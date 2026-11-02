@@ -21,7 +21,7 @@ use crate::bus::{dma::mapping::DmaError, irq::IrqError, mmio::owned, pci::msi::M
 use crate::usb::hid::Translator;
 use alloc::{string::String, vec::Vec};
 pub use descriptor::{ReportKind, ReportLayout};
-pub use native::{Configuration, Inputs, Native, NativeClock, Time};
+pub use native::{Configuration, InputPoll, Inputs, Native, NativeClock, Time};
 pub use protocol::{ClientProperties, Device, FirmwareIdentity, InputReport, TimestampSupport};
 pub use registers::{MappedRegisters, Registers};
 
@@ -43,6 +43,8 @@ pub enum Error {
     Status(u8),
     FirmwareReset,
     Terminal,
+    InputPollInterrupted,
+    StopInterrupted,
     /// Payload drainage is independent of the missing posted-MSI completion.
     PostedMsiRetirementUnavailable,
 }
@@ -56,6 +58,7 @@ const POLL_REPORTS: usize = 16;
 pub struct IshInput {
     native: Native,
     clients: Vec<(u8, Translator)>,
+    poll_cleanup_errors: Vec<Error>,
     pub name: String,
 }
 
@@ -85,17 +88,16 @@ impl IshInput {
         Ok(Self {
             native,
             clients,
+            poll_cleanup_errors: Vec::new(),
             name,
         })
     }
 
     /// Append the input changes of the reports the clients have ready.
     pub fn poll(&mut self, inputs: &mut Vec<Input>) -> Result<()> {
+        let raw = self.native.poll_inputs();
         let mut events = Vec::new();
-        for _ in 0..POLL_REPORTS {
-            let Some(report) = self.native.next_input()? else {
-                break;
-            };
+        for report in raw.reports {
             if let Some((_, translator)) = self
                 .clients
                 .iter_mut()
@@ -104,7 +106,14 @@ impl IshInput {
                 translator.translate(&report.bytes, &mut events, inputs);
             }
         }
-        Ok(())
+        self.poll_cleanup_errors.extend(raw.later_errors);
+        // Completed guest input precedes the exact error from the same pass.
+        raw.first_error.map_or(Ok(()), Err)
+    }
+
+    /// Exact containment causes retained by the same legacy input owner.
+    pub fn poll_cleanup_errors(&self) -> &[Error] {
+        &self.poll_cleanup_errors
     }
 
     /// Send `leds` to each keyboard client's LED output report, as Linux

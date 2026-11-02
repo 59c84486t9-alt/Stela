@@ -114,6 +114,9 @@ struct Callback<R: Registers>(Arc<Shared<R>>);
 impl<R: Registers> Handler for Callback<R> {
     fn handle(&self) -> Disposition {
         let s = &self.0;
+        if s.signals.terminal.load(Ordering::Acquire) {
+            return Disposition::Handled;
+        }
         let cause = match read(&s.registers, PISR) {
             Ok(v) => v,
             Err(_) => {
@@ -224,6 +227,36 @@ unsafe impl<C: Configuration, R: Registers> Source for NativeSource<C, R> {
     }
 }
 
+/// A returned pass disarms this negative guard. An unwinding foreign call
+/// closes future IRQ access immediately, before the process can run again.
+/// It borrows no entered CPU/root permission and performs no hardware cleanup.
+struct ServiceGuard<R: Registers> {
+    shared: Arc<Shared<R>>,
+    returned: bool,
+}
+impl<R: Registers> Drop for ServiceGuard<R> {
+    fn drop(&mut self) {
+        if !self.returned {
+            self.shared.signals.terminal.store(true, Ordering::Release);
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ServiceState {
+    Idle,
+    Polling,
+    Stopping,
+    Interrupted,
+}
+
+#[derive(Debug, Default)]
+pub struct InputPoll {
+    pub reports: Vec<InputReport>,
+    pub first_error: Option<Error>,
+    pub later_errors: Vec<Error>,
+}
+
 pub struct Native<
     C: Configuration = OwnedConfig,
     R: Registers = MappedRegisters,
@@ -237,8 +270,11 @@ pub struct Native<
     registration: Option<Box<dyn IrqRegistration>>,
     msi_route: Option<irq::posted_msi::MsiRoute>,
     interrupts: &'static dyn IrqController,
-    clock: T,
+    clock: core::mem::ManuallyDrop<T>,
     engine: Engine,
+    completed_reports: Vec<InputReport>,
+    poll_cleanup_errors: Vec<Error>,
+    service_state: ServiceState,
     revision: u8,
     started: bool,
     running: bool,
@@ -370,8 +406,11 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
             registration: None,
             msi_route: Some(msi_route),
             interrupts,
-            clock,
+            clock: core::mem::ManuallyDrop::new(clock),
             engine: Engine::new(),
+            completed_reports: Vec::new(),
+            poll_cleanup_errors: Vec::new(),
+            service_state: ServiceState::Idle,
             revision,
             started: false,
             running: false,
@@ -392,6 +431,13 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
     }
     pub fn failure(&self) -> Option<Error> {
         self.failure
+            .or(match self.service_state {
+                ServiceState::Idle => None,
+                ServiceState::Polling => Some(Error::InputPollInterrupted),
+                ServiceState::Stopping => Some(Error::StopInterrupted),
+                ServiceState::Interrupted => Some(Error::Terminal),
+            })
+            .or_else(|| self.stop_attempted.then_some(Error::Terminal))
     }
     pub fn cleanup_failure(&self) -> Option<Error> {
         self.cleanup_failure
@@ -416,6 +462,9 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
         self.shared().signals.pending.load(Ordering::Acquire)
     }
     fn usable(&self) -> Result<()> {
+        if self.service_state != ServiceState::Idle {
+            return Err(self.failure().unwrap_or(Error::Terminal));
+        }
         if self.failure.is_some() || self.stop_attempted {
             Err(Error::Terminal)
         } else {
@@ -427,7 +476,7 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
             self.failure.get_or_insert(e);
             self.running = false;
             self.identity = None;
-            self.engine.invalidate();
+            self.invalidate_reports();
             self.shared()
                 .signals
                 .terminal
@@ -435,11 +484,13 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
             let mask = self.shared().mask();
             if let Err(e) = mask {
                 self.cleanup_failure.get_or_insert(e);
+                self.poll_cleanup_errors.push(e);
             }
             if let Some(c) = &self.config {
                 let mask = c.borrow_mut().msi.mask().map_err(Error::Msi);
                 if let Err(e) = mask {
                     self.cleanup_failure.get_or_insert(e);
+                    self.poll_cleanup_errors.push(e);
                 }
             }
         }
@@ -492,6 +543,11 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
     }
 
     pub fn start(&mut self) -> Result<()> {
+        if self.service_state != ServiceState::Idle {
+            self.seal_interruption();
+            return Err(self.failure.unwrap_or(Error::InputPollInterrupted));
+        }
+        self.usable()?;
         let result = self.start_inner();
         self.record(result)
     }
@@ -715,8 +771,12 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
         self.record(result)
     }
     pub fn service(&mut self) -> Result<()> {
+        if self.service_state != ServiceState::Idle {
+            self.seal_interruption();
+            return Err(self.failure.unwrap_or(Error::InputPollInterrupted));
+        }
+        self.usable()?;
         let result = (|| {
-            self.usable()?;
             if !self.running {
                 return Err(Error::Requirement("running native HID transport"));
             }
@@ -724,12 +784,86 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
         })();
         self.record(result)
     }
-    pub fn next_input(&mut self) -> Result<Option<InputReport>> {
-        self.service()?;
-        let report = self.engine.inputs.pop_front();
-        let result = self.engine.replenish();
-        self.record(result)?;
-        Ok(report)
+    /// One bounded guest service pass and its exact completed report prefix.
+    pub fn poll_inputs(&mut self) -> InputPoll {
+        if matches!(
+            self.service_state,
+            ServiceState::Polling | ServiceState::Stopping
+        ) {
+            self.seal_interruption();
+        }
+        let mut first_error = self.failure;
+        if self.service_state == ServiceState::Idle && first_error.is_none() && !self.stop_attempted
+        {
+            // The checked exclusive owner, not this deny-only marker, owns pump.
+            self.service_state = ServiceState::Polling;
+            let mut pass = ServiceGuard {
+                shared: self.shared.as_ref().unwrap().clone(),
+                returned: false,
+            };
+            for _ in 0..super::POLL_REPORTS {
+                let serviced = if self.running {
+                    self.pump()
+                } else {
+                    Err(Error::Requirement("running native HID transport"))
+                };
+                if let Err(error) = self.record(serviced) {
+                    first_error = Some(self.failure.unwrap_or(error));
+                    break;
+                }
+                let report = self.engine.inputs.pop_front();
+                let had_report = report.is_some();
+                if let Some(report) = report {
+                    // Keep the popped report before replenishment/containment callbacks.
+                    self.completed_reports.push(report);
+                }
+                let replenished = self.engine.replenish();
+                if let Err(error) = self.record(replenished) {
+                    first_error = Some(self.failure.unwrap_or(error));
+                    break;
+                }
+                if !had_report {
+                    break;
+                }
+            }
+            // Every callback in this pass returned, including a typed refusal.
+            // The original failure still fences all subsequent service.
+            self.service_state = ServiceState::Idle;
+            pass.returned = true;
+        } else if first_error.is_none() {
+            first_error = Some(Error::Terminal);
+        }
+        InputPoll {
+            reports: core::mem::take(&mut self.completed_reports),
+            first_error,
+            later_errors: core::mem::take(&mut self.poll_cleanup_errors),
+        }
+    }
+
+    fn invalidate_reports(&mut self) {
+        while let Some(report) = self.engine.inputs.pop_front() {
+            self.completed_reports.push(report);
+        }
+        self.engine.invalidate();
+    }
+    fn seal_interruption(&mut self) {
+        let interruption = match self.service_state {
+            ServiceState::Polling => Error::InputPollInterrupted,
+            ServiceState::Stopping => Error::StopInterrupted,
+            ServiceState::Idle | ServiceState::Interrupted => return,
+        };
+        self.service_state = ServiceState::Interrupted;
+        if self.failure.is_some() {
+            self.poll_cleanup_errors.push(interruption);
+        }
+        self.failure.get_or_insert(interruption);
+        self.running = false;
+        self.identity = None;
+        self.invalidate_reports();
+        self.shared()
+            .signals
+            .terminal
+            .store(true, Ordering::Release);
     }
     fn transmit(&mut self) -> Result<()> {
         if self.engine.frames.is_empty() || read(self.regs(), H2I)? & BUSY != 0 {
@@ -780,7 +914,7 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
                 2 => Ok(()),
                 3 | 4 => {
                     if !self.accept_reset {
-                        self.engine.invalidate();
+                        self.invalidate_reports();
                         self.identity = None;
                         return Err(Error::FirmwareReset);
                     }
@@ -868,10 +1002,19 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
         self.shared().mask()
     }
     pub fn stop(&mut self) -> Result<()> {
+        if self.service_state != ServiceState::Idle {
+            self.seal_interruption();
+            return Err(self.failure.unwrap_or(Error::InputPollInterrupted));
+        }
         if self.stop_attempted {
             return Err(Error::Terminal);
         }
         self.stop_attempted = true;
+        self.service_state = ServiceState::Stopping;
+        let mut pass = ServiceGuard {
+            shared: self.shared.as_ref().unwrap().clone(),
+            returned: false,
+        };
         let mut primary = None;
         if self.running && self.failure.is_none() {
             let disconnect = (|| {
@@ -882,11 +1025,13 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
             })();
             if let Err(e) = disconnect {
                 primary = Some(e);
+                // Persist the actual primary BEFORE any containment callback.
+                self.failure.get_or_insert(e);
             }
         }
         self.running = false;
         self.identity = None;
-        self.engine.invalidate();
+        self.invalidate_reports();
         self.shared()
             .signals
             .terminal
@@ -897,10 +1042,13 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
                 primary = Some(e);
             } else {
                 self.cleanup_failure.get_or_insert(e);
+                self.poll_cleanup_errors.push(e);
             }
         }
         let e = primary.unwrap_or(Error::PostedMsiRetirementUnavailable);
         self.failure.get_or_insert(e);
+        self.service_state = ServiceState::Idle;
+        pass.returned = true;
         Err(e)
     }
     fn contain_and_drain(&mut self) -> Result<()> {
@@ -976,6 +1124,13 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
 }
 impl<C: Configuration, R: Registers, T: Time> Drop for Native<C, R, T> {
     fn drop(&mut self) {
+        // Unacknowledged completed reports stay with the uncertain owner graph.
+        if !self.completed_reports.is_empty() {
+            core::mem::forget(core::mem::take(&mut self.completed_reports));
+        }
+        if !self.engine.inputs.is_empty() {
+            core::mem::forget(core::mem::take(&mut self.engine.inputs));
+        }
         // Neither Drop nor a failed stop can certify original posted-MSI/root
         // completion. Preserve every uncertain owner, even after panic.
         if let Some(v) = self.msi_route.take() {
@@ -1050,3 +1205,6 @@ fn validate_capabilities<C: Configuration>(c: &C) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+pub(super) mod poll_controls;

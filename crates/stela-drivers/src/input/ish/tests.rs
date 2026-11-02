@@ -88,6 +88,8 @@ struct Data {
     busy_mailbox: bool,
     removed: Option<u32>,
     access_fault: Option<u32>,
+    panic_event_at: Option<usize>,
+    access_fault_event_at: Option<(usize, u32)>,
     mix_input: bool,
     first_enable_reset: bool,
     inject_at: Option<usize>,
@@ -131,6 +133,8 @@ impl Data {
             busy_mailbox: false,
             removed: None,
             access_fault: None,
+            panic_event_at: None,
+            access_fault_event_at: None,
             mix_input: false,
             first_enable_reset: false,
             inject_at: None,
@@ -406,14 +410,26 @@ impl Peer {
     fn event(&self, write: bool, at: u32, value: u32) -> bool {
         let mut s = self.state.lock().unwrap();
         s.events.push((write, at, value));
-        if s.inject_at == Some(s.events.len()) {
+        let inject = s.inject_at == Some(s.events.len());
+        if inject {
             s.inject_at = None;
             s.injected = true;
             s.client(hostif(0x85, 7, &input_bytes()));
-            true
-        } else {
-            false
         }
+        if let Some((frontier, at)) = s.access_fault_event_at
+            && frontier == s.events.len()
+        {
+            s.access_fault_event_at = None;
+            s.access_fault = Some(at);
+        }
+        let panic_now = s.panic_event_at == Some(s.events.len());
+        if panic_now {
+            s.panic_event_at = None;
+        }
+        // Drop the peer lock before the deliberate foreign-callback unwind.
+        drop(s);
+        assert!(!panic_now, "isolated ISH callback cut");
+        inject
     }
     fn push_client(&self, b: Vec<u8>) {
         self.state.lock().unwrap().client(b);
@@ -933,7 +949,10 @@ fn owned_native_irq_firmware_discovery_fragmented_descriptors_tx_controls_and_in
         input_bytes()
     );
     f.peer.push_client(hostif(0x85, 7, &input_bytes()));
-    let packet = f.driver.next_input().unwrap().unwrap();
+    let mut polled = f.driver.poll_inputs();
+    assert_eq!(polled.first_error, None);
+    assert_eq!(polled.reports.len(), 1);
+    let packet = polled.reports.pop().unwrap();
     assert_eq!(packet.bytes, input_bytes());
     assert_eq!(packet.hostif_command, 0x85);
     assert_eq!(
@@ -963,7 +982,10 @@ fn native_mixed_unsolicited_input_before_feature_response_keeps_receive_credit_a
         f.driver.get_report(7, ReportKind::Feature, 1).unwrap(),
         [1, 9, 8, 7]
     );
-    assert_eq!(f.driver.next_input().unwrap().unwrap().bytes, input_bytes());
+    let polled = f.driver.poll_inputs();
+    assert_eq!(polled.first_error, None);
+    assert_eq!(polled.reports.len(), 1);
+    assert_eq!(polled.reports[0].bytes, input_bytes());
     retained(&f);
 }
 #[test]
@@ -976,8 +998,10 @@ fn native_aggregate_byte_cursor_accepts_publish_response_bits_and_preserves_tota
         b.extend_from_slice(&r);
     }
     f.peer.push_client(hostif(0x86, 0, &b));
-    for command in [5, 0x85] {
-        let r = f.driver.next_input().unwrap().unwrap();
+    let polled = f.driver.poll_inputs();
+    assert_eq!(polled.first_error, None);
+    assert_eq!(polled.reports.len(), 2);
+    for (command, r) in [5, 0x85].into_iter().zip(polled.reports) {
         assert_eq!(r.hostif_command, command);
         assert_eq!(r.aggregate_total_size, Some(0x1234));
         assert_eq!(r.aggregate_flags, Some(0x55));
@@ -1006,11 +1030,10 @@ fn native_every_rearm_register_boundary_preserves_pending_input_and_masks_callba
         f.peer.state.lock().unwrap().inject_at = Some(base + offset);
         f.driver.service().unwrap();
         assert!(f.peer.state.lock().unwrap().injected);
-        let packet = f
-            .driver
-            .next_input()
-            .unwrap()
-            .expect("no lost native pending input");
+        let mut polled = f.driver.poll_inputs();
+        assert_eq!(polled.first_error, None);
+        assert_eq!(polled.reports.len(), 1, "no lost native pending input");
+        let packet = polled.reports.pop().unwrap();
         assert_eq!(packet.bytes, input_bytes());
         assert_eq!(
             f.peer.callbacks.load(Ordering::Relaxed),
@@ -1252,9 +1275,17 @@ fn native_full_but_drainable_input_capacity_rejects_control_without_destroying_h
     );
     assert_eq!(f.driver.failure(), None);
     assert!(!f.driver.devices().is_empty());
-    for _ in 0..40 {
-        assert_eq!(f.driver.next_input().unwrap().unwrap().bytes, input_bytes());
+    let mut drained = 0;
+    while drained < 40 {
+        let polled = f.driver.poll_inputs();
+        assert_eq!(polled.first_error, None);
+        assert!(!polled.reports.is_empty());
+        drained += polled.reports.len();
+        for report in polled.reports {
+            assert_eq!(report.bytes, input_bytes());
+        }
     }
+    assert_eq!(drained, 40);
     assert_eq!(
         f.driver.get_report(7, ReportKind::Feature, 1).unwrap(),
         [1, 9, 8, 7]
@@ -1342,3 +1373,7 @@ fn native_led_output_uses_set_report_and_keeps_feature_validation_distinct() {
     );
     retained(&f);
 }
+
+mod input_poll;
+
+mod stop_poll;
