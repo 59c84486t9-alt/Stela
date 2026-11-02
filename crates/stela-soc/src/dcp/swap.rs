@@ -60,8 +60,12 @@
 //! | 0x1ed | has compression info (u64) | |
 //!
 //! The model presents linear single-plane surfaces in the 32-bit formats
-//! [`PixelFormat`] names. Tiled and compressed surfaces refuse: the
-//! address-format and compression-info encodings are IOSurface-private and
+//! [`PixelFormat`] names, and `&BGA`, the lossless-compressed form of `BGRA`
+//! WindowServer allocates. The compressed form is a layout AGX's encoder
+//! writes; AGX is hidden and the guest's Metal device stores those surfaces
+//! as plain BGRA rows at the plane's offset, a row being the plane's bytes per
+//! row over its element height. Other tiled and compressed surfaces refuse:
+//! the address-format and compression-info encodings are IOSurface-private and
 //! unrecorded. Multi-planar YCbCr surfaces refuse: the `getYCbCrMatrix`
 //! enumeration is unrecorded. The DVAs are I/O addresses in the display
 //! pipe's DART (`dart-dispext0` stream 0 on J473AP), not the DCP's. Zero is
@@ -117,8 +121,14 @@ const OFFSET: usize = 0x1d;
 const WIDTH: usize = 0x21;
 const HEIGHT: usize = 0x25;
 const BUFFER_SIZE: usize = 0x29;
+/// Plane 0's offset, bytes per row and element height.
+const PLANE_OFFSET: usize = 0x65;
+const PLANE_BYTES_PER_ROW: usize = 0x69;
+const PLANE_ELEMENT_HEIGHT: usize = 0x74;
 /// `has_compr_info` (a 64-bit bool) after the per-plane compression info.
 const HAS_COMPRESSION: usize = 0x1ed;
+/// `&BGA`: `BGRA` under AGX's lossless compression.
+const LOSSLESS_BGRA: u32 = u32::from_be_bytes(*b"&BGA");
 
 fn u32_at(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"))
@@ -143,6 +153,9 @@ pub struct Record {
     pub height: u32,
     pub buffer: u32,
     pub compressed: bool,
+    pub plane_offset: u32,
+    pub plane_bytes_per_row: u32,
+    pub plane_element_height: u8,
 }
 
 impl Record {
@@ -163,6 +176,9 @@ impl Record {
             height: u32_at(bytes, HEIGHT),
             buffer: u32_at(bytes, BUFFER_SIZE),
             compressed: u64_at(bytes, HAS_COMPRESSION) != 0,
+            plane_offset: u32_at(bytes, PLANE_OFFSET),
+            plane_bytes_per_row: u32_at(bytes, PLANE_BYTES_PER_ROW),
+            plane_element_height: bytes[PLANE_ELEMENT_HEIGHT],
         })
     }
 
@@ -170,42 +186,54 @@ impl Record {
     /// model cannot scan it out. Tiled, compressed, multi-planar and other
     /// formats refuse rather than present garbage.
     pub fn surface(&self, dva: u64) -> Result<Surface> {
-        if self.tiled {
-            return Err(refuse!(
-                "DCP swap surface is tiled; the model scans out linear surfaces only"
-            ));
-        }
-        if self.compressed {
-            return Err(refuse!(
-                "DCP swap surface is compressed; the model scans out uncompressed only"
-            ));
-        }
         if self.planes > 1 {
             return Err(refuse!(
                 "DCP swap surface is multi-planar; the model scans out one plane"
             ));
         }
-        let format = PixelFormat::from_fourcc(self.format)
-            .ok_or(refuse!("DCP swap surface format is not BGRA, RGBA or l10r"))?;
         if self.width == 0 || self.height == 0 {
             return Err(refuse!("DCP swap surface has no size"));
         }
+        let (format, stride, offset) = if self.format == LOSSLESS_BGRA {
+            let rows = u32::from(self.plane_element_height.max(1));
+            (
+                PixelFormat::Bgra8888,
+                self.plane_bytes_per_row / rows,
+                self.plane_offset,
+            )
+        } else {
+            if self.tiled {
+                return Err(refuse!(
+                    "DCP swap surface is tiled; the model scans out linear surfaces only"
+                ));
+            }
+            if self.compressed {
+                return Err(refuse!(
+                    "DCP swap surface is compressed; the model scans out uncompressed only"
+                ));
+            }
+            let format = PixelFormat::from_fourcc(self.format).ok_or(refuse!(
+                "DCP swap surface format is not BGRA, &BGA, RGBA or l10r"
+            ))?;
+            (format, self.stride, self.offset)
+        };
         let row = self
             .width
             .checked_mul(4)
             .ok_or(refuse!("DCP swap surface row overflows"))?;
-        if self.stride < row
-            || u64::from(self.stride) * u64::from(self.height) > u64::from(self.buffer)
+        if stride < row
+            || u64::from(offset) + u64::from(stride) * u64::from(self.height)
+                > u64::from(self.buffer)
         {
             return Err(refuse!("DCP swap surface stride or size is inconsistent"));
         }
         Ok(Surface {
             width: self.width,
             height: self.height,
-            stride: self.stride,
+            stride,
             format,
             iova: dva
-                .checked_add(u64::from(self.offset))
+                .checked_add(u64::from(offset))
                 .ok_or(refuse!("DCP swap surface address overflows"))?,
         })
     }
@@ -378,6 +406,22 @@ pub mod tests {
             (surface.width, surface.stride, surface.iova),
             (1920, 7680, 0x4000)
         );
+    }
+
+    #[test]
+    fn lossless_bgra_is_read_as_the_rows_of_its_plane() {
+        let mut bytes = record(1920, 1080, PixelFormat::Bgra8888);
+        bytes[IS_TILED] = 1;
+        bytes[FORMAT..FORMAT + 4].copy_from_slice(&LOSSLESS_BGRA.to_le_bytes());
+        bytes[BUFFER_SIZE..BUFFER_SIZE + 4].copy_from_slice(&8_486_912u32.to_le_bytes());
+        bytes[PLANE_OFFSET..PLANE_OFFSET + 4].copy_from_slice(&0x4000u32.to_le_bytes());
+        bytes[PLANE_BYTES_PER_ROW..PLANE_BYTES_PER_ROW + 4]
+            .copy_from_slice(&122_880u32.to_le_bytes());
+        bytes[PLANE_ELEMENT_HEIGHT] = 16;
+        bytes[HAS_COMPRESSION] = 1;
+        let surface = Record::parse(&bytes).unwrap().surface(0x8000).unwrap();
+        assert_eq!(surface.format, PixelFormat::Bgra8888);
+        assert_eq!((surface.stride, surface.iova), (7680, 0xc000));
     }
 
     #[test]
