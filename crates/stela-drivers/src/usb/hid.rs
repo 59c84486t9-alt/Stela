@@ -254,6 +254,8 @@ pub struct UsbInput {
     /// Transfer errors being retried.
     retry: Option<Retry>,
     translator: Translator,
+    /// Completed output stays with this owner across later controller calls.
+    pending: TouchPoll,
     touch: Option<touch::Assembler>,
     receiver: Option<receiver::Link>,
     /// The first transfer failure, reported once.
@@ -403,6 +405,7 @@ impl UsbInput {
             queued: None,
             retry: None,
             translator: Translator::new(descriptor, reports),
+            pending: TouchPoll::default(),
             touch: None,
             receiver: None,
             failed: false,
@@ -424,8 +427,6 @@ impl UsbInput {
     /// Same HID service pass, with opt-in complete hybrid frames. Use
     /// this method to consume assembled output; `poll_hid` keeps raw output.
     pub fn poll_touch_hid(&mut self) -> TouchPoll {
-        let mut touch = TouchPoll::default();
-        let mut polled = Poll::default();
         if self
             .controller
             .borrow()
@@ -436,8 +437,7 @@ impl UsbInput {
         }
         let now = self.controller.borrow().clock.now_us();
         if self.state != State::Running || self.retry.is_some_and(|retry| now < retry.at_us) {
-            touch.hid = polled;
-            return touch;
+            return self.drain_pending();
         }
         for _ in 0..16 {
             let length = self.length;
@@ -475,36 +475,47 @@ impl UsbInput {
                     self.queued = None;
                     self.retry = None;
                     let bytes = self.buffer.bytes()[..bytes].to_vec();
-                    let events_at = polled.events.len();
-                    let translated =
-                        self.translator
-                            .translate(&bytes, &mut polled.events, &mut polled.inputs);
-                    let received = match translated {
+                    let events_at = self.pending.hid.events.len();
+                    let translated = self.translator.translate(
+                        &bytes,
+                        &mut self.pending.hid.events,
+                        &mut self.pending.hid.inputs,
+                    );
+                    match translated {
                         Translated::Data(frame) => {
                             if let Some(assembly) = &mut self.touch {
-                                for event in &polled.events[events_at..] {
+                                for event in &self.pending.hid.events[events_at..] {
                                     if let events::Event::Touch(packet) = event {
-                                        assembly.update(&frame, packet, &mut touch);
+                                        assembly.update(
+                                            &frame,
+                                            packet,
+                                            &mut self.pending.frames,
+                                            &mut self.pending.discarded,
+                                        );
                                     }
                                 }
                             }
-                            self.receiver_observe(&frame.bytes);
-                            ReceivedReport::Data(frame)
+                            self.pending.hid.reports.push(ReceivedReport::Data(frame));
+                            self.receiver_observe(&bytes);
                         }
                         Translated::Rejected(error) => {
+                            self.pending
+                                .hid
+                                .reports
+                                .push(ReceivedReport::Rejected { bytes, error });
                             self.invalidate_touch();
                             self.invalidate_receiver(receiver::Error::RejectedReport);
-                            ReceivedReport::Rejected { bytes, error }
                         }
-                        Translated::Boot => ReceivedReport::Boot(bytes),
-                    };
-                    polled.reports.push(received);
+                        Translated::Boot => {
+                            self.pending.hid.reports.push(ReceivedReport::Boot(bytes))
+                        }
+                    }
                     continue;
                 }
                 Err(error) => {
+                    self.error.get_or_insert_with(|| error.clone());
                     self.invalidate_touch();
                     self.invalidate_receiver(receiver::Error::Transport);
-                    self.error.get_or_insert_with(|| error.clone());
                     let recovered =
                         self.controller
                             .borrow_mut()
@@ -533,16 +544,22 @@ impl UsbInput {
             }
         }
         self.receiver_progress();
-        touch.hid = polled;
-        touch
+        self.drain_pending()
+    }
+
+    /// Take completed output without hardware access. After an interrupted
+    /// service pass this preserves its prefix; it does not cancel a transfer,
+    /// reset the endpoint or grant DMA retirement/retry permission.
+    pub fn drain_pending(&mut self) -> TouchPoll {
+        core::mem::take(&mut self.pending)
     }
 
     fn fault(&mut self, error: BlockError) {
-        self.invalidate_touch();
-        self.invalidate_receiver(receiver::Error::Transport);
         self.error.get_or_insert(error);
         self.failed = true;
         self.state = State::Faulted;
+        self.invalidate_touch();
+        self.invalidate_receiver(receiver::Error::Transport);
     }
 
     /// The last report received, as it arrived, for diagnostics.

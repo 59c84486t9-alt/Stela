@@ -37,6 +37,20 @@ impl Registers for Trap {
 fn fixture(
     dma: &mut dyn DmaAllocator,
 ) -> (UsbInput, Rc<RefCell<model::CancelModel>>, Rc<Cell<bool>>) {
+    let trap = Rc::new(Cell::new(false));
+    let (input, peer) = fixture_with_registers(dma, |original, _| {
+        Box::new(Trap {
+            original,
+            active: trap.clone(),
+        })
+    });
+    (input, peer, trap)
+}
+
+fn fixture_with_registers(
+    dma: &mut dyn DmaAllocator,
+    wrap: impl FnOnce(Box<dyn Registers>, Rc<RefCell<model::CancelModel>>) -> Box<dyn Registers>,
+) -> (UsbInput, Rc<RefCell<model::CancelModel>>) {
     let mut function = Function::new(
         Address {
             segment: 0,
@@ -47,18 +61,12 @@ fn fixture(
         Config,
     )
     .unwrap();
-    let trap = Rc::new(Cell::new(false));
     let (controller, peer) = model::forwarding_fixture(
         dma,
         &[vec![9, 2, 9, 0, 0, 1, 0, 0x80, 50]],
         xhci::FULL_SPEED,
         &mut function,
-        |original, _| {
-            Box::new(Trap {
-                original,
-                active: trap.clone(),
-            })
-        },
+        wrap,
     );
     let shared = Rc::new(RefCell::new(controller));
     let mut physical = model::device(Vec::new());
@@ -102,7 +110,7 @@ fn fixture(
     let input = UsbInput::new(shared, &physical, &interface, endpoint, dma)
         .unwrap()
         .unwrap();
-    (input, peer, trap)
+    (input, peer)
 }
 
 #[test]
@@ -346,3 +354,5 @@ fn same_controller_root_reuse_refuses_kept_hid_stop_without_touching_current_dma
         }
     }
 }
+
+mod prefix;

@@ -33,7 +33,7 @@ impl UsbInput {
         self.invalidate_receiver(receiver::Error::Stopped);
         self.controller.borrow().validate_device_id(self.id)?;
         if self.state == State::Stopped {
-            return Ok(Poll::default());
+            return Ok(core::mem::take(&mut self.pending.hid));
         }
         self.state = State::Faulted;
         let result = self
@@ -49,11 +49,9 @@ impl UsbInput {
         self.retry = None;
         self.state = State::Stopped;
         let (releases, events) = self.translator.release();
-        Ok(Poll {
-            inputs: releases,
-            events,
-            reports: Vec::new(),
-        })
+        self.pending.hid.inputs.extend(releases);
+        self.pending.hid.events.extend(events);
+        Ok(core::mem::take(&mut self.pending.hid))
     }
 
     /// Resume polling this same device after an acknowledged stop.
