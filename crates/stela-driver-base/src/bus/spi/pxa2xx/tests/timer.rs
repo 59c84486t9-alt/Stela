@@ -24,11 +24,10 @@ impl Timer for OpaqueTime {
 #[test]
 fn every_ssp_layout_uses_opaque_deadlines_including_select_delays_and_fifo_exchange() {
     for profile in PROFILES {
-        let (mut original, hardware) = host(profile);
+        let (original, hardware) = host(profile);
         // No child initialization/register access has happened. Move the exact
         // original peer and clock into its alternate explicit interval service.
-        let (registers, time) = original.owners.take().unwrap();
-        drop(original);
+        let (registers, time) = original.release().ok().unwrap();
         let mut controller = Controller::new(registers, OpaqueTime(time), 10_000)
             .ok()
             .unwrap();

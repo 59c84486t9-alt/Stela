@@ -183,6 +183,10 @@ fn unusable_clocks_refuse_before_io() {
 }
 
 #[test]
+#[expect(
+    clippy::drop_non_drop,
+    reason = "explicit abandonment verifies the original provider Drop witnesses stay unchanged"
+)]
 fn invalid_native_spi_and_mp2_clocks_return_original_unmodified_owners() {
     for rate in [0, u64::MAX, u64::MAX / 2 / BUDGET + 1] {
         let (r, d) = no_io();
@@ -198,21 +202,19 @@ fn invalid_native_spi_and_mp2_clocks_return_original_unmodified_owners() {
         let error = spi::pxa2xx::Controller::new(r, clock(rate), BUDGET)
             .err()
             .unwrap();
-        assert_eq!(error.0, spi::pxa2xx::ErrorKind::Configuration);
-        assert_eq!(error.2.ticks_per_microsecond, rate);
+        assert_eq!(error.error.kind, spi::pxa2xx::ErrorKind::Configuration);
         assert_eq!(d.get(), 0);
         drop(error);
-        assert_eq!(d.get(), 1);
+        assert_eq!(d.get(), 0);
         let (r, d) = no_io();
         // SAFETY: trapped explicit kept model, no device or pending child.
         let error = unsafe { lpss::spi::Spi::attach(r, clock(rate), 1, BUDGET) }
             .err()
             .unwrap();
-        assert_eq!(error.0, lpss::spi::Error::Configuration);
-        assert!(error.1.is_some());
+        assert_eq!(error.error, lpss::spi::Error::Configuration);
         assert_eq!(d.get(), 0);
         drop(error);
-        assert_eq!(d.get(), 1);
+        assert_eq!(d.get(), 0);
         let backing = Box::leak(vec![0u64; 1024].into_boxed_slice());
         let address = backing.as_mut_ptr() as u64;
         // SAFETY: zeroed private model RAM remains pinned for this process.

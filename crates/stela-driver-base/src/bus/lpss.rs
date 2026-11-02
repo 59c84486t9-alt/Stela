@@ -200,9 +200,10 @@ impl NativeRegisters {
         let mut inputs = ManuallyDrop::new((requester, mapping));
         let stopped = inputs.0.check_stopped();
         let (requester, mapping) = ManuallyDrop::into_inner(inputs);
-        let mut function = requester.into_function();
+        let mut resources = ManuallyDrop::new((requester.into_function(), mapping));
         let checked = (|| {
             stopped.map_err(Error::Claim)?;
+            let (function, mapping) = &mut *resources;
             let config = function.config();
             let low = config.read32(0x10)?;
             if low == u32::MAX || low & 9 != 0 || !matches!(low & 6, 0 | 4) {
@@ -217,18 +218,16 @@ impl NativeRegisters {
                 return Err(Error::Mapping);
             }
             let base = u64::from(high) << 32 | u64::from(low & !15);
-            let span = mapping.physical_span().map_err(|_| Error::Mapping)?;
+            let span = mapping.physical_span().map_err(Error::Mmio)?;
             if base == 0
                 || span.start() != base
                 || span.bytes() < WINDOW_BYTES as u64
-                || mapping.attribute().map_err(|_| Error::Mapping)? != CacheAttribute::Uncached
-                || mapping.protection().map_err(|_| Error::Mapping)? != Protection::ReadWrite
+                || mapping.attribute().map_err(Error::Mmio)? != CacheAttribute::Uncached
+                || mapping.protection().map_err(Error::Mmio)? != Protection::ReadWrite
             {
                 return Err(Error::Mapping);
             }
-            let pointer = mapping
-                .address(0, WINDOW_BYTES)
-                .map_err(|_| Error::Mapping)?;
+            let pointer = mapping.address(0, WINDOW_BYTES).map_err(Error::Mmio)?;
             if !(pointer.as_ptr() as usize).is_multiple_of(4) {
                 return Err(Error::Mapping);
             }
@@ -244,12 +243,15 @@ impl NativeRegisters {
             Ok(base)
         })();
         match checked {
-            Ok(base) => Ok(Self {
-                function,
-                mapping,
-                base,
-            }),
-            Err(error) => Err((error, (function, mapping))),
+            Ok(base) => {
+                let (function, mapping) = ManuallyDrop::into_inner(resources);
+                Ok(Self {
+                    function,
+                    mapping,
+                    base,
+                })
+            }
+            Err(error) => Err((error, ManuallyDrop::into_inner(resources))),
         }
     }
     /// `offset` as a register of the window.
@@ -443,7 +445,7 @@ unsafe impl ChildAccess for NativeRegisters {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 impl From<crate::bus::pci::ConfigError> for Error {
     fn from(error: crate::bus::pci::ConfigError) -> Self {

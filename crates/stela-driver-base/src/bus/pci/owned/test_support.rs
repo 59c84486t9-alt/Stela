@@ -48,6 +48,7 @@ pub struct Counters {
     pub platform_drops: AtomicUsize,
     pub contexts: AtomicUsize,
     pub fail_context_at: AtomicUsize,
+    pub panic_context_at: AtomicUsize,
     pub fail_after_word: AtomicUsize,
     pub fail_after_value: AtomicUsize,
 }
@@ -131,6 +132,11 @@ unsafe impl MappingPlatform for Model {
     fn check_context(&self, space: AddressSpace) -> Result<(), MappingError> {
         assert_eq!(space, SPACE);
         let call = self.counters.contexts.fetch_add(1, Ordering::Relaxed) + 1;
+        assert_ne!(
+            self.counters.panic_context_at.load(Ordering::Relaxed),
+            call,
+            "mapping context callback interrupted"
+        );
         if self.counters.fail_context_at.load(Ordering::Relaxed) == call {
             return Err(MappingError::Unavailable);
         }

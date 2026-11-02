@@ -163,3 +163,50 @@ fn restoring_provider_context_does_not_reopen_a_denied_child_or_allow_shutdown_i
     assert_eq!(bar.unmaps.load(Ordering::Relaxed), 0);
     assert_eq!(bar.platform_drops.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+fn every_native_claim_context_unwind_keeps_both_original_config_and_mapping_graphs() {
+    extern crate std;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let (function, mapping, config, bar) = native_fixture();
+    let requester = stop_fixture(function);
+    let begin = [
+        config.contexts.load(Ordering::Relaxed),
+        bar.contexts.load(Ordering::Relaxed),
+    ];
+    // SAFETY: original stopped fixture function and its externally owned BAR;
+    // no physical hardware qualification or register user is inferred.
+    let original = unsafe { NativeRegisters::claim(requester, mapping) }
+        .ok()
+        .unwrap();
+    let count = [
+        config.contexts.load(Ordering::Relaxed) - begin[0],
+        bar.contexts.load(Ordering::Relaxed) - begin[1],
+    ];
+    let _kept = ManuallyDrop::new(original);
+    for (kind, count) in count.into_iter().enumerate() {
+        assert_ne!(count, 0);
+        for ordinal in 1..=count {
+            let (function, mapping, config, bar) = native_fixture();
+            let requester = stop_fixture(function);
+            let counters = if kind == 0 { &*config } else { &*bar };
+            let cut = counters.contexts.load(Ordering::Relaxed) + ordinal;
+            counters.panic_context_at.store(cut, Ordering::Relaxed);
+            // SAFETY: same isolated affine fixture. Interrupt its actual
+            // provider context check rather than replacing claim validation.
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| {
+                    // SAFETY: same isolated stopped function and original
+                    // mapping, deliberately interrupting their context check.
+                    let _result = unsafe { NativeRegisters::claim(requester, mapping) };
+                }))
+                .is_err()
+            );
+            assert_eq!(counters.contexts.load(Ordering::Relaxed), cut);
+            assert_eq!(config.unmaps.load(Ordering::Relaxed), 0);
+            assert_eq!(bar.unmaps.load(Ordering::Relaxed), 0);
+            assert_eq!(config.resource_drops.load(Ordering::Relaxed), 0);
+            assert_eq!(bar.resource_drops.load(Ordering::Relaxed), 0);
+        }
+    }
+}

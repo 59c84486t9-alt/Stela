@@ -1,6 +1,7 @@
 use super::*;
 use alloc::{collections::VecDeque, rc::Rc, vec, vec::Vec};
 use core::cell::{Cell, RefCell};
+mod access;
 mod timer;
 
 #[derive(Clone)]
@@ -52,6 +53,7 @@ struct Hardware {
     mask: u32,
     shift: u32,
     fail: Option<(usize, bool)>,
+    unwind: Option<(usize, bool)>,
     late: Option<usize>,
     ignore: Option<usize>,
     error_after: Option<usize>,
@@ -97,19 +99,29 @@ impl Hardware {
     }
     fn begin(&mut self, access: Access) -> Result<(), IoError> {
         self.log.push(access);
+        assert_ne!(
+            self.unwind,
+            Some((self.log.len(), false)),
+            "register callback interrupted"
+        );
         self.tick();
         if self.late == Some(self.log.len()) {
             self.time.0.set(self.time.0.get().wrapping_add(10_000));
         }
         if self.fail == Some((self.log.len(), false)) {
-            Err(IoError)
+            Err(IoError::Mmio(crate::bus::mmio::owned::Error::Unavailable))
         } else {
             Ok(())
         }
     }
     fn end(&self) -> Result<(), IoError> {
+        assert_ne!(
+            self.unwind,
+            Some((self.log.len(), true)),
+            "register callback interrupted after effect"
+        );
         if self.fail == Some((self.log.len(), true)) {
-            Err(IoError)
+            Err(IoError::Mmio(crate::bus::mmio::owned::Error::Unavailable))
         } else {
             Ok(())
         }
@@ -265,6 +277,7 @@ fn host(profile: Profile) -> (Controller<Peer, Time>, Rc<RefCell<Hardware>>) {
         shift,
         mask,
         fail: None,
+        unwind: None,
         late: None,
         ignore: None,
         error_after: None,
@@ -583,11 +596,15 @@ fn message_refusals_precede_effects_within_hardware_chip_selects() {
 }
 
 #[test]
+#[expect(
+    clippy::drop_non_drop,
+    reason = "explicit abandonment verifies the original provider Drop witnesses stay unchanged"
+)]
 fn zero_clock_refuses_controller_construction() {
     let (h, hw) = host(Profile::LynxPoint);
     let (r, t) = h.release().ok().unwrap();
     drop(t);
-    let (error, r, _) = Controller::new(
+    let failure = Controller::new(
         r,
         Clock {
             ticks_per_microsecond: 0,
@@ -596,12 +613,16 @@ fn zero_clock_refuses_controller_construction() {
     )
     .err()
     .unwrap();
-    assert_eq!(error, ErrorKind::Configuration);
+    assert_eq!(failure.error.kind, ErrorKind::Configuration);
     assert!(hw.borrow().log.is_empty());
-    drop(r);
-    assert_eq!(hw.borrow().drops, 1);
+    drop(failure);
+    assert_eq!(hw.borrow().drops, 0);
 }
 #[test]
+#[expect(
+    clippy::drop_non_drop,
+    reason = "explicit abandonment verifies the original provider Drop witnesses stay unchanged"
+)]
 fn fifo_errors_stall_and_unexpected_receive_never_publish_or_replay() {
     for fault in 0..3 {
         let (mut h, hw) = host(Profile::CannonLake);
@@ -636,6 +657,10 @@ fn fifo_errors_stall_and_unexpected_receive_never_publish_or_replay() {
 }
 
 #[test]
+#[expect(
+    clippy::drop_non_drop,
+    reason = "explicit abandonment verifies the original provider Drop witnesses stay unchanged"
+)]
 fn initialization_failures_before_and_after_each_effect_keep_the_original_device() {
     for profile in PROFILES {
         let (mut h, hw) = host(profile);

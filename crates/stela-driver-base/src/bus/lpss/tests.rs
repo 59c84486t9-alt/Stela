@@ -196,7 +196,7 @@ fn model(device: u16, base: u64, caps: u32) -> ModelResources {
 /// Unique external BAR source owner. It is never stored in the resource,
 /// mapping provider or RAM backing; abandoning an unfinished fixture retains
 /// the same affine grant and its real original model controller.
-pub(super) struct BarFixture {
+pub(crate) struct BarFixture {
     grant: DriverGrant,
     counts: Arc<Counters>,
 }
@@ -226,11 +226,11 @@ impl BarFixture {
         unsafe { finish_retired(self.grant, &self.counts) }
     }
 }
-pub(super) type NativeFixture = (Function<OwnedConfig>, Mapping, Arc<Counters>, BarFixture);
+pub(crate) type NativeFixture = (Function<OwnedConfig>, Mapping, Arc<Counters>, BarFixture);
 fn native_fixture() -> NativeFixture {
     native_fixture_for(0x9d60)
 }
-pub(super) fn native_fixture_for(device: u16) -> NativeFixture {
+pub(crate) fn native_fixture_for(device: u16) -> NativeFixture {
     let address = Address {
         segment: 0x1234,
         bus: 2,
@@ -274,7 +274,7 @@ pub(super) fn native_fixture_for(device: u16) -> NativeFixture {
         bar_counts,
     )
 }
-pub(super) fn stop_fixture(function: Function<OwnedConfig>) -> StoppedRequester {
+pub(crate) fn stop_fixture(function: Function<OwnedConfig>) -> StoppedRequester {
     // SAFETY: owned fixture storage is drained, exclusively kept
     // and not exposed as any production device/coherency validation.
     match unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) } {
@@ -469,6 +469,8 @@ fn concrete_native_rejections_return_exact_unmodified_mapping_and_config_owners(
             error,
             if scenario == 2 {
                 Error::Configuration
+            } else if scenario == 4 {
+                Error::Mmio(crate::bus::mmio::owned::Error::Retired)
             } else {
                 Error::Mapping
             }

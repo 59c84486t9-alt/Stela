@@ -16,7 +16,13 @@ use crate::Clock;
 use alloc::vec::Vec;
 
 mod native;
-pub use native::NativeRegisters;
+pub use native::{NativeFailure, NativeRegisters, NativeRetireFailure};
+mod custody;
+pub(crate) use custody::Kept;
+pub use custody::{
+    Access, AccessResult, Controller, Failure, PreparedController, Progress, ReleaseError,
+    ReleaseFailure,
+};
 const CR0: usize = 0;
 const CR1: usize = 4;
 const STATUS: usize = 8;
@@ -133,7 +139,17 @@ pub struct Description {
     pub chip_selects: u8,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct IoError;
+pub enum IoError {
+    Mmio(crate::bus::mmio::owned::Error),
+    Lpss(crate::bus::lpss::Error),
+    InvalidRegister {
+        offset: usize,
+    },
+    MappingAttributes {
+        attribute: crate::bus::mmio::owned::CacheAttribute,
+        protection: crate::bus::mmio::owned::Protection,
+    },
+}
 /// Retained, stopped LPSS SSP controller and its ordered native DWORDs.
 /// # Safety
 /// Keep the original powered/reset/clock/pin/firmware device ownership and
@@ -180,18 +196,21 @@ pub enum ErrorKind {
     Timeout,
     Fifo,
     NeedsReset,
+    Interrupted,
+    ProgressExhausted,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Error {
     pub kind: ErrorKind,
+    pub io: Option<IoError>,
     pub offset: Option<usize>,
     pub status: Option<u32>,
     pub wire_started: bool,
 }
 
-pub struct Controller<R: Registers, T: Timer = Clock> {
+struct State<R: Registers, T: Timer> {
     owners: Option<(R, T)>,
-    description: Description,
+    description: Option<Description>,
     timeout_us: u64,
     initialized: bool,
     chip_selects: u8,
@@ -201,46 +220,15 @@ pub struct Controller<R: Registers, T: Timer = Clock> {
     offset: Option<usize>,
     status: Option<u32>,
     wire_started: bool,
+    io: Option<IoError>,
+    active: bool,
+    progress: Progress,
 }
-impl<R: Registers, T: Timer> Controller<R, T> {
-    pub fn new(registers: R, timer: T, timeout_us: u64) -> Result<Self, (ErrorKind, R, T)> {
-        if timeout_us == 0 || !timer.calibrated() || timer.check_duration(timeout_us).is_err() {
-            return Err((ErrorKind::Configuration, registers, timer));
-        }
-        let description = registers.description();
-        let maximum = (description.profile.layout().select_mask
-            >> description.profile.layout().select_shift)
-            + 1;
-        if description.input_clock_hz == 0
-            || description.chip_selects == 0
-            || u32::from(description.chip_selects) > maximum
-            || registers.bytes() < description.profile.register_bytes()
-        {
-            return Err((ErrorKind::Configuration, registers, timer));
-        }
-        Ok(Self {
-            owners: Some((registers, timer)),
-            description,
-            timeout_us,
-            initialized: false,
-            chip_selects: description.chip_selects,
-            selected: None,
-            failed: None,
-            started: 0,
-            offset: None,
-            status: None,
-            wire_started: false,
-        })
-    }
-    pub fn failure(&self) -> Option<Error> {
-        self.failed
-    }
-    pub fn chip_selects(&self) -> u8 {
-        self.chip_selects
-    }
+impl<R: Registers, T: Timer> State<R, T> {
     fn error(&self, kind: ErrorKind) -> Error {
         Error {
             kind,
+            io: self.io,
             offset: self.offset,
             status: self.status,
             wire_started: self.wire_started,
@@ -250,10 +238,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if self.failed.is_some() {
             return Err(self.error(ErrorKind::NeedsReset));
         }
-        self.started = self.owners.as_ref().unwrap().1.start();
         self.offset = None;
         self.status = None;
         self.wire_started = false;
+        self.io = None;
+        self.started = self.owners.as_ref().unwrap().1.start();
         Ok(())
     }
     fn deadline(&self) -> Result<(), Error> {
@@ -263,11 +252,32 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             Ok(())
         }
     }
-    fn read(&mut self, offset: usize) -> Result<u32, Error> {
-        self.offset = Some(offset);
+    fn prepare_access(&mut self, access: Access) -> Result<u64, Error> {
+        self.offset = Some(access.offset());
         self.deadline()?;
+        let next = self
+            .progress
+            .accepted
+            .checked_add(1)
+            .ok_or_else(|| self.error(ErrorKind::ProgressExhausted))?;
+        self.progress.pending = Some(access);
+        Ok(next)
+    }
+    fn accepted(&mut self, next: u64, access: Access, read_value: Option<u32>) {
+        self.progress.accepted = next;
+        self.progress.last = Some(AccessResult { access, read_value });
+        self.progress.pending = None;
+    }
+    fn denied(&mut self, cause: IoError) -> Error {
+        self.io = Some(cause);
+        self.error(ErrorKind::Io)
+    }
+    fn read(&mut self, offset: usize) -> Result<u32, Error> {
+        let access = Access::Read { offset };
+        let next = self.prepare_access(access)?;
         let result = self.owners.as_mut().unwrap().0.read32(offset);
-        let value = result.map_err(|_| self.error(ErrorKind::Io))?;
+        let value = result.map_err(|cause| self.denied(cause))?;
+        self.accepted(next, access, Some(value));
         if offset == STATUS {
             self.status = Some(value);
         }
@@ -275,10 +285,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(value)
     }
     fn write(&mut self, offset: usize, value: u32) -> Result<(), Error> {
-        self.offset = Some(offset);
-        self.deadline()?;
+        let access = Access::Write { offset, value };
+        let next = self.prepare_access(access)?;
         let result = self.owners.as_mut().unwrap().0.write32(offset, value);
-        result.map_err(|_| self.error(ErrorKind::Io))?;
+        result.map_err(|cause| self.denied(cause))?;
+        self.accepted(next, access, None);
         self.deadline()
     }
     fn verified(&mut self, offset: usize, value: u32) -> Result<(), Error> {
@@ -329,7 +340,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn cs(&mut self, device: Device, asserted: bool) -> Result<(), Error> {
-        let layout = self.description.profile.layout();
+        let layout = self.description.unwrap().profile.layout();
         let offset = layout.private + layout.select;
         if asserted
             && self.update(
@@ -340,7 +351,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         {
             // Source waits two SSP input-clock cycles after selection. The
             // shared timer rounds this minimum up to whole microseconds.
-            self.delay(2_000_000u64.div_ceil(u64::from(self.description.input_clock_hz)))?;
+            self.delay(2_000_000u64.div_ceil(u64::from(self.description.unwrap().input_clock_hz)))?;
         }
         let high = if asserted {
             device.active_high
@@ -377,7 +388,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             self.verified(CR0, 2 << 8 | 7)?;
             self.verified(TIMEOUT, 0)?;
             self.verified(PROTOCOL, 0)?;
-            let layout = self.description.profile.layout();
+            let layout = self.description.unwrap().profile.layout();
             self.update(layout.private + layout.select, 3, 3)?;
             if layout.capabilities {
                 let caps = self.read(layout.private + 0xfc)?;
@@ -404,8 +415,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         let divider = self
             .description
+            .unwrap()
             .input_clock_hz
-            .div_ceil(hz.min(self.description.input_clock_hz));
+            .div_ceil(hz.min(self.description.unwrap().input_clock_hz));
         if divider > 4096 {
             return Err(self.error(ErrorKind::Configuration));
         }
@@ -428,7 +440,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             Mode::Mode2 => 1 << 3,
             Mode::Mode3 => 3 << 3,
         } | if device.loopback { 1 << 2 } else { 0 };
-        let layout = self.description.profile.layout();
+        let layout = self.description.unwrap().profile.layout();
         self.update(RX_THRESHOLD, 255, layout.rx - 1)?;
         self.update(
             TX_THRESHOLD,
@@ -570,12 +582,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(())
     }
-    /// Acknowledge idle, deassert a held CS, disable SSP and return every
-    /// original owner. Faults keep the complete owner without guessed reset.
-    pub fn release(mut self) -> Result<(R, T), Self> {
-        if self.begin().is_err() {
-            return Err(self);
-        }
+    fn stop(&mut self) -> Result<(), Error> {
+        self.begin()?;
         let result = (|| {
             if self.initialized {
                 self.off()?;
@@ -587,16 +595,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })();
         if let Err(error) = result {
             self.failed = Some(error);
-            return Err(self);
         }
-        Ok(self.owners.take().unwrap())
-    }
-}
-impl<R: Registers, T: Timer> Drop for Controller<R, T> {
-    fn drop(&mut self) {
-        if let Some(owners) = self.owners.take() {
-            core::mem::forget(owners);
-        }
+        result
     }
 }
 

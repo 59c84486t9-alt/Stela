@@ -1,4 +1,24 @@
+use core::mem::ManuallyDrop;
+type Preparation<R> = Result<ManuallyDrop<Owner<R>>, (Error, ManuallyDrop<Owner<R>>)>;
+#[expect(
+    clippy::result_large_err,
+    reason = "source oracle retains its same inline provider on preparation refusal"
+)]
+fn prepare_owner<R: Registers>(registers: R, chip_selects: u8) -> Preparation<R> {
+    let mut owner = ManuallyDrop::new(Owner::new(registers));
+    match owner.prepare(chip_selects) {
+        Ok(()) => Ok(owner),
+        Err(error) => Err((error, owner)),
+    }
+}
+fn finish_owner<R: Registers>(mut owner: ManuallyDrop<Owner<R>>) -> Result<Retired<R>, Error> {
+    owner.retire()?;
+    Ok(Retired {
+        registers: owner.registers.take().unwrap(),
+    })
+}
 use super::*;
+mod access;
 use alloc::{collections::VecDeque, rc::Rc, vec, vec::Vec};
 use core::cell::{Cell, RefCell};
 #[derive(Clone)]
@@ -16,7 +36,7 @@ impl Timer for Time {
         true
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Access {
     Identity,
     Read(usize),
@@ -30,12 +50,18 @@ struct Hardware {
     wire: Vec<u32>,
     log: Vec<Access>,
     fail: Option<(usize, bool)>,
+    unwind: Option<(usize, bool)>,
     reject: Option<usize>,
     drops: usize,
 }
 impl Hardware {
     fn begin(&mut self, access: Access) -> Result<bool, super::super::Error> {
         self.log.push(access);
+        assert_ne!(
+            self.unwind,
+            Some((self.log.len(), false)),
+            "register callback interrupted"
+        );
         if self.fail == Some((self.log.len(), false)) {
             return Err(super::super::Error::Io);
         }
@@ -54,6 +80,11 @@ unsafe impl Registers for Model {
     fn identity(&mut self) -> Result<Identity, super::super::Error> {
         let mut h = self.0.borrow_mut();
         let late = h.begin(Access::Identity)?;
+        assert_ne!(
+            h.unwind,
+            Some((h.log.len(), true)),
+            "register callback interrupted after effect"
+        );
         if late {
             return Err(super::super::Error::Io);
         }
@@ -75,6 +106,11 @@ unsafe impl Registers for Model {
             0x10 => h.rx.pop_front().expect("read beyond actual device RX"),
             _ => h.regs[offset / 4],
         };
+        assert_ne!(
+            h.unwind,
+            Some((h.log.len(), true)),
+            "register callback interrupted after effect"
+        );
         if late {
             Err(super::super::Error::Io)
         } else {
@@ -106,6 +142,11 @@ unsafe impl Registers for Model {
                 _ => h.regs[offset / 4] = value,
             }
         }
+        assert_ne!(
+            h.unwind,
+            Some((h.log.len(), true)),
+            "register callback interrupted after effect"
+        );
         if late {
             Err(super::super::Error::Io)
         } else {
@@ -125,6 +166,7 @@ fn model(device: u16, clock: u32) -> (Model, Time, Rc<RefCell<Hardware>>) {
         wire: vec![],
         log: vec![],
         fail: None,
+        unwind: None,
         reject: None,
         drops: 0,
     }));
@@ -165,7 +207,7 @@ fn kept_private_reset_remap_fractional_clock_and_real_pio_compose_before_retirem
             // SAFETY: same isolated source-register owner, stopped before attach.
             let mut spi = match unsafe { Spi::attach(registers, time, 1, 10_000) } {
                 Ok(s) => s,
-                Err((e, _)) => panic!("attach: {e:?}"),
+                Err(failure) => panic!("attach: {:?}", failure.error),
             };
             let mut rx = [0xe7; 3];
             spi.message(
@@ -244,6 +286,10 @@ fn kept_private_reset_remap_fractional_clock_and_real_pio_compose_before_retirem
     }
 }
 #[test]
+#[expect(
+    clippy::drop_non_drop,
+    reason = "explicit abandonment verifies the original provider Drop witnesses stay unchanged"
+)]
 fn each_preparation_effect_failure_preserves_original_owner_and_unmodified_boundary() {
     let (r, t, h) = model(0xa0aa, 0);
     // SAFETY: isolated real peer ownership; no prior users.
@@ -255,22 +301,20 @@ fn each_preparation_effect_failure_preserves_original_owner_and_unmodified_bound
             let (r, t, h) = model(0xa0aa, 0);
             h.borrow_mut().fail = Some((ordinal, after));
             // SAFETY: same isolated model, injecting uncertain register effects.
-            let (error, returned) = unsafe { Spi::attach(r, t, 1, 10_000) }.err().unwrap();
+            let failure = unsafe { Spi::attach(r, t, 1, 10_000) }.err().unwrap();
+            let error = failure.error;
             assert!(matches!(error, Error::Platform(_) | Error::Spi(_)));
             assert_eq!(h.borrow().log.len(), ordinal);
-            let modified = h
-                .borrow()
-                .log
-                .iter()
-                .any(|a| matches!(a, Access::Write(_, _)));
-            if !modified {
-                assert!(returned.is_some());
-                drop(returned);
-                assert_eq!(h.borrow().drops, 1);
-            } else {
-                assert!(returned.is_none());
-                assert_eq!(h.borrow().drops, 0);
-            }
+            let pending = failure
+                .progress()
+                .pending
+                .or(failure.platform_progress().pending);
+            assert_eq!(
+                pending.is_some(),
+                !matches!(h.borrow().log.last(), Some(Access::Identity))
+            );
+            drop(failure);
+            assert_eq!(h.borrow().drops, 0);
         }
     }
 }
@@ -297,20 +341,27 @@ fn unknown_identity_caps_clock_and_bad_native_time_never_program_hardware() {
                 )
             }
             .map(|_| ())
+            .map_err(|failure| {
+                assert_eq!(failure.progress().accepted, 0);
+                failure.error
+            })
         } else {
             // SAFETY: same peer, unsupported observed metadata is rejected before effects.
-            unsafe { Spi::attach(r, t, 1, 10_000) }.map(|_| ())
+            unsafe { Spi::attach(r, t, 1, 10_000) }
+                .map(|_| ())
+                .map_err(|failure| {
+                    assert_eq!(failure.progress().accepted, 0);
+                    failure.error
+                })
         };
-        let (_, returned) = result.err().unwrap();
-        assert!(returned.is_some());
+        let _error = result.err().unwrap();
         assert!(
             !h.borrow()
                 .log
                 .iter()
                 .any(|a| matches!(a, Access::Write(_, _)))
         );
-        drop(returned);
-        assert_eq!(h.borrow().drops, 1);
+        assert_eq!(h.borrow().drops, 0);
     }
 }
 
@@ -340,7 +391,7 @@ fn every_shutdown_access_failure_and_refused_gate_reset_keeps_original_owners() 
         let spi = unsafe { Spi::attach(r, t, 1, 10_000) }.ok().unwrap();
         h.borrow_mut().reject = Some(offset);
         assert!(
-            matches!(spi.shutdown(),Err(Error::Platform(super::super::Error::Register{offset:observed,..}))if observed==offset)
+            matches!(spi.shutdown().err().unwrap().error,Error::Platform(super::super::Error::Register{offset:observed,..}) if observed==offset)
         );
         assert_eq!(h.borrow().drops, 0);
     }
@@ -366,18 +417,18 @@ fn native_original_function_mapping_prepare_and_acknowledged_retirement() {
         Ok(registers) => registers,
         Err((error, _)) => panic!("native claim: {error:?}"),
     };
-    let mut owner = match Owner::prepare(registers, 1) {
+    let mut owner = match prepare_owner(registers, 1) {
         Ok(owner) => owner,
         Err((error, _)) => panic!("native prepare: {error:?}"),
     };
-    assert_eq!(owner.description.input_clock_hz, 60_000_000);
+    assert_eq!(owner.description.unwrap().input_clock_hz, 60_000_000);
     assert_eq!(owner.read(0x204), Ok(7));
     assert_eq!(owner.read(0x200), Ok(1 << 31 | 1 << 1 | 2 << 16 | 1));
     // This concrete RAM mapping checks the native resource and
     // private reset/remap/clock accesses. RAM has no SSP FIFO/W1C semantics,
     // so no child is published here. Separate independent serial peers execute
     // the full same composed PIO engine instead of inventing RAM-side ACKs.
-    let retired = owner.retire().unwrap();
+    let retired = finish_owner(owner).unwrap();
     release_native(retired.into_resources(), &config_counts, bar_counts);
 }
 
@@ -451,7 +502,7 @@ fn unchanged_linux_spi_pci_inventory_reset_remap_and_clock_functions_match_nativ
                     h.base = num(2);
                     h.regs[0x2fc / 4] |= if num(1) != 0 { 1 << 8 } else { 0 };
                 }
-                let owner = Owner::prepare(r, 1).ok().unwrap();
+                let owner = prepare_owner(r, 1).ok().unwrap();
                 let expected: Vec<_> = fields[3..]
                     .iter()
                     .map(|pair| {
@@ -473,7 +524,7 @@ fn unchanged_linux_spi_pci_inventory_reset_remap_and_clock_functions_match_nativ
                     .take(expected.len())
                     .collect();
                 assert_eq!(actual, expected);
-                drop(owner.retire().unwrap());
+                drop(finish_owner(owner).unwrap());
                 assert_eq!(h.borrow().drops, 1);
             }
             "C" => {
@@ -485,16 +536,16 @@ fn unchanged_linux_spi_pci_inventory_reset_remap_and_clock_functions_match_nativ
                     },
                     num(2) as u32,
                 );
-                let owner = Owner::prepare(r, 1);
+                let owner = prepare_owner(r, 1);
                 if num(3) > u64::from(u32::MAX) {
                     let (error, returned) = owner.err().unwrap();
                     assert_eq!(error, Error::Configuration);
-                    assert!(returned.is_some());
-                    drop(returned);
-                    assert_eq!(h.borrow().drops, 1);
+                    assert!(returned.phase == Phase::Unmodified);
+                    let _retained = returned;
+                    assert_eq!(h.borrow().drops, 0);
                 } else {
                     let owner = owner.ok().unwrap();
-                    assert_eq!(u64::from(owner.description.input_clock_hz), num(3));
+                    assert_eq!(u64::from(owner.description.unwrap().input_clock_hz), num(3));
                     let on: Vec<_> = h
                         .borrow()
                         .log
@@ -508,7 +559,7 @@ fn unchanged_linux_spi_pci_inventory_reset_remap_and_clock_functions_match_nativ
                         })
                         .collect();
                     assert_eq!(on, [num(4), num(5)]);
-                    drop(owner.retire().unwrap());
+                    drop(finish_owner(owner).unwrap());
                     let all: Vec<_> = h
                         .borrow()
                         .log

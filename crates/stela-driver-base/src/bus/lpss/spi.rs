@@ -9,7 +9,10 @@
 //! Source root clocks are distinct from the observed fractional SSP input.
 use super::{Identity, NativeRegisters, NativeResources, Registers, Retired};
 use crate::bus::{mmio::owned::Mapping, pci::requester::StoppedRequester, spi::pxa2xx};
+use core::mem::ManuallyDrop;
 use pxa2xx::Timer;
+mod custody;
+pub use custody::{AttachFailure, AttachStage, Failure};
 
 mod profiles;
 pub use profiles::Profile;
@@ -19,10 +22,7 @@ pub enum Error {
     Platform(super::Error),
     Spi(pxa2xx::Error),
     Configuration,
-}
-pub struct AttachFailure {
-    pub error: Error,
-    pub unmodified: Option<NativeResources>,
+    ProgressExhausted,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -33,46 +33,50 @@ enum Phase {
 }
 struct Owner<R: Registers> {
     registers: Option<R>,
-    description: pxa2xx::Description,
+    description: Option<pxa2xx::Description>,
     phase: Phase,
+    progress: pxa2xx::Progress,
 }
 impl<R: Registers> Owner<R> {
-    fn prepare(mut registers: R, chip_selects: u8) -> Result<Self, (Error, Option<R>)> {
-        let profile = match registers
+    fn new(registers: R) -> Self {
+        Self {
+            registers: Some(registers),
+            description: None,
+            phase: Phase::Unmodified,
+            progress: pxa2xx::Progress::default(),
+        }
+    }
+    fn prepare(&mut self, chip_selects: u8) -> Result<(), Error> {
+        let profile = self
+            .registers
+            .as_mut()
+            .unwrap()
             .identity()
             .map_err(Error::Platform)
-            .and_then(Profile::select)
-        {
-            Ok(profile) => profile,
-            Err(error) => return Err((error, Some(registers))),
-        };
+            .and_then(Profile::select)?;
         let maximum = if profile.family() == pxa2xx::Profile::Sunrisepoint {
             1
         } else {
             4
         };
         if chip_selects == 0 || chip_selects > maximum {
-            return Err((Error::Configuration, Some(registers)));
+            return Err(Error::Configuration);
         }
-        let mut owner = Self {
-            registers: Some(registers),
-            description: pxa2xx::Description {
-                profile: profile.family(),
-                input_clock_hz: 0,
-                chip_selects,
-            },
-            phase: Phase::Unmodified,
-        };
-        let result = (|| {
-            let caps = owner.read(0x2fc)?;
+        self.description = Some(pxa2xx::Description {
+            profile: profile.family(),
+            input_clock_hz: 0,
+            chip_selects,
+        });
+        (|| {
+            let caps = self.read(0x2fc)?;
             if caps == u32::MAX || caps & (15 << 4) != 2 << 4 {
                 return Err(Error::Configuration);
             }
-            let base = owner.registers.as_ref().unwrap().physical_base();
+            let base = self.registers.as_ref().unwrap().physical_base();
             if base == 0 || !base.is_multiple_of(4096) || base.checked_add(0x300).is_none() {
                 return Err(Error::Configuration);
             }
-            let clock = owner.read(0x200)?;
+            let clock = self.read(0x200)?;
             // All bits belong to gates or M/N: 0xffffffff is a valid unity
             // divider with both gates on, not an unavailable-register sentinel.
             let numerator = (clock >> 1) & 32767;
@@ -82,47 +86,65 @@ impl<R: Registers> Owner<R> {
             } else {
                 u64::from(profile.root_clock_hz()) * u64::from(numerator) / u64::from(denominator)
             };
-            owner.description.input_clock_hz = u32::try_from(hz)
+            self.description.as_mut().unwrap().input_clock_hz = u32::try_from(hz)
                 .ok()
                 .filter(|hz| *hz != 0)
                 .ok_or(Error::Configuration)?;
-            owner.phase = Phase::Touched;
-            owner.verified(0x204, 0)?;
-            owner.verified(0x204, 7)?;
+            self.phase = Phase::Touched;
+            self.verified(0x204, 0)?;
+            self.verified(0x204, 7)?;
             // Linux lo_hi_writeq: physical BAR, never a CPU pointer.
-            owner.write(0x240, base as u32)?;
-            owner.write(0x244, (base >> 32) as u32)?;
-            owner.verify(0x240, base as u32)?;
-            owner.verify(0x244, (base >> 32) as u32)?;
+            self.write(0x240, base as u32)?;
+            self.write(0x244, (base >> 32) as u32)?;
+            self.verify(0x240, base as u32)?;
+            self.verify(0x244, (base >> 32) as u32)?;
             if caps & (1 << 8) == 0 {
-                owner.verified(0x220, 1)?;
+                self.verified(0x220, 1)?;
             }
             // Same fractional M/N and source gate order as the Linux clock
             // tree. A zero numerator or denominator bypasses to the root.
-            owner.verified(0x200, clock | 1)?;
-            owner.verified(0x200, clock | 1 | (1 << 31))?;
-            owner.phase = Phase::Ready;
+            self.verified(0x200, clock | 1)?;
+            self.verified(0x200, clock | 1 | (1 << 31))?;
+            self.phase = Phase::Ready;
             Ok(())
-        })();
-        match result {
-            Ok(()) => Ok(owner),
-            Err(error) if owner.phase == Phase::Unmodified => Err((error, owner.registers.take())),
-            Err(error) => Err((error, None)),
-        }
+        })()
     }
     fn read(&mut self, offset: usize) -> Result<u32, Error> {
-        self.registers
+        let access = pxa2xx::Access::Read { offset };
+        let next = self.pending(access)?;
+        let value = self
+            .registers
             .as_mut()
             .unwrap()
             .read32(offset)
-            .map_err(Error::Platform)
+            .map_err(Error::Platform)?;
+        self.accepted(next, access, Some(value));
+        Ok(value)
     }
     fn write(&mut self, offset: usize, value: u32) -> Result<(), Error> {
+        let access = pxa2xx::Access::Write { offset, value };
+        let next = self.pending(access)?;
         self.registers
             .as_mut()
             .unwrap()
             .write32(offset, value)
-            .map_err(Error::Platform)
+            .map_err(Error::Platform)?;
+        self.accepted(next, access, None);
+        Ok(())
+    }
+    fn pending(&mut self, access: pxa2xx::Access) -> Result<u64, Error> {
+        let next = self
+            .progress
+            .accepted
+            .checked_add(1)
+            .ok_or(Error::ProgressExhausted)?;
+        self.progress.pending = Some(access);
+        Ok(next)
+    }
+    fn accepted(&mut self, next: u64, access: pxa2xx::Access, read_value: Option<u32>) {
+        self.progress.accepted = next;
+        self.progress.pending = None;
+        self.progress.last = Some(pxa2xx::AccessResult { access, read_value });
     }
     fn verify(&mut self, offset: usize, value: u32) -> Result<(), Error> {
         let observed = self.read(offset)?;
@@ -139,7 +161,7 @@ impl<R: Registers> Owner<R> {
         self.write(offset, value)?;
         self.verify(offset, value)
     }
-    fn retire(mut self) -> Result<Retired<R>, Error> {
+    fn retire(&mut self) -> Result<(), Error> {
         // The SSP core has acknowledged idle, inactive CS and SSE=0.
         // Reverse the source clock gates before asserting the private reset.
         self.phase = Phase::Touched;
@@ -148,9 +170,7 @@ impl<R: Registers> Owner<R> {
         self.verified(0x200, clock & !((1 << 31) | 1))?;
         self.verified(0x204, 0)?;
         self.phase = Phase::Retired;
-        Ok(Retired {
-            registers: self.registers.take().unwrap(),
-        })
+        Ok(())
     }
 }
 impl<R: Registers> Drop for Owner<R> {
@@ -168,123 +188,42 @@ impl<R: Registers> Drop for Owner<R> {
 // registers and it never enables a DMA/IRQ service. Quarantine leaks this Owner.
 unsafe impl<R: Registers> pxa2xx::Registers for Owner<R> {
     fn description(&self) -> pxa2xx::Description {
-        self.description
+        self.description.unwrap()
     }
     fn bytes(&self) -> usize {
         0x300
     }
     fn read32(&mut self, offset: usize) -> Result<u32, pxa2xx::IoError> {
         if offset >= 0x300 || !offset.is_multiple_of(4) {
-            return Err(pxa2xx::IoError);
+            return Err(pxa2xx::IoError::InvalidRegister { offset });
         }
         self.registers
             .as_mut()
             .unwrap()
             .read32(offset)
-            .map_err(|_| pxa2xx::IoError)
+            .map_err(pxa2xx::IoError::Lpss)
     }
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), pxa2xx::IoError> {
         if offset >= 0x300 || !offset.is_multiple_of(4) {
-            return Err(pxa2xx::IoError);
+            return Err(pxa2xx::IoError::InvalidRegister { offset });
         }
         self.registers
             .as_mut()
             .unwrap()
             .write32(offset, value)
-            .map_err(|_| pxa2xx::IoError)
+            .map_err(pxa2xx::IoError::Lpss)
     }
 }
 pub struct Spi<R: Registers, T: Timer> {
-    engine: Option<pxa2xx::Controller<Owner<R>, T>>,
+    engine: pxa2xx::Controller<Owner<R>, T>,
 }
 impl<R: Registers, T: Timer> Spi<R, T> {
-    /// # Safety
-    /// The original kept provider grants this source-listed PCI
-    /// function's powered root clock, board native-CS pins and firmware/PUNIT
-    /// arbitration. Source root frequency is an established platform
-    /// clock, not permission inferred solely from its PCI ID. No IRQ/DMA child
-    /// exists, and all prior traffic/callbacks were drained by this same owner.
-    pub unsafe fn attach(
-        registers: R,
-        timer: T,
-        chip_selects: u8,
-        timeout_us: u64,
-    ) -> Result<Self, (Error, Option<R>)> {
-        if !timer.calibrated() || timeout_us == 0 || timer.check_duration(timeout_us).is_err() {
-            return Err((Error::Configuration, Some(registers)));
-        }
-        let owner = Owner::prepare(registers, chip_selects)?;
-        let mut engine = match pxa2xx::Controller::new(owner, timer, timeout_us) {
-            Ok(engine) => engine,
-            Err((_, owner, _)) => {
-                drop(owner);
-                return Err((Error::Configuration, None));
-            }
-        };
-        engine
-            .initialize()
-            .map_err(|error| (Error::Spi(error), None))?;
-        Ok(Self {
-            engine: Some(engine),
-        })
-    }
     pub fn message(
         &mut self,
         device: pxa2xx::Device,
         transfers: &mut [pxa2xx::Transfer<'_>],
     ) -> Result<(), Error> {
-        self.engine
-            .as_mut()
-            .unwrap()
-            .message(device, transfers)
-            .map_err(Error::Spi)
-    }
-    pub fn shutdown(mut self) -> Result<(Retired<R>, T), Error> {
-        let engine = self.engine.take().unwrap();
-        let (owner, timer) = match engine.release() {
-            Ok(owners) => owners,
-            Err(engine) => return Err(Error::Spi(engine.failure().unwrap())),
-        };
-        Ok((owner.retire()?, timer))
-    }
-}
-impl<T: Timer> Spi<NativeRegisters, T> {
-    /// # Safety
-    /// The parent's NativeRegisters claim and this adapter's root-clock/board/
-    /// arbitration contracts hold for the same original stopped function
-    /// and its complete exclusive UC BAR0 mapping, including kept Drop.
-    #[expect(
-        clippy::result_large_err,
-        reason = "native refusal returns the complete original config and BAR graph without allocating"
-    )]
-    pub unsafe fn attach_native(
-        requester: StoppedRequester,
-        mapping: Mapping,
-        timer: T,
-        chip_selects: u8,
-        timeout_us: u64,
-    ) -> Result<Self, AttachFailure> {
-        // SAFETY: caller supplies the original stopped function/UC grant.
-        let registers = unsafe { NativeRegisters::claim(requester, mapping) }.map_err(
-            |(error, resources)| AttachFailure {
-                error: Error::Platform(error),
-                unmodified: Some(resources),
-            },
-        )?;
-        // SAFETY: same source clock/board/native firmware owner.
-        unsafe { Self::attach(registers, timer, chip_selects, timeout_us) }.map_err(
-            |(error, registers)| AttachFailure {
-                error,
-                unmodified: registers.map(NativeRegisters::into_resources),
-            },
-        )
-    }
-}
-impl<R: Registers, T: Timer> Drop for Spi<R, T> {
-    fn drop(&mut self) {
-        if let Some(engine) = self.engine.take() {
-            core::mem::forget(engine);
-        }
+        self.engine.message(device, transfers).map_err(Error::Spi)
     }
 }
 
