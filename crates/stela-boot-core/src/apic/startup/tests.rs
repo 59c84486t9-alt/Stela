@@ -207,6 +207,10 @@ fn active_service_wrong_context_or_unenumerated_deadline_refuses_before_write() 
         assert!(b.borrow().operations.is_empty());
         let expected = failure.error;
         let retained = &**failure.graph as *const Graph<Model>;
+        #[expect(
+            clippy::drop_non_drop,
+            reason = "verify abandonment retains the complete manually parked controller graph"
+        )]
         drop(failure);
         // SAFETY: the exact failed graph is retained by its ManuallyDrop Box;
         // dropping the carrier cannot free it or its original RAM controller.
@@ -229,6 +233,10 @@ fn every_partial_effect_error_preserves_exact_prefix_without_cleanup() {
         assert!(matches!(failure.effect(), Effect::MayHaveWritten { ordinal, .. } if ordinal == n));
         assert_eq!(failure.failure(), FaultState::Ready(failure.error));
         assert_eq!(b.borrow().operations.len(), n as usize);
+        #[expect(
+            clippy::drop_non_drop,
+            reason = "verify abandonment retains the complete manually parked controller graph"
+        )]
         drop(failure);
         assert_eq!(b.borrow().operations.len(), n as usize);
         assert_eq!(b.borrow().drops, 0);
@@ -244,6 +252,10 @@ fn readback_denial_and_unwind_never_release_or_retry_actual_owner() {
     };
     assert_eq!(f.error.cause, Cause::Source(Error::Readback));
     assert_eq!(b.borrow().operations.len(), 1);
+    #[expect(
+        clippy::drop_non_drop,
+        reason = "verify readback refusal retains the original controller after carrier loss"
+    )]
     drop(f);
     assert_eq!(b.borrow().drops, 0);
     for n in 1..=7 {
@@ -267,6 +279,10 @@ fn readback_denial_and_unwind_never_release_or_retry_actual_owner() {
 #[test]
 fn forgotten_unpublished_control_has_no_effect_or_owner_release() {
     let b = bank(Mode::Xapic, false);
+    #[expect(
+        clippy::forget_non_drop,
+        reason = "exercise explicit loss of the unpublished controller without running its fields destructors"
+    )]
     core::mem::forget(Startup::new(Model(b.clone())));
     assert!(b.borrow().operations.is_empty());
     assert_eq!(b.borrow().drops, 0);

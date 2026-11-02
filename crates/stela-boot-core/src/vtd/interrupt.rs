@@ -743,6 +743,10 @@ impl<R: Registers> Route<R> {
     /// detached. No reset/reprobe changed its epoch. Keep the returned source
     /// owner until the original native BAR/configuration retirement completes;
     /// a vector/stopped boolean or this fence alone supplies none of these.
+    #[expect(
+        clippy::result_large_err,
+        reason = "retirement refusal returns the same complete route and source pin without allocating"
+    )]
     pub unsafe fn release_after_retirement(
         mut self,
     ) -> Result<ReleasedEndpoint<R>, ReleaseFailure<R>> {
