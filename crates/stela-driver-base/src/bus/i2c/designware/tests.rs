@@ -1,6 +1,7 @@
 use super::*;
 use alloc::{collections::VecDeque, rc::Rc, vec::Vec};
 use core::cell::{Cell, RefCell};
+mod access;
 
 /// A wire peer and finite hardware FIFOs, driven only when emulated time moves.
 /// FIFO overflow/underflow are latched independently of the driver's accounting.
@@ -283,12 +284,13 @@ impl Model {
 struct RegisterModel(Rc<RefCell<Model>>);
 
 impl Registers for RegisterModel {
-    fn read32(&mut self, offset: usize) -> u32 {
-        self.0.borrow_mut().read(offset)
+    fn read32(&mut self, offset: usize) -> Result<u32, IoError> {
+        Ok(self.0.borrow_mut().read(offset))
     }
 
-    fn write32(&mut self, offset: usize, value: u32) {
+    fn write32(&mut self, offset: usize, value: u32) -> Result<(), IoError> {
         self.0.borrow_mut().write(offset, value);
+        Ok(())
     }
 }
 
@@ -433,10 +435,10 @@ fn late_abort_remains_the_original_failure_through_cleanup() {
             h.delay_after_access = Some(2);
             h.delay_us = config().timeout_us;
         }
-        let error = bus.faults().unwrap_err();
+        let error = bus.state.faults().unwrap_err();
         assert!(matches!(error, ErrorKind::Aborted { source: actual, .. } if actual == source));
         assert_eq!(state.borrow().abort_source, 0);
-        assert!(bus.quiesce());
+        assert!(bus.state.quiesce().unwrap());
         assert!(state.borrow().commands.is_empty());
     }
 }
@@ -706,7 +708,7 @@ fn component_timing_and_fifo_requirements_fail_explicitly() {
         }
         let error = DesignWare::new(registers, timer, config).err().unwrap();
         assert!(matches!(
-            (scenario, error.kind),
+            (scenario, error.error.kind),
             (0, ErrorKind::ComponentType(_))
                 | (1 | 2, ErrorKind::ComponentParameters(_))
                 | (3, ErrorKind::UnsupportedVersion(_))
