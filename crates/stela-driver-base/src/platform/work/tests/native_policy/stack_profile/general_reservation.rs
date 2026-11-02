@@ -133,7 +133,10 @@ unsafe extern "C" fn ordinary_marker(pointer: *mut c_void) {
     );
     f.ordinary.fetch_add(1, Ordering::Relaxed);
 }
-fn failed_metadata(r: Pin<&Runtime<64>>, authority: &dyn EnteredProcess) -> Result<(), WorkError> {
+fn failed_metadata(
+    r: Pin<&Runtime<64>>,
+    authority: &dyn EnteredProcess,
+) -> Result<(), GeneralRefusal> {
     let _permit = r.reserve_general(authority, kernel())?;
     // Fallible capacity rejection exercises caller-setup error rollback.
     // This does not claim physical allocator exhaustion or a Linux OOM service.
@@ -161,7 +164,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             }
             assert!(matches!(
                 r.reserve_general(&authority, kernel()),
-                Err(WorkError::Full)
+                Err(refusal) if refusal.error() == WorkError::Full
             ));
             drop(permits);
         }
@@ -169,14 +172,14 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             authority.active.set(false);
             assert!(matches!(
                 r.reserve_general(&authority, kernel()),
-                Err(WorkError::Unavailable)
+                Err(refusal) if refusal.error() == WorkError::Unavailable
             ));
             authority.active.set(true);
         }
         Mode::NoProfile => {
             assert!(matches!(
                 r.reserve_general(&authority, kernel()),
-                Err(WorkError::Unavailable)
+                Err(refusal) if refusal.error() == WorkError::Unavailable
             ));
         }
         Mode::CommitExhaust => {
@@ -200,7 +203,10 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             assert_eq!(f.child.load(Ordering::Relaxed), 0);
             drop(permit);
         }
-        Mode::MetadataFailure => assert_eq!(failed_metadata(r, &authority), Err(WorkError::Full)),
+        Mode::MetadataFailure => assert!(
+            failed_metadata(r, &authority).is_err_and(|refusal| refusal.error() == WorkError::Full
+                && refusal.blocker() == GeneralBlocker::Other)
+        ),
         Mode::Commit => {
             let permit = r.reserve_general(&authority, kernel()).unwrap();
             // SAFETY: queue-kept Scene/code fit exact kernel geometry;
@@ -222,16 +228,41 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             }
             assert!(matches!(
                 r.reserve_general(&authority, ordinary()),
-                Err(WorkError::Full)
+                Err(refusal) if refusal.error() == WorkError::Full
             ));
             for permit in permits {
+                permit.cancel().unwrap();
+            }
+            assert_eq!(r.pending_reservations.get(), 0);
+            // Exhaust actual never-entered kernel workers without publishing
+            // callbacks. Their temporary reservations preserve entry history.
+            let mut cold = Vec::new();
+            loop {
+                match r.reserve_unstarted_general(&authority, kernel()) {
+                    Ok(permit) => cold.push(permit),
+                    Err(refusal) => {
+                        assert_eq!(refusal.blocker(), GeneralBlocker::UnstartedStack);
+                        assert_eq!(refusal.error(), WorkError::Full);
+                        break;
+                    }
+                }
+            }
+            assert!(!cold.is_empty());
+            cold.pop().unwrap().cancel().unwrap();
+            // Real unpublished cancellation restores cold eligibility; no
+            // previously-entered frame is falsely treated as a cold stack.
+            r.reserve_unstarted_general(&authority, kernel())
+                .unwrap()
+                .cancel()
+                .unwrap();
+            for permit in cold {
                 permit.cancel().unwrap();
             }
             assert_eq!(r.pending_reservations.get(), 0);
             r.queue.lock().unwrap().state().next_reservation = u64::MAX;
             assert!(matches!(
                 r.reserve_general(&authority, kernel()),
-                Err(WorkError::Exhausted)
+                Err(refusal) if refusal.error() == WorkError::Exhausted
             ));
             assert!(
                 r.queue
@@ -269,7 +300,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             unsafe { r.queue.execute(Kind::General, ordinary_marker, pointer) }.unwrap();
             assert!(matches!(
                 r.reserve_general(&authority, kernel()),
-                Err(WorkError::Full)
+                Err(refusal) if refusal.error() == WorkError::Full
             ));
             return;
         }

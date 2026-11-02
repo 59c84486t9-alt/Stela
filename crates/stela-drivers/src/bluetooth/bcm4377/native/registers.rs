@@ -32,6 +32,10 @@ impl MappedRegisters {
     /// resources; native mappings are exclusive with no escaped views/accessors.
     /// Metadata matching is insufficient to grant real hardware ownership.
     /// Rejection returns the original mappings without native accesses.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub unsafe fn new(
         full_bars: [PhysicalSpan; 2],
         mappings: [Mapping; 2],

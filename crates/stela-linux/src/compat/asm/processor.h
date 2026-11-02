@@ -12,6 +12,10 @@ struct thread_struct {
 /* There is genuinely no duplicate CPU frame in this native metadata. This
  * initializer does not construct x86 thread.sp, pt_regs or ret_from_fork. */
 #define INIT_THREAD {}
+/* The original static task template is not an executing native stack. Only
+ * actual Runtime Service attachment installs its kept stack, once. */
+#define INIT_TASK_STACK ((void *)0)
+
 
 /* The one CPU model fact Linux code here reads: family 6, past the i386. */
 static const struct {

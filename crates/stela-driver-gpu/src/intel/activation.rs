@@ -87,6 +87,7 @@ pub unsafe trait ProbeOwner {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
+    Config(crate::bus::pci::ConfigError),
     Mapping(MappingError),
     InvalidOwner,
     OutOfMemory,
@@ -304,6 +305,7 @@ pub struct Device {
     closing: bool,
     drained: bool,
     poisoned: bool,
+    config_failure: Option<crate::bus::pci::ConfigError>,
     awake: bool,
     _affinity: PhantomData<*mut ()>,
 }
@@ -410,11 +412,15 @@ impl Device {
             closing: false,
             drained: false,
             poisoned: false,
+            config_failure: None,
             awake: false,
             _affinity: PhantomData,
         })
     }
     fn live(&self) -> Result<&Bundle, Error> {
+        if let Some(error) = self.config_failure {
+            return Err(Error::Config(error));
+        }
         if self.closing {
             return Err(Error::Closing);
         }
@@ -496,12 +502,24 @@ impl Device {
         let config =
             unsafe { super::ggtt::stela_intel_gsm_config(facts.graphics_verx100, &mut offset) };
         let gmch = match config {
-            0 => bundle
-                .context
-                .owner
-                .config_space()
-                .map_err(Error::Native)?
-                .read16(offset),
+            0 => {
+                let result = bundle
+                    .context
+                    .owner
+                    .config_space()
+                    .map_err(Error::Native)?
+                    .read16(offset);
+                match result {
+                    Ok(value) => value,
+                    Err(error) => {
+                        // End admission before any callback can recover context.
+                        // Keep the same mapping/power/reset owner and exact cause.
+                        self.config_failure = Some(error);
+                        self.gsm_poison();
+                        return Err(Error::Config(error));
+                    }
+                }
+            }
             1 => 0,
             error => return Err(Error::Native(error)),
         };
@@ -665,6 +683,9 @@ impl Device {
         Ok(())
     }
     pub fn retire(&mut self) -> Result<(), Error> {
+        if let Some(error) = self.config_failure {
+            return Err(Error::Config(error));
+        }
         if self.awake || self.poisoned {
             return Err(Error::Awake);
         }

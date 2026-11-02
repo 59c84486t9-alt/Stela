@@ -16,6 +16,8 @@ const UNCERTAIN: u8 = 2;
 const QUARANTINED: u8 = 3;
 const RETIRED: u8 = 4;
 const RETIRING: u8 = 5;
+// Native removal acknowledged; original counted use still awaits release.
+const UNMAPPED: u8 = 6;
 
 struct Record {
     resource: Resource,
@@ -23,6 +25,34 @@ struct Record {
     phase: AtomicU8,
     cpu: AtomicUsize,
     token: AtomicU64,
+    mapping_use: UnsafeCell<Option<OpaqueUse>>,
+}
+// SAFETY: token storage is initialized only in unpublished INSTALLING and
+// consumed only by the unique retiring lease or its unchanged-map completion.
+// Inventory readers never borrow it. Every view shares the same live record.
+unsafe impl Send for Record {}
+// SAFETY: phase publication and unique lease retirement exclude token mutation
+// races; mapping/use release callbacks run outside the inventory lock.
+unsafe impl Sync for Record {}
+fn release_mapping_use(record: &Record) -> Result<(), Error> {
+    if record.phase.load(Ordering::Acquire) != UNMAPPED {
+        return Err(Error::InvalidPlatformReply);
+    }
+    // SAFETY: caller owns the unique completion/retirement phase; no observer
+    // reads this slot. Every actual user ended or mapping was never published.
+    let usage = unsafe { &mut *record.mapping_use.get() }
+        .take()
+        .ok_or(Error::InvalidPlatformReply)?;
+    // SAFETY: invoked only after provider unchanged ACK, or acknowledged native
+    // unmap with no views and caller's CPU/IRQ/cache/raw-tail drain contract.
+    match unsafe { usage.release() } {
+        Ok(()) => Ok(()),
+        Err((error, usage)) => {
+            // SAFETY: same exclusive token slot; keep THIS exact unreleased use.
+            unsafe { *record.mapping_use.get() = Some(usage) };
+            Err(Error::Assignment(error))
+        }
+    }
 }
 /// Opaque identity of one registered native alias/cache-policy reservation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -243,7 +273,15 @@ impl Authority {
     /// Register a resource owner for physical-address-only
     /// consumers such as an unchanged native GPU mapping ABI. A BAR tuple is
     /// never sufficient; the caller must already possess ResourceBacking.
-    pub fn register_resource(&self, resource: Resource) -> Result<ResourceId, Error> {
+    pub fn register_resource(&self, resource: Resource) -> Result<ResourceId, RegistrationFailure> {
+        let original = resource.clone();
+        self.register_resource_inner(resource)
+            .map_err(|error| RegistrationFailure {
+                error,
+                resource: ManuallyDrop::new(original),
+            })
+    }
+    fn register_resource_inner(&self, resource: Resource) -> Result<ResourceId, Error> {
         self.inner
             .platform
             .check_context(self.inner.address_space)?;
@@ -430,7 +468,7 @@ impl Authority {
             match record.phase.load(Ordering::Acquire) {
                 INSTALLING => result.installing += 1,
                 LIVE => result.live += 1,
-                UNCERTAIN | RETIRING => result.uncertain += 1,
+                UNCERTAIN | RETIRING | UNMAPPED => result.uncertain += 1,
                 _ => {}
             }
         }
@@ -528,6 +566,7 @@ impl Authority {
                 phase: AtomicU8::new(INSTALLING),
                 cpu: AtomicUsize::new(0),
                 token: AtomicU64::new(0),
+                mapping_use: UnsafeCell::new(None),
             });
             // SAFETY: the entire Record was initialized exactly once above.
             let record = unsafe { UniqueArc::assume_init(record_storage) }.shareable();
@@ -548,12 +587,13 @@ impl Authority {
             inventory.pending_maps = pending_maps;
             (record, lease)
         };
-        // SAFETY: the single inventory atomically reserved exactly this span,
-        // cache policy and id; record keeps the real resource owner.
-        let installed = match unsafe { self.inner.platform.map(&record.resource, record.request) } {
-            Ok(mapping) => mapping,
-            Err(MapFailure::Unchanged(error)) => {
-                let retired = {
+        // Backing admission is outside the inventory lock and BEFORE any
+        // mapper effect. A closed real assignment cannot be revived by Resource
+        // clones or this inventory's numerical resource metadata.
+        let usage = match record.resource.begin_mapping() {
+            Ok(usage) => usage,
+            Err(error) => {
+                let removed = {
                     let mut guard = self.inner.finish_lock();
                     guard.inventory().pending_maps -= 1;
                     record
@@ -561,11 +601,41 @@ impl Authority {
                         .compare_exchange(INSTALLING, RETIRED, Ordering::AcqRel, Ordering::Acquire)
                         .is_ok()
                 };
-                if retired {
+                if removed {
                     self.inner.remove(record.request.id);
                 } else {
                     quarantine(&self.inner, &record);
                 }
+                return Err(error);
+            }
+        };
+        // SAFETY: private unpublished lease; no public borrower can retire it.
+        unsafe { *record.mapping_use.get() = Some(usage) };
+        // SAFETY: inventory reserved exact span/cache/id; same counted original
+        // backing stays held through every reply, view and native unmap.
+        let installed = match unsafe { self.inner.platform.map(&record.resource, record.request) } {
+            Ok(mapping) => mapping,
+            Err(MapFailure::Unchanged(error)) => {
+                {
+                    let mut guard = self.inner.finish_lock();
+                    guard.inventory().pending_maps -= 1;
+                    if record
+                        .phase
+                        .compare_exchange(INSTALLING, UNMAPPED, Ordering::AcqRel, Ordering::Acquire)
+                        .is_err()
+                    {
+                        quarantine(&self.inner, &record);
+                        return Err(error);
+                    }
+                }
+                if let Err(release) = release_mapping_use(&record) {
+                    // No handle escaped: retain original record/use/root graph
+                    // permanently rather than discard its failed completion.
+                    quarantine(&self.inner, &record);
+                    return Err(release);
+                }
+                record.phase.store(RETIRED, Ordering::Release);
+                self.inner.remove(record.request.id);
                 return Err(error);
             }
             Err(MapFailure::Uncertain(error)) => {
@@ -742,6 +812,16 @@ impl Mapping {
             range,
         })
     }
+    /// Match the SAME original resource backing, not matching physical/BDF
+    /// metadata. Grants no config writer/reset/root permission by itself.
+    pub fn retains_resource(&self, resource: &Resource) -> Result<bool, Error> {
+        self.check_current()?;
+        let lease = self.lease()?;
+        Ok(Arc::ptr_eq(
+            &lease.record.resource.backing,
+            &resource.backing,
+        ))
+    }
     /// Compare the original mapping-platform permission, checking both
     /// mappings are still live. Equal numeric root identities are insufficient.
     /// This establishes mapping-service provenance only; it grants no PCI
@@ -781,6 +861,13 @@ impl Mapping {
             .authority
             .platform
             .check_context(lease.record.request.address_space)?;
+        if lease.record.phase.load(Ordering::Acquire) == UNMAPPED {
+            release_mapping_use(&lease.record)?;
+            lease.record.phase.store(RETIRED, Ordering::Release);
+            lease.authority.remove(lease.record.request.id);
+            self.lease = None;
+            return Ok(());
+        }
         let installed = lease.installed.ok_or(Error::Unavailable)?;
         {
             let mut guard = lease.authority.lock()?;
@@ -809,11 +896,20 @@ impl Mapping {
             let mut guard = lease.authority.finish_lock();
             guard.inventory().unmapping -= 1;
             match outcome {
-                Ok(()) => lease
-                    .record
-                    .phase
-                    .compare_exchange(RETIRING, RETIRED, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok(),
+                Ok(()) => {
+                    let acknowledged = lease
+                        .record
+                        .phase
+                        .compare_exchange(RETIRING, UNMAPPED, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok();
+                    if acknowledged {
+                        // Cleared before new map callbacks can reuse this native
+                        // token/VA; its original use still blocks physical close.
+                        lease.record.token.store(0, Ordering::Release);
+                        lease.record.cpu.store(0, Ordering::Release);
+                    }
+                    acknowledged
+                }
                 Err(_) => {
                     let _ = lease.record.phase.compare_exchange(
                         RETIRING,
@@ -830,6 +926,10 @@ impl Mapping {
             quarantine(&lease.authority, &lease.record);
             return Err(Error::InvalidPlatformReply);
         }
+        // Native alias/token no longer exists. Count release may still refuse;
+        // leave UNMAPPED so retry never issues a second hardware unmap.
+        release_mapping_use(&lease.record)?;
+        lease.record.phase.store(RETIRED, Ordering::Release);
         lease.authority.remove(lease.record.request.id);
         self.lease = None;
         Ok(())

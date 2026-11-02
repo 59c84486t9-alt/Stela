@@ -35,7 +35,7 @@ pub mod hda;
 pub mod usb4;
 
 /// A Broadcom Tigon3 adapter over owned BAR0 and APE mappings.
-pub type Tg3 = tg3::Packet<tg3::io::Mmio<OwnedConfig>, Clock>;
+pub type Tg3 = tg3::Packet<tg3::io::Mmio<OwnedConfig>, Rc<dyn crate::bus::pci::power::Timer>>;
 
 /// A link driver and the PCI location it was found at.
 pub struct Located<L> {
@@ -156,24 +156,27 @@ fn upstream(bridges: &[Bridge], segment: u16, bus: u8) -> Option<&Bridge> {
 
 /// `mt76_pci_aspm_supported`: whether firmware enabled ASPM on the
 /// function's link, at either end.
-pub(super) fn aspm_supported<C: ConfigSpace>(function: &Function<C>, bridges: &[Bridge]) -> bool {
+pub(super) fn aspm_supported<C: ConfigSpace>(
+    function: &Function<C>,
+    bridges: &[Bridge],
+) -> Result<bool, crate::block::BlockError> {
     let address = function.address;
-    crate::bus::pci::aspm_control(function) != 0
-        || upstream(bridges, address.segment, address.bus).is_some_and(|parent| parent.aspm != 0)
+    Ok(crate::bus::pci::aspm_control(function)? != 0
+        || upstream(bridges, address.segment, address.bus).is_some_and(|parent| parent.aspm != 0))
 }
 
 fn mediatek_identity<C: ConfigSpace>(
     function: &mut Function<C>,
-) -> mediatek::identity::PciIdentity {
+) -> Result<mediatek::identity::PciIdentity, crate::bus::pci::ConfigError> {
     let (vendor, device) = (function.vendor, function.device);
     let config = function.config();
-    mediatek::identity::PciIdentity {
+    Ok(mediatek::identity::PciIdentity {
         vendor,
         device,
-        subsystem_vendor: config.read16(0x2c),
-        subsystem_device: config.read16(0x2e),
-        revision: config.read8(0x08),
-    }
+        subsystem_vendor: config.read16(0x2c)?,
+        subsystem_device: config.read16(0x2e)?,
+        revision: config.read8(0x08)?,
+    })
 }
 
 /// A function claimed from the mount, before any device effect.
@@ -183,14 +186,29 @@ struct Claimed {
     bars: [Option<Bar>; 6],
 }
 
-fn claim(services: &dyn NativeServices, address: Address) -> Result<Claimed, ServiceError> {
-    let requester = services.claim_stopped(address)?;
-    let (requester, binding) = requester
-        .into_dma_binding()
-        .map_err(|(error, _)| ServiceError::Claim(error))?;
-    let domain = services.domain(binding)?;
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
+fn claim(services: &dyn NativeServices, address: Address) -> Result<Claimed, Failure> {
+    let requester = services
+        .claim_stopped(address)
+        .map_err(|error| (Error::Native(error), None))?;
+    let (requester, binding) = match requester.into_dma_binding() {
+        Ok(value) => value,
+        Err((error, owner)) => {
+            return Err(keep_error(Error::Native(ServiceError::Claim(error)), owner));
+        }
+    };
+    let domain = match services.domain(binding) {
+        Ok(domain) => domain,
+        Err(error) => return Err(keep_error(Error::Native(error), requester)),
+    };
     let mut function = requester.into_function();
-    let bars = function.bars();
+    let bars = match function.bars() {
+        Ok(bars) => bars,
+        Err(error) => return Err(keep_error(error, (function, domain))),
+    };
     Ok(Claimed {
         function,
         domain,
@@ -214,6 +232,10 @@ fn map(
 /// the device because it may hold mappings or DMA.
 pub(super) type Failure = (Error, Option<Box<dyn Any>>);
 
+fn keep_error(error: impl Into<Error>, owner: impl Any) -> Failure {
+    (error.into(), Some(Box::new(owner)))
+}
+
 /// Attach an EHCI host controller from its claimed function, BAR0 registers
 /// and requester domain, returning the controller and that domain.
 ///
@@ -230,15 +252,25 @@ pub(super) unsafe fn ehci(
     address: Address,
     clock: Clock,
 ) -> Result<(ehci::host::Shared, Arc<dyn DmaDomain>), Failure> {
+    let minimum = services
+        .minimum_delay()
+        .map_err(|error| (Error::Native(error), None))?;
     let refused = |error: ServiceError| (Error::Native(error), None);
     let mut requester = services.prepare_requester(address).map_err(refused)?;
-    let bars = requester.function_mut().bars();
-    let registers = map(services, address, &bars, 0).map_err(refused)?;
+    let bars = match requester.function_mut().bars() {
+        Ok(bars) => bars,
+        Err(error) => return Err(keep_error(error, requester)),
+    };
+    let registers = match map(services, address, &bars, 0) {
+        Ok(registers) => registers,
+        Err(error) => return Err(keep_error(Error::Native(error), (requester, minimum))),
+    };
     let resources = ehci::NativeResources {
         requester,
         registers,
         memory: services.pages(),
         clock,
+        minimum,
     };
     // SAFETY: paired original configuration/root/BAR owners and masked/drained
     // IRQ/work exclusion from the cold mount grant. The caller owns the BIOS
@@ -262,20 +294,38 @@ pub(super) unsafe fn ehci(
 pub(super) unsafe fn tg3(
     services: &dyn NativeServices,
     address: Address,
-    clock: Clock,
 ) -> Result<Located<Tg3>, Failure> {
+    let minimum = services
+        .minimum_delay()
+        .map_err(|error| (Error::Native(error), None))?;
     let refused = |error: ServiceError| (Error::Native(error), None);
     let mut requester = services.prepare_requester(address).map_err(refused)?;
-    let bars = requester.function_mut().bars();
-    let mac = map(services, address, &bars, 0).map_err(refused)?;
-    let ape = map(services, address, &bars, 2).map_err(refused)?;
+    let bars = match requester.function_mut().bars() {
+        Ok(bars) => bars,
+        Err(error) => return Err(keep_error(error, requester)),
+    };
+    let mac = match map(services, address, &bars, 0) {
+        Ok(mac) => mac,
+        Err(error) => return Err(keep_error(Error::Native(error), (requester, minimum))),
+    };
+    let ape = match map(services, address, &bars, 2) {
+        Ok(ape) => ape,
+        Err(error) => return Err(keep_error(Error::Native(error), (requester, mac, minimum))),
+    };
     let window = |mapping: &Mapping| {
         let bytes = mapping.bytes()?;
         Ok((mapping.address(0, bytes)?, bytes))
     };
-    let ((mac_window, mac_bytes), (ape_window, ape_bytes)) = window(&mac)
-        .and_then(|mac| Ok((mac, window(&ape)?)))
-        .map_err(|error| refused(ServiceError::Mapping(error)))?;
+    let ((mac_window, mac_bytes), (ape_window, ape_bytes)) =
+        match window(&mac).and_then(|mac| Ok((mac, window(&ape)?))) {
+            Ok(windows) => windows,
+            Err(error) => {
+                return Err(keep_error(
+                    Error::Native(ServiceError::Mapping(error)),
+                    (requester, mac, ape, minimum),
+                ));
+            }
+        };
     let windows: Arc<dyn Any> = Arc::new((mac, ape));
     // SAFETY: original preparation keeps configuration/root/inherited backing
     // and prior IRQ/work exclusions. Both UC mappings belong to that function.
@@ -292,7 +342,7 @@ pub(super) unsafe fn tg3(
     })?;
     // SAFETY: the cold registers meet their exclusive native ownership
     // contract, and this is the handoff's calibrated clock/context.
-    let hardware = unsafe { tg3::Hardware::new(registers, clock) };
+    let hardware = unsafe { tg3::Hardware::new(registers, minimum.clone()) };
     let registers = hardware.quiesce_cold().map_err(|(error, hardware)| {
         (Error::Tg3(error), Some(Box::new(hardware) as Box<dyn Any>))
     })?;
@@ -307,7 +357,7 @@ pub(super) unsafe fn tg3(
     })?;
     // SAFETY: finalization preserved these exact register owners and supplies
     // their isolated domain/unique attachment. No DMA allocation occurred yet.
-    let hardware = unsafe { tg3::Hardware::new(bound.registers, clock) };
+    let hardware = unsafe { tg3::Hardware::new(bound.registers, minimum.clone()) };
     // SAFETY: original-root drain and current-epoch binding completed; IRQ/work
     // exclusions stay held. Packet retirement unmaps rings before detaching.
     match unsafe { tg3::Packet::attach_bound(hardware, services.pages(), bound.attachment) } {
@@ -331,14 +381,20 @@ pub(super) unsafe fn tg3(
 pub(super) unsafe fn aqtion(
     services: &dyn NativeServices,
     address: Address,
-    clock: Clock,
 ) -> Result<Located<aqtion::native::Attached>, Failure> {
+    let minimum = services
+        .minimum_delay()
+        .map_err(|error| (Error::Native(error), None))?;
     let refused = |error: ServiceError| (Error::Native(error), None);
     let mut requester = services.prepare_requester(address).map_err(refused)?;
-    let command = requester
+    let command = match requester
         .function_mut()
         .config()
-        .read16(crate::bus::pci::regs::COMMAND);
+        .read16(crate::bus::pci::regs::COMMAND)
+    {
+        Ok(command) => command,
+        Err(error) => return Err(keep_error(error, requester)),
+    };
     if command == u16::MAX || command & crate::bus::pci::regs::COMMAND_MASTER != 0 {
         return Err((
             Error::Aqtion(aqtion::native::Error::BusMaster(command)),
@@ -346,13 +402,16 @@ pub(super) unsafe fn aqtion(
         ));
     }
     // Establish D0 before sizing or mapping the BAR, with bus mastering gated.
-    if let Err(error) = requester.function_mut().power_up(&clock) {
+    if let Err(error) = requester.function_mut().power_up(minimum.as_ref()) {
         return Err((
             Error::Aqtion(aqtion::native::Error::Power(error)),
             Some(Box::new(requester)),
         ));
     }
-    let bars = requester.function_mut().bars();
+    let bars = match requester.function_mut().bars() {
+        Ok(bars) => bars,
+        Err(error) => return Err(keep_error(error, requester)),
+    };
     let registers = map(services, address, &bars, 0).map_err(refused)?;
     let registers = match MappedRegisters::new(registers) {
         Ok(registers) => registers,
@@ -366,7 +425,7 @@ pub(super) unsafe fn aqtion(
     let inputs = aqtion::native::Inputs {
         requester,
         registers,
-        timer: clock,
+        timer: minimum,
     };
     // SAFETY: paired original function/root/BAR and calibrated process timer;
     // no Stela IRQ/work or competing writer exists. The driver resets firmware,
@@ -413,27 +472,50 @@ pub(super) unsafe fn mediatek_wifi(
     completion: Option<crate::bus::irq::MsiMessage>,
     mut inputs: mediatek::attach::Inputs,
 ) -> Result<Located<mediatek::attach::Attached<MediatekOwner>>, Failure> {
-    let refused = |error: ServiceError| (Error::Native(error), None);
     let Claimed {
         mut function,
         domain,
         bars,
-    } = claim(services, address).map_err(refused)?;
-    let pci = mediatek_identity(&mut function);
-    let registers = map(services, address, &bars, 0).map_err(refused)?;
-    let (base, bytes) = registers
+    } = claim(services, address)?;
+    let pci = match mediatek_identity(&mut function) {
+        Ok(pci) => pci,
+        Err(error) => return Err(keep_error(error, (function, domain))),
+    };
+    let registers = match map(services, address, &bars, 0) {
+        Ok(registers) => registers,
+        Err(error) => return Err(keep_error(Error::Native(error), (function, domain))),
+    };
+    let (base, bytes) = match registers
         .bytes()
         .and_then(|bytes| Ok((registers.address(0, bytes)?, bytes)))
-        .map_err(|error| refused(ServiceError::Mapping(error)))?;
-    // mt7925_pci_probe: memory decoding and bus mastering, then one MSI.
-    function.enable_polled();
-    inputs.vector = match (completion, function.interrupts().msi) {
-        (Some(message), Some(msi)) => {
-            function.enable_msi(msi, message);
-            true
+    {
+        Ok(window) => window,
+        Err(error) => {
+            return Err(keep_error(
+                Error::Native(ServiceError::Mapping(error)),
+                (function, domain, registers),
+            ));
         }
-        _ => false,
     };
+    let configured = (|| -> Result<bool, Error> {
+        let interrupt = function.interrupts()?.msi;
+        function.enable_polled()?;
+        match (completion, interrupt) {
+            (Some(message), Some(msi)) => {
+                function.enable_msi(msi, message)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    })();
+    inputs.vector = match configured {
+        Ok(vector) => vector,
+        Err(error) => return Err(keep_error(error, (function, domain, registers))),
+    };
+    #[expect(
+        clippy::arc_with_non_send_sync,
+        reason = "The serialized BAR and queue retainers require Arc<dyn Any>; this PCI custody remains !Send and !Sync."
+    )]
     let owner = Arc::new((function, registers));
     let kept = Box::new(owner.clone()) as Box<dyn Any>;
     // SAFETY: the mount claimed the stopped function, mapped its BAR0
@@ -465,39 +547,66 @@ pub(super) unsafe fn realtek_wifi(
     completion: Option<crate::bus::irq::MsiMessage>,
     mut inputs: realtek_wifi::attach::Inputs,
 ) -> Result<Located<RealtekWifi>, Failure> {
-    let refused = |error: ServiceError| (Error::Native(error), None);
     let Claimed {
         mut function,
         domain,
         bars,
-    } = claim(services, address).map_err(refused)?;
-    let registers = map(services, address, &bars, 2).map_err(refused)?;
-    let (base, bytes) = registers
+    } = claim(services, address)?;
+    let registers = match map(services, address, &bars, 2) {
+        Ok(registers) => registers,
+        Err(error) => return Err(keep_error(Error::Native(error), (function, domain))),
+    };
+    let (base, bytes) = match registers
         .bytes()
         .and_then(|bytes| Ok((registers.address(0, bytes)?, bytes)))
-        .map_err(|error| refused(ServiceError::Mapping(error)))?;
-    inputs.link_control = crate::bus::pci::link_control_word(&function);
-    let config = function.config();
-    let (subsystem_vendor, subsystem_device, pci_revision) =
-        (config.read16(0x2c), config.read16(0x2e), config.read8(0x08));
+    {
+        Ok(window) => window,
+        Err(error) => {
+            return Err(keep_error(
+                Error::Native(ServiceError::Mapping(error)),
+                (function, domain, registers),
+            ));
+        }
+    };
+    let configured = (|| -> Result<_, Error> {
+        let link_control = crate::bus::pci::link_control_word(&function)?;
+        let config = function.config();
+        let identity = (
+            config.read16(0x2c)?,
+            config.read16(0x2e)?,
+            config.read8(0x08)?,
+        );
+        let interrupt = function.interrupts()?.msi;
+        function.enable_polled()?;
+        let vector = match (completion, interrupt) {
+            (Some(message), Some(msi)) => {
+                function.enable_msi(msi, message)?;
+                true
+            }
+            _ => false,
+        };
+        Ok((link_control, identity, vector))
+    })();
+    let (link_control, (subsystem_vendor, subsystem_device, pci_revision), vector) =
+        match configured {
+            Ok(configured) => configured,
+            Err(error) => return Err(keep_error(error, (function, domain, registers))),
+        };
+    inputs.link_control = link_control;
+    inputs.vector = vector;
     let observed = realtek_wifi::identity::Observed {
         vendor: function.vendor,
         device: function.device,
         subsystem_vendor,
         subsystem_device,
         pci_revision,
-        // SAFETY: the BAR just mapped, whose first page holds SYS_CFG1.
+        // SAFETY: same owned mapped BAR2, whose first page holds SYS_CFG1.
         sys_cfg1: unsafe { crate::bus::mmio::Mmio::new(base.as_ptr() as u64) }.read32(0xf0),
     };
-    // rtw_pci_setup_resource: memory decoding and bus mastering, then one MSI.
-    function.enable_polled();
-    inputs.vector = match (completion, function.interrupts().msi) {
-        (Some(message), Some(msi)) => {
-            function.enable_msi(msi, message);
-            true
-        }
-        _ => false,
-    };
+    #[expect(
+        clippy::arc_with_non_send_sync,
+        reason = "The serialized Realtek backend retains Arc<dyn Any>; this PCI custody remains !Send and !Sync."
+    )]
     let owner: Arc<dyn Any> = Arc::new((function, registers));
     let kept = Box::new(owner.clone()) as Box<dyn Any>;
     // SAFETY: the mount claimed the stopped function, mapped its BAR2 uncached
@@ -529,59 +638,78 @@ pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
     completion: Option<crate::bus::irq::MsiMessage>,
     inputs: wifi::intel::link::Inputs<B>,
 ) -> Result<Located<wifi::intel::link::Station<wifi::intel::boot::NativeBootIo, B>>, Failure> {
+    let minimum = services
+        .minimum_delay()
+        .map_err(|error| (Error::Native(error), None))?;
     use wifi::intel::attach::{AttachError, Pci, attach};
-    let refused = |error: ServiceError| (Error::Native(error), None);
     let Claimed {
         mut function,
         domain,
         bars,
-    } = claim(services, address).map_err(refused)?;
-    let registers = map(services, address, &bars, 0).map_err(refused)?;
-    let window = registers
-        .address(0, 16384)
-        .map_err(|error| refused(ServiceError::Mapping(error)))?;
-    let vendor = function.vendor;
-    let device = function.device;
-    let link_speed = crate::bus::pci::link_speed(&function);
-    let config = function.config();
-    let pci = Pci {
-        vendor,
-        device,
-        subsystem_vendor: config.read16(0x2c),
-        subsystem_device: config.read16(0x2e),
-        revision: config.read8(0x08),
-        link_speed,
-        vector: false,
+    } = claim(services, address)?;
+    let registers = match map(services, address, &bars, 0) {
+        Ok(registers) => registers,
+        Err(error) => return Err(keep_error(Error::Native(error), (function, domain))),
     };
-    // iwl_pci_probe: memory decoding and bus mastering.
-    function.enable_polled();
-    // iwl_pcie_set_interrupt_capa: the table lies in BAR0, at CSR_MSIX_BASE.
-    let vector = match (completion, function.interrupts().msix) {
-        (Some(message), Some(msix)) if msix.table_bar == 0 => {
-            let table = registers
-                .address(msix.table_offset as usize, 16)
-                .map_err(|error| refused(ServiceError::Mapping(error)))?;
-            // SAFETY: the claimed function's own MSI-X table, mapped uncached
-            // by the mapping `owner` keeps.
-            let table = unsafe { crate::bus::mmio::Mmio::new(table.as_ptr() as u64) };
-            let vector = IntelVector {
-                msix,
-                table,
-                message,
-            };
-            vector.enable(&mut function).then_some(vector)
+    let window = match registers.address(0, 16384) {
+        Ok(window) => window,
+        Err(error) => {
+            return Err(keep_error(
+                Error::Native(ServiceError::Mapping(error)),
+                (function, domain, registers),
+            ));
         }
-        _ => None,
     };
-    let pci = Pci {
-        vector: vector.is_some(),
-        ..pci
+    let configured = (|| -> Result<_, Error> {
+        let vendor = function.vendor;
+        let device = function.device;
+        let link_speed = crate::bus::pci::link_speed(&function)?;
+        let config = function.config();
+        let pci = Pci {
+            vendor,
+            device,
+            subsystem_vendor: config.read16(0x2c)?,
+            subsystem_device: config.read16(0x2e)?,
+            revision: config.read8(0x08)?,
+            link_speed,
+            vector: false,
+        };
+        let interrupt = function.interrupts()?.msix;
+        function.enable_polled()?;
+        let vector = match (completion, interrupt) {
+            (Some(message), Some(msix)) if msix.table_bar == 0 => {
+                let table = registers
+                    .address(msix.table_offset as usize, 16)
+                    .map_err(|error| Error::Native(ServiceError::Mapping(error)))?;
+                // SAFETY: this function's owned uncached MSI-X table stays kept.
+                let table = unsafe { crate::bus::mmio::Mmio::new(table.as_ptr() as u64) };
+                let vector = IntelVector {
+                    msix,
+                    table,
+                    message,
+                };
+                vector.enable(&mut function)?;
+                Some(vector)
+            }
+            _ => None,
+        };
+        Ok((
+            Pci {
+                vector: vector.is_some(),
+                ..pci
+            },
+            vector,
+        ))
+    })();
+    let (pci, vector) = match configured {
+        Ok(configured) => configured,
+        Err(error) => return Err(keep_error(error, (function, domain, registers))),
     };
     let owner: Rc<dyn wifi::intel::boot::FunctionOwner> = Rc::new(IntelOwner {
         function: RefCell::new(function),
         _registers: registers,
         vector,
-        clock: inputs.clock,
+        minimum: minimum.clone(),
     });
     let kept = |owner: &Rc<dyn wifi::intel::boot::FunctionOwner>| {
         Some(Box::new(owner.clone()) as Box<dyn Any>)
@@ -589,7 +717,7 @@ pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
     // SAFETY: the mount claimed the stopped function and mapped its BAR0
     // uncached; `owner` keeps both, and its interrupts are off.
     let io = unsafe {
-        wifi::intel::boot::NativeBootIo::from_window(window.cast(), owner.clone(), inputs.clock)
+        wifi::intel::boot::NativeBootIo::from_window(window.cast(), owner.clone(), minimum.clone())
     }
     .map_err(|error| (Error::IntelWifi(AttachError::Boot(error)), kept(&owner)))?;
     // SAFETY: the mount's domain isolates this requester, and the caller's
@@ -613,16 +741,14 @@ struct IntelVector {
 
 #[cfg(feature = "native-acpi")]
 impl IntelVector {
-    fn enable(&self, function: &mut Function<OwnedConfig>) -> bool {
-        function
-            .enable_msix(self.msix, || {
-                self.table.write32(0, self.message.address as u32);
-                self.table.write32(4, (self.message.address >> 32) as u32);
-                self.table.write32(8, self.message.data);
-                self.table.write32(12, 0);
-                Ok(())
-            })
-            .is_ok()
+    fn enable(&self, function: &mut Function<OwnedConfig>) -> Result<(), crate::block::BlockError> {
+        function.enable_msix(self.msix, || {
+            self.table.write32(0, self.message.address as u32);
+            self.table.write32(4, (self.message.address >> 32) as u32);
+            self.table.write32(8, self.message.data);
+            self.table.write32(12, 0);
+            Ok(())
+        })
     }
 }
 
@@ -632,20 +758,20 @@ struct IntelOwner {
     function: RefCell<Function<OwnedConfig>>,
     _registers: Mapping,
     vector: Option<IntelVector>,
-    clock: Clock,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
 }
 
 #[cfg(feature = "native-acpi")]
 impl wifi::intel::boot::FunctionOwner for IntelOwner {
     /// `pci_reset_function`, of its methods the one Intel radios have, with
     /// the vector back as `pci_restore_state` puts it.
-    fn reset(&self) -> bool {
+    fn reset(&self) -> Result<bool, crate::block::BlockError> {
         let mut function = self.function.borrow_mut();
-        function.function_level_reset(&self.clock) == Ok(true)
-            && self
-                .vector
-                .as_ref()
-                .is_none_or(|vector| vector.enable(&mut function))
+        let reset = function.function_level_reset(self.minimum.as_ref())?;
+        if reset && let Some(vector) = &self.vector {
+            vector.enable(&mut function)?;
+        }
+        Ok(reset)
     }
 }
 
@@ -742,26 +868,43 @@ pub(super) unsafe fn vmd(
     address: Address,
     clock: Clock,
 ) -> Result<Vmd, Failure> {
+    let minimum = services
+        .minimum_delay()
+        .map_err(|error| (Error::Native(error), None))?;
     let refused = |error: ServiceError| (Error::Native(error), None);
     let failed = |error: vmd::Error, owner: Box<dyn Any>| (Error::Vmd(error), Some(owner));
     let requester = services.claim_stopped(address).map_err(refused)?;
-    let (requester, binding) = requester
-        .into_dma_binding()
-        .map_err(|(error, _)| refused(ServiceError::Claim(error)))?;
-    let domain = services.domain(binding).map_err(refused)?;
+    let (requester, binding) = match requester.into_dma_binding() {
+        Ok(value) => value,
+        Err((error, owner)) => {
+            return Err(keep_error(Error::Native(ServiceError::Claim(error)), owner));
+        }
+    };
+    let domain = match services.domain(binding) {
+        Ok(domain) => domain,
+        Err(error) => return Err(keep_error(Error::Native(error), requester)),
+    };
     let mut function = requester.into_function();
-    let profile = vmd::Profile::identify(function.vendor, function.device)
-        .map_err(|error| (Error::Vmd(error), None))?;
-    let bars = function.bars();
+    let profile = match vmd::Profile::identify(function.vendor, function.device) {
+        Ok(profile) => profile,
+        Err(error) => return Err(keep_error(Error::Vmd(error), (function, domain))),
+    };
+    let bars = match function.bars() {
+        Ok(bars) => bars,
+        Err(error) => return Err(keep_error(error, (function, domain))),
+    };
     // SAFETY: the mount claimed this function stopped, and sizing its BARs
     // with decode off left it so.
-    let requester = unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) }
-        .map_err(|(error, function)| {
-            (
-                Error::Native(ServiceError::Claim(error)),
-                Some(Box::new(function) as Box<dyn Any>),
-            )
-        })?;
+    let requester =
+        match unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) } {
+            Ok(requester) => requester,
+            Err((error, function)) => {
+                return Err(keep_error(
+                    Error::Native(ServiceError::Claim(error)),
+                    (function, domain),
+                ));
+            }
+        };
     let reserve = |index: usize| match bars[index] {
         Some(bar @ Bar::Memory { .. }) => services.bar_resource(address, bar),
         _ => Err(ServiceError::Refused("missing memory BAR")),
@@ -841,6 +984,7 @@ pub(super) unsafe fn vmd(
             authority,
             services.pages(),
             clock,
+            minimum.clone(),
             label,
         )
     } {
@@ -866,36 +1010,6 @@ pub type Sfh = sfh::Controller<sfh::pci::NativeRegisters, Clock>;
 /// PCI host bridges of Intel's Mehlow platforms, on which Linux `ish_probe`
 /// refuses the ISH (`ish_invalid_pci_ids`).
 pub(super) const MEHLOW: [u16; 2] = [0xa309, 0xa30a];
-
-/// A claimed requester, rewrapped after its BARs were sized, its DMA domain
-/// and its BARs.
-type Sized = (StoppedRequester, Arc<dyn DmaDomain>, [Option<Bar>; 6]);
-
-/// The function's claimed requester, its DMA domain and its BARs.
-#[allow(
-    clippy::result_large_err,
-    reason = "a failed claim hands back the owners that must outlive the device"
-)]
-fn claim_sized(services: &dyn NativeServices, address: Address) -> Result<Sized, Failure> {
-    let refused = |error: ServiceError| (Error::Native(error), None);
-    let requester = services.claim_stopped(address).map_err(refused)?;
-    let (requester, binding) = requester
-        .into_dma_binding()
-        .map_err(|(error, _)| refused(ServiceError::Claim(error)))?;
-    let domain = services.domain(binding).map_err(refused)?;
-    let mut function = requester.into_function();
-    let bars = function.bars();
-    // SAFETY: the mount claimed this function stopped, and sizing its BARs
-    // with decode off left it so.
-    let requester = unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) }
-        .map_err(|(error, function)| {
-            (
-                Error::Native(ServiceError::Claim(error)),
-                Some(Box::new(function) as Box<dyn Any>),
-            )
-        })?;
-    Ok((requester, domain, bars))
-}
 
 /// An Intel PCIe Bluetooth transport over its owned BAR0, whose MSI-X table
 /// entry 0 delivers its interrupts.
@@ -989,13 +1103,15 @@ pub(super) unsafe fn bcm4377(
     board: bcm4377::Board,
     clock: Clock,
 ) -> Result<Bcm4377, Failure> {
+    let minimum = services
+        .minimum_delay()
+        .map_err(|error| (Error::Native(error), None))?;
     use bcm4377::native::{
         Error as NativeError, Inputs, MappedRegisters, NativeClock, NativePlatform, cold,
     };
     let refused = |error: ServiceError| (Error::Native(error), None);
     let failed =
         |error: NativeError, kept: Box<dyn Any>| (Error::Bcm4377(error.into()), Some(kept));
-    let power_clock = clock;
     // SAFETY: the handoff's clock is the calibrated invariant TSC.
     let clock =
         unsafe { NativeClock::new(clock) }.map_err(|error| (Error::Bcm4377(error.into()), None))?;
@@ -1003,13 +1119,16 @@ pub(super) unsafe fn bcm4377(
     let authority = services.authority().map_err(refused)?;
     let mut requester = services.prepare_requester(address).map_err(refused)?;
     // Restore D0 before BAR sizing under the original configuration/root owner.
-    if let Err(error) = requester.function_mut().power_up(&power_clock) {
+    if let Err(error) = requester.function_mut().power_up(minimum.as_ref()) {
         return Err(failed(
             NativeError::Power(error),
             Box::new((requester, topology)),
         ));
     }
-    let bars = requester.function_mut().bars();
+    let bars = match requester.function_mut().bars() {
+        Ok(bars) => bars,
+        Err(error) => return Err(keep_error(error, (requester, topology))),
+    };
     let bar0 = match map(services, address, &bars, 0) {
         Ok(mapping) => mapping,
         Err(error) => return Err((Error::Native(error), Some(Box::new((requester, topology))))),
@@ -1044,6 +1163,7 @@ pub(super) unsafe fn bcm4377(
         topology,
         registers,
         clock,
+        minimum: minimum.clone(),
     };
     // SAFETY: original requester/BAR/root/backing are held, prior firmware,
     // IRQ/work, bypass and competing PCI writers excluded. No private DMA yet.
@@ -1065,6 +1185,7 @@ pub(super) unsafe fn bcm4377(
         // calibration or address properties Apple silicon boards do.
         properties: Vec::new(),
         clock: bound.clock,
+        minimum: bound.minimum,
         interrupts,
     };
     // SAFETY: vendor FLR/D0/BAR restore, original-root drain and current-epoch
@@ -1093,6 +1214,9 @@ pub(super) unsafe fn intel_bluetooth(
     address: Address,
     clock: Clock,
 ) -> Result<IntelBluetooth, Failure> {
+    let minimum = services
+        .minimum_delay()
+        .map_err(|error| (Error::Native(error), None))?;
     use intel_pcie::native::{self as native, Inputs, NativePlatform, cold, lifetime};
     let refused = |error: ServiceError| (Error::Native(error), None);
     let failed =
@@ -1100,13 +1224,16 @@ pub(super) unsafe fn intel_bluetooth(
     let mut requester = services.prepare_requester(address).map_err(refused)?;
     // Power restoration precedes sizing/MMIO, with the original root/backing
     // still held and requester DMA gated by preparation.
-    if let Err(error) = requester.function_mut().power_up(&clock) {
+    if let Err(error) = requester.function_mut().power_up(minimum.as_ref()) {
         return Err(failed(
             native::Error::Power(error).into(),
             Box::new(requester),
         ));
     }
-    let bars = requester.function_mut().bars();
+    let bars = match requester.function_mut().bars() {
+        Ok(bars) => bars,
+        Err(error) => return Err(keep_error(error, requester)),
+    };
     let interrupts = services.interrupts().map_err(refused)?;
     let authority = services.authority().map_err(refused)?;
     let Some(bar @ Bar::Memory { .. }) = bars[0] else {
@@ -1145,6 +1272,7 @@ pub(super) unsafe fn intel_bluetooth(
         requester,
         registers,
         clock,
+        minimum: minimum.clone(),
     };
     // SAFETY: the original function is powered D0; prior IRQ/work/firmware,
     // competing writers and bypass are excluded by the mount. Clock/backing
@@ -1191,7 +1319,18 @@ pub(super) unsafe fn intel_bluetooth(
     }
     // Vendor disconnect/reset, original-root drain and current-epoch binding
     // are complete. BME now permits only the subsequently allocated new domain.
-    function.enable_polled();
+    if let Err(error) = function.enable_polled() {
+        return Err(keep_error(
+            error,
+            (
+                function,
+                bound.registers,
+                bound.attachment,
+                retention,
+                table,
+            ),
+        ));
+    }
     let mut msix = [const { None }; 6];
     msix[0] = Some(table);
     let msi_route = match bound.attachment.irq_route() {
@@ -1213,6 +1352,7 @@ pub(super) unsafe fn intel_bluetooth(
         bars: msix,
         registers: bound.registers,
         clock,
+        minimum: minimum.clone(),
         interrupts,
         domain: bound.attachment.domain(),
         msi_route,
@@ -1248,7 +1388,9 @@ pub(super) unsafe fn intel_bluetooth(
     }
 }
 
-/// Attach an AMD Sensor Fusion Hub and enable its sensors.
+/// Prepare inherited AMD SFH engines under the original root. Attachment
+/// explicitly refuses the missing native notification/mode owner while keeping
+/// that original configuration/root/BAR graph. It grants no new DMA.
 ///
 /// # Safety
 /// [`NativeServices`]' contract holds for `services`, and `clock` is the
@@ -1262,36 +1404,55 @@ pub(super) unsafe fn sfh(
     address: Address,
     clock: Clock,
 ) -> Result<Sfh, Failure> {
+    let minimum = services
+        .minimum_delay()
+        .map_err(|error| (Error::Native(error), None))?;
     let refused = |error: ServiceError| (Error::Native(error), None);
-    let (requester, domain, bars) = claim_sized(services, address)?;
-    let Some(bar @ Bar::Memory { .. }) = bars[2] else {
-        return Err(refused(ServiceError::Refused("missing memory BAR")));
-    };
-    let mapping = services.map_bar(address, bar).map_err(refused)?;
-    // SAFETY: the mount claimed the stopped function and mapped exactly its
-    // BAR2 uncached.
-    let registers = unsafe { sfh::pci::NativeRegisters::attach(requester, mapping, bar) }.map_err(
-        |failure| {
-            (
-                Error::Sfh(failure.error),
-                Some(Box::new((failure.function, failure.mapping)) as Box<dyn Any>),
-            )
-        },
-    )?;
-    // SAFETY: `domain` is the mount's domain for this requester, which meets
-    // the DmaDomain contract for its kind.
-    let mut controller = unsafe { sfh::Controller::claim(registers, clock, domain) }
-        .map_err(|error| (Error::Sfh(error), None))?;
-    match controller.initialize(services.pages()) {
-        Ok(()) => Ok(controller),
-        Err(error) => Err((
-            Error::Sfh(error),
-            Some(Box::new(controller) as Box<dyn Any>),
-        )),
+    let mut requester = services.prepare_requester(address).map_err(refused)?;
+    // Keep the genuine source through every effect, failure and unwind.
+    let minimum = core::mem::ManuallyDrop::new(minimum);
+    if let Err(error) = requester.function_mut().power_up(minimum.as_ref()) {
+        return Err((
+            Error::SfhCold(sfh::cold::native::NativeError::Power(error)),
+            Some(Box::new((requester, minimum))),
+        ));
     }
+    let bars = match requester.function_mut().bars() {
+        Ok(bars) => bars,
+        Err(error) => return Err(keep_error(error, (requester, minimum))),
+    };
+    let Some(bar @ Bar::Memory { .. }) = bars[2] else {
+        return Err((
+            Error::Native(ServiceError::Refused("missing memory BAR2")),
+            Some(Box::new((requester, minimum))),
+        ));
+    };
+    let mapping = match services.map_bar(address, bar) {
+        Ok(mapping) => mapping,
+        Err(error) => return Err((Error::Native(error), Some(Box::new((requester, minimum))))),
+    };
+    // SAFETY: actual original requester/root and its reserved UC BAR2 remain
+    // together; no private domain, new DMA, IRQ or worker was created.
+    let mut original = unsafe { sfh::cold::native::Original::new(requester, mapping, bar, clock) };
+    if let Err(error) = original.prepare() {
+        return Err((
+            Error::SfhCold(sfh::cold::native::NativeError::Controller(error)),
+            Some(Box::new((original, minimum))),
+        ));
+    }
+    // Vendor ACK/BME gating does not establish the missing original native
+    // notification/mode owner. Do not acknowledge/finalize a cold receipt.
+    Err((
+        Error::SfhCold(sfh::cold::native::NativeError::Controller(
+            original.migration_prerequisite(),
+        )),
+        Some(Box::new((original, minimum))),
+    ))
 }
 
-/// Attach an Intel Integrated Sensor Hub and start its HID clients.
+/// Prepare inherited Intel ISH engines under the original root. Attachment
+/// explicitly refuses missing notification ownership and firmware address-reset
+/// prerequisites while keeping the original configuration/root/BAR graph.
 ///
 /// # Safety
 /// [`NativeServices`]' contract holds for `services`, `clock` is the
@@ -1306,42 +1467,64 @@ pub(super) unsafe fn ish(
     address: Address,
     clock: Clock,
 ) -> Result<ish::Native, Failure> {
+    use ish::cold::native::{Error as ColdError, Original};
+    let minimum = services
+        .minimum_delay()
+        .map_err(|error| (Error::Native(error), None))?;
     let refused = |error: ServiceError| (Error::Native(error), None);
-    let (requester, domain, bars) = claim_sized(services, address)?;
-    let interrupts = services.interrupts().map_err(refused)?;
-    let authority = services.authority().map_err(refused)?;
-    let Some(bar @ Bar::Memory { .. }) = bars[0] else {
-        return Err(refused(ServiceError::Refused("missing memory BAR")));
-    };
-    let mapping = services.map_bar(address, bar).map_err(refused)?;
-    // SAFETY: the mount mapped exactly BAR0 of the claimed function uncached.
-    let registers = unsafe { ish::MappedRegisters::new(mapping) }
-        .map_err(|(error, mapping)| (Error::Ish(error), Some(Box::new(mapping) as Box<dyn Any>)))?;
-    // SAFETY: the handoff's clock is the calibrated invariant TSC.
-    let clock =
-        unsafe { ish::NativeClock::new(clock) }.map_err(|error| (Error::Ish(error), None))?;
-    let inputs = ish::Inputs {
-        function: requester.into_function(),
-        retained: Arc::new(authority),
-        registers,
-        domain,
-        interrupts,
-        // No original stable notification/source grant is supplied by this
-        // producer yet. Registry refuses before programming instead of
-        // deriving native root authority from a numeric target.
-        msi_route: crate::bus::irq::posted_msi::MsiRoute::unavailable(),
-        clock,
-    };
-    // SAFETY: the mount claimed the stopped function, mapped its BAR0 and
-    // gave its domain and MSI controller; the caller checked for Mehlow.
-    let mut native = unsafe { ish::Native::new(inputs) }
-        .map_err(|(error, inputs)| (Error::Ish(error), Some(Box::new(inputs) as Box<dyn Any>)))?;
-    match native.start() {
-        Ok(()) => Ok(native),
-        Err(error) => Err((Error::Ish(error), Some(Box::new(native) as Box<dyn Any>))),
+    // SAFETY: the caller supplies the qualified advancing platform clock.
+    let native_clock = unsafe { ish::NativeClock::new(clock) }
+        .map_err(|error| (Error::IshCold(ColdError::Controller(error)), None))?;
+    let mut requester = services.prepare_requester(address).map_err(refused)?;
+    // Keep the genuine source through every effect, failure and unwind.
+    let minimum = core::mem::ManuallyDrop::new(minimum);
+    if let Err(error) = requester.function_mut().power_up(minimum.as_ref()) {
+        return Err((
+            Error::IshCold(ColdError::Power(error)),
+            Some(Box::new((requester, minimum))),
+        ));
     }
+    let bars = match requester.function_mut().bars() {
+        Ok(bars) => bars,
+        Err(error) => return Err(keep_error(error, (requester, minimum))),
+    };
+    let Some(bar @ Bar::Memory { .. }) = bars[0] else {
+        return Err((
+            Error::Native(ServiceError::Refused("missing memory BAR0")),
+            Some(Box::new((requester, minimum))),
+        ));
+    };
+    let mapping = match services.map_bar(address, bar) {
+        Ok(mapping) => mapping,
+        Err(error) => return Err((Error::Native(error), Some(Box::new((requester, minimum))))),
+    };
+    // SAFETY: the actual reserved original BAR0 remains paired with its owner.
+    let registers = match unsafe { ish::MappedRegisters::new(mapping) } {
+        Ok(registers) => registers,
+        Err((error, mapping)) => {
+            return Err((
+                Error::IshCold(ColdError::Controller(error)),
+                Some(Box::new((requester, mapping, minimum))),
+            ));
+        }
+    };
+    // SAFETY: the original graph stays whole before any private-root bind,
+    // allocation, MSI programming or new firmware session is admitted.
+    let mut original = unsafe { Original::new(requester, registers, native_clock) };
+    if let Err(error) = original.prepare() {
+        return Err((Error::IshCold(error), Some(Box::new((original, minimum)))));
+    }
+    // RMP2-off/DMA-idle does not forget firmware's old DMA addresses, and
+    // source masking does not supply a historical notification/root owner.
+    // Both prerequisites remain explicit; neither is a config-only receipt.
+    Err((
+        Error::IshCold(ColdError::Missing(Original::<
+            ish::MappedRegisters,
+            ish::NativeClock,
+        >::migration_prerequisites())),
+        Some(Box::new((original, minimum))),
+    ))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1357,8 +1540,24 @@ mod tests {
     }
 
     #[test]
-    fn ehci_requests_original_preparation_without_a_stopped_or_bound_grant() {
+    fn missing_minimum_refuses_before_any_native_preparation() {
         let services = Refusing::default();
+        let clock = Clock {
+            ticks_per_microsecond: 1000,
+        };
+        // SAFETY: all physical services refuse; no device capability exists.
+        let error = unsafe { ehci(&services, address(), clock) };
+        assert!(matches!(
+            error,
+            Err((Error::Native(ServiceError::Unavailable), None))
+        ));
+        assert!(services.requests.borrow().is_empty());
+        assert!(services.preparations.borrow().is_empty());
+        assert!(services.stopped.borrow().is_empty());
+    }
+    #[test]
+    fn ehci_requests_original_preparation_without_a_stopped_or_bound_grant() {
+        let services = Refusing::minimum_only();
         let clock = Clock {
             ticks_per_microsecond: 1000,
         };
@@ -1375,12 +1574,12 @@ mod tests {
 
     #[test]
     fn a_refused_claim_attaches_nothing_and_keeps_no_owner() {
-        let services = Refusing::default();
+        let services = Refusing::minimum_only();
         let clock = Clock {
             ticks_per_microsecond: 1000,
         };
         // SAFETY: the refusing services transfer no owner.
-        let tg3 = unsafe { tg3(&services, address(), clock) };
+        let tg3 = unsafe { tg3(&services, address()) };
         assert!(matches!(
             tg3,
             Err((Error::Native(ServiceError::Unavailable), None))
@@ -1388,7 +1587,7 @@ mod tests {
         assert_eq!(*services.preparations.borrow(), [address()]);
         assert!(services.stopped.borrow().is_empty());
         // SAFETY: as above.
-        let aqtion = unsafe { aqtion(&services, address(), clock) };
+        let aqtion = unsafe { aqtion(&services, address()) };
         assert!(matches!(
             aqtion,
             Err((Error::Native(ServiceError::Unavailable), None))
@@ -1412,7 +1611,7 @@ mod tests {
 
     #[test]
     fn a_broadcom_function_without_interrupts_claims_nothing() {
-        let services = Refusing::default();
+        let services = Refusing::minimum_only();
         let clock = Clock {
             ticks_per_microsecond: 1000,
         };

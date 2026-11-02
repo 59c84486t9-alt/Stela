@@ -26,7 +26,7 @@ pub(super) fn admission<C: ConfigSpace>(
     let pcie = super::super::pci::capability(config, PCI_EXP)?.ok_or(BlockError::Unsupported(
         "RTSX requires an actual PCIe endpoint capability",
     ))?;
-    let flags = config.read16(pcie + 2);
+    let flags = config.read16(pcie + 2)?;
     let version = (flags & 15) as u8;
     if !matches!(version, 1 | 2) || flags & 0xf0 != 0 {
         return Err(BlockError::Unsupported(
@@ -95,10 +95,13 @@ impl Configuration {
         }
         let pci = function.config();
         let ltr = actual.version == 2
-            && pci.read16(actual.pcie + EXP_DEVICE_CONTROL2) & EXP_LTR_ENABLE != 0;
-        let l1ss_control = actual.l1ss.map_or(0, |at| pci.read32(at + 8) as u8 & 15);
+            && pci.read16(actual.pcie + EXP_DEVICE_CONTROL2)? & EXP_LTR_ENABLE != 0;
+        let l1ss_control = match actual.l1ss {
+            Some(at) => pci.read32(at + 8)? as u8 & 15,
+            None => 0,
+        };
         let force_clock_request = l1ss_control == 0;
-        let setting1 = pci.read32(VENDOR_SETTING1);
+        let setting1 = pci.read32(VENDOR_SETTING1)?;
         let mut config = Self {
             profile,
             l1ss_control,
@@ -122,7 +125,7 @@ impl Configuration {
             aspm: 2,
         };
         if config.vendor_valid {
-            let setting2 = pci.read32(VENDOR_SETTING2);
+            let setting2 = pci.read32(VENDOR_SETTING2)?;
             config.card_drive = (config.card_drive & 0x3f) | (((setting1 >> 25) as u8 & 1) << 6);
             config.drive = ((setting2 >> 5) & 3) as usize;
             config.drive_1v8 = ((setting1 >> 26) & 3) as usize;
@@ -139,20 +142,54 @@ impl Configuration {
     }
 }
 
-impl Engine {
+impl Host {
+    #[expect(
+        clippy::result_large_err,
+        reason = "Return the same affine device, mapping and timer graph without a fallible failure-path allocation."
+    )]
     pub(super) fn new(
         pci: Box<dyn Pci>,
         registers: Box<dyn Registers>,
         config: Configuration,
         clock: Clock,
+        minimum: Rc<dyn crate::bus::pci::power::Timer>,
         location: String,
-    ) -> Result<Self, BlockError> {
-        validate_clock(clock)?;
-        let mut engine = Self {
+    ) -> Result<Self, HostFailure> {
+        let inputs = crate::Retained::new(EnginePreparation {
             pci,
             registers,
             config,
             clock,
+            minimum,
+            location,
+        });
+        if let Err(error) = inputs
+            .minimum
+            .check()
+            .map_err(BlockError::PciPower)
+            .and_then(|()| validate_clock(inputs.clock))
+        {
+            return Err(HostFailure {
+                error,
+                owner: crate::Retained::new(FailedHost::Preparation(inputs.into_inner())),
+            });
+        }
+        let EnginePreparation {
+            pci,
+            registers,
+            config,
+            clock,
+            minimum,
+            location,
+        } = inputs.into_inner();
+        let mut engine = core::mem::ManuallyDrop::new(Engine {
+            pci,
+            registers,
+            config,
+            clock,
+            minimum,
+            minimum_in_progress: false,
+            operation_in_progress: false,
             location,
             rca: 0,
             scratch: [0; 512],
@@ -167,44 +204,74 @@ impl Engine {
             signal_voltage: SignalVoltage::V3_3,
             tuning_rejection_observed: false,
             silicon_version: 0,
-        };
-        engine.healthy()?;
-        engine.registers.write32(BIER, 0);
-        if engine.registers.read32(BIER) != 0 {
-            return engine.failed(BlockError::Unsupported(
-                "RTSX interrupt mask did not acknowledge",
-            ));
-        }
-        let budget = Budget::new(&engine, 100_000);
-        budget.check()?;
-        engine.registers.write32(HCBCTLR, STOP_CMD);
-        budget.check()?;
-        engine.registers.write32(HDBCTLR, STOP_DMA);
-        budget.check()?;
-        loop {
-            budget.check()?;
-            let command = engine.registers.read32(HCBCTLR);
-            budget.check()?;
-            let data = engine.registers.read32(HDBCTLR);
-            budget.check()?;
-            if command & HAIMR_TRANS_START == 0 && data & HAIMR_TRANS_START == 0 {
-                break;
+        });
+        let result = (|| {
+            engine.healthy()?;
+            engine.registers.write32(BIER, 0);
+            if engine.registers.read32(BIER) != 0 {
+                return engine.failed(BlockError::Unsupported(
+                    "RTSX interrupt mask did not acknowledge",
+                ));
             }
+            let budget = Budget::new(&engine, 100_000);
+            budget.check()?;
+            engine.registers.write32(HCBCTLR, STOP_CMD);
+            budget.check()?;
+            engine.registers.write32(HDBCTLR, STOP_DMA);
+            budget.check()?;
+            loop {
+                budget.check()?;
+                let command = engine.registers.read32(HCBCTLR);
+                budget.check()?;
+                let data = engine.registers.read32(HDBCTLR);
+                budget.check()?;
+                if command & HAIMR_TRANS_START == 0 && data & HAIMR_TRANS_START == 0 {
+                    break;
+                }
+            }
+            // Source init_params observes the revision before PHY/extra
+            // initialization; a failed read grants no electrical profile effects.
+            if engine.config.profile == ChipProfile::Rts5229 {
+                engine.silicon_version = engine.read_reg(DUMMY_REG_RESET_0)? & 15;
+            }
+            engine.write_reg(DMACTL, 0x80, 0x80)?;
+            engine.write_reg(RBCTL, 0x80, 0x80)?;
+            engine.initialize()?;
+            engine.power_off()
+        })();
+        let host = Host {
+            inner: Rc::new(RefCell::new(engine)),
+        };
+        if let Err(error) = result {
+            {
+                let mut engine = host.inner.borrow_mut();
+                engine.medium = None;
+                engine.fault.get_or_insert_with(|| error.clone());
+            }
+            return Err(HostFailure {
+                error,
+                owner: crate::Retained::new(FailedHost::Host(host)),
+            });
         }
-        // Source init_params observes the revision before PHY/extra
-        // initialization; a failed read grants no electrical profile effects.
-        if engine.config.profile == ChipProfile::Rts5229 {
-            engine.silicon_version = engine.read_reg(DUMMY_REG_RESET_0)? & 15;
+        Ok(host)
+    }
+}
+impl Engine {
+    pub(super) fn quiet(&mut self, microseconds: u64) -> Result<(), BlockError> {
+        if let Some(error) = &self.fault {
+            return Err(error.clone());
         }
-        engine.write_reg(DMACTL, 0x80, 0x80)?;
-        engine.write_reg(RBCTL, 0x80, 0x80)?;
-        engine.initialize()?;
-        engine.power_off()?;
-        Ok(engine)
+        self.minimum_in_progress = true;
+        let result = self.minimum.wait_us(microseconds);
+        self.minimum_in_progress = false;
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => self.failed(BlockError::PciPower(error)),
+        }
     }
     pub(super) fn failed<T>(&mut self, error: BlockError) -> Result<T, BlockError> {
         self.medium = None;
-        self.fault = Some(error.clone());
+        self.fault.get_or_insert_with(|| error.clone());
         Err(error)
     }
     pub(super) fn read_reg(&mut self, at: u16) -> Result<u8, BlockError> {
@@ -310,15 +377,26 @@ impl Engine {
     }
     fn initialize(&mut self) -> Result<(), BlockError> {
         self.write_reg(FPDCTL, SSC_POWER_DOWN, 0)?;
-        self.clock.delay(200);
+        self.quiet(200)?;
         let link_at = self.config.pcie + EXP_LINK_CONTROL;
         if self.config.profile == ChipProfile::Rts522a {
             self.rts522a_disable_aspm()?;
             self.rts522a_optimize_phy()?;
         } else {
-            let old = self.pci.read16(link_at);
-            self.pci.write16(link_at, old & !3);
-            if self.pci.read16(link_at) & 3 != 0 {
+            let old = self
+                .pci
+                .read16(link_at)
+                .map_err(|error| self.configuration_failed(error))?;
+            self.pci
+                .write16(link_at, old & !3)
+                .map_err(|error| self.configuration_failed(error))?;
+            if self
+                .pci
+                .read16(link_at)
+                .map_err(|error| self.configuration_failed(error))?
+                & 3
+                != 0
+            {
                 return self.failed(BlockError::Unsupported(
                     "RTSX ASPM disable did not acknowledge",
                 ));
@@ -326,7 +404,7 @@ impl Engine {
             if old & 2 != 0
                 || self.config.profile == ChipProfile::Rts5229 && self.config.aspm & 2 != 0
             {
-                self.clock.delay(10_000);
+                self.quiet(10_000)?;
             }
             if self.config.profile != ChipProfile::Rts5229 {
                 self.write_reg(PM_CTRL3, D3_DELINK_MODE_EN, 0)?;
@@ -353,22 +431,40 @@ impl Engine {
             self.rts522a_init_ocp()?;
             self.rts522a_oobs(self.config.l1ss_control != 0)?;
         }
-        let link = self.pci.read16(link_at) | (1 << 8);
-        self.pci.write16(link_at, link);
-        if self.pci.read16(link_at) != link {
+        let link = self
+            .pci
+            .read16(link_at)
+            .map_err(|error| self.configuration_failed(error))?
+            | (1 << 8);
+        self.pci
+            .write16(link_at, link)
+            .map_err(|error| self.configuration_failed(error))?;
+        if self
+            .pci
+            .read16(link_at)
+            .map_err(|error| self.configuration_failed(error))?
+            != link
+        {
             return self.failed(BlockError::Unsupported(
                 "RTSX clock-request PCI control did not acknowledge",
             ));
         }
-        self.pci.write8(CLOCK_REQUEST_CONFIG, 0x5b);
-        if self.pci.read8(CLOCK_REQUEST_CONFIG) != 0x5b {
+        self.pci
+            .write8(CLOCK_REQUEST_CONFIG, 0x5b)
+            .map_err(|error| self.configuration_failed(error))?;
+        if self
+            .pci
+            .read8(CLOCK_REQUEST_CONFIG)
+            .map_err(|error| self.configuration_failed(error))?
+            != 0x5b
+        {
             return self.failed(BlockError::Unsupported(
                 "RTSX clock-request setup did not acknowledge",
             ));
         }
         if self.config.profile == ChipProfile::Rts5229 {
             self.rts5229_initialize()?;
-            self.clock.delay(1_000);
+            self.quiet(1_000)?;
             return self.active_ltr();
         }
         for (at, mask, value) in [
@@ -411,7 +507,7 @@ impl Engine {
         }
         // Native full-on ordering: ASPM disabled before active LTR. RTS5227's
         // zero-initialized active latency is zero; later chips set other values.
-        self.clock.delay(1_000);
+        self.quiet(1_000)?;
         self.active_ltr()?;
         if self.config.profile == ChipProfile::Rts522a {
             self.write_reg(
@@ -483,7 +579,7 @@ impl Engine {
     }
     pub(super) fn configure_card(&mut self) -> Result<(), BlockError> {
         self.power_off()?;
-        self.clock.delay(100_000);
+        self.quiet(100_000)?;
         if self.config.profile == ChipProfile::Rts5229 {
             self.rts5229_voltage(false)?;
         } else {
@@ -513,19 +609,18 @@ impl Engine {
         }
         self.write_reg(CARD_PWR_CTL, SD_POWER_MASK, SD_PARTIAL_POWER_ON)?;
         self.write_reg(PWR_GATE_CTRL, LDO3318_PWR_MASK, 2)?;
-        self.clock
-            .delay(if self.config.profile == ChipProfile::Rts5229 {
-                150
-            } else {
-                20_000
-            });
+        self.quiet(if self.config.profile == ChipProfile::Rts5229 {
+            150
+        } else {
+            20_000
+        })?;
         self.write_reg(CARD_PWR_CTL, SD_POWER_MASK, SD_POWER_ON)?;
         self.write_reg(PWR_GATE_CTRL, LDO3318_PWR_MASK, 6)?;
         if self.config.profile != ChipProfile::Rts5229 {
             self.write_reg(CARD_OE, SD_OUTPUT_EN, SD_OUTPUT_EN)?;
             self.write_reg(CARD_OE, MS_OUTPUT_EN, MS_OUTPUT_EN)?;
         }
-        self.clock.delay(1_000);
+        self.quiet(1_000)?;
         self.write_reg(CARD_OE, SD_OUTPUT_EN, SD_OUTPUT_EN)?;
         self.timing(false)?;
         self.write_reg(SD_CFG1, 3, SD_BUS_WIDTH_1BIT)?;
@@ -535,7 +630,7 @@ impl Engine {
             SD_CLK_TOGGLE_EN | SD_CLK_FORCE_STOP,
             SD_CLK_TOGGLE_EN,
         )?;
-        self.clock.delay(1_000);
+        self.quiet(1_000)?;
         self.write_reg(SD_BUS_STAT, SD_CLK_TOGGLE_EN, 0)?;
         self.rca = 0;
         Ok(())
@@ -625,7 +720,7 @@ impl Engine {
             self.write_reg(SD_VPTX_CTL, PHASE_NOT_RESET, 0)?;
             self.write_reg(SD_VPTX_CTL, PHASE_NOT_RESET, PHASE_NOT_RESET)?;
         }
-        self.clock.delay(130);
+        self.quiet(130)?;
         self.write_reg(CLK_CTL, CLK_LOW_FREQ, 0)?;
         Ok(if initial {
             30_000_000 / 128

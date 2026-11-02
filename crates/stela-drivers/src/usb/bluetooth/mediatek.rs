@@ -169,6 +169,10 @@ pub fn is_candidate(device: &crate::usb::xhci::Device) -> bool {
             .iter()
             .any(|i| i.alternate == 0 && (i.class, i.subclass, i.protocol) == (super::CLASS, 1, 1))
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub fn initialize<B: Io>(
     hci: &mut Hci<B>,
     provider: &dyn crate::firmware::Provider,

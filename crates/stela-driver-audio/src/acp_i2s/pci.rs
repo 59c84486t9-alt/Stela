@@ -42,13 +42,17 @@ impl NativeRegisters {
     /// DMA coherency; attachment does not infer board clocks/codecs from PCI.
     /// No cloned view/raw pointer or other owner accesses these mappings.
     /// Keep the native owners kept until controller shutdown succeeds.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Refusal returns the same physical owner graph without allocating on failure"
+    )]
     pub unsafe fn attach(
         mut requester: StoppedRequester,
         mapping: Mapping,
         bar: Bar,
     ) -> Result<Self, AttachFailure> {
         let result = (|| {
-            requester.check_stopped().map_err(|_| Error::PciAuthority)?;
+            requester.check_stopped().map_err(Error::PciClaim)?;
             let Bar::Memory {
                 address,
                 size,
@@ -130,23 +134,37 @@ impl NativeRegisters {
     }
     /// Return native owners only after the controller acknowledged its
     /// shutdown and removed DMA. Failure keeps this register provider intact.
-    pub fn into_stopped_resources(mut self) -> Result<(Function<OwnedConfig>, Mapping), Self> {
-        if self.associated().is_err()
-            || self.master != Some(false)
-            || self.read32(PAGE_BASE) & PTE_VALID != 0
-            || self.read32(IRQ_ENABLE) != 0
-            || self.read32(IRQ_CONTROL) != 0
-            || self.read32(RESET) != 0
-            || (self.generation == Generation::Vangogh
-                && (self.read32(CONTROL) != 0 || self.read32(CLOCK) != 0))
-        {
-            return Err(self);
-        }
-        for port in PORTS {
-            let regs = self.generation.stream(port);
-            if self.read32(regs.enable) & STREAM_ENABLE != 0 || self.read32(regs.ier) != 0 {
-                return Err(self);
+    #[expect(
+        clippy::result_large_err,
+        reason = "Refusal returns the same physical owner graph without allocating on failure"
+    )]
+    pub fn into_stopped_resources(
+        mut self,
+    ) -> Result<(Function<OwnedConfig>, Mapping), crate::Refusal<Self, Error>> {
+        let result = (|| {
+            self.associated()?;
+            if self.master != Some(false) {
+                return Err(Error::PciAuthority);
             }
+            if self.read32(PAGE_BASE) & PTE_VALID != 0
+                || self.read32(IRQ_ENABLE) != 0
+                || self.read32(IRQ_CONTROL) != 0
+                || self.read32(RESET) != 0
+                || (self.generation == Generation::Vangogh
+                    && (self.read32(CONTROL) != 0 || self.read32(CLOCK) != 0))
+            {
+                return Err(Error::Busy);
+            }
+            for port in PORTS {
+                let regs = self.generation.stream(port);
+                if self.read32(regs.enable) & STREAM_ENABLE != 0 || self.read32(regs.ier) != 0 {
+                    return Err(Error::Busy);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            return Err(crate::Refusal { error, owner: self });
         }
         Ok((self.function, self.mapping))
     }
@@ -161,9 +179,7 @@ impl Registers for NativeRegisters {
     fn set_bus_master(&mut self, enabled: bool) -> Result<(), Error> {
         self.associated()?;
         self.master = None;
-        if !self.function.set_bus_master(enabled) {
-            return Err(Error::PciAuthority);
-        }
+        self.function.set_bus_master(enabled)?;
         self.master = Some(enabled);
         Ok(())
     }
@@ -188,8 +204,8 @@ fn pci_identity<C: ConfigSpace>(
     }
     let metadata = (function.vendor, function.device, function.class);
     let config = function.config();
-    let id = config.read32(0);
-    let revision_class = config.read32(8);
+    let id = config.read32(0)?;
+    let revision_class = config.read32(8)?;
     if id == u32::MAX
         || (id as u16, (id >> 16) as u16) != (metadata.0, metadata.1)
         || [
@@ -199,7 +215,7 @@ fn pci_identity<C: ConfigSpace>(
         ] != metadata.2
         || metadata.2 != [4, 0x80, 0]
         || revision_class == u32::MAX
-        || config.read8(0x0e) & 0x7f != 0
+        || config.read8(0x0e)? & 0x7f != 0
     {
         return Err(Error::PciAuthority);
     }
@@ -208,8 +224,8 @@ fn pci_identity<C: ConfigSpace>(
         device: (id >> 16) as u16,
         revision: revision_class as u8,
     };
-    let command = config.read16(4);
-    let status = config.read16(6);
+    let command = config.read16(4)?;
+    let status = config.read16(6)?;
     // INTx disabled; memory decode enabled by the platform. No PCI power
     // transition, BAR assignment or interrupt route is guessed here.
     if command == u16::MAX
@@ -219,15 +235,15 @@ fn pci_identity<C: ConfigSpace>(
     {
         return Err(Error::PciAuthority);
     }
-    let low = config.read32(0x10);
+    let low = config.read32(0x10)?;
     if low == u32::MAX || low & 7 != if wide { 4 } else { 0 } {
         return Err(Error::InvalidBar);
     }
-    let high = if wide { config.read32(0x14) } else { 0 };
+    let high = if wide { config.read32(0x14)? } else { 0 };
     if u64::from(low & !15) | (u64::from(high) << 32) != base {
         return Err(Error::InvalidBar);
     }
-    if !capability::stopped_in_d0(config) {
+    if !capability::stopped_in_d0(config)? {
         return Err(Error::PciAuthority);
     }
     Ok(identity)
@@ -266,10 +282,20 @@ mod tests {
     };
     const BASE: u64 = 0x1_d000_0000;
     const BYTES: usize = 0x20000;
-    struct ResourceOwner;
+    struct ResourceOwner {
+        mapping: crate::bus::mmio::owned::model::MappingRetention<Arc<ModelRam>>,
+    }
     // SAFETY: isolated model reservation; symbolic BAR labels are never physical
     // pointers and its CPU storage is held by the mapping platform.
+
     unsafe impl ResourceBacking for ResourceOwner {
+        fn begin_mapping(
+            &self,
+        ) -> Result<crate::bus::pci::assignment::OpaqueUse, crate::bus::mmio::owned::Error>
+        {
+            self.mapping.begin_mapping()
+        }
+
         fn physical_span(&self) -> PhysicalSpan {
             PhysicalSpan::new(BASE, BYTES as u64).unwrap()
         }
@@ -279,8 +305,20 @@ mod tests {
     }
     #[repr(align(4096))]
     struct Storage([u8; BYTES]);
+    struct ModelRam(UnsafeCell<Storage>);
+    // SAFETY: actual isolated raw-only RAM; the fixture serializes model users
+    // and no safe references to mutable register bytes escape.
+    unsafe impl Send for ModelRam {}
+    // SAFETY: same exclusive model access contract as Send; no native owner.
+    unsafe impl Sync for ModelRam {}
+    impl ModelRam {
+        fn pointer(&self) -> NonNull<u8> {
+            // SAFETY: this retained UnsafeCell allocation covers exact Storage.
+            unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.0.get()).0).cast()) }
+        }
+    }
     struct Platform {
-        ram: Box<UnsafeCell<Storage>>,
+        ram: Arc<ModelRam>,
         request: Mutex<Option<MapRequest>>,
         unmaps: Arc<AtomicUsize>,
     }
@@ -290,8 +328,8 @@ mod tests {
     unsafe impl Sync for Platform {}
     impl Platform {
         fn pointer(&self) -> NonNull<u8> {
-            // SAFETY: stable Box storage and UnsafeCell permit raw MMIO accesses.
-            unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.ram.get()).0).cast()) }
+            // Same original retained model allocation; only raw register pointers escape.
+            self.ram.pointer()
         }
     }
     // SAFETY: independent model's real CPU storage backs exactly one kept
@@ -329,17 +367,21 @@ mod tests {
             Ok(())
         }
     }
-    fn mapping() -> (Mapping, Arc<AtomicUsize>) {
+    fn mapping() -> (
+        Mapping,
+        Arc<AtomicUsize>,
+        crate::bus::mmio::owned::model::MappingOwner<Arc<ModelRam>>,
+    ) {
         let unmaps = Arc::new(AtomicUsize::new(0));
         let platform = Arc::new(Platform {
-            ram: Box::new(UnsafeCell::new(Storage([0; BYTES]))),
+            ram: Arc::new(ModelRam(UnsafeCell::new(Storage([0; BYTES])))),
             request: Mutex::new(None),
             unmaps: unmaps.clone(),
         });
         // SAFETY: entirely isolated CPU fixture/resources, not native activation.
         let authority = unsafe {
             Authority::isolated_model(
-                platform,
+                platform.clone(),
                 AddressSpace {
                     identity: 99,
                     physical_bits: 48,
@@ -349,24 +391,42 @@ mod tests {
             )
         }
         .unwrap();
+        // SAFETY: the same isolated provider owns this exact aligned RAM;
+        // all host threads are allowed, with exclusive raw model access.
+        let mapping_owner = unsafe {
+            crate::bus::mmio::owned::model::MappingOwner::from_owned(
+                platform.ram.clone(),
+                |owner| {
+                    if (owner.pointer().as_ptr() as usize).is_multiple_of(4096) {
+                        Ok(())
+                    } else {
+                        Err(crate::bus::pci::assignment::Error::Context)
+                    }
+                },
+            )
+        };
         let mapping = authority
             .map(
-                Resource::new(Box::new(ResourceOwner)),
+                Resource::new(Box::new(ResourceOwner {
+                    mapping: mapping_owner.retention().unwrap(),
+                })),
                 0,
                 BYTES,
                 CacheAttribute::Uncached,
                 Protection::ReadWrite,
             )
             .unwrap();
-        (mapping, unmaps)
+        (mapping, unmaps, mapping_owner)
     }
     fn stopped(revision: u8) -> StoppedRequester {
         let (mut config, _) = fixture(ADDRESS);
-        config.write32(0, 0x15e2_1022);
-        config.write32(8, 0x0480_0000 | u32::from(revision));
-        config.write16(4, 0x402);
-        config.write32(0x10, BASE as u32 | 4);
-        config.write32(0x14, (BASE >> 32) as u32);
+        config.write32(0, 0x15e2_1022).unwrap();
+        config
+            .write32(8, 0x0480_0000 | u32::from(revision))
+            .unwrap();
+        config.write16(4, 0x402).unwrap();
+        config.write32(0x10, BASE as u32 | 4).unwrap();
+        config.write32(0x14, (BASE >> 32) as u32).unwrap();
         let function = Function::new(ADDRESS, config).unwrap();
         // SAFETY: isolated model has no PF aliases, engines, IRQs or workers.
         match unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) } {
@@ -382,20 +442,27 @@ mod tests {
             prefetchable: false,
         }
     }
-    fn retire(function: Function<OwnedConfig>, mut mapping: Mapping) {
-        let mut config_mapping = function.into_config().into_mapping();
+    fn retire(
+        function: Function<OwnedConfig>,
+        mut mapping: Mapping,
+        mut mapping_owner: crate::bus::mmio::owned::model::MappingOwner<Arc<ModelRam>>,
+    ) {
+        let config = function.into_config();
         // SAFETY: model owners have been consumed; no device/callback
         // or raw register accesses remain after the asserted stopped state.
         unsafe { mapping.retire() }.unwrap();
         // SAFETY: same final config-owner drain, registry retirement.
-        unsafe { config_mapping.retire() }.unwrap();
+        unsafe { crate::bus::pci::owned::test_support::retire_owned(config) }.unwrap();
+        // SAFETY: both original mappings acknowledged retirement and all raw
+        // fixture users ended. No inventory contains this affine controller.
+        unsafe { mapping_owner.retire() }.unwrap();
     }
 
     // Authored SOURCE ONLY; parent owns finite native driver gate execution.
     #[test]
     fn native_uc_function_and_all_serial_engines_gate_owner_return() {
         for revision in [0, 0x50] {
-            let (mapping, unmaps) = mapping();
+            let (mapping, unmaps, mapping_owner) = mapping();
             // SAFETY: isolated canonical function and reserved UC BAR fixture.
             let mut registers =
                 match unsafe { NativeRegisters::attach(stopped(revision), mapping, bar()) } {
@@ -411,20 +478,20 @@ mod tests {
                 let engine = generation.stream(port).enable;
                 registers.write32(engine, 1);
                 registers = match registers.into_stopped_resources() {
-                    Err(owner) => owner,
+                    Err(owner) => owner.owner,
                     Ok(_) => panic!("active serial stream released"),
                 };
                 registers.write32(engine, 0);
             }
             registers.write32(0xc04, 0x8205_0000);
             registers = match registers.into_stopped_resources() {
-                Err(owner) => owner,
+                Err(owner) => owner.owner,
                 Ok(_) => panic!("enabled address group released"),
             };
             registers.write32(0xc04, 0);
             registers.set_bus_master(true).unwrap();
             registers = match registers.into_stopped_resources() {
-                Err(owner) => owner,
+                Err(owner) => owner.owner,
                 Ok(_) => panic!("BME owner released"),
             };
             registers.set_bus_master(false).unwrap();
@@ -434,7 +501,7 @@ mod tests {
             };
             assert_eq!(function.address, ADDRESS);
             assert_eq!(unmaps.load(Ordering::Relaxed), 0);
-            retire(function, mapping);
+            retire(function, mapping, mapping_owner);
             assert_eq!(unmaps.load(Ordering::Relaxed), 1);
         }
     }
@@ -444,7 +511,7 @@ mod tests {
             let mut requester = stopped(0x50);
             if fault == 0 {
                 let mut function = requester.into_function();
-                function.config().write32(8, 0x0480_0060);
+                function.config().write32(8, 0x0480_0060).unwrap();
                 let config = function.into_config();
                 let function = Function::new(ADDRESS, config).unwrap();
                 // SAFETY: same isolated stopped fixture with fresh unsupported metadata.
@@ -455,7 +522,7 @@ mod tests {
                     Err((error, _)) => panic!("fixture {error:?}"),
                 };
             }
-            let (mapping, unmaps) = mapping();
+            let (mapping, unmaps, mapping_owner) = mapping();
             let candidate = if fault == 1 {
                 Bar::Memory {
                     address: BASE + 4096,
@@ -473,28 +540,28 @@ mod tests {
                     Err(failure) => {
                         assert!(fault <= 1);
                         assert_eq!(unmaps.load(Ordering::Relaxed), 0);
-                        retire(failure.function, failure.mapping);
+                        retire(failure.function, failure.mapping, mapping_owner);
                         continue;
                     }
                     Ok(owner) => owner,
                 };
             if fault == 2 {
-                registers.function.config().write16(4, 0x2);
+                registers.function.config().write16(4, 0x2).unwrap();
             } else {
-                registers.function.config().write16(6, 0x10);
-                registers.function.config().write8(0x34, 0x40);
-                registers.function.config().write16(0x40, 5);
-                registers.function.config().write16(0x42, 1);
+                registers.function.config().write16(6, 0x10).unwrap();
+                registers.function.config().write8(0x34, 0x40).unwrap();
+                registers.function.config().write16(0x40, 5).unwrap();
+                registers.function.config().write16(0x42, 1).unwrap();
             }
             assert_eq!(registers.identity(), Err(Error::PciAuthority));
-            registers.function.config().write16(4, 0x402);
-            registers.function.config().write16(6, 0);
+            registers.function.config().write16(4, 0x402).unwrap();
+            registers.function.config().write16(6, 0).unwrap();
             let (function, mapping) = match registers.into_stopped_resources() {
                 Ok(owners) => owners,
                 Err(_) => panic!("repaired fixture could not retire"),
             };
             assert_eq!(unmaps.load(Ordering::Relaxed), 0);
-            retire(function, mapping);
+            retire(function, mapping, mapping_owner);
             assert_eq!(unmaps.load(Ordering::Relaxed), 1);
         }
     }

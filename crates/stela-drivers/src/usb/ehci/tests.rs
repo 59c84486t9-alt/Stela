@@ -12,9 +12,11 @@ use core::{alloc::Layout, ops::Range, ptr::NonNull};
 use std::sync::Mutex;
 extern crate std;
 mod admission_tests;
+mod configuration_retirement_tests;
 mod configuration_tests;
 mod detach_tests;
 mod host_tests;
+mod minimum_tests;
 mod periodic_tests;
 mod recovery_tests;
 mod suspend_tests;
@@ -45,6 +47,9 @@ struct Shared {
     config: [u32; 64],
     now: u64,
     io: usize,
+    minimum_fail: bool,
+    resource_error: Option<Error>,
+    pin_error: Option<crate::bus::irq::IrqError>,
     writes: Vec<(usize, u32)>,
     bme: bool,
     retired: bool,
@@ -122,6 +127,9 @@ impl Shared {
             config,
             now: 0,
             io: 0,
+            minimum_fail: false,
+            resource_error: None,
+            pin_error: None,
             writes: Vec::new(),
             bme: false,
             retired: false,
@@ -828,7 +836,11 @@ impl Hardware for Access {
     }
     fn pause(&mut self) {}
     fn delay_us(&mut self, us: u64) -> Result<(), Error> {
-        self.0.lock().unwrap().now += us;
+        let mut model = self.0.lock().unwrap();
+        if model.minimum_fail {
+            return Err(Error::Minimum(crate::bus::pci::power::Error::Clock));
+        }
+        model.now += us;
         Ok(())
     }
     fn allocate(&mut self, limit: u64) -> Result<Arena, Error> {
@@ -890,12 +902,18 @@ impl Hardware for Access {
         if m.detach_fail {
             return Err(Error::Dma(DmaError::InvalidationFailed));
         }
+        if let Some(error) = m.pin_error {
+            return Err(Error::Irq(error));
+        }
         m.detached = true;
         Ok(())
     }
     fn retire(&mut self) -> Result<(), Error> {
         let mut m = self.0.lock().unwrap();
         assert!(!m.bme && !m.mapped && m.detached);
+        if let Some(error) = m.resource_error {
+            return Err(error);
+        }
         m.retired = true;
         Ok(())
     }
@@ -1762,7 +1780,27 @@ fn failed_requester_detach_never_retires_configuration_or_restarts_the_controlle
         let state = m.lock().unwrap();
         assert!(!state.detached && !state.retired && !state.mapped && !state.bme);
     }
+    assert!(c.state == State::Retiring);
+    let snapshot = || {
+        let state = m.lock().unwrap();
+        (
+            state.io,
+            state.config,
+            state.writes.clone(),
+            state.drains,
+            state.allocations,
+            state.unmapped,
+            state.retired,
+            state.bme,
+            state.detached,
+        )
+    };
+    let before = snapshot();
     assert_eq!(c.recover(), Err(Error::Quarantined));
+    assert_eq!(c.shutdown(), Err(Error::Quarantined));
+    assert!(c.state == State::Retiring);
+    assert_eq!(snapshot(), before);
     drop(c);
+    assert_eq!(snapshot(), before);
     assert!(!m.lock().unwrap().retired);
 }

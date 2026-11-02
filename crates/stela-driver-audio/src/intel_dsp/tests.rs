@@ -1,4 +1,5 @@
 extern crate std;
+mod minimum;
 use super::*;
 use crate::bus::dma::{
     mapping::{Direction as DmaDirection, DomainMapping},
@@ -89,6 +90,7 @@ struct Translation {
     device_owned: bool,
 }
 struct Model {
+    accesses: usize,
     hda: Vec<u8>,
     dsp: Vec<u8>,
     translations: Vec<Translation>,
@@ -118,6 +120,7 @@ struct Model {
 impl Model {
     fn new() -> Self {
         let mut model = Self {
+            accesses: 0,
             hda: vec![0; 0x4000],
             dsp: vec![0; 0x100000],
             translations: Vec::new(),
@@ -377,6 +380,7 @@ struct Regs(Arc<Mutex<Model>>);
 // all synchronous register/domain/DMA accesses share one serialized model.
 unsafe impl Registers for Regs {
     fn identity(&mut self) -> Result<Identity, Error> {
+        self.0.lock().unwrap().accesses += 1;
         Ok(Identity {
             vendor: 0x8086,
             device: 0xa0c8,
@@ -384,9 +388,11 @@ unsafe impl Registers for Regs {
         })
     }
     fn bytes(&self, bar: Bar) -> usize {
+        self.0.lock().unwrap().accesses += 1;
         self.0.lock().unwrap().bytes(bar).len()
     }
     fn set_bus_master(&mut self, value: bool) -> Result<(), Error> {
+        self.0.lock().unwrap().accesses += 1;
         let mut model = self.0.lock().unwrap();
         if let Some((wanted, after_effect)) = model.master_failure
             && wanted == value
@@ -404,17 +410,21 @@ unsafe impl Registers for Regs {
         Ok(())
     }
     fn misc_clock_gate(&mut self, value: bool) -> Result<(), Error> {
+        self.0.lock().unwrap().accesses += 1;
         self.0.lock().unwrap().clock_gate = value;
         Ok(())
     }
     fn hold_d0(&mut self) -> Result<(), Error> {
+        self.0.lock().unwrap().accesses += 1;
         self.0.lock().unwrap().held_d0 = true;
         Ok(())
     }
     fn read8(&mut self, bar: Bar, offset: usize) -> Result<u8, Error> {
+        self.0.lock().unwrap().accesses += 1;
         Ok(self.0.lock().unwrap().bytes(bar)[offset])
     }
     fn read16(&mut self, bar: Bar, offset: usize) -> Result<u16, Error> {
+        self.0.lock().unwrap().accesses += 1;
         Ok(u16::from_le_bytes(
             self.0.lock().unwrap().bytes(bar)[offset..offset + 2]
                 .try_into()
@@ -422,18 +432,22 @@ unsafe impl Registers for Regs {
         ))
     }
     fn read32(&mut self, bar: Bar, offset: usize) -> Result<u32, Error> {
+        self.0.lock().unwrap().accesses += 1;
         Ok(self.0.lock().unwrap().load(bar, offset))
     }
     fn write8(&mut self, bar: Bar, offset: usize, value: u8) -> Result<(), Error> {
+        self.0.lock().unwrap().accesses += 1;
         self.0.lock().unwrap().write8(bar, offset, value);
         Ok(())
     }
     fn write16(&mut self, bar: Bar, offset: usize, value: u16) -> Result<(), Error> {
+        self.0.lock().unwrap().accesses += 1;
         self.0.lock().unwrap().bytes_mut(bar)[offset..offset + 2]
             .copy_from_slice(&value.to_le_bytes());
         Ok(())
     }
     fn write32(&mut self, bar: Bar, offset: usize, value: u32) -> Result<(), Error> {
+        self.0.lock().unwrap().accesses += 1;
         self.0.lock().unwrap().write32(bar, offset, value);
         Ok(())
     }
@@ -558,13 +572,24 @@ unsafe impl DmaDomain for Domain {
         Ok(())
     }
 }
-struct Time(AtomicU64);
-impl Timer for Time {
+struct Time {
+    now: AtomicU64,
+    refused: core::sync::atomic::AtomicBool,
+}
+impl Time {
+    fn new() -> Self {
+        Self {
+            now: AtomicU64::new(0),
+            refused: core::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+impl crate::bus::i2c::Timer for Time {
     fn now_us(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
+        self.now.load(Ordering::Relaxed)
     }
     fn relax(&self) {
-        self.0.fetch_add(10, Ordering::Relaxed);
+        self.now.fetch_add(10, Ordering::Relaxed);
     }
 }
 fn firmware(bytes: Vec<u8>) -> Catalog {
@@ -612,7 +637,7 @@ fn fixture_image(bytes: Vec<u8>, doorbell: u32) -> Fixture {
     };
     let mut controller = match Controller::claim(
         Regs(model.clone()),
-        Time(AtomicU64::new(0)),
+        Time::new(),
         Config {
             dma_address_bits: 64,
         },
@@ -1016,4 +1041,20 @@ fn unchanged_linux_cnl_host_done_notification_acknowledgement() {
         .collect::<Vec<_>>();
     assert_eq!(actual, expected);
     controller.shutdown().unwrap();
+}
+
+// SAFETY: private synchronous DSP peer consumes model microseconds only.
+unsafe impl crate::bus::pci::power::Timer for Time {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        if self.refused.load(Ordering::Relaxed) {
+            Err(crate::bus::pci::power::Error::Clock)
+        } else {
+            Ok(())
+        }
+    }
+    fn wait_us(&self, us: u64) -> Result<(), crate::bus::pci::power::Error> {
+        crate::bus::pci::power::Timer::check(self)?;
+        self.now.fetch_add(us, Ordering::Relaxed);
+        Ok(())
+    }
 }

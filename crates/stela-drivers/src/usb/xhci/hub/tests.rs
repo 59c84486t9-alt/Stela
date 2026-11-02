@@ -16,6 +16,9 @@ pub(in super::super) fn controller(
         },
         dma,
         "hub model".into(),
+        crate::minimum_model::owned(Clock {
+            ticks_per_microsecond: 1,
+        }),
     )
     .unwrap();
     (controller, model)

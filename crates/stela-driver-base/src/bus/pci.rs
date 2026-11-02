@@ -4,13 +4,21 @@
 //! use [`Function::enable_polled`]; interrupt-driven ports must arrange
 //! delivery with the mount before enabling their interrupt sources.
 use super::mmio::Mmio;
-use crate::{Clock, block::BlockError};
+use crate::block::BlockError;
 use alloc::vec::Vec;
 use core::{
     fmt,
     ops::{Range, RangeInclusive},
 };
 
+mod access;
+mod inventory;
+mod kept;
+mod transaction;
+pub use access::{ConfigEffect, ConfigError, ConfigFailure};
+pub use inventory::{
+    EnumerationError, EnumerationFailure, InventoryError, InventoryFailure, InventoryReleaseFailure,
+};
 mod aspm;
 pub mod assignment;
 pub mod capability;
@@ -55,24 +63,6 @@ const D3HOT_DELAY_US: u64 = 10_000;
 const D2_DELAY_US: u64 = 200;
 const D2: u16 = 2;
 const D3HOT: u16 = 3;
-
-/// The legacy entry requires only its maximum 10 ms exit delay. Keep
-/// that exact contract when sharing the provider-based PM transition path.
-struct PowerUpClock<'a>(&'a Clock);
-// SAFETY: this borrowed original Clock performs canonical checked real waits;
-// its producer's calibration/context grant remains required for every access.
-unsafe impl power::Timer for PowerUpClock<'_> {
-    fn check(&self) -> Result<(), power::Error> {
-        self.0
-            .check_duration(D3HOT_DELAY_US)
-            .map_err(|_| power::Error::Clock)
-    }
-    fn wait_us(&self, microseconds: u64) -> Result<(), power::Error> {
-        self.0
-            .try_delay(microseconds)
-            .map_err(|_| power::Error::Clock)
-    }
-}
 
 pub const CAPABILITY_POWER: u8 = 0x01;
 pub const CAPABILITY_MSI: u8 = 0x05;
@@ -160,37 +150,18 @@ impl fmt::Display for Address {
     }
 }
 
-/// Access to one function's configuration space. Real configuration-space
-/// implementations must override `write8` and `write16` with narrow stores:
-/// a wider read/modify/write can acknowledge unrelated write-one-to-clear status.
+/// Exact-width access to one function's current configuration permission.
+/// Access/ownership failures are distinct from successful hardware all-ones.
+/// Native narrow writes must never replay adjacent W1C status through RMW.
+/// No operation may replace denial with a sentinel, success or a panic.
 pub trait ConfigSpace {
-    fn read32(&self, offset: u16) -> u32;
-    fn write32(&mut self, offset: u16, value: u32);
+    fn read8(&self, offset: u16) -> Result<u8, ConfigError>;
+    fn read16(&self, offset: u16) -> Result<u16, ConfigError>;
+    fn read32(&self, offset: u16) -> Result<u32, ConfigError>;
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), ConfigError>;
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError>;
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), ConfigError>;
 
-    fn read16(&self, offset: u16) -> u16 {
-        (self.read32(offset & !3) >> ((offset & 2) * 8)) as u16
-    }
-
-    fn read8(&self, offset: u16) -> u8 {
-        (self.read32(offset & !3) >> ((offset & 3) * 8)) as u8
-    }
-
-    /// Fallback for simple memory models. Real configuration-space accessors
-    /// must override this with a native byte store; neighboring bytes can be
-    /// write-one-to-clear status or vendor control registers.
-    fn write8(&mut self, offset: u16, value: u8) {
-        let shift = (offset & 3) * 8;
-        let word = self.read32(offset & !3) & !(0xff << shift) | u32::from(value) << shift;
-        self.write32(offset & !3, word);
-    }
-
-    fn write16(&mut self, offset: u16, value: u16) {
-        let shift = (offset & 2) * 8;
-        let word = self.read32(offset & !3) & !(0xffff << shift) | u32::from(value) << shift;
-        self.write32(offset & !3, word);
-    }
-
-    /// The standard capability list ([`capability::capabilities`]).
     fn capabilities(&self) -> Capabilities<capability::Config<'_, Self>>
     where
         Self: Sized,
@@ -198,7 +169,6 @@ pub trait ConfigSpace {
         capability::capabilities(self)
     }
 
-    /// The extended capability list ([`capability::extended_capabilities`]).
     fn extended_capabilities(&self) -> ExtendedCapabilities<capability::Config<'_, Self>>
     where
         Self: Sized,
@@ -234,6 +204,10 @@ impl EcamConfig {
             _context: core::marker::PhantomData,
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "refusal returns the original owned or borrowed transport without allocating"
+    )]
     pub fn into_owned(self) -> Result<owned::OwnedConfig, Self> {
         match self.transport {
             EcamTransport::Owned(config) => Ok(config),
@@ -249,45 +223,66 @@ impl EcamConfig {
         }
     }
 }
+fn ecam_offset(offset: u16, width: usize) -> Result<usize, ConfigError> {
+    let start = usize::from(offset);
+    if !start.is_multiple_of(width) || start.checked_add(width).is_none_or(|end| end > 4096) {
+        return Err(ConfigError::before_effect(ConfigFailure::Access {
+            offset,
+            width,
+        }));
+    }
+    Ok(start)
+}
 impl ConfigSpace for EcamConfig {
-    fn read8(&self, offset: u16) -> u8 {
+    fn read8(&self, offset: u16) -> Result<u8, ConfigError> {
         match &self.transport {
-            EcamTransport::Raw(registers) => registers.read8(usize::from(offset)),
+            EcamTransport::Raw(registers) => Ok(registers.read8(ecam_offset(offset, 1)?)),
             EcamTransport::Owned(config) => config.read8(offset),
             EcamTransport::Retained(config) => config.read8(offset),
         }
     }
-    fn write8(&mut self, offset: u16, value: u8) {
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), ConfigError> {
         match &mut self.transport {
-            EcamTransport::Raw(registers) => registers.write8(usize::from(offset), value),
+            EcamTransport::Raw(registers) => {
+                registers.write8(ecam_offset(offset, 1)?, value);
+                Ok(())
+            }
             EcamTransport::Owned(config) => config.write8(offset, value),
             EcamTransport::Retained(config) => config.write8(offset, value),
         }
     }
-    fn read16(&self, offset: u16) -> u16 {
+
+    fn read16(&self, offset: u16) -> Result<u16, ConfigError> {
         match &self.transport {
-            EcamTransport::Raw(registers) => registers.read16(usize::from(offset)),
+            EcamTransport::Raw(registers) => Ok(registers.read16(ecam_offset(offset, 2)?)),
             EcamTransport::Owned(config) => config.read16(offset),
             EcamTransport::Retained(config) => config.read16(offset),
         }
     }
-    fn write16(&mut self, offset: u16, value: u16) {
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError> {
         match &mut self.transport {
-            EcamTransport::Raw(registers) => registers.write16(usize::from(offset), value),
+            EcamTransport::Raw(registers) => {
+                registers.write16(ecam_offset(offset, 2)?, value);
+                Ok(())
+            }
             EcamTransport::Owned(config) => config.write16(offset, value),
             EcamTransport::Retained(config) => config.write16(offset, value),
         }
     }
-    fn read32(&self, offset: u16) -> u32 {
+
+    fn read32(&self, offset: u16) -> Result<u32, ConfigError> {
         match &self.transport {
-            EcamTransport::Raw(registers) => registers.read32(usize::from(offset)),
+            EcamTransport::Raw(registers) => Ok(registers.read32(ecam_offset(offset, 4)?)),
             EcamTransport::Owned(config) => config.read32(offset),
             EcamTransport::Retained(config) => config.read32(offset),
         }
     }
-    fn write32(&mut self, offset: u16, value: u32) {
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), ConfigError> {
         match &mut self.transport {
-            EcamTransport::Raw(registers) => registers.write32(usize::from(offset), value),
+            EcamTransport::Raw(registers) => {
+                registers.write32(ecam_offset(offset, 4)?, value);
+                Ok(())
+            }
             EcamTransport::Owned(config) => config.write32(offset, value),
             EcamTransport::Retained(config) => config.write32(offset, value),
         }
@@ -368,8 +363,72 @@ pub struct Function<C = EcamConfig> {
     pub class: [u8; 3],
     config: C,
 }
+impl<C> fmt::Debug for Function<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Function")
+            .field("address", &self.address)
+            .field("vendor", &self.vendor)
+            .field("device", &self.device)
+            .field("class", &self.class)
+            .finish_non_exhaustive()
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FunctionError {
+    Absent,
+    ConfigurationRetry,
+    Access(ConfigError),
+}
+/// The exact configuration owner returns on absence, CRS or access failure.
+pub struct FunctionRefusal<C> {
+    pub reason: FunctionError,
+    pub config: C,
+}
+impl<C> fmt::Debug for FunctionRefusal<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FunctionRefusal")
+            .field("reason", &self.reason)
+            .finish_non_exhaustive()
+    }
+}
 
 impl<C> Function<C> {
+    /// Move the same configuration through an owning phase conversion without
+    /// new reads. Refusal returns its original configuration and identity data.
+    /// The callback retains custody across its own effects and unwind; observed
+    /// identity data grants no resource or access permission.
+    pub fn try_map_config<D, E>(
+        self,
+        transform: impl FnOnce(C) -> Result<D, (E, C)>,
+    ) -> Result<Function<D>, (E, Self)> {
+        let Function {
+            address,
+            vendor,
+            device,
+            class,
+            config,
+        } = self;
+        match transform(config) {
+            Ok(config) => Ok(Function {
+                address,
+                vendor,
+                device,
+                class,
+                config,
+            }),
+            Err((error, config)) => Err((
+                error,
+                Function {
+                    address,
+                    vendor,
+                    device,
+                    class,
+                    config,
+                },
+            )),
+        }
+    }
+
     /// Copy the already observed fields without additional config reads.
     /// This data grants no configuration or takeover capability.
     pub fn identity(&self) -> Identity {
@@ -383,105 +442,37 @@ impl<C> Function<C> {
 }
 
 impl<C: ConfigSpace> Function<C> {
-    pub fn new(address: Address, config: C) -> Option<Self> {
-        Self::try_new(address, config).ok()
-    }
-
-    /// Return the config owner on absent/CRS responses. No device
+    /// Return the config owner on absent/CRS responses or access denial. No device
     /// quiescence or mapping-retirement permission follows from either value.
-    pub fn try_new(address: Address, config: C) -> Result<Self, C> {
-        let id = config.read32(regs::VENDOR_ID);
-        if matches!(id as u16, 0xffff | VENDOR_NOT_READY) {
-            return Err(config);
-        }
-        let class = config.read32(regs::CLASS_REVISION);
-        Ok(Self {
-            address,
-            vendor: id as u16,
-            device: (id >> 16) as u16,
-            class: [(class >> 24) as u8, (class >> 16) as u8, (class >> 8) as u8],
-            config,
-        })
-    }
-
-    /// Scan config owners and release each read-only observation before
-    /// returning copied discovery DATA. The callbacks keep all mapping/root
-    /// permission; the result grants no current configuration or device access.
-    pub fn inventory_with<E>(
-        window: &EcamWindow,
-        mut open: impl FnMut(Address) -> Result<Option<Self>, E>,
-        mut release: impl FnMut(Self) -> Result<(), E>,
-    ) -> Result<Vec<Identity>, E> {
-        let mut scans = [None; 256];
-        scans[usize::from(window.start_bus)] = Some(BusScan::All);
-        let mut identities = Vec::new();
-        for bus in window.start_bus..=window.end_bus {
-            let Some(scan) = scans[usize::from(bus)] else {
-                continue;
-            };
-            let mut observe = |function: Self| -> Result<(bool, u8), E> {
-                let multi = function.config.read8(regs::HEADER_TYPE) & 0x80 != 0;
-                let next = if scan == BusScan::Ari {
-                    function
-                        .extended_capability(EXTENDED_ARI)
-                        .map_or(0, |ari| (function.config.read32(ari + 4) >> 8) as u8)
-                } else {
-                    0
-                };
-                if let Some((secondary, scan)) = function.secondary()
-                    && secondary > bus
-                {
-                    scans[usize::from(secondary)] = Some(scan);
-                }
-                identities.push(function.identity());
-                release(function)?;
-                Ok((multi, next))
-            };
-            match scan {
-                BusScan::Ari => {
-                    let mut number = 0u8;
-                    loop {
-                        let address = Address {
-                            segment: window.segment,
-                            bus,
-                            device: number >> 3,
-                            function: number & 7,
-                        };
-                        let Some(function) = open(address)? else {
-                            break;
-                        };
-                        let (_, next) = observe(function)?;
-                        if next <= number {
-                            break;
-                        }
-                        number = next;
-                    }
-                }
-                scan => {
-                    for device in 0..if scan == BusScan::OneChild { 1 } else { 32 } {
-                        for number in 0..8 {
-                            let address = Address {
-                                segment: window.segment,
-                                bus,
-                                device,
-                                function: number,
-                            };
-                            let Some(function) = open(address)? else {
-                                if number == 0 {
-                                    break;
-                                }
-                                continue;
-                            };
-                            let (multi, _) = observe(function)?;
-                            if number == 0 && !multi {
-                                break;
-                            }
-                        }
-                    }
-                }
+    pub fn new(address: Address, config: C) -> Result<Self, FunctionRefusal<C>> {
+        let mut retained = kept::Kept::new(config);
+        let observed = (|| {
+            let config = retained.get_mut();
+            let id = config
+                .read32(regs::VENDOR_ID)
+                .map_err(FunctionError::Access)?;
+            if id as u16 == u16::MAX {
+                return Err(FunctionError::Absent);
             }
+            if id as u16 == VENDOR_NOT_READY {
+                return Err(FunctionError::ConfigurationRetry);
+            }
+            let class = config
+                .read32(regs::CLASS_REVISION)
+                .map_err(FunctionError::Access)?;
+            Ok((id, class))
+        })();
+        let config = retained.take();
+        match observed {
+            Ok((id, class)) => Ok(Self {
+                address,
+                vendor: id as u16,
+                device: (id >> 16) as u16,
+                class: [(class >> 24) as u8, (class >> 16) as u8, (class >> 8) as u8],
+                config,
+            }),
+            Err(reason) => Err(FunctionRefusal { reason, config }),
         }
-        Ok(identities)
     }
 
     pub fn config(&mut self) -> &mut C {
@@ -494,27 +485,27 @@ impl<C: ConfigSpace> Function<C> {
         self.config
     }
 
-    fn header_type(&self) -> u8 {
-        self.config.read8(regs::HEADER_TYPE) & 0x7f
+    fn header_type(&self) -> Result<u8, ConfigError> {
+        Ok(self.config.read8(regs::HEADER_TYPE)? & 0x7f)
     }
 
-    /// Decode and size every BAR of a type 0 header. Decoding is off while
-    /// a BAR holds all ones. A 64-bit BAR in the last slot has no upper
-    /// register and is left out.
-    pub fn bars(&mut self) -> [Option<Bar>; BARS] {
+    /// Decode and size every BAR. Failure can leave decoding disabled or a
+    /// probe value published; retain this owner and do not retry as unchanged.
+    pub fn bars(&mut self) -> Result<[Option<Bar>; BARS], ConfigError> {
         let mut bars = [None; BARS];
-        if self.header_type() != 0 {
-            return bars;
+        if self.header_type()? != 0 {
+            return Ok(bars);
         }
-        let command = self.config.read16(regs::COMMAND);
-        self.config.write16(
+        let mut config = transaction::Transaction::new(&mut self.config);
+        let command = config.read16(regs::COMMAND)?;
+        config.write16(
             regs::COMMAND,
             command & !(regs::COMMAND_IO | regs::COMMAND_MEMORY),
-        );
+        )?;
         let mut index = 0;
         while index < BARS {
             let offset = regs::BASE_ADDRESS_0 + 4 * index as u16;
-            let (low, low_mask) = self.size_register(offset);
+            let (low, low_mask) = Self::size_register(&mut config, offset)?;
             if low & BAR_IO != 0 {
                 let size = bar_size(u64::from(low_mask & !3));
                 if size != 0 {
@@ -531,7 +522,7 @@ impl<C: ConfigSpace> Function<C> {
                 break;
             }
             let (high, high_mask) = if wide {
-                self.size_register(offset + 4)
+                Self::size_register(&mut config, offset + 4)?
             } else {
                 (0, 0)
             };
@@ -546,54 +537,41 @@ impl<C: ConfigSpace> Function<C> {
             }
             index += if wide { 2 } else { 1 };
         }
-        self.config.write16(regs::COMMAND, command);
-        bars
+        config.write16(regs::COMMAND, command)?;
+        Ok(bars)
     }
-
-    /// A BAR register's value and the bits that read back as writable.
-    fn size_register(&mut self, offset: u16) -> (u32, u32) {
-        let value = self.config.read32(offset);
-        self.config.write32(offset, u32::MAX);
-        let mask = self.config.read32(offset);
-        self.config.write32(offset, value);
-        (value, mask)
+    fn size_register(
+        config: &mut impl ConfigSpace,
+        offset: u16,
+    ) -> Result<(u32, u32), ConfigError> {
+        let value = config.read32(offset)?;
+        config.write32(offset, u32::MAX)?;
+        let mask = config.read32(offset)?;
+        config.write32(offset, value)?;
+        Ok((value, mask))
     }
-
     /// Bring the function to D0 as Linux `pci_power_up` does: clear the whole
     /// PMCSR (PME_Status is write-one-to-clear and stays pending), wait the
     /// state's exit delay, and restore the BARs a D3hot soft reset cleared.
     /// Functions without a power management capability are always in D0.
-    pub fn power_up(&mut self, clock: &Clock) -> Result<(), BlockError> {
-        self.power_up_with_timer(&PowerUpClock(clock))
+    pub fn power_up(&mut self, timer: &(impl power::Timer + ?Sized)) -> Result<(), BlockError> {
+        timer.check()?;
+        self.power_up_with(|microseconds| timer.wait_us(microseconds).map_err(BlockError::from))
     }
-
-    /// Run the identical transition under a native timer or
-    /// an explicitly checked symbolic device model. Validate before config
-    /// access; a provider failure never becomes a successful hardware delay.
-    pub fn power_up_with_timer(&mut self, timer: &impl power::Timer) -> Result<(), BlockError> {
-        timer.check().map_err(|_| {
-            BlockError::Unsupported("PCI power transition requires calibrated timing")
-        })?;
-        self.power_up_with(|microseconds| {
-            timer.wait_us(microseconds).map_err(|_| {
-                BlockError::Unsupported("PCI power transition requires calibrated timing")
-            })
-        })
-    }
-
     fn power_up_with(
         &mut self,
         mut delay: impl FnMut(u64) -> Result<(), BlockError>,
     ) -> Result<(), BlockError> {
         let Some((offset, _)) = self
-            .capabilities()
+            .capabilities()?
             .into_iter()
             .find(|(_, id)| *id == CAPABILITY_POWER)
         else {
             return Ok(());
         };
+        let mut config = transaction::Transaction::new(&mut self.config);
         let control = u16::from(offset) + PM_CONTROL;
-        let value = self.config.read16(control);
+        let value = config.read16(control)?;
         if value == u16::MAX {
             return Err(BlockError::Unsupported("PCI function does not answer"));
         }
@@ -601,26 +579,29 @@ impl<C: ConfigSpace> Function<C> {
         if state == 0 {
             return Ok(());
         }
-        let bars: [u32; BARS] =
-            core::array::from_fn(|i| self.config.read32(regs::BASE_ADDRESS_0 + 4 * i as u16));
-        self.config.write16(control, 0);
+        let mut bars = [0; BARS];
+        for (index, bar) in bars.iter_mut().enumerate() {
+            *bar = config.read32(regs::BASE_ADDRESS_0 + 4 * index as u16)?;
+        }
+        config.write16(control, 0)?;
         delay(match state {
             D3HOT => D3HOT_DELAY_US,
             D2 => D2_DELAY_US,
             _ => 0,
         })?;
-        if self.config.read16(control) & PM_STATE != 0 {
+        if config.read16(control)? & PM_STATE != 0 {
             return Err(BlockError::Unsupported("PCI function did not enter D0"));
         }
-        if state == D3HOT && value & PM_NO_SOFT_RESET == 0 && self.header_type() == 0 {
+        if state == D3HOT
+            && value & PM_NO_SOFT_RESET == 0
+            && config.read8(regs::HEADER_TYPE)? & 0x7f == 0
+        {
             for (index, bar) in bars.into_iter().enumerate() {
-                self.config
-                    .write32(regs::BASE_ADDRESS_0 + 4 * index as u16, bar);
+                config.write32(regs::BASE_ADDRESS_0 + 4 * index as u16, bar)?;
             }
         }
         Ok(())
     }
-
     /// Reset this function alone, as Linux's `pcie_flr` inside
     /// `pci_dev_save_and_disable` and `pci_dev_restore`: requests stopped,
     /// their completions waited for, the reset, then the header, device and
@@ -628,61 +609,66 @@ impl<C: ConfigSpace> Function<C> {
     /// caller enables them again and rewrites a table in its BAR. False when
     /// the function has no such reset, having touched nothing. The caller's
     /// own use of the function has ended; this sleeps at least 100 ms.
-    pub fn function_level_reset(&mut self, clock: &Clock) -> Result<bool, BlockError> {
+    pub fn function_level_reset(
+        &mut self,
+        timer: &(impl power::Timer + ?Sized),
+    ) -> Result<bool, BlockError> {
+        // A nominal rate or capability snapshot cannot replace a real minimum
+        // delay. Refuse before even the first configuration observation.
+        timer.check()?;
         self.function_level_reset_with(|microseconds| {
-            clock.try_delay(microseconds).map_err(|_| {
-                BlockError::Unsupported("PCI function reset requires calibrated timing")
-            })
+            timer.wait_us(microseconds).map_err(BlockError::from)
         })
     }
-
     fn function_level_reset_with(
         &mut self,
         mut delay: impl FnMut(u64) -> Result<(), BlockError>,
     ) -> Result<bool, BlockError> {
         let Some((offset, _)) = self
-            .capabilities()
+            .capabilities()?
             .into_iter()
             .find(|&(_, id)| id == CAPABILITY_EXPRESS)
         else {
             return Ok(false);
         };
+        let mut config = transaction::Transaction::new(&mut self.config);
         let express = u16::from(offset);
-        let capabilities = self.config.read32(express + EXPRESS_DEVICE_CAPABILITIES);
+        let capabilities = config.read32(express + EXPRESS_DEVICE_CAPABILITIES)?;
         if capabilities & EXPRESS_FLR_CAPABLE == 0 {
             return Ok(false);
         }
-        let header: [u32; HEADER_REST_WORDS] =
-            core::array::from_fn(|word| self.config.read32(HEADER_REST + word as u16 * 4));
-        let command = self.config.read16(regs::COMMAND);
-        let controls = [
+        let mut header = [0; HEADER_REST_WORDS];
+        for (word, value) in header.iter_mut().enumerate() {
+            *value = config.read32(HEADER_REST + word as u16 * 4)?;
+        }
+        let command = config.read16(regs::COMMAND)?;
+        let mut controls = [(0, 0); 4];
+        for (index, control) in [
             EXPRESS_DEVICE_CONTROL,
             EXPRESS_LINK_CONTROL,
             EXPRESS_DEVICE_CONTROL_2,
             EXPRESS_LINK_CONTROL_2,
         ]
-        .map(|control| (express + control, self.config.read16(express + control)));
-        self.config
-            .write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE);
-        // `pci_wait_for_pending_transaction`; a request that never completes
-        // does not stop the reset, whose job is to end it.
+        .into_iter()
+        .enumerate()
+        {
+            controls[index] = (express + control, config.read16(express + control)?);
+        }
+        config.write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE)?;
         for attempt in 0..3 {
-            let status = self.config.read16(express + EXPRESS_DEVICE_STATUS);
+            let status = config.read16(express + EXPRESS_DEVICE_STATUS)?;
             if status & EXPRESS_TRANSACTIONS_PENDING == 0 {
                 break;
             }
             delay(FLR_WAIT_US << attempt)?;
         }
         let control = express + EXPRESS_DEVICE_CONTROL;
-        self.config
-            .write16(control, self.config.read16(control) | EXPRESS_INITIATE_FLR);
+        let original = config.read16(control)?;
+        config.write16(control, original | EXPRESS_INITIATE_FLR)?;
         delay(FLR_WAIT_US)?;
         let mut poll = FLR_READY_POLL_US;
         let mut waited = 0;
-        while matches!(
-            self.config.read16(regs::VENDOR_ID),
-            0xffff | VENDOR_NOT_READY
-        ) {
+        while matches!(config.read16(regs::VENDOR_ID)?, 0xffff | VENDOR_NOT_READY) {
             if waited >= FLR_READY_US {
                 return Err(BlockError::Unsupported(
                     "PCI function did not return from its reset",
@@ -693,29 +679,32 @@ impl<C: ConfigSpace> Function<C> {
             poll *= 2;
         }
         for (word, value) in header.into_iter().enumerate() {
-            self.config.write32(HEADER_REST + word as u16 * 4, value);
+            config.write32(HEADER_REST + word as u16 * 4, value)?;
         }
         for (control, value) in controls {
-            self.config.write16(control, value);
+            config.write16(control, value)?;
         }
-        self.config.write16(regs::COMMAND, command);
+        config.write16(regs::COMMAND, command)?;
         Ok(true)
     }
-
-    /// Offsets and IDs of the capability list, up to its first malformed
-    /// entry, as Linux's `__pci_find_next_cap_ttl` stops.
-    pub fn capabilities(&self) -> Vec<(u8, u8)> {
+    /// Complete checked conventional capability inventory; malformed/access
+    /// failures are distinct from an absent capability.
+    pub fn capabilities(&self) -> Result<Vec<(u8, u8)>, CapabilityError> {
         capability::capabilities(&self.config)
-            .map_while(Result::ok)
-            .map(|entry| (entry.offset as u8, entry.id))
+            .map(|entry| entry.map(|entry| (entry.offset as u8, entry.id)))
             .collect()
     }
-
-    pub fn interrupts(&self) -> Interrupts {
+    pub fn interrupts(&self) -> Result<Interrupts, CapabilityError> {
         let mut interrupts = Interrupts::default();
-        for (offset, id) in self.capabilities() {
+        for (offset, id) in self.capabilities()? {
             let base = u16::from(offset);
-            let control = self.config.read16(base + 2);
+            let control =
+                self.config
+                    .read16(base + 2)
+                    .map_err(|error| CapabilityError::Config {
+                        offset: base + 2,
+                        error,
+                    })?;
             match id {
                 CAPABILITY_MSI => {
                     interrupts.msi = Some(Msi {
@@ -725,8 +714,20 @@ impl<C: ConfigSpace> Function<C> {
                     })
                 }
                 CAPABILITY_MSIX => {
-                    let table = self.config.read32(base + 4);
-                    let pending = self.config.read32(base + 8);
+                    let table =
+                        self.config
+                            .read32(base + 4)
+                            .map_err(|error| CapabilityError::Config {
+                                offset: base + 4,
+                                error,
+                            })?;
+                    let pending =
+                        self.config
+                            .read32(base + 8)
+                            .map_err(|error| CapabilityError::Config {
+                                offset: base + 8,
+                                error,
+                            })?;
                     interrupts.msix = Some(MsiX {
                         offset,
                         vectors: (control & 0x7ff) + 1,
@@ -734,125 +735,119 @@ impl<C: ConfigSpace> Function<C> {
                         table_offset: table & !7,
                         pending_bar: (pending & 7) as u8,
                         pending_offset: pending & !7,
-                    })
+                    });
                 }
                 _ => {}
             }
         }
-        interrupts
+        Ok(interrupts)
     }
-
-    /// Set or clear Bus Master Enable alone, by a native word store that
-    /// leaves the Status register's write-one-to-clear bits alone, and report
-    /// whether the function reads back exactly that Command value.
-    pub fn set_bus_master(&mut self, enabled: bool) -> bool {
-        let previous = self.config.read16(regs::COMMAND);
+    /// Narrow Command update and exact readback. Failure retains this owner;
+    /// no denied write is hidden behind a successful old register value.
+    pub fn set_bus_master(&mut self, enabled: bool) -> Result<(), ConfigError> {
+        let mut config = transaction::Transaction::new(&mut self.config);
+        let previous = config.read16(regs::COMMAND)?;
         let desired = if enabled {
             previous | regs::COMMAND_MASTER
         } else {
             previous & !regs::COMMAND_MASTER
         };
-        self.config.write16(regs::COMMAND, desired);
-        self.config.read16(regs::COMMAND) == desired
+        config.write16(regs::COMMAND, desired)?;
+        let observed = config.read16(regs::COMMAND)?;
+        if observed != desired {
+            return Err(ConfigError::write_may_have_applied(
+                regs::COMMAND,
+                2,
+                ConfigFailure::Readback {
+                    offset: regs::COMMAND,
+                    width: 2,
+                    expected: u32::from(desired),
+                    observed: u32::from(observed),
+                },
+            ));
+        }
+        Ok(())
     }
-
-    /// Enable memory decoding and bus mastering without changing interrupt
-    /// controls. The driver must first establish its DMA and interrupt policy.
-    /// This does not program MSI/MSI-X routes or install interrupt handlers.
-    pub fn enable_memory_and_bus_master(&mut self) {
-        let command = self.config.read16(regs::COMMAND);
-        self.config.write16(
+    pub fn enable_memory_and_bus_master(&mut self) -> Result<(), ConfigError> {
+        let mut config = transaction::Transaction::new(&mut self.config);
+        let command = config.read16(regs::COMMAND)?;
+        config.write16(
             regs::COMMAND,
             command | regs::COMMAND_MEMORY | regs::COMMAND_MASTER,
-        );
+        )
     }
-
-    /// Enable a polling driver: memory decoding and bus mastering on,
-    /// INTx, MSI and MSI-X off.
-    pub fn enable_polled(&mut self) {
-        let interrupts = self.interrupts();
+    /// Enable a polling driver. A failed prefix stays contained with its owner;
+    /// no later MSI/MSI-X/command write is issued after the first access denial.
+    pub fn enable_polled(&mut self) -> Result<(), BlockError> {
+        let interrupts = self.interrupts()?;
+        let mut config = transaction::Transaction::new(&mut self.config);
         if let Some(msi) = interrupts.msi {
-            let control = self.config.read16(u16::from(msi.offset) + 2);
-            self.config
-                .write16(u16::from(msi.offset) + 2, control & !MSI_ENABLE);
+            let offset = u16::from(msi.offset) + 2;
+            let control = config.read16(offset)?;
+            config.write16(offset, control & !MSI_ENABLE)?;
         }
         if let Some(msix) = interrupts.msix {
-            let control = self.config.read16(u16::from(msix.offset) + 2);
-            self.config
-                .write16(u16::from(msix.offset) + 2, control & !(1 << 15));
+            let offset = u16::from(msix.offset) + 2;
+            let control = config.read16(offset)?;
+            config.write16(offset, control & !MSIX_ENABLE)?;
         }
-        let command = self.config.read16(regs::COMMAND);
-        self.config.write16(
+        let command = config.read16(regs::COMMAND)?;
+        config.write16(
             regs::COMMAND,
             command | regs::COMMAND_MEMORY | regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE,
-        );
+        )?;
+        Ok(())
     }
-
-    /// Turn on MSI-X for a function [`Self::enable_polled`] set up, as
-    /// Linux's `msix_capability_init` does: enabled with every vector masked
-    /// while `program` writes the table, then the function mask cleared.
-    /// The function's other vectors stay masked as `program` leaves them.
+    /// Keep all vectors masked while programming. A failed callback retains
+    /// that masked original state; it cannot authorize cleanup effects or retry.
     pub fn enable_msix<T>(
         &mut self,
         msix: MsiX,
         program: impl FnOnce() -> Result<T, BlockError>,
     ) -> Result<T, BlockError> {
         let control = u16::from(msix.offset) + 2;
-        let value = self.config.read16(control);
-        self.config
-            .write16(control, value | MSIX_ENABLE | MSIX_FUNCTION_MASK);
-        let programmed = program();
-        let value = self.config.read16(control);
-        let value = match programmed {
-            Ok(_) => value & !MSIX_FUNCTION_MASK,
-            Err(_) => value & !MSIX_ENABLE,
-        };
-        self.config.write16(control, value);
-        programmed
+        let mut config = transaction::Transaction::new(&mut self.config);
+        let value = config.read16(control)?;
+        config.write16(control, value | MSIX_ENABLE | MSIX_FUNCTION_MASK)?;
+        let programmed = program()?;
+        let value = config.read16(control)?;
+        config.write16(control, value & !MSIX_FUNCTION_MASK)?;
+        Ok(programmed)
     }
-
-    /// Turn on MSI for a function [`Self::enable_polled`] set up, with one
-    /// vector sending `message`, as Linux's `msi_capability_init` and
-    /// `pci_write_msg_msi` do: the address and data written while MSI is
-    /// off, then MSI enabled with one message.
-    pub fn enable_msi(&mut self, msi: Msi, message: crate::bus::irq::MsiMessage) {
+    pub fn enable_msi(
+        &mut self,
+        msi: Msi,
+        message: crate::bus::irq::MsiMessage,
+    ) -> Result<(), ConfigError> {
         let control = u16::from(msi.offset) + 2;
-        let value = self.config.read16(control);
-        self.config
-            .write16(control, value & !(MSI_ENABLE | MSI_MULTIPLE_ENABLE));
-        self.config
-            .write32(u16::from(msi.offset) + 4, message.address as u32);
+        let mut config = transaction::Transaction::new(&mut self.config);
+        let value = config.read16(control)?;
+        config.write16(control, value & !(MSI_ENABLE | MSI_MULTIPLE_ENABLE))?;
+        config.write32(u16::from(msi.offset) + 4, message.address as u32)?;
         let data = if msi.wide {
-            self.config
-                .write32(u16::from(msi.offset) + 8, (message.address >> 32) as u32);
+            config.write32(u16::from(msi.offset) + 8, (message.address >> 32) as u32)?;
             u16::from(msi.offset) + 12
         } else {
             u16::from(msi.offset) + 8
         };
-        self.config.write16(data, message.data as u16);
-        let value = self.config.read16(control);
-        self.config
-            .write16(control, (value & !MSI_MULTIPLE_ENABLE) | MSI_ENABLE);
+        config.write16(data, message.data as u16)?;
+        let value = config.read16(control)?;
+        config.write16(control, (value & !MSI_MULTIPLE_ENABLE) | MSI_ENABLE)?;
+        Ok(())
     }
-
-    /// Send `message` from the function's first MSI-X entry when its table
-    /// is mapped in `bars`, otherwise from MSI, as Linux's
-    /// `pci_alloc_irq_vectors` tries them for one vector. Whether the
-    /// function offers either.
+    /// Program one supported message mechanism. Mapping failures do not become
+    /// capability absence; all original access/resource owners remain required.
     pub fn enable_message(
         &mut self,
         handoff: &crate::Handoff,
         bars: &[Option<Bar>],
         message: crate::bus::irq::MsiMessage,
     ) -> Result<bool, BlockError> {
-        let interrupts = self.interrupts();
-        let table = interrupts.msix.and_then(|msix| {
+        let interrupts = self.interrupts()?;
+        if let Some(msix) = interrupts.msix {
             let bar = bars.get(usize::from(msix.table_bar)).copied().flatten();
-            crate::registers(handoff, bar, u64::from(msix.table_offset), MSIX_ENTRY_BYTES)
-                .ok()
-                .map(|table| (msix, table))
-        });
-        if let Some((msix, table)) = table {
+            let table =
+                crate::registers(handoff, bar, u64::from(msix.table_offset), MSIX_ENTRY_BYTES)?;
             self.enable_msix(msix, || {
                 table.write32(0, message.address as u32);
                 table.write32(4, (message.address >> 32) as u32);
@@ -863,13 +858,12 @@ impl<C: ConfigSpace> Function<C> {
             return Ok(true);
         }
         if let Some(msi) = interrupts.msi {
-            self.enable_msi(msi, message);
+            self.enable_msi(msi, message)?;
             return Ok(true);
         }
         Ok(false)
     }
 }
-
 /// How a bus's functions are found, from the bridge above it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BusScan {
@@ -884,31 +878,39 @@ enum BusScan {
 }
 
 impl<C: ConfigSpace> Function<C> {
-    /// The offset of the PCI Express extended capability `id`.
-    fn extended_capability(&self, id: u16) -> Option<u16> {
-        capability::extended_capabilities(&self.config)
-            .map_while(Result::ok)
-            .find(|entry| entry.id == id)
-            .map(|entry| entry.offset)
-    }
-
-    /// The bus below this bridge and how to scan it; None for a function
-    /// that is no bridge.
-    fn secondary(&self) -> Option<(u8, BusScan)> {
-        if self.header_type() != HEADER_BRIDGE {
-            return None;
+    fn extended_capability(&self, id: u16) -> Result<Option<u16>, CapabilityError> {
+        for entry in capability::extended_capabilities(&self.config) {
+            let entry = entry?;
+            if entry.id == id {
+                return Ok(Some(entry.offset));
+            }
         }
-        let bus = self.config.read8(SECONDARY_BUS);
+        Ok(None)
+    }
+    fn secondary(&self) -> Result<Option<(u8, BusScan)>, CapabilityError> {
+        let read8 = |offset| {
+            self.config
+                .read8(offset)
+                .map_err(|error| CapabilityError::Config { offset, error })
+        };
+        let read16 = |offset| {
+            self.config
+                .read16(offset)
+                .map_err(|error| CapabilityError::Config { offset, error })
+        };
+        if read8(regs::HEADER_TYPE)? & 0x7f != HEADER_BRIDGE {
+            return Ok(None);
+        }
+        let bus = read8(SECONDARY_BUS)?;
         let express = self
-            .capabilities()
+            .capabilities()?
             .into_iter()
             .find(|&(_, id)| id == CAPABILITY_EXPRESS)
             .map(|(offset, _)| u16::from(offset));
         let scan = match express {
             Some(express) => {
-                let kind =
-                    (self.config.read16(express + EXPRESS_FLAGS) >> EXPRESS_TYPE_SHIFT) & 0xf;
-                let control = self.config.read16(express + EXPRESS_DEVICE_CONTROL_2);
+                let kind = (read16(express + EXPRESS_FLAGS)? >> EXPRESS_TYPE_SHIFT) & 0xf;
+                let control = read16(express + EXPRESS_DEVICE_CONTROL_2)?;
                 match kind {
                     EXPRESS_ROOT_PORT | EXPRESS_DOWNSTREAM if control & ARI_FORWARDING != 0 => {
                         BusScan::Ari
@@ -919,92 +921,9 @@ impl<C: ConfigSpace> Function<C> {
             }
             None => BusScan::All,
         };
-        Some((bus, scan))
+        Ok(Some((bus, scan)))
     }
 }
-
-impl Function {
-    /// Every present function below `window`'s root bus, its first bus: the
-    /// root bus, then each bus a bridge leads to, as Linux's
-    /// `pci_scan_child_bus` descends. A bus no bridge leads to holds no
-    /// function, as the window is one host bridge's ([`rooted`]). Each bus is
-    /// scanned as the bridge above it allows: one device below a PCI Express
-    /// port, its ARI functions where the port forwards ARI. A function still
-    /// initializing (Vendor ID 0x0001) is not returned.
-    ///
-    /// # Safety
-    ///
-    /// The window must be mapped uncached, and nothing else may access the
-    /// configuration space of the functions this returns.
-    pub unsafe fn enumerate(window: &EcamWindow) -> Vec<Self> {
-        let at = |bus: u8, device: u8, function: u8| {
-            let address = Address {
-                segment: window.segment,
-                bus,
-                device,
-                function,
-            };
-            // SAFETY: forwarded exclusive mapped-window contract.
-            let config = unsafe { window.config(bus, device, function) };
-            (address, config)
-        };
-        let mut scans = [None; 256];
-        scans[usize::from(window.start_bus)] = Some(BusScan::All);
-        let mut functions = Vec::new();
-        for bus in window.start_bus..=window.end_bus {
-            let Some(scan) = scans[usize::from(bus)] else {
-                continue;
-            };
-            let first = functions.len();
-            match scan {
-                BusScan::Ari => {
-                    // Functions 0-255 of device 0, each naming the next.
-                    let mut number = 0u8;
-                    loop {
-                        let (address, config) = at(bus, number >> 3, number & 7);
-                        let Some(present) = Function::new(address, config) else {
-                            break;
-                        };
-                        let next = present
-                            .extended_capability(EXTENDED_ARI)
-                            .map_or(0, |ari| (present.config.read32(ari + 4) >> 8) as u8);
-                        functions.push(present);
-                        if next <= number {
-                            break;
-                        }
-                        number = next;
-                    }
-                }
-                scan => {
-                    let devices = if scan == BusScan::OneChild { 1 } else { 32 };
-                    for device in 0..devices {
-                        for function in 0..8u8 {
-                            let (address, config) = at(bus, device, function);
-                            let multifunction = config.read8(regs::HEADER_TYPE) & 0x80 != 0;
-                            match Function::new(address, config) {
-                                Some(present) => functions.push(present),
-                                None if function == 0 => break,
-                                None => {}
-                            }
-                            if function == 0 && !multifunction {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            for bridge in &functions[first..] {
-                if let Some((secondary, scan)) = bridge.secondary()
-                    && secondary > bus
-                {
-                    scans[usize::from(secondary)] = Some(scan);
-                }
-            }
-        }
-        functions
-    }
-}
-
 /// The MCFG's windows narrowed to host bridges: for each root bridge, given
 /// as its segment and its bus range (the bus-number descriptor of its
 /// `_CRS`), the part of its segment's window that decodes the range, from

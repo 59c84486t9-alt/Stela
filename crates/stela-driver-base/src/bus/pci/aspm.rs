@@ -13,7 +13,7 @@
 //! and validation here are Stela's own implementation.
 pub mod native;
 
-use super::{CapabilityError, ConfigSpace, EcamWindow, Function};
+use super::{ConfigSpace, EcamWindow, Function};
 use crate::{Handoff, block::BlockError};
 use alloc::vec::Vec;
 
@@ -45,7 +45,21 @@ pub unsafe fn disable_aspm_l1_2_link(
     for window in windows {
         // SAFETY: checked exclusive segment ownership and complete ECAM
         // mappings; no second PCI or firmware owner may race this operation.
-        functions.extend(unsafe { Function::enumerate(&window) });
+        match unsafe { Function::enumerate(&window) } {
+            Ok(found) => functions.extend(found),
+            Err(failure) => {
+                let error = match failure.error {
+                    super::EnumerationError::Config { error, .. } => BlockError::Config(error),
+                    super::EnumerationError::Capability { error, .. } => {
+                        BlockError::PciCapability(error)
+                    }
+                };
+                // Retain every failed observation and original owner; a reason
+                // return does not authorize config/root retirement.
+                core::mem::forget(failure);
+                return Err(error);
+            }
+        }
     }
     disable_l1_2_with(function, &mut functions)
 }
@@ -54,22 +68,13 @@ fn l1ss_control<C: ConfigSpace>(function: &Function<C>) -> Result<Option<(u16, u
     // Validate a real conventional PCIe function before accessing its extended
     // configuration space. Keep malformed chains distinct from absent L1SS.
     link_control(function)?;
-    let first = function.config.read32(0x100);
+    let first = function.config.read32(0x100)?;
     if first == u32::MAX {
         return Err(BlockError::Device { status: first });
     }
     let mut found = None;
     for entry in function.config.extended_capabilities() {
-        let entry = entry.map_err(|error| match error {
-            CapabilityError::FailedRead { .. } => BlockError::Device { status: u32::MAX },
-            CapabilityError::Cycle { .. } => {
-                BlockError::Unsupported("looping PCI extended capabilities")
-            }
-            CapabilityError::Overlap { .. } => {
-                BlockError::Unsupported("overlapping PCI extended capabilities")
-            }
-            _ => BlockError::Unsupported("invalid PCI extended capability offset"),
-        })?;
+        let entry = entry?;
         if entry.id != EXT_CAPABILITY_L1SS {
             continue;
         }
@@ -78,8 +83,8 @@ fn l1ss_control<C: ConfigSpace>(function: &Function<C>) -> Result<Option<(u16, u
                 "invalid or duplicate PCI L1SS capability",
             ));
         }
-        let capability = function.config.read32(entry.offset + 4);
-        let control = function.config.read32(entry.offset + L1SS_CONTROL1);
+        let capability = function.config.read32(entry.offset + 4)?;
+        let control = function.config.read32(entry.offset + L1SS_CONTROL1)?;
         if capability == u32::MAX || control == u32::MAX {
             return Err(BlockError::Device { status: u32::MAX });
         }
@@ -102,9 +107,9 @@ fn clear_l1_2<C: ConfigSpace>(
     if original != wanted {
         // Linux notes some devices require DWORD access to L1SS. CTL1 is a
         // full control register, unlike Link Control's adjacent W1C status.
-        function.config.write32(offset, wanted);
+        function.config.write32(offset, wanted)?;
     }
-    let observed = function.config.read32(offset);
+    let observed = function.config.read32(offset)?;
     if observed != wanted {
         return Err(BlockError::Device { status: observed });
     }
@@ -154,7 +159,21 @@ pub unsafe fn disable_aspm_link(
     for window in windows {
         // SAFETY: the caller owns configuration access; segment_windows
         // checked every window's entire mapping and disjoint bus numbers.
-        functions.extend(unsafe { Function::enumerate(&window) });
+        match unsafe { Function::enumerate(&window) } {
+            Ok(found) => functions.extend(found),
+            Err(failure) => {
+                let error = match failure.error {
+                    super::EnumerationError::Config { error, .. } => BlockError::Config(error),
+                    super::EnumerationError::Capability { error, .. } => {
+                        BlockError::PciCapability(error)
+                    }
+                };
+                // Retain every failed observation and original owner; a reason
+                // return does not authorize config/root retirement.
+                core::mem::forget(failure);
+                return Err(error);
+            }
+        }
     }
     disable_aspm_with(function, &mut functions)
 }
@@ -194,48 +213,53 @@ fn segment_windows<C: ConfigSpace>(
     Ok(windows)
 }
 
-fn link_control<C: ConfigSpace>(function: &Function<C>) -> Result<u16, BlockError> {
+fn link_control_optional<C: ConfigSpace>(
+    function: &Function<C>,
+) -> Result<Option<u16>, BlockError> {
     let mut express = None;
     for entry in function.config.capabilities() {
-        let entry =
-            entry.map_err(|_| BlockError::Unsupported("malformed PCI capabilities for ASPM"))?;
+        let entry = entry?;
         if entry.id == CAPABILITY_PCIE && express.replace(entry.offset).is_some() {
             return Err(BlockError::Unsupported("multiple PCIe capabilities"));
         }
     }
-    let capability = express.ok_or(BlockError::Unsupported("ASPM requires a PCIe capability"))?;
-    // This is a conventional capability, entirely in the first 256 bytes.
+    let Some(capability) = express else {
+        return Ok(None);
+    };
     if capability + PCIE_LINK_CONTROL + 2 > 0x100 {
         return Err(BlockError::Unsupported(
             "PCIe link control outside capability space",
         ));
     }
-    let flags = function.config.read16(capability + PCIE_FLAGS);
-    let port_type = (flags >> 4) & 0xf;
-    // Root-complex integrated endpoints/event collectors have no Link Control.
-    if flags & 0xf == 0 || !matches!(port_type, 0 | 1 | 4 | 5 | 6 | 7 | 8) {
+    let flags = function.config.read16(capability + PCIE_FLAGS)?;
+    let port_type = (flags >> 4) & 15;
+    if matches!(port_type, 9 | 10) {
+        return Ok(None);
+    }
+    if flags & 15 == 0 || !matches!(port_type, 0 | 1 | 4 | 5 | 6 | 7 | 8) {
         return Err(BlockError::Unsupported("PCIe function has no link control"));
     }
-    Ok(capability + PCIE_LINK_CONTROL)
+    Ok(Some(capability + PCIE_LINK_CONTROL))
 }
-
-/// The ASPM Control field of the function's PCIe Link Control: zero
-/// without a link, as `pcie_capability_read_word` reads a missing register.
-pub fn aspm_control<C: ConfigSpace>(function: &Function<C>) -> u16 {
-    link_control(function).map_or(0, |at| function.config.read16(at) & PCIE_ASPM)
+fn link_control<C: ConfigSpace>(function: &Function<C>) -> Result<u16, BlockError> {
+    link_control_optional(function)?
+        .ok_or(BlockError::Unsupported("ASPM requires a PCIe capability"))
 }
-
-/// The function's whole PCIe Link Control register, zero without a link.
-pub fn link_control_word<C: ConfigSpace>(function: &Function<C>) -> u16 {
-    link_control(function).map_or(0, |at| function.config.read16(at))
+pub fn aspm_control<C: ConfigSpace>(function: &Function<C>) -> Result<u16, BlockError> {
+    Ok(link_control_word(function)? & PCIE_ASPM)
 }
-
-/// The Current Link Speed field of the function's PCIe Link Status: zero
-/// without a link, as `pcie_capability_read_word` reads a missing register.
-pub fn link_speed<C: ConfigSpace>(function: &Function<C>) -> u8 {
-    link_control(function).map_or(0, |at| (function.config.read16(at + 2) & 0xf) as u8)
+pub fn link_control_word<C: ConfigSpace>(function: &Function<C>) -> Result<u16, BlockError> {
+    match link_control_optional(function)? {
+        Some(at) => Ok(function.config.read16(at)?),
+        None => Ok(0),
+    }
 }
-
+pub fn link_speed<C: ConfigSpace>(function: &Function<C>) -> Result<u8, BlockError> {
+    match link_control_optional(function)? {
+        Some(at) => Ok((function.config.read16(at + 2)? & 15) as u8),
+        None => Ok(0),
+    }
+}
 fn upstream<C: ConfigSpace>(
     function: &Function<C>,
     functions: &[Function<C>],
@@ -245,11 +269,11 @@ fn upstream<C: ConfigSpace>(
         if candidate.address.segment != function.address.segment
             || candidate.address == function.address
             || candidate.class[..2] != [6, 4]
-            || candidate.header_type() != 1
+            || candidate.header_type()? != 1
         {
             continue;
         }
-        let buses = candidate.config.read32(BRIDGE_BUSES);
+        let buses = candidate.config.read32(BRIDGE_BUSES)?;
         let primary = buses as u8;
         let secondary = (buses >> 8) as u8;
         let subordinate = (buses >> 16) as u8;
@@ -271,13 +295,13 @@ fn upstream<C: ConfigSpace>(
 }
 
 fn clear_aspm<C: ConfigSpace>(function: &mut Function<C>, control: u16) -> Result<(), BlockError> {
-    let value = function.config.read16(control);
+    let value = function.config.read16(control)?;
     if value & PCIE_ASPM != 0 {
         // Narrow access is essential: Link Status shares this DWORD and
         // includes W1C fields that must not be acknowledged by this write.
-        function.config.write16(control, value & !PCIE_ASPM);
+        function.config.write16(control, value & !PCIE_ASPM)?;
     }
-    let status = function.config.read16(control);
+    let status = function.config.read16(control)?;
     if status & PCIE_ASPM != 0 {
         return Err(BlockError::Device {
             status: u32::from(status),

@@ -86,6 +86,8 @@ pub fn quarantined_units() -> u64 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VtdError {
+    Config(stela_drivers::bus::pci::ConfigError),
+    PciCapability(stela_drivers::bus::pci::CapabilityError),
     Busy,
     Unsupported,
     RegisterRange,
@@ -95,6 +97,38 @@ pub enum VtdError {
     Invalidation,
     Exhausted,
     FaultOverflow,
+}
+impl From<stela_drivers::bus::pci::ConfigError> for VtdError {
+    fn from(error: stela_drivers::bus::pci::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+impl From<stela_drivers::bus::pci::CapabilityError> for VtdError {
+    fn from(error: stela_drivers::bus::pci::CapabilityError) -> Self {
+        Self::PciCapability(error)
+    }
+}
+struct RequesterPreparation<R: Registers> {
+    unit: Option<Arc<Unit<R>>>,
+    claim: Option<RequesterClaim>,
+}
+impl<R: Registers> Drop for RequesterPreparation<R> {
+    fn drop(&mut self) {
+        core::mem::forget(self.claim.take());
+        core::mem::forget(self.unit.take());
+    }
+}
+/// Exact original requester/unit custody survives failed or unwinding attach.
+pub struct AttachRequesterFailure<R: Registers> {
+    pub error: VtdError,
+    _retained: RequesterPreparation<R>,
+}
+impl<R: Registers> core::fmt::Debug for AttachRequesterFailure<R> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("AttachRequesterFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -633,57 +667,89 @@ impl<R: Registers> Unit<R> {
     /// owner can resume it before this returned domain's mapping publication.
     pub unsafe fn attach_requester(
         self: &Arc<Self>,
-        mut claim: RequesterClaim,
-    ) -> Result<Arc<RequesterDomain<R>>, VtdError> {
-        claim.check_stopped()?;
-        let rid = claim.requester();
-        let mut guard = self.lock();
-        let state = guard.state();
-        if state.shutdown
-            || state.poisoned
-            || !state.allowed.contains(&rid)
-            || state.domains.contains_key(&rid)
-        {
-            return Err(VtdError::Busy);
-        }
-        let first = if state.window.is_some() {
-            u32::from(WINDOW_DID) + 1
-        } else {
-            1
+        claim: RequesterClaim,
+    ) -> Result<Arc<RequesterDomain<R>>, AttachRequesterFailure<R>> {
+        let mut original = RequesterPreparation {
+            unit: Some(self.clone()),
+            claim: Some(claim),
         };
-        let did = (first..self.max_domains)
-            .find(|did| !state.domains.values().any(|d| u32::from(d.did) == *did))
-            .ok_or(VtdError::Busy)? as u16;
-        let generation = state.next_generation;
-        state.next_generation = generation.checked_add(1).ok_or(VtdError::Unsupported)?;
-        let root = Table::new(self.source, self.physical_bits)?;
-        let physical = root.physical();
-        // Even an unsolicited access while TE is active must never walk stale
-        // child contents. Publish this complete zero root before its context.
-        if let Some(line) = self.table_cacheline {
-            root.flush(&*self.registers, line);
-        }
-        publish();
-        let mut table_index = BTreeMap::new();
-        table_index.insert(physical, 0);
-        state.domains.insert(
-            rid,
-            DomainState {
-                did,
-                generation,
-                claim,
-                tables: vec![root],
-                table_index,
-                mappings: BTreeMap::new(),
-                quarantined: false,
-            },
-        );
-        let (context, index) = state.context(rid);
-        if context.read(index) & 1 != 0 {
-            // VT-d 6.5.3.3: a present context entry is cleared and its cached
-            // copies and the window's translations invalidated before it is
-            // rewritten.
-            context.write(index, 0);
+        let result = (|| -> Result<Arc<RequesterDomain<R>>, VtdError> {
+            let rid = {
+                let claim = original.claim.as_mut().expect("original requester claim");
+                claim.check_stopped()?;
+                claim.requester()
+            };
+            let mut guard = self.lock();
+            let state = guard.state();
+            if state.shutdown
+                || state.poisoned
+                || !state.allowed.contains(&rid)
+                || state.domains.contains_key(&rid)
+            {
+                return Err(VtdError::Busy);
+            }
+            let first = if state.window.is_some() {
+                u32::from(WINDOW_DID) + 1
+            } else {
+                1
+            };
+            let did = (first..self.max_domains)
+                .find(|did| !state.domains.values().any(|d| u32::from(d.did) == *did))
+                .ok_or(VtdError::Busy)? as u16;
+            let generation = state.next_generation;
+            state.next_generation = generation.checked_add(1).ok_or(VtdError::Unsupported)?;
+            let root = Table::new(self.source, self.physical_bits)?;
+            let physical = root.physical();
+            // Close the whole unit before the first publication callback. A
+            // caught unwind cannot resume sibling contexts after an uncertain
+            // table flush, context store, or invalidation. Only full success
+            // reopens admission under this same held unit lock.
+            state.poisoned = true;
+            // Even an unsolicited access while TE is active must never walk stale
+            // child contents. Publish this complete zero root before its context.
+            if let Some(line) = self.table_cacheline {
+                root.flush(&*self.registers, line);
+            }
+            publish();
+            let mut table_index = BTreeMap::new();
+            table_index.insert(physical, 0);
+            state.domains.insert(
+                rid,
+                DomainState {
+                    did,
+                    generation,
+                    claim: original
+                        .claim
+                        .take()
+                        .expect("original unpublished requester"),
+                    tables: vec![root],
+                    table_index,
+                    mappings: BTreeMap::new(),
+                    quarantined: false,
+                },
+            );
+            let (context, index) = state.context(rid);
+            if context.read(index) & 1 != 0 {
+                // VT-d 6.5.3.3: a present context entry is cleared and its cached
+                // copies and the window's translations invalidated before it is
+                // rewritten.
+                context.write(index, 0);
+                if let Some(line) = self.table_cacheline {
+                    context.flush(&*self.registers, line);
+                }
+                publish();
+                if let Err(error) = self.invalidate(true) {
+                    state.poisoned = true;
+                    return Err(error);
+                }
+            }
+            let (context, index) = state.context(rid);
+            context.write(index + 1, u64::from(did) << 8 | u64::from(self.levels - 2));
+            if let Some(line) = self.table_cacheline {
+                context.flush(&*self.registers, line);
+            }
+            publish();
+            context.write(index, physical | 1);
             if let Some(line) = self.table_cacheline {
                 context.flush(&*self.registers, line);
             }
@@ -692,28 +758,26 @@ impl<R: Registers> Unit<R> {
                 state.poisoned = true;
                 return Err(error);
             }
+            state.poisoned = false;
+            Ok(Arc::new(RequesterDomain {
+                unit: ManuallyDrop::new(self.clone()),
+                rid,
+                did,
+                generation,
+            }))
+        })();
+        match result {
+            Ok(domain) => {
+                // Only the extra preparation Arc is released. The returned
+                // domain and caller still hold the same original Unit.
+                drop(original.unit.take());
+                Ok(domain)
+            }
+            Err(error) => Err(AttachRequesterFailure {
+                error,
+                _retained: original,
+            }),
         }
-        let (context, index) = state.context(rid);
-        context.write(index + 1, u64::from(did) << 8 | u64::from(self.levels - 2));
-        if let Some(line) = self.table_cacheline {
-            context.flush(&*self.registers, line);
-        }
-        publish();
-        context.write(index, physical | 1);
-        if let Some(line) = self.table_cacheline {
-            context.flush(&*self.registers, line);
-        }
-        publish();
-        if let Err(error) = self.invalidate(true) {
-            state.poisoned = true;
-            return Err(error);
-        }
-        Ok(Arc::new(RequesterDomain {
-            unit: ManuallyDrop::new(self.clone()),
-            rid,
-            did,
-            generation,
-        }))
     }
 
     fn lock(&self) -> Guard<'_, R> {

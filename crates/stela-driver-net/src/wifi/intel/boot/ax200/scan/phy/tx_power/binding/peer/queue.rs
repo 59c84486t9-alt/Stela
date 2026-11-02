@@ -135,6 +135,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         self.queue_id().map(|_| self.reply.unwrap().write_pointer)
     }
     /// Original raw RX only; no normalized station/frame completion is inferred.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub fn poll_receive(&mut self) -> Result<MpduProgress, Ax200ManagementQueueError> {
         if let Some(error) = &self.first_error {
             return Err(error.clone());
@@ -166,6 +170,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         self.first_error.get_or_insert(error);
         self.phase = Ax200ManagementQueuePhase::Failed;
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub fn replenish_completed_receive(
         &mut self,
     ) -> Result<Replenished, Ax200ManagementQueueError> {
@@ -184,6 +192,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
     /// Run original MLD station removal: FLUSH, empty transport check,
     /// scheduler REMOVE and DMA release, then STA_REMOVE. No separate
     /// no-queue parent escapes to invent a second removal/flush lifecycle.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub fn begin_remove_station(&mut self) -> Result<(), Ax200ManagementQueueError> {
         if self.phase != Ax200ManagementQueuePhase::ManagementFramesRequired
             || self.ticket.is_some()
@@ -213,6 +225,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
             }
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub fn stop(&mut self) -> Result<(), Ax200ManagementQueueError> {
         if let Err(error) = self.peer().stop() {
             let error = Ax200ManagementQueueError::Boot(error);
@@ -248,6 +264,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         self.rings.push((tid, ring));
     }
     /// `iwl_mvm_flush_sta`'s reply: what each queue dropped comes back.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn flushed(&mut self, raw: &[u8]) -> Result<(), Ax200ManagementQueueError> {
         if raw.len() != 132 {
             return Err(Ax200ManagementQueueError::FlushLength(raw.len()));
@@ -282,6 +302,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
     /// # Safety
     /// Fresh exclusive coherent pages and the original same-device policy,
     /// DMA/domain and no-competing-worker contracts remain in force.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub unsafe fn advance(
         &mut self,
         source: &dyn PageSource,
@@ -306,6 +330,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         }
         result
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     unsafe fn advance_inner(
         &mut self,
         source: &dyn PageSource,

@@ -3,7 +3,7 @@
 //! Copyright (c) 2009 Takashi Iwai <tiwai@suse.de>. See audio/THIRD_PARTY.md.
 use super::super::{CodecGraph, Controller, PinConnection, Registers, Verb, WidgetKind};
 use super::{Authority, CirrusCoefficient, CirrusProfile, DIGITAL};
-use crate::{Error, bus::i2c::Timer};
+use crate::{Error, Timer};
 use alloc::vec::Vec;
 
 pub(super) const ERRATA_COEFFICIENT_WRITES: usize = 6;
@@ -18,6 +18,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<Vec<(u8, u32)>, Error> {
+        self.minimum_guard()?;
         let mut shared_pins = Vec::new();
         for node in SHARED_PINS {
             let pin = graph.widget(node).ok_or(Error::UnsupportedTopology)?;
@@ -44,6 +45,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         graph: &CodecGraph,
         authority: &Authority,
     ) -> Result<Vec<CirrusCoefficient>, Error> {
+        self.minimum_guard()?;
         // AFG/vendor D0 already acknowledged; preserve all source errata writes.
         let vendor = CirrusProfile::Cs420x.vendor();
         self.cirrus_processing(graph.address, vendor, 1)?;

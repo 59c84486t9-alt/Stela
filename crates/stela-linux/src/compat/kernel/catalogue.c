@@ -2,6 +2,7 @@
 /* Exact original device membership under one kernel owner. No device name,
  * BDF, firmware name or current driver name selects an authority. */
 #include <linux/device.h>
+#include <asm/pgtable.h>
 #include <linux/errno.h>
 #include <linux/kobject.h>
 #include <linux/list.h>
@@ -24,6 +25,68 @@ static bool ready, canonical_environment;
 /* Irreversible: 0 = untouched, 1 = legacy activity, 2 = canonical claim.
  * Even a finished legacy environment/entry does not qualify global adoption. */
 static unsigned int bootstrap;
+/* Same original x86 types/runtime folding, populated from the real native
+ * root product. Zero is unbound, not an assumed four-level mode. */
+unsigned int __pgtable_l5_enabled;
+unsigned int pgdir_shift;
+unsigned int ptrs_per_p4d;
+static unsigned int geometry_state; /* 0 untouched, 1 committing, 2 published */
+
+static bool geometry_consistent(void)
+{
+	return __atomic_load_n(&geometry_state, __ATOMIC_ACQUIRE) == 2 &&
+		((__pgtable_l5_enabled == 0 && pgdir_shift == 39 && ptrs_per_p4d == 1) ||
+		 (__pgtable_l5_enabled == 1 && pgdir_shift == 48 && ptrs_per_p4d == 512));
+}
+static bool geometry_owner(const struct stela_linux_owner *owner)
+{
+	return owner && __atomic_load_n(&bootstrap, __ATOMIC_ACQUIRE) == 2 &&
+		owner == __atomic_load_n(&kernel_owner, __ATOMIC_ACQUIRE);
+}
+int stela_linux_kernel_geometry_storage(const struct stela_linux_owner *owner,
+                                      unsigned long *addresses)
+{
+	if (!addresses || !geometry_owner(owner) ||
+	    __atomic_load_n(&canonical_environment, __ATOMIC_ACQUIRE) ||
+	    __atomic_load_n(&ready, __ATOMIC_ACQUIRE) ||
+	    __atomic_load_n(&geometry_state, __ATOMIC_ACQUIRE))
+		return -EPERM;
+	addresses[0] = (unsigned long)&__pgtable_l5_enabled;
+	addresses[1] = (unsigned long)&pgdir_shift;
+	addresses[2] = (unsigned long)&ptrs_per_p4d;
+	addresses[3] = (unsigned long)&geometry_state;
+	return 0;
+}
+int stela_linux_kernel_geometry_bind(const struct stela_linux_owner *owner,
+                                   unsigned int actual_levels)
+{
+	if (!geometry_owner(owner) ||
+	    __atomic_load_n(&canonical_environment, __ATOMIC_ACQUIRE) ||
+	    __atomic_load_n(&ready, __ATOMIC_ACQUIRE))
+		return -EPERM;
+	if (CONFIG_PGTABLE_LEVELS != 5 || (actual_levels != 4 && actual_levels != 5))
+		return -EINVAL;
+	unsigned int fresh = 0;
+	if (!__atomic_compare_exchange_n(&geometry_state, &fresh, 1, false,
+		__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+		return -EALREADY;
+	/* No fallible operation follows this actual native-product commit. */
+	__pgtable_l5_enabled = actual_levels == 5;
+	pgdir_shift = actual_levels == 5 ? 48 : 39;
+	ptrs_per_p4d = actual_levels == 5 ? 512 : 1;
+	__atomic_store_n(&geometry_state, 2, __ATOMIC_RELEASE);
+	return 0;
+}
+int stela_linux_kernel_geometry_ready(const struct stela_linux_owner *owner)
+{
+	return geometry_owner(owner) && geometry_consistent() ? 0 : -EPERM;
+}
+unsigned int stela_linux_task_initial_root_levels(void)
+{
+	if (!geometry_consistent())
+		return 0;
+	return __pgtable_l5_enabled ? 5 : 4;
+}
 static LIST_HEAD(devices);
 static u64 quarantined;
 
@@ -42,11 +105,15 @@ int stela_linux_kernel_claim(const struct stela_linux_owner *owner)
 }
 int stela_linux_kernel_environment(const struct stela_linux_owner *owner)
 {
+	/* Every consumer uses the SAME max5/runtime-folded architecture ABI.
+	 * Legacy activity has no actual canonical root producer; never assume L4. */
+	if (!geometry_consistent())
+		return -EPERM;
 	if (!owner)
 		return -EINVAL;
 	const struct stela_linux_owner *claimed = __atomic_load_n(&kernel_owner, __ATOMIC_ACQUIRE);
 	if (claimed) {
-		if (owner != claimed)
+		if (owner != claimed || !geometry_consistent())
 			return -EPERM;
 		bool expected = false;
 		return __atomic_compare_exchange_n(&canonical_environment, &expected, true, false,
@@ -84,7 +151,8 @@ int stela_linux_kernel_entry(const struct stela_linux_owner *owner)
 int stela_linux_kernel_ready(const struct stela_linux_owner *owner)
 {
 	if (!owner || __atomic_load_n(&kernel_owner, __ATOMIC_ACQUIRE) != owner ||
-	    !__atomic_load_n(&canonical_environment, __ATOMIC_ACQUIRE))
+	    !__atomic_load_n(&canonical_environment, __ATOMIC_ACQUIRE) ||
+	    !geometry_consistent())
 		return -EPERM;
 	__atomic_store_n(&ready, true, __ATOMIC_RELEASE);
 	return 0;

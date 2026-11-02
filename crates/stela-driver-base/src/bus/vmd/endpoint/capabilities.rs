@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // PCI encodings follow Linux include/uapi/linux/pci_regs.h, copyright
 // 1994 Drew Eckhardt and 1997-1999 Martin Mares; see bus/THIRD_PARTY.md.
-//! Fallible, extent-checked capabilities; no infallible ConfigSpace adapter.
+//! Extent-checked capabilities through the retained VMD child transport.
 use super::*;
 use crate::bus::pci::{self, capability::Transport};
 
@@ -179,16 +179,9 @@ impl Capabilities {
     pub(super) fn power_up<R: Registers>(
         &self,
         config: &mut ChildConfig<'_, R>,
-        clock: Clock,
+        timer: &(impl crate::bus::pci::power::Timer + ?Sized),
     ) -> Result<(), Error> {
-        self.power_up_with_timer(config, &clock)
-    }
-    pub(super) fn power_up_with_timer<R: Registers>(
-        &self,
-        config: &mut ChildConfig<'_, R>,
-        timer: &impl crate::bus::pci::power::Timer,
-    ) -> Result<(), Error> {
-        timer.check().map_err(|_| Error::Clock)?;
+        timer.check()?;
         for (offset, enabled) in [(self.msi, 1), (self.msix, 0x8000)] {
             if let Some(offset) = offset
                 && word(config, offset + 2)? & enabled != 0
@@ -204,8 +197,8 @@ impl Capabilities {
         // choosing D0; another owner's pending event is not acknowledged here.
         config.write(pm + 4, 2, u32::from(control & !0x8103))?;
         match control & 3 {
-            3 => timer.wait_us(10_000).map_err(|_| Error::Clock)?,
-            2 => timer.wait_us(200).map_err(|_| Error::Clock)?,
+            3 => timer.wait_us(10_000)?,
+            2 => timer.wait_us(200)?,
             _ => {}
         }
         if word(config, pm + 4)? & 0x103 != 0 {

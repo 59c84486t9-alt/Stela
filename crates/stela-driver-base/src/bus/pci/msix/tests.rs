@@ -7,9 +7,10 @@
 // file keeps the GPL-2.0-only legacy owner oracle and its original notices.
 // Includes the unchanged pre-indexed GPL-2.0-only owner as a legacy trace oracle.
 extern crate std;
+mod fallible;
 use super::*;
-use crate::bus::pci::ConfigSpace;
 use crate::bus::pci::regs;
+use crate::bus::pci::{ConfigError, ConfigFailure, ConfigSpace};
 use alloc::{sync::Arc, vec, vec::Vec};
 use std::sync::Mutex;
 
@@ -56,6 +57,8 @@ struct Peripheral {
     pending_entries: Vec<bool>,
     delivered_entries: Vec<u16>,
     queue_on_guard: Vec<u16>,
+    panic_identity: bool,
+    panic_message: bool,
 }
 impl Peripheral {
     fn get(&self, offset: u16, bytes: usize) -> u32 {
@@ -134,48 +137,72 @@ struct Config {
     drops: Arc<AtomicU64>,
 }
 impl Config {
-    fn read(&self, offset: u16, bytes: u8) -> u32 {
+    fn read(&self, offset: u16, bytes: u8) -> Result<u32, ConfigError> {
         let mut m = self.model.lock().unwrap();
-        if m.event(Event::ConfigRead(offset, bytes)) || core::mem::take(&mut m.failed_config_ack) {
-            return match bytes {
+        if m.panic_identity && offset == 0 {
+            drop(m);
+            panic!("interrupted MSI-X configuration discovery");
+        }
+        if m.event(Event::ConfigRead(offset, bytes)) {
+            return Err(ConfigError::before_effect(ConfigFailure::Mapping(
+                crate::bus::mmio::owned::Error::Unavailable,
+            )));
+        }
+        if core::mem::take(&mut m.failed_config_ack) {
+            return Ok(match bytes {
                 1 => 255,
                 2 => 65535,
                 _ => u32::MAX,
-            };
+            });
         }
-        m.get(offset, usize::from(bytes))
+        Ok(m.get(offset, usize::from(bytes)))
+    }
+    fn write(&mut self, offset: u16, bytes: u8, value: u16) -> Result<(), ConfigError> {
+        let mut m = self.model.lock().unwrap();
+        let fail = m.event(Event::ConfigWrite(offset, value));
+        if fail && !m.after_effect {
+            return Err(ConfigError::before_effect(ConfigFailure::Mapping(
+                crate::bus::mmio::owned::Error::Unavailable,
+            )));
+        }
+        m.put(offset, usize::from(bytes), u32::from(value));
+        if bytes == 2 && offset == 0x52 && value & 0xc000 == 0xc000 {
+            while let Some(index) = m.queue_on_guard.pop() {
+                m.queue(index);
+            }
+        }
+        m.deliver();
+        if fail {
+            return Err(ConfigError::write_may_have_applied(
+                offset,
+                bytes,
+                ConfigFailure::Mapping(crate::bus::mmio::owned::Error::Unavailable),
+            ));
+        }
+        Ok(())
     }
 }
 impl ConfigSpace for Config {
-    fn read8(&self, offset: u16) -> u8 {
-        self.read(offset, 1) as u8
+    fn read8(&self, offset: u16) -> Result<u8, ConfigError> {
+        self.read(offset, 1).map(|value| value as u8)
     }
-    fn read16(&self, offset: u16) -> u16 {
-        self.read(offset, 2) as u16
+    fn read16(&self, offset: u16) -> Result<u16, ConfigError> {
+        self.read(offset, 2).map(|value| value as u16)
     }
-    fn read32(&self, offset: u16) -> u32 {
+    fn read32(&self, offset: u16) -> Result<u32, ConfigError> {
         self.read(offset, 4)
     }
-    fn write16(&mut self, offset: u16, value: u16) {
-        let mut m = self.model.lock().unwrap();
-        let fail = m.event(Event::ConfigWrite(offset, value));
-        if !fail || m.after_effect {
-            m.put(offset, 2, u32::from(value));
-            if offset == 0x52 && value & 0xc000 == 0xc000 {
-                // Model device requests arriving DURING the temporary global
-                // guard, not an artificial queue after unmask has completed.
-                while let Some(index) = m.queue_on_guard.pop() {
-                    m.queue(index);
-                }
-            }
-            m.deliver();
-        }
-        if fail {
-            m.failed_config_ack = true;
-        }
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), ConfigError> {
+        self.write(offset, 1, u16::from(value))
     }
-    fn write32(&mut self, _: u16, _: u32) {
-        panic!("MSI-X must not replay adjacent config W1C with DWORD writes");
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError> {
+        self.write(offset, 2, value)
+    }
+    fn write32(&mut self, offset: u16, _: u32) -> Result<(), ConfigError> {
+        Err(ConfigError::before_effect(ConfigFailure::Access {
+            offset,
+            width: 4,
+        }))
     }
 }
 // SAFETY: write16 changes only its two config bytes under the peripheral mutex;
@@ -239,6 +266,10 @@ unsafe impl BarAccess for Bar {
             m.memory[(offset / 4) as usize] = value;
             m.deliver();
         }
+        if m.panic_message && offset == TABLE {
+            drop(m);
+            panic!("interrupted MSI-X message publication");
+        }
         if fail { Err(IoError) } else { Ok(()) }
     }
 }
@@ -276,6 +307,8 @@ fn fixture(vectors: u16) -> Fixture {
         pending_entries: vec![false; usize::from(vectors)],
         delivered_entries: Vec::new(),
         queue_on_guard: Vec::new(),
+        panic_identity: false,
+        panic_message: false,
     };
     m.put(0, 4, 0x1234_8086);
     m.put(4, 2, 0x107);
@@ -405,10 +438,12 @@ mod original {
         }
         fn config_write(&mut self, offset: u16, value: u16) -> Result<(), Error> {
             let config = self.owners.as_mut().ok_or(Error::Released)?.0.config();
-            config.write16(offset, value);
-            let actual = config.read16(offset);
+            config.write16(offset, value)?;
+            let actual = config.read16(offset).map_err(|error| {
+                Error::Config(ConfigError::write_may_have_applied(offset, 2, error.reason))
+            })?;
             if actual != value {
-                return Err(Error::Config(if actual == u16::MAX {
+                return Err(Error::Msi(if actual == u16::MAX {
                     MsiError::FailedRead { offset }
                 } else {
                     MsiError::Readback { offset }
@@ -442,7 +477,7 @@ mod original {
                 .unwrap()
                 .0
                 .config()
-                .read16(regs::COMMAND);
+                .read16(regs::COMMAND)?;
             if command == u16::MAX {
                 return Err(MsiError::FailedRead {
                     offset: regs::COMMAND,
@@ -688,7 +723,12 @@ fn metadata_allocation_failure() {
     let config = m.lock().unwrap().config;
     let events = m.lock().unwrap().events.len();
     let live = owner.live.0;
-    let control_state = (owner.initialized, owner.open, owner.poisoned);
+    let phase = |phase| match phase {
+        Phase::Ready => Ok(()),
+        Phase::Failed(error) => Err(error),
+        Phase::Acting => panic!("metadata snapshot observed an in-flight MSI-X operation"),
+    };
+    let control_state = (owner.initialized, owner.open, phase(owner.phase));
     let indexed_message = message(2047);
     assert!(indexed_message.valid_pci_format());
     assert_eq!(owner.messages.capacity(), 0);
@@ -717,7 +757,7 @@ fn metadata_allocation_failure() {
     assert_eq!(owner.messages.capacity(), 0);
     assert_eq!(owner.live.0, live);
     assert_eq!(
-        (owner.initialized, owner.open, owner.poisoned),
+        (owner.initialized, owner.open, phase(owner.phase)),
         control_state
     );
     {

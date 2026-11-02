@@ -34,6 +34,7 @@ pub(super) struct ModelState {
     pub(super) stop_ack: bool,
     pub(super) sentinel: Option<(usize, u32)>,
     pub(super) no_reset: bool,
+    pub(super) reset_error: Option<crate::block::BlockError>,
 }
 impl Default for ModelState {
     fn default() -> Self {
@@ -46,6 +47,7 @@ impl Default for ModelState {
             stop_ack: true,
             sentinel: None,
             no_reset: false,
+            reset_error: None,
         }
     }
 }
@@ -112,7 +114,15 @@ unsafe impl BootIo for Model {
         *word = (*word & !(0xff << shift)) | (u32::from(value) << shift);
         Ok(())
     }
-    fn reset_function(&mut self) -> bool {
-        self.operation(Op::Reset).is_ok_and(|state| !state.no_reset)
+    fn reset_function(&mut self) -> Result<bool, crate::block::BlockError> {
+        let state = self.operation(Op::Reset).map_err(|_| {
+            crate::block::BlockError::Config(crate::bus::pci::ConfigError::before_effect(
+                crate::bus::pci::ConfigFailure::UnqualifiedControl,
+            ))
+        })?;
+        if let Some(error) = &state.reset_error {
+            return Err(error.clone());
+        }
+        Ok(!state.no_reset)
     }
 }

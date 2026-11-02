@@ -13,7 +13,7 @@ pub(super) struct Capabilities {
 }
 
 fn config32<C: ConfigSpace>(config: &C, offset: u16) -> Result<u32, Error> {
-    let value = config.read32(offset);
+    let value = config.read32(offset).map_err(Error::Config)?;
     if value == u32::MAX {
         Err(Error::ReadFailed(offset))
     } else {
@@ -34,6 +34,7 @@ pub(super) fn scan<C: ConfigSpace>(config: &C) -> Result<Capabilities, Error> {
     let entries = capability::capability_headers(config)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| match error {
+            CapabilityError::Config { .. } => Error::PciCapability(error),
             CapabilityError::FailedRead { offset } => Error::ReadFailed(offset),
             error => Error::Capability(error.offset()),
         })?;
@@ -118,26 +119,55 @@ fn capability_bytes(entry: &Capability, header: u32) -> Result<u16, Error> {
 mod tests {
     extern crate std;
     use super::*;
-    use crate::bus::pci::regs;
+    use crate::bus::pci::{ConfigError, ConfigFailure, regs};
     use std::sync::Mutex;
     const CAP: u16 = 0x40;
     struct Config {
         words: [u32; 64],
         reads: Mutex<Vec<u16>>,
+        denied_read: Option<u16>,
     }
     impl ConfigSpace for Config {
-        fn read32(&self, offset: u16) -> u32 {
-            self.reads.lock().unwrap().push(offset);
-            self.words[usize::from(offset / 4)]
+        fn read8(&self, offset: u16) -> Result<u8, ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
         }
-        fn write32(&mut self, _: u16, _: u32) {
-            panic!("read-only discovery wrote config");
+        fn read16(&self, offset: u16) -> Result<u16, ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u16)
+        }
+        fn write8(&mut self, _: u16, _: u8) -> Result<(), ConfigError> {
+            Err(ConfigError::before_effect(
+                ConfigFailure::UnqualifiedControl,
+            ))
+        }
+        fn write16(&mut self, _: u16, _: u16) -> Result<(), ConfigError> {
+            Err(ConfigError::before_effect(
+                ConfigFailure::UnqualifiedControl,
+            ))
+        }
+        fn read32(&self, offset: u16) -> Result<u32, ConfigError> {
+            self.reads.lock().unwrap().push(offset);
+            if self.denied_read == Some(offset)
+                || !offset.is_multiple_of(4)
+                || usize::from(offset / 4) >= self.words.len()
+            {
+                return Err(ConfigError::before_effect(ConfigFailure::Access {
+                    offset,
+                    width: 4,
+                }));
+            }
+            Ok(self.words[usize::from(offset / 4)])
+        }
+        fn write32(&mut self, _: u16, _: u32) -> Result<(), ConfigError> {
+            Err(ConfigError::before_effect(
+                ConfigFailure::UnqualifiedControl,
+            ))
         }
     }
     fn make_config(header: u32) -> Config {
         let mut config = Config {
             words: [0; 64],
             reads: Mutex::new(Vec::new()),
+            denied_read: None,
         };
         config.words[1] = u32::from(regs::STATUS_CAP_LIST) << 16;
         config.words[usize::from(regs::CAPABILITY_LIST / 4)] = u32::from(CAP);
@@ -146,6 +176,15 @@ mod tests {
     }
     fn secure_header() -> u32 {
         u32::from(SECURE_DEVICE) | IOMMU_TYPE << 16 | IOMMU_REVISION << 19
+    }
+
+    #[test]
+    fn denied_body_read_keeps_precise_access_error_instead_of_allones_or_empty_capability() {
+        let mut config = make_config(secure_header());
+        config.denied_read = Some(CAP + 12);
+        assert!(
+            matches!(scan(&config),Err(Error::Config(ConfigError{reason:ConfigFailure::Access{offset,width:4},..}))if offset==CAP+12)
+        );
     }
 
     #[test]

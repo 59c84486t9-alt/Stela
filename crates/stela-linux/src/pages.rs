@@ -15,7 +15,10 @@ use stela_driver_base::bus::dma::memory::{CacheAttribute, MemoryError, PinnedPag
 #[cfg(target_arch = "x86_64")]
 mod stack;
 #[cfg(target_arch = "x86_64")]
-pub use stack::{AdmissionError, StackAdmission};
+pub use stack::{
+    AdmissionError, DormantChildStackLease, PreparedChildStackLease, PublishedChildStackLease,
+    StackAdmission,
+};
 #[cfg(target_arch = "x86_64")]
 mod mapping;
 #[cfg(target_arch = "x86_64")]
@@ -486,6 +489,18 @@ pub struct Catalog<P: Provider> {
 }
 
 impl<P: Provider> Catalog<P> {
+    /// Stored source identity only, never an entry, allocation or readiness
+    /// probe. Real page operations independently validate current/generation.
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn matches_kernel<K: super::owner::Platform, const N: usize>(
+        &self,
+        kernel: &super::kernel::KernelOwner<K, N>,
+    ) -> bool {
+        self.context.as_ref().is_some_and(|context| {
+            matches!(&context.entry, ContextEntry::Canonical { owner, .. } if *owner == kernel.raw())
+        })
+    }
+
     /// # Safety
     /// Call in process/deferred context with native IRQ/reentry, migration and
     /// reservation/root changes excluded. The provider and Reservation satisfy

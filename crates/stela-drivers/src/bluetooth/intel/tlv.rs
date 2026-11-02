@@ -45,6 +45,10 @@ pub struct TlvIdentity {
 impl TlvIdentity {
     // Legacy operational firmware may answer the FF query with TLVs but its
     // upload filename requires a fresh legacy-format read, not lossy conversion.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn legacy_fallback(p: &[u8]) -> Result<Option<u8>> {
         if p.first() != Some(&0) {
             return Err(Error::Protocol("TLV version status"));
@@ -79,9 +83,17 @@ impl TlvIdentity {
         Ok(matches!(variant, 0x11..=0x14).then_some(variant))
     }
     #[cfg(test)]
+    #[expect(
+        clippy::result_large_err,
+        reason = "This test-only return keeps the shared typed source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn parse(device: &Device, p: &[u8]) -> Result<Self> {
         Self::parse_transport(TransportIdentity::Usb(super::Identity::usb(device)?), p)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(crate) fn parse_transport(transport: TransportIdentity, p: &[u8]) -> Result<Self> {
         if p.first() != Some(&0) {
             return Err(Error::Protocol("TLV version status"));
@@ -286,6 +298,10 @@ impl TlvIdentity {
         }
         label
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn validate_security(&self, prior: &Self) -> Result<()> {
         for kind in [
             SECURE_BOOT,
@@ -313,6 +329,10 @@ impl TlvIdentity {
             .find(|(kind, _)| *kind == id)
             .map(|(_, value)| value.as_slice())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn boot_requirements<'a>(
         &'a self,
         initial: Option<&'a Self>,

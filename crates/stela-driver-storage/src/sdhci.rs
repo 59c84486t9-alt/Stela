@@ -23,6 +23,12 @@ use core::{
     cell::RefCell,
     sync::atomic::{AtomicU64, Ordering, fence},
 };
+mod attachment;
+pub use attachment::{
+    ControlledSlots, FailedAttachment, FailedHost, HostFailure, OwnedAttachFailure,
+    OwnedPreparation, PreparationStage, Retained, SlotPreparation,
+};
+use attachment::{FunctionPreparation, refused_preparation};
 mod command;
 mod gli;
 mod mmc_fast;
@@ -73,84 +79,96 @@ pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
 /// Native PCI slots, including empty sockets kept for explicit polling.
 pub struct Attached {
     pub hosts: Vec<Host>,
+    /// Failed owners are retained here and never admitted to the live host list.
+    pub failed_hosts: Vec<Host>,
+    pub failed_slots: Vec<Retained<SlotPreparation>>,
     pub cards: Vec<Card>,
     pub failures: Vec<(u8, BlockError)>,
 }
 
-/// Attach only MMIO already mapped by the normal firmware handoff. Vendor
-/// electrical/reset/clock quirks require their own checked source profiles.
+/// Consume and retain the original PCI function for every SDHCI profile.
+/// Failed preparation returns the same actual graph without admitting a live host.
+#[expect(
+    clippy::result_large_err,
+    reason = "Return the same affine device, mapping and timer graph without a fallible failure-path allocation."
+)]
 pub fn attach(
-    function: &mut Function,
+    function: Function,
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
-) -> Result<Attached, BlockError> {
-    validate_clock(handoff.clock)?;
-    if !matches(function) {
-        return Err(BlockError::Unsupported(
-            "PCI function is not standard SDHCI",
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
+) -> Result<Attached, OwnedAttachFailure> {
+    let mut owner = Retained::new(FunctionPreparation {
+        function,
+        minimum,
+        mappings: Vec::new(),
+    });
+    if let Err(error) = owner
+        .minimum
+        .check()
+        .map_err(BlockError::PciPower)
+        .and_then(|()| validate_clock(handoff.clock))
+    {
+        return Err(refused_preparation(error, owner));
+    }
+    if !matches(&owner.function) {
+        return Err(refused_preparation(
+            BlockError::Unsupported("PCI function is not standard SDHCI"),
+            owner,
         ));
     }
-    let profile = Profile::select(function.vendor, function.device);
-    if profile.retained_config() || profile.gli() {
-        return Err(BlockError::Unsupported(
-            "SDHCI profile requires owned PCI function attachment",
-        ));
+    let profile = Profile::select(owner.function.vendor, owner.function.device);
+    if profile.gli() {
+        return gli::attach(owner, handoff, dma);
     }
-    let mappings = prepare_slots(function, handoff, profile)?;
-    Ok(finish_attach(
-        mappings,
-        handoff.clock,
-        function.address.to_string(),
-        dma,
-        profile,
-        None,
-    ))
-}
-
-/// Whether later host clock/power operations require kept PCI ownership.
-pub fn requires_owned_config(function: &Function) -> bool {
-    let profile = Profile::select(function.vendor, function.device);
-    matches(function) && (profile.retained_config() || profile.gli())
-}
-
-/// Consume the enumerated function for profiles requiring future PCI
-/// configuration. All slots share that original permission, without raw ECAM aliases.
-pub fn attach_owned(
-    mut function: Function,
-    handoff: &Handoff,
-    dma: &mut dyn DmaAllocator,
-) -> Result<Attached, BlockError> {
-    if matches(&function) && Profile::select(function.vendor, function.device).gli() {
-        return gli::attach(function, handoff, dma);
+    let location = owner.function.address.to_string();
+    if let Err(error) = prepare_slots(owner.get_mut(), handoff, profile) {
+        return Err(refused_preparation(error, owner));
     }
-    if !requires_owned_config(&function) {
-        return attach(&mut function, handoff, dma);
-    }
-    if handoff.clock.ticks_per_microsecond == 0 {
-        return Err(BlockError::Unsupported(
-            "SDHCI requires a calibrated native clock",
-        ));
-    }
-    let profile = Profile::select(function.vendor, function.device);
-    let location = function.address.to_string();
-    let mappings = prepare_slots(&mut function, handoff, profile)?;
-    // Retire every slot before changing shared PCI clock/capability registers.
-    for registers in &mappings {
-        registers.write8(RESET, RESET_ALL);
-        if !handoff
-            .clock
-            .wait(RESET_US, || registers.read8(RESET) & RESET_ALL == 0)
-        {
-            return Err(BlockError::Unsupported(
-                "SDHCI owned-function slot reset did not retire",
-            ));
+    if profile.retained_config() {
+        // The same original function, mapped slots and timer remain guarded
+        // while all firmware slots retire before shared vendor configuration.
+        for registers in &owner.mappings {
+            registers.write8(RESET, RESET_ALL);
+            if !handoff
+                .clock
+                .wait(RESET_US, || registers.read8(RESET) & RESET_ALL == 0)
+            {
+                return Err(refused_preparation(
+                    BlockError::Unsupported("SDHCI owned-function slot reset did not retire"),
+                    owner,
+                ));
+            }
         }
     }
-    let control = Controller::new(function);
-    control.borrow_mut().prepare()?;
+    let FunctionPreparation {
+        function,
+        minimum,
+        mappings,
+    } = owner.into_inner();
+    let owned = Retained::new(ControlledSlots {
+        control: Controller::new(function),
+        mappings,
+        minimum,
+    });
+    if profile.retained_config() {
+        let prepared = owned.control.borrow_mut().prepare();
+        if let Err(error) = prepared {
+            return Err(OwnedAttachFailure {
+                error,
+                owner: Retained::new(FailedAttachment::ControlledSlots(owned.into_inner())),
+            });
+        }
+    }
+    let ControlledSlots {
+        control,
+        mappings,
+        minimum,
+    } = owned.into_inner();
     Ok(finish_attach(
         mappings,
         handoff.clock,
+        minimum,
         location,
         dma,
         profile,
@@ -159,15 +177,17 @@ pub fn attach_owned(
 }
 
 fn prepare_slots(
-    function: &mut Function,
+    owner: &mut FunctionPreparation,
     handoff: &Handoff,
     profile: Profile,
-) -> Result<Vec<crate::bus::mmio::Mmio>, BlockError> {
+) -> Result<(), BlockError> {
+    owner.minimum.check().map_err(BlockError::PciPower)?;
+    let function = &mut owner.function;
     if profile.retained_config() || profile.gli() {
         quiesce_pio(function)?;
     }
-    function.power_up(&handoff.clock)?;
-    let info = function.config().read8(PCI_SLOT_INFO);
+    function.power_up(owner.minimum.as_ref())?;
+    let info = function.config().read8(PCI_SLOT_INFO)?;
     let slots = profile.slots(((info >> 4) & 7) + 1);
     if profile.gli() && slots != 1 {
         return Err(BlockError::Unsupported(
@@ -178,11 +198,9 @@ fn prepare_slots(
     if first + usize::from(slots) > 6 {
         return Err(BlockError::Unsupported("SDHCI slot BAR inventory"));
     }
-    let bars = function.bars();
-    // Validate the complete mapping set before any controller is enabled.
-    let mut mappings = Vec::new();
+    let bars = function.bars()?;
     for index in 0..slots {
-        mappings.push(mapped_registers(
+        owner.mappings.push(mapped_registers(
             handoff,
             bars[first + usize::from(index)],
             0,
@@ -192,13 +210,15 @@ fn prepare_slots(
     if profile.retained_config() || profile.gli() {
         set_pio_command(function, true)?;
     } else {
-        function.enable_polled();
+        function.enable_polled()?;
     }
-    Ok(mappings)
+    Ok(())
 }
+
 fn finish_attach(
     mappings: Vec<crate::bus::mmio::Mmio>,
     clock: Clock,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
     location: String,
     dma: &mut dyn DmaAllocator,
     profile: Profile,
@@ -206,36 +226,80 @@ fn finish_attach(
 ) -> Attached {
     let mut attached = Attached {
         hosts: Vec::new(),
+        failed_hosts: Vec::new(),
+        failed_slots: Vec::new(),
         cards: Vec::new(),
         failures: Vec::new(),
     };
-    for (index, registers) in mappings.into_iter().enumerate() {
-        let location = format!("{location} SD slot {index}");
-        let host = if let Some(control) = &control {
-            Host::new_with_controller(
-                Box::new(registers),
-                clock,
-                location,
-                dma,
-                profile,
-                Some(control.clone()),
-            )
-        } else {
-            Host::new(Box::new(registers), clock, location, dma, profile)
-        };
-        match host {
+    let mut slots = Retained::new(mappings.into_iter().enumerate());
+    while let Some((index, registers)) = slots.get_mut().next() {
+        let slot_location = format!("{location} SD slot {index}");
+        let result = Host::new_with_controller(
+            Box::new(registers),
+            clock,
+            minimum.clone(),
+            slot_location,
+            dma,
+            profile,
+            control.clone(),
+        );
+        let mut failed = false;
+        match result {
             Ok(mut host) => {
                 match host.poll() {
                     Ok(Some(card)) => attached.cards.push(card),
                     Ok(None) => {}
-                    Err(error) => attached.failures.push((index as u8, error)),
-                };
-                attached.hosts.push(host);
+                    Err(error) => {
+                        failed = host.inner.borrow().fault.is_some();
+                        attached.failures.push((index as u8, error));
+                    }
+                }
+                if failed {
+                    attached.failed_hosts.push(host);
+                } else {
+                    attached.hosts.push(host);
+                }
             }
-            Err(error) => attached.failures.push((index as u8, error)),
+            Err(failure) => {
+                attached.failures.push((index as u8, failure.error));
+                match failure.owner.into_inner() {
+                    FailedHost::Host(host) => attached.failed_hosts.push(host),
+                    FailedHost::Preparation(owner) => {
+                        attached.failed_slots.push(Retained::new(owner))
+                    }
+                }
+                failed = true;
+            }
+        }
+        if failed {
+            for (index, registers) in slots.get_mut().by_ref() {
+                attached.failed_slots.push(Retained::new(SlotPreparation {
+                    registers: Box::new(registers),
+                    clock,
+                    minimum: minimum.clone(),
+                    location: format!("{location} SD slot {index}"),
+                    profile,
+                    controller: control.clone(),
+                    data: None,
+                    descriptors: None,
+                }));
+            }
+            break;
         }
     }
+    drop(slots.into_inner());
+    fence_failed_shared_hosts(&mut attached, control.as_ref());
     attached
+}
+fn fence_failed_shared_hosts(attached: &mut Attached, control: Option<&Control>) {
+    if control.is_some_and(|control| {
+        control
+            .try_borrow()
+            .map_or(true, |control| control.healthy().is_err())
+    }) {
+        attached.failed_hosts.append(&mut attached.hosts);
+        attached.cards.clear();
+    }
 }
 
 pub use super::mmc::{CardInfo, Failure, Kind, SignalVoltage, Timing};
@@ -251,6 +315,8 @@ struct Engine {
     profile: Profile,
     controller: Option<Control>,
     clock: Clock,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
+    minimum_in_progress: bool,
     location: String,
     version: u8,
     capabilities: u32,
@@ -321,7 +387,7 @@ pub struct HostInfo {
 /// Keep this owner even when a removable socket is empty. Polling a real
 /// removal/change fences every previous Card before reset or fresh discovery.
 pub struct Host {
-    inner: Rc<RefCell<Engine>>,
+    inner: Rc<RefCell<core::mem::ManuallyDrop<Engine>>>,
 }
 impl Host {
     /// Primary/cleanup diagnostics require no physical access.
@@ -337,39 +403,85 @@ impl Host {
             extended_capabilities: c.extended_capabilities,
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "Return the same affine device, mapping and timer graph without a fallible failure-path allocation."
+    )]
     fn new(
         registers: Box<dyn Registers>,
         clock: Clock,
+        minimum: Rc<dyn crate::bus::pci::power::Timer>,
         location: String,
         dma: &mut dyn DmaAllocator,
         profile: Profile,
-    ) -> Result<Self, BlockError> {
-        Self::new_with_controller(registers, clock, location, dma, profile, None)
+    ) -> Result<Self, HostFailure> {
+        Self::new_with_controller(registers, clock, minimum, location, dma, profile, None)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "Return the same affine device, mapping and timer graph without a fallible failure-path allocation."
+    )]
     fn new_with_controller(
         registers: Box<dyn Registers>,
         clock: Clock,
+        minimum: Rc<dyn crate::bus::pci::power::Timer>,
         location: String,
         dma: &mut dyn DmaAllocator,
         profile: Profile,
         controller: Option<Control>,
-    ) -> Result<Self, BlockError> {
-        if profile.retained_config() != controller.is_some() {
-            return Err(BlockError::Unsupported(
-                "SDHCI retained PCI authority does not match profile",
-            ));
+    ) -> Result<Self, HostFailure> {
+        let mut preparation = Retained::new(SlotPreparation {
+            registers,
+            clock,
+            minimum,
+            location,
+            profile,
+            controller,
+            data: None,
+            descriptors: None,
+        });
+        let result = (|| {
+            let preparation = preparation.get_mut();
+            if preparation.profile.retained_config() && preparation.controller.is_none() {
+                return Err(BlockError::Unsupported(
+                    "SDHCI retained PCI authority does not match profile",
+                ));
+            }
+            preparation.minimum.check().map_err(BlockError::PciPower)?;
+            validate_clock(preparation.clock)?;
+            if let Some(control) = &preparation.controller {
+                control.borrow().healthy()?;
+            }
+            preparation.data = Some(dma.allocate(TRANSFER_BYTES, 64)?);
+            preparation.descriptors = Some(dma.allocate(4096, 64)?);
+            Ok(())
+        })();
+        if let Err(error) = result {
+            return Err(HostFailure {
+                error,
+                owner: Retained::new(FailedHost::Preparation(preparation.into_inner())),
+            });
         }
-        validate_clock(clock)?;
-        if let Some(control) = &controller {
-            control.borrow().healthy()?;
-        }
-        let data = dma.allocate(TRANSFER_BYTES, 64)?;
-        let descriptors = dma.allocate(4096, 64)?;
-        let mut engine = Engine {
+        let SlotPreparation {
+            registers,
+            clock,
+            minimum,
+            location,
+            profile,
+            controller,
+            data,
+            descriptors,
+        } = preparation.into_inner();
+        // The successful preparation branch above supplies both allocations.
+        let data = data.expect("completed SDHCI data preparation");
+        let descriptors = descriptors.expect("completed SDHCI descriptor preparation");
+        let mut engine = core::mem::ManuallyDrop::new(Engine {
             registers,
             profile,
             controller,
             clock,
+            minimum,
+            minimum_in_progress: false,
             location,
             version: 0,
             capabilities: 0,
@@ -390,8 +502,16 @@ impl Host {
             last_failure: None,
             running: None,
             next_tag: 0,
-        };
-        engine.configure_host()?;
+        });
+        if let Err(error) = engine.configure_host() {
+            engine.quarantine_authority(error.clone());
+            return Err(HostFailure {
+                error,
+                owner: Retained::new(FailedHost::Host(Self {
+                    inner: Rc::new(RefCell::new(engine)),
+                })),
+            });
+        }
         Ok(Self {
             inner: Rc::new(RefCell::new(engine)),
         })
@@ -430,7 +550,7 @@ impl Host {
 /// Immutable published identity. An old clone never names a replacement card.
 #[derive(Clone)]
 pub struct Card {
-    inner: Rc<RefCell<Engine>>,
+    inner: Rc<RefCell<core::mem::ManuallyDrop<Engine>>>,
     generation: u64,
     identity: Identity,
     info: CardInfo,
@@ -449,7 +569,7 @@ impl Card {
         c.check_live(self.generation)?;
         let mut info = c.medium.as_ref().unwrap().info.clone();
         let rca = c.rca;
-        crate::mmc::protocol::Session::new(&mut *c, rca).retune_mmc(&mut info)?;
+        crate::mmc::protocol::Session::new(&mut **c, rca).retune_mmc(&mut info)?;
         c.medium.as_mut().unwrap().info = info.clone();
         self.info = info;
         Ok(())
@@ -610,6 +730,31 @@ impl BlockDevice for Card {
     }
 }
 impl Engine {
+    /// Real electrical/oscillator quiet time; failure terminally fences all aliases.
+    fn quiet(&mut self, microseconds: u64) -> Result<(), BlockError> {
+        self.healthy()?;
+        if let Some(control) = &self.controller {
+            control
+                .try_borrow_mut()
+                .map_err(|_| BlockError::Protocol("SDHCI shared physical operation is active"))?
+                .begin_physical()?;
+        }
+        self.minimum_in_progress = true;
+        let result = self
+            .minimum
+            .wait_us(microseconds)
+            .map_err(BlockError::PciPower);
+        self.minimum_in_progress = false;
+        if let Some(control) = &self.controller {
+            let mut control = control.borrow_mut();
+            if let Err(error) = &result {
+                control.fail(error.clone());
+            } else {
+                control.complete_physical();
+            }
+        }
+        result.map_err(|error| self.quarantine_authority(error))
+    }
     fn check_authority(&mut self) -> Result<(), BlockError> {
         self.healthy()?;
         self.registers
@@ -630,8 +775,16 @@ impl Engine {
     }
     fn healthy(&self) -> Result<(), BlockError> {
         self.fault.clone().map_or(Ok(()), Err)?;
+        if self.minimum_in_progress {
+            return Err(BlockError::Protocol(
+                "SDHCI minimum operation did not complete",
+            ));
+        }
         if let Some(control) = &self.controller {
-            control.borrow().healthy()?;
+            control
+                .try_borrow()
+                .map_err(|_| BlockError::Protocol("SDHCI shared physical operation is active"))?
+                .healthy()?;
         }
         Ok(())
     }
@@ -678,7 +831,15 @@ impl Engine {
     fn reset(&mut self, mask: u8) -> Result<(), BlockError> {
         self.check_authority()?;
         if self.profile == Profile::Gli9767 {
-            match gli::gl9767::before_reset(self.registers.as_mut(), self.clock, mask) {
+            self.minimum_in_progress = true;
+            let result = gli::gl9767::before_reset(
+                self.registers.as_mut(),
+                self.clock,
+                mask,
+                self.minimum.as_ref(),
+            );
+            self.minimum_in_progress = false;
+            match result {
                 Ok(()) => {}
                 Err(gli::gl9755::ClockFailure::Authority(error)) => {
                     return Err(self.quarantine_authority(error));
@@ -737,7 +898,7 @@ impl Engine {
                     "SDHCI rediscovery power-off did not acknowledge",
                 )));
             }
-            self.clock.delay(1_000);
+            self.quiet(1_000)?;
         }
         self.reset(RESET_ALL)?;
         self.signal_voltage = SignalVoltage::V3_3;
@@ -828,7 +989,7 @@ impl Engine {
                 ));
             }
             if power == POWER_180 {
-                self.clock.delay(100_000);
+                self.quiet(100_000)?;
                 self.signal_voltage = SignalVoltage::V1_8;
             }
         }
@@ -845,10 +1006,10 @@ impl Engine {
         );
         self.clear_command_status()?;
         self.power_off()?;
-        self.clock.delay(1000);
+        self.quiet(1000)?;
         if self.profile == Profile::Gli9767 {
             match gli::gl9767::set_power(self.registers.as_mut(), power) {
-                Ok(()) => self.clock.delay(10_000),
+                Ok(()) => self.quiet(10_000)?,
                 Err(gli::gl9755::ClockFailure::Authority(error)) => {
                     return Err(self.quarantine_authority(error));
                 }
@@ -857,7 +1018,11 @@ impl Engine {
                 }
             }
         } else if self.profile == Profile::Gli9755 {
-            if let Err(error) = gli::gl9755::set_power(self.registers.as_mut(), self.clock, power) {
+            self.minimum_in_progress = true;
+            let result =
+                gli::gl9755::set_power(self.registers.as_mut(), self.minimum.as_ref(), power);
+            self.minimum_in_progress = false;
+            if let Err(error) = result {
                 return Err(self.uhs_failure(error));
             }
         } else {
@@ -865,12 +1030,12 @@ impl Engine {
                 self.registers.write8(POWER, power);
             }
             self.registers.write8(POWER, power | POWER_ON);
-            self.clock.delay(10_000);
+            self.quiet(10_000)?;
         }
         self.set_clock(INIT_HZ)?;
         // mmc_power_up requires >=74 card clocks/1ms after enabling f_init.
         // The pre-clock power delay cannot supply any of these card clocks.
-        self.clock.delay(1000);
+        self.quiet(1000)?;
         Ok(())
     }
     fn set_clock(&mut self, hz: u32) -> Result<(), BlockError> {
@@ -880,14 +1045,18 @@ impl Engine {
             } else {
                 gli::gl9767::set_clock
             };
-            match set_clock(
+            self.minimum_in_progress = true;
+            let result = set_clock(
                 self.registers.as_mut(),
                 self.clock,
                 self.version,
                 self.base_hz,
                 self.sd_timing,
                 hz,
-            ) {
+                self.minimum.as_ref(),
+            );
+            self.minimum_in_progress = false;
+            match result {
                 Ok(actual) => {
                     self.actual_hz = actual;
                     return Ok(());
@@ -905,21 +1074,33 @@ impl Engine {
             }
         }
         if self.profile == Profile::Gli9750 {
-            self.actual_hz = gli::set_clock(
+            self.minimum_in_progress = true;
+            let result = gli::set_clock(
                 self.registers.as_mut(),
                 self.clock,
                 self.version,
                 self.base_hz,
                 self.sd_timing,
                 hz,
-            )?;
+                self.minimum.as_ref(),
+            );
+            self.minimum_in_progress = false;
+            self.actual_hz = result.map_err(|error| {
+                if matches!(error, BlockError::PciPower(_)) {
+                    self.quarantine_authority(error)
+                } else {
+                    error
+                }
+            })?;
             return Ok(());
         }
         self.registers.write16(CLOCK, 0);
         if self.registers.read16(CLOCK) & CLOCK_CARD != 0 {
             return Err(BlockError::Unsupported("SDHCI card clock did not stop"));
         }
-        if let Some(control) = &self.controller {
+        if self.profile.retained_config()
+            && let Some(control) = &self.controller
+        {
             control.borrow_mut().before_clock()?;
         }
         if hz == 0 {
@@ -945,6 +1126,14 @@ impl Engine {
         self.finish_ios()
     }
     fn power_off(&mut self) -> Result<(), BlockError> {
+        if self.minimum_in_progress {
+            return Err(BlockError::Protocol(
+                "SDHCI minimum operation did not complete",
+            ));
+        }
+        if let Some(error @ BlockError::PciPower(_)) = &self.fault {
+            return Err(error.clone());
+        }
         if self.profile.gli() && !self.uhs_failed && self.healthy().is_ok() {
             // Normal power transitions run the vendor clock-off hook.
             // A permanently fenced owner keeps the immediate containment path.
@@ -960,9 +1149,20 @@ impl Engine {
             };
         }
         if self.profile == Profile::Gli9755 {
-            return gli::gl9755::set_power(self.registers.as_mut(), self.clock, 0);
+            self.minimum_in_progress = true;
+            let result = gli::gl9755::set_power(self.registers.as_mut(), self.minimum.as_ref(), 0);
+            self.minimum_in_progress = false;
+            return result.map_err(|error| {
+                if matches!(error, BlockError::PciPower(_)) {
+                    self.quarantine_authority(error)
+                } else {
+                    error
+                }
+            });
         }
-        if let Some(control) = &self.controller {
+        if self.profile.retained_config()
+            && let Some(control) = &self.controller
+        {
             self.registers.write16(CLOCK, 0);
             control.borrow_mut().power_off()?;
         }
@@ -975,14 +1175,25 @@ impl Engine {
         Ok(())
     }
     fn o2_card_present(&mut self) -> Result<bool, BlockError> {
-        let result = pci::o2_stabilize(self.registers.as_mut(), self.clock);
-        if let Err(error) = &result {
-            self.medium = None;
-            if let Some(control) = &self.controller {
-                control.borrow_mut().fail(error.clone());
+        self.healthy()?;
+        if let Some(control) = &self.controller {
+            control
+                .try_borrow_mut()
+                .map_err(|_| BlockError::Protocol("SDHCI shared physical operation is active"))?
+                .begin_physical()?;
+        }
+        self.minimum_in_progress = true;
+        let result = pci::o2_stabilize(self.registers.as_mut(), self.clock, self.minimum.as_ref());
+        self.minimum_in_progress = false;
+        if let Some(control) = &self.controller {
+            let mut control = control.borrow_mut();
+            if let Err(error) = &result {
+                control.fail(error.clone());
+            } else {
+                control.complete_physical();
             }
         }
-        result
+        result.map_err(|error| self.quarantine_authority(error))
     }
     fn set_high_speed_host(&mut self) -> Result<(), BlockError> {
         self.check_authority()?;
@@ -1104,6 +1315,7 @@ mod owned_tests {
             Clock {
                 ticks_per_microsecond: CLOCK_TICKS_PER_US,
             },
+            crate::sdhci::model::minimum(),
             "O2 native model".into(),
             dma,
             Profile::select(0x1217, device),
@@ -1235,6 +1447,10 @@ mod owned_tests {
     }
 
     #[test]
+    #[expect(
+        clippy::result_large_err,
+        reason = "The single constructor closure returns the same owning failure under test without allocating a replacement."
+    )]
     fn o2_first_slot_config_fault_refuses_second_constructor_before_mmio_or_allocation() {
         let mut dma = TestRegion::new(128 * 1024 * 8);
         let chip = Rc::new(RefCell::new(O2Chip::new(0x8320)));
@@ -1249,6 +1465,7 @@ mod owned_tests {
                 Clock {
                     ticks_per_microsecond: CLOCK_TICKS_PER_US,
                 },
+                crate::sdhci::model::minimum(),
                 "O2 shared admission".into(),
                 dma,
                 Profile::select(0x1217, 0x8320),
@@ -1320,3 +1537,6 @@ mod owned_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod minimum_tests;

@@ -71,18 +71,46 @@ impl Config {
 }
 
 impl ConfigSpace for Config {
-    fn read32(&self, offset: u16) -> u32 {
-        self.words[usize::from(offset / 4)]
+    fn read32(&self, offset: u16) -> core::result::Result<u32, crate::bus::pci::ConfigError> {
+        Ok(self.words[usize::from(offset / 4)])
     }
-    fn write32(&mut self, offset: u16, value: u32) {
+    fn write32(
+        &mut self,
+        offset: u16,
+        value: u32,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
         self.words[usize::from(offset / 4)] = value;
         (self.react)(&mut self.words, offset);
+
+        Ok(())
     }
-    fn write8(&mut self, offset: u16, value: u8) {
+    fn write8(
+        &mut self,
+        offset: u16,
+        value: u8,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
         let word = &mut self.words[usize::from(offset / 4)];
         let shift = (offset & 3) * 8;
         *word = *word & !(0xff << shift) | u32::from(value) << shift;
         (self.react)(&mut self.words, offset);
+
+        Ok(())
+    }
+
+    fn read8(&self, offset: u16) -> core::result::Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+    fn read16(&self, offset: u16) -> core::result::Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+    }
+    fn write16(
+        &mut self,
+        offset: u16,
+        value: u16,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        let shift = (offset & 2) * 8;
+        let word = self.read32(offset & !3)? & !(0xffff << shift) | u32::from(value) << shift;
+        self.write32(offset & !3, word)
     }
 }
 
@@ -113,7 +141,14 @@ fn ehci_firmware_releases_its_semaphore_and_its_smis_go_off() {
     config.words[usize::from(EECP / 4) + 1] = 0xe03f_0001;
     let mut registers = ehci_registers();
     registers.words.insert(0x20 + EHCI_USBCMD, EHCI_RUN);
-    let handed = ehci(&mut config, &mut registers, 0x400, clock()).unwrap();
+    let handed = ehci(
+        &mut config,
+        &mut registers,
+        0x400,
+        clock(),
+        crate::minimum_model::owned(clock()).as_ref(),
+    )
+    .unwrap();
     assert_eq!(
         handed,
         Handed {
@@ -133,7 +168,14 @@ fn ehci_firmware_that_keeps_its_semaphore_is_forced_out() {
     let _time = crate::test_clock::virtualize();
     let mut config = Config::new(|_, _| {});
     config.words[usize::from(EECP / 4)] = EHCI_LEGSUP | EHCI_BIOS_OWNED;
-    let handed = ehci(&mut config, &mut ehci_registers(), 0x400, clock()).unwrap();
+    let handed = ehci(
+        &mut config,
+        &mut ehci_registers(),
+        0x400,
+        clock(),
+        crate::minimum_model::owned(clock()).as_ref(),
+    )
+    .unwrap();
     assert!(handed.from_firmware && handed.forced);
     assert_eq!(config.words[usize::from(EECP / 4)] & EHCI_BIOS_OWNED, 0);
 }
@@ -145,7 +187,13 @@ fn ehci_capability_loop_without_legacy_support_is_malformed() {
     // A vendor capability pointing at itself.
     config.words[usize::from(EECP / 4)] = u32::from(EECP) << 8 | 0x0a;
     assert_eq!(
-        ehci(&mut config, &mut ehci_registers(), 0x400, clock()),
+        ehci(
+            &mut config,
+            &mut ehci_registers(),
+            0x400,
+            clock(),
+            crate::minimum_model::owned(clock()).as_ref()
+        ),
         Err(Error::Malformed)
     );
 }
@@ -165,7 +213,13 @@ fn ohci_routing_returns_on_ownership_change_or_is_cleared() {
                 }
             });
         }
-        let handed = ohci(&mut registers, 0x1000, clock()).unwrap();
+        let handed = ohci(
+            &mut registers,
+            0x1000,
+            clock(),
+            crate::minimum_model::owned(clock()).as_ref(),
+        )
+        .unwrap();
         assert_eq!(
             handed,
             Handed {
@@ -185,9 +239,14 @@ fn uhci_set_up_by_firmware_is_reset_with_legacy_support_cleared() {
     let mut config = Config::new(|_, _| {});
     config.words[usize::from(UHCI_LEGSUP / 4)] = 0x2010;
     let mut ports = Model::with(&[(UHCI_USBCMD, u32::from(UHCI_RUN | UHCI_CONFIGURE))]);
-    let handed = uhci(&mut config, &mut ports, clock()).unwrap();
+    let handed = uhci(
+        &mut config,
+        &mut ports,
+        crate::minimum_model::owned(clock()).as_ref(),
+    )
+    .unwrap();
     assert!(handed.from_firmware);
-    assert_eq!(config.read16(UHCI_LEGSUP), UHCI_LEGSUP_RWC);
+    assert_eq!(config.read16(UHCI_LEGSUP).unwrap(), UHCI_LEGSUP_RWC);
     assert_eq!(
         ports.writes,
         [
@@ -204,7 +263,11 @@ fn uhci_left_suspended_by_firmware_is_untouched() {
     let mut config = Config::new(|_, _| {});
     let mut ports = Model::with(&[(UHCI_USBCMD, u32::from(UHCI_CONFIGURE | UHCI_EGSM))]);
     assert_eq!(
-        uhci(&mut config, &mut ports, clock()),
+        uhci(
+            &mut config,
+            &mut ports,
+            crate::minimum_model::owned(clock()).as_ref()
+        ),
         Ok(Handed::default())
     );
     assert!(ports.writes.is_empty());
@@ -230,7 +293,13 @@ fn xhci_legacy_support_is_taken_and_the_controller_halted() {
             words.insert(0x20 + XHCI_USBSTS, XHCI_HALTED);
         }
     });
-    let handed = xhci(&mut registers, 0x1000, clock()).unwrap();
+    let handed = xhci(
+        &mut registers,
+        0x1000,
+        clock(),
+        crate::minimum_model::owned(clock()).as_ref(),
+    )
+    .unwrap();
     assert_eq!(
         handed,
         Handed {
@@ -248,8 +317,24 @@ fn xhci_legacy_support_is_taken_and_the_controller_halted() {
 fn registers_reading_all_ones_refuse_the_handoff() {
     let _time = crate::test_clock::virtualize();
     let mut gone = Model::with(&[(XHCI_HCCPARAMS1, u32::MAX), (OHCI_CONTROL, u32::MAX)]);
-    assert_eq!(xhci(&mut gone, 0x1000, clock()), Err(Error::Removed));
-    assert_eq!(ohci(&mut gone, 0x1000, clock()), Err(Error::Removed));
+    assert_eq!(
+        xhci(
+            &mut gone,
+            0x1000,
+            clock(),
+            crate::minimum_model::owned(clock()).as_ref()
+        ),
+        Err(Error::Removed)
+    );
+    assert_eq!(
+        ohci(
+            &mut gone,
+            0x1000,
+            clock(),
+            crate::minimum_model::owned(clock()).as_ref()
+        ),
+        Err(Error::Removed)
+    );
 }
 
 #[test]
@@ -258,3 +343,5 @@ fn only_usb_host_interfaces_have_a_kind() {
     assert_eq!(Kind::of([0x0c, 0x03, 0xfe]), None);
     assert_eq!(Kind::of([0x0c, 0x05, 0x00]), None);
 }
+
+mod minimum;

@@ -3122,3 +3122,57 @@ fn a_firmware_error_frees_the_function_and_boots_it_for_the_keeper_to_join_again
     }
     panic!("{:?} {:?}", wifi.radio().phase(), wifi.radio().error());
 }
+
+#[test]
+fn reset_access_refusal_retains_stopped_owner_and_never_boots_or_retries() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
+    use crate::bus::pci::{ConfigError, ConfigFailure};
+    let native = Native::default();
+    let (mut wifi, _device) = connect(&native, false);
+    let retained_owners = Arc::strong_count(&native.drops);
+    let drops = native.drops.load(Ordering::Relaxed);
+    assert!(retained_owners > 1);
+    assert!(!native.domain.records.lock().unwrap().live.is_empty());
+    let error =
+        crate::block::BlockError::Config(ConfigError::before_effect(ConfigFailure::ForeignGrant));
+    wifi.radio_mut().spend_restarts(3);
+    {
+        let mut state = native.state.lock().unwrap();
+        state.reset_error = Some(error.clone());
+        state.registers.insert(8, 1 << 25);
+    }
+    wifi.carrier();
+    assert_eq!(wifi.radio().phase(), Phase::Failed);
+    assert_eq!(
+        wifi.radio().error(),
+        Some(&crate::wifi::intel::link::Error::Pci(error))
+    );
+    assert!(!wifi.radio().no_reset());
+    assert!(!wifi.signals());
+    assert_eq!(wifi.transmit(&[1; 60]), Err(crate::LinkError::NoCarrier));
+    let operations = native.state.lock().unwrap().ops.clone();
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|op| matches!(op, Op::Reset))
+            .count(),
+        1
+    );
+    // The acknowledged stop releases DMA before the reset attempt. The
+    // same function owner remains held even when no live DMA is left.
+    assert!(native.domain.records.lock().unwrap().live.is_empty());
+    assert_eq!(Arc::strong_count(&native.drops), retained_owners);
+    assert_eq!(native.drops.load(Ordering::Relaxed), drops);
+    for _ in 0..3 {
+        assert!(!wifi.carrier());
+    }
+    assert_eq!(native.state.lock().unwrap().ops, operations);
+    assert!(native.domain.records.lock().unwrap().live.is_empty());
+    assert_eq!(Arc::strong_count(&native.drops), retained_owners);
+    assert_eq!(native.drops.load(Ordering::Relaxed), drops);
+    drop(wifi);
+    assert!(Arc::strong_count(&native.drops) < retained_owners);
+    assert!(native.drops.load(Ordering::Relaxed) > drops);
+}

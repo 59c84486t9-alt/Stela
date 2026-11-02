@@ -3,8 +3,9 @@ pub mod posted_msi;
 use crate::bus::pci::requester::{RequesterId, preparation::DetachedRequester};
 use alloc::{boxed::Box, sync::Arc};
 use core::{
+    cell::UnsafeCell,
     marker::PhantomData,
-    mem::ManuallyDrop,
+    mem::{ManuallyDrop, MaybeUninit},
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
@@ -17,6 +18,11 @@ const CLOSING: u8 = 2;
 const QUARANTINED: u8 = 3;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqError {
+    Config(crate::bus::pci::ConfigError),
+    /// A first cause is being published. Observation only, never a new cause.
+    FaultPublishing,
+    /// Execution unwound or an active registration was abandoned without a join.
+    Interrupted,
     Unavailable,
     WrongCpu,
     Exhausted,
@@ -28,6 +34,11 @@ pub enum IrqError {
     Drain,
     Unregistered,
     Delivery(posted_msi::Error),
+}
+impl From<crate::bus::pci::ConfigError> for IrqError {
+    fn from(error: crate::bus::pci::ConfigError) -> Self {
+        Self::Config(error)
+    }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MsiMessage {
@@ -108,7 +119,7 @@ impl RouteId {
     }
     pub(crate) fn check_process(&self) -> Result<(), IrqError> {
         self.0.platform.check_process()?;
-        decode_error(self.0.registry.fault.load(Ordering::Acquire)).map_or(Ok(()), Err)
+        self.0.registry.fault.failure().map_or(Ok(()), Err)
     }
 }
 /// Borrowed view of an owned Registry reservation, never native entered authority.
@@ -232,6 +243,10 @@ impl<S: Source + ?Sized> UnregisteredSource<S> {
     #[expect(
         clippy::type_complexity,
         reason = "explicit source/handler/route transfer preserves the checked extraction contract"
+    )]
+    #[expect(
+        clippy::result_large_err,
+        reason = "checked extraction returns the same source, handler and route owner without allocating"
     )]
     pub unsafe fn into_parts(
         mut self,
@@ -423,6 +438,10 @@ impl<S: Source + ?Sized> RetiredSource<S> {
         clippy::type_complexity,
         reason = "explicit source/handler/route transfer preserves the checked extraction contract"
     )]
+    #[expect(
+        clippy::result_large_err,
+        reason = "checked retirement extraction returns the same source and route graph without allocating"
+    )]
     pub unsafe fn into_parts(
         mut self,
     ) -> Result<(Box<S>, Arc<dyn Handler>, RetiredRoute), ExtractionFailure<Self>> {
@@ -530,62 +549,67 @@ pub unsafe trait Platform: Send + Sync {
     /// IRQs are disabled; no Registry/resource lock is held.
     unsafe fn interrupt_window(&self);
 }
-fn encode_error(error: IrqError) -> u8 {
-    match error {
-        IrqError::Unavailable => 1,
-        IrqError::WrongCpu => 2,
-        IrqError::Exhausted => 3,
-        IrqError::Unsupported => 4,
-        IrqError::FailedRead => 5,
-        IrqError::Mask => 6,
-        IrqError::Quiesce => 7,
-        IrqError::Route => 8,
-        IrqError::Drain => 9,
-        IrqError::Unregistered => 10,
-        IrqError::Delivery(error) => {
-            16 + match error {
-                posted_msi::Error::RootUnavailable => 0,
-                posted_msi::Error::Unsupported => 1,
-                posted_msi::Error::RootFailed => 2,
-                posted_msi::Error::Unbound => 3,
-                posted_msi::Error::AlreadyBound => 4,
-                posted_msi::Error::WrongRequester => 5,
-                posted_msi::Error::Context => 6,
-                posted_msi::Error::NotRetired => 7,
-            }
+const FAULT_CLEAR: u8 = 0;
+const FAULT_WRITING: u8 = 1;
+const FAULT_READY: u8 = 2;
+/// Immutable first-cause publication. A preempted writer never makes an IRQ
+/// wait or read an unfinished payload; pending observations remain distinct.
+struct FirstFault {
+    phase: AtomicU8,
+    cause: UnsafeCell<MaybeUninit<IrqError>>,
+}
+// SAFETY: exactly one successful CLEAR→WRITING CAS owns the only payload write.
+// READY is release-published and never reset; acquire readers only copy this
+// immutable Copy/Send/Sync error after READY. No payload access occurs pending.
+unsafe impl Sync for FirstFault {}
+impl FirstFault {
+    const fn new() -> Self {
+        Self {
+            phase: AtomicU8::new(FAULT_CLEAR),
+            cause: UnsafeCell::new(MaybeUninit::uninit()),
         }
     }
-}
-fn decode_error(code: u8) -> Option<IrqError> {
-    Some(match code {
-        0 => return None,
-        1 => IrqError::Unavailable,
-        2 => IrqError::WrongCpu,
-        3 => IrqError::Exhausted,
-        4 => IrqError::Unsupported,
-        5 => IrqError::FailedRead,
-        6 => IrqError::Mask,
-        7 => IrqError::Quiesce,
-        8 => IrqError::Route,
-        9 => IrqError::Drain,
-        10 => IrqError::Unregistered,
-        16 => IrqError::Delivery(posted_msi::Error::RootUnavailable),
-        17 => IrqError::Delivery(posted_msi::Error::Unsupported),
-        18 => IrqError::Delivery(posted_msi::Error::RootFailed),
-        19 => IrqError::Delivery(posted_msi::Error::Unbound),
-        20 => IrqError::Delivery(posted_msi::Error::AlreadyBound),
-        21 => IrqError::Delivery(posted_msi::Error::WrongRequester),
-        22 => IrqError::Delivery(posted_msi::Error::Context),
-        23 => IrqError::Delivery(posted_msi::Error::NotRetired),
-        _ => IrqError::Drain,
-    })
+    /// Pending is an observation of another publication, never its cause.
+    fn latch(&self, cause: IrqError) -> bool {
+        if cause == IrqError::FaultPublishing
+            || self
+                .phase
+                .compare_exchange(
+                    FAULT_CLEAR,
+                    FAULT_WRITING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+        {
+            return false;
+        }
+        // No callback, allocation, formatting, panic or wait is permitted
+        // between the claim and publication; the payload is a plain Copy.
+        // SAFETY: this successful CAS uniquely owns the only write. Readers
+        // cannot touch cause until the following release-published READY.
+        unsafe { (*self.cause.get()).write(cause) };
+        self.phase.store(FAULT_READY, Ordering::Release);
+        true
+    }
+    fn failure(&self) -> Option<IrqError> {
+        match self.phase.load(Ordering::Acquire) {
+            FAULT_CLEAR => None,
+            FAULT_READY => {
+                // SAFETY: READY acquired the unique completed payload write;
+                // it never changes again, and IrqError is Copy.
+                Some(unsafe { (*self.cause.get()).assume_init_read() })
+            }
+            _ => Some(IrqError::FaultPublishing),
+        }
+    }
 }
 struct Slot {
     source: core::cell::UnsafeCell<Box<dyn Source>>,
     handler: Arc<dyn Handler>,
     domain: Option<Arc<dyn posted_msi::NotificationDomain>>,
     chip: Option<Arc<dyn ChipEoi>>,
-    fault: AtomicU8,
+    fault: FirstFault,
     routing: core::cell::UnsafeCell<RouteRequest>,
     id: RouteId,
     programming: Option<Route>,
@@ -624,7 +648,7 @@ impl<P: Platform + 'static> Pending<'static, P> {
             handler: request.handler,
             domain,
             chip,
-            fault: AtomicU8::new(0),
+            fault: FirstFault::new(),
             routing: core::cell::UnsafeCell::new(request.routing),
             id,
             programming,
@@ -685,7 +709,7 @@ impl<P: Platform + 'static> IrqController for Registry<P> {
 #[derive(Clone, Copy)]
 pub struct RegistryIdentity {
     held: &'static AtomicBool,
-    fault: &'static AtomicU8,
+    fault: &'static FirstFault,
 }
 impl RegistryIdentity {
     pub fn same(self, other: Self) -> bool {
@@ -699,7 +723,7 @@ pub struct Registry<P: Platform> {
     reserved: AtomicUsize,
     held: AtomicBool,
     quarantined: AtomicU64,
-    controller_fault: AtomicU8,
+    controller_fault: FirstFault,
 }
 impl<P: Platform> Registry<P> {
     pub const fn new(platform: P) -> Self {
@@ -709,7 +733,7 @@ impl<P: Platform> Registry<P> {
             reserved: AtomicUsize::new(0),
             held: AtomicBool::new(false),
             quarantined: AtomicU64::new(0),
-            controller_fault: AtomicU8::new(0),
+            controller_fault: FirstFault::new(),
         }
     }
     pub fn identity(&'static self) -> RegistryIdentity {
@@ -721,7 +745,7 @@ impl<P: Platform> Registry<P> {
     /// Latched original controller acknowledgement failure. A true dispatch
     /// return means vector ownership only; it never certifies successful EOI.
     pub fn controller_failure(&self) -> Option<IrqError> {
-        decode_error(self.controller_fault.load(Ordering::Acquire))
+        self.controller_fault.failure()
     }
     fn check_controller(&self) -> Result<(), IrqError> {
         self.controller_failure().map_or(Ok(()), Err)
@@ -750,7 +774,18 @@ impl<P: Platform> Registry<P> {
             saved,
         }
     }
-    fn quarantine(&self, slot: NonNull<Slot>) {
+    fn quarantine(&self, slot: NonNull<Slot>, cause: IrqError) {
+        // SAFETY: every exposed slot is retained until its checked final join;
+        // quarantine never releases its allocation, even on a foreign CPU.
+        let cause = if cause == IrqError::Interrupted {
+            // Drop diagnostics cannot replace an actual or unfinished original
+            // controller cause. Pending is still never stored as a new cause.
+            self.controller_failure().unwrap_or(cause)
+        } else {
+            cause
+        };
+        // SAFETY: the same retained original allocation as above.
+        unsafe { slot.as_ref() }.fault.latch(cause);
         // SAFETY: every exposed slot is permanently kept until successful
         // detach; quarantine only touches its CPU-independent atomic state.
         if unsafe { slot.as_ref() }
@@ -759,6 +794,20 @@ impl<P: Platform> Registry<P> {
             != QUARANTINED
         {
             self.count_quarantine();
+        }
+    }
+    fn slot_failure(&self, slot: &Slot) -> IrqError {
+        // A controller's pending observation is never relatched locally.
+        // Its actual retained cell supplies the original cause after READY.
+        let local = slot.fault.failure();
+        match local {
+            Some(error) if error != IrqError::Interrupted => error,
+            // A Drop diagnostic is not a replacement for an eventual physical
+            // controller cause, including its still-unfinished publication.
+            _ => self
+                .controller_failure()
+                .or(local)
+                .unwrap_or(IrqError::Interrupted),
         }
     }
     pub fn dispatch(&self, vector: u8) -> bool {
@@ -787,9 +836,10 @@ impl<P: Platform> Registry<P> {
         };
         let controller_error = self.controller_failure();
         let state = slot.map(|slot| slot.state.load(Ordering::Acquire));
-        let live = controller_error.is_none() && state == Some(LIVE);
+        let slot_error = slot.and_then(|slot| slot.fault.failure());
+        let live = controller_error.is_none() && slot_error.is_none() && state == Some(LIVE);
         drop(guard);
-        let mut error = controller_error;
+        let mut error = controller_error.or(slot_error);
         if let Some(slot) = slot
             && live
         {
@@ -826,23 +876,13 @@ impl<P: Platform> Registry<P> {
                 // No Slot may exist for a delayed notification. Preserve the
                 // actual controller failure canonically before allowing any
                 // replacement admission or callback, rather than losing it.
-                let _ = self.controller_fault.compare_exchange(
-                    0,
-                    encode_error(cause),
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                );
+                self.controller_fault.latch(cause);
                 error.get_or_insert(cause);
             }
         }
         if let Some(slot) = slot {
             if let Some(error) = error {
-                let _ = slot.fault.compare_exchange(
-                    0,
-                    encode_error(error),
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                );
+                slot.fault.latch(error);
                 if slot.state.swap(QUARANTINED, Ordering::AcqRel) != QUARANTINED {
                     self.count_quarantine();
                 }
@@ -1016,7 +1056,7 @@ impl<P: Platform + 'static> Registry<P> {
                 ))));
                 self.slots[reservation.index].store(slot.as_ptr(), Ordering::Release);
                 reservation.transferred = true;
-                self.quarantine(slot);
+                self.quarantine(slot, IrqError::Delivery(error.error()));
                 return Err(IrqError::Delivery(error.error()).into());
             }
         };
@@ -1032,7 +1072,7 @@ impl<P: Platform + 'static> Registry<P> {
                     ))));
                     self.slots[reservation.index].store(slot.as_ptr(), Ordering::Release);
                     reservation.transferred = true;
-                    self.quarantine(slot);
+                    self.quarantine(slot, IrqError::Delivery(error));
                     return Err(IrqError::Delivery(error).into());
                 }
             },
@@ -1094,30 +1134,30 @@ impl<P: Platform + 'static> Registry<P> {
                     .map_err(IrqError::Delivery)
             });
         if let Err(error) = armed {
-            self.quarantine(slot);
+            self.quarantine(slot, error);
             return Err(error.into());
         }
-        if stored.fault.load(Ordering::Acquire) != 0
+        if stored.fault.failure().is_some()
             || stored
                 .state
                 .compare_exchange(ARMING, LIVE, Ordering::AcqRel, Ordering::Acquire)
                 .is_err()
         {
-            return Err(decode_error(stored.fault.load(Ordering::Acquire))
-                .unwrap_or(IrqError::Drain)
-                .into());
+            return Err(self.slot_failure(stored).into());
         }
         // SAFETY: published LIVE callback and exact original route stay retained.
         if let Err(error) = unsafe { source.unmask() } {
-            self.quarantine(slot);
-            let _ = source.mask();
+            self.quarantine(slot, error);
+            // No further source effect follows a failed post-LIVE operation.
+            // Quarantine retains the uncertain enabled/masked state and owners.
             return Err(error.into());
         }
-        self.check_controller()?;
+        if let Err(error) = self.check_controller() {
+            self.quarantine(slot, error);
+            return Err(error.into());
+        }
         if stored.state.load(Ordering::Acquire) != LIVE {
-            return Err(decode_error(stored.fault.load(Ordering::Acquire))
-                .unwrap_or(IrqError::Drain)
-                .into());
+            return Err(self.slot_failure(stored).into());
         }
         Ok(registration)
     }
@@ -1209,21 +1249,9 @@ impl<P: Platform> Drop for DispatchUnwind<'_, P> {
         if self.completed {
             return;
         }
-        let code = encode_error(IrqError::Drain);
-        let _ = self.registry.controller_fault.compare_exchange(
-            0,
-            code,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        self.registry.controller_fault.latch(IrqError::Interrupted);
         if let Some(slot) = self.slot {
-            // SAFETY: lock-protected acquisition retained an inflight claim;
-            // no successful retirement can free this actual allocation.
-            let stored = unsafe { slot.as_ref() };
-            let _ = stored
-                .fault
-                .compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire);
-            self.registry.quarantine(slot);
+            self.registry.quarantine(slot, IrqError::Interrupted);
         }
     }
 }
@@ -1235,7 +1263,7 @@ struct RetirementUnwind<'a, P: Platform> {
 impl<P: Platform> Drop for RetirementUnwind<'_, P> {
     fn drop(&mut self) {
         if !self.completed {
-            self.registry.quarantine(self.slot);
+            self.registry.quarantine(self.slot, IrqError::Interrupted);
         }
     }
 }
@@ -1267,11 +1295,18 @@ impl<P: Platform> Registration<'_, P> {
         }
         // SAFETY: this registration keeps its exact live source allocation.
         let slot = unsafe { self.slot.as_ref() };
+        if let Some(error) = slot.fault.failure() {
+            return Err(error);
+        }
         if slot.state.load(Ordering::Acquire) != LIVE {
             return Err(IrqError::Drain);
         }
         // SAFETY: only this original process owner touches the affine source.
-        unsafe { &mut *slot.source.get() }.mask()
+        let result = unsafe { &mut *slot.source.get() }.mask();
+        if let Err(error @ IrqError::Config(_)) = result {
+            self.registry.quarantine(self.slot, error);
+        }
+        result
     }
     pub fn unmask(&mut self) -> Result<(), IrqError> {
         self.registry.platform.check_process()?;
@@ -1281,6 +1316,9 @@ impl<P: Platform> Registration<'_, P> {
         }
         // SAFETY: same retained live registration; no ISR touches source/route.
         let slot = unsafe { self.slot.as_ref() };
+        if let Some(error) = slot.fault.failure() {
+            return Err(error);
+        }
         if slot.state.load(Ordering::Acquire) != LIVE {
             return Err(IrqError::Drain);
         }
@@ -1294,7 +1332,11 @@ impl<P: Platform> Registration<'_, P> {
             .check()
             .map_err(IrqError::Delivery)?;
         // SAFETY: the same exact LIVE callback and checked root route remain.
-        unsafe { (&mut *slot.source.get()).unmask() }
+        let result = unsafe { (&mut *slot.source.get()).unmask() };
+        if let Err(error @ IrqError::Config(_)) = result {
+            self.registry.quarantine(self.slot, error);
+        }
+        result
     }
     pub fn retire(&mut self) -> Result<RetiredSource<dyn Source>, IrqError> {
         if !self.active {
@@ -1302,12 +1344,9 @@ impl<P: Platform> Registration<'_, P> {
         }
         // SAFETY: this active registration retains its exact live Slot;
         // atomic-only inspection is valid even if original context is refused.
-        if unsafe { self.slot.as_ref() }.state.load(Ordering::Acquire) == QUARANTINED {
-            // SAFETY: active registration retains this exact slot and atomics.
-            return Err(
-                decode_error(unsafe { self.slot.as_ref() }.fault.load(Ordering::Acquire))
-                    .unwrap_or(IrqError::Drain),
-            );
+        let slot = unsafe { self.slot.as_ref() };
+        if slot.state.load(Ordering::Acquire) == QUARANTINED {
+            return Err(self.registry.slot_failure(slot));
         }
         let mut poison = RetirementUnwind {
             registry: self.registry,
@@ -1372,9 +1411,7 @@ impl<P: Platform> Registration<'_, P> {
             let guard = self.registry.lock();
             self.registry.check_controller()?;
             if slot.state.load(Ordering::Acquire) != CLOSING {
-                return Err(
-                    decode_error(slot.fault.load(Ordering::Acquire)).unwrap_or(IrqError::Drain)
-                );
+                return Err(self.registry.slot_failure(slot));
             }
             if slot.inflight.load(Ordering::Acquire) != 0
                 || self.registry.platform.pending(self.vector)?
@@ -1416,6 +1453,18 @@ impl<P: Platform> Registration<'_, P> {
                 }),
             })
         })();
+        if let Err(error @ IrqError::Config(_)) = &result
+            && self.active
+        {
+            // SAFETY: an unsuccessful retirement retains this exact slot.
+            let slot = unsafe { self.slot.as_ref() };
+            if slot.state.load(Ordering::Acquire) != LIVE {
+                // Once close began, the full config effect is sticky; no retry
+                // may repeat uncertain hardware work. Pure CPU-drain retries
+                // keep their existing independent timeout/read semantics.
+                self.registry.quarantine(self.slot, *error);
+            }
+        }
         poison.completed = true;
         result
     }
@@ -1453,7 +1502,7 @@ impl<P: Platform, S: Source + 'static> OwnedRegistration<'_, P, S> {
 impl<P: Platform> Drop for Registration<'_, P> {
     fn drop(&mut self) {
         if self.active {
-            self.registry.quarantine(self.slot);
+            self.registry.quarantine(self.slot, IrqError::Interrupted);
         }
     }
 }

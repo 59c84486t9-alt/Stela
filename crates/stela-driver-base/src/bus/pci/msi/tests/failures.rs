@@ -6,7 +6,10 @@ use crate::bus::pci::regs;
 #[test]
 fn programming_faults_revoke_authorization() {
     for (offset, width) in [(regs::COMMAND, 2), (0x52, 2), (0x54, 4), (0x58, 2)] {
-        let (mut helper, model) = attach(fixture(false, false));
+        let f = fixture(false, false);
+        let configs = f.config_drops.clone();
+        let roots = f.root_drops.clone();
+        let (mut helper, model) = attach(f);
         model.lock().unwrap().fail_read = Some((offset, width));
         assert_eq!(
             // SAFETY: The synthetic route and exact RAM config owners remain
@@ -19,17 +22,19 @@ fn programming_faults_revoke_authorization() {
             // SAFETY: The failed programming revoked authorization; the RAM config/root
             // owners remain live and rejected unmask must not enable delivery.
             unsafe { helper.unmask() },
-            Err(MsiError::NotProgrammed)
+            Err(MsiError::FailedRead { offset })
         );
         model.lock().unwrap().fail_read = None;
-        drop(
-            // SAFETY: The read fault was cleared and all model activity is synchronous;
-            // there are no DMA, IRQ, posted or deferred users before release.
-            unsafe { helper.release() }.unwrap(),
-        );
+        assert_closed(&mut helper, &model, MsiError::FailedRead { offset });
+        drop(helper);
+        assert_eq!(configs.load(Ordering::Relaxed), 0);
+        assert_eq!(roots.load(Ordering::Relaxed), 0);
     }
     for (offset, width) in [(regs::COMMAND, 2), (0x54, 4), (0x58, 2)] {
-        let (mut helper, model) = attach(fixture(false, false));
+        let f = fixture(false, false);
+        let configs = f.config_drops.clone();
+        let roots = f.root_drops.clone();
+        let (mut helper, model) = attach(f);
         model.lock().unwrap().block_write = Some((offset, width));
         assert_eq!(
             // SAFETY: The rejected write targets live RAM owned by the fixture; no
@@ -41,14 +46,13 @@ fn programming_faults_revoke_authorization() {
             // SAFETY: The rejected write revoked authorization while keeping its model
             // owners; unmask must reject before publishing delivery.
             unsafe { helper.unmask() },
-            Err(MsiError::NotProgrammed)
+            Err(MsiError::Readback { offset })
         );
         model.lock().unwrap().block_write = None;
-        drop(
-            // SAFETY: The blocked write was cleared. The model has no asynchronous
-            // source, DMA or callbacks, so its original owners may be released.
-            unsafe { helper.release() }.unwrap(),
-        );
+        assert_closed(&mut helper, &model, MsiError::Readback { offset });
+        drop(helper);
+        assert_eq!(configs.load(Ordering::Relaxed), 0);
+        assert_eq!(roots.load(Ordering::Relaxed), 0);
     }
 }
 #[test]
@@ -106,7 +110,10 @@ fn unacknowledged_enable_quarantines() {
 #[test]
 fn changed_route_revokes_authorization() {
     for changed in [0, 0x52, 0x54] {
-        let (mut helper, model) = attach(fixture(false, false));
+        let f = fixture(false, false);
+        let configs = f.config_drops.clone();
+        let roots = f.root_drops.clone();
+        let (mut helper, model) = attach(f);
         // SAFETY: The fresh fixture owns the synthetic route and live RAM config;
         // deliberate stale-identity mutation occurs only after programming.
         unsafe { helper.program(MESSAGE) }.unwrap();
@@ -135,10 +142,9 @@ fn changed_route_revokes_authorization() {
             .lock()
             .unwrap()
             .put(changed, if changed == 0x52 { 2 } else { 4 }, old);
-        drop(
-            // SAFETY: The mutated field was restored; only synchronous RAM accesses
-            // occurred, and no DMA, posted IRQ or deferred user exists before release.
-            unsafe { helper.release() }.unwrap(),
-        );
+        assert_closed(&mut helper, &model, expected);
+        drop(helper);
+        assert_eq!(configs.load(Ordering::Relaxed), 0);
+        assert_eq!(roots.load(Ordering::Relaxed), 0);
     }
 }

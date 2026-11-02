@@ -7,6 +7,9 @@
  * already initialized/enrolled device; removal drops its registration ref. */
 int stela_linux_pci_publish_device(struct pci_dev *dev);
 bool stela_linux_pci_devices_present(void);
+/* Checked original standard capability walker. PCIBIOS failure is distinct
+ * from a successful absent capability (*found == 0). No context ownership moves. */
+int stela_linux_pci_find_capability(struct pci_dev *dev, int cap, u8 *found);
 bool stela_linux_pci_bound(const struct pci_dev *device);
 void stela_linux_pci_remove_device(struct pci_dev *dev);
 
@@ -18,7 +21,10 @@ struct stela_linux_pci_region {
 
 /* A physical function its owner enumerated. Configuration accesses return a
  * PCIBIOS result; dma_map returns DMA_MAPPING_ERROR when it cannot map, and
- * dma_limit is the highest address it hands out. */
+ * dma_limit is the highest address it hands out. Rust retains exact typed
+ * access causes in the actual State; a possibly applied failed write traps
+ * before returning to an original caller that could ignore a PCIBIOS failure.
+ * Real hardware all-ones with a successful access remains success/data. */
 struct stela_linux_pci_function {
 	void *context;
 	int (*read_config)(void *context, int where, int size, u32 *value);

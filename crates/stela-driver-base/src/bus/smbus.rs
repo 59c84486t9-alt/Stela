@@ -146,6 +146,9 @@ pub enum Phase {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
+    /// Genuine hardware minimum timing unavailable or failed; no replay.
+    Minimum(crate::bus::pci::power::Error),
+    Configuration(i801::i2c_block::ConfigurationError),
     InvalidAddress,
     InvalidBlockLength(usize),
     InvalidConfiguration,
@@ -190,6 +193,8 @@ pub enum Recovery {
 pub struct Error {
     pub kind: ErrorKind,
     /// Original host status, kept before W1C clears it.
+    /// Minimum-source failures use zero without a status read; their typed
+    /// `Minimum` kind denotes that no completion/status observation occurred.
     pub status: u8,
     pub recovery: Recovery,
 }

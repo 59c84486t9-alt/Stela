@@ -103,7 +103,13 @@ fn register_offsets_outside_the_bar_refuse_the_controller() {
             ..State::default()
         }));
         let registers = Box::new(RegistersModel(state.clone()));
-        let result = Controller::new(registers, clock(), &mut dma, String::from("bar"));
+        let result = Controller::new(
+            registers,
+            clock(),
+            &mut dma,
+            String::from("bar"),
+            crate::minimum_model::owned(clock()),
+        );
         assert_eq!(result.is_ok(), fits, "{size:#x} {extended:#x}");
         if !fits {
             assert!(state.borrow().writes.is_empty());
@@ -132,10 +138,18 @@ fn constructor_pads_command_and_event_segments_without_extra_trbs() {
                 &mut dma,
                 String::from("overfetch"),
                 Profile::pci(0x1d17, 0x9202),
+                crate::usb::xhci::minimum::fixture(clock()),
             )
             .unwrap()
         } else {
-            Controller::new(registers, clock(), &mut dma, String::from("ordinary")).unwrap()
+            Controller::new(
+                registers,
+                clock(),
+                &mut dma,
+                String::from("ordinary"),
+                crate::minimum_model::owned(clock()),
+            )
+            .unwrap()
         };
         let segment = if overfetch { 8192 } else { 4096 };
         assert_eq!(
@@ -198,7 +212,8 @@ fn every_initial_allocation_failure_precedes_all_pointer_publication_and_run() {
                     Profile {
                         overfetch,
                         ..Profile::SPEC
-                    }
+                    },
+                    crate::usb::xhci::minimum::fixture(clock())
                 ),
                 Err(BlockError::NoDmaMemory)
             ));
@@ -248,7 +263,8 @@ fn controller_applies_ac64_and_pci_masks_before_pointer_publication() {
                 clock(),
                 &mut region,
                 String::new(),
-                profile
+                profile,
+                crate::usb::xhci::minimum::fixture(clock())
             )
             .is_err()
         );

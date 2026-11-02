@@ -8,7 +8,7 @@ fn invalid_native_calibration_preserves_original_packet_owner_before_all_device_
         return;
     }
     for chip in [0x0572_0000, 0x0576_1000, 0x0576_2000] {
-        for rate in [0, u64::MAX, u64::MAX / 60_000_000 + 1] {
+        for rate in [0, 3_000, u64::MAX] {
             let (mut previous, pages, domain, peer) = if chip == 0x0576_1000 {
                 bcm5761::parts_5761(0x1680)
             } else {
@@ -24,9 +24,9 @@ fn invalid_native_calibration_preserves_original_packet_owner_before_all_device_
             let hardware = unsafe {
                 Hardware::new(
                     registers,
-                    crate::Clock {
+                    crate::timing::refused_model(crate::Clock {
                         ticks_per_microsecond: rate,
-                    },
+                    }),
                 )
             };
             // SAFETY: the model device, its pages and its domain belong to this test alone; no
@@ -34,7 +34,7 @@ fn invalid_native_calibration_preserves_original_packet_owner_before_all_device_
             let mut packet = match unsafe { Packet::attach(hardware, &pages, domain.clone()) } {
                 Ok(_) => panic!("unavailable timer admitted {chip:x} rate {rate}"),
                 Err((error, packet)) => {
-                    assert_eq!(error, Error::Clock);
+                    assert_eq!(error, Error::Timing(crate::bus::pci::power::Error::Clock));
                     packet
                 }
             };
@@ -45,11 +45,14 @@ fn invalid_native_calibration_preserves_original_packet_owner_before_all_device_
             assert!(!packet.carrier());
             assert!(packet.transmit(&[0x53; 60]).is_err());
             assert!(packet.receive().is_err());
-            assert_eq!(packet.stop(), Err(Error::Clock));
+            assert_eq!(
+                packet.stop(),
+                Err(Error::Timing(crate::bus::pci::power::Error::Clock))
+            );
             let packet = match packet.retire() {
                 Ok(_) => panic!("timing refusal released the original register owner"),
                 Err((error, packet)) => {
-                    assert_eq!(error, Error::Clock);
+                    assert_eq!(error, Error::Timing(crate::bus::pci::power::Error::Clock));
                     packet
                 }
             };

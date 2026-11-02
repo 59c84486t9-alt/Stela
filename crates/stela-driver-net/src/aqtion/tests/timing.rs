@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Checked provider admission and reset/PM failure ownership.
+//! Historical selector names remain; nominal rates never grant timing.
+//! Explicit private models supply/refuse all minimum waits.
 use super::*;
 
-fn native_clock(
+fn refused_minimum(
     mut old: Aqtion<Rc<Peer>, Rc<Peer>, ControlledConfig>,
     clock: Clock,
-) -> Aqtion<Rc<Peer>, Clock, ControlledConfig> {
+) -> Aqtion<Rc<Peer>, crate::timing::RefusedMinimum, ControlledConfig> {
     let hw = old.hardware.take().unwrap();
     Aqtion {
         function: old.function.take(),
         hardware: Some(Hardware {
             registers: hw.registers,
-            timer: clock,
+            timer: crate::timing::refused_model(clock),
             reset_ownership: hw.reset_ownership,
         }),
         domain: old.domain.take(),
@@ -33,10 +35,10 @@ fn invalid_native_clock_refuses_start_reset_and_pm_before_any_effect() {
         return;
     }
     for device in [0x07b1, 0x04c0] {
-        for rate in [0, u64::MAX, (u64::MAX / 2) / 60_000_000 + 1] {
+        for rate in [0, 3_000, u64::MAX] {
             let (owner, peer, domain, dropped) = setup(device);
             let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
-            let mut owner = native_clock(
+            let mut owner = refused_minimum(
                 owner,
                 Clock {
                     ticks_per_microsecond: rate,
@@ -44,15 +46,27 @@ fn invalid_native_clock_refuses_start_reset_and_pm_before_any_effect() {
             );
             let accesses = pm.accesses.lock().unwrap().len();
             let maps = domain.maps.lock().unwrap().len();
-            assert_eq!(owner.start(), Err(Error::Clock));
-            assert_eq!(owner.hw().reset(owner.profile), Err(Error::Clock));
+            assert_eq!(
+                owner.start(),
+                Err(Error::Pci(crate::block::BlockError::PciPower(
+                    crate::bus::pci::power::Error::Clock
+                )))
+            );
+            assert_eq!(
+                owner.hw().reset(owner.profile),
+                Err(Error::Pci(crate::block::BlockError::PciPower(
+                    crate::bus::pci::power::Error::Clock
+                )))
+            );
             assert_eq!(
                 power_up(
                     owner.function.as_mut().unwrap(),
                     &owner.hardware.as_ref().unwrap().timer,
                     &mut owner.power
                 ),
-                Err(Error::Clock)
+                Err(Error::Pci(crate::block::BlockError::PciPower(
+                    crate::bus::pci::power::Error::Clock
+                )))
             );
             assert_eq!(owner.state(), State::Stopped);
             assert_eq!(owner.power, PciPower::D0);
@@ -79,7 +93,12 @@ fn kept_model_timer_preflight_preserves_running_and_suspended_epoch() {
             peer.writes.borrow().len(),
             pm.accesses.lock().unwrap().len(),
         );
-        assert_eq!(owner.stop(), Err(Error::Clock));
+        assert_eq!(
+            owner.stop(),
+            Err(Error::Pci(crate::block::BlockError::PciPower(
+                crate::bus::pci::power::Error::Clock
+            )))
+        );
         assert_eq!(owner.state(), State::Running);
         assert_eq!(
             (
@@ -97,7 +116,12 @@ fn kept_model_timer_preflight_preserves_running_and_suspended_epoch() {
             pm.accesses.lock().unwrap().len(),
         );
         peer.timing.set(false);
-        assert_eq!(owner.resume_owned(), Err(Error::Clock));
+        assert_eq!(
+            owner.resume_owned(),
+            Err(Error::Pci(crate::block::BlockError::PciPower(
+                crate::bus::pci::power::Error::Clock
+            )))
+        );
         assert_eq!(owner.state(), State::Suspended);
         assert_eq!(owner.power, PciPower::D3hot);
         assert_eq!(
@@ -148,7 +172,12 @@ fn every_reset_wait_failure_preserves_issued_reset_or_releases_only_owned_locks(
             }
             peer.fail_wait.set(Some(failed));
             let hw = hardware(&peer);
-            assert_eq!(hw.reset(peer.profile), Err(Error::Clock));
+            assert_eq!(
+                hw.reset(peer.profile),
+                Err(Error::Pci(crate::block::BlockError::PciPower(
+                    crate::bus::pci::power::Error::Clock
+                )))
+            );
             assert_eq!(peer.waits.borrow().as_slice(), &expected[..failed]);
             if peer.reset_count.get() != 0 {
                 assert!(reset_releases(&peer).is_empty());
@@ -173,7 +202,12 @@ fn wait_failure_acquiring_second_reset_semaphore_releases_only_first() {
     peer.second_lock_busy.set(true);
     peer.fail_wait.set(Some(1));
     let hw = hardware(&peer);
-    assert_eq!(hw.reset(peer.profile), Err(Error::Clock));
+    assert_eq!(
+        hw.reset(peer.profile),
+        Err(Error::Pci(crate::block::BlockError::PciPower(
+            crate::bus::pci::power::Error::Clock
+        )))
+    );
     assert_eq!(reset_releases(&peer), [0x3ac]);
     assert_eq!(peer.semaphores.borrow().get(&0x3ac), Some(&false));
     assert_eq!(peer.reset_count.get(), 0);
@@ -190,7 +224,12 @@ fn antigua_reset_clock_failure_fences_retry_and_keeps_dma() {
     let (mut owner, peer, domain, dropped) = setup(0x04c0);
     peer.fault.set(Fault::Reset);
     peer.fail_wait.set(Some(1));
-    assert_eq!(owner.start(), Err(Error::Clock));
+    assert_eq!(
+        owner.start(),
+        Err(Error::Pci(crate::block::BlockError::PciPower(
+            crate::bus::pci::power::Error::Clock
+        )))
+    );
     assert_eq!(peer.reset_count.get(), 1);
     assert_eq!(owner.state(), State::Faulted);
     assert_eq!(domain.engine_epoch.load(Ordering::Relaxed), 0);
@@ -221,7 +260,9 @@ fn pm_wait_failure_keeps_unknown_power_and_original_owners_until_d0_retry() {
         peer.fail_wait.set(Some(peer.waits.borrow().len() + 1));
         assert_eq!(
             owner.resume_owned(),
-            Err(Error::Unsupported("AQtion PCI D0 transition failed"))
+            Err(Error::Pci(crate::block::BlockError::PciPower(
+                crate::bus::pci::power::Error::Clock
+            )))
         );
         assert_eq!(*peer.waits.borrow().last().unwrap(), 10_000);
         assert_eq!(

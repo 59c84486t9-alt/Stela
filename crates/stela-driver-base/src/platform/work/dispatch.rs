@@ -45,8 +45,15 @@ impl<const N: usize> Runtime<N> {
             return Err(WorkError::Busy);
         }
         let index = self.current.get();
-        let now = self.queue.scheduling_now()?;
         let flags = self.queue.cpu.save_disable()?;
+        let now = match self.queue.scheduling_now() {
+            Ok(now) => now,
+            Err(error) => {
+                // SAFETY: clock refused before any departure or row mutation.
+                unsafe { self.queue.cpu.restore(flags) };
+                return Err(error);
+            }
+        };
         let view = self.context_view(index, true);
         let admission = {
             // SAFETY: checked current task and IF0; borrow ends before switch.
@@ -78,6 +85,7 @@ impl<const N: usize> Runtime<N> {
                     // its placement must observe the current CPU service floor.
                     guard.state().scheduling.account(now)?;
                 }
+                self.execution_publish_at(index, now)?;
                 if let Some(binding) = binding {
                     // SAFETY: transactional prepared commit only, no lock/alloc/drop/switch.
                     unsafe { binding.leave(&view, reason)? };
@@ -103,6 +111,9 @@ impl<const N: usize> Runtime<N> {
             )
         })();
         if let Err(error) = transition {
+            self.queue.cpu.fatal(error);
+        }
+        if let Err(error) = self.execution_pause_at(index, now) {
             self.queue.cpu.fatal(error);
         }
         // SAFETY: running task is exclusively owned, with IF disabled.
@@ -174,6 +185,9 @@ impl<const N: usize> Runtime<N> {
         if self.retired.get() || self.queue.abandoned.load(Ordering::Acquire) {
             return Err(WorkError::Closed);
         }
+        // Deliver only recorded real credit releases, in the actual taskless
+        // dispatcher before deadline inspection. Empty passes invoke no sink.
+        self.publish_general_resources()?;
         let due_service = if let Some(domain) = self.domain() {
             if !self.service_started.get() {
                 return Err(WorkError::Unavailable);
@@ -185,7 +199,6 @@ impl<const N: usize> Runtime<N> {
         } else {
             false
         };
-        let now = self.queue.scheduling_now()?;
         let flags = self.queue.cpu.save_disable()?;
         // SAFETY: the task list's length never changes after construction.
         let count = unsafe { (*self.tasks.get()).len() };
@@ -315,6 +328,15 @@ impl<const N: usize> Runtime<N> {
         }
         // SAFETY: immutable selected job at IF0; no borrow spans switch.
         let task = unsafe { &*self.task(i) };
+        // Start measurement after task selection, not at dispatcher entry.
+        let now = match self.queue.scheduling_now() {
+            Ok(now) => now,
+            Err(error) => {
+                // SAFETY: no Running row or foreign arrival committed yet.
+                unsafe { self.queue.cpu.restore(flags) };
+                return Err(error);
+            }
+        };
         let running = (|| {
             self.queue.lock()?.state().scheduling.running(
                 task.id,
@@ -324,6 +346,30 @@ impl<const N: usize> Runtime<N> {
         })();
         if let Err(error) = running {
             self.queue.cpu.fatal(error);
+        }
+        if self.domain().is_some() {
+            // The Running transition already committed. Every subsequent
+            // invariant failure retains fatally rather than returning a partly
+            // dispatched row as a normal refused step.
+            let opened = (|| {
+                let sequence = task.job.ok_or(WorkError::CorruptContext)?.1.sequence;
+                let (total, through, segment) = self
+                    .queue
+                    .lock()?
+                    .state()
+                    .scheduling
+                    .execution(task.id, sequence, now)?;
+                let sample = ExecutionSample::new(
+                    ExecutionIdentity::new(self.queue.id, task.id.get(), sequence),
+                    total,
+                    through,
+                    segment,
+                );
+                self.execution.open(i, sample)?;
+                self.execution.publish_process(i, &sample);
+                Ok::<(), WorkError>(())
+            })();
+            opened.unwrap_or_else(|error| self.queue.cpu.fatal(error));
         }
         // SAFETY: task `i` is idle or waiting, and IRQs are disabled.
         unsafe {
@@ -346,8 +392,19 @@ impl<const N: usize> Runtime<N> {
         if self.current.get() != NONE || self.queue.active.id.load(Ordering::Acquire) != 0 {
             self.queue.cpu.fatal(WorkError::CorruptContext);
         }
+        // Original do_task_dead never returns through its C/Rust callback.
+        // Only this real architectural successor may acknowledge its tail.
+        self.terminal_returned(i);
+        // Record only after real native switch return, before external outer
+        // restore can unwind. This does not retire foreign C/page/alias users.
+        if let Err(error) = self.returned_stack(i) {
+            self.queue.cpu.fatal(error);
+        }
         // SAFETY: the dispatcher resumed with `flags` from its own save_disable.
         unsafe { self.queue.cpu.restore(flags) };
+        // The completing/parked frame is stopped, Task/active metadata is clear,
+        // and exact outer IF restoration finished before any observer executes.
+        self.publish_general_resources()?;
         Ok(true)
     }
 
@@ -427,7 +484,10 @@ impl<const N: usize> Runtime<N> {
                         TaskState::Running
                         | TaskState::Reserved
                         | TaskState::Escrow
-                        | TaskState::Preparing => false,
+                        | TaskState::Preparing
+                        | TaskState::Dormant
+                        | TaskState::Terminating
+                        | TaskState::Retained => false,
                     }
             })
         }

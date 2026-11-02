@@ -3,14 +3,12 @@
 //! BDL and cAVS host-stream sequence adapt pinned SOF hda-stream.c.
 //! Copyright(c) 2018 Intel Corporation
 use super::{Controller, Error, Phase, Registers, registers::*};
+use crate::Timer;
 use crate::{
     Direction,
-    bus::{
-        dma::{
-            mapping::{Direction as DmaDirection, DmaDomain, DmaMapping},
-            memory::{CacheAttribute, CpuMapping, PageSource},
-        },
-        i2c::Timer,
+    bus::dma::{
+        mapping::{Direction as DmaDirection, DmaDomain, DmaMapping},
+        memory::{CacheAttribute, CpuMapping, PageSource},
     },
 };
 use alloc::sync::Arc;
@@ -239,6 +237,7 @@ impl Stream {
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
     pub(super) fn complete_stopped_dma(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         // Check the complete requester, including ICCmax and loader,
         // rather than trusting one stream's software running flag. Firmware
         // remains alive for pause/restart, but cannot initiate translated DMA
@@ -274,6 +273,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn stream_mut(&mut self, loader: bool, iccmax: bool) -> Result<&mut Stream, Error> {
+        self.minimum_guard()?;
         if loader {
             if iccmax {
                 self.iccmax.as_mut()
@@ -286,6 +286,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         .ok_or(Error::State)
     }
     pub(super) fn program_stream(&mut self, loader: bool, iccmax: bool) -> Result<(), Error> {
+        self.minimum_guard()?;
         let (index, tag, bytes, format, entries, data_bdl) = {
             let stream = self.stream_mut(loader, iccmax)?;
             stream.publish()?;
@@ -314,7 +315,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let start = self.timer.now_us();
         self.registers
             .write8(Bar::Hda, base, previous & !(RUN | SRST | 0x1c))?;
-        self.delay(3);
+        self.delay(3)?;
         self.stream_poll(index, SRST, 0, start, Phase::StreamReset)?;
         // Stream tag occupies byte2, separately from byte3 W1C status.
         let ctl2 = self.registers.read8(Bar::Hda, base + 2)?;
@@ -353,6 +354,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         start: u64,
         phase: Phase,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         loop {
             if self.timer.now_us().wrapping_sub(start) >= 500 {
                 return Err(Error::Timeout(phase));
@@ -373,6 +375,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         iccmax: bool,
         run: bool,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         if run {
             let (index, tag, bytes, format, entries, bdl) = {
                 let stream = self.stream_mut(loader, iccmax)?;

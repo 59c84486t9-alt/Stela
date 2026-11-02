@@ -6,7 +6,7 @@
 //! Copyright (c) 2004 Takashi Iwai. See audio/THIRD_PARTY.md.
 use super::super::{CodecGraph, Controller, Registers, Verb};
 use super::port_power;
-use crate::{Error, bus::i2c::Timer};
+use crate::{Error, Timer};
 use alloc::vec::Vec;
 pub use port_power::IdtPortPower as Idt83PortPower;
 const PORTS: [u8; 7] = [0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10];
@@ -42,6 +42,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         graph: &CodecGraph,
         group: u8,
     ) -> Result<State, Error> {
+        self.minimum_guard()?;
         Ok(State {
             ports: self.preflight_idt_ports(graph, group, &PORTS)?,
         })
@@ -52,6 +53,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         group: u8,
         state: &State,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.validate_idt_ports(graph, group, &state.ports)
     }
     pub(super) fn initialize_idt83(
@@ -60,6 +62,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         group: u8,
         state: &mut State,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.observe_idt_port_map(graph, group, &mut state.ports)?;
         if self.verb(Verb::short(
             graph.address,

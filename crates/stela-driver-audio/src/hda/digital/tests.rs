@@ -15,7 +15,7 @@ use core::cell::{Cell, RefCell};
 
 #[derive(Clone)]
 struct Clock(Rc<Cell<u64>>);
-impl Timer for Clock {
+impl crate::bus::i2c::Timer for Clock {
     fn now_us(&self) -> u64 {
         self.0.get()
     }
@@ -276,6 +276,7 @@ fn controller(ram: &mut Ram) -> (Controller<RegistersPeer, Clock>, Rc<RefCell<Pe
                 ..Default::default()
             },
         )
+        .map_err(|failure| failure.error)
     }
     .unwrap();
     (controller, peer)
@@ -955,4 +956,21 @@ fn legacy_port_excludes_sessions() {
     );
     assert_eq!(peer.borrow().selected, 1);
     assert_eq!(peer.borrow().reads, eld_reads + 2);
+}
+
+// SAFETY: this private synchronous peripheral model measures virtual microseconds;
+// no physical timer, CPU or native hardware permission follows from it.
+unsafe impl crate::bus::pci::power::Timer for Clock {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        Ok(())
+    }
+    fn wait_us(&self, us: u64) -> Result<(), crate::bus::pci::power::Error> {
+        self.0.set(
+            self.0
+                .get()
+                .checked_add(us)
+                .expect("bounded model minimum wait"),
+        );
+        Ok(())
+    }
 }

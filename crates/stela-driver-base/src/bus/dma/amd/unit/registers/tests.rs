@@ -34,10 +34,17 @@ const SPACE: AddressSpace = AddressSpace {
 const BASE: u64 = 0xfed8_0000;
 const CAP: u16 = 0x40;
 
-struct Backing(PhysicalSpan);
+struct Backing(
+    PhysicalSpan,
+    crate::bus::mmio::owned::model::MappingRetention<Arc<Model>>,
+);
 // SAFETY: this symbolic resource belongs exclusively to one isolated RAM
 // model; it confers no native hardware or production mapping permission.
 unsafe impl ResourceBacking for Backing {
+    fn begin_mapping(&self) -> Result<crate::bus::pci::assignment::OpaqueUse, MappingError> {
+        self.1.begin_mapping()
+    }
+
     fn physical_span(&self) -> PhysicalSpan {
         self.0
     }
@@ -125,7 +132,31 @@ unsafe impl MappingPlatform for Model {
         Ok(())
     }
 }
-fn make_mapping(base: u64, bytes: usize, protection: Protection) -> (Mapping, Arc<Model>) {
+/// Unique fixture controller stays outside the record/provider/product graph.
+struct ModelFixture {
+    model: Arc<Model>,
+    controller: crate::bus::mmio::owned::model::MappingOwner<Arc<Model>>,
+    finished: bool,
+}
+impl core::ops::Deref for ModelFixture {
+    type Target = Arc<Model>;
+    fn deref(&self) -> &Self::Target {
+        &self.model
+    }
+}
+impl ModelFixture {
+    /// # Safety
+    /// This finite fixture ended all inspection/raw tails and actual mapping
+    /// retirement acknowledged. Counts alone never authorize cleanup.
+    unsafe fn finish(&mut self) {
+        if !self.finished {
+            // SAFETY: forwarded original fixture completion/alias contract.
+            unsafe { self.controller.retire() }.unwrap();
+            self.finished = true;
+        }
+    }
+}
+fn make_mapping(base: u64, bytes: usize, protection: Protection) -> (Mapping, ModelFixture) {
     let layout = Layout::from_size_align(bytes, 4096).unwrap();
     // SAFETY: nonzero test-only allocation; page alignment is required by
     // the registry, just as for a native installed mapping.
@@ -138,43 +169,68 @@ fn make_mapping(base: u64, bytes: usize, protection: Protection) -> (Mapping, Ar
     });
     // SAFETY: isolated test registry and symbolic resource, no native unit.
     let authority = unsafe { Authority::isolated_model(model.clone(), SPACE, Vec::new()) }.unwrap();
+    // SAFETY: SAME original allocated CPU RAM and pure isolated reservation;
+    // no authority/control/view points back through this allocation product.
+    let controller = unsafe {
+        crate::bus::mmio::owned::model::MappingOwner::from_owned(model.clone(), |allocation| {
+            if allocation.bytes != 0 && (allocation.memory.as_ptr() as usize).is_multiple_of(4096) {
+                Ok(())
+            } else {
+                Err(crate::bus::pci::assignment::Error::Context)
+            }
+        })
+    };
     let resource = Resource::new(Box::new(Backing(
         PhysicalSpan::new(base, bytes as u64).unwrap(),
+        controller.retention().unwrap(),
     )));
     let mapping = authority
         .map(resource, 0, bytes, CacheAttribute::Uncached, protection)
         .unwrap();
-    (mapping, model)
+    (
+        mapping,
+        ModelFixture {
+            model,
+            controller,
+            finished: false,
+        },
+    )
 }
 fn make_function(caps: &[(u16, u64, u32)], msix: bool) -> Function<OwnedConfig> {
     let (mut config, _) = fixture(ADDRESS);
-    config.write32(0, 0x1234_1022);
-    config.write32(8, 0x0806_0001);
-    config.write16(regs::STATUS, regs::STATUS_CAP_LIST);
-    config.write8(0x34, caps[0].0 as u8);
+    config.write32(0, 0x1234_1022).unwrap();
+    config.write32(8, 0x0806_0001).unwrap();
+    config.write16(regs::STATUS, regs::STATUS_CAP_LIST).unwrap();
+    config.write8(0x34, caps[0].0 as u8).unwrap();
     for (index, &(offset, base, extra)) in caps.iter().enumerate() {
         let next = caps
             .get(index + 1)
             .map(|x| x.0)
             .unwrap_or(if msix { 0xa0 } else { 0 });
-        config.write32(
-            offset,
-            u32::from(SECURE_DEVICE)
-                | u32::from(next) << 8
-                | IOMMU_TYPE << 16
-                | IOMMU_REVISION << 19
-                | extra,
-        );
-        config.write32(offset + 4, base as u32 | BASE_ENABLED);
-        config.write32(offset + 8, (base >> 32) as u32);
-        config.write32(offset + 12, 0xfe00_ab80);
-        config.write32(offset + 16, 48 << 15 | 48 << 8 | 2 << 5 | 7);
+        config
+            .write32(
+                offset,
+                u32::from(SECURE_DEVICE)
+                    | u32::from(next) << 8
+                    | IOMMU_TYPE << 16
+                    | IOMMU_REVISION << 19
+                    | extra,
+            )
+            .unwrap();
+        config
+            .write32(offset + 4, base as u32 | BASE_ENABLED)
+            .unwrap();
+        config.write32(offset + 8, (base >> 32) as u32).unwrap();
+        config.write32(offset + 12, 0xfe00_ab80).unwrap();
+        config
+            .write32(offset + 16, 48 << 15 | 48 << 8 | 2 << 5 | 7)
+            .unwrap();
         if extra & CAP_EXTENDED != 0 {
-            config.write32(offset + 20, 9);
+            config.write32(offset + 20, 9).unwrap();
         }
     }
     if msix {
-        config.write32(0xa0, 0x001f_0011);
+        config.write32(0xa0, 0x001f_0011).unwrap();
     }
     Function::new(ADDRESS, config).unwrap()
 }
@@ -227,6 +283,10 @@ fn checksum(bytes: &mut [u8]) {
     bytes[9] = 0;
     bytes[9] = 0u8.wrapping_sub(bytes.iter().fold(0u8, |sum, x| sum.wrapping_add(*x)));
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "the helper returns the same original register inputs on refusal without allocating"
+)]
 fn inspect(inputs: Inputs, bytes: &[u8]) -> Result<FunctionInspection, (Error, Inputs)> {
     let ivrs = Ivrs::parse(bytes, 48).unwrap();
     // SAFETY: all inputs are held, synchronous isolated fixtures.
@@ -254,9 +314,9 @@ fn failure(result: Result<FunctionInspection, (Error, Inputs)>, expected: Error)
     }
 }
 fn retire(inputs: Inputs) {
-    let mut config = inputs.function.into_config().into_mapping();
+    let config = inputs.function.into_config();
     // SAFETY: all synchronous inspection consumers have stopped.
-    unsafe { config.retire() }.unwrap();
+    unsafe { crate::bus::pci::owned::test_support::retire_owned(config) }.unwrap();
     for mut mapping in inputs.mappings {
         // SAFETY: no hardware or fixture worker can access returned owners.
         unsafe { mapping.retire() }.unwrap();
@@ -268,9 +328,9 @@ fn kept_function_and_all_register_bytes_are_unchanged() {
     let mut function = make_function(&[(CAP, BASE, CAP_EXTENDED | EFR_SUPPORTED)], false);
     let original_config: Vec<_> = (0..4096u16)
         .step_by(4)
-        .map(|offset| function.config().read32(offset))
+        .map(|offset| function.config().read32(offset).unwrap())
         .collect();
-    let (mapping, model) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
+    let (mapping, mut model) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
     for (i, offset) in [
         DEVICE_TABLE,
         COMMAND_BUFFER,
@@ -323,13 +383,20 @@ fn kept_function_and_all_register_bytes_are_unchanged() {
     let mut inputs = group.into_inputs();
     let returned_config: Vec<_> = (0..4096u16)
         .step_by(4)
-        .map(|offset| inputs.function.config().read32(offset))
+        .map(|offset| inputs.function.config().read32(offset).unwrap())
         .collect();
     assert_eq!(returned_config, original_config);
-    assert_eq!(inputs.function.config().read32(CAP + 20), 9);
-    assert_eq!(inputs.function.config().read32(CAP + 4), BASE as u32 | 1);
+    assert_eq!(inputs.function.config().read32(CAP + 20).unwrap(), 9);
+    assert_eq!(
+        inputs.function.config().read32(CAP + 4).unwrap(),
+        BASE as u32 | 1
+    );
     retire(inputs);
     assert_eq!(model.unmaps.load(Ordering::Relaxed), 1);
+
+    // SAFETY: this scope acknowledged inspection/mapping retirement and
+    // ended every synchronous original model raw user. No Drop cleanup.
+    unsafe { model.finish() };
 }
 
 #[test]
@@ -342,8 +409,8 @@ fn complete_function_groups_match_caps_and_mappings_independently_of_order() {
     for reverse_table in [false, true] {
         for reverse_maps in [false, true] {
             let function = make_function(&[(CAP, BASE, 0), (second.cap, second.base, 0)], true);
-            let (a, ma) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
-            let (b, mb) = make_mapping(second.base, SMALL_APERTURE, Protection::ReadWrite);
+            let (a, mut ma) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
+            let (b, mut mb) = make_mapping(second.base, SMALL_APERTURE, Protection::ReadWrite);
             let mut units = [Unit::small(), second];
             if reverse_table {
                 units.reverse();
@@ -371,6 +438,13 @@ fn complete_function_groups_match_caps_and_mappings_independently_of_order() {
             retire(group.into_inputs());
             assert_eq!(ma.unmaps.load(Ordering::Relaxed), 1);
             assert_eq!(mb.unmaps.load(Ordering::Relaxed), 1);
+
+            // SAFETY: this scope acknowledged inspection/mapping retirement and
+            // ended every synchronous original model raw user. No Drop cleanup.
+            unsafe { ma.finish() };
+            // SAFETY: this scope acknowledged inspection/mapping retirement and
+            // ended every synchronous original model raw user. No Drop cleanup.
+            unsafe { mb.finish() };
         }
     }
 }
@@ -395,7 +469,7 @@ fn physical_and_firmware_counter_reports_keep_the_larger_aperture() {
                 } else {
                     SMALL_APERTURE
                 };
-                let (mapping, model) = make_mapping(BASE, bytes, Protection::ReadWrite);
+                let (mapping, mut model) = make_mapping(BASE, bytes, Protection::ReadWrite);
                 model.set(
                     EXTENDED_FEATURES,
                     if actual { PERFORMANCE_COUNTERS } else { 0 },
@@ -421,6 +495,10 @@ fn physical_and_firmware_counter_reports_keep_the_larger_aperture() {
                 );
                 assert_eq!(model.image(), original);
                 retire(group.into_inputs());
+
+                // SAFETY: this scope acknowledged inspection/mapping retirement and
+                // ended every synchronous original model raw user. No Drop cleanup.
+                unsafe { model.finish() };
             }
         }
     }
@@ -440,7 +518,7 @@ fn mismatched_or_incomplete_apertures_are_refused_without_mutation() {
             features: if reported { PERFORMANCE_COUNTERS } else { 0 },
             ..Unit::small()
         };
-        let (mapping, model) = make_mapping(base, bytes, Protection::ReadWrite);
+        let (mapping, mut model) = make_mapping(base, bytes, Protection::ReadWrite);
         model.set(
             EXTENDED_FEATURES,
             if actual { PERFORMANCE_COUNTERS } else { 0 },
@@ -459,6 +537,10 @@ fn mismatched_or_incomplete_apertures_are_refused_without_mutation() {
         );
         assert_eq!(model.image(), original);
         assert_eq!(model.unmaps.load(Ordering::Relaxed), 1);
+
+        // SAFETY: this scope acknowledged inspection/mapping retirement and
+        // ended every synchronous original model raw user. No Drop cleanup.
+        unsafe { model.finish() };
     }
 }
 
@@ -466,12 +548,12 @@ fn mismatched_or_incomplete_apertures_are_refused_without_mutation() {
 fn disabled_reserved_and_unknown_inputs_return_original_resources() {
     for case in 0..10 {
         let mut function = make_function(&[(CAP, BASE, 0)], false);
-        let (mapping, model) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
+        let (mapping, mut model) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
         let mut unit = Unit::small();
         let mut info = 0;
         let expected = match case {
             0 => {
-                function.config().write32(CAP + 4, BASE as u32);
+                function.config().write32(CAP + 4, BASE as u32).unwrap();
                 model.set(CONTROL, u64::MAX);
                 Error::Disabled(CAP)
             }
@@ -486,13 +568,16 @@ fn disabled_reserved_and_unknown_inputs_return_original_resources() {
             3 => {
                 unit.attributes = 1 << 17;
                 info = 1;
-                function.config().write32(
-                    CAP,
-                    u32::from(SECURE_DEVICE)
-                        | IOMMU_TYPE << 16
-                        | IOMMU_REVISION << 19
-                        | EFR_SUPPORTED,
-                );
+                function
+                    .config()
+                    .write32(
+                        CAP,
+                        u32::from(SECURE_DEVICE)
+                            | IOMMU_TYPE << 16
+                            | IOMMU_REVISION << 19
+                            | EFR_SUPPORTED,
+                    )
+                    .unwrap();
                 Error::FeatureReporting(CAP)
             }
             4 => {
@@ -500,7 +585,7 @@ fn disabled_reserved_and_unknown_inputs_return_original_resources() {
                 Error::Identity
             }
             5 => {
-                function.config().write32(0, 0xffff_ffff);
+                function.config().write32(0, 0xffff_ffff).unwrap();
                 Error::Identity
             }
             6 => {
@@ -512,11 +597,11 @@ fn disabled_reserved_and_unknown_inputs_return_original_resources() {
                 Error::Firmware
             }
             8 => {
-                function.config().write32(CAP, 0x0013_000f);
+                function.config().write32(CAP, 0x0013_000f).unwrap();
                 Error::UnsupportedLayout(CAP)
             }
             _ => {
-                function.config().write32(CAP + 16, u32::MAX);
+                function.config().write32(CAP + 16, u32::MAX).unwrap();
                 Error::ReadFailed(CAP + 16)
             }
         };
@@ -533,14 +618,18 @@ fn disabled_reserved_and_unknown_inputs_return_original_resources() {
         );
         assert_eq!(model.image(), original);
         assert_eq!(model.unmaps.load(Ordering::Relaxed), 1);
+
+        // SAFETY: this scope acknowledged inspection/mapping retirement and
+        // ended every synchronous original model raw user. No Drop cleanup.
+        unsafe { model.finish() };
     }
 }
 
 #[test]
 fn a_base_without_its_enable_bit_is_used_when_its_registers_answer() {
     let mut function = make_function(&[(CAP, BASE, 0)], false);
-    function.config().write32(CAP + 4, BASE as u32);
-    let (mapping, _model) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
+    function.config().write32(CAP + 4, BASE as u32).unwrap();
+    let (mapping, mut model) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
     let group = success(inspect(
         Inputs {
             function,
@@ -550,6 +639,10 @@ fn a_base_without_its_enable_bit_is_used_when_its_registers_answer() {
     ));
     assert_eq!(group.profiles().len(), 1);
     retire(group.into_inputs());
+
+    // SAFETY: this scope acknowledged inspection/mapping retirement and
+    // ended every synchronous original model raw user. No Drop cleanup.
+    unsafe { model.finish() };
 }
 
 #[test]
@@ -567,7 +660,7 @@ fn mapping_count_policy_identity_and_overlaps_are_checked() {
         Error::MappingCount,
     );
     let function = make_function(&[(CAP, BASE, 0)], false);
-    let (mapping, _) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadOnly);
+    let (mapping, mut mapping_scope_0) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadOnly);
     failure(
         inspect(
             Inputs {
@@ -580,8 +673,8 @@ fn mapping_count_policy_identity_and_overlaps_are_checked() {
     );
     let second = Unit { cap: 0x60, ..unit };
     let function = make_function(&[(CAP, BASE, 0), (second.cap, BASE, 0)], true);
-    let (a, _) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
-    let (b, _) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
+    let (a, mut mapping_scope_1) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
+    let (b, mut mapping_scope_2) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
     failure(
         inspect(
             Inputs {
@@ -592,6 +685,16 @@ fn mapping_count_policy_identity_and_overlaps_are_checked() {
         ),
         Error::Overlap,
     );
+
+    // SAFETY: this scope acknowledged inspection/mapping retirement and
+    // ended every synchronous original model raw user. No Drop cleanup.
+    unsafe { mapping_scope_0.finish() };
+    // SAFETY: this scope acknowledged inspection/mapping retirement and
+    // ended every synchronous original model raw user. No Drop cleanup.
+    unsafe { mapping_scope_1.finish() };
+    // SAFETY: this scope acknowledged inspection/mapping retirement and
+    // ended every synchronous original model raw user. No Drop cleanup.
+    unsafe { mapping_scope_2.finish() };
 }
 
 #[test]
@@ -602,7 +705,7 @@ fn reserved_firmware_fields_and_reserved_registers_are_never_used() {
                 &[(CAP, BASE, if actual_efr { EFR_SUPPORTED } else { 0 })],
                 false,
             );
-            let (mapping, model) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
+            let (mapping, mut model) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
             if !actual_efr {
                 // These would produce Register errors if incorrectly read.
                 model.set(EXTENDED_FEATURES, u64::MAX);
@@ -627,6 +730,10 @@ fn reserved_firmware_fields_and_reserved_registers_are_never_used() {
                 actual_efr.then_some((0, 0))
             );
             retire(group.into_inputs());
+
+            // SAFETY: this scope acknowledged inspection/mapping retirement and
+            // ended every synchronous original model raw user. No Drop cleanup.
+            unsafe { model.finish() };
         }
     }
 }
@@ -648,11 +755,12 @@ fn all_known_profile_refusals_precede_feature_observation() {
             ],
             true,
         );
-        let (first, first_model) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
+        let (first, mut first_model) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
         // If any MMIO observation occurs before complete preflight, this
         // earlier unit fails with Register rather than the expected error.
         first_model.set(EXTENDED_FEATURES, u64::MAX);
-        let (last, _) = make_mapping(second.base, SMALL_APERTURE, Protection::ReadWrite);
+        let (last, mut mapping_scope_3) =
+            make_mapping(second.base, SMALL_APERTURE, Protection::ReadWrite);
         let mut units = [Unit::small(), second];
         let expected = match invalid {
             0 => Error::MappingGeometry,
@@ -675,6 +783,13 @@ fn all_known_profile_refusals_precede_feature_observation() {
             ),
             expected,
         );
+
+        // SAFETY: this scope acknowledged inspection/mapping retirement and
+        // ended every synchronous original model raw user. No Drop cleanup.
+        unsafe { first_model.finish() };
+        // SAFETY: this scope acknowledged inspection/mapping retirement and
+        // ended every synchronous original model raw user. No Drop cleanup.
+        unsafe { mapping_scope_3.finish() };
     }
 }
 
@@ -687,8 +802,9 @@ fn missing_function_instances_and_multiple_units_without_msix_are_refused() {
     };
     for msix in [false, true] {
         let function = make_function(&[(CAP, BASE, 0), (second.cap, second.base, 0)], msix);
-        let (a, _) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
-        let (b, _) = make_mapping(second.base, SMALL_APERTURE, Protection::ReadWrite);
+        let (a, mut mapping_scope_4) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
+        let (b, mut mapping_scope_5) =
+            make_mapping(second.base, SMALL_APERTURE, Protection::ReadWrite);
         let units = if msix {
             vec![Unit::small()]
         } else {
@@ -708,6 +824,13 @@ fn missing_function_instances_and_multiple_units_without_msix_are_refused() {
                 Error::InterruptLayout
             },
         );
+
+        // SAFETY: this scope acknowledged inspection/mapping retirement and
+        // ended every synchronous original model raw user. No Drop cleanup.
+        unsafe { mapping_scope_4.finish() };
+        // SAFETY: this scope acknowledged inspection/mapping retirement and
+        // ended every synchronous original model raw user. No Drop cleanup.
+        unsafe { mapping_scope_5.finish() };
     }
 }
 
@@ -715,7 +838,7 @@ fn missing_function_instances_and_multiple_units_without_msix_are_refused() {
 fn inaccessible_registers_never_become_feature_or_completion_facts() {
     for offset in [EXTENDED_FEATURES, EXTENDED_FEATURES_2, STATUS] {
         let function = make_function(&[(CAP, BASE, EFR_SUPPORTED)], false);
-        let (mapping, model) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
+        let (mapping, mut model) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
         model.set(offset, u64::MAX);
         let result = inspect(
             Inputs {
@@ -731,5 +854,9 @@ fn inaccessible_registers_never_become_feature_or_completion_facts() {
         } else {
             failure(result, Error::Register(offset));
         }
+
+        // SAFETY: this scope acknowledged inspection/mapping retirement and
+        // ended every synchronous original model raw user. No Drop cleanup.
+        unsafe { model.finish() };
     }
 }

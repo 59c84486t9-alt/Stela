@@ -7,7 +7,7 @@
 use super::super::{
     CodecGraph, Controller, PinConfiguration, PinConnection, PinSense, Registers, Verb, WidgetKind,
 };
-use crate::{Error, bus::i2c::Timer};
+use crate::{Error, Timer};
 use alloc::vec::Vec;
 
 const SET_POWER_MAP: u16 = 0x7ec;
@@ -71,6 +71,7 @@ impl State {
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
     fn read_idt_port_map(&mut self, address: u8, group: u8, mask: u8) -> Result<u8, Error> {
+        self.minimum_guard()?;
         let map = self.verb(Verb::short(address, group, GET_POWER_MAP, 0)?)?;
         if map & !u32::from(mask) != 0 {
             return Err(Error::RouteRejected);
@@ -83,6 +84,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         group: u8,
         nodes: &[u8],
     ) -> Result<State, Error> {
+        self.minimum_guard()?;
         // These kept native profiles require an AFG1 and the
         // source node list; do not redirect vendor permission by inference.
         if group != 1 || nodes.is_empty() || nodes.len() > 8 {
@@ -130,6 +132,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         group: u8,
         state: &State,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         for port in &state.ports {
             if graph
                 .widget(port.node)
@@ -154,6 +157,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         group: u8,
         state: &mut State,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         // Vendor registers may be inaccessible in D3. The caller owns the
         // codec and acknowledges D0 before this first map observation.
         state.power_map = Some(self.read_idt_port_map(graph.address, group, state.mask)?);
@@ -165,6 +169,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         group: u8,
         state: &mut State,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         let mut map = 0;
         for (index, port) in state.ports.iter_mut().enumerate() {
             let enabled = if port.poll_presence {
@@ -192,6 +197,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         pin: u8,
         sense: PinSense,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         let Some(index) = state
             .ports
             .iter()

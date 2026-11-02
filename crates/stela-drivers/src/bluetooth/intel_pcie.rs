@@ -56,6 +56,7 @@ pub unsafe trait Platform: 'static {
     fn write32(&mut self, offset: usize, value: u32) -> Result<()>;
     fn write8(&mut self, offset: usize, value: u8) -> Result<()>;
     fn now_us(&self) -> u64;
+    fn minimum_delay(&mut self, microseconds: u64) -> Result<()>;
     fn arm_vector_zero(&mut self) -> Result<()>;
     fn retire_vector_zero(&mut self) -> Result<()>;
     /// Consume the work flag before reading causes. A callback during service
@@ -98,6 +99,8 @@ pub enum Error {
     Dma(BlockError),
     Mmio(&'static str),
     Native(native::Error),
+    /// The original minimum callback unwound before acknowledging completion.
+    MinimumInterrupted,
     Timeout(&'static str),
     Protocol {
         requirement: &'static str,
@@ -158,6 +161,7 @@ pub struct Transport<P: Platform> {
     retirement_attempted: bool,
     retired: bool,
     retirement_error: Option<Box<Error>>,
+    minimum_error: Option<Box<Error>>,
     fault: Option<Box<Error>>,
     fault_snapshot: Option<Box<Snapshot>>,
 }
@@ -185,6 +189,7 @@ impl<P: Platform> Transport<P> {
             retirement_attempted: false,
             retired: false,
             retirement_error: None,
+            minimum_error: None,
             fault: None,
             fault_snapshot: None,
         })
@@ -221,17 +226,19 @@ impl<P: Platform> Transport<P> {
         self.radio_id
     }
     fn read(&mut self, offset: usize) -> Result<u32> {
+        self.minimum_admission()?;
         self.platform.read32(offset)
     }
     fn write(&mut self, offset: usize, value: u32) -> Result<()> {
+        self.minimum_admission()?;
         self.platform.write32(offset, value)
     }
-    fn delay(&self, us: u64) {
-        reset::wait(&*self.platform, us);
+    fn delay(&mut self, us: u64) -> Result<()> {
+        reset::wait(&mut *self.platform, &mut self.minimum_error, us)
     }
     fn update_function(&mut self, clear: u32, set: u32) -> Result<u32> {
         reset::update_function(
-            &mut reset::PlatformIo(&mut *self.platform),
+            &mut reset::PlatformIo(&mut *self.platform, &mut self.minimum_error),
             &mut self.snapshot,
             clear,
             set,
@@ -239,11 +246,15 @@ impl<P: Platform> Transport<P> {
     }
     fn reset_device(&mut self) -> Result<()> {
         reset::reset(
-            &mut reset::PlatformIo(&mut *self.platform),
+            &mut reset::PlatformIo(&mut *self.platform, &mut self.minimum_error),
             &mut self.snapshot,
         )
     }
+    fn minimum_admission(&self) -> Result<()> {
+        self.minimum_error.as_deref().cloned().map_or(Ok(()), Err)
+    }
     fn admission(&self) -> Result<()> {
+        self.minimum_admission()?;
         if self.retirement_attempted {
             return Err(self
                 .retirement_error
@@ -278,7 +289,7 @@ impl<P: Platform> Transport<P> {
         self.write(CI_LOW, ci as u32)?;
         self.write(CI_HIGH, (ci >> 32) as u32)?;
         if self.identity.device == 0x4d76 {
-            self.delay(50_000);
+            self.delay(50_000)?;
         }
         self.update_function(FUNC_INIT | MASTER_DISCONNECT | RESET, ENABLE | MAC_INIT)?;
         self.update_function(0, FUNC_INIT)?;
@@ -661,6 +672,7 @@ impl<P: Platform> Transport<P> {
         Ok(self.snapshot.clone())
     }
     fn retire(&mut self) -> Result<()> {
+        self.minimum_admission()?;
         if self.retirement_attempted {
             return self.retirement_error.as_deref().cloned().map_or_else(
                 || {
@@ -690,6 +702,9 @@ impl<P: Platform> Transport<P> {
             // a failed stop still attempts the real route mask/drain, whose
             // source must refuse quiescence if the acknowledgments are absent.
             let stopped = self.reset_device();
+            // A failed or interrupted minimum source closes this original
+            // owner. Do not run IRQ/config/reset cleanup after that denial.
+            self.minimum_admission()?;
             let interrupts = self.platform.retire_vector_zero();
             match (stopped, interrupts) {
                 (Ok(()), Ok(())) => Ok(()),
@@ -721,12 +736,16 @@ impl<P: Platform> Transport<P> {
         if self.fault_snapshot.is_none() {
             self.fault_snapshot = Some(Box::new(self.snapshot.clone()));
         }
-        let error = match self.retire() {
-            Ok(()) => cause,
-            Err(cleanup) => Error::Cleanup {
-                cause: Box::new(cause),
-                cleanup: Box::new(cleanup),
-            },
+        let error = if self.minimum_error.is_some() {
+            cause
+        } else {
+            match self.retire() {
+                Ok(()) => cause,
+                Err(cleanup) => Error::Cleanup {
+                    cause: Box::new(cause),
+                    cleanup: Box::new(cleanup),
+                },
+            }
         };
         if self.fault.is_none() {
             self.fault = Some(Box::new(error.clone()));

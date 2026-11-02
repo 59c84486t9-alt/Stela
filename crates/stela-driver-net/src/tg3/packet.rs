@@ -10,7 +10,7 @@ use crate::{
     },
     check_frame,
 };
-use alloc::{format, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 mod memory;
 use super::geometry::Geometry;
 #[cfg(test)]
@@ -421,7 +421,7 @@ impl<R: Registers, D: Delay> Link for Packet<R, D> {
         check_frame(frame)?;
         if !self.carrier() {
             return if let Some(error) = self.failure {
-                Err(LinkError::Adapter(format!("tg3: {error:?}")))
+                Err(error.into_link())
             } else {
                 Err(LinkError::NoCarrier)
             };
@@ -431,14 +431,14 @@ impl<R: Registers, D: Delay> Link for Packet<R, D> {
             Err(Error::RingFull) => Err(LinkError::Adapter("tg3 transmit ring full".into())),
             Err(error) => {
                 self.fault(error);
-                Err(LinkError::Adapter(format!("tg3: {error:?}")))
+                Err(error.into_link())
             }
         }
     }
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
         if !self.carrier() {
             return if let Some(error) = self.failure {
-                Err(LinkError::Adapter(format!("tg3: {error:?}")))
+                Err(error.into_link())
             } else {
                 Ok(None)
             };
@@ -447,7 +447,7 @@ impl<R: Registers, D: Delay> Link for Packet<R, D> {
             Ok(frame) => Ok(frame),
             Err(error) => {
                 self.fault(error);
-                Err(LinkError::Adapter(format!("tg3: {error:?}")))
+                Err(error.into_link())
             }
         }
     }

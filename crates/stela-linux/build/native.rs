@@ -90,6 +90,8 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/refcount_lock.c")),
             PathBuf::from(format!("{LINUX}/kernel/user.c")),
             PathBuf::from(format!("{LINUX}/kernel/exec_state.c")),
+            PathBuf::from(format!("{LINUX}/kernel/rcu/srcutiny.c")),
+            PathBuf::from(format!("{LINUX}/kernel/rcu/wakeme.c")),
             PathBuf::from(format!("{LINUX}/kernel/locking/mutex.c")),
             PathBuf::from(format!("{LINUX}/kernel/locking/rtmutex_api.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/wait_support.c")),
@@ -188,6 +190,7 @@ impl Linux {
                     format!("{COMPAT}/stela/workqueue_test.c"),
                     format!("{COMPAT}/stela/i2c_test.c"),
                     format!("{COMPAT}/stela/sync_test.c"),
+                    format!("{COMPAT}/stela/srcu_test.c"),
                 ])
                 .objects(helper_objects)
                 .compile("linux-task-fixture");

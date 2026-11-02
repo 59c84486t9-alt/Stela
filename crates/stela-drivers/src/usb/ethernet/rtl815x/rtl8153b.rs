@@ -84,7 +84,7 @@ impl<C: Control> Chip<C> {
         self.phy_modify(OCP_BASE_MII + 18, 0x0300, 0x0200)?;
         self.phy_write(MII_BMCR, BMCR_ANENABLE_RESTART | BMCR_RESET)?;
         let mapped = self.phy_address(MII_BMCR)?;
-        self.io.delay_us(20_000);
+        self.minimum_wait(20_000)?;
         self.poll(PLA, mapped, 2, BMCR_RESET, 0, (50, 20_000))
     }
 
@@ -192,7 +192,7 @@ impl<C: Control> Chip<C> {
         )?;
         if matches!(self.revision.0, 0x6010 | 0x6400) {
             self.modify(USB, USB_FW_TASK, 2, FC_PATCH_TASK, 0)?;
-            self.io.delay_us(1000);
+            self.minimum_wait(1000)?;
             self.modify(USB, USB_FW_TASK, 2, 0, FC_PATCH_TASK)?;
         }
         Ok(())

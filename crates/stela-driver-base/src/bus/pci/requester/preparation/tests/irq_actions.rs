@@ -352,20 +352,20 @@ fn multiple_entries_and_same_epoch_rerequest_retain_old_pins_until_endpoint_deta
     adopt(&mut bound.attachment, other.retire().unwrap());
     adopt(&mut bound.attachment, replacement.retire().unwrap());
     assert_eq!(state.action_records.lock().unwrap().len(), 3);
-    let mut mapping = bound.requester.into_function().into_config().into_mapping();
+    let mut config = bound.requester.into_function().into_config();
     // SAFETY: inactive fixture checks that real old-action config pins remain.
-    assert_eq!(unsafe { mapping.retire() }, Err(MappingError::Busy));
+    assert_eq!(unsafe { config.retire() }, Err(MappingError::Busy));
     // SAFETY: all action joins adopted, original engines absent and no DMA map
     // was ever admitted in this bounded entry ownership fixture.
     let detached = unsafe { bound.attachment.detach() }.unwrap();
     assert_eq!(state.detachments.load(Ordering::Relaxed), 1);
     // SAFETY: acknowledged endpoint detach alone cannot release old route pins.
-    assert_eq!(unsafe { mapping.retire() }, Err(MappingError::Busy));
+    assert_eq!(unsafe { config.retire() }, Err(MappingError::Busy));
     bound
         .attachment
         .release_irq_pins(detached)
         .unwrap_or_else(|failure| panic!("{:?}", failure.error));
     assert_eq!(state.action_pins_released.load(Ordering::Relaxed), 3);
     // SAFETY: actual endpoint detach and every original action pin released.
-    unsafe { mapping.retire() }.unwrap();
+    unsafe { crate::bus::pci::owned::test_support::retire_owned(config) }.unwrap();
 }

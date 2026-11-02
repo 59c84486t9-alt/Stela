@@ -1,6 +1,6 @@
 //! Descriptor reservations for pinned, unpublished Runtime workers.
 use super::*;
-use stela_driver_base::platform::work::{EnteredProcess, PinnedColdStackPreparation, WorkError};
+use stela_driver_base::platform::work::{EnteredProcess, PinnedGeneralStackPreparation, WorkError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdmissionError {
@@ -42,7 +42,7 @@ unsafe extern "C" {
     fn stela_linux_page_stack_cancel(ticket: *const NativeTicket) -> c_int;
 }
 
-/// Owns the cold pin and its optional unpublished catalog marker. The native
+/// Owns the actual prepared pin and its optional unpublished catalog marker. The native
 /// admission count blocks descriptor retirement independently of this borrow:
 /// forgotten values keep both the catalog context and Runtime backing alive.
 /// Dropping a live value closes its Runtime; it leaves marker cleanup for
@@ -50,19 +50,19 @@ unsafe extern "C" {
 #[must_use = "cancel with fresh matching work authority; dropping retains the owners"]
 pub struct StackAdmission<'catalog, 'runtime, P: Provider, const N: usize> {
     catalog: &'catalog Catalog<P>,
-    cold: PinnedColdStackPreparation<'runtime, N>,
+    prepared: PinnedGeneralStackPreparation<'runtime, N>,
     ticket: Option<NativeTicket>,
 }
 impl<P: Provider> Catalog<P> {
-    /// Keep the original cold pin for a descriptor admission attempt.
+    /// Keep the original prepared pin for a descriptor admission attempt.
     /// This wrapper alone makes no C call and publishes no marker.
     pub fn prepare_stack<'catalog, 'runtime, const N: usize>(
         &'catalog self,
-        cold: PinnedColdStackPreparation<'runtime, N>,
+        prepared: PinnedGeneralStackPreparation<'runtime, N>,
     ) -> StackAdmission<'catalog, 'runtime, P, N> {
         StackAdmission {
             catalog: self,
-            cold,
+            prepared,
             ticket: None,
         }
     }
@@ -73,7 +73,9 @@ impl<P: Provider, const N: usize> StackAdmission<'_, '_, P, N> {
     /// Repeated admission refuses a second marker. This borrows the owning
     /// value only for the call; pages and C stack addresses stay private.
     pub fn admit(&mut self, entered: &dyn EnteredProcess) -> Result<(), AdmissionError> {
-        self.cold.check_pin(entered).map_err(AdmissionError::Work)?;
+        self.prepared
+            .check_pin(entered)
+            .map_err(AdmissionError::Work)?;
         if self.ticket.is_some() {
             return Err(AdmissionError::AlreadyAdmitted);
         }
@@ -88,8 +90,15 @@ impl<P: Provider, const N: usize> StackAdmission<'_, '_, P, N> {
             nonce: 0,
         };
         let result = {
-            let _owner = Entered::try_new().map_err(AdmissionError::Catalog)?;
-            let result = self.cold.inspect_pin(entered, |pages| {
+            let _owner = self
+                .catalog
+                .context
+                .as_ref()
+                .ok_or(AdmissionError::Catalog(Error::InvalidReservation))?
+                .entry
+                .scope()
+                .map_err(AdmissionError::Catalog)?;
+            let result = self.prepared.inspect_pin(entered, |pages| {
                 let mapping = pages
                     .cpu_mapping(CacheAttribute::WriteBack)
                     .map_err(AdmissionError::Memory)?;
@@ -126,31 +135,91 @@ impl<P: Provider, const N: usize> StackAdmission<'_, '_, P, N> {
         };
         // C-owner exit may finish other service callbacks. Recheck after that
         // complete boundary while keeping any successfully created marker.
-        self.cold.check_pin(entered).map_err(AdmissionError::Work)?;
+        self.prepared
+            .check_pin(entered)
+            .map_err(AdmissionError::Work)?;
         result
     }
 
     /// Remove this unpublished marker under fresh work permission, keeping its
     /// RuntimeStack extent reserved, then restore/cancel the cold frame once.
-    /// Refusal keeps/quarantines the catalog and Runtime owners.
-    pub fn cancel(self, entered: &dyn EnteredProcess) -> Result<(), AdmissionError> {
-        self.cold.check_pin(entered).map_err(AdmissionError::Work)?;
+    /// Refusal returns the exact catalog/preparation owner for fresh retry.
+    /// # Safety
+    /// Independently join every original C/page/descriptor/alias/RCU user;
+    /// marker removal alone is not physical-storage retirement authority.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Refusal retains exact catalog marker/prepared owner"
+    )]
+    pub unsafe fn cancel(
+        mut self,
+        entered: &dyn EnteredProcess,
+    ) -> Result<(), (Self, AdmissionError)> {
+        if let Err(error) = self.cancel_marker(entered) {
+            return Err((self, error));
+        }
+        let Self {
+            catalog,
+            prepared,
+            ticket,
+        } = self;
+        // SAFETY: caller joined all actual original C/page/descriptor/alias
+        // users; the exact unpublished marker was removed independently above.
+        match unsafe { prepared.cancel(entered) } {
+            Ok(()) => Ok(()),
+            Err((prepared, error)) => Err((
+                Self {
+                    catalog,
+                    prepared,
+                    ticket,
+                },
+                AdmissionError::Work(error),
+            )),
+        }
+    }
+    fn cancel_marker(&mut self, entered: &dyn EnteredProcess) -> Result<(), AdmissionError> {
+        self.prepared
+            .check_cancel(entered)
+            .map_err(AdmissionError::Work)?;
         if let Some(ticket) = self.ticket {
             let result = {
-                let _owner = Entered::try_new().map_err(AdmissionError::Catalog)?;
-                // SAFETY: private ticket belongs to this catalog and
-                // cold pin. C validates its fixed header/generation/nonce and
-                // every unpublished marker before changing any of them.
-                unsafe { stela_linux_page_stack_cancel(&ticket) }
+                let _owner = self
+                    .catalog
+                    .context
+                    .as_ref()
+                    .ok_or(AdmissionError::Catalog(Error::InvalidReservation))?
+                    .entry
+                    .scope()
+                    .map_err(AdmissionError::Catalog)?;
+                // SAFETY: exact same retained canonical owner+code/generation,
+                // or explicitly selected isolated legacy fixture entry. No bare
+                // fallback is used for a canonical catalogue.
+                let status = unsafe { stela_linux_page_stack_cancel(&ticket) };
+                if status == 0 {
+                    self.ticket = None;
+                }
+                status
             };
             if result != 0 {
                 return Err(AdmissionError::Catalog(Error::Native(result)));
             }
         }
-        self.cold.check_pin(entered).map_err(AdmissionError::Work)?;
-        self.cold.cancel(entered).map_err(AdmissionError::Work)
+        self.prepared
+            .check_cancel(entered)
+            .map_err(AdmissionError::Work)
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests;
+
+impl<P: Provider, const N: usize> core::fmt::Debug for StackAdmission<'_, '_, P, N> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("StackAdmission")
+            .field("epoch", &self.prepared.epoch())
+            .finish_non_exhaustive()
+    }
+}
+
+mod child;
+pub use child::{DormantChildStackLease, PreparedChildStackLease, PublishedChildStackLease};

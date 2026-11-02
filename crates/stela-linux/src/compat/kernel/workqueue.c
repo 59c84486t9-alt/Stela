@@ -21,6 +21,7 @@
 #include <linux/workqueue.h>
 #include <stela/linux.h>
 #include <stela/workqueue.h>
+#include <stela/task.h>
 
 #define SEQ_SHIFT WORK_STRUCT_FLAG_BITS
 /* As kernel/workqueue.c bounds a workqueue's name. */
@@ -444,4 +445,12 @@ void stela_linux_worker_sleeping(bool sleeping)
 	worker->sleeping = sleeping;
 	if (sleeping)
 		kick();
+}
+
+void stela_linux_workqueue_retry(void)
+{
+	(void)stela_linux_current();
+	if (!stela_linux_quiescent())
+		__builtin_trap();
+	kick();
 }

@@ -861,24 +861,31 @@ impl O2Chip {
     }
 }
 pub(super) struct O2ConfigPort(pub Rc<RefCell<O2Chip>>);
-impl Registers for O2ConfigPort {
-    fn read8(&mut self, at: usize) -> u8 {
-        self.0.borrow_mut().read(at, 1) as u8
+impl crate::bus::pci::ConfigSpace for O2ConfigPort {
+    fn read8(&self, at: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok(self.0.borrow_mut().read(usize::from(at), 1) as u8)
     }
-    fn read16(&mut self, at: usize) -> u16 {
-        self.0.borrow_mut().read(at, 2) as u16
+    fn read16(&self, at: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok(self.0.borrow_mut().read(usize::from(at), 2) as u16)
     }
-    fn read32(&mut self, at: usize) -> u32 {
-        self.0.borrow_mut().read(at, 4)
+    fn read32(&self, at: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        Ok(self.0.borrow_mut().read(usize::from(at), 4))
     }
-    fn write8(&mut self, at: usize, value: u8) {
-        self.0.borrow_mut().write(at, 1, u32::from(value));
+    fn write8(&mut self, at: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        self.0
+            .borrow_mut()
+            .write(usize::from(at), 1, u32::from(value));
+        Ok(())
     }
-    fn write16(&mut self, at: usize, value: u16) {
-        self.0.borrow_mut().write(at, 2, u32::from(value));
+    fn write16(&mut self, at: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
+        self.0
+            .borrow_mut()
+            .write(usize::from(at), 2, u32::from(value));
+        Ok(())
     }
-    fn write32(&mut self, at: usize, value: u32) {
-        self.0.borrow_mut().write(at, 4, value);
+    fn write32(&mut self, at: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
+        self.0.borrow_mut().write(usize::from(at), 4, value);
+        Ok(())
     }
 }
 impl Registers for Port {
@@ -1151,5 +1158,27 @@ impl Registers for Port {
         } else {
             m.write(at, 4, value);
         }
+    }
+}
+
+/// Test-only physical-time model. This is never a native admission provider.
+pub(super) fn minimum() -> alloc::rc::Rc<dyn crate::bus::pci::power::Timer> {
+    alloc::rc::Rc::new(ModelMinimum(crate::Clock {
+        ticks_per_microsecond: CLOCK_TICKS_PER_US,
+    }))
+}
+struct ModelMinimum(crate::Clock);
+// SAFETY: only the software SDHCI models use this counter boundary.
+unsafe impl crate::bus::pci::power::Timer for ModelMinimum {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        self.0
+            .check_duration(60_000_000)
+            .map_err(|_| crate::bus::pci::power::Error::Clock)
+    }
+    fn wait_us(&self, us: u64) -> Result<(), crate::bus::pci::power::Error> {
+        self.check()?;
+        self.0
+            .try_delay(us)
+            .map_err(|_| crate::bus::pci::power::Error::Clock)
     }
 }

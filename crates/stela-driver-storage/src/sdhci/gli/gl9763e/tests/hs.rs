@@ -24,6 +24,7 @@ fn ordinary_mmc_hs_orders_host_status_clock_and_width_before_real_pio_or_adma_io
             let mut host = Host::new(
                 Box::new(owner),
                 clock(),
+                crate::sdhci::model::minimum(),
                 "ordinary MMC HS".into(),
                 &mut dma,
                 Profile::Gli9763e,
@@ -73,6 +74,7 @@ fn ordinary_mmc_hs_width_or_power_failure_powers_off_before_publication() {
         let mut host = Host::new(
             Box::new(owner),
             clock(),
+            crate::sdhci::model::minimum(),
             "refused ordinary HS".into(),
             &mut dma,
             Profile::Gli9763e,

@@ -57,6 +57,9 @@ impl Controller {
     /// The started command's result once it completed or timed out; `None`
     /// while it runs. Never waits.
     pub(super) fn finish_command(&mut self, address: u64) -> Option<Result<Event, BlockError>> {
+        if let Err(error) = self.check_minimum() {
+            return Some(Err(error));
+        }
         if let Some(at) = self.finished.iter().position(|(a, _)| *a == address) {
             return Some(self.finished.remove(at).1);
         }
@@ -68,6 +71,9 @@ impl Controller {
             return Some(Err(BlockError::Protocol("unknown xHCI command")));
         }
         let result = self.advance_command()?;
+        if let Some(error) = self.minimum.error() {
+            return Some(Err(BlockError::PciPower(error)));
+        }
         let retired = self.outstanding.take().is_some_and(|c| c.retired);
         Some(self.conclude_command(result, retired))
     }
@@ -80,6 +86,7 @@ impl Controller {
         status: u32,
         control: u32,
     ) -> Result<Event, BlockError> {
+        self.check_minimum()?;
         self.settle_command();
         let address = self.start_command(parameter, status, control)?;
         loop {
@@ -100,11 +107,17 @@ impl Controller {
         status: u32,
         control: u32,
     ) -> Option<Result<Event, BlockError>> {
+        if let Err(error) = self.check_minimum() {
+            return Some(Err(error));
+        }
         let address = match *started {
             Some(address) => address,
             None => {
                 if let Some(other) = self.outstanding.as_ref().map(|c| c.address) {
                     let result = self.finish_command(other)?;
+                    if let Some(error) = self.minimum.error() {
+                        return Some(Err(BlockError::PciPower(error)));
+                    }
                     self.finished.push((other, result));
                 }
                 match self.start_command(parameter, status, control) {
@@ -121,9 +134,17 @@ impl Controller {
     /// Run the outstanding command to its end, keeping the result for its
     /// starter.
     pub(super) fn settle_command(&mut self) {
+        if self.check_minimum().is_err() {
+            return;
+        }
         while let Some(other) = self.outstanding.as_ref().map(|c| c.address) {
             match self.finish_command(other) {
-                Some(result) => self.finished.push((other, result)),
+                Some(result) => {
+                    if self.minimum.error().is_some() {
+                        return;
+                    }
+                    self.finished.push((other, result));
+                }
                 None => {
                     crate::waiting();
                     core::hint::spin_loop();
@@ -136,6 +157,9 @@ impl Controller {
     /// error ending it, once either is known.
     fn advance_command(&mut self) -> Option<Result<Event, BlockError>> {
         loop {
+            if let Err(error) = self.check_minimum() {
+                return Some(Err(error));
+            }
             self.drain();
             if let Some(memory) = &self.native_memory
                 && let Err(error) = memory.ready()

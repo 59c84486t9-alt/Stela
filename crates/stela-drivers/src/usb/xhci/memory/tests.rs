@@ -396,6 +396,9 @@ fn core(
         },
         || Ok(()),
         Some(memory(peer)),
+        crate::usb::xhci::minimum::fixture(Clock {
+            ticks_per_microsecond: 1000,
+        }),
     )
 }
 

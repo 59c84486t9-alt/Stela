@@ -1,3 +1,4 @@
+mod fallible_pci;
 extern crate std;
 use self::std::sync::Mutex;
 use super::*;
@@ -323,7 +324,10 @@ fn a_requester_that_arrives_later_joins_the_unit() {
     assert!(matches!(
         // SAFETY: the model requester is stopped and owned by this test, with no DMA in flight.
         unsafe { unit.attach_requester(stopped_claim(0x300)) },
-        Err(VtdError::Busy)
+        Err(AttachRequesterFailure {
+            error: VtdError::Busy,
+            ..
+        })
     ));
     unit.admit_requester(0x300).unwrap();
     unit.admit_requester(0x300).unwrap();
@@ -679,7 +683,10 @@ fn contexts_separate_same_iova_and_reject_cross_domain_or_stale_tokens() {
             // SAFETY: the model requester is stopped and owned by this test, with no DMA in
             // flight.
             unsafe { unit.attach_requester(stopped_claim(rejected)) },
-            Err(VtdError::Busy)
+            Err(AttachRequesterFailure {
+                error: VtdError::Busy,
+                ..
+            })
         ));
     }
     assert_eq!(
@@ -817,7 +824,10 @@ fn failed_context_detach_keeps_hardware_did_claim_and_tables_until_ack() {
     assert!(matches!(
         // SAFETY: the model requester is stopped and owned by this test, with no DMA in flight.
         unsafe { unit.attach_requester(stopped_claim(8)) },
-        Err(VtdError::Busy)
+        Err(AttachRequesterFailure {
+            error: VtdError::Busy,
+            ..
+        })
     ));
     // SAFETY: no requester is attached, or the refusal leaves them all attached.
     assert_eq!(unsafe { unit.shut_down() }, Err(VtdError::Busy));
@@ -899,7 +909,10 @@ fn hardware_did_capacity_quarantine_and_software_epochs_never_wrap_or_reuse_earl
     assert!(matches!(
         // SAFETY: the model requester is stopped and owned by this test, with no DMA in flight.
         unsafe { unit.attach_requester(stopped_claim(15)) },
-        Err(VtdError::Busy)
+        Err(AttachRequesterFailure {
+            error: VtdError::Busy,
+            ..
+        })
     ));
     let abandoned = domains.remove(3);
     let quarantined_did = abandoned.domain_id();
@@ -927,7 +940,10 @@ fn hardware_did_capacity_quarantine_and_software_epochs_never_wrap_or_reuse_earl
     assert!(matches!(
         // SAFETY: the model requester is stopped and owned by this test, with no DMA in flight.
         unsafe { unit.attach_requester(stopped_claim(15)) },
-        Err(VtdError::Unsupported)
+        Err(AttachRequesterFailure {
+            error: VtdError::Unsupported,
+            ..
+        })
     ));
     {
         let mut g = unit.lock();

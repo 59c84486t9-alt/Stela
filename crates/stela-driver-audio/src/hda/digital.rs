@@ -14,7 +14,7 @@
 //! uncertain restoration poisons the controller. PCI admission
 //! remains unchanged; this module cannot manufacture a powered GPU controller.
 use super::{Controller, ControllerToken, PcmCapabilities, Registers, Verb, WidgetKind};
-use crate::{Error, PcmFormat, bus::i2c::Timer};
+use crate::{Error, PcmFormat, Timer};
 use alloc::vec::Vec;
 
 mod eld;

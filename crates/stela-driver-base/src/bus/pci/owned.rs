@@ -1,49 +1,24 @@
-//! One exclusively owned ECAM function, kept through the native mapping
-//! registry. Numeric MCFG geometry is checked here; device/resource and
-//! configuration-writer exclusion come from the producer's attachment grant.
-use super::{Address, ConfigSpace, EcamWindow, msi::MsiConfigSpace};
-use crate::bus::mmio::owned::{
-    CacheAttribute, Error as MappingError, Mapping, MappingView, Protection,
-};
-use core::{mem::size_of, ptr::NonNull};
-
-const FUNCTION_BYTES: usize = 4096;
-const BUS_SHIFT: u32 = 20;
-const DEVICE_SHIFT: u32 = 15;
-const FUNCTION_SHIFT: u32 = 12;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ConfigError {
-    Window,
-    Address,
-    PhysicalSpan,
-    CacheAttribute,
-    Protection,
-    CpuAddress,
-    Access { offset: u16, width: usize },
-    Mapping(MappingError),
-}
-
-/// Keeps the real resource, installed native mapping and address-space owner.
-/// No clone or raw configuration view is exposed. Final mapping retirement is
-/// explicit, after consuming this owner and draining all configuration access.
+//! Original phase-specific configuration ownership; no naked native attach.
+use super::{Address, ConfigError, ConfigSpace, EcamWindow, msi::MsiConfigSpace};
+use crate::bus::mmio::owned::{Error as MappingError, Mapping, MappingView};
+pub mod grant;
+mod region;
+use grant::{DriverGrant, PrepublicationGrant};
+use region::Region;
 pub struct OwnedConfig {
-    address: Address,
-    window: EcamWindow,
-    mapping: Mapping,
+    region: Region<DriverGrant>,
 }
-
-/// Opaque pin on this exact configuration mapping and native root/resource
-/// epoch. It exposes no pointer or second configuration access path. Holding
-/// it prevents mapping retirement; dropping it establishes no DMA completion.
-/// The original driver's sole config owner must still honor the attachment's
-/// reset/removal/assignment exclusion for every DMA binding lifetime.
+pub struct UnpublishedConfig {
+    region: Region<PrepublicationGrant>,
+}
 pub struct ConfigRetention {
     view: MappingView,
+    custody: alloc::boxed::Box<dyn grant::ConfigEpoch>,
 }
 impl ConfigRetention {
     /// Refuse an original mapping that was dropped, quarantined or retired.
     pub fn check_live(&self) -> Result<(), MappingError> {
+        self.custody.check()?;
         self.view.check_current()
     }
 
@@ -52,6 +27,7 @@ impl ConfigRetention {
     pub fn retain_epoch(&self) -> Result<Self, MappingError> {
         self.check_live()?;
         Ok(Self {
+            custody: self.custody.retain()?,
             view: self.view.clone(),
         })
     }
@@ -59,257 +35,220 @@ impl ConfigRetention {
     /// Compare this actual original configuration allocation/epoch, never
     /// equal BDFs, resource numbers or merely a shared mapping platform.
     pub fn same_allocation(&self, other: &Self) -> Result<bool, MappingError> {
+        if !self.custody.same_epoch(other.custody.as_ref())? {
+            return Ok(false);
+        }
         self.view.shares_mapping(&other.view)
     }
 
     /// Compare actual installed mapping-platform provenance only. This
     /// establishes no endpoint/BAR, I/O, writer, stop or completion permission.
     pub fn shares_authority(&self, mapping: &Mapping) -> Result<bool, MappingError> {
+        self.custody.check()?;
         mapping.shares_authority(&self.view)
     }
     /// Compare kept permissions, never caller-supplied numeric IDs.
     pub fn matches_mapping(&self, mapping: &Mapping) -> Result<bool, MappingError> {
+        self.custody.check()?;
         mapping.shares_mapping(&self.view)
     }
 }
 
 impl OwnedConfig {
-    /// Attach one exact, live 4 KiB UC/RW function mapping. Failure returns that
-    /// same mapping, including its retirement obligations, without device access.
-    ///
+    /// Retain only actual endpoint metadata-denial storage before publication.
+    /// It exposes no I/O, source/config backedge or completion/release proof.
+    pub fn admission_close(&self) -> Result<super::assignment::AdmissionClose, MappingError> {
+        self.region.admission_close()
+    }
+    pub fn seal_bus_master(&mut self) -> Result<(), ConfigError> {
+        self.region.seal_bus_master()
+    }
+    pub fn seal_bus_routing(&mut self) -> Result<(), ConfigError> {
+        self.region.seal_bus_routing()
+    }
     /// # Safety
-    /// `window` is the immutable MCFG window for this function and epoch;
-    /// the mapping's resource is this ECAM configuration space.
-    /// Its native platform owner keeps the mapping valid in every access context.
-    /// The producer holds exclusive configuration, reset/removal, root/bridge
-    /// routing and assignment ownership until the mapping is retired. No other
-    /// configuration writer, raw pointer, MappingView, firmware accessor or reset
-    /// path may access/change this function concurrently or invalidate the grant.
-    /// Accesses may run in an interrupt handler; final releases and
-    /// retirement require process or deferred context, as
-    /// [`MappingPlatform`](crate::bus::mmio::owned::MappingPlatform) sets out.
-    /// A matching physical number alone proves none of
-    /// these ownership facts. This grants neither DMA quiescence nor coherency.
-    pub unsafe fn attach(
-        address: Address,
-        window: EcamWindow,
+    /// Actual owning driver stop/reset, no old restart, current root/config
+    /// binding and required payload completion have all been acknowledged.
+    /// Native source still validates real requester/engine admission separately.
+    pub unsafe fn release_bus_master_seal(&mut self) {
+        // SAFETY: caller holds actual original admission/retirement receipts.
+        unsafe { self.region.release_bus_master_seal() }
+    }
+    /// # Safety
+    /// Complete original descendant cohort is contained/retired, new roots
+    /// blocked, leaf seals enforced and actual bridge assignment remains frozen.
+    pub unsafe fn release_bus_forwarding_seal(&mut self) -> Result<(), ConfigError> {
+        // SAFETY: actual whole-source retirement proof, never endpoint stop.
+        unsafe { self.region.release_bus_forwarding_seal() }
+    }
+
+    #[expect(
+        clippy::result_large_err,
+        reason = "attachment refusal returns the exact grant and mapping without failure-path allocation"
+    )]
+    pub fn attach(
+        grant: DriverGrant,
         mapping: Mapping,
-    ) -> Result<Self, (ConfigError, Mapping)> {
-        if let Err(error) = Self::validate(address, window, &mapping) {
-            return Err((error, mapping));
-        }
-        Ok(Self {
-            address,
-            window,
-            mapping,
-        })
+    ) -> Result<Self, (ConfigError, DriverGrant, Mapping)> {
+        Region::attach(grant, mapping).map(|region| Self { region })
     }
-
-    fn validate(
-        address: Address,
-        window: EcamWindow,
-        mapping: &Mapping,
-    ) -> Result<(), ConfigError> {
-        if window.start_bus > window.end_bus
-            || !window.base.is_multiple_of(1u64 << BUS_SHIFT)
-            || window
-                .base
-                .checked_add((u64::from(window.end_bus) + 1) << BUS_SHIFT)
-                .is_none()
-        {
-            return Err(ConfigError::Window);
-        }
-        if address.segment != window.segment
-            || address.bus < window.start_bus
-            || address.bus > window.end_bus
-            || address.device >= 32
-            || address.function >= 8
-        {
-            return Err(ConfigError::Address);
-        }
-        // MCFG bases are relative to bus zero, including windows whose first
-        // admitted bus is nonzero. Never subtract start_bus from this offset.
-        let physical = window
-            .base
-            .checked_add(u64::from(address.bus) << BUS_SHIFT)
-            .and_then(|base| base.checked_add(u64::from(address.device) << DEVICE_SHIFT))
-            .and_then(|base| base.checked_add(u64::from(address.function) << FUNCTION_SHIFT))
-            .ok_or(ConfigError::PhysicalSpan)?;
-        let end = physical
-            .checked_add(FUNCTION_BYTES as u64)
-            .ok_or(ConfigError::PhysicalSpan)?;
-        let span = mapping.physical_span().map_err(ConfigError::Mapping)?;
-        if span.start() != physical
-            || span.end() != end
-            || mapping.bytes().map_err(ConfigError::Mapping)? != FUNCTION_BYTES
-        {
-            return Err(ConfigError::PhysicalSpan);
-        }
-        if mapping.attribute().map_err(ConfigError::Mapping)? != CacheAttribute::Uncached {
-            return Err(ConfigError::CacheAttribute);
-        }
-        if mapping.protection().map_err(ConfigError::Mapping)? != Protection::ReadWrite {
-            return Err(ConfigError::Protection);
-        }
-        let cpu = mapping
-            .address(0, FUNCTION_BYTES)
-            .map_err(ConfigError::Mapping)?;
-        let base = cpu.as_ptr() as usize;
-        if !base.is_multiple_of(FUNCTION_BYTES) || base.checked_add(FUNCTION_BYTES).is_none() {
-            return Err(ConfigError::CpuAddress);
-        }
-        Ok(())
-    }
-
     pub fn address(&self) -> Address {
-        self.address
+        self.region.address()
     }
-
     pub fn window(&self) -> EcamWindow {
-        self.window
+        self.region.window()
     }
-
-    /// Compare a consumed requester binding with this kept
-    /// configuration mapping. Matching numeric BDF/physical addresses do not
-    /// check. This establishes no current device quiescence.
     pub fn matches_binding(
         &self,
         binding: &super::requester::RequesterBinding,
     ) -> Result<bool, MappingError> {
-        if self.address != binding.address() {
-            return Ok(false);
-        }
-        binding.matches_mapping(&self.mapping)
+        self.region.matches_binding(binding)
     }
-
-    /// Compare the original retained configuration permission, not a BDF or
-    /// physical label. This grants no device stop, drain or reset permission.
     pub fn matches_retention(&self, retained: &ConfigRetention) -> Result<bool, MappingError> {
-        retained.matches_mapping(&self.mapping)
+        self.region.matches_retention(retained)
     }
-
-    /// Keep a read-only epoch seal for this exact original configuration.
-    /// It pins mapping retirement until dropped and exposes no register writer.
     pub fn retain_epoch(&self) -> Result<ConfigRetention, MappingError> {
-        Ok(ConfigRetention {
-            view: self.mapping.view(0..FUNCTION_BYTES)?,
-        })
+        self.region.retain_epoch()
     }
-
-    /// Transfer the original mapping back to its retirement owner. The unsafe
-    /// attachment's epoch/context and access-drain obligations remain in force.
-    pub fn into_mapping(self) -> Mapping {
-        self.mapping
+    pub fn into_parts(self) -> (DriverGrant, Mapping) {
+        self.region.into_parts()
     }
-
-    fn try_register<T>(&self, offset: u16) -> Result<NonNull<T>, ConfigError> {
-        let start = usize::from(offset);
-        let width = size_of::<T>();
-        if !start.is_multiple_of(width)
-            || !start
-                .checked_add(width)
-                .is_some_and(|end| end <= FUNCTION_BYTES)
-        {
-            return Err(ConfigError::Access { offset, width });
-        }
-        // Recheck live registry state for each operation instead of keeping
-        // a raw pointer across a possible later mapping quarantine.
-        self.mapping
-            .address(start, width)
-            .map(NonNull::cast)
-            .map_err(ConfigError::Mapping)
+    /// # Safety
+    /// Every actual config/device/raw pointer/DMA/IRQ/callback user has ended;
+    /// caller owns complete original retirement, no new access may start.
+    /// Failure keeps SAME owner and no actual grant/assignment release follows.
+    pub unsafe fn retire(&mut self) -> Result<(), MappingError> {
+        // SAFETY: caller supplies this exact original mapping retirement.
+        unsafe { self.region.retire() }
     }
-
-    fn register<T>(&self, offset: u16) -> NonNull<T> {
-        self.try_register(offset)
-            .expect("aligned live owned PCI configuration register")
-    }
-
-    /// Fallible exact-width accesses for native service boundaries. Revalidate
-    /// the original mapping/context after the volatile effect as well. An error
-    /// after a write does not establish that the write had no hardware effect.
     pub fn try_read8(&self, offset: u16) -> Result<u8, ConfigError> {
-        // SAFETY: complete checked native byte, under the original attach grant.
-        let value = unsafe { self.try_register::<u8>(offset)?.as_ptr().read_volatile() };
-        self.try_register::<u8>(offset)?;
-        Ok(value)
-    }
-    pub fn try_read16(&self, offset: u16) -> Result<u16, ConfigError> {
-        // SAFETY: complete checked aligned native word.
-        let value = unsafe { self.try_register::<u16>(offset)?.as_ptr().read_volatile() };
-        self.try_register::<u16>(offset)?;
-        Ok(u16::from_le(value))
-    }
-    pub fn try_read32(&self, offset: u16) -> Result<u32, ConfigError> {
-        // SAFETY: complete checked aligned native dword.
-        let value = unsafe { self.try_register::<u32>(offset)?.as_ptr().read_volatile() };
-        self.try_register::<u32>(offset)?;
-        Ok(u32::from_le(value))
+        self.region.try_read8(offset)
     }
     pub fn try_write8(&mut self, offset: u16, value: u8) -> Result<(), ConfigError> {
-        // SAFETY: a byte store never replays a neighboring W1C register.
-        unsafe {
-            self.try_register::<u8>(offset)?
-                .as_ptr()
-                .write_volatile(value)
-        };
-        self.try_register::<u8>(offset)?;
-        Ok(())
+        self.region.try_write8(offset, value)
+    }
+    pub fn try_read16(&self, offset: u16) -> Result<u16, ConfigError> {
+        self.region.try_read16(offset)
     }
     pub fn try_write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError> {
-        // SAFETY: an aligned word store never widens into adjacent Status.
-        unsafe {
-            self.try_register::<u16>(offset)?
-                .as_ptr()
-                .write_volatile(value.to_le())
-        };
-        self.try_register::<u16>(offset)?;
-        Ok(())
+        self.region.try_write16(offset, value)
+    }
+    pub fn try_read32(&self, offset: u16) -> Result<u32, ConfigError> {
+        self.region.try_read32(offset)
     }
     pub fn try_write32(&mut self, offset: u16, value: u32) -> Result<(), ConfigError> {
-        // SAFETY: complete checked aligned native dword store.
-        unsafe {
-            self.try_register::<u32>(offset)?
-                .as_ptr()
-                .write_volatile(value.to_le())
-        };
-        self.try_register::<u32>(offset)?;
-        Ok(())
+        self.region.try_write32(offset, value)
     }
 }
-
 impl ConfigSpace for OwnedConfig {
-    fn read8(&self, offset: u16) -> u8 {
-        // SAFETY: exact-width aligned live ECAM access under attachment grant.
-        unsafe { self.register::<u8>(offset).as_ptr().read_volatile() }
+    fn read8(&self, offset: u16) -> Result<u8, ConfigError> {
+        self.try_read8(offset)
     }
-    fn read16(&self, offset: u16) -> u16 {
-        // SAFETY: complete aligned native word read, with checked function bounds.
-        unsafe { self.register::<u16>(offset).as_ptr().read_volatile() }
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), ConfigError> {
+        self.try_write8(offset, value)
     }
-    fn read32(&self, offset: u16) -> u32 {
-        // SAFETY: complete aligned native dword read under exclusive config epoch.
-        unsafe { self.register::<u32>(offset).as_ptr().read_volatile() }
+    fn read16(&self, offset: u16) -> Result<u16, ConfigError> {
+        self.try_read16(offset)
     }
-    fn write8(&mut self, offset: u16, value: u8) {
-        // SAFETY: native byte store; no neighboring register is read or replayed.
-        unsafe { self.register::<u8>(offset).as_ptr().write_volatile(value) };
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError> {
+        self.try_write16(offset, value)
     }
-    fn write16(&mut self, offset: u16, value: u16) {
-        // SAFETY: native word store; adjacent Status W1C bits are never replayed.
-        unsafe { self.register::<u16>(offset).as_ptr().write_volatile(value) };
+    fn read32(&self, offset: u16) -> Result<u32, ConfigError> {
+        self.try_read32(offset)
     }
-    fn write32(&mut self, offset: u16, value: u32) {
-        // SAFETY: complete aligned native dword write under exclusive config epoch.
-        unsafe { self.register::<u32>(offset).as_ptr().write_volatile(value) };
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), ConfigError> {
+        self.try_write32(offset, value)
     }
 }
+impl UnpublishedConfig {
+    pub fn seal_bus_master(&mut self) -> Result<(), ConfigError> {
+        self.region.seal_bus_master()
+    }
+    pub fn seal_bus_routing(&mut self) -> Result<(), ConfigError> {
+        self.region.seal_bus_routing()
+    }
 
-// SAFETY: the attachment grant establishes exclusive config access for the
-// grant's life, from any context the mapping permits. write16 is a native
-// volatile word store.
+    #[expect(
+        clippy::result_large_err,
+        reason = "attachment refusal returns the exact unpublished grant and mapping without failure-path allocation"
+    )]
+    pub fn attach(
+        grant: PrepublicationGrant,
+        mapping: Mapping,
+    ) -> Result<Self, (ConfigError, PrepublicationGrant, Mapping)> {
+        Region::attach(grant, mapping).map(|region| Self { region })
+    }
+    pub fn address(&self) -> Address {
+        self.region.address()
+    }
+    pub fn window(&self) -> EcamWindow {
+        self.region.window()
+    }
+    pub fn matches_binding(
+        &self,
+        binding: &super::requester::RequesterBinding,
+    ) -> Result<bool, MappingError> {
+        self.region.matches_binding(binding)
+    }
+    pub fn matches_retention(&self, retained: &ConfigRetention) -> Result<bool, MappingError> {
+        self.region.matches_retention(retained)
+    }
+    pub fn retain_epoch(&self) -> Result<ConfigRetention, MappingError> {
+        self.region.retain_epoch()
+    }
+    pub fn into_parts(self) -> (PrepublicationGrant, Mapping) {
+        self.region.into_parts()
+    }
+    /// # Safety
+    /// Every actual config/device/raw pointer/DMA/IRQ/callback user has ended;
+    /// caller owns complete original retirement, no new access may start.
+    /// Failure keeps SAME owner and no actual grant/assignment release follows.
+    pub unsafe fn retire(&mut self) -> Result<(), MappingError> {
+        // SAFETY: caller supplies this exact original mapping retirement.
+        unsafe { self.region.retire() }
+    }
+    pub fn try_read8(&self, offset: u16) -> Result<u8, ConfigError> {
+        self.region.try_read8(offset)
+    }
+    pub fn try_write8(&mut self, offset: u16, value: u8) -> Result<(), ConfigError> {
+        self.region.try_write8(offset, value)
+    }
+    pub fn try_read16(&self, offset: u16) -> Result<u16, ConfigError> {
+        self.region.try_read16(offset)
+    }
+    pub fn try_write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError> {
+        self.region.try_write16(offset, value)
+    }
+    pub fn try_read32(&self, offset: u16) -> Result<u32, ConfigError> {
+        self.region.try_read32(offset)
+    }
+    pub fn try_write32(&mut self, offset: u16, value: u32) -> Result<(), ConfigError> {
+        self.region.try_write32(offset, value)
+    }
+}
+impl ConfigSpace for UnpublishedConfig {
+    fn read8(&self, offset: u16) -> Result<u8, ConfigError> {
+        self.try_read8(offset)
+    }
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), ConfigError> {
+        self.try_write8(offset, value)
+    }
+    fn read16(&self, offset: u16) -> Result<u16, ConfigError> {
+        self.try_read16(offset)
+    }
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError> {
+        self.try_write16(offset, value)
+    }
+    fn read32(&self, offset: u16) -> Result<u32, ConfigError> {
+        self.try_read32(offset)
+    }
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), ConfigError> {
+        self.try_write32(offset, value)
+    }
+}
+// SAFETY: actual final DriverGrant owns exclusive exact-width config access
+// and source-owned operation/phase permissions. No unpublished IRQ admission.
 unsafe impl MsiConfigSpace for OwnedConfig {}
-
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 #[cfg(test)]

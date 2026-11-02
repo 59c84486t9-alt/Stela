@@ -45,6 +45,7 @@ fn fixture(memory: &mut [u64], speed: u8, context: usize, streams: u16) -> Fixtu
             flags: binding.flags,
             device,
             binding,
+            minimum_error: None,
         }
     } else {
         // SAFETY: this fixture exclusively owns the interface/endpoints.
@@ -490,3 +491,5 @@ fn native_acknowledged_abort_rebinds_only_after_whole_device_reset_and_fresh_ide
         }
     }
 }
+
+mod minimum;

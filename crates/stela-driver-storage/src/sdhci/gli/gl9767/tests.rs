@@ -46,28 +46,31 @@ fn vendor_write(card: &Rc<RefCell<Hardware>>, state: &Rc<RefCell<State>>, at: us
 }
 struct Config(Rc<RefCell<State>>);
 impl ConfigSpace for Config {
-    fn read32(&self, at: u16) -> u32 {
-        let mut state = self.0.borrow_mut();
-        let index = usize::from(at);
-        let value = u32::from_le_bytes(state.config[index..index + 4].try_into().unwrap());
-        if at == 0x8e4
-            && let Some(started) = state.reset_started
-        {
-            state.reset_reads += 1;
-            let pending = if let Some(ack) = state.reset_ack_poll {
-                state.reset_reads < ack
-            } else {
-                clock().now_us().wrapping_sub(started) < state.reset_delay_us
-            };
-            return (value & !1) | u32::from(pending);
-        }
-        value
+    fn read32(&self, at: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        let value = {
+            let mut state = self.0.borrow_mut();
+            let index = usize::from(at);
+            let value = u32::from_le_bytes(state.config[index..index + 4].try_into().unwrap());
+            if at == 0x8e4
+                && let Some(started) = state.reset_started
+            {
+                state.reset_reads += 1;
+                let pending = if let Some(ack) = state.reset_ack_poll {
+                    state.reset_reads < ack
+                } else {
+                    clock().now_us().wrapping_sub(started) < state.reset_delay_us
+                };
+                return Ok((value & !1) | u32::from(pending));
+            }
+            value
+        };
+        Ok(value)
     }
-    fn write32(&mut self, at: u16, value: u32) {
+    fn write32(&mut self, at: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         let mut s = self.0.borrow_mut();
         s.writes.push((at, value));
         if s.ignored == Some(at) {
-            return;
+            return Ok(());
         }
         if at == 0x8e4 {
             s.reset_started = Some(clock().now_us());
@@ -80,13 +83,15 @@ impl ConfigSpace for Config {
         }
         let at = usize::from(at);
         s.config[at..at + 4].copy_from_slice(&value.to_le_bytes());
+
+        Ok(())
     }
-    fn write16(&mut self, at: u16, value: u16) {
+    fn write16(&mut self, at: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
         let mut s = self.0.borrow_mut();
         assert!(matches!(at, 4 | 0x94));
         s.writes.push((at, u32::from(value)));
         if s.ignored == Some(at) {
-            return;
+            return Ok(());
         }
         if at == 0x94 {
             assert_eq!(s.config[0x886] & 15, 2, "source VHS power window");
@@ -100,9 +105,19 @@ impl ConfigSpace for Config {
         }
         let at = usize::from(at);
         s.config[at..at + 2].copy_from_slice(&value.to_le_bytes());
+
+        Ok(())
     }
-    fn write8(&mut self, _: u16, _: u8) {
+    fn write8(&mut self, _: u16, _: u8) -> Result<(), crate::bus::pci::ConfigError> {
         panic!("unexpected PCI byte write");
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
     }
 }
 struct Port67 {
@@ -170,12 +185,12 @@ impl Registers for Port67 {
     fn write8(&mut self, at: usize, value: u8) {
         if at == POWER && value == 0 && self.state.borrow().normal_power_off {
             assert_eq!(
-                self.function.config().read32(PLL) & (DIRECT | SPREAD),
+                self.function.config().read32(PLL).unwrap() & (DIRECT | SPREAD),
                 0,
                 "normal rail-off before vendor PLL stopped"
             );
             assert_eq!(
-                self.function.config().read32(0x8a0) & (1 << 12),
+                self.function.config().read32(0x8a0).unwrap() & (1 << 12),
                 0,
                 "normal rail-off before low-power negotiation restored"
             );
@@ -366,6 +381,7 @@ fn initialize_port(p: &mut Port67) -> Result<(), BlockError> {
         &mut p.function,
         &mut Mmio(p.card.clone(), p.state.clone()),
         clock(),
+        crate::sdhci::model::minimum().as_ref(),
     )
 }
 fn host(
@@ -388,6 +404,7 @@ fn host(
     let host = Host::new(
         Box::new(p),
         clock(),
+        crate::sdhci::model::minimum(),
         "GL9767 actual source register/card peer".into(),
         dma,
         Profile::Gli9767,
@@ -401,12 +418,15 @@ fn native_gl9767_source_phy_reset_debounce_pio_and_shutdown_use_original_config(
     let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, card, state) = host(&mut dma, false, false);
     let config = Config(state.clone());
-    assert_eq!(config.read32(0x8d0), 0x3000_700f);
-    assert_eq!(config.read32(0x8e0), 1 << 21 | 3 << 9 | 3 << 6);
-    assert_eq!(config.read32(0x90c), 3 << 29);
-    assert_eq!(config.read32(0x95c), 1 << 25 | 15 << 11 | 3 << 7 | 3 << 5);
-    assert_eq!(config.read32(0x964), 0x4b);
-    assert_eq!(config.read32(VHS) & (15 << 16), 0);
+    assert_eq!(config.read32(0x8d0).unwrap(), 0x3000_700f);
+    assert_eq!(config.read32(0x8e0).unwrap(), 1 << 21 | 3 << 9 | 3 << 6);
+    assert_eq!(config.read32(0x90c).unwrap(), 3 << 29);
+    assert_eq!(
+        config.read32(0x95c).unwrap(),
+        1 << 25 | 15 << 11 | 3 << 7 | 3 << 5
+    );
+    assert_eq!(config.read32(0x964).unwrap(), 0x4b);
+    assert_eq!(config.read32(VHS).unwrap() & (15 << 16), 0);
     let mut disk = host.poll().unwrap().unwrap();
     let mut bytes = [0xa5; 1024];
     disk.read(7, &mut bytes).unwrap();
@@ -427,7 +447,7 @@ fn native_gl9767_source_phy_reset_debounce_pio_and_shutdown_use_original_config(
     state.borrow_mut().normal_power_off = true;
     disk.shutdown(true).unwrap();
     assert_eq!(Port(card.clone()).read8(POWER), 0);
-    assert_eq!(config.read32(0x944) & (1 << 5 | 1 << 8), 0);
+    assert_eq!(config.read32(0x944).unwrap() & (1 << 5 | 1 << 8), 0);
     assert_ne!(Port(card.clone()).read32(INTERRUPT_ENABLE) & BUS_POWER, 0);
 }
 
@@ -440,10 +460,13 @@ fn native_gl9767_uhs_clock_negotiation_and_v4_dma_have_real_payloads() {
     assert_eq!(host.inner.borrow().actual_hz, 205_000_000);
     assert_eq!(card.borrow().tuning_commands, 3);
     let config = Config(state.clone());
-    assert_eq!(config.read32(PLL) & (0xf3ff | DIRECT), 0x246 | DIRECT);
-    assert_eq!(config.read32(PLL) & (31 << 24), 31 << 24);
-    assert_eq!(config.read32(SSC) >> 16, 0xf5c3);
-    assert_eq!(config.read32(0x8a0) & (1 << 12), 0);
+    assert_eq!(
+        config.read32(PLL).unwrap() & (0xf3ff | DIRECT),
+        0x246 | DIRECT
+    );
+    assert_eq!(config.read32(PLL).unwrap() & (31 << 24), 31 << 24);
+    assert_eq!(config.read32(SSC).unwrap() >> 16, 0xf5c3);
+    assert_eq!(config.read32(0x8a0).unwrap() & (1 << 12), 0);
     let mut bytes = vec![0xa5; 65536];
     disk.read(3, &mut bytes).unwrap();
     assert_eq!(bytes, card.borrow().disk[3 * 512..3 * 512 + 65536]);
@@ -453,8 +476,8 @@ fn native_gl9767_uhs_clock_negotiation_and_v4_dma_have_real_payloads() {
     assert!(state.borrow().dma);
     state.borrow_mut().normal_power_off = true;
     disk.shutdown(true).unwrap();
-    assert_eq!(config.read32(PLL) & (DIRECT | SPREAD), 0);
-    assert_eq!(config.read32(0x8a0) & (1 << 12), 0);
+    assert_eq!(config.read32(PLL).unwrap() & (DIRECT | SPREAD), 0);
+    assert_eq!(config.read32(0x8a0).unwrap() & (1 << 12), 0);
 }
 
 #[test]
@@ -469,7 +492,7 @@ fn native_gl9767_active_sd_express_or_refused_pci_reset_never_starts_sd_commands
         assert!(initialize_port(&mut port).is_err());
         assert!(card.borrow().commands.is_empty());
         assert!(!card.borrow().writes.iter().any(|(at, _, _)| *at == RESET));
-        assert_eq!(Config(state).read32(VHS) & (15 << 16), 0);
+        assert_eq!(Config(state).read32(VHS).unwrap() & (15 << 16), 0);
     }
 }
 
@@ -502,7 +525,7 @@ fn native_gl9767_delayed_pci_ahb_reset_ack_precedes_sdhci_reset_and_timeout_refu
             assert_eq!(result, Err(BlockError::Timeout));
             assert!(!card.borrow().writes.iter().any(|(at, _, _)| *at == RESET));
         }
-        assert_eq!(Config(state).read32(VHS) & (15 << 16), 0);
+        assert_eq!(Config(state).read32(VHS).unwrap() & (15 << 16), 0);
     }
 }
 
@@ -642,7 +665,7 @@ fn unchanged_linux_gl9767_phy_clock_power_and_stronger_observed_reset_ack_match_
                 initialize_port(&mut port).unwrap();
                 for (i, at) in addresses.into_iter().enumerate() {
                     assert_eq!(
-                        port.function.config().read32(at as u16),
+                        port.function.config().read32(at as u16).unwrap(),
                         number(i + 3),
                         "{line}"
                     );
@@ -670,13 +693,33 @@ fn unchanged_linux_gl9767_phy_clock_power_and_stronger_observed_reset_ack_match_
                 } else {
                     number(4)
                 };
-                let actual =
-                    set_clock(&mut port, clock(), 2, 200_000_000, timing, requested).unwrap();
+                let actual = set_clock(
+                    &mut port,
+                    clock(),
+                    2,
+                    200_000_000,
+                    timing,
+                    requested,
+                    crate::sdhci::model::minimum().as_ref(),
+                )
+                .unwrap();
                 assert_eq!(actual, number(5), "{line}");
-                assert_eq!(port.function.config().read32(PLL), number(6), "{line}");
-                assert_eq!(port.function.config().read32(SSC), number(7), "{line}");
+                assert_eq!(
+                    port.function.config().read32(PLL).unwrap(),
+                    number(6),
+                    "{line}"
+                );
+                assert_eq!(
+                    port.function.config().read32(SSC).unwrap(),
+                    number(7),
+                    "{line}"
+                );
                 assert_eq!(u32::from(port.read16(CLOCK)), number(8), "{line}");
-                assert_eq!(port.function.config().read32(0x8a0), number(9), "{line}");
+                assert_eq!(
+                    port.function.config().read32(0x8a0).unwrap(),
+                    number(9),
+                    "{line}"
+                );
             }
             "W" => {
                 port.write32(INTERRUPT_ENABLE, 0x1234_5678);
@@ -689,7 +732,7 @@ fn unchanged_linux_gl9767_phy_clock_power_and_stronger_observed_reset_ack_match_
                 }
                 assert_eq!(port.read32(INTERRUPT_ENABLE), number(4 + writes), "{line}");
                 assert_eq!(
-                    port.function.config().read32(0x944),
+                    port.function.config().read32(0x944).unwrap(),
                     number(5 + writes),
                     "{line}"
                 );
@@ -717,7 +760,10 @@ fn unchanged_linux_gl9767_phy_clock_power_and_stronger_observed_reset_ack_match_
             }
             "D" => {
                 state.borrow_mut().reset_ack_poll = Some(number(1) as usize);
-                let result = pci_reset(port.function.config(), clock());
+                let result = pci_reset(
+                    port.function.config(),
+                    crate::sdhci::model::minimum().as_ref(),
+                );
                 let expected = fields[2].parse::<i32>().unwrap();
                 assert_eq!(result.is_ok(), expected == 0, "{line}");
                 assert_eq!(state.borrow().reset_reads, number(3) as usize, "{line}");
@@ -732,4 +778,42 @@ fn unchanged_linux_gl9767_phy_clock_power_and_stronger_observed_reset_ack_match_
         cases += 1;
     }
     assert_eq!(cases, 218);
+}
+
+#[test]
+fn failed_pll_quiet_interval_does_not_restore_l1ss_or_arm_card_clock() {
+    struct Failed;
+    // SAFETY: test-only failure injection, no native timing grant.
+    unsafe impl crate::bus::pci::power::Timer for Failed {
+        fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+            Ok(())
+        }
+        fn wait_us(&self, _: u64) -> Result<(), crate::bus::pci::power::Error> {
+            Err(crate::bus::pci::power::Error::Clock)
+        }
+    }
+    let (mut p, card, state) = port();
+    initialize_port(&mut p).unwrap();
+    let result = set_clock(
+        &mut p,
+        clock(),
+        2,
+        200_000_000,
+        Timing::Sdr104,
+        208_000_000,
+        &Failed,
+    );
+    assert!(matches!(
+        result,
+        Err(ClockFailure::Authority(BlockError::PciPower(
+            crate::bus::pci::power::Error::Clock
+        )))
+    ));
+    assert_ne!(
+        p.function.config().read32(0x8a0).unwrap() & (1 << 12),
+        0,
+        "do not restore L1SS after an uncertain quiet interval"
+    );
+    assert_eq!(Port(card).read16(CLOCK) & CLOCK_CARD, 0);
+    assert_ne!(state.borrow().writes.last().unwrap().0, 0x8a0);
 }

@@ -19,13 +19,17 @@ use crate::{
     },
     registers,
 };
-use alloc::{format, vec::Vec};
+use alloc::{format, rc::Rc, vec::Vec};
+use core::cell::Cell;
 use core::sync::atomic::{Ordering, fence};
 
 mod commands;
 mod configuration;
 mod error_handling;
+mod minimum;
 mod quirks;
+pub use minimum::{AttachRefusal, Host};
+use minimum::{Control, DmaResource, PortRefusal};
 
 pub const CLASS: [u8; 3] = [0x01, 0x06, 0x01];
 /// `ahci_pci_tbl`: AMD uses the RAID class only for AHCI controllers.
@@ -437,9 +441,11 @@ impl CommandPort for Mmio {
 
 pub struct AhciDisk {
     port: Mmio,
-    commands: DmaBuffer,
-    table: DmaBuffer,
-    bounce: DmaBuffer,
+    commands: DmaResource<DmaBuffer>,
+    table: DmaResource<DmaBuffer>,
+    bounce: DmaResource<DmaBuffer>,
+    minimum: Rc<Control>,
+    retain: Rc<Cell<bool>>,
     identity: Identity,
     clock: Clock,
     command_timeout_us: u64,
@@ -480,7 +486,7 @@ pub struct AhciDisk {
     devslp: bool,
     /// Slots 1 and up's command tables and bounce buffers, for queued
     /// commands; slot 0's are `table` and `bounce`.
-    slots: Vec<Slot>,
+    slots: DmaResource<Vec<Slot>>,
     /// The block commands started on the port, each in its own slot, and
     /// the next one's tag.
     running: Vec<Running>,
@@ -1158,30 +1164,38 @@ fn stop_engine(port: &impl CommandPort, clock: Clock) -> Result<(), BlockError> 
 fn debounce(
     port: &impl CommandPort,
     clock: Clock,
+    minimum: &Control,
     timing: [u64; 3],
     limit_us: u64,
 ) -> Result<(), BlockError> {
+    minimum.check()?;
     let [interval, duration, timeout] = timing;
+    if interval == 0 || duration.checked_add(interval).is_none() {
+        return Err(BlockError::Protocol("invalid AHCI debounce interval"));
+    }
     let limit = limit_us.min(timeout);
     let start = clock.try_start().map_err(|_| BlockError::Timeout)?;
     let elapsed = || clock.try_elapsed_us(start).map_err(|_| BlockError::Timeout);
     let mut last = port.read32(PORT_SATA_STATUS) & SATA_STATUS_DETECTION;
-    let mut last_at = 0;
+    let mut stable_minimum = 0u64;
     loop {
-        clock.delay(interval);
+        // Actual lower-bound waits establish stability; nominal elapsed time
+        // controls only refusal/deadlines and cannot shorten this minimum.
+        minimum.wait_after(interval, || {})?;
         let now = elapsed()?;
         let current = port.read32(PORT_SATA_STATUS) & SATA_STATUS_DETECTION;
         if current == last {
             if current == 1 && now < limit {
                 continue;
             }
-            if now > last_at + duration {
+            stable_minimum = stable_minimum.saturating_add(interval);
+            if stable_minimum > duration {
                 return Ok(());
             }
             continue;
         }
         last = current;
-        last_at = now;
+        stable_minimum = 0;
         if now > limit {
             return Err(BlockError::Timeout);
         }
@@ -1190,6 +1204,7 @@ fn debounce(
 
 /// The disks behind one controller, and the ports that failed on their own.
 pub struct Attached {
+    pub host: Host,
     pub disks: Vec<AhciDisk>,
     pub failures: Vec<(u32, BlockError)>,
 }
@@ -1197,79 +1212,114 @@ pub struct Attached {
 /// Take the HBA from the firmware, reset it and return one device per port
 /// with an ATA disk behind it.
 pub fn attach(
-    function: &mut Function,
+    function: Function,
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
-) -> Result<Attached, BlockError> {
-    validate_clock(handoff.clock)?;
-    function.power_up(&handoff.clock)?;
-    let bars = function.bars();
-    let hba = registers(handoff, bars[5], 0, PORT_BASE)?;
-    function.enable_polled();
-    let clock = handoff.clock;
-    if hba.read32(CAPABILITIES_2) & CAP2_HANDOFF != 0 {
-        hba.write32(HANDOFF, hba.read32(HANDOFF) | HANDOFF_OS_OWNED);
-        clock.wait(25_000, || hba.read32(HANDOFF) & HANDOFF_BIOS_OWNED == 0);
-        if hba.read32(HANDOFF) & HANDOFF_BIOS_BUSY != 0 {
-            clock.wait(2_000_000, || hba.read32(HANDOFF) & HANDOFF_BIOS_BUSY == 0);
-        }
-        if hba.read32(HANDOFF) & HANDOFF_BIOS_OWNED != 0 {
-            return Err(BlockError::Unsupported(
-                "firmware keeps the AHCI controller",
-            ));
-        }
-    }
-    hba.write32(GLOBAL_CONTROL, GLOBAL_AHCI_ENABLE);
-    // Firmware programs CAP and PI, which may be write-once and which some
-    // controllers clear on HBA reset (Linux `ahci_save_initial_config`).
-    let capabilities = hba.read32(CAPABILITIES);
-    let capabilities_2 = hba.read32(CAPABILITIES_2);
-    let implemented = port_map(capabilities, hba.read32(PORTS_IMPLEMENTED));
-    hba.write32(GLOBAL_CONTROL, GLOBAL_AHCI_ENABLE | GLOBAL_RESET);
-    if !clock.wait(RESET_TIMEOUT_US, || {
-        hba.read32(GLOBAL_CONTROL) & GLOBAL_RESET == 0
-    }) {
-        return Err(BlockError::Timeout);
-    }
-    // AHCI mode, interrupts off; then Linux `ahci_restore_initial_config`.
-    hba.write32(GLOBAL_CONTROL, GLOBAL_AHCI_ENABLE);
-    hba.write32(CAPABILITIES, capabilities);
-    if capabilities_2 != 0 {
-        hba.write32(CAPABILITIES_2, capabilities_2);
-    }
-    hba.write32(PORTS_IMPLEMENTED, implemented);
-    hba.read32(PORTS_IMPLEMENTED);
-    if function.vendor == INTEL && INTEL_PCS_QUIRK.contains(&function.device) {
-        // Linux `ahci_intel_pcs_quirk`: enable ports firmware left off. Only
-        // the low sixteen ports have PCS bits.
-        let enables = implemented as u16;
-        let control = function.config().read16(INTEL_PORT_CONTROL);
-        if control & enables != enables {
-            function
-                .config()
-                .write16(INTEL_PORT_CONTROL, control | enables);
-        }
-    }
-    let mut attached = Attached {
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
+) -> Result<Attached, AttachRefusal> {
+    let mut kept = crate::Retained::new(alloc::boxed::Box::new(minimum::Build {
+        host: Host::new(function, minimum),
+        hba: None,
         disks: Vec::new(),
         failures: Vec::new(),
-    };
-    for index in (0..MAX_PORTS).filter(|index| implemented >> index & 1 == 1) {
-        let offset = PORT_BASE + PORT_REGISTERS * u64::from(index);
-        let started = registers(handoff, bars[5], offset, PORT_REGISTERS)
-            .and_then(|port| AhciDisk::start(port, capabilities, capabilities_2, clock, dma));
-        match started {
-            Ok(Some(mut disk)) => {
-                disk.identity.location = format!("{} port {index}", function.address);
-                attached.disks.push(disk);
+    }));
+    let result = (|| {
+        let control = kept.host.control.clone();
+        control.check()?;
+        validate_clock(handoff.clock)?;
+        let mut owned_function = control.function.borrow_mut();
+        let function = owned_function
+            .as_mut()
+            .ok_or(BlockError::Protocol("AHCI host lost its function"))?;
+        function.power_up(control.minimum.as_ref())?;
+        let bars = function.bars()?;
+        kept.get_mut().hba = Some(registers(handoff, bars[5], 0, PORT_BASE)?);
+        let hba = kept.hba.expect("same checked HBA");
+        function.enable_polled()?;
+        let clock = handoff.clock;
+        if hba.read32(CAPABILITIES_2) & CAP2_HANDOFF != 0 {
+            hba.write32(HANDOFF, hba.read32(HANDOFF) | HANDOFF_OS_OWNED);
+            clock.wait(25_000, || hba.read32(HANDOFF) & HANDOFF_BIOS_OWNED == 0);
+            if hba.read32(HANDOFF) & HANDOFF_BIOS_BUSY != 0 {
+                clock.wait(2_000_000, || hba.read32(HANDOFF) & HANDOFF_BIOS_BUSY == 0);
             }
-            Ok(None) => {}
-            Err(error) => attached.failures.push((index, error)),
+            if hba.read32(HANDOFF) & HANDOFF_BIOS_OWNED != 0 {
+                return Err(BlockError::Unsupported(
+                    "firmware keeps the AHCI controller",
+                ));
+            }
         }
+        hba.write32(GLOBAL_CONTROL, GLOBAL_AHCI_ENABLE);
+        let capabilities = hba.read32(CAPABILITIES);
+        let capabilities_2 = hba.read32(CAPABILITIES_2);
+        let implemented = port_map(capabilities, hba.read32(PORTS_IMPLEMENTED));
+        hba.write32(GLOBAL_CONTROL, GLOBAL_AHCI_ENABLE | GLOBAL_RESET);
+        if !clock.wait(RESET_TIMEOUT_US, || {
+            hba.read32(GLOBAL_CONTROL) & GLOBAL_RESET == 0
+        }) {
+            return Err(BlockError::Timeout);
+        }
+        hba.write32(GLOBAL_CONTROL, GLOBAL_AHCI_ENABLE);
+        hba.write32(CAPABILITIES, capabilities);
+        if capabilities_2 != 0 {
+            hba.write32(CAPABILITIES_2, capabilities_2);
+        }
+        hba.write32(PORTS_IMPLEMENTED, implemented);
+        hba.read32(PORTS_IMPLEMENTED);
+        if function.vendor == INTEL && INTEL_PCS_QUIRK.contains(&function.device) {
+            let enables = implemented as u16;
+            let value = function.config().read16(INTEL_PORT_CONTROL)?;
+            if value & enables != enables {
+                function
+                    .config()
+                    .write16(INTEL_PORT_CONTROL, value | enables)?;
+            }
+        }
+        let address = function.address;
+        for index in (0..MAX_PORTS).filter(|index| implemented >> index & 1 == 1) {
+            // A prior minimum failure forbids even starting the next port.
+            control.ready()?;
+            let offset = PORT_BASE + PORT_REGISTERS * u64::from(index);
+            let port = registers(handoff, bars[5], offset, PORT_REGISTERS)?;
+            match AhciDisk::start(
+                port,
+                capabilities,
+                capabilities_2,
+                clock,
+                dma,
+                control.clone(),
+            ) {
+                Ok(Some(mut disk)) => {
+                    disk.identity.location = format!("{address} port {index}");
+                    kept.get_mut().disks.push(disk);
+                }
+                Ok(None) => {}
+                Err(refusal) => {
+                    let error = refusal.error.clone();
+                    // Keep the actual partial port BEFORE any other decision.
+                    kept.get_mut().host.retained_ports.push(refusal);
+                    control.ready()?;
+                    kept.get_mut().failures.push((index, error));
+                }
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        return Err(AttachRefusal::new(error, kept));
     }
-    Ok(attached)
+    let minimum::Build {
+        host,
+        hba: _,
+        disks,
+        failures,
+    } = *kept.into_inner();
+    Ok(Attached {
+        host,
+        disks,
+        failures,
+    })
 }
-
 /// The implemented ports. An unprogrammed PI falls back to CAP.NP's count,
 /// as Linux `ahci_save_initial_config` does.
 fn port_map(capabilities: u32, implemented: u32) -> u32 {
@@ -1306,6 +1356,7 @@ fn stop_port(port: &impl CommandPort, clock: Clock) -> Result<(), BlockError> {
 
 impl AhciDisk {
     fn ready(&self) -> Result<(), BlockError> {
+        self.minimum.ready()?;
         self.fault.clone().map_or(Ok(()), Err)
     }
 
@@ -1316,6 +1367,14 @@ impl AhciDisk {
 
     fn sectors(&self, bytes: usize) -> u16 {
         (bytes / self.identity.block_size as usize) as u16
+    }
+}
+
+impl Drop for AhciDisk {
+    fn drop(&mut self) {
+        if self.fault.is_some() {
+            self.retain.set(true);
+        }
     }
 }
 
@@ -1382,11 +1441,15 @@ impl BlockDevice for AhciDisk {
     /// under the caller's lock and completed by a later look
     /// ([`Self::finish`]).
     fn depth(&self) -> usize {
-        self.queue_depth()
+        if self.ready().is_ok() {
+            self.queue_depth()
+        } else {
+            0
+        }
     }
 
     fn room(&self) -> bool {
-        self.free_slot().is_some()
+        self.ready().is_ok() && self.free_slot().is_some()
     }
 
     fn start(&mut self, command: Command) -> Result<u32, BlockError> {
@@ -1412,6 +1475,9 @@ impl BlockDevice for AhciDisk {
     /// arrived: memory alone. A failure that posts none is seen at a later
     /// look.
     fn posted(&self) -> bool {
+        if self.minimum.ready().is_err() {
+            return !self.running.is_empty();
+        }
         self.running.iter().any(|running| {
             running.result.is_some()
                 || running

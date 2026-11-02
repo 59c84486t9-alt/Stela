@@ -134,6 +134,31 @@ int stela_linux_page_stack_admit(
     const struct stela_linux_stack_admission_v1 *request,
     struct stela_linux_stack_ticket_v1 *ticket);
 int stela_linux_page_stack_cancel(const struct stela_linux_stack_ticket_v1 *ticket);
+/* Private original-child descriptor lease ABI. The actual affine Rust native
+ * pin remains the payload owner. actual_child is opaque source factory identity,
+ * never a task/current constructor; caller proves actual copy_process custody.
+ * Lend creates the real original noncompound THREAD_SIZE page allocation. It
+ * does not zero/reseed already-prepared native frame bytes. Ordinary original
+ * free_thread_stack/__free_pages performs logical release, preserving markers.
+ * Cancel is ONLY unpublished and refuses every published descriptor graph. */
+struct stela_linux_owner;
+int stela_linux_page_stack_source_context(const struct stela_linux_owner *expected);
+int stela_linux_page_stack_lend(const struct stela_linux_stack_ticket_v1 *ticket,
+                              const void *actual_child, void **cpu_base);
+/* Bounded real-current/IF0 source validation. No sleep/allocation/publication. */
+int stela_linux_page_stack_prepare_publish(
+    const struct stela_linux_stack_ticket_v1 *ticket, const void *actual_child);
+/* Source nofail commit after nativeDormant accepted, before source PID/tasklist
+ * publication. Corruption traps and retains; no ordinary refusal/cleanup. */
+void stela_linux_page_stack_publish(const struct stela_linux_stack_ticket_v1 *ticket,
+                                 const void *actual_child);
+/* Private unsafe retirement boundary. Real process source reaper already
+ * joined final task/stack/page/alias/RCU and actual native successor receipts.
+ * Every outstanding descriptor/DMA ref independently refuses removal. This
+ * never frees the Rust physical pin or authorizes native stack reseeding. */
+int stela_linux_page_stack_retire(const struct stela_linux_stack_ticket_v1 *ticket,
+                               const void *actual_child);
+
 
 void stela_linux_pages_finish(void);
 /* Entered serialized owner only. Pin one live aligned physical page's actual

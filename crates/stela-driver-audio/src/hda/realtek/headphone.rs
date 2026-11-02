@@ -6,8 +6,7 @@
 //! presence inversion and headset CTIA/OMTP policies are not inferred.
 use super::RealtekCommonReport;
 use crate::{
-    Direction, Error,
-    bus::i2c::Timer,
+    Direction, Error, Timer,
     hda::{
         AnalogRoute, CodecGraph, Controller, PinConnection, PinDevice, PinOptions, PinSense,
         Registers, StreamId, Verb, WidgetKind,
@@ -46,6 +45,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<bool, Error> {
+        self.minimum_guard()?;
         self.realtek_common_guard(graph)?;
         self.preflight_analog_route(graph, route, id, channel, options)?;
         if route.direction() != Direction::Playback
@@ -126,6 +126,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(pin_power)
     }
     pub(super) fn headphone_unmute_zero(&mut self, codec: u8, pin: u8) -> Result<(), Error> {
+        self.minimum_guard()?;
         // Exact AMP_OUT_UNMUTE: both declared stereo channels, gain code zero.
         // Generic route programming subsequently chooses its advertised 0dB.
         self.verb(Verb::long(codec, pin, 3, 0xb000)?)?;
@@ -152,6 +153,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<RealtekHeadphoneReport, Error> {
+        self.minimum_guard()?;
         self.realtek_common_guard(graph)?;
         if graph.vendor_id != 0x10ec_0298 {
             return Err(Error::UnsupportedTopology);
@@ -173,14 +175,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             }
             let coefficients =
                 alloc::vec![self.clear_coefficient_bits(graph.address, 0x10, 1 << 9)?];
-            self.delay(30_000);
+            self.delay(30_000)?;
             let initial_sense = self.poll_pin_sense(graph, route.pin())?;
             if initial_sense.present {
-                self.delay(2_000);
+                self.delay(2_000)?;
                 self.route_control(graph.address, route.pin(), 0x707, 0xf07, 0x40)?;
-                self.delay(75_000);
+                self.delay(75_000)?;
                 self.headphone_unmute_zero(graph.address, route.pin())?;
-                self.delay(75_000);
+                self.delay(75_000)?;
             }
             self.configure_analog_route(graph, route, id, channel, options)?;
             Ok(RealtekHeadphoneReport {
@@ -205,6 +207,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         control: DepopControl,
         setting: u16,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         let (node, index, mask) = match control {
             DepopControl::HeadphonePower => (0x57, 4, 7),
             DepopControl::AnalogReset => (0x53, 2, 0x8000),
@@ -253,6 +256,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<RealtekHeadphoneReport, Error> {
+        self.minimum_guard()?;
         self.configure_realtek_depop_headphone(
             graph,
             route,
@@ -276,6 +280,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<RealtekHeadphoneReport, Error> {
+        self.minimum_guard()?;
         self.configure_realtek_depop_headphone(
             graph,
             route,
@@ -295,6 +300,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         options: PinOptions,
         profile: DepopProfile,
     ) -> Result<RealtekHeadphoneReport, Error> {
+        self.minimum_guard()?;
         self.realtek_common_guard(graph)?;
         let accepts = match profile {
             DepopProfile::Alc255 => graph.vendor_id == 0x10ec_0255,
@@ -322,15 +328,15 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 coefficients.push(self.clear_coefficient_bits(graph.address, 0x36, 1 << 13)?);
             }
             coefficients.push(self.clear_coefficient_bits(graph.address, 0x10, 1 << 9)?);
-            self.delay(30_000);
+            self.delay(30_000)?;
             let initial_sense = self.poll_pin_sense(graph, route.pin())?;
             if initial_sense.present {
-                self.delay(2_000);
+                self.delay(2_000)?;
                 self.depop_control(graph.address, DepopControl::HeadphonePower, 1)?;
                 self.route_control(graph.address, route.pin(), 0x707, 0xf07, 0x40)?;
-                self.delay(75_000);
+                self.delay(75_000)?;
                 self.headphone_unmute_zero(graph.address, route.pin())?;
-                self.delay(75_000);
+                self.delay(75_000)?;
                 self.depop_control(graph.address, DepopControl::HeadphonePower, 4)?;
             }
             coefficients.push(self.clear_coefficient_bits(graph.address, 0x46, 3 << 12)?);

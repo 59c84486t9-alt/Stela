@@ -29,10 +29,19 @@ const BYTES: usize = 0x20000;
 /// A revision/class dword no direct PDM profile admits.
 const UNSUPPORTED: u32 = 0x0480_0050;
 
-struct ResourceOwner;
+struct ResourceOwner {
+    mapping: crate::bus::mmio::owned::model::MappingRetention<Arc<ModelRam>>,
+}
 // SAFETY: isolated model reservation; symbolic BAR labels are never physical
 // pointers and its CPU storage is held by the mapping platform.
+
 unsafe impl ResourceBacking for ResourceOwner {
+    fn begin_mapping(
+        &self,
+    ) -> Result<crate::bus::pci::assignment::OpaqueUse, crate::bus::mmio::owned::Error> {
+        self.mapping.begin_mapping()
+    }
+
     fn physical_span(&self) -> PhysicalSpan {
         PhysicalSpan::new(BASE, BYTES as u64).unwrap()
     }
@@ -42,8 +51,20 @@ unsafe impl ResourceBacking for ResourceOwner {
 }
 #[repr(align(4096))]
 struct Storage([u8; BYTES]);
+struct ModelRam(UnsafeCell<Storage>);
+// SAFETY: actual isolated raw-only RAM; the fixture serializes model users
+// and no safe references to mutable register bytes escape.
+unsafe impl Send for ModelRam {}
+// SAFETY: same exclusive model access contract as Send; no native owner.
+unsafe impl Sync for ModelRam {}
+impl ModelRam {
+    fn pointer(&self) -> NonNull<u8> {
+        // SAFETY: this retained UnsafeCell allocation covers exact Storage.
+        unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.0.get()).0).cast()) }
+    }
+}
 struct Platform {
-    ram: Box<UnsafeCell<Storage>>,
+    ram: Arc<ModelRam>,
     request: Mutex<Option<MapRequest>>,
     unmaps: Arc<AtomicUsize>,
 }
@@ -53,8 +74,8 @@ unsafe impl Send for Platform {}
 unsafe impl Sync for Platform {}
 impl Platform {
     fn pointer(&self) -> NonNull<u8> {
-        // SAFETY: stable Box storage and UnsafeCell permit raw MMIO accesses.
-        unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.ram.get()).0).cast()) }
+        // Same original retained model allocation; only raw register pointers escape.
+        self.ram.pointer()
     }
 }
 // SAFETY: independent model's real CPU storage backs exactly one kept
@@ -93,17 +114,21 @@ unsafe impl MappingPlatform for Platform {
     }
 }
 
-fn mapping() -> (Mapping, Arc<AtomicUsize>) {
+fn mapping() -> (
+    Mapping,
+    Arc<AtomicUsize>,
+    crate::bus::mmio::owned::model::MappingOwner<Arc<ModelRam>>,
+) {
     let unmaps = Arc::new(AtomicUsize::new(0));
     let platform = Arc::new(Platform {
-        ram: Box::new(UnsafeCell::new(Storage([0; BYTES]))),
+        ram: Arc::new(ModelRam(UnsafeCell::new(Storage([0; BYTES])))),
         request: Mutex::new(None),
         unmaps: unmaps.clone(),
     });
     // SAFETY: entirely isolated CPU fixture/resources, not native activation.
     let authority = unsafe {
         Authority::isolated_model(
-            platform,
+            platform.clone(),
             AddressSpace {
                 identity: 99,
                 physical_bits: 48,
@@ -113,26 +138,39 @@ fn mapping() -> (Mapping, Arc<AtomicUsize>) {
         )
     }
     .unwrap();
+    // SAFETY: the same isolated provider owns this exact aligned RAM;
+    // all host threads are allowed, with exclusive raw model access.
+    let mapping_owner = unsafe {
+        crate::bus::mmio::owned::model::MappingOwner::from_owned(platform.ram.clone(), |owner| {
+            if (owner.pointer().as_ptr() as usize).is_multiple_of(4096) {
+                Ok(())
+            } else {
+                Err(crate::bus::pci::assignment::Error::Context)
+            }
+        })
+    };
     let mapping = authority
         .map(
-            Resource::new(Box::new(ResourceOwner)),
+            Resource::new(Box::new(ResourceOwner {
+                mapping: mapping_owner.retention().unwrap(),
+            })),
             0,
             BYTES,
             CacheAttribute::Uncached,
             Protection::ReadWrite,
         )
         .unwrap();
-    (mapping, unmaps)
+    (mapping, unmaps, mapping_owner)
 }
 
 /// A drained ACP function reporting `revision_class` at config offset 8.
 fn stopped(revision_class: u32) -> StoppedRequester {
     let (mut config, _) = fixture(ADDRESS);
-    config.write32(0, 0x15e2_1022);
-    config.write32(8, revision_class);
-    config.write16(4, 0x402);
-    config.write32(0x10, BASE as u32 | 4);
-    config.write32(0x14, (BASE >> 32) as u32);
+    config.write32(0, 0x15e2_1022).unwrap();
+    config.write32(8, revision_class).unwrap();
+    config.write16(4, 0x402).unwrap();
+    config.write32(0x10, BASE as u32 | 4).unwrap();
+    config.write32(0x14, (BASE >> 32) as u32).unwrap();
     let function = Function::new(ADDRESS, config).unwrap();
     // SAFETY: isolated model has no PF aliases, engines, IRQs or workers.
     match unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) } {
@@ -150,11 +188,17 @@ fn bar() -> Bar {
     }
 }
 
-fn attach<P: Profile>(revision_class: u32) -> (NativeRegisters<P>, Arc<AtomicUsize>) {
-    let (mapping, unmaps) = mapping();
+fn attach<P: Profile>(
+    revision_class: u32,
+) -> (
+    NativeRegisters<P>,
+    Arc<AtomicUsize>,
+    crate::bus::mmio::owned::model::MappingOwner<Arc<ModelRam>>,
+) {
+    let (mapping, unmaps, mapping_owner) = mapping();
     // SAFETY: exact symbolic BAR0 plus canonical stopped fixture.
     match unsafe { NativeRegisters::attach(stopped(revision_class), mapping, bar()) } {
-        Ok(registers) => (registers, unmaps),
+        Ok(registers) => (registers, unmaps, mapping_owner),
         Err(failure) => panic!("attachment {:?}", failure.error),
     }
 }
@@ -162,45 +206,56 @@ fn attach<P: Profile>(revision_class: u32) -> (NativeRegisters<P>, Arc<AtomicUsi
 /// The owners `into_stopped_resources` keeps while `why` still holds.
 fn retained<P: Profile>(registers: NativeRegisters<P>, why: &str) -> NativeRegisters<P> {
     match registers.into_stopped_resources() {
-        Err(retained) => retained,
+        Err(retained) => retained.owner,
         Ok(_) => panic!("{why} released"),
     }
 }
 
-fn retire(function: Function<OwnedConfig>, mut mapping: Mapping) {
-    let mut config_mapping = function.into_config().into_mapping();
+fn retire(
+    function: Function<OwnedConfig>,
+    mut mapping: Mapping,
+    mut mapping_owner: crate::bus::mmio::owned::model::MappingOwner<Arc<ModelRam>>,
+) {
+    let config = function.into_config();
     // SAFETY: model owners have been consumed; no device/callback
     // or raw register accesses remain after the asserted stopped state.
     unsafe { mapping.retire() }.unwrap();
     // SAFETY: same final config-owner drain, registry retirement.
-    unsafe { config_mapping.retire() }.unwrap();
+    unsafe { crate::bus::pci::owned::test_support::retire_owned(config) }.unwrap();
+    // SAFETY: both original mappings acknowledged retirement and all raw
+    // fixture users ended. No inventory contains this affine controller.
+    unsafe { mapping_owner.retire() }.unwrap();
 }
 
 /// Release the stopped owners and check both mappings retire exactly once.
-fn release<P: Profile>(registers: NativeRegisters<P>, unmaps: &AtomicUsize) {
+fn release<P: Profile>(
+    registers: NativeRegisters<P>,
+    unmaps: &AtomicUsize,
+    mapping_owner: crate::bus::mmio::owned::model::MappingOwner<Arc<ModelRam>>,
+) {
     let (function, mapping) = match registers.into_stopped_resources() {
         Ok(owners) => owners,
         Err(_) => panic!("stopped owners lost"),
     };
     assert_eq!(function.address, ADDRESS);
     assert_eq!(unmaps.load(Ordering::Relaxed), 0);
-    retire(function, mapping);
+    retire(function, mapping, mapping_owner);
     assert_eq!(unmaps.load(Ordering::Relaxed), 1);
 }
 
 fn stopped_function_survives_dma_gating<P: Profile>(revision_class: u32) {
-    let (mut registers, unmaps) = attach::<P>(revision_class);
+    let (mut registers, unmaps, mapping_owner) = attach::<P>(revision_class);
     assert_eq!(registers.identity().unwrap().revision, revision_class as u8);
     assert_eq!(registers.region_bytes(), BYTES);
     registers.set_bus_master(true).unwrap();
-    assert_eq!(registers.function.config().read16(4), 0x406);
+    assert_eq!(registers.function.config().read16(4).unwrap(), 0x406);
     // The same config rejects MSI activation without MMIO writes.
-    registers.function.config().write16(6, 0x10);
-    registers.function.config().write8(0x34, 0x40);
-    registers.function.config().write16(0x40, 5);
-    registers.function.config().write16(0x42, 1);
+    registers.function.config().write16(6, 0x10).unwrap();
+    registers.function.config().write8(0x34, 0x40).unwrap();
+    registers.function.config().write16(0x40, 5).unwrap();
+    registers.function.config().write16(0x42, 1).unwrap();
     assert_eq!(registers.identity(), Err(Error::PciAuthority));
-    registers.function.config().write16(0x42, 0);
+    registers.function.config().write16(0x42, 0).unwrap();
     registers.set_bus_master(false).unwrap();
     registers.write32(PDM_ENABLE, 1);
     assert_eq!(registers.read32(PDM_ENABLE), 1);
@@ -216,7 +271,7 @@ fn stopped_function_survives_dma_gating<P: Profile>(revision_class: u32) {
     // This raw UC RAM fixture supplies unspecified command readback. It is
     // not evidence for a cache ACK or a hardware value.
     registers.write32(ATU_CONTROL, u32::MAX);
-    release(registers, &unmaps);
+    release(registers, &unmaps, mapping_owner);
 }
 
 #[test]
@@ -242,7 +297,7 @@ fn attachment_rejection_returns_both_owners<P: Profile>(revision_class: u32) {
         (revision_class, shifted, Error::InvalidBar),
         (UNSUPPORTED, bar(), Error::UnsupportedController),
     ] {
-        let (mapping, unmaps) = mapping();
+        let (mapping, unmaps, mapping_owner) = mapping();
         // SAFETY: invalid association is rejected before writes.
         let mut failure = match unsafe {
             NativeRegisters::<P>::attach(stopped(revision_class), mapping, candidate)
@@ -252,8 +307,8 @@ fn attachment_rejection_returns_both_owners<P: Profile>(revision_class: u32) {
         };
         assert_eq!(failure.error, expected);
         assert_eq!(unmaps.load(Ordering::Relaxed), 0);
-        assert_eq!(failure.function.config().read16(4), 0x402);
-        retire(failure.function, failure.mapping);
+        assert_eq!(failure.function.config().read16(4).unwrap(), 0x402);
+        retire(failure.function, failure.mapping, mapping_owner);
         assert_eq!(unmaps.load(Ordering::Relaxed), 1);
     }
 }
@@ -269,7 +324,7 @@ fn native_attachment_rejection_returns_both_real_mapping_owners() {
 /// Each `(revision_class, error)` fails before any MMIO or config mutation.
 fn admission_refuses<P: Profile>(cases: &[(u32, Error)]) {
     for &(revision_class, expected) in cases {
-        let (mapping, unmaps) = mapping();
+        let (mapping, unmaps, mapping_owner) = mapping();
         // SAFETY: valid reservation, unsupported native class/revision.
         let mut failure = match unsafe {
             NativeRegisters::<P>::attach(stopped(revision_class), mapping, bar())
@@ -278,9 +333,9 @@ fn admission_refuses<P: Profile>(cases: &[(u32, Error)]) {
             Ok(_) => panic!("{revision_class:#x} admitted"),
         };
         assert_eq!(failure.error, expected, "{revision_class:#x}");
-        assert_eq!(failure.function.config().read16(4), 0x402);
+        assert_eq!(failure.function.config().read16(4).unwrap(), 0x402);
         assert_eq!(unmaps.load(Ordering::Relaxed), 0);
-        retire(failure.function, failure.mapping);
+        retire(failure.function, failure.mapping, mapping_owner);
         assert_eq!(unmaps.load(Ordering::Relaxed), 1);
     }
 }
@@ -314,7 +369,7 @@ fn native_class_revision_and_containment_are_admission_boundaries() {
 #[test]
 fn acp70_native_parked_control_and_soundwire_exclusion_guard_resource_return() {
     for revision in 0x70..=0x72 {
-        let (mut registers, unmaps) = attach::<Ps70>(0x0480_0000 | revision);
+        let (mut registers, unmaps, mapping_owner) = attach::<Ps70>(0x0480_0000 | revision);
         registers.write32(CONTROL, 1);
         let mut registers = retained(registers, "unparked ACP70 ZSC");
         registers.write32(Ps70::ZSC_CONTROL.unwrap(), 1);
@@ -328,6 +383,6 @@ fn acp70_native_parked_control_and_soundwire_exclusion_guard_resource_return() {
         let mut registers = retained(registers, "enabled ACP70 address group");
         registers.write32(PAGE_BASE, 0);
         registers.write32(ATU_CONTROL, u32::MAX);
-        release(registers, &unmaps);
+        release(registers, &unmaps, mapping_owner);
     }
 }

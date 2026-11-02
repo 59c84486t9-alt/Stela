@@ -707,13 +707,15 @@ pub fn attach(
     function: &mut Function,
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
+    minimum: &(impl crate::bus::pci::power::Timer + ?Sized),
 ) -> Result<Attached, BlockError> {
+    minimum.check().map_err(BlockError::PciPower)?;
     validate_clock(handoff.clock)?;
-    function.power_up(&handoff.clock)?;
-    let bars = function.bars();
+    function.power_up(minimum)?;
+    let bars = function.bars()?;
     let registers = RegisterIo::Legacy(registers(handoff, bars[0], 0, 0x2000)?);
-    function.enable_polled();
-    let signalled = match (handoff.completion, function.interrupts().msix) {
+    function.enable_polled()?;
+    let signalled = match (handoff.completion, function.interrupts()?.msix) {
         (Some(message), Some(msix)) => {
             let table = crate::registers(
                 handoff,

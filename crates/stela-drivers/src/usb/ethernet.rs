@@ -8,7 +8,9 @@ mod asix;
 pub mod firmware;
 mod framing;
 mod identity;
+mod minimum;
 mod registers;
+use minimum::MinimumControl;
 pub mod rtl815x;
 
 use super::descriptor::{Endpoint, Interface};
@@ -47,7 +49,10 @@ pub(crate) fn asix_ids() -> Vec<(u16, u16)> {
 /// byte count; short replies/writes are errors, never invented register values.
 pub trait Control {
     fn control(&mut self, request: [u8; 8], output: &[u8]) -> Result<Vec<u8>, BlockError>;
+    /// Nominal polling cadence only; never authorizes a hardware minimum.
     fn delay_us(&mut self, microseconds: u64);
+    /// Required physical quiet interval from this actual device's owner.
+    fn minimum_wait(&mut self, microseconds: u64) -> Result<(), BlockError>;
 }
 
 #[derive(Clone, Debug)]
@@ -151,6 +156,11 @@ impl Control for HostControl {
     }
     fn delay_us(&mut self, microseconds: u64) {
         self.controller.borrow().clock.delay(microseconds);
+    }
+    fn minimum_wait(&mut self, microseconds: u64) -> Result<(), BlockError> {
+        let mut controller = self.controller.borrow_mut();
+        controller.device(self.id)?.connected()?;
+        controller.minimum_wait(microseconds)
     }
 }
 

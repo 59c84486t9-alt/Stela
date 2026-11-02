@@ -52,6 +52,7 @@ pub(super) trait Io {
     /// Isolate the device after its transport was poisoned.
     fn quarantine(&mut self);
     fn delay(&self, micros: u64);
+    fn minimum_wait(&mut self, micros: u64) -> Result<(), BlockError>;
     /// The transport's clock, in microseconds.
     fn now_us(&self) -> u64;
     /// Whether the host controller sends the handoff's completion signal.
@@ -118,6 +119,10 @@ impl Request {
 }
 
 /// A submitted bulk transfer ([`Io::submit`]).
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Cancellation keeps the in-flight operation and exact failure in one allocation-free state transition."
+)]
 pub(super) enum Pending {
     Done(Result<usize, BlockError>),
     Ticket {
@@ -187,6 +192,11 @@ impl Io for Native {
     fn delay(&self, micros: u64) {
         let clock = self.controller.borrow().clock;
         clock.delay(micros);
+    }
+    fn minimum_wait(&mut self, micros: u64) -> Result<(), BlockError> {
+        let mut controller = self.controller.borrow_mut();
+        controller.device(self.id)?.connected()?;
+        controller.minimum_wait(micros)
     }
     fn now_us(&self) -> u64 {
         self.controller.borrow().clock.now_us()
@@ -323,6 +333,7 @@ pub(super) struct Bot<I: Io> {
     tag: u32,
     max_lun: u8,
     poisoned: bool,
+    minimum_error: Option<BlockError>,
     flags: quirks::Flags,
     initial_read: bool,
     attachment: Option<(Device, Interface)>,
@@ -354,12 +365,13 @@ struct Begun {
     sensing: Option<Sensing>,
 }
 
-/// A reset recovery's progress, as usb_stor_reset_common, none of it
-/// waited for.
+/// A reset recovery's progress, as usb_stor_reset_common. Request completion
+/// is polled; the physical settling phase uses the fallible actual owner.
 enum Recovery {
     /// The class reset request.
     Resetting(Request),
-    /// The device settles until this clock time.
+    /// Nominal scheduling time only; then an actual owner must still supply
+    /// the conservative complete physical minimum before any halt clear.
     Settling(u64),
     /// A halt's clear: the input's, or with its result the output's.
     Clearing(Request, Option<Result<Vec<u8>, BlockError>>),
@@ -386,6 +398,10 @@ enum Stage {
 }
 
 /// What a step of a begun command left.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Descriptor progress carries the full pending stage or exact completion cause without allocating."
+)]
 enum Next {
     Wait,
     Stage(Stage),
@@ -463,6 +479,7 @@ impl<I: Io> Bot<I> {
             tag: 0,
             max_lun,
             poisoned: false,
+            minimum_error: None,
             flags,
             initial_read: flags.initial_read(),
             attachment: None,
@@ -486,8 +503,18 @@ impl<I: Io> Bot<I> {
     pub fn now_us(&self) -> u64 {
         self.io.now_us()
     }
-    pub fn delay(&self, micros: u64) {
-        self.io.delay(micros);
+    pub fn delay(&mut self, micros: u64) -> Result<(), BlockError> {
+        if let Some(error) = &self.minimum_error {
+            return Err(error.clone());
+        }
+        let result = self.io.minimum_wait(micros);
+        if let Err(error) = &result {
+            // Keep every begun transfer, recovery request, and buffer before
+            // returning a result to any class completion callback.
+            self.minimum_error = Some(error.clone());
+            self.poisoned = true;
+        }
+        result
     }
     /// What the last command's data phase moved in before it failed.
     pub fn take_failed_data(&mut self) -> Option<Vec<u8>> {
@@ -537,12 +564,18 @@ impl<I: Io> Bot<I> {
     }
 
     fn ready(&mut self) -> Result<(), BlockError> {
+        if let Some(error) = &self.minimum_error {
+            return Err(error.clone());
+        }
         if self.poisoned || !self.buffer.present() || !self.wrapper.present() {
             return Err(BlockError::Unsupported(
                 "USB storage interface requires rebind",
             ));
         }
         if let Err(error) = self.io.ready() {
+            if matches!(error, BlockError::PciPower(_)) {
+                self.minimum_error = Some(error.clone());
+            }
             self.poisoned = true;
             return Err(error);
         }
@@ -555,10 +588,15 @@ impl<I: Io> Bot<I> {
     /// Acknowledged class reset is not device-side recovery completion: as
     /// usb_stor_reset_common, the device settles for HZ*6 before either
     /// CLEAR_FEATURE, which controller readiness alone cannot replace. No
-    /// caller waits for any of it; the transport takes no command until
+    /// command is admitted until the genuine minimum is supplied. Polling may
+    /// defer that blocking owner operation until the nominal deadline. The
+    /// transport takes no command until
     /// both halts are cleared ([`Self::recovering`]).
     fn recover(&mut self) {
-        if self.io.ready().is_err() {
+        if let Err(error) = self.io.ready() {
+            if matches!(error, BlockError::PciPower(_)) {
+                self.minimum_error = Some(error);
+            }
             self.poisoned = true;
             return;
         }
@@ -595,13 +633,27 @@ impl<I: Io> Bot<I> {
                     }
                 }
                 Recovery::Settling(settled) => {
+                    if self.minimum_error.is_some() {
+                        return false;
+                    }
                     if self.io.now_us() < *settled {
                         return true;
                     }
-                    if self.io.ready().is_err() {
+                    if let Err(error) = self.io.ready() {
+                        if matches!(error, BlockError::PciPower(_)) {
+                            self.minimum_error = Some(error);
+                            self.poisoned = true;
+                            return false;
+                        }
                         self.recovery = None;
                         self.poisoned = true;
                         continue;
+                    }
+                    // The nominal deadline only schedules work. A genuine
+                    // owner now supplies the entire conservative minimum even
+                    // if numeric clock time already advanced past the deadline.
+                    if self.delay(RESET_RECOVERY_US).is_err() {
+                        return false;
                     }
                     let request = self.io.begin_clear(self.endpoints[0]);
                     self.recovery = Some(Recovery::Clearing(request, None));
@@ -629,7 +681,7 @@ impl<I: Io> Bot<I> {
     }
     fn failed<T>(&mut self, error: BlockError) -> Result<T, BlockError> {
         self.recover();
-        Err(error)
+        Err(self.minimum_error.clone().unwrap_or(error))
     }
 
     /// Run `cdb` on `lun`, the caller waiting, for a reset recovery's
@@ -649,7 +701,7 @@ impl<I: Io> Bot<I> {
             crate::waiting();
             core::hint::spin_loop();
         }
-        result
+        self.minimum_error.clone().map_or(result, Err)
     }
 
     /// The begun command's result, the caller waiting for its transfers.
@@ -671,6 +723,9 @@ impl<I: Io> Bot<I> {
     /// Begin `cdb` on `lun` with its data stage and return once its CBW is
     /// submitted; [`Self::end`] gives the result.
     pub fn begin(&mut self, lun: u8, cdb: &[u8], data: Data<'_>) -> Result<(), BlockError> {
+        if let Some(error) = &self.minimum_error {
+            return Err(error.clone());
+        }
         if self.begun.is_some() || self.recovering() {
             return Err(BlockError::Protocol(
                 "BOT runs one command at a time, none while its reset settles",
@@ -727,6 +782,9 @@ impl<I: Io> Bot<I> {
     /// auto-sense after a failure, which runs as the command did; never
     /// waits for a transfer.
     pub fn end(&mut self) -> Option<Result<Vec<u8>, BlockError>> {
+        if let Some(error) = &self.minimum_error {
+            return self.begun.as_ref().map(|_| Err(error.clone()));
+        }
         let mut begun = self.begun.take()?;
         let result = loop {
             match self.advance(&mut begun) {
@@ -738,6 +796,11 @@ impl<I: Io> Bot<I> {
                 Next::Done(result) => break result,
             }
         };
+        if let Some(error) = &self.minimum_error {
+            let error = error.clone();
+            self.begun = Some(begun);
+            return Some(Err(error));
+        }
         match begun.sensing {
             Some(Sensing::Failed) => {
                 let sense = result.ok().and_then(|bytes| Sense::parse(&bytes));
@@ -797,8 +860,10 @@ impl<I: Io> Bot<I> {
                     Ok(_) => return Next::Done(self.failed(PROTOCOL_ERROR)),
                     Err(error) => return Next::Done(self.failed(error)),
                 }
-                if self.flags.go_slow() {
-                    self.io.delay(125);
+                if self.flags.go_slow()
+                    && let Err(error) = self.delay(125)
+                {
+                    return Next::Done(Err(error));
                 }
                 self.data_or_status(begun)
             }
@@ -840,6 +905,12 @@ impl<I: Io> Bot<I> {
                         status: super::STALL,
                     }) if !begun.stalled => {
                         begun.stalled = true;
+                        // The nominal deadline only schedules work. A genuine
+                        // owner now supplies the entire conservative minimum even
+                        // if numeric clock time already advanced past the deadline.
+                        if let Err(error) = self.delay(RESET_RECOVERY_US) {
+                            return Next::Done(Err(error));
+                        }
                         let request = self.io.begin_clear(self.endpoints[0]);
                         Next::Stage(Stage::Clearing(request, true))
                     }
@@ -972,6 +1043,10 @@ impl Bot<Native> {
     /// allocations. Root-leaf reset also reuses the controller's retired
     /// resources; downstream reset keeps the existing allocation behavior.
     /// Every fallible reconstruction step precedes moving either buffer owner.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn reset_and_rebind(
         &mut self,
         dma: &mut dyn DmaAllocator,

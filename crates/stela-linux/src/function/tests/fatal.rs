@@ -11,6 +11,7 @@ struct Reporter {
     drops: Arc<AtomicUsize>,
     domain: Arc<Identity>,
     map_failure: bool,
+    configuration: bool,
     irq_failure: bool,
     enable_failure: bool,
     irq_calls: Arc<AtomicUsize>,
@@ -19,16 +20,29 @@ impl Platform for Reporter {
     fn now_ns(&self) -> i64 {
         unreachable!()
     }
-    fn delay_us(&self, _: u64, _: u64, _: bool) {
-        unreachable!()
+    fn minimum_delay_us(&self, _: u64) -> Result<(), stela_driver_base::platform::work::WorkError> {
+        unreachable!("non-time fatal fixture")
     }
-    fn firmware(&self, _: &CStr) -> Result<&[u8], Errno> {
-        unreachable!()
+    fn minimum_deadline_us(
+        &self,
+        _: u64,
+    ) -> Result<Box<dyn owner::MinimumDeadline>, stela_driver_base::platform::work::WorkError> {
+        unreachable!("non-time fatal fixture")
+    }
+    fn timer_changed(&self) -> Result<(), stela_driver_base::platform::work::WorkError> {
+        unreachable!("non-timer fatal fixture")
     }
     fn log(&self, level: i32, message: &CStr) {
         assert_eq!(level, 0);
         assert_eq!(message.to_str().unwrap(), self.expected);
         assert_eq!(self.drops.load(Ordering::Relaxed), 0);
+        if self.expected == "physical minimum without actual original current" {
+            // Negative admission needs no fabricated hosted Initial/root.
+            // The original Bare owner/fixture must remain retained before any
+            // minimum provider, clock, timer allocation or caller reuse.
+            std::fs::write(&self.path, self.expected).unwrap();
+            return;
+        }
         if self.irq_failure {
             unsafe extern "C" {
                 fn stela_linux_irq_actions_joined(irq: u32) -> bool;
@@ -50,6 +64,11 @@ impl Platform for Reporter {
                 // SAFETY: exact entered closing request remains linked.
                 assert!(unsafe { stela_linux_irq_actions_joined(7) });
             }
+            std::fs::write(&self.path, self.expected).unwrap();
+            return;
+        }
+        if self.configuration {
+            assert_eq!(dma_quarantine_status().mappings, 0);
             std::fs::write(&self.path, self.expected).unwrap();
             return;
         }
@@ -129,10 +148,10 @@ impl Host for HostConfig {
     fn config(&mut self) -> &mut Config {
         &mut self.0
     }
-    fn enable_msi(&mut self) -> Result<(), Errno> {
+    fn enable_msi(&mut self) -> Result<(), MsiError> {
         unreachable!()
     }
-    fn disable_msi(&mut self) {
+    fn disable_msi(&mut self) -> Result<(), MsiError> {
         unreachable!()
     }
 }
@@ -159,6 +178,7 @@ fn terminal(test: &str, map_failure: bool) {
     let domain = Arc::new(Identity::default());
     let mut state = State {
         enrollment: None,
+        configuration: ConfigurationStatus::default(),
         host: HostConfig(Config([0; 256])),
         mappings: mappings(&domain),
     };
@@ -168,6 +188,7 @@ fn terminal(test: &str, map_failure: bool) {
         drops: fixture.drops.clone(),
         domain: domain.clone(),
         map_failure,
+        configuration: false,
         irq_failure: false,
         enable_failure: false,
         irq_calls: Arc::new(AtomicUsize::new(0)),
@@ -294,6 +315,7 @@ fn irq_retirement_refusal_never_reclaims_request_or_returns_to_free_dev_id() {
         drops: fixture.drops.clone(),
         domain: Arc::new(Identity::default()),
         map_failure: false,
+        configuration: false,
         irq_failure: true,
         enable_failure: false,
         irq_calls: Arc::new(AtomicUsize::new(0)),
@@ -337,6 +359,7 @@ fn synchronous_enable_delivery_then_error_retains_linked_action_before_trap() {
         drops: fixture.drops.clone(),
         domain: Arc::new(Identity::default()),
         map_failure: false,
+        configuration: false,
         irq_failure: true,
         enable_failure: true,
         irq_calls: calls.clone(),
@@ -354,3 +377,93 @@ fn synchronous_enable_delivery_then_error_retains_linked_action_before_trap() {
         crate::task::tests::terminal_foreground(owner.raw(), irq_attempt, (&raw mut attempt).cast())
     }
 }
+
+fn configuration_terminal(test: &str, operation: u8) {
+    use super::configuration::{FaultConfig, TestHost};
+    let expected = if operation == 1 {
+        "MSI disable failed without proven retirement"
+    } else {
+        "PCI configuration write failed without acknowledgement"
+    };
+    let Some(path) = std::env::var_os("STELA_PCI_FATAL_WITNESS") else {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fatal.txt");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--test-threads=1", "--nocapture"])
+            .env("STELA_PCI_FATAL_WITNESS", &path)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.signal(), Some(libc::SIGILL), "{output:?}");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
+        return;
+    };
+    let mut fixture = Fixture::new();
+    fixture.entered.take();
+    let domain = Arc::new(Identity::default());
+    let owner = Owner::new(Reporter {
+        path: PathBuf::from(&path),
+        expected,
+        drops: fixture.drops.clone(),
+        domain: domain.clone(),
+        map_failure: false,
+        configuration: true,
+        irq_failure: false,
+        enable_failure: false,
+        irq_calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let error = ConfigError::write_may_have_applied(4, 4, ConfigFailure::ForeignGrant);
+    let mut config = FaultConfig::new(0);
+    config.write_error = Some((1, error));
+    let mut state = State {
+        enrollment: None,
+        configuration: ConfigurationStatus::default(),
+        host: TestHost {
+            config,
+            msi: Err(MsiError::Native(-16)),
+            drops: Arc::new(AtomicUsize::new(0)),
+        },
+        mappings: mappings(&domain),
+    };
+    // SAFETY: isolated subprocess, actual retained entered owner and exact State.
+    let _entered = unsafe { owner::Entered::new(owner.raw()) };
+    let context = (&raw mut state).cast();
+    if operation == 1 {
+        // SAFETY: exact callback State; its typed host refuses real completion.
+        unsafe { disable_msi::<TestHost>(context) };
+    } else if operation == 2 {
+        state.configuration.first = Some(error);
+        state.configuration.uncertain = Some(error);
+        let context = Box::into_raw(Box::new(state)).cast();
+        // SAFETY: exact unique Box, original final C release. It must retain
+        // State and never return to the caller that would free C host metadata.
+        unsafe { release_context::<TestHost>(context) };
+    } else {
+        // SAFETY: exact callback State; injected post-write uncertainty must trap.
+        unsafe { write_config::<TestHost>(context, 4, 4, 7) };
+    }
+    panic!("terminal original C callback returned");
+}
+#[test]
+fn configuration_write_uncertainty_never_returns_to_c() {
+    configuration_terminal(
+        "function::tests::fatal::configuration_write_uncertainty_never_returns_to_c",
+        0,
+    );
+}
+#[test]
+fn refused_msi_disable_never_reports_void_completion() {
+    configuration_terminal(
+        "function::tests::fatal::refused_msi_disable_never_reports_void_completion",
+        1,
+    );
+}
+
+#[test]
+fn terminal_context_release_keeps_outer_c_host_allocation() {
+    configuration_terminal(
+        "function::tests::fatal::terminal_context_release_keeps_outer_c_host_allocation",
+        2,
+    );
+}
+
+mod minimum;

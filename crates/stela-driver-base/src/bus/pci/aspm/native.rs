@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    Config(crate::bus::pci::ConfigError),
     Topology,
     Identity(Address),
     Capability(Address),
@@ -26,6 +27,11 @@ pub enum Error {
         offset: u16,
         observed: u16,
     },
+}
+impl From<crate::bus::pci::ConfigError> for Error {
+    fn from(error: crate::bus::pci::ConfigError) -> Self {
+        Self::Config(error)
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RootBus {
@@ -77,7 +83,7 @@ impl<C: MsiConfigSpace> Topology<C> {
                     .iter()
                     .any(|other| other.address == bridge.address)
                 || bridge.class[..2] != [6, 4]
-                || bridge.config.read8(0x0e) & 0x7f != 1
+                || bridge.config.read8(0x0e)? & 0x7f != 1
             {
                 return Err(Error::Topology);
             }
@@ -167,9 +173,9 @@ impl<C: MsiConfigSpace> Topology<C> {
     }
 }
 fn identity<C: ConfigSpace>(function: &Function<C>) -> Result<(), Error> {
-    let id = function.config.read32(0);
+    let id = function.config.read32(0)?;
     if id != u32::from(function.vendor) | u32::from(function.device) << 16
-        || function.config.read32(8) >> 8
+        || function.config.read32(8)? >> 8
             != u32::from_be_bytes([0, function.class[0], function.class[1], function.class[2]])
     {
         return Err(Error::Identity(function.address));
@@ -177,7 +183,7 @@ fn identity<C: ConfigSpace>(function: &Function<C>) -> Result<(), Error> {
     Ok(())
 }
 fn read<C: ConfigSpace>(function: &Function<C>, offset: u16) -> Result<u16, Error> {
-    let observed = function.config.read16(offset);
+    let observed = function.config.read16(offset)?;
     if observed == u16::MAX {
         Err(Error::Read {
             address: function.address,
@@ -188,7 +194,7 @@ fn read<C: ConfigSpace>(function: &Function<C>, offset: u16) -> Result<u16, Erro
     }
 }
 fn buses<C: ConfigSpace>(bridge: &Function<C>) -> Result<Option<(u8, u8)>, Error> {
-    let value = bridge.config.read32(BRIDGE_BUSES);
+    let value = bridge.config.read32(BRIDGE_BUSES)?;
     if value == u32::MAX {
         return Err(Error::Read {
             address: bridge.address,
@@ -216,6 +222,7 @@ fn link<C: MsiConfigSpace>(function: &Function<C>) -> Result<(u16, u16), Error> 
     let mut found = None;
     for entry in function.config.capabilities() {
         let entry = entry.map_err(|error| match error {
+            CapabilityError::Config { error, .. } => Error::Config(error),
             CapabilityError::FailedRead { offset } => Error::Read {
                 address: function.address,
                 offset,
@@ -257,7 +264,7 @@ fn clear<C: MsiConfigSpace>(
 ) -> Result<(), Error> {
     let wanted = before & !PCIE_ASPM;
     if wanted != before {
-        function.config.write16(offset, wanted);
+        function.config.write16(offset, wanted)?;
     }
     let observed = read(function, offset)?;
     if observed != wanted {
@@ -284,32 +291,47 @@ mod tests {
         refuse: bool,
     }
     impl ConfigSpace for Config {
-        fn read32(&self, offset: u16) -> u32 {
-            if self.failed == Some(offset) {
-                u32::MAX
-            } else {
-                self.words[usize::from(offset / 4)]
-            }
+        fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+            Ok({
+                if self.failed == Some(offset) {
+                    u32::MAX
+                } else {
+                    self.words[usize::from(offset / 4)]
+                }
+            })
         }
-        fn write32(&mut self, _: u16, _: u32) {
+        fn write32(&mut self, _: u16, _: u32) -> Result<(), crate::bus::pci::ConfigError> {
             panic!("ASPM cannot write adjacent W1C status")
         }
-        fn read16(&self, offset: u16) -> u16 {
-            if self.failed == Some(offset) {
-                u16::MAX
-            } else {
-                (self.words[usize::from(offset / 4)] >> ((offset & 2) * 8)) as u16
-            }
+        fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+            Ok({
+                if self.failed == Some(offset) {
+                    u16::MAX
+                } else {
+                    (self.words[usize::from(offset / 4)] >> ((offset & 2) * 8)) as u16
+                }
+            })
         }
-        fn write16(&mut self, offset: u16, value: u16) {
+        fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
             self.writes.borrow_mut().push((self.address, offset, value));
             if self.refuse {
-                return;
+                return Ok(());
             }
             let shift = (offset & 2) * 8;
             self.words[usize::from(offset / 4)] = self.words[usize::from(offset / 4)]
                 & !(0xffff << shift)
                 | u32::from(value) << shift;
+            Ok(())
+        }
+
+        fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+        }
+
+        fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+            let shift = (offset & 3) * 8;
+            let word = self.read32(offset & !3)? & !(0xff << shift) | u32::from(value) << shift;
+            self.write32(offset & !3, word)
         }
     }
     // SAFETY: independent narrow-access model; wider writes explicitly panic.
@@ -377,8 +399,8 @@ mod tests {
             vec![(address(8, 0), 0xc0, 0x5a00), (address(4, 1), 0xc0, 0x5a00)]
         );
         let bridges = topology.into_functions();
-        assert_eq!(endpoint.config.read32(0xc0), 0xa5c3_5a00);
-        assert_eq!(bridges[0].config.read32(0xc0), 0xa5c3_5a00);
+        assert_eq!(endpoint.config.read32(0xc0).unwrap(), 0xa5c3_5a00);
+        assert_eq!(bridges[0].config.read32(0xc0).unwrap(), 0xa5c3_5a00);
     }
     #[test]
     fn nonzero_root_is_required_and_no_absent_parent_is_inferred() {
@@ -429,7 +451,10 @@ mod tests {
             parent.config.refuse = !child;
             assert!(topology(vec![parent], 4).disable(&mut endpoint).is_err());
             assert_eq!(writes.borrow().len(), if child { 1 } else { 2 });
-            assert_eq!(endpoint.config.read16(0xc0) & 3, if child { 3 } else { 0 });
+            assert_eq!(
+                endpoint.config.read16(0xc0).unwrap() & 3,
+                if child { 3 } else { 0 }
+            );
         }
     }
 }

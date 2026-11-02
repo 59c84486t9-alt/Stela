@@ -70,6 +70,8 @@ impl fmt::Display for Mac {
 /// Why a link did not take or give a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkError {
+    /// Exact PCI access/capability failure; the device owner remains retained.
+    Pci(crate::block::BlockError),
     /// The adapter failed or refused a frame.
     Adapter(String),
     /// A frame no Ethernet link carries.
@@ -104,3 +106,5 @@ pub trait Link {
         None
     }
 }
+
+mod timing;

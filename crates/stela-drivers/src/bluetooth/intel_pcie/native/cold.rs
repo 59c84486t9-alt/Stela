@@ -20,6 +20,7 @@ pub struct Inputs<R: Registers> {
     pub requester: PreparingRequester,
     pub registers: R,
     pub clock: Clock,
+    pub minimum: alloc::rc::Rc<dyn crate::bus::pci::power::Timer>,
 }
 struct Resources<R: Registers> {
     inputs: Inputs<R>,
@@ -56,8 +57,13 @@ impl<R: Registers> Cold<R> {
     /// the original root and all inherited DMA backing remain held. `clock`
     /// is the original provider's qualified timer in that processor/root
     /// context. This grants no new DMA or IRQ admission.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub unsafe fn new(mut inputs: Inputs<R>) -> core::result::Result<Self, (Error, Inputs<R>)> {
         let valid = (|| {
+            inputs.minimum.check().map_err(NativeError::Minimum)?;
             inputs
                 .clock
                 .check_duration(120_000_000)
@@ -65,25 +71,36 @@ impl<R: Registers> Cold<R> {
             let function = inputs.requester.function_mut();
             if function.vendor != 0x8086
                 || !DEVICE_IDS.contains(&function.device)
-                || function.config().read32(0)
+                || function.config().read32(0).map_err(NativeError::Config)?
                     != u32::from(function.vendor) | u32::from(function.device) << 16
             {
                 return Err(NativeError::Requirement(
                     "original Intel BT function identity",
                 ));
             }
-            let command = function.config().read16(regs::COMMAND);
+            let command = function
+                .config()
+                .read16(regs::COMMAND)
+                .map_err(NativeError::Config)?;
             if command == u16::MAX || command & regs::COMMAND_MASTER != 0 {
                 return Err(NativeError::Requirement(
                     "cold BT requester bus mastering gated",
                 ));
             }
-            let bar = function.config().read32(0x10);
+            let bar = function
+                .config()
+                .read32(0x10)
+                .map_err(NativeError::Config)?;
             if bar == u32::MAX || bar & 1 != 0 || matches!(bar & 6, 2 | 6) {
                 return Err(NativeError::Requirement("cold BT memory BAR0 format"));
             }
             let upper = if bar & 6 == 4 {
-                u64::from(function.config().read32(0x14)) << 32
+                u64::from(
+                    function
+                        .config()
+                        .read32(0x14)
+                        .map_err(NativeError::Config)?,
+                ) << 32
             } else {
                 0
             };
@@ -109,15 +126,24 @@ impl<R: Registers> Cold<R> {
         let result = (|| {
             let r = self.owner.0.as_mut().expect("original cold BT owner");
             let function = r.inputs.requester.function_mut();
-            let command = function.config().read16(regs::COMMAND);
+            let command = function
+                .config()
+                .read16(regs::COMMAND)
+                .map_err(NativeError::Config)?;
             if command == u16::MAX || command & regs::COMMAND_MASTER != 0 {
                 return Err(NativeError::Requirement("cold BT bus mastering still gated").into());
             }
-            function.config().write16(
-                regs::COMMAND,
-                command | regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE,
-            );
-            let observed = function.config().read16(regs::COMMAND);
+            function
+                .config()
+                .write16(
+                    regs::COMMAND,
+                    command | regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE,
+                )
+                .map_err(NativeError::Config)?;
+            let observed = function
+                .config()
+                .read16(regs::COMMAND)
+                .map_err(NativeError::Config)?;
             if observed & 0x406 != 0x402 {
                 return Err(NativeError::Readback {
                     offset: regs::COMMAND.into(),
@@ -134,7 +160,7 @@ impl<R: Registers> Cold<R> {
             }
             let mut io = Control {
                 registers: &mut r.inputs.registers,
-                clock: r.inputs.clock,
+                minimum: r.inputs.minimum.as_ref(),
             };
             reset::reset(&mut io, &mut r.snapshot)?;
             if r.snapshot.function == u32::MAX
@@ -192,7 +218,7 @@ impl<R: Registers> Cold<R> {
 }
 struct Control<'a, R: Registers> {
     registers: &'a mut R,
-    clock: Clock,
+    minimum: &'a dyn crate::bus::pci::power::Timer,
 }
 // SAFETY: borrowed from this original exclusively owned cold BAR/config/root
 // attempt, with the producer's checked clock and backing retained throughout.
@@ -204,8 +230,8 @@ unsafe impl<R: Registers> reset::Io for Control<'_, R> {
         self.registers.write32(offset, value).map_err(Into::into)
     }
     fn delay(&mut self, microseconds: u64) -> Result<()> {
-        self.clock
-            .try_delay(microseconds)
-            .map_err(|_| NativeError::Requirement("qualified BT cold-reset delay").into())
+        self.minimum
+            .wait_us(microseconds)
+            .map_err(|error| NativeError::Minimum(error).into())
     }
 }

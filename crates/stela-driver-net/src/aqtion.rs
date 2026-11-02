@@ -7,16 +7,13 @@
 //! Firmware must be provisioned in the controller's NVM; host firmware download
 //! is explicitly unsupported, as in the pinned donor. See `aqtion/THIRD_PARTY.md`.
 use super::{HEADER, Link, LinkError, MAX_FRAME, MIN_FRAME, Mac, check_frame};
-use crate::{
-    Clock,
-    bus::{
-        dma::{
-            mapping::{DmaDomain, DmaError},
-            memory::MemoryError,
-        },
-        mmio::owned,
-        pci::{ConfigSpace, Function, owned::OwnedConfig},
+use crate::bus::{
+    dma::{
+        mapping::{DmaDomain, DmaError},
+        memory::MemoryError,
     },
+    mmio::owned,
+    pci::{ConfigSpace, Function, owned::OwnedConfig},
 };
 use alloc::{format, sync::Arc, vec::Vec};
 use core::cell::Cell;
@@ -28,8 +25,11 @@ mod registers;
 use memory::{COUNT, Memory};
 use registers::Field;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
+    Config(crate::bus::pci::ConfigError),
+    PciCapability(crate::bus::pci::CapabilityError),
+    Pci(crate::block::BlockError),
     Unsupported(&'static str),
     Timeout { register: usize },
     Removed,
@@ -40,7 +40,6 @@ pub enum Error {
     Readback { register: usize, observed: u32 },
     RingHead(u32),
     Stopped,
-    Clock,
 }
 pub type Result<T> = core::result::Result<T, Error>;
 impl From<DmaError> for Error {
@@ -150,10 +149,14 @@ struct Hardware<R, T> {
 }
 impl<R: Registers, T: Timer> Hardware<R, T> {
     fn check_timing(&self) -> Result<()> {
-        self.timer.check().map_err(|_| Error::Clock)
+        self.timer
+            .check()
+            .map_err(|error| Error::Pci(crate::block::BlockError::PciPower(error)))
     }
     fn delay(&self, microseconds: u64) -> Result<()> {
-        self.timer.wait_us(microseconds).map_err(|_| Error::Clock)
+        self.timer
+            .wait_us(microseconds)
+            .map_err(|error| Error::Pci(crate::block::BlockError::PciPower(error)))
     }
     fn read(&self, offset: usize) -> Result<u32> {
         let value = self.registers.read(offset)?;
@@ -218,32 +221,32 @@ fn power_up<C: ConfigSpace>(
     timer: &impl Timer,
     power: &mut PciPower,
 ) -> Result<()> {
-    timer.check().map_err(|_| Error::Clock)?;
+    timer
+        .check()
+        .map_err(|error| Error::Pci(crate::block::BlockError::PciPower(error)))?;
     *power = PciPower::Unknown;
-    if function.config().read16(4) == u16::MAX || function.config().read16(6) == u16::MAX {
+    if function.config().read16(4)? == u16::MAX || function.config().read16(6)? == u16::MAX {
         return Err(Error::Removed);
     }
-    function
-        .power_up_with_timer(timer)
-        .map_err(|_| Error::Unsupported("AQtion PCI D0 transition failed"))?;
+    function.power_up(timer).map_err(Error::Pci)?;
     *power = PciPower::D0;
     Ok(())
 }
 fn power_down<C: ConfigSpace>(function: &mut Function<C>, power: &mut PciPower) -> Result<()> {
     let pm = function
-        .capabilities()
+        .capabilities()?
         .into_iter()
         .find_map(|(offset, id)| (id == 1).then_some(u16::from(offset)))
         .ok_or(Error::Unsupported("AQtion PCI power capability absent"))?;
     let pmcsr = pm + 4;
-    let control = function.config().read16(pmcsr);
+    let control = function.config().read16(pmcsr)?;
     if control == u16::MAX {
         return Err(Error::Removed);
     }
     *power = PciPower::Unknown;
     // Native WORD store: leave PME_Status W1C pending and disable PME.
-    function.config().write16(pmcsr, (control & !0x8103) | 3);
-    let observed = function.config().read16(pmcsr);
+    function.config().write16(pmcsr, (control & !0x8103) | 3)?;
+    let observed = function.config().read16(pmcsr)?;
     if observed == u16::MAX {
         return Err(Error::Removed);
     }
@@ -261,7 +264,11 @@ fn power_down<C: ConfigSpace>(function: &mut Function<C>, power: &mut PciPower) 
 /// Native attachment uses the cold/root owner in [`native`]. The defaulted configuration
 /// parameter lets protocol peers exercise the same lifecycle implementation;
 /// it supplies no constructor or physical resource permission.
-pub struct Aqtion<R: Registers = MappedRegisters, T: Timer = Clock, C: ConfigSpace = OwnedConfig> {
+pub struct Aqtion<
+    R: Registers = MappedRegisters,
+    T: Timer = alloc::rc::Rc<dyn Timer>,
+    C: ConfigSpace = OwnedConfig,
+> {
     function: Option<Function<C>>,
     hardware: Option<Hardware<R, T>>,
     domain: Option<Arc<dyn DmaDomain>>,
@@ -325,12 +332,14 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
         }
         self.state = State::Faulted;
         let function = self.function.as_mut().unwrap();
-        if function.config().read16(4) == u16::MAX {
+        if function.config().read16(4)? == u16::MAX {
             return Err(Error::Removed);
         }
         // No MSI/MSI-X registration exists: stop all device sources and use polling.
-        let command = function.config().read16(4);
-        function.config().write16(4, (command & !4) | 2 | (1 << 10));
+        let command = function.config().read16(4)?;
+        function
+            .config()
+            .write16(4, (command & !4) | 2 | (1 << 10))?;
         self.hw().mask_interrupts()?;
         self.hw().reset(self.profile)?;
         self.hw().stop_queues()?;
@@ -349,8 +358,8 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
         self.dropping = false;
         self.memory.as_mut().unwrap().prepare()?;
         self.hw().queues(self.memory.as_ref().unwrap())?;
-        self.function.as_mut().unwrap().enable_polled();
-        let command = self.function.as_mut().unwrap().config().read16(4);
+        self.function.as_mut().unwrap().enable_polled()?;
+        let command = self.function.as_mut().unwrap().config().read16(4)?;
         if command == u16::MAX {
             return Err(Error::Removed);
         }
@@ -379,12 +388,12 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
             self.hw().firmware_link(self.profile, fw, false)?;
         }
         let f = self.function.as_mut().unwrap();
-        let command = f.config().read16(4);
+        let command = f.config().read16(4)?;
         if command == u16::MAX {
             return Err(Error::Removed);
         }
-        f.config().write16(4, command & !4);
-        let command = f.config().read16(4);
+        f.config().write16(4, command & !4)?;
+        let command = f.config().read16(4)?;
         if command == u16::MAX {
             return Err(Error::Removed);
         }
@@ -545,7 +554,14 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Link for Aqtion<R, T, C> {
     }
 }
 fn adapter(error: Error) -> LinkError {
-    LinkError::Adapter(format!("AQtion: {error:?}"))
+    match error {
+        Error::Config(error) => LinkError::Pci(crate::block::BlockError::Config(error)),
+        Error::PciCapability(error) => {
+            LinkError::Pci(crate::block::BlockError::PciCapability(error))
+        }
+        Error::Pci(error) => LinkError::Pci(error),
+        error => LinkError::Adapter(format!("AQtion: {error:?}")),
+    }
 }
 impl<R: Registers, T: Timer, C: ConfigSpace> Drop for Aqtion<R, T, C> {
     fn drop(&mut self) {
@@ -567,3 +583,22 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Drop for Aqtion<R, T, C> {
 
 #[cfg(test)]
 mod tests;
+
+impl From<crate::bus::pci::ConfigError> for Error {
+    fn from(e: crate::bus::pci::ConfigError) -> Self {
+        Self::Config(e)
+    }
+}
+impl From<crate::bus::pci::CapabilityError> for Error {
+    fn from(e: crate::bus::pci::CapabilityError) -> Self {
+        Self::PciCapability(e)
+    }
+}
+impl From<crate::block::BlockError> for Error {
+    fn from(e: crate::block::BlockError) -> Self {
+        Self::Pci(e)
+    }
+}
+
+#[cfg(test)]
+use crate::Clock;

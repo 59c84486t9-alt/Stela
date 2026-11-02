@@ -102,9 +102,9 @@ impl<R: Registers> Host<R> {
     }
 }
 
-// ConfigSpace cannot propagate hardware faults and is not
-// implemented: a failed read must poison/keep the hierarchy rather than
-// return an invented all-ones value that looks like an absent child.
+// ChildConfig keeps the full synthetic VMD domain identity and its actual
+// hierarchy borrow. It is not an ACPI-segment Function; do not truncate that
+// domain to construct a different PCI/configuration owner.
 
 pub(super) fn scan<R: Registers>(host: &mut Host<R>) -> Result<Vec<Child>, Error> {
     host.check_live()?;

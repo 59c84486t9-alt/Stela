@@ -160,14 +160,25 @@ fn malformed_snoop_capabilities_rejected() {
         }
         assert_eq!(
             prepare_model(&mut function, &timer, bar).unwrap_err(),
-            AttachError::InvalidCapabilities
+            match variant {
+                6 => AttachError::PciCapability(crate::bus::pci::CapabilityError::Overlap {
+                    offset: 0x80
+                }),
+                7 => AttachError::PciCapability(crate::bus::pci::CapabilityError::Overlap {
+                    offset: 0x6c
+                }),
+                8 => AttachError::PciCapability(crate::bus::pci::CapabilityError::FailedRead {
+                    offset: 0x72
+                }),
+                _ => AttachError::InvalidCapabilities,
+            }
         );
         assert!(function.config().writes.is_empty(), "variant {variant}");
     }
 }
 
 #[test]
-fn snoop_failure_attempts_cleanup() {
+fn snoop_failure_stops_at_the_failed_control() {
     for variant in 0..3 {
         let (mut function, timer, bar) = pch_fixture(0x9ca0, 2, 9);
         match variant {
@@ -197,12 +208,10 @@ fn snoop_failure_attempts_cleanup() {
                 .iter()
                 .rposition(|(offset, _, _, _)| *offset == SCH_HDA_DEVC)
                 .unwrap();
-            assert!(
-                config.writes[failed_access + 1..]
-                    .iter()
-                    .any(|(offset, width, value, _)| *offset == regs::COMMAND
-                        && *width == 2
-                        && *value & u32::from(regs::COMMAND_MASTER | regs::COMMAND_MEMORY) == 0)
+            assert_eq!(
+                failed_access + 1,
+                config.writes.len(),
+                "effects continued after failed snoop acknowledgement"
             );
         }
         assert!(

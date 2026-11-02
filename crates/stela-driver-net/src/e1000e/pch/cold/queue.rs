@@ -117,12 +117,16 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
     /// without reset/recovery. This constructor requires those grants;
     /// it neither synthesizes PCI ownership nor enables a broad probe match.
     pub unsafe fn new(
-        controller: Controller<R, D>,
+        mut controller: Controller<R, D>,
         dma: &mut dyn DmaAllocator,
     ) -> Result<Self, Error> {
+        if let Some(error) = controller.minimum_failure() {
+            return Err(super::Fault::Minimum(error).into());
+        }
         if controller.is_poisoned() {
             return Err(Error::Poisoned);
         }
+        controller.phy.check_minimum()?;
         let receive = Ring::new(dma).map_err(Error::Dma)?;
         let transmit = Ring::new(dma).map_err(Error::Dma)?;
         let mut this = Self {
@@ -150,12 +154,21 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
     pub fn failure(&self) -> Option<&Error> {
         self.failure.as_ref()
     }
-    fn check(&self) -> Result<(), Error> {
+    fn check(&mut self) -> Result<(), Error> {
+        if let Some(error) = &self.failure
+            && error.minimum_cause().is_some()
+        {
+            return Err(error.clone());
+        }
+        if let Some(error) = self.controller.minimum_failure() {
+            return Err(super::Fault::Minimum(error).into());
+        }
         if self.controller.is_poisoned() {
             Err(Error::Poisoned)
         } else if self.stopped {
             Err(Error::Stopped)
         } else {
+            self.controller.phy.check_minimum()?;
             Ok(())
         }
     }
@@ -170,7 +183,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
                 (u32::from(index) << 16) | write.map_or(1 << 21, u32::from),
             )?;
             p.read_mac(super::STATUS)?;
-            p.delay.delay(2);
+            p.wait_minimum(2)?;
             if write.is_none() {
                 Ok(p.read_mac(KMRN)? as u16)
             } else {
@@ -599,18 +612,18 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
         fence(Ordering::SeqCst);
         self.next_tx = (index + 1) % DESCRIPTORS;
         self.controller.write(TDT, self.next_tx as u32)?;
-        self.controller.phy.delay.delay(200);
+        self.controller.phy.wait_minimum(200)?;
         if self.controller.spt_config_status()? & spt::FLUSH_REQUIRED != 0 {
             let control = self.controller.read(super::RCTL)?;
             self.controller.write(super::RCTL, control & !ENABLE)?;
             self.controller.read(super::STATUS)?;
-            self.controller.phy.delay.delay(100);
+            self.controller.phy.wait_minimum(100)?;
             let value = self.controller.read(RXDCTL)?;
             self.controller
                 .write(RXDCTL, (value & 0xffff_c000) | 0x1f | (1 << 8) | (1 << 24))?;
             self.controller.write(super::RCTL, control | ENABLE)?;
             self.controller.read(super::STATUS)?;
-            self.controller.phy.delay.delay(100);
+            self.controller.phy.wait_minimum(100)?;
             self.controller.write(super::RCTL, control & !ENABLE)?;
             // Source only rechecks after TX. An unresolved RX flush is not
             // permission to reset/power down or release the owner.
@@ -633,7 +646,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
             self.modify_mac(super::RCTL, ENABLE, 0)?;
             self.modify_mac(super::TCTL, ENABLE, 0)?;
             self.controller.read(super::STATUS)?;
-            self.controller.phy.delay.delay(10_000);
+            self.controller.phy.wait_minimum(10_000)?;
             self.modify_mac(super::CTRL, 0, super::MASTER_DISABLE)?;
             for _ in 0..800 {
                 if self.controller.read(super::STATUS)? & super::MASTER_ENABLED == 0 {
@@ -644,7 +657,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
                     }
                     return Ok(());
                 }
-                self.controller.phy.delay.delay(100);
+                self.controller.phy.wait_minimum(100)?;
             }
             Err(Error::MasterTimeout)
         })();
@@ -666,6 +679,9 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
         }
         self.failure.get_or_insert_with(|| error.clone());
         self.poison();
+        if let Some(cause) = error.minimum_cause() {
+            return LinkError::Pci(crate::block::BlockError::PciPower(cause));
+        }
         LinkError::Adapter(format!("PCH: {error}"))
     }
 }
@@ -706,7 +722,10 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Link for Ethernet<R, D> {
             if space {
                 break;
             }
-            self.controller.phy.delay.delay(100);
+            self.controller
+                .phy
+                .wait_minimum(100)
+                .map_err(|fault| self.error(Error::from(fault)))?;
             space = self.reclaim();
         }
         if !space {

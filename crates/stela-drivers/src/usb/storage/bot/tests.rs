@@ -6,6 +6,7 @@ use core::cell::RefCell;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fault {
     None,
+    Minimum,
     ShortCbw,
     ShortData,
     DataStall,
@@ -49,6 +50,7 @@ struct Command {
 enum Order {
     Reset,
     Delay(u64),
+    Minimum(u64),
     Clear(u8),
     Cbw(u8),
 }
@@ -68,6 +70,7 @@ struct State {
     delays: usize,
     now: u64,
     reset_ready: Option<u64>,
+    reset_minimum: bool,
     order: Vec<Order>,
 }
 #[derive(Clone)]
@@ -97,6 +100,7 @@ impl Io for Model {
                 } else {
                     s.command = None;
                     s.reset_ready = Some(s.now + RESET_RECOVERY_US);
+                    s.reset_minimum = false;
                     s.order.push(Order::Reset);
                     Ok(Vec::new())
                 }
@@ -107,7 +111,8 @@ impl Io for Model {
     fn clear(&mut self, endpoint: Endpoint) -> Result<(), BlockError> {
         let mut s = self.0.borrow_mut();
         assert!(
-            s.reset_ready.is_none_or(|at| s.now >= at),
+            s.reset_ready
+                .is_none_or(|at| s.now >= at && s.reset_minimum),
             "halt clear before reset settled"
         );
         s.order.push(Order::Clear(endpoint.address));
@@ -128,6 +133,23 @@ impl Io for Model {
         if micros == 100_000 {
             s.delays += 1;
         }
+    }
+    fn minimum_wait(&mut self, micros: u64) -> Result<(), BlockError> {
+        let mut state = self.0.borrow_mut();
+        state.order.push(Order::Minimum(micros));
+        if state.fault == Fault::Minimum {
+            return Err(BlockError::PciPower(
+                crate::bus::pci::power::Error::Interrupted,
+            ));
+        }
+        state.now += micros;
+        if micros == RESET_RECOVERY_US {
+            state.reset_minimum = true;
+        }
+        if micros == 100_000 {
+            state.delays += 1;
+        }
+        Ok(())
     }
     fn now_us(&self) -> u64 {
         self.0.borrow().now
@@ -163,7 +185,8 @@ impl Io for Model {
             assert!((1..=16).contains(&bytes[14]));
             let lun = bytes[13];
             assert!(
-                s.reset_ready.is_none_or(|at| s.now >= at),
+                s.reset_ready
+                    .is_none_or(|at| s.now >= at && s.reset_minimum),
                 "CBW before reset settled"
             );
             s.order.push(Order::Cbw(lun));
@@ -422,6 +445,7 @@ fn model(start: u64, end: u64, units: Vec<Option<Unit>>) -> Model {
         delays: 0,
         now: 0,
         reset_ready: None,
+        reset_minimum: false,
         order: Vec::new(),
     })))
 }
@@ -999,6 +1023,7 @@ fn native_poison_preflight_preserves_all_buffers() {
             tag: 7,
             max_lun: 1,
             poisoned: false,
+            minimum_error: None,
             flags: quirks::Flags::default(),
             initial_read: false,
             attachment: None,
@@ -1348,6 +1373,9 @@ fn late_discovery_transport_poison_discards_already_probed_units() {
         fn delay(&self, m: u64) {
             self.0.delay(m);
         }
+        fn minimum_wait(&mut self, micros: u64) -> Result<(), BlockError> {
+            self.0.minimum_wait(micros)
+        }
         fn now_us(&self) -> u64 {
             self.0.now_us()
         }
@@ -1444,6 +1472,7 @@ fn recovery_waits_for_real_reset_settle_before_clears_and_next_lun() {
             Order::Cbw(0),
             Order::Reset,
             Order::Delay(RESET_RECOVERY_US),
+            Order::Minimum(RESET_RECOVERY_US),
             Order::Clear(0x82),
             Order::Clear(0x02),
             Order::Cbw(1)
@@ -1472,7 +1501,7 @@ fn source_bridge_profiles_change_wire_transfers_and_probes() {
     // Genesis high-speed IDE bridge requires the command/data delay.
     bot.flags = quirks::Flags::from_id(0x05e3, 0x0702, 0x0010, true).unwrap();
     bot.command(0, &scsi::inquiry(), Data::In(36)).unwrap();
-    assert!(state.borrow().order.contains(&Order::Delay(125)));
+    assert!(state.borrow().order.contains(&Order::Minimum(125)));
     let before = state.borrow().controls.len();
     let flags = quirks::Flags::from_id(0x054c, 0x0010, 0x0106, true).unwrap();
     let mut single = Bot::with_flags(bot.io.clone(), 3, endpoints(), &mut dma, flags).unwrap();
@@ -1607,3 +1636,5 @@ fn acknowledged_class_reset_permanently_invalidates_all_published_luns() {
     assert_eq!(scan_bot(owner, &mut failures).unwrap().len(), 2);
     assert!(old[1].flush_cache().is_err());
 }
+
+mod minimum;

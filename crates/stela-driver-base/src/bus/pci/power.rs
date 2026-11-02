@@ -18,6 +18,8 @@ const READY_TIMEOUT: u64 = 60_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
+    Config(super::ConfigError),
+    Interrupted,
     Identity,
     Capability,
     Unsupported,
@@ -28,6 +30,17 @@ pub enum Error {
     BusMaster,
     Bars,
     NotReady,
+}
+impl From<super::ConfigError> for Error {
+    fn from(error: super::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+#[derive(Clone, Copy)]
+enum Phase {
+    Ready,
+    Acting,
+    Failed(Error),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,6 +61,13 @@ pub enum WakeState {
 
 /// Retained, calibrated process-context timing, or an explicit device model.
 ///
+/// A nominal frequency alone does not implement this physical contract:
+/// ```compile_fail
+/// use stela_driver_base::{Clock, bus::pci::power::Timer};
+/// fn requires_minimum(_: &impl Timer) {}
+/// requires_minimum(&Clock { ticks_per_microsecond: 3_000 });
+/// ```
+///
 /// # Safety
 /// Successful waits must consume at least the requested real microseconds.
 /// `check` must refuse unavailable timing before any hardware effects. The
@@ -65,22 +85,11 @@ unsafe impl<T: Timer + ?Sized> Timer for alloc::rc::Rc<T> {
         (**self).wait_us(microseconds)
     }
 }
-// SAFETY: the canonical checked Clock supplies calibrated elapsed ticks
-// and modular waits. No private timer or absolute counter deadline is used.
-unsafe impl Timer for crate::Clock {
-    fn check(&self) -> Result<(), Error> {
-        self.check_duration(READY_TIMEOUT).map_err(|_| Error::Clock)
-    }
-    fn wait_us(&self, microseconds: u64) -> Result<(), Error> {
-        self.check()?;
-        self.try_delay(microseconds).map_err(|_| Error::Clock)
-    }
-}
-
 /// The original endpoint configuration, platform power/exclusion and timing
 /// owners. Access is withheld throughout D3hot or an uncertain transition.
 /// Unfinished Drop keeps all three, including the stable-rail grant.
 pub struct Power<C: MsiConfigSpace, T: Timer, P> {
+    phase: Phase,
     function: Option<Function<C>>,
     timer: Option<T>,
     platform: Option<P>,
@@ -93,16 +102,16 @@ pub struct Power<C: MsiConfigSpace, T: Timer, P> {
 }
 
 fn word<C: ConfigSpace>(c: &C, offset: u16) -> Result<u16, Error> {
-    match c.read16(offset) {
+    match c.read16(offset)? {
         u16::MAX => Err(Error::Read(offset)),
         value => Ok(value),
     }
 }
 fn identity<C: ConfigSpace>(f: &Function<C>) -> Result<(), Error> {
-    if f.config.read32(0) != u32::from(f.vendor) | u32::from(f.device) << 16
+    if f.config.read32(0)? != u32::from(f.vendor) | u32::from(f.device) << 16
         || f.vendor == u16::MAX
-        || f.config.read8(0x0e) & 0x7f != 0
-        || f.config.read32(8) >> 8 != u32::from_be_bytes([0, f.class[0], f.class[1], f.class[2]])
+        || f.config.read8(0x0e)? & 0x7f != 0
+        || f.config.read32(8)? >> 8 != u32::from_be_bytes([0, f.class[0], f.class[1], f.class[2]])
     {
         return Err(Error::Identity);
     }
@@ -118,6 +127,7 @@ fn discover<C: MsiConfigSpace>(c: &C) -> Result<(u16, u16), Error> {
     let mut pm = None;
     for entry in c.capabilities() {
         let entry = entry.map_err(|error| match error {
+            CapabilityError::Config { error, .. } => Error::Config(error),
             CapabilityError::FailedRead { offset } => Error::Read(offset),
             _ => Error::Capability,
         })?;
@@ -161,12 +171,14 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
         platform: P,
         d3_delay_us: u64,
     ) -> Result<Self, (Error, Function<C>, T, P)> {
+        let mut original = super::kept::Kept::new((function, timer, platform));
         let validation = (|| {
+            let (function, timer, _) = original.get_mut();
             timer.check()?;
             if !(D3_DELAY..=READY_TIMEOUT).contains(&d3_delay_us) {
                 return Err(Error::Clock);
             }
-            identity(&function)?;
+            identity(function)?;
             let (offset, pmc) = discover(&function.config)?;
             if word(&function.config, offset + 4)? & STATE != 0 {
                 return Err(Error::State);
@@ -174,24 +186,82 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
             Ok((offset, pmc))
         })();
         match validation {
-            Ok((capability, pmc)) => Ok(Self {
-                function: Some(function),
-                timer: Some(timer),
-                platform: Some(platform),
-                capability,
-                pmc,
-                state: State::D0,
-                bars: [0; 7],
-                command: 0,
-                d3_delay: d3_delay_us,
-            }),
-            Err(error) => Err((error, function, timer, platform)),
+            Ok((capability, pmc)) => {
+                let (function, timer, platform) = original.take();
+                Ok(Self {
+                    phase: Phase::Ready,
+                    function: Some(function),
+                    timer: Some(timer),
+                    platform: Some(platform),
+                    capability,
+                    pmc,
+                    state: State::D0,
+                    bars: [0; 7],
+                    command: 0,
+                    d3_delay: d3_delay_us,
+                })
+            }
+            Err(error) => {
+                let (function, timer, platform) = original.take();
+                Err((error, function, timer, platform))
+            }
         }
     }
     pub fn state(&self) -> State {
-        self.state
+        if matches!(self.phase, Phase::Ready) {
+            self.state
+        } else {
+            State::Unknown
+        }
     }
 
+    pub fn first_error(&self) -> Option<Error> {
+        match self.phase {
+            Phase::Ready => None,
+            Phase::Acting => Some(Error::Interrupted),
+            Phase::Failed(error) => Some(error),
+        }
+    }
+    fn operation<R>(
+        &mut self,
+        run: impl FnOnce(&mut Self) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        if let Some(error) = self.first_error() {
+            return Err(error);
+        }
+        self.phase = Phase::Acting;
+        let result = run(self);
+        self.phase = match result.as_ref() {
+            Ok(_) => Phase::Ready,
+            Err(error)
+                if self.state != State::Unknown
+                    && matches!(
+                        error,
+                        Error::State | Error::Unsupported | Error::BusMaster | Error::Bars
+                    ) =>
+            {
+                // These explicit preconditions refused before source effects.
+                // Access/identity/readback errors never enter this branch.
+                Phase::Ready
+            }
+            Err(error) => {
+                self.state = State::Unknown;
+                Phase::Failed(*error)
+            }
+        };
+        result
+    }
+    fn minimum_ready(&mut self) -> Result<(), Error> {
+        if let Some(error) = self.first_error() {
+            return Err(error);
+        }
+        // A returned preflight refusal issues no configuration effect and may
+        // be retried by the same owner. Caught unwind keeps Acting closed.
+        self.phase = Phase::Acting;
+        let result = self.timer.as_ref().expect("retained").check();
+        self.phase = Phase::Ready;
+        result
+    }
     fn validate(&self, expected: State) -> Result<u16, Error> {
         if self.state != expected || expected == State::Unknown {
             return Err(Error::State);
@@ -231,12 +301,15 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
         &mut self,
         action: impl FnOnce(&mut Function<C>) -> R,
     ) -> Result<R, Error> {
+        self.operation(|owner| owner.with_d0_inner(action))
+    }
+    fn with_d0_inner<R>(&mut self, action: impl FnOnce(&mut Function<C>) -> R) -> Result<R, Error> {
         self.checked(State::D0)?;
         self.state = State::Unknown;
-        let result = action(self.function.as_mut().expect("retained"));
+        let mut result = super::kept::Kept::new(action(self.function.as_mut().expect("retained")));
         self.state = State::D0;
         self.checked(State::D0)?;
-        Ok(result)
+        Ok(result.take())
     }
 
     /// Configure PME generation and acknowledge its old status, as
@@ -247,6 +320,9 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
     /// platform route and auxiliary-power/board/multifunction coordination for
     /// the intended state. On disable, wake/IRQ users cannot race this change.
     pub unsafe fn configure_pme(&mut self, wake: WakeState, enable: bool) -> Result<(), Error> {
+        self.operation(|owner| owner.configure_pme_inner(wake, enable))
+    }
+    fn configure_pme_inner(&mut self, wake: WakeState, enable: bool) -> Result<(), Error> {
         let state = self.state;
         if state == State::Unknown {
             return Err(Error::State);
@@ -263,7 +339,7 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
         let value =
             (csr & (STATE | DATA_SELECT)) | PME_STATUS | if enable { PME_ENABLE } else { 0 };
         let c = &mut self.function.as_mut().expect("retained").config;
-        c.write16(self.capability + 4, value);
+        c.write16(self.capability + 4, value)?;
         let observed = word(c, self.capability + 4)?;
         if observed & (STATE | PME_ENABLE | DATA_SELECT)
             != value & (STATE | PME_ENABLE | DATA_SELECT)
@@ -285,9 +361,15 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
     /// programmed under board/platform permission if PME is enabled.
     pub unsafe fn suspend(&mut self) -> Result<(), Error> {
         if self.state != State::D0 {
+            return Err(self.first_error().unwrap_or(Error::State));
+        }
+        self.minimum_ready()?;
+        self.operation(|owner| owner.suspend_inner())
+    }
+    fn suspend_inner(&mut self) -> Result<(), Error> {
+        if self.state != State::D0 {
             return Err(Error::State);
         }
-        self.timer.as_ref().expect("retained").check()?;
         let csr = self.checked(State::D0)?;
         if csr & PME_ENABLE != 0 && self.pmc & (1 << 14) == 0 {
             return Err(Error::Unsupported);
@@ -303,7 +385,10 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
         if command & regs::COMMAND_MASTER != 0 {
             return Err(Error::BusMaster);
         }
-        let bars = core::array::from_fn(|i| c.read32(bar_offset(i)));
+        let mut bars = [0; 7];
+        for (index, value) in bars.iter_mut().enumerate() {
+            *value = c.read32(bar_offset(index))?;
+        }
         if bars.contains(&u32::MAX) {
             self.state = State::Unknown;
             return Err(Error::Bars);
@@ -314,12 +399,12 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
         self.bars = bars;
         self.command = command | regs::COMMAND_INTX_DISABLE;
         self.state = State::Unknown;
-        c.write16(4, self.command & !3);
+        c.write16(4, self.command & !3)?;
         if word(c, 4)? != self.command & !3 {
             return Err(Error::Readback(4));
         }
         // Do not replay a pending PME_Status W1C during an ordinary transition.
-        c.write16(self.capability + 4, (csr & (DATA_SELECT | PME_ENABLE)) | 3);
+        c.write16(self.capability + 4, (csr & (DATA_SELECT | PME_ENABLE)) | 3)?;
         self.timer
             .as_ref()
             .expect("retained")
@@ -336,21 +421,27 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
     /// The driver must reinitialize its engines, MSI/MSI-X and device state.
     pub fn resume(&mut self) -> Result<(), Error> {
         if self.state != State::D3hot {
+            return Err(self.first_error().unwrap_or(Error::State));
+        }
+        self.minimum_ready()?;
+        self.operation(|owner| owner.resume_inner())
+    }
+    fn resume_inner(&mut self) -> Result<(), Error> {
+        if self.state != State::D3hot {
             return Err(Error::State);
         }
-        self.timer.as_ref().expect("retained").check()?;
         let csr = self.checked(State::D3hot)?;
         self.state = State::Unknown;
         let c = &mut self.function.as_mut().expect("retained").config;
         // Linux pci_power_up's whole-word zero preserves pending PME_Status
         // while disabling PME generation and selecting D0.
-        c.write16(self.capability + 4, 0);
+        c.write16(self.capability + 4, 0)?;
         let timer = self.timer.as_ref().expect("retained");
         timer.wait_us(self.d3_delay)?;
         let mut remaining = READY_TIMEOUT;
         let mut delay = 1_000;
         loop {
-            if c.read32(0) != 0xffff_0001 && c.read16(4) != u16::MAX {
+            if c.read32(0)? != 0xffff_0001 && c.read16(4)? != u16::MAX {
                 break;
             }
             if remaining == 0 {
@@ -374,21 +465,21 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
         if command & regs::COMMAND_MASTER != 0 {
             return Err(Error::BusMaster);
         }
-        c.write16(4, (command & !3) | regs::COMMAND_INTX_DISABLE);
+        c.write16(4, (command & !3) | regs::COMMAND_INTX_DISABLE)?;
         if word(c, 4)? != (command & !3) | regs::COMMAND_INTX_DISABLE {
             return Err(Error::Readback(4));
         }
         if csr & NO_SOFT_RESET == 0 {
             for (i, value) in self.bars.iter().copied().enumerate() {
-                c.write32(bar_offset(i), value);
+                c.write32(bar_offset(i), value)?;
             }
         }
         for (i, value) in self.bars.iter().copied().enumerate() {
-            if c.read32(bar_offset(i)) != value {
+            if c.read32(bar_offset(i))? != value {
                 return Err(Error::Bars);
             }
         }
-        c.write16(4, self.command);
+        c.write16(4, self.command)?;
         if word(c, 4)? != self.command {
             return Err(Error::Readback(4));
         }
@@ -399,7 +490,16 @@ impl<C: MsiConfigSpace, T: Timer, P> Power<C, T, P> {
     /// Return the same original owners in verified D0. Their independent
     /// mapping retirement and device shutdown obligations still apply.
     pub fn release(mut self) -> Result<(Function<C>, T, P), Self> {
-        if self.checked(State::D0).is_err() {
+        if let Some(error) = self.first_error() {
+            self.phase = Phase::Failed(error);
+            return Err(self);
+        }
+        if self.state != State::D0 {
+            // A known D3hot owner remains available for explicit resume.
+            return Err(self);
+        }
+        if let Err(error) = self.checked(State::D0) {
+            self.phase = Phase::Failed(error);
             return Err(self);
         }
         Ok((

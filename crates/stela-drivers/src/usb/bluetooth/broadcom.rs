@@ -108,6 +108,10 @@ pub(super) fn is_candidate(device: &crate::usb::xhci::Device) -> bool {
 /// Download the exact USB-controller PatchRAM image with no guessed address.
 /// Use the native initialization wrapper to keep a single attempt per
 /// attachment. Failure closes/quarantines that attachment; no firmware retry.
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub fn initialize<B: Io>(
     hci: &mut Hci<B>,
     provider: &dyn crate::firmware::Provider,
@@ -118,6 +122,10 @@ pub fn initialize<B: Io>(
 /// A platform-supplied controller address can replace a source-listed
 /// default address. This is the host-order six-byte BD_ADDR as transmitted by
 /// HCI, not a generated/random identity. No platform value is invented.
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub fn initialize_with_address<B: Io>(
     hci: &mut Hci<B>,
     provider: &dyn crate::firmware::Provider,

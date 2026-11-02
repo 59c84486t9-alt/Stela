@@ -96,7 +96,7 @@ fn runtime_link_patch_failure_permanently_blocks_work_after_late_completion() {
         // The timed-out write completes after the caller has lost its
         // completion observation. Completion is not a recovery boundary.
         model.fail_eri_at = usize::MAX;
-        time.delay(100);
+        time.delay(100).unwrap();
         model.read32(ERI_ADDRESS);
         let writes = model.state.borrow().writes.len();
         assert_eq!(model.state.borrow().eri[&0x1dc], 5);
@@ -121,26 +121,46 @@ fn clock_request_uses_narrow_link_control_and_rejects_failed_config_reads() {
     struct Config {
         value: u16,
         writes: Vec<(u16, u16)>,
+        failure: Option<crate::bus::pci::ConfigError>,
     }
     impl ConfigSpace for Config {
-        fn read32(&self, _: u16) -> u32 {
-            panic!("must use narrow access")
+        fn read8(&self, _: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+            Err(crate::bus::pci::ConfigError::before_effect(
+                crate::bus::pci::ConfigFailure::UnqualifiedControl,
+            ))
         }
-        fn write32(&mut self, _: u16, _: u32) {
-            panic!("must use narrow access")
+        fn read32(&self, _: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+            Err(crate::bus::pci::ConfigError::before_effect(
+                crate::bus::pci::ConfigFailure::UnqualifiedControl,
+            ))
         }
-        fn read16(&self, offset: u16) -> u16 {
+        fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
             assert_eq!(offset, 0x82);
-            self.value
+            if let Some(error) = self.failure {
+                return Err(error);
+            }
+            Ok(self.value)
         }
-        fn write16(&mut self, offset: u16, value: u16) {
+        fn write8(&mut self, _: u16, _: u8) -> Result<(), crate::bus::pci::ConfigError> {
+            Err(crate::bus::pci::ConfigError::before_effect(
+                crate::bus::pci::ConfigFailure::UnqualifiedControl,
+            ))
+        }
+        fn write32(&mut self, _: u16, _: u32) -> Result<(), crate::bus::pci::ConfigError> {
+            Err(crate::bus::pci::ConfigError::before_effect(
+                crate::bus::pci::ConfigFailure::UnqualifiedControl,
+            ))
+        }
+        fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
             self.writes.push((offset, value));
             self.value = value;
+            Ok(())
         }
     }
     let mut config = Config {
         value: 0xa5fc,
         writes: Vec::new(),
+        failure: None,
     };
     clock_request(&mut config, 0x82, false).unwrap();
     assert_eq!(config.value, 0xa4fc);
@@ -151,6 +171,14 @@ fn clock_request_uses_narrow_link_control_and_rejects_failed_config_reads() {
     assert_eq!(
         clock_request(&mut config, 0x82, true),
         Err(BlockError::Device { status: 65535 })
+    );
+    assert_eq!(config.writes.len(), 2);
+    let denied =
+        crate::bus::pci::ConfigError::before_effect(crate::bus::pci::ConfigFailure::ForeignGrant);
+    config.failure = Some(denied);
+    assert_eq!(
+        clock_request(&mut config, 0x82, true),
+        Err(BlockError::Config(denied))
     );
     assert_eq!(config.writes.len(), 2);
 }

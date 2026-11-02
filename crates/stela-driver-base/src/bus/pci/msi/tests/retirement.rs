@@ -39,8 +39,8 @@ fn terminal_stop_releases_original_owners() {
             // this is the single terminal stop, with no BM/MSI re-enable.
             let original = unsafe {
                 terminal.with_device_stop(|config| {
-                    let command = config.read16(regs::COMMAND);
-                    config.write16(regs::COMMAND, command & !4);
+                    let command = config.read16(regs::COMMAND).unwrap();
+                    config.write16(regs::COMMAND, command & !4).unwrap();
                     command
                 })
             }
@@ -103,10 +103,18 @@ fn retirement_access_faults_keep_owners() {
                     }
                     let result = helper.begin_device_retirement();
                     assert!(model.lock().unwrap().transport_dead);
-                    assert_terminal(&mut helper, &model);
-                    // A successful final ACK followed by loss may transfer
-                    // the original owner, but cannot create a stop proof.
-                    drop(result);
+                    let error = match result {
+                        Err(error) => error,
+                        Ok(_) => panic!("denied retirement access transferred owners"),
+                    };
+                    assert!(matches!(
+                        error,
+                        MsiError::Config(ConfigError {
+                            reason: ConfigFailure::Mapping(_),
+                            ..
+                        })
+                    ));
+                    assert_closed(&mut helper, &model, error);
                     drop(helper);
                     assert_eq!(
                         configs.load(Ordering::Relaxed),
@@ -135,7 +143,9 @@ fn stop_unwind_prevents_replay_and_release() {
         // deliberate post-effect unwind; no configuration escape/re-enable.
         unsafe {
             terminal.with_device_stop::<()>(|config| {
-                config.write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE);
+                config
+                    .write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE)
+                    .unwrap();
                 panic!("modeled caller unwind after actual stop effect");
             })
         }
@@ -170,12 +180,12 @@ fn owned_mapping_retirement_and_abandonment() {
             function: 1,
         };
         let (mut config, counters) = owned_fixture(address);
-        config.write32(0, 0x1234_8086);
-        config.write16(regs::COMMAND, 0x107);
-        config.write16(regs::STATUS, regs::STATUS_CAP_LIST);
-        config.write8(0x34, 0x50);
-        config.write16(0x50, u16::from(MSI));
-        config.write16(0x52, WIDE | MASK_CAPABLE);
+        config.write32(0, 0x1234_8086).unwrap();
+        config.write16(regs::COMMAND, 0x107).unwrap();
+        config.write16(regs::STATUS, regs::STATUS_CAP_LIST).unwrap();
+        config.write8(0x34, 0x50).unwrap();
+        config.write16(0x50, u16::from(MSI)).unwrap();
+        config.write16(0x52, WIDE | MASK_CAPABLE).unwrap();
         let function = Function::new(address, config).unwrap();
         let root_drops = Arc::new(AtomicU64::new(0));
         let root: RetainedOwner = Arc::new(Root(root_drops.clone()));
@@ -190,9 +200,9 @@ fn owned_mapping_retirement_and_abandonment() {
         // SAFETY: single synchronous stop of this isolated owner.
         let stopped = unsafe {
             terminal.with_device_stop(|config| {
-                let command = config.read16(regs::COMMAND);
-                config.write16(regs::COMMAND, command & !4);
-                config.read16(regs::COMMAND) & 4 == 0
+                let command = config.read16(regs::COMMAND).unwrap();
+                config.write16(regs::COMMAND, command & !4).unwrap();
+                config.read16(regs::COMMAND).unwrap() & 4 == 0
             })
         }
         .unwrap();
@@ -210,9 +220,9 @@ fn owned_mapping_retirement_and_abandonment() {
             // SAFETY: the isolated real resource has no async users; empty
             // device/IRQ completion is known independently of config bits.
             let (function, root) = unsafe { terminal.release_after_drain() }.unwrap();
-            let mut mapping = function.into_config().into_mapping();
             // SAFETY: original mapping, all synchronous users ended.
-            unsafe { mapping.retire() }.unwrap();
+            unsafe { crate::bus::pci::owned::test_support::retire_owned(function.into_config()) }
+                .unwrap();
             drop(root);
             assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
             assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 1);
@@ -233,7 +243,9 @@ fn failed_stop_keeps_owners() {
     // caller-visible, and supplies no quiescence or release authorization.
     let original: Result<(), u32> = unsafe {
         terminal.with_device_stop(|config| {
-            config.write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE);
+            config
+                .write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE)
+                .unwrap();
             Err(0x4377_00ff)
         })
     }

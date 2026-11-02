@@ -197,6 +197,7 @@ mod tests {
             Clock {
                 ticks_per_microsecond: CLOCK_TICKS_PER_US,
             },
+            crate::sdhci::model::minimum(),
             "SDHCI primary/retirement model".into(),
             &mut dma,
             Profile::Standard,

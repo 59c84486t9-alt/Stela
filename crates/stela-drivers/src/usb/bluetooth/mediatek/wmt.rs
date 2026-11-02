@@ -31,6 +31,10 @@ pub struct WmtEvent {
     pub(super) raw: Vec<u8>,
 }
 impl WmtEvent {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn parse(raw: Vec<u8>, operation: u8) -> Result<Self> {
         if raw.len() < 7
             || raw.len() > 64
@@ -63,6 +67,10 @@ impl WmtEvent {
     pub fn data(&self) -> &[u8] {
         &self.raw[7..]
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn patch_status(&self) -> Result<PatchStatus> {
         // The pinned USB helper selects patch status from flag alone. Any
         // additional response bytes remain raw evidence, without guessed use.
@@ -90,6 +98,10 @@ pub(super) enum PatchStatus {
     Progress,
     Done,
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub(super) fn command(operation: u8, flag: u8, data: &[u8]) -> Result<Vec<u8>> {
     if data.len() > 250 {
         return Err(Error::protocol("WMT parameters exceed HCI limit", data));

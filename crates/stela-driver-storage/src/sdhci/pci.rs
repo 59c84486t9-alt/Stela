@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Native adaptation of sdhci-pci-core.c, Copyright 2005-2008 Pierre Ossman.
 //! Exact PCI identities select source-required host operating sequences.
-use super::{BlockError, Box, Rc, RefCell, registers::Registers};
+use super::{BlockError, Box, Rc, RefCell};
 use crate::bus::pci::{ConfigSpace, Function};
 mod o2micro;
 pub(super) use o2micro::stabilize as o2_stabilize;
@@ -116,46 +116,68 @@ impl Profile {
 /// power operation. Slots share this permission; no second ECAM view is created.
 pub(super) type Control = Rc<RefCell<Controller>>;
 pub(super) struct Controller {
-    registers: Box<dyn Registers>,
+    registers: core::mem::ManuallyDrop<Box<dyn ConfigSpace>>,
     identity: u32,
     fault: Option<BlockError>,
+    in_progress: bool,
 }
 impl Controller {
     pub fn new(function: Function) -> Control {
         let identity = u32::from(function.vendor) | u32::from(function.device) << 16;
         Rc::new(RefCell::new(Self {
-            registers: Box::new(OwnedFunction(function)),
+            registers: core::mem::ManuallyDrop::new(Box::new(OwnedFunction(RefCell::new(
+                function,
+            )))),
             identity,
             fault: None,
+            in_progress: false,
         }))
     }
     #[cfg(test)]
-    pub fn model(registers: Box<dyn Registers>, identity: u32) -> Control {
+    pub fn model(registers: Box<dyn ConfigSpace>, identity: u32) -> Control {
         Rc::new(RefCell::new(Self {
-            registers,
+            registers: core::mem::ManuallyDrop::new(registers),
             identity,
             fault: None,
+            in_progress: false,
         }))
     }
     pub fn healthy(&self) -> Result<(), BlockError> {
-        self.fault.clone().map_or(Ok(()), Err)
+        self.fault.clone().map_or(Ok(()), Err)?;
+        if self.in_progress {
+            Err(BlockError::Protocol(
+                "SDHCI shared physical operation did not complete",
+            ))
+        } else {
+            Ok(())
+        }
     }
     pub fn fail(&mut self, error: BlockError) {
-        self.fault = Some(error);
+        self.fault.get_or_insert(error);
+        self.in_progress = false;
+    }
+    /// Set before the first callback/effect; an unwind deliberately leaves the gate closed.
+    pub fn begin_physical(&mut self) -> Result<(), BlockError> {
+        self.healthy()?;
+        self.in_progress = true;
+        Ok(())
+    }
+    pub fn complete_physical(&mut self) {
+        self.in_progress = false;
     }
     fn operation(
         &mut self,
-        operation: impl FnOnce(&mut dyn Registers) -> Result<(), BlockError>,
+        operation: impl FnOnce(&mut dyn ConfigSpace) -> Result<(), BlockError>,
     ) -> Result<(), BlockError> {
-        self.healthy()?;
+        self.begin_physical()?;
         let result = (|| {
-            if self.registers.read32(0) != self.identity {
+            if self.registers.read32(0)? != self.identity {
                 return Err(BlockError::Unsupported(
                     "SDHCI owned PCI function identity changed",
                 ));
             }
             operation(self.registers.as_mut())?;
-            if self.registers.read32(0) != self.identity {
+            if self.registers.read32(0)? != self.identity {
                 return Err(BlockError::Unsupported(
                     "SDHCI owned PCI function identity changed",
                 ));
@@ -164,6 +186,8 @@ impl Controller {
         })();
         if let Err(error) = &result {
             self.fail(error.clone());
+        } else {
+            self.complete_physical();
         }
         result
     }
@@ -177,24 +201,24 @@ impl Controller {
         self.operation(o2micro::power_off)
     }
 }
-struct OwnedFunction(Function);
-impl Registers for OwnedFunction {
-    fn read8(&mut self, at: usize) -> u8 {
-        self.0.config().read8(at as u16)
+struct OwnedFunction(RefCell<Function>);
+impl ConfigSpace for OwnedFunction {
+    fn read8(&self, at: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        self.0.borrow_mut().config().read8(at)
     }
-    fn read16(&mut self, at: usize) -> u16 {
-        self.0.config().read16(at as u16)
+    fn read16(&self, at: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        self.0.borrow_mut().config().read16(at)
     }
-    fn read32(&mut self, at: usize) -> u32 {
-        self.0.config().read32(at as u16)
+    fn read32(&self, at: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        self.0.borrow_mut().config().read32(at)
     }
-    fn write8(&mut self, at: usize, value: u8) {
-        self.0.config().write8(at as u16, value);
+    fn write8(&mut self, at: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        self.0.get_mut().config().write8(at, value)
     }
-    fn write16(&mut self, at: usize, value: u16) {
-        self.0.config().write16(at as u16, value);
+    fn write16(&mut self, at: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
+        self.0.get_mut().config().write16(at, value)
     }
-    fn write32(&mut self, at: usize, value: u32) {
-        self.0.config().write32(at as u16, value);
+    fn write32(&mut self, at: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
+        self.0.get_mut().config().write32(at, value)
     }
 }

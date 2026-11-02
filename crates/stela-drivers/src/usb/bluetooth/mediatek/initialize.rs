@@ -31,6 +31,10 @@ const CMD_TIMEOUT_US: u64 = 2_000_000;
 const ATTEMPT_US: u64 = 180_000_000;
 const MAX_AUXILIARY: usize = 32768;
 
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub(super) fn run<B: Io>(hci: &mut Hci<B>, provider: &dyn Provider) -> Result<OwnedReport> {
     let usb = UsbIdentity::read(hci.binding.device());
     if !usb.candidate() {
@@ -85,6 +89,10 @@ struct Engine<'a, B: Io> {
     command_timeout: bool,
 }
 impl<B: Io> Engine<'_, B> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn control_read(&mut self, setup: [u8; 8]) -> Result<Vec<u8>> {
         self.hci.open()?;
         if self.hci.io.now_us() >= self.deadline {
@@ -95,6 +103,10 @@ impl<B: Io> Engine<'_, B> {
             .control_read(setup)
             .map_err(|e| self.hci.fail(ErrorKind::Usb(e)).into())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn register(&mut self, address: u32) -> Result<u32> {
         let request =
             crate::usb::descriptor::setup(0xc0, 0x63, (address >> 16) as u16, address as u16, 4);
@@ -108,6 +120,10 @@ impl<B: Io> Engine<'_, B> {
             .push(RegisterObservation { address, value });
         Ok(value)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn poll(&mut self) -> Result<()> {
         for p in self.hci.poll()? {
             match p {
@@ -139,6 +155,10 @@ impl<B: Io> Engine<'_, B> {
         }
         Ok(())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn auxiliary_event(&mut self, event: Vec<u8>) -> Result<()> {
         let (status, credits) = match command::response(&event, wmt::OPCODE) {
             Ok(Response::Complete { credits, returned }) => (returned[0], credits),
@@ -175,6 +195,10 @@ impl<B: Io> Engine<'_, B> {
         }
         Ok(())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn drain_auxiliary(&mut self) -> Result<()> {
         self.poll()?;
         while let Some(e) = self.pending.pop_front() {
@@ -182,6 +206,10 @@ impl<B: Io> Engine<'_, B> {
         }
         Ok(())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn wait(&mut self, us: u64) -> Result<()> {
         let until = self.hci.io.now_us().saturating_add(us);
         loop {
@@ -197,6 +225,10 @@ impl<B: Io> Engine<'_, B> {
             core::hint::spin_loop();
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn wmt(&mut self, operation: u8, flag: u8, data: &[u8]) -> Result<WmtEvent> {
         self.drain_auxiliary()?;
         let now = self.hci.io.now_us();
@@ -232,6 +264,10 @@ impl<B: Io> Engine<'_, B> {
             self.wait(500)?;
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn command(&mut self, opcode: u16) -> Result<Vec<u8>> {
         self.drain_auxiliary()?;
         if self.hci.io.now_us() >= self.deadline {
@@ -310,6 +346,10 @@ impl<B: Io> Engine<'_, B> {
             core::hint::spin_loop();
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn run(&mut self, usb: UsbIdentity, provider: &dyn Provider) -> Result<OwnedReport> {
         let legacy = self.register(LEGACY_ID)?;
         if legacy == 0x7663 {

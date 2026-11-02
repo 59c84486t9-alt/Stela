@@ -1499,11 +1499,26 @@ fn owned_partial_ram_unmap_retries_only_remaining_original_leases() {
 
 #[repr(align(4096))]
 struct RegisterPages([u8; 0x4000]);
+struct RegisterRam(core::cell::UnsafeCell<RegisterPages>);
+// SAFETY: actual isolated register RAM, accessed raw only by serialized fixture
+// users. No native/control/Authority/Source product is included in this pin.
+unsafe impl Send for RegisterRam {}
+// SAFETY: same exclusive hosted raw-memory contract as Send.
+unsafe impl Sync for RegisterRam {}
+impl RegisterRam {
+    fn pointer(&self) -> NonNull<u8> {
+        // SAFETY: retained exact UnsafeCell allocation, without a shared slice.
+        unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.0.get()).0).cast()) }
+    }
+}
 struct RegisterPlatform {
-    pages: Mutex<Box<RegisterPages>>,
+    pages: Arc<RegisterRam>,
     unmaps: AtomicUsize,
 }
-struct RegisterResource(Arc<AtomicUsize>);
+struct RegisterResource(
+    Arc<AtomicUsize>,
+    crate::bus::mmio::owned::model::MappingRetention<Arc<RegisterRam>>,
+);
 impl Drop for RegisterResource {
     fn drop(&mut self) {
         self.0.fetch_add(1, Ordering::SeqCst);
@@ -1512,6 +1527,12 @@ impl Drop for RegisterResource {
 // SAFETY: isolated model reservation, kept through the real Permission;
 // this physical interval is metadata, not a CPU or DMA pointer.
 unsafe impl crate::bus::mmio::owned::ResourceBacking for RegisterResource {
+    fn begin_mapping(
+        &self,
+    ) -> Result<crate::bus::pci::assignment::OpaqueUse, crate::bus::mmio::owned::Error> {
+        self.1.begin_mapping()
+    }
+
     fn physical_span(&self) -> crate::bus::mmio::owned::PhysicalSpan {
         crate::bus::mmio::owned::PhysicalSpan::new(0x2000_0000, 0x4000).unwrap()
     }
@@ -1538,7 +1559,7 @@ unsafe impl crate::bus::mmio::owned::MappingPlatform for RegisterPlatform {
         assert!(resource.backing().is::<RegisterResource>());
         assert_eq!(request.physical.start(), 0x2000_0000);
         assert!(request.physical.bytes() <= 0x4000);
-        let pointer = NonNull::new(self.pages.lock().unwrap().0.as_mut_ptr()).unwrap();
+        let pointer = self.pages.pointer();
         Ok(crate::bus::mmio::owned::InstalledMapping {
             token: request.id,
             cpu_base: pointer,
@@ -1564,7 +1585,9 @@ fn owned_mapping_registers_reject_unaligned_mapping_and_return_its_owner() {
     use crate::bus::mmio::owned::{AddressSpace, Authority, Resource};
     for offset in [1, 2, 3, 0] {
         let platform = Arc::new(RegisterPlatform {
-            pages: Mutex::new(Box::new(RegisterPages([0; 0x4000]))),
+            pages: Arc::new(RegisterRam(core::cell::UnsafeCell::new(RegisterPages(
+                [0; 0x4000],
+            )))),
             unmaps: AtomicUsize::new(0),
         });
         let released = Arc::new(AtomicUsize::new(0));
@@ -1581,9 +1604,26 @@ fn owned_mapping_registers_reject_unaligned_mapping_and_return_its_owner() {
             )
         }
         .unwrap();
+        // SAFETY: retained original isolated allocation and exclusive model
+        // reservation, with no Source/Authority/view backedge or native device.
+        let mut mapping_owner = unsafe {
+            crate::bus::mmio::owned::model::MappingOwner::from_owned(
+                platform.pages.clone(),
+                |owner| {
+                    if (owner.pointer().as_ptr() as usize).is_multiple_of(4096) {
+                        Ok(())
+                    } else {
+                        Err(crate::bus::pci::assignment::Error::Context)
+                    }
+                },
+            )
+        };
         let mapping = authority
             .map(
-                Resource::new(Box::new(RegisterResource(released.clone()))),
+                Resource::new(Box::new(RegisterResource(
+                    released.clone(),
+                    mapping_owner.retention().unwrap(),
+                ))),
                 offset,
                 0x2000,
                 CacheAttribute::Uncached,
@@ -1618,5 +1658,8 @@ fn owned_mapping_registers_reject_unaligned_mapping_and_return_its_owner() {
         assert_eq!(platform.unmaps.load(Ordering::SeqCst), 1);
         assert_eq!(released.load(Ordering::SeqCst), 1);
         assert_eq!(authority.status().unwrap().live, 0);
+        // SAFETY: all returned mapping users ended and acknowledged unmap;
+        // only this external fixture controller can recover its real RAM.
+        unsafe { mapping_owner.retire() }.unwrap();
     }
 }

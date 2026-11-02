@@ -94,7 +94,27 @@ impl Entry {
     }
 
     pub(super) fn domain(self) -> Option<DomainId> {
+        if self.0[0] & TRANSLATION == 0 {
+            return None;
+        }
         DomainId::new((self.0[1] & DOMAIN) as u16)
+    }
+    pub(super) fn existing_original(
+        words: [u64; 4],
+        irq: [u64; 2],
+        physical_bits: u8,
+    ) -> Result<Self, DeviceTableError> {
+        use crate::bus::dma::amd::original::{DataMode, Dte};
+        if [words[2], words[3]] != irq {
+            return Err(DeviceTableError::ConcurrentWriter);
+        }
+        let decoded =
+            Dte::inspect_host(words, physical_bits).map_err(|_| DeviceTableError::Profile)?;
+        match decoded.mode() {
+            DataMode::WalkTerminated => Ok(Self(words)),
+            DataMode::Paged { domain, .. } if domain != 0 => Ok(Self(words)),
+            _ => Err(DeviceTableError::Profile),
+        }
     }
     pub(super) fn words(self) -> [u64; 4] {
         self.0

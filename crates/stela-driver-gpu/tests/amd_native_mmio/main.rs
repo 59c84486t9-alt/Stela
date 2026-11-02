@@ -19,6 +19,7 @@ use bus::{
 use native_mmio::{AttachedBars, Error, KernelDoorbells, RegisterBar, Rollback, Stage};
 use std::{
     alloc::{Layout, alloc_zeroed, dealloc},
+    cell::RefCell,
     collections::BTreeMap,
     ptr::NonNull,
     sync::{
@@ -56,21 +57,29 @@ const CLOCK: Clock = Clock {
 
 struct Config;
 impl ConfigSpace for Config {
-    fn read32(&self, offset: u16) -> u32 {
-        match offset {
+    fn read32(&self, offset: u16) -> Result<u32, bus::pci::ConfigError> {
+        Ok(match offset {
             0 => 0x1234_1002,
             8 => 0x1200_0000, // Original matching is not restricted to display inventory.
             _ => panic!("resource attachment must not probe or activate hardware"),
-        }
+        })
     }
-    fn write32(&mut self, _: u16, _: u32) {
+    fn write32(&mut self, _: u16, _: u32) -> Result<(), bus::pci::ConfigError> {
         panic!("no PCI writes")
     }
-    fn write16(&mut self, _: u16, _: u16) {
+    fn write16(&mut self, _: u16, _: u16) -> Result<(), bus::pci::ConfigError> {
         panic!("no PCI writes")
     }
-    fn write8(&mut self, _: u16, _: u8) {
+    fn write8(&mut self, _: u16, _: u8) -> Result<(), bus::pci::ConfigError> {
         panic!("no PCI writes")
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> (8 * (offset & 3))) as u8)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> (8 * (offset & 2))) as u16)
     }
 }
 fn function() -> Function<Config> {
@@ -90,6 +99,14 @@ struct Backing {
     span: PhysicalSpan,
     kind: ResourceKind,
     drops: Arc<AtomicUsize>,
+    mapping: bus::mmio::owned::model::MappingRetention<Arc<Model>>,
+}
+fn mapping_context(pool: &Arc<Model>) -> Result<(), bus::pci::assignment::Error> {
+    if !pool.0.is_poisoned() {
+        Ok(())
+    } else {
+        Err(bus::pci::assignment::Error::Context)
+    }
 }
 impl Drop for Backing {
     fn drop(&mut self) {
@@ -99,6 +116,9 @@ impl Drop for Backing {
 // SAFETY: test-only exclusive immutable synthetic resource, kept by the
 // canonical owner. It neither stands in for physical ownership nor drives a GPU.
 unsafe impl ResourceBacking for Backing {
+    fn begin_mapping(&self) -> Result<bus::pci::assignment::OpaqueUse, MmioError> {
+        self.mapping.begin_mapping()
+    }
     fn physical_span(&self) -> PhysicalSpan {
         self.span
     }
@@ -106,25 +126,39 @@ unsafe impl ResourceBacking for Backing {
         self.kind
     }
 }
-fn resource(base: u64, bytes: u64, kind: ResourceKind) -> (Resource, Arc<AtomicUsize>) {
+fn resource(
+    base: u64,
+    bytes: u64,
+    kind: ResourceKind,
+    model: &Fixture,
+) -> (Resource, Arc<AtomicUsize>) {
     let drops = Arc::new(AtomicUsize::new(0));
+    // SAFETY: this SAME actual pool owns allocated CPU buffers/tokens and the
+    // original synchronized model guard. It contains no Authority/Resource/view,
+    // Source, native control or callback backedge; labels grant no custody.
+    let mapping = unsafe {
+        bus::mmio::owned::model::MappingOwner::from_owned(model.pool.clone(), mapping_context)
+    };
+    let retained = mapping.retention().unwrap();
+    model.controls.borrow_mut().push(mapping);
     let result = Resource::new(Box::new(Backing {
         span: PhysicalSpan::new(base, bytes).unwrap(),
         kind,
         drops: Arc::clone(&drops),
+        mapping: retained,
     }));
     (result, drops)
 }
-fn registers(base: u64, bar: u8) -> RegisterBar {
+fn registers(base: u64, bar: u8, model: &Fixture) -> RegisterBar {
     RegisterBar {
         index: bar,
-        resource: resource(base, 16384, ResourceKind::Registers).0,
+        resource: resource(base, 16384, ResourceKind::Registers, model).0,
     }
 }
-fn doors(base: u64, modern: bool) -> KernelDoorbells {
+fn doors(base: u64, modern: bool, model: &Fixture) -> KernelDoorbells {
     KernelDoorbells {
         index: 2,
-        resource: resource(base, 65536, ResourceKind::PrefetchableMemory).0,
+        resource: resource(base, 65536, ResourceKind::PrefetchableMemory, model).0,
         offset: 4096,
         reserved_bytes: if modern { 16384 } else { 8192 },
         logical_dwords: if modern { 3072 } else { 2048 },
@@ -149,6 +183,39 @@ struct ModelState {
 }
 #[derive(Default)]
 struct Model(Mutex<ModelState>);
+// Affine source controls are outside the mapping provider and all backings.
+// The actual pool contains no reference to this fixture, so no retention cycle.
+struct Fixture {
+    pool: Arc<Model>,
+    controls: RefCell<Vec<bus::mmio::owned::model::MappingOwner<Arc<Model>>>>,
+}
+impl Fixture {
+    fn new() -> Self {
+        Self {
+            pool: Arc::new(Model::default()),
+            controls: RefCell::new(Vec::new()),
+        }
+    }
+}
+impl core::ops::Deref for Fixture {
+    type Target = Arc<Model>;
+    fn deref(&self) -> &Self::Target {
+        &self.pool
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        for owner in self.controls.get_mut() {
+            // SAFETY: this source fixture drops after test consumers/locals.
+            // Acknowledged mappings freed their actual allocations; never-mapped
+            // reservations exposed no pointer. Real quarantine/retention users
+            // make this same owner's retirement refuse, never certify cleanup.
+            if let Err(error) = unsafe { owner.retire() } {
+                owner.record_retention(error);
+            }
+        }
+    }
+}
 // SAFETY: isolated CPU model. Its own aligned allocation is exact and kept
 // through acknowledged unmap or the canonical quarantine. No native root/cache
 // implementation is claimed; production requires the mount provider.
@@ -225,12 +292,12 @@ unsafe impl MappingPlatform for Model {
 
 #[test]
 fn canonical_amd_attachment() {
-    let model = Arc::new(Model::default());
+    let model = Fixture::new();
     // SAFETY: a single isolated CPU test process, complete empty model alias
     // inventory and one canonical permission. This does not activate real MMIO.
     let authority = unsafe {
         Authority::activate(
-            model.clone(),
+            model.pool.clone(),
             AddressSpace {
                 identity: 1,
                 physical_bits: 48,
@@ -251,7 +318,7 @@ fn canonical_amd_attachment() {
             &pci,
             asic(0),
             asic(0),
-            registers(0x100000, 2),
+            registers(0x100000, 2, &model),
             None,
         )
     }
@@ -303,7 +370,7 @@ fn canonical_amd_attachment() {
             &pci,
             asic(1),
             asic(1),
-            registers(0x180000, 5),
+            registers(0x180000, 5, &model),
             None,
         )
     }
@@ -317,13 +384,14 @@ fn canonical_amd_attachment() {
     }
     // SAFETY: test-only original BO owner, unchanged injected doorbell failure.
     let failed =
-        unsafe { staged.attach_kernel_doorbells(&authority, doors(0x190000, false)) }.unwrap_err();
+        unsafe { staged.attach_kernel_doorbells(&authority, doors(0x190000, false, &model)) }
+            .unwrap_err();
     assert_eq!(failed.stage, Stage::Doorbells);
     assert_eq!(failed.rollback, Rollback::NotAttempted);
     assert_eq!(retained.direct_dword(0).unwrap(), pointer);
     assert!(staged.doorbells().unwrap().is_none());
     // SAFETY: same original owner retries reservation after unchanged failure.
-    unsafe { staged.attach_kernel_doorbells(&authority, doors(0x190000, false)) }.unwrap();
+    unsafe { staged.attach_kernel_doorbells(&authority, doors(0x190000, false, &model)) }.unwrap();
     assert_eq!(staged.doorbells().unwrap().unwrap().bytes(), 8192);
     assert_eq!(retained.direct_dword(0).unwrap(), pointer);
     let register_maps = model
@@ -337,7 +405,10 @@ fn canonical_amd_attachment() {
     assert_eq!(register_maps, 1);
     let before = model.0.lock().unwrap().calls;
     // SAFETY: duplicate original reservation, rejected pre-map.
-    assert!(unsafe { staged.attach_kernel_doorbells(&authority, doors(0x1a0000, false)) }.is_err());
+    assert!(
+        unsafe { staged.attach_kernel_doorbells(&authority, doors(0x1a0000, false, &model)) }
+            .is_err()
+    );
     assert_eq!(model.0.lock().unwrap().calls, before);
     assert_eq!(
         // SAFETY: model accesses stopped, but kept C view still pins its lease.
@@ -358,8 +429,8 @@ fn canonical_amd_attachment() {
             &pci,
             asic(3),
             asic(3),
-            registers(0x200000, 5),
-            Some(doors(0x300000, true)),
+            registers(0x200000, 5, &model),
+            Some(doors(0x300000, true, &model)),
         )
     }
     .unwrap();
@@ -393,14 +464,21 @@ fn canonical_amd_attachment() {
 
     let calls = model.0.lock().unwrap().calls;
     let malformed = [
-        (4, asic(1), Some(doors(0x400000, false))),
-        (2, asic(0), Some(doors(0x400000, false))),
-        (5, u32::MAX, Some(doors(0x400000, false))),
+        (4, asic(1), Some(doors(0x400000, false, &model))),
+        (2, asic(0), Some(doors(0x400000, false, &model))),
+        (5, u32::MAX, Some(doors(0x400000, false, &model))),
     ];
     for (bar, chip, door) in malformed {
         // SAFETY: invalid model facts, expected refusal pre-map.
         let error = unsafe {
-            AttachedBars::attach(&authority, &pci, chip, chip, registers(0x500000, bar), door)
+            AttachedBars::attach(
+                &authority,
+                &pci,
+                chip,
+                chip,
+                registers(0x500000, bar, &model),
+                door,
+            )
         }
         .err()
         .unwrap();
@@ -408,12 +486,12 @@ fn canonical_amd_attachment() {
         assert_eq!(error.rollback, Rollback::NotAttempted);
     }
     for which in 0..8 {
-        let mut door = doors(0x600000, false);
+        let mut door = doors(0x600000, false, &model);
         match which {
             0 => door.offset += 1,
             1 => door.reserved_bytes -= 1,
             2 => door.logical_dwords += 1,
-            3 => door.resource = resource(0x500000, 65536, ResourceKind::Registers).0,
+            3 => door.resource = resource(0x500000, 65536, ResourceKind::Registers, &model).0,
             4 => door.reserved_bytes = 4096,
             5 => door.index = 0,
             6 => door.offset = 65536,
@@ -428,7 +506,7 @@ fn canonical_amd_attachment() {
                     &pci,
                     asic(1),
                     asic(1),
-                    registers(0x500000, 5),
+                    registers(0x500000, 5, &model),
                     Some(door),
                 )
             }
@@ -445,7 +523,7 @@ fn canonical_amd_attachment() {
                 asic(0),
                 RegisterBar {
                     index: 2,
-                    resource: resource(0x700001, 16384, ResourceKind::Registers).0,
+                    resource: resource(0x700001, 16384, ResourceKind::Registers, &model).0,
                 },
                 None,
             )
@@ -463,8 +541,8 @@ fn canonical_amd_attachment() {
             &pci,
             asic(1),
             asic(1),
-            registers(0x800000, 5),
-            Some(doors(0x900000, false)),
+            registers(0x800000, 5, &model),
+            Some(doors(0x900000, false, &model)),
         )
     }
     .err()
@@ -479,9 +557,9 @@ fn canonical_amd_attachment() {
         state.fail_map = state.calls + 2;
         state.fail_unmaps = 1;
     }
-    let (reg, reg_drops) = resource(0xa00000, 16384, ResourceKind::Registers);
-    let (door, door_drops) = resource(0xb00000, 65536, ResourceKind::Registers);
-    let mut kernel = doors(0xc00000, false);
+    let (reg, reg_drops) = resource(0xa00000, 16384, ResourceKind::Registers, &model);
+    let (door, door_drops) = resource(0xb00000, 65536, ResourceKind::Registers, &model);
+    let mut kernel = doors(0xc00000, false, &model);
     kernel.resource = door;
     // SAFETY: owned model resources; failed unmap must preserve exact backing.
     let error = unsafe {
@@ -514,7 +592,7 @@ fn canonical_amd_attachment() {
         state.fail_map = state.calls + 1;
         state.fail_uncertain = true;
     }
-    let (reg, reg_drops) = resource(0xd00000, 16384, ResourceKind::Registers);
+    let (reg, reg_drops) = resource(0xd00000, 16384, ResourceKind::Registers, &model);
     // SAFETY: isolated model returns an uncertain partial map.
     let error = unsafe {
         AttachedBars::attach(
@@ -544,15 +622,15 @@ fn canonical_amd_attachment() {
             &pci,
             asic(1),
             asic(1),
-            registers(0xe00000, 5),
+            registers(0xe00000, 5, &model),
             None,
         )
     }
     .unwrap();
     let retained = late.registers().unwrap();
     let pointer = retained.direct_dword(0).unwrap();
-    let (reservation, drops) = resource(0xf00000, 65536, ResourceKind::Registers);
-    let mut kernel = doors(0xf00000, false);
+    let (reservation, drops) = resource(0xf00000, 65536, ResourceKind::Registers, &model);
+    let mut kernel = doors(0xf00000, false, &model);
     kernel.resource = reservation;
     {
         let mut state = model.0.lock().unwrap();

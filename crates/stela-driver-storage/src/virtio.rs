@@ -116,8 +116,10 @@ impl VirtioBlk {
         function: &mut Function,
         handoff: &Handoff,
         dma: &mut dyn DmaAllocator,
+        minimum: &(impl crate::bus::pci::power::Timer + ?Sized),
     ) -> Result<Self, BlockError> {
-        let transport = Modern::new(function, handoff)?;
+        minimum.check().map_err(BlockError::PciPower)?;
+        let transport = Modern::new(function, handoff, minimum)?;
         let accepted = transport.negotiate(
             FEATURE_READ_ONLY
                 | FEATURE_BLOCK_SIZE

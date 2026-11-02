@@ -44,6 +44,10 @@ struct allocation_record {
 	size_t next;
     size_t dma_refs;
     u64 external_nonce;
+    /* Exact source factory identity only; never dereferenced/interpreted as
+     * current/task ownership. Fresh descriptor nonce guards address reuse. */
+    const void *external_task;
+    enum { STACK_RESERVED, STACK_LENT, STACK_PUBLISHED } external_phase;
 };
 
 /* Inventory entries cover only actual writable mappings, never raw allocation
@@ -741,27 +745,56 @@ int stela_linux_page_stack_admit(
     return 0;
 }
 
-int stela_linux_page_stack_cancel(const struct stela_linux_stack_ticket_v1 *ticket)
+/* An external NativeStack pin is held by its affine Rust owner, never by
+ * ordinary allocation-record provider callbacks. Descriptor/page references
+ * and original source/RCU/native return joins remain independent owners. */
+static int stack_record(const struct stela_linux_stack_ticket_v1 *ticket,
+                        struct allocation_record **out)
 {
-    require_quiescence();
     if (!ticket || ticket->version != STELA_LINUX_STACK_ADMISSION_V1 ||
-        ticket->bytes != sizeof(*ticket))
-        return -EINVAL;
-    if (!catalog.pages || ticket->generation != catalog.generation ||
+        ticket->bytes != sizeof(*ticket) || !catalog.pages ||
+        ticket->generation != catalog.generation ||
         ticket->record >= catalog.page_count || !ticket->nonce)
         return -EINVAL;
     struct allocation_record *record = catalog.allocations + ticket->record;
-    if (record->external_nonce != ticket->nonce || record->pin || record->live ||
+    if (record->external_nonce != ticket->nonce || record->pin ||
         !record->count || record->count > catalog.page_count ||
-        record->first > catalog.page_count - record->count ||
-        !catalog.stack_admissions)
+        record->first > catalog.page_count - record->count || !catalog.stack_admissions)
         return -EINVAL;
     for (size_t i = 0; i < record->count; i++) {
         size_t index = record->first + i;
-        const struct page_state *state = catalog.state + index;
-        if (state->allocation != ticket->record || state->live ||
-            page_ref_count(catalog.pages + index) ||
+        if (catalog.state[index].allocation != ticket->record ||
             index_extent(index)->kind != STELA_LINUX_PAGE_RUNTIME_STACK)
+            return -EINVAL;
+    }
+    *out = record;
+    return 0;
+}
+int stela_linux_page_stack_source_context(const struct stela_linux_owner *expected)
+{
+    if (!expected || in_callback)
+        return -EPERM;
+    struct stela_linux_lease lease;
+    stela_linux_lease_snapshot(&lease);
+    if (lease.owner != expected)
+        return -EPERM;
+    return stela_linux_require_current(expected);
+}static int stack_current(bool sleepable)
+{
+    require_context();
+    int error = stela_linux_require_current(stela_linux_owner());
+    if (error)
+        return error;
+    return sleepable && !stela_linux_quiescent() ? -EBUSY : 0;
+}
+static int stack_remove(const struct stela_linux_stack_ticket_v1 *ticket,
+                        struct allocation_record *record)
+{
+    if (record->live || record->dma_refs)
+        return -EBUSY;
+    for (size_t i = 0; i < record->count; i++) {
+        size_t index = record->first + i;
+        if (catalog.state[index].live || page_ref_count(catalog.pages + index))
             return -EBUSY;
     }
     for (size_t i = 0; i < record->count; i++)
@@ -769,6 +802,105 @@ int stela_linux_page_stack_cancel(const struct stela_linux_stack_ticket_v1 *tick
     catalog.stack_admissions--;
     recycle_record(ticket->record);
     return 0;
+}
+int stela_linux_page_stack_cancel(const struct stela_linux_stack_ticket_v1 *ticket)
+{
+    require_quiescence();
+    struct allocation_record *record;
+    int error = stack_record(ticket, &record);
+    if (error)
+        return error;
+    if (record->external_phase == STACK_PUBLISHED)
+        return -EPERM;
+    return stack_remove(ticket, record);
+}
+int stela_linux_page_stack_lend(const struct stela_linux_stack_ticket_v1 *ticket,
+                              const void *actual_child, void **cpu_base)
+{
+    if (!actual_child || !cpu_base)
+        return -EINVAL;
+    *cpu_base = NULL;
+    int error = stack_current(true);
+    if (error)
+        return error;
+    struct allocation_record *record;
+    error = stack_record(ticket, &record);
+    if (error)
+        return error;
+    if (record->external_phase != STACK_RESERVED || record->external_task ||
+        record->live || record->dma_refs || record->count != THREAD_SIZE / PAGE_SIZE)
+        return -EBUSY;
+    for (size_t i = 0; i < record->count; i++) {
+        if (catalog.state[record->first + i].live ||
+            page_ref_count(catalog.pages + record->first + i))
+            return -EBUSY;
+    }
+    if (record->count > SIZE_MAX - catalog.live_pages)
+        return -EOVERFLOW;
+    unsigned int order = __ffs(record->count);
+    for (size_t i = 0; i < record->count; i++) {
+        initialize_page(catalog.pages + record->first + i);
+        catalog.state[record->first + i] = (struct page_state){
+            .allocation = ticket->record, .run_first = record->first,
+            .run_order = order, .live = true,
+        };
+    }
+    set_page_count(catalog.pages + record->first, 1);
+    record->live = record->count;
+    record->external_task = actual_child;
+    record->external_phase = STACK_LENT;
+    catalog.live_pages += record->count;
+    *cpu_base = page_address(catalog.pages + record->first);
+    return 0;
+}
+int stela_linux_page_stack_prepare_publish(
+    const struct stela_linux_stack_ticket_v1 *ticket, const void *actual_child)
+{
+    int error = stack_current(false);
+    if (error)
+        return error;
+    struct allocation_record *record;
+    error = stack_record(ticket, &record);
+    if (error)
+        return error;
+    if (!actual_child || record->external_task != actual_child ||
+        record->external_phase != STACK_LENT || record->live != record->count || record->dma_refs)
+        return -EINVAL;
+    for (size_t i = 0; i < record->count; i++) {
+        const struct page_state *state = catalog.state + record->first + i;
+        if (!state->live || state->run_first != record->first ||
+            state->run_order != __ffs(record->count) || state->compound ||
+            page_ref_count(catalog.pages + record->first + i) != (i ? 0 : 1))
+            return -EBUSY;
+    }
+    return 0;
+}
+void stela_linux_page_stack_publish(const struct stela_linux_stack_ticket_v1 *ticket,
+                                 const void *actual_child)
+{
+    /* Private source nofail point, after native Dormant accepted and before
+     * original tasklist/PID visibility. Never translate uncertainty to errno. */
+    if (stela_linux_page_stack_prepare_publish(ticket, actual_child))
+        __builtin_trap();
+    catalog.allocations[ticket->record].external_phase = STACK_PUBLISHED;
+}
+int stela_linux_page_stack_retire(const struct stela_linux_stack_ticket_v1 *ticket,
+                               const void *actual_child)
+{
+    int error = stack_current(true);
+    if (error)
+        return error;
+    struct allocation_record *record;
+    error = stack_record(ticket, &record);
+    if (error)
+        return error;
+    if (!actual_child || record->external_task != actual_child ||
+        record->external_phase != STACK_PUBLISHED)
+        return -EINVAL;
+    /* Private unsafe producer already joined the real original task/stack,
+     * alias/RCU releases and actual native terminal successor. These checks
+     * independently retain every real descriptor ref, never infer that join. */
+    return stack_remove(ticket, record);
 }
 
 struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
@@ -981,8 +1113,18 @@ static void retire_pages(size_t first, size_t count)
 	}
 	record->live -= count;
 	catalog.live_pages -= count;
-	if (!record->live)
-		queue_record(allocation);
+	if (!record->live) {
+        if (record->external_nonce) {
+            /* Original free_thread_stack/__free_pages ended logical pages.
+             * Do not queue a NULL ordinary provider pin or recycle native
+             * stack descriptors before exact source/native/RCU retirement. */
+            if (record->external_phase != STACK_LENT &&
+                record->external_phase != STACK_PUBLISHED)
+                __builtin_trap();
+        } else {
+            queue_record(allocation);
+        }
+    }
 }
 
 void __free_pages(struct page *page, unsigned int order)

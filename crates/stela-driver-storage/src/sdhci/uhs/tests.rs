@@ -22,6 +22,7 @@ fn host(
         Clock {
             ticks_per_microsecond: CLOCK_TICKS_PER_US,
         },
+        crate::sdhci::model::minimum(),
         "standard SDHCI UHS model".into(),
         dma,
         Profile::Standard,

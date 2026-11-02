@@ -717,7 +717,7 @@ mod attach {
             subsystem_device: 0,
         };
         let profile = lpss::Profile::select(identity).map_err(PlatformError::Lpss)?;
-        let bars = function.bars();
+        let bars = function.bars().map_err(PlatformError::Config)?;
         // SAFETY: the mount claimed this function stopped, and sizing its BARs
         // with decode off left it so.
         let requester =

@@ -1,15 +1,34 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_STELA_PGTABLE_H
 #define _ASM_STELA_PGTABLE_H
-/* x86-64's four-level page table format, from arch/x86/include/asm's
+/* x86-64's max-five-level, runtime-folded page table format, from
+ * arch/x86/include/asm's
  * pgtable_64_types.h and pgtable_types.h, with which Linux's MM headers
  * describe mappings. Linux code under Stela owns no address space and edits
  * no CPU page table: its memory owners map memory. */
 #include <linux/const.h>
 #include <asm/page.h>
-#include <asm-generic/pgtable-nop4d.h>
+/* Original unsigned-int runtime state. The one canonical native root product
+ * publishes these before Environment/tasks/initial-mm can be initialized. No
+ * x86 CPU feature array or caller-selected LA57 capability is fabricated. */
+extern unsigned int __pgtable_l5_enabled;
+extern unsigned int pgdir_shift;
+extern unsigned int ptrs_per_p4d;
+static inline bool pgtable_l5_enabled(void)
+{
+	return __pgtable_l5_enabled;
+}
+#define PGDIR_SHIFT pgdir_shift
+#define P4D_SHIFT 39
+#define MAX_PTRS_PER_P4D 512
+#define PTRS_PER_P4D ptrs_per_p4d
+#define P4D_SIZE (_AC(1, UL) << P4D_SHIFT)
+#define P4D_MASK (~(P4D_SIZE - 1))
+/* Dynamic native root ownership is bound by the actual initial-root producer.
+ * A static swapper array would provide neither that root nor mapping authority. */
+#define INIT_MM_PGD ((pgd_t *)0)
 
-#define PGDIR_SHIFT	39
+
 #define PTRS_PER_PGD	512
 #define PUD_SHIFT	30
 #define PTRS_PER_PUD	512
@@ -45,11 +64,13 @@
 #define pte_val(x)	((x).pte)
 #define pmd_val(x)	((x).pmd)
 #define pud_val(x)	((x).pud)
+#define p4d_val(x)	((x).p4d)
 #define pgd_val(x)	((x).pgd)
 #define pgprot_val(x)	((x).pgprot)
 #define __pte(x)	((pte_t) { (x) })
 #define __pmd(x)	((pmd_t) { (x) })
 #define __pud(x)	((pud_t) { (x) })
+#define __p4d(x)	((p4d_t) { (x) })
 #define __pgd(x)	((pgd_t) { (x) })
 #define __pgprot(x)	((pgprot_t) { (x) })
 
@@ -95,6 +116,58 @@ static inline int pud_bad(pud_t pud) { return !(pud_val(pud) & _PAGE_PRESENT); }
 static inline pmd_t *pud_pgtable(pud_t pud)
 {
 	return (pmd_t *)__va(pud_val(pud) & PTE_PFN_MASK);
+}
+/* Original x86 runtime folding: the PGD is the P4D on an L4 root. */
+#define p4d_index p4d_index
+static inline unsigned long p4d_index(unsigned long address)
+{
+	return (address >> P4D_SHIFT) & (PTRS_PER_P4D - 1);
+}
+static inline int pgd_present(pgd_t pgd)
+{
+	return !pgtable_l5_enabled() || (pgd_val(pgd) & _PAGE_PRESENT);
+}
+static inline int pgd_none(pgd_t pgd)
+{
+	return pgtable_l5_enabled() && !pgd_val(pgd);
+}
+static inline int pgd_bad(pgd_t pgd)
+{
+	return pgtable_l5_enabled() && !(pgd_val(pgd) & _PAGE_PRESENT);
+}
+static inline unsigned long pgd_page_vaddr(pgd_t pgd)
+{
+	return (unsigned long)__va(pgd_val(pgd) & PTE_PFN_MASK);
+}
+#define p4d_offset p4d_offset
+static inline p4d_t *p4d_offset(pgd_t *pgd, unsigned long address)
+{
+	if (!pgtable_l5_enabled())
+		return (p4d_t *)pgd;
+	return (p4d_t *)pgd_page_vaddr(*pgd) + p4d_index(address);
+}
+struct mm_struct;
+#define mm_p4d_folded mm_p4d_folded
+static inline bool mm_p4d_folded(struct mm_struct *mm)
+{
+	return !pgtable_l5_enabled();
+}
+static inline void set_pgd(pgd_t *pgdp, pgd_t pgd)
+{
+	WRITE_ONCE(*pgdp, pgd);
+}
+static inline void pgd_clear(pgd_t *pgdp)
+{
+	if (pgtable_l5_enabled())
+		set_pgd(pgdp, __pgd(0));
+}
+static inline void set_p4d(p4d_t *p4dp, p4d_t p4d)
+{
+	WRITE_ONCE(*p4dp, p4d);
+}
+static inline void p4d_clear(p4d_t *p4dp)
+{
+	set_p4d(p4dp, __p4d(0));
 }
 static inline int p4d_none(p4d_t p4d) { return !p4d_val(p4d); }
 static inline int p4d_present(p4d_t p4d) { return p4d_val(p4d) & _PAGE_PRESENT; }

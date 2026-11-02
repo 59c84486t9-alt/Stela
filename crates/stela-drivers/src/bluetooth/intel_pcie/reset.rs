@@ -2,6 +2,7 @@
 // Copyright (C) 2024 Intel Corporation
 //! Intel BT disconnect/reset shared by cold preparation and transport teardown.
 use super::{Error, Platform, Result, Snapshot, registers::*};
+use alloc::boxed::Box;
 
 /// Actual same-function control registers and qualified timing, or an isolated
 /// device peer. This interface supplies neither DMA nor IRQ admission.
@@ -16,27 +17,50 @@ pub(super) unsafe trait Io {
     fn delay(&mut self, microseconds: u64) -> Result<()>;
 }
 
-pub(super) struct PlatformIo<'a, P: Platform>(pub(super) &'a mut P);
+pub(super) struct PlatformIo<'a, P: Platform>(
+    pub(super) &'a mut P,
+    pub(super) &'a mut Option<Box<Error>>,
+);
+
+/// Keep the original owner closed if its external minimum callback fails or
+/// unwinds. A successful callback alone clears the prearmed effect fence.
+pub(super) fn wait<P: Platform>(
+    platform: &mut P,
+    failure: &mut Option<Box<Error>>,
+    microseconds: u64,
+) -> Result<()> {
+    if let Some(error) = failure.as_deref() {
+        return Err(error.clone());
+    }
+    *failure = Some(Box::new(Error::MinimumInterrupted));
+    match platform.minimum_delay(microseconds) {
+        Ok(()) => {
+            *failure = None;
+            Ok(())
+        }
+        Err(error) => {
+            *failure = Some(Box::new(error.clone()));
+            Err(error)
+        }
+    }
+}
 // SAFETY: Platform's original function/MMIO/timing ownership and serialized
 // context are borrowed for this call. No reference escapes the reset pass.
 unsafe impl<P: Platform> Io for PlatformIo<'_, P> {
     fn read(&mut self, offset: usize) -> Result<u32> {
+        if let Some(error) = self.1.as_deref() {
+            return Err(error.clone());
+        }
         self.0.read32(offset)
     }
     fn write(&mut self, offset: usize, value: u32) -> Result<()> {
+        if let Some(error) = self.1.as_deref() {
+            return Err(error.clone());
+        }
         self.0.write32(offset, value)
     }
     fn delay(&mut self, microseconds: u64) -> Result<()> {
-        wait(self.0, microseconds);
-        Ok(())
-    }
-}
-
-pub(super) fn wait<P: Platform>(platform: &P, microseconds: u64) {
-    let start = platform.now_us();
-    while platform.now_us().wrapping_sub(start) < microseconds {
-        crate::waiting();
-        core::hint::spin_loop();
+        wait(self.0, self.1, microseconds)
     }
 }
 

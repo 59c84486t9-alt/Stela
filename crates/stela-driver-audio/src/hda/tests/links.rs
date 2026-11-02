@@ -37,6 +37,7 @@ fn clock_selection_preserves_other_links() {
             // keeps the aligned DMA backing, and polling is the only model execution.
             let mut controller = unsafe {
                 Controller::new(registers, timer, &mut fixture.allocator, modern_config())
+                    .map_err(|failure| failure.error)
             }
             .unwrap();
             assert_eq!(
@@ -103,8 +104,11 @@ fn invalid_link_preflight() {
         assert!(
             // SAFETY: The bound PCI fixture owns the register model exclusively. fixture
             // keeps the aligned DMA backing, and polling is the only model execution.
-            unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()) }
-                .is_err(),
+            unsafe {
+                Controller::new(registers, timer, &mut fixture.allocator, modern_config())
+                    .map_err(|failure| failure.error)
+            }
+            .is_err(),
             "variant {variant}"
         );
         assert_eq!(
@@ -156,7 +160,7 @@ fn link_failure_restores_power() {
         let result =
             // SAFETY: The bound PCI fixture owns the register model exclusively. fixture
             // keeps the aligned DMA backing, and polling is the only model execution.
-            unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()) };
+            unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()).map_err(|failure|failure.error) };
         let error = match result {
             Err(error) => error,
             Ok(_) => panic!("variant {variant} succeeded"),
@@ -215,7 +219,7 @@ fn dsp_ownership_blocks_reset_and_shutdown() {
     let mut controller =
         // SAFETY: The bound PCI fixture owns the register model exclusively. fixture
         // keeps the aligned DMA backing, and polling is the only model execution.
-        unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()) }
+        unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()).map_err(|failure|failure.error) }
             .unwrap();
     let id = controller
         .allocate_stream(Direction::Playback, pcm(), 128, 2, &mut fixture.allocator)
@@ -273,7 +277,7 @@ fn failed_reinitialize_stales_link_clock() {
         let mut controller =
             // SAFETY: The bound PCI fixture owns the register model exclusively. fixture
             // keeps the aligned DMA backing, and polling is the only model execution.
-            unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()) }
+            unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()).map_err(|failure|failure.error) }
                 .unwrap();
         assert_eq!(
             controller.link_clock(),

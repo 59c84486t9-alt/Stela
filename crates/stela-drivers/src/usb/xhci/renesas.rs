@@ -72,7 +72,7 @@ pub struct Receipt {
 }
 
 fn read<C: ConfigSpace>(config: &mut C, at: u16) -> Result<u8, BlockError> {
-    match config.read8(at) {
+    match config.read8(at).map_err(BlockError::Config)? {
         u8::MAX => Err(BlockError::Unsupported(
             "Renesas PCI firmware interface disappeared",
         )),
@@ -121,8 +121,16 @@ fn wait_bank<C: ConfigSpace>(config: &mut C, clock: Clock, mask: u8) -> Result<(
     }
     Err(BlockError::Timeout)
 }
-fn upload<C: ConfigSpace>(config: &mut C, clock: Clock, bytes: &[u8]) -> Result<(), BlockError> {
-    config.write8(FW_STATUS, ENABLE);
+fn upload<C: ConfigSpace>(
+    config: &mut C,
+    clock: Clock,
+    bytes: &[u8],
+    minimum: &Minimum,
+) -> Result<(), BlockError> {
+    minimum.check()?;
+    config
+        .write8(FW_STATUS, ENABLE)
+        .map_err(BlockError::Config)?;
     if read(config, FW_STATUS)? & ENABLE == 0 {
         return Err(BlockError::Unsupported(
             "Renesas firmware download enable not acknowledged",
@@ -131,15 +139,19 @@ fn upload<C: ConfigSpace>(config: &mut C, clock: Clock, bytes: &[u8]) -> Result<
     for (step, word) in bytes.as_chunks::<4>().0.iter().enumerate() {
         let bank = (step & 1) as u8;
         wait_bank(config, clock, 1 << bank)?;
-        config.write32(
-            if bank == 0 { DATA0 } else { DATA1 },
-            u32::from_le_bytes(*word),
-        );
-        clock.delay(100);
-        config.write8(FW_MSB, 1 << bank);
+        config
+            .write32(
+                if bank == 0 { DATA0 } else { DATA1 },
+                u32::from_le_bytes(*word),
+            )
+            .map_err(BlockError::Config)?;
+        minimum.wait_us(100)?;
+        config
+            .write8(FW_MSB, 1 << bank)
+            .map_err(BlockError::Config)?;
     }
     wait_bank(config, clock, 3)?;
-    config.write8(FW_STATUS, 0);
+    config.write8(FW_STATUS, 0).map_err(BlockError::Config)?;
     for _ in 0..RETRIES {
         let state = read(config, FW_STATUS)?;
         if running(state)? {
@@ -159,15 +171,26 @@ pub fn prepare<C: ConfigSpace>(
     function: &mut Function<C>,
     clock: Clock,
     provider: &dyn firmware::Provider,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
 ) -> Result<Option<Receipt>, Error> {
+    let minimum = Minimum::retain(minimum);
+    prepare_with_minimum(function, clock, provider, &minimum)
+}
+pub(super) fn prepare_with_minimum<C: ConfigSpace>(
+    function: &mut Function<C>,
+    clock: Clock,
+    provider: &dyn firmware::Provider,
+    minimum: &Minimum,
+) -> Result<Option<Receipt>, Error> {
+    minimum.check()?;
     streams::pci_policy(function)?;
     if function.vendor != VENDOR || !matches!(function.device, 0x0014 | 0x0015) {
         return Ok(None);
     }
     let device = function.device;
-    let revision = function.config().read8(8);
+    let revision = function.config().read8(8).map_err(BlockError::Config)?;
     let config = function.config();
-    let rom = config.read16(ROM_STATUS);
+    let rom = config.read16(ROM_STATUS).map_err(BlockError::Config)?;
     if rom == u16::MAX {
         return Err(BlockError::Unsupported("Renesas ROM status inaccessible").into());
     }
@@ -203,7 +226,7 @@ pub fn prepare<C: ConfigSpace>(
             license: p.license.into(),
             embedded_version,
         });
-        if let Err(error) = upload(config, clock, image.bytes()) {
+        if let Err(error) = upload(config, clock, image.bytes(), minimum) {
             return Err(Error::Download {
                 error,
                 image: source,
@@ -211,7 +234,7 @@ pub fn prepare<C: ConfigSpace>(
         }
         *source
     };
-    let version = config.read32(FW_VERSION);
+    let version = config.read32(FW_VERSION).map_err(BlockError::Config)?;
     if version == u32::MAX {
         return Err(BlockError::Unsupported("Renesas firmware version inaccessible").into());
     }
@@ -224,237 +247,4 @@ pub fn prepare<C: ConfigSpace>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::bus::pci::Address;
-    use sha2::{Digest, Sha256};
-
-    struct Model {
-        status: u8,
-        rom: u16,
-        busy: u8,
-        silent: bool,
-        words: [u32; 2],
-        pending: Vec<(u8, u32)>,
-        accepted: Vec<u8>,
-        writes: Vec<(u16, u32, u8)>,
-    }
-    struct Config(Rc<RefCell<Model>>);
-    impl ConfigSpace for Config {
-        fn read32(&self, at: u16) -> u32 {
-            match at {
-                0 => 0x0014_1912,
-                8 => 0x0c03_3003,
-                FW_VERSION => 0x2026 << 8,
-                _ => 0,
-            }
-        }
-        fn read16(&self, at: u16) -> u16 {
-            if at == ROM_STATUS {
-                self.0.borrow().rom
-            } else {
-                (self.read32(at & !3) >> ((at & 2) * 8)) as u16
-            }
-        }
-        fn read8(&self, at: u16) -> u8 {
-            let mut m = self.0.borrow_mut();
-            match at {
-                FW_STATUS => m.status,
-                FW_MSB => {
-                    let value = m.busy;
-                    if !m.silent {
-                        for (_, word) in core::mem::take(&mut m.pending) {
-                            m.accepted.extend_from_slice(&word.to_le_bytes());
-                        }
-                        m.busy = 0;
-                    }
-                    value
-                }
-                _ => (self.read32(at & !3) >> ((at & 3) * 8)) as u8,
-            }
-        }
-        fn write32(&mut self, at: u16, value: u32) {
-            let mut m = self.0.borrow_mut();
-            m.writes.push((at, value, 4));
-            m.words[usize::from(at == DATA1)] = value;
-        }
-        fn write8(&mut self, at: u16, value: u8) {
-            let mut m = self.0.borrow_mut();
-            m.writes.push((at, u32::from(value), 1));
-            match at {
-                FW_STATUS => {
-                    m.status = if value == 0 && m.busy == 0 && !m.accepted.is_empty() {
-                        SUCCESSFUL
-                    } else {
-                        value
-                    }
-                }
-                FW_MSB => {
-                    let bank = u8::from(value == 2);
-                    assert_eq!(m.busy & value, 0);
-                    let word = m.words[usize::from(bank)];
-                    m.pending.push((bank, word));
-                    m.busy |= value;
-                }
-                _ => panic!("unexpected firmware byte write"),
-            }
-        }
-    }
-    fn function(status: u8, rom: u16) -> (Function<Config>, Rc<RefCell<Model>>) {
-        let model = Rc::new(RefCell::new(Model {
-            status,
-            rom,
-            busy: 0,
-            silent: false,
-            words: [0; 2],
-            pending: Vec::new(),
-            accepted: Vec::new(),
-            writes: Vec::new(),
-        }));
-        let f = Function::new(
-            Address {
-                segment: 0,
-                bus: 0,
-                device: 1,
-                function: 0,
-            },
-            Config(model.clone()),
-        )
-        .unwrap();
-        (f, model)
-    }
-    fn bytes() -> Vec<u8> {
-        let mut bytes = vec![0; 4096];
-        for (index, byte) in bytes.iter_mut().enumerate() {
-            *byte = index as u8;
-        }
-        bytes[..2].copy_from_slice(&[0xaa, 0x55]);
-        bytes[4..6].copy_from_slice(&8u16.to_le_bytes());
-        bytes[8..10].copy_from_slice(&0x2026u16.to_le_bytes());
-        bytes
-    }
-    fn catalog(bytes: Vec<u8>) -> firmware::Catalog {
-        firmware::Catalog::from_handoff(vec![firmware::Resource {
-            name: NAME,
-            target: firmware::Target {
-                driver: "usb-xhci-renesas",
-                hardware: "1912:0014",
-                revision: "03",
-                board: None,
-            },
-            provenance: firmware::Provenance {
-                source: "authored model fixture",
-                revision: "1",
-                member: "renesas_usb_fw.mem",
-                license: "test-only",
-            },
-            expected_length: bytes.len(),
-            expected_sha256: Sha256::digest(&bytes).into(),
-            bytes,
-        }])
-        .unwrap()
-    }
-    #[test]
-    fn real_mailbox_words_are_acknowledged_and_exact_metadata_survives_provider_drop() {
-        let bytes = bytes();
-        let (mut f, model) = function(0, 0);
-        let receipt = {
-            let catalog = catalog(bytes.clone());
-            prepare(
-                &mut f,
-                Clock {
-                    ticks_per_microsecond: 1,
-                },
-                &catalog,
-            )
-            .unwrap()
-            .unwrap()
-        };
-        assert_eq!(model.borrow().accepted, bytes);
-        assert_eq!(receipt.firmware_version, 0x2026);
-        let Source::VolatileUpload {
-            embedded_version,
-            sha256,
-            ..
-        } = receipt.source
-        else {
-            panic!()
-        };
-        assert_eq!(embedded_version, 0x2026);
-        assert_eq!(sha256, <[u8; 32]>::from(Sha256::digest(&bytes)));
-        assert_eq!(
-            model
-                .borrow()
-                .writes
-                .iter()
-                .filter(|(_, _, width)| *width == 4)
-                .count(),
-            1024
-        );
-        assert!(
-            model
-                .borrow()
-                .writes
-                .iter()
-                .all(|(at, _, _)| *at != ROM_STATUS)
-        );
-    }
-    #[test]
-    fn rom_presence_never_substitutes_for_firmware_success_and_stale_download_stays_failed() {
-        let empty = firmware::Catalog::from_handoff(vec![]).unwrap();
-        let clock = Clock {
-            ticks_per_microsecond: 1,
-        };
-        let (mut f, model) = function(0, ROM_EXISTS);
-        assert!(matches!(
-            prepare(&mut f, clock, &empty),
-            Err(Error::Firmware(_))
-        ));
-        assert!(model.borrow().writes.is_empty());
-        let (mut f, model) = function(ENABLE, 0);
-        assert!(prepare(&mut f, clock, &catalog(bytes())).is_err());
-        assert!(model.borrow().writes.is_empty());
-        let (mut f, model) = function(0, 0);
-        model.borrow_mut().silent = true;
-        assert!(prepare(&mut f, clock, &catalog(bytes())).is_err());
-        let writes = model.borrow().writes.len();
-        assert_ne!(model.borrow().status & ENABLE, 0);
-        assert!(prepare(&mut f, clock, &catalog(bytes())).is_err());
-        assert_eq!(model.borrow().writes.len(), writes);
-    }
-    #[test]
-    fn acknowledged_resident_images_need_no_download_and_invalid_images_never_publish_enable() {
-        let empty = firmware::Catalog::from_handoff(vec![]).unwrap();
-        for (status, rom, expected) in [
-            (SUCCESSFUL | LOCK, 0, Source::ResidentSram),
-            (0, ROM_EXISTS | u16::from(SUCCESSFUL), Source::ResidentRom),
-        ] {
-            let (mut f, model) = function(status, rom);
-            let receipt = prepare(
-                &mut f,
-                Clock {
-                    ticks_per_microsecond: 1,
-                },
-                &empty,
-            )
-            .unwrap()
-            .unwrap();
-            assert_eq!(receipt.source, expected);
-            assert!(model.borrow().writes.is_empty());
-        }
-        let mut image = bytes();
-        image[4..6].copy_from_slice(&4095u16.to_le_bytes());
-        let (mut f, model) = function(0, 0);
-        assert!(matches!(
-            prepare(
-                &mut f,
-                Clock {
-                    ticks_per_microsecond: 1
-                },
-                &catalog(image)
-            ),
-            Err(Error::Image(_))
-        ));
-        assert!(model.borrow().writes.is_empty());
-    }
-}
+mod tests;

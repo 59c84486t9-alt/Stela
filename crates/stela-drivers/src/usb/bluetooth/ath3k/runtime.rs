@@ -95,6 +95,10 @@ impl core::fmt::Display for Error {
 impl core::error::Error for Error {}
 /// Initialize only a source-listed bcdDevice>1 standard HCI attachment.
 /// Raw upload evidence does not authorize this entry point or infer readiness.
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub fn initialize<B: Io>(hci: &mut Hci<B>, provider: &dyn Provider) -> Result<OwnedReport> {
     if !super::is_runtime_candidate(hci.binding.device()) {
         return Err(Error::Unsupported(
@@ -135,6 +139,10 @@ struct Engine<'a, B: Io> {
     attempt: Attempt,
 }
 impl<B: Io> Engine<'_, B> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn bounded(&self) -> Result<()> {
         if self.hci.io.now_us().wrapping_sub(self.start) >= ATTEMPT_US {
             Err(Error::Timeout)
@@ -142,6 +150,10 @@ impl<B: Io> Engine<'_, B> {
             Ok(())
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn asynchronous(&mut self, packet: Packet) -> Result<()> {
         if self.attempt.asynchronous.len() >= 64 {
             let (Packet::Event(b) | Packet::Acl(b) | Packet::Diagnostic(b)) = packet;
@@ -153,6 +165,10 @@ impl<B: Io> Engine<'_, B> {
         self.attempt.asynchronous.push(packet);
         Ok(())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn command(&mut self, opcode: u16) -> Result<Vec<u8>> {
         self.bounded()?;
         let start = self.hci.io.now_us();
@@ -219,6 +235,10 @@ impl<B: Io> Engine<'_, B> {
             core::hint::spin_loop();
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn run(&mut self, provider: &dyn Provider) -> Result<OwnedReport> {
         self.bounded()?;
         let raw = self

@@ -153,8 +153,9 @@ impl VirtioNet {
         function: &mut Function,
         handoff: &Handoff,
         dma: &mut dyn DmaAllocator,
+        minimum: &dyn crate::bus::pci::power::Timer,
     ) -> Result<Self, BlockError> {
-        let mut transport = Modern::new(function, handoff)?;
+        let mut transport = Modern::new(function, handoff, minimum)?;
         if let Some(message) = handoff.completion {
             transport.signal(function, handoff, message, &[RECEIVE])?;
         }

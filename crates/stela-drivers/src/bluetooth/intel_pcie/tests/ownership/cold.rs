@@ -19,7 +19,7 @@ fn reset_and_original_drain_precede_private_binding() {
     // Keep the actual configuration owner through the attachment's detach.
     // A temporary Function here would quarantine its mapping after this read.
     let mut function = bound.requester.into_function();
-    assert_eq!(function.config().read16(4) & 0x406, 0x402);
+    assert_eq!(function.config().read16(4).unwrap() & 0x406, 0x402);
     // SAFETY: this model admits no mappings or asynchronous users.
     unsafe { bound.attachment.detach() }.unwrap();
     drop(bound.registers);
@@ -58,6 +58,7 @@ fn failed_device_stop_or_boot_ack_never_reaches_root() {
                 requester,
                 registers,
                 clock: CLOCK,
+                minimum: crate::minimum_model::owned(CLOCK),
             })
         }
         .unwrap_or_else(|_| panic!("cold inputs"));
@@ -108,7 +109,11 @@ fn invalid_clock_or_bar_refuses_before_writes() {
         let root = Arc::new(RootState::default());
         let (mut requester, _) = preparing(root.clone());
         if !bad_clock {
-            requester.function_mut().config().write32(0x10, 0x2000_0000);
+            requester
+                .function_mut()
+                .config()
+                .write32(0x10, 0x2000_0000)
+                .unwrap();
         }
         let clock = if bad_clock {
             crate::Clock {
@@ -123,6 +128,7 @@ fn invalid_clock_or_bar_refuses_before_writes() {
                 requester,
                 registers: Registers::new(root.clone()),
                 clock,
+                minimum: crate::minimum_model::owned(clock),
             })
         }
         .err()
@@ -155,6 +161,7 @@ fn register_read_or_effect_then_store_errors_refuse_root_transition() {
                 requester,
                 registers,
                 clock: CLOCK,
+                minimum: crate::minimum_model::owned(CLOCK),
             })
         }
         .unwrap_or_else(|_| panic!("model inputs"));

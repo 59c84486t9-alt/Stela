@@ -14,17 +14,17 @@ const SPREAD: u32 = 1 << 19;
 const HOST_OPERATION: usize = 0x508;
 
 fn update(c: &mut dyn ConfigSpace, at: u16, mask: u32, bits: u32) -> Result<(), BlockError> {
-    if c.read32(0) != ID {
+    if c.read32(0)? != ID {
         return Err(BlockError::Unsupported("GL9767 original PCI identity lost"));
     }
-    let old = c.read32(at);
+    let old = c.read32(at)?;
     if old == u32::MAX {
         return Err(BlockError::Unsupported(
             "GL9767 PCI register is unavailable",
         ));
     }
-    c.write32(at, (old & !mask) | bits);
-    let value = c.read32(at);
+    c.write32(at, (old & !mask) | bits)?;
+    let value = c.read32(at)?;
     if value == u32::MAX || value & mask != bits {
         return Err(BlockError::Unsupported(
             "GL9767 PCI write did not acknowledge",
@@ -61,17 +61,21 @@ pub(in crate::sdhci) fn after_reset(r: &mut dyn Registers) -> Result<(), BlockEr
     mmio(r, HOST_OPERATION, 1, 0)?;
     card_event(r)
 }
-fn pci_reset(c: &mut dyn ConfigSpace, clock: Clock) -> Result<(), BlockError> {
+fn pci_reset(
+    c: &mut dyn ConfigSpace,
+    minimum: &dyn crate::bus::pci::power::Timer,
+) -> Result<(), BlockError> {
+    minimum.check().map_err(BlockError::PciPower)?;
     unlocked(c, |c| {
-        let old = c.read32(0x8e4);
+        let old = c.read32(0x8e4)?;
         if old == u32::MAX {
             return Err(BlockError::Unsupported("GL9767 reset register unavailable"));
         }
         // Reset completion is asynchronous: do not require immediate equality.
-        c.write32(0x8e4, old & !1);
+        c.write32(0x8e4, old & !1)?;
         for _ in 0..5 {
-            clock.delay(1);
-            let value = c.read32(0x8e4);
+            minimum.wait_us(1).map_err(BlockError::PciPower)?;
+            let value = c.read32(0x8e4)?;
             if value != u32::MAX && value & 1 == 0 {
                 return Ok(());
             }
@@ -83,13 +87,15 @@ pub(in crate::sdhci) fn before_reset(
     r: &mut dyn Registers,
     clock: Clock,
     mask: u8,
+    minimum: &dyn crate::bus::pci::power::Timer,
 ) -> Result<(), ClockFailure> {
+    minimum.check().map_err(BlockError::PciPower)?;
     r.check_authority().map_err(ClockFailure::Authority)?;
     gl9755::before_reset(r, clock, mask)?;
     if mask & RESET_ALL != 0 {
-        let reset = pci_reset(r.configuration().map_err(ClockFailure::Authority)?, clock);
-        r.check_authority().map_err(ClockFailure::Authority)?;
+        let reset = pci_reset(r.configuration().map_err(ClockFailure::Authority)?, minimum);
         reset?;
+        r.check_authority().map_err(ClockFailure::Authority)?;
     }
     Ok(())
 }
@@ -97,12 +103,14 @@ pub(super) fn initialize<C: ConfigSpace>(
     f: &mut Function<C>,
     r: &mut dyn Registers,
     clock: Clock,
+    minimum: &dyn crate::bus::pci::power::Timer,
 ) -> Result<(), BlockError> {
+    minimum.check().map_err(BlockError::PciPower)?;
     validate_clock(clock)?;
-    if f.config().read32(0) != ID {
+    if f.config().read32(0)? != ID {
         return Err(BlockError::Unsupported("GL9767 owned PCI identity changed"));
     }
-    let mode = f.config().read32(0x940);
+    let mode = f.config().read32(0x940)?;
     if mode == u32::MAX || mode & 3 != 0 {
         return Err(BlockError::Unsupported(
             "GL9767 active SD Express requires its PCIe child owner",
@@ -110,7 +118,7 @@ pub(super) fn initialize<C: ConfigSpace>(
     }
     pci::runtime_configuration(f, false)?;
     gl9755::before_reset(r, clock, RESET_ALL)?;
-    pci_reset(f.config(), clock)?;
+    pci_reset(f.config(), minimum)?;
     pci::runtime_configuration(f, false)?;
     r.write8(RESET, RESET_ALL);
     if !clock.wait(RESET_US, || r.read8(RESET) & RESET_ALL == 0) {
@@ -127,16 +135,16 @@ pub(super) fn initialize<C: ConfigSpace>(
         )?;
         // The unchanged donor ORs these vendor defaults rather
         // than replacing every field; preserve preexisting PHY bits.
-        let first = c.read32(0x90c);
-        let second = c.read32(0x948);
-        let control = c.read32(0x95c);
-        let zero_cross = c.read32(0x964);
+        let first = c.read32(0x90c)?;
+        let second = c.read32(0x948)?;
+        let control = c.read32(0x95c)?;
+        let zero_cross = c.read32(0x964)?;
         if [first, second, control, zero_cross].contains(&u32::MAX) {
             return Err(BlockError::Unsupported("GL9767 PHY is unavailable"));
         }
         update(c, 0x90c, 3 << 29, 3 << 29)?;
-        c.write32(0x948, second); // Source zero-valued OR still performs this store.
-        if c.read32(0x948) != second {
+        c.write32(0x948, second)?; // Source zero-valued OR still performs this store.
+        if c.read32(0x948)? != second {
             return Err(BlockError::Unsupported(
                 "GL9767 PHY SSC did not acknowledge",
             ));
@@ -154,7 +162,9 @@ pub(in crate::sdhci) fn set_clock(
     base: u32,
     timing: Timing,
     requested: u32,
+    minimum: &dyn crate::bus::pci::power::Timer,
 ) -> Result<u32, ClockFailure> {
+    minimum.check().map_err(BlockError::PciPower)?;
     unlocked(r.configuration().map_err(ClockFailure::Authority)?, |c| {
         update(c, 0x8a0, 1 << 12, 1 << 12)
     })?;
@@ -173,7 +183,7 @@ pub(in crate::sdhci) fn set_clock(
         let (divisor, mut actual) = clock_divisor(version, base, hz)?;
         if hz == 200_000_000 && timing == Timing::Sdr104 && requested >= 205_000_000 {
             let enable = unlocked(r.configuration().map_err(ClockFailure::Authority)?, |c| {
-                let value = c.read32(0x888);
+                let value = c.read32(0x888)?;
                 if value == u32::MAX {
                     return Err(BlockError::Unsupported("GL9767 SSC mailbox unavailable"));
                 }
@@ -191,7 +201,7 @@ pub(in crate::sdhci) fn set_clock(
             unlocked(r.configuration().map_err(ClockFailure::Authority)?, |c| {
                 update(c, PLL, 0xf3ff | DIRECT, 0x246 | DIRECT)
             })?;
-            timer.delay(1_000);
+            minimum.wait_us(1_000).map_err(BlockError::PciPower)?;
             actual = 205_000_000;
         }
         let field = (divisor & 0xff) << 8 | (divisor & 0x300) >> 2;

@@ -264,6 +264,7 @@ fn address_controller_with_capabilities(
         iso::Capabilities::new(0x100, 0, 0)
     };
     let controller = Controller {
+        minimum: crate::usb::xhci::minimum::fixture(clock),
         native_memory: None,
         registers,
         clock,

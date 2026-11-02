@@ -36,6 +36,10 @@ pub(super) struct Bound<R: RetirableRegisters, T: Timer + 'static> {
 
 /// # Safety
 /// As native::attach. No new DMA allocation/publication occurs in this phase.
+#[expect(
+    clippy::result_large_err,
+    reason = "return the original owner and precise failure without allocating during refusal or retirement"
+)]
 pub(super) unsafe fn prepare<R: RetirableRegisters, T: Timer + 'static>(
     inputs: Inputs<R, T>,
 ) -> Result<Bound<R, T>, Failure> {
@@ -62,27 +66,27 @@ pub(super) unsafe fn prepare<R: RetirableRegisters, T: Timer + 'static>(
                 device: function.device,
                 class: function.class,
             })?;
-        if function.config().read32(0)
+        if function.config().read32(0)?
             != u32::from(function.vendor) | u32::from(function.device) << 16
         {
             return Err(Error::ConfigurationEpoch);
         }
         resources.hardware.check_timing()?;
-        let command = function.config().read16(regs::COMMAND);
-        if command == u16::MAX || function.config().read16(regs::STATUS) == u16::MAX {
+        let command = function.config().read16(regs::COMMAND)?;
+        if command == u16::MAX || function.config().read16(regs::STATUS)? == u16::MAX {
             return Err(Error::Device(aqtion::Error::Removed));
         }
         if command & regs::COMMAND_MASTER != 0 {
             return Err(Error::BusMaster(command));
         }
         function
-            .power_up_with_timer(&resources.hardware.timer)
+            .power_up(&resources.hardware.timer)
             .map_err(Error::Power)?;
         let span = resources.hardware.registers.physical_span()?;
-        let low = function.config().read32(0x10);
+        let low = function.config().read32(0x10)?;
         let wide = low & 6 == 4;
         let high = if wide {
-            function.config().read32(0x14)
+            function.config().read32(0x14)?
         } else {
             0
         };
@@ -103,15 +107,15 @@ pub(super) unsafe fn prepare<R: RetirableRegisters, T: Timer + 'static>(
                 bytes: span.bytes(),
             });
         }
-        let command = function.config().read16(regs::COMMAND);
+        let command = function.config().read16(regs::COMMAND)?;
         if command == u16::MAX || command & regs::COMMAND_MASTER != 0 {
             return Err(Error::BusMaster(command));
         }
         function.config().write16(
             regs::COMMAND,
             command | regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE,
-        );
-        let observed = function.config().read16(regs::COMMAND);
+        )?;
+        let observed = function.config().read16(regs::COMMAND)?;
         if observed & 0x406 != 0x402 {
             return Err(Error::BusMaster(observed));
         }

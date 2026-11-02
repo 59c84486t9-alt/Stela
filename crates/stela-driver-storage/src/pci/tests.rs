@@ -3,6 +3,7 @@ use crate::Clock;
 use crate::bus::pci::regs;
 use alloc::{rc::Rc, vec, vec::Vec};
 use core::cell::RefCell;
+mod timer;
 #[test]
 fn owned_pio_activation_never_grants_dma_or_writes_adjacent_pci_status() {
     #[derive(Clone)]
@@ -11,24 +12,30 @@ fn owned_pio_activation_never_grants_dma_or_writes_adjacent_pci_status() {
         writes: Rc<RefCell<Vec<(u16, usize, u32)>>>,
     }
     impl ConfigSpace for Config {
-        fn read8(&self, at: u16) -> u8 {
-            self.bytes.borrow()[usize::from(at)]
+        fn read8(&self, at: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+            Ok(self.bytes.borrow()[usize::from(at)])
         }
-        fn read16(&self, at: u16) -> u16 {
-            let at = usize::from(at);
-            u16::from_le_bytes(self.bytes.borrow()[at..at + 2].try_into().unwrap())
+        fn read16(&self, at: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+            let value = {
+                let at = usize::from(at);
+                u16::from_le_bytes(self.bytes.borrow()[at..at + 2].try_into().unwrap())
+            };
+            Ok(value)
         }
-        fn read32(&self, at: u16) -> u32 {
-            let at = usize::from(at);
-            u32::from_le_bytes(self.bytes.borrow()[at..at + 4].try_into().unwrap())
+        fn read32(&self, at: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+            let value = {
+                let at = usize::from(at);
+                u32::from_le_bytes(self.bytes.borrow()[at..at + 4].try_into().unwrap())
+            };
+            Ok(value)
         }
-        fn write8(&mut self, _: u16, _: u8) {
+        fn write8(&mut self, _: u16, _: u8) -> Result<(), crate::bus::pci::ConfigError> {
             panic!("PIO activation must use actual word stores");
         }
-        fn write32(&mut self, _: u16, _: u32) {
+        fn write32(&mut self, _: u16, _: u32) -> Result<(), crate::bus::pci::ConfigError> {
             panic!("PCI status/control RMW would clear adjacent W1C status");
         }
-        fn write16(&mut self, at: u16, value: u16) {
+        fn write16(&mut self, at: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
             assert!(matches!(at, 0x04 | 0x52 | 0x62 | 0x92 | 0xa2));
             if at == 0x04 {
                 assert_eq!(value & regs::COMMAND_MASTER, 0, "transient DMA grant");
@@ -36,6 +43,8 @@ fn owned_pio_activation_never_grants_dma_or_writes_adjacent_pci_status() {
             self.writes.borrow_mut().push((at, 2, u32::from(value)));
             let at = usize::from(at);
             self.bytes.borrow_mut()[at..at + 2].copy_from_slice(&value.to_le_bytes());
+
+            Ok(())
         }
     }
     let bytes = Rc::new(RefCell::new(vec![0; 256]));
@@ -68,13 +77,13 @@ fn owned_pio_activation_never_grants_dma_or_writes_adjacent_pci_status() {
     )
     .unwrap();
     quiesce_pio(&mut function).unwrap();
-    assert_eq!(function.config().read16(4), 0x401);
+    assert_eq!(function.config().read16(4).unwrap(), 0x401);
     set_pio_command(&mut function, true).unwrap();
     let c = function.config();
-    assert_eq!(c.read16(4), 0x403);
-    assert_eq!(c.read16(6), 0xa010);
-    assert_eq!(c.read16(0x52), 0x80);
-    assert_eq!(c.read16(0x62), 1);
+    assert_eq!(c.read16(4).unwrap(), 0x403);
+    assert_eq!(c.read16(6).unwrap(), 0xa010);
+    assert_eq!(c.read16(0x52).unwrap(), 0x80);
+    assert_eq!(c.read16(0x62).unwrap(), 1);
     assert_eq!(
         &*writes.borrow(),
         &[(4, 2, 0x401), (0x52, 2, 0x80), (0x62, 2, 1), (4, 2, 0x403)]
@@ -251,9 +260,9 @@ fn owned_pio_activation_never_grants_dma_or_writes_adjacent_pci_status() {
     .unwrap();
     quiesce_pio(&mut function).unwrap();
     function
-        .power_up(&Clock {
+        .power_up(&timer::Minimum(Clock {
             ticks_per_microsecond: 1000,
-        })
+        }))
         .unwrap();
     assert_eq!(
         &*writes.borrow(),
@@ -294,9 +303,9 @@ fn owned_pio_activation_never_grants_dma_or_writes_adjacent_pci_status() {
         .unwrap();
         quiesce_pio(&mut function).unwrap();
         function
-            .power_up(&Clock {
+            .power_up(&timer::Minimum(Clock {
                 ticks_per_microsecond: 1000,
-            })
+            }))
             .unwrap();
         assert_eq!(
             &*writes.borrow(),
@@ -359,3 +368,5 @@ fn owned_pio_activation_never_grants_dma_or_writes_adjacent_pci_status() {
     quiesce_pio(&mut function).unwrap();
     assert_eq!(&*writes.borrow(), &[(4, 2, 0x401)]);
 }
+
+mod access_failures;

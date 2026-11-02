@@ -387,6 +387,10 @@ impl Client {
 
 impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// `_iwl_mld_exit_emlsr`, once nothing else is in firmware's hands.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub(super) fn run_emlsr(&mut self, queue: &mut Queue<Q, B>, now: u64) -> Result<(), Error> {
         let client = &mut self.client;
         if !client.emlsr.offered || client.leaving {

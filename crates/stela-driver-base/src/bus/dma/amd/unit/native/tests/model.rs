@@ -99,9 +99,13 @@ unsafe impl MappingPlatform for Registers {
         Ok(())
     }
 }
-struct RegisterResource;
+struct RegisterResource(crate::bus::mmio::owned::model::MappingRetention<Arc<Registers>>);
 // SAFETY: symbolic device span exclusively belongs to this isolated model.
 unsafe impl ResourceBacking for RegisterResource {
+    fn begin_mapping(&self) -> Result<crate::bus::pci::assignment::OpaqueUse, MapError> {
+        self.0.begin_mapping()
+    }
+
     fn physical_span(&self) -> PhysicalSpan {
         PhysicalSpan::new(BASE, 16384).unwrap()
     }
@@ -140,13 +144,27 @@ struct State {
 }
 type Translation = Option<(u64, bool, bool)>;
 type Image = (Vec<u64>, Vec<(u64, Vec<u8>)>);
+/// Cloneable device/data peer only; no affine MMIO assignment controller.
 #[derive(Clone)]
-pub(super) struct Peer {
+pub(super) struct DevicePeer {
     registers: Arc<Registers>,
     state: Arc<Mutex<State>>,
 }
 pub(super) struct Platform {
-    peer: Peer,
+    peer: DevicePeer,
+}
+/// Actual external fixture scope. Native Unit::retire intentionally retires
+/// walker RAM only, not its PCI mappings; default scope loss therefore keeps
+/// the original register allocation/count instead of claiming complete cleanup.
+pub(super) struct Peer {
+    inner: DevicePeer,
+    _mapping_owner: crate::bus::mmio::owned::model::MappingOwner<Arc<Registers>>,
+}
+impl core::ops::Deref for Peer {
+    type Target = DevicePeer;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 struct Ram {
     cpu: NonNull<u8>,
@@ -340,7 +358,7 @@ fn finish_posted(state: &mut State, mut matches: impl FnMut(u16, u16) -> bool) {
         }
     }
 }
-impl Peer {
+impl DevicePeer {
     pub(super) fn post_write(&self, rid: u16, address: u64, value: u32) {
         let (physical, _, write) = self.walk(rid, address).expect("translated pending write");
         assert!(write && physical.is_multiple_of(4));
@@ -590,11 +608,11 @@ pub(super) fn function_with_counters(rid: u16) -> (Function<OwnedConfig>, Arc<Co
         function: (rid & 7) as u8,
     };
     let (mut config, counters) = fixture(address);
-    config.write32(0, 0x7925_14c3);
-    config.write32(4, 0);
-    config.write32(8, 0x0280_0001);
-    config.write32(0x0c, 0);
-    config.write32(0x100, 0);
+    config.write32(0, 0x7925_14c3).unwrap();
+    config.write32(4, 0).unwrap();
+    config.write32(8, 0x0280_0001).unwrap();
+    config.write32(0x0c, 0).unwrap();
+    config.write32(0x100, 0).unwrap();
     (Function::new(address, config).unwrap(), counters)
 }
 pub(super) fn limits() -> Limits {
@@ -642,9 +660,22 @@ pub(super) fn inputs_hardware(
         // SAFETY: the model device, its pages and its domain belong to this test alone; no other
         // driver, worker or DMA touches them.
         unsafe { Authority::isolated_model(registers.clone(), SPACE, Vec::new()) }.unwrap();
+    // SAFETY: SAME original allocated register RAM with no model controller
+    // or inventory backedge. Guard observes only its real retained CPU extent.
+    let mapping_owner = unsafe {
+        crate::bus::mmio::owned::model::MappingOwner::from_owned(registers.clone(), |ram| {
+            if (ram.cpu.as_ptr() as usize).is_multiple_of(4096) {
+                Ok(())
+            } else {
+                Err(crate::bus::pci::assignment::Error::Context)
+            }
+        })
+    };
     let mapping = authority
         .map(
-            Resource::new(Box::new(RegisterResource)),
+            Resource::new(Box::new(RegisterResource(
+                mapping_owner.retention().unwrap(),
+            ))),
             0,
             16384,
             CacheAttribute::Uncached,
@@ -652,16 +683,18 @@ pub(super) fn inputs_hardware(
         )
         .unwrap();
     let (mut config, _) = fixture(ADDRESS);
-    config.write32(0, 0x1234_1022);
-    config.write32(8, 0x0806_0001);
-    config.write32(0x0c, 0);
-    config.write16(6, 1 << 4);
-    config.write8(0x34, 0x40);
-    config.write32(0x40, 0x0f | (3 << 16) | (1 << 19) | (1 << 27));
-    config.write32(0x44, BASE as u32 | 1);
-    config.write32(0x48, 0);
-    config.write32(0x4c, 0);
-    config.write32(0x50, miscellaneous);
+    config.write32(0, 0x1234_1022).unwrap();
+    config.write32(8, 0x0806_0001).unwrap();
+    config.write32(0x0c, 0).unwrap();
+    config.write16(6, 1 << 4).unwrap();
+    config.write8(0x34, 0x40).unwrap();
+    config
+        .write32(0x40, 0x0f | (3 << 16) | (1 << 19) | (1 << 27))
+        .unwrap();
+    config.write32(0x44, BASE as u32 | 1).unwrap();
+    config.write32(0x48, 0).unwrap();
+    config.write32(0x4c, 0).unwrap();
+    config.write32(0x50, miscellaneous).unwrap();
     let function = Function::new(ADDRESS, config).unwrap();
     let mut bytes = vec![0; 88];
     bytes[..4].copy_from_slice(b"IVRS");
@@ -691,7 +724,7 @@ pub(super) fn inputs_hardware(
         Ok(inspection) => inspection,
         Err((error, _)) => panic!("{error:?}"),
     };
-    let peer = Peer {
+    let peer = DevicePeer {
         registers,
         state: Arc::new(Mutex::new(State {
             ram: BTreeMap::new(),
@@ -708,7 +741,15 @@ pub(super) fn inputs_hardware(
             posted: Vec::new(),
         })),
     };
-    (inspection, Platform { peer: peer.clone() }, peer, bytes)
+    (
+        inspection,
+        Platform { peer: peer.clone() },
+        Peer {
+            inner: peer,
+            _mapping_owner: mapping_owner,
+        },
+        bytes,
+    )
 }
 pub(super) fn unit() -> (Unit<Platform>, Peer) {
     let (inspection, platform, peer, bytes) = inputs();

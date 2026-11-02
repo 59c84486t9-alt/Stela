@@ -1,12 +1,13 @@
 //! Real mmap allocation owners kept by opaque pins; PA labels are hosted
 //! model metadata only and never check native physical/cache/device access.
 use super::*;
-use crate::bus::dma::memory::{CacheAttribute, MemoryError, PageBacking, PinnedPages};
+use crate::bus::dma::memory::{CacheAttribute, CpuMapping, MemoryError, PageBacking, PinnedPages};
 use core::{ops::Range, ptr::NonNull};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Case {
     Good,
+    HeldView,
     Missing,
     Oom,
     Logical,
@@ -31,6 +32,7 @@ struct PinScene {
     pins_dropped: Arc<AtomicUsize>,
     marked: AtomicUsize,
     binding: Mutex<Option<(Arc<Binding>, WakeHandle<64>)>>,
+    held_view: Mutex<Option<CpuMapping>>,
 }
 impl PinScene {
     fn runtime(&self) -> Pin<&Runtime<64>> {
@@ -68,6 +70,8 @@ struct Source {
     other: Option<Arc<Box<dyn StackBacking>>>,
     scene: Arc<PinScene>,
     index: usize,
+    last_epoch: AtomicU64,
+    active_epoch: Arc<AtomicU64>,
 }
 // SAFETY: this wrapper owns the original mmap object, not just bounds
 // or a lifetime token. Its Arc keeps both real PROT_NONE guards and RAM alive.
@@ -79,7 +83,8 @@ unsafe impl StackBacking for Source {
     fn guard(&self) -> Range<usize> {
         self.actual.guard()
     }
-    unsafe fn pin_cold_pages(&self) -> Result<PinnedPages, MemoryError> {
+    unsafe fn pin_prepared_pages(&self, epoch: u64) -> Result<PinnedPages, MemoryError> {
+        assert!(epoch != 0);
         self.scene.exports.fetch_add(1, Ordering::Relaxed);
         assert_eq!(self.scene.cpu.model.flags(), 0x202);
         assert_eq!(self.scene.entered.load(Ordering::Acquire), 1);
@@ -94,6 +99,18 @@ unsafe impl StackBacking for Source {
         if self.scene.case == Case::Oom {
             return Err(MemoryError::OutOfMemory);
         }
+        assert!(epoch > self.last_epoch.load(Ordering::Acquire));
+        if self
+            .active_epoch
+            .compare_exchange(0, epoch, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(MemoryError::Unavailable);
+        }
+        let lease = EpochLease {
+            active: self.active_epoch.clone(),
+            epoch,
+        };
         let actual = self.other.as_ref().unwrap_or(&self.actual).clone();
         let range = actual.bounds();
         let bytes = if self.scene.case == Case::Subset {
@@ -117,6 +134,7 @@ unsafe impl StackBacking for Source {
             physical,
             shift,
             dropped: self.scene.pins_dropped.clone(),
+            _epoch: lease,
         };
         let logical = if self.scene.case == Case::Logical {
             bytes - 1
@@ -124,10 +142,28 @@ unsafe impl StackBacking for Source {
             bytes
         };
         let pin = PinnedPages::new(Box::new(view), logical, 1 << shift)?;
+        self.last_epoch.store(epoch, Ordering::Release);
+        if self.scene.case == Case::HeldView {
+            *self.scene.held_view.lock().unwrap() =
+                Some(pin.cpu_mapping(CacheAttribute::WriteBack)?);
+        }
         if self.scene.case == Case::PostStale {
             self.scene.active.store(false, Ordering::Release);
         }
         Ok(pin)
+    }
+}
+struct EpochLease {
+    active: Arc<AtomicU64>,
+    epoch: u64,
+}
+impl Drop for EpochLease {
+    fn drop(&mut self) {
+        assert_eq!(
+            self.active
+                .compare_exchange(self.epoch, 0, Ordering::AcqRel, Ordering::Acquire),
+            Ok(self.epoch)
+        );
     }
 }
 struct View {
@@ -136,6 +172,7 @@ struct View {
     physical: Vec<u64>,
     shift: u8,
     dropped: Arc<AtomicUsize>,
+    _epoch: EpochLease,
 }
 impl Drop for View {
     fn drop(&mut self) {
@@ -181,6 +218,8 @@ fn mappings(f: &Arc<PinScene>, dropped: &Arc<AtomicUsize>) -> Vec<Stack> {
                 other: other.clone(),
                 scene: f.clone(),
                 index,
+                last_epoch: AtomicU64::new(0),
+                active_epoch: Arc::new(AtomicU64::new(0)),
             }))
             .unwrap()
         })
@@ -207,7 +246,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         .unwrap()
         .into_owned()
         .unwrap();
-    let cold = take_cold(owner, &authority);
+    let cold = take_prepared(owner, &authority);
     if f.case == Case::Denied {
         f.active.store(false, Ordering::Release);
     }
@@ -248,7 +287,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             } else {
                 cold
             };
-            cold.cancel(&fresh).unwrap();
+            unsafe { cold.cancel(&fresh) }.unwrap();
             assert_eq!(
                 f.pins_dropped.load(Ordering::Relaxed),
                 usize::from(acquired)
@@ -265,7 +304,10 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         }
         Case::Stale => {
             f.active.store(false, Ordering::Release);
-            assert_eq!(pinned.cancel(&authority), Err(WorkError::Unavailable));
+            assert_eq!(
+                cancellation_error(unsafe { pinned.cancel(&authority) }),
+                WorkError::Unavailable
+            );
         }
         Case::Forget => {
             core::mem::forget(pinned);
@@ -281,10 +323,10 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             drop(authority);
             assert_eq!(r.park_if_blocked().unwrap(), ParkOutcome::Resumed);
             f.active.store(true, Ordering::Release);
-            pinned.cancel(&f.authority()).unwrap();
+            unsafe { pinned.cancel(&f.authority()) }.unwrap();
         }
         _ => {
-            pinned.cancel(&authority).unwrap();
+            unsafe { pinned.cancel(&authority) }.unwrap();
         }
     }
     if matches!(f.case, Case::Drop | Case::Stale | Case::Forget) {
@@ -329,6 +371,7 @@ fn run(case: Case) {
         pins_dropped: Arc::new(AtomicUsize::new(0)),
         marked: AtomicUsize::new(0),
         binding: Mutex::new(None),
+        held_view: Mutex::new(None),
     });
     // SAFETY: same-thread fixture, code and real mmap owners remain held.
     let queue = unsafe { Queue::<64>::new(cpu.clone(), f.clone()) }.unwrap();
@@ -428,3 +471,5 @@ fn pin_abandonment_keeps_owner() {
         assert!(stdout.contains("STELA_COLD_FATAL_RETAINED"));
     }
 }
+
+mod publication;

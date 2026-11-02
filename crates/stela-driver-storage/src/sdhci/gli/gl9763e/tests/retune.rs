@@ -22,6 +22,7 @@ fn fast_card(
     let mut host = Host::new(
         Box::new(owner),
         clock(),
+        crate::sdhci::model::minimum(),
         "explicit MMC retune".into(),
         dma,
         Profile::Gli9763e,

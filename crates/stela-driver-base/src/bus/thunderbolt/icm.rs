@@ -72,6 +72,7 @@ pub struct FirmwareObservation {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    PciConfig(crate::bus::pci::ConfigError),
     Unsupported,
     Identity,
     PciState,
@@ -469,7 +470,7 @@ impl<R: Registers> Host<R> {
         domain: Arc<dyn DmaDomain>,
         address_limit: u64,
     ) -> Result<Self, Error> {
-        let identity = configuration.read32(0);
+        let identity = configuration.read32(0)?;
         if identity == u32::MAX {
             return Err(Error::Identity);
         }
@@ -477,12 +478,12 @@ impl<R: Registers> Host<R> {
         // icm_probe selects the original Ice Lake protocol without the TGL
         // authentication gate; later integrated IDs use icm_tgl_is_supported.
         let authentication_required = !matches!((identity >> 16) as u16, 0x8a0d | 0x8a17);
-        let command = configuration.read16(4);
+        let command = configuration.read16(4)?;
         if command == u16::MAX || command & 6 != 6 {
             return Err(Error::PciState);
         }
-        let class = configuration.read32(8) >> 8;
-        if !matches!(class, 0x088000 | 0x0c0340) || configuration.read8(0x0e) & 0x7f != 0 {
+        let class = configuration.read32(8)? >> 8;
+        if !matches!(class, 0x088000 | 0x0c0340) || configuration.read8(0x0e)? & 0x7f != 0 {
             return Err(Error::Identity);
         }
         let observation = Self::firmware(&*registers, family, authentication_required)?;
@@ -525,6 +526,11 @@ impl<R: Registers> Host<R> {
             tx_released: false,
             rx_released: false,
         })
+    }
+    /// Compare the actual original register owner without lending it or
+    /// certifying engine/IRQ completion. Native lifecycle rejects swapped hosts.
+    pub fn shares_registers(&self, registers: &Arc<R>) -> bool {
+        Arc::ptr_eq(&self.registers, registers)
     }
     pub fn family(&self) -> Family {
         self.family
@@ -746,3 +752,9 @@ impl<R: Registers> Host<R> {
 
 #[cfg(test)]
 mod tests;
+
+impl From<crate::bus::pci::ConfigError> for Error {
+    fn from(error: crate::bus::pci::ConfigError) -> Self {
+        Self::PciConfig(error)
+    }
+}

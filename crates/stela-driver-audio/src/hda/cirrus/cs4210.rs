@@ -5,7 +5,7 @@
 //! GPL version2 combines the upstream GPL-2.0-or-later codec with native HDA.
 use super::super::{CodecGraph, Controller, PinConnection, PinDevice, Registers, Verb, WidgetKind};
 use super::{CirrusCoefficient, CirrusOutputAmplifier, CirrusProfile, GROUP};
-use crate::{Direction, Error, bus::i2c::Timer};
+use crate::{Direction, Error, Timer};
 use alloc::vec::Vec;
 
 pub(super) const ERRATA_COEFFICIENT_WRITES: usize = 5;
@@ -27,6 +27,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<Vec<(u8, u32)>, Error> {
+        self.minimum_guard()?;
         let mut defaults = Vec::new();
         for pin in graph
             .groups
@@ -47,6 +48,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<Vec<CirrusOutputAmplifier>, Error> {
+        self.minimum_guard()?;
         let dac = graph.widget(DAC).ok_or(Error::UnsupportedTopology)?;
         let adc = graph.widget(ADC).ok_or(Error::UnsupportedTopology)?;
         if dac.kind != WidgetKind::Output || adc.kind != WidgetKind::Input {
@@ -60,6 +62,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }])
     }
     fn cs4210_default_pinmux(&mut self, graph: &CodecGraph) -> Result<CirrusCoefficient, Error> {
+        self.minimum_guard()?;
         let vendor = CirrusProfile::Cs4210.vendor();
         let original = self.cirrus_read(graph.address, vendor, DEVICE_CONFIG)?;
         // Unselected source profile has gpio_mask=0 and sense_b=0. Preserve
@@ -75,6 +78,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<Vec<CirrusCoefficient>, Error> {
+        self.minimum_guard()?;
         let vendor = CirrusProfile::Cs4210.vendor();
         // Probe pinmux precedes processing enable and the source core recipe.
         self.cs4210_default_pinmux(graph)?;
@@ -105,6 +109,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         graph: &CodecGraph,
         code: u8,
     ) -> Result<CirrusSpeakerBoost, Error> {
+        self.minimum_guard()?;
         if code > BOOST_MASK as u8 {
             return Err(Error::InvalidFormat);
         }

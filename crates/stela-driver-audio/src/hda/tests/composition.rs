@@ -70,17 +70,31 @@ impl PciModel {
     }
 }
 impl ConfigSpace for PciModel {
-    fn read32(&self, offset: u16) -> u32 {
-        self.0.borrow().words[usize::from(offset / 4)]
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        Ok(self.0.borrow().words[usize::from(offset / 4)])
     }
-    fn write32(&mut self, offset: u16, value: u32) {
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         self.write(offset, 4, value);
+
+        Ok(())
     }
-    fn write16(&mut self, offset: u16, value: u16) {
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
         self.write(offset, 2, u32::from(value));
+
+        Ok(())
     }
-    fn write8(&mut self, offset: u16, value: u8) {
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
         self.write(offset, 1, u32::from(value));
+
+        Ok(())
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
     }
 }
 struct PoweredRegisters {
@@ -130,7 +144,7 @@ type Hardware = (
     Rc<RefCell<PciState>>,
 );
 type NativeController<'a> =
-    Controller<pci::PciRegisters<'a, PoweredRegisters, PciModel>, ModelClock>;
+    Controller<pci::PciRegisters<PoweredRegisters, &'a mut Function<PciModel>>, ModelClock>;
 
 fn hardware() -> Hardware {
     let model = realtek_desktop_model(0x10ec_0662);
@@ -199,7 +213,11 @@ fn claim<'a>(
     .unwrap();
     let config = registers.config();
     // SAFETY: same symbolic function, BAR and unique DMA RAM.
-    unsafe { Controller::new(registers, clock, &mut fixture.allocator, config) }.unwrap()
+    unsafe {
+        Controller::new(registers, clock, &mut fixture.allocator, config)
+            .map_err(|failure| failure.error)
+    }
+    .unwrap()
 }
 fn routes<R: Registers, T: Timer>(
     c: &mut Controller<R, T>,

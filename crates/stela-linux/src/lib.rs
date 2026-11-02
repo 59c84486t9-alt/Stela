@@ -15,6 +15,8 @@ pub mod catalogue;
 #[cfg(feature = "kernel")]
 pub mod client;
 #[cfg(all(feature = "kernel", target_arch = "x86_64"))]
+pub mod firmware;
+#[cfg(all(feature = "kernel", target_arch = "x86_64"))]
 pub mod function;
 #[cfg(feature = "kernel")]
 pub mod heap;
@@ -33,7 +35,11 @@ pub mod resources;
 #[cfg(all(feature = "kernel", target_arch = "x86_64"))]
 pub mod service;
 #[cfg(all(feature = "kernel", target_arch = "x86_64"))]
+pub mod srcu;
+#[cfg(all(feature = "kernel", target_arch = "x86_64"))]
 pub mod task;
+#[cfg(all(feature = "kernel", target_arch = "x86_64"))]
+pub mod threads;
 
 #[cfg(feature = "kernel")]
 #[unsafe(no_mangle)]

@@ -3,8 +3,8 @@
 //! This is an access/lifetime boundary, not a host bridge, driver registry or
 //! DMA attachment. Its unsafe producer must keep the real exclusion owner.
 use super::{
-    Address, EcamWindow, Function,
-    owned::{ConfigError, ConfigRetention, OwnedConfig},
+    Address, ConfigError, ConfigFailure, EcamWindow, Function,
+    owned::{ConfigRetention, OwnedConfig},
 };
 use crate::bus::dma::{
     mapping::{DmaDomain, DmaError},
@@ -107,6 +107,10 @@ impl NativeFunction {
     /// # Safety
     /// As for `attach`; the stopped requester's original engine/IRQ/coherency
     /// grant remains current until the remapper consumes the binding.
+    #[expect(
+        clippy::result_large_err,
+        reason = "native refusal returns the same function and original exclusion without allocation"
+    )]
     pub unsafe fn attach_stopped(
         requester: super::requester::StoppedRequester,
         exclusion: Box<dyn Any>,
@@ -136,6 +140,10 @@ impl NativeFunction {
     /// or reset worker may coexist. All methods and final retirement obey the
     /// mapping's process/CPU context. Observed IDs grant none of this.
     /// No DMA domain, coherency, engine stop or topology is inferred here.
+    #[expect(
+        clippy::result_large_err,
+        reason = "native refusal returns the same function and original exclusion without allocation"
+    )]
     pub unsafe fn attach(
         mut function: Function<OwnedConfig>,
         exclusion: Box<dyn Any>,
@@ -151,7 +159,7 @@ impl NativeFunction {
             Ok(value) => value,
             Err(error) => {
                 return Err((
-                    Error::Config(ConfigError::Mapping(error)),
+                    Error::Config(ConfigError::before_effect(ConfigFailure::Mapping(error))),
                     (function, exclusion),
                 ));
             }
@@ -186,7 +194,7 @@ impl NativeFunction {
         }
         self.retention
             .check_live()
-            .map_err(|e| Error::Config(ConfigError::Mapping(e)))?;
+            .map_err(|e| Error::Config(ConfigError::before_effect(ConfigFailure::Mapping(e))))?;
         if let Some((domain, generation)) = &*self.bound {
             let actual = domain
                 .check_current_configuration(&self.function.config)
@@ -258,9 +266,9 @@ impl NativeFunction {
             if observe(self.function.config())? != self.description {
                 return Err(Error::IdentityChanged);
             }
-            self.retention
-                .check_live()
-                .map_err(|error| Error::Config(ConfigError::Mapping(error)))
+            self.retention.check_live().map_err(|error| {
+                Error::Config(ConfigError::before_effect(ConfigFailure::Mapping(error)))
+            })
         })();
         self.latch(result)
     }

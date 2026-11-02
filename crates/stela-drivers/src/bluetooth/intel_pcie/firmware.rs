@@ -63,6 +63,10 @@ struct Native<'a, P: Platform> {
     received_bytes: usize,
 }
 impl<P: Platform> Native<'_, P> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn finish<T>(&mut self, result: Result<T, intel::Error>) -> Result<T, intel::Error> {
         // send/poll/D0 can queue complete packets before a later fault. Closing
         // does not erase them. Transfer the final batch on every exit and apply

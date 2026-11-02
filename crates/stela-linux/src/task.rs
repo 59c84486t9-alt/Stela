@@ -4,7 +4,11 @@
 //! The normal/WW and original RT mutex adapters supply wake/signal/I/O effects.
 //! NORMAL nice, FIFO and inherited ranks commit against retained job identities
 //! on the same checked queue; native IRQ delivery remains the service's owner.
+mod factory;
+mod native;
+pub mod runtime;
 use alloc::sync::Arc;
+mod data;
 use core::{
     cell::UnsafeCell,
     ffi::c_void,
@@ -13,6 +17,7 @@ use core::{
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
+pub(crate) use data::StoppedTaskData;
 use stela_driver_base::platform::work::scheduling::{BasePolicy, Snapshot};
 use stela_driver_base::platform::work::{
     ContextId, LeaveReason, ParkOutcome, Runtime, SwitchBinding, TaskContext, WakeHandle, WorkError,
@@ -60,9 +65,16 @@ struct ScopeOps {
     yield_now: unsafe extern "C" fn(*mut c_void) -> i32,
     reschedule: unsafe extern "C" fn(*mut c_void) -> i32,
     reschedule_requested: unsafe extern "C" fn(*mut c_void) -> bool,
+    terminate: unsafe extern "C" fn(*mut c_void) -> !,
 }
 #[repr(C)]
 struct CTask {
+    _opaque: [u8; 0],
+}
+/// Opaque synchronous birth from the actual original allocator source. Only
+/// the native source callback receives it; no definition/raw-task constructor.
+#[repr(C)]
+pub(crate) struct OriginalBirth {
     _opaque: [u8; 0],
 }
 unsafe extern "C" {
@@ -71,6 +83,39 @@ unsafe extern "C" {
     fn stela_linux_task_stack_alignment() -> usize;
     fn stela_linux_task_stack_guard() -> usize;
     fn stela_linux_task_allocate() -> *mut CTask;
+    fn stela_linux_task_initial_allocate(
+        owner: *const crate::owner::RawOwner,
+        pgd: *mut c_void,
+        result: *mut *mut CTask,
+    ) -> i32;
+    fn stela_linux_task_child_allocate(
+        owner: *const crate::owner::RawOwner,
+        birth: *mut OriginalBirth,
+        result: *mut *mut CTask,
+    ) -> i32;
+    fn stela_linux_task_initialize_resources(
+        task: *mut CTask,
+        owner: *const crate::owner::RawOwner,
+    ) -> i32;
+    fn stela_linux_task_start_threads(
+        task: *mut CTask,
+        owner: *const crate::owner::RawOwner,
+    ) -> i32;
+    fn stela_linux_task_reap_source(
+        task: *mut CTask,
+        owner: *const crate::owner::RawOwner,
+        generation: u64,
+    ) -> i32;
+    fn stela_linux_task_join_source(
+        task: *mut CTask,
+        owner: *const crate::owner::RawOwner,
+        generation: u64,
+    ) -> i32;
+    fn stela_linux_task_release_original(
+        task: *mut CTask,
+        owner: *const crate::owner::RawOwner,
+        generation: u64,
+    ) -> i32;
     fn stela_linux_task_attach(
         task: *mut CTask,
         context: *const TaskContext,
@@ -82,6 +127,8 @@ unsafe extern "C" {
     fn stela_linux_task_arrive(task: *mut CTask, context: *const TaskContext, new_job: bool)
     -> i32;
     fn stela_linux_task_complete(task: *mut CTask, context: *const TaskContext) -> i32;
+    fn stela_linux_task_terminal_prepare(task: *mut CTask, context: *const TaskContext) -> i32;
+    fn stela_linux_task_terminal_successor(task: *mut CTask, context: *const TaskContext) -> i32;
     fn stela_linux_task_detach(task: *mut CTask, context: *const TaskContext) -> i32;
     fn stela_linux_task_release(task: *mut CTask);
     fn stela_linux_task_scope_begin(
@@ -117,6 +164,31 @@ pub fn quarantined() -> u64 {
     QUARANTINED.load(Ordering::Relaxed)
 }
 
+/// A refused/partial initial claim retains the actual root allocation/code.
+/// No reset, C initial-object finalization or mount-lifetime release is proved.
+pub struct InitialFailure {
+    pub error: ResourceBootstrapError,
+    _data_backing: Option<ManuallyDrop<Arc<dyn crate::threads::TaskDataBacking>>>,
+    _data_preparation: Option<data::PreparationFailure>,
+    _root: ManuallyDrop<Arc<dyn crate::threads::OriginalKernelRoot>>,
+    _execution: ManuallyDrop<crate::kernel::ExecutionPin>,
+}
+/// Failure retains original callback/code/root scope; this is NOT a native
+/// cancellation/no-publication receipt and cannot authorize source cleanup.
+pub(crate) struct ChildMetadataFailure {
+    pub error: ResourceBootstrapError,
+    _data_backing: Option<ManuallyDrop<Arc<dyn crate::threads::TaskDataBacking>>>,
+    _data_preparation: Option<data::PreparationFailure>,
+    _execution: ManuallyDrop<crate::kernel::ExecutionPin>,
+}
+
+/// Original C initialization status, not a completion/admission receipt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourceBootstrapError {
+    Work(WorkError),
+    Native(i32),
+}
+
 /// Keeps the C task independently of a per-enter borrowed service owner.
 /// The first immutable waker validates CPU/IRQ/RSP before C state access;
 /// renew_current obtains the existing job ticket on stack reuse.
@@ -127,6 +199,9 @@ pub struct TaskBinding<const N: usize> {
     published: AtomicBool,
     detached: AtomicBool,
     released: bool,
+    initial_root: Option<ManuallyDrop<Arc<dyn crate::threads::OriginalKernelRoot>>>,
+    _source_execution: Option<ManuallyDrop<crate::kernel::ExecutionPin>>,
+    source_data: Option<Arc<data::SourceData>>,
 }
 // SAFETY: no foreign CPU mutates the C task or first waker. Runtime
 // identity is checked before C entry; publication is single-writer release/
@@ -155,6 +230,7 @@ impl<const N: usize> TaskBinding<N> {
         yield_now: Self::yield_now,
         reschedule: Self::reschedule,
         reschedule_requested: Self::reschedule_requested,
+        terminate: Self::terminate,
     };
 
     /// Allocate original task metadata before entering a Linux owner.
@@ -182,7 +258,328 @@ impl<const N: usize> TaskBinding<N> {
             published: AtomicBool::new(false),
             detached: AtomicBool::new(false),
             released: false,
+            initial_root: None,
+            _source_execution: None,
+            source_data: None,
         }))
+    }
+
+    /// Claim the exact original init_task and its retained native initial-mm
+    /// root. This is explicit pre-lifecycle identity, not initialized resource,
+    /// supervisor/kthreadd, SRCU or original-kthread readiness.
+    ///
+    /// # Safety
+    /// Cold canonical KernelOwner, before any previous task/WQ/body admission.
+    /// Actual native CPU/root/code and fixed canonical metadata heap are kept;
+    /// heap allocation here is a bounded native leaf with no root change,
+    /// callback reentry, continuation switch or original resource wait. The
+    /// caller keeps this kernel for the mount, including failure. Root backing
+    /// comes from the exact original root owner, never a numeric CR3/address.
+    /// Bind this record only to the actual reserved persistent Service job;
+    /// it cannot complete/detach/release as a bare reusable continuation.
+    pub unsafe fn new_initial<P: crate::threads::KernelThreadPlatform>(
+        kernel: &crate::kernel::KernelOwner<P, N>,
+        root: Arc<dyn crate::threads::OriginalKernelRoot>,
+    ) -> Result<Arc<Self>, InitialFailure> {
+        let root = ManuallyDrop::new(root);
+        let execution = ManuallyDrop::new(kernel.execution());
+        let backing = match kernel.platform().task_data_backing() {
+            Ok(backing) => ManuallyDrop::new(backing),
+            Err(error) => {
+                return Err(InitialFailure {
+                    error: ResourceBootstrapError::Work(error),
+                    _data_backing: None,
+                    _data_preparation: None,
+                    _root: root,
+                    _execution: execution,
+                });
+            }
+        };
+        let mut data_preparation = ManuallyDrop::new(None);
+        // SAFETY: one fresh actual segment, bounded source metadata only;
+        // actual backing is kept before every C claim/accepted projection.
+        let result = unsafe {
+            kernel.platform().with_process(|process| {
+                let pgd = root.pgd(process).map_err(ResourceBootstrapError::Work)?;
+                let mut raw = core::ptr::null_mut();
+                let value = stela_linux_task_initial_allocate(kernel.raw(), pgd.as_ptr(), &mut raw);
+                if value != 0 {
+                    return Err(ResourceBootstrapError::Native(value));
+                }
+                let task = NonNull::new(raw)
+                    .ok_or(ResourceBootstrapError::Work(WorkError::CorruptContext))?;
+                let source_data = match data::SourceData::prepare(
+                    task,
+                    kernel.raw(),
+                    crate::threads::TaskDataStorage::InitialImage,
+                    &backing,
+                ) {
+                    Ok(data) => data,
+                    Err(failure) => {
+                        let error = failure.error;
+                        *data_preparation = Some(failure);
+                        return Err(error);
+                    }
+                };
+                Ok((task, source_data))
+            })
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => Err(ResourceBootstrapError::Work(error)),
+        };
+        let (task, source_data) = match result {
+            Ok(pair) => pair,
+            Err(error) => {
+                return Err(InitialFailure {
+                    error,
+                    _data_backing: Some(backing),
+                    _data_preparation: ManuallyDrop::into_inner(data_preparation),
+                    _root: root,
+                    _execution: execution,
+                });
+            }
+        };
+        drop(ManuallyDrop::into_inner(backing));
+        Ok(Arc::new(Self {
+            task,
+            first: UnsafeCell::new(MaybeUninit::uninit()),
+            target: UnsafeCell::new(MaybeUninit::uninit()),
+            published: AtomicBool::new(false),
+            detached: AtomicBool::new(false),
+            released: false,
+            initial_root: Some(root),
+            _source_execution: Some(execution),
+            source_data: Some(source_data),
+        }))
+    }
+
+    /// Consume one opaque actual original allocation birth into metadata.
+    /// It grants no child/current, native stack or runnable publication.
+    ///
+    /// # Safety
+    /// Called only by this kernel's original dup_task_struct stack-allocation
+    /// callback, with the synchronous genuine source birth pointer. Never
+    /// fabricate/retain that constructor-frame pointer, pass an arbitrary task
+    /// descriptor or enter bare. Caller keeps source/kernel and native Runtime
+    /// mount control; one bounded metadata operation only, no resource waits.
+    /// Native refusal/cancellation/exposure ownership remains independently
+    /// required before original C can return an allocation/fork error.
+    pub(crate) unsafe fn new_child<P: crate::threads::KernelThreadPlatform>(
+        kernel: &crate::kernel::KernelOwner<P, N>,
+        birth: NonNull<OriginalBirth>,
+    ) -> Result<Arc<Self>, ChildMetadataFailure> {
+        let execution = ManuallyDrop::new(kernel.execution());
+        let backing = match kernel.platform().task_data_backing() {
+            Ok(backing) => ManuallyDrop::new(backing),
+            Err(error) => {
+                return Err(ChildMetadataFailure {
+                    error: ResourceBootstrapError::Work(error),
+                    _data_backing: None,
+                    _data_preparation: None,
+                    _execution: execution,
+                });
+            }
+        };
+        let mut data_preparation = ManuallyDrop::new(None);
+        // SAFETY: one fresh actual segment, bounded source metadata only;
+        // actual backing is kept before every C claim/accepted projection.
+        let result = unsafe {
+            kernel.platform().with_process(|_process| {
+                let mut raw = core::ptr::null_mut();
+                let value = stela_linux_task_child_allocate(kernel.raw(), birth.as_ptr(), &mut raw);
+                if value != 0 {
+                    return Err(ResourceBootstrapError::Native(value));
+                }
+                let task = NonNull::new(raw)
+                    .ok_or(ResourceBootstrapError::Work(WorkError::CorruptContext))?;
+                let source_data = match data::SourceData::prepare(
+                    task,
+                    kernel.raw(),
+                    crate::threads::TaskDataStorage::AllocatedTask,
+                    &backing,
+                ) {
+                    Ok(data) => data,
+                    Err(failure) => {
+                        let error = failure.error;
+                        *data_preparation = Some(failure);
+                        return Err(error);
+                    }
+                };
+                Ok((task, source_data))
+            })
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => Err(ResourceBootstrapError::Work(error)),
+        };
+        let (task, source_data) = match result {
+            Ok(pair) => pair,
+            Err(error) => {
+                return Err(ChildMetadataFailure {
+                    error,
+                    _data_backing: Some(backing),
+                    _data_preparation: ManuallyDrop::into_inner(data_preparation),
+                    _execution: execution,
+                });
+            }
+        };
+        drop(ManuallyDrop::into_inner(backing));
+        Ok(Arc::new(Self {
+            task,
+            first: UnsafeCell::new(MaybeUninit::uninit()),
+            target: UnsafeCell::new(MaybeUninit::uninit()),
+            published: AtomicBool::new(false),
+            detached: AtomicBool::new(false),
+            released: false,
+            initial_root: None,
+            _source_execution: Some(execution),
+            source_data: Some(source_data),
+        }))
+    }
+
+    /// Private structural observation for the canonical startup owner only.
+    /// The actual C claim, native Service-only bind and source current checks
+    /// independently authenticate every operation; this is no current grant.
+    pub(crate) fn original_initial(&self) -> bool {
+        self.initial_root.is_some() && self._source_execution.is_some()
+    }
+
+    /// Execute selected original resource roots on this actual original
+    /// Initial Service task. This is NOT full runtime/workqueue/SRCU Ready.
+    ///
+    /// # Safety
+    /// Inside this binding's real run_scoped canonical owner, after permanent
+    /// native heap/image/canonical page catalogue/CPU topology/time/timer/IRQ
+    /// metadata producers are genuinely installed and retained. No transient
+    /// EnteredProcess/RefCell borrow or native queue lock may span original C
+    /// resource code: it may allocate, synchronize or park. Source providers
+    /// must be the exact original helpers, not absent-symbol success stubs.
+    /// Any partial refusal/unwind retains this binding/kernel/root/code graph;
+    /// original global initialization is one-shot and cannot be retried/reset.
+    pub unsafe fn initialize_resources<P: crate::threads::KernelThreadPlatform>(
+        &self,
+        kernel: &crate::kernel::KernelOwner<P, N>,
+    ) -> Result<(), ResourceBootstrapError> {
+        if self.initial_root.is_none() {
+            return Err(ResourceBootstrapError::Work(WorkError::Unavailable));
+        }
+        // SAFETY: caller provides this actual Initial current/scope and all
+        // real native roots. C independently authenticates exact binding and
+        // canonical owner before any original helper or phase publication.
+        let value =
+            unsafe { stela_linux_task_initialize_resources(self.task.as_ptr(), kernel.raw()) };
+        if value == 0 {
+            Ok(())
+        } else {
+            Err(ResourceBootstrapError::Native(value))
+        }
+    }
+
+    /// Create genuine source PID1 supervisor and PID2 kthreadd through original
+    /// copy_process and the SAME native child factory. Publication is distinct
+    /// from their actual execution, original WQ progress or joined FullReady.
+    /// # Safety
+    /// This exact Initial is current in its retained source scope after real
+    /// initialize_resources. The actual native scheduler Domain/fork factory,
+    /// original root/provider/code graph and permanent supervisor request owner
+    /// are installed before calling. No transient EnteredProcess/RefCell/queue
+    /// borrow may span original clone/completion code or resource waits.
+    pub unsafe fn start_threads<P: crate::threads::KernelThreadPlatform>(
+        &self,
+        kernel: &crate::kernel::KernelOwner<P, N>,
+    ) -> Result<(), ResourceBootstrapError> {
+        if self.initial_root.is_none() {
+            return Err(ResourceBootstrapError::Work(WorkError::Unavailable));
+        }
+        // SAFETY: caller supplies genuine Initial and installed typed producer;
+        // C independently verifies source current before original effects.
+        match unsafe { stela_linux_task_start_threads(self.task.as_ptr(), kernel.raw()) } {
+            0 => Ok(()),
+            value => Err(ResourceBootstrapError::Native(value)),
+        }
+    }
+
+    /// # Safety
+    /// Private published-child caller checked this EXACT native/page owner's
+    /// genuine physical-return receipt; source supervisor is a different real
+    /// original current. No transient native permit or RefCell borrow spans
+    /// this potentially waiting C source disposal. Observer callbacks only
+    /// record/wake and may not borrow/mutate the owned Child being disposed.
+    unsafe fn reap_source<P: crate::threads::KernelThreadPlatform>(
+        &self,
+        kernel: &crate::kernel::KernelOwner<P, N>,
+        generation: u64,
+    ) -> Result<(), ResourceBootstrapError> {
+        // SAFETY: exact actual native receipt and real source context above.
+        match unsafe { stela_linux_task_reap_source(self.task.as_ptr(), kernel.raw(), generation) }
+        {
+            0 => Ok(()),
+            value => Err(ResourceBootstrapError::Native(value)),
+        }
+    }
+    /// # Safety
+    /// Source scheduler references released through reap_source, actual source
+    /// supervisor/current, no transient native borrow over original rcu_barrier.
+    /// All original producer/code owners remain retained. EAGAIN means actual
+    /// external source refs still exist; it grants no descriptor/pin retirement.
+    unsafe fn join_source<P: crate::threads::KernelThreadPlatform>(
+        &self,
+        kernel: &crate::kernel::KernelOwner<P, N>,
+        generation: u64,
+    ) -> Result<(), ResourceBootstrapError> {
+        // SAFETY: caller provides true source context and exact retained record.
+        match unsafe { stela_linux_task_join_source(self.task.as_ptr(), kernel.raw(), generation) }
+        {
+            0 => Ok(()),
+            value => Err(ResourceBootstrapError::Native(value)),
+        }
+    }
+
+    /// # Safety
+    /// Consuming caller owns the private actual native/page completed-cancel or
+    /// final-release receipt, and has joined every C/native callback tail,
+    /// producer/target and binding. Actual original source current now owns this
+    /// final bounded metadata free; no physical stack permission is inferred.
+    unsafe fn release_original<P: crate::threads::KernelThreadPlatform>(
+        self: Arc<Self>,
+        kernel: &crate::kernel::KernelOwner<P, N>,
+        generation: u64,
+    ) -> Result<(), Arc<Self>> {
+        if self.initial_root.is_some()
+            || self._source_execution.is_none()
+            || (self.published.load(Ordering::Acquire) && !self.detached.load(Ordering::Acquire))
+        {
+            return Err(self);
+        }
+        if let Some(data) = &self.source_data {
+            if !self.published.load(Ordering::Acquire) {
+                // SAFETY: existing private affine NoPublication caller receipt,
+                // not !published/Arc counts, is the actual native proof.
+                if unsafe { data.close_unpublished(kernel.raw()) }.is_err() {
+                    return Err(self);
+                }
+            } else if data.phase.load(Ordering::Acquire) != data::FINISHED {
+                return Err(self); // real stopped/source-ref tails still owed
+            }
+        }
+        let mut this = Arc::try_unwrap(self)?;
+        // SAFETY: unique metadata + caller's actual affine release/closure
+        // receipt; C independently refuses every live source/callback phase.
+        let value = unsafe {
+            stela_linux_task_release_original(this.task.as_ptr(), kernel.raw(), generation)
+        };
+        if value != 0 {
+            return Err(Arc::new(this));
+        }
+        this.released = true;
+        // Free completed C metadata BEFORE releasing its actual same-Queue
+        // executable/root retention; KernelOwner itself remains mounted.
+        if let Some(mut execution) = this._source_execution.take() {
+            // SAFETY: real producer/source/native tails and C free returned.
+            unsafe { ManuallyDrop::drop(&mut execution) };
+        }
+        Ok(())
     }
 
     /// Attach only to this current continuation, before Linux entry.
@@ -190,6 +587,9 @@ impl<const N: usize> TaskBinding<N> {
     pub fn bind_current(self: &Arc<Self>, runtime: Pin<&Runtime<N>>) -> Result<(), WorkError> {
         if self.published.load(Ordering::Acquire) {
             return Err(WorkError::Busy);
+        }
+        if self.initial_root.is_some() && !runtime.service_current()? {
+            return Err(WorkError::Unavailable);
         }
         let handle = runtime.bind_current(self.clone())?;
         // SAFETY: one successful Runtime attachment owns this same-CPU initial
@@ -365,6 +765,13 @@ impl<const N: usize> TaskBinding<N> {
         }
         Ok(())
     }
+    unsafe extern "C" fn terminate(scope: *mut c_void) -> ! {
+        // SAFETY: run_scoped retained this actual pinned shared Runtime scope.
+        // Only genuine original do_task_dead reaches here; skipped wrappers
+        // own no Rust data/guards/process permit. Core invokes distinct source
+        // prepare then physically switches and joins on actual dispatcher.
+        unsafe { (&*scope.cast::<Scope<'_, N>>()).runtime.terminate_current() }
+    }
     unsafe extern "C" fn park(scope: *mut c_void) -> i32 {
         // SAFETY: run_scoped keeps this pinned shared Runtime borrow until C
         // returns, including the suspended stack and borrowed owners.
@@ -424,6 +831,9 @@ impl<const N: usize> TaskBinding<N> {
     /// process CPU outside IRQ and Linux entry, after native flags restoration.
     /// Detach's unsafe quiescence promise is real, not inferred from Arc counts.
     pub unsafe fn release_quiescent(self: Arc<Self>) -> Result<(), Arc<Self>> {
+        if self.initial_root.is_some() || self._source_execution.is_some() {
+            return Err(self); // Original source records have distinct affine finalization.
+        }
         if self.published.load(Ordering::Acquire) && !self.detached.load(Ordering::Acquire) {
             return Err(self);
         }
@@ -442,9 +852,24 @@ struct Scope<'a, const N: usize> {
 // Each C hook is transactional before leave or bounded after committed arrival;
 // no drain/allocator/final release occurs in any hook. C copies view metadata.
 unsafe impl<const N: usize> SwitchBinding for TaskBinding<N> {
+    fn execution_publication(
+        &self,
+        context: &TaskContext,
+    ) -> Result<Option<Arc<dyn stela_driver_base::platform::work::ExecutionPublication>>, WorkError>
+    {
+        match &self.source_data {
+            Some(data) => data.configure(context).map(Some),
+            None if self._source_execution.is_none() && self.initial_root.is_none() => Ok(None),
+            None => Err(WorkError::Unavailable),
+        }
+    }
+
     unsafe fn attach(&self, context: &TaskContext) -> Result<(), WorkError> {
         if self.published.load(Ordering::Acquire) || self.detached.load(Ordering::Acquire) {
             return Err(WorkError::Busy);
+        }
+        if let Some(data) = &self.source_data {
+            data.attachable(context)?;
         }
         // SAFETY: initial stack hook precedes initial WakeHandle publication.
         status(unsafe {
@@ -454,7 +879,11 @@ unsafe impl<const N: usize> SwitchBinding for TaskBinding<N> {
                 &Self::OPS,
                 self as *const Self as *mut c_void,
             )
-        })
+        })?;
+        if let Some(data) = &self.source_data {
+            data.attached(context);
+        }
+        Ok(())
     }
     unsafe fn still_blocked(&self, context: &TaskContext) -> Result<bool, WorkError> {
         self.validate(context)?;
@@ -489,6 +918,21 @@ unsafe impl<const N: usize> SwitchBinding for TaskBinding<N> {
         self.validate(context)?;
         // SAFETY: outgoing real stack; C refuses unless process exit/scope ended.
         status(unsafe { stela_linux_task_complete(self.task.as_ptr(), context) })
+    }
+    unsafe fn terminal_prepare(&self, context: &TaskContext) -> Result<(), WorkError> {
+        self.validate(context)?;
+        // SAFETY: same real dying current/IF0 and retained original child;
+        // resource fields may be gone, no ordinary current is manufactured.
+        status(unsafe { stela_linux_task_terminal_prepare(self.task.as_ptr(), context) })
+    }
+    unsafe fn terminal_successor(&self, context: &TaskContext) -> Result<(), WorkError> {
+        self.first()?.check_process()?;
+        if self.first()?.context_id().get() != context.context_id {
+            return Err(WorkError::CorruptContext);
+        }
+        // SAFETY: Core supplied true off-all-stacks native successor/IF0 and
+        // exact retained source binding; C only records closure/notification.
+        status(unsafe { stela_linux_task_terminal_successor(self.task.as_ptr(), context) })
     }
     unsafe fn detach(&self, context: &TaskContext) -> Result<(), WorkError> {
         // No current validation is invented on the idle dispatcher. Runtime

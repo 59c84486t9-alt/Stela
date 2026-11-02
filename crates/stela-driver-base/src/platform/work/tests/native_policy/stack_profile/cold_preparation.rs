@@ -8,6 +8,7 @@ enum Mode {
     Hot,
     Park,
     Denied,
+    RestoreRefusal,
     Closed,
     Drop,
     Stale,
@@ -95,7 +96,9 @@ impl Authority {
 unsafe impl EnteredProcess for Authority {
     fn check(&self) -> Result<(), WorkError> {
         self.cpu.check_cpu()?;
-        if self.active.get() {
+        if self.active.get()
+            && !(self.cpu.mode == Mode::RestoreRefusal && self.cpu.restored.load(Ordering::Acquire))
+        {
             Ok(())
         } else {
             Err(WorkError::Unavailable)
@@ -151,14 +154,14 @@ unsafe extern "C" fn marker(pointer: *mut c_void) {
         wake.wake().unwrap();
     }
 }
-fn take_cold<'a>(
+fn take_prepared<'a>(
     owner: OwnedGeneralEscrow<'a, 64>,
     authority: &dyn EnteredProcess,
-) -> ColdStackPreparation<'a, 64> {
-    match owner.prepare_cold(authority) {
+) -> GeneralStackPreparation<'a, 64> {
+    match unsafe { owner.prepare_stack(authority) } {
         Ok(cold) => cold,
         Err((owner, error)) => {
-            owner.cancel(authority).unwrap();
+            unsafe { owner.cancel(authority) }.unwrap();
             panic!("cold precheck failed {error:?}")
         }
     }
@@ -181,11 +184,21 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             unsafe { (*r.task(index)).id },
             hot
         );
-        let owner = match owner.prepare_cold(&authority) {
-            Err((owner, WorkError::Busy)) => owner,
-            _ => panic!("hot frame accepted"),
+        // The prior marker actually returned through the native dispatcher;
+        // no original C/page/alias user exists in this real-stack fixture.
+        // Preserve history and require a NEW source allocation epoch.
+        let prepared = match unsafe { owner.prepare_stack(&authority) } {
+            Ok(prepared) => prepared,
+            Err(_) => panic!("physically returned frame refused"),
         };
-        owner.cancel(&authority).unwrap();
+        assert!(prepared.epoch().is_some());
+        assert!(unsafe { (*r.task(index)).ever_entered });
+        assert_eq!(unsafe { (*r.task(index)).completed_sequence }, unsafe {
+            (*r.task(index)).returned_sequence
+        });
+        // SAFETY: this fixture has no foreign C/descriptor/page/alias user.
+        unsafe { prepared.cancel(&authority) }.unwrap();
+        assert!(unsafe { (*r.task(index)).ever_entered });
     }
     let owner = r
         .reserve_unstarted_general(&authority, kernel())
@@ -211,7 +224,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         } else {
             r.queue.close().unwrap();
         }
-        let owner = match owner.prepare_cold(&authority) {
+        let owner = match unsafe { owner.prepare_stack(&authority) } {
             Err((owner, error)) => {
                 assert_eq!(
                     error,
@@ -226,7 +239,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             _ => panic!("failed precheck mutated"),
         };
         authority.active.set(true);
-        owner.cancel(&authority).unwrap();
+        unsafe { owner.cancel(&authority) }.unwrap();
         return;
     }
     let top = range.end - 2 * size_of::<usize>();
@@ -244,7 +257,38 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
     let state = unsafe { core::ptr::addr_of!((*r.task(index)).state) };
     f.cpu.watch_state.store(state as u64, Ordering::Release);
     f.cpu.watch.store(range.start as u64, Ordering::Release);
-    let cold = take_cold(owner, &authority);
+    if f.mode == Mode::RestoreRefusal {
+        // SAFETY: the real excluded mapping has no C/page/alias users. The
+        // actual outer restore observer revokes this scope AFTER transfer.
+        let prepared = match unsafe { owner.prepare_stack(&authority) } {
+            Err((prepared, WorkError::Unavailable)) => prepared,
+            _ => panic!("post-transfer refusal lost exact preparation owner"),
+        };
+        assert!(f.cpu.restored.load(Ordering::Acquire));
+        assert_eq!(prepared.epoch(), Some(1));
+        assert_eq!(f.cpu.model.flags(), 0x202);
+        // SAFETY: exact excluded backing; the failed fresh scope must prevent
+        // every destructive write, including native bootstrap words.
+        unsafe {
+            assert!(
+                core::slice::from_raw_parts(range.start as *const u8, top - range.start)
+                    .iter()
+                    .all(|byte| *byte == 0xa7)
+            );
+            assert_eq!((top as *const usize).read(), before.0);
+            assert_eq!(
+                ((top + size_of::<usize>()) as *const usize).read(),
+                before.1
+            );
+        }
+        f.cpu.restored.store(false, Ordering::Release);
+        // SAFETY: fresh scope regained; exact transferred owner has no pin or
+        // published user, so cancellation must reseed and release only once.
+        unsafe { prepared.cancel(&authority) }.unwrap();
+        assert_eq!(r.owned_escrows.get(), 0);
+        return;
+    }
+    let cold = take_prepared(owner, &authority);
     assert!(f.cpu.restored.load(Ordering::Acquire));
     assert_eq!(f.cpu.model.flags(), 0x202);
     assert!(
@@ -261,7 +305,10 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         }
         Mode::Stale => {
             authority.active.set(false);
-            assert_eq!(cold.cancel(&authority), Err(WorkError::Unavailable));
+            assert_eq!(
+                cancellation_error(unsafe { cold.cancel(&authority) }),
+                WorkError::Unavailable
+            );
             return;
         }
         Mode::Forget => {
@@ -278,9 +325,9 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             authority.active.set(false);
             drop(authority);
             assert_eq!(r.park_if_blocked().unwrap(), ParkOutcome::Resumed);
-            cold.cancel(&Authority::new(&f.cpu)).unwrap();
+            unsafe { cold.cancel(&Authority::new(&f.cpu)) }.unwrap();
         }
-        _ => cold.cancel(&authority).unwrap(),
+        _ => unsafe { cold.cancel(&authority) }.unwrap(),
     }
     assert_eq!(r.owned_escrows.get(), 0);
     // SAFETY: exact cold frame is reseeded but still never entered. Reading its
@@ -426,3 +473,8 @@ fn stale_dropped_and_forgotten_cold_values_never_reseed_or_free() {
 }
 
 mod pinned;
+
+#[test]
+fn outer_restore_scope_loss_retains_unzeroed_preparation_until_fresh_cancel() {
+    run(Mode::RestoreRefusal);
+}

@@ -9,7 +9,8 @@
 //! an identity DMA domain or starts rings/tunnels. Platform grants precede it.
 use super::ring::{CAPABILITIES, Registers};
 use crate::bus::pci::ConfigSpace;
-use alloc::sync::Arc;
+use alloc::{boxed::Box, rc::Rc, sync::Arc};
+use core::mem::ManuallyDrop;
 use core::sync::atomic::{AtomicU64, Ordering};
 const RESET: usize = 0x39898;
 const INTERRUPT: usize = 0x38200;
@@ -146,6 +147,8 @@ pub struct Prepared {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    Config(crate::bus::pci::ConfigError),
+    Minimum(crate::bus::pci::power::Error),
     Identity,
     Unsupported,
     LegacyUnsupported,
@@ -167,33 +170,51 @@ pub enum Error {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     New,
+    /// Callback/effect in flight; abandonment retains the whole original graph.
+    Acting,
     Firmware {
         next: u64,
         deadline: u64,
         reads: u16,
     },
     Reset {
-        earliest: u64,
-        deadline: u64,
+        // The required physical quiet wait has completed. The independent
+        // nominal retry budget starts at the next actual caller observation.
+        deadline: Option<u64>,
     },
     Prepared,
     Fault,
 }
-/// Caller-serialized controller preparation. Clock observations use one
-/// monotonic millisecond source; polls never sleep or invent timer progress.
-pub struct Controller<'a, C: ConfigSpace, R: Registers> {
+/// Linux's independent host_reset policy. Preserving the router grants no
+/// sibling/tunnel reset authority and does not acknowledge NHI engine stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouterReset {
+    SourceDefault,
+    Preserve,
+}
+struct Resources<'a, C, R> {
     configuration: &'a mut C,
     registers: Arc<R>,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
+}
+/// Caller-serialized controller preparation. Nominal millisecond observations
+/// control retry budgets only. HRR performs one checked physical minimum wait
+/// before its first completion read; nominal time cannot satisfy that wait.
+pub struct Controller<'a, C: ConfigSpace, R: Registers> {
+    resources: ManuallyDrop<Box<Resources<'a, C, R>>>,
     profile: Profile,
     capabilities: u32,
     phase: Phase,
     last_now: Option<u64>,
     mutated: bool,
+    router_reset: RouterReset,
 }
 impl<'a, C: ConfigSpace, R: Registers> Controller<'a, C, R> {
     /// # Safety
     /// ConfigSpace and Registers identify the same live physical NHI
-    /// requester, ownership/reset epoch and BAR0. The kept Registers owns
+    /// requester, ownership/reset epoch and BAR0. Native configuration reads
+    /// must execute the original current hardware transport (including posted
+    /// write ordering); a copied/cached identity is not a configuration read. The kept Registers owns
     /// its PCI function/MMIO/power reservation, including quarantine.
     /// The platform selected the connection manager as Linux's
     /// `nhi_select_cm` does (firmware ICM, or a software CM), and no other
@@ -211,50 +232,110 @@ impl<'a, C: ConfigSpace, R: Registers> Controller<'a, C, R> {
     /// use stela_drivers::bus::{pci::ConfigSpace, thunderbolt::{
     ///     controller::Controller, ring::Registers,
     /// }};
-    /// fn pair<C: ConfigSpace, R: Registers>(pci: &mut C, registers: Arc<R>) {
-    ///     let _controller = Controller::new(pci, registers);
+    /// fn pair<C: ConfigSpace, R: Registers>(pci: &mut C, registers: Arc<R>, minimum: std::rc::Rc<dyn stela_drivers::bus::pci::power::Timer>) {
+    ///     let _controller = Controller::new(pci, registers, minimum);
     /// }
     /// ```
-    pub unsafe fn new(configuration: &'a mut C, registers: Arc<R>) -> Result<Self, Error> {
-        let identity = configuration.read32(0);
-        if identity == u32::MAX {
-            return Err(Error::PciRead(0));
+    pub unsafe fn new(
+        configuration: &'a mut C,
+        registers: Arc<R>,
+        minimum: Rc<dyn crate::bus::pci::power::Timer>,
+    ) -> Result<Self, Error> {
+        // SAFETY: exactly the same physical ownership/CM/drain grant above;
+        // source-default policy preserves the original constructor behavior.
+        unsafe {
+            Self::new_with_router_reset(
+                configuration,
+                registers,
+                RouterReset::SourceDefault,
+                minimum,
+            )
         }
-        let class = configuration.read32(8);
-        if class == u32::MAX {
-            return Err(Error::PciRead(8));
-        }
-        let profile = Profile::select(identity as u16, (identity >> 16) as u16, class >> 8)?;
-        let header = configuration.read8(0x0e);
-        if header & 0x7f != 0 {
-            return Err(Error::Identity);
-        }
-        Self::pci_state(configuration)?;
-        if registers.bytes() < RESET + 4 {
-            return Err(Error::Mapping);
-        }
-        let capabilities = registers.read32(CAPABILITIES);
-        if capabilities == u32::MAX || capabilities & 0x3ff == 0 {
-            return Err(Error::Capabilities);
-        }
-        Ok(Self {
+    }
+    /// Initialize without assuming the function owner also owns every sibling
+    /// tunnel. Preserve corresponds to pinned Linux host_reset=false.
+    ///
+    /// # Safety
+    /// All new() ownership/drain/CM/power requirements hold. SourceDefault
+    /// additionally owns the complete host-router reset scope. Preserve only
+    /// withholds HRR; it is no engine-stop or old IRQ completion proof.
+    pub unsafe fn new_with_router_reset(
+        configuration: &'a mut C,
+        registers: Arc<R>,
+        router_reset: RouterReset,
+        minimum: Rc<dyn crate::bus::pci::power::Timer>,
+    ) -> Result<Self, Error> {
+        // Own the complete graph before any safe provider/config/register
+        // callback can unwind. Normal validation below has no device effects.
+        let held = ManuallyDrop::new(Resources {
             configuration,
             registers,
+            minimum,
+        });
+        let mut storage = Box::<Resources<'a, C, R>>::new_uninit();
+        // Allocation may refuse/unwind while held still retains every input.
+        // No provider callback occurs between this move and initialized storage.
+        storage.write(ManuallyDrop::into_inner(held));
+        // SAFETY: the exact allocated object was initialized above, with no
+        // callback or fallible operation between write and this conversion.
+        let mut resources = ManuallyDrop::new(unsafe { storage.assume_init() });
+        let result = (|| {
+            resources.minimum.check().map_err(Error::Minimum)?;
+            let configuration = &mut *resources.configuration;
+            let identity = configuration.read32(0)?;
+            if identity == u32::MAX {
+                return Err(Error::PciRead(0));
+            }
+            let class = configuration.read32(8)?;
+            if class == u32::MAX {
+                return Err(Error::PciRead(8));
+            }
+            let profile = Profile::select(identity as u16, (identity >> 16) as u16, class >> 8)?;
+            let header = configuration.read8(0x0e)?;
+            if header & 0x7f != 0 {
+                return Err(Error::Identity);
+            }
+            Self::pci_state(configuration)?;
+            if resources.registers.bytes() < RESET + 4 {
+                return Err(Error::Mapping);
+            }
+            let capabilities = resources.registers.read32(CAPABILITIES);
+            if capabilities == u32::MAX || capabilities & 0x3ff == 0 {
+                return Err(Error::Capabilities);
+            }
+            Ok((profile, capabilities))
+        })();
+        let (profile, capabilities) = match result {
+            Ok(value) => value,
+            Err(error) => {
+                // All callbacks returned normally and no register/config store
+                // was issued. A panic instead leaves the original graph held.
+                // SAFETY: initialized storage has not been dropped or moved;
+                // normal untouched validation owns its sole release here.
+                unsafe {
+                    ManuallyDrop::drop(&mut resources);
+                }
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            resources,
             profile,
             capabilities,
             phase: Phase::New,
             last_now: None,
             mutated: false,
+            router_reset,
         })
     }
     pub fn profile(&self) -> Profile {
         self.profile
     }
     pub fn registers(&self) -> Arc<R> {
-        self.registers.clone()
+        self.resources.registers.clone()
     }
     fn pci_state(configuration: &C) -> Result<(), Error> {
-        let command = configuration.read16(4);
+        let command = configuration.read16(4)?;
         if command == u16::MAX {
             return Err(Error::PciRead(4));
         }
@@ -265,15 +346,15 @@ impl<'a, C: ConfigSpace, R: Registers> Controller<'a, C, R> {
     }
     fn identity(&self) -> Result<(), Error> {
         let expected = u32::from(self.profile.vendor) | (u32::from(self.profile.device) << 16);
-        if self.configuration.read32(0) != expected
-            || self.configuration.read32(8) >> 8 != self.profile.class
+        if self.resources.configuration.read32(0)? != expected
+            || self.resources.configuration.read32(8)? >> 8 != self.profile.class
         {
             return Err(Error::Identity);
         }
-        Self::pci_state(self.configuration)
+        Self::pci_state(self.resources.configuration)
     }
     fn read_pci(&self, offset: u16) -> Result<u32, Error> {
-        let value = self.configuration.read32(offset);
+        let value = self.resources.configuration.read32(offset)?;
         if value == u32::MAX {
             Err(Error::PciRead(offset))
         } else {
@@ -283,14 +364,14 @@ impl<'a, C: ConfigSpace, R: Registers> Controller<'a, C, R> {
     fn write_pci(&mut self, offset: u16, value: u32, mask: u32) -> Result<(), Error> {
         self.identity()?;
         self.mutated = true;
-        self.configuration.write32(offset, value);
-        if self.configuration.read32(offset) & mask != value & mask {
+        self.resources.configuration.write32(offset, value)?;
+        if self.resources.configuration.read32(offset)? & mask != value & mask {
             return Err(Error::PciRejected(offset));
         }
         self.identity()
     }
     fn read_register(&self, offset: usize) -> Result<u32, Error> {
-        let value = self.registers.read32(offset);
+        let value = self.resources.registers.read32(offset);
         if value == u32::MAX {
             Err(Error::RegisterRead(offset))
         } else {
@@ -328,17 +409,26 @@ impl<'a, C: ConfigSpace, R: Registers> Controller<'a, C, R> {
         Ok(())
     }
     fn reset_or_mask(&mut self, now: u64) -> Result<Option<Prepared>, Error> {
-        if (self.capabilities >> 16) & 255 < 0x40 {
+        if self.router_reset == RouterReset::Preserve || (self.capabilities >> 16) & 255 < 0x40 {
             return self.mask(now);
         }
-        let earliest = now.checked_add(100).ok_or(Error::ClockOverflow)?;
-        let deadline = earliest.checked_add(500).ok_or(Error::ClockOverflow)?;
+        let _ = now.checked_add(600).ok_or(Error::ClockOverflow)?;
+        self.resources.minimum.check().map_err(Error::Minimum)?;
         self.mutated = true;
-        self.registers.write32(RESET, 1);
-        // HRR can self-clear immediately; a zero read is not completion until
-        // the source-required minimum 100 ms interval has elapsed.
-        let _ = self.read_register(RESET)?;
-        self.phase = Phase::Reset { earliest, deadline };
+        self.resources.registers.write32(RESET, 1);
+        // Complete this same function's posted HRR write without sampling
+        // RESET completion. CPU delay alone is not PCI fabric completion.
+        // All-ones is allowed as a soft-failed hardware response here; this
+        // is a flush, not an identity or reset-completion receipt. A typed
+        // transport error still stops before the minimum wait.
+        let _ = self.resources.configuration.read32(0)?;
+        // Linux nhi_reset sleeps 100 ms BEFORE the first RESET read, even
+        // when HRR self-clears immediately. Nominal now_ms is not this proof.
+        self.resources
+            .minimum
+            .wait_us(100_000)
+            .map_err(Error::Minimum)?;
+        self.phase = Phase::Reset { deadline: None };
         Ok(None)
     }
     fn mask(&mut self, now: u64) -> Result<Option<Prepared>, Error> {
@@ -351,14 +441,15 @@ impl<'a, C: ConfigSpace, R: Registers> Controller<'a, C, R> {
                 InterruptStyle::IntelAutoClear => {
                     // All-one interrupt enables are valid, not a bus-failure
                     // sentinel. Verify the zero write instead of rejecting it.
-                    let _ = self.registers.read32(INTERRUPT + offset);
-                    self.registers.write32(INTERRUPT + offset, 0);
+                    let _ = self.resources.registers.read32(INTERRUPT + offset);
+                    self.resources.registers.write32(INTERRUPT + offset, 0);
                 }
-                InterruptStyle::Usb4MaskClear => {
-                    self.registers.write32(MASK_CLEAR + offset, u32::MAX)
-                }
+                InterruptStyle::Usb4MaskClear => self
+                    .resources
+                    .registers
+                    .write32(MASK_CLEAR + offset, u32::MAX),
             }
-            if self.registers.read32(INTERRUPT + offset) != 0 {
+            if self.resources.registers.read32(INTERRUPT + offset) != 0 {
                 return Err(Error::RegisterRejected(INTERRUPT + offset));
             }
         }
@@ -366,11 +457,12 @@ impl<'a, C: ConfigSpace, R: Registers> Controller<'a, C, R> {
             let offset = index * 4;
             match self.profile.interrupt_style() {
                 InterruptStyle::IntelAutoClear => {
-                    let _ = self.registers.read32(NOTIFY + offset);
+                    let _ = self.resources.registers.read32(NOTIFY + offset);
                 }
-                InterruptStyle::Usb4MaskClear => {
-                    self.registers.write32(INT_CLEAR + offset, u32::MAX)
-                }
+                InterruptStyle::Usb4MaskClear => self
+                    .resources
+                    .registers
+                    .write32(INT_CLEAR + offset, u32::MAX),
             }
         }
         // Same-function MMIO read flushes posted writes. These source-defined
@@ -401,17 +493,21 @@ impl<'a, C: ConfigSpace, R: Registers> Controller<'a, C, R> {
     pub fn poll(&mut self, now_ms: u64) -> Result<Option<Prepared>, Error> {
         match self.phase {
             Phase::Prepared => return Err(Error::Stopped),
-            Phase::Fault => return Err(Error::Poisoned),
+            Phase::Fault | Phase::Acting => return Err(Error::Poisoned),
             _ => {}
         }
         if self.last_now.is_some_and(|last| now_ms < last) {
             return self.fail(Error::ClockRegressed);
         }
         self.last_now = Some(now_ms);
-        let result = (|| match self.phase {
+        let phase = self.phase;
+        self.phase = Phase::Acting;
+        let result = (|| match phase {
             Phase::New => {
                 self.preflight()?;
-                let reset_budget = if (self.capabilities >> 16) & 255 >= 0x40 {
+                let reset_budget = if self.router_reset == RouterReset::SourceDefault
+                    && (self.capabilities >> 16) & 255 >= 0x40
+                {
                     600
                 } else {
                     0
@@ -453,12 +549,16 @@ impl<'a, C: ConfigSpace, R: Registers> Controller<'a, C, R> {
                     Ok(None)
                 }
             }
-            Phase::Reset { earliest, deadline } => {
+            Phase::Reset { deadline } => {
+                let deadline = match deadline {
+                    Some(deadline) => deadline,
+                    None => now_ms.checked_add(500).ok_or(Error::ClockOverflow)?,
+                };
+                self.phase = Phase::Reset {
+                    deadline: Some(deadline),
+                };
                 if now_ms >= deadline {
                     return Err(Error::ResetTimeout);
-                }
-                if now_ms < earliest {
-                    return Ok(None);
                 }
                 if self.read_register(RESET)? & 1 != 0 {
                     return Ok(None);
@@ -468,21 +568,39 @@ impl<'a, C: ConfigSpace, R: Registers> Controller<'a, C, R> {
             _ => Err(Error::Stopped),
         })();
         match result {
-            Ok(value) => Ok(value),
+            Ok(value) => {
+                if self.phase == Phase::Acting {
+                    self.phase = phase;
+                }
+                Ok(value)
+            }
             Err(error) => self.fail(error),
         }
     }
 }
 impl<C: ConfigSpace, R: Registers> Drop for Controller<'_, C, R> {
     fn drop(&mut self) {
-        if self.mutated && self.phase != Phase::Prepared {
+        if self.phase != Phase::Prepared && (self.phase != Phase::New || self.mutated) {
             let _ = QUARANTINED.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 Some(value.saturating_add(1))
             });
-            core::mem::forget(self.registers.clone());
+            // Retain ONE original resource graph, including the real minimum
+            // source; no allocating clone or partial keepalive in Drop.
+        } else {
+            // SAFETY: untouched or fully source-prepared, no callback in
+            // flight; this initialized graph has never been released.
+            unsafe {
+                ManuallyDrop::drop(&mut self.resources);
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+impl From<crate::bus::pci::ConfigError> for Error {
+    fn from(error: crate::bus::pci::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}

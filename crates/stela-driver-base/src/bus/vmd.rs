@@ -34,6 +34,8 @@ static NEXT_DOMAIN: AtomicU32 = AtomicU32::new(0x1_0000);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
+    PciCapability(CapabilityError),
+    Config(crate::bus::pci::ConfigError),
     UnsupportedDevice,
     InvalidResource,
     Mapping,
@@ -45,34 +47,33 @@ pub enum Error {
     Suspended,
     Quarantined,
     ActiveChild,
-    Clock,
+    PciPower(crate::bus::pci::power::Error),
 }
 
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(match self {
-            Self::UnsupportedDevice => "not a supported VMD controller",
-            Self::InvalidResource => "a BAR, window or bus range VMD cannot use",
-            Self::Mapping => "a register window its mapping does not cover",
-            Self::ReadFailed => "a configuration read failed",
-            Self::Readback => "a register did not read back as written",
-            Self::Address => "a child address outside the VMD buses",
-            Self::Capability => "a malformed capability list",
-            Self::Exhausted => "no PCI domain number left",
-            Self::Suspended => "the VMD hierarchy is suspended",
-            Self::Quarantined => "the VMD hierarchy is quarantined after a fault",
-            Self::ActiveChild => "a child may not enable DMA behind VMD",
-            Self::Clock => "the clock cannot time the VMD wait",
-        })
+        match self {
+            Self::Config(error) => write!(f, "VMD {error}"),
+            Self::PciCapability(error) => write!(f, "VMD PCI capability {error:?}"),
+            Self::UnsupportedDevice => f.write_str("not a supported VMD controller"),
+            Self::InvalidResource => f.write_str("a BAR, window or bus range VMD cannot use"),
+            Self::Mapping => f.write_str("a register window its mapping does not cover"),
+            Self::ReadFailed => f.write_str("a configuration read failed"),
+            Self::Readback => f.write_str("a register did not read back as written"),
+            Self::Address => f.write_str("a child address outside the VMD buses"),
+            Self::Capability => f.write_str("a malformed capability list"),
+            Self::Exhausted => f.write_str("no PCI domain number left"),
+            Self::Suspended => f.write_str("the VMD hierarchy is suspended"),
+            Self::Quarantined => f.write_str("the VMD hierarchy is quarantined after a fault"),
+            Self::ActiveChild => f.write_str("a child may not enable DMA behind VMD"),
+            Self::PciPower(error) => write!(f, "VMD power timing {error:?}"),
+        }
     }
 }
 
 impl From<CapabilityError> for Error {
     fn from(error: CapabilityError) -> Self {
-        match error {
-            CapabilityError::FailedRead { .. } => Self::ReadFailed,
-            _ => Self::Capability,
-        }
+        Self::PciCapability(error)
     }
 }
 
@@ -629,3 +630,15 @@ impl<R: Registers> Drop for Host<R> {
 
 #[cfg(test)]
 mod tests;
+
+impl From<crate::bus::pci::ConfigError> for Error {
+    fn from(error: crate::bus::pci::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+
+impl From<crate::bus::pci::power::Error> for Error {
+    fn from(error: crate::bus::pci::power::Error) -> Self {
+        Self::PciPower(error)
+    }
+}

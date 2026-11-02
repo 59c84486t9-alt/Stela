@@ -3,7 +3,7 @@
 //! Copyright (c) 2009 Takashi Iwai <tiwai@suse.de>. See audio/THIRD_PARTY.md.
 use super::super::{CodecGraph, Controller, Registers, WidgetKind, codec::widget_channels};
 use super::{CirrusCoefficient, CirrusInputAmplifier, CirrusProfile, GROUP};
-use crate::{Error, bus::i2c::Timer};
+use crate::{Error, Timer};
 use alloc::vec::Vec;
 
 const INPUT_AMPLIFIERS: [u8; 3] = [0x18, 0x1b, 0x1c];
@@ -12,6 +12,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<Vec<CirrusInputAmplifier>, Error> {
+        self.minimum_guard()?;
         let mut amplifiers = Vec::new();
         for node in INPUT_AMPLIFIERS {
             let widget = graph.widget(node).ok_or(Error::UnsupportedTopology)?;
@@ -42,6 +43,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<Vec<CirrusCoefficient>, Error> {
+        self.minimum_guard()?;
         let vendor = CirrusProfile::Cs4208.vendor();
         self.cirrus_processing(graph.address, vendor, 1)?;
         Ok(alloc::vec![

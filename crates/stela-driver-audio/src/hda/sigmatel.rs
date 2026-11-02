@@ -11,7 +11,7 @@ use super::{
     AnalogRoute, CodecGraph, Controller, PinOptions, PinSense, Registers, StreamId, Verb,
     WidgetKind,
 };
-use crate::{Error, bus::i2c::Timer};
+use crate::{Error, Timer};
 use alloc::vec::Vec;
 mod idt73;
 mod idt83;
@@ -132,11 +132,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .any(|state| state.address == address)
     }
     fn sigmatel_guard(&self, graph: &CodecGraph) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.vendor_codec_guard(graph)?;
         profile(graph.vendor_id)?;
         Ok(())
     }
     fn sigmatel_active(&mut self, graph: &CodecGraph) -> Result<State, Error> {
+        self.minimum_guard()?;
         self.sigmatel_guard(graph)?;
         let state = self
             .sigmatel_codecs
@@ -204,6 +206,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         verb: u16,
         allowed: u8,
     ) -> Result<u8, Error> {
+        self.minimum_guard()?;
         let value = self.verb(Verb::short(address, group, verb, 0)?)?;
         if value & !u32::from(allowed) != 0 {
             return Err(Error::RouteRejected);
@@ -218,6 +221,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         allowed: u8,
         verify: u8,
     ) -> Result<SigmatelGpio, Error> {
+        self.minimum_guard()?;
         if self.verb(Verb::short(address, group, SET_GPIO_CMOS, 0)?)? == u32::MAX {
             return Err(Error::RouteRejected);
         }
@@ -234,7 +238,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         };
         let mask = control(self, SET_GPIO_MASK, GET_GPIO_MASK, gpio.mask)?;
         let direction = control(self, SET_GPIO_DIRECTION, GET_GPIO_DIRECTION, gpio.direction)?;
-        self.delay(1000);
+        self.delay(1000)?;
         let data = control(self, SET_GPIO_DATA, GET_GPIO_DATA, gpio.data)?;
         Ok(SigmatelGpio {
             data,
@@ -331,6 +335,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(Some(selector))
     }
     fn sigmatel_knob_capabilities(&mut self, address: u8, node: u8) -> Result<u32, Error> {
+        self.minimum_guard()?;
         let caps = self.verb(Verb::short(address, node, 0xf00, PAR_VOLUME_KNOB)?)?;
         // The source writes gain127 with direct control. Refuse hardware
         // that cannot express that complete control rather than clipping it.
@@ -346,6 +351,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<SigmatelReport, Error> {
+        self.minimum_guard()?;
         self.sigmatel_guard(graph)?;
         self.require_routing_stopped()?;
         if self
@@ -587,6 +593,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.sigmatel_guard(graph)?;
         let policy = if profile(graph.vendor_id)? == SigmatelProfile::Stac922x {
             RoutePolicy::SigmatelStac922x
@@ -616,6 +623,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         graph: &CodecGraph,
         pin: u8,
     ) -> Result<PinSense, Error> {
+        self.minimum_guard()?;
         let mut state = self.sigmatel_active(graph)?;
         let result = self
             .poll_pin_sense_policy(graph, pin, false)
@@ -665,6 +673,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<Idt83PowerReport, Error> {
+        self.minimum_guard()?;
         let mut state = self.sigmatel_active(graph)?;
         let idt83 = state.idt83.as_mut().ok_or(Error::UnsupportedTopology)?;
         if let Err(error) = self.refresh_idt_ports(graph, state.group, &mut idt83.ports) {
@@ -685,6 +694,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<Idt73PowerReport, Error> {
+        self.minimum_guard()?;
         let mut state = self.sigmatel_active(graph)?;
         let idt73 = state.idt73.as_mut().ok_or(Error::UnsupportedTopology)?;
         if let Err(error) = self.refresh_idt_ports(graph, state.group, &mut idt73.ports) {
@@ -705,6 +715,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<Idt95PowerReport, Error> {
+        self.minimum_guard()?;
         let mut state = self.sigmatel_active(graph)?;
         let ports = state.idt95.as_mut().ok_or(Error::UnsupportedTopology)?;
         if let Err(error) = self.refresh_idt_ports(graph, state.group, ports) {
@@ -724,6 +735,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     pub(super) fn require_sigmatel_route_power(&self, id: StreamId) -> Result<(), Error> {
+        self.minimum_guard()?;
         for (_, route) in self.routes.iter().filter(|(stream, _)| *stream == id) {
             if let Some(idt83) = self
                 .sigmatel_codecs
@@ -755,6 +767,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Quiet the owned pin inventory after every stream stop has
     /// acknowledged. This is a native shutdown boundary, not S3/S4 support.
     pub(super) fn shutdown_sigmatel_codecs(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         for index in 0..self.sigmatel_codecs.len() {
             let state = self.sigmatel_codecs[index].clone();
             if state.quiet {

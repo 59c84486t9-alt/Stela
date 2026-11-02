@@ -16,7 +16,7 @@ use crate::{
         },
     },
 };
-use alloc::{boxed::Box, string::String, sync::Arc};
+use alloc::{boxed::Box, rc::Rc, string::String, sync::Arc};
 
 /// An attached controller with the handle that returns its hierarchy, or the
 /// refusal with that same handle.
@@ -25,6 +25,9 @@ pub type Attachment<R = NativeRegisters> =
 
 fn block(error: Error) -> BlockError {
     match error {
+        Error::Config(error) => BlockError::Config(error),
+        Error::PciCapability(error) => BlockError::PciCapability(error),
+        Error::PciPower(error) => BlockError::PciPower(error),
         Error::ReadFailed | Error::Readback | Error::Mapping | Error::Quarantined => {
             BlockError::Protocol("VMD retained hierarchy access failed")
         }
@@ -52,6 +55,10 @@ fn block(error: Error) -> BlockError {
 /// native mapping permission for these resources and native CPU roots.
 /// `bar` was claimed from this same host and complete firmware assignment.
 /// All calls/final releases obey the providers' process/deferred context rules.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep independently supplied original hierarchy, mapping, DMA, page, clock and minimum-delay prerequisites explicit."
+)]
 pub unsafe fn attach(
     host: Host<NativeRegisters>,
     bar: FirmwareBar,
@@ -59,6 +66,7 @@ pub unsafe fn attach(
     authority: Authority,
     pages: &dyn PageSource,
     clock: Clock,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
     label: String,
 ) -> Attachment {
     let registers = |bar: &FirmwareBar| {
@@ -79,6 +87,7 @@ pub unsafe fn attach(
             domain,
             pages,
             clock,
+            minimum,
             label,
             (registers, owned::attach),
         )
@@ -98,12 +107,17 @@ type AttachPolicy = unsafe fn(
 // and owned policy. This never exposes a public model attachment route.
 // SAFETY: the caller keeps the matching original hierarchy/domain permission,
 // and the factory keeps registers for that exact selected controller.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep independently supplied original hierarchy, mapping, DMA, page, clock and minimum-delay prerequisites explicit."
+)]
 unsafe fn attach_with<R: Registers + 'static>(
     host: Host<R>,
     bar: FirmwareBar,
     domain: Arc<dyn DmaDomain>,
     pages: &dyn PageSource,
     clock: Clock,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
     label: String,
     factories: (
         impl FnOnce(&FirmwareBar) -> Result<Box<dyn owned::Registers>, BlockError>,
@@ -111,8 +125,10 @@ unsafe fn attach_with<R: Registers + 'static>(
     ),
 ) -> Attachment<R> {
     let (registers, attach_policy) = factories;
-    let (mut endpoint, handle) = Endpoint::new(host, Arc::clone(&domain), clock);
+    let timing = minimum.check().map_err(BlockError::PciPower);
+    let (mut endpoint, handle) = Endpoint::new(host, Arc::clone(&domain), minimum);
     let result = (|| {
+        timing?;
         // Admit the shared NVMe controller's complete operation budget before
         // discovery performs any CFGBAR/config or mapping effects.
         super::validate_clock(clock)?;

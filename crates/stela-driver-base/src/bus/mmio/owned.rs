@@ -6,8 +6,11 @@
 mod registry;
 
 pub use crate::bus::dma::memory::CacheAttribute;
+use crate::bus::pci::assignment::{OpaqueUse, UseKind};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::{any::Any, ptr::NonNull};
+use core::{any::Any, mem::ManuallyDrop, ptr::NonNull};
+#[cfg(any(test, feature = "test-support"))]
+pub mod model;
 pub use registry::{AliasId, Authority, Mapping, MappingView, ResourceId, Status};
 
 pub const PAGE_BYTES: u64 = 4096;
@@ -27,6 +30,7 @@ pub enum Error {
     Retired,
     MappingFailed,
     UnmapFailed,
+    Assignment(crate::bus::pci::assignment::Error),
 }
 
 /// Checked nonempty half-open physical interval. Whole-page coverage is checked
@@ -135,6 +139,30 @@ pub struct DeviceCacheRegion {
 pub unsafe trait ResourceBacking: Any + Send + Sync {
     fn physical_span(&self) -> PhysicalSpan;
     fn kind(&self) -> ResourceKind;
+    /// Acquire one counted use from the SAME actual physical/model backing.
+    /// This must precede mapper effects; no address/metadata stand-in or
+    /// independent gate may replace the original assignment/reset epoch.
+    fn begin_mapping(&self) -> Result<OpaqueUse, Error>;
+}
+
+/// Failed registration returns the SAME original resource. Default abandonment
+/// keeps its full backing; inspecting the cause never authorizes final release.
+pub struct RegistrationFailure {
+    pub error: Error,
+    resource: ManuallyDrop<Resource>,
+}
+impl RegistrationFailure {
+    pub fn into_resource(mut self) -> Resource {
+        // SAFETY: consumed once; this transfers original custody, not teardown.
+        unsafe { ManuallyDrop::take(&mut self.resource) }
+    }
+}
+impl core::fmt::Debug for RegistrationFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RegistrationFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Cloneable pin on one exclusive resource reservation.
@@ -216,6 +244,17 @@ impl Resource {
                     || self.kind == ResourceKind::PrefetchableMemory
             }
         }
+    }
+    /// Count an accepted mapping from this original backing. Existing bounded
+    /// views retain that SAME use; closed assignment denies every new map.
+    pub fn begin_mapping(&self) -> Result<OpaqueUse, Error> {
+        let usage = self.backing.begin_mapping()?;
+        if usage.kind() != UseKind::Mapping {
+            // Wrong-kind use cannot grant mapping or safe release. Its Drop
+            // retains the actual original count/product for the owning source.
+            return Err(Error::InvalidPlatformReply);
+        }
+        Ok(usage)
     }
     pub fn physical_span(&self) -> PhysicalSpan {
         self.span

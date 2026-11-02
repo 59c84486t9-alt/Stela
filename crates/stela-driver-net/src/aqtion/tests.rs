@@ -910,15 +910,23 @@ fn ordinary_suspend_stops_dma_before_d3_and_keeps_the_resumable_epoch() {
     }
     let (mut net, peer, domain, dropped) = setup(0x07b1);
     let config = net.function.as_mut().unwrap().config();
-    config.write16(6, 1 << 4);
-    config.write8(0x34, 0x40);
-    config.write16(0x40, 1);
-    config.write16(0x44, 0x8100);
+    config.write16(6, 1 << 4).unwrap();
+    config.write8(0x34, 0x40).unwrap();
+    config.write16(0x40, 1).unwrap();
+    config.write16(0x44, 0x8100).unwrap();
     net.start().unwrap();
     net.suspend().unwrap();
     assert_eq!(net.state(), State::Suspended);
     assert!(domain.drain_count.load(Ordering::Relaxed) > 0);
-    assert_eq!(net.function.as_mut().unwrap().config().read16(0x44), 3);
+    assert_eq!(
+        net.function
+            .as_mut()
+            .unwrap()
+            .config()
+            .read16(0x44)
+            .unwrap(),
+        3
+    );
     let writes = peer.writes.borrow().len();
     assert!(!net.carrier());
     assert!(net.receive().is_err());
@@ -936,13 +944,26 @@ fn ordinary_suspend_stops_dma_before_d3_and_keeps_the_resumable_epoch() {
 // the ConfigSpace boundary. Neither component grants physical permission.
 #[repr(align(4096))]
 struct ConfigPage([u8; 4096]);
+struct ConfigRam(UnsafeCell<ConfigPage>);
+// SAFETY: same isolated raw-only configuration RAM and serialized fixture users;
+// no controller/Source/Authority or safe mutable-memory borrow is retained here.
+unsafe impl Send for ConfigRam {}
+// SAFETY: same actual RAM-only exclusion contract as Send.
+unsafe impl Sync for ConfigRam {}
+impl ConfigRam {
+    fn pointer(&self) -> NonNull<u8> {
+        // SAFETY: retained exact UnsafeCell allocation, no native address cast.
+        unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.0.get()).0).cast()) }
+    }
+}
 struct NativePm {
-    page: Box<UnsafeCell<ConfigPage>>,
+    page: Arc<ConfigRam>,
     mode: Mutex<PmMode>,
     accesses: Mutex<Vec<ConfigAccess>>,
     actual_state: AtomicUsize,
     unmaps: AtomicUsize,
     fail_unmap: AtomicBool,
+    deny_context: AtomicBool,
     retire_after: Mutex<Option<Arc<AtomicBool>>>,
 }
 // SAFETY: test-only stable RAM, serialized native volatile accesses and locked metadata.
@@ -966,7 +987,7 @@ impl NativePm {
     fn pointer(&self) -> NonNull<u8> {
         // SAFETY: the model device, its pages and its domain belong to this test alone; no other
         // driver, worker or DMA touches them.
-        unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.page.get()).0).cast()) }
+        self.page.pointer()
     }
     fn pm_accesses_since(&self, start: usize) -> Vec<ConfigAccess> {
         self.accesses.lock().unwrap()[start..]
@@ -1011,8 +1032,8 @@ struct ControlledConfig {
     peer: Arc<NativePm>,
 }
 impl ConfigSpace for ControlledConfig {
-    fn read8(&self, offset: u16) -> u8 {
-        let native = self.native.read8(offset);
+    fn read8(&self, offset: u16) -> core::result::Result<u8, crate::bus::pci::ConfigError> {
+        let native = self.native.read8(offset)?;
         let value = if *self.peer.mode.lock().unwrap() == PmMode::Removed {
             u8::MAX
         } else {
@@ -1023,10 +1044,10 @@ impl ConfigSpace for ControlledConfig {
             .lock()
             .unwrap()
             .push(ConfigAccess::Read8(offset, value));
-        value
+        Ok(value)
     }
-    fn read16(&self, offset: u16) -> u16 {
-        let native = self.native.read16(offset);
+    fn read16(&self, offset: u16) -> core::result::Result<u16, crate::bus::pci::ConfigError> {
+        let native = self.native.read16(offset)?;
         let mode = *self.peer.mode.lock().unwrap();
         let value = if mode == PmMode::Removed
             || (mode == PmMode::LoseD3Readback && offset == 0x44 && native & 3 == 3)
@@ -1040,10 +1061,10 @@ impl ConfigSpace for ControlledConfig {
             .lock()
             .unwrap()
             .push(ConfigAccess::Read16(offset, value));
-        value
+        Ok(value)
     }
-    fn read32(&self, offset: u16) -> u32 {
-        let native = self.native.read32(offset);
+    fn read32(&self, offset: u16) -> core::result::Result<u32, crate::bus::pci::ConfigError> {
+        let native = self.native.read32(offset)?;
         let value = if *self.peer.mode.lock().unwrap() == PmMode::Removed {
             u32::MAX
         } else {
@@ -1054,18 +1075,27 @@ impl ConfigSpace for ControlledConfig {
             .lock()
             .unwrap()
             .push(ConfigAccess::Read32(offset, value));
-        value
+        Ok(value)
     }
-    fn write8(&mut self, offset: u16, value: u8) {
-        self.native.write8(offset, value);
+    fn write8(
+        &mut self,
+        offset: u16,
+        value: u8,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        self.native.write8(offset, value)?;
         self.peer
             .accesses
             .lock()
             .unwrap()
             .push(ConfigAccess::Write8(offset, value));
+        Ok(())
     }
-    fn write16(&mut self, offset: u16, value: u16) {
-        self.native.write16(offset, value);
+    fn write16(
+        &mut self,
+        offset: u16,
+        value: u16,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        self.native.write16(offset, value)?;
         self.peer
             .accesses
             .lock()
@@ -1073,30 +1103,72 @@ impl ConfigSpace for ControlledConfig {
             .push(ConfigAccess::Write16(offset, value));
         if offset == 0x44 {
             match (*self.peer.mode.lock().unwrap(), value & 3) {
-                (PmMode::RefuseD0, 0) => self.native.write16(offset, (value & !3) | 3),
-                (PmMode::RefuseD3, 3) => self.native.write16(offset, value & !3),
+                (PmMode::RefuseD0, 0) => {
+                    self.native
+                        .write16(offset, (value & !3) | 3)
+                        .map_err(|error| {
+                            crate::bus::pci::ConfigError::write_may_have_applied(
+                                offset,
+                                2,
+                                error.reason,
+                            )
+                        })?
+                }
+                (PmMode::RefuseD3, 3) => {
+                    self.native.write16(offset, value & !3).map_err(|error| {
+                        crate::bus::pci::ConfigError::write_may_have_applied(
+                            offset,
+                            2,
+                            error.reason,
+                        )
+                    })?
+                }
                 _ => {}
             }
             // Synchronous device response through the same accessor.
             // This internal read is absent from the caller trace.
             self.peer.actual_state.store(
-                usize::from(self.native.read16(offset) & 3),
+                usize::from(
+                    self.native.read16(offset).map_err(|error| {
+                        crate::bus::pci::ConfigError::write_may_have_applied(
+                            offset,
+                            2,
+                            error.reason,
+                        )
+                    })? & 3,
+                ),
                 Ordering::Relaxed,
             );
         }
+        Ok(())
     }
-    fn write32(&mut self, offset: u16, value: u32) {
-        self.native.write32(offset, value);
+    fn write32(
+        &mut self,
+        offset: u16,
+        value: u32,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        self.native.write32(offset, value)?;
         self.peer
             .accesses
             .lock()
             .unwrap()
             .push(ConfigAccess::Write32(offset, value));
+        Ok(())
     }
 }
-struct ConfigResource(owned::PhysicalSpan);
+struct ConfigResource(
+    owned::PhysicalSpan,
+    owned::model::MappingRetention<Arc<ConfigRam>>,
+);
+
 // SAFETY: symbolic test ECAM span, backed only by the fixture RAM.
 unsafe impl owned::ResourceBacking for ConfigResource {
+    fn begin_mapping(
+        &self,
+    ) -> core::result::Result<crate::bus::pci::assignment::OpaqueUse, owned::Error> {
+        self.1.begin_mapping()
+    }
+
     fn physical_span(&self) -> owned::PhysicalSpan {
         self.0
     }
@@ -1104,10 +1176,117 @@ unsafe impl owned::ResourceBacking for ConfigResource {
         owned::ResourceKind::Registers
     }
 }
+// This unique hosted configuration actor consumes the original RAM controller.
+// Resource inventories retain only ConfigResource's noncyclic projection.
+struct PmCustody {
+    owner: owned::model::MappingOwner<Arc<ConfigRam>>,
+    retention: owned::model::MappingRetention<Arc<ConfigRam>>,
+    resource: owned::Resource,
+    address: Address,
+    window: crate::bus::pci::EcamWindow,
+}
+struct PmEpoch(owned::model::MappingRetention<Arc<ConfigRam>>);
+// SAFETY: this is only the same actual isolated RAM/count gate. It never
+// retains a config writer, controller, native Source or Mapping/View backedge.
+unsafe impl crate::bus::pci::owned::grant::ConfigEpoch for PmEpoch {
+    fn check(&self) -> core::result::Result<(), owned::Error> {
+        self.0.check_admission()
+    }
+    fn retain(
+        &self,
+    ) -> core::result::Result<Box<dyn crate::bus::pci::owned::grant::ConfigEpoch>, owned::Error>
+    {
+        self.0.check_admission()?;
+        Ok(Box::new(Self(self.0.clone())))
+    }
+    fn same_epoch(
+        &self,
+        other: &dyn crate::bus::pci::owned::grant::ConfigEpoch,
+    ) -> core::result::Result<bool, owned::Error> {
+        self.0.check_admission()?;
+        let Some(other) = other.as_any().downcast_ref::<Self>() else {
+            return Ok(false);
+        };
+        other.0.check_admission()?;
+        Ok(self.0.same_owner(&other.0))
+    }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+// SAFETY: this cfg-only fixture owns the actual original model allocation and
+// sole controller. The same resource and gate are consumed with its mapping;
+// symbolic geometry grants no native/reset/IRQ/fabric/physical authority.
+unsafe impl crate::bus::pci::owned::grant::ConfigCustody for PmCustody {
+    fn admission_close(
+        &self,
+    ) -> core::result::Result<crate::bus::pci::assignment::AdmissionClose, owned::Error> {
+        self.owner.admission_close()
+    }
+
+    fn address(&self) -> Address {
+        self.address
+    }
+    fn window(&self) -> crate::bus::pci::EcamWindow {
+        self.window
+    }
+    fn resource(&self) -> &owned::Resource {
+        &self.resource
+    }
+    fn begin(
+        &self,
+        operation: crate::bus::pci::owned::grant::Operation,
+    ) -> core::result::Result<crate::bus::pci::assignment::OpaqueUse, crate::bus::pci::ConfigError>
+    {
+        use crate::bus::pci::{ConfigError, ConfigFailure, owned::grant::Operation};
+        let (offset, width) = match operation {
+            Operation::Read { offset, width } | Operation::Write { offset, width, .. } => {
+                (offset, width)
+            }
+        };
+        if !matches!(width, 1 | 2 | 4)
+            || !usize::from(offset).is_multiple_of(width)
+            || usize::from(offset)
+                .checked_add(width)
+                .is_none_or(|end| end > 4096)
+        {
+            return Err(ConfigError::before_effect(ConfigFailure::Access {
+                offset,
+                width,
+            }));
+        }
+        self.retention
+            .begin_use(crate::bus::pci::assignment::UseKind::Configuration)
+            .map_err(|error| {
+                ConfigError::before_effect(match error {
+                    owned::Error::Assignment(error) => ConfigFailure::Ownership(error),
+                    error => ConfigFailure::Mapping(error),
+                })
+            })
+    }
+    fn abandon(&mut self) {
+        self.owner.abandon_admission();
+    }
+    fn retirement_context(&self) -> core::result::Result<(), owned::Error> {
+        self.retention.check_context()
+    }
+    fn retain_epoch(
+        &self,
+    ) -> core::result::Result<Box<dyn crate::bus::pci::owned::grant::ConfigEpoch>, owned::Error>
+    {
+        self.retention.check_admission()?;
+        Ok(Box::new(PmEpoch(self.retention.clone())))
+    }
+}
+// SAFETY: exclusive original hosted RAM fixture, not a native phase promotion.
+unsafe impl crate::bus::pci::owned::grant::DriverCustody for PmCustody {}
 // SAFETY: isolated registry, stable aligned native RAM, no physical device.
 // check_context is a mapping-context callback, not a register-access callback.
 unsafe impl owned::MappingPlatform for NativePm {
     fn check_context(&self, _: owned::AddressSpace) -> core::result::Result<(), owned::Error> {
+        if self.deny_context.load(Ordering::Relaxed) {
+            return Err(owned::Error::Unavailable);
+        }
         Ok(())
     }
     unsafe fn map(
@@ -1146,12 +1325,13 @@ unsafe impl owned::MappingPlatform for NativePm {
 }
 fn native_config(address: Address, device: u16) -> (Function<ControlledConfig>, Arc<NativePm>) {
     let model = Arc::new(NativePm {
-        page: Box::new(UnsafeCell::new(ConfigPage([0; 4096]))),
+        page: Arc::new(ConfigRam(UnsafeCell::new(ConfigPage([0; 4096])))),
         mode: Mutex::new(PmMode::Normal),
         accesses: Mutex::new(Vec::new()),
         actual_state: AtomicUsize::new(0),
         unmaps: AtomicUsize::new(0),
         fail_unmap: AtomicBool::new(false),
+        deny_context: AtomicBool::new(false),
         retire_after: Mutex::new(None),
     });
     let span = owned::PhysicalSpan::new(0x8010_0000, 4096).unwrap();
@@ -1164,9 +1344,22 @@ fn native_config(address: Address, device: u16) -> (Function<ControlledConfig>, 
         // SAFETY: the model device, its pages and its domain belong to this test alone; no other
         // driver, worker or DMA touches them.
         unsafe { owned::Authority::isolated_model(model.clone(), space, Vec::new()) }.unwrap();
+    // SAFETY: SAME original real model ECAM allocation, not its symbolic PA;
+    // hosted accesses are serialized and no native/affine resource exists.
+    let mapping_owner = unsafe {
+        owned::model::MappingOwner::from_owned(model.page.clone(), |owner| {
+            if (owner.pointer().as_ptr() as usize).is_multiple_of(4096) {
+                Ok(())
+            } else {
+                Err(crate::bus::pci::assignment::Error::Context)
+            }
+        })
+    };
+    let retention = mapping_owner.retention().unwrap();
+    let resource = owned::Resource::new(Box::new(ConfigResource(span, retention.clone())));
     let mapping = authority
         .map(
-            owned::Resource::new(Box::new(ConfigResource(span))),
+            resource.clone(),
             0,
             4096,
             owned::CacheAttribute::Uncached,
@@ -1181,16 +1374,30 @@ fn native_config(address: Address, device: u16) -> (Function<ControlledConfig>, 
     };
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
     // driver, worker or DMA touches them.
-    let mut config = match unsafe { OwnedConfig::attach(address, window, mapping) } {
-        Ok(config) => config,
-        Err((error, _)) => panic!("native PM fixture: {error:?}"),
+    let custody = PmCustody {
+        owner: mapping_owner,
+        retention,
+        resource,
+        address,
+        window,
     };
-    config.write32(0, (u32::from(device) << 16) | 0x1d6a);
-    config.write32(8, 0x02000000);
-    config.write16(6, 1 << 4);
-    config.write8(0x34, 0x40);
-    config.write16(0x40, 1);
-    config.write16(0x44, 0);
+    let grant = crate::bus::pci::owned::grant::DriverGrant::from_owned(custody);
+    let mut config = match OwnedConfig::attach(grant, mapping) {
+        Ok(config) => config,
+        Err((error, grant, mapping)) => {
+            // Keep the SAME actual grant and mapping on constructor refusal.
+            core::mem::forget((grant, mapping));
+            panic!("native PM fixture: {error:?}")
+        }
+    };
+    config
+        .write32(0, (u32::from(device) << 16) | 0x1d6a)
+        .unwrap();
+    config.write32(8, 0x02000000).unwrap();
+    config.write16(6, 1 << 4).unwrap();
+    config.write8(0x34, 0x40).unwrap();
+    config.write16(0x40, 1).unwrap();
+    config.write16(0x44, 0).unwrap();
     let config = ControlledConfig {
         native: config,
         peer: model.clone(),
@@ -1215,7 +1422,9 @@ fn native_failed_d0_resume_is_retryable_and_never_uses_powered_off_mmio() {
     let access_start = pm.accesses.lock().unwrap().len();
     assert_eq!(
         net.resume_owned(),
-        Err(Error::Unsupported("AQtion PCI D0 transition failed"))
+        Err(Error::Pci(crate::block::BlockError::Unsupported(
+            "PCI function did not enter D0"
+        )))
     );
     assert_eq!(
         pm.pm_accesses_since(access_start),
@@ -1316,12 +1525,19 @@ fn initial_native_d0_failure_keeps_uninitialized_owner_without_mmio() {
     let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
     // Model attach before Memory allocation, using its power helper.
     net.state = State::Faulted;
-    net.function.as_mut().unwrap().config().write16(0x44, 3);
+    net.function
+        .as_mut()
+        .unwrap()
+        .config()
+        .write16(0x44, 3)
+        .unwrap();
     *pm.mode.lock().unwrap() = PmMode::RefuseD0;
     let access_start = pm.accesses.lock().unwrap().len();
     assert_eq!(
         power_up(net.function.as_mut().unwrap(), &peer, &mut net.power),
-        Err(Error::Unsupported("AQtion PCI D0 transition failed"))
+        Err(Error::Pci(crate::block::BlockError::Unsupported(
+            "PCI function did not enter D0"
+        )))
     );
     assert_eq!(
         pm.pm_accesses_since(access_start),
@@ -1684,8 +1900,8 @@ fn model_rejects_dma_drain_and_unmap_without_bus_master_readback() {
                 assert!(!posted.is_empty());
             }
             let config = net.function.as_mut().unwrap().config();
-            let command = config.read16(4);
-            config.write16(4, command & !4);
+            let command = config.read16(4).unwrap();
+            config.write16(4, command & !4).unwrap();
             // This device-side volatile sample is absent from the
             // caller trace: cleared RAM cannot substitute for driver readback.
             assert_eq!(peer.native_pm.borrow().as_ref().unwrap().command() & 4, 0);
@@ -1740,9 +1956,9 @@ fn model_rejects_unmap_after_native_bus_master_reenable_and_keeps_dma() {
         let mappings = domain.maps.lock().unwrap().len();
         assert_eq!(mappings, 4);
         let config = net.function.as_mut().unwrap().config();
-        let command = config.read16(4);
-        config.write16(4, command | 4);
-        assert_ne!(config.read16(4) & 4, 0);
+        let command = config.read16(4).unwrap();
+        config.write16(4, command | 4).unwrap();
+        assert_ne!(config.read16(4).unwrap() & 4, 0);
 
         // Violate the stopped owner's configuration invariant,
         // then try to reclaim through the real Memory/DmaMapping unmap path.
@@ -1772,9 +1988,9 @@ fn model_rejects_historical_drain_after_a_new_engine_epoch() {
     // Satisfy the independent PCI boundary, but omit this epoch's
     // domain drain. The historical-drain control must reach that exact check.
     let config = net.function.as_mut().unwrap().config();
-    let command = config.read16(4);
-    config.write16(4, command & !4);
-    assert_eq!(config.read16(4) & 4, 0);
+    let command = config.read16(4).unwrap();
+    config.write16(4, command & !4).unwrap();
+    assert_eq!(config.read16(4).unwrap() & 4, 0);
     net.memory.as_mut().unwrap().retire().unwrap();
 }
 fn omit_visibility_before_tx(payload: bool) {
@@ -2530,3 +2746,39 @@ mod reset_source;
 mod liveness;
 
 mod ownership;
+
+#[test]
+fn config_context_denial_keeps_exact_error_and_initial_owner_without_mmio() {
+    use crate::bus::pci::{ConfigError, ConfigFailure};
+    let (mut net, peer, domain, dropped) = setup(0x07b1);
+    let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
+    let reads = peer.reads.borrow().len();
+    let writes = peer.writes.borrow().len();
+    let config_accesses = pm.accesses.lock().unwrap().len();
+    let expected = Error::Config(ConfigError::before_effect(ConfigFailure::Mapping(
+        owned::Error::Unavailable,
+    )));
+    pm.deny_context.store(true, Ordering::Relaxed);
+    assert_eq!(net.start(), Err(expected.clone()));
+    assert_eq!(
+        adapter(expected),
+        LinkError::Pci(crate::block::BlockError::Config(
+            ConfigError::before_effect(ConfigFailure::Mapping(owned::Error::Unavailable))
+        ))
+    );
+    assert_eq!(net.state(), State::Faulted);
+    assert!(
+        net.function.is_some()
+            && net.hardware.is_some()
+            && net.domain.is_some()
+            && net.memory.is_some()
+    );
+    assert_eq!(peer.reads.borrow().len(), reads);
+    assert_eq!(peer.writes.borrow().len(), writes);
+    assert_eq!(pm.accesses.lock().unwrap().len(), config_accesses);
+    assert_eq!(pm.unmaps.load(Ordering::Relaxed), 0);
+    drop(net);
+    assert_eq!(pm.unmaps.load(Ordering::Relaxed), 0);
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    assert_eq!(domain.maps.lock().unwrap().len(), 4);
+}

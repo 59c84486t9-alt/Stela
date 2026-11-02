@@ -149,7 +149,7 @@ impl Host {
             c.root_link_write(port, actual, U3, LINK_CHANGE);
             c.wait_root_link(port, before, U3, false)?;
         }
-        time::delay(c.clock, SUSPEND_SETTLE_US)?;
+        time::delay(&mut c, SUSPEND_SETTLE_US)?;
         c.suspend_controller()?;
         for hub in &mut self.hubs {
             hub.pending = None;
@@ -277,7 +277,7 @@ impl Host {
             let usb2 = c.port_major[usize::from(port - 1)] == 2;
             c.root_link_write(port, actual, if usb2 { RESUME } else { 0 }, LINK_CHANGE);
             if usb2 {
-                time::delay(c.clock, RESUME_SIGNAL_US)?;
+                time::delay(&mut c, RESUME_SIGNAL_US)?;
                 let actual = c.read_suspend_port(port);
                 root_session(before, actual)?;
                 c.root_link_write(port, actual, 0, LINK_CHANGE);
@@ -286,7 +286,7 @@ impl Host {
             let actual = c.read_suspend_port(port);
             c.root_link_write(port, actual, 0, LINK_CHANGE);
         }
-        time::delay(c.clock, RESUME_RECOVERY_US)?;
+        time::delay(&mut c, RESUME_RECOVERY_US)?;
         // Restore parents before sending controls through their EP0 to children.
         for &(id, attachment) in snapshot.topology.iter().rev() {
             if !c.known_id(id)
@@ -414,7 +414,7 @@ impl Controller {
             if deadline.passed() {
                 return Err(BlockError::Timeout);
             }
-            time::delay(self.clock, 100)?;
+            time::poll_delay(self.clock, 100)?;
         }
     }
 

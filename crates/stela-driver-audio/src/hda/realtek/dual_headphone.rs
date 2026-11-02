@@ -6,8 +6,7 @@
 //! route. No OEM wiring, GPIO/companion amplifier or ULP policy is inferred.
 use super::{CoefficientChange, RealtekCommonReport, headphone::DepopControl};
 use crate::{
-    Direction, Error, Phase,
-    bus::i2c::Timer,
+    Direction, Error, Phase, Timer,
     hda::{
         AnalogRoute, CodecGraph, Controller, PinOptions, PinSense, Registers, StreamId, Verb,
         WidgetKind,
@@ -40,6 +39,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     // Node58 is fixed in the donor. Only its three sequencer indices
     // enter this private helper; no public arbitrary vendor-NID API is added.
     fn sequencer_index(&mut self, codec: u8, index: u16) -> Result<(), Error> {
+        self.minimum_guard()?;
         if !matches!(index, 0 | 3 | 0x0f) {
             return Err(Error::InvalidConfiguration);
         }
@@ -50,11 +50,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn sequencer_read(&mut self, codec: u8, index: u16) -> Result<u16, Error> {
+        self.minimum_guard()?;
         self.sequencer_index(codec, index)?;
         u16::try_from(self.verb(Verb::long(codec, 0x58, 12, 0)?)?)
             .map_err(|_| Error::CoefficientRejected { node: 0x58, index })
     }
     fn sequencer_write(&mut self, codec: u8, index: u16, value: u16) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.sequencer_index(codec, index)?;
         self.verb(Verb::long(codec, 0x58, 4, value)?)?;
         if self.sequencer_read(codec, index)? != value {
@@ -67,6 +69,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         codec: u8,
         pin: u8,
     ) -> Result<Vec<CoefficientChange>, Error> {
+        self.minimum_guard()?;
         self.sequencer_write(codec, 0, 0x1888)?;
         let mut changes = alloc::vec![self.update_coefficient(codec, 0x4a, 1 << 15, 1 << 15)?];
         let saved38 = self.read_coefficient(codec, 0x38)?;
@@ -81,11 +84,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 return Err(Error::RouteRejected);
             }
         }
-        self.delay(130_000);
+        self.delay(130_000)?;
         changes.push(self.update_coefficient(codec, 0x36, 1 << 14, 1 << 14)?);
         changes.push(self.clear_coefficient_bits(codec, 0x36, 1 << 13)?);
         self.route_control(codec, pin, 0x707, 0xf07, 0)?;
-        self.delay(10_000);
+        self.delay(10_000)?;
         let previous = self.read_coefficient(codec, 0x67)?;
         changes.push(self.write_coefficient_observed(codec, 0x67, previous, 0)?);
         self.sequencer_write(codec, 0, 0x7880)?;
@@ -101,7 +104,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             if result & 0x8000 == 0 {
                 break;
             }
-            self.delay(50_000);
+            self.delay(50_000)?;
             result = self.sequencer_read(codec, 0)?;
         }
         if result & 0x8000 != 0 {
@@ -113,12 +116,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         changes.push(self.update_coefficient(codec, 0x38, 1 << 4, saved38)?);
         changes.push(self.update_coefficient(codec, 0x0d, 0x110, saved0d)?);
         changes.push(self.update_coefficient(codec, 0x36, 3 << 13, saved36)?);
-        self.delay(50_000);
+        self.delay(50_000)?;
         changes.push(self.clear_coefficient_bits(codec, 0x4a, 1 << 15)?);
         Ok(changes)
     }
 
     fn fixed_second_pin_preflight(&mut self, graph: &CodecGraph) -> Result<(bool, u32), Error> {
+        self.minimum_guard()?;
         let pin = graph
             .groups
             .iter()
@@ -173,6 +177,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         primary: RealtekHeadphoneRoute<'_>,
         secondary: Option<RealtekHeadphoneRoute<'_>>,
     ) -> Result<RealtekDualHeadphoneReport, Error> {
+        self.minimum_guard()?;
         self.realtek_common_guard(graph)?;
         if !matches!(graph.vendor_id, 0x10ec_0285 | 0x10ec_0295) {
             return Err(Error::UnsupportedTopology);
@@ -246,7 +251,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             if boot_depop_performed {
                 coefficients.extend(self.boot_headphone_depop(graph.address, primary.route.pin())?);
             }
-            self.delay(30_000);
+            self.delay(30_000)?;
             let first = self.poll_pin_sense(graph, primary.route.pin())?;
             // Donor raw standard sensing is not replaced with a synthetic
             // absence just because firmware reports NoConnection/no-presence.
@@ -275,20 +280,20 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 }
             }
             if first.present || second.present {
-                self.delay(2_000);
+                self.delay(2_000)?;
                 self.depop_control(graph.address, DepopControl::HeadphonePower, 1)?;
                 for (pin, sense) in [(primary.route.pin(), first), (0x16, second)] {
                     if sense.present {
                         self.route_control(graph.address, pin, 0x707, 0xf07, 0x40)?;
                     }
                 }
-                self.delay(75_000);
+                self.delay(75_000)?;
                 for (pin, sense) in [(primary.route.pin(), first), (0x16, second)] {
                     if sense.present {
                         self.headphone_unmute_zero(graph.address, pin)?;
                     }
                 }
-                self.delay(75_000);
+                self.delay(75_000)?;
                 coefficients.push(self.clear_coefficient_bits(graph.address, 0x4a, 3 << 10)?);
                 self.depop_control(graph.address, DepopControl::HeadphonePower, 4)?;
             }

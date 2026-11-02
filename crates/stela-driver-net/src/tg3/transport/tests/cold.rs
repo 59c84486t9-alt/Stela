@@ -143,7 +143,7 @@ fn any_cold_register_or_timer_error_retains_the_original_epoch() {
             .quiesce_cold()
             .err()
             .expect("injected timer failure");
-        assert_eq!(error, Error::Clock);
+        assert_eq!(error, Error::Timing(crate::bus::pci::power::Error::Clock));
         drop(hardware);
         assert_eq!(model.borrow().dropped, 0, "wait {wait}");
     }

@@ -21,10 +21,12 @@ pub struct Resources {
     pub domain: Arc<dyn DmaDomain>,
     pub irq: Box<dyn IrqRegistration>,
     pub clock: Clock,
+    pub minimum: Rc<dyn crate::bus::pci::power::Timer>,
 }
 
 #[derive(Debug)]
 pub enum Error {
+    Config(crate::bus::pci::ConfigError),
     Controller(BlockError),
     Irq(IrqError),
     Registers,
@@ -37,6 +39,7 @@ struct Owner {
     // Neither a replacement domain nor HCRST certifies old-route retirement.
     resources: RefCell<ManuallyDrop<Resources>>,
     register_failure: Rc<Cell<Option<usize>>>,
+    minimum: Minimum,
     // Keep the exact retired action/source/route graph through subsequent
     // device work; IRQ action retirement does not release endpoint resources.
     retired_irq: RefCell<Option<crate::bus::irq::RetiredSource<dyn crate::bus::irq::Source>>>,
@@ -45,7 +48,7 @@ struct Owner {
 struct Access(Rc<Owner>);
 impl Registers for Access {
     fn read32(&mut self, offset: usize) -> u32 {
-        if self.0.register_failure.get().is_some() {
+        if self.0.register_failure.get().is_some() || self.0.minimum.error().is_some() {
             return u32::MAX;
         }
         let resources = self.0.resources.borrow();
@@ -61,7 +64,7 @@ impl Registers for Access {
         u32::from_le(unsafe { pointer.as_ptr().cast::<u32>().read_volatile() })
     }
     fn write32(&mut self, offset: usize, value: u32) {
-        if self.0.register_failure.get().is_some() {
+        if self.0.register_failure.get().is_some() || self.0.minimum.error().is_some() {
             return;
         }
         let resources = self.0.resources.borrow();
@@ -90,6 +93,9 @@ pub struct Failure {
     memory: Option<Rc<memory::Native>>,
 }
 impl Failure {
+    pub fn minimum_error(&self) -> Option<crate::bus::pci::power::Error> {
+        self.owner.minimum.error()
+    }
     pub fn dma_error(&self) -> Option<region::Error> {
         self.memory.as_ref().and_then(|m| m.error())
     }
@@ -261,6 +267,10 @@ impl Controller {
             .configure_streams(endpoints, selected, requested, &mut NoBoot)
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn submit_native(
         &mut self,
         id: SlotId,
@@ -403,11 +413,17 @@ impl Controller {
 /// Native raw-address payload submission is unavailable; use consumed typed
 /// payloads. Full controller retirement is a separate boundary. Dropping this owner
 /// permanently keeps its configuration/BAR/IRQ/power resources.
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub unsafe fn attach(
     resources: Resources,
     firmware: &dyn crate::firmware::Provider,
 ) -> Result<Controller, Failure> {
+    let minimum = Minimum::retain(resources.minimum.clone());
     let owner = Rc::new(Owner {
+        minimum,
         resources: RefCell::new(ManuallyDrop::new(resources)),
         register_failure: Rc::new(Cell::new(None)),
         retired_irq: RefCell::new(None),
@@ -415,6 +431,7 @@ pub unsafe fn attach(
     let mut controller = None;
     let mut retained_memory = None;
     let result = (|| {
+        owner.minimum.check().map_err(Error::Controller)?;
         let (clock, native_memory, policy, location) = {
             let mut resources = owner.resources.borrow_mut();
             clock_ready(resources.clock).map_err(Error::Controller)?;
@@ -428,12 +445,12 @@ pub unsafe fn attach(
             let quirks =
                 quirks::Profile::pci(&mut resources.function).map_err(Error::Controller)?;
             let function = &mut resources.function;
-            let low = function.config().read32(0x10);
+            let low = function.config().read32(0x10).map_err(Error::Config)?;
             if low & 1 != 0 || !matches!(low & 6, 0 | 4) {
                 return Err(Error::Registers);
             }
             let high = if low & 6 == 4 {
-                u64::from(function.config().read32(0x14)) << 32
+                u64::from(function.config().read32(0x14).map_err(Error::Config)?) << 32
             } else {
                 0
             };
@@ -446,20 +463,42 @@ pub unsafe fn attach(
             {
                 return Err(Error::Registers);
             }
-            if resources.function.config().read16(4) & 4 != 0 {
+            if resources
+                .function
+                .config()
+                .read16(4)
+                .map_err(Error::Config)?
+                & 4
+                != 0
+            {
                 return Err(Error::BusMaster);
             }
             // Original source mask, callback synchronization and route
             // retirement; IMAN.IE=0 alone cannot establish these facts.
             let retired = resources.irq.retire().map_err(Error::Irq)?;
             *owner.retired_irq.borrow_mut() = Some(retired);
-            let command = resources.function.config().read16(4);
-            resources.function.config().write16(4, command | 2 | 0x400);
-            if resources.function.config().read16(4) & 0x406 != 0x402 {
+            let command = resources
+                .function
+                .config()
+                .read16(4)
+                .map_err(Error::Config)?;
+            resources
+                .function
+                .config()
+                .write16(4, command | 2 | 0x400)
+                .map_err(Error::Config)?;
+            if resources
+                .function
+                .config()
+                .read16(4)
+                .map_err(Error::Config)?
+                & 0x406
+                != 0x402
+            {
                 return Err(Error::BusMaster);
             }
             let clock = resources.clock;
-            renesas::prepare(&mut resources.function, clock, firmware)
+            renesas::prepare_with_minimum(&mut resources.function, clock, firmware, &owner.minimum)
                 .map_err(|e| Error::Controller(e.transport()))?;
             let function = &resources.function;
             let address = function.address;
@@ -490,6 +529,7 @@ pub unsafe fn attach(
             policy,
             move || quirks::after_reset(&mut reset_owner.resources.borrow_mut().function, clock),
             Some(native_memory),
+            owner.minimum.clone(),
         )
         .map_err(Error::Controller)?;
         controller = Some(Box::new(core));
@@ -497,9 +537,24 @@ pub unsafe fn attach(
             return Err(Error::Registers);
         }
         let mut resources = owner.resources.borrow_mut();
-        let command = resources.function.config().read16(4);
-        resources.function.config().write16(4, command | 6 | 0x400);
-        if resources.function.config().read16(4) & 0x406 != 0x406 {
+        let command = resources
+            .function
+            .config()
+            .read16(4)
+            .map_err(Error::Config)?;
+        resources
+            .function
+            .config()
+            .write16(4, command | 6 | 0x400)
+            .map_err(Error::Config)?;
+        if resources
+            .function
+            .config()
+            .read16(4)
+            .map_err(Error::Config)?
+            & 0x406
+            != 0x406
+        {
             return Err(Error::BusMaster);
         }
         if owner.register_failure.get().is_some() {

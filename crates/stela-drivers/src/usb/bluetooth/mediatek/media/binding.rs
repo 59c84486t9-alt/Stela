@@ -44,6 +44,10 @@ pub struct Bindings {
     use_alt3_for_wbs: bool,
 }
 impl Bindings {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn new(binding: &Binding) -> Result<Self> {
         let device = binding.device();
         let d = &device.descriptor;
@@ -99,6 +103,10 @@ impl Bindings {
         self.iso.is_some()
     }
     /// Source ordinary USB2 SCO plan, without MediaTek's third interface.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(in crate::usb::bluetooth) fn realtek_sco(binding: &Binding) -> Result<Self> {
         let device = binding.device();
         if !super::super::super::realtek::is_candidate(device) || binding.interface() != 0 {
@@ -106,12 +114,20 @@ impl Bindings {
         }
         Self::standard_sco(binding, true)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(in crate::usb::bluetooth) fn qca_sco(binding: &Binding) -> Result<Self> {
         if !super::super::super::qca::is_candidate(binding.device()) || binding.interface() != 0 {
             return Err(Error::Unsupported("exact initialized QCA USB profile"));
         }
         Self::standard_sco(binding, false)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn standard_sco(binding: &Binding, use_alt3_for_wbs: bool) -> Result<Self> {
         let device = binding.device();
         let interfaces = crate::usb::descriptor::interfaces(&device.configuration);
@@ -159,6 +175,10 @@ impl Bindings {
     }
     /// The caller supplies current voice state. Missing/malformed
     /// source-selected alternates refuse, with no invented bandwidth fallback.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn sco(&self, voice: Voice) -> Result<Option<Pair>> {
         if voice.connections == 0 {
             return Ok(None);
@@ -188,6 +208,10 @@ impl Bindings {
             .ok_or(Error::Descriptor("source-selected SCO alternate missing"))?;
         pair(selected, self.speed, 1).map(Some)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(in crate::usb::bluetooth) fn wideband_sco(
         &self,
         connections: u8,
@@ -228,6 +252,10 @@ impl Bindings {
 pub(in crate::usb::bluetooth) fn service_bytes(endpoint: Endpoint) -> usize {
     usize::from(endpoint.max_packet & 0x7ff) * (usize::from((endpoint.max_packet >> 11) & 3) + 1)
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 fn pair(interface: &Interface, speed: u8, kind: u8) -> Result<Pair> {
     if interface.endpoints.len() != 2 {
         return Err(Error::Descriptor("exact duplex media endpoint pair"));

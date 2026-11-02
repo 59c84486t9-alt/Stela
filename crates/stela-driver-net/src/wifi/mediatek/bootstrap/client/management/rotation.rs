@@ -29,10 +29,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         outcome.map(|_| ()).map_err(Error::Key)
     }
 
-    fn rotated_management_session(s: &mut Owned<I, Q, C>) -> Result<Arc<Session>, Error>
-    where
-        C: Send + Sync,
-    {
+    fn rotated_management_session(s: &mut Owned<I, Q, C>) -> Result<Arc<Session>, Error> {
         let (ptk, gtk) = Self::management_keys(s)?;
         let key = s.gtk.as_ref().ok_or(Error::NoKey)?;
         let igtk = key.installed_igtk().ok_or(Error::NoKey)?;
@@ -75,10 +72,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         index: u8,
         material: &[u8],
         receive: PacketNumber,
-    ) -> Result<Arc<Session>, Error>
-    where
-        C: Send + Sync,
-    {
+    ) -> Result<Arc<Session>, Error> {
         let s = self.state_mut();
         Self::validate_management(s, session)?;
         if s.modern.is_some() {
@@ -115,10 +109,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         index: u8,
         material: &[u8],
         receive: PacketNumber,
-    ) -> Result<Arc<Session>, Error>
-    where
-        C: Send + Sync,
-    {
+    ) -> Result<Arc<Session>, Error> {
         let s = self.state_mut();
         Self::validate_management(s, session)?;
         if s.modern.is_none() {

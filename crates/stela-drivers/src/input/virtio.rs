@@ -99,8 +99,9 @@ impl VirtioInput {
         function: &mut Function,
         handoff: &Handoff,
         dma: &mut dyn DmaAllocator,
+        minimum: &(impl crate::bus::pci::power::Timer + ?Sized),
     ) -> Result<Self, BlockError> {
-        let transport = Modern::new(function, handoff)?;
+        let transport = Modern::new(function, handoff, minimum)?;
         transport.negotiate(0)?;
         let device = transport.device;
         let config = |select: u8, subselect: u8| {

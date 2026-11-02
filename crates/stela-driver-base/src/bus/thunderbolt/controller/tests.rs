@@ -9,24 +9,39 @@ struct PciState {
     reject: Option<u16>,
     ready_at: u64,
     ready_delay: u64,
+    reset_flush: Option<alloc::sync::Weak<Model>>,
+    softfail_reset_read: bool,
 }
 struct Pci {
     state: Arc<Mutex<PciState>>,
     clock: Arc<AtomicU64>,
 }
 impl ConfigSpace for Pci {
-    fn read32(&self, offset: u16) -> u32 {
-        let state = self.state.lock().unwrap();
-        if state.fail == Some(offset) {
-            return u32::MAX;
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        let mut value = {
+            let state = self.state.lock().unwrap();
+            if state.fail == Some(offset) {
+                return Ok(u32::MAX);
+            }
+            let mut value = state.values[usize::from(offset) / 4];
+            if offset == VS_FW_READY && self.clock.load(Ordering::Relaxed) >= state.ready_at {
+                value |= 1 << 31;
+            }
+            value
+        };
+        if offset == 0 {
+            let flush = self.state.lock().unwrap().reset_flush.clone();
+            if let Some(model) = flush.and_then(|model| model.upgrade()) {
+                let posted = model.state.lock().unwrap().reset_posted;
+                model.flush_reset();
+                if posted && self.state.lock().unwrap().softfail_reset_read {
+                    value = u32::MAX;
+                }
+            }
         }
-        let mut value = state.values[usize::from(offset) / 4];
-        if offset == VS_FW_READY && self.clock.load(Ordering::Relaxed) >= state.ready_at {
-            value |= 1 << 31;
-        }
-        value
+        Ok(value)
     }
-    fn write32(&mut self, offset: u16, value: u32) {
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         let mut state = self.state.lock().unwrap();
         state.writes.push((offset, value));
         if state.reject != Some(offset) {
@@ -38,6 +53,24 @@ impl ConfigSpace for Pci {
                     .saturating_add(state.ready_delay);
             }
         }
+
+        Ok(())
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+    }
+
+    fn write8(&mut self, _: u16, _: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        panic!("unexpected narrow PCI store in controller fixture");
+    }
+
+    fn write16(&mut self, _: u16, _: u16) -> Result<(), crate::bus::pci::ConfigError> {
+        panic!("unexpected narrow PCI store in controller fixture");
     }
 }
 struct RegistersState {
@@ -49,11 +82,29 @@ struct RegistersState {
     fail: Option<usize>,
     reset_delay: u64,
     reset_clear_at: u64,
+    reset_write_wall: Option<u64>,
+    reset_posted: bool,
+    reset_read_wall: Vec<u64>,
 }
 struct Model {
     state: Mutex<RegistersState>,
     clock: Arc<AtomicU64>,
     style: InterruptStyle,
+    wall: Arc<AtomicU64>,
+    _function: Arc<Mutex<PciState>>,
+}
+impl Model {
+    fn flush_reset(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.reset_posted {
+            state.reset_posted = false;
+            state.reset_write_wall = Some(self.wall.load(Ordering::Relaxed));
+            state.reset_clear_at = self
+                .wall
+                .load(Ordering::Relaxed)
+                .saturating_add(state.reset_delay.saturating_mul(1000));
+        }
+    }
 }
 // SAFETY: this model owns one synthetic PCI/MMIO requester and reset epoch;
 // its mutex preserves real read-clear/write-clear/reset failure effects.
@@ -62,7 +113,15 @@ unsafe impl Registers for Model {
         RESET + 4
     }
     fn read32(&self, offset: usize) -> u32 {
+        if offset == RESET {
+            self.flush_reset();
+        }
         let mut state = self.state.lock().unwrap();
+        if offset == RESET {
+            state
+                .reset_read_wall
+                .push(self.wall.load(Ordering::Relaxed));
+        }
         if state.fail == Some(offset) {
             return u32::MAX;
         }
@@ -77,7 +136,7 @@ unsafe impl Registers for Model {
             }
             return value;
         }
-        if offset == RESET && self.clock.load(Ordering::Relaxed) >= state.reset_clear_at {
+        if offset == RESET && self.wall.load(Ordering::Relaxed) >= state.reset_clear_at {
             state.values.insert(RESET, 0);
         }
         *state.values.get(&offset).unwrap_or(&0)
@@ -108,10 +167,7 @@ unsafe impl Registers for Model {
         }
         state.values.insert(offset, value);
         if offset == RESET {
-            state.reset_clear_at = self
-                .clock
-                .load(Ordering::Relaxed)
-                .saturating_add(state.reset_delay);
+            state.reset_posted = true;
         }
     }
 }
@@ -131,6 +187,8 @@ fn fixture(vendor: u16, device: u16, class: u32, version: u8, hops: u16) -> (Pci
             reject: None,
             ready_at: u64::MAX,
             ready_delay: 6,
+            reset_flush: None,
+            softfail_reset_read: false,
         })),
         clock: clock.clone(),
     };
@@ -146,18 +204,28 @@ fn fixture(vendor: u16, device: u16, class: u32, version: u8, hops: u16) -> (Pci
             fail: None,
             reset_delay: 50,
             reset_clear_at: u64::MAX,
+            reset_write_wall: None,
+            reset_posted: false,
+            reset_read_wall: Vec::new(),
         }),
         clock,
+        wall: Arc::new(AtomicU64::new(0)),
+        _function: pci.state.clone(),
         style: if vendor == 0x8086 {
             InterruptStyle::IntelAutoClear
         } else {
             InterruptStyle::Usb4MaskClear
         },
     });
+    pci.state.lock().unwrap().reset_flush = Some(Arc::downgrade(&model));
     (pci, model)
 }
 fn poll(controller: &mut Controller<'_, Pci, Model>, now: u64) -> Result<Option<Prepared>, Error> {
-    controller.registers.clock.store(now, Ordering::Relaxed);
+    controller
+        .resources
+        .registers
+        .clock
+        .store(now, Ordering::Relaxed);
     controller.poll(now)
 }
 #[test]
@@ -166,7 +234,8 @@ fn intel_integrated_force_ready_ltr_reset_and_interrupt_register_effects() {
     let state = pci.state.clone();
     // SAFETY: both surfaces are this same exclusively owned synthetic
     // requester/epoch, real modeled D0/decode, master off, no prior DMA/IRQ.
-    let mut controller = unsafe { Controller::new(&mut pci, model.clone()) }.unwrap();
+    let mut controller =
+        unsafe { Controller::new(&mut pci, model.clone(), minimum(&model)) }.unwrap();
     assert_eq!(poll(&mut controller, 0).unwrap(), None);
     assert!(state.lock().unwrap().writes.is_empty());
     assert_eq!(model.state.lock().unwrap().writes, vec![(RESET, 1)]);
@@ -222,7 +291,8 @@ fn generic_usb4_amd_uses_source_mask_clear_banks_and_discrete_skips_icl_power() 
         let state = pci.state.clone();
         // SAFETY: same synthetic physical requester, epoch and stopped
         // resources; all required native ownership grants are modeled.
-        let mut controller = unsafe { Controller::new(&mut pci, model.clone()) }.unwrap();
+        let mut controller =
+            unsafe { Controller::new(&mut pci, model.clone(), minimum(&model)) }.unwrap();
         let result = poll(&mut controller, 0).unwrap();
         let prepared = if version >= 0x40 {
             assert_eq!(result, None);
@@ -272,7 +342,7 @@ fn identity_decode_mastering_active_ring_and_mapping_fail_before_mutation() {
         }
         // SAFETY: synthetic identity/register faults test
         // validation; no other physical owner or DMA can exist.
-        match unsafe { Controller::new(&mut pci, model.clone()) } {
+        match unsafe { Controller::new(&mut pci, model.clone(), minimum(&model)) } {
             Ok(mut controller) => assert_eq!(poll(&mut controller, 0), Err(Error::Busy)),
             Err(_) => assert_ne!(case, 6),
         }
@@ -301,9 +371,10 @@ fn firmware_timeout_failed_readback_and_reset_failure_quarantine_real_reservatio
         }
         // SAFETY: same stopped synthetic NHI; injected failures preserve
         // physical ownership rather than authorizing fallback startup.
-        let mut controller = unsafe { Controller::new(&mut pci, model.clone()) }.unwrap();
+        let mut controller =
+            unsafe { Controller::new(&mut pci, model.clone(), minimum(&model)) }.unwrap();
         assert_eq!(poll(&mut controller, 0).unwrap(), None);
-        if integrated {
+        if integrated || case == 3 {
             assert_eq!(poll(&mut controller, 100).unwrap(), None);
         }
         let error = match case {
@@ -345,14 +416,16 @@ fn clock_regression_and_overflow_never_claim_prepared_or_publish_new_work() {
     let (mut pci, model) = fixture(0x8086, 0x9a1b, 0x0c0340, 0x40, 8);
     let state = pci.state.clone();
     // SAFETY: same synthetic requester and epoch contract.
-    let mut controller = unsafe { Controller::new(&mut pci, model.clone()) }.unwrap();
+    let mut controller =
+        unsafe { Controller::new(&mut pci, model.clone(), minimum(&model)) }.unwrap();
     assert_eq!(poll(&mut controller, u64::MAX), Err(Error::ClockOverflow));
     assert!(state.lock().unwrap().writes.is_empty());
     drop(controller);
     let (mut pci, model) = fixture(0x8086, 0x9a1b, 0x0c0340, 0x40, 8);
     let state = pci.state.clone();
     // SAFETY: independent synthetic requester/epoch, no prior work.
-    let mut controller = unsafe { Controller::new(&mut pci, model.clone()) }.unwrap();
+    let mut controller =
+        unsafe { Controller::new(&mut pci, model.clone(), minimum(&model)) }.unwrap();
     poll(&mut controller, 10).unwrap();
     let writes = state.lock().unwrap().writes.len();
     assert_eq!(poll(&mut controller, 9), Err(Error::ClockRegressed));
@@ -385,7 +458,8 @@ fn unchanged_linux_controller_preparation_effects_and_match_table_agree() {
         let state = pci.state.clone();
         // SAFETY: this same stopped synthetic requester/epoch is
         // represented by both PCI and MMIO; no independent owner is paired.
-        let mut controller = unsafe { Controller::new(&mut pci, model.clone()) }.unwrap();
+        let mut controller =
+            unsafe { Controller::new(&mut pci, model.clone(), minimum(&model)) }.unwrap();
         let mut prepared = None;
         for now in 0..200 {
             prepared = poll(&mut controller, now).unwrap();
@@ -427,3 +501,54 @@ fn unchanged_linux_controller_preparation_effects_and_match_table_agree() {
     }
     assert_eq!(count, 350);
 }
+
+#[test]
+fn preserving_router_withholds_hrr_but_keeps_integrated_startup_and_masks() {
+    let (mut pci, model) = fixture(0x8086, 0x9a1b, 0x0c0340, 0x40, 33);
+    let state = pci.state.clone();
+    // SAFETY: same exclusively owned synthetic NHI, prior DMA/IRQ retired;
+    // no sibling-reset authority is supplied and Preserve withholds HRR.
+    let mut controller = unsafe {
+        Controller::new_with_router_reset(
+            &mut pci,
+            model.clone(),
+            RouterReset::Preserve,
+            minimum(&model),
+        )
+    }
+    .unwrap();
+    let mut prepared = None;
+    for now in 0..20 {
+        prepared = poll(&mut controller, now).unwrap();
+        if prepared.is_some() {
+            break;
+        }
+    }
+    assert!(prepared.is_some());
+    assert!(
+        model
+            .state
+            .lock()
+            .unwrap()
+            .writes
+            .iter()
+            .all(|(offset, _)| *offset != RESET)
+    );
+    assert!(
+        model
+            .state
+            .lock()
+            .unwrap()
+            .masks
+            .iter()
+            .all(|value| *value == 0)
+    );
+    let writes = &state.lock().unwrap().writes;
+    assert!(writes.iter().any(|(offset, _)| *offset == VS_FORCE));
+    assert!(writes.iter().any(|(offset, _)| *offset == VS_LTR));
+}
+
+mod access_failures;
+
+mod minimum;
+use minimum::minimum;

@@ -5,6 +5,10 @@
 //! Selected MLD single-link peer with only legacy rates and no TX queue.
 use super::*;
 
+#[expect(
+    clippy::result_large_err,
+    reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+)]
 pub(super) fn prepare<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
     owner: &mut Ax200LegacyPeer<'_, Q, B, O>,
 ) -> Result<(), Ax200LegacyPeerError> {

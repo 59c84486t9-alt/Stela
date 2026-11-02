@@ -76,8 +76,9 @@ struct ModelTimer {
 }
 
 impl Timer for ModelTimer {
-    fn delay(&self, microseconds: u64) {
+    fn delay(&self, microseconds: u64) -> Result<(), BlockError> {
         self.delays.borrow_mut().push(microseconds);
+        Ok(())
     }
 
     fn wait(&self, _: u64, mut ready: impl FnMut() -> bool) -> bool {
@@ -233,12 +234,13 @@ impl Fixture {
             transmit: Ring::new(&mut allocator).unwrap(),
             dropping_receive: false,
             mac: Mac([2, 0, 0, 0, 0, 1]),
-            clock: Clock {
+            clock: crate::timing::model(Clock {
                 ticks_per_microsecond: 1,
-            },
+            }),
             watchdog_at: u64::MAX,
             phy_hangs: 0,
             faulted: false,
+            timing_failure: None,
             location: String::from("model"),
             signalled: false,
         };
@@ -446,14 +448,42 @@ fn station_addresses_reject_invalid_zero_and_multicast_nvm() {
 struct Config(u32, u32);
 
 impl ConfigSpace for Config {
-    fn read32(&self, offset: u16) -> u32 {
-        match offset {
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok(((match offset & !3 {
             0 => self.0,
             8 => self.1,
             _ => 0,
-        }
+        }) >> ((offset & 3) * 8)) as u8)
     }
-    fn write32(&mut self, _: u16, _: u32) {}
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok(((match offset & !3 {
+            0 => self.0,
+            8 => self.1,
+            _ => 0,
+        }) >> ((offset & 3) * 8)) as u16)
+    }
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        Ok((match offset & !3 {
+            0 => self.0,
+            8 => self.1,
+            _ => 0,
+        }) >> ((offset & 3) * 8))
+    }
+    fn write8(&mut self, _: u16, _: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        Err(crate::bus::pci::ConfigError::before_effect(
+            crate::bus::pci::ConfigFailure::UnqualifiedControl,
+        ))
+    }
+    fn write16(&mut self, _: u16, _: u16) -> Result<(), crate::bus::pci::ConfigError> {
+        Err(crate::bus::pci::ConfigError::before_effect(
+            crate::bus::pci::ConfigFailure::UnqualifiedControl,
+        ))
+    }
+    fn write32(&mut self, _: u16, _: u32) -> Result<(), crate::bus::pci::ConfigError> {
+        Err(crate::bus::pci::ConfigError::before_effect(
+            crate::bus::pci::ConfigFailure::UnqualifiedControl,
+        ))
+    }
 }
 
 #[test]
@@ -476,4 +506,34 @@ fn match_is_restricted_to_82574l_and_ethernet_class() {
         .unwrap();
         assert_eq!(matches(&function), expected);
     }
+}
+
+#[test]
+fn minimum_failure_during_reinitialization_is_typed_and_blocks_later_device_effects() {
+    let mut fixture = Fixture::new();
+    let (timing, failed) = crate::timing::controlled_model(Clock {
+        ticks_per_microsecond: 1,
+    });
+    fixture.net.clock = timing;
+    failed.set(true);
+    let expected = BlockError::PciPower(crate::bus::pci::power::Error::Clock);
+    assert_eq!(
+        fixture.net.reinitialize(),
+        Err(LinkError::Pci(expected.clone()))
+    );
+    // Completed RX and an IRQ-capable path must also remain fenced.
+    fixture.inject(0, 60, RX_DONE | RX_EOP, 0, 7);
+    fixture.net.signalled = true;
+    let receive = fixture.net.receive.descriptors.bytes().to_vec();
+    let observed = fixture.registers.clone();
+    for _ in 0..3 {
+        assert!(!fixture.net.carrier());
+        assert_eq!(
+            fixture.net.transmit(&[1; 60]),
+            Err(LinkError::Pci(expected.clone()))
+        );
+        assert_eq!(fixture.net.receive(), Err(LinkError::Pci(expected.clone())));
+    }
+    assert_eq!(fixture.net.receive.descriptors.bytes(), receive);
+    assert_eq!(fixture.registers, observed);
 }

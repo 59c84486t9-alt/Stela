@@ -18,7 +18,6 @@ use super::{
     receive::{self, Alive, FreeDescriptor, Imr, Lmac, Packets, Umac},
 };
 use crate::{
-    Clock,
     bus::{
         dma::{
             mapping::{Direction, DmaDomain},
@@ -100,18 +99,20 @@ pub struct ProductResetObservation {
 /// function under the same reservation; clones take turns.
 pub unsafe trait BootIo: Csr + Clone + 'static {
     fn write8(&mut self, register: u32, value: u8) -> Result<(), power::AccessError>;
-    /// Reset the stopped function with its PCI setup kept. Whether it did.
-    fn reset_function(&mut self) -> bool;
+    /// Reset the stopped function with its PCI setup kept. `Ok(false)` reports
+    /// no reset; `Err` preserves access/ownership failure and never authorizes
+    /// another boot or an unchanged-state retry.
+    fn reset_function(&mut self) -> Result<bool, crate::block::BlockError>;
 }
 /// What keeps the PCI function behind [`NativeBootIo`].
 pub trait FunctionOwner {
     /// [`BootIo::reset_function`], the claim and BAR mapping kept throughout.
-    fn reset(&self) -> bool;
+    fn reset(&self) -> Result<bool, crate::block::BlockError>;
 }
 #[derive(Clone)]
 pub struct NativeBootIo {
     registers: Mmio,
-    clock: Clock,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
     owner: Rc<dyn FunctionOwner>,
 }
 impl NativeBootIo {
@@ -120,20 +121,24 @@ impl NativeBootIo {
     /// mapping covering its 16 KiB. `owner` keeps that real exclusive PCI
     /// claim and BAR reservation, with all old DMA/IRQs stopped and drained and
     /// PCI interrupt routes disabled; no unrelated/dummy owner checks.
-    /// The clock is calibrated and advancing. The window stays mapped through
+    /// The minimum provider is the actual retained platform grant, usable in this
+    /// context. Nominal clocks cannot supply it. The window stays mapped through
     /// the owner's final Drop, including deliberate quarantine on failure.
     pub unsafe fn from_window(
         window: NonNull<[u8; 16384]>,
         owner: Rc<dyn FunctionOwner>,
-        clock: Clock,
+        minimum: Rc<dyn crate::bus::pci::power::Timer>,
     ) -> Result<Self, Error> {
-        if clock.ticks_per_microsecond == 0 || !(window.as_ptr() as usize).is_multiple_of(4096) {
+        minimum
+            .check()
+            .map_err(|error| Error::Pci(crate::block::BlockError::PciPower(error)))?;
+        if !(window.as_ptr() as usize).is_multiple_of(4096) {
             return Err(Error::Access(power::AccessError::Mapping));
         }
         Ok(Self {
             // SAFETY: covered by this function's own safety contract.
             registers: unsafe { Mmio::new(window.as_ptr().cast::<u8>() as u64) },
-            clock,
+            minimum,
             owner,
         })
     }
@@ -153,8 +158,9 @@ impl Csr for NativeBootIo {
         Ok(())
     }
     fn delay_us(&mut self, microseconds: u32) -> Result<(), power::AccessError> {
-        self.clock.delay(u64::from(microseconds));
-        Ok(())
+        self.minimum
+            .wait_us(u64::from(microseconds))
+            .map_err(power::AccessError::Minimum)
     }
 }
 // SAFETY: construction requires the owned exclusive requester/BAR.
@@ -166,12 +172,13 @@ unsafe impl BootIo for NativeBootIo {
         self.registers.write8(register as usize, value);
         Ok(())
     }
-    fn reset_function(&mut self) -> bool {
+    fn reset_function(&mut self) -> Result<bool, crate::block::BlockError> {
         self.owner.reset()
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
+    Pci(crate::block::BlockError),
     Access(power::AccessError),
     Power(power::Error),
     Dma(dma::Error),
@@ -1346,3 +1353,12 @@ mod rom {
 
 #[cfg(test)]
 mod tests;
+
+impl From<crate::block::BlockError> for Error {
+    fn from(error: crate::block::BlockError) -> Self {
+        Self::Pci(error)
+    }
+}
+
+#[cfg(test)]
+use crate::Clock;

@@ -12,6 +12,10 @@ pub struct LocalVersion {
     pub raw: [u8; 9],
 }
 impl LocalVersion {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn parse(p: &[u8]) -> Result<Self> {
         let raw = p
             .try_into()
@@ -87,6 +91,10 @@ pub struct Identity {
     pub project: Project,
 }
 impl Identity {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn select(
         usb: UsbIdentity,
         version: LocalVersion,

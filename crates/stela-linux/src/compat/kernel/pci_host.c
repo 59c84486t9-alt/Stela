@@ -203,15 +203,29 @@ struct pci_dev *stela_linux_pci_attach(const struct stela_linux_pci_function *fu
 	dev->dma_mask = DMA_BIT_MASK(32);
 	dev->current_state = PCI_D0;
 	dev->rom_base_reg = PCI_ROM_ADDRESS;
-	pci_read_config_word(dev, PCI_VENDOR_ID, &dev->vendor);
-	pci_read_config_word(dev, PCI_DEVICE_ID, &dev->device);
-	pci_read_config_word(dev, PCI_SUBSYSTEM_VENDOR_ID, &dev->subsystem_vendor);
-	pci_read_config_word(dev, PCI_SUBSYSTEM_ID, &dev->subsystem_device);
-	pci_read_config_byte(dev, PCI_HEADER_TYPE, &dev->hdr_type);
-	pci_read_config_dword(dev, PCI_CLASS_REVISION, &class_revision);
-	dev->revision = (u8)class_revision;
-	dev->class = class_revision >> 8;
-	dev->pcie_cap = pci_find_capability(dev, PCI_CAP_ID_EXP);
+    error = pci_read_config_word(dev, PCI_VENDOR_ID, &dev->vendor);
+    if (!error)
+        error = pci_read_config_word(dev, PCI_DEVICE_ID, &dev->device);
+    if (!error)
+        error = pci_read_config_word(dev, PCI_SUBSYSTEM_VENDOR_ID, &dev->subsystem_vendor);
+    if (!error)
+        error = pci_read_config_word(dev, PCI_SUBSYSTEM_ID, &dev->subsystem_device);
+    if (!error)
+        error = pci_read_config_byte(dev, PCI_HEADER_TYPE, &dev->hdr_type);
+    if (!error)
+        error = pci_read_config_dword(dev, PCI_CLASS_REVISION, &class_revision);
+    if (!error)
+        error = stela_linux_pci_find_capability(dev, PCI_CAP_ID_EXP, &dev->pcie_cap);
+    if (error) {
+        /* No original device_initialize/publication or context transfer has
+         * occurred. Rust retains exact State/Host/authority on this refusal. */
+        if (status)
+            *status = pcibios_err_to_errno(error);
+        kfree(host);
+        return NULL;
+    }
+    dev->revision = (u8)class_revision;
+    dev->class = class_revision >> 8;
 	for (int i = 0; i < PCI_STD_NUM_BARS; i++) {
 		const struct stela_linux_pci_region *region = &function->regions[i];
 
@@ -256,7 +270,7 @@ struct pci_dev *stela_linux_pci_attach(const struct stela_linux_pci_function *fu
 
 static u8 config[256];
 static unsigned int mapped, fail_map_after = ~0U;
-static int msi_error;
+static int msi_error, config_error;
 static bool on_message;
 static unsigned int context_releases;
 
@@ -269,6 +283,8 @@ static void test_release_context(void *context)
 static int test_read(void *context, int where, int size, u32 *value)
 {
 	assert(context == config);
+	if (config_error)
+		return config_error;
 	*value = 0;
 	memcpy(value, &config[where], (size_t)size);
 	return 0;
@@ -331,6 +347,11 @@ int main(void)
 		.release_context = test_release_context,
 	};
 	function.regions[0] = (struct stela_linux_pci_region){BASE, 0x1000000, IORESOURCE_MEM};
+    int refused_status = 0;
+    config_error = PCIBIOS_SET_FAILED;
+    assert(!stela_linux_pci_attach(&function, &refused_status));
+    assert(refused_status == -EIO && !context_releases);
+    config_error = 0;
 	struct pci_dev *dev = stela_linux_pci_attach(&function, NULL);
 
 	assert(dev && !stela_linux_pci_bound(dev));

@@ -5,32 +5,15 @@
 //! errnos; the table's trampolines are the only code here that sees the C ABI,
 //! and nothing else in this crate needs to know how a service reaches hardware.
 use alloc::boxed::Box;
+use stela_driver_base::platform::work::WorkError;
+mod time;
 use core::{
     ffi::{CStr, c_char, c_int, c_uint, c_void},
     marker::PhantomData,
     pin::Pin,
     ptr, slice,
 };
-
-/// Purpose of a real worker continuation; pools retain independent headroom.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum WorkerKind {
-    Dedicated = 0,
-    Normal = 1,
-    HighPriority = 2,
-}
-impl TryFrom<u32> for WorkerKind {
-    type Error = Errno;
-    fn try_from(value: u32) -> Result<Self, Errno> {
-        match value {
-            0 => Ok(Self::Dedicated),
-            1 => Ok(Self::Normal),
-            2 => Ok(Self::HighPriority),
-            _ => Err(-22),
-        }
-    }
-}
+pub use time::{MinimumDeadline, minimum_failure};
 
 /// A negative Linux errno.
 pub type Errno = i32;
@@ -70,11 +53,17 @@ impl IrqEnableError {
 pub trait Platform {
     /// Monotonic nanoseconds.
     fn now_ns(&self) -> i64;
-    /// Wait at least `minimum` and preferably at most `maximum` microseconds.
-    /// An `atomic` wait must not sleep.
-    fn delay_us(&self, minimum: u64, maximum: u64, atomic: bool);
-    /// A firmware image by Linux's name, stable until the owner exits.
-    fn firmware(&self, name: &CStr) -> Result<&[u8], Errno>;
+    /// Actual source-owned atomic minimum. No sleep, allocation, nominal
+    /// frequency conversion or success fallback is permitted.
+    fn minimum_delay_us(&self, minimum: u64) -> Result<(), WorkError>;
+    /// Create ONE owned relative physical deadline on the same actual clock
+    /// as now_ns/service timers. It retains source/provider/code across park;
+    /// no borrowed execution/process/queue scope may escape this call.
+    fn minimum_deadline_us(&self, minimum: u64) -> Result<Box<dyn MinimumDeadline>, WorkError>;
+    /// Notify this SAME retained Environment of a real C timer queue change.
+    /// Bounded/IRQ-safe, including atomic callbacks. This wakes inspection;
+    /// it grants no timer delivery/native IRQ/physical minimum permission.
+    fn timer_changed(&self) -> Result<(), WorkError>;
     /// One formatted kernel message at its printk level.
     fn log(&self, level: i32, message: &CStr);
     /// A `WARN` that fired, with its condition when Linux records one.
@@ -83,8 +72,6 @@ pub trait Platform {
     fn unsupported(&self, operation: &CStr);
     /// Bytes from an already seeded generator. Must not sleep or allocate.
     fn random_bytes(&self, bytes: &mut [u8]);
-    /// Start a task running `stela_linux_workers_run`, never inline.
-    fn start_worker(&self, kind: WorkerKind) -> Result<(), Errno>;
     /// Power the machine off.
     fn shutdown(&self, force: bool);
     /// Map page-aligned device memory uncached, or write-combining where its
@@ -126,13 +113,13 @@ pub trait Platform {
 #[repr(C)]
 struct Services {
     now_ns: unsafe extern "C" fn(*mut c_void) -> i64,
-    delay_us: unsafe extern "C" fn(*mut c_void, u64, u64, bool),
-    firmware: unsafe extern "C" fn(*mut c_void, *const c_char, *mut *const u8, *mut usize) -> c_int,
+    minimum_delay_us: unsafe extern "C" fn(*mut c_void, u64),
+    minimum_deadline_us: unsafe extern "C" fn(*mut c_void, u64) -> *mut time::Header,
+    timer_changed: unsafe extern "C" fn(*mut c_void),
     log: unsafe extern "C" fn(*mut c_void, c_int, *const c_char),
     warn: unsafe extern "C" fn(*mut c_void, *const c_char, c_int, *const c_char),
     unsupported: unsafe extern "C" fn(*mut c_void, *const c_char),
     random_bytes: unsafe extern "C" fn(*mut c_void, *mut c_void, usize),
-    start_worker: unsafe extern "C" fn(*mut c_void, u32) -> c_int,
     shutdown: unsafe extern "C" fn(*mut c_void, bool),
     map_device: unsafe extern "C" fn(*mut c_void, u64, usize, bool) -> *mut c_void,
     unmap_device: unsafe extern "C" fn(*mut c_void, *mut c_void),
@@ -148,6 +135,28 @@ struct Services {
 }
 
 const _: () = assert!(size_of::<Services>() == 160);
+const _: () = {
+    assert!(core::mem::offset_of!(Services, now_ns) == 0);
+    assert!(core::mem::offset_of!(Services, minimum_delay_us) == 8);
+    assert!(core::mem::offset_of!(Services, minimum_deadline_us) == 16);
+    assert!(core::mem::offset_of!(Services, timer_changed) == 24);
+    assert!(core::mem::offset_of!(Services, log) == 32);
+    assert!(core::mem::offset_of!(Services, warn) == 40);
+    assert!(core::mem::offset_of!(Services, unsupported) == 48);
+    assert!(core::mem::offset_of!(Services, random_bytes) == 56);
+    assert!(core::mem::offset_of!(Services, shutdown) == 64);
+    assert!(core::mem::offset_of!(Services, map_device) == 72);
+    assert!(core::mem::offset_of!(Services, unmap_device) == 80);
+    assert!(core::mem::offset_of!(Services, map_pages) == 88);
+    assert!(core::mem::offset_of!(Services, unmap_pages) == 96);
+    assert!(core::mem::offset_of!(Services, irq_enable) == 104);
+    assert!(core::mem::offset_of!(Services, irq_disable) == 112);
+    assert!(core::mem::offset_of!(Services, irq_retire) == 120);
+    assert!(core::mem::offset_of!(Services, copy_from_user) == 128);
+    assert!(core::mem::offset_of!(Services, copy_to_user) == 136);
+    assert!(core::mem::offset_of!(Services, map_user) == 144);
+    assert!(core::mem::offset_of!(Services, unmap_user) == 152);
+};
 
 /// `struct stela_linux_owner`.
 #[repr(C)]
@@ -186,34 +195,21 @@ mod trampolines {
         unsafe { platform::<P>(context) }.now_ns()
     }
 
-    pub unsafe extern "C" fn delay_us<P: Platform>(
+    pub unsafe extern "C" fn minimum_delay_us<P: Platform>(context: *mut c_void, minimum: u64) {
+        // SAFETY: same exact source-owned Platform callback context.
+        unsafe { time::delay::<P>(context, minimum) };
+    }
+    pub unsafe extern "C" fn minimum_deadline_us<P: Platform>(
         context: *mut c_void,
         minimum: u64,
-        maximum: u64,
-        atomic: bool,
-    ) {
-        // SAFETY: see the module.
-        unsafe { platform::<P>(context) }.delay_us(minimum, maximum, atomic);
+    ) -> *mut time::Header {
+        // SAFETY: returned object owns its source graph, never this Rust borrow.
+        unsafe { time::begin::<P>(context, minimum) }
     }
 
-    pub unsafe extern "C" fn firmware<P: Platform>(
-        context: *mut c_void,
-        name: *const c_char,
-        data: *mut *const u8,
-        size: *mut usize,
-    ) -> c_int {
-        // SAFETY: see the module.
-        match unsafe { platform::<P>(context).firmware(text(name)) } {
-            Ok(image) => {
-                // SAFETY: both are the caller's writable out-parameters.
-                unsafe {
-                    data.write(image.as_ptr());
-                    size.write(image.len());
-                }
-                0
-            }
-            Err(errno) => errno,
-        }
+    pub unsafe extern "C" fn timer_changed<P: Platform>(context: *mut c_void) {
+        // SAFETY: original actual-current Platform callback, no borrowed permit.
+        unsafe { time::timer_changed::<P>(context) };
     }
 
     pub unsafe extern "C" fn log<P: Platform>(
@@ -255,14 +251,6 @@ mod trampolines {
         unsafe {
             platform::<P>(context).random_bytes(slice::from_raw_parts_mut(bytes.cast(), size));
         }
-    }
-
-    pub unsafe extern "C" fn start_worker<P: Platform>(context: *mut c_void, kind: u32) -> c_int {
-        // SAFETY: see the module.
-        status(WorkerKind::try_from(kind).and_then(|kind| {
-            // SAFETY: this service invocation retains the owner's platform.
-            unsafe { platform::<P>(context) }.start_worker(kind)
-        }))
     }
 
     pub unsafe extern "C" fn shutdown<P: Platform>(context: *mut c_void, force: bool) {
@@ -427,13 +415,13 @@ impl<P: Platform> Owner<P> {
         let mut owner = Box::new(Self {
             services: Services {
                 now_ns: t::now_ns::<P>,
-                delay_us: t::delay_us::<P>,
-                firmware: t::firmware::<P>,
+                minimum_delay_us: t::minimum_delay_us::<P>,
+                minimum_deadline_us: t::minimum_deadline_us::<P>,
+                timer_changed: t::timer_changed::<P>,
                 log: t::log::<P>,
                 warn: t::warn::<P>,
                 unsupported: t::unsupported::<P>,
                 random_bytes: t::random_bytes::<P>,
-                start_worker: t::start_worker::<P>,
                 shutdown: t::shutdown::<P>,
                 map_device: t::map_device::<P>,
                 unmap_device: t::unmap_device::<P>,
@@ -476,13 +464,10 @@ mod tests {
     use std::{string::String, vec::Vec};
     extern crate std;
 
-    const ENOENT: Errno = -2;
-    static IMAGE: [u8; 3] = [1, 2, 3];
-
     #[derive(Default)]
     struct Fake {
         events: RefCell<Vec<String>>,
-        workers: Cell<u32>,
+        fatal_log: Option<std::path::PathBuf>,
     }
 
     impl Fake {
@@ -495,17 +480,22 @@ mod tests {
         fn now_ns(&self) -> i64 {
             42
         }
-        fn delay_us(&self, minimum: u64, maximum: u64, atomic: bool) {
-            self.note(std::format!("delay {minimum} {maximum} {atomic}"));
+        fn minimum_delay_us(&self, minimum: u64) -> Result<(), WorkError> {
+            let _ = minimum;
+            Err(WorkError::Unavailable)
         }
-        fn firmware(&self, name: &CStr) -> Result<&[u8], Errno> {
-            if name == c"nvidia/gsp.bin" {
-                Ok(&IMAGE)
-            } else {
-                Err(ENOENT)
-            }
+        fn minimum_deadline_us(&self, _: u64) -> Result<Box<dyn MinimumDeadline>, WorkError> {
+            // This service-table mock has no actual relative time source.
+            // Negative admission is explicit; it never manufactures readiness.
+            Err(WorkError::Unavailable)
+        }
+        fn timer_changed(&self) -> Result<(), WorkError> {
+            Err(WorkError::Unavailable) // no actual Environment in this Bare table fixture
         }
         fn log(&self, level: i32, message: &CStr) {
+            if let Some(path) = &self.fatal_log {
+                std::fs::write(path, b"logger reached").unwrap();
+            }
             self.note(std::format!("log {level} {}", message.to_str().unwrap()));
         }
         fn warn(&self, file: &CStr, line: i32, condition: Option<&CStr>) {
@@ -516,15 +506,6 @@ mod tests {
         }
         fn random_bytes(&self, bytes: &mut [u8]) {
             bytes.fill(7);
-        }
-        fn start_worker(&self, kind: WorkerKind) -> Result<(), Errno> {
-            assert_eq!(kind, WorkerKind::Normal);
-            self.workers.set(self.workers.get() + 1);
-            if self.workers.get() > 1 {
-                Err(-11)
-            } else {
-                Ok(())
-            }
         }
         fn shutdown(&self, force: bool) {
             self.note(std::format!("shutdown {force}"));
@@ -581,8 +562,71 @@ mod tests {
         }
     }
 
+    #[cfg(all(unix, target_arch = "x86_64"))]
     #[test]
-    fn each_service_reaches_the_platform_through_the_c_table() {
+    fn minimum_failure_terminal_component_does_not_log_or_drop() {
+        use std::os::unix::process::ExitStatusExt;
+        const CHILD: &str = "STELA_MINIMUM_FATAL_COMPONENT";
+        if let Some(directory) = std::env::var_os(CHILD) {
+            let directory = std::path::PathBuf::from(directory);
+            let logged = directory.join("logged");
+            let owner = Owner::new(Fake {
+                fatal_log: Some(logged.clone()),
+                ..Fake::default()
+            });
+            // SAFETY: isolated diagnostic-table component process, one exact
+            // retained owner, balanced hosted Bare C entry. This does NOT call
+            // require_current, a minimum provider, timer delivery or native IO.
+            unsafe { stela_linux_enter(owner.raw()) };
+            unsafe extern "C" {
+                fn stela_linux_owner() -> *const RawOwner;
+            }
+            // SAFETY: this exact diagnostic owner remains entered and retained.
+            assert_eq!(unsafe { stela_linux_owner() }, owner.raw());
+            // SAFETY: invoke this exact live retained table/context to prove
+            // its diagnostic logger is connected before the terminal probe.
+            unsafe {
+                ((*(*owner.raw()).services).log)((*owner.raw()).context, 0, c"probe".as_ptr())
+            };
+            assert!(logged.exists());
+            std::fs::remove_file(&logged).unwrap();
+            struct DropWitness(std::path::PathBuf);
+            impl Drop for DropWitness {
+                fn drop(&mut self) {
+                    std::fs::write(&self.0, b"dropped").unwrap();
+                }
+            }
+            let _witness = DropWitness(directory.join("dropped"));
+            std::fs::write(directory.join("armed"), b"exact diagnostic owner entered").unwrap();
+            time::fatal(WorkError::Closed);
+        }
+        let directory = std::env::temp_dir().join(std::format!(
+            "stela-minimum-fatal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "owner::tests::minimum_failure_terminal_component_does_not_log_or_drop",
+                "--nocapture",
+            ])
+            .env(CHILD, &directory)
+            .status()
+            .unwrap();
+        assert_eq!(status.signal(), Some(4)); // actual UD2, not Rust panic/unwind
+        assert!(directory.join("armed").exists());
+        assert!(!directory.join("logged").exists());
+        assert!(!directory.join("dropped").exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn ordinary_services_reach_platform_and_minima_require_actual_current() {
         let owner = Owner::new(Fake::default());
         // SAFETY: the raw owner stays valid while `owner` lives, and each call
         // follows its `linux.h` contract with live local buffers.
@@ -590,18 +634,10 @@ mod tests {
             let raw = &*owner.raw();
             let (s, context) = (&*raw.services, raw.context);
             assert_eq!((s.now_ns)(context), 42);
-            (s.delay_us)(context, 1, 2, true);
-
-            let (mut data, mut size) = (ptr::null(), 0);
-            assert_eq!(
-                (s.firmware)(context, c"nvidia/gsp.bin".as_ptr(), &mut data, &mut size),
-                0
-            );
-            assert_eq!(slice::from_raw_parts(data, size), IMAGE);
-            assert_eq!(
-                (s.firmware)(context, c"none".as_ptr(), &mut data, &mut size),
-                ENOENT
-            );
+            // This Bare table fixture cannot invoke the actual-current minimum
+            // callback. The separate producer tests own their counter model.
+            assert!((s.minimum_delay_us as usize) != 0);
+            assert!((s.minimum_deadline_us as usize) != 0);
 
             (s.log)(context, 4, c"hello".as_ptr());
             (s.warn)(context, c"a.c".as_ptr(), 9, ptr::null());
@@ -610,8 +646,6 @@ mod tests {
             let mut bytes = [0u8; 4];
             (s.random_bytes)(context, bytes.as_mut_ptr().cast(), 4);
             assert_eq!(bytes, [7; 4]);
-            assert_eq!((s.start_worker)(context, WorkerKind::Normal as u32), 0);
-            assert_eq!((s.start_worker)(context, WorkerKind::Normal as u32), -11);
             (s.shutdown)(context, false);
 
             assert_eq!((s.map_device)(context, 0x1000, 0, false), ptr::null_mut());
@@ -659,7 +693,6 @@ mod tests {
         assert_eq!(
             *owner.platform().events.borrow(),
             [
-                "delay 1 2 true",
                 "log 4 hello",
                 "warn \"a.c\" 9 None",
                 "warn \"a.c\" 9 Some(\"x\")",

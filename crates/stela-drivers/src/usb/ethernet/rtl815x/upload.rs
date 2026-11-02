@@ -102,7 +102,7 @@ impl<C: Control> Chip<C> {
             if request { PATCH_REQUEST } else { 0 },
         )?;
         if wait {
-            self.io.delay_us(1000);
+            self.minimum_wait(1000)?;
             let mapped = self.phy_address(OCP_PHY_PATCH_STAT)?;
             // The hardware changes PATCH_READY asynchronously. Even release
             // must acknowledge it clearing before normal PHY accesses resume.
@@ -149,7 +149,7 @@ impl<C: Control> Chip<C> {
             self.write(bank, PLA_BP_EN, 1, 0)?;
         }
         self.write_block(bank, PLA_BP_0, if extended { &[0; 32] } else { &[0; 16] })?;
-        self.io.delay_us(3000);
+        self.minimum_wait(3000)?;
         self.write(bank, PLA_BP_BA, 2, 0)
     }
 
@@ -244,7 +244,7 @@ impl<C: Control> Chip<C> {
             return Ok(());
         }
         self.patch_request(true, wait)?;
-        let transferred = (|| {
+        let transferred: Result<(), BlockError> = (|| {
             for chunk in data.chunks(2048) {
                 self.modify(USB, USB_GPHY_CTRL, 2, 0, GPHY_PATCH_DONE | BACKUP_RESTRORE)?;
                 self.write_block(USB, u32::from(register), chunk)?;

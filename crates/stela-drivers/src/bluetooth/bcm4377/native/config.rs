@@ -6,7 +6,7 @@
 //! Supported endpoint FLR, D0 and native command/control writes.
 use super::{Configuration, Error, Time};
 use crate::bus::pci::regs;
-use crate::bus::pci::{CapabilityError, ConfigSpace, Function, Layout as Extent, msi::MsiError};
+use crate::bus::pci::{ConfigSpace, Function, Layout as Extent, msi::MsiError};
 
 const FLR_SUPPORTED: u32 = 1 << 28;
 const INITIATE_FLR: u16 = 1 << 15;
@@ -27,19 +27,19 @@ pub(super) struct Layout {
     headers: [Option<(u16, u16)>; 4],
 }
 fn read16<C: ConfigSpace>(c: &C, offset: u16) -> Result<u16, Error> {
-    match c.read16(offset) {
+    match c.read16(offset).map_err(Error::Config)? {
         u16::MAX => Err(Error::ConfigRead { offset, width: 2 }),
         value => Ok(value),
     }
 }
 fn read32<C: ConfigSpace>(c: &C, offset: u16) -> Result<u32, Error> {
-    match c.read32(offset) {
+    match c.read32(offset).map_err(Error::Config)? {
         u32::MAX => Err(Error::ConfigRead { offset, width: 4 }),
         value => Ok(value),
     }
 }
 fn write16<C: Configuration>(c: &mut C, offset: u16, value: u16) -> Result<(), Error> {
-    c.write16(offset, value);
+    c.write16(offset, value).map_err(Error::Config)?;
     let observed = read16(c, offset)?;
     if observed != value {
         return Err(Error::ConfigReadback {
@@ -64,7 +64,7 @@ impl Layout {
         let c = f.config();
         if c.owned_address() != address
             || read32(c, regs::VENDOR_ID)? != expected
-            || c.read8(regs::HEADER_TYPE) & 0x7f != 0
+            || c.read8(regs::HEADER_TYPE).map_err(Error::Config)? & 0x7f != 0
         {
             return Err(Error::Requirement(
                 "same actual owned type-zero PCI endpoint",
@@ -82,16 +82,7 @@ impl Layout {
         let mut extents = alloc::vec::Vec::new();
         let (mut express, mut power, mut msi, mut msix) = (None, None, None, None);
         for entry in c.capabilities() {
-            let entry = entry.map_err(|error| match error {
-                CapabilityError::FailedRead { offset } => Error::ConfigRead { offset, width: 2 },
-                CapabilityError::Overlap { .. } => {
-                    Error::Requirement("nonoverlapping native capability bodies")
-                }
-                CapabilityError::OutOfRange { .. } => {
-                    Error::Requirement("complete native capability extent")
-                }
-                _ => Error::Requirement("valid complete native capability chain"),
-            })?;
+            let entry = entry.map_err(Error::Capability)?;
             let offset = entry.offset;
             extents.push(offset..offset + entry.bytes);
             match entry.id {
@@ -195,20 +186,26 @@ impl Layout {
         }
         Ok((address, wide))
     }
-    pub(super) fn prepare<C: Configuration>(self, c: &mut C, time: &dyn Time) -> Result<(), Error> {
-        self.d0(c, time)?;
-        self.stop(c, time)?;
+    pub(super) fn prepare<C: Configuration>(
+        self,
+        c: &mut C,
+        time: &dyn Time,
+        minimum: &dyn crate::bus::pci::power::Timer,
+    ) -> Result<(), Error> {
+        minimum.check().map_err(Error::Minimum)?;
+        self.d0(c, time, minimum)?;
+        self.stop(c, time, minimum)?;
         // FLR may clear BAR assignments/command. Restore only the admitted
         // original BARs; never restore old MSI or device-running control state.
         for (index, value) in self.bars.into_iter().enumerate() {
             let offset = 0x10 + index as u16 * 4;
-            c.write32(offset, value);
-            let observed = c.read32(offset);
+            c.write32(offset, value).map_err(Error::Config)?;
+            let observed = c.read32(offset).map_err(Error::Config)?;
             if observed != value {
                 return Err(Error::ConfigReadback { offset, observed });
             }
         }
-        self.d0(c, time)
+        self.d0(c, time, minimum)
     }
     pub(super) fn enable<C: Configuration>(self, c: &mut C) -> Result<(), Error> {
         let command = read16(c, regs::COMMAND)?;
@@ -218,7 +215,13 @@ impl Layout {
             command | regs::COMMAND_MEMORY | regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE,
         )
     }
-    fn d0<C: Configuration>(self, c: &mut C, time: &dyn Time) -> Result<(), Error> {
+    fn d0<C: Configuration>(
+        self,
+        c: &mut C,
+        time: &dyn Time,
+        minimum: &dyn crate::bus::pci::power::Timer,
+    ) -> Result<(), Error> {
+        minimum.check().map_err(Error::Minimum)?;
         let Some(offset) = self.power.map(|offset| offset + 4) else {
             return Ok(());
         };
@@ -230,17 +233,13 @@ impl Layout {
         let deadline = time.now_us().saturating_add(OPERATION_US);
         // PME_Status is W1C. Do not replay a pending status when changing D0.
         let wanted = value & !(3 | (1 << 15));
-        c.write16(offset, wanted);
+        c.write16(offset, wanted).map_err(Error::Config)?;
         let delay = match state {
             3 => 10_000,
             2 => 200,
             _ => 0,
         };
-        let ready = time.now_us().saturating_add(delay);
-        while time.now_us() < ready {
-            timely(time, deadline, "native PCI D0 delay")?;
-            core::hint::spin_loop();
-        }
+        minimum.wait_us(delay).map_err(Error::Minimum)?;
         timely(time, deadline, "native PCI D0 acknowledgment")?;
         let observed = read16(c, offset)?;
         timely(time, deadline, "native PCI D0 acknowledgment")?;
@@ -252,7 +251,13 @@ impl Layout {
         }
         Ok(())
     }
-    pub(super) fn stop<C: Configuration>(self, c: &mut C, time: &dyn Time) -> Result<(), Error> {
+    pub(super) fn stop<C: Configuration>(
+        self,
+        c: &mut C,
+        time: &dyn Time,
+        minimum: &dyn crate::bus::pci::power::Timer,
+    ) -> Result<(), Error> {
+        minimum.check().map_err(Error::Minimum)?;
         let deadline = time.now_us().saturating_add(OPERATION_US);
         let command = read16(c, regs::COMMAND)?;
         timely(time, deadline, "native bus-master stop")?;
@@ -279,18 +284,15 @@ impl Layout {
         }
         let control = read16(c, self.express + 8)?;
         timely(time, deadline, "native PCI FLR issue")?;
-        c.write16(self.express + 8, control | INITIATE_FLR);
+        c.write16(self.express + 8, control | INITIATE_FLR)
+            .map_err(Error::Config)?;
         // FLR self-clears, so a readback of the reset bit cannot acknowledge
         // issue. Native write + required quiet period + identity/config-ready
         // and cleared FLR are the supported completion observation.
-        let ready = time.now_us().saturating_add(FLR_QUIET_US);
-        while time.now_us() < ready {
-            timely(time, deadline, "native FLR quiet period")?;
-            core::hint::spin_loop();
-        }
+        minimum.wait_us(FLR_QUIET_US).map_err(Error::Minimum)?;
         loop {
             timely(time, deadline, "native FLR configuration ready")?;
-            let id = c.read32(0);
+            let id = c.read32(0).map_err(Error::Config)?;
             timely(time, deadline, "native FLR configuration ready")?;
             if id == self.id {
                 for (offset, expected) in self.headers.iter().flatten().copied() {

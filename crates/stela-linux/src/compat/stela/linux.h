@@ -13,23 +13,24 @@
  * Linux names no device for most of them (msleep, ktime_get, printk), so they
  * belong to whoever runs the code; device-scoped services, such as register
  * access, are bound by the adapter that owns the device. A NULL log or warn
- * discards those reports and a NULL firmware has no images; a service reached
+ * discards those reports; a required service reached
  * without its callback, or outside enter and exit, traps. */
 #include <linux/compiler_attributes.h>
 #include <linux/types.h>
 
+struct stela_linux_minimum_deadline;
 struct stela_linux_services {
 	/* Monotonic nanoseconds. */
 	s64 (*now_ns)(void *context);
-	/* Wait at least minimum and preferably at most maximum microseconds;
-	 * atomic waits must not sleep. */
-	void (*delay_us)(void *context, u64 minimum, u64 maximum, bool atomic);
-	/* A firmware image by Linux's name, valid until the owner exits, or a
-	 * negative errno. Success returns a readable stable source window; the
-	 * common request adapter copies it before publishing owned firmware.
-	 * Return within the same entered owner and quiescent context. No pointer
-	 * to this context or source is retained in the resulting firmware. */
-	int (*firmware)(void *context, const char *name, const u8 **data, size_t *size);
+	/* Actual source-bound atomic minimum. Failure is terminal and retains
+	 * every original owner; this void ABI must never return false success. */
+	void (*minimum_delay_us)(void *context, u64 minimum);
+	/* One owned relative physical deadline. No borrowed Rust execution or
+	 * process scope spans any following C scheduler wait. See stela/time.h. */
+	struct stela_linux_minimum_deadline *(*minimum_deadline_us)(void *context, u64 minimum);
+	/* Real same-Environment RaisedWork notification after queue mutation.
+	 * Bounded/IRQ-safe; post-arm failure is terminal with real queue retained. */
+	void (*timer_changed)(void *context);
 	/* One formatted kernel message at its printk level (LOGLEVEL_*). */
 	void (*log)(void *context, int level, const char *message);
 	/* A WARN that fired, with its condition text when Linux records one. */
@@ -45,11 +46,6 @@ struct stela_linux_services {
 	 * state. The caller retains actual IRQ-safe non-migrating serialization;
 	 * this table is not a native execution/interrupt grant. */
 	void (*random_bytes)(void *context, void *bytes, size_t size);
-	/* Start a Linux task that runs stela_linux_workers_run in this owner,
-	 * or return a negative errno when none can start now. The request must
-	 * not run the worker inline. kind is stela_linux_worker_kind from
-	 * stela/workqueue.h and must reach that worker unchanged. */
-	int (*start_worker)(void *context, unsigned int kind);
 	/* Power the machine off, without waiting for clean exits if force. */
 	void (*shutdown)(void *context, bool force);
 	/* Map page-aligned device memory uncached, or return NULL; unmapped by
@@ -88,10 +84,28 @@ struct stela_linux_owner {
 };
 
 /* Private x86-64 C ABI. All producers and consumers rebuild from this header;
- * Rust currently passes owners opaquely rather than mirroring this table. */
+ * Rust mirrors this exact table and checks every x86-64 field offset. */
 _Static_assert(sizeof(struct stela_linux_services) == 160, "Linux services ABI");
-_Static_assert(__builtin_offsetof(struct stela_linux_services, random_bytes) == 48,
-	       "Linux random callback ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, now_ns) == 0, "Linux now_ns ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, minimum_delay_us) == 8, "Linux minimum_delay_us ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, minimum_deadline_us) == 16, "Linux minimum_deadline_us ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, timer_changed) == 24, "Linux timer_changed ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, log) == 32, "Linux log ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, warn) == 40, "Linux warn ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, unsupported) == 48, "Linux unsupported ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, random_bytes) == 56, "Linux random_bytes ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, shutdown) == 64, "Linux shutdown ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, map_device) == 72, "Linux map_device ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, unmap_device) == 80, "Linux unmap_device ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, map_pages) == 88, "Linux map_pages ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, unmap_pages) == 96, "Linux unmap_pages ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, irq_enable) == 104, "Linux irq_enable ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, irq_disable) == 112, "Linux irq_disable ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, irq_retire) == 120, "Linux irq_retire ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, copy_from_user) == 128, "Linux copy_from_user ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, copy_to_user) == 136, "Linux copy_to_user ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, map_user) == 144, "Linux map_user ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, unmap_user) == 152, "Linux unmap_user ABI");
 _Static_assert(sizeof(struct stela_linux_owner) == 16, "Linux owner ABI");
 
 /* An owner for Linux code that needs none of these services. */

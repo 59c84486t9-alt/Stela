@@ -62,10 +62,10 @@ impl<R: RegisterIo, T: Timer> Hardware<'_, R, T> {
             let control = hardware.io.read(CTRL);
             hardware.io.write(CTRL, control | CTRL_PHY_RST);
             hardware.io.read(STATUS);
-            hardware.clock.delay(100);
+            hardware.clock.delay(100)?;
             hardware.io.write(CTRL, control);
             hardware.io.read(STATUS);
-            hardware.clock.delay(150);
+            hardware.clock.delay(150)?;
             Ok(())
         })?;
         self.phy_configuration();
@@ -99,7 +99,7 @@ impl<R: RegisterIo, T: Timer> Hardware<'_, R, T> {
             ));
         }
         let high = self.read_phy(PHY_ID1)?;
-        self.clock.delay(20);
+        self.clock.delay(20)?;
         let low = self.read_phy(PHY_ID2)?;
         let id = (u32::from(high) << 16 | u32::from(low)) & !15;
         let revision = low & 15;
@@ -125,7 +125,7 @@ impl<R: RegisterIo, T: Timer> Hardware<'_, R, T> {
         match id {
             PHY_IGP3 => {
                 self.hardware_reset_phy()?;
-                self.clock.delay(100_000);
+                self.clock.delay(100_000)?;
                 self.write_phy(PHY_PAGE_IGP, 0)?;
                 let power = self.read_phy(25)?;
                 self.write_phy(25, power & !2)?; // D0 LPLU off; preserve SmartSpeed policy

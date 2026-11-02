@@ -1,6 +1,7 @@
 //! One mount-lifetime canonical Linux execution owner and device catalogue.
 //! Failed or abandoned bootstrap retains the actual owner/environment roots;
 //! there is no implemented full-kernel cache teardown or reinstallation.
+mod initial;
 use super::{
     catalogue::{self, Authority, FirmwareTarget},
     owner::{Owner, Platform, RawOwner},
@@ -8,6 +9,7 @@ use super::{
 };
 use alloc::{boxed::Box, sync::Arc};
 use core::{ffi::c_void, mem::ManuallyDrop, pin::Pin};
+pub use initial::InitialStartError;
 use stela_driver_base::platform::work::{RetainedOwner, Runtime, WorkError, service::Domain};
 use stela_driver_core::firmware::Catalog;
 
@@ -50,21 +52,24 @@ pub struct Failure<P: Platform, const N: usize> {
     _environment: ManuallyDrop<Option<Pin<Box<Environment<N>>>>>,
     _domain: ManuallyDrop<Arc<Domain<N>>>,
     _execution: ManuallyDrop<ExecutionPin>,
+    _geometry: ManuallyDrop<Arc<dyn crate::threads::OriginalKernelGeometry>>,
 }
 impl<P: Platform, const N: usize> Failure<P, N> {
     fn new(
         error: Error,
         owner: ManuallyDrop<Pin<Box<Owner<P>>>>,
         environment: Option<Pin<Box<Environment<N>>>>,
-        domain: Arc<Domain<N>>,
-        execution: ExecutionPin,
+        domain: ManuallyDrop<Arc<Domain<N>>>,
+        execution: ManuallyDrop<ExecutionPin>,
+        geometry: ManuallyDrop<Arc<dyn crate::threads::OriginalKernelGeometry>>,
     ) -> Self {
         Self {
             error,
             _owner: owner,
             _environment: ManuallyDrop::new(environment),
-            _domain: ManuallyDrop::new(domain),
-            _execution: ManuallyDrop::new(execution),
+            _domain: domain,
+            _execution: execution,
+            _geometry: geometry,
         }
     }
 }
@@ -73,6 +78,7 @@ pub struct KernelOwner<P: Platform, const N: usize> {
     environment: ManuallyDrop<Pin<Box<Environment<N>>>>,
     _domain: ManuallyDrop<Arc<Domain<N>>>,
     execution: ManuallyDrop<ExecutionPin>,
+    _geometry: ManuallyDrop<Arc<dyn crate::threads::OriginalKernelGeometry>>,
 }
 impl<P: Platform, const N: usize> KernelOwner<P, N> {
     /// # Safety
@@ -90,8 +96,14 @@ impl<P: Platform, const N: usize> KernelOwner<P, N> {
         platform: P,
         runtime: Pin<&Runtime<N>>,
         domain: Arc<Domain<N>>,
-    ) -> Result<Self, Failure<P, N>> {
-        let execution = ExecutionPin::from_runtime(runtime);
+        geometry: Arc<dyn crate::threads::OriginalKernelGeometry>,
+    ) -> Result<Self, Failure<P, N>>
+    where
+        P: crate::threads::KernelThreadPlatform,
+    {
+        let geometry = ManuallyDrop::new(geometry);
+        let domain = ManuallyDrop::new(domain);
+        let execution = ManuallyDrop::new(ExecutionPin::from_runtime(runtime));
         let owner = ManuallyDrop::new(Owner::new(platform));
         // SAFETY: pinned resident owner above; claim is one irreversible registration.
         let status = unsafe { stela_linux_kernel_claim(owner.raw()) };
@@ -102,21 +114,46 @@ impl<P: Platform, const N: usize> KernelOwner<P, N> {
                 None,
                 domain,
                 execution,
+                geometry,
+            ));
+        }
+        // Keep the real geometry owner before borrowing foreign native context.
+        // SAFETY: one bounded pre-Environment metadata leaf, no Linux callbacks.
+        let bound = unsafe {
+            owner.platform().with_process(|process| {
+                geometry.bind(process, crate::threads::GeometryBinding::new(&*owner.raw()))
+            })
+        };
+        let bound = bound.and_then(core::convert::identity).and_then(|()| {
+            // SAFETY: SAME actual RawOwner remains pinned/kept above; this
+            // bounded acceptance query neither publishes nor lends it.
+            crate::threads::geometry::accepted(unsafe { &*owner.raw() })
+        });
+        if let Err(error) = bound {
+            return Err(Failure::new(
+                Error::Work(error),
+                owner,
+                None,
+                domain,
+                execution,
+                geometry,
             ));
         }
         // SAFETY: caller keeps the real runtime/domain and pinned owner through all tasks.
-        let environment = match unsafe { Environment::new(owner.raw(), runtime, domain.clone()) } {
-            Ok(environment) => environment,
-            Err(error) => {
-                return Err(Failure::new(
-                    Error::Work(error),
-                    owner,
-                    None,
-                    domain,
-                    execution,
-                ));
-            }
-        };
+        let environment =
+            match unsafe { Environment::new(owner.raw(), runtime, Arc::clone(&domain)) } {
+                Ok(environment) => environment,
+                Err(error) => {
+                    return Err(Failure::new(
+                        Error::Work(error),
+                        owner,
+                        None,
+                        domain,
+                        execution,
+                        geometry,
+                    ));
+                }
+            };
         // SAFETY: this same claimed owner now has its actual retained Environment.
         let status = unsafe { stela_linux_kernel_ready(owner.raw()) };
         if status != 0 {
@@ -126,13 +163,15 @@ impl<P: Platform, const N: usize> KernelOwner<P, N> {
                 Some(environment),
                 domain,
                 execution,
+                geometry,
             ));
         }
         Ok(Self {
             owner,
             environment: ManuallyDrop::new(environment),
-            _domain: ManuallyDrop::new(domain),
-            execution: ManuallyDrop::new(execution),
+            _domain: domain,
+            execution,
+            _geometry: geometry,
         })
     }
     pub(crate) fn execution(&self) -> ExecutionPin {
@@ -143,6 +182,11 @@ impl<P: Platform, const N: usize> KernelOwner<P, N> {
     }
     pub fn platform(&self) -> &P {
         self.owner.platform()
+    }
+    /// Identity observation only: the same actual pinned Runtime captured by
+    /// this owner's one Environment. It grants no entry/process permission.
+    pub(crate) fn matches_runtime(&self, runtime: Pin<&Runtime<N>>) -> bool {
+        self.environment.as_ref().matches_runtime(runtime)
     }
     pub fn environment(&self) -> Pin<&Environment<N>> {
         self.environment.as_ref()

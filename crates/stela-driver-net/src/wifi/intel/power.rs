@@ -8,7 +8,7 @@
 //! firmware, calibrates a radio or claims station/carrier readiness.
 use super::{firmware::Family, identity::Profile};
 use crate::{
-    Clock, Handoff,
+    Handoff,
     bus::{mmio::Mmio, pci::Bar},
 };
 
@@ -59,7 +59,7 @@ pub enum AccessError {
     Unavailable,
     Bounds,
     Mapping,
-    Clock,
+    Minimum(crate::bus::pci::power::Error),
 }
 
 /// Exclusive process-context CSR access and a real advancing delay source.
@@ -74,7 +74,7 @@ pub trait Csr {
 /// exclusive PCI claim or attach a DMA domain/interrupt route.
 pub struct NativeCsr {
     registers: Mmio,
-    clock: Clock,
+    minimum: alloc::rc::Rc<dyn crate::bus::pci::power::Timer>,
 }
 impl NativeCsr {
     /// # Safety
@@ -83,18 +83,17 @@ impl NativeCsr {
     /// are stopped and drained, PCI MSI/MSI-X/legacy interrupt delivery is
     /// disabled, no firmware/AML/other driver accesses the BAR,
     /// and the real mapped uncached BAR stays reserved for this object's life.
-    /// The supplied clock is calibrated and keeps advancing in this context.
+    /// The supplied minimum provider retains the real platform grant for this
+    /// context; a numeric clock cannot grant hardware minimum delays.
     pub unsafe fn new(
         handoff: &Handoff,
         bar: Option<Bar>,
-        clock: Clock,
+        minimum: alloc::rc::Rc<dyn crate::bus::pci::power::Timer>,
     ) -> Result<Self, AccessError> {
-        if clock.ticks_per_microsecond == 0 {
-            return Err(AccessError::Clock);
-        }
+        minimum.check().map_err(AccessError::Minimum)?;
         let registers =
             crate::registers(handoff, bar, 0, 4096).map_err(|_| AccessError::Mapping)?;
-        Ok(Self { registers, clock })
+        Ok(Self { registers, minimum })
     }
 }
 impl Csr for NativeCsr {
@@ -112,8 +111,9 @@ impl Csr for NativeCsr {
         Ok(())
     }
     fn delay_us(&mut self, microseconds: u32) -> Result<(), AccessError> {
-        self.clock.delay(u64::from(microseconds));
-        Ok(())
+        self.minimum
+            .wait_us(u64::from(microseconds))
+            .map_err(AccessError::Minimum)
     }
 }
 

@@ -4,6 +4,9 @@ use crate::{bus::dma::TestRegion, sdhci::model::*};
 use alloc::vec;
 
 struct State {
+    denied_read: Option<u16>,
+    denied: bool,
+    after_denial: usize,
     config: [u8; 4096],
     writes: Vec<(u16, u32)>,
     ignored: Option<u16>,
@@ -21,15 +24,33 @@ struct State {
 }
 struct Config(Rc<RefCell<State>>);
 impl ConfigSpace for Config {
-    fn read32(&self, at: u16) -> u32 {
-        let at = usize::from(at);
-        u32::from_le_bytes(self.0.borrow().config[at..at + 4].try_into().unwrap())
+    fn read32(&self, at: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        if self.0.borrow().denied_read == Some(at) {
+            self.0.borrow_mut().denied = true;
+            return Err(crate::bus::pci::ConfigError::before_effect(
+                crate::bus::pci::ConfigFailure::Ownership(
+                    crate::bus::pci::assignment::Error::Closed,
+                ),
+            ));
+        }
+
+        if self.0.borrow().denied {
+            self.0.borrow_mut().after_denial += 1;
+        }
+        let value = {
+            let at = usize::from(at);
+            u32::from_le_bytes(self.0.borrow().config[at..at + 4].try_into().unwrap())
+        };
+        Ok(value)
     }
-    fn write32(&mut self, at: u16, value: u32) {
+    fn write32(&mut self, at: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
+        if self.0.borrow().denied {
+            self.0.borrow_mut().after_denial += 1;
+        }
         let mut s = self.0.borrow_mut();
         s.writes.push((at, value));
         if s.ignored == Some(at) {
-            return;
+            return Ok(());
         }
         if (0x10..=0x24).contains(&at) {
             assert_eq!(s.config[4] & 6, 0, "split BAR write with live decode/DMA");
@@ -38,13 +59,18 @@ impl ConfigSpace for Config {
         }
         let at = usize::from(at);
         s.config[at..at + 4].copy_from_slice(&value.to_le_bytes());
+
+        Ok(())
     }
-    fn write16(&mut self, at: u16, value: u16) {
+    fn write16(&mut self, at: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
+        if self.0.borrow().denied {
+            self.0.borrow_mut().after_denial += 1;
+        }
         let mut s = self.0.borrow_mut();
         assert!(matches!(at, 4 | 0x94));
         s.writes.push((at, u32::from(value)));
         if s.ignored == Some(at) {
-            return;
+            return Ok(());
         }
         if at == 0x94 {
             assert_eq!(
@@ -62,9 +88,28 @@ impl ConfigSpace for Config {
         }
         let at = usize::from(at);
         s.config[at..at + 2].copy_from_slice(&value.to_le_bytes());
+
+        Ok(())
     }
-    fn write8(&mut self, _: u16, _: u8) {
+    fn write8(&mut self, _: u16, _: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        if self.0.borrow().denied {
+            self.0.borrow_mut().after_denial += 1;
+        }
         panic!("unexpected PCI byte write");
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        if self.0.borrow().denied {
+            self.0.borrow_mut().after_denial += 1;
+        }
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        if self.0.borrow().denied {
+            self.0.borrow_mut().after_denial += 1;
+        }
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
     }
 }
 struct Port55 {
@@ -121,7 +166,7 @@ impl Registers for Port55 {
     fn write8(&mut self, at: usize, value: u8) {
         if at == POWER && value == 0 && self.state.borrow().normal_power_off {
             assert_eq!(
-                self.function.config().read32(PLL) & (DIRECT | SSC_ENABLE),
+                self.function.config().read32(PLL).unwrap() & (DIRECT | SSC_ENABLE),
                 0,
                 "normal rail-off before vendor PLL stopped"
             );
@@ -216,6 +261,9 @@ fn port() -> (Port55, Rc<RefCell<Hardware>>, Rc<RefCell<State>>) {
     config[0xb0] = 0x10;
     config[0xb2] = 2;
     let state = Rc::new(RefCell::new(State {
+        denied_read: None,
+        denied: false,
+        after_denial: 0,
         config,
         writes: Vec::new(),
         ignored: None,
@@ -285,7 +333,12 @@ fn initialize_port(p: &mut Port55) -> Result<(), BlockError> {
             Port(self.0.clone()).write32(a, v);
         }
     }
-    initialize(&mut p.function, &mut Mmio(p.card.clone()), clock())
+    initialize(
+        &mut p.function,
+        &mut Mmio(p.card.clone()),
+        clock(),
+        crate::sdhci::model::minimum().as_ref(),
+    )
 }
 fn host(
     dma: &mut dyn DmaAllocator,
@@ -307,6 +360,7 @@ fn host(
     let host = Host::new(
         Box::new(p),
         clock(),
+        crate::sdhci::model::minimum(),
         "GL9755 actual source register/card peer".into(),
         dma,
         Profile::Gli9755,
@@ -320,13 +374,17 @@ fn native_gl9755_original_pci_phy_power_cycle_and_two_rails_precede_real_pio() {
     let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, card, state) = host(&mut dma, false, false);
     let c = Config(state.clone());
-    assert_eq!(c.read32(0x10), 0x9000_0004);
-    assert_eq!(c.read32(0x44), 0xc000_0000, "retain real CD/WP inversion");
-    assert_eq!(c.read32(0x48) & (31 << 24), 31 << 24);
-    assert_eq!(c.read32(0x70), 0xfc00_00b3);
-    assert_eq!(c.read32(0x6c), 1 << 27 | 1 << 18);
-    assert_eq!(c.read32(SSC) & 0xf900_0000, 0xc900_0000);
-    assert_eq!(c.read32(0x800) & 1, 0);
+    assert_eq!(c.read32(0x10).unwrap(), 0x9000_0004);
+    assert_eq!(
+        c.read32(0x44).unwrap(),
+        0xc000_0000,
+        "retain real CD/WP inversion"
+    );
+    assert_eq!(c.read32(0x48).unwrap() & (31 << 24), 31 << 24);
+    assert_eq!(c.read32(0x70).unwrap(), 0xfc00_00b3);
+    assert_eq!(c.read32(0x6c).unwrap(), 1 << 27 | 1 << 18);
+    assert_eq!(c.read32(SSC).unwrap() & 0xf900_0000, 0xc900_0000);
+    assert_eq!(c.read32(0x800).unwrap() & 1, 0);
     let mut disk = host.poll().unwrap().unwrap();
     let mut bytes = [0xa5; 1024];
     disk.read(5, &mut bytes).unwrap();
@@ -363,8 +421,8 @@ fn native_gl9755_uhs_standard_tuning_pci_pll_and_v4_dma_transfer_payloads() {
         "independent card needs three actual CMD19 iterations"
     );
     let c = Config(state.clone());
-    assert_eq!(c.read32(PLL) & (0x73ff | DIRECT), 0x246 | DIRECT);
-    assert_eq!(c.read32(SSC) & 0xffff, 0x5a1d);
+    assert_eq!(c.read32(PLL).unwrap() & (0x73ff | DIRECT), 0x246 | DIRECT);
+    assert_eq!(c.read32(SSC).unwrap() & 0xffff, 0x5a1d);
     let mut bytes = vec![0xa5; 65536];
     disk.read(3, &mut bytes).unwrap();
     assert_eq!(bytes, card.borrow().disk[3 * 512..3 * 512 + 65536]);
@@ -421,6 +479,7 @@ fn native_gl9755_refused_pci_pll_and_vdd2_ack_never_publish_card_commands() {
             Host::new(
                 Box::new(p),
                 clock(),
+                crate::sdhci::model::minimum(),
                 "refused55".into(),
                 &mut dma,
                 Profile::Gli9755
@@ -429,7 +488,7 @@ fn native_gl9755_refused_pci_pll_and_vdd2_ack_never_publish_card_commands() {
         );
         assert!(card.borrow().commands.is_empty());
         assert_eq!(Port(card.clone()).read8(POWER), 0);
-        assert_eq!(Config(state).read32(0x800) & 1, 0);
+        assert_eq!(Config(state).read32(0x800).unwrap() & 1, 0);
     }
 }
 
@@ -591,7 +650,11 @@ fn unchanged_linux_gl9755_phy_pll_dual_rail_and_reset_functions_match_native() {
                     .into_iter()
                     .enumerate()
                 {
-                    assert_eq!(p.function.config().read32(at), number(i + 2), "{line}");
+                    assert_eq!(
+                        p.function.config().read32(at).unwrap(),
+                        number(i + 2),
+                        "{line}"
+                    );
                 }
             }
             "C" => {
@@ -615,16 +678,38 @@ fn unchanged_linux_gl9755_phy_pll_dual_rail_and_reset_functions_match_native() {
                 } else {
                     hz
                 };
-                let actual = set_clock(&mut p, clock(), 2, 200_000_000, timing, request).unwrap();
+                let actual = set_clock(
+                    &mut p,
+                    clock(),
+                    2,
+                    200_000_000,
+                    timing,
+                    request,
+                    crate::sdhci::model::minimum().as_ref(),
+                )
+                .unwrap();
                 assert_eq!(actual, number(5), "{line}");
-                assert_eq!(p.function.config().read32(PLL), number(6), "{line}");
-                assert_eq!(p.function.config().read32(SSC), number(7), "{line}");
+                assert_eq!(
+                    p.function.config().read32(PLL).unwrap(),
+                    number(6),
+                    "{line}"
+                );
+                assert_eq!(
+                    p.function.config().read32(SSC).unwrap(),
+                    number(7),
+                    "{line}"
+                );
                 assert_eq!(u32::from(p.read16(CLOCK)), number(8), "{line}");
             }
             "W" => {
                 p.write32(INTERRUPT_ENABLE, 0x1234_5678);
                 let off = number(2) != 0;
-                set_power(&mut p, clock(), if off { 0 } else { number(1) as u8 }).unwrap();
+                set_power(
+                    &mut p,
+                    crate::sdhci::model::minimum().as_ref(),
+                    if off { 0 } else { number(1) as u8 },
+                )
+                .unwrap();
                 let state = state.borrow();
                 let writes = number(3) as usize;
                 assert_eq!(state.power.len(), writes, "{line}");
@@ -661,4 +746,54 @@ fn unchanged_linux_gl9755_phy_pll_dual_rail_and_reset_functions_match_native() {
         count += 1;
     }
     assert_eq!(count, 206);
+}
+
+#[test]
+fn failed_d3_quiet_interval_never_reenters_d0_or_closes_the_window() {
+    struct Failed;
+    // SAFETY: test-only failure injection, no native timing grant.
+    unsafe impl crate::bus::pci::power::Timer for Failed {
+        fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+            Ok(())
+        }
+        fn wait_us(&self, _: u64) -> Result<(), crate::bus::pci::power::Error> {
+            Err(crate::bus::pci::power::Error::Clock)
+        }
+    }
+    let (mut p, card, state) = port();
+    assert_eq!(
+        initialize(&mut p.function, &mut Port(card), clock(), &Failed),
+        Err(BlockError::PciPower(crate::bus::pci::power::Error::Clock))
+    );
+    let state = state.borrow();
+    assert_eq!(
+        state.writes.last(),
+        Some(&(0x94, 3)),
+        "no readback, D0 write or window cleanup follows failed minimum"
+    );
+    assert_eq!(state.config[0x94] & 3, 3);
+    assert_eq!(state.config[0x800] & 1, 1);
+}
+
+#[test]
+fn protected_config_denial_is_authority_and_stops_all_outer_cleanup() {
+    let mut dma = TestRegion::new(128 * 1024 * 8);
+    let (mut host, card, state) = host(&mut dma, false, false);
+    state.borrow_mut().denied_read = Some(PLL);
+    let before = (card.borrow().reads, card.borrow().writes.len());
+    let error = host.inner.borrow_mut().set_clock(50_000_000).unwrap_err();
+    assert!(matches!(error, BlockError::Config(_)));
+    assert_eq!(
+        state.borrow().after_denial,
+        0,
+        "no protected-window close or outer permission observation"
+    );
+    assert_eq!(
+        (card.borrow().reads, card.borrow().writes.len()),
+        before,
+        "no CLOCK/HOST_CONTROL2 power-off cleanup"
+    );
+    let before = state.borrow().writes.len();
+    assert_eq!(host.poll().err(), Some(error));
+    assert_eq!(state.borrow().writes.len(), before);
 }

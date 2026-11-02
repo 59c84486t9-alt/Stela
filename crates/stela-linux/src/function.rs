@@ -19,7 +19,7 @@ use stela_driver_base::bus::{
         memory::CacheAttribute,
         pages::DmaPages,
     },
-    pci::ConfigSpace,
+    pci::{ConfigEffect, ConfigError, ConfigFailure, ConfigSpace},
 };
 
 /// PCI base address registers.
@@ -30,6 +30,8 @@ const PAGE_SHIFT: u8 = 12;
 const PAGE_BYTES: u64 = 1 << PAGE_SHIFT;
 
 const PCIBIOS_BAD_REGISTER_NUMBER: c_int = 0x87;
+const PCIBIOS_SET_FAILED: c_int = 0x88;
+const EIO: Errno = -5;
 
 static QUARANTINED_MAPPINGS: AtomicU64 = AtomicU64::new(0);
 static QUARANTINED_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -57,13 +59,24 @@ fn quarantine<T>(resources: T, mappings: u64, bytes: u64) {
     core::mem::forget(resources);
 }
 
+/// Exact Rust cause kept before mapping the original C MSI ABI result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MsiError {
+    Config(ConfigError),
+    Native(Errno),
+}
+impl From<ConfigError> for MsiError {
+    fn from(error: ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
 /// The function's owner.
 pub trait Host {
     type Config: ConfigSpace;
     fn config(&mut self) -> &mut Self::Config;
     /// Move the function's interrupt from its line to a message.
-    fn enable_msi(&mut self) -> Result<(), Errno>;
-    fn disable_msi(&mut self);
+    fn enable_msi(&mut self) -> Result<(), MsiError>;
+    fn disable_msi(&mut self) -> Result<(), MsiError>;
 }
 
 /// A memory BAR where its owner placed it. `flags` holds Linux's `IORESOURCE_*`.
@@ -104,33 +117,54 @@ impl Msi {
         Self { capability }
     }
 
-    /// Read this capability's control word through its configuration owner.
-    pub fn control<C: ConfigSpace>(self, config: &C) -> u16 {
-        config.read16(self.capability + Self::CONTROL)
-    }
-
-    /// Stop the function sending it.
-    pub fn disable<C: ConfigSpace>(self, config: &mut C) {
-        let control = self.control(config) & !Self::ENABLE;
-        config.write16(self.capability + Self::CONTROL, control);
-    }
-
-    /// Set the one message, disabled.
-    pub fn program<C: ConfigSpace>(self, config: &mut C, address: u64, data: u16) {
-        self.disable(config);
-        let wide = self.control(config) & Self::WIDE != 0;
-        let at = self.capability + Self::ADDRESS;
-        config.write32(at, address as u32);
-        if wide {
-            config.write32(at + 4, (address >> 32) as u32);
+    fn offset(self, delta: u16, width: usize) -> Result<u16, ConfigError> {
+        if let Some(offset) = self.capability.checked_add(delta)
+            && usize::from(offset) + width <= 4096
+            && usize::from(offset).is_multiple_of(width)
+        {
+            return Ok(offset);
         }
-        config.write16(at + if wide { 8 } else { 4 }, data);
+        Err(ConfigError::before_effect(ConfigFailure::Access {
+            offset: self.capability,
+            width,
+        }))
+    }
+    /// Read this capability's control word through its configuration owner.
+    pub fn control<C: ConfigSpace>(self, config: &C) -> Result<u16, ConfigError> {
+        config.read16(self.offset(Self::CONTROL, 2)?)
     }
 
-    /// Let the function send it.
-    pub fn enable<C: ConfigSpace>(self, config: &mut C) {
-        let control = self.control(config) & !Self::MULTIPLE | Self::ENABLE;
-        config.write16(self.capability + Self::CONTROL, control);
+    /// Stop the function sending it; refusal is no interrupt retirement proof.
+    pub fn disable<C: ConfigSpace>(self, config: &mut C) -> Result<(), ConfigError> {
+        let control = self.control(config)? & !Self::ENABLE;
+        config.write16(self.offset(Self::CONTROL, 2)?, control)
+    }
+
+    /// Set one message, disabled. Stop at the first failed exact-width access;
+    /// earlier writes are not rolled back or inferred to be retired.
+    pub fn program<C: ConfigSpace>(
+        self,
+        config: &mut C,
+        address: u64,
+        data: u16,
+    ) -> Result<(), ConfigError> {
+        self.disable(config)?;
+        let wide = self.control(config)? & Self::WIDE != 0;
+        let at = self.offset(Self::ADDRESS, 4)?;
+        config.write32(at, address as u32)?;
+        if wide {
+            config.write32(self.offset(Self::ADDRESS + 4, 4)?, (address >> 32) as u32)?;
+        }
+        config.write16(
+            self.offset(Self::ADDRESS + if wide { 8 } else { 4 }, 2)?,
+            data,
+        )
+    }
+
+    /// Let the function send it only after an acknowledged control access.
+    pub fn enable<C: ConfigSpace>(self, config: &mut C) -> Result<(), ConfigError> {
+        let control = self.control(config)? & !Self::MULTIPLE | Self::ENABLE;
+        config.write16(self.offset(Self::CONTROL, 2)?, control)
     }
 }
 
@@ -307,17 +341,92 @@ fn direction(linux: c_uint) -> Direction {
     }
 }
 
+/// Typed causes observed in this exact presentation, never a retirement receipt.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ConfigurationStatus {
+    pub first: Option<ConfigError>,
+    pub uncertain: Option<ConfigError>,
+    pub msi: Option<MsiError>,
+    pub msi_retirement_refused: bool,
+}
+impl ConfigurationStatus {
+    fn terminal(self) -> bool {
+        self.uncertain.is_some() || self.msi_retirement_refused
+    }
+}
+fn pcibios(error: ConfigError) -> c_int {
+    match error.reason {
+        ConfigFailure::Access { .. } => PCIBIOS_BAD_REGISTER_NUMBER,
+        _ => PCIBIOS_SET_FAILED,
+    }
+}
+fn register(offset: c_int, size: c_int) -> Option<u16> {
+    if !matches!(size, 1 | 2 | 4) || offset < 0 || offset > 4096 - size || offset & (size - 1) != 0
+    {
+        return None;
+    }
+    Some(offset as u16) // signed range and full function bounds were checked above
+}
 struct State<H> {
     host: H,
     mappings: Mappings,
     enrollment: Option<Box<Authority>>,
+    configuration: ConfigurationStatus,
 }
 
+impl<H> State<H> {
+    /// The original caller may ignore a PCIBIOS failure and use mapped MMIO or
+    /// release suballocations. Stop before returning after any unacknowledged
+    /// write; retaining pages alone would not prevent those effects.
+    unsafe fn require_admission(&self) {
+        if self.configuration.uncertain.is_some() {
+            // SAFETY: this exact entered callback retains State/Host and cause.
+            unsafe {
+                stela_linux_fatal(
+                    c"PCI configuration write failed without acknowledgement".as_ptr(),
+                )
+            };
+        }
+        if self.configuration.msi_retirement_refused {
+            // SAFETY: void C completion cannot report this retained refusal.
+            unsafe { stela_linux_fatal(c"MSI disable failed without proven retirement".as_ptr()) };
+        }
+    }
+    unsafe fn config_failed(&mut self, error: ConfigError) -> c_int {
+        self.configuration.first.get_or_insert(error);
+        if matches!(error.effect, ConfigEffect::WriteMayHaveApplied { .. }) {
+            self.configuration.uncertain.get_or_insert(error);
+        }
+        // SAFETY: same entered callback, with cause installed before the trap.
+        unsafe { self.require_admission() };
+        pcibios(error)
+    }
+}
 unsafe extern "C" fn release_context<H>(context: *mut c_void) {
     // SAFETY: successful attach transferred this unique Box to C. The final
     // C device release invokes it once, only in the original quiescent owner;
     // no device reference can issue another callback after final release.
-    drop(unsafe { Box::from_raw(context.cast::<State<H>>()) });
+    let state = unsafe { Box::from_raw(context.cast::<State<H>>()) };
+    if state.configuration.terminal() {
+        // The outer C host_function/pci_dev must remain too: returning to its
+        // void release caller would let that allocation be freed. Retain the
+        // whole Rust graph before the same existing terminal diagnostic.
+        let uncertain = state.configuration.uncertain.is_some();
+        let _ = RETAINED_PRESENTATIONS.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_add(1))
+        });
+        core::mem::forget(state);
+        // SAFETY: original entered final-release callback, with Rust State
+        // retained and original C host allocation still held by its caller.
+        unsafe {
+            stela_linux_fatal(if uncertain {
+                c"PCI configuration write failed without acknowledgement".as_ptr()
+            } else {
+                c"MSI disable failed without proven retirement".as_ptr()
+            })
+        };
+    }
+    drop(state);
 }
 
 /// # Safety
@@ -334,36 +443,55 @@ unsafe extern "C" fn read_config<H: Host>(
     size: c_int,
     value: *mut u32,
 ) -> c_int {
-    // SAFETY: the table's context.
-    let config = unsafe { state::<H>(context) }.host.config();
-    let offset = offset as u16;
-    let read = match size {
-        1 => u32::from(config.read8(offset)),
-        2 => u32::from(config.read16(offset)),
-        4 => config.read32(offset),
-        _ => return PCIBIOS_BAD_REGISTER_NUMBER,
+    // SAFETY: the table's exact retained callback context.
+    let state = unsafe { state::<H>(context) };
+    // SAFETY: same entered callback; no original operation follows uncertainty.
+    unsafe { state.require_admission() };
+    let Some(offset) = register(offset, size) else {
+        return PCIBIOS_BAD_REGISTER_NUMBER;
     };
-    // SAFETY: Linux gives a writable result.
-    unsafe { *value = read };
-    0
+    let config = state.host.config();
+    let result = match size {
+        1 => config.read8(offset).map(u32::from),
+        2 => config.read16(offset).map(u32::from),
+        4 => config.read32(offset),
+        _ => unreachable!("validated exact width"),
+    };
+    match result {
+        Ok(read) => {
+            // SAFETY: original C gives a writable output. All-ones is real data.
+            unsafe { *value = read };
+            0
+        }
+        // SAFETY: actual typed failure and entire owner are retained first.
+        Err(error) => unsafe { state.config_failed(error) },
+    }
 }
-
 unsafe extern "C" fn write_config<H: Host>(
     context: *mut c_void,
     offset: c_int,
     size: c_int,
     value: u32,
 ) -> c_int {
-    // SAFETY: the table's context.
-    let config = unsafe { state::<H>(context) }.host.config();
-    let offset = offset as u16;
-    match size {
+    // SAFETY: the table's exact retained callback context.
+    let state = unsafe { state::<H>(context) };
+    // SAFETY: same entered callback; no original operation follows uncertainty.
+    unsafe { state.require_admission() };
+    let Some(offset) = register(offset, size) else {
+        return PCIBIOS_BAD_REGISTER_NUMBER;
+    };
+    let config = state.host.config();
+    let result = match size {
         1 => config.write8(offset, value as u8),
         2 => config.write16(offset, value as u16),
         4 => config.write32(offset, value),
-        _ => return PCIBIOS_BAD_REGISTER_NUMBER,
+        _ => unreachable!("validated exact width"),
+    };
+    match result {
+        Ok(()) => 0,
+        // SAFETY: a possibly applied write never returns into the C caller.
+        Err(error) => unsafe { state.config_failed(error) },
     }
-    0
 }
 
 unsafe extern "C" fn dma_map<H: Host>(
@@ -374,6 +502,8 @@ unsafe extern "C" fn dma_map<H: Host>(
 ) -> u64 {
     // SAFETY: the table's context.
     let state = unsafe { state::<H>(context) };
+    // SAFETY: exact entered callback, before DMA-visible effects.
+    unsafe { state.require_admission() };
     match state.mappings.map(physical, size, direction(linux)) {
         Ok(address) => address.unwrap_or(MAPPING_ERROR),
         // The DMA API permits its caller to reuse suballocations immediately
@@ -389,6 +519,8 @@ unsafe extern "C" fn dma_map<H: Host>(
 unsafe extern "C" fn dma_unmap<H: Host>(context: *mut c_void, address: u64, _: usize, _: c_uint) {
     // SAFETY: the table's context.
     let state = unsafe { state::<H>(context) };
+    // SAFETY: uncertainty cannot authorize memory/suballocation reuse.
+    unsafe { state.require_admission() };
     if state.mappings.unmap(address).is_err() {
         let bytes = state.mappings.live[&address].last().unwrap().token.bytes;
         count_quarantine(1, bytes as u64);
@@ -400,20 +532,57 @@ unsafe extern "C" fn dma_unmap<H: Host>(context: *mut c_void, address: u64, _: u
 }
 
 unsafe extern "C" fn enable_msi<H: Host>(context: *mut c_void) -> c_int {
-    // SAFETY: the table's context.
-    let result = unsafe { state::<H>(context) }.host.enable_msi();
-    result.err().unwrap_or(0)
+    // SAFETY: exact live callback state in its entered owner.
+    let state = unsafe { state::<H>(context) };
+    // SAFETY: prevent further endpoint effects after an uncertain access.
+    unsafe { state.require_admission() };
+    match state.host.enable_msi() {
+        Ok(()) => 0,
+        Err(error) => {
+            state.configuration.msi.get_or_insert(error);
+            match error {
+                MsiError::Config(error) => {
+                    // SAFETY: record exact cause, trapping first if write uncertain.
+                    unsafe { state.config_failed(error) };
+                    EIO
+                }
+                MsiError::Native(error) => {
+                    if error < 0 {
+                        error
+                    } else {
+                        EIO
+                    }
+                }
+            }
+        }
+    }
 }
-
 unsafe extern "C" fn disable_msi<H: Host>(context: *mut c_void) {
-    // SAFETY: the table's context.
-    unsafe { state::<H>(context) }.host.disable_msi();
+    // SAFETY: exact live callback state in its entered owner.
+    let state = unsafe { state::<H>(context) };
+    // SAFETY: void C completion cannot retire an uncertain source.
+    unsafe { state.require_admission() };
+    if let Err(error) = state.host.disable_msi() {
+        state.configuration.msi.get_or_insert(error);
+        state.configuration.msi_retirement_refused = true;
+        if let MsiError::Config(error) = error {
+            state.configuration.first.get_or_insert(error);
+            if matches!(error.effect, ConfigEffect::WriteMayHaveApplied { .. }) {
+                state.configuration.uncertain.get_or_insert(error);
+            }
+        }
+        // SAFETY: exact cause and entire Host graph retained before terminal report.
+        unsafe { state.require_admission() };
+    }
 }
 
 unsafe extern "C" fn enroll<H>(context: *mut c_void, device: *mut c_void) -> c_int {
     // SAFETY: the attach call retains this State; take ends the mutable borrow
     // before the generic catalogue can allocate or release any foreign object.
-    let authority = unsafe { state::<H>(context) }.enrollment.take();
+    let attached = unsafe { state::<H>(context) };
+    // SAFETY: original registration cannot continue after uncertain configuration.
+    unsafe { attached.require_admission() };
+    let authority = attached.enrollment.take();
     let Some(authority) = authority else {
         return -22;
     };
@@ -434,6 +603,8 @@ unsafe extern "C" fn enroll<H>(context: *mut c_void, device: *mut c_void) -> c_i
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AttachError {
+    Config(ConfigError),
+    Msi(MsiError),
     Catalogue(catalogue::Error),
     Native(Errno),
 }
@@ -469,6 +640,13 @@ pub struct Rejected<H> {
     pub error: AttachError,
     _held: Retained<Box<Held<H>>>,
 }
+impl<H> core::fmt::Debug for Rejected<H> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Rejected")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
 enum Held<H> {
     Before {
         _host: H,
@@ -484,6 +662,7 @@ enum Held<H> {
 /// quiescent put in that owner; other final puts quarantine those resources.
 pub struct Attached<H> {
     device: NonNull<c_void>,
+    state: NonNull<State<H>>,
     _host: PhantomData<H>,
 }
 
@@ -492,23 +671,18 @@ impl<H: Host> Attached<H> {
     /// In an entered Linux owner, on a Linux task, as a driver may bind here.
     /// That owner and its platform services outlive all escaped device
     /// references, including any quarantined final release. Refusal returns an
-    /// errno while retaining the host graph; it proves no native retirement.
+    /// typed cause while retaining the host graph; it proves no native retirement.
     pub unsafe fn new(
         host: H,
         domain: Arc<dyn DmaDomain>,
         placement: Placement,
-    ) -> Result<Self, Errno>
+    ) -> Result<Self, Rejected<H>>
     where
         H: 'static,
     {
         // SAFETY: unchanged legacy presentation contract; no canonical
         // catalogue authority is inferred for this pre-migration path.
-        unsafe { Self::attach(host, domain, placement, None) }.map_err(|failure| {
-            match failure.error {
-                AttachError::Native(error) => error,
-                _ => -22,
-            }
-        })
+        unsafe { Self::attach(host, domain, placement, None) }
     }
 
     /// Enroll exact original native source metadata before synchronous probe.
@@ -580,6 +754,7 @@ impl<H: Host> Attached<H> {
                 live: BTreeMap::new(),
             },
             enrollment,
+            configuration: ConfigurationStatus::default(),
         }));
         let raw = RawFunction {
             context: state.cast(),
@@ -603,6 +778,7 @@ impl<H: Host> Attached<H> {
         match NonNull::new(unsafe { stela_linux_pci_attach(&raw, &raw mut error) }) {
             Some(device) => Ok(Self {
                 device,
+                state: NonNull::new(state).expect("owned callback State"),
                 _host: PhantomData,
             }),
             None => {
@@ -611,11 +787,26 @@ impl<H: Host> Attached<H> {
                 // retired by its real device put before returning NULL.
                 let state = unsafe { Box::from_raw(state) };
                 Err(Rejected {
-                    error: AttachError::Native(error),
+                    error: state
+                        .configuration
+                        .first
+                        .map(AttachError::Config)
+                        .or_else(|| state.configuration.msi.map(AttachError::Msi))
+                        .unwrap_or(AttachError::Native(error)),
                     _held: Retained::new(Box::new(Held::Native { _state: state })),
                 })
             }
         }
+    }
+
+    /// Inspect exact causes in this retained original presentation.
+    ///
+    /// # Safety
+    /// Same entered serialized Linux owner, with no overlapping C callback.
+    /// The live registration reference keeps the exact State allocation valid.
+    pub unsafe fn configuration_status(&self) -> ConfigurationStatus {
+        // SAFETY: caller's exact current/lifetime and callback exclusion contract.
+        unsafe { self.state.as_ref() }.configuration
     }
 
     /// The `struct pci_dev`, for code that names it.
@@ -635,6 +826,15 @@ impl<H: Host> Attached<H> {
 
 impl<H> Drop for Attached<H> {
     fn drop(&mut self) {
+        // SAFETY: the type's entered serialized owner contract; registration
+        // still keeps the actual State before any remove/release operation.
+        if unsafe { self.state.as_ref() }.configuration.terminal() {
+            let _ =
+                RETAINED_PRESENTATIONS.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    Some(value.saturating_add(1))
+                });
+            return; // actual C device/State/Host/IRQ/DMA graph remains owned
+        }
         // SAFETY: the type's contract; removal unbinds the driver and drops
         // registration. C's final device release owns State destruction, so
         // outstanding device references retain their callback context.

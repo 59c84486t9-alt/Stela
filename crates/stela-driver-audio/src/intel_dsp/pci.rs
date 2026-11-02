@@ -67,6 +67,10 @@ impl NativeRegisters {
     /// BAR numbers or equal numeric addresses alone do not supply these grants.
     /// No aliases/firmware/other workers access these resources. Keep grants
     /// through acknowledged DMA/core shutdown and remapper drain.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Refusal returns the same physical owner graph without allocating on failure"
+    )]
     pub unsafe fn attach(
         mut requester: StoppedRequester,
         hda: Mapping,
@@ -75,7 +79,7 @@ impl NativeRegisters {
         dsp_bar: PciBar,
     ) -> Result<Self, AttachFailure> {
         let result = (|| {
-            requester.check_stopped().map_err(|_| Error::Authority)?;
+            requester.check_stopped().map_err(Error::PciClaim)?;
             let hda_base = mapping_bar(&hda, hda_bar, 0x4000)?;
             let dsp_base = mapping_bar(&dsp, dsp_bar, 0x100000)?;
             let hda_end = hda_base + hda.bytes().map_err(|_| Error::InvalidBar)? as u64;
@@ -133,24 +137,31 @@ impl NativeRegisters {
         }
     }
     /// The Controller must already be consumed after acknowledged shutdown.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Refusal returns the same physical owner graph without allocating on failure"
+    )]
     pub fn into_stopped_resources(
         mut self,
-    ) -> Result<(Function<OwnedConfig>, Mapping, Mapping), Self> {
-        if self.associated().is_err() || self.master != Some(false) {
-            return Err(self);
-        }
-        match self.read32(Bar::Dsp, super::registers::ADSPCS) {
-            Ok(value) if value & 0x0f0f0000 == 0 => (),
-            _ => return Err(self),
-        }
-        let Ok(gcap) = self.read16(Bar::Hda, 0) else {
-            return Err(self);
-        };
-        for index in 0..(((gcap >> 8) & 15) + ((gcap >> 12) & 15)) as u8 {
-            if !matches!(self.read8(Bar::Hda, super::registers::stream_base(index)), Ok(value) if value & 2 == 0)
-            {
-                return Err(self);
+    ) -> Result<(Function<OwnedConfig>, Mapping, Mapping), crate::Refusal<Self, Error>> {
+        let result = (|| {
+            self.associated()?;
+            if self.master != Some(false) {
+                return Err(Error::Authority);
             }
+            if self.read32(Bar::Dsp, super::registers::ADSPCS)? & 0x0f0f0000 != 0 {
+                return Err(Error::Busy);
+            }
+            let gcap = self.read16(Bar::Hda, 0)?;
+            for index in 0..(((gcap >> 8) & 15) + ((gcap >> 12) & 15)) as u8 {
+                if self.read8(Bar::Hda, super::registers::stream_base(index))? & 2 != 0 {
+                    return Err(Error::Busy);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            return Err(crate::Refusal { error, owner: self });
         }
         Ok((self.function, self.hda, self.dsp))
     }
@@ -169,11 +180,11 @@ unsafe impl Registers for NativeRegisters {
     fn set_bus_master(&mut self, enabled: bool) -> Result<(), Error> {
         self.associated()?;
         let config = self.function.config();
-        let before = config.read16(4);
+        let before = config.read16(4)?;
         let desired = if enabled { before | 4 } else { before & !4 };
         self.master = None;
-        config.write16(4, desired);
-        if config.read16(4) != desired {
+        config.write16(4, desired)?;
+        if config.read16(4)? != desired {
             return Err(Error::Authority);
         }
         self.master = Some(enabled);
@@ -182,7 +193,7 @@ unsafe impl Registers for NativeRegisters {
     fn misc_clock_gate(&mut self, enabled: bool) -> Result<(), Error> {
         self.associated()?;
         let config = self.function.config();
-        let before = config.read32(0x48);
+        let before = config.read32(0x48)?;
         if before == u32::MAX {
             return Err(Error::Authority);
         }
@@ -191,8 +202,8 @@ unsafe impl Registers for NativeRegisters {
         } else {
             before & !(1 << 6)
         };
-        config.write32(0x48, wanted);
-        if config.read32(0x48) != wanted {
+        config.write32(0x48, wanted)?;
+        if config.read32(0x48)? != wanted {
             return Err(Error::Authority);
         }
         Ok(())
@@ -201,13 +212,13 @@ unsafe impl Registers for NativeRegisters {
         self.associated()?;
         let config = self.function.config();
         for (offset, mask, bits) in [(0x48, 1 << 1, 0), (0x44, 1 << 2, 1 << 2)] {
-            let before = config.read32(offset);
+            let before = config.read32(offset)?;
             if before == u32::MAX {
                 return Err(Error::Authority);
             }
             let wanted = (before & !mask) | bits;
-            config.write32(offset, wanted);
-            if config.read32(offset) != wanted {
+            config.write32(offset, wanted)?;
+            if config.read32(offset)? != wanted {
                 return Err(Error::Authority);
             }
         }
@@ -293,19 +304,19 @@ fn validate<C: ConfigSpace>(
     }
     let metadata = (function.vendor, function.device, function.class);
     let config = function.config();
-    let id = config.read32(0);
-    let rc = config.read32(8);
+    let id = config.read32(0)?;
+    let rc = config.read32(8)?;
     if id == u32::MAX
         || rc == u32::MAX
         || (id as u16, (id >> 16) as u16) != (metadata.0, metadata.1)
         || [(rc >> 24) as u8, (rc >> 16) as u8, (rc >> 8) as u8] != metadata.2
         || !matches!(metadata.2, [4, 1, 0] | [4, 3, 0x80])
-        || config.read8(0xe) & 0x7f != 0
+        || config.read8(0xe)? & 0x7f != 0
     {
         return Err(Error::Authority);
     }
-    let command = config.read16(4);
-    let status = config.read16(6);
+    let command = config.read16(4)?;
+    let status = config.read16(6)?;
     if command == u16::MAX
         || status == u16::MAX
         || command & 0x402 != 0x402
@@ -314,15 +325,15 @@ fn validate<C: ConfigSpace>(
         return Err(Error::Authority);
     }
     for (offset, base) in [(0x10, bases[0]), (0x20, bases[1])] {
-        let lo = config.read32(offset);
-        let hi = config.read32(offset + 4);
+        let lo = config.read32(offset)?;
+        let hi = config.read32(offset + 4)?;
         if lo & 15 != 4 || (u64::from(lo & !15) | (u64::from(hi) << 32)) != base {
             return Err(Error::InvalidBar);
         }
     }
     let mut pm = false;
     for entry in config.capabilities() {
-        let entry = entry.map_err(|_| Error::Authority)?;
+        let entry = entry?;
         let offset = entry.offset;
         // This profile owns the vendor dwords 44/48. Refuse even an undecoded
         // capability body before them instead of guessing its extent and
@@ -330,13 +341,13 @@ fn validate<C: ConfigSpace>(
         if offset < 0x50 {
             return Err(Error::Authority);
         }
-        let control = config.read16(offset + 2);
+        let control = config.read16(offset + 2)?;
         if control == u16::MAX {
             return Err(Error::Authority);
         }
         match entry.id {
             1 => {
-                if pm || config.read16(offset + 4) & 3 != 0 {
+                if pm || config.read16(offset + 4)? & 3 != 0 {
                     return Err(Error::Authority);
                 }
                 pm = true;

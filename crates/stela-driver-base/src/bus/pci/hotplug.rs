@@ -58,10 +58,22 @@ const SLOT_HOT_PLUG_CAPABLE: u32 = 1 << 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    Config(super::ConfigError),
+    PciCapability(super::CapabilityError),
     /// The bridge's bus range is empty or too small.
     Buses,
     /// Its memory windows are closed or too small.
     Windows,
+}
+impl From<super::ConfigError> for Error {
+    fn from(error: super::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+impl From<super::CapabilityError> for Error {
+    fn from(error: super::CapabilityError) -> Self {
+        Self::PciCapability(error)
+    }
 }
 
 /// What [`adopt`] numbered and placed.
@@ -75,58 +87,64 @@ pub struct Arrivals {
 }
 
 /// Where `config`'s PCI Express capability is.
-fn express<C: ConfigSpace>(config: &C) -> Option<u16> {
-    config
-        .capabilities()
-        .map_while(Result::ok)
-        .find(|entry| entry.id == CAPABILITY_EXPRESS)
-        .map(|entry| entry.offset)
-}
-
-/// The kind of PCI Express port or device `config` is.
-fn express_type<C: ConfigSpace>(config: &C, capability: u16) -> u16 {
-    (config.read16(capability + EXPRESS_FLAGS) >> EXPRESS_TYPE_SHIFT) & 15
-}
-
-/// Whether the bridge's slot can have its device come and go.
-pub fn hot_plug_capable<C: ConfigSpace>(bridge: &C) -> bool {
-    express(bridge).is_some_and(|capability| {
-        bridge.read16(capability + EXPRESS_FLAGS) & EXPRESS_SLOT_IMPLEMENTED != 0
-            && bridge.read32(capability + SLOT_CAPABILITIES) & SLOT_HOT_PLUG_CAPABLE != 0
-    })
-}
-
-/// Whether the link below the bridge is up.
-fn link_active<C: ConfigSpace>(bridge: &C) -> bool {
-    express(bridge)
-        .is_some_and(|capability| bridge.read16(capability + LINK_STATUS) & LINK_ACTIVE != 0)
-}
-
-/// Whether the hot-plug `bridge`'s link holds something [`adopt`] has to
-/// place: a function that answers, or any if the bridge has no bus for it.
-pub fn arrived<C: ConfigSpace>(bridge: &C, at: impl FnOnce(u8, u8, u8) -> C) -> bool {
-    let secondary = bridge.read8(SECONDARY_BUS);
-    link_active(bridge)
-        && (secondary == 0 || {
-            let first = at(secondary, 0, 0);
-            present(&first) && untouched(&first)
-        })
-}
-
-/// Whether a function answers, past its initialization.
-fn present<C: ConfigSpace>(config: &C) -> bool {
-    !matches!(config.read16(regs::VENDOR_ID), u16::MAX | VENDOR_NOT_READY)
-}
-
-/// Whether nothing has numbered or placed `config`'s function yet.
-fn untouched<C: ConfigSpace>(config: &C) -> bool {
-    if config.read8(regs::HEADER_TYPE) & HEADER_MASK == HEADER_BRIDGE {
-        config.read8(SECONDARY_BUS) == 0
-    } else {
-        (0..ENDPOINT_BARS).all(|index| config.read32(regs::BASE_ADDRESS_0 + 4 * index) & !0xf == 0)
+fn express<C: ConfigSpace>(config: &C) -> Result<Option<u16>, Error> {
+    for entry in config.capabilities() {
+        let entry = entry?;
+        if entry.id == CAPABILITY_EXPRESS {
+            return Ok(Some(entry.offset));
+        }
     }
+    Ok(None)
 }
-
+fn express_type<C: ConfigSpace>(config: &C, capability: u16) -> Result<u16, Error> {
+    Ok((config.read16(capability + EXPRESS_FLAGS)? >> EXPRESS_TYPE_SHIFT) & 15)
+}
+pub fn hot_plug_capable<C: ConfigSpace>(bridge: &C) -> Result<bool, Error> {
+    let Some(capability) = express(bridge)? else {
+        return Ok(false);
+    };
+    Ok(
+        bridge.read16(capability + EXPRESS_FLAGS)? & EXPRESS_SLOT_IMPLEMENTED != 0
+            && bridge.read32(capability + SLOT_CAPABILITIES)? & SLOT_HOT_PLUG_CAPABLE != 0,
+    )
+}
+fn link_active<C: ConfigSpace>(bridge: &C) -> Result<bool, Error> {
+    let Some(capability) = express(bridge)? else {
+        return Ok(false);
+    };
+    Ok(bridge.read16(capability + LINK_STATUS)? & LINK_ACTIVE != 0)
+}
+pub fn arrived<C: ConfigSpace>(
+    bridge: &C,
+    at: impl FnOnce(u8, u8, u8) -> C,
+) -> Result<bool, Error> {
+    let secondary = bridge.read8(SECONDARY_BUS)?;
+    if !link_active(bridge)? {
+        return Ok(false);
+    }
+    if secondary == 0 {
+        return Ok(true);
+    }
+    let first = at(secondary, 0, 0);
+    Ok(present(&first)? && untouched(&first)?)
+}
+fn present<C: ConfigSpace>(config: &C) -> Result<bool, Error> {
+    Ok(!matches!(
+        config.read16(regs::VENDOR_ID)?,
+        u16::MAX | VENDOR_NOT_READY
+    ))
+}
+fn untouched<C: ConfigSpace>(config: &C) -> Result<bool, Error> {
+    if config.read8(regs::HEADER_TYPE)? & HEADER_MASK == HEADER_BRIDGE {
+        return Ok(config.read8(SECONDARY_BUS)? == 0);
+    }
+    for index in 0..ENDPOINT_BARS {
+        if config.read32(regs::BASE_ADDRESS_0 + 4 * index)? & !0xf != 0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
 #[derive(Clone, Copy, Debug)]
 struct Register {
     offset: u16,
@@ -256,26 +274,21 @@ fn window(word: u32, upper: (u64, u64)) -> Option<Range<u64>> {
 }
 
 /// A bridge's non-prefetchable window, from its registers.
-fn memory_window<C: ConfigSpace>(bridge: &C) -> Option<Range<u64>> {
-    window(bridge.read32(MEMORY_WINDOW), (0, 0))
+fn memory_window<C: ConfigSpace>(bridge: &C) -> Result<Option<Range<u64>>, Error> {
+    Ok(window(bridge.read32(MEMORY_WINDOW)?, (0, 0)))
 }
-
-/// A bridge's prefetchable window, from its registers.
-fn prefetch_window<C: ConfigSpace>(bridge: &C) -> Option<Range<u64>> {
-    let word = bridge.read32(PREFETCH_WINDOW);
-    let upper = |offset| {
-        if word & PREFETCH_TYPE == PREFETCH_64 {
-            u64::from(bridge.read32(offset))
-        } else {
-            0
-        }
+fn prefetch_window<C: ConfigSpace>(bridge: &C) -> Result<Option<Range<u64>>, Error> {
+    let word = bridge.read32(PREFETCH_WINDOW)?;
+    let upper = if word & PREFETCH_TYPE == PREFETCH_64 {
+        (
+            u64::from(bridge.read32(PREFETCH_BASE_UPPER)?),
+            u64::from(bridge.read32(PREFETCH_LIMIT_UPPER)?),
+        )
+    } else {
+        (0, 0)
     };
-    window(
-        word,
-        (upper(PREFETCH_BASE_UPPER), upper(PREFETCH_LIMIT_UPPER)),
-    )
+    Ok(window(word, upper))
 }
-
 /// A bridge's windows, or what is left of them to place in.
 #[derive(Debug, Default)]
 struct Pools {
@@ -328,21 +341,21 @@ impl<C: ConfigSpace, A: FnMut(u8, u8, u8) -> C> Scan<A> {
     }
 
     /// The first `count` BARs' sizes, with decode off, as `pci_read_bases`.
-    fn registers(config: &mut C, count: u16) -> Vec<Register> {
-        let command = config.read16(regs::COMMAND);
+    fn registers(config: &mut C, count: u16) -> Result<Vec<Register>, Error> {
+        let command = config.read16(regs::COMMAND)?;
         config.write16(
             regs::COMMAND,
             command & !(regs::COMMAND_IO | regs::COMMAND_MEMORY),
-        );
+        )?;
         let mut found = Vec::new();
         let mut index = 0;
         while index < count {
             let offset = regs::BASE_ADDRESS_0 + 4 * index;
             index += 1;
-            let low = config.read32(offset);
-            config.write32(offset, u32::MAX);
-            let mask = config.read32(offset) & !0xf;
-            config.write32(offset, low);
+            let low = config.read32(offset)?;
+            config.write32(offset, u32::MAX)?;
+            let mask = config.read32(offset)? & !0xf;
+            config.write32(offset, low)?;
             if low & BAR_IO != 0 {
                 continue;
             }
@@ -350,9 +363,9 @@ impl<C: ConfigSpace, A: FnMut(u8, u8, u8) -> C> Scan<A> {
             let upper = if wide {
                 let upper = offset + 4;
                 index += 1;
-                config.write32(upper, u32::MAX);
-                let mask = config.read32(upper);
-                config.write32(upper, 0);
+                config.write32(upper, u32::MAX)?;
+                let mask = config.read32(upper)?;
+                config.write32(upper, 0)?;
                 mask
             } else {
                 u32::MAX
@@ -368,22 +381,24 @@ impl<C: ConfigSpace, A: FnMut(u8, u8, u8) -> C> Scan<A> {
                 });
             }
         }
-        config.write16(regs::COMMAND, command);
-        found
+        config.write16(regs::COMMAND, command)?;
+        Ok(found)
     }
 
     /// The address a bridge's prefetchable window can end below, if it has
     /// one, as `pci_read_bridge_windows` finds out.
-    fn reach(config: &mut C) -> Option<u64> {
-        let saved = config.read32(PREFETCH_WINDOW);
-        config.write32(PREFETCH_WINDOW, WINDOW_FIELD << 16 | WINDOW_FIELD);
-        let word = config.read32(PREFETCH_WINDOW);
-        config.write32(PREFETCH_WINDOW, saved);
-        (word != 0).then_some(if word & PREFETCH_TYPE == PREFETCH_64 {
-            u64::MAX
-        } else {
-            FOUR_GIGABYTES
-        })
+    fn reach(config: &mut C) -> Result<Option<u64>, Error> {
+        let saved = config.read32(PREFETCH_WINDOW)?;
+        config.write32(PREFETCH_WINDOW, WINDOW_FIELD << 16 | WINDOW_FIELD)?;
+        let word = config.read32(PREFETCH_WINDOW)?;
+        config.write32(PREFETCH_WINDOW, saved)?;
+        Ok(
+            (word != 0).then_some(if word & PREFETCH_TYPE == PREFETCH_64 {
+                u64::MAX
+            } else {
+                FOUR_GIGABYTES
+            }),
+        )
     }
 
     /// Number a bridge and scan what hangs from it, as
@@ -394,24 +409,25 @@ impl<C: ConfigSpace, A: FnMut(u8, u8, u8) -> C> Scan<A> {
             .filter(|secondary| *secondary <= self.limit)
             .ok_or(Error::Buses)?;
         self.next += 1;
-        let latency = config.read32(BUS_NUMBERS) & 0xff00_0000;
+        let latency = config.read32(BUS_NUMBERS)? & 0xff00_0000;
         config.write32(
             BUS_NUMBERS,
             latency
                 | u32::from(location.0)
                 | u32::from(secondary) << 8
                 | u32::from(self.limit) << 16,
-        );
-        let registers = Self::registers(config, BRIDGE_BARS);
-        let reach = Self::reach(config);
-        let single = express(config).is_some_and(|capability| {
-            matches!(
-                express_type(config, capability),
+        )?;
+        let registers = Self::registers(config, BRIDGE_BARS)?;
+        let reach = Self::reach(config)?;
+        let single = match express(config)? {
+            Some(capability) => matches!(
+                express_type(config, capability)?,
                 EXPRESS_ROOT_PORT | EXPRESS_DOWNSTREAM
-            )
-        });
+            ),
+            None => false,
+        };
         let nodes = self.bus(secondary, single)?;
-        config.write8(SUBORDINATE_BUS, (self.next - 1) as u8);
+        config.write8(SUBORDINATE_BUS, (self.next - 1) as u8)?;
         Ok(Node {
             location,
             registers,
@@ -426,19 +442,19 @@ impl<C: ConfigSpace, A: FnMut(u8, u8, u8) -> C> Scan<A> {
             for function in 0..8 {
                 let location = (bus, device, function);
                 let mut config = self.config(location);
-                if !present(&config) {
+                if !present(&config)? {
                     if function == 0 {
                         break;
                     }
                     continue;
                 }
-                let header = config.read8(regs::HEADER_TYPE);
+                let header = config.read8(regs::HEADER_TYPE)?;
                 let address = self.address(location);
                 self.arrivals.functions.push(address);
                 match header & HEADER_MASK {
                     0 => nodes.push(Node {
                         location,
-                        registers: Self::registers(&mut config, ENDPOINT_BARS),
+                        registers: Self::registers(&mut config, ENDPOINT_BARS)?,
                         below: None,
                     }),
                     HEADER_BRIDGE => nodes.push(self.bridge(location, &mut config)?),
@@ -453,28 +469,29 @@ impl<C: ConfigSpace, A: FnMut(u8, u8, u8) -> C> Scan<A> {
     }
 
     /// Write `node`'s placed windows and open its forwarding.
-    fn forward(&mut self, node: &Node, windows: &Pools) {
+    fn forward(&mut self, node: &Node, windows: &Pools) -> Result<(), Error> {
         let memory = windows.memory.as_ref();
         let prefetch = windows.prefetchable.as_ref();
         let mut config = self.config(node.location);
-        config.write16(IO_WINDOW, IO_WINDOW_CLOSED);
-        config.write32(IO_WINDOW_UPPER, 0);
-        config.write32(MEMORY_WINDOW, window_word(memory));
-        config.write32(PREFETCH_WINDOW, window_word(prefetch));
+        config.write16(IO_WINDOW, IO_WINDOW_CLOSED)?;
+        config.write32(IO_WINDOW_UPPER, 0)?;
+        config.write32(MEMORY_WINDOW, window_word(memory))?;
+        config.write32(PREFETCH_WINDOW, window_word(prefetch))?;
         let upper = |address: u64| (address >> 32) as u32;
         config.write32(
             PREFETCH_BASE_UPPER,
             prefetch.map_or(0, |range| upper(range.start)),
-        );
+        )?;
         config.write32(
             PREFETCH_LIMIT_UPPER,
             prefetch.map_or(0, |range| upper(range.end - 1)),
-        );
-        let command = config.read16(regs::COMMAND);
+        )?;
+        let command = config.read16(regs::COMMAND)?;
         config.write16(
             regs::COMMAND,
             command | regs::COMMAND_MEMORY | regs::COMMAND_MASTER,
-        );
+        )?;
+        Ok(())
     }
 
     /// Give `nodes` their places in `pools`, top down. `end` is what [`items`]
@@ -487,10 +504,10 @@ impl<C: ConfigSpace, A: FnMut(u8, u8, u8) -> C> Scan<A> {
                 Target::Register(index, at) => {
                     let register = nodes[index].registers[at];
                     let mut config = self.config(nodes[index].location);
-                    let kept = config.read32(register.offset) & 0xf;
-                    config.write32(register.offset, range.start as u32 | kept);
+                    let kept = config.read32(register.offset)? & 0xf;
+                    config.write32(register.offset, range.start as u32 | kept)?;
                     if register.wide {
-                        config.write32(register.offset + 4, (range.start >> 32) as u32);
+                        config.write32(register.offset + 4, (range.start >> 32) as u32)?;
                     }
                 }
                 Target::Memory(index) => windows[index].memory = Some(range),
@@ -499,7 +516,7 @@ impl<C: ConfigSpace, A: FnMut(u8, u8, u8) -> C> Scan<A> {
         }
         for (node, mut window) in nodes.iter().zip(windows) {
             if let Some(below) = &node.below {
-                self.forward(node, &window);
+                self.forward(node, &window)?;
                 self.place(&below.nodes, &mut window, child_window(below, end))?;
             }
         }
@@ -507,33 +524,34 @@ impl<C: ConfigSpace, A: FnMut(u8, u8, u8) -> C> Scan<A> {
     }
 
     /// Match each arrival's payload size to its link, as `pci_configure_mps`.
-    fn payloads(&mut self, parent: (u8, u8, u8), nodes: &[Node]) {
+    fn payloads(&mut self, parent: (u8, u8, u8), nodes: &[Node]) -> Result<(), Error> {
         for node in nodes {
             let mut above = self.config(parent);
             let mut config = self.config(node.location);
-            if let (Some(up), Some(own)) = (express(&above), express(&config)) {
-                let control = above.read16(up + DEVICE_CONTROL);
+            if let (Some(up), Some(own)) = (express(&above)?, express(&config)?) {
+                let control = above.read16(up + DEVICE_CONTROL)?;
                 let current = (control & PAYLOAD_MASK) >> PAYLOAD_SHIFT;
-                let largest = (config.read32(own + DEVICE_CAPABILITIES) & 7) as u16;
+                let largest = (config.read32(own + DEVICE_CAPABILITIES)? & 7) as u16;
                 let payload = current.min(largest);
                 if largest < current {
-                    if express_type(&above, up) == EXPRESS_ROOT_PORT {
+                    if express_type(&above, up)? == EXPRESS_ROOT_PORT {
                         above.write16(
                             up + DEVICE_CONTROL,
                             control & !PAYLOAD_MASK | payload << PAYLOAD_SHIFT,
-                        );
+                        )?;
                     } else {
                         let address = self.address(node.location);
                         self.arrivals.payload_mismatches.push(address);
                     }
                 }
-                let control = config.read16(own + DEVICE_CONTROL) & !PAYLOAD_MASK;
-                config.write16(own + DEVICE_CONTROL, control | payload << PAYLOAD_SHIFT);
+                let control = config.read16(own + DEVICE_CONTROL)? & !PAYLOAD_MASK;
+                config.write16(own + DEVICE_CONTROL, control | payload << PAYLOAD_SHIFT)?;
             }
             if let Some(below) = &node.below {
-                self.payloads(node.location, &below.nodes);
+                self.payloads(node.location, &below.nodes)?;
             }
         }
+        Ok(())
     }
 }
 
@@ -546,34 +564,34 @@ pub fn adopt<C: ConfigSpace>(
     mut at: impl FnMut(u8, u8, u8) -> C,
 ) -> Result<Arrivals, Error> {
     let mut parent = at(bridge.0, bridge.1, bridge.2);
-    let secondary = parent.read8(SECONDARY_BUS);
+    let secondary = parent.read8(SECONDARY_BUS)?;
     if secondary == 0 {
         return Err(Error::Buses);
     }
     let first = at(secondary, 0, 0);
-    if !present(&first) || !untouched(&first) {
+    if !present(&first)? || !untouched(&first)? {
         return Ok(Arrivals::default());
     }
     let mut scan = Scan {
         at,
         segment,
         next: u16::from(secondary) + 1,
-        limit: parent.read8(SUBORDINATE_BUS),
+        limit: parent.read8(SUBORDINATE_BUS)?,
         arrivals: Arrivals::default(),
     };
     let nodes = scan.bus(secondary, true)?;
     let mut pools = Pools {
-        memory: memory_window(&parent),
-        prefetchable: prefetch_window(&parent),
+        memory: memory_window(&parent)?,
+        prefetchable: prefetch_window(&parent)?,
     };
     let end = pools.prefetchable.as_ref().map(|range| range.end);
     scan.place(&nodes, &mut pools, end)?;
-    let command = parent.read16(regs::COMMAND);
+    let command = parent.read16(regs::COMMAND)?;
     parent.write16(
         regs::COMMAND,
         command | regs::COMMAND_MEMORY | regs::COMMAND_MASTER,
-    );
-    scan.payloads(bridge, &nodes);
+    )?;
+    scan.payloads(bridge, &nodes)?;
     Ok(scan.arrivals)
 }
 

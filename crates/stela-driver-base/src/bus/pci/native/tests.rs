@@ -28,9 +28,9 @@ fn setup() -> (
     Arc<AtomicUsize>,
 ) {
     let (mut config, counters) = fixture(ADDRESS);
-    config.write32(0, 0x1234_8086);
-    config.write32(8, 0x03000012);
-    config.write8(0x0e, 0x80);
+    config.write32(0, 0x1234_8086).unwrap();
+    config.write32(8, 0x03000012).unwrap();
+    config.write8(0x0e, 0x80).unwrap();
     (
         Function::new(ADDRESS, config).unwrap(),
         counters,
@@ -71,9 +71,8 @@ fn observed_identity_and_native_narrow_effects_return_original_owners() {
     };
     assert_eq!(drops.load(Ordering::Relaxed), 0);
     drop(exclusion);
-    let mut mapping = function.into_config().into_mapping();
     // SAFETY: original fixture accesses and retention are fully stopped.
-    unsafe { mapping.retire() }.unwrap();
+    unsafe { crate::bus::pci::owned::test_support::retire_owned(function.into_config()) }.unwrap();
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
 }
@@ -117,7 +116,11 @@ fn post_write_context_uncertainty_keeps_effect_and_all_original_owners() {
         .fail_after_value
         .store(0x7654_3210, Ordering::Relaxed);
     counters.fail_after_word.store(0x41, Ordering::Relaxed);
-    let error = Error::Config(ConfigError::Mapping(MappingError::Unavailable));
+    let error = Error::Config(ConfigError::write_may_have_applied(
+        0x40,
+        4,
+        ConfigFailure::Mapping(MappingError::Unavailable),
+    ));
     assert_eq!(owner.write(0x40, 4, 0x7654_3210), Err(error));
     assert_eq!(
         // SAFETY: isolated sequential fixture pointer, no device/reference aliases.
@@ -233,7 +236,7 @@ unsafe impl PciDmaDomain for BoundDomain {
 fn dma_root_requires_original_binding_and_preserves_epoch_not_numeric_identity() {
     use crate::bus::pci::requester::{FunctionRole, StoppedRequester};
     let (mut function, _, drops) = setup();
-    function.config().write16(4, 0x400);
+    function.config().write16(4, 0x400).unwrap();
     // SAFETY: isolated fixture has no engines, aliases, IRQ or workers;
     // no DMA/coherence operation is performed by this pairing-only model.
     let requester =
@@ -313,7 +316,7 @@ fn binding_escape_seals_unknown_transitions_before_effect_and_latches_degraded_r
     use crate::bus::pci::requester::{FunctionRole, StoppedRequester};
     for bind in [false, true] {
         let (mut function, _, drops) = setup();
-        function.config().write32(4, 0xa5c3_0400);
+        function.config().write32(4, 0xa5c3_0400).unwrap();
         let command = fixture_pointer(function.config(), 4);
         let policy = fixture_pointer(function.config(), 0x48);
         // SAFETY: isolated stopped PF/config owner, no physical device.

@@ -68,31 +68,35 @@ pub struct Modern {
 }
 
 impl Modern {
-    pub fn new(function: &mut Function, handoff: &Handoff) -> Result<Self, BlockError> {
-        function.power_up(&handoff.clock)?;
-        let bars = function.bars();
+    pub fn new(
+        function: &mut Function,
+        handoff: &Handoff,
+        minimum: &(impl pci::power::Timer + ?Sized),
+    ) -> Result<Self, BlockError> {
+        function.power_up(minimum)?;
+        let bars = function.bars()?;
         let mut common = None;
         let mut device = None;
         let mut notify = None;
-        for (offset, id) in function.capabilities() {
+        for (offset, id) in function.capabilities()? {
             if id != CAPABILITY_VENDOR {
                 continue;
             }
             let config = function.config();
             let base = u16::from(offset);
-            let kind = config.read8(base + 3);
+            let kind = config.read8(base + 3)?;
             let bar = bars
-                .get(usize::from(config.read8(base + 4)))
+                .get(usize::from(config.read8(base + 4)?))
                 .copied()
                 .flatten();
-            let start = u64::from(config.read32(base + 8));
-            let length = u64::from(config.read32(base + 12));
+            let start = u64::from(config.read32(base + 8)?);
+            let length = u64::from(config.read32(base + 12)?);
             let region = || registers(handoff, bar, start, length);
             match kind {
                 COMMON if common.is_none() => common = Some(region()?),
                 DEVICE if device.is_none() => device = Some(region()?),
                 NOTIFY if notify.is_none() => {
-                    notify = Some((bar, start, length, config.read32(base + 16)))
+                    notify = Some((bar, start, length, config.read32(base + 16)?))
                 }
                 _ => {}
             }
@@ -102,7 +106,7 @@ impl Modern {
                 "virtio device without modern registers",
             ));
         };
-        function.enable_polled();
+        function.enable_polled()?;
         common.write8(DEVICE_STATUS, 0);
         if !handoff
             .clock
@@ -133,7 +137,7 @@ impl Modern {
         message: MsiMessage,
         queues: &[u16],
     ) -> Result<(), BlockError> {
-        let Some(msix) = function.interrupts().msix else {
+        let Some(msix) = function.interrupts()?.msix else {
             return Ok(());
         };
         let bar = self

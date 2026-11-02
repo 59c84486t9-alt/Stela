@@ -121,7 +121,9 @@ pub(super) fn reset(
     clock: Clock,
     operational: usize,
     settle_us: u64,
+    minimum: &Minimum,
 ) -> Result<(), BlockError> {
+    minimum.check()?;
     if status(registers, operational)? & HCH == 0 {
         return Err(BlockError::Unsupported(
             "xHCI reset requires acknowledged halt",
@@ -129,7 +131,7 @@ pub(super) fn reset(
     }
     let command = registers.read32(operational + USBCMD);
     registers.write32(operational + USBCMD, command | HCRST);
-    clock.delay(settle_us);
+    minimum.wait_us(settle_us)?;
     handshake(registers, clock, operational, USBCMD, HCRST, 0, RESET_US)?;
     // CNR is independent of the reset bit. Never publish operational pointers
     // or ring a doorbell between these two acknowledgments.
@@ -247,7 +249,7 @@ impl Controller {
             }
         }
         if self.quirks.suspend_delay {
-            self.clock.delay(1_000);
+            self.minimum_wait(1_000)?;
         }
         // From this point any failed handshake permanently blocks traffic;
         // neither a late acknowledgment nor an elapsed timeout unpins DMA.
@@ -295,6 +297,7 @@ impl Controller {
     /// Restore the same hardware context. SRE/HCE, removal or failed handshakes
     /// keep failure and every old DMA owner; no reset/re-enumeration is invented.
     pub(super) fn resume_controller(&mut self) -> Result<(), BlockError> {
+        self.check_minimum()?;
         let State::Suspended(snapshot) = self.hardware else {
             return Err(BlockError::Unsupported(
                 "xHCI has no acknowledged saved controller state",
@@ -428,6 +431,9 @@ mod tests {
             },
             &mut dma,
             "save model".into(),
+            crate::minimum_model::owned(Clock {
+                ticks_per_microsecond: 1,
+            }),
         )
         .unwrap();
         let dcbaa = c.dcbaa.physical();
@@ -470,15 +476,45 @@ mod tests {
         use crate::bus::pci::{Address, ConfigSpace};
         struct Pci(u16);
         impl ConfigSpace for Pci {
-            fn read32(&self, at: u16) -> u32 {
-                match at {
-                    0 => u32::from(self.0) << 16 | 0x1d17,
-                    8 => 0x0c03_3001,
-                    _ => 0,
-                }
+            fn read32(&self, at: u16) -> core::result::Result<u32, crate::bus::pci::ConfigError> {
+                Ok({
+                    match at {
+                        0 => u32::from(self.0) << 16 | 0x1d17,
+                        8 => 0x0c03_3001,
+                        _ => 0,
+                    }
+                })
             }
-            fn write32(&mut self, _: u16, _: u32) {
+            fn write32(
+                &mut self,
+                _: u16,
+                _: u32,
+            ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
                 panic!("PCI quirk admission must not mutate configuration");
+            }
+
+            fn read8(&self, offset: u16) -> core::result::Result<u8, crate::bus::pci::ConfigError> {
+                Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+            }
+            fn write8(
+                &mut self,
+                _: u16,
+                _: u8,
+            ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+                panic!("unexpected narrow configuration write")
+            }
+            fn read16(
+                &self,
+                offset: u16,
+            ) -> core::result::Result<u16, crate::bus::pci::ConfigError> {
+                Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+            }
+            fn write16(
+                &mut self,
+                _: u16,
+                _: u16,
+            ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+                panic!("unexpected narrow configuration write")
             }
         }
         for device in [0x9202, 0x9203] {
@@ -508,6 +544,9 @@ mod tests {
                     ..Default::default()
                 },
                 || Ok(()),
+                crate::usb::xhci::minimum::fixture(Clock {
+                    ticks_per_microsecond: 1,
+                }),
             )
             .unwrap();
             if device == 0x9202 {
@@ -562,6 +601,9 @@ mod tests {
                 },
                 &mut dma,
                 "failure model".into(),
+                crate::minimum_model::owned(Clock {
+                    ticks_per_microsecond: 1,
+                }),
             )
             .unwrap();
             if save {

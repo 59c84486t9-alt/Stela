@@ -363,6 +363,135 @@ fn policies() -> Vec<u8> {
     flags[0xffff] = 0xc7;
     flags
 }
+
+fn original_table(monitor: &Arc<Monitor>, bytes: usize) -> (Hardware, PinnedPages, u64) {
+    {
+        let mut m = monitor.model.lock().unwrap();
+        m.returned_bytes = bytes;
+        m.logical = Some(bytes);
+    }
+    let hardware = Hardware(monitor.clone());
+    let guard = hardware.enter().unwrap();
+    let pages = hardware
+        .allocate(bytes, 4096, CacheAttribute::WriteBack)
+        .unwrap();
+    let physical = pages.physical_pages()[0];
+    let cpu = pages.cpu_mapping(CacheAttribute::WriteBack).unwrap();
+    for index in 0..bytes / ENTRY_BYTES {
+        // SAFETY: actual CPU allocation is exclusively owned by this fixture,
+        // before any modeled walker exposure or table mutation owner exists.
+        unsafe {
+            cpu.address(index * ENTRY_BYTES, 8)
+                .unwrap()
+                .cast::<u64>()
+                .as_ptr()
+                .write_volatile(1u64.to_le())
+        };
+    }
+    let words: [u64; 4] = [1, 0x55, 1 | (1 << 58) | (1 << 60), 0];
+    for (word, value) in words.into_iter().enumerate() {
+        // SAFETY: actual retained WB table, original writer guard held, exact
+        // bounded aligned DWORD pair; this isolated model has no device writer.
+        unsafe {
+            cpu.address(8 * ENTRY_BYTES + word * 8, 8)
+                .unwrap()
+                .cast::<u64>()
+                .as_ptr()
+                .write_volatile(value.to_le())
+        };
+    }
+    drop(cpu);
+    drop(guard);
+    (hardware, pages, physical | (bytes as u64 / 4096 - 1))
+}
+
+#[test]
+fn original_same_table_adoption_mutates_data_only_and_keeps_real_irq_storage() {
+    if !atomic::supported() {
+        return;
+    }
+    let monitor = Monitor::new();
+    let (hardware, pages, register) = original_table(&monitor, 4096);
+    // SAFETY: closed synchronous owned fixture models completed original data
+    // handoff, no native hardware or IRQ/history authority is supplied.
+    let mut table = unsafe {
+        DeviceTable::adopt_original_blocked(hardware, pages, &vec![0; REQUESTERS], 48, register)
+    }
+    .unwrap();
+    assert_eq!(table.entries(), 128);
+    assert_eq!(table.register_for_publication().unwrap(), register);
+    assert_eq!(table.snapshot(128), Err(DeviceTableError::Profile));
+    let irq = [1 | (1 << 58) | (1 << 60), 0];
+    // SAFETY: actual fixture has no requester, writer or alias while attaching.
+    unsafe {
+        table.translate(
+            8,
+            PhysicalAddress::new(0x800000, 48).unwrap(),
+            TableLevel::new(2).unwrap(),
+            DomainId::new(7).unwrap(),
+        )
+    }
+    .unwrap();
+    assert_eq!(&table.snapshot(8).unwrap()[2..], &irq);
+    assert!(
+        monitor
+            .model
+            .lock()
+            .unwrap()
+            .events
+            .contains(&Event::Invalidate(8, None)),
+        "TV0 logging DomainID is not an active translation domain"
+    );
+    // SAFETY: same closed actual fixture, prior domain is retained until invalidate.
+    unsafe { table.block(8) }.unwrap();
+    assert_eq!(&table.snapshot(8).unwrap()[2..], &irq);
+    assert!(
+        monitor
+            .model
+            .lock()
+            .unwrap()
+            .events
+            .contains(&Event::Invalidate(8, Some(7)))
+    );
+    drop(table);
+    assert_eq!(monitor.live_pins(), 1);
+    assert_eq!(monitor.released_pins.load(Ordering::Relaxed), 0);
+    assert_eq!(monitor.hardware_drops.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn failed_original_adoption_keeps_same_active_ram_and_context_owner() {
+    if !atomic::supported() {
+        return;
+    }
+    let monitor = Monitor::new();
+    let (hardware, pages, register) = original_table(&monitor, 4096);
+    // An illegal guest/hardware-writer bit arrives in the actual active table.
+    let cpu = pages.cpu_mapping(CacheAttribute::WriteBack).unwrap();
+    // SAFETY: exact retained isolated table RAM and aligned bounded word;
+    // deliberate malformed data tests rejection, not a hardware permission.
+    unsafe {
+        cpu.address(8 * ENTRY_BYTES, 8)
+            .unwrap()
+            .cast::<u64>()
+            .as_ptr()
+            .write_volatile((1u64 | (1 << 55)).to_le())
+    };
+    drop(cpu);
+    // SAFETY: malformed image is isolated owned fixture RAM; rejection must
+    // quarantine its real pin, not trust a metadata snapshot or inactivity.
+    assert!(matches!(
+        // SAFETY: original model table/pin and sole writer remain retained;
+        // malformed data must refuse while preserving those same owners.
+        unsafe {
+            DeviceTable::adopt_original_blocked(hardware, pages, &vec![0; REQUESTERS], 48, register)
+        },
+        Err(DeviceTableError::Profile)
+    ));
+    assert_eq!(monitor.live_pins(), 1);
+    assert_eq!(monitor.released_pins.load(Ordering::Relaxed), 0);
+    assert_eq!(monitor.hardware_drops.load(Ordering::Relaxed), 0);
+}
 fn blocked(flags: u8) -> [u64; 4] {
     let mut words = [1, u64::from((flags >> 4) & 3) << 40, 0, 0];
     for (flag, bit) in [(1, 56), (2, 57), (4, 58), (64, 62), (128, 63)] {

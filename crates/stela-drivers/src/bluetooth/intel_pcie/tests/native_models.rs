@@ -29,6 +29,7 @@ struct Hardware {
     fail_msi_bind: bool,
     msi_message: Option<irq::MsiMessage>,
     config_drops: usize,
+    forbid_config_reads: bool,
     bar_drops: usize,
     register_drops: usize,
     callback_eoi: Arc<AtomicU64>,
@@ -54,6 +55,7 @@ impl Hardware {
             fail_msi_bind: false,
             msi_message: None,
             config_drops: 0,
+            forbid_config_reads: false,
             bar_drops: 0,
             register_drops: 0,
             callback_eoi: Arc::new(AtomicU64::new(0)),
@@ -79,6 +81,10 @@ impl Hardware {
         self.config[offset..offset + n].copy_from_slice(&value.to_le_bytes()[..n]);
     }
     fn get(&self, offset: u16, n: usize) -> u32 {
+        assert!(
+            !self.forbid_config_reads,
+            "minimum refusal reached configuration"
+        );
         let mut b = [0; 4];
         b[..n].copy_from_slice(&self.config[usize::from(offset)..usize::from(offset) + n]);
         u32::from_le_bytes(b)
@@ -89,24 +95,38 @@ impl Hardware {
 }
 struct Config(Arc<Mutex<Hardware>>);
 impl ConfigSpace for Config {
-    fn read32(&self, offset: u16) -> u32 {
-        self.0.lock().unwrap().get(offset, 4)
+    fn read32(&self, offset: u16) -> core::result::Result<u32, crate::bus::pci::ConfigError> {
+        Ok(self.0.lock().unwrap().get(offset, 4))
     }
-    fn read16(&self, offset: u16) -> u16 {
-        self.0.lock().unwrap().get(offset, 2) as u16
+    fn read16(&self, offset: u16) -> core::result::Result<u16, crate::bus::pci::ConfigError> {
+        Ok(self.0.lock().unwrap().get(offset, 2) as u16)
     }
-    fn read8(&self, offset: u16) -> u8 {
-        self.0.lock().unwrap().get(offset, 1) as u8
+    fn read8(&self, offset: u16) -> core::result::Result<u8, crate::bus::pci::ConfigError> {
+        Ok(self.0.lock().unwrap().get(offset, 1) as u8)
     }
-    fn write16(&mut self, offset: u16, value: u16) {
+    fn write16(
+        &mut self,
+        offset: u16,
+        value: u16,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
         let mut h = self.0.lock().unwrap();
         let status = h.get(6, 2);
         h.put(usize::from(offset), 2, u32::from(value));
         assert_eq!(h.get(6, 2), status, "adjacent Status W1C replayed");
         h.update_route();
+
+        Ok(())
     }
-    fn write32(&mut self, _: u16, _: u32) {
+    fn write32(
+        &mut self,
+        _: u16,
+        _: u32,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
         panic!("unexpected wide config store");
+    }
+
+    fn write8(&mut self, _: u16, _: u8) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        panic!("unexpected narrow configuration write")
     }
 }
 // SAFETY: independent function model implements exact narrow config effects.
@@ -309,6 +329,9 @@ fn inputs() -> Context<Inputs> {
         clock: Clock {
             ticks_per_microsecond: 1000,
         },
+        minimum: crate::minimum_model::owned(Clock {
+            ticks_per_microsecond: 1000,
+        }),
         interrupts: registry,
         domain: Arc::new(root::Payload(h.clone())),
         msi_route: root::completion(h.clone()),
@@ -543,8 +566,8 @@ fn native_constructor_refuses_unqualified_inputs_without_writes_and_returns_owne
         match failure {
             0 => inputs.clock.ticks_per_microsecond = 0,
             1 => inputs.function.device = 0xffff,
-            2 => inputs.function.config().write16(4, 2),
-            3 => inputs.function.config().write16(0x52, 0x8000),
+            2 => inputs.function.config().write16(4, 2).unwrap(),
+            3 => inputs.function.config().write16(0x52, 0x8000).unwrap(),
             5 => inputs.clock.ticks_per_microsecond = u64::MAX,
             6 => inputs.clock.ticks_per_microsecond = u64::MAX / 2 / 120_000_000 + 1,
             _ => {
@@ -675,3 +698,28 @@ fn native_msix_irq_dma_attachment_runs_shared_secure_iml_and_operational_firmwar
 }
 
 mod root;
+
+#[test]
+fn unavailable_minimum_returns_same_inputs_before_native_configuration_access() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
+    let (mut inputs, hardware, _, _) = inputs();
+    inputs.minimum = crate::minimum_model::refusing(inputs.clock);
+    hardware.lock().unwrap().forbid_config_reads = true;
+    // SAFETY: explicit isolated fixture; denied timer must stop before effects.
+    let (error, inputs) = match unsafe { native::NativePlatform::new(inputs) } {
+        Err(refusal) => refusal,
+        Ok(_) => panic!("unavailable minimum admitted native transport"),
+    };
+    assert_eq!(
+        error,
+        native::Error::Minimum(crate::bus::pci::power::Error::Clock)
+    );
+    assert_eq!(hardware.lock().unwrap().config_drops, 0);
+    assert!(hardware.lock().unwrap().table_writes.is_empty());
+    assert_eq!(
+        inputs.function.address,
+        hardware.lock().unwrap().bt.identity.address
+    );
+}

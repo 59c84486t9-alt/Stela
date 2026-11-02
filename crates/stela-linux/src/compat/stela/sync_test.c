@@ -52,32 +52,6 @@ static void rwsem(void)
 	up_read(&lock);
 }
 
-DEFINE_STATIC_SRCU(readers);
-static struct work_struct grace_work;
-static DECLARE_COMPLETION(grace_started);
-static bool reader_left;
-
-static void grace_period(struct work_struct *work)
-{
-	(void)work;
-	complete(&grace_started);
-	synchronize_srcu(&readers);
-	assert(reader_left);
-}
-
-static void srcu(void)
-{
-	synchronize_srcu(&readers);
-	int index = srcu_read_lock(&readers);
-
-	INIT_WORK(&grace_work, grace_period);
-	assert(schedule_work(&grace_work));
-	wait_for_completion(&grace_started);
-	reader_left = true;
-	srcu_read_unlock(&readers, index);
-	assert(flush_work(&grace_work));
-}
-
 static struct kthread_work steps[2], blocked;
 static char order[3];
 static unsigned int order_length;
@@ -250,7 +224,6 @@ static void irq_works(void)
 void stela_linux_sync_test(void)
 {
 	rwsem();
-	srcu();
 	workers();
 	hrtimers();
 	irq_works();

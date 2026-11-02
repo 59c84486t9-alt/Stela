@@ -16,12 +16,14 @@ struct page;
 typedef unsigned long	pteval_t;
 typedef unsigned long	pmdval_t;
 typedef unsigned long	pudval_t;
+typedef unsigned long	p4dval_t;
 typedef unsigned long	pgdval_t;
 typedef unsigned long	pgprotval_t;
 
 typedef struct { pteval_t pte; } pte_t;
 typedef struct { pmdval_t pmd; } pmd_t;
 typedef struct { pudval_t pud; } pud_t;
+typedef struct { p4dval_t p4d; } p4d_t;
 typedef struct { pgdval_t pgd; } pgd_t;
 typedef struct pgprot { pgprotval_t pgprot; } pgprot_t;
 

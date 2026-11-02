@@ -122,13 +122,13 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
             self.mac_ocp_modify(address, clear, set)?;
         }
         self.mac_ocp_modify(0xeb54, 0, 1)?;
-        self.timer.delay(1);
+        self.timer.delay(1)?;
         self.mac_ocp_modify(0xeb54, 1, 0)?;
         r.write16(0x1880, self.mmio16(0x1880)? & !0x30);
         self.mac_ocp_write(0xe098, 0xc302)?;
         let mut ready = false;
         for _ in 0..10 {
-            self.timer.delay(1000);
+            self.timer.delay(1000)?;
             if self.mac_ocp_read(0xe00e)? & (1 << 13) == 0 {
                 ready = true;
                 break;

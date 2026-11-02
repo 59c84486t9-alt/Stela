@@ -78,6 +78,7 @@ pub struct Host {
     flags: quirks::Flags,
     device: Device,
     binding: Binding,
+    minimum_error: Option<BlockError>,
 }
 impl Host {
     /// Whether the host controller sends the handoff's completion signal.
@@ -109,6 +110,7 @@ impl Host {
             flags: binding.flags,
             device: device.clone(),
             binding,
+            minimum_error: None,
         })
     }
     /// Establish the alternate and endpoint/stream contexts before
@@ -182,6 +184,10 @@ impl Host {
     /// Keep the three transport allocations; root-leaf reset also reuses
     /// retired controller resources. Downstream reset keeps its existing
     /// controller-allocation behavior until subtree reuse is supported.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn reset_and_rebind(
         &mut self,
         dma: &mut dyn DmaAllocator,
@@ -291,6 +297,7 @@ impl Host {
                 flags: binding.flags,
                 device: fresh,
                 binding,
+                minimum_error: None,
             })
         })();
         if result.is_err()
@@ -322,6 +329,9 @@ impl Host {
         cdb: &[u8],
         data: Data<'_>,
     ) -> Result<Vec<u8>, BlockError> {
+        if let Some(error) = &self.minimum_error {
+            return Err(error.clone());
+        }
         execute(&mut self.engine, self.flags, lun, cdb, data)
     }
 
@@ -333,11 +343,17 @@ impl Host {
         cdb: &[u8],
         data: Data<'_>,
     ) -> Result<(), BlockError> {
+        if let Some(error) = &self.minimum_error {
+            return Err(error.clone());
+        }
         admit(self.flags, cdb, &data)?;
         self.engine.begin(lun, cdb, data)
     }
     /// The begun command's result once it ended; never waits.
     pub(super) fn end(&mut self) -> Option<Result<Vec<u8>, BlockError>> {
+        if let Some(error) = &self.minimum_error {
+            return self.engine.active.as_ref().map(|_| Err(error.clone()));
+        }
         self.engine.poll(None, &mut None)
     }
     /// Whether a begun command has not ended.
@@ -345,9 +361,22 @@ impl Host {
         self.engine.active.is_some()
     }
 
-    pub(super) fn delay(&self, micros: u64) {
-        let clock = self.engine.io.controller.borrow().clock;
-        clock.delay(micros);
+    pub(super) fn delay(&mut self, micros: u64) -> Result<(), BlockError> {
+        if let Some(error) = &self.minimum_error {
+            return Err(error.clone());
+        }
+        let result = (|| {
+            let mut controller = self.engine.io.controller.borrow_mut();
+            controller.device(self.device.id)?.connected()?;
+            controller.minimum_wait(micros)
+        })();
+        if let Err(error) = &result {
+            self.minimum_error = Some(error.clone());
+            // Do not cancel/reuse tags or take pending contributors after a
+            // failed physical source. Native owner/DMA custody remains held.
+            self.engine.poisoned = true;
+        }
+        result
     }
     pub(super) fn now_us(&self) -> u64 {
         self.engine.io.now()

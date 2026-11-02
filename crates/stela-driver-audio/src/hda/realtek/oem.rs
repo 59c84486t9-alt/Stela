@@ -5,8 +5,7 @@
 //! PCI subsystem observations come from the controller, never AFG f20.
 use super::CoefficientChange;
 use crate::{
-    Error,
-    bus::i2c::Timer,
+    Error, Timer,
     hda::{AnalogRoute, CodecGraph, Controller, Registers, Verb},
 };
 
@@ -42,6 +41,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         graph: &CodecGraph,
         oem: RealtekOem,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         if oem == RealtekOem::Firmware {
             return Ok(());
         }
@@ -63,6 +63,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         address: u8,
         oem: RealtekOem,
     ) -> Result<alloc::vec::Vec<CoefficientChange>, Error> {
+        self.minimum_guard()?;
         let mut changes = alloc::vec::Vec::new();
         match oem {
             RealtekOem::Firmware => {}

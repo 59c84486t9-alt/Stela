@@ -23,6 +23,7 @@ pub(crate) struct Hardware {
     pub(crate) short_at: Option<usize>,
     pub(crate) trace: Vec<([u8; 8], Vec<u8>)>,
     pub(crate) delays: Vec<u64>,
+    pub(crate) minimum_elapsed: u64,
 }
 impl Hardware {
     pub(crate) fn new(bus: u8, ua2: bool) -> Self {
@@ -45,6 +46,7 @@ impl Hardware {
             short_at: None,
             trace: Vec::new(),
             delays: Vec::new(),
+            minimum_elapsed: 0,
         };
         hw.mac[0x10..0x16].copy_from_slice(&[2, 0x34, 0x56, 0x78, 0x9a, 0xbc]);
         hw.mac[2] = bus;
@@ -204,5 +206,14 @@ impl Control for Io {
     }
     fn delay_us(&mut self, microseconds: u64) {
         self.0.borrow_mut().delays.push(microseconds);
+    }
+    fn minimum_wait(&mut self, microseconds: u64) -> Result<(), BlockError> {
+        let mut state = self.0.borrow_mut();
+        state.minimum_elapsed = state
+            .minimum_elapsed
+            .checked_add(microseconds)
+            .ok_or(BlockError::PciPower(crate::bus::pci::power::Error::Clock))?;
+        state.delays.push(microseconds);
+        Ok(())
     }
 }

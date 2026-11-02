@@ -238,6 +238,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         }
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub(super) fn run_coexistence(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
         let family = queue.family();
         let client = &self.client;
@@ -315,6 +319,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// `ieee80211_recalc_smps` reaching `iwl_mvm_phy_ctxt_changed`.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn follow_chains(
         &mut self,
         queue: &mut Queue<Q, B>,

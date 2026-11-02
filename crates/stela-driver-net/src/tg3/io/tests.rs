@@ -13,6 +13,9 @@ use std::sync::Mutex;
 
 #[derive(Default)]
 struct Counts {
+    failure: Mutex<Option<crate::bus::pci::ConfigError>>,
+    fail_after_write: Mutex<Option<crate::bus::pci::ConfigError>>,
+    identity: Mutex<Option<u32>>,
     config_drops: AtomicUsize,
     mapping_drops: AtomicUsize,
     reads: AtomicUsize,
@@ -23,23 +26,79 @@ struct Config {
     original: u64,
 }
 impl ConfigSpace for Config {
-    fn read32(&self, at: u16) -> u32 {
+    fn read8(&self, at: u16) -> Result<u8, crate::bus::pci::ConfigError> {
         self.counts.reads.fetch_add(1, Ordering::Relaxed);
-        match at {
-            0 => 0x165f_14e4,
+        if let Some(error) = *self.counts.failure.lock().unwrap() {
+            return Err(error);
+        }
+        let word = match at & !3 {
+            0 => self.counts.identity.lock().unwrap().unwrap_or(0x165f_14e4),
             8 => 0x0200_0000,
             _ => 0,
+        };
+        Ok((word >> ((at & 3) * 8)) as u8)
+    }
+    fn write8(&mut self, at: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        if let Some(error) = *self.counts.failure.lock().unwrap() {
+            return Err(error);
         }
+        self.counts
+            .writes
+            .lock()
+            .unwrap()
+            .push((at, 8, u32::from(value)));
+        if let Some(error) = *self.counts.fail_after_write.lock().unwrap() {
+            *self.counts.failure.lock().unwrap() = Some(error);
+        }
+        Ok(())
     }
-    fn write32(&mut self, at: u16, value: u32) {
-        self.counts.writes.lock().unwrap().push((at, 32, value));
+    fn read16(&self, at: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        self.counts.reads.fetch_add(1, Ordering::Relaxed);
+        if let Some(error) = *self.counts.failure.lock().unwrap() {
+            return Err(error);
+        }
+        let word = match at & !3 {
+            0 => self.counts.identity.lock().unwrap().unwrap_or(0x165f_14e4),
+            8 => 0x0200_0000,
+            _ => 0,
+        };
+        Ok((word >> ((at & 3) * 8)) as u16)
     }
-    fn write16(&mut self, at: u16, value: u16) {
+    fn write16(&mut self, at: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
+        if let Some(error) = *self.counts.failure.lock().unwrap() {
+            return Err(error);
+        }
         self.counts
             .writes
             .lock()
             .unwrap()
             .push((at, 16, u32::from(value)));
+        if let Some(error) = *self.counts.fail_after_write.lock().unwrap() {
+            *self.counts.failure.lock().unwrap() = Some(error);
+        }
+        Ok(())
+    }
+    fn read32(&self, at: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        self.counts.reads.fetch_add(1, Ordering::Relaxed);
+        if let Some(error) = *self.counts.failure.lock().unwrap() {
+            return Err(error);
+        }
+        let word = match at & !3 {
+            0 => self.counts.identity.lock().unwrap().unwrap_or(0x165f_14e4),
+            8 => 0x0200_0000,
+            _ => 0,
+        };
+        Ok(word >> ((at & 3) * 8))
+    }
+    fn write32(&mut self, at: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
+        if let Some(error) = *self.counts.failure.lock().unwrap() {
+            return Err(error);
+        }
+        self.counts.writes.lock().unwrap().push((at, 32, value));
+        if let Some(error) = *self.counts.fail_after_write.lock().unwrap() {
+            *self.counts.failure.lock().unwrap() = Some(error);
+        }
+        Ok(())
     }
 }
 impl Drop for Config {
@@ -197,3 +256,48 @@ fn failed_window_can_retry_with_same_originals_and_bounded_volatile_accesses() {
 }
 
 mod cold;
+
+#[test]
+fn config_transport_failure_and_all_ones_remain_distinct_with_original_owners() {
+    use crate::bus::pci::{ConfigEffect, ConfigError, ConfigFailure};
+    let counts = Arc::new(Counts::default());
+    let original = function(counts.clone());
+    let owner = windows(counts.clone());
+    let weak = Arc::downgrade(&owner);
+    let (mac, ape) = pointers(&owner.lock().unwrap());
+    // SAFETY: both windows are stable isolated model RAM owned by `owner`.
+    let mut io =
+        match unsafe { Mmio::from_owned_windows(original, mac, 0x8000, ape, 0x8440, owner) } {
+            Ok(io) => io,
+            Err((_error, _function, _owner)) => panic!("valid fixture geometry refused"),
+        };
+    *counts.identity.lock().unwrap() = Some(u32::MAX);
+    assert_eq!(io.config_read32(0), Ok(u32::MAX));
+    let denied = ConfigError::before_effect(ConfigFailure::ForeignGrant);
+    *counts.failure.lock().unwrap() = Some(denied);
+    assert_eq!(io.config_read32(0), Err(Error::Config(denied)));
+    assert_eq!(io.config_write16(4, 0x402), Err(Error::Config(denied)));
+    assert!(counts.writes.lock().unwrap().is_empty());
+    assert_eq!(io.function.config().original, 0x5a1e_75cd);
+    assert_eq!(weak.strong_count(), 1);
+    assert_eq!(counts.config_drops.load(Ordering::Relaxed), 0);
+    assert_eq!(counts.mapping_drops.load(Ordering::Relaxed), 0);
+    *counts.failure.lock().unwrap() = None;
+    *counts.identity.lock().unwrap() = None;
+    *counts.fail_after_write.lock().unwrap() = Some(denied);
+    let expected = ConfigError {
+        reason: denied.reason,
+        effect: ConfigEffect::WriteMayHaveApplied {
+            offset: 4,
+            width: 2,
+        },
+    };
+    assert_eq!(io.config_write16(4, 0x402), Err(Error::Config(expected)));
+    assert_eq!(*counts.writes.lock().unwrap(), [(4, 16, 0x402)]);
+    assert_eq!(io.function.config().original, 0x5a1e_75cd);
+    assert_eq!(weak.strong_count(), 1);
+    // Isolated inactive model owners may be dropped explicitly after observation.
+    drop(io);
+    assert_eq!(counts.config_drops.load(Ordering::Relaxed), 1);
+    assert_eq!(counts.mapping_drops.load(Ordering::Relaxed), 1);
+}

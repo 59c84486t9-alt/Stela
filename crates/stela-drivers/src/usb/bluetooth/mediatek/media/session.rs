@@ -59,6 +59,10 @@ pub struct ShutdownReport {
 
 /// Why `power_on` failed. Either way the owner is terminal.
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "This carrier keeps both vendor setup and media retirement causes without allocation on propagation."
+)]
 pub enum PowerOnError {
     /// The rerun of vendor setup failed, with its partial attempt.
     Setup {
@@ -103,9 +107,17 @@ pub struct OutputReceipt {
 pub trait MediaIo: Io {
     /// Some(sequence) means accepted, never delivered. None is bounded
     /// backpressure with no publication or ownership change.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn queue_sco(&mut self, _bytes: &[u8]) -> Result<Option<u64>> {
         Err(Error::Unsupported("queued SCO transport"))
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn poll_sco_output(&mut self) -> Result<Option<OutputReceipt>> {
         Err(Error::Unsupported("queued SCO completion transport"))
     }
@@ -121,6 +133,10 @@ pub trait MediaIo: Io {
         dma: &mut dyn DmaAllocator,
     ) -> core::result::Result<(), BlockError>;
     fn read_media(&mut self, kind: Kind) -> core::result::Result<Option<Read>, BlockError>;
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn write_media(&mut self, kind: Kind, bytes: &[u8]) -> Result<()>;
     fn quiesce_media(&mut self) -> core::result::Result<(), BlockError>;
     /// Drain media, remove the old SCO voice/alternate, keeping the configured
@@ -178,6 +194,10 @@ impl<B: MediaIo> Session<B> {
     /// allowance; no other command may be outstanding or concurrently submitted.
     /// USB identity alone cannot pass the live MT7925 initialization
     /// check. Failure closes the entire function and requires a fresh rebind.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn start(mut hci: Hci<B>, dma: &mut dyn DmaAllocator, command_credits: u8) -> Result<Self> {
         let result = Self::prepare(&mut hci, dma, command_credits);
         match result {
@@ -222,6 +242,10 @@ impl<B: MediaIo> Session<B> {
     /// `hdev->reset` (btmtk_reset_sync), for the caller's HCI core once a
     /// command it sent outlives HCI_CMD_TIMEOUT. This session fails, and the
     /// USB topology owner reports the device removed and binds a fresh one.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn reset_controller(&mut self) -> Result<Reset> {
         self.hci.io.validate()?;
         let device_id =
@@ -229,12 +253,24 @@ impl<B: MediaIo> Session<B> {
         self.lifecycle = Lifecycle::Failed;
         Ok(Self::hardware_reset(&mut self.hci, device_id))
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(in crate::usb::bluetooth) fn start_realtek(hci: Hci<B>) -> Result<Self> {
         Self::start_standard(hci, true)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(in crate::usb::bluetooth) fn start_qca(hci: Hci<B>) -> Result<Self> {
         Self::start_standard(hci, false)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn start_standard(mut hci: Hci<B>, realtek: bool) -> Result<Self> {
         let result = (|| {
             hci.open().map_err(Error::Hci)?;
@@ -287,6 +323,10 @@ impl<B: MediaIo> Session<B> {
             }),
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn prepare(
         hci: &mut Hci<B>,
         dma: &mut dyn DmaAllocator,
@@ -314,6 +354,10 @@ impl<B: MediaIo> Session<B> {
         let setup = Self::command(hci, &[0x98, 0xfd, 2, 8, 1], &mut pending, false)?;
         Ok((bindings, setup, pending))
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn command(
         hci: &mut Hci<B>,
         packet: &[u8],
@@ -433,6 +477,10 @@ impl<B: MediaIo> Session<B> {
             _ => unreachable!(),
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn running(&self) -> Result<()> {
         self.hci.io.validate()?;
         if self.lifecycle != Lifecycle::Running || self.hci.state() != State::Open {
@@ -448,6 +496,10 @@ impl<B: MediaIo> Session<B> {
             base: self.hci.close().err(),
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn submit_command(&mut self, packet: &[u8]) -> Result<()> {
         self.running()?;
         if packet.len() >= 2 && packet[..2] == [3, 0x0c] {
@@ -480,6 +532,10 @@ impl<B: MediaIo> Session<B> {
     /// Retire the old voice/partial media epoch, await CC, then repost
     /// third-interface RX without reapplying fd98. This is no USB/subsystem or
     /// Wi-Fi reset, and failed completion cannot resume the media owner.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn reset(&mut self) -> Result<()> {
         self.hci
             .io
@@ -501,12 +557,20 @@ impl<B: MediaIo> Session<B> {
         self.lifecycle = Lifecycle::Running;
         Ok(())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn submit_acl(&mut self, packet: &[u8]) -> Result<()> {
         self.running()?;
         self.hci
             .submit_acl(packet)
             .map_err(|e| self.fail(Error::Hci(e)))
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn set_voice(&mut self, voice: Voice, dma: &mut dyn DmaAllocator) -> Result<()> {
         self.running()?;
         let next = self.bindings.sco(voice)?;
@@ -523,6 +587,10 @@ impl<B: MediaIo> Session<B> {
         self.sco_frames.reset();
         Ok(())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(in crate::usb::bluetooth) fn set_wideband_voice(
         &mut self,
         connections: u8,
@@ -558,6 +626,10 @@ impl<B: MediaIo> Session<B> {
         self.wideband_mtu = next.map(|_| mtu);
         Ok(())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(in crate::usb::bluetooth) fn queue_sco(&mut self, packet: &[u8]) -> Result<Option<u64>> {
         self.running()?;
         framing::validate(Kind::Sco, packet)?;
@@ -573,6 +645,10 @@ impl<B: MediaIo> Session<B> {
         }
         self.hci.io.queue_sco(packet).map_err(|e| self.fail(e))
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(in crate::usb::bluetooth) fn poll_sco_output(&mut self) -> Result<Option<OutputReceipt>> {
         self.hci.io.validate()?;
         if !matches!(self.lifecycle, Lifecycle::Running | Lifecycle::Quiescent) {
@@ -580,6 +656,10 @@ impl<B: MediaIo> Session<B> {
         }
         self.hci.io.poll_sco_output().map_err(|e| self.fail(e))
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn submit(&mut self, kind: Kind, packet: &[u8]) -> Result<()> {
         self.running()?;
         if kind == Kind::Iso && !self.bindings.has_iso() {
@@ -605,6 +685,10 @@ impl<B: MediaIo> Session<B> {
         };
         result.map_err(|e| self.fail(e))
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn poll(&mut self) -> Result<Vec<Received>> {
         self.running()?;
         let mut output = core::mem::take(&mut self.pending);
@@ -680,6 +764,10 @@ impl<B: MediaIo> Session<B> {
     }
     /// Cancel and drain only media endpoints. Base command/event/ACL ownership
     /// remains live; no USB power suspend, shared reset or reinitialization.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn quiesce(&mut self) -> Result<()> {
         self.running()?;
         self.hci
@@ -694,6 +782,10 @@ impl<B: MediaIo> Session<B> {
         self.lifecycle = Lifecycle::Quiescent;
         Ok(())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn resume(&mut self) -> Result<()> {
         self.hci.io.validate()?;
         if self.lifecycle != Lifecycle::Quiescent {
@@ -712,6 +804,10 @@ impl<B: MediaIo> Session<B> {
     /// and transport retire, leaving the owner `Off` for `power_on`.
     /// `command_credits` is the caller's HCI allowance; zero refuses
     /// without effects. MediaTek only; any failure is terminal.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn shutdown(&mut self, command_credits: u8) -> Result<ShutdownReport> {
         self.hci.io.validate()?;
         if !matches!(self.lifecycle, Lifecycle::Running | Lifecycle::Quiescent)
@@ -739,6 +835,10 @@ impl<B: MediaIo> Session<B> {
     /// then btusb_mtk_setup runs again, as HCI_QUIRK_NON_PERSISTENT_SETUP asks
     /// of every power-on, through btmtk_usb_isointf_init. The new setup's
     /// report replaces the old. Any failure is terminal.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn power_on(
         &mut self,
         provider: &dyn Provider,
@@ -791,6 +891,10 @@ impl<B: MediaIo> Session<B> {
         self.lifecycle = Lifecycle::Running;
         Ok(())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn function_off(&mut self) -> Result<ShutdownReport> {
         let command = wmt::command(wmt::FUNCTION, 0, &[0])
             .map_err(|_| Error::Packet("WMT function control command"))?;
@@ -824,6 +928,10 @@ impl<B: MediaIo> Session<B> {
             }
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn close(&mut self) -> Result<()> {
         self.hci.io.validate()?;
         if matches!(self.lifecycle, Lifecycle::Closed | Lifecycle::Off) {

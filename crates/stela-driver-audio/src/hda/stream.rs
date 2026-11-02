@@ -8,10 +8,8 @@
 //!                     PeiSen Hou <pshou@realtek.com.tw>
 use super::super::{Direction, Error, PcmFormat, Phase};
 use super::{CodecGraph, Controller, ControllerToken, Registers, Verb, WidgetKind, registers::*};
-use crate::bus::{
-    dma::{DmaAllocator, DmaBuffer},
-    i2c::Timer,
-};
+use crate::Timer;
+use crate::bus::dma::{DmaAllocator, DmaBuffer};
 use core::sync::atomic::{Ordering, fence};
 
 /// Opaque controller/reset-local allocation. A reset invalidates old IDs even
@@ -123,6 +121,7 @@ pub(super) struct Stream {
 
 impl<R: Registers, T: Timer> Controller<R, T> {
     pub(super) fn stop_descriptor(&mut self, index: u8) -> Result<(), Error> {
+        self.minimum_guard()?;
         let base = stream_base(index);
         let control = self.registers.read8(base + SD_CTL);
         if control == u8::MAX {
@@ -142,6 +141,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     pub(super) fn reset_descriptor(&mut self, index: u8) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.stop_descriptor(index)?;
         let base = stream_base(index);
         self.registers.write8(base + SD_CTL, SD_RESET);
@@ -157,6 +157,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     pub(super) fn stream(&self, id: StreamId) -> Result<&Stream, Error> {
+        self.minimum_guard()?;
         if id.token != self.token {
             return Err(Error::InvalidStream);
         }
@@ -192,6 +193,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         periods: usize,
         allocator: &mut dyn DmaAllocator,
     ) -> Result<StreamId, Error> {
+        self.minimum_guard()?;
         if self.lifecycle_failed {
             return Err(Error::NeedsReset);
         }
@@ -351,10 +353,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     pub fn stream_direction(&self, id: StreamId) -> Result<Direction, Error> {
+        self.minimum_guard()?;
         Ok(self.stream(id)?.direction)
     }
 
     pub(super) fn require_routing_stopped(&self) -> Result<(), Error> {
+        self.minimum_guard()?;
         if self.lifecycle_failed {
             return Err(Error::NeedsReset);
         }
@@ -369,9 +373,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     pub fn stream_format(&self, id: StreamId) -> Result<PcmFormat, Error> {
+        self.minimum_guard()?;
         Ok(self.stream(id)?.format)
     }
     pub fn stream_buffer_bytes(&self, id: StreamId) -> Result<usize, Error> {
+        self.minimum_guard()?;
         Ok(self.stream(id)?.buffer.len())
     }
 
@@ -379,6 +385,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// supplies its separate completed-period playback refill API; generic
     /// live capture consumption remains unsupported. LPIB alone grants no RAM.
     pub fn write_pcm(&mut self, id: StreamId, offset: usize, bytes: &[u8]) -> Result<(), Error> {
+        self.minimum_guard()?;
         let stream = self.stream(id)?;
         if stream.running {
             return Err(Error::StreamRunning);
@@ -400,6 +407,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Fill a stopped capture ring with a known byte before starting DMA.
     /// This supports buffer sanitization and detecting device writes.
     pub fn fill_capture(&mut self, id: StreamId, value: u8) -> Result<(), Error> {
+        self.minimum_guard()?;
         let stream = self.stream(id)?;
         if stream.running {
             return Err(Error::StreamRunning);
@@ -418,6 +426,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
 
     /// Copy a stopped capture ring range into CPU-owned memory.
     pub fn read_pcm(&self, id: StreamId, offset: usize, bytes: &mut [u8]) -> Result<(), Error> {
+        self.minimum_guard()?;
         let stream = self.stream(id)?;
         if stream.running {
             return Err(Error::StreamRunning);
@@ -435,6 +444,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     pub fn start(&mut self, id: StreamId) -> Result<(), Error> {
+        self.minimum_guard()?;
         if self.routing_failed {
             return Err(Error::NeedsReset);
         }
@@ -483,6 +493,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     pub fn stop(&mut self, id: StreamId) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.stream(id)?;
         let result = self.stop_descriptor(id.index);
         let stream = self.streams[usize::from(id.index)].as_mut().unwrap();
@@ -499,6 +510,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     pub fn status(&mut self, id: StreamId) -> Result<StreamStatus, Error> {
+        self.minimum_guard()?;
         self.hdmi_runtime(id)?;
         let running = self.stream(id)?.running;
         let base = stream_base(id.index);
@@ -530,11 +542,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Normalized link coordinate. CBL maps to zero, per HDA1.0a
     /// §3.3.37. No FIFO correction is credited as physical DMA progress.
     pub fn position(&mut self, id: StreamId) -> Result<u32, Error> {
+        self.minimum_guard()?;
         Ok(self.position_info(id)?.transport_bytes)
     }
 
     /// Exact LPIB readback, including CBL. Invalid values fail before arithmetic.
     pub fn link_position(&mut self, id: StreamId) -> Result<u32, Error> {
+        self.minimum_guard()?;
         let bytes = self.stream(id)?.buffer.len();
         let position = self.registers.read32(stream_base(id.index) + SD_LPIB);
         if position as usize > bytes {
@@ -548,6 +562,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// clamped to observed progress; playback reports its delay without
     /// changing position. A late first poll cannot infer missed complete wraps.
     pub fn position_info(&mut self, id: StreamId) -> Result<PositionInfo, Error> {
+        self.minimum_guard()?;
         let (bytes, frame_bytes, direction, insufficient) = {
             let stream = self.stream(id)?;
             (
@@ -604,6 +619,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         id: StreamId,
         channel: u8,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         if self.routing_failed {
             return Err(Error::NeedsReset);
         }
@@ -657,6 +673,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         id: StreamId,
         channel: u8,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         if graph.token != self.token {
             return Err(Error::InvalidCodecGraph);
         }

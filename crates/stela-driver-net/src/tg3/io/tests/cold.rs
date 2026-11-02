@@ -120,11 +120,11 @@ fn preparing(state: Arc<State>) -> preparation::PreparingRequester {
         function: 0,
     };
     let (mut config, _) = fixture(address);
-    config.write32(0, 0x165f_14e4);
-    config.write32(4, 0x402);
-    config.write32(8, 0x0200_0000);
-    config.write32(0x0c, 0);
-    config.write32(0x100, 0);
+    config.write32(0, 0x165f_14e4).unwrap();
+    config.write32(4, 0x402).unwrap();
+    config.write32(8, 0x0200_0000).unwrap();
+    config.write32(0x0c, 0).unwrap();
+    config.write32(0x100, 0).unwrap();
     let function = Function::new(address, config).unwrap();
     // SAFETY: the exclusive symbolic fixture has no native firmware/IRQ/work
     // users; its original root and configuration are paired in this attempt.

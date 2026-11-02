@@ -243,6 +243,7 @@ fn stacks_count(dropped: &Arc<AtomicU64>, usable: usize, count: usize) -> Vec<St
 }
 struct CpuModel {
     thread: thread::ThreadId,
+    publication_probe: Mutex<Option<srcu::PublicationObserver>>,
     flags: AtomicU64,
     irq: AtomicBool,
     time: AtomicU64,
@@ -251,6 +252,7 @@ impl CpuModel {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             thread: thread::current().id(),
+            publication_probe: Mutex::new(None),
             flags: AtomicU64::new(0x202),
             irq: AtomicBool::new(false),
             time: AtomicU64::new(0),
@@ -276,6 +278,12 @@ unsafe impl Cpu for CpuModel {
     }
     unsafe fn restore(&self, flags: u64) {
         self.flags.store(flags, Ordering::Release);
+        // The optional diagnostic observer never holds this mutex across a
+        // queue read or panic, and nested restore observation is disarmed.
+        let observer = self.publication_probe.lock().unwrap().clone();
+        if let Some(observer) = observer {
+            observer.after_restore(flags);
+        }
     }
     fn ticks(&self) -> u64 {
         self.time.fetch_add(1, Ordering::Relaxed)
@@ -1167,6 +1175,10 @@ fn timer_service_roundtrip() {
 #[derive(Default)]
 struct Machine {
     start: core::cell::OnceCell<std::time::Instant>,
+    clock: Option<Arc<dyn service::Clock>>,
+    refuse_workers: AtomicBool,
+    worker_attempts: [AtomicU64; 3],
+    worker_limits: [AtomicU64; 3],
     environment: AtomicPtr<Environment<16>>,
     irq: Mutex<Option<crate::service::IrqEvent>>,
     retired_irq: Mutex<Option<crate::service::IrqEvent>>,
@@ -1180,18 +1192,65 @@ impl Machine {
     }
 }
 
+/// Hosted scheduler-model source only. Bare tasks still fail actual-current
+/// admission: a genuine Initial/Managed root fixture is an open prerequisite.
+struct HostedMinimum {
+    origin: std::time::Instant,
+    target: std::time::Instant,
+}
+// SAFETY: isolated std monotonic source and owned original target; no native
+// clock/CPU/device permission. The actual C current guard is never bypassed.
+unsafe impl crate::owner::MinimumDeadline for HostedMinimum {
+    fn ready(&self) -> Result<bool, WorkError> {
+        Ok(std::time::Instant::now() >= self.target)
+    }
+    fn wake_ns(&self) -> Result<i64, WorkError> {
+        i64::try_from(self.target.duration_since(self.origin).as_nanos())
+            .map_err(|_| WorkError::Exhausted)
+    }
+    fn remaining_quanta_ceil(&self, quantum_us: u64) -> Result<u64, WorkError> {
+        let quantum = u128::from(quantum_us)
+            .checked_mul(1000)
+            .filter(|q| *q != 0)
+            .ok_or(WorkError::InvalidTicket)?;
+        let left = self
+            .target
+            .saturating_duration_since(std::time::Instant::now())
+            .as_nanos();
+        u64::try_from(left.div_ceil(quantum)).map_err(|_| WorkError::Exhausted)
+    }
+}
+
 impl Platform for Machine {
     fn now_ns(&self) -> i64 {
+        if let Some(clock) = &self.clock {
+            return clock.now_ns().unwrap().try_into().unwrap();
+        }
         let start = self.start.get_or_init(std::time::Instant::now);
         start.elapsed().as_nanos() as i64
     }
-    fn delay_us(&self, minimum: u64, _: u64, atomic: bool) {
-        assert!(!atomic);
-        // SAFETY: Linux's call, on one of the environment's tasks.
-        unsafe { crate::service::sleep_us(minimum) };
+    fn minimum_delay_us(&self, minimum: u64) -> Result<(), WorkError> {
+        // Explicit hosted model source, never a native Installed grant.
+        let until = std::time::Instant::now()
+            .checked_add(std::time::Duration::from_micros(minimum))
+            .ok_or(WorkError::Exhausted)?;
+        while std::time::Instant::now() < until {
+            core::hint::spin_loop();
+        }
+        Ok(())
     }
-    fn firmware(&self, _: &core::ffi::CStr) -> Result<&[u8], Errno> {
-        unreachable!();
+    fn minimum_deadline_us(
+        &self,
+        minimum: u64,
+    ) -> Result<Box<dyn crate::owner::MinimumDeadline>, WorkError> {
+        let origin = *self.start.get_or_init(std::time::Instant::now);
+        let target = std::time::Instant::now()
+            .checked_add(std::time::Duration::from_micros(minimum))
+            .ok_or(WorkError::Exhausted)?;
+        Ok(Box::new(HostedMinimum { origin, target }))
+    }
+    fn timer_changed(&self) -> Result<(), WorkError> {
+        self.environment().timer_changed()
     }
     fn log(&self, _: i32, message: &core::ffi::CStr) {
         std::eprintln!("{message:?}");
@@ -1206,6 +1265,11 @@ impl Platform for Machine {
         unreachable!();
     }
     fn start_worker(&self, kind: crate::owner::WorkerKind) -> Result<(), Errno> {
+        let attempt = self.worker_attempts[kind as usize].fetch_add(1, Ordering::Relaxed);
+        let limit = self.worker_limits[kind as usize].load(Ordering::Acquire);
+        if self.refuse_workers.load(Ordering::Acquire) || (limit != 0 && attempt >= limit) {
+            return Err(-11);
+        }
         self.environment()
             .start_worker(kind)
             .map(drop)
@@ -2173,4 +2237,9 @@ pub(crate) unsafe fn terminal_foreground(
     // actual switched foreground stack. The bound body terminates this process.
     unsafe { runtime.call_foreground(foreground, (&raw mut call).cast(), 10000) }.unwrap();
     std::process::exit(98);
+}
+
+mod srcu;
+pub(crate) fn run_srcu_child() {
+    srcu::run_child();
 }

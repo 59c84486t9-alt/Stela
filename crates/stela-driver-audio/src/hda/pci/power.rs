@@ -9,12 +9,13 @@
 //! Copyright 1997 -- 2000 Martin Mares <mj@ucw.cz>
 use super::{
     AttachError, PM_NO_SOFT_RESET, PM_PME_ENABLE, PM_PME_STATUS, PM_STATE, PciRegisters,
-    capabilities, delay, registers::associated,
+    capabilities, registers::associated,
 };
+use crate::Timer;
 use crate::bus::pci::regs;
 use crate::{
     Error, Phase,
-    bus::{i2c::Timer, pci::ConfigSpace},
+    bus::pci::ConfigSpace,
     hda::{
         Controller, Registers,
         registers::{GCTL, GCTL_RESET, GCTL_UNSOL},
@@ -48,7 +49,13 @@ pub(super) struct Snapshot {
     command: u16,
 }
 
-impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, T> {
+impl<
+    R: Registers,
+    C: ConfigSpace,
+    F: core::ops::DerefMut<Target = crate::bus::pci::Function<C>>,
+    T: Timer,
+> Controller<PciRegisters<R, F>, T>
+{
     /// Stop the PCM/command engines, retire codec/GPU effects, assert
     /// link reset, disable PCI decode/mastering and enter D3hot. All DMA RAM,
     /// reservations and exact PCI/MMIO owners remain held across suspend.
@@ -61,19 +68,20 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
     /// D3cold, hot removal, board-rail changes or wake routing during this epoch.
     /// Wake is disabled; system/runtime policy and wake dispatch are separate.
     pub fn suspend_pci_d3hot(&mut self) -> Result<(), PowerError> {
+        self.minimum_guard()?;
         if self.registers.suspended.is_some() {
             return Err(PowerError::AlreadySuspended);
         }
-        let r = &mut self.registers;
-        if !associated(r.function, r.address, r.identity, r.base) {
+        let r = &mut *self.registers;
+        if !associated(&mut r.function, r.address, r.identity, r.base)? {
             return Err(AttachError::IdentityChanged.into());
         }
         let config = r.function.config();
         let caps = capabilities(config, r.identity.setup.controls(), r.identity.reset_policy)?;
         let pm = caps.pm.ok_or(AttachError::UnsupportedPowerManagement)?;
-        let flags = config.read16(pm + 2);
-        let state = config.read16(pm + 4);
-        let command = config.read16(regs::COMMAND);
+        let flags = config.read16(pm + 2)?;
+        let state = config.read16(pm + 4)?;
+        let command = config.read16(regs::COMMAND)?;
         if flags == u16::MAX
             || !(1..=3).contains(&(flags & 7))
             || state == u16::MAX
@@ -84,11 +92,11 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
         {
             return Err(AttachError::PowerNotReady.into());
         }
-        let snapshot = Snapshot {
-            bars: core::array::from_fn(|i| config.read32(regs::BASE_ADDRESS_0 + i as u16 * 4)),
-            pm,
-            command,
-        };
+        let mut bars = [0u32; 6];
+        for (i, saved) in bars.iter_mut().enumerate() {
+            *saved = config.read32(regs::BASE_ADDRESS_0 + i as u16 * 4)?;
+        }
+        let snapshot = Snapshot { bars, pm, command };
         self.shutdown()?;
         // The GPU/HDA power grant must cover the final link-reset
         // accesses as well as stream/command stop. A failed reset keeps it.
@@ -103,7 +111,7 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
                 let value = r.read32(GCTL);
                 value != u32::MAX && value & GCTL_RESET == 0
             })?;
-            self.delay(500);
+            self.delay(500)?;
             Ok(())
         })();
         if let Err(error) = reset {
@@ -121,12 +129,12 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
         let config = self.registers.function.config();
         let disabled = snapshot.command & !(regs::COMMAND_MASTER | regs::COMMAND_MEMORY)
             | regs::COMMAND_INTX_DISABLE;
-        config.write16(regs::COMMAND, disabled);
-        let observed = config.read16(regs::COMMAND);
+        config.write16(regs::COMMAND, disabled)?;
+        let observed = config.read16(regs::COMMAND)?;
         if observed == u16::MAX || observed != disabled {
             return Err(AttachError::ConfigurationRejected.into());
         }
-        let value = config.read16(pm + 4);
+        let value = config.read16(pm + 4)?;
         if value == u16::MAX || value & PM_STATE != 0 {
             return Err(AttachError::PowerNotReady.into());
         }
@@ -134,9 +142,9 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
         config.write16(
             pm + 4,
             value & !(PM_STATE | PM_PME_ENABLE | PM_PME_STATUS) | 3,
-        );
-        delay(&self.timer, 10_000);
-        let observed = config.read16(pm + 4);
+        )?;
+        Self::minimum_wait(&*self.timer, &self.minimum_error, 10_000)?;
+        let observed = config.read16(pm + 4)?;
         if observed == u16::MAX || observed & (PM_STATE | PM_PME_ENABLE) != 3 {
             return Err(AttachError::PowerTransition.into());
         }
@@ -149,17 +157,18 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
     /// Discover codecs and bind new codec/GPU routes after success.
     /// Failure keeps the snapshot and every original DMA/resource owner.
     pub fn resume_pci_d0(&mut self) -> Result<(), PowerError> {
+        self.minimum_guard()?;
         let snapshot = self.registers.suspended.ok_or(PowerError::NotSuspended)?;
-        let r = &mut self.registers;
+        let r = &mut *self.registers;
         if r.function.address != r.address {
             return Err(AttachError::IdentityChanged.into());
         }
         let config = r.function.config();
-        let id = config.read32(regs::VENDOR_ID);
-        let class = config.read32(regs::CLASS_REVISION);
+        let id = config.read32(regs::VENDOR_ID)?;
+        let class = config.read32(regs::CLASS_REVISION)?;
         if id != u32::from(r.identity.vendor) | (u32::from(r.identity.device) << 16)
             || [(class >> 24) as u8, (class >> 16) as u8, (class >> 8) as u8] != super::CLASS
-            || config.read8(regs::HEADER_TYPE) & 0x7f != 0
+            || config.read8(regs::HEADER_TYPE)? & 0x7f != 0
         {
             return Err(AttachError::IdentityChanged.into());
         }
@@ -167,8 +176,8 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
         if caps.pm != Some(snapshot.pm) {
             return Err(AttachError::InvalidCapabilities.into());
         }
-        let flags = config.read16(snapshot.pm + 2);
-        let value = config.read16(snapshot.pm + 4);
+        let flags = config.read16(snapshot.pm + 2)?;
+        let value = config.read16(snapshot.pm + 4)?;
         if flags == u16::MAX
             || !(1..=3).contains(&(flags & 7))
             || value == u16::MAX
@@ -179,42 +188,31 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
         // Never restore a BAR with a possible live decoder or bus master.
         let disabled = snapshot.command & !(regs::COMMAND_MASTER | regs::COMMAND_MEMORY)
             | regs::COMMAND_INTX_DISABLE;
-        config.write16(regs::COMMAND, disabled);
-        let observed = config.read16(regs::COMMAND);
+        config.write16(regs::COMMAND, disabled)?;
+        let observed = config.read16(regs::COMMAND)?;
         if observed == u16::MAX || observed != disabled {
             return Err(AttachError::ConfigurationRejected.into());
         }
         config.write16(
             snapshot.pm + 4,
             value & !(PM_STATE | PM_PME_ENABLE | PM_PME_STATUS),
-        );
+        )?;
         if value & PM_STATE == 3 {
-            delay(&self.timer, 10_000);
+            Self::minimum_wait(&*self.timer, &self.minimum_error, 10_000)?;
         }
-        let observed = config.read16(snapshot.pm + 4);
+        let observed = config.read16(snapshot.pm + 4)?;
         if observed == u16::MAX || observed & (PM_STATE | PM_PME_ENABLE) != 0 {
             return Err(AttachError::PowerTransition.into());
         }
         // A D3hot exit may reset BARs. Restore the exact values only
         // after D0 acknowledgement, before decoding/mastering can be enabled.
         // Also recover a prior partial restore even if PMCSR now reports D0.
-        if value & PM_NO_SOFT_RESET == 0
-            || snapshot
-                .bars
-                .iter()
-                .enumerate()
-                .any(|(i, saved)| config.read32(regs::BASE_ADDRESS_0 + i as u16 * 4) != *saved)
-        {
+        if value & PM_NO_SOFT_RESET == 0 || !bars_match(config, &snapshot.bars)? {
             for (index, value) in snapshot.bars.iter().enumerate() {
-                config.write32(regs::BASE_ADDRESS_0 + index as u16 * 4, *value);
+                config.write32(regs::BASE_ADDRESS_0 + index as u16 * 4, *value)?;
             }
         }
-        if snapshot
-            .bars
-            .iter()
-            .enumerate()
-            .any(|(i, saved)| config.read32(regs::BASE_ADDRESS_0 + i as u16 * 4) != *saved)
-        {
+        if !bars_match(config, &snapshot.bars)? {
             return Err(AttachError::InvalidBar.into());
         }
         for control in r.identity.setup.controls() {
@@ -224,22 +222,22 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
         // interrupt path masked before making MMIO available again.
         for (offset, enable) in [(caps.msi, 1), (caps.msix, 1 << 15)] {
             if let Some(offset) = offset {
-                let previous = config.read16(offset + 2);
+                let previous = config.read16(offset + 2)?;
                 if previous == u16::MAX {
                     return Err(AttachError::ConfigurationRejected.into());
                 }
-                config.write16(offset + 2, previous & !enable);
-                let observed = config.read16(offset + 2);
+                config.write16(offset + 2, previous & !enable)?;
+                let observed = config.read16(offset + 2)?;
                 if observed == u16::MAX || observed & enable != 0 {
                     return Err(AttachError::ConfigurationRejected.into());
                 }
             }
         }
         let enabled = disabled | regs::COMMAND_MEMORY | regs::COMMAND_MASTER;
-        config.write16(regs::COMMAND, enabled);
-        let observed = config.read16(regs::COMMAND);
+        config.write16(regs::COMMAND, enabled)?;
+        let observed = config.read16(regs::COMMAND)?;
         if observed == u16::MAX || observed != enabled {
-            config.write16(regs::COMMAND, disabled);
+            config.write16(regs::COMMAND, disabled)?;
             return Err(AttachError::ConfigurationRejected.into());
         }
         r.suspended = None;
@@ -257,3 +255,26 @@ impl<R: Registers, C: ConfigSpace, T: Timer> Controller<PciRegisters<'_, R, C>, 
 
 #[cfg(test)]
 mod tests;
+
+impl From<crate::bus::pci::ConfigError> for PowerError {
+    fn from(error: crate::bus::pci::ConfigError) -> Self {
+        Self::Pci(AttachError::Config(error))
+    }
+}
+impl From<crate::bus::pci::CapabilityError> for PowerError {
+    fn from(error: crate::bus::pci::CapabilityError) -> Self {
+        Self::Pci(AttachError::PciCapability(error))
+    }
+}
+
+fn bars_match<C: ConfigSpace>(
+    config: &C,
+    bars: &[u32; 6],
+) -> Result<bool, crate::bus::pci::ConfigError> {
+    for (i, saved) in bars.iter().enumerate() {
+        if config.read32(regs::BASE_ADDRESS_0 + i as u16 * 4)? != *saved {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}

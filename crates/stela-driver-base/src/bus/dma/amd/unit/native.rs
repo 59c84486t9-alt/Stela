@@ -80,6 +80,8 @@ pub fn quarantined_units() -> u64 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
+    Config(crate::bus::pci::ConfigError),
+    PciCapability(crate::bus::pci::CapabilityError),
     Firmware,
     Profile,
     NotCold,

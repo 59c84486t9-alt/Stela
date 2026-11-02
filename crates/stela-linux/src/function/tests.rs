@@ -135,21 +135,47 @@ fn isolated(name: &str) -> bool {
 /// A function's configuration space as plain memory.
 struct Config([u8; 256]);
 
+impl Config {
+    fn read<const N: usize>(&self, offset: u16) -> Result<[u8; N], ConfigError> {
+        let at = usize::from(offset);
+        if !at.is_multiple_of(N) || at + N > self.0.len() {
+            return Err(ConfigError::before_effect(ConfigFailure::Access {
+                offset,
+                width: N,
+            }));
+        }
+        Ok(self.0[at..at + N].try_into().unwrap())
+    }
+    fn write<const N: usize>(&mut self, offset: u16, value: [u8; N]) -> Result<(), ConfigError> {
+        let at = usize::from(offset);
+        if !at.is_multiple_of(N) || at + N > self.0.len() {
+            return Err(ConfigError::before_effect(ConfigFailure::Access {
+                offset,
+                width: N,
+            }));
+        }
+        self.0[at..at + N].copy_from_slice(&value);
+        Ok(())
+    }
+}
 impl ConfigSpace for Config {
-    fn read32(&self, offset: u16) -> u32 {
-        let at = usize::from(offset);
-        u32::from_le_bytes(self.0[at..at + 4].try_into().unwrap())
+    fn read8(&self, offset: u16) -> Result<u8, ConfigError> {
+        self.read(offset).map(u8::from_le_bytes)
     }
-    fn write32(&mut self, offset: u16, value: u32) {
-        let at = usize::from(offset);
-        self.0[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    fn read16(&self, offset: u16) -> Result<u16, ConfigError> {
+        self.read(offset).map(u16::from_le_bytes)
     }
-    fn write16(&mut self, offset: u16, value: u16) {
-        let at = usize::from(offset);
-        self.0[at..at + 2].copy_from_slice(&value.to_le_bytes());
+    fn read32(&self, offset: u16) -> Result<u32, ConfigError> {
+        self.read(offset).map(u32::from_le_bytes)
     }
-    fn write8(&mut self, offset: u16, value: u8) {
-        self.0[usize::from(offset)] = value;
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), ConfigError> {
+        self.write(offset, value.to_le_bytes())
+    }
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError> {
+        self.write(offset, value.to_le_bytes())
+    }
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), ConfigError> {
+        self.write(offset, value.to_le_bytes())
     }
 }
 
@@ -159,16 +185,16 @@ fn msi_programs_its_one_message_by_width() {
     for (width, data_at) in [(1 << 7, 0x6c), (0, 0x68)] {
         let mut config = Config([0; 256]);
         // Enabled, with a previous owner's multiple-message setting.
-        config.write16(CAPABILITY + 2, width | 1 | 2 << 4);
+        config.write16(CAPABILITY + 2, width | 1 | 2 << 4).unwrap();
         let msi = Msi::at(CAPABILITY);
-        msi.program(&mut config, 0x1_fee0_1000, 0x51);
-        assert_eq!(config.read16(CAPABILITY + 2), width | 2 << 4);
-        assert_eq!(config.read32(CAPABILITY + 4), 0xfee0_1000);
-        assert_eq!(config.read16(data_at), 0x51);
-        msi.enable(&mut config);
-        assert_eq!(config.read16(CAPABILITY + 2), width | 1);
-        msi.disable(&mut config);
-        assert_eq!(config.read16(CAPABILITY + 2), width);
+        msi.program(&mut config, 0x1_fee0_1000, 0x51).unwrap();
+        assert_eq!(config.read16(CAPABILITY + 2).unwrap(), width | 2 << 4);
+        assert_eq!(config.read32(CAPABILITY + 4).unwrap(), 0xfee0_1000);
+        assert_eq!(config.read16(data_at).unwrap(), 0x51);
+        msi.enable(&mut config).unwrap();
+        assert_eq!(config.read16(CAPABILITY + 2).unwrap(), width | 1);
+        msi.disable(&mut config).unwrap();
+        assert_eq!(config.read16(CAPABILITY + 2).unwrap(), width);
     }
 }
 
@@ -381,3 +407,5 @@ fn dropping_active_mappings_quarantines_original_backing_and_domain() {
 mod fatal;
 
 mod lifetime;
+
+mod configuration;

@@ -135,6 +135,10 @@ impl<B: BarAccess + 'static, R: RetirableRegisters> OwnedTransport<B, R> {
     /// binding; `retention` seals that exact configuration. The allocator uses
     /// this attachment's coherent domain and kept pages. Prior IRQ/work/bypass
     /// exclusions and the original processor/root context remain held.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub unsafe fn new(inputs: Inputs<B, R>) -> core::result::Result<Self, Failure> {
         let Inputs {
             mut platform,

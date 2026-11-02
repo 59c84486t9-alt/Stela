@@ -7,7 +7,7 @@
 //! Copyright (c) 2004 Takashi Iwai <tiwai@suse.de>
 //!                     PeiSen Hou <pshou@realtek.com.tw>
 use super::{Controller, Registers, ResetPolicy};
-use crate::{Error, Phase, bus::i2c::Timer};
+use crate::{Error, Phase, Timer};
 use alloc::vec::Vec;
 
 const LLCH: usize = 0x14;
@@ -197,14 +197,16 @@ impl ExtendedCapabilities {
 
 impl<R: Registers, T: Timer> Controller<R, T> {
     pub(super) fn refresh_extended(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         if self.config.reset_policy == ResetPolicy::IntelClockGate {
-            self.extended = Some(inspect(&mut self.registers, self.streams.len() as u8)?);
+            self.extended = Some(inspect(&mut *self.registers, self.streams.len() as u8)?);
         }
         Ok(())
     }
     /// Last successfully configured conventional external-link clock. This is
     /// controller metadata, not a PCM/transport timestamp or CPU timer source.
     pub fn link_clock(&self) -> Result<Option<LinkClock>, Error> {
+        self.minimum_guard()?;
         if self.lifecycle_failed {
             return Err(Error::NeedsReset);
         }
@@ -214,8 +216,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(self.extended.as_ref().and_then(|cap| cap.clock))
     }
     fn link_power(&mut self, link: Link, on: bool) -> Result<(), Error> {
+        self.minimum_guard()?;
         let offset = link.base + LCTL;
-        let value = control(&mut self.registers, offset)?;
+        let value = control(&mut *self.registers, offset)?;
         let wanted = if on { SPA | CPA } else { 0 };
         if value & (SPA | CPA) == wanted {
             return Ok(());
@@ -224,7 +227,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .write32(offset, if on { value | SPA } else { value & !SPA });
         let start = self.timer.now_us();
         loop {
-            let value = control(&mut self.registers, offset)?;
+            let value = control(&mut *self.registers, offset)?;
             if value & (SPA | CPA) == wanted {
                 return Ok(());
             }
@@ -241,6 +244,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
     }
     pub(super) fn configure_extended_link(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         let Some(link) = self
             .extended
             .as_ref()
@@ -250,27 +254,27 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Ok(());
         };
         let offset = link.base + LCTL;
-        let value = control(&mut self.registers, offset)?;
+        let value = control(&mut *self.registers, offset)?;
         let selected = select_clock(link, value)?;
         let current = (value & SCF) as u8;
         let result = (|| {
             if current == 0 {
                 self.link_power(link, false)?;
-                self.delay(100);
-                let stopped = control(&mut self.registers, offset)?;
+                self.delay(100)?;
+                let stopped = control(&mut *self.registers, offset)?;
                 if stopped & (SPA | CPA) != 0 {
                     return Err(Error::LinkPowerUncertain { offset });
                 }
                 self.registers
                     .write32(offset, (stopped & !SCF) | u32::from(selected));
-                let readback = control(&mut self.registers, offset)?;
+                let readback = control(&mut *self.registers, offset)?;
                 if readback & SCF != u32::from(selected) || readback & (SPA | CPA) != 0 {
                     return Err(Error::LinkClockRejected { offset });
                 }
             }
             self.link_power(link, true)?;
-            self.delay(100);
-            let final_control = control(&mut self.registers, offset)?;
+            self.delay(100)?;
+            let final_control = control(&mut *self.registers, offset)?;
             if final_control & SCF != u32::from(selected)
                 || final_control & (SPA | CPA) != (SPA | CPA)
             {
@@ -282,7 +286,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             // A failed clock/power transition never becomes a usable controller;
             // still attempt to restore requested link power while DMA stays pinned.
             let _ = self.link_power(link, true);
-            self.delay(100);
+            self.delay(100)?;
             return Err(error);
         }
         self.extended.as_mut().unwrap().clock = Some(LinkClock::from_encoding(selected));

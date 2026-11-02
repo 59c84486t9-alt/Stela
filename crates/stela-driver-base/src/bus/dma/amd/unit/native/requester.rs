@@ -59,17 +59,17 @@ fn admit_function(function: &mut Function<OwnedConfig>) -> Result<u16, Error> {
     let config = function.config();
     if config.address() != address
         || expected_id == u32::MAX
-        || config.read32(0) != expected_id
-        || config.read8(0x0e) & 0x7f != 0
-        || config.read16(4) & 4 != 0
+        || config.read32(0).map_err(Error::Config)? != expected_id
+        || config.read8(0x0e).map_err(Error::Config)? & 0x7f != 0
+        || config.read16(4).map_err(Error::Config)? & 4 != 0
     {
         return Err(Error::Requester);
     }
-    if config.read32(0x100) == u32::MAX {
+    if config.read32(0x100).map_err(Error::Config)? == u32::MAX {
         return Err(Error::Profile);
     }
     for entry in config.extended_capabilities() {
-        let entry = entry.map_err(|_| Error::Profile)?;
+        let entry = entry.map_err(Error::PciCapability)?;
         // ATS/PRI/PASID/SR-IOV and unknown extended capabilities require wider
         // requester/alias ownership. Do not infer disabled integrated ATS from
         // the absence of its PCI capability; ColdPlatform independently owns it.
@@ -93,8 +93,11 @@ impl<P: ColdPlatform> Unit<P> {
     /// Failure may keep the requester indefinitely with its uncertain root.
     pub unsafe fn attach(
         &mut self,
-        mut function: Function<OwnedConfig>,
+        function: Function<OwnedConfig>,
     ) -> Result<Requester<P>, Error> {
+        // Before any fallible access/context callback: an access error does
+        // not return/reset/retire this SAME original configuration epoch.
+        let mut function = ManuallyDrop::new(function);
         if self.engine.retired.get() || self.engine.poisoned.get() {
             return Err(Error::Poisoned);
         }
@@ -105,7 +108,12 @@ impl<P: ColdPlatform> Unit<P> {
         }
         drop(guard);
         // SAFETY: forwarded.
-        unsafe { self.attach_owner(rid, Owner::Function(RefCell::new(function))) }
+        unsafe {
+            self.attach_owner(
+                rid,
+                Owner::Function(RefCell::new(ManuallyDrop::into_inner(function))),
+            )
+        }
     }
 
     /// Attach the requester a driver's binding names, moving it out of the
@@ -118,6 +126,7 @@ impl<P: ColdPlatform> Unit<P> {
         &mut self,
         binding: RequesterBinding,
     ) -> Result<Requester<P>, Error> {
+        let binding = ManuallyDrop::new(binding);
         if self.engine.retired.get() || self.engine.poisoned.get() {
             return Err(Error::Poisoned);
         }
@@ -126,12 +135,18 @@ impl<P: ColdPlatform> Unit<P> {
         }
         let rid = binding.requester();
         // SAFETY: forwarded.
-        unsafe { self.attach_owner(rid, Owner::Binding(RefCell::new(Some(binding)))) }
+        unsafe {
+            self.attach_owner(
+                rid,
+                Owner::Binding(RefCell::new(Some(ManuallyDrop::into_inner(binding)))),
+            )
+        }
     }
 
     /// # Safety
     /// As for [`Self::attach`], for `owner`'s requester `rid`.
     unsafe fn attach_owner(&mut self, rid: u16, owner: Owner) -> Result<Requester<P>, Error> {
+        let owner = ManuallyDrop::new(owner);
         let _guard = self.engine.resources.platform.enter().map_err(Error::Dma)?;
         if !self.coverage[usize::from(rid)] {
             return Err(Error::Requester);
@@ -156,11 +171,11 @@ impl<P: ColdPlatform> Unit<P> {
             .borrow_mut()
             .try_reserve(1)
             .map_err(|_| Error::Memory(MemoryError::OutOfMemory))?;
-        let owner = Rc::new(owner);
+        let owner = ManuallyDrop::new(Rc::new(ManuallyDrop::into_inner(owner)));
         let hardware = Hardware {
             engine: self.engine.clone(),
             domain: Some(id),
-            requester: Some(owner.clone()),
+            requester: Some(Rc::clone(&owner)),
         };
         let level = TableLevel::new(2).map_err(|_| Error::Profile)?;
         // SAFETY: fixed30-bit IOVA/2-level subset admitted from HATS,
@@ -193,7 +208,7 @@ impl<P: ColdPlatform> Unit<P> {
             tree,
             table: self.table.clone(),
             engine: self.engine.clone(),
-            owner,
+            owner: ManuallyDrop::into_inner(owner),
             active: self.active.clone(),
             seal: Rc::new(()),
             bindings: Vec::new(),

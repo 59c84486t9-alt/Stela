@@ -58,7 +58,7 @@ impl Engine {
             self.registers.write16(HOST_CONTROL2, control);
             // GL9763E's source uses the standard SDHCI voltage hook and its
             // 100-ms settle. MMC changes pads directly and never issues CMD11.
-            self.clock.delay(100_000);
+            self.quiet(100_000)?;
             self.check_card()?;
             if self.registers.read16(HOST_CONTROL2) & SIGNAL_180 == 0 {
                 return Err(BlockError::Unsupported(

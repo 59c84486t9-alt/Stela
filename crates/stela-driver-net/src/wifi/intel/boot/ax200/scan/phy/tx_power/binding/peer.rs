@@ -176,6 +176,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B
     }
     /// Raw original RX only. Host duplicate/reorder/security and associated
     /// normalized RX remain a later station/queue continuation requirement.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub fn poll_receive(&mut self) -> Result<MpduProgress, Ax200LegacyPeerError> {
         if let Some(error) = &self.first_error {
             return Err(error.clone());
@@ -192,6 +196,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B
         }
         result
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub fn replenish_completed_receive(&mut self) -> Result<Replenished, Ax200LegacyPeerError> {
         if let Some(error) = &self.first_error {
             return Err(error.clone());
@@ -221,6 +229,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B
         self.first_error.get_or_insert(error);
         self.phase = Ax200LegacyPeerPhase::Failed;
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn prepare(&mut self) -> Result<(), Ax200LegacyPeerError> {
         if self.mld {
             return mld::prepare(self);
@@ -319,6 +331,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B
     }
     /// Original no-queue removal still sends drain, station/TID flush,
     /// undrain and REMOVE. A new transmit lease cannot block this teardown.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub fn begin_remove(&mut self) -> Result<(), Ax200LegacyPeerError> {
         if self.phase != Ax200LegacyPeerPhase::ManagementQueueRequired
             || self.ticket.is_some()
@@ -370,6 +386,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B
     /// # Safety
     /// The original native requester/domain and begin_legacy_peer
     /// service contracts must hold through every visibility and completion.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub unsafe fn advance(
         &mut self,
         source: &dyn PageSource,
@@ -401,6 +421,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B
         }
         result
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     unsafe fn advance_inner(
         &mut self,
         source: &dyn PageSource,
@@ -547,6 +571,10 @@ fn drain(enabled: bool) -> Vec<u8> {
     bytes[24..28].copy_from_slice(&(1u32 << 12).to_le_bytes());
     bytes
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+)]
 fn rates(
     firmware: &Firmware<'_>,
     mask: u16,
@@ -571,6 +599,10 @@ fn rates(
     bytes[shape.head + 6..shape.head + 8].copy_from_slice(&mask.to_le_bytes());
     Ok(bytes)
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+)]
 fn status(raw: &[u8]) -> Result<(), Ax200LegacyPeerError> {
     if raw.len() != 4 {
         return Err(Ax200LegacyPeerError::ResponseLength(raw.len()));
@@ -582,6 +614,10 @@ fn status(raw: &[u8]) -> Result<(), Ax200LegacyPeerError> {
         Err(Ax200LegacyPeerError::Status(status))
     }
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+)]
 fn flush(raw: &[u8], notification: u8) -> Result<(), Ax200LegacyPeerError> {
     if notification == 0 {
         return Ok(());

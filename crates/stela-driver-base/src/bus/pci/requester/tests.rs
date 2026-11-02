@@ -17,18 +17,43 @@ struct Config {
     last_read: Cell<u16>,
 }
 impl ConfigSpace for Config {
-    fn read32(&self, offset: u16) -> u32 {
-        self.last_read.set(offset);
-        self.words[usize::from(offset / 4)]
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        Ok({
+            self.last_read.set(offset);
+            self.words[usize::from(offset / 4)]
+        })
     }
-    fn write32(&mut self, offset: u16, value: u32) {
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         self.words[usize::from(offset / 4)] = value;
+        Ok(())
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        let shift = (offset & 3) * 8;
+        let word = self.read32(offset & !3)? & !(0xff << shift) | u32::from(value) << shift;
+        self.write32(offset & !3, word)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+    }
+
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
+        let shift = (offset & 2) * 8;
+        let word = self.read32(offset & !3)? & !(0xffff << shift) | u32::from(value) << shift;
+        self.write32(offset & !3, word)
     }
 }
 fn configure<C: ConfigSpace>(config: &mut C) {
-    config.write32(0, 0x2c02_10de);
-    config.write32(8, 0x0300_0000);
-    config.write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE);
+    config.write32(0, 0x2c02_10de).unwrap();
+    config.write32(8, 0x0300_0000).unwrap();
+    config
+        .write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE)
+        .unwrap();
 }
 fn endpoint() -> Function<Config> {
     let mut config = Config {
@@ -41,25 +66,28 @@ fn endpoint() -> Function<Config> {
 fn cap(function: &mut Function<Config>, offset: u16, id: u16, next: u16) {
     function
         .config()
-        .write16(regs::STATUS, regs::STATUS_CAP_LIST);
-    function.config().write8(0x34, offset as u8);
-    function.config().write16(offset, id | next << 8);
+        .write16(regs::STATUS, regs::STATUS_CAP_LIST)
+        .unwrap();
+    function.config().write8(0x34, offset as u8).unwrap();
+    function.config().write16(offset, id | next << 8).unwrap();
     if id == PM {
-        function.config().write16(offset + 2, 3);
+        function.config().write16(offset + 2, 3).unwrap();
     }
 }
 fn ext(function: &mut Function<Config>, offset: u16, id: u16, version: u32, next: u16) {
-    function.config().write32(
-        offset,
-        u32::from(id) | version << 16 | u32::from(next) << 20,
-    );
+    function
+        .config()
+        .write32(
+            offset,
+            u32::from(id) | version << 16 | u32::from(next) << 20,
+        )
+        .unwrap();
 }
 fn release(function: Function<OwnedConfig>, counters: &Arc<Counters>) {
-    let mut mapping = function.into_config().into_mapping();
     assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
     // SAFETY: fixture has no device, IRQ or workers and no config access
     // remains after consuming the original function owner.
-    unsafe { mapping.retire() }.unwrap();
+    unsafe { super::super::owned::test_support::retire_owned(function.into_config()) }.unwrap();
     assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
     assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 1);
     assert_eq!(counters.platform_drops.load(Ordering::Relaxed), 1);
@@ -115,24 +143,23 @@ fn binding_keeps_original_config_and_native_root_until_explicit_release() {
     assert_eq!(binding.address(), ADDRESS);
     assert_eq!(binding.requester(), 0xe7ee);
     assert_eq!(binding.check_live(), Ok(()));
-    assert_eq!(function.config().read32(0), 0x2c02_10de);
-    let mut mapping = function.into_config().into_mapping();
-    assert_eq!(binding.matches_mapping(&mapping), Ok(true));
+    assert_eq!(function.config().read32(0).unwrap(), 0x2c02_10de);
+    let mut config = function.into_config();
+    assert_eq!(config.matches_binding(&binding), Ok(true));
     // SAFETY: stopped synchronous fixture; Busy must refuse before unmap.
-    assert_eq!(unsafe { mapping.retire() }, Err(MappingError::Busy));
+    assert_eq!(unsafe { config.retire() }, Err(MappingError::Busy));
     assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
     let (other, other_counters) = fixture(ADDRESS);
-    let mut other = other.into_mapping();
     // Same BDF and even the fixture's same numeric root identity do not
     // reproduce the original Permission allocation.
-    assert_eq!(binding.matches_mapping(&other), Ok(false));
+    assert_eq!(other.matches_binding(&binding), Ok(false));
     drop(binding);
     // SAFETY: explicit fixture release follows the final binding.
-    unsafe { mapping.retire() }.unwrap();
+    unsafe { super::super::owned::test_support::retire_owned(config) }.unwrap();
     assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
     assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 1);
     // SAFETY: independent original synchronous fixture mapping.
-    unsafe { other.retire() }.unwrap();
+    unsafe { super::super::owned::test_support::retire_owned(other) }.unwrap();
     assert_eq!(other_counters.unmaps.load(Ordering::Relaxed), 1);
 }
 
@@ -160,10 +187,14 @@ fn binding_recheck_refusal_returns_the_unchanged_original_function() {
             Err((error, _)) => panic!("fixture claim: {error:?}"),
         };
     // Private test access models a changed hardware observation.
-    claim.function.config().write16(
-        regs::COMMAND,
-        regs::COMMAND_INTX_DISABLE | regs::COMMAND_MASTER,
-    );
+    claim
+        .function
+        .config()
+        .write16(
+            regs::COMMAND,
+            regs::COMMAND_INTX_DISABLE | regs::COMMAND_MASTER,
+        )
+        .unwrap();
     let (error, claim) = match claim.into_dma_binding() {
         Err(error) => error,
         Ok(_) => panic!("active requester accepted"),
@@ -177,12 +208,13 @@ fn binding_recheck_refusal_returns_the_unchanged_original_function() {
     let mut function = claim.into_function();
     assert_eq!(function.address, ADDRESS);
     assert_eq!(
-        function.config().read16(regs::COMMAND),
+        function.config().read16(regs::COMMAND).unwrap(),
         regs::COMMAND_INTX_DISABLE | regs::COMMAND_MASTER
     );
     function
         .config()
-        .write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE);
+        .write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE)
+        .unwrap();
     release(function, &counters);
 }
 
@@ -228,23 +260,23 @@ fn device_identity_interrupt_gating_and_header_are_observed_not_assumed() {
         (4, 0xffff, ClaimError::ReadFailed { offset: 4 }),
     ] {
         let mut function = endpoint();
-        function.config().write32(offset, value);
+        function.config().write32(offset, value).unwrap();
         assert_eq!(validate_stopped(&mut function), Err(expected));
     }
     // A conventional function has no extended space: its first extended
     // header reads all-ones.
     let mut function = endpoint();
-    function.config().write32(0x100, u32::MAX);
+    function.config().write32(0x100, u32::MAX).unwrap();
     assert_eq!(validate_stopped(&mut function), Ok(()));
     let mut function = endpoint();
-    function.config().write8(0x0e, 1);
+    function.config().write8(0x0e, 1).unwrap();
     assert_eq!(
         validate_stopped(&mut function),
         Err(ClaimError::UnsupportedHeader(1))
     );
     let mut function = endpoint();
     function.class = [0xff; 3];
-    function.config().write32(8, u32::MAX);
+    function.config().write32(8, u32::MAX).unwrap();
     assert_eq!(
         validate_stopped(&mut function),
         Err(ClaimError::ReadFailed { offset: 8 })
@@ -256,18 +288,21 @@ fn msi_layouts_pcie_versions_and_no_snoop_require_complete_extents() {
     for (flags, length) in [(0, 10), (0x80, 14), (0x100, 20), (0x180, 24)] {
         let mut function = endpoint();
         cap(&mut function, 0x40, MSI, 0);
-        function.config().write16(0x42, flags);
+        function.config().write16(0x42, flags).unwrap();
         assert_eq!(validate_stopped(&mut function), Ok(()));
-        function.config().write16(0x42, flags | 1);
+        function.config().write16(0x42, flags | 1).unwrap();
         assert_eq!(
             validate_stopped(&mut function),
             Err(ClaimError::Active { offset: 0x42 })
         );
-        function.config().write16(0x42, flags);
+        function.config().write16(0x42, flags).unwrap();
         let collision = 0x40 + ((length - 1) / 4) * 4;
-        function.config().write16(0x40, MSI | collision << 8);
-        function.config().write16(collision, PM);
-        function.config().write16(collision + 2, 3);
+        function
+            .config()
+            .write16(0x40, MSI | collision << 8)
+            .unwrap();
+        function.config().write16(collision, PM).unwrap();
+        function.config().write16(collision + 2, 3).unwrap();
         assert_eq!(
             validate_stopped(&mut function),
             Err(ClaimError::MalformedCapability { offset: collision })
@@ -276,9 +311,12 @@ fn msi_layouts_pcie_versions_and_no_snoop_require_complete_extents() {
     for (kind, version, bytes) in [(0, 1, 20), (1, 2, 52), (9, 1, 12), (9, 2, 44)] {
         let mut function = endpoint();
         cap(&mut function, 0x40, PCIE, 0);
-        function.config().write16(0x42, version | kind << 4);
+        function
+            .config()
+            .write16(0x42, version | kind << 4)
+            .unwrap();
         assert_eq!(validate_stopped(&mut function), Ok(()));
-        function.config().write16(0x48, 1 << 11);
+        function.config().write16(0x48, 1 << 11).unwrap();
         assert_eq!(
             validate_stopped(&mut function),
             Err(ClaimError::Active { offset: 0x48 })
@@ -288,7 +326,10 @@ fn msi_layouts_pcie_versions_and_no_snoop_require_complete_extents() {
         let offset = 260 - bytes;
         let mut function = endpoint();
         cap(&mut function, offset, PCIE, 0);
-        function.config().write16(offset + 2, version | kind << 4);
+        function
+            .config()
+            .write16(offset + 2, version | kind << 4)
+            .unwrap();
         assert_eq!(
             validate_stopped(&mut function),
             Err(ClaimError::MalformedCapability { offset })
@@ -297,7 +338,7 @@ fn msi_layouts_pcie_versions_and_no_snoop_require_complete_extents() {
     }
     let mut function = endpoint();
     cap(&mut function, 0x40, MSIX, 0);
-    function.config().write16(0x42, 0x8000);
+    function.config().write16(0x42, 0x8000).unwrap();
     assert_eq!(
         validate_stopped(&mut function),
         Err(ClaimError::Active { offset: 0x42 })
@@ -310,8 +351,9 @@ fn linked_zero_cycles_overlaps_unknowns_and_unmasked_pointers_are_refused() {
         let mut function = endpoint();
         function
             .config()
-            .write16(regs::STATUS, regs::STATUS_CAP_LIST);
-        function.config().write8(0x34, pointer);
+            .write16(regs::STATUS, regs::STATUS_CAP_LIST)
+            .unwrap();
+        function.config().write8(0x34, pointer).unwrap();
         assert!(matches!(
             validate_stopped(&mut function),
             Err(ClaimError::MalformedCapability { .. })
@@ -321,8 +363,8 @@ fn linked_zero_cycles_overlaps_unknowns_and_unmasked_pointers_are_refused() {
         let mut function = endpoint();
         cap(&mut function, first, PM, second);
         if first != second {
-            function.config().write16(second, PM);
-            function.config().write16(second + 2, 3);
+            function.config().write16(second, PM).unwrap();
+            function.config().write16(second + 2, 3).unwrap();
         }
         assert!(matches!(
             validate_stopped(&mut function),
@@ -359,12 +401,12 @@ fn pcix_versioned_bodies_cannot_hide_an_overlapping_capability() {
     for version in 0..=2 {
         let mut function = endpoint();
         cap(&mut function, 0x40, PCIX, 0);
-        function.config().write16(0x42, version << 12);
+        function.config().write16(0x42, version << 12).unwrap();
         assert_eq!(validate_stopped(&mut function), Ok(()));
     }
     let mut function = endpoint();
     cap(&mut function, 0x40, PCIX, 0);
-    function.config().write16(0x42, 3 << 12);
+    function.config().write16(0x42, 3 << 12).unwrap();
     assert_eq!(
         validate_stopped(&mut function),
         Err(ClaimError::UnsupportedVersion {
@@ -376,12 +418,13 @@ fn pcix_versioned_bodies_cannot_hide_an_overlapping_capability() {
         for reverse in [false, true] {
             let mut function = endpoint();
             cap(&mut function, 0x40, PCIX, if reverse { 0 } else { 0x48 });
-            function.config().write16(0x42, version << 12);
+            function.config().write16(0x42, version << 12).unwrap();
             function
                 .config()
-                .write16(0x48, MSI | if reverse { 0x40 << 8 } else { 0 });
+                .write16(0x48, MSI | if reverse { 0x40 << 8 } else { 0 })
+                .unwrap();
             if reverse {
-                function.config().write8(0x34, 0x48);
+                function.config().write8(0x34, 0x48).unwrap();
             }
             assert!(matches!(
                 validate_stopped(&mut function),
@@ -392,7 +435,7 @@ fn pcix_versioned_bodies_cannot_hide_an_overlapping_capability() {
     for version in 0..=7 {
         let mut function = endpoint();
         cap(&mut function, 0x40, PM, 0);
-        function.config().write16(0x42, version);
+        function.config().write16(0x42, version).unwrap();
         let result = validate_stopped(&mut function);
         if (1..=3).contains(&version) {
             assert_eq!(result, Ok(()));
@@ -414,17 +457,20 @@ fn translation_features_require_inactive_controls_and_stopped_pri() {
         let mut function = endpoint();
         ext(&mut function, 0x100, id, 1, 0);
         if id == PRI {
-            function.config().write16(0x106, 0x100);
+            function.config().write16(0x106, 0x100).unwrap();
         }
         assert_eq!(validate_stopped(&mut function), Ok(()));
-        function.config().write16(0x100 + control, active);
+        function.config().write16(0x100 + control, active).unwrap();
         assert_eq!(
             validate_stopped(&mut function),
             Err(ClaimError::Active {
                 offset: 0x100 + control
             })
         );
-        function.config().write16(0x100 + control, u16::MAX);
+        function
+            .config()
+            .write16(0x100 + control, u16::MAX)
+            .unwrap();
         assert_eq!(
             validate_stopped(&mut function),
             Err(ClaimError::ReadFailed {
@@ -459,8 +505,8 @@ fn translation_features_require_inactive_controls_and_stopped_pri() {
 fn pcie_pending_transactions_refuse_a_stopped_claim_and_bounded_wait() {
     let mut function = endpoint();
     cap(&mut function, 0x40, PCIE, 0);
-    function.config().write16(0x42, 2);
-    function.config().write16(0x4a, 1 << 5);
+    function.config().write16(0x42, 2).unwrap();
+    function.config().write16(0x4a, 1 << 5).unwrap();
     let mut checks = 0;
     assert_eq!(
         wait_for_pending_transactions(&*function.config(), || {
@@ -473,12 +519,12 @@ fn pcie_pending_transactions_refuse_a_stopped_claim_and_bounded_wait() {
         validate_stopped(&mut function),
         Err(ClaimError::Active { offset: 0x4a })
     );
-    function.config().write16(0x4a, u16::MAX);
+    function.config().write16(0x4a, u16::MAX).unwrap();
     assert_eq!(
         wait_for_pending_transactions(&*function.config(), || true),
         Err(ClaimError::ReadFailed { offset: 0x4a })
     );
-    function.config().write16(0x4a, 0);
+    function.config().write16(0x4a, 0).unwrap();
     assert_eq!(validate_stopped(&mut function), Ok(()));
     assert_eq!(
         wait_for_pending_transactions(&*function.config(), || panic!("idle status needs no wait")),
@@ -493,26 +539,49 @@ fn pcie_pending_wait_observes_completion_before_admitting_the_requester() {
         pending: Cell<u8>,
     }
     impl ConfigSpace for Completing {
-        fn read32(&self, offset: u16) -> u32 {
-            let word = self.config.read32(offset);
-            if offset != 0x48 {
-                return word;
-            }
-            let pending = self.pending.get();
-            self.pending.set(pending.saturating_sub(1));
-            if pending != 0 {
-                word | (1 << 21)
-            } else {
-                word & !(1 << 21)
-            }
+        fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+            Ok({
+                let word = self.config.read32(offset)?;
+                if offset != 0x48 {
+                    return Ok(word);
+                }
+                let pending = self.pending.get();
+                self.pending.set(pending.saturating_sub(1));
+                if pending != 0 {
+                    word | (1 << 21)
+                } else {
+                    word & !(1 << 21)
+                }
+            })
         }
-        fn write32(&mut self, offset: u16, value: u32) {
-            self.config.write32(offset, value);
+        fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
+            self.config.write32(offset, value)?;
+            Ok(())
+        }
+
+        fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+        }
+
+        fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+            let shift = (offset & 3) * 8;
+            let word = self.read32(offset & !3)? & !(0xff << shift) | u32::from(value) << shift;
+            self.write32(offset & !3, word)
+        }
+
+        fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+        }
+
+        fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
+            let shift = (offset & 2) * 8;
+            let word = self.read32(offset & !3)? & !(0xffff << shift) | u32::from(value) << shift;
+            self.write32(offset & !3, word)
         }
     }
     let mut function = endpoint();
     cap(&mut function, 0x40, PCIE, 0);
-    function.config().write16(0x42, 2);
+    function.config().write16(0x42, 2).unwrap();
     let mut function = Function::new(
         ADDRESS,
         Completing {

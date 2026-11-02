@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! PCI MSI configuration model and shared fixtures.
 extern crate std;
+mod fallible;
 use super::*;
-use crate::bus::pci::regs;
+use crate::bus::pci::{ConfigError, ConfigFailure, regs};
 use alloc::vec::Vec;
 use std::sync::Mutex;
 
@@ -19,6 +20,8 @@ struct Model {
     fail_enable_ack: bool,
     fault_at_access: Option<(usize, bool)>,
     transport_dead: bool,
+    panic_read: Option<(u16, u8)>,
+    panic_write: Option<(u16, u8)>,
 }
 impl Model {
     fn get(&self, offset: u16, width: u8) -> u32 {
@@ -38,16 +41,23 @@ struct Config {
     dropped: Arc<AtomicU64>,
 }
 impl Config {
-    fn read(&self, offset: u16, width: u8) -> u32 {
+    fn read(&self, offset: u16, width: u8) -> Result<u32, ConfigError> {
         let mut m = self.model.lock().unwrap();
         m.events.push(Event::Read(offset, width));
+        if m.panic_read == Some((offset, width)) {
+            drop(m);
+            panic!("interrupted configuration observation");
+        }
         let fault = m
             .fault_at_access
             .filter(|&(access, _)| access == m.events.len());
-        let failed = m.transport_dead
-            || m.fail_read == Some((offset, width))
-            || fault == Some((m.events.len(), false));
-        let value = if failed {
+        if m.transport_dead || fault == Some((m.events.len(), false)) {
+            m.transport_dead = true;
+            return Err(ConfigError::before_effect(ConfigFailure::Mapping(
+                crate::bus::mmio::owned::Error::Unavailable,
+            )));
+        }
+        let value = if m.fail_read == Some((offset, width)) {
             match width {
                 1 => 0xff,
                 2 => 0xffff,
@@ -58,10 +68,13 @@ impl Config {
         };
         if fault.is_some() {
             m.transport_dead = true;
+            return Err(ConfigError::before_effect(ConfigFailure::Mapping(
+                crate::bus::mmio::owned::Error::Unavailable,
+            )));
         }
-        value
+        Ok(value)
     }
-    fn write(&mut self, offset: u16, width: u8, value: u32) {
+    fn write(&mut self, offset: u16, width: u8, value: u32) -> Result<(), ConfigError> {
         assert!(
             !(offset == regs::COMMAND && width == 4),
             "dword Command RMW would replay adjacent Status W1C"
@@ -71,18 +84,31 @@ impl Config {
         let fault = m
             .fault_at_access
             .filter(|&(access, _)| access == m.events.len());
-        if !m.transport_dead
-            && m.block_write != Some((offset, width))
-            && fault != Some((m.events.len(), false))
-        {
+        if m.transport_dead || fault == Some((m.events.len(), false)) {
+            m.transport_dead = true;
+            return Err(ConfigError::before_effect(ConfigFailure::Mapping(
+                crate::bus::mmio::owned::Error::Unavailable,
+            )));
+        }
+        if m.block_write != Some((offset, width)) {
             m.put(offset, width, value);
             if m.fail_enable_ack && offset == 0x52 && value & 1 != 0 {
                 m.fail_read = Some((0x52, 2));
             }
         }
+        if m.panic_write == Some((offset, width)) {
+            drop(m);
+            panic!("interrupted configuration publication");
+        }
         if fault.is_some() {
             m.transport_dead = true;
+            return Err(ConfigError::write_may_have_applied(
+                offset,
+                width,
+                ConfigFailure::Mapping(crate::bus::mmio::owned::Error::Unavailable),
+            ));
         }
+        Ok(())
     }
 }
 impl Drop for Config {
@@ -91,20 +117,23 @@ impl Drop for Config {
     }
 }
 impl ConfigSpace for Config {
-    fn read32(&self, offset: u16) -> u32 {
+    fn read8(&self, offset: u16) -> Result<u8, ConfigError> {
+        self.read(offset, 1).map(|value| value as u8)
+    }
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), ConfigError> {
+        self.write(offset, 1, u32::from(value))
+    }
+    fn read16(&self, offset: u16) -> Result<u16, ConfigError> {
+        self.read(offset, 2).map(|value| value as u16)
+    }
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError> {
+        self.write(offset, 2, u32::from(value))
+    }
+    fn read32(&self, offset: u16) -> Result<u32, ConfigError> {
         self.read(offset, 4)
     }
-    fn read16(&self, offset: u16) -> u16 {
-        self.read(offset, 2) as u16
-    }
-    fn read8(&self, offset: u16) -> u8 {
-        self.read(offset, 1) as u8
-    }
-    fn write32(&mut self, offset: u16, value: u32) {
-        self.write(offset, 4, value);
-    }
-    fn write16(&mut self, offset: u16, value: u16) {
-        self.write(offset, 2, u32::from(value));
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), ConfigError> {
+        self.write(offset, 4, value)
     }
 }
 // SAFETY: each width-specific store copies only those bytes under the kept
@@ -133,6 +162,8 @@ fn fixture(wide: bool, mask: bool) -> Fixture {
         fail_enable_ack: false,
         fault_at_access: None,
         transport_dead: false,
+        panic_read: None,
+        panic_write: None,
     };
     model.put(0, 4, 0x1234_8086);
     model.put(regs::COMMAND, 2, 0x107); // BM, IO, memory and unrelated SERR bit.
@@ -192,31 +223,30 @@ const MESSAGE: MsiMessage = MsiMessage {
 };
 
 fn assert_terminal(helper: &mut MsiConfig<Config>, model: &Arc<Mutex<Model>>) {
+    assert_closed(helper, model, MsiError::TerminalRetirement);
+}
+fn assert_closed(helper: &mut MsiConfig<Config>, model: &Arc<Mutex<Model>>, expected: MsiError) {
     let before = model.lock().unwrap().events.len();
-    assert_eq!(helper.mask(), Err(MsiError::TerminalRetirement));
-    assert_eq!(helper.disable(), Err(MsiError::TerminalRetirement));
+    assert_eq!(helper.mask(), Err(expected));
+    assert_eq!(helper.disable(), Err(expected));
     assert_eq!(
         // SAFETY: this terminal RAM model keeps the original config/root guards.
         // No asynchronous source exists; programming must fail before register access.
         unsafe { helper.program(MESSAGE) },
-        Err(MsiError::TerminalRetirement)
+        Err(expected)
     );
     assert_eq!(
         // SAFETY: The terminal model keeps the original config/root owners; this
         // rejected unmask must not reach any register or callback.
         unsafe { helper.unmask() },
-        Err(MsiError::TerminalRetirement)
+        Err(expected)
     );
-    assert!(matches!(
-        helper.begin_device_retirement(),
-        Err(MsiError::TerminalRetirement)
-    ));
-    assert!(matches!(
-        // SAFETY: The terminal model has no DMA, IRQ or deferred users. This rejected
-        // release must keep its original owners.
-        unsafe { helper.release() },
-        Err(MsiError::TerminalRetirement)
-    ));
+    assert_eq!(helper.begin_device_retirement().err(), Some(expected));
+    assert_eq!(
+        // SAFETY: the closed model has no asynchronous users and must retain owners.
+        unsafe { helper.release() }.err(),
+        Some(expected),
+    );
     assert_eq!(model.lock().unwrap().events.len(), before);
 }
 

@@ -105,6 +105,10 @@ impl Controller {
     /// configured DCI set. This service supports one physical leaf, including
     /// a downstream hub port; it never authorizes resetting a hub subtree or
     /// another interface's device.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(crate) unsafe fn reset_and_identify(
         &mut self,
         device: &Device,
@@ -210,6 +214,10 @@ impl Controller {
     /// Same complete device/interface and alias-retirement contract as
     /// reset_and_identify. Caller-owned payload buffers remain owned by caller;
     /// success retires every old endpoint before it may transfer those buffers.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(crate) unsafe fn reset_and_reuse_root(
         &mut self,
         device: &Device,
@@ -293,6 +301,10 @@ impl Controller {
     /// `usb_reset_device` for a queued request: Disable Slot stops every
     /// class transfer, as unbinding the drivers kills their URBs, and the fresh
     /// device chooses its configuration again, unclaimed for normal binding.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn reset_queued(
         &mut self,
         device: &Device,
@@ -410,6 +422,7 @@ impl Controller {
         Ok(())
     }
     pub(super) fn reset_root_device(&mut self, attachment: Attachment) -> Result<(), BlockError> {
+        self.check_minimum()?;
         let port = attachment.root_port;
         self.validate_current_graph(port)?;
         let at = self.port_offset(port);
@@ -465,7 +478,7 @@ impl Controller {
                     ));
                 }
                 self.write_port(port, portsc & PORT_CHANGES);
-                self.clock.delay(POST_RESET_US);
+                self.minimum_wait(POST_RESET_US)?;
                 self.current_port_reset(None, port)?;
                 return Ok(());
             }

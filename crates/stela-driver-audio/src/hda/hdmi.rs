@@ -11,10 +11,8 @@
 //! wildcard. MODEL_GENERIC codecs are DP-MST capable: each pin device entry is
 //! its own port. Display programming stays with the GPU port owner.
 use super::{CodecGraph, Controller, ControllerToken, Registers, StreamId, Verb, WidgetKind};
-use crate::{
-    Direction, Error, PcmFormat, Phase,
-    bus::{i2c::Timer, pci::Address},
-};
+use crate::Timer;
+use crate::{Direction, Error, PcmFormat, Phase, bus::pci::Address};
 use alloc::{sync::Arc, vec::Vec};
 use core::mem::ManuallyDrop;
 mod chmap;
@@ -136,6 +134,7 @@ impl Port {
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
     fn hdmi_index(&self, id: HdmiPortId) -> Result<usize, Error> {
+        self.minimum_guard()?;
         if id.token != self.token
             || self
                 .hdmi_ports
@@ -153,6 +152,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .wrapping_add(u64::from(self.config.transition_timeout_us))
     }
     fn hdmi_late(&self, start: u64) -> Result<(), Error> {
+        self.minimum_guard()?;
         if self.timer.now_us().wrapping_sub(start) >= u64::from(self.config.transition_timeout_us) {
             Err(Error::Timeout(Phase::DisplayAudio))
         } else {
@@ -160,6 +160,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
     }
     fn hdmi_observe(&self, index: usize) -> Result<DisplayAudioState, Error> {
+        self.minimum_guard()?;
         let start = self.timer.now_us();
         let state = self.hdmi_ports[index]
             .as_ref()
@@ -170,6 +171,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(state)
     }
     fn hdmi_effect(&mut self, index: usize, format: Option<PcmFormat>) -> Result<(), Error> {
+        self.minimum_guard()?;
         let start = self.timer.now_us();
         let owner = self.hdmi_ports[index].as_ref().unwrap().owner();
         let result = if let Some(format) = format {
@@ -180,6 +182,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         result.and_then(|()| self.hdmi_late(start))
     }
     fn hdmi_topology(&mut self, graph: &CodecGraph, pin: u8) -> Result<(), Error> {
+        self.minimum_guard()?;
         if graph.token != self.token {
             return Err(Error::InvalidCodecGraph);
         }
@@ -240,6 +243,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Linux snd_hda_get_num_devices + 1: the pin's device entries, one
     /// unless the codec is DP-MST capable. An unanswered parameter is 0.
     fn hdmi_devices(&mut self, codec: u8, vendor: u32, pin: u8) -> Result<u8, Error> {
+        self.minimum_guard()?;
         if !GENERIC_IDS.contains(&vendor) {
             return Ok(1);
         }
@@ -251,6 +255,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
     /// Linux snd_hda_set_dev_select: address `device` on a multi-device pin.
     fn hdmi_select(&mut self, codec: u8, vendor: u32, pin: u8, device: u8) -> Result<(), Error> {
+        self.minimum_guard()?;
         let devices = self.hdmi_devices(codec, vendor, pin)?;
         if devices == 1 {
             return Ok(());
@@ -262,6 +267,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn hdmi_select_port(&mut self, index: usize) -> Result<(), Error> {
+        self.minimum_guard()?;
         let port = self.hdmi_ports[index].as_ref().unwrap();
         let (codec, vendor, pin, device) = (
             port.graph.address,
@@ -274,6 +280,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Linux read_pin_sense: trigger when the pin requires it, then read the
     /// port's device entry.
     fn hdmi_pin_sense(&mut self, index: usize) -> Result<u32, Error> {
+        self.minimum_guard()?;
         let port = self.hdmi_ports[index].as_ref().unwrap();
         let (codec, pin, device) = (port.graph.address, port.pin, port.device);
         let capabilities = port
@@ -300,6 +307,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         device: u8,
         owner: Arc<dyn DisplayAudioPort>,
     ) -> Result<HdmiPortId, Error> {
+        self.minimum_guard()?;
         if self.routing_failed {
             return Err(Error::NeedsReset);
         }
@@ -348,6 +356,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Sticky original cause remains inspectable if a later full reset fails.
     /// Old handles still grant no route/control operations in the new epoch.
     pub fn hdmi_first_error(&self, id: HdmiPortId) -> Result<Option<Error>, Error> {
+        self.minimum_guard()?;
         self.hdmi_ports
             .get(id.index)
             .and_then(Option::as_ref)
@@ -375,6 +384,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         error
     }
     fn hdmi_read_eld(&mut self, index: usize, state: DisplayAudioState) -> Result<HdmiSink, Error> {
+        self.minimum_guard()?;
         self.hdmi_select_port(index)?;
         let port = self.hdmi_ports[index].as_ref().unwrap();
         let (codec, pin) = (port.graph.address, port.pin);
@@ -419,6 +429,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Explicit polled hotplug/ELD service. A failed/changed snapshot first
     /// stops any PCM route; a new valid snapshot requires fresh prepare.
     pub fn poll_hdmi_sink(&mut self, id: HdmiPortId) -> Result<HdmiSink, Error> {
+        self.minimum_guard()?;
         let index = self.hdmi_index(id)?;
         if self.routing_failed {
             return Err(Error::NeedsReset);
@@ -459,6 +470,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         get: u8,
         value: u16,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.verb(Verb::long(codec, node, set, value)?)?;
         if self.verb(Verb::long(codec, node, get, 0)?)? != u32::from(value) {
             return Err(Error::RouteRejected);
@@ -466,6 +478,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn hdmi_digital_control(&mut self, codec: u8, node: u8, value: u8) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.verb(Verb::short(codec, node, 0x70d, value)?)?;
         let observed = self.verb(Verb::short(codec, node, 0xf0d, 0)?)?;
         if observed == u32::MAX || observed & 255 != u32::from(value) {
@@ -480,6 +493,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         connection: Connection,
         map: &ChannelMap,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         let mut packet = [0u8; 9];
         packet[0] = 0x84;
         match connection {
@@ -519,6 +533,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         converter: u8,
         custom_map: Option<&[Speaker]>,
     ) -> Result<ChannelMap, Error> {
+        self.minimum_guard()?;
         let index = self.hdmi_index(id)?;
         if self.routing_failed {
             return Err(Error::NeedsReset);
@@ -680,6 +695,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// validation. This does not change coding type, PCM format, rate or GPU
     /// association; the DMA clock may continue while the output is disabled.
     pub fn set_hdmi_enabled(&mut self, id: HdmiPortId, enabled: bool) -> Result<(), Error> {
+        self.minimum_guard()?;
         let index = self.hdmi_index(id)?;
         if self.routing_failed {
             return Err(Error::NeedsReset);
@@ -707,6 +723,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })
     }
     fn hdmi_close_index(&mut self, index: usize) -> Result<(), Error> {
+        self.minimum_guard()?;
         let port = self.hdmi_ports[index].as_ref().unwrap();
         let (codec, pin) = (port.graph.address, port.pin);
         let Some(route) = port.route.as_ref() else {
@@ -729,6 +746,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     pub fn close_hdmi(&mut self, id: HdmiPortId) -> Result<(), Error> {
+        self.minimum_guard()?;
         let index = self.hdmi_index(id)?;
         self.hdmi_close_index(index).map_err(|e| {
             self.routing_failed = true;
@@ -736,6 +754,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })
     }
     pub fn detach_hdmi_port(&mut self, id: HdmiPortId) -> Result<(), Error> {
+        self.minimum_guard()?;
         let index = self.hdmi_index(id)?;
         self.close_hdmi(id)?;
         let mut port = self.hdmi_ports[index].take().unwrap();
@@ -748,6 +767,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     pub(super) fn shutdown_hdmi(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         let mut first = None;
         for index in 0..self.hdmi_ports.len() {
             if self.hdmi_ports[index].is_some()
@@ -767,6 +787,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         reason = "PCI suspend is a preserved native lifecycle boundary; HDMI retirement is exercised before the production PCI suspend consumer is wired"
     )] // Consumer is the separately owned native PCI lifecycle.
     pub(super) fn retire_hdmi_for_pci_suspend(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         if !self.stopped
             || self.lifecycle_failed
             || !self.command_poisoned
@@ -787,6 +808,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     pub(super) fn retire_hdmi_after_reset(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         // A lost command ACK may prevent pre-reset codec cleanup. The
         // full link/command reset restores unambiguous verbs; re-enumerate the
         // original codec/pin before proving quiet and releasing any old owner.
@@ -844,6 +866,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })
     }
     pub(super) fn hdmi_runtime(&mut self, id: StreamId) -> Result<(), Error> {
+        self.minimum_guard()?;
         let Some(index) = self.hdmi_stream_port(id) else {
             return Ok(());
         };

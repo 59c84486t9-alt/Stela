@@ -1,5 +1,6 @@
 //! CPU-only owned canonical resource/config/page models; no RM or hardware.
 use super::*;
+use crate::bus::pci::ConfigError;
 use crate::bus::{
     dma::{
         mapping::{Direction, DmaError, DomainMapping},
@@ -39,6 +40,8 @@ struct Counts {
     write_width: AtomicUsize,
     write_value: AtomicUsize,
     write_loss: AtomicBool,
+    config_read_failure: AtomicBool,
+    config_write_failure: AtomicBool,
 }
 impl Counts {
     fn new() -> Arc<Self> {
@@ -56,6 +59,8 @@ impl Counts {
             write_width: AtomicUsize::new(0),
             write_value: AtomicUsize::new(0),
             write_loss: AtomicBool::new(false),
+            config_read_failure: AtomicBool::new(false),
+            config_write_failure: AtomicBool::new(false),
         })
     }
     fn values(&self) -> [usize; 5] {
@@ -67,23 +72,60 @@ struct Config {
     counts: Arc<Counts>,
 }
 impl ConfigSpace for Config {
-    fn read32(&self, offset: u16) -> u32 {
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
         self.counts.reads.fetch_add(1, Ordering::SeqCst);
+        if self.counts.config_read_failure.load(Ordering::SeqCst) {
+            return Err(ConfigError::before_effect(
+                crate::bus::pci::ConfigFailure::ForeignGrant,
+            ));
+        }
         if usize::from(offset) == self.counts.lose_at.load(Ordering::SeqCst)
             && self.counts.lose_context.load(Ordering::SeqCst)
         {
             self.counts.context.store(false, Ordering::SeqCst);
         }
-        self.words[usize::from(offset) / 4]
+        Ok(self.words[usize::from(offset) / 4])
     }
-    fn write32(&mut self, _: u16, value: u32) {
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         self.record_write(4, value);
+        if self.counts.config_write_failure.load(Ordering::SeqCst) {
+            return Err(ConfigError::write_may_have_applied(
+                offset,
+                4,
+                crate::bus::pci::ConfigFailure::ForeignGrant,
+            ));
+        }
+        Ok(())
     }
-    fn write16(&mut self, _: u16, value: u16) {
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
         self.record_write(2, u32::from(value));
+        if self.counts.config_write_failure.load(Ordering::SeqCst) {
+            return Err(ConfigError::write_may_have_applied(
+                offset,
+                2,
+                crate::bus::pci::ConfigFailure::ForeignGrant,
+            ));
+        }
+        Ok(())
     }
-    fn write8(&mut self, _: u16, value: u8) {
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
         self.record_write(1, u32::from(value));
+        if self.counts.config_write_failure.load(Ordering::SeqCst) {
+            return Err(ConfigError::write_may_have_applied(
+                offset,
+                1,
+                crate::bus::pci::ConfigFailure::ForeignGrant,
+            ));
+        }
+        Ok(())
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> (8 * (offset & 3))) as u8)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> (8 * (offset & 2))) as u16)
     }
 }
 impl Config {
@@ -110,6 +152,13 @@ struct Backing {
 }
 // SAFETY: immutable distinct synthetic resource labels; never a native grant.
 unsafe impl ResourceBacking for Backing {
+    fn begin_mapping(
+        &self,
+    ) -> Result<crate::bus::pci::assignment::OpaqueUse, crate::bus::mmio::owned::Error> {
+        // Metadata-only RM preparation never supplies a mapper or real BAR RAM.
+        // Do not fabricate an assignment use or dummy allocation from labels.
+        Err(crate::bus::mmio::owned::Error::Unavailable)
+    }
     fn physical_span(&self) -> PhysicalSpan {
         self.span
     }
@@ -686,4 +735,36 @@ fn pci_callback_failures_widths_and_latched_uncertainty() {
         drop(d);
         assert_eq!(c.values(), [0; 5]);
     }
+}
+
+#[test]
+fn typed_config_preparation_and_after_write_refusals_keep_actual_graph() {
+    let (config, owner, source, domain, counts) = inputs();
+    counts.config_read_failure.store(true, Ordering::SeqCst);
+    let error = ConfigError::before_effect(crate::bus::pci::ConfigFailure::ForeignGrant);
+    // SAFETY: CPU-only immutable synthetic owner; no hardware activity.
+    assert!(
+        matches!(unsafe { PreparedDevice::prepare(config, owner, source, domain, 12, u64::MAX) }, Err(Error::Config(actual)) if actual == error)
+    );
+    assert_eq!(counts.values(), [0; 5]);
+    assert_eq!(counts.reads.load(Ordering::SeqCst), 1);
+
+    let (config, owner, source, domain, counts) = inputs();
+    // SAFETY: same bounded model with exact owned configuration/resources.
+    let mut device =
+        unsafe { PreparedDevice::prepare(config, owner, source, domain, 12, u64::MAX) }.unwrap();
+    let raw = handle(&mut device);
+    counts.config_write_failure.store(true, Ordering::SeqCst);
+    // SAFETY: private pinned model handle; native ABI reports failure.
+    assert_ne!(unsafe { os_pci_write_word(raw, 0x42, 7) }, 0);
+    let error =
+        ConfigError::write_may_have_applied(0x42, 2, crate::bus::pci::ConfigFailure::ForeignGrant);
+    assert_eq!(device.retire(), Err(Error::Config(error)));
+    counts.config_write_failure.store(false, Ordering::SeqCst);
+    let before = counts.writes.load(Ordering::SeqCst);
+    // SAFETY: serialized pinned CPU-only fixture; output/configuration is live and owned.
+    assert_ne!(unsafe { os_pci_write_dword(raw, 0x44, 0) }, 0);
+    assert_eq!(counts.writes.load(Ordering::SeqCst), before);
+    drop(device);
+    assert_eq!(counts.values(), [0; 5]);
 }

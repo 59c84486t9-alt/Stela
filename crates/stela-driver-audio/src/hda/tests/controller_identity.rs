@@ -18,6 +18,7 @@ fn controller_identity_exhaustion_refuses_before_register_or_dma_effects() {
             config(),
             &identities,
         )
+        .map_err(|failure| failure.error)
     };
     assert!(matches!(result, Err(Error::ControllerIdentitiesExhausted)));
     assert_eq!(identities.load(Ordering::Relaxed), u64::MAX);

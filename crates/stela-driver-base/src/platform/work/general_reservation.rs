@@ -1,9 +1,13 @@
 //! Affine worker/job reservation under a borrowed entered process guard.
 use super::*;
 mod owned;
+mod refusal;
 pub use owned::{
-    ColdStackPreparation, OwnedGeneralEscrow, PinnedColdStackPreparation, StackPinError,
+    CancelledReservation, DormantGeneralStack, GeneralStackPreparation, OwnedGeneralEscrow,
+    OwnedPinnedGeneral, OwnedTransferFailure, PinnedGeneralStackPreparation, PublishedGeneralStack,
+    StackPinError,
 };
+pub use refusal::{GeneralBlocker, GeneralRefusal};
 /// Borrowed platform process-entry permission, independent of task IDs.
 ///
 /// # Safety
@@ -58,6 +62,7 @@ pub struct GeneralReservation<'runtime, 'entered, const N: usize> {
     queue: Arc<Queue<N>>,
     entered: &'entered dyn EnteredProcess,
     creator: Creator,
+    creator_worker: usize,
     worker: usize,
     context: ContextId,
     slot: usize,
@@ -119,7 +124,7 @@ impl<const N: usize> Runtime<N> {
         callback: Callback,
         context: *mut c_void,
         reusable_bindings: &[&dyn SwitchBinding],
-    ) -> Result<Ticket, WorkError> {
+    ) -> Result<Ticket, GeneralRefusal> {
         // SAFETY: forwards the caller's callback, geometry and binding contract.
         unsafe {
             self.execute_idle_general_with_headroom(
@@ -144,7 +149,7 @@ impl<const N: usize> Runtime<N> {
         context: *mut c_void,
         reusable_bindings: &[&dyn SwitchBinding],
         minimum_idle: usize,
-    ) -> Result<Ticket, WorkError> {
+    ) -> Result<Ticket, GeneralRefusal> {
         self.queue.process()?;
         let flags = self.queue.cpu.save_disable()?;
         let result = (|| {
@@ -155,7 +160,7 @@ impl<const N: usize> Runtime<N> {
                 || state.poisoned
                 || self.queue.abandoned.load(Ordering::Acquire)
             {
-                return Err(WorkError::Closed);
+                return Err(WorkError::Closed.into());
             }
             let mut free_slots = state
                 .layout
@@ -163,9 +168,9 @@ impl<const N: usize> Runtime<N> {
                 .into_iter()
                 .flatten()
                 .filter(|slot| state.jobs[*slot].is_none() && state.reservations[*slot] == 0);
-            let slot = free_slots.next().ok_or(WorkError::Full)?;
+            let slot = free_slots.next().ok_or_else(GeneralRefusal::queue_credit)?;
             if free_slots.count() < minimum_idle {
-                return Err(WorkError::Full);
+                return Err(GeneralRefusal::queue_credit());
             }
             // SAFETY: process CPU at IF0; every other continuation is stopped.
             let count = unsafe { (*self.tasks.get()).len() };
@@ -187,9 +192,26 @@ impl<const N: usize> Runtime<N> {
                         stack_requirement::Geometry::of(&task.stack),
                     )
             });
-            let worker = idle.next().ok_or(WorkError::Full)?;
+            let worker = idle.next().ok_or_else(|| {
+                // Immutable actual constructor geometry distinguishes permanent
+                // placement refusal from temporarily unavailable reusable stacks.
+                let supported = (0..count).any(|index| {
+                    // SAFETY: same immutable bounded constructor-owned entry.
+                    let task = unsafe { &*self.task(index) };
+                    task.lane == Lane::General
+                        && stack_requirement::compatible(
+                            Some(requirement),
+                            stack_requirement::Geometry::of(&task.stack),
+                        )
+                });
+                if supported {
+                    GeneralRefusal::compatible_stack()
+                } else {
+                    GeneralRefusal::placement(WorkError::Full)
+                }
+            })?;
             if idle.count() < minimum_idle {
-                return Err(WorkError::Full);
+                return Err(GeneralRefusal::compatible_stack());
             }
             let sequence = state.next;
             let next = sequence.checked_add(1).ok_or(WorkError::Exhausted)?;
@@ -228,17 +250,17 @@ impl<const N: usize> Runtime<N> {
         self: Pin<&'runtime Self>,
         entered: &'entered dyn EnteredProcess,
         requirement: StackRequirement,
-    ) -> Result<GeneralReservation<'runtime, 'entered, N>, WorkError> {
+    ) -> Result<GeneralReservation<'runtime, 'entered, N>, GeneralRefusal> {
         self.reserve_eligible(entered, requirement, Eligibility::AnyIdle)
     }
-    /// Reserve only a never-entered compatible worker. This is a short
-    /// reservation, not stack byte access or C task publication. Eligibility is
-    /// constructor/entry-owned history, never a caller-provided cold flag.
+    /// Cold-only admission. A released previously-entered stack remains
+    /// ineligible. Canceling an unpublished never-entered reservation may
+    /// restore this separate eligibility without changing entry history.
     pub fn reserve_unstarted_general<'runtime, 'entered>(
         self: Pin<&'runtime Self>,
         entered: &'entered dyn EnteredProcess,
         requirement: StackRequirement,
-    ) -> Result<GeneralReservation<'runtime, 'entered, N>, WorkError> {
+    ) -> Result<GeneralReservation<'runtime, 'entered, N>, GeneralRefusal> {
         self.reserve_eligible(entered, requirement, Eligibility::Unstarted)
     }
     fn reserve_eligible<'runtime, 'entered>(
@@ -246,22 +268,23 @@ impl<const N: usize> Runtime<N> {
         entered: &'entered dyn EnteredProcess,
         requirement: StackRequirement,
         eligibility: Eligibility,
-    ) -> Result<GeneralReservation<'runtime, 'entered, N>, WorkError> {
+    ) -> Result<GeneralReservation<'runtime, 'entered, N>, GeneralRefusal> {
         entered.check()?;
         self.current_context()?;
         let flags = self.queue.cpu.save_disable()?;
         let result = (|| {
             entered.check()?;
             let creator = Creator::of(self.current_context()?);
+            let creator_worker = self.current.get();
             let mut guard = self.queue.lock()?;
             let state = guard.state();
             if state.closed || state.poisoned || self.queue.abandoned.load(Ordering::Acquire) {
-                return Err(WorkError::Closed);
+                return Err(WorkError::Closed.into());
             }
             if state.stack_profile.is_none()
                 || !state.stack_catalog.supports(Lane::General, requirement)
             {
-                return Err(WorkError::Unavailable);
+                return Err(GeneralRefusal::placement(WorkError::Unavailable));
             }
             let slot = state
                 .layout
@@ -269,7 +292,7 @@ impl<const N: usize> Runtime<N> {
                 .into_iter()
                 .flatten()
                 .find(|slot| state.jobs[*slot].is_none() && state.reservations[*slot] == 0)
-                .ok_or(WorkError::Full)?;
+                .ok_or_else(GeneralRefusal::queue_credit)?;
             // SAFETY: current CPU and IF0 own this immutable Vec;
             // no foreign hook/callback, allocation or switch spans these reads.
             let count = unsafe { (*self.tasks.get()).len() };
@@ -289,10 +312,13 @@ impl<const N: usize> Runtime<N> {
                             stack_requirement::Geometry::of(&task.stack),
                         )
                 })
-                .ok_or(WorkError::Full)?;
+                .ok_or_else(|| match eligibility {
+                    Eligibility::AnyIdle => GeneralRefusal::compatible_stack(),
+                    Eligibility::Unstarted => GeneralRefusal::unstarted_stack(),
+                })?;
             let nonce = state.next_reservation;
             if nonce == 0 {
-                return Err(WorkError::CorruptContext);
+                return Err(WorkError::CorruptContext.into());
             }
             let next = nonce.checked_add(1).ok_or(WorkError::Exhausted)?;
             let pending = self
@@ -311,6 +337,7 @@ impl<const N: usize> Runtime<N> {
                 queue: self.queue.clone(),
                 entered,
                 creator,
+                creator_worker,
                 worker,
                 context: task.id,
                 slot,
@@ -328,7 +355,9 @@ impl<const N: usize> Runtime<N> {
 impl<const N: usize> GeneralReservation<'_, '_, N> {
     fn current(&self) -> Result<(), WorkError> {
         self.entered.check()?;
-        if !self.creator.matches(self.runtime.current_context()?) {
+        if !self.creator.matches(self.runtime.current_context()?)
+            || self.runtime.current.get() != self.creator_worker
+        {
             return Err(WorkError::CorruptContext);
         }
         Ok(())
@@ -431,6 +460,13 @@ impl<const N: usize> GeneralReservation<'_, '_, N> {
             let mut guard = self.runtime.queue.lock()?;
             let state = guard.state();
             self.validate(state)?;
+            // SAFETY: validate checked this same unpublished reserved worker,
+            // no binding/C pin/job owns it; original geometry/history are kept.
+            let shape = unsafe {
+                let task = &*self.runtime.task(self.worker);
+                ReleasedStackGeometry::of(&task.stack, !task.ever_entered)
+            };
+            state.resources.reservation_released(shape)?;
             state.reservations[self.slot] = 0;
             // SAFETY: reserved worker ownership validated above. No callback
             // or task metadata was published, and no binding/producer owns it.

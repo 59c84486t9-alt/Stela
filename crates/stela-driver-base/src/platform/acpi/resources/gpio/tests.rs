@@ -555,7 +555,10 @@ struct NativeMappingModel {
     owner: std::thread::ThreadId,
     state: Mutex<NativeMappingState>,
 }
-struct NativeRoot(Arc<NativeMappingModel>);
+struct NativeRoot {
+    model: Arc<NativeMappingModel>,
+    mapping: crate::bus::mmio::owned::model::MappingRetention<Arc<NativeMappingModel>>,
+}
 const NATIVE_BASE: u64 = 0xfd00_0000;
 fn native_span() -> crate::bus::mmio::owned::PhysicalSpan {
     crate::bus::mmio::owned::PhysicalSpan::new(NATIVE_BASE, 4096).unwrap()
@@ -563,6 +566,12 @@ fn native_span() -> crate::bus::mmio::owned::PhysicalSpan {
 // SAFETY: this test root represents one exclusive page in the simulated native
 // machine. Its model lives through all child resources and mapping retirement.
 unsafe impl crate::bus::mmio::owned::ResourceBacking for NativeRoot {
+    fn begin_mapping(
+        &self,
+    ) -> Result<crate::bus::pci::assignment::OpaqueUse, crate::bus::mmio::owned::Error> {
+        self.mapping.begin_mapping()
+    }
+
     fn physical_span(&self) -> crate::bus::mmio::owned::PhysicalSpan {
         native_span()
     }
@@ -596,7 +605,7 @@ unsafe impl crate::bus::mmio::owned::MappingPlatform for NativeMappingModel {
             .backing()
             .downcast_ref::<NativeRoot>()
             .ok_or(MapFailure::Unchanged(MmioError::OutsideResource))?;
-        if !core::ptr::eq(backing.0.as_ref(), self) || request.physical != native_span() {
+        if !core::ptr::eq(backing.model.as_ref(), self) || request.physical != native_span() {
             return Err(MapFailure::Unchanged(MmioError::OutsideResource));
         }
         let mut state = self.state.lock().unwrap();
@@ -657,7 +666,21 @@ fn native_amd_factory_opregion_retirement_and_fresh_rebind() {
         owner: std::thread::current().id(),
         state: Mutex::new(NativeMappingState::default()),
     });
-    let root = MmioResource::new(Box::new(NativeRoot(model.clone())));
+    // SAFETY: original actual single-threaded RAM allocation pool. Its
+    // exact original thread remains required, independent of IO admission.
+    let mut mapping_owner = unsafe {
+        crate::bus::mmio::owned::model::MappingOwner::from_owned(model.clone(), |owner| {
+            if owner.owner == std::thread::current().id() {
+                Ok(())
+            } else {
+                Err(crate::bus::pci::assignment::Error::Context)
+            }
+        })
+    };
+    let root = MmioResource::new(Box::new(NativeRoot {
+        model: model.clone(),
+        mapping: mapping_owner.retention().unwrap(),
+    }));
     // SAFETY: this is the only resource suballocator for the simulated native
     // machine; it keeps the original root and all page coverage.
     let broker = unsafe { MemoryBroker::new(vec![root]) }.unwrap();
@@ -712,5 +735,9 @@ fn native_amd_factory_opregion_retirement_and_fresh_rebind() {
         assert_eq!(state.unmaps, cycle);
         assert_eq!(state.restored_control & !(1 << 16), 0);
     }
+    drop(broker);
+    // SAFETY: both exact binding epochs removed their callbacks and acknowledged
+    // unmap; broker root pins have ended before this external controller returns.
+    unsafe { mapping_owner.retire() }.unwrap();
     session.shutdown().unwrap();
 }

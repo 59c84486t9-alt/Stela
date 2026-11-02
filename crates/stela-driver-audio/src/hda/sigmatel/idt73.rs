@@ -6,7 +6,7 @@
 //! Copyright (c) 2004 Takashi Iwai. See audio/THIRD_PARTY.md.
 use super::super::{CodecGraph, Controller, Registers, Verb, WidgetKind};
 use super::{SigmatelGpio, port_power};
-use crate::{Error, bus::i2c::Timer};
+use crate::{Error, Timer};
 pub use port_power::IdtPowerMapReport as Idt73PowerReport;
 
 const PORTS: [u8; 8] = [0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11];
@@ -34,6 +34,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         group: u8,
         gpio_caps: u32,
     ) -> Result<State, Error> {
+        self.minimum_guard()?;
         if gpio_caps & 255 == 0
             || graph
                 .widget(VOLUME_KNOB)
@@ -55,6 +56,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         state: &mut State,
         gpio: SigmatelGpio,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         // GPIO source default is already applied after D0. Generic init
         // runs the direct knob verb before synchronizing the port power map.
         state.gpio = Some(gpio);
@@ -74,6 +76,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         group: u8,
         state: &State,
     ) -> Result<SigmatelGpio, Error> {
+        self.minimum_guard()?;
         if self.verb(Verb::short(address, group, 0xf00, 0x11)?)? != state.gpio_caps {
             return Err(Error::InvalidCodecGraph);
         }
@@ -107,6 +110,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         group: u8,
         state: &State,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.validate_idt73_gpio(graph.address, group, state)?;
         if self.sigmatel_knob_capabilities(graph.address, VOLUME_KNOB)? != state.knob_caps
             || self.verb(Verb::short(
@@ -126,6 +130,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         group: u8,
         state: &State,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         let actual = self.validate_idt73_gpio(address, group, state)?;
         // Source stac_suspend quietens pins first, then clears its EAPD mask
         // through the same preserving GPIO/CMOS/ordered DATA sequence.

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
-/* An owner's service task, which is what Linux's interrupt return and tick do:
- * each pass runs the raised lines' handlers, brings jiffies up to the clock, runs
- * what expired and says when to come back. Linux's tick is periodic; this one
- * is not, so an idle machine stays idle. */
+/* One bounded service pass from the SAME real owned Domain batch. Nominal
+ * jiffies/deadline inspection is not an original periodic tick producer:
+ * selected HZ_PERIODIC accounting/RCU/workqueue/clockevent integration remains
+ * a distinct required runtime source. No timer callback permission follows
+ * from a numeric now/deadline or an unowned batch pointer. */
 #include <linux/hrtimer.h>
 #include <linux/jiffies.h>
 #include <linux/ktime.h>
@@ -14,41 +15,92 @@
 #include <stela/linux.h>
 #include <stela/service.h>
 #include <stela/timer.h>
-#include <stela/workqueue.h>
+#include <stela/task.h>
 
 static bool started;
-static u64 start;
+static s64 start;
+
+/* Original ktime_to_ns returns s64. Validate that actual MONOTONIC domain
+ * before any jiffy state/queue effect; do not wrap a u64 read into signed time. */
+static s64 service_now_ns(void)
+{
+    s64 now = ktime_to_ns(ktime_get());
+    if (now < 0 || now == S64_MAX)
+        stela_linux_fatal("nominal service clock outside signed timer range");
+    return now;
+}
 
 static void update_jiffies(void)
 {
-	u64 now = ktime_get_ns();
+    s64 now = service_now_ns();
 
 	if (!started) {
 		started = true;
 		start = now;
 	}
-	WRITE_ONCE(jiffies_64, INITIAL_JIFFIES + nsecs_to_jiffies64(now - start));
+    if (now < start)
+        stela_linux_fatal("nominal service clock precedes its retained origin");
+    /* Both samples are in [0,S64_MAX), so this difference is nonnegative and
+     * cannot overflow signed time. Only then convert to the original unsigned
+     * elapsed-nanoseconds input of nsecs_to_jiffies64. */
+    WRITE_ONCE(jiffies_64, INITIAL_JIFFIES + nsecs_to_jiffies64((u64)(now - start)));
 }
 
-s64 stela_linux_service_run(void)
+void stela_linux_timer_queue_current(void)
 {
-	update_jiffies();
-	stela_linux_timers_run();
-	stela_linux_hrtimers_run();
+    const struct stela_linux_owner *owner = stela_linux_owner();
+    /* Bounded original current provenance admits logical C IRQ callbacks,
+     * but never a Bare context, physical native ISR or global phase flag. */
+    if (stela_linux_require_current(owner))
+        stela_linux_fatal("timer queue without actual original current");
+}
 
-	unsigned long timer, hrtimer;
-	bool armed = stela_linux_timers_next(&timer);
+void stela_linux_timers_changed(void)
+{
+    const struct stela_linux_owner *owner = stela_linux_owner();
+    if (!owner->services->timer_changed)
+        stela_linux_fatal("timer queue changed without actual Environment wake producer");
+    owner->services->timer_changed(owner->context);
+}
 
-	if (stela_linux_hrtimers_next(&hrtimer) && (!armed || time_before(hrtimer, timer))) {
-		timer = hrtimer;
-		armed = true;
-	}
-	if (!armed)
-		return S64_MAX;
-	/* The pass itself took time, so ask for the next tick at the earliest. */
-	long left = (long)(timer - jiffies);
+void stela_linux_timer_delivery_require(const struct stela_linux_timer_delivery *delivery)
+{
+    const struct stela_linux_owner *owner = stela_linux_owner();
+    if (!delivery || stela_linux_require_current(owner) || !stela_linux_quiescent() ||
+        stela_linux_atomic_callback_active() || stela_linux_timer_delivery_check(delivery, owner))
+        stela_linux_fatal("timer delivery without genuine current/service/owned batch");
+}
 
-	return (s64)(ktime_get_ns() + (u64)(left > 0 ? left : 1) * (NSEC_PER_SEC / HZ));
+s64 stela_linux_service_run(const struct stela_linux_timer_delivery *delivery)
+{
+    stela_linux_timer_delivery_require(delivery);
+    update_jiffies();
+    stela_linux_hrtimers_run_hard(delivery);
+    stela_linux_timers_run(delivery);
+    stela_linux_hrtimers_run_soft(delivery);
+    /* Every callback returned before selecting the original remaining queue
+     * minima. No mutable queue/Domain borrow spans foreign delivery. */
+    s64 now = service_now_ns();
+    s64 next = S64_MAX, high;
+    unsigned long timer;
+    if (stela_linux_timers_next(&timer)) {
+        long left = (long)(timer - jiffies);
+        u64 ticks = left > 0 ? (u64)left : 1;
+        u64 quantum = NSEC_PER_SEC / HZ;
+        if (ticks > (u64)(S64_MAX - now) / quantum)
+            stela_linux_fatal("nominal timer-list deadline overflow");
+        next = now + (s64)(ticks * quantum);
+    }
+    if (stela_linux_hrtimers_next_ns(&high)) {
+        /* A due timer remaining AFTER its original phase needs another pass.
+         * Same-phase hrtimer restart semantics are preserved by run_queue.
+         * Keep exact ns instead of converting expiry to a whole jiffy. */
+        if (high <= now)
+            high = now + 1;
+        if (high < next)
+            next = high;
+    }
+    return next;
 }
 
 void stela_linux_service_loop(const struct stela_linux_service_call *call)
@@ -71,24 +123,8 @@ void stela_linux_service_loop(const struct stela_linux_service_call *call)
 			stela_linux_irq_run((unsigned int)irq);
 			call->complete_irq(call->context);
 		}
-		call->finish(call->context, stela_linux_service_run());
+		call->finish(call->context);
 	}
-	stela_linux_exit();
-}
-
-void stela_linux_sleep_us(u64 minimum)
-{
-	ktime_t expires = ns_to_ktime(minimum * NSEC_PER_USEC);
-
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_hrtimeout(&expires, HRTIMER_MODE_REL);
-}
-
-void stela_linux_worker_main(void *context)
-{
-	const struct stela_linux_worker_call *call = context;
-	stela_linux_enter(call->owner);
-	stela_linux_workers_run(call->kind);
 	stela_linux_exit();
 }
 

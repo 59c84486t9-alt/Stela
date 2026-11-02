@@ -39,6 +39,7 @@ fn original_reset_and_root_completion_precede_nonidentity_native_traffic() {
         fixture.peer.receive(&[0x47; 60], 0, 3, 60);
         assert_eq!(owner.receive().unwrap().unwrap(), [0x47; 60]);
         owner.retire().unwrap();
+        assert!(owner.function.is_none());
         assert!(state.binding.lock().unwrap().is_none());
         assert!(state.base.maps.lock().unwrap().is_empty());
         assert!(state.detached.load(Ordering::Relaxed));
@@ -151,12 +152,29 @@ fn each_native_retirement_failure_is_sticky_and_keeps_remaining_resources() {
         ] {
             let fixture = inputs(device);
             let mut owner = attach(fixture.inputs, &fixture.pages).unwrap();
+            let original_function = core::ptr::from_ref(owner.function.as_ref().unwrap());
             match failed {
                 "unmap" => fixture.state.base.fail_unmap_at.store(2, Ordering::Relaxed),
                 "configuration" => fixture.state.pm.fail_unmap.store(true, Ordering::Relaxed),
                 _ => *fixture.state.fail.lock().unwrap() = Some(failed),
             }
             let error = owner.retire().unwrap_err();
+            assert!(core::ptr::eq(
+                original_function,
+                owner.function.as_ref().unwrap()
+            ));
+            if failed == "configuration" {
+                assert_eq!(
+                    error,
+                    adapter::Error::Configuration(owned::Error::UnmapFailed)
+                );
+                assert!(fixture.state.detached.load(Ordering::Relaxed));
+                assert!(fixture.state.bar_retired.load(Ordering::Relaxed));
+                let link_error =
+                    LinkError::Pci(crate::block::BlockError::Mmio(owned::Error::UnmapFailed));
+                assert_eq!(owner.transmit(&[0x39; 60]), Err(link_error.clone()));
+                assert_eq!(owner.receive(), Err(link_error));
+            }
             let io = (
                 fixture.peer.reads.borrow().len(),
                 fixture.peer.writes.borrow().len(),
@@ -231,7 +249,8 @@ fn changed_configuration_or_bar_refuses_before_vendor_register_access() {
             .requester
             .function_mut()
             .config()
-            .write32(if identity { 0 } else { 0x10 }, 0x9100_0000);
+            .write32(if identity { 0 } else { 0x10 }, 0x9100_0000)
+            .unwrap();
         let failure = attach(fixture.inputs, &fixture.pages).err().unwrap();
         assert!(matches!(
             failure.error,

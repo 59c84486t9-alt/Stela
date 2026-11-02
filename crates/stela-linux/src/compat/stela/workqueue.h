@@ -21,4 +21,7 @@ int stela_linux_start_task(void (*run)(void *), void *context);
 /* The scheduler's report that the current task is about to sleep, or has
  * woken; a sleeping worker hands pending work to another. */
 void stela_linux_worker_sleeping(bool sleeping);
+/* Attempt pending worker startup after resource availability changed. Actual
+ * entered process context is required; this acknowledges no work completion. */
+void stela_linux_workqueue_retry(void);
 #endif

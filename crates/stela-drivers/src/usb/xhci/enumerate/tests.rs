@@ -72,9 +72,9 @@ fn unavailable_debounce_timing_refuses_before_port_sampling_and_failed_wait_is_e
     for rate in [0, u64::MAX, (u64::MAX / 2) / 60_000_000 + 1] {
         assert!(
             debounce(
-                Clock {
+                Minimum::retain(crate::minimum_model::refusing(Clock {
                     ticks_per_microsecond: rate
-                },
+                })),
                 || panic!("unavailable clock sampled real port")
             )
             .is_err()

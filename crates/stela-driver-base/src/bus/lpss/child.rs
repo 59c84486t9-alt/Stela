@@ -65,6 +65,10 @@ impl<T: Timer + 'static> I2c<NativeRegisters, T> {
     /// All NativeRegisters mapping/stopped epoch and Controller board-timing
     /// contracts hold for the same native Function. No generic alias or
     /// firmware resource override is allowed, including the Surface Go quirks.
+    #[expect(
+        clippy::result_large_err,
+        reason = "native refusal returns the complete original config and BAR graph without allocating"
+    )]
     pub unsafe fn attach_native(
         requester: StoppedRequester,
         mapping: Mapping,

@@ -81,6 +81,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Coexistence<'a, Q, 
     /// No management frame has yet run, so the post-NVM source initial toggle
     /// from index0 remains the current index; later TX completion must own any
     /// rotation rather than accepting an antenna supplied by a caller.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub fn management_antenna_mask(&mut self) -> Result<u8, Ax200CoexistenceError> {
         if let Some(error) = &self.first_error {
             return Err(error.clone());
@@ -123,6 +127,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Coexistence<'a, Q, 
         }
         Ok(self.queue)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub fn stop(&mut self) -> Result<(), Ax200CoexistenceError> {
         let result = self.queue.stop().map_err(Ax200CoexistenceError::Queue);
         match &result {
@@ -131,6 +139,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Coexistence<'a, Q, 
         }
         result
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub fn replenish_completed_receive(&mut self) -> Result<Replenished, Ax200CoexistenceError> {
         if let Some(error) = &self.first_error {
             return Err(error.clone());
@@ -144,6 +156,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Coexistence<'a, Q, 
         }
         result
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub fn poll_receive(&mut self) -> Result<MpduProgress, Ax200CoexistenceError> {
         if let Some(error) = &self.first_error {
             return Err(error.clone());
@@ -175,6 +191,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Coexistence<'a, Q, 
     /// # Safety
     /// Same fresh native page, policy and exclusive requester/domain contracts
     /// as begin_mld_coexistence. Both real policy leases span HCMD visibility.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub unsafe fn advance(
         &mut self,
         source: &dyn PageSource,
@@ -196,6 +216,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Coexistence<'a, Q, 
         }
         result
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     unsafe fn advance_inner(
         &mut self,
         source: &dyn PageSource,

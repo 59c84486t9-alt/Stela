@@ -5,6 +5,8 @@
 use crate::msr;
 use core::arch::asm;
 
+pub mod startup;
+
 /// IA32_APIC_BASE: x2APIC mode enabled.
 const X2APIC_MODE: u64 = 1 << 10;
 /// IA32_APIC_BASE: the register page's physical address.

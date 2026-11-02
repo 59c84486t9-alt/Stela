@@ -160,15 +160,18 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             Mode::ClosedConversion => r.queue.close().unwrap(),
             _ => unreachable!(),
         }
+        let failure = permit.into_owned().unwrap_err();
         assert!(matches!(
-            permit.into_owned(),
-            Err(WorkError::Exhausted | WorkError::Closed)
+            failure.error,
+            WorkError::Exhausted | WorkError::Closed
         ));
+        assert_eq!(r.pending_reservations.get(), 1);
         r.owned_escrows.set(0);
         // SAFETY: same current fixture, rejected conversion owns no escrow.
         unsafe {
             (*r.task(r.current.get())).owned_escrows = 0;
         }
+        let _cancelled = failure.cancel(&authority).unwrap();
         assert_eq!(r.pending_reservations.get(), 0);
         assert!(
             r.queue
@@ -243,7 +246,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             }
             assert!(matches!(
                 r.reserve_general(&authority, kernel()),
-                Err(WorkError::Full)
+                Err(refusal) if refusal.error() == WorkError::Full
             ));
             assert_eq!(r.owned_escrows.get(), 20);
             // Real ordinary peers can run without using any of these C-compatible workers.
@@ -261,7 +264,10 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         }
         Mode::Stale => {
             authority.active.set(false);
-            assert_eq!(escrow.cancel(&authority), Err(WorkError::Unavailable));
+            assert_eq!(
+                cancellation_error(escrow.cancel(&authority)),
+                WorkError::Unavailable
+            );
             return;
         }
         Mode::WrongJob => {
@@ -273,7 +279,10 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             }
             // SAFETY: exact save_disable above; no task borrow survives.
             unsafe { f.cpu.restore(flags) };
-            assert_eq!(escrow.cancel(&authority), Err(WorkError::CorruptContext));
+            assert_eq!(
+                cancellation_error(escrow.cancel(&authority)),
+                WorkError::CorruptContext
+            );
             return;
         }
         Mode::Nonce => {
@@ -286,7 +295,10 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
                 .unwrap();
             guard.state().reservations[slot] += 1;
             drop(guard);
-            assert_eq!(escrow.cancel(&authority), Err(WorkError::CorruptContext));
+            assert_eq!(
+                cancellation_error(escrow.cancel(&authority)),
+                WorkError::CorruptContext
+            );
             return;
         }
         Mode::Foreign | Mode::ForeignDrop => {
@@ -301,8 +313,8 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
                     unsafe { Box::from_raw(address as *mut OwnedGeneralEscrow<'static, 64>) };
                 if mode == Mode::Foreign {
                     assert_eq!(
-                        owned.cancel(&Authority::new(&cpu)),
-                        Err(WorkError::WrongCpu)
+                        cancellation_error(owned.cancel(&Authority::new(&cpu))),
+                        WorkError::WrongCpu
                     );
                 } else {
                     drop(owned);
@@ -481,3 +493,7 @@ fn dropped_foreign_and_forgotten_owned_values_keep_owners_until_stop() {
 fn forgotten_parked_escrow_blocks_retirement_and_whole_executor_drop_keeps_mappings() {
     run(Mode::ForgottenParked);
 }
+
+mod commit;
+
+mod transfer;

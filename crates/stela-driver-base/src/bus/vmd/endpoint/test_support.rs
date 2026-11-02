@@ -4,6 +4,7 @@
 //! behind an Intel VMD parent, with posted child writes.
 extern crate std;
 use super::*;
+use crate::Clock;
 use crate::bus::{
     dma::mapping::DomainMapping,
     mmio::owned::{PhysicalSpan, ResourceBacking, ResourceKind},
@@ -27,6 +28,30 @@ pub fn model_clock() -> Clock {
     Clock {
         ticks_per_microsecond: 1000,
     }
+}
+
+pub(super) struct ModelTimer {
+    pub(super) budget: Clock,
+}
+// SAFETY: explicit shared posted-config/NVMe software model only. The checked
+// counter budget advances its modeled intervals; it grants no native minimum.
+unsafe impl crate::bus::pci::power::Timer for ModelTimer {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        self.budget
+            .check_duration(60_000_000)
+            .map_err(|_| crate::bus::pci::power::Error::Clock)
+    }
+    fn wait_us(&self, microseconds: u64) -> Result<(), crate::bus::pci::power::Error> {
+        self.check()?;
+        self.budget
+            .try_delay(microseconds)
+            .map_err(|_| crate::bus::pci::power::Error::Clock)
+    }
+}
+pub fn model_timer() -> Rc<dyn crate::bus::pci::power::Timer> {
+    Rc::new(ModelTimer {
+        budget: model_clock(),
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -266,6 +291,14 @@ pub struct Backing {
 // SAFETY: symbolic exclusive aperture in an isolated topology model; never
 // passed to a production mapping provider or interpreted as RAM.
 unsafe impl ResourceBacking for Backing {
+    fn begin_mapping(
+        &self,
+    ) -> Result<crate::bus::pci::assignment::OpaqueUse, crate::bus::mmio::owned::Error> {
+        // This topology model supports no CPU mapping (table_read/write also
+        // refuse). Arc<()> labels cannot become an allocation/assignment use.
+        Err(crate::bus::mmio::owned::Error::Unavailable)
+    }
+
     fn physical_span(&self) -> PhysicalSpan {
         PhysicalSpan::new(0x8000_0000, 0x100_0000).unwrap()
     }

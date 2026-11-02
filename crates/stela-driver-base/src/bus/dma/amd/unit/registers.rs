@@ -43,6 +43,8 @@ const STATUS: usize = 0x2020;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
+    Config(crate::bus::pci::ConfigError),
+    PciCapability(crate::bus::pci::CapabilityError),
     Identity,
     Header(u8),
     ReadFailed(u16),
@@ -183,6 +185,10 @@ impl FunctionInspection {
     /// inspection, snapshots, return and final release. This grants no unit
     /// takeover, engine stop, DMA coherency, IRQ or requester/alias permission.
     /// No hardware state is changed, including on refusal or allocation failure.
+    #[expect(
+        clippy::result_large_err,
+        reason = "same original register inputs return on refusal without a failure-path allocation"
+    )]
     pub unsafe fn inspect(mut inputs: Inputs, ivrs: &Ivrs<'_>) -> Result<Self, (Error, Inputs)> {
         let mut firmware = Vec::new();
         if firmware.try_reserve_exact(ivrs.raw().len()).is_err() {
@@ -263,15 +269,15 @@ fn prepare(inputs: &mut Inputs, ivrs: &Ivrs<'_>) -> Result<Vec<Profile>, Error> 
     let expected_id = u32::from(function.vendor) | u32::from(function.device) << 16;
     let expected_class = function.class;
     let config = function.config();
-    let class = config.read32(8);
+    let class = config.read32(8).map_err(Error::Config)?;
     if config.address() != address
-        || config.read32(0) != expected_id
+        || config.read32(0).map_err(Error::Config)? != expected_id
         || expected_class != [0x08, 0x06, 0]
         || class >> 8 != 0x080600
     {
         return Err(Error::Identity);
     }
-    let header = config.read8(0x0e) & 0x7f;
+    let header = config.read8(0x0e).map_err(Error::Config)? & 0x7f;
     if header != 0 {
         return Err(Error::Header(header));
     }

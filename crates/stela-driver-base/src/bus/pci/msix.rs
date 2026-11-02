@@ -48,7 +48,8 @@ pub unsafe trait BarAccess {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
-    Config(MsiError),
+    Config(super::ConfigError),
+    Msi(MsiError),
     MissingCapability,
     ActiveMsi,
     ActiveMsix,
@@ -66,9 +67,24 @@ pub enum Error {
     CapabilityChanged,
     Quarantined,
     Released,
+    Interrupted,
+}
+#[derive(Clone, Copy)]
+enum Phase {
+    Ready,
+    Acting,
+    Failed(Error),
 }
 impl From<MsiError> for Error {
     fn from(error: MsiError) -> Self {
+        match error {
+            MsiError::Config(error) => Self::Config(error),
+            error => Self::Msi(error),
+        }
+    }
+}
+impl From<super::ConfigError> for Error {
+    fn from(error: super::ConfigError) -> Self {
         Self::Config(error)
     }
 }
@@ -120,20 +136,25 @@ pub struct MsixConfig<C: MsiConfigSpace = EcamConfig, B: BarAccess = MappedBar> 
     live: EntrySet,
     initialized: bool,
     open: bool,
-    poisoned: bool,
+    phase: Phase,
 }
 impl<B: BarAccess> MsixConfig<super::owned::OwnedConfig, B> {
     /// Retain the actual unique configuration allocation owned by this table.
     /// This is read-only lifetime/provenance, never a second config writer or
     /// entry/root authorization; current original context is rechecked.
     pub fn retain_config_epoch(&self) -> Result<super::owned::ConfigRetention, Error> {
+        self.admitted()?;
         self.owners
             .as_ref()
             .ok_or(Error::Released)?
             .0
             .config
             .retain_epoch()
-            .map_err(|_| Error::Mapping)
+            .map_err(|error| {
+                Error::Config(super::ConfigError::before_effect(
+                    super::ConfigFailure::Mapping(error),
+                ))
+            })
     }
 }
 impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
@@ -153,20 +174,24 @@ impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
         retained: RetainedOwner,
         bars: [Option<B>; 6],
     ) -> Result<Self, (Error, Owners<C, B>)> {
-        let mut owners = (function, retained, bars);
-        match discover(&mut owners.0, &owners.2) {
+        let mut original = super::kept::Kept::new((function, retained, bars));
+        let discovered = {
+            let owners = original.get_mut();
+            discover(&mut owners.0, &owners.2)
+        };
+        match discovered {
             Ok((layout, control)) if control & ENABLE == 0 => Ok(Self {
-                owners: Some(owners),
+                owners: Some(original.take()),
                 layout,
                 message: None,
                 messages: Vec::new(),
                 live: EntrySet::default(),
                 initialized: false,
                 open: false,
-                poisoned: false,
+                phase: Phase::Ready,
             }),
-            Ok(_) => Err((Error::ActiveMsix, owners)),
-            Err(error) => Err((error, owners)),
+            Ok(_) => Err((Error::ActiveMsix, original.take())),
+            Err(error) => Err((error, original.take())),
         }
     }
     pub fn address(&self) -> Result<Address, Error> {
@@ -176,10 +201,29 @@ impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
         self.layout.vectors
     }
     pub fn needs_reset(&self) -> bool {
-        self.poisoned
+        !matches!(self.phase, Phase::Ready)
+    }
+    pub fn first_error(&self) -> Option<Error> {
+        match self.phase {
+            Phase::Ready => None,
+            Phase::Acting => Some(Error::Interrupted),
+            Phase::Failed(error) => Some(error),
+        }
+    }
+    fn admitted(&self) -> Result<(), Error> {
+        match self.phase {
+            Phase::Acting => Err(Error::Interrupted),
+            Phase::Failed(_) => Err(Error::Quarantined),
+            Phase::Ready => Ok(()),
+        }
+    }
+    fn start_operation(&mut self) -> Result<(), Error> {
+        self.admitted()?;
+        self.phase = Phase::Acting;
+        Ok(())
     }
     fn checked(&mut self) -> Result<u16, Error> {
-        if self.poisoned {
+        if let Phase::Failed(_) = self.phase {
             return Err(Error::Quarantined);
         }
         let owners = self.owners.as_mut().ok_or(Error::Released)?;
@@ -195,9 +239,11 @@ impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
         self.live = EntrySet::default();
     }
     fn fail<T>(&mut self, result: Result<T, Error>) -> Result<T, Error> {
-        if result.is_err() {
+        if let Err(error) = result.as_ref() {
             self.invalidate_messages();
-            self.poisoned = true;
+            self.phase = Phase::Failed(*error);
+        } else {
+            self.phase = Phase::Ready;
         }
         result
     }
@@ -277,10 +323,16 @@ impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
     }
     fn config_write(&mut self, offset: u16, value: u16) -> Result<(), Error> {
         let config = self.owners.as_mut().ok_or(Error::Released)?.0.config();
-        config.write16(offset, value);
-        let actual = config.read16(offset);
+        config.write16(offset, value)?;
+        let actual = config.read16(offset).map_err(|error| {
+            Error::Config(super::ConfigError::write_may_have_applied(
+                offset,
+                2,
+                error.reason,
+            ))
+        })?;
         if actual != value {
-            return Err(Error::Config(if actual == u16::MAX {
+            return Err(Error::Msi(if actual == u16::MAX {
                 MsiError::FailedRead { offset }
             } else {
                 MsiError::Readback { offset }
@@ -313,7 +365,7 @@ impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
             .unwrap()
             .0
             .config()
-            .read16(regs::COMMAND);
+            .read16(regs::COMMAND)?;
         if command == u16::MAX {
             return Err(MsiError::FailedRead {
                 offset: regs::COMMAND,
@@ -342,10 +394,12 @@ impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
     }
     /// Mask all vectors and fallback INTx. No cause/CPU/DMA drain is inferred.
     pub fn mask(&mut self) -> Result<(), Error> {
+        self.start_operation()?;
         let result = self.mask_inner();
         self.fail(result)
     }
     pub fn disable(&mut self) -> Result<(), Error> {
+        self.start_operation()?;
         self.invalidate_messages();
         let result = (|| {
             self.mask_inner()?;
@@ -365,20 +419,30 @@ impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
         message: MsiMessage,
         legacy: bool,
     ) -> Result<(), Error> {
+        self.admitted()?;
         if !message.valid_pci_format() {
             return Err(Error::InvalidMessage);
         }
-        if self.poisoned {
-            return Err(Error::Quarantined);
+        if index >= self.layout.vectors {
+            return if legacy {
+                self.fail(Err(Error::InvalidIndex))
+            } else {
+                Err(Error::InvalidIndex)
+            };
         }
+        // Geometry and metadata allocation cannot issue config/table effects.
+        // Refusing either preserves already-live messages and their callbacks.
         let offset = match self.entry_offset(index) {
-            Ok(offset) => offset,
-            Err(error) if legacy => return self.fail(Err(error)),
-            Err(error) => return Err(error),
+            // Owners already returned: preserve the legacy API's terminal
+            // status without issuing any hardware effect or poisoning a live
+            // controller for a geometry/allocation refusal.
+            Err(Error::Released) if legacy => return self.fail(Err(Error::Released)),
+            result => result?,
         };
         if index != 0 {
             self.reserve_messages()?;
         }
+        self.start_operation()?;
         let result = (|| {
             let reopen = if legacy || !self.initialized {
                 self.mask_inner()?;
@@ -454,13 +518,16 @@ impl<C: MsiConfigSpace, B: BarAccess> MsixConfig<C, B> {
         self.program_entry(index, message, false)
     }
     fn unmask_entries(&mut self, indices: &[u16], legacy: bool) -> Result<(), Error> {
-        if self.poisoned {
-            return Err(Error::Quarantined);
-        }
+        self.admitted()?;
         let selection = EntrySet::selection(indices, self.layout.vectors)?;
         for &index in indices {
             self.message_at(index).ok_or(Error::NotProgrammed)?;
-            self.entry_offset(index)?;
+        }
+        self.start_operation()?;
+        for &index in indices {
+            if let Err(error) = self.entry_offset(index) {
+                return self.fail(Err(error));
+            }
         }
         let result = (|| {
             let control = self.checked()?;

@@ -117,24 +117,32 @@ mod tests {
     }
 
     impl ConfigSpace for ReadOnlyConfig {
-        fn read32(&self, offset: u16) -> u32 {
-            match offset {
+        fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+            Ok(match offset {
                 0 => 0x1234_0000 | u32::from(self.vendor),
                 8 => u32::from_be_bytes([self.class[0], self.class[1], self.class[2], 0]),
                 _ => panic!("GPU inventory must not read device registers"),
-            }
+            })
         }
 
-        fn write32(&mut self, _: u16, _: u32) {
+        fn write32(&mut self, _: u16, _: u32) -> Result<(), crate::bus::pci::ConfigError> {
             panic!("GPU inventory must not change the controller");
         }
 
-        fn write16(&mut self, _: u16, _: u16) {
+        fn write16(&mut self, _: u16, _: u16) -> Result<(), crate::bus::pci::ConfigError> {
             panic!("GPU inventory must not change the controller");
         }
 
-        fn write8(&mut self, _: u16, _: u8) {
+        fn write8(&mut self, _: u16, _: u8) -> Result<(), crate::bus::pci::ConfigError> {
             panic!("GPU inventory must not change the controller");
+        }
+
+        fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> (8 * (offset & 3))) as u8)
+        }
+
+        fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> (8 * (offset & 2))) as u16)
         }
     }
 

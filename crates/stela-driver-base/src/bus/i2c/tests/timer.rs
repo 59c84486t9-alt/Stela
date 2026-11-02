@@ -110,6 +110,17 @@ fn clock(rate: u64) -> Clock {
         ticks_per_microsecond: rate,
     }
 }
+struct MinimumMustNotRun;
+// SAFETY: this explicit refusal fixture never grants a successful wait; invalid
+// nominal admission must return before even consulting this different source.
+unsafe impl crate::bus::pci::power::Timer for MinimumMustNotRun {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        panic!("minimum check before nominal admission")
+    }
+    fn wait_us(&self, _: u64) -> Result<(), crate::bus::pci::power::Error> {
+        panic!("minimum wait before nominal admission")
+    }
+}
 const BUDGET: u64 = 1000;
 
 #[test]
@@ -153,7 +164,7 @@ fn unusable_clocks_refuse_before_io() {
             poll_interval_us: 50,
         };
         assert_eq!(
-            smbus::piix4::Piix4::new(r, clock(rate), info, config)
+            smbus::piix4::Piix4::new(r, clock(rate), info, config, Rc::new(MinimumMustNotRun))
                 .err()
                 .unwrap()
                 .kind,

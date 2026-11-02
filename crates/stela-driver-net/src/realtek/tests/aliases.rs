@@ -34,17 +34,40 @@ struct AliasConfig {
 }
 
 impl ConfigSpace for AliasConfig {
-    fn read32(&self, offset: u16) -> u32 {
-        self.words[usize::from(offset / 4)]
+    fn read8(&self, offset: u16) -> core::result::Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.words[usize::from(offset / 4)] >> ((offset & 3) * 8)) as u8)
     }
-    fn write32(&mut self, _: u16, _: u32) {
-        panic!("no wide configuration write is authorized")
+    fn read16(&self, offset: u16) -> core::result::Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.words[usize::from(offset / 4)] >> ((offset & 3) * 8)) as u16)
     }
-    fn write16(&mut self, offset: u16, value: u16) {
+    fn read32(&self, offset: u16) -> core::result::Result<u32, crate::bus::pci::ConfigError> {
+        Ok(self.words[usize::from(offset / 4)] >> ((offset & 3) * 8))
+    }
+    fn write8(&mut self, _: u16, _: u8) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        Err(crate::bus::pci::ConfigError::before_effect(
+            crate::bus::pci::ConfigFailure::UnqualifiedControl,
+        ))
+    }
+    fn write32(
+        &mut self,
+        _: u16,
+        _: u32,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        Err(crate::bus::pci::ConfigError::before_effect(
+            crate::bus::pci::ConfigFailure::UnqualifiedControl,
+        ))
+    }
+    fn write16(
+        &mut self,
+        offset: u16,
+        value: u16,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
         self.writes.push((offset, value));
         let word = &mut self.words[usize::from(offset / 4)];
         let shift = (offset & 2) * 8;
         *word = (*word & !(0xffff << shift)) | (u32::from(value) << shift);
+
+        Ok(())
     }
 }
 
@@ -113,15 +136,15 @@ fn pci_alias_aspm_selection_uses_capability_before_clock_or_enable() {
             let called = Cell::new(false);
             let control = prepare_pcie_link(&mut function, |function| {
                 called.set(true);
-                assert_eq!(function.config().read16(4) & 6, 0); // No MMIO/bus-master enable yet.
-                assert_eq!(function.config().read16(0x50), 0xa5fc);
+                assert_eq!(function.config().read16(4).unwrap() & 6, 0); // No MMIO/bus-master enable yet.
+                assert_eq!(function.config().read16(0x50).unwrap(), 0xa5fc);
                 assert!(function.config().writes.is_empty());
                 Ok(())
             })
             .unwrap();
             assert_eq!(called.get(), express);
             assert_eq!(control, express.then_some(0x50));
-            assert_eq!(function.config().read16(4) & 6, 0);
+            assert_eq!(function.config().read16(4).unwrap() & 6, 0);
             assert_eq!(
                 function.config().writes,
                 if express {

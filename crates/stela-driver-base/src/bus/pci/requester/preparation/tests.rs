@@ -178,11 +178,13 @@ unsafe impl DmaDomain for Domain {
 }
 fn function(address: Address) -> Function<OwnedConfig> {
     let (mut config, _) = fixture(address);
-    config.write32(0, 0x12348086);
-    config.write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE);
-    config.write32(8, 0x02800000);
-    config.write32(0x0c, 0);
-    config.write32(0x100, 0);
+    config.write32(0, 0x12348086).unwrap();
+    config
+        .write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE)
+        .unwrap();
+    config.write32(8, 0x02800000).unwrap();
+    config.write32(0x0c, 0).unwrap();
+    config.write32(0x100, 0).unwrap();
     Function::new(address, config).unwrap()
 }
 fn preparing(drain_error: bool, bind_error: bool) -> (PreparingRequester, Arc<State>) {
@@ -217,13 +219,13 @@ fn old_root_completion_precedes_attachment_and_owners_follow_the_bound_domain() 
     let old_domain = bound.attachment.domain();
     let (error, requester) = bound.requester.into_dma_binding().err().unwrap();
     assert_eq!(error, ClaimError::AlreadyBound);
-    let mut mapping = requester.into_function().into_config().into_mapping();
+    let mut config = requester.into_function().into_config();
     // SAFETY: isolated idle fixture; the retained binding must refuse reuse.
-    assert_eq!(unsafe { mapping.retire() }, Err(MappingError::Busy));
+    assert_eq!(unsafe { config.retire() }, Err(MappingError::Busy));
     // SAFETY: no modeled DMA/IRQ/work user exists, and all original owners stay kept.
     unsafe { bound.attachment.detach() }.unwrap();
     // SAFETY: exact fixture detach acknowledged before mapping retirement.
-    unsafe { mapping.retire() }.unwrap();
+    unsafe { crate::bus::pci::owned::test_support::retire_owned(config) }.unwrap();
     assert_eq!(state.detachments.load(Ordering::Relaxed), 1);
     drop(bound.attachment);
     assert_eq!(state.drops.load(Ordering::Relaxed), 0);
@@ -284,10 +286,14 @@ fn abandoning_preparation_does_not_release_an_unstopped_owner() {
 #[test]
 fn configuration_activity_is_rechecked_after_old_root_completion() {
     let (mut prepared, state) = preparing(false, false);
-    prepared.function_mut().config().write16(
-        regs::COMMAND,
-        regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE,
-    );
+    prepared
+        .function_mut()
+        .config()
+        .write16(
+            regs::COMMAND,
+            regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE,
+        )
+        .unwrap();
     // SAFETY: no modeled engine/submission/IRQ/work exists; the deliberately
     // enabled configuration bit must independently fail stopped validation.
     let receipt = unsafe { prepared.acknowledge_quiescence() };
@@ -325,10 +331,10 @@ fn failed_or_abandoned_detach_keeps_the_binding_and_original_root() {
             let detached = unsafe { bound.attachment.detach() };
             assert!(matches!(detached, Err(DmaError::InvalidationFailed)));
         }
-        let mut mapping = bound.requester.into_function().into_config().into_mapping();
+        let mut config = bound.requester.into_function().into_config();
         drop(bound.attachment);
         // SAFETY: synchronous idle fixture; its live binding still prohibits retirement.
-        assert_eq!(unsafe { mapping.retire() }, Err(MappingError::Busy));
+        assert_eq!(unsafe { config.retire() }, Err(MappingError::Busy));
         assert_eq!(state.drops.load(Ordering::Relaxed), 0);
         assert_eq!(state.detachments.load(Ordering::Relaxed), 0);
     }

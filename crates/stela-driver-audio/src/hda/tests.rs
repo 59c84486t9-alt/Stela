@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Shared controller test fixtures for command rings, codecs and PCM DMA.
 use super::*;
+use crate::bus::i2c::Timer as NominalTimer;
 use crate::{Direction, PcmFormat, bus::dma::RegionAllocator};
 use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::{Cell, RefCell};
 mod composition;
+mod construction_failures;
 mod lifecycle;
 mod realtek_owned_models;
 mod unsolicited_models;
 
 #[derive(Clone)]
 struct ModelClock(Rc<Cell<u64>>);
-impl Timer for ModelClock {
+impl crate::bus::i2c::Timer for ModelClock {
     fn now_us(&self) -> u64 {
         self.0.get()
     }
@@ -37,6 +39,7 @@ impl Fixture {
     }
 }
 
+mod minimum;
 mod model;
 use model::*;
 
@@ -69,22 +72,25 @@ struct ResetPci {
     clock: ModelClock,
 }
 impl crate::bus::pci::ConfigSpace for ResetPci {
-    fn read32(&self, offset: u16) -> u32 {
-        let mut s = self.state.borrow_mut();
-        s.reads += 1;
-        if offset == 0x48 {
-            s.clock_reads += 1;
-        }
-        if offset == 0x48
-            && (s.failed_read == 1
-                || (s.failed_read == 2 && s.writes.iter().any(|(v, ..)| v & 0x40 == 0))
-                || (s.failed_read == 3 && s.writes.iter().any(|(v, ..)| v & 0x40 != 0)))
-        {
-            return u32::MAX;
-        }
-        s.words[usize::from(offset / 4)]
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        let value = {
+            let mut s = self.state.borrow_mut();
+            s.reads += 1;
+            if offset == 0x48 {
+                s.clock_reads += 1;
+            }
+            if offset == 0x48
+                && (s.failed_read == 1
+                    || (s.failed_read == 2 && s.writes.iter().any(|(v, ..)| v & 0x40 == 0))
+                    || (s.failed_read == 3 && s.writes.iter().any(|(v, ..)| v & 0x40 != 0)))
+            {
+                return Ok(u32::MAX);
+            }
+            s.words[usize::from(offset / 4)]
+        };
+        Ok(value)
     }
-    fn write32(&mut self, offset: u16, value: u32) {
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         assert_eq!(offset, 0x48);
         let mut s = self.state.borrow_mut();
         let model = self.model.borrow();
@@ -95,10 +101,28 @@ impl crate::bus::pci::ConfigSpace for ResetPci {
             model.get(CORBCTL, 1) & u32::from(COMMAND_RUN) != 0,
         ));
         if (value & 0x40 == 0 && s.reject_disable) || (value & 0x40 != 0 && s.reject_enable) {
-            return;
+            return Ok(());
         }
         s.words[usize::from(offset / 4)] = value;
         self.gate.set(value & 0x40 != 0);
+
+        Ok(())
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+    }
+
+    fn write8(&mut self, _: u16, _: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        panic!("unexpected narrow PCI store in identity/reset fixture");
+    }
+
+    fn write16(&mut self, _: u16, _: u16) -> Result<(), crate::bus::pci::ConfigError> {
+        panic!("unexpected narrow PCI store in identity/reset fixture");
     }
 }
 fn reset_pci(
@@ -189,6 +213,7 @@ fn create(
             &mut fixture.allocator,
             config,
         )
+        .map_err(|failure| failure.error)
     }
 }
 fn verb() -> Verb {
@@ -404,3 +429,20 @@ mod register_failures;
 mod dma_positions;
 
 mod controller_identity;
+
+// SAFETY: this private synchronous peripheral model measures virtual microseconds;
+// no physical timer, CPU or native hardware permission follows from it.
+unsafe impl crate::bus::pci::power::Timer for ModelClock {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        Ok(())
+    }
+    fn wait_us(&self, us: u64) -> Result<(), crate::bus::pci::power::Error> {
+        self.0.set(
+            self.0
+                .get()
+                .checked_add(us)
+                .expect("bounded model minimum wait"),
+        );
+        Ok(())
+    }
+}

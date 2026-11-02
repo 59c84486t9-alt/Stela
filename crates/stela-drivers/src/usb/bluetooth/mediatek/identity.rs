@@ -115,6 +115,10 @@ pub struct Identity {
     pub chip: Chip,
 }
 impl Identity {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn select(
         usb: UsbIdentity,
         legacy_device_id: u32,

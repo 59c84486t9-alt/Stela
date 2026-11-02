@@ -53,8 +53,38 @@ pub enum BlockError {
     /// The DMA pages are exhausted.
     NoDmaMemory,
     Dma(crate::bus::dma::AllocationError),
+    Mmio(crate::bus::mmio::owned::Error),
+    Irq(crate::bus::irq::IrqError),
+    Config(crate::bus::pci::ConfigError),
+    PciCapability(crate::bus::pci::CapabilityError),
+    PciPower(crate::bus::pci::power::Error),
     /// The device needs something these drivers do not implement.
     Unsupported(&'static str),
+}
+impl From<crate::bus::mmio::owned::Error> for BlockError {
+    fn from(error: crate::bus::mmio::owned::Error) -> Self {
+        Self::Mmio(error)
+    }
+}
+impl From<crate::bus::irq::IrqError> for BlockError {
+    fn from(error: crate::bus::irq::IrqError) -> Self {
+        Self::Irq(error)
+    }
+}
+impl From<crate::bus::pci::ConfigError> for BlockError {
+    fn from(error: crate::bus::pci::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+impl From<crate::bus::pci::CapabilityError> for BlockError {
+    fn from(error: crate::bus::pci::CapabilityError) -> Self {
+        Self::PciCapability(error)
+    }
+}
+impl From<crate::bus::pci::power::Error> for BlockError {
+    fn from(error: crate::bus::pci::power::Error) -> Self {
+        Self::PciPower(error)
+    }
 }
 
 /// SCSI sense data (SPC-5 4.4): sense key, additional sense code and its
@@ -193,6 +223,11 @@ impl fmt::Display for BlockError {
             Self::Timeout => f.write_str("device timeout"),
             Self::NoDmaMemory => f.write_str("DMA pages exhausted"),
             Self::Dma(error) => write!(f, "DMA allocation: {error:?}"),
+            Self::Mmio(error) => write!(f, "MMIO mapping: {error:?}"),
+            Self::Irq(error) => write!(f, "IRQ: {error:?}"),
+            Self::Config(error) => write!(f, "PCI configuration: {error}"),
+            Self::PciCapability(error) => write!(f, "PCI capability: {error:?}"),
+            Self::PciPower(error) => write!(f, "PCI power/timing: {error:?}"),
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),
         }
     }

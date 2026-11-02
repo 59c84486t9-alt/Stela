@@ -253,6 +253,10 @@ impl<T: Timer> Spi<NativeRegisters, T> {
     /// The parent's NativeRegisters claim and this adapter's root-clock/board/
     /// arbitration contracts hold for the same original stopped function
     /// and its complete exclusive UC BAR0 mapping, including kept Drop.
+    #[expect(
+        clippy::result_large_err,
+        reason = "native refusal returns the complete original config and BAR graph without allocating"
+    )]
     pub unsafe fn attach_native(
         requester: StoppedRequester,
         mapping: Mapping,

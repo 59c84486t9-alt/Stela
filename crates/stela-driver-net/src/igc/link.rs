@@ -99,7 +99,9 @@ impl Supervisor {
                     let ready = Hardware::new(registers, timer)?
                         .remote_receiver_ready()
                         .or_else(|error| match error {
-                            BlockError::Device { status: u32::MAX } => Err(error),
+                            BlockError::Device { status: u32::MAX } | BlockError::PciPower(_) => {
+                                Err(error)
+                            }
                             _ => Ok(true),
                         })?;
                     if !ready && now.saturating_sub(start) < GIGABIT_WAIT_US {

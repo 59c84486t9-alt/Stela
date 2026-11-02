@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
-//! Checked original calibrated timer for root-link transitions only.
+//! Nominal root polling deadlines and distinct owned physical transition waits.
 use super::*;
-use crate::bus::pci::power::Timer;
 
 fn in_range(clock: Clock, microseconds: u64) -> Result<(), BlockError> {
     clock.check_duration(microseconds).map_err(|_| {
@@ -9,16 +8,18 @@ fn in_range(clock: Clock, microseconds: u64) -> Result<(), BlockError> {
     })
 }
 pub(super) fn check(clock: Clock) -> Result<(), BlockError> {
-    clock.check().map_err(|_| {
+    clock.check_duration(0).map_err(|_| {
         BlockError::Unsupported("USB root transition clock unavailable or out of range")
     })?;
     in_range(clock, LINK_TIMEOUT_US)
 }
-pub(super) fn delay(clock: Clock, microseconds: u64) -> Result<(), BlockError> {
-    in_range(clock, microseconds)?;
-    clock.wait_us(microseconds).map_err(|_| {
-        BlockError::Unsupported("USB root transition clock unavailable or out of range")
-    })
+pub(super) fn delay(controller: &mut Controller, microseconds: u64) -> Result<(), BlockError> {
+    controller.minimum_wait(microseconds)
+}
+pub(super) fn poll_delay(clock: Clock, microseconds: u64) -> Result<(), BlockError> {
+    clock
+        .try_delay(microseconds)
+        .map_err(|_| BlockError::Unsupported("USB root polling clock unavailable or out of range"))
 }
 /// A root-link transition's deadline, on the shared [`crate::Deadline`].
 pub(super) fn deadline(clock: Clock, microseconds: u64) -> Result<crate::Deadline, BlockError> {

@@ -18,7 +18,7 @@ mod registers;
 use registers::*;
 
 pub(in crate::usb::ethernet) struct Chip<C> {
-    io: C,
+    io: super::super::MinimumControl<C>,
     accessible: bool,
     initialized: bool,
     pub(super) raw_status: u8,
@@ -74,6 +74,13 @@ impl<C: Control> Chip<C> {
     fn command(&mut self, command: u8, value: u16) -> Result<(), BlockError> {
         self.write(command, value, 0, &[])
     }
+    fn minimum_wait(&mut self, us: u64) -> Result<(), BlockError> {
+        let result = self.io.minimum_wait(us);
+        if result.is_err() {
+            self.initialized = false;
+        }
+        result
+    }
     fn timeout(&mut self) -> BlockError {
         self.accessible = false;
         self.initialized = false;
@@ -82,7 +89,7 @@ impl<C: Control> Chip<C> {
     fn own_mii(&mut self) -> Result<(), BlockError> {
         for _ in 0..30 {
             self.command(SET_SW_MII, 0)?;
-            self.io.delay_us(1000);
+            self.minimum_wait(1000)?;
             if self.read(STATUS, 0, 0, 1)?[0] & HOST_EN != 0 {
                 return Ok(());
             }
@@ -102,7 +109,7 @@ impl<C: Control> Chip<C> {
     }
     pub(super) fn attach(io: C, eeprom_mac: bool) -> Result<(Self, Mac), BlockError> {
         let mut c = Self {
-            io,
+            io: super::super::MinimumControl::new(io),
             accessible: true,
             initialized: false,
             raw_status: 0,
@@ -166,26 +173,26 @@ impl<C: Control> Chip<C> {
             GPIO_RELOAD
         };
         self.command(WRITE_GPIO, gpio)?;
-        self.io.delay_us(5000);
+        self.minimum_wait(5000)?;
         self.command(PHY_SELECT, 1 | if code == ORIGINAL { 0 } else { SSEN })?;
         if code == ORIGINAL {
             self.command(SW_RESET, RESET_IPPD)?;
-            self.io.delay_us(10_000);
+            self.minimum_wait(10_000)?;
             self.command(SW_RESET, 0)?;
-            self.io.delay_us(60_000);
+            self.minimum_wait(60_000)?;
             self.command(SW_RESET, RESET_IPRL | RESET_PRL)?;
-            self.io.delay_us(150_000);
+            self.minimum_wait(150_000)?;
             self.command(WRITE_RX, RX_DEFAULT)?;
             self.command(WRITE_MEDIUM, MEDIUM_DEFAULT)?;
         } else {
-            self.io.delay_us(10_000);
+            self.minimum_wait(10_000)?;
             self.command(SW_RESET, RESET_IPPD | RESET_IPRL)?;
-            self.io.delay_us(10_000);
+            self.minimum_wait(10_000)?;
             self.command(SW_RESET, RESET_IPRL)?;
-            self.io.delay_us(160_000);
+            self.minimum_wait(160_000)?;
             self.command(SW_RESET, 0)?;
             self.command(SW_RESET, RESET_IPRL)?;
-            self.io.delay_us(200_000);
+            self.minimum_wait(200_000)?;
             if code == B {
                 self.write(QUEUE, 0x8000, 0x8001, &[])?;
             } else {
@@ -218,7 +225,7 @@ impl<C: Control> Chip<C> {
         self.phy_write(BMCR, (old & !ISOLATE) | RESET | AN_RESTART)?;
         let mut done = false;
         for _ in 0..12 {
-            self.io.delay_us(50_000);
+            self.minimum_wait(50_000)?;
             if self.phy_read(BMCR)? & RESET == 0 {
                 done = true;
                 break;
@@ -227,7 +234,7 @@ impl<C: Control> Chip<C> {
         if !done {
             return Err(self.timeout());
         }
-        self.io.delay_us(1000);
+        self.minimum_wait(1000)?;
         let capabilities = self.phy_read(BMSR)?;
         if capabilities & AN_CAPABLE == 0 {
             return Err(BlockError::Unsupported("AX88772 PHY lacks autonegotiation"));
@@ -260,6 +267,9 @@ impl<C: Control> Chip<C> {
         )
     }
     pub(super) fn carrier(&mut self) -> Result<bool, BlockError> {
+        if let Some(error) = self.io.error() {
+            return Err(error.clone());
+        }
         if !self.initialized {
             return Err(BlockError::Unsupported("AX88772 not initialized"));
         }
@@ -508,7 +518,7 @@ mod tests {
                 hw.borrow_mut().phy[*reg as usize] = if mask & (1 << j) != 0 { *val } else { 0 };
             }
             let mut chip = Chip {
-                io: model::Io(hw.clone()),
+                io: crate::usb::ethernet::MinimumControl::new(model::Io(hw.clone())),
                 accessible: true,
                 initialized: false,
                 raw_status: code,
@@ -636,4 +646,5 @@ mod tests {
             assert!(failures >= 10);
         }
     }
+    mod minimum;
 }

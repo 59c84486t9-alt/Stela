@@ -16,6 +16,7 @@ use crate::bus::{
         msi::MsiConfigSpace,
         owned::{
             OwnedConfig,
+            grant::DriverGrant,
             test_support::{Counters, fixture},
         },
     },
@@ -518,32 +519,46 @@ struct Config {
     peer: Arc<Peer>,
 }
 impl ConfigSpace for Config {
-    fn read32(&self, at: u16) -> u32 {
+    fn read32(&self, at: u16) -> core::result::Result<u32, crate::bus::pci::ConfigError> {
         self.native.read32(at)
     }
-    fn read16(&self, at: u16) -> u16 {
+    fn read16(&self, at: u16) -> core::result::Result<u16, crate::bus::pci::ConfigError> {
         self.native.read16(at)
     }
-    fn read8(&self, at: u16) -> u8 {
+    fn read8(&self, at: u16) -> core::result::Result<u8, crate::bus::pci::ConfigError> {
         self.native.read8(at)
     }
-    fn write32(&mut self, at: u16, v: u32) {
-        self.native.write32(at, v);
+    fn write32(
+        &mut self,
+        at: u16,
+        v: u32,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        self.native.write32(at, v)?;
+
+        Ok(())
     }
-    fn write8(&mut self, at: u16, v: u8) {
-        self.native.write8(at, v);
+    fn write8(&mut self, at: u16, v: u8) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        self.native.write8(at, v)?;
+
+        Ok(())
     }
-    fn write16(&mut self, at: u16, v: u16) {
+    fn write16(
+        &mut self,
+        at: u16,
+        v: u16,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
         if at == 0x52 && self.peer.state.lock().unwrap().ignore_msi {
-            return;
+            return Ok(());
         }
-        self.native.write16(at, v);
+        self.native.write16(at, v)?;
         if at == 4 {
             self.peer.command.store(usize::from(v), Ordering::Release);
         }
         if at == 0x52 {
             self.peer.msi.store(v & 1 != 0, Ordering::Release);
         }
+
+        Ok(())
     }
 }
 // SAFETY: forwards exact-width native stores through the owned fixture.
@@ -770,6 +785,10 @@ struct Fixture {
     peer: Arc<Peer>,
     config_counts: Arc<Counters>,
     bar_counts: Arc<Counters>,
+    // Unique external model source custody, outside every BAR/provider/IRQ Arc.
+    // ISH has no acknowledged final release in these controls; abandonment
+    // therefore retains this same real grant instead of fabricating completion.
+    _bar_grant: DriverGrant,
 }
 /// Native inputs, the firmware peer, and config-space and BAR access counts.
 type Parts = (
@@ -777,6 +796,7 @@ type Parts = (
     Arc<Peer>,
     Arc<Counters>,
     Arc<Counters>,
+    DriverGrant,
 );
 
 fn inputs() -> Parts {
@@ -791,7 +811,7 @@ fn inputs() -> Parts {
         device: 1,
         ..address
     });
-    let mapping = bar.into_mapping();
+    let (bar_grant, mapping) = bar.into_parts();
     let span = mapping.physical_span().unwrap();
     let view = mapping.view(0..4096).unwrap();
     let peer = Arc::new(Peer {
@@ -811,16 +831,16 @@ fn inputs() -> Parts {
     });
     peer.raw_write(FWSTS, 0x4000);
     peer.raw_write(PIMR, 0x40); // Unrelated bit must survive every mask/rearm.
-    config.write32(0, 0x9d35_8086);
-    config.write32(4, 0x0010_0402);
-    config.write32(8, 0x1180_0002);
-    config.write32(0x10, span.start() as u32);
-    config.write32(0x2c, 0x1234_8086);
-    config.write8(0x34, 0x40);
-    config.write16(0x40, 0x5001);
-    config.write16(0x44, 0);
-    config.write16(0x50, 5);
-    config.write16(0x52, 0x80);
+    config.write32(0, 0x9d35_8086).unwrap();
+    config.write32(4, 0x0010_0402).unwrap();
+    config.write32(8, 0x1180_0002).unwrap();
+    config.write32(0x10, span.start() as u32).unwrap();
+    config.write32(0x2c, 0x1234_8086).unwrap();
+    config.write8(0x34, 0x40).unwrap();
+    config.write16(0x40, 0x5001).unwrap();
+    config.write16(0x44, 0).unwrap();
+    config.write16(0x50, 5).unwrap();
+    config.write16(0x52, 0x80).unwrap();
     let config = Config {
         native: config,
         peer: peer.clone(),
@@ -856,10 +876,11 @@ fn inputs() -> Parts {
         peer,
         config_counts,
         bar_counts,
+        bar_grant,
     )
 }
 fn prepared() -> Fixture {
-    let (i, peer, config_counts, bar_counts) = inputs();
+    let (i, peer, config_counts, bar_counts, bar_grant) = inputs();
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
     // driver, worker or DMA touches them.
     let driver = unsafe { Native::new(i) }.map_err(|(e, _)| e).unwrap();
@@ -868,6 +889,7 @@ fn prepared() -> Fixture {
         peer,
         config_counts,
         bar_counts,
+        _bar_grant: bar_grant,
     }
 }
 fn running() -> Fixture {
@@ -1013,11 +1035,11 @@ fn native_missing_irq_delivery_is_not_checked_by_successful_mailbox_polling() {
 #[test]
 fn profile_admission_rejects_mem_off_wrong_identity_mapping_and_active_dma_before_writes() {
     for variant in 0..5 {
-        let (mut i, peer, _, _) = inputs();
+        let (mut i, peer, _, _, _bar_grant) = inputs();
         match variant {
-            0 => i.function.config().write16(4, 0x400),
-            1 => i.function.config().write32(0, 0x9d34_8086),
-            2 => i.function.config().write32(0x10, 0x8000),
+            0 => i.function.config().write16(4, 0x400).unwrap(),
+            1 => i.function.config().write32(0, 0x9d34_8086).unwrap(),
+            2 => i.function.config().write32(0x10, 0x8000).unwrap(),
             3 => peer.raw_write(RMP2, 1),
             _ => peer.raw_write(FWSTS, 0x4000 | IN_DMA),
         }

@@ -9,6 +9,47 @@ impl<const N: usize> Runtime<N> {
         unsafe { (&mut *self.tasks.get()).as_mut_ptr().add(index) }
     }
 
+    /// Actual same-CPU successor, outside every constructor-owned worker.
+    /// Completion/current metadata cleared on a worker is not this proof.
+    pub(super) fn dispatcher_successor(self: Pin<&Self>) -> Result<(), WorkError> {
+        self.queue.process()?;
+        if self.current.get() != NONE
+            || self.queue.completing.load(Ordering::Acquire)
+            || self.queue.active.id.load(Ordering::Acquire) != 0
+            || self.queue.active.start.load(Ordering::Acquire) != 0
+            || self.queue.active.end.load(Ordering::Acquire) != 0
+        {
+            return Err(WorkError::Busy);
+        }
+        let rsp = context::stack_pointer();
+        // SAFETY: actual affine CPU; constructor ranges are immutable and kept.
+        if unsafe { &*self.tasks.get() }
+            .iter()
+            .any(|task| task.stack.bounds.contains(&rsp))
+        {
+            return Err(WorkError::Busy);
+        }
+        Ok(())
+    }
+    /// Record a completed callback's PHYSICAL return, not a guessed counter.
+    /// Caller is the dispatcher immediately after its actual context switch.
+    pub(super) fn returned_stack(self: Pin<&Self>, index: usize) -> Result<(), WorkError> {
+        self.dispatcher_successor()?;
+        // SAFETY: real checked successor/IF0; no Task borrow spans a callback.
+        let task = unsafe { &mut *self.task(index) };
+        if matches!(task.state, TaskState::Idle | TaskState::Retained) {
+            if task.job.is_some()
+                || task.signal.sequence.load(Ordering::Acquire) != 0
+                || task.completed_sequence == 0
+                || task.returned_sequence > task.completed_sequence
+            {
+                return Err(WorkError::CorruptContext);
+            }
+            task.returned_sequence = task.completed_sequence;
+        }
+        Ok(())
+    }
+
     pub fn queue(&self) -> &Arc<Queue<N>> {
         &self.queue
     }
@@ -33,6 +74,23 @@ impl<const N: usize> Runtime<N> {
         Ok(self
             .layout
             .role(unsafe { (*self.task(self.current.get())).lane }))
+    }
+
+    /// Inspect the constructor-owned reserved Service stack geometry on the
+    /// actual process CPU. No address, task/current, source registration,
+    /// allocation, release event or future execution permission is returned.
+    pub fn service_supports(&self, required: StackRequirement) -> Result<bool, WorkError> {
+        self.queue.process()?;
+        if self.retired.get() {
+            return Err(WorkError::Closed);
+        }
+        // SAFETY: immutable constructor vector on its actual CPU; no callback,
+        // switch or mutation occurs during this bounded geometry observation.
+        let task = unsafe { &*self.tasks.get() }
+            .get(2)
+            .ok_or(WorkError::Unavailable)?;
+        Ok(task.lane == Lane::Service
+            && required.accepts(stack_requirement::Geometry::of(&task.stack)))
     }
 
     /// Check CPU/current/RSP before identifying the reserved service.
@@ -106,6 +164,7 @@ impl<const N: usize> Runtime<N> {
         }
         let flags = self.queue.cpu.save_disable()?;
         let index = self.current.get();
+        let mut rejected_publication = None;
         let result = (|| {
             // SAFETY: current is validated and IF remains disabled throughout.
             if unsafe { (*self.task(index)).binding.is_some() } {
@@ -117,8 +176,37 @@ impl<const N: usize> Runtime<N> {
             if view.sequence == 0 || task.signal.sequence.load(Ordering::Acquire) != view.sequence {
                 return Err(WorkError::CorruptContext);
             }
-            // SAFETY: the unsafe binding promises transactional/no-switch hooks.
-            unsafe { binding.attach(&view)? };
+            let publication = binding.execution_publication(&view)?;
+            let metric_sample = if let Some(publication) = publication {
+                if let Err((publication, error)) = self.execution.prepare_target(index, publication)
+                {
+                    rejected_publication = Some(publication);
+                    return Err(error);
+                }
+                let measured = (|| {
+                    let now = self.execution.clock()?.now_ns()?;
+                    self.execution.sample_at(index, now)
+                })();
+                match measured {
+                    Ok(sample) => Some(sample),
+                    Err(error) => {
+                        rejected_publication = self.execution.abort_target(index);
+                        return Err(error);
+                    }
+                }
+            } else {
+                None
+            };
+            // SAFETY: transactional source attach, with preallocated data lease
+            // claimed in its successful nofallible tail. No Board borrow lives.
+            if let Err(error) = unsafe { binding.attach(&view) } {
+                rejected_publication = self.execution.abort_target(index);
+                return Err(error);
+            }
+            if let Some(sample) = metric_sample {
+                self.execution.publish_process(index, &sample);
+            }
+
             let handle = WakeHandle {
                 queue: ManuallyDrop::new(self.queue.clone()),
                 signal: ManuallyDrop::new(task.signal.clone()),
@@ -133,6 +221,7 @@ impl<const N: usize> Runtime<N> {
         })();
         // SAFETY: no hook/lock is live and flags came from save_disable above.
         unsafe { self.queue.cpu.restore(flags) };
+        drop(rejected_publication);
         result
     }
 
@@ -202,7 +291,10 @@ impl<const N: usize> Runtime<N> {
                 .ok_or(WorkError::Unavailable)?;
             // SAFETY: index comes from this vector.
             let task = unsafe { &*self.task(index) };
-            if task.state != TaskState::Idle || task.job.is_some() {
+            if !matches!(task.state, TaskState::Idle | TaskState::Retained) || task.job.is_some() {
+                return Err(WorkError::Pending);
+            }
+            if self.execution.has_target(index) {
                 return Err(WorkError::Pending);
             }
             let binding = task.binding.as_ref().ok_or(WorkError::Unavailable)?;
@@ -213,6 +305,26 @@ impl<const N: usize> Runtime<N> {
             // SAFETY: unsafe caller supplies real quiescence; failure is transactional.
             unsafe { binding.detach(&view)? };
             // SAFETY: no task/hook is running; take moves owner without dropping it.
+            if task.state == TaskState::Retained && task.stack_pin_nonce == 0 {
+                let shape = (task.lane == Lane::General)
+                    .then(|| ReleasedStackGeometry::of(&task.stack, !task.ever_entered));
+                // Detach already committed. A later ledger failure must retain
+                // fatally, never return an ordinary transactional refusal.
+                if let Some(shape) = shape {
+                    self.queue
+                        .lock()
+                        .and_then(|mut guard| guard.state().resources.stack_released(shape))
+                        .unwrap_or_else(|error| self.queue.cpu.fatal(error));
+                }
+                // SAFETY: exact stopped unbound/pinless worker at IF0; no old
+                // target remains after actual stopped-publication removal.
+                unsafe {
+                    (*self.task(index)).state = TaskState::Idle;
+                }
+            }
+            // SAFETY: exact stopped worker at IF0; foreign detach committed
+            // and prior immutable task/binding borrows ended. Move the Arc
+            // without dropping it or calling foreign code under this scope.
             match unsafe { (*self.task(index)).binding.take() } {
                 Some(binding) => Ok(binding),
                 None => self.queue.cpu.fatal(WorkError::CorruptContext),

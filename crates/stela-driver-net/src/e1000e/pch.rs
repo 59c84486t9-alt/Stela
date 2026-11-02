@@ -10,8 +10,6 @@
 //! generations and canonical native admission remain separate. It never applies the
 //! discrete 82574L's PHY page or RAR policy to an integrated PCH controller.
 
-use crate::Clock;
-
 pub mod cold;
 pub mod io;
 pub mod nvm;
@@ -45,6 +43,7 @@ pub enum Kind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Fault {
+    Minimum(crate::bus::pci::power::Error),
     Access,
     OutsideBar,
     Misaligned,
@@ -101,14 +100,7 @@ pub unsafe trait Registers: 'static {
 }
 
 /// Minimum hardware delays; polling is additionally bounded by count.
-pub trait Delay {
-    fn delay(&mut self, microseconds: u64);
-}
-impl Delay for Clock {
-    fn delay(&mut self, microseconds: u64) {
-        Clock::delay(self, microseconds);
-    }
-}
+pub use crate::bus::pci::power::Timer as Delay;
 
 /// A checked HV register. Wakeup registers use the source's extended u16 index;
 /// all other pages expose only their 32 MDIO register lanes.
@@ -138,7 +130,8 @@ pub struct Identity {
 /// object requires the constructor's reset/quiescence ownership grant.
 pub struct Phy<R: Registers, D: Delay> {
     io: Option<R>,
-    delay: D,
+    delay: Option<D>,
+    minimum_failure: Option<crate::bus::pci::power::Error>,
     kind: Kind,
     poisoned: bool,
     retry_count: u8,
@@ -155,7 +148,8 @@ impl<R: Registers, D: Delay> Phy<R, D> {
     pub unsafe fn new(kind: Kind, io: R, delay: D) -> Self {
         Self {
             io: Some(io),
-            delay,
+            delay: Some(delay),
+            minimum_failure: None,
             kind,
             poisoned: false,
             retry_count: 0,
@@ -167,7 +161,45 @@ impl<R: Registers, D: Delay> Phy<R, D> {
         self.poisoned
     }
 
+    fn check_minimum(&mut self) -> Result<(), Fault> {
+        if let Some(error) = self.minimum_failure {
+            return Err(Fault::Minimum(error));
+        }
+        if self.poisoned {
+            return Err(Fault::Poisoned);
+        }
+        match self
+            .delay
+            .as_ref()
+            .expect("kept PHY minimum provider")
+            .check()
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.minimum_failure = Some(error);
+                self.poisoned = true;
+                Err(Fault::Minimum(error))
+            }
+        }
+    }
+    fn wait_minimum(&mut self, us: u64) -> Result<(), Fault> {
+        self.check_minimum()?;
+        match self
+            .delay
+            .as_ref()
+            .expect("kept PHY minimum provider")
+            .wait_us(us)
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.minimum_failure = Some(error);
+                self.poisoned = true;
+                Err(Fault::Minimum(error))
+            }
+        }
+    }
     fn read_mac(&mut self, at: u32) -> Result<u32, Fault> {
+        self.check_minimum()?;
         let value = self
             .io
             .as_mut()
@@ -180,6 +212,7 @@ impl<R: Registers, D: Delay> Phy<R, D> {
         }
     }
     fn write_mac(&mut self, at: u32, value: u32) -> Result<(), Fault> {
+        self.check_minimum()?;
         self.io
             .as_mut()
             .expect("live PHY register owner")
@@ -204,7 +237,7 @@ impl<R: Registers, D: Delay> Phy<R, D> {
                 available = true;
                 break;
             }
-            self.delay.delay(1000);
+            self.wait_minimum(1000)?;
         }
         if !available {
             return Err(Fault::SemaphoreBusy.into());
@@ -214,7 +247,7 @@ impl<R: Registers, D: Delay> Phy<R, D> {
             if self.read_mac(EXTCNF_CTRL)? & SWFLAG != 0 {
                 return Ok(());
             }
-            self.delay.delay(1000);
+            self.wait_minimum(1000)?;
         }
         // An unacknowledged claim is uncertain. Try the source's clear, keep
         // the owner on the final failure, and never retry this access epoch.
@@ -244,9 +277,13 @@ impl<R: Registers, D: Delay> Phy<R, D> {
         &mut self,
         operation: impl FnOnce(&mut Self) -> Result<T, Fault>,
     ) -> Result<T, Error> {
+        if let Some(error) = self.minimum_failure {
+            return Err(Fault::Minimum(error).into());
+        }
         if self.poisoned {
             return Err(Fault::Poisoned.into());
         }
+        self.check_minimum()?;
         if let Err(error) = self.acquire() {
             self.poisoned = true;
             return Err(error);
@@ -278,7 +315,7 @@ impl<R: Registers, D: Delay> Phy<R, D> {
         for attempt in 0..=retries {
             match self.mdic_once(address, index, write) {
                 Err(Fault::MdicTimeout | Fault::MdicResponse(_)) if attempt < retries => {
-                    self.delay.delay(10_000);
+                    self.wait_minimum(10_000)?;
                 }
                 result => return result,
             }
@@ -296,7 +333,7 @@ impl<R: Registers, D: Delay> Phy<R, D> {
         let mut response = 0;
         let mut ready = false;
         for _ in 0..MDIC_POLLS {
-            self.delay.delay(50);
+            self.wait_minimum(50)?;
             response = self.read_mac(MDIC)?;
             if response & MDIC_READY != 0 {
                 ready = true;
@@ -305,7 +342,7 @@ impl<R: Registers, D: Delay> Phy<R, D> {
         }
         // 82579 requires this quiet interval even when the transaction fails.
         if self.kind == Kind::I82579 {
-            self.delay.delay(100);
+            self.wait_minimum(100)?;
         }
         if !ready {
             return Err(Fault::MdicTimeout);
@@ -382,6 +419,9 @@ impl<R: Registers, D: Delay> Drop for Phy<R, D> {
             // semaphore/page state. Only an external real reset can recover it.
             if let Some(owner) = self.io.take() {
                 core::mem::forget(owner);
+            }
+            if let Some(minimum) = self.delay.take() {
+                core::mem::forget(minimum);
             }
         }
     }

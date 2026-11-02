@@ -88,6 +88,10 @@ impl Client {
 
     /// `ieee80211_key_switch_links`: the group keys of the link of `ap` reach
     /// the firmware stations `stations`.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn fit_group_keys(&mut self, ap: Mac, stations: u32) -> Result<(), Error> {
         let mut added = Vec::new();
         for key in self.keys.iter_mut().filter(|key| !key.pairwise) {
@@ -139,6 +143,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// `iwl_mld_change_link_in_fw` for `context`'s link and what
     /// `iwl_mld_add_modify_sta_cmd` and `iwl_mld_config_tlc_link` say of its
     /// AP, at `seat`.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub(super) fn link_commands(
         &self,
         queue: &mut Queue<Q, B>,
@@ -265,6 +273,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// `_iwl_mld_select_links`: the best of what the last scan heard.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub(super) fn select_link(&mut self, queue: &mut Queue<Q, B>, now: u64) -> Result<(), Error> {
         let (Some(active), Some(dormant)) = (&self.client.context, &self.client.dormant) else {
             return Ok(());
@@ -311,6 +323,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// `iwl_mld_assign_vif_chanctx` for the dormant link: it comes up at the
     /// empty seat beside the active one, which `quiet` deactivates first.
     /// What the AP's firmware stations share reaches both.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn raise_dormant(&mut self, queue: &mut Queue<Q, B>, quiet: bool) -> Result<(), Error> {
         let client = &self.client;
         let from = client.context.clone().ok_or(Error::Refused("no context"))?;
@@ -364,6 +380,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// The link `gone` leaves the firmware seat `seat` and the active link
     /// keeps what they shared; `active` says it still runs.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn lower_link(
         &mut self,
         queue: &mut Queue<Q, B>,
@@ -413,6 +433,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// The other link takes the active link's place, in the books.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn swap_links(&mut self) -> Result<Arc<AssociationContext>, Error> {
         let client = &mut self.client;
         let gone = client.context.take().ok_or(Error::Refused("no context"))?;
@@ -425,6 +449,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// `_ieee80211_set_active_links`: the active link gives way to the dormant
     /// one. Frames keep going to their queues, whose station the firmware
     /// changes under them.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub(super) fn switch_link(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
         self.raise_dormant(queue, true)?;
         let seat = self.client.seat;
@@ -434,6 +462,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// `iwl_mld_assign_vif_chanctx` with two links: firmware's EML Operating
     /// Mode Notification tells the AP, and the active link stays primary.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn enter_emlsr(&mut self, queue: &mut Queue<Q, B>, now: u64) -> Result<(), Error> {
         self.raise_dormant(queue, false)?;
         self.client.emlsr.entered(now);
@@ -441,6 +473,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// `_ieee80211_set_active_links` from two links to the one at `keep`.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub(super) fn lower_second(&mut self, queue: &mut Queue<Q, B>, keep: u8) -> Result<(), Error> {
         let client = &mut self.client;
         client.emlsr.active = false;

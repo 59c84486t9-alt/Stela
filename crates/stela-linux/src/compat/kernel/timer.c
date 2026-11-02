@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: MIT
-/* Linux's timer lists and timed sleeps, following Linux
- * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 kernel/time/timer.c and
- * kernel/time/sleep_timeout.c. Pending timers are kept in expiry order. The
- * owner's service runs the expired ones (stela_linux_timers_run) when its
- * clock reaches the earliest expiry (stela_linux_timers_next) or a tick
- * passes, each in a soft-timer callback scope, as Linux's timer softirq runs
- * them. Callbacks never sleep and Linux code runs in one context at a time,
- * so no callback is ever running while another task deletes its timer: each
- * delete is also a synchronous one. */
+/* Timer-list API of original Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8
+ * kernel/time/timer.c and sleep_timeout.c. The qualified real service source
+ * runs due callbacks in original softirq nesting. Selected !NO_HZ_COMMON uses
+ * one timer base, including deferrable timers; real HZ_PERIODIC tick delivery
+ * and original accounting remain required producers, not a queue/idle bool.
+ * Serialized nonblocking callback delivery makes a running self-join explicit
+ * rather than fabricating a synchronous cancellation receipt. */
 #include <linux/jiffies.h>
 #include <linux/printk.h>
 #include <linux/sched.h>
@@ -16,12 +14,27 @@
 #include <stela/atomic_callback.h>
 #include <stela/linux.h>
 #include <stela/timer.h>
+#include <stela/time.h>
+#include <linux/limits.h>
 
 static HLIST_HEAD(pending);
+static const struct timer_list *running_timer;
 
 void timer_init_key(struct timer_list *timer, void (*func)(struct timer_list *),
 		    unsigned int flags, const char *name, struct lock_class_key *key)
 {
+    stela_linux_timer_queue_current();
+    if ((flags & TIMER_DEFERRABLE) && IS_ENABLED(CONFIG_NO_HZ_COMMON)) {
+        stela_linux_unsupported("NO_HZ deferrable timer requires actual original idle/base producer");
+        stela_linux_fatal("missing NO_HZ timer producer; original timer retained");
+    }
+    if (flags & TIMER_IRQSAFE) {
+        stela_linux_unsupported("IRQ-safe timer requires original softirq callback with IRQs disabled");
+        stela_linux_fatal("missing IRQ-safe timer callback producer; original timer retained");
+    }
+    /* With selected !NO_HZ_COMMON, original Linux uses one base, including
+     * TIMER_DEFERRABLE. Genuine HZ_PERIODIC tick delivery remains a required
+     * runtime producer; an idle-suppression bool is not its substitute. */
 	(void)name;
 	(void)key;
 	timer->entry.pprev = NULL;
@@ -65,15 +78,17 @@ enum modify {
 /* Whether the timer was pending. A shut-down timer stays inactive. */
 static int modify(struct timer_list *timer, unsigned long expires, enum modify how)
 {
+    stela_linux_timer_queue_current();
 	bool was_pending = timer_pending(timer);
 	if ((how == ONLY_PENDING && !was_pending) ||
 	    (how == ONLY_EARLIER && was_pending && !time_before(expires, timer->expires)))
 		return was_pending;
 	if (!timer->function)
 		return 0;
-	detach(timer);
-	enqueue(timer, expires);
-	return was_pending;
+    detach(timer);
+    enqueue(timer, expires);
+    stela_linux_timers_changed();
+    return was_pending;
 }
 
 int mod_timer(struct timer_list *timer, unsigned long expires)
@@ -93,6 +108,7 @@ int timer_reduce(struct timer_list *timer, unsigned long expires)
 
 void add_timer(struct timer_list *timer)
 {
+    stela_linux_timer_queue_current();
 	if (WARN_ON_ONCE(timer_pending(timer)))
 		return;
 	modify(timer, timer->expires, ANY);
@@ -111,53 +127,75 @@ void add_timer_global(struct timer_list *timer)
 
 void add_timer_on(struct timer_list *timer, int cpu)
 {
-	WARN_ON_ONCE(cpu != 0);
-	add_timer(timer);
+    stela_linux_timer_queue_current();
+    if (cpu != 0) {
+        stela_linux_unsupported("timer target CPU without original online CPU producer");
+        stela_linux_fatal("unsupported timer CPU; original timer retained");
+    }
+    add_timer(timer);
 }
 
 int timer_delete(struct timer_list *timer)
 {
-	return detach(timer);
+    stela_linux_timer_queue_current();
+    int removed = detach(timer);
+    if (removed)
+        stela_linux_timers_changed();
+    return removed;
 }
 
 int timer_delete_sync_try(struct timer_list *timer)
 {
-	return detach(timer);
+    stela_linux_timer_queue_current();
+    if (timer == running_timer)
+        return -1;
+    return timer_delete(timer);
 }
 
 int timer_delete_sync(struct timer_list *timer)
 {
-	return detach(timer);
+    stela_linux_timer_queue_current();
+    if (timer == running_timer) {
+        stela_linux_unsupported("timer_delete_sync on its running callback");
+        stela_linux_fatal("running timer cannot synchronously join itself; owner retained");
+    }
+    return timer_delete(timer);
 }
 
 int timer_shutdown(struct timer_list *timer)
 {
+    stela_linux_timer_queue_current();
 	int was_pending = detach(timer);
-	timer->function = NULL;
-	return was_pending;
+    timer->function = NULL;
+    if (was_pending)
+        stela_linux_timers_changed();
+    return was_pending;
 }
 
 int timer_shutdown_sync(struct timer_list *timer)
 {
-	return timer_shutdown(timer);
+    stela_linux_timer_queue_current();
+    if (timer == running_timer) {
+        stela_linux_unsupported("timer_shutdown_sync on its running callback");
+        stela_linux_fatal("running timer cannot synchronously join itself; owner retained");
+    }
+    return timer_shutdown(timer);
 }
 
 bool stela_linux_timers_next(unsigned long *expires)
 {
-	(void)stela_linux_owner();
-	bool found = stela_linux_hrtimers_next(expires);
-	if (hlist_empty(&pending))
-		return found;
-	unsigned long first = hlist_entry(pending.first, struct timer_list, entry)->expires;
-	if (!found || time_before(first, *expires))
-		*expires = first;
-	return true;
+    stela_linux_timer_queue_current();
+    if (hlist_empty(&pending))
+        return false;
+    *expires = hlist_entry(pending.first, struct timer_list, entry)->expires;
+    return true;
 }
 
 /* Like Linux's expiry, a timer a callback arms for an expiry already past
  * runs on the next pass, not this one. */
-void stela_linux_timers_run(void)
+void stela_linux_timers_run(const struct stela_linux_timer_delivery *delivery)
 {
+    stela_linux_timer_delivery_require(delivery);
 	HLIST_HEAD(expired);
 	struct hlist_node *last = NULL;
 	unsigned long now = jiffies;
@@ -179,44 +217,57 @@ void stela_linux_timers_run(void)
 		hlist_del_init(&timer->entry);
 		struct stela_linux_atomic_callback scope;
 		stela_linux_atomic_callback_begin_soft(&scope);
-		function(timer);
-		stela_linux_atomic_callback_end(&scope);
+        running_timer = timer;
+        function(timer);
+        running_timer = NULL;
+        stela_linux_atomic_callback_end(&scope);
 	}
-	stela_linux_hrtimers_run();
 }
 
 struct process_timer {
-	struct timer_list timer;
-	struct task_struct *task;
+    struct timer_list timer;
+    struct task_struct *task;
 };
-
 static void process_timeout(struct timer_list *timer)
 {
-	wake_up_process(container_of(timer, struct process_timer, timer)->task);
+    wake_up_process(container_of(timer, struct process_timer, timer)->task);
 }
 
 long schedule_timeout(long timeout)
 {
-	if (timeout == MAX_SCHEDULE_TIMEOUT) {
-		schedule();
-		return timeout;
-	}
-	if (timeout < 0) {
-		pr_err("%s: wrong timeout value %lx\n", __func__, timeout);
-		dump_stack();
-		__set_current_state(TASK_RUNNING);
-		return 0;
-	}
-	unsigned long expire = (unsigned long)timeout + jiffies;
-	struct process_timer timer = {.task = current};
-	timer_setup_on_stack(&timer.timer, process_timeout, 0);
-	timer.timer.expires = expire;
-	add_timer(&timer.timer);
-	schedule();
-	timer_delete_sync(&timer.timer);
-	timer_destroy_on_stack(&timer.timer);
-	timeout = (long)(expire - jiffies);
-	return timeout < 0 ? 0 : timeout;
+    if (timeout == MAX_SCHEDULE_TIMEOUT) {
+        schedule();
+        return timeout;
+    }
+    if (timeout < 0) {
+        pr_err("%s: wrong timeout value %lx\n", __func__, timeout);
+        dump_stack();
+        __set_current_state(TASK_RUNNING);
+        return 0;
+    }
+    if (!timeout) {
+        /* Exact original zero-timeout scheduler/wakeup ordering. There is no
+         * positive physical minimum to mint, and a sleeping caller still needs
+         * its original wake source before entering schedule. */
+        struct process_timer timer = {.task = current};
+        timer_setup_on_stack(&timer.timer, process_timeout, 0);
+        timer.timer.expires = jiffies;
+        add_timer(&timer.timer);
+        schedule();
+        timer_delete_sync(&timer.timer);
+        timer_destroy_on_stack(&timer.timer);
+        return 0;
+    }
+    _Static_assert(USEC_PER_SEC % HZ == 0, "relative physical jiffy conversion");
+    u64 quantum_us = USEC_PER_SEC / HZ;
+    if ((u64)timeout > U64_MAX / quantum_us)
+        stela_linux_fatal("physical schedule timeout conversion overflow");
+    unsigned int state = READ_ONCE(current->__state);
+    u64 remaining = stela_linux_minimum_sleep((u64)timeout * quantum_us,
+        state, STELA_MINIMUM_EARLY, quantum_us);
+    if (remaining > LONG_MAX)
+        stela_linux_fatal("physical schedule timeout remainder overflow");
+    return (long)remaining;
 }
 
 long schedule_timeout_interruptible(long timeout)

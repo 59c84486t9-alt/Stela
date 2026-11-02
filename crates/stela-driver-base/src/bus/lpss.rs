@@ -28,6 +28,8 @@ const RESET_FUNCTION_AND_IDMA: u32 = 7;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
+    Claim(crate::bus::pci::requester::ClaimError),
+    Config(crate::bus::pci::ConfigError),
     Unsupported,
     Identity,
     Mapping,
@@ -185,22 +187,28 @@ impl NativeRegisters {
     /// in the consumed resources' backings, including quarantine. A
     /// borrowed external guard that can end first is insufficient. No implicit
     /// identity mapping or firmware-conflict override is permitted.
+    #[expect(
+        clippy::result_large_err,
+        reason = "claim refusal returns the same config and mapping instead of allocating after failure"
+    )]
     pub unsafe fn claim(
         mut requester: StoppedRequester,
         mapping: Mapping,
     ) -> Result<Self, (Error, NativeResources)> {
-        let stopped = requester.check_stopped().is_ok();
+        let stopped = requester.check_stopped();
         let mut function = requester.into_function();
         let checked = (|| {
-            if !stopped {
-                return Err(Error::Configuration);
-            }
+            stopped.map_err(Error::Claim)?;
             let config = function.config();
-            let low = config.read32(0x10);
+            let low = config.read32(0x10)?;
             if low == u32::MAX || low & 9 != 0 || !matches!(low & 6, 0 | 4) {
                 return Err(Error::Mapping);
             }
-            let high = if low & 6 == 4 { config.read32(0x14) } else { 0 };
+            let high = if low & 6 == 4 {
+                config.read32(0x14)?
+            } else {
+                0
+            };
             if high == u32::MAX {
                 return Err(Error::Mapping);
             }
@@ -221,7 +229,7 @@ impl NativeRegisters {
                 return Err(Error::Mapping);
             }
             // Keep the source's memory decode, with no DMA or interrupt publish.
-            let command = config.read16(regs::COMMAND);
+            let command = config.read16(regs::COMMAND)?;
             if command == u16::MAX
                 || command
                     & (regs::COMMAND_MASTER | regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE)
@@ -257,10 +265,10 @@ unsafe impl Registers for NativeRegisters {
     fn identity(&mut self) -> Result<Identity, Error> {
         let expected = u32::from(self.function.vendor) | u32::from(self.function.device) << 16;
         let config = self.function.config();
-        if config.read32(0) != expected {
+        if config.read32(0)? != expected {
             return Err(Error::Identity);
         }
-        let subsystem = config.read32(0x2c);
+        let subsystem = config.read32(0x2c)?;
         if subsystem == u32::MAX {
             return Err(Error::Identity);
         }
@@ -406,3 +414,9 @@ unsafe impl ChildAccess for NativeRegisters {
 
 #[cfg(test)]
 mod tests;
+
+impl From<crate::bus::pci::ConfigError> for Error {
+    fn from(error: crate::bus::pci::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}

@@ -12,7 +12,7 @@ use crate::{
         dma::mapping::DmaDomain,
         irq::{self, Disposition, Handler, IrqController, IrqRegistration, Route, Source},
         pci::{
-            Address, CapabilityError, Function, Layout,
+            Address, Function, Layout,
             msi::{self, DisabledMsiConfig, MsiConfig, MsiConfigSpace, RetainedOwner},
             owned::OwnedConfig,
         },
@@ -280,13 +280,13 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
                 return Err(Error::Requirement("actual retained 8086:9d35 endpoint"));
             }
             let c = f.config();
-            let id = c.read32(0);
-            let class = c.read32(8);
-            let subsystem = c.read32(0x2c);
+            let id = c.read32(0).map_err(Error::ConfigAccess)?;
+            let class = c.read32(8).map_err(Error::ConfigAccess)?;
+            let subsystem = c.read32(0x2c).map_err(Error::ConfigAccess)?;
             if id != 0x9d35_8086
                 || class == u32::MAX
                 || subsystem == u32::MAX
-                || c.read8(0x0e) & 0x7f != 0
+                || c.read8(0x0e).map_err(Error::ConfigAccess)? & 0x7f != 0
             {
                 return Err(Error::Requirement(
                     "readable same native endpoint identity/header",
@@ -296,18 +296,18 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
                 return Err(Error::Requirement("SPT ISH signal-processing class"));
             }
             validate_capabilities(c)?;
-            let command = c.read16(4);
+            let command = c.read16(4).map_err(Error::ConfigAccess)?;
             if command == u16::MAX || command & 4 != 0 || command & 0x400 == 0 || command & 2 == 0 {
                 return Err(Error::Requirement(
                     "independently stopped BM-off MEM-enabled INTx-disabled source",
                 ));
             }
-            let low = c.read32(0x10);
+            let low = c.read32(0x10).map_err(Error::ConfigAccess)?;
             if low == u32::MAX || low & 9 != 0 || !matches!(low & 6, 0 | 4) {
                 return Err(Error::Requirement("ordinary nonprefetchable memory BAR0"));
             }
             let high = if low & 4 != 0 {
-                let h = c.read32(0x14);
+                let h = c.read32(0x14).map_err(Error::ConfigAccess)?;
                 if h == u32::MAX {
                     return Err(Error::Config(0x14));
                 }
@@ -503,20 +503,22 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
         self.started = true;
         let f = self.function.as_mut().unwrap();
         let c = f.config();
-        if c.read32(0) != 0x9d35_8086 || c.read32(8) as u8 != self.revision {
+        if c.read32(0).map_err(Error::ConfigAccess)? != 0x9d35_8086
+            || c.read32(8).map_err(Error::ConfigAccess)? as u8 != self.revision
+        {
             return Err(Error::Requirement(
                 "unchanged actual endpoint before startup",
             ));
         }
         // Original config owner enables BME only under the already attached real
         // isolated domain. RMP2 remains0 until the route is published.
-        let observed = c.read16(4);
+        let observed = c.read16(4).map_err(Error::ConfigAccess)?;
         if observed == u16::MAX {
             return Err(Error::Config(4));
         }
         let command = observed | 0x406;
-        c.write16(4, command);
-        if c.read16(4) != command {
+        c.write16(4, command).map_err(Error::ConfigAccess)?;
+        if c.read16(4).map_err(Error::ConfigAccess)? != command {
             return Err(Error::Config(4));
         }
         let function = self.function.take().unwrap();
@@ -934,16 +936,16 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
             core::hint::spin_loop();
         }
         let stop_config = |c: &mut C| -> Result<()> {
-            if c.read32(0) != 0x9d35_8086 {
+            if c.read32(0).map_err(Error::ConfigAccess)? != 0x9d35_8086 {
                 return Err(Error::Config(0));
             }
-            let command = c.read16(4);
+            let command = c.read16(4).map_err(Error::ConfigAccess)?;
             if command == u16::MAX {
                 return Err(Error::Config(4));
             }
             let wanted = (command | 0x400) & !4;
-            c.write16(4, wanted);
-            if c.read16(4) != wanted {
+            c.write16(4, wanted).map_err(Error::ConfigAccess)?;
+            if c.read16(4).map_err(Error::ConfigAccess)? != wanted {
                 return Err(Error::Config(4));
             }
             Ok(())
@@ -1000,19 +1002,15 @@ impl<C: Configuration, R: Registers, T: Time> Drop for Native<C, R, T> {
     }
 }
 fn validate_capabilities<C: Configuration>(c: &C) -> Result<()> {
-    if c.read16(6) == u16::MAX || c.read16(6) & 0x10 == 0 {
+    if c.read16(6).map_err(Error::ConfigAccess)? == u16::MAX
+        || c.read16(6).map_err(Error::ConfigAccess)? & 0x10 == 0
+    {
         return Err(Error::Requirement("actual native PCI capabilities"));
     }
     let mut msi = false;
     let mut pm = false;
     for entry in crate::bus::pci::capability::capabilities(c) {
-        let entry = entry.map_err(|error| match error {
-            CapabilityError::FailedRead { offset } => Error::Config(offset),
-            CapabilityError::OutOfRange { .. } | CapabilityError::Overlap { .. } => {
-                Error::Requirement("native capability extent")
-            }
-            _ => Error::Requirement("bounded nonoverlapping native capabilities"),
-        })?;
+        let entry = entry.map_err(Error::Capability)?;
         let at = entry.offset;
         match entry.id {
             5 => {
@@ -1020,7 +1018,7 @@ fn validate_capabilities<C: Configuration>(c: &C) -> Result<()> {
                     return Err(Error::Requirement("one actual MSI capability"));
                 }
                 msi = true;
-                let flags = c.read16(at + 2);
+                let flags = c.read16(at + 2).map_err(Error::ConfigAccess)?;
                 if flags & !0x1fe != 0
                     || (flags >> 1) & 7 > 5
                     || (flags >> 4) & 7 > (flags >> 1) & 7
@@ -1029,12 +1027,12 @@ fn validate_capabilities<C: Configuration>(c: &C) -> Result<()> {
                 }
             }
             1 => {
-                if pm || c.read16(at + 4) & 3 != 0 {
+                if pm || c.read16(at + 4).map_err(Error::ConfigAccess)? & 3 != 0 {
                     return Err(Error::Requirement("actual single D0 PM capability"));
                 }
                 pm = true;
             }
-            0x11 if c.read16(at + 2) & 0x8000 != 0 => {
+            0x11 if c.read16(at + 2).map_err(Error::ConfigAccess)? & 0x8000 != 0 => {
                 return Err(Error::Requirement(
                     "inactive MSI-X before native ISH admission",
                 ));

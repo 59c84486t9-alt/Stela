@@ -18,6 +18,10 @@ const EXTENDED_END: u16 = 0x1000;
 /// Why a walk stopped. Each variant carries the offset of the entry at fault.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CapabilityError {
+    Config {
+        offset: u16,
+        error: super::ConfigError,
+    },
     /// A header, or a register sizing it, read as all ones.
     FailedRead { offset: u16 },
     /// A pointer with its reserved low two bits set.
@@ -36,6 +40,7 @@ pub enum CapabilityError {
 impl CapabilityError {
     pub fn offset(&self) -> u16 {
         match *self {
+            Self::Config { offset, .. } => offset,
             Self::FailedRead { offset }
             | Self::Misaligned { offset }
             | Self::OutOfRange { offset }
@@ -124,11 +129,12 @@ pub struct Config<'a, C: ?Sized>(pub &'a C);
 impl<C: ConfigSpace + ?Sized> CapabilityRead for Config<'_, C> {
     type Error = CapabilityError;
     fn read(&mut self, offset: u16, bytes: u8) -> Result<u32, CapabilityError> {
-        Ok(match bytes {
-            1 => u32::from(self.0.read8(offset)),
-            2 => u32::from(self.0.read16(offset)),
+        match bytes {
+            1 => self.0.read8(offset).map(u32::from),
+            2 => self.0.read16(offset).map(u32::from),
             _ => self.0.read32(offset),
-        })
+        }
+        .map_err(|error| CapabilityError::Config { offset, error })
     }
 }
 
@@ -169,19 +175,38 @@ pub fn extended_capabilities<C: ConfigSpace + ?Sized>(
 
 /// Whether `config`'s standard list is well formed, with power management in
 /// D0 and MSI and MSI-X disabled: a stopped function's interrupt and power state.
-pub fn stopped_in_d0<C: ConfigSpace + ?Sized>(config: &C) -> bool {
-    capabilities(config).all(|entry| {
-        entry.is_ok_and(|entry| {
-            let control = config.read16(entry.offset + 2);
-            control != u16::MAX
-                && match entry.id {
-                    0x01 => config.read16(entry.offset + 4) & 3 == 0,
-                    0x05 => control & 1 == 0,
-                    0x11 => control & 1 << 15 == 0,
-                    _ => true,
-                }
-        })
-    })
+pub fn stopped_in_d0<C: ConfigSpace + ?Sized>(config: &C) -> Result<bool, CapabilityError> {
+    for entry in capabilities(config) {
+        let entry = entry?;
+        let control = config
+            .read16(entry.offset + 2)
+            .map_err(|error| CapabilityError::Config {
+                offset: entry.offset + 2,
+                error,
+            })?;
+        if control == u16::MAX {
+            return Ok(false);
+        }
+        let stopped = match entry.id {
+            0x01 => {
+                config
+                    .read16(entry.offset + 4)
+                    .map_err(|error| CapabilityError::Config {
+                        offset: entry.offset + 4,
+                        error,
+                    })?
+                    & 3
+                    == 0
+            }
+            0x05 => control & 1 == 0,
+            0x11 => control & (1 << 15) == 0,
+            _ => true,
+        };
+        if !stopped {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Dword cells of one list's region: visited headers and reserved bytes.

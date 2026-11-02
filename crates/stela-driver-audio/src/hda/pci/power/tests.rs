@@ -2,6 +2,7 @@
 //! PCI/MMIO power-transition and failure models.
 //! Addresses/PM sequencing are hardcoded independently of production constants.
 use super::*;
+use crate::bus::i2c::Timer as NominalTimer;
 use crate::hda::hdmi::{DisplayAudioIdentity, DisplayAudioPort, DisplayAudioState};
 use crate::{
     Direction, PcmFormat,
@@ -19,7 +20,7 @@ use core::{
 
 #[derive(Clone)]
 struct Clock(Arc<AtomicU64>);
-impl Timer for Clock {
+impl crate::bus::i2c::Timer for Clock {
     fn now_us(&self) -> u64 {
         self.0.load(Ordering::SeqCst)
     }
@@ -245,27 +246,44 @@ impl State {
 }
 struct Pci(Rc<RefCell<State>>);
 impl ConfigSpace for Pci {
-    fn read32(&self, offset: u16) -> u32 {
-        let s = self.0.borrow();
-        let value = s.config[usize::from(offset / 4)];
-        if offset == 0x54 {
-            if s.fail_power_read {
-                return u32::MAX;
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        let value = {
+            let s = self.0.borrow();
+            let value = s.config[usize::from(offset / 4)];
+            if offset == 0x54 {
+                if s.fail_power_read {
+                    return Ok(u32::MAX);
+                }
+                if s.clock.now_us() < s.ready {
+                    return Ok(value & !3 | u32::from(s.previous_power));
+                }
             }
-            if s.clock.now_us() < s.ready {
-                return value & !3 | u32::from(s.previous_power);
-            }
-        }
-        value
+            value
+        };
+        Ok(value)
     }
-    fn write32(&mut self, offset: u16, value: u32) {
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         self.0.borrow_mut().pci_write(offset, 4, value);
+
+        Ok(())
     }
-    fn write16(&mut self, offset: u16, value: u16) {
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
         self.0.borrow_mut().pci_write(offset, 2, u32::from(value));
+
+        Ok(())
     }
-    fn write8(&mut self, offset: u16, value: u8) {
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
         self.0.borrow_mut().pci_write(offset, 1, u32::from(value));
+
+        Ok(())
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
     }
 }
 #[derive(Clone)]
@@ -377,7 +395,7 @@ fn controller<'a>(
     mmio: Mmio,
     clock: Clock,
     ram: &mut Ram,
-) -> Controller<PciRegisters<'a, Mmio, Pci>, Clock> {
+) -> Controller<PciRegisters<Mmio, &'a mut Function<Pci>>, Clock> {
     let bar = Bar::Memory {
         address: 0xfebf_0000,
         size: 0x4000,
@@ -401,7 +419,11 @@ fn controller<'a>(
     };
     // SAFETY: The adapter keeps this test's PCI/MMIO model and ram owns the coherent
     // DMA allocation. Model activity occurs only while the controller is polled.
-    unsafe { Controller::new(registers, clock, &mut ram.allocator, config) }.unwrap()
+    unsafe {
+        Controller::new(registers, clock, &mut ram.allocator, config)
+            .map_err(|failure| failure.error)
+    }
+    .unwrap()
 }
 
 #[test]
@@ -738,5 +760,16 @@ fn failed_resume_keeps_owner() {
         c.resume_pci_d0().unwrap();
         assert_eq!((c.corb.physical(), c.rirb.physical()), dma);
         c.shutdown().unwrap();
+    }
+}
+
+// SAFETY: private synchronous peripheral peer consumes model microseconds.
+unsafe impl crate::bus::pci::power::Timer for Clock {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        Ok(())
+    }
+    fn wait_us(&self, us: u64) -> Result<(), crate::bus::pci::power::Error> {
+        self.0.fetch_add(us, Ordering::SeqCst);
+        Ok(())
     }
 }

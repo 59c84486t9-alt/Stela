@@ -51,7 +51,7 @@ use super::{
     ring::{DESCRIPTOR, DESCRIPTORS, Ring},
 };
 use crate::{
-    Clock, Handoff,
+    Handoff,
     block::BlockError,
     bus::{
         dma::{DmaAllocator, DmaBuffer},
@@ -248,17 +248,16 @@ impl Registers for Mmio {
 }
 
 trait Timer {
-    fn delay(&self, microseconds: u64);
+    fn delay(&self, microseconds: u64) -> Result<(), BlockError>;
     fn wait(&self, microseconds: u64, ready: impl FnMut() -> bool) -> bool;
 }
 
-impl Timer for Clock {
-    fn delay(&self, microseconds: u64) {
-        self.delay(microseconds);
+impl Timer for crate::timing::Timing {
+    fn delay(&self, us: u64) -> Result<(), BlockError> {
+        crate::timing::Timing::delay(self, us)
     }
-
-    fn wait(&self, microseconds: u64, ready: impl FnMut() -> bool) -> bool {
-        self.wait(microseconds, ready)
+    fn wait(&self, us: u64, ready: impl FnMut() -> bool) -> bool {
+        crate::timing::Timing::wait(self, us, ready)
     }
 }
 
@@ -287,7 +286,7 @@ fn reset(device: &impl Registers, clock: &impl Timer) -> Result<(), BlockError> 
         return Err(BlockError::Timeout);
     }
     device.read(STATUS); // flush posted PCIe writes before the settle time
-    clock.delay(MASTER_SETTLE_US);
+    clock.delay(MASTER_SETTLE_US)?;
     ownership(device, clock)?;
     device.write(CTRL, device.read(CTRL) | CTRL_RST);
     let reset_done = clock.wait(RESET_WAIT_US, || device.read(CTRL) & CTRL_RST == 0);
@@ -295,7 +294,7 @@ fn reset(device: &impl Registers, clock: &impl Timer) -> Result<(), BlockError> 
     if !reset_done || !clock.wait(RESET_WAIT_US, || device.read(EECD) & EECD_AUTO_RD != 0) {
         return Err(BlockError::Timeout);
     }
-    clock.delay(PHY_CONFIGURATION_US);
+    clock.delay(PHY_CONFIGURATION_US)?;
     device.write(IMC, u32::MAX);
     device.read(ICR);
     Ok(())
@@ -408,7 +407,8 @@ pub struct E1000e {
     transmit: Ring,
     dropping_receive: bool,
     mac: Mac,
-    clock: Clock,
+    clock: crate::timing::Timing,
+    timing_failure: Option<BlockError>,
     /// When the next watchdog check is due, and how many checks in a row
     /// found the PHY hung.
     watchdog_at: u64,
@@ -434,18 +434,20 @@ impl E1000e {
         function: &mut Function,
         handoff: &Handoff,
         dma: &mut dyn DmaAllocator,
+        minimum: alloc::rc::Rc<dyn crate::bus::pci::power::Timer>,
     ) -> Result<Self, BlockError> {
+        let clock = crate::timing::Timing::new(handoff.clock, minimum)?;
         if !matches(function) {
             return Err(BlockError::Unsupported("not an Intel 82574L"));
         }
         // SAFETY: the constructor's caller owns segment configuration and
         // the mapped ECAM handoff. Do this before enabling device decoding.
         unsafe { pci::disable_aspm_link(function, handoff)? };
-        function.power_up(&handoff.clock)?;
-        let bars = function.bars();
+        function.power_up(clock.minimum())?;
+        let bars = function.bars()?;
         let device = registers(handoff, bars[0], 0, REGISTER_BYTES)?;
-        function.enable_polled();
-        let signalled = match (handoff.completion, function.interrupts().msix) {
+        function.enable_polled()?;
+        let signalled = match (handoff.completion, function.interrupts()?.msix) {
             (Some(message), Some(msix)) => {
                 let table = registers(
                     handoff,
@@ -464,21 +466,22 @@ impl E1000e {
             }
             _ => false,
         };
-        reset(&device, &handoff.clock)?;
+        reset(&device, &clock)?;
         let mac = station(device.read32(RAL), device.read32(RAH)).ok_or(
             BlockError::Unsupported("82574L without a valid NVM MAC address"),
         )?;
-        configure_phy(&device, &handoff.clock)?;
+        configure_phy(&device, &clock)?;
         let mut net = Self {
             device,
             receive: Ring::new(dma)?,
             transmit: Ring::new(dma)?,
             dropping_receive: false,
             mac,
-            clock: handoff.clock,
+            clock,
             watchdog_at: 0,
             phy_hangs: 0,
             faulted: false,
+            timing_failure: None,
             location: format!("{} Intel 82574L", function.address),
             signalled,
         };
@@ -490,6 +493,9 @@ impl E1000e {
     /// link took down with it, and reinitialize after two PHY hang reports
     /// in a row. Returns the carrier.
     fn watchdog(&mut self) -> Result<bool, LinkError> {
+        if let Some(error) = &self.timing_failure {
+            return Err(LinkError::Pci(error.clone()));
+        }
         let status = self.device.read32(STATUS);
         self.faulted |= status == u32::MAX;
         if self.faulted {
@@ -532,13 +538,27 @@ impl E1000e {
     /// Linux's reset task: reset the MAC and PHY and bring the rings back.
     fn reinitialize(&mut self) -> Result<(), LinkError> {
         let failed = |error: BlockError| {
+            if matches!(error, BlockError::PciPower(_)) {
+                return LinkError::Pci(error);
+            }
             LinkError::Adapter(format!(
                 "{} reinitialization failed: {error}",
                 self.location
             ))
         };
-        reset(&self.device, &self.clock).map_err(failed)?;
-        configure_phy(&self.device, &self.clock).map_err(failed)?;
+        if let Some(error) = &self.timing_failure {
+            return Err(LinkError::Pci(error.clone()));
+        }
+        let prepared = reset(&self.device, &self.clock)
+            .and_then(|()| configure_phy(&self.device, &self.clock));
+        if let Err(error) = prepared {
+            if matches!(error, BlockError::PciPower(_)) {
+                self.timing_failure = Some(error.clone());
+                self.faulted = true;
+                return Err(LinkError::Pci(error));
+            }
+            return Err(failed(error));
+        }
         self.receive.reset();
         self.transmit.reset();
         self.dropping_receive = false;
@@ -653,7 +673,7 @@ impl Link for E1000e {
         if !self.watchdog()? {
             return Err(LinkError::NoCarrier);
         }
-        if !self.transmit.free(self.clock, transmitted) {
+        if !self.transmit.free(self.clock.nominal(), transmitted) {
             return Err(LinkError::Adapter(format!(
                 "{} transmit ring stalled",
                 self.location
@@ -681,6 +701,9 @@ impl Link for E1000e {
     }
 
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
+        if let Some(error) = &self.timing_failure {
+            return Err(LinkError::Pci(error.clone()));
+        }
         // Bound processing even if a device continually supplies bad frames.
         for _ in 0..DESCRIPTORS {
             let index = self.receive.next;
@@ -744,3 +767,6 @@ impl Link for E1000e {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+use crate::Clock;

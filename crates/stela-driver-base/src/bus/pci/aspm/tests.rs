@@ -18,21 +18,24 @@ struct Config {
 }
 
 impl ConfigSpace for Config {
-    fn read32(&self, offset: u16) -> u32 {
-        if self.failed_read == Some(offset) {
-            return u32::MAX;
-        }
-        self.words[usize::from(offset / 4)]
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        Ok({
+            if self.failed_read == Some(offset) {
+                return Ok(u32::MAX);
+            }
+            self.words[usize::from(offset / 4)]
+        })
     }
-    fn write32(&mut self, offset: u16, value: u32) {
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         assert!(
             offset >= 0x100,
             "ASPM must not write a DWORD containing W1C Link Status"
         );
         self.writes.borrow_mut().push((self.address, offset, value));
         self.words[usize::from(offset / 4)] = value | if self.refuses_l1ss { ASPM_L1_2 } else { 0 };
+        Ok(())
     }
-    fn write16(&mut self, offset: u16, value: u16) {
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
         self.writes
             .borrow_mut()
             .push((self.address, offset, u32::from(value)));
@@ -44,6 +47,21 @@ impl ConfigSpace for Config {
         };
         let word = &mut self.words[usize::from(offset / 4)];
         *word = (*word & !(0xffff << shift)) | (u32::from(value) << shift);
+        Ok(())
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        let shift = (offset & 3) * 8;
+        let word = self.read32(offset & !3)? & !(0xff << shift) | u32::from(value) << shift;
+        self.write32(offset & !3, word)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
     }
 }
 
@@ -129,23 +147,23 @@ fn link_speed_reads_the_status_or_zero_without_a_link() {
     let writes = Writes::default();
     let mut endpoint = device(address(0, 8, 0), None, &writes);
     endpoint.config.words[20] = 0x0043_0000;
-    assert_eq!(link_speed(&endpoint), 3);
+    assert_eq!(link_speed(&endpoint).unwrap(), 3);
     endpoint.config.words[16] = (1 | 9 << 4) << 16 | u32::from(CAPABILITY_PCIE);
-    assert_eq!(link_speed(&endpoint), 0);
+    assert_eq!(link_speed(&endpoint).unwrap(), 0);
 }
 
 #[test]
 fn aspm_control_reads_the_link_or_zero_without_one() {
     let writes = Writes::default();
     let mut endpoint = device(address(0, 8, 0), None, &writes);
-    assert_eq!(aspm_control(&endpoint), PCIE_ASPM);
+    assert_eq!(aspm_control(&endpoint).unwrap(), PCIE_ASPM);
     endpoint.config.words[20] = 0xc000_a5a2;
-    assert_eq!(aspm_control(&endpoint), 2);
-    assert_eq!(link_control_word(&endpoint), 0xa5a2);
+    assert_eq!(aspm_control(&endpoint).unwrap(), 2);
+    assert_eq!(link_control_word(&endpoint).unwrap(), 0xa5a2);
     // A root-complex integrated endpoint has no link.
     endpoint.config.words[16] = (1 | 9 << 4) << 16 | u32::from(CAPABILITY_PCIE);
-    assert_eq!(aspm_control(&endpoint), 0);
-    assert_eq!(link_control_word(&endpoint), 0);
+    assert_eq!(aspm_control(&endpoint).unwrap(), 0);
+    assert_eq!(link_control_word(&endpoint).unwrap(), 0);
     assert!(writes.borrow().is_empty());
 }
 
@@ -194,9 +212,9 @@ fn ecam_halfword_store_does_not_replace_the_adjacent_halfword() {
     let mut words = [0xc000_a5a3u32; 64];
     // SAFETY: the fixture owns this exact stable ECAM backing.
     let mut config = unsafe { EcamConfig::raw(words.as_mut_ptr() as u64) };
-    config.write16(0x50, 0xa5a0);
+    config.write16(0x50, 0xa5a0).unwrap();
     assert_eq!(words[20], 0xc000_a5a0);
-    config.write16(0x52, 0x1234);
+    config.write16(0x52, 0x1234).unwrap();
     assert_eq!(words[20], 0x1234_a5a0);
 }
 
@@ -325,7 +343,13 @@ fn l1ss_failed_reads_and_refused_changes_leave_observable_partial_state() {
         parent.config.failed_read = Some(failed);
         assert_eq!(
             disable_l1_2_with(&mut endpoint, core::slice::from_mut(&mut parent)),
-            Err(BlockError::Device { status: u32::MAX })
+            if failed == 0x180 {
+                Err(BlockError::PciCapability(
+                    super::super::CapabilityError::FailedRead { offset: failed },
+                ))
+            } else {
+                Err(BlockError::Device { status: u32::MAX })
+            }
         );
         assert!(writes.borrow().is_empty());
     }

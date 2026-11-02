@@ -38,7 +38,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         tries: usize,
     ) -> Result<(), BlockError> {
         for _ in 0..tries {
-            self.timer.delay(100);
+            self.timer.delay(100)?;
             if self.mmio8(reg)? & mask == expected {
                 return Ok(());
             }
@@ -110,7 +110,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         }
         let r = self.registers;
         r.write32(MISC, self.mmio32(MISC)? | RXDV_GATED); // RXDV gate.
-        self.timer.delay(2_000);
+        self.timer.delay(2_000)?;
         if self.revision.version < 61 {
             self.poll32(TX_CONFIG, TX_FIFO_EMPTY, true, 100, 42)?;
         } else if self.revision.version >= 63 {
@@ -125,7 +125,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         if self.revision.version >= 63 {
             let mut ready = false;
             for _ in 0..42 {
-                self.timer.delay(100);
+                self.timer.delay(100)?;
                 if self.mmio16(INTERRUPT_MITIGATION)? & 0x0103 == 0x0103 {
                     ready = true;
                     break;
@@ -136,7 +136,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
             }
         }
         r.write8(COMMAND, self.mmio8(COMMAND)? & !ENABLE);
-        self.timer.delay(1_000);
+        self.timer.delay(1_000)?;
         r.write8(MCU, self.mmio8(MCU)? & !MCU_OOB);
         self.mac_ocp_modify(0xe8de, 1 << 14, 0)?;
         self.wait8(MCU, LINK_LIST_READY, LINK_LIST_READY, 42)?; // Shared link-list ownership ready.

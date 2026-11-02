@@ -26,6 +26,10 @@ pub(in crate::usb) fn block(error: ehci::Error) -> BlockError {
         ehci::Error::Device(_) if error.stalled() => BlockError::Device { status: STALL },
         ehci::Error::Device(_) => BlockError::Protocol("EHCI transaction error"),
         ehci::Error::Timeout => BlockError::Timeout,
+        ehci::Error::Minimum(error) => BlockError::PciPower(error),
+        ehci::Error::Config(error) => BlockError::Config(error),
+        ehci::Error::Mapping(error) => BlockError::Mmio(error),
+        ehci::Error::Irq(error) => BlockError::Irq(error),
         ehci::Error::Unsupported(why) => BlockError::Unsupported(why),
         ehci::Error::Stale | ehci::Error::Removed => {
             BlockError::Unsupported("EHCI device no longer attached")
@@ -129,6 +133,12 @@ impl Io for EhciBulk {
     fn delay(&self, micros: u64) {
         self.clock.delay(micros);
     }
+    fn minimum_wait(&mut self, micros: u64) -> Result<(), BlockError> {
+        self.controller
+            .borrow_mut()
+            .wait_minimum(micros)
+            .map_err(block)
+    }
     fn now_us(&self) -> u64 {
         self.clock.now_us()
     }
@@ -154,6 +164,10 @@ impl Bot<EhciBulk> {
     /// Linux `usb_reset_device` for a root device: reset its port, address
     /// and configure it afresh, check it is the same device and keep the
     /// two transport allocations, as [`Bot::reset_and_rebind`] does on xHCI.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(in crate::usb) fn reset_and_rebind_ehci(&mut self) -> Result<Self, (String, BlockError)> {
         self.poisoned = true;
         let fail = |why| {

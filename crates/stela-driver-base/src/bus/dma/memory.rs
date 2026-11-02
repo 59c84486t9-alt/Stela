@@ -232,6 +232,14 @@ impl PinnedPages {
         })
     }
 
+    /// Additional actual pin/mapping views prevent native epoch disposal.
+    /// False is not proof that raw/C/DMA aliases retired; those are separate
+    /// unsafe producer obligations. This observes no external backing callback.
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn has_other_views(&self) -> bool {
+        Arc::strong_count(&self.backing) != 1
+    }
+
     /// Exact requested payload length, independently of whole-page padding.
     pub fn logical_bytes(&self) -> usize {
         self.logical_bytes

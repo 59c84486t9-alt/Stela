@@ -108,6 +108,21 @@ impl From<nvm::Error> for Error {
         Self::Nvm(value)
     }
 }
+impl Error {
+    fn minimum_cause(&self) -> Option<crate::bus::pci::power::Error> {
+        match self {
+            Self::Phy(error) => match error.primary {
+                Fault::Minimum(cause) => Some(cause),
+                _ => match error.cleanup {
+                    Some(Fault::Minimum(cause)) => Some(cause),
+                    _ => None,
+                },
+            },
+            Self::Nvm(error) => error.minimum_cause(),
+            _ => None,
+        }
+    }
+}
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "PCH Ethernet: {self:?}")
@@ -119,6 +134,15 @@ impl core::error::Error for Error {}
 /// Neither adapter escapes the controller, so another user cannot reset it or
 /// sequence flash while a PHY operation is in progress.
 struct Bus<R>(Rc<RefCell<R>>);
+fn qualified_bus<R, D: Delay>(io: R, delay: D) -> Result<(Bus<R>, D), Error> {
+    match delay.check() {
+        Ok(()) => Ok((Bus(Rc::new(RefCell::new(io))), delay)),
+        Err(error) => {
+            core::mem::forget((io, delay));
+            Err(Fault::Minimum(error).into())
+        }
+    }
+}
 impl<R> Clone for Bus<R> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
@@ -181,7 +205,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         if !matches!(device, 0x1502 | 0x1503) {
             return Err(Error::UnsupportedDevice(device));
         }
-        let bus = Bus(Rc::new(RefCell::new(io)));
+        let (bus, delay) = qualified_bus(io, delay)?;
         // SAFETY: the constructor supplies one real same-function reset grant;
         // only these two private serialized adapters keep it.
         let nvm = unsafe { nvm::Nvm::new(nvm::Layout::Pch2, bus.clone(), delay.clone()) }?;
@@ -212,6 +236,11 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
     }
     pub fn identity(&self) -> Identity {
         self.identity
+    }
+    fn minimum_failure(&self) -> Option<crate::bus::pci::power::Error> {
+        self.phy
+            .minimum_failure
+            .or_else(|| self.nvm.minimum_failure())
     }
     pub fn is_poisoned(&self) -> bool {
         self.poisoned || self.phy.is_poisoned() || self.nvm.is_poisoned()
@@ -255,7 +284,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         self.phy_reset()?;
         self.configuration_done()?;
         self.qualify()?;
-        self.phy.delay.delay(10_000);
+        self.phy.wait_minimum(10_000)?;
         self.gate(false)?;
         self.identity = self.phy.identify()?;
         // e1000e_reset sets the ordinary-MTU PCH2 allocation before invoking
@@ -276,10 +305,10 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
             let ctrl = p.read_mac(CTRL)?;
             p.write_mac(CTRL, ctrl | PHY_RESET)?;
             p.read_mac(STATUS)?;
-            p.delay.delay(100);
+            p.wait_minimum(100)?;
             p.write_mac(CTRL, ctrl)?;
             p.read_mac(STATUS)?;
-            p.delay.delay(150);
+            p.wait_minimum(150)?;
             Ok(())
         })?;
         Ok(())
@@ -294,7 +323,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
                 drained = true;
                 break;
             }
-            self.phy.delay.delay(100);
+            self.phy.wait_minimum(100)?;
         }
         if !drained {
             return Err(Error::MasterTimeout);
@@ -303,7 +332,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         self.write(RCTL, 0)?;
         self.write(TCTL, PAD_SHORT)?;
         self.read(STATUS)?;
-        self.phy.delay.delay(10_000);
+        self.phy.wait_minimum(10_000)?;
         let ctrl = self.read(CTRL)? | PHY_RESET;
         self.qualify()?;
         if !self.profile.is_lpt_or_newer() {
@@ -314,7 +343,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         // it would access a reset-invalid semaphore. Even an uncertain failed
         // store must observe the full no-register-access quiet interval.
         let reset = self.phy.write_mac(CTRL, ctrl | RESET);
-        self.phy.delay.delay(20_000);
+        self.phy.wait_minimum(20_000)?;
         reset?;
         if self.read(CTRL)? & RESET != 0 {
             return Err(Error::ResetStuck);
@@ -338,11 +367,11 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         Ok(())
     }
     fn configuration_done(&mut self) -> Result<(), Error> {
-        self.phy.delay.delay(10_000);
+        self.phy.wait_minimum(10_000)?;
         let mut ready = false;
         for _ in 0..1500 {
             let status = self.read(STATUS)?;
-            self.phy.delay.delay(100);
+            self.phy.wait_minimum(100)?;
             if status & INIT_DONE != 0 {
                 ready = true;
                 break;
@@ -375,7 +404,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
     }
     fn post_reset(&mut self) -> Result<(), Error> {
         self.qualify()?;
-        self.phy.delay.delay(10_000);
+        self.phy.wait_minimum(10_000)?;
         if !self.profile.is_lpt_or_newer() {
             self.modify(769, 16, 0, MDIO_SLOW)?;
             self.phy.transaction(|p| {
@@ -388,7 +417,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         self.oem()?;
         if !self.profile.is_lpt_or_newer() {
             self.qualify()?;
-            self.phy.delay.delay(10_000);
+            self.phy.wait_minimum(10_000)?;
             self.gate(false)?;
             self.phy
                 .transaction(|p| Self::emi(p, LPI_UPDATE_TIMER, 0x1387))?;

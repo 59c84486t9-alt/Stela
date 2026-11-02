@@ -14,7 +14,7 @@ use crate::bus::{
     },
     thunderbolt::manager::Platform,
 };
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, rc::Rc, sync::Arc};
 use core::fmt;
 
 /// Complete configuration observations for one adopted PCI subtree.
@@ -23,12 +23,16 @@ use core::fmt;
 pub struct ArrivalInventory<'a> {
     pub bridge: Address,
     pub functions: &'a [Address],
-    pub read32: &'a mut dyn FnMut(Address, u16) -> Option<u32>,
+    pub read32:
+        &'a mut dyn FnMut(Address, u16) -> Result<Option<u32>, crate::bus::pci::ConfigError>,
 }
 
 /// Why a service refused a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServiceError {
+    Config(crate::bus::pci::ConfigError),
+    PciCapability(crate::bus::pci::CapabilityError),
+    MinimumDelay(crate::platform::work::WorkError),
     /// The mount has no such service, such as no ACPI namespace.
     Unavailable,
     /// The mount refuses it, such as a requester its IOMMU cannot isolate.
@@ -40,9 +44,12 @@ pub enum ServiceError {
 impl fmt::Display for ServiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MinimumDelay(error) => write!(f, "minimum delay provider: {error:?}"),
             Self::Unavailable => f.write_str("native resource service unavailable"),
             Self::Refused(why) => f.write_str(why),
             Self::Mapping(error) => write!(f, "native mapping: {error:?}"),
+            Self::Config(error) => error.fmt(f),
+            Self::PciCapability(error) => write!(f, "PCI capability: {error:?}"),
             Self::Claim(error) => write!(f, "stopped requester: {error:?}"),
         }
     }
@@ -71,6 +78,10 @@ impl fmt::Display for ServiceError {
 /// RAM through: writable, live in every such context for the program, and
 /// never aliased by a Rust reference.
 pub unsafe trait NativeServices {
+    /// The original clock epoch's checked physical minimum-delay provider.
+    /// Acquire before PCI PM/reset effects. Nominal rates or scheduling clocks
+    /// cannot implement the hardware minimum; no fallback is supplied here.
+    fn minimum_delay(&self) -> Result<Rc<dyn crate::bus::pci::power::Timer>, ServiceError>;
     /// Keep the original configuration and root path for the owning driver's
     /// cold vendor preparation. PCI controls are gated, but no engine stop,
     /// posted-write completion or private domain is granted. The first attach
@@ -247,6 +258,16 @@ pub(crate) mod tests {
         pub(crate) requests: RefCell<Vec<Address>>,
         pub(crate) preparations: RefCell<Vec<Address>>,
         pub(crate) stopped: RefCell<Vec<Address>>,
+        model_minimum: bool,
+    }
+    impl Refusing {
+        /// Isolated timing-only fixture. All physical grants still refuse.
+        pub(crate) fn minimum_only() -> Self {
+            Self {
+                model_minimum: true,
+                ..Self::default()
+            }
+        }
     }
 
     struct NoPages;
@@ -261,8 +282,19 @@ pub(crate) mod tests {
         }
     }
 
-    // SAFETY: every request is refused; no owner is transferred.
+    // SAFETY: every physical request is refused; no config, BAR, DMA or IRQ
+    // owner is transferred. The explicit private timing fixture cannot reach
+    // hardware because no physical service can succeed.
     unsafe impl NativeServices for Refusing {
+        fn minimum_delay(&self) -> Result<Rc<dyn crate::bus::pci::power::Timer>, ServiceError> {
+            if self.model_minimum {
+                Ok(crate::minimum_model::owned(crate::Clock {
+                    ticks_per_microsecond: 1000,
+                }))
+            } else {
+                Err(ServiceError::Unavailable)
+            }
+        }
         fn prepare_requester(&self, address: Address) -> Result<PreparingRequester, ServiceError> {
             self.requests.borrow_mut().push(address);
             self.preparations.borrow_mut().push(address);

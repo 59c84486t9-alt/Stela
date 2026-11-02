@@ -69,6 +69,7 @@ pub enum Error {
     InvalidLayout,
     OutOfMemory,
     Context(i32),
+    Config(crate::bus::pci::ConfigError),
     Native(u32),
     Services(ServiceError),
     Retired,
@@ -146,15 +147,15 @@ struct Bundle<C: ConfigSpace + 'static> {
     owner: Box<dyn Owner>,
     _apertures: Apertures,
     identity: Identity,
-    callback_failure: Cell<Option<i32>>,
+    callback_failure: Cell<Option<Error>>,
     _pin: PhantomPinned,
 }
 impl<C: ConfigSpace + 'static> Bundle<C> {
-    fn callback_context(&self) -> Result<(), i32> {
+    fn callback_context(&self) -> Result<(), Error> {
         if let Some(status) = self.callback_failure.get() {
             return Err(status);
         }
-        let result = self.owner.check_context();
+        let result = self.owner.check_context().map_err(Error::Context);
         if let Err(status) = result {
             // Preserve the first callback-context failure. A later
             // successful query cannot certify an effect that was uncertain.
@@ -173,27 +174,27 @@ unsafe extern "C" fn checked_read<C: ConfigSpace + 'static>(
     width: u32,
     value: *mut u32,
 ) -> u32 {
-    // SAFETY: this handle points to its same live private pinned Bundle.
+    // SAFETY: this context is the same live private pinned Bundle.
     let this = unsafe { &*context.cast::<Bundle<C>>() };
+    if this.callback_context().is_err() || !super::valid_access(offset, width) {
+        return 0;
+    }
+    // SAFETY: exclusive serialized config access, disjoint from owner/latch.
+    let config = unsafe { &**this.config.get() };
+    let result = match super::read_config(config, offset as u16, width) {
+        Ok(result) => result,
+        Err(error) => {
+            // Seal admission BEFORE another owner callback can run/recover.
+            this.callback_failure.set(Some(Error::Config(error)));
+            return 0;
+        }
+    };
     if this.callback_context().is_err() {
         return 0;
     }
-    // SAFETY: config is disjoint from owner/latch and inside UnsafeCell; its
-    // stable owned target has no other Rust/native users. Existing read checks
-    // width/range and accesses the ConfigSpace with that exact width.
-    let config = unsafe { (&**this.config.get() as *const C).cast_mut().cast() };
-    let mut result = 0;
-    // SAFETY: `config` is this callback's live, exclusive target.
-    let status = unsafe { super::read::<C>(config, offset, width, &mut result) };
-    if this.callback_context().is_err() {
-        return 0;
-    }
-    if status != 0 {
-        // SAFETY: original C shim supplies a live aligned writable u32. Only a
-        // checked successful access may publish its returned value.
-        unsafe { value.write(result) };
-    }
-    status
+    // SAFETY: original C shim supplies live aligned writable u32.
+    unsafe { value.write(result) };
+    1
 }
 unsafe extern "C" fn checked_write<C: ConfigSpace + 'static>(
     context: *mut c_void,
@@ -201,20 +202,21 @@ unsafe extern "C" fn checked_write<C: ConfigSpace + 'static>(
     width: u32,
     value: u32,
 ) -> u32 {
-    // SAFETY: same private stable Bundle and serialized/nonreentrant ABI.
+    // SAFETY: same private stable Bundle and serialized callback ABI.
     let this = unsafe { &*context.cast::<Bundle<C>>() };
+    if this.callback_context().is_err() || !super::valid_access(offset, width) {
+        return 0;
+    }
+    // SAFETY: unique configuration target through its disjoint UnsafeCell.
+    let config = unsafe { &mut **this.config.get() };
+    if let Err(error) = super::write_config(config, offset as u16, width, value) {
+        this.callback_failure.set(Some(Error::Config(error)));
+        return 0;
+    }
     if this.callback_context().is_err() {
         return 0;
     }
-    // SAFETY: exclusive target access through the disjoint UnsafeCell; existing
-    // write preserves width and performs no read/modify/write substitute.
-    let config = unsafe { (&mut **this.config.get() as *mut C).cast() };
-    // SAFETY: `config` is this callback's live, exclusive target.
-    let status = unsafe { super::write::<C>(config, offset, width, value) };
-    if this.callback_context().is_err() {
-        return 0;
-    }
-    status
+    1
 }
 /// Pinned, fully owned prepared metadata. Neither Send nor Sync. No safe C
 /// pointer or runtime-ready token escapes, and no method calls original RM.
@@ -382,6 +384,8 @@ impl<C: ConfigSpace + 'static> PreparedDevice<C> {
             context,
             read: checked_read::<C>,
             write: checked_write::<C>,
+            target: core::ptr::null_mut(),
+            failure: Cell::new(None),
             _borrow: PhantomData,
             _pin: PhantomPinned,
         });
@@ -407,7 +411,7 @@ impl<C: ConfigSpace + 'static> PreparedDevice<C> {
             // Configuration callbacks cannot grant a different CPU/context.
             // Keep the same complete reserved bundle if validation is lost.
             core::mem::forget(bundle);
-            return Err(Error::Context(status));
+            return Err(status);
         }
         if status != 0 {
             return Err(Error::Native(status));
@@ -435,7 +439,7 @@ impl<C: ConfigSpace + 'static> PreparedDevice<C> {
     pub fn retire(&mut self) -> Result<(), Error> {
         let bundle = self.bundle.as_mut().ok_or(Error::Retired)?;
         if let Some(status) = bundle.callback_failure.get() {
-            return Err(Error::Context(status));
+            return Err(status);
         }
         bundle.owner.check_context().map_err(Error::Context)?;
         // SAFETY: exclusive prepared device, no C pointer escaped. Context and
@@ -447,6 +451,7 @@ impl<C: ConfigSpace + 'static> PreparedDevice<C> {
         };
         // SAFETY: both pointers belong to this live prepared device.
         let status = unsafe { stela_nvidia_prepared_device_retirable(this.state.raw(), handle) };
+        this.callback_context()?;
         if status != 0 {
             return Err(Error::Native(status));
         }

@@ -145,7 +145,7 @@ unsafe impl StackBacking for Source {
     fn guard(&self) -> Range<usize> {
         self.map.guard()
     }
-    unsafe fn pin_cold_pages(&self) -> Result<PinnedPages, MemoryError> {
+    unsafe fn pin_prepared_pages(&self, epoch: u64) -> Result<PinnedPages, MemoryError> {
         Ok(view(
             &self.map,
             self.physical,
@@ -350,7 +350,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
     }
     let reserved = runtime.reserve_unstarted_general(&guard, kernel()).unwrap();
     let owned = reserved.into_owned().unwrap();
-    let cold = match owned.prepare_cold(&guard) {
+    let cold = match unsafe { owned.prepare_stack(&guard) } {
         Ok(cold) => cold,
         Err((_, error)) => panic!("cold prepare: {error:?}"),
     };
@@ -385,7 +385,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         drop(busy);
         drop(guard);
         let fresh = scene.guard();
-        admission.cancel(&fresh).unwrap();
+        unsafe { admission.cancel(&fresh) }.unwrap();
         catalog.try_retire().unwrap();
         assert_eq!(scene.pool.native_pin_drops.load(Ordering::Relaxed), 1);
         return;
@@ -406,8 +406,8 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             Case::Stale => {
                 scene.pool.hooks.active.store(false, Ordering::Release);
                 assert_eq!(
-                    admission.cancel(&guard),
-                    Err(AdmissionError::Work(WorkError::Unavailable))
+                    cancellation_error(unsafe { admission.cancel(&guard) }),
+                    AdmissionError::Work(WorkError::Unavailable)
                 );
             }
             _ => unreachable!(),
@@ -427,7 +427,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         -16
     );
     drop(owner);
-    admission.cancel(&guard).unwrap();
+    unsafe { admission.cancel(&guard) }.unwrap();
     assert_eq!(scene.pool.native_pin_drops.load(Ordering::Relaxed), 1);
     catalog.try_retire().unwrap();
     assert_eq!(scene.pool.provider_drops.load(Ordering::Relaxed), 1);
@@ -606,4 +606,14 @@ fn annotated_record_layout() {
     assert_eq!(core::mem::offset_of!(NativeTicket, generation), 8);
     assert_eq!(core::mem::offset_of!(NativeTicket, record), 16);
     assert_eq!(core::mem::offset_of!(NativeTicket, nonce), 24);
+}
+
+fn cancellation_error<T>(result: Result<(), (T, AdmissionError)>) -> AdmissionError {
+    match result {
+        Err((owner, error)) => {
+            drop(owner);
+            error
+        }
+        Ok(()) => panic!("expected exact catalogue/native cancellation refusal"),
+    }
 }

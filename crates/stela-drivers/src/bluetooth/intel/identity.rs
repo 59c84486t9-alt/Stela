@@ -19,6 +19,10 @@ pub struct Identity {
     pub build: [u8; 3],
 }
 impl Identity {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(crate) fn usb(device: &Device) -> Result<(u16, u16, u16)> {
         let d = &device.descriptor;
         let vendor = u16::from_le_bytes([d[8], d[9]]);
@@ -48,10 +52,18 @@ impl Identity {
         Ok((vendor, product, u16::from_le_bytes([d[12], d[13]])))
     }
     #[cfg(test)]
+    #[expect(
+        clippy::result_large_err,
+        reason = "This test-only return keeps the shared typed source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn parse(device: &Device, p: &[u8]) -> Result<Self> {
         let (usb_vendor, usb_product, usb_revision) = Self::usb(device)?;
         Self::parse_usb((usb_vendor, usb_product, usb_revision), p)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn parse_usb(
         (usb_vendor, usb_product, usb_revision): (u16, u16, u16),
         p: &[u8],
@@ -151,6 +163,10 @@ pub struct BootParameters {
     raw: [u8; 23],
 }
 impl BootParameters {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn parse(p: &[u8]) -> Result<Self> {
         let raw: [u8; 23] = p
             .try_into()
@@ -170,6 +186,10 @@ impl BootParameters {
         })
     }
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub(super) fn valid_address(address: [u8; 6]) -> Result<()> {
     if address == [0; 6] || address == [0xff; 6] || address == [0, 0x8b, 0x9e, 0x19, 0x03, 0] {
         return Err(Error::Protocol("invalid/default Intel Bluetooth address"));

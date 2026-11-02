@@ -23,14 +23,29 @@ struct CountedConfig {
     reads: Arc<AtomicUsize>,
 }
 impl ConfigSpace for CountedConfig {
-    fn read32(&self, offset: u16) -> u32 {
+    fn read8(&self, offset: u16) -> Result<u8, ConfigError> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.bytes.read8(offset)
+    }
+    fn read16(&self, offset: u16) -> Result<u16, ConfigError> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.bytes.read16(offset)
+    }
+    fn read32(&self, offset: u16) -> Result<u32, ConfigError> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         self.bytes.read32(offset)
     }
-    fn write32(&mut self, offset: u16, value: u32) {
-        self.bytes.write32(offset, value);
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), ConfigError> {
+        self.bytes.write8(offset, value)
+    }
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError> {
+        self.bytes.write16(offset, value)
+    }
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), ConfigError> {
+        self.bytes.write32(offset, value)
     }
 }
+
 struct CountedHost {
     config: CountedConfig,
     drops: Arc<AtomicUsize>,
@@ -40,10 +55,12 @@ impl Host for CountedHost {
     fn config(&mut self) -> &mut CountedConfig {
         &mut self.config
     }
-    fn enable_msi(&mut self) -> Result<(), Errno> {
+    fn enable_msi(&mut self) -> Result<(), MsiError> {
         Ok(())
     }
-    fn disable_msi(&mut self) {}
+    fn disable_msi(&mut self) -> Result<(), MsiError> {
+        Ok(())
+    }
 }
 impl Drop for CountedHost {
     fn drop(&mut self) {

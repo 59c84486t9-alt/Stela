@@ -273,11 +273,15 @@ impl Deadlines {
     ) -> Result<(), WorkError> {
         self.finish_batch(batch, next_timer)
     }
-    fn finish_batch(&mut self, batch: Batch, next_timer: Option<u64>) -> Result<(), WorkError> {
+    fn validate_batch(&self, batch: &Batch) -> Result<(), WorkError> {
         self.process()?;
         if !self.running || batch.domain != self.id || batch.serial != self.serial {
             return Err(WorkError::InvalidTicket);
         }
+        Ok(())
+    }
+    fn finish_batch(&mut self, batch: Batch, next_timer: Option<u64>) -> Result<(), WorkError> {
+        self.validate_batch(&batch)?;
         let now = self.now()?;
         let tick = if batch.tick {
             let previous = self.tick.ok_or(WorkError::CorruptContext)?;
@@ -478,6 +482,19 @@ impl<const N: usize> Domain<N> {
         self.current(runtime)?;
         // SAFETY: service; no borrow survives delivery/return.
         unsafe { &mut *self.deadlines.get() }.begin()
+    }
+    /// Validate an actual outstanding owned Batch from this SAME current
+    /// reserved service/domain. This borrows only metadata, holds no queue/
+    /// deadline lock across delivery, and grants no native IRQ/data access.
+    pub fn validate_batch(
+        &self,
+        runtime: Pin<&Runtime<N>>,
+        batch: &Batch,
+    ) -> Result<(), WorkError> {
+        self.current(runtime)?;
+        // SAFETY: same serialized service; this shared immutable observation
+        // ends before any foreign callback or source timer body is invoked.
+        unsafe { &*self.deadlines.get() }.validate_batch(batch)
     }
     /// # Safety
     /// The original work/expiry consumers completed this captured batch on the

@@ -223,10 +223,18 @@ fn failed_interrupt_reads_rejected() {
                     MappedModel::new(),
                 )
             };
-            assert!(matches!(
-                result,
-                Err(AttachError::ConfigurationRejected | AttachError::InvalidCapabilities)
-            ));
+            assert_eq!(
+                result.as_ref().err().copied(),
+                Some(if after_preflight {
+                    AttachError::ConfigurationRejected
+                } else if offset == 0x60 {
+                    AttachError::PciCapability(crate::bus::pci::CapabilityError::FailedRead {
+                        offset: 0x62,
+                    })
+                } else {
+                    AttachError::InvalidCapabilities
+                })
+            );
             drop(result);
             let config = function.config();
             assert!(

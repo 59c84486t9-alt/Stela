@@ -6,14 +6,12 @@
 //! remains an original external catalog image. SST, AVS, IPC4 and ACE are
 //! different protocols and are explicitly outside this profile.
 //! Copyright(c) 2018, 2020 Intel Corporation
+use crate::Timer;
 use alloc::sync::Arc;
 
-use crate::bus::{
-    dma::{
-        mapping::{DmaDomain, DmaError},
-        memory::{MemoryError, PageSource},
-    },
-    i2c::Timer,
+use crate::bus::dma::{
+    mapping::{DmaDomain, DmaError},
+    memory::{MemoryError, PageSource},
 };
 use crate::firmware::Image;
 
@@ -80,6 +78,11 @@ pub enum Phase {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    MinimumDelay(crate::bus::pci::power::Error),
+    Interrupted,
+    PciClaim(crate::bus::pci::requester::ClaimError),
+    Config(crate::bus::pci::ConfigError),
+    PciCapability(crate::bus::pci::CapabilityError),
     UnsupportedController,
     Authority,
     InvalidBar,
@@ -140,8 +143,9 @@ struct Mailboxes {
 /// Polled held-D0 owner. Any failed operation after publication poisons further
 /// submission; shutdown remains available and keeps every uncertain resource.
 pub struct Controller<R, T> {
-    registers: R,
-    timer: T,
+    registers: core::mem::ManuallyDrop<R>,
+    timer: core::mem::ManuallyDrop<T>,
+    minimum_error: core::cell::Cell<Option<Error>>,
     identity: Identity,
     config: Config,
     state: State,
@@ -181,8 +185,11 @@ struct Deadline {
 }
 
 impl<R: Registers, T: Timer> Controller<R, T> {
-    pub fn claim(mut registers: R, timer: T, config: Config) -> Result<Self, (Error, R, T)> {
+    pub fn claim(registers: R, timer: T, config: Config) -> Result<Self, (Error, R, T)> {
+        let mut original = core::mem::ManuallyDrop::new((registers, timer));
         let result = (|| {
+            original.1.check().map_err(Error::MinimumDelay)?;
+            let registers = &mut original.0;
             let identity = registers.identity()?;
             if !identity.supported() {
                 return Err(Error::UnsupportedController);
@@ -195,13 +202,15 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             }
             Ok(identity)
         })();
+        let (registers, timer) = core::mem::ManuallyDrop::into_inner(original);
         let identity = match result {
             Ok(id) => id,
             Err(error) => return Err((error, registers, timer)),
         };
         Ok(Self {
-            registers,
-            timer,
+            registers: core::mem::ManuallyDrop::new(registers),
+            timer: core::mem::ManuallyDrop::new(timer),
+            minimum_error: core::cell::Cell::new(None),
             identity,
             config,
             state: State::Claimed,
@@ -222,18 +231,24 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })
     }
     pub fn state(&self) -> State {
-        self.state
+        if self.minimum_error.get().is_some() {
+            State::Faulted
+        } else {
+            self.state
+        }
     }
     pub fn firmware_report(&self) -> Option<FirmwareReport> {
         self.report
     }
     fn authority(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         if self.registers.identity()? != self.identity {
             return Err(Error::Authority);
         }
         Ok(())
     }
     fn guard(&mut self, states: &[State]) -> Result<(), Error> {
+        self.minimum_guard()?;
         if !states.contains(&self.state) {
             return Err(if self.state == State::Faulted {
                 Error::NeedsReset
@@ -245,18 +260,22 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.finish(result)
     }
     fn finish<V>(&mut self, result: Result<V, Error>) -> Result<V, Error> {
+        self.minimum_guard()?;
         if result.is_err() {
             self.state = State::Faulted;
         }
         result
     }
     fn read(&mut self, bar: Bar, offset: usize) -> Result<u32, Error> {
+        self.minimum_guard()?;
         self.registers.read32(bar, offset)
     }
     fn write(&mut self, bar: Bar, offset: usize, value: u32) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.registers.write32(bar, offset, value)
     }
     fn update(&mut self, bar: Bar, offset: usize, mask: u32, bits: u32) -> Result<(), Error> {
+        self.minimum_guard()?;
         let old = self.read(bar, offset)?;
         self.write(bar, offset, (old & !mask) | (bits & mask))
     }
@@ -269,6 +288,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         until: Field,
         deadline: Deadline,
     ) -> Result<u32, Error> {
+        self.minimum_guard()?;
         let expired = |timer: &T| timer.now_us().wrapping_sub(deadline.start) >= deadline.timeout;
         loop {
             if expired(&self.timer) {
@@ -295,6 +315,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         timeout: u64,
         phase: Phase,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         let start = self.timer.now_us();
         self.update(bar, offset, request.mask, request.value)?;
         self.poll(
@@ -309,15 +330,48 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         )?;
         Ok(())
     }
-    fn delay(&self, micros: u64) {
-        let start = self.timer.now_us();
-        while self.timer.now_us().wrapping_sub(start) < micros {
-            self.timer.relax();
+    pub fn first_minimum_error(&self) -> Option<Error> {
+        self.minimum_error.get()
+    }
+    fn minimum_guard(&self) -> Result<(), Error> {
+        if let Some(error) = self.minimum_error.get() {
+            return Err(error);
+        }
+        self.minimum_error.set(Some(Error::Interrupted));
+        match self.timer.check() {
+            Ok(()) => {
+                self.minimum_error.set(None);
+                Ok(())
+            }
+            Err(cause) => {
+                let error = Error::MinimumDelay(cause);
+                self.minimum_error.set(Some(error));
+                Err(error)
+            }
+        }
+    }
+    fn delay(&mut self, micros: u64) -> Result<(), Error> {
+        self.minimum_guard()?;
+        let previous = self.state;
+        self.state = State::Faulted;
+        self.minimum_error.set(Some(Error::Interrupted));
+        match self.timer.check().and_then(|()| self.timer.wait_us(micros)) {
+            Ok(()) => {
+                self.minimum_error.set(None);
+                self.state = previous;
+                Ok(())
+            }
+            Err(cause) => {
+                let error = Error::MinimumDelay(cause);
+                self.minimum_error.set(Some(error));
+                Err(error)
+            }
         }
     }
     /// Full controller reset, processing and SPIB discovery. Admission requires
     /// all host streams, command rings and DSP cores stopped first.
     pub fn initialize(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.guard(&[State::Claimed])?;
         let result = (|| {
             let gcap = self.registers.read16(Bar::Hda, GCAP)?;
@@ -344,7 +398,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             if cores & 0x0f0f0000 != 0 {
                 return Err(Error::Busy);
             }
-            let (pp, spib) = registers::capabilities(&mut self.registers, inputs + outputs)?;
+            let (pp, spib) = registers::capabilities(&mut *self.registers, inputs + outputs)?;
             self.pp = pp;
             self.spib = spib;
             let bits = self
@@ -366,7 +420,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 100_000,
                 Phase::LinkReset,
             )?;
-            self.delay(500);
+            self.delay(500)?;
             self.transition(
                 Bar::Hda,
                 GCTL,
@@ -375,10 +429,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 100_000,
                 Phase::LinkReset,
             )?;
-            self.delay(1000);
+            self.delay(1000)?;
             self.registers.misc_clock_gate(true)?;
             let (new_pp, new_spib) =
-                registers::capabilities(&mut self.registers, inputs + outputs)?;
+                registers::capabilities(&mut *self.registers, inputs + outputs)?;
             if (pp, spib) != (new_pp, new_spib) {
                 return Err(Error::Authority);
             }
@@ -409,6 +463,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         pages: &dyn PageSource,
         domain: Arc<dyn DmaDomain>,
     ) -> Result<FirmwareReport, Error> {
+        self.minimum_guard()?;
         self.guard(&[State::Ready])?;
         if image.target().driver != "intel-dsp"
             || image.target().hardware != self.identity.hardware()
@@ -519,6 +574,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.finish(result)
     }
     fn clear_loader_registers(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         for index in [0, self.input_streams] {
             let base = stream_base(index);
             self.write(Bar::Hda, base + BDLPL, 0)?;
@@ -538,6 +594,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Disable engines and core0 before remapper drain/unmap. Failed
     /// acknowledgements keep mappings and the native PCI/MMIO owners.
     pub fn shutdown(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         if self.state == State::Shutdown {
             return Ok(());
         }
@@ -602,13 +659,42 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         clippy::result_large_err,
         reason = "Incomplete shutdown must return the entire owned controller for retry without allocating or releasing uncertain register/DMA owners"
     )]
-    pub fn into_stopped_resources(self) -> Result<(R, T), Self> {
-        if self.state != State::Shutdown {
+    pub fn into_stopped_resources(mut self) -> Result<(R, T), Self> {
+        if self.state != State::Shutdown || self.minimum_error.get().is_some() {
             return Err(self);
         }
-        Ok((self.registers, self.timer))
+        // SAFETY: acknowledged shutdown consumed all stream/DMA users and
+        // transfers each same original register/timer owner exactly once.
+        Ok(unsafe {
+            (
+                core::mem::ManuallyDrop::take(&mut self.registers),
+                core::mem::ManuallyDrop::take(&mut self.timer),
+            )
+        })
+    }
+}
+
+impl<R, T> Drop for Controller<R, T> {
+    fn drop(&mut self) {
+        // Even an unpublished sibling buffer stays with a failed/active graph.
+        // No Buffer destructor may attempt an unmap or release the domain.
+        core::mem::forget(self.boot.take());
+        core::mem::forget(self.iccmax.take());
+        core::mem::forget(self.pcm.take());
+        core::mem::forget(self.graph.take());
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+impl From<crate::bus::pci::ConfigError> for Error {
+    fn from(error: crate::bus::pci::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+impl From<crate::bus::pci::CapabilityError> for Error {
+    fn from(error: crate::bus::pci::CapabilityError) -> Self {
+        Self::PciCapability(error)
+    }
+}

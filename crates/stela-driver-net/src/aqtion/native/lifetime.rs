@@ -6,7 +6,6 @@ use crate::{
     Link, LinkError,
     bus::{
         dma::memory::PageSource,
-        mmio::owned,
         pci::{ConfigSpace, owned::ConfigRetention, regs, requester::preparation::Attachment},
     },
 };
@@ -17,13 +16,12 @@ struct Resources<R: RetirableRegisters, T: Timer + 'static> {
     core: Aqtion<R, T>,
     attachment: Attachment,
     retention: Option<ConfigRetention>,
-    configuration: Option<owned::Mapping>,
 }
 /// The unique attachment and configuration seal cannot be separated from the
 /// device. Mutable operations delegate individually; no mutable core escapes.
 pub struct Attached<
     R: RetirableRegisters = super::MappedRegisters,
-    T: Timer + 'static = crate::Clock,
+    T: Timer + 'static = alloc::rc::Rc<dyn Timer>,
 > {
     resources: Option<Box<Resources<R, T>>>,
     completed: bool,
@@ -43,6 +41,10 @@ impl<R: RetirableRegisters, T: Timer + 'static> Deref for Attached<R, T> {
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "return the original owner and precise failure without allocating during refusal or retirement"
+)]
 pub(super) fn attach<R: RetirableRegisters, T: Timer + 'static>(
     bound: Bound<R, T>,
     pages: &dyn PageSource,
@@ -77,7 +79,6 @@ pub(super) fn attach<R: RetirableRegisters, T: Timer + 'static>(
             core,
             attachment,
             retention: None,
-            configuration: None,
         })),
         completed: false,
         failure: None,
@@ -120,6 +121,16 @@ impl<R: RetirableRegisters, T: Timer + 'static> Attached<R, T> {
             return Err(Error::Retired);
         }
         Ok(())
+    }
+    fn live_link(&self) -> Result<(), LinkError> {
+        self.live().map_err(|error| match error {
+            Error::Configuration(error) => LinkError::Pci(crate::block::BlockError::Mmio(error)),
+            Error::Config(error) => LinkError::Pci(crate::block::BlockError::Config(error)),
+            Error::Power(error) => LinkError::Pci(error),
+            Error::Device(error) => crate::aqtion::adapter(error),
+            Error::Retired => LinkError::NoCarrier,
+            error => LinkError::Adapter(alloc::format!("AQtion native: {error:?}")),
+        })
     }
     fn core_mut(&mut self) -> &mut Aqtion<R, T> {
         &mut self.resources.as_deref_mut().unwrap().core
@@ -166,7 +177,7 @@ impl<R: RetirableRegisters, T: Timer + 'static> Attached<R, T> {
                 .as_mut()
                 .unwrap()
                 .config()
-                .read16(regs::COMMAND);
+                .read16(regs::COMMAND)?;
             if command == u16::MAX || command & regs::COMMAND_MASTER != 0 {
                 return Err(Error::BusMaster(command));
             }
@@ -175,23 +186,18 @@ impl<R: RetirableRegisters, T: Timer + 'static> Attached<R, T> {
             // There are no registered IRQ/work users or competing PCI writers.
             unsafe { resources.attachment.detach() }.map_err(Error::Detach)?;
             resources.retention.take();
-            resources.configuration = Some(
-                resources
-                    .core
-                    .function
-                    .take()
-                    .unwrap()
-                    .into_config()
-                    .into_mapping(),
-            );
             // SAFETY: all device/DMA/IRQ/work and CPU register users retired,
             // and this unique attachment acknowledged requester detach.
             unsafe { resources.core.hardware.as_mut().unwrap().registers.retire() }?;
             // SAFETY: detach released its config binding, the own seal is gone,
-            // no other configuration users remain, and the device cannot resume.
-            unsafe { resources.configuration.as_mut().unwrap().retire() }
+            // remaining configuration users must be joined by the mapping, and the
+            // device cannot resume. Busy/context/unmap refusal retains this owner.
+            // Keep the same typed function, configuration custody and grant
+            // until the borrowed retirement acknowledges alias/unmap/TLB/cache.
+            // Refusal leaves that complete graph inside this sticky owner.
+            unsafe { resources.core.function.as_mut().unwrap().config().retire() }
                 .map_err(Error::Configuration)?;
-            resources.configuration = None;
+            drop(resources.core.function.take());
             // The protocol core conservatively keeps suspended owners on Drop.
             // Native BAR/config retirement has now discharged that obligation;
             // release these owners while preserving the real D3hot state.
@@ -219,11 +225,11 @@ impl<R: RetirableRegisters, T: Timer + 'static> Link for Attached<R, T> {
         self.live().is_ok() && self.core_mut().carrier()
     }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
-        self.live().map_err(|_| LinkError::NoCarrier)?;
+        self.live_link()?;
         self.core_mut().transmit(frame)
     }
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
-        self.live().map_err(|_| LinkError::NoCarrier)?;
+        self.live_link()?;
         self.core_mut().receive()
     }
 }

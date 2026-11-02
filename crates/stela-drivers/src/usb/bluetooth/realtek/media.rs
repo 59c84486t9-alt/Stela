@@ -20,6 +20,10 @@ pub struct Session<B: MediaIo>(shared::Session<B>);
 /// service, as `__fill_isoc_descriptor_msbc` gives it one frame. The caller
 /// toggles flow only once the entire bounded plan can be admitted to its
 /// native owner.
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub(in crate::usb::bluetooth) fn output_lengths(
     packet: usize,
     service: usize,
@@ -45,6 +49,10 @@ impl<B: MediaIo> Session<B> {
     /// Consume an exact, successfully initialized Realtek transport. No HCI
     /// command or synthetic credit is generated when entering this owner.
     /// Failure closes/quarantines the transport and cannot be retried.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn start(hci: Hci<B>) -> Result<Self> {
         shared::Session::start_realtek(hci).map(Self)
     }
@@ -63,12 +71,20 @@ impl<B: MediaIo> Session<B> {
     /// Current SCO connection count and CVSD voice setting from the HCI
     /// stack select the source CVSD alternate. Use `set_wideband_voice` with
     /// an observed HCI MTU for source-checked transparent/mSBC voice.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn set_voice(&mut self, voice: Voice, dma: &mut dyn DmaAllocator) -> Result<()> {
         self.0.set_voice(voice, dma)
     }
     /// Source-checked transparent/mSBC voice. `sco_mtu` is the HCI
     /// synchronous payload MTU observed by the stack, not a descriptor guess.
     /// Queue output ahead and poll receipts; acceptance never credits delivery.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn set_wideband_voice(
         &mut self,
         connections: u8,
@@ -79,32 +95,68 @@ impl<B: MediaIo> Session<B> {
     }
     /// None is bounded backpressure without effects. Some(sequence) is queued;
     /// only a later Completed receipt establishes USB completion.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn queue_sco(&mut self, packet: &[u8]) -> Result<Option<u64>> {
         self.0.queue_sco(packet)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn poll_sco_output(&mut self) -> Result<Option<OutputReceipt>> {
         self.0.poll_sco_output()
     }
     /// The stack owns HCI command credits and command correlation.
     /// Ordinary Reset retires the old voice epoch and forwards its CC.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn submit_command(&mut self, packet: &[u8]) -> Result<()> {
         self.0.submit_command(packet)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn submit_acl(&mut self, packet: &[u8]) -> Result<()> {
         self.0.submit_acl(packet)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn submit_sco(&mut self, packet: &[u8]) -> Result<()> {
         self.0.submit(shared::Kind::Sco, packet)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn poll(&mut self) -> Result<alloc::vec::Vec<Received>> {
         self.0.poll()
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn quiesce(&mut self) -> Result<()> {
         self.0.quiesce()
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn resume(&mut self) -> Result<()> {
         self.0.resume()
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn close(&mut self) -> Result<()> {
         self.0.close()
     }

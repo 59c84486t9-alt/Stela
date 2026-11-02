@@ -44,13 +44,17 @@ impl<P: Profile> NativeRegisters<P> {
     /// DMA coherency; attachment does not infer either from PCI or pin mode.
     /// No cloned view/raw pointer or other owner accesses these mappings.
     /// Keep the native owners kept until controller shutdown succeeds.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Refusal returns the same physical owner graph without allocating on failure"
+    )]
     pub unsafe fn attach(
         mut requester: StoppedRequester,
         mapping: Mapping,
         bar: Bar,
     ) -> Result<Self, AttachFailure> {
         let result = (|| {
-            requester.check_stopped().map_err(|_| Error::PciAuthority)?;
+            requester.check_stopped().map_err(Error::PciClaim)?;
             let Bar::Memory {
                 address,
                 size,
@@ -132,17 +136,31 @@ impl<P: Profile> NativeRegisters<P> {
     }
     /// Return native owners only after the controller acknowledged its
     /// shutdown and removed DMA. Failure keeps this register provider intact.
-    pub fn into_stopped_resources(mut self) -> Result<(Function<OwnedConfig>, Mapping), Self> {
-        if self.associated().is_err()
-            || P::exclusive(&mut self).is_err()
-            || self.master != Some(false)
-            || self.read32(DMA_ENABLE) != 0
-            || self.read32(PDM_ENABLE) != 0
-            || self.read32(PAGE_BASE) & GROUP_ENABLE != 0
-            || !P::parked_control(self.read32(CONTROL))
-            || P::ZSC_CONTROL.is_some_and(|offset| self.read32(offset) != 1)
-        {
-            return Err(self);
+    #[expect(
+        clippy::result_large_err,
+        reason = "Refusal returns the same physical owner graph without allocating on failure"
+    )]
+    pub fn into_stopped_resources(
+        mut self,
+    ) -> Result<(Function<OwnedConfig>, Mapping), crate::Refusal<Self, Error>> {
+        let result = (|| {
+            self.associated()?;
+            P::exclusive(&mut self)?;
+            if self.master != Some(false) {
+                return Err(Error::PciAuthority);
+            }
+            if self.read32(DMA_ENABLE) != 0
+                || self.read32(PDM_ENABLE) != 0
+                || self.read32(PAGE_BASE) & GROUP_ENABLE != 0
+                || !P::parked_control(self.read32(CONTROL))
+                || P::ZSC_CONTROL.is_some_and(|offset| self.read32(offset) != 1)
+            {
+                return Err(Error::Busy);
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            return Err(crate::Refusal { error, owner: self });
         }
         Ok((self.function, self.mapping))
     }
@@ -157,9 +175,7 @@ impl<P: Profile> Registers for NativeRegisters<P> {
     fn set_bus_master(&mut self, enabled: bool) -> Result<(), Error> {
         self.associated()?;
         self.master = None;
-        if !self.function.set_bus_master(enabled) {
-            return Err(Error::PciAuthority);
-        }
+        self.function.set_bus_master(enabled)?;
         self.master = Some(enabled);
         Ok(())
     }
@@ -184,8 +200,8 @@ fn pci_identity<C: ConfigSpace, P: Profile>(
     }
     let metadata = (function.vendor, function.device, function.class);
     let config = function.config();
-    let id = config.read32(0);
-    let revision_class = config.read32(8);
+    let id = config.read32(0)?;
+    let revision_class = config.read32(8)?;
     if id == u32::MAX
         || (id as u16, (id >> 16) as u16) != (metadata.0, metadata.1)
         || [
@@ -195,7 +211,7 @@ fn pci_identity<C: ConfigSpace, P: Profile>(
         ] != metadata.2
         || !P::class_allowed(metadata.2)
         || revision_class == u32::MAX
-        || config.read8(0x0e) & 0x7f != 0
+        || config.read8(0x0e)? & 0x7f != 0
     {
         return Err(Error::PciAuthority);
     }
@@ -204,8 +220,8 @@ fn pci_identity<C: ConfigSpace, P: Profile>(
         device: (id >> 16) as u16,
         revision: revision_class as u8,
     };
-    let command = config.read16(4);
-    let status = config.read16(6);
+    let command = config.read16(4)?;
+    let status = config.read16(6)?;
     // INTx disabled; memory decode enabled by the platform. No PCI power
     // transition, BAR assignment or interrupt route is guessed here.
     if command == u16::MAX
@@ -215,15 +231,15 @@ fn pci_identity<C: ConfigSpace, P: Profile>(
     {
         return Err(Error::PciAuthority);
     }
-    let low = config.read32(0x10);
+    let low = config.read32(0x10)?;
     if low == u32::MAX || low & 7 != if wide { 4 } else { 0 } {
         return Err(Error::InvalidBar);
     }
-    let high = if wide { config.read32(0x14) } else { 0 };
+    let high = if wide { config.read32(0x14)? } else { 0 };
     if u64::from(low & !15) | (u64::from(high) << 32) != base {
         return Err(Error::InvalidBar);
     }
-    if !capability::stopped_in_d0(config) {
+    if !capability::stopped_in_d0(config)? {
         return Err(Error::PciAuthority);
     }
     Ok(identity)

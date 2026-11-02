@@ -64,6 +64,7 @@ pub(crate) struct Inputs<P: Preparation, R: Registers, T: Time> {
     pub topology: native_aspm::Topology<P::Config>,
     pub registers: R,
     pub clock: T,
+    pub minimum: alloc::rc::Rc<dyn crate::bus::pci::power::Timer>,
 }
 struct Resources<P: Preparation, R: Registers, T: Time> {
     inputs: Inputs<P, R, T>,
@@ -85,6 +86,7 @@ pub(crate) struct Bound<C: Configuration, R: Registers, T: Time> {
     pub topology: native_aspm::Topology<C>,
     pub registers: R,
     pub clock: T,
+    pub minimum: alloc::rc::Rc<dyn crate::bus::pci::power::Timer>,
 }
 pub(crate) struct Failure {
     pub error: Error,
@@ -96,13 +98,18 @@ impl<P: Preparation, R: Registers, T: Time> Cold<P, R, T> {
     /// epoch. UC BARs match its assigned windows. Prior firmware, IRQ/work and
     /// bypass are excluded, and the qualified clock advances on this context.
     /// No new domain, DMA allocation, route or worker has been admitted.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(crate) unsafe fn new(
         mut inputs: Inputs<P, R, T>,
     ) -> Result<Self, (Error, Inputs<P, R, T>)> {
         let checked = (|| {
+            inputs.minimum.check().map_err(Error::Minimum)?;
             let function = inputs.requester.function_mut();
-            let class = function.config().read32(8);
-            let subsystem = function.config().read32(0x2c);
+            let class = function.config().read32(8).map_err(Error::Config)?;
+            let subsystem = function.config().read32(0x2c).map_err(Error::Config)?;
             let chip = Chip::select(PciIdentity {
                 address: function.address,
                 vendor: function.vendor,
@@ -159,7 +166,11 @@ impl<P: Preparation, R: Registers, T: Time> Cold<P, R, T> {
             }
             // The source FLR/D0/BAR restore runs once, while the original root
             // still owns inherited traffic; no new domain/allocation exists.
-            r.layout.prepare(function.config(), &r.inputs.clock)?;
+            r.layout.prepare(
+                function.config(),
+                &r.inputs.clock,
+                r.inputs.minimum.as_ref(),
+            )?;
             if r.chip == Chip::Bcm4377 {
                 r.inputs.topology.disable(function).map_err(Error::Aspm)?;
             }
@@ -178,10 +189,11 @@ impl<P: Preparation, R: Registers, T: Time> Cold<P, R, T> {
                     topology,
                     registers,
                     clock,
+                    minimum,
                 },
             ..
         } = *self.owner.0.take().unwrap();
-        let companions = ManuallyDrop::new((topology, registers, clock));
+        let companions = ManuallyDrop::new((topology, registers, clock, minimum));
         // SAFETY: same original function acknowledged FLR/config-ready with
         // BME/MSI off; prior users excluded and every companion remains held.
         match unsafe { requester.finalize() } {
@@ -189,13 +201,14 @@ impl<P: Preparation, R: Registers, T: Time> Cold<P, R, T> {
                 function,
                 attachment,
             }) => {
-                let (topology, registers, clock) = ManuallyDrop::into_inner(companions);
+                let (topology, registers, clock, minimum) = ManuallyDrop::into_inner(companions);
                 Ok(Bound {
                     function,
                     attachment,
                     topology,
                     registers,
                     clock,
+                    minimum,
                 })
             }
             Err(failure) => Err(Box::new(Failure {

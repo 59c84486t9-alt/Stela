@@ -7,6 +7,7 @@ pub(super) enum Requester {
     Bound {
         pci: Function<OwnedConfig>,
         attachment: preparation::Attachment,
+        pin_failure: Option<preparation::PinReleaseFailure>,
     },
     Retired {
         pci: Function<OwnedConfig>,
@@ -53,6 +54,7 @@ impl Requester {
                 *self = Self::Bound {
                     pci: bound.requester.into_function(),
                     attachment: bound.attachment,
+                    pin_failure: None,
                 };
                 Ok(())
             }
@@ -72,13 +74,23 @@ impl Requester {
     /// original configuration/BAR/root owners stay kept until retirement completes.
     pub(super) unsafe fn retire(&mut self) -> Result<(), Error> {
         match self {
-            Self::Bound { pci, attachment } => {
+            Self::Bound {
+                pci,
+                attachment,
+                pin_failure,
+            } => {
                 crate::bus::pci::requester::validate_stopped(pci)
                     .map_err(|error| Error::Preparation(preparation::Error::Claim(error)))?;
+                attachment.validate_irq_actions().map_err(Error::Irq)?;
                 // SAFETY: same paired stopped/drained owner and original
                 // generation. Backend refuses remaining mapped leases before
                 // retiring any context or configuration retention.
-                unsafe { attachment.detach() }.map_err(Error::Dma)?;
+                let detached = unsafe { attachment.detach() }.map_err(Error::Dma)?;
+                if let Err(failure) = attachment.release_irq_pins(detached) {
+                    let error = Error::Irq(failure.error);
+                    *pin_failure = Some(failure);
+                    return Err(error);
+                }
             }
             _ => return Err(Error::Quarantined),
         }
@@ -88,13 +100,18 @@ impl Requester {
         *self = Self::Retired { pci };
         Ok(())
     }
-    pub(super) fn into_function(self) -> Result<Function<OwnedConfig>, Error> {
+    /// # Safety
+    /// This actual requester has completed current engine/payload/DMA/unmap,
+    /// original IRQ/action/user detach and pin release. All BAR/config users
+    /// have ended. Failure retains SAME Function and original DriverGrant.
+    pub(super) unsafe fn retire_configuration(&mut self) -> Result<(), Error> {
         match self {
-            Self::Retired { pci } => Ok(pci),
-            _ => {
-                core::mem::forget(self);
-                Err(Error::Quarantined)
+            Self::Retired { pci } => {
+                // SAFETY: forwarded same-owner completed retirement; actual
+                // OwnedConfig independently checks original retirement custody.
+                unsafe { pci.config().retire() }.map_err(Error::Mapping)
             }
+            _ => Err(Error::Quarantined),
         }
     }
 }

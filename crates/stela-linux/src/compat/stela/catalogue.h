@@ -6,6 +6,13 @@ struct device;
 struct stela_linux_owner;
 /* One mount-lifetime kernel owner. A failed claim is never reset. */
 int stela_linux_kernel_claim(const struct stela_linux_owner *owner);
+/* Actual native producer only, exact fresh claimed owner before Environment. */
+int stela_linux_kernel_geometry_bind(const struct stela_linux_owner *owner,
+                                   unsigned int actual_levels);
+int stela_linux_kernel_geometry_ready(const struct stela_linux_owner *owner);
+int stela_linux_kernel_geometry_storage(const struct stela_linux_owner *owner,
+                                      unsigned long *addresses);
+unsigned int stela_linux_task_initial_root_levels(void);
 int stela_linux_kernel_ready(const struct stela_linux_owner *owner);
 /* A refused partial Environment is not reusable; no global reset is proven. */
 int stela_linux_kernel_environment(const struct stela_linux_owner *owner);

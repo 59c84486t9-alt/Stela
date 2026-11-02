@@ -224,8 +224,9 @@ struct ModelClock {
     delays: RefCell<Vec<u64>>,
 }
 impl Timer for ModelClock {
-    fn delay(&self, microseconds: u64) {
+    fn delay(&self, microseconds: u64) -> Result<(), BlockError> {
         self.delays.borrow_mut().push(microseconds);
+        Ok(())
     }
     fn wait(&self, _: u64, mut ready: impl FnMut() -> bool) -> bool {
         (0..8).any(|_| ready())
@@ -255,16 +256,37 @@ impl Config {
     }
 }
 impl ConfigSpace for Config {
-    fn read32(&self, offset: u16) -> u32 {
-        self.words[usize::from(offset / 4)]
+    fn read8(&self, offset: u16) -> core::result::Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.words[usize::from(offset / 4)] >> ((offset & 3) * 8)) as u8)
     }
-    fn write32(&mut self, _: u16, _: u32) {
-        panic!("device-control and PM writes must be narrow");
+    fn read16(&self, offset: u16) -> core::result::Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.words[usize::from(offset / 4)] >> ((offset & 3) * 8)) as u16)
     }
-    fn write16(&mut self, offset: u16, mut value: u16) {
+    fn read32(&self, offset: u16) -> core::result::Result<u32, crate::bus::pci::ConfigError> {
+        Ok(self.words[usize::from(offset / 4)] >> ((offset & 3) * 8))
+    }
+    fn write8(&mut self, _: u16, _: u8) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        Err(crate::bus::pci::ConfigError::before_effect(
+            crate::bus::pci::ConfigFailure::UnqualifiedControl,
+        ))
+    }
+    fn write32(
+        &mut self,
+        _: u16,
+        _: u32,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        Err(crate::bus::pci::ConfigError::before_effect(
+            crate::bus::pci::ConfigFailure::UnqualifiedControl,
+        ))
+    }
+    fn write16(
+        &mut self,
+        offset: u16,
+        mut value: u16,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
         self.writes.push((offset, value));
         if offset == 0x84 {
-            let old = self.read16(offset);
+            let old = self.read16(offset)?;
             if self.io.fault.get() == Fault::D3 && value & 3 == 3 {
                 value &= !3;
             }
@@ -282,6 +304,8 @@ impl ConfigSpace for Config {
         let shift = (offset & 2) * 8;
         let word = &mut self.words[usize::from(offset / 4)];
         *word = (*word & !(0xffff << shift)) | u32::from(value) << shift;
+
+        Ok(())
     }
 }
 
@@ -566,7 +590,7 @@ fn flashless_pll_recovery_cycles_d3_and_restores_state() {
     assert_eq!(io.get(WUC), old_wake);
     assert_eq!(io.get(CTRL), old_control);
     assert_eq!(io.get(CTRL_EXT), old_extended);
-    assert_ne!(config.read16(0x84) & (1 << 15), 0);
+    assert_ne!(config.read16(0x84).unwrap() & (1 << 15), 0);
     assert!(
         config
             .writes
@@ -691,9 +715,9 @@ impl DmaFixture {
             dropping: false,
             faulted: false,
             mac: Model::MAC,
-            clock: Clock {
+            clock: crate::timing::model(Clock {
                 ticks_per_microsecond: 1,
-            },
+            }),
             location: String::from("DMA peer"),
             warnings: InitializationWarnings::default(),
             signalled: false,

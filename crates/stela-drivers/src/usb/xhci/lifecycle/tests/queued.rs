@@ -21,6 +21,9 @@ fn a_queued_reset_rebinds_the_class_on_a_fresh_generation_like_usb_queue_reset_d
         },
         &mut dma,
         "queued reset model".into(),
+        crate::minimum_model::owned(Clock {
+            ticks_per_microsecond: 1,
+        }),
     )
     .unwrap();
     let mut failures = Vec::new();

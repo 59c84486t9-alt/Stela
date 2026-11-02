@@ -367,7 +367,7 @@ fn unconfirmed_filter_updates_publish_nothing() {
             assert_eq!(
                 f.packet.set_receive_filter(wanted),
                 Err(if fault == 3 {
-                    Error::Clock
+                    Error::Timing(crate::bus::pci::power::Error::Clock)
                 } else {
                     Error::ConfigDidNotLatch
                 })

@@ -176,8 +176,9 @@ impl Registers for Model {
     }
 }
 impl Timer for Model {
-    fn delay(&self, microseconds: u64) {
+    fn delay(&self, microseconds: u64) -> Result<(), BlockError> {
         self.elapsed.set(self.elapsed.get() + microseconds);
+        Ok(())
     }
 }
 

@@ -108,6 +108,10 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
     /// Stop inherited packet engines while the original configuration/root
     /// and DMA backing remain held. This publishes no DMA or reset operation.
     /// The returned registers still require an original-root drain receipt.
+    #[expect(
+        clippy::result_large_err,
+        reason = "return the original owner and precise failure without allocating during refusal or retirement"
+    )]
     pub fn quiesce_cold(mut self) -> Result<R, (Error, Self)> {
         let result = (|| {
             self.timer_ready()?;
@@ -146,10 +150,10 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
         self.stopped
     }
     fn timer_ready(&self) -> Result<(), Error> {
-        self.delay.check().map_err(|_| Error::Clock)
+        self.delay.check().map_err(Error::Timing)
     }
     fn wait(&mut self, microseconds: u64) -> Result<(), Error> {
-        let result = self.delay.wait_us(microseconds).map_err(|_| Error::Clock);
+        let result = self.delay.wait_us(microseconds).map_err(Error::Timing);
         // A failed settling wait cannot certify an in-flight device effect.
         // Poison even private packet helpers that return through Packet's error.
         self.record(result)

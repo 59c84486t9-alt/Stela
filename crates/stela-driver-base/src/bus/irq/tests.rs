@@ -7,6 +7,9 @@ struct Model {
     pending: AtomicBool,
     fail_pending: AtomicBool,
     fail_eoi: AtomicBool,
+    config_failures: AtomicU8,
+    controller_on_unmask: AtomicU8,
+    mask_calls: AtomicUsize,
     dispatch_on_program: AtomicBool,
     dispatch_on_unmask: AtomicBool,
     panic_unmask: AtomicBool,
@@ -40,6 +43,9 @@ impl Model {
             pending: AtomicBool::new(false),
             fail_pending: AtomicBool::new(false),
             fail_eoi: AtomicBool::new(false),
+            config_failures: AtomicU8::new(0),
+            controller_on_unmask: AtomicU8::new(0),
+            mask_calls: AtomicUsize::new(0),
             dispatch_on_program: AtomicBool::new(false),
             dispatch_on_unmask: AtomicBool::new(false),
             panic_unmask: AtomicBool::new(false),
@@ -117,6 +123,9 @@ unsafe impl Platform for ModelPlatform {
     }
     fn eoi(&self, _vector: u8) -> Result<crate::bus::irq::Trigger, crate::bus::irq::IrqError> {
         self.0.eois.fetch_add(1, Ordering::Relaxed);
+        if self.0.config_failures.load(Ordering::Acquire) & 1 != 0 {
+            return Err(config_fault(0x54));
+        }
         if self.0.fail_eoi.load(Ordering::Acquire) {
             return Err(IrqError::FailedRead);
         }
@@ -250,6 +259,10 @@ struct ModelSource(Arc<Model>);
 // controller delivery. Quiesce represents device/work completion.
 unsafe impl Source for ModelSource {
     fn mask(&mut self) -> Result<(), IrqError> {
+        self.0.mask_calls.fetch_add(1, Ordering::Relaxed);
+        if self.0.config_failures.load(Ordering::Acquire) & 2 != 0 {
+            return Err(config_fault(0x54));
+        }
         assert!(
             !self.0.panic_mask.load(Ordering::Relaxed),
             "injected source unwind"
@@ -300,6 +313,20 @@ unsafe impl Source for ModelSource {
             !self.0.panic_unmask.load(Ordering::Acquire),
             "post-LIVE enable panic"
         );
+        if self.0.config_failures.load(Ordering::Acquire) & 4 != 0 {
+            return Err(config_fault(0x54));
+        }
+        let mode = self.0.controller_on_unmask.load(Ordering::Acquire);
+        if mode != 0 {
+            // SAFETY: this model's actual leaked Registry is retained by the
+            // active constructor; no native source or foreign epoch is used.
+            let registry = unsafe { &*self.0.registry.load(Ordering::Acquire) };
+            if mode == 1 {
+                registry.controller_fault.latch(config_fault(0x68));
+            } else {
+                claim_fault_writer(&registry.controller_fault);
+            }
+        }
         Ok(())
     }
     unsafe fn synchronize(&mut self) -> Result<(), IrqError> {
@@ -1032,7 +1059,7 @@ fn source_callback_unwind_poison_retains_without_hardware_retry_on_drop() {
     );
     let fences = model.root_fences.load(Ordering::Relaxed);
     model.panic_sync.store(false, Ordering::Relaxed);
-    assert!(matches!(registration.retire(), Err(IrqError::Drain)));
+    assert!(matches!(registration.retire(), Err(IrqError::Interrupted)));
     drop(registration);
     assert_eq!(model.root_fences.load(Ordering::Relaxed), fences);
     assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
@@ -1192,10 +1219,300 @@ fn handler_unwind_poison_retains_inflight_owners_and_never_reenters_callback() {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| registry.dispatch(vector)))
             .is_err()
     );
-    assert_eq!(registry.controller_failure(), Some(IrqError::Drain));
+    assert_eq!(registry.controller_failure(), Some(IrqError::Interrupted));
     assert!(registry.dispatch(vector));
     assert_eq!(model.callbacks.load(Ordering::Relaxed), 1);
-    assert!(matches!(registration.retire(), Err(IrqError::Drain)));
+    assert!(matches!(registration.retire(), Err(IrqError::Interrupted)));
     assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
     assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
+}
+
+fn config_fault(offset: u16) -> IrqError {
+    use crate::bus::pci::{ConfigError, ConfigFailure};
+    IrqError::Config(ConfigError::write_may_have_applied(
+        offset,
+        4,
+        ConfigFailure::Readback {
+            offset,
+            width: 4,
+            expected: 0xfee0_0010,
+            observed: 0xffff_ffff,
+        },
+    ))
+}
+/// Simulate an IRQ interrupting the only writer immediately after its CAS.
+fn claim_fault_writer(cell: &FirstFault) {
+    assert!(
+        cell.phase
+            .compare_exchange(
+                FAULT_CLEAR,
+                FAULT_WRITING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    );
+}
+/// # Safety
+/// This test holds the only successful writer claim for this still-WRITING cell.
+unsafe fn finish_fault_writer(cell: &FirstFault, cause: IrqError) {
+    assert_eq!(cell.phase.load(Ordering::Acquire), FAULT_WRITING);
+    // SAFETY: the test's actual successful CAS owns the unique payload write;
+    // readers stay pending until the following release, exactly as latch does.
+    unsafe { (*cell.cause.get()).write(cause) };
+    cell.phase.store(FAULT_READY, Ordering::Release);
+}
+#[test]
+fn first_fault_retains_full_config_effect_and_never_records_pending_observations() {
+    let cell = FirstFault::new();
+    assert!(!cell.latch(IrqError::FaultPublishing));
+    assert_eq!(cell.failure(), None);
+    let first = config_fault(0x54);
+    assert!(cell.latch(first));
+    assert!(!cell.latch(config_fault(0x64)));
+    assert!(!cell.latch(IrqError::Interrupted));
+    assert!(!cell.latch(IrqError::FaultPublishing));
+    assert_eq!(cell.failure(), Some(first));
+}
+#[test]
+fn pending_controller_and_slot_publications_preserve_their_original_cause_scope() {
+    for controller in [true, false] {
+        let model = Model::new();
+        let registry = registry(model.clone());
+        let mut registration = request(registry, &model);
+        // SAFETY: active original registration retains this allocation; every
+        // following retirement is refused, so this test never frees the slot.
+        let slot = unsafe { registration.slot.as_ref() };
+        let original = if controller {
+            &registry.controller_fault
+        } else {
+            &slot.fault
+        };
+        claim_fault_writer(original);
+        assert!(registry.dispatch(registration.vector()));
+        assert_eq!(model.callbacks.load(Ordering::Relaxed), 0);
+        assert!(matches!(
+            registration.retire(),
+            Err(IrqError::FaultPublishing)
+        ));
+        if controller {
+            assert_eq!(
+                slot.fault.failure(),
+                None,
+                "pending is not a new local cause"
+            );
+            assert_eq!(
+                registry.identity().fault.failure(),
+                Some(IrqError::FaultPublishing)
+            );
+        } else {
+            assert_eq!(
+                registry.controller_failure(),
+                None,
+                "source fault is not a global controller failure"
+            );
+        }
+        let exact = config_fault(0x54);
+        // SAFETY: claim_fault_writer established this test's only writer;
+        // nested dispatch could neither overwrite it nor read its payload.
+        unsafe { finish_fault_writer(original, exact) };
+        assert!(matches!(registration.retire(), Err(error) if error == exact));
+        if controller {
+            assert_eq!(registry.identity().fault.failure(), Some(exact));
+        } else {
+            assert_eq!(slot.fault.failure(), Some(exact));
+        }
+        assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
+    }
+}
+#[test]
+fn interrupted_writer_stays_closed_without_reading_or_replacing_uninitialized_payload() {
+    let model = Model::new();
+    let registry = registry(model.clone());
+    let mut registration = request(registry, &model);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            claim_fault_writer(&registry.controller_fault);
+            panic!("writer never reached its plain Copy publication");
+        }))
+        .is_err()
+    );
+    for _ in 0..3 {
+        assert!(registry.dispatch(registration.vector()));
+        assert!(matches!(
+            registration.retire(),
+            Err(IrqError::FaultPublishing)
+        ));
+    }
+    assert!(!registry.controller_fault.latch(config_fault(0x64)));
+    assert_eq!(
+        registry.controller_failure(),
+        Some(IrqError::FaultPublishing)
+    );
+    assert_eq!(model.callbacks.load(Ordering::Relaxed), 0);
+    assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+}
+#[test]
+fn concurrent_first_fault_writers_publish_exactly_one_complete_payload() {
+    let cell = Arc::new(FirstFault::new());
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let mut threads = alloc::vec::Vec::new();
+    for index in 0u16..8 {
+        let cell = cell.clone();
+        let barrier = barrier.clone();
+        threads.push(std::thread::spawn(move || {
+            let exact = config_fault(0x40 + index * 4);
+            barrier.wait();
+            (cell.latch(exact), exact)
+        }));
+    }
+    let winners = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .filter_map(|(won, exact)| won.then_some(exact))
+        .collect::<alloc::vec::Vec<_>>();
+    assert_eq!(winners.len(), 1);
+    for _ in 0..64 {
+        assert_eq!(cell.failure(), Some(winners[0]));
+    }
+}
+#[test]
+fn controller_config_readback_retains_exact_payload_after_later_notifications() {
+    let model = Model::new();
+    let registry = registry(model.clone());
+    let mut registration = request(registry, &model);
+    model.config_failures.store(1, Ordering::Release);
+    assert!(registry.dispatch(registration.vector()));
+    assert_eq!(registry.controller_failure(), Some(config_fault(0x54)));
+    assert_eq!(model.callbacks.load(Ordering::Relaxed), 1);
+    model.config_failures.store(0, Ordering::Release);
+    assert!(registry.dispatch(registration.vector()));
+    assert_eq!(model.callbacks.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        registry.identity().fault.failure(),
+        Some(config_fault(0x54))
+    );
+    assert!(matches!(registration.retire(), Err(error) if error == config_fault(0x54)));
+}
+#[test]
+fn post_live_config_failure_keeps_original_source_without_another_effect_attempt() {
+    let model = Model::new();
+    let registry = registry(model.clone());
+    model.config_failures.store(4, Ordering::Release);
+    {
+        let Err(refusal) = registry.request(Request {
+            source: Box::new(ModelSource(model.clone())),
+            handler: Arc::new(ModelHandler(model.clone())),
+            routing: fixture_route(&model),
+        }) else {
+            panic!("uncertain post-LIVE write registered")
+        };
+        assert_eq!(refusal.error, config_fault(0x54));
+        assert!(refusal.returned.is_none());
+    }
+    assert_eq!(
+        model.mask_calls.load(Ordering::Relaxed),
+        1,
+        "constructor must not call mask again after an uncertain unmask write"
+    );
+    let attempts = model.mask_calls.load(Ordering::Relaxed);
+    model.config_failures.store(0, Ordering::Release);
+    assert!(registry.dispatch(FIRST_VECTOR));
+    assert_eq!(model.mask_calls.load(Ordering::Relaxed), attempts);
+    assert_eq!(model.callbacks.load(Ordering::Relaxed), 0);
+    assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+}
+#[test]
+fn reversible_or_closing_config_refusals_keep_first_effect_and_never_retry_source() {
+    for operation in [0, 1, 2] {
+        let model = Model::new();
+        let registry = registry(model.clone());
+        let mut registration = request(registry, &model);
+        model
+            .config_failures
+            .store(if operation == 1 { 4 } else { 2 }, Ordering::Release);
+        let error = match operation {
+            0 => registration.mask(),
+            1 => registration.unmask(),
+            _ => registration.retire().map(|_| ()),
+        };
+        assert_eq!(error, Err(config_fault(0x54)));
+        let attempts = model.mask_calls.load(Ordering::Relaxed);
+        model.config_failures.store(0, Ordering::Release);
+        assert!(matches!(registration.retire(), Err(error) if error == config_fault(0x54)));
+        assert_eq!(registration.mask(), Err(config_fault(0x54)));
+        assert_eq!(registration.unmask(), Err(config_fault(0x54)));
+        assert_eq!(model.mask_calls.load(Ordering::Relaxed), attempts);
+        assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn controller_failure_during_unmask_survives_pending_return_and_registration_drop() {
+    for pending in [false, true] {
+        let model = Model::new();
+        let registry = registry(model.clone());
+        model
+            .controller_on_unmask
+            .store(if pending { 2 } else { 1 }, Ordering::Release);
+        {
+            let Err(refusal) = registry.request(Request {
+                source: Box::new(ModelSource(model.clone())),
+                handler: Arc::new(ModelHandler(model.clone())),
+                routing: fixture_route(&model),
+            }) else {
+                panic!("failed controller constructor published a registration")
+            };
+            assert_eq!(
+                refusal.error,
+                if pending {
+                    IrqError::FaultPublishing
+                } else {
+                    config_fault(0x68)
+                }
+            );
+            assert!(refusal.returned.is_none());
+        }
+        assert_eq!(model.mask_calls.load(Ordering::Relaxed), 1);
+        // SAFETY: constructor refusal permanently retained this actual
+        // quarantined Slot; no successful retirement/free occurred.
+        let slot = unsafe { &*registry.slots[0].load(Ordering::Acquire) };
+        if pending {
+            assert_eq!(
+                slot.fault.failure(),
+                None,
+                "Drop must not relatch a pending origin as Interrupted"
+            );
+            assert_eq!(registry.slot_failure(slot), IrqError::FaultPublishing);
+            // SAFETY: the model's unmask callback owns the only original
+            // controller writer claim; constructor/Drop could not replace it.
+            unsafe { finish_fault_writer(&registry.controller_fault, config_fault(0x68)) };
+        }
+        assert_eq!(registry.slot_failure(slot), config_fault(0x68));
+        assert_eq!(
+            registry.identity().fault.failure(),
+            Some(config_fault(0x68))
+        );
+        assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
+    }
+}
+#[test]
+fn an_earlier_drop_diagnostic_cannot_hide_later_original_controller_publication() {
+    let model = Model::new();
+    let registry = registry(model.clone());
+    let registration = request(registry, &model);
+    drop(registration);
+    // SAFETY: default active Drop quarantined, retained, and never reclaimed
+    // this exact original Slot, as asserted by its source retention counter.
+    let slot = unsafe { &*registry.slots[0].load(Ordering::Acquire) };
+    assert_eq!(slot.fault.failure(), Some(IrqError::Interrupted));
+    claim_fault_writer(&registry.controller_fault);
+    assert_eq!(registry.slot_failure(slot), IrqError::FaultPublishing);
+    // SAFETY: this test owns the only successful controller writer claim;
+    // no nested reader or earlier Drop diagnostic can write that payload.
+    unsafe { finish_fault_writer(&registry.controller_fault, config_fault(0x68)) };
+    assert_eq!(registry.slot_failure(slot), config_fault(0x68));
+    assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
 }

@@ -34,7 +34,7 @@ enum RegisterData<'a> {
 
 /// Exact endpoint-zero transfers shared by both ASIX register protocols.
 fn request<C: Control>(
-    io: &mut C,
+    io: &mut super::MinimumControl<C>,
     accessible: &mut bool,
     operation: RegisterRequest<'_>,
 ) -> Result<Vec<u8>, BlockError> {
@@ -48,6 +48,9 @@ fn request<C: Control>(
         RegisterData::Read(length) => (&[][..], length, true),
         RegisterData::Write(data) => (data, data.len(), false),
     };
+    if let Some(error) = io.error() {
+        return Err(error.clone());
+    }
     if !*accessible {
         return Err(BlockError::Unsupported("ASIX register access poisoned"));
     }
@@ -72,7 +75,7 @@ fn request<C: Control>(
     }
 }
 pub(super) struct Chip<C> {
-    io: C,
+    io: super::MinimumControl<C>,
     accessible: bool,
     initialized: bool,
     status: Option<u16>,
@@ -141,6 +144,13 @@ impl<C: Control> Chip<C> {
         let bytes = self.read(AX_ACCESS_EEPROM, word, 1, 2)?;
         Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
     }
+    fn minimum_wait(&mut self, us: u64) -> Result<(), BlockError> {
+        let result = self.io.minimum_wait(us);
+        if result.is_err() {
+            self.initialized = false;
+        }
+        result
+    }
     fn timeout(&mut self) -> BlockError {
         self.accessible = false;
         self.initialized = false;
@@ -148,7 +158,7 @@ impl<C: Control> Chip<C> {
     }
     pub(super) fn attach(io: C) -> Result<(Self, Mac), BlockError> {
         let mut chip = Self {
-            io,
+            io: super::MinimumControl::new(io),
             accessible: true,
             initialized: false,
             status: None,
@@ -157,9 +167,9 @@ impl<C: Control> Chip<C> {
         };
         chip.mac_write(AX_PHYPWR_RSTCTL, 2, 0)?;
         chip.mac_write(AX_PHYPWR_RSTCTL, 2, AX_PHYPWR_RSTCTL_IPRL)?;
-        chip.io.delay_us(500_000);
+        chip.minimum_wait(500_000)?;
         chip.mac_write(AX_CLK_SELECT, 1, AX_CLK_SELECT_ACS | AX_CLK_SELECT_BCS)?;
-        chip.io.delay_us(200_000);
+        chip.minimum_wait(200_000)?;
         let detach = chip.eeprom(EEPROM_AUTODETACH)?;
         if detach != 0xffff && detach & EEPROM_AUTODETACH_ENABLE != 0 {
             let clock = chip.mac_read(AX_CLK_SELECT, 1)?;
@@ -224,6 +234,9 @@ impl<C: Control> Chip<C> {
         32 * 1024
     }
     pub(super) fn carrier(&mut self) -> Result<bool, BlockError> {
+        if let Some(error) = self.io.error() {
+            return Err(error.clone());
+        }
         if !self.initialized {
             return Err(BlockError::Unsupported("ASIX chip is not initialized"));
         }

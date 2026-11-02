@@ -10,6 +10,14 @@ use core::sync::atomic::Ordering;
 const NORMAL: u8 = 120;
 const MIDDLE: u64 = 1 << 63;
 
+/// Native scheduler state at one guarded snapshot, not a no-wake/death proof.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Activity {
+    Dormant,
+    Ready,
+    Running,
+    Blocked,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BasePolicy {
     Normal,
@@ -47,8 +55,9 @@ impl Snapshot {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum State {
+    Dormant,
     Ready,
     Running,
     Blocked,
@@ -63,6 +72,8 @@ struct Row {
     order: u64,
     virtual_ns: u128,
     started_ns: u64,
+    execution_ns: u64,
+    segment_started_ns: u64,
 }
 /// At most32 continuation records, embedded in the Queue.
 /// Only its existing IRQ-save lock accesses this state; no task/C pointer,
@@ -77,6 +88,8 @@ pub(super) struct Board {
     rows: [Option<Row>; super::MAX_CONTINUATIONS],
     head: u64,
     tail: u64,
+    reserved_tail: u64,
+    running_row: Option<usize>,
 }
 impl Board {
     pub(super) fn new() -> Self {
@@ -89,6 +102,8 @@ impl Board {
             rows: [None; super::MAX_CONTINUATIONS],
             head: MIDDLE,
             tail: MIDDLE,
+            reserved_tail: 0,
+            running_row: None,
         }
     }
     fn normal_floor(&mut self) -> u128 {
@@ -96,7 +111,9 @@ impl Board {
             .rows
             .iter()
             .flatten()
-            .filter(|row| row.rank.effective >= 100 && row.state != State::Blocked)
+            .filter(|row| {
+                row.rank.effective >= 100 && matches!(row.state, State::Ready | State::Running)
+            })
             .map(|row| row.virtual_ns)
             .min()
         {
@@ -111,21 +128,30 @@ impl Board {
             4904, 3906, 3121, 2501, 1991, 1586, 1277, 1024, 820, 655, 526, 423, 335, 272, 215, 172,
             137, 110, 87, 70, 56, 45, 36, 29, 23, 18, 15,
         ];
-        for row in self
-            .rows
-            .iter_mut()
-            .flatten()
-            .filter(|row| row.state == State::Running)
-        {
+        if let Some(index) = self.running_row {
+            let row = self.rows[index].as_mut().ok_or(WorkError::CorruptContext)?;
+            if row.state != State::Running {
+                return Err(WorkError::CorruptContext);
+            }
             let elapsed = now
                 .checked_sub(row.started_ns)
                 .ok_or(WorkError::CorruptContext)?;
-            if row.rank.effective >= 100 {
+            let execution = row
+                .execution_ns
+                .checked_add(elapsed)
+                .ok_or(WorkError::Exhausted)?;
+            let virtual_ns = if row.rank.effective >= 100 {
                 let base = row.rank.base.priority()?;
                 let weight = WEIGHTS[usize::from(base - 100)];
-                // Fixed point keeps short segments from losing their charge.
-                row.virtual_ns += (u128::from(elapsed) << 32) * 1024 / u128::from(weight);
-            }
+                row.virtual_ns
+                    .checked_add((u128::from(elapsed) << 32) * 1024 / u128::from(weight))
+                    .ok_or(WorkError::Exhausted)?
+            } else {
+                row.virtual_ns
+            };
+            // All arithmetic checks precede this one actual running-row commit.
+            row.execution_ns = execution;
+            row.virtual_ns = virtual_ns;
             row.started_ns = now;
         }
         self.normal_floor();
@@ -144,6 +170,9 @@ impl Board {
             Ok(value)
         } else {
             let value = self.tail.checked_add(1).ok_or(WorkError::Exhausted)?;
+            value
+                .checked_add(self.reserved_tail)
+                .ok_or(WorkError::Exhausted)?;
             self.tail = value;
             Ok(value)
         }
@@ -154,8 +183,32 @@ impl Board {
         sequence: u64,
         service: bool,
     ) -> Result<(), WorkError> {
+        self.insert_mode(id, sequence, service, None)
+    }
+    pub(super) fn insert_dormant(
+        &mut self,
+        id: ContextId,
+        sequence: u64,
+        rank: Snapshot,
+    ) -> Result<(), WorkError> {
+        self.insert_mode(id, sequence, false, Some(rank))
+    }
+    fn insert_mode(
+        &mut self,
+        id: ContextId,
+        sequence: u64,
+        service: bool,
+        dormant: Option<Snapshot>,
+    ) -> Result<(), WorkError> {
+        if let Some(rank) = dormant {
+            rank.validate()?;
+        }
         if !self.enabled {
-            return Ok(());
+            return if dormant.is_some() {
+                Err(WorkError::Unavailable)
+            } else {
+                Ok(())
+            };
         }
         if sequence == 0 || self.rows.iter().flatten().any(|row| row.id == id) {
             return Err(WorkError::CorruptContext);
@@ -176,18 +229,61 @@ impl Board {
             })
             .ok_or(WorkError::Full)?;
         let virtual_ns = self.normal_history[history].1.max(self.normal_floor());
-        let order = self.order(false)?;
+        let (order, reserved_tail) = if dormant.is_some() {
+            let reserved = self
+                .reserved_tail
+                .checked_add(1)
+                .ok_or(WorkError::Exhausted)?;
+            self.tail
+                .checked_add(reserved)
+                .ok_or(WorkError::Exhausted)?;
+            (0, reserved)
+        } else {
+            (self.order(false)?, self.reserved_tail)
+        };
+        self.fair_normal |= matches!(dormant, Some(Snapshot { base: BasePolicy::NormalNice(nice), .. }) if nice != 0);
+        self.reserved_tail = reserved_tail;
         self.normal_history[history] = (id.get(), virtual_ns);
         self.rows[slot] = Some(Row {
             id,
             sequence,
             service,
-            rank: Snapshot::NORMAL,
-            state: State::Ready,
+            rank: dormant.unwrap_or(Snapshot::NORMAL),
+            state: if dormant.is_some() {
+                State::Dormant
+            } else {
+                State::Ready
+            },
             order,
             virtual_ns,
             started_ns: 0,
+            execution_ns: 0,
+            segment_started_ns: 0,
         });
+        Ok(())
+    }
+    pub(super) fn activate(&mut self, id: ContextId, sequence: u64) -> Result<(), WorkError> {
+        if !self.enabled {
+            return Err(WorkError::Unavailable);
+        }
+        let slot = self.index(id, sequence)?;
+        if self.rows[slot].as_ref().unwrap().state != State::Dormant || self.reserved_tail == 0 {
+            return Err(WorkError::CorruptContext);
+        }
+        // A fresh ready order was reserved before C publication. Every other
+        // tail stamp preserves this credit; activation consumes no capacity.
+        let order = self.tail.checked_add(1).ok_or(WorkError::CorruptContext)?;
+        let remaining = self.reserved_tail - 1;
+        order
+            .checked_add(remaining)
+            .ok_or(WorkError::CorruptContext)?;
+        let floor = self.normal_floor();
+        let row = self.rows[slot].as_mut().unwrap();
+        row.virtual_ns = row.virtual_ns.max(floor);
+        row.order = order;
+        row.state = State::Ready;
+        self.tail = order;
+        self.reserved_tail = remaining;
         Ok(())
     }
     pub(super) fn wake(&mut self, id: ContextId, sequence: u64) -> Result<(), WorkError> {
@@ -214,13 +310,21 @@ impl Board {
         if !self.enabled {
             return Ok(());
         }
+        if self.running_row.is_some() {
+            return Err(WorkError::CorruptContext);
+        }
         let slot = self.index(id, sequence)?;
         let row = self.rows[slot].as_mut().unwrap();
         if row.state != State::Ready {
             return Err(WorkError::CorruptContext);
         }
+        if now < row.started_ns {
+            return Err(WorkError::CorruptContext);
+        }
         row.state = State::Running;
         row.started_ns = now;
+        row.segment_started_ns = now;
+        self.running_row = Some(slot);
         Ok(())
     }
     pub(super) fn can_suspend(
@@ -236,7 +340,13 @@ impl Board {
         if self.rows[slot].as_ref().unwrap().state != State::Running {
             return Err(WorkError::CorruptContext);
         }
-        if reason == LeaveReason::Yield && self.tail == u64::MAX {
+        if reason == LeaveReason::Yield
+            && self
+                .tail
+                .checked_add(1)
+                .and_then(|next| next.checked_add(self.reserved_tail))
+                .is_none()
+        {
             return Err(WorkError::Exhausted);
         }
         Ok(())
@@ -251,7 +361,9 @@ impl Board {
             return Ok(());
         }
         let slot = self.index(id, sequence)?;
-        if self.rows[slot].as_ref().unwrap().state != State::Running {
+        if self.running_row != Some(slot)
+            || self.rows[slot].as_ref().unwrap().state != State::Running
+        {
             return Err(WorkError::CorruptContext);
         }
         let order = if reason == LeaveReason::Yield {
@@ -268,16 +380,35 @@ impl Board {
         } else {
             State::Ready
         };
+        self.running_row = None;
         self.normal_floor();
         Ok(())
     }
     pub(super) fn remove(&mut self, id: ContextId, sequence: u64) -> Result<(), WorkError> {
+        self.remove_mode(id, sequence, false)
+    }
+    pub(super) fn remove_terminal(
+        &mut self,
+        id: ContextId,
+        sequence: u64,
+    ) -> Result<(), WorkError> {
+        self.remove_mode(id, sequence, true)
+    }
+    fn remove_mode(
+        &mut self,
+        id: ContextId,
+        sequence: u64,
+        terminal: bool,
+    ) -> Result<(), WorkError> {
         if !self.enabled {
             return Ok(());
         }
         let slot = self.index(id, sequence)?;
         let row = self.rows[slot].unwrap();
-        if row.rank != Snapshot::NORMAL || row.state != State::Running {
+        if self.running_row != Some(slot)
+            || (!terminal && row.rank != Snapshot::NORMAL)
+            || row.state != State::Running
+        {
             return Err(WorkError::Busy);
         }
         // Physical continuations keep scheduler service debt across jobs, just
@@ -289,8 +420,49 @@ impl Board {
             .ok_or(WorkError::CorruptContext)?;
         history.1 = row.virtual_ns;
         self.rows[slot] = None;
+        self.running_row = None;
         self.normal_floor();
         Ok(())
+    }
+    pub(super) fn activity(&self, id: ContextId, sequence: u64) -> Result<Activity, WorkError> {
+        if !self.enabled {
+            return Err(WorkError::Unavailable);
+        }
+        Ok(match self.rows[self.index(id, sequence)?].unwrap().state {
+            State::Dormant => Activity::Dormant,
+            State::Ready => Activity::Ready,
+            State::Running => Activity::Running,
+            State::Blocked => Activity::Blocked,
+        })
+    }
+    pub(super) fn execution(
+        &self,
+        id: ContextId,
+        sequence: u64,
+        now: u64,
+    ) -> Result<(u64, u64, u64), WorkError> {
+        if !self.enabled {
+            return Err(WorkError::Unavailable);
+        }
+        let index = self.index(id, sequence)?;
+        let row = self.rows[index].as_ref().unwrap();
+        if row.state == State::Running {
+            if self.running_row != Some(index) {
+                return Err(WorkError::CorruptContext);
+            }
+            let elapsed = now
+                .checked_sub(row.started_ns)
+                .ok_or(WorkError::CorruptContext)?;
+            Ok((
+                row.execution_ns
+                    .checked_add(elapsed)
+                    .ok_or(WorkError::Exhausted)?,
+                now,
+                row.segment_started_ns,
+            ))
+        } else {
+            Ok((row.execution_ns, row.started_ns, row.segment_started_ns))
+        }
     }
     pub(super) fn snapshot(&self, id: ContextId, sequence: u64) -> Result<Snapshot, WorkError> {
         if !self.enabled {
@@ -325,7 +497,7 @@ impl Board {
         }
         self.fair_normal |= matches!(after.base, BasePolicy::NormalNice(nice) if nice != 0);
         let changed = before.effective != after.effective;
-        let order = if changed && row.state != State::Blocked {
+        let order = if changed && matches!(row.state, State::Ready | State::Running) {
             Some(self.order(head)?)
         } else {
             None
@@ -397,6 +569,44 @@ impl<const N: usize> SchedulingHandle<N> {
             .state()
             .scheduling
             .snapshot(self.wake.id, self.wake.sequence)
+    }
+    /// Observe the actual Board row, including a generic IRQ wake before the
+    /// dispatcher's Task.state scan. Closed generation is never inactive/dead.
+    pub fn activity(&self) -> Result<Activity, WorkError> {
+        self.live()?;
+        self.wake
+            .queue
+            .lock()?
+            .state()
+            .scheduling
+            .activity(self.wake.id, self.wake.sequence)
+    }
+    /// Measured unweighted native execution; blocked time adds no elapsed.
+    pub fn execution(&self) -> Result<super::ExecutionSample, WorkError> {
+        self.live()?;
+        let flags = self.wake.queue.cpu.save_disable()?;
+        let result = (|| {
+            let now = self.wake.queue.scheduling_now()?;
+            let mut guard = self.wake.queue.lock()?;
+            let (total, through, segment) =
+                guard
+                    .state()
+                    .scheduling
+                    .execution(self.wake.id, self.wake.sequence, now)?;
+            Ok(super::ExecutionSample::new(
+                super::ExecutionIdentity::new(
+                    self.wake.queue.id,
+                    self.wake.id.get(),
+                    self.wake.sequence,
+                ),
+                total,
+                through,
+                segment,
+            ))
+        })();
+        // SAFETY: exact flags after all native row/queue borrows ended.
+        unsafe { self.wake.queue.cpu.restore(flags) };
+        result
     }
     /// # Safety
     /// The same serialized original Linux task/PI-lock mutation supplies these
@@ -546,3 +756,9 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod child_tests;
+
+#[cfg(test)]
+mod accounting_tests;

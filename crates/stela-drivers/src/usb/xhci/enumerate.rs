@@ -6,14 +6,11 @@ use super::*;
 /// steady and say whether a device is there. `sample` returns the port's
 /// connection and connect change, clearing a change it reports.
 pub(super) fn debounce(
-    clock: Clock,
+    minimum: Minimum,
     sample: impl FnMut() -> Result<(bool, bool), BlockError>,
 ) -> Result<bool, BlockError> {
-    clock_ready(clock)?;
-    debounce_with_delay(sample, || {
-        crate::bus::pci::power::Timer::wait_us(&clock, DEBOUNCE_STEP_US)
-            .map_err(|_| BlockError::Unsupported("xHCI debounce clock unavailable"))
-    })
+    minimum.check()?;
+    debounce_with_delay(sample, || minimum.wait_us(DEBOUNCE_STEP_US))
 }
 
 fn debounce_with_delay(
@@ -59,6 +56,10 @@ pub(super) fn child_route(parent: u32, tier: u8, port: u8) -> u32 {
 impl Controller {
     /// Enables a slot and addresses the device at `attachment`.
     #[cfg(test)]
+    #[expect(
+        clippy::result_large_err,
+        reason = "This test-only return keeps the shared typed source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn address(
         &mut self,
         attachment: Attachment,
@@ -67,6 +68,10 @@ impl Controller {
         self.address_parent(attachment, None, dma)
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn address_parent(
         &mut self,
         attachment: Attachment,
@@ -159,7 +164,10 @@ impl Controller {
         // Address Device sends SET_ADDRESS with BSR=0. The xHC does not
         // time the device's recovery interval (xHCI 1.2b 4.6.5); USB 2.0
         // 9.2.6.3 permits it to ignore Setup packets for another 2 ms.
-        self.clock.delay(ADDRESS_RECOVERY_US);
+        during(
+            "USB address recovery",
+            self.minimum_wait(ADDRESS_RECOVERY_US),
+        )?;
         self.slot(slot).unwrap().retiring = false;
         Ok(slot)
     }
@@ -262,20 +270,22 @@ impl Controller {
     /// A root port's device speed once the port is enabled, or `None` with
     /// nothing connected.
     pub(super) fn root_port(&mut self, port: u8) -> Result<Option<u8>, BlockError> {
+        self.check_minimum()?;
         self.validate_current_graph(port)?;
         let at = self.port_offset(port);
         if self.registers.read32(at) & PP == 0 {
             self.write_port(port, PP);
-            self.clock.delay(PORT_POWER_US);
+            self.minimum_wait(PORT_POWER_US)?;
         }
         let clock = self.clock;
-        let connected = debounce(clock, || {
+        let connected = debounce(self.minimum.clone(), || {
             let portsc = self.registers.read32(at);
             if portsc & CSC != 0 {
                 self.write_port(port, CSC);
             }
             Ok((portsc & CCS != 0, portsc & CSC != 0))
-        })?;
+        });
+        let connected = self.minimum_status(connected)?;
         if !connected {
             return Ok(None);
         }
@@ -295,7 +305,7 @@ impl Controller {
                 return Err(BlockError::Timeout);
             }
             self.write_port(port, WRC | PRC);
-            self.clock.delay(RESET_RECOVERY_US);
+            self.minimum_wait(RESET_RECOVERY_US)?;
         } else if self.port_major[usize::from(port - 1)] != 3 {
             self.write_port(port, PR);
             let clock = self.clock;
@@ -305,7 +315,7 @@ impl Controller {
                 return Err(BlockError::Timeout);
             }
             self.write_port(port, PRC);
-            self.clock.delay(RESET_RECOVERY_US);
+            self.minimum_wait(RESET_RECOVERY_US)?;
         } else {
             let clock = self.clock;
             if !wait(&mut *self.registers, clock, PORT_RESET_US, |r| {
@@ -391,6 +401,10 @@ impl Controller {
     /// Address a new device and read its descriptors. A device that fails
     /// gives its slot back.
     #[cfg(test)]
+    #[expect(
+        clippy::result_large_err,
+        reason = "This test-only return keeps the shared typed source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn identify(
         &mut self,
         attachment: Attachment,
@@ -400,6 +414,10 @@ impl Controller {
         self.identify_parent(attachment, None, location, dma)
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn identify_parent(
         &mut self,
         attachment: Attachment,
@@ -419,6 +437,10 @@ impl Controller {
         described
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn describe(
         &mut self,
         slot: u8,
@@ -499,6 +521,10 @@ impl Controller {
     }
 
     /// Read every descriptor index, keeping the complete original byte streams.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn configurations(
         &mut self,
         slot: u8,
@@ -540,6 +566,10 @@ impl Controller {
     }
 
     /// Configuration descriptor `index`, whole.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn configuration(
         &mut self,
         slot: u8,
@@ -582,6 +612,10 @@ impl Controller {
         Ok(bytes)
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn enumeration_descriptor(
         &mut self,
         slot: u8,
@@ -709,7 +743,7 @@ impl Controller {
             )?;
             powered_ports.push(port);
         }
-        self.clock.delay(descriptor.power_good_us);
+        self.minimum_wait(descriptor.power_good_us)?;
         for port in powered_ports {
             let location = format!("{}.{port}", device.location);
             crate::working(&location);

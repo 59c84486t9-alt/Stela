@@ -428,6 +428,7 @@ fn pci_oem_fixups_and_retirement() {
                 &mut fixture.allocator,
                 config(),
             )
+            .map_err(|failure| failure.error)
         }
         .unwrap();
         let graph = controller.enumerate_codec(0).unwrap();
@@ -510,6 +511,7 @@ fn missing_pci_identity_blocks_fixups() {
             &mut fixture.allocator,
             config(),
         )
+        .map_err(|failure| failure.error)
     }
     .unwrap();
     model.borrow_mut().connection_words.insert((0x14, 0), 2);

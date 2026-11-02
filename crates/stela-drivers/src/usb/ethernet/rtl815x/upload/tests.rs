@@ -266,6 +266,16 @@ impl Control for Io {
     fn delay_us(&mut self, us: u64) {
         self.0.borrow_mut().core.delays.push(us);
     }
+    fn minimum_wait(&mut self, us: u64) -> Result<(), BlockError> {
+        let mut state = self.0.borrow_mut();
+        state.core.minimum_elapsed = state
+            .core
+            .minimum_elapsed
+            .checked_add(us)
+            .ok_or(BlockError::PciPower(crate::bus::pci::power::Error::Clock))?;
+        state.core.delays.push(us);
+        Ok(())
+    }
 }
 
 fn execute(bytes: &[u8], revision: u16) -> (Chip<Io>, Rc<RefCell<Hardware>>) {

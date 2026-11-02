@@ -75,7 +75,7 @@ trait Scsi {
         cdb: &[u8],
         data: Data<'_>,
     ) -> Result<Vec<u8>, BlockError>;
-    fn delay(&self, micros: u64);
+    fn delay(&mut self, micros: u64) -> Result<(), BlockError>;
     /// The transport's clock, in microseconds.
     fn now_us(&self) -> u64;
     fn poisoned(&self) -> bool;
@@ -163,8 +163,8 @@ impl<I: Io> Scsi for Bot<I> {
     fn take_failed_data(&mut self) -> Option<Vec<u8>> {
         Bot::take_failed_data(self)
     }
-    fn delay(&self, micros: u64) {
-        Bot::delay(self, micros);
+    fn delay(&mut self, micros: u64) -> Result<(), BlockError> {
+        Bot::delay(self, micros)
     }
     fn now_us(&self) -> u64 {
         Bot::now_us(self)
@@ -237,8 +237,8 @@ impl Scsi for uas::Host {
     fn take_failed_data(&mut self) -> Option<Vec<u8>> {
         uas::Host::take_failed_data(self)
     }
-    fn delay(&self, micros: u64) {
-        uas::Host::delay(self, micros);
+    fn delay(&mut self, micros: u64) -> Result<(), BlockError> {
+        uas::Host::delay(self, micros)
     }
     fn now_us(&self) -> u64 {
         uas::Host::now_us(self)
@@ -772,7 +772,7 @@ fn probe_identified<T: Scsi>(
                         && !matches!(sense.ascq, 3 | 0xb | 0xc | 0x1b | 0x24 | 0x25) =>
             {
                 if attempt + 1 < READY_TRIES {
-                    bot.delay(READY_DELAY_US);
+                    bot.delay(READY_DELAY_US)?;
                 }
             }
             Err(error) => return Err(error),
@@ -913,7 +913,7 @@ impl<T: Scsi> Disk<T> {
                 SenseCompletion::Retry(_) if exceeded => return failed,
                 SenseCompletion::Retry(delay) => {
                     if delay != 0 {
-                        self.bot.borrow().delay(delay);
+                        self.bot.borrow_mut().delay(delay)?;
                     }
                 }
                 SenseCompletion::MediaChanged | SenseCompletion::Fail => return failed,
@@ -1297,6 +1297,7 @@ mod tests {
         now: Cell<u64>,
         delays: RefCell<Vec<u64>>,
         failed: Option<Vec<u8>>,
+        minimum_error: Option<BlockError>,
     }
     impl Scsi for Unit {
         type Lun = u8;
@@ -1317,9 +1318,13 @@ mod tests {
                 }),
             }
         }
-        fn delay(&self, micros: u64) {
+        fn delay(&mut self, micros: u64) -> Result<(), BlockError> {
+            if let Some(error) = &self.minimum_error {
+                return Err(error.clone());
+            }
             self.now.set(self.now.get() + micros);
             self.delays.borrow_mut().push(micros);
+            Ok(())
         }
         fn now_us(&self) -> u64 {
             self.now.get()
@@ -1340,6 +1345,7 @@ mod tests {
                 now: Cell::new(0),
                 delays: RefCell::new(Vec::new()),
                 failed: None,
+                minimum_error: None,
             })),
             lun: 0,
             identity: Identity {
@@ -1362,6 +1368,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn retry_quiet_failure_returns_original_cause_before_retrying() {
+        let becoming = Some(Sense {
+            key: Sense::NOT_READY,
+            asc: Sense::NOT_READY_CAUSE,
+            ascq: 0x01,
+        });
+        let mut disk = disk(false, &[becoming; 8]);
+        disk.bot.borrow_mut().minimum_error = Some(BlockError::PciPower(
+            crate::bus::pci::power::Error::Interrupted,
+        ));
+        let mut bytes = [0x7a; 512];
+        assert_eq!(
+            disk.read(0, &mut bytes),
+            Err(BlockError::PciPower(
+                crate::bus::pci::power::Error::Interrupted
+            ))
+        );
+        assert_eq!(disk.bot.borrow().commands, 6);
+        assert_eq!(bytes, [0x7a; 512]);
+        assert!(disk.bot.borrow().delays.borrow().is_empty());
+    }
     #[test]
     fn io_sense_follows_scsi_check_sense_and_sd_completion() {
         let sense = |key, asc, ascq| Some(Sense { key, asc, ascq });

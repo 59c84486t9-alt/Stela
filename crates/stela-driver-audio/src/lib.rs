@@ -16,6 +16,21 @@ mod acp_pdm;
 pub mod hda;
 pub mod intel_dsp;
 pub mod renoir;
+mod timing;
+pub use timing::{Timer, Timing};
+
+/// A failed ownership transition returns its exact cause and original owner.
+pub struct Refusal<T, E> {
+    pub error: E,
+    pub owner: T,
+}
+impl<T, E: core::fmt::Debug> core::fmt::Debug for Refusal<T, E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Refusal")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -102,6 +117,10 @@ pub enum Phase {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    MinimumDelay(bus::pci::power::Error),
+    Interrupted,
+    Config(crate::bus::pci::ConfigError),
+    PciCapability(crate::bus::pci::CapabilityError),
     InvalidConfiguration,
     ControllerIdentitiesExhausted,
     PciResetControl {
@@ -180,4 +199,15 @@ pub enum Error {
     /// reset/platform reinitialization is required before further commands.
     NeedsReset,
     Shutdown,
+}
+
+impl From<crate::bus::pci::ConfigError> for Error {
+    fn from(error: crate::bus::pci::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+impl From<crate::bus::pci::CapabilityError> for Error {
+    fn from(error: crate::bus::pci::CapabilityError) -> Self {
+        Self::PciCapability(error)
+    }
 }

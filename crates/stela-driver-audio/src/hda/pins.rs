@@ -8,7 +8,7 @@
 //! Firmware defaults describe candidates, not permission to infer electrical,
 //! GPIO, amplifier, headset, jack inversion or OEM routing policy.
 use super::{AnalogRoute, CodecGraph, Controller, Registers, Verb, Widget, WidgetKind};
-use crate::{Direction, Error, PcmFormat, bus::i2c::Timer};
+use crate::{Direction, Error, PcmFormat, Timer};
 use alloc::vec::Vec;
 
 const DIGITAL: u32 = 1 << 9;
@@ -202,6 +202,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// SigmaTel codecs keep no-trigger sense; IDT83xxx also synchronizes its
     /// source port-power map. Standard polling changes no power or GPIO.
     pub fn poll_pin_sense(&mut self, graph: &CodecGraph, pin: u8) -> Result<PinSense, Error> {
+        self.minimum_guard()?;
         if self.manages_realtek_codec(graph.address) {
             return self.poll_realtek_pin_sense(graph, pin);
         }
@@ -219,6 +220,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         pin: u8,
         allow_trigger: bool,
     ) -> Result<PinSense, Error> {
+        self.minimum_guard()?;
         if graph.token != self.token {
             return Err(Error::InvalidCodecGraph);
         }

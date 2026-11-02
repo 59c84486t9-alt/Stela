@@ -145,6 +145,8 @@ unsafe impl QueueIo for Q {
     }
 }
 pub(crate) struct NativeGuard {
+    // Force every retained-session fixture through genuinely CPU-local custody.
+    _local: core::marker::PhantomData<alloc::rc::Rc<()>>,
     pub(crate) model: Arc<Mutex<Response>>,
     pub(crate) bar: Bar,
     pub(crate) drops: Arc<AtomicUsize>,
@@ -202,7 +204,12 @@ impl NativeFixture {
                 // other driver, worker or DMA touches them.
                 unsafe { Control::new(Registers::new(chip, bar.clone()), clock) }.unwrap();
         let drops = Arc::new(AtomicUsize::new(0));
+        #[expect(
+            clippy::arc_with_non_send_sync,
+            reason = "private local-custody model exercises the real owner retention paths"
+        )]
         let guard = Arc::new(NativeGuard {
+            _local: core::marker::PhantomData,
             model: model.clone(),
             bar: bar.clone(),
             drops: drops.clone(),

@@ -198,11 +198,11 @@ pub(super) fn inputs(device: u16) -> Fixture {
     };
     let (function, pm) = native_config(address, device);
     let ControlledConfig { mut native, .. } = function.into_config();
-    native.write16(4, 1 << 10);
+    native.write16(4, 1 << 10).unwrap();
     // The complete stopped-claim validator requires a real PM capability version.
-    native.write16(0x42, 3);
-    native.write32(0x10, BAR_BASE as u32);
-    native.write32(0x100, 0);
+    native.write16(0x42, 3).unwrap();
+    native.write32(0x10, BAR_BASE as u32).unwrap();
+    native.write32(0x100, 0).unwrap();
     *base.config.lock().unwrap() = Some(pm.clone());
     *peer.native_pm.borrow_mut() = Some(pm.clone());
     let bar_retired = Arc::new(AtomicBool::new(false));
@@ -265,6 +265,10 @@ pub(super) fn inputs(device: u16) -> Fixture {
         dropped,
     }
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "return the original owner and precise failure without allocating during refusal or retirement"
+)]
 pub(super) fn attach(
     inputs: adapter::Inputs<ModelRegisters, Rc<Peer>>,
     pages: &Pages,

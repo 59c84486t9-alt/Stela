@@ -60,12 +60,58 @@ impl StackRequirement {
     pub fn minimum_guard_bytes(self) -> usize {
         self.guard
     }
-    fn accepts(self, shape: Geometry) -> bool {
+    pub(super) fn accepts(self, shape: Geometry) -> bool {
         let size = match self.usable {
             Usable::Exact(bytes) => shape.bytes == bytes,
             Usable::AtLeast(bytes) => shape.bytes >= bytes,
         };
         size && shape.start.is_multiple_of(self.alignment) && shape.guard >= self.guard
+    }
+}
+/// An observation from an actual native worker transition to reusable Idle.
+/// No address, mapping, stack ownership or future admission guarantee is carried.
+/// The entry bit matters: an entered stack cannot satisfy cold-only admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReleasedStackGeometry {
+    bytes: usize,
+    alignment: usize,
+    guard: usize,
+    unstarted: bool,
+}
+impl ReleasedStackGeometry {
+    #[cfg(target_arch = "x86_64")]
+    pub(super) fn of(stack: &Stack, unstarted: bool) -> Self {
+        // Exact immutable constructor ranges, never an escrow's minimum shape.
+        // Zero is divisible by every supported power-of-two alignment; saturate
+        // its observation at the largest representable power of two.
+        let alignment = 1usize << stack.bounds.start.trailing_zeros().min(usize::BITS - 1);
+        Self {
+            bytes: stack.bounds.end - stack.bounds.start,
+            alignment,
+            guard: stack.guard.end - stack.guard.start,
+            unstarted,
+        }
+    }
+    pub fn usable_bytes(self) -> usize {
+        self.bytes
+    }
+    pub fn alignment(self) -> usize {
+        self.alignment
+    }
+    pub fn guard_bytes(self) -> usize {
+        self.guard
+    }
+    pub fn unstarted(self) -> bool {
+        self.unstarted
+    }
+    pub fn supports(self, requirement: StackRequirement) -> bool {
+        let size = if requirement.is_exact() {
+            self.bytes == requirement.usable_bytes()
+        } else {
+            self.bytes >= requirement.usable_bytes()
+        };
+        size && self.alignment >= requirement.alignment()
+            && self.guard >= requirement.minimum_guard_bytes()
     }
 }
 /// Expected mixed geometry of the 32-stack pool.

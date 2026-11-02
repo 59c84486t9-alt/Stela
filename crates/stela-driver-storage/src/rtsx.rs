@@ -20,6 +20,10 @@ use core::{
     cell::RefCell,
     sync::atomic::{AtomicU64, Ordering},
 };
+mod attachment;
+pub use attachment::{
+    AttachFailure, EnginePreparation, FailedAttachment, FailedHost, HostFailure, Preparation,
+};
 mod command;
 mod controller;
 mod registers;
@@ -89,33 +93,74 @@ pub struct Attached {
 
 /// The enumerated function and mapping remain owned through every host
 /// and card alias. PIO never grants bus mastering or invents a DMA address.
-pub fn attach(mut function: Function, handoff: &Handoff) -> Result<Attached, BlockError> {
-    if !matches(&function) {
-        return Err(BlockError::Unsupported(
-            "PCI function is not a qualified RTS5227/RTS522A/RTS5229",
-        ));
-    }
-    validate_clock(handoff.clock)?;
-    let admission = controller::admission(&mut function)?;
-    super::pci::quiesce_pio(&mut function)?;
-    function.power_up(&handoff.clock)?;
-    let config = controller::Configuration::capture(&mut function, admission)?;
-    let bars = function.bars();
-    let registers = crate::registers(handoff, bars[0], 0, 0x20)?;
-    super::pci::set_pio_command(&mut function, true)?;
+#[expect(
+    clippy::result_large_err,
+    reason = "Return the same affine device, mapping and timer graph without a fallible failure-path allocation."
+)]
+pub fn attach(
+    function: Function,
+    handoff: &Handoff,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
+) -> Result<Attached, AttachFailure> {
+    let mut owner = crate::Retained::new(Preparation {
+        function,
+        registers: None,
+        minimum,
+    });
+    let result = (|| {
+        let owner = owner.get_mut();
+        owner.minimum.check().map_err(BlockError::PciPower)?;
+        if !matches(&owner.function) {
+            return Err(BlockError::Unsupported(
+                "PCI function is not a qualified RTS5227/RTS522A/RTS5229",
+            ));
+        }
+        validate_clock(handoff.clock)?;
+        let admission = controller::admission(&mut owner.function)?;
+        super::pci::quiesce_pio(&mut owner.function)?;
+        owner.function.power_up(owner.minimum.as_ref())?;
+        let config = controller::Configuration::capture(&mut owner.function, admission)?;
+        let bars = owner.function.bars()?;
+        owner.registers = Some(crate::registers(handoff, bars[0], 0, 0x20)?);
+        super::pci::set_pio_command(&mut owner.function, true)?;
+        Ok(config)
+    })();
+    let config = match result {
+        Ok(config) => config,
+        Err(error) => {
+            return Err(AttachFailure {
+                error,
+                owner: crate::Retained::new(FailedAttachment::Preparation(owner.into_inner())),
+            });
+        }
+    };
+    let Preparation {
+        function,
+        registers,
+        minimum,
+    } = owner.into_inner();
     let location = alloc::format!("{} {} SD slot", function.address, config.profile.name());
-    let engine = Engine::new(
+    let registers = registers.expect("completed RTSX mapping preparation");
+    let mut host = Host::new(
         Box::new(function),
         Box::new(registers),
         config,
         handoff.clock,
+        minimum,
         location,
-    )?;
-    let mut host = Host {
-        inner: Rc::new(RefCell::new(engine)),
-    };
+    )
+    .map_err(|failure| AttachFailure {
+        error: failure.error,
+        owner: crate::Retained::new(FailedAttachment::Host(failure.owner.into_inner())),
+    })?;
     let (card, failure) = match host.poll() {
         Ok(card) => (card, None),
+        Err(error) if host.inner.borrow().fault.is_some() => {
+            return Err(AttachFailure {
+                error,
+                owner: crate::Retained::new(FailedAttachment::Host(FailedHost::Host(host))),
+            });
+        }
         Err(error) => (None, Some(error)),
     };
     Ok(Attached {
@@ -132,34 +177,34 @@ fn validate_clock(clock: Clock) -> Result<(), BlockError> {
 }
 
 trait Pci {
-    fn read8(&mut self, at: u16) -> u8;
-    fn read16(&mut self, at: u16) -> u16;
-    fn read32(&mut self, at: u16) -> u32;
-    fn write8(&mut self, at: u16, value: u8);
-    fn write16(&mut self, at: u16, value: u16);
+    fn read8(&mut self, at: u16) -> Result<u8, crate::bus::pci::ConfigError>;
+    fn read16(&mut self, at: u16) -> Result<u16, crate::bus::pci::ConfigError>;
+    fn read32(&mut self, at: u16) -> Result<u32, crate::bus::pci::ConfigError>;
+    fn write8(&mut self, at: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError>;
+    fn write16(&mut self, at: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError>;
 }
 impl<C: ConfigSpace> Pci for Function<C> {
-    fn read8(&mut self, at: u16) -> u8 {
+    fn read8(&mut self, at: u16) -> Result<u8, crate::bus::pci::ConfigError> {
         self.config().read8(at)
     }
-    fn read16(&mut self, at: u16) -> u16 {
+    fn read16(&mut self, at: u16) -> Result<u16, crate::bus::pci::ConfigError> {
         self.config().read16(at)
     }
-    fn read32(&mut self, at: u16) -> u32 {
+    fn read32(&mut self, at: u16) -> Result<u32, crate::bus::pci::ConfigError> {
         self.config().read32(at)
     }
-    fn write8(&mut self, at: u16, value: u8) {
-        self.config().write8(at, value);
+    fn write8(&mut self, at: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        self.config().write8(at, value)
     }
-    fn write16(&mut self, at: u16, value: u16) {
-        self.config().write16(at, value);
+    fn write16(&mut self, at: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
+        self.config().write16(at, value)
     }
 }
 
 /// Poll the socket explicitly. Observed removal/replacement permanently
 /// retires every old disk alias before another physical card can be published.
 pub struct Host {
-    inner: Rc<RefCell<Engine>>,
+    inner: Rc<RefCell<core::mem::ManuallyDrop<Engine>>>,
 }
 impl Host {
     /// Last OCP status sampled before socket power-off (RTS522A only).
@@ -172,36 +217,38 @@ impl Host {
     }
     pub fn poll(&mut self) -> Result<Option<Card>, BlockError> {
         let mut engine = self.inner.borrow_mut();
-        engine.healthy()?;
-        if !engine.observe()? || engine.medium.is_some() {
-            return Ok(None);
-        }
-        engine.configure_card()?;
-        let card = match Session::new(&mut *engine, 0).identify() {
-            Ok(card) => card,
-            Err(error) => {
-                engine.medium = None;
-                return Err(error);
+        engine.operation(|engine| {
+            engine.healthy()?;
+            if !engine.observe()? || engine.medium.is_some() {
+                return Ok(None);
             }
-        };
-        engine.rca = card.rca;
-        let id = NEXT_ID
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .map_err(|_| BlockError::Unsupported("RTSX card identity exhausted"))?;
-        let published = Card {
-            inner: self.inner.clone(),
-            generation: id,
-            identity: card.identity.clone(),
-            info: card.info.clone(),
-        };
-        engine.medium = Some(Medium { id, card });
-        Ok(Some(published))
+            engine.configure_card()?;
+            let card = match Session::new(&mut *engine, 0).identify() {
+                Ok(card) => card,
+                Err(error) => {
+                    engine.medium = None;
+                    return Err(error);
+                }
+            };
+            engine.rca = card.rca;
+            let id = NEXT_ID
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+                .map_err(|_| BlockError::Unsupported("RTSX card identity exhausted"))?;
+            let published = Card {
+                inner: self.inner.clone(),
+                generation: id,
+                identity: card.identity.clone(),
+                info: card.info.clone(),
+            };
+            engine.medium = Some(Medium { id, card });
+            Ok(Some(published))
+        })
     }
 }
 
 #[derive(Clone)]
 pub struct Card {
-    inner: Rc<RefCell<Engine>>,
+    inner: Rc<RefCell<core::mem::ManuallyDrop<Engine>>>,
     generation: u64,
     identity: Identity,
     info: CardInfo,
@@ -217,65 +264,74 @@ impl BlockDevice for Card {
     }
     fn read(&mut self, lba: u64, bytes: &mut [u8]) -> Result<(), BlockError> {
         let mut engine = self.inner.borrow_mut();
-        engine.live(self.generation)?;
-        self.identity.check(lba, bytes.len())?;
-        for (index, block) in bytes.chunks_mut(512).enumerate() {
+        engine.operation(|engine| {
             engine.live(self.generation)?;
-            let address = engine.address(lba + index as u64)?;
-            engine.begin_request();
-            let result = (|| {
-                engine.execute(READ_SINGLE, address, Response::Status, Some(512))?;
-                engine.ready()?;
-                // Output is accepted only after the last readiness access.
-                engine.check_request()?;
-                block.copy_from_slice(&engine.scratch);
-                Ok(())
-            })();
-            engine.end_request(result)?;
-        }
-        Ok(())
+            self.identity.check(lba, bytes.len())?;
+            for (index, block) in bytes.chunks_mut(512).enumerate() {
+                engine.live(self.generation)?;
+                let address = engine.address(lba + index as u64)?;
+                engine.begin_request();
+                let result = (|| {
+                    engine.execute(READ_SINGLE, address, Response::Status, Some(512))?;
+                    engine.ready()?;
+                    // Output is accepted only after the last readiness access.
+                    engine.check_request()?;
+                    block.copy_from_slice(&engine.scratch);
+                    Ok(())
+                })();
+                engine.end_request(result)?;
+            }
+            Ok(())
+        })
     }
     fn write(&mut self, lba: u64, bytes: &[u8]) -> Result<(), BlockError> {
         let mut engine = self.inner.borrow_mut();
-        engine.live(self.generation)?;
-        self.identity.check_write(lba, bytes.len())?;
-        for (index, block) in bytes.chunks(512).enumerate() {
+        engine.operation(|engine| {
             engine.live(self.generation)?;
-            if engine.status()? & SD_WRITE_PROTECT != 0 {
-                return Err(BlockError::ReadOnly);
+            self.identity.check_write(lba, bytes.len())?;
+            for (index, block) in bytes.chunks(512).enumerate() {
+                engine.live(self.generation)?;
+                if engine.status()? & SD_WRITE_PROTECT != 0 {
+                    return Err(BlockError::ReadOnly);
+                }
+                let address = engine.address(lba + index as u64)?;
+                engine.begin_request();
+                let result = (|| {
+                    engine.write_block(address, block)?;
+                    engine.ready()?;
+                    engine.check_request()
+                })();
+                engine.end_request(result)?;
             }
-            let address = engine.address(lba + index as u64)?;
-            engine.begin_request();
-            let result = (|| {
-                engine.write_block(address, block)?;
-                engine.ready()?;
-                engine.check_request()
-            })();
-            engine.end_request(result)?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
     /// An eMMC cache flush (EXT_CSD FLUSH_CACHE), the only cache the
     /// medium reports.
     fn flush_cache(&mut self) -> Result<(), BlockError> {
         let mut engine = self.inner.borrow_mut();
-        engine.live(self.generation)?;
-        if !self.identity.features.write_cache {
-            return Err(BlockError::Unsupported("the card reports no cache"));
-        }
-        engine.begin_request();
-        let result = (|| {
-            let rca = engine.rca;
-            Session::new(&mut *engine, rca).mmc_switch(32, 1)?;
-            engine.ready()?;
-            engine.check_request()
-        })();
-        engine.end_request(result)
+        engine.operation(|engine| {
+            engine.live(self.generation)?;
+            if !self.identity.features.write_cache {
+                return Err(BlockError::Unsupported("the card reports no cache"));
+            }
+            engine.begin_request();
+            let result = (|| {
+                let rca = engine.rca;
+                Session::new(&mut *engine, rca).mmc_switch(32, 1)?;
+                engine.ready()?;
+                engine.check_request()
+            })();
+            engine.end_request(result)
+        })
     }
     fn shutdown(&mut self, power_off: bool) -> Result<(), BlockError> {
         self.flush()?;
-        if power_off {
-            let mut engine = self.inner.borrow_mut();
+        if !power_off {
+            return Ok(());
+        }
+        let mut engine = self.inner.borrow_mut();
+        engine.operation(|engine| {
             engine.live(self.generation)?;
             let notify = engine.medium.as_ref().expect("live").card.notify;
             engine.medium = None;
@@ -283,9 +339,8 @@ impl BlockDevice for Card {
                 let rca = engine.rca;
                 Session::new(&mut *engine, rca).power_off_notify()?;
             }
-            engine.power_off()?;
-        }
-        Ok(())
+            engine.power_off()
+        })
     }
 }
 struct Medium {
@@ -297,6 +352,9 @@ struct Engine {
     registers: Box<dyn Registers>,
     config: controller::Configuration,
     clock: Clock,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
+    minimum_in_progress: bool,
+    operation_in_progress: bool,
     location: String,
     rca: u16,
     scratch: [u8; 512],
@@ -313,11 +371,42 @@ struct Engine {
     silicon_version: u8,
 }
 impl Engine {
+    /// Public physical work is serialized; unwind leaves this same owner fenced.
+    fn operation<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T, BlockError>,
+    ) -> Result<T, BlockError> {
+        if self.operation_in_progress {
+            return Err(BlockError::Protocol(
+                "RTSX prior physical operation did not complete",
+            ));
+        }
+        self.operation_in_progress = true;
+        let result = operation(self);
+        self.operation_in_progress = false;
+        result
+    }
+    fn configuration_failed(&mut self, error: crate::bus::pci::ConfigError) -> BlockError {
+        let error = BlockError::Config(error);
+        self.medium = None;
+        self.fault.get_or_insert_with(|| error.clone());
+        error
+    }
+
     fn healthy(&mut self) -> Result<(), BlockError> {
         if let Some(error) = &self.fault {
             return Err(error.clone());
         }
-        if self.pci.read32(0) != (u32::from(VENDOR) | u32::from(self.config.profile.device()) << 16)
+        if self.minimum_in_progress {
+            return Err(BlockError::Protocol(
+                "RTSX minimum callback did not complete",
+            ));
+        }
+        if self
+            .pci
+            .read32(0)
+            .map_err(|error| self.configuration_failed(error))?
+            != (u32::from(VENDOR) | u32::from(self.config.profile.device()) << 16)
         {
             let error = BlockError::Unsupported("RTSX owned PCI function disappeared");
             self.medium = None;
@@ -357,7 +446,7 @@ impl Engine {
             self.stop_card()?;
             self.registers.write32(BIPR, status & SD_INT);
             if status & SD_INT != 0 {
-                self.clock.delay(200_000);
+                self.quiet(200_000)?;
             }
         }
         // This fresh observation also catches MemoryStick inserted during the

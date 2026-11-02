@@ -1,7 +1,10 @@
 extern crate std;
+use super::super::model::{MappingOwner, MappingRetention};
 use super::*;
-use alloc::{boxed::Box, vec};
+use crate::bus::pci::assignment;
+use alloc::{boxed::Box, sync::Weak, vec};
 use core::sync::atomic::AtomicUsize;
+use core::{cell::RefCell, ops::Deref};
 use std::sync::Mutex;
 
 const BASE: u64 = 0x1000_0000;
@@ -12,11 +15,62 @@ const SPACE: AddressSpace = AddressSpace {
 };
 #[repr(align(4096))]
 struct Pages([u8; 16384]);
+struct Window(UnsafeCell<Pages>);
+// SAFETY: the model exports only raw bounded pointers; normal registry users
+// own all access while the same allocation remains in the pool until ACK.
+unsafe impl Send for Window {}
+// SAFETY: UnsafeCell admits raw MMIO mutation without shared RAM references.
+unsafe impl Sync for Window {}
+impl Window {
+    fn pointer(&self) -> *mut u8 {
+        // SAFETY: actual pinned allocation; constructing its raw address creates
+        // no Rust reference to MMIO-mutated bytes.
+        unsafe { core::ptr::addr_of_mut!((*self.0.get()).0).cast() }
+    }
+}
+#[derive(Default)]
+struct Pool {
+    allocations: Mutex<Vec<(u64, Arc<Window>)>>,
+}
+#[derive(Clone)]
+struct ModelPin {
+    _pool: Arc<Pool>,
+    allowed: Arc<AtomicBool>,
+    release_allowed: Arc<AtomicBool>,
+}
+fn check_model(pin: &ModelPin) -> Result<(), assignment::Error> {
+    if pin.allowed.load(Ordering::Acquire) && pin.release_allowed.load(Ordering::Acquire) {
+        Ok(())
+    } else {
+        Err(assignment::Error::Context)
+    }
+}
+fn mapping_retention(fixture: &Fixture) -> MappingRetention<ModelPin> {
+    // SAFETY: actual isolated allocator ledger and original guard; Pool owns
+    // only CPU allocations, never reentrant Authority/Resource bookkeeping.
+    let original = unsafe {
+        MappingOwner::from_owned(
+            ModelPin {
+                _pool: fixture.pool.clone(),
+                allowed: fixture.allowed.clone(),
+                release_allowed: fixture.release_allowed.clone(),
+            },
+            check_model,
+        )
+    };
+    let retained = original.retention().unwrap();
+    // Affine control stays in the fixture, not ResourceBacking or the provider.
+    // Reserve its actual original box before any mapper/consumer effects.
+    fixture.controls.borrow_mut().push(Box::new(original));
+    retained
+}
 struct Backing {
     span: PhysicalSpan,
     kind: ResourceKind,
     dropped: Arc<AtomicUsize>,
-    drop_context: Option<Authority>,
+    drop_context: Option<Weak<Inner>>,
+    pool: Arc<Pool>,
+    mapping: MappingRetention<ModelPin>,
 }
 // SAFETY: isolated model physical inventory; each backing pins its one
 // model resource. Metadata is immutable and no firmware exists.
@@ -27,15 +81,27 @@ unsafe impl ResourceBacking for Backing {
     fn kind(&self) -> ResourceKind {
         self.kind
     }
+    fn begin_mapping(&self) -> Result<OpaqueUse, Error> {
+        // The weak observer is only a lock probe, never original custody.
+        if let Some(authority) = self.drop_context.as_ref().and_then(Weak::upgrade) {
+            assert!(
+                authority.lock().is_ok(),
+                "backing admission under inventory lock"
+            );
+        }
+        self.mapping.begin_mapping()
+    }
 }
 impl Drop for Backing {
     fn drop(&mut self) {
-        if let Some(authority) = &self.drop_context {
+        if let Some(authority) = self.drop_context.as_ref().and_then(Weak::upgrade) {
             assert!(
-                authority.inner.lock().is_ok(),
+                authority.lock().is_ok(),
                 "resource released under inventory lock"
             );
         }
+        // This is retention only. The external fixture owns the original
+        // controller and checks complete source retirement separately.
         self.dropped.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -43,7 +109,7 @@ struct Installed {
     id: u64,
     token: u64,
     request: MapRequest,
-    memory: Box<Pages>,
+    memory: Arc<Window>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
@@ -70,29 +136,77 @@ struct State {
     reply_gates: Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
     unmap_gates: Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
     freeze_shared_allocations: bool,
+    deny_release_on_ack: bool,
 }
 struct Model {
     state: Mutex<State>,
-    allowed: AtomicBool,
+    allowed: Arc<AtomicBool>,
+    release_allowed: Arc<AtomicBool>,
+    pool: Arc<Pool>,
     dropped: Arc<AtomicUsize>,
 }
+struct Fixture {
+    #[expect(
+        clippy::vec_box,
+        reason = "preallocated affine controllers must survive abandonment as whole boxed owners"
+    )]
+    controls: RefCell<Vec<Box<MappingOwner<ModelPin>>>>,
+    model: Arc<Model>,
+}
+impl Deref for Fixture {
+    type Target = Arc<Model>;
+    fn deref(&self) -> &Self::Target {
+        &self.model
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        for mut original in self.controls.get_mut().drain(..) {
+            if original.uses() != 0 {
+                // A still-accepted mapping is not source retirement. Atomically
+                // deny new work and keep this SAME control without entering the
+                // unsafe completed-source return path or allocating on failure.
+                original.abandon_admission();
+                original.record_retention(Error::Busy);
+                core::mem::forget(original);
+                continue;
+            }
+            // SAFETY: fixture scope has ended every source producer/raw tail.
+            // Registry ACKs and absence of every actual retention/use remain
+            // mandatory. A late user/refusal keeps THIS preallocated controller.
+            match unsafe { original.retire() } {
+                Ok(allocation) => drop(allocation),
+                Err(error) => {
+                    original.record_retention(error);
+                    core::mem::forget(original);
+                }
+            }
+        }
+    }
+}
 impl Model {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            state: Mutex::new(State {
-                installed: Vec::new(),
-                mode: Mode::Normal,
-                calls: 0,
-                ack: true,
-                reenter: None,
-                events: Vec::new(),
-                reply_gates: None,
-                unmap_gates: None,
-                freeze_shared_allocations: false,
+    fn fixture() -> Fixture {
+        Fixture {
+            model: Arc::new(Self {
+                state: Mutex::new(State {
+                    installed: Vec::new(),
+                    mode: Mode::Normal,
+                    calls: 0,
+                    ack: true,
+                    reenter: None,
+                    events: Vec::new(),
+                    reply_gates: None,
+                    unmap_gates: None,
+                    freeze_shared_allocations: false,
+                    deny_release_on_ack: false,
+                }),
+                allowed: Arc::new(AtomicBool::new(true)),
+                release_allowed: Arc::new(AtomicBool::new(true)),
+                pool: Arc::new(Pool::default()),
+                dropped: Arc::new(AtomicUsize::new(0)),
             }),
-            allowed: AtomicBool::new(true),
-            dropped: Arc::new(AtomicUsize::new(0)),
-        })
+            controls: RefCell::new(Vec::new()),
+        }
     }
     fn mode(&self, mode: Mode) {
         self.state.lock().unwrap().mode = mode;
@@ -102,6 +216,18 @@ impl Model {
     }
     fn calls(&self) -> usize {
         self.state.lock().unwrap().calls
+    }
+    fn unmap_calls(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .filter(|event| **event == "unmap requested")
+            .count()
+    }
+    fn allocated(&self) -> usize {
+        self.pool.allocations.lock().unwrap().len()
     }
 }
 impl Drop for Model {
@@ -125,7 +251,12 @@ unsafe impl MappingPlatform for Model {
         resource: &Resource,
         request: MapRequest,
     ) -> Result<InstalledMapping, MapFailure> {
-        assert!(resource.backing().is::<Backing>());
+        let backing = resource.backing().downcast_ref::<Backing>().unwrap();
+        assert!(Arc::ptr_eq(&backing.pool, &self.pool));
+        assert!(
+            backing.mapping.uses() != 0,
+            "counted original use must precede mapper effects"
+        );
         assert!(resource.physical_span().contains(request.physical));
         assert_eq!(request.address_space, SPACE);
         assert_ne!(request.id, 0);
@@ -169,8 +300,13 @@ unsafe impl MappingPlatform for Model {
         if state.mode == Mode::RefuseWc && request.attribute == CacheAttribute::WriteCombining {
             return Err(MapFailure::Unchanged(Error::UnsupportedCache));
         }
-        let mut memory = Box::new(Pages([0; 16384]));
-        let pointer = NonNull::new(memory.0.as_mut_ptr()).unwrap();
+        let memory = Arc::new(Window(UnsafeCell::new(Pages([0; 16384]))));
+        let pointer = NonNull::new(memory.pointer()).unwrap();
+        self.pool
+            .allocations
+            .lock()
+            .unwrap()
+            .push((request.id, memory.clone()));
         let mut result = InstalledMapping {
             token: request.id,
             cpu_base: pointer,
@@ -220,7 +356,7 @@ unsafe impl MappingPlatform for Model {
             .unwrap();
         assert_eq!(state.installed[at].request, request);
         assert_eq!(
-            state.installed[at].memory.0.as_ptr() as usize,
+            state.installed[at].memory.pointer() as usize,
             mapping.cpu_base.as_ptr() as usize
         );
         state.events.push("unmap requested");
@@ -244,10 +380,23 @@ unsafe impl MappingPlatform for Model {
             .unwrap();
         state.events.push("all root TLB and WC drain acknowledged");
         state.installed.swap_remove(at);
+        let mut allocations = self.pool.allocations.lock().unwrap();
+        let allocation = allocations
+            .iter()
+            .position(|(id, _)| *id == request.id)
+            .unwrap();
+        allocations.swap_remove(allocation);
+        if state.deny_release_on_ack {
+            self.release_allowed.store(false, Ordering::Release);
+        }
         Ok(())
     }
 }
-fn make_resource(span: PhysicalSpan, kind: ResourceKind) -> (Resource, Arc<AtomicUsize>) {
+fn make_resource(
+    model: &Fixture,
+    span: PhysicalSpan,
+    kind: ResourceKind,
+) -> (Resource, Arc<AtomicUsize>) {
     let dropped = Arc::new(AtomicUsize::new(0));
     (
         Resource::new(Box::new(Backing {
@@ -255,6 +404,8 @@ fn make_resource(span: PhysicalSpan, kind: ResourceKind) -> (Resource, Arc<Atomi
             kind,
             dropped: Arc::clone(&dropped),
             drop_context: None,
+            pool: model.pool.clone(),
+            mapping: mapping_retention(model),
         })),
         dropped,
     )
@@ -265,11 +416,12 @@ fn make_resource(span: PhysicalSpan, kind: ResourceKind) -> (Resource, Arc<Atomi
 unsafe fn fixture(model: Arc<Model>, aliases: Vec<ExistingAlias>) -> Authority {
     Authority::prepare(model, SPACE, aliases).unwrap()
 }
-fn basic() -> (Arc<Model>, Authority, Resource, Arc<AtomicUsize>) {
-    let model = Model::new();
+fn basic() -> (Fixture, Authority, Resource, Arc<AtomicUsize>) {
+    let model = Model::fixture();
     // SAFETY: isolated model machine/root set, no outside mappings.
     let authority = unsafe { fixture(Arc::clone(&model), Vec::new()) };
     let (resource, dropped) = make_resource(
+        &model,
         PhysicalSpan::new(BASE, 16384).unwrap(),
         ResourceKind::Registers,
     );
@@ -289,10 +441,11 @@ fn map(authority: &Authority, resource: Resource) -> Mapping {
 
 #[test]
 fn exact_lease_pairing_distinguishes_other_mapping_in_same_permission() {
-    let (_, authority, resource, _) = basic();
+    let (model, authority, resource, _) = basic();
     let mut first = map(&authority, resource);
     let view = first.view(0..4096).unwrap();
     let (resource, _) = make_resource(
+        &model,
         PhysicalSpan::new(BASE + 0x10000, 16384).unwrap(),
         ResourceKind::Registers,
     );
@@ -348,7 +501,10 @@ fn device_regions() -> Vec<DeviceCacheRegion> {
         },
     ]
 }
-fn make_device_resource(regions: Vec<DeviceCacheRegion>) -> (Resource, Arc<AtomicUsize>) {
+fn make_device_resource(
+    model: &Fixture,
+    regions: Vec<DeviceCacheRegion>,
+) -> (Resource, Arc<AtomicUsize>) {
     let dropped = Arc::new(AtomicUsize::new(0));
     // SAFETY: this isolated model owns one whole Registers BAR at this
     // immutable requester/reset epoch; its model device checks precisely
@@ -360,6 +516,8 @@ fn make_device_resource(regions: Vec<DeviceCacheRegion>) -> (Resource, Arc<Atomi
                 kind: ResourceKind::Registers,
                 dropped: Arc::clone(&dropped),
                 drop_context: None,
+                pool: model.pool.clone(),
+                mapping: mapping_retention(model),
             }),
             regions,
         )
@@ -370,7 +528,7 @@ fn make_device_resource(regions: Vec<DeviceCacheRegion>) -> (Resource, Arc<Atomi
 #[test]
 fn one_original_bar_maps_disjoint_checked_uc_wc_and_keeps_whole_owner() {
     let (model, authority, _, _) = basic();
-    let (resource, dropped) = make_device_resource(device_regions());
+    let (resource, dropped) = make_device_resource(&model, device_regions());
     assert_eq!(resource.kind(), ResourceKind::Registers);
     let cloned = resource.clone();
     assert!(Arc::ptr_eq(&cloned.backing, &resource.backing));
@@ -417,6 +575,7 @@ fn one_original_bar_maps_disjoint_checked_uc_wc_and_keeps_whole_owner() {
         Err(Error::Busy)
     ));
     let (competing, competing_dropped) = make_resource(
+        &model,
         PhysicalSpan::new(BASE, 16384).unwrap(),
         ResourceKind::Registers,
     );
@@ -448,7 +607,7 @@ fn one_original_bar_maps_disjoint_checked_uc_wc_and_keeps_whole_owner() {
 #[test]
 fn device_permissions_cover_only_whole_typed_pages() {
     let (model, authority, _, _) = basic();
-    let (resource, _) = make_device_resource(device_regions());
+    let (resource, _) = make_device_resource(&model, device_regions());
     for (offset, bytes, attribute) in [
         (4096, 1, CacheAttribute::Uncached),
         (4095, 2, CacheAttribute::Uncached),
@@ -482,16 +641,19 @@ fn device_permissions_cover_only_whole_typed_pages() {
     authority.unregister_resource(id).unwrap();
     assert_eq!(model.calls(), 0);
     // Adjacent regions stay separately checked, even with identical UC.
-    let (adjacent, _) = make_device_resource(vec![
-        DeviceCacheRegion {
-            physical: PhysicalSpan::new(BASE, 4096).unwrap(),
-            attribute: CacheAttribute::Uncached,
-        },
-        DeviceCacheRegion {
-            physical: PhysicalSpan::new(BASE + 4096, 4096).unwrap(),
-            attribute: CacheAttribute::Uncached,
-        },
-    ]);
+    let (adjacent, _) = make_device_resource(
+        &model,
+        vec![
+            DeviceCacheRegion {
+                physical: PhysicalSpan::new(BASE, 4096).unwrap(),
+                attribute: CacheAttribute::Uncached,
+            },
+            DeviceCacheRegion {
+                physical: PhysicalSpan::new(BASE + 4096, 4096).unwrap(),
+                attribute: CacheAttribute::Uncached,
+            },
+        ],
+    );
     assert!(matches!(
         authority.map(
             adjacent,
@@ -553,6 +715,8 @@ fn malformed_device_permission_tables_release_owner_before_any_map() {
                     kind: ResourceKind::Registers,
                     dropped: Arc::clone(&dropped),
                     drop_context: None,
+                    pool: model.pool.clone(),
+                    mapping: mapping_retention(&model),
                 }),
                 regions,
             )
@@ -569,7 +733,7 @@ fn source_device_permissions_never_override_unknown_alias_or_native_wc_refusal()
         Some(CacheAttribute::WriteBack),
         Some(CacheAttribute::Uncached),
     ] {
-        let model = Model::new();
+        let model = Model::fixture();
         // SAFETY: exact isolated root-set alias includes the aperture page.
         let authority = unsafe {
             fixture(
@@ -580,7 +744,7 @@ fn source_device_permissions_never_override_unknown_alias_or_native_wc_refusal()
                 }],
             )
         };
-        let (resource, dropped) = make_device_resource(device_regions());
+        let (resource, dropped) = make_device_resource(&model, device_regions());
         assert!(matches!(
             authority.map(
                 resource.clone(),
@@ -637,6 +801,8 @@ fn explicit_uc_permissions_replace_prefetchable_defaults_and_quarantine_keeps_or
                 kind: ResourceKind::PrefetchableMemory,
                 dropped: Arc::clone(&dropped),
                 drop_context: None,
+                pool: model.pool.clone(),
+                mapping: mapping_retention(&model),
             }),
             vec![device_regions()[0]],
         )
@@ -655,7 +821,7 @@ fn explicit_uc_permissions_replace_prefetchable_defaults_and_quarantine_keeps_or
     ));
     assert_eq!(model.calls(), 0);
     assert_eq!(dropped.load(Ordering::Relaxed), 1);
-    let (resource, dropped) = make_device_resource(device_regions());
+    let (resource, dropped) = make_device_resource(&model, device_regions());
     let root_dropped = Arc::clone(&model.dropped);
     model.mode(Mode::WrongCache);
     assert!(matches!(
@@ -677,7 +843,7 @@ fn explicit_uc_permissions_replace_prefetchable_defaults_and_quarantine_keeps_or
 #[test]
 fn each_shared_metadata_failure_precedes_reservation_and_native_effects() {
     for successful_reservations in 0..3 {
-        let model = Model::new();
+        let model = Model::fixture();
         // SAFETY: isolated model machine/root set, no outside mappings.
         let authority = unsafe { fixture(Arc::clone(&model), Vec::new()) };
         let dropped = Arc::new(AtomicUsize::new(0));
@@ -685,7 +851,9 @@ fn each_shared_metadata_failure_precedes_reservation_and_native_effects() {
             span: PhysicalSpan::new(BASE, 16384).unwrap(),
             kind: ResourceKind::Registers,
             dropped: Arc::clone(&dropped),
-            drop_context: Some(authority.clone()),
+            drop_context: Some(Arc::downgrade(&authority.inner)),
+            pool: model.pool.clone(),
+            mapping: mapping_retention(&model),
         }));
         metadata::allocation::budget(Some(successful_reservations));
         let outcome = authority.map(
@@ -709,6 +877,7 @@ fn each_shared_metadata_failure_precedes_reservation_and_native_effects() {
         }
         // The same physical span remains available after either failure.
         let (replacement, released) = make_resource(
+            &model,
             PhysicalSpan::new(BASE, 16384).unwrap(),
             ResourceKind::Registers,
         );
@@ -878,7 +1047,7 @@ fn full_page_reservation_precedes_platform_reentry_and_refuses_overlap() {
 #[test]
 fn imported_effective_wb_or_unknown_alias_blocks_uc_and_wc_until_real_removal() {
     for attribute in [Some(CacheAttribute::WriteBack), None] {
-        let model = Model::new();
+        let model = Model::fixture();
         // SAFETY: model has exactly the imported page-alias policy.
         let authority = unsafe {
             fixture(
@@ -890,6 +1059,7 @@ fn imported_effective_wb_or_unknown_alias_blocks_uc_and_wc_until_real_removal() 
             )
         };
         let (resource, _) = make_resource(
+            &model,
             PhysicalSpan::new(BASE, 8192).unwrap(),
             ResourceKind::PrefetchableMemory,
         );
@@ -914,7 +1084,7 @@ fn imported_effective_wb_or_unknown_alias_blocks_uc_and_wc_until_real_removal() 
 }
 #[test]
 fn compatible_effective_uc_alias_is_distinct_from_wb_pte_flags() {
-    let model = Model::new();
+    let model = Model::fixture();
     // SAFETY: model describes effective UC despite hypothetical WB
     // PTE bits (MTRR UC precedence); no cached Rust reference aliases it.
     let authority = unsafe {
@@ -927,6 +1097,7 @@ fn compatible_effective_uc_alias_is_distinct_from_wb_pte_flags() {
         )
     };
     let (resource, _) = make_resource(
+        &model,
         PhysicalSpan::new(BASE, 4096).unwrap(),
         ResourceKind::Registers,
     );
@@ -936,7 +1107,7 @@ fn compatible_effective_uc_alias_is_distinct_from_wb_pte_flags() {
 }
 #[test]
 fn outside_alias_reservation_blocks_conflicts_before_publication() {
-    let (_, authority, resource, _) = basic();
+    let (_fixture, authority, resource, _) = basic();
     // SAFETY: simulated outside root owner reserves before table mutation.
     let id = unsafe {
         authority.reserve_alias(ExistingAlias {
@@ -995,6 +1166,7 @@ fn invalid_ranges_and_unowned_rounding_never_reach_platform() {
         );
     }
     let (partial, _) = make_resource(
+        &model,
         PhysicalSpan::new(BASE + 1, 8191).unwrap(),
         ResourceKind::Registers,
     );
@@ -1011,6 +1183,7 @@ fn invalid_ranges_and_unowned_rounding_never_reach_platform() {
     assert_eq!(model.calls(), 0);
     assert_eq!(PhysicalSpan::new(u64::MAX, 1), Err(Error::InvalidRange));
     let (above, _) = make_resource(
+        &model,
         PhysicalSpan::new((1u64 << 48) - 4096, 8192).unwrap(),
         ResourceKind::Registers,
     );
@@ -1039,6 +1212,7 @@ fn prefetchable_bar_never_establishes_wc_by_itself() {
         Err(Error::UnsupportedCache)
     ));
     let (memory, _) = make_resource(
+        &model,
         PhysicalSpan::new(BASE, 4096).unwrap(),
         ResourceKind::PrefetchableMemory,
     );
@@ -1218,7 +1392,7 @@ fn lock_contention_and_context_refusal_do_not_publish_or_reuse_state() {
 }
 #[test]
 fn nonwrapping_ids_and_single_production_permission_survive_last_public_drop() {
-    let model = Model::new();
+    let model = Model::fixture();
     let provider_dropped = Arc::clone(&model.dropped);
     // SAFETY: this sole production-constructor test models one complete
     // machine/root set. Other fixtures are cfg(test) simulated machines.
@@ -1234,6 +1408,7 @@ fn nonwrapping_ids_and_single_production_permission_survive_last_public_drop() {
         guard.inventory().next = u64::MAX;
     }
     let (resource, _) = make_resource(
+        &model,
         PhysicalSpan::new(BASE, 4096).unwrap(),
         ResourceKind::Registers,
     );
@@ -1342,14 +1517,21 @@ fn physical_only_abi_requires_registered_full_owner_and_keeps_it_through_ack() {
 }
 #[test]
 fn registered_resource_conflicts_include_whole_grant_and_page_rounded_lookup() {
-    let (_, authority, resource, _) = basic();
+    let (model, authority, resource, _) = basic();
     let id = authority.register_resource(resource.clone()).unwrap();
     let (other, _) = make_resource(
+        &model,
         PhysicalSpan::new(BASE + 4096, 4096).unwrap(),
         ResourceKind::Registers,
     );
     assert_eq!(
-        authority.register_resource(other.clone()),
+        authority
+            .register_resource(other.clone())
+            .map_err(|failure| {
+                let error = failure.error;
+                drop(failure.into_resource());
+                error
+            }),
         Err(Error::ResourceConflict)
     );
     assert!(matches!(
@@ -1358,6 +1540,7 @@ fn registered_resource_conflicts_include_whole_grant_and_page_rounded_lookup() {
     ));
     authority.unregister_resource(id).unwrap();
     let (partial, _) = make_resource(
+        &model,
         PhysicalSpan::new(BASE + 1, 4095).unwrap(),
         ResourceKind::Registers,
     );
@@ -1369,13 +1552,20 @@ fn registered_resource_conflicts_include_whole_grant_and_page_rounded_lookup() {
     authority.unregister_resource(id).unwrap();
     let mut mapping = map(&authority, resource);
     let (other, _) = make_resource(
+        &model,
         PhysicalSpan::new(BASE + 8192, 4096).unwrap(),
         ResourceKind::Registers,
     );
     // Although no live mapped page intersects this request, a second
     // alleged resource owner must not overlap the first whole grant.
     assert_eq!(
-        authority.register_resource(other.clone()),
+        authority
+            .register_resource(other.clone())
+            .map_err(|failure| {
+                let error = failure.error;
+                drop(failure.into_resource());
+                error
+            }),
         Err(Error::ResourceConflict)
     );
     assert!(matches!(
@@ -1385,8 +1575,9 @@ fn registered_resource_conflicts_include_whole_grant_and_page_rounded_lookup() {
     // SAFETY: model consumers stopped; remove original mapping exactly.
     unsafe { mapping.retire() }.unwrap();
 }
-fn disjoint_resource() -> (Resource, Arc<AtomicUsize>) {
+fn disjoint_resource(model: &Fixture) -> (Resource, Arc<AtomicUsize>) {
     make_resource(
+        model,
         PhysicalSpan::new(BASE + 16384, 16384).unwrap(),
         ResourceKind::Registers,
     )
@@ -1410,7 +1601,7 @@ fn duplicate_nonzero_token_quarantines_both_windows_and_forbids_unmap() {
     let (model, authority, resource, first_dropped) = basic();
     let mut first = map(&authority, resource);
     let first_cpu = first.address(0, 1).unwrap();
-    let (second, second_dropped) = disjoint_resource();
+    let (second, second_dropped) = disjoint_resource(&model);
     model.mode(Mode::DuplicateToken);
     assert!(matches!(
         authority.map(
@@ -1430,11 +1621,11 @@ fn duplicate_nonzero_token_quarantines_both_windows_and_forbids_unmap() {
             state.installed[1].request.physical
         );
         assert_ne!(
-            state.installed[0].memory.0.as_ptr(),
-            state.installed[1].memory.0.as_ptr()
+            state.installed[0].memory.pointer(),
+            state.installed[1].memory.pointer()
         );
         assert_eq!(
-            state.installed[0].memory.0.as_ptr() as usize,
+            state.installed[0].memory.pointer() as usize,
             first_cpu.as_ptr() as usize
         );
         assert_eq!(state.installed[0].token, state.installed[1].token);
@@ -1492,7 +1683,7 @@ fn duplicate_tokens_remain_reserved_for_uncertain_and_quarantined_records() {
             .filter(|event| **event == "unmap requested")
             .count();
         model.mode(Mode::DuplicateToken);
-        let (second, second_dropped) = disjoint_resource();
+        let (second, second_dropped) = disjoint_resource(&model);
         assert!(matches!(
             authority.map(
                 second,
@@ -1534,7 +1725,7 @@ fn duplicate_tokens_remain_reserved_for_uncertain_and_quarantined_records() {
 #[test]
 fn simultaneous_duplicate_replies_cannot_resurrect_quarantined_installations() {
     let (model, authority, first, first_dropped) = basic();
-    let (second, second_dropped) = disjoint_resource();
+    let (second, second_dropped) = disjoint_resource(&model);
     let ready = Arc::new(std::sync::Barrier::new(3));
     let release = Arc::new(std::sync::Barrier::new(3));
     {
@@ -1610,7 +1801,7 @@ fn simultaneous_duplicate_replies_cannot_resurrect_quarantined_installations() {
 fn pending_reply_blocks_old_retirement_before_duplicate_identity_is_known() {
     let (model, authority, resource, _) = basic();
     let mut old = map(&authority, resource);
-    let (second, _) = disjoint_resource();
+    let (second, _) = disjoint_resource(&model);
     let ready = Arc::new(std::sync::Barrier::new(2));
     let release = Arc::new(std::sync::Barrier::new(2));
     {
@@ -1644,7 +1835,7 @@ fn pending_reply_blocks_old_retirement_before_duplicate_identity_is_known() {
 fn unmap_excludes_new_map_callbacks_until_all_root_acknowledgement() {
     let (model, authority, resource, _) = basic();
     let mut old = map(&authority, resource);
-    let (second, _) = disjoint_resource();
+    let (second, _) = disjoint_resource(&model);
     let ready = Arc::new(std::sync::Barrier::new(2));
     let release = Arc::new(std::sync::Barrier::new(2));
     model.state.lock().unwrap().unmap_gates = Some((Arc::clone(&ready), Arc::clone(&release)));
@@ -1674,4 +1865,276 @@ fn unmap_excludes_new_map_callbacks_until_all_root_acknowledgement() {
     unsafe { next.retire() }.unwrap();
     assert_eq!(model.calls(), 2);
     assert_eq!(model.live(), 0);
+}
+
+fn original_mapping_retention(resource: &Resource) -> MappingRetention<ModelPin> {
+    resource
+        .backing()
+        .downcast_ref::<Backing>()
+        .unwrap()
+        .mapping
+        .clone()
+}
+fn close_original(fixture: &Fixture, retained: &MappingRetention<ModelPin>) -> Result<(), Error> {
+    let mut originals = fixture.controls.borrow_mut();
+    let original = originals
+        .iter_mut()
+        .find(|original| {
+            original
+                .retention()
+                .is_ok_and(|candidate| candidate.same_owner(retained))
+        })
+        .expect("actual fixture controller for retained original assignment");
+    original.close()
+}
+
+#[test]
+fn counted_original_admission_precedes_mapper_and_close_keeps_accepted_views() {
+    let (model, authority, resource, dropped) = basic();
+    let original = original_mapping_retention(&resource);
+    assert_eq!(original.uses(), 0);
+    let mut mapping = map(&authority, resource.clone());
+    assert_eq!(original.uses(), 1);
+    assert_eq!(model.calls(), 1);
+    let view = mapping.view(0..4096).unwrap();
+    let clone = view.clone();
+    assert_eq!(original.uses(), 1, "views retain the SAME accepted map use");
+    assert!(matches!(
+        close_original(&model, &original),
+        Err(Error::Assignment(assignment::Error::Busy { uses: 1, .. }))
+    ));
+    assert!(
+        view.address(0, 1).is_ok(),
+        "close is not destructive retirement"
+    );
+    assert!(matches!(
+        authority.map(
+            resource.clone(),
+            4096,
+            4096,
+            CacheAttribute::Uncached,
+            Protection::ReadWrite
+        ),
+        Err(Error::Assignment(assignment::Error::Closed))
+    ));
+    assert_eq!(model.calls(), 1, "closed admission never calls the mapper");
+    // SAFETY: no raw users; outstanding concrete views must still refuse unmap.
+    assert_eq!(unsafe { mapping.retire() }, Err(Error::Busy));
+    assert_eq!(model.unmap_calls(), 0);
+    drop(view);
+    // SAFETY: the independent clone still owns the same accepted mapping.
+    assert_eq!(unsafe { mapping.retire() }, Err(Error::Busy));
+    drop(clone);
+    // SAFETY: every concrete view/raw consumer ended; the original model ACKs.
+    unsafe { mapping.retire() }.unwrap();
+    assert_eq!(original.uses(), 0);
+    assert_eq!(model.unmap_calls(), 1);
+    assert_eq!(model.allocated(), 0);
+    assert!(matches!(
+        authority.map(
+            resource.clone(),
+            4096,
+            4096,
+            CacheAttribute::Uncached,
+            Protection::ReadWrite
+        ),
+        Err(Error::Assignment(assignment::Error::Closed))
+    ));
+    assert_eq!(model.calls(), 1);
+    drop(resource);
+    assert_eq!(dropped.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn unchanged_mapper_ack_releases_original_use_but_uncertainty_retains_actual_pool() {
+    let (model, authority, resource, dropped) = basic();
+    let original = original_mapping_retention(&resource);
+    model.mode(Mode::Unchanged);
+    assert!(matches!(
+        authority.map(
+            resource.clone(),
+            0,
+            4096,
+            CacheAttribute::Uncached,
+            Protection::ReadWrite
+        ),
+        Err(Error::MappingFailed)
+    ));
+    assert_eq!(original.uses(), 0);
+    assert_eq!(model.allocated(), 0);
+    assert_eq!(authority.status().unwrap().installing, 0);
+    drop(resource);
+    assert_eq!(dropped.load(Ordering::Relaxed), 1);
+
+    let (model, authority, resource, dropped) = basic();
+    let original = original_mapping_retention(&resource);
+    let allocator = Arc::downgrade(&model.pool);
+    model.mode(Mode::Uncertain);
+    assert!(matches!(
+        authority.map(
+            resource.clone(),
+            0,
+            4096,
+            CacheAttribute::Uncached,
+            Protection::ReadWrite
+        ),
+        Err(Error::MappingFailed)
+    ));
+    assert_eq!(original.uses(), 1);
+    assert_eq!(model.allocated(), 1);
+    assert_eq!(authority.status().unwrap().quarantined, 1);
+    drop(resource);
+    drop(authority);
+    drop(model);
+    assert_eq!(original.uses(), 1);
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        allocator
+            .upgrade()
+            .unwrap()
+            .allocations
+            .lock()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn acknowledged_unmap_then_use_release_refusal_retains_same_closed_use_for_retry() {
+    let (model, authority, resource, dropped) = basic();
+    let original = original_mapping_retention(&resource);
+    let id = authority.register_resource(resource.clone()).unwrap();
+    let mut mapping = map(&authority, resource.clone());
+    assert!(matches!(
+        close_original(&model, &original),
+        Err(Error::Assignment(assignment::Error::Busy { uses: 1, .. }))
+    ));
+    model.state.lock().unwrap().deny_release_on_ack = true;
+    // SAFETY: no views/raw users remain; the provider ACKs native unmap, then
+    // deliberately loses the SAME original model release-control context.
+    assert_eq!(
+        // SAFETY: no raw/view users remain; real modeled unmap ACK happens
+        // before the deliberately refused original use-release context.
+        unsafe { mapping.retire() },
+        Err(Error::Assignment(assignment::Error::Context))
+    );
+    assert_eq!(model.live(), 0);
+    assert_eq!(model.allocated(), 0);
+    assert_eq!(model.unmap_calls(), 1);
+    assert_eq!(
+        original.uses(),
+        1,
+        "failed release must retain its original count"
+    );
+    assert_eq!(mapping.check_current(), Err(Error::Unavailable));
+    assert_eq!(mapping.view(0..4096).err(), Some(Error::Unavailable));
+    assert_eq!(authority.unregister_resource(id), Err(Error::Busy));
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    model.release_allowed.store(true, Ordering::Release);
+    // New admission remains closed, so successful retry cannot manufacture a
+    // fresh replacement use instead of releasing the retained original one.
+    assert!(matches!(
+        original.begin_mapping(),
+        Err(Error::Assignment(assignment::Error::Closed))
+    ));
+    // SAFETY: only this original mapping remains; native unmap already ACKed.
+    unsafe { mapping.retire() }.unwrap();
+    assert_eq!(
+        model.unmap_calls(),
+        1,
+        "count retry never repeats hardware unmap"
+    );
+    assert_eq!(original.uses(), 0);
+    authority.unregister_resource(id).unwrap();
+    drop(resource);
+    assert_eq!(dropped.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn failed_registration_returns_same_owned_resource_and_keeps_backing_outside_lock() {
+    let (model, authority, resource, dropped) = basic();
+    let original = original_mapping_retention(&resource);
+    model.allowed.store(false, Ordering::Release);
+    let failure = authority.register_resource(resource.clone()).unwrap_err();
+    assert_eq!(failure.error, Error::Unavailable);
+    assert_eq!(original.uses(), 0);
+    assert_eq!(model.calls(), 0);
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    let returned = failure.into_resource();
+    assert!(Arc::ptr_eq(&returned.backing, &resource.backing));
+    model.allowed.store(true, Ordering::Release);
+    let id = authority.register_resource(returned).unwrap();
+    authority.unregister_resource(id).unwrap();
+    drop(resource);
+    assert_eq!(dropped.load(Ordering::Relaxed), 1);
+
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let resource = Resource::new(Box::new(Backing {
+        span: PhysicalSpan::new(BASE, 16384).unwrap(),
+        kind: ResourceKind::Registers,
+        dropped: dropped.clone(),
+        drop_context: Some(Arc::downgrade(&authority.inner)),
+        pool: model.pool.clone(),
+        mapping: mapping_retention(&model),
+    }));
+    let mut mapping = map(&authority, resource);
+    // Both acquisition and final Backing Drop assert the actual inventory lock
+    // is free. The model's weak probe supplies no reservation or access grant.
+    // SAFETY: isolated model users ended, and native removal ACKs normally.
+    unsafe { mapping.retire() }.unwrap();
+    assert_eq!(dropped.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn abandoned_registration_refusal_retains_same_resource_without_mapper_effects() {
+    let (model, authority, resource, dropped) = basic();
+    let same_backing = Arc::downgrade(&resource.backing);
+    model.allowed.store(false, Ordering::Release);
+    {
+        let failure = authority.register_resource(resource).unwrap_err();
+        assert_eq!(failure.error, Error::Unavailable);
+    } // abandoned owning refusal keeps the original resource, without a fake release
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    assert!(same_backing.upgrade().is_some());
+    assert_eq!(model.calls(), 0);
+}
+
+#[test]
+fn conflicting_alias_refuses_before_counted_admission_and_same_owner_maps_after_ack() {
+    let (model, authority, resource, dropped) = basic();
+    let original = original_mapping_retention(&resource);
+    // SAFETY: the isolated outside-root model reserves its alias before any
+    // publication. This is no physical alias/removal proof.
+    let alias = unsafe {
+        authority.reserve_alias(ExistingAlias {
+            physical: PhysicalSpan::new(BASE, 4096).unwrap(),
+            attribute: Some(CacheAttribute::WriteBack),
+        })
+    }
+    .unwrap();
+    assert!(matches!(
+        authority.map(
+            resource.clone(),
+            0,
+            4096,
+            CacheAttribute::Uncached,
+            Protection::ReadWrite
+        ),
+        Err(Error::CacheConflict)
+    ));
+    assert_eq!(original.uses(), 0);
+    assert_eq!(model.calls(), 0);
+    assert_eq!(model.allocated(), 0);
+    // SAFETY: this simulated outside owner acknowledged its complete alias
+    // removal. Native callers require their real CPU/TLB/cache completion.
+    unsafe { authority.retire_alias(alias) }.unwrap();
+    let mut mapping = map(&authority, resource.clone());
+    assert_eq!(original.uses(), 1);
+    assert_eq!(model.calls(), 1);
+    // SAFETY: all model pointer users ended; actual model unmap ACK follows.
+    unsafe { mapping.retire() }.unwrap();
+    assert_eq!(original.uses(), 0);
+    drop(resource);
+    assert_eq!(dropped.load(Ordering::Relaxed), 1);
 }

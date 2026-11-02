@@ -69,6 +69,10 @@ impl<B: Io> Hci<B> {
     pub fn initialization(&self) -> Option<Result<&InitializationReport, &InitializationError>> {
         self.initialization.as_deref().map(Result::as_ref)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn initialize_once(
         &mut self,
         provider: &dyn Provider,

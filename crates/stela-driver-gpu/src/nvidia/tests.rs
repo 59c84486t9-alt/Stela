@@ -53,28 +53,31 @@ impl Config {
 }
 
 impl ConfigSpace for Config {
-    fn read32(&self, offset: u16) -> u32 {
-        self.read(offset, 4)
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        Ok(self.read(offset, 4))
     }
 
-    fn read16(&self, offset: u16) -> u16 {
-        self.read(offset, 2) as u16
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok(self.read(offset, 2) as u16)
     }
 
-    fn read8(&self, offset: u16) -> u8 {
-        self.read(offset, 1) as u8
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok(self.read(offset, 1) as u8)
     }
 
-    fn write32(&mut self, offset: u16, value: u32) {
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         self.write(offset, 4, value);
+        Ok(())
     }
 
-    fn write16(&mut self, offset: u16, value: u16) {
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
         self.write(offset, 2, u32::from(value));
+        Ok(())
     }
 
-    fn write8(&mut self, offset: u16, value: u8) {
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
         self.write(offset, 1, u32::from(value));
+        Ok(())
     }
 }
 
@@ -561,4 +564,94 @@ fn nvkms_c_invalid_layouts_fail_for_every_original_zero_flag_value() {
             assert!(unsafe { nvkms_alloc(bytes, zero) }.is_null());
         }
     }
+}
+
+// An explicit provider denial is distinct from a successful all-ones read.
+// This models only Rust/C status/latch semantics, never physical hardware.
+struct Denied<'a> {
+    mode: &'a core::cell::Cell<u8>,
+    calls: &'a core::cell::Cell<usize>,
+}
+impl Denied<'_> {
+    fn read(&self) -> Result<u32, ConfigError> {
+        self.calls.set(self.calls.get() + 1);
+        if self.mode.get() == 0 {
+            Ok(u32::MAX)
+        } else {
+            Err(ConfigError::before_effect(
+                crate::bus::pci::ConfigFailure::ForeignGrant,
+            ))
+        }
+    }
+    fn write(&self, offset: u16, width: u8) -> Result<(), ConfigError> {
+        self.calls.set(self.calls.get() + 1);
+        Err(ConfigError::write_may_have_applied(
+            offset,
+            width,
+            crate::bus::pci::ConfigFailure::ForeignGrant,
+        ))
+    }
+}
+impl ConfigSpace for Denied<'_> {
+    fn read8(&self, _: u16) -> Result<u8, ConfigError> {
+        self.read().map(|v| v as u8)
+    }
+    fn read16(&self, _: u16) -> Result<u16, ConfigError> {
+        self.read().map(|v| v as u16)
+    }
+    fn read32(&self, _: u16) -> Result<u32, ConfigError> {
+        self.read()
+    }
+    fn write8(&mut self, o: u16, _: u8) -> Result<(), ConfigError> {
+        self.write(o, 1)
+    }
+    fn write16(&mut self, o: u16, _: u16) -> Result<(), ConfigError> {
+        self.write(o, 2)
+    }
+    fn write32(&mut self, o: u16, _: u32) -> Result<(), ConfigError> {
+        self.write(o, 4)
+    }
+}
+#[test]
+fn original_pci_prefix_preserves_typed_denial_and_closes_after_uncertain_write() {
+    let mode = core::cell::Cell::new(0);
+    let calls = core::cell::Cell::new(0);
+    let mut config = Denied {
+        mode: &mode,
+        calls: &calls,
+    };
+    {
+        let mut handle = pin!(PciHandle::new(&mut config));
+        // SAFETY: pinned handle, exclusive serialized model, live output.
+        let raw = unsafe { handle.as_mut().as_raw() };
+        let mut value = 0;
+        // SAFETY: serialized pinned CPU-only fixture; output/configuration is live and owned.
+        assert_eq!(unsafe { os_pci_read_dword(raw, 0, &mut value) }, 0);
+        assert_eq!(value, u32::MAX);
+        assert_eq!(handle.failure(), None);
+        mode.set(1);
+        // SAFETY: serialized pinned CPU-only fixture; output/configuration is live and owned.
+        assert_ne!(unsafe { os_pci_read_dword(raw, 0, &mut value) }, 0);
+        let error = ConfigError::before_effect(crate::bus::pci::ConfigFailure::ForeignGrant);
+        assert_eq!(handle.failure(), Some(error));
+        mode.set(0);
+        // SAFETY: serialized pinned CPU-only fixture; output/configuration is live and owned.
+        assert_ne!(unsafe { os_pci_write_dword(raw, 4, 0) }, 0);
+        assert_eq!(calls.get(), 2, "denial closes later bus access");
+        assert_eq!(handle.failure(), Some(error));
+    }
+    let mut handle = pin!(PciHandle::new(&mut config));
+    // SAFETY: same exact model/pinning contract, no physical writes.
+    let raw = unsafe { handle.as_mut().as_raw() };
+    // SAFETY: serialized pinned CPU-only fixture; output/configuration is live and owned.
+    assert_ne!(unsafe { os_pci_write_word(raw, 4, 7) }, 0);
+    let error =
+        ConfigError::write_may_have_applied(4, 2, crate::bus::pci::ConfigFailure::ForeignGrant);
+    assert_eq!(handle.failure(), Some(error));
+    let before = calls.get();
+    let mut value = 0;
+    // SAFETY: serialized pinned CPU-only fixture; output/configuration is live and owned.
+    assert_ne!(unsafe { os_pci_read_dword(raw, 0, &mut value) }, 0);
+    assert_eq!(calls.get(), before);
+    assert_eq!(handle.failure(), Some(error));
 }

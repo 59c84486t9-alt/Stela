@@ -17,10 +17,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         index: u8,
         material: &[u8],
         receive: PacketNumber,
-    ) -> Result<Arc<Session>, LinkControlError>
-    where
-        C: Send + Sync,
-    {
+    ) -> Result<Arc<Session>, LinkControlError> {
         let s = self.state_mut();
         // Frontend batches must be consumed/drained as well as native
         // queues; never drop observations or silently retag old key users.
@@ -112,10 +109,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         index: u8,
         material: &[u8],
         receive: PacketNumber,
-    ) -> Result<Arc<Session>, LinkControlError>
-    where
-        C: Send + Sync,
-    {
+    ) -> Result<Arc<Session>, LinkControlError> {
         let s = self.state_mut();
         if !s.data.is_empty()
             || !s.notices.is_empty()

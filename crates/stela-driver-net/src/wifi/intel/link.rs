@@ -77,6 +77,7 @@ type Country<Q, B> = Ax200Country<'static, Q, B, Regulatory>;
 /// Why bring-up stopped.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
+    Pci(crate::block::BlockError),
     Boot(boot::Error),
     Lari(LariError),
     Setup(Ax200SetupError),
@@ -114,7 +115,13 @@ impl Error {
     fn restartable(&self) -> bool {
         !matches!(
             self,
-            Self::Refused(_)
+            Self::Pci(_)
+                | Self::Boot(boot::Error::Pci(_))
+                | Self::Boot(boot::Error::Access(super::power::AccessError::Minimum(_)))
+                | Self::Boot(boot::Error::Power(super::power::Error::Access(
+                    super::power::AccessError::Minimum(_)
+                )))
+                | Self::Refused(_)
                 | Self::Regulatory(_)
                 | Self::Station(_)
                 | Self::Data(_)
@@ -256,6 +263,12 @@ kept!(
     [Q: BootIo, B: BiosIo] Ax200ManagementQueue<'static, Q, B, Regulatory>,
     [Q: BootIo, B: BiosIo] Ax200Coexistence<'static, Q, B, Regulatory>,
 );
+
+impl<Q: BootIo, B: BiosIo> Kept for Stage<Q, B> {
+    fn stop_function(&mut self) -> bool {
+        self.owner().is_some_and(|owner| owner.stop_function())
+    }
+}
 
 impl<Q: BootIo, B: BiosIo> Stage<Q, B> {
     fn owner(&mut self) -> Option<&mut dyn Kept> {
@@ -488,9 +501,24 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         {
             return false;
         }
-        self.stage = Stage::Moving;
+        let stopped = core::mem::replace(&mut self.stage, Stage::Moving);
         let reset = self.restart.attempts.resets() || core::mem::take(&mut self.restart.top_failed);
-        let no_reset = reset && !self.restart.io.reset_function();
+        let no_reset = if reset {
+            match self.restart.io.reset_function() {
+                Ok(did_reset) => !did_reset,
+                Err(error) => {
+                    self.error = Some(Error::Pci(error));
+                    self.reported = false;
+                    self.stage = Stage::Failed {
+                        owner: Box::new(stopped),
+                    };
+                    return false;
+                }
+            }
+        } else {
+            false
+        };
+        drop(stopped);
         let first = no_reset && !core::mem::replace(&mut self.restart.no_reset, true);
         let restart = &self.restart;
         // SAFETY: the owner that held `io`'s twin stopped, and `new`'s
@@ -510,7 +538,20 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let boot = match boot {
             Ok(boot) => boot,
             Err(error) => {
-                self.error = Some(Error::Restart(format!("{error}")));
+                self.error = Some(match error {
+                    attach::AttachError::Boot(boot::Error::Pci(error)) => Error::Pci(error),
+                    attach::AttachError::Register(super::power::AccessError::Minimum(error))
+                    | attach::AttachError::Power(super::power::Error::Access(
+                        super::power::AccessError::Minimum(error),
+                    ))
+                    | attach::AttachError::Boot(boot::Error::Access(
+                        super::power::AccessError::Minimum(error),
+                    ))
+                    | attach::AttachError::Boot(boot::Error::Power(super::power::Error::Access(
+                        super::power::AccessError::Minimum(error),
+                    ))) => Error::Pci(crate::block::BlockError::PciPower(error)),
+                    error => Error::Restart(format!("{error}")),
+                });
                 self.reported = false;
                 self.stage = Stage::Failed {
                     owner: Box::new(()),
@@ -639,6 +680,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         self.deadline.as_ref().is_some_and(Deadline::passed)
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     unsafe fn step(&mut self, stage: Stage<Q, B>) -> Result<Stage<Q, B>, (Error, Box<dyn Kept>)> {
         let pages = self.pages;
         macro_rules! advance {
@@ -983,6 +1028,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         Stage::Nvm(Box::new(boot.initialize_on_device_nvm()))
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn country(
         &mut self,
         board: Box<Ax200BoardPolicy<'static, Q, B>>,
@@ -1007,6 +1056,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// One scan step: hear the running scan's beacons. The keeper starts and
     /// retires scans.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     unsafe fn scan(
         &mut self,
         mut scan: Box<Ax200Scan<'static, Q, B, Regulatory>>,

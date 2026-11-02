@@ -10,14 +10,14 @@ const SSC: u16 = 0x68;
 const VDD2: u8 = 0xb0; // 1.8-V selection plus VDD2 power-on.
 
 fn update(c: &mut dyn ConfigSpace, at: u16, mask: u32, bits: u32) -> Result<(), BlockError> {
-    let old = c.read32(at);
+    let old = c.read32(at)?;
     if old == u32::MAX {
         return Err(BlockError::Unsupported(
             "GL9755 PCI register is unavailable",
         ));
     }
-    c.write32(at, (old & !mask) | bits);
-    let actual = c.read32(at);
+    c.write32(at, (old & !mask) | bits)?;
+    let actual = c.read32(at)?;
     if actual == u32::MAX || actual & mask != bits {
         return Err(BlockError::Unsupported(
             "GL9755 protected PCI write did not acknowledge",
@@ -61,9 +61,11 @@ pub(super) fn initialize<C: ConfigSpace>(
     f: &mut Function<C>,
     r: &mut dyn Registers,
     clock: Clock,
+    minimum: &dyn crate::bus::pci::power::Timer,
 ) -> Result<(), BlockError> {
+    minimum.check().map_err(BlockError::PciPower)?;
     validate_clock(clock)?;
-    if f.config().read32(0) != ID {
+    if f.config().read32(0)? != ID {
         return Err(BlockError::Unsupported("GL9755 owned PCI identity changed"));
     }
     let pm = crate::pci::capability(f.config(), 1)?.ok_or(BlockError::Unsupported(
@@ -81,23 +83,26 @@ pub(super) fn initialize<C: ConfigSpace>(
         update(f.config(), 0x44, 7 << 12 | 1 << 29, 0)?;
         update(f.config(), 0x70, 1 << 19, 0)?;
         update(f.config(), 0x48, 31 << 24, 31 << 24)?;
-        let bars: [u32; 6] = core::array::from_fn(|i| f.config().read32(0x10 + i as u16 * 4));
-        let control = f.config().read16(pm + 4);
+        let mut bars = [0u32; 6];
+        for (i, saved) in bars.iter_mut().enumerate() {
+            *saved = f.config().read32(0x10 + i as u16 * 4)?;
+        }
+        let control = f.config().read16(pm + 4)?;
         if control == u16::MAX || control & 3 != 0 {
             return Err(BlockError::Unsupported(
                 "GL9755 power cycle requires actual D0",
             ));
         }
         set_pio_command(f, false)?;
-        f.config().write16(pm + 4, (control & !0x8003) | 3);
-        clock.delay(10_000);
-        if f.config().read16(pm + 4) & 3 != 3 {
+        f.config().write16(pm + 4, (control & !0x8003) | 3)?;
+        minimum.wait_us(10_000).map_err(BlockError::PciPower)?;
+        if f.config().read16(pm + 4)? & 3 != 3 {
             return Err(BlockError::Unsupported("GL9755 D3hot did not acknowledge"));
         }
-        f.config().write16(pm + 4, control & !0x8003);
-        clock.delay(10_000);
-        if f.config().read16(pm + 4) & 3 != 0
-            || f.config().read32(0) != ID
+        f.config().write16(pm + 4, control & !0x8003)?;
+        minimum.wait_us(10_000).map_err(BlockError::PciPower)?;
+        if f.config().read16(pm + 4)? & 3 != 0
+            || f.config().read32(0)? != ID
             || crate::pci::capability(f.config(), 1)? != Some(pm)
             || pci::find_aer(f.config())? != aer
         {
@@ -108,8 +113,8 @@ pub(super) fn initialize<C: ConfigSpace>(
         quiesce_pio(f)?;
         for (i, value) in bars.into_iter().enumerate() {
             let at = 0x10 + i as u16 * 4;
-            f.config().write32(at, value);
-            if f.config().read32(at) != value {
+            f.config().write32(at, value)?;
+            if f.config().read32(at)? != value {
                 return Err(BlockError::Unsupported(
                     "GL9755 BAR restoration did not acknowledge",
                 ));
@@ -123,13 +128,24 @@ pub(super) fn initialize<C: ConfigSpace>(
     })();
     // The donor holds the same window through D3/D0 and AER. Close it only
     // while the original configuration-space identity is accessible in D0.
-    let close = if f.config().read32(0) == ID && f.config().read16(pm + 4) & 3 == 0 {
-        update(f.config(), 0x800, 1, 0)
-    } else {
-        Err(BlockError::Unsupported(
-            "GL9755 write window remains inaccessible",
-        ))
-    };
+
+    if matches!(
+        &result,
+        Err(BlockError::Config(_)
+            | BlockError::PciPower(_)
+            | BlockError::PciCapability(crate::bus::pci::CapabilityError::Config { .. }))
+    ) {
+        return result;
+    }
+    let close = (|| {
+        if f.config().read32(0)? == ID && f.config().read16(pm + 4)? & 3 == 0 {
+            update(f.config(), 0x800, 1, 0)
+        } else {
+            Err(BlockError::Unsupported(
+                "GL9755 write window remains inaccessible",
+            ))
+        }
+    })();
     result.and(close)?;
     unlocked(f.config(), |c| {
         update(c, 0x70, 0xff00_00ff, 0xfc00_00b3)?;
@@ -150,7 +166,16 @@ pub(in crate::sdhci) enum ClockFailure {
 }
 impl From<BlockError> for ClockFailure {
     fn from(error: BlockError) -> Self {
-        Self::Hardware(error)
+        if matches!(
+            error,
+            BlockError::Config(_)
+                | BlockError::PciPower(_)
+                | BlockError::PciCapability(crate::bus::pci::CapabilityError::Config { .. })
+        ) {
+            Self::Authority(error)
+        } else {
+            Self::Hardware(error)
+        }
     }
 }
 
@@ -161,7 +186,9 @@ pub(in crate::sdhci) fn set_clock(
     base: u32,
     timing: Timing,
     requested: u32,
+    minimum: &dyn crate::bus::pci::power::Timer,
 ) -> Result<u32, ClockFailure> {
+    minimum.check().map_err(BlockError::PciPower)?;
     unlocked(r.configuration().map_err(ClockFailure::Authority)?, |c| {
         update(c, PLL, DIRECT | SSC_ENABLE, 0)
     })?;
@@ -185,7 +212,7 @@ pub(in crate::sdhci) fn set_clock(
     };
     if let Some((step, ppm, ldiv, pdiv)) = settings {
         let enable = unlocked(r.configuration().map_err(ClockFailure::Authority)?, |c| {
-            let misc = c.read32(0x78);
+            let misc = c.read32(0x78)?;
             if misc == u32::MAX {
                 return Err(BlockError::Unsupported("GL9755 SSC policy unavailable"));
             }
@@ -203,7 +230,7 @@ pub(in crate::sdhci) fn set_clock(
         unlocked(r.configuration().map_err(ClockFailure::Authority)?, |c| {
             update(c, PLL, 0x73ff | DIRECT, ldiv | pdiv << 12 | DIRECT)
         })?;
-        timer.delay(1_000);
+        minimum.wait_us(1_000).map_err(BlockError::PciPower)?;
     }
     let field = (divisor & 0xff) << 8 | (divisor & 0x300) >> 2;
     enable_clock(r, timer, version, field)?;
@@ -215,9 +242,10 @@ pub(in crate::sdhci) fn set_clock(
 
 pub(in crate::sdhci) fn set_power(
     r: &mut dyn Registers,
-    clock: Clock,
+    minimum: &dyn crate::bus::pci::power::Timer,
     vdd1: u8,
 ) -> Result<(), BlockError> {
+    minimum.check().map_err(BlockError::PciPower)?;
     let events = r.read32(INTERRUPT_ENABLE) & !BUS_POWER;
     r.write32(SIGNAL_ENABLE, 0); // Polling owner has no CPU interrupt route.
     r.write32(INTERRUPT_ENABLE, events);
@@ -229,12 +257,12 @@ pub(in crate::sdhci) fn set_power(
     }
     if vdd1 != 0 {
         r.write8(POWER, vdd1 | POWER_ON);
-        clock.delay(5_000);
+        minimum.wait_us(5_000).map_err(BlockError::PciPower)?;
         if r.read8(POWER) != vdd1 | POWER_ON {
             return Err(BlockError::Unsupported("GL9755 VDD1 did not acknowledge"));
         }
         r.write8(POWER, vdd1 | POWER_ON | VDD2);
-        clock.delay(5_000);
+        minimum.wait_us(5_000).map_err(BlockError::PciPower)?;
         if r.read8(POWER) != vdd1 | POWER_ON | VDD2 {
             return Err(BlockError::Unsupported("GL9755 VDD2 did not acknowledge"));
         }

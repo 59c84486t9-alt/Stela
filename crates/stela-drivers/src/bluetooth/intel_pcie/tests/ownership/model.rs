@@ -264,7 +264,7 @@ pub(super) fn preparing(root: Arc<RootState>) -> (preparation::PreparingRequeste
         (0x58, 0x4000),
         (0x100, 0),
     ] {
-        config.write32(offset, value);
+        config.write32(offset, value).unwrap();
     }
     let function = Function::new(address, config).unwrap();
     // SAFETY: exclusive fixture, no native firmware/IRQ/work/bypass users.
@@ -284,6 +284,7 @@ pub(super) fn cold(root: Arc<RootState>) -> (native::cold::Cold<Registers>, Arc<
         requester,
         registers: Registers::new(root),
         clock: CLOCK,
+        minimum: crate::minimum_model::owned(CLOCK),
     };
     // SAFETY: exclusively owned synchronous model with checked test TSC timing.
     let cold = unsafe { native::cold::Cold::new(inputs) }.unwrap_or_else(|(e, _)| panic!("{e:?}"));
@@ -366,7 +367,7 @@ pub(super) fn owned_inputs(
         .unwrap_or_else(|f| panic!("{:?}", f.error));
     let mut function = bound.requester.into_function();
     let retention = function.config().retain_epoch().unwrap();
-    function.enable_polled();
+    function.enable_polled().unwrap();
     let msi_route = bound.attachment.irq_route().unwrap();
     let inputs = native::Inputs {
         function,
@@ -374,6 +375,7 @@ pub(super) fn owned_inputs(
         bars: [Some(Bar(root.clone())), None, None, None, None, None],
         registers: bound.registers,
         clock: CLOCK,
+        minimum: crate::minimum_model::owned(CLOCK),
         interrupts: &NO_INTERRUPTS,
         domain: bound.attachment.domain(),
         msi_route,

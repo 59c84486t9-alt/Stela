@@ -137,3 +137,19 @@ mod switched;
 
 #[cfg(all(target_arch = "x86_64", unix))]
 mod native_policy;
+
+#[cfg(all(target_arch = "x86_64", unix))]
+mod general_credits;
+
+fn cancellation_error<T>(result: Result<(), (T, WorkError)>) -> WorkError {
+    match result {
+        Err((owner, error)) => {
+            drop(owner);
+            error
+        }
+        Ok(()) => panic!("expected exact native cancellation refusal"),
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", unix))]
+mod accounting;

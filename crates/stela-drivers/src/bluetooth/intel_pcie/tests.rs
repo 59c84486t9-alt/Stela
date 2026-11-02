@@ -443,6 +443,17 @@ unsafe impl Platform for ModelPlatform {
         }
         Ok(())
     }
+    fn minimum_delay(&mut self, microseconds: u64) -> Result<()> {
+        let model = self.0.borrow();
+        model.time.set(
+            model
+                .time
+                .get()
+                .checked_add(microseconds)
+                .ok_or(Error::Mmio("modeled time overflow"))?,
+        );
+        Ok(())
+    }
     fn now_us(&self) -> u64 {
         let m = self.0.borrow();
         let t = m.time.get();
@@ -1598,3 +1609,5 @@ fn retirement_unwind_seals_core_before_the_first_register_effect() {
     assert_eq!(model.borrow().writes, writes);
     assert_eq!(model.borrow().retire_count, 0);
 }
+
+mod minimum_fence;

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 //! Native config/mapping/Registry models composed with the literal IPC device.
 //! These are software ownership/effect tests, not physical platform validation.
+extern crate std;
 use super::*;
 use crate::bluetooth::bcm4377::State as TransportState;
+use alloc::rc::Rc;
 #[test]
 fn native_clock_rejects_invalid_calibration_and_unrepresentable_attempt_before_attachment() {
     if crate::model_test_process::isolate() {
@@ -28,9 +30,8 @@ use crate::bus::{
     dma::{memory::PageSource, pages::DmaPages},
     irq::{self, Registry},
     mmio::owned::{
-        self, AddressSpace, Authority, InstalledMapping, MapFailure, MapRequest, Mapping,
-        MappingPlatform, PhysicalSpan, Protection, Resource as MmioResource, ResourceBacking,
-        ResourceKind,
+        self, AddressSpace, Authority, InstalledMapping, MapFailure, MapRequest, MappingPlatform,
+        PhysicalSpan, Protection, Resource as MmioResource, ResourceBacking, ResourceKind,
     },
     pci::{
         ConfigSpace, Function,
@@ -99,6 +100,7 @@ struct State {
     accesses: AtomicUsize,
     fault_access: AtomicUsize,
     dead: AtomicBool,
+    fail_minimum: AtomicBool,
     stuck_pending: AtomicBool,
     resets: AtomicUsize,
 }
@@ -135,6 +137,7 @@ impl State {
             accesses: AtomicUsize::new(0),
             fault_access: AtomicUsize::new(0),
             dead: AtomicBool::new(false),
+            fail_minimum: AtomicBool::new(false),
             stuck_pending: AtomicBool::new(false),
             resets: AtomicUsize::new(0),
         }
@@ -180,46 +183,62 @@ impl Config {
     }
 }
 impl ConfigSpace for Config {
-    fn read8(&self, offset: u16) -> u8 {
+    fn read8(&self, offset: u16) -> core::result::Result<u8, crate::bus::pci::ConfigError> {
         if self.readable(offset, 1) {
             self.inner.read8(offset)
         } else {
-            u8::MAX
+            Ok(u8::MAX)
         }
     }
-    fn read16(&self, offset: u16) -> u16 {
+    fn read16(&self, offset: u16) -> core::result::Result<u16, crate::bus::pci::ConfigError> {
         if !self.readable(offset, 2) {
-            return u16::MAX;
+            return Ok(u16::MAX);
         }
         if offset == 0xba && self.state.stuck_pending.load(Ordering::Relaxed) {
-            return 1 << 5;
+            return Ok(1 << 5);
         }
         self.inner.read16(offset)
     }
-    fn read32(&self, offset: u16) -> u32 {
+    fn read32(&self, offset: u16) -> core::result::Result<u32, crate::bus::pci::ConfigError> {
         if self.readable(offset, 4) {
             self.inner.read32(offset)
         } else {
-            u32::MAX
+            Ok(u32::MAX)
         }
     }
-    fn write8(&mut self, offset: u16, value: u8) {
+    fn write8(
+        &mut self,
+        offset: u16,
+        value: u8,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
         if !self.state.access(Event::Write(offset, 1, u32::from(value))) {
-            self.inner.write8(offset, value);
+            self.inner.write8(offset, value)?;
         }
+
+        Ok(())
     }
-    fn write32(&mut self, offset: u16, value: u32) {
+    fn write32(
+        &mut self,
+        offset: u16,
+        value: u32,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
         // Even an effect-then-fault keeps the original storage kept.
-        self.inner.write32(offset, value);
+        self.inner.write32(offset, value)?;
         self.state.access(Event::Write(offset, 4, value));
+
+        Ok(())
     }
-    fn write16(&mut self, offset: u16, value: u16) {
+    fn write16(
+        &mut self,
+        offset: u16,
+        value: u16,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
         if offset == 0x4c {
             // Independent PME_Status W1C: a zero preserves pending status.
-            let pending = self.inner.read16(offset) & 0x8000 & !(value & 0x8000);
-            self.inner.write16(offset, value & !0x8000 | pending);
+            let pending = self.inner.read16(offset)? & 0x8000 & !(value & 0x8000);
+            self.inner.write16(offset, value & !0x8000 | pending)?;
         } else {
-            self.inner.write16(offset, value);
+            self.inner.write16(offset, value)?;
         }
         if offset == 0xb8 && value & 0x8000 != 0 {
             self.state.event(Event::Reset);
@@ -231,12 +250,12 @@ impl ConfigSpace for Config {
             device.boot = 0;
             device.rti = 0;
             device.armed = false;
-            self.inner.write16(4, 0);
-            self.inner.write16(0x5a, 0x80);
-            self.inner.write16(0x4c, 0x8000);
-            self.inner.write16(0xb8, value & !0x8000);
+            self.inner.write16(4, 0)?;
+            self.inner.write16(0x5a, 0x80)?;
+            self.inner.write16(0x4c, 0x8000)?;
+            self.inner.write16(0xb8, value & !0x8000)?;
             for index in 0..6 {
-                self.inner.write32(0x10 + index * 4, 0);
+                self.inner.write32(0x10 + index * 4, 0)?;
             }
         }
         if offset == 0x5a {
@@ -258,6 +277,8 @@ impl ConfigSpace for Config {
         if offset == 0x5a && value & 1 != 0 && self.state.fail_enable_ack.load(Ordering::Relaxed) {
             self.state.dead.store(true, Ordering::Relaxed);
         }
+
+        Ok(())
     }
 }
 // SAFETY: exact narrow RAM effects model one original config.
@@ -276,7 +297,7 @@ unsafe impl Configuration for Config {
     ) -> core::result::Result<bool, owned::Error> {
         self.inner.matches_retention(seal)
     }
-    fn into_mapping(self) -> Mapping {
+    unsafe fn retire(&mut self) -> core::result::Result<(), owned::Error> {
         self.state.event(Event::ConfigUnmap);
         if self.state.fail_config_unmap.load(Ordering::Relaxed) {
             self.counters.fail_context_at.store(
@@ -284,7 +305,10 @@ unsafe impl Configuration for Config {
                 Ordering::Relaxed,
             );
         }
-        self.inner.into_mapping()
+        // SAFETY: enclosing native/model owner completed its exact DMA, IRQ,
+        // callback and raw-user retirement contract. This borrows the SAME
+        // config+grant on failure and never claims source assignment teardown.
+        unsafe { self.inner.retire() }
     }
 }
 struct ClockModel(Arc<Mutex<Device>>);
@@ -466,7 +490,7 @@ unsafe impl host::cold::Preparation for PreparingModel {
         let (function, _, retained) = &mut *self.owner;
         assert!(function.config().inner.matches_retention(retained).unwrap());
         assert_eq!(state.resets.load(Ordering::Relaxed), 1);
-        assert_eq!(self.owner.0.config().read16(4) & 0x406, 0x400);
+        assert_eq!(self.owner.0.config().read16(4).unwrap() & 0x406, 0x400);
         assert!(self.owner.1.domain.0.lock().unwrap().leases.is_empty());
         state.event(Event::OriginalDrain);
         assert!(
@@ -726,9 +750,15 @@ unsafe impl irq::Platform for Cpu {
         }
     }
 }
-struct BarResource(PhysicalSpan);
+struct BarResource(PhysicalSpan, owned::model::MappingRetention<Arc<BarPool>>);
 // SAFETY: each test reserves disjoint symbolic native BAR resources.
 unsafe impl ResourceBacking for BarResource {
+    fn begin_mapping(
+        &self,
+    ) -> core::result::Result<crate::bus::pci::assignment::OpaqueUse, owned::Error> {
+        self.1.begin_mapping()
+    }
+
     fn physical_span(&self) -> PhysicalSpan {
         self.0
     }
@@ -736,7 +766,27 @@ unsafe impl ResourceBacking for BarResource {
         ResourceKind::Registers
     }
 }
-struct BarPlatform(Arc<State>);
+struct BarAllocation {
+    cpu: NonNull<u8>,
+    layout: Layout,
+}
+// SAFETY: a pool entry uniquely owns its raw model allocation. It is accessed
+// only through serialized mapping users and is freed after acknowledged unmap.
+unsafe impl Send for BarAllocation {}
+impl Drop for BarAllocation {
+    fn drop(&mut self) {
+        // SAFETY: same allocator/layout, and no live raw model users remain.
+        unsafe { dealloc(self.cpu.as_ptr(), self.layout) };
+    }
+}
+#[derive(Default)]
+struct BarPool {
+    allocations: Mutex<Vec<(u64, BarAllocation)>>,
+}
+struct BarPlatform {
+    state: Arc<State>,
+    pool: Arc<BarPool>,
+}
 // SAFETY: fresh aligned CPU allocations model full symbolic BARs;
 // acknowledged unmap alone returns each exact allocation to the model heap.
 unsafe impl MappingPlatform for BarPlatform {
@@ -748,9 +798,25 @@ unsafe impl MappingPlatform for BarPlatform {
         _: &MmioResource,
         request: MapRequest,
     ) -> core::result::Result<InstalledMapping, MapFailure> {
-        let layout = Layout::from_size_align(request.physical.bytes() as usize, 4096).unwrap();
-        // SAFETY: valid layout; permission owns this exact allocation/token.
-        let cpu_base = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
+        let layout = Layout::from_size_align(request.physical.bytes() as usize, 4096)
+            .map_err(|_| MapFailure::Unchanged(owned::Error::InvalidRange))?;
+        let mut allocations = self.pool.allocations.lock().unwrap();
+        if allocations.iter().any(|(id, _)| *id == request.id) {
+            return Err(MapFailure::Unchanged(owned::Error::InvalidPlatformReply));
+        }
+        allocations
+            .try_reserve(1)
+            .map_err(|_| MapFailure::Unchanged(owned::Error::Unavailable))?;
+        // SAFETY: exact checked isolated model layout, retained in the SAME pool.
+        let cpu_base = NonNull::new(unsafe { alloc_zeroed(layout) })
+            .ok_or(MapFailure::Unchanged(owned::Error::Unavailable))?;
+        allocations.push((
+            request.id,
+            BarAllocation {
+                cpu: cpu_base,
+                layout,
+            },
+        ));
         Ok(InstalledMapping {
             token: request.id,
             cpu_base,
@@ -764,22 +830,34 @@ unsafe impl MappingPlatform for BarPlatform {
         request: MapRequest,
         mapping: InstalledMapping,
     ) -> core::result::Result<(), owned::Error> {
-        self.0.event(Event::BarUnmap);
-        if self.0.fail_bar_unmap.load(Ordering::Relaxed) {
+        self.state.event(Event::BarUnmap);
+        if self.state.fail_bar_unmap.load(Ordering::Relaxed) {
             return Err(owned::Error::UnmapFailed);
         }
-        // SAFETY: original allocation after stopped mapping consumers.
-        unsafe {
-            dealloc(
-                mapping.cpu_base.as_ptr(),
-                Layout::from_size_align(request.physical.bytes() as usize, 4096).unwrap(),
-            )
-        };
+        let mut allocations = self.pool.allocations.lock().unwrap();
+        let at = allocations
+            .iter()
+            .position(|(id, _)| *id == request.id)
+            .ok_or(owned::Error::UnmapFailed)?;
+        let allocation = &allocations[at].1;
+        if mapping.token != request.id
+            || allocation.cpu != mapping.cpu_base
+            || allocation.layout.size() != request.physical.bytes() as usize
+        {
+            return Err(owned::Error::UnmapFailed);
+        }
+        let allocation = allocations.swap_remove(at);
+        drop(allocations);
+        // Final allocation release is outside pool metadata and registry locks,
+        // after the exact original unmap/raw-user acknowledgement.
+        drop(allocation);
         Ok(())
     }
 }
 struct NativeRegisters {
     registers: MappedRegisters,
+    // Actual fixture/register custody outside the MMIO inventory/provider.
+    mapping_owner: owned::model::MappingOwner<Arc<BarPool>>,
     device: RefCell<Model>,
     state: Arc<State>,
 }
@@ -827,7 +905,39 @@ unsafe impl Registers for NativeRegisters {
     }
     unsafe fn retire(&mut self) -> core::result::Result<(), host::Error> {
         // SAFETY: enclosing native stop/posting/Registry drain completed.
-        unsafe { self.registers.retire() }
+        unsafe { self.registers.retire() }?;
+        // SAFETY: same original BAR mappings just acknowledged unmap and all
+        // enclosing model raw/IRQ/work tails completed. Controller is not in B.
+        unsafe { self.mapping_owner.retire() }
+            .map(|_| ())
+            .map_err(host::Error::Mapping)
+    }
+}
+struct DeviceMinimum {
+    device: Arc<Mutex<Device>>,
+    state: Arc<State>,
+}
+// SAFETY: private fixture owns this actual software device clock and state.
+// It advances exactly that model's time; it supplies no physical permission.
+unsafe impl crate::bus::pci::power::Timer for DeviceMinimum {
+    fn check(&self) -> core::result::Result<(), crate::bus::pci::power::Error> {
+        if self.state.fail_minimum.load(Ordering::Relaxed) {
+            Err(crate::bus::pci::power::Error::Clock)
+        } else {
+            Ok(())
+        }
+    }
+    fn wait_us(
+        &self,
+        microseconds: u64,
+    ) -> core::result::Result<(), crate::bus::pci::power::Error> {
+        self.check()?;
+        let mut device = self.device.lock().unwrap();
+        device.ticks = device
+            .ticks
+            .checked_add(microseconds)
+            .ok_or(crate::bus::pci::power::Error::Clock)?;
+        Ok(())
     }
 }
 struct Fixture {
@@ -842,6 +952,10 @@ fn fixture_native(device_id: u16, completion: bool) -> Fixture {
 }
 type ColdInputs = host::cold::Inputs<PreparingModel, NativeRegisters, ClockModel>;
 type ColdFailure = (host::Error, Arc<State>, Arc<Counters>, Arc<Mutex<Device>>);
+#[expect(
+    clippy::result_large_err,
+    reason = "The fixture returns its original resource owners and exact source cause without allocating on refusal."
+)]
 fn fixture_native_setup(
     device_id: u16,
     completion: bool,
@@ -875,6 +989,7 @@ fn fixture_native_setup(
         board: Board::from_property(b"apple,formosa\0").unwrap(),
         properties: vec![],
         clock: bound.clock,
+        minimum: bound.minimum,
         // SAFETY: original_inputs leaked this same model Registry.
         interrupts: unsafe { &*state.registry.load(Ordering::Relaxed) },
     };
@@ -908,7 +1023,7 @@ fn original_inputs(device_id: u16) -> (ColdInputs, Arc<State>, Arc<Counters>, Ar
         (0xb4, 1 << 28),
         (0xc0, 0xa5c3_5a03),
     ] {
-        config.write32(offset, value);
+        config.write32(offset, value).unwrap();
     }
     let config = Config {
         inner: config,
@@ -927,13 +1042,38 @@ fn original_inputs(device_id: u16) -> (ColdInputs, Arc<State>, Arc<Counters>, Ar
         virtual_bits: 48,
     };
     // SAFETY: isolated symbolic MMIO resources and private CPU storage.
-    let authority =
-        unsafe { Authority::isolated_model(Arc::new(BarPlatform(state.clone())), space, vec![]) }
-            .unwrap();
+    let pool = Arc::new(BarPool::default());
+    // SAFETY: SAME original allocation pool for both actual model BARs. It
+    // contains owned buffers only, never State/Registry/Source/control backedges.
+    let mapping_owner = unsafe {
+        owned::model::MappingOwner::from_owned(pool.clone(), |pool| {
+            if pool.allocations.is_poisoned() {
+                Err(crate::bus::pci::assignment::Error::Context)
+            } else {
+                Ok(())
+            }
+        })
+    };
+    // SAFETY: this serialized platform owns only the paired RAM BAR pool
+    // and isolated address space; it grants no native MMIO authority.
+    let authority = unsafe {
+        Authority::isolated_model(
+            Arc::new(BarPlatform {
+                state: state.clone(),
+                pool: pool.clone(),
+            }),
+            space,
+            vec![],
+        )
+    }
+    .unwrap();
     let maps = bars.map(|span| {
         authority
             .map(
-                MmioResource::new(Box::new(BarResource(span))),
+                MmioResource::new(Box::new(BarResource(
+                    span,
+                    mapping_owner.retention().unwrap(),
+                ))),
                 0,
                 span.bytes() as usize,
                 CacheAttribute::Uncached,
@@ -962,10 +1102,15 @@ fn original_inputs(device_id: u16) -> (ColdInputs, Arc<State>, Arc<Counters>, Ar
         topology,
         registers: NativeRegisters {
             registers,
+            mapping_owner,
             device: RefCell::new(model),
             state: state.clone(),
         },
         clock: ClockModel(device.clone()),
+        minimum: Rc::new(DeviceMinimum {
+            device: device.clone(),
+            state: state.clone(),
+        }),
     };
     (cold_inputs, state, counters, device)
 }
@@ -1162,13 +1307,32 @@ fn release_unpublished(mut inputs: Inputs<Config, NativeRegisters, ClockModel>) 
     // SAFETY: constructor refusal had no device effects; this isolated model
     // has no DMA/IRQ work or raw views, and its attachment is now detached.
     unsafe { inputs.registers.retire() }.unwrap();
-    let mut mapping = inputs.function.into_config().into_mapping();
-    // SAFETY: same unpublished original isolated config owner.
-    unsafe { mapping.retire() }.unwrap();
+    let Config {
+        inner,
+        counters,
+        state,
+        device,
+    } = inputs.function.into_config();
+    // Keep the exact wrapper metadata through source completion, including
+    // panic/error. No config field is a fabricated new grant/controller.
+    let metadata = core::mem::ManuallyDrop::new((counters, state, device));
+    // SAFETY: same unpublished original isolated config owner, with actual
+    // BAR retirement and attachment detach acknowledged above. This config
+    // mapping has not already been retired by a native callback.
+    unsafe { crate::bus::pci::owned::test_support::retire_owned(inner) }.unwrap();
+    drop(core::mem::ManuallyDrop::into_inner(metadata));
     for function in inputs.topology.into_functions() {
-        let mut mapping = function.into_config().into_mapping();
-        // SAFETY: original bridge model has no concurrent user or device.
-        unsafe { mapping.retire() }.unwrap();
+        let Config {
+            inner,
+            counters,
+            state,
+            device,
+        } = function.into_config();
+        let metadata = core::mem::ManuallyDrop::new((counters, state, device));
+        // SAFETY: original bridge model has no concurrent user/device, and its
+        // exact mapping has not already acknowledged native retirement.
+        unsafe { crate::bus::pci::owned::test_support::retire_owned(inner) }.unwrap();
+        drop(core::mem::ManuallyDrop::into_inner(metadata));
     }
 }
 #[test]
@@ -1179,15 +1343,37 @@ fn native_constructor_rejects_malformed_original_owners_before_any_write() {
     for failure in 0..7 {
         let mut f = fixture_native(0x5fa0, true);
         match failure {
-            0 => f.inputs.function.config().inner.write32(0xb4, 0),
-            1 => f.inputs.function.config().inner.write32(0x18, 0x3000_0000),
-            2 => f.inputs.function.config().inner.write16(0x5a, 0x81),
+            0 => f.inputs.function.config().inner.write32(0xb4, 0).unwrap(),
+            1 => f
+                .inputs
+                .function
+                .config()
+                .inner
+                .write32(0x18, 0x3000_0000)
+                .unwrap(),
+            2 => f
+                .inputs
+                .function
+                .config()
+                .inner
+                .write16(0x5a, 0x81)
+                .unwrap(),
             3 => f.inputs.function.address.device = 1,
-            4 => f.inputs.function.config().inner.write8(0xb1, 0x5c),
+            4 => f.inputs.function.config().inner.write8(0xb1, 0x5c).unwrap(),
             5 => {
-                f.inputs.function.config().inner.write8(0x59, 0x80);
-                f.inputs.function.config().inner.write32(0x80, 0x0002_0010);
-                f.inputs.function.config().inner.write32(0x84, 1 << 28);
+                f.inputs.function.config().inner.write8(0x59, 0x80).unwrap();
+                f.inputs
+                    .function
+                    .config()
+                    .inner
+                    .write32(0x80, 0x0002_0010)
+                    .unwrap();
+                f.inputs
+                    .function
+                    .config()
+                    .inner
+                    .write32(0x84, 1 << 28)
+                    .unwrap();
             }
             6 => {
                 // SAFETY: wrong explicit model root declaration.
@@ -1479,21 +1665,28 @@ fn actual_attachment_pin_blocks_config_mapping_retirement_until_detach_acknowled
     }
     let mut f = fixture_native(0x5f69, false);
     let stale = f.inputs.attachment.domain();
-    let mut mapping = f.inputs.function.into_config().into_mapping();
-    // SAFETY: original isolated model has no private leases or live IRQ users;
-    // this deliberate premature config retirement must independently refuse.
-    assert_eq!(unsafe { mapping.retire() }, Err(owned::Error::Busy));
+    let mut config = f.inputs.function.into_config();
+    assert_eq!(
+        // SAFETY: original isolated model has no private leases or live IRQ users;
+        // this deliberate premature config retirement must independently refuse.
+        unsafe { Configuration::retire(&mut config) },
+        Err(owned::Error::Busy)
+    );
     assert_eq!(f.counters.unmaps.load(Ordering::Relaxed), 0);
     f.state.fail_detach.store(true, Ordering::Relaxed);
     // SAFETY: model original function remains contained with no live mappings.
     assert!(unsafe { f.inputs.attachment.detach() }.is_err());
-    // SAFETY: failed detach must keep its actual config retention pin.
-    assert_eq!(unsafe { mapping.retire() }, Err(owned::Error::Busy));
+    assert_eq!(
+        // SAFETY: the same isolated model has no private leases or live IRQ
+        // users; failed detach keeps the pin that must refuse mapping retirement.
+        unsafe { Configuration::retire(&mut config) },
+        Err(owned::Error::Busy)
+    );
     f.state.fail_detach.store(false, Ordering::Relaxed);
     // SAFETY: only this independent test peer retries; native close is sticky.
     unsafe { f.inputs.attachment.detach() }.unwrap();
     // SAFETY: acknowledged detach released the final config retention pin.
-    unsafe { mapping.retire() }.unwrap();
+    unsafe { Configuration::retire(&mut config) }.unwrap();
     assert_eq!(
         // SAFETY: retained stale domain must reject access after detach before
         // any requester generation or payload operation can be revived.
@@ -1809,4 +2002,26 @@ fn equal_bdf_different_actual_config_attachment_refuses_before_native_admission(
     // Default erroneous-input abandonment cannot release uncertain native pins.
     core::mem::forget(returned);
     core::mem::forget(foreign.inputs);
+}
+
+#[test]
+fn cold_minimum_refusal_precedes_original_config_and_keeps_all_inputs() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
+    let (inputs, state, counts, _) = original_inputs(0x5fa0);
+    state.events.lock().unwrap().clear();
+    state.fail_minimum.store(true, Ordering::Relaxed);
+    // SAFETY: private source model; unavailable minimum cannot reach config.
+    let (error, inputs) = match unsafe { host::cold::Cold::new(inputs) } {
+        Err(refusal) => refusal,
+        Ok(_) => panic!("unavailable minimum admitted cold source"),
+    };
+    assert_eq!(
+        error,
+        host::Error::Minimum(crate::bus::pci::power::Error::Clock)
+    );
+    assert!(state.events.lock().unwrap().is_empty());
+    assert_eq!(counts.unmaps.load(Ordering::Relaxed), 0);
+    core::mem::forget(inputs);
 }

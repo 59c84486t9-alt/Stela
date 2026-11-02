@@ -39,6 +39,16 @@ struct Reservation {
     base: u64,
     memory: Arc<Memory>,
     epoch: Arc<Counts>,
+    mapping: bus::mmio::owned::model::MappingRetention<(Arc<Memory>, std::thread::ThreadId)>,
+}
+fn mapping_context(
+    pin: &(Arc<Memory>, std::thread::ThreadId),
+) -> Result<(), bus::pci::assignment::Error> {
+    if std::thread::current().id() == pin.1 {
+        Ok(())
+    } else {
+        Err(bus::pci::assignment::Error::Context)
+    }
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
@@ -49,6 +59,9 @@ impl Drop for Reservation {
 }
 // SAFETY: a model reservation of its own live host RAM, not a hardware claim.
 unsafe impl ResourceBacking for Reservation {
+    fn begin_mapping(&self) -> Result<bus::pci::assignment::OpaqueUse, bus::mmio::owned::Error> {
+        self.mapping.begin_mapping()
+    }
     fn physical_span(&self) -> PhysicalSpan {
         PhysicalSpan::new(self.base, BYTES as u64).unwrap()
     }
@@ -149,7 +162,8 @@ struct Counts {
     guc_reset_writes: AtomicUsize,
 }
 struct Owner {
-    resource: Resource,
+    resource: Option<Resource>,
+    mapping: bus::mmio::owned::model::MappingOwner<(Arc<Memory>, std::thread::ThreadId)>,
     memory: Arc<Memory>,
     counts: Arc<Counts>,
     clock_ns: AtomicU64,
@@ -173,26 +187,41 @@ impl Owner {
 
 impl Drop for Owner {
     fn drop(&mut self) {
+        // The actual fixture owner performs cleanup outside the inventory.
+        // Drop its resource retention first; retained mappings/other resources
+        // still make exact assignment retirement refuse and keep the same RAM.
+        drop(self.resource.take());
+        // SAFETY: successful Device retirement acknowledged finish/unmap and
+        // released every mapped borrower before this Owner drops; constructor
+        // rejection exposed no active consumer. Uncertain Device paths quarantine
+        // this entire Owner instead. The original creating-thread guard remains.
+        if let Err(error) = unsafe { self.mapping.retire() } {
+            self.mapping.record_retention(error);
+        }
         self.counts.dropped.fetch_add(1, Ordering::SeqCst);
     }
 }
 impl bus::pci::ConfigSpace for Owner {
-    fn read32(&self, _: u16) -> u32 {
+    fn read32(&self, _: u16) -> Result<u32, bus::pci::ConfigError> {
         panic!("read16 must use the actual model width");
     }
-    fn read16(&self, offset: u16) -> u16 {
+    fn read16(&self, offset: u16) -> Result<u16, bus::pci::ConfigError> {
         assert_eq!(offset, 0x50);
         self.counts.config_reads.fetch_add(1, Ordering::SeqCst);
-        u16::try_from(self.counts.gmch.load(Ordering::SeqCst)).unwrap()
+        Ok(u16::try_from(self.counts.gmch.load(Ordering::SeqCst)).unwrap())
     }
-    fn write32(&mut self, _: u16, _: u32) {
+    fn write32(&mut self, _: u16, _: u32) -> Result<(), bus::pci::ConfigError> {
         panic!("read-only probe");
     }
-    fn write16(&mut self, _: u16, _: u16) {
+    fn write16(&mut self, _: u16, _: u16) -> Result<(), bus::pci::ConfigError> {
         panic!("read-only probe");
     }
-    fn write8(&mut self, _: u16, _: u8) {
+    fn write8(&mut self, _: u16, _: u8) -> Result<(), bus::pci::ConfigError> {
         panic!("read-only probe");
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> (8 * (offset & 3))) as u8)
     }
 }
 // SAFETY: this implements only the explicitly simulated single-thread RAM model.
@@ -213,12 +242,20 @@ unsafe impl ProbeOwner for Owner {
             class: 0x030000,
             revision: 0,
             virtual_function: false,
-            bar0_start: self.resource.physical_span().start(),
+            bar0_start: self
+                .resource
+                .as_ref()
+                .expect("live fixture resource")
+                .physical_span()
+                .start(),
             bar0_bytes: BYTES as u64,
         }
     }
     fn bar0(&self) -> Resource {
-        self.resource.clone()
+        self.resource
+            .as_ref()
+            .expect("live fixture resource")
+            .clone()
     }
     fn config_space(&self) -> Result<&dyn bus::pci::ConfigSpace, i32> {
         if self.counts.config_unavailable.load(Ordering::SeqCst) != 0 {
@@ -411,14 +448,24 @@ fn owner_with_registers(
     }
     let counts = Arc::new(Counts::default());
     counts.gmch.store(2 << 6, Ordering::SeqCst);
+    // SAFETY: real aligned RAM allocation with the original creating thread;
+    // no Owner/Resource/Authority/view is retained by this model product.
+    let mapping = unsafe {
+        bus::mmio::owned::model::MappingOwner::from_owned(
+            (memory.clone(), std::thread::current().id()),
+            mapping_context,
+        )
+    };
     let resource = Resource::new(Box::new(Reservation {
         base,
         memory: memory.clone(),
         epoch: counts.clone(),
+        mapping: mapping.retention().unwrap(),
     }));
     (
         Box::new(Owner {
-            resource,
+            resource: Some(resource),
+            mapping,
             memory,
             counts: counts.clone(),
             clock_ns: AtomicU64::new(0),

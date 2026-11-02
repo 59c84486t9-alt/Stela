@@ -46,6 +46,7 @@ pub enum CycleFailure {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
+    Minimum(crate::bus::pci::power::Error),
     Access,
     Removed,
     FirmwareOwned,
@@ -65,6 +66,15 @@ pub enum Error {
     RepairRequired,
     InvalidStation,
     Poisoned,
+}
+impl Error {
+    pub(super) fn minimum_cause(&self) -> Option<crate::bus::pci::power::Error> {
+        match self {
+            Self::Minimum(error) => Some(*error),
+            Self::Followup { observation, .. } => observation.minimum_cause(),
+            _ => None,
+        }
+    }
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -122,7 +132,8 @@ impl Geometry {
 
 pub struct Nvm<R: Registers, D: Delay> {
     io: Option<R>,
-    delay: D,
+    delay: Option<D>,
+    minimum_failure: Option<crate::bus::pci::power::Error>,
     layout: Layout,
     geometry: Geometry,
     bank: Option<u8>,
@@ -138,7 +149,8 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
     pub unsafe fn new(layout: Layout, io: R, delay: D) -> Result<Self, Error> {
         let mut this = Self {
             io: Some(io),
-            delay,
+            delay: Some(delay),
+            minimum_failure: None,
             layout,
             geometry: Geometry {
                 base: 0,
@@ -148,7 +160,7 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
             poisoned: false,
         };
         let result = (|| {
-            let fw = this.io().read_mac32(FWSM)?;
+            let fw = this.io()?.read_mac32(FWSM)?;
             if fw == u32::MAX {
                 return Err(Error::Removed);
             }
@@ -156,9 +168,9 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
                 return Err(Error::FirmwareOwned);
             }
             let value = if layout == Layout::Spt {
-                this.io().read_mac32(STRAP)?
+                this.io()?.read_mac32(STRAP)?
             } else {
-                this.io().read32(GFPREG)?
+                this.io()?.read32(GFPREG)?
             };
             this.geometry = Geometry::from_register(layout, value)?;
             Ok(())
@@ -169,11 +181,52 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
         }
         Ok(this)
     }
-    fn io(&mut self) -> &mut R {
-        self.io.as_mut().expect("retained NVM register owner")
+    fn check_minimum(&mut self) -> Result<(), Error> {
+        if let Some(error) = self.minimum_failure {
+            return Err(Error::Minimum(error));
+        }
+        if self.poisoned {
+            return Err(Error::Poisoned);
+        }
+        match self
+            .delay
+            .as_ref()
+            .expect("kept NVM minimum provider")
+            .check()
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.minimum_failure = Some(error);
+                self.poisoned = true;
+                Err(Error::Minimum(error))
+            }
+        }
+    }
+    fn wait_minimum(&mut self, us: u64) -> Result<(), Error> {
+        self.check_minimum()?;
+        match self
+            .delay
+            .as_ref()
+            .expect("kept NVM minimum provider")
+            .wait_us(us)
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.minimum_failure = Some(error);
+                self.poisoned = true;
+                Err(Error::Minimum(error))
+            }
+        }
+    }
+    fn io(&mut self) -> Result<&mut R, Error> {
+        self.check_minimum()?;
+        Ok(self.io.as_mut().expect("retained NVM register owner"))
     }
     pub fn geometry(&self) -> Geometry {
         self.geometry
+    }
+    pub(super) fn minimum_failure(&self) -> Option<crate::bus::pci::power::Error> {
+        self.minimum_failure
     }
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
@@ -182,7 +235,7 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
         self.bank
     }
     fn status(&mut self) -> Result<u16, Error> {
-        let value = self.io().read16(HSFSTS)?;
+        let value = self.io()?.read16(HSFSTS)?;
         if value == u16::MAX {
             Err(Error::Removed)
         } else {
@@ -191,16 +244,16 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
     }
     fn status_write(&mut self, value: u16) -> Result<(), Error> {
         if self.layout == Layout::Spt {
-            self.io().write32(HSFSTS, u32::from(value))
+            self.io()?.write32(HSFSTS, u32::from(value))
         } else {
-            self.io().write16(HSFSTS, value)
+            self.io()?.write16(HSFSTS, value)
         }
     }
     fn control(&mut self) -> Result<u16, Error> {
         let value = if self.layout == Layout::Spt {
-            self.io().read32(HSFSTS)? >> 16
+            self.io()?.read32(HSFSTS)? >> 16
         } else {
-            u32::from(self.io().read16(HSFCTL)?)
+            u32::from(self.io()?.read16(HSFCTL)?)
         };
         if value == u32::from(u16::MAX) {
             Err(Error::Removed)
@@ -210,9 +263,9 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
     }
     fn control_write(&mut self, value: u16) -> Result<(), Error> {
         if self.layout == Layout::Spt {
-            self.io().write32(HSFSTS, u32::from(value) << 16)
+            self.io()?.write32(HSFSTS, u32::from(value) << 16)
         } else {
-            self.io().write16(HSFCTL, value)
+            self.io()?.write16(HSFCTL, value)
         }
     }
     fn initialize_cycle(&mut self) -> Result<(), Error> {
@@ -230,7 +283,7 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
                     idle = true;
                     break;
                 }
-                self.delay.delay(1);
+                self.wait_minimum(1)?;
             }
             if !idle {
                 return Err(Error::Busy);
@@ -250,7 +303,7 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
                     Err(Error::Cycle(status))
                 };
             }
-            self.delay.delay(1);
+            self.wait_minimum(1)?;
         }
         Err(Error::Timeout)
     }
@@ -274,15 +327,15 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
             .checked_add(offset)
             .ok_or(Error::Bounds)?;
         for attempt in 0..=REPEATS {
-            self.delay.delay(1);
+            self.wait_minimum(1)?;
             self.initialize_cycle()?;
             let control =
                 (self.control()? & !(CYCLE_MASK | SIZE_MASK)) | (u16::from(size - 1) << 8);
             self.control_write(control)?;
-            self.io().write32(FADDR, address)?;
+            self.io()?.write32(FADDR, address)?;
             match self.start_cycle() {
                 Ok(()) => {
-                    return self.io().read32(FDATA).map(|value| match size {
+                    return self.io()?.read32(FDATA).map(|value| match size {
                         1 => value & 0xff,
                         2 => value & 0xffff,
                         _ => value,
@@ -348,6 +401,9 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
         Ok(())
     }
     pub fn read(&mut self, offset: u16, output: &mut [u16]) -> Result<(), Error> {
+        if let Some(error) = self.minimum_failure {
+            return Err(Error::Minimum(error));
+        }
         if self.poisoned {
             return Err(Error::Poisoned);
         }
@@ -445,11 +501,13 @@ impl<R: Registers, D: Delay> Nvm<R, D> {
 }
 impl<R: Registers, D: Delay> Drop for Nvm<R, D> {
     fn drop(&mut self) {
-        if self.poisoned
-            && let Some(owner) = self.io.take()
-        {
-            // Keep the claim and mappings after uncertain flash state.
-            core::mem::forget(owner);
+        if self.poisoned {
+            if let Some(owner) = self.io.take() {
+                core::mem::forget(owner);
+            }
+            if let Some(minimum) = self.delay.take() {
+                core::mem::forget(minimum);
+            }
         }
     }
 }

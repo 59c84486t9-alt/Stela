@@ -66,6 +66,10 @@ const PORT_CHANGES: u32 = (1 << 1) | (1 << 3) | (1 << 5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
+    Minimum(crate::bus::pci::power::Error),
+    Config(crate::bus::pci::ConfigError),
+    Mapping(crate::bus::mmio::owned::Error),
+    Irq(crate::bus::irq::IrqError),
     Unsupported(&'static str),
     Invalid,
     Stale,
@@ -187,6 +191,7 @@ pub struct Controller {
     arena: Option<Arena>,
     owner: Rc<()>,
     state: State,
+    fault: Option<Error>,
     operational: usize,
     ports: Vec<Option<Device>>,
     next_generation: u64,
@@ -201,6 +206,9 @@ impl Controller {
         &mut **self.hardware.as_mut().expect("retained attachment")
     }
     fn read(&mut self, at: usize) -> Result<u32, Error> {
+        if let Some(error) = self.fault {
+            return Err(error);
+        }
         let value = self.hw().read32(at)?;
         if value == u32::MAX {
             Err(Error::Removed)
@@ -209,6 +217,9 @@ impl Controller {
         }
     }
     fn write(&mut self, at: usize, value: u32) -> Result<(), Error> {
+        if let Some(error) = self.fault {
+            return Err(error);
+        }
         self.hw().write32(at, value)
     }
     fn op(&mut self, at: usize) -> Result<u32, Error> {
@@ -218,6 +229,9 @@ impl Controller {
         self.write(self.operational + at, value)
     }
     fn ready(&self) -> Result<(), Error> {
+        if let Some(error) = self.fault {
+            return Err(error);
+        }
         if self.state == State::Running {
             Ok(())
         } else {
@@ -309,8 +323,44 @@ impl Controller {
         }
     }
     fn fail<T>(&mut self, error: Error) -> Result<T, Error> {
-        self.state = State::Failed;
-        Err(error)
+        // Retirement cannot reopen after a later detach or release refusal.
+        if !matches!(self.state, State::Retiring | State::Stopped) {
+            self.state = State::Failed;
+        }
+        if matches!(
+            error,
+            Error::Minimum(_) | Error::Config(_) | Error::Mapping(_) | Error::Irq(_)
+        ) {
+            Err(*self.fault.get_or_insert(error))
+        } else {
+            // Ordinary USB/protocol faults retain their existing explicit
+            // contained recovery policy. They issue no new native grant.
+            Err(error)
+        }
+    }
+    fn delay_minimum(&mut self, microseconds: u64) -> Result<(), Error> {
+        if let Some(error) = self.fault {
+            return Err(error);
+        }
+        // Admission closes before the actual source callback, including unwind.
+        self.fault = Some(Error::Quarantined);
+        match self.hw().delay_us(microseconds) {
+            Ok(()) => {
+                self.fault = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.fault = Some(error);
+                self.state = State::Failed;
+                Err(error)
+            }
+        }
+    }
+    /// Wait through this owner's actual physical minimum provider. A failed
+    /// or unwound source permanently closes traffic and keeps all resources.
+    pub fn wait_minimum(&mut self, microseconds: u64) -> Result<(), Error> {
+        self.ready()?;
+        self.delay_minimum(microseconds)
     }
     fn guard<T>(&mut self, result: Result<T, Error>) -> Result<T, Error> {
         match result {
@@ -454,7 +504,7 @@ impl Controller {
         }
         if self.power_control && value & POWER == 0 {
             self.write(at, (value & !PORT_CHANGES) | POWER)?;
-            self.hw().delay_us(20_000)?;
+            self.delay_minimum(20_000)?;
             value = self.read(at)?;
             if value & POWER == 0 {
                 return Err(Error::Device(value));
@@ -465,17 +515,17 @@ impl Controller {
         }
         // Debounce connectivity, acknowledging only observed changes.
         self.write(at, (value & !PORT_CHANGES) | (value & PORT_CHANGES))?;
-        self.hw().delay_us(100_000)?;
+        self.delay_minimum(100_000)?;
         value = self.read(at)?;
         if value & CONNECT == 0 || value & (OWNER | OVERCURRENT | PORT_CHANGES) != 0 {
             return Err(Error::Stale);
         }
         self.write(at, (value & !(PORT_CHANGES | ENABLE)) | PORT_RESET)?;
-        self.hw().delay_us(50_000)?;
+        self.delay_minimum(50_000)?;
         value = self.read(at)?;
         self.write(at, value & !(PORT_CHANGES | PORT_RESET))?;
         self.wait(at, PORT_RESET, 0, TRANSITION_US)?;
-        self.hw().delay_us(10_000)?;
+        self.delay_minimum(10_000)?;
         value = self.read(at)?;
         if value & CONNECT == 0
             || value & (OVERCURRENT | OWNER | PORT_RESET | (1 << 1) | (1 << 5)) != 0
@@ -549,7 +599,7 @@ impl Controller {
             return Err(Error::Invalid);
         }
         self.control_internal(id, [0, 5, address, 0, 0, 0, 0, 0], &[], 0)?;
-        let delay = self.hw().delay_us(2_000);
+        let delay = self.delay_minimum(2_000);
         self.guard(delay)?;
         self.ports[index].as_mut().expect("retained").address = address;
         self.default_port = None;

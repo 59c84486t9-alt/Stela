@@ -17,7 +17,7 @@ pub(super) struct Layout {
     pending_physical: PhysicalSpan,
 }
 fn word<C: ConfigSpace>(config: &C, offset: u16) -> Result<u16, Error> {
-    let value = config.read16(offset);
+    let value = config.read16(offset)?;
     if value == u16::MAX {
         Err(MsiError::FailedRead { offset }.into())
     } else {
@@ -25,7 +25,7 @@ fn word<C: ConfigSpace>(config: &C, offset: u16) -> Result<u16, Error> {
     }
 }
 fn dword<C: ConfigSpace>(config: &C, offset: u16) -> Result<u32, Error> {
-    let value = config.read32(offset);
+    let value = config.read32(offset)?;
     if value == u32::MAX {
         Err(MsiError::FailedRead { offset }.into())
     } else {
@@ -98,7 +98,7 @@ pub(super) fn discover<C: MsiConfigSpace, B: BarAccess>(
     if dword(config, 0)? != expected {
         return Err(MsiError::IdentityChanged.into());
     }
-    let header_type = config.read8(0x0e) & 0x7f;
+    let header_type = config.read8(0x0e)? & 0x7f;
     if !matches!(header_type, 0 | 1) {
         return Err(MsiError::Unsupported.into());
     }

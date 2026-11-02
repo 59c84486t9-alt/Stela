@@ -360,6 +360,9 @@ fn controller(
     }));
     (
         Controller {
+            minimum: crate::usb::xhci::minimum::fixture(Clock {
+                ticks_per_microsecond: 1,
+            }),
             native_memory: None,
             registers: Box::new(Model(model.clone())),
             clock: Clock {

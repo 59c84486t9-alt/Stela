@@ -263,6 +263,10 @@ impl<B: Io> Hci<B> {
         FirmwareStatus::Unverified
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn open(&self) -> Result<(), Error> {
         self.io.validate().map_err(|e| error(ErrorKind::Usb(e)))?;
         match self.state {
@@ -282,6 +286,10 @@ impl<B: Io> Hci<B> {
     /// Submit one complete HCI command header+parameters. Success acknowledges
     /// USB delivery only; the initializer/host must await and interpret the HCI
     /// event, enforce command credits and choose its response deadline.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn submit_command(&mut self, packet: &[u8]) -> Result<(), Error> {
         self.open()?;
         if packet.len() < 3 || packet.len() != 3 + usize::from(packet[2]) {
@@ -308,6 +316,10 @@ impl<B: Io> Hci<B> {
 
     /// One complete HCI ACL header+payload, in one USB transfer. HCI data flow
     /// control and firmware initialization remain the caller's responsibility.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn submit_acl(&mut self, packet: &[u8]) -> Result<(), Error> {
         self.open()?;
         if self.intel_bootloader {
@@ -334,6 +346,10 @@ impl<B: Io> Hci<B> {
     /// At most one completed USB chunk per receive pipe; packet framing crosses
     /// polls but never crosses Event/ACL pipes. Empty USB transfers yield no HCI
     /// packet. Malformed frames fail closed and discard this poll's output.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn poll(&mut self) -> Result<Vec<Packet>, Error> {
         self.open()?;
         let now = self.io.now_us();
@@ -391,6 +407,10 @@ impl<B: Io> Hci<B> {
 
     // Private to this module and its identified vendor initializer. Both pipes
     // must have complete frames; cancel the posted bulk TD before reframing it.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn intel_mode(&mut self, bootloader: bool) -> Result<(), Error> {
         self.open()?;
         if self.events.since.is_some() || self.acl.since.is_some() {
@@ -408,6 +428,10 @@ impl<B: Io> Hci<B> {
 
     /// Open a cleanly closed transport again with empty assemblers, as power-on
     /// does after power-off. A failed close stays terminal.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(in crate::usb::bluetooth) fn reopen(&mut self) -> Result<(), Error> {
         self.io.validate().map_err(|e| error(ErrorKind::Usb(e)))?;
         match self.state {
@@ -432,6 +456,10 @@ impl<B: Io> Hci<B> {
     /// Stop outstanding USB receives. Idempotent success still requires the same
     /// live device generation; a failed close is terminal and cannot be used as
     /// a reopen/reset shortcut.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn close(&mut self) -> Result<(), Error> {
         self.io.validate().map_err(|e| error(ErrorKind::Usb(e)))?;
         if self.state == State::Closed {
@@ -455,6 +483,10 @@ impl<B: Io> Hci<B> {
     /// `usb_queue_reset_device`: close this transport, then ask the USB
     /// topology owner to reset the device and bind a fresh transport, even
     /// when the close failed.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn queue_reset(&mut self) -> Result<(), Error> {
         let closed = if self.state == State::Open {
             self.close()

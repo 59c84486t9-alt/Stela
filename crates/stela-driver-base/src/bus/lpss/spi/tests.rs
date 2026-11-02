@@ -378,7 +378,7 @@ fn native_original_function_mapping_prepare_and_acknowledged_retirement() {
     // so no child is published here. Separate independent serial peers execute
     // the full same composed PIO engine instead of inventing RAM-side ACKs.
     let retired = owner.retire().unwrap();
-    release_native(retired.into_resources(), &config_counts, &bar_counts);
+    release_native(retired.into_resources(), &config_counts, bar_counts);
 }
 
 #[test]

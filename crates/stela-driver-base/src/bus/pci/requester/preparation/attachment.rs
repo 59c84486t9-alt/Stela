@@ -170,6 +170,10 @@ impl Attachment {
         })
         .map_err(|_| DmaError::DrainUnavailable)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "failed cancellation returns the same affine IRQ grant without allocating"
+    )]
     pub fn cancel_unpublished_irq(&mut self, grant: MsiRoute) -> Result<(), CancelFailure> {
         if let Err(error) = self.check() {
             return Err(CancelFailure { error, grant });
@@ -184,6 +188,10 @@ impl Attachment {
     /// Adopt the exact joined action while retaining its old root/config pin.
     /// This permits another action in the same original ownership epoch; it
     /// supplies no engine/payload/DMA detach or native replacement permission.
+    #[expect(
+        clippy::result_large_err,
+        reason = "failed action adoption returns the same retired route without allocating"
+    )]
     pub fn retain_irq_action(
         &mut self,
         mut retired: RetiredRoute,

@@ -354,6 +354,9 @@ fn controller(
     }));
     (
         Controller {
+            minimum: crate::usb::xhci::minimum::fixture(Clock {
+                ticks_per_microsecond: 1,
+            }),
             native_memory: None,
             registers: Box::new(Model(model.clone())),
             clock: Clock {
@@ -1204,15 +1207,42 @@ fn pci_identity_binds_exact_stream_quirks_without_writes() {
         class: u32,
     }
     impl ConfigSpace for Config {
-        fn read32(&self, at: u16) -> u32 {
-            match at {
-                0 => self.id,
-                8 => self.class,
-                _ => 0,
-            }
+        fn read32(&self, at: u16) -> core::result::Result<u32, crate::bus::pci::ConfigError> {
+            Ok({
+                match at {
+                    0 => self.id,
+                    8 => self.class,
+                    _ => 0,
+                }
+            })
         }
-        fn write32(&mut self, _: u16, _: u32) {
+        fn write32(
+            &mut self,
+            _: u16,
+            _: u32,
+        ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
             panic!("preflight must never mutate PCI");
+        }
+
+        fn read8(&self, offset: u16) -> core::result::Result<u8, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+        }
+        fn write8(
+            &mut self,
+            _: u16,
+            _: u8,
+        ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+            panic!("unexpected narrow configuration write")
+        }
+        fn read16(&self, offset: u16) -> core::result::Result<u16, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+        }
+        fn write16(
+            &mut self,
+            _: u16,
+            _: u16,
+        ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+            panic!("unexpected narrow configuration write")
         }
     }
     for (vendor, device, expected) in [

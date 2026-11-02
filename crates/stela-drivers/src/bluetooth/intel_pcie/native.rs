@@ -27,6 +27,8 @@ const REGISTER_BYTES: usize = IVAR + 0x26;
 const MEMORY_AND_MASTER: u16 = regs::COMMAND_MEMORY | regs::COMMAND_MASTER;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
+    Minimum(crate::bus::pci::power::Error),
+    Config(crate::bus::pci::ConfigError),
     Requirement(&'static str),
     Mapping(owned::Error),
     Msix(msix::Error),
@@ -135,6 +137,7 @@ pub struct Inputs<C: MsiConfigSpace, B: BarAccess, R: Registers> {
     pub bars: [Option<B>; 6],
     pub registers: R,
     pub clock: Clock,
+    pub minimum: alloc::rc::Rc<dyn crate::bus::pci::power::Timer>,
     pub interrupts: &'static dyn IrqController,
     pub domain: Arc<dyn crate::bus::dma::mapping::DmaDomain>,
     pub msi_route: irq::posted_msi::MsiRoute,
@@ -212,7 +215,7 @@ struct Configuration<C: MsiConfigSpace, B: BarAccess> {
     msix: MsixConfig<C, B>,
     fault: Option<Error>,
     released: Option<msix::Owners<C, B>>,
-    retiring_configuration: Option<Mapping>,
+    retiring_configuration: Option<Function<C>>,
 }
 struct NativeSource<C: MsiConfigSpace, B: BarAccess, R: Registers> {
     configuration: Rc<RefCell<Configuration<C, B>>>,
@@ -315,6 +318,7 @@ pub struct NativePlatform<C: MsiConfigSpace, B: BarAccess, R: Registers> {
     requester: Option<crate::bus::pci::requester::RequesterId>,
     irq_retirement: Option<irq::RetiredRoute>,
     clock: Clock,
+    minimum: Option<alloc::rc::Rc<dyn crate::bus::pci::power::Timer>>,
     clock_origin: u64,
     registration: Option<Box<dyn IrqRegistration>>,
     attempted: bool,
@@ -346,6 +350,7 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
         mut inputs: Inputs<C, B, R>,
     ) -> core::result::Result<Self, (Error, Inputs<C, B, R>)> {
         let valid = (|| {
+            inputs.minimum.check().map_err(Error::Minimum)?;
             inputs
                 .clock
                 .check_duration(120_000_000)
@@ -357,7 +362,7 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
             let f = &mut inputs.function;
             if f.vendor != 0x8086
                 || !super::DEVICE_IDS.contains(&f.device)
-                || f.config().read32(regs::VENDOR_ID)
+                || f.config().read32(regs::VENDOR_ID).map_err(Error::Config)?
                     != u32::from(f.vendor) | (u32::from(f.device) << 16)
             {
                 return Err(Error::Requirement(
@@ -365,7 +370,8 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
                 ));
             }
             if inputs.clock.ticks_per_microsecond == 0
-                || f.config().read16(regs::COMMAND) & MEMORY_AND_MASTER != MEMORY_AND_MASTER
+                || f.config().read16(regs::COMMAND).map_err(Error::Config)? & MEMORY_AND_MASTER
+                    != MEMORY_AND_MASTER
             {
                 return Err(Error::Requirement(
                     "qualified clock and acknowledged PCI memory/bus mastering",
@@ -384,8 +390,8 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
                     address: f.address,
                     vendor: f.vendor,
                     device: f.device,
-                    subsystem_vendor: f.config().read16(0x2c),
-                    subsystem_device: f.config().read16(0x2e),
+                    subsystem_vendor: f.config().read16(0x2c).map_err(Error::Config)?,
+                    subsystem_device: f.config().read16(0x2e).map_err(Error::Config)?,
                 },
                 clock_origin,
             ))
@@ -400,6 +406,7 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
             bars,
             registers,
             clock,
+            minimum,
             interrupts,
             domain,
             msi_route,
@@ -417,6 +424,7 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
                         bars,
                         registers,
                         clock,
+                        minimum,
                         interrupts,
                         domain,
                         msi_route,
@@ -448,6 +456,7 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
             requester: None,
             irq_retirement: None,
             clock,
+            minimum: Some(minimum),
             clock_origin,
             registration: None,
             attempted: false,
@@ -523,6 +532,14 @@ unsafe impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> P
             .registers
             .write8(offset, value)
             .map_err(Into::into)
+    }
+    fn minimum_delay(&mut self, microseconds: u64) -> DriverResult<()> {
+        self.minimum
+            .as_ref()
+            .ok_or(Error::Requirement("retained minimum-delay source"))?
+            .wait_us(microseconds)
+            .map_err(Error::Minimum)?;
+        Ok(())
     }
     fn now_us(&self) -> u64 {
         self.clock
@@ -643,6 +660,7 @@ unsafe impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> P
 impl<C: MsiConfigSpace, B: BarAccess, R: Registers> Drop for NativePlatform<C, B, R> {
     fn drop(&mut self) {
         if !self.retired {
+            core::mem::forget(self.minimum.take());
             // No destructor retries or frees an uncertain physical owner.
             if let Some(registration) = self.registration.take() {
                 core::mem::forget(registration);
@@ -761,7 +779,10 @@ impl<B: BarAccess + 'static, R: Registers>
         {
             return Err(Error::Requirement("current original BT configuration epoch").into());
         }
-        let command = function.config().read16(regs::COMMAND);
+        let command = function
+            .config()
+            .read16(regs::COMMAND)
+            .map_err(Error::Config)?;
         if command == u16::MAX {
             return Err(Error::Readback {
                 offset: regs::COMMAND.into(),
@@ -769,10 +790,13 @@ impl<B: BarAccess + 'static, R: Registers>
             }
             .into());
         }
-        function.config().write16(
-            regs::COMMAND,
-            command & !regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE,
-        );
+        function
+            .config()
+            .write16(
+                regs::COMMAND,
+                command & !regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE,
+            )
+            .map_err(Error::Config)?;
         validate_stopped(function).map_err(Error::Claim)?;
         Ok(())
     }
@@ -806,7 +830,7 @@ impl<B: BarAccess + 'static, R: RetirableRegisters>
             // Drop every MSI-X mapping view before retiring the register mapping.
             drop(bars);
             drop(retained);
-            configuration.retiring_configuration = Some(function.into_config().into_mapping());
+            configuration.retiring_configuration = Some(function);
         }
         // SAFETY: full caller proof, unique signals and all table/PBA views gone.
         unsafe { signals.registers.retire_mapping() }?;
@@ -817,6 +841,7 @@ impl<B: BarAccess + 'static, R: RetirableRegisters>
                 .retiring_configuration
                 .as_mut()
                 .unwrap()
+                .config()
                 .retire()
         }
         .map_err(Error::Mapping)?;

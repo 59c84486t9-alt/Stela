@@ -227,10 +227,15 @@ fn vendor_shadow_requires_its_complete_declared_payload() {
         let mut model = Model::new(0x201d);
         shadow_capability(&mut model, 0x80, length, 0);
         let reads = model.parent_reads.clone();
-        assert!(matches!(
-            Host::initialize(model),
-            Err((Error::Capability, None))
-        ));
+        let expected = if length < 3 {
+            Error::PciCapability(CapabilityError::Malformed { offset: 0x80 })
+        } else {
+            Error::Capability
+        };
+        match Host::initialize(model) {
+            Err((error, None)) => assert_eq!(error, expected),
+            _ => panic!("invalid shadow capability must retain the failed host"),
+        }
         assert!(
             reads
                 .lock()
@@ -242,10 +247,13 @@ fn vendor_shadow_requires_its_complete_declared_payload() {
     let mut model = Model::new(0x201d);
     shadow_capability(&mut model, 0xec, 24, 0);
     let reads = model.parent_reads.clone();
-    assert!(matches!(
-        Host::initialize(model),
-        Err((Error::Capability, None))
-    ));
+    match Host::initialize(model) {
+        Err((error, None)) => assert_eq!(
+            error,
+            Error::PciCapability(CapabilityError::OutOfRange { offset: 0xec })
+        ),
+        _ => panic!("oversized shadow capability must retain the failed host"),
+    }
     assert!(
         !reads
             .lock()
@@ -261,10 +269,17 @@ fn vendor_shadow_cannot_hide_overlapping_or_cyclic_capability_links() {
         let mut model = Model::new(0x201d);
         shadow_capability(&mut model, 0x80, 24, next);
         let reads = model.parent_reads.clone();
-        assert!(matches!(
-            Host::initialize(model),
-            Err((Error::Capability, None))
-        ));
+        let expected = if next == 0x80 {
+            CapabilityError::Cycle { offset: 0x80 }
+        } else {
+            CapabilityError::Overlap {
+                offset: u16::from(next),
+            }
+        };
+        match Host::initialize(model) {
+            Err((error, None)) => assert_eq!(error, Error::PciCapability(expected)),
+            _ => panic!("shadow aliases must retain the failed host"),
+        }
         assert!(
             reads
                 .lock()
@@ -278,10 +293,17 @@ fn vendor_shadow_cannot_hide_overlapping_or_cyclic_capability_links() {
         shadow_capability(&mut model, 0x80, 24, 0xb0);
         model.set(0xb0, 2, 1 | u32::from(next) << 8);
         let reads = model.parent_reads.clone();
-        assert!(matches!(
-            Host::initialize(model),
-            Err((Error::Capability, None))
-        ));
+        let expected = if next == 0x80 {
+            CapabilityError::Cycle { offset: 0x80 }
+        } else {
+            CapabilityError::Overlap {
+                offset: u16::from(next),
+            }
+        };
+        match Host::initialize(model) {
+            Err((error, None)) => assert_eq!(error, Error::PciCapability(expected)),
+            _ => panic!("shadow aliases must retain the failed host"),
+        }
         assert!(
             reads
                 .lock()

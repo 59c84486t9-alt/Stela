@@ -158,6 +158,10 @@ impl PreparingRequester {
     /// firmware/configuration/IRQ delivery and worker owners are excluded and
     /// kept; no Stela submission/IRQ/work user exists yet. This grants no
     /// endpoint engine stop, posted-payload drain or new DMA domain.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preparation refusal returns the original function and epoch custody without allocating"
+    )]
     pub unsafe fn new(
         mut function: Function<OwnedConfig>,
         role: FunctionRole,
