@@ -27,6 +27,7 @@
 #include <linux/pgtable.h>
 #include <linux/blkdev.h>
 /* Exact original internal headers from the same applied provider root. */
+#include "rcu/rcu.h"
 #include "workqueue_internal.h"
 #include "../io_uring/io-wq.h"
 #include "sched/sched.h"

@@ -116,6 +116,9 @@ impl Linux {
         }
         let mut build = configure();
         linux.environment.apply(&mut build, None, &[], None);
+        // The ownership adapters consume private declarations from the same
+        // pinned kernel tree, including RCU phases and workqueue metadata.
+        build.flag("-iquote").flag(Path::new(LINUX).join("kernel"));
         let crc_objects = linux_crc::objects(&build, &crc_tables);
         build.objects(crc_objects);
         {
@@ -205,6 +208,9 @@ impl Linux {
             let services = archive(&host, "linux-host", &services);
             let mut kernel_build = host;
             linux.environment.apply(&mut kernel_build, None, &[], None);
+            kernel_build
+                .flag("-iquote")
+                .flag(Path::new(LINUX).join("kernel"));
             let crc_objects = linux_crc::objects(&kernel_build, &crc_tables);
             kernel_build.objects(crc_objects);
             linux.hosted = vec![

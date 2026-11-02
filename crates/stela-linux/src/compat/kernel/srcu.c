@@ -4,6 +4,7 @@
 #include <linux/errno.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
+#include <linux/sched/task.h>
 #include <linux/srcu.h>
 #include <linux/timer.h>
 #include <linux/workqueue.h>
@@ -12,6 +13,7 @@
 #include <stela/linux.h>
 #include <stela/srcu.h>
 #include <stela/task.h>
+#include "rcu/rcu.h"
 
 static_assert(IS_ENABLED(CONFIG_TINY_SRCU));
 static_assert(IS_ENABLED(CONFIG_TINY_RCU));

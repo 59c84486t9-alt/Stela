@@ -57,7 +57,12 @@
 /kernel/exit.c
 /kernel/Makefile
 /kernel/rcu/update.c
+/kernel/rcu/rcu.h
+/kernel/rcu/rcu_segcblist.h
+/kernel/rcu/srcutiny.c
 /kernel/rcu/Makefile
+/kernel/workqueue_internal.h
+/io_uring/io-wq.h
 /kernel/rcuwait_wake.c
 /kernel/rcu/rcuwait_finish.c
 /kernel/irq_work.c
