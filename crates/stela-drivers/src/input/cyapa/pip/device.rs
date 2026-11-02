@@ -596,6 +596,10 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     /// while scanning is suspended. Physical reports drained around commands
     /// remain queued. Complete rejections permit one resume command; uncertain
     /// failures keep the owner for platform reset and send no further command.
+    #[expect(
+        clippy::result_large_err,
+        reason = "primary and resume failures retain exact bus causes without error-path allocation"
+    )]
     pub fn calibrate(&mut self) -> Result<(), CalibrationError> {
         let mut phase = CalibrationPhase::SuspendScanning;
         let mut attempted = false;

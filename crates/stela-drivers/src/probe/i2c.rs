@@ -266,20 +266,17 @@ mod attach {
         probe::{Devices, NativeServices, ServiceError},
     };
     use alloc::{boxed::Box, format, rc::Rc};
-    use core::cell::RefCell;
+    use core::{cell::RefCell, mem::ManuallyDrop};
 
     /// A DesignWare register window over an owned mapping.
     struct Window(Mapping);
 
     impl i2c::Registers for Window {
-        fn read32(&mut self, offset: usize) -> u32 {
-            // The mapping covers the whole register file, so every
-            // register offset is inside it.
-            self.0.read32(offset).unwrap_or(u32::MAX)
+        fn read32(&mut self, offset: usize) -> Result<u32, i2c::IoError> {
+            self.0.read32(offset).map_err(i2c::IoError::Mmio)
         }
-        fn write32(&mut self, offset: usize, value: u32) {
-            // As above: the offset is inside the mapping.
-            let _ = self.0.write32(offset, value);
+        fn write32(&mut self, offset: usize, value: u32) -> Result<(), i2c::IoError> {
+            self.0.write32(offset, value).map_err(i2c::IoError::Mmio)
         }
     }
 
@@ -489,7 +486,7 @@ mod attach {
             0
         };
         let controller = handle.child(&connection.controller).map_err(acpi)?;
-        let bus = bus(services, session, clock, controller, shared)?;
+        let bus = bus(services, session, clock, controller, shared, owners)?;
         let gpio = handle
             .child(&connection.interrupt.controller)
             .map_err(acpi)?;
@@ -589,6 +586,7 @@ mod attach {
         clock: Clock,
         controller: Handle<'_>,
         shared: &mut Shared,
+        owners: &mut Vec<Box<dyn core::any::Any>>,
     ) -> Result<SharedBus, PlatformError> {
         let path = controller.path().map_err(acpi)?;
         if let Some((_, bus)) = shared.buses.iter().find(|(at, _)| *at == path) {
@@ -643,18 +641,28 @@ mod attach {
                         Protection::ReadWrite,
                     )
                     .map_err(|error| native(ServiceError::Mapping(error)))?;
+                let mapping = ManuallyDrop::new(mapping);
                 let board = timing::Board {
                     clock_hz,
                     sda_hold_ns: 0,
                     sda_fall_ns: 0,
                     scl_fall_ns: 0,
                 };
-                let engine = DesignWare::new(Window(mapping), clock, config(board))
-                    .map_err(PlatformError::I2c)?;
+                let config = config(board);
+                let engine =
+                    match DesignWare::new(Window(ManuallyDrop::into_inner(mapping)), clock, config)
+                    {
+                        Ok(engine) => engine,
+                        Err(failure) => {
+                            let error = failure.error;
+                            owners.push(Box::new(failure));
+                            return Err(PlatformError::I2c(error));
+                        }
+                    };
                 Controller::Acpi(engine)
             }
             None => Controller::Lpss(lpss_controller(
-                services, session, clock, controller, config,
+                services, session, clock, controller, config, owners,
             )?),
         };
         let bus = SharedBus(Rc::new(RefCell::new(attached)));
@@ -703,6 +711,7 @@ mod attach {
         clock: Clock,
         controller: Handle<'_>,
         config: impl Fn(timing::Board) -> i2c::Config,
+        owners: &mut Vec<Box<dyn core::any::Any>>,
     ) -> Result<lpss::I2c<lpss::NativeRegisters, Clock>, PlatformError> {
         let integer = |handle: Handle<'_>, name: &str| -> Result<Option<u64>, PlatformError> {
             if handle.child(name).is_err() {
@@ -734,23 +743,49 @@ mod attach {
         let address = pci_location(adr, segment, bus)
             .ok_or(PlatformError::Refused("I2C controller _ADR out of range"))?;
         let requester = services.claim_stopped(address).map_err(native)?;
-        let mut function = requester.into_function();
+        let mut function = ManuallyDrop::new(requester.into_function());
         let identity = lpss::Identity {
             vendor: function.vendor,
             device: function.device,
             subsystem_vendor: 0,
             subsystem_device: 0,
         };
-        let profile = lpss::Profile::select(identity).map_err(PlatformError::Lpss)?;
-        let bars = function.bars().map_err(PlatformError::Config)?;
+        let inspected = (|| {
+            let profile = lpss::Profile::select(identity).map_err(PlatformError::Lpss)?;
+            let bars = function.bars().map_err(PlatformError::Config)?;
+            Ok((profile, bars))
+        })();
+        let (profile, bars) = match inspected {
+            Ok(observed) => observed,
+            Err(error) => {
+                owners.push(Box::new(function));
+                return Err(error);
+            }
+        };
         // SAFETY: the mount claimed this function stopped, and sizing its BARs
         // with decode off left it so.
-        let requester =
-            unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) }
-                .map_err(|(error, _)| native(ServiceError::Claim(error)))?;
-        let mapping = match bars[0] {
-            Some(bar @ Bar::Memory { .. }) => services.map_bar(address, bar).map_err(native)?,
-            _ => return Err(native(ServiceError::Refused("missing memory BAR"))),
+        let requester = match unsafe {
+            StoppedRequester::from_stopped_pci(
+                ManuallyDrop::into_inner(function),
+                FunctionRole::Physical,
+            )
+        } {
+            Ok(requester) => ManuallyDrop::new(requester),
+            Err((error, function)) => {
+                owners.push(Box::new(ManuallyDrop::new(function)));
+                return Err(native(ServiceError::Claim(error)));
+            }
+        };
+        let mapped = match bars[0] {
+            Some(bar @ Bar::Memory { .. }) => services.map_bar(address, bar).map_err(native),
+            _ => Err(native(ServiceError::Refused("missing memory BAR"))),
+        };
+        let mapping = match mapped {
+            Ok(mapping) => ManuallyDrop::new(mapping),
+            Err(error) => {
+                owners.push(Box::new(requester));
+                return Err(error);
+            }
         };
         let board = timing::Board {
             clock_hz: profile.input_clock_hz(),
@@ -758,11 +793,25 @@ mod attach {
             sda_fall_ns: profile.source_sda_fall_ns().unwrap_or(0),
             scl_fall_ns: profile.source_scl_fall_ns().unwrap_or(0),
         };
+        let config = config(board);
         // SAFETY: the mount claimed the stopped function and mapped its BAR0
         // uncached; the counts come from the controller's firmware methods or
         // Linux's computation from this profile's input clock and board times.
-        unsafe { lpss::I2c::attach_native(requester, mapping, clock, config(board)) }
-            .map_err(|failure| PlatformError::LpssAttach(failure.error))
+        match unsafe {
+            lpss::I2c::attach_native(
+                ManuallyDrop::into_inner(requester),
+                ManuallyDrop::into_inner(mapping),
+                clock,
+                config,
+            )
+        } {
+            Ok(controller) => Ok(controller),
+            Err(failure) => {
+                let error = failure.error;
+                owners.push(Box::new(failure));
+                Err(PlatformError::LpssAttach(error))
+            }
+        }
     }
 
     /// The GPIO controller at `handle`, attached on first use.

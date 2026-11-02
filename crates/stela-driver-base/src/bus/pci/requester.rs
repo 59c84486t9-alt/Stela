@@ -14,6 +14,7 @@ use super::{
     owned::{ConfigRetention, OwnedConfig},
 };
 use crate::bus::mmio::owned::{Error as MappingError, Mapping};
+use core::mem::ManuallyDrop;
 
 mod irq_identity;
 pub use irq_identity::RequesterId;
@@ -113,21 +114,28 @@ impl StoppedRequester {
         reason = "stopped-claim refusal returns the same function and original config without allocating"
     )]
     pub unsafe fn from_stopped_pci(
-        mut function: Function<OwnedConfig>,
+        function: Function<OwnedConfig>,
         role: FunctionRole,
     ) -> Result<Self, (ClaimError, Function<OwnedConfig>)> {
+        let mut function = ManuallyDrop::new(function);
         if role != FunctionRole::Physical {
-            return Err((ClaimError::UnsupportedRole(role), function));
+            return Err((
+                ClaimError::UnsupportedRole(role),
+                ManuallyDrop::into_inner(function),
+            ));
         }
         let address = function.config().address();
         if function.address != address {
-            return Err((ClaimError::IdentityChanged, function));
+            return Err((
+                ClaimError::IdentityChanged,
+                ManuallyDrop::into_inner(function),
+            ));
         }
         if let Err(error) = validate_stopped(&mut function) {
-            return Err((error, function));
+            return Err((error, ManuallyDrop::into_inner(function)));
         }
         Ok(Self {
-            function,
+            function: ManuallyDrop::into_inner(function),
             address,
             dma_bound: false,
         })

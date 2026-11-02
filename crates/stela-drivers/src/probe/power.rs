@@ -64,6 +64,10 @@ pub unsafe fn install_embedded_controller(
         binding: None,
         failures: Vec::new(),
     };
+    #[expect(
+        clippy::result_large_err,
+        reason = "discovery retains typed platform causes inline in the diagnostic collection"
+    )]
     let from_ecdt = || -> Result<Option<Device<'static>>, (String, PlatformError)> {
         let Some(table) = session
             .table(b"ECDT")

@@ -15,8 +15,14 @@
 //
 //! Register-level master engine. Tests run this same engine against a controller
 //! model, not a replacement implementation of the bus transaction API.
-use super::{AbortKind, Address, Bus, Clock, Error, ErrorKind, Operation, Phase, Recovery, Timer};
+use super::{
+    AbortKind, Address, Bus, Clock, Error, ErrorKind, IoError, Operation, Phase, Recovery, Timer,
+};
 use crate::bus::mmio::Mmio;
+use alloc::boxed::Box;
+use core::mem::ManuallyDrop;
+mod ownership;
+pub use ownership::{Access, AccessResult, Failure, Progress};
 
 const CON: usize = 0x00;
 const TAR: usize = 0x04;
@@ -78,8 +84,8 @@ const ABRT_ARBITRATION_LOST: u32 = 1 << 12;
 /// implementation must preserve ordered, volatile 32-bit register semantics.
 /// The trait is public so independent models can exercise the driver.
 pub trait Registers {
-    fn read32(&mut self, offset: usize) -> u32;
-    fn write32(&mut self, offset: usize, value: u32);
+    fn read32(&mut self, offset: usize) -> Result<u32, IoError>;
+    fn write32(&mut self, offset: usize, value: u32) -> Result<(), IoError>;
 }
 
 /// A uniquely owned, identity-mapped, uncached DesignWare register window.
@@ -99,12 +105,13 @@ impl MmioRegisters {
 }
 
 impl Registers for MmioRegisters {
-    fn read32(&mut self, offset: usize) -> u32 {
-        self.0.read32(offset)
+    fn read32(&mut self, offset: usize) -> Result<u32, IoError> {
+        Ok(self.0.read32(offset))
     }
 
-    fn write32(&mut self, offset: usize, value: u32) {
+    fn write32(&mut self, offset: usize, value: u32) -> Result<(), IoError> {
         self.0.write32(offset, value);
+        Ok(())
     }
 }
 
@@ -149,6 +156,10 @@ pub struct Config {
 /// Standard/fast mode and 7-/10-bit unicast addressing are implemented.
 /// High-speed mode, target mode, SMBus quick/PEC and GPIO bus clear are not.
 pub struct DesignWare<R = MmioRegisters, T = Clock> {
+    state: ManuallyDrop<Box<State<R, T>>>,
+}
+
+struct State<R, T> {
     registers: R,
     timer: T,
     config: Config,
@@ -156,109 +167,98 @@ pub struct DesignWare<R = MmioRegisters, T = Clock> {
     rx_depth: usize,
     control: u32,
     ready: bool,
+    progress: Progress,
+    active: bool,
+    failure: Option<Error>,
+    inflight_error: Option<Error>,
 }
 
-impl<R: Registers, T: Timer> DesignWare<R, T> {
-    pub fn new(mut registers: R, timer: T, config: Config) -> Result<Self, Error> {
-        if config.timeout_us == 0
-            || config.recovery_timeout_us == 0
-            || timer.check_duration(config.timeout_us).is_err()
-            || timer.check_duration(config.recovery_timeout_us).is_err()
-            || config.timing.scl_high < 6
-            || config.timing.scl_low < 8
-            || config
-                .timing
-                .sda_hold
-                .is_some_and(|hold| hold > 0x00ff_ffff)
-        {
-            return Err(ErrorKind::InvalidConfiguration.into());
-        }
-        let component = registers.read32(COMP_TYPE);
-        if component != COMPONENT_TYPE {
-            return Err(ErrorKind::ComponentType(component).into());
-        }
-        let parameters = registers.read32(COMP_PARAM_1);
-        let tx_depth = (((parameters >> 16) & 0xff) + 1) as usize;
-        let rx_depth = (((parameters >> 8) & 0xff) + 1) as usize;
-        let max_speed = (parameters >> 2) & 3;
-        if parameters & PARAM_ENCODED == 0
-            || parameters & 3 != PARAM_WIDTH_32
-            || tx_depth < 2
-            || rx_depth < 2
-            || max_speed == 0
-            || (config.timing.speed == Speed::Fast && max_speed < 2)
-        {
-            return Err(ErrorKind::ComponentParameters(parameters).into());
-        }
-        if config.timing.sda_hold.is_some() {
-            let version = registers.read32(COMP_VERSION);
-            if version < SDA_HOLD_VERSION {
-                return Err(ErrorKind::UnsupportedVersion(version).into());
+impl<R: Registers, T: Timer> State<R, T> {
+    fn initialize(&mut self) -> Result<(), Error> {
+        let config = self.config;
+        let result = (|| {
+            if config.timeout_us == 0
+                || config.recovery_timeout_us == 0
+                || self.timer.check_duration(config.timeout_us).is_err()
+                || self
+                    .timer
+                    .check_duration(config.recovery_timeout_us)
+                    .is_err()
+                || config.timing.scl_high < 6
+                || config.timing.scl_low < 8
+                || config
+                    .timing
+                    .sda_hold
+                    .is_some_and(|hold| hold > 0x00ff_ffff)
+            {
+                return Err(ErrorKind::InvalidConfiguration);
             }
-        }
-        let control = CON_MASTER | CON_RESTART | CON_SLAVE_DISABLE | config.timing.speed.control();
-        let mut controller = Self {
-            registers,
-            timer,
-            config,
-            tx_depth,
-            rx_depth,
-            control,
-            ready: false,
-        };
-        if !controller.quiesce() {
-            return Err(Error {
-                kind: ErrorKind::Timeout(Phase::Disable),
-                recovery: Recovery::Failed,
-            });
-        }
-        controller.registers.write32(INTR_MASK, 0);
-        controller.registers.write32(SMBUS_INTR_MASK, 0);
-        controller.registers.write32(DMA_CR, 0);
-        controller.registers.write32(CON, control);
-        controller.registers.write32(RX_TL, 0);
-        controller.registers.write32(TX_TL, 0);
-        let (high, low) = match config.timing.speed {
-            Speed::Standard => (SS_SCL_HCNT, SS_SCL_LCNT),
-            Speed::Fast => (FS_SCL_HCNT, FS_SCL_LCNT),
-        };
-        controller
-            .registers
-            .write32(high, u32::from(config.timing.scl_high));
-        controller
-            .registers
-            .write32(low, u32::from(config.timing.scl_low));
-        if let Some(hold) = config.timing.sda_hold {
-            controller.registers.write32(SDA_HOLD, hold);
-        }
-        if controller.registers.read32(high) != u32::from(config.timing.scl_high)
-            || controller.registers.read32(low) != u32::from(config.timing.scl_low)
-            || config
-                .timing
-                .sda_hold
-                .is_some_and(|hold| controller.registers.read32(SDA_HOLD) != hold)
-        {
-            return Err(ErrorKind::TimingRejected.into());
-        }
-        controller.ready = true;
-        Ok(controller)
-    }
-
-    /// Expose ownership of the disabled register window to a platform reset
-    /// path. A failed disable is explicit; it must not be treated as quiescent.
-    pub fn shutdown(mut self) -> Result<(R, T), Error> {
-        if self.quiesce() {
-            Ok((self.registers, self.timer))
-        } else {
-            Err(Error {
-                kind: ErrorKind::Timeout(Phase::Disable),
-                recovery: Recovery::Failed,
+            let component = self.read(COMP_TYPE)?;
+            if component != COMPONENT_TYPE {
+                return Err(ErrorKind::ComponentType(component));
+            }
+            let parameters = self.read(COMP_PARAM_1)?;
+            self.tx_depth = (((parameters >> 16) & 0xff) + 1) as usize;
+            self.rx_depth = (((parameters >> 8) & 0xff) + 1) as usize;
+            let max_speed = (parameters >> 2) & 3;
+            if parameters & PARAM_ENCODED == 0
+                || parameters & 3 != PARAM_WIDTH_32
+                || self.tx_depth < 2
+                || self.rx_depth < 2
+                || max_speed == 0
+                || (config.timing.speed == Speed::Fast && max_speed < 2)
+            {
+                return Err(ErrorKind::ComponentParameters(parameters));
+            }
+            if config.timing.sda_hold.is_some() {
+                let version = self.read(COMP_VERSION)?;
+                if version < SDA_HOLD_VERSION {
+                    return Err(ErrorKind::UnsupportedVersion(version));
+                }
+            }
+            self.control =
+                CON_MASTER | CON_RESTART | CON_SLAVE_DISABLE | config.timing.speed.control();
+            if !self.quiesce()? {
+                return Err(ErrorKind::Timeout(Phase::Disable));
+            }
+            self.write(INTR_MASK, 0)?;
+            self.write(SMBUS_INTR_MASK, 0)?;
+            self.write(DMA_CR, 0)?;
+            self.write(CON, self.control)?;
+            self.write(RX_TL, 0)?;
+            self.write(TX_TL, 0)?;
+            let (high, low) = match config.timing.speed {
+                Speed::Standard => (SS_SCL_HCNT, SS_SCL_LCNT),
+                Speed::Fast => (FS_SCL_HCNT, FS_SCL_LCNT),
+            };
+            self.write(high, u32::from(config.timing.scl_high))?;
+            self.write(low, u32::from(config.timing.scl_low))?;
+            if let Some(hold) = config.timing.sda_hold {
+                self.write(SDA_HOLD, hold)?;
+            }
+            if self.read(high)? != u32::from(config.timing.scl_high)
+                || self.read(low)? != u32::from(config.timing.scl_low)
+            {
+                return Err(ErrorKind::TimingRejected);
+            }
+            if let Some(hold) = config.timing.sda_hold
+                && self.read(SDA_HOLD)? != hold
+            {
+                return Err(ErrorKind::TimingRejected);
+            }
+            self.ready = true;
+            Ok(())
+        })();
+        result.map_err(|kind| {
+            self.failure.unwrap_or_else(|| Error {
+                kind,
+                recovery: if kind == ErrorKind::Timeout(Phase::Disable) {
+                    Recovery::Failed
+                } else {
+                    Recovery::NotAttempted
+                },
             })
-        }
-    }
-
-    pub fn fifo_depths(&self) -> (usize, usize) {
-        (self.tx_depth, self.rx_depth)
+        })
     }
 
     fn expired(&self, start: u64, timeout: u64) -> bool {
@@ -269,15 +269,15 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
         &mut self,
         start: u64,
         timeout: u64,
-        mut ready: impl FnMut(&mut R) -> bool,
-    ) -> bool {
+        mut ready: impl FnMut(&mut Self) -> Result<bool, ErrorKind>,
+    ) -> Result<bool, ErrorKind> {
         loop {
-            let observed = ready(&mut self.registers);
+            let observed = ready(self)?;
             if self.expired(start, timeout) {
-                return false;
+                return Ok(false);
             }
             if observed {
-                return true;
+                return Ok(true);
             }
             self.timer.relax();
         }
@@ -285,39 +285,38 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
 
     /// Abort releases a master holding SCL on an empty TX FIFO; disable then
     /// flushes any unread FIFO entries. Never spin forever on wedged hardware.
-    fn quiesce(&mut self) -> bool {
+    fn quiesce(&mut self) -> Result<bool, ErrorKind> {
         let start = self.timer.start();
-        if self.registers.read32(ENABLE_STATUS) & ENABLE_ON != 0
-            && self.registers.read32(STATUS) & STATUS_MASTER_ACTIVE != 0
+        if self.read(ENABLE_STATUS)? & ENABLE_ON != 0
+            && self.read(STATUS)? & STATUS_MASTER_ACTIVE != 0
         {
-            self.registers.write32(ENABLE, ENABLE_ON | ENABLE_ABORT);
-            let _aborted = self.wait_until(start, self.config.recovery_timeout_us, |registers| {
-                registers.read32(ENABLE) & ENABLE_ABORT == 0
-            });
+            self.write(ENABLE, ENABLE_ON | ENABLE_ABORT)?;
+            let _aborted = self.wait_until(start, self.config.recovery_timeout_us, |state| {
+                Ok(state.read(ENABLE)? & ENABLE_ABORT == 0)
+            })?;
         }
-        self.registers.write32(ENABLE, 0);
-        let mut disabled = self.wait_until(start, self.config.recovery_timeout_us, |registers| {
-            registers.read32(ENABLE_STATUS) & ENABLE_ON == 0
-        });
+        self.write(ENABLE, 0)?;
+        let mut disabled = self.wait_until(start, self.config.recovery_timeout_us, |state| {
+            Ok(state.read(ENABLE_STATUS)? & ENABLE_ON == 0)
+        })?;
         if disabled {
-            self.registers.write32(INTR_MASK, 0);
+            self.write(INTR_MASK, 0)?;
             // Firmware may leave IC_SMBUS enabled independently of the
             // ordinary interrupt mask. No SMBus interrupt is serviced here.
-            self.registers.write32(SMBUS_INTR_MASK, 0);
-            self.registers.write32(DMA_CR, 0);
-            self.registers.read32(CLR_INTR);
+            self.write(SMBUS_INTR_MASK, 0)?;
+            self.write(DMA_CR, 0)?;
+            self.read(CLR_INTR)?;
             disabled = !self.expired(start, self.config.recovery_timeout_us);
         }
         self.ready = disabled;
-        disabled
+        Ok(disabled)
     }
 
     fn faults(&mut self) -> Result<u32, ErrorKind> {
-        let interrupts = self.registers.read32(RAW_INTR_STAT);
+        let interrupts = self.read(RAW_INTR_STAT)?;
         if interrupts & INTR_TX_ABRT != 0 {
             // CLR_INTR/CLR_TX_ABRT also erase the reason. Capture it first.
-            let source = self.registers.read32(TX_ABRT_SOURCE);
-            self.registers.read32(CLR_TX_ABRT);
+            let source = self.read(TX_ABRT_SOURCE)?;
             let kind = if source & ABRT_ARBITRATION_LOST != 0 {
                 AbortKind::ArbitrationLost
             } else if source & ABRT_ADDRESS_NACK != 0 {
@@ -327,7 +326,14 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
             } else {
                 AbortKind::Other
             };
-            return Err(ErrorKind::Aborted { kind, source });
+            let primary = ErrorKind::Aborted { kind, source };
+            self.inflight_error = Some(Error {
+                kind: primary,
+                recovery: Recovery::Interrupted,
+            });
+            self.read(CLR_TX_ABRT)?;
+            self.inflight_error = None;
+            return Err(primary);
         }
         if interrupts & INTR_FIFO_ERROR != 0 {
             return Err(ErrorKind::Fifo { interrupts });
@@ -349,23 +355,23 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
         operations: &mut [Operation<'_>],
     ) -> Result<(), ErrorKind> {
         let start = self.timer.start();
-        if !self.wait_until(start, self.config.timeout_us, |registers| {
-            registers.read32(STATUS) & STATUS_ACTIVE == 0
-        }) {
+        if !self.wait_until(start, self.config.timeout_us, |state| {
+            Ok(state.read(STATUS)? & STATUS_ACTIVE == 0)
+        })? {
             return Err(ErrorKind::Timeout(Phase::BusIdle));
         }
-        self.registers.read32(CLR_INTR);
+        self.read(CLR_INTR)?;
         let (target, address_control) = match address {
             Address::SevenBit(address) => (u32::from(address), 0),
             Address::TenBit(address) => (u32::from(address) | TAR_TEN_BIT, CON_TEN_BIT),
         };
-        self.registers.write32(CON, self.control | address_control);
-        self.registers.write32(TAR, target);
+        self.write(CON, self.control | address_control)?;
+        self.write(TAR, target)?;
         self.transaction_deadline(start, Phase::Enable)?;
-        self.registers.write32(ENABLE, ENABLE_ON);
-        if !self.wait_until(start, self.config.timeout_us, |registers| {
-            registers.read32(ENABLE_STATUS) & ENABLE_ON != 0
-        }) {
+        self.write(ENABLE, ENABLE_ON)?;
+        if !self.wait_until(start, self.config.timeout_us, |state| {
+            Ok(state.read(ENABLE_STATUS)? & ENABLE_ON != 0)
+        })? {
             return Err(ErrorKind::Timeout(Phase::Enable));
         }
 
@@ -380,14 +386,11 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
                     // A STOP cannot belong to our final byte while more
                     // commands remain in the hardware's TX FIFO. Merely
                     // having queued every message does not prove completion.
-                    if message != final_message
-                        || queued != count
-                        || self.registers.read32(TXFLR) != 0
-                    {
+                    if message != final_message || queued != count || self.read(TXFLR)? != 0 {
                         return Err(ErrorKind::UnexpectedStop);
                     }
                 }
-                let available = self.registers.read32(RXFLR) as usize;
+                let available = self.read(RXFLR)? as usize;
                 self.transaction_deadline(start, Phase::Transfer)?;
                 if available > self.rx_depth {
                     return Err(ErrorKind::UnexpectedReceive);
@@ -396,7 +399,7 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
                     match operation {
                         Operation::Read(bytes) if available <= queued - received => {
                             for byte in &mut bytes[received..received + available] {
-                                let observed = self.registers.read32(DATA_CMD) as u8;
+                                let observed = self.read(DATA_CMD)? as u8;
                                 self.transaction_deadline(start, Phase::Transfer)?;
                                 *byte = observed;
                             }
@@ -405,7 +408,7 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
                         _ => return Err(ErrorKind::UnexpectedReceive),
                     }
                 }
-                let pending = self.registers.read32(TXFLR) as usize;
+                let pending = self.read(TXFLR)? as usize;
                 if pending > self.tx_depth {
                     return Err(ErrorKind::Fifo {
                         interrupts: INTR_TX_OVER,
@@ -435,7 +438,7 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
                     // No target/status/payload observation may spend the
                     // remaining budget and still permit a later wire command.
                     self.transaction_deadline(start, Phase::Transfer)?;
-                    self.registers.write32(DATA_CMD, command);
+                    self.write(DATA_CMD, command)?;
                     queued += 1;
                 }
                 if queued == count && (!is_read || received == count) {
@@ -449,20 +452,20 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
         }
         loop {
             let interrupts = self.faults()?;
-            if interrupts & INTR_STOP_DET != 0 && self.registers.read32(TXFLR) != 0 {
+            if interrupts & INTR_STOP_DET != 0 && self.read(TXFLR)? != 0 {
                 return Err(ErrorKind::UnexpectedStop);
             }
-            let status = self.registers.read32(STATUS);
+            let status = self.read(STATUS)?;
             self.transaction_deadline(start, Phase::Stop)?;
             if interrupts & INTR_STOP_DET != 0
                 && status & (STATUS_TX_EMPTY | STATUS_ACTIVE) == STATUS_TX_EMPTY
             {
-                let remaining = self.registers.read32(RXFLR);
+                let remaining = self.read(RXFLR)?;
                 self.transaction_deadline(start, Phase::Stop)?;
                 if remaining != 0 {
                     return Err(ErrorKind::UnexpectedReceive);
                 }
-                self.registers.read32(CLR_STOP_DET);
+                self.read(CLR_STOP_DET)?;
                 self.transaction_deadline(start, Phase::Stop)?;
                 return Ok(());
             }
@@ -470,38 +473,6 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
                 return Err(ErrorKind::Timeout(Phase::Stop));
             }
             self.timer.relax();
-        }
-    }
-}
-
-impl<R: Registers, T: Timer> Bus for DesignWare<R, T> {
-    fn transaction(
-        &mut self,
-        address: Address,
-        operations: &mut [Operation<'_>],
-    ) -> Result<(), Error> {
-        address.validate()?;
-        if operations.is_empty() {
-            return Err(ErrorKind::EmptyTransaction.into());
-        }
-        if operations.iter().any(|operation| operation.len() == 0) {
-            return Err(ErrorKind::EmptyMessage.into());
-        }
-        if !self.ready {
-            return Err(ErrorKind::NeedsReset.into());
-        }
-        let result = self.transfer(address, operations);
-        let disabled = self.quiesce();
-        match result {
-            Ok(()) if disabled => Ok(()),
-            result => Err(Error {
-                kind: result.err().unwrap_or(ErrorKind::Timeout(Phase::Disable)),
-                recovery: if disabled {
-                    Recovery::Disabled
-                } else {
-                    Recovery::Failed
-                },
-            }),
         }
     }
 }

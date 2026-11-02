@@ -1,4 +1,5 @@
 use super::*;
+mod access;
 use crate::bus::pci::regs;
 use crate::bus::pci::{
     Address,
@@ -84,9 +85,9 @@ unsafe impl Registers for Model {
 // SAFETY: isolated model aperture; command/FIFO/status effects are
 // independent of the production engine. There is no real DMA or IRQ.
 unsafe impl ChildAccess for Model {
-    fn child_read32(&mut self, offset: usize) -> u32 {
+    fn child_read32(&mut self, offset: usize) -> Result<u32, Error> {
         let mut h = self.hardware.borrow_mut();
-        match offset {
+        Ok(match offset {
             0xfc => 0x4457_0140,
             0xf4 => 2 | (1 << 7) | (2 << 2) | (3 << 16) | (3 << 8),
             0xf8 => 0x3131_312a,
@@ -113,9 +114,9 @@ unsafe impl ChildAccess for Model {
                 0
             }
             _ => h.words[offset / 4],
-        }
+        })
     }
-    fn child_write32(&mut self, offset: usize, value: u32) {
+    fn child_write32(&mut self, offset: usize, value: u32) -> Result<(), Error> {
         let mut h = self.hardware.borrow_mut();
         assert!(offset < PRIVATE && offset.is_multiple_of(4));
         h.words[offset / 4] = value;
@@ -134,6 +135,7 @@ unsafe impl ChildAccess for Model {
                 h.stop = true;
             }
         }
+        Ok(())
     }
 }
 #[derive(Clone)]
@@ -301,10 +303,13 @@ pub(super) fn release_native(
 fn native_i2c_unavailable_or_unrepresentable_clock_returns_untouched_original_resources() {
     for rate in [0, u64::MAX, u64::MAX / 2 / 100 + 1] {
         let (function, mapping, config_counts, bar_counts) = native_fixture();
-        let before = {
+        let (pointer, before) = {
             let pointer = mapping.address(0, WINDOW_BYTES).unwrap();
             // SAFETY: original stopped, exclusively held fixture aperture.
-            unsafe { core::slice::from_raw_parts(pointer.as_ptr(), WINDOW_BYTES) }.to_vec()
+            (
+                pointer,
+                unsafe { core::slice::from_raw_parts(pointer.as_ptr(), WINDOW_BYTES) }.to_vec(),
+            )
         };
         let requester = stop_fixture(function);
         // SAFETY: same stopped owner/mapping; failed time admission
@@ -325,14 +330,19 @@ fn native_i2c_unavailable_or_unrepresentable_clock_returns_untouched_original_re
             failure.error,
             AttachError::I2c(crate::bus::i2c::ErrorKind::InvalidConfiguration.into())
         );
-        let resources = failure.unmodified.expect("original unchanged owners");
-        let pointer = resources.1.address(0, WINDOW_BYTES).unwrap();
+        assert_eq!(failure.stage(), AttachStage::Validation);
         assert_eq!(
             // SAFETY: these original owners still keep the aperture.
             unsafe { core::slice::from_raw_parts(pointer.as_ptr(), WINDOW_BYTES) },
             before
         );
-        release_native(resources, &config_counts, bar_counts);
+        #[expect(
+            clippy::drop_non_drop,
+            reason = "exercise opaque refusal abandonment with original provider Drop witnesses"
+        )]
+        drop(failure);
+        assert_eq!(config_counts.unmaps.load(Ordering::Relaxed), 0);
+        assert_eq!(bar_counts.unmaps.load(Ordering::Relaxed), 0);
     }
 }
 
@@ -347,7 +357,7 @@ fn concrete_native_registers_use_owned_mapping_and_acknowledged_reset_release() 
     };
     let mut owner = match Controller::initialize(registers) {
         Ok(owner) => owner,
-        Err((error, _)) => panic!("valid private core: {error:?}"),
+        Err(failure) => panic!("valid private core: {:?}", failure.error),
     };
     assert_eq!(owner.profile().device(), 0x9d60);
     let registers = owner.registers.as_mut().unwrap();
@@ -393,7 +403,7 @@ fn concrete_native_live_and_uncertain_child_owners_keep_original_platform_resour
         };
         let owner = match Controller::initialize(registers) {
             Ok(owner) => owner,
-            Err((error, _)) => panic!("valid private core: {error:?}"),
+            Err(failure) => panic!("valid private core: {:?}", failure.error),
         };
         if stage == 0 {
             drop(owner);
@@ -404,12 +414,18 @@ fn concrete_native_live_and_uncertain_child_owners_keep_original_platform_resour
             let child = unsafe { owner.into_i2c(Time(Rc::new(Cell::new(0))), timing()) };
             match stage {
                 1 => assert!(matches!(
-                    child.err().unwrap().kind,
-                    crate::bus::i2c::ErrorKind::ComponentType(0)
+                    child.err().unwrap().error,
+                    AttachError::I2c(crate::bus::i2c::Error {
+                        kind: crate::bus::i2c::ErrorKind::ComponentType(0),
+                        ..
+                    })
                 )),
                 2 => assert_eq!(
-                    child.err().unwrap().kind,
-                    crate::bus::i2c::ErrorKind::Timeout(crate::bus::i2c::Phase::Disable)
+                    child.err().unwrap().error,
+                    AttachError::I2c(crate::bus::i2c::Error {
+                        kind: crate::bus::i2c::ErrorKind::Timeout(crate::bus::i2c::Phase::Disable),
+                        recovery: crate::bus::i2c::Recovery::Failed,
+                    })
                 ),
                 3 => drop(child.unwrap()),
                 _ => unreachable!(),
@@ -517,12 +533,21 @@ fn metadata_refusals_return_unmodified_resources_without_register_writes() {
         (0x9d60, 0x8000_0000, u32::MAX),
     ] {
         let (registers, h, drops) = model(device, base, caps);
-        let (_, registers) = Controller::initialize(registers).err().unwrap();
-        assert!(registers.is_some());
+        let failure = Controller::initialize(registers).err().unwrap();
+        assert!(failure.owner.registers.is_some());
+        assert_eq!(failure.owner.phase, Phase::Unmodified);
         assert!(h.borrow().writes.is_empty());
         assert_eq!(drops.get(), 0);
-        drop(registers);
-        assert_eq!(drops.get(), 1);
+        #[expect(
+            clippy::drop_non_drop,
+            reason = "exercise opaque refusal abandonment with original provider Drop witnesses"
+        )]
+        drop(failure);
+        assert_eq!(
+            drops.get(),
+            0,
+            "refusal retains the same unmodified provider"
+        );
     }
 }
 #[test]
@@ -531,20 +556,20 @@ fn every_access_fault_preserves_original_failure_and_post_effect_owners() {
         for after in [false, true] {
             let (registers, h, drops) = model(0x9d60, 0x1_2345_0000, 0);
             h.borrow_mut().fail = Some((call, after));
-            let (error, returned) = Controller::initialize(registers).err().unwrap();
-            assert!(matches!(error, Error::Io | Error::Identity));
-            assert_eq!(returned.is_some(), call <= 2);
+            let failure = Controller::initialize(registers).err().unwrap();
+            assert!(matches!(failure.error, Error::Io | Error::Identity));
+            assert_eq!(failure.owner.phase == Phase::Unmodified, call <= 2);
+            assert!(Rc::ptr_eq(
+                &failure.owner.registers.as_ref().unwrap().hardware,
+                &h
+            ));
             assert_eq!(drops.get(), 0);
-            if let Some(registers) = returned {
-                drop(registers);
-                assert_eq!(drops.get(), 1);
-            } else {
-                assert_eq!(
-                    drops.get(),
-                    0,
-                    "uncertain real register owner must stay retained"
-                );
-            }
+            #[expect(
+                clippy::drop_non_drop,
+                reason = "exercise opaque refusal abandonment with original provider Drop witnesses"
+            )]
+            drop(failure);
+            assert_eq!(drops.get(), 0, "every refused provider remains retained");
             assert_eq!(
                 h.borrow().calls,
                 call,
@@ -558,9 +583,11 @@ fn ignored_program_and_retirement_writes_do_not_release_owners() {
     for offset in [RESET, REMAP_LOW, REMAP_HIGH] {
         let (registers, h, drops) = model(0x9d60, 0x1_2345_0000, 0);
         h.borrow_mut().reject = Some(offset);
-        let (error, returned) = Controller::initialize(registers).err().unwrap();
-        assert!(matches!(error, Error::Register { offset: actual, .. } if actual == offset));
-        assert!(returned.is_none());
+        let failure = Controller::initialize(registers).err().unwrap();
+        assert!(
+            matches!(failure.error, Error::Register { offset: actual, .. } if actual == offset)
+        );
+        assert!(failure.owner.registers.is_some());
         assert_eq!(drops.get(), 0);
     }
     let (registers, h, drops) = model(0x9d60, 0x1_2345_0000, 0);
@@ -620,6 +647,10 @@ fn real_child_init_shutdown_and_live_drop_failures_keep_platform_grants() {
                 h.borrow_mut().stuck_disable = true;
                 assert!(bus.shutdown().is_err());
             } else {
+                #[expect(
+                    clippy::drop_non_drop,
+                    reason = "exercise live child abandonment with the original provider Drop witness"
+                )]
                 drop(bus);
             }
         }
@@ -716,12 +747,16 @@ fn unchanged_source_reset_remap_effects() {
             // SAFETY: pure source model, no child/IRQ/DMA publication.
             drop(unsafe { owner.retire() }.unwrap().registers);
         } else {
-            let (error, returned) = Controller::initialize(registers).err().unwrap();
-            assert_eq!(error, Error::Unsupported);
+            let failure = Controller::initialize(registers).err().unwrap();
+            assert_eq!(failure.error, Error::Unsupported);
             assert!(h.borrow().writes.is_empty());
-            drop(returned);
+            #[expect(
+                clippy::drop_non_drop,
+                reason = "exercise opaque refusal abandonment with original provider Drop witnesses"
+            )]
+            drop(failure);
         }
-        assert_eq!(drops.get(), 1);
+        assert_eq!(drops.get(), usize::from(type_field == 0));
         cases += 1;
     }
     assert_eq!(cases, 6144);

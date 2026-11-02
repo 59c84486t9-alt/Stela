@@ -12,10 +12,11 @@ use super::{
     pci::{ConfigSpace, Function, owned::OwnedConfig, requester::StoppedRequester},
 };
 use crate::bus::pci::regs;
+use core::mem::ManuallyDrop;
 
 mod child;
 pub mod spi;
-pub use child::{AttachError, AttachFailure, I2c, Retired};
+pub use child::{AttachError, AttachFailure, AttachStage, I2c, I2cFailure, Retired};
 
 const PRIVATE: usize = 0x200;
 const WINDOW_BYTES: usize = 0x300;
@@ -33,6 +34,7 @@ pub enum Error {
     Unsupported,
     Identity,
     Mapping,
+    Mmio(super::mmio::owned::Error),
     Configuration,
     Register {
         offset: usize,
@@ -159,15 +161,15 @@ pub unsafe trait Registers: 'static {
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), Error>;
 }
 
-/// Conventional, infallible child MMIO under the mapping.
+/// Fallible child MMIO under the same retained mapping.
 /// # Safety
 /// The full 0x200-byte child aperture has stable ordered native DWORD access.
 /// Offsets are the DesignWare register definitions. Hardware fault values
 /// remain observable; no invented success or temporary pointer is permitted.
 /// The same provider keeps power/clock/root grants if quarantined.
 pub unsafe trait ChildAccess: Registers {
-    fn child_read32(&mut self, offset: usize) -> u32;
-    fn child_write32(&mut self, offset: usize, value: u32);
+    fn child_read32(&mut self, offset: usize) -> Result<u32, Error>;
+    fn child_write32(&mut self, offset: usize, value: u32) -> Result<(), Error>;
 }
 
 pub type NativeResources = (Function<OwnedConfig>, Mapping);
@@ -192,10 +194,12 @@ impl NativeRegisters {
         reason = "claim refusal returns the same config and mapping instead of allocating after failure"
     )]
     pub unsafe fn claim(
-        mut requester: StoppedRequester,
+        requester: StoppedRequester,
         mapping: Mapping,
     ) -> Result<Self, (Error, NativeResources)> {
-        let stopped = requester.check_stopped();
+        let mut inputs = ManuallyDrop::new((requester, mapping));
+        let stopped = inputs.0.check_stopped();
+        let (requester, mapping) = ManuallyDrop::into_inner(inputs);
         let mut function = requester.into_function();
         let checked = (|| {
             stopped.map_err(Error::Claim)?;
@@ -285,12 +289,12 @@ unsafe impl Registers for NativeRegisters {
     fn read32(&mut self, offset: usize) -> Result<u32, Error> {
         self.mapping
             .read32(Self::register(offset)?)
-            .map_err(|_| Error::Mapping)
+            .map_err(Error::Mmio)
     }
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), Error> {
         self.mapping
             .write32(Self::register(offset)?, value)
-            .map_err(|_| Error::Mapping)
+            .map_err(Error::Mmio)
     }
 }
 
@@ -303,29 +307,47 @@ enum Phase {
 }
 pub struct Controller<R: Registers> {
     registers: Option<R>,
-    profile: Profile,
+    profile: Option<Profile>,
     phase: Phase,
 }
+/// Every initialization or retirement refusal retains its original provider.
+pub struct ControllerFailure<R: Registers> {
+    pub error: Error,
+    owner: ManuallyDrop<Controller<R>>,
+}
+impl<R: Registers> ControllerFailure<R> {
+    pub fn profile(&self) -> Option<Profile> {
+        self.owner.profile
+    }
+}
+impl<R: Registers> core::fmt::Debug for ControllerFailure<R> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ControllerFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
 impl<R: Registers> Controller<R> {
-    /// Consume permission. Rejected metadata returns an unmodified owner;
-    /// errors after the first reset write keep all resources on Drop.
-    pub fn initialize(mut registers: R) -> Result<Self, (Error, Option<R>)> {
-        let profile = match registers.identity().and_then(Profile::select) {
-            Ok(profile) => profile,
-            Err(error) => return Err((error, Some(registers))),
-        };
-        let mut owner = Self {
+    /// Park the same provider before metadata callbacks, reset and remap.
+    pub fn initialize(registers: R) -> Result<Self, ControllerFailure<R>> {
+        let mut owner = ManuallyDrop::new(Self {
             registers: Some(registers),
-            profile,
+            profile: None,
             phase: Phase::Unmodified,
-        };
-        match owner.program() {
-            Ok(()) => Ok(owner),
-            Err(error) if owner.phase == Phase::Unmodified => Err((error, owner.registers.take())),
-            Err(error) => {
-                drop(owner);
-                Err((error, None))
-            }
+        });
+        let result = (|| {
+            let profile = owner
+                .registers
+                .as_mut()
+                .unwrap()
+                .identity()
+                .and_then(Profile::select)?;
+            owner.profile = Some(profile);
+            owner.program()
+        })();
+        match result {
+            Ok(()) => Ok(ManuallyDrop::into_inner(owner)),
+            Err(error) => Err(ControllerFailure { error, owner }),
         }
     }
     fn program(&mut self) -> Result<(), Error> {
@@ -376,16 +398,21 @@ impl<R: Registers> Controller<R> {
     /// The child has acknowledged disable, or no child has ever been
     /// published. No child register/IRQ/work users remain. This is not a DMA or
     /// external SDA/SCL recovery primitive; this PIO owner never enabled DMA.
-    unsafe fn retire(mut self) -> Result<Retired<R>, Error> {
-        self.phase = Phase::Programming;
-        self.write_verified(RESET, 0)?;
-        self.phase = Phase::Retired;
-        Ok(Retired {
-            registers: self.registers.take().unwrap(),
-        })
+    unsafe fn retire(self) -> Result<Retired<R>, ControllerFailure<R>> {
+        let mut owner = ManuallyDrop::new(self);
+        owner.phase = Phase::Programming;
+        match owner.write_verified(RESET, 0) {
+            Err(error) => Err(ControllerFailure { error, owner }),
+            Ok(()) => {
+                owner.phase = Phase::Retired;
+                Ok(Retired {
+                    registers: owner.registers.take().unwrap(),
+                })
+            }
+        }
     }
     pub fn profile(&self) -> Profile {
-        self.profile
+        self.profile.unwrap()
     }
 }
 impl<R: Registers> Drop for Controller<R> {
@@ -401,14 +428,17 @@ impl<R: Registers> Drop for Controller<R> {
 // SAFETY: NativeRegisters keeps the complete UC aperture and original
 // function/root epoch. DesignWare offsets are bounded below private registers.
 unsafe impl ChildAccess for NativeRegisters {
-    fn child_read32(&mut self, offset: usize) -> u32 {
-        assert!(offset < PRIVATE);
-        self.read32(offset).expect("validated retained child DWORD")
+    fn child_read32(&mut self, offset: usize) -> Result<u32, Error> {
+        if offset >= PRIVATE {
+            return Err(Error::Mapping);
+        }
+        self.read32(offset)
     }
-    fn child_write32(&mut self, offset: usize, value: u32) {
-        assert!(offset < PRIVATE);
+    fn child_write32(&mut self, offset: usize, value: u32) -> Result<(), Error> {
+        if offset >= PRIVATE {
+            return Err(Error::Mapping);
+        }
         self.write32(offset, value)
-            .expect("validated retained child DWORD");
     }
 }
 

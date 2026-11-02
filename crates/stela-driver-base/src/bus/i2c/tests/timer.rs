@@ -14,10 +14,10 @@ impl Drop for NoIo {
     }
 }
 impl Registers for NoIo {
-    fn read32(&mut self, _: usize) -> u32 {
+    fn read32(&mut self, _: usize) -> Result<u32, IoError> {
         panic!("register read before timing admission")
     }
-    fn write32(&mut self, _: usize, _: u32) {
+    fn write32(&mut self, _: usize, _: u32) -> Result<(), IoError> {
         panic!("register write before timing admission")
     }
 }
@@ -138,10 +138,18 @@ fn unusable_clocks_refuse_before_io() {
             recovery_timeout_us: 100,
         };
         assert_eq!(
-            DesignWare::new(r, clock(rate), config).err().unwrap().kind,
+            DesignWare::new(r, clock(rate), config)
+                .err()
+                .unwrap()
+                .error
+                .kind,
             ErrorKind::InvalidConfiguration
         );
-        assert_eq!(d.get(), 1);
+        assert_eq!(
+            d.get(),
+            0,
+            "the owning refusal retains the original provider"
+        );
         let (r, d) = no_io();
         let info = smbus::i801::ControllerInfo::from_pci_id(0x8086, 0x7e22).unwrap();
         let config = smbus::i801::Config {

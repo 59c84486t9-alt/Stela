@@ -22,7 +22,10 @@ pub mod amd_mp2;
 mod designware;
 pub mod timing;
 
-pub use designware::{Config, DesignWare, MmioRegisters, Registers, Speed, Timing};
+pub use designware::{
+    Access, AccessResult, Config, DesignWare, Failure, MmioRegisters, Progress, Registers, Speed,
+    Timing,
+};
 
 /// One unshifted I²C target address; the controller supplies the direction bit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,7 +162,16 @@ pub enum AbortKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IoError {
+    Mmio(super::mmio::owned::Error),
+    Lpss(super::lpss::Error),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
+    Access(IoError),
+    Interrupted,
+    ProgressExhausted,
     InvalidAddress,
     EmptyTransaction,
     EmptyMessage,
@@ -190,6 +202,9 @@ pub enum ErrorKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Recovery {
     NotAttempted,
+    Interrupted,
+    ProgressExhausted,
+    Access(IoError),
     /// The controller acknowledged disable and its FIFO/interrupt state was
     /// cleared. This does not assert that external SDA/SCL lines are unstuck.
     Disabled,
