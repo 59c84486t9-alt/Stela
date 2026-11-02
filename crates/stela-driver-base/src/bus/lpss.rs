@@ -9,7 +9,7 @@
 //! initialization with the shared DesignWare PIO engine and held-D0 lifetime.
 use super::{
     mmio::owned::{CacheAttribute, Mapping, Protection},
-    pci::{ConfigSpace, Function, owned::OwnedConfig, requester::StoppedRequester},
+    pci::{Function, owned::OwnedConfig, requester::StoppedRequester},
 };
 use crate::bus::pci::regs;
 use core::mem::ManuallyDrop;
@@ -34,6 +34,8 @@ pub enum Error {
     Mapping,
     Mmio(super::mmio::owned::Error),
     Configuration,
+    Claim(crate::bus::pci::requester::ClaimError),
+    Config(crate::bus::pci::owned::ConfigError),
     Register {
         offset: usize,
         expected: u32,
@@ -192,40 +194,41 @@ impl NativeRegisters {
         mapping: Mapping,
     ) -> Result<Self, (Error, NativeResources)> {
         let mut inputs = ManuallyDrop::new((requester, mapping));
-        let stopped = inputs.0.check_stopped().is_ok();
+        let stopped = inputs.0.check_stopped();
         let (requester, mapping) = ManuallyDrop::into_inner(inputs);
-        let mut function = requester.into_function();
+        let mut resources = ManuallyDrop::new((requester.into_function(), mapping));
         let checked = (|| {
-            if !stopped {
-                return Err(Error::Configuration);
-            }
+            stopped.map_err(Error::Claim)?;
+            let (function, mapping) = &mut *resources;
             let config = function.config();
-            let low = config.read32(0x10);
+            let low = config.try_read32(0x10)?;
             if low == u32::MAX || low & 9 != 0 || !matches!(low & 6, 0 | 4) {
                 return Err(Error::Mapping);
             }
-            let high = if low & 6 == 4 { config.read32(0x14) } else { 0 };
+            let high = if low & 6 == 4 {
+                config.try_read32(0x14)?
+            } else {
+                0
+            };
             if high == u32::MAX {
                 return Err(Error::Mapping);
             }
             let base = u64::from(high) << 32 | u64::from(low & !15);
-            let span = mapping.physical_span().map_err(|_| Error::Mapping)?;
+            let span = mapping.physical_span().map_err(Error::Mmio)?;
             if base == 0
                 || span.start() != base
                 || span.bytes() < WINDOW_BYTES as u64
-                || mapping.attribute().map_err(|_| Error::Mapping)? != CacheAttribute::Uncached
-                || mapping.protection().map_err(|_| Error::Mapping)? != Protection::ReadWrite
+                || mapping.attribute().map_err(Error::Mmio)? != CacheAttribute::Uncached
+                || mapping.protection().map_err(Error::Mmio)? != Protection::ReadWrite
             {
                 return Err(Error::Mapping);
             }
-            let pointer = mapping
-                .address(0, WINDOW_BYTES)
-                .map_err(|_| Error::Mapping)?;
+            let pointer = mapping.address(0, WINDOW_BYTES).map_err(Error::Mmio)?;
             if !(pointer.as_ptr() as usize).is_multiple_of(4) {
                 return Err(Error::Mapping);
             }
             // Keep the source's memory decode, with no DMA or interrupt publish.
-            let command = config.read16(regs::COMMAND);
+            let command = config.try_read16(regs::COMMAND)?;
             if command == u16::MAX
                 || command
                     & (regs::COMMAND_MASTER | regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE)
@@ -236,12 +239,15 @@ impl NativeRegisters {
             Ok(base)
         })();
         match checked {
-            Ok(base) => Ok(Self {
-                function,
-                mapping,
-                base,
-            }),
-            Err(error) => Err((error, (function, mapping))),
+            Ok(base) => {
+                let (function, mapping) = ManuallyDrop::into_inner(resources);
+                Ok(Self {
+                    function,
+                    mapping,
+                    base,
+                })
+            }
+            Err(error) => Err((error, ManuallyDrop::into_inner(resources))),
         }
     }
     /// `offset` as a register of the window.
@@ -261,10 +267,10 @@ unsafe impl Registers for NativeRegisters {
     fn identity(&mut self) -> Result<Identity, Error> {
         let expected = u32::from(self.function.vendor) | u32::from(self.function.device) << 16;
         let config = self.function.config();
-        if config.read32(0) != expected {
+        if config.try_read32(0)? != expected {
             return Err(Error::Identity);
         }
-        let subsystem = config.read32(0x2c);
+        let subsystem = config.try_read32(0x2c)?;
         if subsystem == u32::MAX {
             return Err(Error::Identity);
         }
@@ -435,4 +441,10 @@ unsafe impl ChildAccess for NativeRegisters {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
+
+impl From<crate::bus::pci::owned::ConfigError> for Error {
+    fn from(error: crate::bus::pci::owned::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}

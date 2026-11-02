@@ -29,10 +29,12 @@ pub const ADDRESS: Address = Address {
 pub struct Counters {
     pub maps: AtomicUsize,
     pub unmaps: AtomicUsize,
+    pub fail_unmap_after_effect: AtomicUsize,
     pub resource_drops: AtomicUsize,
     pub platform_drops: AtomicUsize,
     pub contexts: AtomicUsize,
     pub fail_context_at: AtomicUsize,
+    pub panic_context_at: AtomicUsize,
     pub fail_after_word: AtomicUsize,
     pub fail_after_value: AtomicUsize,
 }
@@ -92,6 +94,11 @@ unsafe impl MappingPlatform for Model {
     fn check_context(&self, space: AddressSpace) -> Result<(), MappingError> {
         assert_eq!(space, SPACE);
         let call = self.counters.contexts.fetch_add(1, Ordering::Relaxed) + 1;
+        assert_ne!(
+            self.counters.panic_context_at.load(Ordering::Relaxed),
+            call,
+            "mapping context callback interrupted"
+        );
         if self.counters.fail_context_at.load(Ordering::Relaxed) == call {
             return Err(MappingError::Unavailable);
         }
@@ -147,6 +154,14 @@ unsafe impl MappingPlatform for Model {
         assert_eq!(mapping.token, request.id);
         assert_eq!(mapping.cpu_base, self.pointer());
         self.counters.unmaps.fetch_add(1, Ordering::Relaxed);
+        if self
+            .counters
+            .fail_unmap_after_effect
+            .load(Ordering::Relaxed)
+            != 0
+        {
+            return Err(MappingError::UnmapFailed);
+        }
         Ok(())
     }
 }
