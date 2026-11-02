@@ -991,6 +991,7 @@ dependencies = [
  "stela-compiler",
  "stela-contracts",
  "stela-crypto",
+ "stela-driver-base",
  "stela-drivers",
  "stela-engine",
  "stela-formats",
