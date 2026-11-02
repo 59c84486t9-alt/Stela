@@ -1303,7 +1303,7 @@ pub unsafe fn probe_with_provider(
                 continue;
             } else if input::virtio::matches(&function) {
                 match VirtioInput::new(&mut function, handoff, dma) {
-                    Ok(device) => devices.inputs.push(InputDevice::Virtio(device)),
+                    Ok(device) => devices.inputs.push(InputDevice::Virtio(Box::new(device))),
                     Err(error) => devices.failures.push((address, error.into())),
                 }
                 continue;
