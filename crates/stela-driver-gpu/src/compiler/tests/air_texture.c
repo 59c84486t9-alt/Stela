@@ -70,6 +70,62 @@ static const char *sparse_body =
    "store i32 %wide, ptr addrspace(1) %out, align 4\n"
    "ret void\n}\n";
 
+/* kernel_body sampling and sizing the null texture a constant chose. */
+static const char *null_body =
+   "declare ptr addrspace(1) @air.get_null_texture_2d()\n"
+   "define void @kernel(i32 %tid, ptr addrspace(1) %src, ptr addrspace(2) %smp,"
+   " ptr addrspace(1) %dst, ptr addrspace(1) %layers, ptr addrspace(1) %out) {\n"
+   "%none = call ptr addrspace(1) @air.get_null_texture_2d()\n"
+   "%s = call { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) %none,"
+   " ptr addrspace(2) %smp, <2 x float> <float 0.5, float 0.25>, i1 true, <2 x i32> <i32 1, i32 -1>,"
+   " i1 true, float 2.0, float 0.0, i32 0)\n"
+   "%t = extractvalue { <4 x float>, i8 } %s, 0\n"
+   "call void @air.write_texture_2d.v4f32(ptr addrspace(1) %dst, <2 x i32> <i32 3, i32 4>,"
+   " <4 x float> %t, i32 0, i32 2)\n"
+   "%w = call i32 @air.get_width_texture_2d(ptr addrspace(1) %none, i32 1)\n"
+   "store i32 %w, ptr addrspace(1) %out, align 4\n"
+   "ret void\n}\n";
+
+/* kernel_body joining two samples, of which it reads only the texels. */
+static const char *joined_body =
+   "define void @kernel(i32 %tid, ptr addrspace(1) %src, ptr addrspace(2) %smp,"
+   " ptr addrspace(1) %dst, ptr addrspace(1) %layers, ptr addrspace(1) %out) {\n"
+   "%first = icmp eq i32 %tid, 0\n"
+   "br i1 %first, label %a, label %b\n"
+   "a:\n"
+   "%x = call { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) %src,"
+   " ptr addrspace(2) %smp, <2 x float> <float 0.5, float 0.25>, i1 true, <2 x i32> <i32 1, i32 -1>,"
+   " i1 true, float 2.0, float 0.0, i32 0)\n"
+   "br label %join\n"
+   "b:\n"
+   "%y = call { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) %src,"
+   " ptr addrspace(2) %smp, <2 x float> <float 0.25, float 0.5>, i1 true, <2 x i32> <i32 1, i32 -1>,"
+   " i1 true, float 2.0, float 0.0, i32 0)\n"
+   "br label %join\n"
+   "join:\n"
+   "%s = phi { <4 x float>, i8 } [ %x, %a ], [ %y, %b ]\n"
+   "%t = extractvalue { <4 x float>, i8 } %s, 0\n"
+   "call void @air.write_texture_2d.v4f32(ptr addrspace(1) %dst, <2 x i32> <i32 3, i32 4>,"
+   " <4 x float> %t, i32 0, i32 2)\n"
+   "store i32 0, ptr addrspace(1) %out, align 4\n"
+   "ret void\n}\n";
+
+/* kernel_body reading and writing with 16 bit positions and levels. */
+static const char *short_body =
+   "declare { <4 x float>, i8 } @air.read_texture_2d.i16.v4f32(ptr addrspace(1), <2 x i16>, i16,"
+   " i32)\n"
+   "declare void @air.write_texture_2d.i16.v4f32(ptr addrspace(1), <2 x i16>, <4 x float>, i16,"
+   " i32)\n"
+   "define void @kernel(i32 %tid, ptr addrspace(1) %src, ptr addrspace(2) %smp,"
+   " ptr addrspace(1) %dst, ptr addrspace(1) %layers, ptr addrspace(1) %out) {\n"
+   "%r = call { <4 x float>, i8 } @air.read_texture_2d.i16.v4f32(ptr addrspace(1) %src,"
+   " <2 x i16> <i16 5, i16 6>, i16 0, i32 0)\n"
+   "%t = extractvalue { <4 x float>, i8 } %r, 0\n"
+   "call void @air.write_texture_2d.i16.v4f32(ptr addrspace(1) %dst, <2 x i16> <i16 3, i16 4>,"
+   " <4 x float> %t, i16 0, i32 2)\n"
+   "store i32 0, ptr addrspace(1) %out, align 4\n"
+   "ret void\n}\n";
+
 static const char *kernel_metadata =
    "!air.kernel = !{!2}\n"
    "!air.version = !{!20}\n!air.language_version = !{!21}\n"
@@ -615,6 +671,50 @@ sparse_texels_report_their_residency(void)
    ralloc_free(shader);
 }
 
+/* A null texture has no descriptor to bind, and reads zero. */
+static void
+null_textures_bind_nothing(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = kernel(null_body, kernel_metadata, &error);
+   if (!shader)
+      fprintf(stderr, "null: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_validate_shader(shader, "null texture kernel");
+   assert(!count(shader).first[nir_texop_txl]);
+   ralloc_free(shader);
+}
+
+/* Two samples join through a PHI of their results, without their residency. */
+static void
+samples_join_through_phis(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = kernel(joined_body, kernel_metadata, &error);
+   if (!shader)
+      fprintf(stderr, "joined: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_validate_shader(shader, "joined samples kernel");
+   nir_tex_instr *sample = count(shader).first[nir_texop_txl];
+   assert(sample && !sample->is_sparse && sample->def.num_components == 4);
+   ralloc_free(shader);
+}
+
+/* 16 bit positions and levels widen to the 32 bits every image op takes. */
+static void
+short_indices_widen_their_positions(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = kernel(short_body, kernel_metadata, &error);
+   if (!shader)
+      fprintf(stderr, "short: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_validate_shader(shader, "short index kernel");
+   struct census census = count(shader);
+   assert(census.first[nir_texop_txf] || census.load);
+   ralloc_free(shader);
+}
+
 static void
 unsupported_texture_uses_are_refused(void)
 {
@@ -902,6 +1002,9 @@ main(void)
    fragments_sample_with_derivatives_compare_and_gather();
    storage_levels_select_their_descriptor();
    sparse_texels_report_their_residency();
+   null_textures_bind_nothing();
+   samples_join_through_phis();
+   short_indices_widen_their_positions();
    array_arguments_bind_their_elements();
    constexpr_samplers_bind_their_samplers();
    cube_reads_fetch_their_faces();
@@ -912,6 +1015,6 @@ main(void)
    glsl_type_singleton_decref();
    puts("AIR textures: sample/level/offset, write, read_write array read, size queries, "
         "implicit-derivative fragment sampling, depth compare, gather, storage levels, arrays, atomics, "
-        "constexpr samplers, cube reads and refusals passed");
+        "constexpr samplers, cube reads, null textures, joined samples and refusals passed");
    return 0;
 }

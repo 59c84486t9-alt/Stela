@@ -640,6 +640,13 @@ static StelaRegionRecord region_record(NSUInteger slice, NSUInteger level, MTLOr
 	ENTRY(StelaComputeCodeMemoryBarrier, command);
 }
 
+- (void)barrierAfterQueueStages:(NSUInteger)after beforeStages:(NSUInteger)before
+{
+	(void)after;
+	(void)before;
+	[self memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
+}
+
 /* A barrier on all the kinds of resources is the wider one the hardware has. */
 - (void)memoryBarrierWithResources:(const id __unsafe_unretained[])resources count:(NSUInteger)count
 {

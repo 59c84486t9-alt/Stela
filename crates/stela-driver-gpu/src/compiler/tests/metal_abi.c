@@ -39,8 +39,9 @@ static void buffers_load_their_table_slot(void)
    nir_intrinsic_instr *table = offset_from(load->src[0].ssa,
                                             STELA_METAL_TABLE_BUFFER_ADDRESSES + 5 * 8,
                                             nir_intrinsic_load_push_constant);
-   assert(nir_intrinsic_base(table) == STELA_METAL_PUSH_TABLES + 8);
-   assert(nir_intrinsic_range(table) == 8 && table->def.bit_size == 64);
+   assert(nir_src_as_uint(table->src[0]) == STELA_METAL_PUSH_TABLES + 8);
+   assert(!nir_intrinsic_base(table) && nir_intrinsic_range(table) == STELA_METAL_PUSH_BYTES &&
+          table->def.bit_size == 64);
 
    const struct stela_air_buffer past = {.index = STELA_METAL_BUFFERS};
    assert(!stela_metal_bind_buffer(&b, &past, (void *)&stage));
@@ -240,7 +241,7 @@ static struct census count(nir_shader *shader)
             switch (intrinsic->intrinsic) {
             case nir_intrinsic_load_push_constant:
                census.push_constants++;
-               census.push_base = (unsigned)nir_intrinsic_base(intrinsic);
+               census.push_base = (unsigned)nir_src_as_uint(intrinsic->src[0]);
                break;
             case nir_intrinsic_load_global:
                census.loads++;

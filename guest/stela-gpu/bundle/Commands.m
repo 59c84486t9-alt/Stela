@@ -274,6 +274,18 @@ static CFTimeInterval host_time(void)
 	}
 	_status = failure ? MTLCommandBufferStatusError : MTLCommandBufferStatusCompleted;
 	[_logState commandBufferEnded];
+	dispatch_queue_t queue = (__bridge dispatch_queue_t)_queue.completionQueue;
+	if (queue) {
+		dispatch_async(queue, ^{
+			[self finishCompletion];
+		});
+	} else {
+		[self finishCompletion];
+	}
+}
+
+- (void)finishCompletion
+{
 	for (NSUInteger i = 0; i < _completedHandlers.count; i++) {
 		((void (^)(id))[_completedHandlers objectAtIndex:i])(self);
 	}
@@ -506,7 +518,11 @@ static void pass_attachment(id attachment, StelaPassAttachmentRecord *record)
 	begin.rasterization_rate_map = [descriptor rasterizationRateMap] != nil;
 
 	MTLSamplePosition positions[16];
-	begin.sample_position_count = (uint32_t)[descriptor getSamplePositions:positions count:16];
+	/* Metal validates a count it is given, so it answers how many first. */
+	begin.sample_position_count = (uint32_t)[descriptor getSamplePositions:NULL count:0];
+	if (begin.sample_position_count) {
+		[descriptor getSamplePositions:positions count:begin.sample_position_count];
+	}
 	StelaCounterSampleRecord samples[4 * 4];
 	NSUInteger sample_count = 0;
 	id attachments = [descriptor sampleBufferAttachments];

@@ -19,6 +19,8 @@ mod policy;
 mod publication;
 
 pub const MANIFEST: &str = "gpu-install.json";
+/// The sealed payload as a guest disk, which maintenance reads with `tar`.
+pub const MEDIUM: &str = "gpu-install.tar";
 pub const KEXT: &str = "StelaGPU.kext";
 pub const PLUGIN: &str = "StelaGPU.bundle";
 pub const BUNDLE_PATH: &str = "/Library/Extensions/StelaGPU.kext";
@@ -129,8 +131,27 @@ impl Payload {
             files,
         };
         payload.kext_uuid = hex::encode(payload.source_uuid(root)?);
-        fs::write(root.join(MANIFEST), serde_json::to_vec_pretty(&payload)?)?;
+        let manifest = serde_json::to_vec_pretty(&payload)?;
+        fs::write(root.join(MANIFEST), &manifest)?;
+        fs::write(root.join(MEDIUM), payload.medium(root, &manifest)?)?;
         Ok(())
+    }
+
+    /// A bare ustar stream of the manifest, then every file: single-user
+    /// macOS mounts no removable filesystem, but its `tar` reads a disk.
+    /// The manifest comes first so maintenance can recognize the disk.
+    fn medium(&self, root: &Path, manifest: &[u8]) -> Result<Vec<u8>> {
+        let mut stream = Vec::new();
+        append_ustar(&mut stream, MANIFEST, manifest)?;
+        for path in self.files.keys() {
+            append_ustar(&mut stream, path, &fs::read(root.join(path))?)?;
+        }
+        // Two zero blocks end the archive; whole mebibytes make it a disk.
+        stream.resize(
+            (stream.len() + 2 * USTAR_BLOCK).next_multiple_of(1 << 20),
+            0,
+        );
+        Ok(stream)
     }
 
     pub fn load(root: &Path) -> Result<Self> {
@@ -195,6 +216,34 @@ impl Payload {
         }
         .uuid())
     }
+}
+
+const USTAR_BLOCK: usize = 512;
+
+/// One regular file, owned by root, with no timestamp so builds reproduce.
+fn append_ustar(stream: &mut Vec<u8>, path: &str, data: &[u8]) -> Result<()> {
+    ensure!(path.len() < 100, "GPU payload path is too long: {path}");
+    let mut header = [0; USTAR_BLOCK];
+    let size = format!("{:011o}", data.len());
+    for (at, field) in [
+        (0, path.as_bytes()),
+        (100, b"0000644"),
+        (108, b"0000000"),
+        (116, b"0000000"),
+        (124, size.as_bytes()),
+        (136, b"00000000000"),
+        (148, b"        "),
+        (156, b"0"),
+        (257, b"ustar\x0000"),
+    ] {
+        header[at..at + field.len()].copy_from_slice(field);
+    }
+    let sum: u32 = header.iter().map(|&byte| u32::from(byte)).sum();
+    header[148..155].copy_from_slice(format!("{sum:06o}\0").as_bytes());
+    stream.extend_from_slice(&header);
+    stream.extend_from_slice(data);
+    stream.resize(stream.len().next_multiple_of(USTAR_BLOCK), 0);
+    Ok(())
 }
 
 fn safe_relative(path: &str) -> bool {
@@ -285,6 +334,43 @@ mod tests {
             Gpu::try_parse_from(["stela-gpu-maintenance", "install", "--payload", "guest"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn medium_opens_with_the_manifest_and_is_a_whole_disk() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        for directory in [KEXT, PLUGIN] {
+            fs::create_dir(root.path().join(directory))?;
+        }
+        fs::write(root.path().join(KEXT).join("unit.o"), b"object")?;
+        let payload = Payload {
+            format: 1,
+            kext_uuid: String::new(),
+            files: inventory(root.path())?,
+        };
+        let stream = payload.medium(root.path(), b"{}")?;
+        assert_eq!(stream.len(), 1 << 20);
+        assert_eq!(&stream[..MANIFEST.len() + 1], b"gpu-install.json\0");
+        assert_eq!(&stream[USTAR_BLOCK..USTAR_BLOCK + 2], b"{}");
+        let file = &stream[2 * USTAR_BLOCK..];
+        assert!(file.starts_with(b"StelaGPU.kext/unit.o\0"));
+        assert_eq!(&file[124..135], b"00000000006");
+        assert_eq!(&file[257..265], b"ustar\x0000");
+        assert_eq!(&file[USTAR_BLOCK..USTAR_BLOCK + 6], b"object");
+
+        let recorded = u32::from_str_radix(str::from_utf8(&file[148..154])?, 8)?;
+        let blanked = file[..USTAR_BLOCK].iter().enumerate();
+        let sum: u32 = blanked
+            .map(|(at, &byte)| match at {
+                148..156 => u32::from(b' '),
+                _ => u32::from(byte),
+            })
+            .sum();
+        assert_eq!(recorded, sum);
+
+        let mut stream = Vec::new();
+        assert!(append_ustar(&mut stream, &"a".repeat(100), b"").is_err());
+        Ok(())
     }
 
     #[test]

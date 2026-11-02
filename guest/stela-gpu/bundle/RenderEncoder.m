@@ -164,6 +164,19 @@ STAGE_BINDINGS(Mesh, MTLRenderStageMesh)
 	ENTRY(StelaRenderCodeSetVertexBufferStride, command);
 }
 
+- (void)setVertexBuffers:(const id __unsafe_unretained[])buffers
+		 offsets:(const NSUInteger[])offsets
+	attributeStrides:(const NSUInteger[])strides
+	       withRange:(NSRange)range
+{
+	for (NSUInteger i = 0; i < range.length; i++) {
+		[self setVertexBuffer:buffers[i]
+				 offset:offsets[i]
+			attributeStride:strides[i]
+				atIndex:range.location + i];
+	}
+}
+
 - (void)setRenderPipelineState:(StelaGPURenderPipeline *)pipeline
 {
 	[_commands use:pipeline];
@@ -324,6 +337,18 @@ STAGE_BINDINGS(Mesh, MTLRenderStageMesh)
 	[self memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures | MTLBarrierScopeRenderTargets
 			 afterStages:after
 			beforeStages:before];
+}
+
+/* The render stages keep their bits among `MTLStages`; earlier work's stages are all vertex or later. */
+- (void)barrierAfterQueueStages:(NSUInteger)after beforeStages:(NSUInteger)before
+{
+	const NSUInteger render = MTLRenderStageVertex | MTLRenderStageFragment | MTLRenderStageTile
+				  | MTLRenderStageObject | MTLRenderStageMesh;
+	NSUInteger first = after & render ?: MTLRenderStageVertex | MTLRenderStageFragment;
+	NSUInteger second = before & render ?: MTLRenderStageVertex | MTLRenderStageFragment;
+	[self memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures | MTLBarrierScopeRenderTargets
+			 afterStages:first
+			beforeStages:second];
 }
 
 - (void)textureBarrier

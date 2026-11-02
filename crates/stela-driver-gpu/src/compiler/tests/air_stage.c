@@ -622,7 +622,7 @@ aggregate_phi_semantics(void)
       "float -0.0,float poison,float 0.0,float 4.0");
    raw = bitcode(bad); free(bad); free(text);
    ralloc_free(translate(raw, "test_vertex", &o)); LLVMDisposeMemoryBuffer(raw);
-   const char *unsupported[] = {"{<4 x float>,<4 x float>}", "<{double,<4 x float>}>", "<{<{float}>,<4 x float>}>"};
+   const char *unsupported[] = {"<{double,<4 x float>}>", "<{<{float}>,<4 x float>}>"};
    for (unsigned i = 0; i < ARRAY_SIZE(unsupported); i++) {
       char body[1024];
       snprintf(body, sizeof(body), "{\nentry:\n %%take = icmp eq i32 %%id, 0\n br i1 %%take, label %%a, label %%b\n"

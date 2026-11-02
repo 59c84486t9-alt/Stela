@@ -21,4 +21,10 @@ bool stela_air_construct_constants(struct stela_air_metadata *m);
  * entry with its callees inlined: the loads of constant data, the branches
  * they decide and the blocks those leave unreachable. */
 bool stela_air_fold_constants(struct stela_air_metadata *m, LLVMValueRef fn);
+
+/* Makes the buffers of count arguments their false function constants leave
+ * out null in fn, and removes the paths that must then access null, as Metal's
+ * compiler removes what an absent argument leaves undefined. */
+bool stela_air_fold_absent(struct stela_air_metadata *m, LLVMValueRef fn,
+                           const struct stela_air_argument *arguments, unsigned count);
 #endif

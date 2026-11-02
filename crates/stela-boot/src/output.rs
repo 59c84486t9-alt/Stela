@@ -25,7 +25,7 @@ use stela_runtime::pc::boot_log::{PENDING_BYTES, Pending, Unkept, Writer};
 /// `isa-debug-exit` under QEMU; an unused port on a PC.
 mod terminal;
 use terminal::EXIT_PORT;
-pub(crate) use terminal::panic;
+pub(crate) use terminal::{panic, print_stack_at};
 
 /// One engine-wide value. The mount runs on one processor and its handlers
 /// only print; every access is a `try_borrow`, so output that arrives while
@@ -647,7 +647,15 @@ pub fn terminate(code: u32) -> ! {
     arguments(format_args!(
         "STELA STOPPED code={code:#x}; power off to continue\n"
     ));
+    // Why it stopped is at the end of what is queued, and the log's USB disk
+    // may be what stopped.
+    while send_queued() {
+        core::hint::spin_loop();
+    }
     flush_log();
+    while send_queued() {
+        core::hint::spin_loop();
+    }
     halt(code)
 }
 

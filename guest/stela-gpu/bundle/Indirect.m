@@ -412,6 +412,11 @@
 
 @implementation StelaGPUDevice (Indirect)
 
+- (id)newIndirectCommandBufferWithDescriptor:(id)descriptor maxCount:(NSUInteger)count options:(NSUInteger)options
+{
+	return [self newIndirectCommandBufferWithDescriptor:descriptor maxCommandCount:count options:options];
+}
+
 - (id)newIndirectCommandBufferWithDescriptor:(id)descriptor
 			     maxCommandCount:(NSUInteger)count
 				     options:(NSUInteger)options

@@ -34,6 +34,7 @@ pub const UPDATE_RESTORE: &str = mount_interface::UPDATE_RESTORE_OPTION;
 pub const EXTERNAL_DISKS: &str = "--external-disks";
 pub const NATIVE_CORES: &str = "--native-cores";
 pub const GUEST_PES: &str = "--guest-pes";
+pub const MAINTENANCE_WRITE: &str = "--maintenance-write";
 pub const WIFI: &str = "--wifi";
 pub const WIFI_KEY: &str = "--wifi-key";
 pub const WIFI_COUNTRY: &str = "--wifi-country";
@@ -201,6 +202,8 @@ pub struct System {
     /// Build the boot bundle from the installed system on this APFS
     /// partition instead (`SERIAL:GUID`).
     pub preboot: Option<Target>,
+    /// Allow SIP-protected filesystem writes for this explicit maintenance boot.
+    pub maintenance_write: bool,
     /// The NVRAM boot volume the loader chose (`--boot-volume`), naming the
     /// Preboot disk's container and volume group.
     pub boot_volume: Option<BootVolume>,
@@ -355,6 +358,7 @@ impl Default for System {
             preboot: None,
             boot_volume: None,
             safe_boot: false,
+            maintenance_write: false,
             boot_command: None,
             upgrade: false,
             recovery: None,
@@ -696,6 +700,7 @@ impl fmt::Display for System {
             self.boot_command.map(|command| command as u8),
         )?;
         line.flag(boot_selection::SAFE_BOOT_OPTION, self.safe_boot)?;
+        line.flag(MAINTENANCE_WRITE, self.maintenance_write)?;
         line.flag(boot_selection::UPGRADE_OPTION, self.upgrade)?;
         line.flag(
             boot_selection::PAIRED_RECOVERY_OPTION,

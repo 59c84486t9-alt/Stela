@@ -240,6 +240,9 @@ add_input(struct reflecting *r, const struct stela_air_stage_io *io)
    case STELA_AIR_BARYCENTRIC:
       out->barycentrics = 1;
       return true;
+   case STELA_AIR_ATTACHMENT:
+      out->attachment_reads |= 1u << io->location;
+      return true;
    case STELA_AIR_VERTEX_INPUT:
       return add_attribute(r, io->location, io->primitive, io->components, false, io->used,
                            io->name, io->name_bytes);
@@ -746,6 +749,7 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
       .max_constant_bytes = target->max_constant_bytes,
       .bind_texture = stela_metal_bind_texture,
       .bind_sampler = stela_metal_bind_sampler,
+      .bind_attachment = stela_metal_bind_attachment,
       .bind_texture_id = stela_metal_bind_texture_id,
       .bind_sampler_id = stela_metal_bind_sampler_id,
       .resource_id = stela_metal_resource_id,

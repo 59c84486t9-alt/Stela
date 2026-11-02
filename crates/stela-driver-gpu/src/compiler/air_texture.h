@@ -29,6 +29,10 @@ struct stela_air_texture_context {
  * reads take, which has no value of its own. */
 bool stela_air_read_sampler(LLVMValueRef value);
 
+/* Whether value is a call of air.get_null_texture_*, the texture a function
+ * uses in place of one its constants left out. */
+bool stela_air_null_texture(LLVMValueRef value);
+
 enum stela_air_texture_status {
    STELA_AIR_TEXTURE_OTHER, /* Not a texture function; nothing was emitted. */
    STELA_AIR_TEXTURE_LOWERED,

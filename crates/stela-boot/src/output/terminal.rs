@@ -15,6 +15,18 @@ static PRINTING: AtomicBool = AtomicBool::new(false);
 /// return addresses among them name the caller, as `stela.pdb` resolves them.
 /// A release build has no frame pointers to walk.
 fn print_stack() {
+    let stack: *const u64;
+    // SAFETY: reads the stack pointer.
+    unsafe { asm!("mov {}, rsp", out(reg) stack, options(nomem, nostack, preserves_flags)) };
+    // SAFETY: a panic runs far enough from its stack's end for these.
+    unsafe { print_stack_at(stack) };
+}
+
+/// [`print_stack`], from `stack`.
+///
+/// # Safety
+/// `stack` reads as 512 words.
+pub(crate) unsafe fn print_stack_at(stack: *const u64) {
     const WORDS: usize = 512;
     const SHOWN: usize = 32;
     unsafe extern "C" {
@@ -31,11 +43,8 @@ fn print_stack() {
                 .read_unaligned(),
         )
     };
-    let stack: *const u64;
-    // SAFETY: reads the stack pointer.
-    unsafe { asm!("mov {}, rsp", out(reg) stack, options(nomem, nostack, preserves_flags)) };
     let offsets = (0..WORDS)
-        // SAFETY: a panic runs far enough from its stack's end for these.
+        // SAFETY: the caller's.
         .map(|word| unsafe { stack.add(word).read() }.wrapping_sub(base))
         .filter(|&offset| offset < bytes)
         .take(SHOWN);

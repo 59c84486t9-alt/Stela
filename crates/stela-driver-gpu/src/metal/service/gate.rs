@@ -8,7 +8,7 @@ use super::{
     wire::{self, Fault, GateCall, Span, Status},
 };
 use crate::metal::{capabilities::block::Block, shader::Compiler, vulkan::backend::Backend};
-use alloc::{vec, vec::Vec};
+use alloc::{format, string::String, vec, vec::Vec};
 use core::num::NonZeroU64;
 use stela_contracts::gate::{CallerFault, CallerMemory};
 
@@ -66,7 +66,19 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let outcome = self.dispatch_gate(connection, &call, &mut caller);
         let (status, reason) = match outcome {
             Ok(()) => (Status::Ok, ""),
-            Err(fault) => (fault.status, fault.reason),
+            Err(fault) => {
+                // The frontend answers `Unmapped` by mapping the span and retrying.
+                if fault.status != Status::Unmapped {
+                    self.refused = Some(match self.device.take_refusal() {
+                        Some(refusal) => format!(
+                            "{} in {} at {}: {}",
+                            fault.reason, refusal.entry, refusal.instruction, refusal.detail
+                        ),
+                        None => String::from(fault.reason),
+                    });
+                }
+                (fault.status, fault.reason)
+            }
         };
         call.status = status.raw();
         call.reason_length = reason.len() as u64;

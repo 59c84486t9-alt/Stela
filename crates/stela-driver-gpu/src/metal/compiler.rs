@@ -36,7 +36,7 @@ use super::{
     shader::{
         Access, AttributeUse, BufferUse, ColorOutput, CompiledShader, Compiler, DeclaredAttribute,
         FunctionConstant, Interface, Linking, MAX_PATCH_CONTROL_POINTS, NumericClass, Patch,
-        PatchDomain, Provenance, Reflection, Scalar, Specialization, Stage, Tessellation,
+        PatchDomain, Provenance, Reflection, Refusal, Scalar, Specialization, Stage, Tessellation,
         TessellationStages, TextureUse, ThreadgroupUse, Varying,
     },
     stitching::{StitchedGraph, StitchedNode},
@@ -216,15 +216,6 @@ impl Drop for InternalKernelCode {
     }
 }
 
-/// The service's account of its last refusal.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Refusal {
-    pub entry: String,
-    /// The zero-based ordinal of the AIR instruction at fault.
-    pub instruction: u32,
-    pub detail: String,
-}
-
 pub struct AirCompiler {
     service: Service,
     target: ffi::Target,
@@ -280,6 +271,10 @@ impl AirCompiler {
 }
 
 impl Compiler for AirCompiler {
+    fn take_refusal(&mut self) -> Option<Refusal> {
+        self.refusal.take()
+    }
+
     fn features(&self) -> ShaderFeatures {
         FEATURES
     }
@@ -448,8 +443,15 @@ impl Compiler for AirCompiler {
         specialization: &Specialization,
     ) -> Result<Reflection> {
         let selected = select(&self.libraries, library, entry)?;
-        let (reflection, _) = selected.reflect(&self.service, specialization, &mut self.refusal)?;
+        let (reflection, _) =
+            selected.reflect(&self.service, Some(specialization), &mut self.refusal)?;
         Ok(reflection)
+    }
+
+    fn constants(&mut self, library: u64, entry: &str) -> Result<Vec<FunctionConstant>> {
+        let selected = select(&self.libraries, library, entry)?;
+        let (reflection, _) = selected.reflect(&self.service, None, &mut self.refusal)?;
+        Ok(reflection.constants().to_vec())
     }
 
     fn bindings(
@@ -592,7 +594,7 @@ impl AirCompiler {
     ) -> Result<CompiledShader> {
         let selected = select(&self.libraries, library, entry)?;
         let (reflection, provenance) =
-            selected.reflect(&self.service, specialization, &mut self.refusal)?;
+            selected.reflect(&self.service, Some(specialization), &mut self.refusal)?;
         let Reflection::Stage(interface) = reflection else {
             return Err(Error::Invalid("a visible function is not a pipeline stage"));
         };
@@ -904,18 +906,25 @@ fn select<'a>(
 
 impl Selected<'_> {
     /// The service's reflection of the function specialized with the
-    /// function constant values, with the function's provenance.
+    /// function constant values, or as it is declared with no specialization,
+    /// with the function's provenance.
     fn reflect(
         &self,
         service: &Service,
-        specialization: &Specialization,
+        specialization: Option<&Specialization>,
         refusal: &mut Option<Refusal>,
     ) -> Result<(Reflection, Provenance)> {
         let mut reflection = Box::new(ffi::Reflection::ZERO);
         let mut error = ffi::AirError::NONE;
         let air = self.air.bitcode;
-        let values = constant_values(&specialization.constants);
-        let count = u32::try_from(values.len()).map_err(|_| MALFORMED)?;
+        let values = specialization.map(|known| constant_values(&known.constants));
+        let (values, count) = match &values {
+            Some(values) => (
+                values.as_ptr(),
+                u32::try_from(values.len()).map_err(|_| MALFORMED)?,
+            ),
+            None => (core::ptr::null(), 0),
+        };
         // SAFETY: the AIR, entry and values outlive the call, which writes
         // only the reflection and the error.
         let reflected = unsafe {
@@ -923,7 +932,7 @@ impl Selected<'_> {
                 air.as_ptr().cast(),
                 air.len(),
                 self.entry.as_ptr(),
-                values.as_ptr(),
+                values,
                 count,
                 &mut *reflection,
                 &mut error,
@@ -1227,6 +1236,7 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
         max_total_threads: (r.max_total_threads != 0).then_some(r.max_total_threads),
         amplification: r.amplification != 0,
         command_barriers: r.command_barriers != 0,
+        attachment_reads: r.attachment_reads,
         constants,
         features,
     };

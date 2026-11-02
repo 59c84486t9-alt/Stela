@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 23:10:00 -0400
+Subject: [PATCH] fix(gallivm): probe the stack through shader frames
+
+---
+diff --git a/src/gallium/auxiliary/gallivm/lp_bld_passmgr.c b/src/gallium/auxiliary/gallivm/lp_bld_passmgr.c
+index 32248c4..d51905f 100644
+--- a/src/gallium/auxiliary/gallivm/lp_bld_passmgr.c
++++ b/src/gallium/auxiliary/gallivm/lp_bld_passmgr.c
+@@ -137,6 +137,14 @@ lp_passmgr_run(struct lp_passmgr *mgr,
+    if (gallivm_debug & GALLIVM_DEBUG_PERF)
+       time_begin = os_time_get();
+ 
++#if DETECT_ARCH_X86_64
++   /* A shader's frame can pass a megabyte, past a stack's guard page. */
++   for (LLVMValueRef func = LLVMGetFirstFunction(module); func;
++        func = LLVMGetNextFunction(func)) {
++      LLVMAddTargetDependentFunctionAttr(func, "probe-stack", "inline-asm");
++   }
++#endif
++
+ #if USE_NEW_PASS == 1
+    char passes[1024];
+    passes[0] = 0;

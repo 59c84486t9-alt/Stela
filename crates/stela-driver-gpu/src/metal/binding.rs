@@ -30,6 +30,7 @@
 use super::{
     capabilities::{MAX_BUFFER_BINDINGS, MAX_SAMPLER_BINDINGS, MAX_TEXTURE_BINDINGS},
     error::{Error, Result},
+    pipeline::MAX_COLOR_ATTACHMENTS,
     vulkan::physical::Limits,
 };
 use alloc::{
@@ -176,6 +177,8 @@ pub struct ArgumentTable {
     pub buffers: [BufferBinding; MAX_BUFFER_BINDINGS as usize],
     pub textures: [ResourceId; MAX_TEXTURE_BINDINGS as usize],
     pub samplers: [ResourceId; MAX_SAMPLER_BINDINGS as usize],
+    /// The pass's color attachments, which `[[color(n)]]` inputs read.
+    pub attachments: [ResourceId; MAX_COLOR_ATTACHMENTS],
 }
 
 impl Default for ArgumentTable {
@@ -184,6 +187,7 @@ impl Default for ArgumentTable {
             buffers: [BufferBinding::default(); MAX_BUFFER_BINDINGS as usize],
             textures: [ResourceId::NULL; MAX_TEXTURE_BINDINGS as usize],
             samplers: [ResourceId::NULL; MAX_SAMPLER_BINDINGS as usize],
+            attachments: [ResourceId::NULL; MAX_COLOR_ATTACHMENTS],
         }
     }
 }
@@ -193,7 +197,8 @@ impl ArgumentTable {
     pub const BUFFER_LENGTHS_OFFSET: u32 = MAX_BUFFER_BINDINGS * 8;
     pub const TEXTURES_OFFSET: u32 = Self::BUFFER_LENGTHS_OFFSET + MAX_BUFFER_BINDINGS * 8;
     pub const SAMPLERS_OFFSET: u32 = Self::TEXTURES_OFFSET + MAX_TEXTURE_BINDINGS * 8;
-    pub const BYTES: u32 = Self::SAMPLERS_OFFSET + MAX_SAMPLER_BINDINGS * 8;
+    pub const ATTACHMENTS_OFFSET: u32 = Self::SAMPLERS_OFFSET + MAX_SAMPLER_BINDINGS * 8;
+    pub const BYTES: u32 = Self::ATTACHMENTS_OFFSET + MAX_COLOR_ATTACHMENTS as u32 * 8;
     /// Tables are placed at this alignment in the upload ring.
     pub const ALIGNMENT: u64 = 16;
 
@@ -212,6 +217,7 @@ impl ArgumentTable {
         self.textures
             .iter()
             .chain(&self.samplers)
+            .chain(&self.attachments)
             .for_each(|id| writer.u64(id.0));
         bytes
     }
@@ -787,6 +793,10 @@ mod tests {
             ),
             ("STELA_METAL_TABLE_TEXTURES", ArgumentTable::TEXTURES_OFFSET),
             ("STELA_METAL_TABLE_SAMPLERS", ArgumentTable::SAMPLERS_OFFSET),
+            (
+                "STELA_METAL_TABLE_ATTACHMENTS",
+                ArgumentTable::ATTACHMENTS_OFFSET,
+            ),
             ("STELA_METAL_TABLE_BYTES", ArgumentTable::BYTES),
             (
                 "STELA_METAL_ACCUMULATE_RESULTS",
@@ -1161,7 +1171,8 @@ mod tests {
         assert_eq!(ArgumentTable::BUFFER_LENGTHS_OFFSET, 248);
         assert_eq!(ArgumentTable::TEXTURES_OFFSET, 496);
         assert_eq!(ArgumentTable::SAMPLERS_OFFSET, 1520);
-        assert_eq!(ArgumentTable::BYTES, 1648);
+        assert_eq!(ArgumentTable::ATTACHMENTS_OFFSET, 1648);
+        assert_eq!(ArgumentTable::BYTES, 1712);
         assert_eq!(
             u64::from(ArgumentTable::BYTES) % ArgumentTable::ALIGNMENT,
             0

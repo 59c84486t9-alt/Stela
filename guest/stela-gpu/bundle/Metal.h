@@ -259,6 +259,8 @@ enum {
 /* Local definitions of a protocol resolve to Metal's by name at load. */
 #define STELA_PROTOCOLS(X)                                                                         \
 	X(MTLResource)                                                                             \
+	X(MTLDevice)                                                                               \
+	X(MTLDeviceSPI)                                                                            \
 	X(MTLAllocation)                                                                           \
 	X(MTLBuffer)                                                                               \
 	X(MTLTexture)                                                                              \
@@ -351,6 +353,8 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 - (NSUInteger)storageMode;
 - (NSUInteger)usage;
 - (MTLTextureSwizzleChannels)swizzle;
+- (NSRange)levelRange;
+- (NSRange)sliceRange;
 - (NSUInteger)size;
 - (NSUInteger)type;
 - (NSUInteger)sparsePageSize;

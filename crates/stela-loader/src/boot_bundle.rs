@@ -676,10 +676,18 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     let core_locks_handed_off =
         chip.is_some_and(|chip| ctrr::generation(chip) == Some(ctrr::Generation::Ctrr3));
     let images = Images::load(inputs)?;
-    let modules: Vec<&[u8]> = core::iter::once(inputs.static_trust_cache.bytes)
-        .chain(inputs.extra_trust_caches.iter().map(|input| input.bytes))
+    let extra: Vec<&[u8]> = inputs
+        .extra_trust_caches
+        .iter()
+        .map(|input| input.bytes)
         .collect();
-    let trust_cache = trust_cache::compose(&modules)?;
+    let trust_cache = match extra.as_slice() {
+        [] => trust_cache::compose(&[inputs.static_trust_cache.bytes])?,
+        [one] => trust_cache::compose(&[inputs.static_trust_cache.bytes, one])?,
+        many => {
+            trust_cache::compose(&[inputs.static_trust_cache.bytes, &trust_cache::merge(many)?])?
+        }
+    };
     let mut shaped = Shaped::new(inputs, options, &carveouts)?;
     let mut contents = contents(
         inputs,

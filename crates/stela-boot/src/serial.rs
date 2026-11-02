@@ -1,4 +1,4 @@
-//! Allocation-free, lock-free UART output for the boot processor.
+//! Allocation-free COM1 output and the guest console's nonblocking input.
 use core::{arch::asm, fmt};
 const UART: u16 = 0x3f8;
 unsafe fn out(port: u16, value: u8) {
@@ -27,6 +27,13 @@ pub fn initialize() {
         out(UART + 4, 0x0b);
     }
 }
+/// One input byte for the guest console's device owner, when available.
+pub fn read() -> Option<u8> {
+    // SAFETY: the engine runs at CPL0 after COM1 initialization. Only its
+    // console device owner reads RBR; output accesses the separate THR register.
+    unsafe { (input(UART + 5) & 1 != 0).then(|| input(UART)) }
+}
+
 /// Whether the transmitter is empty: its FIFO takes 16 bytes now.
 pub fn ready() -> bool {
     // SAFETY: reads the line status register of the configured UART.

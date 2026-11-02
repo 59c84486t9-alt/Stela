@@ -17,6 +17,8 @@ const HEADER_BYTES: usize = 4 + 16 + 4;
 const MODULE_ALIGNMENT: usize = 16;
 /// `CS_HASHTYPE_SHA256`, the hash a signature's CDHash truncates.
 const HASH_TYPE_SHA256: u8 = 2;
+/// A version 2 entry.
+const ENTRY_BYTES: usize = 24;
 
 /// A code directory's identity in a trust cache.
 pub type CodeHash = [u8; 20];
@@ -44,7 +46,7 @@ pub struct ModuleSummary {
 fn entry_bytes(version: u32) -> Result<usize> {
     Ok(match version {
         1 => 22,
-        2 => 24,
+        2 => ENTRY_BYTES,
         other => {
             return Err(refuse!("unsupported trust cache module version {other}", other).into());
         }
@@ -81,21 +83,48 @@ pub fn inspect_module(module: &[u8]) -> Result<ModuleSummary> {
 /// `hashes` with no launch constraint. Lookups search a module's entries, so
 /// they are sorted, and the UUID is their digest.
 pub fn module(hashes: &[CodeHash]) -> Result<Vec<u8>> {
-    let mut hashes = hashes.to_vec();
-    hashes.sort_unstable();
-    hashes.dedup();
-    let count = u32::try_from(hashes.len()).map_err(|_| refuse!("too many trusted code hashes"))?;
+    let entries = hashes.iter().map(|hash| {
+        let mut entry = [0; ENTRY_BYTES];
+        entry[..hash.len()].copy_from_slice(hash);
+        entry[hash.len()] = HASH_TYPE_SHA256;
+        entry
+    });
+    built(entries.collect())
+}
+
+/// One module of every entry of `modules`, in their order of precedence.
+///
+/// TXM loads the region's first module as static and the next into its second
+/// static slot, and its load loop (26A434 `0xfffffff01703a0a0`) drops any later
+/// one without an error, so all that follows the static module arrives as one.
+pub fn merge(modules: &[&[u8]]) -> Result<Vec<u8>> {
+    let mut entries = Vec::new();
+    for module in modules {
+        let width = entry_bytes(inspect_module(module)?.version)?;
+        for entry in module[HEADER_BYTES..].chunks_exact(width) {
+            let mut wide = [0; ENTRY_BYTES];
+            wide[..width].copy_from_slice(entry);
+            entries.push(wide);
+        }
+    }
+    built(entries)
+}
+
+/// A version 2 module of `entries`, sorted, each hash once.
+fn built(mut entries: Vec<[u8; ENTRY_BYTES]>) -> Result<Vec<u8>> {
+    let hash = size_of::<CodeHash>();
+    entries.sort_by(|a, b| a[..hash].cmp(&b[..hash]));
+    entries.dedup_by(|a, b| a[..hash] == b[..hash]);
+    let count =
+        u32::try_from(entries.len()).map_err(|_| refuse!("too many trusted code hashes"))?;
     let mut digest = Sha256::new();
-    for hash in &hashes {
-        digest.update(hash);
+    for entry in &entries {
+        digest.update(&entry[..hash]);
     }
     let mut out = 2u32.to_le_bytes().to_vec();
     out.extend_from_slice(&digest.finalize()[..16]);
     out.extend_from_slice(&count.to_le_bytes());
-    for hash in &hashes {
-        out.extend_from_slice(hash);
-        out.extend_from_slice(&[HASH_TYPE_SHA256, 0, 0, 0]);
-    }
+    out.extend(entries.iter().flatten());
     Ok(out)
 }
 
@@ -168,6 +197,32 @@ mod tests {
         assert_eq!(built[HEADER_BYTES + 24..HEADER_BYTES + 44], [2; 20]);
         assert_eq!(built, super::module(&[[1; 20], [2; 20]])?);
         assert_ne!(built[4..20], super::module(&[[1; 20]])?[4..20]);
+        Ok(())
+    }
+
+    #[test]
+    fn merging_sorts_widens_and_keeps_the_first_of_a_hash() -> Result<()> {
+        let mut older = super::module(&[[3; 20], [1; 20]])?;
+        older[HEADER_BYTES + 22] = 5;
+        let mut narrow = 1u32.to_le_bytes().to_vec();
+        narrow.extend([0; 16]);
+        narrow.extend(2u32.to_le_bytes());
+        for hash in [[2; 20], [1; 20]] {
+            narrow.extend(hash);
+            narrow.extend([HASH_TYPE_SHA256, 0]);
+        }
+
+        let merged = merge(&[&older, &narrow])?;
+        let summary = inspect_module(&merged)?;
+        assert_eq!((summary.version, summary.entries), (2, 3));
+        let entries: Vec<_> = merged[HEADER_BYTES..].chunks(ENTRY_BYTES).collect();
+        assert_eq!(
+            entries.iter().map(|entry| entry[0]).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(entries[0][22], 5, "the first module's constraint stays");
+        assert_eq!(entries[1][20..], [HASH_TYPE_SHA256, 0, 0, 0]);
+        assert!(merge(&[&module(3, 0)]).is_err());
         Ok(())
     }
 

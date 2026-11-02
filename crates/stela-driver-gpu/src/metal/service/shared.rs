@@ -41,6 +41,8 @@ pub struct ServiceHost {
     /// Calls its argument on a stack a compile fits on. Only a turn's holder
     /// comes here.
     pub run: fn(u64, &mut dyn FnMut()),
+    /// Told why the service refused a guest's call.
+    pub report: fn(&str),
 }
 
 // SAFETY: the lock gives one PE at a time the service, which `Send` lets move
@@ -162,7 +164,14 @@ impl<B: Backend + Send, C: Compiler + Send> GateService for SharedService<B, C> 
         record: u64,
         caller: &mut dyn CallerMemory,
     ) -> Result<(), CallerFault> {
-        self.call(|service| service.serve(connection, record, caller))
+        let (served, refused) = self.call(|service| {
+            let served = service.serve(connection, record, caller);
+            (served, service.refused.take())
+        });
+        if let Some(reason) = refused {
+            (self.host.report)(&reason);
+        }
+        served
     }
 
     fn import(

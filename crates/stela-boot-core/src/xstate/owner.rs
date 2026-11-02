@@ -39,14 +39,15 @@ impl XstateOwner {
         }
         qualify_error_pointers(identity)?;
         let processor = actual_processor()?;
-        let layout = Layout::discover(identity.eax, features.ecx, cpuid)?;
+        let mut layout = Layout::discover(identity.eax, features.ecx, cpuid)?;
         let controls = read_controls(&layout);
-        if let SaveFormat::Xsave { mask } | SaveFormat::XsaveLegacySse { mask } =
-            layout.format(controls)?
+        let format = layout.format(controls)?;
+        if let SaveFormat::Xsave { mask } | SaveFormat::XsaveLegacySse { mask } = format
             && (cpuid(0xd, 0).ebx as usize) < layout.enabled_extent(mask)
         {
             return Err(LayoutError::Geometry);
         }
+        layout.abi.extended = u64::from(format != SaveFormat::Fxsave);
         Ok(Self {
             processor,
             layout,

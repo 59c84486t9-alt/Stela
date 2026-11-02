@@ -29,6 +29,13 @@ fn from_disk(
             .into(),
         ..boot_bundle::Options::default()
     };
+    if options.maintenance_write {
+        // CSR_ALLOW_UNRESTRICTED_FS; the kext grant and other policy bits stay separate.
+        defaults.security.sip_bits |= 2;
+        output::arguments(format_args!(
+            "MAINTENANCE filesystem protection disabled for this boot (--maintenance-write)\n"
+        ));
+    }
     if !bluetooth {
         defaults.boot_args.push_str(" bt-transport-override=10");
     }

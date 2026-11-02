@@ -59,9 +59,13 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let request: PixelFormatRequest = call.request()?;
         let format = pixel_format(request.pixel_format)?;
         let capabilities = self.device.capabilities();
+        let block = format.describe().block;
         call.reply(&FormatAlignmentsResponse {
             linear_texture: capabilities.minimum_linear_texture_alignment(format),
             texture_buffer: capabilities.minimum_texture_buffer_alignment(format),
+            block_bytes: block.bytes.into(),
+            block_width: block.width.into(),
+            block_height: block.height.into(),
         })
     }
 

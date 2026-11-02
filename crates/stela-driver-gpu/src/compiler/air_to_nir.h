@@ -44,6 +44,11 @@ typedef nir_deref_instr *(*stela_air_bind_texture)(nir_builder *b,
                                                    const struct glsl_type *type, bool faces,
                                                    nir_def *level, void *data);
 
+/* Resolve render target `location`, a 2D texture of type, for a fragment
+ * function's read of it. Returning NULL refuses compilation. */
+typedef nir_deref_instr *(*stela_air_bind_attachment)(nir_builder *b, unsigned location,
+                                                      const struct glsl_type *type, void *data);
+
 /* Resolve a sampler argument for a use with a texture whose texels are
  * integers (integer is the border color class), as bind_texture does, to a
  * deref of glsl_bare_sampler_type(). */
@@ -284,6 +289,8 @@ struct stela_air_options {
    /* Texture and sampler arguments; zero refuses them. */
    stela_air_bind_texture bind_texture;
    stela_air_bind_sampler bind_sampler;
+   /* [[color(n)]] inputs; zero refuses them. */
+   stela_air_bind_attachment bind_attachment;
    /* Textures and samplers in argument buffers; zero refuses them. Argument
     * buffers hold device addresses, so they require bind_buffer. */
    stela_air_bind_texture_id bind_texture_id;

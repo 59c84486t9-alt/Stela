@@ -169,7 +169,7 @@ count(nir_shader *shader)
             nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
             census.intrinsics[intrinsic->intrinsic]++;
             if (intrinsic->intrinsic == nir_intrinsic_load_push_constant) {
-               unsigned base = (unsigned)nir_intrinsic_base(intrinsic);
+               unsigned base = (unsigned)nir_src_as_uint(intrinsic->src[0]);
                census.grid_loads += base == STELA_METAL_PUSH_GRID;
                census.amplification_loads += base == STELA_METAL_PUSH_AMPLIFICATION;
                census.count_loads += base == STELA_METAL_PUSH_AMPLIFICATIONS;

@@ -176,6 +176,7 @@ const HOST: ServiceHost = ServiceHost {
     relax: || panic!("nothing waits"),
     stack: 0x4000,
     run: |_, call| call(),
+    report: |_| {},
 };
 
 /// The GPU finishes what was committed.

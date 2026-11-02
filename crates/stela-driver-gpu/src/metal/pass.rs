@@ -11,6 +11,7 @@ use super::{
         LoadAction, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter, StoreAction,
         StoreActionOptions, TextureType, TextureUsage,
     },
+    binding::ResourceId,
     capabilities::{Capabilities, FormatCapabilities as C},
     error::{Error, Result, ensure, require},
     pipeline::MAX_COLOR_ATTACHMENTS,
@@ -105,6 +106,16 @@ pub struct RenderingAttachment<T> {
     pub store_action: StoreAction,
 }
 
+/// What a fragment function's `[[color(n)]]` inputs read.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AttachmentInputs {
+    /// Each color attachment's texture. Null for what a read cannot address:
+    /// an absent attachment, or one but a whole 2D texture's first level.
+    pub textures: [ResourceId; MAX_COLOR_ATTACHMENTS],
+    /// A read sees earlier fragments of its pixel with no barrier.
+    pub ordered: bool,
+}
+
 /// `VkRenderingInfo` and what the encoder checks against it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderPassPlan<T> {
@@ -120,6 +131,7 @@ pub struct RenderPassPlan<T> {
     pub visibility_results: bool,
     /// Custom sample positions in Vulkan's [0, 1) pixel space.
     pub sample_locations: Vec<[f32; 2]>,
+    pub inputs: AttachmentInputs,
 }
 
 /// An attachment of a pass, named for deferred store actions.
@@ -392,6 +404,7 @@ pub fn render_pass<T: Copy + Eq>(
         stencil_format,
         visibility_results: descriptor.visibility_results,
         sample_locations,
+        inputs: AttachmentInputs::default(),
     })
 }
 

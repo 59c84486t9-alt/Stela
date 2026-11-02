@@ -3,10 +3,12 @@
 #include "compiler/nir/nir_format_convert.h"
 #include "util/ralloc.h"
 
-static nir_def *load_push(nir_builder *b, unsigned bit_size, unsigned offset)
+/* As SPIR-V reaches a driver: the offset in the source, the range the block's.
+ * Lavapipe reads neither `base` nor a range narrower than that. */
+static nir_def *load_push(nir_builder *b, unsigned components, unsigned bit_size, unsigned offset)
 {
-   return nir_load_push_constant(b, 1, bit_size, nir_imm_int(b, 0), .base = (int)offset,
-                                 .range = bit_size / 8, .align_mul = bit_size / 8);
+   return nir_load_push_constant(b, components, bit_size, nir_imm_int(b, (int)offset),
+                                 .range = STELA_METAL_PUSH_BYTES, .align_mul = bit_size / 8);
 }
 
 /* A load of memory nothing writes while the shader runs: the tables and the
@@ -20,7 +22,7 @@ static nir_def *load(nir_builder *b, nir_def *address, unsigned offset, unsigned
 
 nir_def *stela_metal_load_table(nir_builder *b, enum stela_metal_table table)
 {
-   return load_push(b, 64, STELA_METAL_PUSH_TABLES + 8u * (unsigned)table);
+   return load_push(b, 1, 64, STELA_METAL_PUSH_TABLES + 8u * (unsigned)table);
 }
 
 nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_value value,
@@ -29,19 +31,18 @@ nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_val
    (void)stage;
    switch (value) {
    case STELA_AIR_DISPATCH_GRID:
-      return nir_load_push_constant(b, 3, 32, nir_imm_int(b, 0), .base = STELA_METAL_PUSH_GRID,
-                                    .range = 12, .align_mul = 4);
+      return load_push(b, 3, 32, STELA_METAL_PUSH_GRID);
    case STELA_AIR_AMPLIFICATION:
-      return load_push(b, 32, STELA_METAL_PUSH_AMPLIFICATION);
+      return load_push(b, 1, 32, STELA_METAL_PUSH_AMPLIFICATION);
    case STELA_AIR_VIEW_MAPPING:
-      return load_push(b, 32, STELA_METAL_PUSH_VIEW_MAPPING);
+      return load_push(b, 1, 32, STELA_METAL_PUSH_VIEW_MAPPING);
    case STELA_AIR_AMPLIFICATIONS:
-      return load_push(b, 32, STELA_METAL_PUSH_AMPLIFICATIONS);
+      return load_push(b, 1, 32, STELA_METAL_PUSH_AMPLIFICATIONS);
    case STELA_AIR_LOG_BUFFER:
-      return load_push(b, 64, STELA_METAL_PUSH_LOG);
+      return load_push(b, 1, 64, STELA_METAL_PUSH_LOG);
    case STELA_AIR_THREADGROUP_SHAPE:
       return nir_load_global(b, 3, 32,
-                             nir_iadd_imm(b, load_push(b, 64, STELA_METAL_PUSH_ARGUMENTS),
+                             nir_iadd_imm(b, load_push(b, 1, 64, STELA_METAL_PUSH_ARGUMENTS),
                                           STELA_METAL_DISPATCH_SHAPE),
                              .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 4);
    case STELA_AIR_PATCH_IDS: {
@@ -62,7 +63,7 @@ nir_def *stela_metal_threadgroup_offset(nir_builder *b, const struct stela_air_b
    (void)stage;
    if (buffer->index >= STELA_METAL_BUFFERS)
       return NULL;
-   return load(b, load_push(b, 64, STELA_METAL_PUSH_ARGUMENTS),
+   return load(b, load_push(b, 1, 64, STELA_METAL_PUSH_ARGUMENTS),
                STELA_METAL_DISPATCH_OFFSETS + 4u * buffer->index, 32);
 }
 
@@ -164,6 +165,14 @@ nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air
    return stela_metal_bind_texture_id(
       b, table_id(b, stage, STELA_METAL_TABLE_TEXTURES + 8u * texture->index), type, faces,
       level, stage);
+}
+
+nir_deref_instr *stela_metal_bind_attachment(nir_builder *b, unsigned location,
+                                             const struct glsl_type *type, void *stage)
+{
+   return stela_metal_bind_texture_id(
+      b, table_id(b, stage, STELA_METAL_TABLE_ATTACHMENTS + 8u * location), type, false, NULL,
+      stage);
 }
 
 /* The MTLResourceID a texture query names, or NULL for a bad binding. */
@@ -393,7 +402,7 @@ static nir_builder kernel(const nir_shader_compiler_options *options, const char
    b.shader->info.workgroup_size[0] = STELA_METAL_KERNEL_WORKGROUP;
    b.shader->info.workgroup_size[1] = 1;
    b.shader->info.workgroup_size[2] = 1;
-   *arguments = load_push(&b, 64, STELA_METAL_PUSH_ARGUMENTS);
+   *arguments = load_push(&b, 1, 64, STELA_METAL_PUSH_ARGUMENTS);
    *thread = nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0);
    nir_push_if(&b, nir_ult(&b, *thread, load(&b, *arguments, count_offset, 32)));
    return b;
@@ -980,7 +989,7 @@ nir_def *stela_metal_fetch_patch_attribute(nir_builder *b, const struct stela_me
    if (!attribute)
       return NULL;
    const struct stela_metal_stage_in_layout *layout = &stage_in->layouts[attribute->buffer];
-   nir_def *arguments = load_push(b, 64, STELA_METAL_PUSH_ARGUMENTS);
+   nir_def *arguments = load_push(b, 1, 64, STELA_METAL_PUSH_ARGUMENTS);
    nir_def *patch = nir_channel(b, ids, 0), *element;
    switch (layout->step) {
    case STELA_METAL_STEP_CONSTANT:
@@ -1032,7 +1041,7 @@ nir_def *stela_metal_fetch_stage_in(nir_builder *b, const struct stela_metal_sta
    const struct stela_metal_stage_in_layout *layout = &stage_in->layouts[attribute->buffer];
    if (layout->stride == STELA_METAL_STRIDE_DYNAMIC)
       return NULL;
-   nir_def *region = load_push(b, 64, STELA_METAL_PUSH_ARGUMENTS);
+   nir_def *region = load_push(b, 1, 64, STELA_METAL_PUSH_ARGUMENTS);
    nir_def *inside = nir_imm_true(b), *origin[3];
    for (unsigned axis = 0; axis < 3; axis++) {
       origin[axis] = load(b, region, STELA_METAL_STAGE_IN_ORIGIN + 4 * axis, 32);
@@ -1140,7 +1149,7 @@ nir_shader *stela_metal_tessellation_control(const nir_shader_compiler_options *
       nir_load_deref(&b, nir_build_deref_array_imm(&b, nir_build_deref_var(&b, input), 0));
    nir_def *number = nir_channel(&b, vertex, 0);
    nir_def *instance = nir_channel(&b, vertex, 1);
-   nir_def *arguments = load_push(&b, 64, STELA_METAL_PUSH_ARGUMENTS);
+   nir_def *arguments = load_push(&b, 1, 64, STELA_METAL_PUSH_ARGUMENTS);
 
    /* The patch ID: the patch number, or its entry in the patch index buffer. */
    nir_def *indices = load(&b, arguments, STELA_METAL_TESSELLATION_PATCH_INDICES, 64);

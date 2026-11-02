@@ -47,7 +47,9 @@ impl File {
                 .next_back()
                 .and_then(|(&at, block)| {
                     let list = block.physical_pages();
+                    // The page just past a block is not in it.
                     list.get((page - at) as usize..)
+                        .filter(|list| !list.is_empty())
                 });
             if let Some(list) = held {
                 let taken = list.len().min((end - page) as usize);

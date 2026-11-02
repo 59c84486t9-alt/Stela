@@ -621,9 +621,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .iter()
             .any(|value| matches!(value.key, ConstantKey::Name(_)))
         {
-            let unspecialized = Specialization::default();
-            let reflection = self.compiler.reflect(compiled, entry, &unspecialized)?;
-            reflection.constants().to_vec()
+            self.compiler.constants(compiled, entry)?
         } else {
             Vec::new()
         };

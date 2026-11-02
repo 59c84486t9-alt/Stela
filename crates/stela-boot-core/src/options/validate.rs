@@ -83,6 +83,7 @@ fn boot_selection(options: &System) -> Result<(), Error> {
         && (options.boot_volume.is_some()
             || options.boot_command.is_some()
             || options.safe_boot
+            || options.maintenance_write
             || options.upgrade
             || options.recovery.is_some())
     {

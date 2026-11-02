@@ -24,6 +24,7 @@
 #include "air_constants.h"
 #include "llvm-c/Transforms/PassBuilder.h"
 #include "util/macros.h"
+#include "util/set.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -346,24 +347,135 @@ stela_air_construct_constants(struct stela_air_metadata *m)
    return true;
 }
 
-bool
-stela_air_fold_constants(struct stela_air_metadata *m, LLVMValueRef fn)
+static bool
+fold(struct stela_air_metadata *m, LLVMValueRef fn)
 {
-   if (!m->unoptimized && !LLVMGetNamedMetadataNumOperands(m->module, "air.function_constants"))
-      return true;
    LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
    if (!options)
       return fail(m, STELA_AIR_ALLOCATION, "LLVM pass options allocation failed");
    /* SCCP folds the loads of constant data and the branches and selects they
     * decide, leaving the paths those disable unreachable and what only they
     * read dead, such as an absent argument's load hoisted out of a branch.
+    * InstSimplify removes a select SCCP decided for a value it cannot name,
+    * such as a function constant's choice of a buffer over a constant.
     * Unoptimized code also leaves what must be constant computed, such as a
     * barrier's memory flags. */
-   LLVMErrorRef error = LLVMRunPassesOnFunction(fn, "sccp,unreachableblockelim,dce", NULL, options);
+   LLVMErrorRef error = LLVMRunPassesOnFunction(fn, "sccp,instsimplify,unreachableblockelim,dce", NULL, options);
    LLVMDisposePassBuilderOptions(options);
    if (error) {
       LLVMDisposeErrorMessage(LLVMGetErrorMessage(error));
       return fail(m, STELA_AIR_INSTRUCTION, "function constant folding failed");
    }
    return true;
+}
+
+bool
+stela_air_fold_constants(struct stela_air_metadata *m, LLVMValueRef fn)
+{
+   if (!m->unoptimized && !LLVMGetNamedMetadataNumOperands(m->module, "air.function_constants"))
+      return true;
+   return fold(m, fn);
+}
+
+/* Whether pointer is null or off null, whichever way selects and PHIs go. */
+static bool
+null_rooted(LLVMValueRef pointer, unsigned depth)
+{
+   if (LLVMIsAConstantPointerNull(pointer))
+      return true;
+   if (!depth)
+      return false;
+   if (LLVMIsAConstantExpr(pointer))
+      return LLVMGetConstOpcode(pointer) == LLVMGetElementPtr &&
+             null_rooted(LLVMGetOperand(pointer, 0), depth - 1);
+   if (!LLVMIsAInstruction(pointer))
+      return false;
+   switch (LLVMGetInstructionOpcode(pointer)) {
+   case LLVMGetElementPtr:
+   case LLVMBitCast:
+      return null_rooted(LLVMGetOperand(pointer, 0), depth - 1);
+   case LLVMSelect:
+      return null_rooted(LLVMGetOperand(pointer, 1), depth - 1) &&
+             null_rooted(LLVMGetOperand(pointer, 2), depth - 1);
+   case LLVMPHI:
+      for (unsigned i = 0; i < LLVMCountIncoming(pointer); i++) {
+         if (!null_rooted(LLVMGetIncomingValue(pointer, i), depth - 1))
+            return false;
+      }
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
+accesses_null(LLVMBasicBlockRef block)
+{
+   for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst;
+        inst = LLVMGetNextInstruction(inst)) {
+      LLVMValueRef pointer = LLVMIsALoadInst(inst) ? LLVMGetOperand(inst, 0) :
+                             LLVMIsAStoreInst(inst) ? LLVMGetOperand(inst, 1) : NULL;
+      if (pointer && null_rooted(pointer, 8))
+         return true;
+   }
+   return false;
+}
+
+/* Turns every branch toward a block that must access null, of one that may
+ * not, away from it. An access no branch avoids stays, and reads zero. */
+static bool
+avoid_null(struct stela_air_metadata *m, LLVMValueRef fn, bool *avoided)
+{
+   struct set *undefined = _mesa_pointer_set_create(NULL);
+   if (!undefined)
+      return fail(m, STELA_AIR_ALLOCATION, "null access set allocation failed");
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block;
+        block = LLVMGetNextBasicBlock(block)) {
+      if (accesses_null(block))
+         _mesa_set_add(undefined, block);
+   }
+   bool grew = undefined->entries != 0;
+   while (grew) {
+      grew = false;
+      for (LLVMBasicBlockRef block = LLVMGetLastBasicBlock(fn); block;
+           block = LLVMGetPreviousBasicBlock(block)) {
+         LLVMValueRef end = LLVMGetBasicBlockTerminator(block);
+         unsigned successors = LLVMGetNumSuccessors(end);
+         bool all = successors && !_mesa_set_search(undefined, block);
+         for (unsigned i = 0; all && i < successors; i++)
+            all = _mesa_set_search(undefined, LLVMGetSuccessor(end, i));
+         if (all) {
+            _mesa_set_add(undefined, block);
+            grew = true;
+         }
+      }
+   }
+   LLVMTypeRef flag = LLVMInt1TypeInContext(LLVMGetModuleContext(m->module));
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); undefined->entries && block;
+        block = LLVMGetNextBasicBlock(block)) {
+      LLVMValueRef end = LLVMGetBasicBlockTerminator(block);
+      if (LLVMGetInstructionOpcode(end) != LLVMCondBr)
+         continue;
+      bool taken = _mesa_set_search(undefined, LLVMGetSuccessor(end, 0));
+      bool otherwise = _mesa_set_search(undefined, LLVMGetSuccessor(end, 1));
+      if (taken != otherwise) {
+         LLVMSetCondition(end, LLVMConstInt(flag, otherwise, false));
+         *avoided = true;
+      }
+   }
+   _mesa_set_destroy(undefined, NULL);
+   return true;
+}
+
+bool
+stela_air_fold_absent(struct stela_air_metadata *m, LLVMValueRef fn,
+                      const struct stela_air_argument *arguments, unsigned count)
+{
+   for (unsigned i = 0; i < count; i++) {
+      LLVMValueRef value = arguments[i].value;
+      if (arguments[i].absent && arguments[i].is_buffer)
+         LLVMReplaceAllUsesWith(value, LLVMConstPointerNull(LLVMTypeOf(value)));
+   }
+   bool avoided = false;
+   return avoid_null(m, fn, &avoided) && (!avoided || fold(m, fn));
 }

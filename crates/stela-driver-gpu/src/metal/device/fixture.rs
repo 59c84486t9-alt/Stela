@@ -496,6 +496,10 @@ impl Compiler for MockCompiler {
             .map(drop)
             .ok_or(Error::Invalid("unknown library"))
     }
+    fn constants(&mut self, library: u64, entry: &str) -> Result<Vec<FunctionConstant>> {
+        let reflection = self.reflect(library, entry, &Specialization::default())?;
+        Ok(reflection.constants().to_vec())
+    }
     fn reflect(&mut self, _: u64, entry: &str, _: &Specialization) -> Result<Reflection> {
         match entry {
             "visible" => Ok(Reflection::Visible {

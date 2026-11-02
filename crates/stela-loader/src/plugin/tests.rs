@@ -162,6 +162,62 @@ fn a_fat_plugin_holds_each_slice_bound_flat() {
 }
 
 #[test]
+fn linkedit_tables_are_pointer_aligned_after_variable_length_imports() {
+    let mut residues = std::collections::BTreeSet::new();
+    for subtype in [ARM64, ARM64E] {
+        for import in [
+            "_a",
+            "_ab",
+            "_abc",
+            "_abcd",
+            "_abcde",
+            "_abcdef",
+            "_abcdefg",
+            "_abcdefgh",
+        ] {
+            let object = object_file_of(
+                subtype,
+                &[
+                    InputSection::new("__TEXT", "__text", CODE, words(&[0x9400_0000, 0xd65f_03c0]))
+                        .relocate(0, 1, macho::ARM64_RELOC_BRANCH26, 2),
+                ],
+                &[defined("_main", true, 0, 0), undefined(import, false)],
+            );
+            let file = link(IDENTIFIER, &[vec![&object]]).unwrap();
+            let slice = thin(&file, 0);
+            let header = macho::MachHeader64::<LE>::parse(slice, 0).unwrap();
+            let mut commands = header.load_commands(LE, slice, 0).unwrap();
+            let mut fixups_end = None;
+            let mut strings = None;
+            while let Some(command) = commands.next().unwrap() {
+                if command.cmd() == macho::LC_DYLD_CHAINED_FIXUPS {
+                    let data: &macho::LinkeditDataCommand<LE> = command.data().unwrap();
+                    fixups_end = Some(data.dataoff.get(LE) + data.datasize.get(LE));
+                }
+                if let Some(table) = command.symtab().unwrap() {
+                    assert_eq!(table.nsyms.get(LE), 0);
+                    assert!(table.symoff.get(LE).is_multiple_of(8));
+                    assert!(table.stroff.get(LE).is_multiple_of(8));
+                    assert_eq!(table.strsize.get(LE), 1);
+                    strings = Some(table.stroff.get(LE));
+                }
+            }
+            let end = fixups_end.unwrap();
+            residues.insert(end % 8);
+            let strings = strings.unwrap();
+            assert!(strings >= end && strings - end < 8);
+            assert!(
+                slice[end as usize..=strings as usize]
+                    .iter()
+                    .all(|&byte| byte == 0)
+            );
+            code_hashes(&file).unwrap();
+        }
+    }
+    assert_eq!(residues, (0..8).collect());
+}
+
+#[test]
 fn arm64_reaches_imports_through_plain_stubs_and_the_got() {
     let object = object(ARM64);
     let file = link(IDENTIFIER, &[vec![&object]]).unwrap();

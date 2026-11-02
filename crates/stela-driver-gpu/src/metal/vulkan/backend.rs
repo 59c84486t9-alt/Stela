@@ -234,12 +234,13 @@ pub struct Requirement {
 
 /// The features the binding ABI, dynamic state model and synchronization
 /// rely on; a device missing any is refused rather than half-supported.
-pub fn requirements(features: &Features) -> [Requirement; 19] {
+pub fn requirements(features: &Features) -> [Requirement; 20] {
     let requirement = |name, present| Requirement { name, present };
     [
         requirement("bufferDeviceAddress", features.buffer_device_address),
         requirement("timelineSemaphore", features.timeline_semaphore),
         requirement("synchronization2", features.synchronization2),
+        requirement("shaderFloat16", features.shader_float16),
         requirement("dynamicRendering", features.dynamic_rendering),
         requirement(
             "descriptorIndexing",

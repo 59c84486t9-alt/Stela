@@ -56,6 +56,19 @@ fn round_trip(text: &str) -> System {
 }
 
 #[test]
+fn maintenance_writes_require_an_explicit_preboot_selection() {
+    let ordinary = round_trip(&format!("--system --preboot {DISK}"));
+    assert!(!ordinary.maintenance_write);
+    assert!(!ordinary.to_string().contains(MAINTENANCE_WRITE));
+    let maintenance = round_trip(&format!("--system --preboot {DISK} {MAINTENANCE_WRITE}"));
+    assert!(maintenance.maintenance_write);
+    assert_eq!(
+        System::parse(&format!("--system {MAINTENANCE_WRITE}")),
+        Err(Error::Constraint(Constraint::PrebootSelection))
+    );
+}
+
+#[test]
 fn setup_lines_parse_and_serialize_identically() {
     let preboot = format!(
         "--system --storage {DISK} --nor {DISK} --preboot {DISK} --ecid 0x0000000000001234 \

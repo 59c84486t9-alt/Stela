@@ -4,15 +4,16 @@
  * coverage sweep of metal-device.md's bring-up plan. Each argument is an
  * .air module from Apple's `metal -c`; the inputs are never committed.
  *
- *   stela_metal_corpus [--sm SM] MODULE.air...
+ *   stela_metal_corpus [--sm SM] [--fill BYTE] MODULE.air...
  *
  * A kernel takes a 64-thread threadgroup and every threadgroup buffer its
  * declared bytes; a render function is linked with the varyings it writes
  * or reads;
  * a post-tessellation vertex function takes its patch's default
  * tessellation, and each of its attributes a buffer of its own; required
- * function constants take zero. Exits nonzero when
- * any entry point is refused. */
+ * function constants take zero, and with --fill every function constant
+ * takes that byte, reaching what the constants otherwise disable. Exits
+ * nonzero when any entry point is refused. */
 #include "compiler/glsl_types.h"
 #include "compiler/metal_compiler.h"
 #include "llvm-c/BitReader.h"
@@ -26,6 +27,9 @@
 #define WRAPPER_MAGIC 0x0b17c0deu
 
 static struct stela_metal_reflection reflection;
+static struct stela_air_constant_value constants[STELA_METAL_FUNCTION_CONSTANTS];
+static unsigned constant_count;
+static int fill = -1;
 
 /* The module's bitcode, unwrapped from an LLVM bitcode wrapper. */
 static const uint8_t *
@@ -61,6 +65,22 @@ constant_bytes(const char *type, size_t length)
          return scalars[i].bytes * (lanes == 3 ? 4 : lanes);
    }
    return 16;
+}
+
+/* The value of each constant reflection lists that takes one. */
+static void
+choose_constants(void)
+{
+   static uint8_t bytes[16];
+   memset(bytes, fill < 0 ? 0 : fill, sizeof(bytes));
+   constant_count = 0;
+   for (unsigned i = 0; i < reflection.function_constant_count; i++) {
+      const struct stela_metal_function_constant *constant = &reflection.function_constants[i];
+      if (constant->required || fill >= 0)
+         constants[constant_count++] = (struct stela_air_constant_value){
+            constant->index, bytes, constant_bytes(reflection.names + constant->type,
+                                                   constant->type_bytes)};
+   }
 }
 
 /* The MTLVertexFormat of 32-bit lanes that carries an attribute. */
@@ -105,16 +125,6 @@ compile(const uint8_t *air, size_t size, const char *entry,
    }
    specialization.varyings = varyings;
    specialization.varying_count = reflection.varying_count;
-   static struct stela_air_constant_value constants[STELA_METAL_FUNCTION_CONSTANTS];
-   static const uint8_t zeros[16];
-   unsigned constant_count = 0;
-   for (unsigned i = 0; i < reflection.function_constant_count; i++) {
-      const struct stela_metal_function_constant *constant = &reflection.function_constants[i];
-      if (constant->required)
-         constants[constant_count++] = (struct stela_air_constant_value){
-            constant->index, zeros, constant_bytes(reflection.names + constant->type,
-                                                   constant->type_bytes)};
-   }
    specialization.constants = constants;
    specialization.constant_count = constant_count;
    const struct stela_metal_tessellation tessellation = {
@@ -188,7 +198,13 @@ sweep(const char *path, const struct stela_metal_target *target)
          continue;
       char *entry = strndup(name, name_bytes);
       struct stela_air_error error;
-      if (!stela_metal_reflect(air, size, entry, NULL, 0, &reflection, &error)) {
+      bool reflected = stela_metal_reflect(air, size, entry, NULL, 0, &reflection, &error);
+      if (reflected) {
+         choose_constants();
+         reflected = stela_metal_reflect(air, size, entry, constants, constant_count, &reflection,
+                                         &error);
+      }
+      if (!reflected) {
          /* Helpers and other functions no entry metadata lists. */
          if (!strstr(error.detail, "not a listed AIR function"))
             printf("%s %s: reflection refused (%u): %s\n", path, entry, error.kind, error.detail),
@@ -219,12 +235,17 @@ main(int argc, char **argv)
 {
    unsigned sm = 120;
    int first = 1;
-   if (argc > 2 && !strcmp(argv[1], "--sm")) {
-      sm = (unsigned)atoi(argv[2]);
-      first = 3;
+   while (first + 1 < argc && !strncmp(argv[first], "--", 2)) {
+      if (!strcmp(argv[first], "--sm"))
+         sm = (unsigned)atoi(argv[first + 1]);
+      else if (!strcmp(argv[first], "--fill"))
+         fill = atoi(argv[first + 1]);
+      else
+         break;
+      first += 2;
    }
    if (first >= argc) {
-      fprintf(stderr, "usage: %s [--sm SM] MODULE.air...\n", argv[0]);
+      fprintf(stderr, "usage: %s [--sm SM] [--fill BYTE] MODULE.air...\n", argv[0]);
       return 2;
    }
    glsl_type_singleton_init_or_ref();

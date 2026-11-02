@@ -28,7 +28,7 @@ use core::{
     hint,
     ptr::{self, NonNull},
     slice, str,
-    sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, Ordering, fence},
+    sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicUsize, Ordering, fence},
 };
 use stela_boot_core::page_window::Cache;
 use stela_drivers::platform::work::{WorkError, service::Idle};
@@ -93,8 +93,9 @@ enum Operation {
     Export(*const client::Run, usize),
 }
 
-/// What Mesa's threads run on: their calls go to Linux, off this stack.
-const THREAD_STACK_BYTES: usize = 1 << 20;
+/// What Mesa's threads run on: their calls go to Linux, off this stack. Linux's
+/// default, as llvmpipe's compiled shaders probe nothing and one frame can pass 1 MiB.
+const THREAD_STACK_BYTES: usize = 8 << 20;
 /// What stays free of a task's stack below `run_thread`'s frame, which a
 /// thread's Linux calls start past.
 const TASK_STACK_MARGIN: u64 = 256;
@@ -162,6 +163,9 @@ struct Request {
 
 /// The posted calls, newest first.
 static REQUESTS: AtomicPtr<Request> = AtomicPtr::new(ptr::null_mut());
+/// The mappings clients hold. A fault with none is no client's, so it reports
+/// on the spot instead of waiting for the boot PE, which may be waiting for it.
+static MAPPINGS: AtomicUsize = AtomicUsize::new(0);
 
 fn post(request: &Request) {
     let this = ptr::from_ref(request).cast_mut();
@@ -177,7 +181,7 @@ fn post(request: &Request) {
 
 /// A dma-buf of `runs` and the host's mapping of them, for the GPU's service.
 pub(super) fn export(runs: &[client::Run]) -> Option<(c_int, NonNull<u8>)> {
-    let address = map_runs(runs)?;
+    let address = map_runs(runs, 0, 0)?;
     let fd = submit(Operation::Export(runs.as_ptr(), runs.len()));
     let Ok(fd) = c_int::try_from(fd).and_then(|fd| u32::try_from(fd).map(|_| fd)) else {
         let bytes = runs.iter().map(|run| run.bytes).sum();
@@ -187,10 +191,10 @@ pub(super) fn export(runs: &[client::Run]) -> Option<(c_int, NonNull<u8>)> {
     Some((fd, address))
 }
 
-/// The host's mapping of `runs`, in one piece.
-pub(super) fn map_runs(runs: &[client::Run]) -> Option<NonNull<u8>> {
+/// The host's mapping of `runs`, in one piece, then `tail` pages of `scratch`.
+pub(super) fn map_runs(runs: &[client::Run], tail: u64, scratch: u64) -> Option<NonNull<u8>> {
     let gpu = installed()?;
-    let pages: u64 = runs.iter().map(|run| run.bytes / PAGE).sum();
+    let pages: u64 = runs.iter().map(|run| run.bytes / PAGE).sum::<u64>() + tail;
     let address = gpu.window.reserve(pages as usize)?;
     let mut next = address;
     for run in runs {
@@ -203,6 +207,15 @@ pub(super) fn map_runs(runs: &[client::Run]) -> Option<NonNull<u8>> {
                 return None;
             }
             next += PAGE;
+        }
+    }
+    for page in 0..tail {
+        if !gpu
+            .window
+            .install(next + page * PAGE, scratch, Cache::WriteBack)
+        {
+            unmap_export(address, pages * PAGE);
+            return None;
         }
     }
     NonNull::new(address as *mut u8)
@@ -257,6 +270,7 @@ unsafe fn perform(gpu: &Installed, operation: Operation) -> i64 {
                 match client::map(fd, address, size, offset) {
                     Ok(mapping) => {
                         gpu.mappings.borrow_mut().insert(address, (mapping, pages));
+                        MAPPINGS.fetch_add(1, Ordering::Relaxed);
                         address as i64
                     }
                     Err(error) => {
@@ -270,6 +284,7 @@ unsafe fn perform(gpu: &Installed, operation: Operation) -> i64 {
                     return EFAULT;
                 };
                 client::unmap(mapping);
+                MAPPINGS.fetch_sub(1, Ordering::Relaxed);
                 // A processor that kept the translation keeps the addresses too.
                 if gpu.window.remove(address, pages) {
                     gpu.window.release(address, pages);
@@ -424,6 +439,8 @@ fn submit(operation: Operation) -> i64 {
     }
     if host::processor() != BOOT_CPU.load(Ordering::Relaxed) {
         while !request.done.load(Ordering::Acquire) {
+            // The boot CPU's work may be retiring a mapping, which waits for this.
+            crate::native_mmio::shootdown::service();
             hint::spin_loop();
         }
     } else {
@@ -485,7 +502,9 @@ pub(super) fn chipset(index: u32) -> Option<u16> {
 /// False when `address` is not one a client mapped.
 pub(in crate::engine) fn serve_fault(address: u64, write: bool) -> bool {
     installed().is_some_and(|gpu| {
-        gpu.window.contains(address) && submit(Operation::Fault { address, write }) == 0
+        gpu.window.contains(address)
+            && MAPPINGS.load(Ordering::Relaxed) != 0
+            && submit(Operation::Fault { address, write }) == 0
     })
 }
 

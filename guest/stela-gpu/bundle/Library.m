@@ -86,6 +86,7 @@ static void hook(Class class, SEL selector, id block)
 	IMP withName = method_getImplementation(class_getInstanceMethod(class, @selector(setConstantValue:type:withName:)));
 	IMP inRange = method_getImplementation(class_getInstanceMethod(class, @selector(setConstantValues:type:withRange:)));
 	IMP reset = method_getImplementation(class_getInstanceMethod(class, @selector(reset)));
+	IMP copied = method_getImplementation(class_getInstanceMethod(class, @selector(copyWithZone:)));
 	hook(class, @selector(setConstantValue:type:atIndex:),
 	     ^(id self, const void *value, NSUInteger type, NSUInteger index) {
 		     note_constant(self, value, type, index, nil);
@@ -112,6 +113,14 @@ static void hook(Class class, SEL selector, id block)
 	hook(class, @selector(reset), ^(id self) {
 		[constants_of(self) removeAllObjects];
 		((void (*)(id, SEL))reset)(self, @selector(reset));
+	});
+	hook(class, @selector(copyWithZone:), ^id(id self, void *zone) {
+		id copy = ((id (*)(id, SEL, void *))copied)(self, @selector(copyWithZone:), zone);
+		NSMutableArray *constants = constants_of(self);
+		for (NSUInteger i = 0; copy != self && i < constants.count; i++) {
+			[constants_of(copy) addObject:[constants objectAtIndex:i]];
+		}
+		return copy;
 	});
 }
 
@@ -336,6 +345,59 @@ static StelaGPUType *type_at(NSArray *types, uint32_t index)
 typedef struct {
 	NSUInteger index, offset;
 } StelaArgumentSlot;
+
+/* `NSDataReadingMappedIfSafe`: a system library runs to hundreds of megabytes. */
+#define STELA_DATA_MAPPED 1
+
+/* A universal library's header, big endian: magic, then `count` slices of cpu
+ * type, subtype, offset, size and alignment. Its AIR slice is the one a device
+ * other than Apple's own compiles; the rest are code for Apple's GPUs. */
+#define UNIVERSAL_MAGIC 0xcafebabeu
+#define UNIVERSAL_SLICE_WORDS 5
+#define CPU_TYPE_AIR64 0x01000017u
+
+static uint32_t big_endian(const uint8_t *bytes, size_t word)
+{
+	uint32_t value;
+	memcpy(&value, bytes + word * sizeof(value), sizeof(value));
+	return __builtin_bswap32(value);
+}
+
+/* Narrows a universal library to its AIR slice; any other library stays as it is. */
+static void air_slice(const void **bytes, NSUInteger *length)
+{
+	const uint8_t *data = *bytes;
+	if (*length < 2 * sizeof(uint32_t) || big_endian(data, 0) != UNIVERSAL_MAGIC) {
+		return;
+	}
+	size_t count = big_endian(data, 1);
+	if (count > (*length / sizeof(uint32_t) - 2) / UNIVERSAL_SLICE_WORDS) {
+		return;
+	}
+	for (size_t i = 0; i < count; i++) {
+		size_t word = 2 + i * UNIVERSAL_SLICE_WORDS;
+		uint64_t offset = big_endian(data, word + 2), size = big_endian(data, word + 3);
+		if (big_endian(data, word) == CPU_TYPE_AIR64 && offset + size <= *length) {
+			*bytes = data + offset;
+			*length = size;
+			return;
+		}
+	}
+}
+
+@implementation StelaGPUArgumentEncoder (Sizes)
+
+- (NSUInteger)encodedLength
+{
+	return _encodedLength;
+}
+
+- (NSUInteger)alignment
+{
+	return _alignment;
+}
+
+@end
 
 @implementation StelaGPUArgumentEncoder {
 	StelaGPUDevice *_device;
@@ -753,6 +815,7 @@ static id encoder_of_binding(StelaGPUDevice *device, StelaGPUBinding *binding)
 	free(spans);
 	free(records);
 	if (status != StelaStatusOk) {
+		stela_report([[NSString stringWithFormat:@"function %@", name] UTF8String], &failure);
 		if (error) {
 			*error = stela_error(MTLLibraryErrorDomain, MTLLibraryErrorFunctionNotFound, &failure);
 		}
@@ -898,6 +961,7 @@ static BOOL add_failed(NSError **error, NSInteger code, NSError *failure)
 
 - (id)libraryWithBytes:(const void *)bytes length:(NSUInteger)length error:(NSError **)error
 {
+	air_slice(&bytes, &length);
 	StelaNewLibraryRequest request = {.data = stela_span(bytes, length)};
 	StelaHandle response = {};
 	StelaFailure failure;
@@ -923,13 +987,18 @@ static BOOL add_failed(NSError **error, NSInteger code, NSError *failure)
 
 - (id)newLibraryWithURL:(NSURL *)url error:(NSError **)error
 {
-	NSData *data = [NSData dataWithContentsOfURL:url options:0 error:error];
-	return data ? [self libraryWithBytes:data.bytes length:data.length error:error] : nil;
+	NSData *data = [NSData dataWithContentsOfURL:url options:STELA_DATA_MAPPED error:error];
+	if (!data) {
+		StelaFailure failure = {.reason = "the file did not read"};
+		stela_report([[NSString stringWithFormat:@"a library at %@", url] UTF8String], &failure);
+		return nil;
+	}
+	return [self libraryWithBytes:data.bytes length:data.length error:error];
 }
 
 - (id)newLibraryWithFile:(NSString *)path error:(NSError **)error
 {
-	NSData *data = [NSData dataWithContentsOfFile:path options:0 error:error];
+	NSData *data = [NSData dataWithContentsOfFile:path options:STELA_DATA_MAPPED error:error];
 	return data ? [self libraryWithBytes:data.bytes length:data.length error:error] : nil;
 }
 
@@ -939,6 +1008,7 @@ static BOOL add_failed(NSError **error, NSInteger code, NSError *failure)
 	if (!url) {
 		if (error) {
 			StelaFailure failure = {.reason = "the bundle has no default.metallib"};
+			stela_report([[NSString stringWithFormat:@"a default library of %@", bundle] UTF8String], &failure);
 			*error = stela_error(MTLLibraryErrorDomain, MTLLibraryErrorFileNotFound, &failure);
 		}
 		return nil;

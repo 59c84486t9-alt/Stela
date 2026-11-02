@@ -24,7 +24,7 @@ use super::{
     shader::Compiler,
     vulkan::backend::Backend,
 };
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::{
     num::{NonZeroU32, NonZeroU64},
     ops::Range,
@@ -233,6 +233,8 @@ pub struct Service<B: Backend, C: Compiler> {
     /// The completed serial the gate last signaled; `u64::MAX` once it
     /// signaled the device's loss.
     signaled: u64,
+    /// Why the last call was refused, for the platform's log.
+    refused: Option<String>,
 }
 
 impl<B: Backend, C: Compiler> Service<B, C> {
@@ -246,6 +248,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             next_connection: NonZeroU64::MIN,
             shares: sharing::Shares::default(),
             signaled: 0,
+            refused: None,
         }
     }
 

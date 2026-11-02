@@ -101,9 +101,16 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 		return nil;
 	}
 	StelaEmpty nothing = {};
+	if (agreed.capability_bytes != sizeof(*_capabilities)) {
+		NSLog(@"StelaGPU: the capability block is %u bytes, not %zu", agreed.capability_bytes,
+		      sizeof(*_capabilities));
+		return nil;
+	}
 	_capabilities = malloc(sizeof(*_capabilities));
-	if (!_capabilities || agreed.capability_bytes != sizeof(*_capabilities)
-	    || STELA_CALL(&_gate, Capabilities, &nothing, _capabilities, &failure) != StelaStatusOk) {
+	if (!_capabilities) {
+		return nil;
+	}
+	if (STELA_CALL(&_gate, Capabilities, &nothing, _capabilities, &failure) != StelaStatusOk) {
 		stela_report("the capability block", &failure);
 		return nil;
 	}
@@ -159,10 +166,13 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 
 - (void)arm
 {
-	uint64_t reference[kIOAsyncCalloutCount] = {(uint64_t)completed, (uint64_t)(__bridge void *)self};
+	uint64_t reference[kOSAsyncRef64Count] = {
+		[kIOAsyncCalloutFuncIndex] = (uint64_t)completed,
+		[kIOAsyncCalloutRefconIndex] = (uint64_t)(__bridge void *)self,
+	};
 	mach_port_t port = IONotificationPortGetMachPort(_notifications);
 	IOConnectCallAsyncScalarMethod(_gate.connect, kStelaGPUNotifyCompletion, port, reference,
-				       kIOAsyncCalloutCount, &_seen, 1, NULL, NULL);
+				       kOSAsyncRef64Count, &_seen, 1, NULL, NULL);
 }
 
 - (void)completionsReached:(uint64_t)count
@@ -346,6 +356,37 @@ FIELD(readWriteTextureSupport, read_write_texture_tier)
 	return _capabilities->recommended_max_working_set_size;
 }
 
+- (uint64_t)sharedMemorySize
+{
+	return [self hasUnifiedMemory] ? [self recommendedMaxWorkingSetSize] : 0;
+}
+
+- (uint64_t)dedicatedMemorySize
+{
+	return [self hasUnifiedMemory] ? 0 : [self recommendedMaxWorkingSetSize];
+}
+
+/* Metal's own default: nothing here runs at a raised GPU priority band. */
+- (BOOL)supportPriorityBand
+{
+	return NO;
+}
+
+- (BOOL)metalAssertionsEnabled
+{
+	return _metalAssertionsEnabled;
+}
+
+- (void)setMetalAssertionsEnabled:(BOOL)enabled
+{
+	_metalAssertionsEnabled = enabled;
+}
+
+- (BOOL)supportsSampleCount:(NSUInteger)count
+{
+	return [self supportsTextureSampleCount:count];
+}
+
 - (NSUInteger)currentAllocatedSize
 {
 	StelaEmpty nothing = {};
@@ -381,6 +422,82 @@ LIMIT(maxThreadgroupMemoryLength, max_threadgroup_memory_length)
 LIMIT(maxBufferLength, max_buffer_length)
 LIMIT(maxArgumentBufferSamplerCount, max_argument_buffer_sampler_count)
 LIMIT(sparseTileSizeInBytes, sparse_tile_bytes)
+
+/* Metal's base class answers these from a table only Apple's drivers fill, and
+ * zero from it makes every texture too large for Core Animation. */
+LIMIT(maxTextureWidth1D, max_texture_dimension_1d)
+LIMIT(maxTextureWidth2D, max_texture_dimension_2d)
+LIMIT(maxTextureHeight2D, max_texture_dimension_2d)
+LIMIT(maxTextureWidth3D, max_texture_dimension_3d)
+LIMIT(maxTextureHeight3D, max_texture_dimension_3d)
+LIMIT(maxTextureDepth3D, max_texture_dimension_3d)
+LIMIT(maxTextureDimensionCube, max_texture_dimension_cube)
+LIMIT(maxTextureLayers, max_texture_array_length)
+LIMIT(maxTextureBufferWidth, max_texture_buffer_width)
+LIMIT(maxColorAttachments, max_color_attachments)
+LIMIT(maxViewportCount, max_viewports)
+LIMIT(maxVertexAmplificationCount, max_vertex_amplification_count)
+LIMIT(maxVertexAmplificationFactor, max_vertex_amplification_count)
+LIMIT(maxTessellationFactor, max_tessellation_factor)
+LIMIT(maxTotalComputeThreadsPerThreadgroup, max_total_threads_per_threadgroup)
+LIMIT(maxComputeThreadgroupMemory, max_threadgroup_memory_length)
+LIMIT(minConstantBufferAlignmentBytes, buffer_alignment_for_uniforms)
+
+- (float)maxPointSize
+{
+	return _capabilities->limits.max_point_size;
+}
+
+/* The argument table's sizes (`capabilities.rs`). */
+#define TABLE(selector, count)                                                                     \
+	-(NSUInteger)selector                                                                      \
+	{                                                                                          \
+		return count;                                                                      \
+	}
+TABLE(maxVertexBuffers, 31)
+TABLE(maxFragmentBuffers, 31)
+TABLE(maxComputeBuffers, 31)
+TABLE(maxVertexTextures, 128)
+TABLE(maxFragmentTextures, 128)
+TABLE(maxComputeTextures, 128)
+TABLE(maxVertexSamplers, 16)
+TABLE(maxFragmentSamplers, 16)
+TABLE(maxComputeSamplers, 16)
+TABLE(maxVertexAttributes, 31)
+
+/* MTLPixelFormatRGBA32Float: the strictest format, for callers that ask of the device as a whole. */
+#define WIDEST_FORMAT 125
+
+- (NSUInteger)linearTextureAlignmentBytes
+{
+	return [self minimumLinearTextureAlignmentForPixelFormat:WIDEST_FORMAT];
+}
+
+- (NSUInteger)deviceLinearTextureAlignmentBytes
+{
+	return [self linearTextureAlignmentBytes];
+}
+
+- (NSUInteger)deviceLinearReadOnlyTextureAlignmentBytes
+{
+	return [self linearTextureAlignmentBytes];
+}
+
+- (NSUInteger)iosurfaceTextureAlignmentBytes
+{
+	return [self linearTextureAlignmentBytes];
+}
+
+- (NSUInteger)iosurfaceReadOnlyTextureAlignmentBytes
+{
+	return [self linearTextureAlignmentBytes];
+}
+
+/* What wiring a client's pages needs of them. */
+- (NSUInteger)minBufferNoCopyAlignmentBytes
+{
+	return 0x4000;
+}
 
 - (MTLSize)maxThreadsPerThreadgroup
 {
@@ -479,6 +596,16 @@ LIMIT(sparseTileSizeInBytes, sparse_tile_bytes)
 - (NSUInteger)minimumTextureBufferAlignmentForPixelFormat:(NSUInteger)format
 {
 	return [self alignmentsOfFormat:format].texture_buffer;
+}
+
+/* Metal's base class checks the descriptor against limits only Apple's drivers
+ * state; a row here is its blocks, rounded up to the format's alignment. */
+- (NSUInteger)requiredLinearTextureBytesPerRowForDescriptor:(id)descriptor
+{
+	StelaFormatAlignmentsResponse format = [self alignmentsOfFormat:[descriptor pixelFormat]];
+	NSUInteger blocks = format.block_width ? ([descriptor width] + format.block_width - 1) / format.block_width : 0;
+	NSUInteger alignment = format.linear_texture ? format.linear_texture : 1;
+	return (blocks * format.block_bytes + alignment - 1) / alignment * alignment;
 }
 
 - (BOOL)supportsFamily:(NSInteger)family

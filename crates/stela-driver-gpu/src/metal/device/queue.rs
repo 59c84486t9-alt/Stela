@@ -248,7 +248,29 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             sample_positions: request.sample_positions.clone(),
             rasterization_rate_map: request.rasterization_rate_map,
         };
-        let plan = pass::render_pass(&self.capabilities, &descriptor)?;
+        let mut plan = pass::render_pass(&self.capabilities, &descriptor)?;
+        plan.inputs.ordered = self
+            .backend
+            .physical_device()
+            .features
+            .rasterization_order_color;
+        for (input, color) in plan
+            .inputs
+            .textures
+            .iter_mut()
+            .zip(&request.color_attachments)
+        {
+            if let Some(color) = color {
+                let texture = self.texture_descriptor(color.texture)?;
+                if texture.texture_type == crate::metal::abi::TextureType::D2
+                    && texture.sample_count == 1
+                    && color.level == 0
+                    && color.slice == 0
+                {
+                    *input = self.texture_resource_id(color.texture)?;
+                }
+            }
+        }
         let plan = self.resolve_views(plan)?;
         let visibility = request
             .visibility_result_buffer
@@ -340,6 +362,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             stencil_format: plan.stencil_format,
             visibility_results: plan.visibility_results,
             sample_locations: plan.sample_locations,
+            inputs: plan.inputs,
         })
     }
 

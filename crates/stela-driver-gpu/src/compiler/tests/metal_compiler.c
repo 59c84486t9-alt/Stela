@@ -241,6 +241,45 @@ static const char *hoisted =
 static const char *mistyped =
    CONDITIONAL("br i1 %on, label %tinted, label %untinted\n", "int");
 
+/* A fragment function that reads a [[function_constant(use_tint)]] buffer on
+ * one side of a run-time test. With use_tint false that side cannot run, and
+ * the test and its read go with it. */
+static const char *absent_path =
+   "@use_tint.init = linkonce_odr hidden addrspace(2) externally_initialized constant i8"
+   " undef, section \"air.fc_initializer\", align 1\n"
+   "@tinted = internal addrspace(2) global i8 0, align 1\n"
+   "@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }]"
+   " [{ i32, ptr, ptr } { i32 65535, ptr @init, ptr null }]\n"
+   "@llvm.compiler.used = appending global [1 x ptr] [ptr addrspacecast"
+   " (ptr addrspace(2) @tinted to ptr)], section \"llvm.metadata\"\n"
+   "declare i8 @air.normalize_function_constant_predicate.i8(i8)\n"
+   "define <4 x float> @absent_path(<4 x float> %position, ptr addrspace(2) %tint) {\n"
+   "%x = extractelement <4 x float> %position, i64 0\n"
+   "%left = fcmp olt float %x, 0.0\n"
+   "br i1 %left, label %read, label %done\n"
+   "read:\n%t = load <4 x float>, ptr addrspace(2) %tint, align 16\nbr label %done\n"
+   "done:\n%c = phi <4 x float> [ %t, %read ], [ %position, %0 ]\n"
+   "ret <4 x float> %c\n}\n"
+   "define internal void @init() section \"air.static_init\" {\n"
+   "%v = load i8, ptr addrspace(2) @use_tint.init, align 1\n"
+   "%t = call i8 @air.normalize_function_constant_predicate.i8(i8 %v)\n"
+   "store i8 %t, ptr addrspace(2) @tinted, align 1\n"
+   "ret void\n}\n"
+   "!air.fragment = !{!2}\n"
+   "!2 = !{ptr @absent_path, !3, !4}\n!3 = !{!30}\n"
+   "!30 = !{!\"air.render_target\", i32 1, i32 0, !\"air.arg_type_name\", !\"float4\","
+   " !\"air.arg_name\", !\"color\"}\n"
+   "!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.position\", !\"air.center\", !\"air.no_perspective\","
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n"
+   "!41 = !{i32 1, !\"air.function_constant\", !43, !\"air.buffer\","
+   " !\"air.location_index\", i32 0, i32 1, !\"air.read\", !\"air.address_space\", i32 2,"
+   " !\"air.arg_type_size\", i32 16, !\"air.arg_type_align_size\", i32 16,"
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"tint\"}\n"
+   "!43 = !{ptr addrspace(2) @tinted, !\"bool\", !\"use_tint\"}\n"
+   "!air.function_constants = !{!50}\n"
+   "!50 = !{ptr addrspace(2) @use_tint.init, !\"bool\", !\"use_tint\", i32 0}\n";
+
 /* A kernel as Metal 2.4 records one, in a Debug build: its buffer leaves its
  * address space to its type, and its simdgroup barrier has the older scope. */
 static const char *older_kernel =
@@ -917,9 +956,9 @@ render_stages_compile_at_their_linked_locations(void)
    assert(!compile(fragment, "fragment", &unlinked, &error) && error.kind == STELA_AIR_ARGUMENT);
    /* As are entries no AIR list names. */
    assert(!reflect(vertex, "missing", &reflection, &error) && error.kind == STELA_AIR_ARGUMENT);
-   /* Only Apple GPU families blend programmably. */
-   assert(!reflect(blended, "blended", &reflection, &error) && error.kind == STELA_AIR_ARGUMENT &&
-          strstr(error.detail, "programmable blending"));
+   /* A function reading its render target says so, for its pipeline's draws. */
+   assert(reflect(blended, "blended", &reflection, &error));
+   assert(reflection.attachment_reads == 1u);
 }
 
 static void
@@ -1143,6 +1182,21 @@ derived_constants_are_constructed_from_their_function_constants(void)
           strstr(error.detail, "program-scope constants"));
 }
 
+static unsigned
+count_intrinsic(nir_shader *shader, nir_intrinsic_op op)
+{
+   unsigned count = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            count += instr->type == nir_instr_type_intrinsic &&
+                     nir_instr_as_intrinsic(instr)->intrinsic == op;
+         }
+      }
+   }
+   return count;
+}
+
 /* Arguments a false function constant makes absent: reflection leaves
  * them out, folding removes the paths that read them, and another argument
  * takes their index. */
@@ -1151,9 +1205,9 @@ function_constants_select_arguments(void)
 {
    struct stela_metal_reflection reflection;
    struct stela_air_error error;
-   /* Unspecialized, the function declares both. */
+   /* Unspecialized, it declares only what no constant can leave out. */
    assert(reflect(conditional, "conditional", &reflection, &error));
-   assert(reflection.buffer_count == 3);
+   assert(reflection.buffer_count == 1);
    for (uint8_t on = 0; on < 2; on++) {
       const struct stela_air_constant_value value = {0, &on, sizeof(on)};
       assert(reflect_specialized(conditional, "conditional", &value, 1, &reflection, &error));
@@ -1174,15 +1228,26 @@ function_constants_select_arguments(void)
       assert(shader);
       stela_metal_release(shader);
 
-      /* A function that reads an absent argument is refused. */
+      /* A function that reads an absent argument reads nothing. */
       shader = compile(unguarded, "conditional", &specialization, &error);
-      assert(on ? shader != NULL :
-                  !shader && error.kind == STELA_AIR_ARGUMENT && strstr(error.detail, "is false"));
-      if (shader)
-         stela_metal_release(shader);
+      assert(shader);
+      stela_metal_release(shader);
    }
    assert(!reflect(mistyped, "conditional", &reflection, &error) &&
           error.kind == STELA_AIR_METADATA && strstr(error.detail, "predicate"));
+   /* A render stage drops the path that must reach an absent buffer. */
+   for (uint8_t on = 0; on < 2; on++) {
+      const struct stela_air_constant_value value = {0, &on, sizeof(on)};
+      const struct stela_metal_specialization specialization = {
+         .constants = &value, .constant_count = 1,
+      };
+      nir_shader *shader = compile(absent_path, "absent_path", &specialization, &error);
+      if (!shader)
+         fprintf(stderr, "absent_path: %u %s\n", error.kind, error.detail);
+      assert(shader);
+      assert(!count_intrinsic(shader, nir_intrinsic_load_global) == !on);
+      stela_metal_release(shader);
+   }
 }
 
 /* An output a false function constant makes absent is not one. */
@@ -1397,21 +1462,6 @@ static const char *logging =
    " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n"
    "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
    " !\"air.arg_name\", !\"tid\"}\n";
-
-static unsigned
-count_intrinsic(nir_shader *shader, nir_intrinsic_op op)
-{
-   unsigned count = 0;
-   nir_foreach_function_impl(impl, shader) {
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr(instr, block) {
-            count += instr->type == nir_instr_type_intrinsic &&
-                     nir_instr_as_intrinsic(instr)->intrinsic == op;
-         }
-      }
-   }
-   return count;
-}
 
 static void
 os_log_appends_self_contained_records(void)

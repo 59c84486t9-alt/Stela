@@ -152,6 +152,28 @@ struct Heap {
 }
 
 /// Device-level functions of the optional extensions.
+/// Calibrated timestamps under the name the driver offers: lavapipe has only
+/// the EXT one.
+enum Calibrated {
+    Khr(khr::calibrated_timestamps::Device),
+    Ext(ext::calibrated_timestamps::Device),
+}
+
+impl Calibrated {
+    fn sample(
+        &self,
+        domains: &[vk::CalibratedTimestampInfoKHR<'_>],
+    ) -> ash::prelude::VkResult<(Vec<u64>, u64)> {
+        // SAFETY: the caller's domains, on the device these were loaded for.
+        unsafe {
+            match self {
+                Self::Khr(device) => device.get_calibrated_timestamps(domains),
+                Self::Ext(device) => device.get_calibrated_timestamps(domains),
+            }
+        }
+    }
+}
+
 struct ExtensionFns {
     host_image_copy: Option<ext::host_image_copy::Device>,
     dynamic_state3: Option<ext::extended_dynamic_state3::Device>,
@@ -160,7 +182,7 @@ struct ExtensionFns {
     /// as `stela.efi`'s Rust, cannot pass the core command's floats to C.
     depth_bias: Option<ext::depth_bias_control::Device>,
     mesh: Option<ext::mesh_shader::Device>,
-    calibrated: Option<khr::calibrated_timestamps::Device>,
+    calibrated: Option<Calibrated>,
     external_memory_fd: Option<khr::external_memory_fd::Device>,
     external_memory_host: Option<ext::external_memory_host::Device>,
     conditional: ext::conditional_rendering::Device,
@@ -317,8 +339,15 @@ impl NativeBackend {
                 .then(|| ext::depth_bias_control::Device::new(&instance, &device)),
             mesh: has(ext::mesh_shader::NAME)
                 .then(|| ext::mesh_shader::Device::new(&instance, &device)),
-            calibrated: has(khr::calibrated_timestamps::NAME)
-                .then(|| khr::calibrated_timestamps::Device::new(&instance, &device)),
+            calibrated: if has(khr::calibrated_timestamps::NAME) {
+                let calibrated = khr::calibrated_timestamps::Device::new(&instance, &device);
+                Some(Calibrated::Khr(calibrated))
+            } else if has(ext::calibrated_timestamps::NAME) {
+                let calibrated = ext::calibrated_timestamps::Device::new(&instance, &device);
+                Some(Calibrated::Ext(calibrated))
+            } else {
+                None
+            },
             external_memory_fd: has(khr::external_memory_fd::NAME)
                 .then(|| khr::external_memory_fd::Device::new(&instance, &device)),
             external_memory_host: has(ext::external_memory_host::NAME)
@@ -1415,9 +1444,8 @@ impl Backend for NativeBackend {
             vk::CalibratedTimestampInfoKHR::default()
                 .time_domain(vk::TimeDomainKHR::CLOCK_MONOTONIC),
         ];
-        // SAFETY: both domains are valid for Linux-derived drivers.
-        let (stamps, _) =
-            unsafe { calibrated.get_calibrated_timestamps(&domains) }.map_err(failure)?;
+        // Both domains are valid for Linux-derived drivers.
+        let (stamps, _) = calibrated.sample(&domains).map_err(failure)?;
         Ok((stamps[1], stamps[0]))
     }
 }

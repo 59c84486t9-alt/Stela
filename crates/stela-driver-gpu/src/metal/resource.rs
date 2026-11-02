@@ -244,17 +244,20 @@ pub fn texture(capabilities: &Capabilities, descriptor: &TextureDescriptor) -> R
     }
     let cpu_access = match descriptor.options.storage_mode {
         StorageMode::Private => CpuAccess::None,
-        StorageMode::Managed
-            if capabilities
-                .format(descriptor.pixel_format)
-                .contains(C::HOST_TRANSFER) =>
+        // Apple's frameworks expect shared textures whatever the device's memory.
+        StorageMode::Managed | StorageMode::Shared
+            if descriptor.sample_count == 1
+                && capabilities
+                    .format(descriptor.pixel_format)
+                    .contains(C::HOST_TRANSFER) =>
         {
             CpuAccess::HostImageCopy
         }
         StorageMode::Managed => CpuAccess::Staged,
+        // A staged copy only meets the GPU's writes at a synchronize.
         StorageMode::Shared => {
-            return Err(super::error::Error::Invalid(
-                "shared textures need unified memory; use managed or private storage",
+            return Err(super::error::Error::Unsupported(
+                "shared storage of a format without host image copy",
             ));
         }
         StorageMode::Memoryless => {
@@ -465,7 +468,11 @@ fn effective_usage(
             "texture atomics on this pixel format",
         )?;
     }
-    Ok(usage)
+    // A fragment function may read what it renders to.
+    Ok(usage.with(
+        TextureUsage::SHADER_READ,
+        usage.contains(TextureUsage::RENDER_TARGET) && format.contains(C::READ),
+    ))
 }
 
 fn image_info(

@@ -781,7 +781,8 @@ impl<'a> Slice<'a> {
         self.apply()?;
         let starts = self.chain(text_bytes, data_bytes)?;
         let fixups = self.fixups_blob(&starts, text_bytes)?;
-        let strings = linkedit + fixups.len() as u64;
+        // dyld validates pointer alignment even for the empty symbol/string tables.
+        let strings = (linkedit + fixups.len() as u64).next_multiple_of(8);
         let signature_offset = (strings + 1).next_multiple_of(16);
         let signature_bytes = signature_size(identifier, signature_offset);
         let end = signature_offset + signature_bytes;
