@@ -384,6 +384,7 @@ mod attach {
                 kind,
                 &location,
                 &mut shared,
+                &mut devices.owners,
             ) {
                 Ok(Some(input)) => devices.inputs.push(input),
                 Ok(None) => {}
@@ -454,10 +455,20 @@ mod attach {
         kind: Kind,
         location: &str,
         shared: &mut Shared,
+        owners: &mut Vec<Box<dyn core::any::Any>>,
     ) -> Result<Option<InputDevice>, PlatformError> {
         if kind == Kind::Hid && listed(session, handle, NOT_HID_OVER_I2C)? {
             return Ok(None);
         }
+        let minimum = if kind == Kind::Hid {
+            let minimum = services.minimum_delay().map_err(native)?;
+            minimum.check().map_err(|error| {
+                PlatformError::HidI2c(hid_i2c::ErrorKind::Minimum(error).into())
+            })?;
+            Some(minimum)
+        } else {
+            None
+        };
         let device = DeviceResources::inspect(handle).map_err(PlatformError::Acpi)?;
         let connection = connection(device.descriptors())?;
         let register = if kind == Kind::Hid {
@@ -515,19 +526,33 @@ mod attach {
         let failed = PlatformError::Touchpad;
         match kind {
             Kind::Hid => {
-                let mut device = hid_i2c::Device::new(
+                let attached = hid_i2c::Device::new(
                     bus,
                     interrupt,
                     clock,
+                    minimum.unwrap(),
                     address,
                     register,
                     RESET_TIMEOUT_US,
                 )
-                .map_err(PlatformError::HidI2c)?;
-                device.initialize().map_err(PlatformError::HidI2c)?;
-                let input = hid_i2c::HidInput::new(device, format!("I2C-HID {location}"))
-                    .map_err(|(_, error)| PlatformError::HidDescriptor(error))?;
-                Ok(Some(InputDevice::I2cHid(Box::new(input))))
+                .and_then(hid_i2c::Device::initialize_owned);
+                let attached = match attached {
+                    Ok(device) => hid_i2c::HidInput::new(device, format!("I2C-HID {location}")),
+                    Err(refusal) => Err(refusal),
+                };
+                match attached {
+                    Ok(input) => Ok(Some(InputDevice::I2cHid(Box::new(input)))),
+                    Err(refusal) => {
+                        let error = match refusal.error {
+                            hid_i2c::RefusalCause::Transport(error) => PlatformError::HidI2c(error),
+                            hid_i2c::RefusalCause::Descriptor(error) => {
+                                PlatformError::HidDescriptor(error)
+                            }
+                        };
+                        owners.push(Box::new(refusal));
+                        Err(error)
+                    }
+                }
             }
             Kind::Elan => {
                 let elan = |error| failed(touchpad::Error::Elan(error));

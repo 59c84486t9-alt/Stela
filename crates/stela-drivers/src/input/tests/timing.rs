@@ -78,11 +78,19 @@ fn clock_failures_precede_transport_effects() {
         };
         let address = i2c::Address::SevenBit(0x15);
         assert_eq!(
-            hid_i2c::Device::new(Bus, Pin, clock, address, 1, 100_000)
-                .err()
-                .unwrap()
-                .kind,
-            hid_i2c::ErrorKind::Clock(expected)
+            hid_i2c::Device::new(
+                Bus,
+                Pin,
+                clock,
+                crate::minimum_model::refusing(clock),
+                address,
+                1,
+                100_000
+            )
+            .err()
+            .unwrap()
+            .error,
+            hid_i2c::RefusalCause::Transport(hid_i2c::ErrorKind::Clock(expected).into())
         );
         assert_eq!(
             elan::I2cDevice::new(Bus, Pin, clock, address)
