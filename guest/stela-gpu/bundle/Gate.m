@@ -25,7 +25,9 @@ uint32_t stela_gate_call(StelaGate *gate, uint32_t operation, const void *reques
 	StelaFailure unread;
 	failure = failure ? failure : &unread;
 	volatile StelaGateCall call;
+	unsigned denials = 0;
 	do {
+		touch(stela_span(response, response_bytes), true);
 		for (size_t i = 0; i < spans.read_count; i++) {
 			touch(spans.reads[i], false);
 		}
@@ -41,7 +43,10 @@ uint32_t stela_gate_call(StelaGate *gate, uint32_t operation, const void *reques
 		};
 		/* The store runs the call: `call` holds its answer at the next instruction. */
 		gate->page[STELA_GATE_CALL / sizeof(uint64_t)] = (uint64_t)&call;
-	} while (call.status == StelaStatusUnmapped);
+		/* Still closed: the service never reached the record, and the gate says why. */
+		failure->fault = call.status == StelaStatusClosed ? gate->page[STELA_GATE_FAULT / sizeof(uint64_t)] : 0;
+		/* The pager can take back the stack's page after the record is written. */
+	} while (call.status == StelaStatusUnmapped || (failure->fault == STELA_GATE_FAULT_DENIED && ++denials < 16));
 	failure->status = call.status;
 	size_t length = call.reason_length < sizeof(failure->reason) ? call.reason_length : sizeof(failure->reason) - 1;
 	failure->reason[call.status == StelaStatusOk ? 0 : length] = 0;
@@ -60,7 +65,8 @@ void stela_report(const char *what, const StelaFailure *failure)
 {
 	static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
 	static NSMutableDictionary *reported;
-	NSString *message = [NSString stringWithFormat:@"%s: %s", what, failure->reason];
+	NSString *message = [NSString stringWithFormat:@"%s: status %u, gate fault %llu: %s", what, failure->status,
+						       failure->fault, failure->reason];
 	os_unfair_lock_lock(&lock);
 	reported = reported ?: [NSMutableDictionary dictionary];
 	bool first = [reported objectForKey:message] == nil;

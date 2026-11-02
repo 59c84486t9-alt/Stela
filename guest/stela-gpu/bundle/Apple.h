@@ -44,7 +44,10 @@ typedef struct NSRange NSRange;
 /* Foundation. */
 @class NSArray, NSError, NSString, NSURL;
 
-__attribute__((objc_root_class)) @interface NSObject
+/* Clang lays a direct subclass out from this interface, so it states `isa`. */
+__attribute__((objc_root_class)) @interface NSObject {
+	Class isa;
+}
 + (instancetype)alloc;
 - (instancetype)init;
 + (instancetype)new;
@@ -193,7 +196,10 @@ extern mach_port_t mach_task_self_;
 #define kIOReturnSuccess 0
 #define kIOMapAnywhere 1u
 #define kIOMapDefaultCache 0u
-#define kIOAsyncCalloutCount 8
+/* Slot 0 of an async reference is the kernel's, for the reply port. */
+#define kOSAsyncRef64Count 8
+#define kIOAsyncCalloutFuncIndex 1
+#define kIOAsyncCalloutRefconIndex 2
 
 typedef void (*IOAsyncCallback1)(void *reference, int result, void *argument);
 typedef void (*IOAsyncCallback)(void *reference, int result, void **arguments, uint32_t count);
@@ -230,6 +236,7 @@ kern_return_t IOSurfaceUnlock(IOSurfaceRef surface, uint32_t options, uint32_t *
 void *IOSurfaceGetBaseAddress(IOSurfaceRef surface);
 void *IOSurfaceGetBaseAddressOfPlane(IOSurfaceRef surface, size_t plane);
 size_t IOSurfaceGetBytesPerRowOfPlane(IOSurfaceRef surface, size_t plane);
+size_t IOSurfaceGetElementHeightOfPlane(IOSurfaceRef surface, size_t plane);
 size_t IOSurfaceGetAllocSize(IOSurfaceRef surface);
 
 #define DISPATCH_TIME_FOREVER (~0ull)

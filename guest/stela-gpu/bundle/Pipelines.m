@@ -265,6 +265,52 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 	return _maxTotalThreadsPerObjectThreadgroup;
 }
 
+/* A pipeline lives in the service, and no tile stage or fixed mesh grid exists. */
+- (NSUInteger)allocatedSize
+{
+	return 0;
+}
+
+- (NSInteger)shaderValidation
+{
+	return 0;
+}
+
+- (NSUInteger)maxTotalThreadsPerThreadgroup
+{
+	return 0;
+}
+
+- (BOOL)threadgroupSizeMatchesTileSize
+{
+	return NO;
+}
+
+- (NSUInteger)maxTotalThreadgroupsPerMeshGrid
+{
+	return 0;
+}
+
+- (MTLSize)requiredThreadsPerTileThreadgroup
+{
+	return (MTLSize){0};
+}
+
+- (MTLSize)requiredThreadsPerObjectThreadgroup
+{
+	return (MTLSize){0};
+}
+
+- (MTLSize)requiredThreadsPerMeshThreadgroup
+{
+	return (MTLSize){0};
+}
+
+- (id)newRenderPipelineDescriptorForSpecialization
+{
+	return [_descriptor copy];
+}
+
 - (NSUInteger)maxTotalThreadsPerMeshThreadgroup
 {
 	return _maxTotalThreadsPerMeshThreadgroup;
@@ -345,6 +391,32 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 	return _maxTotalThreadsPerThreadgroup;
 }
 
+/* A pipeline lives in the service, and no fixed thread count or persistent threadgroup exists. */
+- (NSUInteger)allocatedSize
+{
+	return 0;
+}
+
+- (NSInteger)shaderValidation
+{
+	return 0;
+}
+
+- (NSInteger)forwardProgressUsage
+{
+	return 0;
+}
+
+- (MTLSize)requiredThreadsPerThreadgroup
+{
+	return (MTLSize){0};
+}
+
+- (NSUInteger)recommendedPersistentThreadgroupsPerGridForThreadsPerThreadgroup:(MTLSize)threads
+{
+	return 0;
+}
+
 - (NSUInteger)threadExecutionWidth
 {
 	return _threadExecutionWidth;
@@ -390,6 +462,11 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 @end
 
 @implementation StelaGPUDevice (Pipelines)
+
+- (id)newVisibleFunctionTableWithDescriptor:(id)descriptor
+{
+	return function_table(self, descriptor);
+}
 
 static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineResponse *response, id descriptor,
 			  BOOL indirect, BOOL mesh)

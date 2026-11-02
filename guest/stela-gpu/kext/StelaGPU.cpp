@@ -131,6 +131,22 @@ StelaGPU::copyGateMemory(uint64_t page)
 	return IODeviceMemory::withSubRange(window, page * STELA_GATE_PAGE, STELA_GATE_PAGE);
 }
 
+static IOMemoryDescriptor *
+wireMemory(task_t task, mach_vm_address_t address, mach_vm_size_t length, IODirection direction)
+{
+	IOMemoryDescriptor *memory = IOMemoryDescriptor::withAddressRange(address, length, direction, task);
+	if (!memory) {
+		return nullptr;
+	}
+	IOReturn prepared = memory->prepare();
+	if (prepared != kIOReturnSuccess) {
+		IOLog("StelaGPU: wiring %llx bytes at %llx refused: %x\n", length, address, prepared);
+		memory->release();
+		return nullptr;
+	}
+	return memory;
+}
+
 /*
  * The prepared descriptor of imported memory stands for its token: only the
  * gate sees a token, and it answers only those the kext gave it.
@@ -138,12 +154,12 @@ StelaGPU::copyGateMemory(uint64_t page)
 uint64_t
 StelaGPU::importMemory(uint64_t page, task_t task, mach_vm_address_t address, mach_vm_size_t length)
 {
-	IOMemoryDescriptor *memory = IOMemoryDescriptor::withAddressRange(address, length, kIODirectionOutIn, task);
+	IOMemoryDescriptor *memory = wireMemory(task, address, length, kIODirectionOutIn);
 	if (!memory) {
-		return 0;
+		// A read-only mapping wires for the GPU's reads alone.
+		memory = wireMemory(task, address, length, kIODirectionOut);
 	}
-	if (memory->prepare() != kIOReturnSuccess) {
-		memory->release();
+	if (!memory) {
 		return 0;
 	}
 	IOLockLock(lock);

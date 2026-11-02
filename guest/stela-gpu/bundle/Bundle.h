@@ -19,9 +19,11 @@ typedef struct {
 	volatile uint64_t *page;
 } StelaGate;
 
-/* Why a call failed: its status and the service's reason. */
+/* Why a call failed: its status, the service's reason, and the gate's fault for
+ * a call the service never completed. */
 typedef struct {
 	uint32_t status;
+	uint64_t fault;
 	char reason[160];
 } StelaFailure;
 
@@ -32,9 +34,9 @@ typedef struct {
 } StelaSpans;
 
 /*
- * Runs one operation and answers its status. A span's page may be away when the
- * service copies it, so the call touches `spans`, and touches them again if the
- * service found one gone. `failure` may be NULL.
+ * Runs one operation and answers its status. A page may be away when the service
+ * copies it, so the call touches `response` and `spans`, and touches them again
+ * if the service found one gone. `failure` may be NULL.
  */
 uint32_t stela_gate_call(StelaGate *gate, uint32_t operation, const void *request, size_t request_bytes,
 			 void *response, size_t response_bytes, StelaSpans spans, StelaFailure *failure);
@@ -77,10 +79,12 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 
 @class StelaGPUCommandBuffer, StelaGPUFunction, StelaGPUIndirectCommandBuffer;
 
-@interface StelaGPUDevice : _MTLDevice {
+/* MTLAddDevice asserts both protocols on the device itself. */
+@interface StelaGPUDevice : _MTLDevice <MTLDevice, MTLDeviceSPI> {
 @public
 	StelaGate _gate;
 	StelaBlock *_capabilities;
+	BOOL _metalAssertionsEnabled;
 }
 - (instancetype)initWithAcceleratorPort:(io_service_t)port;
 - (uint64_t)registryID;
@@ -99,6 +103,7 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 - (void)noteIndirect:(StelaGPUIndirectCommandBuffer *)buffer;
 - (void)forgetIndirect:(StelaGPUIndirectCommandBuffer *)buffer;
 - (void)flushIndirect;
+- (StelaFormatAlignmentsResponse)alignmentsOfFormat:(NSUInteger)format;
 @end
 
 @interface StelaGPUDevice (Resources)
@@ -415,6 +420,8 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 	StelaGPULogState *_logState;
 }
 @property(copy) NSString *label;
+/* Where completion handlers run, in place of the device's own queue. */
+@property(strong) id completionQueue;
 - (instancetype)initWithDevice:(StelaGPUDevice *)device;
 - (void)enqueue:(StelaGPUCommandBuffer *)buffer;
 - (void)flush;
@@ -442,6 +449,8 @@ id stela_empty_logs(void);
 }
 @property(copy) NSString *label;
 @property NSUInteger errorOptions;
+/* Held for its reader: no memory here is protected. */
+@property NSUInteger protectionOptions;
 - (instancetype)initWithQueue:(StelaGPUQueue *)queue
 	    retainsReferences:(BOOL)retains
 		     logState:(StelaGPULogState *)logState;

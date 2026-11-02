@@ -19,9 +19,17 @@ static bool cpu_visible(NSUInteger options)
 	return mode == MTLStorageModeShared || mode == MTLStorageModeManaged;
 }
 
+/* The public bits of MTLTextureUsage; the rest are Apple's drivers' own hints. */
+#define TEXTURE_USAGE_KNOWN 0x37ull
+
 void stela_texture_record(id descriptor, StelaTextureDescriptorRecord *record)
 {
 	MTLTextureSwizzleChannels swizzle = [descriptor swizzle];
+	NSUInteger usage = [descriptor usage];
+	if (usage & ~TEXTURE_USAGE_KNOWN) {
+		StelaFailure failure = {.reason = "a private hint this device drops"};
+		stela_report([[NSString stringWithFormat:@"texture usage %#lx", (unsigned long)usage] UTF8String], &failure);
+	}
 	*record = (StelaTextureDescriptorRecord){
 		.texture_type = [descriptor textureType],
 		.pixel_format = [descriptor pixelFormat],
@@ -32,7 +40,7 @@ void stela_texture_record(id descriptor, StelaTextureDescriptorRecord *record)
 		.sample_count = [descriptor sampleCount],
 		.array_length = [descriptor arrayLength],
 		.options = [descriptor resourceOptions],
-		.usage = [descriptor usage],
+		.usage = usage & TEXTURE_USAGE_KNOWN,
 		.swizzle = {swizzle.red, swizzle.green, swizzle.blue, swizzle.alpha},
 	};
 }
@@ -117,6 +125,17 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 - (NSUInteger)allocatedSize
 {
 	return _allocatedSize;
+}
+
+/* Memory attribution to another task, which only the kernel's ledgers read. */
+- (int)setOwnerWithIdentity:(unsigned int)identity
+{
+	return 0;
+}
+
+- (NSInteger)sparseBufferTier
+{
+	return 0;
 }
 
 - (NSUInteger)heapOffset
@@ -217,6 +236,15 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 	texture->_bufferOffset = offset;
 	texture->_bufferBytesPerRow = bytesPerRow;
 	return texture;
+}
+
+/* Metal's private spelling of the above: a 2D image's bytes follow from its rows. */
+- (id)newLinearTextureWithDescriptor:(id)descriptor
+			      offset:(NSUInteger)offset
+			 bytesPerRow:(NSUInteger)bytesPerRow
+			bytesPerImage:(NSUInteger)bytesPerImage
+{
+	return [self newTextureWithDescriptor:descriptor offset:offset bytesPerRow:bytesPerRow];
 }
 
 - (void)addDebugMarker:(NSString *)marker range:(NSRange)range
@@ -355,6 +383,35 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 - (MTLTextureSwizzleChannels)swizzle
 {
 	return _swizzle;
+}
+
+- (id)rootResource
+{
+	return _parent ?: self;
+}
+
+- (id)remoteStorageTexture
+{
+	return nil;
+}
+
+- (float)minLOD
+{
+	return 0;
+}
+
+- (NSInteger)sparseTextureTier
+{
+	return 0;
+}
+
+- (id)newTextureViewWithDescriptor:(id)descriptor
+{
+	return [self newTextureViewWithPixelFormat:[descriptor pixelFormat]
+				       textureType:[descriptor textureType]
+					    levels:[descriptor levelRange]
+					    slices:[descriptor sliceRange]
+					   swizzle:[descriptor swizzle]];
 }
 
 - (id)parentTexture
@@ -873,7 +930,8 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 	StelaFailure failure;
 	uint64_t memory = [self importAddress:bytes length:page_aligned(length) failure:&failure];
 	if (memory == 0) {
-		stela_report("newBufferWithBytesNoCopy:", &failure);
+		stela_report([[NSString stringWithFormat:@"newBufferWithBytesNoCopy:%p length:%lu", bytes, length] UTF8String],
+			     &failure);
 		return nil;
 	}
 	StelaNewImportedBufferRequest request = {.memory = memory, .length = length, .options = options};
@@ -893,7 +951,8 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 }
 
 /* The texture reads the surface's own pages, through a buffer over them that
- * keeps the surface. Wiring them outlasts the lock that maps them. */
+ * keeps the surface. Wiring them outlasts the lock that maps them. A surface
+ * counts rows of its elements, which can be taller than the format's blocks. */
 - (id)newTextureWithDescriptor:(id)descriptor iosurface:(IOSurfaceRef)surface plane:(NSUInteger)plane
 {
 	if (IOSurfaceLock(surface, 0, NULL) != 0) {
@@ -903,7 +962,9 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 	}
 	uint8_t *base = IOSurfaceGetBaseAddress(surface);
 	NSUInteger offset = (uint8_t *)IOSurfaceGetBaseAddressOfPlane(surface, plane) - base;
-	NSUInteger bytesPerRow = IOSurfaceGetBytesPerRowOfPlane(surface, plane);
+	NSUInteger bytesPerRow = IOSurfaceGetBytesPerRowOfPlane(surface, plane)
+		* [self alignmentsOfFormat:[descriptor pixelFormat]].block_height
+		/ IOSurfaceGetElementHeightOfPlane(surface, plane);
 	CFRetain(surface);
 	StelaGPUBuffer *buffer = [self newBufferWithBytesNoCopy:base
 							 length:IOSurfaceGetAllocSize(surface)
@@ -931,7 +992,7 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 	StelaTextureResponse response;
 	StelaFailure failure;
 	if (STELA_CALL(&_gate, NewTexture, &request, &response, &failure) != StelaStatusOk) {
-		stela_report("a texture", &failure);
+		stela_report([[NSString stringWithFormat:@"a texture of format %llu", request.pixel_format] UTF8String], &failure);
 		return nil;
 	}
 	return [[StelaGPUTexture alloc] initWithDevice:self response:&response descriptor:descriptor];
@@ -997,7 +1058,6 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 	heap->_size = request.size;
 	heap->_options = options;
 	heap->_type = request.heap_type;
-	heap.label = [descriptor label];
 	return heap;
 }
 
