@@ -1,0 +1,287 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 02:41:05 -0500
+Subject: [PATCH] feat(kthread): retain managed native creation lineage
+
+---
+ kernel/kthread.c | 143 ++++++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 136 insertions(+), 7 deletions(-)
+
+diff --git a/kernel/kthread.c b/kernel/kthread.c
+index 63beb59b7a3d1801cd2256a789853638dc8c3577..84d17ab88ef5ccdd892a39cab2e36d1b4ae06cb4 100644
+--- a/kernel/kthread.c
++++ b/kernel/kthread.c
+@@ -29,6 +29,12 @@
+ #include <linux/numa.h>
+ #include <linux/sched/isolation.h>
+ #include <trace/events/sched.h>
++#ifdef CONFIG_STELA
++#include <stela/linux.h>
++#include <stela/task.h>
++#include <stela/task_bootstrap.h>
++#include <stela/managed_source.h>
++#endif
+ 
+ 
+ static DEFINE_SPINLOCK(kthread_create_lock);
+@@ -51,9 +57,26 @@ struct kthread_create_info
+ 	struct completion *done;
+ 
+ 	struct list_head list;
++#ifdef CONFIG_STELA
++	struct stela_linux_managed_lease *managed;
++#endif
+ };
++static void free_create_info(struct kthread_create_info *create)
++{
++#ifdef CONFIG_STELA
++	struct stela_linux_managed_lease *managed = create->managed;
++#endif
++	kfree(create);
++#ifdef CONFIG_STELA
++	if (managed)
++		stela_linux_managed_source_put(managed);
++#endif
++}
+ 
+ struct kthread {
++#ifdef CONFIG_STELA
++	struct stela_linux_managed_lease *managed;
++#endif
+ 	unsigned long flags;
+ 	unsigned int cpu;
+ 	unsigned int node;
+@@ -132,10 +155,17 @@ void free_kthread_struct(struct task_struct *k)
+ 
+ #ifdef CONFIG_BLK_CGROUP
+ 	WARN_ON_ONCE(kthread->blkcg_css);
++#endif
++#ifdef CONFIG_STELA
++	struct stela_linux_managed_lease *managed = kthread->managed;
+ #endif
+ 	k->worker_private = NULL;
+ 	kfree(kthread->full_name);
+ 	kfree(kthread);
++#ifdef CONFIG_STELA
++	if (managed)
++		stela_linux_managed_source_put(managed);
++#endif
+ }
+ 
+ /**
+@@ -389,12 +419,23 @@ static int kthread(void *_create)
+ 	int ret;
+ 
+ 	self = to_kthread(current);
++#ifdef CONFIG_STELA
++	if (create->managed) {
++		stela_linux_managed_source_get(create->managed);
++		self->managed = create->managed;
++	}
++#endif
+ 
+ 	/* Release the structure when caller killed by a fatal signal. */
+ 	done = xchg(&create->done, NULL);
+ 	if (!done) {
++#ifdef CONFIG_STELA
++		if (self->managed)
++			stela_linux_managed_source_outcome(self->managed,
++				STELA_MANAGED_CHILD_ABANDONED, -EINTR);
++#endif
+ 		kfree(create->full_name);
+-		kfree(create);
++		free_create_info(create);
+ 		kthread_exit(-EINTR);
+ 	}
+ 
+@@ -435,6 +476,11 @@ static int kthread(void *_create)
+ 		__kthread_parkme(self);
+ 		ret = threadfn(data);
+ 	}
++#ifdef CONFIG_STELA
++	else if (self->managed)
++		stela_linux_managed_source_outcome(self->managed,
++			STELA_MANAGED_CALLBACK_SKIPPED, -EINTR);
++#endif
+ 	kthread_exit(ret);
+ }
+ 
+@@ -451,20 +497,41 @@ int tsk_fork_get_node(struct task_struct *tsk)
+ static void create_kthread(struct kthread_create_info *create)
+ {
+ 	int pid;
++#ifdef CONFIG_STELA
++	/* Child completion may free create before kernel_thread returns. */
++	struct stela_linux_managed_lease *managed = create->managed;
++#endif
+ 
+ #ifdef CONFIG_NUMA
+ 	current->pref_node_fork = create->node;
+ #endif
+ 	/* We want our own signal handler (we take no signals by default). */
++#ifdef CONFIG_STELA
++	if (managed) {
++		pid = stela_linux_task_managed_fork_begin(stela_linux_owner(), managed);
++		if (pid)
++			goto fork_done;
++	}
++#endif
+ 	pid = kernel_thread(kthread, create, create->full_name,
+ 			    CLONE_FS | CLONE_FILES | SIGCHLD);
++#ifdef CONFIG_STELA
++	if (managed)
++		stela_linux_task_managed_fork_end(stela_linux_owner(), managed);
++fork_done:
++#endif
+ 	if (pid < 0) {
++#ifdef CONFIG_STELA
++		if (managed)
++			stela_linux_managed_source_outcome(managed,
++				STELA_MANAGED_CREATE_FAILED, pid);
++#endif
+ 		/* Release the structure when caller killed by a fatal signal. */
+ 		struct completion *done = xchg(&create->done, NULL);
+ 
+ 		kfree(create->full_name);
+ 		if (!done) {
+-			kfree(create);
++			free_create_info(create);
+ 			return;
+ 		}
+ 		create->result = ERR_PTR(pid);
+@@ -476,7 +543,11 @@ static __printf(4, 0)
+ struct task_struct *__kthread_create_on_node(int (*threadfn)(void *data),
+ 						    void *data, int node,
+ 						    const char namefmt[],
+-						    va_list args)
++						    va_list args
++#ifdef CONFIG_STELA
++						    , struct stela_linux_managed_lease *managed
++#endif
++)
+ {
+ 	DECLARE_COMPLETION_ONSTACK(done);
+ 	struct task_struct *task;
+@@ -484,6 +555,11 @@ struct task_struct *__kthread_create_on_node(int (*threadfn)(void *data),
+ 
+ 	if (!create)
+ 		return ERR_PTR(-ENOMEM);
++#ifdef CONFIG_STELA
++	create->managed = managed;
++	if (managed)
++		stela_linux_managed_source_get(managed);
++#endif
+ 	create->threadfn = threadfn;
+ 	create->data = data;
+ 	create->node = node;
+@@ -495,6 +571,10 @@ struct task_struct *__kthread_create_on_node(int (*threadfn)(void *data),
+ 	}
+ 
+ 	spin_lock(&kthread_create_lock);
++#ifdef CONFIG_STELA
++	if (managed)
++		stela_linux_managed_source_queued(managed);
++#endif
+ 	list_add_tail(&create->list, &kthread_create_list);
+ 	spin_unlock(&kthread_create_lock);
+ 
+@@ -510,8 +590,14 @@ struct task_struct *__kthread_create_on_node(int (*threadfn)(void *data),
+ 		 * kernel thread) calls complete(), leave the cleanup of this
+ 		 * structure to that thread.
+ 		 */
+-		if (xchg(&create->done, NULL))
++		if (xchg(&create->done, NULL)) {
++#ifdef CONFIG_STELA
++			if (managed)
++				stela_linux_managed_source_outcome(managed,
++					STELA_MANAGED_WAIT_INTERRUPTED, -EINTR);
++#endif
+ 			return ERR_PTR(-EINTR);
++		}
+ 		/*
+ 		 * kthreadd (or new kernel thread) will call complete()
+ 		 * shortly.
+@@ -520,10 +606,30 @@ struct task_struct *__kthread_create_on_node(int (*threadfn)(void *data),
+ 	}
+ 	task = create->result;
+ free_create:
+-	kfree(create);
++	free_create_info(create);
+ 	return task;
+ }
+ 
++#ifdef CONFIG_STELA
++static struct task_struct *managed_create_named(
++	struct stela_linux_managed_lease *managed, int (*threadfn)(void *),
++	void *data, const char *namefmt, ...)
++{
++	va_list args;
++	struct task_struct *task;
++	va_start(args, namefmt);
++	task = __kthread_create_on_node(threadfn, data, NUMA_NO_NODE,
++		namefmt, args, managed);
++	va_end(args);
++	return task;
++}
++struct task_struct *stela_linux_original_managed_create(
++	struct stela_linux_managed_lease *managed, int (*threadfn)(void *), void *data)
++{
++	return managed_create_named(managed, threadfn, data, "%s", "stela-managed");
++}
++#endif
++
+ /**
+  * kthread_create_on_node - create a kthread.
+  * @threadfn: the function to run until signal_pending(current).
+@@ -556,7 +662,11 @@ struct task_struct *kthread_create_on_node(int (*threadfn)(void *data),
+ 	va_list args;
+ 
+ 	va_start(args, namefmt);
+-	task = __kthread_create_on_node(threadfn, data, node, namefmt, args);
++	task = __kthread_create_on_node(threadfn, data, node, namefmt, args
++#ifdef CONFIG_STELA
++		, NULL
++#endif
++);
+ 	va_end(args);
+ 
+ 	return task;
+@@ -798,6 +908,11 @@ int kthreadd(void *unused)
+ 	cgroup_init_kthreadd();
+ 
+ 	kthread_affine_node();
++#ifdef CONFIG_STELA
++    /* Same actual native task owner: signal only genuine original body setup,
++     * not task-pointer presence or source PID publication. */
++    stela_linux_task_kthreadd_started();
++#endif
+ 
+ 	for (;;) {
+ 		set_current_state(TASK_INTERRUPTIBLE);
+@@ -1059,7 +1174,11 @@ __kthread_create_worker_on_node(unsigned int flags, int node,
+ 	kthread_init_worker(worker);
+ 
+ 	task = __kthread_create_on_node(kthread_worker_fn, worker,
+-					node, namefmt, args);
++					node, namefmt, args
++#ifdef CONFIG_STELA
++		, NULL
++#endif
++);
+ 	if (IS_ERR(task))
+ 		goto fail_task;
+ 
+@@ -1736,3 +1855,13 @@ struct cgroup_subsys_state *kthread_blkcg(void)
+ 	return NULL;
+ }
+ #endif
++
++#ifdef CONFIG_STELA
++/* Internal actual native task runtime, after source-owned full-current check. */
++int stela_linux_kthread_current_started(void);
++int stela_linux_kthread_current_started(void)
++{
++	struct kthread *self = to_kthread(current);
++	return self && self->task == current && self->started ? 0 : -EAGAIN;
++}
++#endif

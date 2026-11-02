@@ -1,0 +1,611 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 02:41:05 -0500
+Subject: [PATCH] refactor(sched): extract task-local fork metadata for native
+ scheduling
+
+---
+ kernel/sched/fork_backend.h    |  82 ++++++++++++
+ kernel/sched/fork_metadata.c   | 113 +++++++++++++++++
+ kernel/sched/fork_sources.json | 149 ++++++++++++++++++++++
+ kernel/sched/fork_support.c    | 226 +++++++++++++++++++++++++++++++++
+ 4 files changed, 570 insertions(+)
+ create mode 100644 kernel/sched/fork_backend.h
+ create mode 100644 kernel/sched/fork_metadata.c
+ create mode 100644 kernel/sched/fork_sources.json
+ create mode 100644 kernel/sched/fork_support.c
+
+diff --git a/kernel/sched/fork_backend.h b/kernel/sched/fork_backend.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..3fd2c08c5a2c83f7b8fad341ca256938dd0a83fb
+--- /dev/null
++++ b/kernel/sched/fork_backend.h
+@@ -0,0 +1,82 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef STELA_SCHED_FORK_BACKEND_H
++#define STELA_SCHED_FORK_BACKEND_H
++
++#include <linux/types.h>
++
++/* Private interface between original fork metadata and the ONE native owner.
++ * These are required producers, not optional callbacks. This packet defines
++ * none of them and provides no default class, placement, admission or Ready.
++ */
++struct task_struct;
++struct kernel_clone_args;
++
++enum stela_linux_fork_class {
++	STELA_LINUX_FORK_FAIR,
++	STELA_LINUX_FORK_RT,
++	STELA_LINUX_FORK_EXT,
++};
++
++/* Called after original per-task initialization/reset-on-fork/DL-EAGAIN,
++ * immediately before scx_pre_fork. Authenticate the genuine source birth and
++ * same retained native owner/escrow; validate the exact now-final policy/rank,
++ * supported clone/profile operations and actual source class/capacity closure.
++ * Refusal must not precede original __sched_fork: source unwind may depend on
++ * initialized fields rather than copied parent pointers. Genuine original DL
++ * timer/code closure is a link prerequisite, not a callback-presence check.
++ * RR is not FIFO; deadline is not a primitive rank; !SMP is not false topology.
++ *
++ * This bounded metadata call must neither wait nor run/queue a child. Error
++ * means no source/native publication by THIS call; it is not proof that the
++ * caller's existing escrow or original reverse-unwind has retired. Preserve
++ * any typed native refusal in the genuine birth record before returning its
++ * errno to the original fork boundary. Uncertain effects retain/fatal rather
++ * than pretending that a negative errno is a no-publication receipt.
++ */
++int stela_linux_sched_fork_admit(u64 clone_flags, struct task_struct *p);
++
++/* Preserve the original class decision with a genuine source-qualified class
++ * identity and exact post-reset policy/rank, on this same birth/owner. There
++ * is no fake success-only sched_class table in this packet. All reachable
++ * class consumers must be routed to actual native effects, or remain explicit
++ * unsupported dependencies. Do not attach CFS/RT runqueues as a second owner.
++ * No allocation/publication/wait is allowed; task-local fields commit at a
++ * checked no-fail tail from the admission plan retained in the genuine birth.
++ * This MUST NOT return an errno after scx_pre_fork: original sched_fork error
++ * unwind bypasses sched_cancel_fork. A corrupt/uncertain commit retains/fatal.
++ */
++void stela_linux_sched_fork_select(struct task_struct *p,
++				enum stela_linux_fork_class kind);
++
++/* Called with original child pi_lock held, IRQ state saved, before source PID
++ * or task-list visibility. Validate SAME real native reserved placement and
++ * post-reset rank, and perform the genuine source class-fork effects.
++ * FAIR must execute stela_linux_sched_fork_fair_capacity exactly once with
++ * actual source topology/static-key ownership. Original RT has no task_fork
++ * hook; EXT needs its genuine source hook, not FAIR or empty substitution.
++ * This does not activate a native Dormant child or publish source resources.
++ * No waits, original scheduling, capacity allocation or arbitrary callback.
++ * A failure is only an admission error, never a reverse-unwind/cancel receipt.
++ */
++int stela_linux_sched_fork_place(struct task_struct *p,
++			       struct kernel_clone_args *kargs);
++
++/* Actual original capacity helper; not a grant from a CPU number or bool. */
++void stela_linux_sched_fork_fair_capacity(struct task_struct *p);
++/* Exact task-local specialization of original set_load_weight(p, false).
++ * Native scheduler owns runnable reweight/accounting; this leaf synchronizes
++ * genuine source load/inverse metadata after an accepted native nice change.
++ * It neither touches CFS rq nor substitutes an empty update_load=true path. */
++void stela_linux_sched_load_weight(struct task_struct *p);
++
++/* Original enabled helper closures remain unresolved until their real source
++ * implementations/ownership are linked. The disabled original source paths
++ * below are selected by actual configuration, not native success shims.
++ */
++#ifdef CONFIG_UCLAMP_TASK
++void uclamp_update_util_min_rt_default(struct task_struct *p);
++#endif
++#ifdef CONFIG_SCHED_MM_CID
++void sched_mm_cid_fork(struct task_struct *p);
++#endif
++#endif
+diff --git a/kernel/sched/fork_metadata.c b/kernel/sched/fork_metadata.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..de15f41bc083b9694fb1af0837d33595785ff1c5
+--- /dev/null
++++ b/kernel/sched/fork_metadata.c
+@@ -0,0 +1,113 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Original source notices (core.c and fair.c):
++ * Copyright (C) 1991-2002 Linus Torvalds
++ * Copyright (C) 1998-2024 Ingo Molnar, Red Hat
++ * Copyright (C) 2007 Red Hat, Inc., Ingo Molnar <mingo@redhat.com>
++ * Interactivity improvements by Mike Galbraith
++ * (C) 2007 Mike Galbraith <efault@gmx.de>
++ * Various enhancements by Dmitry Adamushko.
++ * (C) 2007 Dmitry Adamushko <dmitry.adamushko@gmail.com>
++ * Group scheduling enhancements by Srivatsa Vaddagiri
++ * Copyright IBM Corporation, 2007
++ * Author: Srivatsa Vaddagiri <vatsa@linux.vnet.ibm.com>
++ * Scaled math optimizations by Thomas Gleixner
++ * Copyright (C) 2007, Linutronix GmbH, Thomas Gleixner <tglx@kernel.org>
++ * Adaptive scheduling granularity, math enhancements by Peter Zijlstra
++ * Copyright (C) 2007 Red Hat, Inc., Peter Zijlstra
++ */
++/* Task-local metadata extracted from original core.c/fair.c/rt.c.
++ * Original source authors/licensing remain as recorded in fork_sources.json.
++ * No CFS/RT runqueue, capacity topology, timer callback or class identity is
++ * manufactured. Duplicate original definitions must not also be linked.
++ */
++#include <linux/sched.h>
++#include <linux/sched/rt.h>
++#include <linux/rcupdate.h>
++#include <linux/cpumask_api.h>
++#include "sched.h"
++#include "fork_backend.h"
++
++const int sched_prio_to_weight[40] = {
++ /* -20 */     88761,     71755,     56483,     46273,     36291,
++ /* -15 */     29154,     23254,     18705,     14949,     11916,
++ /* -10 */      9548,      7620,      6100,      4904,      3906,
++ /*  -5 */      3121,      2501,      1991,      1586,      1277,
++ /*   0 */      1024,       820,       655,       526,       423,
++ /*   5 */       335,       272,       215,       172,       137,
++ /*  10 */       110,        87,        70,        56,        45,
++ /*  15 */        36,        29,        23,        18,        15,
++};
++
++const u32 sched_prio_to_wmult[40] = {
++ /* -20 */     48388,     59856,     76040,     92818,    118348,
++ /* -15 */    147320,    184698,    229616,    287308,    360437,
++ /* -10 */    449829,    563644,    704093,    875809,   1099582,
++ /*  -5 */   1376151,   1717300,   2157191,   2708050,   3363326,
++ /*   0 */   4194304,   5237765,   6557202,   8165337,  10153587,
++ /*   5 */  12820798,  15790321,  19976592,  24970740,  31350126,
++ /*  10 */  39045157,  49367440,  61356676,  76695844,  95443717,
++ /*  15 */ 119304647, 148102320, 186737708, 238609294, 286331153,
++};
++
++int sched_rr_timeslice = RR_TIMESLICE;
++unsigned int sysctl_sched_base_slice			= 700000ULL;
++
++void stela_linux_sched_load_weight(struct task_struct *p)
++{
++	int prio = p->static_prio - MAX_RT_PRIO;
++	struct load_weight lw;
++
++	if (task_has_idle_policy(p)) {
++		lw.weight = scale_load(WEIGHT_IDLEPRIO);
++		lw.inv_weight = WMULT_IDLEPRIO;
++	} else {
++		lw.weight = scale_load(sched_prio_to_weight[prio]);
++		lw.inv_weight = sched_prio_to_wmult[prio];
++	}
++
++	p->se.load = lw;
++}
++
++void init_entity_runnable_average(struct sched_entity *se)
++{
++	struct sched_avg *sa = &se->avg;
++
++	memset(sa, 0, sizeof(*sa));
++
++	/*
++	 * Tasks are initialized with full load to be seen as heavy tasks until
++	 * they get a chance to stabilize to their real load level.
++	 * Group entities are initialized with zero load to reflect the fact that
++	 * nothing has been attached to the task group yet.
++	 */
++	if (entity_is_task(se))
++		sa->load_avg = scale_load_down(se->load.weight);
++
++	/* when this task is enqueued, it will contribute to its cfs_rq's load_avg */
++}
++
++
++void stela_linux_sched_fork_fair_capacity(struct task_struct *p)
++{
++	struct asym_cap_data *entry;
++
++	if (!sched_asym_cpucap_active())
++		return;
++
++	rcu_read_lock();
++	list_for_each_entry_rcu(entry, &asym_cap_list, link) {
++		cpumask_t *cpumask;
++
++		cpumask = cpu_capacity_span(entry);
++		if (!cpumask_intersects(p->cpus_ptr, cpumask))
++			continue;
++
++		p->max_allowed_capacity = entry->capacity;
++		break;
++	}
++	rcu_read_unlock();
++}
++
++#ifndef CONFIG_SCHED_CACHE
++void init_sched_mm(struct task_struct *p) { }
++#endif
+diff --git a/kernel/sched/fork_sources.json b/kernel/sched/fork_sources.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f2a5c1b73f2244a22e3e27d8e965c5d28891749
+--- /dev/null
++++ b/kernel/sched/fork_sources.json
+@@ -0,0 +1,149 @@
++{
++  "format": 1,
++  "source_revision": "0dd21a0e03a3941434e58ac6d12eab1a8dff0e80",
++  "inputs": [
++    {
++      "path": "kernel/sched/core.c",
++      "git_blob": "64427c1e88de3f2e0af1ce09591a06577fe6793b",
++      "sha256": "e3427562c5ce5aa8cd0e71068c9f7cc52a2b3c6239cc8f2b0f21805ff43205b7",
++      "functions": [
++        {
++          "symbol": "set_load_weight",
++          "first_line": 1448,
++          "last_line": 1469,
++          "sha256": "47d2be77bd7153991aeb318d70bb88bffcfd755e81afcffe375fdfe08bf1a801"
++        },
++        {
++          "symbol": "uclamp_fork",
++          "first_line": 2000,
++          "last_line": 2018,
++          "sha256": "76e75fb588f849a7c41a471e1d7d1a5776658cb7453600b9ebde4d8616094f66"
++        },
++        {
++          "symbol": "uclamp_fork",
++          "first_line": 2067,
++          "last_line": 2067,
++          "sha256": "1608510da90bffb49b2162fbffaca900492fb1f444ddbf8b89b21abd7bc619ee"
++        },
++        {
++          "symbol": "uclamp_post_fork",
++          "first_line": 2020,
++          "last_line": 2023,
++          "sha256": "522cc4a13d60a0a5f1fa3abfddd4c6bc534d78baa8e459a47d47ee923f48dcf7"
++        },
++        {
++          "symbol": "uclamp_post_fork",
++          "first_line": 2068,
++          "last_line": 2068,
++          "sha256": "4d6c3767aefc8ad93ddf9e19b48b0fb0885ceb699975af897a878aa454daa766"
++        },
++        {
++          "symbol": "__sched_fork",
++          "first_line": 4500,
++          "last_line": 4553,
++          "sha256": "fd75ec61a7b7636e1df2c61296374d9dd113b061b342e3b50589ed3fa6a6d941"
++        },
++        {
++          "symbol": "sched_fork",
++          "first_line": 4740,
++          "last_line": 4809,
++          "sha256": "eb0350b2e655568da6d0d564f1cbed8604cb29fa3c9eaf89609ac8d2eea9c5fd"
++        },
++        {
++          "symbol": "sched_cgroup_fork",
++          "first_line": 4811,
++          "last_line": 4839,
++          "sha256": "703ddea7f9e716a2f68e29286858f239c26f35be46a2448a911678f3c9cea11c"
++        },
++        {
++          "symbol": "sched_cancel_fork",
++          "first_line": 4841,
++          "last_line": 4844,
++          "sha256": "6c7f84c9ae20a6e81578cb1ab41c3e6dfe203e26166c573c380a7e23842cb3fb"
++        },
++        {
++          "symbol": "sched_post_fork",
++          "first_line": 4848,
++          "last_line": 4853,
++          "sha256": "5b6a816403f5dd4c0e0e8c97fdd056068723e77bb27c04bd8b370467c58597af"
++        },
++        {
++          "symbol": "sched_mm_cid_fork",
++          "first_line": 10947,
++          "last_line": 10990,
++          "sha256": "617f043c5be90509cbf4d81cf0a48c2f29bad98f285b186a2a7c599aeb1a1d04"
++        },
++        {
++          "symbol": "sched_mm_cid_fork",
++          "first_line": 11149,
++          "last_line": 11149,
++          "sha256": "11638d091efdfb889f25464fe469747376d45de32e5df18437663c2af463fd9f"
++        }
++      ]
++    },
++    {
++      "path": "kernel/sched/fair.c",
++      "git_blob": "b6cace1d0e3228b2c53c24b0d402ed7286609538",
++      "sha256": "0002fb0df64c65993650ad66c8af504d8f4d0991bd38ef8cd6c03b70a9f24d5c",
++      "functions": [
++        {
++          "symbol": "init_entity_runnable_average",
++          "first_line": 1280,
++          "last_line": 1296,
++          "sha256": "8c62f912f4377d3dab90cb18b657fa3f6240075b63b64655f110463d11bb41e6"
++        },
++        {
++          "symbol": "set_task_max_allowed_capacity",
++          "first_line": 9891,
++          "last_line": 9910,
++          "sha256": "253e40cde60dcef920b96a7b86f541577ca214309fea1630855ab1addf80fae0"
++        },
++        {
++          "symbol": "init_sched_mm",
++          "first_line": 2127,
++          "last_line": 2146,
++          "sha256": "6ea6e25a0362cd60e6fd50fb598cddc995827d429ca5210f75e2f8097cdd9978"
++        },
++        {
++          "symbol": "init_sched_mm",
++          "first_line": 2153,
++          "last_line": 2153,
++          "sha256": "d994ff162b81709cb75b38ff5d33dc795c6584d12dee2f75b4d18ee41a9d76b5"
++        }
++      ]
++    },
++    {
++      "path": "kernel/sched/rt.c",
++      "git_blob": "85303add726df4c2da846c427aab2d627fca9589",
++      "sha256": "b36ec6b58c10d3a30ab5e7ed889a9cf708c7ecfc392e33f2b9ff4e6b2d6722bc",
++      "functions": []
++    },
++    {
++      "path": "kernel/sched/sched.h",
++      "git_blob": "d25defb116caae1d3f01682a8af5a5e47d0b297c",
++      "sha256": "e10a11a2caafb12ec1da3a90d66f44a2783763c2f4e61df7bcbf52dd858e7993",
++      "functions": []
++    }
++  ],
++  "outputs": [
++    {
++      "path": "kernel/sched/fork_backend.h",
++      "sha256": "8d76100a0684c6d90de0c32c92f0149e419fba16e02d34daf257e5789e4b92ba"
++    },
++    {
++      "path": "kernel/sched/fork_metadata.c",
++      "sha256": "4eba3c60916b611b9d55cd3340219585e3348b3c97a1fd65d371098039d2066e"
++    },
++    {
++      "path": "kernel/sched/fork_support.c",
++      "sha256": "05d7a95728b383c3efa8e0a7ac409c2106560264c2443f8d85f7f09b4e863fb6"
++    }
++  ],
++  "adaptations": [
++    "set_load_weight is specialized for update_load=false and named stela_linux_sched_load_weight; no CFS runqueue reweighting is implemented.",
++    "set_task_max_allowed_capacity is named stela_linux_sched_fork_fair_capacity; it still requires the original capacity/static-key owner.",
++    "Original sched_fork class and placement decisions require the native admit/select/place operations declared in fork_backend.h.",
++    "Disabled SCHED_CACHE, UCLAMP_TASK and SCHED_MM_CID branches remain guarded by their original configuration conditions.",
++    "This manifest records source provenance only; it does not establish compilation, linking, execution or native admission."
++  ]
++}
+diff --git a/kernel/sched/fork_support.c b/kernel/sched/fork_support.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e10ddb1ef1ca7e85eba2c8968cfb965f0e43d86
+--- /dev/null
++++ b/kernel/sched/fork_support.c
+@@ -0,0 +1,226 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Mechanically retained task-local effects from applied Linux core.c.
++ * Original core ownership: (C)1991-2002 Linus Torvalds;
++ * (C)1998-2024 Ingo Molnar, Red Hat. See fork_sources.json.
++ * Native backend operations are declared in fork_backend.h. No scheduler root,
++ * class table, Ready flag, fallback or DL callback is defined here.
++ */
++#include <linux/sched.h>
++#include <linux/sched/signal.h>
++#include <linux/sched/task.h>
++#include <linux/hrtimer_api.h>
++#include <linux/jiffies.h>
++#include <linux/lockdep_api.h>
++#include <linux/spinlock_api.h>
++#include "sched.h"
++#include "autogroup.h"
++#include "fork_backend.h"
++
++#ifdef CONFIG_UCLAMP_TASK
++static void uclamp_fork(struct task_struct *p)
++{
++	enum uclamp_id clamp_id;
++
++	/*
++	 * We don't need to hold task_rq_lock() when updating p->uclamp_* here
++	 * as the task is still at its early fork stages.
++	 */
++	for_each_clamp_id(clamp_id)
++		p->uclamp[clamp_id].active = false;
++
++	if (likely(!p->sched_reset_on_fork))
++		return;
++
++	for_each_clamp_id(clamp_id) {
++		uclamp_se_set(&p->uclamp_req[clamp_id],
++			      uclamp_none(clamp_id), false);
++	}
++}
++
++static void uclamp_post_fork(struct task_struct *p)
++{
++	uclamp_update_util_min_rt_default(p);
++}
++#else /* !CONFIG_UCLAMP_TASK: */
++static inline void uclamp_fork(struct task_struct *p) { }
++static inline void uclamp_post_fork(struct task_struct *p) { }
++#endif /* !CONFIG_UCLAMP_TASK */
++
++static void __sched_fork(u64 clone_flags, struct task_struct *p)
++{
++	p->on_rq			= 0;
++
++	p->se.on_rq			= 0;
++	p->se.exec_start		= 0;
++	p->se.sum_exec_runtime		= 0;
++	p->se.prev_sum_exec_runtime	= 0;
++	p->se.nr_migrations		= 0;
++	p->se.vruntime			= 0;
++	p->se.vlag			= 0;
++	p->se.rel_deadline		= 0;
++	INIT_LIST_HEAD(&p->se.group_node);
++
++	/* A delayed task cannot be in clone(). */
++	WARN_ON_ONCE(p->se.sched_delayed);
++	WARN_ON_ONCE(p->is_blocked);
++
++#ifdef CONFIG_FAIR_GROUP_SCHED
++	p->se.cfs_rq			= NULL;
++#ifdef CONFIG_CFS_BANDWIDTH
++	init_cfs_throttle_work(p);
++#endif
++#endif
++
++#ifdef CONFIG_SCHEDSTATS
++	/* Even if schedstat is disabled, there should not be garbage */
++	memset(&p->stats, 0, sizeof(p->stats));
++#endif
++
++	init_dl_entity(&p->dl);
++
++	INIT_LIST_HEAD(&p->rt.run_list);
++	p->rt.timeout		= 0;
++	p->rt.time_slice	= sched_rr_timeslice;
++	p->rt.on_rq		= 0;
++	p->rt.on_list		= 0;
++
++#ifdef CONFIG_SCHED_CLASS_EXT
++	init_scx_entity(&p->scx);
++#endif
++
++#ifdef CONFIG_PREEMPT_NOTIFIERS
++	INIT_HLIST_HEAD(&p->preempt_notifiers);
++#endif
++
++#ifdef CONFIG_COMPACTION
++	p->capture_control = NULL;
++#endif
++	init_numa_balancing(clone_flags, p);
++	p->wake_entry.u_flags = CSD_TYPE_TTWU;
++	p->migration_pending = NULL;
++	init_sched_mm(p);
++}
++
++int sched_fork(u64 clone_flags, struct task_struct *p)
++{
++	int error;
++
++	__sched_fork(clone_flags, p);
++	/*
++	 * We mark the process as NEW here. This guarantees that
++	 * nobody will actually run it, and a signal or other external
++	 * event cannot wake it up and insert it on the runqueue either.
++	 */
++	p->__state = TASK_NEW;
++
++	/*
++	 * Make sure we do not leak PI boosting priority to the child.
++	 */
++	p->prio = current->normal_prio;
++
++	uclamp_fork(p);
++
++	/*
++	 * Revert to default priority/policy on fork if requested.
++	 */
++	if (unlikely(p->sched_reset_on_fork)) {
++		if (task_has_dl_policy(p) || task_has_rt_policy(p)) {
++			p->policy = SCHED_NORMAL;
++			p->static_prio = NICE_TO_PRIO(0);
++			p->rt_priority = 0;
++			p->timer_slack_ns = p->default_timer_slack_ns;
++		} else if (PRIO_TO_NICE(p->static_prio) < 0)
++			p->static_prio = NICE_TO_PRIO(0);
++
++		p->prio = p->normal_prio = p->static_prio;
++		stela_linux_sched_load_weight(p);
++		p->se.custom_slice = 0;
++		p->se.slice = sysctl_sched_base_slice;
++
++		/*
++		 * We don't need the reset flag anymore after the fork. It has
++		 * fulfilled its duty:
++		 */
++		p->sched_reset_on_fork = 0;
++	}
++
++	if (dl_prio(p->prio))
++		return -EAGAIN;
++
++	error = stela_linux_sched_fork_admit(clone_flags, p);
++	if (error)
++		return error;
++	scx_pre_fork(p);
++
++	if (rt_prio(p->prio)) {
++		stela_linux_sched_fork_select(p, STELA_LINUX_FORK_RT);
++#ifdef CONFIG_SCHED_CLASS_EXT
++	} else if (task_should_scx(p->policy)) {
++		stela_linux_sched_fork_select(p, STELA_LINUX_FORK_EXT);
++#endif
++	} else {
++		stela_linux_sched_fork_select(p, STELA_LINUX_FORK_FAIR);
++	}
++
++	init_entity_runnable_average(&p->se);
++
++
++#ifdef CONFIG_SCHED_INFO
++	if (likely(sched_info_on()))
++		memset(&p->sched_info, 0, sizeof(p->sched_info));
++#endif
++	p->on_cpu = 0;
++	init_task_preempt_count(p);
++	plist_node_init(&p->pushable_tasks, MAX_PRIO);
++	RB_CLEAR_NODE(&p->pushable_dl_tasks);
++
++	return 0;
++}
++
++int sched_cgroup_fork(struct task_struct *p, struct kernel_clone_args *kargs)
++{
++	unsigned long flags;
++	int error;
++
++	/*
++	 * Because we're not yet on the pid-hash, p->pi_lock isn't strictly
++	 * required yet, but lockdep gets upset if rules are violated.
++	 */
++	raw_spin_lock_irqsave(&p->pi_lock, flags);
++#ifdef CONFIG_CGROUP_SCHED
++	if (1) {
++		struct task_group *tg;
++		tg = container_of(kargs->cset->subsys[cpu_cgrp_id],
++				  struct task_group, css);
++		tg = autogroup_task_group(p, tg);
++		p->sched_task_group = tg;
++	}
++#endif
++	/*
++	 * We're setting the CPU for the first time, we don't migrate,
++	 * so use __set_task_cpu().
++	 */
++	__set_task_cpu(p, smp_processor_id());
++	error = stela_linux_sched_fork_place(p, kargs);
++	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
++
++	if (error)
++		return error;
++	return scx_fork(p, kargs);
++}
++
++void sched_cancel_fork(struct task_struct *p)
++{
++	scx_cancel_fork(p);
++}
++
++#ifndef CONFIG_SCHED_MM_CID
++static inline void sched_mm_cid_fork(struct task_struct *t) { }
++#endif
++
++void sched_post_fork(struct task_struct *p)
++{
++	sched_mm_cid_fork(p);
++	uclamp_post_fork(p);
++	scx_post_fork(p);
++}

@@ -25,6 +25,7 @@
 #include <linux/sched/mm.h>
 #include <linux/numa.h>
 #include <linux/cred.h>
+#include <linux/cpuset.h>
 #include <linux/sched/task.h>
 #include <linux/utsname.h>
 #include <linux/time_namespace.h>

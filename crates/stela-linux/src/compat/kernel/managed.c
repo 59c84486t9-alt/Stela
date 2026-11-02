@@ -129,7 +129,8 @@ int stela_linux_managed_create(const struct stela_linux_owner *owner, void *cont
     *output = lease; /* before ANY actual source constructor/callback */
     stela_linux_managed_source_get(lease); /* real calling source frame */
     task = stela_linux_original_managed_create(lease, threadfn, context);
-    result = IS_ERR(task) ? PTR_ERR(task) : 0;
+    /* IS_ERR restricts PTR_ERR to Linux's representable -MAX_ERRNO..-1. */
+    result = IS_ERR(task) ? (int)PTR_ERR(task) : 0;
     if (!IS_ERR(task)) {
         /* Borrowed ORIGINAL create_info result, never Rust task adoption.
          * Child is parked before its first wake; pin only through real wake. */

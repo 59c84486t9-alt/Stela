@@ -89,6 +89,8 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/ctype.c")),
             PathBuf::from(format!("{LINUX}/lib/refcount_lock.c")),
             PathBuf::from(format!("{LINUX}/kernel/user.c")),
+            PathBuf::from(format!("{LINUX}/kernel/kthread.c")),
+            PathBuf::from(format!("{LINUX}/kernel/workqueue.c")),
             PathBuf::from(format!("{LINUX}/kernel/exec_state.c")),
             PathBuf::from(format!("{LINUX}/kernel/rcu/srcutiny.c")),
             PathBuf::from(format!("{LINUX}/kernel/rcu/wakeme.c")),
@@ -118,7 +120,7 @@ impl Linux {
         linux.environment.apply(&mut build, None, &[], None);
         // The ownership adapters consume private declarations from the same
         // pinned kernel tree, including RCU phases and workqueue metadata.
-        build.flag("-iquote").flag(Path::new(LINUX).join("kernel"));
+        build.flag("-isystem").flag(Path::new(LINUX).join("kernel"));
         let crc_objects = linux_crc::objects(&build, &crc_tables);
         build.objects(crc_objects);
         {
@@ -209,7 +211,7 @@ impl Linux {
             let mut kernel_build = host;
             linux.environment.apply(&mut kernel_build, None, &[], None);
             kernel_build
-                .flag("-iquote")
+                .flag("-isystem")
                 .flag(Path::new(LINUX).join("kernel"));
             let crc_objects = linux_crc::objects(&kernel_build, &crc_tables);
             kernel_build.objects(crc_objects);

@@ -49,6 +49,10 @@
 /kernel/locking/mutex.h
 /kernel/locking/ww_mutex.h
 /kernel/sched/core.c
+/kernel/sched/fork_backend.h
+/kernel/sched/fork_metadata.c
+/kernel/sched/fork_support.c
+/kernel/sched/fork_sources.json
 /kernel/sched/Makefile
 /kernel/sched/wait_support.c
 /kernel/sched/wait.c
@@ -60,8 +64,11 @@
 /kernel/rcu/rcu.h
 /kernel/rcu/rcu_segcblist.h
 /kernel/rcu/srcutiny.c
+/kernel/rcu/wakeme.c
 /kernel/rcu/Makefile
 /kernel/workqueue_internal.h
+/kernel/workqueue.c
+/kernel/kthread.c
 /io_uring/io-wq.h
 /kernel/rcuwait_wake.c
 /kernel/rcu/rcuwait_finish.c

@@ -5,6 +5,8 @@
  * not listed are disabled, so debug, tracing, KUnit and fault-injection
  * hooks compile out exactly as in a kernel built without them. */
 #define CONFIG_64BIT 1
+/* Select native architecture ownership hooks in the shared Linux sources. */
+#define CONFIG_STELA 1
 #define CONFIG_MMU 1
 #define CONFIG_PCI 1
 #define CONFIG_PCI_MSI 1

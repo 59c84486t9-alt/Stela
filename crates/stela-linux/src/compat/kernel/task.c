@@ -2,6 +2,7 @@
 /* Original Linux task metadata bound to actual retained Runtime continuations.
  * This implements identity/lease transitions, not a substitute Linux scheduler. */
 #include <linux/errno.h>
+#include <linux/cgroup.h>
 #include <linux/kthread.h>
 #include <stela/managed.h>
 #include <linux/irqflags.h>
@@ -349,9 +350,10 @@ struct stela_linux_task *stela_linux_task_allocate(void)
 {
     /* Canonical tasks have actual original factories; never allocate a bare
      * replacement before or after the initial source claim. */
-    if (stela_linux_kernel_catalogue_active() || initial_claimed ||
-        stela_linux_kernel_prepare_resource())
-        return NULL;
+	if (stela_linux_kernel_catalogue_active() || initial_claimed ||
+	    stela_linux_kernel_prepare_resource()) {
+		return NULL;
+	}
 	struct stela_linux_task *task = stela_linux_heap_alloc(sizeof(*task), __alignof__(*task));
 	if (!task)
 		return NULL;
@@ -931,8 +933,9 @@ static bool scope_quiet_flags(const struct stela_linux_task *task, unsigned long
 {
 	if (task->kind == INITIAL_ALLOCATION)
 		return initial_quiet_flags(task, allowed);
-    if (task->kind == ORIGINAL_CHILD_ALLOCATION)
-        return child_scope_quiet_flags(task, allowed);
+	if (task->kind == ORIGINAL_CHILD_ALLOCATION) {
+		return child_scope_quiet_flags(task, allowed);
+	}
 	return quiet_except_usage_flags(task, allowed) &&
 	       refcount_read(&task->linux_task->usage) == 1;
 }
@@ -1204,9 +1207,10 @@ static bool supported_block_state(const struct stela_linux_task *task, unsigned 
 {
 	/* Preserve the existing ordinary wait masks, plus the exact idle state.
 	 * TASK_NOLOAD alone is not an admitted sleeping state. */
-    if (state == TASK_PARKED)
-        return task->kind == ORIGINAL_CHILD_ALLOCATION &&
-            stela_linux_kthread_current_started() == 0;
+	if (state == TASK_PARKED) {
+		return task->kind == ORIGINAL_CHILD_ALLOCATION &&
+		       stela_linux_kthread_current_started() == 0;
+	}
 	return state == TASK_IDLE ||
 	       !(state & ~(unsigned int)(TASK_NORMAL | TASK_WAKEKILL));
 }
@@ -1578,8 +1582,9 @@ int stela_linux_task_release_original(struct stela_linux_task *requested,
 static void free_bare_record(struct task_struct *linux_task);
 void stela_linux_task_release(struct stela_linux_task *task)
 {
-    if (task && task->kind != BARE_ALLOCATION)
-        __builtin_trap(); /* real original source destructor is a separate owner */
+	if (task && task->kind != BARE_ALLOCATION) {
+		__builtin_trap(); /* original source destructor has a separate owner */
+	}
 	if (!task || task->attached || task->active || task->suspended || task->scope ||
 	    task->prepared || !quiet(task))
 		__builtin_trap();
