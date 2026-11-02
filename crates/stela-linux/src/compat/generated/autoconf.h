@@ -38,7 +38,9 @@
 #define CONFIG_NR_CPUS 1
 #define CONFIG_HZ 1000
 #define CONFIG_PAGE_SHIFT 12
-#define CONFIG_PGTABLE_LEVELS 4
+/* The architecture represents five levels and folds P4D at runtime when the
+ * original native root has four. This is an ABI shape, not LA57 admission. */
+#define CONFIG_PGTABLE_LEVELS 5
 #define CONFIG_ILLEGAL_POINTER_VALUE 0xdead000000000000
 /* nouveau selects the I2C core for its buses and encoders. */
 #define CONFIG_I2C 1
