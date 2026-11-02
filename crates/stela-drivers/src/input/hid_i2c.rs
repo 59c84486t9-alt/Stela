@@ -14,8 +14,12 @@
 //! no keyboard, touchpad or touchscreen descriptor is substituted here.
 use super::Input;
 use crate::bus::i2c::{self, Address, Bus, Operation, Timer};
+use crate::bus::pci::power::{self, Timer as Minimum};
 use crate::usb::hid::{ParseError, Translator};
-use alloc::{string::String, vec::Vec};
+use alloc::{rc::Rc, string::String, vec::Vec};
+use core::mem::ManuallyDrop;
+mod refusal;
+pub use refusal::{Refusal, RefusalCause};
 
 mod descriptor;
 pub use descriptor::Descriptor;
@@ -71,6 +75,8 @@ pub enum PowerState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     Clock(crate::ClockError),
+    Minimum(power::Error),
+    Interrupted,
     InvalidAddress,
     InvalidConfiguration,
     NotReady,
@@ -96,7 +102,8 @@ pub enum ErrorKind {
 pub enum Recovery {
     NotAttempted,
     IrqMasked,
-    Failed,
+    Interrupted,
+    Failed(InterruptError),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Error {
@@ -119,7 +126,6 @@ impl core::fmt::Display for Error {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
     Fresh,
-    Starting,
     Ready,
     Sleeping,
     SuspendedAwake,
@@ -170,6 +176,8 @@ pub struct Device<B, I, T> {
     bus: B,
     interrupt: I,
     timer: T,
+    minimum: Rc<dyn Minimum>,
+    failure: Option<Error>,
     address: Address,
     descriptor_register: u16,
     reset_timeout_us: u64,
@@ -182,36 +190,30 @@ pub struct Device<B, I, T> {
     reset_completion: Option<ResetCompletion>,
 }
 impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
-    /// Does not touch hardware. GPIO/reset-rail sequencing and ACPI descriptor
-    /// discovery belong to the platform; no vendor/ACPI identity supplies IRQ
-    /// completion in place of the required pin provider.
+    /// No HID I/O. Every provider is parked before timing preflight callbacks;
+    /// an owning refusal keeps that complete graph on error or abandonment.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the same original device accompanies refusal without error-path allocation"
+    )]
     pub fn new(
         bus: B,
         interrupt: I,
         timer: T,
+        minimum: Rc<dyn Minimum>,
         address: Address,
         descriptor_register: u16,
         reset_timeout_us: u64,
-    ) -> Result<Self, Error> {
-        if !matches!(
-            address,
-            Address::SevenBit(0x08..=0x77) | Address::TenBit(0..=0x3ff)
-        ) {
-            return Err(ErrorKind::InvalidAddress.into());
-        }
-        if reset_timeout_us == 0 {
-            return Err(ErrorKind::InvalidConfiguration.into());
-        }
-        timer
-            .check_duration(reset_timeout_us.max(GOODIX_RESUME_DELAY_US))
-            .map_err(ErrorKind::Clock)?;
-        Ok(Self {
+    ) -> Result<Self, Refusal<B, I, T>> {
+        let device = ManuallyDrop::new(Self {
             bus,
             interrupt,
             timer,
+            minimum,
             address,
             descriptor_register,
             reset_timeout_us,
+            failure: None,
             state: State::Fresh,
             descriptor: None,
             report_descriptor: Vec::new(),
@@ -219,7 +221,68 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             quirks: Quirks::default(),
             discarded_before_start: 0,
             reset_completion: None,
-        })
+        });
+        let checked = (|| {
+            if !matches!(
+                address,
+                Address::SevenBit(0x08..=0x77) | Address::TenBit(0..=0x3ff)
+            ) {
+                return Err(ErrorKind::InvalidAddress);
+            }
+            if reset_timeout_us == 0 {
+                return Err(ErrorKind::InvalidConfiguration);
+            }
+            device
+                .timer
+                .check_duration(reset_timeout_us.max(GOODIX_RESUME_DELAY_US))
+                .map_err(ErrorKind::Clock)?;
+            device.minimum.check().map_err(ErrorKind::Minimum)
+        })();
+        match checked {
+            Ok(()) => Ok(ManuallyDrop::into_inner(device)),
+            Err(kind) => Err(Refusal::transport(device, kind.into())),
+        }
+    }
+
+    /// Initialize with the complete device parked across every callback.
+    #[expect(
+        clippy::result_large_err,
+        reason = "refusal retains the original device without allocating during failure"
+    )]
+    pub fn initialize_owned(self) -> Result<Self, Refusal<B, I, T>> {
+        let mut device = ManuallyDrop::new(self);
+        match device.initialize() {
+            Ok(()) => Ok(ManuallyDrop::into_inner(device)),
+            Err(error) => Err(Refusal::transport(device, error)),
+        }
+    }
+
+    pub fn first_error(&self) -> Option<Error> {
+        self.failure
+    }
+
+    // Prearm denial before every foreign callback. Only returned success
+    // restores admission; a callback unwind keeps the interruption cause.
+    fn act<R>(
+        &mut self,
+        success: State,
+        body: impl FnOnce(&mut Self) -> Result<R, ErrorKind>,
+    ) -> Result<R, Error> {
+        self.state = State::Faulted;
+        self.failure = Some(ErrorKind::Interrupted.into());
+        let result = self
+            .minimum
+            .check()
+            .map_err(ErrorKind::Minimum)
+            .and_then(|()| body(self));
+        match result {
+            Ok(value) => {
+                self.state = success;
+                self.failure = None;
+                Ok(value)
+            }
+            Err(kind) => Err(self.fail(kind)),
+        }
     }
     pub fn is_ready(&self) -> bool {
         self.state == State::Ready
@@ -229,7 +292,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     }
     pub fn power_state(&self) -> PowerState {
         match self.state {
-            State::Fresh | State::Starting => PowerState::Uninitialized,
+            State::Fresh => PowerState::Uninitialized,
             State::Ready => PowerState::On,
             State::Sleeping => PowerState::Sleep,
             State::SuspendedAwake => PowerState::SuspendedAwake,
@@ -258,11 +321,8 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             Ok(())
         }
     }
-    fn delay(&self, us: u64) {
-        let start = self.timer.start();
-        while self.timer.elapsed_us(start) < us {
-            self.timer.relax();
-        }
+    fn delay(&self, us: u64) -> Result<(), ErrorKind> {
+        self.minimum.wait_us(us).map_err(ErrorKind::Minimum)
     }
     fn buffer(length: usize) -> Result<Vec<u8>, ErrorKind> {
         let mut bytes = Vec::new();
@@ -326,11 +386,11 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             }
             // The one-write command was address-NACKed, so no action reached
             // the device. No partially accepted command is replayed.
-            self.delay(ADDRESS_WAKE_DELAY_US);
+            self.delay(ADDRESS_WAKE_DELAY_US)?;
             self.transfer(&bytes, &mut [])?;
         }
         if on {
-            self.delay(WAKE_DELAY_US);
+            self.delay(WAKE_DELAY_US)?;
         }
         Ok(())
     }
@@ -380,7 +440,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         let completion = if self.quirks.no_reset_irq {
             // Linux i2c_hid_finish_hwreset uses this exact 100ms contract only
             // for the listed device identities. Do not relabel it as an IRQ ACK.
-            self.delay(QUIRK_RESET_DELAY_US);
+            self.delay(QUIRK_RESET_DELAY_US)?;
             // Consume any response/input accumulated during the delay;
             // a stale delayed reset response cannot become guest input later.
             self.drain_before_reset()?;
@@ -413,12 +473,19 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     }
     fn fail(&mut self, kind: ErrorKind) -> Error {
         self.state = State::Faulted;
-        let recovery = if self.interrupt.mask_and_drain().is_ok() {
-            Recovery::IrqMasked
-        } else {
-            Recovery::Failed
-        };
-        Error { kind, recovery }
+        let mut error: Error = kind.into();
+        self.failure = Some(error);
+        // Timing uncertainty authorizes no cleanup or retry callbacks.
+        if !matches!(kind, ErrorKind::Minimum(_)) {
+            error.recovery = Recovery::Interrupted;
+            self.failure = Some(error);
+            error.recovery = match self.interrupt.mask_and_drain() {
+                Ok(()) => Recovery::IrqMasked,
+                Err(cause) => Recovery::Failed(cause),
+            };
+            self.failure = Some(error);
+        }
+        error
     }
     pub fn initialize(&mut self) -> Result<(), Error> {
         if self.is_ready() {
@@ -427,67 +494,59 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         if !matches!(self.state, State::Fresh | State::Stopped) {
             return Err(ErrorKind::NeedsReset.into());
         }
-        self.state = State::Starting;
-        let result = (|| {
-            self.interrupt
+        self.act(State::Ready, |this| {
+            this.interrupt
                 .mask_and_drain()
                 .map_err(ErrorKind::Interrupt)?;
             let mut bytes = [0; DESCRIPTOR_BYTES];
-            if let Err(error) = self.register(self.descriptor_register, &mut bytes) {
+            if let Err(error) = this.register(this.descriptor_register, &mut bytes) {
                 if !Self::address_nack(error) {
                     return Err(error);
                 }
-                self.delay(ADDRESS_WAKE_DELAY_US);
-                self.register(self.descriptor_register, &mut bytes)?;
+                this.delay(ADDRESS_WAKE_DELAY_US)?;
+                this.register(this.descriptor_register, &mut bytes)?;
             }
             let descriptor = Descriptor::parse(&bytes)?;
-            if self.descriptor.is_some_and(|old| old != descriptor) {
+            if this.descriptor.is_some_and(|old| old != descriptor) {
                 return Err(ErrorKind::IdentityChanged);
             }
-            self.quirks = Quirks::for_device(descriptor);
-            self.input = Self::buffer(usize::from(descriptor.max_input_length))?;
-            self.descriptor = Some(descriptor);
-            self.reset()?;
+            this.quirks = Quirks::for_device(descriptor);
+            this.input = Self::buffer(usize::from(descriptor.max_input_length))?;
+            this.descriptor = Some(descriptor);
+            this.reset()?;
             let mut report = Self::buffer(usize::from(descriptor.report_descriptor_length))?;
-            self.register(descriptor.report_descriptor_register, &mut report)?;
-            if !self.report_descriptor.is_empty() && self.report_descriptor != report {
+            this.register(descriptor.report_descriptor_register, &mut report)?;
+            if !this.report_descriptor.is_empty() && this.report_descriptor != report {
                 return Err(ErrorKind::IdentityChanged);
             }
-            self.report_descriptor = report;
-            if self.quirks.repower {
-                self.power(true)?;
+            this.report_descriptor = report;
+            if this.quirks.repower {
+                this.power(true)?;
             }
             Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                self.state = State::Ready;
-                Ok(())
-            }
-            Err(kind) => Err(self.fail(kind)),
-        }
+        })
     }
     /// Read only when the device IRQ pin is asserted. Returned HID bytes
     /// include the report ID if the device's descriptor uses numbered reports.
     pub fn poll(&mut self) -> Result<Option<InputReport>, Error> {
         self.ready()?;
-        let result = (|| {
-            if !self.interrupt.asserted().map_err(ErrorKind::Interrupt)? {
+        self.act(State::Ready, |this| {
+            if !this.interrupt.asserted().map_err(ErrorKind::Interrupt)? {
                 return Ok(None);
             }
-            let length = self.read_input()?;
+            let length = this.read_input()?;
             if length == 0 {
                 return Err(ErrorKind::UnexpectedReset);
             }
-            if self.quirks.elan && length == u16::MAX {
+            if this.quirks.elan && length == u16::MAX {
                 return Ok(Some(InputReport::SpuriousInterrupt));
             }
-            let effective = self.input_length(length)?;
+            let effective = this.input_length(length)?;
             if length == 2 {
                 return Ok(Some(InputReport::Empty));
             }
             let mut report = Self::buffer(effective - 2)?;
-            report.copy_from_slice(&self.input[2..effective]);
+            report.copy_from_slice(&this.input[2..effective]);
             Ok(Some(if effective == usize::from(length) {
                 InputReport::Data(report)
             } else {
@@ -497,8 +556,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
                     read_length: effective as u16,
                 }
             }))
-        })();
-        result.map_err(|kind| self.fail(kind))
+        })
     }
     /// GET_REPORT returns raw HID data (including the report ID when nonzero).
     /// A bounded read can capture a prefix of a larger device report, as Linux
@@ -513,17 +571,17 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         if maximum == 0 || maximum > MAX_BUFFER - 2 {
             return Err(ErrorKind::InvalidConfiguration.into());
         }
-        let result = (|| {
-            let mut command = self.command(GET_REPORT, kind as u8, id)?;
+        self.act(State::Ready, |this| {
+            let mut command = this.command(GET_REPORT, kind as u8, id)?;
             command.extend_from_slice(
-                &self
+                &this
                     .descriptor
                     .ok_or(ErrorKind::NotReady)?
                     .data_register
                     .to_le_bytes(),
             );
             let mut bytes = Self::buffer(maximum + 2)?;
-            self.transfer(&command, &mut bytes)?;
+            this.transfer(&command, &mut bytes)?;
             let length = usize::from(u16::from_le_bytes([bytes[0], bytes[1]]));
             if length < 2 {
                 return Err(ErrorKind::ReportLength {
@@ -543,8 +601,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
                 data: bytes,
                 reported_length: length - 2,
             })
-        })();
-        result.map_err(|kind| self.fail(kind))
+        })
     }
     fn formatted_report(id: u8, data: &[u8]) -> Result<Vec<u8>, ErrorKind> {
         let length = 2 + usize::from(id != 0) + data.len();
@@ -572,10 +629,10 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             return Err(ErrorKind::UnsupportedReportType.into());
         }
         let report = Self::formatted_report(id, data).map_err(Error::from)?;
-        let result = (|| {
-            let mut command = self.command(SET_REPORT, kind as u8, id)?;
+        self.act(State::Ready, |this| {
+            let mut command = this.command(SET_REPORT, kind as u8, id)?;
             command.extend_from_slice(
-                &self
+                &this
                     .descriptor
                     .ok_or(ErrorKind::NotReady)?
                     .data_register
@@ -585,9 +642,8 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
                 .try_reserve_exact(report.len())
                 .map_err(|_| ErrorKind::Allocation)?;
             command.extend_from_slice(&report);
-            self.transfer(&command, &mut [])
-        })();
-        result.map_err(|kind| self.fail(kind))
+            this.transfer(&command, &mut [])
+        })
     }
     /// Plain output-register transfer. A missing output register is explicit;
     /// callers may choose the separate SET_REPORT operation if appropriate.
@@ -608,33 +664,25 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         let mut command = Self::buffer(2 + report.len()).map_err(Error::from)?;
         command[..2].copy_from_slice(&descriptor.output_register.to_le_bytes());
         command[2..].copy_from_slice(&report);
-        self.transfer(&command, &mut [])
-            .map_err(|kind| self.fail(kind))
+        self.act(State::Ready, |this| this.transfer(&command, &mut []))
     }
     pub fn sleep(&mut self) -> Result<(), Error> {
         self.ready()?;
-        let result = self
-            .interrupt
-            .mask_and_drain()
-            .map_err(ErrorKind::Interrupt)
-            .and_then(|()| {
-                if self.quirks.no_sleep {
-                    Ok(())
-                } else {
-                    self.power(false)
-                }
-            });
-        match result {
-            Ok(()) => {
-                self.state = if self.quirks.no_sleep {
-                    State::SuspendedAwake
-                } else {
-                    State::Sleeping
-                };
+        let state = if self.quirks.no_sleep {
+            State::SuspendedAwake
+        } else {
+            State::Sleeping
+        };
+        self.act(state, |this| {
+            this.interrupt
+                .mask_and_drain()
+                .map_err(ErrorKind::Interrupt)?;
+            if this.quirks.no_sleep {
                 Ok(())
+            } else {
+                this.power(false)
             }
-            Err(kind) => Err(self.fail(kind)),
-        }
+        })
     }
     pub fn wake(&mut self) -> Result<(), Error> {
         if !matches!(self.state, State::Sleeping | State::SuspendedAwake) {
@@ -645,23 +693,16 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             }
             .into());
         }
-        let result = {
-            if self.quirks.delayed_resume {
-                self.delay(GOODIX_RESUME_DELAY_US);
+        self.act(State::Ready, |this| {
+            if this.quirks.delayed_resume {
+                this.delay(GOODIX_RESUME_DELAY_US)?;
             }
-            if self.quirks.reset_resume {
-                self.reset()
+            if this.quirks.reset_resume {
+                this.reset()
             } else {
-                self.power(true)
+                this.power(true)
             }
-        };
-        match result {
-            Ok(()) => {
-                self.state = State::Ready;
-                Ok(())
-            }
-            Err(kind) => Err(self.fail(kind)),
-        }
+        })
     }
     pub fn stop(&mut self) -> Result<(), Error> {
         if self.is_ready() {
@@ -675,11 +716,11 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             }
             .into());
         }
-        self.interrupt
-            .mask_and_drain()
-            .map_err(|error| self.fail(ErrorKind::Interrupt(error)))?;
-        self.state = State::Stopped;
-        Ok(())
+        self.act(State::Stopped, |this| {
+            this.interrupt
+                .mask_and_drain()
+                .map_err(ErrorKind::Interrupt)
+        })
     }
 }
 
@@ -688,31 +729,29 @@ const POLL_REPORTS: usize = 16;
 
 /// An I²C-HID keyboard or pointer: the initialized device and the HID
 /// report translator its input reports pass through.
+/// Abandonment retains the device graph; transport sleep is not platform detach.
 pub struct HidInput<B, I, T> {
-    device: Device<B, I, T>,
+    device: ManuallyDrop<Device<B, I, T>>,
     translator: Translator,
     pub name: String,
 }
 
 impl<B: Bus, I: Interrupt, T: Timer> HidInput<B, I, T> {
-    /// Translate `device`'s reports through its report descriptor. `device`
-    /// is initialized; it comes back with the reason when its descriptor
-    /// does not parse.
+    /// Translate the initialized device's reports. A parse refusal owns the
+    /// same device and descriptor alongside the precise parser diagnostic.
     #[allow(
         clippy::result_large_err,
         reason = "a device whose descriptor does not parse goes back to its owner"
     )]
-    pub fn new(
-        device: Device<B, I, T>,
-        name: String,
-    ) -> Result<Self, (Device<B, I, T>, ParseError)> {
+    pub fn new(device: Device<B, I, T>, name: String) -> Result<Self, Refusal<B, I, T>> {
+        let device = ManuallyDrop::new(device);
         match Translator::describe(device.report_descriptor()) {
             Ok(translator) => Ok(Self {
                 device,
                 translator,
                 name,
             }),
-            Err(error) => Err((device, error)),
+            Err(error) => Err(Refusal::descriptor(device, error)),
         }
     }
 

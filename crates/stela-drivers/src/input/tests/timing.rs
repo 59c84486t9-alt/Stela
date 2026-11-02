@@ -5,6 +5,17 @@ use crate::{
     bus::{i2c, smbus},
 };
 
+struct RefusingMinimum;
+// SAFETY: this fixture refuses all waits without device effects.
+unsafe impl crate::bus::pci::power::Timer for RefusingMinimum {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        Err(crate::bus::pci::power::Error::Clock)
+    }
+    fn wait_us(&self, _: u64) -> Result<(), crate::bus::pci::power::Error> {
+        Err(crate::bus::pci::power::Error::Clock)
+    }
+}
+
 struct Bus;
 impl i2c::Bus for Bus {
     fn transaction(
@@ -78,11 +89,19 @@ fn clock_failures_precede_transport_effects() {
         };
         let address = i2c::Address::SevenBit(0x15);
         assert_eq!(
-            hid_i2c::Device::new(Bus, Pin, clock, address, 1, 100_000)
-                .err()
-                .unwrap()
-                .kind,
-            hid_i2c::ErrorKind::Clock(expected)
+            hid_i2c::Device::new(
+                Bus,
+                Pin,
+                clock,
+                alloc::rc::Rc::new(RefusingMinimum),
+                address,
+                1,
+                100_000
+            )
+            .err()
+            .unwrap()
+            .error,
+            hid_i2c::RefusalCause::Transport(hid_i2c::ErrorKind::Clock(expected).into())
         );
         assert_eq!(
             elan::I2cDevice::new(Bus, Pin, clock, address)

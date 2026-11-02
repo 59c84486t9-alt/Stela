@@ -3,6 +3,8 @@
 use super::*;
 use alloc::{collections::VecDeque, rc::Rc, vec};
 use core::cell::{Cell, RefCell};
+mod minimum;
+mod ownership;
 
 // A complete vendor-page HID collection: ID17, two eight-bit input fields.
 const REPORT_DESCRIPTOR: [u8; 23] = [
@@ -15,6 +17,18 @@ struct Model(Rc<RefCell<Hardware>>);
 #[derive(Clone)]
 struct Pin(Rc<RefCell<Hardware>>);
 struct Time(Rc<Cell<u64>>);
+struct MinimumTime(Rc<Cell<u64>>);
+// SAFETY: explicit peripheral model only. Waiting advances this same model's
+// observable time by the complete interval; it grants no native calibration.
+unsafe impl Minimum for MinimumTime {
+    fn check(&self) -> Result<(), power::Error> {
+        Ok(())
+    }
+    fn wait_us(&self, us: u64) -> Result<(), power::Error> {
+        self.0.set(self.0.get().checked_add(us).unwrap());
+        Ok(())
+    }
+}
 struct Hardware {
     time: Rc<Cell<u64>>,
     desc: [u8; 30],
@@ -281,7 +295,8 @@ fn device(vendor: u16, product: u16) -> (Device<Model, Pin, Time>, Rc<RefCell<Ha
         Device::new(
             Model(h.clone()),
             Pin(h.clone()),
-            Time(time),
+            Time(time.clone()),
+            Rc::new(MinimumTime(time)),
             Address::SevenBit(0x2c),
             0x20,
             100,
@@ -492,7 +507,10 @@ fn source_checked_resume_profiles_apply_distinct_physical_effects() {
 fn interrupt_and_partial_bus_failures_quarantine_without_automatic_replay() {
     let (mut d, h) = device(0x06cb, 1);
     h.borrow_mut().fail_mask = true;
-    assert_eq!(d.initialize().unwrap_err().recovery, Recovery::Failed);
+    assert_eq!(
+        d.initialize().unwrap_err().recovery,
+        Recovery::Failed(InterruptError::Hardware(1))
+    );
     assert!(h.borrow().commands.is_empty());
     let (mut d, h) = ready();
     h.borrow_mut().fail_next = true;
