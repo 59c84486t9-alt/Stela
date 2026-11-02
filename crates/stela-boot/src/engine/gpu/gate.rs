@@ -18,7 +18,7 @@ use core::{
     hint,
     num::NonZeroU64,
     ptr::{self, NonNull},
-    sync::atomic::{AtomicPtr, Ordering},
+    sync::atomic::{AtomicPtr, AtomicU64, Ordering},
 };
 use stela_contracts::gate::{GateService, MemoryRange, window};
 use stela_drivers::gpu::{
@@ -66,10 +66,29 @@ fn run(stack: u64, body: &mut dyn FnMut()) {
 }
 
 pub(super) fn relax() {
+    // What this waits for may be retiring a mapping, which waits for this.
+    crate::native_mmio::shootdown::service();
     if host::processor() == BOOT_CPU.load(Ordering::Relaxed) {
         pump();
     }
     hint::spin_loop();
+}
+
+/// Logs why the service refused a guest's call, once for each reason.
+fn report(reason: &str) {
+    static SEEN: [AtomicU64; 128] = [const { AtomicU64::new(0) }; 128];
+    // FNV-1a: a reason is built per refusal, so only its text identifies it.
+    let text = reason.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3)
+    });
+    for slot in &SEEN {
+        match slot.compare_exchange(0, text, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(seen) if seen == text => return,
+            Err(_) => {}
+        }
+    }
+    output::arguments(format_args!("GPU REFUSED {reason}\n"));
 }
 
 /// NVK's entry point, as Vulkan types it.
@@ -149,6 +168,11 @@ impl MemoryExporter for Exporter {
     }
 }
 
+/// llvmpipe blends whole 4x4 blocks, so it touches up to three rows past a
+/// render target's last: three of the widest texture's, at 16 bytes a texel. It
+/// pads textures of its own, and a texture ending a guest buffer gets these.
+const SOFTWARE_TAIL_PAGES: u64 = 3 * 16384 * 16 / PAGE;
+
 /// Guest RAM the kext wired, for lavapipe to reach through one mapping.
 struct SoftwareExporter;
 
@@ -159,7 +183,9 @@ impl MemoryExporter for SoftwareExporter {
 
     fn export(&self, ranges: &[MemoryRange]) -> Result<ExportedMemory, Error> {
         let runs = guest_pages(ranges)?;
-        let pointer = client::map_runs(&runs).ok_or(Error::OutOfMemory)?;
+        let scratch = stack::scratch_page().ok_or(Error::OutOfMemory)?;
+        let pointer =
+            client::map_runs(&runs, SOFTWARE_TAIL_PAGES, scratch).ok_or(Error::OutOfMemory)?;
         let bytes = runs.iter().map(|run| run.bytes).sum();
         Ok(ExportedMemory {
             fd: -1,
@@ -173,7 +199,8 @@ impl MemoryExporter for SoftwareExporter {
     }
 
     fn unmap(&self, exported: ExportedMemory) {
-        client::unmap_export(exported.pointer.as_ptr() as u64, exported.bytes);
+        let bytes = exported.bytes + SOFTWARE_TAIL_PAGES * PAGE;
+        client::unmap_export(exported.pointer.as_ptr() as u64, bytes);
     }
 }
 
@@ -198,7 +225,12 @@ fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
     }?;
     Ok(Arc::new(SharedService::new(
         service,
-        ServiceHost { relax, stack, run },
+        ServiceHost {
+            relax,
+            stack,
+            run,
+            report,
+        },
     )))
 }
 
@@ -258,6 +290,7 @@ fn open_software(gpu: &Installed, constructed: &mut bool) -> Option<Arc<Shared>>
                 relax,
                 stack: top,
                 run,
+                report,
             },
         ))),
         Err(error) => {
