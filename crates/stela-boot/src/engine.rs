@@ -401,6 +401,10 @@ struct GuestConsole {
 }
 
 impl ConsoleSink for GuestConsole {
+    fn poll(&mut self) -> Option<u8> {
+        crate::serial::read()
+    }
+
     fn transmit(&mut self, byte: u8) -> Result<(), ConsoleBusy> {
         if let Some(fragment) = self.lines.push(byte) {
             if let Ok(mut panic) = GUEST_PANIC.0.try_borrow_mut() {

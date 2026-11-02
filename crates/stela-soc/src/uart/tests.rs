@@ -6,8 +6,13 @@ use stela_contracts::interrupt::InterruptLatch;
 struct Console {
     bytes: Vec<u8>,
     busy: bool,
+    input: VecDeque<u8>,
 }
 impl ConsoleSink for Console {
+    fn poll(&mut self) -> Option<u8> {
+        self.input.pop_front()
+    }
+
     fn transmit(&mut self, byte: u8) -> Result<(), ConsoleBusy> {
         if self.busy {
             return Err(ConsoleBusy);
@@ -19,6 +24,58 @@ impl ConsoleSink for Console {
 const IRQ: AicInput = AicInput::new(0, 739);
 fn uart() -> S5lUart<Console> {
     S5lUart::new(Console::default(), Some(IRQ))
+}
+
+#[test]
+fn host_input_raises_receive_irq_without_a_guest_poll_and_preserves_backpressure() {
+    let mut uart = uart();
+    let mut latch = InterruptLatch::new();
+    let ucon = read(&mut uart, &mut latch, UCON);
+    write(
+        &mut uart,
+        &mut latch,
+        UCON,
+        ucon | UCON_RX_TIMEOUT_ENABLE | UCON_RXTO_ENABLE | UCON_RXTHRESH_ENABLE,
+    );
+    uart.console().input.extend(0..20);
+    uart.advance(&mut Access::new(0, 0, &mut latch)).unwrap();
+    assert!(latch.is_asserted(Wire::Aic(IRQ)));
+    assert_eq!(uart.rx.len(), FIFO_BYTES);
+    assert_eq!(uart.console().input.len(), 4);
+    let received: Vec<_> = (0..20)
+        .map(|_| read(&mut uart, &mut latch, URXH) as u8)
+        .collect();
+    assert_eq!(received, (0..20).collect::<Vec<_>>());
+    assert!(uart.console().input.is_empty());
+}
+
+#[test]
+fn paused_and_disabled_receivers_leave_host_input_queued() {
+    let mut uart = uart();
+    let mut latch = InterruptLatch::new();
+    let active = uart.lifecycle;
+    for paused in [
+        LifecycleState {
+            clocked: false,
+            ..active
+        },
+        LifecycleState {
+            quiesced: true,
+            ..active
+        },
+    ] {
+        lifecycle(&mut uart, paused, &mut latch);
+        uart.console().input.push_back(b'x');
+        uart.advance(&mut Access::new(0, 0, &mut latch)).unwrap();
+        assert!(uart.rx.is_empty());
+        assert_eq!(uart.console().input.pop_front(), Some(b'x'));
+        lifecycle(&mut uart, active, &mut latch);
+    }
+    write(&mut uart, &mut latch, UCON, 4);
+    uart.console().input.push_back(b'y');
+    uart.advance(&mut Access::new(0, 0, &mut latch)).unwrap();
+    assert!(uart.rx.is_empty());
+    assert_eq!(uart.console().input.pop_front(), Some(b'y'));
 }
 
 fn lifecycle(uart: &mut S5lUart<Console>, state: LifecycleState, latch: &mut InterruptLatch) {
