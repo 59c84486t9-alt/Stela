@@ -4,16 +4,16 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_DOMAIN: AtomicU64 = AtomicU64::new(1);
 
-pub(super) struct Capture {
+pub(in crate::platform::work) struct Capture {
     domain: u64,
     serial: u64,
     epoch: u64,
-    pub(super) raised: bool,
-    pub(super) tick: bool,
-    pub(super) timer: bool,
+    pub(in crate::platform::work) raised: bool,
+    pub(in crate::platform::work) tick: bool,
+    pub(in crate::platform::work) timer: bool,
 }
 
-pub(super) struct DeadlineCore {
+pub(in crate::platform::work) struct DeadlineCore {
     id: u64,
     last_ns: u64,
     tick: Option<u64>,
@@ -25,7 +25,7 @@ pub(super) struct DeadlineCore {
 }
 
 impl DeadlineCore {
-    pub(super) fn new(now: u64) -> Result<Self, WorkError> {
+    pub(in crate::platform::work) fn new(now: u64) -> Result<Self, WorkError> {
         let id = NEXT_DOMAIN
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .map_err(|_| WorkError::Exhausted)?;
@@ -41,7 +41,7 @@ impl DeadlineCore {
         })
     }
 
-    pub(super) fn observe(&mut self, now: u64) -> Result<(), WorkError> {
+    pub(in crate::platform::work) fn observe(&mut self, now: u64) -> Result<(), WorkError> {
         if now < self.last_ns {
             return Err(WorkError::CorruptContext);
         }
@@ -49,11 +49,11 @@ impl DeadlineCore {
         Ok(())
     }
 
-    pub(super) fn can_start_ticks(&self) -> bool {
+    pub(in crate::platform::work) fn can_start_ticks(&self) -> bool {
         self.tick.is_none() && !self.running
     }
 
-    pub(super) fn start_ticks(&mut self, now: u64) -> Result<(), WorkError> {
+    pub(in crate::platform::work) fn start_ticks(&mut self, now: u64) -> Result<(), WorkError> {
         if !self.can_start_ticks() {
             return Err(WorkError::Busy);
         }
@@ -64,28 +64,32 @@ impl DeadlineCore {
         Ok(())
     }
 
-    pub(super) fn set_timer(&mut self, deadline: Option<u64>) {
+    pub(in crate::platform::work) fn set_timer(&mut self, deadline: Option<u64>) {
         self.timer = deadline;
     }
 
-    pub(super) fn next_deadline(&self) -> Option<u64> {
+    pub(in crate::platform::work) fn next_deadline(&self) -> Option<u64> {
         match (self.tick, self.timer) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         }
     }
 
-    pub(super) fn due(&self, now: u64, epoch: u64) -> bool {
+    pub(in crate::platform::work) fn due(&self, now: u64, epoch: u64) -> bool {
         epoch != self.delivered
             || self.tick.is_some_and(|deadline| deadline <= now)
             || self.timer.is_some_and(|deadline| deadline <= now)
     }
 
-    pub(super) fn running(&self) -> bool {
+    pub(in crate::platform::work) fn running(&self) -> bool {
         self.running
     }
 
-    pub(super) fn begin(&mut self, now: u64, epoch: u64) -> Result<Option<Capture>, WorkError> {
+    pub(in crate::platform::work) fn begin(
+        &mut self,
+        now: u64,
+        epoch: u64,
+    ) -> Result<Option<Capture>, WorkError> {
         if self.running {
             return Err(WorkError::Busy);
         }
@@ -108,14 +112,14 @@ impl DeadlineCore {
         }))
     }
 
-    pub(super) fn validate(&self, capture: &Capture) -> Result<(), WorkError> {
+    pub(in crate::platform::work) fn validate(&self, capture: &Capture) -> Result<(), WorkError> {
         if !self.running || capture.domain != self.id || capture.serial != self.serial {
             return Err(WorkError::InvalidTicket);
         }
         Ok(())
     }
 
-    pub(super) fn finish(
+    pub(in crate::platform::work) fn finish(
         &mut self,
         capture: Capture,
         now: u64,
@@ -145,7 +149,7 @@ impl DeadlineCore {
         Ok(())
     }
 
-    pub(super) fn retire(&mut self, epoch: u64) -> Result<(), WorkError> {
+    pub(in crate::platform::work) fn retire(&mut self, epoch: u64) -> Result<(), WorkError> {
         if epoch & CLOSED == 0
             || epoch & !CLOSED != self.delivered
             || self.running
@@ -159,7 +163,7 @@ impl DeadlineCore {
         Ok(())
     }
 
-    pub(super) fn retired(&self) -> bool {
+    pub(in crate::platform::work) fn retired(&self) -> bool {
         self.retired
     }
 }

@@ -12,6 +12,12 @@ pub struct HostedReason {
     signal: ManuallyDrop<Arc<Signal>>,
 }
 impl HostedReason {
+    pub(super) fn state(&self) -> &ReasonCore {
+        &self.signal.reason
+    }
+    pub(super) fn idle(&self) -> &Arc<HostedIdle> {
+        &self.signal.idle
+    }
     pub fn new(idle: &Arc<HostedIdle>) -> Result<Self, WorkError> {
         idle.clock().execution().check_current()?;
         Ok(Self {

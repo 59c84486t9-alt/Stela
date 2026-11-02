@@ -9,7 +9,8 @@ pub use raised::DomainRaised;
 mod hosted;
 #[cfg(all(feature = "test-support", unix))]
 pub use hosted::{
-    HostFrameId, HostedClock, HostedExecution, HostedIdle, HostedPages, HostedReason,
+    HostFrameId, HostedBatch, HostedClock, HostedDeadlines, HostedExecution, HostedIdle,
+    HostedPages, HostedReason,
 };
 mod storage;
 pub use storage::{CpuSpan, StorageShape, StorageView};

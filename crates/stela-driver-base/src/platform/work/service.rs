@@ -22,7 +22,7 @@ pub enum IdleOutcome {
 const CLOSED: u64 = 1 << 63;
 pub(super) mod reason;
 use reason::ReasonCore;
-mod deadline;
+pub(super) mod deadline;
 use deadline::{Capture, DeadlineCore};
 
 /// Owned nanosecond clock over the exact CPU/root permission.
