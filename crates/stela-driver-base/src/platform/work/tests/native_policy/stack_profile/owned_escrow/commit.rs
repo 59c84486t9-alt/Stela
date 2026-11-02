@@ -43,8 +43,21 @@ unsafe extern "C" fn publish(pointer: *mut c_void) {
         .unwrap()
         .into_owned()
         .unwrap();
+    let flags = f.cpu.save_disable().unwrap();
+    let expected_context = {
+        // SAFETY: this fixture's actual CPU has IRQs saved/disabled. The single
+        // retained escrow excludes its stopped worker; no task borrow survives
+        // this block or the matching restore. No production visibility changes.
+        let tasks = unsafe { &*r.tasks.get() };
+        let mut held = tasks.iter().filter(|task| task.state == TaskState::Escrow);
+        let id = held.next().expect("actual escrow worker").id;
+        assert!(held.next().is_none(), "fixture owns exactly one escrow");
+        id
+    };
+    // SAFETY: exact saved flags above after every Task-table borrow has ended.
+    unsafe { f.cpu.restore(flags) };
     f.child_context
-        .store(owned.context.get(), Ordering::Release);
+        .store(expected_context.get(), Ordering::Release);
     let old_next = r.queue.lock().unwrap().state().next;
     let old_sequence = r.current_context().unwrap().sequence;
     match f.case {

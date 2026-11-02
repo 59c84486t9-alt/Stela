@@ -120,6 +120,7 @@ fn native_intervals_blocked_wake_irq_and_stopped_data_join() {
     assert_eq!(unsafe { r.queue.retire() }, Err(WorkError::Pending));
     // SAFETY: same stopped binding is kept; unresolved source data prevents detach.
     assert!(matches!(
+        // SAFETY: same joined native frame; outstanding source data must veto detach.
         unsafe { r.detach_binding(wake.context_id()) },
         Err(WorkError::Pending)
     ));
@@ -138,14 +139,15 @@ fn native_intervals_blocked_wake_irq_and_stopped_data_join() {
         WorkError::Unavailable
     );
     // No real Linux task ref exists in this RAM-only hosted mechanism fixture.
-    // Its source-reader model is now stopped, matching the explicit unsafe boundary.
+    // SAFETY: its source-reader model is stopped, matching the explicit boundary.
     unsafe { stop.finish(&Authority(s.cpu.clone())) }.unwrap();
     // SAFETY: all fixture source users and native physical frame joined.
     drop(unsafe { r.detach_binding(wake.context_id()) }.unwrap());
+    // SAFETY: queue closed, source readers stopped, and all bindings/frames joined.
     unsafe { r.retire() }.unwrap();
     s.tap.lock().unwrap().take();
     s.domain.lock().unwrap().take();
     drop(domain);
     drop(executor);
-    assert_eq!(dropped.load(Ordering::Acquire), 4);
+    assert_eq!(dropped.load(Ordering::Acquire), 5);
 }

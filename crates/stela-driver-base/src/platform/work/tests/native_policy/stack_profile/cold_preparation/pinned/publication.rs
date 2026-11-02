@@ -236,6 +236,10 @@ fn check(action: Action) {
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
         if matches!(action, Action::Drop | Action::Forget) {
             if matches!(action, Action::Forget) {
+                #[expect(
+                    clippy::forget_non_drop,
+                    reason = "exercise explicit loss of the publication handle independently of its current destructor policy"
+                )]
                 core::mem::forget(published);
             } else {
                 drop(published);

@@ -1,18 +1,13 @@
 use super::*;
 extern crate std;
-use crate::bus::{
-    mmio::control,
-    pci::{ConfigError, ConfigFailure},
-};
+use crate::bus::pci::{ConfigError, ConfigFailure};
 use alloc::sync::Arc;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Cause {
-    Config(ConfigError),
-    Controller(control::Error),
-}
+// Actual current PCI errors are already multiword failure/effect metadata.
+// No future controller SDK or hardware producer is needed by this generic test.
+type Cause = ConfigError;
 fn config() -> Cause {
-    Cause::Config(ConfigError::write_may_have_applied(
+    ConfigError::write_may_have_applied(
         0x54,
         4,
         ConfigFailure::Readback {
@@ -21,27 +16,28 @@ fn config() -> Cause {
             expected: 0xfee0_0010,
             observed: 0xffff_ffff,
         },
-    ))
+    )
 }
-fn controller(index: usize) -> Cause {
-    Cause::Controller(control::Error::write_may_have_applied(
-        0x10 + 4 * index,
+fn other_config(index: usize) -> Cause {
+    let offset = u16::try_from(0x10 + 4 * index).expect("bounded fixture offset");
+    ConfigError::write_may_have_applied(
+        offset,
         4,
-        control::Failure::Readback {
-            offset: 0x10 + 4 * index,
+        ConfigFailure::Readback {
+            offset,
             width: 4,
-            expected: 0x1234_5678_8765_4321,
-            observed: 0xfeed_beef_dead_cafe,
+            expected: 0x8765_4321,
+            observed: 0xdead_cafe,
         },
-    ))
+    )
 }
 #[test]
-fn actual_multiword_causes_keep_readback_width_offset_and_write_effect() {
-    for expected in [config(), controller(0)] {
+fn actual_multiword_config_causes_keep_readback_width_offset_and_write_effect() {
+    for expected in [config(), other_config(0)] {
         let cell = FirstFault::new();
         assert_eq!(cell.observe(), FaultState::Empty);
         assert!(cell.latch(expected));
-        assert!(!cell.latch(controller(1)));
+        assert!(!cell.latch(other_config(1)));
         assert_eq!(cell.observe(), FaultState::Ready(expected));
     }
 }
@@ -55,7 +51,7 @@ fn interrupted_writer_stays_closed_without_reading_uninitialized_payload() {
     assert!(interruption.is_err());
     for _ in 0..4 {
         assert_eq!(cell.observe(), FaultState::Publishing);
-        assert!(!cell.latch(controller(2)));
+        assert!(!cell.latch(other_config(2)));
     }
     // No finish/reset is performed: this exact cell remains closed forever.
 }
@@ -67,14 +63,14 @@ fn nested_publications_keep_observation_separate_from_each_original_cause() {
     let observed = outer.observe();
     assert_eq!(observed, FaultState::Publishing);
     // Observation has a different type: no Cause is manufactured from it.
-    assert!(inner.latch(controller(3)));
-    assert_eq!(inner.observe(), FaultState::Ready(controller(3)));
+    assert!(inner.latch(other_config(3)));
+    assert_eq!(inner.observe(), FaultState::Ready(other_config(3)));
     assert_eq!(outer.observe(), FaultState::Publishing);
     // SAFETY: this fixture owns outer's sole successful simulated claim; no
     // nested reader or inner publisher can access/finish its payload.
     unsafe { testing::finish(&outer, config()) };
     assert_eq!(outer.observe(), FaultState::Ready(config()));
-    assert_eq!(inner.observe(), FaultState::Ready(controller(3)));
+    assert_eq!(inner.observe(), FaultState::Ready(other_config(3)));
 }
 #[test]
 fn concurrent_writers_publish_exactly_one_complete_original_payload() {
@@ -85,7 +81,7 @@ fn concurrent_writers_publish_exactly_one_complete_original_payload() {
         let cell = cell.clone();
         let start = start.clone();
         threads.push(std::thread::spawn(move || {
-            let candidate = controller(index);
+            let candidate = other_config(index);
             start.wait();
             (candidate, cell.latch(candidate))
         }));

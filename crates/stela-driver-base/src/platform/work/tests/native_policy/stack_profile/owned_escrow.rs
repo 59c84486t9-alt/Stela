@@ -1,5 +1,6 @@
 //! Owned exclusions across real hosted park/resume; no native scope or C loan.
 use super::*;
+use crate::platform::work::tests::cancellation_error;
 use core::cell::Cell;
 use std::{println, process::Command, string::String};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

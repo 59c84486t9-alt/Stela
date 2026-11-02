@@ -1,6 +1,9 @@
 //! Real reservation counters/guarded continuations; CPU permission is a model.
 use super::*;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    thread,
+};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TransferCase {
     Fresh,
@@ -128,7 +131,12 @@ unsafe extern "C" fn convert(pointer: *mut c_void) {
         let permission = Permission::new(&f.cpu);
         let reserved = r.reserve_general(&permission, kernel()).unwrap();
         f.cpu.arm.store(true, Ordering::Release);
-        assert!(catch_unwind(AssertUnwindSafe(|| reserved.into_owned())).is_err());
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _ = reserved.into_owned();
+            }))
+            .is_err()
+        );
         assert_eq!(f.cpu.model.flags(), 0x202);
         assert!(r.queue.abandoned.load(Ordering::Acquire));
         assert_eq!(f.cpu.dropped.load(Ordering::Acquire), 0);

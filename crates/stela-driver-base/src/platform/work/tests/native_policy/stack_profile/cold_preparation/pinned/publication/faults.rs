@@ -199,8 +199,9 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         f.signals.restore_armed.store(true, Ordering::Release);
         // SAFETY: complete actual context/code/pin roots precede publication;
         // catch stays INSIDE this Rust callback, crossing no C frame.
-        let caught = catch_unwind(AssertUnwindSafe(|| unsafe {
-            ready.commit(&permission, fault_child, pointer)
+        let caught = catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: the same held context, code and pin precede publication.
+            let _ = unsafe { ready.commit(&permission, fault_child, pointer) };
         }));
         assert!(caught.is_err());
         assert!(f.signals.published.load(Ordering::Acquire));

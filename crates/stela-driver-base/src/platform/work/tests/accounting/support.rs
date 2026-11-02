@@ -183,7 +183,7 @@ pub(super) fn setup() -> (
         runtime: ManuallyDrop::new(
             Runtime::with_service_controls(
                 queue,
-                test_support::stacks_count(&dropped, 4),
+                test_support::stacks_count(&dropped, 5),
                 controls,
                 true,
             )
