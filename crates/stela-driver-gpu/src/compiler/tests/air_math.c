@@ -520,6 +520,38 @@ half_declares_its_float_controls(void)
    }
 }
 
+static unsigned
+count_alu(nir_shader *shader, nir_op op)
+{
+   unsigned count = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+      nir_foreach_instr(instr, block) {
+         count += instr->type == nir_instr_type_alu && nir_instr_as_alu(instr)->op == op;
+      }
+   }
+   return count;
+}
+
+/* A backend without a fused multiply-add gets the weak form it can lower. */
+static void
+fma_follows_its_backend(void)
+{
+   const char *declaration = "declare float @llvm.fma.f32(float, float, float)\n";
+   const char *body =
+      "%a = load float, ptr addrspace(1) %out, align 4\n"
+      "%r = call float @llvm.fma.f32(float %a, float %a, float %a)\n"
+      "store float %r, ptr addrspace(1) %out, align 4\nret void\n";
+   nir_shader_compiler_options fused = nir_options;
+   fused.float_mul_add32 = nir_float_muladd_support_has_ffma;
+   struct stela_air_error error = {0};
+   nir_shader *weak = translate(declaration, body, &nir_options, stela_metal_bind_buffer, &error);
+   assert(weak && count_alu(weak, nir_op_ffma_weak) == 1 && !count_alu(weak, nir_op_ffma));
+   ralloc_free(weak);
+   nir_shader *strict = translate(declaration, body, &fused, stela_metal_bind_buffer, &error);
+   assert(strict && count_alu(strict, nir_op_ffma) == 1 && !count_alu(strict, nir_op_ffma_weak));
+   ralloc_free(strict);
+}
+
 /* Every kind of function lowers, and compiles with NAK, on loaded values the
  * compiler cannot fold: %a, %b and %c of the operand type. */
 static void
@@ -714,6 +746,7 @@ main(void)
    conversions_follow_their_names();
    refuses_misnamed_and_misplaced_functions();
    half_declares_its_float_controls();
+   fma_follows_its_backend();
    functions_compile();
    fragments_take_derivatives_and_discard();
    glsl_type_singleton_decref();

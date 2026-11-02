@@ -84,6 +84,8 @@ struct stela_metal_reflection {
    /* Whether the function's module encodes indirect commands, and may set
     * or copy their barriers. */
    uint32_t commands, command_barriers;
+   /* The color attachments a fragment function reads, one bit each. */
+   uint32_t attachment_reads;
    struct stela_metal_buffer_use buffers[STELA_METAL_BUFFERS];
    struct stela_metal_texture_use textures[STELA_METAL_TEXTURES];
    uint32_t samplers[STELA_METAL_SAMPLERS];
@@ -94,7 +96,7 @@ struct stela_metal_reflection {
    struct stela_metal_function_constant function_constants[STELA_METAL_FUNCTION_CONSTANTS];
    char names[STELA_METAL_NAME_BYTES];
 };
-#define STELA_METAL_REFLECTION_BYTES 18792u
+#define STELA_METAL_REFLECTION_BYTES 18800u
 
 /* The target's facts, fixed for a device. nir is the Vulkan driver's
  * compiler options, which must outlive every shader compiled with them. */

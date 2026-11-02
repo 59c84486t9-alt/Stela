@@ -14,7 +14,7 @@ use super::{
     error::{Error, Result, ensure},
     hazard::{FULL, Hazards, Use},
     indirect::{IndirectCommandBuffer, IndirectCommandBufferId, IndirectPipeline, RecordLayout},
-    pipeline::{ComputePipelinePlan, RenderPipelinePlan},
+    pipeline::{ComputePipelinePlan, MAX_COLOR_ATTACHMENTS, RenderPipelinePlan},
     shader::{Interface, Specialization, Stage},
     sparse::Mapping,
     upload::{Chunk, ChunkSource, Upload, UploadArena},
@@ -302,6 +302,13 @@ impl Bindings {
         table.slots.textures[index as usize] = texture;
         table.address = None;
         Ok(())
+    }
+
+    /// The textures of the pass's color attachments, for `[[color(n)]]`.
+    fn set_attachments(&mut self, textures: [ResourceId; MAX_COLOR_ATTACHMENTS]) {
+        let table = self.table(Stage::Fragment);
+        table.slots.attachments = textures;
+        table.address = None;
     }
 
     fn set_sampler(&mut self, stage: Stage, sampler: ResourceId, index: u32) -> Result<()> {

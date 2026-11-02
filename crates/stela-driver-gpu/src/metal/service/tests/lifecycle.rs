@@ -131,6 +131,7 @@ fn shared_quiesce_uses_the_serialized_service_stack() {
                 assert_eq!(stack, 0x4000);
                 call();
             },
+            report: |_| {},
         },
     );
     let connection = shared.connect().unwrap();

@@ -14,6 +14,7 @@ extern "C" {
 #define AIR_MAX_RENDER_TARGETS 8u
 #define AIR_MAX_PATCH_CONTROL_POINTS 32u
 #define AIR_MAX_METADATA_OPERANDS 256
+#define AIR_MAX_GLOBALS 4096
 #define AIR_MAX_BITCODE_BYTES (64u * 1024u * 1024u)
 
 enum stela_air_error_kind {
@@ -170,6 +171,7 @@ struct stela_air_sampler {
    unsigned argument, index, length;
 };
 #define AIR_MAX_TEXTURES 128u
+#define STELA_AIR_ATTACHMENTS 8u
 #define AIR_MAX_SAMPLERS 16u
 
 /* Metal's builtin inputs. AIR names each after its MSL attribute,
@@ -274,6 +276,9 @@ enum stela_air_stage_semantic {
     * members are the attributes of each control point. */
    STELA_AIR_CONTROL_POINTS,
    STELA_AIR_POSITION_IN_PATCH, /* The tessellated vertex's float2 or float3. */
+   /* A [[color(location)]] input: the render target's texel under the
+    * fragment. */
+   STELA_AIR_ATTACHMENT,
    /* A fragment's barycentric_coord: float to float3, interpolated and
     * sampled as qualified. */
    STELA_AIR_BARYCENTRIC,

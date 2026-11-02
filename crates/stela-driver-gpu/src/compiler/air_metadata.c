@@ -36,6 +36,17 @@ stela_air_md_string(LLVMValueRef value, const char *expected)
    return length == strlen(expected) && !memcmp(string, expected, length);
 }
 
+/* Whether a module flag's name is in AIR's namespace. */
+static bool
+air_flag(LLVMValueRef value)
+{
+   if (!value || !LLVMIsAMDString(value))
+      return true;
+   unsigned length;
+   const char *string = LLVMGetMDString(value, &length);
+   return length >= 4 && !memcmp(string, "air.", 4);
+}
+
 /* A metadata string for a refusal to name: its text, or "?" for another
  * value. */
 static const char *
@@ -252,7 +263,7 @@ stela_air_metadata_globals(struct stela_air_metadata *t, bool *threadgroup)
    for (LLVMValueRef global = LLVMGetFirstGlobal(t->module); global;
         global = LLVMGetNextGlobal(global)) {
       struct stela_air_global info;
-      if (++count > AIR_MAX_ARGUMENTS)
+      if (++count > AIR_MAX_GLOBALS)
          return fail(t, STELA_AIR_LIMIT, "global count exceeded");
       if (global == constructors || retention_list(global) ||
           stela_air_metadata_is_function_constant(t, global) || stela_air_log_only(global))
@@ -321,16 +332,18 @@ module_flags(struct stela_air_metadata *t)
    for (unsigned i = 0; i < count; i++) {
       LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
       unsigned field_count, behavior, value, key;
-      if (!stela_air_md_node(t, flags[i], fields, &field_count) || field_count != 3 ||
-          !stela_air_md_uint(fields[0], &behavior) || !stela_air_md_uint(fields[2], &value))
+      if (!stela_air_md_node(t, flags[i], fields, &field_count) || field_count != 3)
          return fail(t, STELA_AIR_METADATA, "unsupported module flag shape");
       for (key = 0; key < ARRAY_SIZE(keys); key++) {
          if (stela_air_md_string(fields[1], keys[key]))
             break;
       }
-      if (stela_air_md_string(fields[1], "Dwarf Version") ||
-          stela_air_md_string(fields[1], "Debug Info Version"))
+      /* LLVM's notes on the build, such as its SDK's version, are no part of
+       * AIR, and their values need not be integers. */
+      if (key == ARRAY_SIZE(keys) && !air_flag(fields[1]))
          continue;
+      if (!stela_air_md_uint(fields[0], &behavior) || !stela_air_md_uint(fields[2], &value))
+         return fail(t, STELA_AIR_METADATA, "unsupported module flag shape");
       if (key == ARRAY_SIZE(keys) || (seen & (1u << key)))
          return fail(t, STELA_AIR_METADATA, "unsupported/duplicate module flag");
       seen |= 1u << key;
@@ -1721,6 +1734,21 @@ argument_predicate(struct stela_air_metadata *m, LLVMValueRef node, bool *known,
    return true;
 }
 
+/* An argument's attribute index: a number, or the AS2 global the module's
+ * constructors compute a constant expression into, zero until specialization
+ * has constructed it. */
+static bool
+argument_location(LLVMValueRef field, unsigned *location)
+{
+   if (stela_air_md_uint(field, location))
+      return true;
+   LLVMValueRef value = field && LLVMIsAGlobalVariable(field) ? LLVMGetInitializer(field) : NULL;
+   if (!value || !LLVMIsAConstantInt(value))
+      return false;
+   *location = (unsigned)LLVMConstIntGetZExtValue(value);
+   return true;
+}
+
 static bool
 metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef args_node,
                    struct stela_air_kernel *kernel, struct stela_air_render *render)
@@ -1764,7 +1792,9 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          memmove(&fields[1], &fields[3], (fields_count - 3) * sizeof(*fields));
          fields_count -= 2;
       }
+      /* An argument its predicate may yet leave out reads nothing. */
       bool claims = known && !absent;
+      absent = !claims;
       LLVMValueRef param = LLVMGetParam(fn, index);
       unsigned attributes_count = LLVMGetAttributeCountAtIndex(fn, index + 1);
       if (attributes_count > AIR_MAX_METADATA_OPERANDS)
@@ -1819,11 +1849,30 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       bool mesh = mesh_stage && stela_air_md_string(fields[1], "air.mesh");
       bool grid = object && stela_air_md_string(fields[1], "air.mesh_grid_properties");
       /* A fragment input of a render target's color is programmable
-       * blending, which reads the target in raster order. */
+       * blending, which reads the target in raster order. A false predicate
+       * leaves it out, and until one is known it reads nothing. */
       if (render && render->entry.stage == STELA_AIR_FRAGMENT &&
-          stela_air_md_string(fields[1], "air.render_target"))
-         return fail(t, STELA_AIR_ARGUMENT,
-                     "programmable blending ([[color(n)]] inputs) needs an Apple GPU family");
+          stela_air_md_string(fields[1], "air.render_target")) {
+         struct stela_air_stage_io *input = &render->inputs[a];
+         *input = (struct stela_air_stage_io){.argument = index, .semantic = STELA_AIR_ATTACHMENT,
+                                              .absent = !claims};
+         for (unsigned f = 2; f + 1 < fields_count; f++) {
+            if (stela_air_md_string(fields[f], "air.arg_type_name") &&
+                metadata_text(t, fields[f + 1], &input->type_name, &input->type_name_bytes))
+               input->primitive = primitive_type(fields[f + 1], &input->components);
+            else if (stela_air_md_string(fields[f], "air.arg_name"))
+               metadata_text(t, fields[f + 1], &input->name, &input->name_bytes);
+         }
+         if (fields_count < 3 || !argument_location(fields[2], &input->location) ||
+             input->location >= STELA_AIR_ATTACHMENTS || !input->components ||
+             !stage_type_matches(LLVMTypeOf(param), input->primitive, input->components))
+            return fail(t, STELA_AIR_METADATA, "invalid render target input");
+         input->used = LLVMGetFirstUse(param) != NULL;
+         kernel->arguments[a] = (struct stela_air_argument){
+            .value = param, .used = input->used, .absent = !claims,
+            .name = input->name, .name_bytes = input->name_bytes};
+         continue;
+      }
       if (!buffer && !builtin && !interpolated && !vertex_input && !texture && !sampler &&
           !payload && !mesh && !grid && !control_points && !in_patch) {
          unsigned length;
@@ -1892,7 +1941,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             has_access = true;
          } else if ((texture || sampler || vertex_input) && stela_air_md_string(key, "air.location_index")) {
             unsigned *slot = texture ? &texture_desc.index : sampler ? &sampler_desc.index : &location;
-            if (has_location || f + 2 > fields_count || !stela_air_md_uint(fields[f], slot) ||
+            if (has_location || f + 2 > fields_count || !argument_location(fields[f], slot) ||
                 !stela_air_md_uint(fields[f + 1], &locations) || !locations)
                return fail(t, STELA_AIR_METADATA, "invalid/duplicate resource or attribute location");
             if (vertex_input && locations != 1)
@@ -1907,7 +1956,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
                           stela_air_md_string(key, "air.write") ? STELA_AIR_WRITE : STELA_AIR_READ_WRITE;
          } else if (stela_air_md_string(key, "air.location_index")) {
             if (!buffer || has_location || f + 2 > fields_count ||
-                !stela_air_md_uint(fields[f], &desc.index) || !stela_air_md_uint(fields[f + 1], &locations) ||
+                !argument_location(fields[f], &desc.index) || !stela_air_md_uint(fields[f + 1], &locations) ||
                 locations != 1 || desc.index >= AIR_MAX_ARGUMENTS)
                return fail(t, STELA_AIR_METADATA, "unsupported/duplicate buffer location");
             has_location = true;
@@ -2031,8 +2080,10 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          if ((claims && indices[desc.index]) || (limit && desc.index >= limit))
             return fail(t, STELA_AIR_METADATA, "duplicate buffer or location exceeds AIR module limit");
          indices[desc.index] |= claims;
-         if (has_buffer_size && buffer_size != desc.type_size)
-            return fail(t, STELA_AIR_ARGUMENT, "buffer size differs from its type at %u", index);
+         /* An array by reference is typed by its element. */
+         if (has_buffer_size && desc.type_size && buffer_size % desc.type_size)
+            return fail(t, STELA_AIR_ARGUMENT, "buffer %u of %u bytes is no count of %u byte types",
+                        index, buffer_size, desc.type_size);
          if (indirect && (shared || !struct_info || !desc.type_size))
             return fail(t, STELA_AIR_ARGUMENT, "unsupported argument buffer %u", index);
          if (indirect && !argument_fields(t, kernel, struct_info, desc.type_size, index, 0,
@@ -2299,17 +2350,12 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
    r->entry.input_count = r->arguments.count;
    r->entry.inputs = r->inputs; r->entry.outputs = r->outputs;
    entry_facts(m, fn, &r->entry.threadgroup_bytes, &r->entry.discards);
-   bool position = false;
    for (unsigned i = 0; i < r->entry.input_count; i++) {
       struct stela_air_stage_io *io = &r->inputs[i];
       /* Control points name their members instead. */
       if (io->semantic != STELA_AIR_CONTROL_POINTS &&
           (!stage_text(io->name, io->name_bytes) || !stage_text(io->type_name, io->type_name_bytes)))
          return fail(m, STELA_AIR_METADATA, "missing/invalid stage argument name/type");
-      if (io->semantic == STELA_AIR_POSITION) {
-         if (position) return fail(m, STELA_AIR_METADATA, "duplicate render builtin argument");
-         position = true;
-      }
       if (io->semantic == STELA_AIR_VARYING) {
          for (unsigned j = 0; j < i; j++) {
             if (r->inputs[j].semantic == STELA_AIR_VARYING &&
@@ -2360,6 +2406,7 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
          bool known;
          if (n < 5 || !argument_predicate(m, fields[1], &known, &io->absent))
             return fail(m, STELA_AIR_METADATA, "invalid function constant output predicate");
+         io->absent |= !known;
          memmove(fields, &fields[2], (n - 2) * sizeof(*fields));
          n -= 2;
       }
@@ -2390,7 +2437,7 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
                         AIR_MAX_CLIP_DISTANCES);
       } else if (fragment && stela_air_md_string(fields[0], "air.render_target")) {
          io->semantic = STELA_AIR_RENDER_TARGET;
-         if (n < 4 || !stela_air_md_uint(fields[f++], &io->location) ||
+         if (n < 4 || !argument_location(fields[f++], &io->location) ||
              io->location >= AIR_MAX_RENDER_TARGETS)
             return fail(m, STELA_AIR_ARGUMENT, "unsupported attachment/dual-source output");
          /* Dual-source blending writes index 1 of attachment 0. Metal 1 has
@@ -2419,7 +2466,7 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
       if (!type || !stage_type_matches(leaf, io->primitive, io->components))
          return fail(m, STELA_AIR_TYPE, "unsupported render output type");
       for (unsigned j = 0; j < i; j++) {
-         if (same_output(io, &r->outputs[j]))
+         if (!io->absent && !r->outputs[j].absent && same_output(io, &r->outputs[j]))
             return fail(m, STELA_AIR_METADATA, "duplicate render output");
       }
    }

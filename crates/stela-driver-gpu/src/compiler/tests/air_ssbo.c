@@ -545,10 +545,66 @@ binding_refusals(void)
    }
 }
 
+/* A select chooses between places in one buffer. */
+static void
+pointer_select_stays_in_its_resource(void)
+{
+   nir_shader *nir = translate(
+      "%c = icmp eq i32 %tid, 0\n"
+      "%a = getelementptr i8, ptr addrspace(1) %out, i64 4\n"
+      "%p = select i1 %c, ptr addrspace(1) %a, ptr addrspace(1) %out\n"
+      "store i32 123, ptr addrspace(1) %p, align 4\n"
+      "ret void\n", 2);
+   unsigned stores = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic)
+               stores += nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_store_ssbo;
+         }
+      }
+   }
+   CHECK(stores == 1);
+   ralloc_free(nir);
+}
+
+/* A buffer a function constant left out reads zero, and takes no writes. */
+static void
+null_buffers_reach_no_memory(void)
+{
+   nir_shader *nir = translate(
+      "%c = icmp eq i32 %tid, 0\n"
+      "br i1 %c, label %guarded, label %done\n"
+      "guarded:\n"
+      "%a = getelementptr i32, ptr addrspace(1) null, i32 %tid\n"
+      "%v = load i32, ptr addrspace(1) %a, align 4\n"
+      "store i32 %v, ptr addrspace(1) %a, align 4\n"
+      "store i32 %v, ptr addrspace(1) %out, align 4\n"
+      "br label %done\n"
+      "done:\n"
+      "ret void\n", 2);
+   unsigned stores = 0, loads = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
+            stores += op == nir_intrinsic_store_ssbo || op == nir_intrinsic_store_global;
+            loads += op == nir_intrinsic_load_ssbo || op == nir_intrinsic_load_global;
+         }
+      }
+   }
+   CHECK(stores == 1 && !loads);
+   ralloc_free(nir);
+}
+
 int
 main(void)
 {
    glsl_type_singleton_init_or_ref();
+   pointer_select_stays_in_its_resource();
+   null_buffers_reach_no_memory();
    view_validation();
    binding_refusals();
    finite_effect_oracle_contract();

@@ -220,8 +220,9 @@ LLVMErrorRef LLVMRunPassesOnFunction(LLVMValueRef function, const char *passes,
 		manager.addPass(LowerSwitchPass());
 	} else if (pipeline == "sroa") {
 		manager.addPass(SROAPass(SROAOptions::PreserveCFG));
-	} else if (pipeline == "sccp,unreachableblockelim,dce") {
+	} else if (pipeline == "sccp,instsimplify,unreachableblockelim,dce") {
 		manager.addPass(SCCPPass());
+		manager.addPass(InstSimplifyPass());
 		manager.addPass(UnreachableBlocks());
 		manager.addPass(DCEPass());
 	} else {

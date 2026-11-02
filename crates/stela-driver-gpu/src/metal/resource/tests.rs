@@ -162,8 +162,18 @@ fn shape_rules_follow_metal() {
         d.pixel_format = PixelFormat::Depth32Float;
         d.texture_type = TextureType::D3;
     }));
-    assert!(invalid(|d| d.options.storage_mode = StorageMode::Shared));
     assert!(invalid(|d| d.pixel_format = PixelFormat::X32Stencil8));
+
+    // Apple's frameworks expect shared textures on any device.
+    let mut shared = descriptor(TextureType::D2, PixelFormat::Rgba8Unorm);
+    shared.options.storage_mode = StorageMode::Shared;
+    assert!(texture(&capabilities, &shared).is_ok());
+    shared.texture_type = TextureType::D2Multisample;
+    shared.sample_count = 4;
+    assert!(matches!(
+        texture(&capabilities, &shared),
+        Err(Error::Unsupported(_))
+    ));
 
     let mut huge = descriptor(TextureType::D2, PixelFormat::Rgba8Unorm);
     huge.width = 65536;
@@ -242,6 +252,15 @@ fn managed_textures_use_host_image_copies() {
     assert_eq!(plan.cpu_access, CpuAccess::HostImageCopy);
     assert!(plan.image.usage.contains(ImageUsage::HOST_TRANSFER));
     assert_eq!(plan.memory.required, M::DEVICE_LOCAL);
+}
+
+#[test]
+fn shared_textures_use_host_image_copies() {
+    let mut shared = descriptor(TextureType::D2, PixelFormat::Rgba8Unorm);
+    shared.options = options(StorageMode::Shared);
+    let plan = texture(&capabilities(), &shared).unwrap();
+    assert_eq!(plan.cpu_access, CpuAccess::HostImageCopy);
+    assert!(plan.image.usage.contains(ImageUsage::HOST_TRANSFER));
 }
 
 #[test]

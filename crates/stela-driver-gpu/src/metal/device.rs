@@ -10,7 +10,7 @@ use super::{
     binding::{DescriptorHeap, HeapArray, HeapLayout, ResourceId},
     capabilities::{ApiFeatures, Capabilities, Platform},
     error::{Error, Result},
-    shader::Compiler,
+    shader::{Compiler, Refusal},
     vulkan::{
         backend::{Backend, Descriptor, Object, requirements},
         object::{Memory, Semaphore},
@@ -130,6 +130,11 @@ pub struct Device<B: Backend, C: Compiler> {
 }
 
 impl<B: Backend, C: Compiler> Device<B, C> {
+    /// The compiler's detail of the last function it refused, once.
+    pub fn take_refusal(&mut self) -> Option<Refusal> {
+        self.compiler.take_refusal()
+    }
+
     /// Opens the device, refusing Vulkan devices that lack a feature the
     /// binding ABI or command model relies on.
     pub fn new(mut backend: B, compiler: C, platform: &Platform) -> Result<Self> {

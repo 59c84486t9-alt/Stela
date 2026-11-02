@@ -51,11 +51,14 @@ int *__errno_location(void)
 _Noreturn void __assert_fail(const char *condition, const char *file, unsigned int line,
 			     const char *function)
 {
-	(void)line;
-	(void)function;
+	char number[16];
+	int length = snprintf(number, sizeof(number), ":%u: ", line);
 	stela_libc_log(file, strlen(file));
+	stela_libc_log(number, (size_t)length);
+	stela_libc_log(function, strlen(function));
 	stela_libc_log(": ", 2);
 	stela_libc_log(condition, strlen(condition));
+	stela_libc_log("\n", 1);
 	stela_libc_fatal("a Mesa assertion failed");
 }
 
@@ -819,6 +822,11 @@ static int checked(int result)
 int open(const char *path, int flags, ...)
 {
 	(void)flags;
+	/* llvmpipe opens this to learn that it may lay a resource out at a stride
+	 * it is given. An empty file stands in for the device: nothing here exports
+	 * lavapipe's memory, and UDMABUF_CREATE on it fails. */
+	if (!strcmp(path, "/dev/udmabuf"))
+		return checked(stela_libc_file_create());
 	static const char prefix[] = "/dev/dri/renderD";
 	if (strncmp(path, prefix, sizeof(prefix) - 1))
 		return fail(ENOENT);

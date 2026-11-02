@@ -90,6 +90,8 @@ struct call {
    const struct shape *shape;
    unsigned next, count;
    bool coherent;
+   /* Whether the call's positions, offsets and levels are 16 bits (.i16). */
+   bool short_indices;
    /* Whether the call's residency is read, and then its value. */
    bool sparse;
    nir_def *residency;
@@ -163,7 +165,8 @@ overload(const struct stela_air_texture *texture, bool gather)
 }
 
 static bool
-named(const struct call *call, enum operation op, bool coherent, const char *name, size_t bytes)
+named(const struct call *call, enum operation op, bool coherent, bool short_indices,
+      const char *name, size_t bytes)
 {
    const struct stela_air_texture *texture = call->texture;
    const char *type = texture->depth ? call->shape->depth : call->shape->name;
@@ -171,8 +174,9 @@ named(const struct call *call, enum operation op, bool coherent, const char *nam
    if (operations[op].typed)
       texel = op == GATHER_COMPARE ? ".f32" : overload(texture, op == GATHER);
    char expected[96];
-   int length = snprintf(expected, sizeof(expected), "air.%s_%s%s%s%s", operations[op].stem, type,
+   int length = snprintf(expected, sizeof(expected), "air.%s_%s%s%s%s%s", operations[op].stem, type,
                          op == SAMPLE_GRAD || op == SAMPLE_COMPARE_GRAD ? "_grad" : "",
+                         short_indices ? ".i16" : "",
                          coherent ? ".device_coherent" : "",
                          texel);
    return length > 0 && (size_t)length == bytes && !memcmp(expected, name, bytes);
@@ -247,10 +251,20 @@ operand(struct call *call, unsigned components, LLVMTypeKind kind, unsigned bits
    return call->c->operand(call->c->translator, value);
 }
 
+/* The next position, level or layer, of `components` lanes, as 32 bits. */
+static nir_def *
+index_operand(struct call *call, unsigned components)
+{
+   if (!call->short_indices)
+      return operand(call, components, LLVMIntegerTypeKind, 32);
+   nir_def *value = operand(call, components, LLVMIntegerTypeKind, 16);
+   return value ? nir_u2u32(call->b, value) : NULL;
+}
+
 static nir_def *
 uint_operand(struct call *call)
 {
-   return operand(call, 1, LLVMIntegerTypeKind, 32);
+   return index_operand(call, 1);
 }
 
 static nir_def *
@@ -317,7 +331,8 @@ position_offset(struct call *call)
        call->next == call->count)
       return true;
    LLVMValueRef value = LLVMGetOperand(call->inst, call->next);
-   if (!type_is(LLVMTypeOf(value), shape->positions, LLVMIntegerTypeKind, 32))
+   if (!type_is(LLVMTypeOf(value), shape->positions, LLVMIntegerTypeKind,
+                call->short_indices ? 16 : 32))
       return true;
    call->next++;
    return LLVMIsNull(value) || fail(call, "accessing a texel at an offset");
@@ -652,15 +667,32 @@ image_access(const struct call *call, nir_def *level)
           (level && !nir_src_is_const(nir_src_for_ssa(level)) ? ACCESS_NON_UNIFORM : 0);
 }
 
+/* The name of the function value calls directly, or NULL. */
+static const char *
+called_name(LLVMValueRef value, size_t *bytes)
+{
+   *bytes = 0;
+   if (!LLVMIsACallInst(value))
+      return NULL;
+   LLVMValueRef callee = LLVMGetCalledValue(value);
+   return LLVMIsAFunction(callee) ? LLVMGetValueName2(callee, bytes) : NULL;
+}
+
 bool
 stela_air_read_sampler(LLVMValueRef value)
 {
-   if (!LLVMIsACallInst(value))
-      return false;
-   LLVMValueRef callee = LLVMGetCalledValue(value);
-   size_t bytes = 0;
-   const char *name = LLVMIsAFunction(callee) ? LLVMGetValueName2(callee, &bytes) : NULL;
+   size_t bytes;
+   const char *name = called_name(value, &bytes);
    return name && bytes == strlen("air.get_read_sampler") && !memcmp(name, "air.get_read_sampler", bytes);
+}
+
+bool
+stela_air_null_texture(LLVMValueRef value)
+{
+   size_t bytes;
+   const char *name = called_name(value, &bytes);
+   size_t stem = strlen("air.get_null_texture_");
+   return name && bytes > stem && !memcmp(name, "air.get_null_texture_", stem);
 }
 
 static bool
@@ -682,7 +714,7 @@ read_texel(struct call *call, nir_def **result)
                  stela_air_read_sampler(LLVMGetOperand(call->inst, call->next));
    if (texture->depth && !expect(call, 32, 1, "depth operand"))
       return false;
-   nir_def *position = operand(call, shape->positions, LLVMIntegerTypeKind, 32);
+   nir_def *position = index_operand(call, shape->positions);
    nir_def *face = position && shape->dim == GLSL_SAMPLER_DIM_CUBE ? uint_operand(call) : NULL;
    nir_def *layer = position && shape->array ? uint_operand(call) : NULL;
    nir_def *sample = position && shape->dim == GLSL_SAMPLER_DIM_MS ? uint_operand(call) : NULL;
@@ -734,7 +766,7 @@ write_texel(struct call *call)
       return fail(call, "writing a depth or multisample texture");
    if (LLVMGetTypeKind(LLVMTypeOf(call->inst)) != LLVMVoidTypeKind)
       return fail(call, "texture write has a result");
-   nir_def *position = operand(call, shape->positions, LLVMIntegerTypeKind, 32);
+   nir_def *position = index_operand(call, shape->positions);
    nir_def *face = position && shape->dim == GLSL_SAMPLER_DIM_CUBE ? uint_operand(call) : NULL;
    nir_def *layer = position && shape->array ? uint_operand(call) : NULL;
    if (!position || (shape->dim == GLSL_SAMPLER_DIM_CUBE && !face) || (shape->array && !layer))
@@ -989,16 +1021,51 @@ fence(struct call *call)
 }
 
 /* Whether anything may read the call's residency: a use other than an
- * extractvalue of its texel. */
+ * extractvalue of its texel, through PHIs up to `depth` deep. */
 static bool
-reads_residency(LLVMValueRef inst)
+reads_residency(LLVMValueRef inst, unsigned depth)
 {
    for (LLVMUseRef use = LLVMGetFirstUse(inst); use; use = LLVMGetNextUse(use)) {
       LLVMValueRef user = LLVMGetUser(use);
-      if (!LLVMIsAExtractValueInst(user) || LLVMGetNumIndices(user) != 1 || LLVMGetIndices(user)[0])
+      if (LLVMIsAPHINode(user)) {
+         if (!depth || reads_residency(user, depth - 1))
+            return true;
+      } else if (!LLVMIsAExtractValueInst(user) || LLVMGetNumIndices(user) != 1 ||
+                 LLVMGetIndices(user)[0]) {
          return true;
+      }
    }
    return false;
+}
+
+/* A call on a null texture, which has no descriptor: everything reads zero
+ * but its own is_null, and writes go nowhere. */
+static enum stela_air_texture_status
+null_call(const struct stela_air_texture_context *context, LLVMValueRef inst, const char *name,
+          size_t name_bytes, nir_def **result, bool *pair)
+{
+   size_t stem = strlen("air.is_null_texture_");
+   if (name_bytes > stem && !memcmp(name, "air.is_null_texture_", stem)) {
+      *result = nir_imm_true(context->b);
+      return STELA_AIR_TEXTURE_LOWERED;
+   }
+   LLVMTypeRef type = LLVMTypeOf(inst);
+   if (LLVMGetTypeKind(type) == LLVMVoidTypeKind)
+      return STELA_AIR_TEXTURE_LOWERED;
+   *pair = LLVMGetTypeKind(type) == LLVMStructTypeKind;
+   if (*pair)
+      type = LLVMStructGetTypeAtIndex(type, 0);
+   bool vector = LLVMGetTypeKind(type) == LLVMVectorTypeKind;
+   LLVMTypeRef element = vector ? LLVMGetElementType(type) : type;
+   LLVMTypeKind kind = LLVMGetTypeKind(element);
+   unsigned bits = kind == LLVMHalfTypeKind ? 16 : kind == LLVMFloatTypeKind ? 32 :
+                   kind == LLVMIntegerTypeKind ? LLVMGetIntTypeWidth(element) : 0;
+   if (!bits) {
+      fail(&(struct call){.c = context}, "null texture call returns an unknown type");
+      return STELA_AIR_TEXTURE_FAILED;
+   }
+   *result = nir_imm_zero(context->b, vector ? LLVMGetVectorSize(type) : 1, bits);
+   return STELA_AIR_TEXTURE_LOWERED;
 }
 
 enum stela_air_texture_status
@@ -1011,6 +1078,8 @@ stela_air_texture_call(const struct stela_air_texture_context *context, LLVMValu
    *residency = NULL;
    if (!LLVMGetNumArgOperands(inst))
       return STELA_AIR_TEXTURE_OTHER;
+   if (stela_air_null_texture(LLVMGetOperand(inst, 0)))
+      return null_call(context, inst, name, name_bytes, result, pair);
    nir_def *texture_id;
    const struct stela_air_texture *texture =
       context->texture(context->translator, LLVMGetOperand(inst, 0), &texture_id);
@@ -1034,11 +1103,13 @@ stela_air_texture_call(const struct stela_air_texture_context *context, LLVMValu
                                                                        STELA_AIR_TEXTURE_FAILED;
    int op = -1;
    for (unsigned o = 0; o < ARRAY_SIZE(operations) && op < 0; o++) {
-      bool coherent_forms = o == READ || o == WRITE;
-      for (unsigned coherent = 0; coherent <= coherent_forms && op < 0; coherent++) {
-         if (named(&call, (enum operation)o, coherent, name, name_bytes)) {
+      bool forms = o == READ || o == WRITE;
+      for (unsigned form = 0; form < (forms ? 4u : 1u) && op < 0; form++) {
+         bool coherent = form & 1, short_indices = form & 2;
+         if (named(&call, (enum operation)o, coherent, short_indices, name, name_bytes)) {
             op = (int)o;
             call.coherent = coherent;
+            call.short_indices = short_indices;
          }
       }
    }
@@ -1050,7 +1121,7 @@ stela_air_texture_call(const struct stela_air_texture_context *context, LLVMValu
    *pair = LLVMGetTypeKind(LLVMTypeOf(inst)) == LLVMStructTypeKind &&
            (op == SAMPLE || op == SAMPLE_COMPARE || op == SAMPLE_GRAD ||
             op == SAMPLE_COMPARE_GRAD || op == READ || op == GATHER || op == GATHER_COMPARE);
-   call.sparse = *pair && reads_residency(inst);
+   call.sparse = *pair && reads_residency(inst, 4);
    switch ((enum operation)op) {
    case SAMPLE:
    case SAMPLE_COMPARE:

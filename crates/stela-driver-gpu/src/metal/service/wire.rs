@@ -464,6 +464,10 @@ records! {
     pub struct FormatAlignmentsResponse {
         pub linear_texture: u64,
         pub texture_buffer: u64,
+        /// A block's bytes, then its size in pixels.
+        pub block_bytes: u64,
+        pub block_width: u64,
+        pub block_height: u64,
     }
 
     /// `sparseTileSizeWithTextureType:pixelFormat:sampleCount:`.

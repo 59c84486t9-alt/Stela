@@ -263,6 +263,14 @@ pub(super) fn render(encoder: &mut Encoder) -> Result<&mut RenderState> {
     }
 }
 
+/// The color attachments `state`'s functions read, one bit each.
+fn attachment_reads(state: &RenderPipelineState) -> u32 {
+    state
+        .interfaces
+        .iter()
+        .fold(0, |reads, interface| reads | interface.attachment_reads)
+}
+
 impl CommandBuffer {
     /// `renderCommandEncoderWithDescriptor:` for a pass whose attachment
     /// views the device resolved.
@@ -279,6 +287,7 @@ impl CommandBuffer {
             "the visibility result buffer was not resolved",
         )?;
         self.bindings.reset();
+        self.bindings.set_attachments(pass.inputs.textures);
         for &(sample, boundary) in &samples {
             if let (CounterSample::Statistic(destination), true) = (sample, boundary.starts()) {
                 self.recorder.sample_statistics(resolver, destination)?;
@@ -603,6 +612,14 @@ impl CommandBuffer {
             matches(plan.stencil_format, pass.stencil_format),
             "pipeline stencil format differs from the pass",
         )?;
+        let reads = attachment_reads(state);
+        if (0..MAX_COLOR_ATTACHMENTS)
+            .any(|index| reads & 1 << index != 0 && pass.inputs.textures[index] == ResourceId::NULL)
+        {
+            return Err(Error::Unsupported(
+                "reading an attachment but a whole 2D texture's first level",
+            ));
+        }
         let rebind = render
             .pipeline
             .as_ref()
@@ -1371,11 +1388,30 @@ impl CommandBuffer {
         commands
             .into_iter()
             .for_each(|command| self.recorder.push(command));
+        self.order_attachment_reads(resolver)?;
         self.begin_query(resolver)?;
         self.bindings.flush(
             &mut self.recorder,
             resolver,
             &[Stage::Vertex, Stage::Fragment],
+        )
+    }
+
+    /// A draw reading attachments follows the draws before it. Where a read
+    /// does not see them by itself, the pass splits behind a barrier;
+    /// primitives overlapping within one draw stay unordered there, as
+    /// Vulkan offers nothing finer without fragment shader interlock.
+    fn order_attachment_reads(&mut self, resolver: &mut dyn Resolver) -> Result<()> {
+        let render = render(&mut self.encoder)?;
+        let reads = render.pipeline.as_ref().map_or(0, attachment_reads);
+        if reads == 0 || render.pass.inputs.ordered {
+            return Ok(());
+        }
+        self.render_memory_barrier(
+            resolver,
+            BarrierScope::RENDER_TARGETS,
+            RenderStages::FRAGMENT,
+            RenderStages::FRAGMENT,
         )
     }
 
@@ -1465,6 +1501,7 @@ impl CommandBuffer {
             TessellationArguments::ALIGNMENT,
         )?;
         self.bindings.constants.arguments = upload.address;
+        self.order_attachment_reads(resolver)?;
         self.begin_query(resolver)?;
         self.bindings.flush(
             &mut self.recorder,
@@ -1504,6 +1541,7 @@ impl CommandBuffer {
             pipeline,
         });
         self.bindings.constants.grid = grid;
+        self.order_attachment_reads(resolver)?;
         self.begin_query(resolver)?;
         self.bindings.flush(
             &mut self.recorder,

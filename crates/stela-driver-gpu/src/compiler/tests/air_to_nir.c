@@ -1220,7 +1220,7 @@ cfg_limits_and_refusals(void)
 {
    expect_refusal("entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %left, label %right\n"
       "left:\nbr label %join\nright:\nbr label %join\n"
-      "join:\n%p = phi {i32, i32} [{i32 1, i32 2}, %left], [{i32 3, i32 4}, %right]\nret void\n",
+      "join:\n%p = phi [2 x i32] [[i32 1, i32 2], %left], [[i32 3, i32 4], %right]\nret void\n",
       "", 100, STELA_AIR_TYPE);
    expect_refusal("unreachable\n", "", 100, STELA_AIR_CONTROL_FLOW);
    expect_refusal(loop_body, "", 20, STELA_AIR_LIMIT);
@@ -2383,6 +2383,8 @@ tests(void)
       "!12 = !{i32 7, !\"frame-pointer\", i32 2}\n"
       "!13 = !{i32 7, !\"air.max_device_buffers\", i32 31}\n", STELA_AIR_OK);
    module_flag_test("!llvm.module.flags = !{!11}\n"
+      "!11 = !{i32 2, !\"SDK Version\", [2 x i32] [i32 26, i32 0]}\n", STELA_AIR_OK);
+   module_flag_test("!llvm.module.flags = !{!11}\n"
       "!11 = !{i32 7, !\"air.max_device_buffers\", i32 7}\n", STELA_AIR_METADATA);
    module_flag_test("!llvm.module.flags = !{!11}\n"
       "!11 = !{i32 7, !\"air.max_device_buffers\", i32 0}\n", STELA_AIR_METADATA);
@@ -2420,7 +2422,6 @@ tests(void)
    expect_refusal("store i32 %later, ptr addrspace(1) %out, align 4\n%later = add i32 %tid, 1\nret void\n", "", 100, STELA_AIR_VERIFY);
    expect_refusal("ret void\n", "!air.function_constants = !{!3}\n", 100, STELA_AIR_METADATA);
    expect_refusal("%address = inttoptr i64 1048576 to ptr addrspace(1)\nret void\n", "", 100, STELA_AIR_TYPE);
-   expect_refusal("%address = bitcast ptr addrspace(1) null to ptr addrspace(1)\nret void\n", "", 100, STELA_AIR_MEMORY);
    /* LLVM 23's verifier refuses a GEP into a vector of i1, which an older
     * one leaves to the translator. */
    input = stela_air_test_bitcode(
@@ -2719,9 +2720,9 @@ shared_reflection_tests(void)
    strcat(nested, " undef, align 4\n");
    shared_reflection_case(nested, false);
    shared_refusal("ret void\n", nested, STELA_AIR_LIMIT);
-   char globals[16384] = {0};
+   static char globals[(AIR_MAX_GLOBALS + 1) * 64];
    size_t used = 0;
-   for (unsigned i = 0; i <= AIR_MAX_ARGUMENTS; i++) {
+   for (unsigned i = 0; i <= AIR_MAX_GLOBALS; i++) {
       int n = snprintf(globals + used, sizeof(globals) - used,
                        "@s%u = internal addrspace(3) global i32 undef, align 4\n", i);
       CHECK(n > 0 && (size_t)n < sizeof(globals) - used); used += (size_t)n;

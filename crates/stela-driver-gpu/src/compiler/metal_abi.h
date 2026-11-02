@@ -28,7 +28,8 @@
 #define STELA_METAL_TABLE_BUFFER_LENGTHS 248u
 #define STELA_METAL_TABLE_TEXTURES 496u
 #define STELA_METAL_TABLE_SAMPLERS 1520u
-#define STELA_METAL_TABLE_BYTES 1648u
+#define STELA_METAL_TABLE_ATTACHMENTS 1648u
+#define STELA_METAL_TABLE_BYTES 1712u
 
 /* MTLStageInRegionIndirectArguments, which a kernel with stage-in reads at
  * the push constants' arguments address: uint origin[3], then size[3]. */
@@ -218,6 +219,11 @@ nir_def *stela_metal_bind_buffer(nir_builder *b, const struct stela_air_buffer *
 nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air_texture *texture,
                                           const struct glsl_type *type, bool faces,
                                           nir_def *level, void *stage);
+
+/* stela_air_bind_attachment: the texture the table holds for the color
+ * attachment. */
+nir_deref_instr *stela_metal_bind_attachment(nir_builder *b, unsigned location,
+                                             const struct glsl_type *type, void *stage);
 
 /* stela_air_texture_query: the count the texture's MTLResourceID carries. */
 nir_def *stela_metal_texture_levels(nir_builder *b, const struct stela_air_texture *texture,

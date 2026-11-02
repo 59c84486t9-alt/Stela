@@ -223,7 +223,7 @@ view_mapping_loads(nir_shader *shader)
          nir_foreach_instr(instr, block) {
             if (instr->type == nir_instr_type_intrinsic &&
                 nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_push_constant &&
-                nir_intrinsic_base(nir_instr_as_intrinsic(instr)) == STELA_METAL_PUSH_VIEW_MAPPING)
+                nir_src_as_uint(nir_instr_as_intrinsic(instr)->src[0]) == STELA_METAL_PUSH_VIEW_MAPPING)
                loads++;
          }
       }

@@ -45,7 +45,7 @@ impl Default for UnifiedImageLayoutsFeatures {
 
 /// Extensions the device enables when the driver offers them. The
 /// requirements decide which absences refuse the device.
-const ENABLED: [&CStr; 28] = [
+const ENABLED: [&CStr; 30] = [
     UNIFIED_IMAGE_LAYOUTS,
     generated::NAME,
     ext::robustness2::NAME,
@@ -57,6 +57,7 @@ const ENABLED: [&CStr; 28] = [
     ext::mesh_shader::NAME,
     ext::sample_locations::NAME,
     khr::calibrated_timestamps::NAME,
+    ext::calibrated_timestamps::NAME,
     ext::memory_budget::NAME,
     khr::external_memory_fd::NAME,
     ext::external_memory_dma_buf::NAME,
@@ -73,6 +74,7 @@ const ENABLED: [&CStr; 28] = [
     ext::shader_image_atomic_int64::NAME,
     khr::cooperative_matrix::NAME,
     khr::dynamic_rendering_local_read::NAME,
+    ext::rasterization_order_attachment_access::NAME,
     nv::shader_atomic_float16_vector::NAME,
 ];
 
@@ -148,6 +150,7 @@ pub(super) struct FeatureChain {
     image_atomic_int64: vk::PhysicalDeviceShaderImageAtomicInt64FeaturesEXT<'static>,
     cooperative_matrix: vk::PhysicalDeviceCooperativeMatrixFeaturesKHR<'static>,
     local_read: vk::PhysicalDeviceDynamicRenderingLocalReadFeaturesKHR<'static>,
+    raster_order: vk::PhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT<'static>,
     float16_vector: vk::PhysicalDeviceShaderAtomicFloat16VectorFeaturesNV<'static>,
     generated: generated::Features,
     acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR<'static>,
@@ -197,6 +200,7 @@ impl FeatureChain {
             image_atomic_int64 if extensions.has(ext::shader_image_atomic_int64::NAME);
             cooperative_matrix if extensions.has(khr::cooperative_matrix::NAME);
             local_read if extensions.has(khr::dynamic_rendering_local_read::NAME);
+            raster_order if extensions.has(ext::rasterization_order_attachment_access::NAME);
             float16_vector if extensions.has(nv::shader_atomic_float16_vector::NAME);
             generated if extensions.has(generated::NAME);
             acceleration_structure if probe && extensions.has(khr::acceleration_structure::NAME);
@@ -339,6 +343,9 @@ impl FeatureChain {
             synchronization2: on(v13.synchronization2),
             dynamic_rendering: on(v13.dynamic_rendering),
             dynamic_rendering_local_read: on(self.local_read.dynamic_rendering_local_read),
+            rasterization_order_color: on(self
+                .raster_order
+                .rasterization_order_color_attachment_access),
             maintenance4: on(v13.maintenance4),
             maintenance5: on(self.maintenance5.maintenance5),
             host_image_copy: on(self.host_image_copy.host_image_copy),
@@ -378,7 +385,8 @@ impl FeatureChain {
             image_drm_format_modifier: extensions.has(ext::image_drm_format_modifier::NAME),
             shader_float16_vector_atomics: on(self.float16_vector.shader_float16_vector_atomics),
             memory_budget: extensions.has(ext::memory_budget::NAME),
-            calibrated_timestamps: extensions.has(khr::calibrated_timestamps::NAME),
+            calibrated_timestamps: extensions.has(khr::calibrated_timestamps::NAME)
+                || extensions.has(ext::calibrated_timestamps::NAME),
             cooperative_matrix: on(self.cooperative_matrix.cooperative_matrix),
             acceleration_structure: on(self.acceleration_structure.acceleration_structure),
             ray_query: on(self.ray_query.ray_query),

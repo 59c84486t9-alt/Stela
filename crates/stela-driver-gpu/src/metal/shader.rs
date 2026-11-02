@@ -279,6 +279,8 @@ pub struct Interface {
     /// The function's module may set or copy an indirect command's
     /// barrier.
     pub command_barriers: bool,
+    /// The color attachments a fragment function reads, one bit each.
+    pub attachment_reads: u32,
     pub constants: Vec<FunctionConstant>,
     pub features: ShaderFeatures,
 }
@@ -587,6 +589,15 @@ pub struct TessellationStages {
     pub evaluation: CompiledShader,
 }
 
+/// The service's account of its last refusal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Refusal {
+    pub entry: String,
+    /// The zero-based ordinal of the AIR instruction at fault.
+    pub instruction: u32,
+    pub detail: String,
+}
+
 /// The compiler as the device sees it.
 pub trait Compiler {
     /// Shader constructs this compiler lowers completely.
@@ -619,6 +630,15 @@ pub trait Compiler {
         entry: &str,
         specialization: &Specialization,
     ) -> Result<Reflection>;
+
+    /// The function constants `entry` of `library` declares, before any has
+    /// a value.
+    fn constants(&mut self, library: u64, entry: &str) -> Result<Vec<FunctionConstant>>;
+
+    /// The detail of the last call this compiler refused, once.
+    fn take_refusal(&mut self) -> Option<Refusal> {
+        None
+    }
 
     /// The bindings of `entry` of `library` specialized with
     /// `specialization`'s function constant values, without those a false
@@ -691,6 +711,7 @@ pub(crate) mod tests {
             max_total_threads: None,
             amplification: false,
             command_barriers: false,
+            attachment_reads: 0,
             constants: Vec::new(),
             features: ShaderFeatures::EMPTY,
         }

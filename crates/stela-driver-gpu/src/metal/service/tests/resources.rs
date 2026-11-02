@@ -270,6 +270,14 @@ fn pixel_formats_answer_their_alignments_and_tiles() {
     )
     .unwrap();
     assert!(alignments.linear_texture.is_power_of_two());
+    assert_eq!(
+        (
+            alignments.block_bytes,
+            alignments.block_width,
+            alignments.block_height
+        ),
+        (4, 1, 1)
+    );
     let request = SparseTileRequest {
         texture_type: TextureType::D1.raw(),
         pixel_format: format,
