@@ -206,7 +206,8 @@ impl Assembler {
         &mut self,
         frame: &Frame,
         packet: &events::TouchPacket,
-        out: &mut TouchPoll,
+        frames: &mut Vec<TouchFrame>,
+        discarded: &mut Vec<TouchDiscard>,
     ) {
         if frame.id != self.profile.report || packet.application != self.profile.application {
             return;
@@ -214,26 +215,26 @@ impl Assembler {
         let values: Option<Vec<_>> = self.profile.fields.iter().map(|f| f.read(frame)).collect();
         let Some(v) = values else {
             self.pending = None;
-            out.discarded.push(TouchDiscard::InvalidValue);
+            discarded.push(TouchDiscard::InvalidValue);
             return;
         };
         let count = usize::try_from(v[4]).ok().filter(|n| *n <= self.maximum);
         let Some(count) = count else {
             self.pending = None;
-            out.discarded.push(TouchDiscard::InvalidValue);
+            discarded.push(TouchDiscard::InvalidValue);
             return;
         };
         let [contact] = packet.contacts.as_slice() else {
             self.pending = None;
-            out.discarded.push(TouchDiscard::InvalidValue);
+            discarded.push(TouchDiscard::InvalidValue);
             return;
         };
         if count > 0 {
             if self.pending.take().is_some() {
-                out.discarded.push(TouchDiscard::Interrupted);
+                discarded.push(TouchDiscard::Interrupted);
             }
             if self.last_scan == Some(v[5]) {
-                out.discarded.push(TouchDiscard::RepeatedScan);
+                discarded.push(TouchDiscard::RepeatedScan);
                 return;
             }
             self.last_scan = Some(v[5]);
@@ -249,23 +250,23 @@ impl Assembler {
             ));
         }
         let Some((expected, pending)) = &mut self.pending else {
-            out.discarded.push(TouchDiscard::OrphanContinuation);
+            discarded.push(TouchDiscard::OrphanContinuation);
             return;
         };
         if pending.scan_time != v[5] {
             self.pending = None;
-            out.discarded.push(TouchDiscard::ScanMismatch);
+            discarded.push(TouchDiscard::ScanMismatch);
             return;
         }
         if pending.contacts.iter().any(|c| c.id == Some(v[0])) {
             self.pending = None;
-            out.discarded.push(TouchDiscard::DuplicateContact);
+            discarded.push(TouchDiscard::DuplicateContact);
             return;
         }
         pending.contacts.push(contact.clone());
         pending.reports.push(frame.bytes.clone());
         if pending.contacts.len() == *expected {
-            out.frames.push(self.pending.take().unwrap().1);
+            frames.push(self.pending.take().unwrap().1);
         }
     }
 }
@@ -342,7 +343,7 @@ mod tests {
         let mut out = TouchPoll::default();
         for event in events {
             if let events::Event::Touch(packet) = event {
-                a.update(&frame, &packet, &mut out);
+                a.update(&frame, &packet, &mut out.frames, &mut out.discarded);
             }
         }
         out
@@ -439,14 +440,14 @@ mod tests {
             panic!("touch")
         };
         let mut out = TouchPoll::default();
-        a.update(&frame, &packet, &mut out);
+        a.update(&frame, &packet, &mut out.frames, &mut out.discarded);
         packet.application = 99;
-        a.update(&frame, &packet, &mut out);
+        a.update(&frame, &packet, &mut out.frames, &mut out.discarded);
         assert!(out.frames.is_empty());
         let mut foreign = frame.clone();
         foreign.id = 2;
         packet.application = 0;
-        a.update(&foreign, &packet, &mut out);
+        a.update(&foreign, &packet, &mut out.frames, &mut out.discarded);
         assert!(out.frames.is_empty());
         assert_eq!(
             update(&d, &mut decoder, &mut a, &raw(2, 1, 0, 7)).frames[0]
