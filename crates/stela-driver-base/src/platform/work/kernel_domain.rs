@@ -10,7 +10,7 @@ mod hosted;
 #[cfg(all(feature = "test-support", unix))]
 pub use hosted::{
     HostFrameId, HostedBatch, HostedClock, HostedDeadlines, HostedExecution, HostedIdle,
-    HostedPages, HostedReason,
+    HostedPages, HostedQueue, HostedReason, HostedTicket,
 };
 mod storage;
 pub use storage::{CpuSpan, StorageShape, StorageView};

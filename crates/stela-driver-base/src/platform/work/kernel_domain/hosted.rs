@@ -7,6 +7,8 @@ use std::{thread, time::Instant};
 mod deadlines;
 mod idle;
 mod memory;
+mod queue;
+pub use queue::{HostedQueue, HostedTicket};
 mod signal;
 pub use deadlines::{HostedBatch, HostedDeadlines};
 pub use idle::{HostedClock, HostedIdle};

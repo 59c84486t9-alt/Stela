@@ -45,6 +45,7 @@ mod context;
 mod dispatch;
 #[cfg(target_arch = "x86_64")]
 mod lifetime;
+mod queue_state;
 #[cfg(target_arch = "x86_64")]
 pub mod scheduling;
 #[cfg(target_arch = "x86_64")]
@@ -390,22 +391,7 @@ impl<const N: usize> Queue<N> {
             active: ActiveContext::new(),
             cpu: ManuallyDrop::new(cpu),
             owner: ManuallyDrop::new(owner),
-            state: ManuallyDrop::new(UnsafeCell::new(State {
-                jobs: [None; N],
-                reservations: [0; N],
-                #[cfg(target_arch = "x86_64")]
-                next_reservation: 1,
-                layout: Layout::Ordinary,
-                stack_profile: None,
-                stack_catalog: stack_requirement::Catalog::empty(),
-                next: 1,
-                closed: false,
-                poisoned: false,
-                #[cfg(target_arch = "x86_64")]
-                scheduling: scheduling::Board::new(),
-                #[cfg(target_arch = "x86_64")]
-                resources: credits::Resources::new(),
-            })),
+            state: ManuallyDrop::new(UnsafeCell::new(State::new())),
             held: AtomicBool::new(false),
             inspection: AtomicBool::new(false),
             #[cfg(target_arch = "x86_64")]
@@ -481,37 +467,13 @@ impl<const N: usize> Queue<N> {
         requested: Option<StackRequirement>,
     ) -> Result<Ticket, WorkError> {
         let mut guard = self.lock()?;
-        let state = guard.state();
-        if state.closed || state.poisoned || self.abandoned.load(Ordering::Acquire) {
-            return Err(WorkError::Closed);
-        }
-        let requirement = match (state.stack_profile, requested) {
-            (None, Some(_)) => return Err(WorkError::Unavailable),
-            (None, None) => None,
-            (Some(profile), requested) => {
-                let requirement = requested.unwrap_or_else(|| profile.default_for(lane));
-                if !state.stack_catalog.supports(lane, requirement) {
-                    return Err(WorkError::Unavailable);
-                }
-                Some(requirement)
-            }
-        };
-        let ranges = state.layout.admission(lane, N)?;
-        let slot = ranges
-            .into_iter()
-            .flatten()
-            .find(|index| state.jobs[*index].is_none() && state.reservations[*index] == 0)
-            .ok_or(WorkError::Full)?;
-        let sequence = state.next;
-        state.next = sequence.checked_add(1).ok_or(WorkError::Exhausted)?;
-        state.jobs[slot] = Some(Job {
-            callback,
-            context: context as usize,
+        let sequence = guard.state().enqueue(
             lane,
-            sequence,
-            running: false,
-            requirement,
-        });
+            callback,
+            context,
+            requested,
+            self.abandoned.load(Ordering::Acquire),
+        )?;
         Ok(Ticket {
             queue: self.id,
             sequence,
@@ -597,16 +559,11 @@ impl<const N: usize> Queue<N> {
     }
 
     pub fn completed(&self, ticket: Ticket) -> Result<bool, WorkError> {
-        let mut g = self.lock()?;
-        let state = g.state();
-        if ticket.queue != self.id || ticket.sequence == 0 || ticket.sequence >= state.next {
+        let mut guard = self.lock()?;
+        if ticket.queue != self.id {
             return Err(WorkError::InvalidTicket);
         }
-        Ok(!state
-            .jobs
-            .iter()
-            .flatten()
-            .any(|j| j.sequence == ticket.sequence))
+        guard.state().completed(ticket.sequence)
     }
     #[cfg(target_arch = "x86_64")]
     fn next(
@@ -614,29 +571,9 @@ impl<const N: usize> Queue<N> {
         lane: Lane,
         geometry: stack_requirement::Geometry,
     ) -> Result<Option<(usize, Job)>, WorkError> {
-        let mut g = self.lock()?;
-        let state = g.state();
-        if state.poisoned || self.abandoned.load(Ordering::Acquire) {
-            return Err(WorkError::Closed);
-        }
-        let next = state
-            .jobs
-            .iter()
-            .enumerate()
-            .filter_map(|(i, j)| {
-                j.filter(|j| {
-                    state.reservations[i] == 0
-                        && j.lane == lane
-                        && !j.running
-                        && stack_requirement::compatible(j.requirement, geometry)
-                })
-                .map(|j| (i, j))
-            })
-            .min_by_key(|(_, j)| j.sequence);
-        if let Some((i, _)) = next {
-            state.jobs[i].as_mut().expect("selected slot").running = true;
-        }
-        Ok(next)
+        self.lock()?
+            .state()
+            .select_job(lane, geometry, self.abandoned.load(Ordering::Acquire))
     }
     #[cfg(target_arch = "x86_64")]
     fn finish(
@@ -645,37 +582,9 @@ impl<const N: usize> Queue<N> {
         sequence: u64,
         released_stack: Option<ReleasedStackGeometry>,
     ) -> Result<(), WorkError> {
-        let mut g = self.lock()?;
-        let state = g.state();
-        if state.reservations.get(slot).is_none_or(|nonce| *nonce != 0) {
-            return Err(WorkError::CorruptContext);
-        }
-        if !state
-            .jobs
-            .get(slot)
-            .and_then(|j| *j)
-            .is_some_and(|j| j.sequence == sequence && j.running)
-        {
-            state.poisoned = true;
-            return Err(WorkError::CorruptContext);
-        }
-        #[cfg(target_arch = "x86_64")]
-        if state
-            .layout
-            .admission(Lane::General, N)?
-            .into_iter()
-            .flatten()
-            .any(|candidate| candidate == slot)
-        {
-            // Ledger only. No sink/callback runs on this completing Task/IF0.
-            if let Some(shape) = released_stack {
-                state.resources.reservation_released(shape)?;
-            } else {
-                state.resources.released()?;
-            }
-        }
-        state.jobs[slot] = None;
-        Ok(())
+        self.lock()?
+            .state()
+            .finish_job(slot, sequence, released_stack)
     }
     /// # Safety
     /// External IRQ/driver/firmware/work producers have stopped and cannot
