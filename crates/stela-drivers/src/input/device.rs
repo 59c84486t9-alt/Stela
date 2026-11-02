@@ -9,7 +9,7 @@ use alloc::{format, string::String, vec::Vec};
 
 /// A host keyboard or pointer.
 pub enum InputDevice {
-    Virtio(VirtioInput),
+    Virtio(Box<VirtioInput>),
     Usb(Box<UsbInput>),
     /// The i8042 controller, for both of its ports, shared with the SMBus
     /// companion of its mouse port's touchpad.

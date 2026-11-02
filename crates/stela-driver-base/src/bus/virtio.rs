@@ -23,6 +23,7 @@ const DRIVER_FEATURE_SELECT: usize = 0x08;
 const DRIVER_FEATURE: usize = 0x0c;
 const CONFIG_VECTOR: usize = 0x10;
 const DEVICE_STATUS: usize = 0x14;
+const CONFIG_GENERATION: usize = 0x15;
 const QUEUE_SELECT: usize = 0x16;
 const QUEUE_SIZE: usize = 0x18;
 const QUEUE_VECTOR: usize = 0x1a;
@@ -68,6 +69,13 @@ pub struct Modern {
 }
 
 impl Modern {
+    /// Observed device configuration version (virtio 1.2 sections 2.5 and
+    /// 4.1.4.3). Readers bracket their own same-device field accesses with it;
+    /// this byte alone supplies no coherent snapshot or current-state claim.
+    pub fn config_generation(&self) -> u8 {
+        self.common.read8(CONFIG_GENERATION)
+    }
+
     pub fn new(
         function: &mut Function,
         handoff: &Handoff,
@@ -272,6 +280,18 @@ mod tests {
             signalled: 0,
             refused: Cell::new(false),
         }
+    }
+
+    #[test]
+    fn generation_reads_the_common_byte_without_touching_neighbors() {
+        let mut memory = [0xa5a5_a5a5_a5a5_a5a5; 8];
+        let transport = modelled(&mut memory, NO_VECTOR);
+        transport.common.write8(CONFIG_GENERATION, 0x39);
+        let before = memory;
+        assert_eq!(transport.config_generation(), 0x39);
+        assert_eq!(memory, before);
+        assert_eq!(transport.common.read8(DEVICE_STATUS), 0xa5);
+        assert_eq!(transport.common.read16(QUEUE_SELECT), 0xa5a5);
     }
 
     /// Negotiation sends configuration changes to the signal vector, or to

@@ -17,8 +17,8 @@
 //! horizontal wheel, extra buttons) and relative axes of a tablet are
 //! counted and dropped, never mapped to something else.
 use super::observation::{
-    self, Batch, Capabilities, Change, Description, Format, InitialState, Item, Knowledge,
-    NativePoll, Origin, Payload, Producer, Source, Status, StopCause,
+    self, Batch, Capabilities, Change, Description, Format, InitialState, Item, NativePoll, Origin,
+    Payload, Producer, Source, Status, StopCause,
 };
 use super::{Input, POINTER_MAX};
 use crate::{
@@ -33,6 +33,9 @@ use crate::{
 };
 use alloc::{string::String, vec::Vec};
 use core::sync::atomic::{Ordering, fence};
+mod config;
+use config::CapabilityRead;
+pub use config::{ConfigAttempt, ConfigRead, ConfigSelector, ConfigSnapshot, ConfigSnapshotError};
 
 const MODERN_INPUT: u16 = 0x1052;
 /// The queue layout `Modern::queue` uses fits 16 descriptors.
@@ -86,9 +89,14 @@ pub struct Axis {
 }
 
 /// Failures retain the decoded prefix in the same observed poll.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "bounded read evidence stays inline; reporting a config refusal needs no allocation"
+)]
 pub enum PollError {
     BrokenQueue,
+    ConfigSnapshot(ConfigSnapshotError),
 }
 impl core::fmt::Display for PollError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -122,6 +130,7 @@ pub struct VirtioInput {
     pub translator: Translator,
     observation: Option<Producer>,
     pending_observations: Batch,
+    capability_reads: [CapabilityRead; 2],
 }
 
 impl VirtioInput {
@@ -148,10 +157,10 @@ impl VirtioInput {
         let name = String::from_utf8_lossy(name).into_owned();
         // Capabilities come from this actual device's config selectors, never
         // from the device name. They provide no current key/switch snapshot.
-        let capabilities = Capabilities {
-            keys: bitmap_codes(&config(CONFIG_EVENTS, EV_KEY as u8)),
-            switches: bitmap_codes(&config(CONFIG_EVENTS, EV_SW as u8)),
-        };
+        let capability_reads = [
+            config::capability(&transport, EV_KEY as u8),
+            config::capability(&transport, EV_SW as u8),
+        ];
         let absolute = config(CONFIG_EVENTS, EV_ABS as u8);
         let axis = |code: u16| {
             let bytes = config(CONFIG_ABS, code as u8);
@@ -193,6 +202,7 @@ impl VirtioInput {
             translator: Translator::new(axes),
             observation: None,
             pending_observations: Batch::default(),
+            capability_reads,
         };
         for id in 0..entries {
             let base = 16 * usize::from(id);
@@ -204,33 +214,40 @@ impl VirtioInput {
             input.offer(id);
         }
         transport.ready();
-        let initial = InitialState {
-            keys: if capabilities.keys.is_empty() {
-                Knowledge::NotApplicable
-            } else {
-                Knowledge::Unknown
-            },
-            switches: if capabilities.switches.is_empty() {
-                Knowledge::NotApplicable
-            } else {
-                Knowledge::Unknown
-            },
+        input.install_observation();
+        input.publish();
+        Ok(input)
+    }
+
+    /// Same-owner per-selector evidence. These reads neither form one atomic
+    /// KEY/SW union nor establish current held state or kernel input admission.
+    pub fn capability_snapshots(&self) -> Option<[&ConfigSnapshot; 2]> {
+        Some([
+            self.capability_reads[0].snapshot()?,
+            self.capability_reads[1].snapshot()?,
+        ])
+    }
+
+    fn install_observation(&mut self) {
+        let Some([keys, switches]) = self.capability_snapshots() else {
+            return;
         };
-        input.observation = Some(Producer::new(
+        let capabilities = Capabilities {
+            keys: bitmap_codes(keys.bytes()),
+            switches: bitmap_codes(switches.bytes()),
+        };
+        self.observation = Some(Producer::new(
             Description {
                 origin: Origin::Virtio,
                 format: Format::Linux { capabilities },
             },
-            initial,
+            InitialState::unknown(),
         ));
-        if let Some(producer) = &input.observation {
-            input
-                .pending_observations
+        if let Some(producer) = &self.observation {
+            self.pending_observations
                 .items
                 .push(Item::Change(Change::Added(producer.source())));
         }
-        input.publish();
-        Ok(input)
     }
 
     fn offer(&mut self, id: u16) {
@@ -286,6 +303,11 @@ impl VirtioInput {
             observations: core::mem::take(&mut self.pending_observations),
             ..NativePoll::default()
         };
+        for read in &mut self.capability_reads {
+            if let Some(error) = read.take_error() {
+                polled.record_error(PollError::ConfigSnapshot(error));
+            }
+        }
         if self.broken && !was_broken {
             polled.record_error(PollError::BrokenQueue);
         }

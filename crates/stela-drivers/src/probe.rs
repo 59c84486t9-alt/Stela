@@ -1400,7 +1400,7 @@ pub unsafe fn probe_with_provider(
             } else if input::virtio::matches(&function) {
                 let minimum = minimum_for_function!().clone();
                 match VirtioInput::new(&mut function, handoff, dma, minimum.as_ref()) {
-                    Ok(device) => devices.inputs.push(InputDevice::Virtio(device)),
+                    Ok(device) => devices.inputs.push(InputDevice::Virtio(Box::new(device))),
                     Err(error) => devices.failures.push((address, error.into())),
                 }
                 continue;

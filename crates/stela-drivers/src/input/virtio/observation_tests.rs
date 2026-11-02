@@ -4,7 +4,7 @@ use crate::bus::dma::TestRegion;
 use crate::input::observation::{Item, Payload};
 use alloc::{boxed::Box, vec};
 
-fn model(run: impl FnOnce(&mut VirtioInput)) {
+pub(super) fn model(run: impl FnOnce(&mut VirtioInput)) {
     let mut memory = TestRegion::new(8192);
     let mut notify = Box::new(0u16);
     // SAFETY: this model owns the sole aligned volatile notification register;
@@ -34,6 +34,7 @@ fn model(run: impl FnOnce(&mut VirtioInput)) {
         translator: Translator::new(None),
         observation: Some(producer),
         pending_observations: Batch::default(),
+        capability_reads: core::array::from_fn(|_| CapabilityRead::Refused(None)),
     };
     run(&mut input);
     drop(input);
@@ -42,7 +43,7 @@ fn model(run: impl FnOnce(&mut VirtioInput)) {
     drop(memory);
 }
 
-fn complete(input: &mut VirtioInput, raw: &[Event]) {
+pub(super) fn complete(input: &mut VirtioInput, raw: &[Event]) {
     for (slot, event) in raw.iter().enumerate() {
         let at = slot * EVENT_BYTES;
         input.events.write(at, event.kind);
