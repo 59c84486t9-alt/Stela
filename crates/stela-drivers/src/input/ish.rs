@@ -10,16 +10,15 @@
 //! root owner implements posted-MSI completion; all original owners are held.
 pub mod cold;
 mod descriptor;
+mod input;
 mod native;
+pub use input::{ClientRefusal, ClientRefusalCause, InputRefusal, IshInput};
 mod protocol;
 mod registers;
 #[cfg(test)]
 mod tests;
 
-use super::Input;
 use crate::bus::{dma::mapping::DmaError, irq::IrqError, mmio::owned, pci::msi::MsiError};
-use crate::usb::hid::Translator;
-use alloc::{string::String, vec::Vec};
 pub use descriptor::{ReportKind, ReportLayout};
 pub use native::{Configuration, InputPoll, Inputs, Native, NativeClock, Time};
 pub use protocol::{ClientProperties, Device, FirmwareIdentity, InputReport, TimestampSupport};
@@ -52,93 +51,3 @@ pub type Result<T> = core::result::Result<T, Error>;
 
 /// Input reports one poll reads at most, as USB HID bounds its pass.
 const POLL_REPORTS: usize = 16;
-
-/// An ISH whose HID clients include a keyboard or pointer: each client's
-/// reports pass through its own HID report translator.
-pub struct IshInput {
-    native: Native,
-    clients: Vec<(u8, Translator)>,
-    poll_cleanup_errors: Vec<Error>,
-    pub name: String,
-}
-
-impl IshInput {
-    /// Read `native`'s started HID clients as input, or hand `native` back
-    /// when none of them is a keyboard or pointer.
-    #[allow(
-        clippy::result_large_err,
-        reason = "an ISH with no input client goes back to its owner"
-    )]
-    pub fn new(native: Native, name: String) -> core::result::Result<Self, Native> {
-        let clients: Vec<_> = native
-            .devices()
-            .iter()
-            .filter_map(|device| {
-                Translator::describe(&device.report_descriptor)
-                    .ok()
-                    .map(|translator| (device.id, translator))
-            })
-            .collect();
-        if !clients
-            .iter()
-            .any(|(_, translator)| translator.is_keyboard_or_pointer())
-        {
-            return Err(native);
-        }
-        Ok(Self {
-            native,
-            clients,
-            poll_cleanup_errors: Vec::new(),
-            name,
-        })
-    }
-
-    /// Append the input changes of the reports the clients have ready.
-    pub fn poll(&mut self, inputs: &mut Vec<Input>) -> Result<()> {
-        let raw = self.native.poll_inputs();
-        let mut events = Vec::new();
-        for report in raw.reports {
-            if let Some((_, translator)) = self
-                .clients
-                .iter_mut()
-                .find(|(id, _)| *id == report.device_id)
-            {
-                translator.translate(&report.bytes, &mut events, inputs);
-            }
-        }
-        self.poll_cleanup_errors.extend(raw.later_errors);
-        // Completed guest input precedes the exact error from the same pass.
-        raw.first_error.map_or(Ok(()), Err)
-    }
-
-    /// Exact containment causes retained by the same legacy input owner.
-    pub fn poll_cleanup_errors(&self) -> &[Error] {
-        &self.poll_cleanup_errors
-    }
-
-    /// Send `leds` to each keyboard client's LED output report, as Linux
-    /// `hidinput_led_worker` sends it through ishtp-hid's SET_REPORT request.
-    pub fn set_leds(&mut self, leds: u16) -> Result<()> {
-        for (id, translator) in &self.clients {
-            if let Some((_, report)) = translator.led_report(leds) {
-                self.native.set_output(*id, &report)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// The last report of the first client that sent one, as it arrived,
-    /// for diagnostics.
-    pub fn last_report(&self) -> &[u8] {
-        self.clients
-            .iter()
-            .map(|(_, translator)| translator.last_report())
-            .find(|report| !report.is_empty())
-            .unwrap_or(&[])
-    }
-
-    /// Whether the ISH failed and is no longer read.
-    pub fn stopped(&self) -> bool {
-        self.native.failure().is_some()
-    }
-}
