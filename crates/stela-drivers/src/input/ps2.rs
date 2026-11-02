@@ -12,7 +12,13 @@
 //! absolute touchpad profiles under this same controller, selected explicitly
 //! or by [`Controller::new_probing`]'s psmouse protocol probe. Every
 //! command is acknowledged; a failed/uncertain command quarantines this owner.
-use super::Input;
+use super::{
+    Input,
+    observation::{
+        Batch, Change, Description, Format, InitialState, Item, NativePoll, Origin, Payload,
+        Producer, Source, Status, StopCause,
+    },
+};
 use crate::{Clock, bus::i2c::Timer};
 use alloc::{collections::VecDeque, rc::Rc, vec::Vec};
 use core::cell::RefCell;
@@ -286,6 +292,8 @@ pub struct Controller<R = PortIo, T = Clock> {
     pending: VecDeque<Byte>,
     events: Vec<Input>,
     keyboard: keyboard::Keyboard,
+    keyboard_observation: Option<Producer>,
+    pending_observations: Batch,
     mouse: mouse::Mouse,
     synaptics: Option<synaptics::Engine>,
     elantech: Option<elantech::Engine>,
@@ -337,6 +345,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             pending: VecDeque::new(),
             events: Vec::new(),
             keyboard: keyboard::Keyboard::default(),
+            keyboard_observation: None,
+            pending_observations: Batch::default(),
             mouse: mouse::Mouse::default(),
             synaptics: None,
             elantech: None,
@@ -883,6 +893,21 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         match self.initialize_inner() {
             Ok(()) => {
                 self.state = State::Ready;
+                if self.config.keyboard {
+                    self.keyboard.begin_observation();
+                    self.keyboard_observation = Some(Producer::new(
+                        Description {
+                            origin: Origin::Ps2Keyboard,
+                            format: Format::ScanSet2,
+                        },
+                        InitialState::unknown(),
+                    ));
+                    if let Some(producer) = &self.keyboard_observation {
+                        self.pending_observations
+                            .items
+                            .push(Item::Change(Change::Added(producer.source())));
+                    }
+                }
                 Ok(())
             }
             Err(kind) => Err(self.fail(kind)),
@@ -916,6 +941,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
     fn fail(&mut self, kind: ErrorKind) -> Error {
         self.state = State::Faulted;
+        self.capture_keyboard_observation();
+        self.stop_keyboard_observation(StopCause::TransportFailed);
         let response = self.observed_response;
         self.observed_response = None;
         let containment = self.disable_ports();
@@ -962,6 +989,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 byte.received_us,
                 self.config.packet_timeout_us,
                 &mut self.events,
+                self.keyboard_observation
+                    .as_ref()
+                    .is_some_and(|producer| producer.source().status() == Status::Producing),
             ),
             Port::Mouse if self.config.mouse && self.companion => Ok(()),
             Port::Mouse if self.config.mouse && self.synaptics.is_some() => {
@@ -996,6 +1026,81 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// with their port. On error, already decoded input remains available
     /// through `drain_events`; it is never silently discarded with the error.
     pub fn poll(&mut self) -> Result<Vec<Input>, Error> {
+        self.close_observation_admission();
+        let result = self.poll_inner();
+        drop(self.keyboard.drain_observed());
+        result
+    }
+
+    pub fn observation_sources(&self) -> Vec<Source> {
+        self.keyboard_observation
+            .as_ref()
+            .map(Producer::source)
+            .into_iter()
+            .collect()
+    }
+
+    /// Poll the SAME controller once. Completed physical scan prefixes survive a
+    /// later byte error alongside the unchanged guest decoded prefix.
+    pub fn poll_observed(&mut self) -> NativePoll<Error> {
+        let result = self.poll_inner();
+        let stop = self.needs_reset().then_some(StopCause::TransportFailed);
+        self.observed_result(result, stop)
+    }
+
+    fn capture_keyboard_observation(&mut self) {
+        let bytes = self.keyboard.drain_observed();
+        let Some(producer) = &mut self.keyboard_observation else {
+            return;
+        };
+        if !bytes.is_empty() && producer.source().status() == Status::Producing {
+            self.pending_observations
+                .publish(producer, Payload::ScanSet2 { bytes });
+        }
+    }
+
+    fn stop_keyboard_observation(&mut self, cause: StopCause) {
+        if let Some(producer) = &mut self.keyboard_observation
+            && let Some(change) = producer.stop(cause)
+        {
+            self.pending_observations.items.push(Item::Change(change));
+        }
+    }
+
+    fn observed_result(
+        &mut self,
+        result: Result<Vec<Input>, Error>,
+        stop: Option<StopCause>,
+    ) -> NativePoll<Error> {
+        let mut polled = NativePoll::default();
+        match result {
+            Ok(inputs) => polled.inputs = inputs,
+            Err(error) => {
+                polled.inputs = self.drain_events();
+                polled.record_error(error);
+            }
+        }
+        self.capture_keyboard_observation();
+        if let Some(cause) = stop {
+            self.stop_keyboard_observation(cause);
+        }
+        polled.observations = core::mem::take(&mut self.pending_observations);
+        polled
+    }
+
+    /// Close observation only, draining decoded facts before the stop frontier.
+    /// No hardware poll/stop or Linux callback/current loan occurs here.
+    fn close_observation_admission(&mut self) {
+        self.capture_keyboard_observation();
+        self.stop_keyboard_observation(StopCause::ObservationClosed);
+    }
+
+    pub fn close_observation(&mut self) -> Batch {
+        self.close_observation_admission();
+        core::mem::take(&mut self.pending_observations)
+    }
+
+    fn poll_inner(&mut self) -> Result<Vec<Input>, Error> {
         self.ready()?;
         self.observed_response = None;
         for _ in 0..QUEUE_LIMIT {
@@ -1069,6 +1174,23 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Acknowledge reporting disable on both configured devices, then prove
     /// clock/IRQ disable by reading CTR. Failure quarantines this owner.
     pub fn stop(&mut self) -> Result<Vec<Input>, Error> {
+        self.close_observation_admission();
+        let result = self.stop_inner();
+        drop(self.keyboard.drain_observed());
+        result
+    }
+
+    pub fn stop_observed(&mut self) -> NativePoll<Error> {
+        let result = self.stop_inner();
+        let cause = if result.is_ok() {
+            StopCause::ObservationClosed
+        } else {
+            StopCause::TransportFailed
+        };
+        self.observed_result(result, Some(cause))
+    }
+
+    fn stop_inner(&mut self) -> Result<Vec<Input>, Error> {
         self.ready()?;
         self.observed_response = None;
         let result = (|| {
@@ -1086,6 +1208,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })();
         match result {
             Ok(()) => {
+                self.capture_keyboard_observation();
+                self.stop_keyboard_observation(StopCause::ObservationClosed);
                 self.state = State::Stopped;
                 Ok(self.release_inputs())
             }

@@ -18,6 +18,7 @@ use core::{
 pub mod block;
 pub mod bus;
 pub mod entropy;
+pub mod input_observation;
 pub mod platform;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_clock;

@@ -8,6 +8,7 @@ mod device;
 pub mod elan;
 pub mod hid_i2c;
 pub mod ish;
+pub mod observation;
 pub mod ps2;
 pub mod rmi;
 pub mod sfh;

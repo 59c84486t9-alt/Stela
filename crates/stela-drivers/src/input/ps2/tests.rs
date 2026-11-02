@@ -5,6 +5,7 @@ use super::*;
 use alloc::{rc::Rc, vec};
 use core::cell::{Cell, RefCell};
 mod elantech_tests;
+mod observation_tests;
 mod timing_tests;
 
 #[test]
