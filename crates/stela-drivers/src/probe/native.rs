@@ -858,7 +858,7 @@ pub(super) unsafe fn vmd(
 /// when none of its HID clients is a keyboard or pointer.
 pub enum SensorHub {
     Sfh(Box<Sfh>),
-    Ish(Box<ish::Native>),
+    Ish(Box<ish::InputRefusal>),
 }
 
 /// AMD SFH over its owned BAR2.

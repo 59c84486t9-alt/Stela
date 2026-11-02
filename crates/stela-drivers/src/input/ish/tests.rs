@@ -20,6 +20,7 @@ use crate::bus::{
         },
     },
 };
+use crate::usb::hid::Translator;
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 use core::{
     ops::Range,
@@ -66,6 +67,7 @@ struct Data {
     ready_at: u64,
     ready_written: bool,
     descriptor: Vec<u8>,
+    extra_devices: Vec<(u8, Vec<u8>)>,
     outgoing: VecDeque<(u32, Vec<u8>)>,
     clients: VecDeque<Vec<u8>>,
     rx_credit: bool,
@@ -111,6 +113,7 @@ impl Data {
             ready_at: 0,
             ready_written: false,
             descriptor: report_descriptor(),
+            extra_devices: Vec::new(),
             outgoing: VecDeque::new(),
             clients: VecDeque::new(),
             rx_credit: false,
@@ -288,7 +291,11 @@ impl Data {
             let id = msg[1];
             let response = match msg[0] {
                 33 => {
-                    let mut r = vec![if self.duplicate_id { 2 } else { 1 }];
+                    let mut r = vec![if self.duplicate_id {
+                        2
+                    } else {
+                        1 + self.extra_devices.len() as u8
+                    }];
                     let dev = if self.bad_id { 256u32 } else { 7u32 };
                     r.extend_from_slice(&dev.to_le_bytes());
                     r.push(0);
@@ -297,12 +304,28 @@ impl Data {
                     if self.duplicate_id {
                         let old = r[1..].to_vec();
                         r.extend_from_slice(&old);
+                    } else {
+                        for (id, _) in &self.extra_devices {
+                            r.extend_from_slice(&u32::from(*id).to_le_bytes());
+                            r.push(0);
+                            r.extend_from_slice(&0x1234u16.to_le_bytes());
+                            r.extend_from_slice(&0x8086u16.to_le_bytes());
+                        }
                     }
                     hostif(0xa1, 0, &r)
                 }
                 0 => {
-                    assert_eq!(id, 7);
-                    let n = self.descriptor.len() as u16;
+                    let descriptor = if id == 7 {
+                        &self.descriptor
+                    } else {
+                        &self
+                            .extra_devices
+                            .iter()
+                            .find(|(device, _)| *device == id)
+                            .unwrap()
+                            .1
+                    };
+                    let n = descriptor.len() as u16;
                     hostif(
                         0x80,
                         id,
@@ -310,8 +333,17 @@ impl Data {
                     )
                 }
                 1 => {
-                    assert_eq!(id, 7);
-                    hostif(0x81, id, &self.descriptor)
+                    let descriptor = if id == 7 {
+                        &self.descriptor
+                    } else {
+                        &self
+                            .extra_devices
+                            .iter()
+                            .find(|(device, _)| *device == id)
+                            .unwrap()
+                            .1
+                    };
+                    hostif(0x81, id, descriptor)
                 }
                 2 => {
                     assert_eq!(&msg[6..], &[1]);
@@ -1269,4 +1301,5 @@ fn native_led_output_uses_set_report_and_keeps_feature_validation_distinct() {
 
 mod input_poll;
 
+mod input_admission;
 mod stop_poll;
