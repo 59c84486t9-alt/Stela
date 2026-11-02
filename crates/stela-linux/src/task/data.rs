@@ -216,7 +216,7 @@ impl SourceData {
     }
     /// Caller holds actual private native NoPublication and joined original
     /// source unwind/free tails; phase and C flags only reject mistakes.
-    unsafe fn close_unpublished(
+    pub(super) unsafe fn close_unpublished(
         &self,
         owner: *const RawOwner,
     ) -> Result<(), ResourceBootstrapError> {
@@ -237,6 +237,9 @@ impl SourceData {
         }
         self.dispose_backing();
         Ok(())
+    }
+    pub(super) fn is_finished(&self) -> bool {
+        self.phase.load(Ordering::Acquire) == FINISHED
     }
     fn dispose_backing(&self) {
         // SAFETY: sole real stop/cancel control after C and native/IRQ joins.

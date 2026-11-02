@@ -22,7 +22,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> S
     pub(super) fn read(&self) -> Read<'_, K, P, N> {
         if self
             .readers
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1))
             .is_err()
         {
             fatal();

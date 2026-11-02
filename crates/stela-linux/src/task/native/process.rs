@@ -118,7 +118,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
             }
         }
     }
-    unsafe fn finish_slot(&self, slot: &'static Slot<K, P, N>) -> i32 {
+    unsafe fn finish_slot(&self, slot: &Slot<K, P, N>) -> i32 {
         // Single actual PID1 receiver. Callback/dispatcher only touch atomic
         // flags, never these affine source/native finalization controls.
         if let Some(retiring) = unsafe {

@@ -52,11 +52,9 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
             request.broker.kernel.platform().with_process(|entered| {
                 let _mutation = request.mutation()?;
                 // SAFETY: short exclusive same-owner canonical descriptor action.
-                let state = unsafe { &mut *request.state.get().cast::<Owned<K, P, N>>() };
+                let state = &mut *request.state.get().cast::<Owned<K, P, N>>();
                 match state {
-                    Owned::Child(child) => {
-                        unsafe { child.retire_descriptors(entered) }.map_err(Error::Native)
-                    }
+                    Owned::Child(child) => child.retire_descriptors(entered).map_err(Error::Native),
                     _ => Err(Error::WrongPhase),
                 }
             })

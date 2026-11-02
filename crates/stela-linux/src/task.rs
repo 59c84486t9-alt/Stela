@@ -559,7 +559,7 @@ impl<const N: usize> TaskBinding<N> {
                 if unsafe { data.close_unpublished(kernel.raw()) }.is_err() {
                     return Err(self);
                 }
-            } else if data.phase.load(Ordering::Acquire) != data::FINISHED {
+            } else if !data.is_finished() {
                 return Err(self); // real stopped/source-ref tails still owed
             }
         }

@@ -84,11 +84,11 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> R
         let result = unsafe {
             self.broker.kernel.platform().with_process(|entered| {
                 self.advance(|c| c.reserve(entered))?;
-                self.advance(|c| unsafe { c.prepare(entered) })?;
+                self.advance(|c| c.prepare(entered))?;
                 self.advance(|c| c.pin(entered))?;
                 self.advance(|c| c.admit(entered))?;
                 self.advance(|c| c.reconstruct(entered))?;
-                self.advance(|c| unsafe { c.lend(entered) })
+                self.advance(|c| c.lend(entered))
             })
         };
         match result {
@@ -115,9 +115,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> R
             self.broker
                 .kernel
                 .platform()
-                .with_process(|entered| unsafe {
-                    ManuallyDrop::into_inner(child).cancel_unpublished(entered)
-                })
+                .with_process(|entered| ManuallyDrop::into_inner(child).cancel_unpublished(entered))
         } {
             Ok(Ok(receipt)) => {
                 mutation.put(Owned::NoPublication(receipt));
@@ -171,7 +169,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> R
         let pointer = &**context as *const CallbackContext<K, P, N> as *mut c_void;
         let result = unsafe {
             self.broker.kernel.platform().with_process(|entered| {
-                self.advance(|child| unsafe {
+                self.advance(|child| {
                     child.publish_dormant(entered, snapshot, run::<K, P, N> as Callback, pointer)
                 })
             })
@@ -185,7 +183,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> R
             self.broker
                 .kernel
                 .platform()
-                .with_process(|entered| self.advance(|child| unsafe { child.activate(entered) }))
+                .with_process(|entered| self.advance(|child| child.activate(entered)))
         };
         if !matches!(result, Ok(Ok(()))) {
             fatal();

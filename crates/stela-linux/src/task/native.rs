@@ -1,6 +1,6 @@
 //! Required original-child ABI on the same retained Factory/native owner.
 //! No source supervisor, scheduler, workqueue or Ready is installed here.
-use super::data::StoppedTaskData;
+use super::StoppedTaskData;
 use super::factory::{self, Child, Factory, NoPublication, RetiredMetadata};
 use super::{CTask, OriginalBirth, Rank, TaskBinding};
 use crate::{
@@ -19,7 +19,9 @@ use core::{
     ptr::{self, NonNull},
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
-use stela_driver_base::platform::work::{Callback, RaisedWork, Runtime, SwitchBinding, WorkError};
+use stela_driver_base::platform::work::{
+    Callback, Runtime, SwitchBinding, WorkError, service::RaisedWork,
+};
 mod abi;
 mod lifecycle;
 pub(super) mod managed;
@@ -71,7 +73,7 @@ impl Delivery {
     fn record(&self) {
         if self
             .epoch
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1))
             .is_err()
         {
             fatal();

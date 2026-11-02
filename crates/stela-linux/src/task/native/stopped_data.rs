@@ -98,7 +98,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
             request.broker.kernel.platform().with_process(|entered| {
                 let owner = kept.take().unwrap_or_else(|| fatal());
                 // SAFETY: exact affine owner after actual C source release/tail.
-                match unsafe { owner.finish(entered) } {
+                match owner.finish(entered) {
                     Ok(()) => Ok(()),
                     Err((owner, error)) => {
                         *kept = Some(owner);
