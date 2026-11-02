@@ -20,6 +20,8 @@ pub enum IdleOutcome {
     Waited,
 }
 const CLOSED: u64 = 1 << 63;
+pub(super) mod reason;
+use reason::ReasonCore;
 static NEXT_DOMAIN: AtomicU64 = AtomicU64::new(1);
 
 /// Owned nanosecond clock over the exact CPU/root permission.
@@ -50,7 +52,7 @@ pub unsafe trait Idle: Send + Sync {
 }
 
 struct Signal {
-    epoch: AtomicU64,
+    reason: ReasonCore,
     idle: Arc<dyn Idle>,
 }
 
@@ -68,22 +70,7 @@ impl Clone for RaisedWork {
 }
 impl RaisedWork {
     pub fn raise(&self) -> Result<(), WorkError> {
-        self.signal
-            .epoch
-            .try_update(Ordering::Release, Ordering::Acquire, |epoch| {
-                if epoch & CLOSED != 0 || epoch == CLOSED - 1 {
-                    None
-                } else {
-                    Some(epoch + 1)
-                }
-            })
-            .map_err(|epoch| {
-                if epoch & CLOSED != 0 {
-                    WorkError::Closed
-                } else {
-                    WorkError::Exhausted
-                }
-            })?;
+        self.signal.reason.publish()?;
         // A failure keeps the published reason; it never invents delivery.
         self.signal.idle.notify()
     }
@@ -152,7 +139,7 @@ impl Deadlines {
         Ok(Self {
             id,
             signal: ManuallyDrop::new(Arc::new(Signal {
-                epoch: AtomicU64::new(0),
+                reason: ReasonCore::new(),
                 idle,
             })),
             last_ns: now,
@@ -186,7 +173,7 @@ impl Deadlines {
     }
     pub fn raised_work(&self) -> Result<RaisedWork, WorkError> {
         self.process()?;
-        if self.signal.epoch.load(Ordering::Acquire) & CLOSED != 0 {
+        if self.signal.reason.is_closed() {
             return Err(WorkError::Closed);
         }
         Ok(RaisedWork {
@@ -196,10 +183,7 @@ impl Deadlines {
     /// Establish the real 1-ms periodic deadline before IRQ-work admission.
     pub fn start_irq_ticks(&mut self) -> Result<(), WorkError> {
         self.process()?;
-        if self.tick.is_some()
-            || self.running
-            || self.signal.epoch.load(Ordering::Acquire) & CLOSED != 0
-        {
+        if self.tick.is_some() || self.running || self.signal.reason.is_closed() {
             return Err(WorkError::Busy);
         }
         let deadline = self
@@ -212,7 +196,7 @@ impl Deadlines {
     /// The owner copies the original timerqueue's earliest deadline.
     pub fn set_timer(&mut self, deadline: Option<u64>) -> Result<(), WorkError> {
         self.process()?;
-        if self.signal.epoch.load(Ordering::Acquire) & CLOSED != 0 {
+        if self.signal.reason.is_closed() {
             return Err(WorkError::Closed);
         }
         self.timer = deadline;
@@ -228,11 +212,9 @@ impl Deadlines {
     /// No callback, switch, fake tick count or global jiffies effect.
     pub fn due(&mut self) -> Result<bool, WorkError> {
         let now = self.now()?;
-        Ok(
-            (self.signal.epoch.load(Ordering::Acquire) & !CLOSED) != self.delivered
-                || self.tick.is_some_and(|deadline| deadline <= now)
-                || self.timer.is_some_and(|deadline| deadline <= now),
-        )
+        Ok(self.signal.reason.observed_epoch() != self.delivered
+            || self.tick.is_some_and(|deadline| deadline <= now)
+            || self.timer.is_some_and(|deadline| deadline <= now))
     }
     pub fn begin(&mut self) -> Result<Option<Batch>, WorkError> {
         self.process()?;
@@ -242,7 +224,7 @@ impl Deadlines {
         let now = self.now()?;
         // Capture BEFORE task/service inspection. A later raise is not
         // cleared by finish and remains eligible even if its notify was early.
-        let epoch = self.signal.epoch.load(Ordering::Acquire) & !CLOSED;
+        let epoch = self.signal.reason.observed_epoch();
         let raised = epoch != self.delivered;
         let tick = self.tick.is_some_and(|deadline| deadline <= now);
         let timer = self.timer.is_some_and(|deadline| deadline <= now);
@@ -311,7 +293,7 @@ impl Deadlines {
     /// native idle/event permission; this method never installs that permission.
     pub unsafe fn idle(&mut self) -> Result<IdleOutcome, WorkError> {
         self.process()?;
-        if self.signal.epoch.load(Ordering::Acquire) & CLOSED != 0 {
+        if self.signal.reason.is_closed() {
             return Err(WorkError::Closed);
         }
         if self.running {
@@ -327,7 +309,7 @@ impl Deadlines {
     }
     pub fn stop_producers(&mut self) -> Result<(), WorkError> {
         self.process()?;
-        self.signal.epoch.fetch_or(CLOSED, Ordering::AcqRel);
+        self.signal.reason.close();
         Ok(())
     }
     /// # Safety
@@ -336,7 +318,7 @@ impl Deadlines {
     /// its separate runtime/domain ownership. Numerical emptiness is no proof.
     pub unsafe fn retire(&mut self) -> Result<(), WorkError> {
         self.process()?;
-        let epoch = self.signal.epoch.load(Ordering::Acquire);
+        let epoch = self.signal.reason.load();
         if epoch & CLOSED == 0
             || epoch & !CLOSED != self.delivered
             || self.running

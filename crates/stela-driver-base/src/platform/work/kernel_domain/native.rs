@@ -23,6 +23,10 @@ impl sealed::Domain for NativeDomain {
     type Kept<const N: usize> = NativeKept<N>;
     type Segment<'a, const N: usize> = NativeSegment<'a, N>;
     type Storage<'a> = &'a PinnedPages;
+    type Raised = crate::platform::work::service::RaisedWork;
+    fn raise(event: &Self::Raised) -> Result<(), WorkError> {
+        event.raise()
+    }
     fn check<const N: usize>(runtime: &Self::Loan<'_, N>) -> Result<(), WorkError> {
         runtime.queue().process()
     }

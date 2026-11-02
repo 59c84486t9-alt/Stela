@@ -25,6 +25,12 @@ impl<D: Domain> CpuSpan<'_, D> {
 }
 /// Sealed borrowed storage. There is no raw/label constructor, From/Deref or
 /// generic extractor yielding PinnedPages, CpuMapping or a physical-address list.
+/// ```compile_fail
+/// use stela_driver_base::platform::work::kernel_domain::{HostedDomain, StorageView};
+/// fn no_host_physical_pin(view: StorageView<'_, HostedDomain>) {
+///     let _ = view.native_pin();
+/// }
+/// ```
 pub struct StorageView<'storage, D: Domain> {
     inner: D::Storage<'storage>,
     _domain: PhantomData<&'storage D>,
@@ -62,5 +68,16 @@ pub(super) fn check_range(total: usize, offset: usize, bytes: usize) -> Result<(
         Err(MemoryError::InvalidSize)
     } else {
         Ok(())
+    }
+}
+
+#[cfg(all(feature = "test-support", unix))]
+impl<'storage> StorageView<'storage, super::HostedDomain> {
+    /// Borrow only this real host allocation. No native pin conversion exists.
+    pub fn borrow_hosted(pages: &'storage super::HostedPages) -> Self {
+        Self {
+            inner: pages,
+            _domain: PhantomData,
+        }
     }
 }

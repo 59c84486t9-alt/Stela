@@ -7,6 +7,8 @@ pub trait Domain: 'static {
     type Kept<const N: usize>;
     type Segment<'a, const N: usize>;
     type Storage<'a>: Copy;
+    type Raised: Clone;
+    fn raise(event: &Self::Raised) -> Result<(), WorkError>;
     fn check<const N: usize>(loan: &Self::Loan<'_, N>) -> Result<(), WorkError>;
     fn current<const N: usize>(loan: &Self::Loan<'_, N>) -> Result<TaskContext, WorkError>;
     fn dispatcher<const N: usize>(loan: &Self::Loan<'_, N>) -> Result<(), WorkError>;
@@ -42,17 +44,15 @@ pub struct HostKept<const N: usize> {
     _size: core::marker::PhantomData<[(); N]>,
 }
 #[cfg(all(feature = "test-support", unix))]
-#[derive(Clone, Copy)]
-pub struct HostStorage<'a> {
-    never: Unwired,
-    _life: core::marker::PhantomData<&'a ()>,
-}
-#[cfg(all(feature = "test-support", unix))]
 impl Domain for super::HostedDomain {
     type Loan<'a, const N: usize> = HostLoan<'a, N>;
     type Kept<const N: usize> = HostKept<N>;
     type Segment<'a, const N: usize> = HostLoan<'a, N>;
-    type Storage<'a> = HostStorage<'a>;
+    type Storage<'a> = &'a super::HostedPages;
+    type Raised = super::hosted::HostedRaisedWork;
+    fn raise(event: &Self::Raised) -> Result<(), WorkError> {
+        event.raise()
+    }
     fn check<const N: usize>(v: &Self::Loan<'_, N>) -> Result<(), WorkError> {
         match v.never {}
     }
@@ -75,9 +75,17 @@ impl Domain for super::HostedDomain {
         match v.never {}
     }
     fn shape(v: &Self::Storage<'_>) -> StorageShape {
-        match v.never {}
+        StorageShape {
+            bytes: v.bytes(),
+            alignment: v.alignment(),
+            page_shift: v.page_shift(),
+        }
     }
-    fn span(v: &Self::Storage<'_>, _: usize, _: usize) -> Result<NonNull<u8>, MemoryError> {
-        match v.never {}
+    fn span(
+        v: &Self::Storage<'_>,
+        offset: usize,
+        bytes: usize,
+    ) -> Result<NonNull<u8>, MemoryError> {
+        v.cpu_address(offset, bytes)
     }
 }

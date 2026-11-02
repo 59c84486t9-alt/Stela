@@ -1,8 +1,16 @@
 //! Sealed execution-domain loans; native admission never accepts host transport.
-//! Hosted values remain unconstructible until the real shared hosted core exists.
+//! Hosted runtime/segment admission stays unconstructible until its real core exists.
 use super::{EnteredProcess, Runtime, TaskContext, WorkError};
 use core::{marker::PhantomData, pin::Pin};
 mod native;
+mod raised;
+pub use raised::DomainRaised;
+#[cfg(all(feature = "test-support", unix))]
+mod hosted;
+#[cfg(all(feature = "test-support", unix))]
+pub use hosted::{
+    HostFrameId, HostedClock, HostedExecution, HostedIdle, HostedPages, HostedReason,
+};
 mod storage;
 pub use storage::{CpuSpan, StorageShape, StorageView};
 mod sealed;
