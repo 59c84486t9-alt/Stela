@@ -16,6 +16,10 @@
 //! Codes with no keyboard usage (media keys beyond volume and mute,
 //! horizontal wheel, extra buttons) and relative axes of a tablet are
 //! counted and dropped, never mapped to something else.
+use super::observation::{
+    self, Batch, Capabilities, Change, Description, Format, InitialState, Item, Knowledge,
+    NativePoll, Origin, Payload, Producer, Source, Status, StopCause,
+};
 use super::{Input, POINTER_MAX};
 use crate::{
     Handoff,
@@ -47,6 +51,7 @@ const EV_SYN: u16 = 0;
 const EV_KEY: u16 = 1;
 const EV_REL: u16 = 2;
 const EV_ABS: u16 = 3;
+const EV_SW: u16 = 5;
 const SYN_REPORT: u16 = 0;
 const ABS_X: u16 = 0;
 const ABS_Y: u16 = 1;
@@ -80,6 +85,29 @@ pub struct Axis {
     pub maximum: i32,
 }
 
+/// Failures retain the decoded prefix in the same observed poll.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PollError {
+    BrokenQueue,
+}
+impl core::fmt::Display for PollError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "virtio input {self:?}")
+    }
+}
+
+fn bitmap_codes(bitmap: &[u8]) -> Vec<u16> {
+    let mut codes = Vec::new();
+    for (byte, value) in bitmap.iter().enumerate() {
+        for bit in 0..8 {
+            if value & (1 << bit) != 0 {
+                codes.push((byte * 8 + bit) as u16);
+            }
+        }
+    }
+    codes
+}
+
 pub struct VirtioInput {
     notify: Mmio,
     queue: DmaBuffer,
@@ -92,6 +120,8 @@ pub struct VirtioInput {
     pub broken: bool,
     pub name: String,
     pub translator: Translator,
+    observation: Option<Producer>,
+    pending_observations: Batch,
 }
 
 impl VirtioInput {
@@ -116,6 +146,12 @@ impl VirtioInput {
         let name = config(CONFIG_NAME, 0);
         let name = name.split(|&b| b == 0).next().unwrap_or_default();
         let name = String::from_utf8_lossy(name).into_owned();
+        // Capabilities come from this actual device's config selectors, never
+        // from the device name. They provide no current key/switch snapshot.
+        let capabilities = Capabilities {
+            keys: bitmap_codes(&config(CONFIG_EVENTS, EV_KEY as u8)),
+            switches: bitmap_codes(&config(CONFIG_EVENTS, EV_SW as u8)),
+        };
         let absolute = config(CONFIG_EVENTS, EV_ABS as u8);
         let axis = |code: u16| {
             let bytes = config(CONFIG_ABS, code as u8);
@@ -155,6 +191,8 @@ impl VirtioInput {
             broken: false,
             name,
             translator: Translator::new(axes),
+            observation: None,
+            pending_observations: Batch::default(),
         };
         for id in 0..entries {
             let base = 16 * usize::from(id);
@@ -166,6 +204,31 @@ impl VirtioInput {
             input.offer(id);
         }
         transport.ready();
+        let initial = InitialState {
+            keys: if capabilities.keys.is_empty() {
+                Knowledge::NotApplicable
+            } else {
+                Knowledge::Unknown
+            },
+            switches: if capabilities.switches.is_empty() {
+                Knowledge::NotApplicable
+            } else {
+                Knowledge::Unknown
+            },
+        };
+        input.observation = Some(Producer::new(
+            Description {
+                origin: Origin::Virtio,
+                format: Format::Linux { capabilities },
+            },
+            initial,
+        ));
+        if let Some(producer) = &input.observation {
+            input
+                .pending_observations
+                .items
+                .push(Item::Change(Change::Added(producer.source())));
+        }
         input.publish();
         Ok(input)
     }
@@ -187,6 +250,73 @@ impl VirtioInput {
     /// handed back to it. A descriptor the driver never offered breaks the
     /// queue, as Linux `virtqueue_get_buf` does.
     pub fn poll(&mut self) -> Vec<Event> {
+        // Skipped controls cannot later reopen this same observation source.
+        self.close_observation_admission();
+        self.poll_raw()
+    }
+
+    pub fn observation_sources(&self) -> Vec<Source> {
+        self.observation
+            .as_ref()
+            .map(Producer::source)
+            .into_iter()
+            .collect()
+    }
+
+    /// Observation close is not controller stop or a Linux callback join.
+    fn close_observation_admission(&mut self) {
+        if let Some(producer) = &mut self.observation
+            && let Some(change) = producer.stop(StopCause::ObservationClosed)
+        {
+            self.pending_observations.items.push(Item::Change(change));
+        }
+    }
+
+    pub fn close_observation(&mut self) -> Batch {
+        self.close_observation_admission();
+        core::mem::take(&mut self.pending_observations)
+    }
+
+    /// Decode once, retaining guest inputs and actual signed Linux/SYN order.
+    /// No Linux callback runs inside this hardware poll.
+    pub fn poll_observed(&mut self) -> NativePoll<PollError> {
+        let was_broken = self.broken;
+        let raw = self.poll_raw();
+        let mut polled = NativePoll {
+            observations: core::mem::take(&mut self.pending_observations),
+            ..NativePoll::default()
+        };
+        if self.broken && !was_broken {
+            polled.record_error(PollError::BrokenQueue);
+        }
+        for event in &raw {
+            polled.inputs.extend(self.translator.translate(*event));
+        }
+        if let Some(producer) = &mut self.observation {
+            if producer.source().status() == Status::Producing && !raw.is_empty() {
+                let events = raw
+                    .into_iter()
+                    .map(|event| observation::Event {
+                        kind: event.kind,
+                        code: event.code,
+                        value: event.value,
+                    })
+                    .collect();
+                polled
+                    .observations
+                    .publish(producer, Payload::Linux { events });
+            }
+            if self.broken
+                && producer.source().status() == Status::Producing
+                && let Some(change) = producer.stop(StopCause::TransportFailed)
+            {
+                polled.observations.items.push(Item::Change(change));
+            }
+        }
+        polled
+    }
+
+    fn poll_raw(&mut self) -> Vec<Event> {
         fence(Ordering::SeqCst);
         let produced: u16 = self.queue.read(USED + 2);
         let mut events = Vec::new();
@@ -473,3 +603,6 @@ mod tests {
         assert_eq!(t.dropped, 2);
     }
 }
+
+#[cfg(test)]
+mod observation_tests;

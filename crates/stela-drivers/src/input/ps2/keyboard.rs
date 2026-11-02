@@ -16,8 +16,15 @@ pub(super) struct Keyboard {
     pause: Option<usize>,
     prefix_at: u64,
     held: [u64; 4],
+    observed: Vec<u8>,
 }
 impl Keyboard {
+    pub(super) fn begin_observation(&mut self) {
+        self.observed.clear();
+    }
+    pub(super) fn drain_observed(&mut self) -> Vec<u8> {
+        core::mem::take(&mut self.observed)
+    }
     fn reset_prefix(&mut self) {
         self.extended = false;
         self.released = false;
@@ -52,7 +59,14 @@ impl Keyboard {
         now: u64,
         timeout: u64,
         events: &mut Vec<Input>,
+        observe: bool,
     ) -> Result<(), ErrorKind> {
+        // The actual owning Producer admission controls this byte tap only.
+        // Guest parsing still runs after observation closes; no observer
+        // buffer grows and no Linux Pause/repeat policy is manufactured.
+        if observe {
+            self.observed.push(data);
+        }
         if self.prefix() && now.wrapping_sub(self.prefix_at) >= timeout {
             self.reset_prefix();
             return Err(ErrorKind::PacketTimeout(Port::Keyboard));
