@@ -86,6 +86,19 @@ impl<R: Registers> RequesterActor<R> {
 /// Affine configuration/source owner for a requester. Cloning through Deref
 /// yields only the shared DMA projection, never this actor or command authority.
 /// Default Drop only closes metadata and retains this whole typed actor.
+///
+/// The configuration owner cannot move to a different CPU/thread:
+/// ```compile_fail
+/// use stela_boot_core::vtd::{BoundRequester, MmioRegisters};
+/// fn send<T: Send>() {}
+/// send::<BoundRequester<MmioRegisters>>();
+/// ```
+/// Nor can its local command authority be shared between threads:
+/// ```compile_fail
+/// use stela_boot_core::vtd::{BoundRequester, MmioRegisters};
+/// fn sync<T: Sync>() {}
+/// sync::<BoundRequester<MmioRegisters>>();
+/// ```
 pub struct BoundRequester<R: Registers> {
     actor: ManuallyDrop<Box<RequesterActor<R>>>,
 }
