@@ -369,6 +369,37 @@ pub(crate) unsafe fn install(handler: Handler) {
     unsafe { install_on(&mut *tables, handler) };
 }
 
+/// Turn AVX on where this CPU has it, which firmware leaves off. The host
+/// service's shader compilers need it: without F16C, whose detection requires
+/// AVX state, llvmpipe has no half arithmetic. The translator admits no AVX
+/// target; the entry stubs save the enabled state whatever it is.
+///
+/// # Safety
+/// Ring 0 with interrupts masked, on a CPU whose extended state nothing has
+/// captured yet.
+unsafe fn enable_avx() {
+    use core::arch::x86_64::{__cpuid, _xgetbv, _xsetbv};
+    const XSAVE_AND_AVX: u32 = 1 << 26 | 1 << 28;
+    const CR4_OSXSAVE: u64 = 1 << 18;
+    const XCR0_AVX: u64 = 0x7;
+    if __cpuid(1).ecx & XSAVE_AND_AVX != XSAVE_AND_AVX {
+        return;
+    }
+    // SAFETY: CPUID enumerates XSAVE and AVX, so CR4.OSXSAVE and these XCR0
+    // bits are defined; the caller holds this CPU in ring 0.
+    unsafe {
+        core::arch::asm!(
+            "mov {cr4}, cr4",
+            "or {cr4}, {osxsave}",
+            "mov cr4, {cr4}",
+            cr4 = out(reg) _,
+            osxsave = in(reg) CR4_OSXSAVE,
+            options(nostack, preserves_flags),
+        );
+        _xsetbv(0, _xgetbv(0) | XCR0_AVX);
+    }
+}
+
 /// Install the descriptor/IST/local storage of this host processor.
 ///
 /// # Safety
@@ -379,6 +410,9 @@ pub(crate) unsafe fn install_on(tables: &'static mut Tables, handler: Handler) {
     if tables.xstate.is_some() {
         output::fatal("native xstate descriptor owner cannot be reinstalled");
     }
+    // SAFETY: ring 0 with interrupts masked, before this CPU's state is
+    // captured and before anything on it saves extended state.
+    unsafe { enable_avx() };
     // SAFETY: install_on owns this CPU and permanently pinned Tables,
     // including both distinct IST arrays, before HostOwner or AP READY.
     let owner = unsafe { super::xstate::XstateOwner::capture() }.unwrap_or_else(|error| {
@@ -518,18 +552,24 @@ pub(crate) unsafe fn observe() -> Observation {
 /// Report an x86 exception that is a Stela failure, never a guest event.
 pub fn fatal(frame: &Frame) -> ! {
     report(frame);
+    // SAFETY: the interrupted stack, which a fault that left it unreadable
+    // would have stopped on as a double fault before printing this.
+    unsafe { output::print_stack_at(frame.rsp as *const u64) };
     output::fatal("unexpected x86 exception in the system engine")
 }
 
-/// Print an x86 exception's detail.
+/// Print an x86 exception's detail, straight to the port: whatever raised it
+/// may hold the output queue.
 pub fn report(frame: &Frame) {
-    output::arguments(format_args!(
-        "x86 exception vector={} error={:#x} rip={:#x} rsp={:#x} cr2={:#x} rflags={:#x}\n",
+    use core::fmt::Write;
+    let _ = writeln!(
+        crate::serial::Serial,
+        "x86 exception vector={} error={:#x} rip={:#x} rsp={:#x} cr2={:#x} rflags={:#x}",
         frame.vector,
         frame.error,
         frame.rip,
         frame.rsp,
         cr2(),
         frame.rflags
-    ));
+    );
 }
