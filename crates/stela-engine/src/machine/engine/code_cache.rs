@@ -383,6 +383,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// their own code is reclaimed. A block no longer indexed has no live
     /// chain into it, as its page was forgotten whole then.
     pub(super) fn evict_code(&mut self, range: core::ops::Range<usize>) {
+        // A host with nothing to release says so with an empty range, and
+        // while memory stays low that comes before every compile.
+        if range.is_empty() {
+            return;
+        }
         let evicted: Vec<usize> = (0..self.blocks.len())
             .filter(|&slot| range.contains(&self.blocks[slot].code.0))
             .collect();
