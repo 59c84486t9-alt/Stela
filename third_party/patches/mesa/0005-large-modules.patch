@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 12:00:00 -0400
+Subject: [PATCH] fix(gallivm): skip backend optimization of huge modules
+
+---
+diff --git a/src/gallium/auxiliary/gallivm/lp_bld_init.c b/src/gallium/auxiliary/gallivm/lp_bld_init.c
+index e3c7c43..59634fc 100644
+--- a/src/gallium/auxiliary/gallivm/lp_bld_init.c
++++ b/src/gallium/auxiliary/gallivm/lp_bld_init.c
+@@ -145,6 +145,23 @@ gallivm_free_code(struct gallivm_state *gallivm)
+ }
+ 
+ 
++/* The instructions a module may hold before the backend stops optimizing it:
++ * register allocation and scheduling of an uber shader take gigabytes.
++ */
++#define LARGE_MODULE_INSTRUCTIONS 60000
++
++static bool
++large_module(LLVMModuleRef module)
++{
++   unsigned long instructions = 0;
++   for (LLVMValueRef f = LLVMGetFirstFunction(module); f; f = LLVMGetNextFunction(f))
++      for (LLVMBasicBlockRef b = LLVMGetFirstBasicBlock(f); b; b = LLVMGetNextBasicBlock(b))
++         for (LLVMValueRef i = LLVMGetFirstInstruction(b); i; i = LLVMGetNextInstruction(i))
++            if (++instructions > LARGE_MODULE_INSTRUCTIONS)
++               return true;
++   return false;
++}
++
+ static bool
+ init_gallivm_engine(struct gallivm_state *gallivm)
+ {
+@@ -153,7 +170,7 @@ init_gallivm_engine(struct gallivm_state *gallivm)
+       char *error = NULL;
+       int ret;
+ 
+-      if (gallivm_perf & GALLIVM_PERF_NO_OPT) {
++      if ((gallivm_perf & GALLIVM_PERF_NO_OPT) || large_module(gallivm->module)) {
+          optlevel = None;
+       }
+       else {

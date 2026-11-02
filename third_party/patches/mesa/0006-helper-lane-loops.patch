@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 12:30:00 -0400
+Subject: [PATCH] fix(gallivm): run helper lanes to their loop breaks
+
+---
+diff --git a/src/gallium/auxiliary/gallivm/lp_bld_nir_soa.c b/src/gallium/auxiliary/gallivm/lp_bld_nir_soa.c
+index 035ebbe..acd3c65 100644
+--- a/src/gallium/auxiliary/gallivm/lp_bld_nir_soa.c
++++ b/src/gallium/auxiliary/gallivm/lp_bld_nir_soa.c
+@@ -5793,7 +5793,10 @@ visit_loop(struct lp_build_nir_soa_context *bld, nir_loop *loop)
+ 
+    lp_exec_bgnloop(&bld->exec_mask, true);
+    visit_cf_list(bld, &loop->body);
+-   lp_exec_endloop(bld->base.gallivm, &bld->exec_mask, bld->mask);
++   /* Helper and demoted lanes run to their own breaks: values a lane carries out
++    * of a loop feed its derivatives and its addresses.
++    */
++   lp_exec_endloop(bld->base.gallivm, &bld->exec_mask, NULL);
+ }
+ 
+ static void
