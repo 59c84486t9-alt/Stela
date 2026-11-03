@@ -3,6 +3,7 @@
  * This implements identity/lease transitions, not a substitute Linux scheduler. */
 #include <linux/errno.h>
 #include <linux/cgroup.h>
+#include <linux/cpumask.h>
 #include <linux/kthread.h>
 #include <stela/managed.h>
 #include <linux/irqflags.h>
@@ -36,6 +37,7 @@
 
 static_assert(CONFIG_THREAD_INFO_IN_TASK == 1);
 static_assert(!IS_ENABLED(CONFIG_SMP));
+static_assert(NR_CPUS == 1);
 static_assert(!IS_ENABLED(CONFIG_PREEMPT_RT));
 static_assert(!IS_ENABLED(CONFIG_MUTEX_SPIN_ON_OWNER));
 static_assert(!IS_ENABLED(CONFIG_SCHED_PROXY_EXEC));
@@ -1964,6 +1966,52 @@ void rt_mutex_futex_post_schedule(void)
         __builtin_trap();
     task->rt_prepared = false;
     task->linux_task->sched_rt_mutex = 0;
+}
+
+/* Selected native UP affinity has one eligible CPU and no migration path.
+ * The caller borrows a live source task; catalog membership alone does not
+ * acquire a task reference. Preserve the original pi_lock publication. */
+static bool up_affinity_target(struct task_struct *p)
+{
+	const struct stela_linux_owner *owner = stela_linux_owner();
+	if (stela_linux_require_current(owner) || stela_linux_atomic_callback_active())
+		return false;
+	struct stela_linux_task *target = allocated_task(p);
+	return target && target->attached && target->context.sequence &&
+	       refcount_read(&p->usage) && (p->flags & PF_KTHREAD) && !p->mm &&
+	       (target->kind == INITIAL_ALLOCATION ||
+		(target->kind == ORIGINAL_CHILD_ALLOCATION && target->source_owner == owner &&
+		 target->source_visible && target->source_activated && !target->source_original_freed));
+}
+
+static int update_up_affinity(struct task_struct *p, const struct cpumask *mask)
+{
+	if (!mask || !cpumask_test_cpu(0, cpu_online_mask) || !cpumask_equal(mask, cpumask_of(0)))
+		return -EINVAL;
+	/* User affinity and temporary migration masks are outside this source
+	 * profile. Refuse them before mutating any original scheduler fields. */
+	if (p->user_cpus_ptr || p->cpus_ptr != &p->cpus_mask)
+		return -EOPNOTSUPP;
+	cpumask_copy(&p->cpus_mask, mask);
+	p->nr_cpus_allowed = 1;
+	return 0;
+}
+
+int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *mask)
+{
+	/* Authenticate current before touching a caller-supplied target lock. */
+	if (!up_affinity_target(p))
+		return -EPERM;
+	guard(raw_spinlock_irqsave)(&p->pi_lock);
+	return update_up_affinity(p, mask);
+}
+
+void set_cpus_allowed_force(struct task_struct *p, const struct cpumask *mask)
+{
+	/* Original kthread binds enter with the target pi_lock already held. */
+	if (!irqs_disabled() || !preempt_count() || !up_affinity_target(p) ||
+	    update_up_affinity(p, mask))
+		stela_linux_fatal("unsupported forced UP affinity");
 }
 
 static struct stela_linux_task *priority_target(struct task_struct *p)
