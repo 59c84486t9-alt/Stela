@@ -14,6 +14,26 @@ mod timer;
 pub fn timer_delivery_failure() -> Option<WorkError> {
     timer::failure()
 }
+/// Run the original Linux timer phases in a mounted hosted service callback.
+/// The returned value is the actual remaining source deadline.
+///
+/// # Safety
+/// The caller retains this exact canonical source owner and its active
+/// Initial/Managed binding for this service runtime. The original callbacks
+/// are bounded and cannot sleep, reenter delivery, or retain the opaque loan.
+/// An error refuses delivery before any callback runs.
+#[cfg(all(feature = "hosted-test-support", target_os = "linux"))]
+pub unsafe fn run_hosted_timers<const N: usize>(
+    owner: &RawOwner,
+    runtime: Pin<&stela_driver_base::platform::work::kernel_domain::HostedRuntime<N>>,
+    batch: &stela_driver_base::platform::work::kernel_domain::HostedBatch,
+) -> Result<Option<u64>, WorkError> {
+    let delivery = timer::TimerDelivery::hosted(owner, runtime, batch)?;
+    // SAFETY: constructor checked the live service batch and actual source
+    // current, and the caller keeps that binding and its callback graph.
+    Ok(unsafe { timer::run(&delivery) })
+}
+
 use super::{owner::RawOwner, task::TaskBinding};
 use alloc::{boxed::Box, sync::Arc};
 use core::{
@@ -531,11 +551,6 @@ unsafe extern "C" fn finish<const N: usize>(context: *mut c_void) {
         // SAFETY: actual same owned batch/current and bounded token loan;
         // C cannot escape, sleep, recursively pump or retain this stack pointer.
         unsafe { timer::run(&delivery) }
-    };
-    let deadline = if deadline == i64::MAX {
-        None
-    } else {
-        Some(u64::try_from(deadline).unwrap_or_else(|_| timer::fatal(WorkError::CorruptContext)))
     };
     // SAFETY: genuine same batch's primary/expiry callbacks completed and
     // scoped loan ended; actual queue minima came from those original bodies.

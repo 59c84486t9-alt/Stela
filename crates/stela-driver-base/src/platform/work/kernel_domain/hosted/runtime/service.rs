@@ -37,6 +37,15 @@ impl<const N: usize> HostedRuntime<N> {
         self.service.as_ref().ok_or(WorkError::Unavailable)
     }
 
+    /// Check that this exact capture is live on its reserved service stack.
+    pub fn validate_service_batch(&self, batch: &HostedBatch) -> Result<(), WorkError> {
+        self.current_context()?;
+        if self.current.get() != self.count - 1 || self.service.is_none() {
+            return Err(WorkError::Unavailable);
+        }
+        self.service()?.deadlines.borrow().validate_batch(batch)
+    }
+
     pub fn service_raised_work(&self) -> Result<DomainRaised<HostedDomain>, WorkError> {
         self.service()?.deadlines.borrow().raised_work()
     }
@@ -119,6 +128,7 @@ unsafe extern "C" fn deliver<const N: usize>(context: *mut c_void) {
     let service = require(runtime.service());
     let batch = require(service.deadlines.borrow_mut().begin());
     if let Some(batch) = batch {
+        require(runtime.validate_service_batch(&batch));
         // SAFETY: construction retains the actual consumer and storage. This
         // runs on the reserved task, with no timing/queue borrow held.
         let next = unsafe { (service.callback)(service.context, &batch) };
@@ -149,6 +159,7 @@ mod tests {
         assert_eq!(domain.hosted_segment().unwrap().check(), Ok(()));
         assert_eq!(runtime.current.get(), 2);
         assert!(batch.raised());
+        assert_eq!(runtime.validate_service_batch(batch), Ok(()));
         let deliveries = consumer.deliveries.get();
         assert_eq!(batch.timer(), deliveries == 0);
         consumer.deliveries.set(deliveries + 1);

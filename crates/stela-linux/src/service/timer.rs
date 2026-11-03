@@ -10,8 +10,8 @@ unsafe extern "C" {
 pub(super) struct TimerDelivery<'a> {
     owner: *const RawOwner,
     context: *const c_void,
-    batch: &'a Batch,
-    check: unsafe fn(*const c_void, &Batch) -> Result<(), WorkError>,
+    batch: *const c_void,
+    check: unsafe fn(*const c_void, *const c_void) -> Result<(), WorkError>,
     _environment: PhantomData<&'a ()>,
     _local: PhantomData<*mut ()>,
 }
@@ -20,48 +20,86 @@ impl<'a> TimerDelivery<'a> {
         environment: &'a Environment<N>,
         batch: &'a Batch,
     ) -> Result<Self, WorkError> {
-        environment
-            .domain
-            .validate_batch(environment.runtime(), batch)?;
-        // SAFETY: actual retained canonical source service; C independently
-        // validates real Initial/Managed binding/current, not global FullReady.
-        let value = unsafe { stela_linux_require_current(environment.owner) };
-        if value != 0 {
-            return Err(WorkError::Unavailable);
-        }
-        Ok(Self {
+        let delivery = Self {
             owner: environment.owner,
             context: core::ptr::from_ref(environment).cast(),
-            batch,
-            check: check::<N>,
+            batch: core::ptr::from_ref(batch).cast(),
+            check: check_native::<N>,
             _environment: PhantomData,
             _local: PhantomData,
-        })
+        };
+        delivery.validate(environment.owner)?;
+        Ok(delivery)
     }
+
+    #[cfg(all(feature = "hosted-test-support", target_os = "linux"))]
+    pub(super) fn hosted<const N: usize>(
+        owner: &'a RawOwner,
+        runtime: Pin<&'a stela_driver_base::platform::work::kernel_domain::HostedRuntime<N>>,
+        batch: &'a stela_driver_base::platform::work::kernel_domain::HostedBatch,
+    ) -> Result<Self, WorkError> {
+        let delivery = Self {
+            owner,
+            context: core::ptr::from_ref(runtime.get_ref()).cast(),
+            batch: core::ptr::from_ref(batch).cast(),
+            check: check_hosted::<N>,
+            _environment: PhantomData,
+            _local: PhantomData,
+        };
+        delivery.validate(owner)?;
+        Ok(delivery)
+    }
+
     fn validate(&self, owner: *const RawOwner) -> Result<(), WorkError> {
         if owner.is_null() || owner != self.owner {
             return Err(WorkError::InvalidTicket);
         }
-        // SAFETY: private constructor borrowed this SAME Environment+Batch.
+        // SAFETY: the private constructor paired these exact live operands.
         unsafe { (self.check)(self.context, self.batch) }?;
-        // SAFETY: no callback/switch between native and real source validation.
+        // SAFETY: no callback or switch between runtime and source validation.
         if unsafe { stela_linux_require_current(owner) } != 0 {
             return Err(WorkError::Unavailable);
         }
         Ok(())
     }
 }
-unsafe fn check<const N: usize>(context: *const c_void, batch: &Batch) -> Result<(), WorkError> {
-    // SAFETY: only real TimerDelivery constructor supplies this kept pointer.
-    let environment = unsafe { &*context.cast::<Environment<N>>() };
+unsafe fn check_native<const N: usize>(
+    context: *const c_void,
+    batch: *const c_void,
+) -> Result<(), WorkError> {
+    // SAFETY: the native constructor borrows these exact live operands.
+    let (environment, batch) =
+        unsafe { (&*context.cast::<Environment<N>>(), &*batch.cast::<Batch>()) };
     environment
         .domain
         .validate_batch(environment.runtime(), batch)
 }
-pub(super) unsafe fn run(delivery: &TimerDelivery<'_>) -> i64 {
+
+#[cfg(all(feature = "hosted-test-support", target_os = "linux"))]
+unsafe fn check_hosted<const N: usize>(
+    context: *const c_void,
+    batch: *const c_void,
+) -> Result<(), WorkError> {
+    use stela_driver_base::platform::work::kernel_domain::{HostedBatch, HostedRuntime};
+    // SAFETY: the hosted constructor borrows these exact live operands.
+    let (runtime, batch) = unsafe {
+        (
+            &*context.cast::<HostedRuntime<N>>(),
+            &*batch.cast::<HostedBatch>(),
+        )
+    };
+    runtime.validate_service_batch(batch)
+}
+
+pub(super) unsafe fn run(delivery: &TimerDelivery<'_>) -> Option<u64> {
     // SAFETY: caller preserves genuine current, actual batch and bounded loan
     // through this original C operation; no sleeping/reentry/token escape.
-    unsafe { stela_linux_service_run(core::ptr::from_ref(delivery).cast()) }
+    let deadline = unsafe { stela_linux_service_run(core::ptr::from_ref(delivery).cast()) };
+    if deadline == i64::MAX {
+        None
+    } else {
+        Some(u64::try_from(deadline).unwrap_or_else(|_| fatal(WorkError::CorruptContext)))
+    }
 }
 static FIRST_FAILURE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 pub(super) fn failure() -> Option<WorkError> {
