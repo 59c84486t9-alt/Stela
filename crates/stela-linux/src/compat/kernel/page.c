@@ -315,6 +315,7 @@ static int register_inventory(
     catalog.free_records = 0;
     catalog.retired = NO_INDEX;
     catalog.next_stack_nonce = 1;
+    lruvec_init(&contig_page_data.__lruvec);
     publish_memory_counts(count, (long)managed);
     last_generation = generation;
     return 0;

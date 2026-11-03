@@ -130,6 +130,8 @@
 /mm/filemap_batch.h
 /mm/swap.c
 /mm/swap.h
+/mm/mmzone.c
+/mm/lruvec.c
 /mm/internal.h
 /mm/pagecache_init.c
 /mm/folio_wait.c

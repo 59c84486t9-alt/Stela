@@ -1,0 +1,239 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 00:41:56 -0500
+Subject: [PATCH] refactor(mm): separate LRU vector initialization and costs
+
+---
+ mm/Makefile |  2 +-
+ mm/lruvec.c | 97 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ mm/mmzone.c | 21 ------------
+ mm/swap.c   | 67 ------------------------------------
+ 4 files changed, 98 insertions(+), 89 deletions(-)
+ create mode 100644 mm/lruvec.c
+
+diff --git a/mm/Makefile b/mm/Makefile
+index 9cd5f790329d653ef470cff8327ede2d55825887..01b0d0c36b67e1a0b12e85d30d3e6cfff3eaccfb 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -51,7 +51,7 @@ endif
+ obj-y			:= filemap.o pagecache_init.o folio_wait.o mempool.o oom_kill.o oom_adj.o fadvise.o \
+ 			   maccess.o page-writeback.o writeback_domain.o folio-compat.o \
+ 			   readahead.o swap.o filemap_batch.o truncate.o vmscan.o shrinker.o \
+-			   shmem.o util.o mmzone.o vmstat.o vmstat_init.o backing-dev.o backing-dev-inode.o \
++			   shmem.o util.o mmzone.o lruvec.o vmstat.o vmstat_init.o backing-dev.o backing-dev-inode.o \
+ 			   mm_init.o percpu.o slab_common.o kvfree_rcu.o \
+ 			   compaction.o show_mem.o \
+ 			   interval_tree.o list_lru.o workingset.o \
+diff --git a/mm/lruvec.c b/mm/lruvec.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..5ba878b549b7c53617bab7fe8e2a190e8e22de4d
+--- /dev/null
++++ b/mm/lruvec.c
+@@ -0,0 +1,97 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * LRU vector initialization and refault costs from mm/mmzone.c and mm/swap.c.
++ * Copyright (C) 1991, 1992, 1993, 1994 Linus Torvalds
++ */
++#include <linux/memcontrol.h>
++#include <linux/mm_inline.h>
++#include <linux/swap.h>
++#include <linux/zswap.h>
++
++void lruvec_init(struct lruvec *lruvec)
++{
++	enum lru_list lru;
++
++	memset(lruvec, 0, sizeof(struct lruvec));
++	spin_lock_init(&lruvec->lru_lock);
++	zswap_lruvec_state_init(lruvec);
++
++	for_each_lru(lru)
++		INIT_LIST_HEAD(&lruvec->lists[lru]);
++	/*
++	 * The "Unevictable LRU" is imaginary: though its size is maintained,
++	 * it is never scanned, and unevictable pages are not threaded on it
++	 * (so that their lru fields can be reused to hold mlock_count).
++	 * Poison its list head, so that any operations on it would crash.
++	 */
++	list_del(&lruvec->lists[LRU_UNEVICTABLE]);
++
++	lru_gen_init_lruvec(lruvec);
++}
++
++void lru_note_cost_unlock_irq(struct lruvec *lruvec, bool file,
++		unsigned int nr_io, unsigned int nr_rotated)
++		__releases(lruvec->lru_lock)
++		__releases(rcu)
++{
++	unsigned long cost;
++
++	/*
++	 * Reflect the relative cost of incurring IO and spending CPU
++	 * time on rotations. This doesn't attempt to make a precise
++	 * comparison, it just says: if reloads are about comparable
++	 * between the LRU lists, or rotations are overwhelmingly
++	 * different between them, adjust scan balance for CPU work.
++	 */
++	cost = nr_io * SWAP_CLUSTER_MAX + nr_rotated;
++	if (!cost) {
++		spin_unlock_irq(&lruvec->lru_lock);
++		rcu_read_unlock();
++		return;
++	}
++
++	for (;;) {
++		unsigned long lrusize;
++
++		/* Record cost event */
++		if (file)
++			lruvec->file_cost += cost;
++		else
++			lruvec->anon_cost += cost;
++
++		/*
++		 * Decay previous events
++		 *
++		 * Because workloads change over time (and to avoid
++		 * overflow) we keep these statistics as a floating
++		 * average, which ends up weighing recent refaults
++		 * more than old ones.
++		 */
++		lrusize = lruvec_page_state(lruvec, NR_INACTIVE_ANON) +
++			  lruvec_page_state(lruvec, NR_ACTIVE_ANON) +
++			  lruvec_page_state(lruvec, NR_INACTIVE_FILE) +
++			  lruvec_page_state(lruvec, NR_ACTIVE_FILE);
++
++		if (lruvec->file_cost + lruvec->anon_cost > lrusize / 4) {
++			lruvec->file_cost /= 2;
++			lruvec->anon_cost /= 2;
++		}
++
++		spin_unlock_irq(&lruvec->lru_lock);
++		lruvec = parent_lruvec(lruvec);
++		if (!lruvec) {
++			rcu_read_unlock();
++			break;
++		}
++		spin_lock_irq(&lruvec->lru_lock);
++	}
++}
++
++void lru_note_cost_refault(struct folio *folio)
++{
++	struct lruvec *lruvec;
++
++	lruvec = folio_lruvec_lock_irq(folio);
++	lru_note_cost_unlock_irq(lruvec, folio_is_file_lru(folio),
++				folio_nr_pages(folio), 0);
++}
+diff --git a/mm/mmzone.c b/mm/mmzone.c
+index 0c8f181d9d50068b3a2359805bd81791b97c5bf0..676d8ee1926c8efe504fc72fe16cb45d9b62eb72 100644
+--- a/mm/mmzone.c
++++ b/mm/mmzone.c
+@@ -72,27 +72,6 @@ struct zoneref *__next_zones_zonelist(struct zoneref *z,
+ 	return z;
+ }
+ 
+-void lruvec_init(struct lruvec *lruvec)
+-{
+-	enum lru_list lru;
+-
+-	memset(lruvec, 0, sizeof(struct lruvec));
+-	spin_lock_init(&lruvec->lru_lock);
+-	zswap_lruvec_state_init(lruvec);
+-
+-	for_each_lru(lru)
+-		INIT_LIST_HEAD(&lruvec->lists[lru]);
+-	/*
+-	 * The "Unevictable LRU" is imaginary: though its size is maintained,
+-	 * it is never scanned, and unevictable pages are not threaded on it
+-	 * (so that their lru fields can be reused to hold mlock_count).
+-	 * Poison its list head, so that any operations on it would crash.
+-	 */
+-	list_del(&lruvec->lists[LRU_UNEVICTABLE]);
+-
+-	lru_gen_init_lruvec(lruvec);
+-}
+-
+ #if defined(CONFIG_NUMA_BALANCING) && !defined(LAST_CPUPID_NOT_IN_PAGE_FLAGS)
+ int folio_xchg_last_cpupid(struct folio *folio, int cpupid)
+ {
+diff --git a/mm/swap.c b/mm/swap.c
+index 337e47ddd81fe066510c2ff65c3eb6a87cd9815a..37699d0c5334fd387e15686b341574ada38ba263 100644
+--- a/mm/swap.c
++++ b/mm/swap.c
+@@ -272,73 +272,6 @@ void folio_rotate_reclaimable(struct folio *folio)
+ 	folio_batch_add_and_move(folio, lru_move_tail);
+ }
+ 
+-void lru_note_cost_unlock_irq(struct lruvec *lruvec, bool file,
+-		unsigned int nr_io, unsigned int nr_rotated)
+-		__releases(lruvec->lru_lock)
+-		__releases(rcu)
+-{
+-	unsigned long cost;
+-
+-	/*
+-	 * Reflect the relative cost of incurring IO and spending CPU
+-	 * time on rotations. This doesn't attempt to make a precise
+-	 * comparison, it just says: if reloads are about comparable
+-	 * between the LRU lists, or rotations are overwhelmingly
+-	 * different between them, adjust scan balance for CPU work.
+-	 */
+-	cost = nr_io * SWAP_CLUSTER_MAX + nr_rotated;
+-	if (!cost) {
+-		spin_unlock_irq(&lruvec->lru_lock);
+-		rcu_read_unlock();
+-		return;
+-	}
+-
+-	for (;;) {
+-		unsigned long lrusize;
+-
+-		/* Record cost event */
+-		if (file)
+-			lruvec->file_cost += cost;
+-		else
+-			lruvec->anon_cost += cost;
+-
+-		/*
+-		 * Decay previous events
+-		 *
+-		 * Because workloads change over time (and to avoid
+-		 * overflow) we keep these statistics as a floating
+-		 * average, which ends up weighing recent refaults
+-		 * more than old ones.
+-		 */
+-		lrusize = lruvec_page_state(lruvec, NR_INACTIVE_ANON) +
+-			  lruvec_page_state(lruvec, NR_ACTIVE_ANON) +
+-			  lruvec_page_state(lruvec, NR_INACTIVE_FILE) +
+-			  lruvec_page_state(lruvec, NR_ACTIVE_FILE);
+-
+-		if (lruvec->file_cost + lruvec->anon_cost > lrusize / 4) {
+-			lruvec->file_cost /= 2;
+-			lruvec->anon_cost /= 2;
+-		}
+-
+-		spin_unlock_irq(&lruvec->lru_lock);
+-		lruvec = parent_lruvec(lruvec);
+-		if (!lruvec) {
+-			rcu_read_unlock();
+-			break;
+-		}
+-		spin_lock_irq(&lruvec->lru_lock);
+-	}
+-}
+-
+-void lru_note_cost_refault(struct folio *folio)
+-{
+-	struct lruvec *lruvec;
+-
+-	lruvec = folio_lruvec_lock_irq(folio);
+-	lru_note_cost_unlock_irq(lruvec, folio_is_file_lru(folio),
+-				folio_nr_pages(folio), 0);
+-}
+-
+ static void lru_activate(struct lruvec *lruvec, struct folio *folio)
+ {
+ 	long nr_pages = folio_nr_pages(folio);
