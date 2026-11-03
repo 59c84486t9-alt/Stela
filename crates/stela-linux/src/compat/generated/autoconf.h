@@ -7,6 +7,7 @@
 #define CONFIG_64BIT 1
 /* Select native architecture ownership hooks in the shared Linux sources. */
 #define CONFIG_STELA 1
+#define CONFIG_DEFAULT_HOSTNAME "(none)"
 #define CONFIG_MMU 1
 #define CONFIG_PCI 1
 #define CONFIG_PCI_MSI 1

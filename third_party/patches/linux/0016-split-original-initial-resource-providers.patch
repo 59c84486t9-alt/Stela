@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 21:13:33 -0500
+Subject: [PATCH] refactor(init): split original fdtable and restart providers
+
+---
+ fs/Makefile                 |  2 +-
+ fs/file.c                   | 14 --------------
+ fs/init_fdtable.c           | 25 +++++++++++++++++++++++++
+ kernel/Makefile             |  2 +-
+ kernel/restart_no_syscall.c | 20 ++++++++++++++++++++
+ kernel/signal.c             |  5 -----
+ 6 files changed, 47 insertions(+), 21 deletions(-)
+ create mode 100644 fs/init_fdtable.c
+ create mode 100644 kernel/restart_no_syscall.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 634be099b8fedd9cbedad4ed78a6eb968303ca9d..54986924c535d5d60f7f5a6ba5faed6d444aea95 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -10,7 +10,7 @@
+ obj-y :=	open.o read_write.o file_table.o super.o \
+ 		char_dev.o stat.o exec.o pipe.o namei.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o inode.o \
+-		attr.o bad_inode.o file.o filesystems.o namespace.o \
++		attr.o bad_inode.o file.o init_fdtable.o filesystems.o namespace.o \
+ 		seq_file.o seq_output.o xattr.o libfs.o fs-writeback.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+ 		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
+diff --git a/fs/file.c b/fs/file.c
+index 628ca07dc4b179db98f0ac6e9f6d60dd7f3c5d3b..6c8acc2c57fe171480f6221b15faca9ea61fcb8c 100644
+--- a/fs/file.c
++++ b/fs/file.c
+@@ -527,20 +527,6 @@ void exit_files(struct task_struct *tsk)
+ 	}
+ }
+ 
+-struct files_struct init_files = {
+-	.count		= ATOMIC_INIT(1),
+-	.fdt		= &init_files.fdtab,
+-	.fdtab		= {
+-		.max_fds	= NR_OPEN_DEFAULT,
+-		.fd		= &init_files.fd_array[0],
+-		.close_on_exec	= init_files.close_on_exec_init,
+-		.open_fds	= init_files.open_fds_init,
+-		.full_fds_bits	= init_files.full_fds_bits_init,
+-	},
+-	.file_lock	= __SPIN_LOCK_UNLOCKED(init_files.file_lock),
+-	.resize_wait	= __WAIT_QUEUE_HEAD_INITIALIZER(init_files.resize_wait),
+-};
+-
+ static unsigned int find_next_fd(struct fdtable *fdt, unsigned int start)
+ {
+ 	unsigned int maxfd = fdt->max_fds; /* always multiple of BITS_PER_LONG */
+diff --git a/fs/init_fdtable.c b/fs/init_fdtable.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..7c27648f4015e085674f2a20ba506faeb0345da5
+--- /dev/null
++++ b/fs/init_fdtable.c
+@@ -0,0 +1,25 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ *  linux/fs/file.c
++ *
++ *  Copyright (C) 1998-1999, Stephen Tweedie and Bill Hawes
++ *
++ *  Manage the dynamic fd arrays in the process files_struct.
++ */
++/* Extracted unchanged from fs/file.c. */
++#include <linux/fdtable.h>
++#include <linux/init_task.h>
++
++struct files_struct init_files = {
++	.count		= ATOMIC_INIT(1),
++	.fdt		= &init_files.fdtab,
++	.fdtab		= {
++		.max_fds	= NR_OPEN_DEFAULT,
++		.fd		= &init_files.fd_array[0],
++		.close_on_exec	= init_files.close_on_exec_init,
++		.open_fds	= init_files.open_fds_init,
++		.full_fds_bits	= init_files.full_fds_bits_init,
++	},
++	.file_lock	= __SPIN_LOCK_UNLOCKED(init_files.file_lock),
++	.resize_wait	= __WAIT_QUEUE_HEAD_INITIALIZER(init_files.resize_wait),
++};
+diff --git a/kernel/Makefile b/kernel/Makefile
+index bf5c711f6583cbf8ca4d97ed9ab5685e1eb4997e..2c368421667223ee27239b81ad324b39787dfc4a 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -6,7 +6,7 @@
+ obj-y     = fork.o exec_domain.o exec_state.o panic.o \
+ 	    cpu.o exit.o rcuwait_wake.o softirq.o resource.o \
+ 	    sysctl.o capability.o ptrace.o user.o \
+-	    signal.o sys.o umh.o workqueue.o pid.o task_work.o \
++	    signal.o restart_no_syscall.o sys.o umh.o workqueue.o pid.o task_work.o \
+ 	    extable.o params.o \
+ 	    kthread.o sys_ni.o nsproxy.o nstree.o nscommon.o \
+ 	    notifier.o ksysfs.o cred.o reboot.o \
+diff --git a/kernel/restart_no_syscall.c b/kernel/restart_no_syscall.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..b23939a3ab1cda22b065bc88a67f6def8ca6d2d7
+--- /dev/null
++++ b/kernel/restart_no_syscall.c
+@@ -0,0 +1,20 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *  linux/kernel/signal.c
++ *
++ *  Copyright (C) 1991, 1992  Linus Torvalds
++ *
++ *  1997-11-02  Modified for POSIX.1b signals by Richard Henderson
++ *
++ *  2003-06-02  Jim Houston - Concurrent Computer Corp.
++ *		Changes to use preallocated sigqueue structures
++ *		to allow signals to be sent reliably.
++ */
++/* Extracted unchanged from kernel/signal.c. */
++#include <linux/errno.h>
++#include <linux/restart_block.h>
++
++long do_no_restart_syscall(struct restart_block *param)
++{
++	return -EINTR;
++}
+diff --git a/kernel/signal.c b/kernel/signal.c
+index 808980d08371d3f6a5407261333991807b43037c..a71b946575152f6d48d1ac6885853ff5ca37b92b 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -3259,11 +3259,6 @@ SYSCALL_DEFINE0(restart_syscall)
+ 	return restart->fn(restart);
+ }
+ 
+-long do_no_restart_syscall(struct restart_block *param)
+-{
+-	return -EINTR;
+-}
+-
+ static void __set_task_blocked(struct task_struct *tsk, const sigset_t *newset)
+ {
+ 	if (task_sigpending(tsk) && !thread_group_empty(tsk)) {

@@ -93,6 +93,7 @@
 /kernel/user.c
 /kernel/exec_state.c
 /init/init_task.c
+/init/version-timestamp.c
 /lib/refcount.c
 /lib/refcount_lock.c
 /drivers/dma-buf/Makefile
@@ -106,3 +107,12 @@
 /drivers/dma-buf/dma-fence-unwrap.c
 /lib/maple_tree.c
 /drivers/video/hdmi.c
+/kernel/pid.c
+/kernel/nsproxy.c
+/kernel/ucount.c
+/kernel/signal.c
+/kernel/restart_no_syscall.c
+/fs/fs_struct.c
+/fs/file.c
+/fs/init_fdtable.c
+/fs/internal.h

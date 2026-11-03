@@ -1,5 +1,15 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 21:07:14 -0500
+Subject: [PATCH] fix(init): bind the original initial stack and root at mount
+
+---
+ init/init_task.c | 6 +++++-
+ mm/init-mm.c     | 6 +++++-
+ 2 files changed, 10 insertions(+), 2 deletions(-)
+
 diff --git a/init/init_task.c b/init/init_task.c
-index fd564bb2..75919de8 100644
+index fd564bb2750e5331e3932f9be0bc50231fe6e46a..75919de8c8f0cb7bd54bba7326a6c68e0f6f2b03 100644
 --- a/init/init_task.c
 +++ b/init/init_task.c
 @@ -96,13 +96,17 @@ static struct cred init_cred = {
@@ -22,7 +32,7 @@ index fd564bb2..75919de8 100644
  	.flags		= PF_KTHREAD,
  	.prio		= MAX_PRIO - 20,
 diff --git a/mm/init-mm.c b/mm/init-mm.c
-index 3e792aad..bf18457b 100644
+index 3e792aad762616ec611d272aec2630f142df4c33..bf18457b1a1bef2d3fdde60ef0bc03b7bf36061d 100644
 --- a/mm/init-mm.c
 +++ b/mm/init-mm.c
 @@ -29,9 +29,13 @@ const struct vm_operations_struct vma_dummy_vm_ops;

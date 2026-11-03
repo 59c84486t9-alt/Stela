@@ -2,7 +2,7 @@
 //! Linux environment for unchanged Linux sources, and the hosted C test
 //! programs that `cargo test` runs when Cargo builds for this machine.
 use std::{
-    env,
+    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -54,6 +54,58 @@ const DMA_BUF_SOURCES: &[&str] = &[
 ];
 const COMPAT: &str = "src/compat";
 
+/// Kbuild normally emits these headers before compiling the original UTS unit.
+fn initial_uts_headers() -> PathBuf {
+    let makefile = Path::new(LINUX).join("Makefile");
+    println!("cargo:rerun-if-changed={}", makefile.display());
+    let source = fs::read_to_string(makefile).expect("read pinned Linux version");
+    let field = |key| {
+        source
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once('=')?;
+                (name.trim() == key).then_some(value.trim())
+            })
+            .expect("Linux version field")
+    };
+    let release = format!(
+        "{}.{}.{}{}",
+        field("VERSION"),
+        field("PATCHLEVEL"),
+        field("SUBLEVEL"),
+        field("EXTRAVERSION")
+    );
+    assert!(
+        release
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
+    );
+    let root = out_dir().join("initial-uts");
+    let generated = root.join("generated");
+    fs::create_dir_all(&generated).expect("create generated UTS headers");
+    fs::write(
+        generated.join("utsrelease.h"),
+        format!("#define UTS_RELEASE {release:?}\n"),
+    )
+    .expect("write generated release");
+    let machine = env::var("CARGO_CFG_TARGET_ARCH").expect("target machine");
+    fs::write(
+        generated.join("compile.h"),
+        format!(
+            concat!(
+                "#define UTS_MACHINE {:?}\n",
+                "#define UTS_VERSION \"#1 Stela\"\n",
+                "#define LINUX_COMPILE_BY \"stela\"\n",
+                "#define LINUX_COMPILE_HOST \"build\"\n",
+                "#define LINUX_COMPILER __VERSION__\n",
+            ),
+            machine
+        ),
+    )
+    .expect("write generated compile identity");
+    root
+}
+
 impl Linux {
     pub fn new() -> Self {
         require_sources();
@@ -73,7 +125,14 @@ impl Linux {
         // extra conversion diagnostics remain confined to its own source.
         let upstream = vec![
             PathBuf::from(format!("{LINUX}/init/init_task.c")),
+            PathBuf::from(format!("{LINUX}/init/version-timestamp.c")),
             PathBuf::from(format!("{LINUX}/mm/init-mm.c")),
+            PathBuf::from(format!("{LINUX}/kernel/pid.c")),
+            PathBuf::from(format!("{LINUX}/kernel/nsproxy.c")),
+            PathBuf::from(format!("{LINUX}/kernel/ucount.c")),
+            PathBuf::from(format!("{LINUX}/kernel/restart_no_syscall.c")),
+            PathBuf::from(format!("{LINUX}/fs/fs_struct.c")),
+            PathBuf::from(format!("{LINUX}/fs/init_fdtable.c")),
             PathBuf::from(format!("{LINUX}/lib/string.c")),
             PathBuf::from(format!("{LINUX}/lib/hexdump.c")),
             PathBuf::from(format!("{LINUX}/lib/ratelimit.c")),
@@ -118,8 +177,9 @@ impl Linux {
         for source in &upstream {
             println!("cargo:rerun-if-changed={}", source.display());
         }
+        let uts = initial_uts_headers();
         let mut build = configure();
-        linux.environment.apply(&mut build, None, &[], None);
+        linux.environment.apply(&mut build, Some(&uts), &[], None);
         // The ownership adapters consume private declarations from the same
         // pinned kernel tree, including RCU phases and workqueue metadata.
         build.flag("-isystem").flag(Path::new(LINUX).join("kernel"));
@@ -211,7 +271,9 @@ impl Linux {
             ];
             let services = archive(&host, "linux-host", &services);
             let mut kernel_build = host;
-            linux.environment.apply(&mut kernel_build, None, &[], None);
+            linux
+                .environment
+                .apply(&mut kernel_build, Some(&uts), &[], None);
             kernel_build
                 .flag("-isystem")
                 .flag(Path::new(LINUX).join("kernel"));
