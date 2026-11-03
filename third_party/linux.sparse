@@ -88,6 +88,7 @@
 /init/Kconfig
 /kernel/locking/Makefile
 /fs/seq_file.c
+/fs/seq_lifetime.c
 /fs/Makefile
 /fs/seq_output.c
 /fs/seq_output.h

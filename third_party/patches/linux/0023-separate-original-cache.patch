@@ -1,0 +1,221 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 22:10:31 -0500
+Subject: [PATCH] refactor(seq-file): separate original cache and file lifetime
+
+---
+ fs/Makefile       |  2 +-
+ fs/seq_file.c     | 73 ---------------------------------------
+ fs/seq_lifetime.c | 88 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 89 insertions(+), 74 deletions(-)
+ create mode 100644 fs/seq_lifetime.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 54986924c535d5d60f7f5a6ba5faed6d444aea95..b2897388e0c312b47508b63d1c0350361e3d5f2c 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -11,7 +11,7 @@ obj-y :=	open.o read_write.o file_table.o super.o \
+ 		char_dev.o stat.o exec.o pipe.o namei.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o inode.o \
+ 		attr.o bad_inode.o file.o init_fdtable.o filesystems.o namespace.o \
+-		seq_file.o seq_output.o xattr.o libfs.o fs-writeback.o \
++		seq_file.o seq_lifetime.o seq_output.o xattr.o libfs.o fs-writeback.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+ 		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
+ 		fs_dirent.o fs_context.o fs_parser.o fsopen.o init.o \
+diff --git a/fs/seq_file.c b/fs/seq_file.c
+index 3ddfaf146f6842cb87aaf73960ba805a04c259e6..5b4c2899791a7427801ae1a6c4ba496587f40d77 100644
+--- a/fs/seq_file.c
++++ b/fs/seq_file.c
+@@ -24,8 +24,6 @@
+ #include <linux/uaccess.h>
+ #include <asm/page.h>
+ 
+-static struct kmem_cache *seq_file_cache __ro_after_init;
+-
+ #include "seq_output.h"
+ 
+ static void *seq_buf_alloc(unsigned long size)
+@@ -36,55 +34,6 @@ static void *seq_buf_alloc(unsigned long size)
+ 	return kvmalloc(size, GFP_KERNEL_ACCOUNT);
+ }
+ 
+-/**
+- *	seq_open -	initialize sequential file
+- *	@file: file we initialize
+- *	@op: method table describing the sequence
+- *
+- *	seq_open() sets @file, associating it with a sequence described
+- *	by @op.  @op->start() sets the iterator up and returns the first
+- *	element of sequence. @op->stop() shuts it down.  @op->next()
+- *	returns the next element of sequence.  @op->show() prints element
+- *	into the buffer.  In case of error ->start() and ->next() return
+- *	ERR_PTR(error).  In the end of sequence they return %NULL. ->show()
+- *	returns 0 in case of success and negative number in case of error.
+- *	Returning SEQ_SKIP means "discard this element and move on".
+- *	Note: seq_open() will allocate a struct seq_file and store its
+- *	pointer in @file->private_data. This pointer should not be modified.
+- */
+-int seq_open(struct file *file, const struct seq_operations *op)
+-{
+-	struct seq_file *p;
+-
+-	WARN_ON(file->private_data);
+-
+-	p = kmem_cache_zalloc(seq_file_cache, GFP_KERNEL);
+-	if (!p)
+-		return -ENOMEM;
+-
+-	file->private_data = p;
+-
+-	mutex_init(&p->lock);
+-	p->op = op;
+-
+-	// No refcounting: the lifetime of 'p' is constrained
+-	// to the lifetime of the file.
+-	p->file = file;
+-
+-	/*
+-	 * seq_files support lseek() and pread().  They do not implement
+-	 * write() at all, but we clear FMODE_PWRITE here for historical
+-	 * reasons.
+-	 *
+-	 * If a client of seq_files a) implements file.write() and b) wishes to
+-	 * support pwrite() then that client will need to implement its own
+-	 * file.open() which calls seq_open() and then sets FMODE_PWRITE.
+-	 */
+-	file->f_mode &= ~FMODE_PWRITE;
+-	return 0;
+-}
+-EXPORT_SYMBOL(seq_open);
+-
+ static int traverse(struct seq_file *m, loff_t offset)
+ {
+ 	loff_t pos = 0;
+@@ -339,23 +288,6 @@ loff_t seq_lseek(struct file *file, loff_t offset, int whence)
+ }
+ EXPORT_SYMBOL(seq_lseek);
+ 
+-/**
+- *	seq_release -	free the structures associated with sequential file.
+- *	@inode: its inode
+- *	@file: file in question
+- *
+- *	Frees the structures associated with sequential file; can be used
+- *	as ->f_op->release() if you don't have private data to destroy.
+- */
+-int seq_release(struct inode *inode, struct file *file)
+-{
+-	struct seq_file *m = file->private_data;
+-	kvfree(m->buf);
+-	kmem_cache_free(seq_file_cache, m);
+-	return 0;
+-}
+-EXPORT_SYMBOL(seq_release);
+-
+ /**
+  * seq_escape_mem - print data into buffer, escaping some characters
+  * @m: target buffer
+@@ -1086,8 +1018,3 @@ seq_hlist_next_percpu(void *v, struct hlist_head __percpu *head,
+ 	return NULL;
+ }
+ EXPORT_SYMBOL(seq_hlist_next_percpu);
+-
+-void __init seq_file_init(void)
+-{
+-	seq_file_cache = KMEM_CACHE(seq_file, SLAB_ACCOUNT|SLAB_PANIC);
+-}
+diff --git a/fs/seq_lifetime.c b/fs/seq_lifetime.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..296a6d9a42f49c185d66840f706d310120a3572f
+--- /dev/null
++++ b/fs/seq_lifetime.c
+@@ -0,0 +1,88 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * linux/fs/seq_file.c
++ *
++ * helper functions for making synthetic files from sequences of records.
++ * initial implementation -- AV, Oct 2001.
++ */
++
++#include <linux/export.h>
++#include <linux/fs.h>
++#include <linux/init.h>
++#include <linux/mutex.h>
++#include <linux/seq_file.h>
++#include <linux/slab.h>
++#include <linux/vmalloc.h>
++
++static struct kmem_cache *seq_file_cache __ro_after_init;
++
++/**
++ *	seq_open -	initialize sequential file
++ *	@file: file we initialize
++ *	@op: method table describing the sequence
++ *
++ *	seq_open() sets @file, associating it with a sequence described
++ *	by @op.  @op->start() sets the iterator up and returns the first
++ *	element of sequence. @op->stop() shuts it down.  @op->next()
++ *	returns the next element of sequence.  @op->show() prints element
++ *	into the buffer.  In case of error ->start() and ->next() return
++ *	ERR_PTR(error).  In the end of sequence they return %NULL. ->show()
++ *	returns 0 in case of success and negative number in case of error.
++ *	Returning SEQ_SKIP means "discard this element and move on".
++ *	Note: seq_open() will allocate a struct seq_file and store its
++ *	pointer in @file->private_data. This pointer should not be modified.
++ */
++int seq_open(struct file *file, const struct seq_operations *op)
++{
++	struct seq_file *p;
++
++	WARN_ON(file->private_data);
++
++	p = kmem_cache_zalloc(seq_file_cache, GFP_KERNEL);
++	if (!p)
++		return -ENOMEM;
++
++	file->private_data = p;
++
++	mutex_init(&p->lock);
++	p->op = op;
++
++	// No refcounting: the lifetime of 'p' is constrained
++	// to the lifetime of the file.
++	p->file = file;
++
++	/*
++	 * seq_files support lseek() and pread().  They do not implement
++	 * write() at all, but we clear FMODE_PWRITE here for historical
++	 * reasons.
++	 *
++	 * If a client of seq_files a) implements file.write() and b) wishes to
++	 * support pwrite() then that client will need to implement its own
++	 * file.open() which calls seq_open() and then sets FMODE_PWRITE.
++	 */
++	file->f_mode &= ~FMODE_PWRITE;
++	return 0;
++}
++EXPORT_SYMBOL(seq_open);
++
++/**
++ *	seq_release -	free the structures associated with sequential file.
++ *	@inode: its inode
++ *	@file: file in question
++ *
++ *	Frees the structures associated with sequential file; can be used
++ *	as ->f_op->release() if you don't have private data to destroy.
++ */
++int seq_release(struct inode *inode, struct file *file)
++{
++	struct seq_file *m = file->private_data;
++	kvfree(m->buf);
++	kmem_cache_free(seq_file_cache, m);
++	return 0;
++}
++EXPORT_SYMBOL(seq_release);
++
++void __init seq_file_init(void)
++{
++	seq_file_cache = KMEM_CACHE(seq_file, SLAB_ACCOUNT|SLAB_PANIC);
++}
