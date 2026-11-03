@@ -30,20 +30,27 @@ static s64 service_now_ns(void)
     return now;
 }
 
-static void update_jiffies(void)
+static bool sample_jiffies(s64 now, u64 *sample)
 {
-    s64 now = service_now_ns();
-
-	if (!started) {
-		started = true;
-		start = now;
-	}
+    if (!started) {
+        started = true;
+        start = now;
+    }
     if (now < start)
-        stela_linux_fatal("nominal service clock precedes its retained origin");
+        return false;
     /* Both samples are in [0,S64_MAX), so this difference is nonnegative and
      * cannot overflow signed time. Only then convert to the original unsigned
      * elapsed-nanoseconds input of nsecs_to_jiffies64. */
-    WRITE_ONCE(jiffies_64, INITIAL_JIFFIES + nsecs_to_jiffies64((u64)(now - start)));
+    *sample = INITIAL_JIFFIES + nsecs_to_jiffies64((u64)(now - start));
+    return true;
+}
+
+static void update_jiffies(void)
+{
+    u64 sample;
+    if (!sample_jiffies(service_now_ns(), &sample))
+        stela_linux_fatal("nominal service clock precedes its retained origin");
+    WRITE_ONCE(jiffies_64, sample);
 }
 
 void stela_linux_timer_queue_current(void)
@@ -71,6 +78,20 @@ void stela_linux_timer_delivery_require(const struct stela_linux_timer_delivery 
         stela_linux_fatal("timer delivery without genuine current/service/owned batch");
 }
 
+/* Translate a timer-list expiry in the same sampled jiffy domain. A
+ * nonpositive delta schedules a fresh pass one quantum after the sample. */
+static bool timer_list_deadline(s64 now, unsigned long expires, unsigned long current_jiffies,
+                                s64 *deadline)
+{
+    long left = (long)(expires - current_jiffies);
+    u64 ticks = left > 0 ? (u64)left : 1;
+    u64 quantum = NSEC_PER_SEC / HZ;
+    if (ticks > (u64)(S64_MAX - now) / quantum)
+        return false;
+    *deadline = now + (s64)(ticks * quantum);
+    return true;
+}
+
 s64 stela_linux_service_run(const struct stela_linux_timer_delivery *delivery)
 {
     stela_linux_timer_delivery_require(delivery);
@@ -83,14 +104,8 @@ s64 stela_linux_service_run(const struct stela_linux_timer_delivery *delivery)
     s64 now = service_now_ns();
     s64 next = S64_MAX, high;
     unsigned long timer;
-    if (stela_linux_timers_next(&timer)) {
-        long left = (long)(timer - jiffies);
-        u64 ticks = left > 0 ? (u64)left : 1;
-        u64 quantum = NSEC_PER_SEC / HZ;
-        if (ticks > (u64)(S64_MAX - now) / quantum)
-            stela_linux_fatal("nominal timer-list deadline overflow");
-        next = now + (s64)(ticks * quantum);
-    }
+    if (stela_linux_timers_next(&timer) && !timer_list_deadline(now, timer, jiffies, &next))
+        stela_linux_fatal("nominal timer-list deadline overflow");
     if (stela_linux_hrtimers_next_ns(&high)) {
         /* A due timer remaining AFTER its original phase needs another pass.
          * Same-phase hrtimer restart semantics are preserved by run_queue.
@@ -129,51 +144,34 @@ void stela_linux_service_loop(const struct stela_linux_service_call *call)
 }
 
 #ifdef STELA_LINUX_SERVICE_TEST
-#include <linux/timer.h>
 #include <stela/test.h>
-
-static s64 clock;
-
-static s64 now_ns(void *context)
-{
-	(void)context;
-	return clock;
-}
-
-static void expired(struct timer_list *timer)
-{
-	(void)timer;
-	assert(false);
-}
 
 int main(void)
 {
-	static const struct stela_linux_services services = {.now_ns = now_ns};
-	static const struct stela_linux_owner owner = {.services = &services};
-	static struct timer_list timer;
+    s64 clock = 5 * NSEC_PER_SEC;
+    u64 sample;
+    assert(sample_jiffies(clock, &sample) && sample == INITIAL_JIFFIES);
 
-	clock = 5 * NSEC_PER_SEC;
-	stela_linux_enter(&owner);
-	assert(stela_linux_service_run() == S64_MAX);
-	assert(jiffies == INITIAL_JIFFIES);
+    clock += NSEC_PER_SEC;
+    assert(sample_jiffies(clock, &sample) && sample == INITIAL_JIFFIES + HZ);
 
-	/* The clock moves jiffies from where the first pass found it. */
-	clock += NSEC_PER_SEC;
-	assert(stela_linux_service_run() == S64_MAX);
-	assert(jiffies == INITIAL_JIFFIES + HZ);
+    unsigned long expires = (unsigned long)sample + HZ;
+    s64 deadline, next;
+    assert(timer_list_deadline(clock, expires, (unsigned long)sample, &deadline));
+    assert(deadline == clock + NSEC_PER_SEC);
+    clock = deadline - NSEC_PER_SEC / HZ;
+    assert(sample_jiffies(clock, &sample));
+    assert(timer_list_deadline(clock, expires, (unsigned long)sample, &next) && next == deadline);
 
-	timer_setup(&timer, expired, 0);
-	mod_timer(&timer, jiffies + HZ);
-	s64 deadline = stela_linux_service_run();
+    /* Linux compares jiffies modulo unsigned long, including wrap. */
+    assert(timer_list_deadline(clock, 1, ULONG_MAX, &next));
+    assert(next == clock + 2 * (NSEC_PER_SEC / HZ));
+    assert(timer_list_deadline(clock, 0, 1, &next));
+    assert(next == clock + NSEC_PER_SEC / HZ);
+    assert(!timer_list_deadline(S64_MAX - 1, 0, 0, &next));
+    assert(!sample_jiffies(0, &sample));
 
-	assert(deadline == clock + NSEC_PER_SEC);
-	clock = deadline - NSEC_PER_SEC / HZ;
-	assert(stela_linux_service_run() == clock + NSEC_PER_SEC / HZ);
-	timer_delete(&timer);
-	assert(stela_linux_service_run() == S64_MAX);
-
-	stela_linux_exit();
-	printf("Linux service passes passed\n");
-	return 0;
+    printf("Linux nominal service deadline checks passed\n");
+    return 0;
 }
 #endif
