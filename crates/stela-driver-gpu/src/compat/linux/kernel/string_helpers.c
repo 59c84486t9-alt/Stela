@@ -71,6 +71,7 @@ void memcpy_and_pad(void *dest, size_t dest_len, const void *src, size_t count, 
 }
 
 #ifdef STELA_LINUX_STRING_HELPERS_TEST
+#include <linux/string_helpers.h>
 #include <stela/test.h>
 
 /* The expected set is transcribed from pinned lib/ctype.c, not derived
@@ -105,9 +106,30 @@ static void leading_whitespace(void)
 	assert(skip(utf8_nbsp) == utf8_nbsp);
 }
 
+static void unescape_strings(void)
+{
+	char mount[] = "a\\040b\\011c\\134d\\q\\";
+	const char decoded[] = "a b\tc\\d\\q\\";
+	assert(string_unescape(mount, mount, 0, UNESCAPE_OCTAL) == (int)sizeof(decoded) - 1);
+	assert(!memcmp(mount, decoded, sizeof(decoded)));
+
+	char mixed[] = "\\n\\x41\\377\\a";
+	assert(string_unescape(mixed, mixed, 0, UNESCAPE_ANY) == 4);
+	assert(!memcmp(mixed, "\nA\377\a", 5));
+
+	char bounded[] = {0, 0, 0, '!'};
+	assert(string_unescape(mount, bounded, 3, UNESCAPE_OCTAL) == 2);
+	assert(!memcmp(bounded, "a \0!", sizeof(bounded)));
+
+	char malformed[] = "\\xQ\\8";
+	assert(string_unescape(malformed, malformed, 0, UNESCAPE_ANY) == 5);
+	assert(!strcmp(malformed, "\\xQ\\8"));
+}
+
 int main(void)
 {
 	leading_whitespace();
+	unescape_strings();
 	/* Exercise lib/string.c's implementations, not compiler-folded libc
 	 * calls. */
 	int (*volatile compare)(const char *, const char *, size_t) = strncmp;

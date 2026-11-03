@@ -20,6 +20,8 @@
 /lib/ctype.c
 /lib/string.c
 /lib/hexdump.c
+/lib/string_helpers.c
+/lib/string_unescape.c
 /lib/ratelimit.c
 /drivers/i2c/algos/i2c-algo-bit.c
 /lib/bitrev.c

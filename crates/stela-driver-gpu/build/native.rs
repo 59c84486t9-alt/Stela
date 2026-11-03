@@ -281,6 +281,7 @@ impl Linux {
         let upstream = vec![
             PathBuf::from(format!("{LINUX}/lib/string.c")),
             PathBuf::from(format!("{LINUX}/lib/hexdump.c")),
+            PathBuf::from(format!("{LINUX}/lib/string_unescape.c")),
             PathBuf::from(format!("{LINUX}/lib/ratelimit.c")),
             PathBuf::from(format!("{LINUX}/drivers/i2c/algos/i2c-algo-bit.c")),
             PathBuf::from(format!("{LINUX}/lib/scatterlist.c")),
