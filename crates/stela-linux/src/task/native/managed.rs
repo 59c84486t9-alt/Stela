@@ -123,32 +123,44 @@ pub(super) struct Queue {
     delivery: Arc<Delivery>,
 }
 struct Reader<'a> {
-    slot: &'a ManagedSlot,
+    slot: Option<&'a ManagedSlot>,
     pointer: *mut Node,
 }
 impl Drop for Reader<'_> {
     fn drop(&mut self) {
-        if self.slot.readers.fetch_sub(1, Ordering::Release) == 0 {
+        let Some(slot) = self.slot else {
+            return;
+        };
+        let before = slot.readers.fetch_sub(1, Ordering::SeqCst);
+        if before == 0 {
             fatal();
         }
-        if !self.pointer.is_null() && self.slot.closing.load(Ordering::Acquire) {
-            self.slot.close_pending.store(true, Ordering::Release);
-            self.slot.delivery.record();
+        // Even a reader that found a null pointer can delay the join.
+        if before == 1 && slot.closing.load(Ordering::SeqCst) {
+            slot.close_pending.store(true, Ordering::Release);
+            slot.delivery.record();
         }
     }
 }
 impl ManagedSlot {
     fn read(&self) -> Reader<'_> {
+        if self.closing.load(Ordering::SeqCst) {
+            return Reader {
+                slot: None,
+                pointer: ptr::null_mut(),
+            };
+        }
         if self
             .readers
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1))
+            .try_update(Ordering::SeqCst, Ordering::Relaxed, |v| v.checked_add(1))
             .is_err()
         {
             fatal();
         }
         Reader {
-            slot: self,
-            pointer: self.pointer.load(Ordering::Acquire),
+            slot: Some(self),
+            // A reader of the old pointer must be visible to the close join.
+            pointer: self.pointer.load(Ordering::SeqCst),
         }
     }
 }
@@ -329,8 +341,8 @@ impl Queue {
         0
     }
     fn retire(&self, slot: &ManagedSlot, value: &Arc<Node>) {
-        slot.closing.store(true, Ordering::Release);
-        let pointer = slot.pointer.swap(ptr::null_mut(), Ordering::AcqRel);
+        slot.closing.store(true, Ordering::SeqCst);
+        let pointer = slot.pointer.swap(ptr::null_mut(), Ordering::SeqCst);
         if pointer != Arc::as_ptr(value) as *mut Node {
             fatal();
         }
@@ -340,7 +352,7 @@ impl Queue {
         }
     }
     unsafe fn close_slot(&self, slot: &ManagedSlot) -> i32 {
-        if slot.readers.load(Ordering::Acquire) != 0 {
+        if slot.readers.load(Ordering::SeqCst) != 0 {
             return 0;
         }
         let Some(actual) =

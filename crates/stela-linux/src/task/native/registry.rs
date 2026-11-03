@@ -1,37 +1,47 @@
 use super::*;
 pub(super) struct Read<'a, K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
 {
-    slot: &'a Slot<K, P, N>,
+    slot: Option<&'a Slot<K, P, N>>,
     pub(super) pointer: *mut Request<K, P, N>,
 }
 impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> Drop
     for Read<'_, K, P, N>
 {
     fn drop(&mut self) {
-        let before = self.slot.readers.fetch_sub(1, Ordering::Release);
+        let Some(slot) = self.slot else {
+            return;
+        };
+        let before = slot.readers.fetch_sub(1, Ordering::SeqCst);
         if before == 0 {
             fatal();
         }
-        if !self.pointer.is_null() && self.slot.phase.load(Ordering::Acquire) == RETIRING {
-            self.slot.finalize_pending.store(true, Ordering::Release);
-            self.slot.delivery.record();
+        // Even a reader that found a null pointer can delay the join.
+        if before == 1 && slot.phase.load(Ordering::SeqCst) == RETIRING {
+            slot.finalize_pending.store(true, Ordering::Release);
+            slot.delivery.record();
         }
     }
 }
 impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> Slot<K, P, N> {
     pub(super) fn read(&self) -> Read<'_, K, P, N> {
+        if self.phase.load(Ordering::SeqCst) == RETIRING {
+            return Read {
+                slot: None,
+                pointer: ptr::null_mut(),
+            };
+        }
         if self
             .readers
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1))
+            .try_update(Ordering::SeqCst, Ordering::Relaxed, |v| v.checked_add(1))
             .is_err()
         {
             fatal();
         }
-        // Pin BEFORE pointer load. Unpublish then join excludes load-before-pin
-        // UAF. Callback only decrements an integer; it never drops an owner.
+        // Order the reader pin and pointer load with unpublish and its join.
+        // A reader that observes the old pointer must be counted by the join.
         Read {
-            slot: self,
-            pointer: self.request.load(Ordering::Acquire),
+            slot: Some(self),
+            pointer: self.request.load(Ordering::SeqCst),
         }
     }
 }
@@ -285,12 +295,12 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
         if slot.request.load(Ordering::Acquire) != pointer
             || slot
                 .phase
-                .compare_exchange(LIVE, RETIRING, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange(LIVE, RETIRING, Ordering::SeqCst, Ordering::Acquire)
                 .is_err()
         {
             return Err(self);
         }
-        if slot.request.swap(ptr::null_mut(), Ordering::AcqRel) != pointer {
+        if slot.request.swap(ptr::null_mut(), Ordering::SeqCst) != pointer {
             fatal();
         }
         // SAFETY: the swap transfers the slot's Arc. The retiring handle
@@ -313,7 +323,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
     /// Independent slot readers must have returned. Unique Arc is an additional
     /// negative check, never the source/native callback-completion producer.
     pub(crate) unsafe fn finish(self) -> Result<FinalMetadata<K, N>, Self> {
-        if self.slot.readers.load(Ordering::Acquire) != 0 {
+        if self.slot.readers.load(Ordering::SeqCst) != 0 {
             return Err(self);
         }
         let mut this = ManuallyDrop::new(self);
