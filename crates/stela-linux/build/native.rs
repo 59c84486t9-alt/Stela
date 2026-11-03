@@ -134,6 +134,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/mm/vmstat_init.c")),
             PathBuf::from(format!("{LINUX}/mm/pagecache_init.c")),
             PathBuf::from(format!("{LINUX}/mm/folio_wait.c")),
+            PathBuf::from(format!("{LINUX}/mm/folio_fs.c")),
             PathBuf::from(format!("{LINUX}/mm/filemap_batch.c")),
             PathBuf::from(format!("{LINUX}/mm/lruvec.c")),
             PathBuf::from(format!("{LINUX}/mm/shrinker.c")),

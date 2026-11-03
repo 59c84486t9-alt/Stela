@@ -139,6 +139,7 @@
 /mm/internal.h
 /mm/pagecache_init.c
 /mm/folio_wait.c
+/mm/folio_fs.c
 /mm/pagecache_wait.h
 /mm/page-writeback.c
 /mm/writeback_folio.c

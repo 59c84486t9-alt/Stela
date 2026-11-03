@@ -1,0 +1,176 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 00:58:07 -0500
+Subject: [PATCH] refactor(mm): separate filesystem folio metadata operations
+
+---
+ mm/Makefile   |  2 +-
+ mm/filemap.c  | 33 --------------------------
+ mm/folio_fs.c | 65 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ mm/truncate.c | 24 -------------------
+ 4 files changed, 66 insertions(+), 58 deletions(-)
+ create mode 100644 mm/folio_fs.c
+
+diff --git a/mm/Makefile b/mm/Makefile
+index e37b07be86ea215357bd8aebee74648484cf621f..f6dbc664ef999789565dc1a4fad13b112f2d28cc 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -48,7 +48,7 @@ ifdef CONFIG_64BIT
+ mmu-$(CONFIG_MMU)	+= mseal.o
+ endif
+ 
+-obj-y			:= filemap.o pagecache_init.o folio_wait.o mempool.o oom_kill.o oom_adj.o fadvise.o \
++obj-y			:= filemap.o pagecache_init.o folio_wait.o folio_fs.o mempool.o oom_kill.o oom_adj.o fadvise.o \
+ 			   maccess.o page-writeback.o writeback_folio.o writeback_domain.o folio-compat.o \
+ 			   readahead.o swap.o filemap_batch.o truncate.o vmscan.o shrinker.o \
+ 			   shmem.o util.o mmzone.o lruvec.o vmstat.o vmstat_init.o backing-dev.o backing-dev-inode.o \
+diff --git a/mm/filemap.c b/mm/filemap.c
+index 3852489ec7553ce8d18c72d4570b5b9c9d83181c..2003c95bd296eb4eb06d458fd1b3fb87a4270b38 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -3766,39 +3766,6 @@ ssize_t generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
+ }
+ EXPORT_SYMBOL(generic_file_write_iter);
+ 
+-/**
+- * filemap_release_folio() - Release fs-specific metadata on a folio.
+- * @folio: The folio which the kernel is trying to free.
+- * @gfp: Memory allocation flags (and I/O mode).
+- *
+- * The address_space is trying to release any data attached to a folio
+- * (presumably at folio->private).
+- *
+- * This will also be called if the private_2 flag is set on a page,
+- * indicating that the folio has other metadata associated with it.
+- *
+- * The @gfp argument specifies whether I/O may be performed to release
+- * this page (__GFP_IO), and whether the call may block
+- * (__GFP_RECLAIM & __GFP_FS).
+- *
+- * Return: %true if the release was successful, otherwise %false.
+- */
+-bool filemap_release_folio(struct folio *folio, gfp_t gfp)
+-{
+-	struct address_space * const mapping = folio->mapping;
+-
+-	BUG_ON(!folio_test_locked(folio));
+-	if (!folio_needs_release(folio))
+-		return true;
+-	if (folio_test_writeback(folio))
+-		return false;
+-
+-	if (mapping && mapping->a_ops->release_folio)
+-		return mapping->a_ops->release_folio(folio, gfp);
+-	return try_to_free_buffers(folio);
+-}
+-EXPORT_SYMBOL(filemap_release_folio);
+-
+ /**
+  * filemap_invalidate_inode - Invalidate/forcibly write back a range of an inode's pagecache
+  * @inode: The inode to flush
+diff --git a/mm/folio_fs.c b/mm/folio_fs.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..cf4efc21b5b78008c23a60b5455a60b4dffe5825
+--- /dev/null
++++ b/mm/folio_fs.c
+@@ -0,0 +1,65 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Filesystem folio operations from mm/filemap.c and mm/truncate.c.
++ * Copyright (C) 1994-1999 Linus Torvalds
++ */
++#include <linux/buffer_head.h>
++#include <linux/export.h>
++#include <linux/pagemap.h>
++#include "internal.h"
++
++/**
++ * filemap_release_folio() - Release fs-specific metadata on a folio.
++ * @folio: The folio which the kernel is trying to free.
++ * @gfp: Memory allocation flags (and I/O mode).
++ *
++ * The address_space is trying to release any data attached to a folio
++ * (presumably at folio->private).
++ *
++ * This will also be called if the private_2 flag is set on a page,
++ * indicating that the folio has other metadata associated with it.
++ *
++ * The @gfp argument specifies whether I/O may be performed to release
++ * this page (__GFP_IO), and whether the call may block
++ * (__GFP_RECLAIM & __GFP_FS).
++ *
++ * Return: %true if the release was successful, otherwise %false.
++ */
++bool filemap_release_folio(struct folio *folio, gfp_t gfp)
++{
++	struct address_space * const mapping = folio->mapping;
++
++	BUG_ON(!folio_test_locked(folio));
++	if (!folio_needs_release(folio))
++		return true;
++	if (folio_test_writeback(folio))
++		return false;
++
++	if (mapping && mapping->a_ops->release_folio)
++		return mapping->a_ops->release_folio(folio, gfp);
++	return try_to_free_buffers(folio);
++}
++EXPORT_SYMBOL(filemap_release_folio);
++
++/**
++ * folio_invalidate - Invalidate part or all of a folio.
++ * @folio: The folio which is affected.
++ * @offset: start of the range to invalidate
++ * @length: length of the range to invalidate
++ *
++ * folio_invalidate() is called when all or part of the folio has become
++ * invalidated by a truncate operation.
++ *
++ * folio_invalidate() does not have to release all buffers, but it must
++ * ensure that no dirty buffer is left outside @offset and that no I/O
++ * is underway against any of the blocks which are outside the truncation
++ * point.  Because the caller is about to free (and possibly reuse) those
++ * blocks on-disk.
++ */
++void folio_invalidate(struct folio *folio, size_t offset, size_t length)
++{
++	const struct address_space_operations *aops = folio->mapping->a_ops;
++
++	if (aops->invalidate_folio)
++		aops->invalidate_folio(folio, offset, length);
++}
++EXPORT_SYMBOL_GPL(folio_invalidate);
+diff --git a/mm/truncate.c b/mm/truncate.c
+index 85580d8d2f2584af71f1a3737dd66e7d5a1a8b4e..26427470f5bdfbe587a9d1537031f62a9c4044e0 100644
+--- a/mm/truncate.c
++++ b/mm/truncate.c
+@@ -24,30 +24,6 @@
+ #include "internal.h"
+ #include "filemap_batch.h"
+ 
+-/**
+- * folio_invalidate - Invalidate part or all of a folio.
+- * @folio: The folio which is affected.
+- * @offset: start of the range to invalidate
+- * @length: length of the range to invalidate
+- *
+- * folio_invalidate() is called when all or part of the folio has become
+- * invalidated by a truncate operation.
+- *
+- * folio_invalidate() does not have to release all buffers, but it must
+- * ensure that no dirty buffer is left outside @offset and that no I/O
+- * is underway against any of the blocks which are outside the truncation
+- * point.  Because the caller is about to free (and possibly reuse) those
+- * blocks on-disk.
+- */
+-void folio_invalidate(struct folio *folio, size_t offset, size_t length)
+-{
+-	const struct address_space_operations *aops = folio->mapping->a_ops;
+-
+-	if (aops->invalidate_folio)
+-		aops->invalidate_folio(folio, offset, length);
+-}
+-EXPORT_SYMBOL_GPL(folio_invalidate);
+-
+ /*
+  * If truncate cannot remove the fs-private metadata from the page, the page
+  * becomes orphaned.  It will be left on the LRU and may even be mapped into
