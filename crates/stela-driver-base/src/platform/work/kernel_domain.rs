@@ -137,7 +137,7 @@ impl<const N: usize> Segment<'_, NativeDomain, N> {
 }
 
 #[cfg(all(feature = "test-support", target_os = "linux", target_arch = "x86_64"))]
-pub use hosted::{HostedExecutor, HostedRuntime};
+pub use hosted::{HostedExecutor, HostedRuntime, HostedServiceCallback};
 
 #[cfg(all(feature = "test-support", target_os = "linux", target_arch = "x86_64"))]
 mod hosted_domain;

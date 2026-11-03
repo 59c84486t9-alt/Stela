@@ -1,9 +1,9 @@
 //! Linux userspace continuations with distinct guarded mmap stacks.
-use super::{HostedPages, HostedQueue, WorkError, std};
+use super::{HostedDeadlines, HostedPages, HostedQueue, WorkError, std};
 use crate::platform::work::{
-    Continuation, Lane, LeaveReason, NONE, TaskState, context, stack_requirement::Geometry,
+    Continuation, Lane, Layout, LeaveReason, NONE, TaskState, context, stack_requirement::Geometry,
 };
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     cell::{Cell, UnsafeCell},
     ffi::c_void,
@@ -14,6 +14,10 @@ use core::{
     ptr,
     sync::atomic::Ordering,
 };
+
+mod service;
+pub use service::HostedServiceCallback;
+use service::Service;
 
 struct Stack {
     _pages: HostedPages,
@@ -28,7 +32,9 @@ pub struct HostedExecutor<const N: usize> {
 }
 pub struct HostedRuntime<const N: usize> {
     queue: Arc<HostedQueue<N>>,
-    tasks: UnsafeCell<[Task; 2]>,
+    tasks: UnsafeCell<Vec<Task>>,
+    count: usize,
+    service: Option<Service>,
     dispatcher: UnsafeCell<context::Frame>,
     current: Cell<usize>,
     dispatch_epoch: Cell<u64>,
@@ -46,7 +52,45 @@ impl<const N: usize> HostedExecutor<N> {
     /// jump across the switch boundary. The original thread must keep shadow
     /// stacks disabled while this executor can run, including in callbacks.
     pub unsafe fn new(queue: Arc<HostedQueue<N>>, stack_pages: usize) -> Result<Self, WorkError> {
+        Self::build(queue, stack_pages, None)
+    }
+
+    /// Add one guarded service stack and reserve one queue slot for its work.
+    ///
+    /// # Safety
+    /// The requirements of `new` apply to all callbacks. Keep the service
+    /// callback, context and reachable storage/code alive through actual
+    /// retirement or retained abandonment. The callback must deliver its
+    /// captured reasons and return the actual remaining timer deadline.
+    pub unsafe fn new_with_service(
+        queue: Arc<HostedQueue<N>>,
+        stack_pages: usize,
+        deadlines: HostedDeadlines,
+        callback: HostedServiceCallback,
+        context: *mut c_void,
+    ) -> Result<Self, WorkError> {
+        Self::build(
+            queue,
+            stack_pages,
+            Some(Service::new(deadlines, callback, context)),
+        )
+    }
+
+    fn build(
+        queue: Arc<HostedQueue<N>>,
+        stack_pages: usize,
+        service: Option<Service>,
+    ) -> Result<Self, WorkError> {
         queue.execution.check_current()?;
+        let (layout, count) = if let Some(service) = &service {
+            if !service.same_execution(&queue.execution) {
+                return Err(WorkError::InvalidTicket);
+            }
+            (Layout::HostedService, 3)
+        } else {
+            (Layout::Ordinary, 2)
+        };
+        layout.validate(count, N)?;
         if stack_pages < 4 {
             return Err(WorkError::InvalidStack);
         }
@@ -94,10 +138,20 @@ impl<const N: usize> HostedExecutor<N> {
                 (),
             )
         };
-        let tasks = [task(Lane::General)?, task(Lane::Notify)?];
+        let mut tasks = Vec::new();
+        tasks
+            .try_reserve_exact(count)
+            .map_err(|_| WorkError::Full)?;
+        tasks.push(task(Lane::General)?);
+        tasks.push(task(Lane::Notify)?);
+        if service.is_some() {
+            tasks.push(task(Lane::Service)?);
+        }
         let runtime = Box::pin(HostedRuntime {
             queue,
             tasks: UnsafeCell::new(tasks),
+            count,
+            service,
             dispatcher: UnsafeCell::new(context::Frame::new(controls)),
             current: Cell::new(NONE),
             dispatch_epoch: Cell::new(0),
@@ -108,19 +162,25 @@ impl<const N: usize> HostedExecutor<N> {
         });
         {
             let mut guard = runtime.queue.lock()?;
-            if guard.state().closed {
+            let state = guard.state();
+            if state.closed {
                 return Err(WorkError::Closed);
+            }
+            if layout == Layout::HostedService && state.jobs[N - 1].is_some() {
+                return Err(WorkError::Busy);
             }
             runtime
                 .queue
                 .attached
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .map_err(|_| WorkError::Busy)?;
+            state.layout = layout;
         }
         let address = ptr::from_ref(runtime.as_ref().get_ref()).addr();
-        // SAFETY: the pinned runtime and its exclusive stacks have no live
-        // frames yet. No producer can execute these tasks during construction.
-        for (index, task) in unsafe { &mut *runtime.tasks.get() }.iter_mut().enumerate() {
+        for index in 0..runtime.count {
+            // SAFETY: this pinned runtime has no live frames yet and its
+            // producer cannot execute tasks during construction.
+            let task = unsafe { &mut *runtime.task(index) };
             // SAFETY: mmap provides aligned, exclusive writable stack tops.
             unsafe {
                 task.frame
@@ -148,7 +208,9 @@ impl<const N: usize> Drop for HostedExecutor<N> {
 
 impl<const N: usize> HostedRuntime<N> {
     fn task(&self, index: usize) -> *mut Task {
-        self.tasks.get().cast::<Task>().wrapping_add(index)
+        // SAFETY: internal indices always name one initialized task in the
+        // immutable, retained allocation.
+        unsafe { (&mut *self.tasks.get()).as_mut_ptr().add(index) }
     }
 
     pub(in crate::platform::work::kernel_domain) fn check(&self) -> Result<(), WorkError> {
@@ -214,8 +276,9 @@ impl<const N: usize> HostedRuntime<N> {
             .get()
             .checked_add(1)
             .ok_or(WorkError::Exhausted)?;
-        for offset in 0..2 {
-            let index = (self.cursor.get() + offset) % 2;
+        self.schedule_service()?;
+        for offset in 0..self.count {
+            let index = (self.cursor.get() + offset) % self.count;
             let now = self.queue.execution.now_ns()?;
             {
                 // SAFETY: dispatcher on the original thread, no task is running.
@@ -226,7 +289,11 @@ impl<const N: usize> HostedRuntime<N> {
                     let Some(job) = state.select_job(task.lane, task.stack.geometry, false)? else {
                         continue;
                     };
-                    require(state.scheduling.insert(task.id, job.1.sequence, false));
+                    require(state.scheduling.insert(
+                        task.id,
+                        job.1.sequence,
+                        task.lane == Lane::Service,
+                    ));
                     task.assign(job, ());
                 }
                 let sequence = task.job.unwrap_or_else(|| std::process::abort()).1.sequence;
@@ -235,7 +302,7 @@ impl<const N: usize> HostedRuntime<N> {
             }
             self.dispatch_epoch.set(epoch);
             self.current.set(index);
-            self.cursor.set((index + 1) % 2);
+            self.cursor.set((index + 1) % self.count);
             // SAFETY: both frames are pinned and owned by this thread. All
             // task/state borrows and queue guards ended before the switch.
             unsafe {
@@ -299,7 +366,13 @@ impl<const N: usize> HostedRuntime<N> {
         }
         let mut guard = self.queue.lock()?;
         let state = guard.state();
-        if !state.closed || state.jobs.iter().any(Option::is_some) {
+        if !state.closed
+            || state.jobs.iter().any(Option::is_some)
+            || self
+                .service
+                .as_ref()
+                .is_some_and(|service| !service.retired.get())
+        {
             return Err(WorkError::Busy);
         }
         self.retired.set(true);

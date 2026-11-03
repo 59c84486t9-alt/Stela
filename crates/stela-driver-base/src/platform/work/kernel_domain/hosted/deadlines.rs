@@ -47,6 +47,16 @@ impl HostedDeadlines {
         })
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub(super) fn execution(&self) -> &Arc<HostedExecution> {
+        self.reason.idle().clock().execution()
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub(super) fn running(&self) -> bool {
+        self.core.running()
+    }
+
     fn process(&self) -> Result<(), WorkError> {
         self.reason.idle().clock().execution().check_current()?;
         if self.core.retired() {
