@@ -44,6 +44,14 @@ void kvfree(const void *pointer)
   kfree(pointer);
 }
 
+void kvfree_atomic(const void *pointer)
+{
+ if (is_vmalloc_addr(pointer))
+  vfree_atomic(pointer);
+ else
+  kfree(pointer);
+}
+
 void kvfree_rcu_cb(struct rcu_head *head)
 {
  struct stela_linux_allocation allocation;

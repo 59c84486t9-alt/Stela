@@ -3,11 +3,13 @@
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 mm/vmalloc.c. Linux code under
  * Stela owns no address space, so the owner maps the pages (map_pages); this
  * keeps which pages back each mapping, for vmalloc_to_page and vfree. */
+#include <linux/llist.h>
 #include <linux/mm.h>
 #include <linux/overflow.h>
 #include <linux/rbtree.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <linux/workqueue.h>
 #include <stela/linux.h>
 
 struct area {
@@ -60,7 +62,10 @@ static void *map_area(struct area *area)
 	kfree(physical);
 	if (address) {
 		area->address = address;
+		unsigned long flags;
+		local_irq_save(flags);
 		rb_add(&area->node, &areas, area_less);
+		local_irq_restore(flags);
 	}
 	return address;
 }
@@ -137,11 +142,16 @@ static void unmap(const void *address, bool owns_pages)
 {
 	if (!address)
 		return;
-	struct area *area = area_of(address);
-	if (WARN_ON(!area || area->address != address || area->owns_pages != owns_pages))
-		return;
 	const struct stela_linux_owner *owner = stela_linux_owner();
+	unsigned long flags;
+	local_irq_save(flags);
+	struct area *area = area_of(address);
+	if (WARN_ON(!area || area->address != address || area->owns_pages != owns_pages)) {
+		local_irq_restore(flags);
+		return;
+	}
 	rb_erase(&area->node, &areas);
+	local_irq_restore(flags);
 	owner->services->unmap_pages(owner->context, (void *)address, area->count);
 	if (owns_pages)
 		free_pages_of(area, area->count);
@@ -151,6 +161,25 @@ static void unmap(const void *address, bool owns_pages)
 void vfree(const void *address)
 {
 	unmap(address, true);
+}
+
+static LLIST_HEAD(vfree_pending);
+
+static void vfree_work(struct work_struct *work)
+{
+	(void)work;
+	struct llist_node *node, *next;
+	llist_for_each_safe(node, next, llist_del_all(&vfree_pending))
+		vfree(node);
+}
+
+static DECLARE_WORK(vfree_worker, vfree_work);
+
+void vfree_atomic(const void *address)
+{
+	/* As in Linux, the relinquished mapping supplies the queue node. */
+	if (address && llist_add((struct llist_node *)address, &vfree_pending))
+		schedule_work(&vfree_worker);
 }
 
 void vunmap(const void *address)

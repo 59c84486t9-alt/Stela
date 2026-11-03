@@ -162,6 +162,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/radix-tree.c")),
             PathBuf::from(format!("{LINUX}/lib/xarray.c")),
             PathBuf::from(format!("{LINUX}/lib/rbtree.c")),
+            PathBuf::from(format!("{LINUX}/lib/rhashtable.c")),
             PathBuf::from(format!("{LINUX}/lib/timerqueue.c")),
             PathBuf::from(format!("{LINUX}/lib/kobject.c")),
             PathBuf::from(format!("{LINUX}/lib/kobject_uevent.c")),
