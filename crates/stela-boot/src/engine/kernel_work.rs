@@ -93,6 +93,16 @@ pub(super) struct ReadOnlyImage {
     _reservation: Arc<Reservation>,
     ranges: Vec<Range<usize>>,
 }
+impl ReadOnlyImage {
+    /// Authorize one complete read within a retained immutable data section.
+    pub(super) fn contains_range(&self, address: usize, bytes: usize) -> bool {
+        address.checked_add(bytes).is_some_and(|end| {
+            self.ranges
+                .iter()
+                .any(|range| range.contains(&address) && end <= range.end)
+        })
+    }
+}
 // SAFETY: only KernelWork::image constructs this value under the same actual
 // kept original root. The relocated allocation and every native mapping remain
 // owned by Reservation; readonly_ranges admits only original immutable DATA,
@@ -100,7 +110,7 @@ pub(super) struct ReadOnlyImage {
 // contains only checks stored bounds and never dereferences a caller pointer.
 unsafe impl stela_drivers::platform::image::NativeReadOnlyImage for ReadOnlyImage {
     fn contains(&self, address: usize) -> bool {
-        self.ranges.iter().any(|range| range.contains(&address))
+        self.contains_range(address, 1)
     }
 }
 struct Backing {

@@ -351,6 +351,7 @@ struct Host {
     tsc_hz: u64,
     window: &'static Window,
     firmware: Option<Arc<Catalog>>,
+    image: Arc<kernel_work::ReadOnlyImage>,
     random: RefCell<Seeded>,
     environment: Cell<*const Environment>,
     /// The memory BARs Stela claimed, which are all Linux may map.
@@ -665,19 +666,20 @@ impl Platform for Host {
             return Err(EFAULT);
         }
         let heap = native_memory::SOURCE.registration();
-        let in_heap = from
-            .addr()
-            .checked_sub(heap.cpu)
-            .is_some_and(|offset| offset <= heap.bytes && size <= heap.bytes - offset);
-        if heap.generation == 0 || !in_heap {
+        let in_heap = heap.generation != 0
+            && from
+                .addr()
+                .checked_sub(heap.cpu)
+                .is_some_and(|offset| offset <= heap.bytes && size <= heap.bytes - offset);
+        if !in_heap && !self.image.contains_range(from.addr(), size) {
             return Err(ERANGE);
         }
         if from.addr().abs_diff(to.addr()) < size {
             return Err(EINVAL);
         }
-        // SAFETY: the retained heap registration authorizes the source as
-        // host WB memory. The engine's host IDT is active on this CPU, and
-        // the C caller owns the disjoint writable destination.
+        // SAFETY: the retained heap or immutable image owns the full source
+        // range. The engine host IDT is active on this CPU, and the C caller
+        // owns the disjoint writable destination.
         if unsafe { stela_boot_core::nofault_read::read(to, from, size) } == 0 {
             Ok(())
         } else {
@@ -1036,6 +1038,7 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         tsc_hz,
         window,
         firmware,
+        image: image.clone(),
         random: RefCell::new(random),
         environment: Cell::new(ptr::null()),
         bars,
