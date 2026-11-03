@@ -33,6 +33,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> M
         if !self.broker.delivery.pending.swap(false, Ordering::AcqRel) {
             return Ok(false);
         }
+        // SAFETY: the caller supplies the retained owner in authenticated source process context.
         let value = unsafe { stela_linux_task_source_broker_wake(self.broker.kernel.raw()) };
         if value != 0 {
             self.broker.delivery.pending.store(true, Ordering::Release);
@@ -48,6 +49,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> M
     /// Actual taskless native dispatcher AFTER physical return, outside every
     /// constructor stack and source callback/borrow. No C process body here.
     pub(crate) unsafe fn dispatcher_step(&self) -> Result<bool, Error> {
+        // SAFETY: the caller has joined physical return and is in the taskless dispatcher.
         unsafe { self.broker.dispatcher_step() }
     }
 }
@@ -62,6 +64,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
             }
             let read = slot.read();
             if !read.pointer.is_null()
+                // SAFETY: the read guard pins the non-null request for this event check.
                 && unsafe { &*read.pointer }.events.load(Ordering::Acquire) != 0
             {
                 return true;
@@ -76,43 +79,49 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
             if !slot.finalize_pending.swap(false, Ordering::AcqRel) {
                 continue;
             }
+            // SAFETY: PID1 exclusively owns these affine retirement slots.
             return unsafe { self.finish_slot(slot) };
         }
         let event = match self.next_event() {
             Ok(Some(event)) => event,
             // Actual PID1 now consumes one managed source constructor request
             // after native/source retirement work; no native loan spans C.
+            // SAFETY: PID1 is in source process context without a native segment loan.
             Ok(None) => return unsafe { self.managed.process_one() },
             Err(_) => return -5,
         };
         let Event { kind, request } = event;
+        // SAFETY: the event handle pins the exact request throughout the PID1 source operation.
         let result = unsafe { request.process_event(kind) };
         match result {
             Ok(Progress::Keep) => {
+                // SAFETY: the registry or retiring slot still owns the request.
                 unsafe { request.put() };
                 1
             }
             Ok(Progress::Finalize) => {
                 let slot = request.request.slot;
+                // SAFETY: Finalize certifies joined native return and source producer tails.
                 match unsafe { request.unpublish() } {
                     Ok(retiring) => {
                         // Actual source/native joins precede unpublish. Store
                         // the affine retiring control BEFORE any reader check.
+                        // SAFETY: PID1 is the only writer of the retiring slot.
                         unsafe {
-                            *slot
-                                .retiring
-                                .get()
-                                .cast::<Option<RetiringRequest<K, P, N>>>() = Some(retiring);
+                            **slot.retiring.get() = Some(retiring);
                         }
+                        // SAFETY: PID1 owns retirement and has installed the affine retiring control.
                         unsafe { self.finish_slot(slot) }
                     }
                     Err(request) => {
+                        // SAFETY: the registry or retiring slot still owns the request.
                         unsafe { request.put() };
                         -16
                     }
                 }
             }
             Err(error) => {
+                // SAFETY: the registry or retiring slot still owns the request.
                 unsafe { request.put() };
                 process_errno(error)
             }
@@ -121,26 +130,18 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
     unsafe fn finish_slot(&self, slot: &Slot<K, P, N>) -> i32 {
         // Single actual PID1 receiver. Callback/dispatcher only touch atomic
         // flags, never these affine source/native finalization controls.
-        if let Some(retiring) = unsafe {
-            (&mut *slot
-                .retiring
-                .get()
-                .cast::<Option<RetiringRequest<K, P, N>>>())
-                .take()
-        } {
+        // SAFETY: only PID1 accesses the retiring slot.
+        if let Some(retiring) = unsafe { &mut **slot.retiring.get() }.take() {
+            // SAFETY: the retiring handle follows the actual tail joins and checks independent readers.
             match unsafe { retiring.finish() } {
+                // SAFETY: PID1 exclusively installs the final metadata before releasing it.
                 Ok(metadata) => unsafe {
-                    *slot
-                        .final_metadata
-                        .get()
-                        .cast::<Option<FinalMetadata<K, N>>>() = Some(metadata);
+                    **slot.final_metadata.get() = Some(metadata);
                 },
                 Err(retiring) => {
+                    // SAFETY: PID1 restores the same affine control for the next event.
                     unsafe {
-                        *slot
-                            .retiring
-                            .get()
-                            .cast::<Option<RetiringRequest<K, P, N>>>() = Some(retiring);
+                        **slot.retiring.get() = Some(retiring);
                     }
                     // Expected retained wait, not a supervisor-fatal error.
                     // Only actual last-reader/observer release enqueues retry;
@@ -149,21 +150,15 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
                 }
             }
         }
-        if let Some(metadata) = unsafe {
-            (&mut *slot
-                .final_metadata
-                .get()
-                .cast::<Option<FinalMetadata<K, N>>>())
-                .take()
-        } {
+        // SAFETY: only PID1 takes final metadata, and the borrow ends before release.
+        if let Some(metadata) = unsafe { &mut **slot.final_metadata.get() }.take() {
+            // SAFETY: PID1 has joined the original producer tails and holds no native loan.
             match unsafe { metadata.release() } {
                 Ok(()) => 1,
                 Err(metadata) => {
+                    // SAFETY: PID1 restores the exact metadata that release returned.
                     unsafe {
-                        *slot
-                            .final_metadata
-                            .get()
-                            .cast::<Option<FinalMetadata<K, N>>>() = Some(metadata);
+                        **slot.final_metadata.get() = Some(metadata);
                     }
                     // Unexpected external binding retention has no fabricated
                     // progress event. Retain+report; lifecycle owner must join
@@ -184,13 +179,16 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
             if read.pointer.is_null() {
                 fatal();
             }
+            // SAFETY: the read guard pins the registry Arc while acquiring another reference.
             unsafe { Arc::increment_strong_count(read.pointer) };
+            // SAFETY: this takes the additional strong reference acquired above.
             let arc = unsafe { Arc::from_raw(read.pointer) };
             drop(read);
             let handle = RequestHandle {
                 request: ManuallyDrop::new(arc),
                 _affine: PhantomData,
             };
+            // SAFETY: the taskless dispatcher runs after the actual physical return and holds the exact handle.
             let result = unsafe { handle.release_native() };
             match result {
                 Ok(()) => {
@@ -199,6 +197,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
                         .service_stage
                         .store(DISPATCH_DONE, Ordering::Release);
                     handle.request.notify(NATIVE_RELEASED);
+                    // SAFETY: the registry retains the request after the dispatcher notification.
                     unsafe { handle.put() };
                     return Ok(true);
                 }
@@ -208,6 +207,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
                         .service_stage
                         .store(BLOCKED, Ordering::Release);
                     handle.request.notify(FAILED);
+                    // SAFETY: the registry retains the request after the dispatcher notification.
                     unsafe { handle.put() };
                     return Err(error);
                 }
@@ -230,6 +230,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
         // The short guard ends BEFORE any original process/RCU operation.
         let owned_kind = {
             let _mutation = request.mutation()?;
+            // SAFETY: the mutation guard excludes other accesses to owned state.
             match unsafe { &*request.state.get().cast::<Owned<K, P, N>>() } {
                 Owned::NoPublication(_) => 1,
                 Owned::Retired(_) => 2,
@@ -250,6 +251,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
                 }
                 // Do not retry a partially executed original source destructor.
                 request.service_stage.store(BLOCKED, Ordering::Release);
+                // SAFETY: the exact native ticket has physically returned before source ref disposal.
                 unsafe { self.reap_source() }?;
                 request
                     .service_stage
@@ -260,6 +262,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
                 // scheduler-ref reap. Stop actual native IRQ/read publication,
                 // put that real source reference with NO native/state/row loan,
                 // then consume the stopped token under a fresh bounded loan.
+                // SAFETY: PID1 stopped the scheduler reference and owns the source-data handoff.
                 if let Err(error) = unsafe { self.stop_source_data() } {
                     request.service_stage.store(BLOCKED, Ordering::Release);
                     return Err(error);
@@ -267,6 +270,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
                 request.service_stage.store(NEED_JOIN, Ordering::Release);
             }
             if request.service_stage.load(Ordering::Acquire) == NEED_JOIN {
+                // SAFETY: PID1 holds the request and has stopped native data publication.
                 match unsafe { self.join_source() } {
                     Ok(()) => {}
                     Err(Error::Source(-11)) => return Ok(Progress::Keep),
@@ -276,6 +280,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
                     }
                 }
                 // Original join may block; it returned before this fresh loan.
+                // SAFETY: the original source join returned before native descriptor retirement.
                 if let Err(error) = unsafe { self.retire_descriptors() } {
                     request.service_stage.store(BLOCKED, Ordering::Release);
                     return Err(error);
@@ -295,6 +300,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
         if !request.source_tail_seen.load(Ordering::Acquire) {
             return Ok(Progress::Keep);
         }
+        // SAFETY: the retained request supplies the exact source identity and generation.
         let value = unsafe {
             stela_linux_task_child_tails_joined(
                 request.record(),
