@@ -1,0 +1,180 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 00:37:16 -0500
+Subject: [PATCH] refactor(vfs): separate inode LRU admission and removal
+
+---
+ fs/inode.c       | 44 ++++----------------------------------------
+ fs/inode_evict.c | 41 +++++++++++++++++++++++++++++++++++++++++
+ fs/inode_lru.h   | 12 ++++++++++++
+ 3 files changed, 57 insertions(+), 40 deletions(-)
+ create mode 100644 fs/inode_lru.h
+
+diff --git a/fs/inode.c b/fs/inode.c
+index 88676e0af41b4635df2a1f7818f757e27666882c..f99e24ea9dab0c13f1b50a31fa614ddc0d9165b8 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -27,6 +27,7 @@
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/timestamp.h>
+ 
++#include "inode_lru.h"
+ #include "internal.h"
+ 
+ /*
+@@ -70,7 +71,6 @@ const struct address_space_operations empty_aops = {
+ EXPORT_SYMBOL(empty_aops);
+ 
+ static DEFINE_PER_CPU(unsigned long, nr_inodes);
+-static DEFINE_PER_CPU(unsigned long, nr_unused);
+ 
+ static struct kmem_cache *inode_cachep __ro_after_init;
+ 
+@@ -88,7 +88,7 @@ static inline long get_nr_inodes_unused(void)
+ 	int i;
+ 	long sum = 0;
+ 	for_each_possible_cpu(i)
+-		sum += per_cpu(nr_unused, i);
++		sum += per_cpu(nr_unused_inodes, i);
+ 	return sum < 0 ? 0 : sum;
+ }
+ 
+@@ -399,42 +399,6 @@ static void init_once(void *foo)
+ 	inode_init_once(inode);
+ }
+ 
+-static void __inode_lru_list_add(struct inode *inode, bool rotate)
+-{
+-	lockdep_assert_held(&inode->i_lock);
+-
+-	if (inode_state_read(inode) & (I_DIRTY_ALL | I_SYNC | I_FREEING | I_WILL_FREE))
+-		return;
+-	if (icount_read(inode))
+-		return;
+-	if (!(inode->i_sb->s_flags & SB_ACTIVE))
+-		return;
+-	if (!mapping_shrinkable(&inode->i_data))
+-		return;
+-
+-	if (list_lru_add_obj(&inode->i_sb->s_inode_lru, &inode->i_lru))
+-		this_cpu_inc(nr_unused);
+-	else if (rotate)
+-		inode_state_set(inode, I_REFERENCED);
+-}
+-
+-/*
+- * Add inode to LRU if needed (inode is unused and clean).
+- */
+-void inode_lru_list_add(struct inode *inode)
+-{
+-	__inode_lru_list_add(inode, false);
+-}
+-
+-static void inode_lru_list_del(struct inode *inode)
+-{
+-	if (list_empty(&inode->i_lru))
+-		return;
+-
+-	if (list_lru_del_obj(&inode->i_sb->s_inode_lru, &inode->i_lru))
+-		this_cpu_dec(nr_unused);
+-}
+-
+ static void inode_pin_lru_isolating(struct inode *inode)
+ {
+ 	lockdep_assert_held(&inode->i_lock);
+@@ -773,7 +737,7 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
+ 	    !mapping_shrinkable(&inode->i_data)) {
+ 		list_lru_isolate(lru, &inode->i_lru);
+ 		spin_unlock(&inode->i_lock);
+-		this_cpu_dec(nr_unused);
++		this_cpu_dec(nr_unused_inodes);
+ 		return LRU_REMOVED;
+ 	}
+ 
+@@ -810,7 +774,7 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
+ 	list_lru_isolate_move(lru, &inode->i_lru, freeable);
+ 	spin_unlock(&inode->i_lock);
+ 
+-	this_cpu_dec(nr_unused);
++	this_cpu_dec(nr_unused_inodes);
+ 	return LRU_REMOVED;
+ }
+ 
+diff --git a/fs/inode_evict.c b/fs/inode_evict.c
+index c55b2e4b4b5945a9a59537b6aceb4f8909736824..d9fda0826ee82adf0ab3c18491324218d93b870d 100644
+--- a/fs/inode_evict.c
++++ b/fs/inode_evict.c
+@@ -6,10 +6,13 @@
+ #include <linux/export.h>
+ #include <linux/fs.h>
+ #include <linux/fsverity.h>
++#include <linux/pagemap.h>
++#include <linux/percpu.h>
+ #include <linux/sched.h>
+ #include <linux/wait_bit.h>
+ #include <linux/writeback.h>
+ 
++#include "inode_lru.h"
+ #include "writeback_inode.h"
+ 
+ void clear_inode(struct inode *inode)
+@@ -250,3 +253,41 @@ void inode_io_list_del(struct inode *inode)
+ 	spin_unlock(&wb->list_lock);
+ }
+ EXPORT_SYMBOL(inode_io_list_del);
++
++DEFINE_PER_CPU(unsigned long, nr_unused_inodes);
++
++void __inode_lru_list_add(struct inode *inode, bool rotate)
++{
++	lockdep_assert_held(&inode->i_lock);
++
++	if (inode_state_read(inode) & (I_DIRTY_ALL | I_SYNC | I_FREEING | I_WILL_FREE))
++		return;
++	if (icount_read(inode))
++		return;
++	if (!(inode->i_sb->s_flags & SB_ACTIVE))
++		return;
++	if (!mapping_shrinkable(&inode->i_data))
++		return;
++
++	if (list_lru_add_obj(&inode->i_sb->s_inode_lru, &inode->i_lru))
++		this_cpu_inc(nr_unused_inodes);
++	else if (rotate)
++		inode_state_set(inode, I_REFERENCED);
++}
++
++/*
++ * Add inode to LRU if needed (inode is unused and clean).
++ */
++void inode_lru_list_add(struct inode *inode)
++{
++	__inode_lru_list_add(inode, false);
++}
++
++void inode_lru_list_del(struct inode *inode)
++{
++	if (list_empty(&inode->i_lru))
++		return;
++
++	if (list_lru_del_obj(&inode->i_sb->s_inode_lru, &inode->i_lru))
++		this_cpu_dec(nr_unused_inodes);
++}
+diff --git a/fs/inode_lru.h b/fs/inode_lru.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..401e60d42565b47af8b634ffb99b87a80866ad9e
+--- /dev/null
++++ b/fs/inode_lru.h
+@@ -0,0 +1,12 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _FS_INODE_LRU_H
++#define _FS_INODE_LRU_H
++
++#include <linux/percpu.h>
++
++struct inode;
++DECLARE_PER_CPU(unsigned long, nr_unused_inodes);
++void __inode_lru_list_add(struct inode *inode, bool rotate);
++void inode_lru_list_del(struct inode *inode);
++
++#endif
