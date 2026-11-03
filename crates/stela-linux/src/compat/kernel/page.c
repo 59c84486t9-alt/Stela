@@ -6,6 +6,7 @@
  * mapping, page-cache, reclaim or DMA-domain ownership is inferred here. */
 #include <linux/errno.h>
 #include <linux/build_bug.h>
+#include <linux/folio_batch.h>
 #include <linux/gfp.h>
 #include <linux/irqflags.h>
 #include <linux/limits.h>
@@ -1305,6 +1306,14 @@ void __folio_put(struct folio *folio)
 	else if (atomic_read(&page->_mapcount) != -1)
 		__builtin_trap();
 	retire_pages(first, (size_t)1 << order);
+}
+
+void free_unref_folios(struct folio_batch *batch)
+{
+	/* The native catalog owns each allocation and its deferred pin release. */
+	for (unsigned int i = 0; i < folio_batch_count(batch); i++)
+		__folio_put(batch->folios[i]);
+	folio_batch_reinit(batch);
 }
 
 static bool verify_extent(struct page *page, unsigned int order)
@@ -2617,6 +2626,20 @@ int main(void)
 	refusal_and_rollback();
 	adjacency_and_retirement();
 	stela_linux_enter(&owner);
+	struct folio_batch batch;
+	folio_batch_init(&batch);
+	struct page *single = alloc_page(GFP_KERNEL);
+	struct page *compound = alloc_pages(GFP_KERNEL | __GFP_COMP, 1);
+	assert(single && compound);
+	assert(page_ref_freeze(single, 1) && page_ref_freeze(compound, 1));
+	folio_batch_add(&batch, page_folio(single));
+	folio_batch_add(&batch, page_folio(compound));
+	unsigned int releases = fixture.releases;
+	free_unref_folios(&batch);
+	assert(!folio_batch_count(&batch) && !catalog.live_pages);
+	assert(fixture.releases == releases);
+	stela_linux_pages_finish();
+	assert(fixture.releases == releases + 2);
 	compound_and_split();
 	stela_linux_enter(&owner);
 	capacity();
