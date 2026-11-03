@@ -243,6 +243,7 @@ unsafe fn pending<K: KernelThreadPlatform + 'static, P: Provider + 'static, cons
 unsafe fn process<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>(
     context: *const c_void,
 ) -> i32 {
+    // SAFETY: the dispatch supplies the typed broker on its supervisor CPU.
     unsafe { broker::<K, P, N>(context).process_one() }
 }
 #[unsafe(no_mangle)]
