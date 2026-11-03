@@ -79,7 +79,6 @@ const ENOENT: Errno = -2;
 const EIO: Errno = -5;
 const EFAULT: Errno = -14;
 const ERANGE: Errno = -34;
-const EAGAIN: Errno = -11;
 const ENODEV: Errno = -19;
 const EINVAL: Errno = -22;
 const ENOMEM: Errno = -12;
@@ -465,14 +464,12 @@ impl Platform for Host {
         self.random.borrow_mut().fill(bytes);
     }
 
-    fn start_worker(&self, kind: stela_linux::owner::WorkerKind) -> Result<(), Errno> {
-        self.environment()
-            .start_worker(kind)
-            .map(|_| ())
-            .map_err(|error| match error {
-                WorkError::Full => -12,
-                _ => EAGAIN,
-            })
+    fn timer_changed(&self) -> Result<(), WorkError> {
+        // SAFETY: after publication this points to the original pinned
+        // environment, kept for the boot. A prepublication call is refused.
+        let environment =
+            unsafe { self.environment.get().as_ref() }.ok_or(WorkError::Unavailable)?;
+        environment.timer_changed()
     }
 
     fn shutdown(&self, force: bool) {
