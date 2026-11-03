@@ -90,7 +90,24 @@ pub struct ElapsedBounds {
     pub upper_ns: u64,
 }
 
+const PPM: u128 = 1_000_000;
+const ACCURACY_PPM: u128 = 500;
+const EDGE_NS: u128 = 1_000_000;
+
 impl Geometry {
+    /// First counter delta whose conservative lower bound reaches the minimum.
+    pub fn ticks_for_minimum_ns(self, minimum_ns: u64) -> Result<u64, Error> {
+        if !(100_000..=100_000_000).contains(&self.period_fs) {
+            return Err(Error::UnsupportedGeometry);
+        }
+        if minimum_ns == 0 {
+            return Ok(0);
+        }
+        let required_fs = (u128::from(minimum_ns) + EDGE_NS) * (PPM + ACCURACY_PPM);
+        u64::try_from(required_fs.div_ceil(u128::from(self.period_fs)))
+            .map_err(|_| Error::TimeOverflow)
+    }
+
     /// HPET 1.0a section 2.4.1 bounds error by 500 ppm over any 1 ms interval.
     /// Monotonicity bounds an arbitrary remainder by one such interval; keep
     /// that whole 1 ms edge envelope rather than assuming submillisecond rate
@@ -101,9 +118,6 @@ impl Geometry {
         if !(100_000..=100_000_000).contains(&self.period_fs) {
             return Err(Error::UnsupportedGeometry);
         }
-        const PPM: u128 = 1_000_000;
-        const ACCURACY_PPM: u128 = 500;
-        const EDGE_NS: u128 = 1_000_000;
         // ticks*period is femtoseconds. Nanosecond conversion's 10^6 and
         // rate error's 10^6 cancel, keeping a single outward division.
         let nominal_fs = u128::from(ticks) * u128::from(self.period_fs);
@@ -211,6 +225,38 @@ mod tests {
             Some(u64::MAX)
         );
     }
+    #[test]
+    fn minimum_ticks_invert_the_outward_lower_bound() {
+        for period_fs in [100_000, 10_000_000, 100_000_000] {
+            let geometry = Geometry {
+                period_fs,
+                timers: 1,
+            };
+            assert_eq!(geometry.ticks_for_minimum_ns(0), Ok(0));
+            for minimum in [1, 999, 1_000_000, 60_000_000_000] {
+                let ticks = geometry.ticks_for_minimum_ns(minimum).unwrap();
+                assert!(geometry.elapsed_bounds(ticks).unwrap().lower_ns >= minimum);
+                assert!(geometry.elapsed_bounds(ticks - 1).unwrap().lower_ns < minimum);
+            }
+        }
+        let fast = Geometry {
+            period_fs: 100_000,
+            timers: 1,
+        };
+        assert_eq!(
+            fast.ticks_for_minimum_ns(u64::MAX),
+            Err(Error::TimeOverflow)
+        );
+        let invalid = Geometry {
+            period_fs: 0,
+            timers: 1,
+        };
+        assert_eq!(
+            invalid.ticks_for_minimum_ns(0),
+            Err(Error::UnsupportedGeometry)
+        );
+    }
+
     #[test]
     fn elapsed_bounds_cover_rate_extremes_and_short_interval_edges() {
         let geometry = Geometry {
