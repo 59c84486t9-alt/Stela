@@ -37,10 +37,8 @@ const OPEN: &[(&str, &[&str])] = &[
     (
         "shmem and page cache",
         &[
-            "__folio_batch_release",
             "check_move_unevictable_folios",
             "folio_clear_dirty_for_io",
-            "folio_mark_accessed",
             "mark_page_accessed",
             "mm_get_unmapped_area",
             "shmem_read_folio_gfp",
