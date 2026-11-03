@@ -1,5 +1,5 @@
 //! Sealed execution-domain loans; native admission never accepts host transport.
-//! Hosted runtime/segment admission stays unconstructible until its real core exists.
+//! Hosted loans observe the same checked thread and its actual guarded stack.
 use super::{EnteredProcess, Runtime, TaskContext, WorkError};
 use core::{marker::PhantomData, pin::Pin};
 mod native;
@@ -135,3 +135,9 @@ impl<const N: usize> Segment<'_, NativeDomain, N> {
         Ok(body(self.inner.entered))
     }
 }
+
+#[cfg(all(feature = "test-support", target_os = "linux", target_arch = "x86_64"))]
+pub use hosted::{HostedExecutor, HostedRuntime};
+
+#[cfg(all(feature = "test-support", target_os = "linux", target_arch = "x86_64"))]
+mod hosted_domain;

@@ -26,24 +26,40 @@ pub trait Domain: 'static {
         bytes: usize,
     ) -> Result<NonNull<u8>, MemoryError>;
 }
-// Until the real mapped/thread/event/shared-work producer is implemented, a
+// Where the stack switch backend is unavailable, a
 // hosted loan is uninhabited. These are not executable success/error stubs and
 // cannot be constructed by a caller, raw scalar or native wrapper conversion.
-#[cfg(all(feature = "test-support", unix))]
+#[cfg(all(
+    feature = "test-support",
+    unix,
+    not(all(target_os = "linux", target_arch = "x86_64"))
+))]
 #[derive(Clone, Copy)]
 enum Unwired {}
-#[cfg(all(feature = "test-support", unix))]
+#[cfg(all(
+    feature = "test-support",
+    unix,
+    not(all(target_os = "linux", target_arch = "x86_64"))
+))]
 #[derive(Clone, Copy)]
 pub struct HostLoan<'a, const N: usize> {
     never: Unwired,
     _life: core::marker::PhantomData<&'a [(); N]>,
 }
-#[cfg(all(feature = "test-support", unix))]
+#[cfg(all(
+    feature = "test-support",
+    unix,
+    not(all(target_os = "linux", target_arch = "x86_64"))
+))]
 pub struct HostKept<const N: usize> {
     never: Unwired,
     _size: core::marker::PhantomData<[(); N]>,
 }
-#[cfg(all(feature = "test-support", unix))]
+#[cfg(all(
+    feature = "test-support",
+    unix,
+    not(all(target_os = "linux", target_arch = "x86_64"))
+))]
 impl Domain for super::HostedDomain {
     type Loan<'a, const N: usize> = HostLoan<'a, N>;
     type Kept<const N: usize> = HostKept<N>;

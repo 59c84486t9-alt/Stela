@@ -174,10 +174,17 @@ impl Geometry {
     pub(super) fn of(stack: &Stack) -> Self {
         // Stack::new validated these immutable cached ranges. No provider callback
         // or address reinterpretation occurs inside queue admission/dispatch.
+        Self::from_ranges(&stack.bounds, &stack.guard)
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub(super) fn from_ranges(
+        bounds: &core::ops::Range<usize>,
+        guard: &core::ops::Range<usize>,
+    ) -> Self {
         Self {
-            start: stack.bounds.start,
-            bytes: stack.bounds.end - stack.bounds.start,
-            guard: stack.guard.end - stack.guard.start,
+            start: bounds.start,
+            bytes: bounds.end - bounds.start,
+            guard: guard.end - guard.start,
         }
     }
 }

@@ -69,3 +69,8 @@ impl HostedExecution {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod runtime;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub use runtime::{HostedExecutor, HostedRuntime};

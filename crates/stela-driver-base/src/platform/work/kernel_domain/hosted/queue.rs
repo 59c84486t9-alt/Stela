@@ -1,5 +1,5 @@
 //! Actual process/thread admission over the same Work queue state policy.
-//! This owner does not yet construct a hosted continuation Runtime or segment.
+//! Continuation dispatch borrows this queue only for bounded state transitions.
 use super::{HostedExecution, WorkError};
 use crate::platform::work::{Callback, Kind, Lane, NEXT_QUEUE, RetainedOwner, State};
 use alloc::sync::Arc;
@@ -20,12 +20,14 @@ pub struct HostedTicket {
 /// The original host execution/code/storage owner remains kept until explicit
 /// producer drain and successful retirement. Closing alone never releases it.
 pub struct HostedQueue<const N: usize> {
-    id: u64,
-    execution: ManuallyDrop<Arc<HostedExecution>>,
+    pub(super) id: u64,
+    pub(super) execution: ManuallyDrop<Arc<HostedExecution>>,
     owner: ManuallyDrop<RetainedOwner>,
     state: ManuallyDrop<UnsafeCell<State<N>>>,
     held: AtomicBool,
     retired: AtomicBool,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub(super) attached: AtomicBool,
 }
 // SAFETY: every state access first verifies the same actual PID/OS thread and
 // wins the bounded exclusion flag. Foreign-thread operations touch only shared
@@ -34,11 +36,11 @@ unsafe impl<const N: usize> Send for HostedQueue<N> {}
 // SAFETY: same checked thread and unique bounded state borrow as Send above.
 unsafe impl<const N: usize> Sync for HostedQueue<N> {}
 
-struct Guard<'a, const N: usize> {
+pub(super) struct Guard<'a, const N: usize> {
     queue: &'a HostedQueue<N>,
 }
 impl<const N: usize> Guard<'_, N> {
-    fn state(&mut self) -> &mut State<N> {
+    pub(super) fn state(&mut self) -> &mut State<N> {
         // SAFETY: same actual host thread and sole held flag. No callback,
         // wait, switch, allocation or owner release occurs while borrowed.
         unsafe { &mut *self.queue.state.get() }
@@ -68,9 +70,11 @@ impl<const N: usize> HostedQueue<N> {
             state: ManuallyDrop::new(UnsafeCell::new(State::new())),
             held: AtomicBool::new(false),
             retired: AtomicBool::new(false),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            attached: AtomicBool::new(false),
         }))
     }
-    fn lock(&self) -> Result<Guard<'_, N>, WorkError> {
+    pub(super) fn lock(&self) -> Result<Guard<'_, N>, WorkError> {
         self.execution.check_current()?;
         if self.retired.load(Ordering::Acquire) {
             return Err(WorkError::Closed);
@@ -124,6 +128,10 @@ impl<const N: usize> HostedQueue<N> {
     /// close. Pending jobs or reservations refuse retirement without release.
     pub unsafe fn retire(&self) -> Result<(), WorkError> {
         let mut guard = self.lock()?;
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if self.attached.load(Ordering::Acquire) {
+            return Err(WorkError::Busy);
+        }
         let state = guard.state();
         if !state.closed
             || state.jobs.iter().any(Option::is_some)
