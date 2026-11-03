@@ -53,6 +53,7 @@
 /README
 /Makefile
 /kernel/locking/mutex.c
+/kernel/locking/percpu-rwsem.c
 /kernel/locking/mutex.h
 /kernel/locking/ww_mutex.h
 /kernel/sched/core.c
@@ -188,6 +189,7 @@
 /kernel/cpu.c
 /kernel/cpu_topology.c
 /kernel/rcu/tiny.c
+/kernel/rcu/sync.c
 /kernel/smpboot.c
 /kernel/smpboot.h
 /kernel/rcu/tasks.h
