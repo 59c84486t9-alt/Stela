@@ -545,7 +545,18 @@ impl<P: Platform> Transport<P> {
         if self.state == State::Failed {
             return Err(self.fault.as_ref().unwrap().clone());
         }
-        let result = self.close_inner();
+        if self.state == State::Closing {
+            let error = Error::Unsupported("interrupted Broadcom transport close");
+            self.state = State::Failed;
+            self.fault = Some(error.clone());
+            return Err(error);
+        }
+        let previous = self.state;
+        // Seal external admission before protocol callbacks or DMA effects.
+        // Internal control service may finish the close, but an unwind leaves
+        // Closing observable and no public operation can resume this epoch.
+        self.state = State::Closing;
+        let result = self.close_inner(previous);
         match result {
             Ok(()) => {
                 self.state = State::Closed;
@@ -554,8 +565,8 @@ impl<P: Platform> Transport<P> {
             Err(error) => Err(self.fail(error)),
         }
     }
-    fn close_inner(&mut self) -> Result<()> {
-        if matches!(self.state, State::Rti | State::Active) {
+    fn close_inner(&mut self, previous: State) -> Result<()> {
+        if matches!(previous, State::Rti | State::Active) {
             for id in (1..7).rev() {
                 if !self.transfers[id].enabled {
                     continue;
@@ -579,10 +590,10 @@ impl<P: Platform> Transport<P> {
         }
         // Source ring destroys do not stop its firmware/control DMA. The real
         // root/platform must separately acknowledge whole retirement.
-        if self.state != State::Allocated {
+        if previous != State::Allocated {
             self.refresh_snapshot()?;
         }
-        if self.state != State::Allocated || self.platform().retire_unpublished() {
+        if previous != State::Allocated || self.platform().retire_unpublished() {
             self.retire_platform()?;
         }
         for (id, ring) in self.transfers.iter_mut().enumerate() {

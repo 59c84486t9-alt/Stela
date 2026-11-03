@@ -110,6 +110,7 @@ pub enum State {
     Firmware,
     Rti,
     Active,
+    Closing,
     Closed,
     Failed,
 }
@@ -427,8 +428,14 @@ impl<P: Platform> Transport<P> {
         // Record admission before an effect-then-error root operation. Neither
         // fail nor Drop may retry uncertain reset/drain ownership.
         self.retirement_attempted = true;
+        self.retirement_error = Some(Error::Unsupported(
+            "interrupted Broadcom platform retirement",
+        ));
         match self.platform().retire() {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.retirement_error = None;
+                Ok(())
+            }
             Err(error) => {
                 self.retirement_error = Some(error.clone());
                 Err(error)
@@ -440,6 +447,8 @@ impl<P: Platform> Transport<P> {
             return first.clone();
         }
         self.state = State::Failed;
+        // Preserve the first diagnostic even if native retirement unwinds.
+        self.fault = Some(cause.clone());
         // Device stop is independent of the failing IPC path. A failed close
         // never retries control messages or rewrites live descriptor/payload RAM.
         let result = self.retire_platform();
@@ -458,10 +467,7 @@ impl<P: Platform> Transport<P> {
 impl<P: Platform> Drop for Transport<P> {
     fn drop(&mut self) {
         if self.state != State::Closed {
-            let _ = self.close();
-        }
-        if self.state != State::Closed {
-            // No destructor retries or releases a failed physical epoch. Keep
+            // No destructor retries or releases an incomplete physical epoch. Keep
             // terminal DMA bytes and every root/UC/IRQ/domain owner.
             if let Some(platform) = self.platform.take() {
                 core::mem::forget(platform);
