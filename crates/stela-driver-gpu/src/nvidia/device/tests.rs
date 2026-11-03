@@ -743,9 +743,8 @@ fn typed_config_preparation_and_after_write_refusals_keep_actual_graph() {
     counts.config_read_failure.store(true, Ordering::SeqCst);
     let error = ConfigError::before_effect(crate::bus::pci::ConfigFailure::ForeignGrant);
     // SAFETY: CPU-only immutable synthetic owner; no hardware activity.
-    assert!(
-        matches!(unsafe { PreparedDevice::prepare(config, owner, source, domain, 12, u64::MAX) }, Err(Error::Config(actual)) if actual == error)
-    );
+    let prepared = unsafe { PreparedDevice::prepare(config, owner, source, domain, 12, u64::MAX) };
+    assert!(matches!(prepared, Err(Error::Config(actual)) if actual == error));
     assert_eq!(counts.values(), [0; 5]);
     assert_eq!(counts.reads.load(Ordering::SeqCst), 1);
 

@@ -404,8 +404,8 @@ fn canonical_amd_attachment() {
         .count();
     assert_eq!(register_maps, 1);
     let before = model.0.lock().unwrap().calls;
-    // SAFETY: duplicate original reservation, rejected pre-map.
     assert!(
+        // SAFETY: duplicate original reservation, rejected pre-map.
         unsafe { staged.attach_kernel_doorbells(&authority, doors(0x1a0000, false, &model)) }
             .is_err()
     );

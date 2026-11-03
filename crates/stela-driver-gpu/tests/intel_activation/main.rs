@@ -220,8 +220,8 @@ impl bus::pci::ConfigSpace for Owner {
         panic!("read-only probe");
     }
 
-    fn read8(&self, offset: u16) -> Result<u8, bus::pci::ConfigError> {
-        Ok((self.read32(offset & !3)? >> (8 * (offset & 3))) as u8)
+    fn read8(&self, _: u16) -> Result<u8, bus::pci::ConfigError> {
+        panic!("read16 must use the actual model width");
     }
 }
 // SAFETY: this implements only the explicitly simulated single-thread RAM model.
