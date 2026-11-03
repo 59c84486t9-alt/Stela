@@ -1,0 +1,390 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 00:25:00 -0500
+Subject: [PATCH] refactor(writeback): separate inode list removal
+
+---
+ fs/fs-writeback.c      | 111 +----------------------------------------
+ fs/inode_evict.c       |  28 +++++++++++
+ fs/writeback_inode.h   |  95 +++++++++++++++++++++++++++++++++++
+ mm/Makefile            |   2 +-
+ mm/backing-dev-inode.c |  24 +++++++++
+ mm/backing-dev.c       |  19 -------
+ 6 files changed, 149 insertions(+), 130 deletions(-)
+ create mode 100644 fs/writeback_inode.h
+ create mode 100644 mm/backing-dev-inode.c
+
+diff --git a/fs/fs-writeback.c b/fs/fs-writeback.c
+index 4a3820828552f5385e717d3f4f331c6b45877f20..f607fdaff9a24c8aada596181c38f9728251962e 100644
+--- a/fs/fs-writeback.c
++++ b/fs/fs-writeback.c
+@@ -31,6 +31,7 @@
+ #include <linux/device.h>
+ #include <linux/memcontrol.h>
+ #include "internal.h"
++#include "writeback_inode.h"
+ 
+ /*
+  * Passed into wb_writeback(), essentially a subset of writeback_control
+@@ -91,16 +92,6 @@ static bool wb_io_lists_populated(struct bdi_writeback *wb)
+ 	}
+ }
+ 
+-static void wb_io_lists_depopulated(struct bdi_writeback *wb)
+-{
+-	if (wb_has_dirty_io(wb) && list_empty(&wb->b_dirty) &&
+-	    list_empty(&wb->b_io) && list_empty(&wb->b_more_io)) {
+-		clear_bit(WB_has_dirty_io, &wb->state);
+-		WARN_ON_ONCE(atomic_long_sub_return(wb->avg_write_bandwidth,
+-					&wb->bdi->tot_write_bandwidth) < 0);
+-	}
+-}
+-
+ /**
+  * inode_io_list_move_locked - move an inode onto a bdi_writeback IO list
+  * @inode: inode to be moved
+@@ -323,59 +314,6 @@ static void inode_cgwb_move_to_attached(struct inode *inode,
+ 	wb_io_lists_depopulated(wb);
+ }
+ 
+-/**
+- * locked_inode_to_wb_and_lock_list - determine a locked inode's wb and lock it
+- * @inode: inode of interest with i_lock held
+- *
+- * Returns @inode's wb with its list_lock held.  @inode->i_lock must be
+- * held on entry and is released on return.  The returned wb is guaranteed
+- * to stay @inode's associated wb until its list_lock is released.
+- */
+-static struct bdi_writeback *
+-locked_inode_to_wb_and_lock_list(struct inode *inode)
+-	__releases(&inode->i_lock)
+-	__acquires(&wb->list_lock)
+-{
+-	while (true) {
+-		struct bdi_writeback *wb = inode_to_wb(inode);
+-
+-		/*
+-		 * inode_to_wb() association is protected by both
+-		 * @inode->i_lock and @wb->list_lock but list_lock nests
+-		 * outside i_lock.  Drop i_lock and verify that the
+-		 * association hasn't changed after acquiring list_lock.
+-		 */
+-		wb_get(wb);
+-		spin_unlock(&inode->i_lock);
+-		spin_lock(&wb->list_lock);
+-
+-		/* i_wb may have changed inbetween, can't use inode_to_wb() */
+-		if (likely(wb == inode->i_wb)) {
+-			wb_put(wb);	/* @inode already has ref */
+-			return wb;
+-		}
+-
+-		spin_unlock(&wb->list_lock);
+-		wb_put(wb);
+-		cpu_relax();
+-		spin_lock(&inode->i_lock);
+-	}
+-}
+-
+-/**
+- * inode_to_wb_and_lock_list - determine an inode's wb and lock it
+- * @inode: inode of interest
+- *
+- * Same as locked_inode_to_wb_and_lock_list() but @inode->i_lock isn't held
+- * on entry.
+- */
+-static struct bdi_writeback *inode_to_wb_and_lock_list(struct inode *inode)
+-	__acquires(&wb->list_lock)
+-{
+-	spin_lock(&inode->i_lock);
+-	return locked_inode_to_wb_and_lock_list(inode);
+-}
+-
+ struct inode_switch_wbs_context {
+ 	/* List of queued switching contexts for the wb */
+ 	struct llist_node	list;
+@@ -1294,27 +1232,6 @@ static void inode_cgwb_move_to_attached(struct inode *inode,
+ 	wb_io_lists_depopulated(wb);
+ }
+ 
+-static struct bdi_writeback *
+-locked_inode_to_wb_and_lock_list(struct inode *inode)
+-	__releases(&inode->i_lock)
+-	__acquires(&wb->list_lock)
+-{
+-	struct bdi_writeback *wb = inode_to_wb(inode);
+-
+-	spin_unlock(&inode->i_lock);
+-	spin_lock(&wb->list_lock);
+-	return wb;
+-}
+-
+-static struct bdi_writeback *inode_to_wb_and_lock_list(struct inode *inode)
+-	__acquires(&wb->list_lock)
+-{
+-	struct bdi_writeback *wb = inode_to_wb(inode);
+-
+-	spin_lock(&wb->list_lock);
+-	return wb;
+-}
+-
+ static long wb_split_bdi_pages(struct bdi_writeback *wb, long nr_pages)
+ {
+ 	return nr_pages;
+@@ -1392,32 +1309,6 @@ void wb_start_background_writeback(struct bdi_writeback *wb)
+ 	wb_wakeup(wb);
+ }
+ 
+-/*
+- * Remove the inode from the writeback list it is on.
+- */
+-void inode_io_list_del(struct inode *inode)
+-{
+-	struct bdi_writeback *wb;
+-
+-	/*
+-	 * FIXME: ext4 can call here from ext4_evict_inode() after evict() already
+-	 * unlinked the inode.
+-	 */
+-	if (list_empty_careful(&inode->i_io_list))
+-		return;
+-
+-	wb = inode_to_wb_and_lock_list(inode);
+-	spin_lock(&inode->i_lock);
+-
+-	inode_state_clear(inode, I_SYNC_QUEUED);
+-	list_del_init(&inode->i_io_list);
+-	wb_io_lists_depopulated(wb);
+-
+-	spin_unlock(&inode->i_lock);
+-	spin_unlock(&wb->list_lock);
+-}
+-EXPORT_SYMBOL(inode_io_list_del);
+-
+ /*
+  * mark an inode as under writeback on the sb
+  */
+diff --git a/fs/inode_evict.c b/fs/inode_evict.c
+index 707d96386e284d74dd3dff084c5b318f1f7357ae..c55b2e4b4b5945a9a59537b6aceb4f8909736824 100644
+--- a/fs/inode_evict.c
++++ b/fs/inode_evict.c
+@@ -10,6 +10,8 @@
+ #include <linux/wait_bit.h>
+ #include <linux/writeback.h>
+ 
++#include "writeback_inode.h"
++
+ void clear_inode(struct inode *inode)
+ {
+ 	/*
+@@ -222,3 +224,29 @@ void inode_wait_for_writeback(struct inode *inode)
+ 	}
+ 	finish_wait(wq_head, &wqe.wq_entry);
+ }
++
++/*
++ * Remove the inode from the writeback list it is on.
++ */
++void inode_io_list_del(struct inode *inode)
++{
++	struct bdi_writeback *wb;
++
++	/*
++	 * FIXME: ext4 can call here from ext4_evict_inode() after evict() already
++	 * unlinked the inode.
++	 */
++	if (list_empty_careful(&inode->i_io_list))
++		return;
++
++	wb = inode_to_wb_and_lock_list(inode);
++	spin_lock(&inode->i_lock);
++
++	inode_state_clear(inode, I_SYNC_QUEUED);
++	list_del_init(&inode->i_io_list);
++	wb_io_lists_depopulated(wb);
++
++	spin_unlock(&inode->i_lock);
++	spin_unlock(&wb->list_lock);
++}
++EXPORT_SYMBOL(inode_io_list_del);
+diff --git a/fs/writeback_inode.h b/fs/writeback_inode.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc5e0a13e78a801312b64a8975442cab1c581962
+--- /dev/null
++++ b/fs/writeback_inode.h
+@@ -0,0 +1,95 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _FS_WRITEBACK_INODE_H
++#define _FS_WRITEBACK_INODE_H
++
++#include <linux/backing-dev.h>
++
++static inline void wb_io_lists_depopulated(struct bdi_writeback *wb)
++{
++	if (wb_has_dirty_io(wb) && list_empty(&wb->b_dirty) &&
++	    list_empty(&wb->b_io) && list_empty(&wb->b_more_io)) {
++		clear_bit(WB_has_dirty_io, &wb->state);
++		WARN_ON_ONCE(atomic_long_sub_return(wb->avg_write_bandwidth,
++					&wb->bdi->tot_write_bandwidth) < 0);
++	}
++}
++
++#ifdef CONFIG_CGROUP_WRITEBACK
++/**
++ * locked_inode_to_wb_and_lock_list - determine a locked inode's wb and lock it
++ * @inode: inode of interest with i_lock held
++ *
++ * Returns @inode's wb with its list_lock held.  @inode->i_lock must be
++ * held on entry and is released on return.  The returned wb is guaranteed
++ * to stay @inode's associated wb until its list_lock is released.
++ */
++static inline struct bdi_writeback *
++locked_inode_to_wb_and_lock_list(struct inode *inode)
++	__releases(&inode->i_lock)
++	__acquires(&wb->list_lock)
++{
++	while (true) {
++		struct bdi_writeback *wb = inode_to_wb(inode);
++
++		/*
++		 * inode_to_wb() association is protected by both
++		 * @inode->i_lock and @wb->list_lock but list_lock nests
++		 * outside i_lock.  Drop i_lock and verify that the
++		 * association hasn't changed after acquiring list_lock.
++		 */
++		wb_get(wb);
++		spin_unlock(&inode->i_lock);
++		spin_lock(&wb->list_lock);
++
++		/* i_wb may have changed inbetween, can't use inode_to_wb() */
++		if (likely(wb == inode->i_wb)) {
++			wb_put(wb);	/* @inode already has ref */
++			return wb;
++		}
++
++		spin_unlock(&wb->list_lock);
++		wb_put(wb);
++		cpu_relax();
++		spin_lock(&inode->i_lock);
++	}
++}
++
++/**
++ * inode_to_wb_and_lock_list - determine an inode's wb and lock it
++ * @inode: inode of interest
++ *
++ * Same as locked_inode_to_wb_and_lock_list() but @inode->i_lock isn't held
++ * on entry.
++ */
++static inline struct bdi_writeback *inode_to_wb_and_lock_list(struct inode *inode)
++	__acquires(&wb->list_lock)
++{
++	spin_lock(&inode->i_lock);
++	return locked_inode_to_wb_and_lock_list(inode);
++}
++
++#else
++static inline struct bdi_writeback *
++locked_inode_to_wb_and_lock_list(struct inode *inode)
++	__releases(&inode->i_lock)
++	__acquires(&wb->list_lock)
++{
++	struct bdi_writeback *wb = inode_to_wb(inode);
++
++	spin_unlock(&inode->i_lock);
++	spin_lock(&wb->list_lock);
++	return wb;
++}
++
++static inline struct bdi_writeback *inode_to_wb_and_lock_list(struct inode *inode)
++	__acquires(&wb->list_lock)
++{
++	struct bdi_writeback *wb = inode_to_wb(inode);
++
++	spin_lock(&wb->list_lock);
++	return wb;
++}
++
++#endif
++
++#endif
+diff --git a/mm/Makefile b/mm/Makefile
+index 197a3a727ae5e9b6f9d1d13091bbec4bff620022..830376b4647cf8049fd6617dd3c1925cdc8bfec3 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -51,7 +51,7 @@ endif
+ obj-y			:= filemap.o pagecache_init.o mempool.o oom_kill.o oom_adj.o fadvise.o \
+ 			   maccess.o page-writeback.o writeback_domain.o folio-compat.o \
+ 			   readahead.o swap.o truncate.o vmscan.o shrinker.o \
+-			   shmem.o util.o mmzone.o vmstat.o vmstat_init.o backing-dev.o \
++			   shmem.o util.o mmzone.o vmstat.o vmstat_init.o backing-dev.o backing-dev-inode.o \
+ 			   mm_init.o percpu.o slab_common.o kvfree_rcu.o \
+ 			   compaction.o show_mem.o \
+ 			   interval_tree.o list_lru.o workingset.o \
+diff --git a/mm/backing-dev-inode.c b/mm/backing-dev-inode.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..2912b6edfa9afaa2469bff569879130fad54d4d7
+--- /dev/null
++++ b/mm/backing-dev-inode.c
+@@ -0,0 +1,24 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Inode backing-device selection from mm/backing-dev.c. */
++#include <linux/backing-dev.h>
++#include <linux/blkdev.h>
++#include <linux/export.h>
++
++struct backing_dev_info noop_backing_dev_info;
++EXPORT_SYMBOL_GPL(noop_backing_dev_info);
++
++struct backing_dev_info *inode_to_bdi(struct inode *inode)
++{
++	struct super_block *sb;
++
++	if (!inode)
++		return &noop_backing_dev_info;
++
++	sb = inode->i_sb;
++#ifdef CONFIG_BLOCK
++	if (sb_is_blkdev_sb(sb))
++		return I_BDEV(inode)->bd_disk->bdi;
++#endif
++	return sb->s_bdi;
++}
++EXPORT_SYMBOL(inode_to_bdi);
+diff --git a/mm/backing-dev.c b/mm/backing-dev.c
+index 18e999053bae0b82edd15517836ba9ec161d5dd9..ac2d55bd4fdb3e98034325f66a6aa9c12f958ab7 100644
+--- a/mm/backing-dev.c
++++ b/mm/backing-dev.c
+@@ -18,9 +18,6 @@
+ #include <trace/events/writeback.h>
+ #include "internal.h"
+ 
+-struct backing_dev_info noop_backing_dev_info;
+-EXPORT_SYMBOL_GPL(noop_backing_dev_info);
+-
+ static const char *bdi_unknown_name = "(unknown)";
+ 
+ /*
+@@ -1199,22 +1196,6 @@ void bdi_put(struct backing_dev_info *bdi)
+ }
+ EXPORT_SYMBOL(bdi_put);
+ 
+-struct backing_dev_info *inode_to_bdi(struct inode *inode)
+-{
+-	struct super_block *sb;
+-
+-	if (!inode)
+-		return &noop_backing_dev_info;
+-
+-	sb = inode->i_sb;
+-#ifdef CONFIG_BLOCK
+-	if (sb_is_blkdev_sb(sb))
+-		return I_BDEV(inode)->bd_disk->bdi;
+-#endif
+-	return sb->s_bdi;
+-}
+-EXPORT_SYMBOL(inode_to_bdi);
+-
+ const char *bdi_dev_name(struct backing_dev_info *bdi)
+ {
+ 	if (!bdi || !bdi->dev)

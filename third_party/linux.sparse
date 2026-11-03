@@ -109,6 +109,8 @@
 /fs/seq_output.c
 /fs/seq_output.h
 /mm/Makefile
+/mm/backing-dev.c
+/mm/backing-dev-inode.c
 /mm/mm_init.c
 /mm/oom_kill.c
 /mm/oom_adj.c
@@ -190,6 +192,7 @@
 /fs/mnt_idmapping.c
 /fs/inode.c
 /fs/fs-writeback.c
+/fs/writeback_inode.h
 /fs/inode_evict.c
 /fs/open.c
 /fs/filp_close.c
