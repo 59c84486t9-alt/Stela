@@ -109,6 +109,7 @@
 /fs/Makefile
 /fs/seq_output.c
 /fs/seq_output.h
+/fs/seq_path.c
 /mm/Makefile
 /mm/backing-dev.c
 /mm/backing-dev-inode.c

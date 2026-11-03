@@ -1,0 +1,310 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:17:19 -0500
+Subject: [PATCH] refactor(seq-file): separate original pathname output
+
+---
+ fs/Makefile   |   2 +-
+ fs/seq_file.c | 128 ---------------------------------------------
+ fs/seq_path.c | 140 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 141 insertions(+), 129 deletions(-)
+ create mode 100644 fs/seq_path.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index af382463910940bfe49bc5c6a489237d28fd9f5e..fd01d4a593252d5944e4610210461cb029efbc06 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -11,7 +11,7 @@ obj-y :=	open.o filp_close.o read_write.o file_table.o file_table_init.o super.o
+ 		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o path_get.o name_hash.o filename.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o dcache_init.o dentry_ancestry.o inode.o inode_cache_init.o inode_evict.o \
+ 		attr.o bad_inode.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o mount_cache.o \
+-		seq_file.o seq_lifetime.o seq_output.o xattr.o simple_xattr.o libfs.o pseudo_metadata.o fs-writeback.o \
++		seq_file.o seq_lifetime.o seq_output.o seq_path.o xattr.o simple_xattr.o libfs.o pseudo_metadata.o fs-writeback.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+ 		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
+ 		fs_dirent.o fs_context.o fs_context_log.o fs_context_params.o fs_parser.o fs_parser_path.o fsopen.o init.o \
+diff --git a/fs/seq_file.c b/fs/seq_file.c
+index 5b4c2899791a7427801ae1a6c4ba496587f40d77..6bc18cdc808f64cf9952539d87350bee34494834 100644
+--- a/fs/seq_file.c
++++ b/fs/seq_file.c
+@@ -332,134 +332,6 @@ void seq_bprintf(struct seq_file *m, const char *f, const u32 *binary)
+ EXPORT_SYMBOL(seq_bprintf);
+ #endif /* CONFIG_BINARY_PRINTF */
+ 
+-/**
+- *	mangle_path -	mangle and copy path to buffer beginning
+- *	@s: buffer start
+- *	@p: beginning of path in above buffer
+- *	@esc: set of characters that need escaping
+- *
+- *      Copy the path from @p to @s, replacing each occurrence of character from
+- *      @esc with usual octal escape.
+- *      Returns pointer past last written character in @s, or NULL in case of
+- *      failure.
+- */
+-char *mangle_path(char *s, const char *p, const char *esc)
+-{
+-	while (s <= p) {
+-		char c = *p++;
+-		if (!c) {
+-			return s;
+-		} else if (!strchr(esc, c)) {
+-			*s++ = c;
+-		} else if (s + 4 > p) {
+-			break;
+-		} else {
+-			*s++ = '\\';
+-			*s++ = '0' + ((c & 0300) >> 6);
+-			*s++ = '0' + ((c & 070) >> 3);
+-			*s++ = '0' + (c & 07);
+-		}
+-	}
+-	return NULL;
+-}
+-EXPORT_SYMBOL(mangle_path);
+-
+-/**
+- * seq_path - seq_file interface to print a pathname
+- * @m: the seq_file handle
+- * @path: the struct path to print
+- * @esc: set of characters to escape in the output
+- *
+- * return the absolute path of 'path', as represented by the
+- * dentry / mnt pair in the path parameter.
+- */
+-int seq_path(struct seq_file *m, const struct path *path, const char *esc)
+-{
+-	char *buf;
+-	size_t size = seq_get_buf(m, &buf);
+-	int res = -1;
+-
+-	if (size) {
+-		char *p = d_path(path, buf, size);
+-		if (!IS_ERR(p)) {
+-			char *end = mangle_path(buf, p, esc);
+-			if (end)
+-				res = end - buf;
+-		}
+-	}
+-	seq_commit(m, res);
+-
+-	return res;
+-}
+-EXPORT_SYMBOL(seq_path);
+-
+-/**
+- * seq_file_path - seq_file interface to print a pathname of a file
+- * @m: the seq_file handle
+- * @file: the struct file to print
+- * @esc: set of characters to escape in the output
+- *
+- * return the absolute path to the file.
+- */
+-int seq_file_path(struct seq_file *m, struct file *file, const char *esc)
+-{
+-	return seq_path(m, &file->f_path, esc);
+-}
+-EXPORT_SYMBOL(seq_file_path);
+-
+-/*
+- * Same as seq_path, but relative to supplied root.
+- */
+-int seq_path_root(struct seq_file *m, const struct path *path,
+-		  const struct path *root, const char *esc)
+-{
+-	char *buf;
+-	size_t size = seq_get_buf(m, &buf);
+-	int res = -ENAMETOOLONG;
+-
+-	if (size) {
+-		char *p;
+-
+-		p = __d_path(path, root, buf, size);
+-		if (!p)
+-			return SEQ_SKIP;
+-		res = PTR_ERR(p);
+-		if (!IS_ERR(p)) {
+-			char *end = mangle_path(buf, p, esc);
+-			if (end)
+-				res = end - buf;
+-			else
+-				res = -ENAMETOOLONG;
+-		}
+-	}
+-	seq_commit(m, res);
+-
+-	return res < 0 && res != -ENAMETOOLONG ? res : 0;
+-}
+-
+-/*
+- * returns the path of the 'dentry' from the root of its filesystem.
+- */
+-int seq_dentry(struct seq_file *m, struct dentry *dentry, const char *esc)
+-{
+-	char *buf;
+-	size_t size = seq_get_buf(m, &buf);
+-	int res = -1;
+-
+-	if (size) {
+-		char *p = dentry_path(dentry, buf, size);
+-		if (!IS_ERR(p)) {
+-			char *end = mangle_path(buf, p, esc);
+-			if (end)
+-				res = end - buf;
+-		}
+-	}
+-	seq_commit(m, res);
+-
+-	return res;
+-}
+-EXPORT_SYMBOL(seq_dentry);
+-
+ void *single_start(struct seq_file *p, loff_t *pos)
+ {
+ 	return *pos ? NULL : SEQ_START_TOKEN;
+diff --git a/fs/seq_path.c b/fs/seq_path.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..716b1769196485613d898361b290e61f03c91bad
+--- /dev/null
++++ b/fs/seq_path.c
+@@ -0,0 +1,140 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * linux/fs/seq_file.c
++ *
++ * helper functions for making synthetic files from sequences of records.
++ * initial implementation -- AV, Oct 2001.
++ */
++
++#include <linux/export.h>
++#include <linux/fs.h>
++#include <linux/seq_file.h>
++#include <linux/string.h>
++
++/**
++ *	mangle_path -	mangle and copy path to buffer beginning
++ *	@s: buffer start
++ *	@p: beginning of path in above buffer
++ *	@esc: set of characters that need escaping
++ *
++ *      Copy the path from @p to @s, replacing each occurrence of character from
++ *      @esc with usual octal escape.
++ *      Returns pointer past last written character in @s, or NULL in case of
++ *      failure.
++ */
++char *mangle_path(char *s, const char *p, const char *esc)
++{
++	while (s <= p) {
++		char c = *p++;
++		if (!c) {
++			return s;
++		} else if (!strchr(esc, c)) {
++			*s++ = c;
++		} else if (s + 4 > p) {
++			break;
++		} else {
++			*s++ = '\\';
++			*s++ = '0' + ((c & 0300) >> 6);
++			*s++ = '0' + ((c & 070) >> 3);
++			*s++ = '0' + (c & 07);
++		}
++	}
++	return NULL;
++}
++EXPORT_SYMBOL(mangle_path);
++
++/**
++ * seq_path - seq_file interface to print a pathname
++ * @m: the seq_file handle
++ * @path: the struct path to print
++ * @esc: set of characters to escape in the output
++ *
++ * return the absolute path of 'path', as represented by the
++ * dentry / mnt pair in the path parameter.
++ */
++int seq_path(struct seq_file *m, const struct path *path, const char *esc)
++{
++	char *buf;
++	size_t size = seq_get_buf(m, &buf);
++	int res = -1;
++
++	if (size) {
++		char *p = d_path(path, buf, size);
++		if (!IS_ERR(p)) {
++			char *end = mangle_path(buf, p, esc);
++			if (end)
++				res = end - buf;
++		}
++	}
++	seq_commit(m, res);
++
++	return res;
++}
++EXPORT_SYMBOL(seq_path);
++
++/**
++ * seq_file_path - seq_file interface to print a pathname of a file
++ * @m: the seq_file handle
++ * @file: the struct file to print
++ * @esc: set of characters to escape in the output
++ *
++ * return the absolute path to the file.
++ */
++int seq_file_path(struct seq_file *m, struct file *file, const char *esc)
++{
++	return seq_path(m, &file->f_path, esc);
++}
++EXPORT_SYMBOL(seq_file_path);
++
++/*
++ * Same as seq_path, but relative to supplied root.
++ */
++int seq_path_root(struct seq_file *m, const struct path *path,
++		  const struct path *root, const char *esc)
++{
++	char *buf;
++	size_t size = seq_get_buf(m, &buf);
++	int res = -ENAMETOOLONG;
++
++	if (size) {
++		char *p;
++
++		p = __d_path(path, root, buf, size);
++		if (!p)
++			return SEQ_SKIP;
++		res = PTR_ERR(p);
++		if (!IS_ERR(p)) {
++			char *end = mangle_path(buf, p, esc);
++			if (end)
++				res = end - buf;
++			else
++				res = -ENAMETOOLONG;
++		}
++	}
++	seq_commit(m, res);
++
++	return res < 0 && res != -ENAMETOOLONG ? res : 0;
++}
++
++/*
++ * returns the path of the 'dentry' from the root of its filesystem.
++ */
++int seq_dentry(struct seq_file *m, struct dentry *dentry, const char *esc)
++{
++	char *buf;
++	size_t size = seq_get_buf(m, &buf);
++	int res = -1;
++
++	if (size) {
++		char *p = dentry_path(dentry, buf, size);
++		if (!IS_ERR(p)) {
++			char *end = mangle_path(buf, p, esc);
++			if (end)
++				res = end - buf;
++		}
++	}
++	seq_commit(m, res);
++
++	return res;
++}
++EXPORT_SYMBOL(seq_dentry);
