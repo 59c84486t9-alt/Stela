@@ -308,8 +308,10 @@ impl CounterEpoch {
 /// A physical minimum on the same retained epoch as the scheduler clock.
 pub(crate) struct MinimumDeadline {
     epoch: CounterEpoch,
+    start: u64,
     target: u64,
-    nominal_ns: u64,
+    minimum_ns: u64,
+    nominal_ns: i64,
 }
 
 impl CounterEpoch {
@@ -322,26 +324,58 @@ impl CounterEpoch {
             .ok_or(WorkError::Unavailable)?;
         let ticks = counter.ticks_for_minimum_ns(minimum_ns)?;
         let target = start.ticks.checked_add(ticks).ok_or(WorkError::Exhausted)?;
+        // The nominal conversion floors. A subnanosecond HPET tick can
+        // share that nanosecond with an earlier tick, so wake one ns later.
         let nominal_ns = self.cpu.source.ns(target)?;
-        if nominal_ns == NONE {
-            return Err(WorkError::Exhausted);
-        }
+        let nominal_ns = i64::try_from(nominal_ns)
+            .ok()
+            .and_then(|ns| ns.checked_add(1))
+            .filter(|ns| *ns != i64::MAX)
+            .ok_or(WorkError::Exhausted)?;
         Ok(MinimumDeadline {
             epoch: self.clone(),
+            start: start.ticks,
             target,
+            minimum_ns,
             nominal_ns,
         })
     }
 }
 
-impl MinimumDeadline {
-    pub(crate) fn ready(&self) -> Result<bool, WorkError> {
+// SAFETY: construction is private to the installed HPET epoch. Every call
+// revalidates that retained source and CPU and releases its sampling scope
+// before returning. The hint uses the nominal conversion of that same epoch.
+unsafe impl stela_linux::owner::MinimumDeadline for MinimumDeadline {
+    fn ready(&self) -> Result<bool, WorkError> {
         Ok(self.epoch.sample()?.ticks >= self.target)
     }
 
-    pub(crate) fn nominal_ns(&self) -> Result<u64, WorkError> {
+    fn wake_ns(&self) -> Result<i64, WorkError> {
         self.epoch.sample()?;
         Ok(self.nominal_ns)
+    }
+
+    fn remaining_quanta_ceil(&self, quantum_us: u64) -> Result<u64, WorkError> {
+        let quantum_ns = quantum_us
+            .checked_mul(1000)
+            .filter(|ns| *ns != 0)
+            .ok_or(WorkError::Exhausted)?;
+        let now = self.epoch.sample()?.ticks;
+        if now >= self.target {
+            return Ok(0);
+        }
+        let elapsed = now
+            .checked_sub(self.start)
+            .ok_or(WorkError::CorruptContext)?;
+        let lower_ns = self.epoch.cpu.source.elapsed_bounds(elapsed)?.lower_ns;
+        let remaining = self
+            .minimum_ns
+            .checked_sub(lower_ns)
+            .filter(|ns| *ns != 0)
+            .ok_or(WorkError::CorruptContext)?;
+        // A fresh delay for this remainder reapplies the HPET edge bound.
+        // The elapsed lower bound never credits more ticks than actually ran.
+        Ok(remaining.div_ceil(quantum_ns))
     }
 }
 

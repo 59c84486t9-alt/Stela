@@ -1,6 +1,7 @@
 //! Explicit short native-root fixture. PM/LAPIC/IDT/HLT effects are
 //! checked; these authored words are not an original Linux timer-wheel test.
 use super::*;
+use stela_linux::owner::MinimumDeadline as _;
 
 struct Words {
     jiffies: AtomicU64,
@@ -49,12 +50,18 @@ fn run(installed: Installed, epoch: Option<CounterEpoch>) -> Result<(), WorkErro
     if let Some(epoch) = &epoch {
         let start = epoch.sample()?;
         let minimum = epoch.minimum_deadline(100_000)?;
-        let nominal = minimum.nominal_ns()?;
+        if minimum.remaining_quanta_ceil(10)? > 10 {
+            return Err(WorkError::CorruptContext);
+        }
         while !minimum.ready()? {
             core::hint::spin_loop();
         }
         let end = epoch.sample()?;
-        if epoch.now_ns()? < nominal || epoch.elapsed_bounds(&start, &end)?.lower_ns < 100_000 {
+        let wake = u64::try_from(minimum.wake_ns()?).map_err(|_| WorkError::CorruptContext)?;
+        if epoch.now_ns()?.saturating_add(1) < wake
+            || minimum.remaining_quanta_ceil(10)? != 0
+            || epoch.elapsed_bounds(&start, &end)?.lower_ns < 100_000
+        {
             return Err(WorkError::CorruptContext);
         }
     }
