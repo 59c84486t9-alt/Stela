@@ -1,0 +1,577 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 22:18:07 -0500
+Subject: [PATCH] refactor(signal): separate original pending signal and queue
+ state
+
+---
+ kernel/Makefile       |   2 +-
+ kernel/signal.c       | 224 +-----------------------------------------
+ kernel/signal_state.c | 214 ++++++++++++++++++++++++++++++++++++++++
+ kernel/signal_state.h |  54 ++++++++++
+ 4 files changed, 270 insertions(+), 224 deletions(-)
+ create mode 100644 kernel/signal_state.c
+ create mode 100644 kernel/signal_state.h
+
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 765c11e09f90c5b972d2a180873fcfdd5acce775..4cb7e3c54ac0c7d480d077047e8a543fd38f1475 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -6,7 +6,7 @@
+ obj-y     = fork.o exec_domain.o exec_state.o panic.o \
+ 	    cpu.o cpu_topology.o exit.o rcuwait_wake.o softirq.o resource.o \
+ 	    sysctl.o capability.o ptrace.o user.o \
+-	    signal.o restart_no_syscall.o sys.o umh.o workqueue.o pid.o task_work.o \
++	    signal.o signal_state.o restart_no_syscall.o sys.o umh.o workqueue.o pid.o task_work.o \
+ 	    extable.o params.o \
+ 	    kthread.o sys_ni.o nsproxy.o nstree.o nscommon.o \
+ 	    notifier.o ksysfs.o cred.o reboot.o \
+diff --git a/kernel/signal.c b/kernel/signal.c
+index a71b946575152f6d48d1ac6885853ff5ca37b92b..51854b8da2acad58dc00f47bdbd11d7b92c9e2cb 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -61,11 +61,7 @@
+ 
+ #include "time/posix-timers.h"
+ 
+-/*
+- * SLAB caches for signal bits.
+- */
+-
+-static struct kmem_cache *sigqueue_cachep;
++#include "signal_state.h"
+ 
+ int print_fatal_signals __read_mostly;
+ 
+@@ -124,76 +120,6 @@ static bool sig_ignored(struct task_struct *t, int sig, bool force)
+ 	return sig_task_ignored(t, sig, force);
+ }
+ 
+-/*
+- * Re-calculate pending state from the set of locally pending
+- * signals, globally pending signals, and blocked signals.
+- */
+-static inline bool has_pending_signals(sigset_t *signal, sigset_t *blocked)
+-{
+-	unsigned long ready;
+-	long i;
+-
+-	switch (_NSIG_WORDS) {
+-	default:
+-		for (i = _NSIG_WORDS, ready = 0; --i >= 0 ;)
+-			ready |= signal->sig[i] &~ blocked->sig[i];
+-		break;
+-
+-	case 4: ready  = signal->sig[3] &~ blocked->sig[3];
+-		ready |= signal->sig[2] &~ blocked->sig[2];
+-		ready |= signal->sig[1] &~ blocked->sig[1];
+-		ready |= signal->sig[0] &~ blocked->sig[0];
+-		break;
+-
+-	case 2: ready  = signal->sig[1] &~ blocked->sig[1];
+-		ready |= signal->sig[0] &~ blocked->sig[0];
+-		break;
+-
+-	case 1: ready  = signal->sig[0] &~ blocked->sig[0];
+-	}
+-	return ready !=	0;
+-}
+-
+-#define PENDING(p,b) has_pending_signals(&(p)->signal, (b))
+-
+-static bool recalc_sigpending_tsk(struct task_struct *t)
+-{
+-	if ((t->jobctl & (JOBCTL_PENDING_MASK | JOBCTL_TRAP_FREEZE)) ||
+-	    PENDING(&t->pending, &t->blocked) ||
+-	    PENDING(&t->signal->shared_pending, &t->blocked) ||
+-	    cgroup_task_frozen(t)) {
+-		set_tsk_thread_flag(t, TIF_SIGPENDING);
+-		return true;
+-	}
+-
+-	/*
+-	 * We must never clear the flag in another thread, or in current
+-	 * when it's possible the current syscall is returning -ERESTART*.
+-	 * So we don't clear it here, and only callers who know they should do.
+-	 */
+-	return false;
+-}
+-
+-void recalc_sigpending(void)
+-{
+-	if (!recalc_sigpending_tsk(current) && !freezing(current)) {
+-		if (unlikely(test_thread_flag(TIF_SIGPENDING)))
+-			clear_thread_flag(TIF_SIGPENDING);
+-	}
+-}
+-EXPORT_SYMBOL(recalc_sigpending);
+-
+-void calculate_sigpending(void)
+-{
+-	/* Have any signals or users of TIF_SIGPENDING been delayed
+-	 * until after fork?
+-	 */
+-	spin_lock_irq(&current->sighand->siglock);
+-	set_tsk_thread_flag(current, TIF_SIGPENDING);
+-	recalc_sigpending();
+-	spin_unlock_irq(&current->sighand->siglock);
+-}
+-
+ /* Given the mask, find the first available signal that should be serviced. */
+ 
+ #define SYNCHRONOUS_MASK \
+@@ -462,80 +388,12 @@ static struct sigqueue *sigqueue_alloc(int sig, struct task_struct *t, gfp_t gfp
+ 	return q;
+ }
+ 
+-static void __sigqueue_free(struct sigqueue *q)
+-{
+-	if (q->flags & SIGQUEUE_PREALLOC) {
+-		posixtimer_sigqueue_putref(q);
+-		return;
+-	}
+-	if (q->ucounts) {
+-		dec_rlimit_put_ucounts(q->ucounts, UCOUNT_RLIMIT_SIGPENDING);
+-		q->ucounts = NULL;
+-	}
+-	kmem_cache_free(sigqueue_cachep, q);
+-}
+-
+-/*
+- * flush_sigqueue_list() can only be invoked without holding sighand::siglock in
+- * the following cases:
+- *
+- *  1) When flushing task::pending _after_ setting task::flags PF_EXITING
+- *
+- *     All functions which try to send a signal to @task will observe PF_EXITING
+- *     and drop the signal.
+- *
+- *  2) When flushing task::signal::shared_pending _after_ the last task in a
+- *     thread group was unhashed and task::sighand is NULL.
+- *
+- *     Nothing can queue a signal anymore because sighand is NULL.
+- */
+-static void flush_sigqueue_list(struct list_head *head)
+-{
+-	struct sigqueue *q, *tmp;
+-
+-	list_for_each_entry_safe(q, tmp, head, list) {
+-		list_del_init(&q->list);
+-		__sigqueue_free(q);
+-	}
+-}
+-
+-void flush_sigqueue(struct sigpending *queue)
+-{
+-	sigemptyset(&queue->signal);
+-	flush_sigqueue_list(&queue->list);
+-}
+-
+ static void sigqueue_dequeue_pending(struct sigpending *queue, struct list_head *head)
+ {
+ 	sigemptyset(&queue->signal);
+ 	list_splice_init(&queue->list, head);
+ }
+ 
+-/*
+- * Flush all pending signals for this kthread.
+- */
+-void flush_signals(struct task_struct *t)
+-{
+-	unsigned long flags;
+-
+-	spin_lock_irqsave(&t->sighand->siglock, flags);
+-	clear_tsk_thread_flag(t, TIF_SIGPENDING);
+-	flush_sigqueue(&t->pending);
+-	flush_sigqueue(&t->signal->shared_pending);
+-	spin_unlock_irqrestore(&t->sighand->siglock, flags);
+-}
+-EXPORT_SYMBOL(flush_signals);
+-
+-void ignore_signals(struct task_struct *t)
+-{
+-	int i;
+-
+-	for (i = 0; i < _NSIG; ++i)
+-		t->sighand->action[i].sa.sa_handler = SIG_IGN;
+-
+-	flush_signals(t);
+-}
+-
+ /*
+  * Flush all handlers for a task.
+  */
+@@ -4975,79 +4833,6 @@ __weak const char *arch_vma_name(struct vm_area_struct *vma)
+ 	return NULL;
+ }
+ 
+-static inline void siginfo_buildtime_checks(void)
+-{
+-	BUILD_BUG_ON(sizeof(struct siginfo) != SI_MAX_SIZE);
+-
+-	/* Verify the offsets in the two siginfos match */
+-#define CHECK_OFFSET(field) \
+-	BUILD_BUG_ON(offsetof(siginfo_t, field) != offsetof(kernel_siginfo_t, field))
+-
+-	/* kill */
+-	CHECK_OFFSET(si_pid);
+-	CHECK_OFFSET(si_uid);
+-
+-	/* timer */
+-	CHECK_OFFSET(si_tid);
+-	CHECK_OFFSET(si_overrun);
+-	CHECK_OFFSET(si_value);
+-
+-	/* rt */
+-	CHECK_OFFSET(si_pid);
+-	CHECK_OFFSET(si_uid);
+-	CHECK_OFFSET(si_value);
+-
+-	/* sigchld */
+-	CHECK_OFFSET(si_pid);
+-	CHECK_OFFSET(si_uid);
+-	CHECK_OFFSET(si_status);
+-	CHECK_OFFSET(si_utime);
+-	CHECK_OFFSET(si_stime);
+-
+-	/* sigfault */
+-	CHECK_OFFSET(si_addr);
+-	CHECK_OFFSET(si_trapno);
+-	CHECK_OFFSET(si_addr_lsb);
+-	CHECK_OFFSET(si_lower);
+-	CHECK_OFFSET(si_upper);
+-	CHECK_OFFSET(si_pkey);
+-	CHECK_OFFSET(si_perf_data);
+-	CHECK_OFFSET(si_perf_type);
+-	CHECK_OFFSET(si_perf_flags);
+-
+-	/* sigpoll */
+-	CHECK_OFFSET(si_band);
+-	CHECK_OFFSET(si_fd);
+-
+-	/* sigsys */
+-	CHECK_OFFSET(si_call_addr);
+-	CHECK_OFFSET(si_syscall);
+-	CHECK_OFFSET(si_arch);
+-#undef CHECK_OFFSET
+-
+-	/* usb asyncio */
+-	BUILD_BUG_ON(offsetof(struct siginfo, si_pid) !=
+-		     offsetof(struct siginfo, si_addr));
+-	if (sizeof(int) == sizeof(void __user *)) {
+-		BUILD_BUG_ON(sizeof_field(struct siginfo, si_pid) !=
+-			     sizeof(void __user *));
+-	} else {
+-		BUILD_BUG_ON((sizeof_field(struct siginfo, si_pid) +
+-			      sizeof_field(struct siginfo, si_uid)) !=
+-			     sizeof(void __user *));
+-		BUILD_BUG_ON(offsetofend(struct siginfo, si_pid) !=
+-			     offsetof(struct siginfo, si_uid));
+-	}
+-#ifdef CONFIG_COMPAT
+-	BUILD_BUG_ON(offsetof(struct compat_siginfo, si_pid) !=
+-		     offsetof(struct compat_siginfo, si_addr));
+-	BUILD_BUG_ON(sizeof_field(struct compat_siginfo, si_pid) !=
+-		     sizeof(compat_uptr_t));
+-	BUILD_BUG_ON(sizeof_field(struct compat_siginfo, si_pid) !=
+-		     sizeof_field(struct siginfo, si_pid));
+-#endif
+-}
+-
+ #if defined(CONFIG_SYSCTL)
+ static const struct ctl_table signal_debug_table[] = {
+ #ifdef CONFIG_SYSCTL_EXCEPTION_TRACE
+@@ -5080,13 +4865,6 @@ static int __init init_signal_sysctls(void)
+ early_initcall(init_signal_sysctls);
+ #endif /* CONFIG_SYSCTL */
+ 
+-void __init signals_init(void)
+-{
+-	siginfo_buildtime_checks();
+-
+-	sigqueue_cachep = KMEM_CACHE(sigqueue, SLAB_PANIC | SLAB_ACCOUNT);
+-}
+-
+ #ifdef CONFIG_KGDB_KDB
+ #include <linux/kdb.h>
+ /*
+diff --git a/kernel/signal_state.c b/kernel/signal_state.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..5545fef9abd6d95ee2e9878b919ca346cd6b5b7d
+--- /dev/null
++++ b/kernel/signal_state.c
+@@ -0,0 +1,214 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *  linux/kernel/signal.c
++ *
++ *  Copyright (C) 1991, 1992  Linus Torvalds
++ *
++ *  1997-11-02  Modified for POSIX.1b signals by Richard Henderson
++ *
++ *  2003-06-02  Jim Houston - Concurrent Computer Corp.
++ *		Changes to use preallocated sigqueue structures
++ *		to allow signals to be sent reliably.
++ */
++
++#include <linux/cgroup.h>
++#include <linux/compat.h>
++#include <linux/export.h>
++#include <linux/freezer.h>
++#include <linux/init.h>
++#include <linux/posix-timers.h>
++#include <linux/sched/signal.h>
++#include <linux/slab.h>
++#include <linux/user_namespace.h>
++
++#include "signal_state.h"
++
++struct kmem_cache *sigqueue_cachep;
++
++#define PENDING(p,b) has_pending_signals(&(p)->signal, (b))
++
++bool recalc_sigpending_tsk(struct task_struct *t)
++{
++	if ((t->jobctl & (JOBCTL_PENDING_MASK | JOBCTL_TRAP_FREEZE)) ||
++	    PENDING(&t->pending, &t->blocked) ||
++	    PENDING(&t->signal->shared_pending, &t->blocked) ||
++	    cgroup_task_frozen(t)) {
++		set_tsk_thread_flag(t, TIF_SIGPENDING);
++		return true;
++	}
++
++	/*
++	 * We must never clear the flag in another thread, or in current
++	 * when it's possible the current syscall is returning -ERESTART*.
++	 * So we don't clear it here, and only callers who know they should do.
++	 */
++	return false;
++}
++
++void recalc_sigpending(void)
++{
++	if (!recalc_sigpending_tsk(current) && !freezing(current)) {
++		if (unlikely(test_thread_flag(TIF_SIGPENDING)))
++			clear_thread_flag(TIF_SIGPENDING);
++	}
++}
++EXPORT_SYMBOL(recalc_sigpending);
++
++void calculate_sigpending(void)
++{
++	/* Have any signals or users of TIF_SIGPENDING been delayed
++	 * until after fork?
++	 */
++	spin_lock_irq(&current->sighand->siglock);
++	set_tsk_thread_flag(current, TIF_SIGPENDING);
++	recalc_sigpending();
++	spin_unlock_irq(&current->sighand->siglock);
++}
++
++void __sigqueue_free(struct sigqueue *q)
++{
++	if (q->flags & SIGQUEUE_PREALLOC) {
++		posixtimer_sigqueue_putref(q);
++		return;
++	}
++	if (q->ucounts) {
++		dec_rlimit_put_ucounts(q->ucounts, UCOUNT_RLIMIT_SIGPENDING);
++		q->ucounts = NULL;
++	}
++	kmem_cache_free(sigqueue_cachep, q);
++}
++
++/*
++ * flush_sigqueue_list() can only be invoked without holding sighand::siglock in
++ * the following cases:
++ *
++ *  1) When flushing task::pending _after_ setting task::flags PF_EXITING
++ *
++ *     All functions which try to send a signal to @task will observe PF_EXITING
++ *     and drop the signal.
++ *
++ *  2) When flushing task::signal::shared_pending _after_ the last task in a
++ *     thread group was unhashed and task::sighand is NULL.
++ *
++ *     Nothing can queue a signal anymore because sighand is NULL.
++ */
++void flush_sigqueue_list(struct list_head *head)
++{
++	struct sigqueue *q, *tmp;
++
++	list_for_each_entry_safe(q, tmp, head, list) {
++		list_del_init(&q->list);
++		__sigqueue_free(q);
++	}
++}
++
++void flush_sigqueue(struct sigpending *queue)
++{
++	sigemptyset(&queue->signal);
++	flush_sigqueue_list(&queue->list);
++}
++
++/*
++ * Flush all pending signals for this kthread.
++ */
++void flush_signals(struct task_struct *t)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&t->sighand->siglock, flags);
++	clear_tsk_thread_flag(t, TIF_SIGPENDING);
++	flush_sigqueue(&t->pending);
++	flush_sigqueue(&t->signal->shared_pending);
++	spin_unlock_irqrestore(&t->sighand->siglock, flags);
++}
++EXPORT_SYMBOL(flush_signals);
++
++void ignore_signals(struct task_struct *t)
++{
++	int i;
++
++	for (i = 0; i < _NSIG; ++i)
++		t->sighand->action[i].sa.sa_handler = SIG_IGN;
++
++	flush_signals(t);
++}
++
++static inline void siginfo_buildtime_checks(void)
++{
++	BUILD_BUG_ON(sizeof(struct siginfo) != SI_MAX_SIZE);
++
++	/* Verify the offsets in the two siginfos match */
++#define CHECK_OFFSET(field) \
++	BUILD_BUG_ON(offsetof(siginfo_t, field) != offsetof(kernel_siginfo_t, field))
++
++	/* kill */
++	CHECK_OFFSET(si_pid);
++	CHECK_OFFSET(si_uid);
++
++	/* timer */
++	CHECK_OFFSET(si_tid);
++	CHECK_OFFSET(si_overrun);
++	CHECK_OFFSET(si_value);
++
++	/* rt */
++	CHECK_OFFSET(si_pid);
++	CHECK_OFFSET(si_uid);
++	CHECK_OFFSET(si_value);
++
++	/* sigchld */
++	CHECK_OFFSET(si_pid);
++	CHECK_OFFSET(si_uid);
++	CHECK_OFFSET(si_status);
++	CHECK_OFFSET(si_utime);
++	CHECK_OFFSET(si_stime);
++
++	/* sigfault */
++	CHECK_OFFSET(si_addr);
++	CHECK_OFFSET(si_trapno);
++	CHECK_OFFSET(si_addr_lsb);
++	CHECK_OFFSET(si_lower);
++	CHECK_OFFSET(si_upper);
++	CHECK_OFFSET(si_pkey);
++	CHECK_OFFSET(si_perf_data);
++	CHECK_OFFSET(si_perf_type);
++	CHECK_OFFSET(si_perf_flags);
++
++	/* sigpoll */
++	CHECK_OFFSET(si_band);
++	CHECK_OFFSET(si_fd);
++
++	/* sigsys */
++	CHECK_OFFSET(si_call_addr);
++	CHECK_OFFSET(si_syscall);
++	CHECK_OFFSET(si_arch);
++#undef CHECK_OFFSET
++
++	/* usb asyncio */
++	BUILD_BUG_ON(offsetof(struct siginfo, si_pid) !=
++		     offsetof(struct siginfo, si_addr));
++	if (sizeof(int) == sizeof(void __user *)) {
++		BUILD_BUG_ON(sizeof_field(struct siginfo, si_pid) !=
++			     sizeof(void __user *));
++	} else {
++		BUILD_BUG_ON((sizeof_field(struct siginfo, si_pid) +
++			      sizeof_field(struct siginfo, si_uid)) !=
++			     sizeof(void __user *));
++		BUILD_BUG_ON(offsetofend(struct siginfo, si_pid) !=
++			     offsetof(struct siginfo, si_uid));
++	}
++#ifdef CONFIG_COMPAT
++	BUILD_BUG_ON(offsetof(struct compat_siginfo, si_pid) !=
++		     offsetof(struct compat_siginfo, si_addr));
++	BUILD_BUG_ON(sizeof_field(struct compat_siginfo, si_pid) !=
++		     sizeof(compat_uptr_t));
++	BUILD_BUG_ON(sizeof_field(struct compat_siginfo, si_pid) !=
++		     sizeof_field(struct siginfo, si_pid));
++#endif
++}
++
++void __init signals_init(void)
++{
++	siginfo_buildtime_checks();
++
++	sigqueue_cachep = KMEM_CACHE(sigqueue, SLAB_PANIC | SLAB_ACCOUNT);
++}
+diff --git a/kernel/signal_state.h b/kernel/signal_state.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..a148f935168797a1eca35730134785c7b7939932
+--- /dev/null
++++ b/kernel/signal_state.h
+@@ -0,0 +1,54 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *  linux/kernel/signal.c
++ *
++ *  Copyright (C) 1991, 1992  Linus Torvalds
++ *
++ *  1997-11-02  Modified for POSIX.1b signals by Richard Henderson
++ *
++ *  2003-06-02  Jim Houston - Concurrent Computer Corp.
++ *		Changes to use preallocated sigqueue structures
++ *		to allow signals to be sent reliably.
++ */
++
++#ifndef _KERNEL_SIGNAL_STATE_H
++#define _KERNEL_SIGNAL_STATE_H
++
++#include <linux/signal.h>
++
++extern struct kmem_cache *sigqueue_cachep;
++bool recalc_sigpending_tsk(struct task_struct *t);
++void __sigqueue_free(struct sigqueue *q);
++void flush_sigqueue_list(struct list_head *head);
++
++/*
++ * Re-calculate pending state from the set of locally pending
++ * signals, globally pending signals, and blocked signals.
++ */
++static inline bool has_pending_signals(sigset_t *signal, sigset_t *blocked)
++{
++	unsigned long ready;
++	long i;
++
++	switch (_NSIG_WORDS) {
++	default:
++		for (i = _NSIG_WORDS, ready = 0; --i >= 0 ;)
++			ready |= signal->sig[i] &~ blocked->sig[i];
++		break;
++
++	case 4: ready  = signal->sig[3] &~ blocked->sig[3];
++		ready |= signal->sig[2] &~ blocked->sig[2];
++		ready |= signal->sig[1] &~ blocked->sig[1];
++		ready |= signal->sig[0] &~ blocked->sig[0];
++		break;
++
++	case 2: ready  = signal->sig[1] &~ blocked->sig[1];
++		ready |= signal->sig[0] &~ blocked->sig[0];
++		break;
++
++	case 1: ready  = signal->sig[0] &~ blocked->sig[0];
++	}
++	return ready !=	0;
++}
++
++#endif

@@ -124,6 +124,8 @@
 /kernel/ucount.c
 /kernel/cred.c
 /kernel/signal.c
+/kernel/signal_state.c
+/kernel/signal_state.h
 /kernel/restart_no_syscall.c
 /fs/fs_struct.c
 /fs/file.c
