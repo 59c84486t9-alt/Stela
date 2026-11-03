@@ -122,6 +122,7 @@
 /kernel/pid.c
 /kernel/nsproxy.c
 /kernel/ucount.c
+/kernel/cred.c
 /kernel/signal.c
 /kernel/restart_no_syscall.c
 /fs/fs_struct.c
