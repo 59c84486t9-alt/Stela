@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 11:52:22 -0500
+Subject: [PATCH] refactor(fs): link mount lookup with its shared hash table
+
+---
+ fs/mount_cache.c | 24 ++++++++++++++++++++++++
+ fs/mount_cache.h | 10 ++++++++++
+ fs/namespace.c   | 31 -------------------------------
+ 3 files changed, 34 insertions(+), 31 deletions(-)
+
+diff --git a/fs/mount_cache.c b/fs/mount_cache.c
+index 562195453b4071d65ab999ebe013ae53812979d5..79ef93cdfc2fb1b2631c4129fd27aeed0582ead4 100644
+--- a/fs/mount_cache.c
++++ b/fs/mount_cache.c
+@@ -4,6 +4,7 @@
+  */
+ #include <linux/fs.h>
+ #include <linux/memblock.h>
++#include <linux/rculist.h>
+ #include <linux/slab.h>
+ 
+ #include "mount.h"
+@@ -51,3 +52,26 @@ void __init mnt_cache_init(void)
+ 	if (!mount_hashtable || !mountpoint_hashtable)
+ 		panic("Failed to allocate mount hash table\n");
+ }
++
++/**
++ * __lookup_mnt - mount hash lookup
++ * @mnt:	parent mount
++ * @dentry:	dentry of mountpoint
++ *
++ * If @mnt has a child mount @c mounted on @dentry find and return it.
++ * Caller must either hold the spinlock component of @mount_lock or
++ * hold rcu_read_lock(), sample the seqcount component before the call
++ * and recheck it afterwards.
++ *
++ * Return: The child of @mnt mounted on @dentry or %NULL.
++ */
++struct mount *__lookup_mnt(struct vfsmount *mnt, struct dentry *dentry)
++{
++	struct hlist_head *head = m_hash(mnt, dentry);
++	struct mount *p;
++
++	hlist_for_each_entry_rcu(p, head, mnt_hash)
++		if (&p->mnt_parent->mnt == mnt && p->mnt_mountpoint == dentry)
++			return p;
++	return NULL;
++}
+diff --git a/fs/mount_cache.h b/fs/mount_cache.h
+index bffb7838558663952b0a2b59d292c73eca3f58e9..101658b85882efaba8a264f9b2dfcd21d9eebcb7 100644
+--- a/fs/mount_cache.h
++++ b/fs/mount_cache.h
+@@ -2,7 +2,9 @@
+ #ifndef _FS_MOUNT_CACHE_H
+ #define _FS_MOUNT_CACHE_H
+ 
++#include <linux/cache.h>
+ #include <linux/init.h>
++#include <linux/list.h>
+ 
+ extern unsigned int m_hash_mask;
+ extern unsigned int m_hash_shift;
+@@ -14,4 +16,12 @@ extern struct kmem_cache *mnt_cache;
+ 
+ void __init mnt_cache_init(void);
+ 
++static inline struct hlist_head *m_hash(struct vfsmount *mnt, struct dentry *dentry)
++{
++	unsigned long tmp = ((unsigned long)mnt / L1_CACHE_BYTES);
++	tmp += ((unsigned long)dentry / L1_CACHE_BYTES);
++	tmp = tmp + (tmp >> m_hash_shift);
++	return &mount_hashtable[tmp & m_hash_mask];
++}
++
+ #endif
+diff --git a/fs/namespace.c b/fs/namespace.c
+index fdf8ad25ee863f3d1672cb8b4a0dc25fcd780514..c20891726f0f4841794464f21e41a0227f743b91 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -173,14 +173,6 @@ static inline void unlock_mount_hash(void)
+ 	write_sequnlock(&mount_lock);
+ }
+ 
+-static inline struct hlist_head *m_hash(struct vfsmount *mnt, struct dentry *dentry)
+-{
+-	unsigned long tmp = ((unsigned long)mnt / L1_CACHE_BYTES);
+-	tmp += ((unsigned long)dentry / L1_CACHE_BYTES);
+-	tmp = tmp + (tmp >> m_hash_shift);
+-	return &mount_hashtable[tmp & m_hash_mask];
+-}
+-
+ static inline struct hlist_head *mp_hash(struct dentry *dentry)
+ {
+ 	unsigned long tmp = ((unsigned long)dentry / L1_CACHE_BYTES);
+@@ -756,29 +748,6 @@ static bool legitimize_mnt(struct vfsmount *bastard, unsigned seq)
+ 	return false;
+ }
+ 
+-/**
+- * __lookup_mnt - mount hash lookup
+- * @mnt:	parent mount
+- * @dentry:	dentry of mountpoint
+- *
+- * If @mnt has a child mount @c mounted on @dentry find and return it.
+- * Caller must either hold the spinlock component of @mount_lock or
+- * hold rcu_read_lock(), sample the seqcount component before the call
+- * and recheck it afterwards.
+- *
+- * Return: The child of @mnt mounted on @dentry or %NULL.
+- */
+-struct mount *__lookup_mnt(struct vfsmount *mnt, struct dentry *dentry)
+-{
+-	struct hlist_head *head = m_hash(mnt, dentry);
+-	struct mount *p;
+-
+-	hlist_for_each_entry_rcu(p, head, mnt_hash)
+-		if (&p->mnt_parent->mnt == mnt && p->mnt_mountpoint == dentry)
+-			return p;
+-	return NULL;
+-}
+-
+ /**
+  * lookup_mnt - Return the child mount mounted at given location
+  * @path:	location in the namespace
