@@ -42,6 +42,10 @@ pub struct HostedWake {
 }
 
 impl HostedWake {
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
     pub fn wake(&self) -> Result<(), WorkError> {
         self.execution.check_current()?;
         if self.signal.sequence.load(Ordering::Acquire) != self.sequence {
@@ -68,6 +72,13 @@ impl<const N: usize> HostedRuntime<N> {
         // SAFETY: the successful hook returned without a switch or a borrow.
         let task = unsafe { &mut *self.task(index) };
         task.binding = Some(binding);
+        self.current_wake()
+    }
+
+    pub fn current_wake(&self) -> Result<HostedWake, WorkError> {
+        let context = self.current_context()?;
+        // SAFETY: current_context verified this exact executing stack.
+        let task = unsafe { &*self.task(self.current.get()) };
         Ok(HostedWake {
             execution: Arc::clone(&self.queue.execution),
             signal: task.signal.clone(),
@@ -104,6 +115,16 @@ impl<const N: usize> HostedRuntime<N> {
 
     pub fn yield_now(self: Pin<&Self>) -> Result<(), WorkError> {
         self.suspend(LeaveReason::Yield).map(|_| ())
+    }
+
+    pub fn reschedule(self: Pin<&Self>) -> Result<(), WorkError> {
+        self.suspend(LeaveReason::Reschedule).map(|_| ())
+    }
+
+    pub fn service_current(&self) -> Result<bool, WorkError> {
+        self.current_context()?;
+        // SAFETY: the checked current task remains live on this stack.
+        Ok(unsafe { (*self.task(self.current.get())).lane == Lane::Service })
     }
 
     /// Park after preparing the original source wait. A concurrent cooperative

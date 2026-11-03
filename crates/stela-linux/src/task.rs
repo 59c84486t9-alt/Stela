@@ -5,6 +5,10 @@
 //! NORMAL nice, FIFO and inherited ranks commit against retained job identities
 //! on the same checked queue; native IRQ delivery remains the service's owner.
 mod factory;
+#[cfg(all(feature = "hosted-test-support", target_os = "linux"))]
+mod hosted;
+#[cfg(all(feature = "hosted-test-support", target_os = "linux"))]
+pub use hosted::HostedTaskBinding;
 mod native;
 pub mod runtime;
 use alloc::sync::Arc;
@@ -744,26 +748,8 @@ impl<const N: usize> TaskBinding<N> {
         let view = runtime.current_context()?;
         self.validate(&view)?;
         let scope = Scope { runtime };
-        // Pin the stack-local capability; it may not move/escape while
-        // suspended C frames borrow it. Pin<&Runtime> is shared, never &mut.
-        let scope = core::pin::pin!(scope);
-        let pointer = scope.as_ref().get_ref() as *const Scope<'_, N> as *mut c_void;
-        // SAFETY: task/current and immovable scoped capability above.
-        status(unsafe {
-            stela_linux_task_scope_begin(self.task.as_ptr(), &Self::SCOPE_OPS, pointer)
-        })?;
-        // SAFETY: caller's no-unwind/no-escape body contract keeps this scope live.
-        unsafe { body(context) };
-        // SAFETY: body returned only after Linux exit and restored task state.
-        let ended = unsafe { stela_linux_task_scope_end(self.task.as_ptr()) };
-        // A returning error would destroy a scope C might still keep. This is
-        // a fail-closed contract violation, not a recoverable lifetime release.
-        if ended != 0 {
-            // SAFETY: an escaped C borrow cannot be released or unwound. Stop
-            // before destroying its scoped stack capability or borrowed owners.
-            unsafe { core::arch::asm!("ud2", options(noreturn)) };
-        }
-        Ok(())
+        // SAFETY: validated actual native current and caller's scoped body.
+        unsafe { run_scope(self.task, &Self::SCOPE_OPS, scope, body, context) }
     }
     unsafe extern "C" fn terminate(scope: *mut c_void) -> ! {
         // SAFETY: run_scoped retained this actual pinned shared Runtime scope.
@@ -844,6 +830,35 @@ impl<const N: usize> TaskBinding<N> {
         Ok(())
     }
 }
+/// Run one scoped C body on an independently validated bound continuation.
+///
+/// # Safety
+/// The caller holds current and retains the task, body and all borrowed
+/// providers across any suspension. The body must return with its C scope
+/// quiescent and may not unwind or let the capability escape.
+unsafe fn run_scope<S>(
+    task: NonNull<CTask>,
+    ops: &'static ScopeOps,
+    scope: S,
+    body: unsafe extern "C" fn(*mut c_void),
+    context: *mut c_void,
+) -> Result<(), WorkError> {
+    let scope = core::pin::pin!(scope);
+    let pointer = core::ptr::from_ref(scope.as_ref().get_ref())
+        .cast_mut()
+        .cast();
+    // SAFETY: exact validated task and stack-local, pinned capability.
+    status(unsafe { stela_linux_task_scope_begin(task.as_ptr(), ops, pointer) })?;
+    // SAFETY: caller retains the body/context and forbids unwind or escape.
+    unsafe { body(context) };
+    // SAFETY: the same original source body returned on its own stack.
+    if unsafe { stela_linux_task_scope_end(task.as_ptr()) } != 0 {
+        // SAFETY: retain the live scope and all owners on uncertain C exit.
+        unsafe { core::arch::asm!("ud2", options(noreturn)) };
+    }
+    Ok(())
+}
+
 struct Scope<'a, const N: usize> {
     runtime: Pin<&'a Runtime<N>>,
 }

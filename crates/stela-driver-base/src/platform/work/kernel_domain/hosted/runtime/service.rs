@@ -46,6 +46,16 @@ impl<const N: usize> HostedRuntime<N> {
         self.service()?.deadlines.borrow().validate_batch(batch)
     }
 
+    pub fn reschedule_requested(&self) -> Result<bool, WorkError> {
+        if self.service_current()? {
+            return Ok(false);
+        }
+        match &self.service {
+            Some(service) if !service.retired.get() => service.deadlines.borrow_mut().due(),
+            _ => Ok(false),
+        }
+    }
+
     pub fn service_raised_work(&self) -> Result<DomainRaised<HostedDomain>, WorkError> {
         self.service()?.deadlines.borrow().raised_work()
     }
