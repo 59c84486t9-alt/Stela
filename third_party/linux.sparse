@@ -141,6 +141,7 @@
 /mm/folio_wait.c
 /mm/pagecache_wait.h
 /mm/page-writeback.c
+/mm/writeback_folio.c
 /mm/writeback_domain.c
 /mm/writeback_domain.h
 /mm/init-mm.c

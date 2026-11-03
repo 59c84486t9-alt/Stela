@@ -139,6 +139,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/mm/shrinker.c")),
             PathBuf::from(format!("{LINUX}/mm/workingset.c")),
             PathBuf::from(format!("{LINUX}/mm/writeback_domain.c")),
+            PathBuf::from(format!("{LINUX}/mm/writeback_folio.c")),
             PathBuf::from(format!("{LINUX}/mm/backing-dev-inode.c")),
             PathBuf::from(format!("{LINUX}/kernel/pid.c")),
             PathBuf::from(format!("{LINUX}/kernel/task_rcu.c")),

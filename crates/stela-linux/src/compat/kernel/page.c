@@ -91,6 +91,7 @@ static bool in_callback;
  * it, and its page counters, which nothing moves. */
 struct pglist_data contig_page_data;
 atomic_long_t vm_node_stat[NR_VM_NODE_STAT_ITEMS];
+atomic_long_t vm_zone_stat[NR_VM_ZONE_STAT_ITEMS];
 atomic_long_t _totalram_pages __read_mostly;
 DEFINE_STATIC_KEY_MAYBE(CONFIG_INIT_ON_FREE_DEFAULT_ON, init_on_free);
 
@@ -218,6 +219,7 @@ bool stela_linux_page_request_blocking(u32 gfp)
 static void initialize_page(struct page *page)
 {
 	memset(page, 0, sizeof(*page));
+	set_page_zone(page, ZONE_NORMAL);
 	INIT_LIST_HEAD(&page->lru);
 	atomic_set(&page->_mapcount, -1);
 	set_page_count(page, 0);
