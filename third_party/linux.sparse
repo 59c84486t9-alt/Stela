@@ -65,6 +65,8 @@
 /kernel/sched/swait.c
 /kernel/sched/completion.c
 /kernel/exit.c
+/kernel/task_rcu.c
+/kernel/reboot.c
 /kernel/Makefile
 /kernel/rcu/update.c
 /kernel/rcu/rcu.h
