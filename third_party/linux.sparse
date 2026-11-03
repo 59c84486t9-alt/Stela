@@ -54,6 +54,7 @@
 /kernel/locking/mutex.h
 /kernel/locking/ww_mutex.h
 /kernel/sched/core.c
+/kernel/sched/user_affinity.c
 /kernel/sched/fork_backend.h
 /kernel/sched/fork_metadata.c
 /kernel/sched/fork_load.c

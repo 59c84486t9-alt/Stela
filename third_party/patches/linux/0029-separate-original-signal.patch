@@ -1,0 +1,355 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 22:36:13 -0500
+Subject: [PATCH] refactor(fork): separate original signal and affinity
+ lifecycle helpers
+
+---
+ kernel/sched/Makefile        |  2 +-
+ kernel/sched/core.c          | 57 --------------------------
+ kernel/sched/user_affinity.c | 79 ++++++++++++++++++++++++++++++++++++
+ kernel/signal.c              | 69 -------------------------------
+ kernel/signal_state.c        | 69 +++++++++++++++++++++++++++++++
+ 5 files changed, 149 insertions(+), 127 deletions(-)
+ create mode 100644 kernel/sched/user_affinity.c
+
+diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
+index 1058c317bac288691143db66734f03796eb345a5..5e7c0dfd7422f6a08dbb54e8e2421cd7541d10cd 100644
+--- a/kernel/sched/Makefile
++++ b/kernel/sched/Makefile
+@@ -38,7 +38,7 @@ endif
+ # These compilation units have roughly the same size and complexity - so their
+ # build parallelizes well and finishes roughly at once:
+ #
+-obj-y += core.o wait_support.o
++obj-y += core.o wait_support.o user_affinity.o
+ obj-y += fair.o
+ obj-y += build_policy.o
+ obj-y += build_utility.o
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 64427c1e88de3f2e0af1ce09591a06577fe6793b..b21869d3ceb7adb0932b795938dc551354c68eca 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -2747,63 +2747,6 @@ void set_cpus_allowed_force(struct task_struct *p, const struct cpumask *new_mas
+ 	kfree_rcu((union cpumask_rcuhead *)ac.user_mask, rcu);
+ }
+ 
+-int dup_user_cpus_ptr(struct task_struct *dst, struct task_struct *src,
+-		      int node)
+-{
+-	cpumask_t *user_mask;
+-	unsigned long flags;
+-
+-	/*
+-	 * Always clear dst->user_cpus_ptr first as their user_cpus_ptr's
+-	 * may differ by now due to racing.
+-	 */
+-	dst->user_cpus_ptr = NULL;
+-
+-	/*
+-	 * This check is racy and losing the race is a valid situation.
+-	 * It is not worth the extra overhead of taking the pi_lock on
+-	 * every fork/clone.
+-	 */
+-	if (data_race(!src->user_cpus_ptr))
+-		return 0;
+-
+-	user_mask = alloc_user_cpus_ptr(node);
+-	if (!user_mask)
+-		return -ENOMEM;
+-
+-	/*
+-	 * Use pi_lock to protect content of user_cpus_ptr
+-	 *
+-	 * Though unlikely, user_cpus_ptr can be reset to NULL by a concurrent
+-	 * set_cpus_allowed_force().
+-	 */
+-	raw_spin_lock_irqsave(&src->pi_lock, flags);
+-	if (src->user_cpus_ptr) {
+-		swap(dst->user_cpus_ptr, user_mask);
+-		cpumask_copy(dst->user_cpus_ptr, src->user_cpus_ptr);
+-	}
+-	raw_spin_unlock_irqrestore(&src->pi_lock, flags);
+-
+-	if (unlikely(user_mask))
+-		kfree(user_mask);
+-
+-	return 0;
+-}
+-
+-static inline struct cpumask *clear_user_cpus_ptr(struct task_struct *p)
+-{
+-	struct cpumask *user_mask = NULL;
+-
+-	swap(p->user_cpus_ptr, user_mask);
+-
+-	return user_mask;
+-}
+-
+-void release_user_cpus_ptr(struct task_struct *p)
+-{
+-	kfree(clear_user_cpus_ptr(p));
+-}
+-
+ /*
+  * This function is wildly self concurrent; here be dragons.
+  *
+diff --git a/kernel/sched/user_affinity.c b/kernel/sched/user_affinity.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..fa230b4f5fd24fc314add9b43e68dd94de83a5fe
+--- /dev/null
++++ b/kernel/sched/user_affinity.c
+@@ -0,0 +1,79 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *  kernel/sched/core.c
++ *
++ *  Core kernel CPU scheduler code
++ *
++ *  Copyright (C) 1991-2002  Linus Torvalds
++ *  Copyright (C) 1998-2024  Ingo Molnar, Red Hat
++ */
++#include <linux/cpumask.h>
++#include <linux/sched.h>
++#include <linux/slab.h>
++
++static cpumask_t *alloc_user_cpus_ptr(int node)
++{
++	/*
++	 * See set_cpus_allowed_force() above for the rcu_head usage.
++	 */
++	int size = max_t(int, cpumask_size(), sizeof(struct rcu_head));
++
++	return kmalloc_node(size, GFP_KERNEL, node);
++}
++
++int dup_user_cpus_ptr(struct task_struct *dst, struct task_struct *src,
++		      int node)
++{
++	cpumask_t *user_mask;
++	unsigned long flags;
++
++	/*
++	 * Always clear dst->user_cpus_ptr first as their user_cpus_ptr's
++	 * may differ by now due to racing.
++	 */
++	dst->user_cpus_ptr = NULL;
++
++	/*
++	 * This check is racy and losing the race is a valid situation.
++	 * It is not worth the extra overhead of taking the pi_lock on
++	 * every fork/clone.
++	 */
++	if (data_race(!src->user_cpus_ptr))
++		return 0;
++
++	user_mask = alloc_user_cpus_ptr(node);
++	if (!user_mask)
++		return -ENOMEM;
++
++	/*
++	 * Use pi_lock to protect content of user_cpus_ptr
++	 *
++	 * Though unlikely, user_cpus_ptr can be reset to NULL by a concurrent
++	 * set_cpus_allowed_force().
++	 */
++	raw_spin_lock_irqsave(&src->pi_lock, flags);
++	if (src->user_cpus_ptr) {
++		swap(dst->user_cpus_ptr, user_mask);
++		cpumask_copy(dst->user_cpus_ptr, src->user_cpus_ptr);
++	}
++	raw_spin_unlock_irqrestore(&src->pi_lock, flags);
++
++	if (unlikely(user_mask))
++		kfree(user_mask);
++
++	return 0;
++}
++
++static inline struct cpumask *clear_user_cpus_ptr(struct task_struct *p)
++{
++	struct cpumask *user_mask = NULL;
++
++	swap(p->user_cpus_ptr, user_mask);
++
++	return user_mask;
++}
++
++void release_user_cpus_ptr(struct task_struct *p)
++{
++	kfree(clear_user_cpus_ptr(p));
++}
+diff --git a/kernel/signal.c b/kernel/signal.c
+index 51854b8da2acad58dc00f47bdbd11d7b92c9e2cb..52f4baba2023f7178199223a1ef846562fb5f61f 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -186,39 +186,6 @@ static inline void print_dropped_signal(int sig)
+ 				current->comm, current->pid, sig);
+ }
+ 
+-/**
+- * task_set_jobctl_pending - set jobctl pending bits
+- * @task: target task
+- * @mask: pending bits to set
+- *
+- * Clear @mask from @task->jobctl.  @mask must be subset of
+- * %JOBCTL_PENDING_MASK | %JOBCTL_STOP_CONSUME | %JOBCTL_STOP_SIGMASK |
+- * %JOBCTL_TRAPPING.  If stop signo is being set, the existing signo is
+- * cleared.  If @task is already being killed or exiting, this function
+- * becomes noop.
+- *
+- * CONTEXT:
+- * Must be called with @task->sighand->siglock held.
+- *
+- * RETURNS:
+- * %true if @mask is set, %false if made noop because @task was dying.
+- */
+-bool task_set_jobctl_pending(struct task_struct *task, unsigned long mask)
+-{
+-	BUG_ON(mask & ~(JOBCTL_PENDING_MASK | JOBCTL_STOP_CONSUME |
+-			JOBCTL_STOP_SIGMASK | JOBCTL_TRAPPING));
+-	BUG_ON((mask & JOBCTL_TRAPPING) && !(mask & JOBCTL_PENDING_MASK));
+-
+-	if (unlikely(fatal_signal_pending(task) || (task->flags & PF_EXITING)))
+-		return false;
+-
+-	if (mask & JOBCTL_STOP_SIGMASK)
+-		task->jobctl &= ~JOBCTL_STOP_SIGMASK;
+-
+-	task->jobctl |= mask;
+-	return true;
+-}
+-
+ /**
+  * task_clear_jobctl_trapping - clear jobctl trapping bit
+  * @task: target task
+@@ -310,21 +277,6 @@ static bool task_participate_group_stop(struct task_struct *task)
+ 	return false;
+ }
+ 
+-void task_join_group_stop(struct task_struct *task)
+-{
+-	unsigned long mask = current->jobctl & JOBCTL_STOP_SIGMASK;
+-	struct signal_struct *sig = current->signal;
+-
+-	if (sig->group_stop_count) {
+-		sig->group_stop_count++;
+-		mask |= JOBCTL_STOP_CONSUME;
+-	} else if (!(sig->flags & SIGNAL_STOP_STOPPED))
+-		return;
+-
+-	/* Have the new thread join an on-going signal group stop */
+-	task_set_jobctl_pending(task, mask | JOBCTL_STOP_PENDING);
+-}
+-
+ static struct ucounts *sig_get_ucounts(struct task_struct *t, int sig,
+ 				       int override_rlimit)
+ {
+@@ -394,27 +346,6 @@ static void sigqueue_dequeue_pending(struct sigpending *queue, struct list_head
+ 	list_splice_init(&queue->list, head);
+ }
+ 
+-/*
+- * Flush all handlers for a task.
+- */
+-
+-void
+-flush_signal_handlers(struct task_struct *t, int force_default)
+-{
+-	int i;
+-	struct k_sigaction *ka = &t->sighand->action[0];
+-	for (i = _NSIG ; i != 0 ; i--) {
+-		if (force_default || ka->sa.sa_handler != SIG_IGN)
+-			ka->sa.sa_handler = SIG_DFL;
+-		ka->sa.sa_flags = 0;
+-#ifdef __ARCH_HAS_SA_RESTORER
+-		ka->sa.sa_restorer = NULL;
+-#endif
+-		sigemptyset(&ka->sa.sa_mask);
+-		ka++;
+-	}
+-}
+-
+ bool unhandled_signal(struct task_struct *tsk, int sig)
+ {
+ 	void __user *handler = tsk->sighand->action[sig-1].sa.sa_handler;
+diff --git a/kernel/signal_state.c b/kernel/signal_state.c
+index 5545fef9abd6d95ee2e9878b919ca346cd6b5b7d..e581b261d57a24b45f8401f0380b8c6bc6e27cb6 100644
+--- a/kernel/signal_state.c
++++ b/kernel/signal_state.c
+@@ -133,6 +133,75 @@ void ignore_signals(struct task_struct *t)
+ 	flush_signals(t);
+ }
+ 
++/**
++ * task_set_jobctl_pending - set jobctl pending bits
++ * @task: target task
++ * @mask: pending bits to set
++ *
++ * Clear @mask from @task->jobctl.  @mask must be subset of
++ * %JOBCTL_PENDING_MASK | %JOBCTL_STOP_CONSUME | %JOBCTL_STOP_SIGMASK |
++ * %JOBCTL_TRAPPING.  If stop signo is being set, the existing signo is
++ * cleared.  If @task is already being killed or exiting, this function
++ * becomes noop.
++ *
++ * CONTEXT:
++ * Must be called with @task->sighand->siglock held.
++ *
++ * RETURNS:
++ * %true if @mask is set, %false if made noop because @task was dying.
++ */
++bool task_set_jobctl_pending(struct task_struct *task, unsigned long mask)
++{
++	BUG_ON(mask & ~(JOBCTL_PENDING_MASK | JOBCTL_STOP_CONSUME |
++			JOBCTL_STOP_SIGMASK | JOBCTL_TRAPPING));
++	BUG_ON((mask & JOBCTL_TRAPPING) && !(mask & JOBCTL_PENDING_MASK));
++
++	if (unlikely(fatal_signal_pending(task) || (task->flags & PF_EXITING)))
++		return false;
++
++	if (mask & JOBCTL_STOP_SIGMASK)
++		task->jobctl &= ~JOBCTL_STOP_SIGMASK;
++
++	task->jobctl |= mask;
++	return true;
++}
++
++void task_join_group_stop(struct task_struct *task)
++{
++	unsigned long mask = current->jobctl & JOBCTL_STOP_SIGMASK;
++	struct signal_struct *sig = current->signal;
++
++	if (sig->group_stop_count) {
++		sig->group_stop_count++;
++		mask |= JOBCTL_STOP_CONSUME;
++	} else if (!(sig->flags & SIGNAL_STOP_STOPPED))
++		return;
++
++	/* Have the new thread join an on-going signal group stop */
++	task_set_jobctl_pending(task, mask | JOBCTL_STOP_PENDING);
++}
++
++/*
++ * Flush all handlers for a task.
++ */
++
++void
++flush_signal_handlers(struct task_struct *t, int force_default)
++{
++	int i;
++	struct k_sigaction *ka = &t->sighand->action[0];
++	for (i = _NSIG ; i != 0 ; i--) {
++		if (force_default || ka->sa.sa_handler != SIG_IGN)
++			ka->sa.sa_handler = SIG_DFL;
++		ka->sa.sa_flags = 0;
++#ifdef __ARCH_HAS_SA_RESTORER
++		ka->sa.sa_restorer = NULL;
++#endif
++		sigemptyset(&ka->sa.sa_mask);
++		ka++;
++	}
++}
++
+ static inline void siginfo_buildtime_checks(void)
+ {
+ 	BUILD_BUG_ON(sizeof(struct siginfo) != SI_MAX_SIZE);
