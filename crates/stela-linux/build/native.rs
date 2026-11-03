@@ -172,6 +172,8 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/pnode.c")),
             PathBuf::from(format!("{LINUX}/fs/file_table_init.c")),
             PathBuf::from(format!("{LINUX}/fs/filesystems.c")),
+            PathBuf::from(format!("{LINUX}/fs/fs_context_log.c")),
+            PathBuf::from(format!("{LINUX}/fs/fs_parser.c")),
             PathBuf::from(format!("{LINUX}/fs/inode_cache_init.c")),
             PathBuf::from(format!("{LINUX}/fs/inode_evict.c")),
             PathBuf::from(format!("{LINUX}/fs/name_hash.c")),
