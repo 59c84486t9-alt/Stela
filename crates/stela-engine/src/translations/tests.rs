@@ -348,3 +348,29 @@ fn probes_stay_in_the_address_class_of_their_page() {
         }
     }
 }
+
+#[test]
+fn unordered_legacy_records_find_the_first_entry_for_each_offset_and_context() {
+    let source = words(&[0xd65f_03c0]);
+    let low = proved(&source, 0x40).unwrap();
+    let high = proved(&source, 0x80).unwrap();
+    let mut alternate = low.clone();
+    alternate.context = Digest::of(b"alternate");
+    let mut duplicate = low.clone();
+    duplicate.code.push(0);
+    let translator = translator_id();
+    let key = Digest::of(b"legacy page");
+    let legacy = Record {
+        translator,
+        key,
+        entries: vec![high.clone(), alternate.clone(), low.clone(), duplicate],
+    };
+    let decoded = Record::decode(&legacy.encode(), &translator, &key).unwrap();
+    assert_eq!(decoded.find(low.offset, &low.context), Some(&low));
+    assert_eq!(decoded.find(high.offset, &high.context), Some(&high));
+    assert_eq!(
+        decoded.find(alternate.offset, &alternate.context),
+        Some(&alternate)
+    );
+    assert_eq!(decoded.find(low.offset + 4, &low.context), None);
+}
