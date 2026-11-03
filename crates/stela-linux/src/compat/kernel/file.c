@@ -116,7 +116,7 @@ static void release_later(struct work_struct *work)
  * Linux's waits for its task work. */
 void fput(struct file *file)
 {
-	if (atomic_long_dec_return(&file->f_ref.refcnt) != (long)FILE_REF_NOREF)
+	if (!file_ref_put(&file->f_ref))
 		return;
 	if (!in_atomic() && !irqs_disabled()) {
 		release(file);
@@ -520,6 +520,16 @@ static struct file_system_type test_fs = {
 int main(void)
 {
 	stela_linux_enter(&stela_linux_bare);
+
+	/* The final put closes the reference before its owner can free it. */
+	file_ref_t reference;
+	file_ref_init(&reference, 1);
+	assert(file_ref_get(&reference));
+	assert(!file_ref_put(&reference));
+	assert(file_ref_put(&reference));
+	assert((unsigned long)atomic_long_read(&reference.refcnt) == FILE_REF_DEAD);
+	assert(!file_ref_get(&reference));
+
 	/* For the descriptor table's radix nodes. */
 	stela_test_register_pages();
 	radix_tree_init();

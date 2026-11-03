@@ -146,6 +146,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/kernel/restart_no_syscall.c")),
             PathBuf::from(format!("{LINUX}/fs/fs_struct.c")),
             PathBuf::from(format!("{LINUX}/fs/init_fdtable.c")),
+            PathBuf::from(format!("{LINUX}/fs/file_ref.c")),
             PathBuf::from(format!("{LINUX}/lib/string.c")),
             PathBuf::from(format!("{LINUX}/lib/hexdump.c")),
             PathBuf::from(format!("{LINUX}/lib/ratelimit.c")),
