@@ -53,6 +53,12 @@ impl IrqEnableError {
 pub trait Platform {
     /// Monotonic nanoseconds.
     fn now_ns(&self) -> i64;
+    /// Calibrated x86 TSC frequency for Linux boot-time BogoMIPS scaling.
+    /// Read retained metadata without blocking or reentering Linux.
+    /// This observation grants no physical minimum or deadline authority.
+    fn calibrated_tsc_hz(&self) -> Option<core::num::NonZeroU64> {
+        None
+    }
     /// Actual source-owned atomic minimum. No sleep, allocation, nominal
     /// frequency conversion or success fallback is permitted.
     fn minimum_delay_us(&self, minimum: u64) -> Result<(), WorkError>;
@@ -132,9 +138,10 @@ struct Services {
     copy_to_user: unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, u64) -> u64,
     map_user: unsafe extern "C" fn(*mut c_void, *mut c_void, u64, u64, u64) -> c_int,
     unmap_user: unsafe extern "C" fn(*mut c_void, *mut c_void, u64, usize),
+    calibrated_tsc_hz: unsafe extern "C" fn(*mut c_void) -> u64,
 }
 
-const _: () = assert!(size_of::<Services>() == 160);
+const _: () = assert!(size_of::<Services>() == 168);
 const _: () = {
     assert!(core::mem::offset_of!(Services, now_ns) == 0);
     assert!(core::mem::offset_of!(Services, minimum_delay_us) == 8);
@@ -156,6 +163,7 @@ const _: () = {
     assert!(core::mem::offset_of!(Services, copy_to_user) == 136);
     assert!(core::mem::offset_of!(Services, map_user) == 144);
     assert!(core::mem::offset_of!(Services, unmap_user) == 152);
+    assert!(core::mem::offset_of!(Services, calibrated_tsc_hz) == 160);
 };
 
 /// `struct stela_linux_owner`.
@@ -193,6 +201,13 @@ mod trampolines {
     pub unsafe extern "C" fn now_ns<P: Platform>(context: *mut c_void) -> i64 {
         // SAFETY: see the module.
         unsafe { platform::<P>(context) }.now_ns()
+    }
+
+    pub unsafe extern "C" fn calibrated_tsc_hz<P: Platform>(context: *mut c_void) -> u64 {
+        // SAFETY: see the module.
+        unsafe { platform::<P>(context) }
+            .calibrated_tsc_hz()
+            .map_or(0, core::num::NonZeroU64::get)
     }
 
     pub unsafe extern "C" fn minimum_delay_us<P: Platform>(context: *mut c_void, minimum: u64) {
@@ -434,6 +449,7 @@ impl<P: Platform> Owner<P> {
                 copy_to_user: t::copy_to_user::<P>,
                 map_user: t::map_user::<P>,
                 unmap_user: t::unmap_user::<P>,
+                calibrated_tsc_hz: t::calibrated_tsc_hz::<P>,
             },
             raw: RawOwner {
                 services: ptr::null(),
@@ -466,6 +482,7 @@ mod tests {
 
     #[derive(Default)]
     struct Fake {
+        tsc_hz: Cell<Option<core::num::NonZeroU64>>,
         events: RefCell<Vec<String>>,
         fatal_log: Option<std::path::PathBuf>,
     }
@@ -477,6 +494,10 @@ mod tests {
     }
 
     impl Platform for Fake {
+        fn calibrated_tsc_hz(&self) -> Option<core::num::NonZeroU64> {
+            self.tsc_hz.get()
+        }
+
         fn now_ns(&self) -> i64 {
             42
         }
@@ -634,6 +655,12 @@ mod tests {
             let raw = &*owner.raw();
             let (s, context) = (&*raw.services, raw.context);
             assert_eq!((s.now_ns)(context), 42);
+            assert_eq!((s.calibrated_tsc_hz)(context), 0);
+            owner
+                .platform()
+                .tsc_hz
+                .set(core::num::NonZeroU64::new(3_200_000_000));
+            assert_eq!((s.calibrated_tsc_hz)(context), 3_200_000_000);
             // This Bare table fixture cannot invoke the actual-current minimum
             // callback. The separate producer tests own their counter model.
             assert!((s.minimum_delay_us as usize) != 0);

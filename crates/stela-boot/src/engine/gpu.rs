@@ -393,6 +393,10 @@ impl Host {
 }
 
 impl Platform for Host {
+    fn calibrated_tsc_hz(&self) -> Option<core::num::NonZeroU64> {
+        core::num::NonZeroU64::new(self.tsc_hz)
+    }
+
     fn now_ns(&self) -> i64 {
         nanoseconds(host::rdtsc(), self.tsc_hz) as i64
     }

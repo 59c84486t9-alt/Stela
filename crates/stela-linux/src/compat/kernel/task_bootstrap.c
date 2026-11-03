@@ -6,6 +6,8 @@
  */
 #include <linux/types.h>
 #include <linux/errno.h>
+#include <linux/delay.h>
+#include <linux/jiffies.h>
 #include <linux/cpu.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -51,6 +53,9 @@
 bool early_boot_irqs_disabled __read_mostly;
 enum system_states system_state __read_mostly = SYSTEM_BOOTING;
 
+/* The selected machine does not link init/main.c or calibrate a second clock. */
+unsigned long loops_per_jiffy __read_mostly;
+
 enum resource_phase { COLD, INITIALIZING, COMPLETE, FAILED };
 static enum resource_phase resource_phase;
 static const struct stela_linux_owner *resource_owner;
@@ -69,6 +74,12 @@ int stela_linux_task_bootstrap_resources(const struct stela_linux_owner *owner)
         return -EPERM;
     if (resource_phase != COLD)
         return -EALREADY;
+    if (!owner->services->calibrated_tsc_hz)
+        return -ENODEV;
+    u64 tsc_hz = owner->services->calibrated_tsc_hz(owner->context);
+    if (tsc_hz < HZ)
+        return -ENODEV;
+
     /* Commit retaining attempt BEFORE any one-shot external/source effect.
      * A failed bind/unknown unwind never authorizes root reinitialization. */
     resource_owner = owner;
@@ -78,6 +89,10 @@ int stela_linux_task_bootstrap_resources(const struct stela_linux_owner *owner)
         resource_phase = FAILED;
         return error;
     }
+
+    /* Match x86 get_loops_per_jiffy() using the retained calibrated rate.
+     * The workqueue threshold uses this before any worker starts. */
+    loops_per_jiffy = tsc_hz / HZ;
 
     /* Original early phase: queue metadata/boot-list may exist before any
      * original child can execute. This initializes no second native timer or
