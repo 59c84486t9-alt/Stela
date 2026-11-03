@@ -1,0 +1,181 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 11:32:36 -0500
+Subject: [PATCH] refactor(fs): separate original dentry ancestry operations
+
+---
+ fs/Makefile          |  2 +-
+ fs/dcache.c          | 57 -------------------------------------
+ fs/dentry_ancestry.c | 68 ++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 69 insertions(+), 58 deletions(-)
+ create mode 100644 fs/dentry_ancestry.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 8f5226b1d5a8d37934d5d882447af4295af8909e..31873fdf02f9a2d3945cadd64456aeff7210b13a 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -9,7 +9,7 @@
+ 
+ obj-y :=	open.o filp_close.o read_write.o file_table.o file_table_init.o super.o \
+ 		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o path_get.o name_hash.o filename.o fcntl.o \
+-		ioctl.o readdir.o select.o dcache.o dcache_init.o inode.o inode_cache_init.o inode_evict.o \
++		ioctl.o readdir.o select.o dcache.o dcache_init.o dentry_ancestry.o inode.o inode_cache_init.o inode_evict.o \
+ 		attr.o bad_inode.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o mount_cache.o \
+ 		seq_file.o seq_lifetime.o seq_output.o xattr.o simple_xattr.o libfs.o pseudo_metadata.o fs-writeback.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+diff --git a/fs/dcache.c b/fs/dcache.c
+index 965bff50c322ade066449eedecd71cc044af4f4c..b5f9ec2c17833aecd64f2648c3c2733c296e12db 100644
+--- a/fs/dcache.c
++++ b/fs/dcache.c
+@@ -83,10 +83,6 @@ unsigned long vfs_pressure_ratio(unsigned long val)
+ }
+ EXPORT_SYMBOL_GPL(vfs_pressure_ratio);
+ 
+-__cacheline_aligned_in_smp DEFINE_SEQLOCK(rename_lock);
+-
+-EXPORT_SYMBOL(rename_lock);
+-
+ #define dentry_cache runtime_const_ptr(__dentry_cache)
+ 
+ const struct qstr empty_name = QSTR_INIT("", 0);
+@@ -3155,25 +3151,6 @@ void d_exchange(struct dentry *dentry1, struct dentry *dentry2)
+ }
+ EXPORT_SYMBOL(d_exchange);
+ 
+-/**
+- * d_ancestor - search for an ancestor
+- * @p1: ancestor dentry
+- * @p2: child dentry
+- *
+- * Returns the ancestor dentry of p2 which is a child of p1, if p1 is
+- * an ancestor of p2, else NULL.
+- */
+-struct dentry *d_ancestor(struct dentry *p1, struct dentry *p2)
+-{
+-	struct dentry *p;
+-
+-	for (p = p2; !IS_ROOT(p); p = p->d_parent) {
+-		if (p->d_parent == p1)
+-			return p;
+-	}
+-	return NULL;
+-}
+-
+ /*
+  * This helper attempts to cope with remotely renamed directories
+  *
+@@ -3308,40 +3285,6 @@ EXPORT_SYMBOL(d_splice_alias);
+  * Trivially implemented using the dcache structure
+  */
+ 
+-/**
+- * is_subdir - is new dentry a subdirectory of old_dentry
+- * @new_dentry: new dentry
+- * @old_dentry: old dentry
+- *
+- * Returns true if new_dentry is a subdirectory of the parent (at any depth).
+- * Returns false otherwise.
+- * Caller must ensure that "new_dentry" is pinned before calling is_subdir()
+- */
+-  
+-bool is_subdir(struct dentry *new_dentry, struct dentry *old_dentry)
+-{
+-	bool subdir;
+-	unsigned seq;
+-
+-	if (new_dentry == old_dentry)
+-		return true;
+-
+-	/* Access d_parent under rcu as d_move() may change it. */
+-	rcu_read_lock();
+-	seq = read_seqbegin(&rename_lock);
+-	subdir = d_ancestor(old_dentry, new_dentry);
+-	 /* Try lockless once... */
+-	if (read_seqretry(&rename_lock, seq)) {
+-		/* ...else acquire lock for progress even on deep chains. */
+-		read_seqlock_excl(&rename_lock);
+-		subdir = d_ancestor(old_dentry, new_dentry);
+-		read_sequnlock_excl(&rename_lock);
+-	}
+-	rcu_read_unlock();
+-	return subdir;
+-}
+-EXPORT_SYMBOL(is_subdir);
+-
+ void d_mark_tmpfile(struct file *file, struct inode *inode)
+ {
+ 	struct dentry *dentry = file->f_path.dentry;
+diff --git a/fs/dentry_ancestry.c b/fs/dentry_ancestry.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..94c3ad6c8b637e394e689aea6bd7c55146458a3a
+--- /dev/null
++++ b/fs/dentry_ancestry.c
+@@ -0,0 +1,68 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * From fs/dcache.c.
++ * (C) 1997 Thomas Schoebel-Theuer,
++ * with heavy changes by Linus Torvalds
++ */
++#include <linux/cache.h>
++#include <linux/dcache.h>
++#include <linux/export.h>
++#include <linux/rcupdate.h>
++#include <linux/seqlock.h>
++
++__cacheline_aligned_in_smp DEFINE_SEQLOCK(rename_lock);
++
++EXPORT_SYMBOL(rename_lock);
++
++/**
++ * d_ancestor - search for an ancestor
++ * @p1: ancestor dentry
++ * @p2: child dentry
++ *
++ * Returns the ancestor dentry of p2 which is a child of p1, if p1 is
++ * an ancestor of p2, else NULL.
++ */
++struct dentry *d_ancestor(struct dentry *p1, struct dentry *p2)
++{
++	struct dentry *p;
++
++	for (p = p2; !IS_ROOT(p); p = p->d_parent) {
++		if (p->d_parent == p1)
++			return p;
++	}
++	return NULL;
++}
++
++/**
++ * is_subdir - is new dentry a subdirectory of old_dentry
++ * @new_dentry: new dentry
++ * @old_dentry: old dentry
++ *
++ * Returns true if new_dentry is a subdirectory of the parent (at any depth).
++ * Returns false otherwise.
++ * Caller must ensure that "new_dentry" is pinned before calling is_subdir()
++ */
++
++bool is_subdir(struct dentry *new_dentry, struct dentry *old_dentry)
++{
++	bool subdir;
++	unsigned seq;
++
++	if (new_dentry == old_dentry)
++		return true;
++
++	/* Access d_parent under rcu as d_move() may change it. */
++	rcu_read_lock();
++	seq = read_seqbegin(&rename_lock);
++	subdir = d_ancestor(old_dentry, new_dentry);
++	 /* Try lockless once... */
++	if (read_seqretry(&rename_lock, seq)) {
++		/* ...else acquire lock for progress even on deep chains. */
++		read_seqlock_excl(&rename_lock);
++		subdir = d_ancestor(old_dentry, new_dentry);
++		read_sequnlock_excl(&rename_lock);
++	}
++	rcu_read_unlock();
++	return subdir;
++}
++EXPORT_SYMBOL(is_subdir);

@@ -183,6 +183,7 @@
 /fs/pidfs_metadata.h
 /fs/namespace.c
 /fs/pnode.h
+/fs/pnode.c
 /fs/mount.h
 /fs/mount_cache.c
 /fs/mount_cache.h
@@ -201,6 +202,7 @@
 /fs/dcache.c
 /fs/dcache_init.c
 /fs/dcache_init.h
+/fs/dentry_ancestry.c
 /fs/d_path.c
 /fs/d_path_prepend.h
 /fs/namei.c
