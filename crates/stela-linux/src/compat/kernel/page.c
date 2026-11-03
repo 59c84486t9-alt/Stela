@@ -145,6 +145,21 @@ static void require_catalog(void)
 		__builtin_trap();
 }
 
+unsigned long stela_linux_page_boot_capacity(void)
+{
+	require_quiescence();
+	require_catalog();
+	unsigned long pages = 0;
+
+	for (size_t i = 0; i < catalog.extent_count; i++) {
+		const struct registered_extent *extent = catalog.extents + i;
+
+		if (extent->kind == STELA_LINUX_PAGE_ORDINARY)
+			pages += extent->page_count;
+	}
+	return pages;
+}
+
 int stela_linux_page_owner_context(const struct stela_linux_owner *expected)
 {
     struct stela_linux_lease lease;
@@ -2230,6 +2245,7 @@ static void annotated_stack_admission(void)
     metadata_fail_after = NO_INDEX;
     assert(!stela_linux_page_catalog_register_annotated(&inventory, &ops, &fixture));
     assert(catalog.extent_count == 2 && !catalog.stack_admissions);
+    assert(stela_linux_page_boot_capacity() == TEST_PAGES);
     /* Inspect private catalog identity: the public PFN/page conversions
      * deliberately reject these unpublished, zero-reference descriptors. */
     assert(catalog.pages + physical_slot(stack_physical) ==

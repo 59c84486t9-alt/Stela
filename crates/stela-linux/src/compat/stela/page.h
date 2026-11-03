@@ -161,6 +161,9 @@ int stela_linux_page_stack_retire(const struct stela_linux_stack_ticket_v1 *tick
 
 
 void stela_linux_pages_finish(void);
+
+/* Ordinary page inventory available to the Linux boot allocator. */
+unsigned long stela_linux_page_boot_capacity(void);
 /* Entered serialized owner only. Pin one live aligned physical page's actual
  * provider allocation before exposing it to DMA. NULL transfers nothing.
  * Each non-NULL token prevents allocation/descriptor/provider retirement even
