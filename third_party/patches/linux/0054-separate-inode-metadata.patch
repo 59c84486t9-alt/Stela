@@ -1,0 +1,497 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 00:17:47 -0500
+Subject: [PATCH] refactor(pidfs): separate inode metadata and attribute
+ release
+
+---
+ fs/Makefile         |   2 +-
+ fs/pidfs.c          | 191 +-------------------------------------------
+ fs/pidfs_metadata.c | 131 ++++++++++++++++++++++++++++++
+ fs/pidfs_metadata.h |  93 +++++++++++++++++++++
+ 4 files changed, 228 insertions(+), 189 deletions(-)
+ create mode 100644 fs/pidfs_metadata.c
+ create mode 100644 fs/pidfs_metadata.h
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 574627f696fc53e9fea918405b247cd122e3d66b..c0d23e181ef29dfb941cdb7e0037ef453bca68de 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -15,7 +15,7 @@ obj-y :=	open.o filp_close.o read_write.o file_table.o super.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+ 		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
+ 		fs_dirent.o fs_context.o fs_parser.o fsopen.o init.o \
+-		kernel_read_file.o mnt_idmapping.o remap_range.o pidfs.o \
++		kernel_read_file.o mnt_idmapping.o remap_range.o pidfs.o pidfs_metadata.o \
+ 		file_attr.o fserror.o nullfs.o
+ 
+ obj-$(CONFIG_BUFFER_HEAD)	+= buffer.o mpage.o
+diff --git a/fs/pidfs.c b/fs/pidfs.c
+index 99e36a425b19bab92e4b0f891a6fd5fed69831b8..d2ada0d99a61925496460e8e3b752994e01da77b 100644
+--- a/fs/pidfs.c
++++ b/fs/pidfs.c
+@@ -24,13 +24,11 @@
+ #include <linux/utsname.h>
+ #include <net/net_namespace.h>
+ #include <linux/coredump.h>
+-#include <linux/rhashtable.h>
+-#include <linux/llist.h>
+ #include <linux/xattr.h>
+-#include <linux/cookie.h>
+ 
+ #include "internal.h"
+ #include "mount.h"
++#include "pidfs_metadata.h"
+ 
+ #define PIDFS_PID_DEAD ERR_PTR(-ESRCH)
+ 
+@@ -38,194 +36,12 @@ static struct kmem_cache *pidfs_attr_cachep __ro_after_init;
+ 
+ static struct path pidfs_root_path = {};
+ 
+-static struct simple_xattr_cache pidfs_xa_cache;
+-
+ void pidfs_get_root(struct path *path)
+ {
+ 	*path = pidfs_root_path;
+ 	path_get(path);
+ }
+ 
+-enum pidfs_attr_mask_bits {
+-	PIDFS_ATTR_BIT_EXIT	= 0,
+-	PIDFS_ATTR_BIT_COREDUMP	= 1,
+-};
+-
+-struct pidfs_anon_attr {
+-	unsigned long attr_mask;
+-	struct /* exit info */ {
+-		__u64 cgroupid;
+-		__s32 exit_code;
+-	};
+-	__u32 coredump_mask;
+-	__u32 coredump_signal;
+-	__u32 coredump_code;
+-};
+-
+-static struct rhashtable pidfs_ino_ht;
+-
+-static const struct rhashtable_params pidfs_ino_ht_params = {
+-	.key_offset		= offsetof(struct pid, ino),
+-	.key_len		= sizeof(u64),
+-	.head_offset		= offsetof(struct pid, pidfs_hash),
+-	.automatic_shrinking	= true,
+-};
+-
+-/*
+- * inode number handling
+- *
+- * On 64 bit nothing special happens. The 64bit number assigned
+- * to struct pid is the inode number.
+- *
+- * On 32 bit the 64 bit number assigned to struct pid is split
+- * into two 32 bit numbers. The lower 32 bits are used as the
+- * inode number and the upper 32 bits are used as the inode
+- * generation number.
+- *
+- * On 32 bit pidfs_ino() will return the lower 32 bit. When
+- * pidfs_ino() returns zero a wrap around happened. When a
+- * wraparound happens the 64 bit number will be incremented by 1
+- * so inode numbering starts at 1 again.
+- *
+- * On 64 bit comparing two pidfds is as simple as comparing
+- * inode numbers.
+- *
+- * When a wraparound happens on 32 bit multiple pidfds with the
+- * same inode number are likely to exist (This isn't a problem
+- * since before pidfs pidfds used the anonymous inode meaning
+- * all pidfds had the same inode number.). Userspace can
+- * reconstruct the 64 bit identifier by retrieving both the
+- * inode number and the inode generation number to compare or
+- * use file handles.
+- */
+-struct pidfs_attr {
+-	struct list_head xattrs;
+-	union {
+-		struct pidfs_anon_attr;
+-		struct llist_node pidfs_llist;
+-	};
+-};
+-
+-#if BITS_PER_LONG == 32
+-
+-static DEFINE_SPINLOCK(pidfs_ino_lock);
+-static u64 pidfs_ino_nr = 1;
+-
+-static inline unsigned long pidfs_ino(u64 ino)
+-{
+-	return lower_32_bits(ino);
+-}
+-
+-/* On 32 bit the generation number are the upper 32 bits. */
+-static inline u32 pidfs_gen(u64 ino)
+-{
+-	return upper_32_bits(ino);
+-}
+-
+-static inline u64 pidfs_alloc_ino(void)
+-{
+-	u64 ino;
+-
+-	spin_lock(&pidfs_ino_lock);
+-	if (pidfs_ino(pidfs_ino_nr) == 0)
+-		pidfs_ino_nr++;
+-	ino = pidfs_ino_nr++;
+-	spin_unlock(&pidfs_ino_lock);
+-	return ino;
+-}
+-
+-#else
+-
+-/* On 64 bit simply return ino. */
+-static inline unsigned long pidfs_ino(u64 ino)
+-{
+-	return ino;
+-}
+-
+-/* On 64 bit the generation number is 0. */
+-static inline u32 pidfs_gen(u64 ino)
+-{
+-	return 0;
+-}
+-
+-DEFINE_COOKIE(pidfs_ino_cookie);
+-
+-static u64 pidfs_alloc_ino(void)
+-{
+-	u64 ino;
+-
+-	preempt_disable();
+-	ino = gen_cookie_next(&pidfs_ino_cookie);
+-	preempt_enable();
+-
+-	VFS_WARN_ON_ONCE(ino < 1);
+-	return ino;
+-}
+-
+-#endif
+-
+-int pidfs_add_pid(struct pid *pid)
+-{
+-	int ret;
+-
+-	pid->ino = pidfs_alloc_ino();
+-	ret = rhashtable_insert_fast(&pidfs_ino_ht, &pid->pidfs_hash,
+-				     pidfs_ino_ht_params);
+-	if (unlikely(ret))
+-		pid->ino = 0;
+-	return ret;
+-}
+-
+-void pidfs_remove_pid(struct pid *pid)
+-{
+-	if (likely(pid->ino))
+-		rhashtable_remove_fast(&pidfs_ino_ht, &pid->pidfs_hash,
+-				       pidfs_ino_ht_params);
+-}
+-
+-static LLIST_HEAD(pidfs_free_list);
+-
+-static void pidfs_free_attr_work(struct work_struct *work)
+-{
+-	struct pidfs_attr *attr, *next;
+-	struct llist_node *head;
+-
+-	head = llist_del_all(&pidfs_free_list);
+-	llist_for_each_entry_safe(attr, next, head, pidfs_llist) {
+-		simple_xattrs_free(&pidfs_xa_cache, &attr->xattrs, NULL);
+-		kfree(attr);
+-	}
+-}
+-
+-static DECLARE_WORK(pidfs_free_work, pidfs_free_attr_work);
+-
+-void pidfs_free_pid(struct pid *pid)
+-{
+-	struct pidfs_attr *attr = pid->attr;
+-
+-	/*
+-	 * Any dentry must've been wiped from the pid by now.
+-	 * Otherwise there's a reference count bug.
+-	 */
+-	VFS_WARN_ON_ONCE(pid->stashed);
+-
+-	/*
+-	 * This if an error occurred during e.g., task creation that
+-	 * causes us to never go through the exit path.
+-	 */
+-	if (unlikely(!attr))
+-		return;
+-
+-	/* This never had a pidfd created. */
+-	if (IS_ERR(attr))
+-		return;
+-
+-	if (likely(list_empty(&attr->xattrs)))
+-		kfree(attr);
+-	else if (llist_add(&attr->pidfs_llist, &pidfs_free_list))
+-		schedule_work(&pidfs_free_work);
+-}
+-
+ #ifdef CONFIG_PROC_FS
+ /**
+  * pidfd_show_fdinfo - print information about a pidfd
+@@ -893,7 +709,7 @@ static struct pid *pidfs_ino_get_pid(u64 ino)
+ 	struct pidfs_attr *attr;
+ 
+ 	guard(rcu)();
+-	pid = rhashtable_lookup(&pidfs_ino_ht, &ino, pidfs_ino_ht_params);
++	pid = pidfs_lookup_ino(ino);
+ 	if (!pid)
+ 		return NULL;
+ 	attr = READ_ONCE(pid->attr);
+@@ -1172,8 +988,7 @@ struct file *pidfs_alloc_file(struct pid *pid, unsigned int flags)
+ 
+ void __init pidfs_init(void)
+ {
+-	if (rhashtable_init(&pidfs_ino_ht, &pidfs_ino_ht_params))
+-		panic("Failed to initialize pidfs hashtable");
++	pidfs_init_ino_table();
+ 
+ 	pidfs_attr_cachep = kmem_cache_create("pidfs_attr_cache", sizeof(struct pidfs_attr), 0,
+ 					 (SLAB_HWCACHE_ALIGN | SLAB_RECLAIM_ACCOUNT |
+diff --git a/fs/pidfs_metadata.c b/fs/pidfs_metadata.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..39a2c6f4b138b2330ee816a27620b029e515e915
+--- /dev/null
++++ b/fs/pidfs_metadata.c
+@@ -0,0 +1,131 @@
++// SPDX-License-Identifier: GPL-2.0
++/* PID inode identifiers and attribute release from fs/pidfs.c. */
++#include <linux/cookie.h>
++#include <linux/pid.h>
++#include <linux/pidfs.h>
++#include <linux/rhashtable.h>
++#include <linux/slab.h>
++#include <linux/vfsdebug.h>
++#include <linux/workqueue.h>
++#include <linux/xattr.h>
++
++#include "pidfs_metadata.h"
++
++struct simple_xattr_cache pidfs_xa_cache;
++
++static struct rhashtable pidfs_ino_ht;
++
++static const struct rhashtable_params pidfs_ino_ht_params = {
++	.key_offset		= offsetof(struct pid, ino),
++	.key_len		= sizeof(u64),
++	.head_offset		= offsetof(struct pid, pidfs_hash),
++	.automatic_shrinking	= true,
++};
++
++void __init pidfs_init_ino_table(void)
++{
++	if (rhashtable_init(&pidfs_ino_ht, &pidfs_ino_ht_params))
++		panic("Failed to initialize pidfs hashtable");
++}
++
++struct pid *pidfs_lookup_ino(u64 ino)
++{
++	return rhashtable_lookup(&pidfs_ino_ht, &ino, pidfs_ino_ht_params);
++}
++
++#if BITS_PER_LONG == 32
++
++static DEFINE_SPINLOCK(pidfs_ino_lock);
++static u64 pidfs_ino_nr = 1;
++
++static inline u64 pidfs_alloc_ino(void)
++{
++	u64 ino;
++
++	spin_lock(&pidfs_ino_lock);
++	if (pidfs_ino(pidfs_ino_nr) == 0)
++		pidfs_ino_nr++;
++	ino = pidfs_ino_nr++;
++	spin_unlock(&pidfs_ino_lock);
++	return ino;
++}
++
++#else
++
++DEFINE_COOKIE(pidfs_ino_cookie);
++
++static u64 pidfs_alloc_ino(void)
++{
++	u64 ino;
++
++	preempt_disable();
++	ino = gen_cookie_next(&pidfs_ino_cookie);
++	preempt_enable();
++
++	VFS_WARN_ON_ONCE(ino < 1);
++	return ino;
++}
++
++#endif
++
++int pidfs_add_pid(struct pid *pid)
++{
++	int ret;
++
++	pid->ino = pidfs_alloc_ino();
++	ret = rhashtable_insert_fast(&pidfs_ino_ht, &pid->pidfs_hash,
++				     pidfs_ino_ht_params);
++	if (unlikely(ret))
++		pid->ino = 0;
++	return ret;
++}
++
++void pidfs_remove_pid(struct pid *pid)
++{
++	if (likely(pid->ino))
++		rhashtable_remove_fast(&pidfs_ino_ht, &pid->pidfs_hash,
++				       pidfs_ino_ht_params);
++}
++
++static LLIST_HEAD(pidfs_free_list);
++
++static void pidfs_free_attr_work(struct work_struct *work)
++{
++	struct pidfs_attr *attr, *next;
++	struct llist_node *head;
++
++	head = llist_del_all(&pidfs_free_list);
++	llist_for_each_entry_safe(attr, next, head, pidfs_llist) {
++		simple_xattrs_free(&pidfs_xa_cache, &attr->xattrs, NULL);
++		kfree(attr);
++	}
++}
++
++static DECLARE_WORK(pidfs_free_work, pidfs_free_attr_work);
++
++void pidfs_free_pid(struct pid *pid)
++{
++	struct pidfs_attr *attr = pid->attr;
++
++	/*
++	 * Any dentry must've been wiped from the pid by now.
++	 * Otherwise there's a reference count bug.
++	 */
++	VFS_WARN_ON_ONCE(pid->stashed);
++
++	/*
++	 * This if an error occurred during e.g., task creation that
++	 * causes us to never go through the exit path.
++	 */
++	if (unlikely(!attr))
++		return;
++
++	/* This never had a pidfd created. */
++	if (IS_ERR(attr))
++		return;
++
++	if (likely(list_empty(&attr->xattrs)))
++		kfree(attr);
++	else if (llist_add(&attr->pidfs_llist, &pidfs_free_list))
++		schedule_work(&pidfs_free_work);
++}
+diff --git a/fs/pidfs_metadata.h b/fs/pidfs_metadata.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..b8479da93f0c3dc88fbe58ea72e2a2df90c23b2f
+--- /dev/null
++++ b/fs/pidfs_metadata.h
+@@ -0,0 +1,93 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _FS_PIDFS_METADATA_H
++#define _FS_PIDFS_METADATA_H
++
++#include <linux/init.h>
++#include <linux/llist.h>
++#include <linux/types.h>
++
++struct pid;
++struct simple_xattr_cache;
++
++extern struct simple_xattr_cache pidfs_xa_cache;
++void __init pidfs_init_ino_table(void);
++/* Caller holds the RCU read lock through reference acquisition. */
++struct pid *pidfs_lookup_ino(u64 ino);
++
++enum pidfs_attr_mask_bits {
++	PIDFS_ATTR_BIT_EXIT	= 0,
++	PIDFS_ATTR_BIT_COREDUMP	= 1,
++};
++
++struct pidfs_attr {
++	struct list_head xattrs;
++	union {
++		struct {
++			unsigned long attr_mask;
++			struct /* exit info */ {
++				__u64 cgroupid;
++				__s32 exit_code;
++			};
++			__u32 coredump_mask;
++			__u32 coredump_signal;
++			__u32 coredump_code;
++		};
++		struct llist_node pidfs_llist;
++	};
++};
++
++/*
++ * inode number handling
++ *
++ * On 64 bit nothing special happens. The 64bit number assigned
++ * to struct pid is the inode number.
++ *
++ * On 32 bit the 64 bit number assigned to struct pid is split
++ * into two 32 bit numbers. The lower 32 bits are used as the
++ * inode number and the upper 32 bits are used as the inode
++ * generation number.
++ *
++ * On 32 bit pidfs_ino() will return the lower 32 bit. When
++ * pidfs_ino() returns zero a wrap around happened. When a
++ * wraparound happens the 64 bit number will be incremented by 1
++ * so inode numbering starts at 1 again.
++ *
++ * On 64 bit comparing two pidfds is as simple as comparing
++ * inode numbers.
++ *
++ * When a wraparound happens on 32 bit multiple pidfds with the
++ * same inode number are likely to exist (This isn't a problem
++ * since before pidfs pidfds used the anonymous inode meaning
++ * all pidfds had the same inode number.). Userspace can
++ * reconstruct the 64 bit identifier by retrieving both the
++ * inode number and the inode generation number to compare or
++ * use file handles.
++ */
++#if BITS_PER_LONG == 32
++static inline unsigned long pidfs_ino(u64 ino)
++{
++	return lower_32_bits(ino);
++}
++
++/* On 32 bit the generation number are the upper 32 bits. */
++static inline u32 pidfs_gen(u64 ino)
++{
++	return upper_32_bits(ino);
++}
++
++#else
++/* On 64 bit simply return ino. */
++static inline unsigned long pidfs_ino(u64 ino)
++{
++	return ino;
++}
++
++/* On 64 bit the generation number is 0. */
++static inline u32 pidfs_gen(u64 ino)
++{
++	return 0;
++}
++
++#endif
++
++#endif
