@@ -472,7 +472,12 @@ int main(void)
 	kfree(dynamic);
 	void *placed = __kmalloc_cache_node_noprof(NULL, GFP_KERNEL, NUMA_NO_NODE, 96);
 	assert(placed && ksize(placed) == 96);
+	assert(kmem_dump_obj((u8 *)placed + 95));
+	assert(!kmem_dump_obj((u8 *)placed + 96));
+	unsigned long freed_address = (unsigned long)placed;
 	kfree(placed);
+	assert(!kmem_dump_obj((void *)freed_address));
+	assert(!kmem_dump_obj(ZERO_SIZE_PTR));
 	placed = __kmalloc_large_node_noprof(PAGE_SIZE + 1, GFP_KERNEL, 0);
 	assert(placed && IS_ALIGNED((unsigned long)placed, PAGE_SIZE));
 	kfree(placed);

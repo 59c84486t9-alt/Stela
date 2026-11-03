@@ -477,6 +477,23 @@ bool stela_linux_cache_range(const void *pointer, size_t bytes,
  return false;
 }
 
+#ifdef CONFIG_PRINTK
+bool kmem_dump_obj(void *object)
+{
+	struct stela_linux_allocation allocation;
+	if (!stela_linux_allocation_range(object, 1, &allocation))
+		return false;
+
+	/* The native allocator tracks live ranges and cache names. The queried
+	 * address is never read, including when RCU reports a bad callback. */
+	size_t offset = (unsigned long)object - (unsigned long)allocation.object;
+	pr_cont(" slab %s start %px pointer offset %zu size %zu\n",
+		allocation.cache ? allocation.cache->name : "kmalloc",
+		allocation.object, offset, allocation.bytes);
+	return true;
+}
+#endif
+
 unsigned int kmem_cache_size(struct kmem_cache *cache)
 {
 	return require_cache(cache)->object_size;
