@@ -502,7 +502,12 @@ pub(crate) extern "sysv64" fn interrupt(frame: &mut Frame, saved: &SavedState<'_
         return;
     }
     match frame.vector as u8 {
-        14 => host::page_fault(frame, cr2(), saved),
+        14 => {
+            let address = cr2();
+            if !stela_boot_core::nofault_read::fixup(frame, address) {
+                host::page_fault(frame, address, saved);
+            }
+        }
         13 | 6 => host::native_exception(frame, saved),
         TIMER_VECTOR => host::timer_interrupt(),
         NATIVE_WAKE_VECTOR => host::wake_interrupt(),
