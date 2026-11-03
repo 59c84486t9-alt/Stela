@@ -26,6 +26,11 @@
 /lib/find_bit.c
 /lib/find_random_bit.c
 /lib/bitmap.c
+/lib/bitmap-str.c
+/lib/bitmap-parse.c
+/lib/kstrtox.c
+/lib/kstrtox.h
+/lib/kstrtox-parse.c
 /lib/bitmap-alloc.c
 /lib/idr.c
 /lib/radix-tree.c

@@ -140,6 +140,8 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/scatterlist.c")),
             PathBuf::from(format!("{LINUX}/lib/find_bit.c")),
             PathBuf::from(format!("{LINUX}/lib/bitmap.c")),
+            PathBuf::from(format!("{LINUX}/lib/bitmap-parse.c")),
+            PathBuf::from(format!("{LINUX}/lib/kstrtox-parse.c")),
             PathBuf::from(format!("{LINUX}/lib/idr.c")),
             PathBuf::from(format!("{LINUX}/lib/radix-tree.c")),
             PathBuf::from(format!("{LINUX}/lib/xarray.c")),
