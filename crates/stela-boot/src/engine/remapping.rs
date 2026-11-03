@@ -29,7 +29,7 @@ use stela_drivers::bus::{
     dma::{mapping::DmaDomain, memory::CacheAttribute},
     mmio::owned::{PhysicalSpan, Protection},
     pci::{
-        Address, EcamWindow,
+        Address, ConfigError, EcamWindow,
         requester::{FunctionRole, RequesterBinding, roles},
     },
 };
@@ -147,17 +147,27 @@ impl Remappers {
                 .collect();
             let roles = roles::Inventory::capture(&functions, |address, offset| {
                 if offset > 4092 || !offset.is_multiple_of(4) {
-                    return None;
+                    return Ok(None);
                 }
                 let window = ecam.iter().find(|window| {
                     window.segment == address.segment
                         && (window.start_bus..=window.end_bus).contains(&address.bus)
-                })?;
+                });
                 // SAFETY: current loader root maps this checked window;
                 // capture runs before any host driver/configuration writer starts.
-                Some(unsafe { configuration(window, requester(address), offset) })
+                Ok(window
+                    .map(|window| unsafe { configuration(window, requester(address), offset) }))
             });
             (dmar, ivrs, inventories, roles)
+        };
+        let roles = match roles {
+            Ok(roles) => roles,
+            Err(error) => {
+                output::arguments(format_args!(
+                    "UNSUPPORTED Stela PCI function-role inventory: {error:?}\n"
+                ));
+                return remappers;
+            }
         };
         for issue in roles.issues() {
             output::arguments(format_args!(
@@ -355,36 +365,51 @@ impl Remappers {
         &self,
         bridge: Address,
         functions: &[Address],
-        read32: &mut dyn FnMut(Address, u16) -> Option<u32>,
-    ) -> bool {
-        let fresh = roles::Inventory::capture(functions, &mut *read32);
-        let mut updates = Vec::new();
+        read32: &mut dyn FnMut(Address, u16) -> Result<Option<u32>, ConfigError>,
+    ) -> Result<bool, ConfigError> {
+        let fresh = roles::Inventory::capture(functions, &mut *read32).inspect_err(|_| {
+            self.roles.borrow_mut().invalidate_topology(bridge);
+        })?;
+        let mut updates = Vec::with_capacity(functions.len() + 1);
         for address in core::iter::once(bridge).chain(functions.iter().copied()) {
             let observation = (|| {
-                let class = read32(address, 8).filter(|value| *value != u32::MAX)?;
-                let header = read32(address, 12).filter(|value| *value != u32::MAX)?;
+                let read = |value: Option<u32>| value.filter(|value| *value != u32::MAX);
+                let Some(class) = read(read32(address, 8)?) else {
+                    return Ok(None);
+                };
+                let Some(header) = read(read32(address, 12)?) else {
+                    return Ok(None);
+                };
                 let buses = if header >> 16 & 0x7f == 1 {
-                    let buses = read32(address, 24).filter(|value| *value != u32::MAX)?;
+                    let Some(buses) = read(read32(address, 24)?) else {
+                        return Ok(None);
+                    };
                     let secondary = (buses >> 8) as u8;
                     let subordinate = (buses >> 16) as u8;
                     if secondary <= address.bus || subordinate < secondary {
-                        return None;
+                        return Ok(None);
                     }
                     Some((secondary, subordinate))
                 } else {
                     None
                 };
-                Some(Present {
+                Ok(Some(Present {
                     rid: requester(address),
                     class: [(class >> 24) as u8, (class >> 16) as u8, (class >> 8) as u8],
                     bridge: buses,
-                })
+                }))
             })();
-            let Some(observation) = observation else {
-                self.roles.borrow_mut().invalidate_topology(address);
-                return false;
-            };
-            updates.push(observation);
+            match observation {
+                Ok(Some(observation)) => updates.push(observation),
+                Ok(None) => {
+                    self.roles.borrow_mut().invalidate_topology(address);
+                    return Ok(false);
+                }
+                Err(error) => {
+                    self.roles.borrow_mut().invalidate_topology(address);
+                    return Err(error);
+                }
+            }
         }
         let mut topology = self.topology.borrow_mut();
         let Some((_, present)) = topology
@@ -392,7 +417,7 @@ impl Remappers {
             .find(|(segment, _)| *segment == bridge.segment)
         else {
             self.roles.borrow_mut().invalidate_topology(bridge);
-            return false;
+            return Ok(false);
         };
         if !present
             .iter()
@@ -401,14 +426,18 @@ impl Remappers {
             || updates[0].bridge.is_none()
         {
             self.roles.borrow_mut().invalidate_topology(bridge);
-            return false;
+            return Ok(false);
+        }
+        if updates.iter().any(|update| {
+            present
+                .iter()
+                .any(|entry| entry.rid == update.rid && entry.class != update.class)
+        }) {
+            self.roles.borrow_mut().invalidate_topology(bridge);
+            return Ok(false);
         }
         for update in updates {
             if let Some(entry) = present.iter_mut().find(|entry| entry.rid == update.rid) {
-                if entry.class != update.class {
-                    self.roles.borrow_mut().invalidate_topology(bridge);
-                    return false;
-                }
                 *entry = update;
             } else {
                 present.push(update);
@@ -423,9 +452,9 @@ impl Remappers {
                 "UNSUPPORTED Stela PCI function-role arrival: {issue:?}\n"
             ));
         }
-        functions
+        Ok(functions
             .iter()
-            .all(|address| roles.role(*address) != FunctionRole::Unverified)
+            .all(|address| roles.role(*address) != FunctionRole::Unverified))
     }
 
     /// Whether a taken unit confines the DMA of the function at `address`.

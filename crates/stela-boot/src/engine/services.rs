@@ -359,11 +359,10 @@ unsafe impl NativeServices for Services<'_> {
             .functions
             .iter()
             .any(|address| address.segment != arrivals.bridge.segment)
-            || !self.remappers.observe_arrivals(
-                arrivals.bridge,
-                arrivals.functions,
-                arrivals.read32,
-            )
+            || !self
+                .remappers
+                .observe_arrivals(arrivals.bridge, arrivals.functions, arrivals.read32)
+                .map_err(ServiceError::Config)?
         {
             return Err(ServiceError::Refused(
                 "PCI arrival has no stable complete PF/VF inventory",
