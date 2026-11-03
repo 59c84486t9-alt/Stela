@@ -103,6 +103,11 @@
 /mm/Makefile
 /mm/page_alloc.c
 /mm/page_alloc_state.c
+/mm/mmap.c
+/mm/mmap_boot.c
+/mm/util.c
+/mm/vma.h
+/mm/vma_init.c
 /mm/init-mm.c
 /mm/slab_common.c
 /mm/slab.h

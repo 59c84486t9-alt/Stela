@@ -1,0 +1,242 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 22:48:24 -0500
+Subject: [PATCH] refactor(mm): separate original VMA bootstrap and accounting
+ state
+
+---
+ mm/Makefile    |  2 +-
+ mm/mmap.c      | 66 --------------------------------------
+ mm/mmap_boot.c | 86 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ mm/util.c      |  6 ----
+ mm/vma_init.c  | 14 ++++++++
+ 5 files changed, 101 insertions(+), 73 deletions(-)
+ create mode 100644 mm/mmap_boot.c
+
+diff --git a/mm/Makefile b/mm/Makefile
+index c357fafb7c1035b34168b700f38dd6395cce0ae4..77ed13ddfb84f2d9b87d37c741cc6af9a7d2575c 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -35,7 +35,7 @@ CFLAGS_init-mm.o += -Wno-override-init
+ 
+ mmu-y			:= nommu.o
+ mmu-$(CONFIG_MMU)	:= highmem.o memory.o mincore.o \
+-			   mlock.o mmap.o mmu_gather.o mprotect.o mremap.o \
++			   mlock.o mmap.o mmap_boot.o mmu_gather.o mprotect.o mremap.o \
+ 			   msync.o page_vma_mapped.o pagewalk.o \
+ 			   pgtable-generic.o rmap.o vmalloc.o vma.o vma_exec.o
+ 
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 2311ae7c2ff45c7d6a84633fa5c8828ba0827eb0..7ec0f19d754f83a81ab32f59275790dad85c199f 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -1510,72 +1510,6 @@ struct vm_area_struct *_install_special_mapping(
+ 					&special_mapping_vmops);
+ }
+ 
+-#ifdef CONFIG_SYSCTL
+-#if defined(HAVE_ARCH_PICK_MMAP_LAYOUT) || \
+-		defined(CONFIG_ARCH_WANT_DEFAULT_TOPDOWN_MMAP_LAYOUT)
+-int sysctl_legacy_va_layout;
+-#endif
+-
+-static const struct ctl_table mmap_table[] = {
+-		{
+-				.procname       = "max_map_count",
+-				.data           = &sysctl_max_map_count,
+-				.maxlen         = sizeof(sysctl_max_map_count),
+-				.mode           = 0644,
+-				.proc_handler   = proc_dointvec_minmax,
+-				.extra1         = SYSCTL_ZERO,
+-		},
+-#if defined(HAVE_ARCH_PICK_MMAP_LAYOUT) || \
+-		defined(CONFIG_ARCH_WANT_DEFAULT_TOPDOWN_MMAP_LAYOUT)
+-		{
+-				.procname       = "legacy_va_layout",
+-				.data           = &sysctl_legacy_va_layout,
+-				.maxlen         = sizeof(sysctl_legacy_va_layout),
+-				.mode           = 0644,
+-				.proc_handler   = proc_dointvec_minmax,
+-				.extra1         = SYSCTL_ZERO,
+-		},
+-#endif
+-#ifdef CONFIG_HAVE_ARCH_MMAP_RND_BITS
+-		{
+-				.procname       = "mmap_rnd_bits",
+-				.data           = &mmap_rnd_bits,
+-				.maxlen         = sizeof(mmap_rnd_bits),
+-				.mode           = 0600,
+-				.proc_handler   = proc_dointvec_minmax,
+-				.extra1         = (void *)&mmap_rnd_bits_min,
+-				.extra2         = (void *)&mmap_rnd_bits_max,
+-		},
+-#endif
+-#ifdef CONFIG_HAVE_ARCH_MMAP_RND_COMPAT_BITS
+-		{
+-				.procname       = "mmap_rnd_compat_bits",
+-				.data           = &mmap_rnd_compat_bits,
+-				.maxlen         = sizeof(mmap_rnd_compat_bits),
+-				.mode           = 0600,
+-				.proc_handler   = proc_dointvec_minmax,
+-				.extra1         = (void *)&mmap_rnd_compat_bits_min,
+-				.extra2         = (void *)&mmap_rnd_compat_bits_max,
+-		},
+-#endif
+-};
+-#endif /* CONFIG_SYSCTL */
+-
+-/*
+- * initialise the percpu counter for VM, initialise VMA state.
+- */
+-void __init mmap_init(void)
+-{
+-	int ret;
+-
+-	ret = percpu_counter_init(&vm_committed_as, 0, GFP_KERNEL);
+-	VM_BUG_ON(ret);
+-#ifdef CONFIG_SYSCTL
+-	register_sysctl_init("vm", mmap_table);
+-#endif
+-	vma_state_init();
+-}
+-
+ /*
+  * Initialise sysctl_user_reserve_kbytes.
+  *
+diff --git a/mm/mmap_boot.c b/mm/mmap_boot.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..e672385d5033f43ce4beda38754e866c84a35402
+--- /dev/null
++++ b/mm/mmap_boot.c
+@@ -0,0 +1,86 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * mm/mmap.c
++ *
++ * Written by obz.
++ *
++ * Address space accounting code	<alan@lxorguk.ukuu.org.uk>
++ */
++
++#include <linux/mm.h>
++#include <linux/mmdebug.h>
++#include <linux/mman.h>
++
++#include "vma.h"
++
++#ifdef CONFIG_SYSCTL
++#include <linux/sysctl.h>
++#include <asm/mmu_context.h>
++#include "internal.h"
++#endif
++
++#ifdef CONFIG_SYSCTL
++#if defined(HAVE_ARCH_PICK_MMAP_LAYOUT) || \
++		defined(CONFIG_ARCH_WANT_DEFAULT_TOPDOWN_MMAP_LAYOUT)
++int sysctl_legacy_va_layout;
++#endif
++
++static const struct ctl_table mmap_table[] = {
++		{
++				.procname       = "max_map_count",
++				.data           = &sysctl_max_map_count,
++				.maxlen         = sizeof(sysctl_max_map_count),
++				.mode           = 0644,
++				.proc_handler   = proc_dointvec_minmax,
++				.extra1         = SYSCTL_ZERO,
++		},
++#if defined(HAVE_ARCH_PICK_MMAP_LAYOUT) || \
++		defined(CONFIG_ARCH_WANT_DEFAULT_TOPDOWN_MMAP_LAYOUT)
++		{
++				.procname       = "legacy_va_layout",
++				.data           = &sysctl_legacy_va_layout,
++				.maxlen         = sizeof(sysctl_legacy_va_layout),
++				.mode           = 0644,
++				.proc_handler   = proc_dointvec_minmax,
++				.extra1         = SYSCTL_ZERO,
++		},
++#endif
++#ifdef CONFIG_HAVE_ARCH_MMAP_RND_BITS
++		{
++				.procname       = "mmap_rnd_bits",
++				.data           = &mmap_rnd_bits,
++				.maxlen         = sizeof(mmap_rnd_bits),
++				.mode           = 0600,
++				.proc_handler   = proc_dointvec_minmax,
++				.extra1         = (void *)&mmap_rnd_bits_min,
++				.extra2         = (void *)&mmap_rnd_bits_max,
++		},
++#endif
++#ifdef CONFIG_HAVE_ARCH_MMAP_RND_COMPAT_BITS
++		{
++				.procname       = "mmap_rnd_compat_bits",
++				.data           = &mmap_rnd_compat_bits,
++				.maxlen         = sizeof(mmap_rnd_compat_bits),
++				.mode           = 0600,
++				.proc_handler   = proc_dointvec_minmax,
++				.extra1         = (void *)&mmap_rnd_compat_bits_min,
++				.extra2         = (void *)&mmap_rnd_compat_bits_max,
++		},
++#endif
++};
++#endif /* CONFIG_SYSCTL */
++
++/*
++ * initialise the percpu counter for VM, initialise VMA state.
++ */
++void __init mmap_init(void)
++{
++	int ret;
++
++	ret = percpu_counter_init(&vm_committed_as, 0, GFP_KERNEL);
++	VM_BUG_ON(ret);
++#ifdef CONFIG_SYSCTL
++	register_sysctl_init("vm", mmap_table);
++#endif
++	vma_state_init();
++}
+diff --git a/mm/util.c b/mm/util.c
+index 34cb43b3eaa4c3e9fb5074b31fb5553064c0614c..68d1ad17a6cc426f06dfc0488baa17fa67ab1e7d 100644
+--- a/mm/util.c
++++ b/mm/util.c
+@@ -915,12 +915,6 @@ unsigned long vm_commit_limit(void)
+ 	return allowed;
+ }
+ 
+-/*
+- * Make sure vm_committed_as in one cacheline and not cacheline shared with
+- * other variables. It can be updated by several CPUs frequently.
+- */
+-struct percpu_counter vm_committed_as ____cacheline_aligned_in_smp;
+-
+ /*
+  * The global memory commitment made in the system can be a metric
+  * that can be used to drive ballooning decisions when Linux is hosted
+diff --git a/mm/vma_init.c b/mm/vma_init.c
+index 3c0b65950510e06f10e71fe0f4c0af5e47a90051..cc1810a7066d3fd7c2ccc1987612c1fc01578b5a 100644
+--- a/mm/vma_init.c
++++ b/mm/vma_init.c
+@@ -5,9 +5,23 @@
+  * between CONFIG_MMU and non-CONFIG_MMU kernel configurations.
+  */
+ 
++#ifdef CONFIG_STELA
++#include <linux/mm.h>
++#include <linux/swap.h>
++#include <linux/mm_inline.h>
++#include <linux/slab.h>
++#else
+ #include "vma_internal.h"
++#endif
++#include <linux/mman.h>
+ #include "vma.h"
+ 
++/*
++ * Make sure vm_committed_as in one cacheline and not cacheline shared with
++ * other variables. It can be updated by several CPUs frequently.
++ */
++struct percpu_counter vm_committed_as ____cacheline_aligned_in_smp;
++
+ /* SLAB cache for vm_area_struct structures */
+ static struct kmem_cache *vm_area_cachep;
+ 

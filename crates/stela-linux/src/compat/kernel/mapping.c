@@ -33,8 +33,6 @@ static inline unsigned long last_page(const struct vm_area_struct *vma)
 INTERVAL_TREE_DEFINE(struct vm_area_struct, shared.rb, unsigned long, shared.rb_subtree_last,
 		     first_page, last_page, static inline, mapped)
 
-const struct vm_operations_struct vma_dummy_vm_ops;
-
 /* Every mapping's mm: Linux code reads it, the owner's space is what counts. */
 static struct mm_struct client_mm = {
 	.mmap_lock = __RWSEM_INITIALIZER(client_mm.mmap_lock),
