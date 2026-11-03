@@ -3,6 +3,7 @@
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 kernel/locking/rwsem.c. Linux code
  * runs in one context at a time, so count needs no atomicity of its own: it
  * holds the writer bit or the reader count, and waiters sleep on it. */
+#include <linux/errno.h>
 #include <linux/rwsem.h>
 #include <linux/sched.h>
 #include <linux/wait_bit.h>
@@ -40,6 +41,12 @@ int down_write_trylock(struct rw_semaphore *sem)
 void down_read(struct rw_semaphore *sem)
 {
 	wait_var_event(&sem->count, down_read_trylock(sem));
+}
+
+int down_read_killable(struct rw_semaphore *sem)
+{
+	/* The variable wait reports -ERESTARTSYS; the rwsem API reports EINTR. */
+	return wait_var_event_killable(&sem->count, down_read_trylock(sem)) ? -EINTR : 0;
 }
 
 void down_write(struct rw_semaphore *sem)
