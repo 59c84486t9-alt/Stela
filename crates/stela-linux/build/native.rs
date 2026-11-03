@@ -157,6 +157,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/mnt_idmapping.c")),
             PathBuf::from(format!("{LINUX}/fs/inode_evict.c")),
             PathBuf::from(format!("{LINUX}/fs/name_hash.c")),
+            PathBuf::from(format!("{LINUX}/fs/path_get.c")),
             PathBuf::from(format!("{LINUX}/fs/filename.c")),
             PathBuf::from(format!("{LINUX}/fs/filp_close.c")),
             PathBuf::from(format!("{LINUX}/lib/string.c")),

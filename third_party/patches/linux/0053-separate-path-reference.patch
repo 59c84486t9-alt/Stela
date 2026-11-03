@@ -1,0 +1,156 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 00:13:37 -0500
+Subject: [PATCH] refactor(vfs): separate path reference acquisition
+
+---
+ fs/Makefile    |  2 +-
+ fs/mount.h     | 13 +++++++++++++
+ fs/namei.c     | 13 -------------
+ fs/namespace.c | 19 -------------------
+ fs/path_get.c  | 32 ++++++++++++++++++++++++++++++++
+ 5 files changed, 46 insertions(+), 33 deletions(-)
+ create mode 100644 fs/path_get.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 0a1767c3e28fb80a2fe6550d165e74bfbc6c3bc0..574627f696fc53e9fea918405b247cd122e3d66b 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -8,7 +8,7 @@
+ 
+ 
+ obj-y :=	open.o filp_close.o read_write.o file_table.o super.o \
+-		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o name_hash.o filename.o fcntl.o \
++		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o path_get.o name_hash.o filename.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o inode.o inode_evict.o \
+ 		attr.o bad_inode.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o \
+ 		seq_file.o seq_lifetime.o seq_output.o xattr.o simple_xattr.o libfs.o pseudo_metadata.o fs-writeback.o \
+diff --git a/fs/mount.h b/fs/mount.h
+index 2223fb141499fe48ebd88615a14079ed5036c969..7e579a46a5edb05b4748ec81a9ddd2e2856e552a 100644
+--- a/fs/mount.h
++++ b/fs/mount.h
+@@ -1,5 +1,7 @@
+ /* SPDX-License-Identifier: GPL-2.0 */
+ #include <linux/mount.h>
++#include <linux/percpu.h>
++#include <linux/preempt.h>
+ #include <linux/seq_file.h>
+ #include <linux/poll.h>
+ #include <linux/ns_common.h>
+@@ -127,6 +129,17 @@ static inline struct mount *real_mount(struct vfsmount *mnt)
+ 	return container_of(mnt, struct mount, mnt);
+ }
+ 
++static inline void mnt_inc_count(struct mount *mnt)
++{
++#ifdef CONFIG_SMP
++	this_cpu_inc(mnt->mnt_pcp->mnt_gets);
++#else
++	preempt_disable();
++	mnt->mnt_count++;
++	preempt_enable();
++#endif
++}
++
+ static inline int mnt_has_parent(const struct mount *mnt)
+ {
+ 	return mnt != mnt->mnt_parent;
+diff --git a/fs/namei.c b/fs/namei.c
+index 211aaa831cf2725fba7d236a4263396df1b37055..6a75b8f64c84f166dd470f5aa03856ea4d18e99c 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -473,19 +473,6 @@ static __always_inline int lookup_inode_permission_may_exec(struct mnt_idmap *id
+ 	return security_inode_permission(inode, mask);
+ }
+ 
+-/**
+- * path_get - get a reference to a path
+- * @path: path to get the reference to
+- *
+- * Given a path increment the reference count to the dentry and the vfsmount.
+- */
+-void path_get(const struct path *path)
+-{
+-	mntget(path->mnt);
+-	dget(path->dentry);
+-}
+-EXPORT_SYMBOL(path_get);
+-
+ /**
+  * path_put - put a reference to a path
+  * @path: path to put the reference to
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 1df3c892d91d0bab7bdf16d7b47d53728d9f666a..9d9b0c18b57eae4dcb735410d7a441a473a9568c 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -248,17 +248,6 @@ void mnt_release_group_id(struct mount *mnt)
+ 	mnt->mnt_group_id = 0;
+ }
+ 
+-static inline void mnt_inc_count(struct mount *mnt)
+-{
+-#ifdef CONFIG_SMP
+-	this_cpu_inc(mnt->mnt_pcp->mnt_gets);
+-#else
+-	preempt_disable();
+-	mnt->mnt_count++;
+-	preempt_enable();
+-#endif
+-}
+-
+ static inline void mnt_dec_count(struct mount *mnt)
+ {
+ #ifdef CONFIG_SMP
+@@ -1441,14 +1430,6 @@ void mntput(struct vfsmount *mnt)
+ }
+ EXPORT_SYMBOL(mntput);
+ 
+-struct vfsmount *mntget(struct vfsmount *mnt)
+-{
+-	if (mnt)
+-		mnt_inc_count(real_mount(mnt));
+-	return mnt;
+-}
+-EXPORT_SYMBOL(mntget);
+-
+ /*
+  * Make a mount point inaccessible to new lookups.
+  * Because there may still be current users, the caller MUST WAIT
+diff --git a/fs/path_get.c b/fs/path_get.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..08efe794d50de34a19b6c86721e2e7c0d5cd85fa
+--- /dev/null
++++ b/fs/path_get.c
+@@ -0,0 +1,32 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Path reference acquisition from fs/namei.c and fs/namespace.c.
++ * Copyright (C) 1991, 1992 Linus Torvalds
++ * Copyright (C) 2000, 2001 Al Viro
++ */
++#include <linux/dcache.h>
++#include <linux/export.h>
++#include <linux/path.h>
++
++#include "mount.h"
++
++struct vfsmount *mntget(struct vfsmount *mnt)
++{
++	if (mnt)
++		mnt_inc_count(real_mount(mnt));
++	return mnt;
++}
++EXPORT_SYMBOL(mntget);
++
++/**
++ * path_get - get a reference to a path
++ * @path: path to get the reference to
++ *
++ * Given a path increment the reference count to the dentry and the vfsmount.
++ */
++void path_get(const struct path *path)
++{
++	mntget(path->mnt);
++	dget(path->dentry);
++}
++EXPORT_SYMBOL(path_get);
