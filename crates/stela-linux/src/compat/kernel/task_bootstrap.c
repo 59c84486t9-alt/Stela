@@ -254,8 +254,9 @@ int stela_linux_task_bootstrap_threads(const struct stela_linux_owner *owner)
     /* Original rest_init ordering: end the single-original-task inactive RCU
      * phase BEFORE a second child may run. This is no public SRCU readiness. */
     rcu_scheduler_starting();
+    /* All selected kernel clients share the original initial fdtable. */
     int pid = kernel_thread(native_kernel_supervisor, (void *)owner,
-        "stela-init", CLONE_FS);
+        "stela-init", CLONE_FS | CLONE_FILES);
     if (pid < 0) {
         thread_phase = THREADS_FAILED;
         return pid; /* actual original constructor unwind/cancel must join */

@@ -9,10 +9,10 @@
 #include <linux/cdev.h>
 #include <linux/dcache.h>
 #include <linux/err.h>
+#include <linux/fdtable.h>
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/fs_context.h>
-#include <linux/idr.h>
 #include <linux/kdev_t.h>
 #include <linux/llist.h>
 #include <linux/mount.h>
@@ -64,6 +64,7 @@ void inode_set_bytes(struct inode *inode, loff_t bytes)
 }
 
 static struct kmem_cache *file_cache __ro_after_init;
+static const struct file_operations empty_file_operations;
 
 void __init stela_linux_file_cache_init(void)
 {
@@ -97,7 +98,7 @@ static struct file *new_file(struct inode *inode, const struct file_operations *
 	memset_after(file, 0, f_ref);
 	file->f_inode = inode;
 	file->f_mapping = inode->i_mapping;
-	file->f_op = fops;
+	file->f_op = fops ? fops : &empty_file_operations;
 	file->f_flags = flags;
 	file->f_mode = OPEN_FMODE(flags);
 	file->private_data = private_data;
@@ -239,45 +240,9 @@ loff_t noop_llseek(struct file *file, loff_t offset, int whence)
 	return file->f_pos;
 }
 
-/* The descriptors Linux code installs, or NULL for one reserved. */
-static DEFINE_IDR(descriptors);
-
-int get_unused_fd_flags(unsigned int flags)
-{
-	(void)flags;
-	return idr_alloc(&descriptors, NULL, 0, INT_MAX, GFP_KERNEL);
-}
-
-void put_unused_fd(unsigned int fd)
-{
-	idr_remove(&descriptors, (unsigned long)fd);
-}
-
-void fd_install(unsigned int fd, struct file *file)
-{
-	idr_replace(&descriptors, file, (unsigned long)fd);
-}
-
-struct file *fget(unsigned int fd)
-{
-	struct file *file = idr_find(&descriptors, (unsigned long)fd);
-
-	return file ? get_file(file) : NULL;
-}
-
-struct fd fdget(unsigned int fd)
-{
-	struct file *file = fget(fd);
-
-	return file ? CLONED_FD(file) : EMPTY_FD;
-}
-
 void stela_linux_fd_close(int fd)
 {
-	struct file *file = idr_remove(&descriptors, (unsigned long)fd);
-
-	if (file)
-		fput_close(file);
+	close_fd((unsigned int)fd);
 }
 
 int stela_linux_fd_dup(int fd)
@@ -498,6 +463,7 @@ STELA_UNSUPPORTED(void, kill_anon_super, struct super_block *)
 STELA_UNSUPPORTED(struct file *, dentry_open, const struct path *, int, const struct cred *)
 
 #ifdef STELA_LINUX_FILE_TEST
+#include <linux/init_task.h>
 #include <stela/linux.h>
 #include <stela/page.h>
 #include <stela/page_test.h>
@@ -548,6 +514,13 @@ static struct file_system_type test_fs = {
 	.init_fs_context = test_init_fs_context,
 };
 
+/* Component-only binding for the original fdtable and resource limits. */
+struct task_struct *__wrap_stela_linux_current(void);
+struct task_struct *__wrap_stela_linux_current(void)
+{
+	return &init_task;
+}
+
 int main(void)
 {
 	stela_linux_enter(&stela_linux_bare);
@@ -574,7 +547,6 @@ int main(void)
 	assert(reused == first && !reused->f_pos && !reused->private_data);
 	fput(reused);
 
-	radix_tree_init();
 	struct file *file;
 
 	assert(stela_linux_chrdev_open(MKDEV(226, 3), 0, &file) == -ENXIO);
@@ -587,16 +559,38 @@ int main(void)
 	assert(!stela_linux_chrdev_open(MKDEV(226, 3), 0, &file));
 
 	/* A descriptor holds its own reference; closing it drops that one. */
-	int fd = get_unused_fd_flags(0);
+	int fd = get_unused_fd_flags(O_CLOEXEC);
 	assert(fd == 0 && !fget(0) && get_unused_fd_flags(0) == 1);
 	put_unused_fd(1);
 	fd_install(0, get_file(file));
+	assert(get_close_on_exec(0));
+	struct file *looked_up = fget_task(&init_task, 0);
+	assert(looked_up == file);
+	fput(looked_up);
 	struct fd borrowed = fdget(0);
 	assert(fd_file(borrowed) == file);
 	fdput(borrowed);
 	assert(fd_empty(fdget(5)));
 	stela_linux_fd_close(0);
 	assert(!fget(0) && !releases);
+	/* Cross the embedded table boundary and preserve the installed entry. */
+	assert(get_unused_fd_flags(0) == 0);
+	fd_install(0, get_file(file));
+	for (unsigned int index = 1; index <= NR_OPEN_DEFAULT; index++)
+		assert(get_unused_fd_flags(O_CLOEXEC) == (int)index);
+	looked_up = fget_task(&init_task, 0);
+	assert(looked_up == file && !get_close_on_exec(0));
+	fput(looked_up);
+	stela_linux_fd_close(0);
+	fd_install(NR_OPEN_DEFAULT, get_file(file));
+	assert(get_close_on_exec(NR_OPEN_DEFAULT));
+	looked_up = fget_task(&init_task, NR_OPEN_DEFAULT);
+	assert(looked_up == file);
+	fput(looked_up);
+	stela_linux_fd_close(NR_OPEN_DEFAULT);
+	for (unsigned int index = 1; index < NR_OPEN_DEFAULT; index++)
+		put_unused_fd(index);
+
 	fput(file);
 	assert(releases == 1);
 

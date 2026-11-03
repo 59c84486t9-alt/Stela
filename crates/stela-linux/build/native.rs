@@ -147,6 +147,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/fs_struct.c")),
             PathBuf::from(format!("{LINUX}/fs/init_fdtable.c")),
             PathBuf::from(format!("{LINUX}/fs/file_ref.c")),
+            PathBuf::from(format!("{LINUX}/fs/file.c")),
             PathBuf::from(format!("{LINUX}/fs/filp_close.c")),
             PathBuf::from(format!("{LINUX}/lib/string.c")),
             PathBuf::from(format!("{LINUX}/lib/hexdump.c")),
@@ -377,6 +378,19 @@ impl Linux {
                 &archives,
             );
         }
+        // The descriptor fixture uses the original init_task and fdtable
+        // without claiming a native task lease. Only its ELF link wraps current.
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+            let mut file = build.clone();
+            file.define("STELA_LINUX_FILE_TEST", None)
+                .flag("-Wl,--wrap=stela_linux_current");
+            tests.add(
+                &file,
+                "linux_file",
+                &format!("{COMPAT}/kernel/file.c"),
+                &archives,
+            );
+        }
         for (name, source, define) in [
             ("linux_printk", "printk.c", "STELA_LINUX_PRINTK_TEST"),
             ("linux_panic", "panic.c", "STELA_LINUX_PANIC_TEST"),
@@ -430,7 +444,6 @@ impl Linux {
                 "catalogue.c",
                 "STELA_LINUX_CATALOGUE_WORKQUEUE_TEST",
             ),
-            ("linux_file", "file.c", "STELA_LINUX_FILE_TEST"),
             ("linux_mapping", "mapping.c", "STELA_LINUX_MAPPING_TEST"),
             ("linux_reclaim", "reclaim.c", "STELA_LINUX_RECLAIM_TEST"),
             ("linux_sort", "sort.c", "STELA_LINUX_SORT_TEST"),
