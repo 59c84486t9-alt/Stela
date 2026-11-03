@@ -1,0 +1,221 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 21:54:47 -0500
+Subject: [PATCH] refactor(sched): separate task-local load metadata from
+ capacity
+
+---
+ kernel/sched/fork_load.c       | 104 +++++++++++++++++++++++++++++++++
+ kernel/sched/fork_metadata.c   |  60 -------------------
+ kernel/sched/fork_sources.json |   7 ++-
+ 3 files changed, 110 insertions(+), 61 deletions(-)
+ create mode 100644 kernel/sched/fork_load.c
+
+diff --git a/kernel/sched/fork_load.c b/kernel/sched/fork_load.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..f2f565235d5804d9629608a0075ea974d792a42d
+--- /dev/null
++++ b/kernel/sched/fork_load.c
+@@ -0,0 +1,104 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Original source notices (core.c and fair.c):
++ * Copyright (C) 1991-2002 Linus Torvalds
++ * Copyright (C) 1998-2024 Ingo Molnar, Red Hat
++ * Copyright (C) 2007 Red Hat, Inc., Ingo Molnar <mingo@redhat.com>
++ * Interactivity improvements by Mike Galbraith
++ * (C) 2007 Mike Galbraith <efault@gmx.de>
++ * Various enhancements by Dmitry Adamushko.
++ * (C) 2007 Dmitry Adamushko <dmitry.adamushko@gmail.com>
++ * Group scheduling enhancements by Srivatsa Vaddagiri
++ * Copyright IBM Corporation, 2007
++ * Author: Srivatsa Vaddagiri <vatsa@linux.vnet.ibm.com>
++ * Scaled math optimizations by Thomas Gleixner
++ * Copyright (C) 2007, Linutronix GmbH, Thomas Gleixner <tglx@kernel.org>
++ * Adaptive scheduling granularity, math enhancements by Peter Zijlstra
++ * Copyright (C) 2007 Red Hat, Inc., Peter Zijlstra
++ */
++/* Task-local metadata extracted from original core.c/fair.c/rt.c.
++ * Original source authors/licensing remain as recorded in fork_sources.json.
++ * No CFS/RT runqueue, capacity topology, timer callback or class identity is
++ * manufactured. Duplicate original definitions must not also be linked.
++ */
++#include <linux/sched.h>
++#include <linux/sched/rt.h>
++#include <linux/string.h>
++#include "fork_backend.h"
++
++#ifndef CONFIG_STELA
++#include "sched.h"
++#else
++/* Selected 64-bit, non-group profile of kernel/sched/sched.h. */
++static_assert(IS_ENABLED(CONFIG_64BIT));
++static_assert(!IS_ENABLED(CONFIG_FAIR_GROUP_SCHED));
++#define WEIGHT_IDLEPRIO 3
++#define WMULT_IDLEPRIO 1431655765
++#define scale_load(w) ((w) << SCHED_FIXEDPOINT_SHIFT)
++#define scale_load_down(w) \
++({ \
++	unsigned long __w = (w); \
++	if (__w) \
++		__w = max(2UL, __w >> SCHED_FIXEDPOINT_SHIFT); \
++	__w; \
++})
++#define entity_is_task(se) 1
++#endif
++
++const int sched_prio_to_weight[40] = {
++ /* -20 */     88761,     71755,     56483,     46273,     36291,
++ /* -15 */     29154,     23254,     18705,     14949,     11916,
++ /* -10 */      9548,      7620,      6100,      4904,      3906,
++ /*  -5 */      3121,      2501,      1991,      1586,      1277,
++ /*   0 */      1024,       820,       655,       526,       423,
++ /*   5 */       335,       272,       215,       172,       137,
++ /*  10 */       110,        87,        70,        56,        45,
++ /*  15 */        36,        29,        23,        18,        15,
++};
++
++const u32 sched_prio_to_wmult[40] = {
++ /* -20 */     48388,     59856,     76040,     92818,    118348,
++ /* -15 */    147320,    184698,    229616,    287308,    360437,
++ /* -10 */    449829,    563644,    704093,    875809,   1099582,
++ /*  -5 */   1376151,   1717300,   2157191,   2708050,   3363326,
++ /*   0 */   4194304,   5237765,   6557202,   8165337,  10153587,
++ /*   5 */  12820798,  15790321,  19976592,  24970740,  31350126,
++ /*  10 */  39045157,  49367440,  61356676,  76695844,  95443717,
++ /*  15 */ 119304647, 148102320, 186737708, 238609294, 286331153,
++};
++
++int sched_rr_timeslice = RR_TIMESLICE;
++unsigned int sysctl_sched_base_slice			= 700000ULL;
++
++void stela_linux_sched_load_weight(struct task_struct *p)
++{
++	int prio = p->static_prio - MAX_RT_PRIO;
++	struct load_weight lw;
++
++	if (p->policy == SCHED_IDLE) {
++		lw.weight = scale_load(WEIGHT_IDLEPRIO);
++		lw.inv_weight = WMULT_IDLEPRIO;
++	} else {
++		lw.weight = scale_load(sched_prio_to_weight[prio]);
++		lw.inv_weight = sched_prio_to_wmult[prio];
++	}
++
++	p->se.load = lw;
++}
++
++void init_entity_runnable_average(struct sched_entity *se)
++{
++	struct sched_avg *sa = &se->avg;
++
++	memset(sa, 0, sizeof(*sa));
++
++	/*
++	 * Tasks are initialized with full load to be seen as heavy tasks until
++	 * they get a chance to stabilize to their real load level.
++	 * Group entities are initialized with zero load to reflect the fact that
++	 * nothing has been attached to the task group yet.
++	 */
++	if (entity_is_task(se))
++		sa->load_avg = scale_load_down(se->load.weight);
++
++	/* when this task is enqueued, it will contribute to its cfs_rq's load_avg */
++}
+diff --git a/kernel/sched/fork_metadata.c b/kernel/sched/fork_metadata.c
+index de15f41bc083b9694fb1af0837d33595785ff1c5..978cc6d7b39035711f8cecfb04d7848a802a8122 100644
+--- a/kernel/sched/fork_metadata.c
++++ b/kernel/sched/fork_metadata.c
+@@ -27,66 +27,6 @@
+ #include "sched.h"
+ #include "fork_backend.h"
+ 
+-const int sched_prio_to_weight[40] = {
+- /* -20 */     88761,     71755,     56483,     46273,     36291,
+- /* -15 */     29154,     23254,     18705,     14949,     11916,
+- /* -10 */      9548,      7620,      6100,      4904,      3906,
+- /*  -5 */      3121,      2501,      1991,      1586,      1277,
+- /*   0 */      1024,       820,       655,       526,       423,
+- /*   5 */       335,       272,       215,       172,       137,
+- /*  10 */       110,        87,        70,        56,        45,
+- /*  15 */        36,        29,        23,        18,        15,
+-};
+-
+-const u32 sched_prio_to_wmult[40] = {
+- /* -20 */     48388,     59856,     76040,     92818,    118348,
+- /* -15 */    147320,    184698,    229616,    287308,    360437,
+- /* -10 */    449829,    563644,    704093,    875809,   1099582,
+- /*  -5 */   1376151,   1717300,   2157191,   2708050,   3363326,
+- /*   0 */   4194304,   5237765,   6557202,   8165337,  10153587,
+- /*   5 */  12820798,  15790321,  19976592,  24970740,  31350126,
+- /*  10 */  39045157,  49367440,  61356676,  76695844,  95443717,
+- /*  15 */ 119304647, 148102320, 186737708, 238609294, 286331153,
+-};
+-
+-int sched_rr_timeslice = RR_TIMESLICE;
+-unsigned int sysctl_sched_base_slice			= 700000ULL;
+-
+-void stela_linux_sched_load_weight(struct task_struct *p)
+-{
+-	int prio = p->static_prio - MAX_RT_PRIO;
+-	struct load_weight lw;
+-
+-	if (task_has_idle_policy(p)) {
+-		lw.weight = scale_load(WEIGHT_IDLEPRIO);
+-		lw.inv_weight = WMULT_IDLEPRIO;
+-	} else {
+-		lw.weight = scale_load(sched_prio_to_weight[prio]);
+-		lw.inv_weight = sched_prio_to_wmult[prio];
+-	}
+-
+-	p->se.load = lw;
+-}
+-
+-void init_entity_runnable_average(struct sched_entity *se)
+-{
+-	struct sched_avg *sa = &se->avg;
+-
+-	memset(sa, 0, sizeof(*sa));
+-
+-	/*
+-	 * Tasks are initialized with full load to be seen as heavy tasks until
+-	 * they get a chance to stabilize to their real load level.
+-	 * Group entities are initialized with zero load to reflect the fact that
+-	 * nothing has been attached to the task group yet.
+-	 */
+-	if (entity_is_task(se))
+-		sa->load_avg = scale_load_down(se->load.weight);
+-
+-	/* when this task is enqueued, it will contribute to its cfs_rq's load_avg */
+-}
+-
+-
+ void stela_linux_sched_fork_fair_capacity(struct task_struct *p)
+ {
+ 	struct asym_cap_data *entry;
+diff --git a/kernel/sched/fork_sources.json b/kernel/sched/fork_sources.json
+index 6f2a5c1b73f2244a22e3e27d8e965c5d28891749..5a31323d5a0d28cabdb094061746961a92034cf3 100644
+--- a/kernel/sched/fork_sources.json
++++ b/kernel/sched/fork_sources.json
+@@ -130,9 +130,13 @@
+       "path": "kernel/sched/fork_backend.h",
+       "sha256": "8d76100a0684c6d90de0c32c92f0149e419fba16e02d34daf257e5789e4b92ba"
+     },
++    {
++      "path": "kernel/sched/fork_load.c",
++      "sha256": "652136e639f33e738def11694bb9ddab015c9ed12ec0c41ef5c357f4bec0a782"
++    },
+     {
+       "path": "kernel/sched/fork_metadata.c",
+-      "sha256": "4eba3c60916b611b9d55cd3340219585e3348b3c97a1fd65d371098039d2066e"
++      "sha256": "942e91a7e77e61e541ed8faff01502bf13e2560a38f442d988134aa8ede5d533"
+     },
+     {
+       "path": "kernel/sched/fork_support.c",
+@@ -141,6 +145,7 @@
+   ],
+   "adaptations": [
+     "set_load_weight is specialized for update_load=false and named stela_linux_sched_load_weight; no CFS runqueue reweighting is implemented.",
++    "Task-local weights, slice defaults, and average initialization are built separately from the original asymmetric-capacity helper. The native 64-bit non-group branch uses the matching original sched.h scaling and entity rules.",
+     "set_task_max_allowed_capacity is named stela_linux_sched_fork_fair_capacity; it still requires the original capacity/static-key owner.",
+     "Original sched_fork class and placement decisions require the native admit/select/place operations declared in fork_backend.h.",
+     "Disabled SCHED_CACHE, UCLAMP_TASK and SCHED_MM_CID branches remain guarded by their original configuration conditions.",

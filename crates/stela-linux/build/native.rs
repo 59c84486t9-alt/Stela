@@ -162,6 +162,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/kernel/rcu/wakeme.c")),
             PathBuf::from(format!("{LINUX}/kernel/locking/mutex.c")),
             PathBuf::from(format!("{LINUX}/kernel/locking/rtmutex_api.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/fork_load.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/wait_support.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/wait.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/swait.c")),
