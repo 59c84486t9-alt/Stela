@@ -1,7 +1,15 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_ALLOCATION_H
 #define STELA_ALLOCATION_H
+#include <linux/numa.h>
 #include <linux/types.h>
+
+/* The selected slab profile has one physical memory node. */
+static inline bool stela_linux_slab_node_supported(int node)
+{
+ return node == NUMA_NO_NODE || node == 0;
+}
+
 struct kmem_cache;
 struct rcu_head;
 /* Borrowed only during the same serialized entered operation. Descriptors

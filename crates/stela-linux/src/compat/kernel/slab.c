@@ -151,6 +151,24 @@ size_t kmalloc_size_roundup(size_t size)
 static_assert(!IS_ENABLED(CONFIG_NUMA));
 static_assert(!IS_ENABLED(CONFIG_SLAB_BUCKETS));
 static_assert(!IS_ENABLED(CONFIG_MEM_ALLOC_PROFILING));
+void *__kmalloc_node_noprof(DECL_KMALLOC_PARAMS(size, b, token), gfp_t flags, int node)
+{
+	return stela_linux_slab_node_supported(node) ?
+		__kmalloc_noprof(PASS_TOKEN_PARAMS(size, token), flags) : NULL;
+}
+
+void *__kmalloc_cache_node_noprof(struct kmem_cache *cache, gfp_t flags, int node, size_t size)
+{
+	return stela_linux_slab_node_supported(node) ?
+		__kmalloc_cache_noprof(cache, flags, size) : NULL;
+}
+
+void *__kmalloc_large_node_noprof(size_t size, gfp_t flags, int node)
+{
+	return stela_linux_slab_node_supported(node) ?
+		__kmalloc_large_noprof(size, flags) : NULL;
+}
+
 void *__kmalloc_node_track_caller_noprof(DECL_KMALLOC_PARAMS(size, b, token),
                                        gfp_t flags, int node, unsigned long caller)
 {
@@ -444,6 +462,20 @@ int main(void)
 	}
 	assert(__kmalloc_noprof(0, GFP_KERNEL) == ZERO_SIZE_PTR);
 	assert(__kmalloc_cache_noprof(NULL, GFP_KERNEL, 0) == ZERO_SIZE_PTR);
+	assert(__kmalloc_cache_node_noprof(NULL, GFP_KERNEL, 0, 0) == ZERO_SIZE_PTR);
+	assert(!__kmalloc_cache_node_noprof(NULL, GFP_KERNEL, 1, 64));
+	assert(!__kmalloc_large_node_noprof(PAGE_SIZE, GFP_KERNEL, 1));
+	volatile size_t dynamic_size = 96;
+	assert(!kmalloc_node(dynamic_size, GFP_KERNEL, 1));
+	void *dynamic = kmalloc_node(dynamic_size, GFP_KERNEL, 0);
+	assert(dynamic && ksize(dynamic) == 96);
+	kfree(dynamic);
+	void *placed = __kmalloc_cache_node_noprof(NULL, GFP_KERNEL, NUMA_NO_NODE, 96);
+	assert(placed && ksize(placed) == 96);
+	kfree(placed);
+	placed = __kmalloc_large_node_noprof(PAGE_SIZE + 1, GFP_KERNEL, 0);
+	assert(placed && IS_ALIGNED((unsigned long)placed, PAGE_SIZE));
+	kfree(placed);
 	assert(!__kmalloc_large_noprof(0, GFP_KERNEL));
 	assert(!__kmalloc_noprof(KMALLOC_MAX_SIZE + 1, GFP_KERNEL));
 	assert(!__kmalloc_noprof(SIZE_MAX, GFP_KERNEL));

@@ -321,6 +321,11 @@ void *kmem_cache_alloc_noprof(struct kmem_cache *cache, gfp_t flags)
 	return object;
 }
 
+void *kmem_cache_alloc_node_noprof(struct kmem_cache *cache, gfp_t flags, int node)
+{
+	return stela_linux_slab_node_supported(node) ? kmem_cache_alloc_noprof(cache, flags) : NULL;
+}
+
 void *kmem_cache_alloc_lru_noprof(struct kmem_cache *cache, struct list_lru *lru,
 				gfp_t flags)
 {
@@ -855,7 +860,9 @@ static void alignment_and_zeroing(void)
 		struct kmem_cache *cache = __kmem_cache_create_args("zero-and-align", cases[i].size,
 								 &args, SLAB_HWCACHE_ALIGN);
 		assert(cache && cache->stride % cases[i].expected == 0);
-		u8 *object = kmem_cache_alloc_lru(cache, NULL, GFP_KERNEL);
+		assert(!kmem_cache_alloc_node(cache, GFP_KERNEL, 1));
+		u8 *object = i == 0 ? kmem_cache_alloc_node(cache, GFP_KERNEL, 0) :
+			kmem_cache_alloc_lru(cache, NULL, GFP_KERNEL);
 		assert(object && !((unsigned long)object & (cases[i].expected - 1)));
 		for (size_t j = 0; j < cases[i].size; j++)
 			assert(object[j] == 0xa7);
