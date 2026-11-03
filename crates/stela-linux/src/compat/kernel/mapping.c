@@ -270,7 +270,7 @@ int main(void)
 {
 	stela_linux_enter(&owner);
 	stela_test_register_pages();
-	stela_linux_file_cache_init();
+	files_init();
 	struct file *file = anon_inode_getfile("test", &fops, NULL, O_RDWR);
 	struct stela_linux_mapping *mapping;
 

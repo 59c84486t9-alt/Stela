@@ -215,6 +215,9 @@
 /fs/writeback_inode.h
 /fs/inode_evict.c
 /fs/open.c
+/fs/file_table.c
+/fs/file_table_init.c
+/fs/file_table_init.h
 /fs/filp_close.c
 /fs/filp_close.h
 /fs/init_fdtable.c

@@ -128,7 +128,6 @@ int stela_linux_task_bootstrap_resources(const struct stela_linux_owner *owner)
     net_ns_init();
     /* Native hash allocation needs the quiescent, IRQ-enabled owner. */
     vfs_caches_init_early();
-    stela_linux_file_cache_init();
     vfs_caches_init();
     pagecache_init();
     signals_init();

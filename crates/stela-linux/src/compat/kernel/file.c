@@ -62,30 +62,18 @@ void inode_set_bytes(struct inode *inode, loff_t bytes)
 	inode->i_bytes = (unsigned short)(bytes & 511);
 }
 
-static struct kmem_cache *file_cache __ro_after_init;
+extern struct kmem_cache *__filp_cache;
 static const struct file_operations empty_file_operations;
-
-void __init stela_linux_file_cache_init(void)
-{
-	struct kmem_cache_args args = {
-		.use_freeptr_offset = true,
-		.freeptr_offset = offsetof(struct file, f_freeptr),
-	};
-
-	BUG_ON(file_cache);
-	file_cache = kmem_cache_create("filp", sizeof(struct file), &args,
-			SLAB_HWCACHE_ALIGN | SLAB_PANIC | SLAB_ACCOUNT | SLAB_TYPESAFE_BY_RCU);
-}
 
 /* Takes over the caller's inode reference. */
 static struct file *new_file(struct inode *inode, const struct file_operations *fops,
 			     unsigned int flags, void *private_data)
 {
-	if (unlikely(!file_cache)) {
+	if (unlikely(!__filp_cache)) {
 		iput(inode);
 		return ERR_PTR(-ENODEV);
 	}
-	struct file *file = kmem_cache_alloc(file_cache, GFP_KERNEL);
+	struct file *file = kmem_cache_alloc(__filp_cache, GFP_KERNEL);
 
 	if (!file) {
 		iput(inode);
@@ -119,7 +107,7 @@ static void release(struct file *file)
 		iput(dentry->d_inode);
 		kfree(dentry);
 	}
-	kmem_cache_free(file_cache, file);
+	kmem_cache_free(__filp_cache, file);
 }
 
 static LLIST_HEAD(release_pending);
@@ -521,7 +509,7 @@ int main(void)
 	assert(!file_ref_get(&reference));
 
 	stela_test_register_pages();
-	stela_linux_file_cache_init();
+	files_init();
 
 	/* Recycle the same type-stable slot without publishing stale fields. */
 	struct file *first = anon_inode_getfile("first", NULL, &opens, O_RDWR);
