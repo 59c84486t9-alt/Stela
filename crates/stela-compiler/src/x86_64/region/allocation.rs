@@ -134,17 +134,21 @@ pub(super) fn next_read(
 /// One immutable allocation policy for both ordinary spans and resident loops.
 /// The exact emitted candidates choose the smallest useful borrowed subset.
 #[derive(Debug, Clone)]
-pub(super) struct Plan {
-    effects: Vec<ValueEffects>,
-    live: LiveRanges,
+pub(super) struct Plan<'a> {
+    effects: &'a [ValueEffects],
+    live: &'a LiveRanges,
     callee_slots: usize,
     cyclic: bool,
 }
 
-impl Plan {
-    pub(super) fn new(effects: Vec<ValueEffects>, callee_slots: usize, cyclic: bool) -> Self {
+impl<'a> Plan<'a> {
+    pub(super) fn new(
+        effects: &'a [ValueEffects],
+        live: &'a LiveRanges,
+        callee_slots: usize,
+        cyclic: bool,
+    ) -> Self {
         assert!(callee_slots <= CALLEE_POOL.len());
-        let live = LiveRanges::compute(&effects);
         Self {
             effects,
             live,
@@ -174,7 +178,7 @@ impl Plan {
     }
 
     fn next_read(&self, instruction: usize, value: Value) -> Option<usize> {
-        next_read(&self.effects, instruction + 1, value, self.cyclic)
+        next_read(self.effects, instruction + 1, value, self.cyclic)
     }
 }
 
@@ -404,7 +408,7 @@ impl Emitter<'_> {
 
 pub(super) fn emitter<'a>(
     gprs: &'a [Effects],
-    plan: Plan,
+    plan: Plan<'a>,
     _entry: crate::GuestAddress,
 ) -> Emitter<'a> {
     Emitter {
@@ -500,7 +504,7 @@ pub(super) fn prefix(
     }
     let mut best: Option<super::OptimizedRegion> = None;
     for callee_slots in 0..=CALLEE_POOL.len() {
-        let plan = Plan::new(values.clone(), callee_slots, false);
+        let plan = Plan::new(&values, &live, callee_slots, false);
         let mut emitter = emitter(&gprs, plan, entry);
         emitter.borrow_callees();
         for (instruction, (_, _, step)) in instructions.iter().zip(&analyzed) {
