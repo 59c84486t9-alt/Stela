@@ -33,6 +33,38 @@ fn a_heap_whose_bins_are_nearly_empty_is_low_though_little_is_live() {
     assert!(heap.low());
 }
 
+#[test]
+fn available_page_frames_respect_headers_bounds_and_live_allocations() {
+    let heap = Heap::new();
+    let mut ram = backing();
+    let start = ram.0.as_mut_ptr().addr();
+    let end = start + ram.0.len();
+    let whole = start..end;
+    assert_eq!(heap.available_page_frames_in(whole.clone()), 0);
+    // SAFETY: this test exclusively owns the backing until all releases.
+    unsafe { heap.initialize(ram.0.as_mut_ptr(), ram.0.len()) };
+    let layout = Layout::from_size_align(PAGE_BYTES, PAGE_BYTES).unwrap();
+    let initial = ram.0.len() / PAGE_BYTES - 1;
+    assert_eq!(heap.available_page_frames_in(whole.clone()), initial);
+    assert_eq!(heap.available_page_frames_in(start..start + PAGE_BYTES), 0);
+    assert_eq!(
+        heap.available_page_frames_in(start + PAGE_BYTES + 1..start + 3 * PAGE_BYTES),
+        1
+    );
+    // SAFETY: exact live heap and layout; the page is exclusively owned below.
+    let page = unsafe { heap.alloc_pages_zeroed_in(layout, whole.clone()) };
+    assert_eq!(page.addr(), start + PAGE_BYTES);
+    assert_eq!(heap.available_page_frames_in(whole.clone()), initial - 2);
+    // SAFETY: return the same allocation once with its original layout.
+    unsafe { heap.dealloc(page, layout) };
+    assert_eq!(heap.available_page_frames_in(whole.clone()), initial);
+
+    heap.reserve_tail(4 * PAGE_BYTES);
+    let reserve_start = end - 4 * PAGE_BYTES;
+    assert_eq!(heap.available_page_frames_in(whole), initial - 1);
+    assert_eq!(heap.available_page_frames_in(reserve_start..end), 3);
+}
+
 /// An 8 MiB heap whose last `reserve` MiB are its reserve, at the address
 /// this returns.
 fn reserving(heap: &Heap, reserve: usize) -> usize {

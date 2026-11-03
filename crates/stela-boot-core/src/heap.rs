@@ -914,6 +914,33 @@ impl Heap {
         })
     }
 
+    /// Count the whole page frames that can individually serve a one-page
+    /// constrained request at the time of the snapshot. This walks the free
+    /// bins under the heap lock without draining small-object caches.
+    /// Adjacent frames may need an intervening allocation header when
+    /// allocated separately, so this is not a reservation or allocation count.
+    pub fn available_page_frames_in(&self, allowed: Range<usize>) -> usize {
+        let _guard = self.lock();
+        // SAFETY: the guard keeps the free blocks and their bins stable.
+        let state = unsafe { &*self.state.get() };
+        let (first_level, _) = bin(PAGE_BYTES + HEADER_BYTES);
+        state
+            .pools
+            .iter()
+            .flat_map(|pool| pool.heads[first_level..].iter().flatten())
+            // SAFETY: the guard keeps every binned link and header live.
+            .flat_map(|&head| unsafe { bin_blocks(head) })
+            .filter_map(|block| {
+                // SAFETY: the guard keeps this binned free block stable.
+                let first =
+                    unsafe { fit(block, PAGE_BYTES, PAGE_BYTES, allowed.start, allowed.end) }?;
+                // SAFETY: the same guarded free block as above.
+                let end = (block.addr() + unsafe { size(block) }).min(allowed.end);
+                Some((end - first) / PAGE_BYTES)
+            })
+            .sum()
+    }
+
     /// The heap's usage, walking the free list for its largest extent.
     pub fn usage(&self) -> Usage {
         let _guard = self.lock();
