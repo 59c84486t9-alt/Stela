@@ -10,7 +10,7 @@ use crate::{
     CompileError, CompileErrorKind, GuestAddress, Lifter,
     aarch64::{Decoder, Instruction, Operation, Register},
 };
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use serde::Serialize;
 
 pub(super) struct ParsedBlock {
@@ -258,11 +258,15 @@ pub(super) fn parse(
             },
         });
     }
-    let mut instructions = vec![];
+    let mut instructions = Vec::new();
     let mut terminal = None;
     let mut source_bytes = 0;
     let mut side_exits = 0;
     let mut next_pc = base;
+    let full_system = profile.has(Features::FULL_SYSTEM);
+    let pointer_authentication = profile.has(Features::POINTER_AUTHENTICATION);
+    let checked_memory = profile.checked_memory().is_some();
+    let restricted_system = profile.has(Features::SYSTEM) && !full_system;
     for bytes in source.as_chunks::<4>().0 {
         let pc = next_pc;
         next_pc = GuestAddress(pc.0.checked_add(4).ok_or(BlockAnalysisError {
@@ -272,7 +276,7 @@ pub(super) fn parse(
         })?);
         source_bytes += 4;
         let word = u32::from_le_bytes(*bytes);
-        if profile.has(Features::FULL_SYSTEM) {
+        if full_system {
             // PAuth hints share the hint space, so they are matched first.
             if let Some(decoded) =
                 decode_pointer_authentication(pc, word).map_err(|error| BlockAnalysisError {
@@ -284,14 +288,13 @@ pub(super) fn parse(
                 terminal = Some((pc, Terminator::PointerAuthentication(decoded)));
                 break;
             }
+            use crate::aarch64::system::synchronization::{Operation as Sync, decode};
+            let synchronization = decode(word);
             // BTI executes as NOP (Arm `BTI`). PSTATE.BTYPE can be nonzero
             // only for a block's first instruction, after the indirect
             // branch that ended the previous block, and the engine checks
             // that instruction before entering the block.
-            if matches!(
-                crate::aarch64::system::synchronization::decode(word),
-                Some(crate::aarch64::system::synchronization::Operation::BranchTarget { .. })
-            ) {
+            if matches!(synchronization, Some(Sync::BranchTarget { .. })) {
                 instructions.push(Instruction {
                     pc,
                     operation: Operation::Nop,
@@ -305,10 +308,8 @@ pub(super) fn parse(
             // it before the next fetch. The shared lane's PEs keep it.
             if profile == BlockProfile::new(Features::SYSTEM_MODE)
                 && matches!(
-                    crate::aarch64::system::synchronization::decode(word),
-                    Some(
-                        crate::aarch64::system::synchronization::Operation::InstructionSynchronization { .. }
-                    )
+                    synchronization,
+                    Some(Sync::InstructionSynchronization { .. })
                 )
             {
                 instructions.push(Instruction {
@@ -328,8 +329,7 @@ pub(super) fn parse(
             {
                 // The shared lane executes these through the existing typed
                 // all-writer memory service, not the single-agent CPU monitor.
-                let checked = (profile.has(Features::FULL_SYSTEM)
-                    && profile.checked_memory().is_some())
+                let checked = checked_memory
                     && matches!(decoded.operation, system::SystemOperation::Exclusive(Ok(_)));
                 if !checked {
                     terminal = Some((pc, Terminator::System(decoded)));
@@ -337,8 +337,7 @@ pub(super) fn parse(
                 }
             }
         }
-        if profile.has(Features::SYSTEM)
-            && !profile.has(Features::FULL_SYSTEM)
+        if restricted_system
             && let Some(decoded) =
                 decode_system_instruction(pc, word).map_err(|error| BlockAnalysisError {
                     pc,
@@ -355,7 +354,8 @@ pub(super) fn parse(
             terminal = Some((pc, Terminator::System(decoded)));
             break;
         }
-        if profile.has(Features::POINTER_AUTHENTICATION)
+        if !full_system
+            && pointer_authentication
             && let Some(decoded) =
                 decode_pointer_authentication(pc, word).map_err(|error| BlockAnalysisError {
                     pc,
@@ -414,19 +414,14 @@ pub(super) fn parse(
             encoding: Some(word),
             kind: CompileErrorKind::Unsupported(error),
         })?;
-        if profile.checked_memory().is_some()
-            && instruction.operation == Operation::Nop
-            && word != NOP_ENCODING
-        {
+        if checked_memory && instruction.operation == Operation::Nop && word != NOP_ENCODING {
             return Err(BlockAnalysisError {
                 pc,
                 encoding: Some(word),
                 kind: CompileErrorKind::UnadmittedNopProvenance,
             });
         }
-        if profile.has(Features::SYSTEM)
-            && !profile.has(Features::FULL_SYSTEM)
-            && !crate::scalable_context::ordinary_permitted(&instruction.operation)
+        if restricted_system && !crate::scalable_context::ordinary_permitted(&instruction.operation)
         {
             return Err(BlockAnalysisError {
                 pc,
@@ -435,7 +430,7 @@ pub(super) fn parse(
             });
         }
         if let Operation::FloatingPoint(operand) = &instruction.operation {
-            let checked = profile.has(Features::FULL_SYSTEM) && profile.checked_memory().is_some();
+            let checked = full_system && checked_memory;
             if checked || crate::x86_64::numerical_always_exits(operand) {
                 // The checked full-system prefix has no inline numerical recipe.
                 // Recover its exact prefix and complete through the existing FP
@@ -450,8 +445,8 @@ pub(super) fn parse(
         // taken. A branch back is likely taken, and ends the block.
         if side_exits < MAX_SIDE_EXITS
             && source_bytes < source.len()
-            && profile.has(Features::FULL_SYSTEM)
-            && profile.checked_memory().is_none()
+            && full_system
+            && !checked_memory
             && instruction
                 .operation
                 .conditional_target()
