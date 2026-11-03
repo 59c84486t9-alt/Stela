@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:55:02 -0500
+Subject: [PATCH] refactor(mm): retain original dirty writeback expiry
+
+---
+ mm/page-writeback.c   | 5 -----
+ mm/writeback_domain.c | 5 +++++
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/mm/page-writeback.c b/mm/page-writeback.c
+index 79885c49472ab16cb6bf286157c74b9f5d7a82ac..3b970594e21aacd8a2c748059ce3f4a62b6c8e1f 100644
+--- a/mm/page-writeback.c
++++ b/mm/page-writeback.c
+@@ -98,11 +98,6 @@ static int vm_dirty_ratio = 20;
+  */
+ static unsigned long vm_dirty_bytes;
+ 
+-/*
+- * The longest time for which data is allowed to remain dirty
+- */
+-unsigned int dirty_expire_interval = 30 * 100; /* centiseconds */
+-
+ /* End of sysctl-exported parameters */
+ 
+ 
+diff --git a/mm/writeback_domain.c b/mm/writeback_domain.c
+index 9728ebae3ceecd02bc5d015e682a94ade83c5f41..91856bfe6075e45136f2939654f8b9545fb81852 100644
+--- a/mm/writeback_domain.c
++++ b/mm/writeback_domain.c
+@@ -26,6 +26,11 @@ unsigned int dirty_writeback_interval = 5 * 100; /* centiseconds */
+ 
+ EXPORT_SYMBOL_GPL(dirty_writeback_interval);
+ 
++/*
++ * The longest time for which data is allowed to remain dirty
++ */
++unsigned int dirty_expire_interval = 30 * 100; /* centiseconds */
++
+ struct wb_domain global_wb_domain;
+ 
+ /*
