@@ -1,0 +1,400 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:21:15 -0500
+Subject: [PATCH] refactor(lib): separate original string unescaping
+
+---
+ lib/Makefile          |   2 +-
+ lib/string_helpers.c  | 173 ---------------------------------------
+ lib/string_unescape.c | 185 ++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 186 insertions(+), 174 deletions(-)
+ create mode 100644 lib/string_unescape.c
+
+diff --git a/lib/Makefile b/lib/Makefile
+index 016d52892fa9154019cb091baafd5fb89dc0aa37..3f818026fe1066bc355dbef4421552f6a8a9f56d 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -61,7 +61,7 @@ obj-y += bcd.o sort.o parser.o debug_locks.o random32.o \
+ 	 memweight.o kfifo.o percpu-refcount.o rhashtable.o base64.o \
+ 	 once.o refcount.o refcount_lock.o rcuref.o usercopy.o errseq.o bucket_locks.o \
+ 	 generic-radix-tree.o bitmap-str.o bitmap-parse.o
+-obj-y += string_helpers.o
++obj-y += string_helpers.o string_unescape.o
+ obj-y += hexdump.o
+ obj-$(CONFIG_TEST_HEXDUMP) += test_hexdump.o
+ obj-y += kstrtox.o kstrtox-parse.o
+diff --git a/lib/string_helpers.c b/lib/string_helpers.c
+index 98d6ed0eaab7e9f3d54e420c404629a28b925bf4..e624d6a13457548d4053d260204dceef689314a2 100644
+--- a/lib/string_helpers.c
++++ b/lib/string_helpers.c
+@@ -186,179 +186,6 @@ int parse_int_array_user(const char __user *from, size_t count, int **array)
+ }
+ EXPORT_SYMBOL(parse_int_array_user);
+ 
+-static bool unescape_space(char **src, char **dst)
+-{
+-	char *p = *dst, *q = *src;
+-
+-	switch (*q) {
+-	case 'n':
+-		*p = '\n';
+-		break;
+-	case 'r':
+-		*p = '\r';
+-		break;
+-	case 't':
+-		*p = '\t';
+-		break;
+-	case 'v':
+-		*p = '\v';
+-		break;
+-	case 'f':
+-		*p = '\f';
+-		break;
+-	default:
+-		return false;
+-	}
+-	*dst += 1;
+-	*src += 1;
+-	return true;
+-}
+-
+-static bool unescape_octal(char **src, char **dst)
+-{
+-	char *p = *dst, *q = *src;
+-	u8 num;
+-
+-	if (isodigit(*q) == 0)
+-		return false;
+-
+-	num = (*q++) & 7;
+-	while (num < 32 && isodigit(*q) && (q - *src < 3)) {
+-		num <<= 3;
+-		num += (*q++) & 7;
+-	}
+-	*p = num;
+-	*dst += 1;
+-	*src = q;
+-	return true;
+-}
+-
+-static bool unescape_hex(char **src, char **dst)
+-{
+-	char *p = *dst, *q = *src;
+-	int digit;
+-	u8 num;
+-
+-	if (*q++ != 'x')
+-		return false;
+-
+-	num = digit = hex_to_bin(*q++);
+-	if (digit < 0)
+-		return false;
+-
+-	digit = hex_to_bin(*q);
+-	if (digit >= 0) {
+-		q++;
+-		num = (num << 4) | digit;
+-	}
+-	*p = num;
+-	*dst += 1;
+-	*src = q;
+-	return true;
+-}
+-
+-static bool unescape_special(char **src, char **dst)
+-{
+-	char *p = *dst, *q = *src;
+-
+-	switch (*q) {
+-	case '\"':
+-		*p = '\"';
+-		break;
+-	case '\\':
+-		*p = '\\';
+-		break;
+-	case 'a':
+-		*p = '\a';
+-		break;
+-	case 'e':
+-		*p = '\e';
+-		break;
+-	default:
+-		return false;
+-	}
+-	*dst += 1;
+-	*src += 1;
+-	return true;
+-}
+-
+-/**
+- * string_unescape - unquote characters in the given string
+- * @src:	source buffer (escaped)
+- * @dst:	destination buffer (unescaped)
+- * @size:	size of the destination buffer (0 to unlimit)
+- * @flags:	combination of the flags.
+- *
+- * Description:
+- * The function unquotes characters in the given string.
+- *
+- * Because the size of the output will be the same as or less than the size of
+- * the input, the transformation may be performed in place.
+- *
+- * Caller must provide valid source and destination pointers. Be aware that
+- * destination buffer will always be NULL-terminated. Source string must be
+- * NULL-terminated as well.  The supported flags are::
+- *
+- *	UNESCAPE_SPACE:
+- *		'\f' - form feed
+- *		'\n' - new line
+- *		'\r' - carriage return
+- *		'\t' - horizontal tab
+- *		'\v' - vertical tab
+- *	UNESCAPE_OCTAL:
+- *		'\NNN' - byte with octal value NNN (1 to 3 digits)
+- *	UNESCAPE_HEX:
+- *		'\xHH' - byte with hexadecimal value HH (1 to 2 digits)
+- *	UNESCAPE_SPECIAL:
+- *		'\"' - double quote
+- *		'\\' - backslash
+- *		'\a' - alert (BEL)
+- *		'\e' - escape
+- *	UNESCAPE_ANY:
+- *		all previous together
+- *
+- * Return:
+- * The amount of the characters processed to the destination buffer excluding
+- * trailing '\0' is returned.
+- */
+-int string_unescape(char *src, char *dst, size_t size, unsigned int flags)
+-{
+-	char *out = dst;
+-
+-	if (!size)
+-		size = SIZE_MAX;
+-
+-	while (*src && --size) {
+-		if (src[0] == '\\' && src[1] != '\0' && size > 1) {
+-			src++;
+-			size--;
+-
+-			if (flags & UNESCAPE_SPACE &&
+-					unescape_space(&src, &out))
+-				continue;
+-
+-			if (flags & UNESCAPE_OCTAL &&
+-					unescape_octal(&src, &out))
+-				continue;
+-
+-			if (flags & UNESCAPE_HEX &&
+-					unescape_hex(&src, &out))
+-				continue;
+-
+-			if (flags & UNESCAPE_SPECIAL &&
+-					unescape_special(&src, &out))
+-				continue;
+-
+-			*out++ = '\\';
+-		}
+-		*out++ = *src++;
+-	}
+-	*out = '\0';
+-
+-	return out - dst;
+-}
+-EXPORT_SYMBOL(string_unescape);
+-
+ static bool escape_passthrough(unsigned char c, char **dst, char *end)
+ {
+ 	char *out = *dst;
+diff --git a/lib/string_unescape.c b/lib/string_unescape.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..a15b706c2c6f0c556143835629aea80640ab2d5c
+--- /dev/null
++++ b/lib/string_unescape.c
+@@ -0,0 +1,185 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Helpers for formatting and printing strings
++ *
++ * Copyright 31 August 2008 James Bottomley
++ * Copyright (C) 2013, Intel Corporation
++ */
++#include <linux/ctype.h>
++#include <linux/export.h>
++#include <linux/hex.h>
++#include <linux/limits.h>
++#include <linux/string_helpers.h>
++
++static bool unescape_space(char **src, char **dst)
++{
++	char *p = *dst, *q = *src;
++
++	switch (*q) {
++	case 'n':
++		*p = '\n';
++		break;
++	case 'r':
++		*p = '\r';
++		break;
++	case 't':
++		*p = '\t';
++		break;
++	case 'v':
++		*p = '\v';
++		break;
++	case 'f':
++		*p = '\f';
++		break;
++	default:
++		return false;
++	}
++	*dst += 1;
++	*src += 1;
++	return true;
++}
++
++static bool unescape_octal(char **src, char **dst)
++{
++	char *p = *dst, *q = *src;
++	u8 num;
++
++	if (isodigit(*q) == 0)
++		return false;
++
++	num = (*q++) & 7;
++	while (num < 32 && isodigit(*q) && (q - *src < 3)) {
++		num <<= 3;
++		num += (*q++) & 7;
++	}
++	*p = num;
++	*dst += 1;
++	*src = q;
++	return true;
++}
++
++static bool unescape_hex(char **src, char **dst)
++{
++	char *p = *dst, *q = *src;
++	int digit;
++	u8 num;
++
++	if (*q++ != 'x')
++		return false;
++
++	num = digit = hex_to_bin(*q++);
++	if (digit < 0)
++		return false;
++
++	digit = hex_to_bin(*q);
++	if (digit >= 0) {
++		q++;
++		num = (num << 4) | digit;
++	}
++	*p = num;
++	*dst += 1;
++	*src = q;
++	return true;
++}
++
++static bool unescape_special(char **src, char **dst)
++{
++	char *p = *dst, *q = *src;
++
++	switch (*q) {
++	case '\"':
++		*p = '\"';
++		break;
++	case '\\':
++		*p = '\\';
++		break;
++	case 'a':
++		*p = '\a';
++		break;
++	case 'e':
++		*p = '\e';
++		break;
++	default:
++		return false;
++	}
++	*dst += 1;
++	*src += 1;
++	return true;
++}
++
++/**
++ * string_unescape - unquote characters in the given string
++ * @src:	source buffer (escaped)
++ * @dst:	destination buffer (unescaped)
++ * @size:	size of the destination buffer (0 to unlimit)
++ * @flags:	combination of the flags.
++ *
++ * Description:
++ * The function unquotes characters in the given string.
++ *
++ * Because the size of the output will be the same as or less than the size of
++ * the input, the transformation may be performed in place.
++ *
++ * Caller must provide valid source and destination pointers. Be aware that
++ * destination buffer will always be NULL-terminated. Source string must be
++ * NULL-terminated as well.  The supported flags are::
++ *
++ *	UNESCAPE_SPACE:
++ *		'\f' - form feed
++ *		'\n' - new line
++ *		'\r' - carriage return
++ *		'\t' - horizontal tab
++ *		'\v' - vertical tab
++ *	UNESCAPE_OCTAL:
++ *		'\NNN' - byte with octal value NNN (1 to 3 digits)
++ *	UNESCAPE_HEX:
++ *		'\xHH' - byte with hexadecimal value HH (1 to 2 digits)
++ *	UNESCAPE_SPECIAL:
++ *		'\"' - double quote
++ *		'\\' - backslash
++ *		'\a' - alert (BEL)
++ *		'\e' - escape
++ *	UNESCAPE_ANY:
++ *		all previous together
++ *
++ * Return:
++ * The amount of the characters processed to the destination buffer excluding
++ * trailing '\0' is returned.
++ */
++int string_unescape(char *src, char *dst, size_t size, unsigned int flags)
++{
++	char *out = dst;
++
++	if (!size)
++		size = SIZE_MAX;
++
++	while (*src && --size) {
++		if (src[0] == '\\' && src[1] != '\0' && size > 1) {
++			src++;
++			size--;
++
++			if (flags & UNESCAPE_SPACE &&
++					unescape_space(&src, &out))
++				continue;
++
++			if (flags & UNESCAPE_OCTAL &&
++					unescape_octal(&src, &out))
++				continue;
++
++			if (flags & UNESCAPE_HEX &&
++					unescape_hex(&src, &out))
++				continue;
++
++			if (flags & UNESCAPE_SPECIAL &&
++					unescape_special(&src, &out))
++				continue;
++
++			*out++ = '\\';
++		}
++		*out++ = *src++;
++	}
++	*out = '\0';
++
++	return out - dst;
++}
++EXPORT_SYMBOL(string_unescape);
