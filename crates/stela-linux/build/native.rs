@@ -72,6 +72,8 @@ impl Linux {
         // Unchanged shared helpers use Linux's arithmetic types. Stela's
         // extra conversion diagnostics remain confined to its own source.
         let upstream = vec![
+            PathBuf::from(format!("{LINUX}/init/init_task.c")),
+            PathBuf::from(format!("{LINUX}/mm/init-mm.c")),
             PathBuf::from(format!("{LINUX}/lib/string.c")),
             PathBuf::from(format!("{LINUX}/lib/hexdump.c")),
             PathBuf::from(format!("{LINUX}/lib/ratelimit.c")),

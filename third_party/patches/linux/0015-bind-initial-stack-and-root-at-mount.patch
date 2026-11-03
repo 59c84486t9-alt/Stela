@@ -1,0 +1,42 @@
+diff --git a/init/init_task.c b/init/init_task.c
+index fd564bb2..75919de8 100644
+--- a/init/init_task.c
++++ b/init/init_task.c
+@@ -96,13 +96,17 @@ static struct cred init_cred = {
+  * Set up the first task table, touch at your own risk!. Base=0,
+  * limit=0x1fffff (=2MB)
+  */
++#ifndef INIT_TASK_STACK
++#define INIT_TASK_STACK init_stack
++#endif
++
+ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
+ #ifdef CONFIG_THREAD_INFO_IN_TASK
+ 	.thread_info	= INIT_THREAD_INFO(init_task),
+ 	.stack_refcount	= REFCOUNT_INIT(1),
+ #endif
+ 	.__state	= 0,
+-	.stack		= init_stack,
++	.stack		= INIT_TASK_STACK,
+ 	.usage		= REFCOUNT_INIT(2),
+ 	.flags		= PF_KTHREAD,
+ 	.prio		= MAX_PRIO - 20,
+diff --git a/mm/init-mm.c b/mm/init-mm.c
+index 3e792aad..bf18457b 100644
+--- a/mm/init-mm.c
++++ b/mm/init-mm.c
+@@ -29,9 +29,13 @@ const struct vm_operations_struct vma_dummy_vm_ops;
+  * Since there is only one init_mm in the entire system, keep it simple
+  * and size this cpu_bitmask to NR_CPUS.
+  */
++#ifndef INIT_MM_PGD
++#define INIT_MM_PGD swapper_pg_dir
++#endif
++
+ struct mm_struct init_mm = {
+ 	.mm_mt		= MTREE_INIT_EXT(mm_mt, MM_MT_FLAGS, init_mm.mmap_lock),
+-	.pgd		= swapper_pg_dir,
++	.pgd		= INIT_MM_PGD,
+ 	.mm_users	= ATOMIC_INIT(2),
+ 	.mm_count	= ATOMIC_INIT(1),
+ 	.write_protect_seq = SEQCNT_ZERO(init_mm.write_protect_seq),

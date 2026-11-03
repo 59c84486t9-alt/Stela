@@ -86,6 +86,7 @@
 /fs/seq_output.c
 /fs/seq_output.h
 /mm/Makefile
+/mm/init-mm.c
 /mm/slab_common.c
 /mm/slab.h
 /mm/kvfree_rcu.c
