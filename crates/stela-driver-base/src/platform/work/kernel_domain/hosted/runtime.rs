@@ -1,9 +1,9 @@
 //! Linux userspace continuations with distinct guarded mmap stacks.
 use super::{HostedDeadlines, HostedPages, HostedQueue, WorkError, std};
 use crate::platform::work::{
-    Continuation, Lane, Layout, LeaveReason, NONE, TaskState, context, stack_requirement::Geometry,
+    Continuation, Lane, Layout, NONE, TaskContext, TaskState, context, stack_requirement::Geometry,
 };
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, rc::Rc, sync::Arc, vec::Vec};
 use core::{
     cell::{Cell, UnsafeCell},
     ffi::c_void,
@@ -15,6 +15,8 @@ use core::{
     sync::atomic::Ordering,
 };
 
+mod binding;
+pub use binding::{HostedSwitchBinding, HostedWake};
 mod service;
 pub use service::HostedServiceCallback;
 use service::Service;
@@ -25,7 +27,7 @@ struct Stack {
     geometry: Geometry,
     guard: Range<usize>,
 }
-type Task = Continuation<Stack, (), ()>;
+type Task = Continuation<Stack, (), Rc<dyn HostedSwitchBinding>>;
 
 pub struct HostedExecutor<const N: usize> {
     runtime: ManuallyDrop<Pin<Box<HostedRuntime<N>>>>,
@@ -236,16 +238,20 @@ impl<const N: usize> HostedRuntime<N> {
         if task.state != TaskState::Running || !task.stack.bounds.contains(&stack_pointer) {
             return Err(WorkError::CorruptContext);
         }
-        Ok(crate::platform::work::TaskContext {
+        Ok(self.context_view(task, stack_pointer))
+    }
+
+    fn context_view(&self, task: &Task, stack_pointer: usize) -> TaskContext {
+        TaskContext {
             queue_id: self.queue.id,
             context_id: task.id.get(),
-            sequence: task.job.ok_or(WorkError::CorruptContext)?.1.sequence,
+            sequence: task.job.map_or(0, |(_, job)| job.sequence),
             stack_start: task.stack.bounds.start,
             stack_end: task.stack.bounds.end,
             guard_start: task.stack.guard.start,
             guard_end: task.stack.guard.end,
             stack_pointer,
-        })
+        }
     }
 
     pub(in crate::platform::work::kernel_domain) fn segment_epoch(&self) -> Result<u64, WorkError> {
@@ -297,6 +303,13 @@ impl<const N: usize> HostedRuntime<N> {
                     task.assign(job, ());
                 }
                 let sequence = task.job.unwrap_or_else(|| std::process::abort()).1.sequence;
+                if task.state == TaskState::Blocked {
+                    if !task.signal.pending.swap(false, Ordering::AcqRel) {
+                        continue;
+                    }
+                    require(state.scheduling.wake(task.id, sequence));
+                    task.state = TaskState::Runnable;
+                }
                 require(state.scheduling.running(task.id, sequence, now));
                 task.state = TaskState::Running;
             }
@@ -319,30 +332,6 @@ impl<const N: usize> HostedRuntime<N> {
         Ok(false)
     }
 
-    pub fn yield_now(self: Pin<&Self>) -> Result<(), WorkError> {
-        self.queue.execution.check_current()?;
-        let index = self.current.get();
-        if index == NONE {
-            return Err(WorkError::Unavailable);
-        }
-        let now = self.queue.execution.now_ns()?;
-        {
-            // SAFETY: the original thread is executing this exact task.
-            let task = unsafe { &mut *self.task(index) };
-            if !task.stack.bounds.contains(&context::stack_pointer()) {
-                return Err(WorkError::CorruptContext);
-            }
-            let sequence = task.job.ok_or(WorkError::CorruptContext)?.1.sequence;
-            let mut guard = self.queue.lock()?;
-            let board = &mut guard.state().scheduling;
-            board.account(now)?;
-            require(board.suspend(task.id, sequence, LeaveReason::Yield));
-            task.state = TaskState::Runnable;
-        }
-        self.depart(index);
-        Ok(())
-    }
-
     fn depart(&self, index: usize) {
         self.current.set(NONE);
         // SAFETY: called only from this live task with its dispatcher saved,
@@ -363,6 +352,12 @@ impl<const N: usize> HostedRuntime<N> {
         }
         if self.current.get() != NONE {
             return Err(WorkError::Busy);
+        }
+        for index in 0..self.count {
+            // SAFETY: all task stacks are stopped on the original dispatcher.
+            if unsafe { (*self.task(index)).binding.is_some() } {
+                return Err(WorkError::Busy);
+            }
         }
         let mut guard = self.queue.lock()?;
         let state = guard.state();
@@ -393,8 +388,10 @@ unsafe extern "sysv64" fn entry<const N: usize>(address: usize, index: usize) ->
         // SAFETY: immutable assignment for the exact running task. No borrow
         // of its state survives the callback or any cooperative yield.
         let job = unsafe { (*runtime.task(index)).job }.unwrap_or_else(|| std::process::abort());
+        runtime.arrive(index, true);
         // SAFETY: queue admission retains the original callback/context graph.
         unsafe { (job.1.callback)(job.1.context as *mut c_void) };
+        runtime.complete_binding(index);
         let now = require(runtime.queue.execution.now_ns());
         {
             // SAFETY: only the original running task can complete this slot.
