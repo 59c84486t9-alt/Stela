@@ -5,8 +5,27 @@
 #include <linux/limits.h>
 #include <linux/string.h>
 #include <drm/drm_mm.h>
-#include <stela/linux.h>
 #include <stela/test.h>
+
+/* This oracle exercises caller-owned metadata only. Any diagnostic is a
+ * test failure, so it does not need the runtime task or DRM printer graph. */
+struct drm_printer;
+void drm_printf(struct drm_printer *printer, const char *format, ...);
+void stela_linux_warn(const char *file, int line, const char *condition, unsigned int flags);
+void drm_printf(struct drm_printer *printer, const char *format, ...)
+{
+	(void)printer;
+	stela_test_fail(__FILE__, __LINE__, format);
+}
+void stela_linux_warn(const char *file, int line, const char *condition, unsigned int flags)
+{
+	(void)flags;
+	stela_test_fail(file, line, condition ?: "unexpected DRM warning");
+}
+void __warn_printk(const char *format, ...)
+{
+	stela_test_fail(__FILE__, __LINE__, format);
+}
 
 #define UNITS 256U
 #define NODES 32U
@@ -180,13 +199,11 @@ static void colors(void)
 
 int main(void)
 {
-	stela_linux_enter(&stela_linux_bare);
 	sequences(4096, 0x4139U);
 	sequences(0x100000000003ULL, 0xc28aU);
 	sequences(U64_MAX - 512, 0x9bd7U);
 	reservation();
 	colors();
-	stela_linux_exit();
 	printf("Linux DRM mm: %u linear-oracle operations, holes/intervals, alignment, high addresses, reservations and colors\n", operations);
 	return 0;
 }
