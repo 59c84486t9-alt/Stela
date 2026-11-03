@@ -1,0 +1,217 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 23:02:46 -0500
+Subject: [PATCH] refactor(mm): separate original writeback timer and domain
+ state
+
+---
+ mm/Makefile           |  2 +-
+ mm/page-writeback.c   | 56 +------------------------------------
+ mm/writeback_domain.c | 65 +++++++++++++++++++++++++++++++++++++++++++
+ mm/writeback_domain.h | 18 ++++++++++++
+ 4 files changed, 85 insertions(+), 56 deletions(-)
+ create mode 100644 mm/writeback_domain.c
+ create mode 100644 mm/writeback_domain.h
+
+diff --git a/mm/Makefile b/mm/Makefile
+index 9ecb5fa359f6eb7ddfbde3aec9f99ef744b9fa8a..6beedb960fca73feb46c6965266de133a58deb5f 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -49,7 +49,7 @@ mmu-$(CONFIG_MMU)	+= mseal.o
+ endif
+ 
+ obj-y			:= filemap.o pagecache_init.o mempool.o oom_kill.o fadvise.o \
+-			   maccess.o page-writeback.o folio-compat.o \
++			   maccess.o page-writeback.o writeback_domain.o folio-compat.o \
+ 			   readahead.o swap.o truncate.o vmscan.o shrinker.o \
+ 			   shmem.o util.o mmzone.o vmstat.o vmstat_init.o backing-dev.o \
+ 			   mm_init.o percpu.o slab_common.o kvfree_rcu.o \
+diff --git a/mm/page-writeback.c b/mm/page-writeback.c
+index e98748112d1ed1e7cbf2e225cf3e0d95c0de3e80..0c52f87ff986dca0acc38c631a8b109926ca0c82 100644
+--- a/mm/page-writeback.c
++++ b/mm/page-writeback.c
+@@ -42,6 +42,7 @@
+ #include <trace/events/writeback.h>
+ 
+ #include "internal.h"
++#include "writeback_domain.h"
+ 
+ /*
+  * Sleep at most 200ms at a time in balance_dirty_pages().
+@@ -111,14 +112,12 @@ unsigned int dirty_expire_interval = 30 * 100; /* centiseconds */
+ 
+ /* End of sysctl-exported parameters */
+ 
+-struct wb_domain global_wb_domain;
+ 
+ /*
+  * Length of period for aging writeout fractions of bdis. This is an
+  * arbitrarily chosen number. The longer the period, the slower fractions will
+  * reflect changes in current writeout rate.
+  */
+-#define VM_COMPLETIONS_PERIOD_LEN (3*HZ)
+ 
+ #ifdef CONFIG_CGROUP_WRITEBACK
+ 
+@@ -538,15 +537,6 @@ static int dirty_bytes_handler(const struct ctl_table *table, int write,
+ }
+ #endif
+ 
+-static unsigned long wp_next_time(unsigned long cur_time)
+-{
+-	cur_time += VM_COMPLETIONS_PERIOD_LEN;
+-	/* 0 has a special meaning... */
+-	if (!cur_time)
+-		return 1;
+-	return cur_time;
+-}
+-
+ static void wb_domain_writeout_add(struct wb_domain *dom,
+ 				   struct fprop_local_percpu *completions,
+ 				   unsigned int max_prop_frac, long nr)
+@@ -594,50 +584,6 @@ void wb_writeout_inc(struct bdi_writeback *wb)
+ }
+ EXPORT_SYMBOL_GPL(wb_writeout_inc);
+ 
+-/*
+- * On idle system, we can be called long after we scheduled because we use
+- * deferred timers so count with missed periods.
+- */
+-static void writeout_period(struct timer_list *t)
+-{
+-	struct wb_domain *dom = timer_container_of(dom, t, period_timer);
+-	int miss_periods = (jiffies - dom->period_time) /
+-						 VM_COMPLETIONS_PERIOD_LEN;
+-
+-	if (fprop_new_period(&dom->completions, miss_periods + 1)) {
+-		dom->period_time = wp_next_time(dom->period_time +
+-				miss_periods * VM_COMPLETIONS_PERIOD_LEN);
+-		mod_timer(&dom->period_timer, dom->period_time);
+-	} else {
+-		/*
+-		 * Aging has zeroed all fractions. Stop wasting CPU on period
+-		 * updates.
+-		 */
+-		dom->period_time = 0;
+-	}
+-}
+-
+-int wb_domain_init(struct wb_domain *dom, gfp_t gfp)
+-{
+-	memset(dom, 0, sizeof(*dom));
+-
+-	spin_lock_init(&dom->lock);
+-
+-	timer_setup(&dom->period_timer, writeout_period, TIMER_DEFERRABLE);
+-
+-	dom->dirty_limit_tstamp = jiffies;
+-
+-	return fprop_global_init(&dom->completions, gfp);
+-}
+-
+-#ifdef CONFIG_CGROUP_WRITEBACK
+-void wb_domain_exit(struct wb_domain *dom)
+-{
+-	timer_delete_sync(&dom->period_timer);
+-	fprop_global_destroy(&dom->completions);
+-}
+-#endif
+-
+ /*
+  * bdi_min_ratio keeps the sum of the minimum dirty shares of all
+  * registered backing devices, which, for obvious reasons, can not
+diff --git a/mm/writeback_domain.c b/mm/writeback_domain.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf985aed842136b580353895057ebe7348a2f0ea
+--- /dev/null
++++ b/mm/writeback_domain.c
+@@ -0,0 +1,65 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * mm/page-writeback.c
++ *
++ * Copyright (C) 2002, Linus Torvalds.
++ * Copyright (C) 2007 Red Hat, Inc., Peter Zijlstra
++ *
++ * Contains functions related to writing back dirty pages at the
++ * address_space level.
++ *
++ * 10Apr2002	Andrew Morton
++ *		Initial version
++ */
++
++#include <linux/string.h>
++#include <linux/timer.h>
++#include <linux/writeback.h>
++
++#include "writeback_domain.h"
++
++struct wb_domain global_wb_domain;
++
++/*
++ * On idle system, we can be called long after we scheduled because we use
++ * deferred timers so count with missed periods.
++ */
++static void writeout_period(struct timer_list *t)
++{
++	struct wb_domain *dom = timer_container_of(dom, t, period_timer);
++	int miss_periods = (jiffies - dom->period_time) /
++						 VM_COMPLETIONS_PERIOD_LEN;
++
++	if (fprop_new_period(&dom->completions, miss_periods + 1)) {
++		dom->period_time = wp_next_time(dom->period_time +
++				miss_periods * VM_COMPLETIONS_PERIOD_LEN);
++		mod_timer(&dom->period_timer, dom->period_time);
++	} else {
++		/*
++		 * Aging has zeroed all fractions. Stop wasting CPU on period
++		 * updates.
++		 */
++		dom->period_time = 0;
++	}
++}
++
++int wb_domain_init(struct wb_domain *dom, gfp_t gfp)
++{
++	memset(dom, 0, sizeof(*dom));
++
++	spin_lock_init(&dom->lock);
++
++	timer_setup(&dom->period_timer, writeout_period, TIMER_DEFERRABLE);
++
++	dom->dirty_limit_tstamp = jiffies;
++
++	return fprop_global_init(&dom->completions, gfp);
++}
++
++#ifdef CONFIG_CGROUP_WRITEBACK
++void wb_domain_exit(struct wb_domain *dom)
++{
++	timer_delete_sync(&dom->period_timer);
++	fprop_global_destroy(&dom->completions);
++}
++#endif
+diff --git a/mm/writeback_domain.h b/mm/writeback_domain.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..3057ecc372414f833879e607711f0bfc27c85dcf
+--- /dev/null
++++ b/mm/writeback_domain.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _MM_WRITEBACK_DOMAIN_H
++#define _MM_WRITEBACK_DOMAIN_H
++
++#include <linux/jiffies.h>
++
++#define VM_COMPLETIONS_PERIOD_LEN (3*HZ)
++
++static inline unsigned long wp_next_time(unsigned long cur_time)
++{
++	cur_time += VM_COMPLETIONS_PERIOD_LEN;
++	/* 0 has a special meaning... */
++	if (!cur_time)
++		return 1;
++	return cur_time;
++}
++
++#endif
