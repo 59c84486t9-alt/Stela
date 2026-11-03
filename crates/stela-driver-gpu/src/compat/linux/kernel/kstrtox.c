@@ -68,6 +68,30 @@ int kstrtoll(const char *s, unsigned int base, long long *res)
 	return 0;
 }
 
+int kstrtouint(const char *s, unsigned int base, unsigned int *res)
+{
+	unsigned long long value;
+	int ret = kstrtoull(s, base, &value);
+	if (ret)
+		return ret;
+	if (value > UINT_MAX)
+		return -ERANGE;
+	*res = (unsigned int)value;
+	return 0;
+}
+
+int kstrtoint(const char *s, unsigned int base, int *res)
+{
+	long long value;
+	int ret = kstrtoll(s, base, &value);
+	if (ret)
+		return ret;
+	if (value < INT_MIN || value > INT_MAX)
+		return -ERANGE;
+	*res = (int)value;
+	return 0;
+}
+
 /* The digits of base at cp, stopping at the first other character. */
 long simple_strtol(const char *cp, char **endp, unsigned int base)
 {
@@ -119,6 +143,15 @@ int main(void)
 	assert(kstrtoll("-", 10, &value) == -EINVAL);
 	assert(kstrtoull("-1", 10, &unsigned_value) == -EINVAL);
 	assert(!kstrtoull("+0xff", 16, &unsigned_value) && unsigned_value == 0xff);
+	unsigned int u32_value;
+	int s32_value;
+	assert(!kstrtouint("+0xffffffff\n", 0, &u32_value) && u32_value == UINT_MAX);
+	assert(kstrtouint("4294967296", 10, &u32_value) == -ERANGE && u32_value == UINT_MAX);
+	assert(kstrtouint("-1", 10, &u32_value) == -EINVAL && u32_value == UINT_MAX);
+	assert(!kstrtoint("-2147483648", 10, &s32_value) && s32_value == INT_MIN);
+	assert(kstrtoint("-2147483649", 10, &s32_value) == -ERANGE && s32_value == INT_MIN);
+	assert(!kstrtoint("2147483647", 10, &s32_value) && s32_value == INT_MAX);
+	assert(kstrtoint("2147483648", 10, &s32_value) == -ERANGE && s32_value == INT_MAX);
 	printf("Linux integer parsing: signs, bases, bounds and trailing newline passed\n");
 	return 0;
 }
