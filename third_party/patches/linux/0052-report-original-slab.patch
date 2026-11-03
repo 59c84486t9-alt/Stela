@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 00:02:25 -0500
+Subject: [PATCH] fix(task): report original slab retirement after release
+
+---
+ kernel/fork_caches.h  | 11 +++++++++++
+ kernel/fork_release.c |  9 +++++++++
+ 2 files changed, 20 insertions(+)
+
+diff --git a/kernel/fork_caches.h b/kernel/fork_caches.h
+index 6773f3059156abeea5ae51c7b88edc429a86eb3c..d8e75726387f5077174a06476306c1109e0b1b1a 100644
+--- a/kernel/fork_caches.h
++++ b/kernel/fork_caches.h
+@@ -5,6 +5,10 @@
+ #include <linux/futex.h>
+ #include <linux/slab.h>
+ 
++#ifdef CONFIG_STELA
++#include <stela/task_bootstrap.h>
++#endif
++
+ /*
+  * Minimum number of threads to boot the kernel
+  */
+@@ -29,7 +33,14 @@ void free_signal_struct(struct signal_struct *sig);
+ 
+ static inline void free_task_struct(struct task_struct *tsk)
+ {
++#ifdef CONFIG_STELA
++	u64 native_birth_generation = stela_linux_task_free_prepare(tsk);
++#endif
+ 	kmem_cache_free(task_struct_cachep, tsk);
++#ifdef CONFIG_STELA
++	/* The allocation is gone. Report only its saved generation. */
++	stela_linux_task_source_freed(native_birth_generation);
++#endif
+ }
+ 
+ #ifdef CONFIG_VMAP_STACK
+diff --git a/kernel/fork_release.c b/kernel/fork_release.c
+index b526cc2393c760e24b8314ee2d1103fbf9c03654..5792c448c4b698657d462f4964b05dcc93f5ed39 100644
+--- a/kernel/fork_release.c
++++ b/kernel/fork_release.c
+@@ -31,6 +31,10 @@
+ #include <linux/taskstats_kern.h>
+ #include <linux/unwind_deferred.h>
+ 
++#ifdef CONFIG_STELA
++#include <stela/task.h>
++#endif
++
+ #include "fork_caches.h"
+ #include "fork_stack.h"
+ 
+@@ -107,6 +111,11 @@ static inline void put_signal_struct(struct signal_struct *sig)
+ 
+ void __put_task_struct(struct task_struct *tsk)
+ {
++#ifdef CONFIG_STELA
++	/* Bare fixture tasks have no original resource graph to release. */
++	if (stela_linux_task_is_bare(tsk))
++		__builtin_trap();
++#endif
+ 	WARN_ON(!tsk->exit_state);
+ 	WARN_ON(refcount_read(&tsk->usage));
+ 	WARN_ON(tsk == current);
