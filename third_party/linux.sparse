@@ -92,6 +92,8 @@
 /fs/seq_output.c
 /fs/seq_output.h
 /mm/Makefile
+/mm/page_alloc.c
+/mm/page_alloc_state.c
 /mm/init-mm.c
 /mm/slab_common.c
 /mm/slab.h
