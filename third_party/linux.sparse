@@ -166,6 +166,8 @@
 /fs/d_path.c
 /fs/libfs.c
 /fs/pseudo_metadata.c
+/fs/inode.c
+/fs/inode_evict.c
 /fs/open.c
 /fs/filp_close.c
 /fs/filp_close.h

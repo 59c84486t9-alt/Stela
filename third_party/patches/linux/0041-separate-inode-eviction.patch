@@ -1,0 +1,132 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 23:30:37 -0500
+Subject: [PATCH] refactor(fs): separate inode eviction helpers
+
+---
+ fs/Makefile      |  2 +-
+ fs/inode.c       | 38 --------------------------------------
+ fs/inode_evict.c | 45 +++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 46 insertions(+), 39 deletions(-)
+ create mode 100644 fs/inode_evict.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 169f5ec6f0026a273d173663b7388d62d1a2c961..d285c15ea7bd1e2ec4292edb4dca91286a47746a 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -9,7 +9,7 @@
+ 
+ obj-y :=	open.o filp_close.o read_write.o file_table.o super.o \
+ 		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o fcntl.o \
+-		ioctl.o readdir.o select.o dcache.o inode.o \
++		ioctl.o readdir.o select.o dcache.o inode.o inode_evict.o \
+ 		attr.o bad_inode.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o \
+ 		seq_file.o seq_lifetime.o seq_output.o xattr.o simple_xattr.o libfs.o pseudo_metadata.o fs-writeback.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+diff --git a/fs/inode.c b/fs/inode.c
+index efa801f3eb11063849a48feb2079d1764e4b8fbe..feae04ac4c239bb722c92d148f00eb9c68b525df 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -752,37 +752,6 @@ void dump_mapping(const struct address_space *mapping)
+ 		a_ops, ino, fname);
+ }
+ 
+-void clear_inode(struct inode *inode)
+-{
+-	/*
+-	 * Only IS_VERITY() inodes can have verity info, so start by checking
+-	 * for IS_VERITY() (which is faster than retrieving the pointer to the
+-	 * verity info).  This minimizes overhead for non-verity inodes.
+-	 */
+-	if (IS_ENABLED(CONFIG_FS_VERITY) && IS_VERITY(inode))
+-		fsverity_cleanup_inode(inode);
+-
+-	/*
+-	 * We have to cycle the i_pages lock here because reclaim
+-	 * can be in the process of removing the last page (in
+-	 * __filemap_remove_folio()) and we must not free the mapping
+-	 * under it.  We also remove nodes which are empty; these
+-	 * can occur in two different ways.  The first is that radix
+-	 * tree expansion can fail partway and the second is that THP
+-	 * collapse_file() can allocate some temporary nodes and not
+-	 * clean them up.
+-	 */
+-	xa_destroy(&inode->i_data.i_pages);
+-
+-	BUG_ON(inode->i_data.nrpages);
+-	BUG_ON(!(inode_state_read_once(inode) & I_FREEING));
+-	BUG_ON(inode_state_read_once(inode) & I_CLEAR);
+-	BUG_ON(!list_empty(&inode->i_wb_list));
+-	/* don't need i_lock here, no concurrent mods to i_state */
+-	inode_state_assign_raw(inode, I_FREEING | I_CLEAR);
+-}
+-EXPORT_SYMBOL(clear_inode);
+-
+ /*
+  * Free the inode passed in, removing it from the lists it is still connected
+  * to. We remove any pages still attached to the inode and wait for any IO that
+@@ -1951,13 +1920,6 @@ int insert_inode_locked4(struct inode *inode, u64 hashval,
+ }
+ EXPORT_SYMBOL(insert_inode_locked4);
+ 
+-
+-int inode_just_drop(struct inode *inode)
+-{
+-	return 1;
+-}
+-EXPORT_SYMBOL(inode_just_drop);
+-
+ /*
+  * Called when we're dropping the last reference
+  * to an inode.
+diff --git a/fs/inode_evict.c b/fs/inode_evict.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..7c0afa31bcefff6a9a2bf69133a509cc3afe82ac
+--- /dev/null
++++ b/fs/inode_evict.c
+@@ -0,0 +1,45 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * (C) 1997 Linus Torvalds
++ * (C) 1999 Andrea Arcangeli <andrea@suse.de> (dynamic inode allocation)
++ */
++#include <linux/export.h>
++#include <linux/fs.h>
++#include <linux/fsverity.h>
++
++void clear_inode(struct inode *inode)
++{
++	/*
++	 * Only IS_VERITY() inodes can have verity info, so start by checking
++	 * for IS_VERITY() (which is faster than retrieving the pointer to the
++	 * verity info).  This minimizes overhead for non-verity inodes.
++	 */
++	if (IS_ENABLED(CONFIG_FS_VERITY) && IS_VERITY(inode))
++		fsverity_cleanup_inode(inode);
++
++	/*
++	 * We have to cycle the i_pages lock here because reclaim
++	 * can be in the process of removing the last page (in
++	 * __filemap_remove_folio()) and we must not free the mapping
++	 * under it.  We also remove nodes which are empty; these
++	 * can occur in two different ways.  The first is that radix
++	 * tree expansion can fail partway and the second is that THP
++	 * collapse_file() can allocate some temporary nodes and not
++	 * clean them up.
++	 */
++	xa_destroy(&inode->i_data.i_pages);
++
++	BUG_ON(inode->i_data.nrpages);
++	BUG_ON(!(inode_state_read_once(inode) & I_FREEING));
++	BUG_ON(inode_state_read_once(inode) & I_CLEAR);
++	BUG_ON(!list_empty(&inode->i_wb_list));
++	/* don't need i_lock here, no concurrent mods to i_state */
++	inode_state_assign_raw(inode, I_FREEING | I_CLEAR);
++}
++EXPORT_SYMBOL(clear_inode);
++
++int inode_just_drop(struct inode *inode)
++{
++	return 1;
++}
++EXPORT_SYMBOL(inode_just_drop);
