@@ -184,6 +184,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/super_anon_dev.c")),
             PathBuf::from(format!("{LINUX}/fs/super_lifetime.c")),
             PathBuf::from(format!("{LINUX}/fs/inode_cache_init.c")),
+            PathBuf::from(format!("{LINUX}/fs/bad_inode_ops.c")),
             PathBuf::from(format!("{LINUX}/fs/inode_evict.c")),
             PathBuf::from(format!("{LINUX}/fs/name_hash.c")),
             PathBuf::from(format!("{LINUX}/fs/path_get.c")),

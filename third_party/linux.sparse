@@ -216,6 +216,8 @@
 /fs/dcache_init.h
 /fs/dentry_ancestry.c
 /fs/d_path.c
+/fs/bad_inode.c
+/fs/bad_inode_ops.c
 /fs/d_path_prepend.h
 /fs/namei.c
 /fs/path_get.c
