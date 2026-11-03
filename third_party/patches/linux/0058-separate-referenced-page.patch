@@ -1,0 +1,292 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 00:26:55 -0500
+Subject: [PATCH] refactor(mm): separate referenced page-cache batch lookup
+
+---
+ mm/Makefile        |  2 +-
+ mm/filemap.c       | 85 +---------------------------------------------
+ mm/filemap_batch.c | 75 ++++++++++++++++++++++++++++++++++++++++
+ mm/filemap_batch.h | 42 +++++++++++++++++++++++
+ mm/swap.c          | 21 ------------
+ 5 files changed, 119 insertions(+), 106 deletions(-)
+ create mode 100644 mm/filemap_batch.c
+ create mode 100644 mm/filemap_batch.h
+
+diff --git a/mm/Makefile b/mm/Makefile
+index 830376b4647cf8049fd6617dd3c1925cdc8bfec3..5819a4c25bb9f7a242eb9aeb1c1ef09e6d960443 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -50,7 +50,7 @@ endif
+ 
+ obj-y			:= filemap.o pagecache_init.o mempool.o oom_kill.o oom_adj.o fadvise.o \
+ 			   maccess.o page-writeback.o writeback_domain.o folio-compat.o \
+-			   readahead.o swap.o truncate.o vmscan.o shrinker.o \
++			   readahead.o swap.o filemap_batch.o truncate.o vmscan.o shrinker.o \
+ 			   shmem.o util.o mmzone.o vmstat.o vmstat_init.o backing-dev.o backing-dev-inode.o \
+ 			   mm_init.o percpu.o slab_common.o kvfree_rcu.o \
+ 			   compaction.o show_mem.o \
+diff --git a/mm/filemap.c b/mm/filemap.c
+index d79941026b1b7d4415ebed2d63db214dca1f8d9e..cfdda4c8a242e45da7213b962485770f2087a0e8 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -52,6 +52,7 @@
+ 
+ #include <asm/tlbflush.h>
+ #include "internal.h"
++#include "filemap_batch.h"
+ #include "pagecache_wait.h"
+ 
+ #define CREATE_TRACE_POINTS
+@@ -2038,90 +2039,6 @@ no_page:
+ }
+ EXPORT_SYMBOL(__filemap_get_folio_mpol);
+ 
+-static inline struct folio *find_get_entry(struct xa_state *xas, pgoff_t max,
+-		xa_mark_t mark)
+-{
+-	struct folio *folio;
+-
+-retry:
+-	if (mark == XA_PRESENT)
+-		folio = xas_find(xas, max);
+-	else
+-		folio = xas_find_marked(xas, max, mark);
+-
+-	if (xas_retry(xas, folio))
+-		goto retry;
+-	/*
+-	 * A shadow entry of a recently evicted page, a swap
+-	 * entry from shmem/tmpfs or a DAX entry.  Return it
+-	 * without attempting to raise page count.
+-	 */
+-	if (!folio || xa_is_value(folio))
+-		return folio;
+-
+-	if (!folio_try_get(folio))
+-		goto reset;
+-
+-	if (unlikely(folio != xas_reload(xas))) {
+-		folio_put(folio);
+-		goto reset;
+-	}
+-
+-	return folio;
+-reset:
+-	xas_reset(xas);
+-	goto retry;
+-}
+-
+-/**
+- * find_get_entries - gang pagecache lookup
+- * @mapping:	The address_space to search
+- * @start:	The starting page cache index
+- * @end:	The final page index (inclusive).
+- * @fbatch:	Where the resulting entries are placed.
+- * @indices:	The cache indices corresponding to the entries in @entries
+- *
+- * find_get_entries() will search for and return a batch of entries in
+- * the mapping.  The entries are placed in @fbatch.  find_get_entries()
+- * takes a reference on any actual folios it returns.
+- *
+- * The entries have ascending indexes.  The indices may not be consecutive
+- * due to not-present entries or large folios.
+- *
+- * Any shadow entries of evicted folios, or swap entries from
+- * shmem/tmpfs, are included in the returned array.
+- *
+- * Return: The number of entries which were found.
+- */
+-unsigned find_get_entries(struct address_space *mapping, pgoff_t *start,
+-		pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices)
+-{
+-	XA_STATE(xas, &mapping->i_pages, *start);
+-	struct folio *folio;
+-
+-	rcu_read_lock();
+-	while ((folio = find_get_entry(&xas, end, XA_PRESENT)) != NULL) {
+-		indices[fbatch->nr] = xas.xa_index;
+-		if (!folio_batch_add(fbatch, folio))
+-			break;
+-	}
+-
+-	if (folio_batch_count(fbatch)) {
+-		unsigned long nr;
+-		int idx = folio_batch_count(fbatch) - 1;
+-
+-		folio = fbatch->folios[idx];
+-		if (!xa_is_value(folio))
+-			nr = folio_nr_pages(folio);
+-		else
+-			nr = 1 << xa_get_order(&mapping->i_pages, indices[idx]);
+-		*start = round_down(indices[idx] + nr, nr);
+-	}
+-	rcu_read_unlock();
+-
+-	return folio_batch_count(fbatch);
+-}
+-
+ /**
+  * find_lock_entries - Find a batch of pagecache entries.
+  * @mapping:	The address_space to search.
+diff --git a/mm/filemap_batch.c b/mm/filemap_batch.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..f9072b6b08d36c35818d3112aafdb212fc42fba5
+--- /dev/null
++++ b/mm/filemap_batch.c
+@@ -0,0 +1,75 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Page-cache batch helpers from mm/filemap.c and mm/swap.c. */
++#include <linux/folio_batch.h>
++
++#include "filemap_batch.h"
++
++/**
++ * find_get_entries - gang pagecache lookup
++ * @mapping:	The address_space to search
++ * @start:	The starting page cache index
++ * @end:	The final page index (inclusive).
++ * @fbatch:	Where the resulting entries are placed.
++ * @indices:	The cache indices corresponding to the entries in @entries
++ *
++ * find_get_entries() will search for and return a batch of entries in
++ * the mapping.  The entries are placed in @fbatch.  find_get_entries()
++ * takes a reference on any actual folios it returns.
++ *
++ * The entries have ascending indexes.  The indices may not be consecutive
++ * due to not-present entries or large folios.
++ *
++ * Any shadow entries of evicted folios, or swap entries from
++ * shmem/tmpfs, are included in the returned array.
++ *
++ * Return: The number of entries which were found.
++ */
++unsigned find_get_entries(struct address_space *mapping, pgoff_t *start,
++		pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices)
++{
++	XA_STATE(xas, &mapping->i_pages, *start);
++	struct folio *folio;
++
++	rcu_read_lock();
++	while ((folio = find_get_entry(&xas, end, XA_PRESENT)) != NULL) {
++		indices[fbatch->nr] = xas.xa_index;
++		if (!folio_batch_add(fbatch, folio))
++			break;
++	}
++
++	if (folio_batch_count(fbatch)) {
++		unsigned long nr;
++		int idx = folio_batch_count(fbatch) - 1;
++
++		folio = fbatch->folios[idx];
++		if (!xa_is_value(folio))
++			nr = folio_nr_pages(folio);
++		else
++			nr = 1 << xa_get_order(&mapping->i_pages, indices[idx]);
++		*start = round_down(indices[idx] + nr, nr);
++	}
++	rcu_read_unlock();
++
++	return folio_batch_count(fbatch);
++}
++
++/**
++ * folio_batch_remove_exceptionals() - Prune non-folios from a batch.
++ * @fbatch: The batch to prune
++ *
++ * find_get_entries() fills a batch with both folios and shadow/swap/DAX
++ * entries.  This function prunes all the non-folio entries from @fbatch
++ * without leaving holes, so that it can be passed on to folio-only batch
++ * operations.
++ */
++void folio_batch_remove_exceptionals(struct folio_batch *fbatch)
++{
++	unsigned int i, j;
++
++	for (i = 0, j = 0; i < folio_batch_count(fbatch); i++) {
++		struct folio *folio = fbatch->folios[i];
++		if (!xa_is_value(folio))
++			fbatch->folios[j++] = folio;
++	}
++	fbatch->nr = j;
++}
+diff --git a/mm/filemap_batch.h b/mm/filemap_batch.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..837ebb4ecf04fe84e21dedb6533b542cebf05f66
+--- /dev/null
++++ b/mm/filemap_batch.h
+@@ -0,0 +1,42 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _MM_FILEMAP_BATCH_H
++#define _MM_FILEMAP_BATCH_H
++
++#include <linux/pagemap.h>
++
++static inline struct folio *find_get_entry(struct xa_state *xas, pgoff_t max,
++		xa_mark_t mark)
++{
++	struct folio *folio;
++
++retry:
++	if (mark == XA_PRESENT)
++		folio = xas_find(xas, max);
++	else
++		folio = xas_find_marked(xas, max, mark);
++
++	if (xas_retry(xas, folio))
++		goto retry;
++	/*
++	 * A shadow entry of a recently evicted page, a swap
++	 * entry from shmem/tmpfs or a DAX entry.  Return it
++	 * without attempting to raise page count.
++	 */
++	if (!folio || xa_is_value(folio))
++		return folio;
++
++	if (!folio_try_get(folio))
++		goto reset;
++
++	if (unlikely(folio != xas_reload(xas))) {
++		folio_put(folio);
++		goto reset;
++	}
++
++	return folio;
++reset:
++	xas_reset(xas);
++	goto retry;
++}
++
++#endif
+diff --git a/mm/swap.c b/mm/swap.c
+index 1a87e56bdcc52d3d63bc5aff890b594973756c36..337e47ddd81fe066510c2ff65c3eb6a87cd9815a 100644
+--- a/mm/swap.c
++++ b/mm/swap.c
+@@ -1118,27 +1118,6 @@ void __folio_batch_release(struct folio_batch *fbatch)
+ }
+ EXPORT_SYMBOL(__folio_batch_release);
+ 
+-/**
+- * folio_batch_remove_exceptionals() - Prune non-folios from a batch.
+- * @fbatch: The batch to prune
+- *
+- * find_get_entries() fills a batch with both folios and shadow/swap/DAX
+- * entries.  This function prunes all the non-folio entries from @fbatch
+- * without leaving holes, so that it can be passed on to folio-only batch
+- * operations.
+- */
+-void folio_batch_remove_exceptionals(struct folio_batch *fbatch)
+-{
+-	unsigned int i, j;
+-
+-	for (i = 0, j = 0; i < folio_batch_count(fbatch); i++) {
+-		struct folio *folio = fbatch->folios[i];
+-		if (!xa_is_value(folio))
+-			fbatch->folios[j++] = folio;
+-	}
+-	fbatch->nr = j;
+-}
+-
+ #ifdef CONFIG_MEMCG
+ static void lruvec_reparent_lru(struct lruvec *child_lruvec,
+ 				struct lruvec *parent_lruvec,

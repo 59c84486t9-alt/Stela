@@ -126,6 +126,9 @@
 /mm/vmstat.c
 /mm/vmstat_init.c
 /mm/filemap.c
+/mm/filemap_batch.c
+/mm/filemap_batch.h
+/mm/swap.c
 /mm/internal.h
 /mm/pagecache_init.c
 /mm/pagecache_wait.h
