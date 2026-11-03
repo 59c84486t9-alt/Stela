@@ -228,10 +228,14 @@ pub fn require_system_container<R: ReadAt>(namespace: &mut R) -> Result<()> {
 
 /// The container's blocks: a [`ReadAt`] source, the byte offset of the
 /// partition within it and the container's block size.
+///
+/// The source must remain stable while the container is open. Reopen it to
+/// read a later state of a writable image.
 pub struct Device<R> {
     source: R,
     base: u64,
     block_size: u32,
+    nodes: btree::NodeCache,
 }
 
 impl<R: ReadAt> Device<R> {
@@ -240,6 +244,7 @@ impl<R: ReadAt> Device<R> {
             source,
             base,
             block_size,
+            nodes: btree::NodeCache::default(),
         }
     }
 
@@ -249,6 +254,7 @@ impl<R: ReadAt> Device<R> {
 
     pub(crate) fn set_block_size(&mut self, block_size: u32) {
         self.block_size = block_size;
+        self.nodes = btree::NodeCache::default();
     }
 
     /// Read bytes at a byte offset inside the container.
