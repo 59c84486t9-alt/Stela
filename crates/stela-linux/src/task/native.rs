@@ -125,7 +125,7 @@ enum Owned<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: us
     Child(OwnedChild<K, P, N>),
     NoPublication(NoPublication<N>),
     Retired(RetiredMetadata<N>),
-    BeginFailure(factory::BeginFailure<N>),
+    BeginFailure { _failure: factory::BeginFailure<N> },
     Transitioning,
 }
 enum StoppedDataState {
@@ -265,16 +265,6 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> M
     /// Negative association check only, never source readiness.
     pub(crate) fn matches_kernel(&self, kernel: &KernelOwner<K, N>) -> bool {
         core::ptr::eq(&**self.broker.kernel, kernel)
-    }
-
-    /// Actual process receiver; no original wait/body while table is borrowed.
-    pub(crate) unsafe fn next_event(&self) -> Result<Option<Event<K, P, N>>, Error> {
-        self.broker.next_event()
-    }
-    /// No count-derived kernel/source shutdown. A real joined global retirement
-    /// producer is not supplied by this source SDK.
-    pub(crate) fn shutdown(self) -> Result<(), Self> {
-        Err(self)
     }
 }
 

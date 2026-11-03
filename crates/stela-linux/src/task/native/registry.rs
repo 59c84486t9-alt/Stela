@@ -114,7 +114,12 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
                 let generation = child.generation();
                 (Owned::Child(child), Some(binding), record, generation)
             }
-            Err(failure) => (Owned::BeginFailure(failure), None, ptr::null_mut(), 0),
+            Err(failure) => (
+                Owned::BeginFailure { _failure: failure },
+                None,
+                ptr::null_mut(),
+                0,
+            ),
         };
         let request = Arc::new(Request {
             broker: self,
@@ -222,20 +227,6 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
 /// Notification bits ONLY: none proves source/RCU/native completion.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct EventKind(pub(super) u8);
-impl EventKind {
-    pub(crate) fn source_freed(self) -> bool {
-        self.0 & SOURCE_FREED != 0
-    }
-    pub(crate) fn terminal_returned(self) -> bool {
-        self.0 & TERMINAL_RETURNED != 0
-    }
-    pub(crate) fn abort_recorded(self) -> bool {
-        self.0 & ABORT_RECORDED != 0
-    }
-    pub(crate) fn created(self) -> bool {
-        self.0 & CREATED != 0
-    }
-}
 pub(crate) struct Event<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> {
     pub(crate) kind: EventKind,
     pub(crate) request: RequestHandle<K, P, N>,
@@ -267,9 +258,6 @@ pub(crate) struct FinalMetadata<K: KernelThreadPlatform + 'static, const N: usiz
 impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
     RequestHandle<K, P, N>
 {
-    pub(crate) fn generation(&self) -> u64 {
-        self.request.generation()
-    }
     /// # Safety
     /// Actual process release outside IRQ/C lock/native loan. Registry or
     /// retiring control still owns the whole request. No final owner drops.

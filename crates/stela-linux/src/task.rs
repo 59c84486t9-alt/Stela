@@ -201,7 +201,7 @@ pub struct InitialFailure {
 /// Failure retains original callback/code/root scope; this is NOT a native
 /// cancellation/no-publication receipt and cannot authorize source cleanup.
 pub(crate) struct ChildMetadataFailure {
-    pub error: ResourceBootstrapError,
+    _error: ResourceBootstrapError,
     _data_backing: Option<ManuallyDrop<Arc<dyn crate::threads::TaskDataBacking>>>,
     _data_preparation: Option<data::PreparationFailure>,
     _execution: ManuallyDrop<crate::kernel::ExecutionPin>,
@@ -406,7 +406,7 @@ impl<const N: usize> TaskBinding<N> {
             Ok(backing) => ManuallyDrop::new(backing),
             Err(error) => {
                 return Err(ChildMetadataFailure {
-                    error: ResourceBootstrapError::Work(error),
+                    _error: ResourceBootstrapError::Work(error),
                     _data_backing: None,
                     _data_preparation: None,
                     _execution: execution,
@@ -449,7 +449,7 @@ impl<const N: usize> TaskBinding<N> {
             Ok(pair) => pair,
             Err(error) => {
                 return Err(ChildMetadataFailure {
-                    error,
+                    _error: error,
                     _data_backing: Some(backing),
                     _data_preparation: ManuallyDrop::into_inner(data_preparation),
                     _execution: execution,

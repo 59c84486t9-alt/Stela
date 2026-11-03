@@ -11,7 +11,7 @@ use crate::{
 };
 use alloc::{boxed::Box, sync::Arc};
 use core::{cell::UnsafeCell, mem::ManuallyDrop, pin::Pin};
-use stela_driver_base::platform::work::{GeneralRefusal, Runtime, WorkError};
+use stela_driver_base::platform::work::{GeneralRefusal, Runtime, StackPinError, WorkError};
 
 /// Typed complete native/source failure, including retained admission reason.
 /// Its private implementation is not a no-publication/cancellation receipt.
@@ -30,6 +30,27 @@ impl RuntimeError {
     pub fn admission(&self) -> Option<&GeneralRefusal> {
         match &self.inner {
             native::Error::Native(super::factory::Error::Admission(e)) => Some(e),
+            _ => None,
+        }
+    }
+    /// Failure to pin the reserved native stack backing.
+    pub fn stack_pin(&self) -> Option<StackPinError> {
+        match &self.inner {
+            native::Error::Native(super::factory::Error::Pin(error)) => Some(*error),
+            _ => None,
+        }
+    }
+    /// Failure in the stack descriptor lease.
+    pub fn stack_admission(&self) -> Option<crate::pages::AdmissionError> {
+        match &self.inner {
+            native::Error::Native(super::factory::Error::Pages(error)) => Some(*error),
+            _ => None,
+        }
+    }
+    /// Failure in the underlying page catalog.
+    pub fn page_catalog(&self) -> Option<crate::pages::Error> {
+        match &self.inner {
+            native::Error::Native(super::factory::Error::Catalog(error)) => Some(*error),
             _ => None,
         }
     }
