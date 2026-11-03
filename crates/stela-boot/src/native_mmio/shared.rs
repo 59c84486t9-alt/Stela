@@ -522,7 +522,9 @@ impl Source {
             span,
             kind,
         }));
-        self.authority.register_resource(resource.clone())?;
+        self.authority
+            .register_resource(resource.clone())
+            .map_err(|refusal| refusal.error)?;
         Ok(resource)
     }
 

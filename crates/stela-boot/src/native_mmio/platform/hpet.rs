@@ -212,7 +212,10 @@ impl ScopedSource {
             owner: self.platform.resources.clone(),
             span: page,
         }));
-        let registration = self.authority.register_resource(resource.clone())?;
+        let registration = self
+            .authority
+            .register_resource(resource.clone())
+            .map_err(|refusal| refusal.error)?;
         let mapping =
             match self
                 .authority

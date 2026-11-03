@@ -248,6 +248,7 @@ unsafe fn inspect(
                 let authority = mmio.authority();
                 authority
                     .register_resource(resource)
+                    .map_err(|refusal| refusal.error)
                     .and_then(|id| authority.unregister_resource(id))
                     .map_err(|error| refuse!("release {error}", ?error))?;
             }

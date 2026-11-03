@@ -127,7 +127,7 @@ impl Source {
             }));
             authority
                 .register_resource(resource.clone())
-                .map_err(Error::Mapping)?;
+                .map_err(|refusal| Error::Mapping(refusal.error))?;
             buses.push(Bus { window, resource });
         }
         Ok(Self {
@@ -250,7 +250,7 @@ impl Source {
         }));
         self.authority
             .register_resource(resource.clone())
-            .map_err(Error::Mapping)?;
+            .map_err(|refusal| Error::Mapping(refusal.error))?;
         self.authority
             .map(
                 resource,

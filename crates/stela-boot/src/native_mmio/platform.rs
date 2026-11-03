@@ -554,7 +554,8 @@ impl ScopedSource {
                 .register_resource(Resource::new(Box::new(Backing {
                     owner: self.platform.resources.clone(),
                     span,
-                })))?;
+                })))
+                .map_err(|refusal| refusal.error)?;
         }
         Ok(count)
     }
@@ -622,7 +623,9 @@ impl ScopedSource {
             owner: self.platform.resources.clone(),
             span,
         }));
-        self.authority.register_resource(resource.clone())?;
+        self.authority
+            .register_resource(resource.clone())
+            .map_err(|refusal| refusal.error)?;
         Ok((window, resource))
     }
 }

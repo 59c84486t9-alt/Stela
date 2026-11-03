@@ -145,7 +145,10 @@ impl Source {
             span: page,
             kind: ResourceKind::Registers,
         }));
-        let registration = self.authority.register_resource(resource.clone())?;
+        let registration = self
+            .authority
+            .register_resource(resource.clone())
+            .map_err(|refusal| refusal.error)?;
         // Keep every original owner BEFORE an alias/PTE effect. Constructor
         // errors can then quarantine the same real identity/resource bundle.
         let mut owned = HpetMapping {
