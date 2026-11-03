@@ -96,6 +96,15 @@ static bool timer_list_deadline(s64 now, unsigned long expires, unsigned long cu
     return true;
 }
 
+/* A due timer left by a completed phase needs another pass. S64_MAX is
+ * reserved for no deadline, so a retry at the last usable tick is immediate. */
+static s64 hrtimer_deadline(s64 now, s64 expires)
+{
+    if (expires > now)
+        return expires;
+    return now == S64_MAX - 1 ? now : now + 1;
+}
+
 s64 stela_linux_service_run(const struct stela_linux_timer_delivery *delivery)
 {
     stela_linux_timer_delivery_require(delivery);
@@ -118,11 +127,9 @@ s64 stela_linux_service_run(const struct stela_linux_timer_delivery *delivery)
             stela_linux_fatal("nominal timer-list deadline overflow");
     }
     if (stela_linux_hrtimers_next_ns(&high)) {
-        /* A due timer remaining AFTER its original phase needs another pass.
-         * Same-phase hrtimer restart semantics are preserved by run_queue.
-         * Keep exact ns instead of converting expiry to a whole jiffy. */
-        if (high <= now)
-            high = now + 1;
+        /* Same-phase restarts are handled by run_queue. Keep the remaining
+         * hard deadline in ns without rounding it to a whole jiffy. */
+        high = hrtimer_deadline(now, high);
         if (high < next)
             next = high;
     }
@@ -192,6 +199,12 @@ int main(void)
     assert(!timer_list_deadline(S64_MAX - NSEC_PER_SEC / HZ, 0, 0, &next));
     assert(!timer_list_deadline(S64_MAX - 1, 0, 0, &next));
     assert(!sample_jiffies(0, &sample));
+
+    /* A due high-resolution timer must not become the empty-queue sentinel. */
+    assert(hrtimer_deadline(clock, clock + 17) == clock + 17);
+    assert(hrtimer_deadline(clock, clock) == clock + 1);
+    assert(hrtimer_deadline(S64_MAX - 2, S64_MAX - 3) == S64_MAX - 1);
+    assert(hrtimer_deadline(S64_MAX - 1, S64_MAX - 1) == S64_MAX - 1);
 
     printf("Linux nominal service deadline checks passed\n");
     return 0;
