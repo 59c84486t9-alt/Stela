@@ -79,6 +79,25 @@ void *memdup_user_nul(const void __user *source, size_t size)
 	return copy;
 }
 
+int check_zeroed_user(const void __user *from, size_t size)
+{
+	const char __user *source = from;
+
+	while (size) {
+		unsigned long word = 0;
+		size_t available = sizeof(word) - ((uintptr_t)source % sizeof(word));
+		size_t bytes = min(size, available);
+
+		if (raw_copy_from_user(&word, source, bytes))
+			return -EFAULT;
+		if (word)
+			return 0;
+		source += bytes;
+		size -= bytes;
+	}
+	return 1;
+}
+
 long strncpy_from_user(char *destination, const char __user *source, long count)
 {
 	long copied = 0;
@@ -204,6 +223,16 @@ int main(void)
 	assert(strncpy_from_user(buffer, client, sizeof(buffer)) == 2);
 	assert(strncpy_from_user(buffer, client, 2) == 2);
 	assert(strncpy_from_user(buffer, client, 0) == 0);
+	memset(client, 0, sizeof(client));
+	limit = 3;
+	assert(check_zeroed_user(NULL, 0) == 1);
+	assert(check_zeroed_user(client + 1, 2) == 1);
+	assert(check_zeroed_user(client + 1, 3) == -EFAULT);
+	limit = sizeof(client);
+	client[0] = 'x';
+	client[7] = 'x';
+	assert(check_zeroed_user(client + 1, 6) == 1);
+	assert(check_zeroed_user(client + 1, 7) == 0);
 	stela_linux_exit();
 	printf("Linux user copies passed\n");
 	return 0;
