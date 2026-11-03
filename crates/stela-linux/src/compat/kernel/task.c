@@ -1182,6 +1182,7 @@ static int prepare(struct stela_linux_task *task, int count)
 		return -EBUSY;
 	if (count)
 		preempt_count_sub(count);
+	stela_linux_printk_flush();
 	stela_linux_pages_finish();
 	if (!stela_linux_quiescent() || !stela_linux_lease_matches(&lease))
 		__builtin_trap();

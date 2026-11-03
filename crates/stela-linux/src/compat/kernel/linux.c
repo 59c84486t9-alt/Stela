@@ -107,6 +107,7 @@ void stela_linux_exit(void)
 {
 	if (!stela_linux_quiescent())
 		__builtin_trap();
+	stela_linux_printk_flush();
 	stela_linux_pages_finish();
 	if (!stela_linux_quiescent())
 		__builtin_trap();
@@ -161,6 +162,8 @@ void arch_local_irq_restore(unsigned long flags)
 	if (flags != ARCH_IRQ_ENABLED && flags != ARCH_IRQ_DISABLED)
 		__builtin_trap();
 	irq_flags = flags;
+	if (flags == ARCH_IRQ_ENABLED)
+		stela_linux_printk_flush();
 }
 
 bool stela_linux_quiescent(void)

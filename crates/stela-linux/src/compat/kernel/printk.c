@@ -3,6 +3,8 @@
  * log at its level. Messages longer than Linux's 1024-byte records are cut
  * as Linux cuts them. */
 #include <linux/device.h>
+#include <linux/irqflags.h>
+#include <linux/limits.h>
 #include <linux/printk.h>
 #include <linux/sprintf.h>
 #include <stela/linux.h>
@@ -17,15 +19,88 @@ static int level_of(const char **fmt)
 	return level;
 }
 
-static int emit(int level, const char *fmt, va_list args)
+/* The selected Linux CPU is serialized. Buffer a bounded prefix while the
+ * caller holds source locks; the next safe drain reports any dropped tail. */
+#define DEFERRED_RECORDS 4
+struct log_record {
+	int level;
+	char text[1024];
+};
+static struct log_record deferred[DEFERRED_RECORDS];
+static unsigned int deferred_depth, deferred_count, deferred_dropped;
+static const struct stela_linux_owner *deferred_owner;
+static bool flushing;
+
+void __printk_deferred_enter(void)
 {
-	/* One context runs Linux code at a time. */
-	static char message[1024];
-	int length = vscnprintf(message, sizeof(message), fmt, args);
+	(void)stela_linux_owner();
+	if (!irqs_disabled() || deferred_depth == UINT_MAX)
+		__builtin_trap();
+	deferred_depth++;
+}
+
+void __printk_deferred_exit(void)
+{
+	(void)stela_linux_owner();
+	if (!irqs_disabled() || !deferred_depth)
+		__builtin_trap();
+	deferred_depth--;
+}
+
+void stela_linux_printk_flush(void)
+{
+	if (flushing || (!deferred_owner && !deferred_depth) || !stela_linux_quiescent())
+		return;
+	if (deferred_depth)
+		__builtin_trap(); /* The original scope must end before IRQ restoration. */
 	const struct stela_linux_owner *owner = stela_linux_owner();
+	if (owner != deferred_owner)
+		__builtin_trap();
+	flushing = true;
+	for (unsigned int i = 0; i < deferred_count; i++)
+		owner->services->log(owner->context, deferred[i].level, deferred[i].text);
+	if (deferred_dropped) {
+		char warning[64];
+		scnprintf(warning, sizeof(warning), "printk: dropped %u deferred records\n",
+			  deferred_dropped);
+		owner->services->log(owner->context, LOGLEVEL_WARNING, warning);
+	}
+	deferred_count = 0;
+	deferred_dropped = 0;
+	deferred_owner = NULL;
+	flushing = false;
+}
+
+static int emit_record(int level, const char *fmt, va_list args, bool force_deferred)
+{
+	const struct stela_linux_owner *owner = stela_linux_owner();
+	static char message[1024];
+	if (flushing)
+		__builtin_trap(); /* The native log sink must not reenter Linux. */
+	stela_linux_printk_flush();
+	if (owner->services->log &&
+	    (deferred_depth || deferred_owner || (force_deferred && !stela_linux_quiescent()))) {
+		if (deferred_owner && deferred_owner != owner)
+			__builtin_trap();
+		deferred_owner = owner;
+		if (deferred_count < DEFERRED_RECORDS) {
+			struct log_record *record = &deferred[deferred_count++];
+			record->level = level;
+			return vscnprintf(record->text, sizeof(record->text), fmt, args);
+		}
+		if (deferred_dropped != UINT_MAX)
+			deferred_dropped++;
+		return vscnprintf(message, sizeof(message), fmt, args);
+	}
+	int length = vscnprintf(message, sizeof(message), fmt, args);
 	if (owner->services->log)
 		owner->services->log(owner->context, level, message);
 	return length;
+}
+
+static int emit(int level, const char *fmt, va_list args)
+{
+	return emit_record(level, fmt, args, false);
 }
 
 static __printf(2, 3) void emitf(int level, const char *fmt, ...)
@@ -51,11 +126,10 @@ int _printk(const char *fmt, ...)
 	return length;
 }
 
-/* Linux defers these past the scheduler's locks to reach its consoles; the
- * owner's log takes no Linux lock, so they are delivered at once. */
 int vprintk_deferred(const char *fmt, va_list args)
 {
-	return vprintk(fmt, args);
+	int level = level_of(&fmt);
+	return emit_record(level, fmt, args, true);
 }
 
 int _printk_deferred(const char *fmt, ...)
@@ -185,6 +259,27 @@ static void trapping_trace(void)
 	dump_stack();
 }
 
+static void deferred_records(void)
+{
+	unsigned int before = messages;
+	unsigned long irq = arch_local_irq_save();
+	printk_deferred_enter();
+	printk_deferred_enter();
+	pr_info("one");
+	printk_deferred_exit();
+	pr_info("two");
+	printk_deferred_exit();
+	printk_deferred(KERN_INFO "three");
+	printk_deferred(KERN_INFO "four");
+	printk_deferred(KERN_INFO "dropped");
+	assert(messages == before);
+	arch_local_irq_restore(irq);
+	assert(messages == before + 5);
+	assert(observed_level == LOGLEVEL_WARNING &&
+	       !strcmp(observed, "printk: dropped 1 deferred records\n"));
+	messages = before;
+}
+
 static void outside_owner(void)
 {
 	dump_stack();
@@ -203,6 +298,7 @@ int main(void)
 	assert(observed_level == LOGLEVEL_WARNING && !strstr(observed, "0000000000000000;"));
 	dump_stack();
 	assert(observed_level == MESSAGE_LOGLEVEL_DEFAULT && missing == 3);
+	deferred_records();
 	stela_linux_exit();
 	assert(stela_test_traps(trapping_trace));
 	assert(stela_test_traps(outside_owner));

@@ -125,6 +125,7 @@ bool stela_linux_quiescent(void);
  * active despite balanced public preempt/IRQ counters. No task/root grant. */
 bool stela_linux_rcu_callback_active(void);
 void stela_linux_rcu_finish(void);
+void stela_linux_printk_flush(void);
 /* The owner running Linux code; traps outside enter and exit. */
 const struct stela_linux_owner *stela_linux_owner(void);
 /* Report an operation Stela does not provide yet to the running owner. */
