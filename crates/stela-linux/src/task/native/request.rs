@@ -74,19 +74,19 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> R
             }
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "the transition returns the affine child directly to its request on refusal"
+    )]
     pub(super) unsafe fn prefix(&self) -> Result<(), Error> {
         // One bounded native metadata loan. No original resource, fork,
         // kthread or WQ body can park or wait inside any of these leaf steps.
         // SAFETY: every transition in this loan is bounded metadata work.
         let result = unsafe {
-            self.broker.kernel.platform().with_process(|entered| {
-                self.advance(|c| c.reserve(entered))?;
-                self.advance(|c| c.prepare(entered))?;
-                self.advance(|c| c.pin(entered))?;
-                self.advance(|c| c.admit(entered))?;
-                self.advance(|c| c.reconstruct(entered))?;
-                self.advance(|c| c.lend(entered))
-            })
+            self.broker
+                .kernel
+                .platform()
+                .with_process(|entered| self.advance(|child| child.prepare_prefix(entered)))
         };
         match result {
             Ok(outcome) => outcome,

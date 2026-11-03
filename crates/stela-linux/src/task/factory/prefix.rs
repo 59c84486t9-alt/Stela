@@ -3,6 +3,27 @@ use super::*;
 impl<'factory, 'kernel, 'catalog, 'runtime, K: KernelThreadPlatform, P: Provider, const N: usize>
     Child<'factory, 'kernel, 'catalog, 'runtime, K, P, N>
 {
+    /// Run the constructor's preparation steps under one metadata borrow.
+    ///
+    /// # Safety
+    /// The caller owns the original constructor and the entered process for
+    /// this child, including the old-user retirement and C lending contracts.
+    #[expect(
+        clippy::result_large_err,
+        reason = "return the exact affine child on refusal without allocating"
+    )]
+    pub(crate) unsafe fn prepare_prefix(
+        self,
+        entered: &dyn EnteredProcess,
+    ) -> Result<Self, Failure<'factory, 'kernel, 'catalog, 'runtime, K, P, N>> {
+        let child = self.reserve(entered)?;
+        // SAFETY: the caller owns this constructor and its retired old user.
+        let child = unsafe { child.prepare(entered) }?;
+        let child = child.pin(entered)?.admit(entered)?.reconstruct(entered)?;
+        // SAFETY: reconstruction produced this exact child for synchronous C lending.
+        unsafe { child.lend(entered) }
+    }
+
     #[expect(
         clippy::result_large_err,
         reason = "exact affine native/source ownership is returned on refusal"
