@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 22:50:55 -0500
+Subject: [PATCH] refactor(mm): separate original per-CPU workqueue
+ initialization
+
+---
+ mm/Makefile      |  2 +-
+ mm/vmstat.c      |  8 +++++---
+ mm/vmstat_init.c | 37 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 43 insertions(+), 4 deletions(-)
+ create mode 100644 mm/vmstat_init.c
+
+diff --git a/mm/Makefile b/mm/Makefile
+index 77ed13ddfb84f2d9b87d37c741cc6af9a7d2575c..92c998a845b128c9c41fec6f2aa68083eb7522f1 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -51,7 +51,7 @@ endif
+ obj-y			:= filemap.o mempool.o oom_kill.o fadvise.o \
+ 			   maccess.o page-writeback.o folio-compat.o \
+ 			   readahead.o swap.o truncate.o vmscan.o shrinker.o \
+-			   shmem.o util.o mmzone.o vmstat.o backing-dev.o \
++			   shmem.o util.o mmzone.o vmstat.o vmstat_init.o backing-dev.o \
+ 			   mm_init.o percpu.o slab_common.o kvfree_rcu.o \
+ 			   compaction.o show_mem.o \
+ 			   interval_tree.o list_lru.o workingset.o \
+diff --git a/mm/vmstat.c b/mm/vmstat.c
+index f534972f517de042e0ab3f91d0aaed3aa632e170..fca88cf311e4a6f4c8217bc9f6aabc7c6e49a2ff 100644
+--- a/mm/vmstat.c
++++ b/mm/vmstat.c
+@@ -2263,14 +2263,14 @@ static const struct ctl_table vmstat_table[] = {
+ };
+ #endif
+ 
+-struct workqueue_struct *mm_percpu_wq;
++#ifndef CONFIG_STELA
++void __init mm_percpu_wq_init(void);
+ 
+ void __init init_mm_internals(void)
+ {
+ 	int ret __maybe_unused;
+ 
+-	mm_percpu_wq = alloc_workqueue("mm_percpu_wq",
+-				       WQ_MEM_RECLAIM | WQ_PERCPU, 0);
++	mm_percpu_wq_init();
+ 
+ #ifdef CONFIG_SMP
+ 	ret = cpuhp_setup_state_nocalls(CPUHP_MM_VMSTAT_DEAD, "mm/vmstat:dead",
+@@ -2299,6 +2299,8 @@ void __init init_mm_internals(void)
+ #endif
+ }
+ 
++#endif /* !CONFIG_STELA */
++
+ #if defined(CONFIG_DEBUG_FS) && defined(CONFIG_COMPACTION)
+ 
+ /*
+diff --git a/mm/vmstat_init.c b/mm/vmstat_init.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e5283f9383cdbbb394a7e5aae402fe60e7de176
+--- /dev/null
++++ b/mm/vmstat_init.c
+@@ -0,0 +1,37 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *  linux/mm/vmstat.c
++ *
++ *  Manages VM statistics
++ *  Copyright (C) 1991, 1992, 1993, 1994  Linus Torvalds
++ *
++ *  zoned VM statistics
++ *  Copyright (C) 2006 Silicon Graphics, Inc.,
++ *		Christoph Lameter <cl@gentwo.org>
++ *  Copyright (C) 2008-2014 Christoph Lameter
++ */
++#include <linux/init.h>
++#include <linux/panic.h>
++#include <linux/workqueue.h>
++
++struct workqueue_struct *mm_percpu_wq;
++
++void __init mm_percpu_wq_init(void);
++void __init mm_percpu_wq_init(void)
++{
++	mm_percpu_wq = alloc_workqueue("mm_percpu_wq",
++				       WQ_MEM_RECLAIM | WQ_PERCPU, 0);
++}
++
++#ifdef CONFIG_STELA
++/* The omitted vmstat init branches are inactive in the native profile. */
++static_assert(!IS_ENABLED(CONFIG_SMP));
++static_assert(!IS_ENABLED(CONFIG_PROC_FS));
++
++void __init init_mm_internals(void)
++{
++	mm_percpu_wq_init();
++	if (!mm_percpu_wq)
++		panic("cannot initialize mm_percpu_wq");
++}
++#endif

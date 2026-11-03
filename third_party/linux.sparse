@@ -108,6 +108,8 @@
 /mm/util.c
 /mm/vma.h
 /mm/vma_init.c
+/mm/vmstat.c
+/mm/vmstat_init.c
 /mm/init-mm.c
 /mm/slab_common.c
 /mm/slab.h
