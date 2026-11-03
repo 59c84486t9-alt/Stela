@@ -12,12 +12,18 @@
 #include <linux/mm.h>
 #include <linux/poison.h>
 #include <linux/preempt.h>
+#include <linux/rcupdate.h>
 #include <linux/string.h>
 #include <linux/thread_info.h>
+#include <linux/sched/mm.h>
 #include <linux/sched/task_stack.h>
 #include <stela/linux.h>
 #include <stela/page.h>
 #include <stela/task.h>
+#include <stela/task_bootstrap.h>
+
+#include <internal.h>
+#include "rcu/rcu.h"
 
 #define NO_INDEX SIZE_MAX
 
@@ -936,6 +942,34 @@ int stela_linux_page_stack_retire(const struct stela_linux_stack_ticket_v1 *tick
     return stack_remove(ticket, record);
 }
 
+static bool reclaim_catalog_pages(gfp_t gfp)
+{
+	if (!catalog.kernel_roots || !gfpflags_allow_blocking(gfp) ||
+	    !stela_linux_quiescent())
+		return false;
+	const struct stela_linux_owner *owner = stela_linux_owner();
+	if (rcu_scheduler_active != RCU_SCHEDULER_RUNNING ||
+	    !stela_linux_task_resource_roots_complete(owner) ||
+	    stela_linux_require_current(owner))
+		return false;
+	struct task_struct *task = current;
+	if (task->flags & PF_MEMALLOC)
+		return false;
+
+	struct stela_linux_lease lease;
+	stela_linux_lease_snapshot(&lease);
+	gfp = current_gfp_context(gfp);
+	unsigned int flags = memalloc_noreclaim_save();
+	/* Only slab reclaim is available here. Make one pressure pass using
+	 * the original shrinker budgets, outside provider and record custody. */
+	unsigned long reclaimed = shrink_slab(gfp, 0, NULL, 0);
+	if (!stela_linux_quiescent() || !stela_linux_lease_matches(&lease) ||
+	    current != task)
+		__builtin_trap();
+	memalloc_noreclaim_restore(flags);
+	return reclaimed != 0;
+}
+
 struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
 				nodemask_t *nodemask)
 {
@@ -948,7 +982,10 @@ struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_n
 	    (preferred_nid != NUMA_NO_NODE && preferred_nid != 0) ||
 	    (nodemask && !node_isset(0, *nodemask)))
 		return NULL;
-	bool atomic = !stela_linux_quiescent();
+	bool retried = false;
+	bool atomic;
+retry:
+	atomic = !stela_linux_quiescent();
 	const struct stela_linux_owner *owner = stela_linux_owner();
 	int nesting = preempt_count();
 	unsigned long flags = arch_local_save_flags();
@@ -966,7 +1003,7 @@ struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_n
 	if (!atomic)
 		stela_linux_pages_finish();
 	if (catalog.free_records == NO_INDEX)
-		return NULL;
+		goto exhausted;
 	size_t record_index = catalog.free_records;
 	struct allocation_record *record = catalog.allocations + record_index;
 	catalog.free_records = record->next;
@@ -981,6 +1018,8 @@ struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_n
 		    allocation.physical_pages || allocation.page_count)
 			__builtin_trap();
 		recycle_record(record_index);
+		if (error == -ENOMEM)
+			goto exhausted;
 		if (error == -EOPNOTSUPP)
 			stela_linux_unsupported("native page allocation request");
 		return NULL;
@@ -1014,6 +1053,13 @@ struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_n
 	if (order && (gfp & __GFP_COMP))
 		prep_compound_page(page, order);
 	return page;
+
+exhausted:
+	if (!retried && reclaim_catalog_pages(gfp)) {
+		retried = true;
+		goto retry;
+	}
+	return NULL;
 }
 
 struct folio *__folio_alloc_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
