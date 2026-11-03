@@ -1,0 +1,266 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 14:59:35 -0500
+Subject: [PATCH] refactor(vfs): link original mount creation
+
+---
+ fs/mount_cache.c | 104 +++++++++++++++++++++++++++++++++++++++++++++++
+ fs/mount_cache.h |   1 +
+ fs/namespace.c   | 103 ----------------------------------------------
+ 3 files changed, 105 insertions(+), 103 deletions(-)
+
+diff --git a/fs/mount_cache.c b/fs/mount_cache.c
+index 2003a57c057f9eec0c7113de7420454e5e84af0f..687390bf10e3bb22b947077b954a7d95c47c9905 100644
+--- a/fs/mount_cache.c
++++ b/fs/mount_cache.c
+@@ -4,6 +4,7 @@
+  */
+ #include <linux/export.h>
+ #include <linux/fs.h>
++#include <linux/fs_context.h>
+ #include <linux/fsnotify.h>
+ #include <linux/sched/task.h>
+ #include <linux/task_work.h>
+@@ -347,6 +348,109 @@ int mnt_get_count(struct mount *mnt)
+ #endif
+ }
+ 
++static inline void mnt_add_instance(struct mount *m, struct super_block *s)
++{
++	struct mount *first = s->s_mounts;
++
++	if (first)
++		first->mnt_pprev_for_sb = &m->mnt_next_for_sb;
++	m->mnt_next_for_sb = first;
++	m->mnt_pprev_for_sb = &s->s_mounts;
++	s->s_mounts = m;
++}
++
++void setup_mnt(struct mount *m, struct dentry *root)
++{
++	struct super_block *s = root->d_sb;
++
++	atomic_inc(&s->s_active);
++	m->mnt.mnt_sb = s;
++	m->mnt.mnt_root = dget(root);
++	m->mnt_mountpoint = m->mnt.mnt_root;
++	m->mnt_parent = m;
++
++	guard(mount_locked_reader)();
++	mnt_add_instance(m, s);
++}
++
++/**
++ * vfs_create_mount - Create a mount for a configured superblock
++ * @fc: The configuration context with the superblock attached
++ *
++ * Create a mount to an already configured superblock.  If necessary, the
++ * caller should invoke vfs_get_tree() before calling this.
++ *
++ * Note that this does not attach the mount to anything.
++ */
++struct vfsmount *vfs_create_mount(struct fs_context *fc)
++{
++	struct mount *mnt;
++
++	if (!fc->root)
++		return ERR_PTR(-EINVAL);
++
++	mnt = alloc_vfsmnt(fc->source);
++	if (!mnt)
++		return ERR_PTR(-ENOMEM);
++
++	if (fc->sb_flags & SB_KERNMOUNT)
++		mnt->mnt.mnt_flags = MNT_INTERNAL;
++
++	setup_mnt(mnt, fc->root);
++
++	return &mnt->mnt;
++}
++EXPORT_SYMBOL(vfs_create_mount);
++
++struct vfsmount *fc_mount(struct fs_context *fc)
++{
++	int err = vfs_get_tree(fc);
++	if (!err) {
++		up_write(&fc->root->d_sb->s_umount);
++		return vfs_create_mount(fc);
++	}
++	return ERR_PTR(err);
++}
++EXPORT_SYMBOL(fc_mount);
++
++struct vfsmount *fc_mount_longterm(struct fs_context *fc)
++{
++	struct vfsmount *mnt = fc_mount(fc);
++	if (!IS_ERR(mnt))
++		real_mount(mnt)->mnt_ns = MNT_NS_INTERNAL;
++	return mnt;
++}
++EXPORT_SYMBOL(fc_mount_longterm);
++
++struct vfsmount *vfs_kern_mount(struct file_system_type *type,
++				int flags, const char *name,
++				void *data)
++{
++	struct fs_context *fc;
++	struct vfsmount *mnt;
++	int ret = 0;
++
++	if (!type)
++		return ERR_PTR(-EINVAL);
++
++	fc = fs_context_for_mount(type, flags);
++	if (IS_ERR(fc))
++		return ERR_CAST(fc);
++
++	if (name)
++		ret = vfs_parse_fs_string(fc, "source", name);
++	if (!ret)
++		ret = parse_monolithic_mount_data(fc, data);
++	if (!ret)
++		mnt = fc_mount(fc);
++	else
++		mnt = ERR_PTR(ret);
++
++	put_fs_context(fc);
++	return mnt;
++}
++EXPORT_SYMBOL_GPL(vfs_kern_mount);
++
+ static inline void mnt_del_instance(struct mount *m)
+ {
+ 	struct mount **p = m->mnt_pprev_for_sb;
+diff --git a/fs/mount_cache.h b/fs/mount_cache.h
+index 7a81701a073b4f6102551504faf3a46724900772..b58d739f6ca3c276d19a7dc796220347e3b262c2 100644
+--- a/fs/mount_cache.h
++++ b/fs/mount_cache.h
+@@ -20,6 +20,7 @@ extern struct kmem_cache *mnt_cache;
+ #define MNT_UNIQUE_ID_OFFSET (1ULL << 31)
+ 
+ struct mount *alloc_vfsmnt(const char *name);
++void setup_mnt(struct mount *m, struct dentry *root);
+ void mnt_free_id(struct mount *mnt);
+ int mnt_alloc_group_id(struct mount *mnt);
+ void free_vfsmnt(struct mount *mnt);
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 67095a6a6394fc43c5be5dff7ecd5893e846165f..3c9a1b84f3cc139aeec0bc4808fef29aa22c50be 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -420,17 +420,6 @@ static inline void mnt_unhold_writers(struct mount *mnt)
+ 	clear_write_hold(mnt);
+ }
+ 
+-static inline void mnt_add_instance(struct mount *m, struct super_block *s)
+-{
+-	struct mount *first = s->s_mounts;
+-
+-	if (first)
+-		first->mnt_pprev_for_sb = &m->mnt_next_for_sb;
+-	m->mnt_next_for_sb = first;
+-	m->mnt_pprev_for_sb = &s->s_mounts;
+-	s->s_mounts = m;
+-}
+-
+ static int mnt_make_readonly(struct mount *mnt)
+ {
+ 	int ret;
+@@ -655,98 +644,6 @@ static void commit_tree(struct mount *mnt)
+ 	touch_mnt_namespace(n);
+ }
+ 
+-static void setup_mnt(struct mount *m, struct dentry *root)
+-{
+-	struct super_block *s = root->d_sb;
+-
+-	atomic_inc(&s->s_active);
+-	m->mnt.mnt_sb = s;
+-	m->mnt.mnt_root = dget(root);
+-	m->mnt_mountpoint = m->mnt.mnt_root;
+-	m->mnt_parent = m;
+-
+-	guard(mount_locked_reader)();
+-	mnt_add_instance(m, s);
+-}
+-
+-/**
+- * vfs_create_mount - Create a mount for a configured superblock
+- * @fc: The configuration context with the superblock attached
+- *
+- * Create a mount to an already configured superblock.  If necessary, the
+- * caller should invoke vfs_get_tree() before calling this.
+- *
+- * Note that this does not attach the mount to anything.
+- */
+-struct vfsmount *vfs_create_mount(struct fs_context *fc)
+-{
+-	struct mount *mnt;
+-
+-	if (!fc->root)
+-		return ERR_PTR(-EINVAL);
+-
+-	mnt = alloc_vfsmnt(fc->source);
+-	if (!mnt)
+-		return ERR_PTR(-ENOMEM);
+-
+-	if (fc->sb_flags & SB_KERNMOUNT)
+-		mnt->mnt.mnt_flags = MNT_INTERNAL;
+-
+-	setup_mnt(mnt, fc->root);
+-
+-	return &mnt->mnt;
+-}
+-EXPORT_SYMBOL(vfs_create_mount);
+-
+-struct vfsmount *fc_mount(struct fs_context *fc)
+-{
+-	int err = vfs_get_tree(fc);
+-	if (!err) {
+-		up_write(&fc->root->d_sb->s_umount);
+-		return vfs_create_mount(fc);
+-	}
+-	return ERR_PTR(err);
+-}
+-EXPORT_SYMBOL(fc_mount);
+-
+-struct vfsmount *fc_mount_longterm(struct fs_context *fc)
+-{
+-	struct vfsmount *mnt = fc_mount(fc);
+-	if (!IS_ERR(mnt))
+-		real_mount(mnt)->mnt_ns = MNT_NS_INTERNAL;
+-	return mnt;
+-}
+-EXPORT_SYMBOL(fc_mount_longterm);
+-
+-struct vfsmount *vfs_kern_mount(struct file_system_type *type,
+-				int flags, const char *name,
+-				void *data)
+-{
+-	struct fs_context *fc;
+-	struct vfsmount *mnt;
+-	int ret = 0;
+-
+-	if (!type)
+-		return ERR_PTR(-EINVAL);
+-
+-	fc = fs_context_for_mount(type, flags);
+-	if (IS_ERR(fc))
+-		return ERR_CAST(fc);
+-
+-	if (name)
+-		ret = vfs_parse_fs_string(fc, "source", name);
+-	if (!ret)
+-		ret = parse_monolithic_mount_data(fc, data);
+-	if (!ret)
+-		mnt = fc_mount(fc);
+-	else
+-		mnt = ERR_PTR(ret);
+-
+-	put_fs_context(fc);
+-	return mnt;
+-}
+-EXPORT_SYMBOL_GPL(vfs_kern_mount);
+-
+ static struct mount *clone_mnt(struct mount *old, struct dentry *root,
+ 					int flag)
+ {
