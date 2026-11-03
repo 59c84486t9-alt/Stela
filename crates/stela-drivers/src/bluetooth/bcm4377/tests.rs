@@ -272,6 +272,7 @@ struct Device {
     ticks: u64,
     operations: usize,
     fail_operation: Option<usize>,
+    unwind_write: bool,
     writes: usize,
     prepare: usize,
     armed: bool,
@@ -833,7 +834,12 @@ unsafe impl Platform for Model {
             }
             _ => {}
         }
-        d.operation(space, original)
+        let result = d.operation(space, original);
+        if core::mem::take(&mut d.unwind_write) {
+            drop(d);
+            panic!("injected Broadcom control write unwind");
+        }
+        result
     }
     fn now_us(&self) -> u64 {
         let mut d = self.0.lock().unwrap();
@@ -903,6 +909,7 @@ fn fixture(device: u16) -> (Model, Allocator, Arc<Mutex<Device>>) {
         ticks: 0,
         operations: 0,
         fail_operation: None,
+        unwind_write: false,
         writes: 0,
         prepare: 0,
         armed: false,
@@ -1620,6 +1627,31 @@ fn every_live_send_poll_and_close_mmio_effect_error_stops_once() {
         }
     }
 }
+#[test]
+fn interrupted_close_seals_the_transport_before_any_retry() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
+    let (mut transport, device) = active(0x5f69);
+    device.lock().unwrap().unwind_write = true;
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| transport.close())).is_err());
+    assert_eq!(transport.state(), State::Closing);
+    let operations = device.lock().unwrap().operations;
+    assert_eq!(transport.poll(), Err(Error::State(State::Closing)));
+    assert_eq!(
+        transport.send(Kind::Command, &[1, 0, 0]),
+        Err(Error::State(State::Closing))
+    );
+    let first = transport.close().unwrap_err();
+    assert_eq!(transport.state(), State::Failed);
+    assert_eq!(transport.close(), Err(first));
+    drop(transport);
+    let device = device.lock().unwrap();
+    assert_eq!(device.operations, operations);
+    assert_eq!(device.retire, 0);
+    assert!(!device.dropped);
+}
+
 #[test]
 fn retirement_cancels_unacknowledged_tx_without_delivery_claim() {
     if crate::model_test_process::isolate() {
