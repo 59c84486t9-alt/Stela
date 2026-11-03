@@ -85,11 +85,24 @@ static bool in_callback;
  * it, and its page counters, which nothing moves. */
 struct pglist_data contig_page_data;
 atomic_long_t vm_node_stat[NR_VM_NODE_STAT_ITEMS];
+atomic_long_t _totalram_pages __read_mostly;
 DEFINE_STATIC_KEY_MAYBE(CONFIG_INIT_ON_FREE_DEFAULT_ON, init_on_free);
+
+/* The catalog covers one node and one zone. Runtime stack reservations
+ * remain physically present, but the ordinary allocator cannot manage them. */
+static void publish_memory_counts(unsigned long present, long managed)
+{
+	struct zone *zone = &contig_page_data.node_zones[ZONE_NORMAL];
+
+	contig_page_data.node_present_pages = present;
+	zone->present_pages = present;
+	atomic_long_set(&zone->managed_pages, managed);
+	atomic_long_set(&_totalram_pages, managed);
+}
 
 void si_meminfo(struct sysinfo *info)
 {
-	*info = (struct sysinfo){.totalram = catalog.page_count, .mem_unit = PAGE_SIZE};
+	*info = (struct sysinfo){.totalram = totalram_pages(), .mem_unit = PAGE_SIZE};
 }
 
 #ifdef STELA_LINUX_PAGE_TEST
@@ -218,6 +231,7 @@ static int register_inventory(
     if (!generation || generation <= last_generation)
         return -EINVAL;
     size_t count = 0;
+    size_t managed = 0;
     for (size_t i = 0; i < extent_count; i++) {
         const struct stela_linux_page_reservation *item = extents + i;
         if (kinds && kinds[i] != STELA_LINUX_PAGE_ORDINARY &&
@@ -243,6 +257,8 @@ static int register_inventory(
                 return -EINVAL;
         }
         count += item->page_count;
+        if (!kinds || kinds[i] == STELA_LINUX_PAGE_ORDINARY)
+            managed += item->page_count;
     }
     if (count > (size_t)SSIZE_MAX / sizeof(struct page) ||
         count > (size_t)SSIZE_MAX / sizeof(struct page_state) ||
@@ -299,7 +315,7 @@ static int register_inventory(
     catalog.free_records = 0;
     catalog.retired = NO_INDEX;
     catalog.next_stack_nonce = 1;
-    atomic_long_set(&contig_page_data.node_zones[ZONE_NORMAL].managed_pages, (long)count);
+    publish_memory_counts(count, (long)managed);
     last_generation = generation;
     return 0;
 }
@@ -664,6 +680,7 @@ int stela_linux_page_catalog_unregister(u64 generation)
 	free_metadata(catalog.state, count * sizeof(*catalog.state), __alignof__(*catalog.state));
 	free_metadata(catalog.pages, count * sizeof(*catalog.pages), __alignof__(*catalog.pages));
 	memset(&catalog, 0, sizeof(catalog));
+	publish_memory_counts(0, 0);
 	return 0;
 }
 
@@ -2246,6 +2263,14 @@ static void annotated_stack_admission(void)
     assert(!stela_linux_page_catalog_register_annotated(&inventory, &ops, &fixture));
     assert(catalog.extent_count == 2 && !catalog.stack_admissions);
     assert(stela_linux_page_boot_capacity() == TEST_PAGES);
+    assert(totalram_pages() == TEST_PAGES);
+    struct zone *zone = &contig_page_data.node_zones[ZONE_NORMAL];
+    assert(zone_managed_pages(zone) == TEST_PAGES);
+    assert(zone->present_pages == TEST_PAGES + ARRAY_SIZE(physical));
+    assert(node_present_pages(0) == zone->present_pages);
+    struct sysinfo info;
+    si_meminfo(&info);
+    assert(info.totalram == TEST_PAGES && info.mem_unit == PAGE_SIZE);
     /* Inspect private catalog identity: the public PFN/page conversions
      * deliberately reject these unpublished, zero-reference descriptors. */
     assert(catalog.pages + physical_slot(stack_physical) ==
@@ -2331,6 +2356,8 @@ static void annotated_stack_admission(void)
     assert(!catalog.live_pages && !catalog.stack_admissions);
     assert(!stela_linux_page_catalog_unregister(generation));
     assert(!metadata_live);
+    assert(!totalram_pages() && !zone_managed_pages(zone));
+    assert(!node_present_pages(0) && !zone->present_pages);
     free(stack);
 }
 
