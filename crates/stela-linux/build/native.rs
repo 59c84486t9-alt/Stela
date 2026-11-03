@@ -478,6 +478,11 @@ impl Linux {
             ("linux_pci", "pci.c", "STELA_LINUX_PCI_TEST"),
             ("linux_pci_host", "pci_host.c", "STELA_LINUX_PCI_HOST_TEST"),
             ("linux_service", "service.c", "STELA_LINUX_SERVICE_TEST"),
+            (
+                "linux_writeback_init",
+                "writeback_init.c",
+                "STELA_LINUX_WRITEBACK_INIT_TEST",
+            ),
             ("linux_vmalloc", "vmalloc.c", "STELA_LINUX_VMALLOC_TEST"),
             ("linux_refcount", "refcount.c", "STELA_LINUX_REFCOUNT_TEST"),
             (
