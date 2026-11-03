@@ -182,7 +182,10 @@
 /fs/pidfs_metadata.c
 /fs/pidfs_metadata.h
 /fs/namespace.c
+/fs/pnode.h
 /fs/mount.h
+/fs/mount_cache.c
+/fs/mount_cache.h
 /kernel/ucount.c
 /kernel/cred.c
 /kernel/signal.c

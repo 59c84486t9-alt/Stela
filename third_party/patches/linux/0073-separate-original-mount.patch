@@ -1,0 +1,179 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 11:30:43 -0500
+Subject: [PATCH] refactor(fs): separate original mount cache initialization
+
+---
+ fs/Makefile      |  2 +-
+ fs/mount_cache.c | 53 ++++++++++++++++++++++++++++++++++++++++++++++++
+ fs/mount_cache.h | 17 ++++++++++++++++
+ fs/namespace.c   | 40 ++----------------------------------
+ 4 files changed, 73 insertions(+), 39 deletions(-)
+ create mode 100644 fs/mount_cache.c
+ create mode 100644 fs/mount_cache.h
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 8c5e07d5493dac07f07686e2cc9ee7c8fca905ba..8f5226b1d5a8d37934d5d882447af4295af8909e 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -10,7 +10,7 @@
+ obj-y :=	open.o filp_close.o read_write.o file_table.o file_table_init.o super.o \
+ 		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o path_get.o name_hash.o filename.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o dcache_init.o inode.o inode_cache_init.o inode_evict.o \
+-		attr.o bad_inode.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o \
++		attr.o bad_inode.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o mount_cache.o \
+ 		seq_file.o seq_lifetime.o seq_output.o xattr.o simple_xattr.o libfs.o pseudo_metadata.o fs-writeback.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+ 		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
+diff --git a/fs/mount_cache.c b/fs/mount_cache.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..562195453b4071d65ab999ebe013ae53812979d5
+--- /dev/null
++++ b/fs/mount_cache.c
+@@ -0,0 +1,53 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Mount cache initialization from fs/namespace.c.
++ * (C) Copyright Al Viro 2000, 2001
++ */
++#include <linux/fs.h>
++#include <linux/memblock.h>
++#include <linux/slab.h>
++
++#include "mount.h"
++#include "mount_cache.h"
++
++struct hlist_head *mount_hashtable __ro_after_init;
++struct hlist_head *mountpoint_hashtable __ro_after_init;
++struct kmem_cache *mnt_cache __ro_after_init;
++
++unsigned int m_hash_mask __ro_after_init;
++unsigned int m_hash_shift __ro_after_init;
++unsigned int mp_hash_mask __ro_after_init;
++unsigned int mp_hash_shift __ro_after_init;
++
++static __initdata unsigned long mhash_entries;
++static int __init set_mhash_entries(char *str)
++{
++	return kstrtoul(str, 0, &mhash_entries) == 0;
++}
++__setup("mhash_entries=", set_mhash_entries);
++
++static __initdata unsigned long mphash_entries;
++static int __init set_mphash_entries(char *str)
++{
++	return kstrtoul(str, 0, &mphash_entries) == 0;
++}
++__setup("mphash_entries=", set_mphash_entries);
++
++void __init mnt_cache_init(void)
++{
++	mnt_cache = kmem_cache_create("mnt_cache", sizeof(struct mount),
++			0, SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT, NULL);
++
++	mount_hashtable = alloc_large_system_hash("Mount-cache",
++				sizeof(struct hlist_head),
++				mhash_entries, 19,
++				HASH_ZERO,
++				&m_hash_shift, &m_hash_mask, 0, 0);
++	mountpoint_hashtable = alloc_large_system_hash("Mountpoint-cache",
++				sizeof(struct hlist_head),
++				mphash_entries, 19,
++				HASH_ZERO,
++				&mp_hash_shift, &mp_hash_mask, 0, 0);
++
++	if (!mount_hashtable || !mountpoint_hashtable)
++		panic("Failed to allocate mount hash table\n");
++}
+diff --git a/fs/mount_cache.h b/fs/mount_cache.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..bffb7838558663952b0a2b59d292c73eca3f58e9
+--- /dev/null
++++ b/fs/mount_cache.h
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _FS_MOUNT_CACHE_H
++#define _FS_MOUNT_CACHE_H
++
++#include <linux/init.h>
++
++extern unsigned int m_hash_mask;
++extern unsigned int m_hash_shift;
++extern unsigned int mp_hash_mask;
++extern unsigned int mp_hash_shift;
++extern struct hlist_head *mount_hashtable;
++extern struct hlist_head *mountpoint_hashtable;
++extern struct kmem_cache *mnt_cache;
++
++void __init mnt_cache_init(void);
++
++#endif
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 9d9b0c18b57eae4dcb735410d7a441a473a9568c..fdf8ad25ee863f3d1672cb8b4a0dc25fcd780514 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -36,30 +36,12 @@
+ #include <linux/nstree.h>
+ 
+ #include "pnode.h"
++#include "mount_cache.h"
+ #include "internal.h"
+ 
+ /* Maximum number of mounts in a mount namespace */
+ static unsigned int sysctl_mount_max __read_mostly = 100000;
+ 
+-static unsigned int m_hash_mask __ro_after_init;
+-static unsigned int m_hash_shift __ro_after_init;
+-static unsigned int mp_hash_mask __ro_after_init;
+-static unsigned int mp_hash_shift __ro_after_init;
+-
+-static __initdata unsigned long mhash_entries;
+-static int __init set_mhash_entries(char *str)
+-{
+-	return kstrtoul(str, 0, &mhash_entries) == 0;
+-}
+-__setup("mhash_entries=", set_mhash_entries);
+-
+-static __initdata unsigned long mphash_entries;
+-static int __init set_mphash_entries(char *str)
+-{
+-	return kstrtoul(str, 0, &mphash_entries) == 0;
+-}
+-__setup("mphash_entries=", set_mphash_entries);
+-
+ static char * __initdata initramfs_options;
+ static int __init initramfs_options_setup(char *str)
+ {
+@@ -77,9 +59,6 @@ static DEFINE_IDA(mnt_group_ida);
+ #define MNT_UNIQUE_ID_OFFSET (1ULL << 31)
+ static u64 mnt_id_ctr = MNT_UNIQUE_ID_OFFSET;
+ 
+-static struct hlist_head *mount_hashtable __ro_after_init;
+-static struct hlist_head *mountpoint_hashtable __ro_after_init;
+-static struct kmem_cache *mnt_cache __ro_after_init;
+ static DECLARE_RWSEM(namespace_sem);
+ static HLIST_HEAD(unmounted);	/* protected by namespace_sem */
+ static LIST_HEAD(ex_mountpoints); /* protected by namespace_sem */
+@@ -6349,22 +6328,7 @@ void __init mnt_init(void)
+ {
+ 	int err;
+ 
+-	mnt_cache = kmem_cache_create("mnt_cache", sizeof(struct mount),
+-			0, SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT, NULL);
+-
+-	mount_hashtable = alloc_large_system_hash("Mount-cache",
+-				sizeof(struct hlist_head),
+-				mhash_entries, 19,
+-				HASH_ZERO,
+-				&m_hash_shift, &m_hash_mask, 0, 0);
+-	mountpoint_hashtable = alloc_large_system_hash("Mountpoint-cache",
+-				sizeof(struct hlist_head),
+-				mphash_entries, 19,
+-				HASH_ZERO,
+-				&mp_hash_shift, &mp_hash_mask, 0, 0);
+-
+-	if (!mount_hashtable || !mountpoint_hashtable)
+-		panic("Failed to allocate mount hash table\n");
++	mnt_cache_init();
+ 
+ 	kernfs_init();
+ 
