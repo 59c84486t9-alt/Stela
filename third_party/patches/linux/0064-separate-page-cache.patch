@@ -1,0 +1,249 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 00:53:18 -0500
+Subject: [PATCH] refactor(mm): separate page-cache shadow truncation
+
+---
+ mm/filemap_batch.c | 97 ++++++++++++++++++++++++++++++++++++++++++++++
+ mm/filemap_batch.h |  7 ++++
+ mm/truncate.c      | 95 +--------------------------------------------
+ 3 files changed, 105 insertions(+), 94 deletions(-)
+
+diff --git a/mm/filemap_batch.c b/mm/filemap_batch.c
+index 4e27e0831e8a44c49a01c7f5e95f0de145675f49..60d2f3ad718b15d692ac17ceedb390e55c9b9554 100644
+--- a/mm/filemap_batch.c
++++ b/mm/filemap_batch.c
+@@ -1,10 +1,13 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* Page-cache batch helpers from mm/filemap.c and mm/swap.c. */
++#include <linux/dax.h>
+ #include <linux/folio_batch.h>
++#include <linux/shmem_fs.h>
+ 
+ #include <linux/swap.h>
+ 
+ #include "filemap_batch.h"
++#include "internal.h"
+ #include "swap.h"
+ 
+ /**
+@@ -181,3 +184,97 @@ struct address_space *folio_mapping(const struct folio *folio)
+ 	return mapping;
+ }
+ EXPORT_SYMBOL(folio_mapping);
++
++void clear_shadow_entries(struct address_space *mapping,
++				 unsigned long start, unsigned long max)
++{
++	XA_STATE(xas, &mapping->i_pages, start);
++	struct folio *folio;
++
++	/* Handled by shmem itself, or for DAX we do nothing. */
++	if (shmem_mapping(mapping) || dax_mapping(mapping))
++		return;
++
++	xas_set_update(&xas, workingset_update_node);
++
++	spin_lock(&mapping->host->i_lock);
++	xas_lock_irq(&xas);
++
++	/* Clear all shadow entries from start to max */
++	xas_for_each(&xas, folio, max) {
++		if (xa_is_value(folio))
++			xas_store(&xas, NULL);
++	}
++
++	xas_unlock_irq(&xas);
++	if (mapping_shrinkable(mapping))
++		inode_lru_list_add(mapping->host);
++	spin_unlock(&mapping->host->i_lock);
++}
++
++/*
++ * Unconditionally remove exceptional entries. Usually called from truncate
++ * path. Note that the folio_batch may be altered by this function by removing
++ * exceptional entries similar to what folio_batch_remove_exceptionals() does.
++ * Please note that indices[] has entries in ascending order as guaranteed by
++ * either find_get_entries() or find_lock_entries().
++ */
++void truncate_folio_batch_exceptionals(struct address_space *mapping,
++				struct folio_batch *fbatch, pgoff_t *indices)
++{
++	XA_STATE(xas, &mapping->i_pages, indices[0]);
++	int nr = folio_batch_count(fbatch);
++	struct folio *folio;
++	int i, j;
++
++	/* Handled by shmem itself */
++	if (shmem_mapping(mapping))
++		return;
++
++	for (j = 0; j < nr; j++)
++		if (xa_is_value(fbatch->folios[j]))
++			break;
++
++	if (j == nr)
++		return;
++
++	if (dax_mapping(mapping)) {
++		for (i = j; i < nr; i++) {
++			if (xa_is_value(fbatch->folios[i])) {
++				/*
++				 * File systems should already have called
++				 * dax_break_layout_entry() to remove all DAX
++				 * entries while holding a lock to prevent
++				 * establishing new entries. Therefore we
++				 * shouldn't find any here.
++				 */
++				WARN_ON_ONCE(1);
++
++				/*
++				 * Delete the mapping so truncate_pagecache()
++				 * doesn't loop forever.
++				 */
++				dax_delete_mapping_entry(mapping, indices[i]);
++			}
++		}
++		goto out;
++	}
++
++	xas_set(&xas, indices[j]);
++	xas_set_update(&xas, workingset_update_node);
++
++	spin_lock(&mapping->host->i_lock);
++	xas_lock_irq(&xas);
++
++	xas_for_each(&xas, folio, indices[nr-1]) {
++		if (xa_is_value(folio))
++			xas_store(&xas, NULL);
++	}
++
++	xas_unlock_irq(&xas);
++	if (mapping_shrinkable(mapping))
++		inode_lru_list_add(mapping->host);
++	spin_unlock(&mapping->host->i_lock);
++out:
++	folio_batch_remove_exceptionals(fbatch);
++}
+diff --git a/mm/filemap_batch.h b/mm/filemap_batch.h
+index 837ebb4ecf04fe84e21dedb6533b542cebf05f66..a8e3314ce7b7d9c3327349d089e4362061eafafd 100644
+--- a/mm/filemap_batch.h
++++ b/mm/filemap_batch.h
+@@ -39,4 +39,11 @@ reset:
+ 	goto retry;
+ }
+ 
++struct folio_batch;
++
++void clear_shadow_entries(struct address_space *mapping,
++			  unsigned long start, unsigned long max);
++void truncate_folio_batch_exceptionals(struct address_space *mapping,
++				       struct folio_batch *fbatch, pgoff_t *indices);
++
+ #endif
+diff --git a/mm/truncate.c b/mm/truncate.c
+index b58ba940be474000b657cd9f3a48d911b01b34c1..85580d8d2f2584af71f1a3737dd66e7d5a1a8b4e 100644
+--- a/mm/truncate.c
++++ b/mm/truncate.c
+@@ -22,100 +22,7 @@
+ #include <linux/shmem_fs.h>
+ #include <linux/rmap.h>
+ #include "internal.h"
+-
+-static void clear_shadow_entries(struct address_space *mapping,
+-				 unsigned long start, unsigned long max)
+-{
+-	XA_STATE(xas, &mapping->i_pages, start);
+-	struct folio *folio;
+-
+-	/* Handled by shmem itself, or for DAX we do nothing. */
+-	if (shmem_mapping(mapping) || dax_mapping(mapping))
+-		return;
+-
+-	xas_set_update(&xas, workingset_update_node);
+-
+-	spin_lock(&mapping->host->i_lock);
+-	xas_lock_irq(&xas);
+-
+-	/* Clear all shadow entries from start to max */
+-	xas_for_each(&xas, folio, max) {
+-		if (xa_is_value(folio))
+-			xas_store(&xas, NULL);
+-	}
+-
+-	xas_unlock_irq(&xas);
+-	if (mapping_shrinkable(mapping))
+-		inode_lru_list_add(mapping->host);
+-	spin_unlock(&mapping->host->i_lock);
+-}
+-
+-/*
+- * Unconditionally remove exceptional entries. Usually called from truncate
+- * path. Note that the folio_batch may be altered by this function by removing
+- * exceptional entries similar to what folio_batch_remove_exceptionals() does.
+- * Please note that indices[] has entries in ascending order as guaranteed by
+- * either find_get_entries() or find_lock_entries().
+- */
+-static void truncate_folio_batch_exceptionals(struct address_space *mapping,
+-				struct folio_batch *fbatch, pgoff_t *indices)
+-{
+-	XA_STATE(xas, &mapping->i_pages, indices[0]);
+-	int nr = folio_batch_count(fbatch);
+-	struct folio *folio;
+-	int i, j;
+-
+-	/* Handled by shmem itself */
+-	if (shmem_mapping(mapping))
+-		return;
+-
+-	for (j = 0; j < nr; j++)
+-		if (xa_is_value(fbatch->folios[j]))
+-			break;
+-
+-	if (j == nr)
+-		return;
+-
+-	if (dax_mapping(mapping)) {
+-		for (i = j; i < nr; i++) {
+-			if (xa_is_value(fbatch->folios[i])) {
+-				/*
+-				 * File systems should already have called
+-				 * dax_break_layout_entry() to remove all DAX
+-				 * entries while holding a lock to prevent
+-				 * establishing new entries. Therefore we
+-				 * shouldn't find any here.
+-				 */
+-				WARN_ON_ONCE(1);
+-
+-				/*
+-				 * Delete the mapping so truncate_pagecache()
+-				 * doesn't loop forever.
+-				 */
+-				dax_delete_mapping_entry(mapping, indices[i]);
+-			}
+-		}
+-		goto out;
+-	}
+-
+-	xas_set(&xas, indices[j]);
+-	xas_set_update(&xas, workingset_update_node);
+-
+-	spin_lock(&mapping->host->i_lock);
+-	xas_lock_irq(&xas);
+-
+-	xas_for_each(&xas, folio, indices[nr-1]) {
+-		if (xa_is_value(folio))
+-			xas_store(&xas, NULL);
+-	}
+-
+-	xas_unlock_irq(&xas);
+-	if (mapping_shrinkable(mapping))
+-		inode_lru_list_add(mapping->host);
+-	spin_unlock(&mapping->host->i_lock);
+-out:
+-	folio_batch_remove_exceptionals(fbatch);
+-}
++#include "filemap_batch.h"
+ 
+ /**
+  * folio_invalidate - Invalidate part or all of a folio.
