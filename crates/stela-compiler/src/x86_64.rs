@@ -955,15 +955,24 @@ fn condition_holds(code: &mut Code, condition: u8, loaded: bool) -> Option<asm::
         return Some(flag_word::condition(code, condition, loaded));
     };
     let mut asm = code.asm();
+    let group = condition / 2;
+    if group <= 3 {
+        let bit = [30, 29, 31, 28][usize::from(group)];
+        if loaded {
+            asm.test_accumulator_imm(Size::Dword, (1u32 << bit) as i32);
+        } else {
+            asm.test_imm(Size::Byte, frame(NZCV + bit / 8), 1 << (bit % 8));
+        }
+        return Some(if condition & 1 == 0 {
+            Cond::Ne
+        } else {
+            Cond::E
+        });
+    }
     if !loaded {
         asm.mov_load(Size::Dword, Rax, frame(NZCV));
     }
-    let (positive, negative) = match condition / 2 {
-        0..=3 => {
-            let bit = [30, 29, 31, 28][usize::from(condition / 2)];
-            asm.test_accumulator_imm(Size::Dword, (1u32 << bit) as i32);
-            (Cond::Ne, Cond::E) // flag set
-        }
+    let (positive, negative) = match group {
         4 => {
             asm.alu_accumulator_imm32(Alu::And, Size::Dword, 0x60000000);
             asm.alu_accumulator_imm32(Alu::Cmp, Size::Dword, 0x20000000);
@@ -1129,7 +1138,7 @@ pub(crate) fn emit_instruction(
         Operation::Simd(operand) => simd::emit_for_target(code, &operand, target, checks),
         Operation::Bitfield(operand) => bitfield::emit(code, &operand),
         Operation::PcRelative(operand) => pc_relative::emit(code, &operand),
-        Operation::ConditionalSelect(operand) => conditional_select::emit(code, &operand),
+        Operation::ConditionalSelect(operand) => conditional_select::emit(code, &operand, false),
         Operation::ConditionalCompare(operand) => conditional_select::emit_compare(code, &operand),
         Operation::Crc(operand) => crc::emit(code, &operand, target),
         Operation::Flags(operand) => flags::emit(code, &operand),
