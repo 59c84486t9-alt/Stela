@@ -1,0 +1,327 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 13:07:38 -0500
+Subject: [PATCH] refactor(mm): separate original reclaim throttling
+
+---
+ mm/Makefile           |   2 +-
+ mm/reclaim_throttle.c | 150 ++++++++++++++++++++++++++++++++++++++++++
+ mm/vmscan.c           | 128 -----------------------------------
+ 3 files changed, 151 insertions(+), 129 deletions(-)
+ create mode 100644 mm/reclaim_throttle.c
+
+diff --git a/mm/Makefile b/mm/Makefile
+index e31490fb27fbdb9b1e1b6a421a5c770b6ba4d049..062506c2992438d26f28dff41e7a6ff2d200f1c6 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -50,7 +50,7 @@ endif
+ 
+ obj-y			:= filemap.o pagecache_init.o folio_wait.o folio_fs.o mempool.o oom_kill.o oom_adj.o fadvise.o \
+ 			   maccess.o page-writeback.o writeback_folio.o writeback_domain.o folio-compat.o \
+-			   readahead.o swap.o filemap_batch.o truncate.o vmscan.o shrinker.o \
++			   readahead.o swap.o filemap_batch.o truncate.o vmscan.o reclaim_throttle.o shrinker.o \
+ 			   shmem.o util.o mmzone.o lruvec.o vmstat.o vmstat_init.o backing-dev.o backing-dev-inode.o \
+ 			   mm_init.o percpu.o slab_common.o kvfree_rcu.o \
+ 			   compaction.o show_mem.o \
+diff --git a/mm/reclaim_throttle.c b/mm/reclaim_throttle.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f5d092e72db1bc2462ef97e2a728bc041d2baf7
+--- /dev/null
++++ b/mm/reclaim_throttle.c
+@@ -0,0 +1,150 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ *  Copyright (C) 1991, 1992, 1993, 1994  Linus Torvalds
++ *
++ *  Swap reorganised 29.12.95, Stephen Tweedie.
++ *  kswapd added: 7.1.96  sct
++ *  Removed kswapd_ctl limits, and swap out as many pages as needed
++ *  to bring the system back to freepages.high: 2.4.97, Rik van Riel.
++ *  Zone aware kswapd started 02/00, Kanoj Sarcar (kanoj@sgi.com).
++ *  Multiqueue VM started 5.8.00, Rik van Riel.
++ */
++
++#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
++
++#include <linux/mm.h>
++#include <linux/sched.h>
++#include <linux/swap.h>
++#include <linux/vmstat.h>
++#include <linux/wait.h>
++#include <trace/events/vmscan.h>
++
++#include "internal.h"
++
++static bool skip_throttle_noprogress(pg_data_t *pgdat)
++{
++	int reclaimable = 0, write_pending = 0;
++	int i;
++	struct zone *zone;
++	/*
++	 * If kswapd is disabled, reschedule if necessary but do not
++	 * throttle as the system is likely near OOM.
++	 */
++	if (kswapd_test_hopeless(pgdat))
++		return true;
++
++	/*
++	 * If there are a lot of dirty/writeback folios then do not
++	 * throttle as throttling will occur when the folios cycle
++	 * towards the end of the LRU if still under writeback.
++	 */
++	for_each_managed_zone_pgdat(zone, pgdat, i, MAX_NR_ZONES - 1) {
++		reclaimable += zone_reclaimable_pages(zone);
++		write_pending += zone_page_state_snapshot(zone,
++						  NR_ZONE_WRITE_PENDING);
++	}
++	if (2 * write_pending <= reclaimable)
++		return true;
++
++	return false;
++}
++
++void reclaim_throttle(pg_data_t *pgdat, enum vmscan_throttle_state reason)
++{
++	wait_queue_head_t *wqh = &pgdat->reclaim_wait[reason];
++	long timeout, ret;
++	DEFINE_WAIT(wait);
++
++	/*
++	 * Do not throttle user workers, kthreads other than kswapd or
++	 * workqueues. They may be required for reclaim to make
++	 * forward progress (e.g. journalling workqueues or kthreads).
++	 */
++	if (!current_is_kswapd() &&
++	    current->flags & (PF_USER_WORKER|PF_KTHREAD)) {
++		cond_resched();
++		return;
++	}
++
++	/*
++	 * These figures are pulled out of thin air.
++	 * VMSCAN_THROTTLE_ISOLATED is a transient condition based on too many
++	 * parallel reclaimers which is a short-lived event so the timeout is
++	 * short. Failing to make progress or waiting on writeback are
++	 * potentially long-lived events so use a longer timeout. This is shaky
++	 * logic as a failure to make progress could be due to anything from
++	 * writeback to a slow device to excessive referenced folios at the tail
++	 * of the inactive LRU.
++	 */
++	switch(reason) {
++	case VMSCAN_THROTTLE_WRITEBACK:
++		timeout = HZ/10;
++
++		if (atomic_inc_return(&pgdat->nr_writeback_throttled) == 1) {
++			WRITE_ONCE(pgdat->nr_reclaim_start,
++				node_page_state(pgdat, NR_THROTTLED_WRITTEN));
++		}
++
++		break;
++	case VMSCAN_THROTTLE_CONGESTED:
++		fallthrough;
++	case VMSCAN_THROTTLE_NOPROGRESS:
++		if (skip_throttle_noprogress(pgdat)) {
++			cond_resched();
++			return;
++		}
++
++		timeout = 1;
++
++		break;
++	case VMSCAN_THROTTLE_ISOLATED:
++		timeout = HZ/50;
++		break;
++	default:
++		WARN_ON_ONCE(1);
++		timeout = HZ;
++		break;
++	}
++
++	prepare_to_wait(wqh, &wait, TASK_UNINTERRUPTIBLE);
++	ret = schedule_timeout(timeout);
++	finish_wait(wqh, &wait);
++
++	if (reason == VMSCAN_THROTTLE_WRITEBACK)
++		atomic_dec(&pgdat->nr_writeback_throttled);
++
++	trace_mm_vmscan_throttled(pgdat->node_id, jiffies_to_usecs(timeout),
++				jiffies_to_usecs(timeout - ret),
++				reason);
++}
++
++/*
++ * Account for folios written if tasks are throttled waiting on dirty
++ * folios to clean. If enough folios have been cleaned since throttling
++ * started then wakeup the throttled tasks.
++ */
++void __acct_reclaim_writeback(pg_data_t *pgdat, struct folio *folio,
++							int nr_throttled)
++{
++	unsigned long nr_written;
++
++	node_stat_add_folio(folio, NR_THROTTLED_WRITTEN);
++
++	/*
++	 * This is an inaccurate read as the per-cpu deltas may not
++	 * be synchronised. However, given that the system is
++	 * writeback throttled, it is not worth taking the penalty
++	 * of getting an accurate count. At worst, the throttle
++	 * timeout guarantees forward progress.
++	 */
++	nr_written = node_page_state(pgdat, NR_THROTTLED_WRITTEN) -
++		READ_ONCE(pgdat->nr_reclaim_start);
++
++	if (nr_written > SWAP_CLUSTER_MAX * nr_throttled)
++		wake_up(&pgdat->reclaim_wait[VMSCAN_THROTTLE_WRITEBACK]);
++}
++
++bool kswapd_test_hopeless(pg_data_t *pgdat)
++{
++	return atomic_read(&pgdat->kswapd_failures) >= MAX_RECLAIM_RETRIES;
++}
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 8781dbcdb99a6da89ba03b0b9fce38faeca3ff64..2a17e91368f7b854211d248b81f33380e4d5440c 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -472,129 +472,6 @@ static void handle_write_error(struct address_space *mapping,
+ 	folio_unlock(folio);
+ }
+ 
+-static bool skip_throttle_noprogress(pg_data_t *pgdat)
+-{
+-	int reclaimable = 0, write_pending = 0;
+-	int i;
+-	struct zone *zone;
+-	/*
+-	 * If kswapd is disabled, reschedule if necessary but do not
+-	 * throttle as the system is likely near OOM.
+-	 */
+-	if (kswapd_test_hopeless(pgdat))
+-		return true;
+-
+-	/*
+-	 * If there are a lot of dirty/writeback folios then do not
+-	 * throttle as throttling will occur when the folios cycle
+-	 * towards the end of the LRU if still under writeback.
+-	 */
+-	for_each_managed_zone_pgdat(zone, pgdat, i, MAX_NR_ZONES - 1) {
+-		reclaimable += zone_reclaimable_pages(zone);
+-		write_pending += zone_page_state_snapshot(zone,
+-						  NR_ZONE_WRITE_PENDING);
+-	}
+-	if (2 * write_pending <= reclaimable)
+-		return true;
+-
+-	return false;
+-}
+-
+-void reclaim_throttle(pg_data_t *pgdat, enum vmscan_throttle_state reason)
+-{
+-	wait_queue_head_t *wqh = &pgdat->reclaim_wait[reason];
+-	long timeout, ret;
+-	DEFINE_WAIT(wait);
+-
+-	/*
+-	 * Do not throttle user workers, kthreads other than kswapd or
+-	 * workqueues. They may be required for reclaim to make
+-	 * forward progress (e.g. journalling workqueues or kthreads).
+-	 */
+-	if (!current_is_kswapd() &&
+-	    current->flags & (PF_USER_WORKER|PF_KTHREAD)) {
+-		cond_resched();
+-		return;
+-	}
+-
+-	/*
+-	 * These figures are pulled out of thin air.
+-	 * VMSCAN_THROTTLE_ISOLATED is a transient condition based on too many
+-	 * parallel reclaimers which is a short-lived event so the timeout is
+-	 * short. Failing to make progress or waiting on writeback are
+-	 * potentially long-lived events so use a longer timeout. This is shaky
+-	 * logic as a failure to make progress could be due to anything from
+-	 * writeback to a slow device to excessive referenced folios at the tail
+-	 * of the inactive LRU.
+-	 */
+-	switch(reason) {
+-	case VMSCAN_THROTTLE_WRITEBACK:
+-		timeout = HZ/10;
+-
+-		if (atomic_inc_return(&pgdat->nr_writeback_throttled) == 1) {
+-			WRITE_ONCE(pgdat->nr_reclaim_start,
+-				node_page_state(pgdat, NR_THROTTLED_WRITTEN));
+-		}
+-
+-		break;
+-	case VMSCAN_THROTTLE_CONGESTED:
+-		fallthrough;
+-	case VMSCAN_THROTTLE_NOPROGRESS:
+-		if (skip_throttle_noprogress(pgdat)) {
+-			cond_resched();
+-			return;
+-		}
+-
+-		timeout = 1;
+-
+-		break;
+-	case VMSCAN_THROTTLE_ISOLATED:
+-		timeout = HZ/50;
+-		break;
+-	default:
+-		WARN_ON_ONCE(1);
+-		timeout = HZ;
+-		break;
+-	}
+-
+-	prepare_to_wait(wqh, &wait, TASK_UNINTERRUPTIBLE);
+-	ret = schedule_timeout(timeout);
+-	finish_wait(wqh, &wait);
+-
+-	if (reason == VMSCAN_THROTTLE_WRITEBACK)
+-		atomic_dec(&pgdat->nr_writeback_throttled);
+-
+-	trace_mm_vmscan_throttled(pgdat->node_id, jiffies_to_usecs(timeout),
+-				jiffies_to_usecs(timeout - ret),
+-				reason);
+-}
+-
+-/*
+- * Account for folios written if tasks are throttled waiting on dirty
+- * folios to clean. If enough folios have been cleaned since throttling
+- * started then wakeup the throttled tasks.
+- */
+-void __acct_reclaim_writeback(pg_data_t *pgdat, struct folio *folio,
+-							int nr_throttled)
+-{
+-	unsigned long nr_written;
+-
+-	node_stat_add_folio(folio, NR_THROTTLED_WRITTEN);
+-
+-	/*
+-	 * This is an inaccurate read as the per-cpu deltas may not
+-	 * be synchronised. However, given that the system is
+-	 * writeback throttled, it is not worth taking the penalty
+-	 * of getting an accurate count. At worst, the throttle
+-	 * timeout guarantees forward progress.
+-	 */
+-	nr_written = node_page_state(pgdat, NR_THROTTLED_WRITTEN) -
+-		READ_ONCE(pgdat->nr_reclaim_start);
+-
+-	if (nr_written > SWAP_CLUSTER_MAX * nr_throttled)
+-		wake_up(&pgdat->reclaim_wait[VMSCAN_THROTTLE_WRITEBACK]);
+-}
+-
+ /* possible outcome of pageout() */
+ typedef enum {
+ 	/* failed to write folio out, folio is locked */
+@@ -7534,11 +7411,6 @@ void kswapd_try_clear_hopeless(struct pglist_data *pgdat,
+ 			KSWAPD_CLEAR_HOPELESS_KSWAPD : KSWAPD_CLEAR_HOPELESS_DIRECT);
+ }
+ 
+-bool kswapd_test_hopeless(pg_data_t *pgdat)
+-{
+-	return atomic_read(&pgdat->kswapd_failures) >= MAX_RECLAIM_RETRIES;
+-}
+-
+ #ifdef CONFIG_HIBERNATION
+ /*
+  * Try to free `nr_to_reclaim' of memory, system-wide, and return the number of

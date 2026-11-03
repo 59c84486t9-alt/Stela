@@ -143,6 +143,8 @@
 /mm/mmzone.c
 /mm/lruvec.c
 /mm/shrinker.c
+/mm/vmscan.c
+/mm/reclaim_throttle.c
 /mm/workingset.c
 /mm/swap_table.h
 /mm/internal.h

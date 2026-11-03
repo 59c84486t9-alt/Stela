@@ -32,6 +32,7 @@
 /* HVO's masked tail encoding additionally requires a globally aligned
  * vmemmap. This catalog uses the pinned configuration's direct head encoding. */
 static_assert(!IS_ENABLED(CONFIG_HUGETLB_PAGE_OPTIMIZE_VMEMMAP));
+static_assert(!IS_ENABLED(CONFIG_SWAP) && !IS_ENABLED(CONFIG_NUMA));
 
 struct page_state {
 	size_t allocation;
@@ -95,6 +96,13 @@ struct pglist_data contig_page_data;
 atomic_long_t vm_node_stat[NR_VM_NODE_STAT_ITEMS];
 atomic_long_t vm_zone_stat[NR_VM_ZONE_STAT_ITEMS];
 atomic_long_t _totalram_pages __read_mostly;
+
+unsigned long zone_reclaimable_pages(struct zone *zone)
+{
+	/* Without swap or demotion, Linux counts only file-backed LRU pages. */
+	return zone_page_state_snapshot(zone, NR_ZONE_INACTIVE_FILE) +
+	       zone_page_state_snapshot(zone, NR_ZONE_ACTIVE_FILE);
+}
 DEFINE_STATIC_KEY_MAYBE(CONFIG_INIT_ON_FREE_DEFAULT_ON, init_on_free);
 
 /* The catalog covers one node and one zone. Runtime stack reservations
@@ -334,6 +342,8 @@ static int register_inventory(
     catalog.retired = NO_INDEX;
     catalog.next_stack_nonce = 1;
     lruvec_init(&contig_page_data.__lruvec);
+    for (unsigned int i = 0; i < NR_VMSCAN_THROTTLE; i++)
+        init_waitqueue_head(&contig_page_data.reclaim_wait[i]);
     const struct stela_linux_page_reservation *last = &extents[extent_count - 1];
     publish_memory_inventory(PHYS_PFN(extents[0].physical_base),
                              PHYS_PFN(last->physical_base) + last->page_count,

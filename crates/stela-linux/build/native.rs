@@ -140,6 +140,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/mm/mlock_batch.c")),
             PathBuf::from(format!("{LINUX}/mm/swap.c")),
             PathBuf::from(format!("{LINUX}/mm/shrinker.c")),
+            PathBuf::from(format!("{LINUX}/mm/reclaim_throttle.c")),
             PathBuf::from(format!("{LINUX}/mm/workingset.c")),
             PathBuf::from(format!("{LINUX}/mm/writeback_domain.c")),
             PathBuf::from(format!("{LINUX}/mm/writeback_folio.c")),
