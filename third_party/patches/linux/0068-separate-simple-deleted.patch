@@ -1,0 +1,216 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 01:29:22 -0500
+Subject: [PATCH] refactor(fs): separate simple deleted pathname formatting
+
+---
+ fs/d_path.c          | 77 +-------------------------------------------
+ fs/d_path_prepend.h  | 74 ++++++++++++++++++++++++++++++++++++++++++
+ fs/pseudo_metadata.c | 11 +++++++
+ 3 files changed, 86 insertions(+), 76 deletions(-)
+ create mode 100644 fs/d_path_prepend.h
+
+diff --git a/fs/d_path.c b/fs/d_path.c
+index 386ab71ac6f3dc0b3b73ef62bf5d0174ed7cb9c3..28a2c27aaa871fcc65a2d0ce257e36f8d4079c6b 100644
+--- a/fs/d_path.c
++++ b/fs/d_path.c
+@@ -9,72 +9,7 @@
+ #include "mount.h"
+ #include "internal.h"
+ 
+-struct prepend_buffer {
+-	char *buf;
+-	int len;
+-};
+-#define DECLARE_BUFFER(__name, __buf, __len) \
+-	struct prepend_buffer __name = {.buf = __buf + __len, .len = __len}
+-
+-static char *extract_string(struct prepend_buffer *p)
+-{
+-	if (likely(p->len >= 0))
+-		return p->buf;
+-	return ERR_PTR(-ENAMETOOLONG);
+-}
+-
+-static bool prepend_char(struct prepend_buffer *p, unsigned char c)
+-{
+-	if (likely(p->len > 0)) {
+-		p->len--;
+-		*--p->buf = c;
+-		return true;
+-	}
+-	p->len = -1;
+-	return false;
+-}
+-
+-/*
+- * The source of the prepend data can be an optimistic load
+- * of a dentry name and length. And because we don't hold any
+- * locks, the length and the pointer to the name may not be
+- * in sync if a concurrent rename happens, and the kernel
+- * copy might fault as a result.
+- *
+- * The end result will correct itself when we check the
+- * rename sequence count, but we need to be able to handle
+- * the fault gracefully.
+- */
+-static bool prepend_copy(void *dst, const void *src, int len)
+-{
+-	if (unlikely(copy_from_kernel_nofault(dst, src, len))) {
+-		memset(dst, 'x', len);
+-		return false;
+-	}
+-	return true;
+-}
+-
+-static bool prepend(struct prepend_buffer *p, const char *str, int namelen)
+-{
+-	// Already overflowed?
+-	if (p->len < 0)
+-		return false;
+-
+-	// Will overflow?
+-	if (p->len < namelen) {
+-		// Fill as much as possible from the end of the name
+-		str += namelen - p->len;
+-		p->buf -= p->len;
+-		prepend_copy(p->buf, str, p->len);
+-		p->len = -1;
+-		return false;
+-	}
+-
+-	// Fits fully
+-	p->len -= namelen;
+-	p->buf -= namelen;
+-	return prepend_copy(p->buf, str, namelen);
+-}
++#include "d_path_prepend.h"
+ 
+ /**
+  * prepend_name - prepend a pathname in front of current buffer pointer
+@@ -295,16 +230,6 @@ char *d_path(const struct path *path, char *buf, int buflen)
+ }
+ EXPORT_SYMBOL(d_path);
+ 
+-char *simple_dname(struct dentry *dentry, char *buffer, int buflen)
+-{
+-	DECLARE_BUFFER(b, buffer, buflen);
+-	/* these dentries are never renamed, so d_lock is not needed */
+-	prepend(&b, " (deleted)", 11);
+-	prepend(&b, dentry->d_name.name, dentry->d_name.len);
+-	prepend_char(&b, '/');
+-	return extract_string(&b);
+-}
+-
+ /*
+  * Write full pathname from the root of the filesystem into the buffer.
+  */
+diff --git a/fs/d_path_prepend.h b/fs/d_path_prepend.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..5922b9b07ca6677343c5dda417be4f7e1ab95f31
+--- /dev/null
++++ b/fs/d_path_prepend.h
+@@ -0,0 +1,74 @@
++// SPDX-License-Identifier: GPL-2.0
++#ifndef _FS_D_PATH_PREPEND_H
++#define _FS_D_PATH_PREPEND_H
++
++#include <linux/uaccess.h>
++
++struct prepend_buffer {
++	char *buf;
++	int len;
++};
++#define DECLARE_BUFFER(__name, __buf, __len) \
++	struct prepend_buffer __name = {.buf = __buf + __len, .len = __len}
++
++static char *extract_string(struct prepend_buffer *p)
++{
++	if (likely(p->len >= 0))
++		return p->buf;
++	return ERR_PTR(-ENAMETOOLONG);
++}
++
++static bool prepend_char(struct prepend_buffer *p, unsigned char c)
++{
++	if (likely(p->len > 0)) {
++		p->len--;
++		*--p->buf = c;
++		return true;
++	}
++	p->len = -1;
++	return false;
++}
++
++/*
++ * The source of the prepend data can be an optimistic load
++ * of a dentry name and length. And because we don't hold any
++ * locks, the length and the pointer to the name may not be
++ * in sync if a concurrent rename happens, and the kernel
++ * copy might fault as a result.
++ *
++ * The end result will correct itself when we check the
++ * rename sequence count, but we need to be able to handle
++ * the fault gracefully.
++ */
++static bool prepend_copy(void *dst, const void *src, int len)
++{
++	if (unlikely(copy_from_kernel_nofault(dst, src, len))) {
++		memset(dst, 'x', len);
++		return false;
++	}
++	return true;
++}
++
++static bool prepend(struct prepend_buffer *p, const char *str, int namelen)
++{
++	// Already overflowed?
++	if (p->len < 0)
++		return false;
++
++	// Will overflow?
++	if (p->len < namelen) {
++		// Fill as much as possible from the end of the name
++		str += namelen - p->len;
++		p->buf -= p->len;
++		prepend_copy(p->buf, str, p->len);
++		p->len = -1;
++		return false;
++	}
++
++	// Fits fully
++	p->len -= namelen;
++	p->buf -= namelen;
++	return prepend_copy(p->buf, str, namelen);
++}
++
++#endif
+diff --git a/fs/pseudo_metadata.c b/fs/pseudo_metadata.c
+index 6404b953e6293c99c225c300730ba3bbc1bcdbf0..d990a2a9b329c4ea562c78f19cef8889bac8a0e5 100644
+--- a/fs/pseudo_metadata.c
++++ b/fs/pseudo_metadata.c
+@@ -7,6 +7,7 @@
+ #include <linux/statfs.h>
+ #include <trace/events/timestamp.h>
+ 
++#include "d_path_prepend.h"
+ #include "internal.h"
+ 
+ int simple_statfs(struct dentry *dentry, struct kstatfs *buf)
+@@ -42,6 +43,16 @@ char *dynamic_dname(char *buffer, int buflen, const char *fmt, ...)
+ 	return memmove(start, buffer, sz);
+ }
+ 
++char *simple_dname(struct dentry *dentry, char *buffer, int buflen)
++{
++	DECLARE_BUFFER(b, buffer, buflen);
++	/* these dentries are never renamed, so d_lock is not needed */
++	prepend(&b, " (deleted)", 11);
++	prepend(&b, dentry->d_name.name, dentry->d_name.len);
++	prepend_char(&b, '/');
++	return extract_string(&b);
++}
++
+ /**
+  * fill_mg_cmtime - Fill in the mtime and ctime and flag ctime as QUERIED
+  * @stat: where to store the resulting values
