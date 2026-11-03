@@ -1,0 +1,293 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 01:32:58 -0500
+Subject: [PATCH] refactor(fs): separate original dentry cache initialization
+
+---
+ fs/Makefile      |   2 +-
+ fs/dcache.c      |  97 +-------------------------------------------
+ fs/dcache_init.c | 102 +++++++++++++++++++++++++++++++++++++++++++++++
+ fs/dcache_init.h |  17 ++++++++
+ 4 files changed, 121 insertions(+), 97 deletions(-)
+ create mode 100644 fs/dcache_init.c
+ create mode 100644 fs/dcache_init.h
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 1b783cfc1cb1f541d382fc88cb31f68580defe0c..37a69a75d657442d5d45c684161d129badb63ba6 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -9,7 +9,7 @@
+ 
+ obj-y :=	open.o filp_close.o read_write.o file_table.o super.o \
+ 		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o path_get.o name_hash.o filename.o fcntl.o \
+-		ioctl.o readdir.o select.o dcache.o inode.o inode_cache_init.o inode_evict.o \
++		ioctl.o readdir.o select.o dcache.o dcache_init.o inode.o inode_cache_init.o inode_evict.o \
+ 		attr.o bad_inode.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o \
+ 		seq_file.o seq_lifetime.o seq_output.o xattr.o simple_xattr.o libfs.o pseudo_metadata.o fs-writeback.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+diff --git a/fs/dcache.c b/fs/dcache.c
+index d6fbb4fa7dbc500ca5f2f810ad966edb00b37679..965bff50c322ade066449eedecd71cc044af4f4c 100644
+--- a/fs/dcache.c
++++ b/fs/dcache.c
+@@ -32,6 +32,7 @@
+ #include <linux/bit_spinlock.h>
+ #include <linux/rculist_bl.h>
+ #include <linux/list_lru.h>
++#include "dcache_init.h"
+ #include "internal.h"
+ #include "mount.h"
+ 
+@@ -86,7 +87,6 @@ __cacheline_aligned_in_smp DEFINE_SEQLOCK(rename_lock);
+ 
+ EXPORT_SYMBOL(rename_lock);
+ 
+-static struct kmem_cache *__dentry_cache __ro_after_init;
+ #define dentry_cache runtime_const_ptr(__dentry_cache)
+ 
+ const struct qstr empty_name = QSTR_INIT("", 0);
+@@ -96,33 +96,12 @@ EXPORT_SYMBOL(slash_name);
+ const struct qstr dotdot_name = QSTR_INIT("..", 2);
+ EXPORT_SYMBOL(dotdot_name);
+ 
+-/*
+- * This is the single most critical data structure when it comes
+- * to the dcache: the hashtable for lookups. Somebody should try
+- * to make this good - I've just made it work.
+- *
+- * This hash-function tries to avoid losing too many bits of hash
+- * information, yet avoid using a prime hash-size or similar.
+- *
+- * Marking the variables "used" ensures that the compiler doesn't
+- * optimize them away completely on architectures with runtime
+- * constant infrastructure, this allows debuggers to see their
+- * values. But updating these values has no effect on those arches.
+- */
+-
+-static unsigned int d_hash_shift __ro_after_init __used;
+-
+-static struct hlist_bl_head *dentry_hashtable __ro_after_init __used;
+-
+ static inline struct hlist_bl_head *d_hash(unsigned long hashlen)
+ {
+ 	return runtime_const_ptr(dentry_hashtable) +
+ 		runtime_const_shift_right_32(hashlen, d_hash_shift);
+ }
+ 
+-#define IN_LOOKUP_SHIFT 10
+-static struct hlist_bl_head in_lookup_hashtable[1 << IN_LOOKUP_SHIFT];
+-
+ static inline struct hlist_bl_head *in_lookup_hash(const struct dentry *parent,
+ 					unsigned int hash)
+ {
+@@ -3440,80 +3419,6 @@ ino_t d_parent_ino(struct dentry *dentry)
+ }
+ EXPORT_SYMBOL(d_parent_ino);
+ 
+-static __initdata unsigned long dhash_entries;
+-static int __init set_dhash_entries(char *str)
+-{
+-	return kstrtoul(str, 0, &dhash_entries) == 0;
+-}
+-__setup("dhash_entries=", set_dhash_entries);
+-
+-static void __init dcache_init_early(void)
+-{
+-	/* If hashes are distributed across NUMA nodes, defer
+-	 * hash allocation until vmalloc space is available.
+-	 */
+-	if (hashdist)
+-		return;
+-
+-	dentry_hashtable =
+-		alloc_large_system_hash("Dentry cache",
+-					sizeof(struct hlist_bl_head),
+-					dhash_entries,
+-					13,
+-					HASH_EARLY | HASH_ZERO,
+-					&d_hash_shift,
+-					NULL,
+-					2,
+-					0);
+-	d_hash_shift = 32 - d_hash_shift;
+-
+-	runtime_const_init(shift, d_hash_shift);
+-	runtime_const_init(ptr, dentry_hashtable);
+-}
+-
+-static void __init dcache_init(void)
+-{
+-	/*
+-	 * A constructor could be added for stable state like the lists,
+-	 * but it is probably not worth it because of the cache nature
+-	 * of the dcache.
+-	 */
+-	__dentry_cache = KMEM_CACHE_USERCOPY(dentry,
+-		SLAB_RECLAIM_ACCOUNT|SLAB_PANIC|SLAB_ACCOUNT,
+-		d_shortname.string);
+-	runtime_const_init(ptr, __dentry_cache);
+-
+-	/* Hash may have been set up in dcache_init_early */
+-	if (!hashdist)
+-		return;
+-
+-	dentry_hashtable =
+-		alloc_large_system_hash("Dentry cache",
+-					sizeof(struct hlist_bl_head),
+-					dhash_entries,
+-					13,
+-					HASH_ZERO,
+-					&d_hash_shift,
+-					NULL,
+-					2,
+-					0);
+-	d_hash_shift = 32 - d_hash_shift;
+-
+-	runtime_const_init(shift, d_hash_shift);
+-	runtime_const_init(ptr, dentry_hashtable);
+-}
+-
+-void __init vfs_caches_init_early(void)
+-{
+-	int i;
+-
+-	for (i = 0; i < ARRAY_SIZE(in_lookup_hashtable); i++)
+-		INIT_HLIST_BL_HEAD(&in_lookup_hashtable[i]);
+-
+-	dcache_init_early();
+-	inode_init_early();
+-}
+-
+ void __init vfs_caches_init(void)
+ {
+ 	filename_init();
+diff --git a/fs/dcache_init.c b/fs/dcache_init.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..9233e5ecea0baa4b0985bb590e30d075651c04b3
+--- /dev/null
++++ b/fs/dcache_init.c
+@@ -0,0 +1,102 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Cache initialization from fs/dcache.c. */
++#include <linux/fs.h>
++#include <linux/memblock.h>
++#include <linux/slab.h>
++#include <asm/runtime-const.h>
++
++#include "dcache_init.h"
++
++struct kmem_cache *__dentry_cache __ro_after_init;
++
++/*
++ * This is the single most critical data structure when it comes
++ * to the dcache: the hashtable for lookups. Somebody should try
++ * to make this good - I've just made it work.
++ *
++ * This hash-function tries to avoid losing too many bits of hash
++ * information, yet avoid using a prime hash-size or similar.
++ *
++ * Marking the variables "used" ensures that the compiler doesn't
++ * optimize them away completely on architectures with runtime
++ * constant infrastructure, this allows debuggers to see their
++ * values. But updating these values has no effect on those arches.
++ */
++
++unsigned int d_hash_shift __ro_after_init __used;
++struct hlist_bl_head *dentry_hashtable __ro_after_init __used;
++struct hlist_bl_head in_lookup_hashtable[1 << IN_LOOKUP_SHIFT];
++
++static __initdata unsigned long dhash_entries;
++static int __init set_dhash_entries(char *str)
++{
++	return kstrtoul(str, 0, &dhash_entries) == 0;
++}
++__setup("dhash_entries=", set_dhash_entries);
++
++static void __init dcache_init_early(void)
++{
++	/* If hashes are distributed across NUMA nodes, defer
++	 * hash allocation until vmalloc space is available.
++	 */
++	if (hashdist)
++		return;
++
++	dentry_hashtable =
++		alloc_large_system_hash("Dentry cache",
++					sizeof(struct hlist_bl_head),
++					dhash_entries,
++					13,
++					HASH_EARLY | HASH_ZERO,
++					&d_hash_shift,
++					NULL,
++					2,
++					0);
++	d_hash_shift = 32 - d_hash_shift;
++
++	runtime_const_init(shift, d_hash_shift);
++	runtime_const_init(ptr, dentry_hashtable);
++}
++
++void __init dcache_init(void)
++{
++	/*
++	 * A constructor could be added for stable state like the lists,
++	 * but it is probably not worth it because of the cache nature
++	 * of the dcache.
++	 */
++	__dentry_cache = KMEM_CACHE_USERCOPY(dentry,
++		SLAB_RECLAIM_ACCOUNT|SLAB_PANIC|SLAB_ACCOUNT,
++		d_shortname.string);
++	runtime_const_init(ptr, __dentry_cache);
++
++	/* Hash may have been set up in dcache_init_early */
++	if (!hashdist)
++		return;
++
++	dentry_hashtable =
++		alloc_large_system_hash("Dentry cache",
++					sizeof(struct hlist_bl_head),
++					dhash_entries,
++					13,
++					HASH_ZERO,
++					&d_hash_shift,
++					NULL,
++					2,
++					0);
++	d_hash_shift = 32 - d_hash_shift;
++
++	runtime_const_init(shift, d_hash_shift);
++	runtime_const_init(ptr, dentry_hashtable);
++}
++
++void __init vfs_caches_init_early(void)
++{
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(in_lookup_hashtable); i++)
++		INIT_HLIST_BL_HEAD(&in_lookup_hashtable[i]);
++
++	dcache_init_early();
++	inode_init_early();
++}
+diff --git a/fs/dcache_init.h b/fs/dcache_init.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b0be2e36fd03b8b5709c9af45b616908369dc06
+--- /dev/null
++++ b/fs/dcache_init.h
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _FS_DCACHE_INIT_H
++#define _FS_DCACHE_INIT_H
++
++#include <linux/init.h>
++#include <linux/list_bl.h>
++
++#define IN_LOOKUP_SHIFT 10
++
++extern struct kmem_cache *__dentry_cache;
++extern unsigned int d_hash_shift;
++extern struct hlist_bl_head *dentry_hashtable;
++extern struct hlist_bl_head in_lookup_hashtable[1 << IN_LOOKUP_SHIFT];
++
++void __init dcache_init(void);
++
++#endif

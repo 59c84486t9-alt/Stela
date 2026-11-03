@@ -193,6 +193,9 @@
 /fs/file_ref.c
 /fs/xattr.c
 /fs/simple_xattr.c
+/fs/dcache.c
+/fs/dcache_init.c
+/fs/dcache_init.h
 /fs/d_path.c
 /fs/d_path_prepend.h
 /fs/namei.c
