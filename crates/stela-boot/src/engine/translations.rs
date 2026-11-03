@@ -322,6 +322,12 @@ static BOOT: Cell = Cell {
     boot: UnsafeCell::new(None),
 };
 
+/// Availability rarely changes. Keep it off the lock's cache line so a PE
+/// checking for a store does not contend with a PE using it.
+#[repr(align(64))]
+struct Available(AtomicBool);
+static AVAILABLE: Available = Available(AtomicBool::new(false));
+
 /// Run `f` on the boot's store, alone. No interrupt handler reaches it.
 fn with_boot<R>(f: impl FnOnce(&mut Option<Boot>) -> R) -> R {
     while BOOT
@@ -329,7 +335,9 @@ fn with_boot<R>(f: impl FnOnce(&mut Option<Boot>) -> R) -> R {
         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
-        core::hint::spin_loop();
+        while BOOT.held.load(Ordering::Relaxed) {
+            core::hint::spin_loop();
+        }
     }
     // SAFETY: `held` excludes every other access until it is released.
     let result = f(unsafe { &mut *BOOT.boot.get() });
@@ -345,13 +353,19 @@ impl Translations for Shared {
     /// bytes outlive the lock.
     fn record(&mut self, key: &Digest) -> Option<alloc::sync::Arc<Record>> {
         let (bytes, translator) = with_boot(|boot| {
-            let store = &boot.as_ref()?.store;
-            Some((store.stored(key), *store.translator()))
+            let store = &mut boot.as_mut()?.store;
+            match store.stored(key) {
+                Some(bytes) => Some((bytes, *store.translator())),
+                None => {
+                    store.looked_up(key, false, false);
+                    None
+                }
+            }
         })?;
-        let record = bytes.and_then(|bytes| Record::decode(bytes, &translator, key).ok());
+        let record = Record::decode(bytes, &translator, key).ok();
         with_boot(|boot| {
             if let Some(boot) = boot {
-                boot.store.looked_up(key, bytes.is_some(), record.is_some());
+                boot.store.looked_up(key, true, record.is_some());
             }
         });
         record.map(alloc::sync::Arc::new)
@@ -385,7 +399,10 @@ impl Translations for Shared {
 
 /// The store the engine uses, if the loader read one or the PEs share one.
 pub fn store() -> Option<&'static mut Shared> {
-    with_boot(|boot| boot.is_some()).then(|| Box::leak(Box::new(Shared)))
+    AVAILABLE
+        .0
+        .load(Ordering::Acquire)
+        .then(|| Box::leak(Box::new(Shared)))
 }
 
 /// Share compiled blocks between PEs, keeping up to `bound` bytes of buffers
@@ -400,6 +417,7 @@ pub fn share(bound: usize) {
             partition: None,
         });
         boot.store.share(bound);
+        AVAILABLE.0.store(true, Ordering::Release);
     });
 }
 
@@ -433,7 +451,8 @@ pub fn install(contents: &'static [u8]) -> Option<Guid> {
             bound,
             path: pack_path(&translator, "/"),
             partition: None,
-        })
+        });
+        AVAILABLE.0.store(true, Ordering::Release);
     });
     let partition = Guid(contents[16..32].try_into().expect("a GUID"));
     (flags & WRITABLE != 0).then_some(partition)
@@ -456,7 +475,10 @@ pub fn write() {
         bound,
         path,
         partition: Some(partition),
-    }) = with_boot(Option::take)
+    }) = with_boot(|boot| {
+        AVAILABLE.0.store(false, Ordering::Release);
+        boot.take()
+    })
     else {
         return;
     };
