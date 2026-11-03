@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 21:52:03 -0500
+Subject: [PATCH] fix(kthread): require native policy reset before publishing
+ creation
+
+---
+ kernel/kthread.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/kernel/kthread.c b/kernel/kthread.c
+index 84d17ab88ef5ccdd892a39cab2e36d1b4ae06cb4..78bc7b20845eb4aad055055aea2354d63b8f6d1e 100644
+--- a/kernel/kthread.c
++++ b/kernel/kthread.c
+@@ -447,7 +447,11 @@ static int kthread(void *_create)
+ 	 * The new thread inherited kthreadd's priority and CPU mask. Reset
+ 	 * back to default in case they have been changed.
+ 	 */
++#ifdef CONFIG_STELA
++	BUG_ON(sched_setscheduler_nocheck(current, SCHED_NORMAL, &param));
++#else
+ 	sched_setscheduler_nocheck(current, SCHED_NORMAL, &param);
++#endif
+ 
+ 	/* OK, tell user we're spawned, wait for stop or wakeup */
+ 	__set_current_state(TASK_UNINTERRUPTIBLE);

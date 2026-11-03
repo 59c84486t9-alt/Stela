@@ -2071,31 +2071,73 @@ void set_user_nice(struct task_struct *p, long nice)
 	p->prio = priority;
 }
 
-void sched_set_fifo(struct task_struct *p)
+extern unsigned int sysctl_sched_base_slice;
+
+int sched_setscheduler_nocheck(struct task_struct *p, int policy,
+			       const struct sched_param *param)
 {
+	(void)stela_linux_owner();
+	if (!param || param->sched_priority < 0 || param->sched_priority >= MAX_RT_PRIO)
+		return -EINVAL;
+	if (stela_linux_atomic_callback_active() || irqs_disabled())
+		return -EPERM;
+
 	struct stela_linux_task *task = priority_target(p);
 	{
 		guard(raw_spinlock_irqsave)(&p->pi_lock);
-		unsigned int realtime = MAX_RT_PRIO / 2;
-		int normal = MAX_RT_PRIO - 1 - (int)realtime;
-		int priority = p->pi_top_task ? min(normal, p->pi_top_task->prio) : normal;
-		int error = update_priority(task, SCHED_FIFO, realtime, priority, task_nice(p), false);
-		if (error) {
-			/* An unconfigured hosted Runtime cannot acquire FIFO semantics. */
-			stela_linux_unsupported("FIFO scheduling needs the retained kernel service domain");
-			if (error != -EOPNOTSUPP)
-				__builtin_trap();
-			return;
+		bool reset = p->sched_reset_on_fork;
+		if (policy < 0) {
+			policy = (int)p->policy;
+		} else {
+			reset = (policy & SCHED_RESET_ON_FORK) != 0;
+			policy &= ~SCHED_RESET_ON_FORK;
 		}
-		p->policy = SCHED_FIFO;
+		if (policy != SCHED_NORMAL && policy != SCHED_FIFO)
+			return -EOPNOTSUPP;
+		unsigned int realtime = (unsigned int)param->sched_priority;
+		if ((policy == SCHED_FIFO) != (realtime != 0))
+			return -EINVAL;
+		int nice = task_nice(p);
+		int normal = realtime ? MAX_RT_PRIO - 1 - (int)realtime : NICE_TO_PRIO(nice);
+		int priority = p->pi_top_task ? min(normal, p->pi_top_task->prio) : normal;
+		bool head = p->prio < priority && priority < MAX_RT_PRIO;
+		int error = update_priority(task, (unsigned int)policy, realtime, priority, nice, head);
+		if (error)
+			return error;
+		p->sched_reset_on_fork = reset;
+		p->policy = (unsigned int)policy;
 		p->rt_priority = realtime;
 		p->normal_prio = normal;
 		p->prio = priority;
+		if (policy == SCHED_FIFO) {
+			p->timer_slack_ns = 0;
+		} else {
+			if (!p->timer_slack_ns)
+				p->timer_slack_ns = p->default_timer_slack_ns;
+			if (p->se.custom_slice && p->se.slice)
+				p->se.slice = clamp_t(u64, p->se.slice, NSEC_PER_MSEC / 10,
+						     NSEC_PER_MSEC * 100);
+			else {
+				p->se.custom_slice = 0;
+				p->se.slice = sysctl_sched_base_slice;
+			}
+		}
+		stela_linux_sched_load_weight(p);
 	}
-	/* As __sched_setscheduler in the pinned core: changing a blocked task
-	 * must reorder its original waiter and propagate to the lock owner. The
-	 * original helper acquires pi_lock itself, after this policy commit. */
+	/* The original helper reorders a blocked waiter and propagates PI after
+	 * the rank and task metadata commit. It takes pi_lock itself. */
 	rt_mutex_adjust_pi(p);
+	return 0;
+}
+
+void sched_set_fifo(struct task_struct *p)
+{
+	const struct sched_param param = {.sched_priority = MAX_RT_PRIO / 2};
+	int error = sched_setscheduler_nocheck(p, SCHED_FIFO, &param);
+	if (error == -EOPNOTSUPP)
+		stela_linux_unsupported("FIFO scheduling needs the retained kernel service domain");
+	else if (error)
+		__builtin_trap();
 }
 
 /* Called by the original RT-mutex owner/waiter trees with p->pi_lock held.
