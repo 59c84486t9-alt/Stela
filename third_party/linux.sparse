@@ -73,6 +73,8 @@
 /kernel/fork.c
 /kernel/fork_caches.c
 /kernel/fork_caches.h
+/kernel/fork_stack.c
+/kernel/fork_stack.h
 /kernel/reboot.c
 /kernel/Makefile
 /kernel/rcu/update.c
