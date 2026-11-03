@@ -92,8 +92,8 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
                 inner: native::Error::Work(e),
             })?;
         let wake = kernel.environment().thread_wake();
-        // Transfer directly into the same installer's first retained field;
-        // no foreign action or fallible operation intervenes after extraction.
+        // SAFETY: the caller supplies the permanent native mount and
+        // dispatcher context. The wake source comes from that same kernel.
         let mounted = unsafe {
             native::Mounted::install(
                 ManuallyDrop::into_inner(kernel),
@@ -132,15 +132,21 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
     /// source/current/loan/RefCell/queue guard; use fresh native metadata scopes
     /// for bounded leaf operations. No parked frame uses the old segment epoch.
     pub unsafe fn dispatcher_step(&self) -> Result<bool, RuntimeError> {
+        // SAFETY: the caller provides the taskless dispatcher context after
+        // physical return and outside all constructor stacks and source loans.
         unsafe { self.mounted.dispatcher_step() }.map_err(|inner| RuntimeError { inner })
     }
+    /// # Safety
+    /// The canonical source process is current outside all passive leaves,
+    /// with no transient native permit, RefCell borrow, or C lock held.
     pub(crate) unsafe fn service_delivery(&self) {
-        // This consumes ONLY a distinct genuinely recorded event; calling on a
-        // timer pass cannot manufacture progress/retry. No passive leaf active.
+        // SAFETY: the caller supplies the original source process context.
+        // The broker consumes only a recorded delivery event.
         if let Err(inner) = unsafe { self.mounted.service_delivery() } {
-            // Retain the complete exact typed source/admission failure before
-            // a payload-free terminal path, never reenter a C logger here.
+            // SAFETY: this CPU-local control is the sole writer and the
+            // terminal path cannot resume or publish another failure.
             unsafe { *self.failure.get() = ManuallyDrop::new(Some(RuntimeError { inner })) };
+            // SAFETY: UD2 terminates this path without calling into C.
             unsafe { core::arch::asm!("ud2", options(noreturn)) }
         }
     }

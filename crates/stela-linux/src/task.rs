@@ -305,6 +305,10 @@ impl<const N: usize> TaskBinding<N> {
     /// comes from the exact original root owner, never a numeric CR3/address.
     /// Bind this record only to the actual reserved persistent Service job;
     /// it cannot complete/detach/release as a bare reusable continuation.
+    #[expect(
+        clippy::result_large_err,
+        reason = "startup refusal returns retained ownership without another allocation"
+    )]
     pub unsafe fn new_initial<P: crate::threads::KernelThreadPlatform>(
         kernel: &crate::kernel::KernelOwner<P, N>,
         root: Arc<dyn crate::threads::OriginalKernelRoot>,

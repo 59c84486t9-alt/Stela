@@ -43,14 +43,16 @@ unsafe impl<
     unsafe fn run(&self, binding: &Arc<TaskBinding<N>>) -> Result<(), ResourceBootstrapError> {
         // SAFETY: exact pinned permanent mount supplied by start_initial.
         let kernel = unsafe { self.kernel.as_ref() };
-        // These are actual original helpers and clone/completion paths. No
-        // native EnteredProcess or affine metadata loan spans either call.
+        // SAFETY: the bootstrap caller holds the canonical Initial context
+        // without native metadata loans, and the kernel mount stays pinned.
         unsafe { binding.initialize_resources(kernel) }?;
+        // SAFETY: resource initialization succeeded on this same Initial
+        // continuation, with no transient metadata loan spanning the call.
         unsafe { binding.start_threads(kernel) }
     }
     unsafe fn service(&self) {
-        // SAME borrowed original broker. It retains Kernel independently;
-        // Environment owns no broker/control/Kernel Arc backedge.
+        // SAFETY: the bootstrap service contract provides canonical source
+        // context outside passive leaves. The original broker stays mounted.
         unsafe { self.threads.service_delivery() }
     }
 }
@@ -71,6 +73,10 @@ impl<P: crate::threads::KernelThreadPlatform + 'static, const N: usize> KernelOw
     /// Every dispatcher segment uses a fresh real native execution guard with
     /// all transient loans ended before physical return. No borrowed permit,
     /// queue/row/RefCell guard may span this permanent service's original waits.
+    #[expect(
+        clippy::result_large_err,
+        reason = "startup refusal returns retained ownership without another allocation"
+    )]
     pub unsafe fn start_initial<Q: crate::pages::Provider + 'static>(
         self: Pin<&Self>,
         root: Arc<dyn crate::threads::OriginalKernelRoot>,

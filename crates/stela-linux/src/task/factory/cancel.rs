@@ -40,10 +40,10 @@ impl<'factory, 'kernel, 'catalog, 'runtime, K: KernelThreadPlatform, P: Provider
         entered: &dyn EnteredProcess,
     ) -> Result<NoPublication<N>, Failure<'factory, 'kernel, 'catalog, 'runtime, K, P, N>> {
         let mut this = ManuallyDrop::new(self);
-        if matches!(&*this.state, State::Born | State::TransferFailed(_)) {
-            if let Err(error) = this.check_born_creator(entered) {
-                return Err(ManuallyDrop::into_inner(this).fail(error));
-            }
+        if matches!(&*this.state, State::Born | State::TransferFailed(_))
+            && let Err(error) = this.check_born_creator(entered)
+        {
+            return Err(ManuallyDrop::into_inner(this).fail(error));
         }
         if matches!(
             &*this.state,

@@ -145,7 +145,7 @@ unsafe impl StackBacking for Source {
     fn guard(&self) -> Range<usize> {
         self.map.guard()
     }
-    unsafe fn pin_prepared_pages(&self, epoch: u64) -> Result<PinnedPages, MemoryError> {
+    unsafe fn pin_prepared_pages(&self, _epoch: u64) -> Result<PinnedPages, MemoryError> {
         Ok(view(
             &self.map,
             self.physical,

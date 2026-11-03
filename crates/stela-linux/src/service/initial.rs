@@ -6,6 +6,10 @@ use core::mem::ManuallyDrop;
 /// One real bootstrap operation mounted by KernelOwner. It keeps no owning
 /// Kernel/Environment/Runtime/Queue edge. The canonical mount retains the
 /// borrowed kernel separately for the entire permanent service lifetime.
+///
+/// # Safety
+/// Implementations must keep their borrowed kernel and broker valid for the
+/// lifetime of the mounted service and use only that mount's source context.
 pub(crate) unsafe trait Bootstrap<const N: usize> {
     /// Actual canonical Initial current, with no native metadata/row/entered
     /// borrow held. Original helper bodies may really park and resume.
@@ -52,10 +56,11 @@ impl<const N: usize> Initial<N> {
         match unsafe { self.body.run(&self.binding) } {
             Ok(()) => self.phase.store(2, Ordering::Release),
             Err(error) => {
-                // Keep the exact source/work failure before a payload-free
-                // terminal path. Never call a logger with damaged C context.
+                // SAFETY: the successful phase transition grants the sole
+                // write. Readers cannot access the error until phase 3.
                 unsafe { *self.failure.get() = Some(error) };
                 self.phase.store(3, Ordering::Release);
+                // SAFETY: UD2 terminates this path without calling into C.
                 unsafe { core::arch::asm!("ud2", options(noreturn)) }
             }
         }
