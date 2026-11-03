@@ -1,0 +1,254 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 23:39:33 -0500
+Subject: [PATCH] refactor(fs): separate inode initialization and link
+ accounting
+
+---
+ fs/inode.c       | 112 -----------------------------------------------
+ fs/inode_evict.c | 112 +++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 112 insertions(+), 112 deletions(-)
+
+diff --git a/fs/inode.c b/fs/inode.c
+index feae04ac4c239bb722c92d148f00eb9c68b525df..6baf52785272c83c5f90f003a8f3c4c033c7def0 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -392,118 +392,6 @@ static void destroy_inode(struct inode *inode)
+ 	call_rcu(&inode->i_rcu, i_callback);
+ }
+ 
+-/**
+- * drop_nlink - directly drop an inode's link count
+- * @inode: inode
+- *
+- * This is a low-level filesystem helper to replace any
+- * direct filesystem manipulation of i_nlink.  In cases
+- * where we are attempting to track writes to the
+- * filesystem, a decrement to zero means an imminent
+- * write when the file is truncated and actually unlinked
+- * on the filesystem.
+- */
+-void drop_nlink(struct inode *inode)
+-{
+-	WARN_ON(inode->i_nlink == 0);
+-	inode->__i_nlink--;
+-	if (!inode->i_nlink)
+-		atomic_long_inc(&inode->i_sb->s_remove_count);
+-}
+-EXPORT_SYMBOL(drop_nlink);
+-
+-/**
+- * clear_nlink - directly zero an inode's link count
+- * @inode: inode
+- *
+- * This is a low-level filesystem helper to replace any
+- * direct filesystem manipulation of i_nlink.  See
+- * drop_nlink() for why we care about i_nlink hitting zero.
+- */
+-void clear_nlink(struct inode *inode)
+-{
+-	if (inode->i_nlink) {
+-		inode->__i_nlink = 0;
+-		atomic_long_inc(&inode->i_sb->s_remove_count);
+-	}
+-}
+-EXPORT_SYMBOL(clear_nlink);
+-
+-/**
+- * set_nlink - directly set an inode's link count
+- * @inode: inode
+- * @nlink: new nlink (should be non-zero)
+- *
+- * This is a low-level filesystem helper to replace any
+- * direct filesystem manipulation of i_nlink.
+- */
+-void set_nlink(struct inode *inode, unsigned int nlink)
+-{
+-	if (!nlink) {
+-		clear_nlink(inode);
+-	} else {
+-		/* Yes, some filesystems do change nlink from zero to one */
+-		if (inode->i_nlink == 0)
+-			atomic_long_dec(&inode->i_sb->s_remove_count);
+-
+-		inode->__i_nlink = nlink;
+-	}
+-}
+-EXPORT_SYMBOL(set_nlink);
+-
+-/**
+- * inc_nlink - directly increment an inode's link count
+- * @inode: inode
+- *
+- * This is a low-level filesystem helper to replace any
+- * direct filesystem manipulation of i_nlink.  Currently,
+- * it is only here for parity with dec_nlink().
+- */
+-void inc_nlink(struct inode *inode)
+-{
+-	if (unlikely(inode->i_nlink == 0)) {
+-		WARN_ON(!(inode_state_read_once(inode) & I_LINKABLE));
+-		atomic_long_dec(&inode->i_sb->s_remove_count);
+-	}
+-
+-	inode->__i_nlink++;
+-}
+-EXPORT_SYMBOL(inc_nlink);
+-
+-static void __address_space_init_once(struct address_space *mapping)
+-{
+-	xa_init_flags(&mapping->i_pages, XA_FLAGS_LOCK_IRQ | XA_FLAGS_ACCOUNT);
+-	init_rwsem(&mapping->i_mmap_rwsem);
+-	spin_lock_init(&mapping->i_private_lock);
+-	mapping->i_mmap = RB_ROOT_CACHED;
+-}
+-
+-void address_space_init_once(struct address_space *mapping)
+-{
+-	memset(mapping, 0, sizeof(*mapping));
+-	__address_space_init_once(mapping);
+-}
+-EXPORT_SYMBOL(address_space_init_once);
+-
+-/*
+- * These are initializations that only need to be done
+- * once, because the fields are idempotent across use
+- * of the inode, so let the slab aware of that.
+- */
+-void inode_init_once(struct inode *inode)
+-{
+-	memset(inode, 0, sizeof(*inode));
+-	INIT_HLIST_NODE(&inode->i_hash);
+-	INIT_LIST_HEAD(&inode->i_devices);
+-	INIT_LIST_HEAD(&inode->i_io_list);
+-	INIT_LIST_HEAD(&inode->i_wb_list);
+-	INIT_LIST_HEAD(&inode->i_lru);
+-	INIT_LIST_HEAD(&inode->i_sb_list);
+-	__address_space_init_once(&inode->i_data);
+-	i_size_ordered_init(inode);
+-}
+-EXPORT_SYMBOL(inode_init_once);
+-
+ static void init_once(void *foo)
+ {
+ 	struct inode *inode = (struct inode *) foo;
+diff --git a/fs/inode_evict.c b/fs/inode_evict.c
+index 7c0afa31bcefff6a9a2bf69133a509cc3afe82ac..0e1d24d17b1829c9da5625a54a5dc46382c5be6a 100644
+--- a/fs/inode_evict.c
++++ b/fs/inode_evict.c
+@@ -43,3 +43,115 @@ int inode_just_drop(struct inode *inode)
+ 	return 1;
+ }
+ EXPORT_SYMBOL(inode_just_drop);
++
++/**
++ * drop_nlink - directly drop an inode's link count
++ * @inode: inode
++ *
++ * This is a low-level filesystem helper to replace any
++ * direct filesystem manipulation of i_nlink.  In cases
++ * where we are attempting to track writes to the
++ * filesystem, a decrement to zero means an imminent
++ * write when the file is truncated and actually unlinked
++ * on the filesystem.
++ */
++void drop_nlink(struct inode *inode)
++{
++	WARN_ON(inode->i_nlink == 0);
++	inode->__i_nlink--;
++	if (!inode->i_nlink)
++		atomic_long_inc(&inode->i_sb->s_remove_count);
++}
++EXPORT_SYMBOL(drop_nlink);
++
++/**
++ * clear_nlink - directly zero an inode's link count
++ * @inode: inode
++ *
++ * This is a low-level filesystem helper to replace any
++ * direct filesystem manipulation of i_nlink.  See
++ * drop_nlink() for why we care about i_nlink hitting zero.
++ */
++void clear_nlink(struct inode *inode)
++{
++	if (inode->i_nlink) {
++		inode->__i_nlink = 0;
++		atomic_long_inc(&inode->i_sb->s_remove_count);
++	}
++}
++EXPORT_SYMBOL(clear_nlink);
++
++/**
++ * set_nlink - directly set an inode's link count
++ * @inode: inode
++ * @nlink: new nlink (should be non-zero)
++ *
++ * This is a low-level filesystem helper to replace any
++ * direct filesystem manipulation of i_nlink.
++ */
++void set_nlink(struct inode *inode, unsigned int nlink)
++{
++	if (!nlink) {
++		clear_nlink(inode);
++	} else {
++		/* Yes, some filesystems do change nlink from zero to one */
++		if (inode->i_nlink == 0)
++			atomic_long_dec(&inode->i_sb->s_remove_count);
++
++		inode->__i_nlink = nlink;
++	}
++}
++EXPORT_SYMBOL(set_nlink);
++
++/**
++ * inc_nlink - directly increment an inode's link count
++ * @inode: inode
++ *
++ * This is a low-level filesystem helper to replace any
++ * direct filesystem manipulation of i_nlink.  Currently,
++ * it is only here for parity with dec_nlink().
++ */
++void inc_nlink(struct inode *inode)
++{
++	if (unlikely(inode->i_nlink == 0)) {
++		WARN_ON(!(inode_state_read_once(inode) & I_LINKABLE));
++		atomic_long_dec(&inode->i_sb->s_remove_count);
++	}
++
++	inode->__i_nlink++;
++}
++EXPORT_SYMBOL(inc_nlink);
++
++static void __address_space_init_once(struct address_space *mapping)
++{
++	xa_init_flags(&mapping->i_pages, XA_FLAGS_LOCK_IRQ | XA_FLAGS_ACCOUNT);
++	init_rwsem(&mapping->i_mmap_rwsem);
++	spin_lock_init(&mapping->i_private_lock);
++	mapping->i_mmap = RB_ROOT_CACHED;
++}
++
++void address_space_init_once(struct address_space *mapping)
++{
++	memset(mapping, 0, sizeof(*mapping));
++	__address_space_init_once(mapping);
++}
++EXPORT_SYMBOL(address_space_init_once);
++
++/*
++ * These are initializations that only need to be done
++ * once, because the fields are idempotent across use
++ * of the inode, so let the slab aware of that.
++ */
++void inode_init_once(struct inode *inode)
++{
++	memset(inode, 0, sizeof(*inode));
++	INIT_HLIST_NODE(&inode->i_hash);
++	INIT_LIST_HEAD(&inode->i_devices);
++	INIT_LIST_HEAD(&inode->i_io_list);
++	INIT_LIST_HEAD(&inode->i_wb_list);
++	INIT_LIST_HEAD(&inode->i_lru);
++	INIT_LIST_HEAD(&inode->i_sb_list);
++	__address_space_init_once(&inode->i_data);
++	i_size_ordered_init(inode);
++}
++EXPORT_SYMBOL(inode_init_once);

@@ -27,16 +27,15 @@
 
 static struct inode *inode_of_mode(umode_t mode)
 {
-	struct inode *inode = kzalloc_obj(*inode);
+	struct inode *inode = kmalloc_obj(*inode, GFP_KERNEL);
 
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
+	inode_init_once(inode);
 	atomic_set(&inode->i_count, 1);
 	inode->i_mode = mode;
 	inode->i_mapping = &inode->i_data;
 	inode->i_data.host = inode;
-	inode->i_data.i_mmap = RB_ROOT_CACHED;
-	init_rwsem(&inode->i_data.i_mmap_rwsem);
 	return inode;
 }
 
