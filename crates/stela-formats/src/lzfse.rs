@@ -147,8 +147,7 @@ impl Output {
         Ok(())
     }
 
-    /// Copy `length` bytes from `distance` back, byte by byte so that
-    /// overlapping matches repeat their pattern.
+    /// Copy a match from the output, repeating its pattern on overlap.
     fn copy_match(&mut self, distance: usize, length: usize) -> Result<()> {
         if distance == 0 || distance > self.bytes.len() {
             return Err(LzfseError::Malformed("match distance"));
@@ -157,10 +156,18 @@ impl Output {
         let start = self.bytes.len() - distance;
         if distance >= length {
             self.bytes.extend_from_within(start..start + length);
+        } else if distance == 1 {
+            self.bytes
+                .resize(self.bytes.len() + length, self.bytes[start]);
         } else {
-            for i in 0..length {
-                let byte = self.bytes[start + i];
-                self.bytes.push(byte);
+            // Each copy makes twice as much of the repeated pattern available.
+            let mut copied = 0;
+            let mut available = distance;
+            while copied < length {
+                let count = available.min(length - copied);
+                self.bytes.extend_from_within(start..start + count);
+                copied += count;
+                available += count;
             }
         }
         Ok(())
@@ -467,9 +474,15 @@ impl<'a> BitStream<'a> {
             return Ok(());
         }
         self.position -= bytes;
-        let mut word = [0u8; 8];
-        word[..bytes].copy_from_slice(&self.src[self.position..self.position + bytes]);
-        self.accum = (self.accum << bits) | u64::from_le_bytes(word);
+        // Initialization loaded at least seven bytes and we moved back at
+        // least one. Eight bytes from the new position therefore fit within
+        // the stream's end. Only the newly loaded low bytes enter the buffer.
+        let word = u64::from_le_bytes(
+            self.src[self.position..self.position + 8]
+                .try_into()
+                .unwrap(),
+        );
+        self.accum = (self.accum << bits) | (word & ((1u64 << bits) - 1));
         self.accum_bits += bits;
         Ok(())
     }
@@ -496,9 +509,9 @@ fn spread(states: usize, f: usize) -> (u32, usize) {
 /// `fse_decoder_entry`: one literal decoder state.
 #[derive(Clone, Copy, Default)]
 struct LiteralEntry {
-    bits: u32,
+    bits: u8,
     symbol: u8,
-    delta: i32,
+    delta: i16,
 }
 
 /// `fse_init_decoder_table`.
@@ -513,15 +526,15 @@ fn literal_table(freq: &[u16; LITERAL_SYMBOLS]) -> Vec<LiteralEntry> {
         for j in 0..f {
             table.push(if j < j0 {
                 LiteralEntry {
-                    bits: k,
+                    bits: k as u8,
                     symbol: symbol as u8,
-                    delta: (((f + j) << k) as i32) - LITERAL_STATES as i32,
+                    delta: (((f + j) << k) as i16) - LITERAL_STATES as i16,
                 }
             } else {
                 LiteralEntry {
-                    bits: k - 1,
+                    bits: (k - 1) as u8,
                     symbol: symbol as u8,
-                    delta: ((j - j0) << (k - 1)) as i32,
+                    delta: ((j - j0) << (k - 1)) as i16,
                 }
             });
         }
@@ -580,7 +593,7 @@ fn decode_literal(state: &mut u16, table: &[LiteralEntry], input: &mut BitStream
     let entry = table
         .get(usize::from(*state))
         .ok_or(LzfseError::Malformed("FSE state"))?;
-    *state = next_state(entry.delta, input.pull(entry.bits)?);
+    *state = next_state(i32::from(entry.delta), input.pull(u32::from(entry.bits))?);
     Ok(entry.symbol)
 }
 
@@ -812,6 +825,19 @@ mod tests {
         // A decmpfs chunk may stop at the opcode, without the padding.
         let chunk = [0xe3, b'a', b'b', b'c', 0b00_000_111, 3, 0, 0x06];
         assert_eq!(decode_lzvn(&chunk, 6).unwrap(), b"abcabc");
+    }
+
+    #[test]
+    fn overlapping_matches_repeat_until_the_declared_end() {
+        let mut out = Output {
+            bytes: b"abc".to_vec(),
+            limit: 21,
+            block_end: 21,
+        };
+        out.copy_match(3, 13).unwrap();
+        out.copy_match(1, 5).unwrap();
+        assert_eq!(out.bytes, b"abcabcabcabcabcaaaaaa");
+        out.end_block().unwrap();
     }
 
     #[test]
