@@ -67,6 +67,9 @@
 /kernel/locking/lock_events.h
 /kernel/locking/lock_events_list.h
 /lib/timerqueue.c
+/kernel/time/Makefile
+/kernel/time/timer.c
+/kernel/time/timer_round.c
 /init/Kconfig
 /kernel/locking/Makefile
 /fs/seq_file.c

@@ -291,6 +291,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/xarray.c")),
             PathBuf::from(format!("{LINUX}/lib/rbtree.c")),
             PathBuf::from(format!("{LINUX}/lib/timerqueue.c")),
+            PathBuf::from(format!("{LINUX}/kernel/time/timer_round.c")),
             PathBuf::from(format!("{LINUX}/lib/kobject.c")),
             PathBuf::from(format!("{LINUX}/lib/kobject_uevent.c")),
             PathBuf::from(format!("{LINUX}/lib/ctype.c")),
