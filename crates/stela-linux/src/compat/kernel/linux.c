@@ -107,7 +107,6 @@ void stela_linux_exit(void)
 {
 	if (!stela_linux_quiescent())
 		__builtin_trap();
-	stela_linux_rcu_finish();
 	stela_linux_pages_finish();
 	if (!stela_linux_quiescent())
 		__builtin_trap();
@@ -170,34 +169,6 @@ bool stela_linux_quiescent(void)
 	return !stela_linux_atomic_callback_active() &&
 	       !stela_linux_rcu_callback_active() &&
 	       !preempt_count() && irq_flags == ARCH_IRQ_ENABLED;
-}
-
-/* Only depth bookkeeping is needed in this nonpreemptible, non-interrupting
- * context. RCU work is deferred until a checked quiescent boundary, never
- * invoked from inside another atomic/read-side section. */
-static void enable_bh(unsigned int count)
-{
-	(void)stela_linux_owner();
-	int nesting = preempt_count();
-	if (nesting < 0 || !count || (count & ~(SOFTIRQ_MASK | PREEMPT_MASK)) ||
-	    softirq_count() < (count & SOFTIRQ_MASK) ||
-	    ((unsigned int)nesting & PREEMPT_MASK) < (count & PREEMPT_MASK))
-		__builtin_trap();
-	barrier();
-	preempt_count_sub((int)count);
-}
-
-void _local_bh_enable(void)
-{
-	enable_bh(SOFTIRQ_DISABLE_OFFSET);
-}
-
-void __local_bh_enable_ip(unsigned long ip, unsigned int count)
-{
-	(void)ip;
-	if (irqs_disabled() || in_hardirq())
-		__builtin_trap();
-	enable_bh(count);
 }
 
 #ifdef STELA_LINUX_ENTRY_GENERATION_TEST

@@ -15,7 +15,7 @@ use stela_linux::task::HostedTaskBinding;
 unsafe extern "C" {
     fn stela_linux_enter(owner: *const stela_linux::owner::RawOwner);
     fn stela_linux_exit();
-    fn stela_linux_task_yield() -> i32;
+    fn schedule();
     static stela_linux_bare: stela_linux::owner::RawOwner;
 }
 struct Fixture {
@@ -30,8 +30,7 @@ unsafe extern "C" fn body(context: *mut c_void) {
     unsafe { stela_linux_enter(&raw const stela_linux_bare) };
     fixture.phase.set(1);
     // SAFETY: exact live source scope on this executing bound stack.
-    let yielded = unsafe { stela_linux_task_yield() };
-    assert_eq!(yielded, 0);
+    unsafe { schedule() };
     fixture.phase.set(2);
     // SAFETY: resumed the same source lease and holds no outstanding user.
     unsafe { stela_linux_exit() };

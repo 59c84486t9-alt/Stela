@@ -1180,7 +1180,6 @@ static int prepare(struct stela_linux_task *task, int count)
 		return -EBUSY;
 	if (count)
 		preempt_count_sub(count);
-	stela_linux_rcu_finish();
 	stela_linux_pages_finish();
 	if (!stela_linux_quiescent() || !stela_linux_lease_matches(&lease))
 		__builtin_trap();
@@ -1260,6 +1259,8 @@ int stela_linux_task_leave(struct stela_linux_task *task,
     task->linux_task->nvcsw++;
     task->linux_task->on_rq = reason == 1 ? 0 : 1;
 	task->linux_task->on_cpu = 0;
+	if (lease.owner)
+		rcu_note_context_switch(false);
 	stela_linux_lease_suspend(&lease);
 	task->active = false;
 	task->suspended = true;
@@ -1342,6 +1343,7 @@ int stela_linux_task_terminal_prepare(struct stela_linux_task *record,
      * normal returning owner-exit tail; no skipped owning Rust guard exists. */
     record->lease = lease;
     p->nvcsw++;
+    rcu_note_context_switch(false);
     stela_linux_lease_suspend(&lease);
     record->source_terminal_prepared = true;
     record->active = false;
@@ -1790,6 +1792,15 @@ void schedule_preempt_disabled(void)
     sched_preempt_enable_no_resched();
     schedule();
     preempt_disable();
+}
+
+/* The selected UP source may request a real scheduler checkpoint. */
+void resched_cpu(int cpu)
+{
+    const struct stela_linux_owner *owner = stela_linux_owner();
+    if (cpu != 0 || stela_linux_require_current(owner))
+        stela_linux_fatal("reschedule without genuine UP current");
+    set_tsk_thread_flag(current, TIF_NEED_RESCHED);
 }
 
 /* Generic process waits (including original rcuwait) enter at preempt0.

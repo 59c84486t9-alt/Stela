@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 21:34:49 -0500
+Subject: [PATCH] feat(linux): guard original TinyRCU and softirq boundaries
+
+---
+ kernel/rcu/tiny.c | 15 +++++++++++++++
+ kernel/softirq.c  | 18 ++++++++++++++++++
+ 2 files changed, 33 insertions(+)
+
+diff --git a/kernel/rcu/tiny.c b/kernel/rcu/tiny.c
+index 585cade21010e75c011313557fb8d5f8239bbc91..809b3f34a54108c460c4dd33ae9e168e973ccf7d 100644
+--- a/kernel/rcu/tiny.c
++++ b/kernel/rcu/tiny.c
+@@ -26,6 +26,9 @@
+ #include <linux/mm.h>
+ 
+ #include "rcu.h"
++#ifdef CONFIG_STELA
++#include <stela/rcu.h>
++#endif
+ 
+ /* Global control variables for rcupdate callback mechanism. */
+ struct rcu_ctrlblk {
+@@ -44,6 +47,9 @@ static struct rcu_ctrlblk rcu_ctrlblk = {
+ 
+ void rcu_barrier(void)
+ {
++#ifdef CONFIG_STELA
++	stela_linux_rcu_require_process();
++#endif
+ 	wait_rcu_gp(call_rcu_hurry);
+ }
+ EXPORT_SYMBOL(rcu_barrier);
+@@ -90,7 +96,13 @@ static inline bool rcu_reclaim_tiny(struct rcu_head *head)
+ 	f = head->func;
+ 	debug_rcu_head_callback(head);
+ 	WRITE_ONCE(head->func, (rcu_callback_t)0L);
++#ifdef CONFIG_STELA
++	stela_linux_rcu_callback_begin(head);
++#endif
+ 	f(head);
++#ifdef CONFIG_STELA
++	stela_linux_rcu_callback_end(head);
++#endif
+ 	rcu_lock_release(&rcu_callback_map);
+ 	return false;
+ }
+@@ -140,6 +152,9 @@ static __latent_entropy void rcu_process_callbacks(void)
+  */
+ void synchronize_rcu(void)
+ {
++#ifdef CONFIG_STELA
++	stela_linux_rcu_require_process();
++#endif
+ 	RCU_LOCKDEP_WARN(lock_is_held(&rcu_bh_lock_map) ||
+ 			 lock_is_held(&rcu_lock_map) ||
+ 			 lock_is_held(&rcu_sched_lock_map),
+diff --git a/kernel/softirq.c b/kernel/softirq.c
+index 4425d8dce44b467b86fc33562a000bc9f9aea1a1..6470882c3268f4a66ac618689050065ea99ba401 100644
+--- a/kernel/softirq.c
++++ b/kernel/softirq.c
+@@ -30,6 +30,14 @@
+ #include <linux/workqueue.h>
+ 
+ #include <asm/softirq_stack.h>
++#ifdef CONFIG_STELA
++#ifndef KBUILD_MODNAME
++#define KBUILD_MODNAME "softirq"
++#endif
++#include <stela/atomic_callback.h>
++#include <stela/linux.h>
++#include <stela/task.h>
++#endif
+ 
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/irq.h>
+@@ -578,6 +586,13 @@ static inline void lockdep_softirq_end(bool in_hardirq) { }
+ 
+ static void handle_softirqs(bool ksirqd)
+ {
++#ifdef CONFIG_STELA
++	struct stela_linux_atomic_callback dispatch;
++
++	if (stela_linux_require_current(stela_linux_owner()))
++		__builtin_trap();
++	stela_linux_atomic_softirq_dispatch_begin(&dispatch);
++#endif
+ 	unsigned long end = jiffies + MAX_SOFTIRQ_TIME;
+ 	unsigned long old_flags = current->flags;
+ 	int max_restart = MAX_SOFTIRQ_RESTART;
+@@ -649,6 +664,9 @@ restart:
+ 	lockdep_softirq_end(in_hardirq);
+ 	softirq_handle_end();
+ 	current_restore_flags(old_flags, PF_MEMALLOC);
++#ifdef CONFIG_STELA
++	stela_linux_atomic_softirq_dispatch_end(&dispatch);
++#endif
+ }
+ 
+ asmlinkage __visible void __softirq_entry __do_softirq(void)

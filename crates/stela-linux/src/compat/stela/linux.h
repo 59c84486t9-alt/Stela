@@ -118,7 +118,9 @@ bool stela_linux_try_enter(const struct stela_linux_owner *owner);
 void stela_linux_exit(void);
 /* Checked quiescence in the serialized context, not a native IRQ witness. */
 bool stela_linux_quiescent(void);
-/* Internal RCU retirement while the execution owner is still borrowed. */
+/* Explicit original rcu_barrier on a retained source process; it may sleep.
+ * Joins already queued callbacks, not future descendants. Caller first stops
+ * producers and joins each last-callback lifetime. Never a scheduler/exit hook. */
 /* Entered serialized-owner observation only. Private RCU delivery remains
  * active despite balanced public preempt/IRQ counters. No task/root grant. */
 bool stela_linux_rcu_callback_active(void);

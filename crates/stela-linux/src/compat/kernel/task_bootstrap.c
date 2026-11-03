@@ -9,6 +9,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/irqflags.h>
+#include <linux/interrupt.h>
 #include <linux/radix-tree.h>
 #include <linux/sched/isolation.h>
 #include <linux/rcupdate.h>
@@ -86,6 +87,7 @@ int stela_linux_task_bootstrap_resources(const struct stela_linux_owner *owner)
     radix_tree_init();
     housekeeping_init();
     workqueue_init_early();
+    softirq_init();
     rcu_init();
     kvfree_rcu_init();
     srcu_init();

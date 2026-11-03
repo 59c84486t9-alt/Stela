@@ -24,6 +24,7 @@
 #define CONFIG_TINY_RCU 1
 #define CONFIG_TINY_SRCU 1
 /* Record balanced atomic/RCU sections; this enables no scheduling. */
+#define CONFIG_PREEMPT_NONE 1
 #define CONFIG_PREEMPT_COUNT 1
 #define CONFIG_RT_MUTEXES 1
 /* DMA fence array/chain callbacks use the deferred hard-IRQ worker service. */

@@ -32,6 +32,8 @@ void stela_linux_atomic_callback_begin_soft(struct stela_linux_atomic_callback *
  */
 void stela_linux_atomic_softirq_dispatch_begin(struct stela_linux_atomic_callback *scope);
 void stela_linux_atomic_softirq_dispatch_end(struct stela_linux_atomic_callback *scope);
+/* Negative-only observation of the original engine guard, not an entry grant. */
+bool stela_linux_atomic_softirq_dispatch_active(void);
 
 /* Pure guard around one original callback already inside exactly one BH
  * disable level (SOFTIRQ_DISABLE_OFFSET plus process PREEMPT_MASK nesting).

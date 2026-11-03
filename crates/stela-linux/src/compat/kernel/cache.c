@@ -485,8 +485,8 @@ static void release_slab(struct cache_slab *slab)
 	if (slab->free_count != slab->count || page_ref_count(slab->pages) != 1 ||
 	    *total < pages)
 		__builtin_trap();
-	/* In an RCU callback this only queues the native pin. The existing owner
-	 * exit drains callbacks before process-context page-provider release. */
+	/* In an RCU callback this only queues the native pin. The canonical page
+	 * catalogue retains that pin until its separate process release service. */
 	__free_pages(slab->pages, cache->order);
 	/* The slab relinquished its last whole page grant. The page catalog may
 	 * still queue native pin release; that is no longer slab-owned storage. */
@@ -561,8 +561,9 @@ void kmem_cache_destroy(struct kmem_cache *cache)
 		return;
 	}
 	cache->destroying = true;
-	/* Caller callbacks may include deferred frees. Drain chains, without
-	 * removing the handle needed by those frees or allocator callbacks. */
+	/* The caller has stopped and joined users that could retain this cache,
+	 * including last-callback chains. Join already queued frees with the
+	 * original barrier, keeping the descriptor and slabs until both joins. */
 	stela_linux_rcu_finish();
 	if (cache->live) {
 		cache->destroying = false;

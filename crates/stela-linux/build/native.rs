@@ -153,6 +153,10 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/kernel/kthread.c")),
             PathBuf::from(format!("{LINUX}/kernel/workqueue.c")),
             PathBuf::from(format!("{LINUX}/kernel/exec_state.c")),
+            PathBuf::from(format!("{LINUX}/kernel/softirq.c")),
+            PathBuf::from(format!("{LINUX}/kernel/rcu/tiny.c")),
+            PathBuf::from(format!("{LINUX}/kernel/rcu/update.c")),
+            PathBuf::from(format!("{LINUX}/kernel/smpboot.c")),
             PathBuf::from(format!("{LINUX}/kernel/rcu/srcutiny.c")),
             PathBuf::from(format!("{LINUX}/kernel/rcu/wakeme.c")),
             PathBuf::from(format!("{LINUX}/kernel/locking/mutex.c")),
@@ -258,6 +262,7 @@ impl Linux {
                     format!("{COMPAT}/stela/i2c_test.c"),
                     format!("{COMPAT}/stela/sync_test.c"),
                     format!("{COMPAT}/stela/srcu_test.c"),
+                    format!("{COMPAT}/stela/rcu_original_test.c"),
                 ])
                 .objects(helper_objects)
                 .compile("linux-task-fixture");
@@ -345,7 +350,6 @@ impl Linux {
         for (name, source, define) in [
             ("linux_printk", "printk.c", "STELA_LINUX_PRINTK_TEST"),
             ("linux_panic", "panic.c", "STELA_LINUX_PANIC_TEST"),
-            ("linux_rcu", "rcu.c", "STELA_LINUX_RCU_TEST"),
             ("linux_pages", "page.c", "STELA_LINUX_PAGE_TEST"),
             ("linux_slab", "slab.c", "STELA_LINUX_SLAB_TEST"),
             ("linux_cache", "cache.c", "STELA_LINUX_CACHE_TEST"),

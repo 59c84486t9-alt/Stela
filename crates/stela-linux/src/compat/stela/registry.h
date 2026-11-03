@@ -124,7 +124,11 @@ struct stela_linux_registry_unknown_options {
 };
 struct stela_linux_registry_retirement {
  /* Exact complete image/group membership, not a single device idle query.
-  * The callback actually stops/drains all consumers; no production authority
+  * The callback actually stops/drains all consumers, including their final
+  * self-enqueued RCU callbacks. Original rcu_barrier below joins callbacks
+  * already queued by exit/parameter cleanup; it cannot stop a producer or
+  * promise completion of future descendants. Each exit/free helper owns its
+  * last-callback join before releasing callback data. No production authority
   * is created by this API. Borrowed only until this call returns. */
  const struct stela_linux_registry_image *image;
  const struct stela_linux_build_group *const *groups;

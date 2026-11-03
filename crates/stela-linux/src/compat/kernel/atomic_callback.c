@@ -28,6 +28,11 @@ bool stela_linux_atomic_callback_active(void)
 	return active.scope != NULL;
 }
 
+bool stela_linux_atomic_softirq_dispatch_active(void)
+{
+	return active.scope && active.kind == CALLBACK_DISPATCH;
+}
+
 static void begin(struct stela_linux_atomic_callback *scope, enum callback_kind kind)
 {
 	/* No saved ownership, IRQ or nesting mutation before these refusals. */
