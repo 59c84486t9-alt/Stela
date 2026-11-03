@@ -21,9 +21,7 @@ STELA_UNSUPPORTED(struct page *, shmem_read_mapping_page_gfp, struct address_spa
 STELA_UNSUPPORTED(void, shmem_truncate_range, struct inode *, loff_t, uoff_t)
 struct swap_iocb;
 STELA_UNSUPPORTED(int, shmem_writeout, struct folio *, struct swap_iocb **, struct list_head *)
-STELA_UNSUPPORTED(void, folio_mark_accessed, struct folio *)
 STELA_UNSUPPORTED(bool, folio_clear_dirty_for_io, struct folio *)
-STELA_UNSUPPORTED(void, __folio_batch_release, struct folio_batch *)
 STELA_UNSUPPORTED(void, check_move_unevictable_folios, struct folio_batch *)
 STELA_UNSUPPORTED(void, mark_page_accessed, struct page *)
 /* Transparent huge mappings of shmem-backed objects. */

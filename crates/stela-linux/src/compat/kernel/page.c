@@ -15,6 +15,7 @@
 #include <linux/preempt.h>
 #include <linux/rcupdate.h>
 #include <linux/string.h>
+#include <linux/swap.h>
 #include <linux/thread_info.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/task_stack.h>
@@ -1298,13 +1299,6 @@ static void check_frozen_folio(struct folio *folio, const struct page_state *sta
 		__builtin_trap();
 }
 
-void free_frozen_pages(struct page *page, unsigned int order)
-{
-	size_t first = run_index(page, order);
-	check_frozen_folio(page_folio(page), catalog.state + first);
-	retire_pages(first, (size_t)1 << order);
-}
-
 static void retire_frozen_folio(struct folio *folio)
 {
 	struct page *page = &folio->page;
@@ -1322,9 +1316,22 @@ static void retire_frozen_folio(struct folio *folio)
 	retire_pages(first, (size_t)1 << order);
 }
 
-void __folio_put(struct folio *folio)
+void free_frozen_pages(struct page *page, unsigned int order)
 {
-	retire_frozen_folio(folio);
+	if (!order && !PageCompound(page)) {
+		retire_frozen_folio(page_folio(page));
+		return;
+	}
+	size_t first = run_index(page, order);
+	check_frozen_folio(page_folio(page), catalog.state + first);
+	retire_pages(first, (size_t)1 << order);
+}
+
+void drain_local_pages(struct zone *zone)
+{
+	/* The catalog returns pages directly to its native provider. Linux
+	 * buddy per-CPU free lists have no producer on this allocator. */
+	(void)zone;
 }
 
 void free_unref_folios(struct folio_batch *batch)
@@ -2665,6 +2672,31 @@ int main(void)
 	assert(!catalog.live_pages && fixture.releases == releases + 2);
 	stela_linux_pages_finish();
 	assert(fixture.releases == releases + 3);
+	struct page *queued_page = alloc_page(GFP_KERNEL);
+	assert(queued_page);
+	struct folio *queued = page_folio(queued_page);
+	folio_add_lru(queued);
+	assert(folio_ref_count(queued) == 2);
+	folio_batch_add(&batch, queued);
+	folio_batch_release(&batch);
+	assert(!folio_batch_count(&batch) && batch.percpu_pvec_drained);
+	assert(!catalog.live_pages && fixture.releases == releases + 3);
+	stela_linux_pages_finish();
+	assert(fixture.releases == releases + 4);
+	queued_page = alloc_page(GFP_KERNEL);
+	assert(queued_page);
+	queued = page_folio(queued_page);
+	mlock_new_folio(queued);
+	assert(folio_test_mlocked(queued) && folio_ref_count(queued) == 2);
+	lru_add_drain();
+	assert(folio_test_lru(queued) && folio_test_unevictable(queued));
+	assert(folio_ref_count(queued) == 1);
+	munlock_folio(queued);
+	lru_add_drain();
+	assert(!folio_test_mlocked(queued) && !folio_test_unevictable(queued));
+	folio_put(queued);
+	stela_linux_pages_finish();
+	assert(!catalog.live_pages && fixture.releases == releases + 5);
 	compound_and_split();
 	stela_linux_enter(&owner);
 	capacity();

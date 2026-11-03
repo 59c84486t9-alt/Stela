@@ -137,6 +137,8 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/mm/folio_fs.c")),
             PathBuf::from(format!("{LINUX}/mm/filemap_batch.c")),
             PathBuf::from(format!("{LINUX}/mm/lruvec.c")),
+            PathBuf::from(format!("{LINUX}/mm/mlock_batch.c")),
+            PathBuf::from(format!("{LINUX}/mm/swap.c")),
             PathBuf::from(format!("{LINUX}/mm/shrinker.c")),
             PathBuf::from(format!("{LINUX}/mm/workingset.c")),
             PathBuf::from(format!("{LINUX}/mm/writeback_domain.c")),
