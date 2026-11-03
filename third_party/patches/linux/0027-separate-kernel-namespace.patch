@@ -1,0 +1,138 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 22:22:54 -0500
+Subject: [PATCH] refactor(ns): separate kernel namespace lifetime from user
+ ABI
+
+---
+ fs/nsfs.c        | 24 ------------------------
+ kernel/nsproxy.c | 28 ++++++++++++++++++++++++++++
+ kernel/nstree.c  |  8 ++++++++
+ 3 files changed, 36 insertions(+), 24 deletions(-)
+
+diff --git a/fs/nsfs.c b/fs/nsfs.c
+index c3b6ae76594a81f0fdd94e4e453da741ed02f5d3..5857084afd90f781065782713a3652ac327847e3 100644
+--- a/fs/nsfs.c
++++ b/fs/nsfs.c
+@@ -687,27 +687,3 @@ void __init nsfs_init(void)
+ 	nsfs_root_path.mnt = nsfs_mnt;
+ 	nsfs_root_path.dentry = nsfs_mnt->mnt_root;
+ }
+-
+-void nsproxy_ns_active_get(struct nsproxy *ns)
+-{
+-	ns_ref_active_get(ns->mnt_ns);
+-	ns_ref_active_get(ns->uts_ns);
+-	ns_ref_active_get(ns->ipc_ns);
+-	ns_ref_active_get(ns->pid_ns_for_children);
+-	ns_ref_active_get(ns->cgroup_ns);
+-	ns_ref_active_get(ns->net_ns);
+-	ns_ref_active_get(ns->time_ns);
+-	ns_ref_active_get(ns->time_ns_for_children);
+-}
+-
+-void nsproxy_ns_active_put(struct nsproxy *ns)
+-{
+-	ns_ref_active_put(ns->mnt_ns);
+-	ns_ref_active_put(ns->uts_ns);
+-	ns_ref_active_put(ns->ipc_ns);
+-	ns_ref_active_put(ns->pid_ns_for_children);
+-	ns_ref_active_put(ns->cgroup_ns);
+-	ns_ref_active_put(ns->net_ns);
+-	ns_ref_active_put(ns->time_ns);
+-	ns_ref_active_put(ns->time_ns_for_children);
+-}
+diff --git a/kernel/nsproxy.c b/kernel/nsproxy.c
+index 3fb1595a4a5934aa21bd77c1327a1ef7681290ae..cdcf51b97405009d37a638b92d5902380d7e0800 100644
+--- a/kernel/nsproxy.c
++++ b/kernel/nsproxy.c
+@@ -12,6 +12,7 @@
+ #include <linux/slab.h>
+ #include <linux/export.h>
+ #include <linux/nsproxy.h>
++#include <linux/nsfs.h>
+ #include <linux/ns/ns_common_types.h>
+ #include <linux/init_task.h>
+ #include <linux/mnt_namespace.h>
+@@ -29,6 +30,8 @@
+ #include <linux/perf_event.h>
+ #include <linux/nstree.h>
+ 
++#include "../fs/mount.h"
++
+ static struct kmem_cache *nsproxy_cachep;
+ 
+ struct nsproxy init_nsproxy = {
+@@ -51,6 +54,31 @@ struct nsproxy init_nsproxy = {
+ #endif
+ };
+ 
++/* Active references belong to the installed namespace bundle. */
++void nsproxy_ns_active_get(struct nsproxy *ns)
++{
++	ns_ref_active_get(ns->mnt_ns);
++	ns_ref_active_get(ns->uts_ns);
++	ns_ref_active_get(ns->ipc_ns);
++	ns_ref_active_get(ns->pid_ns_for_children);
++	ns_ref_active_get(ns->cgroup_ns);
++	ns_ref_active_get(ns->net_ns);
++	ns_ref_active_get(ns->time_ns);
++	ns_ref_active_get(ns->time_ns_for_children);
++}
++
++void nsproxy_ns_active_put(struct nsproxy *ns)
++{
++	ns_ref_active_put(ns->mnt_ns);
++	ns_ref_active_put(ns->uts_ns);
++	ns_ref_active_put(ns->ipc_ns);
++	ns_ref_active_put(ns->pid_ns_for_children);
++	ns_ref_active_put(ns->cgroup_ns);
++	ns_ref_active_put(ns->net_ns);
++	ns_ref_active_put(ns->time_ns);
++	ns_ref_active_put(ns->time_ns_for_children);
++}
++
+ static inline struct nsproxy *create_nsproxy(void)
+ {
+ 	struct nsproxy *nsproxy;
+diff --git a/kernel/nstree.c b/kernel/nstree.c
+index 831f279d174a32c95953189aa7d9d3dd0ff11a38..bbd0d190d09f6a1dc55bbe1e44734628cf4d09bf 100644
+--- a/kernel/nstree.c
++++ b/kernel/nstree.c
+@@ -5,7 +5,9 @@
+ #include <linux/proc_ns.h>
+ #include <linux/rculist.h>
+ #include <linux/vfsdebug.h>
++#ifndef CONFIG_STELA
+ #include <linux/syscalls.h>
++#endif
+ #include <linux/user_namespace.h>
+ 
+ static __cacheline_aligned_in_smp DEFINE_SEQLOCK(ns_tree_lock);
+@@ -14,9 +16,11 @@ DEFINE_LOCK_GUARD_0(ns_tree_writer,
+ 		    write_seqlock(&ns_tree_lock),
+ 		    write_sequnlock(&ns_tree_lock))
+ 
++#ifndef CONFIG_STELA
+ DEFINE_LOCK_GUARD_0(ns_tree_locked_reader,
+ 		    read_seqlock_excl(&ns_tree_lock),
+ 		    read_sequnlock_excl(&ns_tree_lock))
++#endif
+ 
+ static struct ns_tree_root ns_unified_root = { /* protected by ns_tree_lock */
+ 	.ns_rb = RB_ROOT,
+@@ -400,6 +404,9 @@ u64 __ns_tree_gen_id(struct ns_common *ns, u64 id)
+ 	return ns->ns_id;
+ }
+ 
++/* The native source profile selects the namespace tree and lifetime core.
++ * listns is a userspace syscall and needs the original user-copy boundary. */
++#ifndef CONFIG_STELA
+ struct klistns {
+ 	u64 __user *uns_ids;
+ 	u32 nr_ns_ids;
+@@ -784,3 +791,4 @@ SYSCALL_DEFINE4(listns, const struct ns_id_req __user *, req,
+ 
+ 	return do_listns(&klns);
+ }
++#endif /* !CONFIG_STELA */

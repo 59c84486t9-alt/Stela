@@ -129,6 +129,8 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/mm/init-mm.c")),
             PathBuf::from(format!("{LINUX}/kernel/pid.c")),
             PathBuf::from(format!("{LINUX}/kernel/nsproxy.c")),
+            PathBuf::from(format!("{LINUX}/kernel/nscommon.c")),
+            PathBuf::from(format!("{LINUX}/kernel/nstree.c")),
             PathBuf::from(format!("{LINUX}/kernel/ucount.c")),
             PathBuf::from(format!("{LINUX}/kernel/cred.c")),
             PathBuf::from(format!("{LINUX}/kernel/signal_state.c")),
