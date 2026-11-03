@@ -137,6 +137,8 @@
 /kernel/nscommon.c
 /kernel/nstree.c
 /fs/nsfs.c
+/fs/pidfs.c
+/fs/namespace.c
 /fs/mount.h
 /kernel/ucount.c
 /kernel/cred.c
