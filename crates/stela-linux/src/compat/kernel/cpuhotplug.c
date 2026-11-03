@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Serialized registration only, following Linux 7.2.12 kernel/cpu.c,
- * CPU control, (C) 2001, 2002, 2003, 2004 Rusty Russell.
- * Real CPU transition/callback invocation remains explicitly unavailable. */
+/* Registration on the retained native UP CPU, following Linux 7.2.12
+ * kernel/cpu.c, (C) 2001, 2002, 2003, 2004 Rusty Russell. */
 #include <linux/bug.h>
 #include <linux/build_bug.h>
 #include <linux/list.h>
 #include <linux/cpuhotplug.h>
 #include <linux/cpuhplock.h>
+#include <linux/cpumask.h>
+#include <linux/mutex.h>
 #include <linux/errno.h>
 #include <stela/linux.h>
+#include <stela/task.h>
 
 #if defined(CONFIG_SMP) || defined(CONFIG_HOTPLUG_CPU)
 #error "CPUHP registry requires the serialized non-hotplug Linux profile"
@@ -42,6 +44,58 @@ static void require_context(void)
 {
 	if (!stela_linux_quiescent())
 		__builtin_trap();
+}
+
+/* Source callbacks may park. Keep the registry locked across that wait,
+ * just as the original cpuhp_state_mutex does. Bare controls may register
+ * metadata without a task, but may not enter a live source operation. */
+static DEFINE_MUTEX(registry_lock);
+
+static bool lock_registry(void)
+{
+	require_context();
+	if (stela_linux_require_current(stela_linux_owner())) {
+		if (mutex_is_locked(&registry_lock))
+			__builtin_trap();
+		return false;
+	}
+	mutex_lock(&registry_lock);
+	return true;
+}
+
+static void unlock_registry(bool *locked)
+{
+	if (*locked)
+		mutex_unlock(&registry_lock);
+}
+
+#define LOCK_REGISTRY() \
+	bool locked __attribute__((cleanup(unlock_registry))) = lock_registry()
+
+static bool can_invoke(bool locked)
+{
+	return locked && cpumask_test_cpu(0, cpu_present_mask) &&
+	       cpumask_test_cpu(0, cpu_online_mask);
+}
+
+static int invoke_callback(struct cpuhp_step *step, bool startup,
+			   struct hlist_node *node)
+{
+	struct stela_linux_lease lease;
+	stela_linux_lease_snapshot(&lease);
+	int error;
+	if (step->multi_instance) {
+		int (*callback)(unsigned int, struct hlist_node *) =
+			startup ? step->startup.multi : step->teardown.multi;
+		error = callback ? callback(0, node) : 0;
+	} else {
+		int (*callback)(unsigned int) =
+			startup ? step->startup.single : step->teardown.single;
+		error = callback ? callback(0) : 0;
+	}
+	if (!stela_linux_quiescent() || !stela_linux_lease_matches(&lease))
+		__builtin_trap();
+	return error;
 }
 
 static bool valid_state(enum cpuhp_state state)
@@ -80,12 +134,13 @@ int __cpuhp_setup_state_cpuslocked(enum cpuhp_state state, const char *name, boo
 				 int (*startup)(unsigned int cpu),
 				 int (*teardown)(unsigned int cpu), bool multi_instance)
 {
-	require_context();
+	LOCK_REGISTRY();
 	if (!valid_state(state) || !name)
 		return -EINVAL;
-	/* Refuse before reservation or publication, even for NULL callbacks. */
-	if (invoke)
+	if (invoke && !can_invoke(locked))
 		return refuse_invocation();
+	if (invoke && multi_instance)
+		return -EINVAL;
 	bool dynamic = state == CPUHP_BP_PREPARE_DYN || state == CPUHP_AP_ONLINE_DYN;
 	if (dynamic) {
 		int selected = reserve_state(state);
@@ -101,6 +156,13 @@ int __cpuhp_setup_state_cpuslocked(enum cpuhp_state state, const char *name, boo
 	step->name = name;
 	step->multi_instance = multi_instance;
 	INIT_HLIST_HEAD(&step->list);
+	if (invoke) {
+		int error = invoke_callback(step, true, NULL);
+		if (error) {
+			*step = (struct cpuhp_step){};
+			return error;
+		}
+	}
 	return dynamic ? state : 0;
 }
 
@@ -115,11 +177,11 @@ int __cpuhp_setup_state(enum cpuhp_state state, const char *name, bool invoke,
 int __cpuhp_state_add_instance_cpuslocked(enum cpuhp_state state, struct hlist_node *node,
 					bool invoke)
 {
-	require_context();
+	LOCK_REGISTRY();
 	struct cpuhp_step *step = require_state(state);
 	if (!step->multi_instance)
 		return -EINVAL;
-	if (invoke)
+	if (invoke && !can_invoke(locked))
 		return refuse_invocation();
 	if (!node)
 		__builtin_trap();
@@ -136,6 +198,11 @@ int __cpuhp_state_add_instance_cpuslocked(enum cpuhp_state state, struct hlist_n
 				__builtin_trap();
 		}
 	}
+	if (invoke) {
+		int error = invoke_callback(step, true, node);
+		if (error)
+			return error;
+	}
 	hlist_add_head(node, &step->list);
 	return 0;
 }
@@ -147,11 +214,11 @@ int __cpuhp_state_add_instance(enum cpuhp_state state, struct hlist_node *node, 
 
 int __cpuhp_state_remove_instance(enum cpuhp_state state, struct hlist_node *node, bool invoke)
 {
-	require_context();
+	LOCK_REGISTRY();
 	struct cpuhp_step *step = require_state(state);
 	if (!step->multi_instance)
 		return -EINVAL;
-	if (invoke)
+	if (invoke && !can_invoke(locked))
 		return refuse_invocation();
 	if (!node)
 		__builtin_trap();
@@ -162,21 +229,25 @@ int __cpuhp_state_remove_instance(enum cpuhp_state state, struct hlist_node *nod
 		link = &(*link)->next;
 	if (!*link || node->pprev != link || (node->next && node->next->pprev != &node->next))
 		__builtin_trap();
+	if (invoke && invoke_callback(step, false, node))
+		__builtin_trap();
 	hlist_del(node);
 	return 0;
 }
 
 void __cpuhp_remove_state_cpuslocked(enum cpuhp_state state, bool invoke)
 {
-	require_context();
+	LOCK_REGISTRY();
 	struct cpuhp_step *step = require_state(state);
-	if (invoke) {
+	if (invoke && !can_invoke(locked)) {
 		(void)refuse_invocation();
 		/* Returning would let a caller unload still-registered callback code.
 		 * The void API cannot return an unsupported errno. */
 		__builtin_trap();
 	}
 	if (!hlist_empty(&step->list))
+		__builtin_trap();
+	if (invoke && !step->multi_instance && invoke_callback(step, false, NULL))
 		__builtin_trap();
 	step->startup.single = NULL;
 	step->teardown.single = NULL;
@@ -192,6 +263,7 @@ void __cpuhp_remove_state(enum cpuhp_state state, bool invoke)
 
 #ifdef STELA_LINUX_CPUHP_TEST
 #include <linux/array_size.h>
+#include <linux/cpu.h>
 #include <linux/bottom_half.h>
 #include <linux/irqflags.h>
 #include <linux/preempt.h>
@@ -609,6 +681,9 @@ int main(void)
 	dynamic_range(CPUHP_AP_ONLINE_DYN, CPUHP_AP_ONLINE_DYN_END);
 	assert(warnings == 4);
 	multi_instances(&owner);
+	/* Published source topology alone cannot admit a bare caller. */
+	boot_cpu_init();
+	assert(cpumask_test_cpu(0, cpu_present_mask) && cpumask_test_cpu(0, cpu_online_mask));
 	invoking_errors();
 	assert(refusals == 11);
 	contract_traps();
