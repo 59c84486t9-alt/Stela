@@ -17,9 +17,10 @@
 //! any of them compiled for the others to install ([`share`]).
 use super::bundle::Bytes;
 use crate::{firmware, handoff::Region, output, paging::PAGE};
-use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, format, string::String, vec};
 use core::{
     cell::UnsafeCell,
+    ptr::NonNull,
     sync::atomic::{AtomicBool, Ordering},
 };
 use stela_drivers::block::BlockDevice;
@@ -92,9 +93,8 @@ fn open(root: &mut Directory, path: &str, mode: FileMode) -> Option<RegularFile>
         .into_regular_file()
 }
 
-/// Read `buffer.len()` bytes of `file` from `offset`.
-fn read_at(file: &mut RegularFile, offset: u64, buffer: &mut [u8]) -> Option<()> {
-    file.set_position(offset).ok()?;
+/// Read `buffer.len()` bytes from the current file position.
+fn read_exact(file: &mut RegularFile, buffer: &mut [u8]) -> Option<()> {
     let mut done = 0;
     while done < buffer.len() {
         let count = file.read(&mut buffer[done..]).ok()?;
@@ -186,30 +186,35 @@ pub fn read() -> Option<(Region, bool)> {
         };
         output::arguments(format_args!(
             "TRANSLATIONS {path} bound={bound} pack={} allocated={allocated} partition={}\n",
-            pack.as_ref().map_or(0, Vec::len),
+            pack.as_ref()
+                .map_or(0, |region| region.bytes - PLACEMENT_BYTES as u64),
             partition.is_some()
         ));
-        let pack = pack.unwrap_or_default();
-        let bytes = PLACEMENT_BYTES + pack.len();
-        let physical = firmware::pages(bytes.div_ceil(PAGE)).ok()?;
-        // SAFETY: fresh pages Stela owns for the whole boot, never freed.
-        let region = unsafe { core::slice::from_raw_parts_mut(physical as *mut u8, bytes) };
+        let region = match pack {
+            Some(region) => region,
+            None => Region {
+                physical: firmware::pages(1).ok()? as u64,
+                bytes: PLACEMENT_BYTES as u64,
+            },
+        };
         let flags = if allocated && partition.is_some() {
             WRITABLE
         } else {
             0
         };
-        region[..PLACEMENT_BYTES].fill(0);
-        region[..8].copy_from_slice(&PLACEMENT_MAGIC);
-        region[8..16].copy_from_slice(&bound.to_le_bytes());
-        region[16..32].copy_from_slice(&partition.unwrap_or_default());
-        region[32..36].copy_from_slice(&flags.to_le_bytes());
-        region[40..48].copy_from_slice(&(pack.len() as u64).to_le_bytes());
-        region[PLACEMENT_BYTES..].copy_from_slice(&pack);
-        let region = Region {
-            physical: physical as u64,
-            bytes: bytes as u64,
+        // SAFETY: the exclusive loader allocation starts with space for
+        // the placement header. Initialize it before taking a mutable slice.
+        let placement = unsafe {
+            let start = region.physical as *mut u8;
+            start.write_bytes(0, PLACEMENT_BYTES);
+            core::slice::from_raw_parts_mut(start, PLACEMENT_BYTES)
         };
+        placement[..8].copy_from_slice(&PLACEMENT_MAGIC);
+        placement[8..16].copy_from_slice(&bound.to_le_bytes());
+        placement[16..32].copy_from_slice(&partition.unwrap_or_default());
+        placement[32..36].copy_from_slice(&flags.to_le_bytes());
+        let pack_bytes = region.bytes - PLACEMENT_BYTES as u64;
+        placement[40..48].copy_from_slice(&pack_bytes.to_le_bytes());
         return Some((region, flags & WRITABLE != 0));
     }
     None
@@ -252,26 +257,49 @@ fn claim_spare(root: &mut Directory, translator: &Digest) {
     ));
 }
 
-/// The pack at the start of `file`, when its index is valid and it fits
-/// the bound.
-fn read_pack(file: &mut RegularFile, translator: &Digest, bound: u64) -> Option<Vec<u8>> {
-    let mut header = vec![0; pack::HEADER_BYTES];
-    read_at(file, 0, &mut header)?;
-    let prefix = pack::prefix_bytes(&header, translator).ok()?;
-    let mut bytes = vec![0; prefix];
-    read_at(file, 0, &mut bytes)?;
-    let length = Pack::length(&bytes, translator).ok()?;
+/// Read a checked pack directly into its final handoff region.
+fn read_pack(file: &mut RegularFile, translator: &Digest, bound: u64) -> Option<Region> {
+    let mut header = [0; pack::HEADER_BYTES];
+    read_exact(file, &mut header)?;
+    let prefix_len = pack::prefix_bytes(&header, translator).ok()?;
+    if prefix_len as u64 > bound {
+        return None;
+    }
+    let mut prefix = vec![0; prefix_len];
+    prefix[..header.len()].copy_from_slice(&header);
+    read_exact(file, &mut prefix[header.len()..])?;
+    let length = Pack::length(&prefix, translator).ok()?;
     if length > bound {
         return None;
     }
-    bytes.resize(length as usize, 0);
-    let total = bytes.len() >> 20;
-    for (index, part) in bytes[prefix..].chunks_mut(PROGRESS_STEP).enumerate() {
-        read_at(file, (prefix + index * PROGRESS_STEP) as u64, part)?;
-        let done = (prefix + index * PROGRESS_STEP + part.len()) >> 20;
+    let length = length as usize;
+    let bytes = PLACEMENT_BYTES + length;
+    let pages = bytes.div_ceil(PAGE);
+    let physical = firmware::pages(pages).ok()?;
+    // SAFETY: firmware returned this exclusive allocation and `bytes` fits
+    // in it. Initialize the pack range before borrowing it as a slice.
+    let pack = unsafe {
+        let start = (physical as *mut u8).add(PLACEMENT_BYTES);
+        start.write_bytes(0, length);
+        core::slice::from_raw_parts_mut(start, length)
+    };
+    pack[..prefix_len].copy_from_slice(&prefix);
+    let total = length >> 20;
+    for (index, part) in pack[prefix_len..].chunks_mut(PROGRESS_STEP).enumerate() {
+        if read_exact(file, part).is_none() {
+            let start = NonNull::new(physical as *mut u8).expect("firmware allocation");
+            // SAFETY: the pack slice is no longer used and these are the
+            // original base and page count of the loader allocation.
+            let _ = unsafe { boot::free_pages(start, pages) };
+            return None;
+        }
+        let done = (prefix_len + index * PROGRESS_STEP + part.len()) >> 20;
         crate::status::progress(&format!("{done} of {total} MB"));
     }
-    Some(bytes)
+    Some(Region {
+        physical: physical as u64,
+        bytes: bytes as u64,
+    })
 }
 
 /// The boot's store, the bound and the partition it is written to.
