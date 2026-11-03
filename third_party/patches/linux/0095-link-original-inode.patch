@@ -1,0 +1,191 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 13:01:36 -0500
+Subject: [PATCH] refactor(fs): link original inode unhash and initialization
+ wake
+
+---
+ fs/inode.c            | 60 -------------------------------------------
+ fs/inode_cache_init.c | 60 +++++++++++++++++++++++++++++++++++++++++++
+ fs/internal.h         |  1 +
+ 3 files changed, 61 insertions(+), 60 deletions(-)
+
+diff --git a/fs/inode.c b/fs/inode.c
+index 41fcde17f94d4cb4ec55b843f65453fde0f7806b..b11e1859a074e1ef751bbbe252f6347740cd870c 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -57,8 +57,6 @@
+  *   inode->i_lock
+  */
+ 
+-static __cacheline_aligned_in_smp DEFINE_SPINLOCK(inode_hash_lock);
+-
+ #ifdef CONFIG_DEBUG_FS
+ static DEFINE_PER_CPU(long, mg_ctime_updates);
+ static DEFINE_PER_CPU(long, mg_fine_stamps);
+@@ -288,22 +286,6 @@ void __insert_inode_hash(struct inode *inode, u64 hashval)
+ }
+ EXPORT_SYMBOL(__insert_inode_hash);
+ 
+-/**
+- *	__remove_inode_hash - remove an inode from the hash
+- *	@inode: inode to unhash
+- *
+- *	Remove an inode from the superblock.
+- */
+-void __remove_inode_hash(struct inode *inode)
+-{
+-	spin_lock(&inode_hash_lock);
+-	spin_lock(&inode->i_lock);
+-	hlist_del_init_rcu(&inode->i_hash);
+-	spin_unlock(&inode->i_lock);
+-	spin_unlock(&inode_hash_lock);
+-}
+-EXPORT_SYMBOL(__remove_inode_hash);
+-
+ void dump_mapping(const struct address_space *mapping)
+ {
+ 	struct inode *host;
+@@ -749,48 +731,6 @@ struct inode *new_inode(struct super_block *sb)
+ }
+ EXPORT_SYMBOL(new_inode);
+ 
+-#ifdef CONFIG_DEBUG_LOCK_ALLOC
+-void lockdep_annotate_inode_mutex_key(struct inode *inode)
+-{
+-	if (S_ISDIR(inode->i_mode)) {
+-		struct file_system_type *type = inode->i_sb->s_type;
+-
+-		/* Set new key only if filesystem hasn't already changed it */
+-		if (lockdep_match_class(&inode->i_rwsem, &type->i_mutex_key)) {
+-			/*
+-			 * ensure nobody is actually holding i_rwsem
+-			 */
+-			init_rwsem(&inode->i_rwsem);
+-			lockdep_set_class(&inode->i_rwsem,
+-					  &type->i_mutex_dir_key);
+-		}
+-	}
+-}
+-EXPORT_SYMBOL(lockdep_annotate_inode_mutex_key);
+-#endif
+-
+-/**
+- * unlock_new_inode - clear the I_NEW state and wake up any waiters
+- * @inode:	new inode to unlock
+- *
+- * Called when the inode is fully initialised to clear the new state of the
+- * inode and wake up anyone waiting for the inode to finish initialisation.
+- */
+-void unlock_new_inode(struct inode *inode)
+-{
+-	lockdep_annotate_inode_mutex_key(inode);
+-	spin_lock(&inode->i_lock);
+-	WARN_ON(!(inode_state_read(inode) & I_NEW));
+-	/*
+-	 * Paired with igrab_from_hash()
+-	 */
+-	smp_wmb();
+-	inode_state_clear(inode, I_NEW | I_CREATING);
+-	inode_wake_up_bit(inode, __I_NEW);
+-	spin_unlock(&inode->i_lock);
+-}
+-EXPORT_SYMBOL(unlock_new_inode);
+-
+ void discard_new_inode(struct inode *inode)
+ {
+ 	lockdep_annotate_inode_mutex_key(inode);
+diff --git a/fs/inode_cache_init.c b/fs/inode_cache_init.c
+index e619c805a8a086ab398bb0e71452bc6d7cfadd12..e62a751f507dbbc9f76db62d0a5a45f8f5006140 100644
+--- a/fs/inode_cache_init.c
++++ b/fs/inode_cache_init.c
+@@ -5,6 +5,7 @@
+  * (C) 1999 Andrea Arcangeli <andrea@suse.de> (dynamic inode allocation)
+  */
+ #include <linux/backing-dev.h>
++#include <linux/cache.h>
+ #include <linux/export.h>
+ #include <linux/filelock.h>
+ #include <linux/fs.h>
+@@ -20,6 +21,7 @@
+ #include "inode_lru.h"
+ #include "internal.h"
+ 
++__cacheline_aligned_in_smp DEFINE_SPINLOCK(inode_hash_lock);
+ unsigned int inode_hash_mask __ro_after_init;
+ unsigned int inode_hash_shift __ro_after_init;
+ struct hlist_head *inode_hashtable __ro_after_init;
+@@ -284,3 +286,61 @@ void __destroy_inode(struct inode *inode)
+ 	this_cpu_dec(nr_inodes);
+ }
+ EXPORT_SYMBOL(__destroy_inode);
++
++/**
++ *	__remove_inode_hash - remove an inode from the hash
++ *	@inode: inode to unhash
++ *
++ *	Remove an inode from the superblock.
++ */
++void __remove_inode_hash(struct inode *inode)
++{
++	spin_lock(&inode_hash_lock);
++	spin_lock(&inode->i_lock);
++	hlist_del_init_rcu(&inode->i_hash);
++	spin_unlock(&inode->i_lock);
++	spin_unlock(&inode_hash_lock);
++}
++EXPORT_SYMBOL(__remove_inode_hash);
++
++#ifdef CONFIG_DEBUG_LOCK_ALLOC
++void lockdep_annotate_inode_mutex_key(struct inode *inode)
++{
++	if (S_ISDIR(inode->i_mode)) {
++		struct file_system_type *type = inode->i_sb->s_type;
++
++		/* Set new key only if filesystem hasn't already changed it */
++		if (lockdep_match_class(&inode->i_rwsem, &type->i_mutex_key)) {
++			/*
++			 * ensure nobody is actually holding i_rwsem
++			 */
++			init_rwsem(&inode->i_rwsem);
++			lockdep_set_class(&inode->i_rwsem,
++					  &type->i_mutex_dir_key);
++		}
++	}
++}
++EXPORT_SYMBOL(lockdep_annotate_inode_mutex_key);
++#endif
++
++/**
++ * unlock_new_inode - clear the I_NEW state and wake up any waiters
++ * @inode:	new inode to unlock
++ *
++ * Called when the inode is fully initialised to clear the new state of the
++ * inode and wake up anyone waiting for the inode to finish initialisation.
++ */
++void unlock_new_inode(struct inode *inode)
++{
++	lockdep_annotate_inode_mutex_key(inode);
++	spin_lock(&inode->i_lock);
++	WARN_ON(!(inode_state_read(inode) & I_NEW));
++	/*
++	 * Paired with igrab_from_hash()
++	 */
++	smp_wmb();
++	inode_state_clear(inode, I_NEW | I_CREATING);
++	inode_wake_up_bit(inode, __I_NEW);
++	spin_unlock(&inode->i_lock);
++}
++EXPORT_SYMBOL(unlock_new_inode);
+diff --git a/fs/internal.h b/fs/internal.h
+index e51d9a1c5b96828202c26fad34321062e648918f..3fb532b80f05a033c74d293cc4506d7b5468db33 100644
+--- a/fs/internal.h
++++ b/fs/internal.h
+@@ -209,6 +209,7 @@ extern int vfs_open(const struct path *, struct file *);
+  * inode.c
+  */
+ /* Shared storage for the original inode cache and hash initializers. */
++extern spinlock_t inode_hash_lock;
+ extern unsigned int inode_hash_mask;
+ extern unsigned int inode_hash_shift;
+ extern struct hlist_head *inode_hashtable;
