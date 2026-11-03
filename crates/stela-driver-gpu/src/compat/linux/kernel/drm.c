@@ -20,16 +20,23 @@ const char *video_get_options(const char *name)
 #include <drm/drm_device.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_mode_config.h>
-#include <stela/linux.h>
 #include <stela/test.h>
 
 static unsigned int warnings;
 
-static void format_warning(void *context, const char *file, int line, const char *condition)
+/* This fixture expects WARN_ON for an unknown format. Any printk indicates
+ * a different path and fails the oracle. */
+void stela_linux_warn(const char *file, int line, const char *condition, unsigned int flags);
+void stela_linux_warn(const char *file, int line, const char *condition, unsigned int flags)
 {
-	(void)context;
+	(void)flags;
 	assert(file && line > 0 && condition);
 	warnings++;
+}
+
+int _printk(const char *format, ...)
+{
+	stela_test_fail(__FILE__, __LINE__, format);
 }
 
 static void rgb_and_pitch(void)
@@ -125,14 +132,10 @@ static void invalid_inputs(void)
 
 int main(void)
 {
-	const struct stela_linux_services services = {.warn = format_warning};
-	const struct stela_linux_owner owner = {.services = &services};
-	stela_linux_enter(&owner);
 	rgb_and_pitch();
 	yuv_and_subbyte_formats();
 	device_format_lookup();
 	invalid_inputs();
-	stela_linux_exit();
 	printf("Linux DRM formats: RGB, YUV, sub-byte, modifiers, bounds and 64-bit pitches\n");
 	return 0;
 }
