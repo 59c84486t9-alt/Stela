@@ -203,6 +203,13 @@ impl<const N: usize> Environment<N> {
         unsafe { Pin::new_unchecked(self.runtime.as_ref()) }
     }
 
+    fn initial(&self) -> Option<&initial::Initial<N>> {
+        // SAFETY: only the runtime's CPU can access this Environment. Start
+        // writes the initially empty slot once, before any native publication.
+        // Once installed, the Initial stays in the pinned slot until drop.
+        unsafe { &*self.initial.get() }.as_ref()
+    }
+
     /// One-shot actual Initial service start. The private producer already owns
     /// the real original binding, root/code/data lease and bootstrap callback.
     /// Unknown native publication retains the whole installed startup graph;
@@ -219,7 +226,8 @@ impl<const N: usize> Environment<N> {
         // SAFETY: canonical mount keeps self and its exact Initial graph even
         // on failure/unwind. No error here is interpreted as a no-pub receipt.
         let ticket = unsafe { self.runtime().start_service(service::<N>, context) }?;
-        // No allocation or callback occurs after accepted assignment.
+        // SAFETY: the dispatcher owns the one-shot ticket slot, and the
+        // service callback does not access it.
         unsafe { *self.service_ticket.get() = Some(ticket) };
         self.service_started.store(true, Ordering::Release);
         Ok(())
@@ -232,10 +240,7 @@ impl<const N: usize> Environment<N> {
         {
             return Err(WorkError::InvalidStack);
         }
-        // SAFETY: the preceding real dispatcher/process CPU validation and
-        // serialized cold start exclude concurrent mutation or recursion.
-        if unsafe { &*self.initial.get() }.is_some() || self.service_started.load(Ordering::Acquire)
-        {
+        if self.initial().is_some() || self.service_started.load(Ordering::Acquire) {
             return Err(WorkError::Busy);
         }
         Ok(())
@@ -248,17 +253,14 @@ impl<const N: usize> Environment<N> {
     /// Exact retained Initial bootstrap failure, for the original CPU's
     /// dispatcher diagnostics only. It grants no retry or resource readiness.
     pub fn initial_failure(&self) -> Option<super::task::ResourceBootstrapError> {
-        // SAFETY: Environment is CPU-local; the one-shot initial slot is never
-        // removed/replaced after publication and its terminal diagnostic uses
-        // a release/acquire phase. No C object is dereferenced by this query.
-        unsafe { &*self.initial.get() }
-            .as_ref()
-            .and_then(initial::Initial::failure)
+        self.initial().and_then(initial::Initial::failure)
     }
     /// Observe this exact service assignment only. This says nothing about
     /// original managed children, WQ pools, source/RCU teardown or kernel join.
     /// A genuine permanent Initial returning is a retained contract failure.
     pub fn finished(&self) -> Result<bool, WorkError> {
+        // SAFETY: only the runtime's CPU can access the ticket. The start
+        // path installs it once, and service callbacks never modify it.
         let ticket = unsafe { *self.service_ticket.get() };
         let Some(ticket) = ticket else {
             return Ok(true);
@@ -266,7 +268,7 @@ impl<const N: usize> Environment<N> {
         if !self.runtime().queue().completed(ticket)? {
             return Ok(false);
         }
-        if unsafe { &*self.initial.get() }.is_some() {
+        if self.initial().is_some() {
             return Err(WorkError::CorruptContext);
         }
         Ok(true)
@@ -391,7 +393,7 @@ impl<const N: usize> Environment<N> {
         }
         // The genuine original Initial is a permanent mount, with live
         // original resource/task/RCU roots. No joined kernel teardown exists.
-        if unsafe { &*self.initial.get() }.is_some() {
+        if self.initial().is_some() {
             return Err(WorkError::Busy);
         }
         self.stopping.store(true, Ordering::Release);
@@ -412,7 +414,7 @@ impl<const N: usize> Environment<N> {
         if unsafe { (*self.deferred.get()).len } != 0 {
             return Err(WorkError::Pending);
         }
-        if unsafe { &*self.initial.get() }.is_some() {
+        if self.initial().is_some() {
             return Err(WorkError::Busy); // actual permanent original roots remain
         }
         // SAFETY: only a genuinely unstarted/closed descriptor can reach this
@@ -438,14 +440,9 @@ unsafe extern "C" fn begin<const N: usize>(context: *mut c_void) -> bool {
     // C already entered this exact canonical owner on the real Initial.
     // No queue/row/EnteredProcess loan spans original resource helpers, clone,
     // completion waits or their actual physical switches.
-    unsafe { &*this.initial.get() }
-        .as_ref()
-        .expect("retained original Initial")
-        .bootstrap();
-    unsafe { &*this.initial.get() }
-        .as_ref()
-        .expect("retained original Initial")
-        .service();
+    let initial = this.initial().expect("retained original Initial");
+    initial.bootstrap();
+    initial.service();
     let batch = this
         .domain
         .begin(this.runtime())
@@ -520,13 +517,12 @@ unsafe extern "C" fn drain<const N: usize>(context: *mut c_void) {
 unsafe extern "C" fn finish<const N: usize>(context: *mut c_void) {
     // SAFETY: original actual service call's retained Environment context.
     let this = unsafe { environment::<N>(context) };
-    // Take the true affine batch BEFORE C expiry delivery; no mutable cell/
-    // row/deadline borrow or entered permit survives the foreign callback.
-    let batch = core::mem::ManuallyDrop::new(
-        unsafe { &mut *this.batch.get() }
-            .take()
-            .expect("actual batch"),
-    );
+    // SAFETY: only this service task accesses the batch slot. Take its value
+    // before C expiry delivery so the cell borrow ends before the callback.
+    let batch = unsafe { &mut *this.batch.get() }
+        .take()
+        .expect("actual batch");
+    let batch = core::mem::ManuallyDrop::new(batch);
     let deadline = {
         let delivery =
             timer::TimerDelivery::new(this, &batch).unwrap_or_else(|error| timer::fatal(error));
@@ -556,9 +552,7 @@ unsafe extern "C" fn service<const N: usize>(context: *mut c_void) {
     // SAFETY: `start`'s context.
     let this = unsafe { environment::<N>(context) };
     let runtime = this.runtime();
-    let initial = unsafe { &*this.initial.get() }
-        .as_ref()
-        .expect("retained original Initial");
+    let initial = this.initial().expect("retained original Initial");
     let binding = initial.binding();
     binding
         .bind_current(runtime)
