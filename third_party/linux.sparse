@@ -97,6 +97,7 @@
 /init/version-timestamp.c
 /lib/refcount.c
 /lib/refcount_lock.c
+/lib/rcuref.c
 /drivers/dma-buf/Makefile
 /drivers/dma-buf/dma-fence.c
 /drivers/dma-buf/dma-resv.c

@@ -149,6 +149,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/kobject_uevent.c")),
             PathBuf::from(format!("{LINUX}/lib/ctype.c")),
             PathBuf::from(format!("{LINUX}/lib/refcount_lock.c")),
+            PathBuf::from(format!("{LINUX}/lib/rcuref.c")),
             PathBuf::from(format!("{LINUX}/kernel/user.c")),
             PathBuf::from(format!("{LINUX}/kernel/kthread.c")),
             PathBuf::from(format!("{LINUX}/kernel/workqueue.c")),
