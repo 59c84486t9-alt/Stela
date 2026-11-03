@@ -173,7 +173,13 @@ fn stage2_combined_entries_keep_real_rights_and_device_alignment_is_never_cached
         assert_eq!(read(&mut thread), (MemoryStatus::Success, 7));
         assert_eq!(read(&mut thread), (MemoryStatus::Success, 7));
         assert_eq!(
-            thread.policy_mut().tlb.cells.iter().flatten().count(),
+            thread
+                .policy_mut()
+                .tlb
+                .cells
+                .iter()
+                .filter(|entry| entry.page != Entry::EMPTY.page)
+                .count(),
             usize::from(!device)
         );
         #[cfg(feature = "native-profile")]
@@ -223,5 +229,44 @@ fn terminal_physical_owner_failure_defeats_a_hot_translation() {
     assert_eq!(
         thread.prepare(Default::default()).err(),
         Some(MemoryStatus::Domain)
+    );
+}
+
+#[test]
+fn one_block_walk_covers_distinct_host_pages_until_the_epoch_changes() {
+    let (mut thread, ram) = thread();
+    const L2: u64 = 0x12000;
+    const BLOCK: u64 = 1 | (1 << 10) | (3 << 8);
+    publish(&ram, L2, &BLOCK.to_le_bytes());
+    publish(&ram, DATA, &7u64.to_le_bytes());
+    publish(&ram, OTHER, &9u64.to_le_bytes());
+    let mut bytes = [0; 8];
+    assert_eq!(
+        ordinary_transfer(&mut thread, DATA, &mut bytes, 0).0,
+        MemoryStatus::Success
+    );
+    assert_eq!(u64::from_le_bytes(bytes), 7);
+    // The block's architectural translation may survive a changed PTE.
+    // A different 4 KiB subpage needs no descriptor read or native alias.
+    publish(&ram, L2, &0u64.to_le_bytes());
+    assert_eq!(
+        ordinary_transfer(&mut thread, OTHER, &mut bytes, 0).0,
+        MemoryStatus::Success
+    );
+    assert_eq!(u64::from_le_bytes(bytes), 9);
+    #[cfg(feature = "native-profile")]
+    {
+        let stats = thread.policy_mut().data_tlb_statistics();
+        assert_eq!((stats.walks, stats.descriptor_reads, stats.hits), (1, 3, 1));
+    }
+    let unowned = OTHER + PAGE_BYTES;
+    assert_eq!(
+        ordinary_transfer(&mut thread, unowned, &mut bytes, 0),
+        (MemoryStatus::Unsupported, 0, unowned)
+    );
+    refresh(&mut thread, 2);
+    assert_eq!(
+        ordinary_transfer(&mut thread, OTHER, &mut bytes, 0).0,
+        MemoryStatus::Translation
     );
 }
