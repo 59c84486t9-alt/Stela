@@ -305,6 +305,46 @@ impl CounterEpoch {
     }
 }
 
+/// A physical minimum on the same retained epoch as the scheduler clock.
+pub(crate) struct MinimumDeadline {
+    epoch: CounterEpoch,
+    target: u64,
+    nominal_ns: u64,
+}
+
+impl CounterEpoch {
+    pub(crate) fn minimum_deadline(&self, minimum_ns: u64) -> Result<MinimumDeadline, WorkError> {
+        let start = self.sample()?;
+        let counter = self
+            .cpu
+            .source
+            .hpet_counter()
+            .ok_or(WorkError::Unavailable)?;
+        let ticks = counter.ticks_for_minimum_ns(minimum_ns)?;
+        let target = start.ticks.checked_add(ticks).ok_or(WorkError::Exhausted)?;
+        let nominal_ns = self.cpu.source.ns(target)?;
+        if nominal_ns == NONE {
+            return Err(WorkError::Exhausted);
+        }
+        Ok(MinimumDeadline {
+            epoch: self.clone(),
+            target,
+            nominal_ns,
+        })
+    }
+}
+
+impl MinimumDeadline {
+    pub(crate) fn ready(&self) -> Result<bool, WorkError> {
+        Ok(self.epoch.sample()?.ticks >= self.target)
+    }
+
+    pub(crate) fn nominal_ns(&self) -> Result<u64, WorkError> {
+        self.epoch.sample()?;
+        Ok(self.nominal_ns)
+    }
+}
+
 struct Counter {
     word: NonNull<AtomicU64>,
     generation: NonNull<AtomicU64>,

@@ -46,6 +46,18 @@ pub(crate) unsafe fn check_native(
 }
 
 fn run(installed: Installed, epoch: Option<CounterEpoch>) -> Result<(), WorkError> {
+    if let Some(epoch) = &epoch {
+        let start = epoch.sample()?;
+        let minimum = epoch.minimum_deadline(100_000)?;
+        let nominal = minimum.nominal_ns()?;
+        while !minimum.ready()? {
+            core::hint::spin_loop();
+        }
+        let end = epoch.sample()?;
+        if epoch.now_ns()? < nominal || epoch.elapsed_bounds(&start, &end)?.lower_ns < 100_000 {
+            return Err(WorkError::CorruptContext);
+        }
+    }
     let epoch_start = epoch.as_ref().map(CounterEpoch::sample).transpose()?;
     let observation = installed.observation()?;
     let clock = Arc::clone(&installed.clock);

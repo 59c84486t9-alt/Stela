@@ -207,6 +207,13 @@ impl Counter {
         }
     }
 
+    pub(super) fn ticks_for_minimum_ns(&self, minimum_ns: u64) -> Result<u64, WorkError> {
+        self.continuous_period()?;
+        self.geometry
+            .ticks_for_minimum_ns(minimum_ns)
+            .map_err(|_| WorkError::Exhausted)
+    }
+
     pub(crate) fn elapsed_bounds(
         &self,
         ticks: u64,
