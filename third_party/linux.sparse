@@ -16,6 +16,7 @@
 /drivers/gpu/drm/Kconfig
 /lib/rbtree.c
 /lib/lockref.c
+/lib/is_single_threaded.c
 /lib/rhashtable.c
 /lib/kobject.c
 /lib/kobject_uevent.c

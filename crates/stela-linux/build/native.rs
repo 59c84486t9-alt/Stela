@@ -178,6 +178,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/ctype.c")),
             PathBuf::from(format!("{LINUX}/lib/refcount_lock.c")),
             PathBuf::from(format!("{LINUX}/lib/lockref.c")),
+            PathBuf::from(format!("{LINUX}/lib/is_single_threaded.c")),
             PathBuf::from(format!("{LINUX}/lib/rcuref.c")),
             PathBuf::from(format!("{LINUX}/lib/flex_proportions.c")),
             PathBuf::from(format!("{LINUX}/kernel/user.c")),
