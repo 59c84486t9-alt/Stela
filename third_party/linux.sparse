@@ -109,6 +109,8 @@
 /fs/seq_output.h
 /mm/Makefile
 /mm/mm_init.c
+/mm/oom_kill.c
+/mm/oom_adj.c
 /mm/system_hash.h
 /mm/list_lru.c
 /mm/page_alloc.c
