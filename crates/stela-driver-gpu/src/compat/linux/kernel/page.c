@@ -85,11 +85,19 @@ DEFINE_STATIC_KEY_MAYBE(CONFIG_INIT_ON_FREE_DEFAULT_ON, init_on_free);
 
 /* The catalog covers one node and one zone. Runtime stack reservations
  * remain physically present, but the ordinary allocator cannot manage them. */
-static void publish_memory_counts(unsigned long present, long managed)
+static void publish_memory_inventory(unsigned long start_pfn, unsigned long end_pfn,
+                                     unsigned long present, long managed)
 {
 	struct zone *zone = &contig_page_data.node_zones[ZONE_NORMAL];
+	unsigned long spanned = end_pfn - start_pfn;
 
+	contig_page_data.node_start_pfn = start_pfn;
+	contig_page_data.node_spanned_pages = spanned;
 	contig_page_data.node_present_pages = present;
+	contig_page_data.nr_zones = present ? ZONE_NORMAL + 1 : 0;
+	zone->zone_pgdat = present ? &contig_page_data : NULL;
+	zone->zone_start_pfn = start_pfn;
+	zone->spanned_pages = spanned;
 	zone->present_pages = present;
 	atomic_long_set(&zone->managed_pages, managed);
 	atomic_long_set(&_totalram_pages, managed);
@@ -287,7 +295,10 @@ static int register_inventory(
     catalog.free_records = 0;
     catalog.retired = NO_INDEX;
     catalog.next_stack_nonce = 1;
-    publish_memory_counts(count, (long)managed);
+    const struct stela_linux_page_reservation *last = &extents[extent_count - 1];
+    publish_memory_inventory(PHYS_PFN(extents[0].physical_base),
+                             PHYS_PFN(last->physical_base) + last->page_count,
+                             count, (long)managed);
     last_generation = generation;
     return 0;
 }
@@ -609,7 +620,7 @@ int stela_linux_page_catalog_unregister(u64 generation)
 	free_metadata(catalog.state, count * sizeof(*catalog.state), __alignof__(*catalog.state));
 	free_metadata(catalog.pages, count * sizeof(*catalog.pages), __alignof__(*catalog.pages));
 	memset(&catalog, 0, sizeof(catalog));
-	publish_memory_counts(0, 0);
+	publish_memory_inventory(0, 0, 0, 0);
 	return 0;
 }
 
@@ -1997,7 +2008,7 @@ static void annotated_stack_admission(void)
     unsigned char *stack = aligned_alloc(THREAD_ALIGN, THREAD_SIZE);
     assert(stack);
     memset(stack, 0, THREAD_SIZE);
-    u64 stack_physical = TEST_PHYSICAL + TEST_PAGES * PAGE_SIZE;
+    u64 stack_physical = TEST_PHYSICAL + TEST_PAGES * PAGE_SIZE + THREAD_SIZE;
     u64 physical[THREAD_SIZE / PAGE_SIZE];
     for (size_t i = 0; i < ARRAY_SIZE(physical); i++)
         physical[i] = stack_physical + i * PAGE_SIZE;
@@ -2058,6 +2069,13 @@ static void annotated_stack_admission(void)
     assert(zone_managed_pages(zone) == TEST_PAGES);
     assert(zone->present_pages == TEST_PAGES + ARRAY_SIZE(physical));
     assert(node_present_pages(0) == zone->present_pages);
+    assert(zone->zone_start_pfn == PHYS_PFN(TEST_PHYSICAL));
+    assert(zone_end_pfn(zone) == PHYS_PFN(stack_physical) + ARRAY_SIZE(physical));
+    assert(zone->spanned_pages == zone->present_pages + THREAD_SIZE / PAGE_SIZE);
+    assert(contig_page_data.node_start_pfn == zone->zone_start_pfn);
+    assert(contig_page_data.node_spanned_pages == zone->spanned_pages);
+    assert(contig_page_data.nr_zones == ZONE_NORMAL + 1);
+    assert(zone->zone_pgdat == &contig_page_data);
     struct sysinfo info;
     si_meminfo(&info);
     assert(info.totalram == TEST_PAGES && info.mem_unit == PAGE_SIZE);
@@ -2138,7 +2156,7 @@ static void annotated_stack_admission(void)
     assert(stela_linux_page_stack_cancel(&ticket) == -EINVAL);
     assert(!stela_linux_page_stack_cancel(&second));
     /* Original ordinary source/refcount/release behavior still works while
-     * the adjacent stack descriptors remain reserved and unreferenced. */
+     * the separate stack descriptors remain reserved and unreferenced. */
     struct page *page = alloc_page(GFP_KERNEL | __GFP_ZERO);
     assert(page && page_ref_count(page) == 1);
     __free_page(page);
@@ -2148,6 +2166,9 @@ static void annotated_stack_admission(void)
     assert(!metadata_live);
     assert(!totalram_pages() && !zone_managed_pages(zone));
     assert(!node_present_pages(0) && !zone->present_pages);
+    assert(!zone->zone_start_pfn && !zone->spanned_pages && !zone->zone_pgdat);
+    assert(!contig_page_data.node_start_pfn && !contig_page_data.node_spanned_pages);
+    assert(!contig_page_data.nr_zones);
     free(stack);
 }
 
