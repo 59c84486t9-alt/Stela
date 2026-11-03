@@ -71,6 +71,7 @@
 /kernel/sched/completion.c
 /kernel/exit.c
 /kernel/task_rcu.c
+/kernel/task_work.c
 /kernel/fork.c
 /kernel/fork_caches.c
 /kernel/fork_caches.h
