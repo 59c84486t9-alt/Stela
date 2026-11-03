@@ -8,7 +8,7 @@ use crate::{
     },
     threads::KernelThreadPlatform,
 };
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, rc::Rc, sync::Arc};
 use core::{cell::Cell, mem::ManuallyDrop, pin::Pin};
 use stela_driver_base::platform::work::WorkError;
 mod job;
@@ -39,21 +39,18 @@ impl core::fmt::Display for StartError {
     }
 }
 impl core::error::Error for StartError {}
+type ProbeJob = Pin<Box<dyn ManagedJob>>;
+type StartFailureParts<P, const N: usize> = (StartError, Arc<KernelOwner<P, N>>, Option<ProbeJob>);
+
 /// Exact rejected owned request and canonical kernel. Default abandonment
 /// retains both; no status/errno is converted into a no-publication receipt.
 pub struct StartFailure<P: Platform, const N: usize> {
     pub error: StartError,
     kernel: ManuallyDrop<Arc<KernelOwner<P, N>>>,
-    rejected: ManuallyDrop<Option<Pin<Box<dyn ManagedJob>>>>,
+    rejected: ManuallyDrop<Option<ProbeJob>>,
 }
 impl<P: Platform, const N: usize> StartFailure<P, N> {
-    pub fn into_parts(
-        mut self,
-    ) -> (
-        StartError,
-        Arc<KernelOwner<P, N>>,
-        Option<Pin<Box<dyn ManagedJob>>>,
-    ) {
+    pub fn into_parts(mut self) -> StartFailureParts<P, N> {
         // SAFETY: consuming the exact returned/never-submitted owned request;
         // this extracts no accepted pending graph or fabricated native receipt.
         let kernel = unsafe { ManuallyDrop::take(&mut self.kernel) };
@@ -80,7 +77,7 @@ pub enum Status {
 /// producers, actual native/C/stack/page/RCU graph and canonical kernel alive.
 pub struct Bootstrap<P: KernelThreadPlatform + 'static, const N: usize> {
     kernel: ManuallyDrop<Arc<KernelOwner<P, N>>>,
-    result: ManuallyDrop<Arc<Cell<Option<i32>>>>,
+    result: ManuallyDrop<Rc<Cell<Option<i32>>>>,
     state: ManuallyDrop<State>,
 }
 pub struct JoinFailure<P: KernelThreadPlatform + 'static, const N: usize> {
@@ -119,8 +116,8 @@ impl<P: KernelThreadPlatform + 'static, const N: usize> Bootstrap<P, N> {
                 rejected: ManuallyDrop::new(None),
             });
         }
-        let mut result = ManuallyDrop::new(Arc::new(Cell::new(None)));
-        let owned = job::new(Arc::clone(&kernel), Arc::clone(&result));
+        let mut result = ManuallyDrop::new(Rc::new(Cell::new(None)));
+        let owned = job::new(Arc::clone(&kernel), Rc::clone(&result));
         // SAFETY: genuine same-owner producer owns the pinned job before source
         // creation. Pending retains every accepted/uncertain publication tail.
         let pending = match unsafe { runtime.submit(owned) } {
@@ -212,16 +209,16 @@ impl<P: KernelThreadPlatform + 'static, const N: usize> Bootstrap<P, N> {
                 bootstrap: self,
             });
         }
-        let kernel = Arc::clone(&self.kernel);
         // SAFETY: same genuine joined job extracted once; it holds only Rust
         // kernel/result owners. No source ref destructor needs invented current.
         let State::Joined(joined) = (unsafe { ManuallyDrop::take(&mut self.state) }) else {
             unreachable!()
         };
         drop(joined.into_job());
-        // SAFETY: actual owned job/tails joined; Ready already keeps this kernel.
+        // SAFETY: actual owned job and tails joined. The kernel remains retained.
         drop(unsafe { ManuallyDrop::take(&mut self.result) });
-        drop(unsafe { ManuallyDrop::take(&mut self.kernel) });
+        // SAFETY: transfer the sole retained Bootstrap kernel field to Ready.
+        let kernel = unsafe { ManuallyDrop::take(&mut self.kernel) };
         Ok(Ready { kernel })
     }
 }

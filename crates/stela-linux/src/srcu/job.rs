@@ -3,13 +3,13 @@ use super::*;
 use core::marker::PhantomPinned;
 struct Job<P: KernelThreadPlatform + 'static, const N: usize> {
     kernel: Arc<KernelOwner<P, N>>,
-    result: Arc<Cell<Option<i32>>>,
+    result: Rc<Cell<Option<i32>>>,
     _pin: PhantomPinned,
 }
 pub(super) fn new<P: KernelThreadPlatform + 'static, const N: usize>(
     kernel: Arc<KernelOwner<P, N>>,
-    result: Arc<Cell<Option<i32>>>,
-) -> Pin<Box<dyn ManagedJob>> {
+    result: Rc<Cell<Option<i32>>>,
+) -> ProbeJob {
     Box::pin(Job {
         kernel,
         result,

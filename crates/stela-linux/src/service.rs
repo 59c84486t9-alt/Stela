@@ -191,24 +191,6 @@ impl<const N: usize> Environment<N> {
         }))
     }
 
-    pub(crate) fn srcu_admission(&self) -> Result<(), WorkError> {
-        self.runtime()
-            .general_capacity(super::task::stack_requirement()?)?;
-        if self.stopping.load(Ordering::Acquire) {
-            return Err(WorkError::Closed);
-        }
-        if !self.service_started.load(Ordering::Acquire) {
-            return Err(WorkError::Unavailable);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn srcu_job_completed(&self, ticket: Ticket) -> Result<bool, WorkError> {
-        self.runtime()
-            .general_capacity(super::task::stack_requirement()?)?;
-        self.runtime().queue().completed(ticket)
-    }
-
     pub(crate) fn matches_runtime(self: Pin<&Self>, runtime: Pin<&Runtime<N>>) -> bool {
         core::ptr::eq(
             self.runtime.as_ptr(),
