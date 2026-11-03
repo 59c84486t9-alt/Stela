@@ -189,6 +189,7 @@
 /fs/anon_inodes.c
 /fs/mnt_idmapping.c
 /fs/inode.c
+/fs/fs-writeback.c
 /fs/inode_evict.c
 /fs/open.c
 /fs/filp_close.c
