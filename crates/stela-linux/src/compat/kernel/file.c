@@ -14,6 +14,7 @@
 #include <linux/fs_context.h>
 #include <linux/idr.h>
 #include <linux/kdev_t.h>
+#include <linux/llist.h>
 #include <linux/mount.h>
 #include <linux/pseudo_fs.h>
 #include <linux/shmem_fs.h>
@@ -99,21 +100,20 @@ static void release(struct file *file)
 	kfree(file);
 }
 
-struct release_work {
-	struct work_struct work;
-	struct file *file;
-};
+static LLIST_HEAD(release_pending);
 
 static void release_later(struct work_struct *work)
 {
-	struct release_work *later = container_of(work, struct release_work, work);
+	(void)work;
+	struct llist_node *pending = llist_del_all(&release_pending);
+	struct file *file, *next;
 
-	release(later->file);
-	kfree(later);
+	llist_for_each_entry_safe(file, next, pending, f_llist)
+		release(file);
 }
 
-/* A driver's release may sleep, so an atomic caller's waits for a worker, as
- * Linux's waits for its task work. */
+static DECLARE_WORK(release_worker, release_later);
+
 void fput(struct file *file)
 {
 	if (!file_ref_put(&file->f_ref))
@@ -122,13 +122,12 @@ void fput(struct file *file)
 		release(file);
 		return;
 	}
-	struct release_work *later = kmalloc_obj(*later, GFP_ATOMIC);
 
-	if (WARN_ON(!later))
-		return;
-	later->file = file;
-	INIT_WORK(&later->work, release_later);
-	schedule_work(&later->work);
+	/* Like Linux's delayed fput, the dead file carries its own queue node.
+	 * The empty-to-nonempty producer schedules the drain, including when
+	 * new files arrive while an earlier batch is being released. */
+	if (llist_add(&file->f_llist, &release_pending))
+		schedule_work(&release_worker);
 }
 
 struct file *anon_inode_getfile(const char *name, const struct file_operations *fops, void *priv,
