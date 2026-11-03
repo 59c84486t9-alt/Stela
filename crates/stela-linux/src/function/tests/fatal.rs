@@ -90,9 +90,6 @@ impl Platform for Reporter {
     fn random_bytes(&self, _: &mut [u8]) {
         unreachable!()
     }
-    fn start_worker(&self, _: crate::owner::WorkerKind) -> Result<(), Errno> {
-        unreachable!()
-    }
     fn shutdown(&self, _: bool) {
         unreachable!()
     }

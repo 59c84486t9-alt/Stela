@@ -28,6 +28,7 @@ fn bare_owner_cannot_authorize_physical_minimum_or_reuse_its_owners() {
         drops: fixture.drops.clone(),
         domain: Arc::new(Identity::default()),
         map_failure: false,
+        configuration: false,
         irq_failure: false,
         enable_failure: false,
         irq_calls: Arc::new(AtomicUsize::new(0)),
