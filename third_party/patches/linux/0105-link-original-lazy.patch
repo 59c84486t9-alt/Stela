@@ -1,0 +1,924 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 14:46:06 -0500
+Subject: [PATCH] refactor(vfs): link original lazy mount detachment
+
+---
+ fs/mount_cache.c | 352 ++++++++++++++++++++++++++++++++++++++++++-
+ fs/mount_cache.h |  47 ++++++
+ fs/namespace.c   | 384 +----------------------------------------------
+ 3 files changed, 400 insertions(+), 383 deletions(-)
+
+diff --git a/fs/mount_cache.c b/fs/mount_cache.c
+index 526414e814c059430333a5a341deb410495320f5..5b81d938fd84ca2da9735f9bf23cd60d20eef5c4 100644
+--- a/fs/mount_cache.c
++++ b/fs/mount_cache.c
+@@ -8,12 +8,14 @@
+ #include <linux/sched/task.h>
+ #include <linux/task_work.h>
+ #include <linux/memblock.h>
++#include <linux/nstree.h>
++#include <linux/user_namespace.h>
+ #include <linux/rculist.h>
+ #include <linux/slab.h>
+ #include <linux/xarray.h>
+ 
+ #include "internal.h"
+-#include "mount.h"
++#include "pnode.h"
+ #include "mount_cache.h"
+ 
+ __cacheline_aligned_in_smp DEFINE_SEQLOCK(mount_lock);
+@@ -488,3 +490,351 @@ void mntput(struct vfsmount *mnt)
+ 	}
+ }
+ EXPORT_SYMBOL(mntput);
++
++static DEFINE_IDA(mnt_group_ida);
++
++/*
++ * Allocate a new peer group ID
++ */
++int mnt_alloc_group_id(struct mount *mnt)
++{
++	int res = ida_alloc_min(&mnt_group_ida, 1, GFP_KERNEL);
++
++	if (res < 0)
++		return res;
++	mnt->mnt_group_id = res;
++	return 0;
++}
++
++/*
++ * Release a peer group ID
++ */
++void mnt_release_group_id(struct mount *mnt)
++{
++	ida_free(&mnt_group_ida, mnt->mnt_group_id);
++	mnt->mnt_group_id = 0;
++}
++
++u64 mnt_namespace_event;
++
++DECLARE_RWSEM(namespace_sem);
++static HLIST_HEAD(unmounted);	/* protected by namespace_sem */
++static LIST_HEAD(ex_mountpoints); /* protected by namespace_sem */
++struct mnt_namespace *emptied_ns; /* protected by namespace_sem */
++
++#ifdef CONFIG_FSNOTIFY
++LIST_HEAD(notify_list); /* protected by namespace_sem */
++#endif
++
++void mnt_ns_release(struct mnt_namespace *ns)
++{
++	/* keep alive for {list,stat}mount() */
++	if (ns && refcount_dec_and_test(&ns->passive)) {
++		put_user_ns(ns->user_ns);
++		kfree(ns);
++	}
++}
++
++static void mnt_ns_release_rcu(struct rcu_head *rcu)
++{
++	mnt_ns_release(container_of(rcu, struct mnt_namespace, ns.ns_rcu));
++}
++
++static void mnt_ns_tree_remove(struct mnt_namespace *ns)
++{
++	/* remove from global mount namespace list */
++	if (ns_tree_active(ns))
++		ns_tree_remove(ns);
++
++	call_rcu(&ns->ns.ns_rcu, mnt_ns_release_rcu);
++}
++
++/*
++ * locks: mount_lock [read_seqlock_excl], namespace_sem [excl]
++ */
++void unpin_mountpoint(struct pinned_mountpoint *m)
++{
++	if (m->mp) {
++		hlist_del(&m->node);
++		maybe_free_mountpoint(m->mp, &ex_mountpoints);
++	}
++}
++
++/*
++ * vfsmount lock must be held for write
++ */
++static void __touch_mnt_namespace(struct mnt_namespace *ns)
++{
++	if (ns && ns->event != mnt_namespace_event) {
++		ns->event = mnt_namespace_event;
++		wake_up_interruptible(&ns->poll);
++	}
++}
++
++/*
++ * locks: mount_lock[write_seqlock], namespace_sem[excl] (for ex_mountpoints)
++ */
++void umount_mnt(struct mount *mnt)
++{
++	__umount_mnt(mnt, &ex_mountpoints);
++}
++
++void mnt_change_mountpoint(struct mount *parent, struct mountpoint *mp, struct mount *mnt)
++{
++	struct mountpoint *old_mp = mnt->mnt_mp;
++	struct mount *old_parent = mnt->mnt_parent;
++
++	if (old_parent->overmount == mnt)
++		old_parent->overmount = NULL;
++	list_del_init(&mnt->mnt_child);
++	hlist_del_init(&mnt->mnt_mp_list);
++	hlist_del_init_rcu(&mnt->mnt_hash);
++
++	attach_mnt(mnt, parent, mp);
++
++	maybe_free_mountpoint(old_mp, &ex_mountpoints);
++}
++
++#ifdef CONFIG_FSNOTIFY
++static void mnt_notify(struct mount *p)
++{
++	if (!p->prev_ns && p->mnt_ns) {
++		fsnotify_mnt_attach(p->mnt_ns, &p->mnt);
++	} else if (p->prev_ns && !p->mnt_ns) {
++		fsnotify_mnt_detach(p->prev_ns, &p->mnt);
++	} else if (p->prev_ns == p->mnt_ns) {
++		fsnotify_mnt_move(p->mnt_ns, &p->mnt);
++	} else {
++		fsnotify_mnt_detach(p->prev_ns, &p->mnt);
++		fsnotify_mnt_attach(p->mnt_ns, &p->mnt);
++	}
++	p->prev_ns = p->mnt_ns;
++}
++
++static void notify_mnt_list(void)
++{
++	struct mount *m, *tmp;
++	/*
++	 * Notify about mounts that were added/reparented/detached/remain
++	 * connected after unmount.
++	 */
++	list_for_each_entry_safe(m, tmp, &notify_list, to_notify) {
++		mnt_notify(m);
++		list_del_init(&m->to_notify);
++	}
++}
++
++static bool need_notify_mnt_list(void)
++{
++	return !list_empty(&notify_list);
++}
++#else
++static void notify_mnt_list(void)
++{
++}
++
++static bool need_notify_mnt_list(void)
++{
++	return false;
++}
++#endif
++
++void namespace_unlock(void)
++{
++	struct hlist_head head;
++	struct hlist_node *p;
++	struct mount *m;
++	struct mnt_namespace *ns = emptied_ns;
++	LIST_HEAD(list);
++
++	hlist_move_list(&unmounted, &head);
++	list_splice_init(&ex_mountpoints, &list);
++	emptied_ns = NULL;
++
++	if (need_notify_mnt_list()) {
++		/*
++		 * No point blocking out concurrent readers while notifications
++		 * are sent. This will also allow statmount()/listmount() to run
++		 * concurrently.
++		 */
++		downgrade_write(&namespace_sem);
++		notify_mnt_list();
++		up_read(&namespace_sem);
++	} else {
++		up_write(&namespace_sem);
++	}
++	if (unlikely(ns)) {
++		/* Make sure we notice when we leak mounts. */
++		VFS_WARN_ON_ONCE(!mnt_ns_empty(ns));
++		free_mnt_ns(ns);
++	}
++
++	shrink_dentry_list(&list);
++
++	if (likely(hlist_empty(&head)))
++		return;
++
++	synchronize_rcu_expedited();
++
++	hlist_for_each_entry_safe(m, p, &head, mnt_umount) {
++		hlist_del(&m->mnt_umount);
++		mntput(&m->mnt);
++	}
++}
++
++static bool disconnect_mount(struct mount *mnt, enum umount_tree_flags how)
++{
++	/* Leaving mounts connected is only valid for lazy umounts */
++	if (how & UMOUNT_SYNC)
++		return true;
++
++	/* A mount without a parent has nothing to be connected to */
++	if (!mnt_has_parent(mnt))
++		return true;
++
++	/* Because the reference counting rules change when mounts are
++	 * unmounted and connected, umounted mounts may not be
++	 * connected to mounted mounts.
++	 */
++	if (!(mnt->mnt_parent->mnt.mnt_flags & MNT_UMOUNT))
++		return true;
++
++	/* Has it been requested that the mount remain connected? */
++	if (how & UMOUNT_CONNECTED)
++		return false;
++
++	/* Is the mount locked such that it needs to remain connected? */
++	if (IS_MNT_LOCKED(mnt))
++		return false;
++
++	/* By default disconnect the mount */
++	return true;
++}
++
++/*
++ * mount_lock must be held
++ * namespace_sem must be held for write
++ */
++void umount_tree(struct mount *mnt, enum umount_tree_flags how)
++{
++	LIST_HEAD(tmp_list);
++	struct mount *p;
++
++	if (how & UMOUNT_PROPAGATE)
++		propagate_mount_unlock(mnt);
++
++	/* Gather the mounts to umount */
++	for (p = mnt; p; p = next_mnt(p, mnt)) {
++		/* A mount is unmounted once. */
++		VFS_WARN_ON_ONCE(p->mnt.mnt_flags & MNT_UMOUNT);
++		p->mnt.mnt_flags |= MNT_UMOUNT;
++		if (mnt_ns_attached(p))
++			move_from_ns(p);
++		list_add_tail(&p->mnt_list, &tmp_list);
++	}
++
++	/* Hide the mounts from mnt_mounts */
++	list_for_each_entry(p, &tmp_list, mnt_list) {
++		list_del_init(&p->mnt_child);
++	}
++
++	/* Add propagated mounts to the tmp_list */
++	if (how & UMOUNT_PROPAGATE)
++		propagate_umount(&tmp_list);
++
++	bulk_make_private(&tmp_list);
++
++	while (!list_empty(&tmp_list)) {
++		struct mnt_namespace *ns;
++		bool disconnect;
++		p = list_first_entry(&tmp_list, struct mount, mnt_list);
++		list_del_init(&p->mnt_expire);
++		list_del_init(&p->mnt_list);
++		ns = p->mnt_ns;
++		if (ns) {
++			ns->nr_mounts--;
++			__touch_mnt_namespace(ns);
++		}
++		WRITE_ONCE(p->mnt_ns, NULL);
++		if (how & UMOUNT_SYNC)
++			p->mnt.mnt_flags |= MNT_SYNC_UMOUNT;
++
++		disconnect = disconnect_mount(p, how);
++		if (mnt_has_parent(p)) {
++			if (!disconnect) {
++				/* Don't forget about p */
++				list_add_tail(&p->mnt_child, &p->mnt_parent->mnt_mounts);
++			} else {
++				umount_mnt(p);
++			}
++		}
++		if (disconnect)
++			hlist_add_head(&p->mnt_umount, &unmounted);
++
++		/*
++		 * At this point p->mnt_ns is NULL, notification will be queued
++		 * only if
++		 *
++		 *  - p->prev_ns is non-NULL *and*
++		 *  - p->prev_ns->n_fsnotify_marks is non-NULL
++		 *
++		 * This will preclude queuing the mount if this is a cleanup
++		 * after a failed copy_tree() or destruction of an anonymous
++		 * namespace, etc.
++		 */
++		mnt_notify_add(p);
++	}
++}
++
++/*
++ * __detach_mounts - lazily unmount all mounts on the specified dentry
++ *
++ * During unlink, rmdir, and d_drop it is possible to loose the path
++ * to an existing mountpoint, and wind up leaking the mount.
++ * detach_mounts allows lazily unmounting those mounts instead of
++ * leaking them.
++ *
++ * The dentry is unhashed before the mounts go so that no lookup finds
++ * what they covered. The caller removes it for good afterwards.
++ *
++ * The caller may hold dentry->d_inode->i_rwsem.
++ */
++void __detach_mounts(struct dentry *dentry)
++{
++	struct pinned_mountpoint mp = {};
++	struct mount *mnt;
++
++	guard(namespace_excl)();
++	guard(mount_writer)();
++
++	if (!lookup_mountpoint(dentry, &mp))
++		return;
++
++	/* the name goes first, what covered it goes second */
++	d_drop(dentry);
++	mnt_namespace_event++;
++	while (mp.node.next) {
++		mnt = hlist_entry(mp.node.next, struct mount, mnt_mp_list);
++		if (mnt->mnt.mnt_flags & MNT_UMOUNT) {
++			umount_mnt(mnt);
++			hlist_add_head(&mnt->mnt_umount, &unmounted);
++		}
++		else umount_tree(mnt, UMOUNT_CONNECTED);
++	}
++	unpin_mountpoint(&mp);
++}
++
++void dec_mnt_namespaces(struct ucounts *ucounts)
++{
++	dec_ucount(ucounts, UCOUNT_MNT_NAMESPACES);
++}
++
++void free_mnt_ns(struct mnt_namespace *ns)
++{
++	if (!is_anon_ns(ns))
++		ns_common_free(ns);
++	dec_mnt_namespaces(ns->ucounts);
++	/* the last active reference is gone, no mark can show up anymore */
++	fsnotify_mntns_delete(ns);
++	mnt_ns_tree_remove(ns);
++}
+diff --git a/fs/mount_cache.h b/fs/mount_cache.h
+index 44cfa334f79c43c701d6f1278ce41c4a131ebac8..e183209ad3f09701973474ccdba327e5686e6f4e 100644
+--- a/fs/mount_cache.h
++++ b/fs/mount_cache.h
+@@ -3,8 +3,10 @@
+ #define _FS_MOUNT_CACHE_H
+ 
+ #include <linux/cache.h>
++#include <linux/cleanup.h>
+ #include <linux/init.h>
+ #include <linux/list.h>
++#include <linux/rwsem.h>
+ 
+ extern unsigned int m_hash_mask;
+ extern unsigned int m_hash_shift;
+@@ -19,6 +21,7 @@ extern struct kmem_cache *mnt_cache;
+ 
+ struct mount *alloc_vfsmnt(const char *name);
+ void mnt_free_id(struct mount *mnt);
++int mnt_alloc_group_id(struct mount *mnt);
+ void free_vfsmnt(struct mount *mnt);
+ 
+ void __init mnt_cache_init(void);
+@@ -39,6 +42,50 @@ void attach_mnt(struct mount *mnt, struct mount *parent, struct mountpoint *mp);
+ 
+ void mntput_no_expire(struct mount *mnt);
+ 
++extern u64 mnt_namespace_event;
++extern struct rw_semaphore namespace_sem;
++extern struct mnt_namespace *emptied_ns;
++
++void mnt_ns_release(struct mnt_namespace *ns);
++void free_mnt_ns(struct mnt_namespace *ns);
++void dec_mnt_namespaces(struct ucounts *ucounts);
++void unpin_mountpoint(struct pinned_mountpoint *m);
++void umount_mnt(struct mount *mnt);
++void namespace_unlock(void);
++
++static inline void namespace_lock(void)
++{
++	down_write(&namespace_sem);
++}
++
++DEFINE_LOCK_GUARD_0(namespace_excl, namespace_lock(), namespace_unlock())
++DEFINE_LOCK_GUARD_0(namespace_shared, down_read(&namespace_sem),
++				      up_read(&namespace_sem))
++
++enum umount_tree_flags {
++	UMOUNT_SYNC = 1,
++	UMOUNT_PROPAGATE = 2,
++	UMOUNT_CONNECTED = 4,
++};
++
++void umount_tree(struct mount *mnt, enum umount_tree_flags how);
++
++static inline struct mount *next_mnt(struct mount *p, struct mount *root)
++{
++	struct list_head *next = p->mnt_mounts.next;
++	if (next == &p->mnt_mounts) {
++		while (1) {
++			if (p == root)
++				return NULL;
++			next = p->mnt_child.next;
++			if (next != &p->mnt_parent->mnt_mounts)
++				break;
++			p = p->mnt_parent;
++		}
++	}
++	return list_entry(next, struct mount, mnt_child);
++}
++
+ static inline void lock_mount_hash(void)
+ {
+ 	write_seqlock(&mount_lock);
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 281d67616eb2ac3e957fcdb2e750ea64d051daf6..2dab9df8552389af45337b1f4ee5af6b75b4847a 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -51,26 +51,8 @@ static int __init initramfs_options_setup(char *str)
+ 
+ __setup("initramfs_options=", initramfs_options_setup);
+ 
+-static u64 event;
+-static DEFINE_IDA(mnt_group_ida);
+-
+-static DECLARE_RWSEM(namespace_sem);
+-static HLIST_HEAD(unmounted);	/* protected by namespace_sem */
+-static LIST_HEAD(ex_mountpoints); /* protected by namespace_sem */
+-static struct mnt_namespace *emptied_ns; /* protected by namespace_sem */
+-
+-static inline void namespace_lock(void);
+-static void namespace_unlock(void);
+-DEFINE_LOCK_GUARD_0(namespace_excl, namespace_lock(), namespace_unlock())
+-DEFINE_LOCK_GUARD_0(namespace_shared, down_read(&namespace_sem),
+-				      up_read(&namespace_sem))
+-
+ DEFINE_FREE(mntput, struct vfsmount *, if (!IS_ERR(_T)) mntput(_T))
+ 
+-#ifdef CONFIG_FSNOTIFY
+-LIST_HEAD(notify_list); /* protected by namespace_sem */
+-#endif
+-
+ enum mount_kattr_flags_t {
+ 	MOUNT_KATTR_RECURSE		= (1 << 0),
+ 	MOUNT_KATTR_IDMAP_REPLACE	= (1 << 1),
+@@ -99,31 +81,9 @@ EXPORT_SYMBOL_GPL(fs_kobj);
+  * tree or hash is modified or when a vfsmount structure is modified.
+  */
+ 
+-static void mnt_ns_release(struct mnt_namespace *ns)
+-{
+-	/* keep alive for {list,stat}mount() */
+-	if (ns && refcount_dec_and_test(&ns->passive)) {
+-		put_user_ns(ns->user_ns);
+-		kfree(ns);
+-	}
+-}
+ DEFINE_FREE(mnt_ns_release, struct mnt_namespace *,
+ 	    if (!IS_ERR(_T)) mnt_ns_release(_T))
+ 
+-static void mnt_ns_release_rcu(struct rcu_head *rcu)
+-{
+-	mnt_ns_release(container_of(rcu, struct mnt_namespace, ns.ns_rcu));
+-}
+-
+-static void mnt_ns_tree_remove(struct mnt_namespace *ns)
+-{
+-	/* remove from global mount namespace list */
+-	if (ns_tree_active(ns))
+-		ns_tree_remove(ns);
+-
+-	call_rcu(&ns->ns.ns_rcu, mnt_ns_release_rcu);
+-}
+-
+ /*
+  * Lookup a mount namespace by id and take a passive reference count. Taking a
+  * passive reference means the mount namespace can be emptied if e.g., the last
+@@ -157,28 +117,6 @@ static struct mnt_namespace *lookup_mnt_ns(u64 mnt_ns_id)
+ 	return mnt_ns;
+ }
+ 
+-/*
+- * Allocate a new peer group ID
+- */
+-static int mnt_alloc_group_id(struct mount *mnt)
+-{
+-	int res = ida_alloc_min(&mnt_group_ida, 1, GFP_KERNEL);
+-
+-	if (res < 0)
+-		return res;
+-	mnt->mnt_group_id = res;
+-	return 0;
+-}
+-
+-/*
+- * Release a peer group ID
+- */
+-void mnt_release_group_id(struct mount *mnt)
+-{
+-	ida_free(&mnt_group_ida, mnt->mnt_group_id);
+-	mnt->mnt_group_id = 0;
+-}
+-
+ /*
+  * Most r/o checks on a fs are for operations that take
+  * discrete amounts of time, like a write() or unlink().
+@@ -627,17 +565,6 @@ bool __is_local_mountpoint(const struct dentry *dentry)
+ 	return false;
+ }
+ 
+-/*
+- * locks: mount_lock [read_seqlock_excl], namespace_sem [excl]
+- */
+-static void unpin_mountpoint(struct pinned_mountpoint *m)
+-{
+-	if (m->mp) {
+-		hlist_del(&m->node);
+-		maybe_free_mountpoint(m->mp, &ex_mountpoints);
+-	}
+-}
+-
+ static inline int check_mnt(const struct mount *mnt)
+ {
+ 	return mnt->mnt_ns == current->nsproxy->mnt_ns;
+@@ -660,46 +587,11 @@ static inline bool check_anonymous_mnt(struct mount *mnt)
+ static void touch_mnt_namespace(struct mnt_namespace *ns)
+ {
+ 	if (ns) {
+-		ns->event = ++event;
+-		wake_up_interruptible(&ns->poll);
+-	}
+-}
+-
+-/*
+- * vfsmount lock must be held for write
+- */
+-static void __touch_mnt_namespace(struct mnt_namespace *ns)
+-{
+-	if (ns && ns->event != event) {
+-		ns->event = event;
++		ns->event = ++mnt_namespace_event;
+ 		wake_up_interruptible(&ns->poll);
+ 	}
+ }
+ 
+-/*
+- * locks: mount_lock[write_seqlock], namespace_sem[excl] (for ex_mountpoints)
+- */
+-static void umount_mnt(struct mount *mnt)
+-{
+-	__umount_mnt(mnt, &ex_mountpoints);
+-}
+-
+-void mnt_change_mountpoint(struct mount *parent, struct mountpoint *mp, struct mount *mnt)
+-{
+-	struct mountpoint *old_mp = mnt->mnt_mp;
+-	struct mount *old_parent = mnt->mnt_parent;
+-
+-	if (old_parent->overmount == mnt)
+-		old_parent->overmount = NULL;
+-	list_del_init(&mnt->mnt_child);
+-	hlist_del_init(&mnt->mnt_mp_list);
+-	hlist_del_init_rcu(&mnt->mnt_hash);
+-
+-	attach_mnt(mnt, parent, mp);
+-
+-	maybe_free_mountpoint(old_mp, &ex_mountpoints);
+-}
+-
+ static inline struct mount *node_to_mount(struct rb_node *node)
+ {
+ 	return node ? rb_entry(node, struct mount, mnt_node) : NULL;
+@@ -738,22 +630,6 @@ static void mnt_add_to_ns(struct mnt_namespace *ns, struct mount *mnt)
+ 	mnt_notify_add(mnt);
+ }
+ 
+-static struct mount *next_mnt(struct mount *p, struct mount *root)
+-{
+-	struct list_head *next = p->mnt_mounts.next;
+-	if (next == &p->mnt_mounts) {
+-		while (1) {
+-			if (p == root)
+-				return NULL;
+-			next = p->mnt_child.next;
+-			if (next != &p->mnt_parent->mnt_mounts)
+-				break;
+-			p = p->mnt_parent;
+-		}
+-	}
+-	return list_entry(next, struct mount, mnt_child);
+-}
+-
+ static struct mount *skip_mnt_tree(struct mount *p)
+ {
+ 	struct list_head *prev = p->mnt_mounts.prev;
+@@ -1137,209 +1013,6 @@ int may_umount(struct vfsmount *mnt)
+ 
+ EXPORT_SYMBOL(may_umount);
+ 
+-#ifdef CONFIG_FSNOTIFY
+-static void mnt_notify(struct mount *p)
+-{
+-	if (!p->prev_ns && p->mnt_ns) {
+-		fsnotify_mnt_attach(p->mnt_ns, &p->mnt);
+-	} else if (p->prev_ns && !p->mnt_ns) {
+-		fsnotify_mnt_detach(p->prev_ns, &p->mnt);
+-	} else if (p->prev_ns == p->mnt_ns) {
+-		fsnotify_mnt_move(p->mnt_ns, &p->mnt);
+-	} else {
+-		fsnotify_mnt_detach(p->prev_ns, &p->mnt);
+-		fsnotify_mnt_attach(p->mnt_ns, &p->mnt);
+-	}
+-	p->prev_ns = p->mnt_ns;
+-}
+-
+-static void notify_mnt_list(void)
+-{
+-	struct mount *m, *tmp;
+-	/*
+-	 * Notify about mounts that were added/reparented/detached/remain
+-	 * connected after unmount.
+-	 */
+-	list_for_each_entry_safe(m, tmp, &notify_list, to_notify) {
+-		mnt_notify(m);
+-		list_del_init(&m->to_notify);
+-	}
+-}
+-
+-static bool need_notify_mnt_list(void)
+-{
+-	return !list_empty(&notify_list);
+-}
+-#else
+-static void notify_mnt_list(void)
+-{
+-}
+-
+-static bool need_notify_mnt_list(void)
+-{
+-	return false;
+-}
+-#endif
+-
+-static void free_mnt_ns(struct mnt_namespace *);
+-static void namespace_unlock(void)
+-{
+-	struct hlist_head head;
+-	struct hlist_node *p;
+-	struct mount *m;
+-	struct mnt_namespace *ns = emptied_ns;
+-	LIST_HEAD(list);
+-
+-	hlist_move_list(&unmounted, &head);
+-	list_splice_init(&ex_mountpoints, &list);
+-	emptied_ns = NULL;
+-
+-	if (need_notify_mnt_list()) {
+-		/*
+-		 * No point blocking out concurrent readers while notifications
+-		 * are sent. This will also allow statmount()/listmount() to run
+-		 * concurrently.
+-		 */
+-		downgrade_write(&namespace_sem);
+-		notify_mnt_list();
+-		up_read(&namespace_sem);
+-	} else {
+-		up_write(&namespace_sem);
+-	}
+-	if (unlikely(ns)) {
+-		/* Make sure we notice when we leak mounts. */
+-		VFS_WARN_ON_ONCE(!mnt_ns_empty(ns));
+-		free_mnt_ns(ns);
+-	}
+-
+-	shrink_dentry_list(&list);
+-
+-	if (likely(hlist_empty(&head)))
+-		return;
+-
+-	synchronize_rcu_expedited();
+-
+-	hlist_for_each_entry_safe(m, p, &head, mnt_umount) {
+-		hlist_del(&m->mnt_umount);
+-		mntput(&m->mnt);
+-	}
+-}
+-
+-static inline void namespace_lock(void)
+-{
+-	down_write(&namespace_sem);
+-}
+-
+-enum umount_tree_flags {
+-	UMOUNT_SYNC = 1,
+-	UMOUNT_PROPAGATE = 2,
+-	UMOUNT_CONNECTED = 4,
+-};
+-
+-static bool disconnect_mount(struct mount *mnt, enum umount_tree_flags how)
+-{
+-	/* Leaving mounts connected is only valid for lazy umounts */
+-	if (how & UMOUNT_SYNC)
+-		return true;
+-
+-	/* A mount without a parent has nothing to be connected to */
+-	if (!mnt_has_parent(mnt))
+-		return true;
+-
+-	/* Because the reference counting rules change when mounts are
+-	 * unmounted and connected, umounted mounts may not be
+-	 * connected to mounted mounts.
+-	 */
+-	if (!(mnt->mnt_parent->mnt.mnt_flags & MNT_UMOUNT))
+-		return true;
+-
+-	/* Has it been requested that the mount remain connected? */
+-	if (how & UMOUNT_CONNECTED)
+-		return false;
+-
+-	/* Is the mount locked such that it needs to remain connected? */
+-	if (IS_MNT_LOCKED(mnt))
+-		return false;
+-
+-	/* By default disconnect the mount */
+-	return true;
+-}
+-
+-/*
+- * mount_lock must be held
+- * namespace_sem must be held for write
+- */
+-static void umount_tree(struct mount *mnt, enum umount_tree_flags how)
+-{
+-	LIST_HEAD(tmp_list);
+-	struct mount *p;
+-
+-	if (how & UMOUNT_PROPAGATE)
+-		propagate_mount_unlock(mnt);
+-
+-	/* Gather the mounts to umount */
+-	for (p = mnt; p; p = next_mnt(p, mnt)) {
+-		/* A mount is unmounted once. */
+-		VFS_WARN_ON_ONCE(p->mnt.mnt_flags & MNT_UMOUNT);
+-		p->mnt.mnt_flags |= MNT_UMOUNT;
+-		if (mnt_ns_attached(p))
+-			move_from_ns(p);
+-		list_add_tail(&p->mnt_list, &tmp_list);
+-	}
+-
+-	/* Hide the mounts from mnt_mounts */
+-	list_for_each_entry(p, &tmp_list, mnt_list) {
+-		list_del_init(&p->mnt_child);
+-	}
+-
+-	/* Add propagated mounts to the tmp_list */
+-	if (how & UMOUNT_PROPAGATE)
+-		propagate_umount(&tmp_list);
+-
+-	bulk_make_private(&tmp_list);
+-
+-	while (!list_empty(&tmp_list)) {
+-		struct mnt_namespace *ns;
+-		bool disconnect;
+-		p = list_first_entry(&tmp_list, struct mount, mnt_list);
+-		list_del_init(&p->mnt_expire);
+-		list_del_init(&p->mnt_list);
+-		ns = p->mnt_ns;
+-		if (ns) {
+-			ns->nr_mounts--;
+-			__touch_mnt_namespace(ns);
+-		}
+-		WRITE_ONCE(p->mnt_ns, NULL);
+-		if (how & UMOUNT_SYNC)
+-			p->mnt.mnt_flags |= MNT_SYNC_UMOUNT;
+-
+-		disconnect = disconnect_mount(p, how);
+-		if (mnt_has_parent(p)) {
+-			if (!disconnect) {
+-				/* Don't forget about p */
+-				list_add_tail(&p->mnt_child, &p->mnt_parent->mnt_mounts);
+-			} else {
+-				umount_mnt(p);
+-			}
+-		}
+-		if (disconnect)
+-			hlist_add_head(&p->mnt_umount, &unmounted);
+-
+-		/*
+-		 * At this point p->mnt_ns is NULL, notification will be queued
+-		 * only if
+-		 *
+-		 *  - p->prev_ns is non-NULL *and*
+-		 *  - p->prev_ns->n_fsnotify_marks is non-NULL
+-		 *
+-		 * This will preclude queuing the mount if this is a cleanup
+-		 * after a failed copy_tree() or destruction of an anonymous
+-		 * namespace, etc.
+-		 */
+-		mnt_notify_add(p);
+-	}
+-}
+-
+ static void shrink_submounts(struct mount *mnt);
+ 
+ static int do_umount_root(struct super_block *sb)
+@@ -1447,7 +1120,7 @@ static int do_umount(struct mount *mnt, int flags)
+ 	if (!mnt_has_parent(mnt)) /* not the absolute root */
+ 		goto out;
+ 
+-	event++;
++	mnt_namespace_event++;
+ 	if (flags & MNT_DETACH) {
+ 		umount_tree(mnt, UMOUNT_PROPAGATE);
+ 		retval = 0;
+@@ -1466,44 +1139,6 @@ out:
+ 	return retval;
+ }
+ 
+-/*
+- * __detach_mounts - lazily unmount all mounts on the specified dentry
+- *
+- * During unlink, rmdir, and d_drop it is possible to loose the path
+- * to an existing mountpoint, and wind up leaking the mount.
+- * detach_mounts allows lazily unmounting those mounts instead of
+- * leaking them.
+- *
+- * The dentry is unhashed before the mounts go so that no lookup finds
+- * what they covered. The caller removes it for good afterwards.
+- *
+- * The caller may hold dentry->d_inode->i_rwsem.
+- */
+-void __detach_mounts(struct dentry *dentry)
+-{
+-	struct pinned_mountpoint mp = {};
+-	struct mount *mnt;
+-
+-	guard(namespace_excl)();
+-	guard(mount_writer)();
+-
+-	if (!lookup_mountpoint(dentry, &mp))
+-		return;
+-
+-	/* the name goes first, what covered it goes second */
+-	d_drop(dentry);
+-	event++;
+-	while (mp.node.next) {
+-		mnt = hlist_entry(mp.node.next, struct mount, mnt_mp_list);
+-		if (mnt->mnt.mnt_flags & MNT_UMOUNT) {
+-			umount_mnt(mnt);
+-			hlist_add_head(&mnt->mnt_umount, &unmounted);
+-		}
+-		else umount_tree(mnt, UMOUNT_CONNECTED);
+-	}
+-	unpin_mountpoint(&mp);
+-}
+-
+ /*
+  * Is the caller allowed to modify his namespace?
+  */
+@@ -3761,21 +3396,6 @@ static struct ucounts *inc_mnt_namespaces(struct user_namespace *ns)
+ 	return inc_ucount(ns, current_euid(), UCOUNT_MNT_NAMESPACES);
+ }
+ 
+-static void dec_mnt_namespaces(struct ucounts *ucounts)
+-{
+-	dec_ucount(ucounts, UCOUNT_MNT_NAMESPACES);
+-}
+-
+-static void free_mnt_ns(struct mnt_namespace *ns)
+-{
+-	if (!is_anon_ns(ns))
+-		ns_common_free(ns);
+-	dec_mnt_namespaces(ns->ucounts);
+-	/* the last active reference is gone, no mark can show up anymore */
+-	fsnotify_mntns_delete(ns);
+-	mnt_ns_tree_remove(ns);
+-}
+-
+ static struct mnt_namespace *alloc_mnt_ns(struct user_namespace *user_ns, bool anon)
+ {
+ 	struct mnt_namespace *new_ns;
