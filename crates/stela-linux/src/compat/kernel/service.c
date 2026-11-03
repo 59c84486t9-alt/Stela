@@ -78,17 +78,21 @@ void stela_linux_timer_delivery_require(const struct stela_linux_timer_delivery 
         stela_linux_fatal("timer delivery without genuine current/service/owned batch");
 }
 
-/* Translate a timer-list expiry in the same sampled jiffy domain. A
- * nonpositive delta schedules a fresh pass one quantum after the sample. */
+/* Translate a future expiry to its boundary on the retained jiffy clock.
+ * Already-due entries wait one quantum before the next delivery pass. */
 static bool timer_list_deadline(s64 now, unsigned long expires, unsigned long current_jiffies,
                                 s64 *deadline)
 {
+    _Static_assert(NSEC_PER_SEC % HZ == 0, "nominal jiffy duration");
+    const s64 quantum = NSEC_PER_SEC / HZ;
     long left = (long)(expires - current_jiffies);
-    u64 ticks = left > 0 ? (u64)left : 1;
-    u64 quantum = NSEC_PER_SEC / HZ;
-    if (ticks > (u64)(S64_MAX - now) / quantum)
+    s64 base = left > 0 ? now - (now - start) % quantum : now;
+    s64 ticks = left > 0 ? left : 1;
+
+    /* S64_MAX is reserved for an empty timer queue. */
+    if (ticks > (S64_MAX - 1 - base) / quantum)
         return false;
-    *deadline = now + (s64)(ticks * quantum);
+    *deadline = base + ticks * quantum;
     return true;
 }
 
@@ -104,8 +108,15 @@ s64 stela_linux_service_run(const struct stela_linux_timer_delivery *delivery)
     s64 now = service_now_ns();
     s64 next = S64_MAX, high;
     unsigned long timer;
-    if (stela_linux_timers_next(&timer) && !timer_list_deadline(now, timer, jiffies, &next))
-        stela_linux_fatal("nominal timer-list deadline overflow");
+    if (stela_linux_timers_next(&timer)) {
+        u64 sample;
+        /* Callbacks can cross jiffy boundaries. Resample for the deadline
+         * without changing the jiffies seen by the completed pass. */
+        if (!sample_jiffies(now, &sample))
+            stela_linux_fatal("nominal service clock precedes its retained origin");
+        if (!timer_list_deadline(now, timer, (unsigned long)sample, &next))
+            stela_linux_fatal("nominal timer-list deadline overflow");
+    }
     if (stela_linux_hrtimers_next_ns(&high)) {
         /* A due timer remaining AFTER its original phase needs another pass.
          * Same-phase hrtimer restart semantics are preserved by run_queue.
@@ -163,11 +174,22 @@ int main(void)
     assert(sample_jiffies(clock, &sample));
     assert(timer_list_deadline(clock, expires, (unsigned long)sample, &next) && next == deadline);
 
+    /* Callback time can cross ticks and end between jiffy boundaries. */
+    clock += NSEC_PER_SEC / HZ / 2;
+    assert(sample_jiffies(clock, &sample));
+    assert(timer_list_deadline(clock, expires, (unsigned long)sample, &next) && next == deadline);
+    clock = deadline + NSEC_PER_SEC / HZ / 2;
+    assert(sample_jiffies(clock, &sample));
+    assert(timer_list_deadline(clock, expires, (unsigned long)sample, &next));
+    assert(next == clock + NSEC_PER_SEC / HZ);
+    clock = deadline;
+
     /* Linux compares jiffies modulo unsigned long, including wrap. */
     assert(timer_list_deadline(clock, 1, ULONG_MAX, &next));
     assert(next == clock + 2 * (NSEC_PER_SEC / HZ));
     assert(timer_list_deadline(clock, 0, 1, &next));
     assert(next == clock + NSEC_PER_SEC / HZ);
+    assert(!timer_list_deadline(S64_MAX - NSEC_PER_SEC / HZ, 0, 0, &next));
     assert(!timer_list_deadline(S64_MAX - 1, 0, 0, &next));
     assert(!sample_jiffies(0, &sample));
 
