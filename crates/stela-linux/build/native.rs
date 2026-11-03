@@ -140,6 +140,8 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/kernel/nstree.c")),
             PathBuf::from(format!("{LINUX}/kernel/ucount.c")),
             PathBuf::from(format!("{LINUX}/kernel/cred.c")),
+            PathBuf::from(format!("{LINUX}/kernel/ptrace_access.c")),
+            PathBuf::from(format!("{LINUX}/security/commoncap_ptrace.c")),
             PathBuf::from(format!("{LINUX}/kernel/signal_state.c")),
             PathBuf::from(format!("{LINUX}/kernel/restart_no_syscall.c")),
             PathBuf::from(format!("{LINUX}/fs/fs_struct.c")),
