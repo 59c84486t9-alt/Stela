@@ -161,6 +161,8 @@
 /fs/fs_struct.c
 /fs/file.c
 /fs/file_ref.c
+/fs/xattr.c
+/fs/simple_xattr.c
 /fs/open.c
 /fs/filp_close.c
 /fs/filp_close.h
