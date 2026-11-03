@@ -102,8 +102,11 @@ pub(super) fn fatal(error: WorkError) -> ! {
 unsafe fn current(context: *mut c_void) -> (*const RawOwner, *mut c_void) {
     // SAFETY: original entered C callback; require_current authenticates source.
     let owner = unsafe { stela_linux_owner() };
+    // SAFETY: C checks that this owner is installed and authenticates current.
     let task = unsafe { stela_linux_minimum_task(owner) };
-    if owner.is_null() || unsafe { (*owner).context } != context {
+    // SAFETY: on successful authentication the installed owner is live.
+    let matches = !owner.is_null() && unsafe { (*owner).context == context };
+    if !matches {
         fatal(WorkError::CorruptContext);
     }
     (owner, task)
@@ -111,6 +114,7 @@ unsafe fn current(context: *mut c_void) -> (*const RawOwner, *mut c_void) {
 pub(super) unsafe fn delay<P: Platform>(context: *mut c_void, minimum: u64) {
     // SAFETY: callback context belongs to the exact retained owner.
     let _identity = unsafe { current(context) };
+    // SAFETY: this typed callback uses the authenticated owner’s retained context.
     if let Err(error) = unsafe { platform::<P>(context) }.minimum_delay_us(minimum) {
         fatal(error);
     }
@@ -118,6 +122,7 @@ pub(super) unsafe fn delay<P: Platform>(context: *mut c_void, minimum: u64) {
 pub(super) unsafe fn begin<P: Platform>(context: *mut c_void, minimum: u64) -> *mut Header {
     // SAFETY: callback context belongs to the exact retained owner.
     let (owner, task) = unsafe { current(context) };
+    // SAFETY: this typed callback uses the authenticated owner’s retained context.
     let source = match unsafe { platform::<P>(context) }.minimum_deadline_us(minimum) {
         Ok(source) => source,
         Err(error) => fatal(error),
@@ -138,6 +143,7 @@ pub(super) unsafe fn begin<P: Platform>(context: *mut c_void, minimum: u64) -> *
 pub(super) unsafe fn timer_changed<P: Platform>(context: *mut c_void) {
     // SAFETY: no native/current/process loan survives this bounded callback.
     let _identity = unsafe { current(context) };
+    // SAFETY: this typed callback uses the authenticated owner’s retained context.
     if let Err(error) = unsafe { platform::<P>(context) }.timer_changed() {
         // Queue mutation already happened. Never roll it back or return a false
         // completed arm/removal; the actual owner and pending queue stay kept.
@@ -151,23 +157,27 @@ unsafe fn owned<'a>(pointer: *mut Header) -> &'a Owned {
     // SAFETY: private original constructor returns this exact live allocation;
     // C owns it until explicit release, including every parked stack frame.
     let value = unsafe { &*pointer.cast::<Owned>() };
-    // Equality is only a corruption check AFTER actual current authentication.
-    if unsafe { stela_linux_owner() } != value.owner
-        || unsafe { stela_linux_minimum_task(value.owner) } != value.task
-    {
+    // SAFETY: the original C callback calls with a live deadline. Check its
+    // retained owner against the installed owner, then authenticate current.
+    let matches = unsafe {
+        stela_linux_owner() == value.owner && stela_linux_minimum_task(value.owner) == value.task
+    };
+    if !matches {
         fatal(WorkError::CorruptContext);
     }
     value
 }
 unsafe extern "C" fn ready(pointer: *mut Header) -> bool {
+    // SAFETY: C retains the deadline until its sole joined release.
     match unsafe { owned(pointer) }.source.ready() {
         Ok(value) => value,
         Err(error) => fatal(error),
     }
 }
 unsafe extern "C" fn wake_ns(pointer: *mut Header) -> i64 {
+    // SAFETY: C retains the deadline until its sole joined release.
     match unsafe { owned(pointer) }.source.wake_ns() {
-        Ok(value) if value >= 0 && value < i64::MAX => value,
+        Ok(value) if (0..i64::MAX).contains(&value) => value,
         Ok(_) => fatal(WorkError::Exhausted),
         Err(error) => fatal(error),
     }
@@ -176,6 +186,7 @@ unsafe extern "C" fn remaining(pointer: *mut Header, quantum_us: u64) -> u64 {
     if quantum_us == 0 {
         fatal(WorkError::InvalidTicket);
     }
+    // SAFETY: C retains the deadline until its sole joined release.
     match unsafe { owned(pointer) }
         .source
         .remaining_quanta_ceil(quantum_us)
@@ -185,7 +196,7 @@ unsafe extern "C" fn remaining(pointer: *mut Header, quantum_us: u64) -> u64 {
     }
 }
 unsafe extern "C" fn release(pointer: *mut Header) {
-    // Validate source before taking ownership even for an allowed early cancel.
+    // SAFETY: C still owns the deadline through its sole release callback.
     let value = unsafe { owned(pointer) };
     if let Err(error) = value.source.ready() {
         fatal(error);
@@ -193,6 +204,7 @@ unsafe extern "C" fn release(pointer: *mut Header) {
     // SAFETY: correct original current; C joined its timer before this sole
     // release. Removing a deadline subreference proves no kernel/root teardown.
     let mut value = unsafe { Box::from_raw(pointer.cast::<Owned>()) };
+    // SAFETY: the source is initialized and this is its sole extraction.
     let source = unsafe { ManuallyDrop::take(&mut value.source) };
     drop(source);
 }
