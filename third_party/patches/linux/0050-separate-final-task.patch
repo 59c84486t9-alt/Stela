@@ -1,0 +1,336 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 23:56:52 -0500
+Subject: [PATCH] refactor(fork): separate final task and signal destruction
+
+---
+ kernel/Makefile       |   2 +-
+ kernel/fork.c         | 103 --------------------------------
+ kernel/fork_caches.h  |  14 ++++-
+ kernel/fork_release.c | 133 ++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 146 insertions(+), 106 deletions(-)
+ create mode 100644 kernel/fork_release.c
+
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 6998b7772b425a8eb39d5d27219d9fded36d6f4d..6ddfb9b4a7abcb8ae57fe75d58a7535d9bb64582 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -3,7 +3,7 @@
+ # Makefile for the linux kernel.
+ #
+ 
+-obj-y     = fork.o fork_caches.o fork_stack.o exec_domain.o exec_state.o panic.o \
++obj-y     = fork.o fork_caches.o fork_stack.o fork_release.o exec_domain.o exec_state.o panic.o \
+ 	    cpu.o cpu_topology.o exit.o task_rcu.o rcuwait_wake.o softirq.o resource.o \
+ 	    sysctl.o capability.o ptrace.o ptrace_access.o user.o \
+ 	    signal.o signal_state.o restart_no_syscall.o sys.o umh.o workqueue.o pid.o task_work.o \
+diff --git a/kernel/fork.c b/kernel/fork.c
+index a366981bfeab821f13a3b182fe9c670ef27b4b23..5388348656fad573e67b7b12bfb33070436dd511 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -167,20 +167,11 @@ int nr_processes(void)
+ 	return total;
+ }
+ 
+-void __weak arch_release_task_struct(struct task_struct *tsk)
+-{
+-}
+-
+ static inline struct task_struct *alloc_task_struct_node(int node)
+ {
+ 	return kmem_cache_alloc_node(task_struct_cachep, GFP_KERNEL, node);
+ }
+ 
+-static inline void free_task_struct(struct task_struct *tsk)
+-{
+-	kmem_cache_free(task_struct_cachep, tsk);
+-}
+-
+ #ifdef CONFIG_VMAP_STACK
+ /*
+  * vmalloc() is a bit slow, and calling vfree() enough times will force a TLB
+@@ -472,38 +463,6 @@ void exit_task_stack_account(struct task_struct *tsk)
+ 	}
+ }
+ 
+-void free_task(struct task_struct *tsk)
+-{
+-#ifdef CONFIG_SECCOMP
+-	WARN_ON_ONCE(tsk->seccomp.filter);
+-#endif
+-	release_user_cpus_ptr(tsk);
+-	scs_release(tsk);
+-
+-#ifndef CONFIG_THREAD_INFO_IN_TASK
+-	/*
+-	 * The task is finally done with both the stack and thread_info,
+-	 * so free both.
+-	 */
+-	release_task_stack(tsk);
+-#else
+-	/*
+-	 * If the task had a separate stack allocation, it should be gone
+-	 * by now.
+-	 */
+-	WARN_ON_ONCE(refcount_read(&tsk->stack_refcount) != 0);
+-#endif
+-	rt_mutex_debug_task_free(tsk);
+-	ftrace_graph_exit_task(tsk);
+-	arch_release_task_struct(tsk);
+-	if (tsk->flags & PF_KTHREAD)
+-		free_kthread_struct(tsk);
+-	bpf_task_storage_free(tsk);
+-	put_task_exec_state(rcu_access_pointer(tsk->exec_state));
+-	free_task_struct(tsk);
+-}
+-EXPORT_SYMBOL(free_task);
+-
+ void dup_mm_exe_file(struct mm_struct *mm, struct mm_struct *oldmm)
+ {
+ 	struct file *exe_file;
+@@ -685,68 +644,6 @@ void __mmdrop(struct mm_struct *mm)
+ }
+ EXPORT_SYMBOL_GPL(__mmdrop);
+ 
+-static void mmdrop_async_fn(struct work_struct *work)
+-{
+-	struct mm_struct *mm;
+-
+-	mm = container_of(work, struct mm_struct, async_put_work);
+-	__mmdrop(mm);
+-}
+-
+-static void mmdrop_async(struct mm_struct *mm)
+-{
+-	if (unlikely(atomic_dec_and_test(&mm->mm_count))) {
+-		INIT_WORK(&mm->async_put_work, mmdrop_async_fn);
+-		schedule_work(&mm->async_put_work);
+-	}
+-}
+-
+-static inline void free_signal_struct(struct signal_struct *sig)
+-{
+-	taskstats_tgid_free(sig);
+-	sched_autogroup_exit(sig);
+-	/*
+-	 * __mmdrop is not safe to call from softirq context on x86 due to
+-	 * pgd_dtor so postpone it to the async context
+-	 */
+-	if (sig->oom_mm)
+-		mmdrop_async(sig->oom_mm);
+-	kmem_cache_free(signal_cachep, sig);
+-}
+-
+-static inline void put_signal_struct(struct signal_struct *sig)
+-{
+-	if (refcount_dec_and_test(&sig->sigcnt))
+-		free_signal_struct(sig);
+-}
+-
+-void __put_task_struct(struct task_struct *tsk)
+-{
+-	WARN_ON(!tsk->exit_state);
+-	WARN_ON(refcount_read(&tsk->usage));
+-	WARN_ON(tsk == current);
+-
+-	unwind_task_free(tsk);
+-	io_uring_free(tsk);
+-	cgroup_task_free(tsk);
+-	task_numa_free(tsk, true);
+-	security_task_free(tsk);
+-	exit_creds(tsk);
+-	delayacct_tsk_free(tsk);
+-	put_signal_struct(tsk->signal);
+-	sched_core_free(tsk);
+-	free_task(tsk);
+-}
+-EXPORT_SYMBOL_GPL(__put_task_struct);
+-
+-void __put_task_struct_rcu_cb(struct rcu_head *rhp)
+-{
+-	struct task_struct *task = container_of(rhp, struct task_struct, rcu);
+-
+-	__put_task_struct(task);
+-}
+-EXPORT_SYMBOL_GPL(__put_task_struct_rcu_cb);
+-
+ int __weak arch_dup_task_struct(struct task_struct *dst,
+ 					       struct task_struct *src)
+ {
+diff --git a/kernel/fork_caches.h b/kernel/fork_caches.h
+index a7ba86f5b0da59fe9352ccc2a9ccd3de78457b5a..6773f3059156abeea5ae51c7b88edc429a86eb3c 100644
+--- a/kernel/fork_caches.h
++++ b/kernel/fork_caches.h
+@@ -3,6 +3,7 @@
+ #define _KERNEL_FORK_CACHES_H
+ 
+ #include <linux/futex.h>
++#include <linux/slab.h>
+ 
+ /*
+  * Minimum number of threads to boot the kernel
+@@ -14,14 +15,23 @@
+  */
+ #define MAX_THREADS FUTEX_TID_MASK
+ 
+-struct kmem_cache;
+-extern struct kmem_cache *task_struct_cachep;
++struct signal_struct;
++struct task_struct;
++
+ extern int max_threads;
++extern struct kmem_cache *task_struct_cachep;
+ extern struct kmem_cache *signal_cachep;
+ extern struct kmem_cache *sighand_cachep;
+ extern struct kmem_cache *files_cachep;
+ extern struct kmem_cache *fs_cachep;
+ 
++void free_signal_struct(struct signal_struct *sig);
++
++static inline void free_task_struct(struct task_struct *tsk)
++{
++	kmem_cache_free(task_struct_cachep, tsk);
++}
++
+ #ifdef CONFIG_VMAP_STACK
+ int free_vm_stack_cache(unsigned int cpu);
+ #endif
+diff --git a/kernel/fork_release.c b/kernel/fork_release.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..b526cc2393c760e24b8314ee2d1103fbf9c03654
+--- /dev/null
++++ b/kernel/fork_release.c
+@@ -0,0 +1,133 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *  linux/kernel/fork.c
++ *
++ *  Copyright (C) 1991, 1992  Linus Torvalds
++ */
++
++/*
++ *  'fork.c' contains the help-routines for the 'fork' system call
++ * (see also entry.S and others).
++ * Fork is rather simple, once you get the hang of it, but the memory
++ * management can be a bitch. See 'mm/memory.c': 'copy_page_range()'
++ */
++
++#include <linux/bpf.h>
++#include <linux/cgroup.h>
++#include <linux/delayacct.h>
++#include <linux/export.h>
++#include <linux/ftrace.h>
++#include <linux/io_uring.h>
++#include <linux/kthread.h>
++#include <linux/rtmutex.h>
++#include <linux/sched/autogroup.h>
++#include <linux/sched/mm.h>
++#include <linux/sched/numa_balancing.h>
++#include <linux/sched/signal.h>
++#include <linux/sched/task.h>
++#include <linux/sched/exec_state.h>
++#include <linux/scs.h>
++#include <linux/security.h>
++#include <linux/taskstats_kern.h>
++#include <linux/unwind_deferred.h>
++
++#include "fork_caches.h"
++#include "fork_stack.h"
++
++void __weak arch_release_task_struct(struct task_struct *tsk)
++{
++}
++
++void free_task(struct task_struct *tsk)
++{
++#ifdef CONFIG_SECCOMP
++	WARN_ON_ONCE(tsk->seccomp.filter);
++#endif
++	release_user_cpus_ptr(tsk);
++	scs_release(tsk);
++
++#ifndef CONFIG_THREAD_INFO_IN_TASK
++	/*
++	 * The task is finally done with both the stack and thread_info,
++	 * so free both.
++	 */
++	release_task_stack(tsk);
++#else
++	/*
++	 * If the task had a separate stack allocation, it should be gone
++	 * by now.
++	 */
++	WARN_ON_ONCE(refcount_read(&tsk->stack_refcount) != 0);
++#endif
++	rt_mutex_debug_task_free(tsk);
++	ftrace_graph_exit_task(tsk);
++	arch_release_task_struct(tsk);
++	if (tsk->flags & PF_KTHREAD)
++		free_kthread_struct(tsk);
++	bpf_task_storage_free(tsk);
++	put_task_exec_state(rcu_access_pointer(tsk->exec_state));
++	free_task_struct(tsk);
++}
++EXPORT_SYMBOL(free_task);
++
++static void mmdrop_async_fn(struct work_struct *work)
++{
++	struct mm_struct *mm;
++
++	mm = container_of(work, struct mm_struct, async_put_work);
++	__mmdrop(mm);
++}
++
++static void mmdrop_async(struct mm_struct *mm)
++{
++	if (unlikely(atomic_dec_and_test(&mm->mm_count))) {
++		INIT_WORK(&mm->async_put_work, mmdrop_async_fn);
++		schedule_work(&mm->async_put_work);
++	}
++}
++
++void free_signal_struct(struct signal_struct *sig)
++{
++	taskstats_tgid_free(sig);
++	sched_autogroup_exit(sig);
++	/*
++	 * __mmdrop is not safe to call from softirq context on x86 due to
++	 * pgd_dtor so postpone it to the async context
++	 */
++	if (sig->oom_mm)
++		mmdrop_async(sig->oom_mm);
++	kmem_cache_free(signal_cachep, sig);
++}
++
++static inline void put_signal_struct(struct signal_struct *sig)
++{
++	if (refcount_dec_and_test(&sig->sigcnt))
++		free_signal_struct(sig);
++}
++
++void __put_task_struct(struct task_struct *tsk)
++{
++	WARN_ON(!tsk->exit_state);
++	WARN_ON(refcount_read(&tsk->usage));
++	WARN_ON(tsk == current);
++
++	unwind_task_free(tsk);
++	io_uring_free(tsk);
++	cgroup_task_free(tsk);
++	task_numa_free(tsk, true);
++	security_task_free(tsk);
++	exit_creds(tsk);
++	delayacct_tsk_free(tsk);
++	put_signal_struct(tsk->signal);
++	sched_core_free(tsk);
++	free_task(tsk);
++}
++EXPORT_SYMBOL_GPL(__put_task_struct);
++
++void __put_task_struct_rcu_cb(struct rcu_head *rhp)
++{
++	struct task_struct *task = container_of(rhp, struct task_struct, rcu);
++
++	__put_task_struct(task);
++}
++EXPORT_SYMBOL_GPL(__put_task_struct_rcu_cb);
