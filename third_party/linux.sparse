@@ -223,6 +223,7 @@
 /fs/inode_evict.c
 /fs/open.c
 /fs/file_table.c
+/fs/filesystems.c
 /fs/file_table_init.c
 /fs/file_table_init.h
 /fs/filp_close.c
