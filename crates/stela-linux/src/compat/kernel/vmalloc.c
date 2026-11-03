@@ -160,6 +160,10 @@ static void unmap(const void *address, bool owns_pages)
 
 void vfree(const void *address)
 {
+	if (unlikely(in_interrupt())) {
+		vfree_atomic(address);
+		return;
+	}
 	unmap(address, true);
 }
 
