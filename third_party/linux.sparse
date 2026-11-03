@@ -206,6 +206,7 @@
 /fs/anon_inodes.c
 /fs/mnt_idmapping.c
 /fs/inode.c
+/fs/inode_cache_init.c
 /fs/inode_lru.h
 /fs/fs-writeback.c
 /fs/writeback_inode.h

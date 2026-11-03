@@ -1,0 +1,239 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 01:31:14 -0500
+Subject: [PATCH] refactor(fs): separate original inode cache initialization
+
+---
+ fs/Makefile           |  2 +-
+ fs/inode.c            | 72 ++-------------------------------------
+ fs/inode_cache_init.c | 79 +++++++++++++++++++++++++++++++++++++++++++
+ fs/internal.h         |  6 ++++
+ 4 files changed, 88 insertions(+), 71 deletions(-)
+ create mode 100644 fs/inode_cache_init.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index c0d23e181ef29dfb941cdb7e0037ef453bca68de..1b783cfc1cb1f541d382fc88cb31f68580defe0c 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -9,7 +9,7 @@
+ 
+ obj-y :=	open.o filp_close.o read_write.o file_table.o super.o \
+ 		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o path_get.o name_hash.o filename.o fcntl.o \
+-		ioctl.o readdir.o select.o dcache.o inode.o inode_evict.o \
++		ioctl.o readdir.o select.o dcache.o inode.o inode_cache_init.o inode_evict.o \
+ 		attr.o bad_inode.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o \
+ 		seq_file.o seq_lifetime.o seq_output.o xattr.o simple_xattr.o libfs.o pseudo_metadata.o fs-writeback.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+diff --git a/fs/inode.c b/fs/inode.c
+index f99e24ea9dab0c13f1b50a31fa614ddc0d9165b8..da3ef4c1a957dbce9572ac77b38678c6581681bc 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -57,9 +57,6 @@
+  *   inode->i_lock
+  */
+ 
+-static unsigned int i_hash_mask __ro_after_init;
+-static unsigned int i_hash_shift __ro_after_init;
+-static struct hlist_head *inode_hashtable __ro_after_init;
+ static __cacheline_aligned_in_smp DEFINE_SPINLOCK(inode_hash_lock);
+ 
+ /*
+@@ -72,8 +69,6 @@ EXPORT_SYMBOL(empty_aops);
+ 
+ static DEFINE_PER_CPU(unsigned long, nr_inodes);
+ 
+-static struct kmem_cache *inode_cachep __ro_after_init;
+-
+ static long get_nr_inodes(void)
+ {
+ 	int i;
+@@ -392,13 +387,6 @@ static void destroy_inode(struct inode *inode)
+ 	call_rcu(&inode->i_rcu, i_callback);
+ }
+ 
+-static void init_once(void *foo)
+-{
+-	struct inode *inode = (struct inode *) foo;
+-
+-	inode_init_once(inode);
+-}
+-
+ static void inode_pin_lru_isolating(struct inode *inode)
+ {
+ 	lockdep_assert_held(&inode->i_lock);
+@@ -473,8 +461,8 @@ static unsigned long hash(struct super_block *sb, u64 hashval)
+ 
+ 	tmp = (hashval * (unsigned long)sb) ^ (GOLDEN_RATIO_PRIME + hashval) /
+ 			L1_CACHE_BYTES;
+-	tmp = tmp ^ ((tmp ^ GOLDEN_RATIO_PRIME) >> i_hash_shift);
+-	return tmp & i_hash_mask;
++	tmp = tmp ^ ((tmp ^ GOLDEN_RATIO_PRIME) >> inode_hash_shift);
++	return tmp & inode_hash_mask;
+ }
+ 
+ /**
+@@ -2397,62 +2385,6 @@ static void __wait_on_freeing_inode(struct inode *inode, bool hash_locked, bool
+ 		rcu_read_lock();
+ }
+ 
+-static __initdata unsigned long ihash_entries;
+-static int __init set_ihash_entries(char *str)
+-{
+-	return kstrtoul(str, 0, &ihash_entries) == 0;
+-}
+-__setup("ihash_entries=", set_ihash_entries);
+-
+-/*
+- * Initialize the waitqueues and inode hash table.
+- */
+-void __init inode_init_early(void)
+-{
+-	/* If hashes are distributed across NUMA nodes, defer
+-	 * hash allocation until vmalloc space is available.
+-	 */
+-	if (hashdist)
+-		return;
+-
+-	inode_hashtable =
+-		alloc_large_system_hash("Inode-cache",
+-					sizeof(struct hlist_head),
+-					ihash_entries,
+-					14,
+-					HASH_EARLY | HASH_ZERO,
+-					&i_hash_shift,
+-					&i_hash_mask,
+-					0,
+-					0);
+-}
+-
+-void __init inode_init(void)
+-{
+-	/* inode slab cache */
+-	inode_cachep = kmem_cache_create("inode_cache",
+-					 sizeof(struct inode),
+-					 0,
+-					 (SLAB_RECLAIM_ACCOUNT|SLAB_PANIC|
+-					 SLAB_ACCOUNT),
+-					 init_once);
+-
+-	/* Hash may have been set up in inode_init_early */
+-	if (!hashdist)
+-		return;
+-
+-	inode_hashtable =
+-		alloc_large_system_hash("Inode-cache",
+-					sizeof(struct hlist_head),
+-					ihash_entries,
+-					14,
+-					HASH_ZERO,
+-					&i_hash_shift,
+-					&i_hash_mask,
+-					0,
+-					0);
+-}
+-
+ void init_special_inode(struct inode *inode, umode_t mode, dev_t rdev)
+ {
+ 	inode->i_mode = mode;
+diff --git a/fs/inode_cache_init.c b/fs/inode_cache_init.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..9bf183252d3b8c0222d9e4091255839ecb36bf91
+--- /dev/null
++++ b/fs/inode_cache_init.c
+@@ -0,0 +1,79 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * From fs/inode.c.
++ * (C) 1997 Linus Torvalds
++ * (C) 1999 Andrea Arcangeli <andrea@suse.de> (dynamic inode allocation)
++ */
++#include <linux/fs.h>
++#include <linux/memblock.h>
++#include <linux/slab.h>
++
++#include "internal.h"
++
++unsigned int inode_hash_mask __ro_after_init;
++unsigned int inode_hash_shift __ro_after_init;
++struct hlist_head *inode_hashtable __ro_after_init;
++struct kmem_cache *inode_cachep __ro_after_init;
++
++static void init_once(void *foo)
++{
++	struct inode *inode = (struct inode *) foo;
++
++	inode_init_once(inode);
++}
++
++static __initdata unsigned long ihash_entries;
++static int __init set_ihash_entries(char *str)
++{
++	return kstrtoul(str, 0, &ihash_entries) == 0;
++}
++__setup("ihash_entries=", set_ihash_entries);
++
++/*
++ * Initialize the waitqueues and inode hash table.
++ */
++void __init inode_init_early(void)
++{
++	/* If hashes are distributed across NUMA nodes, defer
++	 * hash allocation until vmalloc space is available.
++	 */
++	if (hashdist)
++		return;
++
++	inode_hashtable =
++		alloc_large_system_hash("Inode-cache",
++					sizeof(struct hlist_head),
++					ihash_entries,
++					14,
++					HASH_EARLY | HASH_ZERO,
++					&inode_hash_shift,
++					&inode_hash_mask,
++					0,
++					0);
++}
++
++void __init inode_init(void)
++{
++	/* inode slab cache */
++	inode_cachep = kmem_cache_create("inode_cache",
++					 sizeof(struct inode),
++					 0,
++					 (SLAB_RECLAIM_ACCOUNT|SLAB_PANIC|
++					 SLAB_ACCOUNT),
++					 init_once);
++
++	/* Hash may have been set up in inode_init_early */
++	if (!hashdist)
++		return;
++
++	inode_hashtable =
++		alloc_large_system_hash("Inode-cache",
++					sizeof(struct hlist_head),
++					ihash_entries,
++					14,
++					HASH_ZERO,
++					&inode_hash_shift,
++					&inode_hash_mask,
++					0,
++					0);
++}
+diff --git a/fs/internal.h b/fs/internal.h
+index 355d93f92208617b3f2b2c5d32d181bc17ffd5a0..e51d9a1c5b96828202c26fad34321062e648918f 100644
+--- a/fs/internal.h
++++ b/fs/internal.h
+@@ -208,6 +208,12 @@ extern int vfs_open(const struct path *, struct file *);
+ /*
+  * inode.c
+  */
++/* Shared storage for the original inode cache and hash initializers. */
++extern unsigned int inode_hash_mask;
++extern unsigned int inode_hash_shift;
++extern struct hlist_head *inode_hashtable;
++extern struct kmem_cache *inode_cachep;
++
+ extern long prune_icache_sb(struct super_block *sb, struct shrink_control *sc);
+ int dentry_needs_remove_privs(struct mnt_idmap *, struct dentry *dentry);
+ bool in_group_or_capable(struct mnt_idmap *idmap,
