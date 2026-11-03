@@ -1,0 +1,141 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:35:21 -0500
+Subject: [PATCH] refactor(mm): link original tagged page-cache batch lookup
+
+---
+ mm/filemap.c       | 56 ----------------------------------------------
+ mm/filemap_batch.c | 56 ++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 56 insertions(+), 56 deletions(-)
+
+diff --git a/mm/filemap.c b/mm/filemap.c
+index 2003c95bd296eb4eb06d458fd1b3fb87a4270b38..0d4bcc6ef5ba40bf57aae582e6bca4ff6df00f07 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -1578,62 +1578,6 @@ out:
+ }
+ EXPORT_SYMBOL(filemap_get_folios_contig);
+ 
+-/**
+- * filemap_get_folios_tag - Get a batch of folios matching @tag
+- * @mapping:    The address_space to search
+- * @start:      The starting page index
+- * @end:        The final page index (inclusive)
+- * @tag:        The tag index
+- * @fbatch:     The batch to fill
+- *
+- * The first folio may start before @start; if it does, it will contain
+- * @start.  The final folio may extend beyond @end; if it does, it will
+- * contain @end.  The folios have ascending indices.  There may be gaps
+- * between the folios if there are indices which have no folio in the
+- * page cache.  If folios are added to or removed from the page cache
+- * while this is running, they may or may not be found by this call.
+- * Only returns folios that are tagged with @tag.
+- *
+- * Return: The number of folios found.
+- * Also update @start to index the next folio for traversal.
+- */
+-unsigned filemap_get_folios_tag(struct address_space *mapping, pgoff_t *start,
+-			pgoff_t end, xa_mark_t tag, struct folio_batch *fbatch)
+-{
+-	XA_STATE(xas, &mapping->i_pages, *start);
+-	struct folio *folio;
+-
+-	rcu_read_lock();
+-	while ((folio = find_get_entry(&xas, end, tag)) != NULL) {
+-		/*
+-		 * Shadow entries should never be tagged, but this iteration
+-		 * is lockless so there is a window for page reclaim to evict
+-		 * a page we saw tagged. Skip over it.
+-		 */
+-		if (xa_is_value(folio))
+-			continue;
+-		if (!folio_batch_add(fbatch, folio)) {
+-			*start = folio_next_index(folio);
+-			goto out;
+-		}
+-	}
+-	/*
+-	 * We come here when there is no page beyond @end. We take care to not
+-	 * overflow the index @start as it confuses some of the callers. This
+-	 * breaks the iteration when there is a page at index -1 but that is
+-	 * already broke anyway.
+-	 */
+-	if (end == (pgoff_t)-1)
+-		*start = (pgoff_t)-1;
+-	else
+-		*start = end + 1;
+-out:
+-	rcu_read_unlock();
+-
+-	return folio_batch_count(fbatch);
+-}
+-EXPORT_SYMBOL(filemap_get_folios_tag);
+-
+ /**
+  * filemap_get_folios_dirty - Get a batch of dirty folios
+  * @mapping:	The address_space to search
+diff --git a/mm/filemap_batch.c b/mm/filemap_batch.c
+index 60d2f3ad718b15d692ac17ceedb390e55c9b9554..f3d9ecec2922c877ec87eded0490fc14d081fe6b 100644
+--- a/mm/filemap_batch.c
++++ b/mm/filemap_batch.c
+@@ -278,3 +278,59 @@ void truncate_folio_batch_exceptionals(struct address_space *mapping,
+ out:
+ 	folio_batch_remove_exceptionals(fbatch);
+ }
++
++/**
++ * filemap_get_folios_tag - Get a batch of folios matching @tag
++ * @mapping:    The address_space to search
++ * @start:      The starting page index
++ * @end:        The final page index (inclusive)
++ * @tag:        The tag index
++ * @fbatch:     The batch to fill
++ *
++ * The first folio may start before @start; if it does, it will contain
++ * @start.  The final folio may extend beyond @end; if it does, it will
++ * contain @end.  The folios have ascending indices.  There may be gaps
++ * between the folios if there are indices which have no folio in the
++ * page cache.  If folios are added to or removed from the page cache
++ * while this is running, they may or may not be found by this call.
++ * Only returns folios that are tagged with @tag.
++ *
++ * Return: The number of folios found.
++ * Also update @start to index the next folio for traversal.
++ */
++unsigned filemap_get_folios_tag(struct address_space *mapping, pgoff_t *start,
++			pgoff_t end, xa_mark_t tag, struct folio_batch *fbatch)
++{
++	XA_STATE(xas, &mapping->i_pages, *start);
++	struct folio *folio;
++
++	rcu_read_lock();
++	while ((folio = find_get_entry(&xas, end, tag)) != NULL) {
++		/*
++		 * Shadow entries should never be tagged, but this iteration
++		 * is lockless so there is a window for page reclaim to evict
++		 * a page we saw tagged. Skip over it.
++		 */
++		if (xa_is_value(folio))
++			continue;
++		if (!folio_batch_add(fbatch, folio)) {
++			*start = folio_next_index(folio);
++			goto out;
++		}
++	}
++	/*
++	 * We come here when there is no page beyond @end. We take care to not
++	 * overflow the index @start as it confuses some of the callers. This
++	 * breaks the iteration when there is a page at index -1 but that is
++	 * already broke anyway.
++	 */
++	if (end == (pgoff_t)-1)
++		*start = (pgoff_t)-1;
++	else
++		*start = end + 1;
++out:
++	rcu_read_unlock();
++
++	return folio_batch_count(fbatch);
++}
++EXPORT_SYMBOL(filemap_get_folios_tag);
