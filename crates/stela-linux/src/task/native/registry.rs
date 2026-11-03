@@ -67,10 +67,12 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
         if unexposed.is_null() || birth.is_null() {
             fatal();
         }
+        // SAFETY: C lends writable output storage for the allocation call.
         unsafe {
             *unexposed = false;
         }
         if node != -1 && node != 0 {
+            // SAFETY: this call still holds C's writable output loan.
             unsafe {
                 *unexposed = true;
             }
@@ -83,12 +85,14 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
         }) else {
             // Actual no-accept branch: genuine birth not consumed and NO
             // native/source allocator invoked. Never errno=>noPub inference.
+            // SAFETY: this call still holds C's writable output loan.
             unsafe {
                 *unexposed = true;
             }
             return -12;
         };
-        // Same actual Factory and its real owning mount retained before C.
+        // SAFETY: the mount retains the factory, and C lends this exact birth
+        // for the original allocation transaction.
         let begin = unsafe {
             self.factory
                 .begin(NonNull::new(birth).unwrap_or_else(|| fatal()))
@@ -142,6 +146,8 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
         // SAME actual constructor ancestry captured by original create_info
         // through private kthreadd source scope, never PID/taskptr/name magic.
         // No source body/wait or new current is executed in this observation.
+        // SAFETY: this metadata-only association uses the current segment
+        // without borrowing it across a source operation.
         if unsafe {
             self.kernel
                 .platform()
@@ -152,12 +158,15 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
             fatal();
         }
 
+        // SAFETY: the registry retains the newly published request throughout
+        // prefix preparation on its creating process.
         match unsafe { request.prefix() } {
             Ok(()) => {
                 request.notify(CREATED);
                 0
             }
             Err(_) => {
+                // SAFETY: C still retains the birth and prefix failed before publication.
                 if unsafe { request.cancel() }.is_err() {
                     fatal();
                 }
@@ -165,6 +174,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
                 // Actual affine NoPublication is held in stable request; keep
                 // metadata/context through original source free + abort tail.
                 let errno = request.errno();
+                // SAFETY: this call still holds C's writable output loan.
                 unsafe {
                     *unexposed = true;
                 }
@@ -178,6 +188,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
             if read.pointer.is_null() {
                 continue;
             }
+            // SAFETY: the read guard keeps the registry owner alive.
             let request = unsafe { &*read.pointer };
             let events = request.events.swap(0, Ordering::AcqRel);
             if events == 0 {
@@ -187,6 +198,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
             unsafe {
                 Arc::increment_strong_count(read.pointer);
             }
+            // SAFETY: this Arc takes the strong reference incremented above.
             let request = unsafe { Arc::from_raw(read.pointer) };
             drop(read);
             return Ok(Some(Event {
@@ -256,6 +268,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
     /// retiring control still owns the whole request. No final owner drops.
     pub(crate) unsafe fn put(mut self) {
         let slot = self.request.slot;
+        // SAFETY: the caller keeps the registry or retiring Arc alive.
         unsafe { ManuallyDrop::drop(&mut self.request) };
         if slot.phase.load(Ordering::Acquire) == RETIRING {
             slot.finalize_pending.store(true, Ordering::Release);
@@ -268,29 +281,27 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
     /// cannot authorize this. No later C/native Context use is possible.
     pub(crate) unsafe fn unpublish(mut self) -> Result<RetiringRequest<K, P, N>, Self> {
         let pointer = Arc::as_ptr(&self.request) as *mut Request<K, P, N>;
-        for slot in &self.request.broker.slots {
-            if slot.request.load(Ordering::Acquire) != pointer {
-                continue;
-            }
-            if slot
+        let slot = self.request.slot;
+        if slot.request.load(Ordering::Acquire) != pointer
+            || slot
                 .phase
                 .compare_exchange(LIVE, RETIRING, Ordering::AcqRel, Ordering::Acquire)
                 .is_err()
-            {
-                return Err(self);
-            }
-            if slot.request.swap(ptr::null_mut(), Ordering::AcqRel) != pointer {
-                fatal();
-            }
-            // Transfer actual registry owner; finalization still joins readers.
-            let registry = unsafe { Arc::from_raw(pointer) };
-            unsafe { ManuallyDrop::drop(&mut self.request) };
-            return Ok(RetiringRequest {
-                slot,
-                request: ManuallyDrop::new(registry),
-            });
+        {
+            return Err(self);
         }
-        Err(self)
+        if slot.request.swap(ptr::null_mut(), Ordering::AcqRel) != pointer {
+            fatal();
+        }
+        // SAFETY: the swap transfers the slot's Arc. The retiring handle
+        // retains it until the independent registry readers are joined.
+        let registry = unsafe { Arc::from_raw(pointer) };
+        // SAFETY: the transferred registry Arc still owns the request.
+        unsafe { ManuallyDrop::drop(&mut self.request) };
+        Ok(RetiringRequest {
+            slot,
+            request: ManuallyDrop::new(registry),
+        })
     }
 }
 impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
@@ -306,6 +317,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
             return Err(self);
         }
         let mut this = ManuallyDrop::new(self);
+        // SAFETY: this handle uniquely owns the initialized retiring Arc.
         let arc = unsafe { ManuallyDrop::take(&mut this.request) };
         let request = match Arc::try_unwrap(arc) {
             Ok(request) => request,
@@ -327,21 +339,23 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
                 (receipt.into_metadata(), generation)
             }
             state => {
+                // SAFETY: the unwrapped request is exclusive. Restore its
+                // owned state before taking the fatal path.
                 unsafe {
                     *request.state.get() = ManuallyDrop::new(state);
                 };
                 fatal()
             }
         };
+        // SAFETY: the request is exclusive and the affine receipt retains
+        // the binding through these drops.
         unsafe {
-            // Real affine receipt retains binding through these nonfinal drops.
             ManuallyDrop::drop(&mut *request.detached.get());
             ManuallyDrop::drop(&mut *request.binding.get());
             ManuallyDrop::drop(&mut *request.context.get());
             ManuallyDrop::drop(&mut *request.fault.get());
         }
         let kernel = &*request.broker.kernel;
-        drop(ManuallyDrop::into_inner(request));
 
         Ok(FinalMetadata {
             kernel,
@@ -356,7 +370,10 @@ impl<K: KernelThreadPlatform + 'static, const N: usize> FinalMetadata<K, N> {
     /// Genuine original process after ALL source C callback borrows returned;
     /// no native transient permit. The real affine receipt above is retained.
     pub(crate) unsafe fn release(mut self) -> Result<(), Self> {
+        // SAFETY: this final receipt uniquely owns the initialized binding.
         let binding = unsafe { ManuallyDrop::take(&mut self.binding) };
+        // SAFETY: the caller joined all source borrows, and this receipt
+        // retains the original binding and generation for the release.
         match unsafe { binding.release_original(self.kernel, self.generation) } {
             Ok(()) => {
                 self.slot_phase.store(EMPTY, Ordering::Release);
