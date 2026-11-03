@@ -1,0 +1,182 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 11:59:05 -0500
+Subject: [PATCH] refactor(fs): keep mount attachment with the mount cache
+
+---
+ fs/mount_cache.c | 65 ++++++++++++++++++++++++++++++++++++++++++++++++
+ fs/mount_cache.h |  4 +++
+ fs/namespace.c   | 65 ------------------------------------------------
+ 3 files changed, 69 insertions(+), 65 deletions(-)
+
+diff --git a/fs/mount_cache.c b/fs/mount_cache.c
+index dc8e1a68fdf294b1f940b257f39a2e454833818d..957bb3d313898110640580f547350258dfe78231 100644
+--- a/fs/mount_cache.c
++++ b/fs/mount_cache.c
+@@ -162,3 +162,68 @@ void maybe_free_mountpoint(struct mountpoint *mp, struct list_head *list)
+ 		kfree(mp);
+ 	}
+ }
++
++/*
++ * locks: mount_lock[write_seqlock]
++ */
++void __umount_mnt(struct mount *mnt, struct list_head *shrink_list)
++{
++	struct mountpoint *mp;
++	struct mount *parent = mnt->mnt_parent;
++	if (unlikely(parent->overmount == mnt))
++		parent->overmount = NULL;
++	mnt->mnt_parent = mnt;
++	mnt->mnt_mountpoint = mnt->mnt.mnt_root;
++	list_del_init(&mnt->mnt_child);
++	hlist_del_init_rcu(&mnt->mnt_hash);
++	hlist_del_init(&mnt->mnt_mp_list);
++	mp = mnt->mnt_mp;
++	mnt->mnt_mp = NULL;
++	maybe_free_mountpoint(mp, shrink_list);
++}
++
++/*
++ * vfsmount lock must be held for write
++ */
++void mnt_set_mountpoint(struct mount *mnt,
++			struct mountpoint *mp,
++			struct mount *child_mnt)
++{
++	child_mnt->mnt_mountpoint = mp->m_dentry;
++	child_mnt->mnt_parent = mnt;
++	child_mnt->mnt_mp = mp;
++	hlist_add_head(&child_mnt->mnt_mp_list, &mp->m_list);
++}
++
++void make_visible(struct mount *mnt)
++{
++	struct mount *parent = mnt->mnt_parent;
++	if (unlikely(mnt->mnt_mountpoint == parent->mnt.mnt_root))
++		parent->overmount = mnt;
++	hlist_add_head_rcu(&mnt->mnt_hash,
++			   m_hash(&parent->mnt, mnt->mnt_mountpoint));
++	list_add_tail(&mnt->mnt_child, &parent->mnt_mounts);
++}
++
++/**
++ * attach_mnt - mount a mount, attach to @mount_hashtable and parent's
++ *              list of child mounts
++ * @parent:  the parent
++ * @mnt:     the new mount
++ * @mp:      the new mountpoint
++ *
++ * Mount @mnt at @mp on @parent. Then attach @mnt
++ * to @parent's child mount list and to @mount_hashtable.
++ *
++ * Note, when make_visible() is called @mnt->mnt_parent already points
++ * to the correct parent.
++ *
++ * Context: This function expects namespace_lock() and lock_mount_hash()
++ *          to have been acquired in that order.
++ */
++void attach_mnt(struct mount *mnt, struct mount *parent,
++		       struct mountpoint *mp)
++{
++	mnt_set_mountpoint(parent, mp, mnt);
++	make_visible(mnt);
++}
+diff --git a/fs/mount_cache.h b/fs/mount_cache.h
+index ac05e12102a3e399a157583bf33b1551e8eb2cb1..8c31a81dba9ef62452d3d42a96299da1436cfa2e 100644
+--- a/fs/mount_cache.h
++++ b/fs/mount_cache.h
+@@ -26,6 +26,10 @@ bool lookup_mountpoint(struct dentry *dentry, struct pinned_mountpoint *m);
+ int get_mountpoint(struct dentry *dentry, struct pinned_mountpoint *m);
+ void maybe_free_mountpoint(struct mountpoint *mp, struct list_head *list);
+ 
++void __umount_mnt(struct mount *mnt, struct list_head *shrink_list);
++void make_visible(struct mount *mnt);
++void attach_mnt(struct mount *mnt, struct mount *parent, struct mountpoint *mp);
++
+ static inline struct hlist_head *m_hash(struct vfsmount *mnt, struct dentry *dentry)
+ {
+ 	unsigned long tmp = ((unsigned long)mnt / L1_CACHE_BYTES);
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 2a5dfca9a908ff2eb51ab34443b7c3da53216bcb..4f560aa698dcade98a638804e93cc8eddf8831f9 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -841,25 +841,6 @@ static void __touch_mnt_namespace(struct mnt_namespace *ns)
+ 	}
+ }
+ 
+-/*
+- * locks: mount_lock[write_seqlock]
+- */
+-static void __umount_mnt(struct mount *mnt, struct list_head *shrink_list)
+-{
+-	struct mountpoint *mp;
+-	struct mount *parent = mnt->mnt_parent;
+-	if (unlikely(parent->overmount == mnt))
+-		parent->overmount = NULL;
+-	mnt->mnt_parent = mnt;
+-	mnt->mnt_mountpoint = mnt->mnt.mnt_root;
+-	list_del_init(&mnt->mnt_child);
+-	hlist_del_init_rcu(&mnt->mnt_hash);
+-	hlist_del_init(&mnt->mnt_mp_list);
+-	mp = mnt->mnt_mp;
+-	mnt->mnt_mp = NULL;
+-	maybe_free_mountpoint(mp, shrink_list);
+-}
+-
+ /*
+  * locks: mount_lock[write_seqlock], namespace_sem[excl] (for ex_mountpoints)
+  */
+@@ -868,52 +849,6 @@ static void umount_mnt(struct mount *mnt)
+ 	__umount_mnt(mnt, &ex_mountpoints);
+ }
+ 
+-/*
+- * vfsmount lock must be held for write
+- */
+-void mnt_set_mountpoint(struct mount *mnt,
+-			struct mountpoint *mp,
+-			struct mount *child_mnt)
+-{
+-	child_mnt->mnt_mountpoint = mp->m_dentry;
+-	child_mnt->mnt_parent = mnt;
+-	child_mnt->mnt_mp = mp;
+-	hlist_add_head(&child_mnt->mnt_mp_list, &mp->m_list);
+-}
+-
+-static void make_visible(struct mount *mnt)
+-{
+-	struct mount *parent = mnt->mnt_parent;
+-	if (unlikely(mnt->mnt_mountpoint == parent->mnt.mnt_root))
+-		parent->overmount = mnt;
+-	hlist_add_head_rcu(&mnt->mnt_hash,
+-			   m_hash(&parent->mnt, mnt->mnt_mountpoint));
+-	list_add_tail(&mnt->mnt_child, &parent->mnt_mounts);
+-}
+-
+-/**
+- * attach_mnt - mount a mount, attach to @mount_hashtable and parent's
+- *              list of child mounts
+- * @parent:  the parent
+- * @mnt:     the new mount
+- * @mp:      the new mountpoint
+- *
+- * Mount @mnt at @mp on @parent. Then attach @mnt
+- * to @parent's child mount list and to @mount_hashtable.
+- *
+- * Note, when make_visible() is called @mnt->mnt_parent already points
+- * to the correct parent.
+- *
+- * Context: This function expects namespace_lock() and lock_mount_hash()
+- *          to have been acquired in that order.
+- */
+-static void attach_mnt(struct mount *mnt, struct mount *parent,
+-		       struct mountpoint *mp)
+-{
+-	mnt_set_mountpoint(parent, mp, mnt);
+-	make_visible(mnt);
+-}
+-
+ void mnt_change_mountpoint(struct mount *parent, struct mountpoint *mp, struct mount *mnt)
+ {
+ 	struct mountpoint *old_mp = mnt->mnt_mp;
