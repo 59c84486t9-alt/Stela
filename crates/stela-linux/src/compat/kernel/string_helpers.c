@@ -60,6 +60,19 @@ int match_string(const char *const *array, size_t n, const char *string)
 	return -EINVAL;
 }
 
+/* Original __sysfs_match_string from lib/string_helpers.c uses sysfs_streq
+ * and stops at either the bound or the first NULL entry. */
+int __sysfs_match_string(const char *const *array, size_t n, const char *string)
+{
+	for (size_t index = 0; index < n; index++) {
+		if (!array[index])
+			break;
+		if (sysfs_streq(array[index], string))
+			return (int)index;
+	}
+	return -EINVAL;
+}
+
 void memcpy_and_pad(void *dest, size_t dest_len, const void *src, size_t count, int pad)
 {
 	if (dest_len > count) {
@@ -108,6 +121,11 @@ static void leading_whitespace(void)
 int main(void)
 {
 	leading_whitespace();
+	const char *const choices[] = {"first", "second", NULL, "hidden"};
+	assert(__sysfs_match_string(choices, ARRAY_SIZE(choices), "second\n") == 1);
+	assert(__sysfs_match_string(choices, 1, "second") == -EINVAL);
+	assert(__sysfs_match_string(choices, (size_t)-1, "hidden") == -EINVAL);
+	assert(__sysfs_match_string(choices, ARRAY_SIZE(choices), "first\n\n") == -EINVAL);
 	/* Exercise lib/string.c's implementations, not compiler-folded libc
 	 * calls. */
 	int (*volatile compare)(const char *, const char *, size_t) = strncmp;
