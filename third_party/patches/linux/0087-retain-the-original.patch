@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:31:13 -0500
+Subject: [PATCH] refactor(mm): retain the original periodic writeback interval
+
+---
+ mm/page-writeback.c   | 7 -------
+ mm/writeback_domain.c | 8 ++++++++
+ 2 files changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/mm/page-writeback.c b/mm/page-writeback.c
+index 51d55cde60086e294adbc315b4fc2f5726ff537b..79885c49472ab16cb6bf286157c74b9f5d7a82ac 100644
+--- a/mm/page-writeback.c
++++ b/mm/page-writeback.c
+@@ -98,13 +98,6 @@ static int vm_dirty_ratio = 20;
+  */
+ static unsigned long vm_dirty_bytes;
+ 
+-/*
+- * The interval between `kupdate'-style writebacks
+- */
+-unsigned int dirty_writeback_interval = 5 * 100; /* centiseconds */
+-
+-EXPORT_SYMBOL_GPL(dirty_writeback_interval);
+-
+ /*
+  * The longest time for which data is allowed to remain dirty
+  */
+diff --git a/mm/writeback_domain.c b/mm/writeback_domain.c
+index bf985aed842136b580353895057ebe7348a2f0ea..9728ebae3ceecd02bc5d015e682a94ade83c5f41 100644
+--- a/mm/writeback_domain.c
++++ b/mm/writeback_domain.c
+@@ -12,12 +12,20 @@
+  *		Initial version
+  */
+ 
++#include <linux/export.h>
+ #include <linux/string.h>
+ #include <linux/timer.h>
+ #include <linux/writeback.h>
+ 
+ #include "writeback_domain.h"
+ 
++/*
++ * The interval between `kupdate'-style writebacks
++ */
++unsigned int dirty_writeback_interval = 5 * 100; /* centiseconds */
++
++EXPORT_SYMBOL_GPL(dirty_writeback_interval);
++
+ struct wb_domain global_wb_domain;
+ 
+ /*
