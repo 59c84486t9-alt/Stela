@@ -105,26 +105,34 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> R
             return Ok(());
         }
         let Owned::Child(child) = state else { fatal() };
-        let child = ManuallyDrop::new(child);
-        // SAFETY: same actual creator. The own Child independently requires
-        // source unwind/RCU receipt after lend and exact native cancellation.
-        match unsafe {
-            self.broker
-                .kernel
-                .platform()
-                .with_process(|entered| ManuallyDrop::into_inner(child).cancel_unpublished(entered))
-        } {
-            Ok(Ok(receipt)) => {
-                mutation.put(Owned::NoPublication(receipt));
-                Ok(())
-            }
-            Ok(Err(failure)) => {
-                let factory::Failure { error, child } = failure;
-                self.fault(error);
+        // Keep the child outside the closure so admission refusal returns the
+        // same owner to the request without consuming the cancellation state.
+        let mut kept = ManuallyDrop::new(Some(child));
+        // SAFETY: the same creator holds the mutation guard. Cancellation is
+        // bounded metadata work and checks the source unwind receipt itself.
+        let result = unsafe {
+            self.broker.kernel.platform().with_process(|entered| {
+                let child = kept.take().unwrap_or_else(|| fatal());
+                match child.cancel_unpublished(entered) {
+                    Ok(receipt) => {
+                        mutation.put(Owned::NoPublication(receipt));
+                        Ok(())
+                    }
+                    Err(factory::Failure { error, child }) => {
+                        self.fault(error);
+                        mutation.put(Owned::Child(child));
+                        Err(Error::WrongPhase)
+                    }
+                }
+            })
+        };
+        match result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let child = kept.take().unwrap_or_else(|| fatal());
                 mutation.put(Owned::Child(child));
-                Err(Error::WrongPhase)
+                Err(Error::Work(error))
             }
-            Err(error) => Err(Error::Work(error)), // Transitioning is retained, never errno/noPub.
         }
     }
     pub(super) unsafe fn prepare_thread(
