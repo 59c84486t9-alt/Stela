@@ -197,20 +197,6 @@ struct file *alloc_file_pseudo(struct inode *inode, struct vfsmount *mount, cons
 	return file;
 }
 
-char *dynamic_dname(char *buffer, int buflen, const char *format, ...)
-{
-	va_list arguments;
-	char name[64];
-
-	va_start(arguments, format);
-	int size = (int)vsnprintf(name, sizeof(name), format, arguments) + 1;
-
-	va_end(arguments);
-	if (size > (int)sizeof(name) || size > buflen)
-		return ERR_PTR(-ENAMETOOLONG);
-	return memcpy(buffer + buflen - size, name, (size_t)size);
-}
-
 /* An object with no backing store, as nouveau's GEM objects take one only for
  * their size and mapping offset. Pages for it are what the OPEN list's shmem
  * entries would serve. */
@@ -464,6 +450,7 @@ STELA_UNSUPPORTED(struct file *, dentry_open, const struct path *, int, const st
 
 #ifdef STELA_LINUX_FILE_TEST
 #include <linux/init_task.h>
+#include <linux/statfs.h>
 #include <stela/linux.h>
 #include <stela/page.h>
 #include <stela/page_test.h>
@@ -636,6 +623,9 @@ int main(void)
 	assert(inode->i_blocks == 2 && inode->i_bytes == 1);
 	struct file *pseudo = alloc_file_pseudo(inode, mount, "dmabuf", O_RDWR, &fops);
 	assert(!IS_ERR(pseudo) && pseudo->f_mode & FMODE_WRITE);
+	struct kstatfs stats = {0};
+	assert(!simple_statfs(pseudo->f_path.dentry, &stats));
+	assert(stats.f_type == 0x7e57 && stats.f_bsize == PAGE_SIZE && stats.f_namelen == NAME_MAX);
 	assert(pseudo->f_path.mnt == mount && !strcmp((const char *)pseudo->f_path.dentry->d_name.name, "dmabuf"));
 	pseudo->f_path.dentry->d_fsdata = &dentries;
 	fput(pseudo);
@@ -645,6 +635,9 @@ int main(void)
 	char name[8];
 	assert(!strcmp(dynamic_dname(name, sizeof(name), "/%s", "ab"), "/ab"));
 	assert(PTR_ERR(dynamic_dname(name, 3, "/%s", "ab")) == -ENAMETOOLONG);
+	char long_name[96];
+	char *formatted = dynamic_dname(long_name, sizeof(long_name), "%080u", 1U);
+	assert(formatted == long_name + 15 && strlen(formatted) == 80 && formatted[79] == '1');
 	stela_linux_exit();
 	printf("Linux files and descriptors passed\n");
 	return 0;

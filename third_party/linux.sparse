@@ -163,6 +163,9 @@
 /fs/file_ref.c
 /fs/xattr.c
 /fs/simple_xattr.c
+/fs/d_path.c
+/fs/libfs.c
+/fs/pseudo_metadata.c
 /fs/open.c
 /fs/filp_close.c
 /fs/filp_close.h
