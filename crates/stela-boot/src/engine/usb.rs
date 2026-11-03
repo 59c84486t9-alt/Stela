@@ -26,7 +26,6 @@ use stela_drivers::{
         thunderbolt::{
             icm,
             manager::{Admission, Platform, Report, Uuid},
-            ring,
         },
     },
     firmware::{Catalog, HandoffProvider},
@@ -81,19 +80,17 @@ impl Platform for Usb4Platform {
 }
 
 /// Report one firmware event of the host at `location`.
-pub fn report_usb4(location: &str, icm: &icm::Host<ring::Mmio>, event: &icm::Event) {
+pub(super) fn report_usb4(location: &str, family: icm::Family, event: &icm::Event) {
     match event {
-        icm::Event::Notification(message) => {
-            match icm::Notification::decode(icm.family(), message) {
-                Ok(notification) => {
-                    output::arguments(format_args!("HOST USB4 {location}: {notification}\n"))
-                }
-                Err(error) => output::arguments(format_args!(
-                    "HOST USB4 {location}: undecodable firmware event {:#x}: {error:?}\n",
-                    message.code
-                )),
+        icm::Event::Notification(message) => match icm::Notification::decode(family, message) {
+            Ok(notification) => {
+                output::arguments(format_args!("HOST USB4 {location}: {notification}\n"))
             }
-        }
+            Err(error) => output::arguments(format_args!(
+                "HOST USB4 {location}: undecodable firmware event {:#x}: {error:?}\n",
+                message.code
+            )),
+        },
         icm::Event::Discarded(error) => output::arguments(format_args!(
             "HOST USB4 {location}: firmware message discarded: {error:?}\n"
         )),
@@ -145,7 +142,7 @@ impl HostUsb {
             usb4: usb4
                 .into_iter()
                 .map(|host| Usb4 {
-                    pcie_tunnels: match &host.connection {
+                    pcie_tunnels: match host.connection() {
                         usb4::Connection::Software { manager } => manager.pcie_tunnels(),
                         usb4::Connection::Firmware { .. } => 0,
                     },
@@ -227,8 +224,8 @@ impl HostUsb {
             if !usb4.running {
                 continue;
             }
-            let location = &usb4.host.location;
-            match &mut usb4.host.connection {
+            let (location, protocol) = usb4.host.protocol();
+            match protocol {
                 usb4::Connection::Firmware { .. } if !timed => {}
                 usb4::Connection::Firmware { icm, .. } => {
                     for _ in 0..USB4_EVENTS {
@@ -238,7 +235,7 @@ impl HostUsb {
                             icm.poll(now_ms)
                         };
                         match event {
-                            Ok(Some(event)) => report_usb4(location, icm, &event),
+                            Ok(Some(event)) => report_usb4(location, icm.family(), &event),
                             Ok(None) => break,
                             Err(error) => {
                                 output::arguments(format_args!(

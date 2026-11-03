@@ -569,7 +569,7 @@ pub unsafe fn open(
     // consumes them yet.
     Vec::leak(core::mem::take(&mut devices.hda_hosts));
     for host in &devices.usb4_hosts {
-        let usb4::Connection::Firmware { icm, ready, early } = &host.connection else {
+        let usb4::Connection::Firmware { icm, ready, early } = host.connection() else {
             continue;
         };
         output::arguments(format_args!(
@@ -582,7 +582,7 @@ pub unsafe fn open(
             )
         ));
         for event in early {
-            super::usb::report_usb4(&host.location, icm, event);
+            super::usb::report_usb4(&host.location, icm.family(), event);
         }
     }
     for (address, error) in &devices.failures {
