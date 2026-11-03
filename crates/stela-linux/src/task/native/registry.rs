@@ -140,10 +140,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> B
         });
         // SAFETY: constructor-only before registry/native/C publication.
         unsafe {
-            *request
-                .context
-                .get()
-                .cast::<Option<Box<CallbackContext<K, P, N>>>>() = Some(context);
+            **request.context.get() = Some(context);
         }
         let raw = Arc::into_raw(request) as *mut Request<K, P, N>;
         slot.request.store(raw, Ordering::Release);

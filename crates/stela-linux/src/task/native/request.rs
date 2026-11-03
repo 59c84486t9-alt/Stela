@@ -163,15 +163,10 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> R
         };
         // SAFETY: separate heap Context exists BEFORE any native/C publication,
         // never the address of movable Child; no owning backpointer.
-        let context = unsafe {
-            (&*self
-                .context
-                .get()
-                .cast::<Option<Box<CallbackContext<K, P, N>>>>())
-                .as_ref()
-        }
-        .unwrap_or_else(|| fatal());
-        let pointer = &**context as *const CallbackContext<K, P, N> as *mut c_void;
+        let context = unsafe { &**self.context.get() }
+            .as_deref()
+            .unwrap_or_else(|| fatal());
+        let pointer = ptr::from_ref(context).cast_mut().cast::<c_void>();
         // SAFETY: the exact callback context is retained and publication performs bounded metadata work.
         let result = unsafe {
             self.broker.kernel.platform().with_process(|entered| {

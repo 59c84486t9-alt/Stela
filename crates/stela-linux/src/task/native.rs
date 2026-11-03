@@ -99,6 +99,8 @@ struct CallbackContext<K: KernelThreadPlatform + 'static, P: Provider + 'static,
     // return AND source callback-tail joins; there is no Arc self-cycle.
     request: NonNull<Request<K, P, N>>,
 }
+type CallbackOwner<K, P, const N: usize> = ManuallyDrop<Option<Box<CallbackContext<K, P, N>>>>;
+
 struct Request<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> {
     broker: &'static Broker<K, P, N>,
     slot: &'static Slot<K, P, N>,
@@ -107,7 +109,7 @@ struct Request<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N
     record: AtomicPtr<CTask>,
     generation: AtomicU64,
     binding: UnsafeCell<ManuallyDrop<Option<Arc<TaskBinding<N>>>>>,
-    context: UnsafeCell<ManuallyDrop<Option<Box<CallbackContext<K, P, N>>>>>,
+    context: UnsafeCell<CallbackOwner<K, P, N>>,
     state: UnsafeCell<ManuallyDrop<Owned<K, P, N>>>,
     // Actual stopped publication/source-ref owner. Default abandonment retains.
     data_stop: UnsafeCell<ManuallyDrop<StoppedDataState>>,
