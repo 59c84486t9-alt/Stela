@@ -142,13 +142,22 @@ int timer_shutdown_sync(struct timer_list *timer)
 	return timer_shutdown(timer);
 }
 
-bool stela_linux_timers_next(unsigned long *expires)
+bool stela_linux_timer_list_next(unsigned long *expires)
 {
 	(void)stela_linux_owner();
-	bool found = stela_linux_hrtimers_next(expires);
 	if (hlist_empty(&pending))
+		return false;
+	*expires = hlist_entry(pending.first, struct timer_list, entry)->expires;
+	return true;
+}
+
+bool stela_linux_timers_next(unsigned long *expires)
+{
+	unsigned long first;
+	bool found = stela_linux_hrtimers_next(expires);
+
+	if (!stela_linux_timer_list_next(&first))
 		return found;
-	unsigned long first = hlist_entry(pending.first, struct timer_list, entry)->expires;
 	if (!found || time_before(first, *expires))
 		*expires = first;
 	return true;

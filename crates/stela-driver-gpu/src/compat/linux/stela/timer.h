@@ -10,11 +10,13 @@
 /* The earliest pending expiry in jiffies, or false when no timer is armed:
  * the service's next timer deadline. */
 bool stela_linux_timers_next(unsigned long *expires);
+bool stela_linux_timer_list_next(unsigned long *expires);
 
 /* Run every timer whose expiry jiffies has reached, earliest first. */
 void stela_linux_timers_run(void);
 
 /* The same for high-resolution timers, which those two also serve. */
 bool stela_linux_hrtimers_next(unsigned long *expires);
+bool stela_linux_hrtimers_next_ns(s64 *expires);
 void stela_linux_hrtimers_run(void);
 #endif

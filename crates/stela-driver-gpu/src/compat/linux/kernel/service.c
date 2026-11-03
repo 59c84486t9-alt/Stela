@@ -41,15 +41,23 @@ static s64 timer_deadline(u64 base, long left)
 	return (s64)(base + ticks * quantum);
 }
 
+static s64 hrtimer_deadline(s64 now, s64 expires)
+{
+	if (expires > now)
+		return expires;
+	/* S64_MAX is reserved for no deadline. */
+	return now == S64_MAX - 1 ? now : now + 1;
+}
+
 s64 stela_linux_service_run(void)
 {
 	update_jiffies();
 	stela_linux_timers_run();
-	stela_linux_hrtimers_run();
 
-	unsigned long timer, hrtimer;
-	bool armed = stela_linux_timers_next(&timer);
-	bool high_armed = stela_linux_hrtimers_next(&hrtimer);
+	unsigned long timer;
+	s64 hrtimer;
+	bool armed = stela_linux_timer_list_next(&timer);
+	bool high_armed = stela_linux_hrtimers_next_ns(&hrtimer);
 
 	if (!armed && !high_armed)
 		return S64_MAX;
@@ -68,10 +76,8 @@ s64 stela_linux_service_run(void)
 		long left = (long)(timer - sample);
 		next = timer_deadline(left > 0 ? now - elapsed % quantum : now, left);
 	}
-	/* The hrtimer helper reports a rounded relative delay from now,
-	 * encoded against the published jiffies. */
 	if (high_armed) {
-		s64 high = timer_deadline(now, (long)(hrtimer - jiffies));
+		s64 high = hrtimer_deadline((s64)now, hrtimer);
 		if (high < next)
 			next = high;
 	}
@@ -139,6 +145,13 @@ static void expired(struct timer_list *timer)
 	assert(false);
 }
 
+static enum hrtimer_restart high_expired(struct hrtimer *timer)
+{
+	(void)timer;
+	assert(false);
+	return HRTIMER_NORESTART;
+}
+
 int main(void)
 {
 	static const struct stela_linux_services services = {.now_ns = now_ns};
@@ -167,6 +180,17 @@ int main(void)
 	assert(stela_linux_service_run() == clock + NSEC_PER_SEC / HZ);
 	timer_delete(&timer);
 	assert(stela_linux_service_run() == S64_MAX);
+
+	struct hrtimer high;
+	hrtimer_setup(&high, high_expired, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
+	hrtimer_start(&high, clock + 17, HRTIMER_MODE_ABS);
+	assert(stela_linux_service_run() == clock + 17);
+	hrtimer_cancel(&high);
+	assert(stela_linux_service_run() == S64_MAX);
+
+	assert(hrtimer_deadline(clock, clock) == clock + 1);
+	assert(hrtimer_deadline(S64_MAX - 2, S64_MAX - 2) == S64_MAX - 1);
+	assert(hrtimer_deadline(S64_MAX - 1, S64_MAX - 1) == S64_MAX - 1);
 
 	stela_linux_exit();
 	printf("Linux service passes passed\n");

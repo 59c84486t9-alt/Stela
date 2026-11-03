@@ -110,13 +110,23 @@ u64 hrtimer_forward(struct hrtimer *timer, ktime_t now, ktime_t interval)
 	return overruns;
 }
 
-bool stela_linux_hrtimers_next(unsigned long *expires)
+bool stela_linux_hrtimers_next_ns(s64 *expires)
 {
 	const struct timerqueue_linked_node *first = timerqueue_linked_first(&pending);
 
 	if (!first)
 		return false;
-	ktime_t left = ktime_sub(first->expires, ktime_get());
+	*expires = first->expires;
+	return true;
+}
+
+bool stela_linux_hrtimers_next(unsigned long *expires)
+{
+	s64 deadline;
+
+	if (!stela_linux_hrtimers_next_ns(&deadline))
+		return false;
+	ktime_t left = ktime_sub(deadline, ktime_get());
 	*expires = jiffies + (left > 0 ? nsecs_to_jiffies((u64)left) + 1 : 0);
 	return true;
 }
