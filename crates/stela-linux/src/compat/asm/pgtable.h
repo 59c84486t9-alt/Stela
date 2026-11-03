@@ -53,6 +53,13 @@ static inline bool pgtable_l5_enabled(void)
 #define _PAGE_PSE	(_AT(pteval_t, 1) << 7)
 #define _PAGE_NX	(_AT(pteval_t, 1) << 63)
 
+/* Original x86-64 pure value encodings, not page-table access authority.
+ * pgtable_types.h selects this KNL mask for its 64-bit entry format. */
+#define _PAGE_BIT_GLOBAL 8
+#define _PAGE_BIT_PROTNONE _PAGE_BIT_GLOBAL
+#define _PAGE_KNL_ERRATUM_MASK (_PAGE_DIRTY | _PAGE_ACCESSED)
+#define _PAGE_SWP_EXCLUSIVE _PAGE_PWT
+
 /* Linux's default PAT programs index 1 write-combining and index 2 UC-. */
 #define pgprot_writecombine(prot) __pgprot(pgprot_val(prot) | _PAGE_PWT)
 #define pgprot_noncached(prot) __pgprot(pgprot_val(prot) | _PAGE_PCD)
@@ -74,6 +81,35 @@ static inline bool pgtable_l5_enabled(void)
 #define __pgd(x)	((pgd_t) { (x) })
 #define __pgprot(x)	((pgprot_t) { (x) })
 
+/* Original x86-64 software-swap representation. These macros transform
+ * values only; they provide no swap device, page, MM or TLB ownership. */
+#define SWP_TYPE_BITS 5
+#define SWP_OFFSET_FIRST_BIT (_PAGE_BIT_PROTNONE + 1)
+#define SWP_OFFSET_SHIFT (SWP_OFFSET_FIRST_BIT + SWP_TYPE_BITS)
+#define __swp_type(x) ((x).val >> (64 - SWP_TYPE_BITS))
+#define __swp_offset(x) (~(x).val << SWP_TYPE_BITS >> SWP_OFFSET_SHIFT)
+#define __swp_entry(type, offset) ((swp_entry_t) { \
+	(~(unsigned long)(offset) << SWP_OFFSET_SHIFT >> SWP_TYPE_BITS) \
+	| ((unsigned long)(type) << (64-SWP_TYPE_BITS)) })
+#define __pte_to_swp_entry(pte) ((swp_entry_t) { pte_val((pte)) })
+#define __pmd_to_swp_entry(pmd) ((swp_entry_t) { pmd_val((pmd)) })
+#define __swp_entry_to_pte(x) (__pte((x).val))
+#define __swp_entry_to_pmd(x) (__pmd((x).val))
+
+#define PTE_FLAGS_MASK (~PTE_PFN_MASK)
+static inline pteval_t native_pte_val(pte_t pte)
+{
+	return pte.pte;
+}
+static inline pteval_t pte_flags(pte_t pte)
+{
+	return native_pte_val(pte) & PTE_FLAGS_MASK;
+}
+static inline int pte_none(pte_t pte)
+{
+	return !(pte.pte & ~(_PAGE_KNL_ERRATUM_MASK));
+}
+
 static inline int pte_present(pte_t pte) { return pte_val(pte) & _PAGE_PRESENT; }
 static inline int pte_write(pte_t pte) { return !!(pte_val(pte) & _PAGE_RW); }
 static inline int pte_young(pte_t pte) { return !!(pte_val(pte) & _PAGE_ACCESSED); }
@@ -83,6 +119,19 @@ static inline pte_t pte_clear_flags(pte_t pte, pteval_t clear)
 {
 	return __pte(pte_val(pte) & ~clear);
 }
+static inline pte_t pte_swp_mkexclusive(pte_t pte)
+{
+	return pte_set_flags(pte, _PAGE_SWP_EXCLUSIVE);
+}
+static inline bool pte_swp_exclusive(pte_t pte)
+{
+	return pte_flags(pte) & _PAGE_SWP_EXCLUSIVE;
+}
+static inline pte_t pte_swp_clear_exclusive(pte_t pte)
+{
+	return pte_clear_flags(pte, _PAGE_SWP_EXCLUSIVE);
+}
+
 static inline pte_t pte_mkyoung(pte_t pte) { return pte_set_flags(pte, _PAGE_ACCESSED); }
 static inline pte_t pte_mkold(pte_t pte) { return pte_clear_flags(pte, _PAGE_ACCESSED); }
 static inline pte_t pte_mkdirty(pte_t pte) { return pte_set_flags(pte, _PAGE_DIRTY); }

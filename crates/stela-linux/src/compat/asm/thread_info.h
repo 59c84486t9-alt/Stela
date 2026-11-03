@@ -7,7 +7,8 @@
 #include <asm/page.h>
 
 /* Exact admitted Linux usable stack size; Runtime retains the real backing. */
-#define THREAD_SIZE (PAGE_SIZE << 2)
+#define THREAD_SIZE_ORDER 2
+#define THREAD_SIZE (PAGE_SIZE << THREAD_SIZE_ORDER)
 
 struct task_struct;
 
