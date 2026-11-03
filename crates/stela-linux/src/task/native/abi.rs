@@ -25,7 +25,7 @@ pub(super) unsafe fn publish<
 >(
     broker: &'static Broker<K, P, N>,
 ) -> Result<(), Error> {
-    let dispatch = ManuallyDrop::new(Box::new(Dispatch {
+    let pointer = Box::into_raw(Box::new(Dispatch {
         pending: pending::<K, P, N>,
         process: process::<K, P, N>,
         context: broker as *const _ as *const c_void,
@@ -37,15 +37,19 @@ pub(super) unsafe fn publish<
         event: event::<K, P, N>,
         abort: abort::<K, P, N>,
     }));
-    let pointer = &**dispatch as *const Dispatch as *mut Dispatch;
-    DISPATCH
+    if DISPATCH
         .compare_exchange(
             ptr::null_mut(),
             pointer,
             Ordering::AcqRel,
             Ordering::Acquire,
         )
-        .map_err(|_| Error::Busy)?;
+        .is_err()
+    {
+        // SAFETY: publication failed, so only this caller owns the raw box.
+        drop(unsafe { Box::from_raw(pointer) });
+        return Err(Error::Busy);
+    }
     Ok(())
 }
 fn dispatch() -> &'static Dispatch {
@@ -68,6 +72,7 @@ unsafe fn allocate<K: KernelThreadPlatform + 'static, P: Provider + 'static, con
     node: i32,
     out: *mut bool,
 ) -> i32 {
+    // SAFETY: The dispatch supplies the typed broker, and C lends the birth and output.
     unsafe { broker::<K, P, N>(context).allocate(birth, node, out) }
 }
 unsafe fn thread<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>(
@@ -77,8 +82,10 @@ unsafe fn thread<K: KernelThreadPlatform + 'static, P: Provider + 'static, const
     entry: Option<NativeEntry>,
     argument: *mut c_void,
 ) -> i32 {
+    // SAFETY: The dispatch pairs this trampoline with its typed broker.
     let b = unsafe { broker::<K, P, N>(context) };
     let read = b.lookup(task, owner, None);
+    // SAFETY: The read guard pins the request, and C retains the entry and argument.
     unsafe { (&*read.pointer).prepare_thread(entry, argument) }
 }
 unsafe fn publish_child<
@@ -94,8 +101,10 @@ unsafe fn publish_child<
     if rank.is_null() {
         fatal();
     }
+    // SAFETY: The dispatch pairs this trampoline with its typed broker.
     let b = unsafe { broker::<K, P, N>(context) };
     let read = b.lookup(task, owner, None);
+    // SAFETY: The guard pins the matched request and C lends the initialized rank.
     unsafe { (&*read.pointer).publish(&*rank) };
 }
 unsafe fn activate<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>(
@@ -103,8 +112,10 @@ unsafe fn activate<K: KernelThreadPlatform + 'static, P: Provider + 'static, con
     task: *mut CTask,
     owner: *const RawOwner,
 ) {
+    // SAFETY: The dispatch pairs this trampoline with its typed broker.
     let b = unsafe { broker::<K, P, N>(context) };
     let read = b.lookup(task, owner, None);
+    // SAFETY: The read guard pins the exact published request C is activating.
     unsafe { (&*read.pointer).activate() };
 }
 unsafe fn event<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>(
@@ -114,10 +125,12 @@ unsafe fn event<K: KernelThreadPlatform + 'static, P: Provider + 'static, const 
     generation: u64,
     event: u8,
 ) {
+    // SAFETY: The dispatch pairs this trampoline with its typed broker.
     let b = unsafe { broker::<K, P, N>(context) };
     let read = b.lookup(task, owner, Some(generation));
     // Record + same real IRQ-safe work reason ONLY. No C/current, allocation,
     // child-state borrow, task/stack drop or original reaper wait occurs here.
+    // SAFETY: The generation-checked guard pins the request for IRQ-safe notification.
     unsafe { (&*read.pointer).notify(event) };
 }
 unsafe fn abort<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>(
@@ -126,9 +139,12 @@ unsafe fn abort<K: KernelThreadPlatform + 'static, P: Provider + 'static, const 
     owner: *const RawOwner,
     generation: u64,
 ) {
+    // SAFETY: The dispatch pairs this trampoline with its typed broker.
     let b = unsafe { broker::<K, P, N>(context) };
     let read = b.lookup(task, owner, Some(generation));
+    // SAFETY: The generation-checked read guard pins this request.
     let request = unsafe { &*read.pointer };
+    // SAFETY: C retains the source borrow while cancelling this unpublished request.
     if unsafe { request.cancel() }.is_err() {
         fatal();
     }
@@ -145,10 +161,10 @@ unsafe extern "C" fn stela_linux_task_stack_allocate(
     if out.is_null() {
         fatal();
     }
-    unsafe {
-        *out = false;
-    }
+    // SAFETY: C lends writable storage for the duration of this call.
+    unsafe { *out = false };
     let d = dispatch();
+    // SAFETY: The dispatch retains its context and C lends the birth and writable output.
     unsafe { (d.allocate)(d.context, birth, node, out) }
 }
 #[unsafe(no_mangle)]
@@ -162,6 +178,7 @@ unsafe extern "C" fn stela_linux_task_native_thread_prepare(
     if d.owner != owner {
         fatal();
     }
+    // SAFETY: The owner matches and C lends the task and retained entry argument.
     unsafe { (d.thread)(d.context, task, owner, entry, argument) }
 }
 #[unsafe(no_mangle)]
@@ -174,6 +191,7 @@ unsafe extern "C" fn stela_linux_task_native_publish(
     if d.owner != owner {
         fatal();
     }
+    // SAFETY: The owner matches and C lends the task and initialized rank.
     unsafe { (d.publish)(d.context, task, owner, rank) }
 }
 #[unsafe(no_mangle)]
@@ -182,6 +200,7 @@ unsafe extern "C" fn stela_linux_task_native_activate(task: *mut CTask, owner: *
     if d.owner != owner {
         fatal();
     }
+    // SAFETY: The owner matches and C is activating the published source task.
     unsafe { (d.activate)(d.context, task, owner) }
 }
 #[unsafe(no_mangle)]
@@ -191,6 +210,7 @@ unsafe extern "C" fn stela_linux_task_native_source_freed(
     generation: u64,
 ) {
     let d = dispatch();
+    // SAFETY: The callback validates source identity and generation before pinning the request.
     unsafe { (d.event)(d.context, task, owner, generation, SOURCE_FREED) }
 }
 #[unsafe(no_mangle)]
@@ -200,6 +220,7 @@ unsafe extern "C" fn stela_linux_task_native_terminal_returned(
     generation: u64,
 ) {
     let d = dispatch();
+    // SAFETY: The callback validates source identity and generation before pinning the request.
     unsafe { (d.event)(d.context, task, owner, generation, TERMINAL_RETURNED) }
 }
 #[unsafe(no_mangle)]
@@ -209,12 +230,14 @@ unsafe extern "C" fn stela_linux_task_native_abort(
     generation: u64,
 ) {
     let d = dispatch();
+    // SAFETY: C retains the unpublished source task through cancellation.
     unsafe { (d.abort)(d.context, task, owner, generation) }
 }
 
 unsafe fn pending<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>(
     context: *const c_void,
 ) -> bool {
+    // SAFETY: The dispatch pairs this trampoline with its typed broker.
     unsafe { broker::<K, P, N>(context) }.pending()
 }
 unsafe fn process<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>(
@@ -229,6 +252,7 @@ unsafe extern "C" fn stela_linux_task_native_source_tail(
     generation: u64,
 ) {
     let d = dispatch();
+    // SAFETY: The callback validates source identity and generation before pinning the request.
     unsafe { (d.event)(d.context, task, owner, generation, SOURCE_TAIL) }
 }
 #[unsafe(no_mangle)]
@@ -237,6 +261,7 @@ unsafe extern "C" fn stela_linux_task_native_pending(owner: *const RawOwner) -> 
     if d.owner != owner {
         fatal();
     }
+    // SAFETY: The owner matches the calling supervisor and the dispatch retains its context.
     unsafe { (d.pending)(d.context) }
 }
 #[unsafe(no_mangle)]
@@ -245,5 +270,6 @@ unsafe extern "C" fn stela_linux_task_native_process_one(owner: *const RawOwner)
     if d.owner != owner {
         fatal();
     }
+    // SAFETY: The owner matches the calling supervisor and the dispatch retains its context.
     unsafe { (d.process)(d.context) }
 }
