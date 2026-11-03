@@ -236,6 +236,7 @@ impl Queue {
                 return true;
             }
             let read = slot.read();
+            // SAFETY: The read guard pins any non-null node for this atomic event check.
             if !read.pointer.is_null() && unsafe { &*read.pointer }.events.load(Ordering::Acquire) {
                 return true;
             }
@@ -245,11 +246,14 @@ impl Queue {
     /// Called only against an actual Factory-born record under fresh bounded
     /// constructor metadata scope. NULL is genuine unmanaged source ancestry.
     pub(super) unsafe fn associate(&self, record: *mut CTask, generation: u64) {
+        // SAFETY: The caller supplies an actual factory birth under its constructor scope.
         let lease = unsafe { stela_linux_task_managed_birth_owner(record, self.owner, generation) };
         if lease.is_null() {
             return;
         }
+        // SAFETY: The source owns this non-null lease throughout the constructor scope.
         let context = unsafe { stela_linux_managed_lease_context(lease, self.owner) };
+        // SAFETY: The C lease exposes the exact retained node context for this owner.
         let node = unsafe { node(context, lease, self.owner) };
         if !ptr::eq(node.queue, self)
             || node.flags.fetch_or(ASSOCIATED, Ordering::AcqRel) & ASSOCIATED != 0
@@ -263,23 +267,28 @@ impl Queue {
     pub(super) unsafe fn process_one(&self) -> i32 {
         for slot in &self.slots {
             if slot.close_pending.swap(false, Ordering::AcqRel) {
+                // SAFETY: Only PID1 consumes retired ownership, and close_slot checks readers.
                 return unsafe { self.close_slot(slot) };
             }
             let read = slot.read();
             if read.pointer.is_null() {
                 continue;
             }
+            // SAFETY: The read guard pins this non-null registry node.
             let value = unsafe { &*read.pointer };
             if !value.events.swap(false, Ordering::AcqRel) {
                 continue;
             }
+            // SAFETY: The read guard keeps the registry Arc alive during the increment.
             unsafe { Arc::increment_strong_count(read.pointer) };
-            let mut value = ManuallyDrop::new(unsafe { Arc::from_raw(read.pointer) });
+            // SAFETY: This takes only the additional strong reference acquired above.
+            let value = unsafe { Arc::from_raw(read.pointer) };
             drop(read);
             let phase = value.phase.load(Ordering::Acquire);
             if phase == CANCELLED {
                 self.retire(slot, &value);
-                unsafe { ManuallyDrop::drop(&mut value) };
+                drop(value);
+                // SAFETY: Only PID1 consumes retired ownership, and close_slot checks readers.
                 return unsafe { self.close_slot(slot) };
             }
             if phase == QUEUED
@@ -291,12 +300,14 @@ impl Queue {
                 let context = Arc::as_ptr(&value) as *mut c_void;
                 // Actual stable heap output BEFORE C can queue, sleep or call
                 // kthreadd/native association. No guard/RefCell/permit remains.
+                // SAFETY: The current process owns the stable node and the C transaction.
                 let result = unsafe {
                     stela_linux_managed_create(self.owner, context, run, value.lease.get())
                 };
                 if value.flags.load(Ordering::Acquire) & (CREATE_FAILED | SKIPPED) == 0 {
                     value.result.store(result, Ordering::Release);
                 }
+                // SAFETY: The synchronous C create call has returned and PID1 owns the lease slot.
                 if unsafe { *value.lease.get() }.is_null() {
                     if result >= 0 || value.flags.load(Ordering::Acquire) & ASSOCIATED != 0 {
                         fatal();
@@ -314,28 +325,32 @@ impl Queue {
             // consume that actual state now rather than lose its coalesced event.
             if value.phase.load(Ordering::Acquire) == CANCELLED {
                 self.retire(slot, &value);
-                unsafe { ManuallyDrop::drop(&mut value) };
+                drop(value);
+                // SAFETY: Only PID1 consumes retired ownership, and close_slot checks readers.
                 return unsafe { self.close_slot(slot) };
             }
             let flags = value.flags.load(Ordering::Acquire);
             let native_joined = flags & ASSOCIATED == 0 || flags & NATIVE_RETIRED != 0;
             if native_joined && (flags & NO_C_OWNER != 0 || flags & PRODUCERS_JOINED != 0) {
+                // SAFETY: PID1 reads the retained lease after the producer joins.
                 let lease = unsafe { *value.lease.get() };
                 if !lease.is_null() {
                     // All actual C lease/free/ref work occurs HERE in PID1,
                     // never Pending.try_join or native dispatcher extraction.
+                    // SAFETY: The current process owns the stable node and the C transaction.
                     let result = unsafe { stela_linux_managed_lease_release(lease, self.owner) };
                     if result != 0 {
                         return result;
                     }
                 }
                 self.retire(slot, &value);
-                unsafe { ManuallyDrop::drop(&mut value) };
+                drop(value);
+                // SAFETY: Only PID1 consumes retired ownership, and close_slot checks readers.
                 return unsafe { self.close_slot(slot) };
             }
             // Keep source owner and job; only a genuine later source/native
             // event enqueues another process attempt, no periodic retry.
-            unsafe { ManuallyDrop::drop(&mut value) };
+            drop(value);
             return 1;
         }
         0
@@ -343,10 +358,12 @@ impl Queue {
     fn retire(&self, slot: &ManagedSlot, value: &Arc<Node>) {
         slot.closing.store(true, Ordering::SeqCst);
         let pointer = slot.pointer.swap(ptr::null_mut(), Ordering::SeqCst);
-        if pointer != Arc::as_ptr(value) as *mut Node {
+        if !ptr::eq(pointer, Arc::as_ptr(value)) {
             fatal();
         }
+        // SAFETY: The swap removed and transferred this slot's exact strong reference.
         let actual = unsafe { Arc::from_raw(pointer) };
+        // SAFETY: only the PID1 retirement path writes the retired owner slot.
         unsafe {
             *slot.retired.get().cast::<Option<Arc<Node>>>() = Some(actual);
         }
@@ -355,6 +372,7 @@ impl Queue {
         if slot.readers.load(Ordering::SeqCst) != 0 {
             return 0;
         }
+        // SAFETY: PID1 exclusively takes the retired owner after the reader check.
         let Some(actual) =
             (unsafe { (&mut *slot.retired.get().cast::<Option<Arc<Node>>>()).take() })
         else {
@@ -406,6 +424,7 @@ impl Pending {
             return Err(self);
         }
         let mut this = ManuallyDrop::new(self);
+        // SAFETY: This consumed handle uniquely owns its initialized Arc field.
         let held = unsafe { ManuallyDrop::take(&mut this.node) };
         let actual = match Arc::try_unwrap(held) {
             Ok(value) => value,
@@ -427,6 +446,7 @@ impl Pending {
         } else {
             Outcome::ExitedWithoutReturn
         };
+        // SAFETY: Unique Arc ownership and joined producers give exclusive access to the job.
         let job =
             unsafe { (&mut *actual.job.get().cast::<Option<Pin<Box<dyn ManagedJob>>>>()).take() }
                 .unwrap_or_else(|| fatal());
@@ -437,7 +457,9 @@ unsafe fn node<'a>(context: *mut c_void, lease: *mut Lease, owner: *const RawOwn
     if context.is_null() || lease.is_null() {
         fatal();
     }
+    // SAFETY: The C callback retains the exact node context for the duration of this call.
     let actual = unsafe { &*context.cast::<Node>() };
+    // SAFETY: The C lease keeps its output slot live throughout this callback.
     if actual.queue.owner != owner || unsafe { *actual.lease.get() } != lease {
         fatal();
     }
@@ -451,6 +473,7 @@ unsafe extern "C" fn stela_linux_managed_source_event(
     event: u32,
     result: i32,
 ) {
+    // SAFETY: The C producer lends its retained node context and exact lease.
     let actual = unsafe { node(context, lease, owner) };
     let flag = match event {
         1 => INTERRUPTED,
@@ -479,12 +502,14 @@ unsafe extern "C" fn run(context: *mut c_void) -> i32 {
     if context.is_null() {
         fatal();
     }
+    // SAFETY: The C callback retains the exact node context for the duration of this call.
     let actual = unsafe { &*context.cast::<Node>() };
     if actual.flags.fetch_or(CALLBACK_ENTERED, Ordering::AcqRel) & CALLBACK_ENTERED != 0 {
         fatal();
     }
     // Exclusive pinned owned job; status/cancel never borrow it and final
     // extraction is impossible until actual complete source/native closure.
+    // SAFETY: the unique callback entry owns the pinned job until it returns.
     let job =
         unsafe { (&mut *actual.job.get().cast::<Option<Pin<Box<dyn ManagedJob>>>>()).as_mut() }
             .unwrap_or_else(|| fatal());
