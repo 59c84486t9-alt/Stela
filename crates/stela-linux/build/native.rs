@@ -314,12 +314,7 @@ impl Linux {
         // SAME production common archive/Rust heap as the unit binary;
         // never mix duplicate native/hosted common archives. The standalone
         // C suites below keep their separate sanitizer-linked programs.
-        if env::var("TARGET").ok() == env::var("HOST").ok()
-            && matches!(
-                env::var("CARGO_CFG_TARGET_OS").as_deref(),
-                Ok("linux" | "macos")
-            )
-        {
+        if super::task_fixtures() {
             let mut helper = stela_c_build::native::compiler();
             helper.define("STELA_TEST_CANONICAL_RUST_HEAP", None);
             helper.file(format!("{COMPAT}/stela/test.c"));
@@ -381,12 +376,7 @@ impl Linux {
     }
 
     pub fn tests(&self, tests: &mut Tests) {
-        if env::var("TARGET").ok() == env::var("HOST").ok()
-            && matches!(
-                env::var("CARGO_CFG_TARGET_OS").as_deref(),
-                Ok("linux" | "macos")
-            )
-        {
+        if super::task_fixtures() {
             tests.rust_children();
         }
         let Some(mut build) = hosted() else {

@@ -225,20 +225,40 @@ fn unmap_failure_stops_before_caller_can_reuse_memory() {
     );
 }
 
+#[cfg(all(
+    feature = "hosted-test-support",
+    target_arch = "x86_64",
+    any(target_os = "linux", target_os = "macos")
+))]
 struct IrqAttempt<'a> {
     path: &'a std::ffi::OsStr,
     dev_id: *mut c_void,
     primary: unsafe extern "C" fn(core::ffi::c_int, *mut c_void) -> core::ffi::c_int,
     enable_failure: bool,
 }
+#[cfg(all(
+    feature = "hosted-test-support",
+    target_arch = "x86_64",
+    any(target_os = "linux", target_os = "macos")
+))]
 unsafe extern "C" fn quiet_primary(_: core::ffi::c_int, _: *mut c_void) -> core::ffi::c_int {
     1
 }
+#[cfg(all(
+    feature = "hosted-test-support",
+    target_arch = "x86_64",
+    any(target_os = "linux", target_os = "macos")
+))]
 unsafe extern "C" fn counted_primary(_: core::ffi::c_int, dev: *mut c_void) -> core::ffi::c_int {
     // SAFETY: the suspended caller retains this exact fixture AtomicUsize dev_id.
     unsafe { &*dev.cast::<AtomicUsize>() }.fetch_add(1, Ordering::Relaxed);
     1
 }
+#[cfg(all(
+    feature = "hosted-test-support",
+    target_arch = "x86_64",
+    any(target_os = "linux", target_os = "macos")
+))]
 unsafe extern "C" fn irq_attempt(context: *mut c_void) {
     // SAFETY: the hosted foreground helper keeps this exact attempt and original
     // source/dev_id/owner graph through its real TaskBinding/current and trap.
@@ -288,6 +308,11 @@ unsafe extern "C" fn irq_attempt(context: *mut c_void) {
     std::process::exit(99);
 }
 
+#[cfg(all(
+    feature = "hosted-test-support",
+    target_arch = "x86_64",
+    any(target_os = "linux", target_os = "macos")
+))]
 #[test]
 fn irq_retirement_refusal_never_reclaims_request_or_returns_to_free_dev_id() {
     const TEST: &str = "function::tests::fatal::irq_retirement_refusal_never_reclaims_request_or_returns_to_free_dev_id";
@@ -331,6 +356,11 @@ fn irq_retirement_refusal_never_reclaims_request_or_returns_to_free_dev_id() {
     }
 }
 
+#[cfg(all(
+    feature = "hosted-test-support",
+    target_arch = "x86_64",
+    any(target_os = "linux", target_os = "macos")
+))]
 #[test]
 fn synchronous_enable_delivery_then_error_retains_linked_action_before_trap() {
     const TEST: &str = "function::tests::fatal::synchronous_enable_delivery_then_error_retains_linked_action_before_trap";

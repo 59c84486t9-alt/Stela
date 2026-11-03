@@ -67,7 +67,7 @@ unsafe extern "C" fn stela_linux_heap_free(object: *mut c_void, size: usize, ali
 }
 
 /// The native ports' hosted C test programs, which `build.rs` compiles.
-#[cfg(all(test, feature = "kernel"))]
+#[cfg(all(test, feature = "hosted-test-support"))]
 mod c_tests {
     extern crate std;
 

@@ -1089,6 +1089,7 @@ impl<const N: usize> Drop for TargetTask<N> {
 
 #[cfg(all(
     test,
+    feature = "hosted-test-support",
     target_arch = "x86_64",
     any(target_os = "linux", target_os = "macos")
 ))]
