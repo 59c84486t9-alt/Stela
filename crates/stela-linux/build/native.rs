@@ -129,6 +129,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/mm/init-mm.c")),
             PathBuf::from(format!("{LINUX}/kernel/pid.c")),
             PathBuf::from(format!("{LINUX}/kernel/task_rcu.c")),
+            PathBuf::from(format!("{LINUX}/kernel/fork_caches.c")),
             PathBuf::from(format!("{LINUX}/kernel/nsproxy.c")),
             PathBuf::from(format!("{LINUX}/kernel/nscommon.c")),
             PathBuf::from(format!("{LINUX}/kernel/nstree.c")),

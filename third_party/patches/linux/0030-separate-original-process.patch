@@ -1,0 +1,194 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 22:41:16 -0500
+Subject: [PATCH] refactor(fork): separate original process cache
+ initialization
+
+---
+ kernel/Makefile      |  2 +-
+ kernel/fork.c        | 44 +----------------------------
+ kernel/fork_caches.c | 67 ++++++++++++++++++++++++++++++++++++++++++++
+ kernel/fork_caches.h | 11 ++++++++
+ 4 files changed, 80 insertions(+), 44 deletions(-)
+ create mode 100644 kernel/fork_caches.c
+ create mode 100644 kernel/fork_caches.h
+
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 623e162956bacd95423c5926447dc94f6b60b373..785f497e51553549c61884ae86c2388d2555621d 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -3,7 +3,7 @@
+ # Makefile for the linux kernel.
+ #
+ 
+-obj-y     = fork.o exec_domain.o exec_state.o panic.o \
++obj-y     = fork.o fork_caches.o exec_domain.o exec_state.o panic.o \
+ 	    cpu.o cpu_topology.o exit.o task_rcu.o rcuwait_wake.o softirq.o resource.o \
+ 	    sysctl.o capability.o ptrace.o user.o \
+ 	    signal.o signal_state.o restart_no_syscall.o sys.o umh.o workqueue.o pid.o task_work.o \
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 854448152696b2cf87df45b11aa28559eebc209c..a54ac92b1da2cc434a6086e658ec95e65370692a 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -119,6 +119,7 @@
+ 
+ /* For dup_mmap(). */
+ #include "../mm/internal.h"
++#include "fork_caches.h"
+ 
+ #include <trace/events/sched.h>
+ 
+@@ -467,18 +468,6 @@ void thread_stack_cache_init(void)
+ #endif /* THREAD_SIZE >= PAGE_SIZE */
+ #endif /* CONFIG_VMAP_STACK */
+ 
+-/* SLAB cache for signal_struct structures (tsk->signal) */
+-static struct kmem_cache *signal_cachep;
+-
+-/* SLAB cache for sighand_struct structures (tsk->sighand) */
+-struct kmem_cache *sighand_cachep;
+-
+-/* SLAB cache for files_struct structures (tsk->files) */
+-struct kmem_cache *files_cachep;
+-
+-/* SLAB cache for fs_struct structures (tsk->fs) */
+-struct kmem_cache *fs_cachep;
+-
+ /* SLAB cache for mm_struct structures (tsk->mm) */
+ static struct kmem_cache *mm_cachep;
+ 
+@@ -3090,14 +3079,6 @@ out:
+ #define ARCH_MIN_MMSTRUCT_ALIGN 0
+ #endif
+ 
+-static void sighand_ctor(void *data)
+-{
+-	struct sighand_struct *sighand = data;
+-
+-	spin_lock_init(&sighand->siglock);
+-	init_waitqueue_head(&sighand->signalfd_wqh);
+-}
+-
+ void __init mm_cache_init(void)
+ {
+ 	unsigned int mm_size;
+@@ -3117,29 +3098,6 @@ void __init mm_cache_init(void)
+ 			NULL);
+ }
+ 
+-void __init proc_caches_init(void)
+-{
+-	sighand_cachep = kmem_cache_create("sighand_cache",
+-			sizeof(struct sighand_struct), 0,
+-			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_TYPESAFE_BY_RCU|
+-			SLAB_ACCOUNT, sighand_ctor);
+-	signal_cachep = kmem_cache_create("signal_cache",
+-			sizeof(struct signal_struct), 0,
+-			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT,
+-			NULL);
+-	exec_state_init();
+-	files_cachep = kmem_cache_create("files_cache",
+-			sizeof(struct files_struct), 0,
+-			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT,
+-			NULL);
+-	fs_cachep = kmem_cache_create("fs_cache",
+-			sizeof(struct fs_struct), 0,
+-			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT,
+-			NULL);
+-	mmap_init();
+-	nsproxy_cache_init();
+-}
+-
+ /*
+  * Check constraints on flags passed to the unshare system call.
+  */
+diff --git a/kernel/fork_caches.c b/kernel/fork_caches.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..440bf0a24e5ecfdad1628f2646b9f255ef9ceede
+--- /dev/null
++++ b/kernel/fork_caches.c
+@@ -0,0 +1,67 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *  linux/kernel/fork.c
++ *
++ *  Copyright (C) 1991, 1992  Linus Torvalds
++ */
++
++/*
++ *  'fork.c' contains the help-routines for the 'fork' system call
++ * (see also entry.S and others).
++ * Fork is rather simple, once you get the hang of it, but the memory
++ * management can be a bitch. See 'mm/memory.c': 'copy_page_range()'
++ */
++
++#include <linux/fdtable.h>
++#include <linux/fs_struct.h>
++#include <linux/init.h>
++#include <linux/mm.h>
++#include <linux/nsproxy.h>
++#include <linux/sched/exec_state.h>
++#include <linux/sched/signal.h>
++#include <linux/slab.h>
++
++#include "fork_caches.h"
++
++/* SLAB cache for signal_struct structures (tsk->signal) */
++struct kmem_cache *signal_cachep;
++
++/* SLAB cache for sighand_struct structures (tsk->sighand) */
++struct kmem_cache *sighand_cachep;
++
++/* SLAB cache for files_struct structures (tsk->files) */
++struct kmem_cache *files_cachep;
++
++/* SLAB cache for fs_struct structures (tsk->fs) */
++struct kmem_cache *fs_cachep;
++
++static void sighand_ctor(void *data)
++{
++	struct sighand_struct *sighand = data;
++
++	spin_lock_init(&sighand->siglock);
++	init_waitqueue_head(&sighand->signalfd_wqh);
++}
++
++void __init proc_caches_init(void)
++{
++	sighand_cachep = kmem_cache_create("sighand_cache",
++			sizeof(struct sighand_struct), 0,
++			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_TYPESAFE_BY_RCU|
++			SLAB_ACCOUNT, sighand_ctor);
++	signal_cachep = kmem_cache_create("signal_cache",
++			sizeof(struct signal_struct), 0,
++			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT,
++			NULL);
++	exec_state_init();
++	files_cachep = kmem_cache_create("files_cache",
++			sizeof(struct files_struct), 0,
++			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT,
++			NULL);
++	fs_cachep = kmem_cache_create("fs_cache",
++			sizeof(struct fs_struct), 0,
++			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT,
++			NULL);
++	mmap_init();
++	nsproxy_cache_init();
++}
+diff --git a/kernel/fork_caches.h b/kernel/fork_caches.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..83a1e583a6a26f4a3083ef869c78985c3fc01557
+--- /dev/null
++++ b/kernel/fork_caches.h
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _KERNEL_FORK_CACHES_H
++#define _KERNEL_FORK_CACHES_H
++
++struct kmem_cache;
++extern struct kmem_cache *signal_cachep;
++extern struct kmem_cache *sighand_cachep;
++extern struct kmem_cache *files_cachep;
++extern struct kmem_cache *fs_cachep;
++
++#endif
