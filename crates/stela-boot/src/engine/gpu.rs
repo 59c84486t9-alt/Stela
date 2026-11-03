@@ -54,7 +54,7 @@ use stela_drivers::{
         dma::mapping::DmaDomain,
         irq::{Disposition, Handler, IrqError, IrqRegistration, Route, Source},
         mmio::owned,
-        pci::{Bar, ConfigSpace, Function, owned::OwnedConfig},
+        pci::{Bar, ConfigError, ConfigSpace, Function, owned::OwnedConfig},
     },
     firmware::{Catalog, Provider, Requirement, Target},
     gpu,
@@ -197,23 +197,23 @@ unsafe fn allocate_zeroed(layout: Layout) -> *mut u8 {
 struct SharedConfig(Rc<RefCell<Function<OwnedConfig>>>);
 
 impl ConfigSpace for SharedConfig {
-    fn read32(&self, offset: u16) -> u32 {
+    fn read32(&self, offset: u16) -> Result<u32, ConfigError> {
         self.0.borrow_mut().config().read32(offset)
     }
-    fn write32(&mut self, offset: u16, value: u32) {
-        self.0.borrow_mut().config().write32(offset, value);
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), ConfigError> {
+        self.0.borrow_mut().config().write32(offset, value)
     }
-    fn read16(&self, offset: u16) -> u16 {
+    fn read16(&self, offset: u16) -> Result<u16, ConfigError> {
         self.0.borrow_mut().config().read16(offset)
     }
-    fn read8(&self, offset: u16) -> u8 {
+    fn read8(&self, offset: u16) -> Result<u8, ConfigError> {
         self.0.borrow_mut().config().read8(offset)
     }
-    fn write16(&mut self, offset: u16, value: u16) {
-        self.0.borrow_mut().config().write16(offset, value);
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError> {
+        self.0.borrow_mut().config().write16(offset, value)
     }
-    fn write8(&mut self, offset: u16, value: u8) {
-        self.0.borrow_mut().config().write8(offset, value);
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), ConfigError> {
+        self.0.borrow_mut().config().write8(offset, value)
     }
 }
 
@@ -233,14 +233,14 @@ struct MsiSource {
 // close refuses and retains owners even if nouveau masked its local source.
 unsafe impl Source for MsiSource {
     fn mask(&mut self) -> Result<(), IrqError> {
-        let command = self.config.read16(4);
+        let command = self.config.read16(4)?;
         if command == u16::MAX {
             return Err(IrqError::FailedRead);
         }
-        self.config.write16(4, command | 1 << 10);
-        self.msi.disable(&mut self.config);
-        let actual = self.config.read16(4);
-        let control = self.msi.control(&self.config);
+        self.config.write16(4, command | 1 << 10)?;
+        self.msi.disable(&mut self.config)?;
+        let actual = self.config.read16(4)?;
+        let control = self.msi.control(&self.config)?;
         if actual == u16::MAX || control == u16::MAX {
             return Err(IrqError::FailedRead);
         }
@@ -272,12 +272,11 @@ unsafe impl Source for MsiSource {
         };
         let data = u16::try_from(message.data).map_err(|_| IrqError::Route)?;
         self.programmed = true;
-        self.msi.program(&mut self.config, message.address, data);
-        Ok(())
+        self.msi.program(&mut self.config, message.address, data).map_err(IrqError::from)
     }
     unsafe fn unmask(&mut self) -> Result<(), IrqError> {
-        self.msi.enable(&mut self.config);
-        let control = self.msi.control(&self.config);
+        self.msi.enable(&mut self.config)?;
+        let control = self.msi.control(&self.config)?;
         if control == u16::MAX {
             return Err(IrqError::FailedRead);
         }
@@ -327,14 +326,15 @@ impl function::Host for Device {
     fn config(&mut self) -> &mut SharedConfig {
         &mut self.config
     }
-    fn enable_msi(&mut self) -> Result<(), Errno> {
+    fn enable_msi(&mut self) -> Result<(), function::MsiError> {
         // The line's route programs it, when nouveau requests its interrupt.
-        self.msi.map(|_| ()).ok_or(EOPNOTSUPP)
+        self.msi.map(|_| ()).ok_or(function::MsiError::Native(EOPNOTSUPP))
     }
-    fn disable_msi(&mut self) {
+    fn disable_msi(&mut self) -> Result<(), function::MsiError> {
         if let Some(msi) = self.msi {
-            msi.disable(&mut self.config);
+            msi.disable(&mut self.config)?;
         }
+        Ok(())
     }
 }
 
@@ -744,8 +744,8 @@ fn claim(
         .map_err(|(error, _)| ServiceError::Claim(error))?;
     let domain = services.domain(binding)?;
     let mut function = requester.into_function();
-    let msi = function
-        .capabilities()
+    let capabilities = function.capabilities().map_err(ServiceError::PciCapability)?;
+    let msi = capabilities
         .iter()
         .find(|(_, id)| *id == MSI_CAPABILITY)
         .map(|(offset, _)| Msi::at(u16::from(*offset)));
@@ -757,7 +757,8 @@ fn claim(
         ..Placement::default()
     };
     let (mut bars, mut resources) = (Vec::new(), Vec::new());
-    for (region, bar) in placement.regions.iter_mut().zip(function.bars()) {
+    let function_bars = function.bars().map_err(ServiceError::Config)?;
+    for (region, bar) in placement.regions.iter_mut().zip(function_bars) {
         let Some(
             bar @ Bar::Memory {
                 address: start,
@@ -786,28 +787,30 @@ fn claim(
     #[cfg(feature = "nvk")]
     let drm = {
         let config = function.config();
-        let (identity, subsystem) = (config.read32(0), config.read32(SUBSYSTEM_ID));
+        let subsystem = config.read32(SUBSYSTEM_ID).map_err(ServiceError::Config)?;
+        let revision = config.read8(REVISION).map_err(ServiceError::Config)?;
         client::DrmDevice {
             segment: address.segment,
-            vendor: identity as u16,
-            device: (identity >> 16) as u16,
+            vendor: function.vendor,
+            device: function.device,
             subsystem_vendor: subsystem as u16,
             subsystem_device: (subsystem >> 16) as u16,
             bus: address.bus,
             slot: address.device,
             function: address.function,
-            revision: config.read8(REVISION),
+            revision,
         }
     };
     #[cfg(feature = "nvk")]
-    let link = function
-        .capabilities()
+    let link = capabilities
         .iter()
         .find(|(_, id)| *id == PCIE_CAPABILITY)
         .map(|(offset, _)| {
-            let status = function.config().read16(u16::from(*offset) + LINK_STATUS);
-            PcieLink::from_link_status(status)
-        });
+            function.config().read16(u16::from(*offset) + LINK_STATUS)
+                .map(PcieLink::from_link_status)
+        })
+        .transpose()
+        .map_err(ServiceError::Config)?;
     Ok(Claimed {
         device: Device {
             config: SharedConfig(Rc::new(RefCell::new(function))),
@@ -907,8 +910,8 @@ unsafe extern "C" fn start(context: *mut c_void) {
                 job.attached.push(attached);
             }
             Err(error) => output::arguments(format_args!(
-                "GPU {} not presented to Linux: errno {}\n",
-                claimed.name, -error
+                "GPU {} presentation refused: {:?}\n",
+                claimed.name, error.error
             )),
         }
     }
