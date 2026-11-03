@@ -17,9 +17,9 @@ use stela_drivers::{
         dma::{mapping::DmaDomain, memory::PageSource},
         mmio::owned::{self, CacheAttribute, Mapping, PhysicalSpan, Protection},
         pci::{
-            Address, Bar, ConfigSpace, Function,
+            Address, Bar, ConfigSpace, Function, FunctionError,
             owned::OwnedConfig,
-            requester::{FunctionRole, RequesterBinding, StoppedRequester},
+            requester::{ClaimError, FunctionRole, RequesterBinding, StoppedRequester},
         },
         thunderbolt::manager::{Platform, Uuid},
     },
@@ -154,69 +154,50 @@ impl<'a> Services<'a> {
             .map_err(|_| ServiceError::Refused("configuration space mapping refused"))
     }
 
-    /// Gate PCI requester DMA and interrupt controls, as Linux's
-    /// `pci_clear_master`, `pci_msi_shutdown`, `pci_msix_shutdown` and
-    /// `pci_disable_ats`/`pri`/`pasid` do, then wait for its outstanding
-    /// requests (`pci_wait_for_pending_transaction`).
-    fn stop(&self, config: &mut OwnedConfig) -> Result<(), ServiceError> {
-        let command = config.read16(COMMAND);
-        let status = config.read16(STATUS);
-        if command == u16::MAX || status == u16::MAX {
-            return Err(ServiceError::Claim(
-                stela_drivers::bus::pci::requester::ClaimError::ReadFailed {
-                    offset: if command == u16::MAX { COMMAND } else { STATUS },
-                },
-            ));
-        }
-        config.write16(COMMAND, command & !BUS_MASTER | INTX_DISABLE);
-        let mut express = None;
+    fn function(&self, address: Address) -> Result<Function<OwnedConfig>, ServiceError> {
+        Function::new(address, self.config(address)?).map_err(|refusal| match refusal.reason {
+            FunctionError::Absent => ServiceError::Refused("no function answers at this address"),
+            FunctionError::ConfigurationRetry => {
+                ServiceError::Refused("PCI function requests configuration retry")
+            }
+            FunctionError::Access(error) => ServiceError::Config(error),
+        })
+    }
+
+    /// Gate PCI requester DMA and interrupt controls, then wait for its
+    /// outstanding requests. A failed access ends the sequence immediately.
+    fn stop(&self, config: &mut OwnedConfig) -> Result<(), ClaimError> {
+        let command = read_control(config, COMMAND)?;
+        let status = read_control(config, STATUS)?;
+        config.write16(COMMAND, command & !BUS_MASTER | INTX_DISABLE)?;
+        let mut express = false;
         if status & CAPABILITY_LIST != 0 {
-            let found: alloc::vec::Vec<_> = config
-                .capabilities()
-                .map(|entry| entry.map(|entry| (entry.offset, entry.id)))
-                .collect::<Result<_, _>>()
-                .map_err(|error| ServiceError::Claim(error.into()))?;
-            for (offset, id) in found {
-                match id {
-                    MSI => {
-                        let control = config.read16(offset + 2);
-                        config.write16(offset + 2, control & !1);
-                    }
-                    MSIX => {
-                        let control = config.read16(offset + 2);
-                        config.write16(offset + 2, control & !(1 << 15));
-                    }
+            let found: Vec<_> = config.capabilities().collect::<Result<_, _>>()?;
+            for entry in found {
+                let (offset, mask) = match entry.id {
+                    MSI => (entry.offset + 2, 1),
+                    MSIX => (entry.offset + 2, 1 << 15),
                     PCIE => {
-                        let control = config.read16(offset + 8);
-                        config.write16(offset + 8, control & !NO_SNOOP);
-                        express = Some(offset);
+                        express = true;
+                        (entry.offset + 8, NO_SNOOP)
                     }
-                    _ => {}
-                }
+                    _ => continue,
+                };
+                let control = read_control(config, offset)?;
+                config.write16(offset, control & !mask)?;
             }
         }
-        if express.is_some() && config.read32(0x100) != u32::MAX {
-            let found: alloc::vec::Vec<_> = config
-                .extended_capabilities()
-                .map(|entry| entry.map(|entry| (entry.offset, entry.id)))
-                .collect::<Result<_, _>>()
-                .map_err(|error| ServiceError::Claim(error.into()))?;
-            for (offset, id) in found {
-                match id {
-                    ATS => {
-                        let control = config.read16(offset + 6);
-                        config.write16(offset + 6, control & !(1 << 15));
-                    }
-                    PASID => {
-                        let control = config.read16(offset + 6);
-                        config.write16(offset + 6, control & !1);
-                    }
-                    PRI => {
-                        let control = config.read16(offset + 4);
-                        config.write16(offset + 4, control & !1);
-                    }
-                    _ => {}
-                }
+        if express && config.read32(0x100)? != u32::MAX {
+            let found: Vec<_> = config.extended_capabilities().collect::<Result<_, _>>()?;
+            for entry in found {
+                let (offset, mask) = match entry.id {
+                    ATS => (entry.offset + 6, 1 << 15),
+                    PASID => (entry.offset + 6, 1),
+                    PRI => (entry.offset + 4, 1),
+                    _ => continue,
+                };
+                let control = read_control(config, offset)?;
+                config.write16(offset, control & !mask)?;
             }
         }
         // A bounded wait must refuse an endpoint that still has requests in
@@ -226,8 +207,15 @@ impl<'a> Services<'a> {
         stela_drivers::bus::pci::requester::wait_for_pending_transactions(config, || {
             super::host::rdtsc().wrapping_sub(start) >= limit
         })
-        .map_err(ServiceError::Claim)
     }
+}
+
+fn read_control(config: &OwnedConfig, offset: u16) -> Result<u16, ClaimError> {
+    let value = config.read16(offset)?;
+    if value == u16::MAX {
+        return Err(ClaimError::ReadFailed { offset });
+    }
+    Ok(value)
 }
 
 // SAFETY: each claimed function's or bridge's configuration page and each BAR
@@ -254,7 +242,7 @@ unsafe impl NativeServices for Services<'_> {
         address: Address,
     ) -> Result<stela_drivers::bus::pci::requester::preparation::PreparingRequester, ServiceError>
     {
-        use stela_drivers::bus::pci::requester::{ClaimError, preparation::PreparingRequester};
+        use stela_drivers::bus::pci::requester::preparation::PreparingRequester;
         let role = self.remappers.function_role(address);
         if role != FunctionRole::Physical {
             return Err(ServiceError::Claim(ClaimError::UnsupportedRole(role)));
@@ -263,9 +251,8 @@ unsafe impl NativeServices for Services<'_> {
             output::arguments(format_args!("UNSUPPORTED Stela cold requester {address}: original DMA drain unavailable ({error:?})\n"));
             ServiceError::Refused("cold requester original DMA drain unavailable")
         })?;
-        let mut function = Function::new(address, self.config(address)?)
-            .ok_or(ServiceError::Refused("no function answers at this address"))?;
-        self.stop(function.config())?;
+        let mut function = self.function(address)?;
+        self.stop(function.config()).map_err(ServiceError::Claim)?;
         // SAFETY: first serialized post-EBS attach through the original owned
         // configuration and selected root. The platform keeps the initial DMA
         // backing, excludes prior firmware/IRQ/work and competing PCI writers,
@@ -283,9 +270,8 @@ unsafe impl NativeServices for Services<'_> {
                 stela_drivers::bus::pci::requester::ClaimError::UnsupportedRole(role),
             ));
         }
-        let mut function = Function::new(address, self.config(address)?)
-            .ok_or(ServiceError::Refused("no function answers at this address"))?;
-        self.stop(function.config())?;
+        let mut function = self.function(address)?;
+        self.stop(function.config()).map_err(ServiceError::Claim)?;
         // SAFETY: bus mastering, interrupts and outstanding requests were
         // stopped above; the complete stable PF/VF inventory supplies role.
         unsafe { StoppedRequester::from_stopped_pci(function, role) }
@@ -293,8 +279,7 @@ unsafe impl NativeServices for Services<'_> {
     }
 
     fn bridge(&self, address: Address) -> Result<Function<OwnedConfig>, ServiceError> {
-        let bridge = Function::new(address, self.config(address)?)
-            .ok_or(ServiceError::Refused("no function answers at this address"))?;
+        let bridge = self.function(address)?;
         if bridge.class[..2] != [6, 4] {
             return Err(ServiceError::Refused("not a PCI-to-PCI bridge"));
         }
