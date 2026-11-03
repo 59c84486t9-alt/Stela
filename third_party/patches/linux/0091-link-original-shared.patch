@@ -1,0 +1,87 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:49:33 -0500
+Subject: [PATCH] refactor(fs): link original shared superblock trylock
+
+---
+ fs/super.c          | 29 -----------------------------
+ fs/super_lifetime.c | 29 +++++++++++++++++++++++++++++
+ 2 files changed, 29 insertions(+), 29 deletions(-)
+
+diff --git a/fs/super.c b/fs/super.c
+index 3ddc094e797934da22da439fbe4ab057834774f1..00b88e24c3a0e5bfb7c6df9a0aff1a7a91be84d9 100644
+--- a/fs/super.c
++++ b/fs/super.c
+@@ -346,35 +346,6 @@ static bool grab_super(struct super_block *sb)
+ 	return false;
+ }
+ 
+-/*
+- *	super_trylock_shared - try to grab ->s_umount shared
+- *	@sb: reference we are trying to grab
+- *
+- *	Try to prevent fs shutdown.  This is used in places where we
+- *	cannot take an active reference but we need to ensure that the
+- *	filesystem is not shut down while we are working on it. It returns
+- *	false if we cannot acquire s_umount or if we lose the race and
+- *	filesystem already got into shutdown, and returns true with the s_umount
+- *	lock held in read mode in case of success. On successful return,
+- *	the caller must drop the s_umount lock when done.
+- *
+- *	Note that unlike get_super() et.al. this one does *not* bump ->s_passive.
+- *	The reason why it's safe is that we are OK with doing trylock instead
+- *	of down_read().  There's a couple of places that are OK with that, but
+- *	it's very much not a general-purpose interface.
+- */
+-bool super_trylock_shared(struct super_block *sb)
+-{
+-	if (down_read_trylock(&sb->s_umount)) {
+-		if (!(sb->s_flags & SB_DYING) && sb->s_root &&
+-		    (sb->s_flags & SB_BORN))
+-			return true;
+-		super_unlock_shared(sb);
+-	}
+-
+-	return false;
+-}
+-
+ /**
+  *	retire_super	-	prevents superblock from being reused
+  *	@sb: superblock to retire
+diff --git a/fs/super_lifetime.c b/fs/super_lifetime.c
+index f9761950f91ddc6dfaa885ffecfa9e72f9d9379b..530000ecaa157e56c81d58e802128ece8ab857c2 100644
+--- a/fs/super_lifetime.c
++++ b/fs/super_lifetime.c
+@@ -240,3 +240,32 @@ int vfs_get_tree(struct fs_context *fc)
+ 	return 0;
+ }
+ EXPORT_SYMBOL(vfs_get_tree);
++
++/*
++ *	super_trylock_shared - try to grab ->s_umount shared
++ *	@sb: reference we are trying to grab
++ *
++ *	Try to prevent fs shutdown.  This is used in places where we
++ *	cannot take an active reference but we need to ensure that the
++ *	filesystem is not shut down while we are working on it. It returns
++ *	false if we cannot acquire s_umount or if we lose the race and
++ *	filesystem already got into shutdown, and returns true with the s_umount
++ *	lock held in read mode in case of success. On successful return,
++ *	the caller must drop the s_umount lock when done.
++ *
++ *	Note that unlike get_super() et.al. this one does *not* bump ->s_passive.
++ *	The reason why it's safe is that we are OK with doing trylock instead
++ *	of down_read().  There's a couple of places that are OK with that, but
++ *	it's very much not a general-purpose interface.
++ */
++bool super_trylock_shared(struct super_block *sb)
++{
++	if (down_read_trylock(&sb->s_umount)) {
++		if (!(sb->s_flags & SB_DYING) && sb->s_root &&
++		    (sb->s_flags & SB_BORN))
++			return true;
++		super_unlock_shared(sb);
++	}
++
++	return false;
++}
