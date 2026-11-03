@@ -6,6 +6,7 @@
  */
 #include <linux/types.h>
 #include <linux/errno.h>
+#include <linux/cpu.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/irqflags.h>
@@ -84,6 +85,7 @@ int stela_linux_task_bootstrap_resources(const struct stela_linux_owner *owner)
     unsigned long flags;
     local_irq_save(flags);
     early_boot_irqs_disabled = true;
+    boot_cpu_init();
     radix_tree_init();
     housekeeping_init();
     workqueue_init_early();

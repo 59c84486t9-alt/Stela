@@ -1,0 +1,294 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 21:44:43 -0500
+Subject: [PATCH] refactor(cpu): separate original CPU topology providers
+
+---
+ kernel/Makefile       |   2 +-
+ kernel/cpu.c          | 122 ---------------------------------------
+ kernel/cpu_topology.c | 130 ++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 131 insertions(+), 123 deletions(-)
+ create mode 100644 kernel/cpu_topology.c
+
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 2c368421667223ee27239b81ad324b39787dfc4a..765c11e09f90c5b972d2a180873fcfdd5acce775 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -4,7 +4,7 @@
+ #
+ 
+ obj-y     = fork.o exec_domain.o exec_state.o panic.o \
+-	    cpu.o exit.o rcuwait_wake.o softirq.o resource.o \
++	    cpu.o cpu_topology.o exit.o rcuwait_wake.o softirq.o resource.o \
+ 	    sysctl.o capability.o ptrace.o user.o \
+ 	    signal.o restart_no_syscall.o sys.o umh.o workqueue.o pid.o task_work.o \
+ 	    extable.o params.o \
+diff --git a/kernel/cpu.c b/kernel/cpu.c
+index b3c8553d7bd6ca5ae6a20ae07c23d2220422caab..280f8a65c95c20a7d3209ab085e4da5a85f684a1 100644
+--- a/kernel/cpu.c
++++ b/kernel/cpu.c
+@@ -3046,128 +3046,6 @@ static int __init cpuhp_sysfs_init(void)
+ device_initcall(cpuhp_sysfs_init);
+ #endif /* CONFIG_SYSFS && CONFIG_HOTPLUG_CPU */
+ 
+-/*
+- * cpu_bit_bitmap[] is a special, "compressed" data structure that
+- * represents all NR_CPUS bits binary values of 1<<nr.
+- *
+- * It is used by cpumask_of() to get a constant address to a CPU
+- * mask value that has a single bit set only.
+- */
+-
+-/* cpu_bit_bitmap[0] is empty - so we can back into it */
+-#define MASK_DECLARE_1(x)	[x+1][0] = (1UL << (x))
+-#define MASK_DECLARE_2(x)	MASK_DECLARE_1(x), MASK_DECLARE_1(x+1)
+-#define MASK_DECLARE_4(x)	MASK_DECLARE_2(x), MASK_DECLARE_2(x+2)
+-#define MASK_DECLARE_8(x)	MASK_DECLARE_4(x), MASK_DECLARE_4(x+4)
+-
+-const unsigned long cpu_bit_bitmap[BITS_PER_LONG+1][BITS_TO_LONGS(NR_CPUS)] = {
+-
+-	MASK_DECLARE_8(0),	MASK_DECLARE_8(8),
+-	MASK_DECLARE_8(16),	MASK_DECLARE_8(24),
+-#if BITS_PER_LONG > 32
+-	MASK_DECLARE_8(32),	MASK_DECLARE_8(40),
+-	MASK_DECLARE_8(48),	MASK_DECLARE_8(56),
+-#endif
+-};
+-EXPORT_SYMBOL_GPL(cpu_bit_bitmap);
+-
+-const DECLARE_BITMAP(cpu_all_bits, NR_CPUS) = CPU_BITS_ALL;
+-EXPORT_SYMBOL(cpu_all_bits);
+-
+-#ifdef CONFIG_INIT_ALL_POSSIBLE
+-struct cpumask __cpu_possible_mask __ro_after_init
+-	= {CPU_BITS_ALL};
+-unsigned int __num_possible_cpus __ro_after_init = NR_CPUS;
+-#else
+-struct cpumask __cpu_possible_mask __ro_after_init;
+-unsigned int __num_possible_cpus __ro_after_init;
+-#endif
+-EXPORT_SYMBOL(__cpu_possible_mask);
+-EXPORT_SYMBOL(__num_possible_cpus);
+-
+-struct cpumask __cpu_online_mask __read_mostly;
+-EXPORT_SYMBOL(__cpu_online_mask);
+-
+-struct cpumask __cpu_enabled_mask __read_mostly;
+-EXPORT_SYMBOL(__cpu_enabled_mask);
+-
+-struct cpumask __cpu_present_mask __read_mostly;
+-EXPORT_SYMBOL(__cpu_present_mask);
+-
+-struct cpumask __cpu_active_mask __read_mostly;
+-EXPORT_SYMBOL(__cpu_active_mask);
+-
+-struct cpumask __cpu_dying_mask __read_mostly;
+-EXPORT_SYMBOL(__cpu_dying_mask);
+-
+-atomic_t __num_online_cpus __read_mostly;
+-EXPORT_SYMBOL(__num_online_cpus);
+-
+-void init_cpu_present(const struct cpumask *src)
+-{
+-	cpumask_copy(&__cpu_present_mask, src);
+-}
+-
+-void init_cpu_possible(const struct cpumask *src)
+-{
+-	cpumask_copy(&__cpu_possible_mask, src);
+-	__num_possible_cpus = cpumask_weight(&__cpu_possible_mask);
+-}
+-
+-void set_cpu_online(unsigned int cpu, bool online)
+-{
+-	/*
+-	 * atomic_inc/dec() is required to handle the horrid abuse of this
+-	 * function by the reboot and kexec code which invoke it from
+-	 * IPI/NMI broadcasts when shutting down CPUs. Invocation from
+-	 * regular CPU hotplug is properly serialized.
+-	 *
+-	 * Note, that the fact that __num_online_cpus is of type atomic_t
+-	 * does not protect readers which are not serialized against
+-	 * concurrent hotplug operations.
+-	 */
+-	if (online) {
+-		if (!cpumask_test_and_set_cpu(cpu, &__cpu_online_mask))
+-			atomic_inc(&__num_online_cpus);
+-	} else {
+-		if (cpumask_test_and_clear_cpu(cpu, &__cpu_online_mask))
+-			atomic_dec(&__num_online_cpus);
+-	}
+-}
+-
+-/*
+- * This should be marked __init, but there is a boatload of call sites
+- * which need to be fixed up to do so. Sigh...
+- */
+-void set_cpu_possible(unsigned int cpu, bool possible)
+-{
+-	if (possible) {
+-		if (!cpumask_test_and_set_cpu(cpu, &__cpu_possible_mask))
+-			__num_possible_cpus++;
+-	} else {
+-		if (cpumask_test_and_clear_cpu(cpu, &__cpu_possible_mask))
+-			__num_possible_cpus--;
+-	}
+-}
+-
+-/*
+- * Activate the first processor.
+- */
+-void __init boot_cpu_init(void)
+-{
+-	int cpu = smp_processor_id();
+-
+-	/* Mark the boot cpu "present", "online" etc for SMP and UP case */
+-	set_cpu_online(cpu, true);
+-	set_cpu_active(cpu, true);
+-	set_cpu_present(cpu, true);
+-	set_cpu_possible(cpu, true);
+-
+-#ifdef CONFIG_SMP
+-	__boot_cpu_id = cpu;
+-#endif
+-}
+-
+ /*
+  * Must be called _AFTER_ setting up the per_cpu areas
+  */
+diff --git a/kernel/cpu_topology.c b/kernel/cpu_topology.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..262cc414bdb9b57b5fdc370534ad42838bb80e6e
+--- /dev/null
++++ b/kernel/cpu_topology.c
+@@ -0,0 +1,130 @@
++// SPDX-License-Identifier: GPL-2.0
++/* CPU control.
++ * (C) 2001, 2002, 2003, 2004 Rusty Russell
++ */
++#include <linux/cpu.h>
++#include <linux/export.h>
++#include <linux/init.h>
++#include <linux/smp.h>
++
++/*
++ * cpu_bit_bitmap[] is a special, "compressed" data structure that
++ * represents all NR_CPUS bits binary values of 1<<nr.
++ *
++ * It is used by cpumask_of() to get a constant address to a CPU
++ * mask value that has a single bit set only.
++ */
++
++/* cpu_bit_bitmap[0] is empty - so we can back into it */
++#define MASK_DECLARE_1(x)	[x+1][0] = (1UL << (x))
++#define MASK_DECLARE_2(x)	MASK_DECLARE_1(x), MASK_DECLARE_1(x+1)
++#define MASK_DECLARE_4(x)	MASK_DECLARE_2(x), MASK_DECLARE_2(x+2)
++#define MASK_DECLARE_8(x)	MASK_DECLARE_4(x), MASK_DECLARE_4(x+4)
++
++const unsigned long cpu_bit_bitmap[BITS_PER_LONG+1][BITS_TO_LONGS(NR_CPUS)] = {
++
++	MASK_DECLARE_8(0),	MASK_DECLARE_8(8),
++	MASK_DECLARE_8(16),	MASK_DECLARE_8(24),
++#if BITS_PER_LONG > 32
++	MASK_DECLARE_8(32),	MASK_DECLARE_8(40),
++	MASK_DECLARE_8(48),	MASK_DECLARE_8(56),
++#endif
++};
++EXPORT_SYMBOL_GPL(cpu_bit_bitmap);
++
++const DECLARE_BITMAP(cpu_all_bits, NR_CPUS) = CPU_BITS_ALL;
++EXPORT_SYMBOL(cpu_all_bits);
++
++#ifdef CONFIG_INIT_ALL_POSSIBLE
++struct cpumask __cpu_possible_mask __ro_after_init
++	= {CPU_BITS_ALL};
++unsigned int __num_possible_cpus __ro_after_init = NR_CPUS;
++#else
++struct cpumask __cpu_possible_mask __ro_after_init;
++unsigned int __num_possible_cpus __ro_after_init;
++#endif
++EXPORT_SYMBOL(__cpu_possible_mask);
++EXPORT_SYMBOL(__num_possible_cpus);
++
++struct cpumask __cpu_online_mask __read_mostly;
++EXPORT_SYMBOL(__cpu_online_mask);
++
++struct cpumask __cpu_enabled_mask __read_mostly;
++EXPORT_SYMBOL(__cpu_enabled_mask);
++
++struct cpumask __cpu_present_mask __read_mostly;
++EXPORT_SYMBOL(__cpu_present_mask);
++
++struct cpumask __cpu_active_mask __read_mostly;
++EXPORT_SYMBOL(__cpu_active_mask);
++
++struct cpumask __cpu_dying_mask __read_mostly;
++EXPORT_SYMBOL(__cpu_dying_mask);
++
++atomic_t __num_online_cpus __read_mostly;
++EXPORT_SYMBOL(__num_online_cpus);
++
++void init_cpu_present(const struct cpumask *src)
++{
++	cpumask_copy(&__cpu_present_mask, src);
++}
++
++void init_cpu_possible(const struct cpumask *src)
++{
++	cpumask_copy(&__cpu_possible_mask, src);
++	__num_possible_cpus = cpumask_weight(&__cpu_possible_mask);
++}
++
++void set_cpu_online(unsigned int cpu, bool online)
++{
++	/*
++	 * atomic_inc/dec() is required to handle the horrid abuse of this
++	 * function by the reboot and kexec code which invoke it from
++	 * IPI/NMI broadcasts when shutting down CPUs. Invocation from
++	 * regular CPU hotplug is properly serialized.
++	 *
++	 * Note, that the fact that __num_online_cpus is of type atomic_t
++	 * does not protect readers which are not serialized against
++	 * concurrent hotplug operations.
++	 */
++	if (online) {
++		if (!cpumask_test_and_set_cpu(cpu, &__cpu_online_mask))
++			atomic_inc(&__num_online_cpus);
++	} else {
++		if (cpumask_test_and_clear_cpu(cpu, &__cpu_online_mask))
++			atomic_dec(&__num_online_cpus);
++	}
++}
++
++/*
++ * This should be marked __init, but there is a boatload of call sites
++ * which need to be fixed up to do so. Sigh...
++ */
++void set_cpu_possible(unsigned int cpu, bool possible)
++{
++	if (possible) {
++		if (!cpumask_test_and_set_cpu(cpu, &__cpu_possible_mask))
++			__num_possible_cpus++;
++	} else {
++		if (cpumask_test_and_clear_cpu(cpu, &__cpu_possible_mask))
++			__num_possible_cpus--;
++	}
++}
++
++/*
++ * Activate the first processor.
++ */
++void __init boot_cpu_init(void)
++{
++	int cpu = smp_processor_id();
++
++	/* Mark the boot cpu "present", "online" etc for SMP and UP case */
++	set_cpu_online(cpu, true);
++	set_cpu_active(cpu, true);
++	set_cpu_present(cpu, true);
++	set_cpu_possible(cpu, true);
++
++#ifdef CONFIG_SMP
++	__boot_cpu_id = cpu;
++#endif
++}

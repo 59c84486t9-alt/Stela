@@ -154,6 +154,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/kernel/workqueue.c")),
             PathBuf::from(format!("{LINUX}/kernel/exec_state.c")),
             PathBuf::from(format!("{LINUX}/kernel/softirq.c")),
+            PathBuf::from(format!("{LINUX}/kernel/cpu_topology.c")),
             PathBuf::from(format!("{LINUX}/kernel/rcu/tiny.c")),
             PathBuf::from(format!("{LINUX}/kernel/rcu/update.c")),
             PathBuf::from(format!("{LINUX}/kernel/smpboot.c")),
