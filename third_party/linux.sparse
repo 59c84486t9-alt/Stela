@@ -133,6 +133,8 @@
 /mm/filemap_batch.c
 /mm/filemap_batch.h
 /mm/truncate.c
+/mm/mlock.c
+/mm/mlock_batch.c
 /mm/swap.c
 /mm/swap.h
 /mm/mmzone.c
