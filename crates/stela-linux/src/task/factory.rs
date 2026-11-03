@@ -102,10 +102,8 @@ impl<'kernel, 'catalog, 'runtime, K: KernelThreadPlatform, P: Provider, const N:
         // in one bounded with_process and retains the same Queue ExecutionPin.
         let binding =
             unsafe { TaskBinding::new_child(self.kernel, birth) }.map_err(|metadata| {
-                BeginFailure {
-                    metadata: Some(metadata),
-                    binding: None,
-                    error: None,
+                BeginFailure::Metadata {
+                    _metadata: metadata,
                 }
             })?;
         let binding = ManuallyDrop::new(binding);
@@ -125,14 +123,13 @@ impl<'kernel, 'catalog, 'runtime, K: KernelThreadPlatform, P: Provider, const N:
         let identity = match (value, NonNull::new(target), generation) {
             (0, Some(target), generation) if generation != 0 => Identity { target, generation },
             (value, _, _) => {
-                return Err(BeginFailure {
-                    metadata: None,
-                    binding: Some(binding),
-                    error: Some(if value == 0 {
+                return Err(BeginFailure::Identity {
+                    _binding: binding,
+                    _error: if value == 0 {
                         Error::Work(WorkError::CorruptContext)
                     } else {
                         Error::Source(value)
-                    }),
+                    },
                 });
             }
         };
@@ -158,10 +155,14 @@ pub(crate) enum Error {
 }
 /// Missing metadata/identity never becomes no-publication by its errno.
 /// All ambiguous source metadata and original execution roots stay retained.
-pub(crate) struct BeginFailure<const N: usize> {
-    pub(crate) metadata: Option<ChildMetadataFailure>,
-    binding: Option<ManuallyDrop<Arc<TaskBinding<N>>>>,
-    pub(crate) error: Option<Error>,
+pub(crate) enum BeginFailure<const N: usize> {
+    Metadata {
+        _metadata: ChildMetadataFailure,
+    },
+    Identity {
+        _binding: ManuallyDrop<Arc<TaskBinding<N>>>,
+        _error: Error,
+    },
 }
 
 #[derive(Clone, Copy)]
