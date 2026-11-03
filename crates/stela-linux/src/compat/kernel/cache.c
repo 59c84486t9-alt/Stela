@@ -51,6 +51,7 @@ struct kmem_cache {
 	void (*ctor)(void *);
 	slab_flags_t flags;
 	unsigned int object_size;
+	unsigned int freeptr_offset;
 	unsigned int order;
 	size_t stride;
 	size_t live;
@@ -158,9 +159,14 @@ struct kmem_cache *__kmem_cache_create_args(const char *name, unsigned int objec
 		return creation_failure(flags, "cache creation context", true);
 	if (flags & ~allowed)
 		return creation_failure(flags, "cache creation flags", true);
-	if (options->use_freeptr_offset ||
-	    (IS_ENABLED(CONFIG_HARDENED_USERCOPY) && (options->usersize || options->useroffset)))
-		return creation_failure(flags, "cache custom freelist or hardened usercopy", true);
+	if (IS_ENABLED(CONFIG_HARDENED_USERCOPY) && (options->usersize || options->useroffset))
+		return creation_failure(flags, "cache hardened usercopy", true);
+	if (options->use_freeptr_offset &&
+	    ((!(flags & SLAB_TYPESAFE_BY_RCU) && !options->ctor) ||
+	     !IS_ALIGNED(options->freeptr_offset, __alignof__(void *)) ||
+	     object_size < sizeof(void *) ||
+	     options->freeptr_offset > object_size - sizeof(void *)))
+		return creation_failure(flags, "invalid cache freelist offset", false);
 	/* With !HARDENED_USERCOPY the public fields are inert, as in the pinned
 	 * slab_common.c. Never claim that configuration implements usercopy checks. */
 	if (!name || !name[0] || !object_size ||
@@ -195,6 +201,7 @@ struct kmem_cache *__kmem_cache_create_args(const char *name, unsigned int objec
 	*cache = (struct kmem_cache){
 		.next = caches, .ctor = options->ctor, .flags = flags,
 		.object_size = object_size, .order = order, .stride = stride,
+		.freeptr_offset = options->use_freeptr_offset ? options->freeptr_offset : UINT_MAX,
 		.descriptor_size = descriptor_size,
 	};
 	memcpy(cache->name, name, length + 1);
@@ -216,6 +223,18 @@ static bool request_supported(gfp_t flags)
 		return false;
 	}
 	return true;
+}
+
+/* Preserve the requested in-object field while the native index remains
+ * authoritative. A stale object writer cannot redirect the allocator. */
+static void publish_freeptr(struct cache_slab *slab, size_t index, size_t next)
+{
+	const struct kmem_cache *cache = slab->cache;
+	if (cache->freeptr_offset == UINT_MAX)
+		return;
+	u8 *object = slab->cpu + index * cache->stride;
+	void *link = next == CACHE_NO_SLOT ? NULL : slab->cpu + next * cache->stride;
+	WRITE_ONCE(*(void **)(object + cache->freeptr_offset), link);
 }
 
 static struct cache_slab *grow_cache(struct kmem_cache *cache, gfp_t flags)
@@ -269,6 +288,7 @@ static struct cache_slab *grow_cache(struct kmem_cache *cache, gfp_t flags)
 			    arch_local_save_flags() != irq)
 				__builtin_trap();
 		}
+		publish_freeptr(slab, i, slab->slots[i].next);
 	}
 	/* Constructors may allocate from another (or this) cache. Publish only
 	 * after every slot has been constructed, preserving any recursive growth. */
@@ -353,11 +373,13 @@ void kmem_cache_free(struct kmem_cache *cache, void *object)
 			__builtin_trap();
 		slot->allocated = false;
 		slot->next = slab->free_head;
-		slab->free_head = offset / cache->stride;
+		size_t index = offset / cache->stride;
+		publish_freeptr(slab, index, slot->next);
+		slab->free_head = index;
 		slab->free_count++;
 		cache->live--;
 		/* Retention, including the final free slot, permits immediate
-		 * same-cache reuse during an RCU reader without changing its bytes. */
+		 * same-cache reuse during an RCU reader. Only a requested freeptr changes. */
 		return;
 	}
 	__builtin_trap();
@@ -1095,6 +1117,43 @@ static void capacity_and_failures(void)
 	check_clean();
 }
 
+struct custom_freeptr_object {
+	u64 marker;
+	void *link;
+};
+
+static void custom_freeptr_ctor(void *storage)
+{
+	struct custom_freeptr_object *object = storage;
+	object->marker = 0x69a5;
+}
+
+static void custom_freeptr_reuse(void)
+{
+	struct kmem_cache_args args = {
+		.ctor = custom_freeptr_ctor,
+		.use_freeptr_offset = true,
+		.freeptr_offset = offsetof(struct custom_freeptr_object, link),
+	};
+	struct kmem_cache *cache = __kmem_cache_create_args("custom-freeptr",
+		sizeof(struct custom_freeptr_object), &args, 0);
+	assert(cache);
+	struct custom_freeptr_object *first = kmem_cache_alloc(cache, GFP_KERNEL);
+	struct custom_freeptr_object *second = kmem_cache_alloc(cache, GFP_KERNEL);
+	assert(first && second && first != second);
+	kmem_cache_free(cache, second);
+	kmem_cache_free(cache, first);
+	assert(first->marker == 0x69a5 && READ_ONCE(first->link) == second);
+	/* The published link is not an allocation authority. */
+	WRITE_ONCE(first->link, NULL);
+	assert(kmem_cache_alloc(cache, GFP_KERNEL) == first);
+	assert(kmem_cache_alloc(cache, GFP_KERNEL) == second);
+	kmem_cache_free(cache, first);
+	kmem_cache_free(cache, second);
+	kmem_cache_destroy(cache);
+	check_clean();
+}
+
 static void policy_and_creation(void)
 {
 	const slab_flags_t unsupported_flags[] = {
@@ -1108,6 +1167,10 @@ static void policy_and_creation(void)
 	}
 	struct kmem_cache_args args = {.use_freeptr_offset = true};
 	assert(!__kmem_cache_create_args("freeptr", 96, &args, 0));
+	args.freeptr_offset = 1;
+	assert(!__kmem_cache_create_args("unaligned-freeptr", 96, &args, SLAB_TYPESAFE_BY_RCU));
+	args.freeptr_offset = 96;
+	assert(!__kmem_cache_create_args("out-of-bounds-freeptr", 96, &args, SLAB_TYPESAFE_BY_RCU));
 	args = (struct kmem_cache_args){.align = 3};
 	assert(!__kmem_cache_create_args("bad-align", 96, &args, 0));
 	args = (struct kmem_cache_args){.align = 1U << 31};
@@ -1418,6 +1481,7 @@ int main(void)
 	destroy_and_misuse();
 	capacity_and_failures();
 	policy_and_creation();
+	custom_freeptr_reuse();
 	reclaim_accounting();
 	reclaim_failure_rollback();
 	reclaim_rcu_and_external_pins();
