@@ -1,0 +1,253 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 11:56:19 -0500
+Subject: [PATCH] refactor(fs): keep mountpoint pinning with the mount cache
+
+---
+ fs/mount_cache.c | 87 +++++++++++++++++++++++++++++++++++++++++++++
+ fs/mount_cache.h | 10 ++++++
+ fs/namespace.c   | 91 ------------------------------------------------
+ 3 files changed, 97 insertions(+), 91 deletions(-)
+
+diff --git a/fs/mount_cache.c b/fs/mount_cache.c
+index 79ef93cdfc2fb1b2631c4129fd27aeed0582ead4..dc8e1a68fdf294b1f940b257f39a2e454833818d 100644
+--- a/fs/mount_cache.c
++++ b/fs/mount_cache.c
+@@ -7,9 +7,12 @@
+ #include <linux/rculist.h>
+ #include <linux/slab.h>
+ 
++#include "internal.h"
+ #include "mount.h"
+ #include "mount_cache.h"
+ 
++__cacheline_aligned_in_smp DEFINE_SEQLOCK(mount_lock);
++
+ struct hlist_head *mount_hashtable __ro_after_init;
+ struct hlist_head *mountpoint_hashtable __ro_after_init;
+ struct kmem_cache *mnt_cache __ro_after_init;
+@@ -75,3 +78,87 @@ struct mount *__lookup_mnt(struct vfsmount *mnt, struct dentry *dentry)
+ 			return p;
+ 	return NULL;
+ }
++
++static inline struct hlist_head *mp_hash(struct dentry *dentry)
++{
++	unsigned long tmp = ((unsigned long)dentry / L1_CACHE_BYTES);
++	tmp = tmp + (tmp >> mp_hash_shift);
++	return &mountpoint_hashtable[tmp & mp_hash_mask];
++}
++
++bool lookup_mountpoint(struct dentry *dentry, struct pinned_mountpoint *m)
++{
++	struct hlist_head *chain = mp_hash(dentry);
++	struct mountpoint *mp;
++
++	hlist_for_each_entry(mp, chain, m_hash) {
++		if (mp->m_dentry == dentry) {
++			hlist_add_head(&m->node, &mp->m_list);
++			m->mp = mp;
++			return true;
++		}
++	}
++	return false;
++}
++
++int get_mountpoint(struct dentry *dentry, struct pinned_mountpoint *m)
++{
++	struct mountpoint *mp __free(kfree) = NULL;
++	bool found;
++	int ret;
++
++	if (d_mountpoint(dentry)) {
++		/* might be worth a WARN_ON() */
++		if (d_unlinked(dentry))
++			return -ENOENT;
++mountpoint:
++		read_seqlock_excl(&mount_lock);
++		found = lookup_mountpoint(dentry, m);
++		read_sequnlock_excl(&mount_lock);
++		if (found)
++			return 0;
++	}
++
++	if (!mp)
++		mp = kmalloc_obj(struct mountpoint);
++	if (!mp)
++		return -ENOMEM;
++
++	/* Exactly one processes may set d_mounted */
++	ret = d_set_mounted(dentry);
++
++	/* Someone else set d_mounted? */
++	if (ret == -EBUSY)
++		goto mountpoint;
++
++	/* The dentry is not available as a mountpoint? */
++	if (ret)
++		return ret;
++
++	/* Add the new mountpoint to the hash table */
++	read_seqlock_excl(&mount_lock);
++	mp->m_dentry = dget(dentry);
++	hlist_add_head(&mp->m_hash, mp_hash(dentry));
++	INIT_HLIST_HEAD(&mp->m_list);
++	hlist_add_head(&m->node, &mp->m_list);
++	m->mp = no_free_ptr(mp);
++	read_sequnlock_excl(&mount_lock);
++	return 0;
++}
++
++/*
++ * vfsmount lock must be held.  Additionally, the caller is responsible
++ * for serializing calls for given disposal list.
++ */
++void maybe_free_mountpoint(struct mountpoint *mp, struct list_head *list)
++{
++	if (hlist_empty(&mp->m_list)) {
++		struct dentry *dentry = mp->m_dentry;
++		spin_lock(&dentry->d_lock);
++		dentry->d_flags &= ~DCACHE_MOUNTED;
++		spin_unlock(&dentry->d_lock);
++		dput_to_list(dentry, list);
++		hlist_del(&mp->m_hash);
++		kfree(mp);
++	}
++}
+diff --git a/fs/mount_cache.h b/fs/mount_cache.h
+index 101658b85882efaba8a264f9b2dfcd21d9eebcb7..ac05e12102a3e399a157583bf33b1551e8eb2cb1 100644
+--- a/fs/mount_cache.h
++++ b/fs/mount_cache.h
+@@ -16,6 +16,16 @@ extern struct kmem_cache *mnt_cache;
+ 
+ void __init mnt_cache_init(void);
+ 
++struct pinned_mountpoint {
++	struct hlist_node node;
++	struct mountpoint *mp;
++	struct mount *parent;
++};
++
++bool lookup_mountpoint(struct dentry *dentry, struct pinned_mountpoint *m);
++int get_mountpoint(struct dentry *dentry, struct pinned_mountpoint *m);
++void maybe_free_mountpoint(struct mountpoint *mp, struct list_head *list);
++
+ static inline struct hlist_head *m_hash(struct vfsmount *mnt, struct dentry *dentry)
+ {
+ 	unsigned long tmp = ((unsigned long)mnt / L1_CACHE_BYTES);
+diff --git a/fs/namespace.c b/fs/namespace.c
+index c20891726f0f4841794464f21e41a0227f743b91..2a5dfca9a908ff2eb51ab34443b7c3da53216bcb 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -103,7 +103,6 @@ EXPORT_SYMBOL_GPL(fs_kobj);
+  * It should be taken for write in all cases where the vfsmount
+  * tree or hash is modified or when a vfsmount structure is modified.
+  */
+-__cacheline_aligned_in_smp DEFINE_SEQLOCK(mount_lock);
+ 
+ static void mnt_ns_release(struct mnt_namespace *ns)
+ {
+@@ -173,13 +172,6 @@ static inline void unlock_mount_hash(void)
+ 	write_sequnlock(&mount_lock);
+ }
+ 
+-static inline struct hlist_head *mp_hash(struct dentry *dentry)
+-{
+-	unsigned long tmp = ((unsigned long)dentry / L1_CACHE_BYTES);
+-	tmp = tmp + (tmp >> mp_hash_shift);
+-	return &mountpoint_hashtable[tmp & mp_hash_mask];
+-}
+-
+ static int mnt_alloc_id(struct mount *mnt)
+ {
+ 	int res;
+@@ -800,89 +792,6 @@ bool __is_local_mountpoint(const struct dentry *dentry)
+ 	return false;
+ }
+ 
+-struct pinned_mountpoint {
+-	struct hlist_node node;
+-	struct mountpoint *mp;
+-	struct mount *parent;
+-};
+-
+-static bool lookup_mountpoint(struct dentry *dentry, struct pinned_mountpoint *m)
+-{
+-	struct hlist_head *chain = mp_hash(dentry);
+-	struct mountpoint *mp;
+-
+-	hlist_for_each_entry(mp, chain, m_hash) {
+-		if (mp->m_dentry == dentry) {
+-			hlist_add_head(&m->node, &mp->m_list);
+-			m->mp = mp;
+-			return true;
+-		}
+-	}
+-	return false;
+-}
+-
+-static int get_mountpoint(struct dentry *dentry, struct pinned_mountpoint *m)
+-{
+-	struct mountpoint *mp __free(kfree) = NULL;
+-	bool found;
+-	int ret;
+-
+-	if (d_mountpoint(dentry)) {
+-		/* might be worth a WARN_ON() */
+-		if (d_unlinked(dentry))
+-			return -ENOENT;
+-mountpoint:
+-		read_seqlock_excl(&mount_lock);
+-		found = lookup_mountpoint(dentry, m);
+-		read_sequnlock_excl(&mount_lock);
+-		if (found)
+-			return 0;
+-	}
+-
+-	if (!mp)
+-		mp = kmalloc_obj(struct mountpoint);
+-	if (!mp)
+-		return -ENOMEM;
+-
+-	/* Exactly one processes may set d_mounted */
+-	ret = d_set_mounted(dentry);
+-
+-	/* Someone else set d_mounted? */
+-	if (ret == -EBUSY)
+-		goto mountpoint;
+-
+-	/* The dentry is not available as a mountpoint? */
+-	if (ret)
+-		return ret;
+-
+-	/* Add the new mountpoint to the hash table */
+-	read_seqlock_excl(&mount_lock);
+-	mp->m_dentry = dget(dentry);
+-	hlist_add_head(&mp->m_hash, mp_hash(dentry));
+-	INIT_HLIST_HEAD(&mp->m_list);
+-	hlist_add_head(&m->node, &mp->m_list);
+-	m->mp = no_free_ptr(mp);
+-	read_sequnlock_excl(&mount_lock);
+-	return 0;
+-}
+-
+-/*
+- * vfsmount lock must be held.  Additionally, the caller is responsible
+- * for serializing calls for given disposal list.
+- */
+-static void maybe_free_mountpoint(struct mountpoint *mp, struct list_head *list)
+-{
+-	if (hlist_empty(&mp->m_list)) {
+-		struct dentry *dentry = mp->m_dentry;
+-		spin_lock(&dentry->d_lock);
+-		dentry->d_flags &= ~DCACHE_MOUNTED;
+-		spin_unlock(&dentry->d_lock);
+-		dput_to_list(dentry, list);
+-		hlist_del(&mp->m_hash);
+-		kfree(mp);
+-	}
+-}
+-
+ /*
+  * locks: mount_lock [read_seqlock_excl], namespace_sem [excl]
+  */
