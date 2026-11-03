@@ -199,6 +199,8 @@
 /fs/xattr.c
 /fs/super.c
 /fs/super_anon_dev.c
+/fs/super_lifetime.c
+/fs/super_lifetime.h
 /fs/simple_xattr.c
 /fs/char_dev.c
 /fs/dcache.c

@@ -1,0 +1,479 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 11:46:20 -0500
+Subject: [PATCH] refactor(fs): separate original superblock reference teardown
+
+---
+ fs/Makefile         |   2 +-
+ fs/super.c          | 184 +-------------------------------------------
+ fs/super_lifetime.c | 169 ++++++++++++++++++++++++++++++++++++++++
+ fs/super_lifetime.h |  43 +++++++++++
+ 4 files changed, 214 insertions(+), 184 deletions(-)
+ create mode 100644 fs/super_lifetime.c
+ create mode 100644 fs/super_lifetime.h
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 71d834e8eacabfb1a0a1f701225df2c53c349e33..af382463910940bfe49bc5c6a489237d28fd9f5e 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -7,7 +7,7 @@
+ # 
+ 
+ 
+-obj-y :=	open.o filp_close.o read_write.o file_table.o file_table_init.o super.o super_anon_dev.o \
++obj-y :=	open.o filp_close.o read_write.o file_table.o file_table_init.o super.o super_anon_dev.o super_lifetime.o \
+ 		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o path_get.o name_hash.o filename.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o dcache_init.o dentry_ancestry.o inode.o inode_cache_init.o inode_evict.o \
+ 		attr.o bad_inode.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o mount_cache.o \
+diff --git a/fs/super.c b/fs/super.c
+index c154dd3e8a1ee6f7f48323fe2046862dadf98466..98cb912f2547d0655df2a46bd1870e3813289998 100644
+--- a/fs/super.c
++++ b/fs/super.c
+@@ -40,12 +40,12 @@
+ #include <linux/fserror.h>
+ #include <uapi/linux/mount.h>
+ #include "internal.h"
++#include "super_lifetime.h"
+ 
+ static int thaw_super_locked(struct super_block *sb, enum freeze_holder who,
+ 			     const void *freeze_owner);
+ 
+ static LIST_HEAD(super_blocks);
+-static DEFINE_SPINLOCK(sb_lock);
+ 
+ static char *sb_writers_name[SB_FREEZE_LEVELS] = {
+ 	"sb_writers",
+@@ -53,37 +53,6 @@ static char *sb_writers_name[SB_FREEZE_LEVELS] = {
+ 	"sb_internal",
+ };
+ 
+-static inline void __super_lock(struct super_block *sb, bool excl)
+-{
+-	if (excl)
+-		down_write(&sb->s_umount);
+-	else
+-		down_read(&sb->s_umount);
+-}
+-
+-static inline void super_unlock(struct super_block *sb, bool excl)
+-{
+-	if (excl)
+-		up_write(&sb->s_umount);
+-	else
+-		up_read(&sb->s_umount);
+-}
+-
+-static inline void __super_lock_excl(struct super_block *sb)
+-{
+-	__super_lock(sb, true);
+-}
+-
+-static inline void super_unlock_excl(struct super_block *sb)
+-{
+-	super_unlock(sb, true);
+-}
+-
+-static inline void super_unlock_shared(struct super_block *sb)
+-{
+-	super_unlock(sb, false);
+-}
+-
+ static bool super_flags(const struct super_block *sb, unsigned int flags)
+ {
+ 	/*
+@@ -148,28 +117,6 @@ static inline bool super_lock_excl(struct super_block *sb)
+ 	return super_lock(sb, true);
+ }
+ 
+-/* wake waiters */
+-#define SUPER_WAKE_FLAGS (SB_BORN | SB_DYING | SB_DEAD)
+-static void super_wake(struct super_block *sb, unsigned int flag)
+-{
+-	WARN_ON_ONCE((flag & ~SUPER_WAKE_FLAGS));
+-	WARN_ON_ONCE(hweight32(flag & SUPER_WAKE_FLAGS) > 1);
+-
+-	/*
+-	 * Pairs with smp_load_acquire() in super_lock() to make sure
+-	 * all initializations in the superblock are seen by the user
+-	 * seeing SB_BORN sent.
+-	 */
+-	smp_store_release(&sb->s_flags, sb->s_flags | flag);
+-	/*
+-	 * Pairs with the barrier in prepare_to_wait_event() to make sure
+-	 * ___wait_var_event() either sees SB_BORN set or
+-	 * waitqueue_active() check in wake_up_var() sees the waiter.
+-	 */
+-	smp_mb();
+-	wake_up_var(&sb->s_flags);
+-}
+-
+ /*
+  * One thing we have to be careful of with a per-sb shrinker is that we don't
+  * drop the last active reference to the superblock from within the shrinker.
+@@ -273,39 +220,6 @@ static unsigned long super_cache_count(struct shrinker *shrink,
+ 	return total_objects;
+ }
+ 
+-static void destroy_super_work(struct work_struct *work)
+-{
+-	struct super_block *s = container_of(work, struct super_block,
+-							destroy_work);
+-	fsnotify_sb_free(s);
+-	security_sb_free(s);
+-	put_user_ns(s->s_user_ns);
+-	kfree(s->s_subtype);
+-	for (int i = 0; i < SB_FREEZE_LEVELS; i++)
+-		percpu_free_rwsem(&s->s_writers.rw_sem[i]);
+-	kfree(s);
+-}
+-
+-static void destroy_super_rcu(struct rcu_head *head)
+-{
+-	struct super_block *s = container_of(head, struct super_block, rcu);
+-	INIT_WORK(&s->destroy_work, destroy_super_work);
+-	schedule_work(&s->destroy_work);
+-}
+-
+-/* Free a superblock that has never been seen by anyone */
+-static void destroy_unused_super(struct super_block *s)
+-{
+-	if (!s)
+-		return;
+-	super_unlock_excl(s);
+-	list_lru_destroy(&s->s_dentry_lru);
+-	list_lru_destroy(&s->s_inode_lru);
+-	shrinker_free(s->s_shrink);
+-	/* no delays needed */
+-	destroy_super_work(&s->destroy_work);
+-}
+-
+ /**
+  *	alloc_super	-	create new superblock
+  *	@type:	filesystem type superblock should belong to
+@@ -401,102 +315,6 @@ fail:
+ 	return NULL;
+ }
+ 
+-/* Superblock refcounting  */
+-
+-/*
+- * Drop a superblock's passive reference.  Must be called WITHOUT sb_lock held;
+- * put_super() acquires sb_lock itself when the final reference is dropped.
+- */
+-void put_super(struct super_block *s)
+-{
+-	if (refcount_dec_and_test(&s->s_passive)) {
+-		struct file_system_type *type = s->s_type;
+-
+-		spin_lock(&sb_lock);
+-		list_del_init(&s->s_list);
+-		hlist_del_init(&s->s_instances);
+-		spin_unlock(&sb_lock);
+-
+-		WARN_ON(s->s_dentry_lru.node);
+-		WARN_ON(s->s_inode_lru.node);
+-		WARN_ON(s->s_mounts);
+-		call_rcu(&s->rcu, destroy_super_rcu);
+-		/* The unlink above may touch type->fs_supers, so drop it last. */
+-		put_filesystem(type);
+-	}
+-}
+-
+-static void kill_super_notify(struct super_block *sb)
+-{
+-	lockdep_assert_not_held(&sb->s_umount);
+-
+-	/* already notified earlier */
+-	if (sb->s_flags & SB_DEAD)
+-		return;
+-
+-	/*
+-	 * Let concurrent mounts know that this thing is really dead.
+-	 * sget_fc() skips SB_DEAD superblocks and calls test() under
+-	 * sb_lock, so set it under sb_lock: once we return no test()
+-	 * runs on this superblock anymore and none will start. Everyone
+-	 * else already saw SB_DYING and either discarded the superblock
+-	 * or waits for SB_DEAD.
+-	 */
+-	spin_lock(&sb_lock);
+-	super_wake(sb, SB_DEAD);
+-	spin_unlock(&sb_lock);
+-}
+-
+-/**
+- *	deactivate_locked_super	-	drop an active reference to superblock
+- *	@s: superblock to deactivate
+- *
+- *	Drops an active reference to superblock, converting it into a temporary
+- *	one if there is no other active references left.  In that case we
+- *	tell fs driver to shut it down and drop the temporary reference we
+- *	had just acquired.
+- *
+- *	Caller holds exclusive lock on superblock; that lock is released.
+- */
+-void deactivate_locked_super(struct super_block *s)
+-{
+-	struct file_system_type *fs = s->s_type;
+-	if (atomic_dec_and_test(&s->s_active)) {
+-		shrinker_free(s->s_shrink);
+-		fs->kill_sb(s);
+-
+-		kill_super_notify(s);
+-
+-		/* list_lru_destroy() may sleep; put_super() callers may not. */
+-		list_lru_destroy(&s->s_dentry_lru);
+-		list_lru_destroy(&s->s_inode_lru);
+-
+-		put_super(s);
+-	} else {
+-		super_unlock_excl(s);
+-	}
+-}
+-
+-EXPORT_SYMBOL(deactivate_locked_super);
+-
+-/**
+- *	deactivate_super	-	drop an active reference to superblock
+- *	@s: superblock to deactivate
+- *
+- *	Variant of deactivate_locked_super(), except that superblock is *not*
+- *	locked by caller.  If we are going to drop the final active reference,
+- *	lock will be acquired prior to that.
+- */
+-void deactivate_super(struct super_block *s)
+-{
+-	if (!atomic_add_unless(&s->s_active, -1, 1)) {
+-		__super_lock_excl(s);
+-		deactivate_locked_super(s);
+-	}
+-}
+-
+-EXPORT_SYMBOL(deactivate_super);
+-
+ /**
+  * grab_super - acquire an active reference to a superblock
+  * @sb: superblock to acquire
+diff --git a/fs/super_lifetime.c b/fs/super_lifetime.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..131623dcaee28672602f84b9ef6b2dc219a3aa5f
+--- /dev/null
++++ b/fs/super_lifetime.c
+@@ -0,0 +1,169 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * From fs/super.c.
++ * Copyright (C) 1991, 1992 Linus Torvalds
++ */
++#include <linux/export.h>
++#include <linux/fsnotify.h>
++#include <linux/rcupdate.h>
++#include <linux/security.h>
++#include <linux/shrinker.h>
++#include <linux/slab.h>
++#include <linux/user_namespace.h>
++#include <linux/wait_bit.h>
++
++#include "internal.h"
++#include "super_lifetime.h"
++
++DEFINE_SPINLOCK(sb_lock);
++
++/* wake waiters */
++#define SUPER_WAKE_FLAGS (SB_BORN | SB_DYING | SB_DEAD)
++void super_wake(struct super_block *sb, unsigned int flag)
++{
++	WARN_ON_ONCE((flag & ~SUPER_WAKE_FLAGS));
++	WARN_ON_ONCE(hweight32(flag & SUPER_WAKE_FLAGS) > 1);
++
++	/*
++	 * Pairs with smp_load_acquire() in super_lock() to make sure
++	 * all initializations in the superblock are seen by the user
++	 * seeing SB_BORN sent.
++	 */
++	smp_store_release(&sb->s_flags, sb->s_flags | flag);
++	/*
++	 * Pairs with the barrier in prepare_to_wait_event() to make sure
++	 * ___wait_var_event() either sees SB_BORN set or
++	 * waitqueue_active() check in wake_up_var() sees the waiter.
++	 */
++	smp_mb();
++	wake_up_var(&sb->s_flags);
++}
++
++static void destroy_super_work(struct work_struct *work)
++{
++	struct super_block *s = container_of(work, struct super_block,
++							destroy_work);
++	fsnotify_sb_free(s);
++	security_sb_free(s);
++	put_user_ns(s->s_user_ns);
++	kfree(s->s_subtype);
++	for (int i = 0; i < SB_FREEZE_LEVELS; i++)
++		percpu_free_rwsem(&s->s_writers.rw_sem[i]);
++	kfree(s);
++}
++
++static void destroy_super_rcu(struct rcu_head *head)
++{
++	struct super_block *s = container_of(head, struct super_block, rcu);
++	INIT_WORK(&s->destroy_work, destroy_super_work);
++	schedule_work(&s->destroy_work);
++}
++
++/* Free a superblock that has never been seen by anyone */
++void destroy_unused_super(struct super_block *s)
++{
++	if (!s)
++		return;
++	super_unlock_excl(s);
++	list_lru_destroy(&s->s_dentry_lru);
++	list_lru_destroy(&s->s_inode_lru);
++	shrinker_free(s->s_shrink);
++	/* no delays needed */
++	destroy_super_work(&s->destroy_work);
++}
++
++/* Superblock refcounting  */
++
++/*
++ * Drop a superblock's passive reference.  Must be called WITHOUT sb_lock held;
++ * put_super() acquires sb_lock itself when the final reference is dropped.
++ */
++void put_super(struct super_block *s)
++{
++	if (refcount_dec_and_test(&s->s_passive)) {
++		struct file_system_type *type = s->s_type;
++
++		spin_lock(&sb_lock);
++		list_del_init(&s->s_list);
++		hlist_del_init(&s->s_instances);
++		spin_unlock(&sb_lock);
++
++		WARN_ON(s->s_dentry_lru.node);
++		WARN_ON(s->s_inode_lru.node);
++		WARN_ON(s->s_mounts);
++		call_rcu(&s->rcu, destroy_super_rcu);
++		/* The unlink above may touch type->fs_supers, so drop it last. */
++		put_filesystem(type);
++	}
++}
++
++void kill_super_notify(struct super_block *sb)
++{
++	lockdep_assert_not_held(&sb->s_umount);
++
++	/* already notified earlier */
++	if (sb->s_flags & SB_DEAD)
++		return;
++
++	/*
++	 * Let concurrent mounts know that this thing is really dead.
++	 * sget_fc() skips SB_DEAD superblocks and calls test() under
++	 * sb_lock, so set it under sb_lock: once we return no test()
++	 * runs on this superblock anymore and none will start. Everyone
++	 * else already saw SB_DYING and either discarded the superblock
++	 * or waits for SB_DEAD.
++	 */
++	spin_lock(&sb_lock);
++	super_wake(sb, SB_DEAD);
++	spin_unlock(&sb_lock);
++}
++
++/**
++ *	deactivate_locked_super	-	drop an active reference to superblock
++ *	@s: superblock to deactivate
++ *
++ *	Drops an active reference to superblock, converting it into a temporary
++ *	one if there is no other active references left.  In that case we
++ *	tell fs driver to shut it down and drop the temporary reference we
++ *	had just acquired.
++ *
++ *	Caller holds exclusive lock on superblock; that lock is released.
++ */
++void deactivate_locked_super(struct super_block *s)
++{
++	struct file_system_type *fs = s->s_type;
++	if (atomic_dec_and_test(&s->s_active)) {
++		shrinker_free(s->s_shrink);
++		fs->kill_sb(s);
++
++		kill_super_notify(s);
++
++		/* list_lru_destroy() may sleep; put_super() callers may not. */
++		list_lru_destroy(&s->s_dentry_lru);
++		list_lru_destroy(&s->s_inode_lru);
++
++		put_super(s);
++	} else {
++		super_unlock_excl(s);
++	}
++}
++
++EXPORT_SYMBOL(deactivate_locked_super);
++
++/**
++ *	deactivate_super	-	drop an active reference to superblock
++ *	@s: superblock to deactivate
++ *
++ *	Variant of deactivate_locked_super(), except that superblock is *not*
++ *	locked by caller.  If we are going to drop the final active reference,
++ *	lock will be acquired prior to that.
++ */
++void deactivate_super(struct super_block *s)
++{
++	if (!atomic_add_unless(&s->s_active, -1, 1)) {
++		__super_lock_excl(s);
++		deactivate_locked_super(s);
++	}
++}
++
++EXPORT_SYMBOL(deactivate_super);
+diff --git a/fs/super_lifetime.h b/fs/super_lifetime.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..b99c7016abd199d19dc721a8655d23f96b1c2442
+--- /dev/null
++++ b/fs/super_lifetime.h
+@@ -0,0 +1,43 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _FS_SUPER_LIFETIME_H
++#define _FS_SUPER_LIFETIME_H
++
++#include <linux/fs.h>
++
++extern spinlock_t sb_lock;
++void super_wake(struct super_block *sb, unsigned int flag);
++void kill_super_notify(struct super_block *sb);
++void destroy_unused_super(struct super_block *s);
++
++static inline void __super_lock(struct super_block *sb, bool excl)
++{
++	if (excl)
++		down_write(&sb->s_umount);
++	else
++		down_read(&sb->s_umount);
++}
++
++static inline void super_unlock(struct super_block *sb, bool excl)
++{
++	if (excl)
++		up_write(&sb->s_umount);
++	else
++		up_read(&sb->s_umount);
++}
++
++static inline void __super_lock_excl(struct super_block *sb)
++{
++	__super_lock(sb, true);
++}
++
++static inline void super_unlock_excl(struct super_block *sb)
++{
++	super_unlock(sb, true);
++}
++
++static inline void super_unlock_shared(struct super_block *sb)
++{
++	super_unlock(sb, false);
++}
++
++#endif
