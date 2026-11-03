@@ -1287,17 +1287,31 @@ void free_pages(unsigned long address, unsigned int order)
 	__free_pages(virt_to_page(address), order);
 }
 
-void __folio_put(struct folio *folio)
+static void check_frozen_folio(struct folio *folio, const struct page_state *state)
 {
 	struct page *page = &folio->page;
-	size_t first = page_index(page);
-	struct page_state *state = catalog.state + first;
 	unsigned int order = state->compound ? state->run_order : 0;
 	if (page_ref_count(page) || PageTail(page) ||
 	    !!PageHead(page) != state->compound || folio_order(folio) != order ||
 	    folio_test_lru(folio) || folio_test_swapcache(folio) ||
 	    folio_test_slab(folio) || folio_test_large_kmalloc(folio) || folio->mapping)
 		__builtin_trap();
+}
+
+void free_frozen_pages(struct page *page, unsigned int order)
+{
+	size_t first = run_index(page, order);
+	check_frozen_folio(page_folio(page), catalog.state + first);
+	retire_pages(first, (size_t)1 << order);
+}
+
+static void retire_frozen_folio(struct folio *folio)
+{
+	struct page *page = &folio->page;
+	size_t first = page_index(page);
+	struct page_state *state = catalog.state + first;
+	unsigned int order = state->compound ? state->run_order : 0;
+	check_frozen_folio(folio, state);
 	/* Raw alloc_pages ownership only: no page-cache, userspace, slab or
 	 * zone-device cleanup is silently discarded. A noncompound high-order
 	 * allocation intentionally loses only its first page here, as Linux does. */
@@ -1308,11 +1322,16 @@ void __folio_put(struct folio *folio)
 	retire_pages(first, (size_t)1 << order);
 }
 
+void __folio_put(struct folio *folio)
+{
+	retire_frozen_folio(folio);
+}
+
 void free_unref_folios(struct folio_batch *batch)
 {
 	/* The native catalog owns each allocation and its deferred pin release. */
 	for (unsigned int i = 0; i < folio_batch_count(batch); i++)
-		__folio_put(batch->folios[i]);
+		retire_frozen_folio(batch->folios[i]);
 	folio_batch_reinit(batch);
 }
 
@@ -2640,6 +2659,12 @@ int main(void)
 	assert(fixture.releases == releases);
 	stela_linux_pages_finish();
 	assert(fixture.releases == releases + 2);
+	struct page *run = alloc_pages(GFP_KERNEL, 2);
+	assert(run && !PageHead(run) && page_ref_freeze(run, 1));
+	free_frozen_pages(run, 2);
+	assert(!catalog.live_pages && fixture.releases == releases + 2);
+	stela_linux_pages_finish();
+	assert(fixture.releases == releases + 3);
 	compound_and_split();
 	stela_linux_enter(&owner);
 	capacity();
