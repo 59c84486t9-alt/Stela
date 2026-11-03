@@ -127,6 +127,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/init/init_task.c")),
             PathBuf::from(format!("{LINUX}/init/version-timestamp.c")),
             PathBuf::from(format!("{LINUX}/mm/init-mm.c")),
+            PathBuf::from(format!("{LINUX}/mm/list_lru.c")),
             PathBuf::from(format!("{LINUX}/mm/mmap_boot.c")),
             PathBuf::from(format!("{LINUX}/mm/vma_init.c")),
             PathBuf::from(format!("{LINUX}/mm/vmstat_init.c")),
