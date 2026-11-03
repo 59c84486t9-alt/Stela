@@ -15,6 +15,7 @@
 /drivers/gpu/drm/Makefile
 /drivers/gpu/drm/Kconfig
 /lib/rbtree.c
+/lib/lockref.c
 /lib/rhashtable.c
 /lib/kobject.c
 /lib/kobject_uevent.c
@@ -164,6 +165,9 @@
 /fs/xattr.c
 /fs/simple_xattr.c
 /fs/d_path.c
+/fs/namei.c
+/fs/name_hash.c
+/fs/name_hash.h
 /fs/libfs.c
 /fs/pseudo_metadata.c
 /fs/inode.c
