@@ -147,6 +147,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/fs_struct.c")),
             PathBuf::from(format!("{LINUX}/fs/init_fdtable.c")),
             PathBuf::from(format!("{LINUX}/fs/file_ref.c")),
+            PathBuf::from(format!("{LINUX}/fs/filp_close.c")),
             PathBuf::from(format!("{LINUX}/lib/string.c")),
             PathBuf::from(format!("{LINUX}/lib/hexdump.c")),
             PathBuf::from(format!("{LINUX}/lib/ratelimit.c")),

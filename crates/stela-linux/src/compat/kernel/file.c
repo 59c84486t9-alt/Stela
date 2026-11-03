@@ -136,10 +136,8 @@ static void release_later(struct work_struct *work)
 
 static DECLARE_WORK(release_worker, release_later);
 
-void fput(struct file *file)
+static void release_last_reference(struct file *file)
 {
-	if (!file_ref_put(&file->f_ref))
-		return;
 	if (!in_atomic() && !irqs_disabled()) {
 		release(file);
 		return;
@@ -150,6 +148,18 @@ void fput(struct file *file)
 	 * new files arrive while an earlier batch is being released. */
 	if (llist_add(&file->f_llist, &release_pending))
 		schedule_work(&release_worker);
+}
+
+void fput(struct file *file)
+{
+	if (file_ref_put(&file->f_ref))
+		release_last_reference(file);
+}
+
+void fput_close(struct file *file)
+{
+	if (file_ref_put_close(&file->f_ref))
+		release_last_reference(file);
 }
 
 struct file *anon_inode_getfile(const char *name, const struct file_operations *fops, void *priv,
@@ -267,7 +277,7 @@ void stela_linux_fd_close(int fd)
 	struct file *file = idr_remove(&descriptors, (unsigned long)fd);
 
 	if (file)
-		fput(file);
+		fput_close(file);
 }
 
 int stela_linux_fd_dup(int fd)

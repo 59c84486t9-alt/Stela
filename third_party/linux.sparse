@@ -160,6 +160,9 @@
 /fs/fs_struct.c
 /fs/file.c
 /fs/file_ref.c
+/fs/open.c
+/fs/filp_close.c
+/fs/filp_close.h
 /fs/init_fdtable.c
 /fs/internal.h
 /kernel/softirq.c

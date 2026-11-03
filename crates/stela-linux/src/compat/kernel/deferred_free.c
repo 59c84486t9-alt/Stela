@@ -18,6 +18,23 @@ bool stela_linux_allocation_range(const void *pointer, size_t bytes,
         stela_linux_cache_range(pointer, bytes, out);
 }
 
+#ifdef CONFIG_PRINTK
+void mem_dump_obj(void *object)
+{
+ if (kmem_dump_obj(object))
+  return;
+
+ const char *type = "untracked pointer";
+ if (is_vmalloc_addr(object))
+  type = "vmalloc memory";
+ else if (!object)
+  type = "NULL pointer";
+ else if (object == ZERO_SIZE_PTR)
+  type = "zero-size pointer";
+ pr_cont(" %s\n", type);
+}
+#endif
+
 void kvfree(const void *pointer)
 {
  /* kfree resolves actual canonical raw-heap and opaque-cache allocations. */
