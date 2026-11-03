@@ -253,6 +253,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> M
         // SAFETY: stable kept Box before C publication, one canonical lifetime.
         let reference: &'static Broker<K, P, N> =
             unsafe { &*(&**broker as *const Broker<K, P, N>) };
+        // SAFETY: the broker is permanently retained at this stable address before publication.
         unsafe { abi::publish(reference) }?;
         Ok(Self {
             broker: reference,

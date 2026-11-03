@@ -63,6 +63,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
             }
             StoppedDataState::Stopped(owner) => owner,
             StoppedDataState::SourceReleased(owner) => {
+                // SAFETY: the retained state records that the source put and its tail already returned.
                 return unsafe { self.finish_data_stop(owner) };
             }
             StoppedDataState::Finished => {
@@ -80,6 +81,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
         // SAFETY: genuine PID1 source current, stopped native/IRQ token kept;
         // source release cannot be inferred from publication flags or errno.
         match unsafe { ManuallyDrop::into_inner(stopped).release_source(&request.broker.kernel) } {
+            // SAFETY: successful source release has joined the source put before the next metadata loan.
             Ok(owner) => unsafe { self.finish_data_stop(owner) },
             Err((owner, error)) => {
                 request.keep_data_stop(StoppedDataState::Stopped(owner));

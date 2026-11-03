@@ -23,6 +23,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
         }
         let request = &self.request;
         // The observation guard above returned BEFORE possibly waiting C.
+        // SAFETY: the exact native ticket physically returned and the caller owns the source reap.
         unsafe {
             request
                 .binding()
@@ -35,6 +36,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
     /// may wait. No native loan or mutable child/registry guard survives here.
     pub(crate) unsafe fn join_source(&self) -> Result<(), Error> {
         let request = &self.request;
+        // SAFETY: the caller has reaped this source and holds no segment loan across the join.
         unsafe {
             request
                 .binding()
@@ -48,6 +50,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
     /// and independently checks every actual C descriptor reference.
     pub(crate) unsafe fn retire_descriptors(&self) -> Result<(), Error> {
         let request = &self.request;
+        // SAFETY: the closure performs a bounded descriptor transition after the source join.
         let result = unsafe {
             request.broker.kernel.platform().with_process(|entered| {
                 let _mutation = request.mutation()?;
@@ -76,19 +79,12 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
         };
         let child = ManuallyDrop::new(child);
         // SAFETY: same short mutation, detached owner is immutable once stored.
-        if unsafe {
-            (&*request
-                .detached
-                .get()
-                .cast::<Option<Arc<dyn SwitchBinding>>>())
-                .is_none()
-        } {
+        if unsafe { &**request.detached.get() }.is_none() {
+            // SAFETY: the dispatcher has joined physical return and owns the assigned binding.
             match unsafe { request.broker.runtime.detach_binding(assigned.context_id()) } {
+                // SAFETY: the mutation guard gives exclusive access to the empty detached slot.
                 Ok(binding) => unsafe {
-                    *request
-                        .detached
-                        .get()
-                        .cast::<Option<Arc<dyn SwitchBinding>>>() = Some(binding);
+                    **request.detached.get() = Some(binding);
                 },
                 Err(error) => {
                     mutation.put(Owned::Child(ManuallyDrop::into_inner(child)));
@@ -96,6 +92,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>
                 }
             }
         }
+        // SAFETY: the taskless dispatcher holds the joined child and its detached owner.
         match unsafe { ManuallyDrop::into_inner(child).release() } {
             Ok(receipt) => {
                 mutation.put(Owned::Retired(receipt));

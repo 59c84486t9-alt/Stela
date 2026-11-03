@@ -28,12 +28,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> R
     pub(super) fn fault(&self, error: factory::Error) {
         // SAFETY: short exclusive mutation. Retain earlier diagnostics too;
         // none of their possible owners may finally drop in source/IF0 hooks.
-        let old = unsafe {
-            mem::replace(
-                &mut *self.fault.get().cast::<Option<factory::Error>>(),
-                Some(error),
-            )
-        };
+        let old = unsafe { &mut **self.fault.get() }.replace(error);
         let _old = ManuallyDrop::new(old);
     }
     pub(super) fn errno(&self) -> i32 {
@@ -42,7 +37,8 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> R
         };
         // Only called AFTER successful affine NoPublication; this mapping is
         // the genuine original errno boundary, not cancellation classification.
-        let fault = unsafe { &*self.fault.get().cast::<Option<factory::Error>>() };
+        // SAFETY: the mutation guard pins this diagnostic for the errno projection.
+        let fault = unsafe { &**self.fault.get() };
         match fault {
             Some(factory::Error::Admission(reason)) => work_errno(reason.error()),
             Some(factory::Error::Work(error)) => work_errno(*error),
@@ -81,6 +77,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> R
     pub(super) unsafe fn prefix(&self) -> Result<(), Error> {
         // One bounded native metadata loan. No original resource, fork,
         // kthread or WQ body can park or wait inside any of these leaf steps.
+        // SAFETY: every transition in this loan is bounded metadata work.
         let result = unsafe {
             self.broker.kernel.platform().with_process(|entered| {
                 self.advance(|c| c.reserve(entered))?;
@@ -167,6 +164,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> R
         }
         .unwrap_or_else(|| fatal());
         let pointer = &**context as *const CallbackContext<K, P, N> as *mut c_void;
+        // SAFETY: the exact callback context is retained and publication performs bounded metadata work.
         let result = unsafe {
             self.broker.kernel.platform().with_process(|entered| {
                 self.advance(|child| {
@@ -179,6 +177,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> R
         }
     }
     pub(super) unsafe fn activate(&self) {
+        // SAFETY: the process segment is borrowed only for the bounded activation transition.
         let result = unsafe {
             self.broker
                 .kernel
@@ -225,6 +224,7 @@ unsafe extern "C" fn run<
     }
     // No mutation guard, registry reader, RefCell/queue borrow or transient
     // EnteredProcess survives this genuine original possibly-waiting body.
+    // SAFETY: the original callback retains the request and has bound the exact current context.
     let result = unsafe {
         binding.run_scoped(
             request.broker.runtime,
