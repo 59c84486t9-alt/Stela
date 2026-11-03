@@ -77,6 +77,8 @@ type Environment = LinuxEnvironment<SLOTS>;
 const PAGE: u64 = page_window::PAGE;
 const ENOENT: Errno = -2;
 const EIO: Errno = -5;
+const EFAULT: Errno = -14;
+const ERANGE: Errno = -34;
 const EAGAIN: Errno = -11;
 const ENODEV: Errno = -19;
 const EINVAL: Errno = -22;
@@ -651,6 +653,36 @@ impl Platform for Host {
         // SAFETY: as in `copy_from_user`.
         unsafe { ptr::copy_nonoverlapping(from, to, size) };
         0
+    }
+
+    unsafe fn copy_from_kernel_nofault(
+        &self,
+        to: *mut u8,
+        from: *const u8,
+        size: usize,
+    ) -> Result<(), Errno> {
+        if native_irq::current_context() != Ok(None) {
+            return Err(EFAULT);
+        }
+        let heap = native_memory::SOURCE.registration();
+        let in_heap = from
+            .addr()
+            .checked_sub(heap.cpu)
+            .is_some_and(|offset| offset <= heap.bytes && size <= heap.bytes - offset);
+        if heap.generation == 0 || !in_heap {
+            return Err(ERANGE);
+        }
+        if from.addr().abs_diff(to.addr()) < size {
+            return Err(EINVAL);
+        }
+        // SAFETY: the retained heap registration authorizes the source as
+        // host WB memory. The engine's host IDT is active on this CPU, and
+        // the C caller owns the disjoint writable destination.
+        if unsafe { stela_boot_core::nofault_read::read(to, from, size) } == 0 {
+            Ok(())
+        } else {
+            Err(EFAULT)
+        }
     }
 
     fn map_user(&self, _: *mut c_void, address: u64, pfn: u64, prot: u64) -> Result<(), Errno> {

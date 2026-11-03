@@ -78,6 +78,7 @@ struct stela_linux_services {
 	void (*unmap_user)(void *context, void *space, unsigned long address, size_t size);
 	/* Calibrated x86 TSC rate for BogoMIPS metadata, or zero if unavailable. */
 	u64 (*calibrated_tsc_hz)(void *context);
+	int (*copy_from_kernel_nofault)(void *context, void *to, const void *from, size_t size);
 };
 
 struct stela_linux_owner {
@@ -87,7 +88,7 @@ struct stela_linux_owner {
 
 /* Private x86-64 C ABI. All producers and consumers rebuild from this header;
  * Rust mirrors this exact table and checks every x86-64 field offset. */
-_Static_assert(sizeof(struct stela_linux_services) == 168, "Linux services ABI");
+_Static_assert(sizeof(struct stela_linux_services) == 176, "Linux services ABI");
 _Static_assert(__builtin_offsetof(struct stela_linux_services, now_ns) == 0, "Linux now_ns ABI");
 _Static_assert(__builtin_offsetof(struct stela_linux_services, minimum_delay_us) == 8, "Linux minimum_delay_us ABI");
 _Static_assert(__builtin_offsetof(struct stela_linux_services, minimum_deadline_us) == 16, "Linux minimum_deadline_us ABI");
@@ -109,6 +110,7 @@ _Static_assert(__builtin_offsetof(struct stela_linux_services, copy_to_user) == 
 _Static_assert(__builtin_offsetof(struct stela_linux_services, map_user) == 144, "Linux map_user ABI");
 _Static_assert(__builtin_offsetof(struct stela_linux_services, unmap_user) == 152, "Linux unmap_user ABI");
 _Static_assert(__builtin_offsetof(struct stela_linux_services, calibrated_tsc_hz) == 160, "Linux calibrated_tsc_hz ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, copy_from_kernel_nofault) == 168, "Linux nofault read ABI");
 _Static_assert(sizeof(struct stela_linux_owner) == 16, "Linux owner ABI");
 
 /* An owner for Linux code that needs none of these services. */

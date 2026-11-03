@@ -109,6 +109,19 @@ pub trait Platform {
     /// `from` is readable for `size` bytes; `to` is an address in the running
     /// client. Returns the bytes left uncopied at a fault.
     unsafe fn copy_to_user(&self, to: *mut u8, from: *const u8, size: usize) -> usize;
+    /// Read kernel memory through the owner's bounded, fault-safe mapping.
+    ///
+    /// # Safety
+    /// `to` is writable for `size` bytes. The owner must validate the source
+    /// range before reading, and may leave only a copied prefix on a fault.
+    unsafe fn copy_from_kernel_nofault(
+        &self,
+        _to: *mut u8,
+        _from: *const u8,
+        _size: usize,
+    ) -> Result<(), Errno> {
+        Err(-95)
+    }
     /// Install one page in client `space`. `prot` holds x86 page table bits.
     fn map_user(&self, space: *mut c_void, address: u64, pfn: u64, prot: u64) -> Result<(), Errno>;
     /// Remove a client's pages.
@@ -139,9 +152,11 @@ struct Services {
     map_user: unsafe extern "C" fn(*mut c_void, *mut c_void, u64, u64, u64) -> c_int,
     unmap_user: unsafe extern "C" fn(*mut c_void, *mut c_void, u64, usize),
     calibrated_tsc_hz: unsafe extern "C" fn(*mut c_void) -> u64,
+    copy_from_kernel_nofault:
+        unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, usize) -> c_int,
 }
 
-const _: () = assert!(size_of::<Services>() == 168);
+const _: () = assert!(size_of::<Services>() == 176);
 const _: () = {
     assert!(core::mem::offset_of!(Services, now_ns) == 0);
     assert!(core::mem::offset_of!(Services, minimum_delay_us) == 8);
@@ -164,6 +179,7 @@ const _: () = {
     assert!(core::mem::offset_of!(Services, map_user) == 144);
     assert!(core::mem::offset_of!(Services, unmap_user) == 152);
     assert!(core::mem::offset_of!(Services, calibrated_tsc_hz) == 160);
+    assert!(core::mem::offset_of!(Services, copy_from_kernel_nofault) == 168);
 };
 
 /// `struct stela_linux_owner`.
@@ -367,6 +383,18 @@ mod trampolines {
         left as u64
     }
 
+    pub unsafe extern "C" fn copy_from_kernel_nofault<P: Platform>(
+        context: *mut c_void,
+        to: *mut c_void,
+        from: *const c_void,
+        size: usize,
+    ) -> c_int {
+        // SAFETY: C authenticates this owner and retains a writable destination.
+        status(unsafe {
+            platform::<P>(context).copy_from_kernel_nofault(to.cast(), from.cast(), size)
+        })
+    }
+
     pub unsafe extern "C" fn map_user<P: Platform>(
         context: *mut c_void,
         space: *mut c_void,
@@ -446,6 +474,7 @@ impl<P: Platform> Owner<P> {
                 irq_disable: t::irq_disable::<P>,
                 irq_retire: t::irq_retire::<P>,
                 copy_from_user: t::copy_from_user::<P>,
+                copy_from_kernel_nofault: t::copy_from_kernel_nofault::<P>,
                 copy_to_user: t::copy_to_user::<P>,
                 map_user: t::map_user::<P>,
                 unmap_user: t::unmap_user::<P>,

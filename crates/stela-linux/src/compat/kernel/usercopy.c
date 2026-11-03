@@ -6,10 +6,42 @@
  * pointer, so every copy faults. */
 #include <linux/bug.h>
 #include <linux/err.h>
+#include <linux/export.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
 #include <stela/linux.h>
+#include <stela/task.h>
+
+long copy_from_kernel_nofault(void *to, const void *from, size_t size)
+{
+	if (!size)
+		return 0;
+	const struct stela_linux_owner *owner = stela_linux_owner();
+	if (stela_linux_require_current(owner))
+		return -EFAULT;
+	if (!owner->services->copy_from_kernel_nofault) {
+		stela_linux_unsupported("kernel no-fault read");
+		return -EOPNOTSUPP;
+	}
+
+	struct task_struct *task = current;
+	struct stela_linux_lease lease;
+	stela_linux_lease_snapshot(&lease);
+	int nesting = preempt_count();
+	pagefault_disable();
+	int disabled = task->pagefault_disabled;
+	int error = owner->services->copy_from_kernel_nofault(owner->context, to, from, size);
+	if (!stela_linux_lease_matches(&lease) || current != task ||
+	    preempt_count() != nesting || task->pagefault_disabled != disabled ||
+	    error > 0)
+		__builtin_trap();
+	pagefault_enable();
+	if (error == -EOPNOTSUPP)
+		stela_linux_unsupported("kernel no-fault read");
+	return error;
+}
+EXPORT_SYMBOL_GPL(copy_from_kernel_nofault);
 
 unsigned long raw_copy_from_user(void *to, const void __user *from, unsigned long n)
 {
