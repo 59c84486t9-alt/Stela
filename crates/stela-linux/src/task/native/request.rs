@@ -47,37 +47,24 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> R
             _ => -5,
         }
     }
-    pub(super) fn advance(
+    fn advance(
         &self,
-        step: impl FnOnce(
-            OwnedChild<K, P, N>,
-        ) -> Result<
-            OwnedChild<K, P, N>,
-            factory::Failure<'static, 'static, 'static, 'static, K, P, N>,
-        >,
+        step: impl FnOnce(&mut OwnedChild<K, P, N>) -> Result<(), factory::Error>,
     ) -> Result<(), Error> {
         let mut mutation = self.mutation()?;
         let Owned::Child(child) = mutation.take() else {
             fatal()
         };
-        let child = ManuallyDrop::new(child);
-        match step(ManuallyDrop::into_inner(child)) {
-            Ok(child) => {
-                mutation.put(Owned::Child(child));
-                Ok(())
-            }
-            Err(failure) => {
-                let factory::Failure { error, child } = failure;
-                self.fault(error);
-                mutation.put(Owned::Child(child));
-                Err(Error::WrongPhase)
-            }
-        }
+        // Keep the affine owner in one local through the entire step. Each
+        // factory transition restores its lease before returning an error.
+        let mut child = ManuallyDrop::new(child);
+        let result = step(&mut child);
+        mutation.put(Owned::Child(ManuallyDrop::into_inner(child)));
+        result.map_err(|error| {
+            self.fault(error);
+            Error::WrongPhase
+        })
     }
-    #[expect(
-        clippy::result_large_err,
-        reason = "the transition returns the affine child directly to its request on refusal"
-    )]
     pub(super) unsafe fn prefix(&self) -> Result<(), Error> {
         // One bounded native metadata loan. No original resource, fork,
         // kthread or WQ body can park or wait inside any of these leaf steps.

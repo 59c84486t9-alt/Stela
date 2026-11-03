@@ -9,19 +9,14 @@ impl<'factory, 'kernel, 'catalog, 'runtime, K: KernelThreadPlatform, P: Provider
     /// not a default. Callback, module/code, data and source graph are retained
     /// BEFORE this call and through unknown publication/native return tails.
     /// No ordinary original bad_fork rollback follows native acceptance.
-    #[expect(
-        clippy::result_large_err,
-        reason = "exact affine native/source ownership is returned on refusal"
-    )]
     pub(crate) unsafe fn publish_dormant(
-        self,
+        &mut self,
         entered: &dyn EnteredProcess,
         rank: scheduling::Snapshot,
         callback: Callback,
         context: *mut c_void,
-    ) -> Result<Self, Failure<'factory, 'kernel, 'catalog, 'runtime, K, P, N>> {
-        let mut this = ManuallyDrop::new(self);
-        match this.take_state() {
+    ) -> Result<(), Error> {
+        match self.take_state() {
             State::Prepared {
                 lease,
                 exposure: Exposure::Lent,
@@ -29,21 +24,21 @@ impl<'factory, 'kernel, 'catalog, 'runtime, K: KernelThreadPlatform, P: Provider
                 // SAFETY: exact original source nofail/publication contract.
                 match unsafe { lease.publish_dormant(entered, rank, callback, context) } {
                     Ok(lease) => {
-                        this.keep(State::Dormant(lease));
-                        Ok(ManuallyDrop::into_inner(this))
+                        self.keep(State::Dormant(lease));
+                        Ok(())
                     }
                     Err((lease, error)) => {
-                        this.keep(State::Prepared {
+                        self.keep(State::Prepared {
                             lease,
                             exposure: Exposure::Lent,
                         });
-                        Err(ManuallyDrop::into_inner(this).fail(Error::Pages(error)))
+                        Err(Error::Pages(error))
                     }
                 }
             }
             state => {
-                this.keep(state);
-                Err(ManuallyDrop::into_inner(this).fail(Error::WrongPhase))
+                self.keep(state);
+                Err(Error::WrongPhase)
             }
         }
     }
@@ -52,31 +47,23 @@ impl<'factory, 'kernel, 'catalog, 'runtime, K: KernelThreadPlatform, P: Provider
     /// # Safety
     /// Actual source tasklist/PID/resource publication and its first wake have
     /// completed for this exact owned child. Uncertainty keeps the whole graph.
-    #[expect(
-        clippy::result_large_err,
-        reason = "exact affine native/source ownership is returned on refusal"
-    )]
-    pub(crate) unsafe fn activate(
-        self,
-        entered: &dyn EnteredProcess,
-    ) -> Result<Self, Failure<'factory, 'kernel, 'catalog, 'runtime, K, P, N>> {
-        let mut this = ManuallyDrop::new(self);
-        match this.take_state() {
+    pub(crate) unsafe fn activate(&mut self, entered: &dyn EnteredProcess) -> Result<(), Error> {
+        match self.take_state() {
             // SAFETY: actual original visibility + first wake is the caller
             // contract; exact owned lease validates native state/epoch separately.
             State::Dormant(lease) => match unsafe { lease.activate(entered) } {
                 Ok(lease) => {
-                    this.keep(State::Published(lease));
-                    Ok(ManuallyDrop::into_inner(this))
+                    self.keep(State::Published(lease));
+                    Ok(())
                 }
                 Err((lease, error)) => {
-                    this.keep(State::Dormant(lease));
-                    Err(ManuallyDrop::into_inner(this).fail(Error::Pages(error)))
+                    self.keep(State::Dormant(lease));
+                    Err(Error::Pages(error))
                 }
             },
             state => {
-                this.keep(state);
-                Err(ManuallyDrop::into_inner(this).fail(Error::WrongPhase))
+                self.keep(state);
+                Err(Error::WrongPhase)
             }
         }
     }
