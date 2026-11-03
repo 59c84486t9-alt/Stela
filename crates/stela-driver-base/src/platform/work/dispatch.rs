@@ -225,13 +225,7 @@ impl<const N: usize> Runtime<N> {
                         if let Err(error) = inserted {
                             self.queue.cpu.fatal(error);
                         }
-                        task.job = Some(job);
-                        task.state = TaskState::Ready;
-                        task.flags = flags;
-                        task.signal.pending.store(false, Ordering::Relaxed);
-                        task.signal
-                            .sequence
-                            .store(job.1.sequence, Ordering::Release);
+                        task.assign(job, flags);
                     }
                     Ok(None) => {}
                     Err(e) => {

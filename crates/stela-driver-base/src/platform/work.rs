@@ -862,40 +862,11 @@ impl<const N: usize> Drop for WakeHandle<N> {
     }
 }
 #[cfg(target_arch = "x86_64")]
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum TaskState {
-    Idle,
-    Retained,
-    Reserved,
-    Escrow,
-    Preparing,
-    Dormant,
-    Terminating,
-    Ready,
-    Running,
-    Runnable,
-    Blocked,
-}
+mod continuation;
 #[cfg(target_arch = "x86_64")]
-struct Task {
-    lane: Lane,
-    stack: Stack,
-    id: ContextId,
-    frame: context::Frame,
-    state: TaskState,
-    job: Option<(usize, Job)>,
-    flags: u64,
-    draining: bool,
-    owned_escrows: usize,
-    stack_pin_nonce: u64,
-    ever_entered: bool,
-    completed_sequence: u64,
-    returned_sequence: u64,
-    stack_epoch: u64,
-    stack_retired_epoch: u64,
-    binding: Option<Arc<dyn SwitchBinding>>,
-    signal: Arc<WakeSignal>,
-}
+use continuation::{Continuation, TaskState};
+#[cfg(target_arch = "x86_64")]
+type Task = Continuation<Stack, u64, Arc<dyn SwitchBinding>>;
 pub const MAX_CONTINUATIONS: usize = 32;
 
 /// CPU-affine pinned executor. Task zero is a real foreground continuation,
@@ -1016,32 +987,7 @@ impl<const N: usize> Runtime<N> {
             .try_reserve_exact(stacks.len())
             .map_err(|_| WorkError::Full)?;
         for (index, stack) in stacks.into_iter().enumerate() {
-            let id = NEXT_CONTEXT
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-                .map_err(|_| WorkError::Exhausted)?;
-            tasks.push(Task {
-                lane: layout.lane(index),
-                stack,
-                id: ContextId(id),
-                frame: context::Frame::new(controls),
-                state: TaskState::Idle,
-                job: None,
-                flags: 0,
-                draining: false,
-                owned_escrows: 0,
-                stack_pin_nonce: 0,
-                ever_entered: false,
-                completed_sequence: 0,
-                returned_sequence: 0,
-                stack_epoch: 0,
-                stack_retired_epoch: 0,
-                binding: None,
-                signal: Arc::new(WakeSignal {
-                    service: layout.lane(index) == Lane::Service,
-                    sequence: AtomicU64::new(0),
-                    pending: AtomicBool::new(false),
-                }),
-            });
+            tasks.push(Task::new(layout.lane(index), stack, controls, 0)?);
         }
         let execution = accounting::ExecutionView::new(&queue, &tasks)?;
         {
