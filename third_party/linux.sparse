@@ -129,8 +129,10 @@
 /mm/filemap_batch.c
 /mm/filemap_batch.h
 /mm/swap.c
+/mm/swap.h
 /mm/internal.h
 /mm/pagecache_init.c
+/mm/folio_wait.c
 /mm/pagecache_wait.h
 /mm/page-writeback.c
 /mm/writeback_domain.c
