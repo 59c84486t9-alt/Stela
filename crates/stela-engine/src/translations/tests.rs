@@ -360,11 +360,16 @@ fn unordered_legacy_records_find_the_first_entry_for_each_offset_and_context() {
     duplicate.code.push(0);
     let translator = translator_id();
     let key = Digest::of(b"legacy page");
-    let legacy = Record {
+    let mut legacy = Record {
         translator,
         key,
         entries: vec![high.clone(), alternate.clone(), low.clone(), duplicate],
     };
+    for index in 0..32u8 {
+        let mut entry = high.clone();
+        entry.context = Digest::of(&[index]);
+        legacy.entries.push(entry);
+    }
     let decoded = Record::decode(&legacy.encode(), &translator, &key).unwrap();
     assert_eq!(decoded.find(low.offset, &low.context), Some(&low));
     assert_eq!(decoded.find(high.offset, &high.context), Some(&high));

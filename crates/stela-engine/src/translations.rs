@@ -307,6 +307,14 @@ impl Record {
     }
 
     pub fn find(&self, offset: u16, context: &Digest) -> Option<&Entry> {
+        // A sequential scan is cheaper for short records, where the
+        // dependent probes of a binary search cost more than they save.
+        if self.entries.len() <= 32 {
+            return self
+                .entries
+                .iter()
+                .find(|entry| entry.offset == offset && entry.context == *context);
+        }
         self.entry_index(offset, context)
             .ok()
             .map(|index| &self.entries[index])
@@ -436,7 +444,9 @@ impl Record {
         if !reader.0.is_empty() {
             return Err(FormatError::Entry);
         }
-        entries.sort_by_key(|entry| (entry.offset, entry.context));
+        if !entries.is_sorted_by_key(|entry| (entry.offset, entry.context)) {
+            entries.sort_by_key(|entry| (entry.offset, entry.context));
+        }
         Ok(Self {
             translator: *translator,
             key: *key,
