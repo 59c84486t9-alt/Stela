@@ -165,6 +165,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/pseudo_metadata.c")),
             PathBuf::from(format!("{LINUX}/fs/mnt_idmapping.c")),
             PathBuf::from(format!("{LINUX}/drivers/base/map.c")),
+            PathBuf::from(format!("{LINUX}/fs/char_dev.c")),
             PathBuf::from(format!("{LINUX}/fs/dcache_init.c")),
             PathBuf::from(format!("{LINUX}/fs/file_table_init.c")),
             PathBuf::from(format!("{LINUX}/fs/inode_cache_init.c")),

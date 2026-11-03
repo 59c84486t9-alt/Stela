@@ -194,6 +194,7 @@
 /fs/file_ref.c
 /fs/xattr.c
 /fs/simple_xattr.c
+/fs/char_dev.c
 /fs/dcache.c
 /fs/dcache_init.c
 /fs/dcache_init.h

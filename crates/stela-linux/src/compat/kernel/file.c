@@ -52,8 +52,11 @@ void ihold(struct inode *inode)
 
 void iput(struct inode *inode)
 {
-	if (inode && atomic_dec_and_test(&inode->i_count))
+	if (inode && atomic_dec_and_test(&inode->i_count)) {
+		if (S_ISCHR(inode->i_mode))
+			cd_forget(inode);
 		kfree(inode);
+	}
 }
 
 void inode_set_bytes(struct inode *inode, loff_t bytes)
@@ -97,6 +100,10 @@ static void release(struct file *file)
 {
 	if (file->f_op && file->f_op->release)
 		file->f_op->release(file->f_inode, file);
+	if (file->f_op && S_ISCHR(file->f_inode->i_mode)) {
+		cdev_put(file->f_inode->i_cdev);
+		fops_put(file->f_op);
+	}
 	iput(file->f_inode);
 
 	struct dentry *dentry = file->f_path.dentry;
@@ -275,82 +282,27 @@ long stela_linux_ioctl(int fd, unsigned int request, void *argument)
 	return result;
 }
 
-struct char_devices {
-	struct list_head node;
-	unsigned int major, base, count;
-	const struct file_operations *fops;
-};
-
-static LIST_HEAD(char_devices);
-
-/* The first dynamic major Linux hands out from the top of its range. */
-#define DYNAMIC_MAJOR 511U
-
-int __register_chrdev(unsigned int major, unsigned int baseminor, unsigned int count,
-		      const char *name, const struct file_operations *fops)
-{
-	(void)name;
-	struct char_devices *devices = kmalloc_obj(*devices);
-	static unsigned int dynamic = DYNAMIC_MAJOR;
-
-	if (!devices)
-		return -ENOMEM;
-	*devices = (struct char_devices){
-		.major = major ? major : dynamic--,
-		.base = baseminor,
-		.count = count,
-		.fops = fops,
-	};
-	list_add(&devices->node, &char_devices);
-	return major ? 0 : (int)devices->major;
-}
-
-void __unregister_chrdev(unsigned int major, unsigned int baseminor, unsigned int count,
-			 const char *name)
-{
-	(void)name;
-	struct char_devices *devices;
-
-	list_for_each_entry(devices, &char_devices, node)
-		if (devices->major == major && devices->base == baseminor &&
-		    devices->count == count) {
-			list_del(&devices->node);
-			kfree(devices);
-			return;
-		}
-	WARN_ON(1);
-}
-
 int stela_linux_chrdev_open(dev_t device, unsigned int flags, struct file **result)
 {
-	const struct char_devices *devices;
-	unsigned int minor = MINOR(device);
-
-	list_for_each_entry(devices, &char_devices, node) {
-		if (devices->major != MAJOR(device) || minor < devices->base ||
-		    minor - devices->base >= devices->count)
-			continue;
-		struct inode *inode = inode_of_mode(S_IFCHR | S_IRUSR | S_IWUSR);
-
-		if (IS_ERR(inode))
-			return (int)PTR_ERR(inode);
-		inode->i_rdev = device;
-		struct file *file = new_file(inode, devices->fops, flags, NULL);
-
-		if (IS_ERR(file))
-			return (int)PTR_ERR(file);
-		file->f_mode = FMODE_READ | FMODE_WRITE;
-		int error = file->f_op->open ? file->f_op->open(inode, file) : 0;
-
-		if (error) {
-			file->f_op = NULL;
-			fput(file);
-			return error;
-		}
-		*result = file;
-		return 0;
+	if (unlikely(!__filp_cache))
+		return -ENXIO;
+	struct inode *inode = inode_of_mode(S_IFCHR | S_IRUSR | S_IWUSR);
+	if (IS_ERR(inode))
+		return (int)PTR_ERR(inode);
+	inode->i_rdev = device;
+	struct file *file = new_file(inode, &def_chr_fops, flags, NULL);
+	if (IS_ERR(file))
+		return (int)PTR_ERR(file);
+	file->f_mode = FMODE_READ | FMODE_WRITE;
+	int error = def_chr_fops.open(inode, file);
+	if (error) {
+		/* chrdev_open already dropped any cdev reference it acquired. */
+		file->f_op = NULL;
+		fput(file);
+		return error;
 	}
-	return -ENXIO;
+	*result = file;
+	return 0;
 }
 
 int stela_linux_open(dev_t device, unsigned int flags)
@@ -443,6 +395,8 @@ STELA_UNSUPPORTED(struct file *, dentry_open, const struct path *, int, const st
 #include <stela/page_test.h>
 #include <stela/test.h>
 
+extern void __init chrdev_init(void);
+
 static unsigned int opens, releases;
 static int open_error;
 
@@ -510,6 +464,7 @@ int main(void)
 
 	stela_test_register_pages();
 	files_init();
+	chrdev_init();
 
 	/* Recycle the same type-stable slot without publishing stale fields. */
 	struct file *first = anon_inode_getfile("first", NULL, &opens, O_RDWR);
@@ -576,12 +531,13 @@ int main(void)
 	assert(stela_linux_ioctl(fd, 7, NULL) == -ENOTTY);
 	stela_linux_fd_close(fd);
 	assert(releases == 1);
+	__unregister_chrdev(226, 0, 8, "test");
+	assert(stela_linux_chrdev_open(MKDEV(226, 3), 0, &file) == -ENXIO);
 	stela_linux_fd_close(copy);
 	assert(releases == 2);
 	assert(stela_linux_fd_dup(fd) == -EBADF && stela_linux_fd_device(fd) == -EBADF);
 	assert(stela_linux_ioctl(fd, 7, NULL) == -EBADF);
 	releases = 1;
-	__unregister_chrdev(226, 0, 8, "test");
 
 	struct file *anonymous = anon_inode_getfile("test", &fops, &opens, O_RDWR);
 	assert(!IS_ERR(anonymous) && anonymous->private_data == &opens);
