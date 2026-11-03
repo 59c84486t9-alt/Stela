@@ -86,6 +86,7 @@ struct Reservation {
     _image: crate::native_image::CodePin,
     allocation: native_smp::resources::AllocationClaim,
     released_stack_views: AtomicUsize,
+    pin_epochs: [pin::Epoch; SLOTS],
 }
 /// Immutable DATA classifier retaining this exact Queue's original image,
 /// allocation and native root/table custody. This is never executable authority.
@@ -118,6 +119,7 @@ struct Backing {
     bounds: Range<usize>,
     guard: Range<usize>,
     physical: u64,
+    slot: usize,
 }
 // SAFETY: prepare consumes one loader allocation exactly once, verifies
 // every root's exact RW/NX/supervisor/WB backing and absent guards, and verifies
@@ -132,13 +134,13 @@ unsafe impl StackBacking for Backing {
     fn guard(&self) -> Range<usize> {
         self.guard.clone()
     }
-    unsafe fn pin_cold_pages(
+    unsafe fn pin_prepared_pages(
         &self,
+        epoch: u64,
     ) -> Result<stela_drivers::bus::dma::memory::PinnedPages, MemoryError> {
-        // SAFETY: the work owner holds this never-entered slot in Preparing
-        // and has zeroed only its usable range. The allocation and checked
-        // mappings remain held by this backing throughout export.
-        unsafe { pin::export(self) }
+        // SAFETY: the native preparation owns the zeroed slot. Export
+        // independently excludes an older view and checks the real mapping.
+        unsafe { pin::export(self, epoch) }
     }
 }
 impl Drop for Backing {
@@ -369,6 +371,7 @@ impl KernelWork {
             _image: image,
             allocation,
             released_stack_views: AtomicUsize::new(0),
+            pin_epochs: core::array::from_fn(|_| pin::Epoch::new()),
         });
         let clock = Clock {
             ticks_per_microsecond: handoff.tsc_hz / 1_000_000,
@@ -393,13 +396,17 @@ impl KernelWork {
         stacks
             .try_reserve_exact(spans.len())
             .map_err(|_| Error::Allocation)?;
-        for (bounds, guard, physical) in spans {
+        if spans.len() > SLOTS {
+            return Err(Error::Geometry);
+        }
+        for (slot, (bounds, guard, physical)) in spans.into_iter().enumerate() {
             stacks.push(
                 Stack::new(Box::new(Backing {
                     _reservation: reservation.clone(),
                     bounds,
                     guard,
                     physical,
+                    slot,
                 }))
                 .map_err(Error::Work)?,
             );

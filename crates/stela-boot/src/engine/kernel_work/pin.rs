@@ -1,18 +1,45 @@
-//! Cold usable-page views share the firmware allocation and validated mappings.
+//! Prepared usable-page views share the firmware allocation and validated mappings.
 use super::*;
 use alloc::alloc::{Layout, alloc};
-use core::ptr::NonNull;
+use core::{ptr::NonNull, sync::atomic::AtomicU64};
 use stela_drivers::bus::dma::memory::{CacheAttribute, PageBacking, PinnedPages};
 
+pub(super) struct Epoch {
+    last: AtomicU64,
+    active: AtomicBool,
+}
+
+impl Epoch {
+    pub(super) const fn new() -> Self {
+        Self {
+            last: AtomicU64::new(0),
+            active: AtomicBool::new(false),
+        }
+    }
+}
+
+struct Lease {
+    reservation: Arc<Reservation>,
+    slot: usize,
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.reservation.pin_epochs[self.slot]
+            .active
+            .store(false, Ordering::Release);
+    }
+}
+
 struct View {
-    _reservation: Arc<Reservation>,
+    _lease: Lease,
     cpu: usize,
     physical: Vec<u64>,
 }
-// SAFETY: construction accepts only one zeroed, never-entered usable slot in
-// Preparing. The shared Reservation keeps the firmware-created allocation
-// claim and all checked root mappings. Its immutable page list excludes raw
-// padding and guard holes. Pages remain Stela-owned for the whole boot.
+// SAFETY: construction accepts only one zeroed usable slot in Preparing
+// and keeps its exact epoch exclusion until the last pin drops. The shared
+// Reservation keeps the firmware allocation and all checked root mappings.
+// The immutable page list excludes raw padding and guard holes.
 unsafe impl PageBacking for View {
     fn cpu_base(&self) -> NonNull<u8> {
         // SAFETY: export checked the nonzero usable mapping; it is held
@@ -46,10 +73,10 @@ fn boxed(view: View) -> Result<Box<View>, MemoryError> {
 }
 
 /// # Safety
-/// Called only after the work frame owner excludes this never-entered backing
-/// in Preparing and zeros its entire usable range. No callback, byte user,
+/// Called only after the work frame owner excludes this exact epoch in
+/// Preparing and zeros its entire usable range. No callback, byte user,
 /// DMA producer, root/cache mutation or stack loan overlaps the export.
-pub(super) unsafe fn export(backing: &Backing) -> Result<PinnedPages, MemoryError> {
+pub(super) unsafe fn export(backing: &Backing, epoch: u64) -> Result<PinnedPages, MemoryError> {
     backing
         ._reservation
         .identity
@@ -74,6 +101,21 @@ pub(super) unsafe fn export(backing: &Backing) -> Result<PinnedPages, MemoryErro
     {
         return Err(MemoryError::OutsideReservation);
     }
+    let state = &backing._reservation.pin_epochs[backing.slot];
+    if state
+        .active
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return Err(MemoryError::Unavailable);
+    }
+    let lease = Lease {
+        reservation: backing._reservation.clone(),
+        slot: backing.slot,
+    };
+    if epoch <= state.last.load(Ordering::Relaxed) {
+        return Err(MemoryError::Unavailable);
+    }
     let mut physical = Vec::new();
     physical
         .try_reserve_exact(bytes / 4096)
@@ -87,9 +129,11 @@ pub(super) unsafe fn export(backing: &Backing) -> Result<PinnedPages, MemoryErro
         );
     }
     let view = boxed(View {
-        _reservation: backing._reservation.clone(),
+        _lease: lease,
         cpu: backing.bounds.start,
         physical,
     })?;
-    PinnedPages::new(view, bytes, 4096)
+    let pages = PinnedPages::new(view, bytes, 4096)?;
+    state.last.store(epoch, Ordering::Relaxed);
+    Ok(pages)
 }
