@@ -190,7 +190,12 @@ impl Linux {
         let crc_objects = linux_crc::objects(&build, &crc_tables);
         build.objects(crc_objects);
         {
-            let mut captured_build = upstream_build(&build, Path::new(COMPAT));
+            // Match the independently reviewed common-cohort command. The
+            // generated UTS metadata and private kernel headers belong only
+            // to the uncaptured original providers and ownership adapters.
+            let mut common_build = configure();
+            linux.environment.apply(&mut common_build, None, &[], None);
+            let mut captured_build = upstream_build(&common_build, Path::new(COMPAT));
             upstream_warnings(&mut captured_build);
             for spec in COMMON {
                 let unit = Unit::from(*spec);

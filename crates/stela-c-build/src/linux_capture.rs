@@ -246,6 +246,18 @@ pub const COMMON: &[UnitSpec] = &[
         module: "dma_fence",
         file: "drivers/dma-buf/dma-fence",
     },
+    UnitSpec {
+        scope: Scope {
+            slice: "common",
+            group: "softirq",
+            group_ordinal: 4,
+            unit_ordinal: 1,
+            global_ordinal: 4,
+        },
+        source: "kernel/softirq",
+        module: "softirq",
+        file: "kernel/softirq",
+    },
 ];
 
 impl From<UnitSpec> for Unit {

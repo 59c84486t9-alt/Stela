@@ -119,7 +119,7 @@ fn encode(captured: &[Captured]) -> Vec<u8> {
 fn reviewed_common_cohort_retains_pins_and_only_caller_owned_roots() {
     let fixture = fixture();
     let observed = decode(&encode(&fixture.captured), &fixture.boundary).unwrap();
-    assert_eq!(observed.len(), 3);
+    assert_eq!(observed.len(), COMMON.len());
     for (index, unit) in observed.iter().enumerate() {
         identity(unit, COMMON[index], index).unwrap();
         assert_eq!(unit.reviewed_roots, fixture.boundary.roots());
@@ -151,7 +151,7 @@ fn imported_cohort_identity_order_and_count_are_exact() {
         decode(&encode(&changed), &fixture.boundary),
         Err(ImportError::Identity { index: 0, .. })
     ));
-    for count in [2, 4] {
+    for count in [COMMON.len() - 1, COMMON.len() + 1] {
         let mut changed = fixture.captured.clone();
         changed.resize(count, fixture.captured[0].clone());
         assert!(matches!(
@@ -264,7 +264,7 @@ fn bounded_import_reads_only_the_caller_selected_output_and_rejects_symlinks() {
     };
     let path = fixture.boundary.output.join("captured-units.bin");
     fs::write(&path, &bytes).unwrap();
-    assert_eq!(read(selected()).unwrap().len(), 3);
+    assert_eq!(read(selected()).unwrap().len(), COMMON.len());
     let mut tampered = bytes.clone();
     tampered.push(0);
     fs::write(&path, tampered).unwrap();
@@ -364,7 +364,7 @@ fn composition_requires_the_exact_ordered_scoped_slices() {
     let f = fixture();
     let c = decode(&encode(&f.captured), &f.boundary).unwrap();
     let composed = compose(COMMON, &[&c[..1], &c[1..]]).unwrap();
-    assert_eq!(composed.len(), 3);
+    assert_eq!(composed.len(), COMMON.len());
     assert!(compose(COMMON, &[&c[1..], &c[..1]]).is_err());
     assert!(compose(COMMON, &[&c[..1], &c[..1], &c[2..]]).is_err());
     assert!(compose(COMMON, &[&c[..2]]).is_err());
@@ -388,7 +388,8 @@ fn terminal_header_and_sources_are_independently_pinned() {
     }
     let expected = "01".repeat(32);
     require_header_pin(&captured, &header, &expected).unwrap();
-    require_source_pins(&captured, &[&expected, &expected, &expected]).unwrap();
+    let sources = [&*expected; COMMON.len()];
+    require_source_pins(&captured, &sources).unwrap();
     captured[1].pins.insert(header.clone(), [2; 32]);
     assert!(require_header_pin(&captured, &header, &expected).is_err());
     captured[1].pins.insert(header.clone(), [1; 32]);
@@ -396,7 +397,7 @@ fn terminal_header_and_sources_are_independently_pinned() {
     assert!(require_header_pin(&captured, &header, &expected).is_err());
     let source = captured[2].source.clone();
     captured[2].pins.insert(source, [2; 32]);
-    assert!(require_source_pins(&captured, &[&expected, &expected, &expected]).is_err());
+    assert!(require_source_pins(&captured, &sources).is_err());
 }
 
 #[test]
