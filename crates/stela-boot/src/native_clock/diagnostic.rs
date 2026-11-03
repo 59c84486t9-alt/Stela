@@ -48,6 +48,14 @@ pub(crate) unsafe fn check_native(
 
 fn run(installed: Installed, epoch: Option<CounterEpoch>) -> Result<(), WorkError> {
     if let Some(epoch) = &epoch {
+        use stela_drivers::bus::pci::power::Timer;
+        Timer::check(epoch).map_err(|_| WorkError::Unavailable)?;
+        let start = epoch.sample()?;
+        Timer::wait_us(epoch, 100).map_err(|_| WorkError::Unavailable)?;
+        let end = epoch.sample()?;
+        if epoch.elapsed_bounds(&start, &end)?.lower_ns < 100_000 {
+            return Err(WorkError::CorruptContext);
+        }
         let start = epoch.sample()?;
         let minimum = epoch.minimum_deadline(100_000)?;
         if minimum.remaining_quanta_ceil(10)? > 10 {

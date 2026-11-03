@@ -253,13 +253,20 @@ impl CounterEpoch {
     /// Nominal monotonic nanoseconds for transport deadlines. UTC callers use
     /// sample/elapsed_bounds, which keep the source's outward uncertainty.
     pub(crate) fn now_ns(&self) -> Result<u64, WorkError> {
-        let sample = self.sample()?;
+        let ticks = self.sample_ticks()?;
         self.cpu
             .source
-            .ns(sample.ticks)
+            .ns(ticks)
             .map_err(|error| self.cpu.health.fail(error))
     }
     pub(crate) fn sample(&self) -> Result<CounterSample, WorkError> {
+        Ok(CounterSample {
+            epoch: self.clone(),
+            ticks: self.sample_ticks()?,
+        })
+    }
+
+    fn sample_ticks(&self) -> Result<u64, WorkError> {
         self.cpu.health.check()?;
         self.cpu.check_cpu()?;
         self.cpu
@@ -277,10 +284,7 @@ impl CounterEpoch {
         let ticks = result?;
         self.cpu.check_cpu()?;
         self.cpu.health.check()?;
-        Ok(CounterSample {
-            epoch: self.clone(),
-            ticks,
-        })
+        Ok(ticks)
     }
 
     pub(crate) fn elapsed_bounds(
@@ -293,7 +297,7 @@ impl CounterEpoch {
         }
         // A kept old reading never supplies readiness after detach,
         // control/root loss or a source transition.
-        self.sample()?;
+        self.sample_ticks()?;
         let ticks = end
             .ticks
             .checked_sub(start.ticks)
@@ -315,15 +319,32 @@ pub(crate) struct MinimumDeadline {
 }
 
 impl CounterEpoch {
-    pub(crate) fn minimum_deadline(&self, minimum_ns: u64) -> Result<MinimumDeadline, WorkError> {
-        let start = self.sample()?;
+    fn minimum_target(&self, start: u64, minimum_ns: u64) -> Result<u64, WorkError> {
         let counter = self
             .cpu
             .source
             .hpet_counter()
             .ok_or(WorkError::Unavailable)?;
         let ticks = counter.ticks_for_minimum_ns(minimum_ns)?;
-        let target = start.ticks.checked_add(ticks).ok_or(WorkError::Exhausted)?;
+        start.checked_add(ticks).ok_or(WorkError::Exhausted)
+    }
+
+    /// Atomic physical wait on this CPU's continuously qualified HPET.
+    pub(crate) fn minimum_delay_us(&self, minimum_us: u64) -> Result<(), WorkError> {
+        let minimum_ns = minimum_us.checked_mul(1000).ok_or(WorkError::Exhausted)?;
+        let start = self.sample_ticks()?;
+        let target = self.minimum_target(start, minimum_ns)?;
+        let mut now = start;
+        while now < target {
+            core::hint::spin_loop();
+            now = self.sample_ticks()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn minimum_deadline(&self, minimum_ns: u64) -> Result<MinimumDeadline, WorkError> {
+        let start = self.sample_ticks()?;
+        let target = self.minimum_target(start, minimum_ns)?;
         // The nominal conversion floors. A subnanosecond HPET tick can
         // share that nanosecond with an earlier tick, so wake one ns later.
         let nominal_ns = self.cpu.source.ns(target)?;
@@ -334,7 +355,7 @@ impl CounterEpoch {
             .ok_or(WorkError::Exhausted)?;
         Ok(MinimumDeadline {
             epoch: self.clone(),
-            start: start.ticks,
+            start,
             target,
             minimum_ns,
             nominal_ns,
@@ -347,11 +368,11 @@ impl CounterEpoch {
 // before returning. The hint uses the nominal conversion of that same epoch.
 unsafe impl stela_linux::owner::MinimumDeadline for MinimumDeadline {
     fn ready(&self) -> Result<bool, WorkError> {
-        Ok(self.epoch.sample()?.ticks >= self.target)
+        Ok(self.epoch.sample_ticks()? >= self.target)
     }
 
     fn wake_ns(&self) -> Result<i64, WorkError> {
-        self.epoch.sample()?;
+        self.epoch.sample_ticks()?;
         Ok(self.nominal_ns)
     }
 
@@ -360,7 +381,7 @@ unsafe impl stela_linux::owner::MinimumDeadline for MinimumDeadline {
             .checked_mul(1000)
             .filter(|ns| *ns != 0)
             .ok_or(WorkError::Exhausted)?;
-        let now = self.epoch.sample()?.ticks;
+        let now = self.epoch.sample_ticks()?;
         if now >= self.target {
             return Ok(0);
         }
@@ -376,6 +397,32 @@ unsafe impl stela_linux::owner::MinimumDeadline for MinimumDeadline {
         // A fresh delay for this remainder reapplies the HPET edge bound.
         // The elapsed lower bound never credits more ticks than actually ran.
         Ok(remaining.div_ceil(quantum_ns))
+    }
+}
+
+// SAFETY: the epoch retains and checks the actual HPET/CPU/root on every
+// sample, derives the target from the outward lower bound, and does not wait
+// in PCI interrupt context.
+unsafe impl stela_drivers::bus::pci::power::Timer for CounterEpoch {
+    fn check(&self) -> Result<(), stela_drivers::bus::pci::power::Error> {
+        use stela_drivers::bus::pci::power::Error;
+        if self.cpu.in_interrupt() {
+            return Err(Error::Clock);
+        }
+        let start = self.sample_ticks().map_err(|_| Error::Clock)?;
+        // The longest PCI power readiness interval is 60 seconds.
+        self.minimum_target(start, 60_000_000_000)
+            .map(|_| ())
+            .map_err(|_| Error::Clock)
+    }
+
+    fn wait_us(&self, microseconds: u64) -> Result<(), stela_drivers::bus::pci::power::Error> {
+        use stela_drivers::bus::pci::power::Error;
+        if self.cpu.in_interrupt() {
+            return Err(Error::Clock);
+        }
+        self.minimum_delay_us(microseconds)
+            .map_err(|_| Error::Clock)
     }
 }
 
