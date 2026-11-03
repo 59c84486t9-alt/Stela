@@ -30,6 +30,17 @@ static void update_jiffies(void)
 	WRITE_ONCE(jiffies_64, INITIAL_JIFFIES + nsecs_to_jiffies64(now - start));
 }
 
+static s64 timer_deadline(u64 base, long left)
+{
+	const u64 quantum = NSEC_PER_SEC / HZ;
+	u64 ticks = left > 0 ? (u64)left : 1;
+
+	/* S64_MAX is reserved for an empty timer queue. */
+	if (ticks > (S64_MAX - 1 - base) / quantum)
+		stela_linux_fatal("nominal service deadline overflow");
+	return (s64)(base + ticks * quantum);
+}
+
 s64 stela_linux_service_run(void)
 {
 	update_jiffies();
@@ -38,17 +49,33 @@ s64 stela_linux_service_run(void)
 
 	unsigned long timer, hrtimer;
 	bool armed = stela_linux_timers_next(&timer);
+	bool high_armed = stela_linux_hrtimers_next(&hrtimer);
 
-	if (stela_linux_hrtimers_next(&hrtimer) && (!armed || time_before(hrtimer, timer))) {
-		timer = hrtimer;
-		armed = true;
-	}
-	if (!armed)
+	if (!armed && !high_armed)
 		return S64_MAX;
-	/* The pass itself took time, so ask for the next tick at the earliest. */
-	long left = (long)(timer - jiffies);
 
-	return (s64)(ktime_get_ns() + (u64)(left > 0 ? left : 1) * (NSEC_PER_SEC / HZ));
+	/* Callbacks can cross ticks. Recompute the timer-list deadline on
+	 * the same jiffy clock without publishing new jiffies in this pass. */
+	_Static_assert(NSEC_PER_SEC % HZ == 0, "nominal jiffy duration");
+	const u64 quantum = NSEC_PER_SEC / HZ;
+	u64 now = ktime_get_ns();
+	if (now < start || now >= S64_MAX)
+		stela_linux_fatal("nominal service clock outside signed timer range");
+	s64 next = S64_MAX;
+	if (armed) {
+		u64 elapsed = now - start;
+		unsigned long sample = INITIAL_JIFFIES + nsecs_to_jiffies64(elapsed);
+		long left = (long)(timer - sample);
+		next = timer_deadline(left > 0 ? now - elapsed % quantum : now, left);
+	}
+	/* The hrtimer helper reports a rounded relative delay from now,
+	 * encoded against the published jiffies. */
+	if (high_armed) {
+		s64 high = timer_deadline(now, (long)(hrtimer - jiffies));
+		if (high < next)
+			next = high;
+	}
+	return next;
 }
 
 void stela_linux_service_loop(const struct stela_linux_service_call *call)
@@ -95,11 +122,15 @@ void stela_linux_worker_main(void *context)
 #include <stela/test.h>
 
 static s64 clock;
+static s64 advance_after_sample;
 
 static s64 now_ns(void *context)
 {
 	(void)context;
-	return clock;
+	s64 sampled = clock;
+	clock += advance_after_sample;
+	advance_after_sample = 0;
+	return sampled;
 }
 
 static void expired(struct timer_list *timer)
@@ -129,6 +160,9 @@ int main(void)
 	s64 deadline = stela_linux_service_run();
 
 	assert(deadline == clock + NSEC_PER_SEC);
+	/* Model time spent in a pass across a tick and into the next one. */
+	advance_after_sample = 3 * (NSEC_PER_SEC / HZ) / 2;
+	assert(stela_linux_service_run() == deadline);
 	clock = deadline - NSEC_PER_SEC / HZ;
 	assert(stela_linux_service_run() == clock + NSEC_PER_SEC / HZ);
 	timer_delete(&timer);
