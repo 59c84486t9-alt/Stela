@@ -200,6 +200,7 @@ void unmap_mapping_range(struct address_space *mapping, loff_t const holebegin,
 
 #ifdef STELA_LINUX_MAPPING_TEST
 #include <linux/anon_inodes.h>
+#include <stela/page_test.h>
 #include <stela/test.h>
 
 #define SPACE ((void *)0x1000)
@@ -268,6 +269,8 @@ static const struct file_operations fops = {.mmap = test_mmap};
 int main(void)
 {
 	stela_linux_enter(&owner);
+	stela_test_register_pages();
+	stela_linux_file_cache_init();
 	struct file *file = anon_inode_getfile("test", &fops, NULL, O_RDWR);
 	struct stela_linux_mapping *mapping;
 

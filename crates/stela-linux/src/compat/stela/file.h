@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_FILE_H
 #define STELA_FILE_H
+#include <linux/init.h>
 #include <linux/mm_types.h>
 #include <linux/types.h>
 
@@ -10,6 +11,8 @@
  * copy_to_user, map_user and unmap_user reach into it. */
 struct file;
 struct stela_linux_mapping;
+
+void __init stela_linux_file_cache_init(void);
 
 /* Opens a character device a driver registered, or returns a negative errno. */
 int stela_linux_chrdev_open(dev_t device, unsigned int flags, struct file **file);

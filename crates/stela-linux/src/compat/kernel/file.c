@@ -63,23 +63,45 @@ void inode_set_bytes(struct inode *inode, loff_t bytes)
 	inode->i_bytes = (unsigned short)(bytes & 511);
 }
 
+static struct kmem_cache *file_cache __ro_after_init;
+
+void __init stela_linux_file_cache_init(void)
+{
+	struct kmem_cache_args args = {
+		.use_freeptr_offset = true,
+		.freeptr_offset = offsetof(struct file, f_freeptr),
+	};
+
+	BUG_ON(file_cache);
+	file_cache = kmem_cache_create("filp", sizeof(struct file), &args,
+			SLAB_HWCACHE_ALIGN | SLAB_PANIC | SLAB_ACCOUNT | SLAB_TYPESAFE_BY_RCU);
+}
+
 /* Takes over the caller's inode reference. */
 static struct file *new_file(struct inode *inode, const struct file_operations *fops,
 			     unsigned int flags, void *private_data)
 {
-	struct file *file = kzalloc_obj(*file);
+	if (unlikely(!file_cache)) {
+		iput(inode);
+		return ERR_PTR(-ENODEV);
+	}
+	struct file *file = kmem_cache_alloc(file_cache, GFP_KERNEL);
 
 	if (!file) {
 		iput(inode);
 		return ERR_PTR(-ENOMEM);
 	}
-	file_ref_init(&file->f_ref, 1);
+	/* A stale RCU reader must keep seeing the dead reference until the
+	 * recycled slot has been initialized. The freelist uses f_freeptr. */
+	memset(file, 0, offsetof(struct file, f_ref));
+	memset_after(file, 0, f_ref);
 	file->f_inode = inode;
 	file->f_mapping = inode->i_mapping;
 	file->f_op = fops;
 	file->f_flags = flags;
 	file->f_mode = OPEN_FMODE(flags);
 	file->private_data = private_data;
+	file_ref_init(&file->f_ref, 1);
 	return file;
 }
 
@@ -97,7 +119,7 @@ static void release(struct file *file)
 		iput(dentry->d_inode);
 		kfree(dentry);
 	}
-	kfree(file);
+	kmem_cache_free(file_cache, file);
 }
 
 static LLIST_HEAD(release_pending);
@@ -529,8 +551,19 @@ int main(void)
 	assert((unsigned long)atomic_long_read(&reference.refcnt) == FILE_REF_DEAD);
 	assert(!file_ref_get(&reference));
 
-	/* For the descriptor table's radix nodes. */
 	stela_test_register_pages();
+	stela_linux_file_cache_init();
+
+	/* Recycle the same type-stable slot without publishing stale fields. */
+	struct file *first = anon_inode_getfile("first", NULL, &opens, O_RDWR);
+	assert(!IS_ERR(first));
+	first->f_pos = 99;
+	fput(first);
+	assert(!file_ref_get(&first->f_ref));
+	struct file *reused = anon_inode_getfile("reused", NULL, NULL, O_RDONLY);
+	assert(reused == first && !reused->f_pos && !reused->private_data);
+	fput(reused);
+
 	radix_tree_init();
 	struct file *file;
 
