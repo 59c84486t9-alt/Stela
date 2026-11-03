@@ -175,6 +175,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/kernel/rcu/rcuwait_finish.c")),
             PathBuf::from(format!("{LINUX}/fs/seq_output.c")),
             PathBuf::from(format!("{LINUX}/fs/seq_lifetime.c")),
+            PathBuf::from(format!("{LINUX}/fs/task_comm.c")),
             PathBuf::from(format!("{LINUX}/lib/maple_tree.c")),
         ];
         let mut upstream = upstream;
