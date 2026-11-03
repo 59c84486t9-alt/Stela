@@ -137,6 +137,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/mm/filemap_batch.c")),
             PathBuf::from(format!("{LINUX}/mm/lruvec.c")),
             PathBuf::from(format!("{LINUX}/mm/shrinker.c")),
+            PathBuf::from(format!("{LINUX}/mm/workingset.c")),
             PathBuf::from(format!("{LINUX}/mm/writeback_domain.c")),
             PathBuf::from(format!("{LINUX}/mm/backing-dev-inode.c")),
             PathBuf::from(format!("{LINUX}/kernel/pid.c")),

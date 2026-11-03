@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 00:50:05 -0500
+Subject: [PATCH] refactor(mm): expose original workingset init to Stela
+ bootstrap
+
+---
+ mm/internal.h   | 3 +++
+ mm/workingset.c | 5 ++++-
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/mm/internal.h b/mm/internal.h
+index 5acba3470659d959f33f0c91c0b0dbc55e796545..9e74600b24d934280df2ec63f975f15b7f48b850 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -1766,6 +1766,9 @@ void __meminit __init_single_page(struct page *page, unsigned long pfn,
+ void __meminit __init_page_from_nid(unsigned long pfn, int nid);
+ 
+ /* shrinker related functions */
++#ifdef CONFIG_STELA
++int __init workingset_init(void);
++#endif
+ unsigned long shrink_slab(gfp_t gfp_mask, int nid, struct mem_cgroup *memcg,
+ 			  int priority);
+ 
+diff --git a/mm/workingset.c b/mm/workingset.c
+index f351798e723acd69ec383d0b0cfec5796f52144e..d1a4b46a6dfc6b0bc4c446918eec993617d8d8d2 100644
+--- a/mm/workingset.c
++++ b/mm/workingset.c
+@@ -795,7 +795,10 @@ static unsigned long scan_shadow_nodes(struct shrinker *shrinker,
+  */
+ static struct lock_class_key shadow_nodes_key;
+ 
+-static int __init workingset_init(void)
++#ifndef CONFIG_STELA
++static
++#endif
++int __init workingset_init(void)
+ {
+ 	unsigned int timestamp_bits, timestamp_bits_anon;
+ 	struct shrinker *workingset_shadow_shrinker;

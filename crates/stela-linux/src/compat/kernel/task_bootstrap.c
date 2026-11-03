@@ -48,6 +48,7 @@
 #include <stela/srcu.h>
 #include <stela/task.h>
 #include <stela/task_bootstrap.h>
+#include <internal.h>
 
 /* Original init/main.c globals have one native bootstrap owner. The original
  * machine start_kernel/main.o must NOT also be activated with this adapter. */
@@ -133,6 +134,12 @@ int stela_linux_task_bootstrap_resources(const struct stela_linux_owner *owner)
     proc_root_init();
     nsfs_init();
     pidfs_init();
+    /* Run the original built-in initcall before publishing root readiness. */
+    error = workingset_init();
+    if (error) {
+        resource_phase = FAILED;
+        return error;
+    }
 
     /* This means ONLY these actual helpers returned on the retained Initial.
      * PID1/kthreadd, scheduler start, full original WQ/rescuers, SRCU probes and

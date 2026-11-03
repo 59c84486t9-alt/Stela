@@ -133,6 +133,8 @@
 /mm/mmzone.c
 /mm/lruvec.c
 /mm/shrinker.c
+/mm/workingset.c
+/mm/swap_table.h
 /mm/internal.h
 /mm/pagecache_init.c
 /mm/folio_wait.c
