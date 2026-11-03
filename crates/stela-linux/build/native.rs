@@ -151,6 +151,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/file.c")),
             PathBuf::from(format!("{LINUX}/fs/simple_xattr.c")),
             PathBuf::from(format!("{LINUX}/fs/pseudo_metadata.c")),
+            PathBuf::from(format!("{LINUX}/fs/mnt_idmapping.c")),
             PathBuf::from(format!("{LINUX}/fs/inode_evict.c")),
             PathBuf::from(format!("{LINUX}/fs/name_hash.c")),
             PathBuf::from(format!("{LINUX}/fs/filename.c")),
