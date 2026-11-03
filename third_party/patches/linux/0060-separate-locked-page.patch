@@ -1,0 +1,180 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 00:35:17 -0500
+Subject: [PATCH] refactor(mm): separate locked page-cache batch lookup
+
+---
+ mm/filemap.c       | 74 ----------------------------------------------
+ mm/filemap_batch.c | 74 ++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 74 insertions(+), 74 deletions(-)
+
+diff --git a/mm/filemap.c b/mm/filemap.c
+index d8bfbed52bca24f7b306a95ab978642c81d158a3..3852489ec7553ce8d18c72d4570b5b9c9d83181c 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -1486,80 +1486,6 @@ no_page:
+ }
+ EXPORT_SYMBOL(__filemap_get_folio_mpol);
+ 
+-/**
+- * find_lock_entries - Find a batch of pagecache entries.
+- * @mapping:	The address_space to search.
+- * @start:	The starting page cache index.
+- * @end:	The final page index (inclusive).
+- * @fbatch:	Where the resulting entries are placed.
+- * @indices:	The cache indices of the entries in @fbatch.
+- *
+- * find_lock_entries() will return a batch of entries from @mapping.
+- * Swap, shadow and DAX entries are included.  Folios are returned
+- * locked and with an incremented refcount.  Folios which are locked
+- * by somebody else or under writeback are skipped.  Folios which are
+- * partially outside the range are not returned.
+- *
+- * The entries have ascending indexes.  The indices may not be consecutive
+- * due to not-present entries, large folios, folios which could not be
+- * locked or folios under writeback.
+- *
+- * Return: The number of entries which were found.
+- */
+-unsigned find_lock_entries(struct address_space *mapping, pgoff_t *start,
+-		pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices)
+-{
+-	XA_STATE(xas, &mapping->i_pages, *start);
+-	struct folio *folio;
+-
+-	rcu_read_lock();
+-	while ((folio = find_get_entry(&xas, end, XA_PRESENT))) {
+-		unsigned long base;
+-		unsigned long nr;
+-
+-		if (!xa_is_value(folio)) {
+-			nr = folio_nr_pages(folio);
+-			base = folio->index;
+-			/* Omit large folio which begins before the start */
+-			if (base < *start)
+-				goto put;
+-			/* Omit large folio which extends beyond the end */
+-			if (base + nr - 1 > end)
+-				goto put;
+-			if (!folio_trylock(folio))
+-				goto put;
+-			if (folio->mapping != mapping ||
+-			    folio_test_writeback(folio))
+-				goto unlock;
+-			VM_BUG_ON_FOLIO(!folio_contains(folio, xas.xa_index),
+-					folio);
+-		} else {
+-			nr = 1 << xas_get_order(&xas);
+-			base = xas.xa_index & ~(nr - 1);
+-			/* Omit order>0 value which begins before the start */
+-			if (base < *start)
+-				continue;
+-			/* Omit order>0 value which extends beyond the end */
+-			if (base + nr - 1 > end)
+-				break;
+-		}
+-
+-		/* Update start now so that last update is correct on return */
+-		*start = base + nr;
+-		indices[fbatch->nr] = xas.xa_index;
+-		if (!folio_batch_add(fbatch, folio))
+-			break;
+-		continue;
+-unlock:
+-		folio_unlock(folio);
+-put:
+-		folio_put(folio);
+-	}
+-	rcu_read_unlock();
+-
+-	return folio_batch_count(fbatch);
+-}
+-
+ /**
+  * filemap_get_folios - Get a batch of folios
+  * @mapping:	The address_space to search
+diff --git a/mm/filemap_batch.c b/mm/filemap_batch.c
+index edc4a4dea2df2bec61313799168a0a2cc6c92906..4e27e0831e8a44c49a01c7f5e95f0de145675f49 100644
+--- a/mm/filemap_batch.c
++++ b/mm/filemap_batch.c
+@@ -56,6 +56,80 @@ unsigned find_get_entries(struct address_space *mapping, pgoff_t *start,
+ 	return folio_batch_count(fbatch);
+ }
+ 
++/**
++ * find_lock_entries - Find a batch of pagecache entries.
++ * @mapping:	The address_space to search.
++ * @start:	The starting page cache index.
++ * @end:	The final page index (inclusive).
++ * @fbatch:	Where the resulting entries are placed.
++ * @indices:	The cache indices of the entries in @fbatch.
++ *
++ * find_lock_entries() will return a batch of entries from @mapping.
++ * Swap, shadow and DAX entries are included.  Folios are returned
++ * locked and with an incremented refcount.  Folios which are locked
++ * by somebody else or under writeback are skipped.  Folios which are
++ * partially outside the range are not returned.
++ *
++ * The entries have ascending indexes.  The indices may not be consecutive
++ * due to not-present entries, large folios, folios which could not be
++ * locked or folios under writeback.
++ *
++ * Return: The number of entries which were found.
++ */
++unsigned find_lock_entries(struct address_space *mapping, pgoff_t *start,
++		pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices)
++{
++	XA_STATE(xas, &mapping->i_pages, *start);
++	struct folio *folio;
++
++	rcu_read_lock();
++	while ((folio = find_get_entry(&xas, end, XA_PRESENT))) {
++		unsigned long base;
++		unsigned long nr;
++
++		if (!xa_is_value(folio)) {
++			nr = folio_nr_pages(folio);
++			base = folio->index;
++			/* Omit large folio which begins before the start */
++			if (base < *start)
++				goto put;
++			/* Omit large folio which extends beyond the end */
++			if (base + nr - 1 > end)
++				goto put;
++			if (!folio_trylock(folio))
++				goto put;
++			if (folio->mapping != mapping ||
++			    folio_test_writeback(folio))
++				goto unlock;
++			VM_BUG_ON_FOLIO(!folio_contains(folio, xas.xa_index),
++					folio);
++		} else {
++			nr = 1 << xas_get_order(&xas);
++			base = xas.xa_index & ~(nr - 1);
++			/* Omit order>0 value which begins before the start */
++			if (base < *start)
++				continue;
++			/* Omit order>0 value which extends beyond the end */
++			if (base + nr - 1 > end)
++				break;
++		}
++
++		/* Update start now so that last update is correct on return */
++		*start = base + nr;
++		indices[fbatch->nr] = xas.xa_index;
++		if (!folio_batch_add(fbatch, folio))
++			break;
++		continue;
++unlock:
++		folio_unlock(folio);
++put:
++		folio_put(folio);
++	}
++	rcu_read_unlock();
++
++	return folio_batch_count(fbatch);
++}
++
+ /**
+  * folio_batch_remove_exceptionals() - Prune non-folios from a batch.
+  * @fbatch: The batch to prune
