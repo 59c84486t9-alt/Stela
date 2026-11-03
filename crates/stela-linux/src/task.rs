@@ -7,6 +7,7 @@
 mod factory;
 #[cfg(all(feature = "hosted-test-support", target_os = "linux"))]
 mod hosted;
+mod inactive;
 #[cfg(all(feature = "hosted-test-support", target_os = "linux"))]
 pub use hosted::HostedTaskBinding;
 mod native;
@@ -62,6 +63,7 @@ struct TaskOps {
     wake_target: unsafe extern "C" fn(*mut c_void, u64) -> i32,
     service_reserved: unsafe extern "C" fn(*mut c_void) -> bool,
     rank: unsafe extern "C" fn(*mut c_void, u64, *const Rank, *const Rank, bool) -> i32,
+    retain_inactive: Option<unsafe extern "C" fn(*mut c_void, u64, *mut *mut c_void) -> i32>,
 }
 #[repr(C)]
 struct ScopeOps {
@@ -70,7 +72,26 @@ struct ScopeOps {
     reschedule: unsafe extern "C" fn(*mut c_void) -> i32,
     reschedule_requested: unsafe extern "C" fn(*mut c_void) -> bool,
     terminate: unsafe extern "C" fn(*mut c_void) -> !,
+    observe_inactive: Option<unsafe extern "C" fn(*mut c_void, *mut c_void, bool) -> i32>,
+    end_inactive: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32>,
 }
+const _: () = {
+    assert!(core::mem::size_of::<TaskContext>() == 64);
+    assert!(core::mem::size_of::<TaskOps>() == 40);
+    assert!(core::mem::offset_of!(TaskOps, is_current) == 0);
+    assert!(core::mem::offset_of!(TaskOps, wake_target) == 8);
+    assert!(core::mem::offset_of!(TaskOps, service_reserved) == 16);
+    assert!(core::mem::offset_of!(TaskOps, rank) == 24);
+    assert!(core::mem::offset_of!(TaskOps, retain_inactive) == 32);
+    assert!(core::mem::size_of::<ScopeOps>() == 56);
+    assert!(core::mem::offset_of!(ScopeOps, park) == 0);
+    assert!(core::mem::offset_of!(ScopeOps, yield_now) == 8);
+    assert!(core::mem::offset_of!(ScopeOps, reschedule) == 16);
+    assert!(core::mem::offset_of!(ScopeOps, reschedule_requested) == 24);
+    assert!(core::mem::offset_of!(ScopeOps, terminate) == 32);
+    assert!(core::mem::offset_of!(ScopeOps, observe_inactive) == 40);
+    assert!(core::mem::offset_of!(ScopeOps, end_inactive) == 48);
+};
 #[repr(C)]
 struct CTask {
     _opaque: [u8; 0],
@@ -228,6 +249,7 @@ impl<const N: usize> TaskBinding<N> {
         wake_target: Self::wake_target,
         service_reserved: Self::service_reserved,
         rank: Self::rank,
+        retain_inactive: Some(Self::retain_inactive),
     };
     const SCOPE_OPS: ScopeOps = ScopeOps {
         park: Self::park,
@@ -235,6 +257,8 @@ impl<const N: usize> TaskBinding<N> {
         reschedule: Self::reschedule,
         reschedule_requested: Self::reschedule_requested,
         terminate: Self::terminate,
+        observe_inactive: Some(Self::observe_inactive),
+        end_inactive: Some(Self::end_inactive),
     };
 
     /// Allocate original task metadata before entering a Linux owner.

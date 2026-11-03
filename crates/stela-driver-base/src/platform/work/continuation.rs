@@ -64,6 +64,8 @@ impl<S, F, B> Continuation<S, F, B> {
             stack_retired_epoch: 0,
             binding: None,
             signal: Arc::new(WakeSignal {
+                #[cfg(feature = "linux-kernel")]
+                physical: inactive::PhysicalRun::new(),
                 service: lane == Lane::Service,
                 sequence: AtomicU64::new(0),
                 pending: AtomicBool::new(false),

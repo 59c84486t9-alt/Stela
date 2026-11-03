@@ -39,8 +39,11 @@ struct stela_linux_task_ops {
 	int (*rank)(void *binding, u64 expected_sequence,
 		    const struct stela_linux_task_rank *before,
 		    const struct stela_linux_task_rank *after, bool head);
+	/* Target concrete binding retains SAME task/wake before type erasure.
+	 * Result owner is kept even on callback failure; never caller-N cast. */
+	int (*retain_inactive)(void *binding, u64 sequence, void **owner);
 };
-_Static_assert(sizeof(struct stela_linux_task_ops) == 32, "Linux task callbacks ABI");
+_Static_assert(sizeof(struct stela_linux_task_ops) == 40, "Linux task callbacks ABI");
 
 struct stela_linux_task_scope_ops {
 	/* Retained shared Runtime borrow on this actual stack. No unwind or
@@ -54,7 +57,30 @@ struct stela_linux_task_scope_ops {
     /* Genuine nonreturn native switch; no owning Rust guard/permit may remain
      * on the abandoned source frame. A returning provider is corruption. */
     void (*terminate)(void *scope);
+	/* Bounded pi_lock/IF0 observation: 1 temporal inactive, 0 subscribed,
+	 * negative terminal error. End consumes only this actual opaque owner
+	 * after removing its actual waiter; no loan survives subsequent park. */
+	int (*observe_inactive)(void *scope, void *owner, bool force_wait);
+	int (*end_inactive)(void *scope, void *owner);
 };
+
+_Static_assert(sizeof(struct stela_linux_task_context) == 64, "TaskContext ABI");
+#define STELA_TASK_OFFSET(type, member, offset) \
+    _Static_assert(__builtin_offsetof(struct type, member) == offset, #type "." #member)
+STELA_TASK_OFFSET(stela_linux_task_ops, is_current, 0);
+STELA_TASK_OFFSET(stela_linux_task_ops, wake_target, 8);
+STELA_TASK_OFFSET(stela_linux_task_ops, service_reserved, 16);
+STELA_TASK_OFFSET(stela_linux_task_ops, rank, 24);
+STELA_TASK_OFFSET(stela_linux_task_ops, retain_inactive, 32);
+_Static_assert(sizeof(struct stela_linux_task_scope_ops) == 56, "ScopeOps ABI");
+STELA_TASK_OFFSET(stela_linux_task_scope_ops, park, 0);
+STELA_TASK_OFFSET(stela_linux_task_scope_ops, yield, 8);
+STELA_TASK_OFFSET(stela_linux_task_scope_ops, reschedule, 16);
+STELA_TASK_OFFSET(stela_linux_task_scope_ops, reschedule_requested, 24);
+STELA_TASK_OFFSET(stela_linux_task_scope_ops, terminate, 32);
+STELA_TASK_OFFSET(stela_linux_task_scope_ops, observe_inactive, 40);
+STELA_TASK_OFFSET(stela_linux_task_scope_ops, end_inactive, 48);
+#undef STELA_TASK_OFFSET
 
 /* Private serialized Linux lease. Suspend is not exit: no callbacks or owner
  * drops run in IF=0 hooks. All functions require the actual qualified CPU. */

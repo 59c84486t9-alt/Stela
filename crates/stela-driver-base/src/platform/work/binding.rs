@@ -47,6 +47,8 @@ impl<const N: usize> Runtime<N> {
             }
             task.returned_sequence = task.completed_sequence;
         }
+        #[cfg(feature = "linux-kernel")]
+        self.physical_departure(task.id, &task.signal)?;
         Ok(())
     }
 

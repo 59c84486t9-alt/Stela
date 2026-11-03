@@ -22,6 +22,7 @@ impl<const N: usize> HostedTaskBinding<N> {
         wake_target: Self::wake_target,
         service_reserved: Self::service_reserved,
         rank: Self::rank,
+        retain_inactive: None,
     };
     const SCOPE_OPS: ScopeOps = ScopeOps {
         park: Self::park,
@@ -29,6 +30,8 @@ impl<const N: usize> HostedTaskBinding<N> {
         reschedule: Self::reschedule,
         reschedule_requested: Self::reschedule_requested,
         terminate: Self::terminate,
+        observe_inactive: None,
+        end_inactive: None,
     };
 
     /// # Safety

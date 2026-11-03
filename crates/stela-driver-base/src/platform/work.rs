@@ -34,11 +34,15 @@ use core::{
 mod accounting;
 #[cfg(target_arch = "x86_64")]
 mod binding;
+#[cfg(all(target_arch = "x86_64", feature = "linux-kernel"))]
+mod inactive;
 #[cfg(target_arch = "x86_64")]
 pub use accounting::{
     ExecutionIdentity, ExecutionPublication, ExecutionSample, ExecutionTap, InterruptedExecution,
     StoppedPublication,
 };
+#[cfg(all(target_arch = "x86_64", feature = "linux-kernel"))]
+pub use inactive::{InactiveObservation, InactiveTarget};
 #[cfg(target_arch = "x86_64")]
 mod context;
 #[cfg(target_arch = "x86_64")]
@@ -242,6 +246,8 @@ struct Job {
     requirement: Option<StackRequirement>,
 }
 struct State<const N: usize> {
+    #[cfg(all(target_arch = "x86_64", feature = "linux-kernel"))]
+    inactive: [Option<inactive::Subscriber>; MAX_CONTINUATIONS],
     jobs: [Option<Job>; N],
     reservations: [u64; N],
     #[cfg(target_arch = "x86_64")]
@@ -605,6 +611,10 @@ impl<const N: usize> Queue<N> {
         {
             return Err(WorkError::Pending);
         }
+        #[cfg(all(target_arch = "x86_64", feature = "linux-kernel"))]
+        if state.inactive.iter().any(Option::is_some) {
+            return Err(WorkError::Pending);
+        }
         if !self.stack_pins_quiet()
             || !self.execution_quiet()
             || !state.closed
@@ -761,6 +771,8 @@ pub unsafe trait SwitchBinding: Send + Sync {
 
 #[cfg(target_arch = "x86_64")]
 struct WakeSignal {
+    #[cfg(feature = "linux-kernel")]
+    physical: inactive::PhysicalRun,
     service: bool,
     sequence: AtomicU64,
     pending: AtomicBool,
@@ -818,6 +830,8 @@ impl<const N: usize> WakeHandle<N> {
         // Real blocked->ready ordering is committed before wake publication;
         // duplicate/running wakes preserve equal-FIFO order. No C/task pointer.
         guard.state().scheduling.wake(self.id, self.sequence)?;
+        #[cfg(feature = "linux-kernel")]
+        inactive::notify(guard.state(), self.id, self.sequence)?;
         self.queue.inspection.store(true, Ordering::Release);
         self.signal.pending.store(true, Ordering::Release);
         Ok(())

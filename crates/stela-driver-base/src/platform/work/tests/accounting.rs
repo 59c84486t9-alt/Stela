@@ -1,6 +1,7 @@
 //! Guarded hosted continuations and real RAM publication. Counter/IRQ models
 //! grant no native entry/root, original task ref or Linux WQ qualification.
 use super::*;
+mod inactive;
 mod support;
 use support::*;
 unsafe extern "C" fn measured(p: *mut c_void) {

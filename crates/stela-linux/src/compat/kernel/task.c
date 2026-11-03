@@ -1739,6 +1739,87 @@ int stela_linux_task_park(bool scheduler_preempt_disabled)
 	return result;
 }
 
+/* Selected !SMP original wait contract on the actual retained native UP
+ * runtime. This replaces neither task birth/current nor the original state
+ * machine. No rq flag/counter is accepted as a physical-switch receipt. */
+unsigned long wait_task_inactive(struct task_struct *p, unsigned int match_state)
+{
+    struct stela_linux_task *caller = current_record();
+    (void)stela_linux_owner();
+    if (stela_linux_atomic_callback_active() || preempt_count() || irqs_disabled() ||
+        !caller->scope || caller->scope_boundary || caller->prepared ||
+        caller->suspended || !caller->scope_ops ||
+        !caller->scope_ops->observe_inactive || !caller->scope_ops->end_inactive ||
+        READ_ONCE(caller->linux_task->__state) != TASK_RUNNING)
+        __builtin_trap();
+    if (!match_state)
+        return 0; /* original mask0 cannot match either original source state */
+    /* p is already borrowed by the original kthread owner. Membership and
+     * positive usage only reject foreign/dead inputs; they never adopt p. */
+    struct stela_linux_task *target = allocated_task(p);
+    if (!target || target == caller || !refcount_read(&p->usage) ||
+        !target->attached || !target->context.sequence || !target->ops ||
+        !target->ops->retain_inactive)
+        __builtin_trap();
+    u64 sequence = target->context.sequence;
+    /* This is a record LIFETIME pin, not a data/RefCell/entered-process loan.
+     * Original task usage independently keeps p through the physical wait. */
+    source_borrow(target);
+    get_task_struct(p);
+    unsigned long cookie = 0;
+    for (;;) {
+        /* A mismatched original state returns0 even if the native assignment
+         * has since closed. This preliminary check only refuses success; the
+         * definitive matched check remains below under the same original lock. */
+        unsigned long early_flags;
+        raw_spin_lock_irqsave(&p->pi_lock, early_flags);
+        bool matches = (READ_ONCE(p->__state) & match_state) ||
+            (READ_ONCE(p->saved_state) & match_state);
+        raw_spin_unlock_irqrestore(&p->pi_lock, early_flags);
+        if (!matches)
+            break;
+        void *owner = NULL;
+        int error = target->ops->retain_inactive(target->binding, sequence, &owner);
+        if (error || !owner)
+            __builtin_trap(); /* actual C refs + returned opaque error owner kept */
+        unsigned long flags;
+        raw_spin_lock_irqsave(&p->pi_lock, flags);
+        unsigned int state = READ_ONCE(p->__state);
+        unsigned int saved = READ_ONCE(p->saved_state);
+        int match = (state & match_state) ? 1 : ((saved & match_state) ? -1 : 0);
+        int observed = 0;
+        if (match) {
+            /* Source lock and genuine IF exclusion stay held THROUGH native
+             * same-assignment/physical/pending recheck and original cookie. */
+            bool force_wait = match < 0 || READ_ONCE(p->on_cpu) || READ_ONCE(p->on_rq);
+            observed = caller->scope_ops->observe_inactive(caller->scope, owner, force_wait);
+            if (observed == 1)
+                cookie = READ_ONCE(p->nvcsw) | (1UL << (sizeof(unsigned long) * 8 - 1));
+        }
+        raw_spin_unlock_irqrestore(&p->pi_lock, flags);
+        if (observed < 0 || observed > 1)
+            __builtin_trap(); /* whole opaque owner retains precise native cause */
+        if (!match || observed == 1) {
+            if (caller->scope_ops->end_inactive(caller->scope, owner))
+                __builtin_trap();
+            break;
+        }
+        /* Already armed. A wake before state assignment remains pending; the
+         * genuine park final check skips/checkpoints instead of losing it.
+         * No pi_lock/queue/Task/native loan/IF guard spans this physical wait. */
+        set_current_state(TASK_UNINTERRUPTIBLE);
+        error = stela_linux_task_park(false);
+        if (error)
+            __builtin_trap(); /* actual wait frame/error + whole owner kept */
+        __set_current_state(TASK_RUNNING);
+        if (caller->scope_ops->end_inactive(caller->scope, owner))
+            __builtin_trap();
+    }
+    put_task_struct(p);
+    source_return(target); /* final record use; possible tail notification only */
+    return cookie; /* mismatch0 or one temporal nvcsw|MSB observation, never death */
+}
+
 int stela_linux_task_yield(void)
 {
 	struct stela_linux_task *task = current_record();

@@ -375,6 +375,9 @@ impl<const N: usize> Runtime<N> {
             let task = &*self.task(i);
             self.queue.active.publish(task.id, &task.stack.bounds);
         }
+        #[cfg(feature = "linux-kernel")]
+        self.physical_enter(i)
+            .unwrap_or_else(|error| self.queue.cpu.fatal(error));
         // SAFETY: both frames are held, pinned and initialized; IRQs stay disabled
         // across the switch, and no lock or borrow spans it.
         unsafe {

@@ -4,6 +4,8 @@ use super::*;
 impl<const N: usize> State<N> {
     pub(super) fn new() -> Self {
         Self {
+            #[cfg(all(target_arch = "x86_64", feature = "linux-kernel"))]
+            inactive: [const { None }; MAX_CONTINUATIONS],
             jobs: [None; N],
             reservations: [0; N],
             #[cfg(target_arch = "x86_64")]
