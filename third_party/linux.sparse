@@ -132,6 +132,7 @@
 /mm/swap.h
 /mm/mmzone.c
 /mm/lruvec.c
+/mm/shrinker.c
 /mm/internal.h
 /mm/pagecache_init.c
 /mm/folio_wait.c

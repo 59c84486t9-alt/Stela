@@ -1,29 +1,4 @@
 // SPDX-License-Identifier: MIT
-/* The retained platform has no pressure-driven shrinker dispatcher. The
- * original mm/list_lru.c owns list membership and explicit walks. */
-#include <linux/shrinker.h>
-#include <linux/slab.h>
-
-struct shrinker *shrinker_alloc(unsigned int flags, const char *fmt, ...)
-{
-	struct shrinker *shrinker = kzalloc_obj(*shrinker);
-
-	(void)fmt;
-	if (shrinker)
-		shrinker->flags = flags;
-	return shrinker;
-}
-
-void shrinker_register(struct shrinker *shrinker)
-{
-	shrinker->flags |= SHRINKER_REGISTERED;
-}
-
-void shrinker_free(struct shrinker *shrinker)
-{
-	kfree(shrinker);
-}
-
 #ifdef STELA_LINUX_RECLAIM_TEST
 #include <linux/list_lru.h>
 #include <stela/linux.h>
@@ -80,11 +55,6 @@ int main(void)
 	list_lru_destroy(&lru);
 	list_lru_destroy(&lru);
 
-	struct shrinker *shrinker = shrinker_alloc(SHRINKER_NUMA_AWARE, "test");
-	assert(shrinker);
-	shrinker_register(shrinker);
-	assert(shrinker->flags & SHRINKER_REGISTERED);
-	shrinker_free(shrinker);
 	stela_linux_exit();
 	printf("Linux reclaim lists passed\n");
 	return 0;
