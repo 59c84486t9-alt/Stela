@@ -10,6 +10,7 @@
 #include <linux/limits.h>
 #include <linux/gfp.h>
 #include <linux/minmax.h>
+#include <linux/overflow.h>
 #include <linux/slab.h>
 #include <linux/rbtree.h>
 #include <linux/log2.h>
@@ -267,6 +268,11 @@ void *kmemdup_noprof(const void *src, size_t len, gfp_t gfp)
 	return copy;
 }
 
+void *kmemdup_array(const void *src, size_t count, size_t element_size, gfp_t gfp)
+{
+	return kmemdup(src, size_mul(element_size, count), gfp);
+}
+
 #ifdef STELA_LINUX_SLAB_TEST
 #include <linux/bottom_half.h>
 #include <linux/irqflags.h>
@@ -505,6 +511,12 @@ int main(void)
 	u8 *duplicate = kmemdup(bytes, sizeof(bytes), GFP_KERNEL);
 	assert(duplicate && !memcmp(duplicate, bytes, sizeof(bytes)));
 	kfree(duplicate);
+	const u16 words[] = {0x102, 0, 0x304};
+	u16 *array = kmemdup_array(words, ARRAY_SIZE(words), sizeof(*words), GFP_KERNEL);
+	assert(array && array != words && !memcmp(array, words, sizeof(words)));
+	kfree(array);
+	assert(kmemdup_array(words, 0, sizeof(*words), GFP_KERNEL) == ZERO_SIZE_PTR);
+	assert(!kmemdup_array(words, SIZE_MAX, sizeof(*words), GFP_KERNEL));
 	policy_and_context();
 	nonblocking_policy_and_context();
 	stela_linux_exit();
