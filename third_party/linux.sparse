@@ -2,6 +2,7 @@
 # buildable kernel tree. netfilter's headers differ only in case, which a
 # case-insensitive file system cannot check out.
 /drivers/acpi/acpica/
+/drivers/base/map.c
 /drivers/gpu/drm/amd/
 /drivers/gpu/drm/nouveau/
 /drivers/gpu/drm/i915/
