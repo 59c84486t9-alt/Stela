@@ -93,8 +93,7 @@ impl JoinedJob {
 }
 /// Default abandonment retains real job/context/producers; never cancels them.
 pub struct Pending {
-    node: ManuallyDrop<Arc<Node>>,
-    _local: PhantomData<Rc<()>>,
+    node: ManuallyDrop<Rc<Node>>,
 }
 type OwnedJob = Pin<Box<dyn ManagedJob>>;
 
@@ -111,11 +110,14 @@ struct Node {
     native_generation: AtomicU64,
 }
 struct ManagedSlot {
+    // Strong references are manipulated only on the checked source CPU.
+    // Pending scans borrow the published node through the reader count and
+    // access its atomic event flag without touching the Rc count.
     pointer: AtomicPtr<Node>,
     readers: AtomicUsize,
     closing: AtomicBool,
     close_pending: AtomicBool,
-    retired: UnsafeCell<ManuallyDrop<Option<Arc<Node>>>>,
+    retired: UnsafeCell<ManuallyDrop<Option<Rc<Node>>>>,
     delivery: Arc<Delivery>,
 }
 pub(super) struct Queue {
@@ -210,7 +212,7 @@ impl Queue {
             });
         };
         slot.close_pending.store(false, Ordering::Release);
-        let node = Arc::new(Node {
+        let node = Rc::new(Node {
             queue: self,
             job: UnsafeCell::new(ManuallyDrop::new(Some(job))),
             phase: AtomicU8::new(QUEUED),
@@ -222,12 +224,11 @@ impl Queue {
         });
         let held = node.clone();
         slot.pointer
-            .store(Arc::into_raw(node) as *mut Node, Ordering::Release);
+            .store(Rc::into_raw(node) as *mut Node, Ordering::Release);
         slot.closing.store(false, Ordering::Release);
         self.delivery.record();
         Ok(Pending {
             node: ManuallyDrop::new(held),
-            _local: PhantomData,
         })
     }
     pub(super) fn pending(&self) -> bool {
@@ -279,10 +280,10 @@ impl Queue {
             if !value.events.swap(false, Ordering::AcqRel) {
                 continue;
             }
-            // SAFETY: The read guard keeps the registry Arc alive during the increment.
-            unsafe { Arc::increment_strong_count(read.pointer) };
+            // SAFETY: The read guard keeps the registry Rc alive during the increment.
+            unsafe { Rc::increment_strong_count(read.pointer) };
             // SAFETY: This takes only the additional strong reference acquired above.
-            let value = unsafe { Arc::from_raw(read.pointer) };
+            let value = unsafe { Rc::from_raw(read.pointer) };
             drop(read);
             let phase = value.phase.load(Ordering::Acquire);
             if phase == CANCELLED {
@@ -297,7 +298,7 @@ impl Queue {
                     .compare_exchange(QUEUED, CREATING, Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
             {
-                let context = Arc::as_ptr(&value) as *mut c_void;
+                let context = Rc::as_ptr(&value) as *mut c_void;
                 // Actual stable heap output BEFORE C can queue, sleep or call
                 // kthreadd/native association. No guard/RefCell/permit remains.
                 // SAFETY: The current process owns the stable node and the C transaction.
@@ -355,17 +356,17 @@ impl Queue {
         }
         0
     }
-    fn retire(&self, slot: &ManagedSlot, value: &Arc<Node>) {
+    fn retire(&self, slot: &ManagedSlot, value: &Rc<Node>) {
         slot.closing.store(true, Ordering::SeqCst);
         let pointer = slot.pointer.swap(ptr::null_mut(), Ordering::SeqCst);
-        if !ptr::eq(pointer, Arc::as_ptr(value)) {
+        if !ptr::eq(pointer, Rc::as_ptr(value)) {
             fatal();
         }
         // SAFETY: The swap removed and transferred this slot's exact strong reference.
-        let actual = unsafe { Arc::from_raw(pointer) };
+        let actual = unsafe { Rc::from_raw(pointer) };
         // SAFETY: only the PID1 retirement path writes the retired owner slot.
         unsafe {
-            *slot.retired.get().cast::<Option<Arc<Node>>>() = Some(actual);
+            *slot.retired.get().cast::<Option<Rc<Node>>>() = Some(actual);
         }
     }
     unsafe fn close_slot(&self, slot: &ManagedSlot) -> i32 {
@@ -374,7 +375,7 @@ impl Queue {
         }
         // SAFETY: PID1 exclusively takes the retired owner after the reader check.
         let Some(actual) =
-            (unsafe { (&mut *slot.retired.get().cast::<Option<Arc<Node>>>()).take() })
+            (unsafe { (&mut *slot.retired.get().cast::<Option<Rc<Node>>>()).take() })
         else {
             return 0;
         };
@@ -424,9 +425,9 @@ impl Pending {
             return Err(self);
         }
         let mut this = ManuallyDrop::new(self);
-        // SAFETY: This consumed handle uniquely owns its initialized Arc field.
+        // SAFETY: This consumed handle uniquely owns its initialized Rc field.
         let held = unsafe { ManuallyDrop::take(&mut this.node) };
-        let actual = match Arc::try_unwrap(held) {
+        let actual = match Rc::try_unwrap(held) {
             Ok(value) => value,
             Err(held) => {
                 this.node = ManuallyDrop::new(held);
@@ -446,7 +447,7 @@ impl Pending {
         } else {
             Outcome::ExitedWithoutReturn
         };
-        // SAFETY: Unique Arc ownership and joined producers give exclusive access to the job.
+        // SAFETY: Unique Rc ownership and joined producers give exclusive access to the job.
         let job_slot = unsafe { &mut **actual.job.get() };
         let job = job_slot.take().unwrap_or_else(|| fatal());
         Ok(JoinedJob { outcome, job })
