@@ -176,6 +176,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/fs_context.c")),
             PathBuf::from(format!("{LINUX}/fs/fs_context_log.c")),
             PathBuf::from(format!("{LINUX}/fs/fs_context_params.c")),
+            PathBuf::from(format!("{LINUX}/fs/fs_pin.c")),
             PathBuf::from(format!("{LINUX}/fs/fs_parser.c")),
             PathBuf::from(format!("{LINUX}/fs/super_anon_dev.c")),
             PathBuf::from(format!("{LINUX}/fs/super_lifetime.c")),

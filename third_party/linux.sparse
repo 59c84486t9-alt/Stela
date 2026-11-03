@@ -230,6 +230,7 @@
 /fs/fs_context.c
 /fs/fs_context_log.c
 /fs/fs_context_params.c
+/fs/fs_pin.c
 /fs/fs_parser.c
 /fs/fs_parser_path.c
 /fs/filesystems.c
