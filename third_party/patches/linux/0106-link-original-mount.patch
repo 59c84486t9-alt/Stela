@@ -1,0 +1,194 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 14:50:27 -0500
+Subject: [PATCH] refactor(vfs): link original mount namespace helpers
+
+---
+ fs/mount_cache.c | 59 ++++++++++++++++++++++++++++++++++++++++++++++++
+ fs/mount_cache.h |  1 +
+ fs/namespace.c   | 58 -----------------------------------------------
+ 3 files changed, 60 insertions(+), 58 deletions(-)
+
+diff --git a/fs/mount_cache.c b/fs/mount_cache.c
+index 5b81d938fd84ca2da9735f9bf23cd60d20eef5c4..2003a57c057f9eec0c7113de7420454e5e84af0f 100644
+--- a/fs/mount_cache.c
++++ b/fs/mount_cache.c
+@@ -9,6 +9,7 @@
+ #include <linux/task_work.h>
+ #include <linux/memblock.h>
+ #include <linux/nstree.h>
++#include <linux/mnt_namespace.h>
+ #include <linux/user_namespace.h>
+ #include <linux/rculist.h>
+ #include <linux/slab.h>
+@@ -515,6 +516,9 @@ void mnt_release_group_id(struct mount *mnt)
+ 	mnt->mnt_group_id = 0;
+ }
+ 
++/* Maximum number of mounts in a mount namespace */
++unsigned int sysctl_mount_max __read_mostly = 100000;
++
+ u64 mnt_namespace_event;
+ 
+ DECLARE_RWSEM(namespace_sem);
+@@ -838,3 +842,58 @@ void free_mnt_ns(struct mnt_namespace *ns)
+ 	fsnotify_mntns_delete(ns);
+ 	mnt_ns_tree_remove(ns);
+ }
++
++int count_mounts(struct mnt_namespace *ns, struct mount *mnt)
++{
++	unsigned int max = READ_ONCE(sysctl_mount_max);
++	unsigned int mounts = 0;
++	struct mount *p;
++
++	if (ns->nr_mounts >= max)
++		return -ENOSPC;
++	max -= ns->nr_mounts;
++	if (ns->pending_mounts >= max)
++		return -ENOSPC;
++	max -= ns->pending_mounts;
++
++	for (p = mnt; p; p = next_mnt(p, mnt))
++		mounts++;
++
++	if (mounts > max)
++		return -ENOSPC;
++
++	ns->pending_mounts += mounts;
++	return 0;
++}
++
++/*
++ * Return true if path is reachable from root
++ *
++ * locks: mount_locked_reader || namespace_shared && is_mounted(mnt)
++ */
++bool is_path_reachable(struct mount *mnt, struct dentry *dentry,
++			 const struct path *root)
++{
++	while (&mnt->mnt != root->mnt && mnt_has_parent(mnt)) {
++		dentry = mnt->mnt_mountpoint;
++		mnt = mnt->mnt_parent;
++	}
++	return &mnt->mnt == root->mnt && is_subdir(dentry, root->dentry);
++}
++
++bool path_is_under(const struct path *path1, const struct path *path2)
++{
++	guard(mount_locked_reader)();
++	return is_path_reachable(real_mount(path1->mnt), path1->dentry, path2);
++}
++EXPORT_SYMBOL(path_is_under);
++
++void put_mnt_ns(struct mnt_namespace *ns)
++{
++	if (!ns_ref_put(ns))
++		return;
++	guard(namespace_excl)();
++	emptied_ns = ns;
++	guard(mount_writer)();
++	umount_tree(ns->root, 0);
++}
+diff --git a/fs/mount_cache.h b/fs/mount_cache.h
+index e183209ad3f09701973474ccdba327e5686e6f4e..7a81701a073b4f6102551504faf3a46724900772 100644
+--- a/fs/mount_cache.h
++++ b/fs/mount_cache.h
+@@ -42,6 +42,7 @@ void attach_mnt(struct mount *mnt, struct mount *parent, struct mountpoint *mp);
+ 
+ void mntput_no_expire(struct mount *mnt);
+ 
++extern unsigned int sysctl_mount_max;
+ extern u64 mnt_namespace_event;
+ extern struct rw_semaphore namespace_sem;
+ extern struct mnt_namespace *emptied_ns;
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 2dab9df8552389af45337b1f4ee5af6b75b4847a..67095a6a6394fc43c5be5dff7ecd5893e846165f 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -39,9 +39,6 @@
+ #include "mount_cache.h"
+ #include "internal.h"
+ 
+-/* Maximum number of mounts in a mount namespace */
+-static unsigned int sysctl_mount_max __read_mostly = 100000;
+-
+ static char * __initdata initramfs_options;
+ static int __init initramfs_options_setup(char *str)
+ {
+@@ -1613,29 +1610,6 @@ static int invent_group_ids(struct mount *mnt, bool recurse)
+ 	return 0;
+ }
+ 
+-int count_mounts(struct mnt_namespace *ns, struct mount *mnt)
+-{
+-	unsigned int max = READ_ONCE(sysctl_mount_max);
+-	unsigned int mounts = 0;
+-	struct mount *p;
+-
+-	if (ns->nr_mounts >= max)
+-		return -ENOSPC;
+-	max -= ns->nr_mounts;
+-	if (ns->pending_mounts >= max)
+-		return -ENOSPC;
+-	max -= ns->pending_mounts;
+-
+-	for (p = mnt; p; p = next_mnt(p, mnt))
+-		mounts++;
+-
+-	if (mounts > max)
+-		return -ENOSPC;
+-
+-	ns->pending_mounts += mounts;
+-	return 0;
+-}
+-
+ enum mnt_tree_flags_t {
+ 	MNT_TREE_BENEATH = BIT(0),
+ 	MNT_TREE_PROPAGATION = BIT(1),
+@@ -3850,28 +3824,6 @@ SYSCALL_DEFINE5(move_mount,
+ 	return vfs_move_mount(&from_path, &to_path, mflags);
+ }
+ 
+-/*
+- * Return true if path is reachable from root
+- *
+- * locks: mount_locked_reader || namespace_shared && is_mounted(mnt)
+- */
+-bool is_path_reachable(struct mount *mnt, struct dentry *dentry,
+-			 const struct path *root)
+-{
+-	while (&mnt->mnt != root->mnt && mnt_has_parent(mnt)) {
+-		dentry = mnt->mnt_mountpoint;
+-		mnt = mnt->mnt_parent;
+-	}
+-	return &mnt->mnt == root->mnt && is_subdir(dentry, root->dentry);
+-}
+-
+-bool path_is_under(const struct path *path1, const struct path *path2)
+-{
+-	guard(mount_locked_reader)();
+-	return is_path_reachable(real_mount(path1->mnt), path1->dentry, path2);
+-}
+-EXPORT_SYMBOL(path_is_under);
+-
+ int path_pivot_root(struct path *new, struct path *old)
+ {
+ 	struct path root __free(path_put) = {};
+@@ -5482,16 +5434,6 @@ void __init mnt_init(void)
+ 	init_mount_tree();
+ }
+ 
+-void put_mnt_ns(struct mnt_namespace *ns)
+-{
+-	if (!ns_ref_put(ns))
+-		return;
+-	guard(namespace_excl)();
+-	emptied_ns = ns;
+-	guard(mount_writer)();
+-	umount_tree(ns->root, 0);
+-}
+-
+ struct vfsmount *kern_mount(struct file_system_type *type)
+ {
+ 	struct vfsmount *mnt;
