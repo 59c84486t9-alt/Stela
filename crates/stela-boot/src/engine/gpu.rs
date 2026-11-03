@@ -272,7 +272,9 @@ unsafe impl Source for MsiSource {
         };
         let data = u16::try_from(message.data).map_err(|_| IrqError::Route)?;
         self.programmed = true;
-        self.msi.program(&mut self.config, message.address, data).map_err(IrqError::from)
+        self.msi
+            .program(&mut self.config, message.address, data)
+            .map_err(IrqError::from)
     }
     unsafe fn unmask(&mut self) -> Result<(), IrqError> {
         self.msi.enable(&mut self.config)?;
@@ -328,7 +330,9 @@ impl function::Host for Device {
     }
     fn enable_msi(&mut self) -> Result<(), function::MsiError> {
         // The line's route programs it, when nouveau requests its interrupt.
-        self.msi.map(|_| ()).ok_or(function::MsiError::Native(EOPNOTSUPP))
+        self.msi
+            .map(|_| ())
+            .ok_or(function::MsiError::Native(EOPNOTSUPP))
     }
     fn disable_msi(&mut self) -> Result<(), function::MsiError> {
         if let Some(msi) = self.msi {
@@ -744,7 +748,9 @@ fn claim(
         .map_err(|(error, _)| ServiceError::Claim(error))?;
     let domain = services.domain(binding)?;
     let mut function = requester.into_function();
-    let capabilities = function.capabilities().map_err(ServiceError::PciCapability)?;
+    let capabilities = function
+        .capabilities()
+        .map_err(ServiceError::PciCapability)?;
     let msi = capabilities
         .iter()
         .find(|(_, id)| *id == MSI_CAPABILITY)
@@ -806,7 +812,9 @@ fn claim(
         .iter()
         .find(|(_, id)| *id == PCIE_CAPABILITY)
         .map(|(offset, _)| {
-            function.config().read16(u16::from(*offset) + LINK_STATUS)
+            function
+                .config()
+                .read16(u16::from(*offset) + LINK_STATUS)
                 .map(PcieLink::from_link_status)
         })
         .transpose()
