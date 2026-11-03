@@ -447,7 +447,8 @@ impl Pending {
             Outcome::ExitedWithoutReturn
         };
         // SAFETY: Unique Arc ownership and joined producers give exclusive access to the job.
-        let job = unsafe { (&mut **actual.job.get()).take() }.unwrap_or_else(|| fatal());
+        let job_slot = unsafe { &mut **actual.job.get() };
+        let job = job_slot.take().unwrap_or_else(|| fatal());
         Ok(JoinedJob { outcome, job })
     }
 }
@@ -508,7 +509,8 @@ unsafe extern "C" fn run(context: *mut c_void) -> i32 {
     // Exclusive pinned owned job; status/cancel never borrow it and final
     // extraction is impossible until actual complete source/native closure.
     // SAFETY: the unique callback entry owns the pinned job until it returns.
-    let job = unsafe { (&mut **actual.job.get()).as_mut() }.unwrap_or_else(|| fatal());
+    let job_slot = unsafe { &mut **actual.job.get() };
+    let job = job_slot.as_mut().unwrap_or_else(|| fatal());
     job.as_mut().run();
     actual.flags.fetch_or(CALLBACK_RETURNED, Ordering::Release);
     actual.events.store(true, Ordering::Release);
