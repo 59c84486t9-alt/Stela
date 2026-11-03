@@ -1,0 +1,188 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:25:34 -0500
+Subject: [PATCH] refactor(fs): link original superblock root acquisition
+
+---
+ fs/super.c          | 71 -------------------------------------------
+ fs/super_lifetime.c | 73 +++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 73 insertions(+), 71 deletions(-)
+
+diff --git a/fs/super.c b/fs/super.c
+index 98cb912f2547d0655df2a46bd1870e3813289998..3ddc094e797934da22da439fbe4ab057834774f1 100644
+--- a/fs/super.c
++++ b/fs/super.c
+@@ -494,14 +494,6 @@ void generic_shutdown_super(struct super_block *sb)
+ 
+ EXPORT_SYMBOL(generic_shutdown_super);
+ 
+-bool mount_capable(struct fs_context *fc)
+-{
+-	if (!(fc->fs_type->fs_flags & FS_USERNS_MOUNT))
+-		return capable(CAP_SYS_ADMIN);
+-	else
+-		return ns_capable(fc->user_ns, CAP_SYS_ADMIN);
+-}
+-
+ /**
+  * sget_fc - Find or create a superblock
+  * @fc:	Filesystem context.
+@@ -1438,69 +1430,6 @@ void kill_block_super(struct super_block *sb)
+ EXPORT_SYMBOL(kill_block_super);
+ #endif
+ 
+-/**
+- * vfs_get_tree - Get the mountable root
+- * @fc: The superblock configuration context.
+- *
+- * The filesystem is invoked to get or create a superblock which can then later
+- * be used for mounting.  The filesystem places a pointer to the root to be
+- * used for mounting in @fc->root.
+- */
+-int vfs_get_tree(struct fs_context *fc)
+-{
+-	struct super_block *sb;
+-	int error;
+-
+-	if (fc->root)
+-		return -EBUSY;
+-
+-	/* Get the mountable root in fc->root, with a ref on the root and a ref
+-	 * on the superblock.
+-	 */
+-	error = fc->ops->get_tree(fc);
+-	if (error < 0)
+-		return error;
+-
+-	if (!fc->root) {
+-		pr_err("Filesystem %s get_tree() didn't set fc->root, returned %i\n",
+-		       fc->fs_type->name, error);
+-		/* We don't know what the locking state of the superblock is -
+-		 * if there is a superblock.
+-		 */
+-		BUG();
+-	}
+-
+-	sb = fc->root->d_sb;
+-	WARN_ON(!sb->s_bdi);
+-
+-	/*
+-	 * super_wake() contains a memory barrier which also care of
+-	 * ordering for super_cache_count(). We place it before setting
+-	 * SB_BORN as the data dependency between the two functions is
+-	 * the superblock structure contents that we just set up, not
+-	 * the SB_BORN flag.
+-	 */
+-	super_wake(sb, SB_BORN);
+-
+-	error = security_sb_set_mnt_opts(sb, fc->security, 0, NULL);
+-	if (unlikely(error)) {
+-		fc_drop_locked(fc);
+-		return error;
+-	}
+-
+-	/*
+-	 * filesystems should never set s_maxbytes larger than MAX_LFS_FILESIZE
+-	 * but s_maxbytes was an unsigned long long for many releases. Throw
+-	 * this warning for a little while to try and catch filesystems that
+-	 * violate this rule.
+-	 */
+-	WARN((sb->s_maxbytes < 0), "%s set sb->s_maxbytes to "
+-		"negative value (%lld)\n", fc->fs_type->name, sb->s_maxbytes);
+-
+-	return 0;
+-}
+-EXPORT_SYMBOL(vfs_get_tree);
+-
+ /*
+  * Setup private BDI for given superblock. It gets automatically cleaned up
+  * in generic_shutdown_super().
+diff --git a/fs/super_lifetime.c b/fs/super_lifetime.c
+index 131623dcaee28672602f84b9ef6b2dc219a3aa5f..f9761950f91ddc6dfaa885ffecfa9e72f9d9379b 100644
+--- a/fs/super_lifetime.c
++++ b/fs/super_lifetime.c
+@@ -3,7 +3,9 @@
+  * From fs/super.c.
+  * Copyright (C) 1991, 1992 Linus Torvalds
+  */
++#include <linux/capability.h>
+ #include <linux/export.h>
++#include <linux/fs_context.h>
+ #include <linux/fsnotify.h>
+ #include <linux/rcupdate.h>
+ #include <linux/security.h>
+@@ -167,3 +169,74 @@ void deactivate_super(struct super_block *s)
+ }
+ 
+ EXPORT_SYMBOL(deactivate_super);
++
++bool mount_capable(struct fs_context *fc)
++{
++	if (!(fc->fs_type->fs_flags & FS_USERNS_MOUNT))
++		return capable(CAP_SYS_ADMIN);
++	else
++		return ns_capable(fc->user_ns, CAP_SYS_ADMIN);
++}
++
++/**
++ * vfs_get_tree - Get the mountable root
++ * @fc: The superblock configuration context.
++ *
++ * The filesystem is invoked to get or create a superblock which can then later
++ * be used for mounting.  The filesystem places a pointer to the root to be
++ * used for mounting in @fc->root.
++ */
++int vfs_get_tree(struct fs_context *fc)
++{
++	struct super_block *sb;
++	int error;
++
++	if (fc->root)
++		return -EBUSY;
++
++	/* Get the mountable root in fc->root, with a ref on the root and a ref
++	 * on the superblock.
++	 */
++	error = fc->ops->get_tree(fc);
++	if (error < 0)
++		return error;
++
++	if (!fc->root) {
++		pr_err("Filesystem %s get_tree() didn't set fc->root, returned %i\n",
++		       fc->fs_type->name, error);
++		/* We don't know what the locking state of the superblock is -
++		 * if there is a superblock.
++		 */
++		BUG();
++	}
++
++	sb = fc->root->d_sb;
++	WARN_ON(!sb->s_bdi);
++
++	/*
++	 * super_wake() contains a memory barrier which also care of
++	 * ordering for super_cache_count(). We place it before setting
++	 * SB_BORN as the data dependency between the two functions is
++	 * the superblock structure contents that we just set up, not
++	 * the SB_BORN flag.
++	 */
++	super_wake(sb, SB_BORN);
++
++	error = security_sb_set_mnt_opts(sb, fc->security, 0, NULL);
++	if (unlikely(error)) {
++		fc_drop_locked(fc);
++		return error;
++	}
++
++	/*
++	 * filesystems should never set s_maxbytes larger than MAX_LFS_FILESIZE
++	 * but s_maxbytes was an unsigned long long for many releases. Throw
++	 * this warning for a little while to try and catch filesystems that
++	 * violate this rule.
++	 */
++	WARN((sb->s_maxbytes < 0), "%s set sb->s_maxbytes to "
++		"negative value (%lld)\n", fc->fs_type->name, sb->s_maxbytes);
++
++	return 0;
++}
++EXPORT_SYMBOL(vfs_get_tree);
