@@ -169,6 +169,7 @@
 /fs/simple_xattr.c
 /fs/d_path.c
 /fs/namei.c
+/fs/filename.c
 /fs/name_hash.c
 /fs/name_hash.h
 /fs/libfs.c

@@ -153,6 +153,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/pseudo_metadata.c")),
             PathBuf::from(format!("{LINUX}/fs/inode_evict.c")),
             PathBuf::from(format!("{LINUX}/fs/name_hash.c")),
+            PathBuf::from(format!("{LINUX}/fs/filename.c")),
             PathBuf::from(format!("{LINUX}/fs/filp_close.c")),
             PathBuf::from(format!("{LINUX}/lib/string.c")),
             PathBuf::from(format!("{LINUX}/lib/hexdump.c")),

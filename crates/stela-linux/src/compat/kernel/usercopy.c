@@ -79,6 +79,41 @@ void *memdup_user_nul(const void __user *source, size_t size)
 	return copy;
 }
 
+long strncpy_from_user(char *destination, const char __user *source, long count)
+{
+	long copied = 0;
+
+	/* Stage each word so the destination is only written through its NUL.
+	 * A client provider may refuse the whole word at a mapping boundary. */
+	while (count - copied >= (long)sizeof(unsigned long)) {
+		char word[sizeof(unsigned long)];
+
+		if (raw_copy_from_user(word, source + copied, sizeof(word)))
+			break;
+		char *end = memchr(word, 0, sizeof(word));
+
+		if (end) {
+			size_t length = (size_t)(end - word);
+
+			memcpy(destination + copied, word, length + 1);
+			return copied + (long)length;
+		}
+		memcpy(destination + copied, word, sizeof(word));
+		copied += (long)sizeof(word);
+	}
+
+	for (; copied < count; copied++) {
+		char byte;
+
+		if (raw_copy_from_user(&byte, source + copied, 1))
+			return -EFAULT;
+		destination[copied] = byte;
+		if (!byte)
+			return copied;
+	}
+	return copied;
+}
+
 /* The string ends where a read of it does: no bound is known beforehand. */
 char *strndup_user(const char __user *source, long limit)
 {
@@ -158,6 +193,17 @@ int main(void)
 	assert(PTR_ERR(strndup_user((const char __user *)client, 3)) == -EINVAL);
 	limit = 3;
 	assert(PTR_ERR(strndup_user((const char __user *)client, sizeof(client))) == -EFAULT);
+
+	memset(buffer, 'x', sizeof(buffer));
+	assert(strncpy_from_user(buffer, client, sizeof(buffer)) == -EFAULT);
+	assert(!memcmp(buffer, "XYcxxxxx", sizeof(buffer)));
+	client[2] = 0;
+	assert(strncpy_from_user(buffer, client, sizeof(buffer)) == 2);
+	assert(!memcmp(buffer, "XY\0x", 4));
+	limit = sizeof(client);
+	assert(strncpy_from_user(buffer, client, sizeof(buffer)) == 2);
+	assert(strncpy_from_user(buffer, client, 2) == 2);
+	assert(strncpy_from_user(buffer, client, 0) == 0);
 	stela_linux_exit();
 	printf("Linux user copies passed\n");
 	return 0;
