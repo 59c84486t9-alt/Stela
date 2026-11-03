@@ -50,21 +50,23 @@ pub(super) fn bind(
             });
         }
         if !matched {
-            let pc = marker
-                .source
-                .map(|index| source_map[index].0)
-                .or_else(|| {
-                    source_map
-                        .iter()
-                        .filter(|(_, at)| *at <= marker.start)
-                        .max_by_key(|(_, at)| *at)
-                        .map(|(pc, _)| *pc)
-                })
-                .expect("guest operand has source map");
-            let index = source
-                .iter()
-                .position(|instruction| instruction.pc == pc)
-                .unwrap_or(source.len());
+            // The source map is emitted in host-offset order. A deferred
+            // check already carries its source index; other sites belong to
+            // the last guest instruction that started at or before the site.
+            let mapped = marker.source.unwrap_or_else(|| {
+                source_map
+                    .partition_point(|(_, at)| *at <= marker.start)
+                    .checked_sub(1)
+                    .expect("guest operand has source map")
+            });
+            let pc = source_map[mapped].0;
+            // Each decoded instruction contributes exactly one source row,
+            // and the terminal (if any) follows the ordinary prefix.
+            debug_assert!(
+                source
+                    .get(mapped)
+                    .map_or(mapped == source.len(), |word| word.pc == pc)
+            );
             output.push(FaultRecovery {
                 start: marker.start,
                 end: marker.end,
@@ -76,7 +78,7 @@ pub(super) fn bind(
                     .collect(),
                 retirement: RetirementPoint::before(
                     pc,
-                    u16::try_from(index).expect("bounded instruction prefix"),
+                    u16::try_from(mapped).expect("bounded instruction prefix"),
                 )
                 .expect("validated source PC"),
             });
