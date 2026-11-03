@@ -685,6 +685,21 @@ impl Platform for Host {
         }
     }
 
+    fn available_page_frames(&self, start: usize, pages: usize) -> Result<usize, Errno> {
+        if native_irq::current_context() != Ok(None) {
+            return Err(EFAULT);
+        }
+        let heap = native_memory::SOURCE.registration();
+        let bytes = pages
+            .checked_mul(stela_boot_core::native_memory::PAGE)
+            .ok_or(ERANGE)?;
+        let end = start.checked_add(bytes).ok_or(ERANGE)?;
+        if heap.generation == 0 || start < heap.cpu || end - heap.cpu > heap.bytes {
+            return Err(ERANGE);
+        }
+        Ok(crate::ALLOCATOR.available_page_frames_in(start..end))
+    }
+
     fn map_user(&self, _: *mut c_void, address: u64, pfn: u64, prot: u64) -> Result<(), Errno> {
         // Clients share the window, so its one address space serves them all.
         let cache = page_window::cache_of(prot);

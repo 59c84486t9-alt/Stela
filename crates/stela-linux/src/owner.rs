@@ -122,6 +122,12 @@ pub trait Platform {
     ) -> Result<(), Errno> {
         Err(-95)
     }
+    /// Observe the whole free frames within one registered ordinary RAM extent.
+    /// This is a process-context snapshot. It must not allocate, transfer
+    /// ownership, or change the active Linux lease.
+    fn available_page_frames(&self, _start: usize, _pages: usize) -> Result<usize, Errno> {
+        Err(-95)
+    }
     /// Install one page in client `space`. `prot` holds x86 page table bits.
     fn map_user(&self, space: *mut c_void, address: u64, pfn: u64, prot: u64) -> Result<(), Errno>;
     /// Remove a client's pages.
@@ -154,9 +160,10 @@ struct Services {
     calibrated_tsc_hz: unsafe extern "C" fn(*mut c_void) -> u64,
     copy_from_kernel_nofault:
         unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, usize) -> c_int,
+    available_page_frames: unsafe extern "C" fn(*mut c_void, usize, usize, *mut usize) -> c_int,
 }
 
-const _: () = assert!(size_of::<Services>() == 176);
+const _: () = assert!(size_of::<Services>() == 184);
 const _: () = {
     assert!(core::mem::offset_of!(Services, now_ns) == 0);
     assert!(core::mem::offset_of!(Services, minimum_delay_us) == 8);
@@ -180,6 +187,7 @@ const _: () = {
     assert!(core::mem::offset_of!(Services, unmap_user) == 152);
     assert!(core::mem::offset_of!(Services, calibrated_tsc_hz) == 160);
     assert!(core::mem::offset_of!(Services, copy_from_kernel_nofault) == 168);
+    assert!(core::mem::offset_of!(Services, available_page_frames) == 176);
 };
 
 /// `struct stela_linux_owner`.
@@ -395,6 +403,23 @@ mod trampolines {
         })
     }
 
+    pub unsafe extern "C" fn available_page_frames<P: Platform>(
+        context: *mut c_void,
+        start: usize,
+        pages: usize,
+        available: *mut usize,
+    ) -> c_int {
+        // SAFETY: C keeps the canonical owner and a writable stack output.
+        match unsafe { platform::<P>(context) }.available_page_frames(start, pages) {
+            Ok(count) => {
+                // SAFETY: output is valid through this call, and written once.
+                unsafe { available.write(count) };
+                0
+            }
+            Err(error) => status(Err(error)),
+        }
+    }
+
     pub unsafe extern "C" fn map_user<P: Platform>(
         context: *mut c_void,
         space: *mut c_void,
@@ -475,6 +500,7 @@ impl<P: Platform> Owner<P> {
                 irq_retire: t::irq_retire::<P>,
                 copy_from_user: t::copy_from_user::<P>,
                 copy_from_kernel_nofault: t::copy_from_kernel_nofault::<P>,
+                available_page_frames: t::available_page_frames::<P>,
                 copy_to_user: t::copy_to_user::<P>,
                 map_user: t::map_user::<P>,
                 unmap_user: t::unmap_user::<P>,

@@ -611,6 +611,45 @@ static void check_callback(const struct stela_linux_owner *owner, int nesting,
 		__builtin_trap();
 }
 
+int stela_linux_available_page_frames(unsigned long *available)
+{
+	if (!available)
+		return -EINVAL;
+	struct stela_linux_lease lease;
+	stela_linux_lease_snapshot(&lease);
+	const struct stela_linux_owner *owner = lease.owner;
+	if (!owner || in_callback || !stela_linux_quiescent())
+		return -EPERM;
+	if (!catalog.pages)
+		return -ENODEV;
+	if (!owner->services->available_page_frames)
+		return -EOPNOTSUPP;
+
+	int nesting = preempt_count();
+	unsigned long flags = arch_local_save_flags();
+	unsigned long total = 0;
+	for (size_t i = 0; i < catalog.extent_count; i++) {
+		const struct registered_extent *extent = catalog.extents + i;
+		if (extent->kind != STELA_LINUX_PAGE_ORDINARY)
+			continue;
+		size_t count = 0;
+		in_callback = true;
+		int error = owner->services->available_page_frames(owner->context,
+			(size_t)extent->cpu_base, extent->page_count, &count);
+		in_callback = false;
+		if (!stela_linux_lease_matches(&lease))
+			__builtin_trap();
+		check_callback(owner, nesting, flags);
+		if (error > 0 || count > extent->page_count)
+			__builtin_trap();
+		if (error)
+			return error;
+		total += count;
+	}
+	*available = total;
+	return 0;
+}
+
 static void recycle_record(size_t index)
 {
 	catalog.allocations[index] = (struct allocation_record){.next = catalog.free_records};
@@ -2261,6 +2300,18 @@ static bool ordinary_release_ready(void *context, void *pin)
     return true; /* These ordinary CPU pins have no additional lifetime fence. */
 }
 
+static bool refuse_availability;
+
+static int test_available_page_frames(void *context, size_t start, size_t pages,
+                                      size_t *available)
+{
+    assert(context == &fixture && start == (size_t)fixture.cpu && pages == TEST_PAGES);
+    if (refuse_availability)
+        return -EAGAIN;
+    *available = pages - 1;
+    return 0;
+}
+
 static void annotated_stack_admission(void)
 {
     unsigned char *stack = aligned_alloc(THREAD_ALIGN, THREAD_SIZE);
@@ -2323,6 +2374,13 @@ static void annotated_stack_admission(void)
     assert(!stela_linux_page_catalog_register_annotated(&inventory, &ops, &fixture));
     assert(catalog.extent_count == 2 && !catalog.stack_admissions);
     assert(stela_linux_page_boot_capacity() == TEST_PAGES);
+    unsigned long available = ULONG_MAX;
+    assert(!stela_linux_available_page_frames(&available));
+    assert(available == TEST_PAGES - 1);
+    refuse_availability = true;
+    assert(stela_linux_available_page_frames(&available) == -EAGAIN);
+    assert(available == TEST_PAGES - 1);
+    refuse_availability = false;
     assert(totalram_pages() == TEST_PAGES);
     struct zone *zone = &contig_page_data.node_zones[ZONE_NORMAL];
     assert(zone_managed_pages(zone) == TEST_PAGES);
@@ -2428,6 +2486,8 @@ static void annotated_stack_admission(void)
     assert(!zone->zone_start_pfn && !zone->spanned_pages && !zone->zone_pgdat);
     assert(!contig_page_data.node_start_pfn && !contig_page_data.node_spanned_pages);
     assert(!contig_page_data.nr_zones);
+    assert(stela_linux_available_page_frames(&available) == -ENODEV);
+    assert(available == TEST_PAGES - 1);
     free(stack);
 }
 
@@ -2527,7 +2587,9 @@ int main(void)
 	assert(!stela_linux_page_request_blocking((__force u32)GFP_NOWAIT));
 	fixture.cpu = aligned_alloc(TEST_PAGES * PAGE_SIZE, TEST_PAGES * PAGE_SIZE);
 	assert(fixture.cpu);
-	const struct stela_linux_services services = {.unsupported = test_unsupported};
+	const struct stela_linux_services services = {
+		.unsupported = test_unsupported, .available_page_frames = test_available_page_frames,
+	};
 	const struct stela_linux_owner owner = {.services = &services, .context = &fixture};
 	struct stela_linux_page_reservation reservation = {
 		.generation = 1, .physical_base = TEST_PHYSICAL, .cpu_base = fixture.cpu,
