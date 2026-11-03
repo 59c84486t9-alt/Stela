@@ -175,6 +175,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/fs_context_log.c")),
             PathBuf::from(format!("{LINUX}/fs/fs_context_params.c")),
             PathBuf::from(format!("{LINUX}/fs/fs_parser.c")),
+            PathBuf::from(format!("{LINUX}/fs/super_anon_dev.c")),
             PathBuf::from(format!("{LINUX}/fs/inode_cache_init.c")),
             PathBuf::from(format!("{LINUX}/fs/inode_evict.c")),
             PathBuf::from(format!("{LINUX}/fs/name_hash.c")),

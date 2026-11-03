@@ -345,6 +345,13 @@ struct vfsmount *kern_mount(struct file_system_type *type)
 		return ERR_PTR(error);
 	}
 	struct pseudo_fs_context *pseudo = context.fs_private;
+	error = get_anon_bdev(&block->s_dev);
+	if (error) {
+		kfree(pseudo);
+		kfree(block);
+		kfree(mount);
+		return ERR_PTR(error);
+	}
 
 	block->s_magic = pseudo->magic;
 	block->__s_d_op = pseudo->dops;
@@ -357,6 +364,7 @@ void kern_unmount(struct vfsmount *mount)
 {
 	if (IS_ERR_OR_NULL(mount))
 		return;
+	free_anon_bdev(mount->mnt_sb->s_dev);
 	kfree(mount->mnt_sb);
 	kfree(mount);
 }
@@ -552,6 +560,11 @@ int main(void)
 	int count = 0;
 	assert(!simple_pin_fs(&test_fs, &mount, &count) && mount && count == 1);
 	struct vfsmount *pinned = mount;
+	dev_t first_device = mount->mnt_sb->s_dev;
+	assert(first_device && !MAJOR(first_device));
+	struct vfsmount *other = kern_mount(&test_fs);
+	assert(!IS_ERR(other) && other->mnt_sb->s_dev != first_device);
+	kern_unmount(other);
 	assert(!simple_pin_fs(&test_fs, &mount, &count) && mount == pinned && count == 2);
 	simple_release_fs(&mount, &count);
 	assert(mount == pinned);
@@ -560,7 +573,7 @@ int main(void)
 
 	/* A pseudo file's dentry is released after its file, with its inode. */
 	mount = kern_mount(&test_fs);
-	assert(!IS_ERR(mount));
+	assert(!IS_ERR(mount) && mount->mnt_sb->s_dev == first_device);
 	struct inode *inode = alloc_anon_inode(mount->mnt_sb);
 	inode_set_bytes(inode, 1025);
 	assert(inode->i_blocks == 2 && inode->i_bytes == 1);
