@@ -110,6 +110,10 @@
 /mm/vma_init.c
 /mm/vmstat.c
 /mm/vmstat_init.c
+/mm/filemap.c
+/mm/internal.h
+/mm/pagecache_init.c
+/mm/pagecache_wait.h
 /mm/init-mm.c
 /mm/slab_common.c
 /mm/slab.h
@@ -121,6 +125,7 @@
 /lib/refcount.c
 /lib/refcount_lock.c
 /lib/rcuref.c
+/lib/flex_proportions.c
 /drivers/dma-buf/Makefile
 /drivers/dma-buf/dma-fence.c
 /drivers/dma-buf/dma-resv.c
