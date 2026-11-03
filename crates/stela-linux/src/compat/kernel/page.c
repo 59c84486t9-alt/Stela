@@ -12,6 +12,7 @@
 #include <linux/limits.h>
 #include <linux/mm.h>
 #include <linux/poison.h>
+#include <linux/printk.h>
 #include <linux/preempt.h>
 #include <linux/rcupdate.h>
 #include <linux/string.h>
@@ -93,9 +94,23 @@ static bool in_callback;
 /* The one memory node the catalog's pages form, for what Linux code reads of
  * it, and its page counters, which nothing moves. */
 struct pglist_data contig_page_data;
+
 atomic_long_t vm_node_stat[NR_VM_NODE_STAT_ITEMS];
 atomic_long_t vm_zone_stat[NR_VM_ZONE_STAT_ITEMS];
 atomic_long_t _totalram_pages __read_mostly;
+
+void dump_page(const struct page *page, const char *reason)
+{
+	/* Report the native descriptor without traversing an untrusted mapping. */
+	if (PagePoisoned(page))
+		pr_warn("page:%p is uninitialized and poisoned\n", page);
+	else
+		pr_warn("page:%p flags:%lx refcount:%d mapcount:%ld\n", page,
+			READ_ONCE(page->flags.f), page_ref_count(page),
+			(long)atomic_read(&page->_mapcount) + 1);
+	if (reason)
+		pr_warn("page dumped because: %s\n", reason);
+}
 
 unsigned long zone_reclaimable_pages(struct zone *zone)
 {

@@ -1,0 +1,478 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 13:38:02 -0500
+Subject: [PATCH] refactor(mm): link original page cache folio removal
+
+---
+ mm/filemap.c       | 217 --------------------------------------------
+ mm/filemap_batch.c | 220 +++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 220 insertions(+), 217 deletions(-)
+
+diff --git a/mm/filemap.c b/mm/filemap.c
+index 74e7715698cc3adc28dfb5e32917038bf26c4e15..e111c2d57f2824a56e52e3d0857327bbdd369291 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -128,223 +128,6 @@
+  *    ->private_lock		(zap_pte_range->block_dirty_folio)
+  */
+ 
+-static void page_cache_delete(struct address_space *mapping,
+-				   struct folio *folio, void *shadow)
+-{
+-	XA_STATE(xas, &mapping->i_pages, folio->index);
+-	long nr = 1;
+-
+-	mapping_set_update(&xas, mapping);
+-
+-	xas_set_order(&xas, folio->index, folio_order(folio));
+-	nr = folio_nr_pages(folio);
+-
+-	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+-
+-	xas_store(&xas, shadow);
+-	xas_init_marks(&xas);
+-
+-	folio->mapping = NULL;
+-	/* Leave folio->index set: truncation lookup relies upon it */
+-	mapping->nrpages -= nr;
+-}
+-
+-static void filemap_unaccount_folio(struct address_space *mapping,
+-		struct folio *folio)
+-{
+-	long nr;
+-
+-	VM_BUG_ON_FOLIO(folio_mapped(folio), folio);
+-	if (!IS_ENABLED(CONFIG_DEBUG_VM) && unlikely(folio_mapped(folio))) {
+-		pr_alert("BUG: Bad page cache in process %s  pfn:%05lx\n",
+-			 current->comm, folio_pfn(folio));
+-		dump_page(&folio->page, "still mapped when deleted");
+-		dump_stack();
+-		add_taint(TAINT_BAD_PAGE, LOCKDEP_NOW_UNRELIABLE);
+-
+-		if (mapping_exiting(mapping) && !folio_test_large(folio)) {
+-			int mapcount = folio_mapcount(folio);
+-
+-			if (folio_ref_count(folio) >= mapcount + 2) {
+-				/*
+-				 * All vmas have already been torn down, so it's
+-				 * a good bet that actually the page is unmapped
+-				 * and we'd rather not leak it: if we're wrong,
+-				 * another bad page check should catch it later.
+-				 */
+-				atomic_set(&folio->_mapcount, -1);
+-				folio_ref_sub(folio, mapcount);
+-			}
+-		}
+-	}
+-
+-	/* hugetlb folios do not participate in page cache accounting. */
+-	if (folio_test_hugetlb(folio))
+-		return;
+-
+-	nr = folio_nr_pages(folio);
+-
+-	lruvec_stat_mod_folio(folio, NR_FILE_PAGES, -nr);
+-	if (folio_test_swapbacked(folio)) {
+-		lruvec_stat_mod_folio(folio, NR_SHMEM, -nr);
+-		if (folio_test_pmd_mappable(folio))
+-			lruvec_stat_mod_folio(folio, NR_SHMEM_THPS, -nr);
+-	} else if (folio_test_pmd_mappable(folio)) {
+-		lruvec_stat_mod_folio(folio, NR_FILE_THPS, -nr);
+-	}
+-	if (test_bit(AS_KERNEL_FILE, &folio->mapping->flags))
+-		mod_node_page_state(folio_pgdat(folio),
+-				    NR_KERNEL_FILE_PAGES, -nr);
+-
+-	/*
+-	 * At this point folio must be either written or cleaned by
+-	 * truncate.  Dirty folio here signals a bug and loss of
+-	 * unwritten data - on ordinary filesystems.
+-	 *
+-	 * But it's harmless on in-memory filesystems like tmpfs; and can
+-	 * occur when a driver which did get_user_pages() sets page dirty
+-	 * before putting it, while the inode is being finally evicted.
+-	 *
+-	 * Below fixes dirty accounting after removing the folio entirely
+-	 * but leaves the dirty flag set: it has no effect for truncated
+-	 * folio and anyway will be cleared before returning folio to
+-	 * buddy allocator.
+-	 */
+-	if (WARN_ON_ONCE(folio_test_dirty(folio) &&
+-			 mapping_can_writeback(mapping)))
+-		folio_account_cleaned(folio, inode_to_wb(mapping->host));
+-}
+-
+-/*
+- * Delete a page from the page cache and free it. Caller has to make
+- * sure the page is locked and that nobody else uses it - or that usage
+- * is safe.  The caller must hold the i_pages lock.
+- */
+-void __filemap_remove_folio(struct folio *folio, void *shadow)
+-{
+-	struct address_space *mapping = folio->mapping;
+-
+-	trace_mm_filemap_delete_from_page_cache(folio);
+-	filemap_unaccount_folio(mapping, folio);
+-	page_cache_delete(mapping, folio, shadow);
+-}
+-
+-static void filemap_free_folio(const struct address_space *mapping,
+-		struct folio *folio)
+-{
+-	void (*free_folio)(struct folio *);
+-
+-	free_folio = mapping->a_ops->free_folio;
+-	if (free_folio)
+-		free_folio(folio);
+-
+-	folio_put_refs(folio, folio_nr_pages(folio));
+-}
+-
+-/**
+- * filemap_remove_folio - Remove folio from page cache.
+- * @folio: The folio.
+- *
+- * This must be called only on folios that are locked and have been
+- * verified to be in the page cache.  It will never put the folio into
+- * the free list because the caller has a reference on the page.
+- */
+-void filemap_remove_folio(struct folio *folio)
+-{
+-	struct address_space *mapping = folio->mapping;
+-
+-	BUG_ON(!folio_test_locked(folio));
+-	spin_lock(&mapping->host->i_lock);
+-	xa_lock_irq(&mapping->i_pages);
+-	__filemap_remove_folio(folio, NULL);
+-	xa_unlock_irq(&mapping->i_pages);
+-	if (mapping_shrinkable(mapping))
+-		inode_lru_list_add(mapping->host);
+-	spin_unlock(&mapping->host->i_lock);
+-
+-	filemap_free_folio(mapping, folio);
+-}
+-
+-/*
+- * page_cache_delete_batch - delete several folios from page cache
+- * @mapping: the mapping to which folios belong
+- * @fbatch: batch of folios to delete
+- *
+- * The function walks over mapping->i_pages and removes folios passed in
+- * @fbatch from the mapping. The function expects @fbatch to be sorted
+- * by page index and is optimised for it to be dense.
+- * It tolerates holes in @fbatch (mapping entries at those indices are not
+- * modified).
+- *
+- * The function expects the i_pages lock to be held.
+- */
+-static void page_cache_delete_batch(struct address_space *mapping,
+-			     struct folio_batch *fbatch)
+-{
+-	XA_STATE(xas, &mapping->i_pages, fbatch->folios[0]->index);
+-	long total_pages = 0;
+-	int i = 0;
+-	struct folio *folio;
+-
+-	mapping_set_update(&xas, mapping);
+-	xas_for_each(&xas, folio, ULONG_MAX) {
+-		if (i >= folio_batch_count(fbatch))
+-			break;
+-
+-		/* A swap/dax/shadow entry got inserted? Skip it. */
+-		if (xa_is_value(folio))
+-			continue;
+-		/*
+-		 * A page got inserted in our range? Skip it. We have our
+-		 * pages locked so they are protected from being removed.
+-		 * If we see a page whose index is higher than ours, it
+-		 * means our page has been removed, which shouldn't be
+-		 * possible because we're holding the PageLock.
+-		 */
+-		if (folio != fbatch->folios[i]) {
+-			VM_BUG_ON_FOLIO(folio->index >
+-					fbatch->folios[i]->index, folio);
+-			continue;
+-		}
+-
+-		WARN_ON_ONCE(!folio_test_locked(folio));
+-
+-		folio->mapping = NULL;
+-		/* Leave folio->index set: truncation lookup relies on it */
+-
+-		i++;
+-		xas_store(&xas, NULL);
+-		total_pages += folio_nr_pages(folio);
+-	}
+-	mapping->nrpages -= total_pages;
+-}
+-
+-void delete_from_page_cache_batch(struct address_space *mapping,
+-				  struct folio_batch *fbatch)
+-{
+-	int i;
+-
+-	if (!folio_batch_count(fbatch))
+-		return;
+-
+-	spin_lock(&mapping->host->i_lock);
+-	xa_lock_irq(&mapping->i_pages);
+-	for (i = 0; i < folio_batch_count(fbatch); i++) {
+-		struct folio *folio = fbatch->folios[i];
+-
+-		trace_mm_filemap_delete_from_page_cache(folio);
+-		filemap_unaccount_folio(mapping, folio);
+-	}
+-	page_cache_delete_batch(mapping, fbatch);
+-	xa_unlock_irq(&mapping->i_pages);
+-	if (mapping_shrinkable(mapping))
+-		inode_lru_list_add(mapping->host);
+-	spin_unlock(&mapping->host->i_lock);
+-
+-	for (i = 0; i < folio_batch_count(fbatch); i++)
+-		filemap_free_folio(mapping, fbatch->folios[i]);
+-}
+-
+ static int filemap_writeback(struct address_space *mapping, loff_t start,
+ 		loff_t end, enum writeback_sync_modes sync_mode,
+ 		long *nr_to_write)
+diff --git a/mm/filemap_batch.c b/mm/filemap_batch.c
+index 5054ba82fb838f4cf1c91b845d574e3600454b33..5a15a7c5fd0319e3129debfbb759d48549d3d08c 100644
+--- a/mm/filemap_batch.c
++++ b/mm/filemap_batch.c
+@@ -1,11 +1,14 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /* Page-cache batch helpers from mm/filemap.c and mm/swap.c. */
++#include <linux/backing-dev.h>
+ #include <linux/dax.h>
+ #include <linux/folio_batch.h>
+ #include <linux/sched.h>
+ #include <linux/shmem_fs.h>
+ 
+ #include <linux/swap.h>
++#include <linux/writeback.h>
++#include <trace/events/filemap.h>
+ 
+ #include "filemap_batch.h"
+ #include "internal.h"
+@@ -455,3 +458,220 @@ int filemap_fdatawait_keep_errors(struct address_space *mapping)
+ 	return filemap_check_and_keep_errors(mapping);
+ }
+ EXPORT_SYMBOL(filemap_fdatawait_keep_errors);
++
++static void page_cache_delete(struct address_space *mapping,
++				   struct folio *folio, void *shadow)
++{
++	XA_STATE(xas, &mapping->i_pages, folio->index);
++	long nr = 1;
++
++	mapping_set_update(&xas, mapping);
++
++	xas_set_order(&xas, folio->index, folio_order(folio));
++	nr = folio_nr_pages(folio);
++
++	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
++
++	xas_store(&xas, shadow);
++	xas_init_marks(&xas);
++
++	folio->mapping = NULL;
++	/* Leave folio->index set: truncation lookup relies upon it */
++	mapping->nrpages -= nr;
++}
++
++static void filemap_unaccount_folio(struct address_space *mapping,
++		struct folio *folio)
++{
++	long nr;
++
++	VM_BUG_ON_FOLIO(folio_mapped(folio), folio);
++	if (!IS_ENABLED(CONFIG_DEBUG_VM) && unlikely(folio_mapped(folio))) {
++		pr_alert("BUG: Bad page cache in process %s  pfn:%05lx\n",
++			 current->comm, folio_pfn(folio));
++		dump_page(&folio->page, "still mapped when deleted");
++		dump_stack();
++		add_taint(TAINT_BAD_PAGE, LOCKDEP_NOW_UNRELIABLE);
++
++		if (mapping_exiting(mapping) && !folio_test_large(folio)) {
++			int mapcount = folio_mapcount(folio);
++
++			if (folio_ref_count(folio) >= mapcount + 2) {
++				/*
++				 * All vmas have already been torn down, so it's
++				 * a good bet that actually the page is unmapped
++				 * and we'd rather not leak it: if we're wrong,
++				 * another bad page check should catch it later.
++				 */
++				atomic_set(&folio->_mapcount, -1);
++				folio_ref_sub(folio, mapcount);
++			}
++		}
++	}
++
++	/* hugetlb folios do not participate in page cache accounting. */
++	if (folio_test_hugetlb(folio))
++		return;
++
++	nr = folio_nr_pages(folio);
++
++	lruvec_stat_mod_folio(folio, NR_FILE_PAGES, -nr);
++	if (folio_test_swapbacked(folio)) {
++		lruvec_stat_mod_folio(folio, NR_SHMEM, -nr);
++		if (folio_test_pmd_mappable(folio))
++			lruvec_stat_mod_folio(folio, NR_SHMEM_THPS, -nr);
++	} else if (folio_test_pmd_mappable(folio)) {
++		lruvec_stat_mod_folio(folio, NR_FILE_THPS, -nr);
++	}
++	if (test_bit(AS_KERNEL_FILE, &folio->mapping->flags))
++		mod_node_page_state(folio_pgdat(folio),
++				    NR_KERNEL_FILE_PAGES, -nr);
++
++	/*
++	 * At this point folio must be either written or cleaned by
++	 * truncate.  Dirty folio here signals a bug and loss of
++	 * unwritten data - on ordinary filesystems.
++	 *
++	 * But it's harmless on in-memory filesystems like tmpfs; and can
++	 * occur when a driver which did get_user_pages() sets page dirty
++	 * before putting it, while the inode is being finally evicted.
++	 *
++	 * Below fixes dirty accounting after removing the folio entirely
++	 * but leaves the dirty flag set: it has no effect for truncated
++	 * folio and anyway will be cleared before returning folio to
++	 * buddy allocator.
++	 */
++	if (WARN_ON_ONCE(folio_test_dirty(folio) &&
++			 mapping_can_writeback(mapping)))
++		folio_account_cleaned(folio, inode_to_wb(mapping->host));
++}
++
++/*
++ * Delete a page from the page cache and free it. Caller has to make
++ * sure the page is locked and that nobody else uses it - or that usage
++ * is safe.  The caller must hold the i_pages lock.
++ */
++void __filemap_remove_folio(struct folio *folio, void *shadow)
++{
++	struct address_space *mapping = folio->mapping;
++
++	trace_mm_filemap_delete_from_page_cache(folio);
++	filemap_unaccount_folio(mapping, folio);
++	page_cache_delete(mapping, folio, shadow);
++}
++
++static void filemap_free_folio(const struct address_space *mapping,
++		struct folio *folio)
++{
++	void (*free_folio)(struct folio *);
++
++	free_folio = mapping->a_ops->free_folio;
++	if (free_folio)
++		free_folio(folio);
++
++	folio_put_refs(folio, folio_nr_pages(folio));
++}
++
++/**
++ * filemap_remove_folio - Remove folio from page cache.
++ * @folio: The folio.
++ *
++ * This must be called only on folios that are locked and have been
++ * verified to be in the page cache.  It will never put the folio into
++ * the free list because the caller has a reference on the page.
++ */
++void filemap_remove_folio(struct folio *folio)
++{
++	struct address_space *mapping = folio->mapping;
++
++	BUG_ON(!folio_test_locked(folio));
++	spin_lock(&mapping->host->i_lock);
++	xa_lock_irq(&mapping->i_pages);
++	__filemap_remove_folio(folio, NULL);
++	xa_unlock_irq(&mapping->i_pages);
++	if (mapping_shrinkable(mapping))
++		inode_lru_list_add(mapping->host);
++	spin_unlock(&mapping->host->i_lock);
++
++	filemap_free_folio(mapping, folio);
++}
++
++/*
++ * page_cache_delete_batch - delete several folios from page cache
++ * @mapping: the mapping to which folios belong
++ * @fbatch: batch of folios to delete
++ *
++ * The function walks over mapping->i_pages and removes folios passed in
++ * @fbatch from the mapping. The function expects @fbatch to be sorted
++ * by page index and is optimised for it to be dense.
++ * It tolerates holes in @fbatch (mapping entries at those indices are not
++ * modified).
++ *
++ * The function expects the i_pages lock to be held.
++ */
++static void page_cache_delete_batch(struct address_space *mapping,
++			     struct folio_batch *fbatch)
++{
++	XA_STATE(xas, &mapping->i_pages, fbatch->folios[0]->index);
++	long total_pages = 0;
++	int i = 0;
++	struct folio *folio;
++
++	mapping_set_update(&xas, mapping);
++	xas_for_each(&xas, folio, ULONG_MAX) {
++		if (i >= folio_batch_count(fbatch))
++			break;
++
++		/* A swap/dax/shadow entry got inserted? Skip it. */
++		if (xa_is_value(folio))
++			continue;
++		/*
++		 * A page got inserted in our range? Skip it. We have our
++		 * pages locked so they are protected from being removed.
++		 * If we see a page whose index is higher than ours, it
++		 * means our page has been removed, which shouldn't be
++		 * possible because we're holding the PageLock.
++		 */
++		if (folio != fbatch->folios[i]) {
++			VM_BUG_ON_FOLIO(folio->index >
++					fbatch->folios[i]->index, folio);
++			continue;
++		}
++
++		WARN_ON_ONCE(!folio_test_locked(folio));
++
++		folio->mapping = NULL;
++		/* Leave folio->index set: truncation lookup relies on it */
++
++		i++;
++		xas_store(&xas, NULL);
++		total_pages += folio_nr_pages(folio);
++	}
++	mapping->nrpages -= total_pages;
++}
++
++void delete_from_page_cache_batch(struct address_space *mapping,
++				  struct folio_batch *fbatch)
++{
++	int i;
++
++	if (!folio_batch_count(fbatch))
++		return;
++
++	spin_lock(&mapping->host->i_lock);
++	xa_lock_irq(&mapping->i_pages);
++	for (i = 0; i < folio_batch_count(fbatch); i++) {
++		struct folio *folio = fbatch->folios[i];
++
++		trace_mm_filemap_delete_from_page_cache(folio);
++		filemap_unaccount_folio(mapping, folio);
++	}
++	page_cache_delete_batch(mapping, fbatch);
++	xa_unlock_irq(&mapping->i_pages);
++	if (mapping_shrinkable(mapping))
++		inode_lru_list_add(mapping->host);
++	spin_unlock(&mapping->host->i_lock);
++
++	for (i = 0; i < folio_batch_count(fbatch); i++)
++		filemap_free_folio(mapping, fbatch->folios[i]);
++}
