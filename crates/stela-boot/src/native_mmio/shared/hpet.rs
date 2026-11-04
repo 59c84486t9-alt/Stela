@@ -2,10 +2,17 @@
 //! The immutable CPU/root pin survives only the checked RAM ownership join;
 //! this owner grants no absent-RAM or mutable root-publication permission.
 use super::*;
-use crate::{engine::host::RootIdentity, native_clock::hpet::Descriptor};
+use crate::{
+    engine::host::RootIdentity,
+    native_clock::{HpetCounter, hpet::Descriptor},
+};
+use alloc::rc::Rc;
 use core::mem::ManuallyDrop;
 use stela_drivers::{
-    bus::mmio::owned::{Mapping, ResourceId},
+    bus::{
+        mmio::owned::{Mapping, ResourceId},
+        pci::power::{self, Timer},
+    },
     platform::work::WorkError,
 };
 
@@ -104,7 +111,76 @@ fn unavailable<T>(_: T) -> WorkError {
     WorkError::Unavailable
 }
 
+pub(super) struct PciMinimum(HpetCounter);
+
+// SAFETY: the retained native HPET checks the original CPU, root, power
+// eligibility and live controls. The lower bound on its actual tick delta
+// supplies the minimum independently of the driver's nominal deadline clock.
+unsafe impl Timer for PciMinimum {
+    fn check(&self) -> Result<(), power::Error> {
+        self.0.check_process().map_err(|_| power::Error::Clock)?;
+        let ticks = self
+            .0
+            .ticks_for_minimum_ns(60_000_000_000)
+            .map_err(|_| power::Error::Clock)?;
+        let before = self.0.read_irq().map_err(|_| power::Error::Clock)?;
+        let after = self
+            .0
+            .progress_after(before)
+            .map_err(|_| power::Error::Clock)?;
+        if after <= before || after.checked_add(ticks).is_none() {
+            return Err(power::Error::Clock);
+        }
+        Ok(())
+    }
+
+    fn wait_us(&self, microseconds: u64) -> Result<(), power::Error> {
+        self.0.check_process().map_err(|_| power::Error::Clock)?;
+        let minimum_ns = microseconds.checked_mul(1000).ok_or(power::Error::Clock)?;
+        let ticks = self
+            .0
+            .ticks_for_minimum_ns(minimum_ns)
+            .map_err(|_| power::Error::Clock)?;
+        let start = self.0.read_irq().map_err(|_| power::Error::Clock)?;
+        let target = start.checked_add(ticks).ok_or(power::Error::Clock)?;
+        let mut now = start;
+        while now < target {
+            let next = self
+                .0
+                .progress_after(now)
+                .map_err(|_| power::Error::Interrupted)?;
+            if next <= now {
+                return Err(power::Error::Interrupted);
+            }
+            now = next;
+        }
+        Ok(())
+    }
+}
+
 impl Source {
+    /// # Safety
+    /// The original BSP keeps this whole HPET block and all root/backing
+    /// owners until shutdown. No firmware, SMM or other HPET user may resume.
+    pub(crate) unsafe fn install_pci_clock(&self) -> Result<(), WorkError> {
+        if self.pci_clock.get().is_some() {
+            return Err(WorkError::Busy);
+        }
+        // SAFETY: same exclusive controller and original root identity.
+        let owned = unsafe { self.take_hpet(self.identity.clone()) }.map_err(unavailable)?;
+        let counter = HpetCounter::attach_native_exclusive(owned)?;
+        self.pci_clock
+            .set(Rc::new(PciMinimum(counter)))
+            .map_err(|_| WorkError::Busy)?;
+        self.pci_minimum().map(drop)
+    }
+
+    pub(crate) fn pci_minimum(&self) -> Result<Rc<dyn Timer>, WorkError> {
+        let timer = self.pci_clock.get().ok_or(WorkError::Unavailable)?;
+        timer.check().map_err(unavailable)?;
+        Ok(timer.clone())
+    }
+
     /// # Safety
     /// The post-EBS BSP dispatcher owns this entire original captured
     /// controller and rounded page, including every firmware/SMM/native route,

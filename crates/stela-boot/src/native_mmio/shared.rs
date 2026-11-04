@@ -381,6 +381,7 @@ pub(crate) struct Source {
     authority: Authority,
     window: Option<super::Window>,
     verified_framebuffer: core::cell::OnceCell<crate::pci_io::FramebufferSource>,
+    pci_clock: core::cell::OnceCell<alloc::rc::Rc<hpet::PciMinimum>>,
     /// Each claimed ECAM bus, by its window and bus.
     buses: core::cell::RefCell<Vec<Bus>>,
     ioapics: core::cell::RefCell<Vec<(crate::native_irq::madt::Unit, Arc<IoapicUnit>)>>,
@@ -512,6 +513,7 @@ impl Source {
             authority,
             window,
             verified_framebuffer: core::cell::OnceCell::new(),
+            pci_clock: core::cell::OnceCell::new(),
             buses: core::cell::RefCell::new(Vec::new()),
             ioapics: core::cell::RefCell::new(Vec::new()),
         })

@@ -316,6 +316,13 @@ pub struct Run {
     /// Expose QEMU's HPET to the owned MMIO or native-clock check.
     #[arg(long, requires = "owned_clock_check")]
     hpet: bool,
+    /// Hand off the entire QEMU HPET to normal system PCI timing.
+    #[arg(long, conflicts_with_all = [
+        "owned_clock_check", "native_dma_check", "native_dma_isolation_check",
+        "native_work_check", "native_irq_work_check", "audio_check", "usb_image",
+        "gdb", "monitor", "icount"
+    ])]
+    native_pci_own_hpet: bool,
     /// Check bounded PM or owned HPET/LAPIC clock, IRQ progress and retirement.
     #[arg(long, group = "owned_clock_check", conflicts_with_all = [
         "native_dma_check", "native_dma_isolation_check", "native_work_check", "native_irq_work_check", "native_mmio_check",
@@ -825,6 +832,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         options.push_str(" --verify-on-read");
     }
     let system = options.split_whitespace().next() == Some("--system");
+    if arguments.native_pci_own_hpet {
+        ensure!(system, "native PCI HPET ownership requires system mode");
+        options.push_str(" --native-pci-own-hpet");
+    }
     if arguments.audio_check.is_some()
         || arguments.network_self_check
         || arguments.network_check.is_some()

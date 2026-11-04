@@ -201,6 +201,12 @@ impl ParseState<'_> {
                 options.usb4_approved.push(uuid);
             }
             EXTERNAL_DISKS => options.external_disks = true,
+            "--native-pci-own-hpet" => {
+                flag(
+                    &mut options.native_pci_own_hpet,
+                    Error::DuplicateNativePciHpet,
+                )?;
+            }
             "--audio-check" => {
                 if options.audio_check.is_some() {
                     return Err(Error::DuplicateAudioCheck);

@@ -22,6 +22,7 @@ pub enum Error {
     Capability,
     Unsupported,
     Clock,
+    Interrupted,
     Read(u16),
     Readback(u16),
     State,

@@ -248,6 +248,12 @@ impl<'a> Services<'a> {
 // and each claimed i801's ports, which nothing else here uses. Firmware
 // memory is the AML provider's own mapping of RAM the map leaves to firmware.
 unsafe impl NativeServices for Services<'_> {
+    fn minimum_delay(
+        &self,
+    ) -> Result<alloc::rc::Rc<dyn stela_drivers::bus::pci::power::Timer>, ServiceError> {
+        self.mmio.pci_minimum().map_err(ServiceError::MinimumDelay)
+    }
+
     fn embedded_controller(
         &self,
     ) -> Result<Option<stela_drivers::platform::ec::capability::Installed<'static>>, ServiceError>

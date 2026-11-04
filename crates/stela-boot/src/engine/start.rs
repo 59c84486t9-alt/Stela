@@ -322,7 +322,7 @@ fn open_host(
         mmio: native_mmio,
         remappers,
         _work: kernel_work,
-    } = start_platform(handoff, &mut host_owner);
+    } = start_platform(handoff, &mut host_owner, options.native_pci_own_hpet);
     // The signing service is asked only during a restore, so a boot that
     // restores nothing leaves the adapter to the guest.
     let restoring = options.install.is_some() || options.restore_source.is_some();
@@ -1953,7 +1953,11 @@ struct Platform {
     _work: Option<&'static kernel_work::KernelWork>,
 }
 
-fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -> Platform {
+fn start_platform(
+    handoff: &'static Handoff,
+    host_owner: &mut host::HostOwner,
+    own_hpet: bool,
+) -> Platform {
     // The owned MMIO permission the host devices' services map through. A
     // host it cannot check is reported, and those services refuse.
     // SAFETY: this boot's capture, on the installed boot processor before
@@ -1965,6 +1969,21 @@ fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -
         })
         .ok()
         .map(|source| &*alloc::boxed::Box::leak(alloc::boxed::Box::new(source)));
+    if own_hpet {
+        let clock = native_mmio
+            .ok_or(stela_drivers::platform::work::WorkError::Unavailable)
+            .and_then(|source| {
+                // SAFETY: the explicit whole-controller handoff excludes all
+                // firmware/SMM and other HPET users through shutdown.
+                unsafe { source.install_pci_clock() }
+            });
+        match clock {
+            Ok(()) => output::arguments(format_args!("NATIVE PCI HPET retained\n")),
+            Err(error) => {
+                output::arguments(format_args!("NATIVE PCI HPET unavailable: {error:?}\n"))
+            }
+        }
+    }
     match host_owner
         .root_identity()
         .map_err(|_| stela_drivers::bus::irq::IrqError::WrongCpu)

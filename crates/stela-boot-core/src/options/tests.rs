@@ -2,6 +2,22 @@ use super::*;
 use alloc::{format, string::ToString, vec};
 
 #[test]
+fn native_pci_hpet_handoff_round_trips_and_excludes_diagnostics() {
+    let text = "--system --native-pci-own-hpet";
+    let options = System::parse(text).unwrap();
+    assert!(options.native_pci_own_hpet);
+    assert_eq!(System::parse(&options.to_string()), Ok(options));
+    assert_eq!(
+        System::parse(&format!("{text} --native-pci-own-hpet")),
+        Err(Error::DuplicateNativePciHpet)
+    );
+    assert_eq!(
+        System::parse(&format!("{text} --native-mmio-check")),
+        Err(Error::Constraint(Constraint::NativePciHpetExclusive))
+    );
+}
+
+#[test]
 fn diagnostic_options_are_typed() {
     for text in ["--system", "--system --wifi --native-memory-check"] {
         assert_eq!(System::parse(text).unwrap().diagnostic_option(), None);

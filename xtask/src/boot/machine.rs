@@ -102,7 +102,10 @@ pub(super) fn command(arguments: &Run, options: MachineOptions<'_>) -> Process {
     });
     command
         .arg("-machine")
-        .arg(qemu_machine(keyboard, arguments.hpet))
+        .arg(qemu_machine(
+            keyboard,
+            arguments.hpet || arguments.native_pci_own_hpet,
+        ))
         .args([
             "-accel",
             qemu_accelerator(arguments.icount, arguments.kvm),

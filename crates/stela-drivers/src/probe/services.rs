@@ -29,6 +29,7 @@ pub struct ArrivalInventory<'a> {
 /// Why a service refused a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServiceError {
+    MinimumDelay(crate::platform::work::WorkError),
     /// The mount has no such service, such as no ACPI namespace.
     Unavailable,
     /// The mount refuses it, such as a requester its IOMMU cannot isolate.
@@ -40,6 +41,7 @@ pub enum ServiceError {
 impl fmt::Display for ServiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MinimumDelay(error) => write!(f, "minimum delay provider: {error:?}"),
             Self::Unavailable => f.write_str("native resource service unavailable"),
             Self::Refused(why) => f.write_str(why),
             Self::Mapping(error) => write!(f, "native mapping: {error:?}"),
@@ -71,6 +73,13 @@ impl fmt::Display for ServiceError {
 /// RAM through: writable, live in every such context for the program, and
 /// never aliased by a Rust reference.
 pub unsafe trait NativeServices {
+    /// Return the retained physical wait source before device effects.
+    fn minimum_delay(
+        &self,
+    ) -> Result<alloc::rc::Rc<dyn crate::bus::pci::power::Timer>, ServiceError> {
+        Err(ServiceError::Unavailable)
+    }
+
     /// Keep the original configuration and root path for the owning driver's
     /// cold vendor preparation. PCI controls are gated, but no engine stop,
     /// posted-write completion or private domain is granted. The first attach

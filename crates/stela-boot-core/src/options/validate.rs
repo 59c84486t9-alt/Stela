@@ -8,6 +8,9 @@ pub(super) fn system(options: &System) -> Result<(), Error> {
     install(options)?;
     boot_selection(options)?;
     dram(options)?;
+    if options.native_pci_own_hpet && options.diagnostic_option().is_some() {
+        return Err(Error::Constraint(Constraint::NativePciHpetExclusive));
+    }
     clock(options)?;
     Ok(())
 }
