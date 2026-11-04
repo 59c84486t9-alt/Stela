@@ -47,6 +47,12 @@ const OWNED_CONFIG_DSDT_HASH: [u8; 32] = [
     0x20, 0xc1, 0x76, 0xc7, 0x6d, 0xdc, 0xcc, 0x1f, 0x50, 0x22, 0xce, 0xd4, 0x94, 0x27, 0x5c, 0x36,
     0x94, 0xb0, 0x99, 0x81, 0x65, 0x80, 0x8a, 0xae, 0x0e, 0x88, 0x79, 0x22, 0x68, 0xcc, 0x3d, 0xb4,
 ];
+// QEMU 10.2.1 Q35/TCG acceptance input, captured and evaluated independently.
+// See docs/research/native-owned-pci-config-route-2026-10-29.md.
+const QEMU_10_DSDT_HASH: [u8; 32] = [
+    0x37, 0x2c, 0xa3, 0x72, 0xdf, 0x1e, 0x4f, 0xa4, 0x45, 0x11, 0x1b, 0x4f, 0x82, 0xb8, 0xbc, 0x66,
+    0x85, 0xe2, 0x5e, 0x5a, 0xa6, 0x4c, 0x6e, 0xd0, 0x4b, 0xd6, 0x59, 0xc3, 0xb9, 0x2a, 0x4f, 0x4d,
+];
 const LINE: LineRoute = LineRoute {
     gsi: 22,
     polarity: Polarity::High,
@@ -110,10 +116,12 @@ impl Prepared {
         // after EBS.
         let dsdt = unsafe { acpi::table(address) }.map_err(|e| refuse!("fixture DSDT: {e}", ?e))?;
         let dsdt_hash = Sha256::digest(dsdt).into();
-        if dsdt.len() != 8098
-            || &dsdt[..4] != b"DSDT"
-            || ![DSDT_HASH, INTEL_DSDT_HASH, OWNED_CONFIG_DSDT_HASH].contains(&dsdt_hash)
-        {
+        let evaluated = match dsdt.len() {
+            8098 => [DSDT_HASH, INTEL_DSDT_HASH, OWNED_CONFIG_DSDT_HASH].contains(&dsdt_hash),
+            8110 => dsdt_hash == QEMU_10_DSDT_HASH,
+            _ => false,
+        };
+        if &dsdt[..4] != b"DSDT" || !evaluated {
             return Err(refuse!(
                 "fixture actual DSDT differs from ACPICA route receipt"
             ));
