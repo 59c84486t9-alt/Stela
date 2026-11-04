@@ -21,6 +21,7 @@ use crate::{engine::host, output};
 use alloc::{
     alloc::{Layout, alloc, dealloc},
     boxed::Box,
+    vec::Vec,
 };
 use core::{
     cell::Cell,
@@ -28,7 +29,9 @@ use core::{
     hint,
     ptr::{self, NonNull},
     slice, str,
-    sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicUsize, Ordering, fence},
+    sync::atomic::{
+        AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence,
+    },
 };
 use stela_boot_core::page_window::Cache;
 use stela_drivers::{
@@ -467,9 +470,56 @@ fn submit(operation: Operation) -> i64 {
         unsafe { stack::on_stack(thread.task, &mut call) };
         return result;
     }
+    // An ioctl by its request code; every other request as zero.
+    let code = match operation {
+        Operation::Control { request, .. } => request,
+        _ => 0,
+    };
     let request = Request::new(operation);
+    let posted = host::rdtsc();
     wait(gpu, &request, u64::MAX);
+    let waited = host::rdtsc().wrapping_sub(posted);
+    let key = code.wrapping_add(1);
+    // Slots fill in order and stay claimed, as the gate's call counts do.
+    if let Some(slot) = POSTED.iter().find(|slot| {
+        match slot
+            .0
+            .compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => true,
+            Err(claimed) => claimed == key,
+        }
+    }) {
+        slot.1.fetch_add(1, Ordering::Relaxed);
+        slot.2.fetch_add(waited, Ordering::Relaxed);
+    }
     request.result.load(Ordering::Acquire)
+}
+
+/// Requests posted to the service task since [`take_posted`] by ioctl
+/// request code plus one (one for every other request): how many, and the
+/// TSC ticks their posters waited for them.
+static POSTED: [(AtomicU32, AtomicU64, AtomicU64); 64] =
+    [const { (AtomicU32::new(0), AtomicU64::new(0), AtomicU64::new(0)) }; 64];
+
+/// The requests posted since the last call: each request code with its
+/// count and the ticks they waited, most waited first.
+pub(super) fn take_posted() -> Vec<(u32, u64, u64)> {
+    let mut posted: Vec<_> = POSTED
+        .iter()
+        .filter_map(|slot| {
+            let count = slot.1.swap(0, Ordering::Relaxed);
+            (count != 0).then(|| {
+                (
+                    slot.0.load(Ordering::Relaxed).wrapping_sub(1),
+                    count,
+                    slot.2.swap(0, Ordering::Relaxed),
+                )
+            })
+        })
+        .collect();
+    posted.sort_unstable_by_key(|&(_, _, waited)| core::cmp::Reverse(waited));
+    posted
 }
 
 /// Posts `request` to the service and waits for it, until the host counter

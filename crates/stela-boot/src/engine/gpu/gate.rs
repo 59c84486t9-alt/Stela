@@ -164,7 +164,8 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
             })
         })
         .collect();
-    if taken.is_empty() {
+    let posted = client::take_posted();
+    if taken.is_empty() && posted.is_empty() {
         return;
     }
     taken.sort_unstable_by_key(|&(_, _, held, ..)| core::cmp::Reverse(held));
@@ -180,6 +181,11 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
             micros(longest),
             micros(waited),
         ));
+    }
+    // The host's Linux work the calls asked the boot CPU for, by ioctl.
+    output::arguments(format_args!("\nGPU POSTED request:count/waited_us"));
+    for &(request, count, waited) in posted.iter().take(SHOWN) {
+        output::arguments(format_args!(" {request:#x}:{count}/{}", micros(waited)));
     }
     output::arguments(format_args!("\n"));
 }
