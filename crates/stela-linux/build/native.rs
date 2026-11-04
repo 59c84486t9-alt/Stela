@@ -422,18 +422,24 @@ impl Linux {
                 &archives,
             );
         }
-        // The descriptor fixture uses the original init_task and fdtable
-        // without claiming a native task lease. Only its ELF link wraps current.
+        // These component fixtures use init_task credentials without a native
+        // task lease. Only their ELF links wrap current.
         if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
-            let mut file = build.clone();
-            file.define("STELA_LINUX_FILE_TEST", None)
-                .flag("-Wl,--wrap=stela_linux_current");
-            tests.add(
-                &file,
-                "linux_file",
-                &format!("{COMPAT}/kernel/file.c"),
-                &archives,
-            );
+            for (name, source, define) in [
+                ("linux_file", "file.c", "STELA_LINUX_FILE_TEST"),
+                ("linux_mapping", "mapping.c", "STELA_LINUX_MAPPING_TEST"),
+            ] {
+                let mut fixture = build.clone();
+                fixture
+                    .define(define, None)
+                    .flag("-Wl,--wrap=stela_linux_current");
+                tests.add(
+                    &fixture,
+                    name,
+                    &format!("{COMPAT}/kernel/{source}"),
+                    &archives,
+                );
+            }
         }
         for (name, source, define) in [
             ("linux_printk", "printk.c", "STELA_LINUX_PRINTK_TEST"),
@@ -488,7 +494,6 @@ impl Linux {
                 "catalogue.c",
                 "STELA_LINUX_CATALOGUE_WORKQUEUE_TEST",
             ),
-            ("linux_mapping", "mapping.c", "STELA_LINUX_MAPPING_TEST"),
             ("linux_reclaim", "reclaim.c", "STELA_LINUX_RECLAIM_TEST"),
             ("linux_sort", "sort.c", "STELA_LINUX_SORT_TEST"),
             ("linux_usercopy", "usercopy.c", "STELA_LINUX_USERCOPY_TEST"),

@@ -75,7 +75,8 @@ struct stela_linux_services {
 	 * prot holds x86 page table bits, and map_user returns a negative errno. */
 	int (*map_user)(void *context, void *space, unsigned long address, unsigned long pfn,
 			u64 prot);
-	void (*unmap_user)(void *context, void *space, unsigned long address, size_t size);
+	/* Zero confirms removal and stale-translation retirement. */
+	int (*unmap_user)(void *context, void *space, unsigned long address, size_t size);
 	/* Calibrated x86 TSC rate for BogoMIPS metadata, or zero if unavailable. */
 	u64 (*calibrated_tsc_hz)(void *context);
 	int (*copy_from_kernel_nofault)(void *context, void *to, const void *from, size_t size);

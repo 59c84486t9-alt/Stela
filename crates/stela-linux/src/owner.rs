@@ -137,8 +137,9 @@ pub trait Platform {
     }
     /// Install one page in client `space`. `prot` holds x86 page table bits.
     fn map_user(&self, space: *mut c_void, address: u64, pfn: u64, prot: u64) -> Result<(), Errno>;
-    /// Remove a client's pages.
-    fn unmap_user(&self, space: *mut c_void, address: u64, size: usize);
+    /// Remove a client's pages and confirm that stale translations cannot
+    /// reach them. An error retains the Linux mapping and backing.
+    fn unmap_user(&self, space: *mut c_void, address: u64, size: usize) -> Result<(), Errno>;
 }
 
 /// `struct stela_linux_services`, in that header's order.
@@ -163,7 +164,7 @@ struct Services {
     copy_from_user: unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, u64) -> u64,
     copy_to_user: unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, u64) -> u64,
     map_user: unsafe extern "C" fn(*mut c_void, *mut c_void, u64, u64, u64) -> c_int,
-    unmap_user: unsafe extern "C" fn(*mut c_void, *mut c_void, u64, usize),
+    unmap_user: unsafe extern "C" fn(*mut c_void, *mut c_void, u64, usize) -> c_int,
     calibrated_tsc_hz: unsafe extern "C" fn(*mut c_void) -> u64,
     copy_from_kernel_nofault:
         unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, usize) -> c_int,
@@ -474,9 +475,9 @@ mod trampolines {
         space: *mut c_void,
         address: u64,
         size: usize,
-    ) {
+    ) -> c_int {
         // SAFETY: see the module.
-        unsafe { platform::<P>(context) }.unmap_user(space, address, size);
+        status(unsafe { platform::<P>(context) }.unmap_user(space, address, size))
     }
 }
 
@@ -669,11 +670,12 @@ mod tests {
         fn map_user(&self, _: *mut c_void, _: u64, pfn: u64, _: u64) -> Result<(), Errno> {
             if pfn == 0 { Err(-14) } else { Ok(()) }
         }
-        fn unmap_user(&self, space: *mut c_void, address: u64, size: usize) {
+        fn unmap_user(&self, space: *mut c_void, address: u64, size: usize) -> Result<(), Errno> {
             self.note(std::format!(
                 "unmap user {:#x} {address:#x} {size}",
                 space as usize
             ));
+            Ok(())
         }
     }
 
@@ -809,7 +811,7 @@ mod tests {
             );
             assert_eq!((s.map_user)(context, 8 as *mut c_void, 0x4000, 0, 0), -14);
             assert_eq!((s.map_user)(context, 8 as *mut c_void, 0x4000, 1, 0), 0);
-            (s.unmap_user)(context, 8 as *mut c_void, 0x4000, 4096);
+            assert_eq!((s.unmap_user)(context, 8 as *mut c_void, 0x4000, 4096), 0);
         }
         assert_eq!(
             *owner.platform().events.borrow(),
