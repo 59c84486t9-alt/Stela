@@ -403,19 +403,37 @@ impl StagedOffer {
     /// `bound` is the producer's snapshot of the shared cache limit.
     /// Admission rechecks the store's limit.
     pub fn new(offer: Offer, bound: usize) -> Option<Self> {
+        let (key, bytes) = Self::charge(&offer, bound)?;
+        Some(Self::entry(key, bytes, offer.shared()))
+    }
+
+    /// Stage only the shared emission while leaving its producer's proof
+    /// input available. Admission still checks the live shared bound.
+    pub fn for_writable(offer: &Offer, bound: usize) -> Option<Self> {
+        let (key, bytes) = Self::charge(offer, bound)?;
+        Some(Self::entry(key, bytes, offer.shared_for_proof()))
+    }
+
+    fn charge(offer: &Offer, bound: usize) -> Option<(SharedKey, usize)> {
         if bound == 0 {
             return None;
         }
         let bytes = offer
             .retained_bytes()
             .saturating_add(size_of::<(SharedKey, SharedEntry)>());
-        (bytes <= bound).then(|| Self {
-            key: shared_key(&offer.key(), offer.pc(), &offer.context()),
-            entry: Some(SharedEntry {
-                translation: offer.shared(),
+        (bytes <= bound).then(|| {
+            (
+                shared_key(&offer.key(), offer.pc(), &offer.context()),
                 bytes,
-            }),
+            )
         })
+    }
+
+    fn entry(key: SharedKey, bytes: usize, translation: Arc<SharedTranslation>) -> Self {
+        Self {
+            key,
+            entry: Some(SharedEntry { translation, bytes }),
+        }
     }
 }
 
@@ -605,7 +623,9 @@ impl<'a> Store<'a> {
         }
     }
 
-    fn keep_pending(&mut self, offer: &Offer) {
+    /// Admit the original input for durable proof independently of shared
+    /// emission admission. A writable owner may call both under one lock.
+    pub fn keep_pending(&mut self, offer: &Offer) {
         if !self.reserve_pending(offer) {
             self.counters.dropped += 1;
         }
@@ -1139,6 +1159,56 @@ mod tests {
         assert!(store.accept_shared(&mut staged).is_none());
         assert!(staged.entry.is_some());
         assert!(store.prepared(&key, 0x1000, &context).is_none());
+    }
+
+    #[test]
+    fn writable_staging_preserves_proof_with_and_without_shared_admission() {
+        let translator = translator_id();
+        let key = Digest::of(b"page");
+        let first = offer(0x1_0000_4008, key);
+        let second = offer(0x1_0000_4010, key);
+        let charge = first.retained_bytes() + size_of::<(SharedKey, SharedEntry)>();
+        let mut queue = VecDeque::<SharedKey>::new();
+        queue.try_reserve(1).unwrap();
+        let bound = charge + queue.capacity() * size_of::<SharedKey>();
+        let mut store = Store::new(translator, None).0;
+        store.share(bound);
+
+        let mut staged = StagedOffer::for_writable(&first, bound).unwrap();
+        store.keep_pending(&first);
+        assert!(store.accept_shared(&mut staged).is_none());
+        let owner = Arc::downgrade(&store.prepared(&key, first.pc(), &first.context()).unwrap());
+
+        let mut staged = StagedOffer::for_writable(&second, bound).unwrap();
+        store.keep_pending(&second);
+        let retired = store.accept_shared(&mut staged).unwrap();
+        assert!(Arc::ptr_eq(&retired, &owner.upgrade().unwrap()));
+        assert!(store.prepared(&key, first.pc(), &first.context()).is_none());
+        assert!(store.shared_usage() <= bound);
+        drop(retired);
+        assert!(owner.upgrade().is_none());
+
+        // A live store change may refuse shared publication after staging.
+        let mut staged = StagedOffer::for_writable(&second, bound).unwrap();
+        store.share(0);
+        store.keep_pending(&second);
+        assert!(store.accept_shared(&mut staged).is_none());
+        assert!(staged.entry.is_some());
+        assert!(StagedOffer::for_writable(&first, 0).is_none());
+        assert_eq!(store.pending(), 2);
+        assert_eq!((store.counters.offered, store.counters.dropped), (2, 0));
+
+        // Reuse and eviction are independent of durable proof input.
+        let planned = store.plan(u64::MAX, || true);
+        assert_eq!(
+            (planned.proven, planned.unprovable, planned.unproven),
+            (2, 0, 0)
+        );
+        let bytes = planned.layout.to_vec();
+        let mut next = Store::new(translator, Some(&bytes)).0;
+        let record = next.record(&key).unwrap();
+        assert!(record.find(8, &first.context()).is_some());
+        assert!(record.find(16, &second.context()).is_some());
     }
 
     #[test]

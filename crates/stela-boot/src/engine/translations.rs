@@ -370,6 +370,19 @@ impl Shared {
         let retired = with_boot(|boot| boot.as_mut()?.store.accept_shared(&mut staged));
         drop(retired);
     }
+
+    fn publish_writable(offer: Offer) {
+        let bound = AVAILABLE.shared_bound.load(Ordering::Acquire);
+        let mut staged = StagedOffer::for_writable(&offer, bound);
+        let retired = with_boot(|boot| {
+            let boot = boot.as_mut()?;
+            if boot.partition.is_some() {
+                boot.store.keep_pending(&offer);
+            }
+            boot.store.accept_shared(staged.as_mut()?)
+        });
+        drop(retired);
+    }
 }
 
 impl Translations for Shared {
@@ -424,15 +437,7 @@ impl Translations for Shared {
     fn offer(&mut self, offer: Offer) {
         let capabilities = AVAILABLE.capabilities.load(Ordering::Acquire);
         if capabilities & WRITE_PACK != 0 {
-            with_boot(|boot| {
-                if let Some(boot) = boot {
-                    if boot.partition.is_some() {
-                        boot.store.offer(offer);
-                    } else {
-                        boot.store.lend(offer);
-                    }
-                }
-            });
+            Self::publish_writable(offer);
         } else if capabilities & SHARE_BLOCKS != 0 {
             Self::publish_shared(offer);
         }

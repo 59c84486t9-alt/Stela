@@ -220,6 +220,18 @@ impl Offer {
         })
     }
 
+    /// Writable stores keep the original offer for proof admission. The
+    /// shared cache does not need the offer's separate successor list.
+    pub(crate) fn shared_for_proof(&self) -> Arc<SharedTranslation> {
+        Arc::new(SharedTranslation {
+            emission: Arc::clone(&self.emission),
+            key: self.key,
+            page: self.page,
+            pc: self.pc,
+            context: self.context,
+        })
+    }
+
     /// Its block's stored form: the block compiled again at both probe
     /// addresses of its page, proven to move only by them
     /// ([`translations::prove`](crate::translations::prove)).
