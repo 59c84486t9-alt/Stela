@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 01:32:30 -0500
+Subject: [PATCH] refactor(fork): share original task-list lock and counters
+
+---
+ kernel/fork.c        | 29 -----------------------------
+ kernel/fork_caches.c | 30 ++++++++++++++++++++++++++++++
+ 2 files changed, 30 insertions(+), 29 deletions(-)
+
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 6cd7f9f9790146c2761da1f8e5511b9a9cbda8da..c0cefb5240bb101398ec7d535c3d2e174439c25b 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -130,35 +130,6 @@
+ 
+ #include <kunit/visibility.h>
+ 
+-/*
+- * Protected counters by write_lock_irq(&tasklist_lock)
+- */
+-unsigned long total_forks;	/* Handle normal Linux uptimes. */
+-int nr_threads;			/* The idle threads do not count.. */
+-
+-DEFINE_PER_CPU(unsigned long, process_counts) = 0;
+-
+-__cacheline_aligned DEFINE_RWLOCK(tasklist_lock);  /* outer */
+-
+-#ifdef CONFIG_PROVE_RCU
+-int lockdep_tasklist_lock_is_held(void)
+-{
+-	return lockdep_is_held(&tasklist_lock);
+-}
+-EXPORT_SYMBOL_GPL(lockdep_tasklist_lock_is_held);
+-#endif /* #ifdef CONFIG_PROVE_RCU */
+-
+-int nr_processes(void)
+-{
+-	int cpu;
+-	int total = 0;
+-
+-	for_each_possible_cpu(cpu)
+-		total += per_cpu(process_counts, cpu);
+-
+-	return total;
+-}
+-
+ static inline struct task_struct *alloc_task_struct_node(int node)
+ {
+ 	return kmem_cache_alloc_node(task_struct_cachep, GFP_KERNEL, node);
+diff --git a/kernel/fork_caches.c b/kernel/fork_caches.c
+index de0289cf2151abf7f43742aca47c9e0d12f948df..9e847cd337e45727220137a4b5d301e7b7111dc1 100644
+--- a/kernel/fork_caches.c
++++ b/kernel/fork_caches.c
+@@ -21,6 +21,7 @@
+ #include <linux/nsproxy.h>
+ #include <linux/sched/exec_state.h>
+ #include <linux/sched/signal.h>
++#include <linux/sched/stat.h>
+ #include <linux/sched/task.h>
+ #include <linux/sched/task_stack.h>
+ #include <linux/scs.h>
+@@ -90,6 +91,35 @@ void __init proc_caches_init(void)
+ 	nsproxy_cache_init();
+ }
+ 
++/*
++ * Protected counters by write_lock_irq(&tasklist_lock)
++ */
++unsigned long total_forks;	/* Handle normal Linux uptimes. */
++int nr_threads;			/* The idle threads do not count.. */
++
++DEFINE_PER_CPU(unsigned long, process_counts) = 0;
++
++__cacheline_aligned DEFINE_RWLOCK(tasklist_lock);  /* outer */
++
++#ifdef CONFIG_PROVE_RCU
++int lockdep_tasklist_lock_is_held(void)
++{
++	return lockdep_is_held(&tasklist_lock);
++}
++EXPORT_SYMBOL_GPL(lockdep_tasklist_lock_is_held);
++#endif /* #ifdef CONFIG_PROVE_RCU */
++
++int nr_processes(void)
++{
++	int cpu;
++	int total = 0;
++
++	for_each_possible_cpu(cpu)
++		total += per_cpu(process_counts, cpu);
++
++	return total;
++}
++
+ struct kmem_cache *task_struct_cachep;
+ int max_threads;			/* tunable limit on nr_threads */
+ 
