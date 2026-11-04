@@ -1185,14 +1185,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn maintain(&mut self, maintenance: Maintenance) -> Step {
         match maintenance {
             Maintenance::Tlb(scope) => {
-                let controls = self.cpu.controls(self.cpu.regime());
-                let current = tlbi::Current {
-                    regime: controls.regime,
-                    asid: (controls.regime != mmu::Regime::El2)
-                        .then(|| mmu::current_asid(&controls)),
-                };
                 self.tlb_maintained(
-                    scope.reach(&current),
+                    scope.reach(&self.cpu.tlbi_current()),
                     scope.everywhere(),
                     scope.named_asid(),
                 );

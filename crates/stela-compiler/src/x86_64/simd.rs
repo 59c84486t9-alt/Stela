@@ -28,7 +28,7 @@ mod minmax;
 pub(in crate::x86_64) mod numerical;
 pub(in crate::x86_64) mod precision;
 mod products;
-mod rearrange;
+pub(super) mod rearrange;
 mod reductions;
 mod refinement;
 mod rounding;

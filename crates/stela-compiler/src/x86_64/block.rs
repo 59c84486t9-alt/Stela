@@ -269,7 +269,8 @@ fn emit_selected(
     // register-allocated and clean-load regions' recipes.
     let optimize_regions = optimize_regions && !target.data_independent_timing();
     let fuse_pairs = optimize_regions && frame_loop.is_none() && !fault_table && !pinned;
-    let fuse_hash = !target.data_independent_timing() && (pinned || fuse_pairs);
+    let fuse_simd = !target.data_independent_timing() && (pinned || fuse_pairs);
+    let fuse_reverse_dwords = fuse_simd && target.supports(crate::TargetCpu::Ssse3);
     // Which accesses check the guest range (`guest_range`), and each
     // instruction's checks.
     let ranges = if checks.guest_range && checks.checks_every_access() {
@@ -305,19 +306,31 @@ fn emit_selected(
     let mut side_exits = vec![];
     while cursor < instructions.len() {
         let held = core::mem::replace(&mut after, Held::NOTHING);
-        if fuse_hash
-            && let Some(pair) = super::simd::sha256::HashPair::recognize(&instructions[cursor..])
+        if fuse_simd
+            && let Some(group) = super::simd::sha256::HashGroup::recognize(&instructions[cursor..])
         {
-            let (offsets, result) = pair.emit(code, target);
+            let (offsets, count, result) = group.emit(code, target);
             block.source_map.extend(
-                instructions[cursor..cursor + offsets.len()]
+                instructions[cursor..cursor + count]
                     .iter()
                     .zip(offsets)
                     .map(|(instruction, offset)| (instruction.pc, offset)),
             );
             code.set_instruction(block.source_map.len() - 1);
+            after.xmm0 = result;
+            cursor += count;
+            continue;
+        }
+        if fuse_reverse_dwords
+            && let Some((count, result)) = super::simd::rearrange::emit_reverse_dword_run(
+                code,
+                &mut block.source_map,
+                &instructions[cursor..],
+                target,
+            )
+        {
             after.xmm0 = Some(result);
-            cursor += offsets.len();
+            cursor += count;
             continue;
         }
         // Build the new candidate privately. Rejection leaves both cursor and

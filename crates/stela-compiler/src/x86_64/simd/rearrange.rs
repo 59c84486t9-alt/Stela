@@ -1,12 +1,87 @@
 //! Lane moves and permutes. All inputs are read before the destination is written.
-use super::{Host, commit, packed, read_vector, vector_offset};
+use super::{Host, commit, packed, packed_imm, read_vector, vector_offset};
 use crate::x86_64::asm::{Alu, Code, Cond, Disp, Gpr, Mem, ShiftOp, Size, vector_extensions};
+use crate::x86_64::isa::ShiftOpcode;
 use crate::x86_64::simd::encode::guest;
 use crate::{
-    TargetCpu,
-    aarch64::simd::rearrange::{LaneSource, Operand},
+    GuestAddress, TargetCpu,
+    aarch64::{
+        Instruction, Operation,
+        simd::{
+            Operand as Simd,
+            rearrange::{LaneSource, Operand},
+        },
+    },
 };
 use Gpr::{R8, Rax, Rcx, Rdi, Rdx};
+use alloc::vec::Vec;
+
+const REVERSE_DWORD_BYTES: [u8; 16] = [3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12];
+const SWAP_WORDS_IN_DWORDS: u8 = 0xb1;
+const REVERSE_MASK: u8 = 2;
+
+/// REV32 Vd.16B is a one-source permutation. First swap bytes within
+/// words, then swap the two words of each dword with SSE2 shuffles.
+fn reverse_dwords(code: &mut Code, destination: u8, source: u8) {
+    read_vector(code, source, 0);
+    packed(code, Host::MoveAligned, 1, 0);
+    ShiftOpcode::LeftWord.emit(code, 0, 8);
+    ShiftOpcode::RightWord.emit(code, 1, 8);
+    packed(code, Host::Or, 0, 1);
+    packed_imm(code, Host::ShuffleLowWord, 0, 0, SWAP_WORDS_IN_DWORDS);
+    packed_imm(code, Host::ShuffleHighWord, 0, 0, SWAP_WORDS_IN_DWORDS);
+    commit(code, destination, 0);
+}
+
+fn reverse_dword_operands(instruction: &Instruction) -> Option<(u8, u8)> {
+    match instruction.operation {
+        Operation::Simd(Simd::Rearrange(Operand::Permute {
+            destination,
+            left,
+            selection: REVERSE_DWORD_BYTES,
+            ..
+        })) => Some((destination, left)),
+        _ => None,
+    }
+}
+
+/// Use one SSSE3 mask for a short sequence of REV32 Vd.16B operations.
+/// Each row still owns its frame load and commit, including aliased inputs.
+pub(in crate::x86_64) fn emit_reverse_dword_run(
+    code: &mut Code,
+    source_map: &mut Vec<(GuestAddress, usize)>,
+    instructions: &[Instruction],
+    target: TargetCpu,
+) -> Option<(usize, u8)> {
+    debug_assert!(target.supports(TargetCpu::Ssse3));
+    let [first, second, ..] = instructions else {
+        return None;
+    };
+    reverse_dword_operands(first)?;
+    reverse_dword_operands(second)?;
+    if first.pc.0.checked_add(4) != Some(second.pc.0) {
+        return None;
+    }
+    let mut last = None;
+    for (index, instruction) in instructions.iter().take(4).enumerate() {
+        let Some((destination, source)) = reverse_dword_operands(instruction) else {
+            break;
+        };
+        if first.pc.0.checked_add(index as u64 * 4) != Some(instruction.pc.0) {
+            break;
+        }
+        source_map.push((instruction.pc, code.len()));
+        code.set_instruction(source_map.len() - 1);
+        if index == 0 {
+            constant(code, REVERSE_MASK, REVERSE_DWORD_BYTES);
+        }
+        read_vector(code, source, 0);
+        Host::ByteShuffle.register(code, 0, REVERSE_MASK, target);
+        commit(code, destination, 0);
+        last = Some((index + 1, destination));
+    }
+    last
+}
 
 pub(super) fn constant(code: &mut Code, xmm: u8, bytes: [u8; 16]) {
     // MOVQ from a GPR followed by PUNPCKLQDQ avoids constant-pool relocations.
@@ -145,6 +220,10 @@ fn permutation(
     selection: [u8; 16],
     target: TargetCpu,
 ) {
+    if selection == REVERSE_DWORD_BYTES && !code.constant_time() {
+        reverse_dwords(code, destination, left);
+        return;
+    }
     if target >= TargetCpu::Ssse3 {
         read_vector(code, left, 0);
         read_vector(code, right, 1);
