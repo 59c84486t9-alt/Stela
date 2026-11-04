@@ -222,41 +222,15 @@ unsafe fn check_native_hpet(
     Ok(())
 }
 
-/// Require an already genuine caller-owned notification domain. This checks
-/// presence/liveness only; it creates no domain, ownership or history grant.
-pub(crate) fn require_notification_owner(
-    notification: Option<
-        alloc::sync::Arc<dyn stela_drivers::bus::irq::posted_msi::NotificationDomain>,
-    >,
-) -> Result<alloc::sync::Arc<dyn stela_drivers::bus::irq::posted_msi::NotificationDomain>, Error> {
-    let notification = stage(
-        "original-notification-owner",
-        notification.ok_or(Error::Unavailable),
-    )?;
-    if let Err(error) = notification.check() {
-        crate::output::arguments(format_args!(
-            "CHECK native-mmio REFUSED stage=notification-domain error={error:?}\n"
-        ));
-        return Err(Error::Unavailable);
-    }
-    Ok(notification)
-}
-
 /// # Safety
 /// Explicit native diagnostic owns this post-EBS BSP, all controller
 /// resources and the complete original HPET/LAPIC source. No firmware, SMM,
 /// other CPU or legacy driver owns or accesses HPET control/counter/comparator/
 /// decode/route state or IOAPIC/ECAM during the kernel-image epoch. Caller stops the boot immediately afterward, preserving the
 /// permanently installed Permission/IRQ/clock's physical root owner.
-/// `notification` is the actual retained original CPU/root/controller-format
-/// owner for this SAME handoff. Table/map/timed-CPU data never constructs it.
-pub(crate) unsafe fn check(
-    handoff: &'static Handoff,
-    owner: &mut HostOwner,
-    notification: alloc::sync::Arc<dyn stela_drivers::bus::irq::posted_msi::NotificationDomain>,
-) -> Result<(), Error> {
-    // A checked real input is required even for direct diagnostic callers.
-    let notification = require_notification_owner(Some(notification))?;
+/// The same handoff excludes other writers of every captured remapper until
+/// the last controller readback and notification mapping retirement.
+pub(crate) unsafe fn check(handoff: &'static Handoff, owner: &mut HostOwner) -> Result<(), Error> {
     if handoff.native_resources.cores != 1 || handoff.storage.present {
         return Err(Error::Unavailable);
     }
@@ -265,6 +239,12 @@ pub(crate) unsafe fn check(
     let (source, session) = stage("authority-activate", unsafe {
         ScopedSource::activate(handoff, &root)
     })?;
+    let notification = stage(
+        "original-notification-owner",
+        // SAFETY: same original scope and inactive firmware inventory, with
+        // every format writer excluded for this bounded diagnostic.
+        unsafe { source.pin_inactive_notification(handoff, &session) },
+    )?;
     // SAFETY: diagnostic's complete post-EBS wholeblock handoff excludes
     // firmware/SMM/native comparator/counter/decode/route owners. Original SDT
     // and idle register values alone are not that physical ownership proof.
@@ -298,7 +278,7 @@ pub(crate) unsafe fn check(
                 &execution,
                 source.authority(),
                 source.madt(),
-                notification,
+                notification.clone(),
             )
         }
         .map_err(|error| {
@@ -367,6 +347,9 @@ pub(crate) unsafe fn check(
         irq.recheck_firmware_lines().map_err(failed),
     )?;
     drop(irq);
+    // SAFETY: the diagnostic published no contributor. Dropping the only
+    // IOAPIC root ended all notification-domain users before map withdrawal.
+    stage("notification-retire", unsafe { notification.retire() })?;
     source.verify_only_hpet(counter.owner().map_err(failed)?)?;
     let mut reused = source.authority().map(
         ecam,

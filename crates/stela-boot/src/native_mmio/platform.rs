@@ -1,5 +1,7 @@
 use super::*;
 mod hpet;
+#[cfg(feature = "diagnostics")]
+mod notification;
 mod publication;
 use crate::{
     engine::host::{MmioRoots, RootContext, RootExecution, RootProcessScope},

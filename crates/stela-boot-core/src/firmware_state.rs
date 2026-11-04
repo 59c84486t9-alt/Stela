@@ -286,10 +286,23 @@ pub enum Failure {
 
 /// Read the unit's state without changing it.
 pub fn inspect(kind: Kind, window: &impl Window) -> Found {
+    inspect_registers(
+        kind,
+        |offset| window.read32(offset),
+        |offset| window.read64(offset),
+    )
+}
+
+/// Read the original inactive-state registers without a writable transport.
+pub fn inspect_registers(
+    kind: Kind,
+    read32: impl Fn(usize) -> u32,
+    read64: impl Fn(usize) -> u64,
+) -> Found {
     match kind {
         Kind::Vtd => {
-            let status = window.read32(GSTS);
-            let protected = window.read32(PMEN);
+            let status = read32(GSTS);
+            let protected = read32(PMEN);
             if status == u32::MAX || protected == u32::MAX {
                 Found::Unreadable
             } else if status & (TRANSLATION | QUEUED_INVALIDATION | INTERRUPT_REMAP) != 0
@@ -301,8 +314,8 @@ pub fn inspect(kind: Kind, window: &impl Window) -> Found {
             }
         }
         Kind::AmdVi => {
-            let control = window.read64(CONTROL);
-            let status = window.read64(STATUS);
+            let control = read64(CONTROL);
+            let status = read64(STATUS);
             if control == u64::MAX {
                 Found::Unreadable
             } else if control & AMD_ACTIVE != 0 || status != u64::MAX && status & AMD_RUNNING != 0 {

@@ -24,6 +24,11 @@ pub(crate) struct FirmwareUnits {
 pub(crate) struct InactiveFirmwareUnits(Option<Units>);
 
 impl InactiveFirmwareUnits {
+    #[cfg(feature = "diagnostics")]
+    pub(crate) fn original_units(&self) -> Option<&[firmware_state::Unit]> {
+        self.0.as_ref().map(Units::as_slice)
+    }
+
     pub(crate) fn contains(&self, kind: Kind, segment: u16, base: u64) -> bool {
         let original = firmware_state::Unit {
             kind,
