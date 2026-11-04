@@ -738,8 +738,15 @@ pub struct Submission {
     /// The started commands: each tag, a read's offset in the data, and
     /// whether it is a flush.
     running: Vec<(u32, usize, bool)>,
-    data: Option<Vec<u8>>,
+    read: Option<ReadData>,
     failed: Option<BlockError>,
+}
+
+/// A read can take ownership of a whole command result. Only a split read
+/// needs an assembly buffer.
+struct ReadData {
+    bytes: usize,
+    data: Option<Vec<u8>>,
 }
 
 /// New commands admitted by one polling call, including synchronous execution.
@@ -748,14 +755,17 @@ const POLL_ADMISSIONS: usize = 64;
 impl Submission {
     pub fn new(request: Request, identity: &Identity) -> Result<Self, BlockError> {
         let plan = Plan::new(request, identity)?;
-        let data = match &plan.request {
-            Request::Read { bytes, .. } => Some(vec![0; *bytes]),
+        let read = match &plan.request {
+            Request::Read { bytes, .. } => Some(ReadData {
+                bytes: *bytes,
+                data: None,
+            }),
             _ => None,
         };
         Ok(Self {
             commands: vec![plan].into_iter().flatten().peekable(),
             running: Vec::new(),
-            data,
+            read,
             failed: None,
         })
     }
@@ -776,7 +786,7 @@ impl Submission {
         Ok(Self {
             commands: plans.into_iter().flatten().peekable(),
             running: Vec::new(),
-            data: None,
+            read: None,
             failed: None,
         })
     }
@@ -841,15 +851,23 @@ impl Submission {
         }
         Some(match self.failed.take() {
             Some(error) => Err(error),
-            None => Ok(self.data.take()),
+            None => Ok(self
+                .read
+                .take()
+                .map(|read| read.data.unwrap_or_else(|| vec![0; read.bytes]))),
         })
     }
 
     fn completed(&mut self, offset: usize, result: Finished) {
         match result {
             Ok(Some(bytes)) => {
-                if let Some(data) = self.data.as_mut() {
-                    data[offset..offset + bytes.len()].copy_from_slice(&bytes);
+                if let Some(read) = &mut self.read {
+                    if read.data.is_none() && offset == 0 && bytes.len() == read.bytes {
+                        read.data = Some(bytes);
+                    } else {
+                        let data = read.data.get_or_insert_with(|| vec![0; read.bytes]);
+                        data[offset..offset + bytes.len()].copy_from_slice(&bytes);
+                    }
                 }
             }
             Ok(None) => {}
