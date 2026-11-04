@@ -69,6 +69,10 @@ void inode_set_bytes(struct inode *inode, loff_t bytes)
 extern struct kmem_cache *__filp_cache;
 struct file *alloc_empty_file(int flags, const struct cred *cred);
 void file_free(struct file *file);
+void __fput(struct file *file);
+
+/* Private provenance for compatibility inode/dentry allocations. */
+#define FMODE_STELA_COMPAT ((__force fmode_t)(1U << 31))
 static const struct file_operations empty_file_operations;
 
 /* Takes over the caller's inode reference. */
@@ -85,6 +89,7 @@ static struct file *new_file(struct inode *inode, const struct file_operations *
 		iput(inode);
 		return file;
 	}
+	file->f_mode |= FMODE_STELA_COMPAT;
 	file->f_inode = inode;
 	file->f_mapping = inode->i_mapping;
 	file->f_op = fops ? fops : &empty_file_operations;
@@ -94,6 +99,11 @@ static struct file *new_file(struct inode *inode, const struct file_operations *
 
 static void release(struct file *file)
 {
+	if (!(file->f_mode & FMODE_STELA_COMPAT)) {
+		__fput(file);
+		return;
+	}
+
 	if (file->f_op && file->f_op->release)
 		file->f_op->release(file->f_inode, file);
 	if (file->f_op && S_ISCHR(file->f_inode->i_mode)) {
@@ -469,6 +479,12 @@ int main(void)
 	stela_test_register_pages();
 	files_init();
 	chrdev_init();
+
+	/* An unopened VFS file owns only its file allocation and credentials. */
+	struct file *unopened = alloc_empty_file(O_RDONLY, current_cred());
+	assert(!IS_ERR(unopened) && !unopened->f_inode && !unopened->f_path.dentry);
+	fput(unopened);
+	assert(!file_ref_get(&unopened->f_ref));
 
 	/* Recycle the same type-stable slot without publishing stale fields. */
 	struct file *first = anon_inode_getfile("first", NULL, &opens, O_RDWR);
