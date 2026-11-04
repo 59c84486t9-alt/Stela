@@ -136,6 +136,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/mm/folio_wait.c")),
             PathBuf::from(format!("{LINUX}/mm/folio_fs.c")),
             PathBuf::from(format!("{LINUX}/mm/filemap_batch.c")),
+            PathBuf::from(format!("{LINUX}/mm/filemap_mkwrite.c")),
             PathBuf::from(format!("{LINUX}/mm/readahead.c")),
             PathBuf::from(format!("{LINUX}/mm/fadvise.c")),
             PathBuf::from(format!("{LINUX}/mm/user_prefault.c")),

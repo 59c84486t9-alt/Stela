@@ -154,6 +154,7 @@
 /mm/vmstat.c
 /mm/vmstat_init.c
 /mm/filemap.c
+/mm/filemap_mkwrite.c
 /mm/gup.c
 /mm/user_prefault.c
 /mm/filemap_batch.c
