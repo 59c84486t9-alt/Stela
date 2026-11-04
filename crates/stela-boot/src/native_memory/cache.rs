@@ -1,6 +1,5 @@
 //! The live cache controls behind `stela_boot_core::native_memory::cache`:
 //! CR0/CR3/CR4, PAT and the MTRRs on Intel, the AMD routing image on AMD.
-use alloc::vec::Vec;
 use stela_boot_core::native_memory::cache::{ADDRESS, Policy, Variable, verify_mappings};
 use stela_drivers::bus::dma::memory::MemoryError;
 
@@ -72,35 +71,31 @@ pub(crate) fn verify_writeback(
             Some(unsafe { (address as *const u64).read_volatile() })
         },
     )?;
-    let mut variables = Vec::new();
     let count = msr(MTRR_CAP) as u8;
-    variables
-        .try_reserve_exact(usize::from(count))
-        .map_err(|_| MemoryError::OutOfMemory)?;
-    for index in 0..count {
+    let variables = (0..count).filter_map(|index| {
         let base = msr(MTRR_PHYS_BASE.at(2 * u32::from(index)));
         let mask = msr(MTRR_PHYS_BASE.at(2 * u32::from(index) + 1));
         if mask & VALID == 0 {
-            continue;
+            return None;
         }
         let size = ((!mask) & address_mask) + 4096;
         let start = base & address_mask;
-        if !size.is_power_of_two() || !start.is_multiple_of(size) {
-            return Err(MemoryError::CacheAttributeUnavailable);
-        }
-        variables.push(Variable {
-            range: start..start + size,
-            kind: base as u8,
-        });
-    }
+        Some(if size.is_power_of_two() && start.is_multiple_of(size) {
+            Ok(Variable {
+                range: start..start + size,
+                kind: base as u8,
+            })
+        } else {
+            Err(MemoryError::CacheAttributeUnavailable)
+        })
+    });
     Policy {
         enabled: default & MTRR_ENABLE != 0,
         caches_enabled: cr0 & (1 << 30 | 1 << 29) == 0,
         default_kind: default as u8,
         physical_bits,
-        variables,
     }
-    .writeback(start, bytes)
+    .writeback(start, bytes, variables)
 }
 
 /// AMD's effective DRAM routing is additional to the common PAT/MTRR fields.
