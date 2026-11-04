@@ -347,6 +347,17 @@ fn linked_zero_cycles_overlaps_unknowns_and_unmasked_pointers_are_refused() {
             extended: true
         })
     );
+    let mut gpu = endpoint();
+    ext(&mut gpu, 0x100, 0, 1, 0x140);
+    ext(&mut gpu, 0x140, 0x01, 2, 0x180);
+    ext(&mut gpu, 0x180, 0x15, 1, 0x1c0);
+    ext(&mut gpu, 0x1c0, 0x10, 1, 0);
+    assert_eq!(validate_stopped(&mut gpu), Ok(()));
+    gpu.config().write16(0x1c0 + 8, 1);
+    assert_eq!(
+        validate_stopped(&mut gpu),
+        Err(ClaimError::Active { offset: 0x1c8 })
+    );
     for next in [0x104, 0x101, 0xfff, 0x100, 0x120] {
         let mut function = endpoint();
         ext(&mut function, 0x100, ATS, 1, next);

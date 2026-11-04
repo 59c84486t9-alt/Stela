@@ -227,6 +227,21 @@ pub fn wait_for_pending_transactions<C: ConfigSpace>(
     Ok(())
 }
 
+/// Extended capabilities that report or tune the link and make no request of
+/// their own, by their `pci_regs.h` IDs: the null entry, AER, virtual channels,
+/// the serial number, power budgeting, vendor-specific, ACS, ARI, Resizable BAR
+/// and its VF twin, LTR, secondary PCIe, L1 substates, data link features, the
+/// 16 and 32 GT/s physical layers and lane margining.
+const INERT: [u16; 17] = [
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x0b, 0x0d, 0x0e, 0x15, 0x18, 0x19, 0x1e, 0x24, 0x25, 0x26, 0x27,
+    0x2a,
+];
+/// SR-IOV: inert while its virtual functions, which are requesters, are off.
+const SRIOV: u16 = 0x10;
+/// `PCI_SRIOV_CTRL`, and its `PCI_SRIOV_CTRL_VFE`.
+const SRIOV_CONTROL: u16 = 8;
+const SRIOV_VF_ENABLE: u16 = 1;
+
 fn standard<C: ConfigSpace>(config: &C, status: u16) -> Result<(), ClaimError> {
     if status & regs::STATUS_CAP_LIST == 0 {
         return Ok(());
@@ -303,6 +318,13 @@ fn extended<C: ConfigSpace>(config: &C) -> Result<(), ClaimError> {
     for entry in config.extended_capabilities() {
         let entry = entry?;
         let (offset, id, version) = (entry.offset, entry.id, entry.version);
+        if INERT.contains(&id) {
+            continue;
+        }
+        if id == SRIOV {
+            inactive(config, offset + SRIOV_CONTROL, SRIOV_VF_ENABLE)?;
+            continue;
+        }
         if !matches!(id, ATS | PASID | PRI) {
             return Err(ClaimError::UnsupportedCapability { id, extended: true });
         }

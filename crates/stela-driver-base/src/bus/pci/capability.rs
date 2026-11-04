@@ -454,8 +454,11 @@ impl<R: CapabilityRead> ExtendedCapabilities<R> {
         if header == u32::MAX {
             return Err(CapabilityError::FailedRead { offset }.into());
         }
+        // ID 0 with a version or a next pointer is a null entry, which only
+        // passes the walk on: how a hypervisor hides the list's first entry,
+        // whose offset is fixed, and what Linux's walk skips.
         let id = header as u16;
-        if id == 0 {
+        if header == 0 {
             return Err(CapabilityError::Malformed { offset }.into());
         }
         let (bytes, layout) = self.extent(offset, id)?;

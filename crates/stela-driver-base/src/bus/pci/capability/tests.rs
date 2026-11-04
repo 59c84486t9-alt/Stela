@@ -288,6 +288,17 @@ fn extended_without_configuration_space_is_empty() {
 }
 
 #[test]
+fn extended_walks_through_a_null_entry() {
+    let mut space = Space::new();
+    space.extended(0x100, 0, 0x140);
+    space.extended(0x140, 0x18, 0);
+    assert_eq!(
+        space.walk_extended(),
+        [Ok((0x100, 0, 4)), Ok((0x140, 0x18, 8))]
+    );
+}
+
+#[test]
 fn extended_refuses_loops_overlaps_and_null_entries() {
     let mut space = Space::new();
     space.extended(0x100, 0x0e, 0x104);
