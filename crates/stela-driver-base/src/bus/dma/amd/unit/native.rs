@@ -289,6 +289,8 @@ unsafe impl<P: ColdPlatform, C: UnitConfig> TableHardware for Hardware<P, C> {
 /// have no domain of their own.
 struct Window<P: ColdPlatform, C: UnitConfig> {
     id: DomainId,
+    root: PhysicalAddress,
+    level: TableLevel,
     tree: PageTables<Hardware<P, C>>,
     requesters: Vec<u16>,
 }
@@ -507,6 +509,8 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
         drop(_guard);
         self.window = Some(Window {
             id,
+            root,
+            level,
             tree,
             requesters: covered,
         });
@@ -527,18 +531,20 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
         if !self.coverage[usize::from(rid)] {
             return Err(DmaError::IommuUnavailable);
         }
-        for member in self.group(rid) {
-            let entry = self
-                .table
-                .borrow()
-                .snapshot(member)
-                .map_err(|_| DmaError::InvalidationFailed)?;
-            if entry[0] & 3 == 3
-                && !self.window.as_ref().is_some_and(|window| {
-                    entry[1] as u16 == window.id.value() && window.requesters.contains(&member)
-                })
-            {
-                return Err(DmaError::IommuUnavailable);
+        {
+            let table = self.table.borrow();
+            for member in self.group(rid) {
+                let expected = self
+                    .window
+                    .as_ref()
+                    .filter(|window| window.requesters.contains(&member))
+                    .map(|window| (window.root, window.level, window.id));
+                table
+                    .check_cold_entry(member, expected)
+                    .map_err(|error| match error {
+                        DeviceTableError::ConcurrentWriter => DmaError::IommuUnavailable,
+                        _ => DmaError::InvalidationFailed,
+                    })?;
             }
         }
         self.drain_posted_writes()
