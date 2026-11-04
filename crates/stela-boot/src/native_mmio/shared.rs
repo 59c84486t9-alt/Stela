@@ -174,6 +174,8 @@ impl Platform {
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
+            // The holder may be waiting for this processor's acknowledgement.
+            shootdown::service();
             core::hint::spin_loop();
         }
         Guard(self)
@@ -616,18 +618,20 @@ impl Source {
 }
 
 impl Source {
-    /// Map bus 0's first configuration page, read it, and retire the mapping
-    /// after the other host processors started: the retirement's shootdown
-    /// generation, which every processor acknowledged.
+    /// Map and read the diagnostic's configuration page on the BSP. The
+    /// returned mapping owns the only lease and may be retired on an AP.
     ///
     /// # Safety
     /// The caller owns bus 0's configuration space.
-    pub(crate) unsafe fn check_shootdown(&self) -> Result<u64, Error> {
+    #[cfg(feature = "diagnostics")]
+    pub(crate) unsafe fn check_shootdown_mapping(
+        &self,
+    ) -> Result<(stela_drivers::bus::mmio::owned::Mapping, u32), Error> {
         let windows = stela_runtime::pc::acpi::mcfg(self.platform.wire().mcfg()).map_err(failed)?;
         let window = windows.first().ok_or(Error::Unavailable)?;
         // SAFETY: forwarded from the caller.
         let (_, resource) = unsafe { self.claim_bus(window.segment, window.start_bus) }?;
-        let mut mapping = self.authority.map(
+        let mapping = self.authority.map(
             resource,
             0,
             PAGE as usize,
@@ -635,6 +639,17 @@ impl Source {
             Protection::ReadOnly,
         )?;
         let identity = mapping.read32(0)?;
+        Ok((mapping, identity))
+    }
+
+    /// Retire on the BSP after the APs started. Return the acknowledged generation.
+    ///
+    /// # Safety
+    /// The caller owns bus 0's configuration space.
+    #[cfg(feature = "diagnostics")]
+    pub(crate) unsafe fn check_shootdown(&self) -> Result<u64, Error> {
+        // SAFETY: forwarded from the caller.
+        let (mut mapping, identity) = unsafe { self.check_shootdown_mapping() }?;
         let before = PROCESSORS.requested();
         // SAFETY: the read above was the mapping's only use.
         unsafe { mapping.retire() }?;
