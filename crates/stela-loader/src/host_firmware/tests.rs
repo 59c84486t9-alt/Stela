@@ -450,6 +450,58 @@ fn interruptions_before_manifest_commit_preserve_old_resources_and_allow_retry()
             Manifest::parse(&after).unwrap().images[0].target.revision,
             "v2"
         );
-        assert_eq!(std::fs::read(&previous_object).unwrap(), b"abc");
+        // Committed, the previous package is unreferenced and removed.
+        assert!(!previous_object.parent().unwrap().exists());
+        assert_eq!(Package::read(&destination).unwrap().inventory(), (1, 3));
     }
+}
+
+#[cfg(all(feature = "std", unix))]
+#[test]
+fn publication_removes_unreferenced_packages_but_keeps_other_entries() {
+    let root = tempfile::tempdir().unwrap();
+    let source = package(root.path());
+    let destination = root.path().join("firmware");
+    Package::read(&source)
+        .unwrap()
+        .publish(&destination)
+        .unwrap();
+    let objects = destination.join("objects");
+    // An orphan from an older publication, an interrupted one's partial
+    // directory, and entries publish never creates.
+    let orphan = objects.join("8".repeat(64));
+    let partial = objects.join("0".repeat(64));
+    for directory in [&orphan, &partial] {
+        std::fs::create_dir(directory).unwrap();
+        std::fs::write(directory.join("0.bin"), vec![0; 4096]).unwrap();
+    }
+    std::fs::create_dir(objects.join("notes")).unwrap();
+    let outside = root.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("keep.bin"), b"keep").unwrap();
+    std::os::unix::fs::symlink(&outside, objects.join("f".repeat(64))).unwrap();
+    let mut changed = image();
+    changed["target"]["revision"] = json!("v2");
+    std::fs::write(source.join("manifest.json"), manifest(vec![changed])).unwrap();
+    Package::read(&source)
+        .unwrap()
+        .publish(&destination)
+        .unwrap();
+    let active = Manifest::parse(&std::fs::read(destination.join("manifest.json")).unwrap())
+        .unwrap()
+        .images[0]
+        .path
+        .split('/')
+        .nth(1)
+        .unwrap()
+        .to_owned();
+    let mut left: Vec<_> = std::fs::read_dir(&objects)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    let mut expected = vec![active, "f".repeat(64), "notes".into()];
+    expected.sort();
+    assert_eq!(left, expected);
+    assert_eq!(std::fs::read(outside.join("keep.bin")).unwrap(), b"keep");
 }

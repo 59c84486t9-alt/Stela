@@ -413,6 +413,12 @@ impl Package {
             )?;
             checkpoint(&path)?;
         }
+        // Leftovers that neither the active manifest nor this package names,
+        // so the medium needs room for at most those two.
+        if let Some(mut keep) = active_objects(directory) {
+            keep.push(digest.clone());
+            prune_objects(directory, &keep)?;
+        }
         let mut manifest: serde_json::Value = serde_json::from_slice(&self.manifest).map_err(io)?;
         for (index, bytes) in self.files.iter().enumerate() {
             let path = format!("{object_path}/{index}.bin");
@@ -460,8 +466,52 @@ impl Package {
         Manifest::parse(&manifest)?;
         let destination = directory.join("manifest.json");
         checkpoint(&destination)?;
-        atomic_write(&destination, &manifest)
+        atomic_write(&destination, &manifest)?;
+        // Only now is the previous package unreferenced.
+        prune_objects(directory, &[digest]).map_err(|error| {
+            fail(&format!(
+                "host firmware published; superseded objects remain: {}",
+                error.0
+            ))
+        })
     }
+}
+
+/// The package directories the active manifest names; None without one that
+/// parses, when nothing may be judged unreferenced.
+fn active_objects(directory: &Path) -> Option<Vec<String>> {
+    let bytes = fs::read(directory.join("manifest.json")).ok()?;
+    let manifest = Manifest::parse(&bytes).ok()?;
+    manifest
+        .images
+        .iter()
+        .map(|image| {
+            let (name, _) = image.path.strip_prefix("objects/")?.split_once('/')?;
+            Some(name.to_owned())
+        })
+        .collect()
+}
+
+/// Remove every real package directory under `objects` (named by a manifest
+/// digest, as only `publish` creates them) that `keep` does not name.
+fn prune_objects(directory: &Path, keep: &[String]) -> Result<(), Error> {
+    let objects = directory.join("objects");
+    for entry in fs::read_dir(&objects).map_err(io)? {
+        let entry = entry.map_err(io)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let digest =
+            name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        if !digest || keep.iter().any(|kept| kept == name) {
+            continue;
+        }
+        if fs::symlink_metadata(entry.path()).map_err(io)?.is_dir() {
+            fs::remove_dir_all(entry.path()).map_err(io)?;
+        }
+    }
+    sync_directory(&objects)
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), Error> {
