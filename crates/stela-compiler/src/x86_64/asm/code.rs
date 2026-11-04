@@ -265,6 +265,10 @@ impl Code {
     }
     /// Move the instructions emitted after `at` into a separate buffer.
     pub(crate) fn split_off(&mut self, at: Checkpoint) -> Self {
+        debug_assert!(
+            self.locals.is_none(),
+            "split after local register settlement"
+        );
         assert!(at.bytes <= self.bytes.len() && at.instructions <= self.instructions);
         assert!(
             self.sites
@@ -297,6 +301,7 @@ impl Code {
             instructions: self.instructions - at.instructions,
             sites,
             pinned: self.pinned,
+            locals: None,
             constant_time: self.constant_time,
             linked_block: self.linked_block,
             instruction: self.instruction,
