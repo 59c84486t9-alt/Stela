@@ -57,6 +57,9 @@ impl Reader<'_> {
 
 impl PackedRecovery {
     pub fn new(rows: &[FaultRecovery]) -> Self {
+        if rows.is_empty() {
+            return Self(Box::default());
+        }
         let mut out = Vec::with_capacity(rows.len() * 12 + 2);
         put(&mut out, rows.len() as u64);
         let (mut end, mut pc, mut retired) = (0, 0, 0);
@@ -107,6 +110,9 @@ impl PackedRecovery {
 
     /// The rows given to [`Self::new`].
     pub fn rows(&self) -> Vec<FaultRecovery> {
+        if self.0.is_empty() {
+            return Vec::new();
+        }
         let mut reader = Reader { bytes: &self.0 };
         let count = reader.value() as usize;
         let mut rows = Vec::with_capacity(count);
@@ -159,6 +165,13 @@ impl PackedRecovery {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn empty_tables_keep_no_payload() {
+        let packed = PackedRecovery::new(&[]);
+        assert_eq!(packed.bytes(), 0);
+        assert!(packed.rows().is_empty());
+    }
 
     #[test]
     fn rows_survive_packing_exactly_and_in_order() {

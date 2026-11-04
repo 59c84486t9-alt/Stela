@@ -34,18 +34,21 @@ pub(super) struct StoredOrigin {
 /// An installed block's recovery owner: its code's length and the rows that
 /// locate guest state at each faultable site of it.
 pub(super) struct CodeRecovery {
-    code_bytes: u32,
     rows: Rows,
     #[cfg(test)]
     qualification_attempts: usize,
 }
 
 enum Rows {
-    Qualified(PackedRecovery),
+    Qualified {
+        code_bytes: u32,
+        rows: PackedRecovery,
+    },
     /// A stored record's entry, whose template and portable rows its first
     /// fault reads and emits again to qualify: replaced by the minted rows.
     Stored {
         origin: Arc<StoredOrigin>,
+        code_bytes: u32,
         offset: u16,
     },
     /// A template and portable rows in hand, as a record's entry gives them.
@@ -53,8 +56,14 @@ enum Rows {
     Pending {
         template: Arc<Emission>,
         rows: Box<[UnqualifiedFaultRecovery]>,
+        code_bytes: u32,
     },
 }
+
+// The code length shares the per-variant space of the row storage. Every
+// installed block uses one slot, including those with no guest fault sites.
+#[cfg(not(test))]
+const _: () = assert!(core::mem::size_of::<Option<CodeRecovery>>() <= 24);
 
 /// The installed blocks' recovery owners, by block slot.
 pub(super) struct Owners {
@@ -223,16 +232,23 @@ impl Template {
     pub(super) fn installed(self) -> CodeRecovery {
         let code_bytes = self.emission.block.native.x86_64_code.len() as u32;
         let rows = match (self.origin, self.pending) {
-            (Some((origin, offset)), _) => Rows::Stored { origin, offset },
+            (Some((origin, offset)), _) => Rows::Stored {
+                origin,
+                code_bytes,
+                offset,
+            },
             #[cfg(test)]
             (None, Some(rows)) => Rows::Pending {
                 template: self.emission,
                 rows,
+                code_bytes,
             },
-            _ => Rows::Qualified(PackedRecovery::new(&self.emission.block.fault_recovery)),
+            _ => Rows::Qualified {
+                code_bytes,
+                rows: PackedRecovery::new(&self.emission.block.fault_recovery),
+            },
         };
         CodeRecovery {
-            code_bytes,
             rows,
             #[cfg(test)]
             qualification_attempts: 0,
@@ -243,7 +259,7 @@ impl Template {
 impl CodeRecovery {
     /// The installed code's length.
     pub(super) fn code_bytes(&self) -> usize {
-        self.code_bytes as usize
+        self.rows.code_bytes() as usize
     }
 
     /// Make the owner a stored record's: `template`'s, whose rows are this
@@ -251,20 +267,24 @@ impl CodeRecovery {
     #[cfg(test)]
     pub(super) fn test_make_pending(&mut self, template: Arc<Emission>) {
         let rows = self.test_portable_rows().into_boxed_slice();
-        self.rows = Rows::Pending { template, rows };
+        self.rows = Rows::Pending {
+            template,
+            rows,
+            code_bytes: self.rows.code_bytes(),
+        };
     }
     /// The rows of an actual emitted plan.
     #[cfg(test)]
     pub(super) fn test_rows(&self) -> Vec<FaultRecovery> {
         match &self.rows {
-            Rows::Qualified(rows) => rows.rows(),
+            Rows::Qualified { rows, .. } => rows.rows(),
             _ => panic!("actual emitted plan"),
         }
     }
     /// Change the rows of an actual emitted plan.
     #[cfg(test)]
     pub(super) fn test_edit_rows<T>(&mut self, edit: impl FnOnce(&mut [FaultRecovery]) -> T) -> T {
-        let Rows::Qualified(packed) = &mut self.rows else {
+        let Rows::Qualified { rows: packed, .. } = &mut self.rows else {
             panic!("actual emitted plan");
         };
         let mut rows = packed.rows();
@@ -275,7 +295,7 @@ impl CodeRecovery {
     #[cfg(test)]
     pub(super) fn test_packed_bytes(&self) -> usize {
         match &self.rows {
-            Rows::Qualified(packed) => packed.bytes(),
+            Rows::Qualified { rows, .. } => rows.bytes(),
             _ => panic!("actual emitted plan"),
         }
     }
@@ -284,7 +304,7 @@ impl CodeRecovery {
         match &self.rows {
             Rows::Pending { rows, .. } => rows.to_vec(),
             Rows::Stored { .. } => panic!("explicitly pending fixture"),
-            Rows::Qualified(rows) => rows
+            Rows::Qualified { rows, .. } => rows
                 .rows()
                 .iter()
                 .map(UnqualifiedFaultRecovery::from)
@@ -325,19 +345,19 @@ impl CodeRecovery {
         record: Option<&Record>,
     ) -> Result<Vec<FaultRecovery>, NativeFailureReason> {
         #[cfg(test)]
-        if !matches!(self.rows, Rows::Qualified(_)) {
+        if !matches!(self.rows, Rows::Qualified { .. }) {
             self.qualification_attempts += 1;
         }
-        if let Rows::Stored { origin, offset } = &self.rows {
-            let entry = record
-                .and_then(|record| record.find(*offset, &origin.context))
-                .ok_or(NativeFailureReason::StoredRecord)?;
-            let stored = entry
-                .rebase(origin.page, &entry.input)
-                .ok_or(NativeFailureReason::StoredRecord)?;
-            let block = origin
-                .preparation
-                .qualify_recovery(
+        let block = match &self.rows {
+            Rows::Qualified { rows, .. } => return Ok(rows.rows()),
+            Rows::Stored { origin, offset, .. } => {
+                let entry = record
+                    .and_then(|record| record.find(*offset, &origin.context))
+                    .ok_or(NativeFailureReason::StoredRecord)?;
+                let stored = entry
+                    .rebase(origin.page, &entry.input)
+                    .ok_or(NativeFailureReason::StoredRecord)?;
+                origin.preparation.qualify_recovery(
                     &entry.input,
                     pc,
                     RecoveryTemplate {
@@ -348,31 +368,36 @@ impl CodeRecovery {
                         recovery: &stored.fault_recovery,
                     },
                 )
-                .map_err(NativeFailureReason::Qualification)?;
-            self.rows = Rows::Qualified(PackedRecovery::new(&block.fault_recovery));
+            }
+            #[cfg(test)]
+            Rows::Pending { template, rows, .. } => template.preparation.qualify_recovery(
+                &template.input,
+                pc,
+                RecoveryTemplate {
+                    code: &template.block.native.x86_64_code,
+                    source_map: &template.block.native.source_map,
+                    source_bytes: template.block.source_bytes,
+                    direct_exits: &template.block.direct_exits,
+                    recovery: rows,
+                },
+            ),
         }
-        #[cfg(test)]
-        if let Rows::Pending { template, rows } = &self.rows {
-            let block = template
-                .preparation
-                .qualify_recovery(
-                    &template.input,
-                    pc,
-                    RecoveryTemplate {
-                        code: &template.block.native.x86_64_code,
-                        source_map: &template.block.native.source_map,
-                        source_bytes: template.block.source_bytes,
-                        direct_exits: &template.block.direct_exits,
-                        recovery: rows,
-                    },
-                )
-                .map_err(NativeFailureReason::Qualification)?;
-            self.rows = Rows::Qualified(PackedRecovery::new(&block.fault_recovery));
-        }
-        let Rows::Qualified(rows) = &self.rows else {
-            unreachable!("qualified above");
+        .map_err(NativeFailureReason::Qualification)?;
+        self.rows = Rows::Qualified {
+            code_bytes: self.rows.code_bytes(),
+            rows: PackedRecovery::new(&block.fault_recovery),
         };
-        Ok(rows.rows())
+        Ok(block.fault_recovery)
+    }
+}
+
+impl Rows {
+    fn code_bytes(&self) -> u32 {
+        match *self {
+            Self::Qualified { code_bytes, .. } | Self::Stored { code_bytes, .. } => code_bytes,
+            #[cfg(test)]
+            Self::Pending { code_bytes, .. } => code_bytes,
+        }
     }
 }
 

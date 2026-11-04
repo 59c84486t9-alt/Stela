@@ -92,6 +92,7 @@ fn a_compiled_owner_keeps_only_its_packed_rows() {
 fn exact_lazy_qualification_replaces_portable_bank_with_only_minted_rows() {
     let (preparation, source, compiled) = store_window();
     let expected = compiled.fault_recovery.clone();
+    let code_bytes = compiled.native.x86_64_code.len();
     let template = crate::translations::StoredBlock {
         native: compiled.native,
         source_bytes: compiled.source_bytes,
@@ -103,7 +104,9 @@ fn exact_lazy_qualification_replaces_portable_bank_with_only_minted_rows() {
             .collect(),
     };
     let mut owner = Template::stored(template, source, preparation, None).installed();
+    assert_eq!(owner.code_bytes(), code_bytes);
     assert_eq!(owner.qualify(BASE, None).unwrap(), expected);
+    assert_eq!(owner.code_bytes(), code_bytes);
     assert_eq!(owner.qualification_attempts, 1);
     assert_eq!(owner.qualify(BASE, None).unwrap(), expected);
     assert_eq!(owner.qualification_attempts, 1);
