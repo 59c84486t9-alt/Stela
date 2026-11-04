@@ -896,12 +896,13 @@ impl State {
 
     /// TTBR0 or the lower half's TCR fields changed from `from` to `to`:
     /// detach the lower half from every root and keep it, and attach the
-    /// half kept for `to`, if any.
-    fn switch_lower(&mut self, from: (u64, u64), to: (u64, u64)) {
+    /// half kept for `to`, if any. Return whether any root entry changed,
+    /// in which case the caller must flush the views.
+    fn switch_lower(&mut self, from: (u64, u64), to: (u64, u64)) -> bool {
         self.lower_switches += 1;
         let mut entries = Vec::new();
-        for root in self.all_roots() {
-            for entry in self.lower_entries() {
+        for entry in self.lower_entries() {
+            for root in self.all_roots() {
                 // SAFETY: permanent root frames through the physmap.
                 let slot = unsafe { (layout::physical(root) as *mut u64).add(entry) };
                 // SAFETY: as above.
@@ -914,6 +915,7 @@ impl State {
             }
         }
         self.lower_used = [0; ROOT_ENTRIES / 64];
+        let detached = !entries.is_empty();
         let extents = core::mem::take(&mut self.extents[LOWER]);
         if let Some(half) = self.kept.switch(from, entries, extents, to) {
             self.lower_found += 1;
@@ -923,10 +925,9 @@ impl State {
                 self.lower_used[entry / 64] |= 1 << (entry % 64);
             }
             self.extents[LOWER] = half.extents;
+            return true;
         }
-        // The software TLB is tagged by view, not root.
-        self.tlb.clear();
-        self.reload();
+        detached
     }
 
     /// The lower half's root entries [`State::lower_used`] names.
@@ -952,7 +953,7 @@ impl State {
 
     /// Take the roots of rights `to` from their bank, leaving those of
     /// `from` there: a bank of `to`, or else the least recently used,
-    /// emptied.
+    /// emptied. The caller must flush the views.
     fn switch_bank(&mut self, from: Rights, to: Rights) {
         self.bank_switches += 1;
         let index = match self.banks.iter().position(|bank| bank.rights == Some(to)) {
@@ -979,9 +980,6 @@ impl State {
         core::mem::swap(&mut bank.roots, &mut self.roots);
         bank.rights = Some(from);
         bank.used = self.bank_switches;
-        // The software TLB is tagged by view, not root.
-        self.tlb.clear();
-        self.reload();
     }
 
     /// Every root the shadow fills: the current ones and the banks'.
