@@ -286,7 +286,7 @@ pub(crate) fn page_fault(
     }
     if half == LOWER {
         let entry = tables::index(virtual_page, layout::top_level());
-        state.lower_used[entry / 64] |= 1 << (entry % 64);
+        state.record_lower(root, entry);
     }
     state.extents[half].record(address, translation.size, translation.global);
     // The rest of the leaf's window has the same translation and rights:

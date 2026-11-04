@@ -235,6 +235,8 @@ struct Bank {
     used: u64,
 }
 const ROOTS: usize = 2 * VIEWS;
+const SHADOW_ROOTS: usize = ROOTS * (BANKS + 1);
+const _: () = assert!(SHADOW_ROOTS <= u64::BITS as usize);
 
 /// Root `view`'s TLB context while PCIDE is set.
 const fn view_context(view: usize) -> u64 {
@@ -446,6 +448,9 @@ pub struct State {
     /// The lower half's root entries any root may hold, by index: a switch
     /// of TTBR0 visits these, a few, rather than every entry of the half.
     lower_used: [u64; ROOT_ENTRIES / 64],
+    /// Physical shadow roots that may hold any lower entry, indexed by
+    /// their permanent pool frame after the host root.
+    lower_roots: u64,
     /// Switches of the lower half to another TTBR0, those that found its
     /// half kept, and the kept halves a TLBI or a bank's replacement
     /// dropped.
@@ -558,16 +563,17 @@ pub unsafe fn install(config: Config) -> Result<HostOwner> {
     };
     let host_root = root()?;
     let mut roots = [0; ROOTS];
-    for slot in &mut roots {
-        *slot = root()?;
-    }
     let mut banks = [Bank {
         rights: None,
         roots: [0; ROOTS],
         used: 0,
     }; BANKS];
-    for slot in banks.iter_mut().flat_map(|bank| &mut bank.roots) {
+    let shadow_roots = roots
+        .iter_mut()
+        .chain(banks.iter_mut().flat_map(|bank| &mut bank.roots));
+    for (index, slot) in shadow_roots.enumerate() {
         *slot = root()?;
+        assert_eq!(*slot, host_root + (index as u64 + 1) * PAGE);
     }
     load_root(host_root);
     let apic = Apic::new(
@@ -629,6 +635,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner> {
             lower_globals: None,
             kept: Kept::new(),
             lower_used: [0; ROOT_ENTRIES / 64],
+            lower_roots: 0,
             lower_switches: 0,
             lower_found: 0,
             kept_dropped: 0,
@@ -896,9 +903,14 @@ impl State {
     fn switch_lower(&mut self, from: (u64, u64), to: (u64, u64)) -> [bool; ROOTS] {
         self.lower_switches += 1;
         let mut entries = Vec::new();
-        let mut changed = [false; ROOTS];
+        let mut changed = 0;
+        let lower_roots = core::mem::take(&mut self.lower_roots);
         for entry in self.lower_entries() {
-            for (view, root) in self.all_roots().enumerate() {
+            let mut roots = lower_roots;
+            while roots != 0 {
+                let index = roots.trailing_zeros();
+                roots &= roots - 1;
+                let root = self.host_root + (u64::from(index) + 1) * PAGE;
                 // SAFETY: permanent root frames through the physmap.
                 let slot = unsafe { (layout::physical(root) as *mut u64).add(entry) };
                 // SAFETY: as above.
@@ -907,11 +919,7 @@ impl State {
                     entries.push((root, entry, value));
                     // SAFETY: as above.
                     unsafe { slot.write(0) };
-                    // The active roots precede the banked roots, which
-                    // will flush their views when the bank is selected.
-                    if let Some(affected) = changed.get_mut(view) {
-                        *affected = true;
-                    }
+                    changed |= 1 << index;
                 }
             }
         }
@@ -922,14 +930,29 @@ impl State {
             for &(root, entry, value) in &half.entries {
                 // SAFETY: as above; the half's tables are still the pool's.
                 unsafe { (layout::physical(root) as *mut u64).add(entry).write(value) };
-                self.lower_used[entry / 64] |= 1 << (entry % 64);
-                if let Some(view) = self.roots.iter().position(|&active| active == root) {
-                    changed[view] = true;
-                }
+                self.record_lower(root, entry);
+                changed |= self.lower_root_bit(root);
             }
             self.extents[LOWER] = half.extents;
         }
-        changed
+        if changed == 0 {
+            [false; ROOTS]
+        } else {
+            // Inactive bank roots have no PCID; selecting a bank flushes it.
+            self.roots
+                .map(|root| changed & self.lower_root_bit(root) != 0)
+        }
+    }
+
+    fn lower_root_bit(&self, root: u64) -> u64 {
+        let index = (root - self.host_root) / PAGE - 1;
+        debug_assert!(root.is_multiple_of(PAGE) && index < SHADOW_ROOTS as u64);
+        1 << index
+    }
+
+    fn record_lower(&mut self, root: u64, entry: usize) {
+        self.lower_used[entry / 64] |= 1 << (entry % 64);
+        self.lower_roots |= self.lower_root_bit(root);
     }
 
     /// The lower half's root entries [`State::lower_used`] names.
@@ -1000,6 +1023,7 @@ impl State {
         }
         if half == LOWER {
             self.lower_used = [0; ROOT_ENTRIES / 64];
+            self.lower_roots = 0;
             self.drop_kept();
         }
     }
