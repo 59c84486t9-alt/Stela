@@ -11,6 +11,9 @@ use alloc::{boxed::Box, vec::Vec};
 
 const AFTER_FALLTHROUGH: u8 = 1 << 2;
 const TRANSLATED: u8 = 1 << 3;
+const SEPARATE_PC_DELTA: u8 = 1 << 4;
+const BINDINGS_SHIFT: u32 = 5;
+const LONG_BINDINGS: usize = 7;
 
 fn zigzag(value: i64) -> u64 {
     ((value << 1) ^ (value >> 63)) as u64
@@ -67,27 +70,42 @@ impl PackedRecovery {
             let point = row.retirement;
             let at = point.instruction_pc().0;
             let site = row.site;
-            put(&mut out, zigzag(row.start as i64 - end));
-            put(&mut out, (row.end - row.start) as u64);
-            put(&mut out, zigzag(at.wrapping_sub(pc) as i64));
-            put(
-                &mut out,
-                zigzag(i64::from(point.retired_before()) - retired),
-            );
+            let pc_delta = at.wrapping_sub(pc) as i64;
+            let retired_delta = i64::from(point.retired_before()) - retired;
+            let separate_pc = pc_delta != retired_delta * 4;
+            let inline_bindings = row.bindings.len().min(LONG_BINDINGS);
+            let start = zigzag(row.start as i64 - end);
+            let span = (row.end - row.start) as u64;
+            let delta = zigzag(retired_delta);
             let translated = site.translated_access();
-            out.push(
-                site.kind() as u8
-                    | if point.phase() == RetirementPhase::AfterFallthrough {
-                        AFTER_FALLTHROUGH
-                    } else {
-                        0
-                    }
-                    | if translated.is_some() { TRANSLATED } else { 0 },
-            );
+            let tag = site.kind() as u8
+                | if point.phase() == RetirementPhase::AfterFallthrough {
+                    AFTER_FALLTHROUGH
+                } else {
+                    0
+                }
+                | if translated.is_some() { TRANSLATED } else { 0 }
+                | if separate_pc { SEPARATE_PC_DELTA } else { 0 }
+                | (inline_bindings as u8) << BINDINGS_SHIFT;
+            if (start | span | delta) < 0x80 {
+                out.extend_from_slice(&[start as u8, span as u8, delta as u8, tag]);
+            } else {
+                put(&mut out, start);
+                put(&mut out, span);
+                put(&mut out, delta);
+                out.push(tag);
+            }
+            // The PC normally advances by four bytes for each instruction
+            // retired. Keep a separate delta only when the row differs.
+            if separate_pc {
+                put(&mut out, zigzag(pc_delta));
+            }
             if let Some(access) = translated {
                 out.extend_from_slice(&[access.bytes, access.flags]);
             }
-            put(&mut out, row.bindings.len() as u64);
+            if inline_bindings == LONG_BINDINGS {
+                put(&mut out, row.bindings.len() as u64);
+            }
             for binding in &row.bindings {
                 out.push(binding.guest);
                 put(
@@ -120,11 +138,23 @@ impl PackedRecovery {
         for _ in 0..count {
             let start = end + unzigzag(reader.value());
             let row_end = start + reader.value() as i64;
-            pc = u64::wrapping_add(pc, unzigzag(reader.value()) as u64);
-            retired += unzigzag(reader.value());
+            let retired_delta = unzigzag(reader.value());
+            retired += retired_delta;
             let tag = reader.byte();
+            let pc_delta = if tag & SEPARATE_PC_DELTA == 0 {
+                retired_delta * 4
+            } else {
+                unzigzag(reader.value())
+            };
+            pc = u64::wrapping_add_signed(pc, pc_delta);
             let translated = (tag & TRANSLATED != 0).then(|| (reader.byte(), reader.byte()));
-            let bindings = (0..reader.value())
+            let inline_bindings = usize::from(tag >> BINDINGS_SHIFT);
+            let bindings = if inline_bindings == LONG_BINDINGS {
+                reader.value() as usize
+            } else {
+                inline_bindings
+            };
+            let bindings = (0..bindings)
                 .map(|_| {
                     let guest = reader.byte();
                     let source = reader.value();
@@ -171,6 +201,21 @@ mod tests {
         let packed = PackedRecovery::new(&[]);
         assert_eq!(packed.bytes(), 0);
         assert!(packed.rows().is_empty());
+    }
+
+    #[test]
+    fn a_large_binding_count_round_trips_with_a_separate_pc_delta() {
+        let row = FaultRecovery {
+            start: 10,
+            end: 15,
+            bindings: (0..12)
+                .map(|register| RecoveryBinding::gpr(register, register))
+                .collect(),
+            retirement: RetirementPoint::before(GuestAddress(0x1234_8000), 26).unwrap(),
+            site: RecoverySite::guest_access(),
+        };
+        let packed = PackedRecovery::new(core::slice::from_ref(&row));
+        assert_eq!(packed.rows(), [row]);
     }
 
     #[test]
