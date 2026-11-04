@@ -89,6 +89,13 @@ pub enum Log {
     Answer { tag: [u8; 4], output: Vec<u8> },
     /// A whole call input kept for an unpinned layout.
     Payload { tag: [u8; 4], bytes: Vec<u8> },
+    /// A swap the AP submitted: its enable mask and each layer's DVA, none
+    /// where its surface pointer is null.
+    Submitted {
+        swap_id: u32,
+        enabled: u32,
+        layers: [Option<u64>; swap::LAYERS],
+    },
     /// A swap's pixels reached the host scanout.
     Presented {
         swap_id: u32,
@@ -153,6 +160,16 @@ impl core::fmt::Display for Log {
                     }
                 }
                 Ok(())
+            }
+            Log::Submitted {
+                swap_id,
+                enabled,
+                layers,
+            } => {
+                write!(
+                    f,
+                    "DCP submitted swap {swap_id} enabled={enabled:#x} layers={layers:x?}"
+                )
             }
             Log::Presented { swap_id, surfaces } => {
                 write!(f, "DCP presented swap {swap_id} surfaces={surfaces:x?}")
@@ -400,6 +417,16 @@ impl Coprocessor {
                 event,
             })
         })
+    }
+
+    /// Keep the display's refresh at counter `now`.
+    pub fn refresh(&mut self, now: u64) {
+        self.link.borrow_mut().service_mut().refresh(now);
+    }
+
+    /// When the display's next refresh is due, if anyone listens for it.
+    pub fn refresh_deadline(&self) -> Option<u64> {
+        self.link.borrow().service().refresh_deadline()
     }
 
     /// Whether a submitted swap waits for its pixels.

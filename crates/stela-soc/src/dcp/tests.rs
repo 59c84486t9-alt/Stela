@@ -237,6 +237,9 @@ fn iop_sleep_to_wake_resumes_the_kept_rpc_region_without_a_hello() {
         assert!(coprocessor.link.borrow().is_up());
         assert!(afk.borrow().started());
         assert_eq!(coprocessor.link.borrow().heap(), heap);
+        // The controller runs again: its power state is republished in the
+        // kept region, with no message.
+        assert!(dma(&mut coprocessor, &mut ram).unwrap().is_empty());
         assert!(!coprocessor.dma_pending());
         let request = call(&mut endpoint, &mut ram, 0, b"A451", &[], 4, true);
         let answer = dma(&mut coprocessor, &mut ram).unwrap();

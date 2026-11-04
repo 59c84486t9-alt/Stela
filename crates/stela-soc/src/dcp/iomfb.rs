@@ -55,6 +55,7 @@ use super::super::scanout::{self, Mode, Scanout};
 use super::Log;
 use super::abi::{self, Fields, IO_RETURN_SUCCESS, Packed};
 use super::avipc::DisplayState;
+use super::link::SHARED_VARIABLES;
 use super::modes::{self, Advertised};
 use super::rpc::{Callback, Service, Step};
 use super::swap::{self, Layer, Submission};
@@ -78,19 +79,34 @@ const LOGGED_INPUT: usize = 64;
 const DUMPED_SWAPS: u32 = 2;
 /// Report progress once this many swaps have reached the scanout.
 const PRESENT_SUMMARY_INTERVAL: u64 = 256;
-/// `IOMFBPARAM_ADAPTIVE_SYNC` (Asahi `iomfb.h`).
-const ADAPTIVE_SYNC: u32 = 14;
+/// The started swaps kept for submission. A client that dies between
+/// `swap_start_dcp` and its submit leaves its swap started for good, so the
+/// oldest is forgotten past this many (inferred: no swap ID ever revives).
+const STARTED_SWAPS: usize = 16;
 /// `D594 swap_complete_ap_gated`'s input starts with the swap ID. Its
 /// statistics pointer is absent. The fixed eight-blob storage remains zero
 /// with count zero; the original dispatcher passes that array unconditionally
 /// and has no independent blob-null flag. The sole null flag is at +0x72c;
 /// +0x72d..+0x72f is padding in the complete 0x730-byte record.
 const SWAP_COMPLETE: [u8; 4] = *b"D594";
+/// `swap_notify_gated(u64, u64, u64)`: the refresh tick the AP forwards to every
+/// registered client, with no reply. It fills in the other two values itself
+/// when they are zero, and Core Animation stops presenting without it.
+const SWAP_NOTIFY: [u8; 4] = *b"D588";
+/// The fixed 60 Hz mode's refresh, in ticks of the 24 MHz counter.
+const REFRESH_TICKS: u64 = 24_000_000 / 60;
 /// Original T6000 `D594_callback__` (container file 0x3daec14) reads this
 /// flag at VA 0xfffffe000adb2cec and passes nullptr for bit0=1. The AP
 /// skips absent statistics at 0xfffffe000ad9cb68 and still completes the
 /// presented swap. A present record copies its timestamp at +0x19.
 const SWAP_COMPLETE_DATA_NULL: usize = 0x72c;
+/// J473's `D594_callback__` (0x3d89f14) passes bit 0 of +4 as
+/// `swap_complete_ap_gated`'s (0x3d73c9c) bool: the swap reached the
+/// display. Only then does the AP record it as displayed
+/// (`updateDisplayedDataFromPendingSwap_gated` 0x3d7344c), releasing the
+/// surfaces it replaces. Otherwise it releases the swap's own surfaces at
+/// once, while a layer it left unchanged still shows them.
+const SWAP_COMPLETE_DISPLAYED: usize = 4;
 /// The property-publishing callbacks (`UnifiedPipeline_RemoteCalls::
 /// D126_callback__` 0x2a71628, `D127` 0x2a71730, `D128` 0x2a718b4).
 const PROP_START: [u8; 4] = *b"D126";
@@ -139,6 +155,13 @@ pub struct Methods {
     last_refusal: Option<String>,
     /// The interface's methods answered without a model, each reported once.
     unmodeled: BTreeSet<[u8; 4]>,
+    /// Whether the AP has any notification client (`A033`).
+    notified: bool,
+    /// The counter value of the next refresh.
+    next_refresh: u64,
+    /// The refresh waiting to leave, if any. A later one replaces it, as a
+    /// display drops the tick it could not deliver.
+    refresh: Option<u64>,
     /// `set_color_remap_mode`'s value, which reads back; 0 is IOMFB's normal
     /// mode, and the scanout applies no other.
     color_remap_mode: u32,
@@ -159,8 +182,8 @@ pub struct Methods {
     /// sets it.
     config_frame: (u32, u32),
     next_swap: u32,
-    /// The swap `swap_start_dcp` opened, not yet submitted.
-    open_swap: Option<u32>,
+    /// Swaps `swap_start_dcp` opened and not yet submitted, oldest first.
+    started: VecDeque<u32>,
     /// The four layer slots after the last submitted swap.
     planes: [Option<Layer>; swap::LAYERS],
     frames: VecDeque<Frame>,
@@ -176,7 +199,7 @@ pub struct Methods {
 
 impl Methods {
     pub(super) fn check_reset(&self) -> Result<()> {
-        if self.open_swap.is_some()
+        if !self.started.is_empty()
             || !self.frames.is_empty()
             || !self.outgoing.is_empty()
             || !self.completed.is_empty()
@@ -197,7 +220,7 @@ impl Methods {
         self.digital_out = None;
         self.config_frame = (0, 0);
         self.next_swap = 1;
-        self.open_swap = None;
+        self.started.clear();
         self.planes = [None; swap::LAYERS];
         self.shut_down = false;
     }
@@ -224,6 +247,9 @@ impl Methods {
             advertised,
             last_refusal: None,
             unmodeled: BTreeSet::new(),
+            notified: false,
+            next_refresh: 0,
+            refresh: None,
             color_remap_mode: 0,
             log: VecDeque::new(),
             dropped: 0,
@@ -235,7 +261,7 @@ impl Methods {
             digital_out: None,
             config_frame: (0, 0),
             next_swap: 1,
-            open_swap: None,
+            started: VecDeque::new(),
             planes: [None; swap::LAYERS],
             frames: VecDeque::new(),
             outgoing: VecDeque::new(),
@@ -299,6 +325,20 @@ impl Methods {
     /// The next submitted swap waiting for its pixels.
     pub fn frame_pending(&self) -> bool {
         !self.frames.is_empty()
+    }
+
+    /// The counter at which the AP's notification clients are next due a
+    /// refresh, while they listen.
+    pub fn refresh_deadline(&self) -> Option<u64> {
+        (self.notified && !self.shut_down).then_some(self.next_refresh)
+    }
+
+    /// Note the refresh due at counter `now`, for the AP's notification clients.
+    pub fn refresh(&mut self, now: u64) {
+        if self.notified && !self.shut_down && now >= self.next_refresh {
+            self.next_refresh = now + REFRESH_TICKS;
+            self.refresh = Some(now);
+        }
     }
 
     /// Present the oldest submitted swap: read its layers through `read`
@@ -393,8 +433,9 @@ impl Methods {
         Ok(())
     }
 
-    /// Publish the one mode's `TimingElements` and `ColorElements` on the
-    /// IOMFB service, then report the monitor plugged.
+    /// Publish the one mode and the monitor's identity on the IOMFB service,
+    /// then report the monitor plugged. WindowServer leaves a monitor that does
+    /// not say what it is dark, and composites to a virtual display instead.
     fn publish(&mut self) -> Result<()> {
         let advertised = match &self.advertised {
             Ok(advertised) => advertised,
@@ -406,6 +447,9 @@ impl Methods {
         let properties = [
             ("TimingElements", advertised.timing_elements()),
             ("ColorElements", advertised.color_elements()),
+            ("DisplayAttributes", advertised.display_attributes()),
+            ("Transport", Advertised::transport()),
+            ("IOMFBUUID", Advertised::uuid()),
         ];
         for (key, xml) in properties {
             // setDCPAVPropEnd NUL-terminates the buffer's last byte and
@@ -451,7 +495,7 @@ impl Methods {
 impl Service for Methods {
     fn call(&mut self, tag: [u8; 4], input: &[u8], output: u32) -> Result<Step<Self>> {
         if !matches!(&tag, b"A406" | b"A407")
-            || self.trace_swap(self.open_swap.unwrap_or(self.next_swap))
+            || self.trace_swap(self.started.back().copied().unwrap_or(self.next_swap))
         {
             self.record_log(Log::Call {
                 tag,
@@ -504,6 +548,12 @@ impl Service for Methods {
                 let packed = Packed::new().bool(true).finish(output);
                 self.reply(tag, packed)
             }
+            // update_notify_clients_dcp(u32 clients[27]): a count of clients
+            // for each notification. Every one is told of the refresh.
+            b"A033" => {
+                self.notified = input.iter().any(|&byte| byte != 0);
+                Ok(Step::Return(Vec::new()))
+            }
             // setup_video_limits(): the fixed mode has no limits to set up.
             b"A027" => Ok(Step::Return(Vec::new())),
             // set_color_remap_mode(mode) -> status.
@@ -522,20 +572,21 @@ impl Service for Methods {
                 bytes.extend_from_slice(&IO_RETURN_SUCCESS.to_le_bytes());
                 Ok(Step::Return(bytes))
             }
-            // set_parameter_dcp(param, value[4], count) -> u32. The one
-            // parameter Asahi sets is adaptive sync, which a fixed 60 Hz
-            // mode has off; any other parameter refuses.
+            // set_parameter_dcp(param, value[4], count) -> u32. Asahi zeroes
+            // adaptive sync, and WindowServer sets others of unknown meaning as
+            // it opens the display, retrying a failure forever. Zero leaves the
+            // fixed 60 Hz mode as it is; anything else is a recorded gap.
             b"A450" => {
-                let param = fields.u32()?;
+                fields.u32()?;
                 let mut values = [0u64; 4];
                 for value in &mut values {
                     *value = fields.u64()?;
                 }
-                if param != ADAPTIVE_SYNC || values != [0; 4] {
-                    return self.refuse(
-                        tag,
-                        refuse!("set_parameter_dcp sets a parameter the fixed mode does not have"),
-                    );
+                // Past `count`, the AP leaves its stack's bytes.
+                let count = fields.u32()? as usize;
+                let set = values.get(..count).unwrap_or(&values);
+                if set.iter().any(|&value| value != 0) {
+                    self.report_unmodeled(tag);
                 }
                 let packed = Packed::new().u32(IO_RETURN_SUCCESS).finish(output);
                 self.reply(tag, packed)
@@ -666,23 +717,24 @@ impl Service for Methods {
             // swap_begin(): no arguments and no result.
             b"A403" => Ok(Step::Return(Vec::new())),
             // swap_start_dcp(u32* swap_id, u64 client) -> {swap_id, u32}.
+            // Each IOMFB client starts its own swaps, and the record each
+            // submission carries names the swap, so starts need not alternate
+            // with submits.
             b"A406" => {
-                if self.open_swap.is_some() {
-                    return self.refuse(
-                        tag,
-                        refuse!("swap_start_dcp while a started swap is not submitted"),
-                    );
-                }
                 let id = self.next_swap;
-                self.next_swap = self.next_swap.wrapping_add(1).max(1);
-                self.open_swap = Some(id);
                 let packed = Packed::new().u32(id).u32(IO_RETURN_SUCCESS).finish(output);
-                self.reply(tag, packed)
+                let reply = self.reply(tag, packed)?;
+                self.next_swap = self.next_swap.wrapping_add(1).max(1);
+                if self.started.len() == STARTED_SWAPS {
+                    self.started.pop_front();
+                }
+                self.started.push_back(id);
+                Ok(reply)
             }
             b"A407" => self.submit(tag, input, output),
             // abort_swaps_dcp(client) -> u32: drop the open and queued swaps.
             b"A479" => {
-                self.open_swap = None;
+                self.started.clear();
                 self.frames.clear();
                 let packed = Packed::new().u32(IO_RETURN_SUCCESS).finish(output);
                 self.reply(tag, packed)
@@ -706,7 +758,7 @@ impl Service for Methods {
                     );
                 }
                 self.shut_down = true;
-                self.open_swap = None;
+                self.started.clear();
                 self.frames.clear();
                 self.outgoing.clear();
                 self.completed.clear();
@@ -725,9 +777,18 @@ impl Service for Methods {
         }
     }
 
+    /// `fControllerPowerState`: the display's controller runs while the
+    /// monitor is powered and awake and the link is up. The AP refuses
+    /// every swap wait for an external display while it reads 0.
+    fn shared_variables(&self) -> [u32; SHARED_VARIABLES] {
+        let powered = !self.shut_down && self.display.borrow().active();
+        [u32::from(powered), 0, 0]
+    }
+
     fn callback_pending(&self) -> bool {
         !self.in_flight
             && (!(self.outgoing.is_empty() && self.completed.is_empty())
+                || self.refresh.is_some()
                 || (!self.shut_down && self.display.borrow().hotplug_pending()))
     }
 
@@ -738,6 +799,20 @@ impl Service for Methods {
         if !self.shut_down && self.display.borrow_mut().take_hotplug_request() {
             self.queue_hotplug()
                 .expect("the recorded fixed-monitor HPD callback has a valid size");
+        }
+        if let Some(counter) = self.refresh.take_if(|_| self.outgoing.is_empty()) {
+            self.in_flight = true;
+            let mut input = alloc::vec![0u8; size_of::<[u64; 3]>()];
+            input[..8].copy_from_slice(&counter.to_le_bytes());
+            return Some(Callback {
+                tag: SWAP_NOTIFY,
+                input,
+                output: 0,
+                then: Box::new(|methods, _| {
+                    methods.in_flight = false;
+                    Ok(())
+                }),
+            });
         }
         if let Some(Outgoing { tag, input, output }) = self.outgoing.pop_front() {
             self.in_flight = true;
@@ -772,6 +847,8 @@ impl Service for Methods {
             as usize;
         let mut input = alloc::vec![0u8; length];
         input[0..4].copy_from_slice(&swap_id.to_le_bytes());
+        // Only presented swaps complete.
+        input[SWAP_COMPLETE_DISPLAYED] = 1;
         input[SWAP_COMPLETE_DATA_NULL] = 1;
         self.in_flight = true;
         if self.trace_swap(swap_id) {
@@ -793,9 +870,6 @@ impl Methods {
     /// `swap_submit_dcp`: update the layer slots, queue the visible layers
     /// (none is a background clear) and answer `{bool, u32, link status}`.
     fn submit(&mut self, tag: [u8; 4], input: &[u8], output: u32) -> Result<Step<Self>> {
-        let Some(swap_id) = self.open_swap else {
-            return self.refuse(tag, refuse!("swap_submit_dcp without swap_start_dcp"));
-        };
         if self.dumped < DUMPED_SWAPS {
             self.dumped += 1;
             self.record_log(Log::Payload {
@@ -807,11 +881,30 @@ impl Methods {
             Ok(submission) => submission,
             Err(reason) => return self.refuse(tag, reason),
         };
+        let swap_id = submission.swap_id;
+        let Some(start) = self.started.iter().position(|&id| id == swap_id) else {
+            return self.refuse(
+                tag,
+                refuse!("swap_submit_dcp names a swap that is not started"),
+            );
+        };
+        if self.trace_swap(swap_id) {
+            self.record_log(Log::Submitted {
+                swap_id,
+                enabled: submission.enabled,
+                layers: submission.layers.map(|layer| layer.map(|layer| layer.dva)),
+            });
+        }
         let planes = submission.apply(&self.planes);
-        let layers = match visible(&planes, submission.background) {
+        let layers = match visible(&planes) {
             Ok(layers) => layers,
             Err(reason) => return self.refuse(tag, reason),
         };
+        // WindowServer retries a failed swap forever, and its layers cover the
+        // screen: a background color is a recorded gap, shown black.
+        if submission.background != 0 {
+            self.report_unmodeled(tag);
+        }
         let packed = Packed::new()
             .bool(false)
             .u32(0)
@@ -819,7 +912,7 @@ impl Methods {
             .finish(output);
         let reply = self.reply(tag, packed)?;
         // Commit the accepted swap only after every fallible preflight succeeds.
-        self.open_swap = None;
+        self.started.remove(start);
         self.planes = planes;
         self.frames.push_back(Frame { swap_id, layers });
         Ok(reply)
@@ -827,14 +920,8 @@ impl Methods {
 }
 
 /// The layers the slots show, bottom to top, over a black background. A
-/// non-black background, or a layer whose surface or rectangles the model
-/// cannot show, refuses by name.
-fn visible(planes: &[Option<Layer>; swap::LAYERS], background: u32) -> Result<Vec<scanout::Layer>> {
-    if background != 0 {
-        return Err(refuse!(
-            "swap clears to a background color; the model presents black only"
-        ));
-    }
+/// layer whose surface or rectangles the model cannot show refuses by name.
+fn visible(planes: &[Option<Layer>; swap::LAYERS]) -> Result<Vec<scanout::Layer>> {
     planes
         .iter()
         .flatten()

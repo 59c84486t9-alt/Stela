@@ -315,6 +315,11 @@ fn timing_score(t: &[u8; TIMING_BYTES]) -> u32 {
 /// colorimetry 2), stored as `score * 1000 + 999`.
 const COLOR_SCORE: u32 = (200 + 40 + 2) * 1000 + 999;
 
+/// The manufacturer the EDID encodes.
+const MANUFACTURER: &str = "STE";
+/// `IOMFBUUID`: one fixed monitor, so its settings persist across boots.
+const UUID: &str = "53544c41-0001-4000-8000-000000000001";
+
 /// An OSUnserializeXML document under construction.
 struct Xml(String);
 
@@ -331,6 +336,11 @@ impl Xml {
     fn bool(&mut self, key: &str, value: bool) -> &mut Self {
         self.key(key);
         self.0.push_str(if value { "<true/>" } else { "<false/>" });
+        self
+    }
+    fn string(&mut self, key: &str, value: &str) -> &mut Self {
+        self.key(key);
+        let _ = write!(self.0, "<string>{value}</string>");
         self
     }
     fn data(&mut self, key: &str, bytes: &[u8]) -> &mut Self {
@@ -360,6 +370,15 @@ fn base64(out: &mut String, bytes: &[u8]) {
             }
         }
     }
+}
+
+/// A chromaticity coordinate pair.
+fn xy(xml: &mut Xml, key: &str, x: u64, y: u64) {
+    xml.key(key)
+        .raw("<dict>")
+        .int("X", x, 32)
+        .int("Y", y, 32)
+        .raw("</dict>");
 }
 
 /// The one color element's properties (`IOAVVideoColorElement::
@@ -422,6 +441,73 @@ impl Advertised {
     /// advertised ones.
     pub fn video_data(&self, timing: u32, color: u32) -> Option<(&[u8], &[u8])> {
         (timing == TIMING_ID && color == COLOR_ID).then_some((&self.timing[..], &self.color[..]))
+    }
+
+    /// The monitor's `DisplayAttributes`, the EDID's identity as WindowServer
+    /// reads it. Chromaticities are sRGB's, in 16.16 fixed point.
+    pub fn display_attributes(&self) -> String {
+        let e = &self.edid;
+        let name = e[77..90].split(|&byte| byte == b'\n').next().unwrap_or(&[]);
+        let (width, height) = (get(&self.timing, 0x08), get(&self.timing, 0x28));
+        let mut xml = Xml(String::new());
+        xml.raw("<dict>")
+            .key("ProductAttributes")
+            .raw("<dict>")
+            .string("ManufacturerID", MANUFACTURER)
+            .int(
+                "LegacyManufacturerID",
+                u64::from(u16::from_be_bytes([e[8], e[9]])),
+                32,
+            )
+            .int(
+                "ProductID",
+                u64::from(u16::from_le_bytes([e[10], e[11]])),
+                32,
+            )
+            .int(
+                "SerialNumber",
+                u64::from(u32::from_le_bytes([e[12], e[13], e[14], e[15]])),
+                32,
+            )
+            .int("WeekOfManufacture", u64::from(e[16]), 32)
+            .int("YearOfManufacture", 1990 + u64::from(e[17]), 32)
+            .string("ProductName", core::str::from_utf8(name).unwrap_or(""))
+            .raw("</dict>")
+            .int("NativeFormatHorizontalPixels", u64::from(width), 32)
+            .int("NativeFormatVerticalPixels", u64::from(height), 32)
+            .bool("ContinuousFrequencySupport", false)
+            .bool("SupportsActiveOff", false)
+            .bool("SupportsSuspend", false)
+            .key("Chromaticity")
+            .raw("<dict>");
+        for (key, x, y) in [
+            ("Red", 41943, 21627),
+            ("Green", 19661, 39322),
+            ("Blue", 9830, 3932),
+        ] {
+            xy(&mut xml, key, x, y);
+        }
+        xml.raw("</dict>");
+        xy(&mut xml, "DefaultWhite", 20493, 21561);
+        xml.raw("</dict>");
+        xml.0
+    }
+
+    /// How the monitor connects: DCP's DisplayPort through the Mac's HDMI port.
+    pub fn transport() -> String {
+        let mut xml = Xml(String::new());
+        xml.raw("<dict>")
+            .string("Upstream", "DP")
+            .string("Downstream", "HDMI")
+            .raw("</dict>");
+        xml.0
+    }
+
+    /// The display's fixed identity across boots, as a plist string.
+    pub fn uuid() -> String {
+        let mut xml = Xml(String::new());
+        let _ = write!(xml.0, "<string>{UUID}</string>");
+        xml.0
     }
 
     /// The `TimingElements` array (`IOAVVideoTimingElement::copyProperties`

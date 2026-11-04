@@ -1139,6 +1139,14 @@ impl Devices for AppleDevices {
             })
             .chain(self.native_pmp_dma_deadline())
             .chain(self.native_pmp_services_deadline())
+            // A display's refresh, which its notification clients pace by.
+            .chain(self.dcp_masters.iter().filter_map(|master| {
+                self.bus
+                    .device::<Asc>(master.asc)
+                    .filter(|asc| asc.execution_enabled())
+                    .and_then(Asc::firmware::<dcp::Coprocessor>)?
+                    .refresh_deadline()
+            }))
             // When to look for a storage command's host transfer.
             .chain(
                 self.storage_masters
@@ -1369,7 +1377,10 @@ impl AppleDevices {
                 .device_mut::<Asc>(master.asc)
                 .filter(|asc| asc.execution_enabled())
                 .and_then(Asc::firmware_mut::<dcp::Coprocessor>)
-                .is_some_and(|coprocessor| coprocessor.frame_pending());
+                .is_some_and(|coprocessor| {
+                    coprocessor.refresh(now);
+                    coprocessor.frame_pending()
+                });
             if presenting {
                 let (surface, stream) = master.surface.ok_or_else(|| {
                     DeviceError::TransferRefused(

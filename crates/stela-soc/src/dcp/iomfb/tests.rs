@@ -117,7 +117,7 @@ fn status_methods_succeed_under_the_ap_link_status_contract() {
     assert!(!ap_success(&1u32.to_le_bytes(), 0));
     let mut methods = methods();
     let mut parameter = [0; 0x28];
-    parameter[..4].copy_from_slice(&ADAPTIVE_SYNC.to_le_bytes());
+    parameter[..4].copy_from_slice(&14u32.to_le_bytes());
     let mut power = [0; 0x10];
     power[..8].copy_from_slice(&1u64.to_le_bytes());
     let mode = [
@@ -140,8 +140,8 @@ fn status_methods_succeed_under_the_ap_link_status_contract() {
         // AP happens to accept.
         assert_eq!(&reply[status_offset..status_offset + 4], &[0; 4]);
     }
-    start_swap(&mut methods);
-    let reply = returned(methods.call(*b"A407", &submission(1, &[]), 0xc));
+    let id = start_swap(&mut methods);
+    let reply = returned(methods.call(*b"A407", &submission(id, &[]), 0xc));
     assert!(ap_success(&reply, 8));
     assert_eq!(&reply[8..12], &[0; 4]);
     // setDisplayRefreshProperties is boolean: the AP at
@@ -359,7 +359,7 @@ fn start_publishes_the_mode_then_reports_the_monitor_plugged() {
     // Start, the chunks, End per key; then the hotplug.
     assert_eq!(tags.first(), Some(&&PROP_START));
     assert_eq!(tags.last(), Some(&&HOTPLUG));
-    assert_eq!(tags.iter().filter(|tag| ***tag == PROP_END).count(), 2);
+    assert_eq!(tags.iter().filter(|tag| ***tag == PROP_END).count(), 5);
     let mut keys = Vec::new();
     let mut buffer = Vec::new();
     let mut expected = 0usize;
@@ -385,7 +385,14 @@ fn start_publishes_the_mode_then_reports_the_monitor_plugged() {
                 // The buffer ends in the NUL setDCPAVPropEnd writes.
                 assert_eq!(buffer.last(), Some(&0));
                 let text = core::str::from_utf8(&buffer[..buffer.len() - 1]).unwrap();
-                assert!(text.starts_with("<array><dict>"));
+                assert!(
+                    ["<array><dict>", "<dict>", "<string>"]
+                        .iter()
+                        .any(|start| text.starts_with(start))
+                );
+                if key == b"DisplayAttributes" {
+                    assert!(text.contains("<key>ProductName</key><string>Stela</string>"));
+                }
             }
             &HOTPLUG => {
                 assert_eq!(input.len(), 0x58);
@@ -396,7 +403,16 @@ fn start_publishes_the_mode_then_reports_the_monitor_plugged() {
             other => panic!("unexpected callback {other:?}"),
         }
     }
-    assert_eq!(keys, ["TimingElements", "ColorElements"]);
+    assert_eq!(
+        keys,
+        [
+            "TimingElements",
+            "ColorElements",
+            "DisplayAttributes",
+            "Transport",
+            "IOMFBUUID"
+        ]
+    );
     assert!(!methods.callback_pending());
 }
 
@@ -472,15 +488,23 @@ fn the_mode_set_uses_the_published_ids() {
 fn power_and_parameters_follow_asahis_power_on() {
     let mut methods = methods();
     // set_parameter_dcp(ADAPTIVE_SYNC, 0, count 3) as Asahi sends it.
-    let mut param = Packed::new().u32(ADAPTIVE_SYNC);
+    let mut param = Packed::new().u32(14);
     for _ in 0..4 {
         param = param.u64(0);
     }
     let param = param.u32(3).finish(0x28).unwrap();
     assert_eq!(returned(methods.call(*b"A450", &param, 4)), [0; 4]);
+    // A value the fixed mode cannot honor is a recorded gap, as WindowServer
+    // retries a failure forever.
     let mut vrr = param.clone();
     vrr[4] = 1;
-    assert!(methods.call(*b"A450", &vrr, 4).is_err());
+    assert_eq!(returned(methods.call(*b"A450", &vrr, 4)), [0; 4]);
+    // WindowServer zeroes others as it opens the display, leaving its stack in
+    // the values past `count`.
+    let mut zeroed = param.clone();
+    zeroed[0] = 31;
+    zeroed[0x1c..0x24].fill(0xaa);
+    assert_eq!(returned(methods.call(*b"A450", &zeroed, 4)), [0; 4]);
     // setPowerState(1) then (0).
     let on = Packed::new().u64(1).finish(0x10).unwrap();
     assert_eq!(returned(methods.call(*b"A484", &on, 8)), [0; 8]);
@@ -493,6 +517,21 @@ fn power_and_parameters_follow_asahis_power_on() {
     // first_client_open / last_client_close_dcp.
     assert!(returned(methods.call(*b"A466", &[], 0)).is_empty());
     assert_eq!(returned(methods.call(*b"A467", &[0; 4], 4)), [0; 4]);
+}
+
+#[test]
+fn the_controller_power_state_follows_power_and_the_link() {
+    let mut methods = methods();
+    // The configured monitor runs before any request.
+    assert_eq!(methods.shared_variables(), [1, 0, 0]);
+    let off = Packed::new().u64(0).finish(0x10).unwrap();
+    returned(methods.call(*b"A484", &off, 8));
+    assert_eq!(methods.shared_variables(), [0, 0, 0]);
+    let on = Packed::new().u64(1).finish(0x10).unwrap();
+    returned(methods.call(*b"A484", &on, 8));
+    assert_eq!(methods.shared_variables(), [1, 0, 0]);
+    returned(methods.call(*b"A500", &[0, 1, 0xaa, 0xaa], 0));
+    assert_eq!(methods.shared_variables(), [0, 0, 0]);
 }
 
 #[test]
@@ -586,14 +625,14 @@ fn submit_refusal_keeps_accepted_swap(mutate: impl FnOnce(&mut [u8]), reason: &s
         .err()
         .expect("unsupported submission refused");
     assert!(error.to_string().contains(reason), "{error}");
-    assert_eq!(methods.open_swap, Some(id));
+    assert_eq!(methods.started, [id]);
     assert_eq!(methods.planes.as_slice(), planes);
     assert_eq!(methods.frames, frames);
     assert_eq!(methods.completed, completions);
     assert_eq!(displayed.borrow().len(), 1);
     assert_eq!(methods.call(*b"A407", &refused, 0xc).err(), Some(error));
     returned(methods.call(*b"A407", &valid, 0xc));
-    assert_eq!(methods.open_swap, None);
+    assert!(methods.started.is_empty());
     assert_eq!(methods.frames.len(), frames.len() + 1);
     assert_eq!(methods.frames.back().unwrap().swap_id, id);
     assert_eq!(methods.completed, completions);
@@ -613,8 +652,37 @@ fn refused_tiled_surface_preserves_started_swap_and_prior_frames() {
 }
 
 #[test]
-fn refused_background_preserves_started_swap_and_prior_frames() {
-    submit_refusal_keeps_accepted_swap(|input| input[swap::BACKGROUND] = 0xff, "background color");
+fn clients_are_told_of_each_refresh_and_a_late_one_replaces_the_last() {
+    let mut methods = methods();
+    methods.refresh(1000);
+    assert!(methods.take_callback().is_none());
+    // With no client, nothing has to wake the display.
+    assert_eq!(methods.refresh_deadline(), None);
+    let mut clients = [0; 0x6c];
+    clients[24] = 1;
+    assert!(returned(methods.call(*b"A033", &clients, 0)).is_empty());
+    assert_eq!(methods.refresh_deadline(), Some(0));
+    methods.refresh(1000);
+    assert_eq!(methods.refresh_deadline(), Some(1000 + REFRESH_TICKS));
+    // Within the refresh period nothing new is due, and a later one wins.
+    methods.refresh(1000 + REFRESH_TICKS - 1);
+    methods.refresh(1000 + REFRESH_TICKS);
+    let callback = methods.take_callback().unwrap();
+    assert_eq!(callback.tag, SWAP_NOTIFY);
+    assert_eq!(callback.input.len(), 0x18);
+    assert_eq!(callback.input[..8], (1000 + REFRESH_TICKS).to_le_bytes());
+    assert_eq!(callback.output, 0);
+}
+
+#[test]
+fn a_background_color_is_a_recorded_gap_shown_black() {
+    let mut methods = methods();
+    let id = start_swap(&mut methods);
+    let mut input = submission(id, &[]);
+    input[swap::BACKGROUND] = 0xff;
+    returned(methods.call(*b"A407", &input, 0xc));
+    assert_eq!(methods.frames.back().unwrap().swap_id, id);
+    assert!(methods.unmodeled.contains(b"A407"));
 }
 
 #[test]
@@ -625,10 +693,44 @@ fn refused_submit_reply_preflight_preserves_started_swap() {
     // Public RPC validates ABI output size before dispatch. The
     // submit method also prepares its fallible reply before committing.
     assert!(methods.submit(*b"A407", &input, 0).is_err());
-    assert_eq!(methods.open_swap, Some(id));
+    assert_eq!(methods.started, [id]);
     assert!(methods.frames.is_empty());
     returned(methods.call(*b"A407", &input, 0xc));
     assert_eq!(methods.frames.back().unwrap().swap_id, id);
+}
+
+#[test]
+fn swaps_started_together_submit_by_the_id_their_record_names() {
+    let mut methods = methods();
+    let first = start_swap(&mut methods);
+    let second = start_swap(&mut methods);
+    assert_ne!(first, second);
+    returned(methods.call(*b"A407", &submission(second, &[]), 0xc));
+    assert_eq!(methods.started, [first]);
+    let error = methods
+        .call(*b"A407", &submission(second, &[]), 0xc)
+        .err()
+        .expect("a submitted swap is not started");
+    assert!(error.to_string().contains("not started"), "{error}");
+    returned(methods.call(*b"A407", &submission(first, &[]), 0xc));
+    let order: Vec<u32> = methods.frames.iter().map(|frame| frame.swap_id).collect();
+    assert_eq!(order, [second, first]);
+}
+
+#[test]
+fn an_abandoned_start_is_forgotten_past_the_limit() {
+    let mut methods = methods();
+    let abandoned = start_swap(&mut methods);
+    for _ in 0..STARTED_SWAPS {
+        start_swap(&mut methods);
+    }
+    assert_eq!(methods.started.len(), STARTED_SWAPS);
+    assert!(!methods.started.contains(&abandoned));
+    assert!(
+        methods
+            .call(*b"A407", &submission(abandoned, &[]), 0xc)
+            .is_err()
+    );
 }
 
 #[test]
@@ -691,6 +793,8 @@ fn failed_presents_keep_swap_order_until_abort() {
     let callback = methods.take_callback().unwrap();
     assert_eq!(callback.tag, SWAP_COMPLETE);
     assert_eq!(&callback.input[..4], &1u32.to_le_bytes());
+    // Presented, so the AP keeps its surfaces as the displayed ones.
+    assert_eq!(callback.input[SWAP_COMPLETE_DISPLAYED], 1);
     (callback.then)(&mut methods, &[]).unwrap();
     // The next submitted swap is still present, and an AP abort owns
     // its cancellation. It emits no invented successful completion.
@@ -710,14 +814,6 @@ fn a_swap_is_started_submitted_presented_then_completed() {
     let mut methods = Methods::new(Box::new(screen));
     assert!(returned(methods.call(*b"A403", &[], 0)).is_empty());
     assert_eq!(start_swap(&mut methods), 1);
-    // A second start before the submit refuses.
-    let start = Packed::new()
-        .u32(0)
-        .u64(0)
-        .bool(false)
-        .finish(0x10)
-        .unwrap();
-    assert!(methods.call(*b"A406", &start, 8).is_err());
     let submitted = returned(methods.call(*b"A407", &submission(1, &[(0, 4, 2, 0x1000)]), 0xc));
     assert_eq!(submitted, [0; 12]);
     // Not complete until presented.
@@ -772,34 +868,36 @@ fn bounded_swap_logs_keep_boot_samples_failures_and_guest_completions() {
     assert!(methods.call(*b"A407", &first, 0xc).is_err());
 
     let records: Vec<_> = core::iter::from_fn(|| methods.take_log()).collect();
-    assert_eq!(records.len(), 12);
+    assert_eq!(records.len(), 14);
     for (index, input) in [first, second].iter().enumerate() {
-        let logs = &records[5 * index..][..5];
+        let logs = &records[6 * index..][..6];
         let id = index as u32 + 1;
         assert!(matches!(&logs[0], Log::Call { tag, .. } if tag == b"A406"));
         assert!(matches!(&logs[1], Log::Call { tag, .. } if tag == b"A407"));
         assert!(
             matches!(&logs[2], Log::Payload { tag, bytes } if tag == b"A407" && bytes == input)
         );
-        assert!(matches!(&logs[3], Log::Presented { swap_id, .. } if *swap_id == id));
-        assert!(matches!(&logs[4], Log::Callback { tag, .. } if *tag == SWAP_COMPLETE));
+        assert!(matches!(&logs[3], Log::Submitted { swap_id, .. } if *swap_id == id));
+        assert!(matches!(&logs[4], Log::Presented { swap_id, .. } if *swap_id == id));
+        assert!(matches!(&logs[5], Log::Callback { tag, .. } if *tag == SWAP_COMPLETE));
     }
     assert_eq!(
-        records[10].to_string(),
+        records[12].to_string(),
         "DCP present summary total=256 last_swap=256"
     );
     assert!(
-        matches!(&records[11], Log::Refused(reason) if reason.contains("swap_submit_dcp without swap_start_dcp"))
+        matches!(&records[13], Log::Refused(reason) if reason.contains("names a swap that is not started"))
     );
 
     methods.set_swap_tracing(true);
     swap(&mut methods);
     let exact: Vec<_> = core::iter::from_fn(|| methods.take_log()).collect();
-    assert_eq!(exact.len(), 4);
+    assert_eq!(exact.len(), 5);
     assert!(matches!(&exact[0], Log::Call { tag, .. } if tag == b"A406"));
     assert!(matches!(&exact[1], Log::Call { tag, .. } if tag == b"A407"));
-    assert!(matches!(&exact[2], Log::Presented { swap_id: 258, .. }));
-    assert!(matches!(&exact[3], Log::Callback { tag, .. } if *tag == SWAP_COMPLETE));
+    assert!(matches!(&exact[2], Log::Submitted { swap_id: 258, .. }));
+    assert!(matches!(&exact[3], Log::Presented { swap_id: 258, .. }));
+    assert!(matches!(&exact[4], Log::Callback { tag, .. } if *tag == SWAP_COMPLETE));
 }
 
 #[test]
@@ -876,9 +974,4 @@ fn a_background_swap_clears_and_bad_swaps_refuse() {
     );
     // The refused submission keeps its accepted start until explicit abort.
     returned(methods.call(*b"A479", &[0; 8], 4));
-    // A non-black background refuses.
-    start_swap(&mut methods);
-    let mut red = submission(3, &[]);
-    red[swap::BACKGROUND] = 0xff;
-    assert!(methods.call(*b"A407", &red, 0xc).is_err());
 }

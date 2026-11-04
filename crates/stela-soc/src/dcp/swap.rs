@@ -29,7 +29,7 @@
 //! `i` selects layer `i` (the AP tests bits 0..3 only). These match m1n1's
 //! 14.7 `IOMFBSwapRec` at every offset the AP touches; m1n1's background
 //! color at +0x154 is not referenced by the 26A434 AP and is read only to
-//! refuse a non-black background, and the Linux driver's
+//! report a non-black background and show it black, and the Linux driver's
 //! `DCP_REMOVE_LAYERS` (bit 31: layers outside the mask are removed) is
 //! honored as Linux defines it.
 //!
@@ -60,11 +60,13 @@
 //! | 0x1ed | has compression info (u64) | |
 //!
 //! The model presents linear single-plane surfaces in the 32-bit formats
-//! [`PixelFormat`] names, and `&BGA`, the lossless-compressed form of `BGRA`
-//! WindowServer allocates. The compressed form is a layout AGX's encoder
-//! writes; AGX is hidden and the guest's Metal device stores those surfaces
-//! as plain BGRA rows at the plane's offset, a row being the plane's bytes per
-//! row over its element height. Other tiled and compressed surfaces refuse:
+//! [`PixelFormat`] names, and `&BGA` and `&b38`, the lossless-compressed forms
+//! of `BGRA` WindowServer allocates. The compressed form is a layout AGX's
+//! encoder writes; AGX is hidden and the guest's Metal device stores those
+//! surfaces as plain BGRA rows at the plane's offset, a row being the plane's
+//! bytes per row over its element height, or for `&b38`, whose second plane
+//! holds AGX's metadata and whose rows its plane does not describe, four bytes
+//! a pixel. Other tiled and compressed surfaces refuse:
 //! the address-format and compression-info encodings are IOSurface-private and
 //! unrecorded. Multi-planar YCbCr surfaces refuse: the `getYCbCrMatrix`
 //! enumeration is unrecorded. The DVAs are I/O addresses in the display
@@ -129,6 +131,8 @@ const PLANE_ELEMENT_HEIGHT: usize = 0x74;
 const HAS_COMPRESSION: usize = 0x1ed;
 /// `&BGA`: `BGRA` under AGX's lossless compression.
 const LOSSLESS_BGRA: u32 = u32::from_be_bytes(*b"&BGA");
+/// `&b38`: the same, with AGX's metadata in a plane of its own.
+const LOSSLESS_BGRA_PLANES: u32 = u32::from_be_bytes(*b"&b38");
 
 fn u32_at(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"))
@@ -186,7 +190,7 @@ impl Record {
     /// model cannot scan it out. Tiled, compressed, multi-planar and other
     /// formats refuse rather than present garbage.
     pub fn surface(&self, dva: u64) -> Result<Surface> {
-        if self.planes > 1 {
+        if self.planes > 1 && self.format != LOSSLESS_BGRA_PLANES {
             return Err(refuse!(
                 "DCP swap surface is multi-planar; the model scans out one plane"
             ));
@@ -199,6 +203,12 @@ impl Record {
             (
                 PixelFormat::Bgra8888,
                 self.plane_bytes_per_row / rows,
+                self.plane_offset,
+            )
+        } else if self.format == LOSSLESS_BGRA_PLANES {
+            (
+                PixelFormat::Bgra8888,
+                self.width.saturating_mul(4),
                 self.plane_offset,
             )
         } else {
@@ -406,6 +416,20 @@ pub mod tests {
             (surface.width, surface.stride, surface.iova),
             (1920, 7680, 0x4000)
         );
+    }
+
+    #[test]
+    fn two_plane_lossless_bgra_is_read_as_plain_rows() {
+        let mut bytes = record(1280, 800, PixelFormat::Bgra8888);
+        bytes[IS_TILED] = 1;
+        bytes[FORMAT..FORMAT + 4].copy_from_slice(&LOSSLESS_BGRA_PLANES.to_le_bytes());
+        bytes[PLANE_COUNT..PLANE_COUNT + 4].copy_from_slice(&2u32.to_le_bytes());
+        bytes[BUFFER_SIZE..BUFFER_SIZE + 4].copy_from_slice(&5_251_072u32.to_le_bytes());
+        bytes[PLANE_OFFSET..PLANE_OFFSET + 4].copy_from_slice(&0x4000u32.to_le_bytes());
+        bytes[HAS_COMPRESSION] = 1;
+        let surface = Record::parse(&bytes).unwrap().surface(0x8000).unwrap();
+        assert_eq!(surface.format, PixelFormat::Bgra8888);
+        assert_eq!((surface.stride, surface.iova), (5120, 0xc000));
     }
 
     #[test]

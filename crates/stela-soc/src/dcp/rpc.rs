@@ -25,8 +25,8 @@
 //! external reply wait owns a stream but is not runnable DMA. Unsafe endpoint
 //! restart/cancellation refuses rather than discarding those effects.
 use super::link::{
-    self, ALIGNMENT, HEADER_BYTES, Header, Owner, RegionHeader, Rpc, STREAM_BYTES, STREAMS, Stream,
-    Word,
+    self, ALIGNMENT, HEADER_BYTES, Header, Owner, RegionHeader, Rpc, SHARED, SHARED_VARIABLES,
+    STREAM_BYTES, STREAMS, Stream, Word,
 };
 use crate::Result;
 use alloc::boxed::Box;
@@ -82,6 +82,10 @@ pub trait Service: Sized + 'static {
     /// The callback the coprocessor makes next, once the link is up.
     fn take_callback(&mut self) -> Option<Callback<Self>> {
         None
+    }
+    /// The shared variables' current values ([`link`]'s shared variables).
+    fn shared_variables(&self) -> [u32; SHARED_VARIABLES] {
+        [0; SHARED_VARIABLES]
     }
 }
 
@@ -167,6 +171,9 @@ pub struct Link<S> {
     pending: Option<Pending<S>>,
     pending_input: bool,
     lanes: [Lane<S>; 2 * STREAMS as usize],
+    /// The shared variables as last written to the region, none since it
+    /// was announced.
+    published: Option<[u32; SHARED_VARIABLES]>,
 }
 
 fn lane_index(stream: Stream) -> usize {
@@ -198,6 +205,7 @@ impl<S: Service> Link<S> {
                 frames: Vec::new(),
                 cursor: 0,
             }),
+            published: None,
         }
     }
 
@@ -269,6 +277,7 @@ impl<S: Service> Link<S> {
         self.pending.is_some()
             || !self.incoming.is_empty()
             || self.is_up() && self.free_stream().is_some() && self.service.callback_pending()
+            || self.is_up() && self.published != Some(self.service.shared_variables())
     }
 
     /// The bus address of a DVA the AP gave the coprocessor.
@@ -308,6 +317,25 @@ impl<S: Service> Link<S> {
             self.pending_input = false;
             self.flush_pending(bus, outbox)?;
         }
+        self.publish(bus)
+    }
+
+    /// Write the shared variables that changed, before the AP reads the
+    /// words this step sends.
+    fn publish(&mut self, bus: &mut dyn Bus) -> Result<()> {
+        let Phase::Up { region } = self.phase else {
+            return Ok(());
+        };
+        let values = self.service.shared_variables();
+        if self.published == Some(values) {
+            return Ok(());
+        }
+        let bytes: Vec<u8> = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        bus.write(region + SHARED, &bytes)?;
+        self.published = Some(values);
         Ok(())
     }
 
@@ -352,6 +380,7 @@ impl<S: Service> Link<S> {
                     lane.cursor = 0;
                 }
                 self.phase = Phase::Up { region };
+                self.published = None;
                 outbox.push(
                     Word::Ready {
                         crc: link::interface_crc(self.version),

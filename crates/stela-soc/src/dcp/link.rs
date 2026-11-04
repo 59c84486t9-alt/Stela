@@ -54,6 +54,19 @@
 //! | 0x60000 + i·0x8000 | coprocessor | AP stream i: its calls nested in the AP's |
 //! | 0x80000 | both | shared variables (0x40000 bytes) |
 //!
+//! ## Shared variables
+//!
+//! `UnifiedPipeline2::setup_shared_variables` (0x2a5e26c) allocates three
+//! `u32` words at the start of the area, in order, and the AP reads each
+//! through `MemIf::StaticElement<u32>::getValue` (0x3d6a3e0) into its own
+//! copy. The coprocessor writes them. The first is the coprocessor's
+//! `fControllerPowerState`: the gated `swap_wait` (0x3d755e8) answers
+//! `kIOReturnNoPower` for an external display while it is 0, and the
+//! firmware itself "swallowed swap ID %d as fControllerPowerState is 0 for
+//! External Display". The second is compared with a swap's ID when a swap
+//! is no longer pending, and the third has no recovered reader; neither
+//! changes an answer the model's swaps reach, and the model leaves both 0.
+//!
 //! ## Call payload (`rpc_caller_gated`, `rpc_callee_gated` 0x3d7d830)
 //!
 //! A 12-byte header (the method tag as a big-endian four-character code in
@@ -84,10 +97,11 @@ const AP_NESTED: u64 = 0x20000;
 const DCP_CALLS: u64 = 0x40000;
 const DCP_NESTED: u64 = 0x60000;
 /// The shared-variable area and its size.
-#[cfg(test)]
 pub const SHARED: u64 = 0x80000;
 #[cfg(test)]
 pub const SHARED_BYTES: u64 = 0x40000;
+/// The `u32` words the coprocessor publishes at the start of the area.
+pub const SHARED_VARIABLES: usize = 3;
 
 /// The call header's size.
 pub const HEADER_BYTES: u32 = 12;

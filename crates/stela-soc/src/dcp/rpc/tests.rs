@@ -50,6 +50,7 @@ impl Memory {
 struct Test {
     log: Vec<String>,
     callbacks: Vec<Callback<Test>>,
+    shared: [u32; link::SHARED_VARIABLES],
 }
 
 impl Service for Test {
@@ -76,6 +77,9 @@ impl Service for Test {
     }
     fn take_callback(&mut self) -> Option<Callback<Self>> {
         self.callbacks.pop()
+    }
+    fn shared_variables(&self) -> [u32; link::SHARED_VARIABLES] {
+        self.shared
     }
 }
 
@@ -571,6 +575,27 @@ fn rpc_faults_keep_committed_acks_and_ownership() {
         assert!(out.is_empty());
         assert!(link.start().is_err());
     }
+}
+
+#[test]
+fn shared_variables_are_written_on_bring_up_and_on_each_change() {
+    let mut memory = Memory::mapped();
+    memory.write(REGION + link::SHARED, &[0xaa; 12]).unwrap();
+    let mut link = up(&mut memory);
+    let read = |memory: &mut Memory| {
+        let mut bytes = [0; 12];
+        memory.read(REGION + link::SHARED, &mut bytes).unwrap();
+        bytes
+    };
+    assert_eq!(read(&mut memory), [0; 12]);
+    assert!(!link.pending());
+    link.service_mut().shared = [1, 0, 7];
+    assert!(link.pending());
+    let mut out = Vec::new();
+    link.dma(&mut memory, &mut out).unwrap();
+    assert!(out.is_empty());
+    assert_eq!(read(&mut memory), [1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0]);
+    assert!(!link.pending());
 }
 
 #[test]
