@@ -199,6 +199,30 @@ struct Visibility {
     queries: Vec<(QueryPool, u32, u64)>,
 }
 
+/// Packed view mappings. A render encoder normally has one view.
+#[derive(Clone)]
+pub(super) enum Amplification {
+    One(u32),
+    Many(Vec<u32>),
+}
+
+impl Amplification {
+    fn new(mut mappings: impl ExactSizeIterator<Item = u32>) -> Self {
+        if mappings.len() == 1 {
+            Self::One(mappings.next().expect("one view mapping"))
+        } else {
+            Self::Many(mappings.collect())
+        }
+    }
+
+    pub(super) fn as_slice(&self) -> &[u32] {
+        match self {
+            Self::One(mapping) => core::slice::from_ref(mapping),
+            Self::Many(mappings) => mappings,
+        }
+    }
+}
+
 pub(super) struct RenderState {
     pass: RenderPassPlan<ImageView>,
     /// Indices of this pass's `BeginRendering` commands in the segment.
@@ -211,7 +235,7 @@ pub(super) struct RenderState {
     index_buffer: Option<(Buffer, u64, IndexType)>,
     topology: Option<PrimitiveTopology>,
     restart: Option<bool>,
-    pub(super) amplification: Vec<u32>,
+    pub(super) amplification: Amplification,
     pub(super) factors: Option<FactorBuffer>,
     factor_scale: f32,
     pub(super) raster: RasterState,
@@ -309,7 +333,7 @@ impl CommandBuffer {
             index_buffer: None,
             topology: None,
             restart: None,
-            amplification: alloc::vec![0],
+            amplification: Amplification::One(0),
             factors: None,
             factor_scale: 1.0,
             raster: RasterState::default(),
@@ -625,9 +649,9 @@ impl CommandBuffer {
             .as_ref()
             .is_none_or(|bound| (bound.id, bound.pipeline) != (state.id, state.pipeline));
         let views = plan.amplification_count;
-        if render.amplification.len() != views as usize {
+        if render.amplification.as_slice().len() != views as usize {
             // Each view maps to itself until the encoder sets mappings.
-            render.amplification = (0..views).map(|view| view << 16 | view).collect();
+            render.amplification = Amplification::new((0..views).map(|view| view << 16 | view));
         }
         render.pipeline = Some(state.clone());
         if rebind {
@@ -910,10 +934,11 @@ impl CommandBuffer {
                 .all(|&(viewport, layer)| viewport <= 0xffff && layer <= 0xffff),
             "view mapping offsets",
         )?;
-        render.amplification = mappings
-            .iter()
-            .map(|&(viewport, layer)| layer << 16 | viewport)
-            .collect();
+        render.amplification = Amplification::new(
+            mappings
+                .iter()
+                .map(|&(viewport, layer)| layer << 16 | viewport),
+        );
         Ok(())
     }
 
@@ -1585,9 +1610,9 @@ impl CommandBuffer {
     /// Records `draw` once per amplified view, each with its view's push
     /// constants.
     fn amplified(&mut self, resolver: &mut dyn Resolver, draw: Command) -> Result<()> {
-        let views = render(&mut self.encoder)?.amplification.clone();
+        let views = render(&mut self.encoder)?.amplification.as_slice();
         self.bindings.constants.amplification_count = views.len() as u32;
-        for (view, mapping) in views.into_iter().enumerate() {
+        for (view, &mapping) in views.iter().enumerate() {
             self.bindings.constants.amplification_id = view as u32;
             self.bindings.constants.view_mapping = mapping;
             self.bindings.flush(&mut self.recorder, resolver, &[])?;
