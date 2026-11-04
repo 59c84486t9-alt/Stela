@@ -33,6 +33,7 @@ pub(crate) struct Asm<'a> {
     shared: Option<&'a mut usize>,
     sites: Option<&'a mut Vec<EmissionSite>>,
     pinned: bool,
+    locals: Option<super::pinned::LocalRegisters>,
     linked_block: Option<u64>,
 }
 
@@ -60,6 +61,7 @@ impl<'a> Asm<'a> {
             shared: None,
             sites: None,
             pinned: false,
+            locals: None,
             linked_block: None,
         }
     }
@@ -77,7 +79,7 @@ impl<'a> Asm<'a> {
         let slot = super::offset(register)? as i32;
         Some(if !self.pinned {
             Mem::base_disp32(Gpr::Rdi, slot).into()
-        } else if let Some(host) = super::pinned::host(register) {
+        } else if let Some(host) = super::pinned::host_or_local(register, self.locals) {
             host.into()
         } else {
             Mem::base(Gpr::Rdi, slot).into()
