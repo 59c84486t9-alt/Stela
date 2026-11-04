@@ -1771,6 +1771,16 @@ fn additional_disk_gets_separate_machine_identity() {
 }
 
 #[test]
+fn translation_store_defaults_to_the_firmware_pack_limit() {
+    let f = fixture(64 * GIB, true);
+    let (store, _) = translations::choose(&f.host, &[&f.data], |_| 0, None).unwrap();
+    assert_eq!(store.unwrap().pack_bytes, GIB);
+
+    let (store, _) = translations::choose(&f.host, &[&f.data], |_| 0, Some(2 * GIB)).unwrap();
+    assert_eq!(store.unwrap().pack_bytes, 2 * GIB);
+}
+
+#[test]
 fn same_revision_update_preserves_options() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);

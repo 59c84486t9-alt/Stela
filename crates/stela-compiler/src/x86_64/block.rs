@@ -9,7 +9,7 @@ pub(crate) use super::region::ResidentLoopPlan;
 use super::chain::ExitWord;
 use crate::{
     GuestAddress, NativeBlock,
-    aarch64::{Instruction, Operation, Register},
+    aarch64::{Instruction, Operation, Register, integer_math, integer_unary},
     block::{ExitKind, Terminator},
 };
 
@@ -243,6 +243,7 @@ fn emit_selected(
     // The DIT audit covers each instruction's own lowering, not the
     // register-allocated and clean-load regions' recipes.
     let optimize_regions = optimize_regions && !target.data_independent_timing();
+    let fuse_pairs = optimize_regions && frame_loop.is_none() && !fault_table && !pinned;
     // Which accesses check the guest range (`guest_range`), and each
     // instruction's checks.
     let ranges = if checks.guest_range && checks.checks_every_access() {
@@ -387,6 +388,37 @@ fn emit_selected(
             continue;
         }
         let instruction = &instructions[cursor];
+        // An ordinary block runs the pair together. A truncated block or
+        // an entry at CLZ still emits its original operation.
+        if fuse_pairs
+            && let Operation::IntegerMath(reverse) = instruction.operation
+            && let integer_math::Kind::ReverseBits { width } = reverse.kind
+            && let Some(second) = instructions.get(cursor + 1)
+            && let Operation::IntegerMath(count) = second.operation
+            && count.kind == (integer_math::Kind::LeadingZeros { width })
+            && reverse.destination != Register::Zero
+            && count.left == reverse.destination
+            && count.destination == reverse.destination
+            && instruction.pc.0.checked_add(4) == Some(second.pc.0)
+        {
+            block.source_map.push((instruction.pc, code.len()));
+            code.set_instruction(block.source_map.len() - 1);
+            code.asm().nop();
+            block.source_map.push((second.pc, code.len()));
+            code.set_instruction(block.source_map.len() - 1);
+            super::integer_unary::emit(
+                code,
+                &integer_unary::Operand {
+                    kind: integer_unary::Kind::TrailingZeros,
+                    width,
+                    destination: count.destination,
+                    source: reverse.left,
+                },
+                target,
+            );
+            cursor += 2;
+            continue;
+        }
         block.source_map.push((instruction.pc, code.len()));
         code.set_instruction(block.source_map.len() - 1);
         if let Some(target) = instruction.operation.conditional_target() {
@@ -538,11 +570,12 @@ fn emit_single(
         && matches!(
             operand.otherwise,
             crate::aarch64::conditional_select::Otherwise::Unchanged
+                | crate::aarch64::conditional_select::Otherwise::Increment
                 | crate::aarch64::conditional_select::Otherwise::Invert
         )
     {
-        // The preceding pinned capture preserves the host flags. MOV and
-        // NOT keep them live while preparing these select operands.
+        // The preceding pinned capture preserves the host flags. The
+        // select keeps them live while preparing its operands.
         super::conditional_select::emit(code, operand, true);
     } else if let super::Rax::Guest(register) = held.rax
         && let Operation::AddSub {

@@ -6164,11 +6164,13 @@ fn eret_traps_and_eretaa_authenticates_elr_with_sp() {
 /// nonzero value enters it without the state, reported once; the host's
 /// own returns are unaffected.
 #[test]
-fn entering_a_guest_with_unapplied_vm_state_reports_it_once() {
+fn only_eligible_guest_entries_report_unapplied_vm_state() {
     const ERET: u32 = 0xd69f_03e0;
     const GEXIT: u32 = 0x0020_1400;
     const EL1H: u64 = 0x3c5;
     const EL0T: u64 = 0x3c0;
+    const EL2H: u64 = 0x3c9;
+    const RESERVED_MODE: u64 = 0x3c2;
     const HCR_E2H: u64 = 1 << 34;
     let guest = super::super::impdef::TABLE
         .iter()
@@ -6202,6 +6204,14 @@ fn entering_a_guest_with_unapplied_vm_state_reports_it_once() {
         .cpu
         .registers
         .set(SystemRegister::HCR_EL2, 0, HCR_E2H);
+    // A pending register must stay silent on a guarded return, an illegal
+    // saved mode, and a return to the hypervisor itself.
+    machine.guest_entry(EL1H, true);
+    machine.guest_entry(RESERVED_MODE, false);
+    enter(&mut machine, ERET, EL2H).unwrap();
+    assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (2, 0x8000));
+    assert!(machine.take_unmodeled().is_empty());
+    assert_eq!(machine.statistics.degraded, 0);
     for _ in 0..2 {
         enter(&mut machine, ERET, EL1H).unwrap();
         assert_eq!((machine.cpu.pstate.el, machine.cpu.pc), (1, 0x8000));

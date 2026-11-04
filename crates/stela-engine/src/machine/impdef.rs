@@ -1748,6 +1748,34 @@ pub const TABLE: &[Entry] = &[
     ),
 ];
 
+const fn guest_count() -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < TABLE.len() {
+        if matches!(TABLE[index].class, Class::Guest) {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
+
+// Retain catalog order so the same register is reported when several hold
+// guest state. Only these entries need inspection at exception return.
+static GUEST_ENTRIES: [&Entry; guest_count()] = {
+    let mut entries = [&TABLE[0]; guest_count()];
+    let mut next = 0;
+    let mut index = 0;
+    while index < TABLE.len() {
+        if matches!(TABLE[index].class, Class::Guest) {
+            entries[next] = &TABLE[index];
+            next += 1;
+        }
+        index += 1;
+    }
+    entries
+};
+
 const fn guest(encoding: Encoding, name: &'static str) -> Entry {
     entry(encoding, name, Class::Guest, GUEST_EVIDENCE).el2()
 }
@@ -1980,9 +2008,10 @@ impl Registers {
     /// The first `Guest` register holding a nonzero value: state an EL1&0
     /// guest would run without.
     pub fn guest_state(&self) -> Option<&'static Entry> {
-        TABLE.iter().find(|entry| {
-            entry.class == Class::Guest && self.stored(entry).is_some_and(|value| value != 0)
-        })
+        GUEST_ENTRIES
+            .iter()
+            .copied()
+            .find(|entry| self.stored(entry).is_some_and(|value| value != 0))
     }
 
     /// (entry, reads, writes) for every register the guest touched, once
