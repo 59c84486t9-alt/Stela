@@ -96,6 +96,18 @@ pub(super) fn capture(code: &mut Code, borrow: bool) {
     store_captured(&mut code.asm());
 }
 
+/// Store canonical Arm NZCV while keeping the normalized host flags live.
+/// The caller has established long-mode LAHF and fast BMI2 extraction.
+pub(super) fn capture_arm_live(code: &mut Code, borrow: bool) {
+    debug_assert!(!code.is_pinned() && !code.constant_time());
+    capture_in_rax(code, borrow);
+    let mut asm = code.asm();
+    asm.mov_imm32(Rcx, WORD_MASK);
+    asm.pext(Rax, Rax, Rcx);
+    asm.rorx(Size::Dword, Rax, Rax, u32::BITS as u8 - ARM_SHIFT);
+    store(&mut asm, Rax);
+}
+
 /// `mov dword [rdi+GuestState.nzcv],source`: a word in pinned code, an Arm
 /// word in frame code.
 pub(super) fn store(asm: &mut Asm, source: Gpr) {

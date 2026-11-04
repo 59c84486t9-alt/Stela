@@ -277,6 +277,30 @@ fn emit_selected(
     // register-allocated and clean-load regions' recipes.
     let optimize_regions = optimize_regions && !target.data_independent_timing();
     let fuse_pairs = optimize_regions && frame_loop.is_none() && !fault_table && !pinned;
+    // Long-mode LAHF is part of the v2 floor. Some BMI2 hosts execute PEXT
+    // in microcode and keep the existing capture and predicate there.
+    let fuse_branch_flags =
+        fuse_pairs && target.supports(crate::TargetCpu::X86_64_V2.with_bmi2().with_fast_pdep());
+    let native_branch_after = |index: usize| {
+        if !fuse_branch_flags
+            || !matches!(
+                instructions[index].operation,
+                Operation::AddSub { flags: true, .. }
+                    | Operation::AddSubRegister { flags: true, .. }
+            )
+        {
+            return false;
+        }
+        let next = match instructions.get(index + 1) {
+            Some(next) => Some((next.pc, &next.operation)),
+            None => match terminal {
+                Some((pc, Terminator::Branch(operation))) => Some((*pc, operation)),
+                _ => None,
+            },
+        };
+        matches!(next, Some((pc, Operation::BranchCondition { condition, .. }))
+            if *condition < 14 && instructions[index].pc.0.checked_add(4) == Some(pc.0))
+    };
     let fuse_simd = !target.data_independent_timing() && (pinned || fuse_pairs);
     let fuse_ssse3 = fuse_simd && target.supports(crate::TargetCpu::Ssse3);
     let fuse_single_table =
@@ -414,6 +438,7 @@ fn emit_selected(
                         SingleOptions {
                             target,
                             checks: checks_at(cursor + index),
+                            live_nzcv: false,
                         },
                         baseline_after,
                     );
@@ -529,6 +554,7 @@ fn emit_selected(
                         SingleOptions {
                             target,
                             checks: checks_at(cursor + index),
+                            live_nzcv: native_branch_after(cursor + index),
                         },
                         after,
                     );
@@ -666,6 +692,7 @@ fn emit_selected(
             SingleOptions {
                 target,
                 checks: checks_at(cursor),
+                live_nzcv: native_branch_after(cursor),
             },
             held,
         );
@@ -760,6 +787,7 @@ fn preserves_xmm0(operation: &Operation) -> bool {
 struct SingleOptions {
     target: crate::TargetCpu,
     checks: super::MemoryChecks,
+    live_nzcv: bool,
 }
 
 /// One instruction outside the regions, after an emission that left
@@ -776,7 +804,11 @@ fn emit_single(
     options: SingleOptions,
     held: Held,
 ) -> Held {
-    let SingleOptions { target, checks } = options;
+    let SingleOptions {
+        target,
+        checks,
+        live_nzcv,
+    } = options;
     if let Operation::FloatingPoint(operand) = &instruction.operation {
         let Some(out_of_line) = out_of_line else {
             super::simd::emit_numerical(code, operand, instruction.pc, target);
@@ -795,6 +827,11 @@ fn emit_single(
             xmm0,
         };
     }
+    let capture: fn(&mut Code, bool) = if live_nzcv {
+        super::flag_word::capture_arm_live
+    } else {
+        super::nzcv
+    };
     let start = code.len();
     if let Operation::Simd(operand) = &instruction.operation {
         super::simd::emit_after(code, operand, target, checks, held.xmm0);
@@ -843,6 +880,7 @@ fn emit_single(
         && source == register
     {
         super::pinned::compare_held_immediate(code, width, immediate);
+        capture(code, true);
     } else if !code.constant_time()
         && let super::Rax::Guest(register) = held.rax
         && let Operation::AddSubRegister {
@@ -859,6 +897,7 @@ fn emit_single(
         && left != right
     {
         super::pinned::compare_held_right(code, width, left);
+        capture(code, true);
     } else if !code.is_pinned()
         && !code.constant_time()
         && let super::Rax::Guest(register) = held.rax
@@ -882,6 +921,16 @@ fn emit_single(
         let left = asm.guest(left).expect("ADD left register");
         asm.alu_load(Alu::Add, Size::of(width == Width::X64), Gpr::Rax, left);
         super::store(code, destination);
+    } else if live_nzcv {
+        assert!(
+            super::pinned::emit_direct_with_add_sub_capture(
+                code,
+                &instruction.operation,
+                target,
+                capture
+            ),
+            "the native branch plan selected ADD/SUB"
+        );
     } else {
         super::emit_instruction(code, instruction, fixups, target, checks);
     }
@@ -902,11 +951,12 @@ fn emit_single(
         {
             super::Rax::Unknown
         }
+        super::Rax::Nzcv if live_nzcv => super::Rax::LiveNzcv,
         rax => rax,
     };
     debug_assert!(match rax {
         super::Rax::Unknown => true,
-        super::Rax::Nzcv => code.ends_with(&nzcv_store(code.is_pinned())),
+        super::Rax::Nzcv | super::Rax::LiveNzcv => code.ends_with(&nzcv_store(code.is_pinned())),
         super::Rax::Guest(register) => super::register_store(scratch, register, code.is_pinned())
             .is_some_and(|store| code.ends_with(store)),
     });
@@ -1281,6 +1331,9 @@ fn load_unless_held(code: &mut Code, register: Register, rax: super::Rax) {
 fn branch_condition(code: &mut Code, operation: &Operation, rax: super::Rax) -> Option<Cond> {
     match *operation {
         Operation::BranchCondition { condition, .. } => {
+            if rax == super::Rax::LiveNzcv {
+                return Some(super::flag_word::condition(code, condition, true));
+            }
             let loaded = rax == super::Rax::Nzcv && code.ends_with(&nzcv_store(code.is_pinned()));
             super::condition_holds(code, condition, loaded)
         }

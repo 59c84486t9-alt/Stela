@@ -616,6 +616,22 @@ impl<'a> Asm<'a> {
 
     // BMI2 (VEX-encoded general-purpose forms).
 
+    /// `pext dst, src, mask`: pack the selected bits without affecting flags.
+    pub(crate) fn pext(&mut self, destination: Gpr, source: Gpr, mask: Gpr) {
+        self.vex(
+            Vex {
+                map: Map::M0f38,
+                pp: Pp::Pf3,
+                w: false,
+                l: false,
+            },
+            0xf5,
+            destination.number(),
+            source.number(),
+            mask.into(),
+        );
+    }
+
     /// `shlx`, `shrx` or `sarx dst, rm, count`: a shift by the count register
     /// modulo the operand width, without flags (BMI2).
     pub(crate) fn shift_x(
@@ -646,7 +662,6 @@ impl<'a> Asm<'a> {
         );
     }
     /// `rorx dst, rm, imm8`: rotate right without flags (BMI2).
-    #[cfg(test)]
     pub(crate) fn rorx(&mut self, size: Size, destination: Gpr, rm: impl Into<Rm>, amount: u8) {
         self.vex(
             Vex {

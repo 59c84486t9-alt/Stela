@@ -120,11 +120,22 @@ fn constant(asm: &mut Asm, destination: Gpr, value: u64) {
 
 /// The result in `work` stored if it is not already home, then NZCV.
 fn finish(code: &mut Code, work: Gpr, destination: Register, flags: bool, subtract: bool) {
+    finish_with(code, work, destination, flags, subtract, nzcv);
+}
+
+fn finish_with(
+    code: &mut Code,
+    work: Gpr,
+    destination: Register,
+    flags: bool,
+    subtract: bool,
+    capture: impl FnOnce(&mut Code, bool),
+) {
     if work == Gpr::Rax {
         store(code, destination);
     }
     if flags {
-        nzcv(code, subtract);
+        capture(code, subtract);
     }
 }
 
@@ -288,7 +299,6 @@ pub(super) fn compare_held_right(code: &mut Code, width: Width, left: Register) 
     let mut asm = code.asm();
     let left = asm.guest(left).expect("CMP left register");
     asm.alu(Alu::Cmp, Size::of(width == Width::X64), left, Gpr::Rax);
-    nzcv(code, true);
 }
 
 /// Compare the guest value that the previous instruction left in RAX.
@@ -296,7 +306,6 @@ pub(super) fn compare_held_immediate(code: &mut Code, width: Width, immediate: u
     let size = Size::of(width == Width::X64);
     code.asm()
         .alu_imm(Alu::Cmp, size, Gpr::Rax, immediate as i32);
-    nzcv(code, true);
 }
 
 pub(super) fn emit_pc_relative(code: &mut Code, operand: pc_relative::Operand) {
@@ -308,6 +317,16 @@ pub(super) fn emit_pc_relative(code: &mut Code, operand: pc_relative::Operand) {
 
 /// Common integer operations on their native register or frame operands.
 pub(super) fn emit_direct(code: &mut Code, operation: &Operation, target: TargetCpu) -> bool {
+    emit_direct_with_add_sub_capture(code, operation, target, nzcv)
+}
+
+/// Use a different capture for ADD/SUB when its successor can read live flags.
+pub(super) fn emit_direct_with_add_sub_capture(
+    code: &mut Code,
+    operation: &Operation,
+    target: TargetCpu,
+    capture: impl FnOnce(&mut Code, bool),
+) -> bool {
     match *operation {
         Operation::AddSub {
             width,
@@ -339,7 +358,7 @@ pub(super) fn emit_direct(code: &mut Code, operation: &Operation, target: Target
                     asm.alu_imm(op, size, work, immediate);
                 }
             }
-            finish(code, work, destination, flags, subtract);
+            finish_with(code, work, destination, flags, subtract, capture);
         }
         Operation::AddSubRegister {
             width,
@@ -375,7 +394,7 @@ pub(super) fn emit_direct(code: &mut Code, operation: &Operation, target: Target
                     }
                 }
             }
-            finish(code, work, destination, flags, subtract);
+            finish_with(code, work, destination, flags, subtract, capture);
         }
         Operation::LogicalRegister {
             width,

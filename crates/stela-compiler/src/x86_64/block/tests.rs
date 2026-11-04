@@ -5,6 +5,57 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 #[test]
+fn ordinary_adjacent_nzcv_uses_native_condition_on_fast_extract_targets() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan},
+    };
+
+    // CMP W13,W1; B.HS from the zlib deflate match search.
+    let pc = GuestAddress(0x100003fe0);
+    let words = [0x6b01_01bfu32, 0x5400_0062];
+    let compile = |words: &[u32], pc, target| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let options = Options::new(BlockProfile::ORDINARY, target);
+        CompilationPlan::new(&source, pc, &options)
+            .unwrap()
+            .compile()
+            .unwrap()
+            .native
+    };
+    let extract = |code: &[u8]| {
+        code.windows(5)
+            .any(|window| window == [0xc4, 0xe2, 0x7a, 0xf5, 0xc1])
+    };
+    let fast = TargetCpu::X86_64_V2.with_bmi2().with_fast_pdep();
+    let pair = compile(&words, pc, fast);
+    let branch = pair.source_map[1];
+    assert_eq!(
+        pair.source_map,
+        [(pc, 0), (GuestAddress(pc.0 + 4), branch.1)]
+    );
+    assert!(extract(&pair.x86_64_code[..branch.1]));
+    // Subtraction's CMC gives Arm carry, so HS branches with host JB.
+    assert!(pair.x86_64_code[branch.1..].starts_with(&[0x0f, 0x82]));
+
+    let hi = compile(&[words[0], words[1] & !15 | 8], pc, fast);
+    // HI needs both !borrow and !zero. Restore x86 borrow for JA.
+    assert!(hi.x86_64_code[hi.source_map[1].1..].starts_with(&[0xf5, 0x0f, 0x87]));
+    for target in [
+        TargetCpu::Baseline,
+        TargetCpu::X86_64_V2.with_bmi2(),
+        TargetCpu::X86_64_V2.with_fast_pdep(),
+        fast.with_data_independent_timing(),
+    ] {
+        assert!(!extract(&compile(&words, pc, target).x86_64_code));
+    }
+    assert!(!extract(&compile(&words[..1], pc, fast).x86_64_code));
+    let independent = compile(&words[1..], branch.0, fast);
+    assert_eq!(independent.source_map, [(branch.0, 0)]);
+    assert_eq!(independent.x86_64_code[0], 0xf6); // TEST the saved NZCV byte.
+}
+
+#[test]
 fn ordinary_compare_reads_both_settled_load_results() {
     use crate::{
         Options, TargetCpu,

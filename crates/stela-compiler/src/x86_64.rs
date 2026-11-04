@@ -1004,6 +1004,9 @@ pub(super) enum Rax {
     Unknown,
     /// The emission ended by storing the NZCV word in EAX ([`nzcv`]).
     Nzcv,
+    /// The canonical NZCV is settled and the normalized host flags still
+    /// hold the same condition.
+    LiveNzcv,
     /// The emission ended by storing RAX to this register's frame slot
     /// ([`store`]).
     Guest(Register),
