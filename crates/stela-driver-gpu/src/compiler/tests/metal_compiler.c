@@ -1368,6 +1368,85 @@ function_constants_select_arguments(void)
    }
 }
 
+/* The false constant makes the helper unreachable, but admission of the
+ * original call graph still precedes early specialization. */
+static void
+specialized_fragment_calls_preserve_graph_admission(void)
+{
+   const char *body =
+      "@enabled = external addrspace(2) constant i8\n"
+      "define <4 x float> @entry() {\n"
+      "%value = load i8, ptr addrspace(2) @enabled\n"
+      "%on = icmp ne i8 %value, 0\n"
+      "br i1 %on, label %active, label %inactive\n"
+      "active:\n%result = call <4 x float> @helper()\nret <4 x float> %result\n"
+      "inactive:\nret <4 x float> zeroinitializer\n}\n"
+      "!air.fragment = !{!2}\n!2 = !{ptr @entry, !3, !4}\n!3 = !{!30}\n!4 = !{}\n"
+      "!30 = !{!\"air.render_target\", i32 0, i32 0, !\"air.arg_type_name\", !\"float4\","
+      " !\"air.arg_name\", !\"color\"}\n"
+      "!air.function_constants = !{!50}\n!50 = !{ptr addrspace(2) @enabled, !\"bool\", !\"enabled\", i32 0}\n";
+   const char *unsupported = "declare <4 x float> @unsupported()\n"
+      "define internal <4 x float> @helper() {\n"
+      "%result = call <4 x float> @unsupported()\nret <4 x float> %result\n}\n";
+   char *fixture = ralloc_asprintf(NULL, "%s%s", body, unsupported);
+   struct stela_air_error error;
+   const struct stela_metal_specialization defaults = {0};
+   uint8_t enabled = 0;
+   const struct stela_air_constant_value value = {0, &enabled, sizeof(enabled)};
+   const struct stela_metal_specialization explicit = {.constants = &value, .constant_count = 1};
+   nir_shader *a = compile(fixture, "entry", &defaults, &error);
+   nir_shader *b = compile(fixture, "entry", &explicit, &error);
+   assert(a && b);
+   struct blob original, folded;
+   blob_init(&original);
+   blob_init(&folded);
+   nir_serialize(&original, a, true);
+   nir_serialize(&folded, b, true);
+   assert(!original.out_of_memory && !folded.out_of_memory && original.size == folded.size &&
+          !memcmp(original.data, folded.data, original.size));
+   blob_finish(&original);
+   blob_finish(&folded);
+   stela_metal_release(a);
+   stela_metal_release(b);
+
+   enabled = 1;
+   assert(!compile(fixture, "entry", &explicit, &error));
+   assert(error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "unresolved external function"));
+   const struct stela_air_error failure = error;
+   assert(ralloc_asprintf_append(&fixture,
+      "declare i32 @air.get_size_visible_function_table(ptr addrspace(1))\n"));
+   assert(!compile(fixture, "entry", &explicit, &error));
+   assert(error.kind == failure.kind && error.instruction == failure.instruction &&
+          !strcmp(error.detail, failure.detail));
+   ralloc_free(fixture);
+
+   enabled = 0;
+   fixture = ralloc_asprintf(NULL, "%s%s", body, "define internal <4 x float> @helper() {\n"
+      "%result = call <4 x float> @helper()\nret <4 x float> %result\n}\n");
+   assert(!compile(fixture, "entry", &explicit, &error));
+   assert(error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "recursive calls outside"));
+   ralloc_free(fixture);
+
+   fixture = ralloc_asprintf(NULL, "%s%s", body, "define internal <4 x float> @helper() {\n"
+      "%result = call <4 x float> @chain0()\nret <4 x float> %result\n}\n");
+   for (unsigned i = 0; i < 256; i++) {
+      assert(ralloc_asprintf_append(&fixture, "define internal <4 x float> @chain%u() {\n"
+         "%%result = call <4 x float> @chain%u()\nret <4 x float> %%result\n}\n", i, i + 1));
+   }
+   assert(ralloc_asprintf_append(&fixture,
+      "define internal <4 x float> @chain256() {\nret <4 x float> zeroinitializer\n}\n"));
+   LLVMMemoryBufferRef input = bitcode(fixture);
+   ralloc_free(fixture);
+   const struct stela_air_stage_options stage = {
+      .stage = STELA_AIR_FRAGMENT, .resources = {.max_instructions = 10000, .constants = &value,
+                                                 .constant_count = 1},
+   };
+   assert(!stela_air_metal_stage_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                       "entry", &nir_options, &stage, &error));
+   assert(error.kind == STELA_AIR_LIMIT && strstr(error.detail, "call depth exceeded"));
+   LLVMDisposeMemoryBuffer(input);
+}
+
 /* An output a false function constant makes absent is not one. */
 static void
 function_constants_select_outputs(void)
@@ -2026,6 +2105,7 @@ main(void)
    unoptimized_kernels_compile();
    undefined_lanes_read_as_anything();
    function_constants_select_arguments();
+   specialized_fragment_calls_preserve_graph_admission();
    arrays_reflect_each_slot();
    bindings_reflect_their_structures();
    defined_functions_inline_into_their_callers();

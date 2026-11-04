@@ -812,7 +812,7 @@ stela_metal_compile_reflected(const void *air, size_t size, const char *entry,
       .max_mesh_vertices = target->max_mesh_vertices,
       .max_mesh_primitives = target->max_mesh_primitives,
    };
-   shader = stela_air_stage_to_nir(air, size, entry, target->nir, &options, error);
+   shader = stela_air_metal_stage_to_nir(air, size, entry, target->nir, &options, error);
 done:
    free(owned_reflection);
    return shader;

@@ -36,4 +36,9 @@ bool stela_air_dispatch_tables(struct stela_air_metadata *m,
  * recursion stay. */
 bool stela_air_inline_calls(struct stela_air_metadata *m, LLVMValueRef entry,
                             unsigned max_call_stack_depth, unsigned max_instructions);
+/* The first inlining pass with an optional specialized entry. After checking
+ * the original graph, it folds constants in an acyclic entry before expanding
+ * its calls, setting *folded when that pass runs. */
+bool stela_air_inline_specialized_calls(struct stela_air_metadata *m, LLVMValueRef entry,
+                                        bool *folded);
 #endif
