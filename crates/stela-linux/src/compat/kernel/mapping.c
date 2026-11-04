@@ -183,9 +183,11 @@ vm_fault_t vmf_insert_pfn_prot(struct vm_area_struct *vma, unsigned long addr, u
 }
 
 /* Clients fault the range back in, and reach wherever it moved to. */
-static void unmap_file_pages(struct address_space *mapping, pgoff_t first, pgoff_t last)
+static bool unmap_file_pages(struct address_space *mapping, pgoff_t first, pgoff_t last,
+			     vm_flags_t required)
 {
 	struct vm_area_struct *vma;
+	bool unmapped = false;
 
 	i_mmap_lock_read(mapping);
 	for (vma = mapped_iter_first(&mapping->i_mmap, first, last); vma;
@@ -195,10 +197,14 @@ static void unmap_file_pages(struct address_space *mapping, pgoff_t first, pgoff
 		pgoff_t from = max(first, vma->vm_pgoff);
 		pgoff_t to = min(last, last_page(vma));
 
+		if ((vma->vm_flags & required) != required)
+			continue;
 		unmap_client(client, vma->vm_start + ((from - vma->vm_pgoff) << PAGE_SHIFT),
 			     (to - from + 1) << PAGE_SHIFT);
+		unmapped = true;
 	}
 	i_mmap_unlock_read(mapping);
+	return unmapped;
 }
 
 void unmap_mapping_range(struct address_space *mapping, loff_t const holebegin,
@@ -208,13 +214,20 @@ void unmap_mapping_range(struct address_space *mapping, loff_t const holebegin,
 	pgoff_t first = (pgoff_t)(holebegin >> PAGE_SHIFT);
 	pgoff_t count = (pgoff_t)(PAGE_ALIGN(holelen) >> PAGE_SHIFT);
 
-	unmap_file_pages(mapping, first, count ? first + count - 1 : ULONG_MAX);
+	unmap_file_pages(mapping, first, count ? first + count - 1 : ULONG_MAX, 0);
 }
 
 void unmap_mapping_folio(struct folio *folio)
 {
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
-	unmap_file_pages(folio->mapping, folio->index, folio_next_index(folio) - 1);
+	unmap_file_pages(folio->mapping, folio->index, folio_next_index(folio) - 1, 0);
+}
+
+bool stela_linux_unmap_writable_folio(struct folio *folio)
+{
+	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+	return unmap_file_pages(folio->mapping, folio->index, folio_next_index(folio) - 1,
+				VM_SHARED | VM_WRITE);
 }
 
 #ifdef STELA_LINUX_MAPPING_TEST
@@ -360,6 +373,7 @@ int main(void)
 	unmap_mapping_folio(&folio);
 	assert(removed_address == BASE + PAGE_SIZE && removed_size == PAGE_SIZE);
 	removed_size = 0;
+	assert(!stela_linux_unmap_writable_folio(&folio) && !removed_size);
 	unmap_mapping_range(file->f_mapping, PAGE_SIZE, 2 * PAGE_SIZE, 1);
 	assert(!removed_size);
 	unmap_mapping_range(file->f_mapping, 0, 0, 1);
@@ -384,6 +398,11 @@ int main(void)
 	assert(!removed_size);
 	unmap_mapping_range(exporter->f_mapping, 0, 0, 1);
 	assert(removed_size == PAGE_SIZE);
+	struct folio writable = {.mapping = exporter->f_mapping};
+	assert(folio_trylock(&writable));
+	removed_size = 0;
+	assert(stela_linux_unmap_writable_folio(&writable));
+	assert(removed_address == BASE && removed_size == PAGE_SIZE);
 	stela_linux_munmap(mapping);
 	fput(exporter);
 	fput(file);

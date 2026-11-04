@@ -190,6 +190,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/inode_timestamps.c")),
             PathBuf::from(format!("{LINUX}/fs/bad_inode_ops.c")),
             PathBuf::from(format!("{LINUX}/fs/inode_evict.c")),
+            PathBuf::from(format!("{LINUX}/fs/attr.c")),
             PathBuf::from(format!("{LINUX}/fs/name_hash.c")),
             PathBuf::from(format!("{LINUX}/fs/path_get.c")),
             PathBuf::from(format!("{LINUX}/fs/pidfs_metadata.c")),

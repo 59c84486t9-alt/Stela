@@ -47,6 +47,10 @@ struct stela_linux_run {
  * errno. A driver maps it through the requester's DMA domain. */
 int stela_linux_export(const struct stela_linux_run *runs, size_t count);
 
+/* Invalidate native shared writers before zeroing a locked folio's new tail.
+ * A mapped writer may have changed bytes the native owner cannot query. */
+bool stela_linux_unmap_writable_folio(struct folio *folio);
+
 /* Maps size bytes of file at offset into space at address, through the file's
  * mmap, or returns a negative errno. Pages arrive by the client's faults. */
 int stela_linux_mmap(struct file *file, void *space, unsigned long address, size_t size,

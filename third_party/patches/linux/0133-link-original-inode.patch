@@ -1,0 +1,1274 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 00:01:11 -0500
+Subject: [PATCH] refactor(vfs): link original inode attributes and size
+ changes
+
+---
+ fs/attr.c          | 347 +++++++++++++++++++++++++++++++++++++++++++++
+ fs/inode.c         |  66 ---------
+ fs/inode_evict.c   |  42 ++++++
+ fs/internal.h      |  19 +++
+ fs/libfs.c         |  33 -----
+ fs/namei.c         | 307 ---------------------------------------
+ fs/open.c          |  34 -----
+ fs/path_open.c     |  34 +++++
+ mm/filemap_batch.c | 131 +++++++++++++++++
+ mm/truncate.c      | 123 ----------------
+ 10 files changed, 573 insertions(+), 563 deletions(-)
+
+diff --git a/fs/attr.c b/fs/attr.c
+index 71888ac903c27ddacc51dfd64e3be58f868d7e20..9d169300a538b1f58bec3f36330a5f2222c8a77c 100644
+--- a/fs/attr.c
++++ b/fs/attr.c
+@@ -7,6 +7,8 @@
+  */
+ 
+ #include <linux/export.h>
++#include <linux/device_cgroup.h>
++#include "internal.h"
+ #include <linux/time.h>
+ #include <linux/mm.h>
+ #include <linux/string.h>
+@@ -565,3 +567,348 @@ int notify_change(struct mnt_idmap *idmap, struct dentry *dentry,
+ 	return error;
+ }
+ EXPORT_SYMBOL(notify_change);
++
++/**
++ * check_acl - perform ACL permission checking
++ * @idmap:	idmap of the mount the inode was found from
++ * @inode:	inode to check permissions on
++ * @mask:	right to check for (%MAY_READ, %MAY_WRITE, %MAY_EXEC ...)
++ *
++ * This function performs the ACL permission checking. Since this function
++ * retrieve POSIX acls it needs to know whether it is called from a blocking or
++ * non-blocking context and thus cares about the MAY_NOT_BLOCK bit.
++ *
++ * If the inode has been found through an idmapped mount the idmap of
++ * the vfsmount must be passed through @idmap. This function will then take
++ * care to map the inode according to @idmap before checking permissions.
++ * On non-idmapped mounts or if permission checking is to be performed on the
++ * raw inode simply pass @nop_mnt_idmap.
++ */
++static int check_acl(struct mnt_idmap *idmap,
++		     struct inode *inode, int mask)
++{
++#ifdef CONFIG_FS_POSIX_ACL
++	struct posix_acl *acl;
++
++	if (mask & MAY_NOT_BLOCK) {
++		acl = get_cached_acl_rcu(inode, ACL_TYPE_ACCESS);
++	        if (!acl)
++	                return -EAGAIN;
++		/* no ->get_inode_acl() calls in RCU mode... */
++		if (is_uncached_acl(acl))
++			return -ECHILD;
++	        return posix_acl_permission(idmap, inode, acl, mask);
++	}
++
++	acl = get_inode_acl(inode, ACL_TYPE_ACCESS);
++	if (IS_ERR(acl))
++		return PTR_ERR(acl);
++	if (acl) {
++	        int error = posix_acl_permission(idmap, inode, acl, mask);
++	        posix_acl_release(acl);
++	        return error;
++	}
++#endif
++
++	return -EAGAIN;
++}
++
++/**
++ * acl_permission_check - perform basic UNIX permission checking
++ * @idmap:	idmap of the mount the inode was found from
++ * @inode:	inode to check permissions on
++ * @mask:	right to check for (%MAY_READ, %MAY_WRITE, %MAY_EXEC ...)
++ *
++ * This function performs the basic UNIX permission checking. Since this
++ * function may retrieve POSIX acls it needs to know whether it is called from a
++ * blocking or non-blocking context and thus cares about the MAY_NOT_BLOCK bit.
++ *
++ * If the inode has been found through an idmapped mount the idmap of
++ * the vfsmount must be passed through @idmap. This function will then take
++ * care to map the inode according to @idmap before checking permissions.
++ * On non-idmapped mounts or if permission checking is to be performed on the
++ * raw inode simply pass @nop_mnt_idmap.
++ */
++static int acl_permission_check(struct mnt_idmap *idmap,
++				struct inode *inode, int mask)
++{
++	unsigned int mode = inode->i_mode;
++	vfsuid_t vfsuid;
++
++	/*
++	 * Common cheap case: everybody has the requested
++	 * rights, and there are no ACLs to check. No need
++	 * to do any owner/group checks in that case.
++	 *
++	 *  - 'mask&7' is the requested permission bit set
++	 *  - multiplying by 0111 spreads them out to all of ugo
++	 *  - '& ~mode' looks for missing inode permission bits
++	 *  - the '!' is for "no missing permissions"
++	 *
++	 * After that, we just need to check that there are no
++	 * ACL's on the inode - do the 'IS_POSIXACL()' check last
++	 * because it will dereference the ->i_sb pointer and we
++	 * want to avoid that if at all possible.
++	 */
++	if (!((mask & 7) * 0111 & ~mode)) {
++		if (no_acl_inode(inode))
++			return 0;
++		if (!IS_POSIXACL(inode))
++			return 0;
++	}
++
++	/* Are we the owner? If so, ACL's don't matter */
++	vfsuid = i_uid_into_vfsuid(idmap, inode);
++	if (likely(vfsuid_eq_kuid(vfsuid, current_fsuid()))) {
++		mask &= 7;
++		mode >>= 6;
++		return (mask & ~mode) ? -EACCES : 0;
++	}
++
++	/* Do we have ACL's? */
++	if (IS_POSIXACL(inode) && (mode & S_IRWXG)) {
++		int error = check_acl(idmap, inode, mask);
++		if (error != -EAGAIN)
++			return error;
++	}
++
++	/* Only RWX matters for group/other mode bits */
++	mask &= 7;
++
++	/*
++	 * Are the group permissions different from
++	 * the other permissions in the bits we care
++	 * about? Need to check group ownership if so.
++	 */
++	if (mask & (mode ^ (mode >> 3))) {
++		vfsgid_t vfsgid = i_gid_into_vfsgid(idmap, inode);
++		if (vfsgid_in_group_p(vfsgid))
++			mode >>= 3;
++	}
++
++	/* Bits in 'mode' clear that we require? */
++	return (mask & ~mode) ? -EACCES : 0;
++}
++
++/**
++ * generic_permission -  check for access rights on a Posix-like filesystem
++ * @idmap:	idmap of the mount the inode was found from
++ * @inode:	inode to check access rights for
++ * @mask:	right to check for (%MAY_READ, %MAY_WRITE, %MAY_EXEC,
++ *		%MAY_NOT_BLOCK ...)
++ *
++ * Used to check for read/write/execute permissions on a file.
++ * We use "fsuid" for this, letting us set arbitrary permissions
++ * for filesystem access without changing the "normal" uids which
++ * are used for other things.
++ *
++ * generic_permission is rcu-walk aware. It returns -ECHILD in case an rcu-walk
++ * request cannot be satisfied (eg. requires blocking or too much complexity).
++ * It would then be called again in ref-walk mode.
++ *
++ * If the inode has been found through an idmapped mount the idmap of
++ * the vfsmount must be passed through @idmap. This function will then take
++ * care to map the inode according to @idmap before checking permissions.
++ * On non-idmapped mounts or if permission checking is to be performed on the
++ * raw inode simply pass @nop_mnt_idmap.
++ */
++int generic_permission(struct mnt_idmap *idmap, struct inode *inode,
++		       int mask)
++{
++	int ret;
++
++	/*
++	 * Do the basic permission checks.
++	 */
++	ret = acl_permission_check(idmap, inode, mask);
++	if (ret != -EACCES)
++		return ret;
++
++	if (S_ISDIR(inode->i_mode)) {
++		/* DACs are overridable for directories */
++		if (!(mask & MAY_WRITE))
++			if (capable_wrt_inode_uidgid(idmap, inode,
++						     CAP_DAC_READ_SEARCH))
++				return 0;
++		if (capable_wrt_inode_uidgid(idmap, inode,
++					     CAP_DAC_OVERRIDE))
++			return 0;
++		return -EACCES;
++	}
++
++	/*
++	 * Searching includes executable on directories, else just read.
++	 */
++	mask &= MAY_READ | MAY_WRITE | MAY_EXEC;
++	if (mask == MAY_READ)
++		if (capable_wrt_inode_uidgid(idmap, inode,
++					     CAP_DAC_READ_SEARCH))
++			return 0;
++	/*
++	 * Read/write DACs are always overridable.
++	 * Executable DACs are overridable when there is
++	 * at least one exec bit set.
++	 */
++	if (!(mask & MAY_EXEC) || (inode->i_mode & S_IXUGO))
++		if (capable_wrt_inode_uidgid(idmap, inode,
++					     CAP_DAC_OVERRIDE))
++			return 0;
++
++	return -EACCES;
++}
++EXPORT_SYMBOL(generic_permission);
++
++/**
++ * do_inode_permission - UNIX permission checking
++ * @idmap:	idmap of the mount the inode was found from
++ * @inode:	inode to check permissions on
++ * @mask:	right to check for (%MAY_READ, %MAY_WRITE, %MAY_EXEC ...)
++ *
++ * We _really_ want to just do "generic_permission()" without
++ * even looking at the inode->i_op values. So we keep a cache
++ * flag in inode->i_opflags, that says "this has not special
++ * permission function, use the fast case".
++ */
++static inline int do_inode_permission(struct mnt_idmap *idmap,
++				      struct inode *inode, int mask)
++{
++	if (unlikely(!(inode->i_opflags & IOP_FASTPERM))) {
++		if (likely(inode->i_op->permission))
++			return inode->i_op->permission(idmap, inode, mask);
++
++		/* This gets set once for the inode lifetime */
++		spin_lock(&inode->i_lock);
++		inode->i_opflags |= IOP_FASTPERM;
++		spin_unlock(&inode->i_lock);
++	}
++	return generic_permission(idmap, inode, mask);
++}
++
++/**
++ * sb_permission - Check superblock-level permissions
++ * @sb: Superblock of inode to check permission on
++ * @inode: Inode to check permission on
++ * @mask: Right to check for (%MAY_READ, %MAY_WRITE, %MAY_EXEC)
++ *
++ * Separate out file-system wide checks from inode-specific permission checks.
++ *
++ * Note: lookup_inode_permission_may_exec() does not call here. If you add
++ * MAY_EXEC checks, adjust it.
++ */
++static int sb_permission(struct super_block *sb, struct inode *inode, int mask)
++{
++	if (mask & MAY_WRITE) {
++		umode_t mode = inode->i_mode;
++
++		/* Nobody gets write access to a read-only fs. */
++		if (sb_rdonly(sb) && (S_ISREG(mode) || S_ISDIR(mode) || S_ISLNK(mode)))
++			return -EROFS;
++	}
++	return 0;
++}
++
++/**
++ * inode_permission - Check for access rights to a given inode
++ * @idmap:	idmap of the mount the inode was found from
++ * @inode:	Inode to check permission on
++ * @mask:	Right to check for (%MAY_READ, %MAY_WRITE, %MAY_EXEC)
++ *
++ * Check for read/write/execute permissions on an inode.  We use fs[ug]id for
++ * this, letting us set arbitrary permissions for filesystem access without
++ * changing the "normal" UIDs which are used for other things.
++ *
++ * When checking for MAY_APPEND, MAY_WRITE must also be set in @mask.
++ */
++int inode_permission(struct mnt_idmap *idmap,
++		     struct inode *inode, int mask)
++{
++	int retval;
++
++	retval = sb_permission(inode->i_sb, inode, mask);
++	if (unlikely(retval))
++		return retval;
++
++	if (mask & MAY_WRITE) {
++		/*
++		 * Nobody gets write access to an immutable file.
++		 */
++		if (unlikely(IS_IMMUTABLE(inode)))
++			return -EPERM;
++
++		/*
++		 * Updating mtime will likely cause i_uid and i_gid to be
++		 * written back improperly if their true value is unknown
++		 * to the vfs.
++		 */
++		if (unlikely(HAS_UNMAPPED_ID(idmap, inode)))
++			return -EACCES;
++	}
++
++	retval = do_inode_permission(idmap, inode, mask);
++	if (unlikely(retval))
++		return retval;
++
++	retval = devcgroup_inode_permission(inode, mask);
++	if (unlikely(retval))
++		return retval;
++
++	return security_inode_permission(inode, mask);
++}
++EXPORT_SYMBOL(inode_permission);
++
++/*
++ * Return mask of changes for notify_change() that need to be done as a
++ * response to write or truncate. Return 0 if nothing has to be changed.
++ * Negative value on error (change should be denied).
++ */
++int dentry_needs_remove_privs(struct mnt_idmap *idmap,
++			      struct dentry *dentry)
++{
++	struct inode *inode = d_inode(dentry);
++	int mask = 0;
++	int ret;
++
++	if (IS_NOSEC(inode))
++		return 0;
++
++	mask = setattr_should_drop_suidgid(idmap, inode);
++	ret = security_inode_need_killpriv(dentry);
++	if (ret < 0)
++		return ret;
++	if (ret)
++		mask |= ATTR_KILL_PRIV;
++	return mask;
++}
++
++/**
++ * simple_setattr - setattr for simple filesystem
++ * @idmap: idmap of the target mount
++ * @dentry: dentry
++ * @iattr: iattr structure
++ *
++ * Returns 0 on success, -error on failure.
++ *
++ * simple_setattr is a simple ->setattr implementation without a proper
++ * implementation of size changes.
++ *
++ * It can either be used for in-memory filesystems or special files
++ * on simple regular filesystems.  Anything that needs to change on-disk
++ * or wire state on size changes needs its own setattr method.
++ */
++int simple_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
++		   struct iattr *iattr)
++{
++	struct inode *inode = d_inode(dentry);
++	int error;
++
++	error = setattr_prepare(idmap, dentry, iattr);
++	if (error)
++		return error;
++
++	if (iattr->ia_valid & ATTR_SIZE)
++		truncate_setsize(inode, iattr->ia_size);
++	setattr_copy(idmap, inode, iattr);
++	mark_inode_dirty(inode);
++	return 0;
++}
++EXPORT_SYMBOL(simple_setattr);
+diff --git a/fs/inode.c b/fs/inode.c
+index 49f40a735aed349a9096f88df7938e8953183609..e3cade3d786b5e765e199dfdd338d2c00caf0157 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -253,48 +253,6 @@ void discard_new_inode(struct inode *inode)
+ }
+ EXPORT_SYMBOL(discard_new_inode);
+ 
+-/**
+- * lock_two_nondirectories - take two i_mutexes on non-directory objects
+- *
+- * Lock any non-NULL argument. Passed objects must not be directories.
+- * Zero, one or two objects may be locked by this function.
+- *
+- * @inode1: first inode to lock
+- * @inode2: second inode to lock
+- */
+-void lock_two_nondirectories(struct inode *inode1, struct inode *inode2)
+-{
+-	if (inode1)
+-		WARN_ON_ONCE(S_ISDIR(inode1->i_mode));
+-	if (inode2)
+-		WARN_ON_ONCE(S_ISDIR(inode2->i_mode));
+-	if (inode1 > inode2)
+-		swap(inode1, inode2);
+-	if (inode1)
+-		inode_lock(inode1);
+-	if (inode2 && inode2 != inode1)
+-		inode_lock_nested(inode2, I_MUTEX_NONDIR2);
+-}
+-EXPORT_SYMBOL(lock_two_nondirectories);
+-
+-/**
+- * unlock_two_nondirectories - release locks from lock_two_nondirectories()
+- * @inode1: first inode to unlock
+- * @inode2: second inode to unlock
+- */
+-void unlock_two_nondirectories(struct inode *inode1, struct inode *inode2)
+-{
+-	if (inode1) {
+-		WARN_ON_ONCE(S_ISDIR(inode1->i_mode));
+-		inode_unlock(inode1);
+-	}
+-	if (inode2 && inode2 != inode1) {
+-		WARN_ON_ONCE(S_ISDIR(inode2->i_mode));
+-		inode_unlock(inode2);
+-	}
+-}
+-EXPORT_SYMBOL(unlock_two_nondirectories);
+-
+ /**
+  * inode_insert5 - obtain an inode from a mounted file system
+  * @inode:	pre-allocated inode to use for insert to cache
+@@ -1000,30 +958,6 @@ int bmap(struct inode *inode, sector_t *block)
+ EXPORT_SYMBOL(bmap);
+ #endif
+ 
+-/*
+- * Return mask of changes for notify_change() that need to be done as a
+- * response to write or truncate. Return 0 if nothing has to be changed.
+- * Negative value on error (change should be denied).
+- */
+-int dentry_needs_remove_privs(struct mnt_idmap *idmap,
+-			      struct dentry *dentry)
+-{
+-	struct inode *inode = d_inode(dentry);
+-	int mask = 0;
+-	int ret;
+-
+-	if (IS_NOSEC(inode))
+-		return 0;
+-
+-	mask = setattr_should_drop_suidgid(idmap, inode);
+-	ret = security_inode_need_killpriv(dentry);
+-	if (ret < 0)
+-		return ret;
+-	if (ret)
+-		mask |= ATTR_KILL_PRIV;
+-	return mask;
+-}
+-
+ static int __remove_privs(struct mnt_idmap *idmap,
+ 			  struct dentry *dentry, int kill)
+ {
+diff --git a/fs/inode_evict.c b/fs/inode_evict.c
+index f810e0a1746641796b436e74cce7350221742be7..3ad1dcbefe6162cb0bd0d493f453c71f7e6624d1 100644
+--- a/fs/inode_evict.c
++++ b/fs/inode_evict.c
+@@ -1237,3 +1237,45 @@ long prune_icache_sb(struct super_block *sb, struct shrink_control *sc)
+ 	inode_dispose_list(&freeable);
+ 	return freed;
+ }
++
++/**
++ * lock_two_nondirectories - take two i_mutexes on non-directory objects
++ *
++ * Lock any non-NULL argument. Passed objects must not be directories.
++ * Zero, one or two objects may be locked by this function.
++ *
++ * @inode1: first inode to lock
++ * @inode2: second inode to lock
++ */
++void lock_two_nondirectories(struct inode *inode1, struct inode *inode2)
++{
++	if (inode1)
++		WARN_ON_ONCE(S_ISDIR(inode1->i_mode));
++	if (inode2)
++		WARN_ON_ONCE(S_ISDIR(inode2->i_mode));
++	if (inode1 > inode2)
++		swap(inode1, inode2);
++	if (inode1)
++		inode_lock(inode1);
++	if (inode2 && inode2 != inode1)
++		inode_lock_nested(inode2, I_MUTEX_NONDIR2);
++}
++EXPORT_SYMBOL(lock_two_nondirectories);
++
++/**
++ * unlock_two_nondirectories - release locks from lock_two_nondirectories()
++ * @inode1: first inode to unlock
++ * @inode2: second inode to unlock
++ */
++void unlock_two_nondirectories(struct inode *inode1, struct inode *inode2)
++{
++	if (inode1) {
++		WARN_ON_ONCE(S_ISDIR(inode1->i_mode));
++		inode_unlock(inode1);
++	}
++	if (inode2 && inode2 != inode1) {
++		WARN_ON_ONCE(S_ISDIR(inode2->i_mode));
++		inode_unlock(inode2);
++	}
++}
++EXPORT_SYMBOL(unlock_two_nondirectories);
+diff --git a/fs/internal.h b/fs/internal.h
+index b663fbc421427b9075a5e27e3a5f158ffb84629f..5945187eacef5391fd06beadc9b0fc1213e66a51 100644
+--- a/fs/internal.h
++++ b/fs/internal.h
+@@ -231,6 +231,25 @@ void inode_sb_list_del(struct inode *inode);
+ extern const struct inode_operations bad_inode_ops;
+ bool sync_lazytime(struct inode *inode);
+ 
++/*
++ * Very quick optimistic "we know we have no ACL's" check.
++ *
++ * Note that this is purely for ACL_TYPE_ACCESS, and purely
++ * for the "we have cached that there are no ACLs" case.
++ *
++ * If this returns true, we know there are no ACLs. But if
++ * it returns false, we might still not have ACLs (it could
++ * be the is_uncached_acl() case).
++ */
++static inline bool no_acl_inode(struct inode *inode)
++{
++#ifdef CONFIG_FS_POSIX_ACL
++	return likely(!READ_ONCE(inode->i_acl));
++#else
++	return true;
++#endif
++}
++
+ /*
+  * dcache.c
+  */
+diff --git a/fs/libfs.c b/fs/libfs.c
+index 5fc9f450e35435cc383dabb9a8c959ee4998c9fb..20a8f35a5ca5e75a65a0b58874d817b1a47eb5e4 100644
+--- a/fs/libfs.c
++++ b/fs/libfs.c
+@@ -801,39 +801,6 @@ int simple_rename(struct mnt_idmap *idmap, struct inode *old_dir,
+ }
+ EXPORT_SYMBOL(simple_rename);
+ 
+-/**
+- * simple_setattr - setattr for simple filesystem
+- * @idmap: idmap of the target mount
+- * @dentry: dentry
+- * @iattr: iattr structure
+- *
+- * Returns 0 on success, -error on failure.
+- *
+- * simple_setattr is a simple ->setattr implementation without a proper
+- * implementation of size changes.
+- *
+- * It can either be used for in-memory filesystems or special files
+- * on simple regular filesystems.  Anything that needs to change on-disk
+- * or wire state on size changes needs its own setattr method.
+- */
+-int simple_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+-		   struct iattr *iattr)
+-{
+-	struct inode *inode = d_inode(dentry);
+-	int error;
+-
+-	error = setattr_prepare(idmap, dentry, iattr);
+-	if (error)
+-		return error;
+-
+-	if (iattr->ia_valid & ATTR_SIZE)
+-		truncate_setsize(inode, iattr->ia_size);
+-	setattr_copy(idmap, inode, iattr);
+-	mark_inode_dirty(inode);
+-	return 0;
+-}
+-EXPORT_SYMBOL(simple_setattr);
+-
+ static int simple_read_folio(struct file *file, struct folio *folio)
+ {
+ 	folio_zero_range(folio, 0, folio_size(folio));
+diff --git a/fs/namei.c b/fs/namei.c
+index 4fa94945678e1e1f59c76c8023f3321258ef7e06..9bfb372acd188172bcf8eb8e70524f3a29618d06 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -130,313 +130,6 @@
+  */
+ enum last_type {LAST_NORM, LAST_ROOT, LAST_DOT, LAST_DOTDOT};
+ 
+-/**
+- * check_acl - perform ACL permission checking
+- * @idmap:	idmap of the mount the inode was found from
+- * @inode:	inode to check permissions on
+- * @mask:	right to check for (%MAY_READ, %MAY_WRITE, %MAY_EXEC ...)
+- *
+- * This function performs the ACL permission checking. Since this function
+- * retrieve POSIX acls it needs to know whether it is called from a blocking or
+- * non-blocking context and thus cares about the MAY_NOT_BLOCK bit.
+- *
+- * If the inode has been found through an idmapped mount the idmap of
+- * the vfsmount must be passed through @idmap. This function will then take
+- * care to map the inode according to @idmap before checking permissions.
+- * On non-idmapped mounts or if permission checking is to be performed on the
+- * raw inode simply pass @nop_mnt_idmap.
+- */
+-static int check_acl(struct mnt_idmap *idmap,
+-		     struct inode *inode, int mask)
+-{
+-#ifdef CONFIG_FS_POSIX_ACL
+-	struct posix_acl *acl;
+-
+-	if (mask & MAY_NOT_BLOCK) {
+-		acl = get_cached_acl_rcu(inode, ACL_TYPE_ACCESS);
+-	        if (!acl)
+-	                return -EAGAIN;
+-		/* no ->get_inode_acl() calls in RCU mode... */
+-		if (is_uncached_acl(acl))
+-			return -ECHILD;
+-	        return posix_acl_permission(idmap, inode, acl, mask);
+-	}
+-
+-	acl = get_inode_acl(inode, ACL_TYPE_ACCESS);
+-	if (IS_ERR(acl))
+-		return PTR_ERR(acl);
+-	if (acl) {
+-	        int error = posix_acl_permission(idmap, inode, acl, mask);
+-	        posix_acl_release(acl);
+-	        return error;
+-	}
+-#endif
+-
+-	return -EAGAIN;
+-}
+-
+-/*
+- * Very quick optimistic "we know we have no ACL's" check.
+- *
+- * Note that this is purely for ACL_TYPE_ACCESS, and purely
+- * for the "we have cached that there are no ACLs" case.
+- *
+- * If this returns true, we know there are no ACLs. But if
+- * it returns false, we might still not have ACLs (it could
+- * be the is_uncached_acl() case).
+- */
+-static inline bool no_acl_inode(struct inode *inode)
+-{
+-#ifdef CONFIG_FS_POSIX_ACL
+-	return likely(!READ_ONCE(inode->i_acl));
+-#else
+-	return true;
+-#endif
+-}
+-
+-/**
+- * acl_permission_check - perform basic UNIX permission checking
+- * @idmap:	idmap of the mount the inode was found from
+- * @inode:	inode to check permissions on
+- * @mask:	right to check for (%MAY_READ, %MAY_WRITE, %MAY_EXEC ...)
+- *
+- * This function performs the basic UNIX permission checking. Since this
+- * function may retrieve POSIX acls it needs to know whether it is called from a
+- * blocking or non-blocking context and thus cares about the MAY_NOT_BLOCK bit.
+- *
+- * If the inode has been found through an idmapped mount the idmap of
+- * the vfsmount must be passed through @idmap. This function will then take
+- * care to map the inode according to @idmap before checking permissions.
+- * On non-idmapped mounts or if permission checking is to be performed on the
+- * raw inode simply pass @nop_mnt_idmap.
+- */
+-static int acl_permission_check(struct mnt_idmap *idmap,
+-				struct inode *inode, int mask)
+-{
+-	unsigned int mode = inode->i_mode;
+-	vfsuid_t vfsuid;
+-
+-	/*
+-	 * Common cheap case: everybody has the requested
+-	 * rights, and there are no ACLs to check. No need
+-	 * to do any owner/group checks in that case.
+-	 *
+-	 *  - 'mask&7' is the requested permission bit set
+-	 *  - multiplying by 0111 spreads them out to all of ugo
+-	 *  - '& ~mode' looks for missing inode permission bits
+-	 *  - the '!' is for "no missing permissions"
+-	 *
+-	 * After that, we just need to check that there are no
+-	 * ACL's on the inode - do the 'IS_POSIXACL()' check last
+-	 * because it will dereference the ->i_sb pointer and we
+-	 * want to avoid that if at all possible.
+-	 */
+-	if (!((mask & 7) * 0111 & ~mode)) {
+-		if (no_acl_inode(inode))
+-			return 0;
+-		if (!IS_POSIXACL(inode))
+-			return 0;
+-	}
+-
+-	/* Are we the owner? If so, ACL's don't matter */
+-	vfsuid = i_uid_into_vfsuid(idmap, inode);
+-	if (likely(vfsuid_eq_kuid(vfsuid, current_fsuid()))) {
+-		mask &= 7;
+-		mode >>= 6;
+-		return (mask & ~mode) ? -EACCES : 0;
+-	}
+-
+-	/* Do we have ACL's? */
+-	if (IS_POSIXACL(inode) && (mode & S_IRWXG)) {
+-		int error = check_acl(idmap, inode, mask);
+-		if (error != -EAGAIN)
+-			return error;
+-	}
+-
+-	/* Only RWX matters for group/other mode bits */
+-	mask &= 7;
+-
+-	/*
+-	 * Are the group permissions different from
+-	 * the other permissions in the bits we care
+-	 * about? Need to check group ownership if so.
+-	 */
+-	if (mask & (mode ^ (mode >> 3))) {
+-		vfsgid_t vfsgid = i_gid_into_vfsgid(idmap, inode);
+-		if (vfsgid_in_group_p(vfsgid))
+-			mode >>= 3;
+-	}
+-
+-	/* Bits in 'mode' clear that we require? */
+-	return (mask & ~mode) ? -EACCES : 0;
+-}
+-
+-/**
+- * generic_permission -  check for access rights on a Posix-like filesystem
+- * @idmap:	idmap of the mount the inode was found from
+- * @inode:	inode to check access rights for
+- * @mask:	right to check for (%MAY_READ, %MAY_WRITE, %MAY_EXEC,
+- *		%MAY_NOT_BLOCK ...)
+- *
+- * Used to check for read/write/execute permissions on a file.
+- * We use "fsuid" for this, letting us set arbitrary permissions
+- * for filesystem access without changing the "normal" uids which
+- * are used for other things.
+- *
+- * generic_permission is rcu-walk aware. It returns -ECHILD in case an rcu-walk
+- * request cannot be satisfied (eg. requires blocking or too much complexity).
+- * It would then be called again in ref-walk mode.
+- *
+- * If the inode has been found through an idmapped mount the idmap of
+- * the vfsmount must be passed through @idmap. This function will then take
+- * care to map the inode according to @idmap before checking permissions.
+- * On non-idmapped mounts or if permission checking is to be performed on the
+- * raw inode simply pass @nop_mnt_idmap.
+- */
+-int generic_permission(struct mnt_idmap *idmap, struct inode *inode,
+-		       int mask)
+-{
+-	int ret;
+-
+-	/*
+-	 * Do the basic permission checks.
+-	 */
+-	ret = acl_permission_check(idmap, inode, mask);
+-	if (ret != -EACCES)
+-		return ret;
+-
+-	if (S_ISDIR(inode->i_mode)) {
+-		/* DACs are overridable for directories */
+-		if (!(mask & MAY_WRITE))
+-			if (capable_wrt_inode_uidgid(idmap, inode,
+-						     CAP_DAC_READ_SEARCH))
+-				return 0;
+-		if (capable_wrt_inode_uidgid(idmap, inode,
+-					     CAP_DAC_OVERRIDE))
+-			return 0;
+-		return -EACCES;
+-	}
+-
+-	/*
+-	 * Searching includes executable on directories, else just read.
+-	 */
+-	mask &= MAY_READ | MAY_WRITE | MAY_EXEC;
+-	if (mask == MAY_READ)
+-		if (capable_wrt_inode_uidgid(idmap, inode,
+-					     CAP_DAC_READ_SEARCH))
+-			return 0;
+-	/*
+-	 * Read/write DACs are always overridable.
+-	 * Executable DACs are overridable when there is
+-	 * at least one exec bit set.
+-	 */
+-	if (!(mask & MAY_EXEC) || (inode->i_mode & S_IXUGO))
+-		if (capable_wrt_inode_uidgid(idmap, inode,
+-					     CAP_DAC_OVERRIDE))
+-			return 0;
+-
+-	return -EACCES;
+-}
+-EXPORT_SYMBOL(generic_permission);
+-
+-/**
+- * do_inode_permission - UNIX permission checking
+- * @idmap:	idmap of the mount the inode was found from
+- * @inode:	inode to check permissions on
+- * @mask:	right to check for (%MAY_READ, %MAY_WRITE, %MAY_EXEC ...)
+- *
+- * We _really_ want to just do "generic_permission()" without
+- * even looking at the inode->i_op values. So we keep a cache
+- * flag in inode->i_opflags, that says "this has not special
+- * permission function, use the fast case".
+- */
+-static inline int do_inode_permission(struct mnt_idmap *idmap,
+-				      struct inode *inode, int mask)
+-{
+-	if (unlikely(!(inode->i_opflags & IOP_FASTPERM))) {
+-		if (likely(inode->i_op->permission))
+-			return inode->i_op->permission(idmap, inode, mask);
+-
+-		/* This gets set once for the inode lifetime */
+-		spin_lock(&inode->i_lock);
+-		inode->i_opflags |= IOP_FASTPERM;
+-		spin_unlock(&inode->i_lock);
+-	}
+-	return generic_permission(idmap, inode, mask);
+-}
+-
+-/**
+- * sb_permission - Check superblock-level permissions
+- * @sb: Superblock of inode to check permission on
+- * @inode: Inode to check permission on
+- * @mask: Right to check for (%MAY_READ, %MAY_WRITE, %MAY_EXEC)
+- *
+- * Separate out file-system wide checks from inode-specific permission checks.
+- *
+- * Note: lookup_inode_permission_may_exec() does not call here. If you add
+- * MAY_EXEC checks, adjust it.
+- */
+-static int sb_permission(struct super_block *sb, struct inode *inode, int mask)
+-{
+-	if (mask & MAY_WRITE) {
+-		umode_t mode = inode->i_mode;
+-
+-		/* Nobody gets write access to a read-only fs. */
+-		if (sb_rdonly(sb) && (S_ISREG(mode) || S_ISDIR(mode) || S_ISLNK(mode)))
+-			return -EROFS;
+-	}
+-	return 0;
+-}
+-
+-/**
+- * inode_permission - Check for access rights to a given inode
+- * @idmap:	idmap of the mount the inode was found from
+- * @inode:	Inode to check permission on
+- * @mask:	Right to check for (%MAY_READ, %MAY_WRITE, %MAY_EXEC)
+- *
+- * Check for read/write/execute permissions on an inode.  We use fs[ug]id for
+- * this, letting us set arbitrary permissions for filesystem access without
+- * changing the "normal" UIDs which are used for other things.
+- *
+- * When checking for MAY_APPEND, MAY_WRITE must also be set in @mask.
+- */
+-int inode_permission(struct mnt_idmap *idmap,
+-		     struct inode *inode, int mask)
+-{
+-	int retval;
+-
+-	retval = sb_permission(inode->i_sb, inode, mask);
+-	if (unlikely(retval))
+-		return retval;
+-
+-	if (mask & MAY_WRITE) {
+-		/*
+-		 * Nobody gets write access to an immutable file.
+-		 */
+-		if (unlikely(IS_IMMUTABLE(inode)))
+-			return -EPERM;
+-
+-		/*
+-		 * Updating mtime will likely cause i_uid and i_gid to be
+-		 * written back improperly if their true value is unknown
+-		 * to the vfs.
+-		 */
+-		if (unlikely(HAS_UNMAPPED_ID(idmap, inode)))
+-			return -EACCES;
+-	}
+-
+-	retval = do_inode_permission(idmap, inode, mask);
+-	if (unlikely(retval))
+-		return retval;
+-
+-	retval = devcgroup_inode_permission(inode, mask);
+-	if (unlikely(retval))
+-		return retval;
+-
+-	return security_inode_permission(inode, mask);
+-}
+-EXPORT_SYMBOL(inode_permission);
+-
+ /*
+  * lookup_inode_permission_may_exec - Check traversal right for given inode
+  *
+diff --git a/fs/open.c b/fs/open.c
+index cb744283906759c67366cb5a6329679e6f68df58..c717582cb6133c7ea8d0ea4eb6dd3487bc4d2667 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -37,40 +37,6 @@
+ #include "filp_close.h"
+ #include "internal.h"
+ 
+-int do_truncate(struct mnt_idmap *idmap, struct dentry *dentry,
+-		loff_t length, unsigned int time_attrs, struct file *filp)
+-{
+-	int ret;
+-	struct iattr newattrs;
+-
+-	/* Not pretty: "inode->i_size" shouldn't really be signed. But it is. */
+-	if (length < 0)
+-		return -EINVAL;
+-
+-	newattrs.ia_size = length;
+-	newattrs.ia_valid = ATTR_SIZE | time_attrs;
+-	if (filp) {
+-		newattrs.ia_file = filp;
+-		newattrs.ia_valid |= ATTR_FILE;
+-	}
+-
+-	/* Remove suid, sgid, and file capabilities on truncate too */
+-	ret = dentry_needs_remove_privs(idmap, dentry);
+-	if (ret < 0)
+-		return ret;
+-	if (ret)
+-		newattrs.ia_valid |= ret | ATTR_FORCE;
+-
+-	ret = inode_lock_killable(dentry->d_inode);
+-	if (ret)
+-		return ret;
+-
+-	/* Note any delegations or leases have already been broken: */
+-	ret = notify_change(idmap, dentry, &newattrs, NULL);
+-	inode_unlock(dentry->d_inode);
+-	return ret;
+-}
+-
+ int vfs_truncate(const struct path *path, loff_t length)
+ {
+ 	struct mnt_idmap *idmap;
+diff --git a/fs/path_open.c b/fs/path_open.c
+index fe2a506eac094b6441ccfe497d7e7cdedad99e6d..bd2491fd657f40a45c2ae4d630aaed12cdd48e66 100644
+--- a/fs/path_open.c
++++ b/fs/path_open.c
+@@ -219,3 +219,37 @@ struct file *dentry_open(const struct path *path, int flags,
+ 	return f;
+ }
+ EXPORT_SYMBOL(dentry_open);
++
++int do_truncate(struct mnt_idmap *idmap, struct dentry *dentry,
++		loff_t length, unsigned int time_attrs, struct file *filp)
++{
++	int ret;
++	struct iattr newattrs;
++
++	/* Not pretty: "inode->i_size" shouldn't really be signed. But it is. */
++	if (length < 0)
++		return -EINVAL;
++
++	newattrs.ia_size = length;
++	newattrs.ia_valid = ATTR_SIZE | time_attrs;
++	if (filp) {
++		newattrs.ia_file = filp;
++		newattrs.ia_valid |= ATTR_FILE;
++	}
++
++	/* Remove suid, sgid, and file capabilities on truncate too */
++	ret = dentry_needs_remove_privs(idmap, dentry);
++	if (ret < 0)
++		return ret;
++	if (ret)
++		newattrs.ia_valid |= ret | ATTR_FORCE;
++
++	ret = inode_lock_killable(dentry->d_inode);
++	if (ret)
++		return ret;
++
++	/* Note any delegations or leases have already been broken: */
++	ret = notify_change(idmap, dentry, &newattrs, NULL);
++	inode_unlock(dentry->d_inode);
++	return ret;
++}
+diff --git a/mm/filemap_batch.c b/mm/filemap_batch.c
+index 9ab21818c38ae5948e163610e30431a154404379..26e3bf185e696e028496ca1d31c64d7f7fbdad22 100644
+--- a/mm/filemap_batch.c
++++ b/mm/filemap_batch.c
+@@ -17,6 +17,10 @@
+ #include <linux/writeback.h>
+ #include <trace/events/filemap.h>
+ 
++#ifdef CONFIG_STELA
++#include <stela/file.h>
++#endif
++
+ #include "filemap_batch.h"
+ #include "internal.h"
+ #include "pagecache_wait.h"
+@@ -1848,3 +1852,130 @@ struct page *read_cache_page_gfp(struct address_space *mapping,
+ 	return do_read_cache_page(mapping, index, NULL, NULL, gfp);
+ }
+ EXPORT_SYMBOL(read_cache_page_gfp);
++
++/**
++ * truncate_pagecache - unmap and remove pagecache that has been truncated
++ * @inode: inode
++ * @newsize: new file size
++ *
++ * inode's new i_size must already be written before truncate_pagecache
++ * is called.
++ *
++ * This function should typically be called before the filesystem
++ * releases resources associated with the freed range (eg. deallocates
++ * blocks). This way, pagecache will always stay logically coherent
++ * with on-disk format, and the filesystem would not have to deal with
++ * situations such as writepage being called for a page that has already
++ * had its underlying blocks deallocated.
++ */
++void truncate_pagecache(struct inode *inode, loff_t newsize)
++{
++	struct address_space *mapping = inode->i_mapping;
++	loff_t holebegin = round_up(newsize, PAGE_SIZE);
++
++	/*
++	 * unmap_mapping_range is called twice, first simply for
++	 * efficiency so that truncate_inode_pages does fewer
++	 * single-page unmaps.  However after this first call, and
++	 * before truncate_inode_pages finishes, it is possible for
++	 * private pages to be COWed, which remain after
++	 * truncate_inode_pages finishes, hence the second
++	 * unmap_mapping_range call must be made for correctness.
++	 */
++	unmap_mapping_range(mapping, holebegin, 0, 1);
++	truncate_inode_pages(mapping, newsize);
++	unmap_mapping_range(mapping, holebegin, 0, 1);
++}
++EXPORT_SYMBOL(truncate_pagecache);
++
++/**
++ * truncate_setsize - update inode and pagecache for a new file size
++ * @inode: inode
++ * @newsize: new file size
++ *
++ * truncate_setsize updates i_size and performs pagecache truncation (if
++ * necessary) to @newsize. It will be typically be called from the filesystem's
++ * setattr function when ATTR_SIZE is passed in.
++ *
++ * Must be called with a lock serializing truncates and writes (generally
++ * i_rwsem but e.g. xfs uses a different lock) and before all filesystem
++ * specific block truncation has been performed.
++ */
++void truncate_setsize(struct inode *inode, loff_t newsize)
++{
++	loff_t oldsize = inode->i_size;
++
++	i_size_write(inode, newsize);
++	if (newsize > oldsize)
++		pagecache_isize_extended(inode, oldsize, newsize);
++	truncate_pagecache(inode, newsize);
++}
++EXPORT_SYMBOL(truncate_setsize);
++
++/**
++ * pagecache_isize_extended - update pagecache after extension of i_size
++ * @inode:	inode for which i_size was extended
++ * @from:	original inode size
++ * @to:		new inode size
++ *
++ * Handle extension of inode size either caused by extending truncate or
++ * by write starting after current i_size.  We mark the page straddling
++ * current i_size RO so that page_mkwrite() is called on the first
++ * write access to the page.  The filesystem will update its per-block
++ * information before user writes to the page via mmap after the i_size
++ * has been changed.
++ *
++ * The function must be called after i_size is updated so that page fault
++ * coming after we unlock the folio will already see the new i_size.
++ * The function must be called while we still hold i_rwsem - this not only
++ * makes sure i_size is stable but also that userspace cannot observe new
++ * i_size value before we are prepared to store mmap writes at new inode size.
++ */
++void pagecache_isize_extended(struct inode *inode, loff_t from, loff_t to)
++{
++	int bsize = i_blocksize(inode);
++	loff_t rounded_from;
++	struct folio *folio;
++
++	WARN_ON(to > inode->i_size);
++
++	if (from >= to || bsize >= PAGE_SIZE)
++		return;
++	/* Page straddling @from will not have any hole block created? */
++	rounded_from = round_up(from, bsize);
++	if (to <= rounded_from || !(rounded_from & (PAGE_SIZE - 1)))
++		return;
++
++	folio = filemap_lock_folio(inode->i_mapping, from / PAGE_SIZE);
++	/* Folio not cached? Nothing to do */
++	if (IS_ERR(folio))
++		return;
++	/*
++	 * See folio_clear_dirty_for_io() for details why folio_mark_dirty()
++	 * is needed.
++	 */
++#ifdef CONFIG_STELA
++	if (stela_linux_unmap_writable_folio(folio))
++#else
++	if (folio_mkclean(folio))
++#endif
++		folio_mark_dirty(folio);
++
++	/*
++	 * The post-eof range of the folio must be zeroed before it is exposed
++	 * to the file. Writeback normally does this, but since i_size has been
++	 * increased we handle it here.
++	 */
++	if (folio_test_dirty(folio)) {
++		unsigned int offset, end;
++
++		offset = from - folio_pos(folio);
++		end = min_t(unsigned int, to - folio_pos(folio),
++			    folio_size(folio));
++		folio_zero_segment(folio, offset, end);
++	}
++
++	folio_unlock(folio);
++	folio_put(folio);
++}
++EXPORT_SYMBOL(pagecache_isize_extended);
+diff --git a/mm/truncate.c b/mm/truncate.c
+index 5beec9a9b035bc82ed9f50613a2304c72ad602ff..c829bbd78575f4e06c2ffb7535a3e360e2376994 100644
+--- a/mm/truncate.c
++++ b/mm/truncate.c
+@@ -186,129 +186,6 @@ int invalidate_inode_pages2(struct address_space *mapping)
+ }
+ EXPORT_SYMBOL_GPL(invalidate_inode_pages2);
+ 
+-/**
+- * truncate_pagecache - unmap and remove pagecache that has been truncated
+- * @inode: inode
+- * @newsize: new file size
+- *
+- * inode's new i_size must already be written before truncate_pagecache
+- * is called.
+- *
+- * This function should typically be called before the filesystem
+- * releases resources associated with the freed range (eg. deallocates
+- * blocks). This way, pagecache will always stay logically coherent
+- * with on-disk format, and the filesystem would not have to deal with
+- * situations such as writepage being called for a page that has already
+- * had its underlying blocks deallocated.
+- */
+-void truncate_pagecache(struct inode *inode, loff_t newsize)
+-{
+-	struct address_space *mapping = inode->i_mapping;
+-	loff_t holebegin = round_up(newsize, PAGE_SIZE);
+-
+-	/*
+-	 * unmap_mapping_range is called twice, first simply for
+-	 * efficiency so that truncate_inode_pages does fewer
+-	 * single-page unmaps.  However after this first call, and
+-	 * before truncate_inode_pages finishes, it is possible for
+-	 * private pages to be COWed, which remain after
+-	 * truncate_inode_pages finishes, hence the second
+-	 * unmap_mapping_range call must be made for correctness.
+-	 */
+-	unmap_mapping_range(mapping, holebegin, 0, 1);
+-	truncate_inode_pages(mapping, newsize);
+-	unmap_mapping_range(mapping, holebegin, 0, 1);
+-}
+-EXPORT_SYMBOL(truncate_pagecache);
+-
+-/**
+- * truncate_setsize - update inode and pagecache for a new file size
+- * @inode: inode
+- * @newsize: new file size
+- *
+- * truncate_setsize updates i_size and performs pagecache truncation (if
+- * necessary) to @newsize. It will be typically be called from the filesystem's
+- * setattr function when ATTR_SIZE is passed in.
+- *
+- * Must be called with a lock serializing truncates and writes (generally
+- * i_rwsem but e.g. xfs uses a different lock) and before all filesystem
+- * specific block truncation has been performed.
+- */
+-void truncate_setsize(struct inode *inode, loff_t newsize)
+-{
+-	loff_t oldsize = inode->i_size;
+-
+-	i_size_write(inode, newsize);
+-	if (newsize > oldsize)
+-		pagecache_isize_extended(inode, oldsize, newsize);
+-	truncate_pagecache(inode, newsize);
+-}
+-EXPORT_SYMBOL(truncate_setsize);
+-
+-/**
+- * pagecache_isize_extended - update pagecache after extension of i_size
+- * @inode:	inode for which i_size was extended
+- * @from:	original inode size
+- * @to:		new inode size
+- *
+- * Handle extension of inode size either caused by extending truncate or
+- * by write starting after current i_size.  We mark the page straddling
+- * current i_size RO so that page_mkwrite() is called on the first
+- * write access to the page.  The filesystem will update its per-block
+- * information before user writes to the page via mmap after the i_size
+- * has been changed.
+- *
+- * The function must be called after i_size is updated so that page fault
+- * coming after we unlock the folio will already see the new i_size.
+- * The function must be called while we still hold i_rwsem - this not only
+- * makes sure i_size is stable but also that userspace cannot observe new
+- * i_size value before we are prepared to store mmap writes at new inode size.
+- */
+-void pagecache_isize_extended(struct inode *inode, loff_t from, loff_t to)
+-{
+-	int bsize = i_blocksize(inode);
+-	loff_t rounded_from;
+-	struct folio *folio;
+-
+-	WARN_ON(to > inode->i_size);
+-
+-	if (from >= to || bsize >= PAGE_SIZE)
+-		return;
+-	/* Page straddling @from will not have any hole block created? */
+-	rounded_from = round_up(from, bsize);
+-	if (to <= rounded_from || !(rounded_from & (PAGE_SIZE - 1)))
+-		return;
+-
+-	folio = filemap_lock_folio(inode->i_mapping, from / PAGE_SIZE);
+-	/* Folio not cached? Nothing to do */
+-	if (IS_ERR(folio))
+-		return;
+-	/*
+-	 * See folio_clear_dirty_for_io() for details why folio_mark_dirty()
+-	 * is needed.
+-	 */
+-	if (folio_mkclean(folio))
+-		folio_mark_dirty(folio);
+-
+-	/*
+-	 * The post-eof range of the folio must be zeroed before it is exposed
+-	 * to the file. Writeback normally does this, but since i_size has been
+-	 * increased we handle it here.
+-	 */
+-	if (folio_test_dirty(folio)) {
+-		unsigned int offset, end;
+-
+-		offset = from - folio_pos(folio);
+-		end = min_t(unsigned int, to - folio_pos(folio),
+-			    folio_size(folio));
+-		folio_zero_segment(folio, offset, end);
+-	}
+-
+-	folio_unlock(folio);
+-	folio_put(folio);
+-}
+-EXPORT_SYMBOL(pagecache_isize_extended);
+-
+ /**
+  * truncate_pagecache_range - unmap and remove pagecache that is hole-punched
+  * @inode: inode
