@@ -269,6 +269,28 @@ fn only_a_connection_the_service_answered_polls_while_it_is_held() {
 }
 
 #[test]
+fn a_busy_poll_with_a_nonempty_request_takes_the_normal_validation_path() {
+    let shared = SharedService::new(service(), HOST);
+    let connection = connect(&mut shared.try_turn().unwrap());
+    let mut memory = Memory::default();
+    let first = gate_call(&mut memory, Operation::Poll, &[], 8);
+    GateService::serve(&shared, connection, first, &mut memory).unwrap();
+    assert_eq!(polled(&mut memory, first), 0);
+
+    let malformed = gate_call(&mut memory, Operation::Poll, &[0], 8);
+    let held = shared.try_turn().unwrap();
+    assert!(!shared.poll_while_held(connection, malformed, &mut memory));
+    assert_eq!(completed(&mut memory, malformed).status, u32::MAX);
+    drop(held);
+
+    GateService::serve(&shared, connection, malformed, &mut memory).unwrap();
+    assert_eq!(
+        completed(&mut memory, malformed).status,
+        Status::Malformed.raw()
+    );
+}
+
+#[test]
 fn every_call_runs_where_the_platform_says() {
     static RUNS: AtomicUsize = AtomicUsize::new(0);
     let host = ServiceHost {

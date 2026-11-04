@@ -174,8 +174,10 @@ impl<B: Backend, C: Compiler> SharedService<B, C> {
             return false;
         }
         let mut call: GateCall = wire::read(&raw).expect("a record of its own size");
+        let (request_bytes, response_bytes) = Operation::Poll.sizes();
         if call.operation != Operation::Poll.raw()
-            || call.response.length != size_of::<wire::Value>() as u64
+            || call.request.length != request_bytes as u64
+            || call.response.length != response_bytes as u64
         {
             return false;
         }
