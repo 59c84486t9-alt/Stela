@@ -912,6 +912,28 @@ modules_list_their_functions(void)
 }
 
 static void
+discovery_reports_malformed_metadata(void)
+{
+   struct stela_air_error error;
+   unsigned listed = 0;
+   const char header[] = "BC\xc0\xde";
+   assert(!stela_metal_functions(header, sizeof(header) - 1, count_function, &listed, &error));
+   assert(error.kind == STELA_AIR_BITCODE && !listed);
+   uint64_t states[STELA_METAL_SAMPLER_STATES];
+   uint32_t count = 1;
+   assert(!stela_metal_sampler_states(header, sizeof(header) - 1, states, &count, &error));
+   assert(error.kind == STELA_AIR_BITCODE && !count);
+
+   char *fixture = ralloc_asprintf(NULL, "%s!air.visible = !{!90}\n!90 = !{null}\n", kernel);
+   LLVMMemoryBufferRef input = bitcode(fixture);
+   ralloc_free(fixture);
+   assert(!stela_metal_functions(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                 count_function, &listed, &error));
+   assert(error.kind == STELA_AIR_METADATA);
+   LLVMDisposeMemoryBuffer(input);
+}
+
+static void
 reflection_requires_a_unique_listed_entry(void)
 {
    struct stela_metal_reflection reflection;
@@ -1969,6 +1991,7 @@ main(void)
 {
    glsl_type_singleton_init_or_ref();
    modules_list_their_functions();
+   discovery_reports_malformed_metadata();
    reflection_requires_a_unique_listed_entry();
    kernels_reflect_and_compile_their_threadgroup_memory();
    dynamic_kernels_take_their_dispatch_shape();

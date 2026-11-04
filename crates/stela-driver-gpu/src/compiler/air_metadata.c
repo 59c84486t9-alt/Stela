@@ -2865,10 +2865,10 @@ stela_air_inspect_entry(const void *bitcode, size_t size, const struct stela_air
                   entry, 0, stage_visit, stage);
 }
 
-/* Parses AIR bitcode into m->module, in *context; false after reporting
- * why. close_module disposes of both. */
+/* Discovery needs globals and named metadata. Leave function bodies to the
+ * eager parser and verifier used by inspection and lowering. */
 static bool
-parse_module(struct stela_air_metadata *m, const void *bitcode, size_t size,
+parse_metadata(struct stela_air_metadata *m, const void *bitcode, size_t size,
              LLVMContextRef *context)
 {
    *context = LLVMContextCreate();
@@ -2876,8 +2876,9 @@ parse_module(struct stela_air_metadata *m, const void *bitcode, size_t size,
       return fail(m, STELA_AIR_ALLOCATION, "LLVM context unavailable");
    LLVMContextSetDiagnosticHandler(*context, inspection_diagnostic, m);
    LLVMMemoryBufferRef buffer = LLVMCreateMemoryBufferWithMemoryRangeCopy(bitcode, size, "Metal input");
-   bool parsed = buffer && !LLVMParseBitcodeInContext2(*context, buffer, &m->module);
-   if (buffer)
+   bool parsed = buffer && !LLVMGetBitcodeModuleInContext2(*context, buffer, &m->module);
+   /* LLVM owns the buffer once it creates the lazy module. */
+   if (buffer && !parsed)
       LLVMDisposeMemoryBuffer(buffer);
    return (parsed && m->error->kind == STELA_AIR_OK) ||
       fail(m, STELA_AIR_BITCODE, "LLVM refused AIR bitcode");
@@ -2909,9 +2910,7 @@ stela_air_functions(const void *bitcode, size_t size, stela_air_visit_function v
    if (!valid_bitcode(bitcode, size) || !visit)
       return fail(&m, STELA_AIR_INPUT, "invalid AIR function list query");
    LLVMContextRef context;
-   if (!parse_module(&m, bitcode, size, &context))
-      return false;
-   bool visited = true;
+   bool visited = parse_metadata(&m, bitcode, size, &context);
    for (unsigned list = 0; visited && list < ARRAY_SIZE(entry_lists); list++) {
       LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
       unsigned count;
@@ -2919,7 +2918,8 @@ stela_air_functions(const void *bitcode, size_t size, stela_air_visit_function v
       for (unsigned i = 0; visited && i < count; i++) {
          LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
          unsigned fields_count;
-         visited = stela_air_md_node(&m, nodes[i], fields, &fields_count) && fields_count;
+         visited = stela_air_md_node(&m, nodes[i], fields, &fields_count) && fields_count &&
+                   fields[0] && LLVMIsAFunction(fields[0]);
          if (visited) {
             size_t name_bytes;
             const char *name = LLVMGetValueName2(fields[0], &name_bytes);
@@ -2945,7 +2945,7 @@ stela_air_sampler_states(const void *bitcode, size_t size, uint64_t *states, uns
       return fail(&m, STELA_AIR_INPUT, "invalid AIR sampler state query");
    LLVMContextRef context;
    LLVMValueRef globals[AIR_MAX_SAMPLER_STATES];
-   bool listed = parse_module(&m, bitcode, size, &context) &&
+   bool listed = parse_metadata(&m, bitcode, size, &context) &&
                  stela_air_metadata_sampler_states(&m, globals, states, count);
    close_module(&m, context);
    return listed;

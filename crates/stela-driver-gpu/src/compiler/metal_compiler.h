@@ -230,8 +230,8 @@ bool stela_metal_reflect_bindings(const void *air, size_t size, const char *entr
                                   struct stela_air_error *error);
 
 /* Calls visit with the name and stage of each function the AIR module lists,
- * for a library of source, whose container has no list. False after reporting
- * why, or when visit refuses one. */
+ * for a library of source, whose container has no list. This reads only module
+ * metadata. False after reporting why, or when visit refuses one. */
 typedef bool (*stela_metal_visit_function)(void *data, const char *name, size_t name_bytes,
                                            enum stela_metal_function_stage stage);
 bool stela_metal_functions(const void *air, size_t size, stela_metal_visit_function visit,
@@ -246,7 +246,8 @@ bool stela_metal_stitch(const struct stela_air_stitch_source *sources, uint32_t 
 #define STELA_METAL_SAMPLER_STATES 256u
 
 /* The constexpr sampler states the AIR module declares, each Apple's
- * encoding, which metal/sampler.rs decodes. False after reporting why. */
+ * encoding, which metal/sampler.rs decodes. This reads only module metadata.
+ * False after reporting why. */
 bool stela_metal_sampler_states(const void *air, size_t size,
                                 uint64_t states[STELA_METAL_SAMPLER_STATES], uint32_t *count,
                                 struct stela_air_error *error);
