@@ -241,16 +241,18 @@ impl Mirrors {
     }
 }
 
-/// System registers whose writes only store what nothing derived reads:
-/// exception entries and returns read the exception registers then, a
-/// thread pointer is read as it is, and only translation reads TTBR0,
-/// whose change the host's regime follows ([`Machine::table_base_changed`]).
+/// System registers whose writes leave the derived caches intact.
+/// Exception registers and thread pointers are read when used. TTBR0
+/// changes translation, and CONTEXTIDR changes prediction identity and
+/// live debug matches. Their writes still synchronize the host regime.
 pub(super) fn stored(register: SystemRegister) -> bool {
     use SystemRegister::*;
     matches!(
         register,
         TTBR0_EL1
             | TTBR0_EL2
+            | CONTEXTIDR_EL1
+            | CONTEXTIDR_EL2
             | ELR_EL1
             | ELR_EL2
             | SPSR_EL1
@@ -265,15 +267,6 @@ pub(super) fn stored(register: SystemRegister) -> bool {
             | TPIDR_EL1
             | TPIDR_EL2
     )
-}
-
-/// System registers no read of a System register follows: not its value,
-/// which only a read of the register itself takes, nor whether it traps. A
-/// kernel writes them at each thread switch. What derives from
-/// them goes as ever ([`Machine::forget_derived`]).
-pub(super) fn keeps_reads(register: SystemRegister) -> bool {
-    use SystemRegister::*;
-    pointer_key(register) || matches!(register, CONTEXTIDR_EL1 | CONTEXTIDR_EL2)
 }
 
 /// Whether `register` is half of a PAC key.
@@ -312,8 +305,6 @@ pub(super) fn reads_storage(register: SystemRegister) -> bool {
                 | TTBR1_EL2
                 | VBAR_EL1
                 | VBAR_EL2
-                | CONTEXTIDR_EL1
-                | CONTEXTIDR_EL2
                 | CPTR_EL2
                 | CPACR_EL1
         )
