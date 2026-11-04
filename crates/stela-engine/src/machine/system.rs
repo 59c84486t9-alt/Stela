@@ -325,10 +325,11 @@ pub trait Context {
     fn x(&self) -> u64;
     /// The MRS or SYSL result.
     fn set_x(&mut self, value: u64);
-    fn read(&self, register: Register, index: u64) -> u64;
+    /// Read a register, sampling live interrupt or timer state if it uses it.
+    fn read(&mut self, register: Register, index: u64) -> u64;
     fn write(&mut self, register: Register, index: u64, value: u64) -> Result<(), Effect>;
     /// `PhysicalCountInt()`: the physical count of the system counter.
-    fn physical_count(&self) -> u64;
+    fn physical_count(&mut self) -> u64;
     /// FEAT_NV2 register access redirected to memory at VNCR_EL2 + offset.
     fn nv_mem(&mut self, offset: u64) -> Result<u64, Effect>;
     fn set_nv_mem(&mut self, offset: u64, value: u64) -> Result<(), Effect>;
