@@ -138,6 +138,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/mm/filemap_batch.c")),
             PathBuf::from(format!("{LINUX}/mm/readahead.c")),
             PathBuf::from(format!("{LINUX}/mm/fadvise.c")),
+            PathBuf::from(format!("{LINUX}/mm/user_prefault.c")),
             PathBuf::from(format!("{LINUX}/mm/lruvec.c")),
             PathBuf::from(format!("{LINUX}/mm/mlock_batch.c")),
             PathBuf::from(format!("{LINUX}/mm/swap.c")),

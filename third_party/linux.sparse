@@ -143,6 +143,8 @@
 /mm/vmstat.c
 /mm/vmstat_init.c
 /mm/filemap.c
+/mm/gup.c
+/mm/user_prefault.c
 /mm/filemap_batch.c
 /mm/filemap_batch.h
 /mm/truncate.c
@@ -260,6 +262,7 @@
 /fs/path_open.c
 /fs/read_write.c
 /fs/file_position.c
+/fs/sync.c
 /fs/file_table.c
 /fs/fcntl.c
 /fs/fs_context.c

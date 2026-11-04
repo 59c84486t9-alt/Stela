@@ -1,0 +1,767 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 00:51:33 -0500
+Subject: [PATCH] refactor(vfs): select original file write checks and
+ synchronization
+
+---
+ fs/file_position.c    |  78 +++++++++++++++++++
+ fs/inode.c            | 174 -----------------------------------------
+ fs/inode_evict.c      |  37 +++++++++
+ fs/inode_timestamps.c | 176 ++++++++++++++++++++++++++++++++++++++++++
+ fs/read_write.c       |  76 ------------------
+ fs/sync.c             |  37 ---------
+ mm/Makefile           |   2 +-
+ mm/gup.c              |  32 --------
+ mm/user_prefault.c    |  37 +++++++++
+ 9 files changed, 329 insertions(+), 320 deletions(-)
+ create mode 100644 mm/user_prefault.c
+
+diff --git a/fs/file_position.c b/fs/file_position.c
+index 2514e46989f103e916e1e4b60130415155389dc8..c881c2a3f57f286c854af40a61271a2442b5f809 100644
+--- a/fs/file_position.c
++++ b/fs/file_position.c
+@@ -5,6 +5,8 @@
+  *  Copyright (C) 1991, 1992  Linus Torvalds
+  */
+ 
++#include <linux/sched/signal.h>
++#include <linux/uio.h>
+ #include <linux/export.h>
+ #include <linux/fs.h>
+ #include <linux/fsnotify.h>
+@@ -396,3 +398,79 @@ int rw_verify_area(int read_write, struct file *file, const loff_t *ppos, size_t
+ 	return fsnotify_file_area_perm(file, mask, ppos, count);
+ }
+ EXPORT_SYMBOL(rw_verify_area);
++
++/*
++ * Don't operate on ranges the page cache doesn't support, and don't exceed the
++ * LFS limits.  If pos is under the limit it becomes a short access.  If it
++ * exceeds the limit we return -EFBIG.
++ */
++int generic_write_check_limits(struct file *file, loff_t pos, loff_t *count)
++{
++	struct inode *inode = file->f_mapping->host;
++	loff_t max_size = inode->i_sb->s_maxbytes;
++	loff_t limit = rlimit(RLIMIT_FSIZE);
++
++	if (limit != RLIM_INFINITY) {
++		if (pos >= limit) {
++			send_sig(SIGXFSZ, current, 0);
++			return -EFBIG;
++		}
++		*count = min(*count, limit - pos);
++	}
++
++	if (!(file->f_flags & O_LARGEFILE))
++		max_size = MAX_NON_LFS;
++
++	if (unlikely(pos >= max_size))
++		return -EFBIG;
++
++	*count = min(*count, max_size - pos);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(generic_write_check_limits);
++
++/* Like generic_write_checks(), but takes size of write instead of iter. */
++int generic_write_checks_count(struct kiocb *iocb, loff_t *count)
++{
++	struct file *file = iocb->ki_filp;
++	struct inode *inode = file->f_mapping->host;
++
++	if (IS_SWAPFILE(inode))
++		return -ETXTBSY;
++
++	if (!*count)
++		return 0;
++
++	if (iocb->ki_flags & IOCB_APPEND)
++		iocb->ki_pos = i_size_read(inode);
++
++	if ((iocb->ki_flags & IOCB_NOWAIT) &&
++	    !((iocb->ki_flags & IOCB_DIRECT) ||
++	      (file->f_op->fop_flags & FOP_BUFFER_WASYNC)))
++		return -EINVAL;
++
++	return generic_write_check_limits(iocb->ki_filp, iocb->ki_pos, count);
++}
++EXPORT_SYMBOL(generic_write_checks_count);
++
++/*
++ * Performs necessary checks before doing a write
++ *
++ * Can adjust writing position or amount of bytes to write.
++ * Returns appropriate error code that caller should return or
++ * zero in case that write should be allowed.
++ */
++ssize_t generic_write_checks(struct kiocb *iocb, struct iov_iter *from)
++{
++	loff_t count = iov_iter_count(from);
++	int ret;
++
++	ret = generic_write_checks_count(iocb, &count);
++	if (ret)
++		return ret;
++
++	iov_iter_truncate(from, count);
++	return iov_iter_count(from);
++}
++EXPORT_SYMBOL(generic_write_checks);
+diff --git a/fs/inode.c b/fs/inode.c
+index e3cade3d786b5e765e199dfdd338d2c00caf0157..13191c30ce578f6259f8edfe5703506a82f91923 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -958,180 +958,6 @@ int bmap(struct inode *inode, sector_t *block)
+ EXPORT_SYMBOL(bmap);
+ #endif
+ 
+-static int __remove_privs(struct mnt_idmap *idmap,
+-			  struct dentry *dentry, int kill)
+-{
+-	struct iattr newattrs;
+-
+-	newattrs.ia_valid = ATTR_FORCE | kill;
+-	/*
+-	 * Note we call this on write, so notify_change will not
+-	 * encounter any conflicting delegations:
+-	 */
+-	return notify_change(idmap, dentry, &newattrs, NULL);
+-}
+-
+-static int file_remove_privs_flags(struct file *file, unsigned int flags)
+-{
+-	struct dentry *dentry = file_dentry(file);
+-	struct inode *inode = file_inode(file);
+-	int error = 0;
+-	int kill;
+-
+-	if (IS_NOSEC(inode) || !S_ISREG(inode->i_mode))
+-		return 0;
+-
+-	kill = dentry_needs_remove_privs(file_mnt_idmap(file), dentry);
+-	if (kill < 0)
+-		return kill;
+-
+-	if (kill) {
+-		if (flags & IOCB_NOWAIT)
+-			return -EAGAIN;
+-
+-		error = __remove_privs(file_mnt_idmap(file), dentry, kill);
+-	}
+-
+-	if (!error)
+-		inode_has_no_xattr(inode);
+-	return error;
+-}
+-
+-/**
+- * file_remove_privs - remove special file privileges (suid, capabilities)
+- * @file: file to remove privileges from
+- *
+- * When file is modified by a write or truncation ensure that special
+- * file privileges are removed.
+- *
+- * Return: 0 on success, negative errno on failure.
+- */
+-int file_remove_privs(struct file *file)
+-{
+-	return file_remove_privs_flags(file, 0);
+-}
+-EXPORT_SYMBOL(file_remove_privs);
+-
+-static inline bool need_cmtime_update(struct inode *inode)
+-{
+-	struct timespec64 now = current_time(inode), ts;
+-
+-	ts = inode_get_mtime(inode);
+-	if (!timespec64_equal(&ts, &now))
+-		return true;
+-	ts = inode_get_ctime(inode);
+-	if (!timespec64_equal(&ts, &now))
+-		return true;
+-	return IS_I_VERSION(inode) && inode_iversion_need_inc(inode);
+-}
+-
+-static int file_update_time_flags(struct file *file, unsigned int flags)
+-{
+-	struct inode *inode = file_inode(file);
+-	int ret;
+-
+-	/* First try to exhaust all avenues to not sync */
+-	if (IS_NOCMTIME(inode))
+-		return 0;
+-	if (unlikely(file->f_mode & FMODE_NOCMTIME))
+-		return 0;
+-	if (!need_cmtime_update(inode))
+-		return 0;
+-
+-	flags &= IOCB_NOWAIT;
+-	if (mnt_get_write_access_file(file))
+-		return 0;
+-	if (inode->i_op->update_time)
+-		ret = inode->i_op->update_time(inode, FS_UPD_CMTIME, flags);
+-	else
+-		ret = generic_update_time(inode, FS_UPD_CMTIME, flags);
+-	mnt_put_write_access_file(file);
+-	return ret;
+-}
+-
+-/**
+- * file_update_time - update mtime and ctime time
+- * @file: file accessed
+- *
+- * Update the mtime and ctime members of an inode and mark the inode for
+- * writeback. Note that this function is meant exclusively for usage in
+- * the file write path of filesystems, and filesystems may choose to
+- * explicitly ignore updates via this function with the _NOCMTIME inode
+- * flag, e.g. for network filesystem where these imestamps are handled
+- * by the server. This can return an error for file systems who need to
+- * allocate space in order to update an inode.
+- *
+- * Return: 0 on success, negative errno on failure.
+- */
+-int file_update_time(struct file *file)
+-{
+-	return file_update_time_flags(file, 0);
+-}
+-EXPORT_SYMBOL(file_update_time);
+-
+-/**
+- * file_modified_flags - handle mandated vfs changes when modifying a file
+- * @file: file that was modified
+- * @flags: kiocb flags
+- *
+- * When file has been modified ensure that special
+- * file privileges are removed and time settings are updated.
+- *
+- * If IOCB_NOWAIT is set, special file privileges will not be removed and
+- * time settings will not be updated. It will return -EAGAIN.
+- *
+- * Context: Caller must hold the file's inode lock.
+- *
+- * Return: 0 on success, negative errno on failure.
+- */
+-static int file_modified_flags(struct file *file, int flags)
+-{
+-	int ret;
+-
+-	/*
+-	 * Clear the security bits if the process is not being run by root.
+-	 * This keeps people from modifying setuid and setgid binaries.
+-	 */
+-	ret = file_remove_privs_flags(file, flags);
+-	if (ret)
+-		return ret;
+-	return file_update_time_flags(file, flags);
+-}
+-
+-/**
+- * file_modified - handle mandated vfs changes when modifying a file
+- * @file: file that was modified
+- *
+- * When file has been modified ensure that special
+- * file privileges are removed and time settings are updated.
+- *
+- * Context: Caller must hold the file's inode lock.
+- *
+- * Return: 0 on success, negative errno on failure.
+- */
+-int file_modified(struct file *file)
+-{
+-	return file_modified_flags(file, 0);
+-}
+-EXPORT_SYMBOL(file_modified);
+-
+-/**
+- * kiocb_modified - handle mandated vfs changes when modifying a file
+- * @iocb: iocb that was modified
+- *
+- * When file has been modified ensure that special
+- * file privileges are removed and time settings are updated.
+- *
+- * Context: Caller must hold the file's inode lock.
+- *
+- * Return: 0 on success, negative errno on failure.
+- */
+-int kiocb_modified(struct kiocb *iocb)
+-{
+-	return file_modified_flags(iocb->ki_filp, iocb->ki_flags);
+-}
+-EXPORT_SYMBOL_GPL(kiocb_modified);
+-
+ int inode_needs_sync(struct inode *inode)
+ {
+ 	if (IS_SYNC(inode))
+diff --git a/fs/inode_evict.c b/fs/inode_evict.c
+index ad2dbb96ea7ab771a85d53fc586b5973a8f78900..216f1543be6e919e6768b88e38ffde11d9606d59 100644
+--- a/fs/inode_evict.c
++++ b/fs/inode_evict.c
+@@ -1299,3 +1299,40 @@ int sync_inode_metadata(struct inode *inode, int wait)
+ 	return writeback_single_inode(inode, &wbc);
+ }
+ EXPORT_SYMBOL(sync_inode_metadata);
++
++/**
++ * vfs_fsync_range - helper to sync a range of data & metadata to disk
++ * @file:		file to sync
++ * @start:		offset in bytes of the beginning of data range to sync
++ * @end:		offset in bytes of the end of data range (inclusive)
++ * @datasync:		perform only datasync
++ *
++ * Write back data in range @start..@end and metadata for @file to disk.  If
++ * @datasync is set only metadata needed to access modified file data is
++ * written.
++ */
++int vfs_fsync_range(struct file *file, loff_t start, loff_t end, int datasync)
++{
++	struct inode *inode = file->f_mapping->host;
++
++	if (!file->f_op->fsync)
++		return -EINVAL;
++	if (!datasync)
++		sync_lazytime(inode);
++	return file->f_op->fsync(file, start, end, datasync);
++}
++EXPORT_SYMBOL(vfs_fsync_range);
++
++/**
++ * vfs_fsync - perform a fsync or fdatasync on a file
++ * @file:		file to sync
++ * @datasync:		only perform a fdatasync operation
++ *
++ * Write back data and metadata for @file to disk.  If @datasync is
++ * set only metadata needed to access modified file data is written.
++ */
++int vfs_fsync(struct file *file, int datasync)
++{
++	return vfs_fsync_range(file, 0, LLONG_MAX, datasync);
++}
++EXPORT_SYMBOL(vfs_fsync);
+diff --git a/fs/inode_timestamps.c b/fs/inode_timestamps.c
+index 634908e16cbf6575527921b6afd4b8bd7ce256f7..7846c89a5d37c24a6e995bbd2fe52f6a862007a0 100644
+--- a/fs/inode_timestamps.c
++++ b/fs/inode_timestamps.c
+@@ -15,6 +15,8 @@
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/timestamp.h>
+ 
++#include "internal.h"
++
+ #ifdef CONFIG_DEBUG_FS
+ static DEFINE_PER_CPU(long, mg_ctime_updates);
+ static DEFINE_PER_CPU(long, mg_fine_stamps);
+@@ -540,3 +542,177 @@ skip_update:
+ 	sb_end_write(inode->i_sb);
+ }
+ EXPORT_SYMBOL(touch_atime);
++
++static int __remove_privs(struct mnt_idmap *idmap,
++			  struct dentry *dentry, int kill)
++{
++	struct iattr newattrs;
++
++	newattrs.ia_valid = ATTR_FORCE | kill;
++	/*
++	 * Note we call this on write, so notify_change will not
++	 * encounter any conflicting delegations:
++	 */
++	return notify_change(idmap, dentry, &newattrs, NULL);
++}
++
++static int file_remove_privs_flags(struct file *file, unsigned int flags)
++{
++	struct dentry *dentry = file_dentry(file);
++	struct inode *inode = file_inode(file);
++	int error = 0;
++	int kill;
++
++	if (IS_NOSEC(inode) || !S_ISREG(inode->i_mode))
++		return 0;
++
++	kill = dentry_needs_remove_privs(file_mnt_idmap(file), dentry);
++	if (kill < 0)
++		return kill;
++
++	if (kill) {
++		if (flags & IOCB_NOWAIT)
++			return -EAGAIN;
++
++		error = __remove_privs(file_mnt_idmap(file), dentry, kill);
++	}
++
++	if (!error)
++		inode_has_no_xattr(inode);
++	return error;
++}
++
++/**
++ * file_remove_privs - remove special file privileges (suid, capabilities)
++ * @file: file to remove privileges from
++ *
++ * When file is modified by a write or truncation ensure that special
++ * file privileges are removed.
++ *
++ * Return: 0 on success, negative errno on failure.
++ */
++int file_remove_privs(struct file *file)
++{
++	return file_remove_privs_flags(file, 0);
++}
++EXPORT_SYMBOL(file_remove_privs);
++
++static inline bool need_cmtime_update(struct inode *inode)
++{
++	struct timespec64 now = current_time(inode), ts;
++
++	ts = inode_get_mtime(inode);
++	if (!timespec64_equal(&ts, &now))
++		return true;
++	ts = inode_get_ctime(inode);
++	if (!timespec64_equal(&ts, &now))
++		return true;
++	return IS_I_VERSION(inode) && inode_iversion_need_inc(inode);
++}
++
++static int file_update_time_flags(struct file *file, unsigned int flags)
++{
++	struct inode *inode = file_inode(file);
++	int ret;
++
++	/* First try to exhaust all avenues to not sync */
++	if (IS_NOCMTIME(inode))
++		return 0;
++	if (unlikely(file->f_mode & FMODE_NOCMTIME))
++		return 0;
++	if (!need_cmtime_update(inode))
++		return 0;
++
++	flags &= IOCB_NOWAIT;
++	if (mnt_get_write_access_file(file))
++		return 0;
++	if (inode->i_op->update_time)
++		ret = inode->i_op->update_time(inode, FS_UPD_CMTIME, flags);
++	else
++		ret = generic_update_time(inode, FS_UPD_CMTIME, flags);
++	mnt_put_write_access_file(file);
++	return ret;
++}
++
++/**
++ * file_update_time - update mtime and ctime time
++ * @file: file accessed
++ *
++ * Update the mtime and ctime members of an inode and mark the inode for
++ * writeback. Note that this function is meant exclusively for usage in
++ * the file write path of filesystems, and filesystems may choose to
++ * explicitly ignore updates via this function with the _NOCMTIME inode
++ * flag, e.g. for network filesystem where these imestamps are handled
++ * by the server. This can return an error for file systems who need to
++ * allocate space in order to update an inode.
++ *
++ * Return: 0 on success, negative errno on failure.
++ */
++int file_update_time(struct file *file)
++{
++	return file_update_time_flags(file, 0);
++}
++EXPORT_SYMBOL(file_update_time);
++
++/**
++ * file_modified_flags - handle mandated vfs changes when modifying a file
++ * @file: file that was modified
++ * @flags: kiocb flags
++ *
++ * When file has been modified ensure that special
++ * file privileges are removed and time settings are updated.
++ *
++ * If IOCB_NOWAIT is set, special file privileges will not be removed and
++ * time settings will not be updated. It will return -EAGAIN.
++ *
++ * Context: Caller must hold the file's inode lock.
++ *
++ * Return: 0 on success, negative errno on failure.
++ */
++static int file_modified_flags(struct file *file, int flags)
++{
++	int ret;
++
++	/*
++	 * Clear the security bits if the process is not being run by root.
++	 * This keeps people from modifying setuid and setgid binaries.
++	 */
++	ret = file_remove_privs_flags(file, flags);
++	if (ret)
++		return ret;
++	return file_update_time_flags(file, flags);
++}
++
++/**
++ * file_modified - handle mandated vfs changes when modifying a file
++ * @file: file that was modified
++ *
++ * When file has been modified ensure that special
++ * file privileges are removed and time settings are updated.
++ *
++ * Context: Caller must hold the file's inode lock.
++ *
++ * Return: 0 on success, negative errno on failure.
++ */
++int file_modified(struct file *file)
++{
++	return file_modified_flags(file, 0);
++}
++EXPORT_SYMBOL(file_modified);
++
++/**
++ * kiocb_modified - handle mandated vfs changes when modifying a file
++ * @iocb: iocb that was modified
++ *
++ * When file has been modified ensure that special
++ * file privileges are removed and time settings are updated.
++ *
++ * Context: Caller must hold the file's inode lock.
++ *
++ * Return: 0 on success, negative errno on failure.
++ */
++int kiocb_modified(struct kiocb *iocb)
++{
++	return file_modified_flags(iocb->ki_filp, iocb->ki_flags);
++}
++EXPORT_SYMBOL_GPL(kiocb_modified);
+diff --git a/fs/read_write.c b/fs/read_write.c
+index 9cd467291d73c6c87b936ac75d312bfcf9771df8..c1902d5dd635a50bbbf84066426ba1e0e6601ccc 100644
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -1316,82 +1316,6 @@ SYSCALL_DEFINE6(copy_file_range, int, fd_in, loff_t __user *, off_in,
+ 	return ret;
+ }
+ 
+-/*
+- * Don't operate on ranges the page cache doesn't support, and don't exceed the
+- * LFS limits.  If pos is under the limit it becomes a short access.  If it
+- * exceeds the limit we return -EFBIG.
+- */
+-int generic_write_check_limits(struct file *file, loff_t pos, loff_t *count)
+-{
+-	struct inode *inode = file->f_mapping->host;
+-	loff_t max_size = inode->i_sb->s_maxbytes;
+-	loff_t limit = rlimit(RLIMIT_FSIZE);
+-
+-	if (limit != RLIM_INFINITY) {
+-		if (pos >= limit) {
+-			send_sig(SIGXFSZ, current, 0);
+-			return -EFBIG;
+-		}
+-		*count = min(*count, limit - pos);
+-	}
+-
+-	if (!(file->f_flags & O_LARGEFILE))
+-		max_size = MAX_NON_LFS;
+-
+-	if (unlikely(pos >= max_size))
+-		return -EFBIG;
+-
+-	*count = min(*count, max_size - pos);
+-
+-	return 0;
+-}
+-EXPORT_SYMBOL_GPL(generic_write_check_limits);
+-
+-/* Like generic_write_checks(), but takes size of write instead of iter. */
+-int generic_write_checks_count(struct kiocb *iocb, loff_t *count)
+-{
+-	struct file *file = iocb->ki_filp;
+-	struct inode *inode = file->f_mapping->host;
+-
+-	if (IS_SWAPFILE(inode))
+-		return -ETXTBSY;
+-
+-	if (!*count)
+-		return 0;
+-
+-	if (iocb->ki_flags & IOCB_APPEND)
+-		iocb->ki_pos = i_size_read(inode);
+-
+-	if ((iocb->ki_flags & IOCB_NOWAIT) &&
+-	    !((iocb->ki_flags & IOCB_DIRECT) ||
+-	      (file->f_op->fop_flags & FOP_BUFFER_WASYNC)))
+-		return -EINVAL;
+-
+-	return generic_write_check_limits(iocb->ki_filp, iocb->ki_pos, count);
+-}
+-EXPORT_SYMBOL(generic_write_checks_count);
+-
+-/*
+- * Performs necessary checks before doing a write
+- *
+- * Can adjust writing position or amount of bytes to write.
+- * Returns appropriate error code that caller should return or
+- * zero in case that write should be allowed.
+- */
+-ssize_t generic_write_checks(struct kiocb *iocb, struct iov_iter *from)
+-{
+-	loff_t count = iov_iter_count(from);
+-	int ret;
+-
+-	ret = generic_write_checks_count(iocb, &count);
+-	if (ret)
+-		return ret;
+-
+-	iov_iter_truncate(from, count);
+-	return iov_iter_count(from);
+-}
+-EXPORT_SYMBOL(generic_write_checks);
+-
+ /*
+  * Performs common checks before doing a file copy/clone
+  * from @file_in to @file_out.
+diff --git a/fs/sync.c b/fs/sync.c
+index 4a84dd837b8637df1e935e71e0c6faaaf4fffab8..8d1c2f589f39c6433cc4c6f2c5ff49d2ba968321 100644
+--- a/fs/sync.c
++++ b/fs/sync.c
+@@ -164,43 +164,6 @@ SYSCALL_DEFINE1(syncfs, int, fd)
+ 	return ret ? ret : ret2;
+ }
+ 
+-/**
+- * vfs_fsync_range - helper to sync a range of data & metadata to disk
+- * @file:		file to sync
+- * @start:		offset in bytes of the beginning of data range to sync
+- * @end:		offset in bytes of the end of data range (inclusive)
+- * @datasync:		perform only datasync
+- *
+- * Write back data in range @start..@end and metadata for @file to disk.  If
+- * @datasync is set only metadata needed to access modified file data is
+- * written.
+- */
+-int vfs_fsync_range(struct file *file, loff_t start, loff_t end, int datasync)
+-{
+-	struct inode *inode = file->f_mapping->host;
+-
+-	if (!file->f_op->fsync)
+-		return -EINVAL;
+-	if (!datasync)
+-		sync_lazytime(inode);
+-	return file->f_op->fsync(file, start, end, datasync);
+-}
+-EXPORT_SYMBOL(vfs_fsync_range);
+-
+-/**
+- * vfs_fsync - perform a fsync or fdatasync on a file
+- * @file:		file to sync
+- * @datasync:		only perform a fdatasync operation
+- *
+- * Write back data and metadata for @file to disk.  If @datasync is
+- * set only metadata needed to access modified file data is written.
+- */
+-int vfs_fsync(struct file *file, int datasync)
+-{
+-	return vfs_fsync_range(file, 0, LLONG_MAX, datasync);
+-}
+-EXPORT_SYMBOL(vfs_fsync);
+-
+ static int do_fsync(unsigned int fd, int datasync)
+ {
+ 	CLASS(fd, f)(fd);
+diff --git a/mm/Makefile b/mm/Makefile
+index 062506c2992438d26f28dff41e7a6ff2d200f1c6..24a1d8750fe27c8cf3cbb1a938d0d781b8ad59ba 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -55,7 +55,7 @@ obj-y			:= filemap.o pagecache_init.o folio_wait.o folio_fs.o mempool.o oom_kill
+ 			   mm_init.o percpu.o slab_common.o kvfree_rcu.o \
+ 			   compaction.o show_mem.o \
+ 			   interval_tree.o list_lru.o workingset.o \
+-			   debug.o gup.o mmap_lock.o vma_init.o $(mmu-y)
++			   debug.o gup.o user_prefault.o mmap_lock.o vma_init.o $(mmu-y)
+ 
+ # Give 'page_alloc' its own module-parameter namespace
+ page-alloc-y := page_alloc.o page_alloc_state.o
+diff --git a/mm/gup.c b/mm/gup.c
+index bde05664fe9a9ee551efa2a07dda8874ad7cf250..8fb6f058822a77cc8b717c5e380944b37ba82e84 100644
+--- a/mm/gup.c
++++ b/mm/gup.c
+@@ -2136,38 +2136,6 @@ size_t fault_in_safe_writeable(const char __user *uaddr, size_t size)
+ }
+ EXPORT_SYMBOL(fault_in_safe_writeable);
+ 
+-/**
+- * fault_in_readable - fault in userspace address range for reading
+- * @uaddr: start of user address range
+- * @size: size of user address range
+- *
+- * Returns the number of bytes not faulted in (like copy_to_user() and
+- * copy_from_user()).
+- */
+-size_t fault_in_readable(const char __user *uaddr, size_t size)
+-{
+-	const unsigned long start = (unsigned long)uaddr;
+-	const unsigned long end = start + size;
+-	unsigned long cur;
+-	volatile char c;
+-
+-	if (unlikely(size == 0))
+-		return 0;
+-	if (!user_read_access_begin(uaddr, size))
+-		return size;
+-
+-	/* Stop once we overflow to 0. */
+-	for (cur = start; cur && cur < end; cur = PAGE_ALIGN_DOWN(cur + PAGE_SIZE))
+-		unsafe_get_user(c, (const char __user *)cur, out);
+-out:
+-	user_read_access_end();
+-	(void)c;
+-	if (size > cur - start)
+-		return size - (cur - start);
+-	return 0;
+-}
+-EXPORT_SYMBOL(fault_in_readable);
+-
+ /**
+  * get_dump_page() - pin user page in memory while writing it to core dump
+  * @addr: user address
+diff --git a/mm/user_prefault.c b/mm/user_prefault.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f65227efff7f6cfae96b9e796acbbc59fac2892
+--- /dev/null
++++ b/mm/user_prefault.c
+@@ -0,0 +1,37 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Readable range prefaulting from mm/gup.c. */
++#include <linux/export.h>
++#include <linux/mm.h>
++#include <linux/uaccess.h>
++
++/**
++ * fault_in_readable - fault in userspace address range for reading
++ * @uaddr: start of user address range
++ * @size: size of user address range
++ *
++ * Returns the number of bytes not faulted in (like copy_to_user() and
++ * copy_from_user()).
++ */
++size_t fault_in_readable(const char __user *uaddr, size_t size)
++{
++	const unsigned long start = (unsigned long)uaddr;
++	const unsigned long end = start + size;
++	unsigned long cur;
++	volatile char c;
++
++	if (unlikely(size == 0))
++		return 0;
++	if (!user_read_access_begin(uaddr, size))
++		return size;
++
++	/* Stop once we overflow to 0. */
++	for (cur = start; cur && cur < end; cur = PAGE_ALIGN_DOWN(cur + PAGE_SIZE))
++		unsafe_get_user(c, (const char __user *)cur, out);
++out:
++	user_read_access_end();
++	(void)c;
++	if (size > cur - start)
++		return size - (cur - start);
++	return 0;
++}
++EXPORT_SYMBOL(fault_in_readable);
