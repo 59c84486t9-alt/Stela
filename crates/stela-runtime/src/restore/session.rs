@@ -474,6 +474,54 @@ impl Session {
         Ok(())
     }
 }
+#[derive(Default)]
+struct MemberWindow {
+    bytes: Vec<u8>,
+    at: u64,
+    segment: Option<usize>,
+}
+
+impl MemberWindow {
+    fn get(&self, segment: usize, at: u64, len: usize) -> Option<&[u8]> {
+        if self.segment != Some(segment) {
+            return None;
+        }
+        let start = usize::try_from(at.checked_sub(self.at)?).ok()?;
+        self.bytes.get(start..start.checked_add(len)?)
+    }
+
+    fn fill<R: ReadAt>(
+        &mut self,
+        store: &mut Store<R>,
+        segment: usize,
+        path: &str,
+        at: u64,
+        len: u64,
+    ) -> Result<()> {
+        // Read in large verified runs and send them in FILE_CHUNK pieces.
+        // A deflated member's random read can replay its inflater.
+        self.bytes = store.read_at(path, at, len.min(MAX_READ_BYTES as u64) as usize)?;
+        self.at = at;
+        self.segment = Some(segment);
+        Ok(())
+    }
+}
+
+fn next_segment<'a>(
+    segments: &'a [Segment],
+    index: &mut usize,
+    offset: &mut u64,
+) -> Option<&'a Segment> {
+    while let Some(segment) = segments.get(*index) {
+        if *offset != segment.len() {
+            return Some(segment);
+        }
+        *index += 1;
+        *offset = 0;
+    }
+    None
+}
+
 /// The scheduler owns the stream and close/reconnect policy. `port=None` uses
 /// the control stream; serialize its outbound frames with all other writers.
 /// DataPort jobs can run concurrently with progress/control reads.
@@ -486,11 +534,8 @@ pub struct Job {
     raw: Output,
     index: usize,
     offset: u64,
-    /// Verified member bytes read ahead for segment `window_segment`, from
-    /// member offset `window_at`.
-    window: Vec<u8>,
-    window_at: u64,
-    window_segment: Option<usize>,
+    /// Verified member bytes ready to frame.
+    window: MemberWindow,
     done: bool,
     failed: bool,
     reply_queued: bool,
@@ -506,9 +551,7 @@ impl Job {
             raw: Output::default(),
             index: 0,
             offset: 0,
-            window: Vec::new(),
-            window_at: 0,
-            window_segment: None,
+            window: MemberWindow::default(),
             done: false,
             failed: false,
             reply_queued: false,
@@ -519,12 +562,21 @@ impl Job {
         s: &mut impl ByteStream,
         store: &mut Store<R>,
     ) -> Poll<Result<()>> {
+        self.poll_with_source(s, store, false)
+    }
+
+    pub(super) fn poll_with_source<R: ReadAt>(
+        &mut self,
+        s: &mut impl ByteStream,
+        store: &mut Store<R>,
+        read_ahead_only: bool,
+    ) -> Poll<Result<()>> {
         // Step on while each step queues or sends: the stream takes only
         // what the guest has room for (its receive window), so the guest's
         // own buffers end the turn.
         let r = loop {
             let (before, queued) = (self.written(), self.sending());
-            let r = self.step(s, store);
+            let r = self.step(s, store, read_ahead_only);
             let moved = self.written() != before || !queued && self.sending();
             if r.is_ready() || !moved {
                 break r;
@@ -535,13 +587,30 @@ impl Job {
         }
         r.map(|r| r.map_err(|e| super::refuse(refuse!("transfer failed: {e}", ?e), &self.request)))
     }
-    /// Read ahead what the job sends next ([`super::asr::Sender::prefetch`]),
-    /// up to `chunks` reads.
+    /// Read the next verified member window, or up to `chunks` ASR chunks.
     pub fn prefetch<R: ReadAt>(&mut self, store: &mut Store<R>, chunks: usize) -> Result<()> {
         match &mut self.plan {
-            Plan::Asr(sender) => sender.prefetch(store, chunks),
-            _ => Ok(()),
+            Plan::Asr(sender) => sender.prefetch(store, chunks)?,
+            Plan::File(segments) | Plan::Raw(segments) | Plan::Message(segments)
+                if chunks != 0 && !self.done && !self.failed =>
+            {
+                if let Some(Segment::Member {
+                    path,
+                    offset,
+                    bytes,
+                }) = next_segment(segments, &mut self.index, &mut self.offset)
+                {
+                    let at = offset + self.offset;
+                    let remaining = bytes - self.offset;
+                    let n = remaining.min(FILE_CHUNK as u64) as usize;
+                    if self.window.get(self.index, at, n).is_none() {
+                        self.window.fill(store, self.index, path, at, remaining)?;
+                    }
+                }
+            }
+            _ => {}
         }
+        Ok(())
     }
     /// The job's ASR sender, if it sends the image.
     pub fn asr(&self) -> Option<&super::asr::Sender> {
@@ -560,6 +629,7 @@ impl Job {
         &mut self,
         s: &mut impl ByteStream,
         store: &mut Store<R>,
+        read_ahead_only: bool,
     ) -> Poll<Result<()>> {
         if self.failed {
             return Poll::Ready(Err(Error::Invalid("restore job already failed")));
@@ -601,11 +671,8 @@ impl Job {
                     Plan::File(s) | Plan::Raw(s) | Plan::Message(s) => s,
                     _ => unreachable!(),
                 };
-                while self.index < segments.len() && self.offset == segments[self.index].len() {
-                    self.index += 1;
-                    self.offset = 0;
-                }
-                if self.index == segments.len() {
+                let Some(segment) = next_segment(segments, &mut self.index, &mut self.offset)
+                else {
                     if !raw && !self.reply_queued {
                         self.frame
                             .queue(&Value::dict([("FileDataDone", Value::Boolean(true))]), true)?;
@@ -614,43 +681,38 @@ impl Job {
                         self.done = true;
                         return Poll::Ready(Ok(()));
                     }
-                } else {
-                    let segment = &segments[self.index];
-                    let n = (segment.len() - self.offset).min(FILE_CHUNK as u64) as usize;
-                    let bytes = match segment {
-                        Segment::Bytes(bytes) => {
-                            bytes[self.offset as usize..self.offset as usize + n].to_vec()
-                        }
-                        Segment::Member {
-                            path,
-                            offset,
-                            bytes,
-                        } => {
-                            // Read the member in large verified runs and frame
-                            // them in FILE_CHUNK pieces: a deflated member's
-                            // random read replays its inflater from the start.
-                            let at = offset + self.offset;
-                            let start = self.window_at;
-                            if self.window_segment != Some(self.index)
-                                || at < start
-                                || at + n as u64 > start + self.window.len() as u64
-                            {
-                                let run = (bytes - self.offset).min(MAX_READ_BYTES as u64);
-                                self.window = store.read_at(path, at, run as usize)?;
-                                self.window_at = at;
-                                self.window_segment = Some(self.index);
-                            }
-                            let skip = (at - self.window_at) as usize;
-                            self.window[skip..skip + n].to_vec()
-                        }
-                    };
-                    self.offset += n as u64;
-                    if raw {
-                        self.raw.queue(bytes, FILE_CHUNK)?;
-                    } else {
-                        self.frame
-                            .queue(&Value::dict([("FileData", Value::Data(bytes))]), true)?;
+                    return Poll::Pending;
+                };
+                let n = (segment.len() - self.offset).min(FILE_CHUNK as u64) as usize;
+                let bytes = match segment {
+                    Segment::Bytes(bytes) => {
+                        bytes[self.offset as usize..self.offset as usize + n].to_vec()
                     }
+                    Segment::Member {
+                        path,
+                        offset,
+                        bytes,
+                    } => {
+                        let at = offset + self.offset;
+                        if self.window.get(self.index, at, n).is_none() {
+                            if read_ahead_only {
+                                return Poll::Pending;
+                            }
+                            self.window
+                                .fill(store, self.index, path, at, bytes - self.offset)?;
+                        }
+                        self.window
+                            .get(self.index, at, n)
+                            .ok_or(Error::Invalid("short restore member read"))?
+                            .to_vec()
+                    }
+                };
+                self.offset += n as u64;
+                if raw {
+                    self.raw.queue(bytes, FILE_CHUNK)?;
+                } else {
+                    self.frame
+                        .queue(&Value::dict([("FileData", Value::Data(bytes))]), true)?;
                 }
             }
         }

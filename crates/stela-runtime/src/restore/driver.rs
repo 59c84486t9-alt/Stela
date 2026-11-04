@@ -96,13 +96,28 @@ impl<R: ReadAt, H: Copy + Eq> Driver<R, H> {
     /// for [`Self::work`], for a caller that must not hold the ports while
     /// the answers sign with Apple's TSS or read the image.
     pub fn poll_ports(&mut self, ports: &mut impl Ports<Handle = H>) -> Poll<Result<()>> {
+        self.poll_inner(ports, false)
+    }
+
+    /// Poll without refilling a member transfer's window. The caller reads
+    /// those windows with [`Self::prefetch`] between polls, outside its
+    /// borrow of the ports.
+    pub fn poll_prefetched(&mut self, ports: &mut impl Ports<Handle = H>) -> Poll<Result<()>> {
+        self.poll_inner(ports, true)
+    }
+
+    fn poll_inner(
+        &mut self,
+        ports: &mut impl Ports<Handle = H>,
+        read_ahead_only: bool,
+    ) -> Poll<Result<()>> {
         if let Some(error) = &self.failure {
             return Poll::Ready(Err(error.clone()));
         }
         if self.complete {
             return Poll::Ready(Ok(()));
         }
-        let result = self.step(ports);
+        let result = self.step(ports, read_ahead_only);
         if let Poll::Ready(Err(error)) = &result {
             self.failure = Some(error.clone());
         }
@@ -155,7 +170,11 @@ impl<R: ReadAt, H: Copy + Eq> Driver<R, H> {
         }
         Ok(())
     }
-    fn step(&mut self, ports: &mut impl Ports<Handle = H>) -> Poll<Result<()>> {
+    fn step(
+        &mut self,
+        ports: &mut impl Ports<Handle = H>,
+        read_ahead_only: bool,
+    ) -> Poll<Result<()>> {
         if self.control.is_none() {
             self.control = Some(match ports.open(PORT) {
                 Poll::Pending => return Poll::Pending,
@@ -237,10 +256,11 @@ impl<R: ReadAt, H: Copy + Eq> Driver<R, H> {
                 control
             };
             if !t.closing {
-                match t
-                    .job
-                    .poll(&mut Stream { ports, handle }, &mut self.answers.store)
-                {
+                match t.job.poll_with_source(
+                    &mut Stream { ports, handle },
+                    &mut self.answers.store,
+                    read_ahead_only,
+                ) {
                     Poll::Pending => {
                         at += 1;
                         continue;
@@ -281,6 +301,15 @@ impl<R: ReadAt, H: Copy + Eq> Driver<R, H> {
             return;
         }
         for transfer in &mut self.jobs {
+            // A waiting DataPort job has no receiver yet. Keep the ASR
+            // sender's existing prefetch activation before its handshake.
+            if transfer.closing
+                || (transfer.job.port.is_some()
+                    && transfer.handle.is_none()
+                    && transfer.job.asr().is_none())
+            {
+                continue;
+            }
             if let Err(e) = transfer.job.prefetch(&mut self.answers.store, chunks) {
                 self.failure = Some(super::refuse(
                     refuse!("transfer failed: {e}", ?e),

@@ -799,7 +799,7 @@ impl Experiment {
         if let Some(proxy) = &mut self.proxy {
             proxy.poll(&mut client);
         }
-        let result = self.driver.poll_ports(&mut client);
+        let result = self.driver.poll_prefetched(&mut client);
         self.backpressure = client.backpressure();
         for message in &self.driver.session.ledger()[self.ledger..] {
             output::arguments(format_args!("{label} ledger={message:?}\n"));
