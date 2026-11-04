@@ -770,10 +770,11 @@ fn ordinary_integer_operations_read_frame_operands_directly() {
         &code[map[1].1 + 7..map[1].1 + 13],
         &[0x23, 0x87, 112, 0, 0, 0]
     );
-    assert_eq!(
-        &code[map[2].1 + 7..map[2].1 + 13],
-        &[0x3b, 0x87, 8, 0, 0, 0]
-    );
+    // CMP [RDI+104],EAX using the preceding AND result.
+    assert_eq!(&code[map[2].1..map[2].1 + 6], &[0x39, 0x87, 104, 0, 0, 0]);
+    let standalone = emit(&instructions[2..3], None, GuestAddress(0x100c));
+    // CMP EAX,[RDI+8] without a producer.
+    assert_eq!(&standalone.x86_64_code[7..13], &[0x3b, 0x87, 8, 0, 0, 0]);
     assert_eq!(
         &code[map[3].1..map[3].1 + 7],
         &[0x83, 0xbf, 104, 0, 0, 0, 7]
