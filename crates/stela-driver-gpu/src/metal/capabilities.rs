@@ -7,7 +7,8 @@
 //! Each refusal is recorded once as a [`Gap`] naming the layer that lacks it,
 //! so negative answers stay explicit. A GPU family is the conjunction of its
 //! requirements; Apple GPU families and Metal 4, which presuppose Apple's
-//! tile-based architecture, are never claimed for another GPU.
+//! tile-based architecture, are not claimed for another GPU, but for Apple3,
+//! which macOS's compositor requires of its display surfaces.
 use super::{
     abi::{
         ArgumentBuffersTier, CounterSamplingPoint, DeviceLocation, GpuFamily, ReadWriteTextureTier,
@@ -1374,11 +1375,19 @@ impl Derivation<'_> {
                     api("MetalFX upscaling", true, ApiFeatures::METALFX),
                 ],
             );
-        self.gap("Apple GPU families", Cause::AppleArchitecture);
+        self.gap(
+            "Apple GPU families other than Apple3",
+            Cause::AppleArchitecture,
+        );
         self.gap("GPU family Metal4", Cause::AppleArchitecture);
 
         let mut families = Vec::new();
         for (family, held) in [
+            // Core Animation maps WindowServer's two-plane framebuffers to a
+            // Metal format only on a device in this family. It predates tile
+            // shaders, and it alone stands: the families below it steer Core
+            // Animation to tile memory.
+            (GpuFamily::Apple3, mac2),
             (GpuFamily::Common1, common1),
             (GpuFamily::Common2, common2),
             (GpuFamily::Common3, common3),
