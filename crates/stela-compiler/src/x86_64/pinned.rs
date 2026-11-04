@@ -178,6 +178,52 @@ pub(super) fn unshifted_binary(
     true
 }
 
+/// The preceding flag capture left native CF equal to the guest carry.
+/// Keep it through operand preparation, then use the direct ADC or SBB.
+pub(super) fn emit_live_carry(code: &mut Code, operation: &Operation) {
+    let Operation::AddSubCarry {
+        width,
+        subtract,
+        flags,
+        destination,
+        left,
+        right,
+    } = *operation
+    else {
+        unreachable!("carry consumer")
+    };
+    let work = working(code, destination);
+    let size = Size::of(width == Width::X64);
+    let mut asm = code.asm();
+    let left = asm.guest(left);
+    let mut right = asm.guest(right);
+    // Loading a different left operand may overwrite the pinned right.
+    if right == Some(Rm::Reg(work)) && left != right {
+        asm.mov(size, Gpr::Rcx, work);
+        right = Some(Rm::Reg(Gpr::Rcx));
+    }
+    match left {
+        None => asm.mov_imm32(work, 0), // XOR would destroy CF.
+        Some(storage) if storage != Rm::Reg(work) => asm.mov_load(size, work, storage),
+        _ => {}
+    }
+    let alu = if subtract {
+        // SBB consumes the inverse carry. A flag-setting SBB is converted
+        // back to the architectural carry by the ordinary capture.
+        asm.cmc();
+        Alu::Sbb
+    } else {
+        Alu::Adc
+    };
+    match right {
+        None => asm.alu_imm8(alu, size, work, 0),
+        Some(Rm::Reg(right)) => asm.alu(alu, size, work, right),
+        Some(Rm::Mem(right)) => asm.alu_load(alu, size, work, right),
+        Some(Rm::Xmm(_)) => unreachable!("scalar guest operand"),
+    }
+    finish(code, work, destination, flags, subtract);
+}
+
 /// Compare the left operand against the prior instruction's result in RAX.
 pub(super) fn compare_held_right(code: &mut Code, width: Width, left: Register) {
     let mut asm = code.asm();
