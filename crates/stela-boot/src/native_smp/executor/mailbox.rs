@@ -290,7 +290,7 @@ impl Processor {
         self.send(ApertureRetirement(mapping), sender, tsc_hz)
             .map_err(|_| refuse!("AP aperture retirement mailbox busy"))?
             .finish()
-            .map_err(|error| refuse!("AP aperture retirement refused: {error:?}"))
+            .map_err(|error| refuse!("AP aperture retirement refused: {error}", ?error))
     }
 
     /// Run `check` with this AP spinning for the driver's real loader-root
