@@ -7,7 +7,7 @@ use crate::aarch64::{
 use crate::x86_64::asm::{
     Alu, Asm, Code, Cond,
     Gpr::{R8, Rax, Rdx},
-    Rm, Size, Unary,
+    Mem, Rm, Size, Unary,
 };
 
 const NZCV_SHIFT: u8 = 28;
@@ -95,6 +95,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, live_nzcv: bool) {
         let mut asm = code.asm();
         select_input(&mut asm, R8, size, operand.right);
         match operand.otherwise {
+            Otherwise::Increment if live_nzcv => asm.lea(size, R8, Mem::base(R8, 1)),
             Otherwise::Increment => asm.inc(size, R8),
             Otherwise::Invert => asm.unary(Unary::Not, size, R8),
             Otherwise::Negate => asm.unary(Unary::Neg, size, R8),

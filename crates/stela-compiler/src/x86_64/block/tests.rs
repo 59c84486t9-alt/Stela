@@ -865,3 +865,56 @@ fn pinned_select_consumes_the_preceding_compare_flags() {
         assert_eq!(state.nzcv, nzcv);
     }
 }
+
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn pinned_conditional_increment_consumes_the_preceding_compare_flags() {
+    use crate::{
+        GuestState,
+        block::{BlockProfile, Features},
+        x86_64::{native, pinned},
+    };
+    // CMP X0, #1; CSET W2, EQ; RET.
+    let cset = 0x1a9f_17e2;
+    // CMP X0, #1; CSINC W8, W2, W8, HI; RET.
+    let csinc = 0x1a88_8448;
+    for (select, prefix) in [
+        (cset, &[0x0f, 0x94, 0xc0][..]),                            // SETE AL
+        (csinc, &[0x44, 0x8b, 0xc6, 0x45, 0x8d, 0x40, 0x01, 0xf5]), // MOV, LEA, CMC
+    ] {
+        let source: Vec<_> = [0xf100_041fu32, select, 0xd65f_03c0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let code = crate::testing::block_with(
+            &source,
+            GuestAddress(0x1000),
+            BlockProfile::new(Features::SYSTEM_MODE),
+        )
+        .unwrap()
+        .native;
+        let selected = &code.x86_64_code[code.source_map[1].1..code.source_map[2].1];
+        assert!(selected.starts_with(prefix), "{selected:02x?}");
+        let entry = pinned::entered(&code.x86_64_code);
+        for (compared, equal, higher, nzcv) in [
+            (0, 0, false, 0x8000_0000),
+            (1, 1, false, 0x6000_0000),
+            (2, 0, true, 0x2000_0000),
+        ] {
+            let mut state = GuestState::default();
+            state.x[0] = compared;
+            state.x[2] = 0xaabb_ccdd_0000_0016;
+            state.x[8] = u64::MAX;
+            state.x[30] = 0x2000;
+            let mut expected = state.x;
+            if select == cset {
+                expected[2] = equal;
+            } else {
+                expected[8] = if higher { 22 } else { 0 };
+            }
+            assert_eq!(native::run(&entry, &mut state), 0x2000);
+            assert_eq!(state.x, expected);
+            assert_eq!(state.nzcv, nzcv);
+        }
+    }
+}

@@ -538,11 +538,12 @@ fn emit_single(
         && matches!(
             operand.otherwise,
             crate::aarch64::conditional_select::Otherwise::Unchanged
+                | crate::aarch64::conditional_select::Otherwise::Increment
                 | crate::aarch64::conditional_select::Otherwise::Invert
         )
     {
-        // The preceding pinned capture preserves the host flags. MOV and
-        // NOT keep them live while preparing these select operands.
+        // The preceding pinned capture preserves the host flags. The
+        // select keeps them live while preparing its operands.
         super::conditional_select::emit(code, operand, true);
     } else if let super::Rax::Guest(register) = held.rax
         && let Operation::AddSub {
