@@ -234,6 +234,14 @@ static const char *called = DERIVED("%x = call i32 @air.unknown(i32 %w)\n");
 
 static const char *conditional =
    CONDITIONAL("br i1 %on, label %tinted, label %untinted\n", "bool");
+/* A shader helper uses the same function constant as its leaf constructor. */
+static const char *conditional_with_helper =
+   CONDITIONAL("%choose = call i1 @choose_tint(i1 %on)\n"
+               "br i1 %choose, label %tinted, label %untinted\n", "bool")
+   "define internal i1 @choose_tint(i1 %enabled) {\n"
+   "%raw = load i8, ptr addrspace(2) @use_tint.init, align 1\n"
+   "%selected = icmp ne i8 %raw, 0\n"
+   "%both = and i1 %selected, %enabled\nret i1 %both\n}\n";
 /* One reading tint whatever use_tint is. */
 static const char *unguarded = CONDITIONAL("br label %tinted\n", "bool");
 /* One whose read Apple's compiler hoists ahead of what decides it. */
@@ -1246,6 +1254,26 @@ constructed_globals_are_bounded(void)
    LLVMDisposeMemoryBuffer(input);
 }
 
+static void
+constructor_priorities_are_integer_literals(void)
+{
+   const char *priority = strstr(derived, "65535");
+   assert(priority);
+   const char *invalid[] = {"undef", "poison"};
+   for (unsigned i = 0; i < ARRAY_SIZE(invalid); i++) {
+      char *fixture = ralloc_asprintf(NULL, "%.*s%s%s", (int)(priority - derived), derived,
+                                      invalid[i], priority + strlen("65535"));
+      LLVMMemoryBufferRef input = bitcode(fixture);
+      ralloc_free(fixture);
+      struct stela_metal_reflection reflection;
+      struct stela_air_error error;
+      assert(!stela_metal_reflect(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                  "derived", NULL, 0, &reflection, &error));
+      assert(error.kind == STELA_AIR_METADATA && strstr(error.detail, "invalid AIR constructor list"));
+      LLVMDisposeMemoryBuffer(input);
+   }
+}
+
 static unsigned
 count_intrinsic(nir_shader *shader, nir_intrinsic_op op)
 {
@@ -1277,6 +1305,10 @@ function_constants_select_arguments(void)
       assert(reflect_specialized(conditional, "conditional", &value, 1, &reflection, &error));
       uint32_t access = on ? STELA_METAL_ACCESS_READ :
                              STELA_METAL_ACCESS_READ | STELA_METAL_ACCESS_WRITE;
+      assert(reflection.buffer_count == 2 && reflection.buffers[1].index == 1 &&
+             reflection.buffers[1].access == access);
+      assert(reflect_specialized(conditional_with_helper, "conditional", &value, 1,
+                                 &reflection, &error));
       assert(reflection.buffer_count == 2 && reflection.buffers[1].index == 1 &&
              reflection.buffers[1].access == access);
       const struct stela_metal_specialization specialization = {
@@ -1947,6 +1979,7 @@ main(void)
    function_constants_reflect_and_specialize();
    derived_constants_are_constructed_from_their_function_constants();
    constructed_globals_are_bounded();
+   constructor_priorities_are_integer_literals();
    function_constants_select_outputs();
    older_kernels_compile();
    unoptimized_kernels_compile();

@@ -181,7 +181,8 @@ stela_air_metadata_constructors(LLVMModuleRef module)
       return NULL;
    for (unsigned i = 0; i < LLVMGetArrayLength2(type); i++) {
       LLVMValueRef entry = LLVMGetAggregateElement(entries, i);
-      if (!entry || LLVMGetNumOperands(entry) != 3 || !static_init(LLVMGetOperand(entry, 1)))
+      if (!entry || LLVMGetNumOperands(entry) != 3 || !LLVMIsAConstantInt(LLVMGetOperand(entry, 0)) ||
+          !static_init(LLVMGetOperand(entry, 1)))
          return NULL;
    }
    return list;
@@ -370,6 +371,8 @@ stela_air_metadata_validate(struct stela_air_metadata *t)
 {
    /* Debug info says nothing a function does, and Xcode's Debug builds carry it. */
    LLVMStripModuleDebugInfo(t->module);
+   if (LLVMGetNamedGlobal(t->module, "llvm.global_ctors") && !stela_air_metadata_constructors(t->module))
+      return fail(t, STELA_AIR_METADATA, "invalid AIR constructor list");
    for (LLVMNamedMDNodeRef node = LLVMGetFirstNamedMetadata(t->module); node;
         node = LLVMGetNextNamedMetadata(node)) {
       size_t size;

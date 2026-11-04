@@ -324,14 +324,15 @@ evaluate_constants(LLVMModuleRef original, LLVMModuleRef clone,
    return true;
 }
 
-/* Inlining does not touch a constructor whose only reference is its
- * initializer list entry and which calls only declarations. */
+/* An unassociated constructor whose only reference is its list entry and
+ * whose calls reach only declarations is independent of shader inlining. */
 static bool
 leaf_constructor(LLVMValueRef entry)
 {
    LLVMValueRef fn = LLVMGetOperand(entry, 1);
    LLVMUseRef use = LLVMGetFirstUse(fn);
-   if (!use || LLVMGetUser(use) != entry || LLVMGetNextUse(use))
+   if (!LLVMIsAConstantPointerNull(LLVMGetOperand(entry, 2)) ||
+       !use || LLVMGetUser(use) != entry || LLVMGetNextUse(use))
       return false;
    for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block; block = LLVMGetNextBasicBlock(block)) {
       for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst; inst = LLVMGetNextInstruction(inst)) {
