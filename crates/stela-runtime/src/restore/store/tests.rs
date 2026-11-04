@@ -220,12 +220,19 @@ fn recorded_hashes_check_every_member_before_the_restore_by_default() {
 fn verify_on_read_checks_recorded_hashes_as_reads_reach_them() {
     let data: Vec<u8> = (0..BLOCK_BYTES * 2 + 5).map(|i| (i * 3) as u8).collect();
     let mut s = fixture(&data, false);
-    let file = precomputed(&mut s, &data);
+    let file = alloc::boxed::Box::leak(precomputed(&mut s, &data).into_boxed_slice());
     assert!(!s.prepared());
-    let error = s.adopt_block_hashes(&file[1..]).unwrap_err().to_string();
+    let error = s
+        .adopt_static_block_hashes(&file[1..])
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("blocks.bin"), "{error}");
     s.set_verify(Verify::OnRead);
-    s.adopt_block_hashes(&file).unwrap();
+    s.adopt_static_block_hashes(file).unwrap();
+    assert!(core::ptr::eq(
+        s.verified["os.dmg"].blocks.as_ref(),
+        file.as_chunks::<32>().0
+    ));
     // Nothing is left to read before the restore.
     assert!(s.prepared());
     s.prepare().unwrap();
