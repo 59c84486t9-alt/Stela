@@ -164,12 +164,14 @@ static void require_catalog(void)
 bool stela_linux_page_request_basic(u32 gfp)
 {
 	/* x86-64 has no high memory, Stela no cpusets or NUMA nodes, and how hard
-	 * to reclaim means nothing to an allocator that does not reclaim. TTM's
-	 * and nouveau's allocations carry all of these. */
+	 * to reclaim means nothing to an allocator that does not reclaim. RAM has
+	 * one zone: __GFP_DMA32 only asks for what a device reaches, which its
+	 * DMA mapping checks against its mask and refuses. TTM's and nouveau's
+	 * allocations carry all of these. */
 	gfp_t allowed = __GFP_ZERO | __GFP_COMP | __GFP_NOWARN | __GFP_NOMEMALLOC |
 		__GFP_DIRECT_RECLAIM | __GFP_KSWAPD_RECLAIM | __GFP_IO | __GFP_FS |
-		__GFP_HIGHMEM | __GFP_HARDWALL | __GFP_THISNODE | __GFP_NORETRY |
-		__GFP_RETRY_MAYFAIL;
+		__GFP_HIGHMEM | __GFP_DMA32 | __GFP_HARDWALL | __GFP_THISNODE |
+		__GFP_NORETRY | __GFP_RETRY_MAYFAIL;
 	if (!IS_ENABLED(CONFIG_MEMCG))
 		allowed |= __GFP_ACCOUNT;
 	return !(gfp & ~(__force u32)allowed);
@@ -770,8 +772,11 @@ struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_n
 	if (error) {
 		if (error > 0)
 			__builtin_trap();
-		if (error == -EOPNOTSUPP)
+		if (error == -EOPNOTSUPP) {
+			pr_err("page request refused: gfp %#x order %u atomic %d\n",
+			       (__force u32)gfp, order, atomic);
 			stela_linux_unsupported("native page allocation request");
+		}
 		return NULL;
 	}
 	if (!atomic)
@@ -1810,7 +1815,7 @@ static void reclaimable_policy(void)
 		       stela_linux_page_request_blocking(reclaimable));
 	}
 	const gfp_t unsupported[] = {
-		__GFP_MOVABLE, __GFP_DMA, __GFP_DMA32, __GFP_HIGH,
+		__GFP_MOVABLE, __GFP_DMA, __GFP_HIGH,
 		__GFP_MEMALLOC, GFP_ATOMIC, __GFP_NOFAIL, __GFP_WRITE,
 		(__force gfp_t)(1U << 31),
 	};

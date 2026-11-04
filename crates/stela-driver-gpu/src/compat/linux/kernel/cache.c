@@ -1113,7 +1113,7 @@ static void policy_and_creation(void)
 		GFP_KERNEL | __GFP_NOFAIL, GFP_KERNEL | __GFP_RETRY_MAYFAIL,
 		GFP_KERNEL | __GFP_RECLAIMABLE,
 		GFP_KERNEL | __GFP_MOVABLE, GFP_KERNEL | __GFP_DMA,
-		GFP_KERNEL | __GFP_DMA32, GFP_KERNEL | __GFP_COMP,
+		GFP_KERNEL | __GFP_COMP,
 		GFP_KERNEL | __GFP_THISNODE, GFP_KERNEL | (__force gfp_t)(1U << 31),
 	};
 	unsigned int validations = fixture.validations;
