@@ -387,7 +387,7 @@ impl CommandBuffer {
         inherit_pipeline: bool,
     ) -> Result<Vec<IndirectRenderClass>> {
         let render = render(&mut self.encoder)?;
-        if render.amplification.len() > 1 {
+        if render.amplification.as_slice().len() > 1 {
             return Err(Error::Unsupported(
                 "vertex amplification of GPU-resident indirect commands",
             ));
