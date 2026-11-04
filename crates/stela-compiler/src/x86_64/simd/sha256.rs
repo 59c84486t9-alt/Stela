@@ -138,7 +138,7 @@ fn unpack_sha(code: &mut Code, state: u8, high: bool) {
 
 /// The copy that keeps the original ABCD and the two projections of one
 /// four-round hash update.
-pub(in crate::x86_64) struct HashPair {
+struct HashPair {
     copy: u8,
     abcd: u8,
     efgh: u8,
@@ -146,7 +146,7 @@ pub(in crate::x86_64) struct HashPair {
 }
 
 impl HashPair {
-    pub(in crate::x86_64) fn recognize(instructions: &[Instruction]) -> Option<Self> {
+    fn recognize(instructions: &[Instruction]) -> Option<Self> {
         let [copy, first, second, ..] = instructions else {
             return None;
         };
@@ -198,7 +198,7 @@ impl HashPair {
     /// Emit each architectural write in its own source row. All memory
     /// operands are in the native guest frame, so there is no guest fault
     /// or internal exit while the two halves are held in host registers.
-    pub(in crate::x86_64) fn emit(self, code: &mut Code, target: TargetCpu) -> ([usize; 3], u8) {
+    fn emit(self, code: &mut Code, target: TargetCpu) -> ([usize; 3], u8) {
         let copy = code.len();
         read_vector(code, self.abcd, LEFT);
         commit(code, self.copy, LEFT);
@@ -223,6 +223,79 @@ impl HashPair {
     }
 }
 
+pub(in crate::x86_64) struct HashGroup {
+    hash: HashPair,
+    schedule: Option<[Operand; 2]>,
+}
+
+impl HashGroup {
+    pub(in crate::x86_64) fn recognize(instructions: &[Instruction]) -> Option<Self> {
+        let Operation::Simd(first) = instructions.first()?.operation else {
+            return None;
+        };
+        if let Simd::Sha256(before) = first
+            && before.kind == Kind::Schedule0
+        {
+            let hash = HashPair::recognize(instructions.get(1..4)?)?;
+            let last = instructions.get(4)?;
+            let Operation::Simd(Simd::Sha256(after)) = last.operation else {
+                return None;
+            };
+            let destination = before.destination;
+            if after.kind != Kind::Schedule1
+                || after.destination != destination
+                || [
+                    hash.abcd,
+                    hash.efgh,
+                    hash.copy,
+                    hash.schedule,
+                    after.left,
+                    after.right,
+                ]
+                .contains(&destination)
+                || instructions[0].pc.0.checked_add(4) != Some(instructions[1].pc.0)
+                || instructions[3].pc.0.checked_add(4) != Some(last.pc.0)
+            {
+                return None;
+            }
+            Some(Self {
+                hash,
+                schedule: Some([before, after]),
+            })
+        } else {
+            HashPair::recognize(instructions).map(|hash| Self {
+                hash,
+                schedule: None,
+            })
+        }
+    }
+
+    pub(in crate::x86_64) fn emit(
+        self,
+        code: &mut Code,
+        target: TargetCpu,
+    ) -> ([usize; 5], usize, Option<u8>) {
+        let Some([before, after]) = self.schedule else {
+            let ([copy, first, second], result) = self.hash.emit(code, target);
+            return ([copy, first, second, 0, 0], 3, Some(result));
+        };
+        // Neither hash body touches this existing scratch register. The
+        // schedule value is private to this group until SU1 overwrites it.
+        let work = if target.supports(TargetCpu::Sha) {
+            SIGMA_TEMPORARY
+        } else {
+            TEMPORARY
+        };
+        let schedule0_at = code.len();
+        schedule0(code, &before, target, work);
+        let ([copy, first, second], _) = self.hash.emit(code, target);
+        let schedule1_at = code.len();
+        schedule1(code, &after, target, work);
+        commit(code, after.destination, work);
+        ([schedule0_at, copy, first, second, schedule1_at], 5, None)
+    }
+}
+
 fn small_sigma(code: &mut Code, input: u8, result: u8, temporary: u8, amounts: [u8; 3]) {
     // Two rotates and a logical shift are a linear XOR of five shifted copies.
     // Destructively consume input for the final shift, avoiding a sixth copy.
@@ -242,51 +315,60 @@ fn small_sigma(code: &mut Code, input: u8, result: u8, temporary: u8, amounts: [
     Shift::RightDword.emit(code, input, amounts[2]);
     packed(code, Host::Xor, result, input);
 }
-fn schedule0(code: &mut Code, operand: &Operand, target: TargetCpu) {
-    read_vector(code, operand.destination, RESULT);
+fn schedule0(code: &mut Code, operand: &Operand, target: TargetCpu, result: u8) {
+    read_vector(code, operand.destination, result);
     read_vector(code, operand.left, LEFT);
     if target.supports(TargetCpu::Sha) {
-        Host::Sha256Message1.register(code, RESULT, LEFT, target);
+        Host::Sha256Message1.register(code, result, LEFT, target);
     } else {
+        let temp = if result == TEMPORARY {
+            RESULT
+        } else {
+            TEMPORARY
+        };
         if target.supports(TargetCpu::Ssse3) {
             packed(code, Host::MoveAligned, RIGHT, LEFT);
-            Host::AlignBytes.register_imm(code, RIGHT, RESULT, WORD_BYTES, target); // [d1,d2,d3,n0]
+            Host::AlignBytes.register_imm(code, RIGHT, result, WORD_BYTES, target); // [d1,d2,d3,n0]
         } else {
-            packed(code, Host::MoveAligned, RIGHT, RESULT);
+            packed(code, Host::MoveAligned, RIGHT, result);
             Shift::RightBytes.emit(code, RIGHT, WORD_BYTES);
             Shift::LeftBytes.emit(code, LEFT, HIGH_WORD_BYTE);
             packed(code, Host::Or, RIGHT, LEFT);
         }
-        small_sigma(code, RIGHT, TEMPORARY, SIGMA_TEMPORARY, SMALL_SIGMA0);
-        packed(code, Host::AddDword, RESULT, TEMPORARY);
+        small_sigma(code, RIGHT, temp, SIGMA_TEMPORARY, SMALL_SIGMA0);
+        packed(code, Host::AddDword, result, temp);
     }
 }
-fn schedule1(code: &mut Code, operand: &Operand, target: TargetCpu) {
-    read_vector(code, operand.destination, RESULT);
+fn schedule1(code: &mut Code, operand: &Operand, target: TargetCpu, result: u8) {
+    let temp = if result == TEMPORARY {
+        RESULT
+    } else {
+        TEMPORARY
+    };
     read_vector(code, operand.left, LEFT);
     read_vector(code, operand.right, RIGHT);
     if target.supports(TargetCpu::Ssse3) {
         // Keep the M vector for schedule feedback and SHA256MSG2.
-        packed(code, Host::MoveAligned, TEMPORARY, RIGHT);
-        Host::AlignBytes.register_imm(code, TEMPORARY, LEFT, WORD_BYTES, target); // [n1,n2,n3,m0]
-        packed(code, Host::AddDword, RESULT, TEMPORARY);
+        packed(code, Host::MoveAligned, temp, RIGHT);
+        Host::AlignBytes.register_imm(code, temp, LEFT, WORD_BYTES, target); // [n1,n2,n3,m0]
+        packed(code, Host::AddDword, result, temp);
     } else {
         Shift::RightBytes.emit(code, LEFT, WORD_BYTES);
-        packed(code, Host::MoveAligned, TEMPORARY, RIGHT);
-        Shift::LeftBytes.emit(code, TEMPORARY, HIGH_WORD_BYTE);
-        packed(code, Host::Or, LEFT, TEMPORARY);
-        packed(code, Host::AddDword, RESULT, LEFT);
+        packed(code, Host::MoveAligned, temp, RIGHT);
+        Shift::LeftBytes.emit(code, temp, HIGH_WORD_BYTE);
+        packed(code, Host::Or, LEFT, temp);
+        packed(code, Host::AddDword, result, LEFT);
     }
     if target.supports(TargetCpu::Sha) {
-        Host::Sha256Message2.register(code, RESULT, RIGHT, target);
+        Host::Sha256Message2.register(code, result, RIGHT, target);
     } else {
         Shift::RightBytes.emit(code, RIGHT, DOUBLE_WORD_BYTES);
-        small_sigma(code, RIGHT, TEMPORARY, SIGMA_TEMPORARY, SMALL_SIGMA1); // [sigma1(m2),sigma1(m3),0,0]
-        packed(code, Host::AddDword, RESULT, TEMPORARY);
-        packed(code, Host::MoveAligned, RIGHT, RESULT);
+        small_sigma(code, RIGHT, temp, SIGMA_TEMPORARY, SMALL_SIGMA1); // [sigma1(m2),sigma1(m3),0,0]
+        packed(code, Host::AddDword, result, temp);
+        packed(code, Host::MoveAligned, RIGHT, result);
         Shift::LeftBytes.emit(code, RIGHT, DOUBLE_WORD_BYTES); // [0,0,result0,result1]
-        small_sigma(code, RIGHT, TEMPORARY, SIGMA_TEMPORARY, SMALL_SIGMA1);
-        packed(code, Host::AddDword, RESULT, TEMPORARY);
+        small_sigma(code, RIGHT, temp, SIGMA_TEMPORARY, SMALL_SIGMA1);
+        packed(code, Host::AddDword, result, temp);
     }
 }
 
@@ -309,8 +391,11 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
                 preserve_scratch(code, true);
             }
         }
-        Kind::Schedule0 => schedule0(code, operand, target),
-        Kind::Schedule1 => schedule1(code, operand, target),
+        Kind::Schedule0 => schedule0(code, operand, target, RESULT),
+        Kind::Schedule1 => {
+            read_vector(code, operand.destination, RESULT);
+            schedule1(code, operand, target, RESULT);
+        }
     }
     commit(code, operand.destination, RESULT);
 }
@@ -319,6 +404,49 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
 mod tests {
     use super::*;
     use crate::{GuestAddress, Lifter, aarch64::Decoder};
+
+    #[test]
+    fn schedule_group_requires_a_private_intermediate_and_adjacent_rows() {
+        let words = [
+            0x5e28_28a4_u32,
+            0x4ea0_1c02,
+            0x5e10_4020,
+            0x5e10_5041,
+            0x5e07_60c4,
+        ];
+        let instructions = |words: [u32; 5]| {
+            core::array::from_fn::<_, 5, _>(|index| {
+                Decoder
+                    .lift(GuestAddress(0x1000 + index as u64 * 4), words[index])
+                    .unwrap()
+            })
+        };
+        let input = instructions(words);
+        assert!(HashGroup::recognize(&input).unwrap().schedule.is_some());
+        assert!(HashGroup::recognize(&input[..4]).is_none());
+        assert!(
+            HashGroup::recognize(&input[1..])
+                .unwrap()
+                .schedule
+                .is_none()
+        );
+        let mut gap = instructions(words);
+        gap[4].pc.0 += 4;
+        assert!(HashGroup::recognize(&gap).is_none());
+
+        for alias in [0, 1, 2, 16] {
+            let mut aliasing = words;
+            aliasing[0] = aliasing[0] & !31 | alias;
+            aliasing[4] = aliasing[4] & !31 | alias;
+            assert!(HashGroup::recognize(&instructions(aliasing)).is_none());
+        }
+        for shift in [0, 5, 16] {
+            let mut aliasing = words;
+            let operand = if shift == 0 { 5 } else { 4 };
+            aliasing[4] = aliasing[4] & !(31 << shift) | operand << shift;
+            assert!(HashGroup::recognize(&instructions(aliasing)).is_none());
+        }
+    }
 
     #[test]
     fn hash_pair_requires_the_unchanged_schedule_and_original_abcd_copy() {

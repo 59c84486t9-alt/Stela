@@ -135,6 +135,107 @@ fn conditional_exits_branch_over_the_fallthrough_exit() {
 
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 #[test]
+fn grouped_sha256_schedule_removes_only_the_intermediate_frame_round_trip() {
+    use crate::{
+        GuestState, Lifter, TargetCpu,
+        aarch64::Decoder,
+        x86_64::{native, pinned},
+    };
+
+    let pc = GuestAddress(0x1000);
+    let words = [
+        0x5e28_28a4_u32,
+        0x4ea0_1c02,
+        0x5e10_4020,
+        0x5e10_5041,
+        0x5e07_60c4,
+    ];
+    let instructions: Vec<_> = words
+        .into_iter()
+        .enumerate()
+        .map(|(i, word)| {
+            Decoder
+                .lift(GuestAddress(pc.0 + i as u64 * 4), word)
+                .unwrap()
+        })
+        .collect();
+    let checks = super::super::MemoryChecks::DEFAULT;
+    for target in [
+        TargetCpu::Baseline,
+        TargetCpu::Ssse3,
+        TargetCpu::Sha,
+        TargetCpu::Ssse3.with_sha(),
+    ] {
+        let system = |input: &[Instruction]| {
+            let pc = GuestAddress(input.last().unwrap().pc.0 + 4);
+            let terminal = (
+                pc,
+                Terminator::Register {
+                    source: Register::X(30),
+                    kind: ExitKind::Return,
+                },
+            );
+            let next = GuestAddress(pc.0 + 4);
+            let (block, faults) = emit_system_mode(
+                input,
+                Some(&terminal),
+                next,
+                target,
+                checks,
+                super::super::NativeSystem::NONE,
+            );
+            assert!(faults.is_empty());
+            (block, terminal, next)
+        };
+        let body_bytes = |input: &[Instruction]| system(input).0.source_map.last().unwrap().1;
+        let separate_bytes = body_bytes(&instructions[..1])
+            + body_bytes(&instructions[1..4])
+            + body_bytes(&instructions[4..]);
+        assert_eq!(body_bytes(&instructions) + 16, separate_bytes);
+
+        if (target.supports(TargetCpu::Sha) && !std::arch::is_x86_feature_detected!("sha"))
+            || (target.supports(TargetCpu::Ssse3) && !std::arch::is_x86_feature_detected!("ssse3"))
+        {
+            continue;
+        }
+        for input in [
+            &instructions[..],
+            &instructions[..4],
+            &instructions[1..],
+            &instructions[4..],
+        ] {
+            let (grouped, terminal, next) = system(input);
+            let plain = emit_for_target(input, Some(&terminal), next, target, checks);
+            let rows =
+                |code: &NativeBlock| code.source_map.iter().map(|row| row.0).collect::<Vec<_>>();
+            assert_eq!(rows(&grouped), rows(&plain));
+            assert!(
+                grouped
+                    .source_map
+                    .windows(2)
+                    .all(|pair| pair[0].1 < pair[1].1)
+            );
+            let entered = pinned::entered(&grouped.x86_64_code);
+            let mut state = GuestState {
+                x: core::array::from_fn(|index| u64::MAX ^ index as u64),
+                v: core::array::from_fn(|index| {
+                    let word = (index as u64).wrapping_mul(0x1234_5678_8765_4321);
+                    [word, !word.rotate_left(11)]
+                }),
+                nzcv: 0xa000_0000,
+                fpsr: 0x800_0000,
+                ..GuestState::default()
+            };
+            let mut expected = state.clone();
+            let exit = native::run(&plain.x86_64_code, &mut expected);
+            assert_eq!(native::run(&entered, &mut state), exit);
+            assert_eq!(state, expected);
+        }
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+#[test]
 fn grouped_sha256_rounds_preserve_three_rows_and_both_state_halves() {
     use crate::{
         GuestState, Lifter, TargetCpu,

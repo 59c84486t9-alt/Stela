@@ -306,18 +306,18 @@ fn emit_selected(
     while cursor < instructions.len() {
         let held = core::mem::replace(&mut after, Held::NOTHING);
         if fuse_hash
-            && let Some(pair) = super::simd::sha256::HashPair::recognize(&instructions[cursor..])
+            && let Some(group) = super::simd::sha256::HashGroup::recognize(&instructions[cursor..])
         {
-            let (offsets, result) = pair.emit(code, target);
+            let (offsets, count, result) = group.emit(code, target);
             block.source_map.extend(
-                instructions[cursor..cursor + offsets.len()]
+                instructions[cursor..cursor + count]
                     .iter()
                     .zip(offsets)
                     .map(|(instruction, offset)| (instruction.pc, offset)),
             );
             code.set_instruction(block.source_map.len() - 1);
-            after.xmm0 = Some(result);
-            cursor += offsets.len();
+            after.xmm0 = result;
+            cursor += count;
             continue;
         }
         // Build the new candidate privately. Rejection leaves both cursor and
