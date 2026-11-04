@@ -5,8 +5,8 @@ use crate::native_mmio::ecam::EcamInventory;
 use core::mem::ManuallyDrop;
 use stela_drivers::bus::{mmio::owned::Mapping, pci::Address};
 mod containment;
-pub(crate) use containment::ContainedPci;
 pub(super) use containment::PciSlots;
+pub(crate) use containment::{ContainedPci, ContainmentError};
 
 pub(crate) struct ConfigScope {
     pending: ManuallyDrop<Box<Pending>>,

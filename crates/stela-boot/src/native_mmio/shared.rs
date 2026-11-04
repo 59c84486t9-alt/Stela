@@ -22,7 +22,7 @@ use crate::{
     native_smp::memory_types::Image,
 };
 mod config_space;
-pub(crate) use config_space::ContainedPci;
+pub(crate) use config_space::{ContainedPci, ContainmentError};
 mod hpet;
 use alloc::{boxed::Box, rc::Rc, sync::Arc, vec::Vec};
 use core::{
@@ -438,14 +438,6 @@ unsafe impl MappingPlatform for Platform {
     }
 }
 
-/// A claimed ECAM bus: its MCFG window index and bus, the window, and the
-/// reservation of the bus's configuration space.
-struct Bus {
-    at: (usize, u8),
-    window: EcamWindow,
-    resource: Resource,
-}
-
 /// The owned MMIO permission over the captured firmware description.
 pub(crate) struct Source {
     /// The original BSP owner, independent of finite RAM absence scopes.
@@ -461,8 +453,6 @@ pub(crate) struct Source {
     pci_slots: config_space::PciSlots,
     pci_clock: core::cell::OnceCell<crate::native_clock::Prepared>,
     verified_framebuffer: core::cell::OnceCell<crate::pci_io::FramebufferSource>,
-    /// Each claimed ECAM bus, by its window and bus.
-    buses: core::cell::RefCell<Vec<Bus>>,
     ioapics: core::cell::RefCell<MountedIoapics>,
 }
 
@@ -607,7 +597,6 @@ impl Source {
             pci_slots: config_space::PciSlots::new(),
             pci_clock: core::cell::OnceCell::new(),
             verified_framebuffer: core::cell::OnceCell::new(),
-            buses: core::cell::RefCell::new(Vec::new()),
             ioapics: core::cell::RefCell::new(MountedIoapics::Unclaimed),
         })
     }
@@ -684,47 +673,6 @@ impl Source {
                 Err(error)
             }
         }
-    }
-
-    /// The ECAM window and reservation of `bus` on `segment`, claimed once.
-    ///
-    /// # Safety
-    /// The caller owns every function on that bus: its configuration space,
-    /// resets and the drivers that reach it.
-    pub(crate) unsafe fn claim_bus(
-        &self,
-        segment: u16,
-        bus: u8,
-    ) -> Result<(EcamWindow, Resource), Error> {
-        let wire = self.platform.wire();
-        let windows = stela_runtime::pc::acpi::mcfg(wire.mcfg()).map_err(failed)?;
-        let index = windows
-            .iter()
-            .position(|window| {
-                window.segment == segment && (window.start_bus..=window.end_bus).contains(&bus)
-            })
-            .ok_or(Error::OutsideResource)?;
-        if let Some(claimed) = self
-            .buses
-            .borrow()
-            .iter()
-            .find(|claimed| claimed.at == (index, bus))
-        {
-            return Ok((claimed.window, claimed.resource.clone()));
-        }
-        let inventory =
-            super::ecam::EcamInventory::validate(&windows, self.platform.space.physical_bits)?;
-        let (window, span) = inventory.subset(index, bus..=bus, wire.roots())?;
-        if !wire.excludes_memory(span.start(), span.end()) {
-            return Err(Error::OutsideResource);
-        }
-        let resource = self.reserve(span, ResourceKind::Registers)?;
-        self.buses.borrow_mut().push(Bus {
-            at: (index, bus),
-            window,
-            resource: resource.clone(),
-        });
-        Ok((window, resource))
     }
 
     /// Reserve the memory BAR at bus address `address` for `bytes` on

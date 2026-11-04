@@ -1638,6 +1638,10 @@ fn blocked_initial_cohort_is_exact_and_each_requester_is_claimed_once() {
         Err(DmaError::IommuUnavailable)
     ));
     let first = cohort.claim(requesters[0]).unwrap();
+    assert_eq!(first.requester(), requesters[0]);
+    let before_check = registers.0.lock().unwrap().writes.len();
+    first.check().unwrap();
+    assert_eq!(registers.0.lock().unwrap().writes.len(), before_check);
     assert!(matches!(
         cohort.claim(requesters[0]),
         Err(DmaError::IommuUnavailable)
@@ -1646,6 +1650,7 @@ fn blocked_initial_cohort_is_exact_and_each_requester_is_claimed_once() {
 
     // SAFETY: model requester remains stopped with no DMA, IRQ or worker users.
     let domain = unsafe { unit.attach_requester(stopped_claim(requesters[0])) }.unwrap();
+    assert_eq!(first.check(), Err(DmaError::IommuUnavailable));
     assert_eq!(first.drain(), Err(DmaError::IommuUnavailable));
     // SAFETY: the model has no live users or payload mappings.
     drop(unsafe { domain.detach() }.unwrap());

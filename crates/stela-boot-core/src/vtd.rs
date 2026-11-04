@@ -446,14 +446,31 @@ impl<R: Registers> InitialBlock<R> {
 }
 
 impl<R: Registers> BlockedRequester<R> {
+    pub fn requester(&self) -> u16 {
+        self.rid
+    }
+
+    /// Check this kept, one-shot owner's original blocked context without
+    /// draining it or authorizing a new domain or configuration operation.
+    pub fn check(&self) -> Result<(), DmaError> {
+        self.with_blocked(|_, _| Ok(()))
+    }
+
     pub fn drain(&self) -> Result<(), DmaError> {
+        self.with_blocked(Unit::drain_initial)
+    }
+
+    fn with_blocked(
+        &self,
+        action: impl FnOnce(&Unit<R>, &mut State) -> Result<(), DmaError>,
+    ) -> Result<(), DmaError> {
         let mut guard = self.unit.lock();
         let state = guard.state();
         self.unit.check_blocked_requester(state, self.rid)?;
         if !*state.initial_claim(self.rid)? {
             return Err(DmaError::IommuUnavailable);
         }
-        self.unit.drain_initial(state)
+        action(&self.unit, state)
     }
 }
 

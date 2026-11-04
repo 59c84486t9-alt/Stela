@@ -78,6 +78,13 @@ impl fmt::Display for ServiceError {
 /// RAM through: writable, live in every such context for the program, and
 /// never aliased by a Rust reference.
 pub unsafe trait NativeServices {
+    /// Whether legacy probe may still use the raw loader ECAM view for
+    /// device writes. A mount that has blocked the complete requester
+    /// fabric keeps this view for read-only discovery.
+    fn legacy_pci_writes(&self) -> bool {
+        true
+    }
+
     /// The original clock epoch's checked physical minimum-delay provider.
     /// Acquire before PCI PM/reset effects. Nominal rates or scheduling clocks
     /// cannot implement the hardware minimum; no fallback is supplied here.

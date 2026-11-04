@@ -123,6 +123,8 @@ pub(super) struct Remappers {
 pub(super) enum PreparationError {
     Dma(DmaError),
     Interrupt(MappingError),
+    Configuration(native_mmio::ContainmentError),
+    AmdConfiguration,
 }
 
 impl From<DmaError> for PreparationError {
@@ -146,6 +148,10 @@ fn requester(address: Address) -> u16 {
 }
 
 impl Remappers {
+    pub(super) fn has_blocked_fabric(&self) -> bool {
+        self.initial_fabric.is_some()
+    }
+
     pub(super) const fn none() -> Self {
         Self {
             taken: Vec::new(),

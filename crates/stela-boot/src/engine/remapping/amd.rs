@@ -169,6 +169,10 @@ fn named(scope: MemoryScope, segment: u16, present: &[Present]) -> Vec<u16> {
 pub(super) struct Taken {
     unit: Rc<RefCell<Unit<Platform, ObservedConfig>>>,
     segment: u16,
+    #[allow(
+        dead_code,
+        reason = "retained for the AMD-Vi parked configuration join"
+    )]
     firmware_inactive: bool,
     requesters: RefCell<Vec<u16>>,
 }
@@ -437,6 +441,7 @@ impl Taken {
     }
 
     /// Keep the original unit/window graph through vendor cold preparation.
+    #[allow(dead_code, reason = "AMD-Vi has no parked configuration promotion yet")]
     pub(super) fn preparation(
         &self,
         address: Address,
@@ -482,6 +487,7 @@ fn attach_domain(
     }))
 }
 
+#[allow(dead_code, reason = "AMD-Vi has no parked configuration promotion yet")]
 struct ColdRoot {
     address: Address,
     unit: Rc<RefCell<Unit<Platform, ObservedConfig>>>,
@@ -516,6 +522,7 @@ unsafe impl stela_drivers::bus::pci::requester::preparation::Root for ColdRoot {
     }
 }
 
+#[allow(dead_code, reason = "AMD-Vi has no parked configuration promotion yet")]
 struct Attachment {
     domain: Arc<Domain>,
 }

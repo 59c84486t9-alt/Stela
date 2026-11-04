@@ -877,6 +877,7 @@ pub unsafe fn probe_with_provider(
     // Broadcom PCIe Bluetooth functions, attached once the scan has found
     // every bridge of their segment.
     let mut broadcom_bluetooth = Vec::new();
+    let legacy_pci_writes = services.is_none_or(NativeServices::legacy_pci_writes);
     let mut ehci_hosts = Vec::new();
     let mut usb_handoff_failures = Vec::new();
     let mut pci_scan_complete = true;
@@ -973,6 +974,14 @@ pub unsafe fn probe_with_provider(
             if let Some(kind) = usb::handoff::Kind::of(function.class) {
                 if kind == usb::handoff::Kind::Ehci {
                     ehci_hosts.push(address);
+                    continue;
+                }
+                if !legacy_pci_writes {
+                    usb_handoff_failures.push(kind);
+                    devices.failures.push((
+                        address,
+                        Error::Native(ServiceError::Refused("legacy USB PCI handoff unavailable")),
+                    ));
                     continue;
                 }
                 let minimum = match &minimum_result {
@@ -1240,6 +1249,15 @@ pub unsafe fn probe_with_provider(
                         devices.failures.push((address, error));
                         devices.owners.extend(kept);
                     }
+                }
+                continue;
+            } else if !legacy_pci_writes {
+                if function.class[..2] != [6, 4] {
+                    devices.unsupported.push((
+                        address,
+                        function.class,
+                        "legacy PCI writes are excluded by the blocked requester fabric",
+                    ));
                 }
                 continue;
             } else if virtio::matches(&function) {

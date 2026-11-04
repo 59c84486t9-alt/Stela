@@ -17,21 +17,16 @@ use stela_drivers::{
         dma::{mapping::DmaDomain, memory::PageSource},
         mmio::owned::{self, CacheAttribute, Mapping, PhysicalSpan, Protection},
         pci::{
-            Address, Bar, ConfigSpace, Function, FunctionError,
+            Address, Bar, Function, FunctionError,
             owned::OwnedConfig,
             power::Timer,
-            requester::{
-                ClaimError, FunctionRole, RequesterBinding, StoppedRequester, containment::Plan,
-                wait_for_pending_transactions,
-            },
+            requester::{ClaimError, FunctionRole, RequesterBinding, StoppedRequester},
         },
         thunderbolt::manager::{Platform, Uuid},
     },
     platform::acpi::resources::{self, DeviceResources, MemoryBroker, Resource, Space},
     probe::{NativeServices, ServiceError},
 };
-
-const FUNCTION_BYTES: usize = 4096;
 
 /// Whether a passthrough domain was handed out, which is reported once.
 static PASSTHROUGH_REPORTED: AtomicBool = AtomicBool::new(false);
@@ -120,66 +115,12 @@ impl<'a> Services<'a> {
             brokers: core::cell::RefCell::new(alloc::vec::Vec::new()),
         }
     }
-
-    fn config(&self, address: Address) -> Result<OwnedConfig, ServiceError> {
-        // SAFETY: probe owns every function it asks for, and the bus's
-        // other functions are probe's too.
-        let (window, resource) = unsafe { self.mmio.claim_bus(address.segment, address.bus) }
-            .map_err(ServiceError::Mapping)?;
-        let offset = usize::from(address.device) << 15 | usize::from(address.function) << 12;
-        let mapping = self
-            .mmio
-            .authority()
-            .map(
-                resource,
-                offset,
-                FUNCTION_BYTES,
-                CacheAttribute::Uncached,
-                Protection::ReadWrite,
-            )
-            .map_err(ServiceError::Mapping)?;
-        // SAFETY: the mapping is the function's own configuration page in
-        // the claimed bus, which only this owner reaches.
-        unsafe { OwnedConfig::attach(address, window, mapping) }
-            .map_err(|_| ServiceError::Refused("configuration space mapping refused"))
-    }
-
-    fn function(&self, address: Address) -> Result<Function<OwnedConfig>, ServiceError> {
-        Function::new(address, self.config(address)?).map_err(|refusal| match refusal.reason {
-            FunctionError::Absent => ServiceError::Refused("no function answers at this address"),
-            FunctionError::ConfigurationRetry => {
-                ServiceError::Refused("PCI function requests configuration retry")
-            }
-            FunctionError::Access(error) => ServiceError::Config(error),
-        })
-    }
-
-    /// Gate PCI requester DMA and interrupt controls, then wait for its
-    /// outstanding requests. A failed access ends the sequence immediately.
-    fn stop(&self, config: &mut OwnedConfig) -> Result<(), ClaimError> {
-        let plan = Plan::read(|offset, width| {
-            let read = match width {
-                1 => config.read8(offset).map(u32::from),
-                2 => config.read16(offset).map(u32::from),
-                4 => config.read32(offset),
-                _ => unreachable!("PCI capability widths"),
-            };
-            read.map_err(ClaimError::Config)
-        })?;
-        plan.apply(config)?;
-        // A bounded wait must refuse an endpoint that still has requests in
-        // flight. Bus-master gating alone is not completion of those requests.
-        let start = super::host::rdtsc();
-        let limit = (self.tsc_hz / 1000 * 64).max(1);
-        wait_for_pending_transactions(config, || super::host::rdtsc().wrapping_sub(start) >= limit)
-    }
 }
 
-// SAFETY: each claimed function's or bridge's configuration page and each BAR
-// is mapped once through the owned aperture, which every host processor and engine
-// root reaches; a claimed function is stopped before `from_stopped_pci`
-// checks it. The bound domain keeps its translation/configuration epoch;
-// an unavailable remapper is reported as passthrough. The ACPI namespace is
+// SAFETY: cold PCI preparation consumes the checked original configuration
+// owner once through the owned aperture and leaves its bus-master seal in
+// place until the driver joins stop and domain binding. Each BAR belongs to
+// the requesting driver. The ACPI namespace is
 // offered only with the i8042's interrupts masked; ring 0 reaches the i8042's
 // and each claimed i801's ports, which nothing else here uses. Firmware
 // memory is the AML provider's own mapping of RAM the map leaves to firmware.
@@ -198,6 +139,10 @@ unsafe impl NativeServices for Services<'_> {
         crate::random::source()
     }
 
+    fn legacy_pci_writes(&self) -> bool {
+        !self.remappers.has_blocked_fabric()
+    }
+
     fn prepare_requester(
         &self,
         address: Address,
@@ -208,7 +153,7 @@ unsafe impl NativeServices for Services<'_> {
         if role != FunctionRole::Physical {
             return Err(ServiceError::Claim(ClaimError::UnsupportedRole(role)));
         }
-        let root = self.remappers.preparation(self.mmio, address).map_err(|error| {
+        let (config, root) = self.remappers.preparation(self.mmio, address).map_err(|error| {
             use super::remapping::PreparationError;
             match error {
                 PreparationError::Dma(error) => {
@@ -219,41 +164,51 @@ unsafe impl NativeServices for Services<'_> {
                     output::arguments(format_args!("UNSUPPORTED Stela cold requester {address}: original interrupt containment unavailable ({error:?})\n"));
                     ServiceError::Mapping(error)
                 }
+                PreparationError::Configuration(error) => {
+                    output::arguments(format_args!("UNSUPPORTED Stela cold requester {address}: original configuration handoff refused ({error})\n"));
+                    ServiceError::Refused("cold requester original configuration handoff refused")
+                }
+                PreparationError::AmdConfiguration => ServiceError::Refused("AMD-Vi original PCI configuration handoff unavailable"),
             }
         })?;
-        let mut function = self.function(address)?;
-        self.stop(function.config()).map_err(ServiceError::Claim)?;
+        let function = match Function::new(address, config) {
+            Ok(function) => function,
+            Err(refusal) => {
+                let _root = core::mem::ManuallyDrop::new(root);
+                return Err(match refusal.reason {
+                    FunctionError::Absent => {
+                        ServiceError::Refused("no function answers at this address")
+                    }
+                    FunctionError::ConfigurationRetry => {
+                        ServiceError::Refused("PCI function requests configuration retry")
+                    }
+                    FunctionError::Access(error) => ServiceError::Config(error),
+                });
+            }
+        };
         // SAFETY: first serialized post-EBS attach through the original owned
         // configuration and selected root. The platform keeps the initial DMA
         // backing, excludes prior firmware/IRQ/work and competing PCI writers,
         // and admits snooped WB DMA. Complete stable inventory supplies role.
         // PCI containment here grants no endpoint engine stop or payload drain;
         // the owning driver must produce that receipt with BARs still kept.
-        unsafe { PreparingRequester::new(function, role, root) }
-            .map_err(|rejected| ServiceError::Claim(rejected.error))
+        unsafe { PreparingRequester::new(function, role, root) }.map_err(|rejected| {
+            let _root = core::mem::ManuallyDrop::new(rejected.root);
+            drop(rejected.function);
+            ServiceError::Claim(rejected.error)
+        })
     }
 
-    fn claim_stopped(&self, address: Address) -> Result<StoppedRequester, ServiceError> {
-        let role = self.remappers.function_role(address);
-        if role != FunctionRole::Physical {
-            return Err(ServiceError::Claim(
-                stela_drivers::bus::pci::requester::ClaimError::UnsupportedRole(role),
-            ));
-        }
-        let mut function = self.function(address)?;
-        self.stop(function.config()).map_err(ServiceError::Claim)?;
-        // SAFETY: bus mastering, interrupts and outstanding requests were
-        // stopped above; the complete stable PF/VF inventory supplies role.
-        unsafe { StoppedRequester::from_stopped_pci(function, role) }
-            .map_err(|(error, _)| ServiceError::Claim(error))
+    fn claim_stopped(&self, _: Address) -> Result<StoppedRequester, ServiceError> {
+        Err(ServiceError::Refused(
+            "native endpoint engine stop receipt unavailable",
+        ))
     }
 
-    fn bridge(&self, address: Address) -> Result<Function<OwnedConfig>, ServiceError> {
-        let bridge = self.function(address)?;
-        if bridge.class[..2] != [6, 4] {
-            return Err(ServiceError::Refused("not a PCI-to-PCI bridge"));
-        }
-        Ok(bridge)
+    fn bridge(&self, _: Address) -> Result<Function<OwnedConfig>, ServiceError> {
+        Err(ServiceError::Refused(
+            "native bridge forwarding handoff unavailable",
+        ))
     }
 
     fn map_bar(&self, address: Address, bar: Bar) -> Result<Mapping, ServiceError> {
@@ -325,6 +280,11 @@ unsafe impl NativeServices for Services<'_> {
         &self,
         arrivals: stela_drivers::probe::services::ArrivalInventory<'_>,
     ) -> Result<(), ServiceError> {
+        if !self.legacy_pci_writes() {
+            return Err(ServiceError::Refused(
+                "initial blocked PCI fabric does not admit changed topology",
+            ));
+        }
         if arrivals
             .functions
             .iter()

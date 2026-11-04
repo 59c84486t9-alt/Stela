@@ -1,5 +1,6 @@
 //! Retain the original PCI fabric after disabling each captured function.
 use super::*;
+use crate::native_dma::vtd::{BlockedRequester, MmioRegisters};
 use alloc::rc::Rc;
 use core::{any::Any, cell::RefCell, cmp::Reverse, fmt};
 use stela_boot_core::ecam::topology;
@@ -7,10 +8,10 @@ use stela_drivers::{
     bus::pci::{
         ConfigEffect, ConfigError, ConfigFailure,
         owned::{
-            ConfigParts, PreparedConfig, UnpublishedConfig,
+            ConfigParts, OwnedConfig, PreparedConfig, UnpublishedConfig,
             grant::{
-                CompletionCheck, ConfigCustody, ConfigEpoch, ConfigOperation, Operation,
-                PrepublicationCustody, PrepublicationGrant,
+                CompletionCheck, ConfigCustody, ConfigEpoch, ConfigOperation, DriverCustody,
+                Operation, PrepublicationCustody, PrepublicationGrant,
             },
         },
         requester::{ClaimError, containment::Plan, wait_for_pending_transactions},
@@ -150,6 +151,7 @@ pub(crate) struct ContainmentError {
 enum Cause {
     Claim(ClaimError),
     Topology(topology::Error),
+    BridgeForwarding,
 }
 
 impl fmt::Display for ContainmentError {
@@ -160,6 +162,7 @@ impl fmt::Display for ContainmentError {
         match self.cause {
             Cause::Claim(cause) => write!(f, "{cause:?} ({:?})", self.effect),
             Cause::Topology(cause) => write!(f, "PCI topology {cause:?}"),
+            Cause::BridgeForwarding => f.write_str("upstream bridge forwarding is still sealed"),
         }
     }
 }
@@ -210,9 +213,11 @@ impl ContainmentError {
 struct Slot {
     address: Address,
     configuration: Option<PreparedConfig<PrepublicationGrant>>,
+    refusal: Option<SlotRefusal>,
     header: Header,
     plan: Rc<Plan>,
     ancestor: Parent,
+    route: topology::Parent,
 }
 
 #[derive(Default)]
@@ -468,6 +473,7 @@ struct SlotCustody {
     address: Address,
     window: EcamWindow,
     plan: Rc<Plan>,
+    driver_lines: Option<InitialPciLines>,
 }
 
 // SAFETY: the census issues one exact slot from the original aperture
@@ -487,11 +493,12 @@ unsafe impl ConfigCustody for SlotCustody {
 
     fn begin(&self, operation: Operation) -> Result<ConfigOperation, ConfigError> {
         self.completion.epoch.context().map_err(mapping_error)?;
-        if let Operation::Write {
-            offset,
-            width,
-            value,
-        } = operation
+        if self.driver_lines.is_none()
+            && let Operation::Write {
+                offset,
+                width,
+                value,
+            } = operation
             && !self.plan.permits(offset, width, value)
         {
             return Err(ConfigError::before_effect(
@@ -528,7 +535,111 @@ unsafe impl ConfigCustody for SlotCustody {
 // writes are the exact disabling values planned from the complete census.
 unsafe impl PrepublicationCustody for SlotCustody {}
 
+// SAFETY: only promote_cold_config can turn on driver operations. It joins
+// the original parked slot and ancestor assignment to the checked blocked
+// requester and original interrupt paths, preserving the BME seal.
+unsafe impl DriverCustody for SlotCustody {}
+
 impl Source {
+    /// Take the original parked endpoint, preserving its grant and negative
+    /// operation state. A refusal after taking it keeps the exact envelope in
+    /// the same slot and prevents a second attempt.
+    ///
+    /// # Safety
+    /// The caller owns the original complete VT-d fabric. `blocked` is from
+    /// its exact firmware-selected unit for this segment and RID. Prior PCI
+    /// writers and any legacy writer or reassignment of the topology stay
+    /// excluded. This grants no endpoint stop, root binding or IRQ route.
+    pub(crate) unsafe fn promote_cold_config(
+        &self,
+        address: Address,
+        blocked: &BlockedRequester<MmioRegisters>,
+        lines: &InitialPciLines,
+    ) -> Result<OwnedConfig, ContainmentError> {
+        let rid = u16::from(address.bus) << 8
+            | u16::from(address.device) << 3
+            | u16::from(address.function);
+        if blocked.requester() != rid {
+            return Err(ContainmentError::from(Error::OutsideResource).at(address));
+        }
+        let check_paths = || {
+            lines.check(self)?;
+            blocked.check().map_err(|_| Error::Unavailable)
+        };
+        check_paths().map_err(|error| ContainmentError::from(error).at(address))?;
+        let (index, prepared, header, plan) = {
+            let mut cohort = self.pci_slots.0.try_borrow_mut().map_err(|_| Error::Busy)?;
+            let Cohort::Parked(fabric) = &mut *cohort else {
+                return Err(Error::Unavailable.into());
+            };
+            let index = fabric
+                .slots
+                .binary_search_by_key(&address, |slot| slot.address)
+                .map_err(|_| Error::OutsideResource)?;
+            let slot = &mut fabric.slots[index];
+            if let Some(refusal) = &slot.refusal {
+                return Err(refusal.error);
+            }
+            if (slot.header.layout >> 16) & 0x7f != 0 {
+                return Err(ContainmentError::from(Error::OutsideResource).at(address));
+            }
+            if matches!(slot.route, topology::Parent::Bridge(_)) {
+                return Err(ContainmentError {
+                    address: Some(address),
+                    cause: Cause::BridgeForwarding,
+                    effect: ConfigEffect::None,
+                });
+            }
+            let prepared = slot.configuration.take().ok_or(Error::Busy)?;
+            (index, prepared, slot.header, slot.plan.clone())
+        };
+        let result = (|| {
+            let mapping = match self.authority.map(
+                prepared.configuration_resource().clone(),
+                0,
+                PAGE as usize,
+                CacheAttribute::Uncached,
+                Protection::ReadWrite,
+            ) {
+                Ok(mapping) => mapping,
+                Err(error) => return Err(SlotRefusal::new(error, prepared.into_parts())),
+            };
+            let config = prepared
+                .attach(mapping)
+                .map_err(|(error, original)| SlotRefusal::new(error, original))?;
+            if let Err(error) = header
+                .verify(|offset| config.try_read32(offset))
+                .and_then(|()| plan.check_disabled(|offset| config.try_read16(offset)))
+            {
+                return Err(SlotRefusal::new(error, config.into_parts()));
+            }
+            // SAFETY: the parked map retired, this is its sole successor,
+            // and the original kept paths are checked again before changing
+            // the original grant's operation policy.
+            unsafe {
+                config.promote(|owner: &mut SlotCustody| {
+                    check_paths()?;
+                    owner.driver_lines = Some(lines.clone());
+                    Ok(())
+                })
+            }
+            .map_err(|(error, original)| SlotRefusal::new(error, original))
+        })();
+        match result {
+            Ok(config) => Ok(config),
+            Err(mut refusal) => {
+                refusal.error.address = Some(address);
+                let error = refusal.error;
+                let mut cohort = self.pci_slots.0.borrow_mut();
+                let Cohort::Parked(fabric) = &mut *cohort else {
+                    unreachable!("the original parked fabric stays owned")
+                };
+                fabric.slots[index].refusal = Some(refusal);
+                Err(error)
+            }
+        }
+    }
+
     /// Contain the captured fabric once and park each original configuration.
     /// The return value qualifies PCI-level controls for remapper takeover.
     ///
@@ -650,14 +761,14 @@ impl Source {
         *self.pci_slots.0.borrow_mut() = Cohort::Incomplete(fabric);
         // Secondary bus numbers exceed their upstream bus. BDF order keeps
         // each real bridge assignment before any of its children.
-        for ((address, parent), input) in parents.into_iter().zip(inputs) {
+        for ((address, route), input) in parents.into_iter().zip(inputs) {
             debug_assert_eq!(address, input.address);
             let parent = {
                 let cohort = self.pci_slots.0.borrow();
                 let Cohort::Incomplete(fabric) = &*cohort else {
                     unreachable!("exclusive containment owns the incomplete fabric");
                 };
-                match parent {
+                match route {
                     topology::Parent::Root(index) => fabric.roots[index]
                         .as_ref()
                         .expect("resolved root grant")
@@ -672,7 +783,7 @@ impl Source {
                 }
             };
             let slot = self
-                .prepare_slot(input, parent)
+                .prepare_slot(input, parent, route)
                 .map_err(|error| error.at(address))?;
             let mut cohort = self.pci_slots.0.borrow_mut();
             let Cohort::Incomplete(fabric) = &mut *cohort else {
@@ -683,7 +794,12 @@ impl Source {
         Ok(())
     }
 
-    fn prepare_slot(&self, input: Input, parent: Parent) -> Result<Slot, ContainmentError> {
+    fn prepare_slot(
+        &self,
+        input: Input,
+        parent: Parent,
+        route: topology::Parent,
+    ) -> Result<Slot, ContainmentError> {
         let (resource, original) =
             self.reservation_under(input.span, ResourceKind::Configuration, parent)?;
         let ancestor = original.parent();
@@ -701,15 +817,18 @@ impl Source {
             address: input.address,
             window: input.window,
             plan: input.plan.clone(),
+            driver_lines: None,
         });
         // SAFETY: the same affine slot backs the bounded operation and map.
         let grant = unsafe { PrepublicationGrant::from_boxed(owner, close) };
         Ok(Slot {
             address: input.address,
             configuration: Some(UnpublishedConfig::prepare(grant)),
+            refusal: None,
             header: input.header,
             plan: input.plan,
             ancestor,
+            route,
         })
     }
 

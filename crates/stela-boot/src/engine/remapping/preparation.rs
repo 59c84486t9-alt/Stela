@@ -1,7 +1,7 @@
 //! The retained original VT-d/AMD root used during vendor cold preparation.
 use super::*;
 use alloc::boxed::Box;
-use stela_drivers::bus::pci::requester::preparation::Root;
+use stela_drivers::bus::pci::{owned::OwnedConfig, requester::preparation::Root};
 
 struct VtdRoot {
     address: Address,
@@ -104,13 +104,14 @@ impl Remappers {
         &self,
         source: &native_mmio::Source,
         address: Address,
-    ) -> Result<Box<dyn Root>, PreparationError> {
+    ) -> Result<(OwnedConfig, Box<dyn Root>), PreparationError> {
         let rid = requester(address);
-        if let Some(taken) = self
+        if self
             .amd(address.segment, rid)
             .map_err(|_| DmaError::IommuUnavailable)?
+            .is_some()
         {
-            return taken.preparation(address).map_err(PreparationError::Dma);
+            return Err(PreparationError::AmdConfiguration);
         }
         let taken = self
             .vtd(address.segment, rid)
@@ -125,11 +126,17 @@ impl Remappers {
         let blocked = self
             .initial_requester(source, taken, rid)?
             .ok_or(DmaError::DrainUnavailable)?;
-        Ok(Box::new(VtdRoot {
+        // SAFETY: this root is selected from the same fully contained fabric
+        // and this slot's exact firmware route. Legacy probing is read-only
+        // while this fabric is active, and AML's ECAM writers are excluded.
+        let config = unsafe { source.promote_cold_config(address, &blocked, lines) }
+            .map_err(PreparationError::Configuration)?;
+        let root = Box::new(VtdRoot {
             address,
             unit: taken.unit.clone(),
             blocked,
             _lines: lines.clone(),
-        }))
+        });
+        Ok((config, root))
     }
 }
