@@ -277,6 +277,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/kernel/sched/capacity_state.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/fork_load.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/rt_timeslice.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/rq_lock.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/fork_metadata.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/cputime_group.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/user_affinity.c")),
@@ -299,6 +300,7 @@ impl Linux {
                 .map(|source| PathBuf::from(format!("{LINUX}/drivers/dma-buf/{source}.c"))),
         );
         let hosted_upstream = upstream.clone();
+        println!("cargo:rerun-if-changed={LINUX}/kernel/sched");
         upstream.retain(|source| !captured_units().iter().any(|unit| unit.path() == *source));
         for source in &upstream {
             println!("cargo:rerun-if-changed={}", source.display());

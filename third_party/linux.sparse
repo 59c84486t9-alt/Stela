@@ -67,6 +67,13 @@
 /kernel/locking/mutex.h
 /kernel/locking/ww_mutex.h
 /kernel/sched/core.c
+/kernel/sched/sched.h
+/kernel/sched/cpupri.h
+/kernel/sched/cpudeadline.h
+/kernel/sched/features.h
+/kernel/sched/stats.h
+/kernel/sched/ext/ext.h
+/kernel/sched/rq_lock.c
 /kernel/sched/cputime.c
 /kernel/sched/cputime_group.c
 /kernel/sched/user_affinity.c
