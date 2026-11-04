@@ -51,7 +51,7 @@ pub(crate) struct Prepared<F = stela_drivers::bus::pci::Identity> {
     virtio_resource: Range<u64>,
     bars: Vec<[Option<Bar>; 6]>,
     pub(super) clock: Clock,
-    pub(super) register_mappings: Vec<stela_drivers::bus::mmio::owned::Mapping>,
+    pub(super) register_mappings: Vec<crate::paging::config::FixtureRegisters>,
     level: Option<crate::native_irq::level_diagnostic::Prepared>,
     pub(super) second: Option<(usize, Range<u64>)>,
 }
@@ -477,6 +477,9 @@ impl Prepared {
             functions.push(function);
         }
         let mut register_mappings = Vec::new();
+        register_mappings
+            .try_reserve_exact(ranges.len())
+            .map_err(|_| refuse!("fixture register inventory allocation failed"))?;
         for span in ranges {
             let permit = RegisterSpan { source, span };
             register_mappings.push(
@@ -884,7 +887,7 @@ impl RegisterSpan<'_> {
     }
 }
 pub(crate) fn retire_registers(
-    mappings: Vec<stela_drivers::bus::mmio::owned::Mapping>,
+    mappings: Vec<crate::paging::config::FixtureRegisters>,
 ) -> Result<()> {
     for mut mapping in mappings {
         // SAFETY: callers just completed exact fixture DMA/IRQ/work/posted

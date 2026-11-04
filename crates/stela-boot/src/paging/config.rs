@@ -2,6 +2,10 @@
 //! The one native Permission keeps real firmware/root reservations. Captured
 //! MCFG observations alone cannot construct this Source.
 #[cfg(feature = "diagnostics")]
+mod fixture_registers;
+#[cfg(feature = "diagnostics")]
+pub(crate) use fixture_registers::FixtureRegisters;
+#[cfg(feature = "diagnostics")]
 mod hpet;
 mod inventory;
 mod platform;
@@ -94,17 +98,13 @@ pub(crate) struct Source {
     hpet_assignment: core::cell::RefCell<Option<Assignment<RegisterReservation>>>,
     _local: PhantomData<*mut ()>,
 }
-struct Backing {
-    platform: Arc<platform::Platform>,
-    span: PhysicalSpan,
-}
 struct RegisterReservation {
     platform: Arc<platform::Platform>,
     _span: PhysicalSpan,
 }
 
-// SAFETY: the exclusive post-EBS source owns the validated ECAM windows and
-// any separately handed off HPET page. The original ActivatedTables and
+// SAFETY: the exclusive post-EBS source owns the validated ECAM windows,
+// separately handed off HPET page and verified diagnostic register spans. The original ActivatedTables and
 // firmware exclusions remain held without a mapping or registry backedge.
 unsafe impl PhysicalAssignment for RegisterReservation {
     fn parent(&self) -> Option<&assignment::Parent> {
@@ -143,17 +143,6 @@ unsafe impl ResourceBacking for RegisterBacking {
             .begin_use(UseKind::Mapping)
             .map(|usage| usage.erase())
             .map_err(owned::Error::Assignment)
-    }
-}
-// SAFETY: only Source's post-EBS exclusive bus handoff mints these
-// complete ECAM reservations. Original tables/resource exclusions stay pinned;
-// no other config/reset writer is published for this standalone boot path.
-unsafe impl ResourceBacking for Backing {
-    fn physical_span(&self) -> PhysicalSpan {
-        self.span
-    }
-    fn kind(&self) -> ResourceKind {
-        ResourceKind::Registers
     }
 }
 impl Source {
@@ -286,32 +275,5 @@ impl Source {
             return Err(Error::Mapping(owned::Error::Busy));
         }
         Ok(())
-    }
-    /// The private permit is minted only by post-EBS fixture binding,
-    /// after its requester/controller identity and route were rechecked.
-    pub(crate) fn fixture_registers(
-        &self,
-        permit: &crate::native_dma::diagnostic::RegisterSpan<'_>,
-    ) -> Result<owned::Mapping, Error> {
-        let range = permit.for_source(self).ok_or(Error::ResourceInventory)?;
-        let span =
-            PhysicalSpan::new(range.start, range.end - range.start).map_err(Error::Mapping)?;
-        self.platform.identity_device(span)?;
-        let resource = Resource::new(Box::new(Backing {
-            platform: self.platform.clone(),
-            span,
-        }));
-        self.authority
-            .register_resource(resource.clone())
-            .map_err(|refusal| Error::Mapping(refusal.error))?;
-        self.authority
-            .map(
-                resource,
-                0,
-                usize::try_from(span.bytes()).map_err(|_| Error::ResourceInventory)?,
-                CacheAttribute::Uncached,
-                Protection::ReadWrite,
-            )
-            .map_err(Error::Mapping)
     }
 }

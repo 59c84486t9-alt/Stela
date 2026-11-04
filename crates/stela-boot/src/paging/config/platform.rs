@@ -146,6 +146,7 @@ impl Platform {
         }
         Ok(())
     }
+    #[cfg(feature = "diagnostics")]
     pub(super) fn identity_device(&self, span: PhysicalSpan) -> Result<(), Error> {
         self.check()?;
         self.prepared.device_range(span.start(), span.end())?;
@@ -328,17 +329,9 @@ unsafe impl MappingPlatform for Platform {
         let unchanged = MapFailure::Unchanged;
         self.check_context(request.address_space)
             .map_err(unchanged)?;
-        let backing = resource.backing();
-        let owner = backing
-            .downcast_ref::<RegisterBacking>()
-            .map(|bus| (&bus.platform, bus.span))
-            .or_else(|| {
-                backing
-                    .downcast_ref::<Backing>()
-                    .map(|fixture| (&fixture.platform, fixture.span))
-            });
-        if !owner.is_some_and(|(platform, span)| {
-            core::ptr::eq(self, platform.as_ref()) && span == resource.physical_span()
+        let owner = resource.backing().downcast_ref::<RegisterBacking>();
+        if !owner.is_some_and(|owner| {
+            core::ptr::eq(self, owner.platform.as_ref()) && owner.span == resource.physical_span()
         }) {
             return Err(unchanged(owned::Error::OutsideResource));
         }
