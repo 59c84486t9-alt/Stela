@@ -1034,3 +1034,107 @@ fn pinned_conditional_increment_consumes_the_preceding_compare_flags() {
         }
     }
 }
+
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn pinned_conditional_compare_consumes_the_preceding_flags() {
+    use crate::{
+        GuestState, Lifter, TargetCpu,
+        aarch64::{Decoder, conditional_select::decode_compare},
+        x86_64::{native, pinned},
+    };
+
+    let pc = GuestAddress(0x1000);
+    let compare_pc = GuestAddress(pc.0 + 4);
+    let end = GuestAddress(pc.0 + 8);
+    for wide in [0, 1] {
+        for producer_subtract in [0, 1] {
+            // CMP or CMN of X0/W0 and X4/W4.
+            let producer = 0x2b04_001f | wide << 31 | producer_subtract << 30;
+            for subtract in [0, 1] {
+                for right in [2 << 16, (1 << 11) | (31 << 16)] {
+                    for condition in 0..16 {
+                        // CCMP or CCMN of X1/W1 and X2/W2 or immediate 31.
+                        let compare =
+                            0x3a40_0025 | wide << 31 | subtract << 30 | right | condition << 12;
+                        let instructions = [
+                            Decoder.lift(pc, producer).unwrap(),
+                            Decoder.lift(compare_pc, compare).unwrap(),
+                        ];
+                        let (system, _) = emit_system_mode(
+                            &instructions,
+                            None,
+                            end,
+                            TargetCpu::Baseline,
+                            super::super::MemoryChecks::DEFAULT,
+                            super::super::NativeSystem::NONE,
+                        );
+                        assert_eq!(system.source_map[0], (pc, 0));
+                        let (at, offset) = system.source_map[1];
+                        assert_eq!(at, compare_pc);
+                        let (single, _) = emit_system_mode(
+                            &instructions[1..],
+                            None,
+                            end,
+                            TargetCpu::Baseline,
+                            super::super::MemoryChecks::DEFAULT,
+                            super::super::NativeSystem::NONE,
+                        );
+                        let bytes = &system.x86_64_code[offset..];
+                        if condition < 14 {
+                            assert!(bytes.len() < single.x86_64_code.len(), "{compare:08x}");
+                            let predicate_at = usize::from(matches!(condition, 8 | 9));
+                            assert_eq!(bytes[predicate_at..predicate_at + 2], [0x41, 0x0f]);
+                        } else {
+                            assert_eq!(bytes, single.x86_64_code);
+                        }
+
+                        let dit = TargetCpu::Baseline.with_data_independent_timing();
+                        let (system_dit, _) = emit_system_mode(
+                            &instructions,
+                            None,
+                            end,
+                            dit,
+                            super::super::MemoryChecks::DEFAULT,
+                            super::super::NativeSystem::NONE,
+                        );
+                        let mut baseline = Code::pinned();
+                        baseline.set_constant_time(true);
+                        super::super::conditional_select::emit_compare(
+                            &mut baseline,
+                            &decode_compare(compare).unwrap(),
+                            false,
+                        );
+                        assert!(
+                            system_dit.x86_64_code[system_dit.source_map[1].1..]
+                                .starts_with(&baseline)
+                        );
+
+                        let frame = emit(&instructions, None, end);
+                        let entered = pinned::entered(&system.x86_64_code);
+                        for (left, right) in [
+                            (0, 0),
+                            (1, 0),
+                            (0, 1),
+                            (1 << 31, 1),
+                            (1 << 63, 1),
+                            (u64::MAX, 1),
+                            (u64::MAX, u64::MAX),
+                        ] {
+                            let mut initial = GuestState::default();
+                            initial.x[0] = left;
+                            initial.x[1] = left ^ 1;
+                            initial.x[2] = right;
+                            initial.x[4] = right;
+                            initial.nzcv = 0xf000_0000;
+                            let mut expected = initial.clone();
+                            assert_eq!(native::run(&frame.x86_64_code, &mut expected), end.0);
+                            assert_eq!(native::run(&entered, &mut initial), end.0);
+                            assert_eq!(initial, expected, "{producer:08x} {compare:08x}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
