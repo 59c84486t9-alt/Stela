@@ -329,12 +329,32 @@ impl Record {
     }
 
     /// Add the entries of `other` this record lacks.
-    pub fn merge(&mut self, other: Self) {
-        for entry in other.entries {
-            if let Err(index) = self.entry_index(entry.offset, &entry.context) {
-                self.entries.insert(index, entry);
-            }
+    pub fn merge(&mut self, mut other: Self) {
+        if other.entries.is_empty() {
+            return;
         }
+        let key = |entry: &Entry| (entry.offset, entry.context);
+        // Legacy packs can contain duplicate keys. The first one wins
+        // unless this record already holds an entry for that key.
+        other.entries.dedup_by_key(|entry| key(entry));
+        if self.entries.is_empty() {
+            self.entries = other.entries;
+            return;
+        }
+        let mut merged = Vec::with_capacity(self.entries.len() + other.entries.len());
+        let mut incoming = other.entries.into_iter().peekable();
+        for entry in self.entries.drain(..) {
+            let current = key(&entry);
+            while incoming.peek().is_some_and(|next| key(next) < current) {
+                merged.extend(incoming.next());
+            }
+            if incoming.peek().is_some_and(|next| key(next) == current) {
+                incoming.next();
+            }
+            merged.push(entry);
+        }
+        merged.extend(incoming);
+        self.entries = merged;
     }
 
     pub fn encode(&self) -> Vec<u8> {
