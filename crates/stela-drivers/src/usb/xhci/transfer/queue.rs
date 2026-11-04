@@ -90,6 +90,14 @@ impl Queue {
         self.active.iter().any(|td| td.id == id && td.trb == trb)
     }
 
+    pub(in crate::usb::xhci) fn unfinished(&self, id: u64, trb: u64) -> bool {
+        self.readiness().is_ok()
+            && self
+                .active
+                .iter()
+                .any(|td| td.id == id && td.trb == trb && td.done.is_none())
+    }
+
     pub(in crate::usb::xhci) fn event(&mut self, event: Event) -> Result<(), BlockError> {
         let Some(td) = self.active.iter_mut().find(|td| td.trb == event.parameter) else {
             self.recovery = true;

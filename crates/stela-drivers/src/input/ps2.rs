@@ -1100,6 +1100,17 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         core::mem::take(&mut self.pending_observations)
     }
 
+    fn partial_input(&self) -> bool {
+        self.keyboard.prefix()
+            || if let Some(engine) = &self.synaptics {
+                engine.partial()
+            } else if let Some(engine) = &self.elantech {
+                engine.partial()
+            } else {
+                self.mouse.partial()
+            }
+    }
+
     fn poll_inner(&mut self) -> Result<Vec<Input>, Error> {
         self.ready()?;
         self.observed_response = None;
@@ -1120,6 +1131,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 None => self.read_byte().map_err(|kind| self.fail(kind))?,
             };
             let Some(byte) = byte else {
+                // The port already reported no output. Only an incomplete
+                // packet needs another status check before expiring it.
+                if !self.partial_input() {
+                    return Ok(self.drain_events());
+                }
                 break;
             };
             if let Err(kind) = self.decode(byte) {

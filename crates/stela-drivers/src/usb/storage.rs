@@ -57,6 +57,22 @@ pub enum Data<'a> {
     Out(&'a [u8]),
 }
 
+enum BlockData<'a> {
+    None,
+    Read(&'a mut [u8]),
+    Write(&'a [u8]),
+}
+
+const SHORT_READ: BlockError = BlockError::Protocol("short USB storage read");
+
+fn copy_read(output: &mut [u8], bytes: &[u8]) -> Result<(), BlockError> {
+    if bytes.len() != output.len() {
+        return Err(SHORT_READ);
+    }
+    output.copy_from_slice(bytes);
+    Ok(())
+}
+
 /// How a unit's write cache is found, as Linux `sd_read_cache_type` finds
 /// it: from the Caching mode page, or assumed when a transport's devices
 /// mishandle that page (`skip_ms_page_8`, with or without `wce_default_on`).
@@ -77,6 +93,15 @@ trait Scsi {
         cdb: &[u8],
         data: Data<'_>,
     ) -> Result<Vec<u8>, BlockError>;
+    fn read_into(
+        &mut self,
+        lun: Self::Lun,
+        cdb: &[u8],
+        output: &mut [u8],
+    ) -> Result<(), BlockError> {
+        let bytes = self.command(lun, cdb, Data::In(output.len()))?;
+        copy_read(output, &bytes)
+    }
     fn delay(&mut self, micros: u64) -> Result<(), BlockError>;
     /// The transport's clock, in microseconds.
     fn now_us(&self) -> u64;
@@ -161,6 +186,9 @@ impl<I: Io> Scsi for Bot<I> {
     type Lun = u8;
     fn command(&mut self, lun: u8, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
         Bot::command(self, lun, cdb, data)
+    }
+    fn read_into(&mut self, lun: u8, cdb: &[u8], output: &mut [u8]) -> Result<(), BlockError> {
+        Bot::read_into(self, lun, cdb, output)
     }
     fn take_failed_data(&mut self) -> Option<Vec<u8>> {
         Bot::take_failed_data(self)
@@ -872,8 +900,14 @@ fn capacity16<T: Scsi>(bot: &mut T, lun: T::Lun) -> Result<(u64, u32), BlockErro
 impl<T: Scsi> Disk<T> {
     /// Execute a SCSI CDB on this unit, including same-LUN auto-sense.
     pub fn command(&mut self, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
+        self.with_media(|bot, lun| bot.command(lun, cdb, data))
+    }
+    fn with_media<R>(
+        &self,
+        run: impl FnOnce(&mut T, T::Lun) -> Result<R, BlockError>,
+    ) -> Result<R, BlockError> {
         self.check_media()?;
-        let result = self.bot.borrow_mut().command(self.lun, cdb, data);
+        let result = run(&mut self.bot.borrow_mut(), self.lun);
         if matches!(&result, Err(BlockError::Sense(sense)) if media::changed(sense, self.removable))
         {
             self.media.set(false);
@@ -886,11 +920,16 @@ impl<T: Scsi> Disk<T> {
     /// unit and is a media change on a removable one, a transient NOT READY
     /// is requeued after its delay, and nothing is retried once the command
     /// has run past sd's runtime limit.
-    fn io(&mut self, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
+    fn io(&mut self, cdb: &[u8], mut data: BlockData<'_>) -> Result<(), BlockError> {
         let started = self.bot.borrow().now_us();
         let mut retries = 0;
         loop {
-            let sense = match self.command(cdb, data) {
+            let result = self.with_media(|bot, lun| match &mut data {
+                BlockData::Read(output) => bot.read_into(lun, cdb, output),
+                BlockData::Write(bytes) => bot.command(lun, cdb, Data::Out(bytes)).map(|_| ()),
+                BlockData::None => bot.command(lun, cdb, Data::None).map(|_| ()),
+            });
+            let sense = match result {
                 Err(BlockError::Sense(sense)) => sense,
                 result => return result,
             };
@@ -905,11 +944,11 @@ impl<T: Scsi> Disk<T> {
                 // transport moved in full is returned.
                 SenseCompletion::Done => {
                     return match data {
-                        Data::In(length) => match self.bot.borrow_mut().take_failed_data() {
-                            Some(bytes) if bytes.len() == length => Ok(bytes),
+                        BlockData::Read(output) => match self.bot.borrow_mut().take_failed_data() {
+                            Some(bytes) if bytes.len() == output.len() => copy_read(output, &bytes),
                             _ => failed,
                         },
-                        _ => Ok(Vec::new()),
+                        _ => Ok(()),
                     };
                 }
                 SenseCompletion::Retry(_) if exceeded => return failed,
@@ -1035,7 +1074,7 @@ impl<T: Scsi> Disk<T> {
             remaining = rest;
             let blocks = (chunk.len() / size) as u32;
             let cdb = scsi::read_write(true, fua, lba, blocks);
-            self.io(cdb.as_ref(), Data::Out(chunk))?;
+            self.io(cdb.as_ref(), BlockData::Write(chunk))?;
             lba += u64::from(blocks);
         }
         Ok(())
@@ -1069,11 +1108,7 @@ impl<T: Scsi> BlockDevice for Disk<T> {
             remaining = rest;
             let blocks = (chunk.len() / size) as u32;
             let cdb = scsi::read_write(false, false, lba, blocks);
-            let data = self.io(cdb.as_ref(), Data::In(chunk.len()))?;
-            if data.len() != chunk.len() {
-                return Err(BlockError::Protocol("short USB storage read"));
-            }
-            chunk.copy_from_slice(&data);
+            self.io(cdb.as_ref(), BlockData::Read(chunk))?;
             lba += u64::from(blocks);
         }
         Ok(())
@@ -1089,7 +1124,7 @@ impl<T: Scsi> BlockDevice for Disk<T> {
 
     fn flush_cache(&mut self) -> Result<(), BlockError> {
         self.check_media()?;
-        self.io(&scsi::synchronize_cache(), Data::None).map(|_| ())
+        self.io(&scsi::synchronize_cache(), BlockData::None)
     }
 
     /// A transport that begins commands without waiting runs one block

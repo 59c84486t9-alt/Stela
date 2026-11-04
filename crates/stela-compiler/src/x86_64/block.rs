@@ -269,6 +269,7 @@ fn emit_selected(
     // register-allocated and clean-load regions' recipes.
     let optimize_regions = optimize_regions && !target.data_independent_timing();
     let fuse_pairs = optimize_regions && frame_loop.is_none() && !fault_table && !pinned;
+    let fuse_hash = !target.data_independent_timing() && (pinned || fuse_pairs);
     // Which accesses check the guest range (`guest_range`), and each
     // instruction's checks.
     let ranges = if checks.guest_range && checks.checks_every_access() {
@@ -304,6 +305,21 @@ fn emit_selected(
     let mut side_exits = vec![];
     while cursor < instructions.len() {
         let held = core::mem::replace(&mut after, Held::NOTHING);
+        if fuse_hash
+            && let Some(pair) = super::simd::sha256::HashPair::recognize(&instructions[cursor..])
+        {
+            let (offsets, result) = pair.emit(code, target);
+            block.source_map.extend(
+                instructions[cursor..cursor + offsets.len()]
+                    .iter()
+                    .zip(offsets)
+                    .map(|(instruction, offset)| (instruction.pc, offset)),
+            );
+            code.set_instruction(block.source_map.len() - 1);
+            after.xmm0 = Some(result);
+            cursor += offsets.len();
+            continue;
+        }
         // Build the new candidate privately. Rejection leaves both cursor and
         // output untouched, so the legacy clean-load chunk partition is exact.
         if optimize_regions

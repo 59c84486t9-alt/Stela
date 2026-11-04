@@ -35,7 +35,7 @@ mod rounding;
 pub(super) use rounding::kernel as rounding_kernel;
 mod saturating;
 mod sha1;
-mod sha256;
+pub(super) mod sha256;
 mod sha3;
 mod sha32;
 mod sha512;

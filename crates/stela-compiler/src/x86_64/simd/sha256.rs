@@ -9,7 +9,13 @@ use crate::x86_64::asm::Code;
 use crate::x86_64::simd::encode::gpr;
 use crate::{
     TargetCpu,
-    aarch64::simd::sha256::{Kind, Operand},
+    aarch64::{
+        Instruction, Operation,
+        simd::{
+            IntegerOperation, Operand as Simd,
+            sha256::{Kind, Operand},
+        },
+    },
     x86_64::isa::ShiftOpcode as Shift,
 };
 
@@ -65,14 +71,9 @@ fn big_sigma(code: &mut Code, input: u8, result: u8, temporary: u8, amounts: [u8
         Scalar32::Xor.register(code, result, temporary);
     }
 }
-fn rounds_baseline(code: &mut Code, operand: &Operand) {
+fn rounds_baseline(code: &mut Code, x: u8, y: u8, schedule: u8) -> [u8; 8] {
     use Scalar32::*;
     preserve_scratch(code, false);
-    let (x, y) = if operand.kind == Kind::Hash {
-        (operand.destination, operand.left)
-    } else {
-        (operand.left, operand.destination)
-    };
     let mut state = [EAX, ECX, EDX, ESI, R8D, R9D, R10D, R11D];
     for (index, register) in state.iter().enumerate() {
         Move.state(
@@ -91,7 +92,7 @@ fn rounds_baseline(code: &mut Code, operand: &Operand) {
         Xor.register(code, EBP, g);
         Add.register(code, EBX, EBP);
         Add.register(code, EBX, h);
-        Add.state(code, EBX, operand.right, lane);
+        Add.state(code, EBX, schedule, lane);
         Add.register(code, d, EBX); // new E; the original D is now consumed
         big_sigma(code, a, EBP, R12D, BIG_SIGMA0);
         Add.register(code, EBX, EBP);
@@ -105,23 +106,12 @@ fn rounds_baseline(code: &mut Code, operand: &Operand) {
         Move.register(code, h, EBX); // new A; the original H is now consumed
         state = [h, a, b, c, d, e, f, g];
     }
-    let part = if operand.kind == Kind::Hash {
-        &state[..WORDS_PER_VECTOR]
-    } else {
-        &state[WORDS_PER_VECTOR..]
-    };
-    pack_state(code, [part[0], part[1], part[2], part[3]]);
-    preserve_scratch(code, true);
+    state
 }
-fn rounds_sha(code: &mut Code, operand: &Operand, target: TargetCpu) {
-    let (x, y) = if operand.kind == Kind::Hash {
-        (operand.destination, operand.left)
-    } else {
-        (operand.left, operand.destination)
-    };
-    read_vector(code, x, LEFT);
+/// Four rounds, with the caller's original ABCD already in LEFT.
+fn rounds_sha(code: &mut Code, y: u8, schedule: u8, target: TargetCpu) {
     read_vector(code, y, RIGHT);
-    read_vector(code, operand.right, RESULT); // RNDS2's implicit WK input
+    read_vector(code, schedule, RESULT); // RNDS2's implicit WK input
     shuffle(code, LEFT, LEFT, REVERSE_DWORDS); // [D,C,B,A]
     shuffle(code, RIGHT, RIGHT, REVERSE_DWORDS); // [H,G,F,E]
     packed(code, Host::MoveAligned, TEMPORARY, RIGHT);
@@ -130,17 +120,107 @@ fn rounds_sha(code: &mut Code, operand: &Operand, target: TargetCpu) {
     Host::Sha256Rounds2.register(code, RIGHT, TEMPORARY, target);
     Shift::RightBytes.emit(code, RESULT, DOUBLE_WORD_BYTES);
     Host::Sha256Rounds2.register(code, TEMPORARY, RIGHT, target);
+}
+
+fn unpack_sha(code: &mut Code, state: u8, high: bool) {
     packed(
         code,
-        if operand.kind == Kind::Hash {
+        if high {
             Host::UnpackHighQword
         } else {
             Host::UnpackLowQword
         },
-        TEMPORARY,
+        state,
         RIGHT,
     );
-    shuffle(code, RESULT, TEMPORARY, REVERSE_DWORD_PAIRS);
+    shuffle(code, RESULT, state, REVERSE_DWORD_PAIRS);
+}
+
+/// The copy that keeps the original ABCD and the two projections of one
+/// four-round hash update.
+pub(in crate::x86_64) struct HashPair {
+    copy: u8,
+    abcd: u8,
+    efgh: u8,
+    schedule: u8,
+}
+
+impl HashPair {
+    pub(in crate::x86_64) fn recognize(instructions: &[Instruction]) -> Option<Self> {
+        let [copy, first, second, ..] = instructions else {
+            return None;
+        };
+        let Operation::Simd(Simd::Integer {
+            operation: IntegerOperation::Orr,
+            destination: temporary,
+            left,
+            right,
+            bytes: 16,
+            ..
+        }) = copy.operation
+        else {
+            return None;
+        };
+        let Operation::Simd(Simd::Sha256(Operand {
+            kind: Kind::Hash,
+            destination: abcd,
+            left: efgh,
+            right: schedule,
+        })) = first.operation
+        else {
+            return None;
+        };
+        let second_half = Operation::Simd(Simd::Sha256(Operand {
+            kind: Kind::Hash2,
+            destination: efgh,
+            left: temporary,
+            right: schedule,
+        }));
+        if left != abcd || right != abcd
+            || temporary == abcd || temporary == efgh || abcd == efgh
+            // SHA256H2 must read the same WK as SHA256H, including when
+            // WK aliases the unchanged EFGH or the original ABCD copy.
+            || schedule == abcd
+            || second.operation != second_half
+            || copy.pc.0.checked_add(4) != Some(first.pc.0)
+            || first.pc.0.checked_add(4) != Some(second.pc.0)
+        {
+            return None;
+        }
+        Some(Self {
+            copy: temporary,
+            abcd,
+            efgh,
+            schedule,
+        })
+    }
+
+    /// Emit each architectural write in its own source row. All memory
+    /// operands are in the native guest frame, so there is no guest fault
+    /// or internal exit while the two halves are held in host registers.
+    pub(in crate::x86_64) fn emit(self, code: &mut Code, target: TargetCpu) -> ([usize; 3], u8) {
+        let copy = code.len();
+        read_vector(code, self.abcd, LEFT);
+        commit(code, self.copy, LEFT);
+        let first = code.len();
+        if target.supports(TargetCpu::Sha) {
+            rounds_sha(code, self.efgh, self.schedule, target);
+            packed(code, Host::MoveAligned, LEFT, TEMPORARY);
+            unpack_sha(code, LEFT, true);
+            commit(code, self.abcd, RESULT);
+            unpack_sha(code, TEMPORARY, false);
+        } else {
+            let [a, b, c, d, e, f, g, h] =
+                rounds_baseline(code, self.abcd, self.efgh, self.schedule);
+            pack_state(code, [a, b, c, d]);
+            commit(code, self.abcd, RESULT);
+            pack_state(code, [e, f, g, h]);
+            preserve_scratch(code, true);
+        }
+        let second = code.len();
+        commit(code, self.efgh, RESULT);
+        ([copy, first, second], self.efgh)
+    }
 }
 
 fn small_sigma(code: &mut Code, input: u8, result: u8, temporary: u8, amounts: [u8; 3]) {
@@ -213,10 +293,20 @@ fn schedule1(code: &mut Code, operand: &Operand, target: TargetCpu) {
 pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     match operand.kind {
         Kind::Hash | Kind::Hash2 => {
-            if target.supports(TargetCpu::Sha) {
-                rounds_sha(code, operand, target);
+            let high = operand.kind == Kind::Hash;
+            let (x, y) = if high {
+                (operand.destination, operand.left)
             } else {
-                rounds_baseline(code, operand);
+                (operand.left, operand.destination)
+            };
+            if target.supports(TargetCpu::Sha) {
+                read_vector(code, x, LEFT);
+                rounds_sha(code, y, operand.right, target);
+                unpack_sha(code, TEMPORARY, high);
+            } else {
+                let [a, b, c, d, e, f, g, h] = rounds_baseline(code, x, y, operand.right);
+                pack_state(code, if high { [a, b, c, d] } else { [e, f, g, h] });
+                preserve_scratch(code, true);
             }
         }
         Kind::Schedule0 => schedule0(code, operand, target),
@@ -228,6 +318,37 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{GuestAddress, Lifter, aarch64::Decoder};
+
+    #[test]
+    fn hash_pair_requires_the_unchanged_schedule_and_original_abcd_copy() {
+        let instructions = |words: [u32; 3]| {
+            core::array::from_fn::<_, 3, _>(|index| {
+                Decoder
+                    .lift(GuestAddress(0x1000 + index as u64 * 4), words[index])
+                    .unwrap()
+            })
+        };
+        let copy = 0x4ea0_1c02; // MOV V2.16B, V0.16B.
+        let first = 0x5e00_4020; // SHA256H V0, V1, V0, before setting WK.
+        let second = 0x5e00_5041; // SHA256H2 V1, V2, V0, before setting WK.
+        for schedule in [1, 2, 16, 31] {
+            let pair = instructions([copy, first | schedule << 16, second | schedule << 16]);
+            assert!(HashPair::recognize(&pair).is_some());
+            assert!(HashPair::recognize(&pair[..2]).is_none());
+            assert!(HashPair::recognize(&pair[1..]).is_none());
+        }
+        for words in [
+            [copy, first, second],                       // H changes the H2 schedule.
+            [copy, first | 16 << 16, second | 17 << 16], // Different schedule.
+            [copy ^ (1 << 30), first | 16 << 16, second | 16 << 16], // 64-bit copy.
+            [copy ^ (1 << 16), first | 16 << 16, second | 16 << 16], // Not a copy.
+            [copy ^ 2, first | 16 << 16, (second ^ (2 << 5)) | 16 << 16], // Temp=ABCD.
+            [copy ^ 3, first | 16 << 16, (second ^ (3 << 5)) | 16 << 16], // Temp=EFGH.
+        ] {
+            assert!(HashPair::recognize(&instructions(words)).is_none());
+        }
+    }
 
     #[test]
     fn schedule_gathers_require_ssse3_independently_of_sha() {

@@ -7,7 +7,7 @@
 // 1993-1995, 1999. Lifecycle uses Stela's shared xHCI permission.
 use super::super::descriptor::{DEVICE_TO_HOST, Interface, RECIPIENT_INTERFACE, TYPE_CLASS};
 use super::super::xhci::{Device, Operation};
-use super::{Data, Endpoint, MAX_TD, Shared, scsi, setup};
+use super::{Data, Endpoint, MAX_TD, Shared, copy_read, scsi, setup};
 mod ehci;
 mod quirks;
 use crate::{
@@ -129,6 +129,7 @@ pub(super) enum Pending {
         ticket: super::super::xhci::TransferTicket,
         dci: u8,
         deadline: crate::Deadline,
+        status_due: Option<crate::Deadline>,
     },
     /// The endpoint's cancellation after a failure, which it then reports.
     Cancelling(Operation, BlockError),
@@ -219,6 +220,7 @@ impl Io for Native {
             ticket,
             dci,
             deadline,
+            status_due: None,
         })
     }
     fn begin_control(&mut self, request: [u8; 8]) -> Request {
@@ -260,9 +262,10 @@ impl Io for Native {
             ticket,
             dci,
             deadline,
+            status_due,
         } = pending
         {
-            let error = match device.completed_ticket(ticket) {
+            let error = match device.poll_ticket_until(ticket, deadline, status_due) {
                 Some(Ok(length)) => return Some(Ok(length)),
                 Some(Err(error)) => {
                     let incompatible = matches!(
@@ -276,7 +279,6 @@ impl Io for Native {
                     }
                     error
                 }
-                None if deadline.passed() => BlockError::Timeout,
                 None => return None,
             };
             match device.start_cancel(*dci) {
@@ -685,6 +687,27 @@ impl<I: Io> Bot<I> {
     /// Run `cdb` on `lun`, the caller waiting, for a reset recovery's
     /// settling first.
     pub fn command(&mut self, lun: u8, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
+        self.command_wait(lun, cdb, data, None)
+    }
+
+    /// For a single data transfer, its DMA buffer holds the payload until
+    /// the separate status transfer completes. The caller's slice stays on
+    /// the waiting stack and is filled only after the CSW validates it.
+    pub fn read_into(&mut self, lun: u8, cdb: &[u8], output: &mut [u8]) -> Result<(), BlockError> {
+        let data = Data::In(output.len());
+        if output.is_empty() || output.len() > MAX_TD {
+            return copy_read(output, &self.command(lun, cdb, data)?);
+        }
+        self.command_wait(lun, cdb, data, Some(output)).map(|_| ())
+    }
+
+    fn command_wait(
+        &mut self,
+        lun: u8,
+        cdb: &[u8],
+        data: Data<'_>,
+        output: Option<&mut [u8]>,
+    ) -> Result<Vec<u8>, BlockError> {
         while self.recovering() {
             if let Some(Recovery::Settling(settled)) = self.recovery {
                 self.io.delay(settled.saturating_sub(self.io.now_us()));
@@ -693,7 +716,7 @@ impl<I: Io> Bot<I> {
                 core::hint::spin_loop();
             }
         }
-        let result = self.begin(lun, cdb, data).and_then(|()| self.wait());
+        let result = self.begin(lun, cdb, data).and_then(|()| self.wait(output));
         // The waiting caller sees the generation a failure's reset left.
         while matches!(self.recovery, Some(Recovery::Resetting(_))) && self.recovering() {
             crate::waiting();
@@ -703,9 +726,9 @@ impl<I: Io> Bot<I> {
     }
 
     /// The begun command's result, the caller waiting for its transfers.
-    fn wait(&mut self) -> Result<Vec<u8>, BlockError> {
+    fn wait(&mut self, mut output: Option<&mut [u8]>) -> Result<Vec<u8>, BlockError> {
         loop {
-            if let Some(result) = self.end() {
+            if let Some(result) = self.end_with_output(output.as_deref_mut()) {
                 return result;
             }
             crate::waiting();
@@ -780,12 +803,22 @@ impl<I: Io> Bot<I> {
     /// auto-sense after a failure, which runs as the command did; never
     /// waits for a transfer.
     pub fn end(&mut self) -> Option<Result<Vec<u8>, BlockError>> {
+        self.end_with_output(None)
+    }
+
+    fn end_with_output(
+        &mut self,
+        output: Option<&mut [u8]>,
+    ) -> Option<Result<Vec<u8>, BlockError>> {
         if let Some(error) = &self.minimum_error {
             return self.begun.as_ref().map(|_| Err(error.clone()));
         }
         let mut begun = self.begun.take()?;
+        // Auto-sense can resume on a later poll of the original read.
+        // Its response belongs to the sense parser, not the read's buffer.
+        let mut output = output.filter(|_| begun.sensing.is_none());
         let result = loop {
-            match self.advance(&mut begun) {
+            match self.advance(&mut begun, output.as_deref_mut()) {
                 Next::Wait => {
                     self.begun = Some(begun);
                     return None;
@@ -846,7 +879,7 @@ impl<I: Io> Bot<I> {
     }
 
     /// Move the begun command on as far as its completed transfers allow.
-    fn advance(&mut self, begun: &mut Begun) -> Next {
+    fn advance(&mut self, begun: &mut Begun, output: Option<&mut [u8]>) -> Next {
         match &mut begun.stage {
             Stage::Wrapper(pending, cbw_length) => {
                 let cbw_length = *cbw_length;
@@ -863,7 +896,7 @@ impl<I: Io> Bot<I> {
                 {
                     return Next::Done(Err(error));
                 }
-                self.data_or_status(begun)
+                self.data_or_status(begun, output)
             }
             Stage::Data(pending, piece) => {
                 let piece = *piece;
@@ -873,14 +906,14 @@ impl<I: Io> Bot<I> {
                 let endpoint = self.endpoints[usize::from(!begun.is_in)];
                 match result {
                     Ok(n) if n <= piece => {
-                        if begun.is_in {
+                        if begun.is_in && (output.is_none() || n != begun.length) {
                             begun.received.extend_from_slice(&self.buffer.bytes()[..n]);
                         }
                         begun.moved += n;
                         if n < piece {
-                            return self.status(begun);
+                            return self.status(begun, output);
                         }
-                        self.data_or_status(begun)
+                        self.data_or_status(begun, output)
                     }
                     Ok(_) => Next::Done(self.failed(PROTOCOL_ERROR)),
                     Err(BlockError::Device {
@@ -894,7 +927,7 @@ impl<I: Io> Bot<I> {
                     return Next::Wait;
                 };
                 match result {
-                    Ok(13) => Next::Done(self.conclude(begun)),
+                    Ok(13) => Next::Done(self.conclude(begun, output)),
                     Ok(0) if !begun.zero && !begun.stalled => {
                         begun.zero = true;
                         self.submit_status()
@@ -922,7 +955,7 @@ impl<I: Io> Bot<I> {
                     None => Next::Wait,
                     Some(Err(error)) => Next::Done(self.failed(error)),
                     Some(Ok(_)) if resubmit => self.submit_status(),
-                    Some(Ok(_)) => self.status(begun),
+                    Some(Ok(_)) => self.status(begun, output),
                 }
             }
         }
@@ -932,9 +965,9 @@ impl<I: Io> Bot<I> {
     /// consecutive ones of `MAX_TD` bytes, each a whole number of packets,
     /// as Linux's scatter-gather list does, until the device ends it short
     /// or stalls.
-    fn data_or_status(&mut self, begun: &mut Begun) -> Next {
+    fn data_or_status(&mut self, begun: &mut Begun, output: Option<&mut [u8]>) -> Next {
         if begun.moved >= begun.length {
-            return self.status(begun);
+            return self.status(begun, output);
         }
         let piece = (begun.length - begun.moved).min(MAX_TD);
         // No uncertain CBW transfer can be followed by a CPU data write.
@@ -951,7 +984,7 @@ impl<I: Io> Bot<I> {
 
     /// Some bridges skip the data phase and send the CSW directly. Keep
     /// status bytes out of returned media and do not wait for a second CSW.
-    fn status(&mut self, begun: &mut Begun) -> Next {
+    fn status(&mut self, begun: &mut Begun, output: Option<&mut [u8]>) -> Next {
         let skipped = begun.is_in
             && begun.moved == 13
             && begun.length > 13
@@ -959,7 +992,7 @@ impl<I: Io> Bot<I> {
         if skipped {
             self.wrapper.bytes_mut()[..13].copy_from_slice(&begun.received[..13]);
             begun.moved = 0;
-            return Next::Done(self.conclude(begun));
+            return Next::Done(self.conclude(begun, output));
         }
         self.submit_status()
     }
@@ -972,7 +1005,11 @@ impl<I: Io> Bot<I> {
     }
 
     /// The command's result from its CSW.
-    fn conclude(&mut self, begun: &mut Begun) -> Result<Vec<u8>, BlockError> {
+    fn conclude(
+        &mut self,
+        begun: &mut Begun,
+        output: Option<&mut [u8]>,
+    ) -> Result<Vec<u8>, BlockError> {
         let (opcode, is_in, length, moved) = (begun.opcode, begun.is_in, begun.length, begun.moved);
         let mut received = core::mem::take(&mut begun.received);
         let bytes = &self.wrapper.bytes()[..13];
@@ -987,6 +1024,11 @@ impl<I: Io> Bot<I> {
         }
         if status == CSW_FAILED {
             if is_in && begun.sensing.is_none() {
+                // REQUEST SENSE reuses the DMA buffer. Preserve a full
+                // transfer for the block layer's RECOVERED ERROR handling.
+                if output.is_some() && moved == length {
+                    received.extend_from_slice(&self.buffer.bytes()[..moved]);
+                }
                 self.failed_data = Some(received);
             }
             return Err(BlockError::CheckCondition);
@@ -1013,7 +1055,11 @@ impl<I: Io> Bot<I> {
         if !is_in && (moved != length || residue != 0) {
             return Err(SHORT_WRITE);
         }
-        received.truncate(moved.min(length - residue));
+        let count = moved.min(length - residue);
+        if let Some(output) = output {
+            copy_read(output, &self.buffer.bytes()[..count])?;
+        }
+        received.truncate(count);
         Ok(received)
     }
 }
