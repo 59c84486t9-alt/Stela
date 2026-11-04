@@ -53,6 +53,25 @@ pub(super) fn emit_compare(code: &mut Code, operand: &CompareOperand) {
 
 pub(super) fn emit(code: &mut Code, operand: &Operand, live_nzcv: bool) {
     let size = Size::of(operand.width == Width::X64);
+    let destination = code.host(operand.destination);
+    let output = destination.unwrap_or(Rax);
+    if operand.left == Register::Zero
+        && operand.right == Register::Zero
+        && matches!(operand.otherwise, Otherwise::Increment | Otherwise::Invert)
+        && let Some(predicate) = condition_holds(code, operand.condition, live_nzcv)
+    {
+        // CSET and CSETM materialize the condition as a bit or a mask.
+        let mut asm = code.asm();
+        asm.setcc(predicate.negate(), output);
+        asm.movzx(Size::Dword, output, Size::Byte, output);
+        if operand.otherwise == Otherwise::Invert {
+            asm.unary(Unary::Neg, size, output);
+        }
+        if destination.is_none() {
+            store(code, operand.destination);
+        }
+        return;
+    }
     let otherwise = if operand.condition >= 14 {
         // AL and NV always select Rn.
         None
@@ -73,8 +92,6 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, live_nzcv: bool) {
         }
         Some(Rm::Reg(R8))
     };
-    let destination = code.host(operand.destination);
-    let output = destination.unwrap_or(Rax);
     // If the unchanged false arm already lives in the result register,
     // keep it there and conditionally move the true arm instead.
     let keep_false = operand.left != operand.destination
@@ -93,7 +110,9 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, live_nzcv: bool) {
     let mut asm = code.asm();
     let selected = predicate.zip(alternate);
     let already_placed = destination.is_some() && initial == operand.destination;
-    if selected.is_none() || !already_placed || size != Size::Qword {
+    // CMOVcc r32 in 64-bit mode clears the upper half even when its
+    // predicate is false (Intel SDM, CMOVcc).
+    if selected.is_none() || !already_placed {
         select_input(&mut asm, output, size, initial);
     }
     if let Some((predicate, alternate)) = selected {
