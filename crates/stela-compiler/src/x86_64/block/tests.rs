@@ -1533,6 +1533,90 @@ fn grouped_sha256_rounds_preserve_three_rows_and_both_state_halves() {
     }
 }
 
+#[cfg(feature = "std")]
+#[test]
+fn ordinary_add_sub_zero_branch_reuses_flags_and_keeps_both_source_rows() {
+    use crate::{Lifter, TargetCpu, aarch64::Decoder};
+
+    // The W15 subtraction and CBNZ are the exact zlib-deflate tail words.
+    let entry = GuestAddress(0x100003fe8);
+    let branch_pc = GuestAddress(entry.0 + 4);
+    let fallthrough = GuestAddress(entry.0 + 8);
+    for (producer, branch_width) in [(0, 0), (0, 1), (1, 1)] {
+        for (subtract, nonzero, register) in [(1, 1, 15), (0, 0, 8)] {
+            let alu = 0x1100_0400 | producer << 31 | subtract << 30 | register << 5 | register;
+            let branch = 0x34ff_f020 | branch_width << 31 | nonzero << 24 | register;
+            let instructions = [Decoder.lift(entry, alu).unwrap()];
+            let terminal = (
+                branch_pc,
+                Terminator::Branch(Decoder.lift(branch_pc, branch).unwrap().operation),
+            );
+            let baseline = emit(&instructions, Some(&terminal), fallthrough);
+            let candidate = emit_ordinary_for_target(
+                &instructions,
+                Some(&terminal),
+                fallthrough,
+                TargetCpu::Baseline,
+            );
+            let at = baseline.source_map[1].1;
+            assert_eq!(candidate.source_map, [(entry, 0), (branch_pc, at)]);
+            assert_eq!(candidate.x86_64_code[..at], baseline.x86_64_code[..at]);
+            let test_len = if branch_width == 0 { 2 } else { 3 };
+            assert_eq!(
+                candidate.x86_64_code[at..],
+                baseline.x86_64_code[at + test_len..]
+            );
+            assert_eq!(
+                candidate.x86_64_code[at..at + 2],
+                [0x0f, 0x84 + nonzero as u8]
+            );
+
+            let dit = TargetCpu::Baseline.with_data_independent_timing();
+            assert_eq!(
+                emit_ordinary_for_target(&instructions, Some(&terminal), fallthrough, dit)
+                    .x86_64_code,
+                baseline.x86_64_code,
+            );
+            let interior =
+                emit_ordinary_for_target(&[], Some(&terminal), fallthrough, TargetCpu::Baseline);
+            assert_eq!(interior.source_map, [(branch_pc, 0)]);
+            assert_eq!(
+                interior.x86_64_code,
+                emit(&[], Some(&terminal), fallthrough).x86_64_code
+            );
+            let truncated =
+                emit_ordinary_for_target(&instructions, None, branch_pc, TargetCpu::Baseline);
+            assert_eq!(truncated.source_map, [(entry, 0)]);
+            assert_eq!(
+                truncated.x86_64_code,
+                emit(&instructions, None, branch_pc).x86_64_code
+            );
+        }
+    }
+}
+
+#[test]
+fn alu_zero_branch_refuses_incompatible_width_register_and_adjacency() {
+    use crate::{Lifter, aarch64::Decoder};
+
+    let entry = GuestAddress(0x1000);
+    for (alu, branch, branch_pc) in [
+        (0xd100_0400, 0x3500_0040, 0x1004), // SUB X0; CBNZ W0.
+        (0x5100_0400, 0x3500_0041, 0x1004), // Branch tests W1.
+        (0x5100_0420, 0x3500_0040, 0x1004), // Producer reads W1.
+        (0x7100_0400, 0x3500_0040, 0x1004), // SUBS.
+        (0x5100_0400, 0x3500_0040, 0x1008), // Nonadjacent.
+    ] {
+        let instructions = [Decoder.lift(entry, alu).unwrap()];
+        let branch_pc = GuestAddress(branch_pc);
+        let terminal = (
+            branch_pc,
+            Terminator::Branch(Decoder.lift(branch_pc, branch).unwrap().operation),
+        );
+        assert_eq!(alu_zero_branch(&instructions, Some(&terminal)), None);
+    }
+}
+
 #[test]
 fn hosted_trailing_zero_pair_preserves_instruction_boundaries() {
     use crate::{Lifter, TargetCpu, aarch64::Decoder};

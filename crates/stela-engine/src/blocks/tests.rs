@@ -649,6 +649,63 @@ mod resident {
     }
 
     #[test]
+    fn ordinary_alu_zero_branch_preserves_guest_state_at_both_entries() -> Result<()> {
+        const SUB_W0: u32 = 0x5100_0400;
+        const SUB_X0: u32 = 0xd100_0400;
+        const CBZ_W0: u32 = 0x3400_0040;
+        const CBNZ_X0: u32 = 0xb500_0040;
+        let branch = GuestAddress(BASE.0 + 4);
+        let fallthrough = GuestAddress(BASE.0 + 8);
+        let target = GuestAddress(BASE.0 + 12);
+        let cache = tempfile::tempdir()?;
+        for (sub, cb, wide, nonzero) in [
+            (SUB_W0, CBZ_W0, false, false),
+            (SUB_W0, CBNZ_X0, false, true),
+            (SUB_X0, CBNZ_X0, true, true),
+        ] {
+            let mut runtime = ordinary(cache.path(), &[sub, cb])?;
+            for input in [0, 1, 2, 0x1_0000_0001, u64::MAX] {
+                for entry in [BASE, branch] {
+                    let mut state = thread(input);
+                    state.pc = entry;
+                    let mut expected = state.registers.clone();
+                    if entry == BASE {
+                        expected.x[0] = input.wrapping_sub(1);
+                        if !wide {
+                            expected.x[0] &= u64::from(u32::MAX);
+                        }
+                    }
+                    let tested = if nonzero {
+                        expected.x[0]
+                    } else {
+                        u64::from(expected.x[0] as u32)
+                    };
+                    let stop = if (tested != 0) == nonzero {
+                        target
+                    } else {
+                        fallthrough
+                    };
+                    // SAFETY: the emitted block contains only GPR operations and a branch.
+                    let outcome = unsafe { runtime.run(&mut state, Some(stop), 1)? };
+                    assert_eq!(outcome.blocks_executed, 1);
+                    assert_eq!(state.pc, stop);
+                    assert_eq!(state.registers, expected);
+                }
+            }
+            let mut truncated = ordinary(cache.path(), &[sub])?;
+            let mut state = thread(1);
+            let mut expected = state.registers.clone();
+            expected.x[0] = 0;
+            // SAFETY: the truncated source contains only the GPR operation.
+            let outcome = unsafe { truncated.run(&mut state, Some(branch), 1)? };
+            assert_eq!(outcome.blocks_executed, 1);
+            assert_eq!(state.pc, branch);
+            assert_eq!(state.registers, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn ordinary_address_pair_respects_standalone_entry_and_truncated_source() -> Result<()> {
         const ADRP: u32 = 0xb000_0000; // adrp x0, BASE+0x1000
         const ADD: u32 = 0x9100_2000; // add x0, x0, #8

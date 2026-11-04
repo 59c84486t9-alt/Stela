@@ -284,6 +284,14 @@ fn emit_selected(
             None
         };
     let fuse_pairs = optimize_regions && frame_loop.is_none() && !fault_table && !pinned;
+    let zero_branch = if cfg!(feature = "std") && fuse_pairs {
+        alu_zero_branch(instructions, terminal)
+    } else {
+        None
+    };
+    // Neither region gate admits one instruction. Keep the single
+    // frame ADD/SUB lowering, whose final store is a flag-preserving MOV.
+    let optimize_regions = optimize_regions && zero_branch.is_none();
     // Long-mode LAHF is part of the v2 floor. Some BMI2 hosts execute PEXT
     // in microcode and keep the existing capture and predicate there.
     let fuse_branch_flags =
@@ -762,6 +770,7 @@ fn emit_selected(
                 checks,
                 rax: after.rax,
                 target,
+                zero_branch,
             },
         );
     }
@@ -783,6 +792,44 @@ fn emit_selected(
         );
     }
     (block.into_native(), fault_recovery)
+}
+
+/// The zero test can consume the adjacent frame ALU result's host flags.
+fn alu_zero_branch(
+    instructions: &[Instruction],
+    terminal: Option<&(GuestAddress, Terminator)>,
+) -> Option<Cond> {
+    let [instruction] = instructions else {
+        return None;
+    };
+    let Operation::AddSub {
+        width,
+        flags: false,
+        destination: destination @ Register::X(_),
+        source,
+        ..
+    } = instruction.operation
+    else {
+        return None;
+    };
+    let (
+        branch_pc,
+        Terminator::Branch(Operation::BranchZero {
+            width: branch_width,
+            source: tested,
+            nonzero,
+            ..
+        }),
+    ) = terminal?
+    else {
+        return None;
+    };
+    // A W write zero-extends, so its ZF also describes the full X value.
+    (destination == source
+        && destination == *tested
+        && (width == *branch_width || width == crate::aarch64::Width::W32)
+        && instruction.pc.0.checked_add(4) == Some(branch_pc.0))
+    .then_some(if *nonzero { Cond::Ne } else { Cond::E })
 }
 
 /// What registers hold where an instruction outside the regions begins,
@@ -1270,6 +1317,7 @@ struct TerminalContext {
     checks: super::MemoryChecks,
     rax: super::Rax,
     target: crate::TargetCpu,
+    zero_branch: Option<Cond>,
 }
 
 fn emit_terminal(
@@ -1284,6 +1332,7 @@ fn emit_terminal(
         checks,
         rax,
         target,
+        zero_branch,
     } = context;
     if let Some((pc, terminal)) = terminal {
         source_map.push((*pc, code.len()));
@@ -1369,7 +1418,7 @@ fn emit_terminal(
                 Operation::BranchCondition { target, .. }
                 | Operation::BranchZero { target, .. }
                 | Operation::BranchBit { target, .. } => {
-                    let taken = branch_condition(code, operation, rax);
+                    let taken = zero_branch.or_else(|| branch_condition(code, operation, rax));
                     conditional_exit(code, taken, target, fallthrough);
                 }
                 _ => unreachable!("block decoder restricts branch terminators"),

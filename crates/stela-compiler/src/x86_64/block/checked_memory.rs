@@ -86,6 +86,7 @@ pub(crate) fn emit(
             checks: crate::x86_64::MemoryChecks::DEFAULT,
             rax: crate::x86_64::Rax::Unknown,
             target,
+            zero_branch: None,
         },
     );
     if let Some(profile) = profile
