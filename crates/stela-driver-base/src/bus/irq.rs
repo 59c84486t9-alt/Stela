@@ -512,6 +512,13 @@ pub unsafe trait Source {
     }
     fn mask(&mut self) -> Result<(), IrqError>;
     fn quiesce(&mut self) -> Result<(), IrqError>;
+    /// For a route requiring a terminal fabric fence, confirm that the exact
+    /// masked source and its alternate producers are stopped and that its
+    /// independent posted payload drain was acknowledged. The original
+    /// configuration/reset epoch and reachable state remain retained.
+    fn quiesce_for_fabric_fence(&mut self) -> Result<(), IrqError> {
+        Err(IrqError::Unsupported)
+    }
     /// # Safety
     /// Registry retains this exact route/CPU/source/callback while masked.
     unsafe fn program(&mut self, route: &AllocatedRoute<'_>) -> Result<(), IrqError>;
@@ -1363,15 +1370,36 @@ impl<P: Platform> Registration<'_, P> {
             drop(guard);
             // SAFETY: only this unique checked process owner touches source/route.
             let source = unsafe { &mut *slot.source.get() };
-            source.mask()?;
-            source.quiesce()?;
-            // Notification-domain validation is not fabric completion. The
-            // source action is closed; old ordinary packets may notify a valid
-            // current handler after exact CPU/service/thread/work retirement.
-            if let Some(domain) = &slot.domain {
-                domain.check().map_err(IrqError::Delivery)?;
-            } else {
-                return Err(IrqError::Delivery(posted_msi::Error::RootUnavailable));
+            // SAFETY: same exclusive process access to the independent route.
+            let routing = unsafe { &mut *slot.routing.get() };
+            let domain = slot
+                .domain
+                .as_ref()
+                .ok_or(IrqError::Delivery(posted_msi::Error::RootUnavailable))?;
+            match routing {
+                RouteRequest::Msi(route) if route.fabric_fenced() => {
+                    // The exact source and route stay closed through CPU/work retries.
+                }
+                RouteRequest::Msi(route) if route.needs_fabric_fence() => {
+                    source.mask()?;
+                    source.quiesce_for_fabric_fence()?;
+                }
+                _ => {
+                    source.mask()?;
+                    source.quiesce()?;
+                }
+            }
+            domain.check().map_err(IrqError::Delivery)?;
+            if let RouteRequest::Msi(route) = routing
+                && route.needs_fabric_fence()
+            {
+                // SAFETY: this exact source has acknowledged mask, stop and
+                // payload drain. CLOSING retains both owners without a lock.
+                if let Err(error) = unsafe { route.fence_before_cpu_retirement() } {
+                    let error = IrqError::Delivery(error);
+                    self.registry.quarantine(self.slot, error);
+                    return Err(error);
+                }
             }
             let saved = SavedInterrupts::new(&self.registry.platform);
             let start = self.registry.platform.ticks();
@@ -1404,8 +1432,7 @@ impl<P: Platform> Registration<'_, P> {
                 .ok_or(IrqError::Delivery(posted_msi::Error::RootUnavailable))?
                 .check()
                 .map_err(IrqError::Delivery)?;
-            // SAFETY: same exclusive process route access after work synchronization.
-            if let RouteRequest::Msi(route) = unsafe { &mut *slot.routing.get() } {
+            if let RouteRequest::Msi(route) = routing {
                 route.cpu_retired().map_err(IrqError::Delivery)?;
             }
             let guard = self.registry.lock();

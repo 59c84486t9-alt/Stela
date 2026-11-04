@@ -267,6 +267,13 @@ unsafe impl<C: MsiConfigSpace, B: BarAccess, R: Registers> Source for NativeSour
         })();
         self.checked(result, irq::IrqError::Quiesce)
     }
+    fn quiesce_for_fabric_fence(&mut self) -> core::result::Result<(), irq::IrqError> {
+        if !self.programmed {
+            return Err(irq::IrqError::Quiesce);
+        }
+        // The programmed path joins the original stop and payload drain.
+        self.quiesce()
+    }
     fn route_kind(&self) -> crate::bus::irq::RouteKind {
         crate::bus::irq::RouteKind::Msi
     }

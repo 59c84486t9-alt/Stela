@@ -57,8 +57,10 @@ pub unsafe trait NotificationDomain: Send + Sync {
 /// return that grant without any possible hardware publication. Every method
 /// checks actual process/root/source epochs. notification_domain is genuine
 /// original ordinary fixed/edge admission, never fabric completion. Strong
-/// Intel fencing remains separate optional evidence. Existing index/root ledger
-/// obligations are retained independently; notification does not reclaim them. release_endpoint consumes the exact higher retirement proof before
+/// fencing remains separate evidence. Owners whose route format requires it
+/// must declare that policy before allocation. Existing index/root ledger
+/// obligations are retained independently; notification does not reclaim them.
+/// release_endpoint consumes the exact higher retirement proof before
 /// ending its source/config pin. The terminal root ledger must survive final
 /// owner Drop; failed/abandoned state retains every uncertain native owner.
 /// No borrowed native entered permit may escape or span a blocking operation.
@@ -68,11 +70,17 @@ pub unsafe trait RouteOwner {
     /// Original process-mode checks plus a retained IRQ-safe notification guard.
     /// Missing root/source/format admission is an error, never None-as-success.
     fn notification_domain(&self) -> Result<Arc<dyn NotificationDomain>, Error>;
-    /// Optional stronger original fabric fence, distinct from generic action
-    /// notification retirement. No all-issued proof is invented by the default.
+    /// Whether this route format requires an acknowledged terminal fabric
+    /// fence before CPU retirement. This policy is fixed for the allocation.
+    fn requires_fabric_fence(&self) -> bool {
+        false
+    }
+    /// Terminally block this exact route and acknowledge delivery covered by
+    /// the original fabric fence before Registry samples CPU pending state.
+    /// A provider without this operation must refuse.
     /// # Safety
-    /// This actual original route is masked and its admitted source/pending
-    /// cause protocol is quiescent; all covered native owners stay retained.
+    /// This actual original route is masked, the source has confirmed its
+    /// stop and independent payload drain, and all covered owners stay retained.
     unsafe fn strong_fence(&mut self) -> Result<(), Error> {
         Err(Error::Unsupported)
     }
@@ -114,6 +122,8 @@ pub struct MsiRoute {
     message: Option<MsiMessage>,
     published: bool,
     domain: ManuallyDrop<Option<Arc<dyn NotificationDomain>>>,
+    requires_fabric_fence: bool,
+    fabric_fenced: bool,
     cpu_retired: bool,
     released: bool,
     local: PhantomData<*mut ()>,
@@ -129,6 +139,8 @@ impl MsiRoute {
             message: None,
             published: false,
             domain: ManuallyDrop::new(None),
+            requires_fabric_fence: false,
+            fabric_fenced: false,
             cpu_retired: false,
             released: false,
             local: PhantomData,
@@ -222,6 +234,7 @@ impl MsiRoute {
                 .map_err(AllocationError::Unexposed)?;
             domain.check().map_err(AllocationError::Unexposed)?;
             *self.domain = Some(domain);
+            self.requires_fabric_fence = owner.requires_fabric_fence();
             let message = match owner.allocate(target) {
                 Ok(message) => message,
                 Err(error) => {
@@ -266,7 +279,7 @@ impl MsiRoute {
     pub(crate) fn check_rearm(&self) -> Result<(), Error> {
         let id = self.route.as_ref().ok_or(Error::Unbound)?;
         id.check_process().map_err(|_| Error::Context)?;
-        if self.cpu_retired || self.released {
+        if self.fabric_fenced || self.cpu_retired || self.released {
             return Err(Error::NotRetired);
         }
         self.owner
@@ -287,8 +300,31 @@ impl MsiRoute {
             .ok_or(Error::RootUnavailable)?
             .validate()
     }
+    pub(crate) fn needs_fabric_fence(&self) -> bool {
+        self.requires_fabric_fence && !self.fabric_fenced
+    }
+    pub(crate) fn fabric_fenced(&self) -> bool {
+        self.fabric_fenced
+    }
+    /// # Safety
+    /// The Registry has masked the exact source and joined its independent
+    /// stop and payload drain. The original source and route stay retained.
+    pub(crate) unsafe fn fence_before_cpu_retirement(&mut self) -> Result<(), Error> {
+        self.validate()?;
+        let owner = self.owner.as_mut().ok_or(Error::RootUnavailable)?;
+        // SAFETY: the caller supplies the checked source stop and payload join.
+        unsafe { owner.strong_fence() }?;
+        self.fabric_fenced = true;
+        Ok(())
+    }
     pub(crate) fn cpu_retired(&mut self) -> Result<(), Error> {
         self.validate()?;
+        if self.needs_fabric_fence() {
+            return Err(Error::NotRetired);
+        }
+        if self.cpu_retired {
+            return Ok(());
+        }
         self.domain
             .as_ref()
             .ok_or(Error::RootUnavailable)?

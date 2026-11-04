@@ -223,6 +223,11 @@ unsafe impl<C: Configuration> Source for NativeSource<C> {
             Err(irq::IrqError::Quiesce)
         }
     }
+    fn quiesce_for_fabric_fence(&mut self) -> Result<(), irq::IrqError> {
+        // This source publishes stopped only after disabling MSI, resetting
+        // the same function and draining its posted payload writes.
+        self.quiesce()
+    }
     fn route_kind(&self) -> crate::bus::irq::RouteKind {
         crate::bus::irq::RouteKind::Msi
     }

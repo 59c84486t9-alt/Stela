@@ -21,6 +21,9 @@ struct Model {
     panic_mask: AtomicBool,
     panic_sync: AtomicBool,
     root_pending: AtomicBool,
+    expect_fence_before_pending: AtomicBool,
+    fence_quiesces: AtomicUsize,
+    fence_attempts: AtomicUsize,
     root_checks: AtomicUsize,
     root_fences: AtomicUsize,
     wrong_cpu: AtomicBool,
@@ -57,6 +60,9 @@ impl Model {
             panic_mask: AtomicBool::new(false),
             panic_sync: AtomicBool::new(false),
             root_pending: AtomicBool::new(false),
+            expect_fence_before_pending: AtomicBool::new(false),
+            fence_quiesces: AtomicUsize::new(0),
+            fence_attempts: AtomicUsize::new(0),
             root_checks: AtomicUsize::new(0),
             root_fences: AtomicUsize::new(0),
             wrong_cpu: AtomicBool::new(false),
@@ -111,6 +117,9 @@ unsafe impl Platform for ModelPlatform {
         })
     }
     fn pending(&self, _: u8) -> Result<bool, IrqError> {
+        if self.0.expect_fence_before_pending.load(Ordering::Relaxed) {
+            assert_eq!(self.0.root_fences.load(Ordering::Relaxed), 1);
+        }
         assert!(
             !self.0.panic_pending.load(Ordering::Relaxed),
             "injected pending unwind"
@@ -173,6 +182,7 @@ struct DeliveryPeer {
     model: Arc<Model>,
     allocated: bool,
     epoch: u64,
+    requires_fence: bool,
 }
 // SAFETY: explicit isolated no-native-pin route peer. Its independent pending
 // state is not source stop, payload, CPU IRR/ISR or a native delivery receipt.
@@ -216,8 +226,18 @@ unsafe impl posted_msi::RouteOwner for DeliveryPeer {
             epoch: self.epoch,
         }))
     }
+    fn requires_fabric_fence(&self) -> bool {
+        self.requires_fence
+    }
     unsafe fn strong_fence(&mut self) -> Result<(), posted_msi::Error> {
         self.validate()?;
+        self.model.fence_attempts.fetch_add(1, Ordering::Relaxed);
+        if self.requires_fence {
+            assert_eq!(self.model.fence_quiesces.load(Ordering::Relaxed), 1);
+            // The ordinary quiesce during masked admission is the only one
+            // before the strong fence; the post-CPU work join is still pending.
+            assert_eq!(self.model.quiesces.load(Ordering::Relaxed), 1);
+        }
         if self.model.root_pending.load(Ordering::Relaxed) {
             return Err(posted_msi::Error::RootFailed);
         }
@@ -234,6 +254,9 @@ unsafe impl posted_msi::RouteOwner for DeliveryPeer {
     }
 }
 fn fixture_route(model: &Arc<Model>) -> RouteRequest {
+    fixture_route_with_fence(model, false)
+}
+fn fixture_route_with_fence(model: &Arc<Model>, requires_fence: bool) -> RouteRequest {
     // SAFETY: this original synchronous model carries no native config pin;
     // private Registry target joins it, and its independent root state fences.
     RouteRequest::Msi(unsafe {
@@ -241,6 +264,7 @@ fn fixture_route(model: &Arc<Model>) -> RouteRequest {
             model: model.clone(),
             allocated: false,
             epoch: model.root_epoch.load(Ordering::Acquire),
+            requires_fence,
         }))
     })
 }
@@ -275,6 +299,11 @@ unsafe impl Source for ModelSource {
     }
     fn quiesce(&mut self) -> Result<(), IrqError> {
         self.0.quiesces.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+    fn quiesce_for_fabric_fence(&mut self) -> Result<(), IrqError> {
+        assert!(self.0.mask_calls.load(Ordering::Relaxed) >= 2);
+        self.0.fence_quiesces.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
     fn route_kind(&self) -> crate::bus::irq::RouteKind {
@@ -859,6 +888,7 @@ fn notification_action_join_does_not_claim_optional_fabric_completion() {
         model: model.clone(),
         allocated: true,
         epoch: 1,
+        requires_fence: false,
     };
     assert_eq!(
         // SAFETY: independent explicit model source is masked; this optional peer
@@ -873,6 +903,62 @@ fn notification_action_join_does_not_claim_optional_fabric_completion() {
     model.wrong_cpu.store(false, Ordering::Relaxed);
     finish(retired);
 }
+#[test]
+fn required_fabric_fence_precedes_cpu_drain_and_is_not_repeated() {
+    let model = Model::new();
+    let registry = registry(model.clone());
+    let mut registration = registry
+        .request(Request {
+            source: Box::new(ModelSource(model.clone())),
+            handler: Arc::new(ModelHandler(model.clone())),
+            routing: fixture_route_with_fence(&model, true),
+        })
+        .unwrap();
+    model
+        .expect_fence_before_pending
+        .store(true, Ordering::Relaxed);
+    model.pending.store(true, Ordering::Relaxed);
+    model.admit_irq.store(false, Ordering::Relaxed);
+    assert!(matches!(registration.retire(), Err(IrqError::Drain)));
+    assert_eq!(model.quiesces.load(Ordering::Relaxed), 1);
+    assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+
+    model.admit_irq.store(true, Ordering::Relaxed);
+    finish(registration.retire().unwrap());
+    assert_eq!(model.fence_attempts.load(Ordering::Relaxed), 1);
+    assert_eq!(model.fence_quiesces.load(Ordering::Relaxed), 1);
+    assert_eq!(model.eois.load(Ordering::Relaxed), 1);
+    assert_eq!(model.quiesces.load(Ordering::Relaxed), 2);
+    assert_eq!(model.source_drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn failed_required_fabric_fence_keeps_the_slot_and_original_error() {
+    let model = Model::new();
+    let registry = registry(model.clone());
+    let mut registration = registry
+        .request(Request {
+            source: Box::new(ModelSource(model.clone())),
+            handler: Arc::new(ModelHandler(model.clone())),
+            routing: fixture_route_with_fence(&model, true),
+        })
+        .unwrap();
+    let index = usize::from(registration.vector() - FIRST_VECTOR);
+    model
+        .expect_fence_before_pending
+        .store(true, Ordering::Relaxed);
+    model.root_pending.store(true, Ordering::Relaxed);
+    let expected = IrqError::Delivery(posted_msi::Error::RootFailed);
+    assert!(matches!(registration.retire(), Err(error) if error == expected));
+    model.root_pending.store(false, Ordering::Relaxed);
+    assert!(matches!(registration.retire(), Err(error) if error == expected));
+    assert_eq!(model.fence_attempts.load(Ordering::Relaxed), 1);
+    assert_eq!(model.fence_quiesces.load(Ordering::Relaxed), 1);
+    assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+    assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
+    assert_ne!(registry.reserved.load(Ordering::Relaxed) & (1 << index), 0);
+}
+
 #[test]
 fn domain_loss_and_eoi_failure_preserve_exact_error_and_old_owners() {
     for root_loss in [false, true] {
