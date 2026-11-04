@@ -719,6 +719,7 @@ fn load(
     };
 
     let remapping = crate::native_dma::firmware_units()?;
+    let amd_tables = crate::native_dma::reserve_amd_tables(&remapping);
 
     let mut native_mmio = match crate::native_mmio::Prepared::capture() {
         Ok(prepared) => Some(prepared),
@@ -879,6 +880,7 @@ fn load(
             native_task_allocations,
             native_loader_tables: loader_tables,
             native_mmio_capture,
+            amd_tables,
         });
     }
     // SAFETY: boot services ended; the completed root maps this code and

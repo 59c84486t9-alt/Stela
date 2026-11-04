@@ -151,7 +151,12 @@ impl<H: DeviceTableHardware> DeviceTable<H> {
         let geometry = hardware.page_geometry().map_err(DeviceTableError::Memory)?;
         let request = DEVICE_TABLE_BYTES.max(geometry.base_bytes());
         let pages = hardware
-            .allocate(request, geometry.base_bytes(), CacheAttribute::WriteBack)
+            .allocate_below(
+                request,
+                geometry.base_bytes(),
+                CacheAttribute::WriteBack,
+                DMA32_LIMIT,
+            )
             .map_err(DeviceTableError::Memory)?;
         if !geometry.supports(pages.page_shift())
             || pages.logical_bytes() != request
@@ -162,9 +167,10 @@ impl<H: DeviceTableHardware> DeviceTable<H> {
         }
         let physical = pages.physical_pages()[0];
         if !physical.is_multiple_of(TABLE_PAGE_BYTES)
-            || physical
-                .checked_add(DEVICE_TABLE_BYTES as u64)
-                .is_none_or(|end| end > DMA32_LIMIT)
+            || pages.physical_pages().iter().any(|page| {
+                page.checked_add(1u64 << pages.page_shift())
+                    .is_none_or(|end| end > DMA32_LIMIT)
+            })
         {
             return Err(DeviceTableError::AddressLimit);
         }

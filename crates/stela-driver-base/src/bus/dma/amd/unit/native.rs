@@ -233,6 +233,20 @@ impl<P: ColdPlatform> PageSource for Hardware<P> {
             .platform
             .allocate(bytes, alignment, attribute)
     }
+    fn allocate_below(
+        &self,
+        bytes: usize,
+        alignment: usize,
+        attribute: CacheAttribute,
+        physical_end_exclusive: u64,
+    ) -> Result<PinnedPages, MemoryError> {
+        self.engine.resources.platform.allocate_below(
+            bytes,
+            alignment,
+            attribute,
+            physical_end_exclusive,
+        )
+    }
 }
 // SAFETY: the original unsafe platform supplies table visibility; this
 // adapter preserves the exact bytes and original unit context.

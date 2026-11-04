@@ -49,6 +49,88 @@ pub(crate) fn firmware_units() -> Result<Units> {
     Ok(units)
 }
 
+/// Reserve the AMD device-table pool independently of all driver DMA windows.
+pub(crate) fn reserve_amd_tables(units: &Units) -> crate::handoff::Region {
+    use crate::paging::PAGE;
+    use stela_drivers::bus::dma::amd::device::DEVICE_TABLE_BYTES;
+    use uefi::boot::{self, AllocateType, MemoryType};
+
+    let units = units
+        .as_slice()
+        .iter()
+        .filter(|unit| unit.kind == Kind::AmdVi)
+        .count();
+    if units == 0 {
+        return crate::handoff::Region::default();
+    }
+    // Each table is contiguous, with separate page-alignment and allocator
+    // bookkeeping space in this exclusive native heap.
+    let pages = units * (DEVICE_TABLE_BYTES.div_ceil(PAGE) + 2);
+    match boot::allocate_pages(
+        AllocateType::MaxAddress(u32::MAX.into()),
+        MemoryType::LOADER_DATA,
+        pages,
+    ) {
+        Ok(allocation) => {
+            let region = crate::handoff::Region {
+                physical: allocation.as_ptr() as u64,
+                bytes: (pages * PAGE) as u64,
+            };
+            if amd_table_range_is_private(region) {
+                region
+            } else {
+                // Keep this firmware allocation out of guest RAM even when
+                // we cannot prove it is private enough for IOMMU metadata.
+                output::arguments(format_args!(
+                    "HOST AMD-Vi table reservation withheld: firmware DMA windows unqualified\n"
+                ));
+                crate::handoff::Region::default()
+            }
+        }
+        Err(error) => {
+            output::arguments(format_args!(
+                "HOST AMD-Vi table reservation unavailable: {error:?}\n"
+            ));
+            crate::handoff::Region::default()
+        }
+    }
+}
+
+fn amd_table_range_is_private(region: crate::handoff::Region) -> bool {
+    use stela_drivers::bus::dma::amd::ivrs::Ivrs;
+
+    let Some(rsdp) = crate::storage::rsdp() else {
+        return false;
+    };
+    let start = region.physical;
+    let end = start + region.bytes;
+    // SAFETY: boot services still keep these original ACPI tables mapped.
+    let Ok(ivrs) = (unsafe { acpi::find(rsdp, b"IVRS") }) else {
+        return false;
+    };
+    let Ok(ivrs) = Ivrs::parse(ivrs, firmware_state::MAX_UNITS) else {
+        return false;
+    };
+    if ivrs
+        .memory_definitions()
+        .any(|range| range.start() < end && start < range.end())
+    {
+        return false;
+    }
+    // SAFETY: same mapped firmware table inventory. Missing DMAR means no
+    // Intel reserved windows. An unreadable table supplies no exclusion proof.
+    match unsafe { acpi::find(rsdp, b"DMAR") } {
+        Ok(table) => dmar::parse(table).is_ok_and(|table| {
+            table
+                .reserved
+                .iter()
+                .all(|range| range.base >= end || range.limit < start)
+        }),
+        Err(acpi::AcpiError::Missing(_)) => true,
+        Err(_) => false,
+    }
+}
+
 /// A unit's registers through the firmware's identity map, with a TSC
 /// deadline.
 struct Identity {

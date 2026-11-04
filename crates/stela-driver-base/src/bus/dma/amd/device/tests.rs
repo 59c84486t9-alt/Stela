@@ -207,12 +207,19 @@ impl PageSource for Hardware {
         model.geometry_queries += 1;
         model.geometry
     }
-    fn allocate(
+    fn allocate(&self, _: usize, _: usize, _: CacheAttribute) -> Result<PinnedPages, MemoryError> {
+        panic!("AMD-Vi device tables require a physical ceiling")
+    }
+    fn allocate_below(
         &self,
         bytes: usize,
         alignment: usize,
         attribute: CacheAttribute,
+        physical_end_exclusive: u64,
     ) -> Result<PinnedPages, MemoryError> {
+        assert_eq!(physical_end_exclusive, DMA32_LIMIT);
+        // The fixture can deliberately return an out-of-range pin to exercise
+        // the device-table constructor's independent provider validation.
         let (shift, returned_bytes, physical, logical, actual_attribute, swap) = {
             let mut model = self.0.model.lock().unwrap();
             assert!(model.active);
@@ -624,7 +631,7 @@ fn provider_contiguity_dma32_cache_size_and_geometry_errors_roll_back() {
         assert!(construct(&Monitor::new(), &policies()).is_none());
         return;
     }
-    for case in 0..8 {
+    for case in 0..9 {
         let monitor = Monitor::new();
         let expected = {
             let mut model = monitor.model.lock().unwrap();
@@ -656,6 +663,12 @@ fn provider_contiguity_dma32_cache_size_and_geometry_errors_roll_back() {
                 }
                 6 => {
                     model.next_physical = DMA32_LIMIT - DEVICE_TABLE_BYTES as u64 + 4096;
+                    DeviceTableError::AddressLimit
+                }
+                7 => {
+                    // The table itself fits but the complete provider pin crosses 4 GiB.
+                    model.next_physical = DMA32_LIMIT - DEVICE_TABLE_BYTES as u64;
+                    model.returned_bytes += 4096;
                     DeviceTableError::AddressLimit
                 }
                 _ => {

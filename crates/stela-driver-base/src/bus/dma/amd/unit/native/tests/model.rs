@@ -243,6 +243,27 @@ impl PageSource for Platform {
             alignment,
         )
     }
+    fn allocate_below(
+        &self,
+        bytes: usize,
+        alignment: usize,
+        attribute: CacheAttribute,
+        physical_end_exclusive: u64,
+    ) -> Result<PinnedPages, MemoryError> {
+        assert_eq!(physical_end_exclusive, 1 << 32);
+        if self
+            .peer
+            .state
+            .lock()
+            .unwrap()
+            .next_pa
+            .checked_add(bytes as u64)
+            .is_none_or(|end| end > physical_end_exclusive)
+        {
+            return Err(MemoryError::OutOfMemory);
+        }
+        self.allocate(bytes, alignment, attribute)
+    }
 }
 // SAFETY: synchronous peer shares coherent fixture RAM. These explicit
 // fixtures model ordering/ownership but do not check native cache hardware.

@@ -149,6 +149,13 @@ fn start(handoff: u64) -> Started {
             layout::physical(0),
         )
     };
+    // SAFETY: original private reservation held in the shared physmap, before
+    // any remapper or AP has started.
+    if let Err(error) = unsafe { crate::native_memory::initialize_amd_tables(handoff.amd_tables) } {
+        output::arguments(format_args!(
+            "HOST AMD-Vi table memory unavailable: {error:?}\n"
+        ));
+    }
     // SAFETY: loader-reserved immutable pages, kept in every shared-window
     // physmap; metadata and Arc are created in this active engine allocator.
     let host_firmware = unsafe { crate::host_firmware::after_ebs(&handoff.host_firmware) }

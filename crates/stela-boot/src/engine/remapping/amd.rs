@@ -65,6 +65,20 @@ impl PageSource for Platform {
     ) -> Result<PinnedPages, MemoryError> {
         crate::native_memory::SOURCE.allocate(bytes, alignment, attribute)
     }
+    fn allocate_below(
+        &self,
+        bytes: usize,
+        alignment: usize,
+        attribute: CacheAttribute,
+        physical_end_exclusive: u64,
+    ) -> Result<PinnedPages, MemoryError> {
+        crate::native_memory::AMD_TABLES.allocate_below(
+            bytes,
+            alignment,
+            attribute,
+            physical_end_exclusive,
+        )
+    }
 }
 
 // SAFETY: the unit walks its tables coherently (control bit Coherent), so a
