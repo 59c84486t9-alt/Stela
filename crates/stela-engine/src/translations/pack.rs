@@ -375,6 +375,35 @@ struct PendingPage {
 /// A pending page's key, guest page and context.
 type PendingKey = (Digest, u64, Digest);
 
+/// Stage bounded growth without changing a retained allocation. Either
+/// buffer may fail, so the owner installs their replacements together.
+fn grow_pending<T: Copy>(
+    current: Option<&Vec<T>>,
+    additional: usize,
+    minimum: usize,
+    limit: usize,
+) -> Result<Option<Vec<T>>, ()> {
+    let held = current.map_or(0, Vec::capacity);
+    let used = current.map_or(0, Vec::len);
+    let required = used.checked_add(additional).ok_or(())?;
+    if required.max(held) > limit {
+        return Err(());
+    }
+    if required <= held {
+        return Ok(None);
+    }
+    let capacity = held.saturating_mul(2).max(minimum).max(required).min(limit);
+    let mut replacement = Vec::new();
+    replacement.try_reserve_exact(capacity).map_err(|_| ())?;
+    if replacement.capacity() > limit {
+        return Err(());
+    }
+    if let Some(current) = current {
+        replacement.extend_from_slice(current);
+    }
+    Ok(Some(replacement))
+}
+
 /// A shared block's PC and the leading words of its page key and context:
 /// a compact index whose rare collision only replaces an entry, as a hit
 /// still matches the whole key and context ([`SharedTranslation::matches`]).
@@ -653,33 +682,57 @@ impl<'a> Store<'a> {
             return true;
         };
         let new_page = if known.is_some() { 0 } else { PAGE_BYTES };
-        let charge = BLOCK_BYTES + usize::from(length) + new_page;
-        if self.pending_bytes.saturating_add(charge) > MAX_PENDING_BYTES {
+        let held_slots = known.map_or(0, |page| page.blocks.capacity());
+        let held_inputs = known.map_or(0, |page| page.inputs.capacity());
+        let held = held_slots * BLOCK_BYTES + held_inputs;
+        let Some(available) = MAX_PENDING_BYTES
+            .checked_sub(self.pending_bytes)
+            .and_then(|available| available.checked_sub(new_page))
+        else {
             return false;
-        }
+        };
+        let limit = held + available;
+        // A page's inputs stay far below 4 GiB: each offset is unique and
+        // both it and the associated block length fit in 16 bits.
+        let start = known.map_or(0, |page| page.inputs.len());
+        let required_inputs = (start + usize::from(length)).max(held_inputs);
+        let Some(slot_limit) = limit.checked_sub(required_inputs) else {
+            return false;
+        };
+        let Ok(blocks) = grow_pending(
+            known.map(|page| &page.blocks),
+            1,
+            4,
+            slot_limit / BLOCK_BYTES,
+        ) else {
+            return false;
+        };
+        let slots = blocks.as_ref().map_or(held_slots, Vec::capacity);
+        let Ok(inputs) = grow_pending(
+            known.map(|page| &page.inputs),
+            usize::from(length),
+            8,
+            limit - slots * BLOCK_BYTES,
+        ) else {
+            return false;
+        };
         let page = self.pending.entry(group).or_insert_with(|| PendingPage {
             preparation: Arc::clone(offer.preparation()),
             blocks: Vec::new(),
             inputs: Vec::new(),
         });
-        let held = page.blocks.capacity() * BLOCK_BYTES + page.inputs.capacity();
-        // A page's inputs stay far below 4 GiB: its blocks do not overlap by
-        // more than a block each, and `length` fits 16 bits.
-        let start = page.inputs.len() as u32;
-        if page.blocks.try_reserve(1).is_err()
-            || page.inputs.try_reserve(usize::from(length)).is_err()
-        {
-            if page.blocks.is_empty() {
-                self.pending.remove(&group);
-            }
-            return false;
+        if let Some(blocks) = blocks {
+            page.blocks = blocks;
+        }
+        if let Some(inputs) = inputs {
+            page.inputs = inputs;
         }
         page.blocks.insert(
             place,
             PendingBlock {
                 offset,
                 length,
-                start,
+                start: start as u32,
             },
         );
         page.inputs.extend_from_slice(offer.input());
@@ -1159,6 +1212,47 @@ mod tests {
         assert!(store.accept_shared(&mut staged).is_none());
         assert!(staged.entry.is_some());
         assert!(store.prepared(&key, 0x1000, &context).is_none());
+    }
+
+    #[test]
+    fn pending_budget_caps_capacity_growth_and_keeps_exact_input() {
+        let key = Digest::of(b"page");
+        let base = 0x1_0000_4000;
+        let mut store = Store::new(translator_id(), None).0;
+        for index in 0..4 {
+            store.keep_pending(&offer(base + index * 8, key));
+        }
+        let page = store.pending.values().next().unwrap();
+        assert_eq!((page.blocks.len(), page.inputs.len()), (4, 32));
+        assert_eq!((page.blocks.capacity(), page.inputs.capacity()), (4, 32));
+
+        // The other pages consume the rest of the budget. There is room
+        // for one exact block and its input, but no geometric slack.
+        let extra = size_of::<PendingBlock>() + 8;
+        store.pending_bytes = MAX_PENDING_BYTES - extra;
+        let next = offer(base + 32, key);
+        store.keep_pending(&next);
+        assert_eq!(store.pending_bytes, MAX_PENDING_BYTES);
+        let page = store.pending.values().next().unwrap();
+        assert_eq!((page.blocks.capacity(), page.inputs.capacity()), (5, 40));
+        assert_eq!(&page.inputs[32..], next.input());
+
+        // A duplicate has no charge. A fresh block cannot replace an old
+        // allocation or corrupt the input offsets at the exhausted limit.
+        let previous = page.inputs.clone();
+        store.keep_pending(&next);
+        store.keep_pending(&offer(base + 40, key));
+        assert_eq!(store.pending_bytes, MAX_PENDING_BYTES);
+        assert_eq!((store.pending(), store.counters.dropped), (5, 1));
+        let page = store.pending.values().next().unwrap();
+        assert_eq!(page.inputs, previous);
+        assert_eq!(
+            page.blocks
+                .iter()
+                .map(|block| block.start)
+                .collect::<Vec<_>>(),
+            [0, 8, 16, 24, 32]
+        );
     }
 
     #[test]
