@@ -73,6 +73,63 @@ fn values_left_in_rax_are_not_reloaded() {
     assert_eq!(count(&LOAD_NZCV), 0);
 }
 
+#[test]
+fn pinned_scalar_loads_forward_through_the_block() {
+    use crate::{Lifter, aarch64::Decoder, block::RecoverySiteKind};
+    const FRAME_LOAD: [u8; 4] = [0x48, 0x8b, 0x47, 0x50];
+    let pc = GuestAddress(0x1000);
+    let second = GuestAddress(0x1004);
+    let branch = GuestAddress(0x1008);
+    // LDR X10,[X10]; LDR X10,[X10,X2]; CBZ X10,entry.
+    let instructions = [
+        Decoder.lift(pc, 0xf940_014a).unwrap(),
+        Decoder.lift(second, 0xf862_694a).unwrap(),
+    ];
+    let terminal = (
+        branch,
+        Terminator::Branch(Operation::BranchZero {
+            source: Register::X(10),
+            width: crate::aarch64::Width::X64,
+            nonzero: false,
+            target: pc,
+        }),
+    );
+    let (native, recovery) = emit_system_mode(
+        &instructions,
+        Some(&terminal),
+        GuestAddress(0x100c),
+        crate::TargetCpu::Baseline,
+        super::super::MemoryChecks::DEFAULT,
+        super::super::NativeSystem::NONE,
+    );
+    let code = &native.x86_64_code;
+    assert_eq!(native.source_map.len(), 3);
+    let [(pc1, at1), (pc2, at2), (pc3, at3)] = native.source_map.as_slice() else {
+        unreachable!()
+    };
+    assert_eq!([*pc1, *pc2, *pc3], [pc, second, branch]);
+    assert!(at1 < at2 && at2 < at3);
+    assert_eq!(
+        code.windows(FRAME_LOAD.len())
+            .filter(|w| *w == FRAME_LOAD)
+            .count(),
+        1
+    );
+    assert_eq!(&code[*at3..*at3 + 3], &[0x48, 0x85, 0xc0]); // TEST RAX,RAX
+    let accesses: Vec<_> = recovery
+        .iter()
+        .filter(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+        .collect();
+    assert_eq!(accesses.len(), 2);
+    for (index, access) in accesses.into_iter().enumerate() {
+        let (pc, start) = native.source_map[index];
+        assert!(start <= access.start && access.end <= native.source_map[index + 1].1);
+        let position = access.retirement.position().unwrap();
+        assert_eq!(position.pc, pc);
+        assert_eq!(usize::from(position.retired_instructions), index);
+    }
+}
+
 /// ldr x0, [sp, #8]; ldr x1, [sp, #16]; sub sp, sp, #8; ldr x2, [sp]:
 /// the second access relies on the first one's SP alignment check, and
 /// the third checks SP again after its move by 8.

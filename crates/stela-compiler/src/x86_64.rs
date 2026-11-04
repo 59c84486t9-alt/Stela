@@ -1009,8 +1009,19 @@ pub(super) enum Rax {
 }
 
 /// What RAX holds after `operation`'s emission by [`emit_instruction`].
-pub(super) fn rax_after(operation: &Operation) -> Rax {
+pub(super) fn rax_after(operation: &Operation, pinned: bool) -> Rax {
     match *operation {
+        Operation::Memory {
+            transfer: MemoryTransfer::Load { .. },
+            data,
+            mode: AddressMode::Offset,
+            ..
+        }
+        | Operation::MemoryRegisterOffset(crate::aarch64::register_offset::Operand {
+            transfer: MemoryTransfer::Load { .. },
+            data,
+            ..
+        }) if pinned && data != Register::Zero => Rax::Guest(data),
         Operation::AddSub { flags: true, .. }
         | Operation::AddSubRegister { flags: true, .. }
         | Operation::AddSubExtended { flags: true, .. }

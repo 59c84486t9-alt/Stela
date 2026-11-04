@@ -513,7 +513,7 @@ fn emit_single(
     {
         code.remove_instruction(start..start + load.len());
     }
-    let rax = match super::rax_after(&instruction.operation) {
+    let rax = match super::rax_after(&instruction.operation, code.is_pinned()) {
         // A direct form may leave the result only in its host register.
         super::Rax::Guest(register)
             if code.is_pinned()
