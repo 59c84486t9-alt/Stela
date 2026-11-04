@@ -13,7 +13,25 @@ pub(super) const SOURCE_FREED: u8 = 2;
 pub(super) const TERMINAL_RETURNED: u8 = 4;
 pub(super) const SOURCE_TAIL: u8 = 16;
 
+#[cfg(all(
+    feature = "hosted-runtime",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
+pub(super) struct HostedHooks {
+    pub(super) runtime: *const c_void,
+    pub(super) start: unsafe fn(*const c_void) -> i32,
+    pub(super) service: unsafe fn(*const c_void) -> i32,
+    pub(super) dispatcher: unsafe fn(*const c_void) -> i32,
+}
+
 pub(super) struct Dispatch {
+    #[cfg(all(
+        feature = "hosted-runtime",
+        target_os = "linux",
+        target_arch = "x86_64"
+    ))]
+    pub(super) hosted: Option<HostedHooks>,
     pub(super) pending: unsafe fn(*const c_void) -> bool,
     pub(super) process: unsafe fn(*const c_void) -> i32,
     pub(super) context: *const c_void,
@@ -38,6 +56,19 @@ static DISPATCH: AtomicPtr<Dispatch> = AtomicPtr::new(ptr::null_mut());
 impl Dispatch {
     pub(super) fn installed() -> bool {
         !DISPATCH.load(Ordering::Acquire).is_null()
+    }
+
+    #[cfg(all(
+        feature = "hosted-runtime",
+        target_os = "linux",
+        target_arch = "x86_64"
+    ))]
+    pub(super) fn hosted(runtime: *const c_void) -> Option<(&'static Self, &'static HostedHooks)> {
+        let pointer = DISPATCH.load(Ordering::Acquire);
+        // SAFETY: successful publication keeps this immutable table permanently.
+        let table = unsafe { pointer.as_ref() }?;
+        let hooks = table.hosted.as_ref()?;
+        (hooks.runtime == runtime).then_some((table, hooks))
     }
 
     /// Publish the sole source callback owner.

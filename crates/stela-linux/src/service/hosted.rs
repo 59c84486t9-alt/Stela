@@ -77,6 +77,10 @@ unsafe extern "C" fn finish<const N: usize>(context: *mut c_void) {
     // SAFETY: original callbacks returned and this is their real next deadline.
     unsafe { runtime.finish_service_batch(ManuallyDrop::into_inner(batch), deadline) }
         .unwrap_or_else(|error| timer::fatal(error));
+    // SAFETY: still on this mounted Initial, after the timer capture returned.
+    if unsafe { crate::task::hosted_service_progress(owner, runtime) }.is_err() {
+        timer::fatal(WorkError::CorruptContext);
+    }
 }
 
 unsafe extern "C" fn no_native_irq(_: *mut c_void) -> c_int {

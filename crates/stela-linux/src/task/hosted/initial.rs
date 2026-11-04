@@ -52,6 +52,21 @@ pub unsafe fn initialize_hosted_resources(
     }
 }
 
+/// Publish original PID1 and kthreadd from the mounted hosted Initial.
+/// Continue running Initial's hosted service and drive the dispatcher with
+/// `step_hosted` to run the children and process their source joins.
+///
+/// # Safety
+/// The exact Initial is entered and has completed original resources.
+/// Keep the mounted source and callback graph for the life of this process.
+pub unsafe fn start_hosted_threads<const N: usize>(
+    owner: *const RawOwner,
+    runtime: Pin<&HostedRuntime<N>>,
+) -> Result<(), ResourceBootstrapError> {
+    // SAFETY: forwarded exact original Initial and its retained runtime.
+    unsafe { fork::start_threads(owner, runtime) }
+}
+
 const PAGE: usize = 4096;
 const MAX_MODEL_PAGES: usize = 16 * 1024;
 
@@ -113,8 +128,10 @@ impl<const N: usize> HostedTaskBinding<N> {
         let pgd = root
             .cpu_address(0, PAGE)
             .map_err(|_| Work(WorkError::CorruptContext))?;
+        let owner = Owner::new(platform);
+        let fork = fork::Broker::new(runtime, owner.raw(), stacks.len()).map_err(Work)?;
         let mount = Box::new(Initial {
-            owner: Owner::new(platform),
+            owner,
             _root: root,
             pages,
             _stacks: stacks,
@@ -147,7 +164,9 @@ impl<const N: usize> HostedTaskBinding<N> {
             return Err(Native(status));
         }
         let task = NonNull::new(raw).ok_or(Work(WorkError::CorruptContext))?;
-        mount.binding = Some(Self::new_record(task, runtime, true));
+        // SAFETY: the irreversible original mount and same runtime stay kept.
+        unsafe { fork.install(task) }.map_err(Work)?;
+        mount.binding = Some(Self::new_record(task, runtime, Kind::Initial));
         let context = core::ptr::from_mut(mount).cast();
         // SAFETY: the published mount, binding, body and image remain kept
         // on every path after the irreversible original source claim.

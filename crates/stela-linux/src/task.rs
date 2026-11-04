@@ -18,9 +18,15 @@ mod inactive;
     target_os = "linux",
     target_arch = "x86_64"
 ))]
+pub(crate) use hosted::service_progress as hosted_service_progress;
+#[cfg(all(
+    feature = "hosted-runtime",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 pub use hosted::{
     HostedStackReservation, HostedTaskBinding, initialize_hosted_resources,
-    reserve_hosted_child_stack,
+    reserve_hosted_child_stack, start_hosted_threads, step_hosted,
 };
 mod native;
 pub mod runtime;

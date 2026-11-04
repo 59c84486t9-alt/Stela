@@ -9,6 +9,12 @@ pub(super) unsafe fn publish<
     broker: &'static Broker<K, P, N>,
 ) -> Result<(), Error> {
     let dispatch = Dispatch {
+        #[cfg(all(
+            feature = "hosted-runtime",
+            target_os = "linux",
+            target_arch = "x86_64"
+        ))]
+        hosted: None,
         pending: pending::<K, P, N>,
         process: process::<K, P, N>,
         context: broker as *const _ as *const c_void,

@@ -352,7 +352,20 @@ impl<const N: usize> HostedChild<'_, N> {
     /// Observe the exact child on its physical dispatcher successor.
     pub fn returned(&self) -> Result<bool, WorkError> {
         self.runtime.dispatcher_successor()?;
-        // SAFETY: actual original dispatcher, with every hosted task stopped.
+        self.returned_stopped()
+    }
+
+    /// Observe a physical return from another live process on the same runtime.
+    pub fn returned_to_peer(&self) -> Result<bool, WorkError> {
+        self.runtime.current_context()?;
+        if self.worker == self.runtime.current.get() {
+            return Err(WorkError::InvalidTicket);
+        }
+        self.returned_stopped()
+    }
+
+    fn returned_stopped(&self) -> Result<bool, WorkError> {
+        // SAFETY: the dispatcher or a different live task owns this runtime.
         let task = unsafe { &*self.runtime.task(self.worker) };
         if task.stack_pin_nonce != self.nonce {
             return Err(WorkError::InvalidTicket);
@@ -487,12 +500,20 @@ mod tests {
         // SAFETY: exact source preparation ended and the fixture stays kept.
         let child = unsafe { reserved.publish(child_body, raw) }
             .unwrap_or_else(|(_, error)| panic!("{error:?}"));
+        assert_eq!(child.returned_to_peer(), Ok(false));
         *call.child.borrow_mut() = Some(child);
         runtime.yield_now().unwrap();
         assert_eq!(call.visits.get(), 0);
         // SAFETY: this bounded model completes its source publication here
         // on the exact creator and retains the callback through its return.
         unsafe { call.child.borrow_mut().as_mut().unwrap().activate() }.unwrap();
+    }
+
+    unsafe extern "C" fn observe_return(raw: *mut c_void) {
+        // SAFETY: the fixture keeps the same context while this peer runs.
+        let call = unsafe { &*raw.cast::<Call<'_>>() };
+        let child = call.child.borrow();
+        assert_eq!(child.as_ref().unwrap().returned_to_peer(), Ok(true));
     }
 
     #[test]
@@ -532,6 +553,17 @@ mod tests {
         assert_eq!(runtime.step(), Ok(true));
         assert_eq!(call.visits.get(), 1);
         assert_eq!(queue.completed(ticket), Ok(true));
+        // SAFETY: the same context survives this separate hosted assignment.
+        let peer = unsafe {
+            queue.execute(
+                Kind::General,
+                observe_return,
+                ptr::from_ref(&call).cast_mut().cast(),
+            )
+        }
+        .unwrap();
+        assert_eq!(runtime.step(), Ok(true));
+        assert_eq!(queue.completed(peer), Ok(true));
         let child = call.child.take().unwrap();
         assert_eq!(child.returned(), Ok(true));
         queue.close().unwrap();

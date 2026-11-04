@@ -4,7 +4,7 @@ use crate::owner::RawOwner;
 use stela_driver_base::platform::work::kernel_domain::{HostedChildReservation, HostedPages};
 
 #[repr(C)]
-struct ModelStackTicket {
+pub(super) struct ModelStackTicket {
     version: u32,
     bytes: u32,
     generation: u64,
@@ -27,8 +27,8 @@ unsafe extern "C" {
 #[must_use = "explicitly cancel this unpublished hosted stack"]
 pub struct HostedStackReservation<'runtime, const N: usize> {
     owner: *const RawOwner,
-    worker: HostedChildReservation<'runtime, N>,
-    descriptors: Option<ModelStackTicket>,
+    pub(super) worker: HostedChildReservation<'runtime, N>,
+    pub(super) descriptors: Option<ModelStackTicket>,
 }
 
 /// Reserve the actual stopped worker and its model stack descriptors.

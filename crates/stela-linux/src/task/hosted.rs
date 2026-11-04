@@ -5,8 +5,11 @@ use core::cell::{Cell, RefCell};
 use stela_driver_base::platform::work::kernel_domain::{
     DomainRef, HostedRuntime, HostedSwitchBinding, HostedWake,
 };
+mod fork;
+pub(crate) use fork::service_progress;
+pub use fork::step_hosted;
 mod initial;
-pub use initial::initialize_hosted_resources;
+pub use initial::{initialize_hosted_resources, start_hosted_threads};
 mod stack;
 pub use stack::{HostedStackReservation, reserve_hosted_child_stack};
 
@@ -17,7 +20,15 @@ pub struct HostedTaskBinding<const N: usize> {
     wake: RefCell<Option<HostedWake>>,
     detached: Cell<bool>,
     released: bool,
-    initial: bool,
+    kind: Kind,
+    identity: Cell<Option<TaskContext>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Bare,
+    Initial,
+    Child,
 }
 
 impl<const N: usize> HostedTaskBinding<N> {
@@ -47,21 +58,18 @@ impl<const N: usize> HostedTaskBinding<N> {
         DomainRef::borrow_hosted(runtime)?.dispatcher_successor()?;
         // SAFETY: caller supplies the original heap and serialized dispatcher.
         let task = NonNull::new(unsafe { stela_linux_task_allocate() }).ok_or(WorkError::Full)?;
-        Ok(Self::new_record(task, runtime, false))
+        Ok(Self::new_record(task, runtime, Kind::Bare))
     }
 
-    fn new_record(
-        task: NonNull<CTask>,
-        runtime: Pin<&HostedRuntime<N>>,
-        initial: bool,
-    ) -> Rc<Self> {
+    fn new_record(task: NonNull<CTask>, runtime: Pin<&HostedRuntime<N>>, kind: Kind) -> Rc<Self> {
         Rc::new(Self {
             task,
             runtime: NonNull::from(runtime.get_ref()),
             wake: RefCell::new(None),
             detached: Cell::new(false),
             released: false,
-            initial,
+            kind,
+            identity: Cell::new(None),
         })
     }
 
@@ -109,7 +117,7 @@ impl<const N: usize> HostedTaskBinding<N> {
     /// Original producer/waiter/lease users have actually joined. This must
     /// run on the sole dispatcher, after successful detach if ever attached.
     pub unsafe fn release_quiescent(self: Rc<Self>) -> Result<(), Rc<Self>> {
-        if self.initial
+        if self.kind != Kind::Bare
             || DomainRef::borrow_hosted(self.runtime())
                 .and_then(|domain| domain.dispatcher_successor())
                 .is_err()
@@ -159,7 +167,7 @@ impl<const N: usize> HostedTaskBinding<N> {
 
     unsafe extern "C" fn service_reserved(binding: *mut c_void) -> bool {
         // SAFETY: C retains the same binding and checks its assignment.
-        unsafe { &*binding.cast::<Self>() }.initial
+        unsafe { &*binding.cast::<Self>() }.kind == Kind::Initial
     }
 
     unsafe extern "C" fn rank(
@@ -246,10 +254,12 @@ impl<const N: usize> HostedTaskBinding<N> {
         }
     }
 
-    unsafe extern "C" fn terminate(_: *mut c_void) -> ! {
-        // SAFETY: bare source may not retire an original child. Preserve the
-        // current stack and owners if it reaches this impossible boundary.
-        unsafe { core::arch::asm!("ud2", options(noreturn)) }
+    unsafe extern "C" fn terminate(scope: *mut c_void) -> ! {
+        // SAFETY: C entered from original do_task_dead and keeps the exact
+        // child scope. The runtime independently checks the live child stack.
+        let runtime = unsafe { *scope.cast::<Pin<&HostedRuntime<N>>>() };
+        // SAFETY: the nonreturning C body owns no returning Rust guards.
+        unsafe { runtime.terminate_child() }
     }
 }
 
@@ -269,7 +279,7 @@ unsafe impl<const N: usize> HostedSwitchBinding for HostedTaskBinding<N> {
             return Err(WorkError::Busy);
         }
         let runtime = self.runtime();
-        if runtime.service_current()? != self.initial {
+        if runtime.service_current()? != (self.kind == Kind::Initial) {
             return Err(WorkError::Unavailable);
         }
         let wake = runtime.current_wake()?;
@@ -285,6 +295,7 @@ unsafe impl<const N: usize> HostedSwitchBinding for HostedTaskBinding<N> {
                 core::ptr::from_ref(self).cast_mut().cast(),
             )
         })?;
+        self.identity.set(Some(*context));
         *self.wake.borrow_mut() = Some(wake);
         Ok(())
     }
@@ -306,7 +317,7 @@ unsafe impl<const N: usize> HostedSwitchBinding for HostedTaskBinding<N> {
 
     unsafe fn arrive(&self, context: &TaskContext, new_job: bool) -> Result<(), WorkError> {
         if new_job {
-            if self.initial {
+            if self.kind != Kind::Bare {
                 return Err(WorkError::CorruptContext);
             }
             // Old signal/OS execution owners remain kept by the same runtime.
@@ -319,6 +330,22 @@ unsafe impl<const N: usize> HostedSwitchBinding for HostedTaskBinding<N> {
     unsafe fn complete(&self, context: &TaskContext) -> Result<(), WorkError> {
         // SAFETY: actual finishing stack; C checks that the source scope ended.
         status(unsafe { stela_linux_task_complete(self.task.as_ptr(), context) })
+    }
+
+    unsafe fn terminal_prepare(&self, context: &TaskContext) -> Result<(), WorkError> {
+        if self.kind != Kind::Child {
+            return Err(WorkError::InvalidTicket);
+        }
+        // SAFETY: actual current, source terminal path and kept child record.
+        status(unsafe { stela_linux_task_terminal_prepare(self.task.as_ptr(), context) })
+    }
+
+    unsafe fn terminal_successor(&self, context: &TaskContext) -> Result<(), WorkError> {
+        if self.kind != Kind::Child {
+            return Err(WorkError::InvalidTicket);
+        }
+        // SAFETY: runtime returned to its dispatcher from this exact child.
+        status(unsafe { stela_linux_task_terminal_successor(self.task.as_ptr(), context) })
     }
 
     unsafe fn detach(&self, context: &TaskContext) -> Result<(), WorkError> {

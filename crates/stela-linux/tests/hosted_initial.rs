@@ -16,13 +16,16 @@ use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
-use stela_driver_base::platform::image::NativeReadOnlyImage;
 use stela_driver_base::platform::work::{
     WorkError,
     kernel_domain::{
         DomainRaised, HostedClock, HostedDeadlines, HostedDomain, HostedExecution, HostedExecutor,
         HostedIdle, HostedQueue, HostedRuntime,
     },
+};
+use stela_driver_base::{
+    entropy::{Entropy, EntropyError},
+    platform::image::NativeReadOnlyImage,
 };
 use stela_linux::{
     owner::{
@@ -31,16 +34,27 @@ use stela_linux::{
     },
     task::{
         HostedTaskBinding, ResourceBootstrapError, initialize_hosted_resources,
-        reserve_hosted_child_stack,
+        reserve_hosted_child_stack, start_hosted_threads, step_hosted,
     },
 };
 
 struct Host {
     clock: Arc<HostedClock>,
+    boot_origin_ns: u64,
     timer: DomainRaised<HostedDomain>,
     tsc_hz: NonZeroU64,
     realtime: RealtimeOrigin,
-    random: RefCell<stela_crypto::random::Generator>,
+    random: RefCell<stela_linux::random::Seeded>,
+}
+
+struct HostEntropy;
+
+impl Entropy for HostEntropy {
+    fn fill(&self, output: &mut [u8]) -> Result<(), EntropyError> {
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut source| source.read_exact(output))
+            .map_err(|_| EntropyError::Failed)
+    }
 }
 
 struct ProcessImage {
@@ -81,9 +95,30 @@ unsafe impl NativeReadOnlyImage for ProcessImage {
     }
 }
 
+fn host_boottime() -> Result<u64, WorkError> {
+    let mut sample = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: CLOCK_BOOTTIME initializes the exact output on success.
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, sample.as_mut_ptr()) } != 0 {
+        return Err(WorkError::Unavailable);
+    }
+    // SAFETY: the successful host call wrote both fields.
+    let sample = unsafe { sample.assume_init() };
+    let seconds = u64::try_from(sample.tv_sec).map_err(|_| WorkError::CorruptContext)?;
+    let nanos = u64::try_from(sample.tv_nsec).map_err(|_| WorkError::CorruptContext)?;
+    seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|base| base.checked_add(nanos))
+        .ok_or(WorkError::Exhausted)
+}
+
 impl Platform for Host {
     fn now_ns(&self) -> i64 {
         self.clock.now_ns().unwrap().try_into().unwrap()
+    }
+    fn boottime_ns(&self) -> Result<u64, WorkError> {
+        host_boottime()?
+            .checked_sub(self.boot_origin_ns)
+            .ok_or(WorkError::CorruptContext)
     }
     fn calibrated_tsc_hz(&self) -> Option<NonZeroU64> {
         Some(self.tsc_hz)
@@ -111,6 +146,13 @@ impl Platform for Host {
     }
     fn random_bytes(&self, bytes: &mut [u8]) {
         self.random.borrow_mut().fill(bytes);
+    }
+    fn mix_random(&self, bytes: &[u8]) -> bool {
+        let Ok(ticks) = self.clock.now_ns() else {
+            return false;
+        };
+        self.random.borrow_mut().mix(ticks, bytes);
+        true
     }
     fn shutdown(&self, _: bool) {
         process::abort()
@@ -154,6 +196,7 @@ unsafe extern "C" {
     static init_task: u8;
     static jiffies_64: u64;
     static system_wq: *const c_void;
+    static kthreadd_task: *const c_void;
     static sighand_cachep: *const c_void;
     fn stela_linux_current() -> *const u8;
     fn task_sched_runtime(task: *const u8) -> u64;
@@ -218,7 +261,7 @@ unsafe extern "C" fn check_initial(owner: *const RawOwner, context: *mut c_void)
         Err(WorkError::Unavailable)
     );
     // SAFETY: the stopped dispatcher keeps the exact pinned runtime handle.
-    let runtime = unsafe { *context.cast::<Pin<&HostedRuntime<4>>>() };
+    let runtime = unsafe { *context.cast::<Pin<&HostedRuntime<8>>>() };
     // SAFETY: C checks the owner before using it. A refusal must release the worker.
     let refused = unsafe { reserve_hosted_child_stack(runtime, ptr::null()) };
     assert!(matches!(refused, Err(ResourceBootstrapError::Native(-1))));
@@ -304,6 +347,7 @@ fn hosted_initial_enters_the_original_task_without_native_admission() {
         "hosted_initial_enters_the_original_task_without_native_admission",
         "original hosted Initial attached",
         MODEL_PAGES,
+        1,
         check_initial,
         run_once,
     );
@@ -315,6 +359,7 @@ fn hosted_initial_bootstraps_original_resource_roots() {
         "hosted_initial_bootstraps_original_resource_roots",
         "original hosted resource bootstrap returned",
         16 * 1024,
+        1,
         check_resources,
         run_once,
     );
@@ -326,14 +371,86 @@ fn hosted_initial_services_original_timers_after_a_park() {
         "hosted_initial_services_original_timers_after_a_park",
         "original hosted timer service resumed",
         16 * 1024,
+        1,
         start_timer_service,
         drive_timer_service,
     );
 }
 
+#[test]
+fn hosted_initial_publishes_original_pid1_and_kthreadd() {
+    in_fresh_process(
+        "hosted_initial_publishes_original_pid1_and_kthreadd",
+        "original hosted kernel children dispatched",
+        16 * 1024,
+        2,
+        check_threads_published,
+        drive_first_children,
+    );
+}
+
+#[test]
+fn hosted_original_fork_returns_enomem_without_an_unowned_stack() {
+    in_fresh_process(
+        "hosted_original_fork_returns_enomem_without_an_unowned_stack",
+        "original hosted fork exhausted its worker inventory",
+        16 * 1024,
+        1,
+        check_threads_exhausted,
+        run_once,
+    );
+}
+
+unsafe extern "C" fn check_threads_exhausted(owner: *const RawOwner, context: *mut c_void) -> ! {
+    // SAFETY: the stopped dispatcher keeps the exact pinned runtime handle.
+    let runtime = unsafe { *context.cast::<Pin<&HostedRuntime<8>>>() };
+    // SAFETY: the mounted Initial is the real entered source creator.
+    let _entered = unsafe { Entered::new(owner) };
+    // SAFETY: the permanent model inventory and clock are retained.
+    unsafe { initialize_hosted_resources(owner) }.unwrap();
+    // SAFETY: exact entered Initial after original resource initialization.
+    let result = unsafe { start_hosted_threads(owner, runtime) };
+    assert_eq!(result, Err(ResourceBootstrapError::Native(-12)));
+    // SAFETY: the failed startup never published a kthreadd task.
+    assert!(unsafe { kthreadd_task }.is_null());
+    println!("original hosted fork exhausted its worker inventory");
+    process::exit(0);
+}
+
+unsafe extern "C" fn check_threads_published(owner: *const RawOwner, context: *mut c_void) -> ! {
+    // SAFETY: exact retained original owner/current and dispatcher runtime handle.
+    let (owner, runtime) = unsafe { (&*owner, *context.cast::<Pin<&HostedRuntime<8>>>()) };
+    {
+        // SAFETY: the mounted Initial is the real entered source creator.
+        let _entered = unsafe { Entered::new(owner) };
+        // SAFETY: the permanent model inventory and clock are retained.
+        unsafe { initialize_hosted_resources(owner) }.unwrap();
+        // SAFETY: exact entered Initial after original resource initialization.
+        unsafe { start_hosted_threads(owner, runtime) }.unwrap();
+        // SAFETY: original publication retains this genuine kthreadd task.
+        assert!(!unsafe { kthreadd_task }.is_null());
+        // SAFETY: both real children still own the reserved stacks.
+        let extra = unsafe { reserve_hosted_child_stack(runtime, owner) };
+        assert!(matches!(
+            extra,
+            Err(ResourceBootstrapError::Work(WorkError::Full))
+        ));
+    }
+    // SAFETY: mounted Initial's exact scope with the original resources kept.
+    unsafe { stela_linux::service::run_hosted_service(owner, runtime) }
+}
+
+fn drive_first_children(runtime: Pin<&HostedRuntime<8>>, _: &HostedClock) {
+    assert!(step_hosted(runtime, false).unwrap()); // Initial parks
+    assert!(step_hosted(runtime, false).unwrap()); // PID1 waits for kthreadd
+    assert!(step_hosted(runtime, false).unwrap()); // kthreadd enters and parks
+    println!("original hosted kernel children dispatched");
+    process::exit(0);
+}
+
 unsafe extern "C" fn start_timer_service(owner: *const RawOwner, context: *mut c_void) -> ! {
     // SAFETY: exact retained original owner/current and dispatcher runtime handle.
-    let (owner, runtime) = unsafe { (&*owner, *context.cast::<Pin<&HostedRuntime<4>>>()) };
+    let (owner, runtime) = unsafe { (&*owner, *context.cast::<Pin<&HostedRuntime<8>>>()) };
     {
         // SAFETY: this is the exact original Initial, before the C loop enters it.
         let _entered = unsafe { Entered::new(owner) };
@@ -344,11 +461,11 @@ unsafe extern "C" fn start_timer_service(owner: *const RawOwner, context: *mut c
     unsafe { stela_linux::service::run_hosted_service(owner, runtime) }
 }
 
-fn run_once(runtime: Pin<&HostedRuntime<4>>, _: &HostedClock) {
+fn run_once(runtime: Pin<&HostedRuntime<8>>, _: &HostedClock) {
     runtime.step().unwrap();
 }
 
-fn drive_timer_service(runtime: Pin<&HostedRuntime<4>>, clock: &HostedClock) {
+fn drive_timer_service(runtime: Pin<&HostedRuntime<8>>, clock: &HostedClock) {
     let raised = runtime.service_raised_work().unwrap();
     raised.raise().unwrap();
     assert!(runtime.step().unwrap());
@@ -377,8 +494,9 @@ fn in_fresh_process(
     test: &str,
     witness: &str,
     page_count: usize,
+    general_stacks: usize,
     body: unsafe extern "C" fn(*const RawOwner, *mut c_void) -> !,
-    drive: fn(Pin<&HostedRuntime<4>>, &HostedClock),
+    drive: fn(Pin<&HostedRuntime<8>>, &HostedClock),
 ) {
     const CHILD: &str = "STELA_HOSTED_INITIAL_CHILD";
     if std::env::var_os(CHILD).is_none() {
@@ -402,11 +520,16 @@ fn in_fresh_process(
     let clock = HostedClock::new(&execution).unwrap();
     let idle = HostedIdle::new(&clock).unwrap();
     let deadlines = HostedDeadlines::new(&clock, &idle).unwrap();
-    let queue = HostedQueue::<4>::new(execution, Arc::new(())).unwrap();
+    let queue = HostedQueue::<8>::new(execution, Arc::new(())).unwrap();
     let stack = stela_linux::task::stack_requirement().unwrap();
     // SAFETY: this fresh process retains its only executor through exit.
     let executor = unsafe {
-        HostedExecutor::new_with_persistent_service_stacks(queue.clone(), stack, 1, deadlines)
+        HostedExecutor::new_with_persistent_service_stacks(
+            queue.clone(),
+            stack,
+            general_stacks,
+            deadlines,
+        )
     }
     .unwrap();
     let runtime = executor.runtime();
@@ -429,17 +552,13 @@ fn in_fresh_process(
         utc.subsec_nanos(),
     )
     .unwrap();
-    let mut seed = [0; 32];
-    std::fs::File::open("/dev/urandom")
-        .unwrap()
-        .read_exact(&mut seed)
-        .unwrap();
     let platform = Host {
         clock: clock.clone(),
+        boot_origin_ns: host_boottime().unwrap(),
         timer: runtime.service_raised_work().unwrap(),
         tsc_hz: NonZeroU64::new(hz.try_into().unwrap()).unwrap(),
         realtime,
-        random: RefCell::new(stela_crypto::random::Generator::from_seed(seed)),
+        random: RefCell::new(stela_linux::random::Seeded::from_entropy(&HostEntropy).unwrap()),
     };
     let context = ptr::from_ref(&runtime).cast_mut().cast();
     // SAFETY: the exact static archive, dispatcher and local runtime handle

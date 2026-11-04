@@ -17,30 +17,30 @@ const ACTIVE: u8 = 2;
 const SOURCE_RELEASED: u8 = 3;
 const FINISHED: u8 = 4;
 #[repr(C)]
-struct CData {
+pub(super) struct CData {
     _opaque: [u8; 0],
 }
 #[repr(C)]
-struct DataIdentity {
-    queue_id: u64,
-    context_id: u64,
-    sequence: u64,
+pub(super) struct DataIdentity {
+    pub(super) queue_id: u64,
+    pub(super) context_id: u64,
+    pub(super) sequence: u64,
 }
 const _: () = assert!(core::mem::size_of::<DataIdentity>() == 24);
 #[repr(C)]
-struct DataView {
-    lease: *mut CData,
-    total: *mut u64,
-    system: *mut u64,
+pub(super) struct DataView {
+    pub(super) lease: *mut CData,
+    pub(super) total: *mut u64,
+    pub(super) system: *mut u64,
 }
 const _: () = assert!(core::mem::size_of::<DataView>() == 24);
 unsafe extern "C" {
-    fn stela_linux_task_data_prepare(
+    pub(super) fn stela_linux_task_data_prepare(
         task: *mut CTask,
         owner: *const RawOwner,
         view: *mut DataView,
     ) -> i32;
-    fn stela_linux_task_data_release(
+    pub(super) fn stela_linux_task_data_release(
         lease: *mut CData,
         owner: *const RawOwner,
         view: *const DataIdentity,
