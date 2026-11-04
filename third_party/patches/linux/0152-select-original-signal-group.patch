@@ -1,0 +1,368 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 01:12:25 -0500
+Subject: [PATCH] refactor(signal): select original process-group delivery
+
+---
+ kernel/signal.c       | 141 ----------------------------------------
+ kernel/signal_state.c | 145 ++++++++++++++++++++++++++++++++++++++++++
+ kernel/signal_state.h |   2 +
+ 3 files changed, 147 insertions(+), 141 deletions(-)
+
+diff --git a/kernel/signal.c b/kernel/signal.c
+index fe06a99c..dc7669c2 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -289,78 +289,6 @@ still_pending:
+ 	return info->si_signo;
+ }
+ 
+-/*
+- * Tell a process that it has a new active signal..
+- *
+- * NOTE! we rely on the previous spin_lock to
+- * lock interrupts for us! We can only be called with
+- * "siglock" held, and the local interrupt must
+- * have been disabled when that got acquired!
+- *
+- * No need to set need_resched since signal event passing
+- * goes through ->blocked
+- */
+-static inline bool si_fromuser(const struct kernel_siginfo *info)
+-{
+-	return info == SEND_SIG_NOINFO ||
+-		(!is_si_special(info) && SI_FROMUSER(info));
+-}
+-
+-/*
+- * called with RCU read lock from check_kill_permission()
+- */
+-static bool kill_ok_by_cred(struct task_struct *t)
+-{
+-	const struct cred *cred = current_cred();
+-	const struct cred *tcred = __task_cred(t);
+-
+-	return uid_eq(cred->euid, tcred->suid) ||
+-	       uid_eq(cred->euid, tcred->uid) ||
+-	       uid_eq(cred->uid, tcred->suid) ||
+-	       uid_eq(cred->uid, tcred->uid) ||
+-	       ns_capable(tcred->user_ns, CAP_KILL);
+-}
+-
+-/*
+- * Bad permissions for sending the signal
+- * - the caller must hold the RCU read lock
+- */
+-static int check_kill_permission(int sig, struct kernel_siginfo *info,
+-				 struct task_struct *t)
+-{
+-	struct pid *sid;
+-	int error;
+-
+-	if (!valid_signal(sig))
+-		return -EINVAL;
+-
+-	if (!si_fromuser(info))
+-		return 0;
+-
+-	error = audit_signal_info(sig, t); /* Let audit system see the signal */
+-	if (error)
+-		return error;
+-
+-	if (!same_thread_group(current, t) &&
+-	    !kill_ok_by_cred(t)) {
+-		switch (sig) {
+-		case SIGCONT:
+-			sid = task_session(t);
+-			/*
+-			 * We don't return the error if sid == NULL. The
+-			 * task was unhashed, the caller must notice this.
+-			 */
+-			if (!sid || sid == task_session(current))
+-				break;
+-			fallthrough;
+-		default:
+-			return -EPERM;
+-		}
+-	}
+-
+-	return security_task_kill(t, info, sig, NULL);
+-}
+-
+ static void print_fatal_signal(int signr)
+ {
+ 	struct pt_regs *regs = task_pt_regs(current);
+@@ -462,31 +390,6 @@ int force_sig_info(struct kernel_siginfo *info)
+ 	return force_sig_info_to_task(info, current, HANDLER_CURRENT);
+ }
+ 
+-/*
+- * Nuke all other threads in the group.
+- */
+-int zap_other_threads(struct task_struct *p)
+-{
+-	struct task_struct *t;
+-	int count = 0;
+-
+-	p->signal->group_stop_count = 0;
+-	task_clear_jobctl_pending(p, JOBCTL_PENDING_MASK);
+-
+-	for_other_threads(p, t) {
+-		task_clear_jobctl_pending(t, JOBCTL_PENDING_MASK);
+-		count++;
+-
+-		/* Don't bother with already dead threads */
+-		if (t->exit_state)
+-			continue;
+-		sigaddset(&t->pending.signal, SIGKILL);
+-		signal_wake_up(t, 1);
+-	}
+-
+-	return count;
+-}
+-
+ #ifdef CONFIG_LOCKDEP
+ void lockdep_assert_task_sighand_held(struct task_struct *task)
+ {
+@@ -502,50 +405,6 @@ void lockdep_assert_task_sighand_held(struct task_struct *task)
+ }
+ #endif
+ 
+-/*
+- * send signal info to all the members of a thread group or to the
+- * individual thread if type == PIDTYPE_PID.
+- */
+-int group_send_sig_info(int sig, struct kernel_siginfo *info,
+-			struct task_struct *p, enum pid_type type)
+-{
+-	int ret;
+-
+-	rcu_read_lock();
+-	ret = check_kill_permission(sig, info, p);
+-	rcu_read_unlock();
+-
+-	if (!ret && sig)
+-		ret = do_send_sig_info(sig, info, p, type);
+-
+-	return ret;
+-}
+-
+-/*
+- * __kill_pgrp_info() sends a signal to a process group: this is what the tty
+- * control characters do (^C, ^Z etc)
+- * - the caller must hold at least a readlock on tasklist_lock
+- */
+-int __kill_pgrp_info(int sig, struct kernel_siginfo *info, struct pid *pgrp)
+-{
+-	struct task_struct *p = NULL;
+-	int ret = -ESRCH;
+-
+-	do_each_pid_task(pgrp, PIDTYPE_PGID, p) {
+-		int err = group_send_sig_info(sig, info, p, PIDTYPE_PGID);
+-		/*
+-		 * If group_send_sig_info() succeeds at least once ret
+-		 * becomes 0 and after that the code below has no effect.
+-		 * Otherwise we return the last err or -ESRCH if this
+-		 * process group is empty.
+-		 */
+-		if (ret)
+-			ret = err;
+-	} while_each_pid_task(pgrp, PIDTYPE_PGID, p);
+-
+-	return ret;
+-}
+-
+ static int kill_pid_info_type(int sig, struct kernel_siginfo *info,
+ 				struct pid *pid, enum pid_type type)
+ {
+diff --git a/kernel/signal_state.c b/kernel/signal_state.c
+index 012bd5c0..2606e737 100644
+--- a/kernel/signal_state.c
++++ b/kernel/signal_state.c
+@@ -11,7 +11,10 @@
+  *		to allow signals to be sent reliably.
+  */
+ 
++#include <linux/audit.h>
++#include <linux/capability.h>
+ #include <linux/cgroup.h>
++#include <linux/cred.h>
+ #include <linux/compat.h>
+ #include <linux/export.h>
+ #include <linux/freezer.h>
+@@ -25,6 +28,7 @@
+ 
+ #include <linux/ptrace.h>
+ #include <linux/ratelimit.h>
++#include <linux/security.h>
+ #include <linux/signalfd.h>
+ #include <trace/events/signal.h>
+ 
+@@ -469,6 +473,17 @@ static struct sigqueue *sigqueue_alloc(int sig, struct task_struct *t, gfp_t gfp
+ 	return q;
+ }
+ 
++/*
++ * Tell a process that it has a new active signal..
++ *
++ * NOTE! we rely on the previous spin_lock to
++ * lock interrupts for us! We can only be called with
++ * "siglock" held, and the local interrupt must
++ * have been disabled when that got acquired!
++ *
++ * No need to set need_resched since signal event passing
++ * goes through ->blocked
++ */
+ void signal_wake_up_state(struct task_struct *t, unsigned int state)
+ {
+ 	lockdep_assert_held(&t->sighand->siglock);
+@@ -1060,6 +1075,136 @@ struct sighand_struct *lock_task_sighand(struct task_struct *tsk,
+ 	return sighand;
+ }
+ 
++static inline bool si_fromuser(const struct kernel_siginfo *info)
++{
++	return info == SEND_SIG_NOINFO ||
++		(!is_si_special(info) && SI_FROMUSER(info));
++}
++
++/*
++ * called with RCU read lock from check_kill_permission()
++ */
++static bool kill_ok_by_cred(struct task_struct *t)
++{
++	const struct cred *cred = current_cred();
++	const struct cred *tcred = __task_cred(t);
++
++	return uid_eq(cred->euid, tcred->suid) ||
++	       uid_eq(cred->euid, tcred->uid) ||
++	       uid_eq(cred->uid, tcred->suid) ||
++	       uid_eq(cred->uid, tcred->uid) ||
++	       ns_capable(tcred->user_ns, CAP_KILL);
++}
++
++/*
++ * Bad permissions for sending the signal
++ * - the caller must hold the RCU read lock
++ */
++int check_kill_permission(int sig, struct kernel_siginfo *info,
++				 struct task_struct *t)
++{
++	struct pid *sid;
++	int error;
++
++	if (!valid_signal(sig))
++		return -EINVAL;
++
++	if (!si_fromuser(info))
++		return 0;
++
++	error = audit_signal_info(sig, t); /* Let audit system see the signal */
++	if (error)
++		return error;
++
++	if (!same_thread_group(current, t) &&
++	    !kill_ok_by_cred(t)) {
++		switch (sig) {
++		case SIGCONT:
++			sid = task_session(t);
++			/*
++			 * We don't return the error if sid == NULL. The
++			 * task was unhashed, the caller must notice this.
++			 */
++			if (!sid || sid == task_session(current))
++				break;
++			fallthrough;
++		default:
++			return -EPERM;
++		}
++	}
++
++	return security_task_kill(t, info, sig, NULL);
++}
++
++/*
++ * Nuke all other threads in the group.
++ */
++int zap_other_threads(struct task_struct *p)
++{
++	struct task_struct *t;
++	int count = 0;
++
++	p->signal->group_stop_count = 0;
++	task_clear_jobctl_pending(p, JOBCTL_PENDING_MASK);
++
++	for_other_threads(p, t) {
++		task_clear_jobctl_pending(t, JOBCTL_PENDING_MASK);
++		count++;
++
++		/* Don't bother with already dead threads */
++		if (t->exit_state)
++			continue;
++		sigaddset(&t->pending.signal, SIGKILL);
++		signal_wake_up(t, 1);
++	}
++
++	return count;
++}
++
++/*
++ * send signal info to all the members of a thread group or to the
++ * individual thread if type == PIDTYPE_PID.
++ */
++int group_send_sig_info(int sig, struct kernel_siginfo *info,
++			struct task_struct *p, enum pid_type type)
++{
++	int ret;
++
++	rcu_read_lock();
++	ret = check_kill_permission(sig, info, p);
++	rcu_read_unlock();
++
++	if (!ret && sig)
++		ret = do_send_sig_info(sig, info, p, type);
++
++	return ret;
++}
++
++/*
++ * __kill_pgrp_info() sends a signal to a process group: this is what the tty
++ * control characters do (^C, ^Z etc)
++ * - the caller must hold at least a readlock on tasklist_lock
++ */
++int __kill_pgrp_info(int sig, struct kernel_siginfo *info, struct pid *pgrp)
++{
++	struct task_struct *p = NULL;
++	int ret = -ESRCH;
++
++	do_each_pid_task(pgrp, PIDTYPE_PGID, p) {
++		int err = group_send_sig_info(sig, info, p, PIDTYPE_PGID);
++		/*
++		 * If group_send_sig_info() succeeds at least once ret
++		 * becomes 0 and after that the code below has no effect.
++		 * Otherwise we return the last err or -ESRCH if this
++		 * process group is empty.
++		 */
++		if (ret)
++			ret = err;
++	} while_each_pid_task(pgrp, PIDTYPE_PGID, p);
++
++	return ret;
++}
++
+ int send_sig_info(int sig, struct kernel_siginfo *info, struct task_struct *p)
+ {
+ 	/*
+diff --git a/kernel/signal_state.h b/kernel/signal_state.h
+index ce75c995..4ccfb7a2 100644
+--- a/kernel/signal_state.h
++++ b/kernel/signal_state.h
+@@ -32,6 +32,8 @@ bool prepare_signal(int sig, struct task_struct *p, bool force);
+ void complete_signal(int sig, struct task_struct *p, enum pid_type type);
+ int __send_signal_locked(int sig, struct kernel_siginfo *info,
+ 				struct task_struct *t, enum pid_type type, bool force);
++int check_kill_permission(int sig, struct kernel_siginfo *info,
++			  struct task_struct *t);
+ bool task_participate_group_stop(struct task_struct *task);
+ void do_notify_parent_cldstop(struct task_struct *tsk, bool for_ptracer, int why);
+ void retarget_shared_pending(struct task_struct *tsk, sigset_t *which);
