@@ -1,13 +1,12 @@
-//! Register residency for non-faulting scalar self-loops. Every exit writes back
-//! the full guest register bank.
+//! Bounded native self-loops. Every return settles the guest register bank.
 use super::{
     AllocationStats, Effects, Emitter, FRAME_LOCATIONS, GPR_SLOTS, HostGpr, Location,
     MAX_INSTRUCTIONS, OptimizedRegion, POOL, Resident, analysis, constant, encoding, flags,
 };
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Code, Cond, Gpr, Mem, Patch, Size};
 use crate::{
     GuestAddress, NativeBlock,
-    aarch64::{Instruction, Operation},
+    aarch64::{AddressMode, Instruction, MemoryTransfer, Operation, Register},
     block::{ExitKind, Terminator},
 };
 use alloc::vec;
@@ -15,6 +14,139 @@ use alloc::vec::Vec;
 
 const ARM_CONDITION_INVERSE_BIT: u8 = 1;
 const INSTRUCTION_BYTES: u64 = core::mem::size_of::<u32>() as u64;
+const MAX_FRAME_LOOP_INSTRUCTIONS: usize = 32;
+const FRAME_LOOP_COUNTER: Gpr = Gpr::R12;
+
+/// The existing ordinary body finishes with a settled frame. Its regions
+/// preserve callee-saved registers, including the native budget counter.
+/// This wrapper is only used for reviewed direct-RAM bodies with no helper
+/// exits, stack checks or fault-recoverable execution context.
+pub(crate) struct FrameLoop {
+    entry: GuestAddress,
+    header: usize,
+    zero_budget: Patch,
+}
+
+impl FrameLoop {
+    pub(crate) fn begin(code: &mut Code, entry: GuestAddress) -> Self {
+        const _: () = assert!(crate::block::loop_budget::REMAINING_OFFSET == 0);
+        let mut asm = code.asm();
+        asm.push(FRAME_LOOP_COUNTER);
+        asm.push(Gpr::Rsi);
+        asm.mov_load(Size::Qword, FRAME_LOOP_COUNTER, Mem::base(Gpr::Rsi, 0));
+        asm.test(Size::Qword, FRAME_LOOP_COUNTER, FRAME_LOOP_COUNTER);
+        let zero_budget = asm.jcc(Cond::E);
+        let header = asm.len();
+        Self {
+            entry,
+            header,
+            zero_budget,
+        }
+    }
+
+    pub(crate) fn finish(self, code: &mut Code, taken: Option<Cond>, fallthrough: GuestAddress) {
+        let mut asm = code.asm();
+        let normal = taken.map(|condition| asm.jcc(condition.negate()));
+        // The guest predicate is already consumed and NZCV is settled. A
+        // single decrement both accounts for this iteration and gates the
+        // native backedge.
+        asm.dec(Size::Qword, FRAME_LOOP_COUNTER);
+        let again = asm.jcc(Cond::Ne);
+        asm.bind_back(again, self.header);
+        asm.bind(self.zero_budget);
+        settle_frame_budget(&mut asm);
+        super::super::block::direct_exit_with(&mut asm, self.entry, ExitKind::Direct);
+        if let Some(normal) = normal {
+            asm.bind(normal);
+            asm.dec(Size::Qword, FRAME_LOOP_COUNTER);
+            settle_frame_budget(&mut asm);
+            super::super::block::direct_exit_with(&mut asm, fallthrough, ExitKind::Fallthrough);
+        }
+    }
+}
+
+fn settle_frame_budget(asm: &mut crate::x86_64::asm::Asm<'_>) {
+    asm.pop(Gpr::Rsi);
+    asm.mov_store(Size::Qword, Mem::base(Gpr::Rsi, 0), FRAME_LOOP_COUNTER);
+    asm.pop(FRAME_LOOP_COUNTER);
+}
+
+fn direct_ram_loop(
+    instructions: &[Instruction],
+    terminal: Option<&(GuestAddress, Terminator)>,
+    fallthrough: GuestAddress,
+) -> Option<GuestAddress> {
+    let entry = instructions.first()?.pc;
+    let (branch_pc, Terminator::Branch(Operation::BranchCondition { target, .. })) = terminal?
+    else {
+        return None;
+    };
+    if *target != entry
+        || instructions.len() > MAX_FRAME_LOOP_INSTRUCTIONS
+        || branch_pc.0
+            != entry
+                .0
+                .checked_add(instructions.len() as u64 * INSTRUCTION_BYTES)?
+        || fallthrough.0 != branch_pc.0.checked_add(INSTRUCTION_BYTES)?
+    {
+        return None;
+    }
+    let mut loads = 0;
+    for (index, instruction) in instructions.iter().enumerate() {
+        if instruction.pc.0 != entry.0.checked_add(index as u64 * INSTRUCTION_BYTES)? {
+            return None;
+        }
+        let operation = &instruction.operation;
+        match operation {
+            Operation::Memory {
+                transfer: MemoryTransfer::Load { signed: false, .. },
+                base: Register::X(_),
+                mode: AddressMode::Offset,
+                ..
+            }
+            | Operation::MemoryPair {
+                transfer: MemoryTransfer::Load { signed: false, .. },
+                base: Register::X(_),
+                mode: AddressMode::Offset,
+                ..
+            } if analysis::clean_load_effects(operation).is_some() => loads += 1,
+            operation if flags::analyze_value(operation).is_some() => {}
+            _ => return None,
+        }
+    }
+    // Prefer dense read loops over adding an ABI wrapper to short, occasional
+    // memory edges. Register-only loops have the earlier residency plans.
+    (loads >= 2).then_some(entry)
+}
+
+#[cfg(test)]
+#[test]
+fn direct_ram_admission_excludes_stack_checks_and_stores() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features},
+    };
+
+    let options = Options::new(BlockProfile::ORDINARY, TargetCpu::Baseline);
+    let second_load = 0xf940_0423_u32;
+    let subtract = 0xf100_0400;
+    let branch = 0x54ff_ffa1;
+    for (first_load, resident) in [
+        (0xf940_0022_u32, true), // LDR X2, [X1]
+        (0xf940_03e2, false),    // LDR X2, [SP]
+        (0xf900_0022, false),    // STR X2, [X1]
+        (0xb980_0022, false),    // LDRSW X2, [X1]
+    ] {
+        let source: Vec<_> = [first_load, second_load, subtract, branch]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let plan = CompilationPlan::new(&source, GuestAddress(0x1000), &options)
+            .unwrap()
+            .with_resident_loops();
+        assert_eq!(plan.profile().has(Features::RESIDENT_LOOPS), resident);
+    }
+}
 
 pub(crate) fn prefix_with_budget(mut native: NativeBlock, base: GuestAddress) -> NativeBlock {
     let mut code = Code::new();
@@ -47,6 +179,7 @@ pub(crate) struct Plan {
 
 enum Choice {
     Legacy(LegacyPlan),
+    DirectRam(GuestAddress),
     Allocated {
         instructions: Vec<Instruction>,
         native: NativeBlock,
@@ -64,21 +197,40 @@ impl Plan {
                 choice: Choice::Legacy(plan),
             });
         }
-        let native = allocated_loop(instructions, terminal, fallthrough)?;
-        Some(Self {
-            choice: Choice::Allocated {
+        let choice = if let Some(native) = allocated_loop(instructions, terminal, fallthrough) {
+            Choice::Allocated {
                 instructions: instructions.to_vec(),
                 native,
-            },
-        })
+            }
+        } else {
+            Choice::DirectRam(direct_ram_loop(instructions, terminal, fallthrough)?)
+        };
+        Some(Self { choice })
     }
 
     pub(crate) fn emit(
         self,
         instructions: &[Instruction],
+        terminal: Option<&(GuestAddress, Terminator)>,
+        fallthrough: GuestAddress,
+        target: crate::TargetCpu,
     ) -> Result<NativeBlock, super::RegionError> {
         match self.choice {
             Choice::Legacy(plan) => plan.emit(instructions),
+            Choice::DirectRam(entry) => {
+                // The caller's immutable parse and source identity own the
+                // words. Recheck the emitter's no-helper contract here too.
+                if direct_ram_loop(instructions, terminal, fallthrough) != Some(entry) {
+                    return Err(super::RegionError::ChangedInstructions);
+                }
+                Ok(super::super::block::emit_frame_loop(
+                    instructions,
+                    terminal,
+                    fallthrough,
+                    target,
+                    entry,
+                ))
+            }
             Choice::Allocated {
                 instructions: planned,
                 native,

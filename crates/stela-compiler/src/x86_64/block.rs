@@ -89,6 +89,31 @@ pub(crate) fn emit_ordinary_for_target(
             optimize: true,
             fault_table: false,
             pinned: false,
+            frame_loop: None,
+        },
+        super::MemoryChecks::DEFAULT,
+        super::NativeSystem::NONE,
+    )
+    .0
+}
+
+pub(crate) fn emit_frame_loop(
+    instructions: &[Instruction],
+    terminal: Option<&(GuestAddress, Terminator)>,
+    fallthrough: GuestAddress,
+    target: crate::TargetCpu,
+    entry: GuestAddress,
+) -> NativeBlock {
+    emit_selected(
+        instructions,
+        terminal,
+        fallthrough,
+        target,
+        RegionPolicy {
+            optimize: true,
+            fault_table: false,
+            pinned: false,
+            frame_loop: Some(entry),
         },
         super::MemoryChecks::DEFAULT,
         super::NativeSystem::NONE,
@@ -129,6 +154,7 @@ pub(crate) fn emit_for_target(
             optimize: false,
             fault_table: false,
             pinned: false,
+            frame_loop: None,
         },
         checks,
         super::NativeSystem::NONE,
@@ -162,6 +188,7 @@ pub(crate) fn emit_system_mode(
             optimize: false,
             fault_table: true,
             pinned: true,
+            frame_loop: None,
         },
         super::MemoryChecks {
             guest_range: true,
@@ -178,6 +205,7 @@ struct RegionPolicy {
     fault_table: bool,
     /// Keep guest registers in host registers ([`super::pinned`]).
     pinned: bool,
+    frame_loop: Option<GuestAddress>,
 }
 
 /// With `fault_table`, region accesses keep dirty values in registers and
@@ -195,6 +223,7 @@ fn emit_selected(
         optimize: optimize_regions,
         fault_table,
         pinned,
+        frame_loop,
     } = regions;
     let mut fault_recovery = vec![];
     let mut block = super::Emitted::default();
@@ -209,6 +238,7 @@ fn emit_selected(
         code.set_linked_block(first.0);
     }
     code.set_constant_time(target.data_independent_timing());
+    let frame_loop = frame_loop.map(|entry| super::region::FrameLoop::begin(code, entry));
     let mut fixups = vec![];
     // The DIT audit covers each instruction's own lowering, not the
     // register-allocated and clean-load regions' recipes.
@@ -394,18 +424,30 @@ fn emit_selected(
         "ordinary instruction prefix cannot branch"
     );
     out_of_line.place(code);
-    emit_terminal(
-        code,
-        &mut block.source_map,
-        terminal,
-        TerminalContext {
-            fallthrough,
-            native,
-            checks,
-            rax: after.rax,
-            target,
-        },
-    );
+    if let Some(frame_loop) = frame_loop {
+        let Some((pc, Terminator::Branch(operation))) = terminal else {
+            unreachable!("a frame loop has a validated direct branch")
+        };
+        debug_assert!(side_exits.is_empty());
+        block.source_map[0].1 = 0;
+        block.source_map.push((*pc, code.len()));
+        code.set_instruction(block.source_map.len() - 1);
+        let taken = branch_condition(code, operation, after.rax);
+        frame_loop.finish(code, taken, fallthrough);
+    } else {
+        emit_terminal(
+            code,
+            &mut block.source_map,
+            terminal,
+            TerminalContext {
+                fallthrough,
+                native,
+                checks,
+                rax: after.rax,
+                target,
+            },
+        );
+    }
     // After the terminal, whose direct exits end the code before them.
     let instructions_run = block.source_map.len();
     for (jump, target, run) in side_exits {
