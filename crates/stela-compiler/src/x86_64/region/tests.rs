@@ -592,7 +592,9 @@ fn clean_loads_check_the_guest_range_when_asked() {
             .filter(|bytes| *bytes == check)
             .count()
     };
-    let unchecked = emit_clean_load_prefix(&instructions, true, None).unwrap();
+    // Keep both arms on the checked-memory path. With no range policy,
+    // ordinary lowering can also fold the cached base into the load.
+    let unchecked = emit_clean_load_prefix(&instructions, true, Some(&[false; 5])).unwrap();
     let checked = emit_clean_load_prefix(&instructions, true, Some(&[true; 5])).unwrap();
     assert_eq!(checks(&unchecked.code), 0);
     assert_eq!(checks(&checked.code), 3);
