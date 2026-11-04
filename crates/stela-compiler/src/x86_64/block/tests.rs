@@ -5,6 +5,126 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 #[test]
+fn pinned_carry_follows_live_flags_and_keeps_the_next_fault_boundary() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features, RecoverySiteKind},
+    };
+    let start = GuestAddress(0xeee3c);
+    let words = [
+        0xab06_0273u32, // ADDS X19,X19,X6
+        0xba07_0294,    // ADCS X20,X20,X7
+        0xf940_0289,    // LDR X9,[X20]
+    ];
+    let compile = |words: &[u32], pc, target| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let profile = BlockProfile::new(Features::SYSTEM_MODE);
+        CompilationPlan::new(&source, pc, &Options::new(profile, target))
+            .unwrap()
+            .compile()
+            .unwrap()
+    };
+    let target = TargetCpu::Baseline;
+    let grouped = compile(&words, start, target);
+    let dit = compile(&words, start, target.with_data_independent_timing());
+    let second = GuestAddress(start.0 + 4);
+    let independent = compile(&words[1..], second, target);
+    let mut scratch = Code::pinned();
+    super::super::flag_word::carry(&mut scratch.asm(), 29);
+    let reads_carry = |native: &NativeBlock, row: usize| {
+        let start = native.source_map[row].1;
+        let end = native.source_map[row + 1].1;
+        native.x86_64_code[start..end]
+            .windows(scratch.len())
+            .any(|bytes| bytes == &scratch[..])
+    };
+    assert!(!reads_carry(&grouped.native, 1));
+    assert!(reads_carry(&dit.native, 1));
+    assert!(reads_carry(&independent.native, 0));
+    assert_eq!(grouped.native.source_map.len(), words.len());
+    assert_eq!(grouped.native.source_map[1].0, second);
+    assert_eq!(grouped.native.source_map[2].0, GuestAddress(start.0 + 8));
+    let access = grouped
+        .fault_recovery
+        .iter()
+        .find(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+        .unwrap();
+    assert_eq!(
+        access.retirement.instruction_pc(),
+        grouped.native.source_map[2].0
+    );
+    assert_eq!(access.retirement.retired_before(), 2);
+    assert!(access.start >= grouped.native.source_map[2].1);
+    assert!(access.bindings.is_empty());
+}
+
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn pinned_carry_matches_fallback_for_widths_aliases_and_zero_registers() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features},
+        context::ExecutionContext,
+        x86_64::{asm::vector_extensions::execution::Native, pinned::entered},
+    };
+    let compile = |words: [u32; 2], target| {
+        let source: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        let profile = BlockProfile::new(Features::SYSTEM_MODE);
+        let options = Options::new(profile, target);
+        let body = CompilationPlan::new(&source, GuestAddress(0x100000), &options)
+            .unwrap()
+            .compile()
+            .unwrap();
+        Native::new(&entered(&body.native.x86_64_code))
+    };
+    let target = TargetCpu::Baseline;
+    let dit = target.with_data_independent_timing();
+    for wide in [0, 1 << 31] {
+        for producer in [0x2b03_004f, 0x6b03_004f] {
+            for kind in [0, 1 << 29, 1 << 30, 3 << 29] {
+                for (destination, left, right) in [
+                    (8, 20, 8),
+                    (19, 19, 19),
+                    (1, 31, 0),
+                    (0, 0, 31),
+                    (31, 2, 8),
+                    (7, 31, 31),
+                    (17, 16, 1),
+                ] {
+                    let consumer = 0x1a00_0000 | kind | right << 16 | left << 5 | destination;
+                    let words = [wide | producer, wide | consumer];
+                    let grouped = compile(words, target);
+                    let fallback = compile(words, dit);
+                    for pair in [
+                        [0, 1],
+                        [1, 0],
+                        [u64::MAX, 1],
+                        [0x8000_0000_8000_0000, u64::MAX],
+                    ] {
+                        let mut original = crate::GuestState {
+                            sp: 0x1234,
+                            nzcv: 0x9000_0000,
+                            ..Default::default()
+                        };
+                        for (index, register) in original.x.iter_mut().enumerate() {
+                            *register = 0xfedc_ba98_7654_3210u64.wrapping_mul(index as u64 + 1);
+                        }
+                        original.x[2..4].copy_from_slice(&pair);
+                        let mut result = original.clone();
+                        grouped.run(&mut result, &mut ExecutionContext::default());
+                        fallback.run(&mut original, &mut ExecutionContext::default());
+                        assert_eq!(
+                            result, original,
+                            "encodings {words:08x?}, inputs {pair:016x?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn pinned_scalar_span_settles_before_the_next_access() {
     use crate::{
         Options, TargetCpu,

@@ -724,6 +724,12 @@ fn emit_single(
                 code.remove_instruction(start..start + load.len());
             }
         }
+    } else if code.is_pinned()
+        && !code.constant_time()
+        && held.rax == super::Rax::Nzcv
+        && matches!(instruction.operation, Operation::AddSubCarry { .. })
+    {
+        super::pinned::emit_live_carry(code, &instruction.operation);
     } else if let Operation::ConditionalSelect(operand) = &instruction.operation
         && code.is_pinned()
         && !code.constant_time()
