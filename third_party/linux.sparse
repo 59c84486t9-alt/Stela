@@ -24,6 +24,7 @@
 /lib/is_single_threaded.c
 /lib/rhashtable.c
 /lib/kobject.c
+/lib/plist.c
 /lib/kobject_uevent.c
 /lib/ctype.c
 /lib/string.c
@@ -78,6 +79,10 @@
 /kernel/sched/rq_clock.c
 /kernel/sched/rq_resched.c
 /kernel/sched/rq_tasks.c
+/kernel/sched/sched_ratio.c
+/kernel/sched/rq_debug.c
+/kernel/sched/rq_debug.inc
+/kernel/sched/debug_output.h
 /kernel/sched/rq_migration.c
 /kernel/sched/rq_resched.h
 /kernel/sched/clock.c

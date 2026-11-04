@@ -1,0 +1,346 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 05:01:28 -0500
+Subject: [PATCH] refactor(sched): share deadline and RT support routines
+
+---
+ kernel/sched/Makefile          |  2 +-
+ kernel/sched/core.c            | 16 ---------
+ kernel/sched/debug.c           | 61 ++--------------------------------
+ kernel/sched/debug_output.h    | 17 ++++++++++
+ kernel/sched/fork_sources.json | 54 ++++++++++++++++++++++++++++++
+ kernel/sched/rq_debug.c        |  5 +++
+ kernel/sched/rq_debug.inc      | 52 +++++++++++++++++++++++++++++
+ kernel/sched/sched_ratio.c     | 23 +++++++++++++
+ 8 files changed, 154 insertions(+), 76 deletions(-)
+ create mode 100644 kernel/sched/debug_output.h
+ create mode 100644 kernel/sched/rq_debug.c
+ create mode 100644 kernel/sched/rq_debug.inc
+ create mode 100644 kernel/sched/sched_ratio.c
+
+diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
+index a0a90672a3a253d85338f9258694a655bc02cd21..0c09d8e2b3dc07d63709a77c644393fbf994fbaa 100644
+--- a/kernel/sched/Makefile
++++ b/kernel/sched/Makefile
+@@ -48,7 +48,7 @@ endif
+ # build parallelizes well and finishes roughly at once:
+ #
+ obj-y += core.o rq_lock.o rq_clock.o rq_resched.o wait_support.o user_affinity.o
+-obj-y += rq_tasks.o rq_migration.o
++obj-y += rq_tasks.o rq_migration.o sched_ratio.o
+ obj-y += fair.o
+ obj-y += build_policy.o cputime_group.o rt_timeslice.o
+ obj-y += build_utility.o capacity_state.o
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index b344a738925eca3360336c78d0ccc6ac0ac8f47b..07573bb7c029d192a2918ea28b058f3585f060a2 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -4287,22 +4287,6 @@ void sched_post_fork(struct task_struct *p)
+ 	scx_post_fork(p);
+ }
+ 
+-u64 to_ratio(u64 period, u64 runtime)
+-{
+-	if (runtime == RUNTIME_INF)
+-		return BW_UNIT;
+-
+-	/*
+-	 * Doing this here saves a lot of checks in all
+-	 * the calling paths, and returning zero seems
+-	 * safe for them anyway.
+-	 */
+-	if (period == 0)
+-		return 0;
+-
+-	return div64_u64(runtime << BW_SHIFT, period);
+-}
+-
+ /*
+  * wake_up_new_task - wake up a newly created task for the first time.
+  *
+diff --git a/kernel/sched/debug.c b/kernel/sched/debug.c
+index 40584b27ea0ce37c27409d4c400545cd6f7a2977..756e73fba0d6077ad3a7ecd9c1a55bd896c94a58 100644
+--- a/kernel/sched/debug.c
++++ b/kernel/sched/debug.c
+@@ -10,18 +10,7 @@
+ #include <linux/nmi.h>
+ #include <linux/log2.h>
+ #include "sched.h"
+-
+-/*
+- * This allows printing both to /sys/kernel/debug/sched/debug and
+- * to the console
+- */
+-#define SEQ_printf(m, x...)			\
+- do {						\
+-	if (m)					\
+-		seq_printf(m, x);		\
+-	else					\
+-		pr_cont(x);			\
+- } while (0)
++#include "debug_output.h"
+ 
+ /*
+  * Ease the printing of nsec fields:
+@@ -1048,53 +1037,7 @@ void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
+ #endif
+ }
+ 
+-void print_rt_rq(struct seq_file *m, int cpu, struct rt_rq *rt_rq)
+-{
+-#ifdef CONFIG_RT_GROUP_SCHED
+-	SEQ_printf(m, "\n");
+-	SEQ_printf_task_group_path(m, rt_rq->tg, "rt_rq[%d]:%s\n", cpu);
+-#else
+-	SEQ_printf(m, "\n");
+-	SEQ_printf(m, "rt_rq[%d]:\n", cpu);
+-#endif
+-
+-#define P(x) \
+-	SEQ_printf(m, "  .%-30s: %Ld\n", #x, (long long)(rt_rq->x))
+-#define PU(x) \
+-	SEQ_printf(m, "  .%-30s: %lu\n", #x, (unsigned long)(rt_rq->x))
+-#define PN(x) \
+-	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", #x, SPLIT_NS(rt_rq->x))
+-
+-	PU(rt_nr_running);
+-
+-#ifdef CONFIG_RT_GROUP_SCHED
+-	P(rt_throttled);
+-	PN(rt_time);
+-	PN(rt_runtime);
+-#endif
+-
+-#undef PN
+-#undef PU
+-#undef P
+-}
+-
+-void print_dl_rq(struct seq_file *m, int cpu, struct dl_rq *dl_rq)
+-{
+-	struct dl_bw *dl_bw;
+-
+-	SEQ_printf(m, "\n");
+-	SEQ_printf(m, "dl_rq[%d]:\n", cpu);
+-
+-#define PU(x) \
+-	SEQ_printf(m, "  .%-30s: %lu\n", #x, (unsigned long)(dl_rq->x))
+-
+-	PU(dl_nr_running);
+-	dl_bw = &cpu_rq(cpu)->rd->dl_bw;
+-	SEQ_printf(m, "  .%-30s: %lld\n", "dl_bw->bw", dl_bw->bw);
+-	SEQ_printf(m, "  .%-30s: %lld\n", "dl_bw->total_bw", dl_bw->total_bw);
+-
+-#undef PU
+-}
++#include "rq_debug.inc"
+ 
+ static void print_cpu(struct seq_file *m, int cpu)
+ {
+diff --git a/kernel/sched/debug_output.h b/kernel/sched/debug_output.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..4ecfe6ba39d26e3b2c5c4e8f22c5a4e0e141743d
+--- /dev/null
++++ b/kernel/sched/debug_output.h
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _KERNEL_SCHED_DEBUG_OUTPUT_H
++#define _KERNEL_SCHED_DEBUG_OUTPUT_H
++
++/*
++ * This allows printing both to /sys/kernel/debug/sched/debug and
++ * to the console
++ */
++#define SEQ_printf(m, x...)			\
++ do {						\
++	if (m)					\
++		seq_printf(m, x);		\
++	else					\
++		pr_cont(x);			\
++ } while (0)
++
++#endif
+diff --git a/kernel/sched/fork_sources.json b/kernel/sched/fork_sources.json
+index 98c4f88c706721625035bd1428137e8619838a15..8bfc8cf61d1f3217a08076e7a344eb723a24bc06 100644
+--- a/kernel/sched/fork_sources.json
++++ b/kernel/sched/fork_sources.json
+@@ -73,6 +73,12 @@
+           "last_line": 4853,
+           "sha256": "5b6a816403f5dd4c0e0e8c97fdd056068723e77bb27c04bd8b370467c58597af"
+         },
++        {
++          "symbol": "to_ratio",
++          "first_line": 4855,
++          "last_line": 4869,
++          "sha256": "ccd5f061dfbebd9daa2899bff187b371c28ad236654ddfeb8797a5d4924182bd"
++        },
+         {
+           "symbol": "sched_mm_cid_fork",
+           "first_line": 10947,
+@@ -135,6 +141,37 @@
+       "git_blob": "d25defb116caae1d3f01682a8af5a5e47d0b297c",
+       "sha256": "e10a11a2caafb12ec1da3a90d66f44a2783763c2f4e61df7bcbf52dd858e7993",
+       "functions": []
++    },
++    {
++      "path": "kernel/sched/debug.c",
++      "git_blob": "40584b27ea0ce37c27409d4c400545cd6f7a2977",
++      "sha256": "49e9a698deca3684c1423c7477baac955cbcfe4f52a67e808f997db7524c33f4",
++      "functions": [
++        {
++          "symbol": "SEQ_printf",
++          "first_line": 18,
++          "last_line": 24,
++          "sha256": "4306c47fea0eabcbf5ad76d0ed3e475b45f6c29ce6fa17b5612cc1d7481a3408"
++        },
++        {
++          "symbol": "print_rt_rq",
++          "first_line": 1051,
++          "last_line": 1079,
++          "sha256": "b5d1dfa52a1ce2b5118dfa84ab198954d89861775f172051935bdffed0c2778d"
++        },
++        {
++          "symbol": "print_dl_rq",
++          "first_line": 1081,
++          "last_line": 1097,
++          "sha256": "66bd54b05912c8da9087671e26d91485a021fab131246901d2105fa6f5e1fb19"
++        }
++      ]
++    },
++    {
++      "path": "lib/plist.c",
++      "git_blob": "a5bef38add431d106dc021a71ee555cf3f961388",
++      "sha256": "0a001fa3e04c463a17481e1dfdd641a956240b969516e0a5d2f4f1484f3ead41",
++      "functions": []
+     }
+   ],
+   "outputs": [
+@@ -193,6 +230,22 @@
+     {
+       "path": "kernel/sched/fork_support.c",
+       "sha256": "05d7a95728b383c3efa8e0a7ac409c2106560264c2443f8d85f7f09b4e863fb6"
++    },
++    {
++      "path": "kernel/sched/sched_ratio.c",
++      "sha256": "b7ae4e510d479ca53b73b394ec4f2fd776523ee962632f70bdc45c0e1abb1bbb"
++    },
++    {
++      "path": "kernel/sched/rq_debug.c",
++      "sha256": "6376377bb4404031858ad6522cf352024a05a560e063c67c8116525586e1fc1b"
++    },
++    {
++      "path": "kernel/sched/rq_debug.inc",
++      "sha256": "523ad0b9d407ad6eb3b0f67935743d6132d5c97a5f8eafa9d880a3796a8a6939"
++    },
++    {
++      "path": "kernel/sched/debug_output.h",
++      "sha256": "a36ed1007364450e5d27269df8a206f20e26d665eabbebb6715ca3f3cb588e0f"
+     }
+   ],
+   "adaptations": [
+@@ -207,6 +260,7 @@
+     "The original sched_rr_timeslice definition is shared by the regular and native scheduler builds through rt_timeslice.c.",
+     "Original sched_fork class and placement decisions require the native admit/select/place operations declared in fork_backend.h.",
+     "Disabled SCHED_CACHE, UCLAMP_TASK and SCHED_MM_CID branches remain guarded by their original configuration conditions.",
++    "The original scheduler bandwidth scaling and RT/deadline output bodies are shared. The regular debug unit retains the original group path and time formatting helpers. The native archive also builds unmodified lib/plist.c.",
+     "This manifest records source provenance only; it does not establish compilation, linking, execution or native admission."
+   ]
+ }
+diff --git a/kernel/sched/rq_debug.c b/kernel/sched/rq_debug.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..ed2c193749fdc52d8f662307b3a6f583f64269d8
+--- /dev/null
++++ b/kernel/sched/rq_debug.c
+@@ -0,0 +1,5 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* The native scheduler uses the non-group diagnostic paths. */
++#include "sched.h"
++#include "debug_output.h"
++#include "rq_debug.inc"
+diff --git a/kernel/sched/rq_debug.inc b/kernel/sched/rq_debug.inc
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6c3d6cbdb00ceb9241c00145d642901c315e380
+--- /dev/null
++++ b/kernel/sched/rq_debug.inc
+@@ -0,0 +1,52 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* RT and deadline diagnostics from kernel/sched/debug.c.
++ * Copyright(C) 2007, Red Hat, Inc., Ingo Molnar
++ */
++
++void print_rt_rq(struct seq_file *m, int cpu, struct rt_rq *rt_rq)
++{
++#ifdef CONFIG_RT_GROUP_SCHED
++	SEQ_printf(m, "\n");
++	SEQ_printf_task_group_path(m, rt_rq->tg, "rt_rq[%d]:%s\n", cpu);
++#else
++	SEQ_printf(m, "\n");
++	SEQ_printf(m, "rt_rq[%d]:\n", cpu);
++#endif
++
++#define P(x) \
++	SEQ_printf(m, "  .%-30s: %Ld\n", #x, (long long)(rt_rq->x))
++#define PU(x) \
++	SEQ_printf(m, "  .%-30s: %lu\n", #x, (unsigned long)(rt_rq->x))
++#define PN(x) \
++	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", #x, SPLIT_NS(rt_rq->x))
++
++	PU(rt_nr_running);
++
++#ifdef CONFIG_RT_GROUP_SCHED
++	P(rt_throttled);
++	PN(rt_time);
++	PN(rt_runtime);
++#endif
++
++#undef PN
++#undef PU
++#undef P
++}
++
++void print_dl_rq(struct seq_file *m, int cpu, struct dl_rq *dl_rq)
++{
++	struct dl_bw *dl_bw;
++
++	SEQ_printf(m, "\n");
++	SEQ_printf(m, "dl_rq[%d]:\n", cpu);
++
++#define PU(x) \
++	SEQ_printf(m, "  .%-30s: %lu\n", #x, (unsigned long)(dl_rq->x))
++
++	PU(dl_nr_running);
++	dl_bw = &cpu_rq(cpu)->rd->dl_bw;
++	SEQ_printf(m, "  .%-30s: %lld\n", "dl_bw->bw", dl_bw->bw);
++	SEQ_printf(m, "  .%-30s: %lld\n", "dl_bw->total_bw", dl_bw->total_bw);
++
++#undef PU
++}
+diff --git a/kernel/sched/sched_ratio.c b/kernel/sched/sched_ratio.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff6c137eb4928c7e2b7e4abf8c431726acb50a26
+--- /dev/null
++++ b/kernel/sched/sched_ratio.c
+@@ -0,0 +1,23 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Bandwidth scaling from kernel/sched/core.c.
++ * Copyright (C) 1991-2002 Linus Torvalds
++ * Copyright (C) 1998-2024 Ingo Molnar, Red Hat
++ */
++#include <linux/math64.h>
++#include "sched.h"
++
++u64 to_ratio(u64 period, u64 runtime)
++{
++	if (runtime == RUNTIME_INF)
++		return BW_UNIT;
++
++	/*
++	 * Doing this here saves a lot of checks in all
++	 * the calling paths, and returning zero seems
++	 * safe for them anyway.
++	 */
++	if (period == 0)
++		return 0;
++
++	return div64_u64(runtime << BW_SHIFT, period);
++}
