@@ -388,10 +388,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if range.is_empty() {
             return;
         }
-        let evicted: Vec<usize> = (0..self.blocks.len())
-            .filter(|&slot| range.contains(&self.blocks[slot].code.0))
-            .collect();
-        for &slot in &evicted {
+        let evicted = self.code_slots.take(&range).unwrap_or_else(|| {
+            (0..self.blocks.len())
+                .filter(|&slot| {
+                    let address = self.blocks[slot].code.0;
+                    address != 0 && range.contains(&address)
+                })
+                .map(|slot| slot as u32)
+                .collect()
+        });
+        for slot in evicted.iter().map(|&slot| slot as usize) {
             let block = &self.blocks[slot];
             let found = self
                 .index
@@ -400,7 +406,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.index.forget_page(block.physical & !(FETCH_PAGE - 1));
             }
         }
-        for &slot in &evicted {
+        for slot in evicted.iter().map(|&slot| slot as usize) {
             let block = &mut self.blocks[slot];
             if block.taken != 0 {
                 *self.exit_words.entry(block.terminal).or_default() += u64::from(block.taken);
@@ -427,6 +433,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.host.discard_code();
         self.lookup_dispatchers = Default::default();
         self.blocks.clear();
+        self.code_slots = Default::default();
         self.free_blocks.clear();
         self.fault_recovery.clear();
         self.index.clear();

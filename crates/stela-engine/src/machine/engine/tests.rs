@@ -152,6 +152,7 @@ pub(super) struct FakeHost {
     /// turn, and its parts' code addresses, oldest first; `None` for an
     /// arena of one part.
     pub(super) ring: Option<usize>,
+    code_partitions: Option<CodePartitions>,
     parts: Vec<core::ops::Range<usize>>,
 }
 
@@ -206,6 +207,9 @@ impl Host for FakeHost {
         self.installed.push(code.to_vec());
         assert!(code.len() < NATIVE_CODE_STRIDE);
         Ok(NativeCode(self.installed.len() * NATIVE_CODE_STRIDE))
+    }
+    fn code_partitions(&self) -> Option<CodePartitions> {
+        self.code_partitions
     }
     fn reclaim_code(&mut self) -> Option<core::ops::Range<usize>> {
         self.ring?;
@@ -520,6 +524,7 @@ pub(super) fn board_on<D: Devices>(
         memory_low: false,
         require_empty_code_on_read: false,
         ring: None,
+        code_partitions: None,
         parts: Vec::new(),
     };
     let profile = CpuProfile {
@@ -2026,9 +2031,20 @@ fn all_chip_performance_monitors_count_retirement_and_signal_their_overflow_fiq(
 
 #[test]
 fn a_full_arena_reclaims_its_oldest_part_and_forgets_those_pages() {
+    for indexed in [false, true] {
+        check_code_arena_reclamation(indexed);
+    }
+}
+
+fn check_code_arena_reclamation(indexed: bool) {
     const RET: u32 = 0xd65f_03c0;
     let mut machine = machine(&vec![RET; 4 * FETCH_PAGE as usize / 4]);
     machine.host.ring = Some(2);
+    machine.host.code_partitions = indexed.then_some(CodePartitions {
+        base: NATIVE_CODE_STRIDE,
+        bytes_per_part: 2 * NATIVE_CODE_STRIDE,
+        parts: 8,
+    });
     let base = machine.cpu.pc;
     let page = |n: u64| base + n * FETCH_PAGE;
     let pcs = [page(0), page(1), page(0) + 4, page(2), page(3), page(1) + 8];
@@ -2051,6 +2067,13 @@ fn a_full_arena_reclaims_its_oldest_part_and_forgets_those_pages() {
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
     assert_eq!(machine.blocks.len(), 4);
     assert_eq!(&slots[4..], [1, 0]);
+    assert_eq!(
+        matches!(
+            machine.code_slots,
+            code_slots::CodeSlots::Partitioned { .. }
+        ),
+        indexed
+    );
 }
 
 #[test]

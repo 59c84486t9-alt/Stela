@@ -278,6 +278,15 @@ impl Host for BareHost<'_> {
         }
     }
 
+    fn code_partitions(&self) -> Option<stela_engine::machine::engine::CodePartitions> {
+        let state = state();
+        Some(stela_engine::machine::engine::CodePartitions {
+            base: state.code_virtual as usize,
+            bytes_per_part: code_unit_bytes(state) as usize,
+            parts: CODE_UNITS as usize,
+        })
+    }
+
     fn reclaim_code(&mut self) -> Option<core::ops::Range<usize>> {
         let state = state();
         state.installed_immutable.clear();

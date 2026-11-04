@@ -5,7 +5,8 @@ mod mirrors;
 mod reports;
 use boundary::*;
 pub use boundary::{
-    ConsumedPair, DeviceError, Devices, Host, LocalRegisters, NoDevices, ScalarRead, Start,
+    CodePartitions, ConsumedPair, DeviceError, Devices, Host, LocalRegisters, NoDevices,
+    ScalarRead, Start,
 };
 use mirrors::*;
 use reports::*;
@@ -20,6 +21,7 @@ mod caller;
 mod chain_control;
 mod clock;
 mod code_cache;
+mod code_slots;
 mod compilation;
 mod compression;
 mod data_access;
@@ -668,6 +670,7 @@ pub struct Machine<H: Host, D: Devices> {
     preparation_metrics: Option<metrics::PreparationMetrics>,
     target: TargetCpu,
     blocks: table::Table<Block>,
+    code_slots: code_slots::CodeSlots,
     /// Slots of `blocks` whose code was reclaimed, for new blocks.
     free_blocks: Vec<usize>,
     /// The blocks this machine held when it last reclaimed code for memory,
@@ -976,6 +979,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             preparation_metrics: None,
             target,
             blocks: table::Table::new(),
+            code_slots: code_slots::CodeSlots::default(),
             free_blocks: Vec::new(),
             reclaimed_at: None,
             memory_release_blocks: MEMORY_RELEASE_BLOCKS,

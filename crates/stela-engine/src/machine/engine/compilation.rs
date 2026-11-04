@@ -557,6 +557,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             None => self.blocks.push(block),
         };
+        self.code_slots
+            .record(code.0, index, || self.host.code_partitions());
         self.fault_recovery.insert(index, compiled.installed());
         self.index.insert(&self.blocks, index);
         self.mirrors.close_code_page();
