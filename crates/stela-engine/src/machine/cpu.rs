@@ -1136,7 +1136,7 @@ impl Cpu {
     /// (EL1&0, or EL2&0 because HCR_EL2.E2H is RES1), so the address is sign
     /// extended.
     pub fn branch_address(&self, address: u64) -> u64 {
-        let tcr = self.controls(self.regime()).tcr;
+        let tcr = self.regime_tcr();
         let (tbi, tbid) = if address & (1 << 55) != 0 {
             (38, 52)
         } else {
@@ -1244,6 +1244,59 @@ mod tests {
                 assert_eq!(current.regime, controls.regime);
                 assert_eq!(current.asid, Some(asid));
                 assert_eq!(current.asid, Some(mmu::current_asid(&controls)));
+            }
+        }
+    }
+
+    #[test]
+    fn exception_return_untags_the_target_using_the_destination_tcr() {
+        for (source, host) in [(1, false), (2, false), (2, true)] {
+            let (active, inactive) = if host {
+                (Register::TCR_EL2, Register::TCR_EL1)
+            } else {
+                (Register::TCR_EL1, Register::TCR_EL2)
+            };
+            for guarded in [false, true] {
+                for (link, untagged, tbi, tbid) in [
+                    (0xab00_0000_0000_4000, 0x4000, TCR_TBI0, 1 << 51),
+                    (
+                        0xab80_0000_0000_4000,
+                        0xff80_0000_0000_4000,
+                        TCR_TBI1,
+                        1 << 52,
+                    ),
+                ] {
+                    for (controls, expected) in
+                        [(0, link), (tbi, untagged), (tbid, link), (tbi | tbid, link)]
+                    {
+                        let mut cpu = Cpu::new(
+                            0x8000,
+                            Pstate {
+                                guarded,
+                                ..Pstate::reset(source)
+                            },
+                        );
+                        cpu.registers.set_raw(
+                            Register::HCR_EL2,
+                            0,
+                            if host { HCR_E2H_TGE } else { 1 << 34 },
+                        );
+                        cpu.registers.set_raw(active, 0, controls);
+                        cpu.registers.set_raw(inactive, 0, tbi);
+                        if guarded {
+                            cpu.apple.guarded[usize::from(source) - 1].spsr = 0;
+                        } else {
+                            cpu.registers.set_raw(bank(source).spsr, 0, 0);
+                        }
+                        cpu.exception_return(link).unwrap();
+                        assert_eq!(
+                            cpu.pc, expected,
+                            "source={source} host={host} guarded={guarded} controls={controls:#x}"
+                        );
+                        assert_eq!(cpu.pstate.el, 0);
+                        assert_eq!(cpu.pstate.guarded, guarded);
+                    }
+                }
             }
         }
     }
