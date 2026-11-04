@@ -1,0 +1,407 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 00:58:18 -0500
+Subject: [PATCH] refactor(lib): select original buffered write iterators
+
+---
+ lib/iov_iter.c      | 170 --------------------------------------------
+ lib/iov_iter_copy.c | 162 +++++++++++++++++++++++++++++++++++++++++
+ lib/iov_iter_copy.h |   8 +++
+ 3 files changed, 170 insertions(+), 170 deletions(-)
+
+diff --git a/lib/iov_iter.c b/lib/iov_iter.c
+index 367c43a52dbc2734d9b55624b915977e0e35c782..453df98d2db85866117bfab3248bfa331e9e4a6c 100644
+--- a/lib/iov_iter.c
++++ b/lib/iov_iter.c
+@@ -28,85 +28,6 @@ size_t copy_to_user_iter_nofault(void __user *iter_to, size_t progress,
+ 	return res < 0 ? len : res;
+ }
+ 
+-static __always_inline
+-size_t copy_from_user_iter(void __user *iter_from, size_t progress,
+-			   size_t len, void *to, void *priv2)
+-{
+-	size_t res = len;
+-
+-	if (should_fail_usercopy())
+-		return len;
+-	if (can_do_masked_user_access()) {
+-		iter_from = mask_user_address(iter_from);
+-	} else {
+-		if (!access_ok(iter_from, len))
+-			return res;
+-
+-		/*
+-		 * Ensure that bad access_ok() speculation will not
+-		 * lead to nasty side effects *after* the copy is
+-		 * finished:
+-		 */
+-		barrier_nospec();
+-	}
+-	to += progress;
+-	instrument_copy_from_user_before(to, iter_from, len);
+-	res = raw_copy_from_user(to, iter_from, len);
+-	instrument_copy_from_user_after(to, iter_from, len, res);
+-
+-	return res;
+-}
+-
+-static __always_inline
+-size_t memcpy_from_iter(void *iter_from, size_t progress,
+-			size_t len, void *to, void *priv2)
+-{
+-	memcpy(to + progress, iter_from, len);
+-	return 0;
+-}
+-
+-/*
+- * fault_in_iov_iter_readable - fault in iov iterator for reading
+- * @i: iterator
+- * @size: maximum length
+- *
+- * Fault in one or more iovecs of the given iov_iter, to a maximum length of
+- * @size.  For each iovec, fault in each page that constitutes the iovec.
+- *
+- * Returns the number of bytes not faulted in (like copy_to_user() and
+- * copy_from_user()).
+- *
+- * Always returns 0 for non-userspace iterators.
+- */
+-size_t fault_in_iov_iter_readable(const struct iov_iter *i, size_t size)
+-{
+-	if (iter_is_ubuf(i)) {
+-		size_t n = min(size, iov_iter_count(i));
+-		n -= fault_in_readable(i->ubuf + i->iov_offset, n);
+-		return size - n;
+-	} else if (iter_is_iovec(i)) {
+-		size_t count = min(size, iov_iter_count(i));
+-		const struct iovec *p;
+-		size_t skip;
+-
+-		size -= count;
+-		for (p = iter_iov(i), skip = i->iov_offset; count; p++, skip = 0) {
+-			size_t len = min(count, p->iov_len - skip);
+-			size_t ret;
+-
+-			if (unlikely(!len))
+-				continue;
+-			ret = fault_in_readable(p->iov_base + skip, len);
+-			count -= len - ret;
+-			if (ret)
+-				break;
+-		}
+-		return count + size;
+-	}
+-	return 0;
+-}
+-EXPORT_SYMBOL(fault_in_iov_iter_readable);
+-
+ /*
+  * fault_in_iov_iter_writeable - fault in iov iterator for writing
+  * @i: iterator
+@@ -150,23 +71,6 @@ size_t fault_in_iov_iter_writeable(const struct iov_iter *i, size_t size)
+ }
+ EXPORT_SYMBOL(fault_in_iov_iter_writeable);
+ 
+-void iov_iter_init(struct iov_iter *i, unsigned int direction,
+-			const struct iovec *iov, unsigned long nr_segs,
+-			size_t count)
+-{
+-	WARN_ON(direction & ~(READ | WRITE));
+-	*i = (struct iov_iter) {
+-		.iter_type = ITER_IOVEC,
+-		.nofault = false,
+-		.data_source = direction,
+-		.__iov = iov,
+-		.nr_segs = nr_segs,
+-		.iov_offset = 0,
+-		.count = count
+-	};
+-}
+-EXPORT_SYMBOL(iov_iter_init);
+-
+ #ifdef CONFIG_ARCH_HAS_COPY_MC
+ static __always_inline
+ size_t copy_to_user_iter_mc(void __user *iter_to, size_t progress,
+@@ -224,23 +128,6 @@ EXPORT_SYMBOL_GPL(_copy_mc_to_iter);
+ #endif /* CONFIG_ARCH_HAS_COPY_MC */
+ 
+ static __always_inline
+-size_t __copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
+-{
+-	return iterate_and_advance(i, bytes, addr,
+-				   copy_from_user_iter, memcpy_from_iter);
+-}
+-
+-size_t _copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
+-{
+-	if (WARN_ON_ONCE(!i->data_source))
+-		return 0;
+-
+-	if (user_backed_iter(i))
+-		might_fault();
+-	return __copy_from_iter(addr, bytes, i);
+-}
+-EXPORT_SYMBOL(_copy_from_iter);
+-
+ static __always_inline
+ size_t copy_from_user_iter_nocache(void __user *iter_from, size_t progress,
+ 				   size_t len, void *to, void *priv2)
+@@ -336,33 +223,6 @@ size_t copy_page_to_iter_nofault(struct page *page, unsigned offset, size_t byte
+ }
+ EXPORT_SYMBOL(copy_page_to_iter_nofault);
+ 
+-size_t copy_page_from_iter(struct page *page, size_t offset, size_t bytes,
+-			 struct iov_iter *i)
+-{
+-	size_t res = 0;
+-	if (!page_copy_sane(page, offset, bytes))
+-		return 0;
+-	page += offset / PAGE_SIZE; // first subpage
+-	offset %= PAGE_SIZE;
+-	while (1) {
+-		void *kaddr = kmap_local_page(page);
+-		size_t n = min(bytes, (size_t)PAGE_SIZE - offset);
+-		n = _copy_from_iter(kaddr + offset, n, i);
+-		kunmap_local(kaddr);
+-		res += n;
+-		bytes -= n;
+-		if (!bytes || !n)
+-			break;
+-		offset += n;
+-		if (offset == PAGE_SIZE) {
+-			page++;
+-			offset = 0;
+-		}
+-	}
+-	return res;
+-}
+-EXPORT_SYMBOL(copy_page_from_iter);
+-
+ static __always_inline
+ size_t zero_to_user_iter(void __user *iter_to, size_t progress,
+ 			 size_t len, void *priv, void *priv2)
+@@ -385,36 +245,6 @@ size_t iov_iter_zero(size_t bytes, struct iov_iter *i)
+ }
+ EXPORT_SYMBOL(iov_iter_zero);
+ 
+-size_t copy_folio_from_iter_atomic(struct folio *folio, size_t offset,
+-		size_t bytes, struct iov_iter *i)
+-{
+-	size_t n, copied = 0;
+-
+-	if (!page_copy_sane(&folio->page, offset, bytes))
+-		return 0;
+-	if (WARN_ON_ONCE(!i->data_source))
+-		return 0;
+-
+-	do {
+-		char *to = kmap_local_folio(folio, offset);
+-
+-		n = bytes - copied;
+-		if (folio_test_partial_kmap(folio) &&
+-		    n > PAGE_SIZE - offset_in_page(offset))
+-			n = PAGE_SIZE - offset_in_page(offset);
+-
+-		pagefault_disable();
+-		n = __copy_from_iter(to, n, i);
+-		pagefault_enable();
+-		kunmap_local(to);
+-		copied += n;
+-		offset += n;
+-	} while (copied != bytes && n > 0);
+-
+-	return copied;
+-}
+-EXPORT_SYMBOL(copy_folio_from_iter_atomic);
+-
+ static unsigned long iov_iter_alignment_iovec(const struct iov_iter *i)
+ {
+ 	const struct iovec *iov = iter_iov(i);
+diff --git a/lib/iov_iter_copy.c b/lib/iov_iter_copy.c
+index 056fb1337a8af045ab1111cd866ba05de66ff09e..326ba1ddb9e0d3495d7280a4d6d62670b01c9d1e 100644
+--- a/lib/iov_iter_copy.c
++++ b/lib/iov_iter_copy.c
+@@ -365,3 +365,165 @@ void iov_iter_discard(struct iov_iter *i, unsigned int direction, size_t count)
+ 	};
+ }
+ EXPORT_SYMBOL(iov_iter_discard);
++
++static __always_inline
++size_t copy_from_user_iter(void __user *iter_from, size_t progress,
++			   size_t len, void *to, void *priv2)
++{
++	size_t res = len;
++
++	if (should_fail_usercopy())
++		return len;
++	if (can_do_masked_user_access()) {
++		iter_from = mask_user_address(iter_from);
++	} else {
++		if (!access_ok(iter_from, len))
++			return res;
++
++		/*
++		 * Ensure that bad access_ok() speculation will not
++		 * lead to nasty side effects *after* the copy is
++		 * finished:
++		 */
++		barrier_nospec();
++	}
++	to += progress;
++	instrument_copy_from_user_before(to, iter_from, len);
++	res = raw_copy_from_user(to, iter_from, len);
++	instrument_copy_from_user_after(to, iter_from, len, res);
++
++	return res;
++}
++
++/*
++ * fault_in_iov_iter_readable - fault in iov iterator for reading
++ * @i: iterator
++ * @size: maximum length
++ *
++ * Fault in one or more iovecs of the given iov_iter, to a maximum length of
++ * @size.  For each iovec, fault in each page that constitutes the iovec.
++ *
++ * Returns the number of bytes not faulted in (like copy_to_user() and
++ * copy_from_user()).
++ *
++ * Always returns 0 for non-userspace iterators.
++ */
++size_t fault_in_iov_iter_readable(const struct iov_iter *i, size_t size)
++{
++	if (iter_is_ubuf(i)) {
++		size_t n = min(size, iov_iter_count(i));
++		n -= fault_in_readable(i->ubuf + i->iov_offset, n);
++		return size - n;
++	} else if (iter_is_iovec(i)) {
++		size_t count = min(size, iov_iter_count(i));
++		const struct iovec *p;
++		size_t skip;
++
++		size -= count;
++		for (p = iter_iov(i), skip = i->iov_offset; count; p++, skip = 0) {
++			size_t len = min(count, p->iov_len - skip);
++			size_t ret;
++
++			if (unlikely(!len))
++				continue;
++			ret = fault_in_readable(p->iov_base + skip, len);
++			count -= len - ret;
++			if (ret)
++				break;
++		}
++		return count + size;
++	}
++	return 0;
++}
++EXPORT_SYMBOL(fault_in_iov_iter_readable);
++
++size_t __copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
++{
++	return iterate_and_advance(i, bytes, addr,
++				   copy_from_user_iter, memcpy_from_iter);
++}
++
++size_t _copy_from_iter(void *addr, size_t bytes, struct iov_iter *i)
++{
++	if (WARN_ON_ONCE(!i->data_source))
++		return 0;
++
++	if (user_backed_iter(i))
++		might_fault();
++	return __copy_from_iter(addr, bytes, i);
++}
++EXPORT_SYMBOL(_copy_from_iter);
++
++size_t copy_page_from_iter(struct page *page, size_t offset, size_t bytes,
++			 struct iov_iter *i)
++{
++	size_t res = 0;
++	if (!page_copy_sane(page, offset, bytes))
++		return 0;
++	page += offset / PAGE_SIZE; // first subpage
++	offset %= PAGE_SIZE;
++	while (1) {
++		void *kaddr = kmap_local_page(page);
++		size_t n = min(bytes, (size_t)PAGE_SIZE - offset);
++		n = _copy_from_iter(kaddr + offset, n, i);
++		kunmap_local(kaddr);
++		res += n;
++		bytes -= n;
++		if (!bytes || !n)
++			break;
++		offset += n;
++		if (offset == PAGE_SIZE) {
++			page++;
++			offset = 0;
++		}
++	}
++	return res;
++}
++EXPORT_SYMBOL(copy_page_from_iter);
++
++size_t copy_folio_from_iter_atomic(struct folio *folio, size_t offset,
++		size_t bytes, struct iov_iter *i)
++{
++	size_t n, copied = 0;
++
++	if (!page_copy_sane(&folio->page, offset, bytes))
++		return 0;
++	if (WARN_ON_ONCE(!i->data_source))
++		return 0;
++
++	do {
++		char *to = kmap_local_folio(folio, offset);
++
++		n = bytes - copied;
++		if (folio_test_partial_kmap(folio) &&
++		    n > PAGE_SIZE - offset_in_page(offset))
++			n = PAGE_SIZE - offset_in_page(offset);
++
++		pagefault_disable();
++		n = __copy_from_iter(to, n, i);
++		pagefault_enable();
++		kunmap_local(to);
++		copied += n;
++		offset += n;
++	} while (copied != bytes && n > 0);
++
++	return copied;
++}
++EXPORT_SYMBOL(copy_folio_from_iter_atomic);
++
++void iov_iter_init(struct iov_iter *i, unsigned int direction,
++			const struct iovec *iov, unsigned long nr_segs,
++			size_t count)
++{
++	WARN_ON(direction & ~(READ | WRITE));
++	*i = (struct iov_iter) {
++		.iter_type = ITER_IOVEC,
++		.nofault = false,
++		.data_source = direction,
++		.__iov = iov,
++		.nr_segs = nr_segs,
++		.iov_offset = 0,
++		.count = count
++	};
++}
++EXPORT_SYMBOL(iov_iter_init);
+diff --git a/lib/iov_iter_copy.h b/lib/iov_iter_copy.h
+index df6bd1b53178f19c5c65f1fa7f3f31204a397062..3ea3b07108afa6073f8d51654bd253699346f54b 100644
+--- a/lib/iov_iter_copy.h
++++ b/lib/iov_iter_copy.h
+@@ -33,4 +33,12 @@ static inline bool page_copy_sane(struct page *page, size_t offset, size_t n)
+ 	return true;
+ }
+ 
++static __always_inline
++size_t memcpy_from_iter(void *iter_from, size_t progress,
++			size_t len, void *to, void *priv2)
++{
++	memcpy(to + progress, iter_from, len);
++	return 0;
++}
++
+ #endif
