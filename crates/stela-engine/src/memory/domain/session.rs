@@ -138,6 +138,36 @@ mod tests {
     }
 
     #[test]
+    fn prepared_clear_shares_the_owned_loan_count_without_cloning_the_domain() {
+        let system = MemorySystem::new(16, 8).unwrap();
+        let (domain, mut thread) = fixture(&system);
+        let owned = domain.execution_loan().unwrap();
+        let references = Arc::strong_count(&domain);
+        let clear = thread.prepare_clear_reservation().unwrap();
+        assert_eq!(Arc::strong_count(&domain), references);
+        assert_eq!(domain.state.lock().unwrap().native_loans, 2);
+        drop(owned);
+        assert!(matches!(
+            domain.try_service_loan().unwrap(),
+            ServiceLoanAttempt::ExecutionBusy
+        ));
+        drop(clear);
+        let service = domain.service_loan().unwrap();
+        assert!(matches!(
+            domain.try_execution_loan().unwrap(),
+            ExecutionLoanAttempt::ServiceBusy
+        ));
+        assert!(matches!(
+            thread.prepare_clear_reservation(),
+            Err(MemoryStatus::Domain)
+        ));
+        drop(service);
+        thread.prepare_clear_reservation().unwrap().commit();
+        assert_eq!(domain.state.lock().unwrap().native_loans, 0);
+        assert!(domain.service_loan().is_ok());
+    }
+
+    #[test]
     fn equal_address_space_and_shared_system_do_not_authorize_foreign_session() {
         let system = MemorySystem::new(16, 8).unwrap();
         let (_, first) = fixture(&system);
