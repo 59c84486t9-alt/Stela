@@ -346,14 +346,10 @@ fn stream_file(
     })
 }
 
-fn hash_file(
-    path: &Path,
-    size: u64,
-    progress: &crate::progress::Phase,
-) -> Result<(String, Vec<u8>)> {
-    let mut hashes = Hashes::default();
-    stream_file(path, size, progress, |bytes| hashes.update(bytes))?;
-    Ok(hashes.finish())
+fn hash_file(path: &Path, size: u64, progress: &crate::progress::Phase) -> Result<String> {
+    let mut hash = Sha256::new();
+    stream_file(path, size, progress, |bytes| hash.update(bytes))?;
+    Ok(hex::encode(hash.finalize()))
 }
 
 /// The whole IPSW's SHA-256 and its SHA-1 if the catalog supplies one.
@@ -362,32 +358,23 @@ struct Whole<'a> {
     catalog: Option<(&'a str, Sha1)>,
 }
 
-/// Read `size` bytes of `ipsw` from `offset` and return their hashes;
-/// with `partial`, also copy them there durably; with `whole`, also add
-/// them to the IPSW's digests.
-fn piece(
+/// Stream a source piece, copying it durably when `partial` is supplied.
+fn read_piece(
     ipsw: &mut fs::File,
     offset: u64,
     size: u64,
     partial: Option<&Path>,
-    mut whole: Option<&mut Whole<'_>>,
     progress: &crate::progress::Phase,
-) -> Result<(String, Vec<u8>)> {
+    mut consume: impl FnMut(&[u8]),
+) -> Result<()> {
     ipsw.seek(SeekFrom::Start(offset))?;
     let mut out = partial
         .map(|path| {
             fs::File::create(path).with_context(|| format!("cannot write {}", path.display()))
         })
         .transpose()?;
-    let mut hashes = Hashes::default();
     stream(ipsw, size, |bytes| {
-        hashes.update(bytes);
-        if let Some(whole) = whole.as_deref_mut() {
-            whole.sha256.update(bytes);
-            if let Some((_, hash)) = &mut whole.catalog {
-                hash.update(bytes);
-            }
-        }
+        consume(bytes);
         match (&mut out, partial) {
             (Some(out), Some(path)) => out
                 .write_all(bytes)
@@ -400,7 +387,7 @@ fn piece(
     if let Some(out) = out {
         out.sync_all()?;
     }
-    Ok(hashes.finish())
+    Ok(())
 }
 
 /// What [`write`] did.
@@ -471,33 +458,42 @@ pub(super) fn write(options: WriteOptions<'_>) -> Result<Written> {
         let present = fs::metadata(&path).is_ok_and(|m| m.len() == size);
         // The IPSW's bytes for this piece, read once: hashed, added to the
         // IPSW's digests, and written when the piece is not there yet.
-        let source = piece(
+        let mut hashes = Hashes::default();
+        read_piece(
             &mut file,
             offset,
             size,
             (!present).then_some(partial.as_path()),
-            Some(&mut whole),
             &progress,
+            |bytes| {
+                hashes.update(bytes);
+                whole.sha256.update(bytes);
+                if let Some((_, hash)) = &mut whole.catalog {
+                    hash.update(bytes);
+                }
+            },
         )?;
-        let keep = present && hash_file(&path, size, &progress)? == source;
+        let (digest, blocks) = hashes.finish();
+        // The whole-piece digest verifies the bytes represented by the
+        // already-recorded block hashes.
+        let keep = present && hash_file(&path, size, &progress)? == digest;
         if keep {
             written.kept += 1;
         } else {
             if present {
                 // A complete piece whose bytes differ: written again.
                 progress.add_work(size * 2);
-                piece(&mut file, offset, size, Some(&partial), None, &progress)?;
+                read_piece(&mut file, offset, size, Some(&partial), &progress, |_| {})?;
             }
             // Read back, so a USB that loses writes is found now.
             ensure!(
-                hash_file(&partial, size, &progress)? == source,
+                hash_file(&partial, size, &progress)? == digest,
                 "{} does not read back as written; the USB may be failing",
                 partial.display()
             );
             fs::rename(&partial, &path)?;
             written.wrote += 1;
         }
-        let (digest, blocks) = source;
         pieces.push(Piece {
             bytes: size,
             sha256: digest,
@@ -731,6 +727,7 @@ pub(super) mod tests {
         .unwrap();
         assert_eq!((again.kept, again.wrote), (count - 2, 2));
         assert_eq!(again.manifest_sha256, first.manifest_sha256);
+        assert_eq!(fs::read(directory.join(PIECE_HASHES_FILE)).unwrap(), hashes);
         assert!(!partial.exists());
         assert!(!directory.join(piece_name(count + 3)).exists());
         let joined: Vec<u8> = (0..count)

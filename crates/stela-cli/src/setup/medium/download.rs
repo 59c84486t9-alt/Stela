@@ -116,12 +116,8 @@ fn write_from(
         let partial = directory.join(format!("{}.partial", piece_name(index)));
         // The download already recorded the per-block hashes. Readback
         // verifies the piece's digest before publishing it.
-        let mut readback = Sha256::new();
-        stream_file(&partial, piece.bytes, &progress, |bytes| {
-            readback.update(bytes);
-        })?;
         ensure!(
-            hex::encode(readback.finalize()) == piece.sha256,
+            hash_file(&partial, piece.bytes, &progress)? == piece.sha256,
             "USB data does not read back as written"
         );
         if path.exists() {
