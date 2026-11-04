@@ -350,8 +350,12 @@ fn release_vtd(window: &impl Window, status: u32, protected: u32) -> Result<(), 
             continue;
         }
         if bit == QUEUED_INVALIDATION {
-            // Let the queue drain its pending descriptors first.
-            let _ = wait(window, feature, || window.read64(IQH) == window.read64(IQT));
+            // Firmware may have submitted descriptors before ExitBootServices.
+            // Keep the queue enabled until readable pointers prove it empty.
+            wait(window, "queued invalidation drain", || {
+                let head = window.read64(IQH);
+                head != u64::MAX && head == window.read64(IQT)
+            })?;
         }
         command &= !bit;
         window.write32(GCMD, command);
@@ -610,6 +614,25 @@ mod tests {
             unsafe { release(Kind::Vtd, &fake) },
             Err(Failure::Timeout("DMA translation"))
         );
+    }
+
+    #[test]
+    fn vtd_pending_or_unreadable_queue_prevents_queued_invalidation_disable() {
+        for (head, tail) in [(0x10, 0x20), (u64::MAX, u64::MAX)] {
+            let fake = Fake::new(
+                Kind::Vtd,
+                &[
+                    (GSTS, u64::from(QUEUED_INVALIDATION)),
+                    (IQH, head),
+                    (IQT, tail),
+                ],
+            );
+            // SAFETY: the fake window stands in for the unit, and this test is its only owner.
+            let released = unsafe { release(Kind::Vtd, &fake) };
+            assert_eq!(released, Err(Failure::Timeout("queued invalidation drain")));
+            assert_eq!(*fake.writes.borrow(), [(FECTL, u64::from(FAULT_MASK))]);
+            assert_eq!(fake.get(GSTS), u64::from(QUEUED_INVALIDATION));
+        }
     }
 
     #[test]

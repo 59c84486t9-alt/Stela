@@ -136,7 +136,7 @@ pub(crate) unsafe fn release_firmware_units(units: &Units, tsc_hz: u64) {
             unsafe { firmware_state::release(unit.kind, &window) }
         {
             output::arguments(format_args!(
-                "HOST IOMMU {kind} unit {:#x}: {feature} stayed on after one second\n",
+                "HOST IOMMU {kind} unit {:#x}: {feature} did not complete within one second\n",
                 unit.base,
             ));
             output::fatal(
