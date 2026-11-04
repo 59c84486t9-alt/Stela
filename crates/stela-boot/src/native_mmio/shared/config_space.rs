@@ -2,8 +2,10 @@
 //! views are private to their consumers and never enter physical lookup.
 use super::*;
 use crate::native_mmio::ecam::EcamInventory;
-use core::mem::ManuallyDrop;
+use core::{mem::ManuallyDrop, ops::RangeInclusive};
 use stela_drivers::bus::{mmio::owned::Mapping, pci::Address};
+mod containment;
+pub(super) use containment::PciSlots;
 
 struct ConfigScope {
     pending: ManuallyDrop<Box<Pending>>,
@@ -19,11 +21,7 @@ struct Pending {
 impl ConfigScope {
     /// # Safety
     /// The caller holds this original configuration extent and exclusion.
-    unsafe fn open(
-        source: &Source,
-        span: PhysicalSpan,
-        protection: Protection,
-    ) -> Result<Self, Error> {
+    unsafe fn open(source: &Source, span: PhysicalSpan) -> Result<Self, Error> {
         let bytes = usize::try_from(span.bytes()).map_err(|_| Error::InvalidRange)?;
         let (resource, assignment) = source.reservation(span, ResourceKind::Registers)?;
         let close = assignment.admission_close();
@@ -35,12 +33,13 @@ impl ConfigScope {
             })),
             close: Some(close),
         };
-        scope.pending.mapping =
-            Some(
-                source
-                    .authority
-                    .map(resource, 0, bytes, CacheAttribute::Uncached, protection)?,
-            );
+        scope.pending.mapping = Some(source.authority.map(
+            resource,
+            0,
+            bytes,
+            CacheAttribute::Uncached,
+            Protection::ReadOnly,
+        )?);
         Ok(scope)
     }
 
@@ -126,7 +125,7 @@ impl ConfigInventory<'_> {
             )?;
             // SAFETY: the caller owns the original complete captured buses.
             // Only this bounded read observes the newly mapped bus.
-            let scope = unsafe { ConfigScope::open(self.source, span, Protection::ReadOnly) }?;
+            let scope = unsafe { ConfigScope::open(self.source, span) }?;
             self.mapped = Some((key, scope));
         }
         let (_, scope) = self.mapped.as_ref().expect("current read-only bus");
@@ -139,6 +138,15 @@ impl ConfigInventory<'_> {
             .as_ref()
             .expect("original map")
             .read32(offset)
+    }
+
+    pub(crate) fn check_bridge(
+        &self,
+        address: Address,
+        downstream: RangeInclusive<u8>,
+    ) -> Result<(), Error> {
+        self.geometry
+            .check_bridge(self.source.platform.wire().roots(), address, downstream)
     }
 
     fn withdraw(&mut self) -> Result<(), Error> {
@@ -163,7 +171,10 @@ impl Source {
         if windows.is_empty() {
             return Err(Error::Unavailable);
         }
-        let geometry = EcamInventory::validate(&windows, self.platform.space.physical_bits)?;
+        let bits = self.platform.space.physical_bits;
+        let original = EcamInventory::validate(&windows, bits)?;
+        let windows = original.root_windows(wire.roots())?;
+        let geometry = EcamInventory::validate(&windows, bits)?;
         for (index, window) in windows.iter().enumerate() {
             for bus in window.start_bus..=window.end_bus {
                 let (_, span) = geometry.subset(index, bus..=bus, wire.roots())?;
@@ -229,107 +240,16 @@ impl Source {
     /// writers until the scope withdraws the mapping.
     pub(super) unsafe fn read_config_identity(&self, address: Address) -> Result<u32, Error> {
         let (_, span) = self.config_page(address)?;
-        // SAFETY: this closure performs one synchronous read with no aliases.
-        unsafe { self.with_config_scope(span, Protection::ReadOnly, |mapping| mapping.read32(0)) }
-    }
-
-    /// # Safety
-    /// This boot owns every function on the captured buses, and firmware
-    /// has stopped interrupt work before native probing or AP startup.
-    pub(crate) unsafe fn mask_pci_intx(&self) -> Result<(), Error> {
-        let wire = self.platform.wire();
-        let windows = stela_runtime::pc::acpi::mcfg(wire.mcfg()).map_err(failed)?;
-        let inventory = super::super::ecam::EcamInventory::validate(
-            &windows,
-            self.platform.space.physical_bits,
-        )?;
-        for (index, window) in windows.iter().enumerate() {
-            for bus in window.start_bus..=window.end_bus {
-                let (_, span) = inventory.subset(index, bus..=bus, wire.roots())?;
-                if !wire.excludes_memory(span.start(), span.end()) {
-                    return Err(Error::OutsideResource);
-                }
-                // SAFETY: this exact bus is held exclusively by the caller.
-                // The containment loop ends all accesses before returning.
-                unsafe {
-                    self.with_config_scope(span, Protection::ReadWrite, |mapping| {
-                        mask_bus_intx(mapping)
-                    })
-                }?;
-            }
-        }
-        Ok(())
-    }
-
-    /// # Safety
-    /// The caller proved the original configuration extent and exclusivity.
-    /// The body uses only this map and ends all pointers and aliases on return.
-    unsafe fn with_config_scope<T>(
-        &self,
-        span: PhysicalSpan,
-        protection: Protection,
-        body: impl FnOnce(&Mapping) -> Result<T, Error>,
-    ) -> Result<T, Error> {
         // SAFETY: the caller keeps this exact original configuration extent.
-        let mut scope = unsafe { ConfigScope::open(self, span, protection) }?;
-        let result = body(scope.pending.mapping.as_ref().expect("original map"));
-        // A failed writable scope may already have changed a command word.
-        // Keep the original mapping and assignment closed to further users
-        // until a source can account for that effect.
-        if protection == Protection::ReadWrite && result.is_err() {
-            return result;
-        }
-        // SAFETY: the caller's body ended every use before returning.
+        let mut scope = unsafe { ConfigScope::open(self, span) }?;
+        let result = scope
+            .pending
+            .mapping
+            .as_ref()
+            .expect("original map")
+            .read32(0);
+        // SAFETY: the synchronous observation has no aliases.
         unsafe { scope.retire() }?;
         result
     }
-}
-
-/// Stop legacy interrupt contributors through the private containment map.
-/// A disappearing function or failed command readback refuses SCI admission.
-/// # Safety
-/// The mapping is the original exclusive writable UC lease for this bus.
-unsafe fn mask_bus_intx(mapping: &Mapping) -> Result<(), Error> {
-    const INTX_DISABLE: u16 = 1 << 10;
-    for device in 0..32usize {
-        let first = device << 15;
-        let first_identity = mapping.read32(first)?;
-        if first_identity & 0xffff == 0xffff {
-            continue;
-        }
-        let functions = if mapping.read32(first + 12)? & (0x80 << 16) != 0 {
-            8
-        } else {
-            1
-        };
-        for function in 0..functions {
-            let offset = first | function << 12;
-            let identity = if function == 0 {
-                first_identity
-            } else {
-                mapping.read32(offset)?
-            };
-            if identity & 0xffff == 0xffff {
-                continue;
-            }
-            let command = mapping.address(offset + 4, 2)?.as_ptr().cast::<u16>();
-            // SAFETY: the exclusive UC mapping covers the aligned 16-bit
-            // command register. The adjacent W1C status is a separate word.
-            let original = u16::from_le(unsafe { command.read_volatile() });
-            if original == u16::MAX {
-                return Err(Error::InvalidPlatformReply);
-            }
-            let expected = original | INTX_DISABLE;
-            if expected != original {
-                // SAFETY: the same private command register is still live.
-                unsafe { command.write_volatile(expected.to_le()) };
-            }
-            // SAFETY: readback of that same aligned command register.
-            let actual = u16::from_le(unsafe { command.read_volatile() });
-            if actual != expected || mapping.read32(offset)? != identity {
-                return Err(Error::InvalidPlatformReply);
-            }
-        }
-    }
-    Ok(())
 }

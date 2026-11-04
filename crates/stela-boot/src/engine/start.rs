@@ -2024,15 +2024,16 @@ fn start_platform(
         Ok(()) => output::arguments(format_args!("NATIVE IRQ device vectors attached\n")),
         Err(error) => output::arguments(format_args!("NATIVE IRQ unavailable: {error:?}\n")),
     }
-    // Mask contributors while the whole-bus mappings can still be temporary.
-    // Once a remapper keeps its function page, the aperture refuses overlap.
+    // Retire the configuration census and park the contained function owners
+    // before remapping units keep their own read-only function views.
     let prepared_sci = match (&native_mmio, &handoff.power) {
         (Some(mmio), Some(power)) => {
             // SAFETY: firmware is stopped, APs have not started, and native
             // probing has not published any PCI/controller owner yet.
             let prepared = unsafe { mmio.mask_pci_intx() }
                 .map_err(|error| refuse!("PCI INTx handoff: {error}", ?error))
-                .and_then(|()| {
+                .and_then(|count| {
+                    output::arguments(format_args!("HOST PCI INTx contained: {count} functions\n"));
                     // SAFETY: PCI INTx contributors are disabled; the boot
                     // owns the fixed/GPE sources and complete IOAPIC handoff.
                     unsafe { aml::sci::Prepared::capture(mmio, power.clone()) }

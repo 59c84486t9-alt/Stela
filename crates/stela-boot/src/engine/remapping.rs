@@ -129,17 +129,11 @@ impl Remappers {
                         }
                         Ok(Some(value))
                     })?;
-                // A bridge whose live downstream range leaves the captured
-                // ECAM windows cannot establish a complete requester scope.
+                // A live bridge must stay inside its own captured root grant.
                 for (segment, functions) in &inventories {
-                    for (first, last) in functions.iter().filter_map(|function| function.bridge) {
-                        if (first..=last).any(|bus| {
-                            !windows.iter().any(|window| {
-                                window.segment == *segment
-                                    && (window.start_bus..=window.end_bus).contains(&bus)
-                            })
-                        }) {
-                            return Err(MappingError::OutsideResource);
+                    for function in functions {
+                        if let Some((first, last)) = function.bridge {
+                            reader.check_bridge(address(*segment, function.rid), first..=last)?;
                         }
                     }
                 }
