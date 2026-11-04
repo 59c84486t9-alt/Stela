@@ -16,6 +16,7 @@ use stela_compiler::{TargetCpu, context::memory::MemoryStatus};
 mod completion;
 mod transfer;
 pub use completion::CanonicalRamService;
+pub use transfer::DescriptorReader;
 
 const GRANULE: usize = 16;
 const MAX_RANGES: usize = 4096;

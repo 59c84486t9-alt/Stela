@@ -3,6 +3,7 @@ use super::*;
 use crate::memory::{
     backing::AccessKind,
     domain::{DataAccess, DataOperation, DataPart, DataPolicy, DataRequest},
+    system_ram::DescriptorReader,
 };
 use stela_compiler::context::memory::{
     InstructionRequirements, MemoryOperationClass, SpAlignmentRequirement, flags,
@@ -407,7 +408,7 @@ impl DataPolicy for Policy {
     }
 }
 pub(super) struct Tables<'a> {
-    ram: &'a RegisteredSystemRam,
+    descriptors: DescriptorReader<'a>,
     pub(super) failure: Option<MemoryStatus>,
     #[cfg(feature = "native-profile")]
     pub(super) reads: u64,
@@ -415,7 +416,7 @@ pub(super) struct Tables<'a> {
 impl<'a> Tables<'a> {
     pub(super) fn new(ram: &'a RegisteredSystemRam) -> Self {
         Self {
-            ram,
+            descriptors: ram.descriptor_reader(),
             failure: None,
             #[cfg(feature = "native-profile")]
             reads: 0,
@@ -428,7 +429,7 @@ impl mmu::TableMemory for Tables<'_> {
         {
             self.reads = self.reads.saturating_add(1);
         }
-        match self.ram.read_descriptor(physical) {
+        match self.descriptors.read_descriptor(physical) {
             Ok(value) => Some(value),
             Err(MemoryStatus::Translation) => None,
             Err(status) => {
@@ -438,7 +439,7 @@ impl mmu::TableMemory for Tables<'_> {
         }
     }
     fn update_descriptor(&mut self, physical: u64, old: u64, new: u64) -> Option<bool> {
-        match self.ram.update_descriptor(physical, old, new) {
+        match self.descriptors.update_descriptor(physical, old, new) {
             Ok(changed) => Some(changed),
             Err(MemoryStatus::Translation) => None,
             Err(status) => {

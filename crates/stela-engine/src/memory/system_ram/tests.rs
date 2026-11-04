@@ -486,6 +486,19 @@ fn physical_host_copy_preflights_holes_and_keeps_descriptor_prefix_precise() {
         registered.read_descriptor(0x4038),
         Ok(0x5353_5353_5353_5353)
     );
+    let mut descriptors = registered.descriptor_reader();
+    assert_eq!(
+        descriptors.read_descriptor(0x4000),
+        Ok(0x5353_5353_5353_5353)
+    );
+    assert_eq!(
+        descriptors.read_descriptor(0x4001),
+        Err(MemoryStatus::InvalidRequest)
+    );
+    assert_eq!(
+        descriptors.read_descriptor(0x4040),
+        Err(MemoryStatus::Translation)
+    );
     assert_eq!(
         registered.update_descriptor(0x4001, 0, 1),
         Err(MemoryStatus::InvalidRequest)
@@ -503,6 +516,7 @@ fn physical_host_copy_preflights_holes_and_keeps_descriptor_prefix_precise() {
         Ok(false)
     );
     assert_eq!(registered.read_descriptor(0x4000), Ok(0x1234));
+    assert_eq!(descriptors.read_descriptor(0x4000), Ok(0x1234));
     assert_eq!(
         registered.read_descriptor(0x4008),
         Ok(0x5353_5353_5353_5353)
@@ -511,6 +525,8 @@ fn physical_host_copy_preflights_holes_and_keeps_descriptor_prefix_precise() {
     // registered.
     unsafe { registered.publish_physical(0x4080, &42u64.to_le_bytes()) }.unwrap();
     assert_eq!(registered.read_descriptor(0x4080), Ok(42));
+    assert_eq!(descriptors.read_descriptor(0x4080), Ok(42));
+    assert_eq!(descriptors.read_descriptor(0x4000), Ok(0x1234));
 }
 
 #[test]

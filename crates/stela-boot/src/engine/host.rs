@@ -1140,22 +1140,37 @@ impl State {
 }
 
 /// Guest page tables read through the RAM map.
-struct GuestTables<'a>(&'a State);
+struct GuestTables<'a> {
+    state: &'a State,
+    descriptors: Option<stela_engine::memory::system_ram::DescriptorReader<'a>>,
+}
+
+impl<'a> GuestTables<'a> {
+    fn new(state: &'a State) -> Self {
+        Self {
+            state,
+            descriptors: state
+                .registered_ram
+                .as_ref()
+                .map(|ram| ram.descriptor_reader()),
+        }
+    }
+}
 
 impl mmu::TableMemory for GuestTables<'_> {
     fn read_descriptor(&mut self, physical: u64) -> Option<u64> {
-        if let Some(ram) = &self.0.registered_ram {
-            return ram.read_descriptor(physical).ok();
+        if let Some(descriptors) = &mut self.descriptors {
+            return descriptors.read_descriptor(physical).ok();
         }
-        let host = self.0.host_physical(physical)?;
+        let host = self.state.host_physical(physical)?;
         // SAFETY: guest RAM through the physmap.
         Some(unsafe { (layout::physical(host) as *const u64).read_volatile() })
     }
     fn update_descriptor(&mut self, physical: u64, old: u64, new: u64) -> Option<bool> {
-        if let Some(ram) = &self.0.registered_ram {
-            return ram.update_descriptor(physical, old, new).ok();
+        if let Some(descriptors) = &self.descriptors {
+            return descriptors.update_descriptor(physical, old, new).ok();
         }
-        let host = self.0.host_physical(physical)?;
+        let host = self.state.host_physical(physical)?;
         let slot = layout::physical(host) as *mut u64;
         // SAFETY: guest RAM through the physmap; one PE, no concurrent walker.
         unsafe {

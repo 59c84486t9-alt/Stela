@@ -175,7 +175,7 @@ pub(super) fn resolve(
         address,
         access,
         requester,
-        &mut GuestTables(state),
+        &mut GuestTables::new(state),
     ) {
         Outcome::Mapped(translation) => translation,
         Outcome::Fault(fault) => return Err(FaultCause::Guest(fault)),
