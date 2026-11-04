@@ -2,7 +2,7 @@
 //! Valid mappings may remain stale until guest maintenance. Fetches still walk
 //! and compare source bytes; all data hits still resolve RAM.
 use super::{DataPart, mmu};
-use crate::memory::backing::AccessKind;
+use crate::memory::{backing::AccessKind, domain::SCA_BYTES};
 use alloc::{boxed::Box, vec};
 
 const PAGE_BYTES: u64 = 4096;
@@ -96,8 +96,10 @@ impl DataTlb {
     }
 
     fn contained(part: DataPart) -> bool {
-        // These naturally aligned widths all divide a page.
-        matches!(part.bytes, 1 | 2 | 4 | 8) && part.address & (part.bytes as u64 - 1) == 0
+        // Request alignment is checked before decomposition. A nonempty
+        // part inside one SCA granule is also inside one translation page.
+        let offset = part.address as usize & (SCA_BYTES - 1);
+        part.bytes.wrapping_sub(1) < SCA_BYTES - offset
     }
 
     fn index(address: u64) -> usize {

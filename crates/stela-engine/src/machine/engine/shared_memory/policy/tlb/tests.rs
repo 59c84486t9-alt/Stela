@@ -126,6 +126,52 @@ fn context_changes_cannot_revive_old_entries_and_helpers_disable_caching() {
 }
 
 #[test]
+fn cached_translation_covers_an_unaligned_sca_part_and_a_full_pair() {
+    let (mut thread, ram) = thread();
+    let data = *b"0123456789abcdef";
+    let other = *b"fedcba9876543210";
+    publish(&ram, DATA, &data);
+    publish(&ram, OTHER, &other);
+
+    // Neither initial request needs a narrower access to seed the TLB.
+    let mut narrow = [0; 8];
+    assert_eq!(
+        ordinary_transfer(&mut thread, VA + 3, &mut narrow, 0),
+        (MemoryStatus::Success, 8, 0)
+    );
+    assert_eq!(narrow, data[3..11]);
+    #[cfg(feature = "native-profile")]
+    let before = thread.policy_mut().data_tlb_statistics();
+    publish(&ram, LEAF, &(DESCRIPTOR + PAGE_BYTES).to_le_bytes());
+    let mut pair = [0; 16];
+    assert_eq!(
+        ordinary_transfer(&mut thread, VA, &mut pair, flags::PAIR),
+        (MemoryStatus::Success, 16, 0)
+    );
+    assert_eq!(pair, data);
+    #[cfg(feature = "native-profile")]
+    {
+        let after = thread.policy_mut().data_tlb_statistics();
+        assert_eq!(after.hits, before.hits + 1);
+        assert_eq!(after.walks, before.walks);
+        assert_eq!(after.descriptor_reads, before.descriptor_reads);
+    }
+
+    refresh(&mut thread, 2);
+    assert_eq!(
+        ordinary_transfer(&mut thread, VA, &mut pair, flags::PAIR).0,
+        MemoryStatus::Success
+    );
+    assert_eq!(pair, other);
+    publish(&ram, LEAF, &DESCRIPTOR.to_le_bytes());
+    assert_eq!(
+        ordinary_transfer(&mut thread, VA + 3, &mut narrow, 0).0,
+        MemoryStatus::Success
+    );
+    assert_eq!(narrow, other[3..11]);
+}
+
+#[test]
 fn cached_page_does_not_authorize_a_later_split_page_or_unaligned_shape() {
     let (mut thread, ram) = thread();
     assert_eq!(read(&mut thread).0, MemoryStatus::Success);

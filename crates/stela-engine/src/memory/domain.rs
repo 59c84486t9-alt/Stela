@@ -53,7 +53,7 @@ use super::{
     monitor,
 };
 
-const SCA_BYTES: usize = 16;
+pub(crate) const SCA_BYTES: usize = 16;
 const HALF_SCA_BYTES: usize = SCA_BYTES / 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
