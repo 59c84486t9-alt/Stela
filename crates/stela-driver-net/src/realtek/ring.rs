@@ -5,6 +5,7 @@ use super::{LinkError, MAX_FRAME, MIN_FRAME, registers::*};
 use crate::{
     block::BlockError,
     bus::dma::{DmaAllocator, DmaBuffer},
+    ring::write_transmit_frame,
 };
 use alloc::vec::Vec;
 use core::sync::atomic::{Ordering, fence};
@@ -64,8 +65,7 @@ impl Ring {
         fence(Ordering::Acquire);
         let length = frame.len().max(MIN_FRAME);
         let data = &mut self.buffers.bytes_mut()[self.next * BUFFER..self.next * BUFFER + length];
-        data.fill(0);
-        data[..frame.len()].copy_from_slice(frame);
+        write_transmit_frame(data, frame, length);
         let offset = self.next * DESCRIPTOR;
         self.descriptors.write(offset + 4, 0u32);
         // Publish OWN last. Never rewrite a device-owned descriptor or buffer.
