@@ -3182,11 +3182,16 @@ fn tlbi_invalidates_and_wfi_waits_for_the_virtual_timer() {
     let mut machine = machine_on(one_timer_bank(), &[]);
     machine.system_instruction(0xd508_871f).unwrap(); // tlbi vmalle1
     assert_eq!(machine.host.invalidations, 1);
+    machine.native_system();
+    machine.memory_checks();
+    assert_eq!(machine.timer_deadline(), None);
     // Arm the virtual timer 1500 ticks ahead and wait.
     machine.cpu.state.x[0] = 1500;
     machine.system_instruction(0xd51b_e300).unwrap(); // msr cntv_tval_el0, x0
     machine.cpu.state.x[0] = 1;
     machine.system_instruction(0xd51b_e320).unwrap(); // msr cntv_ctl_el0, x0
+    assert_eq!(machine.timer_deadline(), Some(1500));
+    assert!(machine.native_system.is_some() && machine.memory_checks.is_some());
     wait(&mut machine, 0xd503_207f).unwrap(); // wfi
     assert_eq!(machine.host.now, 2000);
     // The FIQ is masked by DAIF until it is cleared.
