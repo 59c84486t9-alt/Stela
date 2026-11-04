@@ -899,10 +899,10 @@ pub(crate) fn retire_registers(
 /// This exact fixture completed real device/DMA/IRQ/work/posted-write drain.
 /// No other view or callback can start using the original config mapping.
 pub(crate) fn retire_function(function: Function) -> Result<()> {
-    let mut mapping = function.into_config().into_mapping();
-    // SAFETY: all callers are final acknowledged fixture teardown, not a
-    // vendor read or BM-disable guess. Busy/error keeps the original lease.
-    unsafe { mapping.retire() }
+    let mut configuration = function.into_config().into_parts();
+    // SAFETY: the caller has joined the fixture's device, DMA, IRQ and work
+    // users. Retirement checks the original configuration operation and map.
+    unsafe { configuration.retire() }
         .map_err(|error| refuse!("original config retirement: {error}", ?error))
 }
 

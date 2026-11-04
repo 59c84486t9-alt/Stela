@@ -98,10 +98,6 @@ impl NativeRegisters {
     /// equality is insufficient. The stopped requester's firmware/IRQ/work and
     /// physical alias exclusion continues until successful explicit shutdown.
     /// No other raw access, cloned view or configuration writer may interfere.
-    #[expect(
-        clippy::result_large_err,
-        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
-    )]
     pub unsafe fn attach(
         mut requester: StoppedRequester,
         mapping: Mapping,

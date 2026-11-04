@@ -107,10 +107,6 @@ impl NativeFunction {
     /// # Safety
     /// As for `attach`; the stopped requester's original engine/IRQ/coherency
     /// grant remains current until the remapper consumes the binding.
-    #[expect(
-        clippy::result_large_err,
-        reason = "native refusal returns the same function and original exclusion without allocation"
-    )]
     pub unsafe fn attach_stopped(
         requester: super::requester::StoppedRequester,
         exclusion: Box<dyn Any>,
@@ -140,10 +136,6 @@ impl NativeFunction {
     /// or reset worker may coexist. All methods and final retirement obey the
     /// mapping's process/CPU context. Observed IDs grant none of this.
     /// No DMA domain, coherency, engine stop or topology is inferred here.
-    #[expect(
-        clippy::result_large_err,
-        reason = "native refusal returns the same function and original exclusion without allocation"
-    )]
     pub unsafe fn attach(
         mut function: Function<OwnedConfig>,
         exclusion: Box<dyn Any>,

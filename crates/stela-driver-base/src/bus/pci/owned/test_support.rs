@@ -403,9 +403,12 @@ impl FixtureCustody {
     /// Source caller completed actual model unmap and every raw/callback user.
     /// Failure keeps the complete SAME source actor, never recreates a grant.
     unsafe fn finish(mut self: Box<Self>) -> Result<(), RetireFailure> {
-        if let Err(error) = self.owner.close() {
-            return Err(RetireFailure::source(error, self));
-        }
+        // SAFETY: same actual fixture retirement described above.
+        unsafe { self.finish_in_place() }.map_err(|error| RetireFailure::source(error, self))
+    }
+
+    unsafe fn finish_in_place(&mut self) -> Result<(), MappingError> {
+        self.owner.close()?;
         drop(self.resource.take());
         drop(self.retention.take());
         drop(self.completion.take());
@@ -414,13 +417,8 @@ impl FixtureCustody {
         }
         // SAFETY: caller supplied exact model drain; actual original gate also
         // checks every retained epoch and config operation has ended.
-        match unsafe { self.owner.retire() } {
-            Ok(allocation) => {
-                drop(allocation);
-                Ok(())
-            }
-            Err(error) => Err(RetireFailure::source(error, self)),
-        }
+        drop(unsafe { self.owner.retire() }?);
+        Ok(())
     }
 }
 /// Original source plus mapping. Geometry remains model DATA and never creates
@@ -434,6 +432,25 @@ pub fn mapped(
     attribute: CacheAttribute,
     protection: Protection,
 ) -> (FixtureCustody, Mapping, Arc<Counters>) {
+    let (source, authority, counters) = unmapped(address, window, span, attribute);
+    let mapping = authority
+        .map(
+            source.resource().clone(),
+            offset,
+            bytes,
+            attribute,
+            protection,
+        )
+        .unwrap();
+    (source, mapping, counters)
+}
+
+fn unmapped(
+    address: Address,
+    window: EcamWindow,
+    span: PhysicalSpan,
+    attribute: CacheAttribute,
+) -> (FixtureCustody, Authority, Arc<Counters>) {
     let counters = Arc::new(Counters::default());
     let memory = Arc::new(Ram {
         pages: UnsafeCell::new(Pages([0; 8192])),
@@ -461,10 +478,6 @@ pub fn mapped(
         counters: counters.clone(),
         mapping: retention.clone(),
     }));
-    let mapping = authority
-        .map(resource.clone(), offset, bytes, attribute, protection)
-        .unwrap();
-    drop(authority);
     (
         FixtureCustody {
             close: Some(close),
@@ -479,28 +492,28 @@ pub fn mapped(
             address,
             window,
         },
-        mapping,
+        authority,
         counters,
     )
 }
 /// Sibling fixture entry. The actual final grant owns its external controller.
 pub fn fixture(address: Address) -> (OwnedConfig, Arc<Counters>) {
     let span = PhysicalSpan::new(physical(address), FUNCTION_BYTES as u64).unwrap();
-    let (source, mapping, counters) = mapped(
-        address,
-        window(address),
-        span,
-        0,
-        FUNCTION_BYTES,
-        CacheAttribute::Uncached,
-        Protection::ReadWrite,
-    );
-    let config = match OwnedConfig::attach(source.into_grant(), mapping) {
+    let (source, authority, counters) =
+        unmapped(address, window(address), span, CacheAttribute::Uncached);
+    let prepared = OwnedConfig::prepare(source.into_grant());
+    let mapping = authority
+        .map(
+            prepared.configuration_resource().clone(),
+            0,
+            FUNCTION_BYTES,
+            CacheAttribute::Uncached,
+            Protection::ReadWrite,
+        )
+        .unwrap();
+    let config = match prepared.attach(mapping) {
         Ok(config) => config,
-        Err((error, grant, mapping)) => {
-            core::mem::forget((grant, mapping));
-            panic!("valid original owned fixture refused: {error:?}")
-        }
+        Err((error, _parts)) => panic!("valid original owned fixture refused: {error:?}"),
     };
     (config, counters)
 }
@@ -521,9 +534,21 @@ pub fn fixture_pointer(config: &OwnedConfig, offset: u16) -> NonNull<u8> {
 /// Failure keeps exact original parts/source. Cause inspection cannot release.
 pub struct RetireFailure {
     pub error: MappingError,
-    _parts: Option<(DriverGrant, Mapping)>,
-    _source: Option<ManuallyDrop<Box<FixtureCustody>>>,
-    _grant: Option<DriverGrant>,
+    kept: Option<KeptFailure>,
+}
+
+enum KeptFailure {
+    Parts {
+        _grant: DriverGrant,
+        _mapping: Mapping,
+    },
+    Envelope {
+        _parts: ConfigParts<DriverGrant>,
+    },
+    Source(ManuallyDrop<Box<FixtureCustody>>),
+    Grant {
+        _grant: DriverGrant,
+    },
 }
 impl Drop for RetireFailure {
     fn drop(&mut self) {
@@ -531,7 +556,7 @@ impl Drop for RetireFailure {
         // its whole original object remains retained. Ordinary DriverGrant and
         // Mapping fields below run their own close/quarantine-only Drop paths;
         // neither acknowledges hardware or frees an unfinished graph.
-        if let Some(source) = &mut self._source {
+        if let Some(KeptFailure::Source(source)) = &mut self.kept {
             source.owner.abandon_admission();
         }
     }
@@ -547,17 +572,16 @@ impl RetireFailure {
     fn parts(error: MappingError, grant: DriverGrant, mapping: Mapping) -> Self {
         Self {
             error,
-            _parts: Some((grant, mapping)),
-            _source: None,
-            _grant: None,
+            kept: Some(KeptFailure::Parts {
+                _grant: grant,
+                _mapping: mapping,
+            }),
         }
     }
     fn source(error: MappingError, source: Box<FixtureCustody>) -> Self {
         Self {
             error,
-            _parts: None,
-            _source: Some(ManuallyDrop::new(source)),
-            _grant: None,
+            kept: Some(KeptFailure::Source(ManuallyDrop::new(source))),
         }
     }
 }
@@ -594,9 +618,7 @@ unsafe fn finish_original(grant: DriverGrant) -> Result<(), RetireFailure> {
         // unsafe native extraction merely to inspect its Rust identity.
         return Err(RetireFailure {
             error: MappingError::InvalidPlatformReply,
-            _parts: None,
-            _source: None,
-            _grant: Some(grant),
+            kept: Some(KeptFailure::Grant { _grant: grant }),
         });
     }
     // SAFETY: exact Any identity above makes this an immutable observation of
@@ -606,9 +628,7 @@ unsafe fn finish_original(grant: DriverGrant) -> Result<(), RetireFailure> {
     if fixture.uses() != 0 {
         return Err(RetireFailure {
             error: MappingError::Busy,
-            _parts: None,
-            _source: None,
-            _grant: Some(grant),
+            kept: Some(KeptFailure::Grant { _grant: grant }),
         });
     }
     // SAFETY: known actual hosted source transfers intact to its retirement
@@ -654,29 +674,42 @@ pub unsafe fn retire(
 /// # Safety
 /// Same complete synchronous model drain as retire; no raw user can restart.
 pub unsafe fn retire_config(config: OwnedConfig, counters: &Counters) -> Result<(), RetireFailure> {
-    let (grant, mapping) = config.into_parts();
     // SAFETY: same exact original model drain supplied by this caller.
-    unsafe { retire(grant, mapping, counters) }
+    unsafe { retire_owned(config) }?;
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
+    assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 1);
+    assert_eq!(counters.platform_drops.load(Ordering::Relaxed), 1);
+    Ok(())
 }
 
 /// Complete one original hosted config fixture without needing its counters.
-/// Failure retains the SAME grant/mapping/source. No native source is admitted.
+/// Failure retains the SAME envelope. No native source is admitted.
 /// # Safety
 /// Every actual model producer, callback, raw pointer and alias has ended and
 /// cannot restart. This is the owning fixture's acknowledged retirement path.
 pub unsafe fn retire_owned(config: OwnedConfig) -> Result<(), RetireFailure> {
-    let (grant, mut mapping) = config.into_parts();
-    if let Err(error) = preflight_unmap(&grant, &mapping) {
-        return Err(RetireFailure::parts(error, grant, mapping));
-    }
-    // SAFETY: exact model raw-user/drain obligations supplied by this caller;
-    // original same-resource/pending-use vetoes ran before this unmap effect.
-    if let Err(error) = unsafe { mapping.retire() } {
-        return Err(RetireFailure::parts(error, grant, mapping));
-    }
-    drop(mapping);
-    // SAFETY: acknowledged SAME mapping and caller's source exclusion above.
-    unsafe { finish_original(grant) }
+    // SAFETY: exact original model drain and owning acknowledgement supplied.
+    unsafe { retire_parts(config.into_parts()) }
+}
+
+unsafe fn retire_parts(parts: ConfigParts<DriverGrant>) -> Result<(), RetireFailure> {
+    // SAFETY: actual fixture drain from the caller. The finalizer borrows the
+    // same model source in place and performs its acknowledged retirement.
+    let result = unsafe {
+        parts.finish_model(
+            |source: &FixtureCustody, mapping| {
+                if source.uses() != usize::from(mapping.is_some()) {
+                    return Err(MappingError::Busy);
+                }
+                Ok(())
+            },
+            |source| source.finish_in_place(),
+        )
+    };
+    result.map_err(|(error, parts)| RetireFailure {
+        error,
+        kept: Some(KeptFailure::Envelope { _parts: parts }),
+    })
 }
 
 #[cfg(test)]

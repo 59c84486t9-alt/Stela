@@ -1,17 +1,19 @@
 //! Original phase-specific configuration ownership; no naked native attach.
 use super::{Address, ConfigError, ConfigSpace, EcamWindow, msi::MsiConfigSpace};
 use crate::bus::mmio::owned::{Error as MappingError, Mapping, MappingView};
+mod envelope;
+use envelope::Envelope;
+pub use envelope::{ConfigParts, PreparedConfig};
 pub mod grant;
 mod observed;
 pub use observed::ObservedConfig;
 mod region;
 use grant::{DriverGrant, PrepublicationGrant};
-use region::Region;
 pub struct OwnedConfig {
-    region: Region<DriverGrant>,
+    storage: Envelope<DriverGrant>,
 }
 pub struct UnpublishedConfig {
-    region: Region<PrepublicationGrant>,
+    storage: Envelope<PrepublicationGrant>,
 }
 pub struct ConfigRetention {
     view: MappingView,
@@ -60,13 +62,13 @@ impl OwnedConfig {
     /// Retain only actual endpoint metadata-denial storage before publication.
     /// It exposes no I/O, source/config backedge or completion/release proof.
     pub fn admission_close(&self) -> Result<super::assignment::AdmissionClose, MappingError> {
-        self.region.admission_close()
+        self.storage.region().admission_close()
     }
     pub fn seal_bus_master(&mut self) -> Result<(), ConfigError> {
-        self.region.seal_bus_master()
+        self.storage.region_mut().seal_bus_master()
     }
     pub fn seal_bus_routing(&mut self) -> Result<(), ConfigError> {
-        self.region.seal_bus_routing()
+        self.storage.region_mut().seal_bus_routing()
     }
     /// # Safety
     /// Actual owning driver stop/reset, no old restart, current root/config
@@ -74,42 +76,40 @@ impl OwnedConfig {
     /// Native source still validates real requester/engine admission separately.
     pub unsafe fn release_bus_master_seal(&mut self) {
         // SAFETY: caller holds actual original admission/retirement receipts.
-        unsafe { self.region.release_bus_master_seal() }
+        unsafe { self.storage.region_mut().release_bus_master_seal() }
     }
     /// # Safety
     /// Complete original descendant cohort is contained/retired, new roots
     /// blocked, leaf seals enforced and actual bridge assignment remains frozen.
     pub unsafe fn release_bus_forwarding_seal(&mut self) -> Result<(), ConfigError> {
         // SAFETY: actual whole-source retirement proof, never endpoint stop.
-        unsafe { self.region.release_bus_forwarding_seal() }
+        unsafe { self.storage.region_mut().release_bus_forwarding_seal() }
     }
 
-    pub fn attach(
-        grant: DriverGrant,
-        mapping: Mapping,
-    ) -> Result<Self, (ConfigError, DriverGrant, Mapping)> {
-        Region::attach(grant, mapping).map(|region| Self { region })
+    pub fn prepare(grant: DriverGrant) -> PreparedConfig<DriverGrant> {
+        envelope::prepare(grant)
     }
+
     pub fn address(&self) -> Address {
-        self.region.address()
+        self.storage.region().address()
     }
     pub fn window(&self) -> EcamWindow {
-        self.region.window()
+        self.storage.region().window()
     }
     pub fn matches_binding(
         &self,
         binding: &super::requester::RequesterBinding,
     ) -> Result<bool, MappingError> {
-        self.region.matches_binding(binding)
+        self.storage.region().matches_binding(binding)
     }
     pub fn matches_retention(&self, retained: &ConfigRetention) -> Result<bool, MappingError> {
-        self.region.matches_retention(retained)
+        self.storage.region().matches_retention(retained)
     }
     pub fn retain_epoch(&self) -> Result<ConfigRetention, MappingError> {
-        self.region.retain_epoch()
+        self.storage.region().retain_epoch()
     }
-    pub fn into_parts(self) -> (DriverGrant, Mapping) {
-        self.region.into_parts()
+    pub fn into_parts(self) -> ConfigParts<DriverGrant> {
+        ConfigParts(self.storage)
     }
     /// # Safety
     /// Every actual config/device/raw pointer/DMA/IRQ/callback user has ended;
@@ -117,25 +117,39 @@ impl OwnedConfig {
     /// Failure keeps SAME owner and no actual grant/assignment release follows.
     pub unsafe fn retire(&mut self) -> Result<(), MappingError> {
         // SAFETY: caller supplies this exact original mapping retirement.
-        unsafe { self.region.retire() }
+        unsafe { self.storage.retire() }
     }
     pub fn try_read8(&self, offset: u16) -> Result<u8, ConfigError> {
-        self.region.try_read8(offset)
+        self.storage.region().try_read8(offset)
     }
     pub fn try_write8(&mut self, offset: u16, value: u8) -> Result<(), ConfigError> {
-        self.region.try_write8(offset, value)
+        self.storage.region_mut().try_write8(offset, value)
     }
     pub fn try_read16(&self, offset: u16) -> Result<u16, ConfigError> {
-        self.region.try_read16(offset)
+        self.storage.region().try_read16(offset)
     }
     pub fn try_write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError> {
-        self.region.try_write16(offset, value)
+        self.storage.region_mut().try_write16(offset, value)
     }
     pub fn try_read32(&self, offset: u16) -> Result<u32, ConfigError> {
-        self.region.try_read32(offset)
+        self.storage.region().try_read32(offset)
     }
     pub fn try_write32(&mut self, offset: u16, value: u32) -> Result<(), ConfigError> {
-        self.region.try_write32(offset, value)
+        self.storage.region_mut().try_write32(offset, value)
+    }
+}
+#[cfg(test)]
+impl OwnedConfig {
+    fn attach_test(
+        grant: DriverGrant,
+        mapping: Mapping,
+    ) -> Result<Self, (ConfigError, DriverGrant, Mapping)> {
+        Self::prepare(grant)
+            .attach(mapping)
+            .map_err(|(error, parts)| {
+                let (grant, mapping) = parts.into_test_parts();
+                (error, grant, mapping)
+            })
     }
 }
 impl ConfigSpace for OwnedConfig {
@@ -160,38 +174,36 @@ impl ConfigSpace for OwnedConfig {
 }
 impl UnpublishedConfig {
     pub fn seal_bus_master(&mut self) -> Result<(), ConfigError> {
-        self.region.seal_bus_master()
+        self.storage.region_mut().seal_bus_master()
     }
     pub fn seal_bus_routing(&mut self) -> Result<(), ConfigError> {
-        self.region.seal_bus_routing()
+        self.storage.region_mut().seal_bus_routing()
     }
 
-    pub fn attach(
-        grant: PrepublicationGrant,
-        mapping: Mapping,
-    ) -> Result<Self, (ConfigError, PrepublicationGrant, Mapping)> {
-        Region::attach(grant, mapping).map(|region| Self { region })
+    pub fn prepare(grant: PrepublicationGrant) -> PreparedConfig<PrepublicationGrant> {
+        envelope::prepare(grant)
     }
+
     pub fn address(&self) -> Address {
-        self.region.address()
+        self.storage.region().address()
     }
     pub fn window(&self) -> EcamWindow {
-        self.region.window()
+        self.storage.region().window()
     }
     pub fn matches_binding(
         &self,
         binding: &super::requester::RequesterBinding,
     ) -> Result<bool, MappingError> {
-        self.region.matches_binding(binding)
+        self.storage.region().matches_binding(binding)
     }
     pub fn matches_retention(&self, retained: &ConfigRetention) -> Result<bool, MappingError> {
-        self.region.matches_retention(retained)
+        self.storage.region().matches_retention(retained)
     }
     pub fn retain_epoch(&self) -> Result<ConfigRetention, MappingError> {
-        self.region.retain_epoch()
+        self.storage.region().retain_epoch()
     }
-    pub fn into_parts(self) -> (PrepublicationGrant, Mapping) {
-        self.region.into_parts()
+    pub fn into_parts(self) -> ConfigParts<PrepublicationGrant> {
+        ConfigParts(self.storage)
     }
     /// # Safety
     /// Every actual config/device/raw pointer/DMA/IRQ/callback user has ended;
@@ -199,25 +211,25 @@ impl UnpublishedConfig {
     /// Failure keeps SAME owner and no actual grant/assignment release follows.
     pub unsafe fn retire(&mut self) -> Result<(), MappingError> {
         // SAFETY: caller supplies this exact original mapping retirement.
-        unsafe { self.region.retire() }
+        unsafe { self.storage.retire() }
     }
     pub fn try_read8(&self, offset: u16) -> Result<u8, ConfigError> {
-        self.region.try_read8(offset)
+        self.storage.region().try_read8(offset)
     }
     pub fn try_write8(&mut self, offset: u16, value: u8) -> Result<(), ConfigError> {
-        self.region.try_write8(offset, value)
+        self.storage.region_mut().try_write8(offset, value)
     }
     pub fn try_read16(&self, offset: u16) -> Result<u16, ConfigError> {
-        self.region.try_read16(offset)
+        self.storage.region().try_read16(offset)
     }
     pub fn try_write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError> {
-        self.region.try_write16(offset, value)
+        self.storage.region_mut().try_write16(offset, value)
     }
     pub fn try_read32(&self, offset: u16) -> Result<u32, ConfigError> {
-        self.region.try_read32(offset)
+        self.storage.region().try_read32(offset)
     }
     pub fn try_write32(&mut self, offset: u16, value: u32) -> Result<(), ConfigError> {
-        self.region.try_write32(offset, value)
+        self.storage.region_mut().try_write32(offset, value)
     }
 }
 impl ConfigSpace for UnpublishedConfig {

@@ -189,10 +189,6 @@ impl NativeRegisters {
     /// in the consumed resources' backings, including quarantine. A
     /// borrowed external guard that can end first is insufficient. No implicit
     /// identity mapping or firmware-conflict override is permitted.
-    #[expect(
-        clippy::result_large_err,
-        reason = "claim refusal returns the same config and mapping instead of allocating after failure"
-    )]
     pub unsafe fn claim(
         requester: StoppedRequester,
         mapping: Mapping,

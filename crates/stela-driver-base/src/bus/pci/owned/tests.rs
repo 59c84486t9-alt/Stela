@@ -20,7 +20,7 @@ fn full_mcfg_geometry_and_mapping_owners_survive_until_retirement() {
     assert_eq!(counters.platform_drops.load(Ordering::Relaxed), 0);
     config.write32(0, 0xabcd1234).unwrap();
     assert_eq!(config.read32(0).unwrap(), 0xabcd1234);
-    let (grant, mapping) = config.into_parts();
+    let (grant, mapping) = config.into_parts().into_test_parts();
     assert_eq!(mapping.physical_span().unwrap().start(), 0x8abff000);
     assert_eq!(mapping.bytes().unwrap(), FUNCTION_BYTES);
     assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
@@ -74,7 +74,7 @@ fn segment_and_bus_extremes_keep_full_function_offsets() {
     ] {
         let (config, counters) = fixture(address);
         assert_eq!(config.address(), address);
-        let (grant, mapping) = config.into_parts();
+        let (grant, mapping) = config.into_parts().into_test_parts();
         assert_eq!(mapping.physical_span().unwrap().start(), physical);
         // SAFETY: exact synchronous RAM fixture; every pointer/borrower stopped.
         unsafe { retire(grant, mapping, &counters) }.unwrap();
@@ -84,11 +84,11 @@ fn segment_and_bus_extremes_keep_full_function_offsets() {
 #[test]
 fn retired_mapping_is_returned_without_resurrecting_ownership() {
     let (config, counters) = fixture(ADDRESS);
-    let (grant, mut mapping) = config.into_parts();
+    let (grant, mut mapping) = config.into_parts().into_test_parts();
     // SAFETY: this synchronous fixture has no config, worker or device access.
     unsafe { mapping.retire() }.unwrap();
     // Reuse the SAME source grant; rejection must not resurrect the mapping.
-    let (error, grant, mapping) = match OwnedConfig::attach(grant, mapping) {
+    let (error, grant, mapping) = match OwnedConfig::attach_test(grant, mapping) {
         Err(failure) => failure,
         Ok(_) => panic!("retired mapping accepted"),
     };
@@ -208,7 +208,7 @@ fn rejected_metadata_returns_the_live_mapping_for_explicit_retirement() {
         let original = mapping.view(0..FUNCTION_BYTES).unwrap();
         // Actual newly created fixture source carries its model geometry. The
         // constructor rejects it without descriptor-to-native-grant conversion.
-        let (error, grant, mapping) = match OwnedConfig::attach(source.into_grant(), mapping) {
+        let (error, grant, mapping) = match OwnedConfig::attach_test(source.into_grant(), mapping) {
             Err(failure) => failure,
             Ok(_) => panic!("invalid config metadata accepted"),
         };
@@ -264,7 +264,7 @@ fn rejected_metadata_returns_the_live_mapping_for_explicit_retirement() {
         let (source, mapping, counters) =
             mapped(ADDRESS, good, span, offset, bytes, attribute, protection);
         // SAME actual owned fixture source, with an invalid view/policy.
-        let (error, grant, mapping) = match OwnedConfig::attach(source.into_grant(), mapping) {
+        let (error, grant, mapping) = match OwnedConfig::attach_test(source.into_grant(), mapping) {
             Err(failure) => failure,
             Ok(_) => panic!("invalid mapping accepted"),
         };
@@ -282,7 +282,7 @@ fn read_only_epoch_seal_pins_exact_mapping_and_refuses_same_address_substitute()
     let seal = config.retain_epoch().unwrap();
     assert_eq!(config.matches_retention(&seal), Ok(true));
     assert_eq!(foreign.matches_retention(&seal), Ok(false));
-    let (grant, mut mapping) = config.into_parts();
+    let (grant, mut mapping) = config.into_parts().into_test_parts();
     // SAFETY: synchronous RAM fixture has no device/IRQ/work access. The live
     // seal must still prevent retirement of the mapping that backs it.
     assert_eq!(unsafe { mapping.retire() }, Err(MappingError::Busy));

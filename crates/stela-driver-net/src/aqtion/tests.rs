@@ -1424,6 +1424,7 @@ fn native_config(address: Address, device: u16) -> (Function<ControlledConfig>, 
     let close = custody.owner.admission_close().unwrap();
     // SAFETY: the close is from the same original custody owner before mapping.
     let grant = unsafe { crate::bus::pci::owned::grant::DriverGrant::from_boxed(custody, close) };
+    let prepared = OwnedConfig::prepare(grant);
     let mapping = authority
         .map(
             resource,
@@ -1433,11 +1434,9 @@ fn native_config(address: Address, device: u16) -> (Function<ControlledConfig>, 
             owned::Protection::ReadWrite,
         )
         .unwrap();
-    let mut config = match OwnedConfig::attach(grant, mapping) {
+    let mut config = match prepared.attach(mapping) {
         Ok(config) => config,
-        Err((error, grant, mapping)) => {
-            // Keep the SAME actual grant and mapping on constructor refusal.
-            core::mem::forget((grant, mapping));
+        Err((error, _parts)) => {
             panic!("native PM fixture: {error:?}")
         }
     };

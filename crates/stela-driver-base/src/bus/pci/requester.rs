@@ -172,10 +172,6 @@ impl StoppedRequester {
     /// Only a specifically checked bounded reset preserving those owners and
     /// ATS/NoSnoop policy is admissible. Reset supplies neither stopped/drained
     /// proof nor remapper completion; keeping a mapping cannot enforce it.
-    #[expect(
-        clippy::result_large_err,
-        reason = "binding refusal returns the same requester and original config without allocating"
-    )]
     pub fn into_dma_binding(mut self) -> Result<(Self, RequesterBinding), (ClaimError, Self)> {
         if self.dma_bound {
             return Err((ClaimError::AlreadyBound, self));

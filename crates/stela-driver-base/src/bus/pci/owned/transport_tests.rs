@@ -36,7 +36,7 @@ fn mapped() -> (
 fn counted_transport_survives_extraction_without_generic_bme_or_pointer_escape() {
     let (source, mapping, counters) = mapped();
     let retention = source.retention();
-    let mut config = match OwnedConfig::attach(source.into_grant(), mapping) {
+    let mut config = match OwnedConfig::attach_test(source.into_grant(), mapping) {
         Ok(config) => Box::new(config),
         Err(_) => panic!("actual RAM attachment refused"),
     };
@@ -49,7 +49,7 @@ fn counted_transport_survives_extraction_without_generic_bme_or_pointer_escape()
     assert_eq!(config.try_read32(0x44).unwrap(), 0x89ab_cdef);
     assert_eq!(retention.uses(), 1);
     config.seal_bus_master().unwrap();
-    let (grant, mapping) = (*config).into_parts();
+    let (grant, mapping) = (*config).into_parts().into_test_parts();
     assert_eq!(mapping.kind(), Ok(ResourceKind::Configuration));
     assert_eq!(
         mapping.address(0, 4096),
@@ -64,7 +64,7 @@ fn counted_transport_survives_extraction_without_generic_bme_or_pointer_escape()
         Err(MappingError::ConfigurationOperationRequired)
     );
     assert_eq!(retention.uses(), 1);
-    let mut config = match OwnedConfig::attach(grant, mapping) {
+    let mut config = match OwnedConfig::attach_test(grant, mapping) {
         Ok(config) => config,
         Err((error, _, _)) => panic!("original RAM attachment refused: {error:?}"),
     };
@@ -85,7 +85,7 @@ fn counted_transport_survives_extraction_without_generic_bme_or_pointer_escape()
 fn equal_geometry_register_mapping_cannot_be_used_as_configuration() {
     let (source, original, counters) = mapped();
     let (bar, registers) = test_support::bar_fixture(original.physical_span().unwrap(), 4096);
-    let (error, grant, registers) = match OwnedConfig::attach(source.into_grant(), registers) {
+    let (error, grant, registers) = match OwnedConfig::attach_test(source.into_grant(), registers) {
         Ok(_) => panic!("register mapping accepted as configuration"),
         Err(refusal) => refusal,
     };
@@ -110,7 +110,7 @@ fn real_poststore_failure_keeps_prefix_count_and_generic_veto() {
     let (source, mapping, counters) = mapped();
     let retention = source.retention();
     let mut parked: Box<(Option<DriverGrant>, Option<Mapping>)> = Box::new((None, None));
-    let mut config = match OwnedConfig::attach(source.into_grant(), mapping) {
+    let mut config = match OwnedConfig::attach_test(source.into_grant(), mapping) {
         Ok(config) => Box::new(config),
         Err(_) => panic!("actual RAM attachment refused"),
     };
@@ -127,7 +127,11 @@ fn real_poststore_failure_keeps_prefix_count_and_generic_veto() {
         }
     );
     assert_eq!(retention.uses(), 2);
-    let (grant, mapping) = (*config).into_parts();
+    let mut parts = (*config).into_parts();
+    // SAFETY: all synchronous callers have returned. The retained internal
+    // operation still has an uncertain effect and must veto unmap.
+    assert_eq!(unsafe { parts.retire() }, Err(MappingError::Busy));
+    let (grant, mapping) = parts.into_test_parts();
     parked.0 = Some(grant);
     parked.1 = Some(mapping);
     let contexts = counters.contexts.load(Ordering::Relaxed);

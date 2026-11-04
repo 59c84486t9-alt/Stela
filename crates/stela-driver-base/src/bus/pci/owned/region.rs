@@ -86,46 +86,77 @@ pub(super) fn validate_mapping(
     Ok(())
 }
 
-pub(super) struct Region<G: Grant> {
+/// # Safety
+/// The owning source stopped and joined every actual user of this custody.
+pub(super) unsafe fn retire_mapping<G: Grant>(
+    grant: &G,
+    mapping: Option<&mut Mapping>,
+) -> Result<(), MappingError> {
+    let state = grant.state();
+    if state.acting.get()
+        || state.terminal.get().is_some()
+        || state.waiting.get().is_some()
+        || state.operation.borrow().is_some()
+    {
+        return Err(MappingError::Busy);
+    }
+    grant.custody().retirement_context()?;
+    if let Some(mapping) = mapping {
+        if !mapping.owns_resource(grant.custody().resource())? {
+            return Err(MappingError::InvalidPlatformReply);
+        }
+        // SAFETY: the exact original owner supplies complete retirement.
+        unsafe { mapping.retire() }?;
+    }
+    state.close_metadata();
+    state.dismiss_close();
+    Ok(())
+}
+
+pub(super) struct Region<G> {
     address: Address,
     window: EcamWindow,
     mapping: Mapping,
     grant: G,
 }
 impl<G: Grant> Region<G> {
-    /// Join an actual owned source grant with its SAME original UC/RW mapping.
-    /// Geometry derives only from that source, never a caller replacement.
-    /// Failure returns every original owner intact before device access.
-    pub fn attach(grant: G, mapping: Mapping) -> Result<Self, (ConfigError, G, Mapping)> {
+    /// Validate by borrowing the original grant and mapping in their envelope.
+    pub fn validate_attachment(
+        grant: &G,
+        mapping: &Mapping,
+    ) -> Result<(Address, EcamWindow), ConfigError> {
         let address = grant.custody().address();
         let window = grant.custody().window();
-        if let Err(error) = validate_mapping(address, window, &mapping, Protection::ReadWrite) {
-            return Err((error, grant, mapping));
-        }
-        if let Err(error) = grant
+        validate_mapping(address, window, mapping, Protection::ReadWrite)?;
+        grant
             .custody()
             .retirement_context()
-            .map_err(|e| ConfigError::before_effect(ConfigFailure::Mapping(e)))
+            .map_err(Self::map_error)?;
+        if !mapping
+            .retains_resource(grant.custody().resource())
+            .map_err(Self::map_error)?
         {
-            return Err((error, grant, mapping));
+            return Err(grant::foreign_grant());
         }
-        match mapping.retains_resource(grant.custody().resource()) {
-            Ok(true) => {}
-            Ok(false) => return Err((grant::foreign_grant(), grant, mapping)),
-            Err(error) => {
-                return Err((
-                    ConfigError::before_effect(ConfigFailure::Mapping(error)),
-                    grant,
-                    mapping,
-                ));
-            }
-        }
-        Ok(Self {
-            grant,
+        Ok((address, window))
+    }
+
+    fn map_error(error: MappingError) -> ConfigError {
+        ConfigError::before_effect(ConfigFailure::Mapping(error))
+    }
+
+    pub fn attached(grant: G, mapping: Mapping, (address, window): (Address, EcamWindow)) -> Self {
+        Self {
             address,
             window,
             mapping,
-        })
+            grant,
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn kept_parts(&mut self) -> (&mut G, &mut Mapping) {
+        (&mut self.grant, &mut self.mapping)
     }
 
     pub fn admission_close(
@@ -172,7 +203,8 @@ impl<G: Grant> Region<G> {
 
     /// Transfer the original mapping back to its retirement owner. The unsafe
     /// attachment's epoch/context and access-drain obligations remain in force.
-    pub fn into_parts(self) -> (G, Mapping) {
+    #[cfg(test)]
+    pub fn into_test_parts(self) -> (G, Mapping) {
         (self.grant, self.mapping)
     }
     /// # Safety
@@ -180,18 +212,8 @@ impl<G: Grant> Region<G> {
     /// no new access may start. No assignment/grant release is implied. Failure
     /// retains THIS same complete owner; never reconstruct it from descriptors.
     pub unsafe fn retire(&mut self) -> Result<(), MappingError> {
-        let state = self.grant.state();
-        if state.acting.get()
-            || state.terminal.get().is_some()
-            || state.operation.borrow().is_some()
-        {
-            return Err(MappingError::Busy);
-        }
-        self.grant.custody().retirement_context()?;
-        // SAFETY: exact original mapping under caller's complete retirement.
-        unsafe { self.mapping.retire() }?;
-        state.close_metadata();
-        state.dismiss_close();
+        // SAFETY: caller owns all-user retirement for this exact mapping.
+        unsafe { retire_mapping(&self.grant, Some(&mut self.mapping)) }?;
         Ok(())
     }
 

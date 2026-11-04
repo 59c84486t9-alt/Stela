@@ -44,10 +44,6 @@ impl<P: Profile> NativeRegisters<P> {
     /// DMA coherency; attachment does not infer either from PCI or pin mode.
     /// No cloned view/raw pointer or other owner accesses these mappings.
     /// Keep the native owners kept until controller shutdown succeeds.
-    #[expect(
-        clippy::result_large_err,
-        reason = "Refusal returns the same physical owner graph without allocating on failure"
-    )]
     pub unsafe fn attach(
         mut requester: StoppedRequester,
         mapping: Mapping,

@@ -67,10 +67,6 @@ impl NativeRegisters {
     /// BAR numbers or equal numeric addresses alone do not supply these grants.
     /// No aliases/firmware/other workers access these resources. Keep grants
     /// through acknowledged DMA/core shutdown and remapper drain.
-    #[expect(
-        clippy::result_large_err,
-        reason = "Refusal returns the same physical owner graph without allocating on failure"
-    )]
     pub unsafe fn attach(
         mut requester: StoppedRequester,
         hda: Mapping,

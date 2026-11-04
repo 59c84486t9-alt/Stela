@@ -283,10 +283,6 @@ fn checksum(bytes: &mut [u8]) {
     bytes[9] = 0;
     bytes[9] = 0u8.wrapping_sub(bytes.iter().fold(0u8, |sum, x| sum.wrapping_add(*x)));
 }
-#[expect(
-    clippy::result_large_err,
-    reason = "the helper returns the same original register inputs on refusal without allocating"
-)]
 fn inspect(inputs: Inputs, bytes: &[u8]) -> Result<FunctionInspection, (Error, Inputs)> {
     let ivrs = Ivrs::parse(bytes, 48).unwrap();
     // SAFETY: all inputs are held, synchronous isolated fixtures.

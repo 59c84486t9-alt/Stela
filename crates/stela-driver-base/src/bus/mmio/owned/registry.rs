@@ -843,9 +843,13 @@ impl Mapping {
     /// metadata. Grants no config writer/reset/root permission by itself.
     pub fn retains_resource(&self, resource: &Resource) -> Result<bool, Error> {
         self.check_current()?;
-        let lease = self.lease()?;
+        self.owns_resource(resource)
+    }
+    /// Check retained backing identity even after an unmap refusal. A match
+    /// carries no live mapping, context or retirement permission.
+    pub(crate) fn owns_resource(&self, resource: &Resource) -> Result<bool, Error> {
         Ok(Arc::ptr_eq(
-            &lease.record.resource.backing,
+            &self.lease()?.record.resource.backing,
             &resource.backing,
         ))
     }

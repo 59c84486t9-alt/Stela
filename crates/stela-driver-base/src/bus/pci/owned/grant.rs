@@ -209,6 +209,22 @@ impl PrepublicationGrant {
     }
 }
 impl DriverGrant {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn model_custody_mut(&mut self) -> &mut dyn DriverCustody {
+        &mut **self.original
+    }
+
+    /// # Safety
+    /// The same model owner has acknowledged empty custody in place.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) unsafe fn release_model_custody(&mut self) {
+        assert!(self.state.close.get_mut().is_none());
+        assert!(self.state.operation.get_mut().is_none());
+        self.returned = true;
+        // SAFETY: actual empty model custody and its unique allocation.
+        unsafe { ManuallyDrop::drop(&mut self.original) };
+    }
+
     pub fn admission_close(&self) -> Result<AdmissionClose, MappingError> {
         self.state.admission_close()
     }

@@ -60,10 +60,6 @@ impl RequesterClaim {
     /// uses its permanently host-check root. Native production attach
     /// needs the canonical owned MMIO/root-epoch adapter, not this contract
     /// inferred from an ECAM address. No operation/final release runs in IRQ.
-    #[expect(
-        clippy::result_large_err,
-        reason = "refusal returns the complete original function without failure-path allocation"
-    )]
     pub unsafe fn from_stopped_pci(
         function: Function<OwnedConfig>,
     ) -> Result<Self, (VtdError, Function<OwnedConfig>)> {
@@ -219,10 +215,6 @@ impl RequesterClaim {
         };
         function.set_bus_master(enabled).map_err(VtdError::Config)
     }
-    #[expect(
-        clippy::result_large_err,
-        reason = "wrong-kind extraction preserves the original affine claim without allocating"
-    )]
     pub fn into_function(self) -> Result<Function<OwnedConfig>, (VtdError, Self)> {
         match self.owner {
             Owner::Pci(function) => Ok(function),
