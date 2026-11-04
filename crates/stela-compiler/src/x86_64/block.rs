@@ -1049,6 +1049,21 @@ fn emit_single(
             );
         }
         super::store(code, destination);
+    } else if let Operation::AddSubExtended {
+        width,
+        subtract: true,
+        flags: true,
+        destination: Register::Zero,
+        left,
+        right,
+        extend,
+        amount,
+    } = instruction.operation
+        && !code.constant_time()
+        && held.rax != super::Rax::Guest(left)
+        && let Some(left) = code.asm().guest(left)
+    {
+        super::compare_extended(code, width, left, right, extend, amount);
     } else if let super::Rax::PairStoreAddress { base, displacement } = held.rax
         && let Operation::AddSub {
             width: Width::X64,

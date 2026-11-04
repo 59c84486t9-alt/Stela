@@ -598,6 +598,107 @@ fn ordinary_compare_reads_both_settled_load_results() {
 }
 
 #[test]
+fn extended_compare_reads_its_left_operand_in_place() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features, RecoverySiteKind},
+    };
+
+    let pc = GuestAddress(0xffff_fe00_3a41_bdc8);
+    let compare = 0xeb2a_013fu32; // CMP X9,W10,UXTB
+    let branch = 0x5400_0601; // B.NE
+    let target = TargetCpu::Baseline;
+    let system = BlockProfile::new(Features::SYSTEM_MODE);
+    let compile = |words: &[u32], pc, profile, target| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        CompilationPlan::new(&source, pc, &Options::new(profile, target))
+            .unwrap()
+            .compile()
+            .unwrap()
+    };
+    let suffix = |native: &NativeBlock| native.source_map[1].1;
+    let has = |bytes: &[u8], needle: &[u8]| bytes.windows(needle.len()).any(|row| row == needle);
+    for profile in [BlockProfile::ORDINARY, system] {
+        let (left_load, direct_cmp, staged_right, direct_wcmp) = if profile == system {
+            (
+                &[0x48, 0x8b, 0x47, 0x48][..],
+                &[0x48, 0x39, 0x4f, 0x48][..],
+                &[0x0f, 0xb6, 0x4f, 0x50][..],
+                &[0x39, 0x4f, 0x50][..],
+            )
+        } else {
+            (
+                &[0x48, 0x8b, 0x87, 0x48, 0, 0, 0][..],
+                &[0x48, 0x39, 0x8f, 0x48, 0, 0, 0][..],
+                &[0x0f, 0xb6, 0x8f, 0x50, 0, 0, 0][..],
+                &[0x39, 0x8f, 0x50, 0, 0, 0][..],
+            )
+        };
+        let block = compile(&[compare, branch], pc, profile, target);
+        let branch_pc = GuestAddress(pc.0 + 4);
+        assert_eq!(
+            block.native.source_map,
+            [(pc, 0), (branch_pc, suffix(&block.native))]
+        );
+        assert!(
+            block
+                .native
+                .x86_64_code
+                .starts_with(&[staged_right, direct_cmp].concat())
+        );
+        let fallback = compile(
+            &[compare, branch],
+            pc,
+            profile,
+            target.with_data_independent_timing(),
+        );
+        assert!(fallback.native.x86_64_code.starts_with(left_load));
+        let independent = compile(&[branch], branch_pc, profile, target);
+        assert_eq!(independent.native.source_map, [(branch_pc, 0)]);
+        assert!(!has(&independent.native.x86_64_code, direct_cmp));
+
+        // Keep the cheaper RAX-only path when the left input is already held.
+        let held = compile(&[0xf940_0049, compare, branch], pc, profile, target);
+        let compare_row =
+            &held.native.x86_64_code[held.native.source_map[1].1..held.native.source_map[2].1];
+        assert!(compare_row.starts_with(staged_right));
+        assert!(!has(compare_row, left_load) && !has(compare_row, direct_cmp));
+
+        let wcmp = compile(&[0x6b2c_015f, 0x5400_0420], pc, profile, target);
+        assert!(has(
+            &wcmp.native.x86_64_code[..suffix(&wcmp.native)],
+            direct_wcmp
+        ));
+    }
+
+    // X8 and SP use their pinned registers, and XZR supplies a zero RHS.
+    let pin_left = (compare & !(31 << 5)) | (8 << 5);
+    let sp = compare | (31 << 5);
+    let zero = compare | (31 << 16);
+    for (word, expected) in [
+        (pin_left, &[0x48, 0x39, 0xce][..]),
+        (sp, &[0x48, 0x39, 0xcb]),
+        (zero, &[0x31, 0xc9, 0x48, 0x39, 0x4f]),
+    ] {
+        let block = compile(&[word, branch], pc, system, target);
+        assert!(has(
+            &block.native.x86_64_code[..suffix(&block.native)],
+            expected
+        ));
+    }
+
+    let fault = compile(&[compare, 0xf940_004b, branch], pc, system, target);
+    let access = fault
+        .fault_recovery
+        .iter()
+        .find(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+        .unwrap();
+    assert_eq!(access.retirement.instruction_pc(), GuestAddress(pc.0 + 4));
+    assert_eq!(access.retirement.retired_before(), 1);
+    assert!(access.start >= fault.native.source_map[1].1);
+}
+
+#[test]
 fn pinned_indexed_address_uses_the_base_without_copying_it() {
     use crate::{
         Options, TargetCpu,

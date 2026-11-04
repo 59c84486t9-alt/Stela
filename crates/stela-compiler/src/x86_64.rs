@@ -239,6 +239,49 @@ pub(super) fn test_zero(code: &mut Code, width: Width, nonzero: bool) -> asm::Co
     if nonzero { asm::Cond::Ne } else { asm::Cond::E }
 }
 
+/// Stage the extended right operand in RCX.
+fn extended_operand(code: &mut Code, right: Register, extend: RegisterExtend, amount: u8) {
+    use asm::Size::{Byte, Dword, Qword, Word};
+    use asm::{Alu, Gpr::Rcx};
+    let mut asm = code.asm();
+    if let Some(storage) = asm.guest(right) {
+        match extend {
+            RegisterExtend::Uxtb => asm.movzx(Dword, Rcx, Byte, storage),
+            RegisterExtend::Uxth => asm.movzx(Dword, Rcx, Word, storage),
+            RegisterExtend::Uxtw => asm.mov_load(Dword, Rcx, storage),
+            RegisterExtend::Sxtb => asm.movsx(Qword, Rcx, Byte, storage),
+            RegisterExtend::Sxth => asm.movsx(Qword, Rcx, Word, storage),
+            RegisterExtend::Sxtw => asm.movsxd(Rcx, storage),
+            RegisterExtend::Uxtx | RegisterExtend::Sxtx => asm.mov_load(Qword, Rcx, storage),
+        }
+    } else {
+        asm.alu(Alu::Xor, Dword, Rcx, Rcx);
+    }
+    if amount != 0 {
+        asm.shift_imm(asm::ShiftOp::Shl, Qword, Rcx, amount);
+    }
+}
+
+/// Compare an extended right operand against the left operand in its existing
+/// location. The flags and their Arm subtraction carry are captured normally.
+fn compare_extended(
+    code: &mut Code,
+    width: Width,
+    left: asm::Rm,
+    right: Register,
+    extend: RegisterExtend,
+    amount: u8,
+) {
+    extended_operand(code, right, extend, amount);
+    code.asm().alu(
+        asm::Alu::Cmp,
+        asm::Size::of(width == Width::X64),
+        left,
+        asm::Gpr::Rcx,
+    );
+    nzcv(code, true);
+}
+
 /// `bt rax,bit`: the condition under which the bit is set, or clear.
 pub(super) fn test_bit(code: &mut Code, bit: u8, nonzero: bool) -> asm::Cond {
     test_bit_of(code.asm(), asm::Gpr::Rax, bit, nonzero)
@@ -1320,26 +1363,7 @@ pub(crate) fn emit_instruction(
         } => {
             // Read both operands before a possibly overlapping destination/SP write.
             load(code, left);
-            use asm::Size::{Byte, Dword, Qword, Word};
-            let mut asm = code.asm();
-            if let Some(storage) = asm.guest(right) {
-                match extend {
-                    RegisterExtend::Uxtb => asm.movzx(Dword, Rcx, Byte, storage),
-                    RegisterExtend::Uxth => asm.movzx(Dword, Rcx, Word, storage),
-                    RegisterExtend::Uxtw => asm.mov_load(Dword, Rcx, storage),
-                    RegisterExtend::Sxtb => asm.movsx(Qword, Rcx, Byte, storage),
-                    RegisterExtend::Sxth => asm.movsx(Qword, Rcx, Word, storage),
-                    RegisterExtend::Sxtw => asm.movsxd(Rcx, storage),
-                    RegisterExtend::Uxtx | RegisterExtend::Sxtx => {
-                        asm.mov_load(Qword, Rcx, storage)
-                    }
-                }
-            } else {
-                asm.alu(Alu::Xor, Dword, Rcx, Rcx);
-            }
-            if amount != 0 {
-                asm.shift_imm(asm::ShiftOp::Shl, Qword, Rcx, amount);
-            }
+            extended_operand(code, right, extend, amount);
             // W32 arithmetic truncates both operands and zero-extends even WSP.
             add_sub(code, width, subtract);
             store(code, destination);
