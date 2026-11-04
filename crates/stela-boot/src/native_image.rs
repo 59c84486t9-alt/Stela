@@ -15,6 +15,7 @@ pub(crate) enum Error {
     ExposedAllocation,
     Header(crate::Refusal),
     ForeignCode,
+    ForeignData,
     NotLoaderData,
 }
 impl core::fmt::Debug for Error {
@@ -27,6 +28,7 @@ impl core::fmt::Debug for Error {
             Self::ForeignHandoff => f.write_str("ForeignHandoff"),
             Self::ExposedAllocation => f.write_str("ExposedAllocation"),
             Self::ForeignCode => f.write_str("ForeignCode"),
+            Self::ForeignData => f.write_str("ForeignData"),
             Self::NotLoaderData => f.write_str("NotLoaderData"),
         }
     }
@@ -178,34 +180,68 @@ impl CodePin {
             .map(|section| (virtual_base + section.first)..(virtual_base + section.end))
             .collect())
     }
-    /// Check an actual callback lies in this image's original executable section.
-    /// This does not grant arbitrary code-loading or user execution permission.
+    /// Return the original physical byte of a callback in executable PE payload.
     ///
     /// # Safety
     /// Same kept original CPU/root/immutable-header contract as ResidentImage::pin.
-    pub(crate) unsafe fn check_callback(&self, address: usize) -> Result<(), Error> {
-        let virtual_range = self.image.geometry.virtual_range();
-        let offset = (address as u64)
-            .checked_sub(virtual_range.start)
-            .filter(|offset| *offset < self.image.image_bytes as u64)
-            .ok_or(Error::ForeignCode)? as usize;
+    pub(crate) unsafe fn check_callback(&self, address: usize) -> Result<u64, Error> {
+        // SAFETY: the caller holds the original image and root contract.
+        unsafe {
+            self.section_physical(address, 1, |section| section.executable, Error::ForeignCode)
+        }
+    }
+    /// Return the original physical start of a complete writable PE payload span.
+    ///
+    /// # Safety
+    /// Same kept original CPU/root/immutable-header contract as ResidentImage::pin.
+    pub(crate) unsafe fn writable_span(&self, address: usize, bytes: usize) -> Result<u64, Error> {
+        // SAFETY: the caller holds the original image and root contract.
+        unsafe {
+            self.section_physical(
+                address,
+                bytes,
+                |section| section.writable,
+                Error::ForeignData,
+            )
+        }
+    }
+    unsafe fn section_physical(
+        &self,
+        address: usize,
+        bytes: usize,
+        accepts: impl Fn(pe::Section) -> bool,
+        foreign: Error,
+    ) -> Result<u64, Error> {
+        let virtual_base = self.image.geometry.virtual_range().start as usize;
+        let Some(offset) = address.checked_sub(virtual_base) else {
+            return Err(foreign);
+        };
+        let Some(end) = offset.checked_add(bytes) else {
+            return Err(foreign);
+        };
+        if offset == end || end > self.image.image_bytes {
+            return Err(foreign);
+        }
         let physical = self.image.geometry.physical().start;
         let base = layout::physical(physical) as *const u8;
-        let sections = pe::sections(self.image.image_bytes, |offset, out| {
-            // SAFETY: pe::sections bounds each short read within the exact
-            // original image allocation, without borrowing writable statics.
-            unsafe {
-                core::ptr::copy_nonoverlapping(base.add(offset), out.as_mut_ptr(), out.len())
-            };
-        })
+        let mut matches = false;
+        pe::visit_sections(
+            self.image.image_bytes,
+            |offset, out| {
+                // SAFETY: the parser bounds each read within the exact
+                // original image allocation, without borrowing writable statics.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(base.add(offset), out.as_mut_ptr(), out.len())
+                };
+            },
+            |section, payload_end| {
+                matches |= section.first <= offset && end <= payload_end && accepts(section);
+            },
+        )
         .map_err(Error::Header)?;
-        if sections
-            .iter()
-            .any(|section| section.executable && section.first <= offset && offset < section.end)
-        {
-            Ok(())
-        } else {
-            Err(Error::ForeignCode)
+        if !matches {
+            return Err(foreign);
         }
+        physical.checked_add(offset as u64).ok_or(Error::Overflow)
     }
 }

@@ -15,7 +15,7 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     arch::asm,
     cell::{Cell, UnsafeCell},
-    ffi::c_void,
+    ffi::{c_uint, c_void},
     ops::Range,
     pin::Pin,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -144,6 +144,62 @@ unsafe impl stela_linux::threads::OriginalKernelRoot for Reservation {
             .map_err(|_| WorkError::Unavailable)?;
         process.check()?;
         core::ptr::NonNull::new(address as *mut c_void).ok_or(WorkError::CorruptContext)
+    }
+}
+
+// SAFETY: the same retained original table graph and image owner cover the
+// entered CPU and each C entry and geometry global. Publication is synchronous
+// in the checked scope, after validating the effective mappings.
+unsafe impl stela_linux::threads::OriginalKernelGeometry for Reservation {
+    fn bind(
+        &self,
+        process: &dyn work::EnteredProcess,
+        target: stela_linux::threads::GeometryBinding<'_>,
+    ) -> Result<(), WorkError> {
+        process.check()?;
+        let owner = &self._handoff.native_loader_tables;
+        let scope = self.identity.process_root()?;
+        scope.entered_original(owner)?;
+
+        for entry in target.entries() {
+            // SAFETY: the original root and immutable image owner are held.
+            let physical = unsafe { self._image.check_callback(entry) }
+                .map_err(|_| WorkError::CorruptContext)?;
+            let page = scope
+                .observe_original(entry as u64)?
+                .ok_or(WorkError::CorruptContext)?;
+            if page.physical != physical || page.user || page.writable || page.nx {
+                return Err(WorkError::CorruptContext);
+            }
+        }
+        for address in target.storage()? {
+            if !address.is_multiple_of(core::mem::align_of::<c_uint>()) {
+                return Err(WorkError::CorruptContext);
+            }
+            let bytes = core::mem::size_of::<c_uint>();
+            // SAFETY: the original root and immutable image owner are held.
+            let physical = unsafe { self._image.writable_span(address, bytes) }
+                .map_err(|_| WorkError::CorruptContext)?;
+            let page = scope
+                .observe_original(address as u64)?
+                .ok_or(WorkError::CorruptContext)?;
+            if page.physical != physical || page.user || !page.writable || !page.nx {
+                return Err(WorkError::CorruptContext);
+            }
+            crate::native_memory::cache::verify_writeback(
+                address as u64,
+                physical,
+                bytes,
+                layout::physical(0),
+            )
+            .map_err(|_| WorkError::Unavailable)?;
+        }
+
+        process.check()?;
+        scope.entered_original(owner)?;
+        // SAFETY: the exact entered LoaderTables, its live paging mode and the
+        // original code and writable globals have all been checked.
+        unsafe { target.publish(owner.levels()) }
     }
 }
 

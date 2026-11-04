@@ -23,6 +23,14 @@ impl GeometryBinding<'_> {
             _local: PhantomData,
         }
     }
+    /// Original C entry addresses for mapping validation. These observations
+    /// convey no authority to invoke either entry.
+    pub fn entries(&self) -> [usize; 2] {
+        [
+            stela_linux_kernel_geometry_storage as *const () as usize,
+            stela_linux_kernel_geometry_bind as *const () as usize,
+        ]
+    }
     /// Actual publication DATA addresses for precommit mapping validation only.
     /// This grants no read/write/root permission. The same privately captured
     /// fresh owner is checked by C; no caller range selects these globals.
