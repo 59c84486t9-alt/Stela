@@ -147,6 +147,24 @@ impl<const N: usize> HostedRuntime<N> {
         Ok(total)
     }
 
+    /// Commit the actual current assignment's CPU-time charge. An outgoing
+    /// source callback can publish this sample before the scheduler parks it.
+    pub fn account_current_execution(&self) -> Result<u64, WorkError> {
+        let view = self.current_context()?;
+        let mut guard = self.queue.lock()?;
+        let board = &mut guard.state().scheduling;
+        if !board.enabled {
+            return Err(WorkError::Unavailable);
+        }
+        // SAFETY: current_context authenticated this live stack. The CPU-time
+        // query and board update cannot switch or invoke foreign callbacks.
+        let task = unsafe { &*self.task(self.current.get()) };
+        let now = self.thread_cpu_ns()?;
+        board.account(now)?;
+        let (total, _, _) = board.execution(task.id, view.sequence, now)?;
+        Ok(total)
+    }
+
     fn check_target(&self, target: &HostedWake) -> Result<(), WorkError> {
         if self.queue.id != target.queue {
             return Err(WorkError::InvalidTicket);

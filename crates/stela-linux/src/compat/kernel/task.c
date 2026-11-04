@@ -286,10 +286,19 @@ static u64 measured_runtime(struct stela_linux_task *task)
 	u64 sample;
 
 	if (!task->data.claimed || !task->scope || !task->scope_ops->account_current ||
-	    task->scope_ops->account_current(task->scope, &sample) ||
-	    READ_ONCE(p->se.sum_exec_runtime) < sample ||
-	    READ_ONCE(p->stime) < sample)
+	    task->scope_ops->account_current(task->scope, &sample))
+		stela_linux_fatal("current task runtime sampling failed");
+	if (stela_linux_kernel_hosted()) {
+		/* The sole hosted CPU keeps the original task data reference.
+		 * A bounded scheduler sample charges only its actual running stack.
+		 * Keep writes here with the exact current record, with no Rust writer. */
+		if (READ_ONCE(p->se.sum_exec_runtime) > sample || READ_ONCE(p->stime) > sample)
+			stela_linux_fatal("hosted task runtime regressed");
+		WRITE_ONCE(p->stime, sample);
+		WRITE_ONCE(p->se.sum_exec_runtime, sample);
+	} else if (READ_ONCE(p->se.sum_exec_runtime) < sample || READ_ONCE(p->stime) < sample) {
 		stela_linux_fatal("current task runtime publication failed");
+	}
 	return sample;
 }
 
@@ -299,7 +308,7 @@ unsigned long long task_sched_runtime(struct task_struct *p)
 	(void)stela_linux_owner();
 
 	/* Only current accrues CPU time on this single-CPU Linux owner.
-	 * Every actual native switch publishes the previous task's final sample. */
+	 * Each switch publishes the previous task's outgoing sample. */
 	if (p != task->linux_task)
 		return READ_ONCE(p->se.sum_exec_runtime);
 	if (task->kind == BARE_ALLOCATION) {
@@ -1456,6 +1465,10 @@ int stela_linux_task_leave(struct stela_linux_task *task,
 		   lease.irq_flags != ARCH_IRQ_ENABLED) {
 		return -EBUSY;
 	}
+	/* Account the actual outgoing model stack before committing the switch.
+	 * Its bounded sampler holds no owner loan across the transition. */
+	if (task->kind != BARE_ALLOCATION && stela_linux_kernel_hosted())
+		measured_runtime(task);
 	/* Every refusal above is mutation-free. No callbacks, allocator, final
 	 * release or Rust owner borrow crosses this committed IF=0 transition. */
 	task->lease = lease;
@@ -1546,6 +1559,8 @@ int stela_linux_task_terminal_prepare(struct stela_linux_task *record,
     if (lease.owner != record->source_owner || !lease.generation ||
         lease.irq_flags != ARCH_IRQ_ENABLED)
         return -EPERM;
+    if (stela_linux_kernel_hosted())
+        measured_runtime(record);
     /* Every refusal precedes mutation. Exact C lease suspension replaces the
      * normal returning owner-exit tail; no skipped owning Rust guard exists. */
     record->lease = lease;

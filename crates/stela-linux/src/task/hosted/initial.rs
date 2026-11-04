@@ -123,6 +123,9 @@ impl<const N: usize> HostedTaskBinding<N> {
             body,
             context,
         });
+        // Every original hosted source context publishes actual CPU time
+        // through the scheduler's accounting rows.
+        runtime.enable_ranked_scheduling().map_err(Work)?;
         // SAFETY: the actual owner/root are kept above before global claim.
         // A returned refusal leaves the archive's owner unchanged.
         let status = unsafe { stela_linux_kernel_claim_hosted(mount.owner.raw()) };

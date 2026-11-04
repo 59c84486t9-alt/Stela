@@ -156,6 +156,7 @@ unsafe extern "C" {
     static system_wq: *const c_void;
     static sighand_cachep: *const c_void;
     fn stela_linux_current() -> *const u8;
+    fn task_sched_runtime(task: *const u8) -> u64;
     fn stela_linux_require_current(owner: *const RawOwner) -> i32;
     fn stela_linux_device_publish_allowed(device: *const c_void) -> bool;
     fn stela_linux_page_catalog_register_extents_v2(
@@ -203,6 +204,15 @@ unsafe extern "C" fn check_initial(owner: *const RawOwner, context: *mut c_void)
             -1,
         );
     }
+    // SAFETY: actual entered original Initial owns this task pointer.
+    let initial_time = unsafe { task_sched_runtime(&raw const init_task) };
+    let spin = Instant::now();
+    while spin.elapsed() < Duration::from_millis(1) {
+        std::hint::spin_loop();
+    }
+    // SAFETY: the same original task and source scope remained current.
+    let after_spin = unsafe { task_sched_runtime(&raw const init_task) };
+    assert!(after_spin > initial_time);
     assert_eq!(
         stela_linux::threads::initial_root_levels(),
         Err(WorkError::Unavailable)
@@ -400,7 +410,6 @@ fn in_fresh_process(
     }
     .unwrap();
     let runtime = executor.runtime();
-    runtime.enable_ranked_scheduling().unwrap();
     let start = Instant::now();
     // SAFETY: reading the userspace x86-64 TSC supplies a measured fixture rate.
     let first = unsafe { std::arch::x86_64::_rdtsc() };

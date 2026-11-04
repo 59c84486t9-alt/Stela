@@ -36,7 +36,7 @@ impl<const N: usize> HostedTaskBinding<N> {
         terminate: Self::terminate,
         observe_inactive: None,
         end_inactive: None,
-        account_current: None,
+        account_current: Some(Self::account_current),
     };
 
     /// # Safety
@@ -229,6 +229,21 @@ impl<const N: usize> HostedTaskBinding<N> {
             // SAFETY: an invalid current query must stop before the C caller proceeds.
             unsafe { core::arch::asm!("ud2", options(noreturn)) }
         })
+    }
+
+    unsafe extern "C" fn account_current(scope: *mut c_void, total_ns: *mut u64) -> i32 {
+        // SAFETY: C supplies the exact pinned current scope and one writable
+        // result. The hosted scheduler authenticates and charges that stack.
+        let runtime = unsafe { &*scope.cast::<Pin<&HostedRuntime<N>>>() };
+        match runtime.account_current_execution() {
+            Ok(sample) => {
+                // SAFETY: the caller lends the result for this bounded call.
+                unsafe { total_ns.write(sample) };
+                0
+            }
+            Err(WorkError::Unavailable) => -95,
+            Err(_) => -1,
+        }
     }
 
     unsafe extern "C" fn terminate(_: *mut c_void) -> ! {
