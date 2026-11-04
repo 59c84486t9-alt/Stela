@@ -33,7 +33,7 @@ use crate::{
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::arch::{asm, global_asm};
-use stela_boot_core::native_resources::{CODE_INSTALL_ALIGNMENT, CodeExtents};
+use stela_boot_core::native_resources::{CodeExtents, MAX_CODE_PARTS, code_part_bytes};
 use stela_compiler::{GuestState, block::BlockExit};
 use stela_contracts::refuse;
 use stela_engine::machine::FaultCause;
@@ -60,7 +60,6 @@ mod bare_host;
 mod faults;
 mod signals;
 pub use bare_host::BareHost;
-use bare_host::*;
 use faults::*;
 pub(crate) use faults::{native_exception, page_fault};
 pub(crate) use signals::{
@@ -407,11 +406,13 @@ pub struct State {
     code_virtual: u64,
     code_physical: u64,
     code_bytes: u64,
+    code_part_bytes: u64,
+    code_parts: u64,
     /// The arena part new code goes to.
     code_unit: u64,
     /// Successful initialized installs in each arena unit, from its start.
     /// These extents require this State's backing, root and CPU owner.
-    installed_extents: [CodeExtents; CODE_UNITS as usize],
+    installed_extents: [CodeExtents; MAX_CODE_PARTS as usize],
     /// The furthest the arena's code has reached: what the run needed of it
     /// until it first filled and new code reclaimed the oldest.
     code_peak: u64,
@@ -503,6 +504,7 @@ pub struct Config {
     pub code_virtual: u64,
     pub code_physical: u64,
     pub code_bytes: u64,
+    pub code_parts: u32,
     /// One common origin for every physical executor.
     pub tsc_base: u64,
     pub tsc_hz: u64,
@@ -526,6 +528,7 @@ pub struct Config {
 /// SMT-shared changes; reinstall and re-enumerate afterwards. ExitBootServices
 /// and CPUID do not prove that external promise or hardware validation.
 pub unsafe fn install(config: Config) -> Result<HostOwner> {
+    let code_part_bytes = code_part_bytes(config.code_bytes, config.code_parts)?;
     let mut pool = Pool {
         base: config.pool_physical,
         bytes: config.pool_bytes,
@@ -607,6 +610,8 @@ pub unsafe fn install(config: Config) -> Result<HostOwner> {
             code_virtual: config.code_virtual,
             code_physical: config.code_physical,
             code_bytes: config.code_bytes,
+            code_part_bytes,
+            code_parts: u64::from(config.code_parts),
             code_unit: 0,
             installed_extents: core::array::from_fn(|_| CodeExtents::default()),
             code_peak: 0,
@@ -848,7 +853,7 @@ impl State {
         let Some(end) = offset.checked_add(bytes as u64) else {
             return false;
         };
-        let unit = code_unit_bytes(self);
+        let unit = self.code_part_bytes;
         if unit == 0 || end > self.code_bytes {
             return false;
         }

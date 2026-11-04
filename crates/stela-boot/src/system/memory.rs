@@ -92,10 +92,17 @@ pub(super) fn prepare_image(snapshot: &Snapshot) -> Result<EngineImage> {
 
 /// Reserve the engine's working memory and each physical worker's resources.
 pub(super) fn reserve(cores: usize, ram: &[(usize, usize)]) -> Result<EngineMemory> {
-    let sizes = Sizes::for_host(free_ram()?, cores, cores);
+    let sizes = Sizes::for_host(free_ram()?, cores, cores)?;
     // Each claimed core owns a full native part. Check both ends before allocation.
     for slot in [0, cores - 1] {
-        crate::native_smp::resources::partition(cores, cores, slot, sizes.code, sizes.pool)?;
+        let part = crate::native_smp::resources::partition(
+            cores,
+            cores,
+            slot,
+            sizes.code.bytes,
+            sizes.pool,
+        )?;
+        crate::native_smp::resources::code_part_bytes(part.code_bytes, sizes.code.parts)?;
     }
     let heap = allocate(sizes.heap)?;
     // The engine allocator uses this existing physmap directly. Prove the
@@ -127,6 +134,7 @@ pub(super) fn reserve(cores: usize, ram: &[(usize, usize)]) -> Result<EngineMemo
     })?;
     let mut native_resources = NativeResources {
         cores: cores as u32,
+        code_parts: sizes.code.parts,
         stacks,
         invocations,
         tasks: native_task_allocations.region(),
@@ -153,7 +161,7 @@ pub(super) fn reserve(cores: usize, ram: &[(usize, usize)]) -> Result<EngineMemo
         physical: native_resources.stacks.physical,
         bytes: STACK_BYTES,
     };
-    let code = allocate_large(sizes.code)?;
+    let code = allocate_large(sizes.code.bytes)?;
     let pool = allocate(sizes.pool)?;
     let handoff_page = allocate(size_of::<Handoff>() as u64)?;
     let trampoline = low_page(MemoryType::LOADER_CODE)?;
@@ -321,7 +329,7 @@ pub(super) fn map(
     tables::map_range(
         frames,
         root,
-        layout::code(),
+        layout::code(code.bytes),
         code.physical,
         code.bytes,
         PRESENT | tables::GLOBAL,

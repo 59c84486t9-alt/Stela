@@ -99,13 +99,14 @@ pub(crate) unsafe fn validate(
             }
         }
     }
-    resources::partition(
+    let last = resources::partition(
         cores,
         cores,
         cores - 1,
         handoff.code.bytes,
         handoff.pool.bytes,
     )?;
+    resources::code_part_bytes(last.code_bytes, resources.code_parts)?;
     if cores > 1
         && (!(crate::tables::PAGE..1 << 20).contains(&resources.sipi)
             || !resources.sipi.is_multiple_of(crate::tables::PAGE))

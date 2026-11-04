@@ -12,6 +12,8 @@ pub(crate) use stela_boot_core::native_resources::*;
 #[derive(Clone, Copy)]
 pub(crate) struct Resources {
     pub cores: u32,
+    /// Active parts of each exact owner's fixed native code ring.
+    pub code_parts: u32,
     /// Owned LOADER_CODE page below 1 MiB, absent for the serial path.
     pub sipi: u64,
     /// Fixed physical stack ranges; virtual guards are not mapped.
@@ -28,6 +30,7 @@ impl Default for Resources {
     fn default() -> Self {
         Self {
             cores: 1,
+            code_parts: MAX_CODE_PARTS,
             sipi: 0,
             stacks: Region::default(),
             invocations: Region::default(),

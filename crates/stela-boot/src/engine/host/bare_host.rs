@@ -10,16 +10,6 @@ pub struct BareHost<'a> {
     pub(super) _pinned: core::marker::PhantomData<*mut ()>,
 }
 
-/// The parts of the code arena, reclaimed oldest first for new code or
-/// for memory: a reclaim costs only the oldest thirty-second's blocks, and
-/// low memory finds an older part to release while the arena is a part
-/// full rather than discarding every block.
-pub(super) const CODE_UNITS: u64 = 32;
-
-pub(super) fn code_unit_bytes(state: &State) -> u64 {
-    state.code_bytes / CODE_UNITS / CODE_INSTALL_ALIGNMENT * CODE_INSTALL_ALIGNMENT
-}
-
 impl Host for BareHost<'_> {
     #[cfg(feature = "native-profile")]
     fn native_timing_work_start(
@@ -183,7 +173,7 @@ impl Host for BareHost<'_> {
     }
     fn install(&mut self, code: &[u8]) -> Result<NativeCode, InstallError> {
         let state = state();
-        let part_bytes = code_unit_bytes(state);
+        let part_bytes = state.code_part_bytes;
         let part_offset = state.code_unit * part_bytes;
         let physical = state.code_physical + part_offset;
         let extent = state.installed_extents[state.code_unit as usize]
@@ -276,16 +266,16 @@ impl Host for BareHost<'_> {
         let state = state();
         Some(stela_engine::machine::engine::CodePartitions {
             base: state.code_virtual as usize,
-            bytes_per_part: code_unit_bytes(state) as usize,
-            parts: CODE_UNITS as usize,
+            bytes_per_part: state.code_part_bytes as usize,
+            parts: state.code_parts as usize,
         })
     }
 
     fn reclaim_code(&mut self) -> Option<core::ops::Range<usize>> {
         let state = state();
         state.installed_immutable.clear();
-        let unit = code_unit_bytes(state);
-        state.code_unit = (state.code_unit + 1) % CODE_UNITS;
+        let unit = state.code_part_bytes;
+        state.code_unit = (state.code_unit + 1) % state.code_parts;
         state.installed_extents[state.code_unit as usize].clear();
         let start = (state.code_virtual + state.code_unit * unit) as usize;
         Some(start..start + unit as usize)
@@ -298,8 +288,8 @@ impl Host for BareHost<'_> {
         // is all this machine runs, and the ring bounds its growth: pressure
         // from the rest of the heap would only make it compile the same
         // blocks again.
-        let Some(part) = (1..CODE_UNITS)
-            .map(|step| (state.code_unit + step) % CODE_UNITS)
+        let Some(part) = (1..state.code_parts)
+            .map(|step| (state.code_unit + step) % state.code_parts)
             .find(|&part| !state.installed_extents[part as usize].is_empty())
         else {
             return Some(0..0);
@@ -307,7 +297,7 @@ impl Host for BareHost<'_> {
         state.installed_immutable.clear();
         // This reclaim is for heap pressure, so give back the ledger too.
         state.installed_extents[part as usize] = CodeExtents::default();
-        let unit = code_unit_bytes(state);
+        let unit = state.code_part_bytes;
         let start = (state.code_virtual + part * unit) as usize;
         Some(start..start + unit as usize)
     }

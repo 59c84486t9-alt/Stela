@@ -43,7 +43,6 @@ const MIB: u64 = 1024 * 1024;
 /// The bounds of the parts of Stela's memory sized from host RAM
 /// ([`Sizes::for_host`]).
 const HEAP_BYTES: RangeInclusive<u64> = 2304 * MIB..=3072 * MIB;
-const CODE_BYTES: RangeInclusive<u64> = 128 * MIB..=512 * MIB;
 const POOL_BYTES: RangeInclusive<u64> = 64 * MIB..=2048 * MIB;
 /// Guest DRAM bytes per byte of each native executor's shadow page-table
 /// pool: room for its 8 roots to map all of guest DRAM once in 4 KiB pages
@@ -56,15 +55,9 @@ const POOL_SHARE: u64 = 64;
 /// Assistant boot whose Core Image stitches its kernels peaked at 2149 MiB,
 /// which bounds the heap from below on a smaller host.
 const HEAP_SHARE: u64 = 12;
-/// Translated code carries about its own size again in heap metadata (each
-/// block's table entries and recovery rows), so the arenas together stay well
-/// under the heap: at half this share, boot exhausted it.
-const CODE_SHARE: u64 = 128;
 /// The loader heap's free bytes kept past boot services, for what still runs
 /// before the engine does; the rest of it goes to the guest.
 const LOADER_HEAP_KEPT: usize = 16 * MIB as usize;
-/// The code arena divides into parts of whole 2 MiB pages.
-const CODE_ALIGNMENT: u64 = 16 * MIB;
 const BELOW_4G: u64 = 0xffff_f000;
 const RELOCATION_DIRECTORY: usize = 5;
 
@@ -160,7 +153,7 @@ fn allocate(bytes: u64) -> Result<Region> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Sizes {
     heap: u64,
-    code: u64,
+    code: crate::native_smp::resources::CodeReservation,
     pool: u64,
 }
 
@@ -171,24 +164,24 @@ impl Sizes {
     /// the bound, and the code arena with them too; the other `cores` add
     /// only their reserves. Each runner after the first adds an eighth of the
     /// heap's share, for its machine's translation metadata.
-    fn for_host(free: u64, cores: usize, runners: usize) -> Self {
+    fn for_host(free: u64, cores: usize, runners: usize) -> Result<Self> {
+        use crate::native_smp::resources::{code_reservation, parked_reserve};
+        let code = code_reservation(free, cores, runners)?;
         let running = runners as u64;
         let heap = free / HEAP_SHARE + (running - 1) * (free / HEAP_SHARE / 8);
         let clamp = |bytes: u64, bounds: RangeInclusive<u64>, alignment: u64| {
             (bytes / alignment * alignment).clamp(*bounds.start(), *bounds.end())
         };
-        let (code_reserve, pool_reserve) =
-            crate::native_smp::resources::parked_reserve(cores, runners);
-        Self {
+        let (_, pool_reserve) = parked_reserve(cores, runners);
+        Ok(Self {
             heap: clamp(heap, HEAP_BYTES, LARGE),
-            code: clamp(free / CODE_SHARE, CODE_BYTES, CODE_ALIGNMENT) * running
-                + code_reserve.next_multiple_of(CODE_ALIGNMENT),
+            code,
             pool: clamp(
                 (free / POOL_SHARE).saturating_mul(running),
                 POOL_BYTES,
                 LARGE,
             ) + pool_reserve,
-        }
+        })
     }
 }
 

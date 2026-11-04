@@ -7,6 +7,7 @@ use core::ops::Range;
 use stela_contracts::refuse;
 
 const PAGE: u64 = 4096;
+const MIB: u64 = 1024 * 1024;
 
 pub const STACK_BYTES: u64 = 2 * 1024 * 1024;
 pub const STACK_STRIDE: u64 = STACK_BYTES + PAGE;
@@ -112,11 +113,81 @@ pub struct Partition {
 const PARKED_CODE: u64 = 4 * 1024 * 1024;
 const PARKED_POOL: u64 = 4 * 1024 * 1024;
 
+const MIN_RUNNING_CODE: u64 = 128 * MIB;
+const MAX_RUNNING_CODE: u64 = 512 * MIB;
+/// Native code also carries recovery and lookup data in the engine heap.
+const CODE_SHARE: u64 = 128;
+/// Preserve the existing aggregate share of a 32-executor roster.
+const CODE_AGGREGATE_SHARE: u64 = CODE_SHARE / 32;
+const CODE_ALIGNMENT: u64 = 16 * MIB;
+pub const MAX_CODE_PARTS: u32 = 32;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CodeReservation {
+    pub bytes: u64,
+    pub parts: u32,
+}
+
+/// The aligned bytes in an install/eviction part. Reduced rings cover
+/// their whole private arena; a legacy ring can leave a rounding tail.
+pub fn code_part_bytes(bytes: u64, parts: u32) -> Result<u64> {
+    if parts == MAX_CODE_PARTS {
+        // Legacy partition callers can leave an unused sub-alignment tail.
+        // Retain their established aligned unit calculation.
+        return Ok(bytes / u64::from(parts) / CODE_INSTALL_ALIGNMENT * CODE_INSTALL_ALIGNMENT);
+    }
+    if !(2..MAX_CODE_PARTS).contains(&parts)
+        || bytes == 0
+        || !bytes.is_multiple_of(u64::from(parts) * CODE_INSTALL_ALIGNMENT)
+    {
+        return Err(refuse!("invalid native code ring geometry"));
+    }
+    Ok(bytes / u64::from(parts))
+}
+
+/// The executable window holds the largest reservation the loader can make.
+/// Each active slot contributes at most `MAX_RUNNING_CODE`. The rounded
+/// parked tail fits in what those slots would contribute when active.
+pub const CODE_WINDOW_BYTES: u64 = MAX_CORES as u64 * MAX_RUNNING_CODE;
+
 /// The code and pool bytes the executors past the `runners` of `cores` keep.
 /// The loader adds them to the runners' own shares.
 pub const fn parked_reserve(cores: usize, runners: usize) -> (u64, u64) {
     let parked = cores.saturating_sub(runners) as u64;
     (parked * PARKED_CODE, parked * PARKED_POOL)
+}
+
+/// The firmware code allocation, including the aligned parked tail, checked
+/// before any firmware pages are reserved.
+pub fn code_reservation(free: u64, cores: usize, runners: usize) -> Result<CodeReservation> {
+    if cores == 0 || cores > MAX_CORES || runners == 0 || runners > cores {
+        return Err(refuse!("invalid native executor count"));
+    }
+    let per_runner = (free / CODE_SHARE / CODE_ALIGNMENT * CODE_ALIGNMENT)
+        .clamp(MIN_RUNNING_CODE, MAX_RUNNING_CODE);
+    let part_bytes = per_runner / u64::from(MAX_CODE_PARTS);
+    // Keep the original maximum single-install size. Exact active rosters
+    // reduce part count when the old aggregate exceeds the budget of 32
+    // legacy shares, retaining the original per-owner capacity floor.
+    let parts = if cores == runners {
+        let budget = free / CODE_AGGREGATE_SHARE / runners as u64;
+        (budget / part_bytes).clamp(
+            MIN_RUNNING_CODE.div_ceil(part_bytes),
+            u64::from(MAX_CODE_PARTS),
+        ) as u32
+    } else {
+        MAX_CODE_PARTS
+    };
+    let parked = parked_reserve(cores, runners)
+        .0
+        .next_multiple_of(CODE_ALIGNMENT);
+    let bytes = part_bytes * u64::from(parts) * runners as u64 + parked;
+    if bytes > CODE_WINDOW_BYTES {
+        return Err(refuse!(
+            "native code reservation exceeds its executable window"
+        ));
+    }
+    Ok(CodeReservation { bytes, parts })
 }
 
 /// Divide only whole frames/code ring units; unused tail bytes remain owned
@@ -137,7 +208,7 @@ pub fn partition(
     let share = |total: u64, reserve: u64, unit: u64| {
         total.saturating_sub(parked * reserve) / runners as u64 / unit * unit
     };
-    // Each host ring has eight 16-byte-aligned code units. Each shadow pool
+    // Each host ring uses 16-byte-aligned code units. Each shadow pool
     // needs 64 permanent root frames and at least one frame in each half.
     let (code_share, pool_share) = (
         share(code, PARKED_CODE, 128),
@@ -171,6 +242,124 @@ pub fn partition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_reservations_preserve_smaller_rosters_and_parked_budgets() {
+        for (free, cores, runners, expected) in [
+            (8 * 1024, 8, 8, 1024),
+            (8 * 1024, 64, 8, 1248),
+            (64 * 1024, 64, 8, 4320),
+            (64 * 1024, 9, 8, 4112),
+            (32 * 1024, 32, 32, 8 * 1024),
+            (128 * 1024, 64, 64, 32 * 1024),
+        ] {
+            assert_eq!(
+                code_reservation(free * MIB, cores, runners).unwrap(),
+                CodeReservation {
+                    bytes: expected * MIB,
+                    parts: MAX_CODE_PARTS,
+                },
+            );
+        }
+        for (cores, runners) in [(0, 0), (1, 0), (2, 3), (MAX_CORES + 1, 1)] {
+            assert!(code_reservation(0, cores, runners).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_parked_partition_keeps_its_aligned_ring_units() {
+        let code = code_reservation(32 * 1024 * MIB, 5, 3).unwrap();
+        let owner = partition(5, 3, 0, code.bytes, 64 * MIB).unwrap();
+        assert_eq!(owner.code_bytes, 271_231_616);
+        assert_eq!(owner.code_bytes % 512, 128);
+        assert_eq!(
+            code_part_bytes(owner.code_bytes, code.parts).unwrap(),
+            owner.code_bytes / 512 * 16,
+        );
+    }
+
+    #[test]
+    fn larger_exact_rosters_reduce_part_count_without_reducing_install_size() {
+        for (free, cores, bytes, parts, part_mib) in [
+            (32 * 1024, 48, 8064, 21, 8),
+            (32 * 1024, 64, 8 * 1024, 16, 8),
+            (64 * 1024, 64, 16 * 1024, 16, 16),
+        ] {
+            let code = code_reservation(free * MIB, cores, cores).unwrap();
+            assert_eq!(
+                code,
+                CodeReservation {
+                    bytes: bytes * MIB,
+                    parts
+                }
+            );
+            let partition = partition(cores, cores, cores - 1, code.bytes, 2048 * MIB).unwrap();
+            let part_bytes = code_part_bytes(partition.code_bytes, code.parts).unwrap();
+            assert_eq!(part_bytes, part_mib * MIB);
+            assert_eq!(partition.code_offset + partition.code_bytes, code.bytes);
+            let mut empty = CodeExtents::default();
+            assert!(
+                empty
+                    .append(part_bytes, part_bytes as usize + 1, |_| panic!())
+                    .is_none()
+            );
+            assert_eq!(
+                empty.append(part_bytes, part_bytes as usize, |_| {}),
+                Some(0..part_bytes)
+            );
+        }
+        assert!(code_part_bytes(16 * MIB, 0).is_err());
+        assert!(code_part_bytes(16 * MIB, MAX_CODE_PARTS + 1).is_err());
+        assert!(code_part_bytes(16 * MIB - 1, 16).is_err());
+        assert_eq!(
+            code_part_bytes(16 * MIB - 1, MAX_CODE_PARTS).unwrap(),
+            512 * 1024 - 16
+        );
+    }
+
+    #[test]
+    fn all_supported_code_partitions_fit_inside_the_executable_window() {
+        for cores in 1..=MAX_CORES {
+            for runners in 1..=cores {
+                for free in [
+                    0,
+                    8 * 1024 * MIB,
+                    18 * 1024 * MIB,
+                    24 * 1024 * MIB,
+                    64 * 1024 * MIB,
+                    u64::MAX,
+                ] {
+                    let code = code_reservation(free, cores, runners).unwrap();
+                    let pool = 64 * MIB + parked_reserve(cores, runners).1;
+                    let first = partition(cores, runners, 0, code.bytes, pool).unwrap();
+                    let last = partition(cores, runners, cores - 1, code.bytes, pool).unwrap();
+                    assert_eq!(first.code_offset, 0);
+                    assert_eq!(code.bytes % PAGE, 0);
+                    assert!(last.code_offset + last.code_bytes <= code.bytes);
+                    assert!(code.bytes <= CODE_WINDOW_BYTES);
+                    if cores == runners {
+                        let original = (free / CODE_SHARE / CODE_ALIGNMENT * CODE_ALIGNMENT)
+                            .clamp(MIN_RUNNING_CODE, MAX_RUNNING_CODE);
+                        let part_bytes = code_part_bytes(first.code_bytes, code.parts).unwrap();
+                        assert_eq!(part_bytes, original / u64::from(MAX_CODE_PARTS));
+                        assert!(first.code_bytes >= MIN_RUNNING_CODE);
+                        assert!(first.code_bytes <= original);
+                        assert_eq!(last.code_offset + last.code_bytes, code.bytes);
+                        let floor =
+                            MIN_RUNNING_CODE.div_ceil(part_bytes) * part_bytes * cores as u64;
+                        assert!(code.bytes <= (free / CODE_AGGREGATE_SHARE).max(floor));
+                        if cores <= 32 {
+                            assert_eq!(code.parts, MAX_CODE_PARTS);
+                            assert_eq!(first.code_bytes, original);
+                        }
+                    } else {
+                        assert_eq!(code.parts, MAX_CODE_PARTS);
+                        assert_eq!(code.bytes % CODE_ALIGNMENT, 0);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn installed_code_extents_cover_only_individual_initialized_ranges() {

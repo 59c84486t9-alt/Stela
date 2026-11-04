@@ -9,6 +9,7 @@
 //! sets it again from the handoff first thing: its image is a copy taken
 //! before the loader ran.
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use stela_boot_core::native_resources::CODE_WINDOW_BYTES;
 use stela_engine::machine::mmu::placement::Placement;
 use stela_engine::machine::mmu::placement::SLICE;
 use stela_engine::machine::mmu::placement::UPPER_HALF;
@@ -36,6 +37,10 @@ const BOUNCE: u64 = 0x4_0000_0000;
 // 0x5/0x6 windows belong to MMIO and scoped RAM-publication diagnostics.
 const INVOCATION_STACKS: u64 = 0x7_0000_0000;
 const TASK_STACKS: u64 = 0x8_0000_0000;
+/// A larger arena goes in the second shared PML4 entry, above the
+/// ordinary engine window and below the four-level physmap.
+const LARGE_CODE: u64 = PML4_ENTRY;
+const _: () = assert!(LARGE_CODE + CODE_WINDOW_BYTES <= FOUR_LEVEL_PHYSMAP);
 
 /// The four-level slices below `U`, or zero under LA57.
 static SLICES: AtomicU8 = AtomicU8::new(0);
@@ -108,8 +113,13 @@ pub fn task_stacks() -> u64 {
     window() + TASK_STACKS
 }
 
-pub fn code() -> u64 {
-    window() + CODE
+pub fn code(bytes: u64) -> u64 {
+    let offset = if bytes <= BOUNCE - CODE {
+        CODE
+    } else {
+        LARGE_CODE
+    };
+    window() + offset
 }
 
 pub fn bounce() -> u64 {
