@@ -218,6 +218,7 @@
 /fs/pidfs_metadata.h
 /fs/namespace.c
 /fs/namespace_tree.c
+/fs/nullfs.c
 /fs/namespace_tree.h
 /fs/pnode.h
 /fs/pnode.c

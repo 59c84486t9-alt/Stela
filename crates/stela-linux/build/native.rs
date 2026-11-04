@@ -216,6 +216,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/libfs.c")),
             PathBuf::from(format!("{LINUX}/fs/namei.c")),
             PathBuf::from(format!("{LINUX}/fs/namespace_tree.c")),
+            PathBuf::from(format!("{LINUX}/fs/nullfs.c")),
             PathBuf::from(format!("{LINUX}/fs/nsfs.c")),
             PathBuf::from(format!("{LINUX}/lib/string.c")),
             PathBuf::from(format!("{LINUX}/lib/hexdump.c")),
