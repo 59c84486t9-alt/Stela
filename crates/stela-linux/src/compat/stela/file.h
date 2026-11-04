@@ -65,7 +65,8 @@ int stela_linux_map(int fd, void *space, unsigned long address, size_t size, u64
 		    struct stela_linux_mapping **mapping);
 
 /* Serves a client's fault at address within the mapping, which installs pages
- * through map_user; a VM_FAULT_ result. */
+ * through map_user; a VM_FAULT_ result. The caller holds the mapping live
+ * through the fault and waits for outstanding faults before unmapping. */
 vm_fault_t stela_linux_fault(struct stela_linux_mapping *mapping, unsigned long address,
 			     bool write);
 

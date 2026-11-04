@@ -130,7 +130,8 @@ pub unsafe fn map(fd: c_int, address: u64, size: usize, offset: u64) -> Result<M
 }
 
 /// # Safety
-/// See the module. `mapping` is not used after this.
+/// See the module. All outstanding faults on `mapping` have returned, and the
+/// mapping is no longer used.
 pub unsafe fn unmap(mapping: Mapping) {
     // SAFETY: the module's contract and this function's.
     unsafe { stela_linux_munmap(mapping.0) };
@@ -139,7 +140,7 @@ pub unsafe fn unmap(mapping: Mapping) {
 /// Install the page at `address` again, after Linux moved what it maps.
 ///
 /// # Safety
-/// See the module.
+/// See the module. Keep `mapping` alive until this fault returns.
 pub unsafe fn fault(mapping: Mapping, address: u64, write: bool) -> bool {
     // SAFETY: the module's contract.
     unsafe { stela_linux_refault(mapping.0, address, write) }

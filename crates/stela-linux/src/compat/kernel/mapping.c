@@ -3,8 +3,8 @@
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 mm/memory.c, mm/mmap.c and
  * mm/interval_tree.c. The owner owns the clients' address spaces: each
  * mapping is a VMA for the driver's mmap and fault, and map_user and
- * unmap_user change the page tables. Linux's fault path takes no locks here,
- * so no retry leaves mmap_lock. */
+ * unmap_user change the page tables. Faults do not hold mmap_lock, so they
+ * do not pass Linux fault flags that permit dropping it. */
 #include <linux/err.h>
 #include <linux/file.h>
 #include <linux/fs.h>
@@ -18,9 +18,18 @@
 
 #include <internal.h>
 
+struct pinned_client_page {
+	struct rb_node node;
+	unsigned long address;
+	struct page *page;
+	bool writable;
+};
+
 struct stela_linux_mapping {
 	struct vm_area_struct vma;
 	void *space;
+	struct rb_root pins;
+	unsigned long invalidate_sequence;
 };
 
 static inline unsigned long first_page(const struct vm_area_struct *vma)
@@ -68,6 +77,8 @@ int stela_linux_mmap(struct file *file, void *space, unsigned long address, size
 	struct vm_area_struct *vma = &mapping->vma;
 
 	mapping->space = space;
+	mapping->pins = RB_ROOT;
+	mapping->invalidate_sequence = 0;
 	vma_init(vma, &client_mm);
 	vma->vm_start = address;
 	vma->vm_end = address + size;
@@ -120,7 +131,7 @@ void vma_set_file(struct vm_area_struct *vma, struct file *file)
 	fput(file);
 }
 
-static void unmap_client(const struct stela_linux_mapping *mapping,
+static void remove_client_entries(const struct stela_linux_mapping *mapping,
 			 unsigned long address, size_t size)
 {
 	const struct stela_linux_owner *owner = stela_linux_owner();
@@ -128,6 +139,58 @@ static void unmap_client(const struct stela_linux_mapping *mapping,
 	if (!owner->services->unmap_user ||
 	    owner->services->unmap_user(owner->context, mapping->space, address, size))
 		stela_linux_fatal("client mapping removal was not acknowledged");
+}
+
+static int compare_pin(const void *key, const struct rb_node *node)
+{
+	unsigned long address = *(const unsigned long *)key;
+	const struct pinned_client_page *pin = rb_entry(node, struct pinned_client_page, node);
+
+	return address < pin->address ? -1 : address > pin->address;
+}
+
+static int compare_pin_nodes(struct rb_node *node, const struct rb_node *other)
+{
+	const struct pinned_client_page *pin = rb_entry(node, struct pinned_client_page, node);
+
+	return compare_pin(&pin->address, other);
+}
+
+static int compare_pin_range(const void *key, const struct rb_node *node)
+{
+	const unsigned long *range = key;
+	const struct pinned_client_page *pin = rb_entry(node, struct pinned_client_page, node);
+
+	return pin->address < range[0] ? 1 : pin->address >= range[1] ? -1 : 0;
+}
+
+static void drop_client_pin(struct stela_linux_mapping *mapping, struct pinned_client_page *pin)
+{
+	rb_erase(&pin->node, &mapping->pins);
+	put_page(pin->page);
+	kfree(pin);
+}
+
+static void unmap_client(struct stela_linux_mapping *mapping, unsigned long address, size_t size)
+{
+	/* Keep pins until the owner has removed the translations on every CPU. */
+	remove_client_entries(mapping, address, size);
+	unsigned long sequence = mapping->invalidate_sequence + 1;
+
+	if (!sequence)
+		stela_linux_fatal("client mapping invalidation sequence exhausted");
+	WRITE_ONCE(mapping->invalidate_sequence, sequence);
+
+	const unsigned long range[] = { address, address + size };
+	struct rb_node *node = rb_find_first(range, &mapping->pins, compare_pin_range);
+
+	while (node) {
+		struct pinned_client_page *pin = rb_entry(node, struct pinned_client_page, node);
+		if (pin->address >= range[1])
+			break;
+		node = rb_next(node);
+		drop_client_pin(mapping, pin);
+	}
 }
 
 void stela_linux_munmap(struct stela_linux_mapping *mapping)
@@ -144,6 +207,93 @@ void stela_linux_munmap(struct stela_linux_mapping *mapping)
 	kfree(mapping);
 }
 
+static vm_fault_t install_file_page(struct stela_linux_mapping *mapping, struct vm_fault *vmf,
+				    vm_fault_t result, unsigned long sequence, bool write)
+{
+	struct folio *folio = page_folio(vmf->page);
+	struct address_space *backing = vmf->vma->vm_file->f_mapping;
+	const struct vm_operations_struct *ops = vmf->vma->vm_ops;
+
+	if (result & VM_FAULT_LOCKED)
+		folio_unlock(folio);
+	struct pinned_client_page *pin = kmalloc_obj(*pin);
+
+	if (!pin) {
+		folio_put(folio);
+		return VM_FAULT_OOM;
+	}
+	*pin = (struct pinned_client_page){
+		.address = vmf->address, .page = vmf->page, .writable = write,
+	};
+	if (write && ops->page_mkwrite) {
+		vmf->flags = FAULT_FLAG_WRITE | FAULT_FLAG_MKWRITE;
+		vm_fault_t prepared = ops->page_mkwrite(vmf);
+		if (prepared & (VM_FAULT_ERROR | VM_FAULT_NOPAGE | VM_FAULT_RETRY |
+				VM_FAULT_COMPLETED)) {
+			result = prepared & VM_FAULT_ERROR ? prepared : VM_FAULT_RETRY;
+			goto release;
+		}
+		if (!(prepared & VM_FAULT_LOCKED))
+			folio_lock(folio);
+	} else {
+		folio_lock(folio);
+	}
+
+	i_mmap_lock_write(backing);
+	if (sequence != mapping->invalidate_sequence) {
+		result = VM_FAULT_RETRY;
+		goto unlock;
+	}
+	/* The original fault may have dropped the folio lock for I/O. Check
+	 * both the cache identity and EOF again before making the page visible. */
+	if (folio->mapping != backing || !folio_contains(folio, vmf->pgoff) ||
+	    vmf->pgoff >= DIV_ROUND_UP(i_size_read(backing->host), PAGE_SIZE)) {
+		result = VM_FAULT_SIGBUS;
+		goto unlock;
+	}
+
+	struct rb_node *existing = rb_find(&pin->address, &mapping->pins, compare_pin);
+	struct pinned_client_page *previous = rb_entry_safe(existing, struct pinned_client_page, node);
+
+	result = (result & VM_FAULT_MAJOR) | VM_FAULT_NOPAGE;
+	if (previous) {
+		if (previous->page != pin->page) {
+			result = VM_FAULT_SIGBUS;
+			goto unlock;
+		}
+		if (!write || previous->writable)
+			goto unlock;
+		/* Retire the read-only entry before making it writable. This
+		 * changes no file offset or invalidation generation. */
+		remove_client_entries(mapping, pin->address, PAGE_SIZE);
+		drop_client_pin(mapping, previous);
+	}
+
+	pgprot_t protection = vmf->vma->vm_page_prot;
+	if (!write)
+		protection = __pgprot(pgprot_val(protection) & ~_PAGE_RW);
+	else
+		folio_mark_dirty(folio);
+	vm_fault_t installed = vmf_insert_pfn_prot(vmf->vma, pin->address,
+						    page_to_pfn(pin->page), protection);
+	if (installed == VM_FAULT_NOPAGE) {
+		if (rb_find_add(&pin->node, &mapping->pins, compare_pin_nodes))
+			stela_linux_fatal("duplicate native client page pin");
+		pin = NULL; /* The mapping now owns the fault reference. */
+	} else {
+		result = installed;
+	}
+unlock:
+	i_mmap_unlock_write(backing);
+	folio_unlock(folio);
+release:
+	if (pin) {
+		folio_put(folio);
+		kfree(pin);
+	}
+	return result;
+}
+
 vm_fault_t stela_linux_fault(struct stela_linux_mapping *mapping, unsigned long address,
 			     bool write)
 {
@@ -157,15 +307,25 @@ vm_fault_t stela_linux_fault(struct stela_linux_mapping *mapping, unsigned long 
 		.vma = vma,
 		.address = address,
 		.pgoff = vma->vm_pgoff + ((address - vma->vm_start) >> PAGE_SHIFT),
+		.gfp_mask = mapping_gfp_mask(vma->vm_file->f_mapping),
 		.flags = FAULT_FLAG_USER | (write ? FAULT_FLAG_WRITE : 0),
 	};
 
-	return vma->vm_ops->fault(&vmf);
+	unsigned long sequence = READ_ONCE(mapping->invalidate_sequence);
+	vm_fault_t result = vma->vm_ops->fault(&vmf);
+
+	if (result & (VM_FAULT_ERROR | VM_FAULT_NOPAGE | VM_FAULT_RETRY | VM_FAULT_COMPLETED))
+		return result;
+	if (!vmf.page)
+		return VM_FAULT_SIGBUS;
+	return install_file_page(mapping, &vmf, result, sequence, write);
 }
 
 bool stela_linux_refault(struct stela_linux_mapping *mapping, unsigned long address, bool write)
 {
-	return !(stela_linux_fault(mapping, address, write) & VM_FAULT_ERROR);
+	vm_fault_t result = stela_linux_fault(mapping, address, write);
+
+	return (result & VM_FAULT_NOPAGE) && !(result & (VM_FAULT_ERROR | VM_FAULT_RETRY));
 }
 
 vm_fault_t vmf_insert_pfn_prot(struct vm_area_struct *vma, unsigned long addr, unsigned long pfn,
@@ -190,10 +350,10 @@ static bool unmap_file_pages(struct address_space *mapping, pgoff_t first, pgoff
 	struct vm_area_struct *vma;
 	bool writable = false;
 
-	i_mmap_lock_read(mapping);
+	i_mmap_lock_write(mapping);
 	for (vma = mapped_iter_first(&mapping->i_mmap, first, last); vma;
 	     vma = mapped_iter_next(vma, first, last)) {
-		const struct stela_linux_mapping *client =
+		struct stela_linux_mapping *client =
 			container_of(vma, struct stela_linux_mapping, vma);
 		pgoff_t from = max(first, vma->vm_pgoff);
 		pgoff_t to = min(last, last_page(vma));
@@ -204,7 +364,7 @@ static bool unmap_file_pages(struct address_space *mapping, pgoff_t first, pgoff
 			     (to - from + 1) << PAGE_SHIFT);
 		writable |= (vma->vm_flags & (VM_SHARED | VM_WRITE)) == (VM_SHARED | VM_WRITE);
 	}
-	i_mmap_unlock_read(mapping);
+	i_mmap_unlock_write(mapping);
 	return writable;
 }
 
@@ -263,6 +423,7 @@ static unsigned int closes, mmaps;
 static int mmap_error, map_error, unmap_error;
 static struct stela_linux_mapping *refused_mapping;
 static bool witness_unmap;
+static struct page *client_page;
 
 static int map_user(void *context, void *space, unsigned long address, unsigned long pfn,
 		    u64 prot)
@@ -281,6 +442,8 @@ static int unmap_user(void *context, void *space, unsigned long address, size_t 
 	assert(space == SPACE);
 	removed_address = address;
 	removed_size = size;
+	if (client_page)
+		assert(page_ref_count(client_page) == 2);
 	return unmap_error;
 }
 
@@ -336,6 +499,59 @@ static int test_mmap(struct file *file, struct vm_area_struct *vma)
 }
 
 static const struct file_operations fops = {.mmap = test_mmap};
+
+static vm_fault_t file_page_fault(struct vm_fault *vmf)
+{
+	get_page(client_page);
+	vmf->page = client_page;
+	return 0;
+}
+
+static int test_file_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	static const struct vm_operations_struct page_ops = {.fault = file_page_fault};
+
+	assert(vma->vm_file == file);
+	vma->vm_ops = &page_ops;
+	return 0;
+}
+
+static void test_file_page_pin(void)
+{
+	static const struct file_operations page_fops = {.mmap = test_file_mmap};
+	struct file *file = anon_inode_getfile("page", &page_fops, NULL, O_RDWR);
+	struct stela_linux_mapping *mapping;
+
+	assert(!IS_ERR(file));
+	i_size_write(file_inode(file), PAGE_SIZE);
+	assert(!stela_linux_mmap(file, SPACE, BASE, PAGE_SIZE, 0, true, &mapping));
+	client_page = alloc_page(GFP_KERNEL);
+	assert(client_page);
+	struct folio *folio = page_folio(client_page);
+	folio->mapping = file->f_mapping;
+	map_error = 0;
+
+	assert(stela_linux_refault(mapping, BASE, false));
+	assert(inserted_pfn == page_to_pfn(client_page) && !(pgprot_val(inserted_prot) & _PAGE_RW));
+	assert(page_ref_count(client_page) == 2);
+	assert(stela_linux_refault(mapping, BASE, false));
+	assert(page_ref_count(client_page) == 2);
+
+	unmap_mapping_pages(file->f_mapping, 0, 1, false);
+	assert(page_ref_count(client_page) == 1);
+	map_error = -ENOMEM;
+	assert(stela_linux_fault(mapping, BASE, false) == VM_FAULT_OOM);
+	assert(page_ref_count(client_page) == 1);
+	map_error = 0;
+	assert(stela_linux_refault(mapping, BASE, false));
+	stela_linux_munmap(mapping);
+	assert(page_ref_count(client_page) == 1);
+	folio->mapping = NULL;
+	put_page(client_page);
+	client_page = NULL;
+	i_size_write(file_inode(file), 0);
+	fput(file);
+}
 
 struct task_struct *__wrap_stela_linux_current(void)
 {
@@ -435,6 +651,7 @@ int main(void)
 	stela_linux_munmap(mapping);
 	fput(exporter);
 	fput(file);
+	test_file_page_pin();
 	stela_linux_exit();
 	printf("Linux client mappings passed\n");
 	return 0;
