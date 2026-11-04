@@ -582,8 +582,12 @@ impl Platform for Host {
         }
     }
 
-    fn unmap_user(&self, _: *mut c_void, address: u64, size: usize) {
-        self.window.remove(address, size / PAGE as usize);
+    fn unmap_user(&self, _: *mut c_void, address: u64, size: usize) -> Result<(), Errno> {
+        if self.window.remove(address, size / PAGE as usize) {
+            Ok(())
+        } else {
+            Err(EIO)
+        }
     }
 }
 

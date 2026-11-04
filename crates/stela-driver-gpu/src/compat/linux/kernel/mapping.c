@@ -118,17 +118,24 @@ void vma_set_file(struct vm_area_struct *vma, struct file *file)
 	fput(file);
 }
 
+static void unmap_client(const struct stela_linux_mapping *mapping,
+			 unsigned long address, size_t size)
+{
+	const struct stela_linux_owner *owner = stela_linux_owner();
+
+	if (!owner->services->unmap_user ||
+	    owner->services->unmap_user(owner->context, mapping->space, address, size))
+		stela_linux_fatal("client mapping removal was not acknowledged");
+}
+
 void stela_linux_munmap(struct stela_linux_mapping *mapping)
 {
 	struct vm_area_struct *vma = &mapping->vma;
 	struct file *file = vma->vm_file;
-	const struct stela_linux_owner *owner = stela_linux_owner();
-
 	i_mmap_lock_write(file->f_mapping);
+	unmap_client(mapping, vma->vm_start, vma->vm_end - vma->vm_start);
 	mapped_remove(vma, &file->f_mapping->i_mmap);
 	i_mmap_unlock_write(file->f_mapping);
-	owner->services->unmap_user(owner->context, mapping->space, vma->vm_start,
-				    vma->vm_end - vma->vm_start);
 	if (vma->vm_ops && vma->vm_ops->close)
 		vma->vm_ops->close(vma);
 	fput(file);
@@ -179,7 +186,6 @@ void unmap_mapping_range(struct address_space *mapping, loff_t const holebegin,
 			 loff_t const holelen, int even_cows)
 {
 	(void)even_cows;
-	const struct stela_linux_owner *owner = stela_linux_owner();
 	unsigned long first = (unsigned long)(holebegin >> PAGE_SHIFT);
 	unsigned long count = (unsigned long)(PAGE_ALIGN(holelen) >> PAGE_SHIFT);
 	unsigned long last = count ? first + count - 1 : ULONG_MAX;
@@ -193,9 +199,8 @@ void unmap_mapping_range(struct address_space *mapping, loff_t const holebegin,
 		unsigned long from = max(first, vma->vm_pgoff);
 		unsigned long to = min(last, last_page(vma));
 
-		owner->services->unmap_user(owner->context, client->space,
-					    vma->vm_start + ((from - vma->vm_pgoff) << PAGE_SHIFT),
-					    (to - from + 1) << PAGE_SHIFT);
+		unmap_client(client, vma->vm_start + ((from - vma->vm_pgoff) << PAGE_SHIFT),
+			     (to - from + 1) << PAGE_SHIFT);
 	}
 	i_mmap_unlock_read(mapping);
 }
@@ -211,7 +216,9 @@ void unmap_mapping_range(struct address_space *mapping, loff_t const holebegin,
 static unsigned long inserted_address, inserted_pfn, removed_address, removed_size;
 static pgprot_t inserted_prot;
 static unsigned int closes, mmaps;
-static int mmap_error, map_error;
+static int mmap_error, map_error, unmap_error;
+static struct stela_linux_mapping *refused_mapping;
+static bool witness_unmap;
 
 static int map_user(void *context, void *space, unsigned long address, unsigned long pfn,
 		    u64 prot)
@@ -224,17 +231,36 @@ static int map_user(void *context, void *space, unsigned long address, unsigned 
 	return map_error;
 }
 
-static void unmap_user(void *context, void *space, unsigned long address, size_t size)
+static int unmap_user(void *context, void *space, unsigned long address, size_t size)
 {
 	(void)context;
 	assert(space == SPACE);
 	removed_address = address;
 	removed_size = size;
+	return unmap_error;
+}
+
+static void report_unmap_failure(void *context, int level, const char *message)
+{
+	(void)context;
+	(void)level;
+	if (!witness_unmap)
+		return;
+
+	struct vm_area_struct *vma = &refused_mapping->vma;
+	struct file *file = vma->vm_file;
+	assert(!strcmp(message, "client mapping removal was not acknowledged"));
+	assert(removed_address == BASE && removed_size == 4 * PAGE_SIZE);
+	assert(!closes && file_count(file) == 2);
+	assert(mapped_iter_first(&file->f_mapping->i_mmap, vma->vm_pgoff,
+				 last_page(vma)) == vma);
+	stela_test_witness_passed();
 }
 
 static const struct stela_linux_services services = {
 	.map_user = map_user,
 	.unmap_user = unmap_user,
+	.log = report_unmap_failure,
 };
 static const struct stela_linux_owner owner = {.services = &services};
 
@@ -266,6 +292,18 @@ static int test_mmap(struct file *file, struct vm_area_struct *vma)
 }
 
 static const struct file_operations fops = {.mmap = test_mmap};
+
+static void refuse_unmap(void)
+{
+	unmap_error = -EIO;
+	stela_linux_munmap(refused_mapping);
+}
+
+static void witness_refused_unmap(void)
+{
+	witness_unmap = true;
+	refuse_unmap();
+}
 
 int main(void)
 {
@@ -302,6 +340,9 @@ int main(void)
 	unmap_mapping_range(file->f_mapping, 0, 0, 1);
 	assert(removed_address == BASE && removed_size == 4 * PAGE_SIZE);
 
+	refused_mapping = mapping;
+	assert(stela_test_traps(refuse_unmap));
+	assert(stela_test_witnessed(witness_refused_unmap));
 	stela_linux_munmap(mapping);
 	assert(closes == 1 && mmaps == 2);
 	removed_size = 0;

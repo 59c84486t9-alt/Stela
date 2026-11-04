@@ -1239,7 +1239,7 @@ impl Platform for Machine {
     fn map_user(&self, _: *mut c_void, _: u64, _: u64, _: u64) -> Result<(), Errno> {
         unreachable!();
     }
-    fn unmap_user(&self, _: *mut c_void, _: u64, _: usize) {
+    fn unmap_user(&self, _: *mut c_void, _: u64, _: usize) -> Result<(), Errno> {
         unreachable!();
     }
 }
