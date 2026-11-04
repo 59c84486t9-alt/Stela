@@ -70,15 +70,22 @@ pub fn in_resource_fork(header: &[u8]) -> Result<bool> {
     kind(header).map(|(_, fork, _)| fork)
 }
 
-/// One chunk, decoding to exactly `bytes`.
-fn chunk(codec: Codec, data: &[u8], bytes: usize) -> Result<Vec<u8>> {
-    let stored = match codec {
+fn stored(codec: Codec, data: &[u8]) -> Option<&[u8]> {
+    match codec {
         Codec::None => Some(data),
         Codec::Zlib => (data.first().is_some_and(|b| b & 0x0f == 0x0f)).then(|| &data[1..]),
         Codec::Lzvn => (data.first() == Some(&0x06)).then(|| &data[1..]),
         Codec::Lzfse => (data.first() == Some(&0xff)).then(|| &data[1..]),
-    };
-    let decoded = match (stored, codec) {
+    }
+}
+
+const CHUNK_SIZE_MISMATCH: ApfsError =
+    ApfsError::Malformed("decmpfs chunk does not decode to its size");
+
+/// One inline chunk. Let compressed output grow as needed instead of
+/// allocating its untrusted declared size up front.
+fn chunk(codec: Codec, data: &[u8], bytes: usize) -> Result<Vec<u8>> {
+    let decoded = match (stored(codec, data), codec) {
         (Some(stored), _) => stored.get(..bytes).map(<[u8]>::to_vec),
         (None, Codec::Zlib) => {
             miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, bytes).ok()
@@ -89,10 +96,44 @@ fn chunk(codec: Codec, data: &[u8], bytes: usize) -> Result<Vec<u8>> {
     };
     match decoded {
         Some(decoded) if decoded.len() == bytes => Ok(decoded),
-        _ => Err(ApfsError::Malformed(
-            "decmpfs chunk does not decode to its size",
-        )),
+        _ => Err(CHUNK_SIZE_MISMATCH),
     }
+}
+
+/// Decode into the final file allocation. Each compressed chunk starts
+/// with empty match history even when earlier chunks share the allocation.
+fn append_chunk(codec: Codec, data: &[u8], bytes: usize, output: &mut Vec<u8>) -> Result<()> {
+    if let Some(stored) = stored(codec, data) {
+        output.extend_from_slice(stored.get(..bytes).ok_or(CHUNK_SIZE_MISMATCH)?);
+        return Ok(());
+    }
+    let start = output.len();
+    match codec {
+        Codec::Zlib => {
+            output.resize(start + bytes, 0);
+            let written = miniz_oxide::inflate::decompress_slice_iter_to_slice(
+                &mut output[start..],
+                core::iter::once(data),
+                true,
+                false,
+            )
+            .map_err(|_| CHUNK_SIZE_MISMATCH)?;
+            if written != bytes {
+                return Err(CHUNK_SIZE_MISMATCH);
+            }
+        }
+        Codec::Lzvn => {
+            crate::lzfse::append_lzvn(data, bytes, output).map_err(|_| CHUNK_SIZE_MISMATCH)?
+        }
+        Codec::Lzfse => {
+            crate::lzfse::append(data, bytes, output).map_err(|_| CHUNK_SIZE_MISMATCH)?
+        }
+        Codec::None => unreachable!("stored above"),
+    }
+    if output.len() - start != bytes {
+        return Err(CHUNK_SIZE_MISMATCH);
+    }
+    Ok(())
 }
 
 fn u32_le(bytes: &[u8], at: usize) -> Result<u32> {
@@ -168,7 +209,7 @@ pub fn decode(header: &[u8], fork: Option<&[u8]>) -> Result<Vec<u8>> {
         .map_err(|_| ApfsError::Unsupported("decmpfs file larger than memory"))?;
     for (i, (start, end)) in chunks(codec, fork, count)?.into_iter().enumerate() {
         let want = (size - i * CHUNK_BYTES).min(CHUNK_BYTES);
-        bytes.extend(chunk(codec, &fork[start..end], want)?);
+        append_chunk(codec, &fork[start..end], want, &mut bytes)?;
     }
     Ok(bytes)
 }
@@ -252,8 +293,10 @@ mod tests {
         fork.extend(&compressed[1]);
         let attribute = header(4, data.len() as u64);
         assert_eq!(decode(&attribute, Some(&fork)).unwrap(), data);
-        // A chunk short of 64 KiB is refused.
-        let attribute = header(4, data.len() as u64 + 1);
-        assert!(decode(&attribute, Some(&fork)).is_err());
+        // A short chunk and a broken Adler-32 are both refused.
+        let oversized = header(4, data.len() as u64 + 1);
+        assert_eq!(decode(&oversized, Some(&fork)), Err(CHUNK_SIZE_MISMATCH));
+        *fork.last_mut().unwrap() ^= 1;
+        assert_eq!(decode(&attribute, Some(&fork)), Err(CHUNK_SIZE_MISMATCH));
     }
 }

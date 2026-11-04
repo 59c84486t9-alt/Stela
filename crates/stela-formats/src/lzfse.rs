@@ -112,21 +112,32 @@ fn u64_at(bytes: &[u8], at: usize) -> Result<u64> {
 }
 
 /// The decoded output, bounded by the caller's limit.
-struct Output {
-    bytes: Vec<u8>,
+struct Output<'a> {
+    bytes: &'a mut Vec<u8>,
+    start: usize,
     limit: usize,
     /// Where the current block must end.
     block_end: usize,
 }
 
-impl Output {
+impl<'a> Output<'a> {
+    fn new(bytes: &'a mut Vec<u8>, limit: usize) -> Self {
+        let start = bytes.len();
+        Self {
+            bytes,
+            start,
+            limit,
+            block_end: start,
+        }
+    }
+
     fn begin_block(&mut self, raw_bytes: u32) -> Result<()> {
         let end = self
             .bytes
             .len()
             .checked_add(raw_bytes as usize)
             .ok_or(LzfseError::Limit)?;
-        if end > self.limit {
+        if end - self.start > self.limit {
             return Err(LzfseError::Limit);
         }
         self.bytes.reserve(raw_bytes as usize);
@@ -149,11 +160,13 @@ impl Output {
 
     /// Copy a match from the output, repeating its pattern on overlap.
     fn copy_match(&mut self, distance: usize, length: usize) -> Result<()> {
-        if distance == 0 || distance > self.bytes.len() {
-            return Err(LzfseError::Malformed("match distance"));
-        }
+        let start = self
+            .bytes
+            .len()
+            .checked_sub(distance)
+            .filter(|&at| distance != 0 && at >= self.start)
+            .ok_or(LzfseError::Malformed("match distance"))?;
         self.room(length)?;
-        let start = self.bytes.len() - distance;
         if distance >= length {
             self.bytes.extend_from_within(start..start + length);
         } else if distance == 1 {
@@ -254,14 +267,27 @@ fn framed_output_size(src: &[u8], limit: usize) -> Option<usize> {
 
 /// Decode a whole LZFSE stream, producing at most `limit` bytes.
 pub fn decode(src: &[u8], limit: usize) -> Result<Vec<u8>> {
-    let mut out = Output {
-        bytes: Vec::new(),
-        limit,
-        block_end: 0,
-    };
+    let mut bytes = Vec::new();
+    append(src, limit, &mut bytes)?;
+    Ok(bytes)
+}
+
+/// Append one complete stream. Its matches can use only this stream's output.
+pub(crate) fn append(src: &[u8], limit: usize, bytes: &mut Vec<u8>) -> Result<()> {
+    let mut out = Output::new(bytes, limit);
+    let result = decode_stream(src, &mut out);
+    if result.is_err() {
+        out.bytes.truncate(out.start);
+    }
+    result
+}
+
+fn decode_stream(src: &[u8], out: &mut Output<'_>) -> Result<()> {
     // A heap without in-place growth copies all preceding output on each
     // resize. Reserve once when all block ranges fit the stream and limit.
-    if let Some(bytes) = framed_output_size(src, limit) {
+    if out.bytes.capacity() - out.start < out.limit
+        && let Some(bytes) = framed_output_size(src, out.limit)
+    {
         let _ = out.bytes.try_reserve_exact(bytes);
     }
     let mut at = 0;
@@ -271,7 +297,7 @@ pub fn decode(src: &[u8], limit: usize) -> Result<Vec<u8>> {
             if at + 4 != src.len() {
                 return Err(LzfseError::Malformed("bytes follow the end of stream"));
             }
-            return Ok(out.bytes);
+            return Ok(());
         }
         let frame = Frame::read(src, at, magic)?;
         match magic {
@@ -281,7 +307,7 @@ pub fn decode(src: &[u8], limit: usize) -> Result<Vec<u8>> {
             }
             COMPRESSED_LZVN => {
                 out.begin_block(frame.raw_bytes)?;
-                lzvn(&src[frame.payload..frame.end], &mut out, true)?;
+                lzvn(&src[frame.payload..frame.end], out, true)?;
             }
             COMPRESSED_V1 | COMPRESSED_V2 => {
                 let encoded = &src[at..frame.payload];
@@ -292,7 +318,7 @@ pub fn decode(src: &[u8], limit: usize) -> Result<Vec<u8>> {
                 };
                 header.check()?;
                 out.begin_block(frame.raw_bytes)?;
-                block(src, &frame, &header, &mut out)?;
+                block(src, &frame, &header, out)?;
             }
             _ => unreachable!("validated by Frame::read"),
         }
@@ -647,7 +673,7 @@ fn decode_value(state: &mut u16, table: &[ValueEntry], input: &mut BitStream) ->
 
 /// Decode the literals and then the L, M, D triples of one LZFSE block
 /// (`lzfse_decode` and `lzfse_decode_lmd`).
-fn block(src: &[u8], frame: &Frame, header: &Header, out: &mut Output) -> Result<()> {
+fn block(src: &[u8], frame: &Frame, header: &Header, out: &mut Output<'_>) -> Result<()> {
     let literal_table = literal_table(&header.literal_freq);
     let l_table = value_table(L_STATES, &header.l_freq, &L_EXTRA_BITS, &L_BASE_VALUE);
     let m_table = value_table(M_STATES, &header.m_freq, &M_EXTRA_BITS, &M_BASE_VALUE);
@@ -734,21 +760,25 @@ fn opcode(op: u8) -> Opcode {
 /// its chunks: it must produce exactly `raw_bytes` and end with its
 /// end-of-stream opcode.
 pub fn decode_lzvn(src: &[u8], raw_bytes: usize) -> Result<Vec<u8>> {
-    let mut out = Output {
-        bytes: Vec::new(),
-        limit: raw_bytes,
-        block_end: 0,
-    };
+    let mut bytes = Vec::new();
+    append_lzvn(src, raw_bytes, &mut bytes)?;
+    Ok(bytes)
+}
+
+pub(crate) fn append_lzvn(src: &[u8], raw_bytes: usize, bytes: &mut Vec<u8>) -> Result<()> {
+    let mut out = Output::new(bytes, raw_bytes);
     out.begin_block(u32::try_from(raw_bytes).map_err(|_| LzfseError::Limit)?)?;
-    lzvn(src, &mut out, false)?;
-    out.end_block()?;
-    Ok(out.bytes)
+    let result = lzvn(src, &mut out, false).and_then(|()| out.end_block());
+    if result.is_err() {
+        out.bytes.truncate(out.start);
+    }
+    result
 }
 
 /// Decode one LZVN payload up to its end-of-stream opcode, which a block
 /// must end with exactly, padding included. A decmpfs chunk drops the
 /// padding when its bytes round its stored size.
-fn lzvn(src: &[u8], out: &mut Output, block: bool) -> Result<()> {
+fn lzvn(src: &[u8], out: &mut Output<'_>, block: bool) -> Result<()> {
     let mut at = 0usize;
     let mut distance = 0usize;
     // Each opcode needs its operands, its literals and one more byte (the
@@ -868,15 +898,47 @@ mod tests {
     }
 
     #[test]
+    fn appended_streams_cannot_match_the_existing_prefix() {
+        let mut bytes = b"prefix".to_vec();
+        let valid = [0xe3, b'a', b'b', b'c', 0b00_000_111, 3, 0, 0x06];
+        append_lzvn(&valid, 6, &mut bytes).unwrap();
+        assert_eq!(bytes, b"prefixabcabc");
+
+        // A literal is written before the malformed match. The match
+        // would reach the previous stream and must roll that literal back.
+        let invalid = [0b01_000_111, 3, 0, b'x', 0x06];
+        assert_eq!(
+            append_lzvn(&invalid, 4, &mut bytes),
+            Err(LzfseError::Malformed("match distance"))
+        );
+        assert_eq!(bytes, b"prefixabcabc");
+
+        let mut framed = lzvn_block(4, &[&invalid[..4], &LZVN_END].concat());
+        framed.extend(b"bvx$");
+        assert_eq!(
+            append(&framed, 4, &mut bytes),
+            Err(LzfseError::Malformed("match distance"))
+        );
+        assert_eq!(bytes, b"prefixabcabc");
+
+        let mut truncated = stored(b"new");
+        truncated.truncate(truncated.len() - 4);
+        assert_eq!(
+            append(&truncated, 3, &mut bytes),
+            Err(LzfseError::Truncated)
+        );
+        assert_eq!(bytes, b"prefixabcabc");
+    }
+
+    #[test]
     fn overlapping_matches_repeat_until_the_declared_end() {
-        let mut out = Output {
-            bytes: b"abc".to_vec(),
-            limit: 21,
-            block_end: 21,
-        };
+        let mut bytes = Vec::new();
+        let mut out = Output::new(&mut bytes, 21);
+        out.begin_block(21).unwrap();
+        out.literals(b"abc").unwrap();
         out.copy_match(3, 13).unwrap();
         out.copy_match(1, 5).unwrap();
-        assert_eq!(out.bytes, b"abcabcabcabcabcaaaaaa");
+        assert_eq!(out.bytes.as_slice(), b"abcabcabcabcabcaaaaaa");
         out.end_block().unwrap();
     }
 
