@@ -168,9 +168,6 @@ impl<B: Backend, C: Compiler> SharedService<B, C> {
         record: u64,
         caller: &mut dyn CallerMemory,
     ) -> bool {
-        if !self.polls(connection) {
-            return false;
-        }
         let mut raw = [0; size_of::<GateCall>()];
         if caller.read(record, &mut raw).is_err() {
             return false;
@@ -184,7 +181,9 @@ impl<B: Backend, C: Compiler> SharedService<B, C> {
             return false;
         }
         let reached = self.reached.load(Ordering::Acquire);
-        if reached == POLL_UNAVAILABLE {
+        // Check membership after acquiring the serial. A close that
+        // precedes its publication has already removed that connection.
+        if reached == POLL_UNAVAILABLE || !self.polls(connection) {
             return false;
         }
         let value = wire::Value { value: reached };
@@ -251,11 +250,14 @@ impl<B: Backend + Send, C: Compiler + Send> GateService for SharedService<B, C> 
     }
 
     fn disconnect(&self, connection: NonZeroU64) {
-        for slot in &self.polling {
-            let _ = slot.compare_exchange(connection.get(), 0, Ordering::AcqRel, Ordering::Acquire);
-        }
         // The gate closes only connections it opened and holds.
-        let closed = self.call(|service| service.disconnect(connection));
+        let closed = self.call(|service| {
+            for slot in &self.polling {
+                let _ =
+                    slot.compare_exchange(connection.get(), 0, Ordering::AcqRel, Ordering::Acquire);
+            }
+            service.disconnect(connection)
+        });
         debug_assert!(closed.is_ok());
     }
 
@@ -286,16 +288,20 @@ impl<B: Backend + Send, C: Compiler + Send> GateService for SharedService<B, C> 
             let served = turn.serve(connection, record, caller);
             answer = Some((served, turn.refused.take(), turn.noted.take(), turn.served));
         });
-        drop(turn);
         let (served, refused, noted, (operation, status)) =
             answer.expect("the platform runs what it is given");
-        if operation == Operation::Poll.raw() && status == Status::Ok && !self.polls(connection) {
-            // Slots fill in order; one taken by a closed connection is freed.
+        if served.is_ok()
+            && operation == Operation::Poll.raw()
+            && status == Status::Ok
+            && !self.polls(connection)
+        {
+            // The turn serializes enrollment with other polls and close.
             let _ = self.polling.iter().find(|slot| {
                 slot.compare_exchange(0, connection.get(), Ordering::AcqRel, Ordering::Acquire)
                     .is_ok()
             });
         }
+        drop(turn);
         let left = (self.host.ticks)();
         (self.host.served)(Served {
             operation,

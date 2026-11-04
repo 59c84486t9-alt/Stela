@@ -314,6 +314,44 @@ fn a_busy_poll_falls_back_after_the_device_loss_notification() {
 }
 
 #[test]
+fn a_poll_that_cannot_write_its_status_does_not_enroll_the_connection() {
+    struct DenyStatus<'a> {
+        memory: &'a mut Memory,
+        record: u64,
+    }
+    impl CallerMemory for DenyStatus<'_> {
+        fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<(), CallerFault> {
+            CallerMemory::read(self.memory, address, buffer)
+        }
+
+        fn write(&mut self, address: u64, data: &[u8]) -> Result<(), CallerFault> {
+            if address == self.record {
+                return Err(CallerFault::Denied { address });
+            }
+            CallerMemory::write(self.memory, address, data)
+        }
+    }
+
+    let shared = SharedService::new(service(), HOST);
+    let connection = connect(&mut shared.try_turn().unwrap());
+    let mut memory = Memory::default();
+    let record = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let mut caller = DenyStatus {
+        memory: &mut memory,
+        record,
+    };
+    assert_eq!(
+        GateService::serve(&shared, connection, record, &mut caller),
+        Err(CallerFault::Denied { address: record })
+    );
+
+    let held = shared.try_turn().unwrap();
+    let busy = gate_call(&mut memory, Operation::Poll, &[], 8);
+    assert!(!shared.poll_while_held(connection, busy, &mut memory));
+    drop(held);
+}
+
+#[test]
 fn every_call_runs_where_the_platform_says() {
     static RUNS: AtomicUsize = AtomicUsize::new(0);
     let host = ServiceHost {
