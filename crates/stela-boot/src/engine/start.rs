@@ -1109,7 +1109,7 @@ fn open_gpus(
     remappers: &'static remapping::Remappers,
     heap: core::ops::Range<u64>,
     firmware: &Option<alloc::sync::Arc<stela_drivers::firmware::Catalog>>,
-    tsc_hz: u64,
+    handoff: &Handoff,
     adapters: Vec<stela_drivers::gpu::Adapter>,
 ) -> bool {
     let Some(window) = mmio.and_then(|mmio| mmio.window()) else {
@@ -1117,6 +1117,7 @@ fn open_gpus(
         return false;
     };
     let Some(mmio) = mmio else { return false };
+    let tsc_hz = handoff.tsc_hz;
     #[cfg(feature = "nvk")]
     let heap_bytes = heap.end - heap.start;
     // A PC with an NVIDIA GPU uses it or says why not; only one with none draws
@@ -1150,6 +1151,7 @@ fn open_gpus(
         firmware: firmware.clone(),
         random,
         tsc_hz,
+        wall: handoff.wall,
         #[cfg(feature = "nvk")]
         heap_bytes,
     };
@@ -2222,7 +2224,7 @@ fn start_devices(
                     remappers,
                     heap_range,
                     host_firmware,
-                    tsc_hz,
+                    handoff,
                     gpus,
                 )
             {

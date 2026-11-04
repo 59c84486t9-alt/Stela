@@ -103,6 +103,39 @@ ktime_t ktime_get(void)
 	return owner->services->now_ns(owner->context);
 }
 
+static void realtime(struct timespec64 *ts, u32 mode, u32 tick_ns)
+{
+	const struct stela_linux_owner *owner = stela_linux_owner();
+	s64 seconds;
+	u32 nanoseconds;
+
+	if (owner->services->realtime_at &&
+	    owner->services->realtime_at(owner->context, ktime_get(), mode,
+					 tick_ns, &seconds, &nanoseconds)) {
+		*ts = (struct timespec64){.tv_sec = seconds, .tv_nsec = nanoseconds};
+		return;
+	}
+
+	/* The void Linux API uses the epoch when this host has no UTC source. */
+	stela_linux_unsupported("realtime clock unavailable");
+	*ts = (struct timespec64){};
+}
+
+void ktime_get_real_ts64(struct timespec64 *ts)
+{
+	realtime(ts, 0, 0);
+}
+
+void ktime_get_coarse_real_ts64_mg(struct timespec64 *ts)
+{
+	realtime(ts, 1, TICK_NSEC);
+}
+
+void ktime_get_real_ts64_mg(struct timespec64 *ts)
+{
+	realtime(ts, 2, 0);
+}
+
 static u64 jiffy_minimum_us(u64 ticks)
 {
     _Static_assert(USEC_PER_SEC % HZ == 0, "relative physical jiffy conversion");

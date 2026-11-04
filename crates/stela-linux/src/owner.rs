@@ -6,6 +6,7 @@
 //! and nothing else in this crate needs to know how a service reaches hardware.
 use alloc::boxed::Box;
 use stela_driver_base::platform::work::WorkError;
+mod realtime;
 mod time;
 use core::{
     ffi::{CStr, c_char, c_int, c_uint, c_void},
@@ -13,6 +14,7 @@ use core::{
     pin::Pin,
     ptr, slice,
 };
+pub use realtime::{RealtimeOrigin, RealtimeRead};
 pub use time::{MinimumDeadline, minimum_failure};
 
 /// A negative Linux errno.
@@ -53,6 +55,11 @@ impl IrqEnableError {
 pub trait Platform {
     /// Monotonic nanoseconds.
     fn now_ns(&self) -> i64;
+    /// Map a sample from this platform's monotonic clock into UTC. The
+    /// platform retains its correlation and multigrain floor for this owner.
+    fn realtime_at(&self, _ns: i64, _read: RealtimeRead) -> Option<(i64, u32)> {
+        None
+    }
     /// Calibrated x86 TSC frequency for Linux boot-time BogoMIPS scaling.
     /// Read retained metadata without blocking or reentering Linux.
     /// This observation grants no physical minimum or deadline authority.
@@ -161,9 +168,10 @@ struct Services {
     copy_from_kernel_nofault:
         unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, usize) -> c_int,
     available_page_frames: unsafe extern "C" fn(*mut c_void, usize, usize, *mut usize) -> c_int,
+    realtime_at: unsafe extern "C" fn(*mut c_void, i64, u32, u32, *mut i64, *mut u32) -> bool,
 }
 
-const _: () = assert!(size_of::<Services>() == 184);
+const _: () = assert!(size_of::<Services>() == 192);
 const _: () = {
     assert!(core::mem::offset_of!(Services, now_ns) == 0);
     assert!(core::mem::offset_of!(Services, minimum_delay_us) == 8);
@@ -188,6 +196,7 @@ const _: () = {
     assert!(core::mem::offset_of!(Services, calibrated_tsc_hz) == 160);
     assert!(core::mem::offset_of!(Services, copy_from_kernel_nofault) == 168);
     assert!(core::mem::offset_of!(Services, available_page_frames) == 176);
+    assert!(core::mem::offset_of!(Services, realtime_at) == 184);
 };
 
 /// `struct stela_linux_owner`.
@@ -225,6 +234,35 @@ mod trampolines {
     pub unsafe extern "C" fn now_ns<P: Platform>(context: *mut c_void) -> i64 {
         // SAFETY: see the module.
         unsafe { platform::<P>(context) }.now_ns()
+    }
+
+    pub unsafe extern "C" fn realtime_at<P: Platform>(
+        context: *mut c_void,
+        ns: i64,
+        mode: u32,
+        tick_ns: u32,
+        seconds: *mut i64,
+        nanoseconds: *mut u32,
+    ) -> bool {
+        let read = match (mode, core::num::NonZeroU32::new(tick_ns)) {
+            (0, None) => RealtimeRead::Fine,
+            (1, Some(tick)) => RealtimeRead::CoarseMultigrain(tick),
+            (2, None) => RealtimeRead::FineMultigrain,
+            _ => return false,
+        };
+        // SAFETY: see the module.
+        let Some((sec, nanos)) = (unsafe { platform::<P>(context) }).realtime_at(ns, read) else {
+            return false;
+        };
+        if nanos >= 1_000_000_000 {
+            return false;
+        }
+        // SAFETY: both output pointers address independent writable C locals.
+        unsafe {
+            seconds.write(sec);
+            nanoseconds.write(nanos);
+        }
+        true
     }
 
     pub unsafe extern "C" fn calibrated_tsc_hz<P: Platform>(context: *mut c_void) -> u64 {
@@ -483,6 +521,7 @@ impl<P: Platform> Owner<P> {
         let mut owner = Box::new(Self {
             services: Services {
                 now_ns: t::now_ns::<P>,
+                realtime_at: t::realtime_at::<P>,
                 minimum_delay_us: t::minimum_delay_us::<P>,
                 minimum_deadline_us: t::minimum_deadline_us::<P>,
                 timer_changed: t::timer_changed::<P>,

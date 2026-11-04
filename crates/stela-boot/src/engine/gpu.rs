@@ -32,7 +32,7 @@ use super::{
     host,
     kernel_work::{self, KernelWork, SLOTS},
 };
-use crate::{native_irq, native_memory, native_mmio::Window, output};
+use crate::{handoff::RtcReading, native_irq, native_memory, native_mmio::Window, output};
 use alloc::{
     borrow::ToOwned, boxed::Box, collections::BTreeMap, collections::BTreeSet, format, rc::Rc,
     string::String, sync::Arc, vec::Vec,
@@ -67,7 +67,7 @@ use stela_drivers::{
 use stela_engine::machine::engine::Hub;
 use stela_linux::{
     function::{self, Attached, Msi, Placement, Region},
-    owner::{Entered, Errno, Owner, Platform, RawOwner},
+    owner::{Entered, Errno, Owner, Platform, RawOwner, RealtimeOrigin, RealtimeRead},
     random::Seeded,
     service::{self, Environment as LinuxEnvironment},
 };
@@ -352,6 +352,7 @@ struct Line {
 /// What Linux code gets from Stela.
 struct Host {
     tsc_hz: u64,
+    realtime: Option<RealtimeOrigin>,
     window: &'static Window,
     firmware: Option<Arc<Catalog>>,
     image: Arc<kernel_work::ReadOnlyImage>,
@@ -405,6 +406,10 @@ impl Platform for Host {
 
     fn now_ns(&self) -> i64 {
         nanoseconds(host::rdtsc(), self.tsc_hz) as i64
+    }
+
+    fn realtime_at(&self, ns: i64, read: RealtimeRead) -> Option<(i64, u32)> {
+        self.realtime.as_ref()?.read(ns, read)
     }
 
     fn delay_us(&self, minimum: u64, _maximum: u64, atomic: bool) {
@@ -968,6 +973,7 @@ pub(super) struct Machine {
     pub firmware: Option<Arc<Catalog>>,
     pub random: Seeded,
     pub tsc_hz: u64,
+    pub wall: Option<RtcReading>,
     /// What the heap can give, which is all a software device's memory.
     #[cfg(feature = "nvk")]
     pub heap_bytes: u64,
@@ -1023,6 +1029,7 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         firmware,
         random,
         tsc_hz,
+        wall,
         #[cfg(feature = "nvk")]
         heap_bytes,
     } = machine;
@@ -1042,8 +1049,25 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         .iter()
         .flat_map(|claimed| claimed.bars.iter().cloned())
         .collect();
+    let realtime = wall.and_then(|reading| {
+        if tsc_hz == 0
+            || !crate::cpu::INVARIANT_TSC.present()
+            || reading.resolution == 0
+            || reading.tsc_before > reading.tsc_after
+        {
+            return None;
+        }
+        // Correlate with the same boot-CPU TSC scale as Host::now_ns.
+        let origin = u128::from(reading.tsc_after) * 1_000_000_000 / u128::from(tsc_hz);
+        RealtimeOrigin::new(
+            i64::try_from(origin).ok()?,
+            i64::try_from(reading.utc.seconds).ok()?,
+            reading.utc.nanosecond,
+        )
+    });
     let owner = Owner::new(Host {
         tsc_hz,
+        realtime,
         window,
         firmware,
         image: image.clone(),
