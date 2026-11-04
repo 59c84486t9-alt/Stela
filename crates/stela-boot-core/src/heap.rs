@@ -1143,12 +1143,35 @@ unsafe impl GlobalAlloc for Heap {
         // SAFETY: GlobalAlloc's realloc contract guarantees that this size
         // rounded to the original alignment fits in isize.
         let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
-        if layout.size() == new_size
-            || class(layout).is_some_and(|old| class(new_layout) == Some(old))
-        {
+        if layout.size() == new_size {
+            return pointer;
+        }
+        let (old_class, new_class) = (class(layout), class(new_layout));
+        if old_class.is_some() && old_class == new_class {
             // The live block already has the full size-class capacity, and
             // this resize leaves all class accounting and ownership intact.
             return pointer;
+        }
+        if old_class.is_none() && new_class.is_none() {
+            let resized = {
+                let _guard = self.lock();
+                // SAFETY: the guard excludes other accesses to the state.
+                let state = unsafe { &mut *self.state.get() };
+                // SAFETY: the old layout identifies a live free-list block
+                // exclusively owned by the caller, and the lock is held.
+                let resized = unsafe { resize_large(state, pointer, new_size) };
+                if resized {
+                    state.live = state.live - layout.size() + new_size;
+                    state.count_large(layout.size(), false);
+                    state.count_large(new_size, true);
+                }
+                resized
+            };
+            if resized {
+                self.count_own(layout, false);
+                self.count_own(new_layout, true);
+                return pointer;
+            }
         }
         // SAFETY: both layouts meet GlobalAlloc's realloc contract. A new
         // successful allocation is disjoint, and only then can the old one
@@ -1162,6 +1185,66 @@ unsafe impl GlobalAlloc for Heap {
             next
         }
     }
+}
+
+/// Resize a free-list allocation without moving its payload, using or
+/// returning the following free space in the same pool.
+///
+/// # Safety
+/// The heap's lock is held. `pointer` identifies a live free-list block,
+/// exclusively owned by the caller, and `new_size` is nonzero.
+unsafe fn resize_large(state: &mut State, pointer: *mut u8, new_size: usize) -> bool {
+    let Some(wanted) = aligned(new_size, GRANULE).and_then(|bytes| bytes.checked_add(HEADER_BYTES))
+    else {
+        return false;
+    };
+    // SAFETY: the old block and its neighbours have live headers, and the
+    // lock protects both the boundary tags and bins. The replacement header
+    // lies beyond the retained payload and inside the old or joined block.
+    unsafe {
+        let block = pointer.sub(HEADER_BYTES).cast::<Header>();
+        let old_bytes = size(block);
+        if wanted == old_bytes {
+            return true;
+        }
+        let following = block as usize + old_bytes;
+        let next = following as *mut Header;
+        let join = following < state.end && following != state.floor && (*next).size & FREE != 0;
+        let available = if join {
+            old_bytes + size(next)
+        } else {
+            old_bytes
+        };
+        if wanted > available {
+            return false;
+        }
+        let new_bytes = if available - wanted >= MIN_BLOCK {
+            wanted
+        } else {
+            available
+        };
+        if join {
+            state.remove(next);
+        }
+        (*block).size = new_bytes | ((*block).size & PREVIOUS_FREE);
+        if new_bytes < available {
+            let rest = (block as usize + new_bytes) as *mut Header;
+            rest.write(Header {
+                previous: block as usize,
+                size: (available - new_bytes) | FREE,
+            });
+            state.tell_following(rest);
+            state.insert(rest);
+        } else {
+            state.tell_following(block);
+        }
+        state.carved = state.carved - old_bytes + new_bytes;
+        if block as usize >= state.floor {
+            state.carved_reserve = state.carved_reserve - old_bytes + new_bytes;
+        }
+        state.peak = state.peak.max(state.carved);
+    }
+    true
 }
 
 /// Where a payload of `payload` bytes aligned to `alignment` fits in free
