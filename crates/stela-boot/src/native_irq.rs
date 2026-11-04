@@ -9,7 +9,9 @@ use core::{
     arch::asm,
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering},
 };
-use stela_drivers::bus::irq::{IrqController, IrqError, Platform, Registry, Target};
+use stela_drivers::bus::irq::{
+    FIRST_VECTOR, IrqController, IrqError, Platform, Registry, Target, VECTOR_COUNT,
+};
 use stela_drivers::platform::work::Cpu;
 
 use stela_boot_core::crs;
@@ -146,6 +148,15 @@ fn id(apic: &Apic) -> Result<u32, IrqError> {
     Ok(if apic.is_x2apic() { raw } else { raw >> 24 })
 }
 
+fn pending_bank(apic: &Apic, bank: u32) -> Result<u32, IrqError> {
+    let irr = apic.read(0x200 + bank * 16);
+    let isr = apic.read(0x100 + bank * 16);
+    if irr == u32::MAX || isr == u32::MAX {
+        return Err(IrqError::FailedRead);
+    }
+    Ok(irr | isr)
+}
+
 /// Attach the existing, already enabled APIC and installed device-vector IDT.
 ///
 /// # Safety
@@ -178,6 +189,14 @@ pub unsafe fn initialize(base: u64, registers: u64, timeout_ticks: u64) -> Resul
     if bsp >= 255 {
         return Err(IrqError::Unsupported);
     }
+    // No stale firmware delivery may become the first interrupt of a
+    // newly installed handler. Inspect the entire registry vector block.
+    const FIRST_BIT: u8 = FIRST_VECTOR % 32;
+    const _: () = assert!(VECTOR_COUNT < 32 && FIRST_BIT as usize + VECTOR_COUNT <= 32);
+    const MASK: u32 = ((1u32 << VECTOR_COUNT) - 1) << FIRST_BIT;
+    if pending_bank(&apic, u32::from(FIRST_VECTOR / 32))? & MASK != 0 {
+        return Err(IrqError::Drain);
+    }
     BASE.store(base, Ordering::Relaxed);
     REGISTERS.store(registers, Ordering::Relaxed);
     BSP.store(bsp, Ordering::Relaxed);
@@ -202,7 +221,6 @@ pub(crate) unsafe fn dispatch_frame(vector: u8, interrupted_rsp: usize) -> bool 
     unsafe { dispatch_entry(vector, Some(interrupted_rsp)) }
 }
 unsafe fn dispatch_entry(vector: u8, interrupted_rsp: Option<usize>) -> bool {
-    use stela_drivers::bus::irq::{FIRST_VECTOR, VECTOR_COUNT};
     if !READY.load(Ordering::Acquire)
         || vector < FIRST_VECTOR
         || usize::from(vector - FIRST_VECTOR) >= VECTOR_COUNT
@@ -266,14 +284,8 @@ unsafe impl Platform for NativePlatform {
     }
     fn pending(&self, vector: u8) -> Result<bool, IrqError> {
         self.check_cpu()?;
-        let apic = controller();
-        let offset = u32::from(vector / 32) * 16;
-        let irr = apic.read(0x200 + offset);
-        let isr = apic.read(0x100 + offset);
-        if irr == u32::MAX || isr == u32::MAX {
-            return Err(IrqError::FailedRead);
-        }
-        Ok((irr | isr) & (1u32 << (vector % 32)) != 0)
+        let pending = pending_bank(&controller(), u32::from(vector / 32))?;
+        Ok(pending & (1u32 << (vector % 32)) != 0)
     }
     fn eoi(&self) {
         controller().eoi();
