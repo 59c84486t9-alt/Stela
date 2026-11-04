@@ -517,27 +517,49 @@ impl Host for BareHost<'_> {
                 Some(ranges) => unmapped.extend(ranges),
             }
         }
-        let mut pages = 0u64;
-        for &(first, last) in &unmapped {
-            for root in state.all_roots() {
-                tables::unmap(&state.pool, root, first, last);
-            }
-            pages = pages.saturating_add(((last - first) >> 12) + 1);
-        }
-        if whole || pages > INVLPG_PAGES {
-            state.reload();
-        } else {
-            for &(first, last) in &unmapped {
-                let mut page = first & !(PAGE - 1);
-                loop {
-                    let current = state.root_of(state.current);
-                    state.contexts.forget(page, current);
-                    if page >= last & !(PAGE - 1) {
-                        break;
+        let pages = unmapped.iter().fold(0u64, |sum, &(first, last)| {
+            sum.saturating_add(((last >> 12) - (first >> 12)) + 1)
+        });
+        const { assert!(INVLPG_PAGES <= u16::BITS as u64) };
+        let precise = !whole && pages <= INVLPG_PAGES;
+        let current = state.root_of(state.current);
+        let mut reload_current = false;
+        for (first, last) in unmapped {
+            let base = first & !(PAGE - 1);
+            for (view, root) in state.roots.into_iter().enumerate() {
+                let mut removed = 0u16;
+                tables::unmap(&state.pool, root, first, last, |address| {
+                    let bit = if precise { (address - base) / PAGE } else { 0 };
+                    removed |= 1 << bit;
+                });
+                if whole || removed == 0 {
+                    continue;
+                }
+                if !precise {
+                    state.contexts.stale[view] = true;
+                    reload_current |= view == current;
+                    continue;
+                }
+                while removed != 0 {
+                    let page = base + u64::from(removed.trailing_zeros()) * PAGE;
+                    removed &= removed - 1;
+                    if view == current {
+                        invlpg(page);
+                    } else {
+                        state.contexts.forget_inactive(page, view);
                     }
-                    page += PAGE;
                 }
             }
+            // A bank has no PCID while it is inactive. Switching to it
+            // flushes the views before they can use its entries again.
+            for root in state.banks.iter().flat_map(|bank| bank.roots) {
+                tables::unmap(&state.pool, root, first, last, |_| {});
+            }
+        }
+        if whole {
+            state.reload();
+        } else if reload_current {
+            state.load_view(state.current);
         }
         if whole {
             state.resets += 1;

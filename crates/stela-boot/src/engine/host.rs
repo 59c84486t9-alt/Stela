@@ -301,20 +301,27 @@ impl Contexts {
     fn forget(&mut self, page: u64, current: usize) {
         invlpg(page);
         for view in 0..ROOTS {
-            if view == current || self.stale[view] {
-                continue;
+            if view != current {
+                self.forget_inactive(page, view);
             }
-            if self.invpcid {
-                let descriptor = [view_context(view), page];
-                // SAFETY: a valid single-address INVPCID of a tagged context:
-                // a context is fresh only under PCIDE ([`State::load_view`]).
-                unsafe {
-                    asm!("invpcid {}, [{}]", in(reg) 0u64, in(reg) &descriptor,
-                        options(nostack, preserves_flags))
-                };
-            } else {
-                self.stale[view] = true;
-            }
+        }
+    }
+
+    /// Drop a page from one inactive view, whose context can be retained
+    /// across CR3 loads only while tagged and fresh.
+    fn forget_inactive(&mut self, page: u64, view: usize) {
+        if !self.tagged || self.stale[view] {
+            return;
+        }
+        if self.invpcid {
+            let descriptor = [view_context(view), page];
+            // SAFETY: a valid single-address INVPCID of an inactive PCID.
+            unsafe {
+                asm!("invpcid {}, [{}]", in(reg) 0u64, in(reg) &descriptor,
+                    options(nostack, preserves_flags))
+            };
+        } else {
+            self.stale[view] = true;
         }
     }
 }
