@@ -488,6 +488,19 @@ fn emit_predicate(code: &mut Code, operand: &Operand, pc: GuestAddress) {
     };
     let mut helper = Vec::new();
     exception_guard(code, &mut helper);
+    if shape != Shape::Scalar
+        && operation == Predicate::Equal
+        && right == CompareSource::Register(left)
+    {
+        // Normal values, both zero signs and infinities equal themselves
+        // without changing FPSR. One guard suffices for the shared source.
+        read_numerical_vector(code, shape, left, LEFT_VECTOR);
+        vector_zero_guard(code, format, shape, &mut helper);
+        helper_section(code, &helper, pc);
+        packed(code, Host::EqualDword, LEFT_VECTOR, LEFT_VECTOR);
+        commit_predicate(code, format, shape, destination, LEFT_VECTOR, false, false);
+        return;
+    }
     let zero = right == CompareSource::Zero;
     let merge = shape == Shape::Scalar
         && !zero

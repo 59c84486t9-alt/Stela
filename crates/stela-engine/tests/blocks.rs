@@ -298,6 +298,47 @@ mod numerical {
         assert_eq!(initial.registers, prefix);
         Ok(())
     }
+
+    #[test]
+    fn vector_self_comparison_exits_only_for_exceptional_lanes() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let mut runtime = BlockRuntime::new_for_target(
+            75,
+            cache.path().into(),
+            BlockProfile::ORDINARY,
+            TargetCpu::Baseline,
+        );
+        // FCMEQ V0.4S,V1.4S,V1.4S and FCMEQ V2.2S,V2.2S,V2.2S.
+        runtime.register_code(
+            GuestAddress(BASE),
+            words(&[ADD_ONE, 0x4e21_e420, 0x0e22_e442, ADD_ONE, RET]),
+        )?;
+        for exceptional in [false, true] {
+            let mut thread = input(false);
+            thread.registers.v[1] = if exceptional {
+                [0x8000_0000_7fc0_0001, 0x7f80_0000_7f80_0001]
+            } else {
+                [0x8000_0000_0000_0000, 0xff80_0000_7f80_0000]
+            };
+            // The aliased 2S form clears the old signaling NaNs in the high half.
+            thread.registers.v[2] = [0x3f80_0000_8000_0000, 0x7f80_0001_7f80_0001];
+            let mut expected = thread.registers.clone();
+            expected.x[0] += 2;
+            expected.v[2] = [u64::MAX, 0];
+            if exceptional {
+                expected.v[0] = [0xffff_ffff_0000_0000; 2];
+                expected.fpsr |= INVALID;
+            } else {
+                expected.v[0] = [u64::MAX; 2];
+            }
+            // SAFETY: the program only operates on its own registered code and state.
+            let report = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
+            assert_eq!(report.reason, StopReason::StopAddress);
+            assert_eq!(report.floating_point_helpers, usize::from(exceptional));
+            assert_eq!(thread.registers, expected);
+        }
+        Ok(())
+    }
 }
 
 #[test]
