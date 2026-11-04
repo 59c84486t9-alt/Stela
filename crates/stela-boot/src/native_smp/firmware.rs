@@ -9,7 +9,7 @@ use super::{
     topology::{self, Cpuid, Location, Msr, Processor, Snapshot},
 };
 use crate::{cpu::msr, handoff::Region, tables::PAGE};
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use core::{
     arch::{
         asm,
@@ -172,8 +172,22 @@ fn push_msr(snapshot: &mut Snapshot, index: u32, value: u64) -> Result<(), Error
 /// callback or under its owned native executor. No CPU feature is cached from
 /// another processor, and unsupported leaves/MSRs are not probed.
 pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
+    let mut snapshot = Snapshot::default();
     // SAFETY: forwarded original CPU/control capture contract.
-    unsafe { observe_controls(true) }
+    unsafe { observe_controls(&mut snapshot, true) }?;
+    Ok(snapshot)
+}
+
+/// [`observe`] into the heap, for callers on small stacks: Linux-compatible
+/// work threads verify cache attributes, and two snapshots on their stack
+/// overflowed it on AMD.
+/// # Safety
+/// The same contract as [`observe`].
+pub(crate) unsafe fn observe_boxed() -> Result<Box<Snapshot>, Error> {
+    let mut snapshot = Box::<Snapshot>::default();
+    // SAFETY: forwarded original CPU/control capture contract.
+    unsafe { observe_controls(&mut snapshot, true) }?;
+    Ok(snapshot)
 }
 
 /// Observe the same installed CPU without changing its retained PAT.
@@ -182,14 +196,18 @@ pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
 /// configuration already complete before its owner sealed the controls.
 #[cfg(feature = "diagnostics")]
 pub(crate) unsafe fn observe_with_original_pat() -> Result<Snapshot, Error> {
+    let mut snapshot = Snapshot::default();
     // SAFETY: forwarded original CPU/control capture contract.
-    unsafe { observe_controls(false) }
+    unsafe { observe_controls(&mut snapshot, false) }?;
+    Ok(snapshot)
 }
 
 /// # Safety
 /// Current non-migrating CPL0 CPU, with exclusive control of its memory types.
-unsafe fn observe_controls(configure_pat: bool) -> Result<Snapshot, Error> {
-    let mut snapshot = Snapshot::default();
+/// Fills `snapshot`, which the caller passes as `Snapshot::default()`, in
+/// place: a copy of its 2 KiB would cost the stack it exists to spare.
+unsafe fn observe_controls(snapshot: &mut Snapshot, configure_pat: bool) -> Result<(), Error> {
+    debug_assert_eq!((snapshot.count, snapshot.msr_count), (0, 0));
     let maximum = __cpuid(0).eax;
     let extended = __cpuid(0x8000_0000).eax;
     for leaf in [
@@ -214,7 +232,7 @@ unsafe fn observe_controls(configure_pat: bool) -> Result<Snapshot, Error> {
                 extended
             }
         {
-            push(&mut snapshot, cpuid(leaf, 0))?;
+            push(snapshot, cpuid(leaf, 0))?;
         }
     }
     for leaf in [0xb, 0x1f, 0x8000_0026] {
@@ -229,7 +247,7 @@ unsafe fn observe_controls(configure_pat: bool) -> Result<Snapshot, Error> {
         }
         for subleaf in 0..8 {
             let record = cpuid(leaf, subleaf);
-            push(&mut snapshot, record)?;
+            push(snapshot, record)?;
             if record.ebx == 0 || record.ecx >> 8 & 0xff == 0 {
                 break;
             }
@@ -242,12 +260,12 @@ unsafe fn observe_controls(configure_pat: bool) -> Result<Snapshot, Error> {
     let basic = snapshot.get(1, 0).ok_or(Error::ProcessorIdentity)?;
     if maximum >= 0xd && basic.ecx & (1 << 26) != 0 {
         let xstate = cpuid(0xd, 0);
-        push(&mut snapshot, xstate)?;
-        push(&mut snapshot, cpuid(0xd, 1))?;
+        push(snapshot, xstate)?;
+        push(snapshot, cpuid(0xd, 1))?;
         let components = u64::from(xstate.eax) | (u64::from(xstate.edx) << 32);
         for subleaf in [2, 5, 6, 7, 9, 17, 18] {
             if components & (1u64 << subleaf) != 0 {
-                push(&mut snapshot, cpuid(0xd, subleaf))?;
+                push(snapshot, cpuid(0xd, subleaf))?;
             }
         }
     }
@@ -276,13 +294,9 @@ unsafe fn observe_controls(configure_pat: bool) -> Result<Snapshot, Error> {
             if variables > MAX_VARIABLE_MTRRS {
                 return Err(Error::SnapshotCapacity);
             }
-            push_msr(&mut snapshot, msr::MTRR_CAP.index, cap)?;
-            push_msr(
-                &mut snapshot,
-                msr::MTRR_DEFAULT.index,
-                msr::MTRR_DEFAULT.read(),
-            )?;
-            let amd_controls = amd::architectural(&snapshot);
+            push_msr(snapshot, msr::MTRR_CAP.index, cap)?;
+            push_msr(snapshot, msr::MTRR_DEFAULT.index, msr::MTRR_DEFAULT.read())?;
+            let amd_controls = amd::architectural(snapshot);
             let visibility = if amd_controls {
                 Some(FixedVisibility::open(cap & (1 << 8) != 0)?)
             } else {
@@ -292,7 +306,7 @@ unsafe fn observe_controls(configure_pat: bool) -> Result<Snapshot, Error> {
                 for index in [
                     0x250, 0x258, 0x259, 0x268, 0x269, 0x26a, 0x26b, 0x26c, 0x26d, 0x26e, 0x26f,
                 ] {
-                    push_msr(&mut snapshot, index, msr::rdmsr(index))?;
+                    push_msr(snapshot, index, msr::rdmsr(index))?;
                 }
             }
             if let Some(visibility) = visibility {
@@ -303,14 +317,14 @@ unsafe fn observe_controls(configure_pat: bool) -> Result<Snapshot, Error> {
                 }
                 // Do not report masked fixed zeros as physical source state.
                 snapshot.amd_fixed_raw = true;
-                push_msr(&mut snapshot, amd::SYSCFG, original)?;
+                push_msr(snapshot, amd::SYSCFG, original)?;
                 for index in amd::enabled(original) {
-                    push_msr(&mut snapshot, index, msr::rdmsr(index))?;
+                    push_msr(snapshot, index, msr::rdmsr(index))?;
                 }
             }
             for offset in 0..variables as u32 * 2 {
                 let index = msr::MTRR_PHYS_BASE.at(offset).index;
-                push_msr(&mut snapshot, index, msr::rdmsr(index))?;
+                push_msr(snapshot, index, msr::rdmsr(index))?;
             }
         }
         // Pinned Linux hpet.c mwait_pc10_supported/hpet_is_pc10_damaged:
@@ -330,13 +344,13 @@ unsafe fn observe_controls(configure_pat: bool) -> Result<Snapshot, Error> {
         {
             // SAFETY: Intel CPU's PC10 MWAIT enumeration is the pinned
             // Linux gate for MSR_PKG_CST_CONFIG_CONTROL, on this same CPL0 CPU.
-            push_msr(&mut snapshot, 0xe2, msr::rdmsr(0xe2))?;
+            push_msr(snapshot, 0xe2, msr::rdmsr(0xe2))?;
         }
         if snapshot
             .get(7, 0)
             .is_some_and(|record| record.ebx & (1 << 1) != 0)
         {
-            push_msr(&mut snapshot, msr::TSC_ADJUST.index, msr::TSC_ADJUST.read())?;
+            push_msr(snapshot, msr::TSC_ADJUST.index, msr::TSC_ADJUST.read())?;
         }
         if basic.ecx & ((1 << 26) | (1 << 27)) == (1 << 26) | (1 << 27)
             && snapshot.cr4 & CR4_OSXSAVE != 0
@@ -347,7 +361,7 @@ unsafe fn observe_controls(configure_pat: bool) -> Result<Snapshot, Error> {
             snapshot.xcr0_valid = true;
         }
     }
-    Ok(snapshot)
+    Ok(())
 }
 
 struct Callback {

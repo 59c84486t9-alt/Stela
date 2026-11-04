@@ -114,7 +114,7 @@ fn verify_amd_writeback(
     // SAFETY: initialize's contract excludes migration, root/cache writers
     // and IRQ allocation. This is the current CPL0 processor; observe
     // restores AMD's read-visibility control without changing routing.
-    let before = unsafe { firmware::observe() }.map_err(unavailable)?;
+    let before = unsafe { firmware::observe_boxed() }.map_err(unavailable)?;
     let image = Image::from_snapshot(&before).map_err(unavailable)?;
     image
         .writeback_ram(physical, bytes as u64)
@@ -139,7 +139,7 @@ fn verify_amd_writeback(
         },
     )?;
     // SAFETY: the same actor-local exclusion remains held through validation.
-    let after = unsafe { firmware::observe() }.map_err(unavailable)?;
+    let after = unsafe { firmware::observe_boxed() }.map_err(unavailable)?;
     if before.apic_id() != after.apic_id()
         || before.cr0 != after.cr0
         || before.cr3 != after.cr3
