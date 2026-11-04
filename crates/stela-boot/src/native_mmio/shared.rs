@@ -122,7 +122,8 @@ struct Reservation {
 // SAFETY: These spans come from Source's checked, exclusive device handoffs.
 // The boot reservation pins the captured tables, root allocations and decoded
 // span. Platform contains aperture allocation metadata and no mapping or
-// authority backedge. This reservation is never transferable PCI custody.
+// authority backedge. The parent keeps any upstream assignment. A reservation
+// alone conveys no PCI writer or driver authority.
 unsafe impl PhysicalAssignment for Reservation {
     fn parent(&self) -> Option<&Parent> {
         Some(&self.parent)
@@ -633,9 +634,18 @@ impl Source {
         span: PhysicalSpan,
         kind: ResourceKind,
     ) -> Result<(Resource, Assignment<Reservation>), Error> {
+        self.reservation_under(span, kind, self.aperture.parent())
+    }
+
+    fn reservation_under(
+        &self,
+        span: PhysicalSpan,
+        kind: ResourceKind,
+        parent: Parent,
+    ) -> Result<(Resource, Assignment<Reservation>), Error> {
         let reservation = Reservation {
             platform: self.platform.clone(),
-            parent: self.aperture.parent(),
+            parent,
             _span: span,
         };
         reservation.check_control().map_err(Error::Assignment)?;

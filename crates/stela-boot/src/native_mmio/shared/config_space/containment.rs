@@ -2,6 +2,7 @@
 use super::*;
 use alloc::rc::Rc;
 use core::{any::Any, cell::RefCell, cmp::Reverse, fmt};
+use stela_boot_core::ecam::topology;
 use stela_drivers::{
     bus::pci::{
         ConfigEffect, ConfigError, ConfigFailure,
@@ -40,13 +41,14 @@ impl<'a> ContainedPci<'a> {
         value: u32,
     ) -> Result<(), Error> {
         let cohort = self.source.pci_slots.0.borrow();
-        let Cohort::Parked(slots) = &*cohort else {
+        let Cohort::Parked(fabric) = &*cohort else {
             return Err(Error::Unavailable);
         };
-        let index = slots
-            .binary_search_by_key(&address, |slot| slot.configuration.address())
+        let index = fabric
+            .slots
+            .binary_search_by_key(&address, |slot| slot.address)
             .map_err(|_| Error::OutsideResource)?;
-        if slots[index].header.word(offset) != Some(value) {
+        if fabric.slots[index].header.word(offset) != Some(value) {
             return Err(Error::InvalidPlatformReply);
         }
         Ok(())
@@ -56,8 +58,14 @@ impl<'a> ContainedPci<'a> {
 #[derive(Debug)]
 pub(crate) struct ContainmentError {
     address: Option<Address>,
-    cause: ClaimError,
+    cause: Cause,
     effect: ConfigEffect,
+}
+
+#[derive(Debug)]
+enum Cause {
+    Claim(ClaimError),
+    Topology(topology::Error),
 }
 
 impl fmt::Display for ContainmentError {
@@ -65,7 +73,10 @@ impl fmt::Display for ContainmentError {
         if let Some(address) = self.address {
             write!(f, "{address} ")?;
         }
-        write!(f, "{:?} ({:?})", self.cause, self.effect)
+        match self.cause {
+            Cause::Claim(cause) => write!(f, "{cause:?} ({:?})", self.effect),
+            Cause::Topology(cause) => write!(f, "PCI topology {cause:?}"),
+        }
     }
 }
 
@@ -77,8 +88,18 @@ impl From<ClaimError> for ContainmentError {
         };
         Self {
             address: None,
-            cause,
+            cause: Cause::Claim(cause),
             effect,
+        }
+    }
+}
+
+impl From<topology::Error> for ContainmentError {
+    fn from(cause: topology::Error) -> Self {
+        Self {
+            address: None,
+            cause: Cause::Topology(cause),
+            effect: ConfigEffect::None,
         }
     }
 }
@@ -102,15 +123,44 @@ impl ContainmentError {
     }
 }
 
-struct ParkedConfig {
-    configuration: PreparedConfig<PrepublicationGrant>,
+struct Slot {
+    address: Address,
+    configuration: Option<PreparedConfig<PrepublicationGrant>>,
     header: Header,
+    plan: Rc<Plan>,
+    ancestor: Parent,
+}
+
+#[derive(Default)]
+struct Fabric {
+    roots: Vec<Option<Assignment<RootBus>>>,
+    slots: Vec<Slot>,
 }
 
 enum Cohort {
     Unclaimed,
-    Incomplete(Vec<ParkedConfig>),
-    Parked(Vec<ParkedConfig>),
+    Incomplete(Fabric),
+    Parked(Fabric),
+}
+
+struct RootBus {
+    _descriptor: &'static RootWindow,
+    platform: Arc<Platform>,
+    aperture: Parent,
+}
+
+// SAFETY: the descriptor comes from the retained capture. Each unique root
+// bus assignment is a child of that capture's aperture owner.
+unsafe impl PhysicalAssignment for RootBus {
+    fn parent(&self) -> Option<&Parent> {
+        Some(&self.aperture)
+    }
+
+    fn check_control(&self) -> Result<(), assignment::Error> {
+        self.platform
+            .check_mapping_control()
+            .map_err(|_| assignment::Error::Context)
+    }
 }
 
 pub(in crate::native_mmio::shared) struct PciSlots(RefCell<Cohort>);
@@ -184,6 +234,9 @@ impl Input {
         }
         let layout = reader.read32(address, 0x0c)?;
         let bridge = if reader.header_type(layout)? == 1 {
+            if class_revision >> 16 != 0x0604 {
+                return Err(Error::InvalidPlatformReply.into());
+            }
             let buses = reader.read32(address, 0x18)?;
             reader.check_bridge(address, buses)?;
             Some(buses)
@@ -388,47 +441,123 @@ impl Source {
             if !matches!(*cohort, Cohort::Unclaimed) {
                 return Err(Error::Busy.into());
             }
-            *cohort = Cohort::Incomplete(Vec::new());
+            *cohort = Cohort::Incomplete(Fabric::default());
         }
         // SAFETY: the caller keeps the complete captured topology exclusive.
         // with_config_inventory retires the last read-only map before return.
-        let mut inputs = unsafe { self.with_config_inventory(census) }?;
-        // Stop endpoints while their bridges still forward. Stop downstream
-        // bridges before their upstream parents.
-        inputs.sort_unstable_by_key(|input| {
-            (input.header.bridge.is_some(), Reverse(input.address.bus))
-        });
-        let count = inputs.len();
-        let mut slots = Vec::new();
-        slots
+        let inputs = unsafe { self.with_config_inventory(census) }?;
+        let fabric = self.prepare_fabric(inputs)?;
+        let count = fabric.slots.len();
+        let mut order = Vec::new();
+        order
             .try_reserve_exact(count)
             .map_err(|_| Error::Exhausted)?;
-        *self.pci_slots.0.borrow_mut() = Cohort::Incomplete(slots);
-        for input in inputs {
-            let address = input.address;
+        order.extend(0..count);
+        // Stop endpoints while their bridges still forward. Stop downstream
+        // bridges before their upstream parents.
+        order.sort_unstable_by_key(|&index| {
+            let slot = &fabric.slots[index];
+            (slot.header.bridge.is_some(), Reverse(slot.address.bus))
+        });
+        *self.pci_slots.0.borrow_mut() = Cohort::Incomplete(fabric);
+
+        for index in order {
+            let (address, prepared, header, plan) = {
+                let mut cohort = self.pci_slots.0.borrow_mut();
+                let Cohort::Incomplete(fabric) = &mut *cohort else {
+                    unreachable!("exclusive containment owns the incomplete fabric");
+                };
+                let slot = &mut fabric.slots[index];
+                (
+                    slot.address,
+                    slot.configuration
+                        .take()
+                        .expect("one prepared configuration"),
+                    slot.header,
+                    slot.plan.clone(),
+                )
+            };
             let parked = self
-                .contain_slot(input, tsc_hz)
+                .contain_slot(prepared, header, &plan, tsc_hz)
                 .map_err(|error| error.at(address))?;
             let mut cohort = self.pci_slots.0.borrow_mut();
-            let Cohort::Incomplete(slots) = &mut *cohort else {
-                unreachable!("exclusive containment owns the incomplete cohort");
+            let Cohort::Incomplete(fabric) = &mut *cohort else {
+                unreachable!("exclusive containment owns the incomplete fabric");
             };
-            slots.push(parked);
+            fabric.slots[index].configuration = Some(parked);
         }
         let mut cohort = self.pci_slots.0.borrow_mut();
-        let Cohort::Incomplete(slots) = &mut *cohort else {
-            unreachable!("exclusive containment owns the incomplete cohort");
+        let Cohort::Incomplete(fabric) = &mut *cohort else {
+            unreachable!("exclusive containment owns the incomplete fabric");
         };
-        slots.sort_unstable_by_key(|slot| slot.configuration.address());
-        *cohort = Cohort::Parked(core::mem::take(slots));
+        *cohort = Cohort::Parked(core::mem::take(fabric));
         Ok(ContainedPci {
             source: self,
             functions: count,
         })
     }
 
-    fn contain_slot(&self, input: Input, tsc_hz: u64) -> Result<ParkedConfig, ContainmentError> {
-        let (resource, original) = self.reservation(input.span, ResourceKind::Configuration)?;
+    fn prepare_fabric(&self, mut inputs: Vec<Input>) -> Result<Fabric, ContainmentError> {
+        let roots = self.platform.wire().roots();
+        let mut observed = Vec::new();
+        observed
+            .try_reserve_exact(inputs.len())
+            .map_err(|_| Error::Exhausted)?;
+        observed.extend(inputs.iter().map(|input| topology::Function {
+            address: input.address,
+            bridge_buses: input.header.bridge,
+        }));
+        let parents = topology::resolve(roots, &observed)?;
+        inputs.sort_unstable_by_key(|input| input.address);
+
+        let mut fabric = Fabric::default();
+        fabric
+            .roots
+            .try_reserve_exact(roots.len())
+            .map_err(|_| Error::Exhausted)?;
+        fabric
+            .slots
+            .try_reserve_exact(inputs.len())
+            .map_err(|_| Error::Exhausted)?;
+        for descriptor in roots {
+            let assignment = (descriptor.space == 2).then(|| {
+                Assignment::from_owned(RootBus {
+                    _descriptor: descriptor,
+                    platform: self.platform.clone(),
+                    aperture: self.aperture.parent(),
+                })
+            });
+            fabric.roots.push(assignment);
+        }
+        // Secondary bus numbers exceed their upstream bus. BDF order keeps
+        // each real bridge assignment before any of its children.
+        for ((address, parent), input) in parents.into_iter().zip(inputs) {
+            debug_assert_eq!(address, input.address);
+            let parent = match parent {
+                topology::Parent::Root(index) => fabric.roots[index]
+                    .as_ref()
+                    .expect("resolved root grant")
+                    .parent(),
+                topology::Parent::Bridge(bridge) => {
+                    let at = fabric
+                        .slots
+                        .binary_search_by_key(&bridge, |slot| slot.address)
+                        .expect("upstream slot is ordered before its children");
+                    fabric.slots[at].ancestor.clone()
+                }
+            };
+            let slot = self
+                .prepare_slot(input, parent)
+                .map_err(|error| error.at(address))?;
+            fabric.slots.push(slot);
+        }
+        Ok(fabric)
+    }
+
+    fn prepare_slot(&self, input: Input, parent: Parent) -> Result<Slot, ContainmentError> {
+        let (resource, original) =
+            self.reservation_under(input.span, ResourceKind::Configuration, parent)?;
+        let ancestor = original.parent();
         let close = original.admission_close();
         let owner = Box::new(SlotCustody {
             completion: Arc::new(Completion {
@@ -446,7 +575,22 @@ impl Source {
         });
         // SAFETY: the same affine slot backs the bounded operation and map.
         let grant = unsafe { PrepublicationGrant::from_boxed(owner, close) };
-        let prepared = UnpublishedConfig::prepare(grant);
+        Ok(Slot {
+            address: input.address,
+            configuration: Some(UnpublishedConfig::prepare(grant)),
+            header: input.header,
+            plan: input.plan,
+            ancestor,
+        })
+    }
+
+    fn contain_slot(
+        &self,
+        prepared: PreparedConfig<PrepublicationGrant>,
+        header: Header,
+        plan: &Plan,
+        tsc_hz: u64,
+    ) -> Result<PreparedConfig<PrepublicationGrant>, ContainmentError> {
         let mapping = self.authority.map(
             prepared.configuration_resource().clone(),
             0,
@@ -457,8 +601,8 @@ impl Source {
         let mut config = prepared
             .attach(mapping)
             .map_err(|(error, _original)| error)?;
-        input.header.verify(&config)?;
-        let effect = input.plan.apply(&mut config)?;
+        header.verify(&config)?;
+        let effect = plan.apply(&mut config)?;
         let acknowledge = (|| -> Result<(), ClaimError> {
             let started = crate::apic::rdtsc();
             let limit = (tsc_hz / 1_000 * 64).max(1);
@@ -466,28 +610,23 @@ impl Source {
                 crate::apic::rdtsc().wrapping_sub(started) >= limit
             })?;
             config.seal_bus_master()?;
-            if input.header.bridge.is_some() {
+            if header.bridge.is_some() {
                 config.seal_bus_routing()?;
             }
-            input.header.verify(&config)?;
+            header.verify(&config)?;
             Ok(())
         })();
         acknowledge.map_err(|cause| ContainmentError {
             address: None,
-            cause,
+            cause: Cause::Claim(cause),
             effect,
         })?;
         // SAFETY: the only accesses were synchronous and bounded, with no
         // escaped aliases. Source keeps this original decode and assignment.
-        let configuration =
-            unsafe { config.park() }.map_err(|(error, _original)| ContainmentError {
-                address: None,
-                cause: ClaimError::Mapping(error),
-                effect,
-            })?;
-        Ok(ParkedConfig {
-            configuration,
-            header: input.header,
+        unsafe { config.park() }.map_err(|(error, _original)| ContainmentError {
+            address: None,
+            cause: Cause::Claim(ClaimError::Mapping(error)),
+            effect,
         })
     }
 }
