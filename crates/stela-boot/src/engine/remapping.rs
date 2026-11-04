@@ -1,11 +1,9 @@
 //! The host's DMA remapping units, VT-d's (DMAR) and AMD-Vi's (IVRS, in
 //! [`amd`]), taken before the host drivers start
 //! ([`stela_boot_core::remapping`] decides which). Every requester a taken
-//! unit covers starts in the unit's window domain, which maps the drivers'
-//! DMA region and the reserved regions (RMRR, IVMD) of the unit's USB host
-//! controllers one to one, so a device reaches that memory and no other
-//! RAM. A driver that asks the native services for a domain gets its own
-//! ([`Remappers::domain`]).
+//! Intel requesters start blocked unless the unit retains an RMRR-backed
+//! window. AMD-Vi units keep their existing window policy. A driver that asks
+//! the native services for a domain gets its own ([`Remappers::domain`]).
 //!
 //! The display functions a driver maps the firmware's reserved regions for
 //! are a policy input: none yet, so a unit whose scope holds a display
@@ -18,7 +16,7 @@ use crate::{
     native_dma::{
         dmar,
         requester::RequesterClaim,
-        vtd::{BoundRequester, MmioRegisters, Unit, VtdError},
+        vtd::{BlockedRequester, BoundRequester, InitialBlock, MmioRegisters, Unit, VtdError},
     },
     native_mmio, output,
 };
@@ -26,7 +24,10 @@ use alloc::{sync::Arc, vec::Vec};
 use core::ops::Range;
 use stela_boot_core::remapping::{self, Present};
 use stela_drivers::bus::{
-    dma::{mapping::DmaDomain, memory::CacheAttribute},
+    dma::{
+        mapping::{DmaDomain, DmaError},
+        memory::CacheAttribute,
+    },
     mmio::owned::{Error as MappingError, PhysicalSpan, Protection},
     pci::{
         Address, ConfigError, ConfigFailure,
@@ -47,6 +48,25 @@ const CLAIMED_DISPLAYS: &[u16] = &[];
 struct Taken {
     descriptor: usize,
     unit: Arc<Unit<MmioRegisters>>,
+    initial: InitialContexts,
+}
+
+enum InitialContexts {
+    Window,
+    Blocked(Result<InitialBlock<MmioRegisters>, DmaError>),
+}
+
+impl Taken {
+    fn initial_requester(
+        &self,
+        rid: u16,
+    ) -> Result<Option<BlockedRequester<MmioRegisters>>, DmaError> {
+        match &self.initial {
+            InitialContexts::Window => Ok(None),
+            InitialContexts::Blocked(Ok(cohort)) => cohort.claim(rid).map(Some),
+            InitialContexts::Blocked(Err(error)) => Err(*error),
+        }
+    }
 }
 
 /// The units the mount translates for.
@@ -209,7 +229,7 @@ impl Remappers {
                         continue;
                     }
                 };
-                let mut window = alloc::vec![drivers.clone()];
+                let mut window = Vec::new();
                 for region in parsed.reserved.iter().filter(|region| {
                     region.segment == *segment
                         && region.scopes.iter().any(|scope| {
@@ -220,6 +240,9 @@ impl Remappers {
                         })
                 }) {
                     window.push(region.base..region.limit + 1);
+                }
+                if !window.is_empty() {
+                    window.push(drivers.clone());
                 }
                 // SAFETY: forwarded; the unit's registers are the mount's.
                 match unsafe {
@@ -233,14 +256,32 @@ impl Remappers {
                     )
                 } {
                     Ok(taken) => {
-                        output::arguments(format_args!(
-                            "HOST IOMMU VT-d unit {:#x} translates {} requesters\n",
-                            unit.base,
-                            requesters.len()
-                        ));
+                        let initial = if window.is_empty() {
+                            let result = taken.acknowledge_initial_block(&requesters);
+                            match &result {
+                                Ok(_) => output::arguments(format_args!(
+                                    "HOST IOMMU VT-d unit {:#x} blocked and drained {} initial requesters\n",
+                                    unit.base,
+                                    requesters.len()
+                                )),
+                                Err(error) => output::arguments(format_args!(
+                                    "HOST IOMMU VT-d unit {:#x} blocked cohort not qualified: {error:?}\n",
+                                    unit.base
+                                )),
+                            }
+                            InitialContexts::Blocked(result)
+                        } else {
+                            output::arguments(format_args!(
+                                "HOST IOMMU VT-d unit {:#x} retains a reserved window for {} requesters\n",
+                                unit.base,
+                                requesters.len()
+                            ));
+                            InitialContexts::Window
+                        };
                         remappers.taken.push(Taken {
                             descriptor: index,
                             unit: taken,
+                            initial,
                         });
                     }
                     Err(error) => output::arguments(format_args!(
@@ -571,6 +612,20 @@ impl Remappers {
                 return Ok(Err(error));
             }
         };
+        let initial = taken
+            .initial_requester(rid)
+            .and_then(|blocked| blocked.map_or(Ok(()), |requester| requester.drain()));
+        if let Err(error) = initial {
+            output::arguments(format_args!(
+                "HOST IOMMU VT-d requester {rid:#06x} initial handoff refused: {error:?}\n"
+            ));
+            let _kept = core::mem::ManuallyDrop::new(claim);
+            return Ok(Err(match error {
+                DmaError::InvalidationFailed => VtdError::Invalidation,
+                _ => VtdError::Unsupported,
+            }));
+        }
+        // SAFETY: the same checked stopped claim and original unit remain held.
         let owner = match unsafe { taken.unit.attach_requester(claim) } {
             Ok(owner) => owner,
             Err(failure) => return Ok(Err(failure.error)),

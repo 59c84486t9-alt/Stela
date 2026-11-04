@@ -1,11 +1,12 @@
 //! The retained original VT-d/AMD root used during vendor cold preparation.
 use super::*;
 use alloc::boxed::Box;
-use stela_drivers::bus::{dma::mapping::DmaError, pci::requester::preparation::Root};
+use stela_drivers::bus::pci::requester::preparation::Root;
 
 struct VtdRoot {
     address: Address,
     unit: Arc<Unit<MmioRegisters>>,
+    blocked: Option<BlockedRequester<MmioRegisters>>,
 }
 
 // SAFETY: constructed only from the requester's selected original taken unit,
@@ -14,7 +15,10 @@ struct VtdRoot {
 // the receipt producer's independent obligation; neither method infers it.
 unsafe impl Root for VtdRoot {
     fn drain(&self) -> Result<(), DmaError> {
-        self.unit.drain_initial_requester(requester(self.address))
+        match &self.blocked {
+            Some(blocked) => blocked.drain(),
+            None => self.unit.drain_initial_requester(requester(self.address)),
+        }
     }
     unsafe fn bind(
         &self,
@@ -117,6 +121,7 @@ impl Remappers {
         Ok(Box::new(VtdRoot {
             address,
             unit: taken.unit.clone(),
+            blocked: taken.initial_requester(rid)?,
         }))
     }
 }
