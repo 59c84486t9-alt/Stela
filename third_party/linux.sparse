@@ -82,6 +82,7 @@
 /kernel/sched/completion.c
 /kernel/exit.c
 /kernel/exit.h
+/kernel/task_exit.c
 /kernel/task_wait.c
 /kernel/task_rcu.c
 /kernel/task_work.c
