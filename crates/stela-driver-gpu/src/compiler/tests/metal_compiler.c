@@ -6,6 +6,8 @@
 #include "../metal_compiler.h"
 #include "air_effect_oracle.h"
 #include "air_test_fixture.h"
+#include "compiler/nir/nir_serialize.h"
+#include "util/blob.h"
 #include "util/ralloc.h"
 #include <assert.h>
 #include <stdio.h>
@@ -171,6 +173,9 @@ static const char *derived = DERIVED("%x = shl nsw i32 %w, 1\n");
 static const char *converted = DERIVED("%f = call float @air.convert.f.f32.s.i32(i32 %w)\n"
                                        "%d = fmul fast float %f, 2.000000e+00\n"
                                        "%x = call i32 @air.convert.s.i32.f.f32(float %d)\n");
+/* A constructor whose helper needs the ordinary inlining path. */
+static const char *derived_with_helper = DERIVED("%x = call i32 @twice(i32 %w)\n")
+   "define internal i32 @twice(i32 %w) {\n%x = shl nsw i32 %w, 1\nret i32 %x\n}\n";
 /* A constructor that calls an AIR function, which no constant folds. */
 static const char *called = DERIVED("%x = call i32 @air.unknown(i32 %w)\n");
 
@@ -229,6 +234,14 @@ static const char *called = DERIVED("%x = call i32 @air.unknown(i32 %w)\n");
 
 static const char *conditional =
    CONDITIONAL("br i1 %on, label %tinted, label %untinted\n", "bool");
+/* A shader helper uses the same function constant as its leaf constructor. */
+static const char *conditional_with_helper =
+   CONDITIONAL("%choose = call i1 @choose_tint(i1 %on)\n"
+               "br i1 %choose, label %tinted, label %untinted\n", "bool")
+   "define internal i1 @choose_tint(i1 %enabled) {\n"
+   "%raw = load i8, ptr addrspace(2) @use_tint.init, align 1\n"
+   "%selected = icmp ne i8 %raw, 0\n"
+   "%both = and i1 %selected, %enabled\nret i1 %both\n}\n";
 /* One reading tint whatever use_tint is. */
 static const char *unguarded = CONDITIONAL("br label %tinted\n", "bool");
 /* One whose read Apple's compiler hoists ahead of what decides it. */
@@ -899,6 +912,48 @@ modules_list_their_functions(void)
 }
 
 static void
+discovery_reports_malformed_metadata(void)
+{
+   struct stela_air_error error;
+   unsigned listed = 0;
+   const char header[] = "BC\xc0\xde";
+   assert(!stela_metal_functions(header, sizeof(header) - 1, count_function, &listed, &error));
+   assert(error.kind == STELA_AIR_BITCODE && !listed);
+   uint64_t states[STELA_METAL_SAMPLER_STATES];
+   uint32_t count = 1;
+   assert(!stela_metal_sampler_states(header, sizeof(header) - 1, states, &count, &error));
+   assert(error.kind == STELA_AIR_BITCODE && !count);
+
+   char *fixture = ralloc_asprintf(NULL, "%s!air.visible = !{!90}\n!90 = !{null}\n", kernel);
+   LLVMMemoryBufferRef input = bitcode(fixture);
+   ralloc_free(fixture);
+   assert(!stela_metal_functions(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                 count_function, &listed, &error));
+   assert(error.kind == STELA_AIR_METADATA);
+   LLVMDisposeMemoryBuffer(input);
+}
+
+static void
+reflection_requires_a_unique_listed_entry(void)
+{
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   char *fixture = ralloc_asprintf(NULL, "%s!air.visible = !{!2}\n", kernel);
+   LLVMMemoryBufferRef input = bitcode(fixture);
+   ralloc_free(fixture);
+   assert(!stela_metal_reflect(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                               "kernel", NULL, 0, &reflection, &error));
+   assert(error.kind == STELA_AIR_METADATA && strstr(error.detail, "entry listed more than once"));
+   LLVMDisposeMemoryBuffer(input);
+
+   input = bitcode(kernel);
+   assert(!stela_metal_reflect(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                               "air.wg.barrier", NULL, 0, &reflection, &error));
+   assert(error.kind == STELA_AIR_ARGUMENT);
+   LLVMDisposeMemoryBuffer(input);
+}
+
+static void
 render_stages_compile_at_their_linked_locations(void)
 {
    struct stela_metal_reflection reflection;
@@ -1102,6 +1157,23 @@ function_constants_reflect_and_specialize(void)
       fprintf(stderr, "constants: %u %s\n", error.kind, error.detail);
    /* Every read folds to its value; none is left in constant data. */
    assert(shader && shader->constant_data_size == 0);
+   assert(reflect_specialized(constants, "constants", values, 3, &reflection, &error));
+   LLVMMemoryBufferRef input = bitcode(constants);
+   nir_shader *prepared = stela_metal_compile_reflected(
+      LLVMGetBufferStart(input), LLVMGetBufferSize(input), "constants",
+      &target, &specialization, &reflection, &error);
+   LLVMDisposeMemoryBuffer(input);
+   assert(prepared);
+   struct blob normal, reused;
+   blob_init(&normal);
+   blob_init(&reused);
+   nir_serialize(&normal, shader, true);
+   nir_serialize(&reused, prepared, true);
+   assert(!normal.out_of_memory && !reused.out_of_memory);
+   assert(normal.size == reused.size && !memcmp(normal.data, reused.data, normal.size));
+   blob_finish(&normal);
+   blob_finish(&reused);
+   stela_metal_release(prepared);
    stela_metal_release(shader);
 
    /* scale is optional, and its definedness test folds to false. */
@@ -1170,6 +1242,11 @@ derived_constants_are_constructed_from_their_function_constants(void)
    assert(shader && stores_constant(shader, 10));
    stela_metal_release(shader);
 
+   assert(reflect_specialized(derived_with_helper, "derived", values, 1, &reflection, &error));
+   shader = compile(derived_with_helper, "derived", &specialization, &error);
+   assert(shader && stores_constant(shader, 10));
+   stela_metal_release(shader);
+
    /* Without width, its definedness test selects eight. */
    specialization.constant_count = 0;
    shader = compile(derived, "derived", &specialization, &error);
@@ -1180,6 +1257,43 @@ derived_constants_are_constructed_from_their_function_constants(void)
    assert(reflect(called, "derived", &reflection, &error));
    assert(!compile(called, "derived", &specialization, &error) && error.kind == STELA_AIR_INSTRUCTION &&
           strstr(error.detail, "program-scope constants"));
+}
+
+static void
+constructed_globals_are_bounded(void)
+{
+   char *fixture = ralloc_strdup(NULL, derived);
+   for (unsigned i = 0; i < AIR_MAX_ARGUMENTS; i++)
+      assert(ralloc_asprintf_append(&fixture, "@extra%u = internal addrspace(2) global i32 0\n", i));
+   LLVMMemoryBufferRef input = bitcode(fixture);
+   ralloc_free(fixture);
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   const struct stela_air_constant_value unused = {0};
+   assert(!stela_metal_reflect(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                               "derived", &unused, 0, &reflection, &error));
+   assert(error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "program-scope constants"));
+   LLVMDisposeMemoryBuffer(input);
+}
+
+static void
+constructor_priorities_are_integer_literals(void)
+{
+   const char *priority = strstr(derived, "65535");
+   assert(priority);
+   const char *invalid[] = {"undef", "poison"};
+   for (unsigned i = 0; i < ARRAY_SIZE(invalid); i++) {
+      char *fixture = ralloc_asprintf(NULL, "%.*s%s%s", (int)(priority - derived), derived,
+                                      invalid[i], priority + strlen("65535"));
+      LLVMMemoryBufferRef input = bitcode(fixture);
+      ralloc_free(fixture);
+      struct stela_metal_reflection reflection;
+      struct stela_air_error error;
+      assert(!stela_metal_reflect(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                  "derived", NULL, 0, &reflection, &error));
+      assert(error.kind == STELA_AIR_METADATA && strstr(error.detail, "invalid AIR constructor list"));
+      LLVMDisposeMemoryBuffer(input);
+   }
 }
 
 static unsigned
@@ -1213,6 +1327,10 @@ function_constants_select_arguments(void)
       assert(reflect_specialized(conditional, "conditional", &value, 1, &reflection, &error));
       uint32_t access = on ? STELA_METAL_ACCESS_READ :
                              STELA_METAL_ACCESS_READ | STELA_METAL_ACCESS_WRITE;
+      assert(reflection.buffer_count == 2 && reflection.buffers[1].index == 1 &&
+             reflection.buffers[1].access == access);
+      assert(reflect_specialized(conditional_with_helper, "conditional", &value, 1,
+                                 &reflection, &error));
       assert(reflection.buffer_count == 2 && reflection.buffers[1].index == 1 &&
              reflection.buffers[1].access == access);
       const struct stela_metal_specialization specialization = {
@@ -1418,6 +1536,24 @@ defined_functions_inline_into_their_callers(void)
    assert(reflect(calls, "recurses", &reflection, &error));
    assert(!compile(calls, "recurses", &specialization, &error) &&
           error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "recursive"));
+}
+
+/* A module with no direct call edges still checks unsupported calls during lowering. */
+static void
+unresolved_calls_are_rejected_without_a_call_graph(void)
+{
+   const char *callees[] = {"@external", "null"};
+   const char *errors[] = {"unresolved external function external", "only from visible function tables"};
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   for (unsigned i = 0; i < ARRAY_SIZE(callees); i++) {
+      char *fixture = ralloc_asprintf(NULL,
+         "declare void @external()\ndefine void @unresolved() {\ncall void %s()\nret void\n}\n"
+         "!air.kernel = !{!2}\n!2 = !{ptr @unresolved, !3, !3}\n!3 = !{}\n", callees[i]);
+      struct stela_air_error error;
+      assert(!compile(fixture, "unresolved", &specialization, &error));
+      assert(error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, errors[i]));
+      ralloc_free(fixture);
+   }
 }
 
 /* os_log.log_error("hi %d %f %ld", ...) through the method Apple's compiler
@@ -1873,6 +2009,8 @@ main(void)
 {
    glsl_type_singleton_init_or_ref();
    modules_list_their_functions();
+   discovery_reports_malformed_metadata();
+   reflection_requires_a_unique_listed_entry();
    kernels_reflect_and_compile_their_threadgroup_memory();
    dynamic_kernels_take_their_dispatch_shape();
    render_stages_compile_at_their_linked_locations();
@@ -1881,6 +2019,8 @@ main(void)
    mesh_stages_compile_with_their_launch();
    function_constants_reflect_and_specialize();
    derived_constants_are_constructed_from_their_function_constants();
+   constructed_globals_are_bounded();
+   constructor_priorities_are_integer_literals();
    function_constants_select_outputs();
    older_kernels_compile();
    unoptimized_kernels_compile();
@@ -1889,6 +2029,7 @@ main(void)
    arrays_reflect_each_slot();
    bindings_reflect_their_structures();
    defined_functions_inline_into_their_callers();
+   unresolved_calls_are_rejected_without_a_call_graph();
    stitched_functions_call_their_nodes_in_order();
    os_log_appends_self_contained_records();
    linked_functions_resolve_tables_and_externals();

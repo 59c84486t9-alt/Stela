@@ -110,7 +110,7 @@ pub(super) struct Queue {
     chunks: Vec<(Chunk, Memory)>,
     free_chunks: Vec<Chunk>,
     free_pools: Vec<(QueryType, QueryPool)>,
-    in_flight: Vec<InFlight>,
+    in_flight: VecDeque<InFlight>,
     events: Slab<Semaphore>,
     counters: Slab<CounterBuffer>,
     /// Committed work not yet submitted, in commit order.
@@ -395,7 +395,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             chunks.push(*chunk);
         }
         self.submitted = serial;
-        self.queue.in_flight.push(InFlight {
+        self.queue.in_flight.push_back(InFlight {
             serial,
             chunks,
             pools,
@@ -635,12 +635,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             return Ok(());
         }
         self.completed = completed;
-        let (done, pending): (Vec<_>, Vec<_>) = core::mem::take(&mut self.queue.in_flight)
-            .into_iter()
-            .partition(|flight| flight.serial <= completed);
-        self.queue.in_flight = pending;
         let mut outcome = Ok(());
-        for flight in done {
+        while let Some(flight) = self
+            .queue
+            .in_flight
+            .pop_front_if(|flight| flight.serial <= completed)
+        {
             // Before deferred destruction, which may free the memory.
             for range in flight.invalidations {
                 outcome = outcome.and(self.backend.invalidate_memory(
@@ -664,11 +664,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 self.queue.free_pools.push((query_type, pool));
             }
         }
-        let (ready, waiting): (Vec<_>, Vec<_>) = core::mem::take(&mut self.deferred)
-            .into_iter()
-            .partition(|(serial, _, _)| *serial <= completed);
-        self.deferred = waiting;
-        for (_, object, allocated) in ready {
+        while let Some((_, object, allocated)) = self
+            .deferred
+            .pop_front_if(|(serial, _, _)| *serial <= completed)
+        {
             self.backend.destroy(object);
             self.allocated -= allocated;
         }

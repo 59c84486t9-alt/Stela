@@ -8,6 +8,8 @@
 //! build in `target`. The tests then run alone.
 //! A lane stops at its first failure; the gate fails if any part did, once
 //! every part has finished.
+//! Low-memory mode runs the same checks in sequence, with one job per build
+//! and one test thread.
 use crate::tools::{cargo, exec};
 use anyhow::{Context, Result, bail};
 use std::{
@@ -58,7 +60,8 @@ const CROSS_TARGET_DIR: &str = "target/cross";
 const RELEASE_HOST: &str = "aarch64-apple-darwin";
 const DENY: [&str; 3] = ["--", "-D", "warnings"];
 
-pub fn run(fix: bool, nvk: bool) -> Result<()> {
+pub fn run(fix: bool, nvk: bool, low_memory: bool) -> Result<()> {
+    let gpu_jobs = if low_memory { 1 } else { 8 };
     if fix {
         exec(&mut command(["fmt", "--all"]))?;
         for manifest in FORMATTED_APART {
@@ -123,7 +126,7 @@ pub fn run(fix: bool, nvk: bool) -> Result<()> {
             "--target-dir",
             BOOT_TARGET_DIR,
         ]);
-        linked.env("CARGO_BUILD_JOBS", "8");
+        linked.env("CARGO_BUILD_JOBS", gpu_jobs.to_string());
         boot_lane.push(linked);
     }
     boot_lane.extend(CROSS.map(|(target, packages)| {
@@ -158,6 +161,32 @@ pub fn run(fix: bool, nvk: bool) -> Result<()> {
             build
         },
     ];
+    let run_tests = |run: fn(&mut Command) -> Result<()>| {
+        run(&mut command(test))?;
+        // The all-feature suite selects the software crypto backend.
+        // Check the default selector independently as well.
+        run(&mut command([
+            "test",
+            "--locked",
+            "-p",
+            "stela-crypto",
+            "--no-default-features",
+            "--lib",
+        ]))
+    };
+    if low_memory {
+        for mut format in formatting {
+            serial(&mut format)?;
+        }
+        cross?;
+        crate::gpu::fetch::fetch(false)?;
+        if nvk {
+            crate::gpu::build_nvk(gpu_jobs)?;
+        }
+        lane(boot_lane, serial)?;
+        lane(host_lane, serial)?;
+        return run_tests(serial);
+    }
     let failures: Vec<String> = thread::scope(|scope| {
         let formatting: Vec<_> = formatting
             .into_iter()
@@ -167,7 +196,7 @@ pub fn run(fix: bool, nvk: bool) -> Result<()> {
         let lanes = crate::gpu::fetch::fetch(false)
             .and_then(|()| {
                 if nvk {
-                    crate::gpu::build_nvk(8)?;
+                    crate::gpu::build_nvk(gpu_jobs)?;
                 }
                 Ok(())
             })
@@ -177,22 +206,7 @@ pub fn run(fix: bool, nvk: bool) -> Result<()> {
                 let boot = boot.join().expect("the UEFI lane panicked");
                 // The tests run once nothing else does: some time their fixtures
                 // against the host's clock.
-                [
-                    boot,
-                    host.and_then(|()| {
-                        exec(&mut command(test))?;
-                        // The all-feature suite selects the software crypto backend.
-                        // Check the default selector independently as well.
-                        exec(&mut command([
-                            "test",
-                            "--locked",
-                            "-p",
-                            "stela-crypto",
-                            "--no-default-features",
-                            "--lib",
-                        ]))
-                    }),
-                ]
+                [boot, host.and_then(|()| run_tests(exec))]
             });
         let mut results: Vec<Result<()>> = formatting
             .into_iter()
@@ -263,6 +277,14 @@ fn lane(commands: Vec<Command>, run: fn(&mut Command) -> Result<()>) -> Result<(
         run(&mut command)?;
     }
     Ok(())
+}
+
+fn serial(command: &mut Command) -> Result<()> {
+    exec(
+        command
+            .env("CARGO_BUILD_JOBS", "1")
+            .env("RUST_TEST_THREADS", "1"),
+    )
 }
 
 /// Run `command` with its output held until it ends, so a part beside the

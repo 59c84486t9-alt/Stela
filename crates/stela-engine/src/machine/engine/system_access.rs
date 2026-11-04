@@ -3,16 +3,52 @@
 
 use super::*;
 
+/// A PE often completes the same architectural instruction words through
+/// many different compiled blocks. Cache decoding only; the operation still
+/// runs with the current registers, privilege and feature checks.
+pub(super) struct DecodeCache([Option<(u32, SystemOperation)>; Self::SLOTS]);
+
+impl Default for DecodeCache {
+    fn default() -> Self {
+        Self([None; Self::SLOTS])
+    }
+}
+
+impl DecodeCache {
+    const SLOTS: usize = 64;
+
+    fn operation(&mut self, pc: u64, word: u32) -> Option<SystemOperation> {
+        let slot = (word.wrapping_mul(0x9e37_79b9) >> (u32::BITS - Self::SLOTS.ilog2())) as usize;
+        let entry = &mut self.0[slot];
+        if let Some((cached_word, operation)) = *entry
+            && cached_word == word
+            // The compiler includes a checked fallthrough address in its
+            // decoded instruction. A cached word must keep that refusal.
+            && pc <= u64::MAX - INSTRUCTION
+        {
+            return Some(operation);
+        }
+        let decoded = block::decode_system_mode_instruction(GuestAddress(pc), word)
+            .ok()
+            .flatten()?
+            .operation;
+        *entry = Some((word, decoded));
+        Some(decoded)
+    }
+}
+
 impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn system_instruction(&mut self, word: u32) -> Step {
-        let pc = self.cpu.pc;
-        let instruction = match block::decode_system_mode_instruction(GuestAddress(pc), word) {
-            Ok(Some(instruction)) => instruction,
-            _ => return Err(self.refuse_system(word, "System exit at a word that is not System")),
+        let Some(operation) = self.system_decode.operation(self.cpu.pc, word) else {
+            return Err(self.refuse_system(word, "System exit at a word that is not System"));
         };
+        self.complete_system_instruction(word, operation)
+    }
+
+    fn complete_system_instruction(&mut self, word: u32, operation: SystemOperation) -> Step {
         // Apple's SDSB (`0x00201460` plus the domain), WKDMC and WKDMD;
         // `guarded` checks the GXF instructions.
-        let apple = match instruction.operation {
+        let apple = match operation {
             SystemOperation::Synchronization(_) if word & !3 == 0x0020_1460 => {
                 Some(hacr::Operation::SynchronizationBarrier)
             }
@@ -24,7 +60,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         {
             return step;
         }
-        match instruction.operation {
+        match operation {
             SystemOperation::Exception(operation) => self.exception_instruction(operation),
             SystemOperation::Register(access) => self.register_instruction(word, access),
             SystemOperation::PstateImmediate(encoding) => {
@@ -498,13 +534,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // Apple's vGIC CPU interface answers the ICH_* and ICC_* encodings
         // before the generated accessors, which follow the profile's absent
         // FEAT_GICv3.
-        let write = (access.direction() == Direction::Write).then(|| match access.rt() {
-            31 => 0,
-            rt => self.cpu.state.x[usize::from(rt)],
-        });
-        let context = self.cpu.vgic_context(write.is_some());
-        if let Some(outcome) = self.cpu.vgic.access(encoding, write, &context) {
-            return self.register_outcome(word, Some(access), outcome);
+        if super::super::vgic::CpuInterface::may_access(encoding) {
+            let write = (access.direction() == Direction::Write).then(|| match access.rt() {
+                31 => 0,
+                rt => self.cpu.state.x[usize::from(rt)],
+            });
+            let context = self.cpu.vgic_context(write.is_some());
+            if let Some(outcome) = self.cpu.vgic.access(encoding, write, &context) {
+                return self.register_outcome(word, Some(access), outcome);
+            }
         }
         if self.hacr_reaches(access)
             && let Some(step) = self.hacr_guest(word, hacr::Operation::Register(encoding))
@@ -905,5 +943,24 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.cpu.pc += INSTRUCTION;
         self.cpu.pstate.btype = 0;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decoded_operation_reuses_words_across_pcs_and_still_checks_fallthrough() {
+        let mut cache = DecodeCache::default();
+        let word = 0xd503_205f; // WFE
+        let expected = SystemOperation::Wait {
+            kind: WaitKind::Event,
+            timeout_register: None,
+        };
+        assert_eq!(cache.operation(0x1000, word), Some(expected));
+        assert_eq!(cache.operation(0x2000, word), Some(expected));
+        assert_eq!(cache.operation(u64::MAX - 3, word), None);
+        assert_eq!(cache.operation(0x3000, word), Some(expected));
     }
 }

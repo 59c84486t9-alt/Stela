@@ -163,8 +163,9 @@ impl HostUsb {
         }
     }
 
-    /// Poll each signalling controller that has work, and the others when
-    /// the interval has passed; the keyboards and pointers that arrived.
+    /// Poll controllers with work or a due attachment timer, and check
+    /// non-signalling controllers on the fallback interval. Return the
+    /// keyboards and pointers that arrived.
     pub fn poll(&mut self) -> Vec<InputDevice> {
         let mut inputs = Vec::new();
         let now = super::host::rdtsc();
@@ -179,7 +180,11 @@ impl HostUsb {
                 // SAFETY: the loader root `storage::open` captured maps the
                 // controller and DMA pages used by both readiness and polling.
                 let _root = unsafe { RestoreRoot::enter(self.root) };
-                if !(if host.signals() { host.due() } else { timed }) {
+                if !(if host.signals() {
+                    host.due()
+                } else {
+                    timed || host.attachment_due()
+                }) {
                     continue;
                 }
                 host.poll(&mut self.dma, &firmware)

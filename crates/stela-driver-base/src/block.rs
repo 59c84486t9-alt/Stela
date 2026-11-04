@@ -692,7 +692,26 @@ impl Iterator for Plan {
     }
 }
 
-type Commands = core::iter::Peekable<core::iter::Flatten<alloc::vec::IntoIter<Plan>>>;
+/// The current request's plan lives inline. Only a batch has further plans
+/// to allocate, and no caller consumes plans from the back.
+struct Plans {
+    current: Option<Plan>,
+    rest: alloc::vec::IntoIter<Plan>,
+}
+
+impl Iterator for Plans {
+    type Item = (usize, Command);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(plan) = &mut self.current {
+            if let Some(command) = plan.next() {
+                return Some(command);
+            }
+            self.current = self.rest.next();
+        }
+        None
+    }
+}
 
 impl Request {
     /// The commands that carry out `self` on a device with `identity`'s
@@ -734,12 +753,57 @@ pub type Finished = Result<Option<Vec<u8>>, BlockError>;
 /// flush alone once they completed, as Linux's flush sequence orders them.
 /// A device that runs no queued commands runs each where it is polled.
 pub struct Submission {
-    commands: Commands,
-    /// The started commands: each tag, a read's offset in the data, and
-    /// whether it is a flush.
-    running: Vec<(u32, usize, bool)>,
-    data: Option<Vec<u8>>,
+    commands: core::iter::Peekable<Plans>,
+    running: Running,
+    read: Option<ReadData>,
     failed: Option<BlockError>,
+}
+
+/// A started command's tag, a read's offset in the data, and whether the
+/// command is a flush.
+type InFlight = (u32, usize, bool);
+
+/// One command is enough for a request that fits the device's transfer
+/// limit. Only overlapping commands require a queue allocation.
+enum Running {
+    One(Option<InFlight>),
+    Many(Vec<InFlight>),
+}
+
+impl Running {
+    fn as_slice(&self) -> &[InFlight] {
+        match self {
+            Self::One(command) => command.as_slice(),
+            Self::Many(commands) => commands,
+        }
+    }
+
+    fn push(&mut self, command: InFlight) {
+        match self {
+            Self::One(Some(first)) => *self = Self::Many(vec![*first, command]),
+            Self::One(slot) => *slot = Some(command),
+            Self::Many(commands) => commands.push(command),
+        }
+    }
+
+    fn remove(&mut self, index: usize) {
+        match self {
+            Self::One(slot) => {
+                debug_assert_eq!(index, 0);
+                *slot = None;
+            }
+            Self::Many(commands) => {
+                commands.swap_remove(index);
+            }
+        }
+    }
+}
+
+/// A read can take ownership of a whole command result. Only a split read
+/// needs an assembly buffer.
+struct ReadData {
+    bytes: usize,
+    data: Option<Vec<u8>>,
 }
 
 /// New commands admitted by one polling call, including synchronous execution.
@@ -748,14 +812,21 @@ const POLL_ADMISSIONS: usize = 64;
 impl Submission {
     pub fn new(request: Request, identity: &Identity) -> Result<Self, BlockError> {
         let plan = Plan::new(request, identity)?;
-        let data = match &plan.request {
-            Request::Read { bytes, .. } => Some(vec![0; *bytes]),
+        let read = match &plan.request {
+            Request::Read { bytes, .. } => Some(ReadData {
+                bytes: *bytes,
+                data: None,
+            }),
             _ => None,
         };
         Ok(Self {
-            commands: vec![plan].into_iter().flatten().peekable(),
-            running: Vec::new(),
-            data,
+            commands: Plans {
+                current: Some(plan),
+                rest: Default::default(),
+            }
+            .peekable(),
+            running: Running::One(None),
+            read,
             failed: None,
         })
     }
@@ -766,24 +837,33 @@ impl Submission {
         if let [Request::Read { .. }] = requests.as_slice() {
             return Self::new(requests.into_iter().next().unwrap(), identity);
         }
-        let mut plans = Vec::with_capacity(requests.len());
-        for request in requests {
+        let plan = |request| {
             if let Request::Read { .. } = request {
                 return Err(BlockError::Protocol("a read in a batch of requests"));
             }
-            plans.push(Plan::new(request, identity)?);
+            Plan::new(request, identity)
+        };
+        let mut requests = requests.into_iter();
+        let current = requests.next().map(plan).transpose()?;
+        let mut rest = Vec::with_capacity(requests.len());
+        for request in requests {
+            rest.push(plan(request)?);
         }
         Ok(Self {
-            commands: plans.into_iter().flatten().peekable(),
-            running: Vec::new(),
-            data: None,
+            commands: Plans {
+                current,
+                rest: rest.into_iter(),
+            }
+            .peekable(),
+            running: Running::One(None),
+            read: None,
             failed: None,
         })
     }
 
     /// The commands the device runs for this submission now.
     pub fn started(&self) -> usize {
-        self.running.len()
+        self.running.as_slice().len()
     }
 
     /// Collect the device's completions of this request's commands and
@@ -796,13 +876,12 @@ impl Submission {
     /// entered synchronous execution may take longer than the caller's slice.
     pub fn poll(&mut self, device: &mut (impl BlockDevice + ?Sized)) -> Option<Finished> {
         let mut index = 0;
-        while index < self.running.len() {
-            let (tag, offset, _) = self.running[index];
+        while let Some(&(tag, offset, _)) = self.running.as_slice().get(index) {
             let Some(result) = device.finish(tag) else {
                 index += 1;
                 continue;
             };
-            self.running.swap_remove(index);
+            self.running.remove(index);
             self.completed(offset, result);
         }
         let depth = device.depth();
@@ -813,11 +892,12 @@ impl Submission {
                 break;
             };
             let flush = matches!(command, Command::Flush);
-            if (flush && !self.running.is_empty()) || self.running.iter().any(|run| run.2) {
+            let running = self.running.as_slice();
+            if (flush && !running.is_empty()) || running.iter().any(|run| run.2) {
                 break;
             }
             if depth == 0 {
-                if !self.running.is_empty() {
+                if !running.is_empty() {
                     break;
                 }
                 let (offset, command) = self.commands.next().unwrap();
@@ -826,7 +906,7 @@ impl Submission {
                 self.completed(offset, result);
                 continue;
             }
-            if self.running.len() >= capacity || !device.room() {
+            if running.len() >= capacity || !device.room() {
                 break;
             }
             let (offset, command) = self.commands.next().unwrap();
@@ -836,20 +916,30 @@ impl Submission {
                 Err(error) => self.failed = Some(error),
             }
         }
-        if !self.running.is_empty() || (self.failed.is_none() && self.commands.peek().is_some()) {
+        if !self.running.as_slice().is_empty()
+            || (self.failed.is_none() && self.commands.peek().is_some())
+        {
             return None;
         }
         Some(match self.failed.take() {
             Some(error) => Err(error),
-            None => Ok(self.data.take()),
+            None => Ok(self
+                .read
+                .take()
+                .map(|read| read.data.unwrap_or_else(|| vec![0; read.bytes]))),
         })
     }
 
     fn completed(&mut self, offset: usize, result: Finished) {
         match result {
             Ok(Some(bytes)) => {
-                if let Some(data) = self.data.as_mut() {
-                    data[offset..offset + bytes.len()].copy_from_slice(&bytes);
+                if let Some(read) = &mut self.read {
+                    if read.data.is_none() && offset == 0 && bytes.len() == read.bytes {
+                        read.data = Some(bytes);
+                    } else {
+                        let data = read.data.get_or_insert_with(|| vec![0; read.bytes]);
+                        data[offset..offset + bytes.len()].copy_from_slice(&bytes);
+                    }
                 }
             }
             Ok(None) => {}

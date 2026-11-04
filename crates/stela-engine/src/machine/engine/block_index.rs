@@ -206,11 +206,10 @@ mod tests {
             variant: VariantId(variant),
             successors: Box::default(),
             dynamic_site: None,
-            first: 0,
+            landing: super::super::fetch::Landing::None,
             terminal: 0,
             taken: 0,
             fetched: false,
-            source_bytes: 4,
             source_hash: 0,
         }
     }

@@ -1,7 +1,7 @@
 //! Apple SPRR: page permissions indirected through per-index registers
 //! (Asahi Linux "SPRR and GXF"; m1n1 `cpu_regs.h`).
 
-use super::{Requester, Unsupported};
+use super::{PagePermissions, Requester, Unsupported};
 
 /// With SPRR enabled the descriptor bits AP[1], AP[0], UXN and PXN form a
 /// 4-bit index (bit 3 down to bit 0), and nibble `index` of SPRR_PERM_EL1
@@ -99,15 +99,15 @@ pub struct Hierarchy {
     pub uxn_table: bool,
 }
 
-/// (readable, writable, executable) of a leaf under SPRR. The two special
+/// The rights of a leaf under SPRR. The two special
 /// GL/EL combinations follow the Asahi table: GL `r-x` with EL `rw-` gives
 /// EL `---`, and GL `r--` with EL `r-x` gives EL `--x`.
-pub fn permissions(
+pub(super) fn permissions(
     sprr: Sprr,
     requester: Requester,
     hierarchy: &Hierarchy,
     descriptor: u64,
-) -> Result<(bool, bool, bool), Unsupported> {
+) -> Result<PagePermissions, Unsupported> {
     if hierarchy.no_el0 || hierarchy.read_only {
         return Err(Unsupported::Sprr("APTable with SPRR"));
     }
@@ -144,20 +144,22 @@ pub fn permissions(
         if requester.guarded {
             rights(guarded)
         } else {
-            let (readable, writable, executable) = match (guarded, el) {
+            match (guarded, el) {
                 (1, 3) => (false, false, false),
                 (2, 1) => (false, false, true),
                 (_, el) => rights(el),
-            };
-            // PAN removes data access to a location EL0 can access.
-            if requester.pan && user_accessible(sprr, index) {
-                (false, false, executable)
-            } else {
-                (readable, writable, executable)
             }
         }
     };
-    Ok((readable, writable, executable && !table_xn))
+    // PAN removes data access to a location EL0 can access.
+    let pan_sensitive = !as_el0 && !requester.guarded && user_accessible(sprr, index);
+    let pan = requester.pan && pan_sensitive;
+    Ok(PagePermissions {
+        readable: readable && !pan,
+        writable: writable && !pan,
+        executable: executable && !table_xn,
+        pan_sensitive,
+    })
 }
 
 #[cfg(test)]
@@ -204,7 +206,9 @@ mod tests {
             ..Sprr::default()
         };
         let gl0 = requester(0, false, true);
-        let at = |index, requester| permissions(sprr, requester, &FLAT, leaf(index));
+        let at = |index, requester| {
+            permissions(sprr, requester, &FLAT, leaf(index)).map(PagePermissions::rights)
+        };
         assert_eq!(at(1, gl0), Ok((true, false, false)));
         assert_eq!(at(4, gl0), Ok((true, true, false)));
         assert_eq!(at(8, gl0), Ok((true, false, true)));
@@ -227,13 +231,14 @@ mod tests {
             ..Sprr::default()
         };
         let kernel = requester(2, true, false);
-        let at = |index| permissions(sprr, kernel, &FLAT, leaf(index));
+        let at = |index| permissions(sprr, kernel, &FLAT, leaf(index)).map(PagePermissions::rights);
         assert_eq!(at(0), Ok((true, true, false)));
         assert_eq!(at(4), Ok((false, false, false)));
         assert_eq!(at(1), Ok((false, false, false)));
         assert_eq!(at(5), Ok((true, true, false)));
         // Without PAN, and at a guarded level, the kernel keeps its rights.
-        let unmasked = |requester| permissions(sprr, requester, &FLAT, leaf(4));
+        let unmasked =
+            |requester| permissions(sprr, requester, &FLAT, leaf(4)).map(PagePermissions::rights);
         assert_eq!(
             unmasked(requester(2, false, false)),
             Ok((true, true, false))

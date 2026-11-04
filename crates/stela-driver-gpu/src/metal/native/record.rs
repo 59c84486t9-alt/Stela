@@ -233,6 +233,24 @@ impl Recorder<'_> {
     /// Binds runs of buffers that all set, or all keep, their strides:
     /// `pStrides` covers every buffer of a call or none.
     fn bind_vertex_buffers(&self, first: u32, buffers: &[VertexBuffer]) {
+        if let [vertex] = buffers {
+            let handles = [handle(vertex.buffer.0)];
+            let offsets = [vertex.offset];
+            let sizes = [vertex.size];
+            let strides = vertex.stride.as_ref().map(core::slice::from_ref);
+            // SAFETY: the buffer is alive with vertex-buffer usage.
+            unsafe {
+                self.device().cmd_bind_vertex_buffers2(
+                    self.buffer,
+                    first,
+                    &handles,
+                    &offsets,
+                    Some(&sizes),
+                    strides,
+                );
+            }
+            return;
+        }
         let mut binding = first;
         for run in buffers.chunk_by(|a, b| a.stride.is_some() == b.stride.is_some()) {
             let handles: Vec<vk::Buffer> =

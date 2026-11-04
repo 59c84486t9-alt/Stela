@@ -317,7 +317,7 @@ fn native_ring_publishes_real_iova_td_before_first_cycle_and_keeps_failed_visibi
             );
             assert!(memory.ready().is_err());
         } else {
-            assert_eq!(result.unwrap(), vec![address]);
+            assert_eq!(result.unwrap(), [address]);
             let td = peer.device(address, TRB);
             assert_eq!(u64::from_le_bytes(td[..8].try_into().unwrap()), 0x1234_5000);
             assert_eq!(u32::from_le_bytes(td[8..12].try_into().unwrap()), 32);

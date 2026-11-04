@@ -10,7 +10,10 @@
 //! the rest of their array zero; strings are UTF-8 with their length.
 //! Decoding accepts only a block the encoder writes, which it checks by
 //! encoding the result again.
-use super::{Capabilities, Cause, FormatCapabilities, Gap, Limits, Size, TexelBufferAlignment};
+use super::{
+    Capabilities, Cause, FormatCapabilities, Gap, IndexedPixelFormats, Limits, PixelFormats, Size,
+    TexelBufferAlignment,
+};
 use crate::metal::{
     abi::{
         ArgumentBuffersTier, CounterSamplingPoint, DeviceLocation, GpuFamily, ReadWriteTextureTier,
@@ -354,9 +357,10 @@ impl Block {
             constant_vertex_step: has(Flags::CONSTANT_VERTEX_STEP),
             counter_sampling,
             sparse_volumes: has(Flags::SPARSE_VOLUMES),
-            sparse_samples: formats(&self.sparse_formats, self.sparse_format_count, |value| {
-                SampleCounts::from_bits(value)
-            })?,
+            sparse_samples: formats(
+                listed(&self.sparse_formats, self.sparse_format_count)?,
+                SampleCounts::from_bits,
+            )?,
             vertex_formats: VertexFormat::ALL
                 .iter()
                 .copied()
@@ -366,11 +370,7 @@ impl Block {
                 .iter()
                 .map(|&raw| GpuFamily::from_raw(raw).ok_or(MALFORMED))
                 .collect::<Result<_>>()?,
-            formats: formats(
-                &self.formats,
-                self.format_count,
-                FormatCapabilities::from_bits,
-            )?,
+            formats: pixel_formats(listed(&self.formats, self.format_count)?)?,
             gaps,
             linear_row_alignment: self.linear_row_alignment,
             linear_offset_alignment: self.linear_offset_alignment,
@@ -406,13 +406,12 @@ fn text(field: &[u8], offset: u32, bytes: u32) -> Result<String> {
     ))
 }
 
-/// The first `count` format entries, each value decoded.
+/// Format entries in wire order, each value decoded.
 fn formats<T>(
     entries: &[FormatEntry],
-    count: u32,
     decode: impl Fn(u32) -> Option<T>,
 ) -> Result<Vec<(PixelFormat, T)>> {
-    listed(entries, count)?
+    entries
         .iter()
         .map(|entry| {
             Ok((
@@ -421,6 +420,24 @@ fn formats<T>(
             ))
         })
         .collect()
+}
+
+fn pixel_formats(entries: &[FormatEntry]) -> Result<PixelFormats> {
+    if entries.len() == PixelFormat::ALL.len()
+        && entries
+            .iter()
+            .zip(PixelFormat::ALL)
+            .all(|(entry, format)| u64::from(entry.format) == format.raw())
+    {
+        let mut formats: Box<IndexedPixelFormats> =
+            Box::new([FormatCapabilities::EMPTY; PixelFormat::ALL.len()]);
+        for (capabilities, entry) in formats.iter_mut().zip(entries) {
+            *capabilities = FormatCapabilities::from_bits(entry.value).ok_or(MALFORMED)?;
+        }
+        return Ok(PixelFormats::Indexed(formats));
+    }
+    let formats = formats(entries, FormatCapabilities::from_bits)?;
+    Ok(PixelFormats::Listed(formats.into_boxed_slice()))
 }
 
 /// Copies `text` into the start of `field`, returning its length.
@@ -456,6 +473,25 @@ fn format_entry(format: PixelFormat, value: u32) -> Result<FormatEntry> {
     })
 }
 
+fn put_pixel_formats(field: &mut [FormatEntry], formats: &PixelFormats) -> Result<u32> {
+    let what = "pixel format count";
+    let encode = |(format, capabilities): (PixelFormat, FormatCapabilities)| {
+        format_entry(format, capabilities.bits())
+    };
+    match formats {
+        PixelFormats::Indexed(formats) => put_list(
+            field,
+            PixelFormat::ALL
+                .iter()
+                .copied()
+                .zip(formats.iter().copied()),
+            what,
+            encode,
+        ),
+        PixelFormats::Listed(formats) => put_list(field, formats.iter().copied(), what, encode),
+    }
+}
+
 impl Capabilities {
     /// The block that carries these capabilities across the boundary.
     pub fn block(&self) -> Result<Box<Block>> {
@@ -473,12 +509,7 @@ impl Capabilities {
             "GPU family count",
             |family| Ok(family.raw()),
         )?;
-        block.format_count = put_list(
-            &mut block.formats,
-            self.formats.iter(),
-            "pixel format count",
-            |&(format, capabilities)| format_entry(format, capabilities.bits()),
-        )?;
+        block.format_count = put_pixel_formats(&mut block.formats, &self.formats)?;
         block.sparse_format_count = put_list(
             &mut block.sparse_formats,
             self.sparse_samples.iter(),
@@ -636,6 +667,44 @@ mod tests {
         let block = capabilities.block().unwrap();
         assert_eq!(block.capabilities().unwrap(), capabilities);
         assert!(block.family_count > 0 && block.format_count > 0 && block.gap_count > 0);
+        for (format, entry) in PixelFormat::ALL.iter().zip(&block.formats) {
+            assert_eq!(format.raw(), u64::from(entry.format));
+            assert_eq!(capabilities.format(*format).bits(), entry.value);
+        }
+    }
+
+    #[test]
+    fn nonstandard_pixel_format_lists_keep_wire_order_and_first_match() {
+        let capabilities = fixture::capabilities();
+        let mut block = capabilities.block().unwrap();
+        let bgra = PixelFormat::Bgra8Unorm;
+        let rgba = PixelFormat::Rgba8Unorm;
+        let entry = |format: PixelFormat, value: FormatCapabilities| FormatEntry {
+            format: format.raw() as u32,
+            value: value.bits(),
+        };
+        block.formats.fill(FormatEntry::default());
+        block.formats[..3].copy_from_slice(&[
+            entry(bgra, FormatCapabilities::EMPTY),
+            entry(rgba, FormatCapabilities::READ),
+            entry(bgra, FormatCapabilities::WRITE),
+        ]);
+        block.format_count = 3;
+        let decoded = block.capabilities().unwrap();
+        assert_eq!(decoded.format(bgra), FormatCapabilities::EMPTY);
+        assert_eq!(decoded.format(rgba), FormatCapabilities::READ);
+        assert_eq!(
+            decoded.format(PixelFormat::Depth32Float),
+            FormatCapabilities::EMPTY
+        );
+        assert_eq!(decoded.block().unwrap(), block);
+
+        block.formats[3..].fill(entry(rgba, FormatCapabilities::EMPTY));
+        block.format_count = FORMATS as u32;
+        assert_eq!(block.capabilities().unwrap().block().unwrap(), block);
+
+        block.formats[1].format = u32::MAX;
+        assert_eq!(block.capabilities(), Err(MALFORMED));
     }
 
     #[test]

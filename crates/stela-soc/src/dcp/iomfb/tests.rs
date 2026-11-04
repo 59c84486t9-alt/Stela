@@ -742,6 +742,67 @@ fn a_swap_is_started_submitted_presented_then_completed() {
 }
 
 #[test]
+fn bounded_swap_logs_keep_boot_samples_failures_and_guest_completions() {
+    let screen = TestScreen(Rc::default(), Some(MODE));
+    let presented = screen.0.clone();
+    let mut methods = Methods::new(Box::new(screen));
+    methods.set_swap_tracing(false);
+    let swap = |methods: &mut Methods| {
+        let id = start_swap(methods);
+        let input = submission(id, &[]);
+        assert_eq!(returned(methods.call(*b"A407", &input, 0xc)), [0; 12]);
+        methods
+            .present(|_, _| panic!("a clear has no surface DMA"))
+            .unwrap();
+        let callback = methods.take_callback().unwrap();
+        assert_eq!(callback.tag, SWAP_COMPLETE);
+        assert_eq!(&callback.input[..4], &id.to_le_bytes());
+        (callback.then)(methods, &[]).unwrap();
+        input
+    };
+    let first = swap(&mut methods);
+    let second = swap(&mut methods);
+    for _ in 2..=PRESENT_SUMMARY_INTERVAL {
+        swap(&mut methods);
+    }
+    assert_eq!(
+        presented.borrow().len() as u64,
+        PRESENT_SUMMARY_INTERVAL + 1
+    );
+    assert!(methods.call(*b"A407", &first, 0xc).is_err());
+
+    let records: Vec<_> = core::iter::from_fn(|| methods.take_log()).collect();
+    assert_eq!(records.len(), 12);
+    for (index, input) in [first, second].iter().enumerate() {
+        let logs = &records[5 * index..][..5];
+        let id = index as u32 + 1;
+        assert!(matches!(&logs[0], Log::Call { tag, .. } if tag == b"A406"));
+        assert!(matches!(&logs[1], Log::Call { tag, .. } if tag == b"A407"));
+        assert!(
+            matches!(&logs[2], Log::Payload { tag, bytes } if tag == b"A407" && bytes == input)
+        );
+        assert!(matches!(&logs[3], Log::Presented { swap_id, .. } if *swap_id == id));
+        assert!(matches!(&logs[4], Log::Callback { tag, .. } if *tag == SWAP_COMPLETE));
+    }
+    assert_eq!(
+        records[10].to_string(),
+        "DCP present summary total=256 last_swap=256"
+    );
+    assert!(
+        matches!(&records[11], Log::Refused(reason) if reason.contains("swap_submit_dcp without swap_start_dcp"))
+    );
+
+    methods.set_swap_tracing(true);
+    swap(&mut methods);
+    let exact: Vec<_> = core::iter::from_fn(|| methods.take_log()).collect();
+    assert_eq!(exact.len(), 4);
+    assert!(matches!(&exact[0], Log::Call { tag, .. } if tag == b"A406"));
+    assert!(matches!(&exact[1], Log::Call { tag, .. } if tag == b"A407"));
+    assert!(matches!(&exact[2], Log::Presented { swap_id: 258, .. }));
+    assert!(matches!(&exact[3], Log::Callback { tag, .. } if *tag == SWAP_COMPLETE));
+}
+
+#[test]
 fn a_layer_left_out_of_the_mask_keeps_showing() {
     let screen = TestScreen(Rc::default(), Some(MODE));
     let frames = screen.0.clone();

@@ -354,12 +354,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if self.variants[block.variant.0 as usize].single {
             return None;
         }
+        if unlinked {
+            return Some(0);
+        }
         let context = self.chain.contexts()[chain::half(next_pc)];
         let slot = chain::lookup_slot(next_pc, context);
         let entry = self.targets.find(slot, next_pc, context);
-        Some(if unlinked {
-            0
-        } else if entry.pc != next_pc {
+        Some(if entry.pc != next_pc {
             1
         } else if entry.context != context {
             2
@@ -380,7 +381,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn link(&mut self, index: usize, next_pc: u64, word: impl Into<ExitWord>) {
         let word = word.into();
         let block = &self.blocks[index];
-        if self.variants[block.variant.0 as usize].single
+        if block.successors.is_empty()
+            || self.variants[block.variant.0 as usize].single
             || self.traces.binary_search(&next_pc).is_ok()
         {
             return;

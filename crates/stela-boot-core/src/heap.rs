@@ -1138,6 +1138,30 @@ unsafe impl GlobalAlloc for Heap {
             unsafe { release(state, pointer) };
         }
     }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: GlobalAlloc's realloc contract guarantees that this size
+        // rounded to the original alignment fits in isize.
+        let new_layout = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+        if layout.size() == new_size
+            || class(layout).is_some_and(|old| class(new_layout) == Some(old))
+        {
+            // The live block already has the full size-class capacity, and
+            // this resize leaves all class accounting and ownership intact.
+            return pointer;
+        }
+        // SAFETY: both layouts meet GlobalAlloc's realloc contract. A new
+        // successful allocation is disjoint, and only then can the old one
+        // be freed. On failure the old owner keeps its block.
+        unsafe {
+            let next = self.alloc(new_layout);
+            if !next.is_null() {
+                ptr::copy_nonoverlapping(pointer, next, layout.size().min(new_size));
+                self.dealloc(pointer, layout);
+            }
+            next
+        }
+    }
 }
 
 /// Where a payload of `payload` bytes aligned to `alignment` fits in free

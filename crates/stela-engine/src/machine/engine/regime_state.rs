@@ -5,9 +5,13 @@ use super::*;
 
 impl<H: Host, D: Devices> Machine<H, D> {
     /// A write of `register`: a [`stored`] one reaches only its own cells,
-    /// one that [`keeps_reads`] all that derives from it but the cells, and
-    /// any other everything derived.
+    /// a timer channel's changes only its deadline, one that [`keeps_reads`]
+    /// all that derives from it but the cells, and any other everything derived.
     pub(super) fn register_written(&mut self, register: SystemRegister) {
+        if timer::channel_register(register) {
+            self.timers = None;
+            return;
+        }
         if keeps_reads(register) {
             return self.forget_derived();
         }
