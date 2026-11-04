@@ -442,6 +442,17 @@ pub(crate) unsafe fn start(
         }
     }
     let effective_pat = memory_source.pat;
+    let bsp = sender.id();
+    if u64::from(bsp) != capture.processors[capture.selected[0] as usize].apic_id {
+        return Err(StartupFailure::Resources);
+    }
+    // The BSP's host and handlers are installed. Publish its local slot
+    // before any AP can run or issue a retirement.
+    host::join_shootdown(
+        crate::native_mmio::PROCESSORS
+            .join_bsp(bsp)
+            .ok_or(StartupFailure::Resources)?,
+    );
     for slot in 1..cores {
         let part =
             resources::partition(cores, runners, slot, handoff.code.bytes, handoff.pool.bytes)
@@ -538,7 +549,7 @@ pub(crate) unsafe fn start(
         // It may translate through the MMIO aperture from its first fetch,
         // so it shares the aperture's shootdowns from now on.
         crate::native_mmio::PROCESSORS
-            .join(destination)
+            .join_ap(destination)
             .ok_or(StartupFailure::Resources)?;
         // SAFETY: validated physical AP and pinned complete startup resources.
         unsafe { sender.startup(destination, vector, handoff.tsc_hz) }

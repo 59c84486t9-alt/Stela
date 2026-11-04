@@ -15,7 +15,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     } = *operand
     else {
         if let Operand::LaneMove(ref lane) = *operand {
-            rearrange::emit(code, lane, target);
+            rearrange::emit(code, lane, target, None);
         }
         return;
     };

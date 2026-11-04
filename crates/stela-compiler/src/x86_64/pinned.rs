@@ -42,6 +42,21 @@ pub(crate) fn host(register: Register) -> Option<Gpr> {
         .map(|(_, host)| *host)
 }
 
+mod span;
+pub(super) use span::Span;
+
+const LOCAL_HOSTS: [Gpr; 4] = [Gpr::R8, Gpr::R9, Gpr::R10, Gpr::R11];
+pub(super) type LocalRegisters = [Option<Register>; LOCAL_HOSTS.len()];
+
+pub(super) fn host_or_local(register: Register, locals: Option<LocalRegisters>) -> Option<Gpr> {
+    host(register).or_else(|| {
+        locals?
+            .iter()
+            .position(|local| *local == Some(register))
+            .map(|index| LOCAL_HOSTS[index])
+    })
+}
+
 /// Whether the frame slot at `offset` holds no Arm state while native code
 /// runs.
 #[cfg(debug_assertions)]
