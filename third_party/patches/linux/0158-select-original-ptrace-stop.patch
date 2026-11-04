@@ -1,0 +1,437 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 01:28:32 -0500
+Subject: [PATCH] refactor(signal): select original ptrace stop notifications
+
+---
+ kernel/signal.c       | 191 -----------------------------------------
+ kernel/signal_state.c | 192 ++++++++++++++++++++++++++++++++++++++++++
+ kernel/signal_state.h |   3 +
+ 3 files changed, 195 insertions(+), 191 deletions(-)
+
+diff --git a/kernel/signal.c b/kernel/signal.c
+index dc7669c21d023a379853cdd6c332d16323b08de7..7f0921c7daf4d46d9559ddb7c617f1846afbe917 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -1113,197 +1113,6 @@ static void posixtimer_sig_unignore(struct task_struct *tsk, int sig)
+ static inline void posixtimer_sig_unignore(struct task_struct *tsk, int sig) { }
+ #endif /* !CONFIG_POSIX_TIMERS */
+ 
+-/*
+- * This must be called with current->sighand->siglock held.
+- *
+- * This should be the path for all ptrace stops.
+- * We always set current->last_siginfo while stopped here.
+- * That makes it a way to test a stopped process for
+- * being ptrace-stopped vs being job-control-stopped.
+- *
+- * Returns the signal the ptracer requested the code resume
+- * with.  If the code did not stop because the tracer is gone,
+- * the stop signal remains unchanged unless clear_code.
+- */
+-static int ptrace_stop(int exit_code, int why, unsigned long message,
+-		       kernel_siginfo_t *info)
+-	__releases(&current->sighand->siglock)
+-	__acquires(&current->sighand->siglock)
+-{
+-	bool gstop_done = false;
+-
+-	if (arch_ptrace_stop_needed()) {
+-		/*
+-		 * The arch code has something special to do before a
+-		 * ptrace stop.  This is allowed to block, e.g. for faults
+-		 * on user stack pages.  We can't keep the siglock while
+-		 * calling arch_ptrace_stop, so we must release it now.
+-		 * To preserve proper semantics, we must do this before
+-		 * any signal bookkeeping like checking group_stop_count.
+-		 */
+-		spin_unlock_irq(&current->sighand->siglock);
+-		arch_ptrace_stop();
+-		spin_lock_irq(&current->sighand->siglock);
+-	}
+-
+-	/*
+-	 * After this point ptrace_signal_wake_up or signal_wake_up
+-	 * will clear TASK_TRACED if ptrace_unlink happens or a fatal
+-	 * signal comes in.  Handle previous ptrace_unlinks and fatal
+-	 * signals here to prevent ptrace_stop sleeping in schedule.
+-	 */
+-	if (!current->ptrace || __fatal_signal_pending(current))
+-		return exit_code;
+-
+-	set_special_state(TASK_TRACED);
+-	current->jobctl |= JOBCTL_TRACED;
+-
+-	/*
+-	 * We're committing to trapping.  TRACED should be visible before
+-	 * TRAPPING is cleared; otherwise, the tracer might fail do_wait().
+-	 * Also, transition to TRACED and updates to ->jobctl should be
+-	 * atomic with respect to siglock and should be done after the arch
+-	 * hook as siglock is released and regrabbed across it.
+-	 *
+-	 *     TRACER				    TRACEE
+-	 *
+-	 *     ptrace_attach()
+-	 * [L]   wait_on_bit(JOBCTL_TRAPPING)	[S] set_special_state(TRACED)
+-	 *     do_wait()
+-	 *       set_current_state()                smp_wmb();
+-	 *       ptrace_do_wait()
+-	 *         wait_task_stopped()
+-	 *           task_stopped_code()
+-	 * [L]         task_is_traced()		[S] task_clear_jobctl_trapping();
+-	 */
+-	smp_wmb();
+-
+-	current->ptrace_message = message;
+-	current->last_siginfo = info;
+-	current->exit_code = exit_code;
+-
+-	/*
+-	 * If @why is CLD_STOPPED, we're trapping to participate in a group
+-	 * stop.  Do the bookkeeping.  Note that if SIGCONT was delievered
+-	 * across siglock relocks since INTERRUPT was scheduled, PENDING
+-	 * could be clear now.  We act as if SIGCONT is received after
+-	 * TASK_TRACED is entered - ignore it.
+-	 */
+-	if (why == CLD_STOPPED && (current->jobctl & JOBCTL_STOP_PENDING))
+-		gstop_done = task_participate_group_stop(current);
+-
+-	/* any trap clears pending STOP trap, STOP trap clears NOTIFY */
+-	task_clear_jobctl_pending(current, JOBCTL_TRAP_STOP);
+-	if (info && info->si_code >> 8 == PTRACE_EVENT_STOP)
+-		task_clear_jobctl_pending(current, JOBCTL_TRAP_NOTIFY);
+-
+-	/* entering a trap, clear TRAPPING */
+-	task_clear_jobctl_trapping(current);
+-
+-	spin_unlock_irq(&current->sighand->siglock);
+-	read_lock(&tasklist_lock);
+-	/*
+-	 * Notify parents of the stop.
+-	 *
+-	 * While ptraced, there are two parents - the ptracer and
+-	 * the real_parent of the group_leader.  The ptracer should
+-	 * know about every stop while the real parent is only
+-	 * interested in the completion of group stop.  The states
+-	 * for the two don't interact with each other.  Notify
+-	 * separately unless they're gonna be duplicates.
+-	 */
+-	if (current->ptrace)
+-		do_notify_parent_cldstop(current, true, why);
+-	if (gstop_done && (!current->ptrace || ptrace_reparented(current)))
+-		do_notify_parent_cldstop(current, false, why);
+-
+-	/*
+-	 * The previous do_notify_parent_cldstop() invocation woke ptracer.
+-	 * One a PREEMPTION kernel this can result in preemption requirement
+-	 * which will be fulfilled after read_unlock() and the ptracer will be
+-	 * put on the CPU.
+-	 * The ptracer is in wait_task_inactive(, __TASK_TRACED) waiting for
+-	 * this task wait in schedule(). If this task gets preempted then it
+-	 * remains enqueued on the runqueue. The ptracer will observe this and
+-	 * then sleep for a delay of one HZ tick. In the meantime this task
+-	 * gets scheduled, enters schedule() and will wait for the ptracer.
+-	 *
+-	 * This preemption point is not bad from a correctness point of
+-	 * view but extends the runtime by one HZ tick time due to the
+-	 * ptracer's sleep.  The preempt-disable section ensures that there
+-	 * will be no preemption between unlock and schedule() and so
+-	 * improving the performance since the ptracer will observe that
+-	 * the tracee is scheduled out once it gets on the CPU.
+-	 *
+-	 * On PREEMPT_RT locking tasklist_lock does not disable preemption.
+-	 * Therefore the task can be preempted after do_notify_parent_cldstop()
+-	 * before unlocking tasklist_lock so there is no benefit in doing this.
+-	 *
+-	 * In fact disabling preemption is harmful on PREEMPT_RT because
+-	 * the spinlock_t in cgroup_enter_frozen() must not be acquired
+-	 * with preemption disabled due to the 'sleeping' spinlock
+-	 * substitution of RT.
+-	 */
+-	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+-		preempt_disable();
+-	read_unlock(&tasklist_lock);
+-	cgroup_enter_frozen();
+-	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+-		preempt_enable_no_resched();
+-	schedule();
+-	cgroup_leave_frozen(true);
+-
+-	/*
+-	 * We are back.  Now reacquire the siglock before touching
+-	 * last_siginfo, so that we are sure to have synchronized with
+-	 * any signal-sending on another CPU that wants to examine it.
+-	 */
+-	spin_lock_irq(&current->sighand->siglock);
+-	exit_code = current->exit_code;
+-	current->last_siginfo = NULL;
+-	current->ptrace_message = 0;
+-	current->exit_code = 0;
+-
+-	/* LISTENING can be set only during STOP traps, clear it */
+-	current->jobctl &= ~(JOBCTL_LISTENING | JOBCTL_PTRACE_FROZEN);
+-
+-	/*
+-	 * Queued signals ignored us while we were stopped for tracing.
+-	 * So check for any that we should take before resuming user mode.
+-	 * This sets TIF_SIGPENDING, but never clears it.
+-	 */
+-	recalc_sigpending_tsk(current);
+-	return exit_code;
+-}
+-
+-static int ptrace_do_notify(int signr, int exit_code, int why, unsigned long message)
+-{
+-	kernel_siginfo_t info;
+-
+-	clear_siginfo(&info);
+-	info.si_signo = signr;
+-	info.si_code = exit_code;
+-	info.si_pid = task_pid_vnr(current);
+-	info.si_uid = from_kuid_munged(current_user_ns(), current_uid());
+-
+-	/* Let the debugger run.  */
+-	return ptrace_stop(exit_code, why, message, &info);
+-}
+-
+-int ptrace_notify(int exit_code, unsigned long message)
+-{
+-	int signr;
+-
+-	BUG_ON((exit_code & (0x7f | ~0xffff)) != SIGTRAP);
+-	if (unlikely(task_work_pending(current)))
+-		task_work_run();
+-
+-	spin_lock_irq(&current->sighand->siglock);
+-	signr = ptrace_do_notify(SIGTRAP, exit_code, CLD_TRAPPED, message);
+-	spin_unlock_irq(&current->sighand->siglock);
+-	return signr;
+-}
+-
+ /**
+  * do_signal_stop - handle group stop for SIGSTOP and other stop signals
+  * @signr: signr causing group stop if initiating
+diff --git a/kernel/signal_state.c b/kernel/signal_state.c
+index 2606e73715fb65c713a3422c372f60c21b462604..cca208fcf314b6adb7d684cb59213d8d439022c3 100644
+--- a/kernel/signal_state.c
++++ b/kernel/signal_state.c
+@@ -24,6 +24,7 @@
+ #include <linux/sched/cputime.h>
+ #include <linux/sched/signal.h>
+ #include <linux/slab.h>
++#include <linux/task_work.h>
+ #include <linux/user_namespace.h>
+ 
+ #include <linux/ptrace.h>
+@@ -1472,6 +1473,197 @@ void do_notify_parent_cldstop(struct task_struct *tsk,
+ 	spin_unlock_irqrestore(&sighand->siglock, flags);
+ }
+ 
++/*
++ * This must be called with current->sighand->siglock held.
++ *
++ * This should be the path for all ptrace stops.
++ * We always set current->last_siginfo while stopped here.
++ * That makes it a way to test a stopped process for
++ * being ptrace-stopped vs being job-control-stopped.
++ *
++ * Returns the signal the ptracer requested the code resume
++ * with.  If the code did not stop because the tracer is gone,
++ * the stop signal remains unchanged unless clear_code.
++ */
++int ptrace_stop(int exit_code, int why, unsigned long message,
++		       kernel_siginfo_t *info)
++	__releases(&current->sighand->siglock)
++	__acquires(&current->sighand->siglock)
++{
++	bool gstop_done = false;
++
++	if (arch_ptrace_stop_needed()) {
++		/*
++		 * The arch code has something special to do before a
++		 * ptrace stop.  This is allowed to block, e.g. for faults
++		 * on user stack pages.  We can't keep the siglock while
++		 * calling arch_ptrace_stop, so we must release it now.
++		 * To preserve proper semantics, we must do this before
++		 * any signal bookkeeping like checking group_stop_count.
++		 */
++		spin_unlock_irq(&current->sighand->siglock);
++		arch_ptrace_stop();
++		spin_lock_irq(&current->sighand->siglock);
++	}
++
++	/*
++	 * After this point ptrace_signal_wake_up or signal_wake_up
++	 * will clear TASK_TRACED if ptrace_unlink happens or a fatal
++	 * signal comes in.  Handle previous ptrace_unlinks and fatal
++	 * signals here to prevent ptrace_stop sleeping in schedule.
++	 */
++	if (!current->ptrace || __fatal_signal_pending(current))
++		return exit_code;
++
++	set_special_state(TASK_TRACED);
++	current->jobctl |= JOBCTL_TRACED;
++
++	/*
++	 * We're committing to trapping.  TRACED should be visible before
++	 * TRAPPING is cleared; otherwise, the tracer might fail do_wait().
++	 * Also, transition to TRACED and updates to ->jobctl should be
++	 * atomic with respect to siglock and should be done after the arch
++	 * hook as siglock is released and regrabbed across it.
++	 *
++	 *     TRACER				    TRACEE
++	 *
++	 *     ptrace_attach()
++	 * [L]   wait_on_bit(JOBCTL_TRAPPING)	[S] set_special_state(TRACED)
++	 *     do_wait()
++	 *       set_current_state()                smp_wmb();
++	 *       ptrace_do_wait()
++	 *         wait_task_stopped()
++	 *           task_stopped_code()
++	 * [L]         task_is_traced()		[S] task_clear_jobctl_trapping();
++	 */
++	smp_wmb();
++
++	current->ptrace_message = message;
++	current->last_siginfo = info;
++	current->exit_code = exit_code;
++
++	/*
++	 * If @why is CLD_STOPPED, we're trapping to participate in a group
++	 * stop.  Do the bookkeeping.  Note that if SIGCONT was delievered
++	 * across siglock relocks since INTERRUPT was scheduled, PENDING
++	 * could be clear now.  We act as if SIGCONT is received after
++	 * TASK_TRACED is entered - ignore it.
++	 */
++	if (why == CLD_STOPPED && (current->jobctl & JOBCTL_STOP_PENDING))
++		gstop_done = task_participate_group_stop(current);
++
++	/* any trap clears pending STOP trap, STOP trap clears NOTIFY */
++	task_clear_jobctl_pending(current, JOBCTL_TRAP_STOP);
++	if (info && info->si_code >> 8 == PTRACE_EVENT_STOP)
++		task_clear_jobctl_pending(current, JOBCTL_TRAP_NOTIFY);
++
++	/* entering a trap, clear TRAPPING */
++	task_clear_jobctl_trapping(current);
++
++	spin_unlock_irq(&current->sighand->siglock);
++	read_lock(&tasklist_lock);
++	/*
++	 * Notify parents of the stop.
++	 *
++	 * While ptraced, there are two parents - the ptracer and
++	 * the real_parent of the group_leader.  The ptracer should
++	 * know about every stop while the real parent is only
++	 * interested in the completion of group stop.  The states
++	 * for the two don't interact with each other.  Notify
++	 * separately unless they're gonna be duplicates.
++	 */
++	if (current->ptrace)
++		do_notify_parent_cldstop(current, true, why);
++	if (gstop_done && (!current->ptrace || ptrace_reparented(current)))
++		do_notify_parent_cldstop(current, false, why);
++
++	/*
++	 * The previous do_notify_parent_cldstop() invocation woke ptracer.
++	 * One a PREEMPTION kernel this can result in preemption requirement
++	 * which will be fulfilled after read_unlock() and the ptracer will be
++	 * put on the CPU.
++	 * The ptracer is in wait_task_inactive(, __TASK_TRACED) waiting for
++	 * this task wait in schedule(). If this task gets preempted then it
++	 * remains enqueued on the runqueue. The ptracer will observe this and
++	 * then sleep for a delay of one HZ tick. In the meantime this task
++	 * gets scheduled, enters schedule() and will wait for the ptracer.
++	 *
++	 * This preemption point is not bad from a correctness point of
++	 * view but extends the runtime by one HZ tick time due to the
++	 * ptracer's sleep.  The preempt-disable section ensures that there
++	 * will be no preemption between unlock and schedule() and so
++	 * improving the performance since the ptracer will observe that
++	 * the tracee is scheduled out once it gets on the CPU.
++	 *
++	 * On PREEMPT_RT locking tasklist_lock does not disable preemption.
++	 * Therefore the task can be preempted after do_notify_parent_cldstop()
++	 * before unlocking tasklist_lock so there is no benefit in doing this.
++	 *
++	 * In fact disabling preemption is harmful on PREEMPT_RT because
++	 * the spinlock_t in cgroup_enter_frozen() must not be acquired
++	 * with preemption disabled due to the 'sleeping' spinlock
++	 * substitution of RT.
++	 */
++	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
++		preempt_disable();
++	read_unlock(&tasklist_lock);
++	cgroup_enter_frozen();
++	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
++		preempt_enable_no_resched();
++	schedule();
++	cgroup_leave_frozen(true);
++
++	/*
++	 * We are back.  Now reacquire the siglock before touching
++	 * last_siginfo, so that we are sure to have synchronized with
++	 * any signal-sending on another CPU that wants to examine it.
++	 */
++	spin_lock_irq(&current->sighand->siglock);
++	exit_code = current->exit_code;
++	current->last_siginfo = NULL;
++	current->ptrace_message = 0;
++	current->exit_code = 0;
++
++	/* LISTENING can be set only during STOP traps, clear it */
++	current->jobctl &= ~(JOBCTL_LISTENING | JOBCTL_PTRACE_FROZEN);
++
++	/*
++	 * Queued signals ignored us while we were stopped for tracing.
++	 * So check for any that we should take before resuming user mode.
++	 * This sets TIF_SIGPENDING, but never clears it.
++	 */
++	recalc_sigpending_tsk(current);
++	return exit_code;
++}
++
++int ptrace_do_notify(int signr, int exit_code, int why, unsigned long message)
++{
++	kernel_siginfo_t info;
++
++	clear_siginfo(&info);
++	info.si_signo = signr;
++	info.si_code = exit_code;
++	info.si_pid = task_pid_vnr(current);
++	info.si_uid = from_kuid_munged(current_user_ns(), current_uid());
++
++	/* Let the debugger run.  */
++	return ptrace_stop(exit_code, why, message, &info);
++}
++
++int ptrace_notify(int exit_code, unsigned long message)
++{
++	int signr;
++
++	BUG_ON((exit_code & (0x7f | ~0xffff)) != SIGTRAP);
++	if (unlikely(task_work_pending(current)))
++		task_work_run();
++
++	spin_lock_irq(&current->sighand->siglock);
++	signr = ptrace_do_notify(SIGTRAP, exit_code, CLD_TRAPPED, message);
++	spin_unlock_irq(&current->sighand->siglock);
++	return signr;
++}
++
+ void retarget_shared_pending(struct task_struct *tsk, sigset_t *which)
+ {
+ 	sigset_t retarget;
+diff --git a/kernel/signal_state.h b/kernel/signal_state.h
+index 4ccfb7a22aa7e3e63eba38039c48d065e89531e7..660d5248f95756df421cfe13a4a084e636d22960 100644
+--- a/kernel/signal_state.h
++++ b/kernel/signal_state.h
+@@ -36,6 +36,9 @@ int check_kill_permission(int sig, struct kernel_siginfo *info,
+ 			  struct task_struct *t);
+ bool task_participate_group_stop(struct task_struct *task);
+ void do_notify_parent_cldstop(struct task_struct *tsk, bool for_ptracer, int why);
++int ptrace_stop(int exit_code, int why, unsigned long message,
++		kernel_siginfo_t *info);
++int ptrace_do_notify(int signr, int exit_code, int why, unsigned long message);
+ void retarget_shared_pending(struct task_struct *tsk, sigset_t *which);
+ bool known_siginfo_layout(unsigned sig, int si_code);
+ 
