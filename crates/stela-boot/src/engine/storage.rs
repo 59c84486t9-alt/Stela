@@ -142,9 +142,9 @@ fn try_lock_host_drivers() -> bool {
 }
 
 /// Take the host drivers' lock, counting the wait.
-fn lock_host_drivers() {
+fn lock_host_drivers() -> u64 {
     if try_lock_host_drivers() {
-        return;
+        return 0;
     }
     let started = super::host::rdtsc();
     while HOST_DRIVERS
@@ -159,6 +159,7 @@ fn lock_host_drivers() {
     let waited = super::host::rdtsc().wrapping_sub(started);
     HOST_DRIVERS_WAITED[0].fetch_add(waited, Ordering::Relaxed);
     HOST_DRIVERS_WAITED[1].fetch_max(waited, Ordering::Relaxed);
+    waited
 }
 
 /// The time cores waited for the host drivers since the last report, in
@@ -192,6 +193,31 @@ impl RestoreRoot {
         lock_host_drivers();
         // SAFETY: the caller supplies the live root, and this core holds the lock.
         unsafe { Self::enter_locked(root) }
+    }
+
+    /// Enter for input service, attributing this acquisition's actual
+    /// contention to the current phase in a diagnostics build.
+    ///
+    /// # Safety
+    /// As for [`Self::enter`].
+    #[inline]
+    pub(super) unsafe fn enter_input(
+        root: u64,
+        #[cfg(feature = "diagnostics")] wait: &mut u64,
+    ) -> Self {
+        #[cfg(feature = "diagnostics")]
+        {
+            let waited = lock_host_drivers();
+            // SAFETY: the caller supplies the live root, and this core holds the lock.
+            let guard = unsafe { Self::enter_locked(root) };
+            *wait = wait.saturating_add(waited);
+            guard
+        }
+        #[cfg(not(feature = "diagnostics"))]
+        // SAFETY: same loader root and pinned-core requirement as enter.
+        unsafe {
+            Self::enter(root)
+        }
     }
 
     /// Enter for work that can wait until another service turn.

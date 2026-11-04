@@ -78,14 +78,27 @@ impl HostInput {
     /// order probe found them. The guest's lock-key LEDs reach each host
     /// keyboard first, as Linux `hidinput_led_worker` sends an input
     /// device's LED changes.
-    pub fn read(&mut self) -> Vec<Input> {
+    pub fn read(
+        &mut self,
+        #[cfg(feature = "diagnostics")] turn: &mut super::service::InputTurn,
+    ) -> Vec<Input> {
         if let Some(leds) = self.wanted_leds
             && self.leds != Some(leds)
         {
             self.leds = Some(leds);
+            #[cfg(feature = "diagnostics")]
+            {
+                turn.led_changed = true;
+            }
             for device in &mut self.inputs.devices {
                 // SAFETY: as below, for the device's controller.
-                let _root = unsafe { RestoreRoot::enter(self.inputs.root) };
+                let _root = unsafe {
+                    RestoreRoot::enter_input(
+                        self.inputs.root,
+                        #[cfg(feature = "diagnostics")]
+                        &mut turn.led_wait,
+                    )
+                };
                 if let Err(error) = device.set_leds(leds)
                     && !core::mem::replace(&mut self.led_failed, true)
                 {
@@ -93,12 +106,23 @@ impl HostInput {
                 }
             }
         }
+        #[cfg(feature = "diagnostics")]
+        {
+            turn.led_done = super::host::rdtsc();
+            turn.devices = self.inputs.devices.len();
+        }
         let mut pending = Vec::new();
         for device in &mut self.inputs.devices {
             let polled = {
                 // SAFETY: the loader root `storage::open` captured, which
                 // maps this device.
-                let _root = unsafe { RestoreRoot::enter(self.inputs.root) };
+                let _root = unsafe {
+                    RestoreRoot::enter_input(
+                        self.inputs.root,
+                        #[cfg(feature = "diagnostics")]
+                        &mut turn.read_wait,
+                    )
+                };
                 device.poll(&mut pending)
             };
             if let Err(error) = polled

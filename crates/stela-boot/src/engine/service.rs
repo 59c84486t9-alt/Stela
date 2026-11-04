@@ -58,6 +58,8 @@ pub(super) struct Service {
     tsc_hz: u64,
     log_flushed: u64,
     reported: u64,
+    #[cfg(feature = "diagnostics")]
+    input_peak: Option<InputTurn>,
 }
 
 /// The host's keyboards and pointers, the USB controllers new ones arrive
@@ -95,6 +97,8 @@ impl Service {
             tsc_hz,
             log_flushed: now,
             reported: now,
+            #[cfg(feature = "diagnostics")]
+            input_peak: None,
         }
     }
 
@@ -144,6 +148,8 @@ impl Service {
             tsc_hz,
             log_flushed,
             reported,
+            #[cfg(feature = "diagnostics")]
+            input_peak,
         } = self;
         let mut lap = Lap(host::rdtsc());
         let now = host::rdtsc();
@@ -154,18 +160,55 @@ impl Service {
             output::advance_logs();
         }
         lap.part(Part::Log);
+        #[cfg(feature = "diagnostics")]
+        let mut input_turn = InputTurn {
+            start: lap.0,
+            boot,
+            ..InputTurn::default()
+        };
         if let Some(usb) = usb {
-            let arrived = usb.poll();
+            let arrived = usb.poll(
+                #[cfg(feature = "diagnostics")]
+                &mut input_turn.usb_wait,
+            );
             if let Some(input) = input.as_mut() {
                 input.add(arrived);
             }
         }
         if let Some(input) = input {
-            let inputs = input.read();
+            #[cfg(feature = "diagnostics")]
+            {
+                input_turn.usb_done = host::rdtsc();
+            }
+            let inputs = input.read(
+                #[cfg(feature = "diagnostics")]
+                &mut input_turn,
+            );
+            #[cfg(feature = "diagnostics")]
+            {
+                input_turn.read_done = host::rdtsc();
+                input_turn.reports = inputs.len();
+            }
             if !inputs.is_empty() {
-                devices.serve(|devices| input.deliver_all(devices, inputs));
+                devices.serve(|devices| {
+                    #[cfg(feature = "diagnostics")]
+                    {
+                        input_turn.delivery_entered = host::rdtsc();
+                    }
+                    input.deliver_all(devices, inputs);
+                });
             }
             lap.part(Part::Input);
+            #[cfg(feature = "diagnostics")]
+            {
+                input_turn.end = lap.0;
+                if input_peak
+                    .as_ref()
+                    .is_none_or(|prior| input_turn.duration() > prior.duration())
+                {
+                    *input_peak = Some(input_turn);
+                }
+            }
         }
         if let Some(network) = network {
             let frames = devices.with(network::GuestNetwork::queued);
@@ -269,6 +312,61 @@ impl Lap {
         let now = host::rdtsc();
         LONGEST[part as usize].fetch_max(now.wrapping_sub(self.0), Ordering::Relaxed);
         self.0 = now;
+    }
+}
+
+/// A single completed turn, so its phases cannot come from different PEs
+/// or different services. The outer service owner serializes access.
+#[cfg(feature = "diagnostics")]
+#[derive(Default)]
+pub(super) struct InputTurn {
+    start: u64,
+    usb_done: u64,
+    pub(super) led_done: u64,
+    read_done: u64,
+    delivery_entered: u64,
+    end: u64,
+    usb_wait: u64,
+    pub(super) led_wait: u64,
+    pub(super) read_wait: u64,
+    pub(super) led_changed: bool,
+    pub(super) devices: usize,
+    reports: usize,
+    boot: bool,
+}
+
+#[cfg(feature = "diagnostics")]
+impl InputTurn {
+    fn duration(&self) -> u64 {
+        self.end.wrapping_sub(self.start)
+    }
+
+    fn report(&self, tsc_hz: u64) -> String {
+        let us = |ticks| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
+        let delivery_entry = if self.reports == 0 {
+            0
+        } else {
+            self.delivery_entered.wrapping_sub(self.read_done)
+        };
+        format!(
+            " input_turn_us={} input_turn_boot={} input_usb_us={} input_usb_wait_us={} \
+             input_led_us={} input_led_wait_us={} input_led_changed={} input_read_us={} \
+             input_read_wait_us={} input_devices={} input_delivery_us={} \
+             input_delivery_entry_us={} input_reports={}",
+            us(self.duration()),
+            self.boot,
+            us(self.usb_done.wrapping_sub(self.start)),
+            us(self.usb_wait),
+            us(self.led_done.wrapping_sub(self.usb_done)),
+            us(self.led_wait),
+            self.led_changed,
+            us(self.read_done.wrapping_sub(self.led_done)),
+            us(self.read_wait),
+            self.devices,
+            us(self.end.wrapping_sub(self.read_done)),
+            us(delivery_entry),
+            self.reports,
+        )
     }
 }
 
@@ -384,6 +482,12 @@ pub(super) fn report(tsc_hz: u64) -> String {
             " {name}={}",
             u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1))
         ));
+    }
+    // An in-flight service keeps its sample for the next report. Reporting
+    // never waits for the owner or holds it while formatting.
+    #[cfg(feature = "diagnostics")]
+    if let Some(Some(turn)) = hold(|slot| slot.as_mut()?.input_peak.take()) {
+        line.push_str(&turn.report(tsc_hz));
     }
     line
 }

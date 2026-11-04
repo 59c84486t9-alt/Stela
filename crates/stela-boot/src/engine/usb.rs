@@ -163,14 +163,19 @@ impl HostUsb {
     /// Poll controllers with work or a due attachment timer, and check
     /// non-signalling controllers on the fallback interval. Return the
     /// keyboards and pointers that arrived.
-    pub fn poll(&mut self) -> Vec<InputDevice> {
+    pub fn poll(&mut self, #[cfg(feature = "diagnostics")] wait: &mut u64) -> Vec<InputDevice> {
         let mut inputs = Vec::new();
         let now = super::host::rdtsc();
         let timed = now.wrapping_sub(self.last) >= self.interval;
         if timed {
             self.last = now;
         }
-        self.poll_usb4(now, timed);
+        self.poll_usb4(
+            now,
+            timed,
+            #[cfg(feature = "diagnostics")]
+            wait,
+        );
         let firmware = HandoffProvider::new(self.firmware.as_deref());
         for host in &mut self.hosts {
             let mut changes = {
@@ -181,7 +186,13 @@ impl HostUsb {
                     // SAFETY: the loader root captured by `storage::open`
                     // keeps the engine window and maps the controller and DMA pages.
                     // This service runs with the processor's pinned record active.
-                    let root = unsafe { RestoreRoot::enter(self.root) };
+                    let root = unsafe {
+                        RestoreRoot::enter_input(
+                            self.root,
+                            #[cfg(feature = "diagnostics")]
+                            wait,
+                        )
+                    };
                     Some(root)
                 } else {
                     // SAFETY: the same root and active pinned record apply here.
@@ -237,7 +248,7 @@ impl HostUsb {
     /// Run each running USB4 host's software connection manager for up to a
     /// millisecond, and, when `timed`, service each firmware's events. A host whose
     /// transport faults is reported once and left stopped.
-    fn poll_usb4(&mut self, now: u64, timed: bool) {
+    fn poll_usb4(&mut self, now: u64, timed: bool, #[cfg(feature = "diagnostics")] wait: &mut u64) {
         let now_ms = now / self.tsc_per_ms;
         for usb4 in &mut self.usb4 {
             if !usb4.running {
@@ -250,7 +261,13 @@ impl HostUsb {
                     for _ in 0..USB4_EVENTS {
                         let event = {
                             // SAFETY: as for the xHCI controllers below.
-                            let _root = unsafe { RestoreRoot::enter(self.root) };
+                            let _root = unsafe {
+                                RestoreRoot::enter_input(
+                                    self.root,
+                                    #[cfg(feature = "diagnostics")]
+                                    wait,
+                                )
+                            };
                             icm.poll(now_ms)
                         };
                         match event {
@@ -270,7 +287,13 @@ impl HostUsb {
                 usb4::Connection::Software { manager } => {
                     {
                         // SAFETY: as for the xHCI controllers below.
-                        let _root = unsafe { RestoreRoot::enter(self.root) };
+                        let _root = unsafe {
+                            RestoreRoot::enter_input(
+                                self.root,
+                                #[cfg(feature = "diagnostics")]
+                                wait,
+                            )
+                        };
                         loop {
                             usb4.running = manager.poll();
                             if !usb4.running
