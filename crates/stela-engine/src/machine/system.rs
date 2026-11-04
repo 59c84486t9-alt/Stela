@@ -63,8 +63,8 @@ pub struct Accessor {
 
 impl Accessor {
     /// MRS and the System instructions with a result read; the rest write.
-    pub fn reads(&self) -> bool {
-        matches!(self.kind, "MRS" | "SYSL")
+    pub const fn reads(&self) -> bool {
+        matches!(self.kind.as_bytes(), b"MRS" | b"SYSL")
     }
 }
 
@@ -77,9 +77,47 @@ pub fn key(encoding: Encoding) -> u16 {
         | u16::from(encoding.op2())
 }
 
-/// Accessors by key and direction: entry `key * 2 + read` holds the
-/// accessor's position plus one, or 0 when none matches.
-pub struct Lookup(alloc::vec::Vec<u16>);
+/// Accessors by key and direction, shared by all PEs.
+pub struct Lookup;
+
+const SLOTS: usize = 1 << 17;
+const INDEX_SHIFT: u32 = 11;
+const POSITION_MASK: u16 = (1 << INDEX_SHIFT) - 1;
+
+/// Each entry packs the accessor position plus one and its decoded array
+/// index. Zero marks a slot with no matching accessor.
+const fn accessors_by_encoding() -> [u16; SLOTS] {
+    assert!(ACCESSORS.len() <= POSITION_MASK as usize);
+    let mut entries = [0u16; SLOTS];
+    let mut position = 0;
+    while position < ACCESSORS.len() {
+        let accessor = &ACCESSORS[position];
+        let mut combination = 0;
+        while combination < 1 << accessor.index.len() {
+            let mut key = accessor.value;
+            let mut index = 0u64;
+            let mut bit = 0;
+            while bit < accessor.index.len() {
+                let (key_bit, index_bit) = accessor.index[bit];
+                if combination >> bit & 1 != 0 {
+                    key |= 1 << key_bit;
+                }
+                index |= (((key >> key_bit) & 1) as u64) << index_bit;
+                bit += 1;
+            }
+            let slot = key as usize * 2 + accessor.reads() as usize;
+            if entries[slot] == 0 {
+                assert!(index < 1 << (u16::BITS - INDEX_SHIFT));
+                entries[slot] = (position as u16 + 1) | (index as u16) << INDEX_SHIFT;
+            }
+            combination += 1;
+        }
+        position += 1;
+    }
+    entries
+}
+
+static LOOKUP: [u16; SLOTS] = accessors_by_encoding();
 
 impl Default for Lookup {
     fn default() -> Self {
@@ -88,39 +126,19 @@ impl Default for Lookup {
 }
 
 impl Lookup {
-    pub fn new() -> Self {
-        let mut table = alloc::vec![0u16; 1 << 17];
-        for (position, accessor) in ACCESSORS.iter().enumerate() {
-            // Enumerate the keys the pattern admits through its index bits.
-            let bits: alloc::vec::Vec<u8> =
-                accessor.index.iter().map(|&(key_bit, _)| key_bit).collect();
-            for combination in 0..1u32 << bits.len() {
-                let mut key = accessor.value;
-                for (number, bit) in bits.iter().enumerate() {
-                    if combination >> number & 1 != 0 {
-                        key |= 1 << bit;
-                    }
-                }
-                let slot = usize::from(key) * 2 + usize::from(accessor.reads());
-                if table[slot] == 0 {
-                    table[slot] = position as u16 + 1;
-                }
-            }
-        }
-        Self(table)
+    pub const fn new() -> Self {
+        Self
     }
 
     /// The accessor for an encoding and direction, with its array index.
     pub fn find(&self, encoding: Encoding, read: bool) -> Option<(&'static Accessor, u64)> {
-        let key = key(encoding);
-        let position = self.0[usize::from(key) * 2 + usize::from(read)].checked_sub(1)?;
-        let accessor = &ACCESSORS[usize::from(position)];
-        let index = accessor
-            .index
-            .iter()
-            .map(|&(key_bit, index_bit)| u64::from((key >> key_bit) & 1) << index_bit)
-            .fold(0, |a, b| a | b);
-        Some((accessor, index))
+        let slot = usize::from(key(encoding)) * 2 + usize::from(read);
+        let entry = LOOKUP[slot];
+        let position = (entry & POSITION_MASK).checked_sub(1)?;
+        Some((
+            &ACCESSORS[usize::from(position)],
+            u64::from(entry >> INDEX_SHIFT),
+        ))
     }
 }
 
@@ -353,5 +371,41 @@ pub trait Context {
     /// The value chosen for an ARBITRARY (UNKNOWN) result.
     fn arbitrary(&self) -> u64 {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_matches_the_accessor_patterns_for_every_encoding() {
+        let lookup = Lookup::new();
+        for key in 0..=u16::MAX {
+            let encoding = Encoding::new(
+                (key >> 14) as u8,
+                (key >> 11 & 7) as u8,
+                (key >> 7 & 15) as u8,
+                (key >> 3 & 15) as u8,
+                (key & 7) as u8,
+            );
+            for read in [false, true] {
+                let expected = ACCESSORS.iter().find(|accessor| {
+                    key & accessor.mask == accessor.value && accessor.reads() == read
+                });
+                let actual = lookup.find(encoding, read);
+                match (actual, expected) {
+                    (Some((accessor, index)), Some(expected)) => {
+                        assert!(core::ptr::eq(accessor, expected), "{key:#x}, read={read}");
+                        let decoded = expected.index.iter().fold(0, |value, &(from, to)| {
+                            value | u64::from(key & (1 << from) != 0) << to
+                        });
+                        assert_eq!(index, decoded, "{key:#x}, read={read}");
+                    }
+                    (None, None) => {}
+                    _ => panic!("different accessor match for {key:#x}, read={read}"),
+                }
+            }
+        }
     }
 }
