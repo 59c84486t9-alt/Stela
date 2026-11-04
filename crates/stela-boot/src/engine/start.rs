@@ -11,7 +11,6 @@ use stela_contracts::refuse;
 fn from_disk(
     partition: alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>,
     options: &Options,
-    bluetooth: bool,
 ) -> Vec<(String, Vec<u8>)> {
     crate::status::begin("Reading macOS's boot files from its disk");
     // The kernel's text on the screen and on the debug UART, which the
@@ -19,13 +18,19 @@ fn from_disk(
     // waits for every PE to answer: 10 s at 24 MHz, not XNU's 1.44 ms, which
     // is too short for PEs that answer at their next exit. System sleep is
     // not modeled, so `noidle` stops the idle timer that would ask for it.
-    // Without a host controller to bridge the guest has no Bluetooth, and
-    // bluetoothd, left to look for Apple's PCIe one, restarts all boot long:
-    // 10 is its virtual transport.
+    // The guest's only Bluetooth is a bridged USB controller, so bluetoothd
+    // and BlueTool take USB, transport 0 (26A434 bluetoothd's transport
+    // switch at x86_64 0x1001f84e7). BlueTool ignores overrides from 10, its
+    // virtual transport, and on the DeviceTree's PCIe Skywalk (7) waits for
+    // the hidden radio's AppleOLYHAL while bluetoothd stays Unknown for good.
+    // Without a bridge, bluetoothd reports Unsupported once BlueTool's boot
+    // script times out, about a minute in; a client that checked in before
+    // then is never told (Language Chooser waits for it without a timeout).
     let mut defaults = boot_bundle::Options {
         ecid: options.ecid,
         boot_command: options.boot_command,
-        boot_args: "-v serial=3 serial-device-name=uart0 ml-timeout-debug-ack=240000000 noidle=1"
+        boot_args: "-v serial=3 serial-device-name=uart0 ml-timeout-debug-ack=240000000 noidle=1 \
+                     bt-transport-override=0"
             .into(),
         ..boot_bundle::Options::default()
     };
@@ -35,9 +40,6 @@ fn from_disk(
         output::arguments(format_args!(
             "MAINTENANCE filesystem protection disabled for this boot (--maintenance-write)\n"
         ));
-    }
-    if !bluetooth {
-        defaults.boot_args.push_str(" bt-transport-override=10");
     }
     let result = if options.upgrade {
         bundle::upgrade_from_disk(partition, options.boot_volume, &defaults)
@@ -333,11 +335,10 @@ fn open_host(
         kernel_work,
     );
     remappers.report_faults();
-    let bluetooth = devices.host_bluetooth.is_some();
     let built = devices
         .preboot
         .take()
-        .map(|partition| from_disk(partition, options, bluetooth));
+        .map(|partition| from_disk(partition, options));
     // A system boots as the board it was installed on: libignition finds its
     // Cryptex1 tickets by that board's model.
     if options.bundle || built.is_some() {
