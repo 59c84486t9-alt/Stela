@@ -1203,6 +1203,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         descriptor: &TextureDescriptor,
     ) -> Result<SizeAndAlign> {
         let plan = resource::texture(&self.capabilities, descriptor)?;
+        self.heap_texture_requirements(&plan)
+    }
+
+    fn heap_texture_requirements(&mut self, plan: &TexturePlan) -> Result<SizeAndAlign> {
         let requirements = self.backend.image_requirements(&plan.image)?;
         SizeAndAlign::from_requirements(requirements.size, requirements.alignment)
             .ok_or(Error::Invalid("requirements"))
@@ -1294,7 +1298,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             ensure(offset.is_none(), "sparse heaps place textures themselves")?;
             return self.new_sparse_texture(id, descriptor);
         }
-        let requirement = self.heap_texture_size_and_align(descriptor)?;
+        let plan = resource::texture(&self.capabilities, descriptor)?;
+        let requirement = self.heap_texture_requirements(&plan)?;
         let (memory, offset) = self.place(id, descriptor.options, requirement, offset)?;
         let backing = Backing::Heap {
             heap: id,
@@ -1302,7 +1307,6 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             size: requirement.size,
             aliasable: false,
         };
-        let plan = resource::texture(&self.capabilities, descriptor)?;
         let image = match self
             .backend
             .create_placed_image(&plan.image, memory, offset)
