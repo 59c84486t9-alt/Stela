@@ -264,6 +264,14 @@ impl Scsi for uas::Host {
     ) -> Result<Vec<u8>, BlockError> {
         uas::Host::command(self, lun.bytes(), cdb, data)
     }
+    fn read_into(
+        &mut self,
+        lun: uas::Lun,
+        cdb: &[u8],
+        output: &mut [u8],
+    ) -> Result<(), BlockError> {
+        uas::Host::read_into(self, lun.bytes(), cdb, output)
+    }
     fn take_failed_data(&mut self) -> Option<Vec<u8>> {
         uas::Host::take_failed_data(self)
     }

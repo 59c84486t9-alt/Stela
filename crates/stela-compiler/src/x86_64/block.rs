@@ -10,7 +10,7 @@ use super::chain::ExitWord;
 use crate::{
     GuestAddress, NativeBlock,
     aarch64::{Instruction, Operation, Register, Width, integer_math, integer_unary, pc_relative},
-    block::{ExitKind, Terminator},
+    block::{ExitKind, MAX_BLOCK_INSTRUCTIONS, Terminator},
 };
 
 pub(super) fn exit_kind(code: &mut Code, kind: ExitKind) {
@@ -252,7 +252,11 @@ fn emit_selected(
         frame_loop,
     } = regions;
     let mut fault_recovery = vec![];
-    let mut block = super::Emitted::default();
+    let source_rows = instructions.len() + usize::from(terminal.is_some());
+    let mut block = super::Emitted {
+        source_map: Vec::with_capacity(source_rows),
+        ..super::Emitted::default()
+    };
     let code = &mut block.x86_64_code;
     code.set_pinned(pinned);
     if pinned
@@ -272,18 +276,22 @@ fn emit_selected(
     let fuse_pairs = optimize_regions && frame_loop.is_none() && !fault_table && !pinned;
     let fuse_simd = !target.data_independent_timing() && (pinned || fuse_pairs);
     let fuse_reverse_dwords = fuse_simd && target.supports(crate::TargetCpu::Ssse3);
-    // Which accesses check the guest range (`guest_range`), and each
-    // instruction's checks.
-    let ranges = if checks.guest_range && checks.checks_every_access() {
-        vec![true; instructions.len()]
-    } else if checks.guest_range {
-        super::guest_range::checks(instructions)
+    // The parser bounds the block, so these per-instruction rows stay local
+    // to the emitter. Region admission can still borrow a suffix of them.
+    let mut range_rows = [true; MAX_BLOCK_INSTRUCTIONS];
+    let ranges = if checks.guest_range {
+        let rows = &mut range_rows[..instructions.len()];
+        if !checks.checks_every_access() {
+            super::guest_range::checks(instructions, rows);
+        }
+        Some(&rows[..])
     } else {
-        vec![]
+        None
     };
-    let ranges = checks.guest_range.then_some(&ranges[..]);
     // Which accesses through SP check its alignment (`stack_alignment`).
-    let stack = super::stack_alignment::checks(instructions);
+    let mut stack_rows = [true; MAX_BLOCK_INSTRUCTIONS];
+    let stack = &mut stack_rows[..instructions.len()];
+    super::stack_alignment::checks(instructions, stack);
     let checks_at = |index: usize| super::MemoryChecks {
         guest_range: ranges.is_some_and(|ranges| ranges[index]),
         stack_checked: !stack[index],
@@ -626,6 +634,7 @@ fn emit_selected(
     }
     // After the terminal, whose direct exits end the code before them.
     let instructions_run = block.source_map.len();
+    debug_assert_eq!(instructions_run, source_rows);
     for (jump, target, run) in side_exits {
         let mut asm = code.asm();
         asm.bind(jump);
@@ -724,6 +733,12 @@ fn emit_single(
                 code.remove_instruction(start..start + load.len());
             }
         }
+    } else if code.is_pinned()
+        && !code.constant_time()
+        && held.rax == super::Rax::Nzcv
+        && matches!(instruction.operation, Operation::AddSubCarry { .. })
+    {
+        super::pinned::emit_live_carry(code, &instruction.operation);
     } else if let Operation::ConditionalSelect(operand) = &instruction.operation
         && code.is_pinned()
         && !code.constant_time()

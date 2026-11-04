@@ -40,6 +40,7 @@ const BITS_PER_BYTE: u32 = u8::BITS;
 const SINGLE_EXPONENT_BIAS: i16 = 127;
 const DOUBLE_EXPONENT_BIAS: i16 = 1023;
 const UNSIGNED_HIGH_EXPONENT: i16 = 63;
+const SINGLE_SUBNORMAL_CLASS_SHIFT: u8 = Format::Single.fraction_bits() as u8 + 1;
 
 fn helper(code: &mut Code, pc: GuestAddress) {
     super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
@@ -356,6 +357,27 @@ fn guard_float_input(code: &mut Code, operand: &IntegerConversion) -> usize {
     }
 }
 
+/// Guard only the lanes whose conversion depends on Arm input flushing.
+/// XMM0 holds the input and any inactive high lanes are already zero.
+fn guard_single_subnormal(code: &mut Code) -> usize {
+    let magnitude = TEMPORARY_VECTOR;
+    let exponent = 2;
+    let zero = 3;
+    packed(code, Host::MoveAligned, magnitude, RESULT_VECTOR);
+    // Drop the sign and test the magnitude and exponent independently.
+    // Only exponent-zero lanes with a nonzero magnitude can flush.
+    ShiftOpcode::LeftDword.emit(code, magnitude, 1);
+    packed(code, Host::MoveAligned, exponent, magnitude);
+    ShiftOpcode::RightDword.emit(code, exponent, SINGLE_SUBNORMAL_CLASS_SHIFT);
+    packed(code, Host::Xor, zero, zero);
+    packed(code, Host::EqualDword, magnitude, zero);
+    packed(code, Host::EqualDword, exponent, zero);
+    packed(code, Host::AndNot, magnitude, exponent);
+    Host::DwordSignMask.register(code, 0, magnitude, TargetCpu::Baseline);
+    code.asm().test(Size::Dword, Rax, Rax);
+    branch(code, Condition::NotZero)
+}
+
 fn read_float_lane(code: &mut Code, operand: &IntegerConversion, lane: u32) {
     let element =
         guest(vector_offset(operand.float) + lane * (operand.format.bits() / BITS_PER_BYTE));
@@ -598,7 +620,9 @@ pub(in crate::x86_64) fn to_integer(
         resolve(code, other_controls, check_controls);
         test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
         helper_patches.push(branch(code, Condition::NotZero));
-        helper_patches.push(guard_float_input(code, operand));
+        // Signed zero is safe under every flush mode. NaN and range errors
+        // are still caught by CVTTPS2DQ's invalid status before commit.
+        helper_patches.push(guard_single_subnormal(code));
         let resume = jump(code);
         resolve(code, resume, convert);
     }

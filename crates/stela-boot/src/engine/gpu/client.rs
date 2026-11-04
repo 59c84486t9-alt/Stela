@@ -10,9 +10,9 @@
 //! A thread Mesa starts is a Linux task too, as Linux's own kthreads are, so it
 //! makes its calls in place and sleeps in Linux. It runs Mesa on a stack of its
 //! own and goes back to the task's, which is what Linux knows, for those. Everything
-//! that waits in the C library comes through `stela_libc_wait`: a PE spins; the
-//! boot CPU runs the environment, as what it waits for may need it; a thread
-//! sleeps.
+//! that waits in the C library comes through `stela_libc_wait`: a PE services
+//! shootdowns and spins, the boot CPU also runs the environment, and a task
+//! thread sleeps.
 use super::{
     BOOT_CPU, Installed, PAGE, environment_error, installed, nanoseconds,
     stack::{self, Stack},
@@ -580,10 +580,7 @@ unsafe extern "C" fn stela_libc_wait(word: *const c_uint, value: c_uint, deadlin
         return hint::spin_loop();
     };
     let Some(thread) = current_thread(gpu) else {
-        if host::processor() == BOOT_CPU.load(Ordering::Relaxed) {
-            super::pump();
-        }
-        return hint::spin_loop();
+        return super::gate::relax();
     };
     let sleeping = &SLEEPING[thread.core as usize - PROCESSORS];
     sleeping.store(word.cast_mut(), Ordering::SeqCst);
