@@ -69,6 +69,12 @@ unsafe extern "C" {
 }
 
 impl Service {
+    pub(super) fn accepts_compilation_projection(&self) -> bool {
+        let linked = Self::linked(self.nir_options);
+        core::ptr::fn_addr_eq(self.reflect, linked.reflect)
+            && core::ptr::fn_addr_eq(self.compile, linked.compile)
+    }
+
     /// The linked service, compiling with the driver's `nir_options`.
     pub fn linked(nir_options: NonNull<c_void>) -> Self {
         Self {

@@ -37,8 +37,8 @@ use super::{
     shader::{
         Access, AttributeUse, BufferUse, ColorOutput, CompiledShader, Compiler, DeclaredAttribute,
         FunctionConstant, Interface, Linking, MAX_PATCH_CONTROL_POINTS, NumericClass, Patch,
-        PatchDomain, Provenance, Reflection, Refusal, Scalar, Specialization, Stage, Tessellation,
-        TessellationStages, TextureUse, ThreadgroupUse, Varying,
+        PatchDomain, PreparedFunction, Provenance, Reflection, Refusal, Scalar, Specialization,
+        Stage, Tessellation, TessellationStages, TextureUse, ThreadgroupUse, Varying,
     },
     stitching::{StitchedGraph, StitchedNode},
     vertex::{Attribute, STRIDE_DYNAMIC, StageInputDescriptor, VertexDescriptor},
@@ -136,7 +136,8 @@ pub struct Service {
         *mut c_void,
         *mut ffi::AirError,
     ) -> bool,
-    /// `stela_metal_compile_reflected`.
+    /// `stela_metal_compile_reflected`. Custom callbacks receive the full
+    /// record. Stela's linked callbacks also accept a compilation projection.
     pub compile: unsafe extern "C" fn(
         *const c_void,
         usize,
@@ -223,6 +224,7 @@ impl Drop for InternalKernelCode {
 pub struct AirCompiler {
     service: Service,
     target: ffi::Target,
+    project_reflection: bool,
     /// MTLB libraries by id; ids are never reused.
     libraries: BTreeMap<u64, LoadedLibrary>,
     next_library: u64,
@@ -259,9 +261,14 @@ impl AirCompiler {
             max_mesh_vertices: mesh.map_or(0, |mesh| mesh.max_mesh_output_vertices),
             max_mesh_primitives: mesh.map_or(0, |mesh| mesh.max_mesh_output_primitives),
         };
+        #[cfg(feature = "metal-linked")]
+        let project_reflection = service.accepts_compilation_projection();
+        #[cfg(not(feature = "metal-linked"))]
+        let project_reflection = false;
         Self {
             service,
             target,
+            project_reflection,
             libraries: BTreeMap::new(),
             next_library: 0,
             refusal: None,
@@ -452,6 +459,31 @@ impl Compiler for AirCompiler {
         Ok(reflection)
     }
 
+    fn prepare_function(
+        &mut self,
+        library: u64,
+        entry: &str,
+        constants: Vec<(u32, Vec<u8>)>,
+    ) -> Result<PreparedFunction> {
+        let selected = select(&self.libraries, library, entry)?;
+        let specialization = Specialization {
+            constants,
+            ..Specialization::default()
+        };
+        let (reflection, provenance) =
+            selected.reflect(&self.service, Some(&specialization), &mut self.refusal)?;
+        Ok(PreparedFunction {
+            library,
+            constants: specialization.constants,
+            reflection,
+            provenance,
+            reflection_service: self
+                .project_reflection
+                .then_some(self.service.reflect as usize)
+                .and_then(core::num::NonZeroUsize::new),
+        })
+    }
+
     fn constants(&mut self, library: u64, entry: &str) -> Result<Vec<FunctionConstant>> {
         let selected = select(&self.libraries, library, entry)?;
         let (reflection, _) = selected.reflect(&self.service, None, &mut self.refusal)?;
@@ -532,12 +564,7 @@ impl Compiler for AirCompiler {
         entry: &str,
         specialization: &Specialization,
     ) -> Result<CompiledShader> {
-        let stage_in = specialization
-            .stage_in
-            .as_ref()
-            .map(ffi::StageIn::kernel)
-            .transpose()?;
-        self.compile_function(library, entry, specialization, None, stage_in.as_deref())
+        self.compile_entry(library, entry, specialization, None)
     }
 
     fn compile_tessellation(
@@ -546,6 +573,75 @@ impl Compiler for AirCompiler {
         entry: &str,
         specialization: &Specialization,
         tessellation: &Tessellation,
+    ) -> Result<TessellationStages> {
+        self.compile_patch(library, entry, specialization, tessellation, None)
+    }
+
+    fn compile_prepared(
+        &mut self,
+        function: &PreparedFunction,
+        specialization: &Specialization,
+    ) -> Result<CompiledShader> {
+        self.compile_entry(
+            function.library,
+            function.entry(),
+            specialization,
+            Some(function),
+        )
+    }
+
+    fn compile_prepared_tessellation(
+        &mut self,
+        function: &PreparedFunction,
+        specialization: &Specialization,
+        tessellation: &Tessellation,
+    ) -> Result<TessellationStages> {
+        self.compile_patch(
+            function.library,
+            function.entry(),
+            specialization,
+            tessellation,
+            Some(function),
+        )
+    }
+
+    fn release(&mut self, code: ShaderCode) {
+        // SAFETY: the code is NIR this compiler's service compiled, which the
+        // device releases once.
+        unsafe { (self.service.release)(code.0 as usize as *mut c_void) }
+    }
+}
+
+impl AirCompiler {
+    fn compile_entry(
+        &mut self,
+        library: u64,
+        entry: &str,
+        specialization: &Specialization,
+        prepared: Option<&PreparedFunction>,
+    ) -> Result<CompiledShader> {
+        let stage_in = specialization
+            .stage_in
+            .as_ref()
+            .map(ffi::StageIn::kernel)
+            .transpose()?;
+        self.compile_function(
+            library,
+            entry,
+            specialization,
+            None,
+            stage_in.as_deref(),
+            prepared,
+        )
+    }
+
+    fn compile_patch(
+        &mut self,
+        library: u64,
+        entry: &str,
+        specialization: &Specialization,
+        tessellation: &Tessellation,
+        prepared: Option<&PreparedFunction>,
     ) -> Result<TessellationStages> {
         if specialization.stage_in.is_some() {
             return Err(Error::Invalid("kernel stage-in of a vertex function"));
@@ -562,6 +658,7 @@ impl Compiler for AirCompiler {
             specialization,
             Some(&properties),
             stage_in.as_deref(),
+            prepared,
         )?;
         let mut stages = [ptr::null_mut(); 2];
         // SAFETY: the target and tessellation outlive the call, which writes
@@ -577,14 +674,6 @@ impl Compiler for AirCompiler {
         })
     }
 
-    fn release(&mut self, code: ShaderCode) {
-        // SAFETY: the code is NIR this compiler's service compiled, which the
-        // device releases once.
-        unsafe { (self.service.release)(code.0 as usize as *mut c_void) }
-    }
-}
-
-impl AirCompiler {
     /// Compiles `entry` of `library`: a post-tessellation vertex function
     /// with its pipeline's tessellation, and a kernel or post-tessellation
     /// vertex function with the stage-in layout it fetches by.
@@ -595,13 +684,39 @@ impl AirCompiler {
         specialization: &Specialization,
         tessellation: Option<&ffi::Tessellation>,
         stage_in: Option<&ffi::StageIn>,
+        prepared: Option<&PreparedFunction>,
     ) -> Result<CompiledShader> {
         let selected = select(&self.libraries, library, entry)?;
         let constants = constant_values(&specialization.constants);
-        let reflected = selected.reflect_raw(&self.service, Some(&constants), &mut self.refusal)?;
-        let (reflection, provenance) = selected.decode_reflection(&reflected)?;
-        let Reflection::Stage(interface) = reflection else {
-            return Err(Error::Invalid("a visible function is not a pipeline stage"));
+        // Reflection uses only the module, entry and function constant values.
+        // Linkage, layouts and dispatch sizes enter later at compilation.
+        let prepared = prepared.filter(|function| {
+            self.project_reflection
+                && function.library == library
+                && function.entry() == entry
+                && function.provenance.slice_hash == selected.slice_hash
+                && function.constants == specialization.constants
+                && function
+                    .reflection_service
+                    .is_some_and(|service| service.get() == self.service.reflect as usize)
+        });
+        let (reflected, interface, provenance) = if let Some(function) = prepared {
+            let Reflection::Stage(interface) = &function.reflection else {
+                return Err(Error::Invalid("a visible function is not a pipeline stage"));
+            };
+            (
+                compilation_reflection(interface)?,
+                interface.as_ref().clone(),
+                function.provenance.clone(),
+            )
+        } else {
+            let reflected =
+                selected.reflect_raw(&self.service, Some(&constants), &mut self.refusal)?;
+            let (reflection, provenance) = selected.decode_reflection(&reflected)?;
+            let Reflection::Stage(interface) = reflection else {
+                return Err(Error::Invalid("a visible function is not a pipeline stage"));
+            };
+            (reflected, *interface, provenance)
         };
         let linking = &specialization.linking;
         let own = (selected.slice_hash, specialization.constants.as_slice());
@@ -683,8 +798,8 @@ impl AirCompiler {
         let air = selected.bitcode;
         // SAFETY: the AIR, entry, target and specialization, with the arrays,
         // identifiers, values, layouts, modules and names it points to,
-        // outlive the call, which writes only the error. The reflection was
-        // produced above by this service from the same input and constants.
+        // outlive the call, which writes only the error. The compilation
+        // fields come from this service's reflection of the same input and constants.
         let shader = unsafe {
             (self.service.compile)(
                 air.as_ptr().cast(),
@@ -701,7 +816,7 @@ impl AirCompiler {
         }
         Ok(CompiledShader {
             code: ShaderCode(shader as usize as u64),
-            interface: *interface,
+            interface,
             provenance,
         })
     }
@@ -907,7 +1022,7 @@ impl Selected<'_> {
         values: Option<&[ffi::ConstantValue]>,
         refusal: &mut Option<Refusal>,
     ) -> Result<Box<ffi::Reflection>> {
-        let mut reflection = Box::new(ffi::Reflection::ZERO);
+        let mut reflection = ffi::Reflection::zeroed();
         let mut error = ffi::AirError::NONE;
         let air = self.bitcode;
         let (values, count) = match values {
@@ -1020,6 +1135,48 @@ fn scalar(primitive: u32) -> Result<Scalar> {
         HALF => Scalar::Half,
         _ => return Err(MALFORMED),
     })
+}
+
+/// The compilation ABI reads only these fields. Rebuild them from the
+/// validated interface to avoid retaining a full ABI record for each function.
+fn compilation_reflection(interface: &Interface) -> Result<Box<ffi::Reflection>> {
+    let mut reflection = ffi::Reflection::zeroed();
+    reflection.stage = interface.stage.raw() as u32;
+    reflection.patch = match interface.patch.map(|patch| patch.domain) {
+        None => 0,
+        Some(PatchDomain::Triangle) => 1,
+        Some(PatchDomain::Quad) => 2,
+    };
+    reflection.threadgroup_bytes = interface.static_threadgroup_bytes;
+    for (index, varying) in interface.varyings.iter().enumerate() {
+        let identifier = varying.identifier.as_bytes();
+        let offset = reflection.names_bytes as usize;
+        let end = offset.checked_add(identifier.len()).ok_or(MALFORMED)?;
+        reflection
+            .names
+            .get_mut(offset..end)
+            .ok_or(MALFORMED)?
+            .copy_from_slice(identifier);
+        *reflection.varyings.get_mut(index).ok_or(MALFORMED)? = ffi::Varying {
+            identifier: offset as u32,
+            identifier_bytes: identifier.len() as u32,
+            primitive: match varying.scalar {
+                Scalar::Char => ffi::primitive::CHAR,
+                Scalar::Uchar => ffi::primitive::UCHAR,
+                Scalar::Short => ffi::primitive::SHORT,
+                Scalar::Ushort => ffi::primitive::USHORT,
+                Scalar::Int => ffi::primitive::INT,
+                Scalar::Uint => ffi::primitive::UINT,
+                Scalar::Float => ffi::primitive::FLOAT,
+                Scalar::Half => ffi::primitive::HALF,
+            },
+            components: varying.components.into(),
+            per_primitive: varying.per_primitive.into(),
+        };
+        reflection.names_bytes = end as u32;
+    }
+    reflection.varying_count = interface.varyings.len() as u32;
+    Ok(reflection)
 }
 
 fn numeric(primitive: u32) -> Result<NumericClass> {
