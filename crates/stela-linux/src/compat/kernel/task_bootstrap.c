@@ -102,14 +102,17 @@ int stela_linux_task_bootstrap_resources(const struct stela_linux_owner *owner)
      * The workqueue threshold uses this before any worker starts. */
     loops_per_jiffy = tsc_hz / HZ;
 
-    /* Original early phase: queue metadata/boot-list may exist before any
-     * original child can execute. This initializes no second native timer or
-     * scheduler. The caller's actual native providers own those boundaries. */
+    /* Original early metadata with IRQs excluded only around the CPU setup.
+     * The allocator and workqueue constructors below need process context. */
     unsigned long flags;
     local_irq_save(flags);
     early_boot_irqs_disabled = true;
     jump_label_init();
     boot_cpu_init();
+    early_boot_irqs_disabled = false;
+    local_irq_restore(flags);
+    /* Original helpers keep their order. The admitted Initial is the only
+     * source continuation at this point and no original IRQ is published. */
     radix_tree_init();
     housekeeping_init();
     workqueue_init_early();
@@ -117,8 +120,6 @@ int stela_linux_task_bootstrap_resources(const struct stela_linux_owner *owner)
     rcu_init();
     kvfree_rcu_init();
     srcu_init();
-    early_boot_irqs_disabled = false;
-    local_irq_restore(flags);
     sched_clock_init();
     error = stela_linux_rq_init_queues(owner);
     if (error) {

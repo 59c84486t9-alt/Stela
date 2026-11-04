@@ -118,6 +118,7 @@ int stela_linux_task_initial_allocate(const struct stela_linux_owner *owner,
 /* The same original task, with process-image data and a kept model PGD. */
 int stela_linux_task_hosted_initial_allocate(const struct stela_linux_owner *owner,
 	void *pgd, struct stela_linux_task **result);
+int stela_linux_task_hosted_initialize_resources(const struct stela_linux_owner *owner);
 #endif
 /* One genuine original Initial/Managed current + source-owned resource subset.
  * This never establishes global bootstrap/workqueue/SRCU FullReady. */

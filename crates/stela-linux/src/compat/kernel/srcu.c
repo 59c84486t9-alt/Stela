@@ -60,7 +60,7 @@ int stela_linux_srcu_bind_initial(const struct stela_linux_owner *owner)
 }
 bool stela_linux_srcu_owner_bound(const struct stela_linux_owner *owner)
 {
-	return owner && stela_linux_kernel_catalogue_active() &&
+	return owner && stela_linux_kernel_source_active() &&
 	       stela_linux_kernel_owner_allowed(owner) &&
 	       __atomic_load_n(&phase, __ATOMIC_ACQUIRE) != UNBOUND;
 }

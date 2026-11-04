@@ -6,6 +6,7 @@ use stela_driver_base::platform::work::kernel_domain::{
     DomainRef, HostedRuntime, HostedSwitchBinding, HostedWake,
 };
 mod initial;
+pub use initial::initialize_hosted_resources;
 
 /// The original source record attached to one checked hosted continuation.
 pub struct HostedTaskBinding<const N: usize> {

@@ -28,6 +28,24 @@ unsafe extern "C" {
         cpu_base: *mut c_void,
         page_count: usize,
     ) -> i32;
+    fn stela_linux_task_hosted_initialize_resources(owner: *const RawOwner) -> i32;
+}
+
+/// Run the original resource sequence on the mounted hosted Initial.
+/// Child creation and joined workqueue, timer and SRCU service are separate.
+///
+/// # Safety
+/// Call inside the exact Initial's entered owner and live source scope, with
+/// its model inventory and clock providers kept. Hold no transient runtime
+/// loan across the original C code. A partial source attempt is permanent.
+pub unsafe fn initialize_hosted_resources(
+    owner: *const RawOwner,
+) -> Result<(), ResourceBootstrapError> {
+    // SAFETY: C authenticates the same mounted owner, source and task scope.
+    match unsafe { stela_linux_task_hosted_initialize_resources(owner) } {
+        0 => Ok(()),
+        error => Err(ResourceBootstrapError::Native(error)),
+    }
 }
 
 const PAGE: usize = 4096;

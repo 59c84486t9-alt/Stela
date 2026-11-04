@@ -1248,6 +1248,18 @@ int stela_linux_task_initialize_resources(struct stela_linux_task *task,
     return stela_linux_task_bootstrap_resources(owner);
 }
 
+#ifdef __linux__
+int stela_linux_task_hosted_initialize_resources(const struct stela_linux_owner *owner)
+{
+    if (!stela_linux_kernel_hosted())
+        return -EPERM;
+    int error = stela_linux_require_current(owner);
+    if (error)
+        return error;
+    return stela_linux_task_initialize_resources(current_record(), owner);
+}
+#endif
+
 int stela_linux_task_start_threads(struct stela_linux_task *task,
     const struct stela_linux_owner *owner)
 {
