@@ -18,6 +18,9 @@
 struct stela_linux_mapping {
 	struct vm_area_struct vma;
 	void *space;
+	/* The end of the highest page a fault inserted: a fault may fill the
+	 * pages after its own too, as TTM's prefault does. */
+	unsigned long filled;
 };
 
 static inline unsigned long first_page(const struct vm_area_struct *vma)
@@ -67,6 +70,7 @@ int stela_linux_mmap(struct file *file, void *space, unsigned long address, size
 	struct vm_area_struct *vma = &mapping->vma;
 
 	mapping->space = space;
+	mapping->filled = 0;
 	vma_init(vma, &client_mm);
 	vma->vm_start = address;
 	vma->vm_end = address + size;
@@ -103,8 +107,10 @@ int stela_linux_map(int fd, void *space, unsigned long address, size_t size, u64
 	fput(file);
 	if (error)
 		return error;
-	for (size_t at = 0; at < size; at += PAGE_SIZE) {
-		if (!stela_linux_refault(*result, address + at, true)) {
+	/* Each fault fills from its page on; the next starts past what it filled. */
+	for (unsigned long at = address; at < address + size;
+	     at = max(at + PAGE_SIZE, (*result)->filled)) {
+		if (!stela_linux_refault(*result, at, true)) {
 			stela_linux_munmap(*result);
 			return -EFAULT;
 		}
@@ -171,15 +177,17 @@ vm_fault_t vmf_insert_pfn_prot(struct vm_area_struct *vma, unsigned long addr, u
 			       pgprot_t pgprot)
 {
 	const struct stela_linux_owner *owner = stela_linux_owner();
-	const struct stela_linux_mapping *mapping =
-		container_of(vma, struct stela_linux_mapping, vma);
+	struct stela_linux_mapping *mapping = container_of(vma, struct stela_linux_mapping, vma);
 
 	if (addr < vma->vm_start || addr >= vma->vm_end)
 		return VM_FAULT_SIGBUS;
 	int error = owner->services->map_user(owner->context, mapping->space, addr, pfn,
 					      pgprot_val(pgprot));
 
-	return !error ? VM_FAULT_NOPAGE : error == -ENOMEM ? VM_FAULT_OOM : VM_FAULT_SIGBUS;
+	if (error)
+		return error == -ENOMEM ? VM_FAULT_OOM : VM_FAULT_SIGBUS;
+	mapping->filled = max(mapping->filled, (addr & PAGE_MASK) + PAGE_SIZE);
+	return VM_FAULT_NOPAGE;
 }
 
 /* Clients fault the range back in, and reach wherever it moved to. */
@@ -208,6 +216,7 @@ void unmap_mapping_range(struct address_space *mapping, loff_t const holebegin,
 
 #ifdef STELA_LINUX_MAPPING_TEST
 #include <linux/anon_inodes.h>
+#include <stela/page_test.h>
 #include <stela/test.h>
 
 #define SPACE ((void *)0x1000)
@@ -272,6 +281,21 @@ static vm_fault_t fault(struct vm_fault *vmf)
 				   pgprot_writecombine(vmf->vma->vm_page_prot));
 }
 
+static unsigned int prefaults;
+
+/* As TTM does: fill this page and up to three after it. */
+static vm_fault_t prefault(struct vm_fault *vmf)
+{
+	vm_fault_t result = VM_FAULT_NOPAGE;
+
+	prefaults++;
+	for (unsigned long at = vmf->address; at < vmf->address + 4 * PAGE_SIZE &&
+					       at < vmf->vma->vm_end && result == VM_FAULT_NOPAGE;
+	     at += PAGE_SIZE)
+		result = vmf_insert_pfn_prot(vmf->vma, at, PFN, vmf->vma->vm_page_prot);
+	return result;
+}
+
 static void close_area(struct vm_area_struct *vma)
 {
 	(void)vma;
@@ -279,6 +303,8 @@ static void close_area(struct vm_area_struct *vma)
 }
 
 static const struct vm_operations_struct operations = {.fault = fault, .close = close_area};
+static const struct vm_operations_struct prefaulting = {.fault = prefault, .close = close_area};
+static const struct vm_operations_struct *area_operations = &operations;
 
 static struct file *exporter;
 
@@ -286,7 +312,7 @@ static int test_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	(void)file;
 	mmaps++;
-	vma->vm_ops = &operations;
+	vma->vm_ops = area_operations;
 	if (exporter)
 		vma_set_file(vma, exporter);
 	return mmap_error;
@@ -309,6 +335,9 @@ static void witness_refused_unmap(void)
 int main(void)
 {
 	stela_linux_enter(&owner);
+	/* For the descriptor table's radix nodes. */
+	stela_test_register_pages();
+	radix_tree_init();
 	struct file *file = anon_inode_getfile("test", &fops, NULL, O_RDWR);
 	struct stela_linux_mapping *mapping;
 
@@ -374,6 +403,19 @@ int main(void)
 	assert(removed_size == PAGE_SIZE);
 	stela_linux_munmap(mapping);
 	fput(exporter);
+	exporter = NULL;
+
+	/* A whole mapping faults once per prefaulted run, not once a page. */
+	area_operations = &prefaulting;
+	map_error = 0;
+	int fd = get_unused_fd_flags(O_RDWR);
+	assert(fd >= 0);
+	fd_install((unsigned int)fd, get_file(file));
+	assert(!stela_linux_map(fd, SPACE, BASE, 10 * PAGE_SIZE, 0, &mapping));
+	assert(prefaults == 3 && inserted_address == BASE + 9 * PAGE_SIZE);
+	stela_linux_munmap(mapping);
+	put_unused_fd((unsigned int)fd);
+	fput(file);
 	fput(file);
 	stela_linux_exit();
 	printf("Linux client mappings passed\n");
