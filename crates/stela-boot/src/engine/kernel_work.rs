@@ -34,6 +34,7 @@ mod clock;
 pub(crate) use clock::check_native_clock_domain;
 mod firmware;
 mod pages;
+pub(super) use pages::KernelPages;
 mod pin;
 mod plan;
 mod task_data;
@@ -641,6 +642,14 @@ impl KernelWork {
         };
         let ticks = timeout.checked_mul(scale).ok_or(Error::Clock)?;
         self.cpu.ticks().checked_add(ticks).ok_or(Error::Clock)
+    }
+
+    pub(super) fn linux_geometry(&self) -> Arc<dyn stela_linux::threads::OriginalKernelGeometry> {
+        self.reservation.clone()
+    }
+
+    pub(super) fn linux_root(&self) -> Arc<dyn stela_linux::threads::OriginalKernelRoot> {
+        self.reservation.clone()
     }
 
     pub(super) fn service_clock(&self) -> Result<&ClockServices, WorkError> {

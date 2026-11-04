@@ -30,7 +30,7 @@ mod stack;
 
 use super::{
     host,
-    kernel_work::{self, KernelWork, SLOTS},
+    kernel_work::{self, KernelPages, KernelWork, SLOTS},
 };
 use crate::{handoff::RtcReading, native_irq, native_memory, native_mmio::Window, output};
 use alloc::{
@@ -41,6 +41,7 @@ use core::{
     alloc::Layout,
     cell::{Cell, RefCell},
     ffi::{CStr, c_void},
+    mem::ManuallyDrop,
     ops::Range,
     pin::Pin,
     ptr::{self, addr_of},
@@ -67,13 +68,17 @@ use stela_drivers::{
 use stela_engine::machine::engine::Hub;
 use stela_linux::{
     function::{self, Attached, Msi, Placement, Region},
-    owner::{Entered, Errno, Owner, Platform, RawOwner, RealtimeOrigin, RealtimeRead},
+    kernel::KernelOwner,
+    owner::{Errno, Platform, RealtimeOrigin, RealtimeRead},
     random::Seeded,
     service::Environment as LinuxEnvironment,
+    task::runtime::{ManagedJob, Outcome, TaskRuntime},
     threads::{KernelThreadPlatform, TaskDataBacking},
 };
 
 type Environment = LinuxEnvironment<SLOTS>;
+type LinuxKernel = KernelOwner<Host, SLOTS>;
+type LinuxThreads = TaskRuntime<Host, KernelPages, SLOTS>;
 
 const PAGE: u64 = page_window::PAGE;
 const ENOENT: Errno = -2;
@@ -895,29 +900,44 @@ struct Bound {
     link: Option<PcieLink>,
 }
 
-/// The first task's work: Linux, then every GPU.
+/// The original managed child runs the driver's initcalls and probe.
 struct Start {
-    owner: *const RawOwner,
-    claimed: Vec<Claimed>,
-    attached: Vec<Attached<Device>>,
-    /// The bound GPUs, by DRM minor.
+    claimed: ManuallyDrop<Vec<Claimed>>,
+    completed: Rc<Cell<Option<ManuallyDrop<Started>>>>,
+}
+
+struct Started {
+    _attached: Vec<Attached<Device>>,
     #[cfg(feature = "nvk")]
     bound: Vec<Bound>,
     result: Result<(), Errno>,
 }
 
-unsafe extern "C" fn start(context: *mut c_void) {
-    // SAFETY: `open` keeps the job through its ticket, and only this task
-    // touches it until the ticket completes.
-    let job = unsafe { &mut *context.cast::<Start>() };
-    // SAFETY: a task of the environment, whose owner lasts for the boot.
-    let _entered = unsafe { Entered::new(job.owner) };
+// SAFETY: the original managed runtime enters the canonical owner on the
+// child before run. The job retains the actual devices until it publishes
+// the result, whose attachments remain owned for the boot.
+unsafe impl ManagedJob for Start {
+    fn run(mut self: Pin<&mut Self>) {
+        let claimed = core::mem::take(&mut *self.claimed);
+        self.completed.set(Some(ManuallyDrop::new(start(claimed))));
+    }
+}
+
+fn start(claimed: Vec<Claimed>) -> Started {
+    let mut job = Started {
+        _attached: Vec::new(),
+        #[cfg(feature = "nvk")]
+        bound: Vec::new(),
+        result: Ok(()),
+    };
     // SAFETY: entered, on a task.
     job.result = unsafe { gpu::nouveau::start() };
     if job.result.is_err() {
-        return;
+        // No source-specific device return was acknowledged.
+        core::mem::forget(claimed);
+        return job;
     }
-    for claimed in core::mem::take(&mut job.claimed) {
+    for claimed in claimed {
         // SAFETY: entered, on a task.
         let attached = unsafe { Attached::new(claimed.device, claimed.domain, claimed.placement) };
         match attached {
@@ -936,7 +956,7 @@ unsafe extern "C" fn start(context: *mut c_void) {
                         claimed.name
                     ));
                 }
-                job.attached.push(attached);
+                job._attached.push(attached);
             }
             Err(error) => output::arguments(format_args!(
                 "GPU {} presentation refused: {:?}\n",
@@ -944,6 +964,7 @@ unsafe extern "C" fn start(context: *mut c_void) {
             )),
         }
     }
+    job
 }
 
 /// The running environment.
@@ -973,9 +994,9 @@ struct Installed {
     /// Mesa's running threads, by the bottom of their stacks. On the boot CPU.
     #[cfg(feature = "nvk")]
     threads: RefCell<BTreeMap<u64, client::Running>>,
-    owner: Pin<Box<Owner<Host>>>,
-    environment: Pin<Box<Environment>>,
-    start: Box<Start>,
+    owner: &'static Arc<LinuxKernel>,
+    threads: &'static LinuxThreads,
+    start: ManuallyDrop<Started>,
 }
 
 static INSTALLED: AtomicPtr<Installed> = AtomicPtr::new(ptr::null_mut());
@@ -1042,6 +1063,8 @@ pub(super) fn serve(
 /// Bring Linux up over `claimed`, and return once nouveau has bound them or
 /// failed, as the guest should not start with a half-started GPU beneath it.
 pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error> {
+    // Keep the exact original claims on every partial startup refusal.
+    let claimed = ManuallyDrop::new(claimed);
     let Machine {
         work,
         window,
@@ -1077,7 +1100,7 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         idle: clock.idle(),
         pending: AtomicBool::new(false),
     });
-    let domain = Domain::tickless(time.clone(), events.clone()).map_err(environment_error)?;
+    let domain = Domain::new(time.clone(), events.clone()).map_err(environment_error)?;
     let realtime = wall.and_then(|reading| {
         if tsc_hz == 0
             || !crate::cpu::INVARIANT_TSC.present()
@@ -1103,7 +1126,7 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
             (wall_ns % 1_000_000_000) as u32,
         )
     });
-    let owner = Owner::new(Host {
+    let platform = Host {
         work,
         task_data,
         tsc_hz,
@@ -1118,88 +1141,36 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         devices: RefCell::new(BTreeMap::new()),
         lines: RefCell::new(lines),
         reported: RefCell::new(BTreeSet::new()),
-    });
-    let mut job = Box::new(Start {
-        owner: owner.raw(),
-        claimed,
-        attached: Vec::new(),
-        #[cfg(feature = "nvk")]
-        bound: Vec::new(),
-        result: Ok(()),
-    });
-    let context = (&raw mut *job).cast();
-    // SAFETY: one environment for the boot, on the boot CPU before any producer
-    // or PE: the image and heap are this binary's, and the page catalog is kept.
+    };
+    // SAFETY: boot's original code and allocator remain installed permanently.
     unsafe {
         stela_linux::image::register(image).map_err(|_| kernel_work::Error::Inventory)?;
         stela_linux::heap::register(allocate_zeroed).map_err(|_| kernel_work::Error::Inventory)?;
     }
-    let _pages = work.register_linux_pages()?;
+    let pages = work.register_linux_pages()?;
     #[cfg(feature = "nvk")]
     BOOT_CPU.store(host::processor(), Ordering::Relaxed);
-    let opened = work.dispatch_linux(|runtime| {
-        let deadline = time
-            .now_ns()?
-            .checked_add(START_SECONDS * 1_000_000_000)
-            .ok_or(WorkError::Exhausted)?;
-        // SAFETY: in the dispatcher; the owner and runtime last for the boot.
-        let environment = unsafe { Environment::new(owner.raw(), runtime, domain.clone()) }?;
-        owner.platform().environment.set(addr_of!(*environment));
-        let started = (|| {
-            environment.as_ref().start()?;
-            // SAFETY: `start` enters the owner itself, and the job is kept.
-            let ticket = unsafe { environment.as_ref().spawn(start, context) }?;
-            let queue = runtime.get_ref().queue();
-            while !queue.completed(ticket)? && time.now_ns()? < deadline {
-                runtime.step_or_idle()?;
-            }
-            queue.completed(ticket)
-        })();
-        match started {
-            Ok(finished) => Ok((environment, finished)),
-            Err(error) => {
-                // A failed dispatch cannot prove its native tasks stopped.
-                // Their environment, owner and callback job must stay live.
-                core::mem::forget(environment);
-                Err(error)
-            }
-        }
-    });
-    let started = opened.map_err(Error::Environment);
-    let (environment, finished) = match started {
-        Ok(started) => started,
-        Err(error) => {
-            core::mem::forget(owner);
-            core::mem::forget(job);
-            return Err(error);
-        }
-    };
-    let mut result = Ok(());
-    if !finished {
-        // It goes on between the guest's slices.
-        crate::status::warn("the GPUs are still starting");
-        result = Err(Error::Timeout);
-    } else if let Err(error) = job.result {
-        output::arguments(format_args!("Linux stopped starting: errno {}\n", -error));
-        crate::status::warn("Linux could not start, so the GPUs are unavailable");
-        result = Err(Error::Init(error));
-    }
+    let (owner, threads, job, next) = work.dispatch_linux(|runtime| {
+        Ok(mount_and_start(
+            work,
+            runtime,
+            platform,
+            domain.clone(),
+            pages,
+            claimed,
+            time.as_ref(),
+        ))
+    })??;
+    let result = job.result.map_err(Error::Init);
     // With nothing claimed, the environment serves software Metal.
     #[cfg(feature = "nvk")]
-    if finished && result.is_ok() && claiming && job.bound.is_empty() {
-        result = Err(Error::NoDevices);
-    }
-    let next = match domain.next_deadline() {
-        Ok(deadline) => deadline.unwrap_or(u64::MAX),
-        Err(error) => {
-            // The tasks have started; preserve all objects their callbacks
-            // borrow even when the clock can no longer schedule their work.
-            core::mem::forget(environment);
-            core::mem::forget(owner);
-            core::mem::forget(job);
-            return Err(Error::Environment(environment_error(error)));
+    let result = result.and_then(|()| {
+        if claiming && job.bound.is_empty() {
+            Err(Error::NoDevices)
+        } else {
+            Ok(())
         }
-    };
+    });
     let installed = Box::new(Installed {
         work,
         time,
@@ -1217,17 +1188,133 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         #[cfg(feature = "nvk")]
         threads: RefCell::new(BTreeMap::new()),
         owner,
-        environment,
+        threads,
         start: job,
     });
     INSTALLED.store(Box::into_raw(installed), Ordering::Release);
     result
 }
 
+type MountedStartup = (
+    &'static Arc<LinuxKernel>,
+    &'static LinuxThreads,
+    ManuallyDrop<Started>,
+    u64,
+);
+
+fn mount_and_start(
+    work: &'static KernelWork,
+    runtime: Pin<&'static stela_drivers::platform::work::Runtime<SLOTS>>,
+    platform: Host,
+    domain: Arc<Domain<SLOTS>>,
+    pages: &'static stela_linux::pages::Catalog<KernelPages>,
+    claimed: ManuallyDrop<Vec<Claimed>>,
+    time: &dyn Clock,
+) -> Result<MountedStartup, Error> {
+    let deadline = time
+        .now_ns()
+        .and_then(|now| {
+            now.checked_add(START_SECONDS * 1_000_000_000)
+                .ok_or(WorkError::Exhausted)
+        })
+        .map_err(environment_error)?;
+    // SAFETY: the enclosing dispatch owns this exact root/CPU/clock and
+    // queue. The original heap, executable backing, platform and catalogue
+    // stay retained permanently, including any partial kernel publication.
+    let kernel =
+        unsafe { KernelOwner::new(platform, runtime, domain.clone(), work.linux_geometry()) }
+            .map_err(|failure| Error::Kernel(failure.error))?;
+    #[expect(
+        clippy::arc_with_non_send_sync,
+        reason = "the canonical broker retains this CPU-local kernel through Arc"
+    )]
+    let owner = &*Box::leak(Box::new(Arc::new(kernel)));
+    owner
+        .platform()
+        .environment
+        .set(addr_of!(*owner.environment()));
+    // SAFETY: the permanent, same-owner runtime, catalogue and service
+    // domain were installed above. No original child has started yet.
+    let threads = unsafe { TaskRuntime::install(owner.clone(), runtime, pages, SLOTS) }
+        .map_err(Error::Threads)?;
+    let threads = &*Box::leak(Box::new(threads));
+    // SAFETY: this exact source, root and broker remain kept on refusal. Each
+    // runtime step runs inside the same live native execution segment.
+    unsafe { Pin::new(owner.as_ref()).start_initial(work.linux_root(), threads) }
+        .map_err(Error::Initial)?;
+
+    // SAFETY: submit via this actual original task broker. The service
+    // initializes the original resources before dispatching accepted jobs.
+    let srcu = unsafe { stela_linux::srcu::Bootstrap::start(owner.clone(), threads) }
+        .map_err(|failure| Error::SrcuStart(failure.error))?;
+    wait_for_child(
+        runtime,
+        threads,
+        time,
+        deadline,
+        || matches!(srcu.status(), stela_linux::srcu::Status::Pending(status) if status.joined),
+    )?;
+    // SAFETY: the taskless dispatcher observed the original joined job.
+    // Only this consuming join can acknowledge public SRCU admission.
+    let ready = unsafe { srcu.join() }.map_err(|failure| Error::Srcu(failure.error))?;
+    let completed = Rc::new(Cell::new(None));
+    let job = Box::pin(Start {
+        claimed,
+        completed: completed.clone(),
+    });
+    // SAFETY: the ready original task broker keeps the callback and all
+    // original owners until its genuine managed child has joined.
+    let pending = unsafe { threads.submit(job) }.map_err(|refusal| Error::Submit(refusal.error))?;
+    wait_for_child(runtime, threads, time, deadline, || pending.status().joined)?;
+    // SAFETY: physical return on the same dispatcher with the joined status.
+    let joined =
+        unsafe { pending.try_join() }.map_err(|_| environment_error(WorkError::Pending))?;
+    if joined.outcome() != Outcome::CallbackReturned {
+        return Err(Error::Child(joined.outcome()));
+    }
+    let job = completed
+        .take()
+        .ok_or(environment_error(WorkError::CorruptContext))?;
+    drop(joined.into_job());
+    drop(ready);
+    let next = domain
+        .next_deadline()
+        .map_err(environment_error)?
+        .unwrap_or(u64::MAX);
+    Ok((owner, threads, job, next))
+}
+
+fn wait_for_child(
+    runtime: Pin<&stela_drivers::platform::work::Runtime<SLOTS>>,
+    threads: &LinuxThreads,
+    time: &dyn Clock,
+    deadline: u64,
+    finished: impl Fn() -> bool,
+) -> Result<(), Error> {
+    loop {
+        // SAFETY: runtime is on its dispatcher after real physical return.
+        unsafe { threads.dispatcher_step() }.map_err(Error::Threads)?;
+        if finished() {
+            return Ok(());
+        }
+        if time.now_ns().map_err(environment_error)? >= deadline {
+            return Err(Error::Timeout);
+        }
+        runtime.step_or_idle().map_err(environment_error)?;
+    }
+}
+
 /// Startup failures distinguish the work environment from driver admission.
 #[derive(Debug)]
 pub(super) enum Error {
     Environment(kernel_work::Error),
+    Kernel(stela_linux::kernel::Error),
+    Threads(stela_linux::task::runtime::RuntimeError),
+    Initial(stela_linux::kernel::InitialStartError),
+    SrcuStart(stela_linux::srcu::StartError),
+    Srcu(stela_linux::srcu::Error),
+    Submit(stela_linux::task::runtime::SubmitError),
+    Child(Outcome),
     Init(Errno),
     Timeout,
     #[cfg(feature = "nvk")]
@@ -1244,6 +1331,13 @@ impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Environment(error) => write!(f, "Linux environment: {error}"),
+            Self::Kernel(error) => write!(f, "{error}"),
+            Self::Threads(error) => write!(f, "{error}"),
+            Self::Initial(error) => write!(f, "{error}"),
+            Self::SrcuStart(error) => write!(f, "{error}"),
+            Self::Srcu(error) => write!(f, "{error}"),
+            Self::Submit(error) => write!(f, "GPU startup job refused: {error:?}"),
+            Self::Child(outcome) => write!(f, "GPU startup child ended: {outcome:?}"),
             Self::Init(error) => write!(f, "Linux initialization failed: errno {}", -error),
             Self::Timeout => {
                 f.write_str("GPU startup exceeded its deadline; native owners remain held")
@@ -1269,7 +1363,16 @@ pub(super) fn pump() {
     let ran = gpu.work.dispatch_linux(|runtime| {
         #[cfg(feature = "nvk")]
         client::start(gpu)?;
-        while runtime.step()? {
+        loop {
+            // SAFETY: no active native task or process loan after each step.
+            if let Err(error) = unsafe { gpu.threads.dispatcher_step() } {
+                output::fatal(format_args!(
+                    "Linux original task retirement failed: {error}"
+                ));
+            }
+            if !runtime.step()? {
+                break;
+            }
             if super::service::shutdown_pending() {
                 gpu.events.pending.store(true, Ordering::Release);
                 break;

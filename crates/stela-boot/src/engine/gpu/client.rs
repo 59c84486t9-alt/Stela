@@ -306,7 +306,7 @@ unsafe fn perform(gpu: &Installed, operation: Operation) -> i64 {
             Operation::Thread(thread) => {
                 (*thread).stack = Stack::map(gpu.window, THREAD_STACK_BYTES);
                 let spawned = match (*thread).stack {
-                    Some(_) => gpu.environment.as_ref().spawn(run_thread, thread.cast()),
+                    Some(_) => gpu.owner.environment().spawn(run_thread, thread.cast()),
                     None => Err(WorkError::Full),
                 };
                 match spawned {
@@ -370,12 +370,12 @@ pub(super) fn start(gpu: &Installed) -> Result<(), WorkError> {
         let accepted = unsafe {
             match current.operation {
                 Operation::Wake => gpu
-                    .environment
-                    .as_ref()
+                    .owner
+                    .environment()
                     .defer_service(serve_wake, request.cast_mut().cast()),
                 _ => gpu
-                    .environment
-                    .as_ref()
+                    .owner
+                    .environment()
                     .spawn(serve, request.cast_mut().cast())
                     .map(drop),
             }

@@ -15,7 +15,8 @@ unsafe extern "C" {
 /// that fails. Each environment does this once.
 ///
 /// # Safety
-/// In an entered Linux owner, on a Linux task, as initcalls may sleep.
+/// On the canonical Linux owner's original managed task after Initial and
+/// SRCU startup have completed. Initcalls may sleep.
 pub unsafe fn start() -> Result<(), Errno> {
     let mut registry = ptr::null_mut();
     // SAFETY: the caller's contract; the image is the build's, and the

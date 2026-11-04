@@ -46,6 +46,7 @@
 #include <linux/proc_fs.h>
 #include <linux/proc_ns.h>
 #include <linux/pidfs.h>
+#include <linux/maple_tree.h>
 #include <stela/file.h>
 #include <stela/linux.h>
 #include <stela/srcu.h>
@@ -125,6 +126,9 @@ int stela_linux_task_bootstrap_resources(const struct stela_linux_owner *owner)
         return error;
     }
 
+    /* Initialize the original VMA storage before any original child can
+     * allocate an mm. This is process context with native IRQs restored. */
+    maple_tree_init();
     /* Linux initializes the descriptor cache during mm_core_init(), before
      * creating the first threads. The native owner supplies their stacks. */
     mm_cache_init();
