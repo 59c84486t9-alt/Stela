@@ -23,6 +23,8 @@ pub mod amd;
 #[cfg(feature = "nouveau-port")]
 pub mod nouveau;
 
+pub mod cold;
+
 #[cfg(feature = "linux-kernel")]
 pub mod drm;
 
