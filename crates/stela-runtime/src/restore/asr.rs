@@ -54,6 +54,8 @@ pub struct Sender {
     /// checksum, and the image offset the next starts at. Once a caller
     /// reads ahead, [`Self::poll`] sends only chunks read ahead.
     ahead: VecDeque<(usize, Vec<u8>)>,
+    /// Full-size buffers already consumed by the stream, reused by prefetch.
+    recycled: Vec<Vec<u8>>,
     ahead_at: u64,
     reads_ahead: bool,
     /// Polls that ended with the guest's window open and no chunk read
@@ -77,6 +79,7 @@ impl Sender {
             output: Output::default(),
             xml: XmlStream::new(Limits::default()),
             ahead: VecDeque::new(),
+            recycled: Vec::new(),
             ahead_at: 0,
             reads_ahead: false,
             starved: 0,
@@ -101,12 +104,18 @@ impl Sender {
             return Ok(());
         }
         let n = (self.size - self.ahead_at).min((room * CHUNK_BYTES) as u64) as usize;
-        let bytes = source.read_at(&self.image, self.ahead_at, n)?;
+        let bytes = source
+            .read_at(&self.image, self.ahead_at, n)
+            .inspect_err(|_| self.recycled.clear())?;
         if bytes.len() != n {
+            self.recycled.clear();
             return Err(Error::Invalid("short ASR payload read"));
         }
         for chunk in bytes.chunks(CHUNK_BYTES) {
-            let mut queued = Vec::with_capacity(chunk.len() + SHA1_BYTES);
+            let mut queued = self
+                .recycled
+                .pop()
+                .unwrap_or_else(|| Vec::with_capacity(chunk.len() + SHA1_BYTES));
             queued.extend_from_slice(chunk);
             if self.checksum {
                 queued.extend_from_slice(&Sha1::digest(chunk));
@@ -151,6 +160,7 @@ impl Sender {
         };
         if matches!(r, Poll::Ready(Err(_))) {
             self.phase = Phase::Failed;
+            self.recycled.clear();
         }
         if self.phase == Phase::Payload {
             if self.output.is_pending() {
@@ -177,7 +187,17 @@ impl Sender {
         }
         if self.output.is_pending() {
             return match self.output.poll(stream) {
-                Poll::Ready(Ok(())) => Poll::Pending,
+                Poll::Ready(Ok(())) => {
+                    if self.phase == Phase::Payload && self.reads_ahead {
+                        let buffer = self.output.take_completed_buffer();
+                        if buffer.capacity() == CHUNK_BYTES + SHA1_BYTES
+                            && self.recycled.len() < AHEAD_CHUNKS
+                        {
+                            self.recycled.push(buffer);
+                        }
+                    }
+                    Poll::Pending
+                }
                 r => r,
             };
         }
@@ -198,6 +218,7 @@ impl Sender {
         }
         if self.phase == Phase::Payload {
             if self.offset == self.size {
+                self.recycled.clear();
                 self.phase = Phase::Complete;
                 return Poll::Ready(Ok(()));
             }
@@ -413,11 +434,15 @@ mod tests {
         assert_eq!(sender.progress().0, 0);
         assert!(sender.starved > 0, "nothing was read ahead yet");
         sender.prefetch(&mut source, 2).unwrap();
+        let last_sent = sender.ahead[1].1.as_ptr();
         assert!(sender.poll(&mut stream, &mut source).is_pending());
         assert_eq!(sender.progress().0, 2 * CHUNK_BYTES as u64);
+        assert_eq!(sender.recycled.last().unwrap().as_ptr(), last_sent);
         sender.prefetch(&mut source, 2).unwrap();
+        assert_eq!(sender.ahead[0].1.as_ptr(), last_sent);
         assert!(sender.poll(&mut stream, &mut source).is_ready());
         assert_eq!(sender.phase(), Phase::Complete);
+        assert!(sender.recycled.is_empty());
         assert!(stream.output.ends_with(&data));
     }
     #[test]

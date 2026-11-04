@@ -8,6 +8,16 @@ pub enum LaneSource {
     General(Register),
     Vector { register: u8, byte: u8 },
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteExtract {
+    pub destination: u8,
+    pub left: u8,
+    pub right: u8,
+    pub bytes: u8,
+    pub offset: u8,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
     Duplicate {
@@ -30,6 +40,7 @@ pub enum Operand {
         signed: bool,
         x64: bool,
     },
+    ByteExtract(ByteExtract),
     /// Each output byte selects left[0..16] or right[16..32]; 255 means zero.
     Permute {
         destination: u8,
@@ -160,21 +171,21 @@ pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
             preserve: word & (1 << 12) != 0,
         }));
     }
-    let mut selection = [255; 16];
     if ExtractBytes.matches(word) {
         let offset = ((word >> 11) & 15) as u8;
         if offset >= bytes {
             return Some(Err(Unsupported));
         }
-        for i in 0..bytes {
-            let source = i + offset;
-            selection[usize::from(i)] = if source < bytes {
-                source
-            } else {
-                16 + source - bytes
-            };
-        }
-    } else if [Reverse16, Reverse32, Reverse64]
+        return Some(Ok(Operand::ByteExtract(ByteExtract {
+            destination: d,
+            left: n,
+            right: m,
+            bytes,
+            offset,
+        })));
+    }
+    let mut selection = [255; 16];
+    if [Reverse16, Reverse32, Reverse64]
         .into_iter()
         .any(|kind| kind.matches(word))
     {
