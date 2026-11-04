@@ -146,12 +146,10 @@ impl Io for Native {
             .is_ok_and(|controller| controller.posted_for(self.id))
     }
     fn ready(&mut self) -> Result<(), BlockError> {
-        let mut controller = self.controller.borrow_mut();
-        let mut device = controller.device(self.id)?;
-        for dci in [1, self.endpoints[0].dci(), self.endpoints[1].dci()] {
-            device.endpoint_ready(dci)?;
-        }
-        Ok(())
+        self.controller
+            .borrow_mut()
+            .device(self.id)?
+            .endpoints_ready(&[1, self.endpoints[0].dci(), self.endpoints[1].dci()])
     }
     fn control(&mut self, request: [u8; 8]) -> Result<Vec<u8>, BlockError> {
         self.controller
