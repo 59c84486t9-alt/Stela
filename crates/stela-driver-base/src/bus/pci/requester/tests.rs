@@ -600,3 +600,79 @@ fn pcie_pending_wait_observes_completion_before_admitting_the_requester() {
     );
     assert_eq!(validate_stopped(&mut function), Ok(()));
 }
+
+fn containment_plan(config: &Config) -> Result<containment::Plan, ClaimError> {
+    containment::Plan::read(|offset, width| {
+        Ok(match width {
+            1 => u32::from(config.read8(offset)?),
+            2 => u32::from(config.read16(offset)?),
+            4 => config.read32(offset)?,
+            _ => panic!("unexpected PCI read width"),
+        })
+    })
+}
+
+#[test]
+fn containment_only_writes_the_exact_disabled_command_and_msi_controls() {
+    use crate::bus::pci::ConfigEffect;
+
+    let mut function = endpoint();
+    cap(&mut function, 0x50, MSI, 0);
+    let config = function.config();
+    config.write16(regs::COMMAND, 7).unwrap();
+    config.write16(0x52, 0x81).unwrap();
+    let plan = containment_plan(config).unwrap();
+    assert!(plan.permits(4, 2, 0x403));
+    assert!(plan.permits(0x52, 2, 0x80));
+    assert!(!plan.permits(4, 4, 0x403));
+    assert!(!plan.permits(0x52, 2, 0x81));
+    assert_eq!(
+        plan.apply(config),
+        Ok(ConfigEffect::WriteMayHaveApplied {
+            offset: 0x52,
+            width: 2
+        })
+    );
+    assert_eq!(config.read16(regs::COMMAND), Ok(0x403));
+    assert_eq!(config.read16(regs::STATUS), Ok(regs::STATUS_CAP_LIST));
+    assert_eq!(config.read16(0x52), Ok(0x80));
+}
+
+#[test]
+fn containment_refuses_changed_control_before_the_first_write() {
+    use crate::bus::pci::{ConfigEffect, ConfigFailure};
+
+    let mut function = endpoint();
+    cap(&mut function, 0x50, MSI, 0);
+    let config = function.config();
+    config.write16(regs::COMMAND, 7).unwrap();
+    config.write16(0x52, 1).unwrap();
+    let plan = containment_plan(config).unwrap();
+    config.write16(0x52, 0x81).unwrap();
+    let failure = plan.apply(config).unwrap_err();
+    assert_eq!(failure.effect, ConfigEffect::None);
+    assert!(matches!(
+        failure.reason,
+        ConfigFailure::Readback { offset: 0x52, .. }
+    ));
+    assert_eq!(config.read16(regs::COMMAND), Ok(7));
+}
+
+#[test]
+fn containment_refuses_to_replay_function_or_pri_reset_commands() {
+    use crate::bus::pci::{ConfigError, ConfigFailure};
+
+    let mut function = endpoint();
+    cap(&mut function, 0x40, PCIE, 0);
+    function.config().write16(0x42, 2).unwrap();
+    let refused = ClaimError::Config(ConfigError::before_effect(
+        ConfigFailure::UnqualifiedControl,
+    ));
+    function.config().write16(0x48, 1 << 15).unwrap();
+    assert!(matches!(containment_plan(function.config()), Err(error) if error == refused));
+
+    function.config().write16(0x48, 0).unwrap();
+    ext(&mut function, 0x100, PRI, 1, 0);
+    function.config().write16(0x104, 2).unwrap();
+    assert!(matches!(containment_plan(function.config()), Err(error) if error == refused));
+}

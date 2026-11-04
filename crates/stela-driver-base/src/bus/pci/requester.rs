@@ -18,6 +18,7 @@ use core::mem::ManuallyDrop;
 
 mod irq_identity;
 pub use irq_identity::RequesterId;
+pub mod containment;
 pub mod preparation;
 pub mod roles;
 
