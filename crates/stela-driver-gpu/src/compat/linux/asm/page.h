@@ -27,8 +27,9 @@ typedef struct pgprot { pgprotval_t pgprot; } pgprot_t;
 
 typedef struct page *pgtable_t;
 
-/* x86-64's user address space; Linux code under Stela serves none. */
-#define TASK_SIZE_MAX	((_AC(1, UL) << 47) - PAGE_SIZE)
+/* Clients are in-process, wherever the placement put the shared window, so
+ * every address can be a user pointer. */
+#define TASK_SIZE_MAX	(_AC(0, UL) - PAGE_SIZE)
 #define TASK_SIZE	TASK_SIZE_MAX
 
 /* Stela has no kernel direct map: the platform translates between physical
