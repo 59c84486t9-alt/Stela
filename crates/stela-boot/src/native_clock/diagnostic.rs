@@ -49,7 +49,7 @@ pub(crate) unsafe fn check_native(
     services.check_identity(&identity)?;
     // SAFETY: the same exclusive clock, BSP and untouched stack pool are kept
     // through the owned service completion and retirement.
-    unsafe { crate::engine::check_native_clock_domain(handoff, owner, &services) }?;
+    unsafe { crate::engine::check_native_clock_domain(handoff, owner, &installed, &services) }?;
     let epoch = services.epoch()?;
     drop(services);
     run(installed, Some(epoch))

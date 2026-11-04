@@ -233,6 +233,26 @@ impl ClockServices {
             .map_err(|error| self.state.cpu.health.fail(error))?;
         Ok(())
     }
+    #[cfg(feature = "diagnostics")]
+    pub(crate) fn heartbeat(&self) -> u64 {
+        self.state.heartbeat.load(Ordering::Acquire)
+    }
+
+    /// # Safety
+    /// The dispatcher's live root and all interrupt-reachable owners stay held
+    /// until the guard ends. Its native callbacks and foreign scopes must join.
+    #[cfg(feature = "diagnostics")]
+    pub(crate) unsafe fn enter_dispatch<'a>(
+        &self,
+        installed: &'a Installed,
+    ) -> Result<DriverExecution<'a>, WorkError> {
+        if !Arc::ptr_eq(&self.state, &installed.state) {
+            return Err(WorkError::InvalidTicket);
+        }
+        // SAFETY: the caller owns the entered root and complete IRQ handoff.
+        unsafe { installed.enter_driver_execution() }
+    }
+
     pub(crate) fn cpu(&self) -> Arc<dyn Cpu> {
         self.state.cpu_view.clone()
     }

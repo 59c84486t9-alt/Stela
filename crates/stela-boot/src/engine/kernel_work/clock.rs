@@ -1,15 +1,36 @@
 //! Pair the installed native clock with a real reserved service continuation.
 use super::*;
-use core::sync::atomic::AtomicU64;
+use crate::native_clock::Installed;
+use core::sync::atomic::{AtomicU8, AtomicU64};
 use stela_drivers::platform::work::{
-    ContextId, LeaveReason, SwitchBinding, TaskContext, service::Domain,
+    ContextId, LeaveReason, ParkOutcome, SwitchBinding, TaskContext, service::Domain,
 };
 
 #[derive(Default)]
 struct OneShotBinding {
     context: AtomicU64,
     sequence: AtomicU64,
-    completed: AtomicBool,
+    phase: AtomicU8,
+}
+
+const NEW: u8 = 0;
+const RUNNING: u8 = 1;
+const PARKED: u8 = 2;
+const COMPLETED: u8 = 3;
+
+impl OneShotBinding {
+    fn same_job(&self, task: &TaskContext) -> bool {
+        self.context.load(Ordering::Acquire) == task.context_id
+            && self.sequence.load(Ordering::Acquire) == task.sequence
+            && (task.stack_start..task.stack_end).contains(&task.stack_pointer)
+    }
+
+    fn transition(&self, from: u8, to: u8) -> Result<(), WorkError> {
+        self.phase
+            .compare_exchange(from, to, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| WorkError::CorruptContext)
+    }
 }
 
 // SAFETY: this one native service records only its attached job identity.
@@ -26,35 +47,44 @@ unsafe impl SwitchBinding for OneShotBinding {
             .compare_exchange(0, task.context_id, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| WorkError::Busy)?;
         self.sequence.store(task.sequence, Ordering::Release);
-        Ok(())
+        self.transition(NEW, RUNNING)
     }
 
-    unsafe fn still_blocked(&self, _: &TaskContext) -> Result<bool, WorkError> {
-        Err(WorkError::Unavailable)
+    unsafe fn still_blocked(&self, task: &TaskContext) -> Result<bool, WorkError> {
+        if !self.same_job(task) || self.phase.load(Ordering::Acquire) != RUNNING {
+            return Err(WorkError::CorruptContext);
+        }
+        // The service made one prepare after observing no due batch. A
+        // producer only publishes a WakeHandle signal; Runtime checks it
+        // under this same IF exclusion before committing the blocked switch.
+        Ok(true)
     }
 
-    unsafe fn leave(&self, _: &TaskContext, _: LeaveReason) -> Result<(), WorkError> {
-        Err(WorkError::Unavailable)
+    unsafe fn leave(&self, task: &TaskContext, reason: LeaveReason) -> Result<(), WorkError> {
+        if !self.same_job(task) || reason != LeaveReason::Blocked {
+            return Err(WorkError::CorruptContext);
+        }
+        self.transition(RUNNING, PARKED)
     }
 
-    unsafe fn arrive(&self, _: &TaskContext, _: bool) -> Result<(), WorkError> {
-        Err(WorkError::Unavailable)
+    unsafe fn arrive(&self, task: &TaskContext, new_job: bool) -> Result<(), WorkError> {
+        if !self.same_job(task) || new_job {
+            return Err(WorkError::CorruptContext);
+        }
+        self.transition(PARKED, RUNNING)
     }
 
     unsafe fn complete(&self, task: &TaskContext) -> Result<(), WorkError> {
-        if self.context.load(Ordering::Acquire) != task.context_id
-            || self.sequence.load(Ordering::Acquire) != task.sequence
-            || self.completed.swap(true, Ordering::AcqRel)
-        {
+        if !self.same_job(task) {
             return Err(WorkError::CorruptContext);
         }
-        Ok(())
+        self.transition(RUNNING, COMPLETED)
     }
 
     unsafe fn detach(&self, task: &TaskContext) -> Result<(), WorkError> {
         if self.context.load(Ordering::Acquire) != task.context_id
             || task.sequence != 0
-            || !self.completed.load(Ordering::Acquire)
+            || self.phase.load(Ordering::Acquire) != COMPLETED
         {
             return Err(WorkError::CorruptContext);
         }
@@ -83,6 +113,11 @@ unsafe extern "C" fn deliver(context: *mut c_void) {
         )?;
         service.context.set(Some(wake.context_id()));
         stage("service binding", service.domain.bind_current(runtime))?;
+        if service.domain.begin(runtime)?.is_some()
+            || runtime.park_if_blocked()? != ParkOutcome::Resumed
+        {
+            return Err(WorkError::CorruptContext);
+        }
         let batch = service
             .domain
             .begin(runtime)?
@@ -103,6 +138,7 @@ unsafe extern "C" fn deliver(context: *mut c_void) {
 pub(crate) unsafe fn check_native_clock_domain(
     handoff: &'static Handoff,
     owner: &mut HostOwner,
+    installed: &Installed,
     clock: &ClockServices,
 ) -> Result<(), WorkError> {
     fn failed(error: Error) -> WorkError {
@@ -124,61 +160,92 @@ pub(crate) unsafe fn check_native_clock_domain(
         .ok_or(WorkError::CorruptContext)?;
     let epoch = stage("epoch", clock.epoch())?;
     work.dispatch(|runtime| {
-        let domain = stage("domain", Domain::tickless(clock.clock(), clock.idle()))?;
-        stage("attach", runtime.attach_service_domain(domain.clone()))?;
-        let target = epoch
-            .now_ns()?
-            .checked_add(100_000)
-            .ok_or(WorkError::Exhausted)?;
-        stage("arm", domain.set_timer(Some(target)))?;
-        // This phase runs with the original loader root held and IF clear.
-        // The companion clock control exercises hardware IRQ and HLT wake.
-        while stage("wait", epoch.now_ns())? < target {
-            core::hint::spin_loop();
-        }
-        let service = Box::new(Service {
-            runtime: core::ptr::from_ref(runtime.get_ref()),
-            domain: domain.clone(),
-            binding: Arc::new(OneShotBinding::default()),
-            context: Cell::new(None),
-            result: Cell::new(None),
-        });
-        let service = Box::into_raw(service);
-        // SAFETY: exact callback and stable allocation, kept on all errors.
-        let ticket = stage("start", unsafe {
-            runtime.start_service(deliver, service.cast())
+        // SAFETY: the original loader root is entered. The clock supplies its
+        // exact interrupt owner, and the service and timer join before return.
+        let execution = stage("dispatch admission", unsafe {
+            clock.enter_dispatch(installed)
         })?;
-        for _ in 0..8 {
-            if runtime.queue().completed(ticket)? {
-                break;
-            }
-            stage("dispatch", runtime.step())?;
+        let result = dispatch_timer(runtime, clock, &epoch);
+        if let Err(error) = result {
+            // A failing fixture may have retained a suspended frame. Stop
+            // while the original root and interrupt owner are still held.
+            crate::output::arguments(format_args!(
+                "CHECK native-clock-domain FAIL timed dispatch {error:?}\n"
+            ));
+            crate::output::fatal("native clock domain did not join");
         }
-        if !runtime.queue().completed(ticket)? {
-            return Err(WorkError::TimedOut);
-        }
-        // SAFETY: the ticket joined the only callback and all its users.
-        let service = unsafe { Box::from_raw(service) };
+        drop(execution);
         stage(
-            "delivery",
-            service.result.get().ok_or(WorkError::CorruptContext)?,
-        )?;
-        let context = service.context.get().ok_or(WorkError::CorruptContext)?;
-        // SAFETY: the completed one-shot job has no foreign binding users.
-        stage("detach", unsafe { runtime.detach_binding(context) })?;
-        drop(service);
-        stage("stop", domain.stop_producers())?;
-        // SAFETY: sole consumer joined, timer finished, no other producer.
-        unsafe {
-            stage("domain retirement", domain.retire())?;
-            stage("runtime retirement", runtime.retire())
-        }
+            "dispatcher restoration",
+            work.reservation.identity.check_dispatch(),
+        )
     })
     .map_err(failed)??;
     crate::output::arguments(format_args!(
-        "CHECK native-clock-domain PASS cpu=installed clock=HPET service=timed retired=joined; no Linux current grant\n"
+        "CHECK native-clock-domain PASS cpu=installed clock=HPET service=park+timer+resume loader_irq=elapsed dispatcher_if=restored retired=joined\n"
     ));
     Ok(())
+}
+
+fn dispatch_timer(
+    runtime: Pin<&work::Runtime<SLOTS>>,
+    clock: &ClockServices,
+    epoch: &crate::native_clock::CounterEpoch,
+) -> Result<(), WorkError> {
+    let domain = stage("domain", Domain::tickless(clock.clock(), clock.idle()))?;
+    stage("attach", runtime.attach_service_domain(domain.clone()))?;
+    let service = Box::new(Service {
+        runtime: core::ptr::from_ref(runtime.get_ref()),
+        domain: domain.clone(),
+        binding: Arc::new(OneShotBinding::default()),
+        context: Cell::new(None),
+        result: Cell::new(None),
+    });
+    let binding = service.binding.clone();
+    let service = Box::into_raw(service);
+    // SAFETY: exact callback and stable allocation, kept on all errors.
+    let ticket = stage("start", unsafe {
+        runtime.start_service(deliver, service.cast())
+    })?;
+    if !stage("initial dispatch", runtime.step())?
+        || binding.phase.load(Ordering::Acquire) != PARKED
+    {
+        return Err(WorkError::CorruptContext);
+    }
+    let heartbeat = clock.heartbeat();
+    let target = epoch
+        .now_ns()?
+        .checked_add(5_000_000)
+        .ok_or(WorkError::Exhausted)?;
+    stage("arm", domain.set_timer(Some(target)))?;
+    for _ in 0..32 {
+        if runtime.queue().completed(ticket)? {
+            break;
+        }
+        stage("idle dispatch", runtime.step_or_idle())?;
+    }
+    if !runtime.queue().completed(ticket)? {
+        return Err(WorkError::TimedOut);
+    }
+    if clock.heartbeat() <= heartbeat || epoch.now_ns()? < target {
+        return Err(WorkError::CorruptContext);
+    }
+    // SAFETY: the ticket joined the only callback and all its users.
+    let service = unsafe { Box::from_raw(service) };
+    stage(
+        "delivery",
+        service.result.get().ok_or(WorkError::CorruptContext)?,
+    )?;
+    let context = service.context.get().ok_or(WorkError::CorruptContext)?;
+    // SAFETY: the completed one-shot job has no foreign binding users.
+    stage("detach", unsafe { runtime.detach_binding(context) })?;
+    drop(service);
+    stage("stop", domain.stop_producers())?;
+    // SAFETY: sole consumer joined, timer finished, no other producer.
+    unsafe {
+        stage("domain retirement", domain.retire())?;
+        stage("runtime retirement", runtime.retire())
+    }
 }
 
 fn stage<T>(name: &str, result: Result<T, WorkError>) -> Result<T, WorkError> {
