@@ -386,12 +386,13 @@ bool stela_air_inspect_stage(const void *, size_t, const struct stela_air_consta
                              const char *entry,
                              enum stela_air_stage, stela_air_visit_stage, void *,
                              struct stela_air_error *);
-/* The stage whose entry list names entry: *stage is zero for air.kernel.
- * Only the lists are read; inspection validates the rest. */
-bool stela_air_entry_stage(const void *, size_t, const char *entry, unsigned *stage,
-                           struct stela_air_error *);
-/* Calls visit with each function the entry lists name and its list, zero for
- * air.kernel, as stela_air_entry_stage numbers them, until it refuses one. */
+/* Looks up the entry's stage on the module being inspected. Zero names
+ * air.kernel, whose visitor still receives every validated kernel. */
+bool stela_air_inspect_entry(const void *, size_t, const struct stela_air_constants *,
+                             const char *entry, unsigned *stage, stela_air_visit_entry,
+                             stela_air_visit_stage, void *, struct stela_air_error *);
+/* Calls visit with each function the entry lists name and its stage,
+ * zero for air.kernel, until it refuses one. */
 typedef bool (*stela_air_visit_function)(void *, const char *name, size_t name_bytes,
                                          unsigned stage);
 bool stela_air_functions(const void *, size_t, stela_air_visit_function, void *,

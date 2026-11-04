@@ -51,8 +51,32 @@ impl UploadArena {
         bytes: &[u8],
         alignment: u64,
     ) -> Result<Upload> {
+        let (upload, data) = self.reserve(source, bytes.len(), alignment)?;
+        data.extend_from_slice(bytes);
+        Ok(upload)
+    }
+
+    /// Appends storage for a payload encoded directly into the arena.
+    pub(super) fn zeroed(
+        &mut self,
+        source: &mut dyn ChunkSource,
+        length: usize,
+        alignment: u64,
+    ) -> Result<(Upload, &mut [u8])> {
+        let (upload, data) = self.reserve(source, length, alignment)?;
+        let start = data.len();
+        data.resize(start + length, 0);
+        Ok((upload, &mut data[start..]))
+    }
+
+    fn reserve(
+        &mut self,
+        source: &mut dyn ChunkSource,
+        length: usize,
+        alignment: u64,
+    ) -> Result<(Upload, &mut Vec<u8>)> {
         debug_assert!(alignment.is_power_of_two());
-        let length = bytes.len() as u64;
+        let length = length as u64;
         let fits = |(chunk, data): &(Chunk, Vec<u8>)| {
             let offset = (data.len() as u64).next_multiple_of(alignment);
             (offset + length <= chunk.size).then_some(offset)
@@ -70,12 +94,14 @@ impl UploadArena {
         };
         let (chunk, data) = self.chunks.last_mut().expect("a chunk was just ensured");
         data.resize(offset as usize, 0);
-        data.extend_from_slice(bytes);
-        Ok(Upload {
-            buffer: chunk.buffer,
-            offset,
-            address: chunk.address + offset,
-        })
+        Ok((
+            Upload {
+                buffer: chunk.buffer,
+                offset,
+                address: chunk.address + offset,
+            },
+            data,
+        ))
     }
 
     /// The chunks and the bytes to copy into each before submission.
@@ -109,7 +135,9 @@ mod tests {
         let mut pool = Pool::default();
         let mut arena = UploadArena::default();
         let first = arena.write(&mut pool, &[1; 10], 16).unwrap();
-        let second = arena.write(&mut pool, &[2; 4], 16).unwrap();
+        let (second, payload) = arena.zeroed(&mut pool, 4, 16).unwrap();
+        assert_eq!(payload, &[0; 4]);
+        payload.fill(2);
         assert_eq!((first.offset, second.offset), (0, 16));
         assert_eq!(second.address, (1 << 32) + 16);
         let big = arena

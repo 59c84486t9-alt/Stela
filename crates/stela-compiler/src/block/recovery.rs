@@ -110,7 +110,8 @@ impl FaultRecovery {
         state: &mut crate::GuestState,
     ) -> Result<Option<RecoverySettlement>, FaultRecoveryError> {
         let mut settlement: Option<RecoverySettlement> = None;
-        let mut values = [None; 32];
+        let mut values = [0; 32];
+        let mut present = 0u32;
         for entry in table {
             if entry.start >= entry.end {
                 return Err(FaultRecoveryError::InvalidNativeRange {
@@ -166,21 +167,23 @@ impl FaultRecovery {
                         .ok_or(FaultRecoveryError::NativeSpillUnavailable { offset })?,
                 };
                 let slot = &mut values[usize::from(binding.guest)];
-                if slot.is_some_and(|previous| previous != value) {
+                let bit = 1 << binding.guest;
+                if present & bit != 0 && *slot != value {
                     return Err(FaultRecoveryError::ConflictingGuestBinding {
                         register: binding.guest,
                     });
                 }
-                *slot = Some(value);
+                *slot = value;
+                present |= bit;
             }
         }
-        for (guest, value) in values.into_iter().enumerate() {
-            if let Some(value) = value {
-                if guest == 31 {
-                    state.sp = value;
-                } else {
-                    state.x[guest] = value;
-                }
+        while present != 0 {
+            let guest = present.trailing_zeros() as usize;
+            present &= present - 1;
+            if guest == 31 {
+                state.sp = values[guest];
+            } else {
+                state.x[guest] = values[guest];
             }
         }
         Ok(settlement)

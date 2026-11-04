@@ -17,16 +17,24 @@ use stela_drivers::{
 
 const SERIAL: &str = "0123456789ABCDEF";
 
-fn device(blocks: u64, block_size: u32, read_only: bool) -> MassStorage {
+fn ram_disk(blocks: u64, block_size: u32, read_only: bool) -> RamDisk {
     let mut disk = RamDisk::new("host", blocks, block_size);
     disk.identity.read_only = read_only;
     for (n, byte) in disk.bytes.iter_mut().enumerate() {
         *byte = (n / block_size as usize) as u8;
     }
+    disk
+}
+
+fn configured(disk: impl BlockDevice + 'static) -> MassStorage {
     let mut d = MassStorage::new(Box::new(disk), SERIAL, "Host Disk").unwrap();
     transfer(&mut d, setup(0, SET_ADDRESS, 2, 0, 0), &[]).unwrap();
     transfer(&mut d, setup(0, SET_CONFIGURATION, 1, 0, 0), &[]).unwrap();
     d
+}
+
+fn device(blocks: u64, block_size: u32, read_only: bool) -> MassStorage {
+    configured(ram_disk(blocks, block_size, read_only))
 }
 
 fn cbw(tag: u32, length: u32, input: bool, cdb: &[u8]) -> Vec<u8> {
@@ -221,6 +229,59 @@ fn reads_and_writes_move_whole_blocks_through_chunks() {
         &[],
     );
     assert_eq!(status, PASSED);
+}
+
+#[test]
+fn a_failed_refill_stalls_without_replaying_the_previous_chunk() {
+    struct FailingRead(RamDisk);
+    impl BlockDevice for FailingRead {
+        fn identity(&self) -> &stela_drivers::block::Identity {
+            self.0.identity()
+        }
+
+        fn read(&mut self, lba: u64, bytes: &mut [u8]) -> Result<(), BlockError> {
+            if lba == 16 {
+                return Err(BlockError::Device { status: 1 });
+            }
+            self.0.read(lba, bytes)
+        }
+
+        fn write(&mut self, lba: u64, bytes: &[u8]) -> Result<(), BlockError> {
+            self.0.write(lba, bytes)
+        }
+    }
+
+    let mut d = configured(FailingRead(ram_disk(32, 4096, false)));
+    let (data, residue, status) = run(
+        &mut d,
+        1,
+        17 * 4096,
+        true,
+        &[READ_10, 0, 0, 0, 0, 0, 0, 0, 17, 0],
+        &[],
+    );
+    assert_eq!((data.len(), residue, status), (CHUNK, 4096, FAILED));
+    assert!(
+        data.as_chunks::<4096>()
+            .0
+            .iter()
+            .enumerate()
+            .all(|(lba, block)| block.iter().all(|&byte| byte == lba as u8))
+    );
+    assert_eq!(sense(&mut d), (3, 0x11));
+
+    let (data, residue, status) = run(
+        &mut d,
+        2,
+        4096,
+        true,
+        &[READ_10, 0, 0, 0, 0, 17, 0, 0, 1, 0],
+        &[],
+    );
+    assert_eq!(
+        (data.as_slice(), residue, status),
+        (&[17; 4096][..], 0, PASSED)
+    );
 }
 
 #[test]

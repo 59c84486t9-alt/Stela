@@ -21,7 +21,7 @@ use alloc::{boxed::Box, format, string::String, vec};
 use core::{
     cell::UnsafeCell,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
 use stela_drivers::block::BlockDevice;
 use stela_engine::machine::Offer;
@@ -30,8 +30,8 @@ use stela_engine::translations;
 use stela_engine::translations::Digest;
 use stela_engine::translations::Record;
 use stela_engine::translations::pack;
-use stela_engine::translations::pack::Pack;
 use stela_engine::translations::pack::Store;
+use stela_engine::translations::pack::{DecodedRecord, Pack, StagedOffer};
 use stela_runtime::pc::fat32::Fat32;
 use stela_runtime::pc::gpt::Guid;
 use uefi::{
@@ -322,11 +322,26 @@ static BOOT: Cell = Cell {
     boot: UnsafeCell::new(None),
 };
 
-/// Availability rarely changes. Keep it off the lock's cache line so a PE
-/// checking for a store does not contend with a PE using it.
+/// Keep the store's capabilities off the lock's cache line so a PE can
+/// skip operations that have no backing without contending with its users.
 #[repr(align(64))]
-struct Available(AtomicBool);
-static AVAILABLE: Available = Available(AtomicBool::new(false));
+struct Available {
+    capabilities: AtomicU8,
+    /// A preflight limit for staging. Admission checks the live store bound.
+    shared_bound: AtomicUsize,
+}
+
+static AVAILABLE: Available = Available {
+    capabilities: AtomicU8::new(0),
+    shared_bound: AtomicUsize::new(0),
+};
+const READ_PACK: u8 = 1 << 0;
+const WRITE_PACK: u8 = 1 << 1;
+const SHARE_BLOCKS: u8 = 1 << 2;
+
+fn available(capabilities: u8) -> bool {
+    AVAILABLE.capabilities.load(Ordering::Acquire) & capabilities != 0
+}
 
 /// Run `f` on the boot's store, alone. No interrupt handler reaches it.
 fn with_boot<R>(f: impl FnOnce(&mut Option<Boot>) -> R) -> R {
@@ -348,27 +363,49 @@ fn with_boot<R>(f: impl FnOnce(&mut Option<Boot>) -> R) -> R {
 /// The engine's view of the boot's store, from any PE's machine.
 pub struct Shared;
 
+impl Shared {
+    fn publish_shared(offer: Offer) {
+        let bound = AVAILABLE.shared_bound.load(Ordering::Acquire);
+        let Some(mut staged) = StagedOffer::new(offer, bound) else {
+            return;
+        };
+        let retired = with_boot(|boot| boot.as_mut()?.store.accept_shared(&mut staged));
+        drop(retired);
+    }
+}
+
 impl Translations for Shared {
-    /// The record, decoded while the other PEs reach the store: the pack's
-    /// bytes outlive the lock.
+    /// The pack bytes outlive the lock, so other PEs can reach the store
+    /// while a record is decoded. A writer also tracks absent keys.
     fn record(&mut self, key: &Digest) -> Option<alloc::sync::Arc<Record>> {
-        let (bytes, translator) = with_boot(|boot| {
+        if !available(READ_PACK | WRITE_PACK) {
+            return None;
+        }
+        let lookup = with_boot(|boot| {
             let store = &mut boot.as_mut()?.store;
+            if let Some(record) = store.cached_record(key) {
+                return Some(Ok(record));
+            }
             match store.stored(key) {
-                Some(bytes) => Some((bytes, *store.translator())),
+                Some(bytes) => Some(Err((bytes, *store.translator()))),
                 None => {
                     store.looked_up(key, false, false);
                     None
                 }
             }
         })?;
-        let record = Record::decode(bytes, &translator, key).ok();
-        with_boot(|boot| {
-            if let Some(boot) = boot {
-                boot.store.looked_up(key, true, record.is_some());
-            }
+        let (bytes, translator) = match lookup {
+            Ok(record) => return Some(record),
+            Err(source) => source,
+        };
+        let decoded = DecodedRecord::decode(bytes, &translator, key);
+        let evicted = with_boot(|boot| {
+            let store = &mut boot.as_mut()?.store;
+            store.looked_up(key, true, decoded.is_some());
+            store.remember_record(decoded.as_ref()?)
         });
-        record.map(alloc::sync::Arc::new)
+        drop(evicted);
+        decoded.map(DecodedRecord::into_record)
     }
 
     fn prepared(
@@ -377,32 +414,39 @@ impl Translations for Shared {
         pc: u64,
         context: &Digest,
     ) -> Option<alloc::sync::Arc<stela_engine::machine::engine::SharedTranslation>> {
+        if !available(SHARE_BLOCKS) {
+            return None;
+        }
         with_boot(|boot| boot.as_mut()?.store.prepared(key, pc, context))
     }
 
     fn offer(&mut self, offer: Offer) {
-        with_boot(|boot| {
-            if let Some(boot) = boot {
-                boot.store.offer(offer);
-            }
-        });
+        let capabilities = AVAILABLE.capabilities.load(Ordering::Acquire);
+        if capabilities & WRITE_PACK != 0 {
+            with_boot(|boot| {
+                if let Some(boot) = boot {
+                    if boot.partition.is_some() {
+                        boot.store.offer(offer);
+                    } else {
+                        boot.store.lend(offer);
+                    }
+                }
+            });
+        } else if capabilities & SHARE_BLOCKS != 0 {
+            Self::publish_shared(offer);
+        }
     }
 
     fn lend(&mut self, offer: Offer) {
-        with_boot(|boot| {
-            if let Some(boot) = boot {
-                boot.store.lend(offer);
-            }
-        });
+        if available(SHARE_BLOCKS) {
+            Self::publish_shared(offer);
+        }
     }
 }
 
 /// The store the engine uses, if the loader read one or the PEs share one.
 pub fn store() -> Option<&'static mut Shared> {
-    AVAILABLE
-        .0
-        .load(Ordering::Acquire)
-        .then(|| Box::leak(Box::new(Shared)))
+    available(READ_PACK | WRITE_PACK | SHARE_BLOCKS).then(|| Box::leak(Box::new(Shared)))
 }
 
 /// Share compiled blocks between PEs, keeping up to `bound` bytes of buffers
@@ -417,7 +461,16 @@ pub fn share(bound: usize) {
             partition: None,
         });
         boot.store.share(bound);
-        AVAILABLE.0.store(true, Ordering::Release);
+        AVAILABLE.shared_bound.store(bound, Ordering::Release);
+        if bound != 0 {
+            AVAILABLE
+                .capabilities
+                .fetch_or(SHARE_BLOCKS, Ordering::Release);
+        } else {
+            AVAILABLE
+                .capabilities
+                .fetch_and(!SHARE_BLOCKS, Ordering::Release);
+        }
     });
 }
 
@@ -446,13 +499,15 @@ pub fn install(contents: &'static [u8]) -> Option<Guid> {
         (None, None) => output::arguments(format_args!("TRANSLATIONS no pack yet\n")),
     }
     with_boot(|boot| {
+        let readable = if store.pack().is_some() { READ_PACK } else { 0 };
         *boot = Some(Boot {
             store,
             bound,
             path: pack_path(&translator, "/"),
             partition: None,
         });
-        AVAILABLE.0.store(true, Ordering::Release);
+        AVAILABLE.shared_bound.store(0, Ordering::Release);
+        AVAILABLE.capabilities.store(readable, Ordering::Release);
     });
     let partition = Guid(contents[16..32].try_into().expect("a GUID"));
     (flags & WRITABLE != 0).then_some(partition)
@@ -463,6 +518,9 @@ pub fn set_partition(partition: Box<dyn BlockDevice>) {
     with_boot(|boot| {
         if let Some(boot) = boot {
             boot.partition = Some(partition);
+            AVAILABLE
+                .capabilities
+                .fetch_or(WRITE_PACK, Ordering::Release);
         }
     });
 }
@@ -476,7 +534,8 @@ pub fn write() {
         path,
         partition: Some(partition),
     }) = with_boot(|boot| {
-        AVAILABLE.0.store(false, Ordering::Release);
+        AVAILABLE.capabilities.store(0, Ordering::Release);
+        AVAILABLE.shared_bound.store(0, Ordering::Release);
         boot.take()
     })
     else {

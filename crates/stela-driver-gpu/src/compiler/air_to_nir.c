@@ -4821,8 +4821,10 @@ translate(const void *bitcode, size_t size, const char *entry,
        !stela_air_inline_calls(&t.metadata, NULL, 0, 0) ||
        !stela_air_dispatch_tables(&t.metadata, options->linked_functions,
                                   options->linked_function_count) ||
-       !stela_air_inline_calls(&t.metadata, LLVMGetNamedFunction(t.module, entry),
-                               options->max_call_stack_depth, options->max_instructions))
+       /* Walk again only for calls the first pass left or table lowering added. */
+       (stela_air_has_defined_calls(t.module) &&
+        !stela_air_inline_calls(&t.metadata, LLVMGetNamedFunction(t.module, entry),
+                                options->max_call_stack_depth, options->max_instructions)))
       goto done;
    t.layout = t.metadata.layout;
    t.air_minor = t.metadata.air_minor;

@@ -12,7 +12,7 @@ fn legacy_first_fault_qualification_is_cached_and_reports_dispatcher_cost() {
     make_pending(&mut machine, index, &input);
     let mut owner = machine.fault_recovery.remove(&index).unwrap();
     let started = std::time::Instant::now();
-    let first = owner.qualify(BASE, None).unwrap();
+    let first = owner.qualify(BASE, None).unwrap().rows();
     let cold = started.elapsed();
     assert!(
         first
@@ -21,7 +21,7 @@ fn legacy_first_fault_qualification_is_cached_and_reports_dispatcher_cost() {
     );
     let started = std::time::Instant::now();
     for _ in 0..32 {
-        assert_eq!(owner.qualify(BASE, None).unwrap(), first);
+        assert_eq!(owner.qualify(BASE, None).unwrap().rows(), first);
     }
     let cached = started.elapsed();
     assert_eq!(
@@ -80,7 +80,7 @@ fn a_compiled_owner_keeps_only_its_packed_rows() {
         native_bytes,
         "the code's image, not a copy"
     );
-    assert_eq!(owner.qualify(BASE, None).unwrap(), expected);
+    assert_eq!(owner.qualify(BASE, None).unwrap().rows(), expected);
     assert!(
         owner.test_packed_bytes() * 3 < unpacked,
         "{} packed bytes of {unpacked}",
@@ -92,6 +92,7 @@ fn a_compiled_owner_keeps_only_its_packed_rows() {
 fn exact_lazy_qualification_replaces_portable_bank_with_only_minted_rows() {
     let (preparation, source, compiled) = store_window();
     let expected = compiled.fault_recovery.clone();
+    let code_bytes = compiled.native.x86_64_code.len();
     let template = crate::translations::StoredBlock {
         native: compiled.native,
         source_bytes: compiled.source_bytes,
@@ -103,9 +104,11 @@ fn exact_lazy_qualification_replaces_portable_bank_with_only_minted_rows() {
             .collect(),
     };
     let mut owner = Template::stored(template, source, preparation, None).installed();
-    assert_eq!(owner.qualify(BASE, None).unwrap(), expected);
+    assert_eq!(owner.code_bytes(), code_bytes);
+    assert_eq!(owner.qualify(BASE, None).unwrap().rows(), expected);
+    assert_eq!(owner.code_bytes(), code_bytes);
     assert_eq!(owner.qualification_attempts, 1);
-    assert_eq!(owner.qualify(BASE, None).unwrap(), expected);
+    assert_eq!(owner.qualify(BASE, None).unwrap().rows(), expected);
     assert_eq!(owner.qualification_attempts, 1);
 }
 
@@ -127,5 +130,5 @@ fn fault_rows_survive_packing() {
     let expected = compiled.fault_recovery.clone();
     let mut owner =
         Template::compiled(Arc::new(Emission::new(source, compiled, preparation))).installed();
-    assert_eq!(owner.qualify(BASE, None).unwrap(), expected);
+    assert_eq!(owner.qualify(BASE, None).unwrap().rows(), expected);
 }

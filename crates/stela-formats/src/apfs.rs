@@ -236,6 +236,7 @@ pub struct Device<R> {
     base: u64,
     block_size: u32,
     nodes: btree::NodeCache,
+    open_cache: volume::OpenCache,
 }
 
 impl<R: ReadAt> Device<R> {
@@ -245,6 +246,7 @@ impl<R: ReadAt> Device<R> {
             base,
             block_size,
             nodes: btree::NodeCache::default(),
+            open_cache: volume::OpenCache::default(),
         }
     }
 
@@ -255,6 +257,7 @@ impl<R: ReadAt> Device<R> {
     pub(crate) fn set_block_size(&mut self, block_size: u32) {
         self.block_size = block_size;
         self.nodes = btree::NodeCache::default();
+        self.open_cache = volume::OpenCache::default();
     }
 
     /// Read bytes at a byte offset inside the container.

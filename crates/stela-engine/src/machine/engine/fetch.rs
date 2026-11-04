@@ -3,6 +3,62 @@
 
 use super::*;
 
+/// Which BTYPEs may land on this instruction. PAC signing instructions use
+/// the current SCTLR to decide whether they also admit BTYPE 0b11.
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub(super) enum Landing {
+    None = 0b0000,
+    Bti = 0b0001,
+    Call = 0b0111,
+    Jump = 0b1011,
+    Any = 0b1111,
+    Pac = 0b1_0000,
+}
+
+impl Landing {
+    pub(super) fn of(word: u32) -> Self {
+        const PACIASP: u32 = 0xd503_233f;
+        const PACIBSP: u32 = 0xd503_237f;
+        if word & 0xffff_ff3f == 0xd503_241f {
+            return match (word >> 6) & 3 {
+                0b00 => Self::Bti,
+                0b01 => Self::Call,
+                0b10 => Self::Jump,
+                _ => Self::Any,
+            };
+        }
+        if word == PACIASP || word == PACIBSP || block::pauth_lr::signs_with_implicit_bti(word) {
+            return Self::Pac;
+        }
+        if matches!(word & 0xffe0_001f, 0xd420_0000 | 0xd440_0000) {
+            Self::Any // BRK and HLT
+        } else {
+            Self::None
+        }
+    }
+
+    pub(super) fn targets(self, cpu: &Cpu) -> u32 {
+        match self {
+            Self::Pac => {
+                const SCTLR_BT0: u64 = 1 << 35;
+                const SCTLR_BT1: u64 = 1 << 36;
+                let forbid = if cpu.pstate.el == 0 {
+                    SCTLR_BT0
+                } else {
+                    SCTLR_BT1
+                };
+                if cpu.regime_sctlr() & forbid == 0 {
+                    Self::Any as u32
+                } else {
+                    Self::Call as u32
+                }
+            }
+            static_targets => static_targets as u32,
+        }
+    }
+}
+
 impl<H: Host, D: Devices> Machine<H, D> {
     /// Arm `BranchTargetCheck`: the Branch Target exception (EC 0x0D)
     /// reports BTYPE in ISS and leaves it set for SPSR.
@@ -371,29 +427,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// [`Self::branch_target_compatible`] for BTYPE `btype`.
     pub(super) fn branch_target_accepts(&self, word: u32, btype: u8) -> bool {
-        const PACIASP: u32 = 0xd503_233f;
-        const PACIBSP: u32 = 0xd503_237f;
-        const SCTLR_BT0: u64 = 1 << 35;
-        const SCTLR_BT1: u64 = 1 << 36;
-        if word & 0xffff_ff3f == 0xd503_241f {
-            return match (word >> 6) & 3 {
-                0b00 => btype == 0,
-                0b01 => btype != 0b11,
-                0b10 => btype != 0b10,
-                _ => true,
-            };
-        }
-        if word == PACIASP || word == PACIBSP || block::pauth_lr::signs_with_implicit_bti(word) {
-            let sctlr = self.cpu.regime_sctlr();
-            let forbid = if self.cpu.pstate.el == 0 {
-                SCTLR_BT0
-            } else {
-                SCTLR_BT1
-            };
-            return btype != 0b11 || sctlr & forbid == 0;
-        }
-        // BRK and HLT.
-        matches!(word & 0xffe0_001f, 0xd420_0000 | 0xd440_0000)
+        Landing::of(word).targets(&self.cpu) & (1 << btype) != 0
     }
 
     /// The EL an FP/SIMD access traps to, if it traps (Arm

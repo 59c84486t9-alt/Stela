@@ -211,10 +211,8 @@ impl Session {
         {
             // A full-size last USB packet is followed by a ZLP; the mux
             // frame length remains independent of that USB terminator.
-            self.output = Some(
-                self.host
-                    .submit_out(&packet, packet.len().is_multiple_of(MAX_PACKET))?,
-            );
+            let terminate = packet.len().is_multiple_of(MAX_PACKET);
+            self.output = Some(self.host.submit_out_owned(packet, terminate)?);
             submitted = true;
         }
         Ok(moved || submitted)

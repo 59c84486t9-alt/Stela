@@ -103,12 +103,15 @@ impl Ring {
 
     /// Writes one TD, its first TRB owned last, and returns each TRB's
     /// address.
-    pub(super) fn push(&mut self, trbs: &[(u64, u32, u32)]) -> Result<Vec<u64>, BlockError> {
-        let mut addresses = Vec::with_capacity(trbs.len());
+    pub(super) fn push<const N: usize>(
+        &mut self,
+        trbs: &[(u64, u32, u32); N],
+    ) -> Result<[u64; N], BlockError> {
+        let mut addresses = [0; N];
         let mut first = None;
         for (n, &(parameter, status, control)) in trbs.iter().enumerate() {
             let at = self.index * TRB;
-            addresses.push(self.address());
+            addresses[n] = self.address();
             self.buffer.write(at, parameter);
             self.buffer.write(at + 8, status);
             let cycle = u32::from(self.cycle);

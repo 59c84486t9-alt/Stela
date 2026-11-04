@@ -1210,9 +1210,18 @@ fn real_block_api_chunks_units_checks_bounds_and_never_copies_short_reads() {
     let mut untouched = [0xa5; 512];
     assert!(disks[0].read(0, &mut untouched).is_err());
     assert_eq!(untouched, [0xa5; 512]);
-    assert_eq!(disks[0].cdb(false, false, u32::MAX as u64, 1)[0], 0x28);
-    assert_eq!(disks[0].cdb(false, false, u32::MAX as u64, 2)[0], 0x88);
-    assert_eq!(disks[0].cdb(true, false, 1u64 << 32, 1)[0], 0x8a);
+    assert_eq!(
+        scsi::read_write(false, false, u32::MAX as u64, 1).as_ref()[0],
+        0x28
+    );
+    assert_eq!(
+        scsi::read_write(false, false, u32::MAX as u64, 2).as_ref()[0],
+        0x88
+    );
+    assert_eq!(
+        scsi::read_write(true, false, 1u64 << 32, 1).as_ref()[0],
+        0x8a
+    );
 }
 
 #[test]

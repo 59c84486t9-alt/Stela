@@ -648,6 +648,96 @@ mod resident {
         Ok(runtime)
     }
 
+    #[test]
+    fn ordinary_direct_ram_loop_keeps_budget_state_and_cached_source_map() -> Result<()> {
+        const BODY: [u32; 7] = [
+            0xf940_0022, // ldr x2, [x1]
+            0xf940_0423, // ldr x3, [x1, #8]
+            SUBS_X0_ONE,
+            0x9100_4021, // add x1, x1, #16
+            0x8b02_0084, // add x4, x4, x2
+            0x8b03_0084, // add x4, x4, x3
+            0x54ff_ff41, // b.ne BASE
+        ];
+        const BRK: u32 = 0xd420_0120;
+        const DATA: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+        let words: Vec<_> = BODY.into_iter().chain([BRK]).collect();
+        let next = GuestAddress(BASE.0 + (BODY.len() * size_of::<u32>()) as u64);
+        let mut input = DATA.to_vec();
+        let base = input.as_mut_ptr() as u64;
+        let iterations = DATA.len() / 2;
+        let initial = || {
+            let mut state = thread(iterations as u64);
+            state.registers.x[1] = base;
+            state
+        };
+        let expected = |completed: usize| {
+            let mut state = initial().registers;
+            if completed != 0 {
+                let last = completed * 2 - 2;
+                state.x[0] -= completed as u64;
+                state.x[1] += (completed * 2 * size_of::<u64>()) as u64;
+                state.x[2] = DATA[last];
+                state.x[3] = DATA[last + 1];
+                state.x[4] = state.x[4].wrapping_add(DATA[..last + 2].iter().sum());
+                state.nzcv = ARM_CARRY | if completed == iterations { ARM_ZERO } else { 0 };
+            }
+            state
+        };
+        let cache = tempfile::tempdir()?;
+        let mut runtime = ordinary(cache.path(), &words)?;
+        for budget in 0..=iterations {
+            let mut state = initial();
+            // SAFETY: each iteration reads two aligned, live elements of
+            // input before advancing the pointer. The loop writes no RAM.
+            let outcome = unsafe { runtime.run(&mut state, Some(next), budget)? };
+            assert_eq!(outcome.blocks_executed, budget);
+            assert_eq!(state.registers, expected(budget));
+            if budget == iterations {
+                assert_eq!(state.pc, next);
+                assert_eq!(outcome.reason, StopReason::StopAddress);
+            } else {
+                assert_eq!(state.pc, BASE);
+                assert_eq!(outcome.reason, StopReason::BudgetExhausted);
+            }
+        }
+
+        let manifest = runtime.loaded_manifest(BASE).unwrap();
+        let source: Vec<_> = BODY.into_iter().flat_map(u32::to_le_bytes).collect();
+        assert_eq!(
+            manifest.identity.source_sha256,
+            stela_formats::sha256(&source)
+        );
+        assert_eq!(
+            manifest.identity.abi,
+            BlockProfile::new(Features::RESIDENT_LOOPS).abi()
+        );
+        assert_eq!(manifest.source_map[0], (BASE, 0));
+        assert_eq!(manifest.source_map.len(), BODY.len());
+        assert!(manifest.source_map.windows(2).all(|pair| {
+            pair[1].0.0 - pair[0].0.0 == size_of::<u32>() as u64 && pair[1].1 > pair[0].1
+        }));
+        let mut reload = ordinary(cache.path(), &words)?;
+        let mut state = initial();
+        // SAFETY: the same immutable array and source, followed by a BRK
+        // that returns a modeled trap instead of accessing memory.
+        let outcome = unsafe { reload.run(&mut state, None, iterations + 1)? };
+        assert_eq!(outcome.blocks_executed, iterations + 1);
+        assert_eq!(outcome.disk_cache_hits, 1);
+        assert_eq!(
+            reload.loaded_manifest(BASE).unwrap().source_map,
+            manifest.source_map
+        );
+        assert_eq!(state.registers, expected(iterations));
+        assert_eq!(state.pc, next);
+        assert!(
+            matches!(outcome.reason, StopReason::SynchronousTrap { trap }
+            if trap.kind == stela_compiler::block::TrapKind::SoftwareBreakpoint
+                && trap.instruction_pc == next && trap.immediate == 9)
+        );
+        Ok(())
+    }
+
     fn crc_thread() -> (ThreadState, GuestState) {
         let mut state = thread(0);
         state.registers.x[8] = 0x1234_5678_0000_0000 | u64::from(CRC_INITIAL);

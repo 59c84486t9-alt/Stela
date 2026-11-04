@@ -89,6 +89,31 @@ pub(crate) fn emit_ordinary_for_target(
             optimize: true,
             fault_table: false,
             pinned: false,
+            frame_loop: None,
+        },
+        super::MemoryChecks::DEFAULT,
+        super::NativeSystem::NONE,
+    )
+    .0
+}
+
+pub(crate) fn emit_frame_loop(
+    instructions: &[Instruction],
+    terminal: Option<&(GuestAddress, Terminator)>,
+    fallthrough: GuestAddress,
+    target: crate::TargetCpu,
+    entry: GuestAddress,
+) -> NativeBlock {
+    emit_selected(
+        instructions,
+        terminal,
+        fallthrough,
+        target,
+        RegionPolicy {
+            optimize: true,
+            fault_table: false,
+            pinned: false,
+            frame_loop: Some(entry),
         },
         super::MemoryChecks::DEFAULT,
         super::NativeSystem::NONE,
@@ -129,6 +154,7 @@ pub(crate) fn emit_for_target(
             optimize: false,
             fault_table: false,
             pinned: false,
+            frame_loop: None,
         },
         checks,
         super::NativeSystem::NONE,
@@ -162,6 +188,7 @@ pub(crate) fn emit_system_mode(
             optimize: false,
             fault_table: true,
             pinned: true,
+            frame_loop: None,
         },
         super::MemoryChecks {
             guest_range: true,
@@ -178,6 +205,7 @@ struct RegionPolicy {
     fault_table: bool,
     /// Keep guest registers in host registers ([`super::pinned`]).
     pinned: bool,
+    frame_loop: Option<GuestAddress>,
 }
 
 /// With `fault_table`, region accesses keep dirty values in registers and
@@ -195,6 +223,7 @@ fn emit_selected(
         optimize: optimize_regions,
         fault_table,
         pinned,
+        frame_loop,
     } = regions;
     let mut fault_recovery = vec![];
     let mut block = super::Emitted::default();
@@ -209,6 +238,7 @@ fn emit_selected(
         code.set_linked_block(first.0);
     }
     code.set_constant_time(target.data_independent_timing());
+    let frame_loop = frame_loop.map(|entry| super::region::FrameLoop::begin(code, entry));
     let mut fixups = vec![];
     // The DIT audit covers each instruction's own lowering, not the
     // register-allocated and clean-load regions' recipes.
@@ -240,6 +270,9 @@ fn emit_selected(
     // What the last instruction emitted left in registers.
     let mut after = Held::NOTHING;
     let mut out_of_line = OutOfLine::default();
+    // Forwarding probes encode one expected MOV at a time. Keep their
+    // bytes in one buffer across the block and its temporary candidates.
+    let mut scratch = Code::default();
     // Each branch the block runs past: its jump to a side exit, its target
     // and the instructions up to it.
     let mut side_exits = vec![];
@@ -283,7 +316,7 @@ fn emit_selected(
         {
             let count = region.consumed_instructions;
             let chunk = &instructions[cursor..cursor + count];
-            let baseline = |checks_at: &dyn Fn(usize) -> super::MemoryChecks| {
+            let mut baseline = |checks_at: &dyn Fn(usize) -> super::MemoryChecks| {
                 let mut code = Code::new();
                 let mut map = vec![];
                 let mut fixups = vec![];
@@ -292,11 +325,14 @@ fn emit_selected(
                     map.push((instruction.pc, code.len()));
                     after = emit_single(
                         &mut code,
+                        &mut scratch,
                         None,
                         instruction,
                         &mut fixups,
-                        target,
-                        checks_at(cursor + index),
+                        SingleOptions {
+                            target,
+                            checks: checks_at(cursor + index),
+                        },
                         after,
                     );
                 }
@@ -367,11 +403,14 @@ fn emit_selected(
         }
         after = emit_single(
             code,
+            &mut scratch,
             Some(&mut out_of_line),
             instruction,
             &mut fixups,
-            target,
-            checks_at(cursor),
+            SingleOptions {
+                target,
+                checks: checks_at(cursor),
+            },
             held,
         );
         if frame_bound {
@@ -385,18 +424,30 @@ fn emit_selected(
         "ordinary instruction prefix cannot branch"
     );
     out_of_line.place(code);
-    emit_terminal(
-        code,
-        &mut block.source_map,
-        terminal,
-        TerminalContext {
-            fallthrough,
-            native,
-            checks,
-            rax: after.rax,
-            target,
-        },
-    );
+    if let Some(frame_loop) = frame_loop {
+        let Some((pc, Terminator::Branch(operation))) = terminal else {
+            unreachable!("a frame loop has a validated direct branch")
+        };
+        debug_assert!(side_exits.is_empty());
+        block.source_map[0].1 = 0;
+        block.source_map.push((*pc, code.len()));
+        code.set_instruction(block.source_map.len() - 1);
+        let taken = branch_condition(code, operation, after.rax);
+        frame_loop.finish(code, taken, fallthrough);
+    } else {
+        emit_terminal(
+            code,
+            &mut block.source_map,
+            terminal,
+            TerminalContext {
+                fallthrough,
+                native,
+                checks,
+                rax: after.rax,
+                target,
+            },
+        );
+    }
     // After the terminal, whose direct exits end the code before them.
     let instructions_run = block.source_map.len();
     for (jump, target, run) in side_exits {
@@ -432,6 +483,11 @@ impl Held {
     };
 }
 
+struct SingleOptions {
+    target: crate::TargetCpu,
+    checks: super::MemoryChecks,
+}
+
 /// One instruction outside the regions, after an emission that left
 /// `held`; returns what it leaves. An instruction that first loads the
 /// register the previous one just stored from RAX finds it there, and one
@@ -439,13 +495,14 @@ impl Held {
 /// `out_of_line`, numerical instructions move their slow paths there.
 fn emit_single(
     code: &mut Code,
+    scratch: &mut Code,
     out_of_line: Option<&mut OutOfLine>,
     instruction: &Instruction,
     fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
-    target: crate::TargetCpu,
-    checks: super::MemoryChecks,
+    options: SingleOptions,
     held: Held,
 ) -> Held {
+    let SingleOptions { target, checks } = options;
     if let Operation::FloatingPoint(operand) = &instruction.operation {
         let Some(out_of_line) = out_of_line else {
             super::simd::emit_numerical(code, operand, instruction.pc, target);
@@ -469,8 +526,8 @@ fn emit_single(
         super::simd::emit_after(code, operand, target, checks, held.xmm0);
         // A first load of the vector XMM0 holds changes nothing.
         if let Some(vector) = held.xmm0 {
-            let load = super::simd::xmm0_load(vector);
-            if code[start..].starts_with(&load) && code.len() > start + load.len() {
+            let load = super::simd::xmm0_load(scratch, vector);
+            if code[start..].starts_with(load) && code.len() > start + load.len() {
                 code.remove_instruction(start..start + load.len());
             }
         }
@@ -487,23 +544,35 @@ fn emit_single(
         // The preceding pinned capture preserves the host flags. MOV and
         // NOT keep them live while preparing these select operands.
         super::conditional_select::emit(code, operand, true);
+    } else if let super::Rax::Guest(register) = held.rax
+        && let Operation::AddSub {
+            width,
+            subtract: true,
+            flags: true,
+            destination: Register::Zero,
+            source,
+            immediate,
+        } = instruction.operation
+        && source == register
+    {
+        super::pinned::compare_held_immediate(code, width, immediate);
     } else {
         super::emit_instruction(code, instruction, fixups, target, checks);
     }
     // The instruction keeps a non-empty native range for its source map.
     if let super::Rax::Guest(register) = held.rax
-        && let Some(load) = super::register_load(code, register)
-        && code[start..].starts_with(&load)
+        && let Some(load) = super::register_load(scratch, register, code.is_pinned())
+        && code[start..].starts_with(load)
         && code.len() > start + load.len()
     {
         code.remove_instruction(start..start + load.len());
     }
-    let rax = match super::rax_after(&instruction.operation) {
+    let rax = match super::rax_after(&instruction.operation, code.is_pinned()) {
         // A direct form may leave the result only in its host register.
         super::Rax::Guest(register)
             if code.is_pinned()
-                && !super::register_store(code, register)
-                    .is_some_and(|store| code.ends_with(&store)) =>
+                && !super::register_store(scratch, register, true)
+                    .is_some_and(|store| code.ends_with(store)) =>
         {
             super::Rax::Unknown
         }
@@ -512,11 +581,13 @@ fn emit_single(
     debug_assert!(match rax {
         super::Rax::Unknown => true,
         super::Rax::Nzcv => code.ends_with(&nzcv_store(code.is_pinned())),
-        super::Rax::Guest(register) =>
-            super::register_store(code, register).is_some_and(|store| code.ends_with(&store)),
+        super::Rax::Guest(register) => super::register_store(scratch, register, code.is_pinned())
+            .is_some_and(|store| code.ends_with(store)),
     });
     let xmm0 = match &instruction.operation {
-        Operation::Simd(operand) => super::simd::xmm0_after(operand, &code[start..], held.xmm0),
+        Operation::Simd(operand) => {
+            super::simd::xmm0_after(scratch, operand, &code[start..], held.xmm0)
+        }
         _ => None,
     };
     Held { rax, xmm0 }

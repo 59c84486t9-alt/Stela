@@ -56,6 +56,7 @@ const SEND_BUFFER: usize = 64 * 1024;
 /// polling the interface reports it.
 struct Phy<L> {
     link: L,
+    tx_frame: Vec<u8>,
     fault: Option<LinkError>,
     /// Whether the last poll took a frame from the link.
     received: bool,
@@ -77,8 +78,10 @@ impl phy::RxToken for Rx {
 
 impl<L: Link> phy::TxToken for Tx<'_, L> {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, length: usize, f: F) -> R {
-        let mut frame = vec![0; length];
-        let result = f(&mut frame);
+        let frame = &mut self.0.tx_frame;
+        frame.clear();
+        frame.resize(length, 0);
+        let result = f(frame);
         // Tentative addresses stay off the wire until their DAD probe ends.
         if self.0.manage_ipv6 && frame.len() >= 54 && frame[12..14] == [0x86, 0xdd] {
             let source = Ipv6Addr::from(<[u8; 16]>::try_from(&frame[22..38]).unwrap());
@@ -86,7 +89,7 @@ impl<L: Link> phy::TxToken for Tx<'_, L> {
                 return result;
             }
         }
-        if let Err(error) = self.0.link.transmit(&frame) {
+        if let Err(error) = self.0.link.transmit(frame) {
             self.0.fault.get_or_insert(error);
         }
         result
@@ -231,6 +234,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         config.slaac = true;
         let mut phy = Phy {
             link,
+            tx_frame: Vec::new(),
             fault: None,
             received: false,
             probes: Vec::new(),
