@@ -2139,6 +2139,9 @@ fn start_platform(
             )),
         }
     }
+    if let Some(pci) = &contained_pci {
+        remappers.forward_pci_bridges(pci);
+    }
     let prepared_sci = match (&contained_pci, &handoff.power) {
         (Some(pci), Some(power)) => {
             match aml::sci::Prepared::capture(pci.source(), power.clone()) {

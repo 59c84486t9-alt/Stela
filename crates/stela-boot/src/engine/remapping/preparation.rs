@@ -100,6 +100,62 @@ unsafe impl stela_drivers::bus::pci::requester::preparation::AttachmentBackend f
 }
 
 impl Remappers {
+    pub(in crate::engine) fn forward_pci_bridges(&self, pci: &native_mmio::ContainedPci<'_>) {
+        let Some(lines) = &self.initial_lines else {
+            return;
+        };
+        let source = pci.source();
+        let bridges = match pci.bridges() {
+            Ok(bridges) if bridges.is_empty() => return,
+            Ok(bridges) => bridges,
+            Err(error) => {
+                output::arguments(format_args!(
+                    "HOST PCI bridge inventory unavailable: {error:?}\n"
+                ));
+                return;
+            }
+        };
+        // SAFETY: this startup step precedes every driver and competing PCI
+        // writer. The same complete blocked remappers and line owners are kept.
+        if let Err(error) = unsafe { pci.recheck_stopped() } {
+            output::arguments(format_args!(
+                "HOST PCI bridge forwarding withheld: {error}\n"
+            ));
+            return;
+        }
+        for address in bridges {
+            let rid = requester(address);
+            let blocked = self
+                .vtd(address.segment, rid)
+                .map_err(|_| DmaError::IommuUnavailable)
+                .and_then(|taken| {
+                    let taken = taken.ok_or(DmaError::IommuUnavailable)?;
+                    self.initial_requester(source, taken, rid)?
+                        .ok_or(DmaError::DrainUnavailable)
+                });
+            let blocked = match blocked {
+                Ok(blocked) => blocked,
+                Err(error) => {
+                    output::arguments(format_args!(
+                        "HOST PCI bridge {address} blocked context unavailable: {error:?}\n"
+                    ));
+                    continue;
+                }
+            };
+            // SAFETY: exact firmware-selected blocked RID, the original kept
+            // line paths, checked stopped leaves and frozen topology. Other
+            // reopened ports retain their own original blocked contexts.
+            match unsafe { source.forward_cold_bridge(address, blocked, lines) } {
+                Ok(()) => output::arguments(format_args!(
+                    "HOST PCI bridge {address} forwarding restored with routing sealed\n"
+                )),
+                Err(error) => output::arguments(format_args!(
+                    "HOST PCI bridge forwarding withheld: {error}\n"
+                )),
+            }
+        }
+    }
+
     pub(in crate::engine) fn preparation(
         &self,
         source: &native_mmio::Source,

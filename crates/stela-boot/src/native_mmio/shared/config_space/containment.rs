@@ -7,13 +7,15 @@ use stela_boot_core::ecam::topology;
 use stela_drivers::{
     bus::pci::{
         ConfigEffect, ConfigError, ConfigFailure,
+        capability::capabilities,
         owned::{
             ConfigParts, OwnedConfig, PreparedConfig, UnpublishedConfig,
             grant::{
                 CompletionCheck, ConfigCustody, ConfigEpoch, ConfigOperation, DriverCustody,
-                Operation, PrepublicationCustody, PrepublicationGrant,
+                DriverGrant, Operation, PrepublicationCustody, PrepublicationGrant,
             },
         },
+        regs::{COMMAND, COMMAND_MASTER},
         requester::{ClaimError, containment::Plan, wait_for_pending_transactions},
     },
     sync::{FaultState, FirstFault},
@@ -33,6 +35,38 @@ impl<'a> ContainedPci<'a> {
 
     pub(crate) fn functions(&self) -> usize {
         self.functions
+    }
+
+    /// Original populated bridge routes in upstream-first order.
+    pub(crate) fn bridges(&self) -> Result<Vec<Address>, Error> {
+        let cohort = self
+            .source
+            .pci_slots
+            .0
+            .try_borrow()
+            .map_err(|_| Error::Busy)?;
+        let Cohort::Parked(fabric) = &*cohort else {
+            return Err(Error::Unavailable);
+        };
+        let mut bridges = Vec::new();
+        for slot in &fabric.slots {
+            let Some(buses) = slot.header.bridge else {
+                continue;
+            };
+            let secondary = buses.to_le_bytes()[1];
+            if secondary > slot.address.bus
+                && fabric
+                    .slots
+                    .binary_search_by_key(&(slot.address.segment, secondary), |slot| {
+                        (slot.address.segment, slot.address.bus)
+                    })
+                    .is_ok()
+            {
+                bridges.try_reserve(1).map_err(|_| Error::Exhausted)?;
+                bridges.push(slot.address);
+            }
+        }
+        Ok(bridges)
     }
 
     /// Compare firmware's framebuffer association with the same parked
@@ -152,6 +186,7 @@ enum Cause {
     Claim(ClaimError),
     Topology(topology::Error),
     BridgeForwarding,
+    BridgeAlias,
 }
 
 impl fmt::Display for ContainmentError {
@@ -162,7 +197,8 @@ impl fmt::Display for ContainmentError {
         match self.cause {
             Cause::Claim(cause) => write!(f, "{cause:?} ({:?})", self.effect),
             Cause::Topology(cause) => write!(f, "PCI topology {cause:?}"),
-            Cause::BridgeForwarding => f.write_str("upstream bridge forwarding is still sealed"),
+            Cause::BridgeForwarding => f.write_str("upstream bridge forwarding is unavailable"),
+            Cause::BridgeAlias => f.write_str("bridge DMA requester aliases are unqualified"),
         }
     }
 }
@@ -218,6 +254,60 @@ struct Slot {
     plan: Rc<Plan>,
     ancestor: Parent,
     route: topology::Parent,
+    forwarding: Option<Forwarding>,
+}
+
+enum Forwarding {
+    Open {
+        config: OwnedConfig,
+        blocked: BlockedRequester<MmioRegisters>,
+        command: u16,
+    },
+    Refused {
+        _original: ConfigParts<DriverGrant>,
+        _blocked: BlockedRequester<MmioRegisters>,
+    },
+}
+
+impl Forwarding {
+    fn check(&self) -> Result<(), ContainmentError> {
+        let Self::Open {
+            config,
+            blocked,
+            command,
+        } = self
+        else {
+            return Err(Error::Unavailable.into());
+        };
+        blocked.check().map_err(|_| Error::Unavailable)?;
+        check_command(config, *command, ConfigEffect::None)?;
+        Ok(())
+    }
+}
+
+fn check_command(
+    config: &OwnedConfig,
+    expected: u16,
+    effect: ConfigEffect,
+) -> Result<(), ConfigError> {
+    let observed = config.try_read16(COMMAND).map_err(|mut error| {
+        if effect != ConfigEffect::None {
+            error.effect = effect;
+        }
+        error
+    })?;
+    if observed == expected {
+        return Ok(());
+    }
+    Err(ConfigError {
+        reason: ConfigFailure::Readback {
+            offset: COMMAND,
+            width: 2,
+            expected: expected.into(),
+            observed: observed.into(),
+        },
+        effect,
+    })
 }
 
 #[derive(Default)]
@@ -225,6 +315,30 @@ struct Fabric {
     roots: Vec<Option<Assignment<RootBus>>>,
     slots: Vec<Slot>,
     refusal: Option<SlotRefusal>,
+}
+
+impl Fabric {
+    fn check_upstream(&self, mut route: topology::Parent) -> Result<(), ContainmentError> {
+        while let topology::Parent::Bridge(address) = route {
+            let index = self
+                .slots
+                .binary_search_by_key(&address, |slot| slot.address)
+                .expect("original parent remains in the fabric");
+            let bridge = &self.slots[index];
+            bridge
+                .forwarding
+                .as_ref()
+                .ok_or(ContainmentError {
+                    address: Some(address),
+                    cause: Cause::BridgeForwarding,
+                    effect: ConfigEffect::None,
+                })?
+                .check()
+                .map_err(|error| error.at(address))?;
+            route = bridge.route;
+        }
+        Ok(())
+    }
 }
 
 struct SlotRefusal {
@@ -315,6 +429,29 @@ impl Header {
         }
         Ok(())
     }
+}
+
+// PCI Express root, upstream switch and downstream switch ports keep the
+// downstream requester ID. PCI/PCI-X translation can introduce DMA aliases
+// which the current single-RID attachment cannot grant.
+fn check_pcie_port(config: &UnpublishedConfig) -> Result<(), ContainmentError> {
+    const EXPRESS: u8 = 0x10;
+    const PORT_TYPE_MASK: u16 = 0xf0;
+    for entry in capabilities(config) {
+        let entry = entry.map_err(ClaimError::from)?;
+        if entry.id == EXPRESS {
+            let flags = config.try_read16(entry.offset + 2)?;
+            if matches!(flags & PORT_TYPE_MASK, 0x40 | 0x50 | 0x60) {
+                return Ok(());
+            }
+            break;
+        }
+    }
+    Err(ContainmentError {
+        address: None,
+        cause: Cause::BridgeAlias,
+        effect: ConfigEffect::None,
+    })
 }
 
 struct Input {
@@ -535,7 +672,7 @@ unsafe impl ConfigCustody for SlotCustody {
 // writes are the exact disabling values planned from the complete census.
 unsafe impl PrepublicationCustody for SlotCustody {}
 
-// SAFETY: only promote_cold_config can turn on driver operations. It joins
+// SAFETY: only promote_parked can turn on driver operations. It joins
 // the original parked slot and ancestor assignment to the checked blocked
 // requester and original interrupt paths, preserving the BME seal.
 unsafe impl DriverCustody for SlotCustody {}
@@ -555,6 +692,86 @@ impl Source {
         address: Address,
         blocked: &BlockedRequester<MmioRegisters>,
         lines: &InitialPciLines,
+    ) -> Result<OwnedConfig, ContainmentError> {
+        // SAFETY: same original exclusive, blocked requester and line paths.
+        unsafe { self.promote_parked(address, blocked, lines, false) }
+    }
+
+    /// Restore only forwarding through one original PCIe port. Keep the
+    /// routing seal, configuration owner and its original blocked context.
+    ///
+    /// # Safety
+    /// Same proof as promote_cold_config, plus the complete original cohort
+    /// was rechecked before any forwarding and all leaf owners remain parked
+    /// with their master seals and new DMA roots blocked.
+    pub(crate) unsafe fn forward_cold_bridge(
+        &self,
+        address: Address,
+        blocked: BlockedRequester<MmioRegisters>,
+        lines: &InitialPciLines,
+    ) -> Result<(), ContainmentError> {
+        // SAFETY: the caller keeps the original stopped descendant cohort,
+        // and this selects only the original Type1 port for the exact RID.
+        let mut config = unsafe { self.promote_parked(address, &blocked, lines, true) }?;
+        let result = (|| {
+            let command = config.try_read16(COMMAND)? | COMMAND_MASTER;
+            // SAFETY: the whole original fabric is drained and held, with
+            // blocked contexts, disabled leaves and no competing writers.
+            // The original routing seal stays enforced by the configuration.
+            unsafe { config.release_bus_forwarding_seal() }?;
+            config.try_write16(COMMAND, command)?;
+            check_command(
+                &config,
+                command,
+                ConfigEffect::WriteMayHaveApplied {
+                    offset: COMMAND,
+                    width: 2,
+                },
+            )?;
+            Ok::<_, ConfigError>(command)
+        })();
+        let (forwarding, result) = match result {
+            Ok(command) => (
+                Forwarding::Open {
+                    config,
+                    blocked,
+                    command,
+                },
+                Ok(()),
+            ),
+            Err(error) => {
+                let original = config.into_parts();
+                original.close_admission();
+                (
+                    Forwarding::Refused {
+                        _original: original,
+                        _blocked: blocked,
+                    },
+                    Err(ContainmentError::from(error).at(address)),
+                )
+            }
+        };
+        let mut cohort = self.pci_slots.0.borrow_mut();
+        let Cohort::Parked(fabric) = &mut *cohort else {
+            unreachable!("the original parked fabric stays owned")
+        };
+        let index = fabric
+            .slots
+            .binary_search_by_key(&address, |slot| slot.address)
+            .expect("forwarding keeps the original slot");
+        fabric.slots[index].forwarding = Some(forwarding);
+        result
+    }
+
+    /// # Safety
+    /// Caller holds the matching complete fabric and excludes all old PCI
+    /// writers. Bridge promotion additionally requires parked descendants.
+    unsafe fn promote_parked(
+        &self,
+        address: Address,
+        blocked: &BlockedRequester<MmioRegisters>,
+        lines: &InitialPciLines,
+        bridge: bool,
     ) -> Result<OwnedConfig, ContainmentError> {
         let rid = u16::from(address.bus) << 8
             | u16::from(address.device) << 3
@@ -576,20 +793,15 @@ impl Source {
                 .slots
                 .binary_search_by_key(&address, |slot| slot.address)
                 .map_err(|_| Error::OutsideResource)?;
-            let slot = &mut fabric.slots[index];
+            let slot = &fabric.slots[index];
             if let Some(refusal) = &slot.refusal {
                 return Err(refusal.error);
             }
-            if (slot.header.layout >> 16) & 0x7f != 0 {
+            if (slot.header.layout >> 16) & 0x7f != u32::from(bridge) {
                 return Err(ContainmentError::from(Error::OutsideResource).at(address));
             }
-            if matches!(slot.route, topology::Parent::Bridge(_)) {
-                return Err(ContainmentError {
-                    address: Some(address),
-                    cause: Cause::BridgeForwarding,
-                    effect: ConfigEffect::None,
-                });
-            }
+            fabric.check_upstream(slot.route)?;
+            let slot = &mut fabric.slots[index];
             let prepared = slot.configuration.take().ok_or(Error::Busy)?;
             (index, prepared, slot.header, slot.plan.clone())
         };
@@ -611,6 +823,9 @@ impl Source {
                 .verify(|offset| config.try_read32(offset))
                 .and_then(|()| plan.check_disabled(|offset| config.try_read16(offset)))
             {
+                return Err(SlotRefusal::new(error, config.into_parts()));
+            }
+            if bridge && let Err(error) = check_pcie_port(&config) {
                 return Err(SlotRefusal::new(error, config.into_parts()));
             }
             // SAFETY: the parked map retired, this is its sole successor,
@@ -829,6 +1044,7 @@ impl Source {
             plan: input.plan,
             ancestor,
             route,
+            forwarding: None,
         })
     }
 
