@@ -22,6 +22,7 @@ use crate::{
     native_smp::memory_types::Image,
 };
 mod config_space;
+pub(crate) use config_space::ContainedPci;
 mod hpet;
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{

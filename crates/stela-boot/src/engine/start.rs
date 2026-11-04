@@ -2025,24 +2025,32 @@ fn start_platform(
         Err(error) => output::arguments(format_args!("NATIVE IRQ unavailable: {error:?}\n")),
     }
     // Retire the configuration census and park the contained function owners
-    // before remapping units keep their own read-only function views.
-    let prepared_sci = match (&native_mmio, &handoff.power) {
-        (Some(mmio), Some(power)) => {
-            // SAFETY: firmware is stopped, APs have not started, and native
-            // probing has not published any PCI/controller owner yet.
-            let prepared = unsafe { mmio.mask_pci_intx() }
-                .map_err(|error| refuse!("PCI INTx handoff: {error}", ?error))
-                .and_then(|count| {
-                    output::arguments(format_args!("HOST PCI INTx contained: {count} functions\n"));
-                    // SAFETY: PCI INTx contributors are disabled; the boot
-                    // owns the fixed/GPE sources and complete IOAPIC handoff.
-                    unsafe { aml::sci::Prepared::capture(mmio, power.clone()) }
-                        .map_err(|error| refuse!("SCI route: {error}", ?error))
-                });
-            match prepared {
+    // before either SCI publication or remapper takeover.
+    let contained_pci = native_mmio.and_then(|mmio| {
+        // SAFETY: firmware is stopped, APs have not started, and native
+        // probing has not published any PCI/controller owner yet.
+        match unsafe { mmio.contain_pci(handoff.tsc_hz) } {
+            Ok(contained) => {
+                output::arguments(format_args!(
+                    "HOST PCI contained: {} functions\n",
+                    contained.functions()
+                ));
+                Some(contained)
+            }
+            Err(error) => {
+                output::arguments(format_args!("HOST PCI containment unavailable: {error}\n"));
+                None
+            }
+        }
+    });
+    let prepared_sci = match (&contained_pci, &handoff.power) {
+        (Some(pci), Some(power)) => {
+            // SAFETY: PCI INTx contributors are disabled; the boot owns the
+            // fixed/GPE sources and complete IOAPIC handoff.
+            match unsafe { aml::sci::Prepared::capture(pci.source(), power.clone()) } {
                 Ok(prepared) => Some(prepared),
                 Err(error) => {
-                    output::arguments(format_args!("HOST ACPI SCI unavailable: {error}\n"));
+                    output::arguments(format_args!("HOST ACPI SCI unavailable: {error:?}\n"));
                     None
                 }
             }
@@ -2050,16 +2058,15 @@ fn start_platform(
         _ => None,
     };
     // The remapping units, taken before any host driver starts DMA.
-    let remappers = match (&native_mmio, handoff.storage.handoff()) {
+    let remappers = match (&contained_pci, handoff.storage.handoff()) {
         // SAFETY: no host driver has started; the loader root maps the ACPI
-        // tables, the MMIO source owns ECAM, and the firmware's translation
-        // was turned off at ExitBootServices.
-        (Some(mmio), Some(storage)) => unsafe {
+        // tables and firmware translation was turned off at ExitBootServices.
+        (Some(pci), Some(storage)) => unsafe {
             remapping::Remappers::take(
                 handoff.rsdp,
                 handoff.root,
                 storage.dma.clone(),
-                mmio,
+                pci,
                 handoff.tsc_hz,
             )
         },

@@ -94,14 +94,15 @@ impl Remappers {
     /// No host driver has started. `root` is the loader root for the ACPI
     /// tables at `rsdp`, and firmware translation ended at ExitBootServices.
     /// PCI function, SR-IOV, reset and routing writers stay excluded through
-    /// inventory and later claims. `mmio` owns all captured ECAM buses.
+    /// inventory and later claims. `pci` retains the same captured ECAM buses.
     pub(super) unsafe fn take(
         rsdp: u64,
         root: u64,
         drivers: Range<u64>,
-        mmio: &native_mmio::Source,
+        pci: &native_mmio::ContainedPci<'_>,
         tsc_hz: u64,
     ) -> Self {
+        let mmio = pci.source();
         let mut remappers = Self::none();
         let (dmar, ivrs) = {
             // SAFETY: forwarded; the loader root maps the original tables.
@@ -125,18 +126,10 @@ impl Remappers {
                     remapping::try_enumerate_segments(windows, |window, rid, offset| {
                         let address = address(window.segment, rid);
                         let value = reader.read32(address, offset)?;
-                        match offset {
-                            0 if matches!(value as u16, 0 | 1) => {
-                                return Err(MappingError::InvalidPlatformReply);
-                            }
-                            0x0c => {
-                                reader.header_type(value)?;
-                            }
-                            0x18 => reader.check_bridge(address, value)?,
-                            _ if offset != 0 && value == u32::MAX => {
-                                return Err(MappingError::InvalidPlatformReply);
-                            }
-                            _ => {}
+                        // The original containment census validated the
+                        // bridge layout and bus route before sealing them.
+                        if offset != 0 || value as u16 != u16::MAX {
+                            pci.check_observation(address, offset, value)?;
                         }
                         Ok(Some(value))
                     })?;
@@ -148,6 +141,9 @@ impl Remappers {
                             .map(|function| address(*segment, function.rid))
                     })
                     .collect();
+                if functions.len() != pci.functions() {
+                    return Err(MappingError::InvalidPlatformReply);
+                }
                 let roles = roles::Inventory::capture(&functions, |address, offset| {
                     reader
                         .read32(address, offset)

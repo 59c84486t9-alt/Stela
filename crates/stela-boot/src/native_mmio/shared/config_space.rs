@@ -5,6 +5,7 @@ use crate::native_mmio::ecam::EcamInventory;
 use core::mem::ManuallyDrop;
 use stela_drivers::bus::{mmio::owned::Mapping, pci::Address};
 mod containment;
+pub(crate) use containment::ContainedPci;
 pub(super) use containment::PciSlots;
 
 struct ConfigScope {
@@ -96,10 +97,16 @@ pub(crate) struct ConfigInventory<'a> {
 
 impl ConfigInventory<'_> {
     pub(crate) fn read32(&mut self, address: Address, offset: u16) -> Result<u32, Error> {
+        self.read(address, offset, 4)
+    }
+
+    fn read(&mut self, address: Address, offset: u16, width: u8) -> Result<u32, Error> {
+        let width = u16::from(width);
         if address.device >= 32
             || address.function >= 8
-            || offset > 4092
-            || !offset.is_multiple_of(4)
+            || !matches!(width, 1 | 2 | 4)
+            || offset > 4096 - width
+            || !offset.is_multiple_of(width)
         {
             return Err(Error::InvalidRange);
         }
@@ -132,12 +139,23 @@ impl ConfigInventory<'_> {
         let offset = (usize::from(address.device) << 15)
             | (usize::from(address.function) << 12)
             | usize::from(offset);
-        scope
-            .pending
-            .mapping
-            .as_ref()
-            .expect("original map")
-            .read32(offset)
+        let mapping = scope.pending.mapping.as_ref().expect("original map");
+        match width {
+            1 => {
+                let address = mapping.address(offset, 1)?;
+                // SAFETY: the live read-only bus map covers this byte and
+                // remains exclusively borrowed throughout the observation.
+                Ok(u32::from(unsafe { address.as_ptr().read_volatile() }))
+            }
+            2 => {
+                let address = mapping.address(offset, 2)?;
+                // SAFETY: the bus map is page-aligned and the checked word
+                // offset is aligned. This observation has no escaping alias.
+                let value = unsafe { address.cast::<u16>().as_ptr().read_volatile() };
+                Ok(u32::from(u16::from_le(value)))
+            }
+            _ => mapping.read32(offset),
+        }
     }
 
     pub(crate) fn header_type(&self, word: u32) -> Result<u8, Error> {
@@ -175,14 +193,14 @@ impl Source {
     /// # Safety
     /// The boot owns all captured configuration buses, excluding firmware,
     /// reset, topology and SR-IOV writers through the observation and its use.
-    pub(crate) unsafe fn with_config_inventory<T>(
+    pub(crate) unsafe fn with_config_inventory<T, E: From<Error>>(
         &self,
-        body: impl FnOnce(&[EcamWindow], &mut ConfigInventory<'_>) -> Result<T, Error>,
-    ) -> Result<T, Error> {
+        body: impl FnOnce(&[EcamWindow], &mut ConfigInventory<'_>) -> Result<T, E>,
+    ) -> Result<T, E> {
         let wire = self.platform.wire();
         let windows = stela_runtime::pc::acpi::mcfg(wire.mcfg()).map_err(failed)?;
         if windows.is_empty() {
-            return Err(Error::Unavailable);
+            return Err(Error::Unavailable.into());
         }
         let bits = self.platform.space.physical_bits;
         let original = EcamInventory::validate(&windows, bits)?;
@@ -192,7 +210,7 @@ impl Source {
             for bus in window.start_bus..=window.end_bus {
                 let (_, span) = geometry.subset(index, bus..=bus, wire.roots())?;
                 if !wire.excludes_memory(span.start(), span.end()) {
-                    return Err(Error::OutsideResource);
+                    return Err(Error::OutsideResource.into());
                 }
             }
         }
