@@ -503,7 +503,8 @@ fn emit_selected(
             cursor += 3;
             continue;
         }
-        if fuse_pairs
+        if (pinned || fuse_pairs)
+            && !code.constant_time()
             && matches!(instructions[cursor].operation, Operation::IntegerMath(operand)
                 if matches!(operand.kind, integer_math::Kind::Divide { .. }))
             && super::integer_math::emit_divide_remainder(

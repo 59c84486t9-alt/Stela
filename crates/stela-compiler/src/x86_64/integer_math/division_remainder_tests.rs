@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     Lifter, Options,
     aarch64::Decoder,
-    block::{BlockProfile, CompilationPlan, CompiledBlock},
+    block::{BlockProfile, CompilationPlan, CompiledBlock, Features},
 };
 
 const PC: GuestAddress = GuestAddress(0x1f534c);
@@ -18,8 +18,17 @@ fn lift(words: [u32; 2]) -> [Instruction; 2] {
 }
 
 fn compile(words: &[u32], pc: GuestAddress, target: TargetCpu) -> CompiledBlock {
+    compile_profile(words, pc, target, BlockProfile::ORDINARY)
+}
+
+fn compile_profile(
+    words: &[u32],
+    pc: GuestAddress,
+    target: TargetCpu,
+    profile: BlockProfile,
+) -> CompiledBlock {
     let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
-    CompilationPlan::new(&source, pc, &Options::new(BlockProfile::ORDINARY, target))
+    CompilationPlan::new(&source, pc, &Options::new(profile, target))
         .unwrap()
         .compile()
         .unwrap()
@@ -97,11 +106,185 @@ fn divide_remainder_refuses_aliased_inputs_and_unmatched_rows() {
     ));
 }
 
+#[test]
+fn pinned_divide_remainder_keeps_recovery_at_the_following_access() {
+    use crate::block::RecoverySiteKind;
+
+    let system = BlockProfile::new(Features::SYSTEM_MODE);
+    let target = TargetCpu::Baseline;
+    let instructions = lift(OPENSSL);
+    let mut group = Code::pinned();
+    let mut map = Vec::new();
+    assert!(emit_divide_remainder(&mut group, &mut map, &instructions));
+    assert_eq!((group.len(), group.instructions()), (48, 11));
+    assert!(group.sites().is_empty());
+    let pair = compile_profile(&OPENSSL, PC, target, system);
+    assert_eq!(pair.native.source_map, map);
+    assert!(pair.native.x86_64_code.starts_with(&group));
+    assert!(pair.fault_recovery.is_empty());
+
+    let [a, b] = OPENSSL;
+    let load_pc = GuestAddress(PC.0 + 8);
+    let with_access = compile_profile(&[a, b, 0xf940_0004], PC, target, system);
+    assert_eq!(
+        with_access.native.source_map,
+        [map[0], map[1], (load_pc, group.len())]
+    );
+    assert!(with_access.native.x86_64_code.starts_with(&group));
+    assert!(
+        with_access
+            .fault_recovery
+            .iter()
+            .any(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+    );
+    for row in with_access.fault_recovery {
+        assert!(row.start >= group.len());
+        assert_eq!(row.retirement.instruction_pc(), load_pc);
+        assert_eq!(row.retirement.retired_before(), 2);
+        assert!(row.bindings.is_empty());
+    }
+
+    let dit = target.with_data_independent_timing();
+    let mut separate = Code::pinned();
+    for row in instructions {
+        let Operation::IntegerMath(operand) = row.operation else {
+            unreachable!("decoded DIV and MSUB");
+        };
+        emit(&mut separate, &operand, dit);
+    }
+    assert_eq!((separate.len(), separate.instructions()), (72, 16));
+    assert!(
+        compile_profile(&OPENSSL, PC, dit, system)
+            .native
+            .x86_64_code
+            .starts_with(&separate)
+    );
+}
+
+#[test]
+fn pinned_divide_remainder_shortens_the_installed_desktop_pair() {
+    // UDIV W8,W12,W9; MSUB W8,W8,W9,W12 from the installed desktop trace.
+    let words = [0x1ac9_0988, 0x1b09_b108];
+    let pc = GuestAddress(0x18cfb1460);
+    let system = BlockProfile::new(Features::SYSTEM_MODE);
+    let target = TargetCpu::Baseline;
+    let mut group = Code::pinned();
+    let mut map = Vec::new();
+    let instructions = lift(words);
+    assert!(emit_divide_remainder(&mut group, &mut map, &instructions));
+    assert_eq!((group.len(), group.instructions()), (37, 12));
+    assert_eq!(&group[map[1].1..], &[0x48, 0x89, 0xd6]); // mov rsi,rdx
+    let actual = compile_profile(&words, pc, target, system);
+    assert_eq!(
+        actual.native.source_map,
+        [(pc, 0), (GuestAddress(pc.0 + 4), map[1].1)]
+    );
+    assert!(actual.native.x86_64_code.starts_with(&group));
+
+    let mut separate = Code::pinned();
+    for row in instructions {
+        let Operation::IntegerMath(operand) = row.operation else {
+            unreachable!("decoded DIV and MSUB");
+        };
+        emit(&mut separate, &operand, target);
+    }
+    assert_eq!((separate.len(), separate.instructions()), (53, 17));
+}
+
 #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
 #[test]
 fn divide_remainder_matches_arm_at_each_row_and_independent_entry() {
-    use crate::{GuestState, x86_64::native::run};
+    check_state_at_each_row(
+        BlockProfile::ORDINARY,
+        &[
+            [0, 1, 2, 2],
+            [0, 1, 2, 0],
+            [0, 1, 2, 1],
+            [0, 1, 2, 3],
+            [0, 0, 2, 30],
+            [31, 1, 2, 3],
+            [0, 31, 2, 3],
+        ],
+    );
+}
 
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn pinned_divide_remainder_settles_both_rows_and_independent_entry() {
+    check_state_at_each_row(
+        BlockProfile::new(Features::SYSTEM_MODE),
+        &[
+            [0, 1, 8, 8],
+            [8, 19, 0, 19],
+            [19, 8, 17, 16],
+            [1, 16, 19, 0],
+            [21, 1, 20, 20],
+            [31, 1, 8, 1],
+            [0, 31, 8, 0],
+            [0, 0, 8, 8],
+        ],
+    );
+}
+
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn pinned_divide_remainder_commits_before_a_polled_exit() {
+    use crate::{
+        Anchor, GuestState,
+        x86_64::{chain, native::run, pinned},
+    };
+
+    let division = OPENSSL[0] & !31 | 8;
+    let remainder = OPENSSL[1] & !(31 | (31 << 5)) | 8 | (8 << 5);
+    let block = compile_profile(
+        &[division, remainder, 0x17ff_fffe], // Backward branch to DIV.
+        PC,
+        TargetCpu::Baseline,
+        BlockProfile::new(Features::SYSTEM_MODE),
+    );
+    let [exit] = block.direct_exits.as_slice() else {
+        panic!("one direct exit");
+    };
+    assert_eq!(exit.target, PC);
+    let at = exit.offset - chain::POLLED_LINK_BYTES;
+    let link = chain::link(at as u64, chain::POLLED_LINK_BYTES, 3, 1, 0).unwrap();
+    let mut code = block.native.x86_64_code;
+    code[at..exit.offset].copy_from_slice(&link);
+
+    let mut control = chain::ChainControl {
+        budget: 1,
+        interrupt_epoch: 2,
+        observed_interrupt_epoch: 1,
+        ..Default::default()
+    };
+    let mut state = GuestState {
+        nzcv: 0xb000_0000,
+        ..Default::default()
+    };
+    state.anchors[Anchor::Control] = &raw mut control as u64;
+    state.x[21] = 29;
+    state.x[1] = 6;
+    let mut expected = state.clone();
+    expected.x[8] = 5;
+    assert_eq!(run(&pinned::entered(&code), &mut state), PC.0);
+    assert_eq!(state, expected);
+    assert_eq!((control.budget, control.retired, control.block), (1, 0, 0));
+}
+
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+fn check_state_at_each_row(profile: BlockProfile, aliases: &[[u32; 4]]) {
+    use crate::{
+        GuestState,
+        x86_64::{native::run, pinned},
+    };
+
+    let enter = |code: &[u8]| {
+        if profile.has(Features::FULL_SYSTEM) {
+            pinned::entered(code)
+        } else {
+            code.to_vec()
+        }
+    };
     let inputs = [
         0,
         1,
@@ -114,15 +297,7 @@ fn divide_remainder_matches_arm_at_each_row_and_independent_entry() {
     for wide in [false, true] {
         for signed in [false, true] {
             for swapped in [false, true] {
-                for [dividend, divisor, quotient, remainder] in [
-                    [0, 1, 2, 2],
-                    [0, 1, 2, 0],
-                    [0, 1, 2, 1],
-                    [0, 1, 2, 3],
-                    [0, 0, 2, 30],
-                    [31, 1, 2, 3],
-                    [0, 31, 2, 3],
-                ] {
+                for &[dividend, divisor, quotient, remainder] in aliases {
                     let form = u32::from(wide) << 31;
                     let divide = 0x1ac0_0800
                         | form
@@ -141,12 +316,16 @@ fn divide_remainder_matches_arm_at_each_row_and_independent_entry() {
                         | (dividend << 10)
                         | (left << 5)
                         | remainder;
-                    let compiled = compile(&[divide, msub], PC, TargetCpu::Baseline);
+                    let compiled =
+                        compile_profile(&[divide, msub], PC, TargetCpu::Baseline, profile);
                     let msub_pc = GuestAddress(PC.0 + 4);
                     let msub_at = compiled.native.source_map[1].1;
                     assert_eq!(compiled.native.source_map, [(PC, 0), (msub_pc, msub_at)]);
-                    let alone = compile(&[msub], msub_pc, TargetCpu::Baseline);
+                    let alone = compile_profile(&[msub], msub_pc, TargetCpu::Baseline, profile);
                     assert_eq!(alone.native.source_map, [(msub_pc, 0)]);
+                    let first_body = enter(&compiled.native.x86_64_code[..msub_at]);
+                    let pair_body = enter(&compiled.native.x86_64_code);
+                    let second_body = enter(&alone.native.x86_64_code);
                     let mask = if wide { u64::MAX } else { u32::MAX.into() };
                     let signed_value = |v: u64| {
                         if wide {
@@ -159,7 +338,8 @@ fn divide_remainder_matches_arm_at_each_row_and_independent_entry() {
                         for b in inputs {
                             let mut state = GuestState {
                                 x: [0xabab_cdcd_efef_0101; 31],
-                                nzcv: 0xb,
+                                sp: 0x1234_5678_9000,
+                                nzcv: 0xb000_0000,
                                 ..Default::default()
                             };
                             if dividend != 31 {
@@ -184,11 +364,11 @@ fn divide_remainder_matches_arm_at_each_row_and_independent_entry() {
                             let mut expected = first.clone();
                             expected.x[remainder as usize] = r;
                             let mut intermediate = state.clone();
-                            run(&compiled.native.x86_64_code[..msub_at], &mut intermediate);
+                            run(&first_body, &mut intermediate);
                             assert_eq!(intermediate, first, "{divide:08x}, {msub:08x}");
-                            assert_eq!(run(&compiled.native.x86_64_code, &mut state), PC.0 + 8);
+                            assert_eq!(run(&pair_body, &mut state), PC.0 + 8);
                             assert_eq!(state, expected, "{divide:08x}, {msub:08x}");
-                            assert_eq!(run(&alone.native.x86_64_code, &mut intermediate), PC.0 + 8);
+                            assert_eq!(run(&second_body, &mut intermediate), PC.0 + 8);
                             assert_eq!(intermediate, expected, "independent {msub:08x}");
                         }
                     }

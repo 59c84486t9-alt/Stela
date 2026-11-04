@@ -209,7 +209,8 @@ pub(super) fn emit_with(asm: &mut Asm, operand: &Operand, target: TargetCpu) {
 
 /// An adjacent DIV and MSUB can commit both architectural results of one
 /// native divide. The quotient store must leave the dividend and divisor
-/// available to the guest MSUB as their original values.
+/// available to the guest MSUB as their original values. RDX is scratch in
+/// both frame and pinned code, and neither row has a guest fault site.
 pub(super) fn emit_divide_remainder(
     code: &mut Code,
     source_map: &mut Vec<(GuestAddress, usize)>,
@@ -246,7 +247,7 @@ pub(super) fn emit_divide_remainder(
     {
         return false;
     }
-    debug_assert!(!code.is_pinned() && !code.constant_time());
+    debug_assert!(!code.constant_time());
     source_map.push((*divide_pc, code.len()));
     code.set_instruction(source_map.len() - 1);
     let mut asm = code.asm();
