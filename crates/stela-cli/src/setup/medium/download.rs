@@ -114,8 +114,14 @@ fn write_from(
     for (index, piece) in pieces.iter().enumerate() {
         let path = directory.join(piece_name(index));
         let partial = directory.join(format!("{}.partial", piece_name(index)));
+        // The download already recorded the per-block hashes. Readback
+        // verifies the piece's digest before publishing it.
+        let mut readback = Sha256::new();
+        stream_file(&partial, piece.bytes, &progress, |bytes| {
+            readback.update(bytes);
+        })?;
         ensure!(
-            hash_file(&partial, piece.bytes, &progress)?.0 == piece.sha256,
+            hex::encode(readback.finalize()) == piece.sha256,
             "USB data does not read back as written"
         );
         if path.exists() {
@@ -256,11 +262,38 @@ mod tests {
             written.wrote > 1,
             "the fixture must exercise joined-piece reads"
         );
-        let manifest = fs::read(directory(&volume, &image.build).join(MANIFEST_FILE))?;
+        let written_dir = directory(&volume, &image.build);
+        let manifest = fs::read(written_dir.join(MANIFEST_FILE))?;
         let manifest = stela_formats::payload::PayloadManifest::parse(&manifest)
             .map_err(anyhow::Error::msg)?;
-        assert!(matches!(manifest.layout, Layout::Pieces { .. }));
         assert_eq!(manifest.source.sha256, Some(stela_formats::sha256(&bytes)));
+        let Layout::Pieces {
+            pieces,
+            block_hashes,
+            ..
+        } = manifest.layout
+        else {
+            panic!("download did not publish a pieces layout");
+        };
+        let mut expected_blocks = Vec::new();
+        assert_eq!(
+            pieces.len(),
+            bytes.len().div_ceil(HASH_BLOCK_BYTES as usize)
+        );
+        for (index, (piece, expected)) in pieces
+            .iter()
+            .zip(bytes.chunks(HASH_BLOCK_BYTES as usize))
+            .enumerate()
+        {
+            let digest = Sha256::digest(expected);
+            expected_blocks.extend_from_slice(&digest);
+            assert_eq!(piece.sha256, hex::encode(digest));
+            assert_eq!(fs::read(written_dir.join(piece_name(index)))?, expected);
+        }
+        assert_eq!(
+            fs::read(written_dir.join(block_hashes.file))?,
+            expected_blocks
+        );
         let mut damaged = bytes.clone();
         damaged[0] ^= 1;
         let mut oversized = bytes.clone();
