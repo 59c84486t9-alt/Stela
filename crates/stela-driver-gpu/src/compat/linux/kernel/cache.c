@@ -208,8 +208,9 @@ struct kmem_cache *__kmem_cache_create_args(const char *name, unsigned int objec
  * or allocate metadata through the current process-only native provider. */
 static bool request_supported(gfp_t flags)
 {
+	/* Growth already makes one fallible attempt and forwards NORETRY. */
 	gfp_t allowed = GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN | __GFP_NOMEMALLOC |
-		__GFP_ACCOUNT;
+		__GFP_ACCOUNT | __GFP_NORETRY;
 	if ((flags & ~allowed) ||
 	    (gfpflags_allow_blocking(flags) && !stela_linux_quiescent())) {
 		stela_linux_unsupported("cache allocation policy or context");
@@ -1097,13 +1098,20 @@ static void policy_and_creation(void)
 	struct kmem_cache *cache = __kmem_cache_create_args("policy", 96, &args,
 							 SLAB_NO_MERGE | SLAB_NO_SHEAVES);
 	assert(cache);
-	void *object = kmem_cache_alloc(cache, GFP_KERNEL);
-	assert(object);
+	const gfp_t no_retry = GFP_KERNEL | __GFP_NORETRY;
+	unsigned int attempts = fixture.attempts;
+	fixture.exhausted = true;
+	assert(!kmem_cache_alloc(cache, no_retry));
+	assert(fixture.attempts == attempts + 1 && !cache->slabs);
+	fixture.exhausted = false;
+	void *object = kmem_cache_alloc(cache, no_retry);
+	assert(object && fixture.attempts == attempts + 2);
+	assert(fixture.seen_gfp == (__force u32)(no_retry | __GFP_COMP));
 	kmem_cache_free(cache, object);
 	const gfp_t unsupported_requests[] = {
 		GFP_ATOMIC, GFP_KERNEL | __GFP_HIGH, GFP_KERNEL | __GFP_MEMALLOC,
 		GFP_KERNEL | __GFP_NOFAIL, GFP_KERNEL | __GFP_RETRY_MAYFAIL,
-		GFP_KERNEL | __GFP_NORETRY, GFP_KERNEL | __GFP_RECLAIMABLE,
+		GFP_KERNEL | __GFP_RECLAIMABLE,
 		GFP_KERNEL | __GFP_MOVABLE, GFP_KERNEL | __GFP_DMA,
 		GFP_KERNEL | __GFP_DMA32, GFP_KERNEL | __GFP_COMP,
 		GFP_KERNEL | __GFP_THISNODE, GFP_KERNEL | (__force gfp_t)(1U << 31),
