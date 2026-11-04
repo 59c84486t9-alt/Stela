@@ -7,6 +7,10 @@ use super::{
     accessed, address_add, address_checks, load, memory_store, memory_writeback, right_operand,
     stack_alignment_check, stack_alignment_check_register,
 };
+use crate::{
+    GuestAddress,
+    aarch64::{Instruction, Operation},
+};
 use alloc::vec::Vec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +232,123 @@ pub(super) fn address(
         mask(Gpr::Rax) | mask(Gpr::Rcx),
     );
 }
+pub(super) struct CompareLoads {
+    first: Scalar,
+    second: Scalar,
+    width: Width,
+    left: Gpr,
+    right: Gpr,
+}
+
+impl CompareLoads {
+    pub(super) fn new(
+        instructions: &[Instruction],
+        held: super::Rax,
+        checks: MemoryChecks,
+    ) -> Option<Self> {
+        let [first, second, compare, ..] = instructions else {
+            return None;
+        };
+        let first_load = compare_input(&first.operation)?;
+        let second_load = compare_input(&second.operation)?;
+        if checks.guest_range
+            || checks.alignment
+            || checks.checks_every_access()
+            || first.pc.0.checked_add(4) != Some(second.pc.0)
+            || second.pc.0.checked_add(4) != Some(compare.pc.0)
+            || first_load.data == second_load.data
+            || first_load.address.base == second_load.address.base
+            || first_load.data == second_load.address.base
+            || held == super::Rax::Guest(first_load.address.base)
+        {
+            return None;
+        }
+        let Operation::AddSubRegister {
+            width,
+            subtract: true,
+            flags: true,
+            destination: Register::Zero,
+            left,
+            right,
+            amount: 0,
+            ..
+        } = compare.operation
+        else {
+            return None;
+        };
+        let operands = (first_load.data, second_load.data);
+        let (left, right) = if (left, right) == operands {
+            (Gpr::Rcx, Gpr::Rax)
+        } else if (right, left) == operands {
+            (Gpr::Rax, Gpr::Rcx)
+        } else {
+            return None;
+        };
+        Some(Self {
+            first: first_load,
+            second: second_load,
+            width,
+            left,
+            right,
+        })
+    }
+
+    /// Commit each load at its own row before the next guest access. The
+    /// second unchecked offset load uses RAX for address and result, so the
+    /// first value in RCX survives to the compare without a frame reload.
+    pub(super) fn emit(
+        self,
+        code: &mut Code,
+        source_map: &mut Vec<(GuestAddress, usize)>,
+        instructions: &[Instruction],
+        checks: MemoryChecks,
+    ) -> super::Rax {
+        debug_assert!(!code.is_pinned() && !code.constant_time());
+        for (instruction, operand, result) in [
+            (&instructions[0], self.first, Gpr::Rcx),
+            (&instructions[1], self.second, Gpr::Rax),
+        ] {
+            source_map.push((instruction.pc, code.len()));
+            code.set_instruction(source_map.len() - 1);
+            scalar(code, checks, operand, None, Some(result));
+        }
+        source_map.push((instructions[2].pc, code.len()));
+        code.set_instruction(source_map.len() - 1);
+        code.asm().alu(
+            Alu::Cmp,
+            Size::of(self.width == Width::X64),
+            self.left,
+            self.right,
+        );
+        super::nzcv(code, true);
+        super::Rax::Nzcv
+    }
+}
+
+fn compare_input(operation: &Operation) -> Option<Scalar> {
+    let Operation::Memory {
+        transfer: transfer @ MemoryTransfer::Load { signed: false, .. },
+        bytes: bytes @ (1 | 2 | 4 | 8),
+        data: data @ Register::X(_),
+        base: base @ Register::X(_),
+        displacement,
+        mode: AddressMode::Offset,
+    } = *operation
+    else {
+        return None;
+    };
+    Some(Scalar {
+        transfer,
+        bytes,
+        data,
+        address: ImmediateAddress {
+            base,
+            displacement,
+            mode: AddressMode::Offset,
+        },
+    })
+}
+
 pub(super) fn scalar_load(
     code: &mut Code,
     bytes: u8,
@@ -256,6 +377,7 @@ pub(super) fn scalar(
     checks: MemoryChecks,
     operand: Scalar,
     mut recipe: Option<&mut Recipe>,
+    frame_load_result: Option<Gpr>,
 ) {
     let Scalar {
         transfer,
@@ -306,11 +428,12 @@ pub(super) fn scalar(
             // result in RAX for the next instruction. Region recipes
             // retain their separate address and result registers.
             let hold_result = code.is_pinned() || (recipe.is_none() && !code.constant_time());
-            let scratch = if hold_result && mode == AddressMode::Offset {
-                Gpr::Rax
-            } else {
-                Gpr::Rcx
-            };
+            let scratch =
+                frame_load_result.unwrap_or(if hold_result && mode == AddressMode::Offset {
+                    Gpr::Rax
+                } else {
+                    Gpr::Rcx
+                });
             let host = code.host(data).unwrap_or(scratch);
             let checkpoint = code.checkpoint();
             scalar_load(code, bytes, signed, width, source, host);
@@ -466,7 +589,7 @@ pub(super) fn pair(
 pub(super) fn scalar_recipe(checks: MemoryChecks, operand: Scalar) -> (Code, Recipe) {
     let mut code = Code::new();
     let mut recipe = Recipe::default();
-    scalar(&mut code, checks, operand, Some(&mut recipe));
+    scalar(&mut code, checks, operand, Some(&mut recipe), None);
     (code, recipe)
 }
 pub(super) fn pair_recipe(checks: MemoryChecks, operand: Pair) -> (Code, Recipe) {

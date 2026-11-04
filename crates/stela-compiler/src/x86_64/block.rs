@@ -456,6 +456,22 @@ fn emit_selected(
             cursor += 2;
             continue;
         }
+        if fuse_pairs
+            && matches!(
+                instructions[cursor].operation,
+                Operation::Memory {
+                    transfer: super::MemoryTransfer::Load { .. },
+                    mode: super::AddressMode::Offset,
+                    ..
+                }
+            )
+            && let Some(group) =
+                super::memory_recipe::CompareLoads::new(&instructions[cursor..], held.rax, checks)
+        {
+            after.rax = group.emit(code, &mut block.source_map, &instructions[cursor..], checks);
+            cursor += 3;
+            continue;
+        }
         // Build the new candidate privately. Rejection leaves both cursor and
         // output untouched, so the legacy clean-load chunk partition is exact.
         if optimize_regions

@@ -5,6 +5,60 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 #[test]
+fn ordinary_compare_reads_both_settled_load_results() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan},
+    };
+
+    // LDRB W6,[X4]; LDRB W7,[X11]; CMP W6,W7; B.NE from zlib.
+    let words = [0x3940_0086u32, 0x3940_0167, 0x6b07_00df, 0x5400_0dc1];
+    let pc = GuestAddress(0x100003e14);
+    let compile = |words: &[u32], pc, target| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        CompilationPlan::new(&source, pc, &Options::new(BlockProfile::ORDINARY, target))
+            .unwrap()
+            .compile()
+            .unwrap()
+            .native
+    };
+    let baseline = TargetCpu::Baseline;
+    let fast = TargetCpu::X86_64_V2.with_bmi2().with_fast_pdep();
+    for target in [baseline, fast] {
+        let grouped = compile(&words, pc, target);
+        let map = &grouped.source_map;
+        assert_eq!(
+            map.iter().map(|row| row.0).collect::<Vec<_>>(),
+            [
+                pc,
+                GuestAddress(pc.0 + 4),
+                GuestAddress(pc.0 + 8),
+                GuestAddress(pc.0 + 12),
+            ]
+        );
+        let code = &grouped.x86_64_code;
+        assert!(code[..map[1].1].ends_with(&[0x48, 0x89, 0x8f, 0x30, 0, 0, 0]));
+        assert!(code[map[1].1..map[2].1].ends_with(&[0x48, 0x89, 0x87, 0x38, 0, 0, 0]));
+        assert!(code[map[2].1..].starts_with(&[0x39, 0xc1]));
+        let independent = compile(&words[1..], map[1].0, target);
+        assert!(!independent.x86_64_code[independent.source_map[1].1..].starts_with(&[0x39, 0xc1]));
+    }
+
+    for fallback in [
+        compile(&words, pc, baseline.with_data_independent_timing()),
+        compile(&[words[0], 0x3940_0087, words[2], words[3]], pc, baseline), // Shared base.
+        compile(&[words[0], 0x3940_00c7, words[2], words[3]], pc, baseline), // Dependent base.
+        compile(
+            &[words[0], words[1], words[2] | (1 << 10), words[3]],
+            pc,
+            baseline,
+        ),
+    ] {
+        assert!(!fallback.x86_64_code[fallback.source_map[2].1..].starts_with(&[0x39, 0xc1]));
+    }
+}
+
+#[test]
 fn indexed_load_store_pair_shares_checked_address_with_distinct_fault_rows() {
     use crate::{
         Options, TargetCpu,
