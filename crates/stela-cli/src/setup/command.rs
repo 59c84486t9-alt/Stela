@@ -332,8 +332,8 @@ struct Create {
     #[arg(long)]
     install_volume: Option<PathBuf>,
     /// The bound of each translation pack `stela.efi` keeps on the USB, in
-    /// bytes (64 MiB to 4 GiB; 0 for none). By default 2 GiB, or what the
-    /// USB's FAT32 volumes have room for.
+    /// bytes (64 MiB to the FAT32 file limit; 0 for none). Defaults to 1 GiB
+    /// or what fits. The mount uses up to 1 GiB of each allocation.
     #[arg(long, value_name = "BYTES")]
     translation_store_bytes: Option<u64>,
     /// The model or size, as setup shows it, of the whole disk `--usb`
