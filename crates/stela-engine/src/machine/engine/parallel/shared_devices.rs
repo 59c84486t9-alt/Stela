@@ -5,15 +5,13 @@ use super::super::{GateCall, GateOutcome, LocalRegisters};
 use super::*;
 
 pub(super) struct Board<D> {
-    pub(super) devices: Mutex<D>,
+    pub(super) devices: Mutex<BoardState<D>>,
     pub(super) hub: Arc<Hub>,
     /// Calls that found the devices' lock held, by [`Call`].
     pub(super) waits: [AtomicU64; Call::ALL.len()],
     /// The latest count any machine passed, which every later call sees at
     /// least: the PEs' counters agree only to within their reads.
     pub(super) now: AtomicU64,
-    /// Each PE's device lines as last seen.
-    pub(super) lines: Mutex<Vec<Lines>>,
     /// Each PE's latched pins as every call left them ([`pack`]), which
     /// another PE's machine reads without the lock: only the home machine
     /// advances the devices with time.
@@ -35,6 +33,12 @@ pub(super) struct Board<D> {
     /// serve, by op1, CRm and op2 ([`register_bit`]): a PE's machine asks
     /// for every one it reaches, and the others take no lock.
     pub(super) registers: [u64; 16],
+}
+
+pub(super) struct BoardState<D> {
+    devices: D,
+    /// Each PE's device lines as last seen, under the same lock as the devices.
+    lines: Vec<Lines>,
 }
 
 /// Pins as [`Board::pins`] holds them: IRQ and FIQ, or [`UNLATCHED`] for
@@ -65,17 +69,14 @@ pub(super) fn register_bit(encoding: Encoding) -> Option<usize> {
 
 impl<D: Devices> Board<D> {
     pub(super) fn lock(&self, call: Call) -> Held<'_, D> {
-        let devices = match self.devices.try_lock() {
-            Ok(devices) => devices,
+        let state = match self.devices.try_lock() {
+            Ok(state) => state,
             Err(_) => {
                 self.waits[call as usize].fetch_add(1, Ordering::Relaxed);
                 self.devices.lock().unwrap_or_else(|e| e.into_inner())
             }
         };
-        Held {
-            board: self,
-            devices,
-        }
+        Held { board: self, state }
     }
 
     /// Record what the machines ask of `devices` at every step: the home
@@ -143,26 +144,69 @@ impl<D: Devices> Board<D> {
 /// The devices while a call holds their lock; its release publishes what
 /// the call left for the home machine ([`Board::publish`]).
 pub(super) struct Held<'a, D: Devices> {
-    pub(super) board: &'a Board<D>,
-    pub(super) devices: crate::platform::sync::MutexGuard<'a, D>,
+    board: &'a Board<D>,
+    state: crate::platform::sync::MutexGuard<'a, BoardState<D>>,
+}
+
+impl<D: Devices> Held<'_, D> {
+    /// The count the devices see for a call at `now`, at least as high as
+    /// every earlier call's. Only this guard can advance the count.
+    fn now(&self, now: u64) -> u64 {
+        let previous = self.board.now.load(Ordering::Relaxed);
+        if now > previous {
+            self.board.now.store(now, Ordering::Release);
+        }
+        previous.max(now)
+    }
+
+    /// Tell every PE but `cpu` whose lines changed since it last saw them.
+    /// Every change reaches the devices under their lock, so a PE learns of
+    /// each from the call that made it, and needs no device deadline of its
+    /// own: only the home machine advances the devices with time.
+    fn notify(&mut self, cpu: usize, now: u64) {
+        let BoardState {
+            devices,
+            lines: seen,
+        } = &mut *self.state;
+        if let Some(own) = seen.get_mut(cpu)
+            && let Some(lines) = devices.pins(cpu)
+        {
+            // The caller reads its own lines after the call.
+            *own = lines;
+        }
+        for pe in self.board.hub.others(cpu) {
+            let pins = devices.pins(pe);
+            let lines = match pins {
+                Some(lines) => lines,
+                None => devices.lines(pe, now),
+            };
+            // The receiver may read its pins as soon as the epoch changes,
+            // before this call releases the devices' lock.
+            self.board.publish_pins(pe, pins);
+            if lines != seen[pe] {
+                seen[pe] = lines;
+                self.board.hub.lines_changed(pe, now);
+            }
+        }
+    }
 }
 
 impl<D: Devices> core::ops::Deref for Held<'_, D> {
     type Target = D;
     fn deref(&self) -> &D {
-        &self.devices
+        &self.state.devices
     }
 }
 
 impl<D: Devices> core::ops::DerefMut for Held<'_, D> {
     fn deref_mut(&mut self) -> &mut D {
-        &mut self.devices
+        &mut self.state.devices
     }
 }
 
 impl<D: Devices> Drop for Held<'_, D> {
     fn drop(&mut self) {
-        self.board.publish(&mut self.devices);
+        self.board.publish(&mut self.state.devices);
     }
 }
 
@@ -194,11 +238,13 @@ impl<D: Devices> SharedDevices<D> {
             }
         }
         let board = Board {
-            devices: Mutex::new(devices),
+            devices: Mutex::new(BoardState {
+                devices,
+                lines: alloc::vec![Lines::default(); pes],
+            }),
             hub,
             waits: Default::default(),
             now: AtomicU64::new(0),
-            lines: Mutex::new(alloc::vec![Lines::default(); pes]),
             pins: (0..pes).map(|_| AtomicU8::new(UNLATCHED)).collect(),
             dma: AtomicU64::new(u64::MAX),
             reset: Mutex::new(None),
@@ -253,17 +299,10 @@ impl<D: Devices> SharedDevices<D> {
         self.changing(Call::Home, usize::MAX, now, |devices, _| f(devices))
     }
 
-    /// The count the devices see for a call at `now`, which no earlier
-    /// call's passes. Taken under the devices' lock, so calls see counts in
-    /// the order they reach the devices.
-    pub(super) fn now(&self, now: u64) -> u64 {
-        self.board.now.fetch_max(now, Ordering::AcqRel).max(now)
-    }
-
-    /// Run `f` on the devices at `now`, as [`Self::now`] gives it.
+    /// Run `f` on the devices at `now`, as [`Held::now`] gives it.
     pub(super) fn at<R>(&self, call: Call, now: u64, f: impl FnOnce(&mut D, u64) -> R) -> R {
         let mut devices = self.board.lock(call);
-        let now = self.now(now);
+        let now = devices.now(now);
         f(&mut devices, now)
     }
 
@@ -289,38 +328,10 @@ impl<D: Devices> SharedDevices<D> {
         f: impl FnOnce(&mut D, u64) -> R,
     ) -> R {
         let mut devices = self.board.lock(call);
-        let now = self.now(now);
+        let now = devices.now(now);
         let result = f(&mut devices, now);
-        self.notify(&mut devices, cpu, now);
+        devices.notify(cpu, now);
         result
-    }
-
-    /// Tell every PE but `cpu` whose lines changed since it last saw them.
-    /// Every change reaches the devices under their lock, so a PE learns of
-    /// each from the call that made it, and needs no device deadline of its
-    /// own: only the home machine advances the devices with time.
-    pub(super) fn notify(&self, devices: &mut D, cpu: usize, now: u64) {
-        let mut seen = self.board.lines.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(own) = seen.get_mut(cpu)
-            && let Some(lines) = devices.pins(cpu)
-        {
-            // The caller reads its own lines after the call.
-            *own = lines;
-        }
-        for pe in self.board.hub.others(cpu) {
-            let pins = devices.pins(pe);
-            let lines = match pins {
-                Some(lines) => lines,
-                None => devices.lines(pe, now),
-            };
-            // The receiver may read its pins as soon as the epoch changes,
-            // before this call releases the devices' lock.
-            self.board.publish_pins(pe, pins);
-            if lines != seen[pe] {
-                seen[pe] = lines;
-                self.board.hub.lines_changed(pe, now);
-            }
-        }
     }
 }
 
@@ -455,10 +466,10 @@ impl<D: Devices> Devices for SharedDevices<D> {
             return lines;
         }
         let mut devices = self.board.lock(Call::Lines);
-        let now = self.now(now);
+        let now = devices.now(now);
         let lines = devices.lines(cpu, now);
-        self.board.lines.lock().unwrap_or_else(|e| e.into_inner())[cpu] = lines;
-        self.notify(&mut devices, cpu, now);
+        devices.state.lines[cpu] = lines;
+        devices.notify(cpu, now);
         lines
     }
     fn pins(&mut self, cpu: usize) -> Option<Lines> {
@@ -482,10 +493,10 @@ impl<D: Devices> Devices for SharedDevices<D> {
             return (self.lines(cpu, now), None);
         }
         let mut devices = self.board.lock(Call::Lines);
-        let now = self.now(now);
+        let now = devices.now(now);
         let (lines, deadline) = devices.lines_and_deadline(cpu, now);
-        self.board.lines.lock().unwrap_or_else(|e| e.into_inner())[cpu] = lines;
-        self.notify(&mut devices, cpu, now);
+        devices.state.lines[cpu] = lines;
+        devices.notify(cpu, now);
         (lines, deadline)
     }
     fn system_register(
@@ -517,7 +528,11 @@ impl<D: Devices> Devices for SharedDevices<D> {
     }
     /// Only the home machine takes a reset, which stops every PE.
     fn take_reset(&mut self) -> Option<Reset> {
-        if !self.home || !self.board.resetting.swap(false, Ordering::Acquire) {
+        let resetting = &self.board.resetting;
+        if !self.home
+            || !resetting.load(Ordering::Relaxed)
+            || !resetting.swap(false, Ordering::Acquire)
+        {
             return None;
         }
         self.board

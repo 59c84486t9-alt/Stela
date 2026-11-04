@@ -4,7 +4,6 @@ use super::isa::SimdOpcode as Host;
 use super::{MemoryChecks, memory_address, memory_writeback};
 use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
 use crate::x86_64::asm::{Code, Gpr, Mem, vector_extensions};
-use alloc::vec::Vec;
 pub(in crate::x86_64) mod absolute_selection;
 mod aes;
 pub(super) mod arithmetic;
@@ -671,11 +670,16 @@ pub(super) fn emit_after(
 /// destination of a branch-free emission that ends with its commit from
 /// XMM0; or, after a lane move to a general register, which leaves XMM0
 /// alone, what it held.
-pub(super) fn xmm0_after(operand: &Operand, code: &[u8], held: Option<u8>) -> Option<u8> {
-    let committed = |vector: u8| {
-        let mut store = Code::new();
-        commit(&mut store, vector, 0);
-        code.ends_with(&store).then_some(vector)
+pub(super) fn xmm0_after(
+    scratch: &mut Code,
+    operand: &Operand,
+    code: &[u8],
+    held: Option<u8>,
+) -> Option<u8> {
+    let mut committed = |vector: u8| {
+        scratch.clear();
+        commit(scratch, vector, 0);
+        code.ends_with(scratch).then_some(vector)
     };
     match *operand {
         Operand::Immediate(crate::aarch64::simd::immediates::Operand::LaneMove(
@@ -706,10 +710,10 @@ pub(super) fn xmm0_after(operand: &Operand, code: &[u8], held: Option<u8>) -> Op
 
 /// [`read_vector`]'s bytes for `vector` into XMM0, which an emission that
 /// begins with them does not need where XMM0 holds the vector already.
-pub(super) fn xmm0_load(vector: u8) -> Vec<u8> {
-    let mut load = Code::new();
-    read_vector(&mut load, vector, 0);
-    load.into_bytes()
+pub(super) fn xmm0_load(scratch: &mut Code, vector: u8) -> &[u8] {
+    scratch.clear();
+    read_vector(scratch, vector, 0);
+    scratch
 }
 
 #[cfg(test)]

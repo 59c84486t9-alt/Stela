@@ -204,10 +204,13 @@ impl ArgumentTable {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = alloc::vec![0; Self::BYTES as usize];
-        let mut writer = Writer {
-            bytes: &mut bytes,
-            offset: 0,
-        };
+        self.encode_into(&mut bytes);
+        bytes
+    }
+
+    pub(super) fn encode_into(&self, bytes: &mut [u8]) {
+        debug_assert_eq!(bytes.len(), Self::BYTES as usize);
+        let mut writer = Writer { bytes, offset: 0 };
         self.buffers
             .iter()
             .for_each(|buffer| writer.u64(buffer.address));
@@ -219,7 +222,6 @@ impl ArgumentTable {
             .chain(&self.samplers)
             .chain(&self.attachments)
             .for_each(|id| writer.u64(id.0));
-        bytes
     }
 }
 

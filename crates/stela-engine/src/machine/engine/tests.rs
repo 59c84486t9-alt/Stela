@@ -152,6 +152,7 @@ pub(super) struct FakeHost {
     /// turn, and its parts' code addresses, oldest first; `None` for an
     /// arena of one part.
     pub(super) ring: Option<usize>,
+    code_partitions: Option<CodePartitions>,
     parts: Vec<core::ops::Range<usize>>,
 }
 
@@ -206,6 +207,9 @@ impl Host for FakeHost {
         self.installed.push(code.to_vec());
         assert!(code.len() < NATIVE_CODE_STRIDE);
         Ok(NativeCode(self.installed.len() * NATIVE_CODE_STRIDE))
+    }
+    fn code_partitions(&self) -> Option<CodePartitions> {
+        self.code_partitions
     }
     fn reclaim_code(&mut self) -> Option<core::ops::Range<usize>> {
         self.ring?;
@@ -520,6 +524,7 @@ pub(super) fn board_on<D: Devices>(
         memory_low: false,
         require_empty_code_on_read: false,
         ring: None,
+        code_partitions: None,
         parts: Vec::new(),
     };
     let profile = CpuProfile {
@@ -2026,9 +2031,20 @@ fn all_chip_performance_monitors_count_retirement_and_signal_their_overflow_fiq(
 
 #[test]
 fn a_full_arena_reclaims_its_oldest_part_and_forgets_those_pages() {
+    for indexed in [false, true] {
+        check_code_arena_reclamation(indexed);
+    }
+}
+
+fn check_code_arena_reclamation(indexed: bool) {
     const RET: u32 = 0xd65f_03c0;
     let mut machine = machine(&vec![RET; 4 * FETCH_PAGE as usize / 4]);
     machine.host.ring = Some(2);
+    machine.host.code_partitions = indexed.then_some(CodePartitions {
+        base: NATIVE_CODE_STRIDE,
+        bytes_per_part: 2 * NATIVE_CODE_STRIDE,
+        parts: 8,
+    });
     let base = machine.cpu.pc;
     let page = |n: u64| base + n * FETCH_PAGE;
     let pcs = [page(0), page(1), page(0) + 4, page(2), page(3), page(1) + 8];
@@ -2051,6 +2067,13 @@ fn a_full_arena_reclaims_its_oldest_part_and_forgets_those_pages() {
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
     assert_eq!(machine.blocks.len(), 4);
     assert_eq!(&slots[4..], [1, 0]);
+    assert_eq!(
+        matches!(
+            machine.code_slots,
+            code_slots::CodeSlots::Partitioned { .. }
+        ),
+        indexed
+    );
 }
 
 #[test]
@@ -2073,6 +2096,37 @@ fn a_fetch_that_reclaims_code_looks_up_in_a_new_context() {
         machine.targets[target_slot(&machine, pc)].context,
         machine.chain.contexts()[chain::half(pc)]
     );
+}
+
+#[test]
+fn finishing_and_pressure_return_block_table_storage() {
+    const RET: u32 = 0xd65f_03c0;
+    for cause in [Discard::Finished, Discard::Memory] {
+        let mut machine = machine(&[RET]);
+        let base = machine.cpu.pc;
+        assert!(matches!(
+            machine.fetch_block(base, false),
+            Ok(Fetched::Block(0))
+        ));
+        let capacities = (machine.blocks.capacity(), machine.fault_recovery.capacity());
+        assert!(capacities.0 > 0 && capacities.1 > 0);
+        machine.discard_code(Discard::Maintenance);
+        assert_eq!(
+            (machine.blocks.capacity(), machine.fault_recovery.capacity()),
+            capacities,
+        );
+        assert!(matches!(
+            machine.fetch_block(base, false),
+            Ok(Fetched::Block(0))
+        ));
+        machine.discard_code(cause);
+        assert_eq!(machine.blocks.capacity(), 0);
+        assert_eq!(machine.fault_recovery.capacity(), 0);
+        assert!(matches!(
+            machine.fetch_block(base, false),
+            Ok(Fetched::Block(0))
+        ));
+    }
 }
 
 #[test]
@@ -3128,11 +3182,16 @@ fn tlbi_invalidates_and_wfi_waits_for_the_virtual_timer() {
     let mut machine = machine_on(one_timer_bank(), &[]);
     machine.system_instruction(0xd508_871f).unwrap(); // tlbi vmalle1
     assert_eq!(machine.host.invalidations, 1);
+    machine.native_system();
+    machine.memory_checks();
+    assert_eq!(machine.timer_deadline(), None);
     // Arm the virtual timer 1500 ticks ahead and wait.
     machine.cpu.state.x[0] = 1500;
     machine.system_instruction(0xd51b_e300).unwrap(); // msr cntv_tval_el0, x0
     machine.cpu.state.x[0] = 1;
     machine.system_instruction(0xd51b_e320).unwrap(); // msr cntv_ctl_el0, x0
+    assert_eq!(machine.timer_deadline(), Some(1500));
+    assert!(machine.native_system.is_some() && machine.memory_checks.is_some());
     wait(&mut machine, 0xd503_207f).unwrap(); // wfi
     assert_eq!(machine.host.now, 2000);
     // The FIQ is masked by DAIF until it is cleared.
@@ -3149,6 +3208,16 @@ fn tlbi_invalidates_and_wfi_waits_for_the_virtual_timer() {
         .set(SystemRegister::CNTV_CTL_EL0, 0, 0);
     machine.derived_changed();
     assert_eq!(wait(&mut machine, 0xd503_207f), Err(Stop::Idle));
+}
+
+#[test]
+fn untimed_wfi_uses_cached_lines_without_reading_the_counter() {
+    let mut machine = machine_on(one_timer_bank(), &[]);
+    machine.lines();
+    let reads = machine.host.counter_reads;
+    machine.system_instruction(0xd503_207f).unwrap(); // wfi
+    assert!(machine.waiting.is_some());
+    assert_eq!(machine.host.counter_reads, reads);
 }
 
 #[test]
@@ -3499,6 +3568,30 @@ fn branch_target_compatibility_follows_bti_paciasp_brk_and_hlt() {
     assert!(!machine.branch_target_compatible(PACIASP));
 }
 
+#[test]
+fn a_compiled_pac_landing_uses_the_current_sctlr_for_lookup_entries() {
+    const PACIASP: u32 = 0xd503_233f;
+    const RET: u32 = 0xd65f_03c0;
+    const SCTLR_BT1: u64 = 1 << 36;
+    let mut machine = machine(&[PACIASP, RET]);
+    let pc = machine.cpu.pc;
+    let Ok(Fetched::Block(index)) = machine.fetch_block(pc, false) else {
+        panic!("compiled PAC landing");
+    };
+    let slot = (pc / FETCH_PAGE) as usize % FETCH_CACHE;
+    machine.fetch[slot].as_mut().unwrap().guarded = true;
+    let sctlr = machine.cpu.regime_sctlr();
+    for (bits, targets) in [(0, 0b1111), (SCTLR_BT1, 0b0111)] {
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SCTLR_EL1, 0, sctlr & !SCTLR_BT1 | bits);
+        machine.derived_changed();
+        machine.remember_target(pc, index);
+        assert_eq!(machine.targets[target_slot(&machine, pc)].targets, targets);
+    }
+}
+
 /// SCTLR_EL2 bit 36 is BT with HCR_EL2.TGE clear and BT1 with it set
 /// (E2H is RES1); either way it decides PACIASP at EL2.
 #[test]
@@ -3604,6 +3697,23 @@ fn wfe_wakes_on_an_event_stream_edge() {
     // Without a stream, timer or device, WFE is a terminal idle state.
     machine.cpu.registers.set(SystemRegister::CNTHCTL_EL2, 0, 0);
     assert_eq!(wait(&mut machine, WFE), Err(Stop::Idle));
+}
+
+#[test]
+fn pending_event_coalesces_sampled_edges_without_replaying_them() {
+    let mut machine = machine(&[]);
+    machine
+        .cpu
+        .registers
+        .set(SystemRegister::CNTHCTL_EL2, 0, 1 << 2);
+    machine.sample_events(0);
+    machine.cpu.signal_event();
+    machine.sample_events(1);
+    assert!(machine.cpu.consume_event());
+    machine.sample_events(1);
+    assert!(!machine.cpu.consume_event());
+    machine.sample_events(3);
+    assert!(machine.cpu.consume_event());
 }
 
 #[test]

@@ -61,13 +61,13 @@ pub fn hcr_nvx(c: &mut dyn Context) -> Result<u64, Effect> {
     Ok(effective_nvx(c.read(Register::HCR_EL2, 0), nv, nv2))
 }
 
-fn tge(c: &dyn Context) -> bool {
+fn tge(c: &mut dyn Context) -> bool {
     bits(c.read(Register::HCR_EL2, 0), u64::from(HCR_TGE), 1) == 1
 }
 
 /// `ELIsInHost(el)`: EL2 is always in host (E2H RES1); EL0 is in host while
 /// HCR_EL2.TGE is 1; EL1 never is.
-pub fn is_in_host(c: &dyn Context, el: u64) -> bool {
+pub fn is_in_host(c: &mut dyn Context, el: u64) -> bool {
     match el {
         2 => true,
         0 => tge(c),
@@ -76,23 +76,23 @@ pub fn is_in_host(c: &dyn Context, el: u64) -> bool {
 }
 
 /// `EffectivelyAtEL0InHost()`.
-pub fn at_el0_in_host(c: &dyn Context) -> bool {
+pub fn at_el0_in_host(c: &mut dyn Context) -> bool {
     c.el() == 0 && is_in_host(c, 0)
 }
 
 /// `EffectivelyAtEL0NotInHost()`.
-pub fn at_el0_not_in_host(c: &dyn Context) -> bool {
+pub fn at_el0_not_in_host(c: &mut dyn Context) -> bool {
     c.el() == 0 && !is_in_host(c, 0)
 }
 
 /// `EffectiveTGEforEL0Traps()`: HCR_EL2.TGE, EL2 being enabled.
-pub fn tge_for_el0_traps(c: &dyn Context) -> u64 {
+pub fn tge_for_el0_traps(c: &mut dyn Context) -> u64 {
     u64::from(tge(c))
 }
 
 /// `AArch64_SystemAccessTraptoEL1orEL2(ec)`: an EL0 trap goes to EL2 when
 /// HCR_EL2.TGE is 1, else to EL1.
-pub fn trap_el1_or_el2(c: &dyn Context, ec: u64) -> Effect {
+pub fn trap_el1_or_el2(c: &mut dyn Context, ec: u64) -> Effect {
     Effect::Trap {
         el: if tge(c) { 2 } else { 1 },
         ec,
@@ -102,7 +102,7 @@ pub fn trap_el1_or_el2(c: &dyn Context, ec: u64) -> Effect {
 /// `UnimplementedIDRegister()` with FEAT_IDST: an access to an ID register
 /// encoding the profile does not implement traps with EC 0x18 to the current
 /// EL, or from EL0 to EL1 or, under HCR_EL2.TGE, EL2.
-pub fn unimplemented_id_register(c: &dyn Context) -> Effect {
+pub fn unimplemented_id_register(c: &mut dyn Context) -> Effect {
     match c.el() {
         0 => trap_el1_or_el2(c, 0x18),
         el => Effect::Trap {
@@ -113,7 +113,7 @@ pub fn unimplemented_id_register(c: &dyn Context) -> Effect {
 }
 
 /// `VMID()`: 8-bit VMIDs (no FEAT_VMID16), from VTTBR_EL2.
-pub fn vmid(c: &dyn Context) -> u64 {
+pub fn vmid(c: &mut dyn Context) -> u64 {
     bits(c.read(Register::VTTBR_EL2, 0), u64::from(VTTBR_VMID), 8)
 }
 

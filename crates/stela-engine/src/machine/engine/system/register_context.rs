@@ -123,7 +123,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
         self.result = Some(value);
     }
 
-    fn read(&self, register: Register, index: u64) -> u64 {
+    fn read(&mut self, register: Register, index: u64) -> u64 {
         let machine = &*self.machine;
         let cpu = &machine.cpu;
         // The reset address, where the board holds it (Apple's
@@ -191,7 +191,10 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             Register::OSDTRRX_EL1 => u64::from(cpu.dcc.rx),
             Register::OSDTRTX_EL1 => u64::from(cpu.dcc.tx),
             _ => match Channel::by_control(register) {
-                Some(channel) => channel.read_control(cpu, self.bank, self.now),
+                Some(channel) => {
+                    let now = self.now();
+                    channel.read_control(&self.machine.cpu, self.bank, now)
+                }
                 None => match (self.bank, cpu.apple.generic_timer.get(register)) {
                     (Bank::Apple, Some(value)) => value,
                     _ => {
@@ -329,10 +332,12 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                 | Register::CNTVOFF_EL2
                 | Register::HCR_EL2
         ) {
-            self.machine.sample_events(self.now);
+            let now = self.now();
+            self.machine.sample_events(now);
         }
         if register == Register::TPIDR_EL1 {
-            self.machine.switch_thread(value, self.now);
+            let now = self.now();
+            self.machine.switch_thread(value, now);
         }
         let cpu = &mut self.machine.cpu;
         let sctlr = matches!(register, Register::SCTLR_EL1 | Register::SCTLR_EL2);
@@ -403,8 +408,9 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
         Ok(())
     }
 
-    fn physical_count(&self) -> u64 {
-        timer::count(&self.machine.cpu, self.bank, self.now)
+    fn physical_count(&mut self) -> u64 {
+        let now = self.now();
+        timer::count(&self.machine.cpu, self.bank, now)
     }
 
     fn nv_mem(&mut self, offset: u64) -> Result<u64, Effect> {

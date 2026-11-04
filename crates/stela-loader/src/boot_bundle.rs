@@ -97,9 +97,25 @@ pub struct Input<'a> {
     pub source: Source,
 }
 
+/// The original kernel collection and its source, optionally owned so
+/// an installed boot can move the decoded buffer into the bundle.
+pub struct KernelInput<'a> {
+    pub bytes: Cow<'a, [u8]>,
+    pub source: Source,
+}
+
+impl<'a> From<Input<'a>> for KernelInput<'a> {
+    fn from(input: Input<'a>) -> Self {
+        Self {
+            bytes: Cow::Borrowed(input.bytes),
+            source: input.source,
+        }
+    }
+}
+
 pub struct Inputs<'a> {
     pub target: Target,
-    pub kernel_collection: Input<'a>,
+    pub kernel_collection: KernelInput<'a>,
     /// Kexts linked against `kernel_collection` (`aux_kc`), which SPTM maps
     /// beside it.
     pub auxiliary_collection: Option<Input<'a>>,
@@ -164,6 +180,31 @@ pub struct Bundle {
     pub manifest: Manifest,
 }
 
+impl Bundle {
+    /// Append firmware named by the prepared board's DeviceTree. These
+    /// files have source receipts but are not guest memory regions.
+    pub fn append_board_firmware(
+        &mut self,
+        name: String,
+        bytes: Vec<u8>,
+        source: Source,
+    ) -> Result<()> {
+        require!(
+            name.len() <= MAX_FILE_NAME && !self.files.iter().any(|(file, _)| file == &name),
+            "board firmware name {name} is too long or already a bundle file",
+            ?name
+        );
+        self.manifest.files.push(File {
+            name: name.clone(),
+            bytes: bytes.len() as u64,
+            sha256: sha256(&bytes),
+        });
+        self.manifest.sources.push(source);
+        self.files.push((name, bytes));
+        Ok(())
+    }
+}
+
 /// Where a split region begins or ends within an image.
 #[derive(Clone, Copy)]
 enum Mark {
@@ -184,7 +225,13 @@ const fn split(suffix: &'static str, start: Mark, end: Mark) -> Split {
 }
 
 use Mark::{ImageEnd, ImageStart, SegmentEnd, SegmentStart};
-use alloc::{borrow::ToOwned, format, string::String, vec, vec::Vec};
+use alloc::{
+    borrow::{Cow, ToOwned},
+    format,
+    string::String,
+    vec,
+    vec::Vec,
+};
 
 /// m1n1 `load_macos_sptm` image splits.
 const KERNEL_SPLITS: &[Split] = &[
@@ -399,7 +446,7 @@ const BOOT_MANIFEST_FILE: &str = "boot-manifest.im4m";
 /// carveout rather than the memory map (`layout::boot_manifest_region`).
 const BOOT_MANIFEST_REGION: &str = "BootManifest";
 const SEP_FILE: &str = "sepfw.im4p";
-const RAMDISK_FILE: &str = "ramdisk.img";
+pub const RAMDISK_FILE: &str = "ramdisk.img";
 /// The engine handoff's file-name capacity (`stela-boot` `handoff::MAX_NAME`).
 const MAX_FILE_NAME: usize = 48;
 const BOOT_ARGS_FILE: &str = "bootargs.bin";
@@ -410,6 +457,8 @@ struct LoadedImage {
     file: &'static str,
     collection: KernelCollection,
     memory: Vec<u8>,
+    /// The validated file already had this layout and was moved unchanged.
+    kept_input: bool,
     /// `(region name, image offset range)` in split order.
     pieces: Vec<(String, core::ops::Range<u64>)>,
 }
@@ -433,10 +482,13 @@ impl LoadedImage {
         name: &'static str,
         file: &'static str,
         collection: KernelCollection,
-        bytes: &[u8],
+        bytes: Cow<'_, [u8]>,
         splits: &[Split],
     ) -> Result<Self> {
-        let memory = collection.memory_image(bytes)?;
+        let (memory, kept_input) = match bytes {
+            Cow::Owned(bytes) if collection.file_is_memory_image(bytes.len()) => (bytes, true),
+            bytes => (collection.memory_image(&bytes)?, false),
+        };
         let mut pieces = vec![];
         for split in splits {
             let start = resolve(&collection, split.start)?;
@@ -472,6 +524,7 @@ impl LoadedImage {
             file,
             collection,
             memory,
+            kept_input,
             pieces,
         })
     }
@@ -646,7 +699,24 @@ pub struct OwnedRamdisk {
 }
 
 pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
-    assemble(inputs, options, None)
+    assemble(
+        inputs,
+        options,
+        Cow::Borrowed(&inputs.kernel_collection.bytes),
+        None,
+    )
+}
+
+/// Build an installed bundle from the decoder's owned kernel and source
+/// receipt. When the kernel already has the required layout, move its
+/// bytes unchanged and reuse the decoder's SHA-256 for the file receipt.
+pub(crate) fn prepare_moving_kernel(
+    installed: crate::installed::BundleInputs<'_>,
+    options: &Options,
+) -> Result<Bundle> {
+    let mut inputs = installed.into_inputs();
+    let kernel = core::mem::take(&mut inputs.kernel_collection.bytes);
+    assemble(&inputs, options, kernel, None)
 }
 
 /// [`prepare`], with `ramdisk` moved into the bundle; `inputs` must name no
@@ -656,10 +726,20 @@ pub fn prepare_owned(inputs: &Inputs, ramdisk: OwnedRamdisk, options: &Options) 
         inputs.ramdisk.is_none(),
         "a bundle has one ramdisk, given both borrowed and owned"
     );
-    assemble(inputs, options, Some(ramdisk))
+    assemble(
+        inputs,
+        options,
+        Cow::Borrowed(&inputs.kernel_collection.bytes),
+        Some(ramdisk),
+    )
 }
 
-fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> Result<Bundle> {
+fn assemble(
+    inputs: &Inputs,
+    options: &Options,
+    kernel: Cow<'_, [u8]>,
+    owned: Option<OwnedRamdisk>,
+) -> Result<Bundle> {
     stela_formats::builds::find(&inputs.target.product_build)?;
     let ramdisk_bytes = owned
         .as_ref()
@@ -675,7 +755,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     let chip = inputs.target.chip_id.and_then(board::chip);
     let core_locks_handed_off =
         chip.is_some_and(|chip| ctrr::generation(chip) == Some(ctrr::Generation::Ctrr3));
-    let images = Images::load(inputs)?;
+    let images = Images::load(inputs, kernel)?;
     let extra: Vec<&[u8]> = inputs
         .extra_trust_caches
         .iter()
@@ -789,6 +869,10 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
 
     let manifest_images = images.manifest_images(&regions)?;
     let entry = manifest_images[0].entry.clone();
+    let kernel_source = &inputs.kernel_collection.source;
+    let kernel_digest = (images.kernel.kept_input
+        && images.kernel.memory.len() as u64 == kernel_source.decoded_bytes)
+        .then_some(&kernel_source.decoded_sha256);
     let (files, ramdisk_source) = files(
         inputs,
         images,
@@ -797,7 +881,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         boot_args_bytes,
         core_locks_handed_off,
         owned,
-    )?;
+    );
     hash_regions(&mut regions, &files)?;
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,
@@ -809,10 +893,28 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         sources: sources(inputs, ramdisk_source),
         files: files
             .iter()
-            .map(|(name, bytes)| File {
-                name: name.clone(),
-                bytes: bytes.len() as u64,
-                sha256: sha256(bytes),
+            .map(|(name, contents)| {
+                let bytes = contents.len() as u64;
+                // A whole-file region (such as a restore ramdisk) already
+                // has the digest of these exact bytes.
+                let whole = || {
+                    regions
+                        .iter()
+                        .find(|region| {
+                            region.file == *name && region.file_offset == 0 && region.bytes == bytes
+                        })
+                        .map(|region| &region.sha256)
+                };
+                let digest = if name == KERNEL_FILE {
+                    kernel_digest.or_else(whole)
+                } else {
+                    whole()
+                };
+                File {
+                    name: name.clone(),
+                    bytes,
+                    sha256: digest.cloned().unwrap_or_else(|| sha256(contents)),
+                }
             })
             .collect(),
         regions,
@@ -831,7 +933,11 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         security: shaped.security,
         unresolved: shaped.unresolved,
     };
-    Ok(Bundle { files, manifest })
+    let mut bundle = Bundle { files, manifest };
+    for (name, image) in &inputs.board_firmware {
+        bundle.append_board_firmware(name.clone(), image.bytes.to_vec(), source_of(image))?;
+    }
+    Ok(bundle)
 }
 
 /// A global manifest must name the selected board.

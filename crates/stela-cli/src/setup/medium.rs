@@ -13,10 +13,10 @@
 //! 4 GiB limit, so their concatenation is the IPSW byte for byte. Each piece
 //! is written as `ipsw.NNN.partial`, read back, and renamed; a rerun keeps
 //! every complete piece whose bytes still match the IPSW and writes only
-//! the rest. The IPSW's SHA-256 and SHA-1 are taken while its pieces are
-//! written, and compared with its download receipt and Apple's catalog
-//! digest; `payload.json` is written only when they match, so a medium
-//! without it is never taken for a complete one.
+//! the rest. While writing the IPSW, setup checks its SHA-256 and any
+//! catalog SHA-1 supplied by the download receipt. It writes
+//! `payload.json` after verification, so a medium without it is never
+//! taken for a complete one.
 //!
 //! A remote medium ([`write_remote`]) holds only `payload.json` and
 //! `blocks.bin`: `stela.efi` streams the IPSW from Apple's servers during
@@ -347,11 +347,10 @@ fn hash_file(
     Ok(hashes.finish())
 }
 
-/// The whole IPSW's SHA-256 and catalog SHA-1.
-#[derive(Default)]
-struct Whole {
+/// The whole IPSW's SHA-256 and its SHA-1 if the catalog supplies one.
+struct Whole<'a> {
     sha256: Sha256,
-    sha1: Sha1,
+    catalog: Option<(&'a str, Sha1)>,
 }
 
 /// Read `size` bytes of `ipsw` from `offset` and return their hashes;
@@ -362,7 +361,7 @@ fn piece(
     offset: u64,
     size: u64,
     partial: Option<&Path>,
-    mut whole: Option<&mut Whole>,
+    mut whole: Option<&mut Whole<'_>>,
     progress: &crate::progress::Phase,
 ) -> Result<(String, Vec<u8>)> {
     ipsw.seek(SeekFrom::Start(offset))?;
@@ -376,7 +375,9 @@ fn piece(
         hashes.update(bytes);
         if let Some(whole) = whole.as_deref_mut() {
             whole.sha256.update(bytes);
-            whole.sha1.update(bytes);
+            if let Some((_, hash)) = &mut whole.catalog {
+                hash.update(bytes);
+            }
         }
         match (&mut out, partial) {
             (Some(out), Some(path)) => out
@@ -445,7 +446,10 @@ pub(super) fn write(options: WriteOptions<'_>) -> Result<Written> {
         ipsw.display(),
         sizes.len()
     );
-    let mut whole = Whole::default();
+    let mut whole = Whole {
+        sha256: Sha256::new(),
+        catalog: expected.sha1.as_deref().map(|digest| (digest, Sha1::new())),
+    };
     let mut pieces = Vec::new();
     let mut piece_blocks = Vec::new();
     let mut written = Written::default();
@@ -506,7 +510,6 @@ pub(super) fn write(options: WriteOptions<'_>) -> Result<Written> {
         }
     }
     let sha256 = hex::encode(whole.sha256.finalize());
-    let sha1 = hex::encode(whole.sha1.finalize());
     ensure!(
         manifest.source.sha256.as_ref() == Some(&sha256),
         "{} changed while setup read it: its SHA-256 is now {sha256}",
@@ -520,14 +523,17 @@ pub(super) fn write(options: WriteOptions<'_>) -> Result<Written> {
             ipsw.display()
         );
     }
-    if let Some(catalog) = &expected.sha1 {
+    manifest.source.catalog_sha1 = if let Some((catalog, hash)) = whole.catalog {
+        let sha1 = hex::encode(hash.finalize());
         ensure!(
             sha1.eq_ignore_ascii_case(catalog),
             "{}'s SHA-1 {sha1} differs from Apple's catalog digest {catalog}; download it again",
             ipsw.display()
         );
-    }
-    manifest.source.catalog_sha1 = expected.sha1.as_ref().map(|_| sha1);
+        Some(sha1)
+    } else {
+        None
+    };
     manifest.layout = Layout::Pieces {
         piece_bytes,
         pieces,
@@ -722,6 +728,20 @@ pub(super) mod tests {
             .flat_map(|index| fs::read(directory.join(piece_name(index))).unwrap())
             .collect();
         assert_eq!(joined, bytes);
+
+        let manual = write(WriteOptions {
+            volume: &volume,
+            ipsw: &ipsw,
+            inventory: inventory(&ipsw),
+            expected: &Expected::default(),
+            piece_bytes: PIECE_BYTES,
+        })
+        .unwrap();
+        assert_eq!((manual.kept, manual.wrote), (count, 0));
+        let manual_manifest =
+            PayloadManifest::parse(&fs::read(directory.join(MANIFEST_FILE)).unwrap()).unwrap();
+        assert_eq!(manual_manifest.source.sha256, manifest.source.sha256);
+        assert!(manual_manifest.source.catalog_sha1.is_none());
     }
 
     #[test]

@@ -17,7 +17,7 @@ pub struct BareHost<'a> {
 pub(super) const CODE_UNITS: u64 = 32;
 
 pub(super) fn code_unit_bytes(state: &State) -> u64 {
-    state.code_bytes / CODE_UNITS / 16 * 16
+    state.code_bytes / CODE_UNITS / CODE_INSTALL_ALIGNMENT * CODE_INSTALL_ALIGNMENT
 }
 
 impl Host for BareHost<'_> {
@@ -81,6 +81,21 @@ impl Host for BareHost<'_> {
                 )
             };
         })
+    }
+
+    fn read_ram_descriptor(&mut self, physical: u64) -> Option<u64> {
+        super::super::speculation::fence();
+        if let Some(ram) = &state().registered_ram {
+            return ram.read_descriptor(physical).ok();
+        }
+        let (host, bytes) = state().run(physical)?;
+        if bytes < 8 || !host.is_multiple_of(8) {
+            return None;
+        }
+        // SAFETY: this aligned descriptor fits in one live RAM run and
+        // the physical window maps the entire run. No Rust reference to
+        // guest memory is formed.
+        Some(unsafe { (layout::physical(host) as *const u64).read_volatile() })
     }
 
     fn write_ram(&mut self, physical: u64, data: &[u8]) -> bool {
@@ -168,34 +183,29 @@ impl Host for BareHost<'_> {
     }
     fn install(&mut self, code: &[u8]) -> Result<NativeCode, InstallError> {
         let state = state();
-        let offset = state.code_used.next_multiple_of(16);
-        let end = offset + code.len() as u64;
-        if end > (state.code_unit + 1) * code_unit_bytes(state) {
-            return Err(InstallError::Full);
-        }
-        state.installed_ranges[state.code_unit as usize]
-            .try_reserve(1)
-            .map_err(|_| InstallError::Full)?;
-        if code.is_empty() {
-            return Err(InstallError::Full);
-        }
-        // SAFETY: arena bytes through the writable physmap alias.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                code.as_ptr(),
-                layout::physical(state.code_physical + offset) as *mut u8,
-                code.len(),
-            );
-        }
-        serialize_code();
-        let unit = state.code_unit * code_unit_bytes(state);
-        state.installed_ranges[state.code_unit as usize]
-            .push(((offset - unit) as u32, (end - unit) as u32));
-        state.code_used = end;
-        state.code_peak = state.code_peak.max(end);
+        let part_bytes = code_unit_bytes(state);
+        let part_offset = state.code_unit * part_bytes;
+        let physical = state.code_physical + part_offset;
+        let extent = state.installed_extents[state.code_unit as usize]
+            .append(part_bytes, code.len(), |start| {
+                // SAFETY: the ledger reserves this nonoverlapping extent in
+                // the owned arena. The writable physmap reaches it.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        code.as_ptr(),
+                        layout::physical(physical + start) as *mut u8,
+                        code.len(),
+                    );
+                }
+                serialize_code();
+            })
+            .ok_or(InstallError::Full)?;
+        state.code_peak = state.code_peak.max(part_offset + extent.end);
         #[cfg(feature = "native-profile")]
         state.native_profile.copied(code.len());
-        Ok(NativeCode((state.code_virtual + offset) as usize))
+        Ok(NativeCode(
+            (state.code_virtual + part_offset + extent.start) as usize,
+        ))
     }
 
     fn install_immutable(&mut self, code: &Arc<Vec<u8>>) -> Result<NativeCode, InstallError> {
@@ -257,10 +267,18 @@ impl Host for BareHost<'_> {
         let state = state();
         state.installed_immutable.clear();
         state.code_unit = 0;
-        state.code_used = 0;
-        for ranges in &mut state.installed_ranges {
-            ranges.clear();
+        for extents in &mut state.installed_extents {
+            extents.clear();
         }
+    }
+
+    fn code_partitions(&self) -> Option<stela_engine::machine::engine::CodePartitions> {
+        let state = state();
+        Some(stela_engine::machine::engine::CodePartitions {
+            base: state.code_virtual as usize,
+            bytes_per_part: code_unit_bytes(state) as usize,
+            parts: CODE_UNITS as usize,
+        })
     }
 
     fn reclaim_code(&mut self) -> Option<core::ops::Range<usize>> {
@@ -268,9 +286,8 @@ impl Host for BareHost<'_> {
         state.installed_immutable.clear();
         let unit = code_unit_bytes(state);
         state.code_unit = (state.code_unit + 1) % CODE_UNITS;
-        state.installed_ranges[state.code_unit as usize].clear();
-        state.code_used = state.code_unit * unit;
-        let start = (state.code_virtual + state.code_used) as usize;
+        state.installed_extents[state.code_unit as usize].clear();
+        let start = (state.code_virtual + state.code_unit * unit) as usize;
         Some(start..start + unit as usize)
     }
 
@@ -283,12 +300,13 @@ impl Host for BareHost<'_> {
         // blocks again.
         let Some(part) = (1..CODE_UNITS)
             .map(|step| (state.code_unit + step) % CODE_UNITS)
-            .find(|&part| !state.installed_ranges[part as usize].is_empty())
+            .find(|&part| !state.installed_extents[part as usize].is_empty())
         else {
             return Some(0..0);
         };
         state.installed_immutable.clear();
-        state.installed_ranges[part as usize].clear();
+        // This reclaim is for heap pressure, so give back the ledger too.
+        state.installed_extents[part as usize] = CodeExtents::default();
         let unit = code_unit_bytes(state);
         let start = (state.code_virtual + part * unit) as usize;
         Some(start..start + unit as usize)
@@ -352,6 +370,7 @@ impl Host for BareHost<'_> {
 
     fn set_regime(&mut self, regime: &Regime) {
         let state = state();
+        let mut changed_roots = None;
         if let Some(current) = state.regime
             && current.controls != regime.controls
         {
@@ -386,12 +405,18 @@ impl Host for BareHost<'_> {
             if rest == to && (!lower || asid || !state.extents[UPPER].private()) {
                 if lower {
                     let key = |c: &mmu::Controls| (c.ttbr0, c.tcr & lower_tcr);
-                    state.switch_lower(key(&from), key(&to));
+                    changed_roots = Some(state.switch_lower(key(&from), key(&to)));
                 }
                 let rights = |c: &mmu::Controls| (c.sprr.el0, c.sprr.el1, c.tcr & user_tcr);
                 let (from, to) = (rights(&from), rights(&to));
-                if from != to {
+                let bank = from != to;
+                if bank {
                     state.switch_bank(from, to);
+                    changed_roots = Some([true; ROOTS]);
+                }
+                // The helper's software TLB keys neither TTBR0 nor the bank.
+                if lower || bank {
+                    state.tlb.clear();
                 }
             } else {
                 let ttbr0 = mmu::Controls {
@@ -438,13 +463,21 @@ impl Host for BareHost<'_> {
             (_, false, false) => EL1_VIEW,
             (_, true, false) => PAN_VIEW,
         } + if regime.tag_checked() { VIEWS } else { 0 };
-        if state.current != view {
-            let load = state.root_of(view) != state.root_of(state.current);
-            state.current = view;
-            if load {
-                state.view_switches += 1;
-                state.load_view(view);
+        let root = state.root_of(view);
+        let switch_view = root != state.root_of(state.current);
+        state.current = view;
+        state.view_switches += u64::from(switch_view);
+        // Lower-half and bank changes, and a switch of the active view,
+        // can coincide. Load the final view after applying all of them.
+        let mut load = switch_view;
+        if let Some(changed) = changed_roots {
+            for (stale, changed) in state.contexts.stale.iter_mut().zip(changed) {
+                *stale |= changed;
             }
+            load |= changed[root];
+        }
+        if load {
+            state.load_view(view);
         }
     }
 
@@ -482,38 +515,66 @@ impl Host for BareHost<'_> {
             return state.reset_shadow(Cause::Maintained);
         }
         state.tlb.clear();
-        let mut unmapped = Vec::new();
+        // Most maintenance addresses reach a single extent, without a
+        // large overlapping leaf or a second half.
+        let mut first_range = None;
+        let mut extra_ranges = Vec::new();
+        let mut pages = 0u64;
         let mut whole = false;
         for half in [LOWER, UPPER] {
-            match state.extents[half].ranges(reach, state.half_range(half)) {
-                None => {
-                    state.clear(half);
-                    whole = true;
+            let bounds = state.half_range(half);
+            if !state.extents[half].visit_ranges(reach, bounds, |first, last| {
+                pages = pages.saturating_add(((last >> 12) - (first >> 12)) + 1);
+                if first_range.is_none() {
+                    first_range = Some((first, last));
+                } else {
+                    extra_ranges.push((first, last));
                 }
-                Some(ranges) => unmapped.extend(ranges),
+            }) {
+                state.clear(half);
+                whole = true;
             }
         }
-        let mut pages = 0u64;
-        for &(first, last) in &unmapped {
-            for root in state.all_roots() {
-                tables::unmap(&state.pool, root, first, last);
-            }
-            pages = pages.saturating_add(((last - first) >> 12) + 1);
-        }
-        if whole || pages > INVLPG_PAGES {
-            state.reload();
-        } else {
-            for &(first, last) in &unmapped {
-                let mut page = first & !(PAGE - 1);
-                loop {
-                    let current = state.root_of(state.current);
-                    state.contexts.forget(page, current);
-                    if page >= last & !(PAGE - 1) {
-                        break;
+        const { assert!(INVLPG_PAGES <= u16::BITS as u64) };
+        let precise = !whole && pages <= INVLPG_PAGES;
+        let current = state.root_of(state.current);
+        let mut reload_current = false;
+        for (first, last) in first_range.into_iter().chain(extra_ranges) {
+            let base = first & !(PAGE - 1);
+            for (view, root) in state.roots.into_iter().enumerate() {
+                let mut removed = 0u16;
+                tables::unmap(&state.pool, root, first, last, |address| {
+                    let bit = if precise { (address - base) / PAGE } else { 0 };
+                    removed |= 1 << bit;
+                });
+                if whole || removed == 0 {
+                    continue;
+                }
+                if !precise {
+                    state.contexts.stale[view] = true;
+                    reload_current |= view == current;
+                    continue;
+                }
+                while removed != 0 {
+                    let page = base + u64::from(removed.trailing_zeros()) * PAGE;
+                    removed &= removed - 1;
+                    if view == current {
+                        invlpg(page);
+                    } else {
+                        state.contexts.forget_inactive(page, view);
                     }
-                    page += PAGE;
                 }
             }
+            // A bank has no PCID while it is inactive. Switching to it
+            // flushes the views before they can use its entries again.
+            for root in state.banks.iter().flat_map(|bank| bank.roots) {
+                tables::unmap(&state.pool, root, first, last, |_| {});
+            }
+        }
+        if whole {
+            state.reload();
+        } else if reload_current {
+            state.load_view(state.current);
         }
         if whole {
             state.resets += 1;

@@ -61,13 +61,13 @@ pub(super) struct Images {
 }
 
 impl Images {
-    pub(super) fn load(inputs: &Inputs) -> Result<Self> {
+    pub(super) fn load(inputs: &Inputs, kernel: Cow<'_, [u8]>) -> Result<Self> {
         Ok(Self {
             kernel: LoadedImage::new(
                 "BootKC",
                 KERNEL_FILE,
-                KernelCollection::parse(inputs.kernel_collection.bytes)?,
-                inputs.kernel_collection.bytes,
+                KernelCollection::parse(&kernel)?,
+                kernel,
                 KERNEL_SPLITS,
             )?,
             auxiliary: inputs
@@ -78,7 +78,7 @@ impl Images {
                         "AuxKC",
                         AUXILIARY_FILE,
                         KernelCollection::parse_auxiliary(input.bytes)?,
-                        input.bytes,
+                        Cow::Borrowed(input.bytes),
                         AUXILIARY_SPLITS,
                     )
                 })
@@ -87,14 +87,14 @@ impl Images {
                 "SPTM",
                 SPTM_FILE,
                 KernelCollection::parse_executable(inputs.sptm.bytes)?,
-                inputs.sptm.bytes,
+                Cow::Borrowed(inputs.sptm.bytes),
                 SPTM_SPLITS,
             )?,
             txm: LoadedImage::new(
                 "TXM",
                 TXM_FILE,
                 KernelCollection::parse_executable(inputs.txm.bytes)?,
-                inputs.txm.bytes,
+                Cow::Borrowed(inputs.txm.bytes),
                 TXM_SPLITS,
             )?,
         })
@@ -687,7 +687,7 @@ pub(super) fn files(
     boot_args_bytes: Vec<u8>,
     core_locks_handed_off: bool,
     owned: Option<OwnedRamdisk>,
-) -> Result<(Files, Option<Source>)> {
+) -> (Files, Option<Source>) {
     let mut files = vec![
         (KERNEL_FILE.to_owned(), images.kernel.memory),
         (SPTM_FILE.to_owned(), images.sptm.memory),
@@ -722,17 +722,7 @@ pub(super) fn files(
             source_of(ramdisk)
         }),
     };
-    for (name, image) in &inputs.board_firmware {
-        // The manifest admits only simple names; these checks keep the name
-        // within the engine handoff and distinct from the bundle's own files.
-        require!(
-            name.len() <= MAX_FILE_NAME && !files.iter().any(|(file, _)| file == name),
-            "board firmware name {name} is too long or already a bundle file",
-            ?name
-        );
-        files.push((name.clone(), image.bytes.to_vec()));
-    }
-    Ok((files, ramdisk_source))
+    (files, ramdisk_source)
 }
 
 /// Each region's hash, over the bytes its file supplies.
@@ -756,7 +746,7 @@ pub(super) fn hash_regions(regions: &mut [Region], files: &[(String, Vec<u8>)]) 
 
 /// Every input's source, in manifest order.
 pub(super) fn sources(inputs: &Inputs, ramdisk_source: Option<Source>) -> Vec<Source> {
-    let mut sources = vec![source_of(&inputs.kernel_collection)];
+    let mut sources = vec![inputs.kernel_collection.source.clone()];
     sources.extend(inputs.auxiliary_collection.iter().map(source_of));
     sources.extend([
         source_of(&inputs.sptm),
@@ -780,7 +770,6 @@ pub(super) fn sources(inputs: &Inputs, ramdisk_source: Option<Source>) -> Vec<So
             .iter()
             .filter_map(|r| r.im4p.as_ref())
             .chain(&inputs.pivot_root_hash)
-            .chain(inputs.board_firmware.iter().map(|(_, image)| image))
             .map(source_of),
     );
     sources

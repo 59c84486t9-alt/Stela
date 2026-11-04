@@ -153,6 +153,7 @@ impl Host {
         c.suspend_controller()?;
         for hub in &mut self.hubs {
             hub.pending = None;
+            hub.attachments.clear();
         }
         Ok(Snapshot { topology, roots })
     }

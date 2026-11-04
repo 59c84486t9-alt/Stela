@@ -23,7 +23,7 @@ use super::{
     plist::{self, Limits, Value},
 };
 use alloc::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     string::{String, ToString},
     vec::Vec,
 };
@@ -31,9 +31,11 @@ use sha2::{Digest, Sha384};
 use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use {
-    stela_formats::payload::MemberRead, stela_formats::payload::PayloadManifest,
-    stela_formats::payload::Purpose, stela_formats::payload::ReadAt,
-    stela_formats::payload::zip::Archive, stela_formats::payload::zip::Entry,
+    stela_formats::payload::MemberRead,
+    stela_formats::payload::PayloadManifest,
+    stela_formats::payload::Purpose,
+    stela_formats::payload::ReadAt,
+    stela_formats::payload::zip::{Archive, Entry, Progress},
 };
 
 pub const BLOCK_BYTES: usize = stela_formats::payload::HASH_BLOCK_BYTES as usize;
@@ -95,6 +97,50 @@ struct Verified {
     /// reach.
     whole: Option<(u64, Sha384)>,
 }
+/// A few simultaneous streams can share one IPSW. Keep their positions
+/// separate, with bounded inflater buffers, so alternating reads do not
+/// replay each deflated member from byte zero.
+#[derive(Default)]
+struct Cursors(VecDeque<(String, Progress)>);
+
+impl Cursors {
+    // Each deflate cursor owns a 64 KiB input buffer, a 32 KiB window,
+    // and the decoder state. Stored cursors have no inflater allocation.
+    const LIMIT: usize = 6;
+
+    fn read<R: ReadAt>(
+        &mut self,
+        archive: &Archive,
+        reader: &mut R,
+        entry: &Entry,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<()> {
+        let cached = self
+            .0
+            .iter()
+            .position(|(name, _)| *name == entry.name)
+            .and_then(|index| self.0.remove(index));
+        let (name, mut progress) = match cached {
+            Some((name, progress)) => (Some(name), Some(progress)),
+            None => (None, None),
+        };
+        archive
+            .read_member_resuming(reader, entry, &mut progress, offset, output)
+            .map_err(payload)?;
+        if let Some(progress) = progress
+            && progress.produced() < entry.bytes
+        {
+            if self.0.len() == Self::LIMIT {
+                self.0.pop_front();
+            }
+            self.0
+                .push_back((name.unwrap_or_else(|| entry.name.clone()), progress));
+        }
+        Ok(())
+    }
+}
+
 pub struct Store<R> {
     reader: R,
     archive: Archive,
@@ -106,10 +152,7 @@ pub struct Store<R> {
     verified: BTreeMap<String, Verified>,
     block_count: usize,
     verify: Verify,
-    /// The most recently read member and its resumable inflate position, so
-    /// reading a deflate member block by block inflates it once rather than
-    /// replaying it from the start each block.
-    cursor: Option<(String, stela_formats::payload::zip::Progress)>,
+    cursors: Cursors,
 }
 fn payload(error: impl core::fmt::Debug) -> Error {
     Error::Payload(refuse!("payload: {error}", ?error))
@@ -210,12 +253,16 @@ impl<R: ReadAt> Store<R> {
             verified: BTreeMap::new(),
             block_count: 0,
             verify: Verify::Full,
-            cursor: None,
+            cursors: Cursors::default(),
         })
     }
     pub fn manifest(&self) -> &PayloadManifest {
         &self.manifest
     }
+    pub(super) fn release_cursors(&mut self) {
+        self.cursors.0.clear();
+    }
+
     pub fn reader_mut(&mut self) -> &mut R {
         &mut self.reader
     }
@@ -247,10 +294,11 @@ impl<R: ReadAt> Store<R> {
             .iter()
             .map(|m| m.name.clone())
             .collect();
+        let mut buffer = Vec::new();
         for path in paths {
             match self.verified.get(&path) {
                 Some(recorded) if recorded.whole.is_some() && self.verify == Verify::Full => {
-                    self.check_whole(&path)?
+                    self.check_whole(&path, &mut buffer)?
                 }
                 Some(_) => {}
                 None => self.verify(&path)?,
@@ -330,22 +378,24 @@ impl<R: ReadAt> Store<R> {
     /// Blocks `blocks` of a member with recorded or scanned hashes, each
     /// checked against its hash: one read of the source, so the storage
     /// under it moves the whole run in its largest transfers.
-    fn blocks(&mut self, path: &str, blocks: core::ops::Range<u64>) -> Result<Vec<u8>> {
-        let size = self.member_len(path)?;
+    fn read_blocks(
+        &mut self,
+        path: &str,
+        blocks: core::ops::Range<u64>,
+        bytes: &mut Vec<u8>,
+    ) -> Result<()> {
         let verified = &self.verified[path];
         let start = blocks.start * BLOCK_BYTES as u64;
-        let end = (blocks.end * BLOCK_BYTES as u64).min(size);
-        let entry = verified.entry.clone();
-        let mut bytes = vec![0; (end - start) as usize];
-        let mut progress = match self.cursor.take() {
-            Some((p, progress)) if p == path => Some(progress),
-            _ => None,
-        };
-        self.archive
-            .read_member_resuming(&mut self.reader, &entry, &mut progress, start, &mut bytes)
-            .map_err(payload)?;
-        self.cursor = progress.map(|progress| (path.to_string(), progress));
-        let expected = &self.verified[path].blocks[blocks.start as usize..blocks.end as usize];
+        let end = (blocks.end * BLOCK_BYTES as u64).min(verified.entry.bytes);
+        bytes.resize((end - start) as usize, 0);
+        self.cursors.read(
+            &self.archive,
+            &mut self.reader,
+            &verified.entry,
+            start,
+            bytes,
+        )?;
+        let expected = &verified.blocks[blocks.start as usize..blocks.end as usize];
         for (index, (block, expected)) in bytes.chunks(BLOCK_BYTES).zip(expected).enumerate() {
             let actual: [u8; 32] = Sha256::digest(block).into();
             if actual != *expected {
@@ -356,16 +406,17 @@ impl<R: ReadAt> Store<R> {
                 )));
             }
         }
-        Ok(bytes)
+        Ok(())
     }
     /// Read a member with recorded hashes whole, checking each block and
     /// then its SHA-384.
-    fn check_whole(&mut self, path: &str) -> Result<()> {
+    fn check_whole(&mut self, path: &str, buffer: &mut Vec<u8>) -> Result<()> {
         let blocks = self.verified[path].blocks.len() as u64;
         let run = (MAX_READ_BYTES / BLOCK_BYTES) as u64;
         let mut hash = Sha384::new();
         for first in (0..blocks).step_by(run as usize) {
-            hash.update(self.blocks(path, first..(first + run).min(blocks))?);
+            self.read_blocks(path, first..(first + run).min(blocks), buffer)?;
+            hash.update(&*buffer);
         }
         let verified = self.verified.get_mut(path).expect("recorded");
         if Some(<[u8; 48]>::from(hash.finalize())) != verified.sha384 {
@@ -495,7 +546,12 @@ impl<R: ReadAt> Store<R> {
         }
         let block = BLOCK_BYTES as u64;
         let first = offset / block;
-        let mut result = self.blocks(path, first..(offset + len as u64).div_ceil(block))?;
+        let mut result = Vec::new();
+        self.read_blocks(
+            path,
+            first..(offset + len as u64).div_ceil(block),
+            &mut result,
+        )?;
         result.drain(..(offset - first * block) as usize);
         result.truncate(len);
         let verified = self.verified.get_mut(path).expect("verified above");
@@ -520,16 +576,10 @@ impl<R: ReadAt> Store<R> {
     }
     /// A device-verified member's bytes, as read.
     fn read_unhashed(&mut self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
-        let entry = self.verified[path].entry.clone();
+        let entry = &self.verified[path].entry;
         let mut bytes = vec![0; len];
-        let mut progress = match self.cursor.take() {
-            Some((p, progress)) if p == path => Some(progress),
-            _ => None,
-        };
-        self.archive
-            .read_member_resuming(&mut self.reader, &entry, &mut progress, offset, &mut bytes)
-            .map_err(payload)?;
-        self.cursor = progress.map(|progress| (path.to_string(), progress));
+        self.cursors
+            .read(&self.archive, &mut self.reader, entry, offset, &mut bytes)?;
         Ok(bytes)
     }
     pub fn read_component(&mut self, name: &str, offset: u64, len: usize) -> Result<Vec<u8>> {

@@ -109,12 +109,13 @@ enum Plan {
 enum Phase {
     Command,
     /// Sending: bytes the host still accepts, bytes the device still
-    /// intends, buffered bytes not yet sent.
+    /// intends, and the cursor into the current backing read.
     DataIn {
         host: u32,
         device: u64,
         lba: u64,
         buffer: Vec<u8>,
+        sent: usize,
         failed: bool,
     },
     /// Receiving: bytes the host still sends, bytes the write still takes.
@@ -587,6 +588,7 @@ impl State {
                 device,
                 lba: 0,
                 buffer: data,
+                sent: 0,
                 failed: false,
             },
             Plan::Read { lba, .. } => Phase::DataIn {
@@ -594,6 +596,7 @@ impl State {
                 device,
                 lba,
                 buffer: Vec::new(),
+                sent: 0,
                 failed: false,
             },
             Plan::Write { lba, .. } => Phase::DataOut {
@@ -636,17 +639,18 @@ impl State {
                 device,
                 lba,
                 buffer,
+                sent,
                 failed,
             } => {
-                if buffer.is_empty() && *device > 0 && !*failed {
-                    // Reads stream from the backing device a chunk at a time.
+                if *sent == buffer.len() && *device > 0 && !*failed {
+                    // Refill only after the previous chunk has reached the host.
                     let bytes = (*device as usize).min(CHUNK) / size * size;
                     let bytes = bytes.max(size);
-                    let mut chunk = vec![0u8; bytes];
-                    match self.device.read(*lba, &mut chunk) {
+                    buffer.resize(bytes, 0);
+                    *sent = 0;
+                    match self.device.read(*lba, buffer) {
                         Ok(()) => {
                             *lba += (bytes / size) as u64;
-                            *buffer = chunk;
                         }
                         Err(_) => *failed = true,
                     }
@@ -658,9 +662,10 @@ impl State {
                     self.phase = Phase::Status;
                     return Reply::Stall;
                 }
-                let n = buffer.len().min(*device as usize).min(max);
-                packet[..n].copy_from_slice(&buffer[..n]);
-                buffer.drain(..n);
+                let data = &buffer[*sent..];
+                let n = data.len().min(*device as usize).min(max);
+                packet[..n].copy_from_slice(&data[..n]);
+                *sent += n;
                 *device -= n as u64;
                 *host -= n as u32;
                 self.pending.residue = *host;

@@ -218,6 +218,10 @@ fn development_hardware_model(tree: &mut DeviceTree) -> Result<String> {
             "the selected Apple board hardware model is not first in compatible"
         ));
     }
+    // A prepared bundle may already carry the development identity.
+    if value.ends_with(b"DEV") {
+        return Ok(target);
+    }
     let mut development_compatible = Vec::with_capacity(compatible.len());
     development_compatible.extend_from_slice(target.as_bytes());
     development_compatible.push(0);
@@ -698,6 +702,14 @@ fn run_machine<H: Host>(
     machine.set_wait_limit(Some(host::COUNTER_HZ / WAIT_POLLS_PER_SECOND));
     if !options.breakpoints.is_empty() {
         machine.set_breakpoints(&options.breakpoints);
+    }
+    machine
+        .devices
+        .with(|devices| devices.set_display_swap_tracing(options.display_trace));
+    if options.display_trace {
+        output::arguments(format_args!(
+            "DISPLAY TRACE enabled: per-swap DCP reports\n"
+        ));
     }
     machine.set_monitor_tracing(options.monitor_trace);
     if options.monitor_trace {

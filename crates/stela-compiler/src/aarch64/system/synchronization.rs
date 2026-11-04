@@ -96,6 +96,10 @@ pub enum Operation {
 }
 
 pub fn decode(word: u32) -> Option<Operation> {
+    // All the modeled hint, barrier and timed-wait forms share this class.
+    if word >> 16 != 0xd503 {
+        return None;
+    }
     if word & BARRIER_MASK == DSB_CLASS {
         let option = ((word >> OPTION_SHIFT) & OPTION_MASK) as u8;
         if option == SSBB_OPTION || option == PSSBB_OPTION {

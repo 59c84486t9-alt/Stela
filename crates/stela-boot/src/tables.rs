@@ -140,14 +140,11 @@ pub fn map_range(
     Ok(())
 }
 
-/// Unmap `first..=last`, a canonical address range in one half: clear the
-/// pages it holds, descending into every table it reaches. The tables stay
-/// linked, empty where the range covers them, so a later map of the range
-/// takes no new frame: clearing their entries instead would leave their
-/// frames taken and unreachable until the whole pool resets. The TLB is the
-/// caller's.
-pub fn unmap(frames: &dyn Frames, root: u64, first: u64, last: u64) {
-    clear(frames, root, layout::top_level(), first, last);
+/// Unmap `first..=last`, a canonical address range in one half, reporting
+/// an address in each present leaf removed. Intermediate tables stay linked
+/// for reuse. The caller invalidates any cached translations of those leaves.
+pub fn unmap(frames: &dyn Frames, root: u64, first: u64, last: u64, mut removed: impl FnMut(u64)) {
+    clear(frames, root, layout::top_level(), first, last, &mut removed);
 }
 
 /// [`unmap`] the part of `first..=last` that the root entry `entry` maps,
@@ -160,33 +157,44 @@ pub fn unmap_under(frames: &dyn Frames, entry: u64, first: u64, last: u64) {
             layout::top_level() - 1,
             first,
             last,
+            &mut |_| {},
         );
     }
 }
 
-fn clear(frames: &dyn Frames, table: u64, level: u32, first: u64, last: u64) {
+fn clear(
+    frames: &dyn Frames,
+    table: u64,
+    level: u32,
+    first: u64,
+    last: u64,
+    removed: &mut impl FnMut(u64),
+) {
     let shift = 12 + 9 * level;
     // The table maps the aligned region holding the range.
     let region = first & !((1u64 << (shift + 9)) - 1);
+    let entries = frames.table(table);
     for slot in index(first, level)..=index(last, level) {
-        let start = region | (slot as u64) << shift;
-        let end = start | ((1u64 << shift) - 1);
-        let entry = frames.table(table).wrapping_add(slot);
+        let entry = entries.wrapping_add(slot);
         // SAFETY: `table` is a live table page of these frames.
         let value = unsafe { entry.read_volatile() };
         if value & PRESENT == 0 {
             continue;
         }
+        let start = region | (slot as u64) << shift;
         if level == 0 || value & HUGE != 0 {
             // SAFETY: as above.
             unsafe { entry.write_volatile(0) };
+            removed(start.max(first));
         } else {
+            let end = start | ((1u64 << shift) - 1);
             clear(
                 frames,
                 value & ADDRESS,
                 level - 1,
                 first.max(start),
                 last.min(end),
+                removed,
             );
         }
     }
