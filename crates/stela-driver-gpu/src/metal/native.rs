@@ -1505,6 +1505,31 @@ fn flush(
     submitted.map_err(failure)
 }
 
+/// Keep the Vulkan packet for a single ordinary segment on the stack.
+fn submit_single_segment(
+    device: &ash::Device,
+    queue: vk::Queue,
+    segments: &[Segment],
+    buffers: &[vk::CommandBuffer],
+) -> Option<Result<()>> {
+    let ([segment], [buffer]) = (segments, buffers) else {
+        return None;
+    };
+    if !segment.binds.is_empty() || segment.waits.len() > 1 || segment.signals.len() > 1 {
+        return None;
+    }
+    let wait = segment.waits.first().copied().map(objects::semaphore);
+    let signal = segment.signals.first().copied().map(objects::semaphore);
+    let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(*buffer)];
+    let submits = [vk::SubmitInfo2::default()
+        .wait_semaphore_infos(wait.as_slice())
+        .command_buffer_infos(&commands)
+        .signal_semaphore_infos(signal.as_slice())];
+    // SAFETY: the backend owns the queue and recorded buffer. All packet
+    // arrays stay alive for the call, which consumes their contents.
+    Some(unsafe { device.queue_submit2(queue, &submits, vk::Fence::null()) }.map_err(failure))
+}
+
 impl NativeBackend {
     /// Submits the recorded segments in order. A segment with sparse binds
     /// splits the submission: the queue signals the bind timeline once
@@ -1515,6 +1540,10 @@ impl NativeBackend {
         segments: &[Segment],
         buffers: &[vk::CommandBuffer],
     ) -> Result<()> {
+        if let Some(submitted) = submit_single_segment(&self.device, self.queue, segments, buffers)
+        {
+            return submitted;
+        }
         let bound: Vec<Option<u64>> = segments
             .iter()
             .map(|segment| {

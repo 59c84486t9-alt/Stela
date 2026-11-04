@@ -17,6 +17,7 @@ use alloc::{collections::VecDeque, vec, vec::Vec};
 use ash::vk::{self, Handle};
 
 mod lifecycle;
+mod submission;
 
 #[test]
 fn in_flight_retirement_observes_a_timeline_once_per_ready_run() {
