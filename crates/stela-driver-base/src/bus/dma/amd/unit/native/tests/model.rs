@@ -460,6 +460,22 @@ impl Peer {
             _ => self.registers.write(COMMAND_HEAD, head as u64),
         }
     }
+    pub(super) fn overwrite_dte_word(&self, rid: u16, index: usize, value: u64) {
+        assert!(index < 4);
+        let state = self.state.lock().unwrap();
+        let table = self.registers.read(DEVICE_TABLE) & PHYSICAL;
+        let &(cpu, bytes) = state.ram.get(&table).expect("original device table");
+        let offset = usize::from(rid) * 32 + index * 8;
+        assert!(offset + 8 <= bytes);
+        // SAFETY: synchronous peer, original table allocation and one aligned
+        // word in its retained RAM. This injects only the requested corruption.
+        unsafe {
+            (cpu as *mut u64)
+                .add(offset / 8)
+                .write_volatile(value.to_le())
+        };
+    }
+
     pub(super) fn walk(&self, rid: u16, address: u64) -> Option<(u64, bool, bool)> {
         let mut state = self.state.lock().unwrap();
         let table = self.registers.read(DEVICE_TABLE) & PHYSICAL;

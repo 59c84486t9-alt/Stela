@@ -222,3 +222,47 @@ fn initial_window_drain_rejects_private_contexts_including_aliases() {
     // SAFETY: every covered requester and earlier window transaction retired.
     unsafe { unit.retire() }.unwrap();
 }
+
+#[test]
+fn initial_drain_refuses_an_invalid_blocked_alias_before_commands() {
+    let (mut unit, peer) = unit_with_entries(&[0x42, 0x20, 0, 0, 0, 0x21, 0, 0]);
+    unit.drain_initial_requester(0x20).unwrap();
+    let original = unit.table.borrow().snapshot(0x21).unwrap();
+    peer.overwrite_dte_word(0x21, 0, 0);
+    let before = peer.commands();
+    assert_eq!(
+        unit.drain_initial_requester(0x20),
+        Err(DmaError::IommuUnavailable)
+    );
+    assert_eq!(peer.commands(), before);
+    peer.overwrite_dte_word(0x21, 0, original[0]);
+    // SAFETY: both original entries are restored and no DMA/work users exist.
+    unsafe { unit.retire() }.unwrap();
+}
+
+#[test]
+fn initial_window_drain_requires_the_exact_root_and_dte() {
+    let (mut unit, peer) = model::unit();
+    let pages = peer.pages(4096);
+    // SAFETY: the isolated peer has no active requester; the original window
+    // owns these pages through the drain and any refused observation.
+    unsafe { unit.window(&[0x20], vec![pages.into()]) }.unwrap();
+    let initial = unit.table.borrow().snapshot(0x20).unwrap();
+    let before = peer.commands();
+    for (word, value) in [
+        (0, initial[0] ^ (1 << 12)), // Retain the original domain ID with a different root.
+        (0, 1),                      // Replace an expected window entry with a blocked one.
+        (2, initial[2] ^ (1 << 56)), // Change the original interrupt policy.
+    ] {
+        peer.overwrite_dte_word(0x20, word, value);
+        assert_eq!(
+            unit.drain_initial_requester(0x20),
+            Err(DmaError::IommuUnavailable)
+        );
+        assert_eq!(peer.commands(), before);
+        peer.overwrite_dte_word(0x20, word, initial[word]);
+    }
+    unit.drain_initial_requester(0x20).unwrap();
+    // SAFETY: the original window entry is restored and no requester is active.
+    unsafe { unit.retire() }.unwrap();
+}

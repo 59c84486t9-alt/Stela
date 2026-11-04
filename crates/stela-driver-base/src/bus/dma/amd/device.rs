@@ -241,6 +241,28 @@ impl<H: DeviceTableHardware> DeviceTable<H> {
         Ok(state.words(requester))
     }
 
+    /// Compare all four words with the exact cold blocked or window entry.
+    pub(super) fn check_cold_entry(
+        &self,
+        requester: u16,
+        window: Option<(PhysicalAddress, TableLevel, DomainId)>,
+    ) -> Result<(), DeviceTableError> {
+        if self.poisoned {
+            return Err(DeviceTableError::Poisoned);
+        }
+        let state = self.state.as_ref().expect("retained device table");
+        let _guard = state.hardware.enter().map_err(DeviceTableError::Context)?;
+        let policy = state.policy(requester);
+        let expected = match window {
+            Some((root, level, domain)) => Entry::translated(policy, root, level, domain)?,
+            None => Entry::blocked(policy),
+        };
+        if state.words(requester) != expected.words() {
+            return Err(DeviceTableError::ConcurrentWriter);
+        }
+        Ok(())
+    }
+
     /// # Safety
     /// The requester and complete alias group are stopped/drained with
     /// no queued DMA. The real root/mode is admitted; keep both old/new roots,
