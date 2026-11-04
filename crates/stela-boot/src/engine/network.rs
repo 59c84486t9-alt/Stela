@@ -129,10 +129,10 @@ impl HostNetwork {
         }
         let mut failures = Vec::new();
         for device in links.devices {
+            let driver = device.driver();
             let location = String::from(device.location());
             output::arguments(format_args!(
-                "NETWORK candidate driver={} adapter={location} mac={}\n",
-                device.driver(),
+                "NETWORK candidate driver={driver} adapter={location} mac={}\n",
                 device.mac()
             ));
             crate::status::progress(&format!("adapter {location}"));
@@ -160,6 +160,7 @@ impl HostNetwork {
             }
             match stack.automatic() {
                 Ok(config) => {
+                    output::arguments(format_args!("NETWORK driver={driver}\n"));
                     output::arguments(format_args!(
                         "NETWORK adapter={location} addresses={:?} dns={:?}\n",
                         config.addresses, config.dns

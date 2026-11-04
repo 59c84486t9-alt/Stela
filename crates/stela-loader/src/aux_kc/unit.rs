@@ -141,7 +141,7 @@ pub struct Unit<'a> {
     /// The definition each external name binds to: (object, symbol).
     globals: BTreeMap<String, (usize, usize)>,
     /// What the boot collection's entries this kext links against define.
-    imports: BTreeMap<String, u64>,
+    imports: BTreeMap<&'a str, u64>,
     /// `__got` slots, by what they hold.
     got: Vec<Value>,
     /// Boot-collection functions branched to, each through an
@@ -158,7 +158,7 @@ pub struct Unit<'a> {
 }
 
 impl<'a> Unit<'a> {
-    pub fn new(kext: &'a Kext<'a>, boot: &BootCollection<'_>) -> Result<Self> {
+    pub fn new(kext: &'a Kext<'a>, boot: &BootCollection<'a>) -> Result<Self> {
         let info = plist::parse(kext.info)?
             .into_dictionary()
             .ok_or(refuse!("Info.plist is not a dictionary"))?;
@@ -379,7 +379,7 @@ impl<'a> Unit<'a> {
         if let Some(&(object, index)) = self.globals.get(&symbol.name) {
             return self.define(object, index);
         }
-        if let Some(&address) = self.imports.get(&symbol.name) {
+        if let Some(&address) = self.imports.get(symbol.name.as_str()) {
             return Ok(Value::Boot(address));
         }
         match symbol.definition {
@@ -765,7 +765,7 @@ impl<'a> Unit<'a> {
             self.inherit_vtable(&parent, vtables, boot, done)?;
             None
         } else {
-            Some(*self.imports.get(&parent).ok_or_else(|| {
+            Some(*self.imports.get(parent.as_str()).ok_or_else(|| {
                 refuse!(
                     "{name} derives from {parent}, which no library the kext lists exports",
                     name,
@@ -945,7 +945,7 @@ impl<'a> Unit<'a> {
 /// The symbols the boot-collection entries a kext lists in
 /// `OSBundleLibraries` define; every `com.apple.kpi.*` interface is the
 /// kernel's.
-fn imports(info: &Dictionary, boot: &BootCollection<'_>) -> Result<BTreeMap<String, u64>> {
+fn imports<'a>(info: &Dictionary, boot: &BootCollection<'a>) -> Result<BTreeMap<&'a str, u64>> {
     let libraries = info
         .get("OSBundleLibraries")
         .and_then(plist::Value::as_dictionary)
@@ -967,9 +967,10 @@ fn imports(info: &Dictionary, boot: &BootCollection<'_>) -> Result<BTreeMap<Stri
     // The kernel's definitions come first, then each library's in name order.
     entries.sort_by_key(|&entry| (entry != KERNEL, entry));
     entries.dedup();
-    let mut imports = BTreeMap::new();
-    for entry in entries {
-        for (name, address) in boot.exports(entry)? {
+    let mut exports = entries.into_iter().map(|entry| boot.exports(entry));
+    let mut imports = exports.next().transpose()?.unwrap_or_default();
+    for library in exports {
+        for (name, address) in library? {
             imports.entry(name).or_insert(address);
         }
     }

@@ -94,25 +94,45 @@ impl Queue {
         self.ring.write(base + 14, 0u16);
     }
 
-    fn offer(&mut self, id: u16) {
+    /// Add one descriptor to the driver ring without publishing its index.
+    fn stage(&mut self, id: u16) {
         let slot = AVAIL + 4 + 2 * usize::from(self.available % self.entries);
         self.ring.write(slot, id);
         self.available = self.available.wrapping_add(1);
+    }
+
+    fn publish(&mut self) {
         fence(Ordering::SeqCst);
         self.ring.write(AVAIL + 2, self.available);
         fence(Ordering::SeqCst);
         self.notify.write16(0, 0);
     }
 
+    fn offer(&mut self, id: u16) {
+        self.stage(id);
+        self.publish();
+    }
+
+    fn prime_receive(&mut self) {
+        for id in 0..self.entries {
+            // These descriptors always name the same writable buffers.
+            self.describe(id, BUFFER, DESCRIPTOR_WRITE);
+            self.stage(id);
+        }
+        self.publish();
+    }
+
     /// The next buffer the device returned: its descriptor and length. A
     /// descriptor the driver never offered, or a length past its buffer,
     /// breaks the queue, as Linux `virtqueue_get_buf` does.
     fn take(&mut self) -> Result<Option<(u16, usize)>, Broken> {
-        fence(Ordering::SeqCst);
         let produced: u16 = self.ring.read(USED + 2);
         if self.used == produced {
             return Ok(None);
         }
+        // The device publishes the index after writing the used entry and
+        // buffer. Order those reads after observing a completed descriptor.
+        fence(Ordering::SeqCst);
         let slot = USED + 4 + 8 * usize::from(self.used % self.entries);
         let id = self.ring.read::<u32>(slot);
         let length = self.ring.read::<u32>(slot + 4) as usize;
@@ -182,10 +202,7 @@ impl VirtioNet {
             signalled,
         };
         transport.ready();
-        for id in 0..net.receive.entries {
-            net.receive.describe(id, BUFFER, DESCRIPTOR_WRITE);
-            net.receive.offer(id);
-        }
+        net.receive.prime_receive();
         Ok(net)
     }
 
@@ -269,7 +286,6 @@ impl Link for VirtioNet {
             let frame = (SHORTEST_RECEIVE..=LONGEST_RECEIVE)
                 .contains(&length)
                 .then(|| self.receive.buffer(id)[HEADER..length].to_vec());
-            self.receive.describe(id, BUFFER, DESCRIPTOR_WRITE);
             self.receive.offer(id);
             // A runt or oversized buffer is dropped and the next one read.
             if frame.is_some() {
@@ -314,7 +330,8 @@ mod tests {
                 used: 0,
                 available: 0,
             };
-            let (receive, transmit) = (queue(), queue());
+            let (mut receive, transmit) = (queue(), queue());
+            receive.prime_receive();
             Self {
                 net: VirtioNet {
                     device: mmio,
@@ -346,6 +363,47 @@ mod tests {
     }
 
     #[test]
+    fn receive_reposts_fixed_descriptors_across_ring_and_index_wrap() {
+        let mut fixture = Fixture::new();
+        let net = &mut fixture.net;
+        assert_eq!(net.receive.ring.read::<u16>(AVAIL + 2), ENTRIES);
+        for id in 0..ENTRIES {
+            let slot = usize::from(id);
+            assert_eq!(net.receive.ring.read::<u16>(AVAIL + 4 + 2 * slot), id);
+            assert_eq!(
+                net.receive.ring.read::<u64>(16 * slot),
+                net.receive.buffers.bus_address() + (slot * BUFFER) as u64
+            );
+            assert_eq!(net.receive.ring.read::<u32>(16 * slot + 8), BUFFER as u32);
+            assert_eq!(
+                net.receive.ring.read::<u16>(16 * slot + 12),
+                DESCRIPTOR_WRITE
+            );
+            assert_eq!(net.receive.ring.read::<u16>(16 * slot + 14), 0);
+        }
+        let descriptors = net.receive.ring.bytes()[..16 * usize::from(ENTRIES)].to_vec();
+
+        net.receive.available = u16::MAX;
+        net.receive.ring.write(AVAIL + 2, u16::MAX);
+        net.receive.used = u16::MAX;
+        let mut produced = u16::MAX;
+        net.receive.buffer(2)[HEADER..HEADER + 60].fill(0x44);
+        give_back(&mut net.receive, &mut produced, 2, (HEADER + 60) as u32);
+        let received = net.receive().unwrap().unwrap();
+        assert_eq!(net.receive.ring.read::<u16>(AVAIL + 2), 0);
+        assert_eq!(
+            net.receive
+                .ring
+                .read::<u16>(AVAIL + 4 + 2 * usize::from(ENTRIES - 1)),
+            2
+        );
+        net.receive.buffer(2)[HEADER..HEADER + 60].fill(0x77);
+        assert_eq!(received, [0x44; 60]);
+        assert_eq!(net.receive(), Ok(None));
+        assert_eq!(&net.receive.ring.bytes()[..descriptors.len()], descriptors);
+    }
+
+    #[test]
     fn bad_length_frames_are_dropped() {
         let mut fixture = Fixture::new();
         let net = &mut fixture.net;
@@ -362,7 +420,7 @@ mod tests {
         assert_eq!(net.receive(), Ok(Some(vec![0x5a; 60])));
         assert_eq!(net.receive(), Ok(None));
         // Every buffer, dropped or delivered, went back to the device.
-        assert_eq!(net.receive.available, 3);
+        assert_eq!(net.receive.available, ENTRIES + 3);
     }
 
     #[test]

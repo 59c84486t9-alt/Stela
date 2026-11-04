@@ -21,6 +21,97 @@ fn add(destination: Register, source: Register) -> Operation {
 }
 
 #[test]
+fn direct_region_keeps_interleaved_lz4_products_through_their_shifts() {
+    use crate::{Lifter, aarch64::Decoder};
+
+    let instructions: Vec<_> = [
+        0x9b0b_7c00,
+        0x4b05_0231,
+        0x9b0b_7e52,
+        0xd372_fc00,
+        0xd372_fe52,
+        0x927e_2e52,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, word)| {
+        Decoder
+            .lift(GuestAddress(0x100008384 + index as u64 * 4), word)
+            .unwrap()
+    })
+    .collect();
+    let ordinary = emit_clean_load_prefix(&instructions, false, None).unwrap();
+    assert_eq!(ordinary.consumed_instructions, instructions.len());
+    assert_eq!(ordinary.stats.state_loads, 5);
+    assert_eq!(ordinary.stats.in_place_source_uses, 3);
+    assert_eq!(ordinary.stats.exit_stores, 2);
+    assert_eq!(ordinary.code.len(), 84);
+    assert_eq!(
+        ordinary
+            .source_map
+            .iter()
+            .map(|row| row.0)
+            .collect::<Vec<_>>(),
+        instructions
+            .iter()
+            .map(|instruction| instruction.pc)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        ordinary
+            .source_map
+            .windows(2)
+            .all(|rows| rows[0].1 < rows[1].1)
+    );
+
+    let precise = emit_clean_load_prefix_with(
+        &instructions,
+        crate::x86_64::MemoryChecks::DEFAULT,
+        true,
+        None,
+    )
+    .unwrap();
+    assert_eq!(precise.consumed_instructions, 3);
+    let standalone = emit_clean_load_prefix(&instructions[3..], false, None).unwrap();
+    assert_eq!(standalone.consumed_instructions, 0);
+}
+
+#[test]
+fn direct_region_selects_only_nonzero_shift_aliases() {
+    use crate::aarch64::bitfield::{Kind, Operand};
+
+    for (width, bits) in [(Width::W32, 32), (Width::X64, 64)] {
+        let operand = |kind, rotation, mask_end| Operand {
+            kind,
+            width,
+            source: Register::X(1),
+            destination: Register::X(2),
+            rotation,
+            mask_end,
+        };
+        for (kind, rotation, end, expected) in [
+            (Kind::Unsigned, 1, bits - 1, Some((Shift::Lsr, 1))),
+            (
+                Kind::Signed,
+                bits - 1,
+                bits - 1,
+                Some((Shift::Asr, bits - 1)),
+            ),
+            (Kind::Unsigned, bits - 3, bits - 4, Some((Shift::Lsl, 3))),
+            (Kind::Unsigned, 0, bits - 1, None),
+            (Kind::Signed, 0, 15, None),
+            (Kind::Unsigned, 2, bits - 2, None),
+            (Kind::Insert, 1, bits - 1, None),
+        ] {
+            assert_eq!(
+                analysis::bitfield_shift(operand(kind, rotation, end)),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
 fn address_pair_shares_one_literal_and_preserves_distinct_source_rows() {
     let x0 = Register::X(0);
     let instructions = [
@@ -642,20 +733,21 @@ fn clean_load_tier_declines_unselected_memory_forms() {
 
 #[test]
 fn shared_byte_load_recipe_rejects_any_clobber_or_offset_change() {
-    let mut raw = Code::new();
-    super::super::memory(
-        &mut raw,
+    // The typed recipe keeps its address in RAX and its result in RCX.
+    let (raw, _) = memory_recipe::scalar_recipe(
         super::super::MemoryChecks::DEFAULT,
-        MemoryTransfer::Load {
-            signed: false,
-            width: Width::W32,
-        },
-        1,
-        Register::X(16),
-        crate::x86_64::ImmediateAddress {
-            base: Register::X(15),
-            displacement: -255,
-            mode: AddressMode::Offset,
+        memory_recipe::Scalar {
+            transfer: MemoryTransfer::Load {
+                signed: false,
+                width: Width::W32,
+            },
+            bytes: 1,
+            data: Register::X(16),
+            address: crate::x86_64::ImmediateAddress {
+                base: Register::X(15),
+                displacement: -255,
+                mode: AddressMode::Offset,
+            },
         },
     );
     assert_eq!(
@@ -708,20 +800,20 @@ fn shared_load_recipes_reject_any_clobber_or_offset_change() {
     ];
     for (width, bytes) in sizes {
         for data in [Register::X(16), Register::Zero] {
-            let mut raw = Code::new();
-            super::super::memory(
-                &mut raw,
+            let (raw, _) = memory_recipe::scalar_recipe(
                 super::super::MemoryChecks::DEFAULT,
-                MemoryTransfer::Load {
-                    signed: false,
-                    width,
-                },
-                bytes,
-                data,
-                crate::x86_64::ImmediateAddress {
-                    base: Register::X(15),
-                    displacement: -255,
-                    mode: AddressMode::Offset,
+                memory_recipe::Scalar {
+                    transfer: MemoryTransfer::Load {
+                        signed: false,
+                        width,
+                    },
+                    bytes,
+                    data,
+                    address: crate::x86_64::ImmediateAddress {
+                        base: Register::X(15),
+                        displacement: -255,
+                        mode: AddressMode::Offset,
+                    },
                 },
             );
             let selected = slot(data);

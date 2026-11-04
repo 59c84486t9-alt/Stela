@@ -59,6 +59,8 @@ pub mod upgrade;
 #[cfg(feature = "std")]
 use object::{Object, ObjectSection};
 #[cfg(feature = "std")]
+use std::borrow::Cow;
+#[cfg(feature = "std")]
 use stela_formats::sha256;
 
 /// One Mach-O slice of a file, as [`inspect`] names it.
@@ -100,28 +102,39 @@ fn integer(data: &[u8], start: usize, width: usize, little: bool) -> Result<u64>
 }
 
 #[cfg(feature = "std")]
-fn artifact(data: &[u8], path: &str, offset: u64) -> Result<Artifact> {
+fn parsed_macho(data: &[u8]) -> Result<object::File<'_>> {
     let file = object::File::parse(data)?;
     require!(
         file.format() == object::BinaryFormat::MachO,
         "not a Mach-O slice"
     );
-    let architecture = match file.architecture() {
+    Ok(file)
+}
+
+#[cfg(feature = "std")]
+fn architecture(file: &object::File<'_>, data: &[u8]) -> Result<Cow<'static, str>> {
+    Ok(match file.architecture() {
         object::Architecture::Aarch64 => {
             // cpu_subtype's high byte contains capability flags.
             let subtype = integer(data, 8, 4, file.is_little_endian())? as u32 & 0x00ff_ffff;
             match subtype {
-                0 => "arm64".to_owned(),
-                2 => "arm64e".to_owned(),
+                0 => Cow::Borrowed("arm64"),
+                2 => Cow::Borrowed("arm64e"),
                 // LLVM MachO.h 4a0a7e3ddc3b: CPU_SUBTYPE_ARM64E_X1.
                 // Naming this slice does not admit it to the execution profile.
-                12 => "arm64e.x1".to_owned(),
-                other => format!("arm64-subtype-{other}"),
+                12 => Cow::Borrowed("arm64e.x1"),
+                other => Cow::Owned(format!("arm64-subtype-{other}")),
             }
         }
-        object::Architecture::X86_64 => "x86_64".to_owned(),
-        other => format!("{other:?}"),
-    };
+        object::Architecture::X86_64 => Cow::Borrowed("x86_64"),
+        other => Cow::Owned(format!("{other:?}")),
+    })
+}
+
+#[cfg(feature = "std")]
+fn artifact(data: &[u8], path: &str, offset: u64) -> Result<Artifact> {
+    let file = parsed_macho(data)?;
+    let architecture = architecture(&file, data)?.into_owned();
     let text_bytes = file
         .sections()
         .filter(|s| s.kind() == object::SectionKind::Text)
@@ -198,25 +211,29 @@ pub fn inspect(data: &[u8], path: &str) -> Result<Vec<Artifact>> {
 /// The single arm64/arm64e slice of `data`, optionally narrowed by architecture.
 pub fn select_slice<'a>(
     data: &'a [u8],
-    path: &std::path::Path,
-    architecture: Option<&str>,
+    _path: &std::path::Path,
+    requested_architecture: Option<&str>,
 ) -> Result<(u64, &'a [u8])> {
-    let artifacts = inspect(data, &path.display().to_string())?;
-    let slices = split_slices(data)?;
-    let selected: Vec<_> = artifacts
-        .iter()
-        .zip(slices)
-        .filter(|(artifact, _)| {
-            matches!(artifact.architecture.as_str(), "arm64" | "arm64e")
-                && architecture.is_none_or(|wanted| wanted == artifact.architecture)
-        })
-        .collect();
-    require!(
-        selected.len() == 1,
-        "expected exactly one matching Apple executable slice, found {selected_len}; select --architecture arm64 or arm64e",
-        selected_len = selected.len()
-    );
-    Ok(selected[0].1)
+    let mut selected = None;
+    let mut selected_len = 0;
+    // Validate every slice, including architectures that cannot be selected.
+    for (offset, bytes) in split_slices(data)? {
+        let file = parsed_macho(bytes)?;
+        let label = architecture(&file, bytes)?;
+        if matches!(label.as_ref(), "arm64" | "arm64e")
+            && requested_architecture.is_none_or(|wanted| wanted == label.as_ref())
+        {
+            selected = Some((offset, bytes));
+            selected_len += 1;
+        }
+    }
+    selected.filter(|_| selected_len == 1).ok_or_else(|| {
+        refuse!(
+            "expected exactly one matching Apple executable slice, found {selected_len}; select --architecture arm64 or arm64e",
+            selected_len
+        )
+        .into()
+    })
 }
 
 #[cfg(test)]
@@ -257,6 +274,27 @@ mod tests {
         let slices = inspect(&fat, "universal")?;
         assert_eq!(slices.len(), 2);
         assert_eq!(slices[1].architecture, "x86_64");
+        let path = std::path::Path::new("universal");
+        assert_eq!(select_slice(&fat, path, None)?, (48, &fat[48..80]));
+        assert_eq!(
+            select_slice(&fat, path, Some("arm64e"))?,
+            (48, &fat[48..80])
+        );
+        let mut ambiguous = fat.clone();
+        ambiguous[80..].copy_from_slice(&thin(0x0100000c, 0));
+        assert!(
+            select_slice(&ambiguous, path, None)
+                .unwrap_err()
+                .to_string()
+                .contains("found 2")
+        );
+        assert_eq!(
+            select_slice(&ambiguous, path, Some("arm64"))?,
+            (80, &ambiguous[80..])
+        );
+        let mut bad_sibling = fat.clone();
+        bad_sibling[80..84].fill(0);
+        assert!(select_slice(&bad_sibling, path, Some("arm64e")).is_err());
         fat[36..40].copy_from_slice(&4096u32.to_be_bytes());
         assert!(inspect(&fat, "broken").is_err());
         Ok(())
@@ -266,6 +304,7 @@ mod tests {
         for (subtype, label) in [(0x8000000c, "arm64e.x1"), (0x8000007f, "arm64-subtype-127")] {
             let bytes = thin(0x0100000c, subtype);
             assert_eq!(inspect(&bytes, "own-subtype")?[0].architecture, label);
+            assert!(select_slice(&bytes, std::path::Path::new("own-subtype"), None).is_err());
             assert!(
                 matches!(load_plan::plan(&bytes), Err(load_plan::PlanError::UnsupportedCpu { cpu_subtype, .. }) if cpu_subtype == subtype)
             );
