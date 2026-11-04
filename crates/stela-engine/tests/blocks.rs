@@ -753,6 +753,59 @@ fn unsupported_callee_is_lazy_and_preserves_completed_caller_effects() -> Result
 }
 
 #[test]
+fn hosted_dispatch_separates_source_admission_from_plan_and_memory_errors() -> Result<()> {
+    use stela_compiler::{
+        CompileErrorKind, TargetCpu,
+        block::{BlockProfile, CheckedMemoryProfile, Features},
+    };
+    let cache = tempfile::tempdir()?;
+    let mut runtime = BlockRuntime::new(20, cache.path().to_path_buf());
+    let unsupported = words(&[0]);
+    runtime.register_code(GuestAddress(BASE), unsupported.clone())?;
+    let detail = stela_compiler::block::source_bytes(&unsupported, GuestAddress(BASE))
+        .unwrap_err()
+        .to_string();
+    let mut thread = state(BASE, 40);
+    // SAFETY: dispatch refuses the unsupported source before it can run.
+    let stopped = unsafe { runtime.run(&mut thread, None, 1)? };
+    assert_eq!(stopped.reason, StopReason::Unsupported { detail });
+    assert_eq!(stopped.compiled_blocks, 0);
+    assert_eq!(stopped.blocks_executed, 0);
+
+    let mut leaf = BlockRuntime::new_for_target(
+        20,
+        cache.path().to_path_buf(),
+        BlockProfile::new(Features::LEAF),
+        TargetCpu::Baseline,
+    );
+    leaf.register_code(GuestAddress(BASE), words(&[ADD_ONE]))?;
+    // SAFETY: only a register operation, and the leaf planner refuses its missing return.
+    let error = unsafe { leaf.run(&mut thread, None, 1) }.unwrap_err();
+    assert!(matches!(
+        error,
+        stela_engine::Error::Compile(error) if error.kind == CompileErrorKind::MissingLeafReturn
+    ));
+
+    let mut checked = BlockRuntime::new_for_target(
+        20,
+        cache.path().to_path_buf(),
+        BlockProfile::ORDINARY.with_checked_memory(CheckedMemoryProfile::SpAlignmentEnabled),
+        TargetCpu::Baseline,
+    );
+    checked.register_code(GuestAddress(BASE), unsupported)?;
+    // SAFETY: checked-memory artifacts are refused at the direct entry.
+    let error = unsafe { checked.run(&mut thread, None, 1) }.unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "checked artifact cannot execute through direct entry"
+    );
+    assert_eq!(thread.pc, GuestAddress(BASE));
+    assert_eq!(thread.registers.x[0], 40);
+    assert!(named_files(cache.path(), "native.bin")?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn indirect_unmapped_and_unaligned_targets_stop_without_host_jumps() -> Result<()> {
     for (target, expected) in [
         (0x9000, StopReason::UnmappedTarget),
