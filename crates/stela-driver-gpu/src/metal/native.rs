@@ -143,6 +143,34 @@ struct InFlight {
     value: u64,
 }
 
+impl InFlight {
+    /// Counts finished submissions from the front of the queue. Timeline
+    /// values only increase, so one observation covers consecutive
+    /// submissions that signal the same semaphore.
+    fn completed_prefix(
+        flights: &VecDeque<Self>,
+        mut observe: impl FnMut(vk::Semaphore) -> Result<u64>,
+    ) -> Result<usize> {
+        let mut observed = None;
+        let mut ready = 0;
+        for entry in flights {
+            let value = match observed {
+                Some((timeline, value)) if timeline == entry.timeline => value,
+                _ => {
+                    let value = observe(entry.timeline)?;
+                    observed = Some((entry.timeline, value));
+                    value
+                }
+            };
+            if value < entry.value {
+                break;
+            }
+            ready += 1;
+        }
+        Ok(ready)
+    }
+}
+
 /// The bindless descriptor heap: set 0 of every pipeline.
 #[derive(Clone, Copy, Debug)]
 struct Heap {
@@ -204,7 +232,7 @@ pub struct NativeBackend {
     null_sampler: vk::Sampler,
     layout: vk::PipelineLayout,
     command_pool: vk::CommandPool,
-    in_flight: Vec<InFlight>,
+    in_flight: VecDeque<InFlight>,
     mappings: BTreeMap<u64, Mapping>,
     exporter: ManuallyDrop<Box<dyn MemoryExporter>>,
     /// What each imported memory came from, and its token.
@@ -381,7 +409,7 @@ impl NativeBackend {
             null_sampler: vk::Sampler::null(),
             layout: vk::PipelineLayout::null(),
             command_pool: vk::CommandPool::null(),
-            in_flight: Vec::new(),
+            in_flight: VecDeque::new(),
             mappings: BTreeMap::new(),
             exporter: ManuallyDrop::new(exporter),
             imports: BTreeMap::new(),
@@ -676,26 +704,22 @@ impl NativeBackend {
 
     /// Frees the command buffers of submissions the queue has finished.
     fn reclaim(&mut self) -> Result<()> {
-        let mut finished = Vec::new();
-        let mut index = 0;
-        while index < self.in_flight.len() {
-            let entry = &self.in_flight[index];
+        // Leave the queue intact if observing a completion fails.
+        let ready = InFlight::completed_prefix(&self.in_flight, |timeline| {
             // SAFETY: the timeline semaphore is alive while submissions use it.
-            let value = unsafe { self.device.get_semaphore_counter_value(entry.timeline) }
-                .map_err(failure)?;
-            if value >= entry.value {
-                finished.extend(self.in_flight.swap_remove(index).buffers);
-            } else {
-                index += 1;
-            }
+            unsafe { self.device.get_semaphore_counter_value(timeline) }.map_err(failure)
+        })?;
+        if ready == 0 {
+            return Ok(());
         }
-        if !finished.is_empty() {
-            // SAFETY: the queue finished every command buffer in `finished`.
-            unsafe {
-                self.device
-                    .free_command_buffers(self.command_pool, &finished)
-            };
-        }
+        let mut completed = self.in_flight.drain(..ready);
+        let mut buffers = completed.next().expect("a ready submission").buffers;
+        buffers.extend(completed.flat_map(|entry| entry.buffers));
+        // SAFETY: the queue finished every command buffer in `buffers`.
+        unsafe {
+            self.device
+                .free_command_buffers(self.command_pool, &buffers)
+        };
         Ok(())
     }
 }
@@ -1419,7 +1443,7 @@ impl Backend for NativeBackend {
         // A commit appends the queue's completion signal last.
         let completion = segments.last().and_then(|segment| segment.signals.last());
         match completion {
-            Some(&(timeline, value)) => self.in_flight.push(InFlight {
+            Some(&(timeline, value)) => self.in_flight.push_back(InFlight {
                 buffers,
                 timeline: handle(timeline.0),
                 value,

@@ -165,7 +165,7 @@ fn backend(calls: &Calls, drops: &Arc<AtomicUsize>) -> NativeBackend {
         null_sampler: vk::Sampler::null(),
         layout: vk::PipelineLayout::null(),
         command_pool: vk::CommandPool::null(),
-        in_flight: Vec::new(),
+        in_flight: VecDeque::new(),
         mappings: BTreeMap::new(),
         exporter: ManuallyDrop::new(Box::new(Exporter(drops.clone()))),
         imports: BTreeMap::new(),

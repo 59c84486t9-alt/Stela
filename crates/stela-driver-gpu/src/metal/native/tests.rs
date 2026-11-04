@@ -1,4 +1,4 @@
-use super::{failure, objects};
+use super::{InFlight, failure, objects};
 use crate::metal::{
     binding::HeapArray,
     error::Error,
@@ -13,10 +13,47 @@ use crate::metal::{
         },
     },
 };
-use alloc::vec;
-use ash::vk;
+use alloc::{collections::VecDeque, vec, vec::Vec};
+use ash::vk::{self, Handle};
 
 mod lifecycle;
+
+#[test]
+fn in_flight_retirement_observes_a_timeline_once_per_ready_run() {
+    let main = vk::Semaphore::from_raw(1);
+    let sparse_step = vk::Semaphore::from_raw(2);
+    let mut flights: VecDeque<_> = (1..=64)
+        .map(|value| InFlight {
+            timeline: main,
+            value,
+            buffers: Vec::new(),
+        })
+        .collect();
+    flights.push_back(InFlight {
+        timeline: sparse_step,
+        value: 1,
+        buffers: Vec::new(),
+    });
+    let mut queries = Vec::new();
+    assert_eq!(
+        InFlight::completed_prefix(&flights, |timeline| {
+            queries.push(timeline);
+            Ok(32)
+        }),
+        Ok(32),
+    );
+    assert_eq!(queries, [main], "stop at the first unfinished submission");
+
+    queries.clear();
+    assert_eq!(
+        InFlight::completed_prefix(&flights, |timeline| {
+            queries.push(timeline);
+            Ok(if timeline == main { 64 } else { 0 })
+        }),
+        Ok(64),
+    );
+    assert_eq!(queries, [main, sparse_step]);
+}
 
 fn memory() -> crate::metal::vulkan::physical::Memory {
     nvk(Chip::find(0x1b3).unwrap(), 16 << 30).memory
