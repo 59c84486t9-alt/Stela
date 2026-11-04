@@ -252,7 +252,7 @@ unsafe impl NativeServices for Services<'_> {
         if role != FunctionRole::Physical {
             return Err(ServiceError::Claim(ClaimError::UnsupportedRole(role)));
         }
-        let root = self.remappers.preparation(address).map_err(|error| {
+        let root = self.remappers.preparation(self.mmio, address).map_err(|error| {
             output::arguments(format_args!("UNSUPPORTED Stela cold requester {address}: original DMA drain unavailable ({error:?})\n"));
             ServiceError::Refused("cold requester original DMA drain unavailable")
         })?;
@@ -331,7 +331,7 @@ unsafe impl NativeServices for Services<'_> {
 
     fn domain(&self, binding: RequesterBinding) -> Result<Arc<dyn DmaDomain>, ServiceError> {
         let address = binding.address();
-        let binding = match self.remappers.domain(binding) {
+        let binding = match self.remappers.domain(self.mmio, binding) {
             Ok(domain) => {
                 return domain.map_err(|error| {
                     output::arguments(format_args!(

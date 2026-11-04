@@ -53,25 +53,40 @@ struct Taken {
 
 enum InitialContexts {
     Window,
-    Blocked(Result<InitialBlock<MmioRegisters>, DmaError>),
+    Blocked,
 }
 
-impl Taken {
-    fn initial_requester(
+/// The drained initial cohorts of every original Intel DMA unit, paired
+/// with the same MMIO source that contained the PCI functions. Line
+/// controller and endpoint-engine retirement remain independent.
+struct BlockedFabric {
+    source: &'static native_mmio::Source,
+    units: Vec<(usize, InitialBlock<MmioRegisters>)>,
+}
+
+impl BlockedFabric {
+    fn requester(
         &self,
+        source: &native_mmio::Source,
+        descriptor: usize,
         rid: u16,
-    ) -> Result<Option<BlockedRequester<MmioRegisters>>, DmaError> {
-        match &self.initial {
-            InitialContexts::Window => Ok(None),
-            InitialContexts::Blocked(Ok(cohort)) => cohort.claim(rid).map(Some),
-            InitialContexts::Blocked(Err(error)) => Err(*error),
+    ) -> Result<BlockedRequester<MmioRegisters>, DmaError> {
+        if !core::ptr::eq(self.source, source) {
+            return Err(DmaError::IommuUnavailable);
         }
+        let (_, cohort) = self
+            .units
+            .iter()
+            .find(|(index, _)| *index == descriptor)
+            .ok_or(DmaError::IommuUnavailable)?;
+        cohort.claim(rid)
     }
 }
 
 /// The units the mount translates for.
 pub(super) struct Remappers {
     taken: Vec<Taken>,
+    initial_fabric: Option<BlockedFabric>,
     requesters: core::cell::RefCell<Vec<BoundRequester<MmioRegisters>>>,
     amd: Vec<amd::Taken>,
     roles: core::cell::RefCell<roles::Inventory>,
@@ -97,6 +112,7 @@ impl Remappers {
     pub(super) const fn none() -> Self {
         Self {
             taken: Vec::new(),
+            initial_fabric: None,
             requesters: core::cell::RefCell::new(Vec::new()),
             amd: Vec::new(),
             roles: core::cell::RefCell::new(roles::Inventory::empty()),
@@ -119,7 +135,7 @@ impl Remappers {
         rsdp: u64,
         root: u64,
         drivers: Range<u64>,
-        pci: &native_mmio::ContainedPci<'_>,
+        pci: &native_mmio::ContainedPci<'static>,
         inactive_firmware_units: &InactiveFirmwareUnits,
         tsc_hz: u64,
     ) -> Self {
@@ -225,7 +241,17 @@ impl Remappers {
                 return remappers;
             }
         };
+        let mut cohorts = Vec::new();
         remappers.dmar = Some(parsed.clone());
+        if cohorts.try_reserve_exact(parsed.units.len()).is_err()
+            || remappers.taken.try_reserve_exact(parsed.units.len()).is_err()
+        {
+            output::arguments(format_args!(
+                "HOST IOMMU VT-d inventory could not be retained\n"
+            ));
+            return remappers;
+        }
+        let mut covered = 0;
         for (segment, present) in &inventories {
             for (index, decision) in remapping::plan(&parsed, *segment, present, CLAIMED_DISPLAYS) {
                 let unit = &parsed.units[index];
@@ -276,18 +302,22 @@ impl Remappers {
                             } else {
                                 Err(DmaError::DrainUnavailable)
                             };
-                            match &result {
-                                Ok(_) => output::arguments(format_args!(
-                                    "HOST IOMMU VT-d unit {:#x} blocked and drained {} initial requesters\n",
-                                    unit.base,
-                                    requesters.len()
-                                )),
+                            match result {
+                                Ok(cohort) => {
+                                    covered += requesters.len();
+                                    cohorts.push((index, cohort));
+                                    output::arguments(format_args!(
+                                        "HOST IOMMU VT-d unit {:#x} blocked and drained {} initial requesters\n",
+                                        unit.base,
+                                        requesters.len()
+                                    ));
+                                }
                                 Err(error) => output::arguments(format_args!(
                                     "HOST IOMMU VT-d unit {:#x} blocked cohort not qualified: {error:?}\n",
                                     unit.base
                                 )),
                             }
-                            InitialContexts::Blocked(result)
+                            InitialContexts::Blocked
                         } else {
                             output::arguments(format_args!(
                                 "HOST IOMMU VT-d unit {:#x} retains a reserved window for {} requesters\n",
@@ -309,7 +339,48 @@ impl Remappers {
                 }
             }
         }
+        // The planner deduplicates RIDs inside each unit and refuses
+        // overlaps between units. A full count therefore requires each
+        // function from the independently checked PCI census exactly once.
+        if !cohorts.is_empty()
+            && cohorts.len() == parsed.units.len()
+            && inactive_firmware_units.matches_dmar(&parsed.units)
+            && covered == pci.functions()
+        {
+            remappers.initial_fabric = Some(BlockedFabric {
+                source: mmio,
+                units: cohorts,
+            });
+            output::arguments(format_args!(
+                "HOST IOMMU VT-d blocked PCI fabric qualified: {} units, {covered} functions\n",
+                parsed.units.len()
+            ));
+        } else if !parsed.units.is_empty() {
+            output::arguments(format_args!(
+                "HOST IOMMU VT-d blocked PCI fabric incomplete: {}/{} units, {covered}/{} functions\n",
+                cohorts.len(),
+                parsed.units.len(),
+                pci.functions()
+            ));
+        }
         remappers
+    }
+
+    fn initial_requester(
+        &self,
+        source: &native_mmio::Source,
+        taken: &Taken,
+        rid: u16,
+    ) -> Result<Option<BlockedRequester<MmioRegisters>>, DmaError> {
+        match taken.initial {
+            InitialContexts::Window => Ok(None),
+            InitialContexts::Blocked => self
+                .initial_fabric
+                .as_ref()
+                .ok_or(DmaError::DrainUnavailable)?
+                .requester(source, taken.descriptor, rid)
+                .map(Some),
+        }
     }
 
     /// # Safety
@@ -382,8 +453,8 @@ impl Remappers {
     }
 
     /// The taken hardware unit selected by this requester's firmware route.
-    /// An untaken descriptor remains explicitly untranslated, even when the
-    /// parent bridge uses a different taken unit.
+    /// A routed but untaken unit supplies no requester-domain grant, even
+    /// when the parent bridge uses a different taken unit.
     fn vtd(&self, segment: u16, rid: u16) -> Result<Option<&Taken>, VtdError> {
         let Some(dmar) = &self.dmar else {
             return Ok(None);
@@ -394,11 +465,12 @@ impl Remappers {
         };
         let selected =
             remapping::route(dmar, segment, present, rid).map_err(|_| VtdError::Unsupported)?;
-        Ok(selected.and_then(|descriptor| {
+        selected.map(|descriptor| {
             self.taken
                 .iter()
                 .find(|taken| taken.descriptor == descriptor)
-        }))
+                .ok_or(VtdError::Unsupported)
+        }).transpose()
     }
 
     fn amd(&self, segment: u16, rid: u16) -> Result<Option<&amd::Taken>, VtdError> {
@@ -593,6 +665,7 @@ impl Remappers {
     /// covers it; the binding back when none does.
     pub(super) fn domain(
         &self,
+        source: &native_mmio::Source,
         binding: RequesterBinding,
     ) -> Result<Result<Arc<dyn DmaDomain>, VtdError>, RequesterBinding> {
         let segment = binding.address().segment;
@@ -630,8 +703,8 @@ impl Remappers {
                 return Ok(Err(error));
             }
         };
-        let initial = taken
-            .initial_requester(rid)
+        let initial = self
+            .initial_requester(source, taken, rid)
             .and_then(|blocked| blocked.map_or(Ok(()), |requester| requester.drain()));
         if let Err(error) = initial {
             output::arguments(format_args!(

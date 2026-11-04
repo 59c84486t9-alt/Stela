@@ -130,6 +130,19 @@ impl Units {
         &self.units[..self.count]
     }
 
+    /// Compare the complete early inventory with a later DMAR parse, without
+    /// treating duplicate entries or an IVRS unit as a VT-d match.
+    pub fn matches_dmar(&self, descriptors: &[crate::dmar::Drhd]) -> bool {
+        let units = self.as_slice();
+        units.len() == descriptors.len()
+            && units.iter().all(|original| {
+                original.kind == Kind::Vtd
+                    && descriptors.iter().any(|descriptor| {
+                        original.segment == descriptor.segment && original.base == descriptor.base
+                    })
+            })
+    }
+
     fn push(&mut self, unit: Unit, at: usize) -> Result<(), TableError> {
         if unit.base == 0 || !unit.base.is_multiple_of(4096) {
             return Err(TableError::Structure(at));
@@ -494,6 +507,27 @@ mod tests {
             units.add_dmar(&sealed(b"DMAR", 0, &drhd(0xfed9_0000, 1))),
             Err(TableError::Structure(TABLE_HEADER))
         );
+    }
+
+    #[test]
+    fn dmar_match_requires_each_original_unit_in_the_same_segment() {
+        let first = drhd(0xfed9_0000, 0);
+        let second = drhd(0xfed9_1000, 1);
+        let mut table = sealed(b"DMAR", 0, &[first, second].concat());
+        table[36] = 47;
+        table[9] = 0u8.wrapping_sub(table.iter().copied().fold(0, u8::wrapping_add));
+        let mut units = Units::default();
+        units.add_dmar(&table).unwrap();
+        let mut parsed = crate::dmar::parse(&table).unwrap();
+        parsed.units.reverse();
+        assert!(units.matches_dmar(&parsed.units));
+        assert!(!units.matches_dmar(&parsed.units[..1]));
+        let second = parsed.units[1].clone();
+        parsed.units[1] = parsed.units[0].clone();
+        assert!(!units.matches_dmar(&parsed.units));
+        parsed.units[1] = second;
+        parsed.units[1].segment = 1;
+        assert!(!units.matches_dmar(&parsed.units));
     }
 
     #[test]

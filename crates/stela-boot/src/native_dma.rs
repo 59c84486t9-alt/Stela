@@ -28,6 +28,12 @@ impl InactiveFirmwareUnits {
         let original = firmware_state::Unit { kind, segment, base };
         self.0.as_ref().is_some_and(|units| units.as_slice().contains(&original))
     }
+
+    pub(crate) fn matches_dmar(&self, descriptors: &[dmar::Drhd]) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|units| units.matches_dmar(descriptors))
+    }
 }
 
 /// Before ExitBootServices: every remapping unit the firmware's DMAR and IVRS

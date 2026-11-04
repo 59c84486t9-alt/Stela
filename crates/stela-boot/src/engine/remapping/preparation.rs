@@ -101,6 +101,7 @@ unsafe impl stela_drivers::bus::pci::requester::preparation::AttachmentBackend f
 impl Remappers {
     pub(in crate::engine) fn preparation(
         &self,
+        source: &native_mmio::Source,
         address: Address,
     ) -> Result<Box<dyn Root>, DmaError> {
         let rid = requester(address);
@@ -115,8 +116,8 @@ impl Remappers {
             .map_err(|_| DmaError::IommuUnavailable)?
             .filter(|taken| taken.unit.allows(rid))
             .ok_or(DmaError::DrainUnavailable)?;
-        let blocked = taken
-            .initial_requester(rid)?
+        let blocked = self
+            .initial_requester(source, taken, rid)?
             .ok_or(DmaError::DrainUnavailable)?;
         Ok(Box::new(VtdRoot {
             address,
