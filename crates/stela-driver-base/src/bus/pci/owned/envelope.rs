@@ -31,6 +31,16 @@ pub struct PreparedConfig<G>(Envelope<G>);
 #[must_use]
 pub struct ConfigParts<G>(pub(super) Envelope<G>);
 
+impl<G> ConfigParts<G> {
+    /// Deny new users while the source keeps the original failed operation
+    /// and any mapping it acquired. This does not withdraw the mapping.
+    pub fn close_admission(&self) {
+        if let Some(close) = &self.0.close {
+            close.close();
+        }
+    }
+}
+
 pub(super) unsafe fn park(
     mut config: UnpublishedConfig,
 ) -> Result<PreparedConfig<PrepublicationGrant>, (MappingError, ConfigParts<PrepublicationGrant>)> {

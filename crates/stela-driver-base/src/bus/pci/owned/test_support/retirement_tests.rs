@@ -2,6 +2,28 @@
 use super::*;
 
 #[test]
+fn closing_retained_parts_blocks_new_users_without_unmapping_the_original() {
+    let (config, counters) = fixture(ADDRESS);
+    let epoch = config.retain_epoch().unwrap();
+    assert!(epoch.check_live().is_ok());
+
+    let mut parts = config.into_parts();
+    parts.close_admission();
+    parts.close_admission();
+    assert_eq!(
+        epoch.check_live(),
+        Err(MappingError::Assignment(assignment::Error::Closed))
+    );
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+    assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
+    drop(epoch);
+
+    // SAFETY: no fixture users remain. The same kept mapping can now withdraw.
+    unsafe { parts.retire() }.unwrap();
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
+}
+
+#[test]
 fn pending_original_config_use_vetoes_unmap_and_same_parts_retry_after_release() {
     let (config, counters) = fixture(ADDRESS);
     let (grant, mapping) = config.into_parts().into_test_parts();

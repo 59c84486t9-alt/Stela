@@ -7,7 +7,7 @@ use stela_drivers::{
     bus::pci::{
         ConfigEffect, ConfigError, ConfigFailure,
         owned::{
-            PreparedConfig, UnpublishedConfig,
+            ConfigParts, PreparedConfig, UnpublishedConfig,
             grant::{
                 CompletionCheck, ConfigCustody, ConfigEpoch, ConfigOperation, Operation,
                 PrepublicationCustody, PrepublicationGrant,
@@ -139,14 +139,14 @@ impl<'a> ContainedPci<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct ContainmentError {
     address: Option<Address>,
     cause: Cause,
     effect: ConfigEffect,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 enum Cause {
     Claim(ClaimError),
     Topology(topology::Error),
@@ -219,6 +219,22 @@ struct Slot {
 struct Fabric {
     roots: Vec<Option<Assignment<RootBus>>>,
     slots: Vec<Slot>,
+    refusal: Option<SlotRefusal>,
+}
+
+struct SlotRefusal {
+    error: ContainmentError,
+    _original: ConfigParts<PrepublicationGrant>,
+}
+
+impl SlotRefusal {
+    fn new(error: impl Into<ContainmentError>, original: ConfigParts<PrepublicationGrant>) -> Self {
+        original.close_admission();
+        Self {
+            error: error.into(),
+            _original: original,
+        }
+    }
 }
 
 enum Cohort {
@@ -525,28 +541,37 @@ impl Source {
     ) -> Result<ContainedPci<'_>, ContainmentError> {
         {
             let mut cohort = self.pci_slots.0.borrow_mut();
-            if !matches!(*cohort, Cohort::Unclaimed) {
-                return Err(Error::Busy.into());
+            match &*cohort {
+                Cohort::Unclaimed => *cohort = Cohort::Incomplete(Fabric::default()),
+                Cohort::Incomplete(Fabric {
+                    refusal: Some(refusal),
+                    ..
+                }) => return Err(refusal.error),
+                _ => return Err(Error::Busy.into()),
             }
-            *cohort = Cohort::Incomplete(Fabric::default());
         }
         // SAFETY: the caller keeps the complete captured topology exclusive.
         // with_config_inventory retires the last read-only map before return.
         let inputs = unsafe { self.with_config_inventory(census) }?;
-        let fabric = self.prepare_fabric(inputs)?;
-        let count = fabric.slots.len();
+        let count = inputs.len();
         let mut order = Vec::new();
         order
             .try_reserve_exact(count)
             .map_err(|_| Error::Exhausted)?;
+        self.prepare_fabric(inputs)?;
         order.extend(0..count);
         // Stop endpoints while their bridges still forward. Stop downstream
         // bridges before their upstream parents.
-        order.sort_unstable_by_key(|&index| {
-            let slot = &fabric.slots[index];
-            (slot.header.bridge.is_some(), Reverse(slot.address.bus))
-        });
-        *self.pci_slots.0.borrow_mut() = Cohort::Incomplete(fabric);
+        {
+            let cohort = self.pci_slots.0.borrow();
+            let Cohort::Incomplete(fabric) = &*cohort else {
+                unreachable!("exclusive containment owns the incomplete fabric");
+            };
+            order.sort_unstable_by_key(|&index| {
+                let slot = &fabric.slots[index];
+                (slot.header.bridge.is_some(), Reverse(slot.address.bus))
+            });
+        }
 
         for index in order {
             let (address, prepared, header, plan) = {
@@ -564,14 +589,20 @@ impl Source {
                     slot.plan.clone(),
                 )
             };
-            let parked = self
-                .contain_slot(prepared, header, &plan, tsc_hz)
-                .map_err(|error| error.at(address))?;
+            let result = self.contain_slot(prepared, header, &plan, tsc_hz);
             let mut cohort = self.pci_slots.0.borrow_mut();
             let Cohort::Incomplete(fabric) = &mut *cohort else {
                 unreachable!("exclusive containment owns the incomplete fabric");
             };
-            fabric.slots[index].configuration = Some(parked);
+            match result {
+                Ok(parked) => fabric.slots[index].configuration = Some(parked),
+                Err(mut refusal) => {
+                    refusal.error.address = Some(address);
+                    let error = refusal.error;
+                    fabric.refusal = Some(refusal);
+                    return Err(error);
+                }
+            }
         }
         let mut cohort = self.pci_slots.0.borrow_mut();
         let Cohort::Incomplete(fabric) = &mut *cohort else {
@@ -584,7 +615,7 @@ impl Source {
         })
     }
 
-    fn prepare_fabric(&self, mut inputs: Vec<Input>) -> Result<Fabric, ContainmentError> {
+    fn prepare_fabric(&self, mut inputs: Vec<Input>) -> Result<(), ContainmentError> {
         let roots = self.platform.wire().roots();
         let mut observed = Vec::new();
         observed
@@ -616,29 +647,40 @@ impl Source {
             });
             fabric.roots.push(assignment);
         }
+        *self.pci_slots.0.borrow_mut() = Cohort::Incomplete(fabric);
         // Secondary bus numbers exceed their upstream bus. BDF order keeps
         // each real bridge assignment before any of its children.
         for ((address, parent), input) in parents.into_iter().zip(inputs) {
             debug_assert_eq!(address, input.address);
-            let parent = match parent {
-                topology::Parent::Root(index) => fabric.roots[index]
-                    .as_ref()
-                    .expect("resolved root grant")
-                    .parent(),
-                topology::Parent::Bridge(bridge) => {
-                    let at = fabric
-                        .slots
-                        .binary_search_by_key(&bridge, |slot| slot.address)
-                        .expect("upstream slot is ordered before its children");
-                    fabric.slots[at].ancestor.clone()
+            let parent = {
+                let cohort = self.pci_slots.0.borrow();
+                let Cohort::Incomplete(fabric) = &*cohort else {
+                    unreachable!("exclusive containment owns the incomplete fabric");
+                };
+                match parent {
+                    topology::Parent::Root(index) => fabric.roots[index]
+                        .as_ref()
+                        .expect("resolved root grant")
+                        .parent(),
+                    topology::Parent::Bridge(bridge) => {
+                        let at = fabric
+                            .slots
+                            .binary_search_by_key(&bridge, |slot| slot.address)
+                            .expect("upstream slot is ordered before its children");
+                        fabric.slots[at].ancestor.clone()
+                    }
                 }
             };
             let slot = self
                 .prepare_slot(input, parent)
                 .map_err(|error| error.at(address))?;
+            let mut cohort = self.pci_slots.0.borrow_mut();
+            let Cohort::Incomplete(fabric) = &mut *cohort else {
+                unreachable!("exclusive containment owns the incomplete fabric");
+            };
             fabric.slots.push(slot);
         }
-        Ok(fabric)
+        Ok(())
     }
 
     fn prepare_slot(&self, input: Input, parent: Parent) -> Result<Slot, ContainmentError> {
@@ -677,19 +719,27 @@ impl Source {
         header: Header,
         plan: &Plan,
         tsc_hz: u64,
-    ) -> Result<PreparedConfig<PrepublicationGrant>, ContainmentError> {
-        let mapping = self.authority.map(
+    ) -> Result<PreparedConfig<PrepublicationGrant>, SlotRefusal> {
+        let mapping = match self.authority.map(
             prepared.configuration_resource().clone(),
             0,
             PAGE as usize,
             CacheAttribute::Uncached,
             Protection::ReadWrite,
-        )?;
+        ) {
+            Ok(mapping) => mapping,
+            Err(error) => return Err(SlotRefusal::new(error, prepared.into_parts())),
+        };
         let mut config = prepared
             .attach(mapping)
-            .map_err(|(error, _original)| error)?;
-        header.verify(|offset| config.try_read32(offset))?;
-        let effect = plan.apply(&mut config)?;
+            .map_err(|(error, original)| SlotRefusal::new(error, original))?;
+        let effect = match header
+            .verify(|offset| config.try_read32(offset))
+            .and_then(|()| plan.apply(&mut config))
+        {
+            Ok(effect) => effect,
+            Err(error) => return Err(SlotRefusal::new(error, config.into_parts())),
+        };
         let acknowledge = (|| -> Result<(), ClaimError> {
             let started = crate::apic::rdtsc();
             let limit = (tsc_hz / 1_000 * 64).max(1);
@@ -704,17 +754,27 @@ impl Source {
             header.verify(|offset| config.try_read32(offset))?;
             Ok(())
         })();
-        acknowledge.map_err(|cause| ContainmentError {
-            address: None,
-            cause: Cause::Claim(cause),
-            effect,
-        })?;
+        if let Err(cause) = acknowledge {
+            return Err(SlotRefusal::new(
+                ContainmentError {
+                    address: None,
+                    cause: Cause::Claim(cause),
+                    effect,
+                },
+                config.into_parts(),
+            ));
+        }
         // SAFETY: the only accesses were synchronous and bounded, with no
         // escaped aliases. Source keeps this original decode and assignment.
-        unsafe { config.park() }.map_err(|(error, _original)| ContainmentError {
-            address: None,
-            cause: Cause::Claim(ClaimError::Mapping(error)),
-            effect,
+        unsafe { config.park() }.map_err(|(error, original)| {
+            SlotRefusal::new(
+                ContainmentError {
+                    address: None,
+                    cause: Cause::Claim(ClaimError::Mapping(error)),
+                    effect,
+                },
+                original,
+            )
         })
     }
 }
