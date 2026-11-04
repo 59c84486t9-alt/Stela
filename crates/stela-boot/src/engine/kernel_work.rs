@@ -90,6 +90,31 @@ struct Reservation {
     allocation: native_smp::resources::AllocationClaim,
     released_stack_views: AtomicUsize,
 }
+#[cfg(feature = "diagnostics")]
+impl Reservation {
+    fn initial_pgd(
+        &self,
+        process: &dyn work::EnteredProcess,
+    ) -> Result<core::ptr::NonNull<c_void>, WorkError> {
+        process.check()?;
+        let owner = &self._handoff.native_loader_tables;
+        let scope = self.identity.process_root()?;
+        scope.entered_original(owner)?;
+        let physical = owner.root();
+        let address = layout::physical(physical);
+        let page = scope
+            .observe_original(address)?
+            .ok_or(WorkError::CorruptContext)?;
+        if page.physical != physical || page.user || !page.writable {
+            return Err(WorkError::CorruptContext);
+        }
+        crate::native_memory::cache::verify_writeback(address, physical, 4096, layout::physical(0))
+            .map_err(|_| WorkError::Unavailable)?;
+        process.check()?;
+        core::ptr::NonNull::new(address as *mut c_void).ok_or(WorkError::CorruptContext)
+    }
+}
+
 struct Backing {
     _reservation: Arc<Reservation>,
     bounds: Range<usize>,
