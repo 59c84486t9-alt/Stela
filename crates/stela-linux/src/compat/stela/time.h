@@ -4,6 +4,8 @@
 #include <linux/types.h>
 struct stela_linux_owner;
 struct task_struct;
+/* Read actual same-owner boottime. Refusal leaves the output unchanged. */
+int stela_linux_boottime_ns(s64 *now);
 /* Produced only by the actual minimum factory, with owned source/root/code.
  * Operations validate same original current/owner. All failures are terminal;
  * no operation returns a successful physical grant after source failure. */

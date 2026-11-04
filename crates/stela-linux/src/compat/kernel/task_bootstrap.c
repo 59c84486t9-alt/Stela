@@ -49,6 +49,7 @@
 #include <stela/srcu.h>
 #include <stela/task.h>
 #include <stela/task_bootstrap.h>
+#include <stela/time.h>
 #include <internal.h>
 
 /* Original init/main.c globals have one native bootstrap owner. The original
@@ -263,6 +264,12 @@ int stela_linux_task_bootstrap_threads(const struct stela_linux_owner *owner)
         return -EPERM;
     if (thread_phase != THREADS_COLD)
         return -EALREADY;
+    /* The original fork records CLOCK_BOOTTIME before task-list
+     * publication. Validate the live source before starting RCU or forking. */
+    s64 boot;
+    error = stela_linux_boottime_ns(&boot);
+    if (error)
+        return error;
     thread_phase = THREADS_STARTING;
     /* Original rest_init ordering: end the single-original-task inactive RCU
      * phase BEFORE a second child may run. This is no public SRCU readiness. */

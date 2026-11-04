@@ -55,6 +55,12 @@ impl IrqEnableError {
 pub trait Platform {
     /// Monotonic nanoseconds.
     fn now_ns(&self) -> i64;
+    /// Elapsed nanoseconds from this Linux instance's boot epoch, including
+    /// suspend. A no-suspend source must own continuity from that epoch.
+    /// Read the retained source without allocation, sleeping or switching.
+    fn boottime_ns(&self) -> Result<u64, WorkError> {
+        Err(WorkError::Unavailable)
+    }
     /// Map a sample from this platform's monotonic clock into UTC. The
     /// platform retains its correlation and multigrain floor for this owner.
     fn realtime_at(&self, _ns: i64, _read: RealtimeRead) -> Option<(i64, u32)> {
@@ -176,9 +182,10 @@ struct Services {
     available_page_frames: unsafe extern "C" fn(*mut c_void, usize, usize, *mut usize) -> c_int,
     realtime_at: unsafe extern "C" fn(*mut c_void, i64, u32, u32, *mut i64, *mut u32) -> bool,
     mix_random: unsafe extern "C" fn(*mut c_void, *const c_void, usize) -> bool,
+    boottime_ns: unsafe extern "C" fn(*mut c_void, *mut i64) -> bool,
 }
 
-const _: () = assert!(size_of::<Services>() == 200);
+const _: () = assert!(size_of::<Services>() == 208);
 const _: () = {
     assert!(core::mem::offset_of!(Services, now_ns) == 0);
     assert!(core::mem::offset_of!(Services, minimum_delay_us) == 8);
@@ -205,6 +212,7 @@ const _: () = {
     assert!(core::mem::offset_of!(Services, available_page_frames) == 176);
     assert!(core::mem::offset_of!(Services, realtime_at) == 184);
     assert!(core::mem::offset_of!(Services, mix_random) == 192);
+    assert!(core::mem::offset_of!(Services, boottime_ns) == 200);
 };
 
 /// `struct stela_linux_owner`.
@@ -242,6 +250,23 @@ mod trampolines {
     pub unsafe extern "C" fn now_ns<P: Platform>(context: *mut c_void) -> i64 {
         // SAFETY: see the module.
         unsafe { platform::<P>(context) }.now_ns()
+    }
+
+    pub unsafe extern "C" fn boottime_ns<P: Platform>(context: *mut c_void, now: *mut i64) -> bool {
+        // SAFETY: see the module. The owner lends its original boot clock.
+        let Ok(sample) = unsafe { platform::<P>(context) }.boottime_ns() else {
+            return false;
+        };
+        // KTIME_MAX is a sentinel, never an actual time sample.
+        let Ok(sample) = i64::try_from(sample) else {
+            return false;
+        };
+        if sample == i64::MAX {
+            return false;
+        }
+        // SAFETY: C lends one writable output, left unchanged on refusal.
+        unsafe { now.write(sample) };
+        true
     }
 
     pub unsafe extern "C" fn realtime_at<P: Platform>(
@@ -544,6 +569,7 @@ impl<P: Platform> Owner<P> {
         let mut owner = Box::new(Self {
             services: Services {
                 now_ns: t::now_ns::<P>,
+                boottime_ns: t::boottime_ns::<P>,
                 realtime_at: t::realtime_at::<P>,
                 minimum_delay_us: t::minimum_delay_us::<P>,
                 minimum_deadline_us: t::minimum_deadline_us::<P>,
