@@ -1204,6 +1204,34 @@ fn host_breakpoints_end_blocks_and_stop_before_their_instruction() {
 }
 
 #[test]
+fn system_address_pair_keeps_an_independent_add_entry_and_breakpoint() {
+    let words = [0xb000_0000, 0x9100_2000, 0x17ff_ffff]; // adrp; add; b to ADD
+    let mut grouped = machine(&words);
+    let Ok(Fetched::Block(head)) = grouped.fetch_block(BASE, false) else {
+        panic!("address pair block");
+    };
+    let Ok(Fetched::Block(add)) = grouped.fetch_block(BASE + 4, false) else {
+        panic!("independent ADD block");
+    };
+    assert_ne!(grouped.blocks[head].code, grouped.blocks[add].code);
+    assert_eq!(grouped.blocks[head].instructions, 3);
+    assert_eq!(grouped.blocks[add].instructions, 2);
+    assert_eq!(installed_code(&mut grouped, head, 0, 1), [0x90]);
+    assert_ne!(installed_code(&mut grouped, add, 0, 1), [0x90]);
+
+    let mut split = machine(&words);
+    split.set_breakpoints(&[BASE + 4]);
+    let Ok(Fetched::Block(head)) = split.fetch_block(BASE, false) else {
+        panic!("breakpoint-bounded ADRP");
+    };
+    assert_eq!(split.blocks[head].instructions, 1);
+    assert_eq!(
+        installed_code(&mut split, head, 2, 8),
+        (BASE + 0x1000).to_le_bytes()
+    );
+}
+
+#[test]
 fn trace_points_end_blocks_and_record_each_entry_without_stopping() {
     // add x0, x0, #1 (twice); fmov d0, d0, which traps with FP access
     // disabled, so the step completes without native code.

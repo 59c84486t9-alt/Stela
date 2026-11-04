@@ -4,6 +4,95 @@ use crate::block::{SynchronousTrap, TrapKind};
 use alloc::vec;
 use alloc::vec::Vec;
 
+#[test]
+fn system_address_pair_keeps_source_rows_and_the_following_fault_boundary() {
+    use crate::{Lifter, TargetCpu, aarch64::Decoder, block::RecoverySiteKind};
+
+    let entry = GuestAddress(0x1030);
+    let add_pc = GuestAddress(entry.0 + 4);
+    let load_pc = GuestAddress(entry.0 + 8);
+    let fallthrough = GuestAddress(entry.0 + 12);
+    let checks = super::super::MemoryChecks::DEFAULT;
+    for (register, opcode) in [(0, [0x49, 0xbf]), (20, [0x48, 0xb8])] {
+        let instructions = [
+            Decoder.lift(entry, 0xb000_0000 | register).unwrap(),
+            Decoder
+                .lift(add_pc, 0x9140_2000 | register << 5 | register)
+                .unwrap(),
+            Decoder.lift(load_pc, 0xf940_0002 | register << 5).unwrap(),
+        ]; // adrp; add #8, lsl #12; ldr x2,[register]
+        let system = |input: &[Instruction], next, target| {
+            emit_system_mode(
+                input,
+                None,
+                next,
+                target,
+                checks,
+                super::super::NativeSystem::NONE,
+            )
+        };
+        let (native, recovery) = system(&instructions, fallthrough, TargetCpu::Baseline);
+        let (dit, _) = system(
+            &instructions,
+            fallthrough,
+            TargetCpu::Baseline.with_data_independent_timing(),
+        );
+        let expected_end = if register == 0 { 11 } else { 18 };
+        assert_eq!(
+            native.source_map,
+            [(entry, 0), (add_pc, 1), (load_pc, expected_end)]
+        );
+        assert_eq!(native.x86_64_code[0], 0x90);
+        assert_eq!(native.x86_64_code[1..3], opcode);
+        assert_eq!(native.x86_64_code[3..11], 0xa000_u64.to_le_bytes());
+        assert!(dit.source_map[1].1 > 1);
+        assert!(native.x86_64_code.len() < dit.x86_64_code.len());
+        assert!(!recovery.is_empty());
+        assert!(recovery.iter().all(|row| row.start >= expected_end));
+        let access = recovery
+            .iter()
+            .find(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+            .unwrap();
+        assert_eq!(access.retirement.instruction_pc(), load_pc);
+        assert_eq!(access.retirement.retired_before(), 2);
+
+        let (truncated, _) = system(&instructions[..1], add_pc, TargetCpu::Baseline);
+        assert_eq!(truncated.source_map, [(entry, 0)]);
+        assert_eq!(truncated.x86_64_code[2..10], 0x2000_u64.to_le_bytes());
+        let (standalone, _) = system(&instructions[1..2], load_pc, TargetCpu::Baseline);
+        assert_eq!(standalone.source_map, [(add_pc, 0)]);
+        assert_ne!(standalone.x86_64_code[0], 0x90);
+    }
+}
+
+#[test]
+fn system_address_pair_requires_an_adjacent_flagless_x64_overwrite() {
+    use crate::{Lifter, TargetCpu, aarch64::Decoder};
+
+    let entry = GuestAddress(0x1000);
+    let first = Decoder.lift(entry, 0xb000_0000).unwrap();
+    for (pc, word) in [
+        (0x1008, 0x9100_2000), // Gap.
+        (0x1004, 0x1100_2000), // W destination.
+        (0x1004, 0xb100_2000), // Flag-setting ADD.
+        (0x1004, 0xd100_2000), // SUB.
+        (0x1004, 0x9100_2001), // Different destination.
+        (0x1004, 0x9100_2020), // Different source.
+    ] {
+        let second = Decoder.lift(GuestAddress(pc), word).unwrap();
+        let (native, _) = emit_system_mode(
+            &[first.clone(), second],
+            None,
+            GuestAddress(pc + 4),
+            TargetCpu::Baseline,
+            super::super::MemoryChecks::DEFAULT,
+            super::super::NativeSystem::NONE,
+        );
+        assert_eq!(native.source_map, [(entry, 0), (GuestAddress(pc), 10)]);
+        assert_eq!(native.x86_64_code[2..10], 0x2000_u64.to_le_bytes());
+    }
+}
+
 /// A reload removed before a check takes the check's jump along.
 #[test]
 fn removed_instructions_move_the_check_failures_after_them() {
