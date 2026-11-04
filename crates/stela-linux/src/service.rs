@@ -22,7 +22,11 @@ pub fn timer_delivery_failure() -> Option<WorkError> {
 /// Initial/Managed binding for this service runtime. The original callbacks
 /// are bounded and cannot sleep, reenter delivery, or retain the opaque loan.
 /// An error refuses delivery before any callback runs.
-#[cfg(all(feature = "hosted-test-support", target_os = "linux"))]
+#[cfg(all(
+    feature = "hosted-runtime",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 pub unsafe fn run_hosted_timers<const N: usize>(
     owner: &RawOwner,
     runtime: Pin<&stela_driver_base::platform::work::kernel_domain::HostedRuntime<N>>,

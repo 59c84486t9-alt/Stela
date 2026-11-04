@@ -5,10 +5,18 @@
 //! NORMAL nice, FIFO and inherited ranks commit against retained job identities
 //! on the same checked queue; native IRQ delivery remains the service's owner.
 mod factory;
-#[cfg(all(feature = "hosted-test-support", target_os = "linux"))]
+#[cfg(all(
+    feature = "hosted-runtime",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 mod hosted;
 mod inactive;
-#[cfg(all(feature = "hosted-test-support", target_os = "linux"))]
+#[cfg(all(
+    feature = "hosted-runtime",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 pub use hosted::HostedTaskBinding;
 mod native;
 pub mod runtime;

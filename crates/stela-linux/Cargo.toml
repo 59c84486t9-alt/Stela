@@ -12,8 +12,10 @@ workspace = true
 # Default builds require no external Linux source.
 kernel = ["dep:stela-driver-core", "dep:cc", "dep:stela-c-build", "stela-c-build/linux-registry", "stela-driver-base/linux-kernel"]
 
-# Bounded hosted execution of original kernel fixtures.
-hosted-test-support = ["kernel", "stela-driver-base/test-support"]
+# Bounded original C execution on the hosted continuation adapter.
+hosted-runtime = ["kernel", "stela-driver-base/test-support"]
+# Standalone C suites and original task fixture executables.
+hosted-test-support = ["hosted-runtime"]
 
 [dependencies]
 stela-driver-core = { path = "../stela-driver-core", optional = true }

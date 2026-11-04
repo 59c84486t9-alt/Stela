@@ -32,7 +32,11 @@ impl<'a> TimerDelivery<'a> {
         Ok(delivery)
     }
 
-    #[cfg(all(feature = "hosted-test-support", target_os = "linux"))]
+    #[cfg(all(
+        feature = "hosted-runtime",
+        target_os = "linux",
+        target_arch = "x86_64"
+    ))]
     pub(super) fn hosted<const N: usize>(
         owner: &'a RawOwner,
         runtime: Pin<&'a stela_driver_base::platform::work::kernel_domain::HostedRuntime<N>>,
@@ -75,7 +79,11 @@ unsafe fn check_native<const N: usize>(
         .validate_batch(environment.runtime(), batch)
 }
 
-#[cfg(all(feature = "hosted-test-support", target_os = "linux"))]
+#[cfg(all(
+    feature = "hosted-runtime",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
 unsafe fn check_hosted<const N: usize>(
     context: *const c_void,
     batch: *const c_void,
