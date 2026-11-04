@@ -1,6 +1,7 @@
 //! AES: constant-time SSE2 circuits, or AES-NI when available. All sources are
 //! read before the destination is written.
 use crate::x86_64::asm::{Code, Gpr};
+pub(in crate::x86_64) mod packed_rounds;
 mod sbox;
 
 use super::{Host, commit, packed, read_vector, rearrange::constant, shuffle};
@@ -143,15 +144,7 @@ fn round_input(code: &mut Code, operand: &Operand) {
     packed(code, Host::Xor, RESULT, OLD_DESTINATION);
 }
 
-/// An in-place MixColumns consumes and overwrites the immediately preceding
-/// AES row. Both operations are pure once the block has admitted AdvSIMD.
-/// Keep both source rows, but commit only the final value within the block.
-pub(in crate::x86_64) fn emit_round_pair(
-    code: &mut Code,
-    source_map: &mut Vec<(GuestAddress, usize)>,
-    instructions: &[Instruction],
-    target: TargetCpu,
-) -> Option<u8> {
+fn round_pair(instructions: &[Instruction]) -> Option<(&Operand, Host)> {
     let [first, second, ..] = instructions else {
         return None;
     };
@@ -171,16 +164,32 @@ pub(in crate::x86_64) fn emit_round_pair(
         (Kind::Decrypt, Kind::InverseMixColumns) => Host::AesDecryptRound,
         _ => return None,
     };
+    Some((round, opcode))
+}
+
+fn source_row(code: &mut Code, source_map: &mut Vec<(GuestAddress, usize)>, pc: GuestAddress) {
     code.set_instruction(source_map.len());
-    source_map.push((first.pc, code.len()));
+    source_map.push((pc, code.len()));
+}
+
+/// An in-place MixColumns consumes and overwrites the immediately preceding
+/// AES row. Both operations are pure once the block has admitted AdvSIMD.
+/// Keep both source rows, but commit only the final value within the block.
+pub(in crate::x86_64) fn emit_round_pair(
+    code: &mut Code,
+    source_map: &mut Vec<(GuestAddress, usize)>,
+    instructions: &[Instruction],
+    target: TargetCpu,
+) -> Option<u8> {
+    let (round, opcode) = round_pair(instructions)?;
+    source_row(code, source_map, instructions[0].pc);
     round_input(code, round);
-    code.set_instruction(source_map.len());
-    source_map.push((second.pc, code.len()));
+    source_row(code, source_map, instructions[1].pc);
     // Arm XORs the key before the transforms. AES-NI's final key is zero.
     packed(code, Host::Xor, MASK, MASK);
     opcode.register(code, RESULT, MASK, target);
-    commit(code, mix.destination, RESULT);
-    Some(mix.destination)
+    commit(code, round.destination, RESULT);
+    Some(round.destination)
 }
 
 pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {

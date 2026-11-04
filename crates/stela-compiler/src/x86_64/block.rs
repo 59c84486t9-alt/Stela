@@ -318,6 +318,7 @@ fn emit_selected(
     };
     let fuse_simd = !target.data_independent_timing() && (pinned || fuse_pairs);
     let fuse_aes_rounds = fuse_simd && target.supports(crate::TargetCpu::Aes);
+    let fuse_vaes_rounds = fuse_simd && target.supports(crate::TargetCpu::Vaes);
     let fuse_ssse3 = fuse_simd && target.supports(crate::TargetCpu::Ssse3);
     let fuse_single_table =
         fuse_ssse3 && !super::asm::vector_extensions::table_supported(1, target);
@@ -376,21 +377,35 @@ fn emit_selected(
             cursor += count;
             continue;
         }
-        if fuse_aes_rounds
+        if (fuse_aes_rounds || fuse_vaes_rounds)
             && matches!(
                 instructions[cursor].operation,
                 Operation::Simd(Simd::Aes(_))
             )
-            && let Some(result) = super::simd::aes::emit_round_pair(
-                code,
-                &mut block.source_map,
-                &instructions[cursor..],
-                target,
-            )
         {
-            after.xmm0 = Some(result);
-            cursor += 2;
-            continue;
+            if fuse_vaes_rounds
+                && super::simd::aes::packed_rounds::emit(
+                    code,
+                    &mut block.source_map,
+                    &instructions[cursor..],
+                )
+                .is_some()
+            {
+                cursor += 4;
+                continue;
+            }
+            if fuse_aes_rounds
+                && let Some(result) = super::simd::aes::emit_round_pair(
+                    code,
+                    &mut block.source_map,
+                    &instructions[cursor..],
+                    target,
+                )
+            {
+                after.xmm0 = Some(result);
+                cursor += 2;
+                continue;
+            }
         }
         if fuse_ssse3
             && let Operation::Simd(Simd::Rearrange(operand)) = instructions[cursor].operation
