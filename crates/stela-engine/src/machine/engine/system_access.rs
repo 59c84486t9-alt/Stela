@@ -534,13 +534,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // Apple's vGIC CPU interface answers the ICH_* and ICC_* encodings
         // before the generated accessors, which follow the profile's absent
         // FEAT_GICv3.
-        let write = (access.direction() == Direction::Write).then(|| match access.rt() {
-            31 => 0,
-            rt => self.cpu.state.x[usize::from(rt)],
-        });
-        let context = self.cpu.vgic_context(write.is_some());
-        if let Some(outcome) = self.cpu.vgic.access(encoding, write, &context) {
-            return self.register_outcome(word, Some(access), outcome);
+        if super::super::vgic::CpuInterface::may_access(encoding) {
+            let write = (access.direction() == Direction::Write).then(|| match access.rt() {
+                31 => 0,
+                rt => self.cpu.state.x[usize::from(rt)],
+            });
+            let context = self.cpu.vgic_context(write.is_some());
+            if let Some(outcome) = self.cpu.vgic.access(encoding, write, &context) {
+                return self.register_outcome(word, Some(access), outcome);
+            }
         }
         if self.hacr_reaches(access)
             && let Some(step) = self.hacr_guest(word, hacr::Operation::Register(encoding))
