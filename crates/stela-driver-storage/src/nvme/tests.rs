@@ -26,7 +26,7 @@ impl Fixture {
         };
         let slots = (1..DEPTH)
             .map(|_| Slot {
-                bounce: Buffer::Legacy(dma.allocate(PAGE, PAGE).unwrap()),
+                bounce: Buffer::Legacy(dma.allocate(4 * PAGE, PAGE).unwrap()),
                 prp_list: Buffer::Legacy(dma.allocate(PAGE, PAGE).unwrap()),
             })
             .collect();
@@ -38,6 +38,7 @@ impl Fixture {
             bounce: Buffer::Legacy(dma.allocate(BOUNCE_BYTES, PAGE).unwrap()),
             prp_list: Buffer::Legacy(dma.allocate(PAGE, PAGE).unwrap()),
             slots,
+            prp_pages: [1; DEPTH],
             tags: (0..DEPTH).map(|_| Tag::Free).collect(),
             recovery: None,
             signalled: false,
@@ -348,6 +349,57 @@ fn running_id(controller: &Controller, tag: u32) -> u16 {
         Tag::Running { id, .. } => id,
         _ => panic!("tag {tag} runs nothing"),
     }
+}
+
+#[test]
+fn prp_list_prefixes_follow_each_bounce_mapping_and_only_grow() {
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let submit = |disk: &mut Namespace, pages| {
+        disk.start(Command::Read {
+            lba: 0,
+            bytes: pages * PAGE,
+        })
+        .unwrap()
+    };
+    let check = |disk: &Namespace, tag: u32, pages| {
+        let mut controller = disk.controller.borrow_mut();
+        let tag = tag as usize;
+        assert_eq!(controller.prp_pages[tag], pages);
+        let (bounce, list) = controller.slot(tag);
+        let base = bounce.address().unwrap();
+        for page in 1..=pages {
+            let start = (page - 1) * 8;
+            let entry = u64::from_le_bytes(list.bytes()[start..start + 8].try_into().unwrap());
+            let expected = if page < pages {
+                base + (page * PAGE) as u64
+            } else {
+                0
+            };
+            assert_eq!(entry, expected);
+        }
+        base
+    };
+    let complete = |disk: &mut Namespace, tag| {
+        {
+            let mut controller = disk.controller.borrow_mut();
+            let id = running_id(&controller, tag);
+            post(&mut controller, id, 0);
+        }
+        assert!(matches!(disk.finish(tag), Some(Ok(Some(_)))));
+    };
+    let first = submit(disk, 3);
+    let second = submit(disk, 4);
+    let base = check(disk, first, 3);
+    assert_ne!(check(disk, second, 4), base);
+    complete(disk, first);
+    assert_eq!(submit(disk, 2), first);
+    assert_eq!(check(disk, first, 3), base);
+    complete(disk, first);
+    assert_eq!(submit(disk, 5), first);
+    assert_eq!(check(disk, first, 5), base);
+    complete(disk, second);
+    complete(disk, first);
 }
 
 #[test]

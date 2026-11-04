@@ -443,6 +443,7 @@ unsafe fn attach_with_timeout(
         prp_list: Buffer::Empty,
         // The DMA domain's buffers change hands whole: one command at a time.
         slots: alloc::vec::Vec::new(),
+        prp_pages: [1; DEPTH],
         tags: alloc::vec![Tag::Free],
         recovery: None,
         signalled: false,

@@ -534,16 +534,19 @@ impl Controller {
         tag: usize,
         bytes: usize,
     ) -> Result<(u64, u64), BlockError> {
+        let initialized = self.prp_pages[tag];
         let (bounce, prp_list) = self.slot(tag);
         let first = bounce.address()?;
         match bytes.div_ceil(PAGE) {
             0 | 1 => Ok((first, 0)),
             2 => Ok((first, first + PAGE as u64)),
             pages => {
-                for page in 1..pages {
+                let second = prp_list.address()?;
+                for page in initialized..pages {
                     prp_list.write(8 * (page - 1), first + (page * PAGE) as u64);
                 }
-                Ok((first, prp_list.address()?))
+                self.prp_pages[tag] = initialized.max(pages);
+                Ok((first, second))
             }
         }
     }

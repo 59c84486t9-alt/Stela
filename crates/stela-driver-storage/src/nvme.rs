@@ -574,6 +574,10 @@ struct Controller {
     prp_list: Buffer,
     /// Tags 1 and up's bounce memory.
     slots: Vec<Slot>,
+    /// Initialized PRP list prefix per tag, counted in bounce pages including
+    /// the first page that travels in the command. The bounce mappings stay
+    /// fixed and the controller only reads the lists, including across reset.
+    prp_pages: [usize; DEPTH],
     tags: Vec<Tag>,
     recovery: Option<Recovery>,
     /// The I/O completion queue raises MSI-X vector 0, which the host
@@ -747,6 +751,7 @@ pub fn attach(
         bounce: Buffer::Legacy(dma.allocate(BOUNCE_BYTES, PAGE)?),
         prp_list: Buffer::Legacy(dma.allocate(PAGE, PAGE)?),
         slots,
+        prp_pages: [1; DEPTH],
         tags: (0..DEPTH).map(|_| Tag::Free).collect(),
         recovery: None,
         signalled,
