@@ -5,6 +5,7 @@
 //! identity of the old generation then fails.
 use super::*;
 
+mod attach;
 mod recovery;
 mod suspend;
 
@@ -43,6 +44,7 @@ struct Hub {
     pending: Option<u64>,
     retired: bool,
     recovery: Option<Recovery>,
+    attachments: Vec<attach::Pending>,
 }
 
 /// Keeps the controller even when no leaf class currently owns it. Call
@@ -163,6 +165,7 @@ impl Host {
                     pending: None,
                     retired: false,
                     recovery: None,
+                    attachments: Vec::new(),
                 })
             })();
             match result {
@@ -186,7 +189,8 @@ impl Host {
     /// Whether [`Self::poll`] has work, as `xhci_irq` and `hub_irq` find it:
     /// an event on the ring, a root port's status change or a hub's status
     /// transfer that completed, a queued reset, a hub to recover, a dead
-    /// controller or a device whose slot changed. A look at memory alone.
+    /// controller, a device whose slot changed, or an attachment timer due.
+    /// This does not access controller registers.
     pub fn due(&self) -> bool {
         let Ok(c) = self.controller.try_borrow() else {
             return true;
@@ -206,7 +210,8 @@ impl Host {
                 event.kind() == reset::PORT_STATUS_CHANGE
                     || (event.kind() == super::TRANSFER_EVENT && hub(event.slot()))
             })
-            || self.hubs.iter().any(|hub| hub.recovery.is_some());
+            || self.hubs.iter().any(|hub| hub.recovery.is_some())
+            || self.attachment_due();
         if changed {
             return true;
         }
@@ -272,6 +277,7 @@ impl Host {
                     .failures
                     .push((format!("{location} hub lifecycle"), error));
             }
+            self.poll_hub_attachments(index, dma, &mut changes);
         }
         let queued = self.controller.borrow_mut().take_queued_resets();
         for id in queued {
@@ -599,7 +605,6 @@ impl Host {
         changes: &mut Changes,
     ) -> Result<(), BlockError> {
         let id = self.hubs[index].device.id;
-        let slot = id.hardware_slot();
         let attachment = self.hubs[index].attachment;
         let ss = attachment.speed >= SUPER_SPEED;
         let (status, change, owner) = {
@@ -652,12 +657,49 @@ impl Host {
         if !reconnect {
             return Ok(());
         }
-        let location = format!("{}.{port}", self.hubs[index].device.location);
-        let ssp = self.hubs[index].ssp.as_ref();
+        if !ss && owner.is_none() {
+            if let Some(pending) = self.hubs[index]
+                .attachments
+                .iter_mut()
+                .find(|pending| pending.port == port)
+            {
+                // The change latch was consumed above. A bounce reported
+                // between timer samples must still restart the interval.
+                pending.notice(c.clock, status & 1 != 0, change & 1 != 0);
+                return Ok(());
+            }
+            if status & 1 != 0 {
+                let pending = attach::Pending::start(&mut c, id, port)?;
+                self.hubs[index].attachments.push(pending);
+                return Ok(());
+            }
+        }
+        drop(c);
+        self.connect_hub_port(index, port, false, dma, changes);
+        Ok(())
+    }
+
+    fn connect_hub_port(
+        &mut self,
+        index: usize,
+        port: u8,
+        mut debounced: bool,
+        dma: &mut dyn DmaAllocator,
+        changes: &mut Changes,
+    ) {
+        let hub = &self.hubs[index];
+        let id = hub.device.id;
+        let slot = id.hardware_slot();
+        let attachment = hub.attachment;
+        let ss = attachment.speed >= SUPER_SPEED;
+        let location = format!("{}.{port}", hub.device.location);
+        let ssp = hub.ssp.as_ref();
         let reset = |c: &mut Controller| {
             c.observe_current_ancestors_for(id, true)?;
             let speed = if ss {
                 c.superspeed_port_for(id, port, ssp)
+            } else if core::mem::take(&mut debounced) {
+                c.reset_debounced_usb2_hub_port(id, port)
             } else {
                 c.hub_port_for(id, port)
             };
@@ -674,15 +716,14 @@ impl Host {
                 },
             }))
         };
-        c.connect(
+        self.controller.borrow_mut().connect(
             location,
-            Some(self.hubs[index].device.id),
+            Some(id),
             reset,
             dma,
             &mut changes.added.devices,
             &mut changes.added.failures,
         );
-        Ok(())
     }
 
     /// Linux usb_hc_died: every device below a dead host controller is
@@ -699,6 +740,7 @@ impl Host {
         for hub in &mut self.hubs {
             hub.retired = true;
             hub.recovery = None;
+            hub.attachments.clear();
         }
         changes.removed.append(&mut self.devices);
     }
@@ -771,6 +813,7 @@ impl Host {
         for hub in &mut self.hubs {
             if slots.contains(&hub.device.slot) && c.known_id(hub.device.id) {
                 hub.retired = true;
+                hub.attachments.clear();
                 if Some(hub.device.id) != keep {
                     hub.recovery = None;
                 }
