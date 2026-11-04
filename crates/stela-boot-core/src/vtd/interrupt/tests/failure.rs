@@ -25,7 +25,7 @@ fn wrong_context_preflight_drop_retains_original_root_and_source() {
     {
         // SAFETY: intentionally refused exact source peer with original owner kept.
         let failed = unsafe {
-            f.unit.allocate_interrupt_route(
+            f.mode().allocate_interrupt_route(
                 Box::new(SourceGrant {
                     checks: checks.clone(),
                     epoch: 1,
@@ -74,6 +74,43 @@ fn allocation_failure_and_unwind_keep_original_root_grant() {
 }
 
 #[test]
+fn changed_root_or_requester_roster_refuses_before_any_irq_write() {
+    for change_root in [true, false] {
+        let f = Fixture::new(true);
+        let unit = f.unit.clone();
+        let registers = f.registers.clone();
+        let root = registers.read64(RTADDR);
+        let writes = registers.0.lock().unwrap().writes.len();
+        *f.pool.before_allocate.lock().unwrap() = Some(Box::new(move || {
+            assert!(!unit.held.load(Ordering::Acquire));
+            if change_root {
+                registers
+                    .0
+                    .lock()
+                    .unwrap()
+                    .values
+                    .insert(RTADDR, root + PAGE as u64);
+            } else {
+                unit.admit_requester(SID + 1).unwrap();
+            }
+        }));
+        // SAFETY: no real hardware or competing interrupt producers. The
+        // isolated allocator changes one of the initial takeover observations.
+        let failure = unsafe {
+            f.unit
+                .enable_interrupt_remapping(Box::new(RootGrant(f.root.clone())))
+        }
+        .err()
+        .unwrap();
+        assert_eq!(failure.error, VtdError::Unsupported);
+        assert!(failure.returned.is_some());
+        assert_eq!(f.pool.released.load(Ordering::Relaxed), 3);
+        assert_eq!(f.root.drops.load(Ordering::Relaxed), 0);
+        assert_eq!(f.registers.0.lock().unwrap().writes.len(), writes);
+    }
+}
+
+#[test]
 fn every_uncertain_irq_enable_stage_keeps_all_root_targets() {
     for stage in [QUEUED_INVALIDATION, INTERRUPT_POINTER, INTERRUPT_REMAP] {
         let f = Fixture::new(true);
@@ -103,7 +140,7 @@ fn tail_publication_unwind_retains_source_and_burned_index() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // SAFETY: original symbolic source; peer unwinds after real tail publication.
         unsafe {
-            f.unit.allocate_interrupt_route(
+            f.mode().allocate_interrupt_route(
                 Box::new(SourceGrant {
                     checks: source.clone(),
                     epoch: 1,
@@ -303,7 +340,7 @@ fn full_index_epoch_never_recycles_even_explicitly_retired_routes() {
     {
         // SAFETY: next unpublished symbolic epoch, expected to refuse index exhaustion.
         let failed = unsafe {
-            f.unit.allocate_interrupt_route(
+            f.mode().allocate_interrupt_route(
                 Box::new(SourceGrant {
                     checks: source.clone(),
                     epoch: 300,
@@ -362,6 +399,7 @@ fn unused_irq_root_shuts_down_only_after_irq_and_dma_pointer_retirement() {
     assert_eq!(h.values[&GSTS] as u32 & PERSISTENT, 0);
     assert_eq!((h.values[&IQA], h.values[&IRTA]), (0, 0));
     drop(h);
+    drop(f.mode);
     drop(f.unit);
     assert_eq!(f.pool.released.load(Ordering::Relaxed), 5);
     assert_eq!(f.root.drops.load(Ordering::Relaxed), 1);

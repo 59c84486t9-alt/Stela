@@ -234,6 +234,23 @@ pub struct AllocationFailure {
     pub returned: Option<KeptSourceOwner>,
 }
 
+/// The exact original root and process admission that enabled remapping.
+/// Holding a DMA Unit alone does not authorize interrupt allocation.
+pub struct InterruptRemapping<R: Registers> {
+    unit: Arc<Unit<R>>,
+    context: Arc<dyn Context>,
+    generation: u64,
+}
+
+#[derive(PartialEq, Eq)]
+struct EnableSnapshot {
+    root: u64,
+    // The original allowlist only grows. A different length means the source
+    // inventory changed while page providers were running.
+    requesters: usize,
+    next_generation: u64,
+}
+
 /// Immutable identity of a permanently reserved actual interrupt index.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RouteIdentity {
@@ -260,10 +277,21 @@ pub(super) struct State {
     sequence: u64,
     token: u32,
     records: Vec<Record>,
+    pending_source: Option<RouteIdentity>,
     poisoned: bool,
     stopped: bool,
 }
 impl State {
+    fn unpublished_failure(mut self, error: VtdError) -> EnableFailure {
+        // SAFETY: this state was never installed in the Unit. The original
+        // grant is extracted once and the three unexposed tables can drop.
+        let owner = unsafe { ManuallyDrop::take(&mut self.owner.0) };
+        EnableFailure {
+            error,
+            returned: Some(KeptRootOwner(ManuallyDrop::new(owner))),
+        }
+    }
+
     fn new<R: Registers>(
         unit: &Unit<R>,
         owner: KeptRootOwner,
@@ -302,6 +330,7 @@ impl State {
                 sequence: 0,
                 token: 0,
                 records,
+                pending_source: None,
                 poisoned: true,
                 stopped: false,
             }),
@@ -395,9 +424,9 @@ impl<R: Registers> Unit<R> {
     /// source can remain. Native inventory/IOAPIC integration must establish
     /// these obligations before calling; this API does no native discovery.
     pub unsafe fn enable_interrupt_remapping(
-        &self,
+        self: &Arc<Self>,
         owner: Box<dyn RootOwner>,
-    ) -> Result<(), EnableFailure> {
+    ) -> Result<InterruptRemapping<R>, EnableFailure> {
         let owner = KeptRootOwner(ManuallyDrop::new(owner));
         let context = owner.context();
         if let Err(error) = context.check() {
@@ -406,36 +435,42 @@ impl<R: Registers> Unit<R> {
                 returned: Some(owner),
             });
         }
-        let mut guard = self.lock();
-        let state = guard.state();
-        let preflight = (|| {
-            if state.shutdown
-                || state.poisoned
-                || self.direct_delivery.load(Ordering::Acquire)
-                || self.with_interrupts(|irq| irq.is_some())
-            {
-                return Err(VtdError::Busy);
+        let snapshot = {
+            let mut guard = self.lock();
+            self.interrupt_enable_preflight(guard.state(), &*owner)
+        };
+        let snapshot = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return Err(EnableFailure {
+                    error,
+                    returned: Some(owner),
+                });
             }
-            owner.check()?;
-            if self.ecap & (QI_SUPPORT | IR_SUPPORT) != QI_SUPPORT | IR_SUPPORT
-                || self.ecap & EIM_REQUIRED != 0
-                || self.registers.read64(ECAP) != self.ecap
-                || self.registers.read32(GSTS) & PERSISTENT != TRANSLATION
-                || self.registers.read32(FSTS) != 0
-            {
-                return Err(VtdError::Unsupported);
-            }
-            self.wait64(CCMD, CONTEXT_INVALIDATE)?;
-            self.wait64(self.iotlb, IOTLB_INVALIDATE)?;
-            Ok(())
-        })();
-        if let Err(error) = preflight {
-            return Err(EnableFailure {
-                error,
-                returned: Some(owner),
-            });
+        };
+        // Page allocation and unexposed backing release may call the platform.
+        let irq = State::new(self, owner, context, snapshot.root)?;
+        if let Err(error) = irq.context.check() {
+            return Err(irq.unpublished_failure(error));
         }
-        let irq = State::new(self, owner, context, state.root.physical())?;
+        let mut guard = self.lock();
+        let recheck = self
+            .interrupt_enable_preflight(guard.state(), &*irq.owner)
+            .and_then(|current| {
+                if current != snapshot || irq.owner.generation() != irq.generation {
+                    return Err(VtdError::Unsupported);
+                }
+                Ok(())
+            });
+        if let Err(error) = recheck {
+            drop(guard);
+            return Err(irq.unpublished_failure(error));
+        }
+        let mode = InterruptRemapping {
+            unit: self.clone(),
+            context: irq.context.clone(),
+            generation: irq.generation,
+        };
         // SAFETY: existing Unit lock exclusively owns the separate IRQ state.
         unsafe { *self.interrupts.get() = Some(irq) };
         let result = self.with_interrupts(|slot| {
@@ -462,12 +497,48 @@ impl<R: Registers> Unit<R> {
                 Ok(())
             })()
         });
-        result.map_err(|error| EnableFailure {
+        result.map(|()| mode).map_err(|error| EnableFailure {
             error,
             returned: None,
         })
     }
 
+    fn interrupt_enable_preflight(
+        &self,
+        state: &super::State,
+        owner: &dyn RootOwner,
+    ) -> Result<EnableSnapshot, VtdError> {
+        if state.shutdown
+            || state.poisoned
+            || state.window.is_some()
+            || !state.domains.is_empty()
+            || self.direct_delivery.load(Ordering::Acquire)
+            || self.with_interrupts(|irq| irq.is_some())
+        {
+            return Err(VtdError::Busy);
+        }
+        owner.check()?;
+        if self.ecap & (QI_SUPPORT | IR_SUPPORT) != QI_SUPPORT | IR_SUPPORT
+            || self.ecap & EIM_REQUIRED != 0
+            || self.registers.read64(ECAP) != self.ecap
+            || self.registers.read32(GSTS) & PERSISTENT != TRANSLATION
+            || self.registers.read32(FSTS) != 0
+        {
+            return Err(VtdError::Unsupported);
+        }
+        let root = state.root.physical();
+        self.check_direct_delivery(root)?;
+        self.wait64(CCMD, CONTEXT_INVALIDATE)?;
+        self.wait64(self.iotlb, IOTLB_INVALIDATE)?;
+        Ok(EnableSnapshot {
+            root,
+            requesters: state.allowed.len(),
+            next_generation: state.next_generation,
+        })
+    }
+}
+
+impl<R: Registers> InterruptRemapping<R> {
     /// Allocate one fresh full-SID IM=0 route; no index is ever recycled.
     ///
     /// # Safety
@@ -478,22 +549,22 @@ impl<R: Registers> Unit<R> {
     /// MSI/MSI-X/INTx path is inactive. No source or other writer can issue
     /// this new message before publication returns successfully.
     pub unsafe fn allocate_interrupt_route(
-        self: &Arc<Self>,
+        &self,
         source: Box<dyn ExactSourceOwner>,
         target: RouteTarget,
     ) -> Result<Route<R>, AllocationFailure> {
         let source = KeptSourceOwner(ManuallyDrop::new(source));
-        if let Err(error) = source.check() {
+        if let Err(error) = self.context.check().and_then(|()| source.check()) {
             return Err(AllocationFailure {
                 error,
                 returned: Some(source),
             });
         }
-        let mut guard = self.lock();
+        let identity = source.identity();
+        let unit = &self.unit;
+        let mut guard = unit.lock();
         let state = guard.state();
         let preflight = (|| {
-            source.check()?;
-            let identity = source.identity();
             if state.shutdown
                 || state.poisoned
                 || identity.configuration_epoch == 0
@@ -502,10 +573,16 @@ impl<R: Registers> Unit<R> {
             {
                 return Err(VtdError::Unsupported);
             }
-            self.with_interrupts(|slot| {
+            unit.with_interrupts(|slot| {
                 let irq = slot.as_mut().ok_or(VtdError::Unsupported)?;
-                irq.check(self)?;
-                irq.quiescent(self)?;
+                if irq.generation != self.generation || !Arc::ptr_eq(&irq.context, &self.context) {
+                    return Err(VtdError::Unsupported);
+                }
+                irq.check(unit)?;
+                if irq.pending_source.is_some() {
+                    return Err(VtdError::Busy);
+                }
+                irq.quiescent(unit)?;
                 if irq.sequence == u64::MAX {
                     return Err(VtdError::Exhausted);
                 }
@@ -519,15 +596,10 @@ impl<R: Registers> Unit<R> {
                 {
                     return Err(VtdError::Busy);
                 }
-                Ok((
-                    identity,
-                    irq.records.len() as u16,
-                    irq.generation,
-                    irq.context.clone(),
-                ))
+                Ok(irq.records.len() as u16)
             })
         })();
-        let (identity, index, root_generation, context) = match preflight {
+        let index = match preflight {
             Ok(value) => value,
             Err(error) => {
                 return Err(AllocationFailure {
@@ -539,10 +611,10 @@ impl<R: Registers> Unit<R> {
         let identity = RouteIdentity {
             index,
             source: identity,
-            root_generation,
+            root_generation: self.generation,
             target,
         };
-        let result = self.with_interrupts(|slot| {
+        let result = unit.with_interrupts(|slot| {
             let irq = slot.as_mut().expect("admitted IRQ state");
             // Burn before the first uncertain table mutation. Source is already
             // ManuallyDrop, so even a register peer panic keeps the config pin.
@@ -555,34 +627,49 @@ impl<R: Registers> Unit<R> {
             let entry = usize::from(index) * 2;
             irq.table
                 .write(entry + 1, u64::from(identity.source.source_id) | 1 << 18);
-            irq.publish(self, &irq.table);
+            irq.publish(unit, &irq.table);
             irq.table.write(
                 entry,
                 1 | u64::from(target.vector) << 16 | u64::from(target.destination) << 40,
             );
-            irq.publish(self, &irq.table);
+            irq.publish(unit, &irq.table);
             irq.poisoned = false;
-            if let Err(error) = irq.execute(self, &[queue::Descriptor::iec(Some(index))]) {
+            if let Err(error) = irq.execute(unit, &[queue::Descriptor::iec(Some(index))]) {
                 irq.poisoned = true;
                 return Err(error);
             }
-            irq.poisoned = true;
-            if source.check().is_err() || source.identity() != identity.source {
-                irq.poisoned = true;
-                return Err(VtdError::Unsupported);
-            }
-            irq.poisoned = false;
+            // This index stays reserved but no message can escape before
+            // source validation. Keep the shared invalidation queue available
+            // for independent DMA users while the source check runs.
+            irq.pending_source = Some(identity);
             Ok(())
         });
-        if let Err(error) = result {
+        drop(guard);
+        let validated = result
+            .and_then(|()| self.context.check())
+            .and_then(|()| check_source(&*source, identity.source))
+            .and_then(|()| {
+                let _guard = unit.lock();
+                unit.with_interrupts(|slot| {
+                    let irq = slot.as_mut().ok_or(VtdError::Unsupported)?;
+                    irq.check(unit)?;
+                    if irq.pending_source != Some(identity) {
+                        return Err(VtdError::Unsupported);
+                    }
+                    irq.record(identity)?;
+                    irq.pending_source = None;
+                    Ok(())
+                })
+            });
+        if let Err(error) = validated {
             return Err(AllocationFailure {
                 error,
                 returned: None,
             });
         }
         Ok(Route {
-            unit: self.clone(),
-            context,
+            unit: unit.clone(),
+            context: self.context.clone(),
             source,
             identity,
             precheck_failed: Cell::new(false),
@@ -590,7 +677,17 @@ impl<R: Registers> Unit<R> {
             local: PhantomData,
         })
     }
+}
 
+fn check_source(source: &dyn ExactSourceOwner, expected: SourceIdentity) -> Result<(), VtdError> {
+    source.check()?;
+    if source.identity() != expected {
+        return Err(VtdError::Unsupported);
+    }
+    Ok(())
+}
+
+impl<R: Registers> Unit<R> {
     // Every caller holds the canonical Unit process-context lock. The closure
     // cannot return a borrow of IRQ state, and callers never nest this accessor.
     fn with_interrupts<T>(&self, operation: impl FnOnce(&mut Option<State>) -> T) -> T {
@@ -747,10 +844,7 @@ impl<R: Registers> Route<R> {
         if self.precheck_failed.replace(true) {
             return Err(VtdError::Busy);
         }
-        self.source.check()?;
-        if self.source.identity() != self.identity.source {
-            return Err(VtdError::Unsupported);
-        }
+        check_source(&*self.source, self.identity.source)?;
         self.precheck_failed.set(false);
         Ok(())
     }
@@ -758,14 +852,7 @@ impl<R: Registers> Route<R> {
         self.unit.with_interrupts(|slot| {
             let irq = slot.as_mut().ok_or(VtdError::Unsupported)?;
             irq.check(&self.unit)?;
-            // External source callbacks cannot unwind past a healthy route.
-            irq.poisoned = true;
-            self.source.check()?;
-            if self.source.identity() != self.identity.source {
-                return Err(VtdError::Unsupported);
-            }
             irq.record(self.identity)?;
-            irq.poisoned = false;
             Ok(())
         })
     }
@@ -794,7 +881,7 @@ impl<R: Registers> Route<R> {
     /// acknowledged, and config/BAR/DMA/callback owners remain kept.
     pub unsafe fn fence(&mut self) -> Result<(), VtdError> {
         self.precheck()?;
-        let _guard = self.unit.lock();
+        let guard = self.unit.lock();
         self.check()?;
         if self.fenced {
             return Ok(());
@@ -818,8 +905,9 @@ impl<R: Registers> Route<R> {
             Ok(())
         })?;
         self.check()?;
+        drop(guard);
         self.fenced = true;
-        Ok(())
+        self.precheck()
     }
     /// Return the original source pin only after this same native epoch retires.
     ///

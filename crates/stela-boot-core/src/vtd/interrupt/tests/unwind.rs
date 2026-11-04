@@ -22,17 +22,20 @@ impl Drop for PanicRoot {
 }
 struct PanicSource {
     checks: Arc<Checks>,
+    unit: Arc<Unit<RegistersPeer>>,
     at: usize,
 }
 // SAFETY: exact isolated SID/epoch peer. The chosen check only unwinds; it
 // performs no reset, config mutation or hardware access before doing so.
 unsafe impl ExactSourceOwner for PanicSource {
     fn check(&self) -> Result<(), VtdError> {
+        assert!(!self.unit.held.load(Ordering::Acquire));
         let count = self.checks.observations.fetch_add(1, Ordering::Relaxed) + 1;
         assert_ne!(count, self.at, "injected source check unwind");
         Ok(())
     }
     fn identity(&self) -> SourceIdentity {
+        assert!(!self.unit.held.load(Ordering::Acquire));
         SourceIdentity {
             source_id: SID,
             configuration_epoch: 1,
@@ -44,6 +47,32 @@ impl Drop for PanicSource {
     fn drop(&mut self) {
         self.checks.drops.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+#[test]
+fn original_source_checks_run_outside_the_unit_lock_through_retirement() {
+    let f = Fixture::new(true);
+    f.enable();
+    let checks = Arc::new(Checks::default());
+    // SAFETY: this symbolic source has no competing reset or delivery owner.
+    let mut route = unsafe {
+        f.mode().allocate_interrupt_route(
+            Box::new(PanicSource {
+                checks: checks.clone(),
+                unit: f.unit.clone(),
+                at: usize::MAX,
+            }),
+            RouteTarget::new(2, 0x51).unwrap(),
+        )
+    }
+    .unwrap();
+    route.message().unwrap();
+    fence(&mut route).unwrap();
+    // SAFETY: the same symbolic endpoint's independent users have all joined.
+    let released = unsafe { route.release_after_retirement() }.unwrap();
+    assert_eq!(checks.observations.load(Ordering::Relaxed), 6);
+    drop(released);
+    assert_eq!(checks.drops.load(Ordering::Relaxed), 1);
 }
 
 #[test]
@@ -60,14 +89,15 @@ fn original_grant_callback_unwinds_never_run_final_owner_drop() {
     assert!(result.is_err());
     assert_eq!(root.drops.load(Ordering::Relaxed), 0);
     f.enable();
-    for at in [1, 3] {
+    for at in [1, 2] {
         let source = Arc::new(Checks::default());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // SAFETY: exact original symbolic source; chosen callback unwinds.
             unsafe {
-                f.unit.allocate_interrupt_route(
+                f.mode().allocate_interrupt_route(
                     Box::new(PanicSource {
                         checks: source.clone(),
+                        unit: f.unit.clone(),
                         at,
                     }),
                     RouteTarget::new(2, 0x51).unwrap(),
@@ -76,11 +106,31 @@ fn original_grant_callback_unwinds_never_run_final_owner_drop() {
         }));
         assert!(result.is_err());
         assert_eq!(source.drops.load(Ordering::Relaxed), 0);
-        let _guard = f.unit.lock();
+        let guard = f.unit.lock();
         f.unit.with_interrupts(|slot| {
             let irq = slot.as_ref().unwrap();
-            assert_eq!(irq.records.len(), usize::from(at == 3));
-            assert_eq!(irq.poisoned, at == 3);
+            assert_eq!(irq.records.len(), usize::from(at == 2));
+            assert!(!irq.poisoned);
+            assert_eq!(irq.pending_source.is_some(), at == 2);
         });
+        f.unit.invalidate(false).unwrap();
+        drop(guard);
+        if at == 2 {
+            // SAFETY: a fresh symbolic source may check the mode, but the
+            // earlier unacknowledged publication must refuse a new index.
+            let refused = unsafe {
+                f.mode().allocate_interrupt_route(
+                    Box::new(SourceGrant {
+                        checks: Arc::new(Checks::default()),
+                        epoch: 2,
+                    }),
+                    RouteTarget::new(2, 0x52).unwrap(),
+                )
+            }
+            .err()
+            .unwrap();
+            assert_eq!(refused.error, VtdError::Busy);
+            assert!(refused.returned.is_some());
+        }
     }
 }

@@ -10,6 +10,7 @@ pub(super) struct Pool {
     pub(super) fail_at: AtomicU64,
     pub(super) panic_at: AtomicU64,
     pub(super) released: Arc<AtomicU64>,
+    pub(super) before_allocate: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     addresses: Arc<Mutex<BTreeMap<u64, usize>>>,
 }
 impl Pool {
@@ -19,6 +20,7 @@ impl Pool {
             fail_at: AtomicU64::new(u64::MAX),
             panic_at: AtomicU64::new(u64::MAX),
             released: Arc::new(AtomicU64::new(0)),
+            before_allocate: Mutex::new(None),
             addresses: Arc::new(Mutex::new(BTreeMap::new())),
         }))
     }
@@ -72,6 +74,10 @@ impl PageSource for Pool {
             (bytes, alignment, attribute),
             (PAGE, PAGE, CacheAttribute::WriteBack)
         );
+        let before_allocate = self.before_allocate.lock().unwrap().take();
+        if let Some(before_allocate) = before_allocate {
+            before_allocate();
+        }
         let physical = self.next.fetch_add(PAGE as u64, Ordering::Relaxed);
         if physical == self.fail_at.load(Ordering::Relaxed) {
             return Err(MemoryError::OutOfMemory);

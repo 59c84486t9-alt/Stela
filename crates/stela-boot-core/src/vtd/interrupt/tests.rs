@@ -87,6 +87,7 @@ struct Fixture {
     registers: RegistersPeer,
     unit: Arc<Unit<RegistersPeer>>,
     root: Arc<Checks>,
+    mode: core::cell::OnceCell<InterruptRemapping<RegistersPeer>>,
 }
 impl Fixture {
     fn new(coherent: bool) -> Self {
@@ -108,22 +109,27 @@ impl Fixture {
             registers,
             unit,
             root,
+            mode: core::cell::OnceCell::new(),
         }
     }
     fn enable(&self) {
         // SAFETY: fixture owns all symbolic sources before any route allocation.
-        unsafe {
+        let mode = unsafe {
             self.unit
                 .enable_interrupt_remapping(Box::new(RootGrant(self.root.clone())))
         }
         .unwrap();
+        assert!(self.mode.set(mode).is_ok());
+    }
+    fn mode(&self) -> &InterruptRemapping<RegistersPeer> {
+        self.mode.get().unwrap()
     }
     fn route(&self, epoch: u64, vector: u8) -> (Route<RegistersPeer>, Arc<Checks>) {
         let checks = Arc::new(Checks::default());
         // SAFETY: exact original SID/epoch peer and exclusively allocated
         // symbolic CPU vector; no duplicate source or alternate delivery exists.
         let route = unsafe {
-            self.unit.allocate_interrupt_route(
+            self.mode().allocate_interrupt_route(
                 Box::new(SourceGrant {
                     checks: checks.clone(),
                     epoch,
@@ -244,6 +250,7 @@ fn payload_and_empty_cpu_state_cannot_complete_held_fabric_interrupt() {
     assert_eq!(source.drops.load(Ordering::Relaxed), 0);
     // SAFETY: no real endpoint exists; the uncertain IRQ must still forbid root release.
     assert!(unsafe { f.unit.shut_down() }.is_err());
+    drop(f.mode);
     drop(f.unit);
     assert_eq!(f.pool.released.load(Ordering::Relaxed), 0);
     assert_eq!(f.root.drops.load(Ordering::Relaxed), 0);
@@ -300,6 +307,7 @@ fn fenced_drop_retains_source_until_explicit_same_epoch_retirement() {
     let observed = source.observations.load(Ordering::Relaxed);
     terminal.check().unwrap();
     assert_eq!(source.observations.load(Ordering::Relaxed), observed);
+    drop(f.mode);
     drop(f.unit);
     drop(terminal);
     assert_eq!(f.pool.released.load(Ordering::Relaxed), 0);
@@ -390,6 +398,7 @@ fn unexpected_unallocated_absent_entry_still_faults_and_keeps_the_root() {
     assert_eq!(source.drops.load(Ordering::Relaxed), 0);
     // SAFETY: symbolic peers only; an unsuppressed fault cannot grant release.
     assert!(unsafe { f.unit.shut_down() }.is_err());
+    drop(f.mode);
     drop(f.unit);
     assert_eq!(f.root.drops.load(Ordering::Relaxed), 0);
     assert_eq!(f.pool.released.load(Ordering::Relaxed), 0);
@@ -485,16 +494,33 @@ fn wrong_context_checks_return_before_a_held_unit_lock_or_register_access() {
     let guard = f.unit.lock();
     let reads = f.registers.0.lock().unwrap().reads;
     let observations = source.observations.load(Ordering::Relaxed);
+    let unpublished = Arc::new(Checks::default());
     for bad_context in [&f.root.wrong_cpu, &f.root.hard_irq, &f.root.wrong_root] {
         bad_context.store(true, Ordering::Relaxed);
         // No timeout or scheduling assumption: both calls return while this
         // thread still owns the non-reentrant Unit lock.
         assert_eq!(live.message(), Err(VtdError::Busy));
         assert_eq!(terminal.check(), Err(VtdError::Busy));
+        // SAFETY: deliberately wrong context must refuse before either source
+        // observation or the Unit lock, so this peer cannot publish a route.
+        let failure = unsafe {
+            f.mode().allocate_interrupt_route(
+                Box::new(SourceGrant {
+                    checks: unpublished.clone(),
+                    epoch: 3,
+                }),
+                RouteTarget::new(2, 0x53).unwrap(),
+            )
+        }
+        .err()
+        .unwrap();
+        assert_eq!(failure.error, VtdError::Busy);
+        assert!(failure.returned.is_some());
         bad_context.store(false, Ordering::Relaxed);
     }
     assert_eq!(f.registers.0.lock().unwrap().reads, reads);
     assert_eq!(source.observations.load(Ordering::Relaxed), observations);
+    assert_eq!(unpublished.observations.load(Ordering::Relaxed), 0);
     drop(guard);
     live.message().unwrap();
     terminal.check().unwrap();
