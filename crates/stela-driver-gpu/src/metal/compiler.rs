@@ -136,13 +136,14 @@ pub struct Service {
         *mut c_void,
         *mut ffi::AirError,
     ) -> bool,
-    /// `stela_metal_compile`.
+    /// `stela_metal_compile_reflected`.
     pub compile: unsafe extern "C" fn(
         *const c_void,
         usize,
         *const c_char,
         *const ffi::Target,
         *const ffi::Specialization,
+        *const ffi::Reflection,
         *mut ffi::AirError,
     ) -> *mut c_void,
     /// `stela_metal_tessellation_stages`.
@@ -596,8 +597,9 @@ impl AirCompiler {
         stage_in: Option<&ffi::StageIn>,
     ) -> Result<CompiledShader> {
         let selected = select(&self.libraries, library, entry)?;
-        let (reflection, provenance) =
-            selected.reflect(&self.service, Some(specialization), &mut self.refusal)?;
+        let constants = constant_values(&specialization.constants);
+        let reflected = selected.reflect_raw(&self.service, Some(&constants), &mut self.refusal)?;
+        let (reflection, provenance) = selected.decode_reflection(&reflected)?;
         let Reflection::Stage(interface) = reflection else {
             return Err(Error::Invalid("a visible function is not a pipeline stage"));
         };
@@ -650,7 +652,6 @@ impl AirCompiler {
                 per_primitive: varying.per_primitive.into(),
             })
             .collect();
-        let constants = constant_values(&specialization.constants);
         let samplers: Vec<_> = specialization
             .samplers
             .iter()
@@ -682,7 +683,8 @@ impl AirCompiler {
         let air = selected.bitcode;
         // SAFETY: the AIR, entry, target and specialization, with the arrays,
         // identifiers, values, layouts, modules and names it points to,
-        // outlive the call, which writes only the error.
+        // outlive the call, which writes only the error. The reflection was
+        // produced above by this service from the same input and constants.
         let shader = unsafe {
             (self.service.compile)(
                 air.as_ptr().cast(),
@@ -690,6 +692,7 @@ impl AirCompiler {
                 selected.entry.as_ptr(),
                 &self.target,
                 &raw,
+                &*reflected,
                 &mut error,
             )
         };
@@ -893,11 +896,21 @@ impl Selected<'_> {
         specialization: Option<&Specialization>,
         refusal: &mut Option<Refusal>,
     ) -> Result<(Reflection, Provenance)> {
+        let values = specialization.map(|known| constant_values(&known.constants));
+        let reflection = self.reflect_raw(service, values.as_deref(), refusal)?;
+        self.decode_reflection(&reflection)
+    }
+
+    fn reflect_raw(
+        &self,
+        service: &Service,
+        values: Option<&[ffi::ConstantValue]>,
+        refusal: &mut Option<Refusal>,
+    ) -> Result<Box<ffi::Reflection>> {
         let mut reflection = Box::new(ffi::Reflection::ZERO);
         let mut error = ffi::AirError::NONE;
         let air = self.bitcode;
-        let values = specialization.map(|known| constant_values(&known.constants));
-        let (values, count) = match &values {
+        let (values, count) = match values {
             Some(values) => (
                 values.as_ptr(),
                 u32::try_from(values.len()).map_err(|_| MALFORMED)?,
@@ -920,19 +933,23 @@ impl Selected<'_> {
         if !reflected {
             return Err(refuse(refusal, self.name, &error));
         }
+        Ok(reflection)
+    }
+
+    fn decode_reflection(&self, reflection: &ffi::Reflection) -> Result<(Reflection, Provenance)> {
         let provenance = Provenance {
-            build_id: name(&reflection, reflection.ident, reflection.ident_bytes)?.to_vec(),
+            build_id: name(reflection, reflection.ident, reflection.ident_bytes)?.to_vec(),
             slice_hash: self.slice_hash,
             source_map: None,
             entry: self.name.to_string(),
         };
         let reflection = if u64::from(reflection.stage) == FunctionType::Visible.raw() {
             Reflection::Visible {
-                constants: constants(&reflection)?,
+                constants: constants(reflection)?,
                 command_barriers: reflection.command_barriers != 0,
             }
         } else {
-            Reflection::Stage(Box::new(interface(&reflection)?))
+            Reflection::Stage(Box::new(interface(reflection)?))
         };
         Ok((reflection, provenance))
     }

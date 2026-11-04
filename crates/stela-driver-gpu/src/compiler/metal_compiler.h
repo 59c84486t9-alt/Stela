@@ -259,6 +259,15 @@ nir_shader *stela_metal_compile(const void *air, size_t size, const char *entry,
                                 const struct stela_metal_specialization *specialization,
                                 struct stela_air_error *error);
 
+/* As stela_metal_compile, with the compiler's own successful reflection of
+ * this exact AIR, entry and constant values. The caller owns the immutable
+ * reflection until this call returns. NULL asks the compiler to reflect. */
+nir_shader *stela_metal_compile_reflected(const void *air, size_t size, const char *entry,
+                                         const struct stela_metal_target *target,
+                                         const struct stela_metal_specialization *specialization,
+                                         const struct stela_metal_reflection *reflection,
+                                         struct stela_air_error *error);
+
 /* The vertex and control stages a tessellated pipeline runs ahead of its
  * post-tessellation vertex function (metal_abi.h), each with entry point
  * main, which stela_metal_release frees. */

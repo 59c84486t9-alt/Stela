@@ -6,6 +6,8 @@
 #include "../metal_compiler.h"
 #include "air_effect_oracle.h"
 #include "air_test_fixture.h"
+#include "compiler/nir/nir_serialize.h"
+#include "util/blob.h"
 #include "util/ralloc.h"
 #include <assert.h>
 #include <stdio.h>
@@ -1102,6 +1104,23 @@ function_constants_reflect_and_specialize(void)
       fprintf(stderr, "constants: %u %s\n", error.kind, error.detail);
    /* Every read folds to its value; none is left in constant data. */
    assert(shader && shader->constant_data_size == 0);
+   assert(reflect_specialized(constants, "constants", values, 3, &reflection, &error));
+   LLVMMemoryBufferRef input = bitcode(constants);
+   nir_shader *prepared = stela_metal_compile_reflected(
+      LLVMGetBufferStart(input), LLVMGetBufferSize(input), "constants",
+      &target, &specialization, &reflection, &error);
+   LLVMDisposeMemoryBuffer(input);
+   assert(prepared);
+   struct blob normal, reused;
+   blob_init(&normal);
+   blob_init(&reused);
+   nir_serialize(&normal, shader, true);
+   nir_serialize(&reused, prepared, true);
+   assert(!normal.out_of_memory && !reused.out_of_memory);
+   assert(normal.size == reused.size && !memcmp(normal.data, reused.data, normal.size));
+   blob_finish(&normal);
+   blob_finish(&reused);
+   stela_metal_release(prepared);
    stela_metal_release(shader);
 
    /* scale is optional, and its definedness test folds to false. */

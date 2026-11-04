@@ -69,6 +69,7 @@ struct Fake {
     reflection: ffi::Reflection,
     /// The function constant values of each reflection.
     reflected: Vec<Values>,
+    reflected_record: usize,
     refuse_reflection: Option<Refused>,
     refuse_compilation: Option<Refused>,
     compiled: Vec<Compiled>,
@@ -86,6 +87,7 @@ std::thread_local! {
         RefCell::new(Fake {
             reflection: ffi::Reflection::ZERO,
             reflected: Vec::new(),
+            reflected_record: 0,
             refuse_reflection: None,
             refuse_compilation: None,
             compiled: Vec::new(),
@@ -143,6 +145,7 @@ unsafe extern "C" fn reflect(
         }
         // SAFETY: the compiler passes its reflection record.
         unsafe { *reflection = fake.reflection };
+        fake.reflected_record = reflection.addr();
         true
     })
 }
@@ -210,6 +213,7 @@ unsafe extern "C" fn compile(
     entry: *const c_char,
     target: *const ffi::Target,
     specialization: *const ffi::Specialization,
+    reflection: *const ffi::Reflection,
     error: *mut ffi::AirError,
 ) -> *mut c_void {
     check_input(air, size, entry);
@@ -323,6 +327,8 @@ unsafe extern "C" fn compile(
         if refused(fake.refuse_compilation, error) {
             return ptr::null_mut();
         }
+        assert_eq!(reflection.addr(), fake.reflected_record);
+        assert_eq!(fake.reflected.last(), Some(&constants));
         fake.compiled.push(Compiled {
             workgroup_size: specialization.workgroup_size,
             lengths: lengths

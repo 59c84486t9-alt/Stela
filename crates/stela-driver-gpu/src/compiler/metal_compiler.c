@@ -684,10 +684,11 @@ varying_rows(const struct stela_metal_reflection *reflection,
 }
 
 nir_shader *
-stela_metal_compile(const void *air, size_t size, const char *entry,
-                    const struct stela_metal_target *target,
-                    const struct stela_metal_specialization *specialization,
-                    struct stela_air_error *error)
+stela_metal_compile_reflected(const void *air, size_t size, const char *entry,
+                              const struct stela_metal_target *target,
+                              const struct stela_metal_specialization *specialization,
+                              const struct stela_metal_reflection *reflection,
+                              struct stela_air_error *error)
 {
    struct stela_air_error local = {0};
    if (!error)
@@ -703,17 +704,21 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
       fail(error, STELA_AIR_INPUT, "invalid compilation request");
       return NULL;
    }
-   struct stela_metal_reflection *reflection = malloc(sizeof(*reflection));
-   if (!reflection) {
-      fail(error, STELA_AIR_ALLOCATION, "reflection allocation failed");
-      return NULL;
-   }
-   struct reflecting r = {.entry = entry, .out = reflection, .error = error};
+   struct stela_metal_reflection *owned_reflection = NULL;
    nir_shader *shader = NULL;
-   struct stela_air_constants constants = {specialization->constants,
-                                           specialization->constant_count};
-   if (!reflect(air, size, entry, &constants, &r))
-      goto done;
+   if (!reflection) {
+      owned_reflection = malloc(sizeof(*owned_reflection));
+      if (!owned_reflection) {
+         fail(error, STELA_AIR_ALLOCATION, "reflection allocation failed");
+         return NULL;
+      }
+      struct reflecting r = {.entry = entry, .out = owned_reflection, .error = error};
+      struct stela_air_constants constants = {specialization->constants,
+                                              specialization->constant_count};
+      if (!reflect(air, size, entry, &constants, &r))
+         goto done;
+      reflection = owned_reflection;
+   }
    enum stela_metal_function_stage stage = reflection->stage;
    if (stage == STELA_METAL_VISIBLE) {
       fail(error, STELA_AIR_ARGUMENT, "visible functions compile into the functions that link them");
@@ -814,8 +819,17 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
    };
    shader = stela_air_stage_to_nir(air, size, entry, target->nir, &options, error);
 done:
-   free(reflection);
+   free(owned_reflection);
    return shader;
+}
+
+nir_shader *
+stela_metal_compile(const void *air, size_t size, const char *entry,
+                    const struct stela_metal_target *target,
+                    const struct stela_metal_specialization *specialization,
+                    struct stela_air_error *error)
+{
+   return stela_metal_compile_reflected(air, size, entry, target, specialization, NULL, error);
 }
 
 void
