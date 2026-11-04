@@ -2136,6 +2136,13 @@ dependencies = [
 [[package]]
 name = "stela-c-build"
 version = "0.1.0"
+dependencies = [
+ "cc",
+ "libc",
+ "object",
+ "sha2",
+ "tempfile",
+]
 
 [[package]]
 name = "stela-cli"

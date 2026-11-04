@@ -3,7 +3,7 @@
 //! environment does not yet supply.
 use super::initcalls::{self, Captured, Unit};
 use super::kbuild::{Config, Kbuild};
-use super::native::{self, Linux, Module};
+use super::native::{self, Linux};
 use object::{Object, ObjectSymbol, read::archive::ArchiveFile};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -11,11 +11,12 @@ use std::{
     path::Path,
     thread,
 };
+use stela_c_build::linux::Module;
 
 const NOUVEAU: &str = "../../third_party/linux/drivers/gpu/drm/nouveau";
 const AUTOCONF: &str = "src/compat/linux/generated/autoconf.h";
 const KERNEL: &str = "src/compat/linux/kernel";
-const MODULE: Module = Module {
+const MODULE: Module<'static> = Module {
     name: "nouveau",
     file: "drivers/gpu/drm/nouveau/nouveau",
 };
@@ -100,8 +101,13 @@ pub fn port(linux: &mut Linux) {
     let includes = includes.iter().map(String::as_str).collect::<Vec<_>>();
     // Compiled below, with its registrations captured.
     sources.retain(|source| *source != INITCALLS.path());
-    let mut build = native::configure();
-    linux.apply(&mut build, None, &includes, Some(&MODULE));
+    let mut build = stela_c_build::native::configure();
+    linux.environment.apply(
+        &mut build,
+        None,
+        &native::drm_includes(&includes),
+        Some(&MODULE),
+    );
     native::upstream_warnings(&mut build);
     // As Kbuild builds every profile: Linux relies on the optimizer to drop
     // the calls its configuration disables.

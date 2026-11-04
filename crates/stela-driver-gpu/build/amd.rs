@@ -1,7 +1,8 @@
 //! Stela's amdgpu port and its hosted tests.
-use super::native::{self, Linux, Module, Tests};
+use super::native::{self, Linux, Tests};
+use stela_c_build::linux::Module;
 
-const AMDGPU: Module = Module {
+const AMDGPU: Module<'static> = Module {
     name: "amdgpu",
     file: "drivers/gpu/drm/amd/amdgpu/amdgpu",
 };
@@ -12,10 +13,10 @@ const AMDGPU: Module = Module {
 pub fn port(linux: &Linux, tests: &mut Tests) {
     const FIXTURES: &str = "src/amd/tests/fixtures.c";
     let configure = |mut build: cc::Build| {
-        linux.apply(
+        linux.environment.apply(
             &mut build,
             None,
-            &[
+            &native::drm_includes(&[
                 "amd/include/asic_reg",
                 "amd/include",
                 "amd/amdgpu",
@@ -29,13 +30,13 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
                 "amd/amdkfd",
                 "amd/ras/rascore",
                 "amd/ras/ras_mgr",
-            ],
+            ]),
             Some(&AMDGPU),
         );
         build
     };
     let adapters = native::sources("src/amd");
-    let port = configure(native::configure());
+    let port = configure(stela_c_build::native::configure());
     native::check_declarations(&port, &adapters);
     port.clone().files(&adapters).compile("stela-amd-port");
     // Fixtures for the integration test, which links them itself.
@@ -44,7 +45,7 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
         .cargo_metadata(false)
         .compile("stela-amd-test-fixtures");
     println!("cargo:rerun-if-changed=src/amd/tests");
-    let Some(hosted) = native::hosted() else {
+    let Some(hosted) = stela_c_build::native::hosted() else {
         return;
     };
     let hosted = configure(hosted);
