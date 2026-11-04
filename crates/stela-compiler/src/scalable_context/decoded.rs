@@ -342,6 +342,12 @@ impl Decoded {
             // CPA2 enabled. Do not require controls for an unobserved result.
             return Ok(Self::PrefetchHint);
         }
+        // The register allowlists exclude every typed memory effect.
+        if ordinary_permitted(&instruction.operation)
+            || checked_register_asimd(&instruction.operation)
+        {
+            return Ok(Self::Ordinary(instruction));
+        }
         if let Some(operand) = crate::x86_64::shared_memory::CheckedOperand::from_operation(
             &instruction.operation,
             profile,
@@ -374,15 +380,10 @@ impl Decoded {
         ) {
             return Ok(Self::MemoryFixed(operand));
         }
-        if !ordinary_permitted(&instruction.operation)
-            && !checked_register_asimd(&instruction.operation)
-        {
-            return Err(
-                CompileError::new(crate::CompileErrorKind::OutsideCheckedMemoryProfile)
-                    .at(instruction.pc),
-            );
-        }
-        Ok(Self::Ordinary(instruction))
+        Err(
+            CompileError::new(crate::CompileErrorKind::OutsideCheckedMemoryProfile)
+                .at(instruction.pc),
+        )
     }
     pub(crate) fn emit_checked_ordinary(
         &self,
