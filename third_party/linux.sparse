@@ -16,6 +16,7 @@
 /drivers/gpu/drm/Makefile
 /drivers/gpu/drm/Kconfig
 /lib/rbtree.c
+/lib/errseq.c
 /lib/lockref.c
 /lib/is_single_threaded.c
 /lib/rhashtable.c
@@ -119,6 +120,7 @@
 /mm/Makefile
 /mm/backing-dev.c
 /mm/backing-dev-inode.c
+/mm/readahead.c
 /mm/mm_init.c
 /mm/oom_kill.c
 /mm/oom_adj.c
@@ -243,6 +245,7 @@
 /fs/inode_evict.c
 /fs/open.c
 /fs/file_table.c
+/fs/fcntl.c
 /fs/fs_context.c
 /fs/fs_context_log.c
 /fs/fs_context_params.c
