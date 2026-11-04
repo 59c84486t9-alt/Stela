@@ -188,21 +188,32 @@ impl Kept {
     ) -> Option<KeptHalf> {
         self.switches += 1;
         self.halves.retain(|half| half.key != key);
-        if !entries.is_empty() {
-            if self.halves.len() == KEPT
-                && let Some(oldest) = (0..self.halves.len()).min_by_key(|&i| self.halves[i].used)
-            {
-                self.halves.swap_remove(oldest);
-            }
-            self.halves.push(KeptHalf {
-                key,
-                entries,
-                extents,
-                used: self.switches,
-            });
+        // Take the incoming half before making room for the outgoing one:
+        // the half we need can itself be the least recently kept.
+        let found = self
+            .halves
+            .iter()
+            .position(|half| half.key == to)
+            .map(|index| self.halves.swap_remove(index));
+        if entries.is_empty() {
+            return found;
         }
-        let index = self.halves.iter().position(|half| half.key == to)?;
-        Some(self.halves.swap_remove(index))
+        let outgoing = KeptHalf {
+            key,
+            entries,
+            extents,
+            used: self.switches,
+        };
+        if key == to {
+            return Some(outgoing);
+        }
+        if self.halves.len() == KEPT
+            && let Some(oldest) = (0..self.halves.len()).min_by_key(|&i| self.halves[i].used)
+        {
+            self.halves.swap_remove(oldest);
+        }
+        self.halves.push(outgoing);
+        found
     }
 
     /// Drop every kept half, returning how many there were.
@@ -460,5 +471,34 @@ mod tests {
         kept.switch(key(1), alloc::vec![(0x1000, 0, 2)], Extents::new(), key(2));
         assert_eq!(kept.clear(), 1);
         assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn switching_to_the_oldest_kept_half_reuses_it_when_full() {
+        let mut kept = Kept::new();
+        let key = |n: u64| (n << 12, 0);
+        for from in 0..KEPT as u64 {
+            assert!(
+                kept.switch(
+                    key(from),
+                    alloc::vec![(0x1000, 0, from + 1)],
+                    Extents::new(),
+                    key(from + 1),
+                )
+                .is_none()
+            );
+        }
+        for from in (KEPT as u64..).take(50).map(|n| n % (KEPT as u64 + 1)) {
+            let to = (from + 1) % (KEPT as u64 + 1);
+            let half = kept
+                .switch(
+                    key(from),
+                    alloc::vec![(0x1000, 0, from + 1)],
+                    Extents::new(),
+                    key(to),
+                )
+                .unwrap();
+            assert_eq!(half.entries, [(0x1000, 0, to + 1)]);
+        }
     }
 }
