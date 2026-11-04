@@ -115,12 +115,12 @@ fn queued(ranges: usize, unmap: bool) -> (HostDisk, Log) {
     (HostDisk::new(Box::new(device)), log)
 }
 
-fn write(lba: u64) -> Vec<Request> {
-    vec![Request::Write {
+fn write(lba: u64) -> Request {
+    Request::Write {
         lba,
         data: vec![7; 4096],
         durable: false,
-    }]
+    }
 }
 
 fn release(log: &Log, tag: u32) {
@@ -185,7 +185,7 @@ fn a_flush_waits_for_discards_only_where_deallocated_blocks_stay_zeros() {
     for zeros in [true, false] {
         let (mut disk, log) = queued(256, zeros);
         disk.discard(0, 8);
-        assert!(disk.submit(1, vec![Request::Flush], 0).is_none());
+        assert!(disk.submit(1, Request::Flush, 0).is_none());
         assert_eq!(disk.discards.held.len(), usize::from(zeros));
         if zeros {
             disk.poll(0);
