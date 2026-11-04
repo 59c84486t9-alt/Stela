@@ -2139,7 +2139,7 @@ fn start_platform(
             });
         match result {
             Ok(units) => output::arguments(format_args!(
-                "HOST IOAPIC contained: {units} original controllers; VT-d direct mode retained\n"
+                "HOST IOAPIC contained: {units} original controllers; remapper direct mode retained\n"
             )),
             Err(error) => output::arguments(format_args!(
                 "HOST IOAPIC containment unavailable: {error:?}\n"

@@ -114,6 +114,8 @@ pub(super) struct Remappers {
     initial_lines: Option<native_mmio::InitialPciLines>,
     requesters: core::cell::RefCell<Vec<BoundRequester<MmioRegisters>>>,
     amd: Vec<amd::Taken>,
+    amd_fabric: Option<&'static native_mmio::Source>,
+    amd_blocked: bool,
     roles: core::cell::RefCell<roles::Inventory>,
     topology: core::cell::RefCell<Vec<(u16, Vec<Present>)>>,
     dmar: Option<dmar::Remapping>,
@@ -149,7 +151,7 @@ fn requester(address: Address) -> u16 {
 
 impl Remappers {
     pub(super) fn has_blocked_fabric(&self) -> bool {
-        self.initial_fabric.is_some()
+        self.initial_fabric.is_some() || self.amd_blocked
     }
 
     pub(super) const fn none() -> Self {
@@ -159,6 +161,8 @@ impl Remappers {
             initial_lines: None,
             requesters: core::cell::RefCell::new(Vec::new()),
             amd: Vec::new(),
+            amd_fabric: None,
+            amd_blocked: false,
             roles: core::cell::RefCell::new(roles::Inventory::empty()),
             topology: core::cell::RefCell::new(Vec::new()),
             dmar: None,
@@ -261,17 +265,46 @@ impl Remappers {
         *remappers.topology.get_mut() = inventories.clone();
         if let Some(ivrs) = ivrs {
             // SAFETY: forwarded.
-            remappers.amd = unsafe {
+            let (units, blocked) = unsafe {
                 amd::take(
                     &ivrs,
                     &inventories,
                     &drivers,
                     mmio,
-                    inactive_firmware_units,
+                    dmar.is_none().then_some(inactive_firmware_units),
                     tsc_hz,
                     physical_bits(),
                 )
             };
+            remappers.amd = units;
+            remappers.amd_blocked = blocked.is_some();
+            if blocked == Some(true) {
+                // SAFETY: no driver, AP or competing configuration writer
+                // can change the original stopped PCI cohort during takeover.
+                match unsafe {
+                    pci.recheck_stopped_scoped(|address, offset, width| {
+                        remappers
+                            .amd
+                            .iter()
+                            .find_map(|unit| unit.read_original_config(address, offset, width))
+                    })
+                } {
+                    Ok(()) => {
+                        remappers.amd_fabric = Some(mmio);
+                        output::arguments(format_args!(
+                            "HOST IOMMU AMD-Vi blocked PCI fabric qualified: {} units\n",
+                            remappers.amd.len()
+                        ));
+                    }
+                    Err(error) => output::arguments(format_args!(
+                        "HOST IOMMU AMD-Vi blocked PCI fabric changed: {error}\n"
+                    )),
+                }
+            } else if blocked == Some(false) {
+                output::arguments(format_args!(
+                    "HOST IOMMU AMD-Vi blocked PCI fabric incomplete\n"
+                ));
+            }
         }
         let Some(table) = dmar else {
             return remappers;
@@ -442,21 +475,44 @@ impl Remappers {
         &mut self,
         pci: &native_mmio::ContainedPci<'static>,
     ) -> Result<usize, MappingError> {
-        let fabric = self
+        let source = pci.source();
+        let modes = if let Some(fabric) = self
             .initial_fabric
             .as_ref()
-            .filter(|fabric| core::ptr::eq(fabric.source, pci.source()))
-            .ok_or(MappingError::Unavailable)?;
-        // SAFETY: the same original source and complete unit cohort remain
-        // held in the accepting mount context.
-        let modes = unsafe { fabric.pin_direct_delivery() }.map_err(|error| {
-            output::arguments(format_args!("HOST IOAPIC direct mode refused: {error:?}\n"));
-            MappingError::Unavailable
-        })?;
-        // SAFETY: forwarded original controller handoff and exact complete
-        // mode owners, all from this same retained source.
-        let count = unsafe { fabric.source.install_ioapics(modes) }?;
-        match fabric.source.initial_pci_lines() {
+            .filter(|fabric| core::ptr::eq(fabric.source, source))
+        {
+            // SAFETY: original complete Intel unit cohort and live root.
+            unsafe { fabric.pin_direct_delivery() }
+                .map_err(|error| {
+                    output::arguments(format_args!("HOST IOAPIC direct mode refused: {error:?}\n"));
+                    MappingError::Unavailable
+                })?
+                .into_iter()
+                .map(native_mmio::ModePin::Intel)
+                .collect()
+        } else if self
+            .amd_fabric
+            .is_some_and(|amd| core::ptr::eq(amd, source))
+        {
+            self.amd
+                .iter()
+                .map(|unit| {
+                    unit.pin_direct_delivery()
+                        .map(native_mmio::ModePin::Amd)
+                        .map_err(|error| {
+                            output::arguments(format_args!(
+                                "HOST IOAPIC AMD-Vi direct mode refused: {error:?}\n"
+                            ));
+                            MappingError::Unavailable
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            return Err(MappingError::Unavailable);
+        };
+        // SAFETY: forwarded controller handoff and complete original modes.
+        let count = unsafe { source.install_ioapics(modes) }?;
+        match source.initial_pci_lines() {
             Ok(lines) => {
                 self.initial_lines = Some(lines);
                 output::arguments(format_args!("HOST PCI initial interrupt paths contained\n"));

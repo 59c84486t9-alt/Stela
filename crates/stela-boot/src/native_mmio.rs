@@ -19,7 +19,7 @@ pub(crate) use platform::{ExclusiveHpet, HpetMapping};
 #[cfg(feature = "diagnostics")]
 pub(crate) use platform::{QualifiedRam, RootPublication, ScopedSource};
 pub(crate) use shared::{
-    ContainedPci, ContainmentError, InitialPciLines, IoapicRegisters, NativeExclusiveHpet,
+    ContainedPci, ContainmentError, InitialPciLines, IoapicRegisters, ModePin, NativeExclusiveHpet,
     NativeHpetMapping, PROCESSORS, Source,
 };
 pub(crate) use window::Window;

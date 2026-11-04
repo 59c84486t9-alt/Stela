@@ -132,31 +132,57 @@ impl<'a> ContainedPci<'a> {
             return Err(Error::Unavailable.into());
         };
         for slot in &fabric.slots {
-            slot.header
-                .verify(|offset| reader.read32(slot.address, offset).map_err(mapping_error))
-                .and_then(|()| {
-                    slot.plan.check_disabled(|offset| {
-                        reader
-                            .read(slot.address, offset, 2)
-                            .map(|value| value as u16)
-                            .map_err(mapping_error)
-                    })
-                })
-                .and_then(|()| {
-                    if slot.header.bridge.is_some() {
-                        let prepared = slot
-                            .configuration
-                            .as_ref()
-                            .ok_or_else(|| mapping_error(Error::Unavailable))?;
-                        prepared.check_bridge_routing(|offset, width| {
-                            reader
-                                .read(slot.address, offset, width)
-                                .map_err(mapping_error)
-                        })?;
-                    }
-                    Ok(())
-                })
-                .map_err(|error| ContainmentError::from(error).at(slot.address))?;
+            slot.check_stopped(|offset, width| {
+                reader
+                    .read(slot.address, offset, width)
+                    .map_err(mapping_error)
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Recheck one parked page at a time, borrowing any already kept
+    /// remapper configuration through its own original read-only owner.
+    ///
+    /// # Safety
+    /// Caller keeps the original writer exclusion. `kept` returns a reader
+    /// only for the exact original remapper function; other pages are disjoint.
+    pub(crate) unsafe fn recheck_stopped_scoped(
+        &self,
+        mut kept: impl FnMut(Address, u16, u8) -> Option<Result<u32, ConfigError>>,
+    ) -> Result<(), ContainmentError> {
+        let cohort = self.source.pci_slots.0.borrow();
+        let Cohort::Parked(fabric) = &*cohort else {
+            return Err(Error::Unavailable.into());
+        };
+        for slot in &fabric.slots {
+            let mut map = None;
+            let checked = slot.check_stopped(|offset, width| {
+                if let Some(value) = kept(slot.address, offset, width) {
+                    return value;
+                }
+                if map.is_none() {
+                    let (_, span) = self
+                        .source
+                        .config_page(slot.address)
+                        .map_err(mapping_error)?;
+                    // SAFETY: this exact original slot has no other current
+                    // observation owner. Its sole read-only view is scoped.
+                    map = Some(
+                        unsafe { ConfigScope::open(self.source, span) }.map_err(mapping_error)?,
+                    );
+                }
+                map.as_ref()
+                    .expect("scoped function map")
+                    .read(usize::from(offset), u16::from(width))
+                    .map_err(mapping_error)
+            });
+            if let Some(mut map) = map {
+                // SAFETY: all observations returned synchronously.
+                unsafe { map.retire() }
+                    .map_err(|error| ContainmentError::from(error).at(slot.address))?;
+            }
+            checked?;
         }
         Ok(())
     }
@@ -255,6 +281,31 @@ struct Slot {
     ancestor: Parent,
     route: topology::Parent,
     forwarding: Option<Forwarding>,
+}
+
+impl Slot {
+    fn check_stopped(
+        &self,
+        mut read: impl FnMut(u16, u8) -> Result<u32, ConfigError>,
+    ) -> Result<(), ContainmentError> {
+        self.header
+            .verify(|offset| read(offset, 4))
+            .and_then(|()| {
+                self.plan
+                    .check_disabled(|offset| read(offset, 2).map(|word| word as u16))
+            })
+            .and_then(|()| {
+                if self.header.bridge.is_some() {
+                    let prepared = self
+                        .configuration
+                        .as_ref()
+                        .ok_or_else(|| mapping_error(Error::Unavailable))?;
+                    prepared.check_bridge_routing(read)?;
+                }
+                Ok(())
+            })
+            .map_err(|error| ContainmentError::from(error).at(self.address))
+    }
 }
 
 enum Forwarding {
@@ -683,18 +734,18 @@ impl Source {
     /// the same slot and prevents a second attempt.
     ///
     /// # Safety
-    /// The caller owns the original complete VT-d fabric. `blocked` is from
-    /// its exact firmware-selected unit for this segment and RID. Prior PCI
+    /// The caller owns the original complete remapping fabric. The check
+    /// observes the exact firmware-selected unit for this segment and RID. Prior PCI
     /// writers and any legacy writer or reassignment of the topology stay
     /// excluded. This grants no endpoint stop, root binding or IRQ route.
     pub(crate) unsafe fn promote_cold_config(
         &self,
         address: Address,
-        blocked: &BlockedRequester<MmioRegisters>,
         lines: &InitialPciLines,
+        check_blocked: impl Fn() -> Result<(), stela_drivers::bus::dma::mapping::DmaError>,
     ) -> Result<OwnedConfig, ContainmentError> {
         // SAFETY: same original exclusive, blocked requester and line paths.
-        unsafe { self.promote_parked(address, blocked, lines, false) }
+        unsafe { self.promote_parked(address, lines, check_blocked, false) }
     }
 
     /// Restore only forwarding through one original PCIe port. Keep the
@@ -710,9 +761,15 @@ impl Source {
         blocked: BlockedRequester<MmioRegisters>,
         lines: &InitialPciLines,
     ) -> Result<(), ContainmentError> {
+        let rid = u16::from(address.bus) << 8
+            | u16::from(address.device) << 3
+            | u16::from(address.function);
+        if blocked.requester() != rid {
+            return Err(ContainmentError::from(Error::OutsideResource).at(address));
+        }
         // SAFETY: the caller keeps the original stopped descendant cohort,
         // and this selects only the original Type1 port for the exact RID.
-        let mut config = unsafe { self.promote_parked(address, &blocked, lines, true) }?;
+        let mut config = unsafe { self.promote_parked(address, lines, || blocked.check(), true) }?;
         let result = (|| {
             let command = config.try_read16(COMMAND)? | COMMAND_MASTER;
             // SAFETY: the whole original fabric is drained and held, with
@@ -769,19 +826,13 @@ impl Source {
     unsafe fn promote_parked(
         &self,
         address: Address,
-        blocked: &BlockedRequester<MmioRegisters>,
         lines: &InitialPciLines,
+        check_blocked: impl Fn() -> Result<(), stela_drivers::bus::dma::mapping::DmaError>,
         bridge: bool,
     ) -> Result<OwnedConfig, ContainmentError> {
-        let rid = u16::from(address.bus) << 8
-            | u16::from(address.device) << 3
-            | u16::from(address.function);
-        if blocked.requester() != rid {
-            return Err(ContainmentError::from(Error::OutsideResource).at(address));
-        }
         let check_paths = || {
             lines.check(self)?;
-            blocked.check().map_err(|_| Error::Unavailable)
+            check_blocked().map_err(|_| Error::Unavailable)
         };
         check_paths().map_err(|error| ContainmentError::from(error).at(address))?;
         let (index, prepared, header, plan) = {

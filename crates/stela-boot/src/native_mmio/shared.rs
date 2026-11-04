@@ -797,8 +797,25 @@ pub(crate) type IoapicUnit =
     crate::native_irq::ioapic::Unit<IoapicRegisters, crate::native_irq::NativePlatform>;
 
 type IoapicEntry = (crate::native_irq::madt::Unit, Arc<IoapicUnit>);
-type ModePin =
-    crate::native_dma::vtd::interrupt::DirectDelivery<crate::native_dma::vtd::MmioRegisters>;
+pub(crate) enum ModePin {
+    Intel(crate::native_dma::vtd::interrupt::DirectDelivery<crate::native_dma::vtd::MmioRegisters>),
+    Amd(stela_drivers::bus::dma::amd::unit::native::DirectDelivery),
+}
+impl ModePin {
+    unsafe fn check(&self) -> Result<(), irq::posted_msi::Error> {
+        let alive = match self {
+            // SAFETY: both projections use the same checked IRQ CPU/root.
+            Self::Intel(pin) => unsafe { pin.check() }.is_ok(),
+            // SAFETY: forwarded original CPU/root and kept AMD register view.
+            Self::Amd(pin) => unsafe { pin.check() }.is_ok(),
+        };
+        if alive {
+            Ok(())
+        } else {
+            Err(irq::posted_msi::Error::RootFailed)
+        }
+    }
+}
 
 enum MountedIoapics {
     Unclaimed,
@@ -882,7 +899,7 @@ unsafe impl NotificationDomain for MountedNotification {
         for mode in &self.modes {
             // SAFETY: checked original IRQ CPU/root; the actual register maps
             // stay held by the pins across every admitted root.
-            unsafe { mode.check() }.map_err(|_| irq::posted_msi::Error::RootFailed)?;
+            unsafe { mode.check() }?;
         }
         Ok(())
     }

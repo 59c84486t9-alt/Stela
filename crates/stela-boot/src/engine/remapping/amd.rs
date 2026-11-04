@@ -2,7 +2,7 @@
 //! own PCI function. The units are process local; the boot processor, which
 //! runs the host drivers, owns them, and their domains refuse other
 //! processors and interrupt handlers.
-use super::{CLAIMED_DISPLAYS, InactiveFirmwareUnits, Kind};
+use super::{CLAIMED_DISPLAYS, InactiveFirmwareUnits};
 use crate::Result;
 use crate::{native_mmio, output};
 use alloc::{boxed::Box, format, rc::Rc, sync::Arc, vec, vec::Vec};
@@ -17,7 +17,9 @@ use stela_drivers::{
                 ivrs::{Ivrs, MemoryScope},
                 memory::TableVisibility,
                 unit::{
-                    native::{ColdPlatform, Error, Limits, Mapping, Requester, Unit},
+                    native::{
+                        ColdPlatform, DirectDelivery, Error, Limits, Mapping, Requester, Unit,
+                    },
                     registers::{FunctionInspection, Inputs},
                 },
             },
@@ -183,11 +185,8 @@ fn named(scope: MemoryScope, segment: u16, present: &[Present]) -> Vec<u16> {
 pub(super) struct Taken {
     unit: Rc<RefCell<Unit<Platform, ObservedConfig>>>,
     segment: u16,
-    #[allow(
-        dead_code,
-        reason = "retained for the AMD-Vi parked configuration join"
-    )]
-    firmware_inactive: bool,
+    own: Address,
+    claims: Option<RefCell<Vec<(u16, bool)>>>,
     requesters: RefCell<Vec<u16>>,
 }
 
@@ -299,10 +298,10 @@ pub(super) unsafe fn take(
     inventories: &[(u16, Vec<Present>)],
     drivers: &Range<u64>,
     mmio: &native_mmio::Source,
-    inactive_firmware_units: &InactiveFirmwareUnits,
+    inactive_firmware_units: Option<&InactiveFirmwareUnits>,
     tsc_hz: u64,
     physical_bits: u8,
-) -> Vec<Taken> {
+) -> (Vec<Taken>, Option<bool>) {
     let mut taken = Vec::new();
     let ivrs = match Ivrs::parse(table, MAXIMUM_BLOCKS) {
         Ok(ivrs) => ivrs,
@@ -310,9 +309,11 @@ pub(super) unsafe fn take(
             output::arguments(format_args!(
                 "UNSUPPORTED host IVRS unreadable ({error:?}): host DMA stays untranslated\n"
             ));
-            return taken;
+            return (taken, None);
         }
     };
+    let blocked = inactive_firmware_units.is_some_and(|units| units.matches_amd(&ivrs))
+        && ivrs.memory_definitions().next().is_none();
     for description in ivrs.units() {
         let id = description.id();
         let base = description.mmio_address();
@@ -333,6 +334,10 @@ pub(super) unsafe fn take(
                 "HOST IOMMU AMD-Vi unit {base:#x} left untranslated: {why:?}\n"
             ));
         };
+        if blocked && !present.iter().any(|function| function.rid == id.device_id) {
+            left(&"its function was absent from the original stopped PCI census");
+            continue;
+        }
         // SAFETY: forwarded; no driver claims an IOMMU function.
         let function = match unsafe { config(mmio, address) } {
             Ok(function) => function,
@@ -394,42 +399,102 @@ pub(super) unsafe fn take(
                 continue;
             }
         };
-        let mut window = vec![drivers.clone()];
-        window.extend(
-            reserved
+        let claims = if blocked {
+            // Publish no shared window. Retain the real complete stopped
+            // cohort and verify each original DTE before the unit-wide drain.
+            let checked = requesters
                 .iter()
-                .filter(|(rid, _)| requesters.contains(rid))
-                .map(|(_, range)| range.clone()),
-        );
-        let Some(ranges) = window
-            .iter()
-            .map(|range| borrowed(range, physical_bits))
-            .collect::<Option<Vec<_>>>()
-        else {
-            left(&"a DMA window range is empty, out of bounds or cannot be allocated");
-            continue;
+                .try_for_each(|&rid| {
+                    unit.admit_requester(rid)?;
+                    unit.check_blocked_requester(rid).map_err(Error::Dma)
+                })
+                .and_then(|()| unit.drain_posted_writes().map_err(Error::Dma));
+            if let Err(error) = checked {
+                left(&error);
+                continue;
+            }
+            output::arguments(format_args!(
+                "HOST IOMMU AMD-Vi unit {base:#x} blocked and drained {} initial requesters\n",
+                requesters.len()
+            ));
+            Some(RefCell::new(
+                requesters.iter().map(|&rid| (rid, false)).collect(),
+            ))
+        } else {
+            let mut window = vec![drivers.clone()];
+            window.extend(
+                reserved
+                    .iter()
+                    .filter(|(rid, _)| requesters.contains(rid))
+                    .map(|(_, range)| range.clone()),
+            );
+            let Some(ranges) = window
+                .iter()
+                .map(|range| borrowed(range, physical_bits))
+                .collect::<Option<Vec<_>>>()
+            else {
+                left(&"a DMA window range is empty, out of bounds or cannot be allocated");
+                continue;
+            };
+            // SAFETY: forwarded: the requesters DMA only to the drivers' region
+            // and their reserved regions until they attach.
+            if let Err(error) = unsafe { unit.window(&requesters, ranges) } {
+                left(&error);
+                continue;
+            }
+            output::arguments(format_args!(
+                "HOST IOMMU AMD-Vi unit {base:#x} translates {} requesters\n",
+                requesters.len()
+            ));
+            None
         };
-        // SAFETY: forwarded: the requesters DMA only to the drivers' region
-        // and their reserved regions until they attach.
-        if let Err(error) = unsafe { unit.window(&requesters, ranges) } {
-            left(&error);
-            continue;
-        }
-        output::arguments(format_args!(
-            "HOST IOMMU AMD-Vi unit {base:#x} translates {} requesters\n",
-            requesters.len()
-        ));
         taken.push(Taken {
             unit: Rc::new(RefCell::new(unit)),
             segment: id.segment,
-            firmware_inactive: inactive_firmware_units.contains(Kind::AmdVi, id.segment, base),
+            own: address,
+            claims,
             requesters: RefCell::new(requesters),
         });
     }
-    taken
+    let complete = blocked
+        && !taken.is_empty()
+        && taken.len() == ivrs.units().count()
+        && inventories.iter().all(|(segment, functions)| {
+            functions.iter().all(|function| {
+                let address = super::address(*segment, function.rid);
+                taken.iter().any(|unit| unit.own == address)
+                    || taken
+                        .iter()
+                        .filter(|unit| unit.covers(*segment, function.rid))
+                        .count()
+                        == 1
+            })
+        });
+    (taken, blocked.then_some(complete))
 }
 
 impl Taken {
+    pub(super) fn read_original_config(
+        &self,
+        address: Address,
+        offset: u16,
+        width: u8,
+    ) -> Option<Result<u32, super::ConfigError>> {
+        (self.own == address).then(|| {
+            self.unit
+                .try_borrow()
+                .map_err(|_| super::ConfigError::before_effect(super::ConfigFailure::Busy))?
+                .read_original_config(offset, width)
+        })
+    }
+
+    pub(super) fn pin_direct_delivery(&self) -> Result<DirectDelivery, Error> {
+        self.unit
+            .try_borrow()
+            .map_err(|_| Error::Busy)?
+            .pin_direct_delivery()
+    }
+
     /// Full IVRS routing coverage, including still-blocked future arrivals.
     pub(super) fn routes(&self, segment: u16, rid: u16) -> Result<bool, Error> {
         let unit = self.unit.try_borrow().map_err(|_| Error::Busy)?;
@@ -454,23 +519,37 @@ impl Taken {
         Ok(())
     }
 
-    /// Keep the original unit/window graph through vendor cold preparation.
-    #[allow(dead_code, reason = "AMD-Vi has no parked configuration promotion yet")]
+    /// Claim one original blocked entry for this exact parked function.
     pub(super) fn preparation(
         &self,
         address: Address,
-    ) -> Result<Box<dyn stela_drivers::bus::pci::requester::preparation::Root>, DmaError> {
+        lines: native_mmio::InitialPciLines,
+    ) -> Result<ColdRoot, DmaError> {
         let rid = super::requester(address);
         if !on_boot_processor() || !self.covers(address.segment, rid) {
             return Err(DmaError::IommuUnavailable);
         }
-        if !self.firmware_inactive {
-            return Err(DmaError::DrainUnavailable);
+        let mut claims = self
+            .claims
+            .as_ref()
+            .ok_or(DmaError::DrainUnavailable)?
+            .try_borrow_mut()
+            .map_err(|_| DmaError::IommuUnavailable)?;
+        let claimed = claims
+            .iter_mut()
+            .find(|(member, _)| *member == rid)
+            .ok_or(DmaError::IommuUnavailable)?;
+        if claimed.1 {
+            return Err(DmaError::IommuUnavailable);
         }
-        Ok(Box::new(ColdRoot {
+        let root = ColdRoot {
             address,
             unit: self.unit.clone(),
-        }))
+            _lines: lines,
+        };
+        root.check()?;
+        claimed.1 = true;
+        Ok(root)
     }
 
     /// A domain of its own for `binding`'s requester.
@@ -501,12 +580,20 @@ fn attach_domain(
     }))
 }
 
-#[allow(dead_code, reason = "AMD-Vi has no parked configuration promotion yet")]
-struct ColdRoot {
+pub(super) struct ColdRoot {
     address: Address,
     unit: Rc<RefCell<Unit<Platform, ObservedConfig>>>,
+    _lines: native_mmio::InitialPciLines,
 }
-// SAFETY: the paired original IVRS unit/window and DMA backing are retained.
+impl ColdRoot {
+    pub(super) fn check(&self) -> Result<(), DmaError> {
+        self.unit
+            .try_borrow()
+            .map_err(|_| DmaError::IommuUnavailable)?
+            .check_blocked_requester(super::requester(self.address))
+    }
+}
+// SAFETY: the paired original IVRS unit and blocked table and DMA backing are retained.
 // It is process-local and every operation checks BSP/non-IRQ execution. The
 // consuming receipt supplies independent endpoint/IRQ/work/bypass retirement;
 // failure retains hardware resources through the unit's native owners.
@@ -536,7 +623,6 @@ unsafe impl stela_drivers::bus::pci::requester::preparation::Root for ColdRoot {
     }
 }
 
-#[allow(dead_code, reason = "AMD-Vi has no parked configuration promotion yet")]
 struct Attachment {
     domain: Arc<Domain>,
 }

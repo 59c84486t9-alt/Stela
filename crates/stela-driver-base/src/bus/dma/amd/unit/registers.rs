@@ -7,7 +7,7 @@
 //! borrowed mapping view, numeric permission or successful completion is exposed.
 use crate::bus::{
     dma::amd::ivrs::{HardwareVersion, Ivhd, Ivrs},
-    mmio::owned::{CacheAttribute, Error as MappingError, Mapping, Protection},
+    mmio::owned::{CacheAttribute, Error as MappingError, Mapping, MappingView, Protection},
     pci::{
         Address, ConfigSpace, Function,
         owned::{ObservedConfig, OwnedConfig},
@@ -174,6 +174,34 @@ impl<C: UnitConfig> FunctionInspection<C> {
             return Err(Error::MappingCount);
         }
         read_register(&self.inputs.mappings[self.profiles[0].mapping], offset)
+    }
+
+    pub(super) fn read_config(
+        &self,
+        offset: u16,
+        width: u8,
+    ) -> Result<u32, crate::bus::pci::ConfigError> {
+        let config = self.inputs.function.config_ref();
+        match width {
+            1 => config.read8(offset).map(u32::from),
+            2 => config.read16(offset).map(u32::from),
+            4 => config.read32(offset),
+            _ => Err(crate::bus::pci::ConfigError::before_effect(
+                crate::bus::pci::ConfigFailure::Access {
+                    offset,
+                    width: usize::from(width),
+                },
+            )),
+        }
+    }
+
+    pub(super) fn native_view(&self, bytes: usize) -> Result<MappingView, Error> {
+        let [profile] = self.profiles.as_slice() else {
+            return Err(Error::MappingCount);
+        };
+        self.inputs.mappings[profile.mapping]
+            .view(0..bytes)
+            .map_err(Error::Mapping)
     }
 
     pub(super) fn native_write(&self, offset: usize, value: u64) -> Result<(), Error> {

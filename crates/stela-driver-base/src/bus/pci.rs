@@ -475,6 +475,10 @@ impl<C: ConfigSpace> Function<C> {
         &mut self.config
     }
 
+    pub(crate) fn config_ref(&self) -> &C {
+        &self.config
+    }
+
     /// Transfer the original configuration owner without creating another
     /// access path or ending its mapping/resource lifetime.
     pub fn into_config(self) -> C {

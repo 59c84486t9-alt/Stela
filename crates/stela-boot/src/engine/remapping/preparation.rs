@@ -162,12 +162,28 @@ impl Remappers {
         address: Address,
     ) -> Result<(OwnedConfig, Box<dyn Root>), PreparationError> {
         let rid = requester(address);
-        if self
+        if let Some(taken) = self
             .amd(address.segment, rid)
             .map_err(|_| DmaError::IommuUnavailable)?
-            .is_some()
         {
-            return Err(PreparationError::AmdConfiguration);
+            if !self
+                .amd_fabric
+                .is_some_and(|original| core::ptr::eq(original, source))
+            {
+                return Err(PreparationError::AmdConfiguration);
+            }
+            let lines = self
+                .initial_lines
+                .as_ref()
+                .ok_or(PreparationError::Interrupt(MappingError::Unavailable))?;
+            lines.check(source).map_err(PreparationError::Interrupt)?;
+            let root = taken.preparation(address, lines.clone())?;
+            // SAFETY: the complete original AMD fabric is blocked, the
+            // selected unit owns this exact entry, and the kept line/source
+            // owners exclude prior configuration and topology writers.
+            let config = unsafe { source.promote_cold_config(address, lines, || root.check()) }
+                .map_err(PreparationError::Configuration)?;
+            return Ok((config, Box::new(root)));
         }
         let taken = self
             .vtd(address.segment, rid)
@@ -185,8 +201,15 @@ impl Remappers {
         // SAFETY: this root is selected from the same fully contained fabric
         // and this slot's exact firmware route. Legacy probing is read-only
         // while this fabric is active, and AML's ECAM writers are excluded.
-        let config = unsafe { source.promote_cold_config(address, &blocked, lines) }
-            .map_err(PreparationError::Configuration)?;
+        let config = unsafe {
+            source.promote_cold_config(address, lines, || {
+                if blocked.requester() != rid {
+                    return Err(DmaError::IommuUnavailable);
+                }
+                blocked.check()
+            })
+        }
+        .map_err(PreparationError::Configuration)?;
         let root = Box::new(VtdRoot {
             address,
             unit: taken.unit.clone(),

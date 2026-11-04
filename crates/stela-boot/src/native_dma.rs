@@ -40,6 +40,18 @@ impl InactiveFirmwareUnits {
             .is_some_and(|units| units.as_slice().contains(&original))
     }
 
+    pub(crate) fn matches_amd(&self, ivrs: &stela_drivers::bus::dma::amd::ivrs::Ivrs<'_>) -> bool {
+        self.0.as_ref().is_some_and(|units| {
+            units.as_slice().len() == ivrs.units().count()
+                && units.as_slice().iter().all(|unit| {
+                    unit.kind == Kind::AmdVi
+                        && ivrs.units().any(|entry| {
+                            entry.id().segment == unit.segment && entry.mmio_address() == unit.base
+                        })
+                })
+        })
+    }
+
     pub(crate) fn matches_dmar(&self, descriptors: &[dmar::Drhd]) -> bool {
         self.0
             .as_ref()
