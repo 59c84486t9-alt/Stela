@@ -24,7 +24,7 @@ pub use analysis::{
     BlockAnalysis, BlockAnalysisError, DynamicEdge, DynamicEdgeKind, StaticSuccessor,
     SuccessorKind, analyze, analyze_with_profile, source_bytes, source_bytes_with_profile,
 };
-use analysis::{ParsedBlock, analyze_parsed, parse};
+use analysis::{ParsedBlock, analyze_parsed, parse, parse_admitted};
 pub use features::{BlockProfile, Features};
 pub use host_gprs::HostGprSnapshot;
 pub use memory::{
@@ -334,6 +334,29 @@ enum Stage {
 }
 
 impl CompilationPlan {
+    /// Plan one checked full-system block while applying a word admission
+    /// policy. A denied first word returns `Ok(None)`; a later denial ends
+    /// the block before that word. The policy is consulted in source order,
+    /// only until a denial, parse error, or the actual terminal.
+    pub fn new_admitted_system(
+        source: &[u8],
+        base: GuestAddress,
+        checked: CheckedMemoryProfile,
+        target: crate::TargetCpu,
+        admit: impl FnMut(u32) -> bool,
+    ) -> Result<Option<Self>, CompileError> {
+        // The unchecked full-system profile can look past forward
+        // conditionals based on the available source length.
+        let profile = BlockProfile::new(Features::SYSTEM_MODE).with_checked_memory(checked);
+        let options = crate::Options::new(profile, target);
+        options.validate()?;
+        let parsed = parse_admitted(source, base, profile, admit).map_err(CompileError::from)?;
+        if parsed.source_bytes == 0 {
+            return Ok(None);
+        }
+        Self::block(parsed, &options).map(Some)
+    }
+
     pub fn new(
         source: &[u8],
         base: GuestAddress,
