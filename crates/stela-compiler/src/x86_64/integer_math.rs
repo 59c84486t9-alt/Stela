@@ -6,9 +6,13 @@ use super::{
 };
 use crate::x86_64::asm::Code;
 use crate::{
-    TargetCpu,
-    aarch64::integer_math::{Kind, Operand},
+    GuestAddress, TargetCpu,
+    aarch64::{
+        Instruction, Operation,
+        integer_math::{Kind, Operand},
+    },
 };
+use alloc::vec::Vec;
 
 use Gpr::{Rax, Rcx, Rdx};
 
@@ -155,7 +159,7 @@ pub(super) fn emit_with(asm: &mut Asm, operand: &Operand, target: TargetCpu) {
         _ => {}
     }
     if let Kind::Divide { signed, width } = operand.kind {
-        divide(asm, signed, width);
+        divide(asm, signed, width, false);
         store_with(asm, operand.destination);
         return;
     }
@@ -203,6 +207,61 @@ pub(super) fn emit_with(asm: &mut Asm, operand: &Operand, target: TargetCpu) {
     store_with(asm, operand.destination);
 }
 
+/// An adjacent DIV and MSUB can commit both architectural results of one
+/// native divide. The quotient store must leave the dividend and divisor
+/// available to the guest MSUB as their original values.
+pub(super) fn emit_divide_remainder(
+    code: &mut Code,
+    source_map: &mut Vec<(GuestAddress, usize)>,
+    instructions: &[Instruction],
+) -> bool {
+    let [
+        Instruction {
+            pc: divide_pc,
+            operation: Operation::IntegerMath(division),
+        },
+        Instruction {
+            pc: remainder_pc,
+            operation: Operation::IntegerMath(product),
+        },
+        ..,
+    ] = instructions
+    else {
+        return false;
+    };
+    let Kind::Divide { signed, width } = division.kind else {
+        return false;
+    };
+    let (dividend, divisor, quotient) = (division.left, division.right, division.destination);
+    let operands = (product.left, product.right);
+    if product.kind != (Kind::Low { width })
+        || !product.subtract
+        || product.accumulator != dividend
+        || (operands != (quotient, divisor) && operands != (divisor, quotient))
+        || !matches!(quotient, Register::X(_))
+        || !matches!(product.destination, Register::X(_))
+        || quotient == dividend
+        || quotient == divisor
+        || divide_pc.0.checked_add(4) != Some(remainder_pc.0)
+    {
+        return false;
+    }
+    debug_assert!(!code.is_pinned() && !code.constant_time());
+    source_map.push((*divide_pc, code.len()));
+    code.set_instruction(source_map.len() - 1);
+    let mut asm = code.asm();
+    load_with(&mut asm, dividend);
+    right_operand_with(&mut asm, divisor, Width::X64, Shift::Lsl, 0);
+    divide(&mut asm, signed, width, true);
+    store_with(&mut asm, quotient);
+    source_map.push((*remainder_pc, code.len()));
+    code.set_instruction(source_map.len() - 1);
+    let mut asm = code.asm();
+    let remainder = asm.guest(product.destination).expect("remainder register");
+    asm.mov_store(Size::Qword, remainder, Rdx);
+    true
+}
+
 /// CLZ (or, after the sign fold, CLS) without BSR or LZCNT, neither on
 /// Intel's data operand independent timing list: every bit below the
 /// highest set one is set by shifted ORs, so the count is the width less the
@@ -248,7 +307,7 @@ fn swap_groups(asm: &mut Asm, width: Width, shift: u8, mask: u64) {
 /// RAX and RCX hold the operands. x86 DIV/IDIV fault on a zero divisor, and
 /// IDIV also on MIN / -1, where Arm returns zero or the wrapped MIN. A divisor
 /// of -1 is handled by negation instead of IDIV.
-fn divide(asm: &mut Asm, signed: bool, width: Width) {
+fn divide(asm: &mut Asm, signed: bool, width: Width, keep_remainder: bool) {
     let size = size(width);
     if width == Width::W32 {
         // Clear the discarded high dividend.
@@ -262,6 +321,9 @@ fn divide(asm: &mut Asm, signed: bool, width: Width) {
         let ordinary = asm.jcc(Cond::Ne);
         // Negation, including MIN wraparound.
         asm.unary(Unary::Neg, size, Rax);
+        if keep_remainder {
+            asm.alu(Alu::Xor, Size::Dword, Rdx, Rdx);
+        }
         minus_one_done = Some(asm.jmp());
         asm.bind(ordinary);
         asm.sign_extend_accumulator(size);
@@ -274,12 +336,18 @@ fn divide(asm: &mut Asm, signed: bool, width: Width) {
     let ordinary_done = asm.jmp();
     asm.bind(zero);
     // A zero divisor produces zero, never a native #DE.
+    if keep_remainder {
+        asm.mov(size, Rdx, Rax);
+    }
     asm.alu(Alu::Xor, Size::Dword, Rax, Rax);
     asm.bind(ordinary_done);
     if let Some(patch) = minus_one_done {
         asm.bind(patch);
     }
 }
+
+#[cfg(test)]
+mod division_remainder_tests;
 
 #[cfg(test)]
 mod tests {

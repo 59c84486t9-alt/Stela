@@ -503,6 +503,18 @@ fn emit_selected(
             cursor += 3;
             continue;
         }
+        if fuse_pairs
+            && matches!(instructions[cursor].operation, Operation::IntegerMath(operand)
+                if matches!(operand.kind, integer_math::Kind::Divide { .. }))
+            && super::integer_math::emit_divide_remainder(
+                code,
+                &mut block.source_map,
+                &instructions[cursor..],
+            )
+        {
+            cursor += 2;
+            continue;
+        }
         // Build the new candidate privately. Rejection leaves both cursor and
         // output untouched, so the legacy clean-load chunk partition is exact.
         if optimize_regions
