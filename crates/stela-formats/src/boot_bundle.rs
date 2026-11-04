@@ -24,7 +24,8 @@ pub use schema::{
 };
 use schema::{File, Region};
 pub const MANIFEST_FILE: &str = "bundle.json";
-const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum encoded size of a boot bundle manifest.
+pub const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 /// Guest DRAM is backed by 2 MiB host frames.
 pub const FRAME_BYTES: u64 = 2 * 1024 * 1024;
 const U64_BYTES: usize = 8;

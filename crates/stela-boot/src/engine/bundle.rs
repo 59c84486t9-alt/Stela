@@ -17,22 +17,22 @@
 use crate::Result;
 use crate::{
     firmware,
-    handoff::{File, Region},
+    handoff::{File, MAX_FILES, Region},
     layout, output,
     paging::PAGE,
 };
 use alloc::string::ToString;
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
-use core::arch::asm;
+use core::{arch::asm, ops::RangeInclusive, ptr::NonNull};
 pub(crate) use stela_boot_core::bundle::{live_tree, source};
 use stela_contracts::refuse;
 use stela_drivers::block::{BlockDevice, BlockError};
 use stela_engine::machine::Host;
 use stela_formats::boot_bundle::Framebuffer;
-use stela_formats::boot_bundle::MANIFEST_FILE;
 use stela_formats::boot_bundle::Machine;
 use stela_formats::boot_bundle::Manifest;
 use stela_formats::boot_bundle::Nvram;
+use stela_formats::boot_bundle::{MANIFEST_FILE, MAX_MANIFEST_BYTES};
 use stela_formats::payload;
 use stela_formats::payload::PayloadManifest;
 use stela_formats::payload::ReadAt;
@@ -90,27 +90,80 @@ fn open(root: &mut Directory, path: &str) -> Result<RegularFile> {
         .ok_or(refuse!("a bundle path is a directory"))
 }
 
-/// Read a whole file into fresh `LOADER_DATA` pages, which Stela keeps.
+fn size(file: &mut RegularFile) -> Result<u64> {
+    Ok(file
+        .get_boxed_info::<FileInfo>()
+        .map_err(|_| refuse!("cannot read a bundle file's size"))?
+        .file_size())
+}
+
 /// The part of a large file read between progress updates.
 const PROGRESS_STEP: usize = 16 << 20;
 
-fn read_file(root: &mut Directory, path: &str) -> Result<Region> {
-    read_bounded(root, path, u64::MAX)
+/// Firmware pages held privately until their caller commits the read.
+struct ReadPages {
+    start: NonNull<u8>,
+    count: usize,
+    length: usize,
 }
 
-fn read_bounded(root: &mut Directory, path: &str, limit: u64) -> Result<Region> {
-    let mut file = open(root, path)?;
-    let bytes = file
-        .get_boxed_info::<FileInfo>()
-        .map_err(|_| refuse!("cannot read a bundle file's size"))?
-        .file_size();
-    if bytes > limit {
-        return Err(refuse!("file size outside configured bound"));
+impl ReadPages {
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: only a complete read leaves `read_sized`, and these pages
+        // remain owned for the duration of the borrow.
+        unsafe { core::slice::from_raw_parts(self.start.as_ptr(), self.length) }
     }
-    let length = usize::try_from(bytes).map_err(|_| refuse!("bundle file is too large"))?;
-    let physical = firmware::pages(length.div_ceil(PAGE).max(1))?;
-    // SAFETY: fresh pages Stela owns for the whole boot, never freed.
-    let buffer = unsafe { core::slice::from_raw_parts_mut(physical as *mut u8, length) };
+
+    fn retain(self) -> Region {
+        let region = Region {
+            physical: self.start.as_ptr() as u64,
+            bytes: self.length as u64,
+        };
+        core::mem::forget(self);
+        region
+    }
+}
+
+impl Drop for ReadPages {
+    fn drop(&mut self) {
+        // SAFETY: this is the exact, unpublished allocation made before EBS.
+        let _ = unsafe { boot::free_pages(self.start, self.count) };
+    }
+}
+
+fn read_staged(root: &mut Directory, path: &str, sizes: RangeInclusive<u64>) -> Result<ReadPages> {
+    let mut file = open(root, path)?;
+    let bytes = size(&mut file)?;
+    if !sizes.contains(&bytes) {
+        return Err(refuse!("file size outside configured bound", %path, bytes));
+    }
+    read_sized(file, path, bytes)
+}
+
+/// Preserve the restore inventory's per-file retention contract.
+fn read_bounded(root: &mut Directory, path: &str, sizes: RangeInclusive<u64>) -> Result<Region> {
+    read_staged(root, path, sizes).map(ReadPages::retain)
+}
+
+/// Read a size-checked file into private `LOADER_DATA` pages.
+fn read_sized(mut file: RegularFile, path: &str, bytes: u64) -> Result<ReadPages> {
+    let length = usize::try_from(bytes)
+        .ok()
+        .filter(|&length| length <= isize::MAX as usize)
+        .ok_or(refuse!("bundle file is too large"))?;
+    let count = length.div_ceil(PAGE).max(1);
+    let pages = ReadPages {
+        start: boot::allocate_pages(
+            boot::AllocateType::AnyPages,
+            boot::MemoryType::LOADER_DATA,
+            count,
+        )
+        .map_err(|_| refuse!("firmware has no memory for Stela"))?,
+        count,
+        length,
+    };
+    // SAFETY: fresh pages owned exclusively by this read and sized for length.
+    let buffer = unsafe { core::slice::from_raw_parts_mut(pages.start.as_ptr(), length) };
     // Large files are read in parts, with their progress on the screen.
     let name = path.rsplit('\\').next().unwrap_or(path);
     if length > PROGRESS_STEP {
@@ -137,10 +190,7 @@ fn read_bounded(root: &mut Directory, path: &str, limit: u64) -> Result<Region> 
             );
         }
     }
-    Ok(Region {
-        physical: physical as u64,
-        bytes,
-    })
+    Ok(pages)
 }
 
 pub(crate) struct Retained {
@@ -163,21 +213,32 @@ pub(crate) fn read(directory: &str, verify_topology: bool) -> Result<Retained> {
         let Ok(mut root) = volume.open_volume() else {
             continue;
         };
-        let Ok(json) = read_file(&mut root, &manifest_path) else {
+        let Ok(mut manifest_file) = open(&mut root, &manifest_path) else {
             continue;
         };
-        // SAFETY: just read into Stela's own pages.
-        let bytes =
-            unsafe { core::slice::from_raw_parts(json.physical as *const u8, json.bytes as usize) };
-        let manifest = Manifest::parse(bytes).map_err(|error| {
+        let Ok(bytes) = size(&mut manifest_file) else {
+            continue;
+        };
+        if bytes > MAX_MANIFEST_BYTES as u64 {
+            return Err(refuse!("bundle.json exceeds the manifest size limit"));
+        }
+        let Ok(json) = read_sized(manifest_file, &manifest_path, bytes) else {
+            continue;
+        };
+        let manifest = Manifest::parse(json.bytes()).map_err(|error| {
             output::arguments(format_args!("bundle refusal: {error}\n"));
             "bundle.json is not a boot bundle"
         })?;
-        let mut files = alloc::vec![(String::from(MANIFEST_FILE), json)];
+        if manifest.files.len() >= MAX_FILES {
+            return Err(refuse!("bundle lists too many files"));
+        }
+        let mut files = Vec::with_capacity(manifest.files.len() + 1);
+        files.push((String::from(MANIFEST_FILE), json));
         crate::status::begin("Reading the boot files");
         for file in &manifest.files {
-            output::arguments(format_args!("READ {directory}\\{}\n", file.name));
-            let contents = read_file(&mut root, &format!("{directory}\\{}", file.name))
+            let path = format!("{directory}\\{}", file.name);
+            output::arguments(format_args!("READ {path}\n"));
+            let contents = read_staged(&mut root, &path, file.bytes..=file.bytes)
                 .inspect_err(|error| crate::status::fail(&error.to_string()))?;
             files.push((file.name.clone(), contents));
         }
@@ -187,34 +248,21 @@ pub(crate) fn read(directory: &str, verify_topology: bool) -> Result<Retained> {
                     files
                         .iter()
                         .find(|(file, _)| file == name)
-                        .map(|(_, region)| {
-                            // SAFETY: these live firmware pages were filled by read_file.
-                            unsafe {
-                                core::slice::from_raw_parts(
-                                    region.physical as *const u8,
-                                    region.bytes as usize,
-                                )
-                            }
-                        })
+                        .map(|(_, pages)| pages.bytes())
                 })
             })
-            .transpose();
-        let processors = match processors {
-            Ok(processors) => processors,
-            Err(error) => {
-                for (_, region) in files {
-                    let pages = (region.bytes as usize).div_ceil(PAGE).max(1);
-                    let start = core::ptr::NonNull::new(region.physical as *mut u8)
-                        .expect("live firmware allocation");
-                    // SAFETY: read_file allocated these pages and none were handed off.
-                    let _ = unsafe { boot::free_pages(start, pages) };
-                }
-                return Err(error);
-            }
-        };
-        let bytes: u64 = files.iter().map(|(_, region)| region.bytes).sum();
+            .transpose()?;
+        let bytes: u64 = files.iter().map(|(_, pages)| pages.length as u64).sum();
         crate::status::done(&format!("{} MB", bytes >> 20));
-        return Ok(Retained { files, processors });
+        // Reserve the handoff list before relinquishing any page owner.
+        let mut retained = Vec::with_capacity(files.len());
+        for (name, pages) in files {
+            retained.push((name, pages.retain()));
+        }
+        return Ok(Retained {
+            files: retained,
+            processors,
+        });
     }
     Err(refuse!("no volume has the bundle's bundle.json"))
 }
@@ -267,7 +315,7 @@ pub fn with_inventory(
                 "restore inventory path appears on multiple volumes"
             ));
         }
-        let manifest = read_bounded(&mut root, path, LIMIT)?;
+        let manifest = read_bounded(&mut root, path, 0..=LIMIT)?;
         // SAFETY: just read into Stela's own pages.
         let bytes = unsafe {
             core::slice::from_raw_parts(manifest.physical as *const u8, manifest.bytes as usize)
@@ -284,7 +332,7 @@ pub fn with_inventory(
                 .map(|entry| {
                     let path = format!("{directory}\\{}", entry.file);
                     output::arguments(format_args!("READ {path}\n"));
-                    read_bounded(&mut root, &path, MAX_HASH_FILE_BYTES).map_err(|_| {
+                    read_bounded(&mut root, &path, 0..=MAX_HASH_FILE_BYTES).map_err(|_| {
                         refuse!("a hash file the restore inventory names cannot be read")
                     })
                 })
@@ -305,13 +353,13 @@ pub fn with_inventory(
                     let seed = read_bounded(
                         &mut root,
                         &diagnostic_path,
-                        stela_runtime::restore::fdr::MAX_BYTES as u64,
+                        0..=stela_runtime::restore::fdr::MAX_BYTES as u64,
                     )?;
                     let state_path = format!("{directory}\\{}", super::fdr::STATE_FILE);
                     let image = read_bounded(
                         &mut root,
                         &state_path,
-                        stela_runtime::pc::fdr_store::FILE_BYTES as u64,
+                        0..=stela_runtime::pc::fdr_store::FILE_BYTES as u64,
                     )
                     .map_err(|_| refuse!("FDR diagnostic needs its preallocated fdrstate.bin"))?;
                     let partition = super::translations::partition(handle)
