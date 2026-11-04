@@ -326,7 +326,41 @@ fn a_deflated_member_streams_whole_in_file_chunks_across_read_runs() {
         answers.plan(&request).unwrap(),
     );
     let mut stream = Memory::new(Vec::new(), 1 << 20);
-    while job.poll(&mut stream, &mut answers.store).is_pending() {}
+    // The native poll cannot inflate or verify source data while its
+    // caller holds the guest's devices.
+    assert!(
+        job.poll_with_source(&mut stream, &mut answers.store, true)
+            .is_pending()
+    );
+    assert!(stream.output.is_empty());
+
+    job.prefetch(&mut answers.store, 1).unwrap();
+    for _ in 0..2 * MAX_READ_BYTES / FILE_CHUNK + 2 {
+        assert!(
+            job.poll_with_source(&mut stream, &mut answers.store, true)
+                .is_pending()
+        );
+        if !job.sending() && job.offset == MAX_READ_BYTES as u64 {
+            break;
+        }
+    }
+    assert_eq!(job.offset, MAX_READ_BYTES as u64);
+    assert!(!job.sending());
+    let sent = stream.output.len();
+    assert!(
+        job.poll_with_source(&mut stream, &mut answers.store, true)
+            .is_pending()
+    );
+    assert_eq!(stream.output.len(), sent);
+
+    job.prefetch(&mut answers.store, 1).unwrap();
+    for _ in 0..16 {
+        if let Poll::Ready(result) = job.poll_with_source(&mut stream, &mut answers.store, true) {
+            result.unwrap();
+            break;
+        }
+    }
+    assert!(job.done);
     stream.input = core::mem::take(&mut stream.output);
     let mut frame = Framed::new(Endian::Big, Limits::default());
     let mut got = Vec::new();

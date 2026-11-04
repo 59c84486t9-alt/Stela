@@ -336,11 +336,12 @@ impl Bindings {
             let address = match table.address {
                 Some(address) => address,
                 None => {
-                    let upload = recorder.upload(
+                    let (upload, bytes) = recorder.uploads.zeroed(
                         resolver,
-                        &table.slots.encode(),
+                        ArgumentTable::BYTES as usize,
                         ArgumentTable::ALIGNMENT,
                     )?;
+                    table.slots.encode_into(bytes);
                     table.address = Some(upload.address);
                     upload.address
                 }

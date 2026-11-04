@@ -766,7 +766,7 @@ impl Ans {
             {
                 return Err(refuse!("ANS Flush fields are not modeled"));
             }
-            return self.host(key, vec![Request::Flush], Wait::Flush, port);
+            return self.host(key, Some(Request::Flush), Wait::Flush, port);
         }
         if cmd.opcode() == REPRIORITIZE {
             // The medium serves I/O in arrival order, without tiers, so there
@@ -809,7 +809,6 @@ impl Ans {
             READ | COMPARE => {
                 let plan = self.medium.plan_read(nsid, lba, blocks).expect(range);
                 let request = plan.address.map(|lba| Request::Read { lba, bytes });
-                let requests = request.into_iter().collect();
                 let wait = if cmd.opcode() == READ {
                     let inline = inline.map(|key| (key, unit));
                     Wait::Read {
@@ -823,7 +822,7 @@ impl Ans {
                     prps.read(port, &mut data)?;
                     Wait::Compare { plan, data }
                 };
-                self.host(key, requests, wait, port)
+                self.host(key, request, wait, port)
             }
             WRITE => {
                 let mut data = vec![0; bytes];
@@ -839,26 +838,26 @@ impl Ans {
                     data,
                     durable: self.write_through() || controls & FORCE_UNIT_ACCESS != 0,
                 };
-                self.host(key, vec![request], Wait::Write { nsid, lba, blocks }, port)
+                self.host(key, Some(request), Wait::Write { nsid, lba, blocks }, port)
             }
             _ => Err(refuse!("ANS I/O command is not modeled")),
         }
     }
 
-    /// Submit an I/O command's host transfers under `key`, none for a read
+    /// Submit an I/O command's host request under `key`, none for a read
     /// of erased blocks alone, and finish the command at once unless the
-    /// host disk completes them later ([`super::host`]).
+    /// host disk completes it later ([`super::host`]).
     fn host(
         &mut self,
         key: u32,
-        requests: Vec<Request>,
+        request: Option<Request>,
         wait: Wait,
         port: &mut Port<'_, '_>,
     ) -> Result<Executed> {
-        if requests.is_empty() {
+        let Some(request) = request else {
             return self.finish(wait, None, port).map(Executed::Done);
-        }
-        match self.medium.device.submit(key, requests, port.access.now) {
+        };
+        match self.medium.device.submit(key, request, port.access.now) {
             Some(done) => self.finish(wait, Some(done), port).map(Executed::Done),
             None => Ok(Executed::Host(wait)),
         }

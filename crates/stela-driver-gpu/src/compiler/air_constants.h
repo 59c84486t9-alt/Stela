@@ -12,10 +12,24 @@ bool stela_air_specialize_constants(struct stela_air_metadata *m,
                                     const struct stela_air_constant_value *values,
                                     unsigned count);
 
+/* Initializers captured from a compact copy of a module before reflection
+ * inlines its shader functions. LLVM constants belong to the shared context. */
+struct stela_air_constructed_constants {
+   unsigned count;
+   LLVMValueRef globals[AIR_MAX_ARGUMENTS], values[AIR_MAX_ARGUMENTS];
+};
+
+/* Prepares initialization when inlining cannot change the constructors. */
+bool stela_air_prepare_constants(struct stela_air_metadata *m,
+                                 const struct stela_air_constants *constants,
+                                 struct stela_air_constructed_constants *prepared);
+
 /* Evaluates the specialized module's air.static_init constructors, making the
  * program-scope constants they compute constant data, and removes them;
  * refuses constructors that depend on more than function constants. */
 bool stela_air_construct_constants(struct stela_air_metadata *m);
+bool stela_air_construct_prepared_constants(struct stela_air_metadata *m,
+                                           const struct stela_air_constructed_constants *prepared);
 
 /* Folds what the constructed module's function constants decide in fn, its
  * entry with its callees inlined: the loads of constant data, the branches

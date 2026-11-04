@@ -282,6 +282,24 @@ impl KernelCollection {
         Ok(image)
     }
 
+    /// A freshly parsed file is already its memory image when its
+    /// disjoint segments cover every byte at the same offsets.
+    pub(crate) fn file_is_memory_image(&self, file_bytes: usize) -> bool {
+        if self.image_bytes() != file_bytes as u64 {
+            return false;
+        }
+        let mut covered = 0;
+        for segment in self.segments.iter().filter(|segment| segment.vm_size != 0) {
+            if segment.file_size != segment.vm_size
+                || segment.file_offset != segment.vm_address - self.vm_base
+            {
+                return false;
+            }
+            covered += segment.file_size;
+        }
+        covered == self.image_bytes()
+    }
+
     /// Byte range from the load base covering `first` through `last`.
     pub fn span(&self, first: &str, last: &str) -> Result<core::ops::Range<u64>> {
         let start = self
@@ -465,6 +483,7 @@ pub(crate) mod tests {
         assert!(kc.physical_address(0x8_0000_0000, BASE + 0xc000).is_err());
         assert_eq!(kc.span("__TEXT_EXEC", "__LINKEDIT")?, 0x4000..0xc000);
         let image = kc.memory_image(&bytes)?;
+        assert!(!kc.file_is_memory_image(bytes.len()));
         assert_eq!(image.len(), 0xc000);
         assert_eq!(&image[0x4000..0x4010], &[0xaa; 0x10]);
         assert_eq!(image[0x4010], 0);

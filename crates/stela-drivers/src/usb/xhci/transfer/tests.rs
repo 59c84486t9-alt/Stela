@@ -3,6 +3,35 @@ use crate::bus::dma::TestRegion;
 use crate::usb::xhci::model::*;
 
 #[test]
+fn shared_preflight_samples_status_once_and_still_checks_every_endpoint() {
+    let mut dma = TestRegion::new(64 * 1024 * 8);
+    let (mut controller, model) = cancellation_controller(&mut dma);
+    assert!(!controller.event_posted());
+    controller.quiet_drains = 0;
+    let before = model.borrow().status_reads;
+    controller.endpoints_ready_owned(1, &[1, 3, 5]).unwrap();
+    assert_eq!(model.borrow().status_reads - before, 1);
+
+    model
+        .borrow_mut()
+        .event(0, INCOMPATIBLE_DEVICE, TRANSFER_EVENT, 5, 0);
+    assert_eq!(
+        controller.endpoints_ready_owned(1, &[1, 3, 5]),
+        Err(BlockError::Device {
+            status: INCOMPATIBLE_DEVICE,
+        })
+    );
+    assert!(controller.endpoint_poisoned(1, 5));
+    assert!(controller.endpoint_ready_owned(1, 3).is_ok());
+
+    model.borrow_mut().fatal_status = HSE;
+    assert_eq!(
+        controller.endpoints_ready_owned(1, &[1, 3]),
+        Err(BlockError::Device { status: HSE })
+    );
+}
+
+#[test]
 fn strings_use_the_first_listed_language_and_default_to_english() {
     let mut dma = TestRegion::new(32 * 1024 * 8);
     let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);

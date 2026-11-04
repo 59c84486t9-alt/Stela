@@ -493,13 +493,11 @@ impl Io for Native {
             .is_ok_and(|controller| controller.posted_for(self.id))
     }
     fn ready(&mut self) -> Result<(), BlockError> {
-        let mut controller = self.controller.borrow_mut();
-        let mut device = controller.device(self.id)?;
-        device.endpoint_ready(1)?;
-        for endpoint in self.endpoints {
-            device.endpoint_ready(endpoint.dci())?;
-        }
-        Ok(())
+        let [command, status, input, output] = self.endpoints;
+        self.controller
+            .borrow_mut()
+            .device(self.id)?
+            .endpoints_ready(&[1, command.dci(), status.dci(), input.dci(), output.dci()])
     }
     fn streams(&self) -> Option<u16> {
         self.streams

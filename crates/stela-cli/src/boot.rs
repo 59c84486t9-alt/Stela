@@ -9,7 +9,8 @@ use std::{fs::OpenOptions, io::Write, path::PathBuf};
 use stela_formats::payload::Purpose;
 use stela_loader::aux_kc::{Linked, TRUSTED_CODE_FILE};
 use stela_loader::boot_bundle::{
-    self, Input, Inputs, Options, OverlayProperty, RootHash, Source, Target,
+    self, Input, Inputs, Options, OverlayProperty, OwnedRamdisk, RAMDISK_FILE, RootHash, Source,
+    Target,
 };
 use stela_loader::boot_policy::{
     KextGrant, OsEnvironment, SealedVolume, SecurityMode, SecurityPolicy,
@@ -776,29 +777,43 @@ impl Prepare {
             } else {
                 format!("{name} ({})", owner.variant)
             };
-            let (bytes, receipt) = match payload_type {
-                Some(expected) => {
-                    let (bytes, receipt) = stela_loader::im4p::decode(&container, limit)?;
-                    if receipt.payload_type != expected {
-                        bail!(
-                            "{name} is IM4P type {}, expected {expected}",
-                            receipt.payload_type
-                        );
+            let (bytes, container_sha256, payload_type, description, decoded_sha256) =
+                match payload_type {
+                    Some(expected) => {
+                        let (bytes, receipt) = stela_loader::im4p::decode_owned(container, limit)?;
+                        if receipt.payload_type != expected {
+                            bail!(
+                                "{name} is IM4P type {}, expected {expected}",
+                                receipt.payload_type
+                            );
+                        }
+                        (
+                            bytes,
+                            receipt.container_sha256,
+                            receipt.payload_type,
+                            receipt.description,
+                            receipt.decoded_sha256,
+                        )
                     }
-                    (bytes, Some(receipt))
-                }
-                None => (container.clone(), None),
-            };
+                    None => {
+                        let digest = stela_formats::sha256(&container);
+                        (
+                            container,
+                            digest.clone(),
+                            "opaque".into(),
+                            String::new(),
+                            digest,
+                        )
+                    }
+                };
             let source = Source {
                 component: label,
                 member: entry.path.clone(),
-                container_sha256: stela_formats::sha256(&container),
-                payload_type: receipt
-                    .as_ref()
-                    .map_or_else(|| "opaque".into(), |r| r.payload_type.clone()),
-                description: receipt.map(|r| r.description).unwrap_or_default(),
+                container_sha256,
+                payload_type,
+                description,
                 decoded_bytes: bytes.len() as u64,
-                decoded_sha256: stela_formats::sha256(&bytes),
+                decoded_sha256,
             };
             Ok(Decoded {
                 bytes,
@@ -840,6 +855,7 @@ impl Prepare {
                 return Ok(None);
             }
             let bytes = restore::archive::read_member(&ipsw, &member, COMPONENT_LIMIT)?;
+            let digest = stela_formats::sha256(&bytes);
             let source = Source {
                 component: if cryptex1 {
                     "Cryptex1 manifest"
@@ -848,11 +864,11 @@ impl Prepare {
                 }
                 .into(),
                 member,
-                container_sha256: stela_formats::sha256(&bytes),
+                container_sha256: digest.clone(),
                 payload_type: "im4m".into(),
                 description: String::new(),
                 decoded_bytes: bytes.len() as u64,
-                decoded_sha256: stela_formats::sha256(&bytes),
+                decoded_sha256: digest,
             };
             Ok(Some(Decoded {
                 bytes,
@@ -897,13 +913,13 @@ impl Prepare {
                     cryptex_trust_caches.push(component(name, None, COMPONENT_LIMIT).and_then(
                         |raw| {
                             let (bytes, receipt) =
-                                stela_loader::im4p::decode(&raw.bytes, COMPONENT_LIMIT)?;
+                                stela_loader::im4p::decode_owned(raw.bytes, COMPONENT_LIMIT)?;
                             Ok(Decoded {
                                 source: Source {
                                     payload_type: receipt.payload_type,
                                     description: receipt.description,
                                     decoded_bytes: bytes.len() as u64,
-                                    decoded_sha256: stela_formats::sha256(&bytes),
+                                    decoded_sha256: receipt.decoded_sha256,
                                     ..raw.source
                                 },
                                 bytes,
@@ -967,10 +983,7 @@ impl Prepare {
         let extensions = kexts(&bundles);
         let (auxiliary, kexts) = Self::auxiliary_collection(&kernel.bytes, &extensions)?.unzip();
         let kext_code = Self::kext_code(&extensions)?;
-        // Set below when the images come from the restore ramdisk.
-        let sourced: Vec<(String, Decoded)>;
-        let ramdisk_component: Decoded;
-        let mut inputs = Inputs {
+        let inputs = Inputs {
             target: Target {
                 product_type: model.clone(),
                 device_class: identity.device_class.clone(),
@@ -980,7 +993,7 @@ impl Prepare {
                 chip_id: parse_id(identity.ap_chip_id.as_deref())?,
                 board_id: parse_id(identity.ap_board_id.as_deref())?,
             },
-            kernel_collection: input(&kernel),
+            kernel_collection: input(&kernel).into(),
             auxiliary_collection: auxiliary.as_ref().map(input),
             sptm: input(&sptm),
             txm: input(&txm),
@@ -994,7 +1007,7 @@ impl Prepare {
                 .chain(&kext_code)
                 .map(input)
                 .collect(),
-            ramdisk: ramdisk.as_ref().map(input),
+            ramdisk: None,
             root_hash: root_hash.as_ref().map(|(volume, decoded)| RootHash {
                 volume: *volume,
                 im4p: decoded.as_ref().map(input),
@@ -1009,7 +1022,13 @@ impl Prepare {
         };
         let mut options = self.options(inputs.dram_base()?)?;
         options.security.kexts = kexts;
-        let mut bundle = boot_bundle::prepare(&inputs, &options)?;
+        let ramdisk_source = ramdisk.as_ref().map(|ramdisk| ramdisk.source.clone());
+        let mut bundle = match ramdisk {
+            Some(Decoded { bytes, source, .. }) => {
+                boot_bundle::prepare_owned(&inputs, OwnedRamdisk { bytes, source }, &options)?
+            }
+            None => boot_bundle::prepare(&inputs, &options)?,
+        };
         let mut unresolved = vec![];
         // The board the bundle's DeviceTree describes names its images, each
         // die the one its own node or its flash's names; the same IPSW's
@@ -1021,29 +1040,34 @@ impl Prepare {
                     .filter(|name| !board_firmware.iter().any(|(given, _)| given == name))
                     .collect();
                 if !names.is_empty() {
-                    let ramdisk = match &ramdisk {
-                        Some(ramdisk)
-                            if ramdisk.source.component == components::RESTORE_RAMDISK =>
-                        {
-                            ramdisk
+                    let separate_ramdisk;
+                    let (bytes, source) = match &ramdisk_source {
+                        Some(source) if source.component == components::RESTORE_RAMDISK => {
+                            let (_, bytes) = bundle
+                                .files
+                                .iter()
+                                .find(|(name, _)| name == RAMDISK_FILE)
+                                .context("the bundle has no restore ramdisk")?;
+                            (bytes.as_slice(), source)
                         }
                         _ => {
-                            ramdisk_component = component(
+                            separate_ramdisk = component(
                                 components::RESTORE_RAMDISK,
                                 Some("rdsk"),
                                 RAMDISK_LIMIT,
                             )?;
-                            &ramdisk_component
+                            (separate_ramdisk.bytes.as_slice(), &separate_ramdisk.source)
                         }
                     };
-                    sourced =
-                        board_firmware::from_ramdisk(ramdisk, board_firmware::DIRECTORY, &names)?;
-                    inputs.board_firmware.extend(
-                        sourced
-                            .iter()
-                            .map(|(name, decoded)| (name.clone(), input(decoded))),
-                    );
-                    bundle = boot_bundle::prepare(&inputs, &options)?;
+                    let sourced = board_firmware::from_ramdisk(
+                        bytes,
+                        source,
+                        board_firmware::DIRECTORY,
+                        &names,
+                    )?;
+                    for (name, Decoded { bytes, source, .. }) in sourced {
+                        bundle.append_board_firmware(name, bytes, source)?;
+                    }
                 }
             }
             Err(error) if board_firmware.is_empty() => unresolved.push(format!(

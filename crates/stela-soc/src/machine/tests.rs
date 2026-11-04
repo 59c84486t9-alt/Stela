@@ -3774,12 +3774,26 @@ fn pmgr_shared_usb_leaf_pauses_both_clients_and_cancels_sessions_only_on_reset_o
 
 #[test]
 fn a_late_usb_poll_moves_the_packets_of_the_microframes_it_missed() {
-    assert_eq!(usb_packets(USB_POLL_TICKS, USB_POLL_TICKS), 13);
-    assert_eq!(usb_packets(2 * USB_POLL_TICKS - 1, USB_POLL_TICKS), 13);
-    assert_eq!(usb_packets(3 * USB_POLL_TICKS + 7, USB_POLL_TICKS), 3 * 13);
+    let frame = USB_POLL_TICKS;
+    assert_eq!(usb_poll(frame, frame), (13, 2 * frame));
+    assert_eq!(usb_poll(2 * frame - 1, frame), (13, 2 * frame));
+    assert_eq!(usb_poll(3 * frame + 7, frame), (3 * 13, 4 * frame));
     // A frame's at most, as for a session's first poll.
-    assert_eq!(usb_packets(100 * USB_POLL_TICKS, USB_POLL_TICKS), 8 * 13);
-    assert_eq!(usb_packets(100 * USB_POLL_TICKS, 0), 8 * 13);
+    assert_eq!(usb_poll(100 * frame + 7, frame), (8 * 13, 101 * frame));
+    assert_eq!(usb_poll(100 * frame, 0), (8 * 13, 101 * frame));
+
+    // A polling interval just under two microframes must still service
+    // each elapsed microframe. Resetting the phase loses almost half.
+    let mut due = frame;
+    let mut packets = 0;
+    for poll in 1..=100 {
+        let now = poll * (2 * frame - 1);
+        let (budget, next) = usb_poll(now, due);
+        packets += budget;
+        due = next;
+    }
+    assert_eq!(packets, 199 * 13);
+    assert_eq!(due, 200 * frame);
 }
 
 #[test]

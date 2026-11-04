@@ -51,10 +51,11 @@ const FORMS: [u32; 30] = [
 ];
 
 fn compile(word: u32, target: TargetCpu) -> Mapping {
-    let source: Vec<_> = [PREFIX, word, SUFFIX]
-        .into_iter()
-        .flat_map(u32::to_le_bytes)
-        .collect();
+    compile_words(&[PREFIX, word, SUFFIX], target)
+}
+
+fn compile_words(words: &[u32], target: TargetCpu) -> Mapping {
+    let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
     let block = CompilationPlan::new(
         &source,
         GuestAddress(PC),
@@ -167,5 +168,49 @@ fn half_conversions_match_completion_on_each_host_recipe() {
         }
         std::println!("{} inline={inline}", target.id());
         assert_eq!(inline == 0, target == TargetCpu::Baseline, "{target:?}");
+    }
+}
+
+#[test]
+fn half_widening_keeps_all_finite_lanes_native_on_sse2() {
+    for (word, part) in [(0x0e21_7820, 0), (0x4e21_7820, 1)] {
+        let operation = FloatingPointOperation::decode(word).unwrap().unwrap();
+        let mapping = compile_words(&[PREFIX, word], TargetCpu::Baseline);
+        for first in (0..=u16::MAX).step_by(4) {
+            let mut state = GuestState {
+                fpcr: FPCR_AH | FPCR_AHP | FPCR_FZ | FPCR_FIZ | FPCR_FZ16 | FPCR_DN,
+                fpsr: FPSR_QC,
+                ..GuestState::default()
+            };
+            // The unused half contains signaling NaNs, including for FCVTL2.
+            state.v[SOURCE] = [0x7c01_7c01_7c01_7c01; 2];
+            state.v[SOURCE][part] = (0..4).fold(0, |bits, lane| {
+                bits | u64::from(first + lane) << (16 * lane)
+            });
+            let finite = first & 0x7c00 != 0x7c00;
+            assert_eq!(check(&mapping, &operation, state), finite, "{first:#06x}");
+        }
+
+        for special in [0x7c00, 0xfc00, 0x7c01, 0xfe00] {
+            let mut state = GuestState::default();
+            state.v[SOURCE][part] = special;
+            assert!(!check(&mapping, &operation, state));
+        }
+
+        let mut state = GuestState {
+            fpcr: FPCR_EXCEPTION_ENABLE_MASK,
+            ..GuestState::default()
+        };
+        state.v[0] = [u64::MAX; 2];
+        assert!(complete(&mut state.clone(), &operation).is_err());
+        let mut expected = state.clone();
+        expected.x[8] += 1;
+        let before_mxcsr = mxcsr();
+        // SAFETY: compiled for the host baseline and only accesses its frame.
+        let exit = unsafe { mapping.call_block(&mut state) }.unwrap();
+        assert_eq!(exit.kind, ExitKind::FloatingPoint as u64);
+        assert_eq!(exit.next_pc, PC + 4);
+        assert_eq!(state, expected);
+        assert_eq!(mxcsr(), before_mxcsr);
     }
 }

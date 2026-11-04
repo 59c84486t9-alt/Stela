@@ -25,7 +25,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let mut last = None;
         for (cursor, index) in self.index.sweep(self.stale_cursor).take(STALE_CHECKS) {
             let block = &self.blocks[index];
-            bytes.resize(block.source_bytes as usize, 0);
+            bytes.resize(block.source_bytes(), 0);
             report.blocks += 1;
             if self.host.read_ram(block.physical, &mut bytes)
                 && source_hash(&bytes) != block.source_hash
@@ -388,10 +388,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if range.is_empty() {
             return;
         }
-        let evicted: Vec<usize> = (0..self.blocks.len())
-            .filter(|&slot| range.contains(&self.blocks[slot].code.0))
-            .collect();
-        for &slot in &evicted {
+        let evicted = self.code_slots.take(&range).unwrap_or_else(|| {
+            (0..self.blocks.len())
+                .filter(|&slot| {
+                    let address = self.blocks[slot].code.0;
+                    address != 0 && range.contains(&address)
+                })
+                .map(|slot| slot as u32)
+                .collect()
+        });
+        for slot in evicted.iter().map(|&slot| slot as usize) {
             let block = &self.blocks[slot];
             let found = self
                 .index
@@ -400,7 +406,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.index.forget_page(block.physical & !(FETCH_PAGE - 1));
             }
         }
-        for &slot in &evicted {
+        for slot in evicted.iter().map(|&slot| slot as usize) {
             let block = &mut self.blocks[slot];
             if block.taken != 0 {
                 *self.exit_words.entry(block.terminal).or_default() += u64::from(block.taken);
@@ -426,9 +432,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.exit_words = self.exit_words();
         self.host.discard_code();
         self.lookup_dispatchers = Default::default();
-        self.blocks.clear();
-        self.free_blocks.clear();
-        self.fault_recovery.clear();
+        // A running guest normally fills the chunks again after a discard.
+        // Return their storage when freeing memory is the reason to discard.
+        if matches!(cause, Discard::Memory | Discard::Finished) {
+            self.blocks = table::Table::new();
+            self.free_blocks = Vec::new();
+            self.fault_recovery = recovery::Owners::new();
+        } else {
+            self.blocks.clear();
+            self.free_blocks.clear();
+            self.fault_recovery.clear();
+        }
+        self.code_slots = Default::default();
         self.index.clear();
         self.pages.clear();
         self.scalable_leaves.clear();

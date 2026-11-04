@@ -4,8 +4,9 @@
 //! this image (taken before any Rust state exists), chooses the host
 //! placement, places a relocated copy in the Stela window, allocates the
 //! engine's memory, builds its page tables (five-level under LA57, else
-//! four-level), leaves boot services, loads them, through the LA57
-//! trampoline when five-level, and calls the engine phase in the window. See
+//! four-level), releases the pristine copy, and leaves boot services. It
+//! loads the tables through the LA57 trampoline when five-level and calls
+//! the engine phase in the window. See
 //! `docs/design/system.md#host-placement`.
 use crate::Result;
 use crate::{
@@ -20,8 +21,8 @@ use crate::{
 use alloc::{format, string::String, vec::Vec};
 use core::{
     arch::asm,
-    cell::UnsafeCell,
     ops::{Range, RangeInclusive},
+    ptr::NonNull,
 };
 use stela_boot_core::options::{DEFAULT_WIFI_KEY, System};
 use stela_contracts::refuse;
@@ -62,36 +63,39 @@ const RELOCATION_DIRECTORY: usize = 5;
 const IMAGE_REL_BASED_ABSOLUTE: u16 = 0;
 const IMAGE_REL_BASED_DIR64: u16 = 10;
 
-#[derive(Clone, Copy)]
-struct Snapshot {
-    copy: usize,
+/// Private firmware pages owned only while boot services are active.
+pub(crate) struct Snapshot {
+    copy: NonNull<u8>,
     start: usize,
     bytes: usize,
 }
 
-struct Pristine(UnsafeCell<Option<Snapshot>>);
-// SAFETY: written once by the boot processor before anything else runs.
-unsafe impl Sync for Pristine {}
-static PRISTINE: Pristine = Pristine(UnsafeCell::new(None));
+impl Drop for Snapshot {
+    fn drop(&mut self) {
+        let physical = self.copy.as_ptr() as usize;
+        // SAFETY: this owner holds exactly the pages allocated in take_snapshot.
+        // The entry and system loader both drop it before exiting boot services.
+        let result = unsafe { boot::free_pages(self.copy, self.bytes / PAGE as usize) };
+        output::arguments(format_args!(
+            "BOOT IMAGE snapshot physical={physical:#x} bytes={:#x} release={result:?}\n",
+            self.bytes,
+        ));
+    }
+}
 
 /// Copy this image as the firmware loaded it, before Rust state changes it.
 /// Only the firmware entry glue has run; its statics are not used later.
-pub fn take_snapshot() {
-    let Ok(image) = boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle()) else {
-        return;
-    };
+pub(crate) fn take_snapshot() -> Option<Snapshot> {
+    let image = boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle()).ok()?;
     let (base, bytes) = image.info();
-    let Ok(extent) = firmware::loaded_extent(base as usize, bytes) else {
-        return;
-    };
+    let extent = firmware::loaded_extent(base as usize, bytes).ok()?;
     let bytes = extent.mapped_bytes;
-    let Ok(copy) = boot::allocate_pages(
+    let copy = boot::allocate_pages(
         AllocateType::AnyPages,
         MemoryType::LOADER_DATA,
         bytes / PAGE as usize,
-    ) else {
-        return;
-    };
+    )
+    .ok()?;
     // SAFETY: exact checked firmware source extent and distinct fresh owned
     // pages. Zero only the destination tail, without reading source padding.
     unsafe {
@@ -99,12 +103,12 @@ pub fn take_snapshot() {
         copy.as_ptr()
             .add(extent.bytes)
             .write_bytes(0, bytes - extent.bytes);
-        *PRISTINE.0.get() = Some(Snapshot {
-            copy: copy.as_ptr() as usize,
-            start: base as usize,
-            bytes,
-        });
     }
+    Some(Snapshot {
+        copy,
+        start: base as usize,
+        bytes,
+    })
 }
 
 fn low_page(kind: MemoryType) -> Result<u64> {
@@ -602,11 +606,12 @@ pub fn held_at_start(options: &[u8]) -> Option<&'static str> {
 /// Run the engine; never returns.
 /// `log` is the partition holding the USB's boot log, when the loader keeps
 /// one there (`log_file`).
-pub fn boot(
+pub(crate) fn boot(
     mut options: Vec<u8>,
     mut volume: FileSystem,
     log: Option<Guid>,
     host_firmware: crate::host_firmware::Resources,
+    snapshot: Option<Snapshot>,
 ) -> ! {
     // NVRAM chooses macOS or recoveryOS before any input is read. A machine
     // NVRAM holds in recovery mode waits at the startup choices, as LLB
@@ -635,15 +640,13 @@ pub fn boot(
     // `inputs` closes the volume: protocols must be closed before boot
     // services end.
     let inputs = inputs(&options, volume);
-    let result = inputs.and_then(|(source, files, storage, wifi_key)| {
+    let result = inputs.and_then(|inputs| {
         load(
             options,
-            source,
-            files,
-            storage,
-            wifi_key,
+            inputs,
             log,
             host_firmware,
+            snapshot.ok_or(refuse!("no pristine image copy"))?,
         )
     });
     match result {
@@ -654,15 +657,14 @@ pub fn boot(
 
 fn load(
     options: Vec<u8>,
-    source: Vec<u8>,
-    bundle: BundleFiles,
-    storage: Option<stela_drivers::Handoff>,
-    wifi_key: Vec<u8>,
+    inputs: Inputs,
     log: Option<Guid>,
     host_firmware: crate::host_firmware::Resources,
+    snapshot: Snapshot,
 ) -> Result<core::convert::Infallible> {
+    let (source, bundle, storage, wifi_key) = inputs;
     crate::status::begin("Setting up Stela's memory");
-    let image = memory::prepare_image()?;
+    let image = memory::prepare_image(&snapshot)?;
     let text = core::str::from_utf8(&options).map_err(|_| refuse!("stela.cfg is not UTF-8"))?;
     let system = System::parse(text).map_err(stela_boot_core::options::Error::message)?;
     let (native_processors, cores) =
@@ -749,6 +751,9 @@ fn load(
         boot_heap.live >> 20,
     ));
     release_loader_heap();
+    // Reservations have already been sized and the relocated image owns its
+    // bytes. The final firmware map can now offer the pristine pages to macOS.
+    drop(snapshot);
     // SAFETY: the fresh immutable MP observation is held LOADER_DATA. Identity
     // mappings and the calibrated local APIC remain valid across EBS.
     let capture = unsafe {

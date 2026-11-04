@@ -9,7 +9,9 @@ pub(in super::super) struct Control {
     slot: u8,
     length: usize,
     is_in: bool,
-    addresses: Vec<u64>,
+    setup_address: u64,
+    data_address: Option<u64>,
+    status_address: u64,
     deadline: Deadline,
     received: usize,
     short_seen: bool,
@@ -101,20 +103,24 @@ impl Controller {
             (_, false) => 2,
             (_, true) => 3,
         };
-        let mut trbs = vec![(
+        let setup = (
             u64::from_le_bytes(request),
             8,
             SETUP << 10 | IDT | transfer_type << 16,
-        )];
-        let direction = if is_in { DIRECTION_IN } else { 0 };
-        if length > 0 {
-            trbs.push((buffer, length as u32, DATA << 10 | ISP | direction));
-        }
+        );
         let status_direction = if length > 0 && is_in { 0 } else { DIRECTION_IN };
-        trbs.push((0, 0, STATUS << 10 | IOC | status_direction));
-        let addresses = {
+        let status = (0, 0, STATUS << 10 | IOC | status_direction);
+        let (setup_address, data_address, status_address) = {
             let endpoint = self.slot(slot)?.endpoints[1].as_mut().unwrap();
-            let addresses = endpoint.ring.push(&trbs)?;
+            let addresses = if length > 0 {
+                let direction = if is_in { DIRECTION_IN } else { 0 };
+                let data = (buffer, length as u32, DATA << 10 | ISP | direction);
+                let [setup, data, status] = endpoint.ring.push(&[setup, data, status])?;
+                (setup, Some(data), status)
+            } else {
+                let [setup, status] = endpoint.ring.push(&[setup, status])?;
+                (setup, None, status)
+            };
             endpoint.in_flight = 1;
             addresses
         };
@@ -123,7 +129,9 @@ impl Controller {
             slot,
             length,
             is_in,
-            addresses,
+            setup_address,
+            data_address,
+            status_address,
             deadline,
             received: length,
             short_seen: false,
@@ -143,7 +151,7 @@ impl Controller {
             return Some(result.and(Err(error.clone())));
         }
         let slot = control.slot;
-        let status_address = *control.addresses.last().unwrap();
+        let status_address = control.status_address;
         loop {
             let event = match self.poll_event(control.deadline, |e| {
                 e.kind() == TRANSFER_EVENT && e.slot() == slot && e.endpoint() == 1
@@ -158,13 +166,14 @@ impl Controller {
             // An event must name this TD's Setup/Data/Status TRB.
             // Event Data is never submitted by this control path. Only Data
             // short packets may precede the final zero-length Status ACK.
-            let data_address = (control.length > 0).then(|| control.addresses[1]);
             let valid = event.control & EVENT_DATA == 0
-                && control.addresses.contains(&event.parameter)
+                && (event.parameter == control.setup_address
+                    || event.parameter == status_address
+                    || Some(event.parameter) == control.data_address)
                 && match event.code() {
                     SUCCESS => event.parameter == status_address && event.residual() == 0,
                     SHORT_PACKET => {
-                        data_address == Some(event.parameter)
+                        control.data_address == Some(event.parameter)
                             && event.residual() <= control.length
                             && !control.short_seen
                     }

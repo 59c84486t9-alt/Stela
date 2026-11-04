@@ -1,14 +1,10 @@
 //! Ahead-of-time preparation and static code discovery.
 use super::BlockRuntime;
-#[cfg(feature = "std")]
-use super::MAX_NATIVE_BYTES;
 #[cfg(not(feature = "std"))]
 use super::aot::ArtifactPreparation;
 use super::validate::validate_source_map;
 use crate::Prepared;
 use crate::Result;
-#[cfg(feature = "std")]
-use crate::prepare_runtime_block_for_target;
 use alloc::collections::{BTreeSet, VecDeque};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -16,10 +12,12 @@ use serde::Serialize;
 use stela_compiler::{
     CompileErrorKind, GuestAddress,
     block::{
-        BlockAnalysis, BlockProfile, DynamicEdge, MAX_BLOCK_INSTRUCTIONS, analyze_with_profile,
+        BlockAnalysis, BlockProfile, CompilationPlan, DynamicEdge, Features,
+        MAX_BLOCK_INSTRUCTIONS, analyze_and_plan, analyze_with_profile,
     },
 };
 use stela_contracts::{refuse, require};
+#[cfg(not(feature = "std"))]
 use stela_formats::sha256;
 
 /// Persistent preparation artifact shared by ahead-of-time discovery and JIT.
@@ -28,9 +26,6 @@ use stela_formats::sha256;
 pub struct PreparedDiscoveryBlock {
     #[serde(skip)]
     pub(super) artifact_profile: BlockProfile,
-    #[cfg(not(feature = "std"))]
-    #[serde(skip)]
-    pub(super) native: Vec<u8>,
     pub entry: GuestAddress,
     pub region_base: GuestAddress,
     pub generation: u64,
@@ -82,56 +77,20 @@ pub struct DiscoveryReport {
 impl BlockRuntime {
     /// Prepare one known entry into the persistent AOT/JIT cache, without RX
     /// loading or execution. Source bytes/edges share the compiler's parser.
-    #[cfg(feature = "std")]
     pub fn prepare(&mut self, pc: GuestAddress) -> Result<PreparedDiscoveryBlock> {
-        require!(pc.0.is_multiple_of(4), "unaligned preparation entry");
-        let cache_root = self.preparation.cache_root(pc)?;
-        let (base, region) = self
-            .region(pc)
-            .ok_or_else(|| refuse!("unmapped preparation entry", pc = pc.0))?;
-        require!(region.end - pc.0 >= 4, "truncated preparation instruction");
-        let offset = (pc.0 - base) as usize;
-        let available = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS) * 4;
-        let generation = region.generation;
-        let window = &region.source[offset..offset + available];
-        let analysis = analyze_with_profile(window, pc, self.profile)?;
-        let (prepared, artifact_profile) =
-            prepare_runtime_block_for_target(window, pc, cache_root, self.profile, self.target)?;
-        require!(
-            prepared.source_bytes == analysis.source_bytes,
-            "prepared block analysis extent mismatch"
-        );
-        let manifest = &prepared.prepared.manifest;
-        require!(
-            manifest.identity.guest_base == pc.0
-                && manifest.identity.abi == artifact_profile.abi()
-                && manifest.identity.target_cpu == self.target.id()
-                && manifest.identity.schema_version == 1,
-            "unsupported block translation identity"
-        );
-        require!(
-            manifest.identity.compiler_source_sha256 == crate::compiler_source_sha256()
-                && manifest.identity.source_sha256 == sha256(&window[..prepared.source_bytes]),
-            "block compiler/source identity mismatch"
-        );
-        validate_source_map(&prepared.prepared.manifest, pc, prepared.source_bytes)?;
-        require!(
-            manifest.native_bytes > 0 && manifest.native_bytes <= MAX_NATIVE_BYTES,
-            "invalid block native size"
-        );
-        Ok(PreparedDiscoveryBlock {
-            artifact_profile,
-            entry: pc,
-            region_base: GuestAddress(base),
-            generation,
-            analysis,
-            prepared: prepared.prepared,
-        })
+        self.prepare_snapshot(pc).map(|(prepared, _)| prepared)
     }
 
-    #[cfg(not(feature = "std"))]
-    pub fn prepare(&mut self, pc: GuestAddress) -> Result<PreparedDiscoveryBlock> {
+    /// Keep the same native bytes whose checksum the preparation bound to the
+    /// manifest, so dispatch can map them without reopening the cache file.
+    pub(super) fn prepare_snapshot(
+        &mut self,
+        pc: GuestAddress,
+    ) -> Result<(PreparedDiscoveryBlock, Vec<u8>)> {
         require!(pc.0.is_multiple_of(4), "unaligned preparation entry");
+        #[cfg(feature = "std")]
+        let cache_root = self.preparation.cache_root(pc)?;
+        #[cfg(not(feature = "std"))]
         require!(
             matches!(self.preparation, ArtifactPreparation::InMemory),
             "AOT block unavailable; runtime compilation is unsupported",
@@ -145,40 +104,56 @@ impl BlockRuntime {
         let available = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS) * 4;
         let generation = region.generation;
         let window = &region.source[offset..offset + available];
-        let analysis = analyze_with_profile(window, pc, self.profile)?;
-        let plan = stela_compiler::block::CompilationPlan::new(
-            window,
-            pc,
-            &stela_compiler::Options::new(self.profile, self.target),
-        )?
-        .with_resident_loops();
+        let options = stela_compiler::Options::new(self.profile, self.target);
+        // A leaf plan uses a different parser and consumes the entire window.
+        let (analysis, plan) = if self.profile.has(Features::LEAF) {
+            (
+                analyze_with_profile(window, pc, self.profile)?,
+                CompilationPlan::new(window, pc, &options),
+            )
+        } else {
+            analyze_and_plan(window, pc, &options)?
+        };
+        let plan = plan?.with_resident_loops();
         let artifact_profile = plan.profile();
         let source_bytes = plan.source_bytes();
         require!(
             source_bytes == analysis.source_bytes,
             "prepared block analysis extent mismatch"
         );
-        let identity = crate::block_plan_identity(window, pc, self.target, &plan)?;
-        let key = sha256(&serde_json::to_vec(&identity)?);
-        let requirements = plan.memory_requirements();
-        let (manifest, native) =
-            crate::artifact::prepare::generate(identity, requirements, || {
-                plan.compile().map(|block| block.native)
-            })?;
-        validate_source_map(&manifest, pc, source_bytes)?;
-        Ok(PreparedDiscoveryBlock {
-            artifact_profile,
-            native,
-            entry: pc,
-            region_base: GuestAddress(base),
-            generation,
-            analysis,
-            prepared: Prepared {
-                key,
-                cache_hit: false,
-                manifest,
+        #[cfg(feature = "std")]
+        let (prepared, native) =
+            crate::prepare_block_plan(window, pc, cache_root, self.target, plan)?;
+        #[cfg(not(feature = "std"))]
+        let (prepared, native) = {
+            let identity = crate::block_plan_identity(window, pc, self.target, &plan)?;
+            let key = sha256(&serde_json::to_vec(&identity)?);
+            let requirements = plan.memory_requirements();
+            let (manifest, native) =
+                crate::artifact::prepare::generate(identity, requirements, || {
+                    plan.compile().map(|block| block.native)
+                })?;
+            (
+                Prepared {
+                    key,
+                    cache_hit: false,
+                    manifest,
+                },
+                native,
+            )
+        };
+        validate_source_map(&prepared.manifest, pc, source_bytes)?;
+        Ok((
+            PreparedDiscoveryBlock {
+                artifact_profile,
+                entry: pc,
+                region_base: GuestAddress(base),
+                generation,
+                analysis,
+                prepared,
             },
-        })
+            native,
+        ))
     }
 
     /// Follow known static successors only. Call continuations are candidates,
@@ -286,5 +261,42 @@ impl BlockRuntime {
             native_executed: false,
             complete_code_discovered: false,
         })
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_preparation_returns_the_validated_native_snapshot() -> anyhow::Result<()> {
+        let cache = tempfile::tempdir()?;
+        let mut runtime = BlockRuntime::new(1, cache.path().to_owned());
+        let entry = GuestAddress(0x1000);
+        let source = [0x9100_0400u32, 0xd65f_03c0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        runtime.register_code(entry, source)?;
+        let (fresh, original) = runtime.prepare_snapshot(entry)?;
+        assert!(!fresh.prepared.cache_hit);
+        let (hit, checked) = runtime.prepare_snapshot(entry)?;
+        assert!(hit.prepared.cache_hit);
+        assert_eq!(hit.prepared.key, fresh.prepared.key);
+        assert_eq!(checked, original);
+        assert_eq!(
+            hit.prepared.manifest.native_sha256,
+            stela_formats::sha256(&checked)
+        );
+
+        let mut corrupted = original;
+        corrupted[0] ^= 1;
+        std::fs::write(hit.prepared.directory.join("native.bin"), &corrupted)?;
+        assert!(matches!(
+            runtime.prepare_snapshot(entry),
+            Err(crate::Error::InvalidCacheEntry { .. })
+        ));
+        assert_ne!(checked, corrupted);
+        Ok(())
     }
 }

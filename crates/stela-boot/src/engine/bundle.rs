@@ -486,7 +486,7 @@ pub(super) fn entropy(buffer: &mut [u8]) -> Result<()> {
 
 /// The bundle's `bundle.json`, from the files the loader read or a bundle
 /// built in the heap.
-fn manifest(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<Manifest> {
+pub(super) fn manifest(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<Manifest> {
     let json = match built {
         Some(built) => built
             .iter()
@@ -499,18 +499,6 @@ fn manifest(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<Manif
     }
     .ok_or(refuse!("bundle.json was not read"))?;
     Manifest::parse(json).map_err(|error| refuse!("bundle manifest: {error}", %error))
-}
-
-/// The guest DRAM base the bundle was prepared for (`bundle.json`).
-pub fn dram_base(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<u64> {
-    Ok(manifest(files, built)?.options.dram_base)
-}
-
-/// Whether the bundle's system was personalized for a development board.
-pub fn development_board(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<bool> {
-    Ok(manifest(files, built)?
-        .target
-        .is_some_and(|target| target.device_class.ends_with("dev")))
 }
 
 /// The guest's DRAM: `backed` bytes of host RAM from `base`, within the

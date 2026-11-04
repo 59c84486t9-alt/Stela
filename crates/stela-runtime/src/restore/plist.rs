@@ -708,18 +708,68 @@ impl<'a> Binary<'a> {
         }
     }
 }
+fn binary_size(out: &mut Vec<u8>, tag: u8, n: usize) {
+    if n < 15 {
+        out.push(tag | n as u8);
+    } else {
+        out.extend_from_slice(&[tag | 15, 0x13]);
+        out.extend_from_slice(&(n as u64).to_be_bytes());
+    }
+}
+
+fn binary_trailer(out: &mut Vec<u8>, objects: u64, root: u64, table: u64) {
+    out.extend_from_slice(&[0, 0, 0, 0, 0, 0, 8, 8]);
+    out.extend_from_slice(&objects.to_be_bytes());
+    out.extend_from_slice(&root.to_be_bytes());
+    out.extend_from_slice(&table.to_be_bytes());
+}
+
+/// Append the same three-object table as `encode_binary` for FileData.
+/// The streaming sender can write the payload directly to its frame buffer.
+pub(super) fn append_file_data(out: &mut Vec<u8>, data: &[u8], limits: Limits) -> Result<u32> {
+    const KEY: &[u8] = b"FileData";
+    let mut budget = Budget::new(limits);
+    budget.node(0)?;
+    budget.node(1)?;
+    budget.node(1)?;
+    budget.bytes(KEY.len())?;
+    budget.bytes(data.len())?;
+
+    // Header, key, dictionary with two references, offsets, and trailer.
+    const FIXED_BYTES: usize = 8 + (1 + KEY.len()) + (1 + 2 * 8) + 3 * 8 + 32;
+    let marker_bytes = if data.len() < 15 { 1 } else { 10 };
+    let length = data
+        .len()
+        .checked_add(FIXED_BYTES + marker_bytes)
+        .filter(|length| *length <= limits.bytes)
+        .ok_or(Error::Limit("bplist encoded bytes"))?;
+    let wire_length = u32::try_from(length).map_err(|_| Error::Limit("plist frame u32 length"))?;
+    out.reserve(length);
+    let start = out.len();
+    out.extend_from_slice(b"bplist00");
+    let key = (out.len() - start) as u64;
+    binary_size(out, 0x50, KEY.len());
+    out.extend_from_slice(KEY);
+    let value = (out.len() - start) as u64;
+    binary_size(out, 0x40, data.len());
+    out.extend_from_slice(data);
+    let root = (out.len() - start) as u64;
+    binary_size(out, 0xd0, 1);
+    out.extend_from_slice(&0u64.to_be_bytes());
+    out.extend_from_slice(&1u64.to_be_bytes());
+    let table = (out.len() - start) as u64;
+    for offset in [key, value, root] {
+        out.extend_from_slice(&offset.to_be_bytes());
+    }
+    binary_trailer(out, 3, 2, table);
+    debug_assert_eq!(out.len() - start, length);
+    Ok(wire_length)
+}
+
 /// Canonical, unshared object table; 8-byte references avoid narrowing casts.
 pub fn encode_binary(v: &Value, limits: Limits) -> Result<Vec<u8>> {
     validate(v, &mut Budget::new(limits), 0)?;
     let mut objects: Vec<Vec<u8>> = Vec::new();
-    fn size(out: &mut Vec<u8>, tag: u8, n: usize) {
-        if n < 15 {
-            out.push(tag | n as u8);
-        } else {
-            out.extend_from_slice(&[tag | 15, 0x13]);
-            out.extend_from_slice(&(n as u64).to_be_bytes());
-        }
-    }
     fn emit(v: &Value, objects: &mut Vec<Vec<u8>>) -> usize {
         let mut out = Vec::new();
         match v {
@@ -738,28 +788,28 @@ pub fn encode_binary(v: &Value, limits: Limits) -> Result<Vec<u8>> {
                 out.extend_from_slice(&n.to_be_bytes());
             }
             Value::Data(b) => {
-                size(&mut out, 0x40, b.len());
+                binary_size(&mut out, 0x40, b.len());
                 out.extend_from_slice(b);
             }
             Value::String(s) => {
                 if s.is_ascii() {
-                    size(&mut out, 0x50, s.len());
+                    binary_size(&mut out, 0x50, s.len());
                     out.extend_from_slice(s.as_bytes());
                 } else {
-                    size(&mut out, 0x60, s.encode_utf16().count());
+                    binary_size(&mut out, 0x60, s.encode_utf16().count());
                     for c in s.encode_utf16() {
                         out.extend_from_slice(&c.to_be_bytes());
                     }
                 }
             }
             Value::Array(a) => {
-                size(&mut out, 0xa0, a.len());
+                binary_size(&mut out, 0xa0, a.len());
                 for v in a {
                     out.extend_from_slice(&(emit(v, objects) as u64).to_be_bytes());
                 }
             }
             Value::Dict(d) => {
-                size(&mut out, 0xd0, d.len());
+                binary_size(&mut out, 0xd0, d.len());
                 for k in d.keys() {
                     out.extend_from_slice(
                         &(emit(&Value::String(k.clone()), objects) as u64).to_be_bytes(),
@@ -788,10 +838,7 @@ pub fn encode_binary(v: &Value, limits: Limits) -> Result<Vec<u8>> {
     for off in offsets {
         out.extend_from_slice(&off.to_be_bytes());
     }
-    out.extend_from_slice(&[0, 0, 0, 0, 0, 0, 8, 8]);
-    out.extend_from_slice(&(objects.len() as u64).to_be_bytes());
-    out.extend_from_slice(&(root as u64).to_be_bytes());
-    out.extend_from_slice(&table.to_be_bytes());
+    binary_trailer(&mut out, objects.len() as u64, root as u64, table);
     if out.len() > limits.bytes {
         return Err(Error::Limit("bplist encoded bytes"));
     }

@@ -6,7 +6,10 @@ use crate::metal::{
         IndexType, TessellationControlPointIndexType, TessellationFactorStepFunction,
         TessellationPartitionMode, Winding,
     },
-    library::tests::{container, fixture},
+    library::{
+        Header, Library,
+        tests::{container, fixture},
+    },
     nvidia::{CHIPS, fixture::nvk},
     shader::{LinkedFunction, Linking, Patch, PatchDomain},
     vertex::{STRIDE_DYNAMIC, StageInputDescriptor, VertexDescriptor},
@@ -66,6 +69,8 @@ struct Fake {
     reflection: ffi::Reflection,
     /// The function constant values of each reflection.
     reflected: Vec<Values>,
+    reflected_record: usize,
+    expect_projected: bool,
     refuse_reflection: Option<Refused>,
     refuse_compilation: Option<Refused>,
     compiled: Vec<Compiled>,
@@ -83,6 +88,8 @@ std::thread_local! {
         RefCell::new(Fake {
             reflection: ffi::Reflection::ZERO,
             reflected: Vec::new(),
+            reflected_record: 0,
+            expect_projected: false,
             refuse_reflection: None,
             refuse_compilation: None,
             compiled: Vec::new(),
@@ -140,6 +147,7 @@ unsafe extern "C" fn reflect(
         }
         // SAFETY: the compiler passes its reflection record.
         unsafe { *reflection = fake.reflection };
+        fake.reflected_record = reflection.addr();
         true
     })
 }
@@ -207,6 +215,7 @@ unsafe extern "C" fn compile(
     entry: *const c_char,
     target: *const ffi::Target,
     specialization: *const ffi::Specialization,
+    reflection: *const ffi::Reflection,
     error: *mut ffi::AirError,
 ) -> *mut c_void {
     check_input(air, size, entry);
@@ -320,6 +329,40 @@ unsafe extern "C" fn compile(
         if refused(fake.refuse_compilation, error) {
             return ptr::null_mut();
         }
+        if fake.expect_projected {
+            // SAFETY: the compiler keeps the projected reflection alive for the call.
+            let projection = unsafe { &*reflection };
+            let original = &fake.reflection;
+            assert_eq!(projection.stage, original.stage);
+            assert_eq!(projection.patch, original.patch);
+            assert_eq!(projection.threadgroup_bytes, original.threadgroup_bytes);
+            assert_eq!(projection.varying_count, original.varying_count);
+            for (projected, original_varying) in projection
+                .varyings
+                .iter()
+                .zip(&original.varyings)
+                .take(original.varying_count as usize)
+            {
+                assert_eq!(projected.primitive, original_varying.primitive);
+                assert_eq!(projected.components, original_varying.components);
+                assert_eq!(projected.per_primitive, original_varying.per_primitive);
+                assert_eq!(
+                    name(projection, projected.identifier, projected.identifier_bytes),
+                    name(
+                        original,
+                        original_varying.identifier,
+                        original_varying.identifier_bytes
+                    )
+                );
+            }
+        } else {
+            assert_eq!(reflection.addr(), fake.reflected_record);
+            // SAFETY: this is the live reflection record the service filled.
+            let actual = unsafe { &*reflection };
+            assert_eq!(actual.ident_bytes, fake.reflection.ident_bytes);
+            assert_eq!(actual.names, fake.reflection.names);
+        }
+        assert_eq!(fake.reflected.last(), Some(&constants));
         fake.compiled.push(Compiled {
             workgroup_size: specialization.workgroup_size,
             lengths: lengths
@@ -661,6 +704,92 @@ fn reflections_become_interfaces_with_their_provenance() {
             entry: String::from("kernel"),
         }
     );
+}
+
+#[test]
+fn custom_compilation_receives_the_full_reflection_of_a_prepared_function() {
+    reflecting(|r| {
+        r.stage = 3;
+        r.ident = add_name(r, IDENT);
+        r.ident_bytes = IDENT.len() as u32;
+    });
+    let (mut compiler, library) = with_library();
+    let function = compiler
+        .prepare_function(library, "kernel", Vec::new())
+        .unwrap();
+    assert!(function.reflection_service.is_none());
+    assert_eq!(function.entry(), "kernel");
+    let shader = compiler
+        .compile_prepared(&function, &Specialization::default())
+        .unwrap();
+    assert_eq!(shader.provenance.build_id, IDENT);
+    compiler.release(shader.code);
+    FAKE.with_borrow(|fake| assert_eq!(fake.reflected.len(), 2));
+}
+
+#[test]
+fn prepared_compilation_reuses_only_the_same_specialization() {
+    reflecting(|r| {
+        r.stage = 1;
+        r.ident = add_name(r, IDENT);
+        r.ident_bytes = IDENT.len() as u32;
+        add_varying(r, "user(uv)", ffi::primitive::HALF, 2);
+        add_varying(r, "user(index)", ffi::primitive::UINT, 1);
+    });
+    let (mut compiler, library) = with_library();
+    compiler.project_reflection = true;
+    let mut specialization = Specialization {
+        constants: vec![(4, vec![1])],
+        ..Specialization::default()
+    };
+    let prepared = compiler
+        .prepare_function(library, "kernel", specialization.constants.clone())
+        .unwrap();
+    let reflections = FAKE.with_borrow(|fake| fake.reflected.len());
+    FAKE.with_borrow_mut(|fake| fake.expect_projected = true);
+    let shader = compiler
+        .compile_prepared(&prepared, &specialization)
+        .unwrap();
+    assert_eq!(shader.provenance, prepared.provenance);
+    assert_eq!(shader.provenance.build_id, IDENT);
+    assert_eq!(
+        Reflection::Stage(Box::new(shader.interface)),
+        prepared.reflection
+    );
+    compiler.release(shader.code);
+    FAKE.with_borrow(|fake| assert_eq!(fake.reflected.len(), reflections));
+
+    FAKE.with_borrow_mut(|fake| {
+        fake.refuse_compilation = Some((ffi::kind::INSTRUCTION, 17, "unsupported call"))
+    });
+    assert_eq!(
+        compiler.compile_prepared(&prepared, &specialization),
+        Err(Error::Unsupported("AIR instructions"))
+    );
+    let refusal = compiler.take_refusal().unwrap();
+    assert_eq!(
+        (
+            refusal.entry.as_str(),
+            refusal.instruction,
+            refusal.detail.as_str()
+        ),
+        ("kernel", 17, "unsupported call")
+    );
+    FAKE.with_borrow_mut(|fake| {
+        assert_eq!(fake.reflected.len(), reflections);
+        fake.expect_projected = false;
+        fake.refuse_compilation = None;
+    });
+
+    specialization.constants[0].1[0] = 2;
+    let shader = compiler
+        .compile_prepared(&prepared, &specialization)
+        .unwrap();
+    compiler.release(shader.code);
+    FAKE.with_borrow(|fake| {
+        assert_eq!(fake.reflected.len(), reflections + 1);
+        assert_eq!(fake.reflected.last(), Some(&specialization.constants));
+    });
 }
 
 #[test]
@@ -1165,6 +1294,7 @@ fn post_tessellation_vertex_functions_compile_with_their_stage_in() {
         r.attribute_count = 1;
     });
     let (mut compiler, library) = with_library();
+    compiler.project_reflection = true;
     let patch = Patch {
         domain: PatchDomain::Quad,
         control_points: Some(4),
@@ -1196,9 +1326,14 @@ fn post_tessellation_vertex_functions_compile_with_their_stage_in() {
             }],
         }),
     };
-    let stages = compiler
-        .compile_tessellation(library, "kernel", &Specialization::default(), &tessellation)
+    let prepared = compiler
+        .prepare_function(library, "kernel", Vec::new())
         .unwrap();
+    FAKE.with_borrow_mut(|fake| fake.expect_projected = true);
+    let stages = compiler
+        .compile_prepared_tessellation(&prepared, &Specialization::default(), &tessellation)
+        .unwrap();
+    FAKE.with_borrow_mut(|fake| fake.expect_projected = false);
     assert_eq!(
         (stages.vertex, stages.control),
         (ShaderCode(0x10), ShaderCode(0x20))

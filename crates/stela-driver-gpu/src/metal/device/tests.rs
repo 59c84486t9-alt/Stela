@@ -1431,6 +1431,69 @@ fn managed_textures_keep_a_cpu_copy_without_host_image_copy() {
 }
 
 #[test]
+fn texture_transfers_keep_strided_padding_and_coalesce_contiguous_rows() {
+    let mut backend = MockBackend::new();
+    backend.physical.as_mut().unwrap().features.host_image_copy = false;
+    let mut device = device_on(backend);
+    let descriptor = TextureDescriptor {
+        texture_type: TextureType::D3,
+        width: 2,
+        height: 2,
+        depth: 2,
+        options: options(StorageMode::Managed),
+        ..texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ)
+    };
+    let texture = device.new_texture(&descriptor).unwrap();
+    let region = Region {
+        slice: 0,
+        level: 0,
+        origin: [0; 3],
+        size: [2; 3],
+    };
+    let strides = Strides {
+        bytes_per_row: 12,
+        bytes_per_image: 28,
+    };
+    let ranges = [0..8, 12..20, 28..36, 40..48];
+    let pixels = core::array::from_fn::<_, 32, _>(|index| index as u8);
+    let (rows, _) = pixels.as_chunks::<8>();
+    let mut upload = [0xaa; 48];
+    for (range, row) in ranges.iter().zip(rows) {
+        upload[range.clone()].copy_from_slice(row);
+    }
+    let previous = device.backend().writes.len();
+    device
+        .replace_region(texture, &region, &upload, strides)
+        .unwrap();
+    let [(_, _, written)] = &device.backend().writes[previous..] else {
+        panic!("contiguous texture data should reach the backend in one write");
+    };
+    assert_eq!(written, &pixels);
+
+    let mut read = [0xee; 49];
+    device
+        .get_bytes(texture, &region, &mut read, strides)
+        .unwrap();
+    let mut expected = [0xee; 49];
+    for (range, row) in ranges.into_iter().zip(rows) {
+        expected[range].copy_from_slice(row);
+    }
+    assert_eq!(read, expected);
+    assert_eq!(
+        device.replace_region(
+            texture,
+            &region,
+            &upload,
+            Strides {
+                bytes_per_row: u64::MAX,
+                bytes_per_image: u64::MAX,
+            },
+        ),
+        Err(Error::Invalid("bytesPerImage is smaller than an image"))
+    );
+}
+
+#[test]
 fn post_tessellation_functions_compile_with_their_feeding_stages() {
     let mut device = device();
     let patch = device.new_function(LIBRARY, "patch", &[]).unwrap();

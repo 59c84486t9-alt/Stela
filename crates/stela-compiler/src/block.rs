@@ -562,7 +562,12 @@ impl CompilationPlan {
             checked.emit(parsed.terminal.as_ref(), parsed.next_pc, target, recipes)?
         } else if let Some(resident) = resident {
             resident
-                .emit(&parsed.instructions)
+                .emit(
+                    &parsed.instructions,
+                    parsed.terminal.as_ref(),
+                    parsed.next_pc,
+                    target,
+                )
                 .map_err(CompileError::from)?
         } else if profile.has(Features::RESIDENT_LOOPS) {
             crate::x86_64::block::emit_resident_fallback_for_target(

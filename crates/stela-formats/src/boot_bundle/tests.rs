@@ -244,7 +244,10 @@ fn verifies_loads_and_patches_into_guest_ram() -> Result<(), BundleError> {
     let kernel = [0xaa; 100];
     let tree = [0x11; 20];
     let json = manifest_json(&kernel, &tree);
-    let manifest = Manifest::parse(json.as_bytes())?;
+    let mut manifest = Manifest::parse(json.as_bytes())?;
+    // Leave more than two zero chunks after the prepared tree bytes.
+    manifest.regions[1].memory_bytes = 0x9000;
+    manifest.top_of_kernel_data = BASE + 0xd000;
     let files: BTreeMap<&str, &[u8]> =
         BTreeMap::from([("kernel.img", &kernel[..]), ("devicetree.adt", &tree[..])]);
     let verified = manifest.verify(&|name| files.get(name).copied())?;
@@ -264,6 +267,8 @@ fn verifies_loads_and_patches_into_guest_ram() -> Result<(), BundleError> {
     assert_eq!(&ram[dt..dt + 8], &FRAME_BYTES.to_le_bytes());
     assert_eq!(&ram[dt + 8..dt + 12], &[0x42; 4]);
     assert_eq!(&ram[dt + 12..dt + 20], &[0x11; 8]);
+    assert!(ram[dt + 20..0xd000].iter().all(|&b| b == 0));
+    assert_eq!(ram[0xd000], 0xff);
 
     // With a framebuffer and verbose boot-args, v_display is 0.
     let screen = Machine {

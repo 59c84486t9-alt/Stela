@@ -2,6 +2,8 @@
 //! shadow pool. Each executor owns its own ranges; none is shared.
 use crate::Result;
 use crate::topology::MAX_CORES;
+use alloc::vec::Vec;
+use core::ops::Range;
 use stela_contracts::refuse;
 
 const PAGE: u64 = 4096;
@@ -9,6 +11,60 @@ const PAGE: u64 = 4096;
 pub const STACK_BYTES: u64 = 2 * 1024 * 1024;
 pub const STACK_STRIDE: u64 = STACK_BYTES + PAGE;
 pub const INVOCATION_STACK_BYTES: u64 = 128 * 1024;
+pub const CODE_INSTALL_ALIGNMENT: u64 = 16;
+
+/// Initialized code extents of one private arena part, stored by exclusive
+/// end. Installs start at the aligned end of the preceding one, so retaining
+/// that start as well would duplicate information.
+#[derive(Default)]
+pub struct CodeExtents(Vec<u32>);
+
+impl CodeExtents {
+    /// Reserve one ledger entry, initialize its code, then record the extent.
+    /// A refusal leaves both the ledger and its code unchanged.
+    pub fn append(
+        &mut self,
+        part_bytes: u64,
+        code_bytes: usize,
+        initialize: impl FnOnce(u64),
+    ) -> Option<Range<u64>> {
+        let previous = u64::from(self.0.last().copied().unwrap_or(0));
+        let start = previous.next_multiple_of(CODE_INSTALL_ALIGNMENT);
+        let end = start.checked_add(code_bytes as u64)?;
+        if code_bytes == 0 || end > part_bytes {
+            return None;
+        }
+        let finish = u32::try_from(end).ok()?;
+        self.0.try_reserve(1).ok()?;
+        initialize(start);
+        self.0.push(finish);
+        Some(start..end)
+    }
+
+    /// Whether one install owns the whole part-relative interval. Alignment
+    /// gaps and spans across separately initialized installs are refused.
+    pub fn contains(&self, range: Range<u64>) -> bool {
+        if range.is_empty() {
+            return false;
+        }
+        let index = self.0.partition_point(|&end| u64::from(end) <= range.start);
+        self.0.get(index).is_some_and(|&end| {
+            let previous = if index == 0 { 0 } else { self.0[index - 1] };
+            let start = u64::from(previous).next_multiple_of(CODE_INSTALL_ALIGNMENT);
+            start <= range.start && range.end <= u64::from(end)
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Forget a part's code when the ring reuses it, keeping the ledger's
+    /// capacity ready for new code.
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+}
 
 pub fn invocation_stacks(
     cores: usize,
@@ -112,6 +168,50 @@ pub fn partition(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_code_extents_cover_only_individual_initialized_ranges() {
+        let mut ledger = CodeExtents::default();
+        let mut exact = Vec::new();
+        for bytes in [13, 16, 2, 9, 25, 1] {
+            let start = exact.last().map_or(0, |range: &Range<u64>| {
+                range.end.next_multiple_of(CODE_INSTALL_ALIGNMENT)
+            });
+            let range = ledger
+                .append(128, bytes, |at| assert_eq!(at, start))
+                .unwrap();
+            assert_eq!(range, start..start + bytes as u64);
+            exact.push(range);
+        }
+        for start in 0..=128 {
+            for end in start..=129 {
+                let expected = start < end
+                    && exact
+                        .iter()
+                        .any(|extent| extent.start <= start && end <= extent.end);
+                assert_eq!(ledger.contains(start..end), expected, "{start}..{end}");
+            }
+        }
+        ledger.clear();
+        assert!(ledger.is_empty());
+        assert!(!ledger.contains(0..1));
+        assert_eq!(ledger.append(64, 7, |_| {}), Some(0..7));
+    }
+
+    #[test]
+    fn refused_code_installs_leave_the_end_and_backing_untouched() {
+        let mut ledger = CodeExtents::default();
+        assert_eq!(ledger.append(32, 13, |_| {}), Some(0..13));
+        assert_eq!(ledger.append(32, 0, |_| panic!("empty code")), None);
+        assert_eq!(ledger.append(32, 17, |_| panic!("over the part")), None);
+        assert_eq!(
+            ledger.append(u64::MAX, u32::MAX as usize, |_| panic!("over the ledger")),
+            None
+        );
+        assert_eq!(ledger.append(32, 16, |_| {}), Some(16..32));
+        assert!(!ledger.contains(13..16));
+        assert!(ledger.contains(16..32));
+    }
 
     #[test]
     fn task_plan_keeps_exact_payload_padding_guards_and_classes() {
