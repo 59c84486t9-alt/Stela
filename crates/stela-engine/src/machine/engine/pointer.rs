@@ -81,8 +81,9 @@ pub(super) struct PointerService {
     /// The keys, version and layout, while open.
     context: Option<pauth::Context>,
     /// Results, each tagged with the generation of the inputs it was
-    /// computed under; `generation` is that of `inputs`.
-    memo: Box<[pointer::MemoEntry]>,
+    /// computed under; `generation` is that of `inputs`. Allocated before
+    /// the first usable native tag and kept at that address for the owner.
+    memo: Option<Box<[pointer::MemoEntry]>>,
     inputs: Option<PointerInputs>,
     pub(super) generation: u64,
     /// The generations of the most recent distinct inputs, most recent
@@ -117,7 +118,7 @@ impl PointerService {
     pub(super) fn new() -> Self {
         Self {
             context: None,
-            memo: vec![pointer::MemoEntry::default(); pointer::MEMO_ENTRIES].into_boxed_slice(),
+            memo: None,
             inputs: None,
             generation: 0,
             seen: Vec::new(),
@@ -181,7 +182,7 @@ impl PointerService {
                 .as_ref()
                 .is_some_and(|context| context.has_key(key))
         {
-            pointer::tag(self.generation, index, 0)
+            self.native_tag(index)
         } else {
             0
         };
@@ -197,7 +198,7 @@ impl PointerService {
                 .as_ref()
                 .is_some_and(pauth::Context::has_generic_key);
         self.tags[usize::from(pointer::GENERIC_KEY)] = if usable {
-            pointer::tag(self.generation, pointer::GENERIC_KEY, 0)
+            self.native_tag(pointer::GENERIC_KEY)
         } else {
             0
         };
@@ -249,10 +250,28 @@ impl PointerService {
         );
     }
 
+    /// A usable tag permits a thunk to dereference the memo anchor. A
+    /// closed or disabled tag is handled before that dereference.
+    fn native_tag(&mut self, key: u8) -> u64 {
+        if self.memo.is_none() {
+            self.allocate_memo();
+        }
+        pointer::tag(self.generation, key, 0)
+    }
+
+    #[cold]
+    fn allocate_memo(&mut self) {
+        self.memo =
+            Some(vec![pointer::MemoEntry::default(); pointer::MEMO_ENTRIES].into_boxed_slice());
+    }
+
     /// What native code finds through [`Anchor::Pointer`] and
-    /// [`Anchor::Memo`].
+    /// [`Anchor::Memo`] on its next entry.
     pub(super) fn anchors(&self) -> (u64, u64) {
-        (self as *const Self as u64, self.memo.as_ptr() as u64)
+        (
+            self as *const Self as u64,
+            self.memo.as_ref().map_or(0, |memo| memo.as_ptr() as u64),
+        )
     }
 
     /// One signing or authentication with the open context, remembered
@@ -275,7 +294,8 @@ impl PointerService {
         if !self.context.as_ref()?.has_key(key) {
             return None;
         }
-        self.tags[usize::from(memo_key(key))] = pointer::tag(self.generation, memo_key(key), 0);
+        let index = memo_key(key);
+        self.tags[usize::from(index)] = self.native_tag(index);
         if let Some(result) = self.remembered(operation, key, pointer, modifier) {
             return Some(result);
         }
@@ -312,14 +332,15 @@ impl PointerService {
     pub(super) fn generic_code(&mut self, data: u64, modifier: u64) -> Option<u64> {
         let key = pointer::GENERIC_KEY;
         let code = self.context.as_ref()?.generic_code(data, modifier).ok()?;
-        let tag = pointer::tag(self.generation, key, 0);
-        self.tags[usize::from(key)] = tag;
-        self.memo[pointer::slot(data, modifier)] = pointer::MemoEntry {
+        let tag = self.native_tag(key);
+        let memo = self.memo.as_mut().expect("memo for open tag");
+        memo[pointer::slot(data, modifier)] = pointer::MemoEntry {
             pointer: data,
             modifier,
             tag: tag | pointer::SIGNED,
             value: code,
         };
+        self.tags[usize::from(key)] = tag;
         Some(code)
     }
 
@@ -349,7 +370,7 @@ impl PointerService {
         pointer: u64,
         modifier: u64,
     ) -> Option<PointerResult> {
-        let entry = self.memo[pointer::slot(pointer, modifier)];
+        let entry = self.memo.as_ref()?[pointer::slot(pointer, modifier)];
         let tag = pointer::tag(self.generation, memo_key(key), 0);
         if entry.pointer != pointer || entry.modifier != modifier || entry.tag & !KIND != tag {
             return None;
@@ -376,7 +397,8 @@ impl PointerService {
         result: PointerResult,
     ) {
         let (kind, value) = memo_result(operation, result);
-        self.memo[pointer::slot(pointer, modifier)] = pointer::MemoEntry {
+        let memo = self.memo.as_mut().expect("memo for open tag");
+        memo[pointer::slot(pointer, modifier)] = pointer::MemoEntry {
             pointer,
             modifier,
             tag: pointer::tag(self.generation, memo_key(key), kind),
@@ -437,6 +459,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_memo_is_needed_only_for_a_usable_native_tag() {
+        use stela_contracts::pauth::Key;
+
+        let mut owner = Box::new(PointerService::new());
+        let (service, memo) = owner.anchors();
+        assert_eq!(memo, 0);
+        let first = inputs(pauth::Version::Classic, 25 | 25 << 16);
+        let mut unavailable = first;
+        unavailable.keys = [None; 5];
+        owner.open(unavailable);
+        owner.reopen(Key::Ia, false, true);
+        owner.reopen(Key::Ib, true, false);
+        owner.reopen_generic(false);
+        owner.reopen_stripping(true);
+        assert_eq!(owner.tags, [pointer::DISABLED, 0, 0, 0, 0]);
+        assert_eq!(owner.strips[1].enabled, 1);
+        assert_eq!(owner.result(PointerOperation::Sign, Key::Ib, 4, 8), None);
+        assert_eq!(owner.generic_code(4, 8), None);
+        assert_eq!(owner.anchors(), (service, 0));
+
+        owner.revalidate(first);
+        owner.reopen(Key::Ia, true, true);
+        owner.reopen_generic(true);
+        assert_eq!(owner.anchors(), (service, 0));
+        owner.reopen(Key::Ia, true, false);
+        let memo = owner.anchors().1;
+        assert_ne!(memo, 0);
+        let tag = owner.tags[0];
+        let result = owner.result(PointerOperation::Sign, Key::Ia, 4, 8).unwrap();
+        owner.close();
+        assert_eq!(owner.anchors(), (service, memo));
+        owner.open(unavailable);
+        owner.revalidate(first);
+        owner.reopen(Key::Ia, true, false);
+        assert_eq!(owner.anchors(), (service, memo));
+        assert_eq!(owner.tags[0], tag);
+        assert_eq!(
+            owner.remembered(PointerOperation::Sign, Key::Ia, 4, 8),
+            Some(result)
+        );
+
+        let mut other = Box::new(PointerService::new());
+        other.open(first);
+        assert_eq!(other.anchors().1, 0);
+        other.reopen_generic(false);
+        assert_ne!(other.anchors().1, 0);
+        assert_ne!(other.anchors().1, memo);
+    }
+
+    #[test]
     fn a_generic_code_opens_its_own_tag_and_completes_for_thunks() {
         let mut service = Box::new(PointerService::new());
         let mut input = inputs(pauth::Version::Classic, 25 | 25 << 16);
@@ -464,7 +536,7 @@ mod tests {
         assert_eq!(service.tags[usize::from(pointer::GENERIC_KEY)], tag);
         assert_eq!(service.tags[..4], [0; 4]);
         assert_eq!(
-            service.memo[pointer::slot(data, modifier)],
+            service.memo.as_ref().unwrap()[pointer::slot(data, modifier)],
             pointer::MemoEntry {
                 pointer: data,
                 modifier,
@@ -652,7 +724,8 @@ mod tests {
                             native.tags = [0; pointer::TAG_WORDS];
                             let asked = complete(state, request(key, operation), operand, modifier);
                             assert_eq!(asked, pointer::Completion::default(), "a closed key");
-                            native.tags[index] = pointer::tag(native.generation, index as u8, 0);
+                            native.reopen(pauth_key, true, false);
+                            assert_ne!(native.tags[index], 0);
                             let expected = engine.result(operation, pauth_key, operand, modifier);
                             let asked = complete(state, request(key, operation), operand, modifier);
                             let completed = match expected {
