@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 /* Memory the owner holds, as a dma-buf a driver imports like any other. Linux
  * has no pages for it, so a mapping is only device addresses, which is all an
- * importer may read of one. */
+ * importer may read of one, and DMA_ATTR_MMIO says that the owner, not Linux's
+ * allocator, keeps them. */
 #include <linux/dma-buf.h>
 #include <linux/dma-mapping.h>
 #include <linux/err.h>
@@ -25,7 +26,8 @@ static void unmap_entries(struct device *dev, struct sg_table *table, unsigned i
 	for_each_sgtable_dma_sg(table, entry, index) {
 		if (index == count)
 			break;
-		dma_unmap_phys(dev, sg_dma_address(entry), sg_dma_len(entry), direction, 0);
+		dma_unmap_phys(dev, sg_dma_address(entry), sg_dma_len(entry), direction,
+			       DMA_ATTR_MMIO);
 	}
 }
 
@@ -46,7 +48,8 @@ static struct sg_table *map_exported(struct dma_buf_attachment *attachment,
 	}
 	for_each_sgtable_dma_sg(table, entry, index) {
 		const struct stela_linux_run *run = &memory->runs[index];
-		dma_addr_t address = dma_map_phys(dev, run->physical, run->bytes, direction, 0);
+		dma_addr_t address = dma_map_phys(dev, run->physical, run->bytes, direction,
+						     DMA_ATTR_MMIO);
 
 		if (dma_mapping_error(dev, address)) {
 			unmap_entries(dev, table, index, direction);
