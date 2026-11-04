@@ -1038,18 +1038,26 @@ pub(super) fn rax_after(operation: &Operation) -> Rax {
     }
 }
 
-/// [`load`]'s bytes for a register in code like `like`, but for XZR.
-pub(super) fn register_load(like: &Code, register: Register) -> Option<Code> {
-    let mut code = like.alike();
-    load(&mut code, register);
-    offset(register).map(|_| code)
+/// [`load`]'s bytes for a register, but for XZR.
+pub(super) fn register_load(scratch: &mut Code, register: Register, pinned: bool) -> Option<&[u8]> {
+    offset(register)?;
+    scratch.clear();
+    scratch.set_pinned(pinned);
+    load(scratch, register);
+    Some(scratch)
 }
 
-/// [`store`]'s bytes for a register in code like `like`, but for XZR.
-pub(super) fn register_store(like: &Code, register: Register) -> Option<Code> {
-    let mut code = like.alike();
-    store(&mut code, register);
-    offset(register).map(|_| code)
+/// [`store`]'s bytes for a register, but for XZR.
+pub(super) fn register_store(
+    scratch: &mut Code,
+    register: Register,
+    pinned: bool,
+) -> Option<&[u8]> {
+    offset(register)?;
+    scratch.clear();
+    scratch.set_pinned(pinned);
+    store(scratch, register);
+    Some(scratch)
 }
 
 /// `movabs rax,value`.

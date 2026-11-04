@@ -94,14 +94,6 @@ impl Code {
             ..Self::new()
         }
     }
-    /// Empty code of this one's kind.
-    pub(crate) fn alike(&self) -> Self {
-        Self {
-            pinned: self.pinned,
-            constant_time: self.constant_time,
-            ..Self::new()
-        }
-    }
     /// The instructions from here on have `index` in the block's source map.
     pub(crate) fn set_instruction(&mut self, index: usize) {
         self.instruction = index;
@@ -345,11 +337,12 @@ impl Code {
             .expect("counted instruction");
     }
     /// Remove every byte and instruction.
-    #[cfg(test)]
     pub(crate) fn clear(&mut self) {
         self.bytes.clear();
         self.instructions = 0;
         self.sites.clear();
+        self.instruction = 0;
+        self.failures.clear();
     }
 }
 
