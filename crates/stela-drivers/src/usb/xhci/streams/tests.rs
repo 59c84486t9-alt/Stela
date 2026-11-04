@@ -853,10 +853,12 @@ fn transferless_stream_errors_reset_the_endpoint_like_linux() {
     model
         .borrow_mut()
         .event(0, RING_UNDERRUN, TRANSFER_EVENT, 3, 0);
+    model.borrow_mut().event(0, SUCCESS, TRANSFER_EVENT, 5, 0);
     model.borrow_mut().event(0, SUCCESS, TRANSFER_EVENT, 3, 0);
     assert_eq!(controller.completed_stream(&one), None);
     assert_eq!(resets(&model), (2, 4));
     assert!(controller.pending.iter().all(|e| e.endpoint() != 3));
+    assert!(controller.pending.iter().any(|e| e.endpoint() == 5));
     // A success clears err_count: the next error is soft again.
     model.borrow_mut().set_state(3, ENDPOINT_RUNNING);
     model.borrow_mut().complete(3, 1, SUCCESS, 0);

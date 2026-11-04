@@ -535,25 +535,30 @@ impl Controller {
     /// none of the endpoint's stream rings reset the endpoint, softly while
     /// within MAX_SOFT_RETRY. Other such events are dropped.
     fn transferless(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
-        let streams = self.slot(slot)?.endpoints[usize::from(dci)]
-            .as_ref()
-            .and_then(|endpoint| endpoint.streams.as_ref())
-            .ok_or(BlockError::Unsupported("endpoint has no streams"))?;
-        let rings: Vec<_> = streams
-            .rings
-            .iter()
-            .map(|stream| {
-                let base = stream.ring.buffer.device_address();
-                base..base + (RING_TRBS * TRB) as u64
-            })
-            .collect();
-        while let Some(event) = self.take(|e| {
-            e.kind() == TRANSFER_EVENT
-                && e.slot() == slot
-                && e.endpoint() == dci
-                && e.code() != INCOMPATIBLE_DEVICE
-                && !rings.iter().any(|ring| ring.contains(&e.parameter))
-        }) {
+        loop {
+            let state = self
+                .slots
+                .get(usize::from(slot))
+                .and_then(Option::as_ref)
+                .ok_or(BlockError::Unsupported("xHCI slot not enabled"))?;
+            let streams = state.endpoints[usize::from(dci)]
+                .as_ref()
+                .and_then(|endpoint| endpoint.streams.as_ref())
+                .ok_or(BlockError::Unsupported("endpoint has no streams"))?;
+            // Inspect the rings only for events on this endpoint.
+            let Some(index) = self.pending.iter().position(|e| {
+                e.kind() == TRANSFER_EVENT
+                    && e.slot() == slot
+                    && e.endpoint() == dci
+                    && e.code() != INCOMPATIBLE_DEVICE
+                    && !streams.rings.iter().any(|stream| {
+                        let base = stream.ring.buffer.device_address();
+                        (base..base + (RING_TRBS * TRB) as u64).contains(&e.parameter)
+                    })
+            }) else {
+                return Ok(());
+            };
+            let event = self.pending.remove(index);
             match event.code() {
                 STALL
                 | transfer::USB_TRANSACTION_ERROR
@@ -583,7 +588,6 @@ impl Controller {
                 _ => {}
             }
         }
-        Ok(())
     }
 
     /// Polls the exact active ticket. Successful completion returns the

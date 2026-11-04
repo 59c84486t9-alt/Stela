@@ -1177,6 +1177,63 @@ fn constexpr_samplers_are_listed_across_linked_modules_and_reach_the_service() {
 }
 
 #[test]
+fn sampler_declarations_are_reused_for_the_lifetime_of_the_loaded_module() {
+    let mut compiler = compiler(&nvk(&CHIPS[0], 8 << 30));
+    compiler.reuse_sampler_states = true;
+    let library = compiler
+        .add_library(crate::metal::library::assemble(
+            b"BC\xc0\xdepayload",
+            &[("first", 2), ("second", 2)],
+            0,
+            None,
+        ))
+        .unwrap();
+    let dynamic = compiler.add_library(dynamic_fixture()).unwrap();
+    let mut specialization = Specialization {
+        linking: Linking {
+            libraries: vec![dynamic],
+            ..Linking::default()
+        },
+        ..Specialization::default()
+    };
+    FAKE.with_borrow_mut(|fake| {
+        fake.refuse_reflection = Some((ffi::kind::METADATA, 0, "invalid constexpr sampler"));
+    });
+    assert_eq!(
+        compiler.sampler_states(library, "first", &specialization),
+        Err(Error::Unsupported("AIR metadata"))
+    );
+    FAKE.with_borrow_mut(|fake| {
+        fake.refuse_reflection = None;
+        fake.states = vec![7, 3, 7];
+    });
+    assert_eq!(
+        compiler.sampler_states(library, "first", &specialization),
+        Ok(vec![3, 7])
+    );
+    assert_eq!(
+        compiler.sampler_states(library, "second", &specialization),
+        Ok(vec![3, 7])
+    );
+    FAKE.with_borrow(|fake| assert_eq!(fake.listed.len(), 2));
+
+    compiler.remove_library(dynamic).unwrap();
+    assert_eq!(
+        compiler.sampler_states(library, "second", &specialization),
+        Err(Error::Invalid("unknown library"))
+    );
+    specialization.linking.libraries[0] = compiler.add_library(dynamic_fixture()).unwrap();
+    FAKE.with_borrow_mut(|fake| fake.states.clear());
+    for _ in 0..2 {
+        assert_eq!(
+            compiler.sampler_states(library, "second", &specialization),
+            Ok(vec![3, 7])
+        );
+    }
+    FAKE.with_borrow(|fake| assert_eq!(fake.listed.len(), 3));
+}
+
+#[test]
 fn what_the_service_cannot_take_is_refused_before_it_runs() {
     let (mut compiler, library) = with_library();
     let specialization = Specialization::default();
