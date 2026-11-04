@@ -140,7 +140,7 @@ pub enum PeerState<'a> {
 
 impl<H: Host, D: Devices> Machine<H, D> {
     /// The progress the clock paces this PE by.
-    fn work(&self) -> u64 {
+    pub(super) fn work(&self) -> u64 {
         if self.clock.paces_instructions() {
             self.cpu.retired >> super::clock::PACE_UNIT_SHIFT
         } else {

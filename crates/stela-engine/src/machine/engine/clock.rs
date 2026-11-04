@@ -549,6 +549,31 @@ impl Clock {
         }
     }
 
+    /// The running PE, at `work`, leaves guest code for host work on behalf
+    /// of its EL0 thread, which holds no lock the kernel times: attached, it
+    /// holds the count no further than the work it did. Whether it released
+    /// the count, for [`Self::resume`] once the host's work returns. That
+    /// work takes the time it takes, as a device's does, while the other
+    /// PEs' time goes on.
+    pub(super) fn release(&mut self, mut counter: impl Counter, work: u64) -> bool {
+        if self
+            .shared
+            .as_ref()
+            .is_none_or(|attachment| attachment.waiting)
+        {
+            return false;
+        }
+        self.end_slice(&mut counter, work);
+        self.wait(&mut counter);
+        true
+    }
+
+    /// The PE [`Self::release`]d the count returns to guest code at `work`,
+    /// holding the count again from the present.
+    pub(super) fn resume(&mut self, counter: impl Counter, work: u64) {
+        self.start_slice(counter, work, 1);
+    }
+
     /// The running PE polls a monitor. Half a lookahead apart, so that a
     /// lock's waiters do not contend for the clock's sequence.
     pub(super) fn poll(&mut self, mut counter: impl Counter) {
@@ -762,6 +787,33 @@ mod tests {
                 holder: None
             }
         );
+    }
+
+    #[test]
+    fn a_pe_in_host_work_for_its_thread_holds_the_count_no_longer() {
+        let (shared, mut first, mut second) = pair();
+        first.start_slice(|| 1000, 0, 1);
+        second.start_slice(|| 1000, 0, 1);
+        // The first PE leaves guest code for a long host call. Holding the
+        // count, it would keep it at its horizon, 1100: the second runs on,
+        // and the count follows the second instead.
+        assert!(first.release(|| 1010, 10));
+        assert!(!first.release(|| 1010, 10), "released once");
+        for (host, blocks) in [(2000, 1000), (3000, 2000), (4000, 3000)] {
+            second.end_slice(|| host, blocks);
+        }
+        assert!(second.read(|| 4000) > 1100);
+        assert_ne!(shared.status(|| 4000).holder.map(|(pe, _)| pe), Some(0));
+        // Back in guest code, the caller holds the count again, from the
+        // present within the lookahead.
+        let count = second.read(|| 4000);
+        first.resume(|| 4000, 10);
+        second.end_slice(|| 9000, 100_000);
+        assert_eq!(second.read(|| 9000), count + 100);
+        assert_eq!(shared.status(|| 9000).holder.map(|(pe, _)| pe), Some(0));
+        // A waiting PE has nothing to release.
+        second.wait(|| 9000);
+        assert!(!second.release(|| 9000, 100_000));
     }
 
     #[test]

@@ -66,6 +66,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// when a provider returns an ordinary register error from its service.
     pub(super) fn device_transfer(&mut self, now: u64) -> Result<(), DeviceError> {
         self.observe_parallel_source(SourcePhase::DeviceAdvanceEnter);
+        let work = self.work();
         // A just-accepted lock write precedes follow_memory_lock(), so query
         // its device owner rather than the CPU's previous snapshot.
         let mut memory = HostMemory {
@@ -76,6 +77,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if result.is_ok()
             && let Some(call) = self.devices.take_call(self.current)
         {
+            // A call from EL0 holds no lock the kernel times, so the count
+            // need not wait for it: a compile or a GPU wait can take
+            // milliseconds.
+            let released =
+                self.cpu.pstate.el == 0 && self.clock.release(|| memory.host.counter(), work);
             let mut caller = caller::CallerSpace {
                 controls: self.cpu.controls(self.cpu.regime()),
                 requester: mmu::Requester {
@@ -88,6 +94,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             };
             let outcome = call.run(&mut caller);
             let refused = caller.refused;
+            if released {
+                self.clock.resume(|| self.host.counter(), work);
+            }
             self.devices.finish_call(outcome);
             // The tables refuse what a kept translation still reaches: XNU
             // ages pages by clearing the access flag without a TLBI. The
