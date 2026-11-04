@@ -487,15 +487,14 @@ impl<'a> BitStream<'a> {
         Ok(())
     }
 
-    /// `fse_in_pull64`.
-    fn pull(&mut self, bits: u32) -> Result<u64> {
-        if bits > self.accum_bits {
-            return Err(LzfseError::Malformed("FSE stream underflow"));
-        }
+    /// `fse_in_pull64`. Each decode group starts with at least 56 bits
+    /// after refilling. A group of four literals consumes at most 40 bits,
+    /// and an L, M, D triple at most (6 + 8) + (6 + 11) + (8 + 15) bits.
+    /// Only the low `accum_bits` bits are live between pulls and refills.
+    fn pull(&mut self, bits: u32) -> u64 {
+        debug_assert!(bits <= self.accum_bits);
         self.accum_bits -= bits;
-        let value = self.accum >> self.accum_bits;
-        self.accum &= (1u64 << self.accum_bits) - 1;
-        Ok(value)
+        (self.accum >> self.accum_bits) & ((1u64 << bits) - 1)
     }
 }
 
@@ -546,9 +545,9 @@ fn literal_table(freq: &[u16; LITERAL_SYMBOLS]) -> Vec<LiteralEntry> {
 /// `fse_value_decoder_entry`: one L, M or D decoder state.
 #[derive(Clone, Copy, Default)]
 struct ValueEntry {
-    total_bits: u32,
-    value_bits: u32,
-    delta: i32,
+    total_bits: u8,
+    value_bits: u8,
+    delta: i16,
     base: i32,
 }
 
@@ -561,20 +560,20 @@ fn value_table(states: usize, freq: &[u16], extra_bits: &[u8], base: &[i32]) -> 
             continue;
         }
         let (k, j0) = spread(states, f);
-        let value_bits = u32::from(extra_bits[symbol]);
+        let value_bits = extra_bits[symbol];
         for j in 0..f {
             table.push(if j < j0 {
                 ValueEntry {
-                    total_bits: k + value_bits,
+                    total_bits: k as u8 + value_bits,
                     value_bits,
-                    delta: (((f + j) << k) as i32) - states as i32,
+                    delta: (((f + j) << k) as i16) - states as i16,
                     base: base[symbol],
                 }
             } else {
                 ValueEntry {
-                    total_bits: k - 1 + value_bits,
+                    total_bits: (k - 1) as u8 + value_bits,
                     value_bits,
-                    delta: ((j - j0) << (k - 1)) as i32,
+                    delta: ((j - j0) << (k - 1)) as i16,
                     base: base[symbol],
                 }
             });
@@ -584,7 +583,7 @@ fn value_table(states: usize, freq: &[u16], extra_bits: &[u8], base: &[i32]) -> 
     table
 }
 
-fn next_state(delta: i32, bits: u64) -> u16 {
+fn next_state(delta: i16, bits: u64) -> u16 {
     (delta as u16).wrapping_add(bits as u16)
 }
 
@@ -593,7 +592,7 @@ fn decode_literal(state: &mut u16, table: &[LiteralEntry], input: &mut BitStream
     let entry = table
         .get(usize::from(*state))
         .ok_or(LzfseError::Malformed("FSE state"))?;
-    *state = next_state(i32::from(entry.delta), input.pull(u32::from(entry.bits))?);
+    *state = next_state(entry.delta, input.pull(u32::from(entry.bits)));
     Ok(entry.symbol)
 }
 
@@ -602,7 +601,7 @@ fn decode_value(state: &mut u16, table: &[ValueEntry], input: &mut BitStream) ->
     let entry = table
         .get(usize::from(*state))
         .ok_or(LzfseError::Malformed("FSE state"))?;
-    let bits = input.pull(entry.total_bits)?;
+    let bits = input.pull(u32::from(entry.total_bits));
     *state = next_state(entry.delta, bits >> entry.value_bits);
     Ok(entry.base + (bits & ((1u64 << entry.value_bits) - 1)) as i32)
 }
@@ -623,9 +622,13 @@ fn block(src: &[u8], payload: usize, header: &Header, out: &mut Output) -> Resul
     let mut states = header.literal_state;
     for _ in (0..header.n_literals).step_by(4) {
         input.refill()?;
-        for state in &mut states {
-            literals.push(decode_literal(state, &literal_table, &mut input)?);
-        }
+        let [a, b, c, d] = &mut states;
+        literals.extend_from_slice(&[
+            decode_literal(a, &literal_table, &mut input)?,
+            decode_literal(b, &literal_table, &mut input)?,
+            decode_literal(c, &literal_table, &mut input)?,
+            decode_literal(d, &literal_table, &mut input)?,
+        ]);
     }
 
     let lmd_end = lmd_start + header.n_lmd_payload_bytes as usize;
