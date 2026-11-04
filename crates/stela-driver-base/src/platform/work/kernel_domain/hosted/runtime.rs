@@ -132,7 +132,26 @@ impl<const N: usize> HostedExecutor<N> {
             queue,
             stack,
             general_stacks,
-            Some(Service::new(deadlines, callback, context)),
+            Some(Service::bounded(deadlines, callback, context)),
+        )
+    }
+
+    /// Reserve a service stack for one persistent hosted assignment. Its
+    /// source starts it explicitly and consumes each owned deadline batch.
+    ///
+    /// # Safety
+    /// Same stack, thread and unwind requirements as `new`.
+    pub unsafe fn new_with_persistent_service_stacks(
+        queue: Arc<HostedQueue<N>>,
+        stack: StackRequirement,
+        general_stacks: usize,
+        deadlines: HostedDeadlines,
+    ) -> Result<Self, WorkError> {
+        Self::build(
+            queue,
+            stack,
+            general_stacks,
+            Some(Service::persistent(deadlines)),
         )
     }
 

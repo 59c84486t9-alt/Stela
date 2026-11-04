@@ -102,6 +102,15 @@ impl<const N: usize> HostedQueue<N> {
             Kind::General => Lane::General,
             Kind::Notify => Lane::Notify,
         };
+        self.enqueue_lane(lane, callback, context)
+    }
+
+    pub(super) fn enqueue_lane(
+        &self,
+        lane: Lane,
+        callback: Callback,
+        context: *mut c_void,
+    ) -> Result<HostedTicket, WorkError> {
         let mut guard = self.lock()?;
         let sequence = guard
             .state()
