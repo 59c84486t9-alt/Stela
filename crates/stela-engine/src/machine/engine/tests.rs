@@ -112,6 +112,7 @@ pub(super) struct FakeHost {
     pub(super) events: Vec<Event>,
     base: u64,
     pub(super) now: u64,
+    pub(super) memory_barriers: usize,
     pub(super) regimes: Vec<Regime>,
     invalidations: usize,
     /// Calls of [`Host::isolate_predictions`].
@@ -157,6 +158,11 @@ pub(super) struct FakeHost {
 }
 
 impl Host for FakeHost {
+    fn memory_barrier(&mut self) {
+        self.memory_barriers += 1;
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    }
+
     fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
         if self.require_empty_code_on_read {
             assert!(
@@ -500,6 +506,7 @@ pub(super) fn board_on<D: Devices>(
         events: Vec::new(),
         base: BASE,
         now: 0,
+        memory_barriers: 0,
         regimes: Vec::new(),
         invalidations: 0,
         isolations: 0,
