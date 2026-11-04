@@ -2191,6 +2191,7 @@ fn start_platform(
             .handoff()
             .map(|storage| storage.ecam)
             .unwrap_or_default(),
+        native_mmio,
         handoff.tsc_hz,
         prepared_sci,
         work,

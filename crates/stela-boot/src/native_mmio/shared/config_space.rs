@@ -44,6 +44,25 @@ impl ConfigScope {
         Ok(scope)
     }
 
+    fn read(&self, offset: usize, width: u16) -> Result<u32, Error> {
+        let mapping = self.pending.mapping.as_ref().ok_or(Error::Unavailable)?;
+        match width {
+            1 => {
+                let address = mapping.address(offset, 1)?;
+                // SAFETY: the live read-only map covers this byte.
+                Ok(u32::from(unsafe { address.as_ptr().read_volatile() }))
+            }
+            2 if offset.is_multiple_of(2) => {
+                let address = mapping.address(offset, 2)?;
+                // SAFETY: the map is page-aligned and the word offset is aligned.
+                let value = unsafe { address.cast::<u16>().as_ptr().read_volatile() };
+                Ok(u32::from(u16::from_le(value)))
+            }
+            4 => mapping.read32(offset),
+            _ => Err(Error::InvalidRange),
+        }
+    }
+
     /// # Safety
     /// Every accepted mapping user has stopped, with no escaping aliases.
     unsafe fn retire(&mut self) -> Result<(), Error> {
@@ -167,23 +186,7 @@ impl ConfigInventory<'_> {
         let offset = (usize::from(address.device) << 15)
             | (usize::from(address.function) << 12)
             | usize::from(offset);
-        let mapping = scope.pending.mapping.as_ref().expect("original map");
-        match width {
-            1 => {
-                let address = mapping.address(offset, 1)?;
-                // SAFETY: the live read-only bus map covers this byte and
-                // remains exclusively borrowed throughout the observation.
-                Ok(u32::from(unsafe { address.as_ptr().read_volatile() }))
-            }
-            2 => {
-                let address = mapping.address(offset, 2)?;
-                // SAFETY: the bus map is page-aligned and the checked word
-                // offset is aligned. This observation has no escaping alias.
-                let value = unsafe { address.cast::<u16>().as_ptr().read_volatile() };
-                Ok(u32::from(u16::from_le(value)))
-            }
-            _ => mapping.read32(offset),
-        }
+        scope.read(offset, width)
     }
 
     pub(crate) fn header_type(&self, word: u32) -> Result<u8, Error> {
@@ -218,6 +221,17 @@ impl ConfigInventory<'_> {
 }
 
 impl Source {
+    /// Every ECAM decode window from the same sealed MCFG used by the census.
+    pub(crate) fn configuration_windows(&self) -> Result<Vec<EcamWindow>, Error> {
+        let mcfg = self.platform.wire().mcfg();
+        if mcfg.is_empty() {
+            return Ok(Vec::new());
+        }
+        let windows = stela_runtime::pc::acpi::mcfg(mcfg).map_err(failed)?;
+        EcamInventory::validate(&windows, self.platform.space.physical_bits)?;
+        Ok(windows)
+    }
+
     /// # Safety
     /// The boot owns all captured configuration buses, excluding firmware,
     /// reset, topology and SR-IOV writers through the observation and its use.
@@ -265,6 +279,30 @@ impl Source {
             return Err(Error::OutsideResource);
         }
         Ok((window, span))
+    }
+
+    /// Read an AML PCI operation through a scoped UC map without lending a
+    /// writable address or letting the provider change the physical function.
+    pub(crate) fn read_firmware_config(
+        &self,
+        address: Address,
+        offset: u16,
+        width: u16,
+    ) -> Result<u32, Error> {
+        if !matches!(width, 1 | 2 | 4)
+            || offset > PAGE as u16 - width
+            || !offset.is_multiple_of(width)
+        {
+            return Err(Error::InvalidRange);
+        }
+        let (_, span) = self.config_page(address)?;
+        // SAFETY: the original capture supplies this function extent. This
+        // synchronous BSP call lends no mapping or configuration writer.
+        let mut scope = unsafe { ConfigScope::open(self, span) }?;
+        let value = scope.read(usize::from(offset), width);
+        // SAFETY: the only reader was the synchronous scalar access above.
+        unsafe { scope.retire() }?;
+        value
     }
 
     /// Map one exact read-only function for a kept native observer.
