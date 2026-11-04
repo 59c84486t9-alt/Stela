@@ -357,6 +357,7 @@ impl<const N: usize> HostedRuntime<N> {
         if state.jobs.iter().flatten().any(|job| job.running) {
             return Err(WorkError::Busy);
         }
+        self.thread_cpu_ns()?;
         state.scheduling.enabled = true;
         Ok(())
     }
@@ -371,7 +372,6 @@ impl<const N: usize> HostedRuntime<N> {
             .checked_add(1)
             .ok_or(WorkError::Exhausted)?;
         self.schedule_service()?;
-        let now = self.queue.execution.now_ns()?;
         let Some(index) = self.select_ready()? else {
             return Ok(false);
         };
@@ -380,7 +380,11 @@ impl<const N: usize> HostedRuntime<N> {
             let task = unsafe { &mut *self.task(index) };
             let sequence = task.job.unwrap_or_else(|| std::process::abort()).1.sequence;
             let mut guard = self.queue.lock()?;
-            require(guard.state().scheduling.running(task.id, sequence, now));
+            let board = &mut guard.state().scheduling;
+            if board.enabled {
+                let now = self.thread_cpu_ns()?;
+                require(board.running(task.id, sequence, now));
+            }
             task.state = TaskState::Running;
         }
         DISPATCH.set(Dispatch {
@@ -450,6 +454,45 @@ impl<const N: usize> HostedRuntime<N> {
         Ok(selected.map(|(index, _)| index))
     }
 
+    /// Linux thread CPU time for work accounting. Deadline delivery keeps
+    /// the original wall-monotonic clock and advances even while we sleep.
+    fn thread_cpu_ns(&self) -> Result<u64, WorkError> {
+        self.queue.execution.check_current()?;
+        const SYS_CLOCK_GETTIME: i64 = 228;
+        const CLOCK_THREAD_CPUTIME_ID: usize = 3;
+        #[repr(C)]
+        struct Timespec {
+            seconds: i64,
+            nanoseconds: i64,
+        }
+        let mut stamp = core::mem::MaybeUninit::<Timespec>::uninit();
+        // SAFETY: Linux x86-64 clock_gettime writes the two fields on success.
+        // The output stays live for the entire syscall.
+        let result = unsafe {
+            let result: i64;
+            core::arch::asm!(
+                "syscall", inlateout("rax") SYS_CLOCK_GETTIME => result,
+                in("rdi") CLOCK_THREAD_CPUTIME_ID, in("rsi") stamp.as_mut_ptr(),
+                lateout("rcx") _, lateout("r11") _, options(nostack),
+            );
+            result
+        };
+        if result != 0 {
+            return Err(WorkError::Unavailable);
+        }
+        // SAFETY: the successful kernel call initialized the full Timespec.
+        let stamp = unsafe { stamp.assume_init() };
+        let seconds = u64::try_from(stamp.seconds).map_err(|_| WorkError::CorruptContext)?;
+        let nanos = u64::try_from(stamp.nanoseconds)
+            .ok()
+            .filter(|nanos| *nanos < 1_000_000_000)
+            .ok_or(WorkError::CorruptContext)?;
+        seconds
+            .checked_mul(1_000_000_000)
+            .and_then(|seconds| seconds.checked_add(nanos))
+            .ok_or(WorkError::Exhausted)
+    }
+
     fn depart(&self, index: usize) {
         self.current.set(NONE);
         // SAFETY: called only from this live task with its dispatcher saved,
@@ -508,14 +551,16 @@ unsafe extern "sysv64" fn entry<const N: usize>(address: usize, index: usize) ->
         // SAFETY: queue admission retains the original callback/context graph.
         unsafe { (job.1.callback)(job.1.context as *mut c_void) };
         runtime.complete_binding(index);
-        let now = require(runtime.queue.execution.now_ns());
         {
             // SAFETY: only the original running task can complete this slot.
             let task = unsafe { &mut *runtime.task(index) };
             let mut guard = require(runtime.queue.lock());
             let state = guard.state();
-            require(state.scheduling.account(now));
-            require(state.scheduling.remove(task.id, job.1.sequence));
+            if state.scheduling.enabled {
+                let now = require(runtime.thread_cpu_ns());
+                require(state.scheduling.account(now));
+                require(state.scheduling.remove(task.id, job.1.sequence));
+            }
             task.signal.sequence.store(0, Ordering::Release);
             require(state.finish_job(job.0, job.1.sequence, None));
             task.completed_sequence = job.1.sequence;

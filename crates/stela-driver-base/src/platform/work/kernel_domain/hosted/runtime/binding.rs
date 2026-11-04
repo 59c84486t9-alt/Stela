@@ -105,19 +105,44 @@ impl<const N: usize> HostedRuntime<N> {
         head: bool,
     ) -> Result<(), WorkError> {
         self.current_context()?;
+        self.check_target(target)?;
+        let mut guard = self.queue.lock()?;
+        let board = &mut guard.state().scheduling;
+        if !board.enabled {
+            return Err(WorkError::Unavailable);
+        }
+        let now = self.thread_cpu_ns()?;
+        board.update(target.task, target.sequence, before, after, head, Some(now))
+    }
+
+    /// Observe time charged to this exact live assignment. An inactive
+    /// assignment keeps its last charge until it runs again. Completion
+    /// closes the handle even if its physical stack is reused later.
+    pub fn execution_ns(&self, target: &HostedWake) -> Result<u64, WorkError> {
+        self.check()?;
+        if DISPATCH.get().active.is_null() {
+            self.dispatcher_successor()?;
+        } else {
+            self.current_context()?;
+        }
+        self.check_target(target)?;
+        let mut guard = self.queue.lock()?;
+        let board = &mut guard.state().scheduling;
+        if !board.enabled {
+            return Err(WorkError::Unavailable);
+        }
+        let (total, _, _) = board.execution(target.task, target.sequence, self.thread_cpu_ns()?)?;
+        Ok(total)
+    }
+
+    fn check_target(&self, target: &HostedWake) -> Result<(), WorkError> {
         if self.queue.id != target.queue {
             return Err(WorkError::InvalidTicket);
         }
         if target.signal.sequence.load(Ordering::Acquire) != target.sequence {
             return Err(WorkError::Closed);
         }
-        let now = self.queue.execution.now_ns()?;
-        let mut guard = self.queue.lock()?;
-        let board = &mut guard.state().scheduling;
-        if !board.enabled {
-            return Err(WorkError::Unavailable);
-        }
-        board.update(target.task, target.sequence, before, after, head, Some(now))
+        Ok(())
     }
 
     /// # Safety
@@ -174,7 +199,6 @@ impl<const N: usize> HostedRuntime<N> {
     fn suspend(self: Pin<&Self>, reason: LeaveReason) -> Result<ParkOutcome, WorkError> {
         let view = self.current_context()?;
         let index = self.current.get();
-        let now = self.queue.execution.now_ns()?;
         {
             // SAFETY: checked current stack. No task borrow spans the switch.
             let task = unsafe { &*self.task(index) };
@@ -191,7 +215,9 @@ impl<const N: usize> HostedRuntime<N> {
                 let mut guard = self.queue.lock()?;
                 let board = &mut guard.state().scheduling;
                 board.can_suspend(task.id, view.sequence, reason)?;
-                board.account(now)?;
+                if board.enabled {
+                    board.account(self.thread_cpu_ns()?)?;
+                }
             }
             if let Some(binding) = &task.binding {
                 // SAFETY: pure scheduler preflight completed and its guard

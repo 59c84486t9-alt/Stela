@@ -5,7 +5,16 @@
     target_arch = "x86_64"
 ))]
 
-use std::{cell::Cell, ffi::c_void, pin::Pin, ptr, rc::Rc, sync::Arc};
+use std::{
+    cell::Cell,
+    ffi::c_void,
+    pin::Pin,
+    ptr,
+    rc::Rc,
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
 use stela_driver_base::platform::work::{
     Kind, WorkError,
     kernel_domain::{HostedExecution, HostedExecutor, HostedQueue, HostedRuntime, HostedWake},
@@ -26,6 +35,7 @@ struct Fixture<'a> {
     wake: Cell<Option<HostedWake>>,
     phase: Cell<u8>,
     fifo: Cell<bool>,
+    live_ns: Cell<Option<u64>>,
 }
 unsafe extern "C" fn body(context: *mut c_void) {
     // SAFETY: the sole producer keeps this fixture through both task steps.
@@ -35,10 +45,21 @@ unsafe extern "C" fn body(context: *mut c_void) {
     if fixture.fifo.get() {
         // SAFETY: this source task is current on its original hosted stack.
         unsafe { sched_set_fifo(stela_linux_current()) };
+        let start = fixture.binding.measured_execution_ns().unwrap();
+        let wall = Instant::now();
+        thread::sleep(Duration::from_millis(20));
+        let awake = fixture.binding.measured_execution_ns().unwrap();
+        assert!(wall.elapsed().as_nanos() > u128::from(awake - start) + 10_000_000);
+        fixture.live_ns.set(Some(awake));
     }
     fixture.phase.set(1);
     // SAFETY: exact live source scope on this executing bound stack.
     unsafe { schedule() };
+    if let Some(before) = fixture.live_ns.get() {
+        let resumed = fixture.binding.measured_execution_ns().unwrap();
+        assert!(resumed >= before);
+        fixture.live_ns.set(Some(resumed));
+    }
     fixture.phase.set(2);
     // SAFETY: resumed the same source lease and holds no outstanding user.
     unsafe { stela_linux_exit() };
@@ -76,6 +97,7 @@ fn original_bare_scopes_yield_and_resume_on_separate_hosted_stacks() {
         wake: Cell::new(None),
         phase: Cell::new(0),
         fifo: Cell::new(false),
+        live_ns: Cell::new(None),
     };
     let fixtures = [fixture(), fixture()];
     let tickets = fixtures.each_ref().map(|fixture| {
@@ -115,7 +137,16 @@ fn original_bare_scopes_yield_and_resume_on_separate_hosted_stacks() {
         }
         .unwrap()
     });
-    for expected in [[1, 0], [2, 0], [2, 1], [2, 2]] {
+    assert!(runtime.step().unwrap());
+    assert_eq!(
+        fixtures.each_ref().map(|fixture| fixture.phase.get()),
+        [1, 0]
+    );
+    let stopped = first.binding.measured_execution_ns().unwrap();
+    assert!(stopped >= first.live_ns.get().unwrap());
+    assert_eq!(first.binding.measured_execution_ns(), Ok(stopped));
+    assert_eq!(runtime.execution_ns(&old_wake), Err(WorkError::Closed));
+    for expected in [[2, 0], [2, 1], [2, 2]] {
         assert!(runtime.step().unwrap());
         assert_eq!(
             fixtures.each_ref().map(|fixture| fixture.phase.get()),
@@ -126,6 +157,11 @@ fn original_bare_scopes_yield_and_resume_on_separate_hosted_stacks() {
             expected.map(|phase| phase == 2)
         );
     }
+    assert!(first.live_ns.get().unwrap() >= stopped);
+    assert_eq!(
+        first.binding.measured_execution_ns(),
+        Err(WorkError::Closed)
+    );
     // SAFETY: the source scope joined. The earlier assignment is still the
     // wrong detach handle even though the physical stack and C task are same.
     let detached = unsafe { runtime.detach_binding(&old_wake) };

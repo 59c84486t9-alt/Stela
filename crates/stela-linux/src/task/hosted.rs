@@ -64,6 +64,17 @@ impl<const N: usize> HostedTaskBinding<N> {
         self.runtime().bind_current(self.clone())
     }
 
+    /// Observe the hosted scheduler's charge for this binding's live
+    /// assignment. This observation lends no source task-data writer.
+    pub fn measured_execution_ns(&self) -> Result<u64, WorkError> {
+        if self.detached.get() {
+            return Err(WorkError::Closed);
+        }
+        let wake = self.wake.borrow();
+        let target = wake.as_ref().ok_or(WorkError::Unavailable)?;
+        self.runtime().execution_ns(target)
+    }
+
     /// # Safety
     /// Body and context stay valid through every real suspension. The source
     /// body cannot unwind, retire the executor or retain the scoped capability.
