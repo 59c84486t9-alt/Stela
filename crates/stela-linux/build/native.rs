@@ -153,6 +153,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/kernel/fork_caches.c")),
             PathBuf::from(format!("{LINUX}/kernel/fork_stack.c")),
             PathBuf::from(format!("{LINUX}/kernel/fork_release.c")),
+            PathBuf::from(format!("{LINUX}/kernel/fork_mm.c")),
             PathBuf::from(format!("{LINUX}/kernel/nsproxy.c")),
             PathBuf::from(format!("{LINUX}/kernel/nscommon.c")),
             PathBuf::from(format!("{LINUX}/kernel/nstree.c")),

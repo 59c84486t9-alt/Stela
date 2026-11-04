@@ -114,10 +114,9 @@ int stela_linux_task_bootstrap_resources(const struct stela_linux_owner *owner)
     early_boot_irqs_disabled = false;
     local_irq_restore(flags);
 
-    /* Original source sequence (init/main.c1150..), for genuine kernel-thread
-     * resources. User-mm/anon-vma/exec and architecture stack caches are not
-     * substituted: the native clone boundary rejects those consumers before
-     * effects, and one actual native prepared-stack owner supplies stacks. */
+    /* Linux initializes the descriptor cache during mm_core_init(), before
+     * creating the first threads. The native owner supplies their stacks. */
+    mm_cache_init();
     pid_idr_init();
     cred_init();
     fork_init();

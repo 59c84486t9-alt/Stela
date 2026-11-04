@@ -85,6 +85,8 @@
 /kernel/fork_stack.c
 /kernel/fork_stack.h
 /kernel/fork_release.c
+/kernel/fork_mm.c
+/kernel/fork_mm.h
 /kernel/reboot.c
 /kernel/Makefile
 /kernel/rcu/update.c

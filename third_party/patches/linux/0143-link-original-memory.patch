@@ -1,0 +1,516 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 00:42:35 -0500
+Subject: [PATCH] refactor(mm): link original memory descriptor teardown
+
+---
+ kernel/Makefile  |   2 +-
+ kernel/fork.c    | 191 +---------------------------------------
+ kernel/fork_mm.c | 225 +++++++++++++++++++++++++++++++++++++++++++++++
+ kernel/fork_mm.h |  18 ++++
+ 4 files changed, 245 insertions(+), 191 deletions(-)
+ create mode 100644 kernel/fork_mm.c
+ create mode 100644 kernel/fork_mm.h
+
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 6ddfb9b4a7abcb8ae57fe75d58a7535d9bb64582..d617d154a6fb7627d287d5a71b4f5e6cbd78e3f6 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -3,7 +3,7 @@
+ # Makefile for the linux kernel.
+ #
+ 
+-obj-y     = fork.o fork_caches.o fork_stack.o fork_release.o exec_domain.o exec_state.o panic.o \
++obj-y     = fork.o fork_caches.o fork_stack.o fork_release.o fork_mm.o exec_domain.o exec_state.o panic.o \
+ 	    cpu.o cpu_topology.o exit.o task_rcu.o rcuwait_wake.o softirq.o resource.o \
+ 	    sysctl.o capability.o ptrace.o ptrace_access.o user.o \
+ 	    signal.o signal_state.o restart_no_syscall.o sys.o umh.o workqueue.o pid.o task_work.o \
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 747ce4c4e026e9d19a454b986c9f17bd2f44ef91..8cbabde9492c481207a894dfccf061083eb49289 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -121,6 +121,7 @@
+ #include "../mm/internal.h"
+ #include "fork_caches.h"
+ #include "fork_stack.h"
++#include "fork_mm.h"
+ 
+ #include <trace/events/sched.h>
+ 
+@@ -135,15 +136,6 @@
+ unsigned long total_forks;	/* Handle normal Linux uptimes. */
+ int nr_threads;			/* The idle threads do not count.. */
+ 
+-#define NAMED_ARRAY_INDEX(x)	[x] = __stringify(x)
+-
+-static const char * const resident_page_types[] = {
+-	NAMED_ARRAY_INDEX(MM_FILEPAGES),
+-	NAMED_ARRAY_INDEX(MM_ANONPAGES),
+-	NAMED_ARRAY_INDEX(MM_SWAPENTS),
+-	NAMED_ARRAY_INDEX(MM_SHMEMPAGES),
+-};
+-
+ DEFINE_PER_CPU(unsigned long, process_counts) = 0;
+ 
+ __cacheline_aligned DEFINE_RWLOCK(tasklist_lock);  /* outer */
+@@ -428,9 +420,6 @@ void thread_stack_cache_init(void)
+ #endif /* THREAD_SIZE >= PAGE_SIZE */
+ #endif /* CONFIG_VMAP_STACK */
+ 
+-/* SLAB cache for mm_struct structures (tsk->mm) */
+-static struct kmem_cache *mm_cachep;
+-
+ static void account_kernel_stack(struct task_struct *tsk, int account)
+ {
+ 	if (IS_ENABLED(CONFIG_VMAP_STACK)) {
+@@ -485,165 +474,10 @@ static inline int mm_alloc_pgd(struct mm_struct *mm)
+ 		return -ENOMEM;
+ 	return 0;
+ }
+-
+-static inline void mm_free_pgd(struct mm_struct *mm)
+-{
+-	pgd_free(mm, mm->pgd);
+-}
+ #else
+ #define mm_alloc_pgd(mm)	(0)
+-#define mm_free_pgd(mm)
+ #endif /* CONFIG_MMU */
+ 
+-#ifdef CONFIG_MM_ID
+-static DEFINE_IDA(mm_ida);
+-
+-static inline int mm_alloc_id(struct mm_struct *mm)
+-{
+-	int ret;
+-
+-	ret = ida_alloc_range(&mm_ida, MM_ID_MIN, MM_ID_MAX, GFP_KERNEL);
+-	if (ret < 0)
+-		return ret;
+-	mm->mm_id = ret;
+-	return 0;
+-}
+-
+-static inline void mm_free_id(struct mm_struct *mm)
+-{
+-	const mm_id_t id = mm->mm_id;
+-
+-	mm->mm_id = MM_ID_DUMMY;
+-	if (id == MM_ID_DUMMY)
+-		return;
+-	if (WARN_ON_ONCE(id < MM_ID_MIN || id > MM_ID_MAX))
+-		return;
+-	ida_free(&mm_ida, id);
+-}
+-#else /* !CONFIG_MM_ID */
+-static inline int mm_alloc_id(struct mm_struct *mm) { return 0; }
+-static inline void mm_free_id(struct mm_struct *mm) {}
+-#endif /* CONFIG_MM_ID */
+-
+-static void check_mm(struct mm_struct *mm)
+-{
+-	int i;
+-
+-	BUILD_BUG_ON_MSG(ARRAY_SIZE(resident_page_types) != NR_MM_COUNTERS,
+-			 "Please make sure 'struct resident_page_types[]' is updated as well");
+-
+-	for (i = 0; i < NR_MM_COUNTERS; i++) {
+-		long x = percpu_counter_sum(&mm->rss_stat[i]);
+-
+-		if (unlikely(x)) {
+-			pr_alert("BUG: Bad rss-counter state mm:%p type:%s val:%ld Comm:%s Pid:%d\n",
+-				 mm, resident_page_types[i], x,
+-				 current->comm,
+-				 task_pid_nr(current));
+-		}
+-	}
+-
+-	if (mm_pgtables_bytes(mm))
+-		pr_alert("BUG: non-zero pgtables_bytes on freeing mm: %ld\n",
+-				mm_pgtables_bytes(mm));
+-
+-#if defined(CONFIG_TRANSPARENT_HUGEPAGE) && !defined(CONFIG_SPLIT_PMD_PTLOCKS)
+-	VM_BUG_ON_MM(mm->pmd_huge_pte, mm);
+-#endif
+-}
+-
+-#define allocate_mm()	(kmem_cache_alloc(mm_cachep, GFP_KERNEL))
+-#define free_mm(mm)	(kmem_cache_free(mm_cachep, (mm)))
+-
+-static void do_check_lazy_tlb(void *arg)
+-{
+-	struct mm_struct *mm = arg;
+-
+-	WARN_ON_ONCE(current->active_mm == mm);
+-}
+-
+-static void do_shoot_lazy_tlb(void *arg)
+-{
+-	struct mm_struct *mm = arg;
+-
+-	if (current->active_mm == mm) {
+-		WARN_ON_ONCE(current->mm);
+-		current->active_mm = &init_mm;
+-		switch_mm(mm, &init_mm, current);
+-	}
+-}
+-
+-static void cleanup_lazy_tlbs(struct mm_struct *mm)
+-{
+-	if (!IS_ENABLED(CONFIG_MMU_LAZY_TLB_SHOOTDOWN)) {
+-		/*
+-		 * In this case, lazy tlb mms are refounted and would not reach
+-		 * __mmdrop until all CPUs have switched away and mmdrop()ed.
+-		 */
+-		return;
+-	}
+-
+-	/*
+-	 * Lazy mm shootdown does not refcount "lazy tlb mm" usage, rather it
+-	 * requires lazy mm users to switch to another mm when the refcount
+-	 * drops to zero, before the mm is freed. This requires IPIs here to
+-	 * switch kernel threads to init_mm.
+-	 *
+-	 * archs that use IPIs to flush TLBs can piggy-back that lazy tlb mm
+-	 * switch with the final userspace teardown TLB flush which leaves the
+-	 * mm lazy on this CPU but no others, reducing the need for additional
+-	 * IPIs here. There are cases where a final IPI is still required here,
+-	 * such as the final mmdrop being performed on a different CPU than the
+-	 * one exiting, or kernel threads using the mm when userspace exits.
+-	 *
+-	 * IPI overheads have not found to be expensive, but they could be
+-	 * reduced in a number of possible ways, for example (roughly
+-	 * increasing order of complexity):
+-	 * - The last lazy reference created by exit_mm() could instead switch
+-	 *   to init_mm, however it's probable this will run on the same CPU
+-	 *   immediately afterwards, so this may not reduce IPIs much.
+-	 * - A batch of mms requiring IPIs could be gathered and freed at once.
+-	 * - CPUs store active_mm where it can be remotely checked without a
+-	 *   lock, to filter out false-positives in the cpumask.
+-	 * - After mm_users or mm_count reaches zero, switching away from the
+-	 *   mm could clear mm_cpumask to reduce some IPIs, perhaps together
+-	 *   with some batching or delaying of the final IPIs.
+-	 * - A delayed freeing and RCU-like quiescing sequence based on mm
+-	 *   switching to avoid IPIs completely.
+-	 */
+-	on_each_cpu_mask(mm_cpumask(mm), do_shoot_lazy_tlb, (void *)mm, 1);
+-	if (IS_ENABLED(CONFIG_DEBUG_VM_SHOOT_LAZIES))
+-		on_each_cpu(do_check_lazy_tlb, (void *)mm, 1);
+-}
+-
+-/*
+- * Called when the last reference to the mm
+- * is dropped: either by a lazy thread or by
+- * mmput. Free the page directory and the mm.
+- */
+-void __mmdrop(struct mm_struct *mm)
+-{
+-	BUG_ON(mm == &init_mm);
+-	WARN_ON_ONCE(mm == current->mm);
+-
+-	/* Ensure no CPUs are using this as their lazy tlb mm */
+-	cleanup_lazy_tlbs(mm);
+-
+-	WARN_ON_ONCE(mm == current->active_mm);
+-	mm_destroy_sched(mm);
+-	mm_free_pgd(mm);
+-	mm_free_id(mm);
+-	destroy_context(mm);
+-	mmu_notifier_subscriptions_destroy(mm);
+-	check_mm(mm);
+-	mm_pasid_drop(mm);
+-	mm_destroy_cid(mm);
+-	percpu_counter_destroy_many(mm->rss_stat, NR_MM_COUNTERS);
+-
+-	free_mm(mm);
+-}
+-EXPORT_SYMBOL_GPL(__mmdrop);
+-
+ int __weak arch_dup_task_struct(struct task_struct *dst,
+ 					       struct task_struct *src)
+ {
+@@ -2744,29 +2578,6 @@ out:
+ 	read_unlock(&tasklist_lock);
+ }
+ 
+-#ifndef ARCH_MIN_MMSTRUCT_ALIGN
+-#define ARCH_MIN_MMSTRUCT_ALIGN 0
+-#endif
+-
+-void __init mm_cache_init(void)
+-{
+-	unsigned int mm_size;
+-
+-	/*
+-	 * The mm_cpumask is located at the end of mm_struct, and is
+-	 * dynamically sized based on the maximum CPU number this system
+-	 * can have, taking hotplug into account (nr_cpu_ids).
+-	 */
+-	mm_size = sizeof(struct mm_struct) + cpumask_size() + mm_cid_size();
+-
+-	mm_cachep = kmem_cache_create_usercopy("mm_struct",
+-			mm_size, ARCH_MIN_MMSTRUCT_ALIGN,
+-			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT,
+-			offsetof(struct mm_struct, saved_auxv),
+-			sizeof_field(struct mm_struct, saved_auxv),
+-			NULL);
+-}
+-
+ /*
+  * Check constraints on flags passed to the unshare system call.
+  */
+diff --git a/kernel/fork_mm.c b/kernel/fork_mm.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..f61e5f2a19c102d9a350b89451005161ed7c35fc
+--- /dev/null
++++ b/kernel/fork_mm.c
+@@ -0,0 +1,225 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *  Memory descriptor lifetime from kernel/fork.c
++ *
++ *  Copyright (C) 1991, 1992  Linus Torvalds
++ */
++
++/*
++ *  'fork.c' contains the help-routines for the 'fork' system call
++ * (see also entry.S and others).
++ * Fork is rather simple, once you get the hang of it, but the memory
++ * management can be a bitch. See 'mm/memory.c': 'copy_page_range()'
++ */
++
++#include <linux/idr.h>
++#include <linux/init.h>
++#include <linux/iommu.h>
++#include <linux/mm.h>
++#include <linux/mmu_notifier.h>
++#include <linux/sched/mm.h>
++#include <linux/sched/task.h>
++#include <linux/slab.h>
++
++#include <asm/mmu_context.h>
++#include <asm/pgalloc.h>
++
++#include "fork_mm.h"
++
++#define NAMED_ARRAY_INDEX(x)	[x] = __stringify(x)
++
++static const char * const resident_page_types[] = {
++	NAMED_ARRAY_INDEX(MM_FILEPAGES),
++	NAMED_ARRAY_INDEX(MM_ANONPAGES),
++	NAMED_ARRAY_INDEX(MM_SWAPENTS),
++	NAMED_ARRAY_INDEX(MM_SHMEMPAGES),
++};
++
++/* SLAB cache for mm_struct structures (tsk->mm) */
++static struct kmem_cache *mm_cachep;
++
++#ifdef CONFIG_MMU
++void mm_free_pgd(struct mm_struct *mm)
++{
++	pgd_free(mm, mm->pgd);
++}
++#endif /* CONFIG_MMU */
++
++#ifdef CONFIG_MM_ID
++static DEFINE_IDA(mm_ida);
++
++int mm_alloc_id(struct mm_struct *mm)
++{
++	int ret;
++
++	ret = ida_alloc_range(&mm_ida, MM_ID_MIN, MM_ID_MAX, GFP_KERNEL);
++	if (ret < 0)
++		return ret;
++	mm->mm_id = ret;
++	return 0;
++}
++
++void mm_free_id(struct mm_struct *mm)
++{
++	const mm_id_t id = mm->mm_id;
++
++	mm->mm_id = MM_ID_DUMMY;
++	if (id == MM_ID_DUMMY)
++		return;
++	if (WARN_ON_ONCE(id < MM_ID_MIN || id > MM_ID_MAX))
++		return;
++	ida_free(&mm_ida, id);
++}
++#else /* !CONFIG_MM_ID */
++int mm_alloc_id(struct mm_struct *mm) { return 0; }
++void mm_free_id(struct mm_struct *mm) {}
++#endif /* CONFIG_MM_ID */
++
++struct mm_struct *allocate_mm(void)
++{
++	return kmem_cache_alloc(mm_cachep, GFP_KERNEL);
++}
++
++void free_mm(struct mm_struct *mm)
++{
++	kmem_cache_free(mm_cachep, mm);
++}
++
++static void check_mm(struct mm_struct *mm)
++{
++	int i;
++
++	BUILD_BUG_ON_MSG(ARRAY_SIZE(resident_page_types) != NR_MM_COUNTERS,
++			 "Please make sure 'struct resident_page_types[]' is updated as well");
++
++	for (i = 0; i < NR_MM_COUNTERS; i++) {
++		long x = percpu_counter_sum(&mm->rss_stat[i]);
++
++		if (unlikely(x)) {
++			pr_alert("BUG: Bad rss-counter state mm:%p type:%s val:%ld Comm:%s Pid:%d\n",
++				 mm, resident_page_types[i], x,
++				 current->comm,
++				 task_pid_nr(current));
++		}
++	}
++
++	if (mm_pgtables_bytes(mm))
++		pr_alert("BUG: non-zero pgtables_bytes on freeing mm: %ld\n",
++				mm_pgtables_bytes(mm));
++
++#if defined(CONFIG_TRANSPARENT_HUGEPAGE) && !defined(CONFIG_SPLIT_PMD_PTLOCKS)
++	VM_BUG_ON_MM(mm->pmd_huge_pte, mm);
++#endif
++}
++
++static void do_check_lazy_tlb(void *arg)
++{
++	struct mm_struct *mm = arg;
++
++	WARN_ON_ONCE(current->active_mm == mm);
++}
++
++static void do_shoot_lazy_tlb(void *arg)
++{
++	struct mm_struct *mm = arg;
++
++	if (current->active_mm == mm) {
++		WARN_ON_ONCE(current->mm);
++		current->active_mm = &init_mm;
++		switch_mm(mm, &init_mm, current);
++	}
++}
++
++static void cleanup_lazy_tlbs(struct mm_struct *mm)
++{
++	if (!IS_ENABLED(CONFIG_MMU_LAZY_TLB_SHOOTDOWN)) {
++		/*
++		 * In this case, lazy tlb mms are refounted and would not reach
++		 * __mmdrop until all CPUs have switched away and mmdrop()ed.
++		 */
++		return;
++	}
++
++	/*
++	 * Lazy mm shootdown does not refcount "lazy tlb mm" usage, rather it
++	 * requires lazy mm users to switch to another mm when the refcount
++	 * drops to zero, before the mm is freed. This requires IPIs here to
++	 * switch kernel threads to init_mm.
++	 *
++	 * archs that use IPIs to flush TLBs can piggy-back that lazy tlb mm
++	 * switch with the final userspace teardown TLB flush which leaves the
++	 * mm lazy on this CPU but no others, reducing the need for additional
++	 * IPIs here. There are cases where a final IPI is still required here,
++	 * such as the final mmdrop being performed on a different CPU than the
++	 * one exiting, or kernel threads using the mm when userspace exits.
++	 *
++	 * IPI overheads have not found to be expensive, but they could be
++	 * reduced in a number of possible ways, for example (roughly
++	 * increasing order of complexity):
++	 * - The last lazy reference created by exit_mm() could instead switch
++	 *   to init_mm, however it's probable this will run on the same CPU
++	 *   immediately afterwards, so this may not reduce IPIs much.
++	 * - A batch of mms requiring IPIs could be gathered and freed at once.
++	 * - CPUs store active_mm where it can be remotely checked without a
++	 *   lock, to filter out false-positives in the cpumask.
++	 * - After mm_users or mm_count reaches zero, switching away from the
++	 *   mm could clear mm_cpumask to reduce some IPIs, perhaps together
++	 *   with some batching or delaying of the final IPIs.
++	 * - A delayed freeing and RCU-like quiescing sequence based on mm
++	 *   switching to avoid IPIs completely.
++	 */
++	on_each_cpu_mask(mm_cpumask(mm), do_shoot_lazy_tlb, (void *)mm, 1);
++	if (IS_ENABLED(CONFIG_DEBUG_VM_SHOOT_LAZIES))
++		on_each_cpu(do_check_lazy_tlb, (void *)mm, 1);
++}
++
++/*
++ * Called when the last reference to the mm
++ * is dropped: either by a lazy thread or by
++ * mmput. Free the page directory and the mm.
++ */
++void __mmdrop(struct mm_struct *mm)
++{
++	BUG_ON(mm == &init_mm);
++	WARN_ON_ONCE(mm == current->mm);
++
++	/* Ensure no CPUs are using this as their lazy tlb mm */
++	cleanup_lazy_tlbs(mm);
++
++	WARN_ON_ONCE(mm == current->active_mm);
++	mm_destroy_sched(mm);
++	mm_free_pgd(mm);
++	mm_free_id(mm);
++	destroy_context(mm);
++	mmu_notifier_subscriptions_destroy(mm);
++	check_mm(mm);
++	mm_pasid_drop(mm);
++	mm_destroy_cid(mm);
++	percpu_counter_destroy_many(mm->rss_stat, NR_MM_COUNTERS);
++
++	free_mm(mm);
++}
++EXPORT_SYMBOL_GPL(__mmdrop);
++
++#ifndef ARCH_MIN_MMSTRUCT_ALIGN
++#define ARCH_MIN_MMSTRUCT_ALIGN 0
++#endif
++
++void __init mm_cache_init(void)
++{
++	unsigned int mm_size;
++
++	/*
++	 * The mm_cpumask is located at the end of mm_struct, and is
++	 * dynamically sized based on the maximum CPU number this system
++	 * can have, taking hotplug into account (nr_cpu_ids).
++	 */
++	mm_size = sizeof(struct mm_struct) + cpumask_size() + mm_cid_size();
++
++	mm_cachep = kmem_cache_create_usercopy("mm_struct",
++			mm_size, ARCH_MIN_MMSTRUCT_ALIGN,
++			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_ACCOUNT,
++			offsetof(struct mm_struct, saved_auxv),
++			sizeof_field(struct mm_struct, saved_auxv),
++			NULL);
++}
+diff --git a/kernel/fork_mm.h b/kernel/fork_mm.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..20996e6921c80eba551140f543fed26c30812cb8
+--- /dev/null
++++ b/kernel/fork_mm.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _KERNEL_FORK_MM_H
++#define _KERNEL_FORK_MM_H
++
++struct mm_struct;
++
++struct mm_struct *allocate_mm(void);
++void free_mm(struct mm_struct *mm);
++
++#ifdef CONFIG_MMU
++void mm_free_pgd(struct mm_struct *mm);
++#else
++#define mm_free_pgd(mm)
++#endif
++int mm_alloc_id(struct mm_struct *mm);
++void mm_free_id(struct mm_struct *mm);
++
++#endif
