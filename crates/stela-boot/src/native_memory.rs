@@ -32,7 +32,9 @@ impl Drop for LinuxPages {
 // SAFETY: initialize registered the heap and its WB mapping. The catalog
 // count prevents retargeting the generation; each allocation goes through the
 // zeroed page source and keeps its backing until the last drop. Unsupported
-// flags and contexts are refused before any heap or cache work.
+// flags and contexts are refused before any heap or cache work. Reclaimable
+// requests take the same unmovable RAM, Linux's permitted fallback, and one
+// that may not block is met as any other: nothing here sleeps or reclaims.
 unsafe impl stela_drivers::gpu::linux::pages::Provider for LinuxPages {
     fn validate(
         &self,
@@ -40,8 +42,7 @@ unsafe impl stela_drivers::gpu::linux::pages::Provider for LinuxPages {
     ) -> Result<(), MemoryError> {
         if SOURCE.registration().generation != self.generation
             || request.atomic
-            || !request.basic_ram()
-            || !request.may_block()
+            || !(request.basic_ram() || request.reclaimable_ram())
         {
             return Err(MemoryError::Unavailable);
         }
