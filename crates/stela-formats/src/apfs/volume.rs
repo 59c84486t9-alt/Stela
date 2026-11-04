@@ -457,35 +457,34 @@ impl Volume {
     pub fn inode<R: ReadAt>(&self, device: &mut Device<R>, oid: u64) -> Result<Inode> {
         let mut found = None;
         self.records(device, oid, APFS_TYPE_INODE, &mut |_, value| {
-            found = Some(value.to_vec());
+            let mode = u16_at(value, 80)?;
+            let internal_flags = u64_at(value, 48)?;
+            let mut size = 0;
+            let mut name = None;
+            for (kind, data) in extended_fields(value.get(92..).unwrap_or(&[]))? {
+                match kind {
+                    INO_EXT_TYPE_DSTREAM => size = u64_at(data, 0)?,
+                    INO_EXT_TYPE_NAME => name = Some(c_string(data)?),
+                    _ => {}
+                }
+            }
+            found = Some(Inode {
+                oid,
+                parent: u64_at(value, 0)?,
+                private_id: u64_at(value, 8)?,
+                kind: FileKind::from_mode(mode),
+                mode,
+                bsd_flags: u32_at(value, 68)?,
+                internal_flags,
+                size,
+                uncompressed_size: (internal_flags & INODE_HAS_UNCOMPRESSED_SIZE != 0)
+                    .then(|| u64_at(value, 84))
+                    .transpose()?,
+                name,
+            });
             Ok(Visit::Stop)
         })?;
-        let value = found.ok_or_else(|| ApfsError::NotFound(format!("inode {oid}")))?;
-        let mode = u16_at(&value, 80)?;
-        let internal_flags = u64_at(&value, 48)?;
-        let mut size = 0;
-        let mut name = None;
-        for (kind, data) in extended_fields(value.get(92..).unwrap_or(&[]))? {
-            match kind {
-                INO_EXT_TYPE_DSTREAM => size = u64_at(data, 0)?,
-                INO_EXT_TYPE_NAME => name = Some(c_string(data)?),
-                _ => {}
-            }
-        }
-        Ok(Inode {
-            oid,
-            parent: u64_at(&value, 0)?,
-            private_id: u64_at(&value, 8)?,
-            kind: FileKind::from_mode(mode),
-            mode,
-            bsd_flags: u32_at(&value, 68)?,
-            internal_flags,
-            size,
-            uncompressed_size: (internal_flags & INODE_HAS_UNCOMPRESSED_SIZE != 0)
-                .then(|| u64_at(&value, 84))
-                .transpose()?,
-            name,
-        })
+        found.ok_or_else(|| ApfsError::NotFound(format!("inode {oid}")))
     }
 
     fn visit_entries<R: ReadAt>(
