@@ -11,13 +11,24 @@
 //! call would hold up every PE, so [`GateService::signaled`] only reads a
 //! flag. The platform reports each GPU interrupt ([`SharedService::interrupted`]);
 //! whoever next holds the service looks at the device for what completed.
-use super::{Service, wire::Status};
+//!
+//! A `Poll` that finds another call holding the service is answered with the
+//! newest serial a holder saw completed, rather than waiting out a commit or
+//! a compile: the completion interrupt that wakes a frontend's poll is raised
+//! only once a holder has seen that serial, so the answer covers it. Only a
+//! connection whose poll the service itself answered is answered this way,
+//! and never once the device is lost.
+use super::{
+    Service,
+    wire::{self, GateCall, Operation, Status},
+};
 use crate::metal::{shader::Compiler, vulkan::backend::Backend};
 use core::{
     cell::UnsafeCell,
+    mem::size_of,
     num::NonZeroU64,
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use stela_contracts::gate::{CallerFault, CallerMemory, GateService, MemoryRange};
 
@@ -28,8 +39,18 @@ pub struct SharedService<B: Backend, C: Compiler> {
     stale: AtomicBool,
     /// Completed work the gate has not taken.
     completed: AtomicBool,
+    /// The newest serial a holder saw completed, and whether the device
+    /// is lost, as the last holder left them.
+    reached: AtomicU64,
+    lost: AtomicBool,
+    /// Connections whose `Poll` the service answered, zero for a free slot:
+    /// those a busy service answers from `reached`.
+    polling: [AtomicU64; POLLING],
     host: ServiceHost,
 }
+
+/// More connections than a device's gates open.
+const POLLING: usize = 64;
 
 /// What the platform does for the shared service.
 #[derive(Clone, Copy)]
@@ -103,6 +124,11 @@ impl<B: Backend, C: Compiler> Drop for Turn<'_, B, C> {
         if completed || self.retiring() {
             self.0.completed.store(true, Ordering::Release);
         }
+        let device = self.device();
+        let (reached, lost) = (device.completed_serial(), device.is_lost());
+        // Only the holder writes it, and a reopened device counts afresh.
+        self.0.reached.store(reached, Ordering::Release);
+        self.0.lost.store(lost, Ordering::Release);
         self.0.locked.store(false, Ordering::SeqCst);
         if self.0.stale.load(Ordering::SeqCst) {
             self.0.interrupted();
@@ -117,8 +143,54 @@ impl<B: Backend, C: Compiler> SharedService<B, C> {
             locked: AtomicBool::new(false),
             stale: AtomicBool::new(false),
             completed: AtomicBool::new(false),
+            reached: AtomicU64::new(0),
+            lost: AtomicBool::new(false),
+            polling: [const { AtomicU64::new(0) }; POLLING],
             host,
         }
+    }
+
+    fn polls(&self, connection: NonZeroU64) -> bool {
+        self.polling
+            .iter()
+            .any(|slot| slot.load(Ordering::Acquire) == connection.get())
+    }
+
+    /// Answers `connection`'s `Poll` at `record` from `reached`, or leaves
+    /// the call to the service: any other operation or record, a connection
+    /// the service never answered a poll for, a lost device, or a span out
+    /// of the caller's reach.
+    pub(super) fn poll_while_held(
+        &self,
+        connection: NonZeroU64,
+        record: u64,
+        caller: &mut dyn CallerMemory,
+    ) -> bool {
+        if self.lost.load(Ordering::Acquire) || !self.polls(connection) {
+            return false;
+        }
+        let mut raw = [0; size_of::<GateCall>()];
+        if caller.read(record, &mut raw).is_err() {
+            return false;
+        }
+        let mut call: GateCall = wire::read(&raw).expect("a record of its own size");
+        if call.operation != Operation::Poll.raw()
+            || call.response.length != size_of::<wire::Value>() as u64
+        {
+            return false;
+        }
+        let value = wire::Value {
+            value: self.reached.load(Ordering::Acquire),
+        };
+        let mut response = [0; size_of::<wire::Value>()];
+        wire::write(&value, &mut response).expect("a record of its own size");
+        if caller.write(call.response.address, &response).is_err() {
+            return false;
+        }
+        call.status = Status::Ok.raw();
+        call.reason_length = 0;
+        wire::write(&call, &mut raw).expect("a record of its own size");
+        caller.write(record, &raw).is_ok()
     }
 
     pub(super) fn try_turn(&self) -> Option<Turn<'_, B, C>> {
@@ -173,6 +245,9 @@ impl<B: Backend + Send, C: Compiler + Send> GateService for SharedService<B, C> 
     }
 
     fn disconnect(&self, connection: NonZeroU64) {
+        for slot in &self.polling {
+            let _ = slot.compare_exchange(connection.get(), 0, Ordering::AcqRel, Ordering::Acquire);
+        }
         // The gate closes only connections it opened and holds.
         let closed = self.call(|service| service.disconnect(connection));
         debug_assert!(closed.is_ok());
@@ -185,7 +260,20 @@ impl<B: Backend + Send, C: Compiler + Send> GateService for SharedService<B, C> 
         caller: &mut dyn CallerMemory,
     ) -> Result<(), CallerFault> {
         let rang = (self.host.ticks)();
-        let mut turn = self.turn();
+        let mut turn = match self.try_turn() {
+            Some(turn) => turn,
+            None if self.poll_while_held(connection, record, caller) => {
+                let left = (self.host.ticks)();
+                (self.host.served)(Served {
+                    operation: Operation::Poll.raw(),
+                    status: Status::Ok,
+                    waited: 0,
+                    held: left.wrapping_sub(rang),
+                });
+                return Ok(());
+            }
+            None => self.turn(),
+        };
         let entered = (self.host.ticks)();
         let mut answer = None;
         (self.host.run)(self.host.stack, &mut || {
@@ -195,6 +283,13 @@ impl<B: Backend + Send, C: Compiler + Send> GateService for SharedService<B, C> 
         drop(turn);
         let (served, refused, noted, (operation, status)) =
             answer.expect("the platform runs what it is given");
+        if operation == Operation::Poll.raw() && status == Status::Ok && !self.polls(connection) {
+            // Slots fill in order; one taken by a closed connection is freed.
+            let _ = self.polling.iter().find(|slot| {
+                slot.compare_exchange(0, connection.get(), Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            });
+        }
         let left = (self.host.ticks)();
         (self.host.served)(Served {
             operation,

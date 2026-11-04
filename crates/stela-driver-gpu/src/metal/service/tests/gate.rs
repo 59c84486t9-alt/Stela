@@ -214,6 +214,60 @@ fn the_shared_service_finds_completed_work_only_after_an_interrupt() {
     assert!(!shared.signaled());
 }
 
+/// A `Poll` call's answered serial.
+fn polled(memory: &mut Memory, record: u64) -> u64 {
+    let call = completed(memory, record);
+    assert_eq!(call.status, Status::Ok.raw());
+    let bytes = GuestMemory::read(memory, call.response).unwrap();
+    let wire::Value { value } = wire::read(&bytes).unwrap();
+    value
+}
+
+#[test]
+fn a_poll_while_another_call_holds_the_service_answers_what_completed() {
+    let shared = SharedService::new(service(), HOST);
+    let connection = connect(&mut shared.try_turn().unwrap());
+    let mut memory = Memory::default();
+    commit_shared(&shared, connection);
+    complete(&shared);
+    shared.interrupted();
+    // The service answers the connection's first poll itself.
+    let first = gate_call(&mut memory, Operation::Poll, &[], 8);
+    GateService::serve(&shared, connection, first, &mut memory).unwrap();
+    assert_eq!(polled(&mut memory, first), 1);
+    // `HOST.relax` panics, so a poll that waited for this holder would fail.
+    let held = shared.try_turn().unwrap();
+    let busy = gate_call(&mut memory, Operation::Poll, &[], 8);
+    GateService::serve(&shared, connection, busy, &mut memory).unwrap();
+    assert_eq!(polled(&mut memory, busy), 1);
+    drop(held);
+}
+
+#[test]
+fn only_a_connection_the_service_answered_polls_while_it_is_held() {
+    let shared = SharedService::new(service(), HOST);
+    let connection = connect(&mut shared.try_turn().unwrap());
+    let mut memory = Memory::default();
+    let record = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let held = shared.try_turn().unwrap();
+    assert!(!shared.poll_while_held(connection, record, &mut memory));
+    assert_eq!(
+        completed(&mut memory, record).status,
+        u32::MAX,
+        "left unanswered"
+    );
+    drop(held);
+    GateService::serve(&shared, connection, record, &mut memory).unwrap();
+    assert_eq!(polled(&mut memory, record), 0);
+    let held = shared.try_turn().unwrap();
+    let again = gate_call(&mut memory, Operation::Commit, &[], 8);
+    assert!(
+        !shared.poll_while_held(connection, again, &mut memory),
+        "only polls are answered without a turn"
+    );
+    drop(held);
+}
+
 #[test]
 fn every_call_runs_where_the_platform_says() {
     static RUNS: AtomicUsize = AtomicUsize::new(0);

@@ -197,6 +197,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.lost
     }
 
+    /// The newest serial a poll saw completed, without asking the GPU.
+    pub fn completed_serial(&self) -> u64 {
+        self.completed
+    }
+
     /// `currentAllocatedSize`, including allocations pending GPU completion.
     pub fn current_allocated_size(&self) -> u64 {
         self.allocated
