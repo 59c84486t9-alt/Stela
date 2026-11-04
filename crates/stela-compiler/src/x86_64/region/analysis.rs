@@ -1,6 +1,7 @@
 //! Liveness analysis. Every GPR is live at a region exit.
 use super::location::GPR_SLOTS;
 use super::{BYTE_LOAD_BYTES, DOUBLEWORD_LOAD_BYTES, HALFWORD_LOAD_BYTES, WORD_LOAD_BYTES};
+use crate::aarch64::bitfield::{Kind as BitfieldKind, Operand as Bitfield};
 use crate::aarch64::integer_math::Kind as IntegerMath;
 use crate::aarch64::{
     AddressMode, Instruction, MemoryTransfer, Operation, Register, Shift, WideMove, Width,
@@ -23,6 +24,24 @@ fn valid(register: Register) -> bool {
 }
 fn bits(width: Width) -> u8 {
     if width == Width::X64 { 64 } else { 32 }
+}
+
+/// The nonzero-count LSL, LSR and ASR aliases have the same result as a
+/// sized host shift. General extracts, inserts and extensions do not.
+pub(super) fn bitfield_shift(operand: Bitfield) -> Option<(Shift, u8)> {
+    let width = bits(operand.width);
+    let rotation = operand.rotation;
+    if rotation == 0 || rotation >= width {
+        return None;
+    }
+    match operand.kind {
+        BitfieldKind::Unsigned if operand.mask_end == width - 1 => Some((Shift::Lsr, rotation)),
+        BitfieldKind::Signed if operand.mask_end == width - 1 => Some((Shift::Asr, rotation)),
+        BitfieldKind::Unsigned if operand.mask_end.checked_add(1) == Some(rotation) => {
+            Some((Shift::Lsl, width - rotation))
+        }
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,10 +275,34 @@ pub fn clean_access_effects(operation: &Operation, stack_alignment: bool) -> Opt
 pub fn prefix_clean_access_effects(
     instructions: &[Instruction],
     stack_alignment: bool,
+    allow_shifts: bool,
 ) -> Vec<Effects> {
+    let mut written = 0;
     instructions
         .iter()
-        .map_while(|instruction| clean_access_effects(&instruction.operation, stack_alignment))
+        .map_while(|instruction| {
+            let effect = if allow_shifts && let Operation::Bitfield(operand) = instruction.operation
+            {
+                bitfield_shift(operand)?;
+                if operand.source == Register::Sp || operand.destination == Register::Sp {
+                    return None;
+                }
+                let reads = 1 << slot(operand.source)?;
+                // Admit a shift as a consumer of a value produced in the
+                // region. A standalone shift keeps its own ordinary lowering.
+                if written & reads == 0 {
+                    return None;
+                }
+                Effects {
+                    reads,
+                    writes: 1 << slot(operand.destination)?,
+                }
+            } else {
+                clean_access_effects(&instruction.operation, stack_alignment)?
+            };
+            written |= effect.writes;
+            Some(effect)
+        })
         .collect()
 }
 
