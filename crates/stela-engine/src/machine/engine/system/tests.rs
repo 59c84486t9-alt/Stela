@@ -419,6 +419,54 @@ fn guest_context_changes_isolate_branch_predictions() {
 }
 
 #[test]
+fn contextidr_updates_live_debug_and_predictions_without_forgetting_cached_controls() {
+    const CONTEXTIDR_EL1: Encoding = Encoding::new(3, 0, 13, 0, 1);
+    let mut machine = machine_on(Chip::AppleM2, &[]);
+    machine.cpu.pstate = Pstate {
+        daif: 0,
+        ..Pstate::reset(1)
+    };
+    let registers = &mut machine.cpu.registers;
+    registers.set(Register::CNTHP_CTL_EL2, 0, 1);
+    registers.set(Register::CNTHP_CVAL_EL2, 0, 400);
+    registers.set(Register::OSLSR_EL1, 0, 0b1000);
+    registers.set(Register::MDSCR_EL1, 0, 1 << 15 | 1 << 13);
+    // Address breakpoint 0 is linked to context-aware breakpoint 5.
+    registers.set(Register::DBGBVR_EL1, 0, 0x8000);
+    registers.set(
+        Register::DBGBCR_EL1,
+        0,
+        1 << 20 | 5 << 16 | 0b1111 << 5 | 0b01 << 1 | 1,
+    );
+    registers.set(Register::DBGBVR_EL1, 5, 0x42);
+    registers.set(
+        Register::DBGBCR_EL1,
+        5,
+        0b0011 << 20 | 0b1111 << 5 | 0b11 << 1 | 1,
+    );
+    assert_eq!(machine.timer_deadline(), Some(400));
+    machine.floating_point_enabled();
+    machine.memory_checks();
+    machine.native_system();
+    let debug = machine.debug_mode();
+    assert!(!crate::machine::debug::breakpoint(&machine.cpu, 0x8000));
+    let isolations = machine.host.isolations;
+    let regimes = machine.host.regimes.len();
+    machine.cpu.state.x[1] = 0x42;
+    machine
+        .system_instruction(access(false, CONTEXTIDR_EL1, 1))
+        .unwrap();
+    assert_eq!(machine.host.isolations, isolations + 1);
+    assert_eq!(machine.host.regimes.len(), regimes + 1);
+    assert_eq!(machine.timers, Some(Some(400)));
+    assert!(machine.floating_point.is_some());
+    assert!(machine.memory_checks.is_some());
+    assert!(machine.native_system.is_some());
+    assert_eq!(machine.debug, Some(debug));
+    assert!(crate::machine::debug::breakpoint(&machine.cpu, 0x8000));
+}
+
+#[test]
 fn ccsidr_reads_the_cache_csselr_selects() {
     use {
         stela_contracts::caches::Cache, stela_contracts::caches::Caches,
