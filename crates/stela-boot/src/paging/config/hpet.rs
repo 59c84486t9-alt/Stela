@@ -64,6 +64,7 @@ impl Source {
         let descriptor = self.platform.hpet()?;
         let registers = descriptor.registers();
         let span = PhysicalSpan::new(registers.start(), PAGE as u64).map_err(Error::Mapping)?;
+        self.exclude_ecam(span)?;
         let mut assignment = Assignment::from_owned(RegisterReservation {
             platform: self.platform.clone(),
             _span: span,

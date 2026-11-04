@@ -5,7 +5,7 @@ use super::{
     vtd::{self, MmioRegisters, Registers, Unit},
 };
 use crate::Result;
-use alloc::{format, string::String, vec::Vec};
+use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::{ops::Range, ptr::NonNull};
 use stela_contracts::refuse;
 use stela_drivers::{
@@ -17,13 +17,15 @@ use stela_drivers::{
         },
         pci::{
             Bar, CAPABILITY_EXPRESS, CAPABILITY_VENDOR, ConfigError, ConfigSpace,
-            Function as PciFunction, owned::OwnedConfig,
+            Function as PciFunction,
+            owned::{OwnedConfig, UnpublishedConfig},
         },
     },
 };
 use stela_runtime::pc::acpi;
 
 type Function = PciFunction<OwnedConfig>;
+pub(crate) type UnpublishedFunction = PciFunction<UnpublishedConfig>;
 
 const EDU_VENDOR: u16 = 0x1234;
 const EDU_DEVICE: u16 = 0x11e8;
@@ -121,7 +123,7 @@ fn config_error(error: ConfigError) -> crate::Refusal {
     refuse!("fixture PCI configuration: {error}", %error)
 }
 
-fn read_command(config: &OwnedConfig) -> Result<u16> {
+fn read_command(config: &impl ConfigSpace) -> Result<u16> {
     let command = config.read16(COMMAND).map_err(config_error)?;
     if command == u16::MAX {
         return Err(refuse!("fixture PCI command read returned all ones"));
@@ -400,7 +402,10 @@ impl Prepared {
         ranges
     }
 
-    pub(crate) fn bind(self, source: &crate::paging::config::Source) -> Result<Prepared<Function>> {
+    pub(crate) fn bind(
+        self,
+        source: &crate::paging::config::Source,
+    ) -> Result<Prepared<UnpublishedFunction>> {
         let mut actual = Vec::new();
         for window in source.windows() {
             actual.extend(
@@ -425,10 +430,21 @@ impl Prepared {
         let ranges = self.mappings();
         let mut functions = Vec::new();
         for (index, identity) in self.functions.into_iter().enumerate() {
+            let permit = ConfigPermit {
+                source,
+                address: identity.address,
+                set_command: if index == self.edu
+                    || self.second.as_ref().is_some_and(|(i, _)| index == *i)
+                {
+                    MEMORY | INTX_DISABLE
+                } else {
+                    0
+                },
+            };
             let config = source
-                .config(identity.address)
+                .fixture_config(&permit)
                 .map_err(|error| refuse!("fixture owned config: {error}", %error))?;
-            let mut function = Function::new(identity.address, config).map_err(
+            let mut function = PciFunction::new(identity.address, config).map_err(
                 |refusal| refuse!("fixture requester bind: {reason}", reason = ?refusal.reason),
             )?;
             if function.identity() != identity {
@@ -512,111 +528,9 @@ impl Prepared<Function> {
         }
     }
 
-    /// Only after EBS on the prepared UC mappings, with interrupts off. Any
-    /// error must stop the host check; normal probing cannot resume into an
-    /// uncertain translation state. Unit/lease Drop keeps uncertain resources.
-    pub(crate) fn run(mut self) -> Result<Report> {
-        self.quiesce()?;
-        if self.second.is_some() {
-            return super::isolation_diagnostic::run(self).map(Report::Isolation);
-        }
-        self.run_single(None)
-            .map(|(dma, irq)| Report::Single(dma, irq))
-    }
-
-    pub(crate) fn run_irq_work(
-        mut self,
-        work: crate::native_work_check::Prepared,
-    ) -> Result<Report> {
-        self.quiesce()?;
-        if self.second.is_some() {
-            return Err(refuse!("IRQ work requires the single EDU grant"));
-        }
-        self.run_single(Some(work))
-            .map(|(dma, irq)| Report::IrqWork(format!("{dma}; {irq}")))
-    }
-
-    fn quiesce(&mut self) -> Result<()> {
-        // QEMU v11.1.2 i8257.c: write-all-mask stops each channel, including
-        // controller two's cascade. Its single-threaded device callbacks are
-        // synchronous; the next run sees all masks before any channel handler.
-        // Read-mask is controller offset one (0x09 and 0xd2), not write-all-mask.
-        // The exact Q35 host bridge has no DMA engine. This validation is
-        // specific to the granted TCG fixture and never physical quiescence.
-        for (write, read) in [(0x0fu16, 0x09u16), (0xde, 0xd2)] {
-            let mask: u8;
-            // SAFETY: exclusive known QEMU i8257 controllers after EBS; all
-            // channels are disabled for this bounded fixture.
-            unsafe {
-                core::arch::asm!("out dx, al", in("dx") write, in("al") 15u8, options(nostack, preserves_flags));
-                core::arch::asm!("in al, dx", in("dx") read, out("al") mask, options(nostack, preserves_flags));
-            }
-            if mask & 15 != 15 {
-                return Err(refuse!("fixture legacy DMA mask did not latch"));
-            }
-        }
-        for (index, function) in self.functions.iter_mut().enumerate() {
-            if index != self.edu
-                && self.second.as_ref().is_none_or(|(i, _)| index != *i)
-                && index != self.virtio
-            {
-                let config = function.config();
-                let command = read_command(config)?;
-                config
-                    .write16(COMMAND, command & !BUS_MASTER)
-                    .map_err(config_error)?;
-                if read_command(config)? & BUS_MASTER != 0 {
-                    return Err(refuse!("fixture chipset bus master remained enabled"));
-                }
-            }
-        }
-        // SAFETY: Reset the firmware boot virtio device and observe status zero
-        // before clearing bus mastering. Its reset acknowledgement, not the
-        // command bit alone, proves virtio has stopped accessing its queues.
-        unsafe { (self.virtio_status as *mut u8).write_volatile(0) };
-        if !self.clock.wait(
-            TIMEOUT_US,
-            // SAFETY: `virtio_status` is the boot virtio function's mapped device status
-            // register.
-            || unsafe { (self.virtio_status as *const u8).read_volatile() } == 0,
-        ) {
-            return Err(refuse!("virtio reset did not quiesce DMA"));
-        }
-        let config = self.functions[self.virtio].config();
-        let command = read_command(config)?;
-        config
-            .write16(COMMAND, command & !BUS_MASTER)
-            .map_err(config_error)?;
-        if read_command(config)? & BUS_MASTER != 0 {
-            return Err(refuse!("virtio bus master remained enabled"));
-        }
-        let mut devices = alloc::vec![(self.edu, self.edu_registers.clone())];
-        if let Some(second) = &self.second {
-            devices.push(second.clone());
-        }
-        for (index, bar) in devices {
-            let config = self.functions[index].config();
-            let command = read_command(config)?;
-            config
-                .write16(COMMAND, (command | MEMORY | INTX_DISABLE) & !BUS_MASTER)
-                .map_err(config_error)?;
-            let device = Device {
-                edu_registers: bar,
-                clock: self.clock,
-            };
-            if device.read32(0) != 0x010000ed
-                || device.read32(0x20) & 1 != 0
-                || device.read64(DMA_COMMAND) & DMA_RUN != 0
-                || device.read32(0x24) != 0
-            {
-                return Err(refuse!("EDU is not the supported idle QEMU fixture"));
-            }
-            device.write32(0x20, 0);
-            device.write32(0x64, u32::MAX);
-        }
-        // Device-specific reset/idle ACK above establishes real fixture
-        // quiescence. Only now size BARs through native config owners;
-        // firmware descriptors were candidates, never native access grants.
+    fn check_bars(&mut self) -> Result<()> {
+        // The original fixture completed device stops and blocked-root
+        // takeover before the final writer may temporarily size BARs.
         for (index, function) in self.functions.iter_mut().enumerate() {
             let selected = index == self.edu
                 || index == self.virtio
@@ -635,59 +549,19 @@ impl Prepared<Function> {
 
     fn run_single(
         mut self,
+        unit: Arc<Unit<MmioRegisters>>,
+        table_walk_coherent: bool,
         work: Option<crate::native_work_check::Prepared>,
     ) -> Result<(String, String)> {
         let device = self.device();
-        let timeout = self
-            .clock
-            .ticks_per_microsecond
-            .checked_mul(TIMEOUT_US)
-            .ok_or_else(|| refuse!("fixture timeout overflow"))?;
-        // SAFETY: strict fixture discovery supplies the UC unit window;
-        // root mappings keep it, clock advances on this one BSP.
-        let registers = unsafe {
-            MmioRegisters::new(
-                NonNull::new(self.hardware.base as *mut u8)
-                    .ok_or_else(|| refuse!("zero unit base"))?,
-                self.hardware.bytes,
-                crate::apic::rdtsc,
-                timeout,
-            )
-        }
-        .map_err(|error| refuse!("VT-d registers: {error}", ?error))?;
-        let table_walk_coherent = registers.read64(0x10) & 1 != 0;
         let address = self.functions[self.edu].address;
         let requester = u16::from(address.bus) << 8
             | u16::from(address.device) << 3
             | u16::from(address.function);
-        // SAFETY: QEMU-only flat topology, exact matched DMAR owner; all
-        // other requesters are reset/drained, EDU idle, ATS/NoSnoop off.
-        let requesters: Vec<u16> = self
-            .functions
-            .iter()
-            .map(|f| u16::from(f.address.device) * 8 + u16::from(f.address.function))
-            .collect();
         let function = self.functions.swap_remove(self.edu);
         // SAFETY: same exclusive, idle fixture function and kept root.
         let claim = unsafe { super::requester::RequesterClaim::from_stopped_pci(function) }
             .map_err(|error| refuse!("requester claim: {error}", ?error))?;
-        // SAFETY: the unit window is this fixture's matched DMAR unit and every listed requester
-        // was reset and stopped above.
-        let unit = unsafe {
-            Unit::take_over(
-                registers,
-                &crate::native_memory::SOURCE,
-                &requesters,
-                self.hardware.physical_bits,
-                &[],
-            )
-        }
-        .map_err(|error| {
-            refuse!(
-                "VT-d takeover: {error}; no normal probing permitted",
-                ?error
-            )
-        })?;
         // SAFETY: same stopped requester epoch and coherent grant.
         let domain = unsafe { unit.attach_requester(claim) }
             .map_err(|error| refuse!("requester domain: {error}", ?error))?;
@@ -872,6 +746,237 @@ impl Prepared<Function> {
             .run(function, self.edu_registers.start, self.clock)?;
         retire_registers(self.register_mappings)?;
         Ok((dma, format!("{irq}; {level}")))
+    }
+}
+
+impl Prepared<UnpublishedFunction> {
+    /// Only after EBS on the prepared UC mappings, with interrupts off. Any
+    /// error must stop the host check; normal probing cannot resume into an
+    /// uncertain translation state. Unit/lease Drop keeps uncertain resources.
+    pub(crate) fn run(mut self) -> Result<Report> {
+        self.quiesce()?;
+        let (unit, table_walk_coherent) = self.take_unit()?;
+        let mut prepared = self.promote(&unit)?;
+        prepared.check_bars()?;
+        if prepared.second.is_some() {
+            return super::isolation_diagnostic::run(prepared, unit).map(Report::Isolation);
+        }
+        prepared
+            .run_single(unit, table_walk_coherent, None)
+            .map(|(dma, irq)| Report::Single(dma, irq))
+    }
+
+    pub(crate) fn run_irq_work(
+        mut self,
+        work: crate::native_work_check::Prepared,
+    ) -> Result<Report> {
+        self.quiesce()?;
+        if self.second.is_some() {
+            return Err(refuse!("IRQ work requires the single EDU grant"));
+        }
+        let (unit, table_walk_coherent) = self.take_unit()?;
+        let mut prepared = self.promote(&unit)?;
+        prepared.check_bars()?;
+        prepared
+            .run_single(unit, table_walk_coherent, Some(work))
+            .map(|(dma, irq)| Report::IrqWork(format!("{dma}; {irq}")))
+    }
+
+    fn quiesce(&mut self) -> Result<()> {
+        // QEMU v11.1.2 i8257.c: write-all-mask stops each channel, including
+        // controller two's cascade. Its single-threaded device callbacks are
+        // synchronous; the next run sees all masks before any channel handler.
+        // Read-mask is controller offset one (0x09 and 0xd2), not write-all-mask.
+        // The exact Q35 host bridge has no DMA engine. This validation is
+        // specific to the granted TCG fixture and never physical quiescence.
+        for (write, read) in [(0x0fu16, 0x09u16), (0xde, 0xd2)] {
+            let mask: u8;
+            // SAFETY: exclusive known QEMU i8257 controllers after EBS; all
+            // channels are disabled for this bounded fixture.
+            unsafe {
+                core::arch::asm!("out dx, al", in("dx") write, in("al") 15u8, options(nostack, preserves_flags));
+                core::arch::asm!("in al, dx", in("dx") read, out("al") mask, options(nostack, preserves_flags));
+            }
+            if mask & 15 != 15 {
+                return Err(refuse!("fixture legacy DMA mask did not latch"));
+            }
+        }
+        for (index, function) in self.functions.iter_mut().enumerate() {
+            if index != self.edu
+                && self.second.as_ref().is_none_or(|(i, _)| index != *i)
+                && index != self.virtio
+            {
+                let config = function.config();
+                let command = read_command(config)?;
+                config
+                    .write16(COMMAND, command & !BUS_MASTER)
+                    .map_err(config_error)?;
+                if read_command(config)? & BUS_MASTER != 0 {
+                    return Err(refuse!("fixture chipset bus master remained enabled"));
+                }
+            }
+        }
+        // SAFETY: Reset the firmware boot virtio device and observe status zero
+        // before clearing bus mastering. Its reset acknowledgement, not the
+        // command bit alone, proves virtio has stopped accessing its queues.
+        unsafe { (self.virtio_status as *mut u8).write_volatile(0) };
+        if !self.clock.wait(
+            TIMEOUT_US,
+            // SAFETY: `virtio_status` is the boot virtio function's mapped device status
+            // register.
+            || unsafe { (self.virtio_status as *const u8).read_volatile() } == 0,
+        ) {
+            return Err(refuse!("virtio reset did not quiesce DMA"));
+        }
+        let config = self.functions[self.virtio].config();
+        let command = read_command(config)?;
+        config
+            .write16(COMMAND, command & !BUS_MASTER)
+            .map_err(config_error)?;
+        if read_command(config)? & BUS_MASTER != 0 {
+            return Err(refuse!("virtio bus master remained enabled"));
+        }
+        let mut devices = alloc::vec![(self.edu, self.edu_registers.clone())];
+        if let Some(second) = &self.second {
+            devices.push(second.clone());
+        }
+        for (index, bar) in devices {
+            let config = self.functions[index].config();
+            let command = read_command(config)?;
+            config
+                .write16(COMMAND, (command | MEMORY | INTX_DISABLE) & !BUS_MASTER)
+                .map_err(config_error)?;
+            let device = Device {
+                edu_registers: bar,
+                clock: self.clock,
+            };
+            if device.read32(0) != 0x010000ed
+                || device.read32(0x20) & 1 != 0
+                || device.read64(DMA_COMMAND) & DMA_RUN != 0
+                || device.read32(0x24) != 0
+            {
+                return Err(refuse!("EDU is not the supported idle QEMU fixture"));
+            }
+            device.write32(0x20, 0);
+            device.write32(0x64, u32::MAX);
+        }
+        Ok(())
+    }
+
+    fn promote(self, unit: &Arc<Unit<MmioRegisters>>) -> Result<Prepared<Function>> {
+        let mut functions = Vec::new();
+        functions
+            .try_reserve_exact(self.functions.len())
+            .map_err(|_| refuse!("fixture final owner inventory allocation"))?;
+        for function in self.functions {
+            let identity = function.identity();
+            let address = identity.address;
+            let rid = u16::from(address.bus) << 8
+                | u16::from(address.device) << 3
+                | u16::from(address.function);
+            if !unit.allows(rid) {
+                return Err(refuse!("fixture original unit omitted a requester"));
+            }
+            // SAFETY: this exact cohort was reset/stopped, then the one
+            // original unit installed and acknowledged its blocked root.
+            // No other CPU, firmware, C or driver writer can restart it.
+            let config = unsafe {
+                function.into_config().promote(
+                    |source: &mut crate::paging::config::FixtureConfig| source.publish_driver(),
+                )
+            }
+            .map_err(|(error, _original)| {
+                refuse!("fixture final configuration: {error}", ?error)
+            })?;
+            let function = Function::new(address, config).map_err(
+                |refusal| refuse!("fixture final identity: {error}", error = ?refusal.reason),
+            )?;
+            if function.identity() != identity {
+                return Err(refuse!("fixture identity changed at promotion"));
+            }
+            functions.push(function);
+        }
+        Ok(Prepared {
+            hardware: self.hardware,
+            functions,
+            edu: self.edu,
+            virtio: self.virtio,
+            edu_registers: self.edu_registers,
+            virtio_status: self.virtio_status,
+            virtio_resource: self.virtio_resource,
+            bars: self.bars,
+            clock: self.clock,
+            register_mappings: self.register_mappings,
+            level: self.level,
+            second: self.second,
+        })
+    }
+
+    /// Install the blocked initial context for the whole actual fixture
+    /// cohort after the device-specific stops, before either test binds DMA.
+    fn take_unit(&self) -> Result<(Arc<Unit<MmioRegisters>>, bool)> {
+        let timeout = self
+            .clock
+            .ticks_per_microsecond
+            .checked_mul(TIMEOUT_US)
+            .ok_or_else(|| refuse!("fixture timeout overflow"))?;
+        // SAFETY: strict fixture discovery supplies the UC unit window;
+        // root mappings keep it, clock advances on this one BSP.
+        let registers = unsafe {
+            MmioRegisters::new(
+                NonNull::new(self.hardware.base as *mut u8)
+                    .ok_or_else(|| refuse!("zero unit base"))?,
+                self.hardware.bytes,
+                crate::apic::rdtsc,
+                timeout,
+            )
+        }
+        .map_err(|error| refuse!("VT-d registers: {error}", ?error))?;
+        let table_walk_coherent = registers.read64(0x10) & 1 != 0;
+        let requesters: Vec<u16> = self
+            .functions
+            .iter()
+            .map(|function| {
+                let address = function.address;
+                u16::from(address.bus) << 8
+                    | u16::from(address.device) << 3
+                    | u16::from(address.function)
+            })
+            .collect();
+        // SAFETY: the unit window is this fixture's matched DMAR unit and every listed requester
+        // was reset and stopped above.
+        let unit = unsafe {
+            Unit::take_over(
+                registers,
+                &crate::native_memory::SOURCE,
+                &requesters,
+                self.hardware.physical_bits,
+                &[],
+            )
+        }
+        .map_err(|error| {
+            refuse!(
+                "VT-d takeover: {error}; no normal probing permitted",
+                ?error
+            )
+        })?;
+        Ok((unit, table_walk_coherent))
+    }
+}
+
+/// A one-slot request from the exact post-EBS fixture census.
+pub(crate) struct ConfigPermit<'a> {
+    source: &'a crate::paging::config::Source,
+    address: stela_drivers::bus::pci::Address,
+    set_command: u16,
+}
+
+impl ConfigPermit<'_> {
+    pub(crate) fn for_source(
+        &self,
+        source: &crate::paging::config::Source,
+    ) -> Option<(stela_drivers::bus::pci::Address, u16)> {
+        core::ptr::eq(source, self.source).then_some((self.address, self.set_command))
     }
 }
 

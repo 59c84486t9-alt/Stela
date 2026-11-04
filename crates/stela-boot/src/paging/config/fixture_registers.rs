@@ -75,6 +75,7 @@ impl Source {
             .checked_sub(range.start)
             .ok_or(Error::ResourceInventory)?;
         let span = PhysicalSpan::new(range.start, bytes).map_err(Error::Mapping)?;
+        self.exclude_ecam(span)?;
         let bytes = usize::try_from(bytes).map_err(|_| Error::ResourceInventory)?;
         self.platform.identity_device(span)?;
 

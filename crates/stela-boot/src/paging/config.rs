@@ -2,6 +2,10 @@
 //! The one native Permission keeps real firmware/root reservations. Captured
 //! MCFG observations alone cannot construct this Source.
 #[cfg(feature = "diagnostics")]
+mod fixture_config;
+#[cfg(feature = "diagnostics")]
+pub(crate) use fixture_config::FixtureConfig;
+#[cfg(feature = "diagnostics")]
 mod fixture_registers;
 #[cfg(feature = "diagnostics")]
 pub(crate) use fixture_registers::FixtureRegisters;
@@ -29,7 +33,6 @@ use stela_drivers::bus::{
     pci::{
         Address, ConfigError, EcamWindow, EnumerationError,
         assignment::{self, Assignment, OpaqueUse, PhysicalAssignment, Retention, UseKind},
-        owned::OwnedConfig,
     },
 };
 
@@ -96,6 +99,8 @@ pub(crate) struct Source {
     buses: Vec<Bus>,
     #[cfg(feature = "diagnostics")]
     hpet_assignment: core::cell::RefCell<Option<Assignment<RegisterReservation>>>,
+    #[cfg(feature = "diagnostics")]
+    issued_config: core::cell::RefCell<Vec<Address>>,
     _local: PhantomData<*mut ()>,
 }
 struct RegisterReservation {
@@ -146,6 +151,17 @@ unsafe impl ResourceBacking for RegisterBacking {
     }
 }
 impl Source {
+    #[cfg(feature = "diagnostics")]
+    fn exclude_ecam(&self, span: PhysicalSpan) -> Result<(), Error> {
+        if self.buses.iter().any(|bus| {
+            let ecam = bus.resource.physical_span();
+            ecam.start() < span.end() && span.start() < ecam.end()
+        }) {
+            return Err(Error::ResourceConflict);
+        }
+        Ok(())
+    }
+
     /// # Safety
     /// Standalone/HostCheck post-EBS BSP owns all captured PCI roots,
     /// excluding firmware/SMM configuration/reset and every competing accessor.
@@ -171,7 +187,7 @@ impl Source {
             let range = window.range();
             let span =
                 PhysicalSpan::new(range.start, range.end - range.start).map_err(Error::Mapping)?;
-            let mut assignment = Assignment::from_owned(RegisterReservation {
+            let assignment = Assignment::from_owned(RegisterReservation {
                 platform: platform.clone(),
                 _span: span,
             });
@@ -180,15 +196,6 @@ impl Source {
                 span,
                 retention: assignment.retain(),
             }));
-            if let Err(refusal) = authority.register_resource(resource.clone()) {
-                let error = refusal.error;
-                drop(refusal.into_resource());
-                drop(resource);
-                if assignment.close().is_ok() {
-                    let _ = assignment.into_original();
-                }
-                return Err(Error::Mapping(error));
-            }
             buses.push(Bus {
                 window,
                 resource,
@@ -201,26 +208,11 @@ impl Source {
             buses,
             #[cfg(feature = "diagnostics")]
             hpet_assignment: core::cell::RefCell::new(None),
+            #[cfg(feature = "diagnostics")]
+            issued_config: core::cell::RefCell::new(Vec::new()),
             _local: PhantomData,
         })
     }
-    /// Exact function access, keeping its real mapping until explicit retirement.
-    pub(crate) fn config(&self, address: Address) -> Result<OwnedConfig, Error> {
-        let (window, mapping) = self.config_mapping(address, Protection::ReadWrite)?;
-        // SAFETY: unique original bus reservation, current root and exact
-        // 4K lease; no raw accessor or second writer is exposed by this Source.
-        match unsafe { OwnedConfig::attach(address, window, mapping) } {
-            Ok(config) => Ok(config),
-            Err((error, mut mapping)) => {
-                // No consumer/device effect occurred. Explicitly retire this
-                // rejected mapping; failure leaves its real owner quarantined.
-                // SAFETY: rejected attachment made no device access and exposed no view.
-                let _ = unsafe { mapping.retire() };
-                Err(Error::Config(error))
-            }
-        }
-    }
-
     fn config_mapping(
         &self,
         address: Address,

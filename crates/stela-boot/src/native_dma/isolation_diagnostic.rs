@@ -6,7 +6,6 @@ use super::{
 };
 use crate::Result;
 use alloc::{format, string::String, sync::Arc, vec::Vec};
-use core::ptr::NonNull;
 use stela_contracts::refuse;
 use stela_drivers::bus::dma::{
     mapping::{Direction, DmaMapping},
@@ -15,7 +14,6 @@ use stela_drivers::bus::dma::{
 
 const BYTES: usize = 4096;
 const BUFFER: u64 = 0x40000;
-const TIMEOUT_US: u64 = 2_000_000;
 
 struct Buffer {
     pages: PinnedPages,
@@ -99,6 +97,7 @@ pub(super) fn run(
     mut prepared: Prepared<
         stela_drivers::bus::pci::Function<stela_drivers::bus::pci::owned::OwnedConfig>,
     >,
+    unit: Arc<Unit<MmioRegisters>>,
 ) -> Result<String> {
     let (second_index, second_bar) = prepared
         .second
@@ -112,28 +111,6 @@ pub(super) fn run(
         edu_registers: second_bar,
         clock: prepared.clock,
     };
-    let timeout = prepared
-        .clock
-        .ticks_per_microsecond
-        .checked_mul(TIMEOUT_US)
-        .ok_or_else(|| refuse!("isolation timeout overflow"))?;
-    // SAFETY: complete DMAR ownership, UC fixture root mapping kept;
-    // both EDUs idle, virtio reset acknowledged and legacy channels masked.
-    let registers = unsafe {
-        MmioRegisters::new(
-            NonNull::new(prepared.hardware.base as *mut u8)
-                .ok_or_else(|| refuse!("zero isolation unit"))?,
-            prepared.hardware.bytes,
-            crate::apic::rdtsc,
-            timeout,
-        )
-    }
-    .map_err(|e| refuse!("isolation registers: {e}", ?e))?;
-    let requesters: Vec<u16> = prepared
-        .functions
-        .iter()
-        .map(|f| u16::from(f.address.device) * 8 + u16::from(f.address.function))
-        .collect();
     // Remove descending indices so both unique configuration owners
     // survive inventory changes. Neither a RID nor an address creates a claim.
     let mut indices = [prepared.edu, second_index];
@@ -150,17 +127,6 @@ pub(super) fn run(
         );
     }
     claims.sort_unstable_by_key(RequesterClaim::requester);
-    // SAFETY: complete exclusive fixture unit and all masters stopped.
-    let unit = unsafe {
-        Unit::take_over(
-            registers,
-            &crate::native_memory::SOURCE,
-            &requesters,
-            prepared.hardware.physical_bits,
-            &[],
-        )
-    }
-    .map_err(|e| refuse!("isolation takeover: {e}", ?e))?;
     let mut domains = Vec::new();
     for claim in claims {
         // SAFETY: stopped claim, same checked
