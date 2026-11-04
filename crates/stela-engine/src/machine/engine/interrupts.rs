@@ -314,7 +314,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return self.next();
         }
         let el = self.cpu.pstate.el;
-        let sctlr = self.cpu.regime_sctlr();
         let (enable_bit, hcr_trap, form) = match kind {
             WaitKind::Interrupt => (1u64 << 16, HCR_TWI, 0b00),
             WaitKind::Event => (1u64 << 18, HCR_TWE, 0b01),
@@ -324,7 +323,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let iss = TRAPPED_AARCH64
             | form
             | register.map_or(0, |register| 0b10 | 1 << 2 | u32::from(register) << 5);
-        if el == 0 && sctlr & enable_bit == 0 {
+        if el == 0 && self.cpu.regime_sctlr() & enable_bit == 0 {
             self.take(Exception::synchronous(Class::WaitTrap, iss, self.cpu.pc));
             return Ok(());
         }

@@ -332,6 +332,16 @@ mod tests {
                     DNS query localhost type 1\n\
                     TCP 10.0.2.15:50581 -> 127.0.0.1:12345 open\n";
         assert!(verify(&serial, Some(&fixture), None, "e1000e", peer).is_ok());
+        let candidate_only = serial.replace(
+            "NETWORK driver=e1000e\n",
+            "NETWORK candidate driver=e1000e adapter=0000:01:00.0 mac=52:54:00:12:34:56\n",
+        );
+        assert_eq!(
+            verify(&candidate_only, Some(&fixture), None, "e1000e", peer),
+            Err(VerificationError::WrongDriver {
+                expected: "e1000e".into()
+            })
+        );
         assert_eq!(
             verify(&serial, Some(&fixture), None, "virtio-net", peer),
             Err(VerificationError::WrongDriver {
