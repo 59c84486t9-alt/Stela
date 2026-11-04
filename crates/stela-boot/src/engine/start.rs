@@ -1446,14 +1446,24 @@ fn check_processors(
         ));
     }
     if let Some(mmio) = &native_mmio {
-        // SAFETY: the check owns the host's devices; bus 0's first
-        // function is only read here.
-        let generation = unsafe { mmio.check_shootdown() }.unwrap_or_else(|error| {
+        let waiter = executors
+            .processors()
+            .first()
+            .unwrap_or_else(|| output::fatal("the shootdown check requires a started AP"));
+        // SAFETY: both processors keep the live loader root. This diagnostic
+        // owns the host's devices and only reads bus 0's first function.
+        let generation = unsafe {
+            waiter.check_driver_wait(handoff.root, sender, handoff.tsc_hz, || {
+                mmio.check_shootdown()
+            })
+        }
+        .unwrap_or_else(|error| output::fatal(error))
+        .unwrap_or_else(|error| {
             output::arguments(format_args!("CHECK native-shootdown FAIL {error:?}\n"));
             output::fatal("the MMIO aperture's shootdown failed")
         });
         output::arguments(format_args!(
-            "CHECK native-shootdown PASS generation={generation} processors={}\n",
+            "CHECK native-shootdown PASS generation={generation} processors={} waiter=driver-lock-if0\n",
             executors.processors().len()
         ));
     }
