@@ -746,8 +746,13 @@ impl NativeBackend {
             // SAFETY: the timeline semaphore is alive while submissions use it.
             unsafe { self.device.get_semaphore_counter_value(timeline) }.map_err(failure)
         })?;
+        self.free_completed(ready);
+        Ok(())
+    }
+
+    fn free_completed(&mut self, ready: usize) {
         if ready == 0 {
-            return Ok(());
+            return;
         }
         let buffers = if ready == 1 {
             self.in_flight
@@ -775,7 +780,6 @@ impl NativeBackend {
             self.device
                 .free_command_buffers(self.command_pool, buffers.as_slice())
         };
-        Ok(())
     }
 }
 
@@ -1439,8 +1443,20 @@ impl Backend for NativeBackend {
     }
 
     fn semaphore_value(&mut self, semaphore: Semaphore) -> Result<u64> {
+        let timeline = handle(semaphore.0);
         // SAFETY: the semaphore is alive.
-        unsafe { self.device.get_semaphore_counter_value(handle(semaphore.0)) }.map_err(failure)
+        let value =
+            unsafe { self.device.get_semaphore_counter_value(timeline) }.map_err(failure)?;
+        // The Metal completion poll already observed this timeline. Free the
+        // prefix it proves complete so the next submission need not query it
+        // again just to free these command buffers.
+        let ready = self
+            .in_flight
+            .iter()
+            .take_while(|entry| entry.timeline == timeline && entry.value <= value)
+            .count();
+        self.free_completed(ready);
+        Ok(value)
     }
 
     fn signal_semaphore(&mut self, semaphore: Semaphore, value: u64) -> Result<()> {

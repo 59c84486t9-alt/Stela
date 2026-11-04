@@ -796,18 +796,18 @@ impl Ans {
         }
         let blocks = u64::from((controls & 0xffff) + 1);
         let lba = cmd.long(40);
-        if self.medium.address(cmd.nsid(), lba, blocks).is_none() {
+        let nsid = cmd.nsid();
+        let Some(address) = self.medium.address(nsid, lba, blocks) else {
             return Ok(Executed::Done(Outcome::status(LBA_RANGE)));
-        }
+        };
         let bytes = blocks as usize * BLOCK_BYTES as usize;
         if bytes > MAX_TRANSFER {
             return Ok(Executed::Done(Outcome::status(INVALID_FIELD)));
         }
         let prps = cmd.prps(port, bytes, NVMMU_PAGE_BYTES)?;
-        let (nsid, range) = (cmd.nsid(), "ANS I/O range was checked");
         match cmd.opcode() {
             READ | COMPARE => {
-                let plan = self.medium.plan_read(nsid, lba, blocks).expect(range);
+                let plan = self.medium.plan_read(address, blocks);
                 let request = plan.address.map(|lba| Request::Read { lba, bytes });
                 let wait = if cmd.opcode() == READ {
                     let inline = inline.map(|key| (key, unit));
@@ -830,7 +830,6 @@ impl Ans {
                 if let Some(key) = &inline {
                     key.transform(unit, &mut data, true)?;
                 }
-                let address = self.medium.address(nsid, lba, blocks).expect(range);
                 // Force Unit Access: this write completes durably whatever
                 // the cache. A read returns the same bytes either way.
                 let request = Request::Write {

@@ -77,6 +77,81 @@ mod numerical {
     }
 
     #[test]
+    fn packed_truncation_retires_from_native_status_with_input_flushing_disabled() -> Result<()> {
+        use stela_compiler::aarch64::floating::{
+            FPCR_AH, FPCR_FIZ, FPCR_FZ, Format,
+            integer::{IntegerFormat, IntegerRounding, IntegerWidth, to_integer},
+        };
+
+        let cache = tempfile::tempdir()?;
+        let mut runtime = BlockRuntime::new_for_target(
+            76,
+            cache.path().into(),
+            BlockProfile::ORDINARY,
+            TargetCpu::Baseline,
+        );
+        // FCVTZS V0.4S,V1.4S and FCVTZS V2.2S,V2.2S.
+        runtime.register_code(
+            GuestAddress(BASE),
+            words(&[ADD_ONE, 0x4ea1_b820, 0x0ea1_b842, ADD_ONE, RET]),
+        )?;
+        let pack = |low: u32, high: u32| u64::from(low) | (u64::from(high) << 32);
+        let integer = IntegerFormat {
+            width: IntegerWidth::Bits32,
+            signed: true,
+        };
+        let small = [0, 0x8000_0000, 1, 0x807f_ffff];
+        let normals = [0x3fe0_0000, 0xc020_0000, 0x4eff_ffff, 0xcf00_0000];
+        for (fpcr, lanes, helpers) in [
+            (0, small, 0),
+            (FPCR_AH, small, 0),
+            (FPCR_FZ, small, 1),
+            (FPCR_FIZ, small, 1),
+            (FPCR_AH | FPCR_FZ, small, 1),
+            (FPCR_FZ | FPCR_FIZ, normals, 0),
+            (0, normals, 0),
+            (0, [0x7f80_0001, 0x7fc0_1234, 0xc020_0000, 0xff80_0000], 1),
+            (0, [0x4f00_0000, 0xcf00_0001, 1, 0x8000_0000], 1),
+        ] {
+            let mut thread = input(false);
+            thread.registers.fpcr = fpcr;
+            thread.registers.v[1] = [pack(lanes[0], lanes[1]), pack(lanes[2], lanes[3])];
+            let low_lane = if fpcr & (FPCR_FZ | FPCR_FIZ) == 0 {
+                0x8000_0000
+            } else {
+                0x3f80_0000
+            };
+            thread.registers.v[2] = [pack(low_lane, 0x4080_0000), 0x7f80_0001_7f80_0001];
+            let mut expected = thread.registers.clone();
+            let converted = lanes.map(|lane| {
+                let result = to_integer(
+                    Format::Single,
+                    integer,
+                    0,
+                    IntegerRounding::TowardZero,
+                    fpcr,
+                    u64::from(lane),
+                )
+                .expect("supported FP controls");
+                expected.fpsr |= result.exceptions;
+                result.bits as u32
+            });
+            expected.x[0] += 2;
+            expected.v[0] = [
+                pack(converted[0], converted[1]),
+                pack(converted[2], converted[3]),
+            ];
+            expected.v[2] = [pack(u32::from(low_lane == 0x3f80_0000), 4), 0];
+            // SAFETY: the program only operates on its own registered code and state.
+            let report = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
+            assert_eq!(report.reason, StopReason::StopAddress);
+            assert_eq!(report.floating_point_helpers, helpers);
+            assert_eq!(thread.registers, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn interior_half_helper_resumes_after_prefix_and_reuses_disk_code() -> Result<()> {
         let cache = tempfile::tempdir()?;
         let source = words(&[ADD_ONE, FADD_S0_S1_S2, FADD_H3_H4_H5, FMUL_D6_D7_D8, RET]);

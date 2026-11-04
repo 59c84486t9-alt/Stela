@@ -14,6 +14,7 @@
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::ptr::{self, NonNull};
+use stela_contracts::{Refusal, refuse};
 
 /// `_IOWR('d', number, T)`.
 const fn request<T>(number: u32) -> u32 {
@@ -224,6 +225,17 @@ pub struct Display<D> {
 // SAFETY: the buffers' mappings go with the display, which one PE uses at a
 // time through the board's lock.
 unsafe impl<D: Send> Send for Display<D> {}
+
+/// A complete frame in the hidden buffer. Dropping it leaves the display
+/// unchanged. No other frame can be prepared before this one is released.
+pub struct PreparedFrame<'a, D>(&'a mut Display<D>);
+
+impl<D: Drm> PreparedFrame<'_, D> {
+    /// Queue the prepared frame for the next vertical blank.
+    pub fn present(self) -> Result<(), Error> {
+        self.0.flip()
+    }
+}
 
 fn call<D: Drm, T>(drm: &mut D, request: u32, argument: &mut T) -> Result<(), Error> {
     match drm.control(request, ptr::from_mut(argument).cast()) {
@@ -450,20 +462,46 @@ impl<D: Drm> Display<D> {
                 actual: rows.len(),
             });
         }
-        let target = self.buffers[2].pixels.as_ptr();
-        let pitch = self.buffers[2].pitch;
-        for (y, line) in rows
-            .chunks_exact(row)
-            .take(self.height as usize)
-            .enumerate()
-        {
-            // SAFETY: `y` is a row of the mapped buffer, whose rows are
-            // `pitch` apart and hold `row` bytes, and the engine reads
-            // another buffer.
-            unsafe {
-                ptr::copy_nonoverlapping(line.as_ptr(), target.add(y * pitch), row);
-            }
+        for (y, line) in rows.chunks_exact(row).enumerate() {
+            self.copy_hidden_row(y, line);
         }
+        self.flip()
+    }
+
+    /// Fill the hidden buffer one row at a time. The producer works in
+    /// ordinary RAM so inspecting or changing pixels never reads VRAM.
+    /// A failed row leaves the current scanout and buffer order unchanged.
+    pub fn prepare_rows(
+        &mut self,
+        mut fill: impl FnMut(usize, &mut [u8]) -> Result<(), Refusal>,
+    ) -> Result<PreparedFrame<'_, D>, Refusal> {
+        let bytes = self.width as usize * BYTES_PER_PIXEL as usize;
+        let mut row = Vec::new();
+        row.try_reserve_exact(bytes)
+            .map_err(|_| refuse!("could not allocate a scanout row"))?;
+        row.resize(bytes, 0);
+        for y in 0..self.height as usize {
+            fill(y, &mut row)?;
+            self.copy_hidden_row(y, &row);
+        }
+        Ok(PreparedFrame(self))
+    }
+
+    fn copy_hidden_row(&mut self, y: usize, row: &[u8]) {
+        let target = &self.buffers[2];
+        // SAFETY: callers give one full row and a valid row index. The
+        // mapping's pitch holds that row, and the engine reads a different
+        // buffer.
+        unsafe {
+            ptr::copy_nonoverlapping(
+                row.as_ptr(),
+                target.pixels.as_ptr().add(y * target.pitch),
+                row.len(),
+            );
+        }
+    }
+
+    fn flip(&mut self) -> Result<(), Error> {
         let mut flip = PageFlip {
             crtc: self.crtc,
             framebuffer: self.buffers[2].framebuffer,

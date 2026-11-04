@@ -312,9 +312,7 @@ impl Methods {
         let Some(frame) = self.frames.front() else {
             return Ok(());
         };
-        let mode = self.mode();
-        let rows = scanout::compose(&frame.layers, mode, read)?;
-        self.scanout.present(&rows)?;
+        scanout::present(self.scanout.as_mut(), &frame.layers, read)?;
         // Both the surface DMA and host sink can refuse. The submitted swap
         // owns its surfaces until presentation succeeds, or the AP explicitly
         // aborts/shuts down; neither failure consumes it or queues D594.

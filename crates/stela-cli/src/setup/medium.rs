@@ -331,19 +331,28 @@ fn stream(
     Ok(())
 }
 
+fn stream_file(
+    path: &Path,
+    size: u64,
+    progress: &crate::progress::Phase,
+    mut consume: impl FnMut(&[u8]),
+) -> Result<()> {
+    let mut file =
+        fs::File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    stream(&mut file, size, |bytes| {
+        consume(bytes);
+        progress.advance(bytes.len() as u64);
+        Ok(())
+    })
+}
+
 fn hash_file(
     path: &Path,
     size: u64,
     progress: &crate::progress::Phase,
 ) -> Result<(String, Vec<u8>)> {
-    let mut file =
-        fs::File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
     let mut hashes = Hashes::default();
-    stream(&mut file, size, |bytes| {
-        hashes.update(bytes);
-        progress.advance(bytes.len() as u64);
-        Ok(())
-    })?;
+    stream_file(path, size, progress, |bytes| hashes.update(bytes))?;
     Ok(hashes.finish())
 }
 

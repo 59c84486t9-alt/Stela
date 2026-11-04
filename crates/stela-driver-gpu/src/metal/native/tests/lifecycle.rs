@@ -229,6 +229,7 @@ struct BufferCalls {
     status: Cell<vk::Result>,
     value: Cell<u64>,
     allocated: Cell<u64>,
+    queries: Cell<usize>,
     freed: Cell<Option<(u32, u64)>>,
 }
 
@@ -263,6 +264,7 @@ unsafe extern "system" fn counter(
 ) -> vk::Result {
     // SAFETY: the fixture owns the kept BufferCalls.
     let calls = unsafe { &*(device.as_raw() as *const BufferCalls) };
+    calls.queries.set(calls.queries.get() + 1);
     // SAFETY: the caller provides a writable counter.
     unsafe { value.write(calls.value.get()) };
     calls.status.get()
@@ -294,6 +296,7 @@ fn inline_and_owned_buffers_retire_once_in_queue_order() {
         status: Cell::new(vk::Result::SUCCESS),
         value: Cell::new(0),
         allocated: Cell::new(0),
+        queries: Cell::new(0),
         freed: Cell::new(None),
     };
     // SAFETY: only these typed test callbacks are invoked and Calls stays live.
@@ -311,13 +314,13 @@ fn inline_and_owned_buffers_retire_once_in_queue_order() {
     let drops = Arc::new(AtomicUsize::new(0));
     let mut backend = ManuallyDrop::new(backend(device, &drops));
     backend.command_pool = vk::CommandPool::from_raw(2);
-    for (value, count) in [(1, 1), (2, 1), (3, 2), (4, 1)] {
+    for (timeline, value, count) in [(7, 1, 1), (7, 2, 1), (7, 3, 2), (8, 4, 1)] {
         let buffers =
             CommandBuffers::allocate(&backend.device, backend.command_pool, count).unwrap();
         assert_eq!(buffers.as_slice().len(), count as usize);
         backend.in_flight.push_back(InFlight {
             buffers,
-            timeline: vk::Semaphore::from_raw(7),
+            timeline: vk::Semaphore::from_raw(timeline),
             value,
         });
     }
@@ -329,6 +332,10 @@ fn inline_and_owned_buffers_retire_once_in_queue_order() {
         ));
     }
     assert_eq!(backend.reclaim(), Err(Error::DeviceLost));
+    assert_eq!(
+        backend.semaphore_value(Semaphore(7)),
+        Err(Error::DeviceLost)
+    );
     assert_eq!(backend.in_flight.len(), 4);
     assert_eq!(calls.allocated.get(), 5);
     assert_eq!(calls.freed.get(), None);
@@ -336,12 +343,25 @@ fn inline_and_owned_buffers_retire_once_in_queue_order() {
     calls.status.set(vk::Result::SUCCESS);
     backend.reclaim().unwrap();
     assert_eq!(calls.freed.get(), None);
-    for (value, freed, remaining) in [(1, (1, 1), 3), (3, (3, 234), 1), (4, (1, 5), 0)] {
-        calls.value.set(value);
-        backend.reclaim().unwrap();
-        assert_eq!(calls.freed.replace(None), Some(freed));
-        assert_eq!(backend.in_flight.len(), remaining);
-    }
+    calls.value.set(4);
+    assert_eq!(backend.semaphore_value(Semaphore(8)), Ok(4));
+    assert_eq!(calls.freed.get(), None);
+    assert_eq!(backend.in_flight.len(), 4);
+    calls.value.set(1);
+    backend.reclaim().unwrap();
+    assert_eq!(calls.freed.replace(None), Some((1, 1)));
+    assert_eq!(backend.in_flight.len(), 3);
+
+    calls.value.set(4);
+    assert_eq!(backend.semaphore_value(Semaphore(7)), Ok(4));
+    assert_eq!(calls.freed.replace(None), Some((3, 234)));
+    assert_eq!(backend.in_flight.len(), 1);
+    assert_eq!(backend.semaphore_value(Semaphore(8)), Ok(4));
+    assert_eq!(calls.freed.replace(None), Some((1, 5)));
+    assert!(backend.in_flight.is_empty());
+    let queries = calls.queries.get();
+    backend.reclaim().unwrap();
+    assert_eq!(calls.queries.get(), queries);
     // SAFETY: the fixture has no Vulkan resources and the list is empty.
     unsafe { ManuallyDrop::drop(&mut backend.exporter) };
 }

@@ -1146,7 +1146,7 @@ pub(crate) fn emit_instruction(
         Alu,
         Gpr::{Rax, Rcx},
     };
-    if pinned::emit_direct(code, &instruction.operation) {
+    if pinned::emit_direct(code, &instruction.operation, target) {
         return;
     }
     match instruction.operation {

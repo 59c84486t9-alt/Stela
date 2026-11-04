@@ -1446,7 +1446,11 @@ fn check_processors(
             doorbells,
         ));
     }
-    if let Some(mmio) = &native_mmio {
+    if handoff.native_resources.cores == 1 && executors.processors().is_empty() {
+        output::arguments(format_args!(
+            "CHECK native-shootdown SKIP reason=no-remote-processor\n"
+        ));
+    } else if let Some(mmio) = &native_mmio {
         let waiter = executors
             .processors()
             .first()
