@@ -123,20 +123,23 @@ impl Remappers {
             mmio.with_config_inventory(|windows, reader| {
                 let inventories =
                     remapping::try_enumerate_segments(windows, |window, rid, offset| {
-                        let value = reader.read32(address(window.segment, rid), offset)?;
-                        if offset != 0 && value == u32::MAX {
-                            return Err(MappingError::InvalidPlatformReply);
+                        let address = address(window.segment, rid);
+                        let value = reader.read32(address, offset)?;
+                        match offset {
+                            0 if matches!(value as u16, 0 | 1) => {
+                                return Err(MappingError::InvalidPlatformReply);
+                            }
+                            0x0c => {
+                                reader.header_type(value)?;
+                            }
+                            0x18 => reader.check_bridge(address, value)?,
+                            _ if offset != 0 && value == u32::MAX => {
+                                return Err(MappingError::InvalidPlatformReply);
+                            }
+                            _ => {}
                         }
                         Ok(Some(value))
                     })?;
-                // A live bridge must stay inside its own captured root grant.
-                for (segment, functions) in &inventories {
-                    for function in functions {
-                        if let Some((first, last)) = function.bridge {
-                            reader.check_bridge(address(*segment, function.rid), first..=last)?;
-                        }
-                    }
-                }
                 let functions: Vec<_> = inventories
                     .iter()
                     .flat_map(|(segment, present)| {

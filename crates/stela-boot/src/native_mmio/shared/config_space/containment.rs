@@ -60,20 +60,10 @@ fn census(windows: &[EcamWindow], reader: &mut ConfigInventory<'_>) -> Result<Ve
                         0 | 1 => return Err(Error::InvalidPlatformReply),
                         _ => {}
                     }
-                    let header = ((reader.read32(address, 12)? >> 16) & 0x7f) as u8;
-                    match header {
-                        0 => {}
-                        1 => {
-                            let [primary, secondary, subordinate, _] =
-                                reader.read32(address, 0x18)?.to_le_bytes();
-                            if secondary != 0 || subordinate != 0 {
-                                if primary != bus || secondary <= bus || subordinate < secondary {
-                                    return Err(Error::InvalidPlatformReply);
-                                }
-                                reader.check_bridge(address, secondary..=subordinate)?;
-                            }
-                        }
-                        _ => return Err(Error::InvalidPlatformReply),
+                    let header = reader.read32(address, 0x0c)?;
+                    if reader.header_type(header)? == 1 {
+                        let buses = reader.read32(address, 0x18)?;
+                        reader.check_bridge(address, buses)?;
                     }
                     let command = reader.read32(address, COMMAND)? as u16;
                     if command == u16::MAX {

@@ -2,7 +2,7 @@
 //! views are private to their consumers and never enter physical lookup.
 use super::*;
 use crate::native_mmio::ecam::EcamInventory;
-use core::{mem::ManuallyDrop, ops::RangeInclusive};
+use core::mem::ManuallyDrop;
 use stela_drivers::bus::{mmio::owned::Mapping, pci::Address};
 mod containment;
 pub(super) use containment::PciSlots;
@@ -140,13 +140,26 @@ impl ConfigInventory<'_> {
             .read32(offset)
     }
 
-    pub(crate) fn check_bridge(
-        &self,
-        address: Address,
-        downstream: RangeInclusive<u8>,
-    ) -> Result<(), Error> {
-        self.geometry
-            .check_bridge(self.source.platform.wire().roots(), address, downstream)
+    pub(crate) fn header_type(&self, word: u32) -> Result<u8, Error> {
+        match ((word >> 16) & 0x7f) as u8 {
+            kind @ (0 | 1) => Ok(kind),
+            _ => Err(Error::InvalidPlatformReply),
+        }
+    }
+
+    pub(crate) fn check_bridge(&self, address: Address, buses: u32) -> Result<(), Error> {
+        let [primary, secondary, subordinate, _] = buses.to_le_bytes();
+        if secondary == 0 && subordinate == 0 {
+            return Ok(());
+        }
+        if primary != address.bus || secondary <= address.bus || subordinate < secondary {
+            return Err(Error::InvalidPlatformReply);
+        }
+        self.geometry.check_bridge(
+            self.source.platform.wire().roots(),
+            address,
+            secondary..=subordinate,
+        )
     }
 
     fn withdraw(&mut self) -> Result<(), Error> {
