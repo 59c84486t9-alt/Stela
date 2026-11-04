@@ -14,7 +14,8 @@ use alloc::vec::Vec;
 
 const ARM_CONDITION_INVERSE_BIT: u8 = 1;
 const INSTRUCTION_BYTES: u64 = core::mem::size_of::<u32>() as u64;
-const MAX_FRAME_LOOP_INSTRUCTIONS: usize = 32;
+const SHORT_FRAME_LOOP_INSTRUCTIONS: usize = 32;
+const MAX_FRAME_LOOP_INSTRUCTIONS: usize = 64;
 const FRAME_LOOP_COUNTER: Gpr = Gpr::R12;
 
 /// The existing ordinary body finishes with a settled frame. Its regions
@@ -114,9 +115,56 @@ fn direct_ram_loop(
             _ => return None,
         }
     }
-    // Prefer dense read loops over adding an ABI wrapper to short, occasional
-    // memory edges. Register-only loops have the earlier residency plans.
-    (loads >= 2).then_some(entry)
+    // Preserve the short-loop policy. Longer bodies must contain at least
+    // one read for every four operations, as in unrolled scalar read loops.
+    let minimum_loads = if instructions.len() <= SHORT_FRAME_LOOP_INSTRUCTIONS {
+        2
+    } else {
+        instructions.len().div_ceil(4)
+    };
+    (loads >= minimum_loads).then_some(entry)
+}
+
+#[cfg(test)]
+#[test]
+fn longer_direct_ram_loops_require_dense_reads() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features},
+    };
+
+    let options = Options::new(BlockProfile::ORDINARY, TargetCpu::Baseline);
+    let entry = GuestAddress(0x1000);
+    for (rows, loads, load, resident) in [
+        (32, 2, 0x3940_0022u32, true), // LDRB W2,[X1]
+        (33, 2, 0x3940_0022, false),
+        (33, 9, 0x3940_0022, true),
+        (50, 12, 0x3940_0022, false),
+        (50, 13, 0x3940_0022, true),
+        (50, 16, 0x3940_03e2, false), // LDRB W2,[SP]
+        (50, 16, 0x3900_0022, false), // STRB W2,[X1]
+        (64, 16, 0x3940_0022, true),
+        (65, 17, 0x3940_0022, false),
+    ] {
+        let mut words = vec![0x9100_0400u32; rows];
+        words[..loads].fill(load);
+        words[rows - 1] = 0x3100_0400; // ADDS W0,W0,#1
+        let backedge = (-(rows as i32) as u32) & 0x7_ffff;
+        words.push(0x5400_0001 | (backedge << 5)); // B.NE entry
+        let source: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        let plan = CompilationPlan::new(&source, entry, &options)
+            .unwrap()
+            .with_resident_loops();
+        assert_eq!(plan.profile().has(Features::RESIDENT_LOOPS), resident);
+        if resident {
+            let native = plan.compile().unwrap().native;
+            assert_eq!(native.source_map.len(), rows + 1);
+            assert_eq!(native.source_map[0], (entry, 0));
+            assert!(native.source_map.windows(2).all(|pair| {
+                pair[1].0.0 == pair[0].0.0 + INSTRUCTION_BYTES && pair[1].1 > pair[0].1
+            }));
+        }
+    }
 }
 
 #[cfg(test)]
