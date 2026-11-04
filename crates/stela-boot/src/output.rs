@@ -697,6 +697,7 @@ fn stopped(message: &str) {
 pub fn fatal(message: impl core::fmt::Display) -> ! {
     let message = alloc::string::ToString::to_string(&message);
     arguments(format_args!("\nSTELA FATAL {message}\n"));
+    crate::engine::stop_gpus_for_fatal();
     stopped(&message);
     terminate(0x11)
 }

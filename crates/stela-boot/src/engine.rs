@@ -972,3 +972,10 @@ fn finish<H: Host>(
         }
     }
 }
+
+/// Unload the GPUs' firmware before a fatal stop, where one can
+/// (`gpu::gate::stop_for_fatal`).
+pub(crate) fn stop_gpus_for_fatal() {
+    #[cfg(feature = "nvk")]
+    gpu::gate::stop_for_fatal();
+}

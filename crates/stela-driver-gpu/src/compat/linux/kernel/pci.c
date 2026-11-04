@@ -177,6 +177,13 @@ bool stela_linux_pci_bound(const struct pci_dev *device)
 	return device->dev.driver;
 }
 
+/* What the kernel's shutdown does of a device: its driver stops the hardware. */
+void stela_linux_pci_shutdown(struct pci_dev *dev)
+{
+	if (dev->driver && dev->driver->shutdown)
+		dev->driver->shutdown(dev);
+}
+
 void stela_linux_pci_remove_device(struct pci_dev *dev)
 {
 	unbind(dev);

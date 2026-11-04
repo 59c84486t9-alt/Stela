@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: stela <stela@localhost>
+Date: Mon, 2 Nov 2026 10:26:07 -0500
+Subject: [PATCH] fix(nouveau): unload GSP at shutdown
+
+---
+ .../drm/nouveau/include/nvkm/core/device.h    |  1 +
+ drivers/gpu/drm/nouveau/nouveau_drm.c         | 20 +++++--------------
+ .../gpu/drm/nouveau/nvkm/engine/device/priv.h |  1 -
+ 3 files changed, 6 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/gpu/drm/nouveau/include/nvkm/core/device.h b/drivers/gpu/drm/nouveau/include/nvkm/core/device.h
+index 954a89d43bada14cc90f0c6349f28803d11ae0f4..f36e8432d29b8f3d6df4d4c12bfe6e1b0d025409 100644
+--- a/drivers/gpu/drm/nouveau/include/nvkm/core/device.h
++++ b/drivers/gpu/drm/nouveau/include/nvkm/core/device.h
+@@ -138,6 +138,7 @@ struct nvkm_device *nvkm_device_find(u64 name);
+ #define NVKM_RD32_(p,o,dr) nvkm_rd32((p), (o) + (dr))
+ #define NVKM_RD32(p,A...) DRF_RV(NVKM_RD32_, (p), 0, ##A)
+ 
++int  nvkm_device_fini(struct nvkm_device *, enum nvkm_suspend_state);
+ void nvkm_device_del(struct nvkm_device **);
+ 
+ struct nvkm_device_oclass {
+diff --git a/drivers/gpu/drm/nouveau/nouveau_drm.c b/drivers/gpu/drm/nouveau/nouveau_drm.c
+index c03638ebd352b71dbeb96d60fff21096d384da82..a6552ac1fc63c4e92ea1a20daa078349b46e820f 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_drm.c
++++ b/drivers/gpu/drm/nouveau/nouveau_drm.c
+@@ -1085,7 +1085,6 @@ static void
+ nouveau_drm_shutdown(struct pci_dev *pdev)
+ {
+ 	struct nouveau_drm *drm = pci_get_drvdata(pdev);
+-	int ret;
+ 
+ 	if (!drm)
+ 		return;
+@@ -1094,22 +1093,13 @@ nouveau_drm_shutdown(struct pci_dev *pdev)
+ 	    drm->dev->switch_power_state == DRM_SWITCH_POWER_DYNAMIC_OFF)
+ 		return;
+ 
+-	ret = nouveau_do_suspend(drm, false);
+-	if (ret)
+-		NV_ERROR(drm, "shutdown suspend failed with: %d\n", ret);
+-
+-	pci_save_state(pdev);
+-	pci_disable_device(pdev);
+-	pci_set_power_state(pdev, PCI_D3hot);
+ 	/*
+-	 *  This is just to give the pci power transition time to settle
+-	 *  before an immediate kexec jump. it’s mirroring the existing
+-	 *  nouveau_pmops_suspend() behavior, which already does
+-	 *  udelay(200) right after pci_set_power_state(..., pci_d3hot). In
+-	 *  ->shutdown() we’re allowed to sleep, so I used usleep_range()
+-	 *  instead of a busy-wait udelay().
++	 * The hardware does not come back from here, so nothing is saved to
++	 * resume from: this unloads GSP, which no reset recovers a card from
++	 * once it has served work.
+ 	 */
+-	usleep_range(200, 400);
++	nvkm_device_fini(nvxx_device(drm), NVKM_POWEROFF);
++	pci_disable_device(pdev);
+ }
+ 
+ static int
+diff --git a/drivers/gpu/drm/nouveau/nvkm/engine/device/priv.h b/drivers/gpu/drm/nouveau/nvkm/engine/device/priv.h
+index d0c40f0342442d134b281c2c8a526dacbbbcbef0..0c3a3c7398a9ce0b71f3ede8aff3b6d2fe6c687e 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/engine/device/priv.h
++++ b/drivers/gpu/drm/nouveau/nvkm/engine/device/priv.h
+@@ -56,5 +56,4 @@ int  nvkm_device_ctor(const struct nvkm_device_func *,
+ 		      const char *name, const char *cfg, const char *dbg,
+ 		      struct nvkm_device *);
+ int  nvkm_device_init(struct nvkm_device *);
+-int  nvkm_device_fini(struct nvkm_device *, enum nvkm_suspend_state suspend);
+ #endif

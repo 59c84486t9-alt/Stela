@@ -156,6 +156,7 @@ const _: () = assert!(core::mem::offset_of!(RawFunction, release_context) == 224
 unsafe extern "C" {
     fn stela_linux_pci_attach(function: *const RawFunction) -> *mut c_void;
     fn stela_linux_pci_bound(device: *const c_void) -> bool;
+    fn stela_linux_pci_shutdown(device: *mut c_void);
     fn stela_linux_pci_remove_device(device: *mut c_void);
     fn stela_linux_pci_quarantined_functions() -> u64;
     fn stela_linux_fatal(message: *const c_char) -> !;
@@ -505,6 +506,15 @@ impl<H: Host> Attached<H> {
     /// The `struct pci_dev`, for code that names it.
     pub fn device(&self) -> *mut c_void {
         self.device.as_ptr()
+    }
+
+    /// Has the function's driver stop its hardware, as at a power-off.
+    ///
+    /// # Safety
+    /// In an entered Linux owner, on a task that may sleep.
+    pub unsafe fn shutdown(&self) {
+        // SAFETY: the caller's contract, over this function's live device.
+        unsafe { stela_linux_pci_shutdown(self.device.as_ptr()) };
     }
 
     /// Whether a driver took the function.

@@ -93,6 +93,8 @@ enum Operation {
     Thread(*mut Thread),
     Wake,
     Export(*const client::Run, usize),
+    /// Stop the GPUs as a power-off does.
+    Shutdown,
 }
 
 /// What Mesa's threads run on: their calls go to Linux, off this stack. Linux's
@@ -155,12 +157,23 @@ fn current_thread(gpu: &Installed) -> Option<Running> {
     (pointer < thread.top).then_some(*thread)
 }
 
-/// A posted call, on its caller's stack until `done`.
+/// A posted call, which its caller keeps until `done`.
 struct Request {
     operation: Operation,
     next: Cell<*const Request>,
     result: AtomicI64,
     done: AtomicBool,
+}
+
+impl Request {
+    fn new(operation: Operation) -> Self {
+        Self {
+            operation,
+            next: Cell::new(ptr::null()),
+            result: AtomicI64::new(0),
+            done: AtomicBool::new(false),
+        }
+    }
 }
 
 /// The posted calls, newest first.
@@ -181,11 +194,39 @@ fn post(request: &Request) {
     }
 }
 
+/// Stops the GPUs' drivers within `seconds`, as a reset is safest for a card
+/// whose GSP has unloaded, and says whether they did. A GSP that does not answer
+/// its unload stays running: Linux then waits on it for minutes, with the guest
+/// already stopped.
+pub(super) fn shutdown(seconds: u64) -> bool {
+    // A wait that gives up leaves this with the Linux task.
+    unload(
+        Box::leak(Box::new(Request::new(Operation::Shutdown))),
+        seconds,
+    )
+}
+
+/// [`shutdown`] for a fatal stop, which allocates nothing: the stop never
+/// returns, so its stack keeps the request for a wait that gives up.
+pub(super) fn shutdown_for_fatal(seconds: u64) -> bool {
+    unload(&Request::new(Operation::Shutdown), seconds)
+}
+
+fn unload(request: &Request, seconds: u64) -> bool {
+    let Some(gpu) = installed() else {
+        return true;
+    };
+    let deadline = host::rdtsc().saturating_add(seconds.saturating_mul(gpu.tsc_hz));
+    wait(gpu, request, deadline);
+    request.done.load(Ordering::Acquire)
+}
+
 /// A dma-buf of `runs` and the host's mapping of them, for the GPU's service.
 pub(super) fn export(runs: &[client::Run]) -> Option<(c_int, NonNull<u8>)> {
-    let address = map_runs(runs, 0, 0)?;
+    let address = map_runs(runs)?;
     let fd = submit(Operation::Export(runs.as_ptr(), runs.len()));
     let Ok(fd) = c_int::try_from(fd).and_then(|fd| u32::try_from(fd).map(|_| fd)) else {
+        crate::output::arguments(format_args!("GPU export of {} runs: {fd}\n", runs.len()));
         let bytes = runs.iter().map(|run| run.bytes).sum();
         unmap_export(address.as_ptr() as u64, bytes);
         return None;
@@ -326,6 +367,14 @@ unsafe fn perform(gpu: &Installed, operation: Operation) -> i64 {
                 client::wake();
                 0
             }
+            Operation::Shutdown => {
+                let gpu = installed().expect("requests are posted to a running environment");
+                gpu.start
+                    .attached
+                    .iter()
+                    .for_each(|attached| attached.shutdown());
+                0
+            }
         }
     }
 }
@@ -427,27 +476,30 @@ fn submit(operation: Operation) -> i64 {
         unsafe { stack::on_stack(thread.task, &mut call) };
         return result;
     }
-    let request = Request {
-        operation,
-        next: Cell::new(ptr::null()),
-        result: AtomicI64::new(0),
-        done: AtomicBool::new(false),
-    };
-    post(&request);
+    let request = Request::new(operation);
+    wait(gpu, &request, u64::MAX);
+    request.result.load(Ordering::Acquire)
+}
+
+/// Posts `request` to the service and waits for it, until the host counter
+/// reaches `deadline`.
+fn wait(gpu: &Installed, request: &Request, deadline: u64) {
+    let waiting = || !request.done.load(Ordering::Acquire) && host::rdtsc() < deadline;
+    post(request);
     if let Err(error) = gpu.events.notify() {
         output::fatal(format_args!(
             "the host's Linux environment failed: {error:?}"
         ));
     }
     if host::processor() != BOOT_CPU.load(Ordering::Relaxed) {
-        while !request.done.load(Ordering::Acquire) {
+        while waiting() {
             // The boot CPU's work may be retiring a mapping, which waits for this.
             crate::native_mmio::shootdown::service();
             hint::spin_loop();
         }
     } else {
         let ran = gpu.work.dispatch(|runtime| {
-            while !request.done.load(Ordering::Acquire) {
+            while waiting() {
                 start(gpu)?;
                 runtime.step_or_idle()?;
             }
@@ -457,7 +509,6 @@ fn submit(operation: Operation) -> i64 {
             output::fatal(format_args!("the host's Linux environment failed: {error}"));
         }
     }
-    request.result.load(Ordering::Acquire)
 }
 
 /// A file of the DRM node at `minor`.

@@ -18,7 +18,7 @@ use core::{
     hint,
     num::NonZeroU64,
     ptr::{self, NonNull},
-    sync::atomic::{AtomicPtr, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
 };
 use stela_contracts::gate::{GateService, MemoryRange, window};
 use stela_drivers::gpu::{
@@ -50,6 +50,8 @@ const STACK_BYTES: usize = 16 << 20;
 /// How long a GPU's accepted work may go without progress as the PC stops:
 /// with the guest stopped, an event it waits on will never signal.
 const STOP_STALL_SECONDS: u64 = 5;
+/// How long the stop waits for a GSP to unload.
+const STOP_UNLOAD_SECONDS: u64 = 10;
 
 /// The services for the kernel's interrupts, once all are open.
 static SERVICES: AtomicPtr<Vec<Arc<Shared>>> = AtomicPtr::new(ptr::null_mut());
@@ -391,6 +393,35 @@ pub(in crate::engine) fn stop(close_gates: impl FnOnce() -> u64) {
         quarantine.bytes,
         quarantined_functions(),
     ));
+    if client::shutdown(STOP_UNLOAD_SECONDS) {
+        output::arguments(format_args!("GPU drivers stopped\n"));
+    } else {
+        output::arguments(format_args!(
+            "GPU drivers still stopping after {STOP_UNLOAD_SECONDS} s\n"
+        ));
+    }
+}
+
+/// Unload the GPUs' firmware before a fatal stop ends the machine: the reset
+/// that follows takes down the link of a card whose GSP still runs, until a
+/// power cycle. The Linux environment that unloads it runs on the boot CPU,
+/// so a stop raised there leaves the firmware running and says so. Once.
+pub(in crate::engine) fn stop_for_fatal() {
+    static STOPPING: AtomicBool = AtomicBool::new(false);
+    if installed().is_none() || STOPPING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if host::processor() == BOOT_CPU.load(Ordering::Relaxed) {
+        output::arguments(format_args!(
+            "GPU firmware left running: the stop is on the CPU that unloads it\n"
+        ));
+    } else if client::shutdown_for_fatal(STOP_UNLOAD_SECONDS) {
+        output::arguments(format_args!("GPU drivers stopped before the fatal stop\n"));
+    } else {
+        output::arguments(format_args!(
+            "GPU drivers still stopping after {STOP_UNLOAD_SECONDS} s; the firmware may still run\n"
+        ));
+    }
 }
 
 /// Step `service` until accepted work ends or stops moving.

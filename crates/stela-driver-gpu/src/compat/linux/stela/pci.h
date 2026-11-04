@@ -7,6 +7,7 @@
  * initializes its device; removing drops that reference. */
 void stela_linux_pci_add_device(struct pci_dev *dev);
 bool stela_linux_pci_bound(const struct pci_dev *device);
+void stela_linux_pci_shutdown(struct pci_dev *dev);
 void stela_linux_pci_remove_device(struct pci_dev *dev);
 
 /* A placed memory region of a function. */
