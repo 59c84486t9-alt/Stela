@@ -483,7 +483,7 @@ impl GuestNetwork {
             match self.link.receive() {
                 Ok(Some(frame)) => {
                     // Without an attached adapter the frame has nowhere to go.
-                    let _ = devices.network_deliver(&frame);
+                    let _ = devices.network_deliver_owned(frame);
                 }
                 Ok(None) => break,
                 Err(error) => {

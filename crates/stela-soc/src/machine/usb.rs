@@ -201,6 +201,12 @@ impl AppleDevices {
         Ok(())
     }
 
+    /// Hand the USB Ethernet adapter an owned frame from the host link.
+    pub fn network_deliver_owned(&mut self, frame: Vec<u8>) -> Result<()> {
+        self.usb_network()?.deliver_owned(frame);
+        Ok(())
+    }
+
     fn usb_bluetooth(&mut self) -> Option<&mut Hci> {
         self.usb_masters
             .iter_mut()

@@ -44,7 +44,7 @@ use super::{
     },
 };
 use crate::Result;
-use alloc::{collections::VecDeque, format, string::String, vec, vec::Vec};
+use alloc::{borrow::Cow, collections::VecDeque, format, string::String, vec, vec::Vec};
 use stela_contracts::refuse;
 use stela_drivers::net::Mac;
 
@@ -327,13 +327,22 @@ impl Ecm {
     /// while the link is down, when the packet filter excludes it, or when
     /// the queue is full.
     pub fn deliver(&mut self, frame: &[u8]) {
+        self.deliver_frame(Cow::Borrowed(frame));
+    }
+
+    /// Hand off a frame the host link already owns.
+    pub(crate) fn deliver_owned(&mut self, frame: Vec<u8>) {
+        self.deliver_frame(Cow::Owned(frame));
+    }
+
+    fn deliver_frame(&mut self, frame: Cow<'_, [u8]>) {
         let state = &mut self.state;
         if !(HEADER_BYTES..=MAX_SEGMENT).contains(&frame.len()) {
             state.counters.oversized += 1;
             state.statistics.receive_errors += 1;
             return;
         }
-        let destination = destination(frame);
+        let destination = destination(&frame);
         let filter = state.filter;
         let passes = filter & PROMISCUOUS != 0
             || if destination == Mac::BROADCAST {
@@ -353,7 +362,13 @@ impl Ecm {
             self.state.statistics.no_buffer += 1;
             return;
         }
-        self.state.inbound.push_back(frame.to_vec());
+        // Keep each queue slot within the segment bound, including frames
+        // from adapters that retain a larger receive-buffer allocation.
+        let frame = match frame {
+            Cow::Owned(frame) if frame.capacity() <= MAX_SEGMENT => frame,
+            frame => frame.to_vec(),
+        };
+        self.state.inbound.push_back(frame);
     }
 
     /// Whether the guest's receive queue has room for another frame.
@@ -808,6 +823,36 @@ mod tests {
         e.deliver(&frame(MAC, 60));
         assert_eq!(e.state.counters.overflowed, 1);
         assert_eq!(e.state.inbound.len(), QUEUE_FRAMES);
+    }
+
+    #[test]
+    fn owned_frames_reuse_bounded_storage_and_keep_receive_boundaries() {
+        let mut e = adapter(true);
+        let first = frame(MAC, 1024);
+        let original = first.as_ptr();
+        let expected = first.clone();
+        e.deliver_owned(first);
+        assert_eq!(e.state.inbound[0].as_ptr(), original);
+        assert_eq!(read(&mut e, BULK_IN).unwrap(), expected[..512]);
+        assert_eq!(read(&mut e, BULK_IN).unwrap(), expected[512..]);
+        assert_eq!(read(&mut e, BULK_IN), Some(Vec::new()));
+        assert_eq!(read(&mut e, BULK_IN), None);
+
+        let mut padded = Vec::with_capacity(4 * MAX_SEGMENT);
+        padded.extend_from_slice(&frame(MAC, 60));
+        e.deliver_owned(padded);
+        assert!(e.state.inbound[0].capacity() <= MAX_SEGMENT);
+        assert_eq!(read(&mut e, BULK_IN).unwrap(), frame(MAC, 60));
+
+        e.deliver_owned(frame(Mac([0x02, 0, 0, 0, 0, 2]), 60));
+        e.deliver_owned(vec![0; MAX_SEGMENT + 1]);
+        assert_eq!(e.counters().filtered, 1);
+        assert_eq!(e.counters().oversized, 1);
+        for _ in 0..=QUEUE_FRAMES {
+            e.deliver_owned(frame(MAC, 60));
+        }
+        assert!(!e.has_room());
+        assert_eq!(e.counters().overflowed, 1);
     }
 
     #[test]
