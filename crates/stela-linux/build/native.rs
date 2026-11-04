@@ -433,11 +433,15 @@ impl Linux {
                 .define("getrusage", "stela_linux_hosted_getrusage");
             let crc_objects = linux_crc::objects(&kernel_build, &crc_tables);
             kernel_build.objects(crc_objects);
+            let mut hosted_kernel = kernel;
+            hosted_kernel.push(PathBuf::from(format!(
+                "{COMPAT}/stela/native_callback_test_host.c"
+            )));
             linux.hosted = vec![
                 linux_archive(
                     &kernel_build,
                     "linux-hosted",
-                    &kernel,
+                    &hosted_kernel,
                     &hosted_upstream,
                     Path::new(COMPAT),
                 ),
