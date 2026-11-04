@@ -35,6 +35,7 @@
 #include "workqueue_internal.h"
 #include "../io_uring/io-wq.h"
 #include "sched/sched.h"
+#include <sched/affinity.h>
 #include <sched/fork_capacity.h>
 
 static_assert(CONFIG_THREAD_INFO_IN_TASK == 1);
@@ -2125,8 +2126,8 @@ static int update_up_affinity(struct task_struct *p, const struct cpumask *mask)
 	 * profile. Refuse them before mutating any original scheduler fields. */
 	if (p->user_cpus_ptr || p->cpus_ptr != &p->cpus_mask)
 		return -EOPNOTSUPP;
-	cpumask_copy(&p->cpus_mask, mask);
-	p->nr_cpus_allowed = 1;
+	struct affinity_context context = { .new_mask = mask };
+	set_cpus_allowed_common(p, &context);
 	return 0;
 }
 
