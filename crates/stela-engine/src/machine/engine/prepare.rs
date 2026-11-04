@@ -222,6 +222,29 @@ impl Preparation {
     /// prepares: the analysis reads words in order and stops at the
     /// block's last.
     pub fn prepare(&self, source: &[u8], pc: u64, limit: usize) -> Result<Prepared, Refused> {
+        self.prepare_window(source, pc, limit, true)
+            .expect("complete window")
+    }
+
+    /// A short probe that reaches the end of its input needs the full window.
+    /// Decide from analysis before emitting code that the caller would discard.
+    pub(super) fn prepare_window(
+        &self,
+        source: &[u8],
+        pc: u64,
+        limit: usize,
+        whole: bool,
+    ) -> Option<Result<Prepared, Refused>> {
+        self.prepare_prefix(source, pc, limit, whole).transpose()
+    }
+
+    fn prepare_prefix(
+        &self,
+        source: &[u8],
+        pc: u64,
+        limit: usize,
+        whole: bool,
+    ) -> Result<Option<Prepared>, Refused> {
         let word = |index: usize| {
             u32::from_le_bytes(source[index * 4..index * 4 + 4].try_into().expect("a word"))
         };
@@ -235,9 +258,9 @@ impl Preparation {
             match first {
                 // CheckFPMREnabled comes before the FP access check.
                 Some(0) if self.chip.checks(word(0)).contains(&Check::Fpmr) => {
-                    return Ok(Prepared::Checked(word(0)));
+                    return Ok(Some(Prepared::Checked(word(0))));
                 }
-                Some(0) => return Ok(Prepared::FloatingPointTrap),
+                Some(0) => return Ok(Some(Prepared::FloatingPointTrap)),
                 Some(index) => length = length.min(index * 4),
                 None => {}
             }
@@ -257,7 +280,7 @@ impl Preparation {
                     }
                 });
             match first {
-                Some(0) => return Ok(Prepared::Checked(word(0))),
+                Some(0) => return Ok(Some(Prepared::Checked(word(0)))),
                 Some(index) => length = index * 4,
                 None => {}
             }
@@ -277,6 +300,9 @@ impl Preparation {
             Err(error) => return Err(refused(error)),
         };
         let consumed = analysis.source_bytes;
+        if !whole && consumed == source.len() {
+            return Ok(None);
+        }
         let (compiled, input) = self.compile_prefix(&source[..consumed], pc, plan)?;
         // A block a host refusal cut short falls through to the refused
         // word; a whole one has the analysis's static successors.
@@ -289,12 +315,12 @@ impl Preparation {
                 .map(|successor| successor.target.0)
                 .collect()
         };
-        Ok(Prepared::Block {
+        Ok(Some(Prepared::Block {
             compiled,
             input,
             consumed,
             successors,
-        })
+        }))
     }
 
     /// Compile the longest prefix of `source` the target can emit, starting

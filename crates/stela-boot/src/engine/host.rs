@@ -1109,14 +1109,7 @@ struct GuestTables<'a>(&'a State);
 impl mmu::TableMemory for GuestTables<'_> {
     fn read_descriptor(&mut self, physical: u64) -> Option<u64> {
         if let Some(ram) = &self.0.registered_ram {
-            if !physical.is_multiple_of(8) {
-                return None;
-            }
-            let mut bytes = [0; 8];
-            // SAFETY: private descriptor staging; the canonical owner
-            // supplies the all-writer mapping and native scalar read.
-            unsafe { ram.read_physical(physical, &mut bytes) }.ok()?;
-            return Some(u64::from_le_bytes(bytes));
+            return ram.read_descriptor(physical).ok();
         }
         let host = self.0.host_physical(physical)?;
         // SAFETY: guest RAM through the physmap.

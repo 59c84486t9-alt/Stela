@@ -232,17 +232,13 @@ pub fn decode_system_instruction(
                 .at_instruction(pc, word),
         );
     }
-    let event = match synchronization::decode(word) {
-        Some(synchronization::Operation::SendEvent { local }) => Some(local),
-        _ => None,
-    };
-    let instruction_synchronization = match synchronization::decode(word) {
+    let synchronization = match synchronization::decode(word) {
+        Some(synchronization::Operation::SendEvent { local }) => {
+            Some(SystemOperation::SendEvent { local })
+        }
         Some(synchronization::Operation::InstructionSynchronization { option }) => {
             Some(SystemOperation::InstructionSynchronization { option })
         }
-        _ => None,
-    };
-    let wait = match synchronization::decode(word) {
         Some(synchronization::Operation::Wait {
             kind,
             timeout_register,
@@ -255,9 +251,7 @@ pub fn decode_system_instruction(
     let mut operations = [
         exception::decode(word).map(SystemOperation::Exception),
         tag_memory::decode(word).map(SystemOperation::TagMemory),
-        event.map(|local| SystemOperation::SendEvent { local }),
-        instruction_synchronization,
-        wait,
+        synchronization,
         registers::decode(word).map(SystemOperation::Register),
         registers::decode_pstate_immediate(word).map(SystemOperation::PstateImmediate),
     ]

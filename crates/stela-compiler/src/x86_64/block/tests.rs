@@ -667,3 +667,89 @@ fn region_census_of_real_code() {
     std::println!("outside {:?}", top(&outside));
     std::println!("breakers {:?}", top(&breakers));
 }
+
+#[test]
+fn frame_compare_and_test_branches_do_not_load_a_scratch_register() {
+    use crate::aarch64::Width;
+    let target = GuestAddress(0x2000);
+    for (operation, expected, condition) in [
+        (
+            Operation::BranchZero {
+                target,
+                source: Register::X(20),
+                width: Width::W32,
+                nonzero: false,
+            },
+            &[0x83, 0xbf, 160, 0, 0, 0, 0][..],
+            Cond::E,
+        ),
+        (
+            Operation::BranchZero {
+                target,
+                source: Register::X(20),
+                width: Width::X64,
+                nonzero: true,
+            },
+            &[0x48, 0x83, 0xbf, 160, 0, 0, 0, 0][..],
+            Cond::Ne,
+        ),
+        (
+            Operation::BranchBit {
+                target,
+                source: Register::X(20),
+                bit: 63,
+                nonzero: true,
+            },
+            &[0xf6, 0x87, 167, 0, 0, 0, 0x80][..],
+            Cond::Ne,
+        ),
+    ] {
+        let mut code = Code::pinned();
+        assert_eq!(
+            branch_condition(&mut code, &operation, super::super::Rax::Unknown),
+            Some(condition)
+        );
+        assert_eq!(&code[..], expected);
+        assert_eq!(code.instructions(), 1);
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn pinned_select_consumes_the_preceding_compare_flags() {
+    use crate::{
+        GuestState,
+        block::{BlockProfile, Features},
+        x86_64::{native, pinned},
+    };
+    // CMP X0, #1; CSEL X1, X2, X3, HI; RET.
+    let source: Vec<_> = [0xf100_041fu32, 0x9a83_8041, 0xd65f_03c0]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    let code = crate::testing::block_with(
+        &source,
+        GuestAddress(0x1000),
+        BlockProfile::new(Features::SYSTEM_MODE),
+    )
+    .unwrap()
+    .native;
+    let select = &code.x86_64_code[code.source_map[1].1..code.source_map[2].1];
+    // CMC converts Arm carry into the x86 borrow for the HI predicate.
+    assert_eq!(select[0], 0xf5);
+    let entry = pinned::entered(&code.x86_64_code);
+    for (operand, selected, nzcv) in [
+        (0, 33, 0x8000_0000),
+        (1, 33, 0x6000_0000),
+        (2, 22, 0x2000_0000),
+    ] {
+        let mut state = GuestState::default();
+        state.x[0] = operand;
+        state.x[2] = 22;
+        state.x[3] = 33;
+        state.x[30] = 0x2000;
+        assert_eq!(native::run(&entry, &mut state), 0x2000);
+        assert_eq!(state.x[1], selected);
+        assert_eq!(state.nzcv, nzcv);
+    }
+}

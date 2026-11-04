@@ -27,7 +27,6 @@ pub(super) struct PreparationMetrics {
     refused: u64,
     short_window_retries: u64,
     returned_native_bytes: u64,
-    discarded_returned_native_bytes: u64,
     counter_saturated: bool,
 }
 
@@ -38,32 +37,32 @@ fn add(total: &mut u64, value: u64, saturated: &mut bool) {
 }
 
 impl PreparationMetrics {
-    pub(super) fn record(&mut self, result: &Result<Prepared, Refused>, ticks: u64, retry: bool) {
+    pub(super) fn record(
+        &mut self,
+        result: Option<&Result<Prepared, Refused>>,
+        ticks: u64,
+        short: bool,
+    ) {
         add(&mut self.calls, 1, &mut self.counter_saturated);
         add(&mut self.wall_ticks, ticks, &mut self.counter_saturated);
+        let retry = short && !matches!(result, Some(Ok(_)));
         let outcome = match result {
-            Ok(Prepared::Block { compiled, .. }) => {
+            Some(Ok(Prepared::Block { compiled, .. })) => {
                 let bytes = compiled.native.x86_64_code.len() as u64;
                 add(
                     &mut self.returned_native_bytes,
                     bytes,
                     &mut self.counter_saturated,
                 );
-                if retry {
-                    add(
-                        &mut self.discarded_returned_native_bytes,
-                        bytes,
-                        &mut self.counter_saturated,
-                    );
-                }
                 &mut self.blocks
             }
-            Ok(Prepared::Checked(_)) => &mut self.checked,
-            Ok(Prepared::FloatingPointTrap) => &mut self.fp_traps,
-            Err(_) => &mut self.refused,
+            Some(Ok(Prepared::Checked(_))) => &mut self.checked,
+            Some(Ok(Prepared::FloatingPointTrap)) => &mut self.fp_traps,
+            Some(Err(_)) => &mut self.refused,
+            None => &mut self.short_window_retries,
         };
         add(outcome, 1, &mut self.counter_saturated);
-        if retry {
+        if retry && result.is_some() {
             add(
                 &mut self.short_window_retries,
                 1,
@@ -93,7 +92,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             indexed_code_pages: self.index.pages(),
             retained_source_pages: self.pages.len(),
             compile_wall_ticks_scope: "accepted foreground prepare only; excludes discarded short-window attempts, refusals and background compilation; host counter ticks, not CPU cycles",
-            preparation_scope: "since this writer enabled metrics; all outer Preparation::prepare calls and wall ticks, including internal retry work; returned bytes exclude internal discarded emissions; not exact emitter invocation counts or CPU cycles; excludes shared/stored rebase and background workers",
+            preparation_scope: "since this writer enabled metrics; all foreground preparation probes and wall ticks, including internal retry work; short probes that reach the end of input emit no code; returned bytes exclude internal discarded emissions; not exact emitter invocation counts or CPU cycles; excludes shared/stored rebase and background workers",
             lookup_counter_scope: "lookups counts exits sent to lookup dispatchers; lookup_hits counts successful native transfers; their ratio is not a hit rate",
             counter_scope: "raw engine lifetime counters; subtract initial_statistics for writer epoch; legacy u64 counters have no saturation detection; residency fields are gauges, not RSS",
         }
@@ -107,15 +106,15 @@ mod tests {
     #[test]
     fn preparation_outcomes_partition_calls_and_report_saturation() {
         let mut metrics = PreparationMetrics::default();
-        metrics.record(&Ok(Prepared::Checked(0)), 3, false);
-        metrics.record(&Ok(Prepared::FloatingPointTrap), 5, false);
+        metrics.record(Some(&Ok(Prepared::Checked(0))), 3, false);
+        metrics.record(Some(&Ok(Prepared::FloatingPointTrap)), 5, false);
         metrics.record(
-            &Err(Refused {
+            Some(&Err(Refused {
                 pc: 0,
                 error: stela_compiler::CompileError::new(
                     stela_compiler::CompileErrorKind::IncompleteSourceInstruction,
                 ),
-            }),
+            })),
             7,
             true,
         );
@@ -132,13 +131,13 @@ mod tests {
         assert!(!metrics.counter_saturated);
         metrics.calls = u64::MAX;
         metrics.wall_ticks = u64::MAX;
-        metrics.record(&Ok(Prepared::Checked(0)), 1, false);
+        metrics.record(Some(&Ok(Prepared::Checked(0))), 1, false);
         assert_eq!((metrics.calls, metrics.wall_ticks), (u64::MAX, u64::MAX));
         assert!(metrics.counter_saturated);
     }
 
     #[test]
-    fn long_window_records_discarded_prepare_without_changing_installed_code() {
+    fn short_probe_retries_without_emitting_a_partial_block() {
         use super::super::{
             Fetched,
             tests::{BASE, machine},
@@ -159,10 +158,9 @@ mod tests {
         let metrics = profiled.preparation_metrics.unwrap();
         assert_eq!(
             (metrics.calls, metrics.blocks, metrics.short_window_retries),
-            (2, 2, 1)
+            (2, 1, 1)
         );
-        assert!(metrics.discarded_returned_native_bytes > 0);
-        assert!(metrics.returned_native_bytes > metrics.discarded_returned_native_bytes);
+        assert!(metrics.returned_native_bytes > 0);
         assert_eq!(profiled.statistics.compiled, 1);
         assert_eq!(plain.host.installed, profiled.host.installed);
         assert_eq!(plain.cpu.state, profiled.cpu.state);

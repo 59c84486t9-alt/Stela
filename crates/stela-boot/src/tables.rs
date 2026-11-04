@@ -80,10 +80,21 @@ pub fn map_page(
     physical: u64,
     rights: u64,
 ) -> Result<()> {
+    map_page_slot(frames, root, address, physical, rights).map(|_| ())
+}
+
+/// Map one 4 KiB page and retain its slot for an adjacent prefill.
+pub(crate) fn map_page_slot(
+    frames: &mut dyn Frames,
+    root: u64,
+    address: u64,
+    physical: u64,
+    rights: u64,
+) -> Result<*mut u64> {
     let slot = entry(frames, root, address, 0, true)?.expect("created");
     // SAFETY: a live leaf slot of this builder's tables.
     unsafe { slot.write_volatile((physical & ADDRESS) | rights) };
-    Ok(())
+    Ok(slot)
 }
 
 /// Map one 2 MiB page; both addresses are 2 MiB aligned.

@@ -276,7 +276,8 @@ pub enum FormatError {
 pub struct Record {
     pub translator: Digest,
     pub key: Digest,
-    pub entries: Vec<Entry>,
+    // Ordered by entry PC and context, including records loaded from disk.
+    entries: Vec<Entry>,
 }
 
 impl Record {
@@ -288,29 +289,50 @@ impl Record {
         }
     }
 
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    fn entry_index(&self, offset: u16, context: &Digest) -> Result<usize, usize> {
+        // Keep the first entry when decoding a legacy record with duplicate
+        // keys, as the previous sequential lookup did.
+        let key = (offset, context);
+        let index = self
+            .entries
+            .partition_point(|entry| (entry.offset, &entry.context) < key);
+        match self.entries.get(index) {
+            Some(entry) if (entry.offset, &entry.context) == key => Ok(index),
+            _ => Err(index),
+        }
+    }
+
     pub fn find(&self, offset: u16, context: &Digest) -> Option<&Entry> {
-        self.entries
-            .iter()
-            .find(|entry| entry.offset == offset && entry.context == *context)
+        // A sequential scan is cheaper for short records, where the
+        // dependent probes of a binary search cost more than they save.
+        if self.entries.len() <= 32 {
+            return self
+                .entries
+                .iter()
+                .find(|entry| entry.offset == offset && entry.context == *context);
+        }
+        self.entry_index(offset, context)
+            .ok()
+            .map(|index| &self.entries[index])
     }
 
     /// Add `entry`, replacing one for the same entry PC and context.
     pub fn insert(&mut self, entry: Entry) {
-        match self
-            .entries
-            .iter_mut()
-            .find(|other| other.offset == entry.offset && other.context == entry.context)
-        {
-            Some(other) => *other = entry,
-            None => self.entries.push(entry),
+        match self.entry_index(entry.offset, &entry.context) {
+            Ok(index) => self.entries[index] = entry,
+            Err(index) => self.entries.insert(index, entry),
         }
     }
 
     /// Add the entries of `other` this record lacks.
     pub fn merge(&mut self, other: Self) {
         for entry in other.entries {
-            if self.find(entry.offset, &entry.context).is_none() {
-                self.entries.push(entry);
+            if let Err(index) = self.entry_index(entry.offset, &entry.context) {
+                self.entries.insert(index, entry);
             }
         }
     }
@@ -421,6 +443,9 @@ impl Record {
         }
         if !reader.0.is_empty() {
             return Err(FormatError::Entry);
+        }
+        if !entries.is_sorted_by_key(|entry| (entry.offset, entry.context)) {
+            entries.sort_by_key(|entry| (entry.offset, entry.context));
         }
         Ok(Self {
             translator: *translator,

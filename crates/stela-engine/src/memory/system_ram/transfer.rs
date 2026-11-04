@@ -1,7 +1,7 @@
 //! Native coherent host/table-walker transfers through the canonical RAM owner.
 use super::RegisteredSystemRam;
-use crate::memory::{backing::AccessKind, domain::PublicationFault};
-use stela_compiler::context::memory::MemoryStatus;
+use crate::memory::{access, backing::AccessKind, domain::PublicationFault};
+use stela_compiler::{TargetCpu, context::memory::MemoryStatus};
 
 impl RegisteredSystemRam {
     /// Publish private host bytes through every reached backing's same writer
@@ -46,14 +46,23 @@ impl RegisteredSystemRam {
         Ok(())
     }
 
-    pub(crate) fn read_descriptor(&self, physical: u64) -> Result<u64, MemoryStatus> {
+    /// Read a single aligned descriptor through the canonical RAM owner.
+    pub fn read_descriptor(&self, physical: u64) -> Result<u64, MemoryStatus> {
         if !physical.is_multiple_of(8) {
             return Err(MemoryStatus::InvalidRequest);
         }
-        let mut bytes = [0; 8];
-        // SAFETY: private local staging, disjoint from every canonical backing.
-        unsafe { self.read_physical(physical, &mut bytes) }?;
-        Ok(u64::from_le_bytes(bytes))
+        self.domain.check_execution()?;
+        let (region, offset) = self.region(physical).ok_or(MemoryStatus::Translation)?;
+        let pointer = region
+            .backing
+            .host_pointer(offset, 8, AccessKind::Read)
+            .map_err(|_| MemoryStatus::Domain)?;
+        // SAFETY: registration aligns both ends of each extent to at least
+        // eight bytes. The pointer covers one aligned doubleword in its
+        // pinned, coherent backing, with no Rust reference into guest RAM.
+        unsafe { access::read_part(pointer.as_ptr(), 8, TargetCpu::Baseline) }
+            .map(|value| value as u64)
+            .map_err(|_| MemoryStatus::Domain)
     }
 
     pub fn update_descriptor(
