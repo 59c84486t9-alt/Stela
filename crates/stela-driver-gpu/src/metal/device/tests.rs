@@ -1406,15 +1406,15 @@ fn managed_textures_keep_a_cpu_copy_without_host_image_copy() {
 
     submit(&mut device);
     let segment = &device.backend().submissions.last().unwrap()[0];
-    let Command::CopyBufferToImage { src, regions, .. } = &segment.commands[1] else {
+    let Command::CopyBufferToImage { src, region, .. } = &segment.commands[1] else {
         panic!("{:?}", segment.commands[1]);
     };
     assert_eq!(*src, level1.buffer.buffer);
     assert_eq!(
         (
-            regions[0].buffer_offset,
-            regions[0].buffer_row_length,
-            regions[0].offset
+            region.buffer_offset,
+            region.buffer_row_length,
+            region.offset
         ),
         ((8 * 4) + 2 * 4, 8, [2, 1, 0])
     );
@@ -2057,8 +2057,8 @@ fn indirect_mapping_updates_bind_once_their_arguments_are_read() {
             .commands
             .iter()
             .find_map(|command| match command {
-                Command::CopyBuffer { src, regions, .. } if *src == Buffer(99) => {
-                    Some(regions[0].dst_offset)
+                Command::CopyBuffer { src, region, .. } if *src == Buffer(99) => {
+                    Some(region.dst_offset)
                 }
                 _ => None,
             })

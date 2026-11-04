@@ -12,7 +12,7 @@ use serde::Serialize;
 use stela_compiler::{
     CompileErrorKind, GuestAddress,
     block::{
-        BlockAnalysis, BlockProfile, CompilationPlan, DynamicEdge, Features,
+        BlockAnalysis, BlockAnalysisError, BlockProfile, CompilationPlan, DynamicEdge, Features,
         MAX_BLOCK_INSTRUCTIONS, analyze_and_plan, analyze_with_profile,
     },
 };
@@ -32,6 +32,9 @@ pub struct PreparedDiscoveryBlock {
     pub analysis: BlockAnalysis,
     pub prepared: Prepared,
 }
+
+type PreparedSnapshot = (PreparedDiscoveryBlock, Vec<u8>);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DiscoveryProblem {
@@ -83,10 +86,16 @@ impl BlockRuntime {
 
     /// Keep the same native bytes whose checksum the preparation bound to the
     /// manifest, so dispatch can map them without reopening the cache file.
-    pub(super) fn prepare_snapshot(
-        &mut self,
+    pub(super) fn prepare_snapshot(&self, pc: GuestAddress) -> Result<PreparedSnapshot> {
+        self.prepare_snapshot_attempt(pc)?.map_err(Into::into)
+    }
+
+    /// Separate source admission failures, which dispatch reports as a guest
+    /// stop, from later plan, cache and artifact failures.
+    pub(super) fn prepare_snapshot_attempt(
+        &self,
         pc: GuestAddress,
-    ) -> Result<(PreparedDiscoveryBlock, Vec<u8>)> {
+    ) -> Result<Result<PreparedSnapshot, BlockAnalysisError>> {
         require!(pc.0.is_multiple_of(4), "unaligned preparation entry");
         #[cfg(feature = "std")]
         let cache_root = self.preparation.cache_root(pc)?;
@@ -106,13 +115,15 @@ impl BlockRuntime {
         let window = &region.source[offset..offset + available];
         let options = stela_compiler::Options::new(self.profile, self.target);
         // A leaf plan uses a different parser and consumes the entire window.
-        let (analysis, plan) = if self.profile.has(Features::LEAF) {
-            (
-                analyze_with_profile(window, pc, self.profile)?,
-                CompilationPlan::new(window, pc, &options),
-            )
+        let planned = if self.profile.has(Features::LEAF) {
+            analyze_with_profile(window, pc, self.profile)
+                .map(|analysis| (analysis, CompilationPlan::new(window, pc, &options)))
         } else {
-            analyze_and_plan(window, pc, &options)?
+            analyze_and_plan(window, pc, &options)
+        };
+        let (analysis, plan) = match planned {
+            Ok(parsed) => parsed,
+            Err(error) => return Ok(Err(error)),
         };
         let plan = plan?.with_resident_loops();
         let artifact_profile = plan.profile();
@@ -143,7 +154,7 @@ impl BlockRuntime {
             )
         };
         validate_source_map(&prepared.manifest, pc, source_bytes)?;
-        Ok((
+        Ok(Ok((
             PreparedDiscoveryBlock {
                 artifact_profile,
                 entry: pc,
@@ -153,7 +164,7 @@ impl BlockRuntime {
                 prepared,
             },
             native,
-        ))
+        )))
     }
 
     /// Follow known static successors only. Call continuations are candidates,

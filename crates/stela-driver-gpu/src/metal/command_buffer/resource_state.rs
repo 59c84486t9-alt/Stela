@@ -86,11 +86,11 @@ impl CommandBuffer {
         self.recorder.push(Command::CopyBuffer {
             src: buffer.buffer,
             dst: arguments.buffer,
-            regions: alloc::vec![BufferCopy {
+            region: BufferCopy {
                 src_offset,
                 dst_offset: arguments.offset,
                 size,
-            }],
+            },
         });
         if let Some(barrier) = self.recorder.hazards.host() {
             self.recorder.push(Command::Barrier(barrier));

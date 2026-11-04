@@ -175,11 +175,11 @@ impl CommandBuffer {
         self.recorder.push(Command::CopyBuffer {
             src: src.buffer,
             dst: dst.buffer,
-            regions: alloc::vec![BufferCopy {
+            region: BufferCopy {
                 src_offset,
                 dst_offset,
-                size
-            }],
+                size,
+            },
         });
         Ok(())
     }
@@ -198,7 +198,7 @@ impl CommandBuffer {
         self.recorder.push(Command::CopyBufferToImage {
             src: src.buffer.buffer,
             dst: dst.image,
-            regions: alloc::vec![copy],
+            region: copy,
         });
         Ok(())
     }
@@ -217,7 +217,7 @@ impl CommandBuffer {
         self.recorder.push(Command::CopyImageToBuffer {
             src: src.image,
             dst: dst.buffer.buffer,
-            regions: alloc::vec![copy],
+            region: copy,
         });
         Ok(())
     }
@@ -368,7 +368,7 @@ impl CommandBuffer {
             self.recorder.push(Command::CopyBuffer {
                 src: upload.buffer,
                 dst: buffer.buffer,
-                regions: alloc::vec![region],
+                region,
             });
         }
         Ok(())
