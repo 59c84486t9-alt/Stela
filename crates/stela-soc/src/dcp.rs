@@ -95,6 +95,8 @@ pub enum Log {
         /// The composed layers' surfaces, bottom to top.
         surfaces: Vec<Surface>,
     },
+    /// Cumulative presentation progress in the bounded log.
+    PresentSummary { total: u64, last_swap: u32 },
     /// A named refusal, with the call's interface row.
     Refused(String),
     /// A method of the interface with no model, answered with zeros.
@@ -154,6 +156,9 @@ impl core::fmt::Display for Log {
             }
             Log::Presented { swap_id, surfaces } => {
                 write!(f, "DCP presented swap {swap_id} surfaces={surfaces:x?}")
+            }
+            Log::PresentSummary { total, last_swap } => {
+                write!(f, "DCP present summary total={total} last_swap={last_swap}")
             }
             Log::Refused(text) => write!(f, "DCP refused {text}"),
             Log::Unmodeled(tag) => {
@@ -371,6 +376,14 @@ impl Coprocessor {
         self.link.borrow().retained_idle()
             && !self.frame_pending()
             && self.afk.iter().all(|afk| afk.borrow().retained_idle())
+    }
+
+    /// Choose per-swap tracing or bounded presentation reports.
+    pub fn set_swap_tracing(&mut self, enabled: bool) {
+        self.link
+            .borrow_mut()
+            .service_mut()
+            .set_swap_tracing(enabled);
     }
 
     /// The next display-log entry.

@@ -42,6 +42,9 @@ use super::{
 use crate::machine::registers::{Changes, Outcome};
 use stela_compiler::aarch64::system::registers::Encoding;
 
+/// ICC_PMR_EL1 is outside the CRn=12 CPU interface register space.
+pub(super) const PMR: Encoding = Encoding::new(3, 0, 4, 6, 0);
+
 /// ICC_SRE_EL1: SRE, DFB and DIB, each RAO/WI.
 const SRE_EL1_VALUE: u64 = 0b111;
 /// ICC_SRE_EL2: SRE, DFB, DIB and Enable, each RAO/WI.
@@ -128,7 +131,7 @@ impl Register {
             encoding.crm(),
             encoding.op2(),
         );
-        if (op0, op1, crn, crm, op2) == (3, 0, 4, 6, 0) {
+        if encoding == PMR {
             return Some(Self::Pmr);
         }
         if (op0, op1, crn) != (3, 0, 12) {

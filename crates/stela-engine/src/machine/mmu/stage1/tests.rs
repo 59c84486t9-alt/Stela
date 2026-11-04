@@ -197,7 +197,7 @@ fn access_permissions_follow_ap_xn_wxn_and_pan() {
         ..KERNEL
     };
     let leaf = |controls: &Controls, requester, descriptor| {
-        super::rights(controls, requester, &Hierarchy::default(), descriptor)
+        super::rights(controls, requester, &Hierarchy::default(), descriptor).rights()
     };
     // AP[2:1] 00..11 with UXN=PXN=0: the rights of EL1, EL0, EL1 with
     // PAN, and an unprivileged EL1 access.
@@ -264,7 +264,7 @@ fn epan_extends_pan_to_locations_el0_may_execute() {
         ..KERNEL
     };
     let leaf = |controls: &Controls, hierarchy: &Hierarchy, descriptor| {
-        super::rights(controls, pan, hierarchy, descriptor)
+        super::rights(controls, pan, hierarchy, descriptor).rights()
     };
     let execute_only = ATTRS; // AP[2:1] 00, EL0 execute-only.
     let read_only_execute_only = ATTRS | AP_READ_ONLY;
@@ -295,9 +295,51 @@ fn epan_extends_pan_to_locations_el0_may_execute() {
     assert_eq!(leaf(&controls, &none, el0_writable), (false, false, false));
     // Without PSTATE.PAN, EPAN has no effect.
     assert_eq!(
-        super::rights(&controls, KERNEL, &none, execute_only),
+        super::rights(&controls, KERNEL, &none, execute_only).rights(),
         (true, true, false)
     );
+}
+
+#[test]
+fn pan_classification_matches_a_second_translation() {
+    let va = 0x1_0000_4000;
+    let pa = 0x8_0000_0000;
+    let pan = Requester {
+        pan: true,
+        ..KERNEL
+    };
+    for sprr in [
+        Sprr::default(),
+        Sprr {
+            config: SPRR_CONFIG_EN,
+            el1: 0x3333_3333_3333_3333,
+            el0: 0x3030_3030_3030_3030,
+            ..Sprr::default()
+        },
+    ] {
+        for epan in [false, true] {
+            let mut controls = controls();
+            controls.sprr = sprr;
+            controls.sctlr |= if epan { SCTLR_EPAN } else { 0 };
+            for index in 0..16u64 {
+                let descriptor = ATTRS | (index >> 2) << 6 | (index & 3) << 53;
+                let mut tables = Tables::default();
+                map(&mut tables, &controls, va, pa, descriptor);
+                for access in [Access::Read, Access::Write] {
+                    let Outcome::Mapped(mapped) =
+                        translate(&controls, va, access, KERNEL, &mut tables)
+                    else {
+                        continue;
+                    };
+                    let masked = translate(&controls, va, Access::Read, pan, &mut tables);
+                    assert_eq!(
+                        !mapped.readable || mapped.pan_sensitive,
+                        !matches!(masked, Outcome::Mapped(same) if same.writable == mapped.writable)
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]

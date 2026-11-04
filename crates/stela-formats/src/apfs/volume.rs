@@ -15,7 +15,7 @@ use super::{
     u16_at, u32_at, u64_at, uuid_at,
 };
 use crate::payload::ReadAt;
-use alloc::{format, string::String, vec, vec::Vec};
+use alloc::{collections::VecDeque, format, string::String, vec, vec::Vec};
 use core::cmp::Ordering;
 
 pub const APFS_VOL_ROLE_NONE: u16 = 0x0000;
@@ -181,14 +181,45 @@ pub struct Volume {
     integrity_meta_oid: u64,
 }
 
+/// Successfully opened volumes and trees for one stable container source.
+#[derive(Default)]
+pub(super) struct OpenCache {
+    volumes: VecDeque<Volume>,
+    trees: VecDeque<(TreeKey, Tree)>,
+}
+
+const OPEN_CACHE_SLOTS: usize = 8;
+
+fn remember<T>(cache: &mut VecDeque<T>, item: T) {
+    if cache.len() == OPEN_CACHE_SLOTS {
+        cache.pop_front();
+    }
+    cache.push_back(item);
+}
+
+/// Includes the volume's object-map view and distinguishes seal-checked roots.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TreeKey {
+    omap_root: u64,
+    xid: u64,
+    type_field: u32,
+    oid: u64,
+    integrity_meta_oid: Option<u64>,
+    seal_root: bool,
+}
+
 fn key_id_and_type(key: &[u8]) -> Result<(u64, u8)> {
     let value = u64_at(key, 0)?;
     Ok((value & OBJ_ID_MASK, (value >> OBJ_TYPE_SHIFT) as u8))
 }
 
-fn c_string(bytes: &[u8]) -> Result<String> {
+fn c_str(bytes: &[u8]) -> Result<&str> {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    String::from_utf8(bytes[..end].to_vec()).map_err(|_| ApfsError::Malformed("name is not UTF-8"))
+    core::str::from_utf8(&bytes[..end]).map_err(|_| ApfsError::Malformed("name is not UTF-8"))
+}
+
+fn c_string(bytes: &[u8]) -> Result<String> {
+    c_str(bytes).map(String::from)
 }
 
 /// The extended fields of an inode or directory entry: `(type, data)`.
@@ -218,9 +249,14 @@ fn extended_fields(blob: &[u8]) -> Result<Vec<(u8, &[u8])>> {
 
 impl Volume {
     pub(crate) fn open<R: ReadAt>(device: &mut Device<R>, paddr: u64) -> Result<Self> {
+        if let Some(volume) = device.open_cache.volumes.iter().find(|v| v.paddr == paddr) {
+            return Ok(volume.clone());
+        }
         let block = Self::superblock(device, paddr)?;
         let omap = Omap::open(device, u64_at(&block, 128)?)?;
-        Self::parse(&block, paddr, omap)
+        let volume = Self::parse(&block, paddr, omap)?;
+        remember(&mut device.open_cache.volumes, volume.clone());
+        Ok(volume)
     }
 
     fn superblock<R: ReadAt>(device: &mut Device<R>, paddr: u64) -> Result<Vec<u8>> {
@@ -309,6 +345,22 @@ impl Volume {
         oid: u64,
         seal_root: bool,
     ) -> Result<Tree> {
+        let key = TreeKey {
+            omap_root: self.omap.tree.root,
+            xid: self.xid,
+            type_field,
+            oid,
+            integrity_meta_oid: self.sealed.then_some(self.integrity_meta_oid),
+            seal_root,
+        };
+        if let Some((_, tree)) = device
+            .open_cache
+            .trees
+            .iter()
+            .find(|(cached, _)| *cached == key)
+        {
+            return Ok(tree.clone());
+        }
         let (root, headerless) = match Storage::of(type_field) {
             Storage::Physical => {
                 // A physical root shows by its zero header whether it has one.
@@ -328,6 +380,7 @@ impl Volume {
         if Storage::of(type_field) == Storage::Virtual {
             tree.relative_to(oid);
         }
+        remember(&mut device.open_cache.trees, (key, tree.clone()));
         Ok(tree)
     }
 
@@ -391,10 +444,13 @@ impl Volume {
         })
     }
 
-    /// The entries of directory `oid`.
-    pub fn entries<R: ReadAt>(&self, device: &mut Device<R>, oid: u64) -> Result<Vec<Entry>> {
+    fn visit_entries<R: ReadAt>(
+        &self,
+        device: &mut Device<R>,
+        oid: u64,
+        mut visit: impl FnMut(&str, u64, FileKind),
+    ) -> Result<()> {
         let hashed = self.hashed_names();
-        let mut entries = Vec::new();
         self.records(device, oid, APFS_TYPE_DIR_REC, &mut |key, value| {
             let name = if hashed {
                 let length = (u32_at(key, 8)? & J_DREC_LEN_MASK) as usize;
@@ -404,12 +460,24 @@ impl Volume {
                 key.get(10..10 + length)
             }
             .ok_or(ApfsError::Malformed("directory entry name"))?;
-            entries.push(Entry {
-                name: c_string(name)?,
-                oid: u64_at(value, 0)?,
-                kind: FileKind::from_drec(u16_at(value, 16)?),
-            });
+            visit(
+                c_str(name)?,
+                u64_at(value, 0)?,
+                FileKind::from_drec(u16_at(value, 16)?),
+            );
             Ok(Visit::Continue)
+        })
+    }
+
+    /// The entries of directory `oid`.
+    pub fn entries<R: ReadAt>(&self, device: &mut Device<R>, oid: u64) -> Result<Vec<Entry>> {
+        let mut entries = Vec::new();
+        self.visit_entries(device, oid, |name, oid, kind| {
+            entries.push(Entry {
+                name: String::from(name),
+                oid,
+                kind,
+            });
         })?;
         Ok(entries)
     }
@@ -429,10 +497,17 @@ impl Volume {
         parent: u64,
         name: &str,
     ) -> Result<Entry> {
-        self.entries(device, parent)?
-            .into_iter()
-            .find(|entry| self.names_match(&entry.name, name))
-            .ok_or_else(|| ApfsError::NotFound(String::from(name)))
+        let mut found = None;
+        self.visit_entries(device, parent, |stored, oid, kind| {
+            if found.is_none() && self.names_match(stored, name) {
+                found = Some(Entry {
+                    name: String::from(stored),
+                    oid,
+                    kind,
+                });
+            }
+        })?;
+        found.ok_or_else(|| ApfsError::NotFound(String::from(name)))
     }
 
     /// The inode at `path` from the volume root. Symbolic links in
@@ -530,7 +605,7 @@ impl Volume {
                 let size = u64_at(&data, 8)?;
                 let mut bytes =
                     vec![0; usize::try_from(size).map_err(|_| ApfsError::Malformed("xattr size"))?];
-                self.read_stream(device, stream, size, 0, &mut bytes)?;
+                self.read_stream(device, stream, size, 0, &mut bytes, true)?;
                 Ok(Some(bytes))
             }
             Some(_) => Err(ApfsError::Malformed(
@@ -597,13 +672,17 @@ impl Volume {
         size: u64,
         offset: u64,
         buffer: &mut [u8],
+        zeroed: bool,
     ) -> Result<()> {
         let end = offset
             .checked_add(buffer.len() as u64)
             .filter(|&end| end <= size)
             .ok_or(ApfsError::Malformed("read past the end of the stream"))?;
-        // Holes and the space past the last extent read as zeros.
-        buffer.fill(0);
+        // Holes and the space past the last extent read as zeros. Whole
+        // files and attributes already have a freshly zeroed buffer.
+        if !zeroed {
+            buffer.fill(0);
+        }
         let block_size = u64::from(device.block_size());
         for extent in self.extents(device, private_id)? {
             let start = extent.offset.max(offset);
@@ -626,6 +705,17 @@ impl Volume {
         offset: u64,
         buffer: &mut [u8],
     ) -> Result<()> {
+        self.read_regular_at(device, inode, offset, buffer, false)
+    }
+
+    fn read_regular_at<R: ReadAt>(
+        &self,
+        device: &mut Device<R>,
+        inode: &Inode,
+        offset: u64,
+        buffer: &mut [u8],
+        zeroed: bool,
+    ) -> Result<()> {
         if inode.kind != FileKind::Regular {
             return Err(ApfsError::NotFound(format!(
                 "inode {} is not a regular file",
@@ -635,7 +725,19 @@ impl Volume {
         if inode.bsd_flags & UF_COMPRESSED != 0 {
             return Err(ApfsError::Unsupported("transparently compressed files"));
         }
-        self.read_stream(device, inode.private_id, inode.size, offset, buffer)
+        self.read_stream(device, inode.private_id, inode.size, offset, buffer, zeroed)
+    }
+
+    /// Read a whole regular file without accepting transparent compression.
+    pub(crate) fn read_regular<R: ReadAt>(
+        &self,
+        device: &mut Device<R>,
+        inode: &Inode,
+    ) -> Result<Vec<u8>> {
+        let mut bytes =
+            vec![0; usize::try_from(inode.size).map_err(|_| ApfsError::Malformed("file size"))?];
+        self.read_regular_at(device, inode, 0, &mut bytes, true)?;
+        Ok(bytes)
     }
 
     /// A whole regular file; a transparently compressed one is inflated
@@ -654,10 +756,7 @@ impl Volume {
             };
             return super::decmpfs::decode(&header, fork.as_deref());
         }
-        let mut bytes =
-            vec![0; usize::try_from(inode.size).map_err(|_| ApfsError::Malformed("file size"))?];
-        self.read_at(device, inode, 0, &mut bytes)?;
-        Ok(bytes)
+        self.read_regular(device, inode)
     }
 
     /// The volume's snapshots, oldest first.
@@ -733,6 +832,41 @@ mod tests {
 
     const GROUP: &str = "A304C51B-D22F-4CDD-829D-3E30CB5BD87B";
 
+    #[test]
+    fn caller_buffer_has_zeroed_unread_bytes_after_source_failure() -> Result<()> {
+        struct PartialRead(crate::apfs::tests::Memory);
+
+        impl ReadAt for PartialRead {
+            type Error = &'static str;
+
+            fn len(&self) -> u64 {
+                self.0.len()
+            }
+
+            fn read_at(
+                &mut self,
+                offset: u64,
+                out: &mut [u8],
+            ) -> core::result::Result<(), Self::Error> {
+                if out.len() == 16 {
+                    out[..3].fill(0xa5);
+                    return Err("injected partial source failure");
+                }
+                self.0.read_at(offset, out)
+            }
+        }
+
+        let mut container = Container::open(PartialRead(fixture()), 0)?;
+        let volume = container.volume_with_role(APFS_VOL_ROLE_PREBOOT)?;
+        let device = &mut container.device;
+        let inode = volume.lookup(device, "pattern.bin", true)?;
+        let mut out = [0xff; 16];
+        assert!(volume.read_at(device, &inode, 123_456, &mut out).is_err());
+        assert_eq!(&out[..3], &[0xa5; 3]);
+        assert_eq!(&out[3..], &[0; 13]);
+        Ok(())
+    }
+
     fn pattern(length: usize) -> Vec<u8> {
         (0..length)
             .map(|i| ((i * 7 + i / 251) & 0xff) as u8)
@@ -776,6 +910,9 @@ mod tests {
         assert_eq!(data.len(), 200_004);
         assert!(data[..200_000].iter().all(|&b| b == 0));
         assert_eq!(&data[200_000..], b"tail");
+        let mut last = [0xff; 8];
+        volume.read_at(device, &sparse, 199_996, &mut last)?;
+        assert_eq!(&last, b"\0\0\0\0tail");
         let empty = volume.lookup(device, "empty", true)?;
         assert_eq!(
             volume
@@ -821,6 +958,26 @@ mod tests {
         let old = volume.snapshot(device, &snapshot)?;
         let raw = old.lookup(device, "pattern.bin", true)?;
         assert_eq!(old.read(device, &raw)?, pattern(300_000));
+        Ok(())
+    }
+
+    #[test]
+    fn cached_tree_keeps_the_transaction_and_seal_identity() -> Result<()> {
+        let mut container = Container::open(sealed_fixture(), 0)?;
+        let mut volume = container.volumes()?.remove(0);
+        let device = &mut container.device;
+        assert_eq!(
+            volume.inode(device, ROOT_DIR_INO_NUM)?.kind,
+            FileKind::Directory
+        );
+
+        let xid = volume.xid;
+        volume.xid = 0;
+        assert!(volume.inode(device, ROOT_DIR_INO_NUM).is_err());
+        volume.xid = xid;
+
+        volume.integrity_meta_oid = u64::MAX;
+        assert!(volume.inode(device, ROOT_DIR_INO_NUM).is_err());
         Ok(())
     }
 

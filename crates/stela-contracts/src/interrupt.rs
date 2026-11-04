@@ -68,6 +68,9 @@ pub struct InterruptLatch {
     asserted: BTreeSet<Wire>,
     aic_inputs: Vec<(AicInput, bool)>,
 }
+/// Retain space for ordinary wire traffic without keeping a large burst.
+const RETAINED_AIC_INPUTS: usize = 32;
+
 impl InterruptLatch {
     pub fn new() -> Self {
         Self::default()
@@ -75,6 +78,21 @@ impl InterruptLatch {
     /// AIC input changes in the order they happened, removed from the latch.
     pub fn take_aic_inputs(&mut self) -> Vec<(AicInput, bool)> {
         core::mem::take(&mut self.aic_inputs)
+    }
+
+    /// Move queued AIC input changes in order into an existing destination.
+    pub fn append_aic_inputs<T>(
+        &mut self,
+        destination: &mut Vec<T>,
+        map: impl FnMut((AicInput, bool)) -> T,
+    ) {
+        if self.aic_inputs.is_empty() {
+            return;
+        }
+        destination.extend(self.aic_inputs.drain(..).map(map));
+        if self.aic_inputs.capacity() > RETAINED_AIC_INPUTS {
+            self.aic_inputs = Vec::new();
+        }
     }
     #[cfg(any(test, feature = "test-support"))]
     pub fn is_asserted(&self, wire: Wire) -> bool {
@@ -146,5 +164,31 @@ mod tests {
         latch.set_level(Wire::Aic(uart), false);
         assert_eq!(latch.take_aic_inputs(), vec![(uart, true), (uart, false)]);
         assert!(latch.take_aic_inputs().is_empty());
+    }
+
+    #[test]
+    fn appending_aic_inputs_reuses_small_buffers_and_releases_large_ones() {
+        let mut latch = InterruptLatch::new();
+        let input = AicInput::new(0, 739);
+        let mut output = vec![(input, false)];
+        latch.set_level(Wire::Aic(input), true);
+        let capacity = latch.aic_inputs.capacity();
+        assert_ne!(capacity, 0);
+        latch.append_aic_inputs(&mut output, core::convert::identity);
+        assert_eq!(output, [(input, false), (input, true)]);
+        assert_eq!(latch.aic_inputs.capacity(), capacity);
+
+        for index in 0..=RETAINED_AIC_INPUTS {
+            latch.set_level(Wire::Aic(input), index % 2 != 0);
+        }
+        output.clear();
+        latch.append_aic_inputs(&mut output, core::convert::identity);
+        assert!(
+            output
+                .iter()
+                .copied()
+                .eq((0..=RETAINED_AIC_INPUTS).map(|index| (input, index % 2 != 0)))
+        );
+        assert_eq!(latch.aic_inputs.capacity(), 0);
     }
 }

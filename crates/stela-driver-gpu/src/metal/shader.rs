@@ -452,6 +452,22 @@ pub struct Provenance {
     pub entry: String,
 }
 
+/// A specialized function and the reflection of its exact AIR input.
+#[derive(Debug)]
+pub struct PreparedFunction {
+    pub(crate) library: u64,
+    pub(crate) constants: Vec<(u32, Vec<u8>)>,
+    pub(crate) reflection: Reflection,
+    pub(crate) provenance: Provenance,
+    pub(crate) reflection_service: Option<core::num::NonZeroUsize>,
+}
+
+impl PreparedFunction {
+    pub(crate) fn entry(&self) -> &str {
+        &self.provenance.entry
+    }
+}
+
 /// A function compiled for a pipeline stage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompiledShader {
@@ -631,6 +647,30 @@ pub trait Compiler {
         specialization: &Specialization,
     ) -> Result<Reflection>;
 
+    /// Reflects a specialized function for later pipeline compilation.
+    fn prepare_function(
+        &mut self,
+        library: u64,
+        entry: &str,
+        constants: Vec<(u32, Vec<u8>)>,
+    ) -> Result<PreparedFunction> {
+        let specialization = Specialization {
+            constants,
+            ..Specialization::default()
+        };
+        let reflection = self.reflect(library, entry, &specialization)?;
+        Ok(PreparedFunction {
+            library,
+            constants: specialization.constants,
+            reflection,
+            provenance: Provenance {
+                entry: String::from(entry),
+                ..Provenance::default()
+            },
+            reflection_service: None,
+        })
+    }
+
     /// The function constants `entry` of `library` declares, before any has
     /// a value.
     fn constants(&mut self, library: u64, entry: &str) -> Result<Vec<FunctionConstant>>;
@@ -680,6 +720,30 @@ pub trait Compiler {
         specialization: &Specialization,
         tessellation: &Tessellation,
     ) -> Result<TessellationStages>;
+
+    /// Compiles a function whose specialized reflection is already available.
+    fn compile_prepared(
+        &mut self,
+        function: &PreparedFunction,
+        specialization: &Specialization,
+    ) -> Result<CompiledShader> {
+        self.compile(function.library, function.entry(), specialization)
+    }
+
+    /// Compiles a prepared patch function with its preceding stages.
+    fn compile_prepared_tessellation(
+        &mut self,
+        function: &PreparedFunction,
+        specialization: &Specialization,
+        tessellation: &Tessellation,
+    ) -> Result<TessellationStages> {
+        self.compile_tessellation(
+            function.library,
+            function.entry(),
+            specialization,
+            tessellation,
+        )
+    }
 
     /// Releases a compiled function's NIR.
     fn release(&mut self, code: ShaderCode);

@@ -176,7 +176,7 @@ impl BlockRuntime {
         prepare::validate_preparation_native(&manifest, native)?;
         prepare::validate_preparation_claim(&manifest)?;
         validate_source_map(&manifest, pc, source_bytes)?;
-        let prepared = LoadedArtifact::bind(manifest, native)?;
+        let prepared = LoadedArtifact { manifest };
         let block = LoadedBlock::from_artifact(
             self.target,
             profile,
@@ -265,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_artifact_enters_original_loaded_hit_path_without_disk_or_execution() -> Result<()> {
+    fn standard_artifact_dispatches_from_memory_without_disk_or_compilation() -> Result<()> {
         let source = source(&[MOVZ_X0_42, B_NEXT]);
         let (manifest, native) = artifact(&source, BlockProfile::ORDINARY)?;
         let (bytes, checksum) = serialized(&manifest)?;
@@ -275,12 +275,22 @@ mod tests {
             runtime.loaded_manifest(BASE).unwrap().identity,
             manifest.identity
         );
-        let mut observations = outcome();
-        runtime.load(BASE, &mut observations)?;
-        assert_eq!(observations.memory_cache_hits, 1);
-        assert_eq!(observations.disk_cache_hits, 0);
-        assert_eq!(observations.compiled_blocks, 0);
-        assert_eq!(observations.blocks_executed, 0);
+        #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+        {
+            let mut state = ThreadState {
+                registers: stela_compiler::GuestState::default(),
+                pc: BASE,
+            };
+            let stop = GuestAddress(BASE.0 + source.len() as u64);
+            // SAFETY: the block only modifies registers and branches to the stop address.
+            let observations = unsafe { runtime.run(&mut state, Some(stop), 1)? };
+            assert_eq!(observations.reason, StopReason::StopAddress);
+            assert_eq!(observations.memory_cache_hits, 1);
+            assert_eq!(observations.disk_cache_hits, 0);
+            assert_eq!(observations.compiled_blocks, 0);
+            assert_eq!(observations.blocks_executed, 1);
+            assert_eq!(state.registers.x[0], 42);
+        }
         assert_eq!(runtime.loaded.len(), 1);
         assert!(
             runtime

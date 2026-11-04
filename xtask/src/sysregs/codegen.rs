@@ -262,7 +262,9 @@ impl Generator<'_> {
                 Some(index) => self.int(index)?,
                 None => "0".into(),
             };
-            return Ok(format!("c.error_record(ErrorRecord::{record}, {index})"));
+            return Ok(format!(
+                "{{ let index = {index}; c.error_record(ErrorRecord::{record}, index) }}"
+            ));
         }
         if !self.registers.contains(&rust) {
             self.unknown.insert(format!("register {name}"));
@@ -776,7 +778,7 @@ impl Generator<'_> {
                         None => "0".into(),
                     };
                     format!(
-                        "{{ let value = {value}; c.set_error_record(ErrorRecord::{record}, {index}, value)?; }}"
+                        "{{ let value = {value}; let index = {index}; c.set_error_record(ErrorRecord::{record}, index, value)?; }}"
                     )
                 }
                 "AST.Function" => {

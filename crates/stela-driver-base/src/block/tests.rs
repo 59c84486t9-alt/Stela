@@ -17,6 +17,7 @@ struct Delayed {
     released: Rc<Cell<usize>>,
     reads: Rc<Cell<usize>>,
     given: Rc<core::cell::RefCell<Vec<Command>>>,
+    last_read_address: Rc<Cell<usize>>,
 }
 
 type Probes = (
@@ -37,6 +38,7 @@ impl Delayed {
             released: probes.0.clone(),
             reads: probes.1.clone(),
             given: probes.2.clone(),
+            last_read_address: Default::default(),
         };
         (delayed, probes)
     }
@@ -48,6 +50,9 @@ impl Delayed {
             };
             self.released.set(self.released.get() - 1);
             let result = self.disk.execute(command);
+            if let Ok(Some(data)) = &result {
+                self.last_read_address.set(data.as_ptr() as usize);
+            }
             self.done.insert(tag, result);
         }
     }
@@ -209,6 +214,31 @@ fn windows_queue_commands_and_whichever_looks_moves_the_queue_on() {
         bytes: 512,
     };
     assert!(a.start(outside).is_err());
+}
+
+#[test]
+fn a_single_queued_read_returns_the_devices_original_buffer() {
+    let data: Vec<u8> = (0..4096).map(|byte| (byte % 251) as u8).collect();
+    let mut ram = RamDisk::new("single", 16, 512);
+    ram.write(1, &data).unwrap();
+    let (delayed, (released, _, _)) = Delayed::new(ram, 1);
+    let address = delayed.last_read_address.clone();
+    let disk = Shared::new(Box::new(delayed));
+    let mut window = disk.whole();
+    let mut read = Submission::new(
+        Request::Read {
+            lba: 1,
+            bytes: data.len(),
+        },
+        window.identity(),
+    )
+    .unwrap();
+    assert_eq!(read.poll(&mut window), None);
+    released.set(1);
+    let result = read.poll(&mut window).unwrap().unwrap().unwrap();
+    assert_eq!(result, data);
+    assert_eq!(result.as_ptr() as usize, address.get());
+    assert_eq!(read.poll(&mut window), Some(Ok(None)));
 }
 
 #[test]

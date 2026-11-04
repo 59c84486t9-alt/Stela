@@ -419,6 +419,70 @@ fn two_dies() -> (Aic2Config, Aic2Layout) {
 }
 
 #[test]
+fn the_last_die_omits_unaddressable_trailing_state() {
+    let (mut config, layout) = two_dies();
+    config.nr_irq = 32;
+    let die = layout.dies[1];
+    let mut aic = Aic2::new_with_layout(config, layout).unwrap();
+    let mut latch = InterruptLatch::new();
+    write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
+    assert_eq!(aic.irq_cfg.len(), 96);
+    assert_eq!(aic.software.len(), 3);
+    for bank in [
+        die.software_set,
+        die.software_clear,
+        die.mask_set,
+        die.mask_clear,
+        die.hardware_state,
+    ] {
+        let mut access = Access::new(0, 0, &mut latch);
+        assert!(aic.write(bank + 4, Width::Word, 0, &mut access).is_err());
+        assert!(aic.read(bank + 4, Width::Word, &mut access).is_err());
+    }
+    assert_eq!(read(&mut aic, &mut latch, 0, EVENT), 0);
+
+    write(&mut aic, &mut latch, die.mask_clear, 1 << 31);
+    write(&mut aic, &mut latch, die.software_set, 1 << 31);
+    assert_eq!(
+        read(&mut aic, &mut latch, 0, EVENT),
+        1 << 24 | EVENT_TYPE_IRQ | 31
+    );
+}
+
+#[test]
+fn two_eligible_cpus_claim_valid_words_in_die_priority_order() {
+    let (mut config, layout) = two_dies();
+    config.cpus = 64;
+    config.default_cpus = 1 | 1 << 63;
+    let (first, second) = (layout.dies[0], layout.dies[1]);
+    let mut aic = Aic2::new_with_layout(config, layout).unwrap();
+    let mut latch = InterruptLatch::new();
+    write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
+    write(&mut aic, &mut latch, first.mask_clear + 4, u32::MAX);
+    write(&mut aic, &mut latch, first.software_set + 4, u32::MAX);
+    write(&mut aic, &mut latch, second.mask_clear, 1);
+    write(&mut aic, &mut latch, second.software_set, 1);
+
+    assert!(latch.pins(0).irq && latch.pins(63).irq);
+    assert!(!latch.pins(1).irq);
+    assert_eq!(read(&mut aic, &mut latch, 63, EVENT), EVENT_TYPE_IRQ | 32);
+    assert!(latch.pins(0).irq && latch.pins(63).irq);
+    aic.steer(63, true, &mut Access::new(0, 0, &mut latch));
+    assert!(latch.pins(0).irq && !latch.pins(63).irq);
+    assert_eq!(read(&mut aic, &mut latch, 63, EVENT), 0);
+    assert_eq!(
+        read(&mut aic, &mut latch, 0, EVENT),
+        1 << 24 | EVENT_TYPE_IRQ
+    );
+    assert_eq!(
+        read(&mut aic, &mut latch, 0, EVENT),
+        0,
+        "padding stays masked"
+    );
+    assert!(!latch.pins(0).irq && !latch.pins(63).irq);
+}
+
+#[test]
 fn explicit_layout_routes_claims_masks_and_timestamps_independently_per_die() {
     let (config, layout) = two_dies();
     let (first, second) = (layout.dies[0], layout.dies[1]);
@@ -562,7 +626,7 @@ fn unqualified_irq_cfg_selectors_and_delays_refuse_without_effects() {
                 aic.software.clone(),
                 aic.hardware.clone(),
                 aic.mask.clone(),
-                aic.irq_level.clone(),
+                aic.irq_level,
                 aic.refusing,
                 aic.timestamps
                     .iter()
@@ -587,7 +651,7 @@ fn unqualified_irq_cfg_selectors_and_delays_refuse_without_effects() {
                         aic.software.clone(),
                         aic.hardware.clone(),
                         aic.mask.clone(),
-                        aic.irq_level.clone(),
+                        aic.irq_level,
                         aic.refusing,
                         aic.timestamps
                             .iter()

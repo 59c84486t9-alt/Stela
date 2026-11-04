@@ -47,7 +47,7 @@ impl Controller {
     pub(super) fn publish(
         &mut self,
         io: bool,
-        command: [u32; 16],
+        mut command: [u32; 16],
         tag: Option<usize>,
     ) -> Result<u16, BlockError> {
         let stride = self.doorbell_stride;
@@ -70,18 +70,10 @@ impl Controller {
         // than the queue holds.
         unsafe { queue.submissions.resume_writes() };
         let base = usize::from(queue.tail) * 64;
-        for (index, word) in command.iter().enumerate() {
-            queue.submissions.write(
-                base + 4 * index,
-                if index == 0 {
-                    word | u32::from(id) << 16
-                } else {
-                    *word
-                },
-            );
-        }
+        command[0] |= u32::from(id) << 16;
+        queue.submissions.write_submission(base, command);
         queue.submissions.give()?;
-        queue.tail = (queue.tail + 1) % queue.entries;
+        queue.tail = queue.next(queue.tail);
         fence(Ordering::SeqCst);
         registers.write32(
             DOORBELLS + 2 * usize::from(queue.id) * stride,
@@ -113,7 +105,7 @@ impl Controller {
             return Err(BlockError::Device { status: 0xffff });
         }
         queue.consumed = head;
-        queue.head = (queue.head + 1) % queue.entries;
+        queue.head = queue.next(queue.head);
         if queue.head == 0 {
             queue.phase = !queue.phase;
         }
@@ -518,7 +510,11 @@ impl Controller {
 
     /// Tag `tag`'s result once its command completed; never waits.
     pub(super) fn finish(&mut self, tag: usize) -> Option<Finished> {
-        self.advance();
+        // An earlier poll can reap several completions. Only a tag whose
+        // result is still pending needs another pass over the queues.
+        if !matches!(self.tags.get(tag), Some(Tag::Done(_))) {
+            self.advance();
+        }
         if !matches!(self.tags.get(tag)?, Tag::Done(_)) {
             return None;
         }
@@ -534,16 +530,19 @@ impl Controller {
         tag: usize,
         bytes: usize,
     ) -> Result<(u64, u64), BlockError> {
+        let initialized = self.prp_pages[tag];
         let (bounce, prp_list) = self.slot(tag);
         let first = bounce.address()?;
         match bytes.div_ceil(PAGE) {
             0 | 1 => Ok((first, 0)),
             2 => Ok((first, first + PAGE as u64)),
             pages => {
-                for page in 1..pages {
+                let second = prp_list.address()?;
+                for page in initialized..pages {
                     prp_list.write(8 * (page - 1), first + (page * PAGE) as u64);
                 }
-                Ok((first, prp_list.address()?))
+                self.prp_pages[tag] = initialized.max(pages);
+                Ok((first, second))
             }
         }
     }

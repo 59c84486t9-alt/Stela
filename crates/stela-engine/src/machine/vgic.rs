@@ -375,6 +375,13 @@ impl CpuInterface {
         })
     }
 
+    /// Whether an encoding can reach a vGIC accessor. Ordinary System
+    /// register accesses can skip constructing the live vGIC context.
+    pub(crate) fn may_access(encoding: Encoding) -> bool {
+        encoding == icc::PMR
+            || (encoding.op0() == 3 && encoding.crn() == 12 && matches!(encoding.op1(), 0 | 4))
+    }
+
     /// An MRS (`write` `None`) or MSR of `encoding` that this interface
     /// answers before the generated accessors, which follow the profile's
     /// absent FEAT_GICv3: the ICH_* space and ICC_SRE_EL2 at EL2, and the
@@ -407,6 +414,25 @@ mod tests {
         nested: false,
         fine_grained_trap: false,
     };
+
+    #[test]
+    fn the_fast_prefilter_admits_every_accessor() {
+        let mut interface = CpuInterface::default();
+        for op0 in 0..4 {
+            for op1 in 0..8 {
+                for crn in 0..16 {
+                    for crm in 0..16 {
+                        for op2 in 0..8 {
+                            let encoding = Encoding::new(op0, op1, crn, crm, op2);
+                            if !CpuInterface::may_access(encoding) {
+                                assert!(interface.access(encoding, None, &EL2).is_none());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fn read(gic: &mut CpuInterface, encoding: Encoding) -> Option<Outcome> {
         gic.access(encoding, None, &EL2)

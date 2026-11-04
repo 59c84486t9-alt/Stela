@@ -9,7 +9,6 @@ use stela_compiler::{GuestState, TargetCpu};
 use stela_contracts::Chip;
 use stela_contracts::identity::Identity;
 use stela_contracts::refuse;
-use stela_drivers::bus::dma::memory::{CacheAttribute, CpuMapping, PageSource, PinnedPages};
 use stela_engine::machine::Cpu;
 use stela_engine::machine::CpuProfile;
 use stela_engine::machine::DeviceError;
@@ -24,13 +23,8 @@ use stela_engine::machine::engine::publication::WorkerBinding;
 use stela_engine::machine::engine::publication::WorkerId;
 use stela_engine::machine::exception::Pstate;
 use stela_engine::memory::RegisteredSystemRam;
-use stela_engine::memory::ReservedSystemRamRange;
 use stela_soc::machine;
 
-struct Reservation {
-    pages: PinnedPages,
-    mapping: CpuMapping,
-}
 struct TestDevices {
     starts: Vec<engine::Start>,
     ready: Vec<bool>,
@@ -156,43 +150,62 @@ impl TestDevices {
         Ok(engine::ConsumedWrite::Complete { settlement: Ok(()) })
     }
 }
-fn reservation() -> Result<Arc<RegisteredSystemRam>> {
-    let pages = crate::native_memory::SOURCE
-        .allocate(source::BYTES, 4096, CacheAttribute::WriteBack)
-        .map_err(|_| refuse!("native kernel actual WB page allocation refused"))?;
-    let mapping = pages
-        .cpu_mapping(CacheAttribute::WriteBack)
-        .map_err(|_| refuse!("native kernel CPU mapping refused"))?;
-    let owner = Arc::new(Reservation { pages, mapping });
-    let physical = owner.pages.physical_pages();
-    if physical.windows(2).any(|pages| pages[1] != pages[0] + 4096) {
-        return Err(refuse!(
-            "native kernel actual page allocation is not contiguous"
-        ));
-    }
-    let range = ReservedSystemRamRange {
-        source_pa: source::BASE,
-        host_pa: physical[0],
-        host_base: owner
-            .mapping
-            .address(0, source::BYTES)
-            .map_err(|_| refuse!("native kernel mapping extent refused"))?,
-        bytes: source::BYTES,
+/// # Safety
+/// `loader_ram` is the complete loader backing, reserved exclusively for
+/// the guest. No guest, direct publisher or DMA accesses it during the check.
+unsafe fn reservation(
+    handoff: &'static Handoff,
+    loader_ram: &[host::RamRange],
+) -> Result<Arc<RegisteredSystemRam>> {
+    const UNUSED_GUEST_BASE: u64 = 0x8_0000_0000;
+    const { assert!(source::BASE + source::BYTES as u64 <= source::READY) };
+    let bytes = source::BYTES as u64;
+    let mut ranges = loader_ram.to_vec();
+    let index = ranges
+        .iter()
+        .position(|range| range.bytes >= bytes)
+        .ok_or(refuse!(
+            "native kernel has no contiguous loader RAM for its fixture"
+        ))?;
+    let mut backing = ranges.remove(index);
+    let fixture = host::RamRange {
+        guest: source::BASE,
+        host: backing.host,
+        bytes,
     };
-    // SAFETY: exclusive heap page pin and checked WB CPU mapping. No
-    // DMA/direct writer is admitted. Arc keeps both through all native frames,
-    // callbacks, fault recovery and source-PC/publication settlement.
-    let ram = Arc::new(
-        unsafe {
-            RegisteredSystemRam::register(
-                &[range],
-                owner,
-                stela_engine::machine::cpu::RESERVATION_GRANULE,
-                64,
-            )
-        }
-        .map_err(|_| refuse!("native kernel canonical RAM registration refused"))?,
-    );
+    if backing.bytes > bytes {
+        backing.host = backing
+            .host
+            .checked_add(bytes)
+            .ok_or(refuse!("native kernel loader RAM extent wraps"))?;
+        backing.bytes -= bytes;
+        ranges.insert(index, backing);
+    }
+    // Keep the retained physical union while leaving the fixture's MMIO
+    // addresses unbacked. The authored guest only touches its low extent.
+    let mut guest = UNUSED_GUEST_BASE;
+    for range in &mut ranges {
+        range.guest = guest;
+        guest = guest
+            .checked_add(range.bytes)
+            .ok_or(refuse!("native kernel guest RAM extent wraps"))?;
+    }
+    ranges.insert(0, fixture);
+    // SAFETY: only the guest addresses changed. The loader's complete
+    // physical reservation and the closed writer contract remain held.
+    let ram = unsafe { super::canonical::reserve(handoff, &ranges) }?;
+    let zeros = [0; 4096];
+    for offset in (0..source::BYTES).step_by(zeros.len()) {
+        let length = (source::BYTES - offset).min(zeros.len());
+        // SAFETY: the validated loader RAM has no other writer, and this
+        // source slice is disjoint from it. Clear only the fixture.
+        unsafe { ram.publish_physical(source::BASE + offset as u64, &zeros[..length]) }
+            .map_err(|_| refuse!("native kernel fixture zeroing failed"))?;
+    }
+    Ok(ram)
+}
+
+fn publish_scheduler(ram: &RegisteredSystemRam) -> Result<()> {
     for (address, descriptor) in source::tables() {
         // SAFETY: the source bytes are private locals, disjoint from the registered RAM, and `ram`
         // keeps its registration live.
@@ -204,7 +217,7 @@ fn reservation() -> Result<Arc<RegisteredSystemRam>> {
     // keeps its registration live.
     unsafe { ram.publish_physical(source::CODE, &program) }
         .map_err(|_| refuse!("native kernel source publication failed"))?;
-    Ok(ram)
+    Ok(())
 }
 fn profile(cores: usize) -> Result<CpuProfile> {
     let chip = Chip::AppleM1;
@@ -264,13 +277,17 @@ pub(crate) unsafe fn check(
     executors: &Executors,
     host_owner: &mut host::HostOwner,
     sender: &Apic,
+    loader_ram: &[host::RamRange],
 ) -> Result<()> {
     let cores = handoff.native_resources.cores as usize;
+    // SAFETY: this diagnostic owns the complete loader backing and will stop
+    // before the normal guest or any asynchronous producer can use it.
+    let ram = unsafe { reservation(handoff, loader_ram) }?;
     if cores == 1 {
         // SAFETY: same bootstrap/physical-owner fixture contract.
-        return unsafe { cold::check(handoff, capture, executors, host_owner, sender) };
+        return unsafe { cold::check(handoff, capture, executors, host_owner, sender, ram) };
     }
-    let ram = reservation()?;
+    publish_scheduler(&ram)?;
     // Preserve a nonzero guest boot PE while the physical BSP
     // remains worker0. Other identities and their source affinity stay ordered.
     let boot_processor = cores - 1;

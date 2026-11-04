@@ -489,9 +489,19 @@ impl<'a> Verified<'a> {
             if region.guest_pa < machine.dram_base || end > ram_end {
                 return Err(fail("lies outside backed guest DRAM"));
             }
-            let tail = vec![0u8; (region.memory_bytes - region.bytes) as usize];
-            if !write(region.guest_pa, bytes) || !write(region.guest_pa + region.bytes, &tail) {
+            if !write(region.guest_pa, bytes) {
                 return Err(fail("guest RAM write failed"));
+            }
+            // Reserved and zero-fill regions can be much larger than
+            // their file bytes. Stream the zeros without allocating a tail.
+            static ZEROES: [u8; 16 * 1024] = [0; 16 * 1024];
+            let mut tail = region.guest_pa + region.bytes;
+            while tail < end {
+                let chunk = (end - tail).min(ZEROES.len() as u64) as usize;
+                if !write(tail, &ZEROES[..chunk]) {
+                    return Err(fail("guest RAM write failed"));
+                }
+                tail += chunk as u64;
             }
             regions.push(LoadedRegion {
                 name: region.name.clone(),

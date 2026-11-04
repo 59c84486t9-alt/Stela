@@ -516,10 +516,7 @@ pub fn run(command: Command) -> Result<ExitCode> {
                 crate::gpu::fetch::fetch(false)?;
                 crate::gpu::build_nvk(8)?;
             }
-            println!(
-                "{}",
-                build_with_diagnostics(release, diagnostics, nvk)?.display()
-            );
+            println!("{}", build_for_boot(release, diagnostics, nvk)?.display());
             Ok(ExitCode::SUCCESS)
         }
         Command::Run(arguments) => launch(*arguments),
@@ -531,6 +528,35 @@ pub fn build(release: bool, nvk: bool) -> Result<PathBuf> {
         crate::gpu::build_nvk(8)?;
     }
     build_with_diagnostics(release, false, nvk)
+}
+
+fn build_for_boot(release: bool, diagnostics: bool, nvk: bool) -> Result<PathBuf> {
+    let built = build_with_diagnostics(release, diagnostics, nvk)?;
+    if !release {
+        return Ok(built);
+    }
+    let image = built.with_file_name("stela-deploy.efi");
+    deploy_image(&built, &image)?;
+    Ok(image)
+}
+
+/// Keep the linked image and its symbols beside a smaller bootable image.
+pub(crate) fn deploy_image(built: &Path, output: &Path) -> Result<()> {
+    let objcopy = crate::tools::toolchain_llvm_tool("llvm-objcopy")
+        .or_else(|| crate::tools::which("llvm-objcopy"))
+        .context("install the Rust llvm-tools component to prepare a boot image")?;
+    let parent = output
+        .parent()
+        .context("the boot image needs a parent directory")?;
+    let temporary = tempfile::NamedTempFile::new_in(parent)?;
+    exec(
+        Process::new(objcopy)
+            .arg("--strip-debug")
+            .arg(built)
+            .arg(temporary.path()),
+    )?;
+    temporary.persist(output)?;
+    Ok(())
 }
 
 fn build_with_diagnostics(release: bool, diagnostics: bool, nvk: bool) -> Result<PathBuf> {
@@ -702,7 +728,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     let attached = storage_disks(&arguments.storage_disk, &arguments.storage_serial)?;
     let image = match &arguments.image {
         Some(image) => image.clone(),
-        None => build_with_diagnostics(true, true, false)?,
+        None => build_for_boot(true, true, false)?,
     };
     let paths = storage::Paths::new(arguments.output.clone());
     if paths.output.exists() {
