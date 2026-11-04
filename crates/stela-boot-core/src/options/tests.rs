@@ -7,6 +7,33 @@ fn audio_hpet_handoff_requires_an_audio_diagnostic() {
         Error::Constraint(Constraint::AudioHpetDependency)
     );
 }
+#[test]
+fn native_pci_hpet_round_trips_only_on_the_normal_system_path() {
+    let flag = "--native-pci-own-hpet";
+    let text = format!("--system {flag}");
+    let options = System::parse(&text).unwrap();
+    assert!(options.native_pci_own_hpet);
+    assert_eq!(options.diagnostic_option(), None);
+    assert_eq!(System::parse(&options.to_string()), Ok(options));
+    assert_eq!(
+        System::parse(&format!("{text} {flag}")).unwrap_err(),
+        Error::DuplicateNativePciHpet
+    );
+    for fixture in [
+        "--audio-check transport-duplex --audio-own-hpet",
+        "--native-cores 1 --native-clock-check",
+        "--native-mmio-check",
+        "--native-memory-check",
+        "--native-cores 2 --native-bootstrap-check",
+        "--native-cores 2 --native-shared-check",
+    ] {
+        assert_eq!(
+            System::parse(&format!("{text} {fixture}")).unwrap_err(),
+            Error::Constraint(Constraint::NativePciHpetExclusive)
+        );
+    }
+}
+
 use alloc::{format, string::ToString, vec};
 
 #[test]

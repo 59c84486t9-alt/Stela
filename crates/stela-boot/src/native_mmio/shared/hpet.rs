@@ -2,10 +2,18 @@
 //! The immutable CPU/root pin survives only the checked RAM ownership join;
 //! this owner grants no absent-RAM or mutable root-publication permission.
 use super::*;
-use crate::{engine::host::RootIdentity, native_clock::hpet::Descriptor};
+use crate::{
+    engine::host::RootIdentity,
+    native_clock::{Prepared, hpet::Descriptor},
+};
+use alloc::rc::Rc;
 use core::mem::ManuallyDrop;
+use stela_contracts::refuse;
 use stela_drivers::{
-    bus::mmio::owned::{Mapping, ResourceId},
+    bus::{
+        mmio::owned::{Mapping, ResourceId},
+        pci::power::Timer,
+    },
     platform::work::WorkError,
 };
 
@@ -112,6 +120,36 @@ fn unavailable<T>(_: T) -> WorkError {
 }
 
 impl Source {
+    /// # Safety
+    /// The BSP owns the complete captured HPET block and rounded page through
+    /// shutdown. Firmware, SMM and other controller users have stopped, with
+    /// all earlier accesses drained and no future comparator, route, reset or
+    /// decode changes. The source and root outlive every retained PCI timer.
+    pub(crate) unsafe fn install_pci_clock(&self) -> crate::Result<()> {
+        if self.pci_clock.get().is_some() {
+            return Err(refuse!("the native PCI clock is already retained"));
+        }
+        // SAFETY: caller provides the whole-controller handoff and the
+        // original root identity is the same one that activated this Source.
+        let owner = unsafe { self.take_hpet(self.identity.clone()) }
+            .map_err(|error| refuse!("PCI HPET handoff: {error}", ?error))?;
+        let prepared = Prepared::exclusive_native_hpet(owner)
+            .map_err(|error| refuse!("PCI HPET counter: {error}", ?error))?;
+        // This keeps the physical owner even if a later context or power
+        // observation refuses a timer. The mount has no live device teardown.
+        self.pci_clock
+            .set(prepared)
+            .map_err(|_| refuse!("the native PCI clock is already retained"))
+    }
+
+    pub(crate) fn pci_minimum(&self) -> Result<Rc<dyn Timer>, WorkError> {
+        self.identity.check_dispatch()?;
+        self.pci_clock
+            .get()
+            .ok_or(WorkError::Unavailable)?
+            .pci_minimum()
+    }
+
     /// Reclaim the original controller only after native unmap and resource
     /// withdrawal acknowledged, and all independent backing pins have joined.
     pub(crate) fn join_hpet(&self) -> Result<(), Error> {

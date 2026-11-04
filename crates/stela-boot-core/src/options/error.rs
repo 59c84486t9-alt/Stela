@@ -66,6 +66,7 @@ pub enum Error {
     DuplicateDns,
     DuplicateAudioCheck,
     DuplicateAudioHpet,
+    DuplicateNativePciHpet,
     MissingAudioMode,
     MissingNetworkUrl,
     DuplicateNetworkCheck,
@@ -136,6 +137,7 @@ pub enum Constraint {
     ClockExclusive,
     HostDiagnosticExclusive,
     AudioHpetDependency,
+    NativePciHpetExclusive,
 }
 impl Error {
     /// The established stela.cfg diagnostic at presentation-only callers.
@@ -188,6 +190,7 @@ impl Error {
             Self::DuplicateDns => "duplicate --dns",
             Self::DuplicateAudioCheck => "duplicate audio check",
             Self::DuplicateAudioHpet => "duplicate audio HPET handoff",
+            Self::DuplicateNativePciHpet => "duplicate native PCI HPET handoff",
             Self::MissingAudioMode => "missing audio check mode",
             Self::MissingNetworkUrl => "missing network check URL",
             Self::DuplicateNetworkCheck => "duplicate network check",
@@ -266,6 +269,9 @@ impl Constraint {
                 "host check: native diagnostic fixture modes are exclusive"
             }
             Self::AudioHpetDependency => "--audio-own-hpet requires --audio-check",
+            Self::NativePciHpetExclusive => {
+                "--native-pci-own-hpet requires the normal system platform path"
+            }
         }
     }
 }

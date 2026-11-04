@@ -299,12 +299,7 @@ fn open_host(
         mmio: native_mmio,
         remappers,
         _work: kernel_work,
-    } = start_platform(
-        handoff,
-        &mut host_owner,
-        #[cfg(feature = "diagnostics")]
-        options,
-    );
+    } = start_platform(handoff, &mut host_owner, options);
     // The signing service is asked only during a restore, so a boot that
     // restores nothing leaves the adapter to the guest.
     let restoring = options.install.is_some() || options.restore_source.is_some();
@@ -1973,7 +1968,7 @@ unsafe fn check_audio(
 fn start_platform(
     handoff: &'static Handoff,
     host_owner: &mut host::HostOwner,
-    #[cfg(feature = "diagnostics")] options: &Options,
+    options: &Options,
 ) -> Platform {
     // The owned MMIO permission the host devices' services map through. A
     // host it cannot check is reported, and those services refuse.
@@ -1999,6 +1994,20 @@ fn start_platform(
             output::arguments(format_args!("AUDIO CHECK failed: {error}\n"));
             output::fatal("the audio check failed")
         });
+    }
+    if options.native_pci_own_hpet {
+        let result = native_mmio
+            .ok_or(refuse!("native MMIO aperture unavailable"))
+            .and_then(|source| {
+                // SAFETY: the explicit whole-controller handoff excludes
+                // firmware/SMM and every other writer until shutdown. The
+                // installed BSP owns the source before any native driver.
+                unsafe { source.install_pci_clock() }
+            });
+        match result {
+            Ok(()) => output::arguments(format_args!("NATIVE PCI HPET retained\n")),
+            Err(error) => output::arguments(format_args!("NATIVE PCI HPET unavailable: {error}\n")),
+        }
     }
     // SAFETY: the installed boot processor with interrupts off; the engine's
     // IDT routes the device vectors to native_irq, and the physmap maps the

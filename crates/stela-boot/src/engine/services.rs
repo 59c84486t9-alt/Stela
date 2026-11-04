@@ -9,7 +9,7 @@
 //! report unrestricted DMA once.
 use super::aml::HostAcpi;
 use crate::{native_memory, native_mmio, output};
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, rc::Rc, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use stela_boot_core::passthrough::Passthrough;
 use stela_drivers::{
@@ -19,6 +19,7 @@ use stela_drivers::{
         pci::{
             Address, Bar, ConfigSpace, Function, FunctionError,
             owned::OwnedConfig,
+            power::Timer,
             requester::{ClaimError, FunctionRole, RequesterBinding, StoppedRequester},
         },
         thunderbolt::manager::{Platform, Uuid},
@@ -233,6 +234,10 @@ unsafe impl NativeServices for Services<'_> {
     {
         self.acpi.map_or(Ok(None), HostAcpi::embedded_controller)
     }
+    fn minimum_delay(&self) -> Result<Rc<dyn Timer>, ServiceError> {
+        self.mmio.pci_minimum().map_err(ServiceError::MinimumDelay)
+    }
+
     fn entropy(&self) -> Result<Arc<dyn stela_drivers::entropy::Entropy>, ServiceError> {
         crate::random::source()
     }

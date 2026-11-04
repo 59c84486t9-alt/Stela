@@ -421,6 +421,7 @@ pub(crate) struct Source {
     window: Option<super::Window>,
     reservations: core::cell::RefCell<Vec<Assignment<Reservation>>>,
     hpet_assignment: core::cell::RefCell<Option<Assignment<Reservation>>>,
+    pci_clock: core::cell::OnceCell<crate::native_clock::Prepared>,
     /// Each claimed ECAM bus, by its window and bus.
     buses: core::cell::RefCell<Vec<Bus>>,
     ioapics: core::cell::RefCell<Vec<(crate::native_irq::madt::Unit, Arc<IoapicUnit>)>>,
@@ -552,6 +553,7 @@ impl Source {
             window,
             reservations: core::cell::RefCell::new(Vec::new()),
             hpet_assignment: core::cell::RefCell::new(None),
+            pci_clock: core::cell::OnceCell::new(),
             buses: core::cell::RefCell::new(Vec::new()),
             ioapics: core::cell::RefCell::new(Vec::new()),
             irq_domain: None,

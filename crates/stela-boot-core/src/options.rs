@@ -301,6 +301,8 @@ pub struct System {
     pub audio_check: Option<AudioCheck>,
     /// Explicit whole-controller handoff for the audio check's physical clock.
     pub audio_own_hpet: bool,
+    /// Exclusive whole HPET handoff for native PCI minimum delays until shutdown.
+    pub native_pci_own_hpet: bool,
     /// Whole host disks, by serial, that the guest sees as USB mass
     /// storage behind the native hub (`--usb-storage SERIAL`, repeatable).
     pub usb_storage: Vec<String>,
@@ -399,6 +401,7 @@ impl Default for System {
             network_check: None,
             audio_check: None,
             audio_own_hpet: false,
+            native_pci_own_hpet: false,
             usb_storage: Vec::new(),
             usb4_approved: Vec::new(),
             external_disks: false,
@@ -768,6 +771,7 @@ impl fmt::Display for System {
         line.value("--network-check", self.network_check.as_deref())?;
         line.value("--audio-check", self.audio_check.map(AudioCheck::name))?;
         line.flag("--audio-own-hpet", self.audio_own_hpet)?;
+        line.flag("--native-pci-own-hpet", self.native_pci_own_hpet)?;
         if self.dram_explicit {
             line.value("--dram-base", Some(Hex(self.dram_base)))?;
         }

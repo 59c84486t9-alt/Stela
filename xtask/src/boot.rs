@@ -296,6 +296,13 @@ pub struct Run {
     /// Expose QEMU's HPET to the owned MMIO or native-clock check.
     #[arg(long, requires = "owned_clock_check")]
     hpet: bool,
+    /// Hand off the entire QEMU HPET to normal system PCI timing.
+    #[arg(long, conflicts_with_all = [
+        "owned_clock_check", "native_dma_check", "native_dma_isolation_check",
+        "native_work_check", "native_irq_work_check", "audio_check", "usb_image",
+        "gdb", "monitor", "icount"
+    ])]
+    native_pci_own_hpet: bool,
     /// Check bounded PM or owned HPET/LAPIC clock, IRQ progress and retirement.
     #[arg(long, group = "owned_clock_check", conflicts_with_all = [
         "native_dma_check", "native_dma_isolation_check", "native_work_check", "native_irq_work_check", "native_mmio_check",
@@ -764,6 +771,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             "host audio/network checks require system mode: use --scenario system-kernel, --bundle or --append starting with --system"
         );
     }
+    if arguments.native_pci_own_hpet {
+        ensure!(system, "native PCI HPET ownership requires system mode");
+        options.push_str(" --native-pci-own-hpet");
+    }
     if let Some(mode) = arguments.audio_check {
         options.push_str(&format!(
             " --audio-check {} --audio-own-hpet",
@@ -911,6 +922,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
 }
 
 impl Run {
+    fn hpet_enabled(&self) -> bool {
+        self.hpet || self.audio_check.is_some() || self.native_pci_own_hpet
+    }
+
     /// A native host fixture: the mount runs a host check, not a guest.
     fn host_check(&self) -> bool {
         self.native_dma_check
