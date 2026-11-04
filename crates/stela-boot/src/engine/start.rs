@@ -1917,15 +1917,20 @@ fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -
         })
         .ok()
         .map(|source| &*alloc::boxed::Box::leak(alloc::boxed::Box::new(source)));
-    // SAFETY: the installed boot processor with interrupts off; the engine's
-    // IDT routes the device vectors to native_irq, and the physmap maps the
-    // local APIC in every root.
-    match unsafe {
-        crate::native_irq::start(
-            layout::physical(handoff.apic_base & crate::apic::BASE_ADDRESS),
-            handoff.tsc_hz,
-        )
-    } {
+    match host_owner
+        .root_identity()
+        .map_err(|_| stela_drivers::bus::irq::IrqError::WrongCpu)
+        .and_then(|identity| {
+            // SAFETY: the installed BSP owns the existing IDT and the same
+            // all-root APIC mapping before any external route can publish.
+            unsafe {
+                crate::native_irq::start(
+                    layout::physical(handoff.apic_base & crate::apic::BASE_ADDRESS),
+                    handoff.tsc_hz,
+                    identity,
+                )
+            }
+        }) {
         Ok(()) => output::arguments(format_args!("NATIVE IRQ device vectors attached\n")),
         Err(error) => output::arguments(format_args!("NATIVE IRQ unavailable: {error:?}\n")),
     }
