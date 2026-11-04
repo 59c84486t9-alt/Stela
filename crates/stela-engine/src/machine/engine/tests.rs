@@ -2099,6 +2099,37 @@ fn a_fetch_that_reclaims_code_looks_up_in_a_new_context() {
 }
 
 #[test]
+fn finishing_and_pressure_return_block_table_storage() {
+    const RET: u32 = 0xd65f_03c0;
+    for cause in [Discard::Finished, Discard::Memory] {
+        let mut machine = machine(&[RET]);
+        let base = machine.cpu.pc;
+        assert!(matches!(
+            machine.fetch_block(base, false),
+            Ok(Fetched::Block(0))
+        ));
+        let capacities = (machine.blocks.capacity(), machine.fault_recovery.capacity());
+        assert!(capacities.0 > 0 && capacities.1 > 0);
+        machine.discard_code(Discard::Maintenance);
+        assert_eq!(
+            (machine.blocks.capacity(), machine.fault_recovery.capacity()),
+            capacities,
+        );
+        assert!(matches!(
+            machine.fetch_block(base, false),
+            Ok(Fetched::Block(0))
+        ));
+        machine.discard_code(cause);
+        assert_eq!(machine.blocks.capacity(), 0);
+        assert_eq!(machine.fault_recovery.capacity(), 0);
+        assert!(matches!(
+            machine.fetch_block(base, false),
+            Ok(Fetched::Block(0))
+        ));
+    }
+}
+
+#[test]
 fn pressure_reclaims_before_reading_new_compile_input() {
     const RET: u32 = 0xd65f_03c0;
     let mut machine = machine(&vec![RET; FETCH_PAGE as usize / 4 + 1]);

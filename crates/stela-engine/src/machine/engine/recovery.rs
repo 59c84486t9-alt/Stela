@@ -110,6 +110,11 @@ impl Owners {
     pub(super) fn len(&self) -> usize {
         self.slots.iter().flatten().count()
     }
+
+    #[cfg(test)]
+    pub(super) fn capacity(&self) -> usize {
+        self.slots.capacity()
+    }
 }
 
 /// A terminal native implementation failure. Captured data and code owners stay

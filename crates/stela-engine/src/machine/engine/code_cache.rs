@@ -432,10 +432,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.exit_words = self.exit_words();
         self.host.discard_code();
         self.lookup_dispatchers = Default::default();
-        self.blocks.clear();
+        // A running guest normally fills the chunks again after a discard.
+        // Return their storage when freeing memory is the reason to discard.
+        if matches!(cause, Discard::Memory | Discard::Finished) {
+            self.blocks = table::Table::new();
+            self.free_blocks = Vec::new();
+            self.fault_recovery = recovery::Owners::new();
+        } else {
+            self.blocks.clear();
+            self.free_blocks.clear();
+            self.fault_recovery.clear();
+        }
         self.code_slots = Default::default();
-        self.free_blocks.clear();
-        self.fault_recovery.clear();
         self.index.clear();
         self.pages.clear();
         self.scalable_leaves.clear();
