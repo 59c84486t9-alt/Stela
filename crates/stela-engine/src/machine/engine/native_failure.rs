@@ -95,7 +95,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let owner = self.fault_recovery.get_mut(&index).expect("found above");
         let qualified = owner.qualify(entry_pc, record.as_deref());
         let table = match qualified {
-            Ok(table) => table,
+            Ok(rows) => rows.rows_at(fault.offset),
             Err(reason) => return Err(self.fail_native(index, fault, reason)),
         };
         let recovery_site = match FaultRecovery::site_at(&table, fault.offset) {

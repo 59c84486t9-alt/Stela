@@ -128,12 +128,22 @@ impl PackedRecovery {
 
     /// The rows given to [`Self::new`].
     pub fn rows(&self) -> Vec<FaultRecovery> {
+        self.decode(None)
+    }
+
+    /// Rows that apply at this native offset, plus any malformed ranges that
+    /// the caller must reject regardless of where the fault occurred.
+    pub fn rows_at(&self, offset: usize) -> Vec<FaultRecovery> {
+        self.decode(Some(offset))
+    }
+
+    fn decode(&self, offset: Option<usize>) -> Vec<FaultRecovery> {
         if self.0.is_empty() {
             return Vec::new();
         }
         let mut reader = Reader { bytes: &self.0 };
         let count = reader.value() as usize;
-        let mut rows = Vec::with_capacity(count);
+        let mut rows = Vec::with_capacity(offset.map_or(count, |_| 0));
         let (mut end, mut pc, mut retired) = (0, 0, 0);
         for _ in 0..count {
             let start = end + unzigzag(reader.value());
@@ -154,25 +164,28 @@ impl PackedRecovery {
             } else {
                 inline_bindings
             };
-            let bindings = (0..bindings)
-                .map(|_| {
-                    let guest = reader.byte();
-                    let source = reader.value();
-                    RecoveryBinding {
-                        guest,
-                        source: if source & 1 == 0 {
-                            RecoverySource::HostRegister((source >> 1) as u8)
-                        } else {
-                            RecoverySource::NativeSpill(
-                                SpillOffset::new((source >> 1) as u16).expect("packed by new"),
-                            )
-                        },
-                    }
+            let encoded_bindings = (0..bindings).map(|_| (reader.byte(), reader.value()));
+            let range = start as usize..row_end as usize;
+            end = row_end;
+            if offset.is_some_and(|at| range.start < range.end && !range.contains(&at)) {
+                encoded_bindings.for_each(drop);
+                continue;
+            }
+            let bindings = encoded_bindings
+                .map(|(guest, source)| RecoveryBinding {
+                    guest,
+                    source: if source & 1 == 0 {
+                        RecoverySource::HostRegister((source >> 1) as u8)
+                    } else {
+                        RecoverySource::NativeSpill(
+                            SpillOffset::new((source >> 1) as u16).expect("packed by new"),
+                        )
+                    },
                 })
                 .collect();
             rows.push(FaultRecovery {
-                start: start as usize,
-                end: row_end as usize,
+                start: range.start,
+                end: range.end,
                 bindings,
                 retirement: RetirementPoint::packed(
                     GuestAddress(pc),
@@ -185,7 +198,6 @@ impl PackedRecovery {
                 ),
                 site: RecoverySite::packed(tag & 3, translated),
             });
-            end = row_end;
         }
         rows
     }
@@ -216,6 +228,24 @@ mod tests {
         };
         let packed = PackedRecovery::new(core::slice::from_ref(&row));
         assert_eq!(packed.rows(), [row]);
+    }
+
+    #[test]
+    fn selected_rows_keep_overlaps_and_malformed_ranges() {
+        let row = |start, end| FaultRecovery {
+            start,
+            end,
+            bindings: vec![RecoveryBinding::gpr(1, 2)],
+            retirement: RetirementPoint::before(GuestAddress(0x4000), 0).unwrap(),
+            site: RecoverySite::guest_access(),
+        };
+        let rows = [row(0, 4), row(8, 16), row(9, 11), row(100, 100)];
+        let packed = PackedRecovery::new(&rows);
+        assert_eq!(
+            packed.rows_at(10),
+            [rows[1].clone(), rows[2].clone(), rows[3].clone()],
+        );
+        assert_eq!(packed.rows_at(16), [rows[3].clone()]);
     }
 
     #[test]

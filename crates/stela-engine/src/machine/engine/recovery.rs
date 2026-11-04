@@ -4,8 +4,10 @@ use super::{NativeCode, NativeFault, Preparation, table::Table};
 use crate::translations::{Digest, Record, StoredBlock};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use stela_compiler::NativeBlock;
+#[cfg(test)]
+use stela_compiler::block::FaultRecovery;
 use stela_compiler::block::{
-    CompiledBlock, FaultRecovery, PackedRecovery, RecoveryQualificationError, RecoveryTemplate,
+    CompiledBlock, PackedRecovery, RecoveryQualificationError, RecoveryTemplate,
     UnqualifiedFaultRecovery,
 };
 use stela_compiler::x86_64::chain::DirectExit;
@@ -348,51 +350,56 @@ impl CodeRecovery {
         &mut self,
         pc: u64,
         record: Option<&Record>,
-    ) -> Result<Vec<FaultRecovery>, NativeFailureReason> {
-        #[cfg(test)]
+    ) -> Result<&PackedRecovery, NativeFailureReason> {
         if !matches!(self.rows, Rows::Qualified { .. }) {
-            self.qualification_attempts += 1;
-        }
-        let block = match &self.rows {
-            Rows::Qualified { rows, .. } => return Ok(rows.rows()),
-            Rows::Stored { origin, offset, .. } => {
-                let entry = record
-                    .and_then(|record| record.find(*offset, &origin.context))
-                    .ok_or(NativeFailureReason::StoredRecord)?;
-                let stored = entry
-                    .rebase(origin.page, &entry.input)
-                    .ok_or(NativeFailureReason::StoredRecord)?;
-                origin.preparation.qualify_recovery(
-                    &entry.input,
+            #[cfg(test)]
+            {
+                self.qualification_attempts += 1;
+            }
+            let block = match &self.rows {
+                Rows::Qualified { .. } => unreachable!("unqualified above"),
+                Rows::Stored { origin, offset, .. } => {
+                    let entry = record
+                        .and_then(|record| record.find(*offset, &origin.context))
+                        .ok_or(NativeFailureReason::StoredRecord)?;
+                    let stored = entry
+                        .rebase(origin.page, &entry.input)
+                        .ok_or(NativeFailureReason::StoredRecord)?;
+                    origin.preparation.qualify_recovery(
+                        &entry.input,
+                        pc,
+                        RecoveryTemplate {
+                            code: &stored.native.x86_64_code,
+                            source_map: &stored.native.source_map,
+                            source_bytes: stored.source_bytes,
+                            direct_exits: &stored.direct_exits,
+                            recovery: &stored.fault_recovery,
+                        },
+                    )
+                }
+                #[cfg(test)]
+                Rows::Pending { template, rows, .. } => template.preparation.qualify_recovery(
+                    &template.input,
                     pc,
                     RecoveryTemplate {
-                        code: &stored.native.x86_64_code,
-                        source_map: &stored.native.source_map,
-                        source_bytes: stored.source_bytes,
-                        direct_exits: &stored.direct_exits,
-                        recovery: &stored.fault_recovery,
+                        code: &template.block.native.x86_64_code,
+                        source_map: &template.block.native.source_map,
+                        source_bytes: template.block.source_bytes,
+                        direct_exits: &template.block.direct_exits,
+                        recovery: rows,
                     },
-                )
+                ),
             }
-            #[cfg(test)]
-            Rows::Pending { template, rows, .. } => template.preparation.qualify_recovery(
-                &template.input,
-                pc,
-                RecoveryTemplate {
-                    code: &template.block.native.x86_64_code,
-                    source_map: &template.block.native.source_map,
-                    source_bytes: template.block.source_bytes,
-                    direct_exits: &template.block.direct_exits,
-                    recovery: rows,
-                },
-            ),
+            .map_err(NativeFailureReason::Qualification)?;
+            self.rows = Rows::Qualified {
+                code_bytes: self.rows.code_bytes(),
+                rows: PackedRecovery::new(&block.fault_recovery),
+            };
         }
-        .map_err(NativeFailureReason::Qualification)?;
-        self.rows = Rows::Qualified {
-            code_bytes: self.rows.code_bytes(),
-            rows: PackedRecovery::new(&block.fault_recovery),
+        let Rows::Qualified { rows, .. } = &self.rows else {
+            unreachable!("qualified above");
         };
-        Ok(block.fault_recovery)
+        Ok(rows)
     }
 }
 
