@@ -70,6 +70,11 @@ impl Link for RootLink {
         let _root = unsafe { RestoreRoot::enter(self.root) };
         self.device.receive()
     }
+    fn receive_reusing(&mut self, frame: &mut Vec<u8>) -> Result<bool, LinkError> {
+        // SAFETY: as in `carrier`.
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        self.device.receive_reusing(frame)
+    }
     fn signals(&self) -> bool {
         self.device.signals()
     }
