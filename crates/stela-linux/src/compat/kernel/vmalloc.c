@@ -10,6 +10,7 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/workqueue.h>
+#include <stela/catalogue.h>
 #include <stela/linux.h>
 
 struct area {
@@ -49,7 +50,7 @@ static struct area *area_of(const void *address)
 static void *map_area(struct area *area)
 {
 	const struct stela_linux_owner *owner = stela_linux_owner();
-	if (!owner->services->map_pages) {
+	if (stela_linux_kernel_hosted() || !owner->services->map_pages) {
 		stela_linux_unsupported("mapping pages");
 		return NULL;
 	}

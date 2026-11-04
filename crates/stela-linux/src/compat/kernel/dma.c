@@ -7,10 +7,13 @@
 #include <linux/dma-map-ops.h>
 #include <linux/dma-mapping.h>
 #include <linux/scatterlist.h>
+#include <stela/catalogue.h>
 
 dma_addr_t dma_map_phys(struct device *dev, phys_addr_t phys, size_t size,
 			enum dma_data_direction dir, unsigned long attrs)
 {
+	if (stela_linux_kernel_hosted())
+		return DMA_MAPPING_ERROR;
 	BUG_ON(!valid_dma_direction(dir));
 	return get_dma_ops(dev)->map_phys(dev, phys, size, dir, attrs);
 }
@@ -25,6 +28,8 @@ void dma_unmap_phys(struct device *dev, dma_addr_t addr, size_t size,
 dma_addr_t dma_map_page_attrs(struct device *dev, struct page *page, size_t offset,
 			      size_t size, enum dma_data_direction dir, unsigned long attrs)
 {
+	if (stela_linux_kernel_hosted())
+		return DMA_MAPPING_ERROR;
 	return dma_map_phys(dev, page_to_phys(page) + offset, size, dir, attrs);
 }
 
@@ -37,6 +42,8 @@ void dma_unmap_page_attrs(struct device *dev, dma_addr_t addr, size_t size,
 static int map_sg(struct device *dev, struct scatterlist *sg, int nents,
 		  enum dma_data_direction dir, unsigned long attrs)
 {
+	if (stela_linux_kernel_hosted())
+		return -EOPNOTSUPP;
 	BUG_ON(!valid_dma_direction(dir));
 	int ents = get_dma_ops(dev)->map_sg(dev, sg, nents, dir, attrs);
 	return ents ? ents : -EIO;
@@ -69,6 +76,8 @@ void dma_unmap_sg_attrs(struct device *dev, struct scatterlist *sg, int nents,
 void *dma_alloc_attrs(struct device *dev, size_t size, dma_addr_t *dma_handle, gfp_t flag,
 		      unsigned long attrs)
 {
+	if (stela_linux_kernel_hosted())
+		return NULL;
 	/* The zone modifiers mean nothing here: the mask decides placement. */
 	flag &= ~(__GFP_DMA | __GFP_DMA32 | __GFP_HIGHMEM);
 	return get_dma_ops(dev)->alloc(dev, size, dma_handle, flag, attrs);
@@ -85,6 +94,8 @@ void dma_free_attrs(struct device *dev, size_t size, void *cpu_addr, dma_addr_t 
 struct page *dma_alloc_pages(struct device *dev, size_t size, dma_addr_t *dma_handle,
 			     enum dma_data_direction dir, gfp_t gfp)
 {
+	if (stela_linux_kernel_hosted())
+		return NULL;
 	gfp &= ~(__GFP_DMA | __GFP_DMA32 | __GFP_HIGHMEM);
 	return get_dma_ops(dev)->alloc_pages_op(dev, PAGE_ALIGN(size), dma_handle, dir, gfp);
 }

@@ -96,7 +96,25 @@ unsafe extern "C" {
         ops: *const c_void,
         context: *mut c_void,
     ) -> i32;
+    fn get_free_pages_noprof(gfp: u32, order: u32) -> usize;
+    fn free_pages(address: usize, order: u32);
+    fn stela_linux_virt_to_page(address: usize) -> *const c_void;
+    fn stela_linux_page_to_virt(page: *const c_void) -> *const c_void;
+    fn page_to_pfn(page: *const c_void) -> usize;
+    fn pfn_to_page(frame: usize) -> *const c_void;
+    fn stela_linux_page_dma_pin(physical: u64) -> *const c_void;
+    fn dma_map_phys(
+        device: *const c_void,
+        physical: u64,
+        size: usize,
+        direction: i32,
+        attrs: usize,
+    ) -> u64;
+    fn stela_linux_pages_finish();
+    fn stela_linux_available_page_frames(out: *mut usize) -> i32;
 }
+
+const MODEL_PAGES: usize = 16;
 
 unsafe extern "C" fn check_initial(owner: *const RawOwner, _: *mut c_void) -> ! {
     // SAFETY: this callback runs in the exact kept original Initial scope.
@@ -120,6 +138,40 @@ unsafe extern "C" fn check_initial(owner: *const RawOwner, _: *mut c_void) -> ! 
         stela_linux::threads::initial_root_levels(),
         Err(WorkError::Unavailable)
     );
+    // SAFETY: actual current owns the fresh 16-page inventory. Use the original
+    // C allocation and release calls with the exact order and live address.
+    unsafe {
+        let order = MODEL_PAGES.ilog2();
+        let bytes = MODEL_PAGES * 4096;
+        let address = get_free_pages_noprof(0, order);
+        assert_ne!(address, 0);
+        assert_eq!(address % bytes, 0);
+        assert_eq!(get_free_pages_noprof(0, 0), 0);
+        (address as *mut u8).add(bytes - 1).write(0x96);
+        assert_eq!((address as *const u8).add(bytes - 1).read(), 0x96);
+        let last = stela_linux_virt_to_page(address + bytes - 1);
+        let model_frame = page_to_pfn(last);
+        assert_eq!(pfn_to_page(model_frame), last);
+        assert_eq!(
+            stela_linux_page_to_virt(last).addr(),
+            address + bytes - 4096
+        );
+        let colliding_physical = (model_frame as u64) << 12;
+        assert!(stela_linux_page_dma_pin(colliding_physical).is_null());
+        assert_eq!(
+            dma_map_phys(ptr::null(), colliding_physical, 4096, 0, 0),
+            u64::MAX
+        );
+        free_pages(address, order);
+        stela_linux_pages_finish();
+        let mut free = 0;
+        assert_eq!(stela_linux_available_page_frames(&mut free), 0);
+        assert_eq!(free, MODEL_PAGES);
+        let reused = get_free_pages_noprof(0, order);
+        assert_eq!(reused, address);
+        free_pages(reused, order);
+        stela_linux_pages_finish();
+    }
     println!("original hosted Initial attached");
     process::exit(0);
 }
@@ -160,9 +212,10 @@ fn hosted_initial_enters_the_original_task_without_native_admission() {
     let runtime = executor.runtime();
     // SAFETY: this exact static archive and the only dispatcher are retained
     // for the lifetime of this process. The source check does not return.
-    let ticket =
-        unsafe { HostedTaskBinding::start_initial(runtime, Host, check_initial, ptr::null_mut()) }
-            .unwrap();
+    let ticket = unsafe {
+        HostedTaskBinding::start_initial(runtime, Host, MODEL_PAGES, check_initial, ptr::null_mut())
+    }
+    .unwrap();
     assert_eq!(queue.completed(ticket), Ok(false));
     runtime.step().unwrap();
     panic!("the original Initial returned to its dispatcher");

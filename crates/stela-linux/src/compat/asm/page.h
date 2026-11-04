@@ -51,11 +51,16 @@ unsigned long page_to_pfn(const struct page *page);
  * No direct-map, identity conversion or arbitrary-pointer admission is implied. */
 extern bool __virt_addr_valid(unsigned long kaddr);
 #define virt_addr_valid(kaddr) __virt_addr_valid((unsigned long) (kaddr))
-#define virt_to_page(kaddr)	pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
-#define page_to_phys(page)	PFN_PHYS(page_to_pfn(page))
+struct page *stela_linux_virt_to_page(unsigned long address);
+void *stela_linux_page_to_virt(const struct page *page);
+phys_addr_t stela_linux_page_to_phys(const struct page *page);
+struct page *stela_linux_phys_to_page(phys_addr_t address);
+#define virt_to_page(kaddr)	stela_linux_virt_to_page((unsigned long)(kaddr))
+#define page_to_virt(page)	stela_linux_page_to_virt(page)
+#define page_to_phys(page)	stela_linux_page_to_phys(page)
 #define __pfn_to_phys(pfn)	PFN_PHYS(pfn)
 #define __phys_to_pfn(paddr)	PHYS_PFN(paddr)
-#define phys_to_page(phys)	pfn_to_page(PHYS_PFN(phys))
+#define phys_to_page(phys)	stela_linux_phys_to_page(phys)
 
 /* Pages are ordinary memory to Linux code, which clears and copies them
  * with the compiler's memset and memcpy. */

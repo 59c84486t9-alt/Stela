@@ -87,6 +87,7 @@ static struct {
 	size_t live_pages;
     size_t stack_admissions;
     bool kernel_roots;
+    bool hosted;
     u64 next_stack_nonce;
 } catalog;
 static u64 last_generation;
@@ -261,14 +262,16 @@ static void initialize_page(struct page *page)
 
 static int register_inventory(
     const struct stela_linux_page_reservation *extents, const u32 *kinds,
-    size_t extent_count, const struct stela_linux_page_ops *ops, void *context)
+    size_t extent_count, const struct stela_linux_page_ops *ops, void *context,
+    bool hosted)
 {
-    if (stela_linux_kernel_hosted())
+    if (hosted != stela_linux_kernel_hosted())
         return -EPERM;
     require_quiescence();
     if (catalog.pages)
         return -EBUSY;
-    if (!extents || !extent_count || !ops || !ops->validate || !ops->allocate || !ops->release ||
+    if (!extents || !extent_count ||
+        (!hosted && (!ops || !ops->validate || !ops->allocate || !ops->release)) ||
         extent_count > (size_t)SSIZE_MAX / sizeof(struct registered_extent))
         return -EINVAL;
     u64 generation = extents[0].generation;
@@ -351,7 +354,8 @@ static int register_inventory(
     catalog.page_count = count;
     catalog.extents = inventory;
     catalog.extent_count = extent_count;
-    catalog.ops = *ops;
+    if (ops)
+        catalog.ops = *ops;
     catalog.context = context;
     catalog.pages = pages;
     catalog.state = state;
@@ -359,6 +363,7 @@ static int register_inventory(
     catalog.free_records = 0;
     catalog.retired = NO_INDEX;
     catalog.next_stack_nonce = 1;
+    catalog.hosted = hosted;
     lruvec_init(&contig_page_data.__lruvec);
     for (unsigned int i = 0; i < NR_VMSCAN_THROTTLE; i++)
         init_waitqueue_head(&contig_page_data.reclaim_wait[i]);
@@ -374,8 +379,25 @@ int stela_linux_page_catalog_register_extents(
     const struct stela_linux_page_reservation *extents, size_t extent_count,
     const struct stela_linux_page_ops *ops, void *context)
 {
-    return register_inventory(extents, NULL, extent_count, ops, context);
+    return register_inventory(extents, NULL, extent_count, ops, context, false);
 }
+
+#ifdef __linux__
+int stela_linux_page_model_register(const struct stela_linux_owner *owner,
+                                   void *cpu_base, size_t page_count)
+{
+    if (!stela_linux_kernel_hosted() || stela_linux_require_current(owner))
+        return -EPERM;
+    if (!is_power_of_2(page_count) || page_count > SIZE_MAX / PAGE_SIZE ||
+        ((unsigned long)cpu_base & (page_count * PAGE_SIZE - 1)))
+        return -EINVAL;
+    /* The model namespace uses page offsets from this one kept host mmap. */
+    const struct stela_linux_page_reservation extent = {
+        .generation = 1, .cpu_base = cpu_base, .page_count = page_count,
+    };
+    return register_inventory(&extent, NULL, 1, NULL, NULL, true);
+}
+#endif
 
 int stela_linux_page_catalog_register(const struct stela_linux_page_reservation *reservation,
                                      const struct stela_linux_page_ops *ops, void *context)
@@ -448,7 +470,7 @@ int stela_linux_page_catalog_register_annotated(
         extents[i] = input[i].reservation;
         kinds[i] = input[i].kind;
     }
-    int error = register_inventory(extents, kinds, count, &ops->ordinary, context);
+    int error = register_inventory(extents, kinds, count, &ops->ordinary, context, false);
     if (!error)
         catalog.release_ready = ops->release_ready;
     free_metadata(kinds, count * sizeof(*kinds), __alignof__(*kinds));
@@ -522,6 +544,8 @@ static size_t physical_index(phys_addr_t address)
 
 void *stela_linux_page_dma_pin(u64 physical)
 {
+    if (stela_linux_kernel_hosted())
+        return NULL;
     require_context();
     if (!catalog.pages || (physical & (PAGE_SIZE - 1)))
         return NULL;
@@ -539,6 +563,8 @@ void *stela_linux_page_dma_pin(u64 physical)
 
 void stela_linux_page_dma_unpin(void *pin)
 {
+    if (stela_linux_kernel_hosted())
+        stela_linux_fatal("native DMA unpin from a hosted page catalogue");
     require_catalog();
     unsigned long address = (unsigned long)pin;
     unsigned long base = (unsigned long)catalog.allocations;
@@ -559,6 +585,7 @@ int stela_linux_page_mapping_pin(u64 generation, const void *context,
  const struct stela_linux_owner *owner, u64 physical,
  struct stela_linux_mapping_page *out)
 {
+ if (stela_linux_kernel_hosted()) return -EPERM;
  if (!out) return -EINVAL;
  *out=(struct stela_linux_mapping_page){};
  int error=stela_linux_page_owner_context(owner);
@@ -580,6 +607,7 @@ int stela_linux_page_mapping_pin(u64 generation, const void *context,
 int stela_linux_page_mapping_unpin(u64 generation, const void *context,
  const struct stela_linux_owner *owner, void *token)
 {
+ if (stela_linux_kernel_hosted()) return -EPERM;
  int error=stela_linux_page_owner_context(owner);
  if (error) return error;
  if (!catalog.pages || generation!=catalog.generation || context!=catalog.context)
@@ -610,24 +638,68 @@ unsigned long page_to_pfn(const struct page *page)
     return (unsigned long)(extent->physical_base >> PAGE_SHIFT) + index - extent->first;
 }
 
-unsigned long __phys_addr(unsigned long address)
+/* Original CPU-address lookup stays inside the current descriptor namespace. */
+static size_t cpu_index(unsigned long address, size_t *offset)
 {
     require_catalog();
     for (size_t i = 0; i < catalog.extent_count; i++) {
         const struct registered_extent *extent = catalog.extents + i;
         unsigned long base = (unsigned long)extent->cpu_base;
         if (address >= base && address - base < extent->page_count * PAGE_SIZE) {
-            size_t offset = address - base;
-            if (!catalog.state[extent->first + (offset >> PAGE_SHIFT)].live)
+            size_t delta = address - base;
+            size_t index = extent->first + (delta >> PAGE_SHIFT);
+            if (!catalog.state[index].live)
                 __builtin_trap();
-            return (unsigned long)extent->physical_base + offset;
+            *offset = delta & (PAGE_SIZE - 1);
+            return index;
         }
     }
     __builtin_trap();
 }
 
+struct page *stela_linux_virt_to_page(unsigned long address)
+{
+    size_t offset;
+    size_t index = cpu_index(address, &offset);
+    return catalog.pages + index;
+}
+
+void *stela_linux_page_to_virt(const struct page *page)
+{
+    size_t index = page_index(page);
+    const struct registered_extent *extent = index_extent(index);
+    return extent->cpu_base + ((index - extent->first) << PAGE_SHIFT);
+}
+
+phys_addr_t stela_linux_page_to_phys(const struct page *page)
+{
+    if (stela_linux_kernel_hosted())
+        stela_linux_fatal("physical page address requested from a hosted page catalogue");
+    return PFN_PHYS(page_to_pfn(page));
+}
+
+struct page *stela_linux_phys_to_page(phys_addr_t address)
+{
+    if (stela_linux_kernel_hosted())
+        stela_linux_fatal("physical page lookup requested from a hosted page catalogue");
+    return pfn_to_page(PHYS_PFN(address));
+}
+
+unsigned long __phys_addr(unsigned long address)
+{
+    if (stela_linux_kernel_hosted())
+        stela_linux_fatal("physical address requested from a hosted page catalogue");
+    size_t offset;
+    size_t index = cpu_index(address, &offset);
+    const struct registered_extent *extent = index_extent(index);
+    return (unsigned long)extent->physical_base +
+           ((index - extent->first) << PAGE_SHIFT) + offset;
+}
+
 void *__phys_to_virt(phys_addr_t address)
 {
+    if (stela_linux_kernel_hosted())
+        stela_linux_fatal("physical pointer requested from a hosted page catalogue");
     size_t index = physical_index(address);
     const struct registered_extent *extent = index_extent(index);
     size_t offset = ((index - extent->first) << PAGE_SHIFT) +
@@ -656,6 +728,13 @@ int stela_linux_available_page_frames(unsigned long *available)
 		return -EPERM;
 	if (!catalog.pages)
 		return -ENODEV;
+    if (catalog.hosted) {
+        unsigned long free = 0;
+        for (size_t index = 0; index < catalog.page_count; index++)
+            free += catalog.state[index].allocation == NO_INDEX;
+        *available = free;
+        return 0;
+    }
 	if (!owner->services->available_page_frames)
 		return -EOPNOTSUPP;
 
@@ -728,10 +807,12 @@ void stela_linux_pages_finish(void)
             }
         }
         *link = record->next;
-		in_callback = true;
-		catalog.ops.release(catalog.context, record->pin);
-		in_callback = false;
-		check_callback(owner, 0, ARCH_IRQ_ENABLED);
+		if (!catalog.hosted) {
+			in_callback = true;
+			catalog.ops.release(catalog.context, record->pin);
+			in_callback = false;
+			check_callback(owner, 0, ARCH_IRQ_ENABLED);
+		}
 		for (size_t i = 0; i < record->count; i++) {
 			struct page_state *state = catalog.state + record->first + i;
 			if (state->live || state->allocation != index)
@@ -758,6 +839,8 @@ int stela_linux_page_catalog_retain_kernel(u64 generation)
 
 int stela_linux_page_catalog_unregister(u64 generation)
 {
+	if (stela_linux_kernel_hosted())
+		return -EPERM;
 	require_quiescence();
 	if (!catalog.pages || catalog.generation != generation)
 		return -EINVAL;
@@ -834,6 +917,8 @@ int stela_linux_page_stack_admit(
     const struct stela_linux_stack_admission_v1 *request,
     struct stela_linux_stack_ticket_v1 *ticket)
 {
+    if (stela_linux_kernel_hosted())
+        return -EPERM;
     require_quiescence();
     if (!request || request->version != STELA_LINUX_STACK_ADMISSION_V1 ||
         request->bytes != sizeof(*request) ||
@@ -876,6 +961,8 @@ int stela_linux_page_stack_admit(
 static int stack_record(const struct stela_linux_stack_ticket_v1 *ticket,
                         struct allocation_record **out)
 {
+    if (stela_linux_kernel_hosted())
+        return -EPERM;
     if (!ticket || ticket->version != STELA_LINUX_STACK_ADMISSION_V1 ||
         ticket->bytes != sizeof(*ticket) || !catalog.pages ||
         ticket->generation != catalog.generation ||
@@ -1056,6 +1143,20 @@ static bool reclaim_catalog_pages(gfp_t gfp)
 	return reclaimed != 0;
 }
 
+/* The one hosted extent is kept by the mount. Its page-state array already
+ * records both live and retired runs. Never lend a retired run early. */
+static size_t find_model_run(size_t count)
+{
+    for (size_t first = 0; first + count <= catalog.page_count; first += count) {
+        size_t i = 0;
+        while (i < count && catalog.state[first + i].allocation == NO_INDEX)
+            i++;
+        if (i == count)
+            return first;
+    }
+    return NO_INDEX;
+}
+
 struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
 				nodemask_t *nodemask)
 {
@@ -1075,15 +1176,21 @@ retry:
 	const struct stela_linux_owner *owner = stela_linux_owner();
 	int nesting = preempt_count();
 	unsigned long flags = arch_local_save_flags();
-	in_callback = true;
-	int error = catalog.ops.validate(catalog.context, (__force u32)gfp, order, atomic);
-	in_callback = false;
-	check_callback(owner, nesting, flags);
+	int error;
+	if (catalog.hosted) {
+		error = stela_linux_page_request_basic((__force u32)gfp) ||
+			stela_linux_page_request_reclaimable((__force u32)gfp) ? 0 : -EOPNOTSUPP;
+	} else {
+		in_callback = true;
+		error = catalog.ops.validate(catalog.context, (__force u32)gfp, order, atomic);
+		in_callback = false;
+		check_callback(owner, nesting, flags);
+	}
 	if (error) {
 		if (error > 0)
 			__builtin_trap();
 		if (error == -EOPNOTSUPP)
-			stela_linux_unsupported("native page allocation request");
+			stela_linux_unsupported("page allocation request");
 		return NULL;
 	}
 	if (!atomic)
@@ -1095,32 +1202,42 @@ retry:
 	catalog.free_records = record->next;
 	*record = (struct allocation_record){0};
 	struct stela_linux_page_allocation allocation = {0};
-	in_callback = true;
-	error = catalog.ops.allocate(catalog.context, (__force u32)gfp, order, atomic, &allocation);
-	in_callback = false;
-	check_callback(owner, nesting, flags);
-	if (error) {
-		if (error > 0 || allocation.pin || allocation.cpu_base ||
-		    allocation.physical_pages || allocation.page_count)
-			__builtin_trap();
-		recycle_record(record_index);
-		if (error == -ENOMEM)
-			goto exhausted;
-		if (error == -EOPNOTSUPP)
-			stela_linux_unsupported("native page allocation request");
-		return NULL;
-	}
-	if (!allocation.pin)
-		__builtin_trap();
-	record->pin = allocation.pin;
-	size_t first;
-	if (!validate_allocation(&allocation, order, &first)) {
-		queue_record(record_index);
-		if (!atomic)
-			stela_linux_pages_finish();
-		return NULL;
-	}
 	size_t count = (size_t)1 << order;
+	size_t first;
+	if (catalog.hosted) {
+		first = find_model_run(count);
+		if (first == NO_INDEX) {
+			recycle_record(record_index);
+			goto exhausted;
+		}
+		allocation.cpu_base = catalog.extents[0].cpu_base + (first << PAGE_SHIFT);
+		record->pin = allocation.cpu_base;
+	} else {
+		in_callback = true;
+		error = catalog.ops.allocate(catalog.context, (__force u32)gfp, order, atomic, &allocation);
+		in_callback = false;
+		check_callback(owner, nesting, flags);
+		if (error) {
+			if (error > 0 || allocation.pin || allocation.cpu_base ||
+			    allocation.physical_pages || allocation.page_count)
+				__builtin_trap();
+			recycle_record(record_index);
+			if (error == -ENOMEM)
+				goto exhausted;
+			if (error == -EOPNOTSUPP)
+				stela_linux_unsupported("native page allocation request");
+			return NULL;
+		}
+		if (!allocation.pin)
+			__builtin_trap();
+		record->pin = allocation.pin;
+		if (!validate_allocation(&allocation, order, &first)) {
+			queue_record(record_index);
+			if (!atomic)
+				stela_linux_pages_finish();
+			return NULL;
+		}
+	}
 	record->first = first;
 	record->count = count;
 	record->live = count;
@@ -1398,6 +1515,8 @@ static bool verify_extent(struct page *page, unsigned int order)
 
 int stela_linux_page_catalog_verify(u64 generation)
 {
+	if (stela_linux_kernel_hosted())
+		return -EPERM;
 	require_quiescence();
 	if (!catalog.pages || catalog.generation != generation)
 		return -EINVAL;

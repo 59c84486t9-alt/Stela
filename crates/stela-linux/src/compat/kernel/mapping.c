@@ -14,6 +14,7 @@
 #include <linux/rmap.h>
 #include <linux/slab.h>
 #include <stela/file.h>
+#include <stela/catalogue.h>
 #include <stela/linux.h>
 
 #include <internal.h>
@@ -95,6 +96,8 @@ static int prepare_client_mmap(struct file *file, struct vm_area_struct *vma)
 int stela_linux_mmap(struct file *file, void *space, unsigned long address, size_t size,
 		     u64 offset, bool writable, struct stela_linux_mapping **result)
 {
+	if (stela_linux_kernel_hosted())
+		return -EPERM;
 	if (!PAGE_ALIGNED(address) || !PAGE_ALIGNED(size) || !PAGE_ALIGNED(offset) ||
 	    !size || size > ULONG_MAX - address)
 		return -EINVAL;
@@ -143,6 +146,8 @@ int stela_linux_mmap(struct file *file, void *space, unsigned long address, size
 int stela_linux_map(int fd, void *space, unsigned long address, size_t size, u64 offset,
 		    struct stela_linux_mapping **result)
 {
+	if (stela_linux_kernel_hosted())
+		return -EPERM;
 	struct file *file = fget((unsigned int)fd);
 
 	if (!file)

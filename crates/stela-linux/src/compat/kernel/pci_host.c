@@ -7,6 +7,7 @@
 #include <linux/pci.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
+#include <stela/catalogue.h>
 #include <stela/linux.h>
 #include <stela/pci.h>
 
@@ -183,6 +184,11 @@ static void release(struct device *dev)
 
 struct pci_dev *stela_linux_pci_attach(const struct stela_linux_pci_function *function, int *status)
 {
+	if (stela_linux_kernel_hosted()) {
+		if (status)
+			*status = -EPERM;
+		return NULL;
+	}
 	int error = -ENOMEM;
 	struct host_function *host = kzalloc_obj(*host);
 	if (status)

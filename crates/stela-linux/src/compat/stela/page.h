@@ -3,6 +3,12 @@
 #define STELA_PAGE_H
 #include <linux/types.h>
 struct stela_linux_owner;
+#ifdef __linux__
+/* The exact original hosted Initial lends its retained aligned mmap extent.
+ * Its descriptors and model offsets are separate from native RAM custody. */
+int stela_linux_page_model_register(const struct stela_linux_owner *owner,
+                                   void *cpu_base, size_t page_count);
+#endif
 /* Pure current-owner/quiescence check; no entry, callback or ownership change. */
 int stela_linux_page_owner_context(const struct stela_linux_owner *expected);
 
