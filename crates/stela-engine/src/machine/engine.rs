@@ -285,14 +285,20 @@ impl Default for Watch {
 }
 
 impl Watch {
-    /// Whether the 4 KiB page at `page` must stay unmapped.
-    pub fn blocks(&self, page: u64) -> bool {
-        let last = page | (FETCH_PAGE - 1);
-        !self.pass.contains(&Some(page & !(FETCH_PAGE - 1)))
+    /// Whether any watch range intersects the inclusive address span.
+    /// A one-instruction pass can still admit a page inside it.
+    pub fn overlaps(&self, first: u64, last: u64) -> bool {
+        first <= last
             && self
                 .ranges
                 .iter()
-                .any(|&(first, end)| first <= end && first <= last && end >= page)
+                .any(|&(start, end)| start <= end && start <= last && first <= end)
+    }
+
+    /// Whether the 4 KiB page at `page` must stay unmapped.
+    pub fn blocks(&self, page: u64) -> bool {
+        let last = page | (FETCH_PAGE - 1);
+        !self.pass.contains(&Some(page & !(FETCH_PAGE - 1))) && self.overlaps(page, last)
     }
 
     fn from_ranges(ranges: &[(u64, u64)]) -> Self {

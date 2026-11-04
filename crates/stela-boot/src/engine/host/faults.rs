@@ -309,9 +309,10 @@ pub(crate) fn page_fault(
         let (first_host, available) = state.run(physical).unwrap_or((0, 0));
         let table = slot.wrapping_sub(tables::index(virtual_page, 0));
         let watch = &state.regime.as_ref().expect("checked above").watch;
+        let watched = watch.overlaps(first, last);
         let mut page = first;
         loop {
-            if page != virtual_page && !watch.blocks(page) {
+            if page != virtual_page && (!watched || !watch.blocks(page)) {
                 let offset = page - first;
                 let host = if offset < available {
                     first_host.checked_add(offset)

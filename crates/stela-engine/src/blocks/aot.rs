@@ -317,6 +317,26 @@ mod tests {
         assert_eq!(observations.memory_cache_hits, 0);
         assert_eq!(observations.disk_cache_hits, 0);
         assert_eq!(observations.compiled_blocks, 0);
+        #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+        {
+            let mut state = ThreadState {
+                registers: stela_compiler::GuestState::default(),
+                pc: BASE,
+            };
+            let detail = stela_compiler::block::source_bytes(&source, BASE)
+                .unwrap_err()
+                .to_string();
+            // SAFETY: dispatch rejects the unsupported word before execution.
+            let stopped = unsafe { runtime.run(&mut state, None, 1)? };
+            assert_eq!(stopped.reason, StopReason::Unsupported { detail });
+            assert_eq!(stopped.blocks_executed, 0);
+            runtime.register_code(BASE, MOVZ_X0_42.to_le_bytes().to_vec())?;
+            // SAFETY: the valid register-only instruction has no preloaded body.
+            let refusal = unsafe { runtime.run(&mut state, None, 1) }.unwrap_err();
+            assert_eq!(refusal.to_string(), error.to_string());
+            assert_eq!(state.pc, BASE);
+            assert_eq!(state.registers.x[0], 0);
+        }
         Ok(())
     }
 
