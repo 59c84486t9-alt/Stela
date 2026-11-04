@@ -4,6 +4,7 @@
 #include <linux/jiffies.h>
 #include <linux/ktime.h>
 #include <linux/limits.h>
+#include <linux/sched/clock.h>
 #include <linux/timekeeping.h>
 #include <stela/linux.h>
 #include <stela/time.h>
@@ -14,6 +15,14 @@ ktime_t ktime_get(void)
 	if (!owner->services->now_ns)
 		__builtin_trap();
 	return owner->services->now_ns(owner->context);
+}
+
+notrace u64 sched_clock(void)
+{
+	ktime_t now = ktime_get();
+	if (now < 0 || now == KTIME_MAX)
+		stela_linux_fatal("invalid scheduler clock sample");
+	return (u64)now;
 }
 
 int stela_linux_boottime_ns(s64 *now)

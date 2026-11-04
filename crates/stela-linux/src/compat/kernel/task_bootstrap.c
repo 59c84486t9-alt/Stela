@@ -9,12 +9,14 @@
 #include <linux/errno.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
+#include <linux/jump_label.h>
 #include <linux/cpu.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/irqflags.h>
 #include <linux/interrupt.h>
 #include <linux/radix-tree.h>
+#include <linux/sched/clock.h>
 #include <linux/sched/isolation.h>
 #include <linux/rcupdate.h>
 #include <linux/srcu.h>
@@ -55,6 +57,7 @@
 /* Original init/main.c globals have one native bootstrap owner. The original
  * machine start_kernel/main.o must NOT also be activated with this adapter. */
 bool early_boot_irqs_disabled __read_mostly;
+bool static_key_initialized __read_mostly;
 enum system_states system_state __read_mostly = SYSTEM_BOOTING;
 
 /* The selected machine does not link init/main.c or calibrate a second clock. */
@@ -104,6 +107,7 @@ int stela_linux_task_bootstrap_resources(const struct stela_linux_owner *owner)
     unsigned long flags;
     local_irq_save(flags);
     early_boot_irqs_disabled = true;
+    jump_label_init();
     boot_cpu_init();
     radix_tree_init();
     housekeeping_init();
@@ -114,6 +118,7 @@ int stela_linux_task_bootstrap_resources(const struct stela_linux_owner *owner)
     srcu_init();
     early_boot_irqs_disabled = false;
     local_irq_restore(flags);
+    sched_clock_init();
 
     /* Linux initializes the descriptor cache during mm_core_init(), before
      * creating the first threads. The native owner supplies their stacks. */

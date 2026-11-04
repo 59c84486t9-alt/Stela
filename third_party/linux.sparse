@@ -74,6 +74,10 @@
 /kernel/sched/stats.h
 /kernel/sched/ext/ext.h
 /kernel/sched/rq_lock.c
+/kernel/sched/rq_clock.c
+/kernel/sched/clock.c
+/kernel/sched/pelt.h
+/kernel/sched/sched-pelt.h
 /kernel/sched/cputime.c
 /kernel/sched/cputime_group.c
 /kernel/sched/user_affinity.c
