@@ -257,6 +257,13 @@ impl AppleDevices {
         self.usb_network().ok()?.take()
     }
 
+    /// Return the host link's finished frame storage to the USB assembler.
+    pub fn network_recycle(&mut self, frame: Vec<u8>) {
+        if let Ok(network) = self.usb_network() {
+            network.recycle_outbound(frame);
+        }
+    }
+
     /// The keyboard LEDs the guest set on the attached peripheral, Num Lock
     /// in bit 0 as input LED codes number them.
     pub fn keyboard_leds(&self) -> Option<u8> {

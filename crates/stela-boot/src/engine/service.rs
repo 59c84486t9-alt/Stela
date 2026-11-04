@@ -169,8 +169,13 @@ impl Service {
         }
         if let Some(network) = network {
             let frames = devices.with(network::GuestNetwork::queued);
-            network.transmit(frames);
-            devices.serve(|devices| network.poll(devices));
+            let reusable = network.transmit(frames);
+            devices.serve(|devices| {
+                if let Some(frame) = reusable {
+                    devices.network_recycle(frame);
+                }
+                network.poll(devices);
+            });
             lap.part(Part::Network);
         }
         if let Some(bluetooth) = bluetooth {

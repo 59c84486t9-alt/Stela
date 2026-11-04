@@ -476,8 +476,9 @@ impl GuestNetwork {
         // out, and frames come in while its receive queue has room. The rest
         // wait in the host adapter's ring, which drops on overflow as the
         // hardware does.
-        let frames: Vec<_> = core::iter::from_fn(|| devices.network_take()).collect();
-        self.transmit(frames);
+        if let Some(frame) = self.transmit(Self::queued(devices)) {
+            devices.network_recycle(frame);
+        }
         while devices.network_room() {
             match self.link.receive() {
                 Ok(Some(frame)) => {
@@ -499,12 +500,16 @@ impl GuestNetwork {
         core::iter::from_fn(|| devices.network_take()).collect()
     }
 
-    pub fn transmit(&mut self, frames: Vec<Vec<u8>>) {
+    /// Send in queue order and return the last frame's reusable storage.
+    pub fn transmit(&mut self, frames: Vec<Vec<u8>>) -> Option<Vec<u8>> {
+        let mut reusable = None;
         for frame in frames {
             if let Err(error) = self.link.transmit(&frame) {
                 self.refuse(error.into());
             }
+            reusable = Some(frame);
         }
+        reusable
     }
 
     fn refuse(&mut self, error: NetError) {

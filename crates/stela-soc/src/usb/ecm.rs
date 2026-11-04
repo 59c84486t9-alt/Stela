@@ -365,6 +365,18 @@ impl Ecm {
     pub fn take(&mut self) -> Option<Vec<u8>> {
         self.state.outbound.pop_front()
     }
+
+    /// Reuse storage after the host link has finished borrowing the frame.
+    pub(crate) fn recycle_outbound(&mut self, mut frame: Vec<u8>) {
+        let assembling = &mut self.state.assembling;
+        if assembling.is_empty()
+            && frame.capacity() > assembling.capacity()
+            && frame.capacity() <= MAX_SEGMENT.next_power_of_two()
+        {
+            frame.clear();
+            *assembling = frame;
+        }
+    }
 }
 
 impl State {
@@ -734,6 +746,55 @@ mod tests {
         assert_eq!(sizes, [512, 512, 0]);
         assert_eq!(read(&mut e, BULK_IN), None);
         assert_eq!(e.counters().to_guest, 1);
+    }
+
+    #[test]
+    fn drained_outbound_frames_reuse_the_same_storage_across_usb_boundaries() {
+        const FRAMES: usize = 864;
+        let mut e = adapter(true);
+        let mut payload = frame(MAC, MAX_SEGMENT);
+        for packet in payload.chunks_mut(512) {
+            e.packet(BULK_OUT, Token::Out, packet).unwrap();
+        }
+        let completed = e.take().unwrap();
+        let address = completed.as_ptr();
+        assert_eq!(completed, payload);
+        e.recycle_outbound(completed);
+
+        for index in 0..FRAMES {
+            let length = [60, 512, 1024, MAX_SEGMENT][index % 4];
+            let mut payload = frame(MAC, length);
+            payload[14..].fill(index as u8);
+            for packet in payload.chunks_mut(512) {
+                e.packet(BULK_OUT, Token::Out, packet).unwrap();
+            }
+            if length.is_multiple_of(512) {
+                assert!(e.take().is_none());
+                e.packet(BULK_OUT, Token::Out, &mut []).unwrap();
+            }
+            let completed = e.take().unwrap();
+            assert_eq!(completed.as_ptr(), address);
+            assert_eq!(completed, payload);
+            e.recycle_outbound(completed);
+        }
+        assert_eq!(e.counters().to_host, FRAMES as u64 + 1);
+    }
+
+    #[test]
+    fn returned_outbound_storage_preserves_partial_assembly_and_its_capacity_bound() {
+        let mut e = adapter(true);
+        e.recycle_outbound(Vec::with_capacity(4096));
+        assert_eq!(e.state.assembling.capacity(), 0);
+
+        let mut payload = frame(MAC, 750);
+        let (first, last) = payload.split_at_mut(512);
+        e.packet(BULK_OUT, Token::Out, first).unwrap();
+        let address = e.state.assembling.as_ptr();
+        e.recycle_outbound(Vec::with_capacity(1024));
+        assert_eq!(e.state.assembling.as_ptr(), address);
+        assert!(e.take().is_none());
+        e.packet(BULK_OUT, Token::Out, last).unwrap();
+        assert_eq!(e.take().unwrap(), payload);
     }
 
     #[test]
