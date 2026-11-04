@@ -598,6 +598,86 @@ fn ordinary_compare_reads_both_settled_load_results() {
 }
 
 #[test]
+fn pinned_indexed_address_uses_the_base_without_copying_it() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features, RecoverySiteKind},
+        x86_64::MemoryChecks,
+    };
+
+    let pc = GuestAddress(0xffff_fe00_37ec_f448);
+    let pointer = 0xf940_5808u32; // LDR X8,[X0,#0xb0]
+    let load = 0xb861_4900; // LDR W0,[X8,W1,UXTW]
+    let store = 0xb821_4902; // STR W2,[X8,W1,UXTW]
+    let profile = BlockProfile::new(Features::SYSTEM_MODE);
+    let direct = MemoryChecks::DEFAULT;
+    let compile = |words: &[u32], pc, checks| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let options = Options::new(profile, TargetCpu::Baseline).with_memory_checks(checks);
+        CompilationPlan::new(&source, pc, &options)
+            .unwrap()
+            .compile()
+            .unwrap()
+    };
+
+    let uxtw = [0x8b, 0xcd, 0x48, 0x8d, 0x04, 0x0e]; // MOV ECX,EBP; LEA RAX,[RSI+RCX]
+    for word in [load, store] {
+        let block = compile(&[pointer, word], pc, direct);
+        let (indexed_pc, start) = block.native.source_map[1];
+        assert_eq!(indexed_pc, GuestAddress(pc.0 + 4));
+        assert!(block.native.x86_64_code[start..].starts_with(&uxtw));
+        let standalone = compile(&[word], indexed_pc, direct);
+        assert!(standalone.native.x86_64_code.starts_with(&uxtw));
+        let accesses: Vec<_> = block
+            .fault_recovery
+            .iter()
+            .filter(|entry| entry.site.kind() == RecoverySiteKind::GuestAccess)
+            .collect();
+        assert_eq!(accesses.len(), 2);
+        assert!(accesses[0].end <= start && accesses[1].start >= start + uxtw.len());
+        assert_eq!(accesses[0].retirement.instruction_pc(), pc);
+        assert_eq!(accesses[0].retirement.retired_before(), 0);
+        assert_eq!(accesses[1].retirement.instruction_pc(), indexed_pc);
+        assert_eq!(accesses[1].retirement.retired_before(), 1);
+    }
+    // A signed W index, the pinned base as its own W index, and a pinned X
+    // index. X16 lives in R12, whose SIB index needs the REX.X extension.
+    for (word, expected) in [
+        (
+            load | (1 << 15),
+            &[0x48, 0x63, 0xcd, 0x48, 0x8d, 0x04, 0x0e][..],
+        ),
+        (
+            (load & !(31 << 16)) | (8 << 16),
+            &[0x8b, 0xce, 0x48, 0x8d, 0x04, 0x0e],
+        ),
+        (
+            (load & !(31 << 16)) | (16 << 16) | (1 << 13),
+            &[0x4a, 0x8d, 0x04, 0x26],
+        ),
+    ] {
+        assert!(
+            compile(&[word], pc, direct)
+                .native
+                .x86_64_code
+                .starts_with(expected)
+        );
+    }
+    for checks in [
+        direct.with_translation(0x1000),
+        MemoryChecks::system(true, true, true, false),
+        MemoryChecks::system(true, false, true, true),
+    ] {
+        assert!(
+            !compile(&[load], pc, checks)
+                .native
+                .x86_64_code
+                .starts_with(&uxtw)
+        );
+    }
+}
+
+#[test]
 fn indexed_load_store_pair_shares_checked_address_with_distinct_fault_rows() {
     use crate::{
         Options, TargetCpu,

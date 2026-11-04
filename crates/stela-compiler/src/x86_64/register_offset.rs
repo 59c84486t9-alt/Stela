@@ -3,7 +3,7 @@ use super::{
     Access, AddressMode, MemoryTransfer, Register, Shift, Width, memory_address, memory_store,
     right_operand,
 };
-use crate::x86_64::asm::{Alu, Code, Gpr, Mem, ShiftOp, Size};
+use crate::x86_64::asm::{Alu, Code, Gpr, Mem, Rm, ShiftOp, Size};
 use crate::{
     GuestAddress,
     aarch64::{
@@ -155,8 +155,7 @@ fn emit_address(
             code.asm().test_imm(Size::Byte, host, 15);
             code.check_failure(crate::x86_64::asm::Cond::Ne);
         }
-        code.asm().mov(Size::Qword, Gpr::Rax, host);
-        index_add(code, index, extend, shift);
+        index_from_base(code, host, index, extend, shift);
         if checks.guest_range {
             checks.range.emit_base(code, Gpr::Rax);
             if shared {
@@ -189,15 +188,33 @@ const MAX_SCALE_SHIFT: u8 = 3;
 /// modulo 2^64. A W index is read with its extension from its frame slot;
 /// a ZR index adds nothing. RCX and host flags are scratch.
 pub(crate) fn index_add(code: &mut Code, index: Register, extend: IndexExtend, shift: u8) {
+    index_from_base(code, Gpr::Rax, index, extend, shift);
+}
+
+/// Form the same address from a base that is already in a host register.
+/// Pinned bases and indices never occupy the RAX or RCX scratch registers.
+fn index_from_base(code: &mut Code, base: Gpr, index: Register, extend: IndexExtend, shift: u8) {
     let mut asm = code.asm();
     let Some(state) = asm.guest(index) else {
+        if base != Gpr::Rax {
+            asm.mov(Size::Qword, Gpr::Rax, base);
+        }
         return;
     };
     match extend {
         IndexExtend::Uxtw => asm.mov_load(Size::Dword, Gpr::Rcx, state),
         IndexExtend::Sxtw => asm.movsxd(Gpr::Rcx, state),
         IndexExtend::Lsl | IndexExtend::Sxtx if shift == 0 => {
-            asm.alu_load(Alu::Add, Size::Qword, Gpr::Rax, state);
+            if base != Gpr::Rax
+                && let Rm::Reg(index) = state
+            {
+                asm.lea(Size::Qword, Gpr::Rax, Mem::indexed(base, index, 1, 0));
+            } else {
+                if base != Gpr::Rax {
+                    asm.mov(Size::Qword, Gpr::Rax, base);
+                }
+                asm.alu_load(Alu::Add, Size::Qword, Gpr::Rax, state);
+            }
             return;
         }
         IndexExtend::Lsl | IndexExtend::Sxtx => asm.mov_load(Size::Qword, Gpr::Rcx, state),
@@ -208,11 +225,11 @@ pub(crate) fn index_add(code: &mut Code, index: Register, extend: IndexExtend, s
     } else {
         shift
     };
-    // RAX + RCX * 2^scale, the SIB scale applying the shift.
+    // The SIB can use the pinned base directly.
     asm.lea(
         Size::Qword,
         Gpr::Rax,
-        Mem::indexed(Gpr::Rax, Gpr::Rcx, 1 << scale, 0),
+        Mem::indexed(base, Gpr::Rcx, 1 << scale, 0),
     );
 }
 
