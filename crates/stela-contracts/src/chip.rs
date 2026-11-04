@@ -360,7 +360,6 @@ impl Chip {
             else {
                 continue;
             };
-            let single = ((word & checks::IMM5) >> checks::IMM5.trailing_zeros()).count_ones() == 1;
             return group.forms[index]
                 .variants
                 .iter()
@@ -368,7 +367,9 @@ impl Chip {
                     variant.chips & bit != 0
                         && match variant.class {
                             WordClass::Any => true,
-                            WordClass::SingleImm5(wanted) => wanted == single,
+                            WordClass::SingleImm5(wanted) => {
+                                wanted == (word & checks::IMM5).is_power_of_two()
+                            }
                         }
                 })
                 .map_or(&[], |variant| variant.checks);
