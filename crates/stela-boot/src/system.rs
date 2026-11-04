@@ -42,7 +42,7 @@ mod memory;
 const MIB: u64 = 1024 * 1024;
 /// The bounds of the parts of Stela's memory sized from host RAM
 /// ([`Sizes::for_host`]).
-const HEAP_BYTES: RangeInclusive<u64> = 512 * MIB..=3072 * MIB;
+const HEAP_BYTES: RangeInclusive<u64> = 2304 * MIB..=3072 * MIB;
 const CODE_BYTES: RangeInclusive<u64> = 128 * MIB..=512 * MIB;
 const POOL_BYTES: RangeInclusive<u64> = 64 * MIB..=2048 * MIB;
 /// Guest DRAM bytes per byte of each native executor's shadow page-table
@@ -50,9 +50,16 @@ const POOL_BYTES: RangeInclusive<u64> = 64 * MIB..=2048 * MIB;
 /// (8 bytes per page). An exhausted half resets and refills everything; a
 /// 26A434 restore's userland filled 8 MiB halves 20 to 80 times a beat.
 const POOL_SHARE: u64 = 64;
-/// Free host RAM bytes per byte of the engine heap and of the code arena.
-const HEAP_SHARE: u64 = 16;
-const CODE_SHARE: u64 = 64;
+/// Free host RAM bytes per byte of the engine heap. A 16 GiB guest's first
+/// Metal shader compiles carved all of a sixteenth (1816 MiB) and failed.
+/// What the heap needs does not shrink with the RAM: a 26A434 Setup
+/// Assistant boot whose Core Image stitches its kernels peaked at 2149 MiB,
+/// which bounds the heap from below on a smaller host.
+const HEAP_SHARE: u64 = 12;
+/// Translated code carries about its own size again in heap metadata (each
+/// block's table entries and recovery rows), so the arenas together stay well
+/// under the heap: at half this share, boot exhausted it.
+const CODE_SHARE: u64 = 128;
 /// The loader heap's free bytes kept past boot services, for what still runs
 /// before the engine does; the rest of it goes to the guest.
 const LOADER_HEAP_KEPT: usize = 16 * MIB as usize;
