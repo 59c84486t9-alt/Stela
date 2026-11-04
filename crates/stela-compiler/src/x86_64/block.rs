@@ -457,7 +457,7 @@ fn emit_selected(
                     );
                     code.append(candidate);
                     // The last destination is outside the local assignment,
-                    // and settlement MOVs do not touch RAX or XMM0.
+                    // and settlement MOVs do not touch RAX or the XMM registers.
                     after = baseline_after;
                     cursor += count;
                     continue;
@@ -539,9 +539,9 @@ fn emit_selected(
                     .source_map
                     .extend(region.source_map.iter().map(|(pc, at)| (*pc, offset + at)));
                 code.append(region.code);
-                // The value allocator emits only GPR operations and GPR
-                // saves. A vector loaded before this span stays in XMM0.
+                // The value allocator emits only GPR operations and saves.
                 after.xmm0 = held.xmm0;
+                after.xmm_pair = held.xmm_pair;
                 cursor += count;
                 continue;
             }
@@ -599,12 +599,13 @@ fn emit_selected(
                     }
                 }));
                 code.append(region.code);
-                if held.xmm0.is_some()
+                if (held.xmm0.is_some() || held.xmm_pair.is_some())
                     && chunk
                         .iter()
-                        .all(|instruction| preserves_xmm0(&instruction.operation))
+                        .all(|instruction| preserves_held_vectors(&instruction.operation))
                 {
                     after.xmm0 = held.xmm0;
+                    after.xmm_pair = held.xmm_pair;
                 }
             } else {
                 // Reject the complete eligible chunk. Rescanning its suffix
@@ -777,7 +778,7 @@ struct Held {
     rax: super::Rax,
     /// The guest vector XMM0 holds whole.
     xmm0: Option<u8>,
-    /// The guest vectors XMM0 and XMM1 hold after an adjacent pair transfer.
+    /// The guest vectors XMM0 and XMM1 hold whole.
     xmm_pair: Option<[u8; 2]>,
 }
 
@@ -791,7 +792,7 @@ impl Held {
 
 /// These recipes only touch GPRs, flags and their frame slots. A memory
 /// access can call a helper, and integer math can use vector scratch.
-fn preserves_xmm0(operation: &Operation) -> bool {
+fn preserves_held_vectors(operation: &Operation) -> bool {
     matches!(
         operation,
         Operation::AddSub { .. }
@@ -994,17 +995,19 @@ fn emit_single(
         super::Rax::Guest(register) => super::register_store(scratch, register, code.is_pinned())
             .is_some_and(|store| code.ends_with(store)),
     });
+    let keep_vectors = !code.constant_time() && preserves_held_vectors(&instruction.operation);
     let xmm0 = match &instruction.operation {
         Operation::Simd(operand) => {
             super::simd::xmm0_after(scratch, operand, &code[start..], held.xmm0)
         }
-        operation if !code.constant_time() && preserves_xmm0(operation) => held.xmm0,
+        _ if keep_vectors => held.xmm0,
         _ => None,
     };
     let xmm_pair = match &instruction.operation {
         Operation::Simd(Simd::MemoryPair { vectors, .. }) if !code.constant_time() => {
             Some(*vectors)
         }
+        _ if keep_vectors => held.xmm_pair,
         _ => None,
     };
     Held {

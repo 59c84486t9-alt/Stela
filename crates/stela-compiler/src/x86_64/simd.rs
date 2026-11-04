@@ -383,7 +383,7 @@ pub(super) fn emit_for_target(
 }
 
 /// [`emit_for_target`] with guest vectors already held whole in XMM0, or
-/// in XMM0 and XMM1 for an immediately preceding pair transfer.
+/// in XMM0 and XMM1 for a pair transfer.
 pub(super) fn emit_after(
     code: &mut Code,
     operand: &Operand,

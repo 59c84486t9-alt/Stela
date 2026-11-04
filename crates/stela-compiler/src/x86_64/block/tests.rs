@@ -251,11 +251,146 @@ fn adjacent_vector_pairs_forward_both_sources_and_keep_each_access() {
     }
     let ordinary = BlockProfile::ORDINARY;
     let different_pair = [words[0] ^ (2 << 10), words[1]];
-    let separated = [words[0], 0xd503_201f, words[1]];
+    let separated = [words[0], 0x4f00_e402, words[1]]; // MOVI V2.16B,#0 uses XMM0.
     for fallback in [&different_pair[..], &separated[..]] {
         assert!(has_reload(
             &compile(fallback, pc, ordinary, checks, target).native
         ));
+    }
+}
+
+#[test]
+fn vector_copy_keeps_pair_across_scalar_rows() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features, RecoverySiteKind},
+        x86_64::MemoryChecks,
+    };
+
+    // Paired Q load, counter SUBS, source ADD, paired Q store,
+    // destination ADD, and conditional backedge from real copy loops.
+    let windows = [
+        (
+            0x10000b620,
+            [
+                0xad7f_8520u32,
+                0xf100_818c,
+                0x9100_8129,
+                0xad3f_8540,
+                0x9100_814a,
+                0x54ff_ff61,
+            ],
+        ),
+        (
+            0x10000003c,
+            [
+                0xad7f_8540,
+                0xf100_816b,
+                0x9100_814a,
+                0xad3f_8520,
+                0x9100_8129,
+                0x54ff_ff61,
+            ],
+        ),
+        (
+            0x100008150,
+            [
+                0xad7f_8821,
+                0xf100_12d6,
+                0x9100_8021,
+                0xad3f_8801,
+                0x9100_8000,
+                0x54ff_ff61,
+            ],
+        ),
+        (
+            0x100008dd0,
+            [
+                0xad7f_8500,
+                0xf100_1318,
+                0x9100_8108,
+                0xad3f_8520,
+                0x9100_8129,
+                0x54ff_ff61,
+            ],
+        ),
+        (
+            0x100008f60,
+            [
+                0xad7f_8440,
+                0xf100_12f7,
+                0x9100_8042,
+                0xad3f_8660,
+                0x9100_8273,
+                0x54ff_ff61,
+            ],
+        ),
+    ];
+    let compile = |words: &[u32], pc, profile, target, checks| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        CompilationPlan::new(
+            &source,
+            pc,
+            &Options::new(profile, target).with_memory_checks(checks),
+        )
+        .unwrap()
+        .compile()
+        .unwrap()
+    };
+    let reloads = |native: &NativeBlock, row: usize| {
+        native.x86_64_code[native.source_map[row].1..native.source_map[row + 1].1]
+            .windows(4)
+            .filter(|bytes| matches!(*bytes, [0xf3, 0x0f, 0x6f, 0x87 | 0x8f]))
+            .count()
+    };
+    let target = TargetCpu::Baseline;
+    let checks = MemoryChecks::DEFAULT;
+    let system = BlockProfile::new(Features::SYSTEM_MODE);
+    for (address, words) in windows {
+        let pc = GuestAddress(address);
+        let store = GuestAddress(address + 12);
+        for profile in [BlockProfile::ORDINARY, system] {
+            let grouped = compile(&words, pc, profile, target, checks);
+            assert_eq!(grouped.native.source_map.len(), words.len());
+            for (index, (guest, _)) in grouped.native.source_map.iter().enumerate() {
+                assert_eq!(*guest, GuestAddress(address + 4 * index as u64));
+            }
+            assert_eq!(reloads(&grouped.native, 3), 0);
+            let independent = compile(&words[3..], store, profile, target, checks);
+            assert_eq!(reloads(&independent.native, 0), 2);
+            let dit = compile(
+                &words,
+                pc,
+                profile,
+                target.with_data_independent_timing(),
+                checks,
+            );
+            assert_eq!(reloads(&dit.native, 3), 2);
+            if profile != system {
+                continue;
+            }
+            let accesses: Vec<_> = grouped
+                .fault_recovery
+                .iter()
+                .filter(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+                .collect();
+            assert_eq!(accesses.len(), 4);
+            for (index, row) in accesses.into_iter().enumerate() {
+                let (expected_pc, retired, opcode) = if index < 2 {
+                    (pc, 0, 0x6f)
+                } else {
+                    (store, 3, 0x7f)
+                };
+                assert_eq!(row.retirement.instruction_pc(), expected_pc);
+                assert_eq!(row.retirement.retired_before(), retired);
+                assert_eq!(
+                    &grouped.native.x86_64_code[row.start..row.start + 3],
+                    &[0xf3, 0x0f, opcode]
+                );
+            }
+            let translated = compile(&words, pc, profile, target, checks.with_translation(0x1000));
+            assert_eq!(reloads(&translated.native, 3), 2);
+        }
     }
 }
 
