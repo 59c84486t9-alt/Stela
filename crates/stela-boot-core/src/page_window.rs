@@ -99,6 +99,20 @@ pub fn indices(address: u64) -> [usize; 3] {
     ]
 }
 
+/// Group the leaf slots of a validated page range by their parent table.
+pub fn leaf_runs(address: u64, pages: usize) -> impl Iterator<Item = (usize, usize, Range<usize>)> {
+    let mut offset = 0;
+    core::iter::from_fn(move || {
+        if offset == pages {
+            return None;
+        }
+        let [pointer, directory, first] = indices(address + offset as u64 * PAGE);
+        let count = (ENTRIES as usize - first).min(pages - offset);
+        offset += count;
+        Some((pointer, directory, first..first + count))
+    })
+}
+
 /// The page window of the engine's window at `base`: the rest of the
 /// directory-pointer table its fixed parts start.
 pub fn span(base: u64) -> core::ops::Range<u64> {
@@ -187,6 +201,20 @@ mod tests {
     use super::*;
 
     const GIB: u64 = 1 << 30;
+
+    #[test]
+    fn leaf_runs_cover_exactly_the_requested_slots_across_table_boundaries() {
+        let address = GIB - 2 * PAGE;
+        assert_eq!(
+            leaf_runs(address, 516).collect::<Vec<_>>(),
+            [(0, 511, 510..512), (1, 0, 0..512), (1, 1, 0..2)]
+        );
+        assert_eq!(leaf_runs(address, 0).next(), None);
+        assert_eq!(
+            leaf_runs(!(PAGE - 1), 1).collect::<Vec<_>>(),
+            [(511, 511, 511..512)]
+        );
+    }
 
     #[test]
     fn retiring_ranges_remain_excluded_until_acknowledged() {
