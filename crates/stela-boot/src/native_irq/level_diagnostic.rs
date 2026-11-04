@@ -221,6 +221,16 @@ impl Prepared {
         {
             return Err(refuse!("EDU MSI remains active before INTx"));
         }
+        if self.routing.has_ioapic_nmis() {
+            return Err(refuse!("level fixture has an IOAPIC NMI source"));
+        }
+        // SAFETY: the exact exclusive fixture owns the full original IOAPIC,
+        // with physical interrupt format and every legacy contributor kept.
+        let firmware_routes = unsafe { unit.firmware_routes() }
+            .map_err(|e| refuse!("firmware IOAPIC census: {e}", ?e))?;
+        // SAFETY: same fixture owner, no driver or competing RTE writer.
+        unsafe { firmware_routes.contain() }
+            .map_err(|e| refuse!("firmware IOAPIC containment: {e}", ?e))?;
         let edu = Arc::new(Edu {
             base: base as usize,
             unit: unit.clone(),

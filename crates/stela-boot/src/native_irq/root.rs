@@ -130,8 +130,10 @@ impl Root {
     /// post-EBS CPU/root epoch. `madt` is its original table. Every
     /// IOAPIC selector/window has been handed off exclusively, with no firmware,
     /// SMM, other CPU or controller owner; interrupt remapping is off. APIC EOI
-    /// broadcast remains enabled until every pin retires. This does not grant
-    /// any individual pin: claim separately keeps every physical contributor.
+    /// broadcast remains enabled until every pin retires. Former firmware
+    /// destinations have no running AP or alternate receiver, and all their
+    /// contributors/backing stay owned through independent retirement. This
+    /// does not grant a pin or acknowledge contributor and work retirement.
     pub(crate) unsafe fn attach(
         execution: &crate::native_clock::DriverExecution<'_>,
         authority: &Authority,
@@ -143,6 +145,11 @@ impl Root {
             .map_err(|error| Error::Irq(IrqError::Delivery(error)))?;
         let scope = execution.process_scope().map_err(Error::Cpu)?;
         let cpu = scope.cpu().map_err(Error::Cpu)?;
+        let routing = madt::Routing::parse(madt, authority.address_space().physical_bits)
+            .map_err(Error::Route)?;
+        if routing.has_ioapic_nmis() {
+            return Err(Error::Route(madt::RouteError::NmiConflict));
+        }
         // SAFETY: complete external-controller/main handoff is required
         // by this constructor; adopt joins the existing IDT/APIC owner only.
         unsafe { super::adopt(execution) }.map_err(Error::Irq)?;
@@ -151,8 +158,6 @@ impl Root {
         if svr == u32::MAX || svr & (1 << 12) != 0 {
             return Err(Error::Irq(IrqError::Unsupported));
         }
-        let routing = madt::Routing::parse(madt, authority.address_space().physical_bits)
-            .map_err(Error::Route)?;
         let mut units = Vec::new();
         let mut spans = Vec::new();
         units
@@ -198,29 +203,30 @@ impl Root {
             spans.push((*descriptor, unit.pins()));
             units.push((*descriptor, unit));
         }
-        // Validate complete hardware spans and every inter-unit overlap
-        // even before any consumer asks for a route. No guessed pin capacity.
-        for (unit, _) in &spans {
-            routing
-                .owner(
-                    LineRoute {
-                        gsi: unit.gsi_base,
-                        polarity: stela_drivers::bus::irq::Polarity::High,
-                        trigger: stela_drivers::bus::irq::Trigger::Level,
-                    },
-                    &spans,
-                )
-                .or_else(|error| {
-                    // An NMI pin at a unit's base is valid inventory, but can never
-                    // be claimed by a normal consumer.
-                    if error == madt::RouteError::NmiConflict {
-                        Ok(*unit)
-                    } else {
-                        Err(error)
-                    }
-                })
-                .map_err(Error::Route)?;
+        routing.validate_units(&spans).map_err(Error::Route)?;
+        let mut firmware_routes = Vec::new();
+        firmware_routes
+            .try_reserve_exact(units.len())
+            .map_err(|_| Error::Irq(IrqError::Exhausted))?;
+        for (_, unit) in &units {
+            // SAFETY: this is the complete original controller handoff and
+            // MADT supplied no IOAPIC NMI routes. Remapping is off.
+            firmware_routes.push(unsafe { unit.firmware_routes() }.map_err(Error::Irq)?);
         }
+        // Keep the same actual controller mappings and CPU scope on a failed
+        // or unwinding containment, including the unattempted suffix.
+        let mut kept = ManuallyDrop::new(units.clone());
+        for plan in &firmware_routes {
+            // SAFETY: same exclusive platform handoff, and every original
+            // controller and its scope remain retained through containment.
+            unsafe { plan.contain() }.map_err(Error::Irq)?;
+        }
+        for plan in firmware_routes {
+            plan.verify_contained().map_err(Error::Irq)?;
+        }
+        // SAFETY: containment succeeded. The returned root retains every
+        // original controller, so only the redundant Arc references end.
+        unsafe { ManuallyDrop::drop(&mut kept) };
         Ok(Self {
             routing,
             units,

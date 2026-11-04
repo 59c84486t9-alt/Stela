@@ -286,6 +286,80 @@ fn fixture_version(version: u8) -> Fixture {
 }
 
 #[test]
+fn firmware_containment_masks_only_original_ordinary_routes() {
+    let (board, unit, _, _) = fixture();
+    {
+        let mut hardware = board.hw.lock().unwrap();
+        hardware.regs[0x12] = 0x38;
+        hardware.regs[0x13] = 2 << 24;
+        hardware.regs[0x16] = LOWEST_PRIORITY | 0x42;
+        hardware.regs[0x17] = 3 << 24;
+    }
+    // SAFETY: sole controller, CPU and original firmware route model.
+    let plan = unsafe { unit.firmware_routes() }.unwrap();
+    assert!(board.hw.lock().unwrap().events.is_empty());
+    // SAFETY: the fixture retains the exact original controller and its sources.
+    unsafe { plan.contain() }.unwrap();
+    plan.verify_contained().unwrap();
+    let hardware = board.hw.lock().unwrap();
+    assert_eq!(&hardware.regs[0x12..0x14], &[MASK | 0x38, 2 << 24]);
+    assert_eq!(
+        &hardware.regs[0x16..0x18],
+        &[MASK | LOWEST_PRIORITY | 0x42, 3 << 24]
+    );
+    assert_eq!(hardware.events, ["mask", "mask"]);
+}
+
+#[test]
+fn firmware_containment_refuses_pending_and_unowned_modes_before_writes() {
+    for (last, cpu_pending, expected) in [
+        (REMOTE_IRR | 0x42, false, IrqError::Drain),
+        (DELIVERY | 0x42, false, IrqError::Drain),
+        (0x42, true, IrqError::Drain),
+        (4 << 8 | 0x42, false, IrqError::Unsupported),
+    ] {
+        let (board, unit, _, _) = fixture();
+        {
+            let mut hardware = board.hw.lock().unwrap();
+            hardware.regs[0x12] = 0x38;
+            hardware.regs[0x3e] = last;
+            hardware.pending = cpu_pending;
+        }
+        // SAFETY: sole controller, CPU and original firmware route model.
+        let plan = unsafe { unit.firmware_routes() };
+        assert!(matches!(plan, Err(error) if error == expected));
+        assert!(board.hw.lock().unwrap().events.is_empty());
+    }
+}
+
+#[test]
+fn firmware_containment_refuses_a_changed_destination_and_failed_mask_readback() {
+    let (board, unit, _, _) = fixture();
+    board.hw.lock().unwrap().regs[0x12] = 0x38;
+    // SAFETY: sole controller, CPU and original firmware route model.
+    let plan = unsafe { unit.firmware_routes() }.unwrap();
+    board.hw.lock().unwrap().regs[0x3f] = 2 << 24;
+    // SAFETY: the fixture keeps the source, simulating a stale hardware reply.
+    let result = unsafe { plan.contain() };
+    assert_eq!(result, Err(IrqError::Route));
+    {
+        let mut hardware = board.hw.lock().unwrap();
+        assert!(hardware.events.is_empty());
+        hardware.regs[0x3f] = 0;
+        hardware.refuse_mask = true;
+    }
+    // SAFETY: the fixture retains the exact controller and simulates a refusal.
+    let result = unsafe { plan.contain() };
+    assert_eq!(result, Err(IrqError::Mask));
+    assert_eq!(plan.verify_contained(), Err(IrqError::Unavailable));
+    board.hw.lock().unwrap().refuse_mask = false;
+    // SAFETY: same original model; the uncertain first write bars replay.
+    let replay = unsafe { plan.contain() };
+    assert_eq!(replay, Err(IrqError::Unavailable));
+    assert!(board.hw.lock().unwrap().events.is_empty());
+}
+
+#[test]
 fn local_contributors_require_process_context_before_device_access() {
     struct Local(alloc::rc::Rc<()>, Contributors);
     // SAFETY: this wrapper owns the fixture's same contributor and delegates
