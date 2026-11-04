@@ -15,10 +15,13 @@
 use super::asm::{Alu, Asm, Code, Gpr, Mem, Rm, ShiftOp, Size};
 use super::{flag_word, logical, nzcv, right_operand, store};
 use crate::{
-    GuestState, TargetCpu,
-    aarch64::{Logical, Operation, Register, Shift, WideMove, Width, pc_relative, simd},
+    GuestAddress, GuestState, TargetCpu,
+    aarch64::{
+        Instruction, Logical, Operation, Register, Shift, WideMove, Width, pc_relative, simd,
+    },
     block::HostGprSnapshot,
 };
+use alloc::vec::Vec;
 
 /// Each pinned guest register and the host register that holds it. SP takes
 /// RBX, the host register an emitter may borrow around an access
@@ -181,6 +184,53 @@ pub(super) fn unshifted_binary(
 /// The preceding flag capture left native CF equal to the guest carry.
 /// Keep it through operand preparation, then use the direct ADC or SBB.
 pub(super) fn emit_live_carry(code: &mut Code, operation: &Operation) {
+    emit_carry(code, operation, Carry::Native { borrow: false }, true);
+}
+
+#[derive(Clone, Copy)]
+enum Carry {
+    Frame,
+    Native { borrow: bool },
+}
+
+/// The body uses only GPRs and the owned frame. Each result reaches its
+/// canonical home immediately, but only the final row materializes NZCV.
+pub(super) fn emit_carry_run(
+    code: &mut Code,
+    source_map: &mut Vec<(GuestAddress, usize)>,
+    instructions: &[Instruction],
+    live: bool,
+) -> Option<usize> {
+    const MAX_ROWS: usize = 8;
+    let start = instructions.first()?.pc.0;
+    let count = instructions
+        .iter()
+        .take(MAX_ROWS)
+        .enumerate()
+        .take_while(|&(index, instruction)| {
+            start.checked_add(index as u64 * 4) == Some(instruction.pc.0)
+                && matches!(
+                    instruction.operation,
+                    Operation::AddSubCarry { flags: true, .. }
+                )
+        })
+        .count();
+    if count < 2 {
+        return None;
+    }
+    let mut carry = if live {
+        Carry::Native { borrow: false }
+    } else {
+        Carry::Frame
+    };
+    for (index, instruction) in instructions[..count].iter().enumerate() {
+        source_map.push((instruction.pc, code.len()));
+        carry = emit_carry(code, &instruction.operation, carry, index + 1 == count);
+    }
+    Some(count)
+}
+
+fn emit_carry(code: &mut Code, operation: &Operation, incoming: Carry, commit: bool) -> Carry {
     let Operation::AddSubCarry {
         width,
         subtract,
@@ -207,21 +257,30 @@ pub(super) fn emit_live_carry(code: &mut Code, operation: &Operation) {
         Some(storage) if storage != Rm::Reg(work) => asm.mov_load(size, work, storage),
         _ => {}
     }
-    let alu = if subtract {
-        // SBB consumes the inverse carry. A flag-setting SBB is converted
-        // back to the architectural carry by the ordinary capture.
-        asm.cmc();
-        Alu::Sbb
-    } else {
-        Alu::Adc
+    let incoming_borrow = match incoming {
+        Carry::Frame => {
+            flag_word::carry(&mut asm, flag_word::ARM_SHIFT + 1);
+            false
+        }
+        Carry::Native { borrow } => borrow,
     };
+    // ADC consumes carry, SBB consumes borrow. Within a run, equally
+    // oriented operations keep CF unchanged between producer and consumer.
+    if incoming_borrow != subtract {
+        asm.cmc();
+    }
+    let alu = if subtract { Alu::Sbb } else { Alu::Adc };
     match right {
         None => asm.alu_imm8(alu, size, work, 0),
         Some(Rm::Reg(right)) => asm.alu(alu, size, work, right),
         Some(Rm::Mem(right)) => asm.alu_load(alu, size, work, right),
         Some(Rm::Xmm(_)) => unreachable!("scalar guest operand"),
     }
-    finish(code, work, destination, flags, subtract);
+    let commit = flags && commit;
+    finish(code, work, destination, commit, subtract);
+    Carry::Native {
+        borrow: subtract && !commit,
+    }
 }
 
 /// Compare the left operand against the prior instruction's result in RAX.
