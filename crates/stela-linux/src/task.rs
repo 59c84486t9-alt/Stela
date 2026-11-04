@@ -4,6 +4,7 @@
 //! The normal/WW and original RT mutex adapters supply wake/signal/I/O effects.
 //! NORMAL nice, FIFO and inherited ranks commit against retained job identities
 //! on the same checked queue; native IRQ delivery remains the service's owner.
+mod dispatch;
 mod factory;
 #[cfg(all(
     feature = "hosted-runtime",

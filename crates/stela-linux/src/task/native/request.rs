@@ -127,7 +127,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> R
     }
     pub(super) unsafe fn prepare_thread(
         &self,
-        entry: Option<NativeEntry>,
+        entry: Option<SourceEntry>,
         argument: *mut c_void,
     ) -> i32 {
         let Ok(_mutation) = self.mutation() else {

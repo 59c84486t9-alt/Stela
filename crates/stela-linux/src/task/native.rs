@@ -1,6 +1,7 @@
 //! Required original-child ABI on the same retained Factory/native owner.
 //! No source supervisor, scheduler, workqueue or Ready is installed here.
 use super::StoppedTaskData;
+use super::dispatch::{Dispatch, SOURCE_TAIL, SourceEntry, TERMINAL_RETURNED};
 use super::factory::{self, Child, Factory, NoPublication, RetiredMetadata};
 use super::{CTask, OriginalBirth, Rank, TaskBinding};
 use crate::{
@@ -36,14 +37,10 @@ const RESERVED: u8 = 1;
 const LIVE: u8 = 2;
 const RETIRING: u8 = 3;
 const CREATED: u8 = 1;
-const SOURCE_FREED: u8 = 2;
-const TERMINAL_RETURNED: u8 = 4;
 const ABORT_RECORDED: u8 = 8;
-const SOURCE_TAIL: u8 = 16;
 const NATIVE_RELEASED: u8 = 32;
 const FAILED: u8 = 64;
 type OwnedChild<K, P, const N: usize> = Child<'static, 'static, 'static, 'static, K, P, N>;
-type NativeEntry = unsafe extern "C" fn(*mut c_void) -> i32;
 unsafe extern "C" {
     fn stela_linux_task_run_original(context: *mut c_void);
 }
@@ -117,7 +114,7 @@ struct Request<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N
     prepared: AtomicBool,
     entered: AtomicBool,
     events: AtomicU8,
-    entry: UnsafeCell<Option<(NativeEntry, *mut c_void)>>,
+    entry: UnsafeCell<Option<(SourceEntry, *mut c_void)>>,
     fault: UnsafeCell<ManuallyDrop<Option<factory::Error>>>,
     detached: UnsafeCell<ManuallyDrop<Option<Arc<dyn SwitchBinding>>>>,
 }
@@ -210,7 +207,7 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> M
         if capacity == 0 {
             return Err(Error::Work(WorkError::Full));
         }
-        if !abi::DISPATCH.load(Ordering::Acquire).is_null() {
+        if Dispatch::installed() {
             return Err(Error::Busy);
         }
         let delivery = Arc::new(Delivery {
