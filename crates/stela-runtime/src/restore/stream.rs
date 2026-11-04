@@ -128,8 +128,12 @@ impl Framed {
         self.output
             .queue(bytes, self.limits.bytes.saturating_add(4))
     }
-    /// Queue a binary FileData frame, reusing the completed frame's buffer.
-    pub(super) fn queue_file_data(&mut self, data: &[u8]) -> Result<()> {
+    /// Queue consecutive binary FileData frames and return the final frame's
+    /// byte offset in the send buffer.
+    pub(super) fn queue_file_data<'a>(
+        &mut self,
+        chunks: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<usize> {
         if self.failed {
             return Err(Error::Invalid("framing stream failed"));
         }
@@ -137,17 +141,20 @@ impl Framed {
             return Err(Error::Invalid("output already pending"));
         }
         let out = &mut self.output.bytes;
-        out.resize(4, 0);
-        match plist::append_file_data(out, data, self.limits) {
-            Ok(length) => {
-                out[..4].copy_from_slice(&self.endian.encode(length));
-                Ok(())
-            }
-            Err(error) => {
-                out.clear();
-                Err(error)
+        let mut last = 0;
+        for data in chunks {
+            let at = out.len();
+            last = at;
+            out.resize(at + 4, 0);
+            match plist::append_file_data(out, data, self.limits) {
+                Ok(length) => out[at..at + 4].copy_from_slice(&self.endian.encode(length)),
+                Err(error) => {
+                    out.clear();
+                    return Err(error);
+                }
             }
         }
+        Ok(last)
     }
     pub fn poll_send(&mut self, s: &mut impl ByteStream) -> Poll<Result<()>> {
         if self.failed {
@@ -370,11 +377,11 @@ pub(crate) mod tests {
                 .unwrap();
                 let buffer = frame.output.bytes.as_ptr();
                 let capacity = frame.output.bytes.capacity();
-                frame.queue_file_data(&data).unwrap();
+                frame.queue_file_data([data.as_slice()]).unwrap();
                 if capacity >= frame.output.bytes.len() {
                     assert_eq!(frame.output.bytes.as_ptr(), buffer);
                 }
-                assert!(frame.queue_file_data(b"pending").is_err());
+                assert!(frame.queue_file_data([b"pending".as_slice()]).is_err());
                 while frame.sending() {
                     if let Poll::Ready(result) = frame.poll_send(&mut stream) {
                         result.unwrap();
@@ -392,8 +399,12 @@ pub(crate) mod tests {
                 ..limits
             },
         );
-        assert!(limited.queue_file_data(&[0; 100]).is_err());
-        assert!(limited.queue_file_data(&[0; 40]).is_err());
+        assert!(
+            limited
+                .queue_file_data([b"ok".as_slice(), &[0; 100]])
+                .is_err()
+        );
+        assert!(limited.queue_file_data([[0; 40].as_slice()]).is_err());
         assert!(!limited.sending());
     }
     #[test]
