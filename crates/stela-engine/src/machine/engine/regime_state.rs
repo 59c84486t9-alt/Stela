@@ -51,7 +51,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// EL or GXF state: what derives from PSTATE goes, but the mirrored reads
     /// keep their cells per state ([`Self::cells_moved`]).
     pub(super) fn transitioned(&mut self) {
-        self.forget_derived();
+        // The timer deadline is an absolute count derived from timer state.
+        // Polling still applies the new PSTATE masks and interrupt routing.
+        self.forget_pstate_derived();
         self.cells_moved();
     }
 
@@ -85,6 +87,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// the device lines.
     pub(super) fn forget_derived(&mut self) {
         self.timers = None;
+        self.forget_pstate_derived();
+    }
+
+    fn forget_pstate_derived(&mut self) {
         self.floating_point = None;
         self.memory_checks = None;
         self.native_system = None;

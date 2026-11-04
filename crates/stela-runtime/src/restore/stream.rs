@@ -54,6 +54,11 @@ impl Output {
     pub fn written(&self) -> u64 {
         self.written
     }
+    /// Take the emptied buffer after a successful send.
+    pub(super) fn take_completed_buffer(&mut self) -> Vec<u8> {
+        debug_assert!(!self.is_pending());
+        core::mem::take(&mut self.bytes)
+    }
     pub fn queue(&mut self, bytes: Vec<u8>, limit: usize) -> Result<()> {
         if self.is_pending() {
             return Err(Error::Invalid("output already pending"));

@@ -113,6 +113,28 @@ struct Held {
     mappings: Vec<(usize, Mapping)>,
 }
 
+/// One commit's prepared work. Only indirect mapping updates split it.
+enum HeldBatch {
+    One(Held),
+    Split(Vec<Held>),
+}
+
+impl HeldBatch {
+    fn as_mut_slice(&mut self) -> &mut [Held] {
+        match self {
+            Self::One(held) => core::slice::from_mut(held),
+            Self::Split(held) => held,
+        }
+    }
+
+    fn enqueue(self, queue: &mut VecDeque<Held>) {
+        match self {
+            Self::One(held) => queue.push_back(held),
+            Self::Split(held) => queue.extend(held),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct Queue {
     /// Upload chunks with their memory; free ones are reused.
@@ -392,7 +414,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let mut times = None;
         let prepared = (|| {
             let mut held = self.hold(serial, recording.segments, recording.mappings)?;
-            times = self.time(&mut held)?;
+            times = self.time(held.as_mut_slice())?;
             let mut chunks = Vec::with_capacity(recording.uploads.len());
             for (chunk, bytes) in &recording.uploads {
                 let memory = self.chunk_memory(chunk.buffer)?;
@@ -424,7 +446,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         // and outside the command buffer's GPU times. Keep pending copies
         // available for the next commit until preparation succeeds.
         let uploads = self.take_cpu_copy_uploads();
-        held[0].segments[0].commands.splice(1..1, uploads);
+        held.as_mut_slice()[0].segments[0]
+            .commands
+            .splice(1..1, uploads);
         self.submitted = serial;
         self.queue.in_flight.push_back(InFlight {
             serial,
@@ -433,7 +457,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             invalidations: recording.invalidations,
             times,
         });
-        self.queue.held.extend(held);
+        held.enqueue(&mut self.queue.held);
         self.advance()?;
         Ok(serial)
     }
@@ -552,13 +576,21 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         serial: u64,
         mut segments: Vec<Segment>,
         mut mappings: Vec<(usize, Mapping)>,
-    ) -> Result<Vec<Held>> {
+    ) -> Result<HeldBatch> {
         let mut starts: Vec<_> = mappings
             .iter()
             .filter(|(_, mapping)| matches!(mapping, Mapping::Indirect { .. }))
             .map(|(segment, _)| *segment)
             .collect();
         starts.dedup();
+        if starts.is_empty() {
+            return Ok(HeldBatch::One(Held {
+                serial,
+                step: 0,
+                segments,
+                mappings,
+            }));
+        }
         let rebase = |mappings: Vec<(usize, Mapping)>, base: usize| {
             mappings
                 .into_iter()
@@ -591,7 +623,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             segments,
             mappings: rebase(mappings, base),
         });
-        Ok(held)
+        Ok(HeldBatch::Split(held))
     }
 
     /// Submits held work, in order, as far as its arguments are readable.
