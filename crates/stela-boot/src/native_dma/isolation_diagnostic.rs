@@ -182,11 +182,11 @@ pub(super) fn run(
     {
         return Err(refuse!("prior isolation faults"));
     }
-    let mut send_a = Buffer::new(da.clone(), Direction::ToDevice)?;
-    let mut receive_a = Buffer::new(da.clone(), Direction::FromDevice)?;
-    let mut protected_a = Buffer::new(da.clone(), Direction::FromDevice)?;
-    let mut send_b = Buffer::new(db.clone(), Direction::ToDevice)?;
-    let mut receive_b = Buffer::new(db.clone(), Direction::FromDevice)?;
+    let mut send_a = Buffer::new(da.domain(), Direction::ToDevice)?;
+    let mut receive_a = Buffer::new(da.domain(), Direction::FromDevice)?;
+    let mut protected_a = Buffer::new(da.domain(), Direction::FromDevice)?;
+    let mut send_b = Buffer::new(db.domain(), Direction::ToDevice)?;
+    let mut receive_b = Buffer::new(db.domain(), Direction::FromDevice)?;
     send_a.fill(0x31)?;
     send_b.fill(0x97)?;
     receive_a.fill(0)?;
