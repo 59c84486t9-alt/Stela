@@ -251,7 +251,7 @@ pub struct Stream {
 }
 
 impl Stream {
-    fn from_control(bank: Bank, control: u64, offset: u64) -> Option<Self> {
+    fn from_control(bank: Bank, control: u64, offset: impl FnOnce() -> u64) -> Option<Self> {
         if control & EVNTEN == 0 {
             return None;
         }
@@ -259,7 +259,7 @@ impl Stream {
         let scale = if control & EVNTIS != 0 { 8 } else { 0 };
         Some(Self {
             bank,
-            offset,
+            offset: offset(),
             bit: (control >> EVNTI_SHIFT) as u32 % 16 + scale,
             falling: control & EVNTDIR != 0,
         })
@@ -298,14 +298,12 @@ pub fn streams(cpu: &Cpu) -> impl Iterator<Item = Stream> + '_ {
     let host = cpu.read(Register::HCR_EL2) & (HCR_E2H | HCR_TGE) == HCR_E2H | HCR_TGE;
     banks(cpu).iter().flat_map(move |&bank| {
         let read = |register| value(cpu, bank, register);
-        let physical = Stream::from_control(bank, read(Register::CNTHCTL_EL2), 0);
+        let physical = Stream::from_control(bank, read(Register::CNTHCTL_EL2), || 0);
         let virtual_stream = (!host)
             .then(|| {
-                Stream::from_control(
-                    bank,
-                    read(Register::CNTKCTL_EL1),
-                    read(Register::CNTVOFF_EL2),
-                )
+                Stream::from_control(bank, read(Register::CNTKCTL_EL1), || {
+                    read(Register::CNTVOFF_EL2)
+                })
             })
             .flatten();
         physical.into_iter().chain(virtual_stream)
@@ -315,7 +313,8 @@ pub fn streams(cpu: &Cpu) -> impl Iterator<Item = Stream> + '_ {
 /// Whether an enabled event stream signals in the system counts
 /// (previous, current] (Arm `GenericCounterTick`).
 pub fn event(cpu: &Cpu, previous: u64, current: u64) -> bool {
-    streams(cpu).any(|stream| stream.signals(cpu, previous, current))
+    // A shared clock may hold the count while another PE advances its horizon.
+    current != previous && streams(cpu).any(|stream| stream.signals(cpu, previous, current))
 }
 
 /// The first system count after `now` at which an event stream signals.
@@ -327,6 +326,13 @@ pub fn next_event(cpu: &Cpu, now: u64) -> Option<u64> {
 mod tests {
     use super::*;
     use {crate::machine::exception::Pstate, stela_contracts::Chip};
+
+    #[test]
+    fn disabled_stream_does_not_read_its_offset() {
+        assert!(Stream::from_control(Bank::Arm, 0, || panic!("disabled stream offset")).is_none());
+        let stream = Stream::from_control(Bank::Arm, EVNTEN, || 9).unwrap();
+        assert_eq!(stream.offset, 9);
+    }
 
     #[test]
     fn native_epoch_omits_stable_assertions_but_keeps_every_future_channel() {

@@ -670,8 +670,7 @@ fn emit_single(
         && source == register
     {
         super::pinned::compare_held_immediate(code, width, immediate);
-    } else if code.is_pinned()
-        && !code.constant_time()
+    } else if !code.constant_time()
         && let super::Rax::Guest(register) = held.rax
         && let Operation::AddSubRegister {
             width,
@@ -687,6 +686,29 @@ fn emit_single(
         && left != right
     {
         super::pinned::compare_held_right(code, width, left);
+    } else if !code.is_pinned()
+        && !code.constant_time()
+        && let super::Rax::Guest(register) = held.rax
+        && let Operation::AddSubRegister {
+            width,
+            subtract: false,
+            flags: false,
+            destination,
+            left: left @ Register::X(_),
+            right,
+            amount: 0,
+            ..
+        } = instruction.operation
+        && right == register
+        && left != right
+        && destination != Register::Zero
+    {
+        // ADD is commutative here. The preceding result in RAX can be
+        // the host destination, with the guest's left operand in memory.
+        let mut asm = code.asm();
+        let left = asm.guest(left).expect("ADD left register");
+        asm.alu_load(Alu::Add, Size::of(width == Width::X64), Gpr::Rax, left);
+        super::store(code, destination);
     } else {
         super::emit_instruction(code, instruction, fixups, target, checks);
     }
@@ -698,7 +720,7 @@ fn emit_single(
     {
         code.remove_instruction(start..start + load.len());
     }
-    let rax = match super::rax_after(&instruction.operation, code.is_pinned()) {
+    let rax = match super::rax_after(&instruction.operation, code) {
         // A direct form may leave the result only in its host register.
         super::Rax::Guest(register)
             if code.is_pinned()

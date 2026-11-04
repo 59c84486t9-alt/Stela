@@ -1089,6 +1089,28 @@ impl Emitter<'_> {
                     "prefix analysis selects only low product and equal-source extract"
                 ),
             },
+            Operation::Bitfield(operand) => {
+                let (shift, amount) = analysis::bitfield_shift(operand)
+                    .expect("clean region selects only immediate shift aliases");
+                let in_place = self.in_place(operand.destination, operand.source);
+                if in_place.is_none() {
+                    self.read(operand.source, RESULT);
+                }
+                self.emit(|code| {
+                    encoding::shift_register(
+                        code,
+                        in_place.unwrap_or(RESULT),
+                        shift,
+                        amount,
+                        operand.width,
+                    )
+                });
+                if in_place.is_some() {
+                    self.committed_in_place(operand.destination);
+                } else {
+                    self.commit(operand.destination, operand.width);
+                }
+            }
             Operation::LogicalImmediate {
                 width,
                 kind,
@@ -1206,7 +1228,7 @@ fn emit_prefix_selected<'a>(
         return Err(RegionError::Misaligned);
     }
     let effects = if clean_loads {
-        analysis::prefix_clean_access_effects(instructions, checks.stack_alignment)
+        analysis::prefix_clean_access_effects(instructions, checks.stack_alignment, !fault_table)
     } else {
         prefix_effects(instructions)
     };

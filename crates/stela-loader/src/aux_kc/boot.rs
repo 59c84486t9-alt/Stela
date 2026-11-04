@@ -1,6 +1,6 @@
 //! The boot kernel collection an auxiliary collection links against: its
 //! identity, its base and the symbols each of its fileset entries defines.
-use alloc::{borrow::ToOwned, collections::BTreeMap, string::String};
+use alloc::collections::BTreeMap;
 
 use super::fit;
 use crate::{Result, Within};
@@ -93,7 +93,7 @@ impl<'a> BootCollection<'a> {
 
     /// The external symbols `entry` defines, by name, at their unslid
     /// addresses.
-    pub fn exports(&self, entry: &str) -> Result<BTreeMap<String, u64>> {
+    pub fn exports(&self, entry: &str) -> Result<BTreeMap<&'a str, u64>> {
         let offset = self
             .collection
             .fileset_entry(entry)
@@ -120,7 +120,7 @@ impl<'a> BootCollection<'a> {
                         core::str::from_utf8(nlist.name(LE, table.strings())?).map_err(|_| {
                             refuse!("{entry} exports a symbol whose name is not UTF-8", entry)
                         })?;
-                    exports.insert(name.to_owned(), nlist.n_value(LE));
+                    exports.insert(name, nlist.n_value(LE));
                 }
             }
         }

@@ -147,7 +147,11 @@ fn transfer(code: &mut Code, operand: &Operand) {
             let address = Mem::base(Gpr::Rax, 0);
             // The result may replace the address in RAX. This leaves it
             // available to the next instruction, with no base writeback.
-            let scratch = if code.is_pinned() { Gpr::Rax } else { Gpr::Rcx };
+            let scratch = if code.is_pinned() || !code.constant_time() {
+                Gpr::Rax
+            } else {
+                Gpr::Rcx
+            };
             let host = code.host(operand.data).unwrap_or(scratch);
             let mut asm = code.asm();
             asm.guest_access(|asm| match (operand.bytes, signed) {
