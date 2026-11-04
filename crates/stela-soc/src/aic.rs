@@ -289,7 +289,11 @@ impl Aic2 {
             ));
         }
         let span = layout.validate(&config).map_err(Aic2Error::InvalidConfig)?;
-        let words = usize::from(config.max_irq / 32) * layout.dies.len();
+        // The register decoder exposes only implemented entries. Keep the
+        // inter-die stride, but omit unaddressable trailing state.
+        let preceding = usize::from(config.max_irq) * (layout.dies.len() - 1);
+        let interrupts = preceding + usize::from(config.nr_irq);
+        let words = interrupts.div_ceil(32);
         Ok(Self {
             lifecycle: LifecycleState {
                 powered: true,
@@ -300,7 +304,7 @@ impl Aic2 {
             },
             timestamps: vec![Timestamp::default(); config.timestamps],
             enabled: false,
-            irq_cfg: vec![0; usize::from(config.max_irq) * layout.dies.len()],
+            irq_cfg: vec![0; interrupts],
             software: vec![0; words],
             hardware: vec![0; words],
             mask: vec![u32::MAX; words],

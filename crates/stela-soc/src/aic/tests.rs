@@ -419,6 +419,37 @@ fn two_dies() -> (Aic2Config, Aic2Layout) {
 }
 
 #[test]
+fn the_last_die_omits_unaddressable_trailing_state() {
+    let (mut config, layout) = two_dies();
+    config.nr_irq = 32;
+    let die = layout.dies[1];
+    let mut aic = Aic2::new_with_layout(config, layout).unwrap();
+    let mut latch = InterruptLatch::new();
+    write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
+    assert_eq!(aic.irq_cfg.len(), 96);
+    assert_eq!(aic.software.len(), 3);
+    for bank in [
+        die.software_set,
+        die.software_clear,
+        die.mask_set,
+        die.mask_clear,
+        die.hardware_state,
+    ] {
+        let mut access = Access::new(0, 0, &mut latch);
+        assert!(aic.write(bank + 4, Width::Word, 0, &mut access).is_err());
+        assert!(aic.read(bank + 4, Width::Word, &mut access).is_err());
+    }
+    assert_eq!(read(&mut aic, &mut latch, 0, EVENT), 0);
+
+    write(&mut aic, &mut latch, die.mask_clear, 1 << 31);
+    write(&mut aic, &mut latch, die.software_set, 1 << 31);
+    assert_eq!(
+        read(&mut aic, &mut latch, 0, EVENT),
+        1 << 24 | EVENT_TYPE_IRQ | 31
+    );
+}
+
+#[test]
 fn two_eligible_cpus_claim_valid_words_in_die_priority_order() {
     let (mut config, layout) = two_dies();
     config.cpus = 64;
