@@ -1,0 +1,506 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 02:34:30 -0500
+Subject: [PATCH] refactor(vfs): select original root mount initialization
+
+---
+ fs/Makefile      |   2 +-
+ fs/mount_init.c  | 137 +++++++++++++++++++++++++++++++++++++++++++++++
+ fs/namespace.c   |  97 ---------------------------------
+ init/Makefile    |   2 +-
+ init/do_mounts.c |  29 +---------
+ init/rootfs.c    |  36 +++++++++++++
+ mm/Makefile      |   2 +-
+ mm/shmem.c       |  18 +------
+ mm/shmem_mount.c |  47 ++++++++++++++++
+ 9 files changed, 226 insertions(+), 144 deletions(-)
+ create mode 100644 fs/mount_init.c
+ create mode 100644 init/rootfs.c
+ create mode 100644 mm/shmem_mount.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 0d2b2aef99f9eadc52d86a99081910c8d1553826..bc1c78cb5b7643f9b0ddc514f779c6aec176ba1f 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -10,7 +10,7 @@
+ obj-y :=	open.o path_open.o filp_close.o read_write.o file_position.o file_table.o file_table_init.o super.o super_anon_dev.o super_lifetime.o \
+ 		char_dev.o stat.o exec.o task_comm.o pipe.o pipe_buffers.o pipe_create.o namei.o path_get.o name_hash.o filename.o fcntl.o file_async.o \
+ 		ioctl.o readdir.o select.o dcache.o dcache_init.o dentry_ancestry.o inode.o inode_cache_init.o inode_timestamps.o inode_evict.o \
+-		attr.o bad_inode.o bad_inode_ops.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o namespace_tree.o mount_cache.o \
++		attr.o bad_inode.o bad_inode_ops.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o namespace_tree.o mount_cache.o mount_init.o \
+ 		seq_file.o seq_lifetime.o seq_output.o seq_path.o xattr.o xattr_access.o simple_xattr.o libfs.o pseudo_metadata.o stashed_path.o fs-writeback.o \
+ 		pnode.o splice.o splice_file.o sync.o utimes.o d_path.o \
+ 		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
+diff --git a/fs/mount_init.c b/fs/mount_init.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..c3fb4af2479eb692f7fa1ebbcb97ed7956fa52f2
+--- /dev/null
++++ b/fs/mount_init.c
+@@ -0,0 +1,137 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *  linux/fs/namespace.c
++ *
++ * (C) Copyright Al Viro 2000, 2001
++ *
++ * Based on code from fs/super.c, copyright Linus Torvalds and others.
++ * Heavily rewritten.
++ */
++
++#include <linux/syscalls.h>
++#include <linux/export.h>
++#include <linux/capability.h>
++#include <linux/mnt_namespace.h>
++#include <linux/user_namespace.h>
++#include <linux/namei.h>
++#include <linux/security.h>
++#include <linux/cred.h>
++#include <linux/idr.h>
++#include <linux/init.h>		/* init_rootfs */
++#include <linux/fs_struct.h>	/* get_fs_root et.al. */
++#include <linux/fsnotify.h>	/* fsnotify_vfsmount_delete */
++#include <linux/file.h>
++#include <linux/uaccess.h>
++#include <linux/proc_ns.h>
++#include <linux/magic.h>
++#include <linux/memblock.h>
++#include <linux/proc_fs.h>
++#include <linux/task_work.h>
++#include <linux/sched/task.h>
++#include <uapi/linux/mount.h>
++#include <linux/fs_context.h>
++#include <linux/shmem_fs.h>
++#include <linux/mnt_idmapping.h>
++#include <linux/pidfs.h>
++#include <linux/nstree.h>
++
++#include "pnode.h"
++#include "mount_cache.h"
++#include "namespace_tree.h"
++#include "internal.h"
++
++static char * __initdata initramfs_options;
++static int __init initramfs_options_setup(char *str)
++{
++	initramfs_options = str;
++	return 1;
++}
++
++__setup("initramfs_options=", initramfs_options_setup);
++/* /sys/fs */
++struct kobject *fs_kobj __ro_after_init;
++EXPORT_SYMBOL_GPL(fs_kobj);
++
++static void __init init_mount_tree(void)
++{
++	struct vfsmount *mnt, *nullfs_mnt;
++	struct mount *mnt_root;
++	struct path root;
++
++	/*
++	 * We create two mounts:
++	 *
++	 * (1) nullfs with mount id 1
++	 * (2) mutable rootfs with mount id 2
++	 *
++	 * with (2) mounted on top of (1).
++	 */
++	nullfs_mnt = vfs_kern_mount(&nullfs_fs_type, 0, "nullfs", NULL);
++	if (IS_ERR(nullfs_mnt))
++		panic("VFS: Failed to create nullfs");
++
++	mnt = vfs_kern_mount(&rootfs_fs_type, 0, "rootfs", initramfs_options);
++	if (IS_ERR(mnt))
++		panic("Can't create rootfs");
++
++	VFS_WARN_ON_ONCE(real_mount(nullfs_mnt)->mnt_id != 1);
++	VFS_WARN_ON_ONCE(real_mount(mnt)->mnt_id != 2);
++
++	/* The namespace root is the nullfs mnt. */
++	mnt_root		= real_mount(nullfs_mnt);
++	init_mnt_ns.root	= mnt_root;
++
++	/* Mount mutable rootfs on top of nullfs. */
++	root.mnt		= nullfs_mnt;
++	root.dentry		= nullfs_mnt->mnt_root;
++
++	LOCK_MOUNT_EXACT(mp, &root);
++	if (unlikely(IS_ERR(mp.parent)))
++		panic("VFS: Failed to mount rootfs on nullfs");
++	scoped_guard(mount_writer)
++		attach_mnt(real_mount(mnt), mp.parent, mp.mp);
++
++	pr_info("VFS: Finished mounting rootfs on nullfs\n");
++
++	/*
++	 * We've dropped all locks here but that's fine. Not just are we
++	 * the only task that's running, there's no other mount
++	 * namespace in existence and the initial mount namespace is
++	 * completely empty until we add the mounts we just created.
++	 */
++	for (struct mount *p = mnt_root; p; p = next_mnt(p, mnt_root)) {
++		mnt_add_to_ns(&init_mnt_ns, p);
++		init_mnt_ns.nr_mounts++;
++	}
++
++	init_task.nsproxy->mnt_ns = &init_mnt_ns;
++	get_mnt_ns(&init_mnt_ns);
++
++	/* The root and pwd always point to the mutable rootfs. */
++	root.mnt	= mnt;
++	root.dentry	= mnt->mnt_root;
++	set_fs_pwd(current->fs, &root);
++	set_fs_root(current->fs, &root);
++
++	ns_tree_add(&init_mnt_ns);
++}
++
++void __init mnt_init(void)
++{
++	int err;
++
++	mnt_cache_init();
++
++	kernfs_init();
++
++	err = sysfs_init();
++	if (err)
++		printk(KERN_WARNING "%s: sysfs_init error: %d\n",
++			__func__, err);
++	fs_kobj = kobject_create_and_add("fs", NULL);
++	if (!fs_kobj)
++		printk(KERN_WARNING "%s: kobj create error\n", __func__);
++	shmem_init();
++	init_rootfs();
++	init_mount_tree();
++}
+diff --git a/fs/namespace.c b/fs/namespace.c
+index c8562d31197f90b1cffc2becdbe5243881a67fa4..47cb451066946bf60180f84c7f2b7e1ea3c54b6a 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -40,15 +40,6 @@
+ #include "namespace_tree.h"
+ #include "internal.h"
+ 
+-static char * __initdata initramfs_options;
+-static int __init initramfs_options_setup(char *str)
+-{
+-	initramfs_options = str;
+-	return 1;
+-}
+-
+-__setup("initramfs_options=", initramfs_options_setup);
+-
+ enum mount_kattr_flags_t {
+ 	MOUNT_KATTR_RECURSE		= (1 << 0),
+ 	MOUNT_KATTR_IDMAP_REPLACE	= (1 << 1),
+@@ -64,10 +55,6 @@ struct mount_kattr {
+ 	struct mnt_idmap *mnt_idmap;
+ };
+ 
+-/* /sys/fs */
+-struct kobject *fs_kobj __ro_after_init;
+-EXPORT_SYMBOL_GPL(fs_kobj);
+-
+ /*
+  * vfsmount lock may be taken for read to prevent changes to the
+  * vfsmount hash, ie. during mountpoint lookups or walking back
+@@ -4056,90 +4043,6 @@ SYSCALL_DEFINE4(listmount, const struct mnt_id_req __user *, req,
+ }
+ 
+ 
+-static void __init init_mount_tree(void)
+-{
+-	struct vfsmount *mnt, *nullfs_mnt;
+-	struct mount *mnt_root;
+-	struct path root;
+-
+-	/*
+-	 * We create two mounts:
+-	 *
+-	 * (1) nullfs with mount id 1
+-	 * (2) mutable rootfs with mount id 2
+-	 *
+-	 * with (2) mounted on top of (1).
+-	 */
+-	nullfs_mnt = vfs_kern_mount(&nullfs_fs_type, 0, "nullfs", NULL);
+-	if (IS_ERR(nullfs_mnt))
+-		panic("VFS: Failed to create nullfs");
+-
+-	mnt = vfs_kern_mount(&rootfs_fs_type, 0, "rootfs", initramfs_options);
+-	if (IS_ERR(mnt))
+-		panic("Can't create rootfs");
+-
+-	VFS_WARN_ON_ONCE(real_mount(nullfs_mnt)->mnt_id != 1);
+-	VFS_WARN_ON_ONCE(real_mount(mnt)->mnt_id != 2);
+-
+-	/* The namespace root is the nullfs mnt. */
+-	mnt_root		= real_mount(nullfs_mnt);
+-	init_mnt_ns.root	= mnt_root;
+-
+-	/* Mount mutable rootfs on top of nullfs. */
+-	root.mnt		= nullfs_mnt;
+-	root.dentry		= nullfs_mnt->mnt_root;
+-
+-	LOCK_MOUNT_EXACT(mp, &root);
+-	if (unlikely(IS_ERR(mp.parent)))
+-		panic("VFS: Failed to mount rootfs on nullfs");
+-	scoped_guard(mount_writer)
+-		attach_mnt(real_mount(mnt), mp.parent, mp.mp);
+-
+-	pr_info("VFS: Finished mounting rootfs on nullfs\n");
+-
+-	/*
+-	 * We've dropped all locks here but that's fine. Not just are we
+-	 * the only task that's running, there's no other mount
+-	 * namespace in existence and the initial mount namespace is
+-	 * completely empty until we add the mounts we just created.
+-	 */
+-	for (struct mount *p = mnt_root; p; p = next_mnt(p, mnt_root)) {
+-		mnt_add_to_ns(&init_mnt_ns, p);
+-		init_mnt_ns.nr_mounts++;
+-	}
+-
+-	init_task.nsproxy->mnt_ns = &init_mnt_ns;
+-	get_mnt_ns(&init_mnt_ns);
+-
+-	/* The root and pwd always point to the mutable rootfs. */
+-	root.mnt	= mnt;
+-	root.dentry	= mnt->mnt_root;
+-	set_fs_pwd(current->fs, &root);
+-	set_fs_root(current->fs, &root);
+-
+-	ns_tree_add(&init_mnt_ns);
+-}
+-
+-void __init mnt_init(void)
+-{
+-	int err;
+-
+-	mnt_cache_init();
+-
+-	kernfs_init();
+-
+-	err = sysfs_init();
+-	if (err)
+-		printk(KERN_WARNING "%s: sysfs_init error: %d\n",
+-			__func__, err);
+-	fs_kobj = kobject_create_and_add("fs", NULL);
+-	if (!fs_kobj)
+-		printk(KERN_WARNING "%s: kobj create error\n", __func__);
+-	shmem_init();
+-	init_rootfs();
+-	init_mount_tree();
+-}
+-
+ void kern_unmount_array(struct vfsmount *mnt[], unsigned int num)
+ {
+ 	unsigned int i;
+diff --git a/init/Makefile b/init/Makefile
+index d6f75d8907e09877c6e413986c75f0ac92a89f89..f7ab125fe30580b8ff43453ce86ed815ff89c6bc 100644
+--- a/init/Makefile
++++ b/init/Makefile
+@@ -16,7 +16,7 @@ obj-$(CONFIG_INITRAMFS_TEST)   += initramfs_test.o
+ 
+ obj-y                          += init_task.o
+ 
+-mounts-y			:= do_mounts.o
++mounts-y			:= do_mounts.o rootfs.o
+ mounts-$(CONFIG_BLK_DEV_RAM)	+= do_mounts_rd.o
+ mounts-$(CONFIG_BLK_DEV_INITRD)	+= do_mounts_initrd.o
+ 
+diff --git a/init/do_mounts.c b/init/do_mounts.c
+index 95e0b3a0f711bd72c76b8a6fc752414bdb049a7e..906a019f121a39f7a8fb984c47d6ca3910859149 100644
+--- a/init/do_mounts.c
++++ b/init/do_mounts.c
+@@ -29,7 +29,7 @@
+ #include "do_mounts.h"
+ 
+ int root_mountflags = MS_RDONLY | MS_SILENT;
+-static char __initdata saved_root_name[64];
++char __initdata saved_root_name[64];
+ static int root_wait;
+ 
+ dev_t ROOT_DEV;
+@@ -103,7 +103,7 @@ static int __init root_data_setup(char *str)
+ 	return 1;
+ }
+ 
+-static char * __initdata root_fs_names;
++char * __initdata root_fs_names;
+ static int __init fs_names_setup(char *str)
+ {
+ 	root_fs_names = str;
+@@ -493,28 +493,3 @@ void __init prepare_namespace(void)
+ 	}
+ 	pr_info("VFS: Pivoted into new rootfs\n");
+ }
+-
+-static bool is_tmpfs;
+-static int rootfs_init_fs_context(struct fs_context *fc)
+-{
+-	if (IS_ENABLED(CONFIG_TMPFS) && is_tmpfs)
+-		return shmem_init_fs_context(fc);
+-
+-	return ramfs_init_fs_context(fc);
+-}
+-
+-struct file_system_type rootfs_fs_type = {
+-	.name		= "rootfs",
+-	.init_fs_context = rootfs_init_fs_context,
+-	.kill_sb	= kill_anon_super,
+-};
+-
+-void __init init_rootfs(void)
+-{
+-	if (IS_ENABLED(CONFIG_TMPFS)) {
+-		if (!saved_root_name[0] && !root_fs_names)
+-			is_tmpfs = true;
+-		else if (root_fs_names && !!strstr(root_fs_names, "tmpfs"))
+-			is_tmpfs = true;
+-	}
+-}
+diff --git a/init/rootfs.c b/init/rootfs.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..2770afdb4f492ae4bcc1641e54238ffb654f38ee
+--- /dev/null
++++ b/init/rootfs.c
+@@ -0,0 +1,36 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include <linux/init.h>
++#include <linux/fs_context.h>
++#include <linux/ramfs.h>
++#include <linux/shmem_fs.h>
++#include <linux/string.h>
++
++#ifdef CONFIG_TMPFS
++extern char saved_root_name[64];
++extern char *root_fs_names;
++#endif
++
++static bool is_tmpfs;
++static int rootfs_init_fs_context(struct fs_context *fc)
++{
++	if (IS_ENABLED(CONFIG_TMPFS) && is_tmpfs)
++		return shmem_init_fs_context(fc);
++
++	return ramfs_init_fs_context(fc);
++}
++
++struct file_system_type rootfs_fs_type = {
++	.name		= "rootfs",
++	.init_fs_context = rootfs_init_fs_context,
++	.kill_sb	= kill_anon_super,
++};
++
++void __init init_rootfs(void)
++{
++#ifdef CONFIG_TMPFS
++	if (!saved_root_name[0] && !root_fs_names)
++		is_tmpfs = true;
++	else if (root_fs_names && !!strstr(root_fs_names, "tmpfs"))
++		is_tmpfs = true;
++#endif
++}
+diff --git a/mm/Makefile b/mm/Makefile
+index 727b6bc498e646c4033f180f517aa48d3e3a8a07..1e86431794de5f30f65918670a885b7849ebe259 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -51,7 +51,7 @@ endif
+ obj-y			:= filemap.o filemap_mmap.o filemap_mkwrite.o pagecache_init.o folio_wait.o folio_fs.o mempool.o oom_kill.o oom_victim.o oom_adj.o fadvise.o \
+ 			   maccess.o page-writeback.o writeback_io.o writeback_folio.o writeback_domain.o folio-compat.o \
+ 			   readahead.o swap.o filemap_batch.o truncate.o vmscan.o reclaim_throttle.o shrinker.o \
+-			   shmem.o util.o mmzone.o lruvec.o vmstat.o vmstat_init.o backing-dev.o backing-dev-inode.o \
++			   shmem.o shmem_mount.o util.o mmzone.o lruvec.o vmstat.o vmstat_init.o backing-dev.o backing-dev-inode.o \
+ 			   mm_init.o percpu.o slab_common.o kvfree_rcu.o \
+ 			   compaction.o show_mem.o \
+ 			   interval_tree.o list_lru.o workingset.o \
+diff --git a/mm/shmem.c b/mm/shmem.c
+index cfb546785295146c3f4d91c9506db7c9f8ad0c24..387575d28631175bd09ea9739db5750ae12a67bf 100644
+--- a/mm/shmem.c
++++ b/mm/shmem.c
+@@ -43,7 +43,7 @@
+ #include <linux/unicode.h>
+ #include "swap.h"
+ 
+-static struct vfsmount *shm_mnt __ro_after_init;
++extern struct vfsmount *shm_mnt;
+ 
+ #ifdef CONFIG_SHMEM
+ /*
+@@ -5712,22 +5712,6 @@ __setup("thp_shmem=", setup_thp_shmem);
+  * effectively equivalent, but much lighter weight.
+  */
+ 
+-static struct file_system_type shmem_fs_type = {
+-	.name		= "tmpfs",
+-	.init_fs_context = ramfs_init_fs_context,
+-	.parameters	= ramfs_fs_parameters,
+-	.kill_sb	= ramfs_kill_sb,
+-	.fs_flags	= FS_USERNS_MOUNT,
+-};
+-
+-void __init shmem_init(void)
+-{
+-	BUG_ON(register_filesystem(&shmem_fs_type) != 0);
+-
+-	shm_mnt = kern_mount(&shmem_fs_type);
+-	BUG_ON(IS_ERR(shm_mnt));
+-}
+-
+ int shmem_unuse(unsigned int type)
+ {
+ 	return 0;
+diff --git a/mm/shmem_mount.c b/mm/shmem_mount.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..a94ee5caa1581195bee9a3f551f2c9f8367eecaa
+--- /dev/null
++++ b/mm/shmem_mount.c
+@@ -0,0 +1,47 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Resizable virtual memory filesystem for Linux.
++ *
++ * Copyright (C) 2000 Linus Torvalds.
++ *		 2000 Transmeta Corp.
++ *		 2000-2001 Christoph Rohland
++ *		 2000-2001 SAP AG
++ *		 2002 Red Hat Inc.
++ * Copyright (C) 2002-2011 Hugh Dickins.
++ * Copyright (C) 2011 Google Inc.
++ * Copyright (C) 2002-2005 VERITAS Software Corporation.
++ * Copyright (C) 2004 Andi Kleen, SuSE Labs
++ *
++ * Extended attribute support for tmpfs:
++ * Copyright (c) 2004, Luke Kenneth Casson Leighton <lkcl@lkcl.net>
++ * Copyright (c) 2004 Red Hat, Inc., James Morris <jmorris@redhat.com>
++ *
++ * tiny-shmem:
++ * Copyright (c) 2004, 2008 Matt Mackall <mpm@selenic.com>
++ */
++
++#include <linux/fs.h>
++#include <linux/init.h>
++#include <linux/mount.h>
++#include <linux/ramfs.h>
++#include <linux/shmem_fs.h>
++
++struct vfsmount *shm_mnt __ro_after_init;
++
++#ifndef CONFIG_SHMEM
++static struct file_system_type shmem_fs_type = {
++	.name		= "tmpfs",
++	.init_fs_context = ramfs_init_fs_context,
++	.parameters	= ramfs_fs_parameters,
++	.kill_sb	= ramfs_kill_sb,
++	.fs_flags	= FS_USERNS_MOUNT,
++};
++
++void __init shmem_init(void)
++{
++	BUG_ON(register_filesystem(&shmem_fs_type) != 0);
++
++	shm_mnt = kern_mount(&shmem_fs_type);
++	BUG_ON(IS_ERR(shm_mnt));
++}
++#endif

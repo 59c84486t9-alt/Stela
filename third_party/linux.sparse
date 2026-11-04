@@ -155,6 +155,8 @@
 /mm/vmstat_init.c
 /mm/filemap.c
 /mm/filemap_mmap.c
+/mm/shmem.c
+/mm/shmem_mount.c
 /mm/filemap_mkwrite.c
 /mm/gup.c
 /mm/user_prefault.c
@@ -194,6 +196,9 @@
 /kernel/ptrace_access.c
 /kernel/ptrace_access.h
 /init/init_task.c
+/init/Makefile
+/init/do_mounts.c
+/init/rootfs.c
 /init/version-timestamp.c
 /lib/refcount.c
 /lib/refcount_lock.c
@@ -226,6 +231,10 @@
 /fs/pnode.c
 /fs/mount.h
 /fs/mount_cache.c
+/fs/mount_init.c
+/fs/ramfs/inode.c
+/fs/ramfs/file-mmu.c
+/fs/ramfs/internal.h
 /fs/mount_cache.h
 /kernel/ucount.c
 /kernel/capability.c
