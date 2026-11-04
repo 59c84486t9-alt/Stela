@@ -13,6 +13,11 @@
 //! of another connection, of a destroyed object or of another kind of object
 //! is refused, and closing a connection releases what it still holds, newest
 //! first, so views and aliases go before the resources under them.
+//!
+//! A lost device refuses every call but releases. Once its last connection
+//! closes, a service given a [`Reopen`] serves a new device in the next
+//! epoch, as a Mac's GPU comes back for the clients that start after its
+//! reset; until then new connections are refused.
 use super::{
     command_buffer::blit::Region,
     device::{
@@ -24,7 +29,7 @@ use super::{
     shader::Compiler,
     vulkan::backend::Backend,
 };
-use alloc::{collections::BTreeMap, string::String, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec::Vec};
 use core::{
     num::{NonZeroU32, NonZeroU64},
     ops::Range,
@@ -49,6 +54,9 @@ mod sharing;
 #[cfg(test)]
 mod tests;
 pub mod wire;
+
+/// Opens a new device for the GPU after a loss.
+pub type Reopen<B, C> = Box<dyn FnMut() -> Result<Device<B, C>, Error> + Send>;
 
 /// A decoded value, or the value's name when it is not one.
 fn known<T>(value: Option<T>, name: &'static str) -> Result<T, Fault> {
@@ -235,6 +243,7 @@ pub struct Service<B: Backend, C: Compiler> {
     signaled: u64,
     /// Why the last call was refused, for the platform's log.
     refused: Option<String>,
+    reopen: Option<Reopen<B, C>>,
 }
 
 impl<B: Backend, C: Compiler> Service<B, C> {
@@ -249,7 +258,14 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             shares: sharing::Shares::default(),
             signaled: 0,
             refused: None,
+            reopen: None,
         }
+    }
+
+    /// Serves a new device from `reopen` once a lost one's connections close.
+    pub fn with_reopen(mut self, reopen: Reopen<B, C>) -> Self {
+        self.reopen = Some(reopen);
+        self
     }
 
     pub fn device(&mut self) -> &mut Device<B, C> {
@@ -291,7 +307,31 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 released = released.and(Err(Fault::from(error)));
             }
         }
+        self.recover();
         released
+    }
+
+    /// Serves a new device in the next epoch once the lost one has no
+    /// connection left. The lost device keeps what its backend could not
+    /// prove stopped.
+    fn recover(&mut self) {
+        if !self.device.is_lost() || !self.connections.is_empty() {
+            return;
+        }
+        let (Some(reopen), Ok(epoch)) = (self.reopen.as_mut(), self.epoch.next()) else {
+            return;
+        };
+        match reopen() {
+            Ok(device) => {
+                self.device = device;
+                self.epoch = epoch;
+                self.shares = sharing::Shares::default();
+                self.signaled = 0;
+            }
+            Err(error) => {
+                self.refused = Some(format!("the lost device did not reopen: {error:?}"));
+            }
+        }
     }
 
     /// Gives `connection` the wired guest RAM of `ranges`; the handle goes to

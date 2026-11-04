@@ -52,16 +52,22 @@ pub fn serve<B: Backend, C: Compiler>(
     gpu: &Gpu,
     epoch: DeviceEpoch,
 ) -> Result<Service<B, C>, OpenError> {
+    Ok(Service::new(device(backend, compiler, gpu)?, epoch))
+}
+
+/// The Metal device over `backend`, once it is admitted as `gpu`.
+fn device<B: Backend, C: Compiler>(
+    backend: B,
+    compiler: C,
+    gpu: &Gpu,
+) -> Result<Device<B, C>, OpenError> {
     let identity = &backend.physical_device().identity;
     if identity.pci_bus != Some(gpu.pci) {
         return Err(Error::Invalid("the backend drives another GPU").into());
     }
     let chip = Chip::admit(identity, gpu.chipset).map_err(OpenError::Refused)?;
     let platform = chip.platform(gpu.attachment);
-    Ok(Service::new(
-        Device::new(backend, compiler, &platform)?,
-        epoch,
-    ))
+    Ok(Device::new(backend, compiler, &platform)?)
 }
 
 /// The Metal service over NVK and the AIR compiler.
@@ -129,6 +135,27 @@ pub unsafe fn open(
     // SAFETY: the caller's guarantees.
     let (backend, compiler) = unsafe { stack(loader, gpu.pci, exporter, compiler) }?;
     serve(backend, compiler, gpu, epoch)
+}
+
+/// Opens NVK's device for `gpu` as [`open`] does, for a service whose device
+/// was lost ([`Service::with_reopen`]).
+///
+/// # Safety
+///
+/// As for [`open`].
+#[cfg(feature = "metal-vulkan")]
+pub unsafe fn reopen(
+    loader: Loader,
+    exporter: Box<dyn MemoryExporter>,
+    compiler: impl FnOnce(vk::PhysicalDevice) -> compiler::Service,
+    gpu: &Gpu,
+) -> Result<Device<NativeBackend, AirCompiler>, Error> {
+    // SAFETY: the caller's guarantees.
+    let (backend, compiler) = unsafe { stack(loader, gpu.pci, exporter, compiler) }?;
+    device(backend, compiler, gpu).map_err(|error| match error {
+        OpenError::Device(error) => error,
+        OpenError::Refused(_) => Error::Invalid("the GPU was refused as it reopened"),
+    })
 }
 
 #[cfg(test)]

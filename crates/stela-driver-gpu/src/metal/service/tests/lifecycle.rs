@@ -1,14 +1,22 @@
 use super::{Memory, call, connect, cpu_buffer, service, status};
 use crate::metal::{
     abi::StorageMode,
-    device::{EventId, lifecycle::QuiesceStatus},
+    device::{
+        EventId,
+        fixture::{MockBackend, device_on},
+        lifecycle::QuiesceStatus,
+    },
     error::Error,
     service::{
         ServiceHost, SharedService,
         wire::{Empty, EventValueRequest, Handle, Operation, Status, Value},
     },
 };
-use core::num::NonZeroU64;
+use alloc::boxed::Box;
+use core::{
+    num::NonZeroU64,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use stela_contracts::gate::{GateService, MemoryRange};
 
 #[test]
@@ -156,4 +164,41 @@ fn failed_idle_does_not_close_the_connection_or_release_its_imports() {
     assert_eq!(service.retired(), None);
     assert_eq!(service.device().backend().imports.len(), 1);
     assert_eq!(service.device().current_allocated_size(), 8192);
+}
+
+#[test]
+fn a_lost_device_reopens_once_its_last_connection_closes() {
+    static REOPENED: AtomicUsize = AtomicUsize::new(0);
+    let mut service = service().with_reopen(Box::new(|| {
+        REOPENED.fetch_add(1, Ordering::Relaxed);
+        Ok(device_on(MockBackend::new()))
+    }));
+    let first = connect(&mut service);
+    let second = connect(&mut service);
+    cpu_buffer(&mut service, first, 4096, StorageMode::Shared);
+    service.device().mark_lost();
+    assert_eq!(
+        service.connect().unwrap_err().status,
+        Status::DeviceLost,
+        "new clients wait for the lost device's last connection"
+    );
+    service.disconnect(first).unwrap();
+    assert_eq!(REOPENED.load(Ordering::Relaxed), 0);
+    service.disconnect(second).unwrap();
+    assert_eq!(REOPENED.load(Ordering::Relaxed), 1);
+    assert!(!service.device().is_lost());
+    let next = connect(&mut service);
+    cpu_buffer(&mut service, next, 4096, StorageMode::Shared);
+    assert_eq!(service.device().current_allocated_size(), 4096);
+}
+
+#[test]
+fn a_device_that_does_not_reopen_stays_lost() {
+    let mut service = service().with_reopen(Box::new(|| Err(Error::OutOfMemory)));
+    let connection = connect(&mut service);
+    service.device().mark_lost();
+    service.disconnect(connection).unwrap();
+    assert!(service.device().is_lost());
+    assert_eq!(service.connect().unwrap_err().status, Status::DeviceLost);
+    assert!(service.refused.take().unwrap().contains("did not reopen"));
 }

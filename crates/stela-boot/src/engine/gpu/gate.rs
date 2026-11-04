@@ -32,6 +32,7 @@ use stela_drivers::gpu::{
         native::{ExportedMemory, Loader, MemoryExporter, NativeBackend, vk},
         nvidia::{
             Attachment,
+            open::{Gpu, OpenError, open, reopen},
         },
         service::{ServiceHost, SharedService, identity::DeviceEpoch},
         vulkan::physical::PciBusInfo,
@@ -166,6 +167,13 @@ fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
             DeviceEpoch::from_registered(NonZeroU64::MIN),
         )
     }?;
+    let gpu = *gpu;
+    // A lost device's channels are gone, so the next client gets a new one,
+    // opened on the service's stack as the first was.
+    // SAFETY: as above.
+    let service = service.with_reopen(Box::new(move || unsafe {
+        reopen(loader, Box::new(Exporter), compiler, &gpu)
+    }));
     Ok(Arc::new(SharedService::new(
         service,
         ServiceHost {
