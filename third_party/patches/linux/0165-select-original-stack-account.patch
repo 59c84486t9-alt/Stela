@@ -1,0 +1,118 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 02:08:06 -0500
+Subject: [PATCH] refactor(fork): select original kernel stack accounting
+
+---
+ kernel/fork.c       | 32 --------------------------------
+ kernel/fork_stack.c | 34 ++++++++++++++++++++++++++++++++++
+ kernel/fork_stack.h |  2 ++
+ 3 files changed, 36 insertions(+), 32 deletions(-)
+
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 91bb00bcd5863affc8b25410ce9518d38e4aa581..3c8b4f96506d62ac2ade76d46815c03cb36bdd77 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -391,38 +391,6 @@ void thread_stack_cache_init(void)
+ #endif /* THREAD_SIZE >= PAGE_SIZE */
+ #endif /* CONFIG_VMAP_STACK */
+ 
+-static void account_kernel_stack(struct task_struct *tsk, int account)
+-{
+-	if (IS_ENABLED(CONFIG_VMAP_STACK)) {
+-		struct vm_struct *vm_area = task_stack_vm_area(tsk);
+-		int i;
+-
+-		for (i = 0; i < THREAD_SIZE / PAGE_SIZE; i++)
+-			mod_lruvec_page_state(vm_area->pages[i], NR_KERNEL_STACK_KB,
+-					      account * (PAGE_SIZE / 1024));
+-	} else {
+-		void *stack = task_stack_page(tsk);
+-
+-		/* All stack pages are in the same node. */
+-		mod_lruvec_kmem_state(stack, NR_KERNEL_STACK_KB,
+-				      account * (THREAD_SIZE / 1024));
+-	}
+-}
+-
+-void exit_task_stack_account(struct task_struct *tsk)
+-{
+-	account_kernel_stack(tsk, -1);
+-
+-	if (IS_ENABLED(CONFIG_VMAP_STACK)) {
+-		struct vm_struct *vm_area;
+-		int i;
+-
+-		vm_area = task_stack_vm_area(tsk);
+-		for (i = 0; i < THREAD_SIZE / PAGE_SIZE; i++)
+-			memcg_kmem_uncharge_page(vm_area->pages[i], 0);
+-	}
+-}
+-
+ void dup_mm_exe_file(struct mm_struct *mm, struct mm_struct *oldmm)
+ {
+ 	struct file *exe_file;
+diff --git a/kernel/fork_stack.c b/kernel/fork_stack.c
+index c451c4f4b7ec8d2af20abcf0faf0cac36bdbd427..11bb2a3c0a1448106c3795da16e9e4d842167f6b 100644
+--- a/kernel/fork_stack.c
++++ b/kernel/fork_stack.c
+@@ -6,10 +6,12 @@
+  */
+ 
+ #include <linux/export.h>
++#include <linux/memcontrol.h>
+ #include <linux/mm.h>
+ #include <linux/rcupdate.h>
+ #include <linux/sched/task.h>
+ #include <linux/sched/task_stack.h>
++#include <linux/vmalloc.h>
+ 
+ #include "fork_stack.h"
+ 
+@@ -48,3 +50,35 @@ void put_task_stack(struct task_struct *tsk)
+ 		release_task_stack(tsk);
+ }
+ #endif
++
++void account_kernel_stack(struct task_struct *tsk, int account)
++{
++	if (IS_ENABLED(CONFIG_VMAP_STACK)) {
++		struct vm_struct *vm_area = task_stack_vm_area(tsk);
++		int i;
++
++		for (i = 0; i < THREAD_SIZE / PAGE_SIZE; i++)
++			mod_lruvec_page_state(vm_area->pages[i], NR_KERNEL_STACK_KB,
++					      account * (PAGE_SIZE / 1024));
++	} else {
++		void *stack = task_stack_page(tsk);
++
++		/* All stack pages are in the same node. */
++		mod_lruvec_kmem_state(stack, NR_KERNEL_STACK_KB,
++				      account * (THREAD_SIZE / 1024));
++	}
++}
++
++void exit_task_stack_account(struct task_struct *tsk)
++{
++	account_kernel_stack(tsk, -1);
++
++	if (IS_ENABLED(CONFIG_VMAP_STACK)) {
++		struct vm_struct *vm_area;
++		int i;
++
++		vm_area = task_stack_vm_area(tsk);
++		for (i = 0; i < THREAD_SIZE / PAGE_SIZE; i++)
++			memcg_kmem_uncharge_page(vm_area->pages[i], 0);
++	}
++}
+diff --git a/kernel/fork_stack.h b/kernel/fork_stack.h
+index dac3790079b7d8b38f371960cad8784bc43244e7..354e604792f4a1876aabd7e432c8481d0a439407 100644
+--- a/kernel/fork_stack.h
++++ b/kernel/fork_stack.h
+@@ -6,4 +6,6 @@ struct task_struct;
+ void free_thread_stack(struct task_struct *tsk);
+ void release_task_stack(struct task_struct *tsk);
+ 
++void account_kernel_stack(struct task_struct *tsk, int account);
++
+ #endif
