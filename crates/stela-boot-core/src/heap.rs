@@ -652,7 +652,7 @@ impl Heap {
         };
         // SAFETY: this guard exclusively protects the heap state. The
         // shared body checks initialization before accessing backing storage.
-        let block = unsafe { allocate_locked(&mut *self.state.get(), layout) };
+        let block = unsafe { allocate_locked(&mut *self.state.get(), layout, class(layout)) };
         drop(guard);
         block
     }
@@ -888,17 +888,14 @@ impl Heap {
     }
 
     /// Add `bytes` to the calling core's own count, which only it writes.
-    fn count_own(&self, layout: Layout, allocated: bool) {
-        if let Some(cpu) = self.cpu() {
-            let class = class(layout);
-            let bytes = class.map_or(layout.size(), |class| SMALLEST << class) as isize;
-            let bytes = if allocated { bytes } else { -bytes };
-            let count = &self.own[cpu];
+    fn count_own(&self, cpu: usize, layout: Layout, class: Option<usize>, allocated: bool) {
+        let bytes = class.map_or(layout.size(), |class| SMALLEST << class) as isize;
+        let bytes = if allocated { bytes } else { -bytes };
+        let count = &self.own[cpu];
+        count.store(count.load(Ordering::Relaxed) + bytes, Ordering::Relaxed);
+        if let Some(class) = class {
+            let count = &self.own_classes[cpu][class];
             count.store(count.load(Ordering::Relaxed) + bytes, Ordering::Relaxed);
-            if let Some(class) = class {
-                let count = &self.own_classes[cpu][class];
-                count.store(count.load(Ordering::Relaxed) + bytes, Ordering::Relaxed);
-            }
         }
     }
 
@@ -1036,12 +1033,12 @@ fn aligned(value: usize, alignment: usize) -> Option<usize> {
 ///
 /// # Safety
 /// The heap's guard exclusively owns `state`. Initialization is checked
-/// before backing access; successful allocations keep their original layout.
-unsafe fn allocate_locked(state: &mut State, layout: Layout) -> *mut u8 {
+/// before backing access; `class` must be the size class of `layout`.
+unsafe fn allocate_locked(state: &mut State, layout: Layout, class: Option<usize>) -> *mut u8 {
     if !state.ready {
         return ptr::null_mut();
     }
-    let Some(class) = class(layout) else {
+    let Some(class) = class else {
         // SAFETY: this helper keeps the initialized state guard and
         // GlobalAlloc's layout supplies the payload size and alignment.
         let block = unsafe { carve_draining(state, layout.size(), layout.align()) };
@@ -1072,54 +1069,47 @@ unsafe fn allocate_locked(state: &mut State, layout: Layout) -> *mut u8 {
 // the single matching deallocation.
 unsafe impl GlobalAlloc for Heap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if let Some(class) = class(layout)
-            && let Some(cpu) = self.cpu()
-        {
+        let class = class(layout);
+        let cpu = self.cpu();
+        let block = if let (Some(class), Some(cpu)) = (class, cpu) {
             let flags = interrupts_off();
             // SAFETY: on this core, with interrupts disabled.
             let block = unsafe { self.take_cached(cpu, class) };
             restore_interrupts(flags);
-            if !block.is_null() {
-                self.count_own(layout, true);
-            }
-            if block.is_null() {
-                failure::report(self, layout);
-            }
-            return block;
-        }
-        let block = {
+            block
+        } else {
             let _guard = self.lock();
             // SAFETY: the guard excludes all free-list writers, while
             // CPU-local cache ownership is already exclusive to this core.
             let state = unsafe { &mut *self.state.get() };
             // SAFETY: the guard owns this state for the entire operation.
-            unsafe { allocate_locked(state, layout) }
+            unsafe { allocate_locked(state, layout, class) }
         };
-        if !block.is_null() {
-            self.count_own(layout, true);
-        }
         if block.is_null() {
             failure::report(self, layout);
+        } else if let Some(cpu) = cpu {
+            self.count_own(cpu, layout, class, true);
         }
         block
     }
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        self.count_own(layout, false);
-        if let Some(class) = class(layout)
-            && let Some(cpu) = self.cpu()
-        {
-            let flags = interrupts_off();
-            // SAFETY: on this core, with interrupts disabled; the caller's
-            // block of this class, which it no longer accesses.
-            unsafe { self.give_cached(cpu, class, pointer) };
-            restore_interrupts(flags);
-            return;
+        let class = class(layout);
+        if let Some(cpu) = self.cpu() {
+            self.count_own(cpu, layout, class, false);
+            if let Some(class) = class {
+                let flags = interrupts_off();
+                // SAFETY: on this core, with interrupts disabled; the caller's
+                // block of this class, which it no longer accesses.
+                unsafe { self.give_cached(cpu, class, pointer) };
+                restore_interrupts(flags);
+                return;
+            }
         }
         let _guard = self.lock();
         // SAFETY: this live acquire/release guard excludes every metadata
         // writer and masks local reentry until this state borrow ends.
         let state = unsafe { &mut *self.state.get() };
-        if let Some(class) = class(layout) {
+        if let Some(class) = class {
             state.live -= SMALLEST << class;
             let block = pointer.cast::<Small>();
             // SAFETY: the caller's block of this class, at least 16 bytes
@@ -1168,8 +1158,10 @@ unsafe impl GlobalAlloc for Heap {
                 resized
             };
             if resized {
-                self.count_own(layout, false);
-                self.count_own(new_layout, true);
+                if let Some(cpu) = self.cpu() {
+                    self.count_own(cpu, layout, None, false);
+                    self.count_own(cpu, new_layout, None, true);
+                }
                 return pointer;
             }
         }
