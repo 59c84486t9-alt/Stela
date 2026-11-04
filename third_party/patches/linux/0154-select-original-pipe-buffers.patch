@@ -13,7 +13,7 @@ Subject: [PATCH] refactor(pipe): separate original buffer lifecycle and waits
  create mode 100644 fs/pipe_buffers.h
 
 diff --git a/fs/Makefile b/fs/Makefile
-index 804f6153..44e20f00 100644
+index 804f6153031a2b6f9e0e8338ff76546a25a75139..44e20f0023c16898a05bade6c6efa31480eb1a63 100644
 --- a/fs/Makefile
 +++ b/fs/Makefile
 @@ -8,7 +8,7 @@
@@ -26,7 +26,7 @@ index 804f6153..44e20f00 100644
  		attr.o bad_inode.o bad_inode_ops.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o namespace_tree.o mount_cache.o \
  		seq_file.o seq_lifetime.o seq_output.o seq_path.o xattr.o xattr_access.o simple_xattr.o libfs.o pseudo_metadata.o stashed_path.o fs-writeback.o \
 diff --git a/fs/pipe.c b/fs/pipe.c
-index 429b0714..c408ab91 100644
+index 429b0714ec57558f9057c58151e0f7da63d3cd49..c408ab91231da261458bdb3215434d34bb19d4ef 100644
 --- a/fs/pipe.c
 +++ b/fs/pipe.c
 @@ -32,33 +32,7 @@
@@ -346,7 +346,7 @@ index 429b0714..c408ab91 100644
   * holding the pipe lock, so "*cnt" is stable and we know a wakeup cannot
 diff --git a/fs/pipe_buffers.c b/fs/pipe_buffers.c
 new file mode 100644
-index 00000000..9f3df15c
+index 0000000000000000000000000000000000000000..9f3df15cb0f9ec86e20b94b665df7f7d5b39f6a0
 --- /dev/null
 +++ b/fs/pipe_buffers.c
 @@ -0,0 +1,265 @@
@@ -617,7 +617,7 @@ index 00000000..9f3df15c
 +}
 diff --git a/fs/pipe_buffers.h b/fs/pipe_buffers.h
 new file mode 100644
-index 00000000..43f556a9
+index 0000000000000000000000000000000000000000..43f556a98b27d2005adecd7790ceb1be09972a80
 --- /dev/null
 +++ b/fs/pipe_buffers.h
 @@ -0,0 +1,30 @@

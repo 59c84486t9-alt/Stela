@@ -10,7 +10,7 @@ Subject: [PATCH] refactor(signal): select original process-group delivery
  3 files changed, 147 insertions(+), 141 deletions(-)
 
 diff --git a/kernel/signal.c b/kernel/signal.c
-index fe06a99c..dc7669c2 100644
+index fe06a99c518677d5ab5977b7030cad09f7517124..dc7669c21d023a379853cdd6c332d16323b08de7 100644
 --- a/kernel/signal.c
 +++ b/kernel/signal.c
 @@ -289,78 +289,6 @@ still_pending:
@@ -176,7 +176,7 @@ index fe06a99c..dc7669c2 100644
  				struct pid *pid, enum pid_type type)
  {
 diff --git a/kernel/signal_state.c b/kernel/signal_state.c
-index 012bd5c0..2606e737 100644
+index 012bd5c0a5d78f78ecf1c8be9cf0fd4c62b81418..2606e73715fb65c713a3422c372f60c21b462604 100644
 --- a/kernel/signal_state.c
 +++ b/kernel/signal_state.c
 @@ -11,7 +11,10 @@
@@ -354,7 +354,7 @@ index 012bd5c0..2606e737 100644
  {
  	/*
 diff --git a/kernel/signal_state.h b/kernel/signal_state.h
-index ce75c995..4ccfb7a2 100644
+index ce75c9952eb1c6a3b7aeebcf22df99767e81b9e2..4ccfb7a22aa7e3e63eba38039c48d065e89531e7 100644
 --- a/kernel/signal_state.h
 +++ b/kernel/signal_state.h
 @@ -32,6 +32,8 @@ bool prepare_signal(int sig, struct task_struct *p, bool force);

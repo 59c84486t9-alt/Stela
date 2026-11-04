@@ -13,7 +13,7 @@ Subject: [PATCH] refactor(vfs): separate original asynchronous file
  create mode 100644 fs/file_async.c
 
 diff --git a/fs/Makefile b/fs/Makefile
-index 9cfccb05..804f6153 100644
+index 9cfccb05e32eccb9c61495483a4a949b0396a98c..804f6153031a2b6f9e0e8338ff76546a25a75139 100644
 --- a/fs/Makefile
 +++ b/fs/Makefile
 @@ -8,7 +8,7 @@
@@ -26,7 +26,7 @@ index 9cfccb05..804f6153 100644
  		attr.o bad_inode.o bad_inode_ops.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o namespace_tree.o mount_cache.o \
  		seq_file.o seq_lifetime.o seq_output.o seq_path.o xattr.o xattr_access.o simple_xattr.o libfs.o pseudo_metadata.o stashed_path.o fs-writeback.o \
 diff --git a/fs/fcntl.c b/fs/fcntl.c
-index d3c3ceb2..fc9ec21a 100644
+index d3c3ceb2e4c6d9a26bd7836e814626ba66e2c327..fc9ec21afd97bd573ccb28726c7a299b81749e84 100644
 --- a/fs/fcntl.c
 +++ b/fs/fcntl.c
 @@ -88,120 +88,6 @@ static int setfl(int fd, struct file * filp, unsigned int arg)
@@ -513,7 +513,7 @@ index d3c3ceb2..fc9ec21a 100644
 -module_init(fcntl_init)
 diff --git a/fs/file_async.c b/fs/file_async.c
 new file mode 100644
-index 00000000..1e582aca
+index 0000000000000000000000000000000000000000..1e582acaa89e8d47fc8771b06fa2f2b95f4c2166
 --- /dev/null
 +++ b/fs/file_async.c
 @@ -0,0 +1,496 @@
@@ -1014,7 +1014,7 @@ index 00000000..1e582aca
 +
 +module_init(fcntl_init)
 diff --git a/include/linux/fs.h b/include/linux/fs.h
-index a07031fd..7e9e0584 100644
+index a07031fd4ae242cdbec1afee31ecc3b3b35330bf..7e9e0584fa7842b53279247bd1540246e6bba0b2 100644
 --- a/include/linux/fs.h
 +++ b/include/linux/fs.h
 @@ -77,6 +77,9 @@ extern void __init inode_init(void);
