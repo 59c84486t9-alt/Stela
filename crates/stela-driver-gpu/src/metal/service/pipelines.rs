@@ -33,7 +33,7 @@ use crate::metal::{
     },
     vulkan::backend::Backend,
 };
-use alloc::vec::Vec;
+use alloc::{format, string::String, vec::Vec};
 use core::num::NonZeroU64;
 
 impl<B: Backend, C: Compiler> Service<B, C> {
@@ -70,8 +70,40 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 .contains(PipelineFlags::INDIRECT_COMMAND_BUFFERS),
             archives: self.archives(connection, &mut *memory, &request.archives)?,
         };
+        self.noted = Some(self.describe_render_pipeline(&pipeline));
         let pipeline = self.device.new_render_pipeline(&pipeline)?;
         self.adopt_render_pipeline(call, pipeline)
+    }
+
+    /// A render pipeline's functions and vertex fetch, for the platform's
+    /// log: `vertex=… fragment=… attributes=[index:format@offset/buffer …]
+    /// layouts=[buffer:stride/step/rate …]`.
+    fn describe_render_pipeline(&self, pipeline: &RenderPipelineRequest) -> String {
+        use core::fmt::Write;
+        let entry = |id: FunctionId| self.device.function_entry(id).unwrap_or("?");
+        let mut text = format!("vertex={}", entry(pipeline.vertex_function));
+        let fragment = pipeline.fragment_function.map_or("-", entry);
+        let _ = write!(text, " fragment={fragment}");
+        if let Some(vertex) = &pipeline.vertex_descriptor {
+            text.push_str(" attributes=[");
+            for attribute in &vertex.attributes {
+                let _ = write!(
+                    text,
+                    " {}:{:?}@{}/{}",
+                    attribute.index, attribute.format, attribute.offset, attribute.buffer_index
+                );
+            }
+            text.push_str(" ] layouts=[");
+            for layout in &vertex.layouts {
+                let _ = write!(
+                    text,
+                    " {}:{}/{:?}/{}",
+                    layout.buffer_index, layout.stride, layout.step_function, layout.step_rate
+                );
+            }
+            text.push_str(" ]");
+        }
+        text
     }
 
     pub(super) fn new_mesh_pipeline(&mut self, call: &mut Call) -> Result<(), Fault> {

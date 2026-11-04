@@ -741,6 +741,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.pipelines.interface(id)
     }
 
+    /// The entry point a function was made from.
+    pub fn function_entry(&self, id: FunctionId) -> Result<&str> {
+        Ok(self.pipelines.functions.get(id.0)?.prepared.entry())
+    }
+
     /// What the compiler reflects of a function.
     pub fn function_reflection(&self, id: FunctionId) -> Result<&Reflection> {
         Ok(&self.pipelines.functions.get(id.0)?.prepared.reflection)

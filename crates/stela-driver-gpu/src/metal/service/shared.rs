@@ -43,6 +43,9 @@ pub struct ServiceHost {
     pub run: fn(u64, &mut dyn FnMut()),
     /// Told why the service refused a guest's call.
     pub report: fn(&str),
+    /// Told what a guest's call made, such as a render pipeline's stages and
+    /// vertex fetch.
+    pub note: fn(&str),
     /// The platform's tick counter, which times [`Served`].
     pub ticks: fn() -> u64,
     /// Told of each guest call the gate served.
@@ -187,10 +190,10 @@ impl<B: Backend + Send, C: Compiler + Send> GateService for SharedService<B, C> 
         let mut answer = None;
         (self.host.run)(self.host.stack, &mut || {
             let served = turn.serve(connection, record, caller);
-            answer = Some((served, turn.refused.take(), turn.served));
+            answer = Some((served, turn.refused.take(), turn.noted.take(), turn.served));
         });
         drop(turn);
-        let (served, refused, (operation, status)) =
+        let (served, refused, noted, (operation, status)) =
             answer.expect("the platform runs what it is given");
         let left = (self.host.ticks)();
         (self.host.served)(Served {
@@ -201,6 +204,9 @@ impl<B: Backend + Send, C: Compiler + Send> GateService for SharedService<B, C> 
         });
         if let Some(reason) = refused {
             (self.host.report)(&reason);
+        }
+        if let Some(text) = noted {
+            (self.host.note)(&text);
         }
         served
     }

@@ -140,6 +140,7 @@ fn shared_quiesce_uses_the_serialized_service_stack() {
                 call();
             },
             report: |_| {},
+            note: |_| {},
             ticks: || 0,
             served: |_| {},
         },

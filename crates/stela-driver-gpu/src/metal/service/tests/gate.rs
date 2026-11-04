@@ -188,6 +188,7 @@ const HOST: ServiceHost = ServiceHost {
     stack: 0x4000,
     run: |_, call| call(),
     report: |_| {},
+    note: |_| {},
     ticks: || 0,
     served: |_| {},
 };

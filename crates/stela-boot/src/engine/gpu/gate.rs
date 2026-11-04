@@ -73,21 +73,36 @@ pub(super) fn relax() {
     hint::spin_loop();
 }
 
-/// Logs why the service refused a guest's call, once for each reason.
-fn report(reason: &str) {
-    static SEEN: [AtomicU64; 128] = [const { AtomicU64::new(0) }; 128];
-    // FNV-1a: a reason is built per refusal, so only its text identifies it.
-    let text = reason.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+/// Whether `text` is new to `seen`. FNV-1a: a text is built per call, so
+/// only its bytes identify it; once `seen` fills, every text is new.
+fn first_time(seen: &[AtomicU64], text: &str) -> bool {
+    let hash = text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3)
     });
-    for slot in &SEEN {
-        match slot.compare_exchange(0, text, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => break,
-            Err(seen) if seen == text => return,
+    for slot in seen {
+        match slot.compare_exchange(0, hash, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(known) if known == hash => return false,
             Err(_) => {}
         }
     }
-    output::arguments(format_args!("GPU REFUSED {reason}\n"));
+    true
+}
+
+/// Logs why the service refused a guest's call, once for each reason.
+fn report(reason: &str) {
+    static SEEN: [AtomicU64; 128] = [const { AtomicU64::new(0) }; 128];
+    if first_time(&SEEN, reason) {
+        output::arguments(format_args!("GPU REFUSED {reason}\n"));
+    }
+}
+
+/// Logs a render pipeline the guest made, once for each distinct one.
+fn note(text: &str) {
+    static SEEN: [AtomicU64; 512] = [const { AtomicU64::new(0) }; 512];
+    if first_time(&SEEN, text) {
+        output::arguments(format_args!("GPU PIPELINE {text}\n"));
+    }
 }
 
 /// The guest calls one operation's gate served since the last report.
@@ -308,6 +323,7 @@ fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
             stack,
             run,
             report,
+            note,
             ticks: host::rdtsc,
             served,
         },

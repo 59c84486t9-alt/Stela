@@ -248,6 +248,9 @@ pub struct Service<B: Backend, C: Compiler> {
     signaled: u64,
     /// Why the last call was refused, for the platform's log.
     refused: Option<String>,
+    /// What the last call made, for the platform's log: a render pipeline's
+    /// stages and vertex fetch.
+    noted: Option<String>,
     /// The last call's operation and status, for the platform's timing.
     served: (u32, Status),
     /// Whether a refusal named the work the device was lost running.
@@ -267,6 +270,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             shares: sharing::Shares::default(),
             signaled: 0,
             refused: None,
+            noted: None,
             served: (0, Status::Ok),
             loss_described: false,
             reopen: None,
