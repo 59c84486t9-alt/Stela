@@ -16,9 +16,10 @@ pub(crate) fn emit(
     register_regions: bool,
     mut profile: Option<&mut crate::block::profile::CompileProfile>,
 ) -> Result<NativeBlock, CompileError> {
+    let source_rows = instructions.len() + usize::from(terminal.is_some());
     let mut block = Emitted {
         x86_64_code: scalable_context::context_wrapper(),
-        source_map: Vec::new(),
+        source_map: Vec::with_capacity(source_rows),
     };
     let mut fixups = Vec::new();
     // DIT validation covers the individual recipes, not region allocation.
@@ -100,6 +101,7 @@ pub(crate) fn emit(
                 traffic,
             });
     }
+    debug_assert_eq!(block.source_map.len(), source_rows);
     Ok(block.into_native())
 }
 
