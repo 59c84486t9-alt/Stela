@@ -15,7 +15,7 @@
 use super::asm::{Alu, Asm, Code, Gpr, Mem, Rm, ShiftOp, Size};
 use super::{flag_word, logical, nzcv, right_operand, store};
 use crate::{
-    GuestState,
+    GuestState, TargetCpu,
     aarch64::{Logical, Operation, Register, Shift, WideMove, Width, pc_relative, simd},
     block::HostGprSnapshot,
 };
@@ -179,7 +179,7 @@ pub(super) fn emit_pc_relative(code: &mut Code, operand: pc_relative::Operand) {
 }
 
 /// Common integer operations on their native register or frame operands.
-pub(super) fn emit_direct(code: &mut Code, operation: &Operation) -> bool {
+pub(super) fn emit_direct(code: &mut Code, operation: &Operation, target: TargetCpu) -> bool {
     match *operation {
         Operation::AddSub {
             width,
@@ -262,7 +262,27 @@ pub(super) fn emit_direct(code: &mut Code, operation: &Operation) -> bool {
         } => {
             let size = Size::of(width == Width::X64);
             let work = working(code, destination);
-            if kind == Logical::Or && left == Register::Zero && !invert && amount == 0 && !flags {
+            if kind == Logical::And
+                && invert
+                && target.supports(TargetCpu::Bmi1)
+                && !target.data_independent_timing()
+                && let Some(left) = code.asm().guest(left)
+            {
+                let inverted = match code.host(operand) {
+                    Some(host) if amount == 0 => host,
+                    _ => {
+                        right_operand(code, operand, width, shift, amount);
+                        Gpr::Rcx
+                    }
+                };
+                // ANDN folds a frame operand and sets N/Z with C/V clear.
+                code.asm().andn(size, work, inverted, left);
+            } else if kind == Logical::Or
+                && left == Register::Zero
+                && !invert
+                && amount == 0
+                && !flags
+            {
                 // MOV.
                 take(&mut code.asm(), size, work, operand);
             } else if invert
@@ -484,7 +504,7 @@ mod tests {
                     immediate,
                 };
                 let mut frame = Code::new();
-                assert!(emit_direct(&mut frame, &operation));
+                assert!(emit_direct(&mut frame, &operation, TargetCpu::Baseline));
                 let start = usize::from(width == Width::X64);
                 assert_eq!(frame[start], if immediate <= 127 { 0x83 } else { 0x81 });
                 assert_eq!(frame[start + 1], 0xbf); // CMP with a frame displacement.
@@ -505,7 +525,7 @@ mod tests {
 
     fn direct(operation: Operation) -> Code {
         let mut code = Code::pinned();
-        assert!(emit_direct(&mut code, &operation));
+        assert!(emit_direct(&mut code, &operation, TargetCpu::Baseline));
         code
     }
 
@@ -547,6 +567,95 @@ mod tests {
             amount: 0,
         });
         assert!(!narrow.is_empty());
+    }
+
+    #[test]
+    fn bmi1_bic_folds_the_frame_operand_and_keeps_older_targets() {
+        // BIC X8,X9,X10 from archived desktop code (8a2a0128).
+        let operation = Operation::LogicalRegister {
+            width: Width::X64,
+            kind: Logical::And,
+            invert: true,
+            flags: false,
+            destination: Register::X(8),
+            left: Register::X(9),
+            right: Register::X(10),
+            shift: Shift::Lsl,
+            amount: 0,
+        };
+        let emit = |target| {
+            let mut code = Code::pinned();
+            assert!(emit_direct(&mut code, &operation, target));
+            code
+        };
+        let fast = emit(TargetCpu::Bmi1);
+        // mov rcx,[rdi+80]; andn rsi,rcx,[rdi+72].
+        assert_eq!(
+            &fast[..],
+            [0x48, 0x8b, 0x4f, 0x50, 0xc4, 0xe2, 0xf0, 0xf2, 0x77, 0x48]
+        );
+        let baseline = emit(TargetCpu::Baseline);
+        assert_eq!(baseline.instructions(), 4);
+        assert_eq!(fast.instructions(), 2);
+        for target in [
+            TargetCpu::Sse42,
+            TargetCpu::Bmi2,
+            TargetCpu::Bmi1.with_data_independent_timing(),
+        ] {
+            assert_eq!(emit(target), baseline);
+        }
+    }
+
+    #[test]
+    fn bmi1_bic_preserves_aliases_and_bics_flags() {
+        if !TargetCpu::detect().supports(TargetCpu::Bmi1) {
+            return;
+        }
+        let mut initial = GuestState::default();
+        initial.x[0] = 0x89ab_cdef_8000_0000;
+        initial.x[8] = 0x5555_5555_0000_0000;
+        initial.x[9] = u64::MAX;
+        initial.nzcv = 0xf000_0000;
+        for width in [Width::W32, Width::X64] {
+            for (shift, amount) in [(Shift::Lsl, 0), (Shift::Asr, 1), (Shift::Ror, 3)] {
+                for (destination, left, right) in [
+                    (Register::X(8), Register::X(8), Register::X(0)),
+                    (Register::X(8), Register::X(0), Register::X(8)),
+                    (Register::X(8), Register::X(9), Register::X(9)),
+                    (Register::Zero, Register::X(0), Register::X(8)),
+                ] {
+                    let operation = Operation::LogicalRegister {
+                        width,
+                        kind: Logical::And,
+                        invert: true,
+                        flags: true,
+                        destination,
+                        left,
+                        right,
+                        shift,
+                        amount,
+                    };
+                    let run = |target, pinned| {
+                        let mut code = if pinned { Code::pinned() } else { Code::new() };
+                        assert!(emit_direct(&mut code, &operation, target));
+                        code.asm().ret();
+                        let bytes = if pinned {
+                            entered(&code)
+                        } else {
+                            code.into_bytes()
+                        };
+                        let mut state = initial.clone();
+                        super::super::native::run(&bytes, &mut state);
+                        state
+                    };
+                    for pinned in [false, true] {
+                        let state = run(TargetCpu::Bmi1, pinned);
+                        assert_eq!(state, run(TargetCpu::Baseline, pinned));
+                        assert_eq!(state.nzcv & 0x3000_0000, 0);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

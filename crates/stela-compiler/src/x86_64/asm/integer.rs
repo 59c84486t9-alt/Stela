@@ -97,6 +97,21 @@ impl Asm<'_> {
         self.legacy(size, None, &[0x0f, 0xa4], source as u8, false, rm.into());
         self.data(&[amount]);
     }
+    /// `andn dst, inverted, rm`: `~inverted & rm` (BMI1).
+    pub(crate) fn andn(&mut self, size: Size, destination: Gpr, inverted: Gpr, rm: Rm) {
+        self.vex(
+            Vex {
+                map: Map::M0f38,
+                pp: Pp::None,
+                w: size == Size::Qword,
+                l: false,
+            },
+            0xf2,
+            destination.number(),
+            inverted.number(),
+            rm,
+        );
+    }
     /// A BMI1 group 17 form (VEX.0F38 F3 /digit) writing `destination`.
     fn bmi1_group(&mut self, digit: u8, size: Size, destination: Gpr, rm: Rm) {
         self.vex(
