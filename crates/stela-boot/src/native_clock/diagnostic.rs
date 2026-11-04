@@ -29,6 +29,8 @@ pub(crate) unsafe fn check(
 /// controller/IRQ/idle handoff remain owned through this bounded native proof.
 /// No finite RAM-absence scope is held or recreated by this constructor.
 pub(crate) unsafe fn check_native(
+    handoff: &'static crate::handoff::Handoff,
+    owner: &mut host::HostOwner,
     identity: Arc<host::RootIdentity>,
     prepared: Prepared,
 ) -> Result<(), WorkError> {
@@ -37,9 +39,17 @@ pub(crate) unsafe fn check_native(
     }
     // SAFETY: this owner supplies complete HPET/LAPIC/IDT delivery and
     // lifecycle; constructor checks exact Source identity and ARAT.
-    let installed = unsafe { Installed::attach_native(identity.clone(), prepared)? };
+    let installed =
+        unsafe { Installed::attach_native(identity.clone(), prepared) }.inspect_err(|error| {
+            crate::output::arguments(format_args!(
+                "CHECK native-clock-domain FAIL native attachment {error:?}\n"
+            ));
+        })?;
     let services = installed.services()?;
     services.check_identity(&identity)?;
+    // SAFETY: the same exclusive clock, BSP and untouched stack pool are kept
+    // through the owned service completion and retirement.
+    unsafe { crate::engine::check_native_clock_domain(handoff, owner, &services) }?;
     let epoch = services.epoch()?;
     drop(services);
     run(installed, Some(epoch))

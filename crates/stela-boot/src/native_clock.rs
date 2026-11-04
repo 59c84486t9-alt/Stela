@@ -210,6 +210,7 @@ pub(crate) struct CounterSample {
 }
 /// A sealed pairing of the existing installed CPU, clock and idle producer.
 /// Its private fields cannot pair an unrelated Cpu/Idle with a counter epoch.
+#[derive(Clone)]
 pub(crate) struct ClockServices {
     state: Arc<State>,
     clock: Arc<dyn Clock>,
