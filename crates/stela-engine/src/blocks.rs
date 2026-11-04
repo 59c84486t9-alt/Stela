@@ -199,17 +199,6 @@ impl BlockRuntime {
     }
 
     fn load(&mut self, pc: GuestAddress, outcome: &mut RunOutcome) -> Result<()> {
-        let (base, region) = self
-            .region(pc)
-            .ok_or_else(|| refuse!("instruction mapping disappeared", pc = pc.0))?;
-        if let Some(block) = self.loaded.get(&pc.0) {
-            require!(
-                block.region_base == base && block.generation == region.generation,
-                "stale native block generation"
-            );
-            outcome.memory_cache_hits += 1;
-            return Ok(());
-        }
         #[cfg(not(feature = "std"))]
         {
             let discovery = self.prepare(pc)?;
@@ -222,7 +211,7 @@ impl BlockRuntime {
             let block = LoadedBlock::from_artifact(
                 self.target,
                 profile,
-                base,
+                discovery.region_base.0,
                 generation,
                 source_bytes,
                 prepared,
@@ -235,6 +224,7 @@ impl BlockRuntime {
         {
             let prepared = self.prepare(pc)?;
             let profile = prepared.artifact_profile;
+            let base = prepared.region_base.0;
             let generation = prepared.generation;
             let source_bytes = prepared.analysis.source_bytes;
             let prepared = prepared.prepared;
@@ -511,9 +501,12 @@ impl BlockRuntime {
             } else {
                 None
             };
-            // Decode ahead of loading so an unsupported instruction is a typed
-            // dispatch stop. Disk corruption and allocation errors remain errors.
-            if !self.loaded.contains_key(&pc.0) {
+            let (block, current) = if let Some(block) = self.loaded.get(&pc.0) {
+                outcome.memory_cache_hits += 1;
+                (block, region)
+            } else {
+                // Decode ahead of loading so an unsupported instruction is a typed
+                // dispatch stop. Disk corruption and allocation errors remain errors.
                 let offset = (pc.0 - base) as usize;
                 let words = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS);
                 if let Err(error) = stela_compiler::block::source_bytes_with_profile(
@@ -526,17 +519,20 @@ impl BlockRuntime {
                     };
                     break;
                 }
-            }
-            self.load(pc, &mut outcome)?;
-            let block = self
-                .loaded
-                .get(&pc.0)
-                .ok_or_else(|| refuse!("loaded block disappeared", pc = pc.0))?;
-            let (_, current) = self
-                .region(pc)
-                .ok_or_else(|| refuse!("loaded block unmapped", pc = pc.0))?;
+                self.load(pc, &mut outcome)?;
+                let block = self
+                    .loaded
+                    .get(&pc.0)
+                    .ok_or_else(|| refuse!("loaded block disappeared", pc = pc.0))?;
+                let (_, current) = self
+                    .region(pc)
+                    .ok_or_else(|| refuse!("loaded block unmapped", pc = pc.0))?;
+                (block, current)
+            };
             require!(
-                block.generation == current.generation && block.source_bytes > 0,
+                block.region_base == base
+                    && block.generation == current.generation
+                    && block.source_bytes > 0,
                 "refusing stale block execution"
             );
             let mut completed_blocks = 1;
