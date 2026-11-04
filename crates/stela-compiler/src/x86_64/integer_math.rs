@@ -25,6 +25,12 @@ fn size(width: Width) -> Size {
 }
 
 pub(super) fn emit_with(asm: &mut Asm, operand: &Operand, target: TargetCpu) {
+    if let Kind::Extract { width, amount } = operand.kind
+        && operand.left != operand.right
+    {
+        extract_distinct(asm, operand, width, amount);
+        return;
+    }
     load_with(asm, operand.left);
     match operand.kind {
         Kind::LeadingZeros { width } | Kind::LeadingSignBits { width } => {
@@ -207,6 +213,38 @@ pub(super) fn emit_with(asm: &mut Asm, operand: &Operand, target: TargetCpu) {
     store_with(asm, operand.destination);
 }
 
+fn extract_distinct(asm: &mut Asm, operand: &Operand, width: Width, amount: u8) {
+    if amount == 0 {
+        // The low source is the result, with a W write clearing high bits.
+        load_with(asm, operand.right);
+        if width == Width::W32 {
+            asm.mov(Size::Dword, Rax, Rax);
+        }
+        store_with(asm, operand.destination);
+        return;
+    }
+
+    // SHRD updates the low source. Reuse its host register when it already
+    // holds the destination, and read a resident high source in place.
+    let result = match asm.guest(operand.right) {
+        Some(Rm::Reg(host)) if operand.right == operand.destination => host,
+        _ => {
+            load_with(asm, operand.right);
+            Rax
+        }
+    };
+    let high = if let Some(Rm::Reg(host)) = asm.guest(operand.left) {
+        host
+    } else {
+        right_operand_with(asm, operand.left, Width::X64, Shift::Lsl, 0);
+        Rcx
+    };
+    asm.shrd_imm(size(width), result, high, amount);
+    if result == Rax {
+        store_with(asm, operand.destination);
+    }
+}
+
 /// An adjacent DIV and MSUB can commit both architectural results of one
 /// native divide. The quotient store must leave the dividend and divisor
 /// available to the guest MSUB as their original values. RDX is scratch in
@@ -349,6 +387,9 @@ fn divide(asm: &mut Asm, signed: bool, width: Width, keep_remainder: bool) {
 
 #[cfg(test)]
 mod division_remainder_tests;
+
+#[cfg(test)]
+mod extract_tests;
 
 #[cfg(test)]
 mod tests {
