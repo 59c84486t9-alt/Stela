@@ -1504,6 +1504,25 @@ fn two_roots() -> (Controller, Arc<Mutex<Shared>>) {
 }
 
 #[test]
+fn an_empty_untracked_root_does_not_quarantine_an_addressed_neighbor() {
+    let (mut c, model) = two_roots();
+    let disk = c.reset_port(1).unwrap();
+    c.set_address(&disk, 1).unwrap();
+    let empty = OP + PORT + 4;
+    model.lock().unwrap().words[empty / 4] = POWER;
+    assert!(matches!(c.reset_port(2), Err(Error::Stale)));
+    assert!(c.validate(&disk).is_ok());
+    assert!(
+        !model
+            .lock()
+            .unwrap()
+            .writes
+            .iter()
+            .any(|(at, value)| { *at == empty && *value & PORT_RESET != 0 })
+    );
+}
+
+#[test]
 fn connected_ambiguous_default_root_never_releases_address0_for_another_root() {
     for through_live in [false, true] {
         let (mut c, m) = two_roots();
