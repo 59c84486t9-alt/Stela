@@ -115,6 +115,7 @@ static void release(struct file *file)
 			dentry->d_op->d_release(dentry);
 		iput(dentry->d_inode);
 		kfree(dentry);
+		mntput(file->f_path.mnt);
 	}
 	file_free(file);
 }
@@ -189,7 +190,7 @@ struct file *alloc_file_pseudo(struct inode *inode, struct vfsmount *mount, cons
 	dentry->d_inode = inode;
 	dentry->d_sb = mount->mnt_sb;
 	dentry->d_op = mount->mnt_sb->__s_d_op;
-	file->__f_path = (struct path){.mnt = mount, .dentry = dentry};
+	file->__f_path = (struct path){.mnt = mntget(mount), .dentry = dentry};
 	return file;
 }
 
@@ -323,77 +324,6 @@ int stela_linux_open(dev_t device, unsigned int flags)
 	return fd;
 }
 
-struct pseudo_fs_context *init_pseudo(struct fs_context *context, unsigned long magic)
-{
-	struct pseudo_fs_context *pseudo = kzalloc_obj(*pseudo);
-
-	if (pseudo) {
-		pseudo->magic = magic;
-		context->fs_private = pseudo;
-	}
-	return pseudo;
-}
-
-struct vfsmount *kern_mount(struct file_system_type *type)
-{
-	struct fs_context context = {.fs_type = type};
-	struct vfsmount *mount = kzalloc_obj(*mount);
-	struct super_block *block = kzalloc_obj(*block);
-	int error = mount && block ? type->init_fs_context(&context) : -ENOMEM;
-
-	if (error) {
-		kfree(block);
-		kfree(mount);
-		return ERR_PTR(error);
-	}
-	struct pseudo_fs_context *pseudo = context.fs_private;
-	error = get_anon_bdev(&block->s_dev);
-	if (error) {
-		kfree(pseudo);
-		kfree(block);
-		kfree(mount);
-		return ERR_PTR(error);
-	}
-
-	block->s_magic = pseudo->magic;
-	block->__s_d_op = pseudo->dops;
-	mount->mnt_sb = block;
-	kfree(pseudo);
-	return mount;
-}
-
-void kern_unmount(struct vfsmount *mount)
-{
-	if (IS_ERR_OR_NULL(mount))
-		return;
-	free_anon_bdev(mount->mnt_sb->s_dev);
-	kfree(mount->mnt_sb);
-	kfree(mount);
-}
-
-int simple_pin_fs(struct file_system_type *type, struct vfsmount **mount, int *count)
-{
-	if (!*mount) {
-		struct vfsmount *pinned = kern_mount(type);
-
-		if (IS_ERR(pinned))
-			return (int)PTR_ERR(pinned);
-		*mount = pinned;
-	}
-	++*count;
-	return 0;
-}
-
-void simple_release_fs(struct vfsmount **mount, int *count)
-{
-	if (--*count)
-		return;
-	kern_unmount(*mount);
-	*mount = NULL;
-}
-
-/* Nothing tears a superblock down through its filesystem; kern_unmount frees it. */
-STELA_UNSUPPORTED(void, kill_anon_super, struct super_block *)
 /* A raw compatibility file has no VFS path through which to reopen it. */
 struct file *stela_linux_reopen_unowned_path(void)
 {
@@ -403,12 +333,15 @@ struct file *stela_linux_reopen_unowned_path(void)
 
 #ifdef STELA_LINUX_FILE_TEST
 #include <linux/init_task.h>
+#include <linux/radix-tree.h>
 #include <linux/statfs.h>
 #include <stela/page.h>
 #include <stela/page_test.h>
 #include <stela/test.h>
 
 extern void __init chrdev_init(void);
+extern void __init dcache_init(void);
+extern void __init mnt_cache_init(void);
 
 static unsigned int opens, releases;
 static int open_error;
@@ -453,6 +386,7 @@ static int test_init_fs_context(struct fs_context *context)
 static struct file_system_type test_fs = {
 	.name = "test",
 	.init_fs_context = test_init_fs_context,
+	.kill_sb = kill_anon_super,
 };
 
 /* Component-only binding for the original fdtable and resource limits. */
@@ -462,9 +396,61 @@ struct task_struct *__wrap_stela_linux_current(void)
 	return &init_task;
 }
 
+/* The fixture is single-threaded and has no RCU or workqueue workers. */
+static struct rcu_head *retiring[32];
+static rcu_callback_t retirement[ARRAY_SIZE(retiring)];
+static unsigned int queued, grace_periods;
+
+void __wrap_call_rcu(struct rcu_head *head, rcu_callback_t callback)
+{
+	assert(queued < ARRAY_SIZE(retiring));
+	retiring[queued] = head;
+	retirement[queued++] = callback;
+}
+
+int __wrap___cond_resched(void)
+{
+	return 0;
+}
+
+void __wrap_synchronize_rcu(void)
+{
+	grace_periods++;
+}
+
+bool __wrap_queue_work_on(int cpu, struct workqueue_struct *queue, struct work_struct *work)
+{
+	(void)cpu;
+	(void)queue;
+	work->func(work);
+	return true;
+}
+
+static s64 test_now_ns(void *context)
+{
+	(void)context;
+	return 0;
+}
+
+static bool test_realtime_at(void *context, s64 monotonic, u32 mode, u32 tick_ns,
+			     s64 *seconds, u32 *nanoseconds)
+{
+	(void)context;
+	(void)monotonic;
+	(void)mode;
+	(void)tick_ns;
+	*seconds = 1700000000;
+	*nanoseconds = 0;
+	return true;
+}
+
 int main(void)
 {
-	stela_linux_enter(&stela_linux_bare);
+	static const struct stela_linux_services services = {
+		.now_ns = test_now_ns, .realtime_at = test_realtime_at,
+	};
+	static const struct stela_linux_owner owner = {.services = &services};
+	stela_linux_enter(&owner);
 
 	/* The final put closes the reference before its owner can free it. */
 	file_ref_t reference;
@@ -476,6 +462,11 @@ int main(void)
 	assert(!file_ref_get(&reference));
 
 	stela_test_register_pages();
+	radix_tree_init();
+	vfs_caches_init_early();
+	dcache_init();
+	inode_init();
+	mnt_cache_init();
 	files_init();
 	chrdev_init();
 
@@ -575,7 +566,9 @@ int main(void)
 	assert(first_device && !MAJOR(first_device));
 	struct vfsmount *other = kern_mount(&test_fs);
 	assert(!IS_ERR(other) && other->mnt_sb->s_dev != first_device);
+	assert(other->mnt_root && d_is_dir(other->mnt_root));
 	kern_unmount(other);
+	assert(grace_periods == 1);
 	assert(!simple_pin_fs(&test_fs, &mount, &count) && mount == pinned && count == 2);
 	simple_release_fs(&mount, &count);
 	assert(mount == pinned);
@@ -595,9 +588,10 @@ int main(void)
 	assert(stats.f_type == 0x7e57 && stats.f_bsize == PAGE_SIZE && stats.f_namelen == NAME_MAX);
 	assert(pseudo->f_path.mnt == mount && !strcmp((const char *)pseudo->f_path.dentry->d_name.name, "dmabuf"));
 	pseudo->f_path.dentry->d_fsdata = &dentries;
+	kern_unmount(mount);
+	assert(grace_periods == 2 && mount->mnt_sb->s_dev == first_device);
 	fput(pseudo);
 	assert(releases == 3 && dentries == 1);
-	kern_unmount(mount);
 
 	char name[8];
 	assert(!strcmp(dynamic_dname(name, sizeof(name), "/%s", "ab"), "/ab"));
@@ -605,6 +599,8 @@ int main(void)
 	char long_name[96];
 	char *formatted = dynamic_dname(long_name, sizeof(long_name), "%080u", 1U);
 	assert(formatted == long_name + 15 && strlen(formatted) == 80 && formatted[79] == '1');
+	for (unsigned int i = 0; i < queued; i++)
+		retirement[i](retiring[i]);
 	stela_linux_exit();
 	printf("Linux files and descriptors passed\n");
 	return 0;

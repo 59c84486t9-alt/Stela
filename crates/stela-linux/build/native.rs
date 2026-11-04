@@ -434,6 +434,16 @@ impl Linux {
                 fixture
                     .define(define, None)
                     .flag("-Wl,--wrap=stela_linux_current");
+                if name == "linux_file" {
+                    for symbol in [
+                        "__cond_resched",
+                        "call_rcu",
+                        "queue_work_on",
+                        "synchronize_rcu",
+                    ] {
+                        fixture.flag(format!("-Wl,--wrap={symbol}"));
+                    }
+                }
                 tests.add(
                     &fixture,
                     name,

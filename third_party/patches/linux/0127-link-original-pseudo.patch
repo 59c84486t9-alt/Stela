@@ -1,0 +1,637 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 23:36:24 -0500
+Subject: [PATCH] refactor(vfs): link original pseudo filesystem mount
+ lifecycle
+
+---
+ fs/libfs.c           | 109 --------------------------------------
+ fs/mount_cache.c     |  37 +++++++++++++
+ fs/namespace.c       |  37 -------------
+ fs/pseudo_metadata.c | 113 ++++++++++++++++++++++++++++++++++++++++
+ fs/super.c           |  99 -----------------------------------
+ fs/super_lifetime.c  | 121 +++++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 271 insertions(+), 245 deletions(-)
+
+diff --git a/fs/libfs.c b/fs/libfs.c
+index fec9bf30c02bb36bb17f78d296110da62d4dc088..5fc9f450e35435cc383dabb9a8c959ee4998c9fb 100644
+--- a/fs/libfs.c
++++ b/fs/libfs.c
+@@ -645,80 +645,6 @@ void locked_recursive_removal(struct dentry *dentry,
+ }
+ EXPORT_SYMBOL(locked_recursive_removal);
+ 
+-static const struct super_operations simple_super_operations = {
+-	.statfs		= simple_statfs,
+-};
+-
+-static int pseudo_fs_fill_super(struct super_block *s, struct fs_context *fc)
+-{
+-	struct pseudo_fs_context *ctx = fc->fs_private;
+-	struct inode *root;
+-
+-	s->s_maxbytes = MAX_LFS_FILESIZE;
+-	s->s_blocksize = PAGE_SIZE;
+-	s->s_blocksize_bits = PAGE_SHIFT;
+-	s->s_magic = ctx->magic;
+-	s->s_op = ctx->ops ?: &simple_super_operations;
+-	s->s_export_op = ctx->eops;
+-	s->s_xattr = ctx->xattr;
+-	s->s_time_gran = 1;
+-	s->s_d_flags |= ctx->s_d_flags;
+-	root = new_inode(s);
+-	if (!root)
+-		return -ENOMEM;
+-
+-	/*
+-	 * since this is the first inode, make it number 1. New inodes created
+-	 * after this must take care not to collide with it (by passing
+-	 * max_reserved of 1 to iunique).
+-	 */
+-	root->i_ino = 1;
+-	root->i_mode = S_IFDIR | S_IRUSR | S_IWUSR;
+-	simple_inode_init_ts(root);
+-	s->s_root = d_make_root(root);
+-	if (!s->s_root)
+-		return -ENOMEM;
+-	set_default_d_op(s, ctx->dops);
+-	return 0;
+-}
+-
+-static int pseudo_fs_get_tree(struct fs_context *fc)
+-{
+-	return get_tree_nodev(fc, pseudo_fs_fill_super);
+-}
+-
+-static void pseudo_fs_free(struct fs_context *fc)
+-{
+-	kfree(fc->fs_private);
+-}
+-
+-static const struct fs_context_operations pseudo_fs_context_ops = {
+-	.free		= pseudo_fs_free,
+-	.get_tree	= pseudo_fs_get_tree,
+-};
+-
+-/*
+- * Common helper for pseudo-filesystems (sockfs, pipefs, bdev - stuff that
+- * will never be mountable)
+- */
+-struct pseudo_fs_context *init_pseudo(struct fs_context *fc,
+-					unsigned long magic)
+-{
+-	struct pseudo_fs_context *ctx;
+-
+-	ctx = kzalloc_obj(struct pseudo_fs_context);
+-	if (likely(ctx)) {
+-		ctx->magic = magic;
+-		fc->fs_private = ctx;
+-		fc->ops = &pseudo_fs_context_ops;
+-		fc->sb_flags |= SB_NOUSER;
+-		fc->s_iflags |= SB_I_NOEXEC | SB_I_NODEV;
+-		fc->global = true;
+-	}
+-	return ctx;
+-}
+-EXPORT_SYMBOL(init_pseudo);
+-
+ int simple_open(struct inode *inode, struct file *file)
+ {
+ 	if (inode->i_private)
+@@ -1068,41 +994,6 @@ int simple_fill_super(struct super_block *s, unsigned long magic,
+ }
+ EXPORT_SYMBOL(simple_fill_super);
+ 
+-static DEFINE_SPINLOCK(pin_fs_lock);
+-
+-int simple_pin_fs(struct file_system_type *type, struct vfsmount **mount, int *count)
+-{
+-	struct vfsmount *mnt = NULL;
+-	spin_lock(&pin_fs_lock);
+-	if (unlikely(!*mount)) {
+-		spin_unlock(&pin_fs_lock);
+-		mnt = vfs_kern_mount(type, SB_KERNMOUNT, type->name, NULL);
+-		if (IS_ERR(mnt))
+-			return PTR_ERR(mnt);
+-		spin_lock(&pin_fs_lock);
+-		if (!*mount)
+-			*mount = mnt;
+-	}
+-	mntget(*mount);
+-	++*count;
+-	spin_unlock(&pin_fs_lock);
+-	mntput(mnt);
+-	return 0;
+-}
+-EXPORT_SYMBOL(simple_pin_fs);
+-
+-void simple_release_fs(struct vfsmount **mount, int *count)
+-{
+-	struct vfsmount *mnt;
+-	spin_lock(&pin_fs_lock);
+-	mnt = *mount;
+-	if (!--*count)
+-		*mount = NULL;
+-	spin_unlock(&pin_fs_lock);
+-	mntput(mnt);
+-}
+-EXPORT_SYMBOL(simple_release_fs);
+-
+ /**
+  * simple_read_from_buffer - copy data from the buffer to user space
+  * @to: the user space buffer to read to
+diff --git a/fs/mount_cache.c b/fs/mount_cache.c
+index 5873d2e8b6f562076f37ea5c1d860734a1b9184f..2c6674151dd3c7e9ca09e3ee834b5aeb92a38db6 100644
+--- a/fs/mount_cache.c
++++ b/fs/mount_cache.c
+@@ -761,6 +761,43 @@ struct vfsmount *vfs_kern_mount(struct file_system_type *type,
+ }
+ EXPORT_SYMBOL_GPL(vfs_kern_mount);
+ 
++/*
++ * Make a mount point inaccessible to new lookups.
++ * Because there may still be current users, the caller MUST WAIT
++ * for an RCU grace period before destroying the mount point.
++ */
++void mnt_make_shortterm(struct vfsmount *mnt)
++{
++	if (mnt)
++		WRITE_ONCE(real_mount(mnt)->mnt_ns, NULL);
++}
++
++struct vfsmount *kern_mount(struct file_system_type *type)
++{
++	struct vfsmount *mnt;
++	mnt = vfs_kern_mount(type, SB_KERNMOUNT, type->name, NULL);
++	if (!IS_ERR(mnt)) {
++		/*
++		 * it is a longterm mount, don't release mnt until
++		 * we unmount before file sys is unregistered
++		*/
++		real_mount(mnt)->mnt_ns = MNT_NS_INTERNAL;
++	}
++	return mnt;
++}
++EXPORT_SYMBOL_GPL(kern_mount);
++
++void kern_unmount(struct vfsmount *mnt)
++{
++	/* release long term mount so mount point can be released */
++	if (!IS_ERR(mnt)) {
++		mnt_make_shortterm(mnt);
++		synchronize_rcu();	/* yecchhh... */
++		mntput(mnt);
++	}
++}
++EXPORT_SYMBOL(kern_unmount);
++
+ struct mount *clone_mnt(struct mount *old, struct dentry *root,
+ 					int flag)
+ {
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 5b88decc5867fc81d840147b51c0bdfab29706be..bd20d4884efca8099ff060e6181049b803d40fe0 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -350,17 +350,6 @@ static void commit_tree(struct mount *mnt)
+ 	touch_mnt_namespace(n);
+ }
+ 
+-/*
+- * Make a mount point inaccessible to new lookups.
+- * Because there may still be current users, the caller MUST WAIT
+- * for an RCU grace period before destroying the mount point.
+- */
+-void mnt_make_shortterm(struct vfsmount *mnt)
+-{
+-	if (mnt)
+-		WRITE_ONCE(real_mount(mnt)->mnt_ns, NULL);
+-}
+-
+ /**
+  * path_is_mountpoint() - Check if path is a mount in the current namespace.
+  * @path: path to check
+@@ -4911,32 +4900,6 @@ void __init mnt_init(void)
+ 	init_mount_tree();
+ }
+ 
+-struct vfsmount *kern_mount(struct file_system_type *type)
+-{
+-	struct vfsmount *mnt;
+-	mnt = vfs_kern_mount(type, SB_KERNMOUNT, type->name, NULL);
+-	if (!IS_ERR(mnt)) {
+-		/*
+-		 * it is a longterm mount, don't release mnt until
+-		 * we unmount before file sys is unregistered
+-		*/
+-		real_mount(mnt)->mnt_ns = MNT_NS_INTERNAL;
+-	}
+-	return mnt;
+-}
+-EXPORT_SYMBOL_GPL(kern_mount);
+-
+-void kern_unmount(struct vfsmount *mnt)
+-{
+-	/* release long term mount so mount point can be released */
+-	if (!IS_ERR(mnt)) {
+-		mnt_make_shortterm(mnt);
+-		synchronize_rcu();	/* yecchhh... */
+-		mntput(mnt);
+-	}
+-}
+-EXPORT_SYMBOL(kern_unmount);
+-
+ void kern_unmount_array(struct vfsmount *mnt[], unsigned int num)
+ {
+ 	unsigned int i;
+diff --git a/fs/pseudo_metadata.c b/fs/pseudo_metadata.c
+index 84f11a73d95eb03e37943289a912752a7637a663..f4b9cefa91251bb694507b22a0dec78e2cc85d20 100644
+--- a/fs/pseudo_metadata.c
++++ b/fs/pseudo_metadata.c
+@@ -2,10 +2,14 @@
+ /* Simple pseudo-filesystem metadata from fs/d_path.c, fs/libfs.c and fs/nsfs.c. */
+ #include <linux/export.h>
+ #include <linux/fs.h>
++#include <linux/fs_context.h>
+ #include <linux/iversion.h>
+ #include <linux/mm.h>
++#include <linux/mount.h>
+ #include <linux/nsfs.h>
+ #include <linux/proc_ns.h>
++#include <linux/pseudo_fs.h>
++#include <linux/slab.h>
+ #include <linux/statfs.h>
+ #include <trace/events/timestamp.h>
+ 
+@@ -358,3 +362,112 @@ int ns_get_name(char *buf, size_t size, struct task_struct *task,
+ 	}
+ 	return res;
+ }
++
++static const struct super_operations simple_super_operations = {
++	.statfs		= simple_statfs,
++};
++
++static int pseudo_fs_fill_super(struct super_block *s, struct fs_context *fc)
++{
++	struct pseudo_fs_context *ctx = fc->fs_private;
++	struct inode *root;
++
++	s->s_maxbytes = MAX_LFS_FILESIZE;
++	s->s_blocksize = PAGE_SIZE;
++	s->s_blocksize_bits = PAGE_SHIFT;
++	s->s_magic = ctx->magic;
++	s->s_op = ctx->ops ?: &simple_super_operations;
++	s->s_export_op = ctx->eops;
++	s->s_xattr = ctx->xattr;
++	s->s_time_gran = 1;
++	s->s_d_flags |= ctx->s_d_flags;
++	root = new_inode(s);
++	if (!root)
++		return -ENOMEM;
++
++	/*
++	 * since this is the first inode, make it number 1. New inodes created
++	 * after this must take care not to collide with it (by passing
++	 * max_reserved of 1 to iunique).
++	 */
++	root->i_ino = 1;
++	root->i_mode = S_IFDIR | S_IRUSR | S_IWUSR;
++	simple_inode_init_ts(root);
++	s->s_root = d_make_root(root);
++	if (!s->s_root)
++		return -ENOMEM;
++	set_default_d_op(s, ctx->dops);
++	return 0;
++}
++
++static int pseudo_fs_get_tree(struct fs_context *fc)
++{
++	return get_tree_nodev(fc, pseudo_fs_fill_super);
++}
++
++static void pseudo_fs_free(struct fs_context *fc)
++{
++	kfree(fc->fs_private);
++}
++
++static const struct fs_context_operations pseudo_fs_context_ops = {
++	.free		= pseudo_fs_free,
++	.get_tree	= pseudo_fs_get_tree,
++};
++
++/*
++ * Common helper for pseudo-filesystems (sockfs, pipefs, bdev - stuff that
++ * will never be mountable)
++ */
++struct pseudo_fs_context *init_pseudo(struct fs_context *fc,
++					unsigned long magic)
++{
++	struct pseudo_fs_context *ctx;
++
++	ctx = kzalloc_obj(struct pseudo_fs_context);
++	if (likely(ctx)) {
++		ctx->magic = magic;
++		fc->fs_private = ctx;
++		fc->ops = &pseudo_fs_context_ops;
++		fc->sb_flags |= SB_NOUSER;
++		fc->s_iflags |= SB_I_NOEXEC | SB_I_NODEV;
++		fc->global = true;
++	}
++	return ctx;
++}
++EXPORT_SYMBOL(init_pseudo);
++
++static DEFINE_SPINLOCK(pin_fs_lock);
++
++int simple_pin_fs(struct file_system_type *type, struct vfsmount **mount, int *count)
++{
++	struct vfsmount *mnt = NULL;
++	spin_lock(&pin_fs_lock);
++	if (unlikely(!*mount)) {
++		spin_unlock(&pin_fs_lock);
++		mnt = vfs_kern_mount(type, SB_KERNMOUNT, type->name, NULL);
++		if (IS_ERR(mnt))
++			return PTR_ERR(mnt);
++		spin_lock(&pin_fs_lock);
++		if (!*mount)
++			*mount = mnt;
++	}
++	mntget(*mount);
++	++*count;
++	spin_unlock(&pin_fs_lock);
++	mntput(mnt);
++	return 0;
++}
++EXPORT_SYMBOL(simple_pin_fs);
++
++void simple_release_fs(struct vfsmount **mount, int *count)
++{
++	struct vfsmount *mnt;
++	spin_lock(&pin_fs_lock);
++	mnt = *mount;
++	if (!--*count)
++		*mount = NULL;
++	spin_unlock(&pin_fs_lock);
++	mntput(mnt);
++}
++EXPORT_SYMBOL(simple_release_fs);
+diff --git a/fs/super.c b/fs/super.c
+index 1275e6e575073a91e933cf81c5031a3ae5a158f1..ef7e2d79008fd8fc2dd9d63330995a5df39d7880 100644
+--- a/fs/super.c
++++ b/fs/super.c
+@@ -80,96 +80,6 @@ void retire_super(struct super_block *sb)
+ }
+ EXPORT_SYMBOL(retire_super);
+ 
+-/**
+- *	generic_shutdown_super	-	common helper for ->kill_sb()
+- *	@sb: superblock to kill
+- *
+- *	generic_shutdown_super() does all fs-independent work on superblock
+- *	shutdown.  Typical ->kill_sb() should pick all fs-specific objects
+- *	that need destruction out of superblock, call generic_shutdown_super()
+- *	and release aforementioned objects.  Note: dentries and inodes _are_
+- *	taken care of and do not need specific handling.
+- *
+- *	Upon calling this function, the filesystem may no longer alter or
+- *	rearrange the set of dentries belonging to this super_block, nor may it
+- *	change the attachments of dentries to inodes.
+- */
+-void generic_shutdown_super(struct super_block *sb)
+-{
+-	const struct super_operations *sop = sb->s_op;
+-
+-	if (sb->s_root) {
+-		fsnotify_sb_delete(sb);
+-		shrink_dcache_for_umount(sb);
+-		sync_filesystem(sb);
+-		sb->s_flags &= ~SB_ACTIVE;
+-
+-		fserror_unmount(sb);
+-		cgroup_writeback_umount(sb);
+-
+-		/* Evict all inodes with zero refcount. */
+-		evict_inodes(sb);
+-
+-		/*
+-		 * Clean up and evict any inodes that still have references due
+-		 * to the security policy.
+-		 */
+-		security_sb_delete(sb);
+-
+-		if (sb->s_dio_done_wq) {
+-			destroy_workqueue(sb->s_dio_done_wq);
+-			sb->s_dio_done_wq = NULL;
+-		}
+-
+-		if (sop->put_super)
+-			sop->put_super(sb);
+-
+-		/*
+-		 * Now that all potentially-encrypted inodes have been evicted,
+-		 * the fscrypt keyring can be destroyed.
+-		 */
+-		fscrypt_destroy_keyring(sb);
+-
+-		if (CHECK_DATA_CORRUPTION(!list_empty(&sb->s_inodes), NULL,
+-				"VFS: Busy inodes after unmount of %s (%s)",
+-				sb->s_id, sb->s_type->name)) {
+-			/*
+-			 * Adding a proper bailout path here would be hard, but
+-			 * we can at least make it more likely that a later
+-			 * iput_final() or such crashes cleanly.
+-			 */
+-			struct inode *inode;
+-
+-			spin_lock(&sb->s_inode_list_lock);
+-			list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
+-				inode->i_op = VFS_PTR_POISON;
+-				inode->i_sb = VFS_PTR_POISON;
+-				inode->i_mapping = VFS_PTR_POISON;
+-			}
+-			spin_unlock(&sb->s_inode_list_lock);
+-		}
+-	}
+-	/*
+-	 * Broadcast to everyone that grabbed a temporary reference to this
+-	 * superblock that it is dying. Every walker of @fs_supers outside
+-	 * of sget_fc() will now discard this superblock and treat it as
+-	 * dead.
+-	 *
+-	 * sget_fc() keeps finding the superblock until SB_DEAD is set, so
+-	 * a concurrent mounter waits until we passed sb->kill_sb().
+-	 */
+-	super_wake(sb, SB_DYING);
+-	super_unlock_excl(sb);
+-	if (sb->s_bdi != &noop_backing_dev_info) {
+-		if (sb->s_iflags & SB_I_PERSB_BDI)
+-			bdi_unregister(sb->s_bdi);
+-		bdi_put(sb->s_bdi);
+-		sb->s_bdi = &noop_backing_dev_info;
+-	}
+-}
+-
+-EXPORT_SYMBOL(generic_shutdown_super);
+-
+ void drop_super(struct super_block *sb)
+ {
+ 	super_unlock_shared(sb);
+@@ -555,15 +465,6 @@ void filesystems_thaw(void)
+ 	__iterate_supers(filesystems_thaw_callback, NULL, SUPER_ITER_UNLOCKED);
+ }
+ 
+-void kill_anon_super(struct super_block *sb)
+-{
+-	dev_t dev = sb->s_dev;
+-	generic_shutdown_super(sb);
+-	kill_super_notify(sb);
+-	free_anon_bdev(dev);
+-}
+-EXPORT_SYMBOL(kill_anon_super);
+-
+ static int set_bdev_super(struct super_block *s, void *data)
+ {
+ 	s->s_dev = *(dev_t *)data;
+diff --git a/fs/super_lifetime.c b/fs/super_lifetime.c
+index 1de8086785c689415ce13fc33df9acf090294ec0..12b2b487659dfcec1b833a4364cddb8433c346f1 100644
+--- a/fs/super_lifetime.c
++++ b/fs/super_lifetime.c
+@@ -11,6 +11,7 @@
+ #include <linux/export.h>
+ #include <linux/fs.h>
+ #include <linux/fs_context.h>
++#include <linux/fscrypt.h>
+ #include <linux/fserror.h>
+ #include <linux/fsnotify.h>
+ #include <linux/rcupdate.h>
+@@ -21,6 +22,10 @@
+ #include <linux/wait_bit.h>
+ #include <linux/writeback.h>
+ 
++#ifdef CONFIG_STELA
++#include <stela/linux.h>
++#endif
++
+ #include "internal.h"
+ #include "super_lifetime.h"
+ 
+@@ -754,3 +759,119 @@ int get_tree_keyed(struct fs_context *fc,
+ 	return vfs_get_super(fc, test_keyed_super, fill_super);
+ }
+ EXPORT_SYMBOL(get_tree_keyed);
++
++/**
++ *	generic_shutdown_super	-	common helper for ->kill_sb()
++ *	@sb: superblock to kill
++ *
++ *	generic_shutdown_super() does all fs-independent work on superblock
++ *	shutdown.  Typical ->kill_sb() should pick all fs-specific objects
++ *	that need destruction out of superblock, call generic_shutdown_super()
++ *	and release aforementioned objects.  Note: dentries and inodes _are_
++ *	taken care of and do not need specific handling.
++ *
++ *	Upon calling this function, the filesystem may no longer alter or
++ *	rearrange the set of dentries belonging to this super_block, nor may it
++ *	change the attachments of dentries to inodes.
++ */
++void generic_shutdown_super(struct super_block *sb)
++{
++	const struct super_operations *sop = sb->s_op;
++
++#ifdef CONFIG_STELA
++	/* Native mounts have no backing device or registered writeback domain. */
++	if (sb->s_bdev || sb->s_bdi != &noop_backing_dev_info)
++		stela_linux_fatal("shutdown of a VFS superblock with an active backing device");
++#endif
++	if (sb->s_root) {
++		fsnotify_sb_delete(sb);
++		shrink_dcache_for_umount(sb);
++#ifdef CONFIG_STELA
++		/*
++		 * Both inode writeback passes skip noop_backing_dev_info and
++		 * there is no block device to flush. Keep the filesystem's two
++		 * sync callbacks and the early exit on the first error.
++		 */
++		if (!sb_rdonly(sb) && sop->sync_fs && !sop->sync_fs(sb, 0))
++			sop->sync_fs(sb, 1);
++#else
++		sync_filesystem(sb);
++#endif
++		sb->s_flags &= ~SB_ACTIVE;
++
++		fserror_unmount(sb);
++		cgroup_writeback_umount(sb);
++
++		/* Evict all inodes with zero refcount. */
++		evict_inodes(sb);
++
++		/*
++		 * Clean up and evict any inodes that still have references due
++		 * to the security policy.
++		 */
++		security_sb_delete(sb);
++
++		if (sb->s_dio_done_wq) {
++			destroy_workqueue(sb->s_dio_done_wq);
++			sb->s_dio_done_wq = NULL;
++		}
++
++		if (sop->put_super)
++			sop->put_super(sb);
++
++		/*
++		 * Now that all potentially-encrypted inodes have been evicted,
++		 * the fscrypt keyring can be destroyed.
++		 */
++		fscrypt_destroy_keyring(sb);
++
++		if (CHECK_DATA_CORRUPTION(!list_empty(&sb->s_inodes), NULL,
++				"VFS: Busy inodes after unmount of %s (%s)",
++				sb->s_id, sb->s_type->name)) {
++			/*
++			 * Adding a proper bailout path here would be hard, but
++			 * we can at least make it more likely that a later
++			 * iput_final() or such crashes cleanly.
++			 */
++			struct inode *inode;
++
++			spin_lock(&sb->s_inode_list_lock);
++			list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
++				inode->i_op = VFS_PTR_POISON;
++				inode->i_sb = VFS_PTR_POISON;
++				inode->i_mapping = VFS_PTR_POISON;
++			}
++			spin_unlock(&sb->s_inode_list_lock);
++		}
++	}
++	/*
++	 * Broadcast to everyone that grabbed a temporary reference to this
++	 * superblock that it is dying. Every walker of @fs_supers outside
++	 * of sget_fc() will now discard this superblock and treat it as
++	 * dead.
++	 *
++	 * sget_fc() keeps finding the superblock until SB_DEAD is set, so
++	 * a concurrent mounter waits until we passed sb->kill_sb().
++	 */
++	super_wake(sb, SB_DYING);
++	super_unlock_excl(sb);
++#ifndef CONFIG_STELA
++	if (sb->s_bdi != &noop_backing_dev_info) {
++		if (sb->s_iflags & SB_I_PERSB_BDI)
++			bdi_unregister(sb->s_bdi);
++		bdi_put(sb->s_bdi);
++		sb->s_bdi = &noop_backing_dev_info;
++	}
++#endif
++}
++
++EXPORT_SYMBOL(generic_shutdown_super);
++
++void kill_anon_super(struct super_block *sb)
++{
++	dev_t dev = sb->s_dev;
++	generic_shutdown_super(sb);
++	kill_super_notify(sb);
++	free_anon_bdev(dev);
++}
++EXPORT_SYMBOL(kill_anon_super);
