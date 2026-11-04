@@ -138,7 +138,7 @@ struct RawFunction {
     context: *mut c_void,
     read_config: unsafe extern "C" fn(*mut c_void, c_int, c_int, *mut u32) -> c_int,
     write_config: unsafe extern "C" fn(*mut c_void, c_int, c_int, u32) -> c_int,
-    dma_map: unsafe extern "C" fn(*mut c_void, u64, usize, c_uint) -> u64,
+    dma_map: unsafe extern "C" fn(*mut c_void, u64, usize, c_uint, bool) -> u64,
     dma_unmap: unsafe extern "C" fn(*mut c_void, u64, usize, c_uint),
     enable_msi: unsafe extern "C" fn(*mut c_void) -> c_int,
     disable_msi: unsafe extern "C" fn(*mut c_void),
@@ -197,27 +197,27 @@ struct Mappings {
 }
 
 impl Mappings {
-    fn pin(physical: u64, size: usize) -> Option<(u64, DmaPages, Vec<PagePin>)> {
+    /// The offset of `physical` in its page, and the pages `size` bytes span.
+    fn span(physical: u64, size: usize) -> Option<(u64, Vec<u64>)> {
         let offset = physical % PAGE_BYTES;
         let end = physical.checked_add(u64::try_from(size).ok()?.max(1))?;
-        let physical: Vec<_> = (physical - offset..end)
+        let pages = (physical - offset..end)
             .step_by(PAGE_BYTES as usize)
             .collect();
+        Some((offset, pages))
+    }
+
+    fn pin(physical: &[u64]) -> Option<Vec<PagePin>> {
         let mut pins = Vec::new();
         pins.try_reserve_exact(physical.len()).ok()?;
-        for &page in &physical {
+        for &page in physical {
             // SAFETY: map is called in the serialized entered Linux owner.
             // C checks live PFN ownership and retains its provider allocation.
             pins.push(PagePin(NonNull::new(unsafe {
                 stela_linux_page_dma_pin(page)
             })?));
         }
-        // SAFETY: every physical page's original allocation is retained by
-        // pins until successful unmap, or permanently on uncertain teardown.
-        let pages =
-            unsafe { DmaPages::from_physical(physical, PAGE_SHIFT, CacheAttribute::WriteBack) }
-                .ok()?;
-        Some((offset, pages, pins))
+        Some(pins)
     }
 
     fn map(
@@ -226,7 +226,40 @@ impl Mappings {
         size: usize,
         direction: Direction,
     ) -> Result<Option<u64>, DmaError> {
-        let Some((offset, pages, pins)) = Self::pin(physical, size) else {
+        let Some((offset, pins, pages)) = Self::span(physical, size)
+            .and_then(|(offset, pages)| Some((offset, Self::pin(&pages)?, pages)))
+        else {
+            return Ok(None);
+        };
+        self.publish(offset, pages, pins, direction)
+    }
+
+    /// Maps memory Linux has no pages for, which its holder keeps instead.
+    fn map_pageless(
+        &mut self,
+        physical: u64,
+        size: usize,
+        direction: Direction,
+    ) -> Result<Option<u64>, DmaError> {
+        let Some((offset, pages)) = Self::span(physical, size) else {
+            return Ok(None);
+        };
+        self.publish(offset, pages, Vec::new(), direction)
+    }
+
+    fn publish(
+        &mut self,
+        offset: u64,
+        physical: Vec<u64>,
+        pins: Vec<PagePin>,
+        direction: Direction,
+    ) -> Result<Option<u64>, DmaError> {
+        // SAFETY: every physical page's original allocation is retained by
+        // pins, or by a pageless mapping's holder, until successful unmap, or
+        // permanently on uncertain teardown.
+        let Ok(pages) =
+            (unsafe { DmaPages::from_physical(physical, PAGE_SHIFT, CacheAttribute::WriteBack) })
+        else {
             return Ok(None);
         };
         // SAFETY: the real allocation pins and domain survive every uncertain
@@ -365,10 +398,17 @@ unsafe extern "C" fn dma_map<H: Host>(
     physical: u64,
     size: usize,
     linux: c_uint,
+    pageless: bool,
 ) -> u64 {
     // SAFETY: the table's context.
     let state = unsafe { state::<H>(context) };
-    match state.mappings.map(physical, size, direction(linux)) {
+    let direction = direction(linux);
+    let mapped = if pageless {
+        state.mappings.map_pageless(physical, size, direction)
+    } else {
+        state.mappings.map(physical, size, direction)
+    };
+    match mapped {
         Ok(address) => address.unwrap_or(MAPPING_ERROR),
         // The DMA API permits its caller to reuse suballocations immediately
         // after refusal. Allocation pins alone cannot stop slab-slot reuse.

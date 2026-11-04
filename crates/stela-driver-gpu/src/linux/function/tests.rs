@@ -225,6 +225,27 @@ unsafe impl DmaDomain for Identity {
 }
 
 #[test]
+fn pageless_memory_maps_without_a_pin() {
+    if !isolated("linux::function::tests::pageless_memory_maps_without_a_pin") {
+        return;
+    }
+    let _fixture = Fixture::new();
+    let domain = Arc::new(Identity::default());
+    let mut mappings = Mappings {
+        domain: domain.clone(),
+        limit: u64::MAX >> 1,
+        live: BTreeMap::new(),
+    };
+    let address = mappings
+        .map_pageless(0xdead_5010, 0x2000, Direction::Bidirectional)
+        .unwrap();
+    assert_eq!(address, Some(0xdead_5010));
+    assert!(mappings.live[&0xdead_5010][0]._pins.is_empty());
+    mappings.unmap(0xdead_5010).unwrap();
+    assert!(mappings.live.is_empty());
+}
+
+#[test]
 fn the_same_pages_can_be_mapped_twice() {
     if !isolated("linux::function::tests::the_same_pages_can_be_mapped_twice") {
         return;

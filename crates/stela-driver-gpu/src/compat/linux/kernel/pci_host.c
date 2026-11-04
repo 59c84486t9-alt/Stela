@@ -61,8 +61,8 @@ static dma_addr_t map_phys(struct device *dev, phys_addr_t physical, size_t size
 {
 	const struct stela_linux_pci_function *function = of_device(dev);
 
-	(void)attributes;
-	return function->dma_map(function->context, physical, size, direction);
+	return function->dma_map(function->context, physical, size, direction,
+				 attributes & DMA_ATTR_MMIO);
 }
 
 static void unmap_phys(struct device *dev, dma_addr_t address, size_t size,
@@ -263,12 +263,15 @@ static int test_write(void *context, int where, int size, u32 value)
 	return context == config ? 0 : PCIBIOS_SET_FAILED;
 }
 
+static bool last_pageless;
+
 static dma_addr_t test_map(void *context, phys_addr_t physical, size_t size,
-			   enum dma_data_direction direction)
+			   enum dma_data_direction direction, bool pageless)
 {
 	(void)context;
 	(void)size;
 	(void)direction;
+	last_pageless = pageless;
 	if (!fail_map_after)
 		return DMA_MAPPING_ERROR;
 	fail_map_after--;
@@ -336,9 +339,12 @@ int main(void)
 
 	dma_addr_t address = dma_map_phys(&dev->dev, 0x2000, 0x100, DMA_TO_DEVICE, 0);
 
-	assert(address == 0x2000 + BUS_OFFSET && mapped == 1);
+	assert(address == 0x2000 + BUS_OFFSET && mapped == 1 && !last_pageless);
 	dma_unmap_phys(&dev->dev, address, 0x100, DMA_TO_DEVICE, 0);
 	assert(!mapped);
+	address = dma_map_phys(&dev->dev, 0x2000, 0x100, DMA_TO_DEVICE, DMA_ATTR_MMIO);
+	assert(last_pageless);
+	dma_unmap_phys(&dev->dev, address, 0x100, DMA_TO_DEVICE, DMA_ATTR_MMIO);
 
 	/* A failure part way through releases what it mapped. */
 	static struct scatterlist list[2];

@@ -133,10 +133,10 @@ fn terminal(test: &str, map_failure: bool) {
     if map_failure {
         domain.fail_map.store(true, Ordering::Relaxed);
         // SAFETY: exact live state, entered isolated owner and live model pages.
-        unsafe { dma_map::<HostConfig>(context, 0x5010, 0x2000, 1) };
+        unsafe { dma_map::<HostConfig>(context, 0x5010, 0x2000, 1, false) };
     } else {
         // SAFETY: exact live state, entered isolated owner and live model pages.
-        let address = unsafe { dma_map::<HostConfig>(context, 0x5010, 0x2000, 1) };
+        let address = unsafe { dma_map::<HostConfig>(context, 0x5010, 0x2000, 1, false) };
         assert_ne!(address, MAPPING_ERROR);
         domain.fail_unmap.store(true, Ordering::Relaxed);
         // SAFETY: exact callback context and live quiescent model mapping.

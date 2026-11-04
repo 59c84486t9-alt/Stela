@@ -17,13 +17,14 @@ struct stela_linux_pci_region {
 
 /* A physical function its owner enumerated. Configuration accesses return a
  * PCIBIOS result; dma_map returns DMA_MAPPING_ERROR when it cannot map, and
- * dma_limit is the highest address it hands out. */
+ * dma_limit is the highest address it hands out. `pageless` memory is not
+ * Linux's to keep, so its holder keeps it for as long as it stays mapped. */
 struct stela_linux_pci_function {
 	void *context;
 	int (*read_config)(void *context, int where, int size, u32 *value);
 	int (*write_config)(void *context, int where, int size, u32 value);
 	dma_addr_t (*dma_map)(void *context, phys_addr_t physical, size_t size,
-			      enum dma_data_direction direction);
+			      enum dma_data_direction direction, bool pageless);
 	void (*dma_unmap)(void *context, dma_addr_t address, size_t size,
 			  enum dma_data_direction direction);
 	/* Move the function's interrupt from its line to a message and back. The
