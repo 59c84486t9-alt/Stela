@@ -506,25 +506,31 @@ impl Host for BareHost<'_> {
             return state.reset_shadow(Cause::Maintained);
         }
         state.tlb.clear();
-        let mut unmapped = Vec::new();
+        // Most maintenance addresses reach a single extent, without a
+        // large overlapping leaf or a second half.
+        let mut first_range = None;
+        let mut extra_ranges = Vec::new();
+        let mut pages = 0u64;
         let mut whole = false;
         for half in [LOWER, UPPER] {
-            match state.extents[half].ranges(reach, state.half_range(half)) {
-                None => {
-                    state.clear(half);
-                    whole = true;
+            let bounds = state.half_range(half);
+            if !state.extents[half].visit_ranges(reach, bounds, |first, last| {
+                pages = pages.saturating_add(((last >> 12) - (first >> 12)) + 1);
+                if first_range.is_none() {
+                    first_range = Some((first, last));
+                } else {
+                    extra_ranges.push((first, last));
                 }
-                Some(ranges) => unmapped.extend(ranges),
+            }) {
+                state.clear(half);
+                whole = true;
             }
         }
-        let pages = unmapped.iter().fold(0u64, |sum, &(first, last)| {
-            sum.saturating_add(((last >> 12) - (first >> 12)) + 1)
-        });
         const { assert!(INVLPG_PAGES <= u16::BITS as u64) };
         let precise = !whole && pages <= INVLPG_PAGES;
         let current = state.root_of(state.current);
         let mut reload_current = false;
-        for (first, last) in unmapped {
+        for (first, last) in first_range.into_iter().chain(extra_ranges) {
             let base = first & !(PAGE - 1);
             for (view, root) in state.roots.into_iter().enumerate() {
                 let mut removed = 0u16;

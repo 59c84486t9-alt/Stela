@@ -96,38 +96,42 @@ impl Extents {
         self.private
     }
 
-    /// The ranges, first and last byte within `bounds` (this half's
-    /// addresses), that hold every page this half maps from an entry
-    /// `reach` removes; the large leaves among them are forgotten, as the
-    /// caller unmaps them. `None` when the whole half must go.
-    pub fn ranges(&mut self, reach: Reach, bounds: (u64, u64)) -> Option<Vec<(u64, u64)>> {
+    /// Visit the ranges within `bounds` (this half's addresses) that hold
+    /// every page this half maps from an entry `reach` removes. Forget the
+    /// large leaves among them as the caller unmaps them. Return `false`
+    /// without visiting a range when the whole half must go.
+    pub fn visit_ranges(
+        &mut self,
+        reach: Reach,
+        bounds: (u64, u64),
+        mut visit: impl FnMut(u64, u64),
+    ) -> bool {
         let (first, last) = match reach {
-            Reach::Nothing => return Some(Vec::new()),
-            Reach::All => return None,
+            Reach::Nothing => return true,
+            Reach::All => return false,
             Reach::Containing(address) => (address, address),
             Reach::Overlapping { first, last } => (first, last),
         };
         let (low, high) = bounds;
         if last < low || first > high || first > last {
-            return Some(Vec::new());
+            return true;
         }
         if self.overflow {
-            return None;
+            return false;
         }
         let (first, last) = (first.max(low), last.min(high));
-        let mut ranges = Vec::new();
         if self.small != 0 {
             let mask = (1u64 << self.small) - 1;
-            ranges.push(((first & !mask).max(low), (last | mask).min(high)));
+            visit((first & !mask).max(low), (last | mask).min(high));
         }
         self.large.retain(|&(start, end)| {
             let overlaps = start <= last && first <= end;
             if overlaps {
-                ranges.push((start.max(low), end.min(high)));
+                visit(start.max(low), end.min(high));
             }
             !overlaps
         });
-        Some(ranges)
+        true
     }
 }
 
@@ -231,10 +235,7 @@ impl Kept {
         };
         let before = self.halves.len();
         self.halves.retain_mut(|half| {
-            let Some(ranges) = half.extents.ranges(reach, bounds) else {
-                return false;
-            };
-            for &(first, last) in &ranges {
+            half.extents.visit_ranges(reach, bounds, |first, last| {
                 for &(_, entry, value) in &half.entries {
                     let start = (entry as u64) << entry_bits;
                     let end = start | ((1 << entry_bits) - 1);
@@ -242,8 +243,7 @@ impl Kept {
                         unmap(value, first.max(start), last.min(end));
                     }
                 }
-            }
-            true
+            })
         });
         before - self.halves.len()
     }
@@ -255,6 +255,14 @@ mod tests {
 
     const LOWER: (u64, u64) = (0, (1 << 48) - 1);
     const UPPER: (u64, u64) = (0xffff_0000_0000_0000, u64::MAX);
+
+    impl Extents {
+        fn ranges(&mut self, reach: Reach, bounds: (u64, u64)) -> Option<Vec<(u64, u64)>> {
+            let mut ranges = Vec::new();
+            self.visit_ranges(reach, bounds, |first, last| ranges.push((first, last)))
+                .then_some(ranges)
+        }
+    }
 
     #[test]
     fn leaves_and_windows_are_aligned_extents() {
