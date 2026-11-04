@@ -211,8 +211,7 @@ fn map(
 /// the device because it may hold mappings or DMA.
 pub(super) type Failure = (Error, Option<Box<dyn Any>>);
 
-/// Attach an EHCI host controller from its claimed function, BAR0 registers
-/// and requester domain, returning the controller and that domain.
+/// Attach an EHCI host controller with its own requester, BAR0 and DMA arena.
 ///
 /// # Safety
 /// [`NativeServices`]' contract holds for `services`, `clock` is the
@@ -227,7 +226,7 @@ pub(super) unsafe fn ehci(
     services: &dyn NativeServices,
     address: Address,
     clock: Clock,
-) -> Result<(ehci::host::Shared, Arc<dyn DmaDomain>), Failure> {
+) -> Result<ehci::host::Shared, Failure> {
     let refused = |error: ServiceError| (Error::Native(error), None);
     let mut requester = services.prepare_requester(address).map_err(refused)?;
     let bars = requester.function_mut().bars();
@@ -243,7 +242,7 @@ pub(super) unsafe fn ehci(
     // companions. EHCI proves BIOS release and engine HALT, then drains the
     // original root before binding the domain or allocating its arena.
     match unsafe { ehci::attach(resources) } {
-        Ok((controller, domain)) => Ok((Rc::new(RefCell::new(controller)), domain)),
+        Ok((controller, _)) => Ok(Rc::new(RefCell::new(controller))),
         Err(failure) => Err((Error::Ehci(failure.error), Some(Box::new(failure)))),
     }
 }

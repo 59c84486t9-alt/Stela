@@ -1,17 +1,16 @@
 //! Root enumeration and Bulk-Only binding over the native-layout peer.
 use super::*;
-use crate::{Clock, bus::dma::TestRegion, usb::ehci::host::enumerate};
+use crate::{Clock, usb::ehci::host::enumerate};
 use alloc::{rc::Rc, string::String};
 use core::cell::RefCell;
 
 /// What enumerating the peer's root left unused, and how many failures.
 fn enumerated(m: &Arc<Mutex<Shared>>) -> (Vec<(String, &'static str)>, usize) {
-    let mut dma = TestRegion::new(16_384 * 8);
     let controller = Rc::new(RefCell::new(controller(m.clone())));
     let clock = Clock {
         ticks_per_microsecond: 1_000,
     };
-    let found = enumerate(&controller, "ehci", clock, &mut dma);
+    let found = enumerate(&controller, "ehci", clock);
     assert!(found.disks.is_empty());
     (found.unused, found.failures.len())
 }

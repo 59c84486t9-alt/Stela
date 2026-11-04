@@ -1,11 +1,10 @@
 //! Bulk-Only Transport over an EHCI controller's high-speed bulk pipes. The
 //! controller runs one transfer at a time through its own bounce buffer, so
 //! each stage copies through it and completes before the next begins.
-use super::{Bot, COMMAND_US, Io, TransportBuffer, quirks};
+use super::{Bot, Buffer, COMMAND_US, Io, TransportBuffer, quirks};
 use crate::{
     Clock,
     block::BlockError,
-    bus::dma::DmaBuffer,
     usb::{
         descriptor::{Endpoint, Interface, interfaces},
         ehci::{self, host},
@@ -78,6 +77,8 @@ impl EhciBulk {
 }
 
 impl Io for EhciBulk {
+    type Buffer = Vec<u8>;
+
     fn ready(&mut self) -> Result<(), BlockError> {
         self.controller
             .borrow()
@@ -105,7 +106,7 @@ impl Io for EhciBulk {
     fn bulk(
         &mut self,
         endpoint: Endpoint,
-        buffer: &mut DmaBuffer,
+        buffer: &mut Vec<u8>,
         length: usize,
     ) -> Result<usize, BlockError> {
         let pipe = self.pipe(endpoint)?;
@@ -141,14 +142,31 @@ impl Io for EhciBulk {
 
 impl Bot<EhciBulk> {
     /// A Bulk-Only interface of a configured high-speed EHCI device.
-    pub(in crate::usb) fn ehci(
-        io: EhciBulk,
-        setting: &Interface,
-        dma: &mut dyn crate::bus::dma::DmaAllocator,
-    ) -> Result<Self, BlockError> {
+    pub(in crate::usb) fn ehci(mut io: EhciBulk, setting: &Interface) -> Result<Self, BlockError> {
         let flags = quirks::Flags::high_speed(&io.descriptor).map_err(BlockError::Unsupported)?;
         let endpoints = endpoints(setting)?;
-        Self::with_flags(io, setting.number, endpoints, dma, flags)
+        // EHCI copies through its controller-owned DMA arena. BOT's command,
+        // status and payload staging stay in CPU memory for this transport.
+        let staging = |bytes| -> Result<_, BlockError> {
+            let mut buffer = Vec::new();
+            buffer
+                .try_reserve_exact(bytes)
+                .map_err(|_| BlockError::Unsupported("EHCI BOT CPU staging memory exhausted"))?;
+            buffer.resize(bytes, 0);
+            Ok(TransportBuffer::new(buffer))
+        };
+        let buffer = staging(super::MAX_TD)?;
+        let wrapper = staging(64)?;
+        let max_lun = Self::startup(&mut io, setting.number, flags)?;
+        Ok(Self::with_buffers(
+            io,
+            setting.number,
+            endpoints,
+            buffer,
+            wrapper,
+            flags,
+            max_lun,
+        ))
     }
 
     /// Linux `usb_reset_device` for a root device: reset its port, address
@@ -163,7 +181,7 @@ impl Bot<EhciBulk> {
             )
         };
         if !self.buffer.present() || !self.wrapper.present() {
-            return Err(fail("BOT transport DMA owners already transferred"));
+            return Err(fail("BOT transport buffers already transferred"));
         }
         let controller = self.io.controller.clone();
         let port = self.io.device.root_port();
@@ -200,8 +218,8 @@ impl Bot<EhciBulk> {
                 .map_err(|e| (String::from("BOT reset reconstruct transport"), e))?;
             // Every fallible step is done and the old device's handles were
             // retired by the reset; move the unique buffer owners.
-            let mut buffer: TransportBuffer = self.buffer.transfer();
-            let mut wrapper: TransportBuffer = self.wrapper.transfer();
+            let mut buffer = self.buffer.transfer();
+            let mut wrapper = self.wrapper.transfer();
             buffer.bytes_mut().fill(0);
             wrapper.bytes_mut().fill(0);
             Ok(Self::with_buffers(

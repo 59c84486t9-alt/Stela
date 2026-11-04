@@ -80,6 +80,8 @@ struct State {
 #[derive(Clone)]
 struct Model(Rc<RefCell<State>>);
 impl Io for Model {
+    type Buffer = DmaBuffer;
+
     /// The model has no device to isolate.
     fn quarantine(&mut self) {}
     fn ready(&mut self) -> Result<(), BlockError> {
@@ -1488,6 +1490,8 @@ fn malformed_sense_never_invents_a_ready_unit() {
 fn late_discovery_transport_poison_discards_already_probed_units() {
     struct FailSecond(Model);
     impl Io for FailSecond {
+        type Buffer = DmaBuffer;
+
         fn ready(&mut self) -> Result<(), BlockError> {
             self.0.ready()
         }
