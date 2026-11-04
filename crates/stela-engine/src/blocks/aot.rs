@@ -176,7 +176,7 @@ impl BlockRuntime {
         prepare::validate_preparation_native(&manifest, native)?;
         prepare::validate_preparation_claim(&manifest)?;
         validate_source_map(&manifest, pc, source_bytes)?;
-        let prepared = LoadedArtifact::bind(manifest, native)?;
+        let prepared = LoadedArtifact { manifest };
         let block = LoadedBlock::from_artifact(
             self.target,
             profile,
