@@ -59,10 +59,16 @@ impl MemoryExecutionLoan {
 
 impl Drop for MemoryExecutionLoan {
     fn drop(&mut self) {
-        match self.domain.state.lock() {
-            Ok(mut state) => state.native_loans -= 1,
-            Err(_) => self.domain.system.failed.store(true, Ordering::Release),
-        }
+        self.domain.release_execution();
+    }
+}
+
+/// The same exclusion when a thread already keeps the domain alive.
+pub(super) struct BorrowedExecutionLoan<'a>(&'a MemoryDomain);
+
+impl Drop for BorrowedExecutionLoan<'_> {
+    fn drop(&mut self) {
+        self.0.release_execution();
     }
 }
 
@@ -119,19 +125,43 @@ impl MemoryDomain {
     /// Like `execution_loan`, but report a busy host service without waiting.
     /// Only `ServiceBusy` may be retried; errors remain failures.
     pub fn try_execution_loan(self: &Arc<Self>) -> Result<ExecutionLoanAttempt, MemoryStatus> {
+        if self.try_claim_execution()? {
+            Ok(ExecutionLoanAttempt::Acquired(MemoryExecutionLoan {
+                domain: Arc::clone(self),
+            }))
+        } else {
+            Ok(ExecutionLoanAttempt::ServiceBusy)
+        }
+    }
+
+    pub(super) fn borrow_execution(&self) -> Result<BorrowedExecutionLoan<'_>, MemoryStatus> {
+        if self.try_claim_execution()? {
+            Ok(BorrowedExecutionLoan(self))
+        } else {
+            Err(MemoryStatus::Domain)
+        }
+    }
+
+    /// Whether an execution claim succeeded. False means a live service.
+    fn try_claim_execution(&self) -> Result<bool, MemoryStatus> {
         self.check_execution()?;
         let mut state = self.state.lock().map_err(|_| MemoryStatus::Domain)?;
         self.check_execution()?;
         if state.servicing {
-            return Ok(ExecutionLoanAttempt::ServiceBusy);
+            return Ok(false);
         }
         state.native_loans = state
             .native_loans
             .checked_add(1)
             .ok_or(MemoryStatus::Domain)?;
-        Ok(ExecutionLoanAttempt::Acquired(MemoryExecutionLoan {
-            domain: Arc::clone(self),
-        }))
+        Ok(true)
+    }
+
+    fn release_execution(&self) {
+        match self.state.lock() {
+            Ok(mut state) => state.native_loans -= 1,
+            Err(_) => self.system.failed.store(true, Ordering::Release),
+        }
     }
 
     pub(in crate::memory) fn service_loan(

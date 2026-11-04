@@ -48,7 +48,7 @@ pub mod pch;
 
 use super::{
     HEADER, Link, LinkError, MAX_FRAME, MIN_FRAME, Mac, check_frame,
-    ring::{DESCRIPTOR, DESCRIPTORS, Ring},
+    ring::{DESCRIPTOR, DESCRIPTORS, Ring, write_transmit_frame},
 };
 use crate::{
     Clock, Handoff,
@@ -661,9 +661,7 @@ impl Link for E1000e {
         }
         let index = self.transmit.advance();
         let length = frame.len().max(MIN_FRAME);
-        let buffer = self.transmit.buffer(index);
-        buffer[..length].fill(0);
-        buffer[..frame.len()].copy_from_slice(frame);
+        write_transmit_frame(self.transmit.buffer(index), frame, length);
         let base = index * DESCRIPTOR;
         let address = self.transmit.address(index);
         self.transmit.descriptors.write(base, address);
