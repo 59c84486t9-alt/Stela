@@ -165,6 +165,8 @@
 /mm/folio_fs.c
 /mm/pagecache_wait.h
 /mm/page-writeback.c
+/mm/writeback_io.c
+/mm/writeback_throttle.h
 /mm/writeback_folio.c
 /mm/folio-compat.c
 /mm/writeback_domain.c

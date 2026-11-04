@@ -145,6 +145,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/mm/shrinker.c")),
             PathBuf::from(format!("{LINUX}/mm/reclaim_throttle.c")),
             PathBuf::from(format!("{LINUX}/mm/workingset.c")),
+            PathBuf::from(format!("{LINUX}/mm/page-writeback.c")),
             PathBuf::from(format!("{LINUX}/mm/writeback_domain.c")),
             PathBuf::from(format!("{LINUX}/mm/writeback_folio.c")),
             PathBuf::from(format!("{LINUX}/mm/backing-dev-inode.c")),
@@ -438,6 +439,16 @@ impl Linux {
                 &archives,
             );
         }
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+            let mut writeback = build.clone();
+            writeback.flag("-Wl,--wrap=stela_linux_current");
+            tests.add(
+                &writeback,
+                "linux_writeback_init",
+                &format!("{COMPAT}/stela/writeback_init_test.c"),
+                &archives,
+            );
+        }
         // These component fixtures use init_task credentials without a native
         // task lease. Only their ELF links wrap current.
         if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
@@ -527,11 +538,6 @@ impl Linux {
             ("linux_pci", "pci.c", "STELA_LINUX_PCI_TEST"),
             ("linux_pci_host", "pci_host.c", "STELA_LINUX_PCI_HOST_TEST"),
             ("linux_service", "service.c", "STELA_LINUX_SERVICE_TEST"),
-            (
-                "linux_writeback_init",
-                "writeback_init.c",
-                "STELA_LINUX_WRITEBACK_INIT_TEST",
-            ),
             ("linux_vmalloc", "vmalloc.c", "STELA_LINUX_VMALLOC_TEST"),
             ("linux_refcount", "refcount.c", "STELA_LINUX_REFCOUNT_TEST"),
             (

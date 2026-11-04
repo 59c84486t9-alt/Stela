@@ -1,0 +1,1589 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 01:03:39 -0500
+Subject: [PATCH] refactor(mm): separate original dirty throttling from
+ writeout
+
+---
+ fs/fs-writeback.c       |  65 ----
+ fs/inode_evict.c        |  65 ++++
+ fs/writeback_inode.h    |   2 +
+ mm/Makefile             |   2 +-
+ mm/page-writeback.c     | 635 ++------------------------------------
+ mm/writeback_io.c       | 658 ++++++++++++++++++++++++++++++++++++++++
+ mm/writeback_throttle.h |   9 +
+ 7 files changed, 760 insertions(+), 676 deletions(-)
+ create mode 100644 mm/writeback_io.c
+ create mode 100644 mm/writeback_throttle.h
+
+diff --git a/fs/fs-writeback.c b/fs/fs-writeback.c
+index b545df1e21342f856a29f913a8761ec480933ede..e6e54b5fabfa037dfce3f7c445a6a79487b74374 100644
+--- a/fs/fs-writeback.c
++++ b/fs/fs-writeback.c
+@@ -67,14 +67,6 @@ static inline struct inode *wb_inode(struct list_head *head)
+ 
+ EXPORT_TRACEPOINT_SYMBOL_GPL(wbc_writepage);
+ 
+-static void wb_wakeup(struct bdi_writeback *wb)
+-{
+-	spin_lock_irq(&wb->work_lock);
+-	if (test_bit(WB_registered, &wb->state))
+-		mod_delayed_work(bdi_wq, &wb->dwork, 0);
+-	spin_unlock_irq(&wb->work_lock);
+-}
+-
+ static void finish_writeback_work(struct wb_writeback_work *work)
+ {
+ 	struct wb_completion *done = work->done;
+@@ -1192,26 +1184,6 @@ static void wb_start_writeback(struct bdi_writeback *wb, enum wb_reason reason)
+ 	wb_wakeup(wb);
+ }
+ 
+-/**
+- * wb_start_background_writeback - start background writeback
+- * @wb: bdi_writback to write from
+- *
+- * Description:
+- *   This makes sure WB_SYNC_NONE background writeback happens. When
+- *   this function returns, it is only guaranteed that for given wb
+- *   some IO is happening if we are over background dirty threshold.
+- *   Caller need not hold sb s_umount semaphore.
+- */
+-void wb_start_background_writeback(struct bdi_writeback *wb)
+-{
+-	/*
+-	 * We just wake up the flusher thread. It will perform background
+-	 * writeback as soon as there is no other work to do.
+-	 */
+-	trace_writeback_wake_background(wb);
+-	wb_wakeup(wb);
+-}
+-
+ /*
+  * mark an inode as under writeback on the sb
+  */
+@@ -2037,43 +2009,6 @@ void wakeup_flusher_threads_bdi(struct backing_dev_info *bdi,
+ 	rcu_read_unlock();
+ }
+ 
+-/**
+- * filemap_dontcache_kick_writeback - kick flusher for IOCB_DONTCACHE writes
+- * @mapping:	address_space that was just written to
+- *
+- * Kick the writeback flusher thread to expedite writeback of dontcache dirty
+- * pages. Queue writeback for the inode's wb for as many pages as there are
+- * dontcache pages, but don't restrict writeback to dontcache pages only.
+- *
+- * This significantly improves performance over either writing all wb's pages
+- * or writing only dontcache pages.  Although it doesn't guarantee quick
+- * writeback and reclaim of dontcache pages, it keeps the amount of dirty pages
+- * in check. Over longer term dontcache pages get written and reclaimed by
+- * background writeback even with this rough heuristic.
+- */
+-void filemap_dontcache_kick_writeback(struct address_space *mapping)
+-{
+-	struct inode *inode = mapping->host;
+-	struct bdi_writeback *wb;
+-	struct wb_lock_cookie cookie = {};
+-	bool need_wakeup = false;
+-
+-	wb = unlocked_inode_to_wb_begin(inode, &cookie);
+-	if (wb_has_dirty_io(wb) &&
+-	    !test_bit(WB_start_dontcache, &wb->state) &&
+-	    !test_and_set_bit(WB_start_dontcache, &wb->state)) {
+-		wb_get(wb);
+-		need_wakeup = true;
+-	}
+-	unlocked_inode_to_wb_end(inode, &cookie);
+-
+-	if (need_wakeup) {
+-		wb_wakeup(wb);
+-		wb_put(wb);
+-	}
+-}
+-EXPORT_SYMBOL_GPL(filemap_dontcache_kick_writeback);
+-
+ /*
+  * Wakeup the flusher threads to start writeback of all currently dirty pages
+  */
+diff --git a/fs/inode_evict.c b/fs/inode_evict.c
+index 216f1543be6e919e6768b88e38ffde11d9606d59..4e8bea69eed87bb8b3fde4b949fbb091071abe04 100644
+--- a/fs/inode_evict.c
++++ b/fs/inode_evict.c
+@@ -316,6 +316,71 @@ bool wb_io_lists_populated(struct bdi_writeback *wb)
+ 	}
+ }
+ 
++void wb_wakeup(struct bdi_writeback *wb)
++{
++	spin_lock_irq(&wb->work_lock);
++	if (test_bit(WB_registered, &wb->state))
++		mod_delayed_work(bdi_wq, &wb->dwork, 0);
++	spin_unlock_irq(&wb->work_lock);
++}
++
++/**
++ * wb_start_background_writeback - start background writeback
++ * @wb: bdi_writback to write from
++ *
++ * Description:
++ *   This makes sure WB_SYNC_NONE background writeback happens. When
++ *   this function returns, it is only guaranteed that for given wb
++ *   some IO is happening if we are over background dirty threshold.
++ *   Caller need not hold sb s_umount semaphore.
++ */
++void wb_start_background_writeback(struct bdi_writeback *wb)
++{
++	/*
++	 * We just wake up the flusher thread. It will perform background
++	 * writeback as soon as there is no other work to do.
++	 */
++	trace_writeback_wake_background(wb);
++	wb_wakeup(wb);
++}
++
++/**
++ * filemap_dontcache_kick_writeback - kick flusher for IOCB_DONTCACHE writes
++ * @mapping:	address_space that was just written to
++ *
++ * Kick the writeback flusher thread to expedite writeback of dontcache dirty
++ * pages. Queue writeback for the inode's wb for as many pages as there are
++ * dontcache pages, but don't restrict writeback to dontcache pages only.
++ *
++ * This significantly improves performance over either writing all wb's pages
++ * or writing only dontcache pages.  Although it doesn't guarantee quick
++ * writeback and reclaim of dontcache pages, it keeps the amount of dirty pages
++ * in check. Over longer term dontcache pages get written and reclaimed by
++ * background writeback even with this rough heuristic.
++ */
++void filemap_dontcache_kick_writeback(struct address_space *mapping)
++{
++	struct inode *inode = mapping->host;
++	struct bdi_writeback *wb;
++	struct wb_lock_cookie cookie = {};
++	bool need_wakeup = false;
++
++	wb = unlocked_inode_to_wb_begin(inode, &cookie);
++	if (wb_has_dirty_io(wb) &&
++	    !test_bit(WB_start_dontcache, &wb->state) &&
++	    !test_and_set_bit(WB_start_dontcache, &wb->state)) {
++		wb_get(wb);
++		need_wakeup = true;
++	}
++	unlocked_inode_to_wb_end(inode, &cookie);
++
++	if (need_wakeup) {
++		wb_wakeup(wb);
++		wb_put(wb);
++	}
++}
++EXPORT_SYMBOL_GPL(filemap_dontcache_kick_writeback);
++
+ /**
+  * inode_io_list_move_locked - move an inode onto a bdi_writeback IO list
+  * @inode: inode to be moved
+diff --git a/fs/writeback_inode.h b/fs/writeback_inode.h
+index 8bb33017328b09e823797ba64e88a30847a8a049..dca47bb68c28358b07f1615b11f9ea7977e7e0eb 100644
+--- a/fs/writeback_inode.h
++++ b/fs/writeback_inode.h
+@@ -125,4 +125,6 @@ static inline struct bdi_writeback *inode_to_wb_and_lock_list(struct inode *inod
+ 
+ #endif
+ 
++void wb_wakeup(struct bdi_writeback *wb);
++
+ #endif
+diff --git a/mm/Makefile b/mm/Makefile
+index 24a1d8750fe27c8cf3cbb1a938d0d781b8ad59ba..ca7cf0278e2c5ddfdf15a4cc78747f50dd46826d 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -49,7 +49,7 @@ mmu-$(CONFIG_MMU)	+= mseal.o
+ endif
+ 
+ obj-y			:= filemap.o pagecache_init.o folio_wait.o folio_fs.o mempool.o oom_kill.o oom_adj.o fadvise.o \
+-			   maccess.o page-writeback.o writeback_folio.o writeback_domain.o folio-compat.o \
++			   maccess.o page-writeback.o writeback_io.o writeback_folio.o writeback_domain.o folio-compat.o \
+ 			   readahead.o swap.o filemap_batch.o truncate.o vmscan.o reclaim_throttle.o shrinker.o \
+ 			   shmem.o util.o mmzone.o lruvec.o vmstat.o vmstat_init.o backing-dev.o backing-dev-inode.o \
+ 			   mm_init.o percpu.o slab_common.o kvfree_rcu.o \
+diff --git a/mm/page-writeback.c b/mm/page-writeback.c
+index 26ce52aed13e110585954f164e57181e12f74c9f..600e8bba408d32f6d27ff1210a00a829a1833e32 100644
+--- a/mm/page-writeback.c
++++ b/mm/page-writeback.c
+@@ -44,6 +44,14 @@
+ #include "internal.h"
+ #include "writeback_domain.h"
+ 
++#ifdef CONFIG_STELA
++#include <stela/linux.h>
++#include <stela/page.h>
++#endif
++
++#include "writeback_throttle.h"
++
++
+ /*
+  * Sleep at most 200ms at a time in balance_dirty_pages().
+  */
+@@ -130,11 +138,6 @@ static struct dirty_throttle_control *mdtc_gdtc(struct dirty_throttle_control *m
+ 	return mdtc->gdtc;
+ }
+ 
+-static struct fprop_local_percpu *wb_memcg_completions(struct bdi_writeback *wb)
+-{
+-	return &wb->memcg_completions;
+-}
+-
+ static void wb_min_max_ratio(struct bdi_writeback *wb,
+ 			     unsigned long *minp, unsigned long *maxp)
+ {
+@@ -184,11 +187,6 @@ static struct dirty_throttle_control *mdtc_gdtc(struct dirty_throttle_control *m
+ 	return NULL;
+ }
+ 
+-static struct fprop_local_percpu *wb_memcg_completions(struct bdi_writeback *wb)
+-{
+-	return NULL;
+-}
+-
+ static void wb_min_max_ratio(struct bdi_writeback *wb,
+ 			     unsigned long *minp, unsigned long *maxp)
+ {
+@@ -300,6 +298,10 @@ static unsigned long global_dirtyable_memory(void)
+ {
+ 	unsigned long x;
+ 
++#ifdef CONFIG_STELA
++	if (stela_linux_available_page_frames(&x))
++		stela_linux_fatal("writeback free-frame snapshot unavailable");
++#else
+ 	x = global_zone_page_state(NR_FREE_PAGES);
+ 	/*
+ 	 * Pages reserved for the kernel should not be considered
+@@ -307,6 +309,7 @@ static unsigned long global_dirtyable_memory(void)
+ 	 * clean pages in order to balance the zones.
+ 	 */
+ 	x -= min(x, totalreserve_pages);
++#endif
+ 
+ 	x += global_node_page_state(NR_INACTIVE_FILE);
+ 	x += global_node_page_state(NR_ACTIVE_FILE);
+@@ -520,53 +523,6 @@ static int dirty_bytes_handler(const struct ctl_table *table, int write,
+ }
+ #endif
+ 
+-static void wb_domain_writeout_add(struct wb_domain *dom,
+-				   struct fprop_local_percpu *completions,
+-				   unsigned int max_prop_frac, long nr)
+-{
+-	__fprop_add_percpu_max(&dom->completions, completions,
+-			       max_prop_frac, nr);
+-	/* First event after period switching was turned off? */
+-	if (unlikely(!dom->period_time)) {
+-		/*
+-		 * We can race with other wb_domain_writeout_add calls here but
+-		 * it does not cause any harm since the resulting time when
+-		 * timer will fire and what is in writeout_period_time will be
+-		 * roughly the same.
+-		 */
+-		dom->period_time = wp_next_time(jiffies);
+-		mod_timer(&dom->period_timer, dom->period_time);
+-	}
+-}
+-
+-/*
+- * Increment @wb's writeout completion count and the global writeout
+- * completion count. Called from __folio_end_writeback().
+- */
+-static inline void __wb_writeout_add(struct bdi_writeback *wb, long nr)
+-{
+-	struct wb_domain *cgdom;
+-
+-	wb_stat_mod(wb, WB_WRITTEN, nr);
+-	wb_domain_writeout_add(&global_wb_domain, &wb->completions,
+-			       wb->bdi->max_prop_frac, nr);
+-
+-	cgdom = mem_cgroup_wb_domain(wb);
+-	if (cgdom)
+-		wb_domain_writeout_add(cgdom, wb_memcg_completions(wb),
+-				       wb->bdi->max_prop_frac, nr);
+-}
+-
+-void wb_writeout_inc(struct bdi_writeback *wb)
+-{
+-	unsigned long flags;
+-
+-	local_irq_save(flags);
+-	__wb_writeout_add(wb, 1);
+-	local_irq_restore(flags);
+-}
+-EXPORT_SYMBOL_GPL(wb_writeout_inc);
+-
+ /*
+  * bdi_min_ratio keeps the sum of the minimum dirty shares of all
+  * registered backing devices, which, for obvious reasons, can not
+@@ -1853,7 +1809,7 @@ pause:
+ 	return ret;
+ }
+ 
+-static DEFINE_PER_CPU(int, bdp_ratelimits);
++DEFINE_PER_CPU(int, bdp_ratelimits);
+ 
+ /*
+  * Normal tasks are throttled by
+@@ -2178,565 +2134,24 @@ static const struct ctl_table vm_page_writeback_sysctls[] = {
+  */
+ void __init page_writeback_init(void)
+ {
++#ifdef CONFIG_STELA
++	if (wb_domain_init(&global_wb_domain, GFP_KERNEL))
++		stela_linux_fatal("writeback domain initialization failed");
++
++	if (cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "mm/writeback:online",
++			      page_writeback_cpu_online, NULL) < 0 ||
++	    cpuhp_setup_state(CPUHP_MM_WRITEBACK_DEAD, "mm/writeback:dead",
++			      NULL, page_writeback_cpu_online) < 0)
++		stela_linux_fatal("writeback CPU state registration failed");
++#else
+ 	BUG_ON(wb_domain_init(&global_wb_domain, GFP_KERNEL));
+ 
+ 	cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "mm/writeback:online",
+ 			  page_writeback_cpu_online, NULL);
+ 	cpuhp_setup_state(CPUHP_MM_WRITEBACK_DEAD, "mm/writeback:dead", NULL,
+ 			  page_writeback_cpu_online);
++#endif
+ #ifdef CONFIG_SYSCTL
+ 	register_sysctl_init("vm", vm_page_writeback_sysctls);
+ #endif
+ }
+-
+-/**
+- * tag_pages_for_writeback - tag pages to be written by writeback
+- * @mapping: address space structure to write
+- * @start: starting page index
+- * @end: ending page index (inclusive)
+- *
+- * This function scans the page range from @start to @end (inclusive) and tags
+- * all pages that have DIRTY tag set with a special TOWRITE tag.  The caller
+- * can then use the TOWRITE tag to identify pages eligible for writeback.
+- * This mechanism is used to avoid livelocking of writeback by a process
+- * steadily creating new dirty pages in the file (thus it is important for this
+- * function to be quick so that it can tag pages faster than a dirtying process
+- * can create them).
+- */
+-void tag_pages_for_writeback(struct address_space *mapping,
+-			     pgoff_t start, pgoff_t end)
+-{
+-	XA_STATE(xas, &mapping->i_pages, start);
+-	unsigned int tagged = 0;
+-	void *page;
+-
+-	xas_lock_irq(&xas);
+-	xas_for_each_marked(&xas, page, end, PAGECACHE_TAG_DIRTY) {
+-		xas_set_mark(&xas, PAGECACHE_TAG_TOWRITE);
+-		if (++tagged % XA_CHECK_SCHED)
+-			continue;
+-
+-		xas_pause(&xas);
+-		xas_unlock_irq(&xas);
+-		cond_resched();
+-		xas_lock_irq(&xas);
+-	}
+-	xas_unlock_irq(&xas);
+-}
+-EXPORT_SYMBOL(tag_pages_for_writeback);
+-
+-static bool folio_prepare_writeback(struct address_space *mapping,
+-		struct writeback_control *wbc, struct folio *folio)
+-{
+-	/*
+-	 * Folio truncated or invalidated. We can freely skip it then,
+-	 * even for data integrity operations: the folio has disappeared
+-	 * concurrently, so there could be no real expectation of this
+-	 * data integrity operation even if there is now a new, dirty
+-	 * folio at the same pagecache index.
+-	 */
+-	if (unlikely(folio->mapping != mapping))
+-		return false;
+-
+-	/*
+-	 * Did somebody else write it for us?
+-	 */
+-	if (!folio_test_dirty(folio))
+-		return false;
+-
+-	if (folio_test_writeback(folio)) {
+-		if (wbc->sync_mode == WB_SYNC_NONE)
+-			return false;
+-		folio_wait_writeback(folio);
+-	}
+-	BUG_ON(folio_test_writeback(folio));
+-
+-	if (!folio_clear_dirty_for_io(folio))
+-		return false;
+-
+-	return true;
+-}
+-
+-
+-static pgoff_t wbc_end(struct writeback_control *wbc)
+-{
+-	if (wbc->range_cyclic)
+-		return -1;
+-	return wbc->range_end >> PAGE_SHIFT;
+-}
+-
+-static struct folio *writeback_get_folio(struct address_space *mapping,
+-		struct writeback_control *wbc)
+-{
+-	struct folio *folio;
+-
+-retry:
+-	folio = folio_batch_next(&wbc->fbatch);
+-	if (!folio) {
+-		folio_batch_release(&wbc->fbatch);
+-		cond_resched();
+-		filemap_get_folios_tag(mapping, &wbc->index, wbc_end(wbc),
+-				wbc_to_tag(wbc), &wbc->fbatch);
+-		folio = folio_batch_next(&wbc->fbatch);
+-		if (!folio)
+-			return NULL;
+-	}
+-
+-	folio_lock(folio);
+-	if (unlikely(!folio_prepare_writeback(mapping, wbc, folio))) {
+-		folio_unlock(folio);
+-		goto retry;
+-	}
+-
+-	trace_wbc_writepage(wbc, inode_to_bdi(mapping->host));
+-	return folio;
+-}
+-
+-/**
+- * writeback_iter - iterate folio of a mapping for writeback
+- * @mapping: address space structure to write
+- * @wbc: writeback context
+- * @folio: previously iterated folio (%NULL to start)
+- * @error: in-out pointer for writeback errors (see below)
+- *
+- * This function returns the next folio for the writeback operation described by
+- * @wbc on @mapping and  should be called in a while loop in the ->writepages
+- * implementation.
+- *
+- * To start the writeback operation, %NULL is passed in the @folio argument, and
+- * for every subsequent iteration the folio returned previously should be passed
+- * back in.
+- *
+- * If there was an error in the per-folio writeback inside the writeback_iter()
+- * loop, @error should be set to the error value.
+- *
+- * Once the writeback described in @wbc has finished, this function will return
+- * %NULL and if there was an error in any iteration restore it to @error.
+- *
+- * Note: callers should not manually break out of the loop using break or goto
+- * but must keep calling writeback_iter() until it returns %NULL.
+- *
+- * Return: the folio to write or %NULL if the loop is done.
+- */
+-struct folio *writeback_iter(struct address_space *mapping,
+-		struct writeback_control *wbc, struct folio *folio, int *error)
+-{
+-	if (!folio) {
+-		folio_batch_init(&wbc->fbatch);
+-		wbc->saved_err = *error = 0;
+-
+-		/*
+-		 * For range cyclic writeback we remember where we stopped so
+-		 * that we can continue where we stopped.
+-		 *
+-		 * For non-cyclic writeback we always start at the beginning of
+-		 * the passed in range.
+-		 */
+-		if (wbc->range_cyclic)
+-			wbc->index = mapping->writeback_index;
+-		else
+-			wbc->index = wbc->range_start >> PAGE_SHIFT;
+-
+-		/*
+-		 * To avoid livelocks when other processes dirty new pages, we
+-		 * first tag pages which should be written back and only then
+-		 * start writing them.
+-		 *
+-		 * For data-integrity writeback we have to be careful so that we
+-		 * do not miss some pages (e.g., because some other process has
+-		 * cleared the TOWRITE tag we set).  The rule we follow is that
+-		 * TOWRITE tag can be cleared only by the process clearing the
+-		 * DIRTY tag (and submitting the page for I/O).
+-		 */
+-		if (wbc->sync_mode == WB_SYNC_ALL || wbc->tagged_writepages)
+-			tag_pages_for_writeback(mapping, wbc->index,
+-					wbc_end(wbc));
+-	} else {
+-		wbc->nr_to_write -= folio_nr_pages(folio);
+-
+-		WARN_ON_ONCE(*error > 0);
+-
+-		/*
+-		 * For integrity writeback we have to keep going until we have
+-		 * written all the folios we tagged for writeback above, even if
+-		 * we run past wbc->nr_to_write or encounter errors.
+-		 * We stash away the first error we encounter in wbc->saved_err
+-		 * so that it can be retrieved when we're done.  This is because
+-		 * the file system may still have state to clear for each folio.
+-		 *
+-		 * For background writeback we exit as soon as we run past
+-		 * wbc->nr_to_write or encounter the first error.
+-		 */
+-		if (wbc->sync_mode == WB_SYNC_ALL) {
+-			if (*error && !wbc->saved_err)
+-				wbc->saved_err = *error;
+-		} else {
+-			if (*error || wbc->nr_to_write <= 0)
+-				goto done;
+-		}
+-	}
+-
+-	folio = writeback_get_folio(mapping, wbc);
+-	if (!folio) {
+-		/*
+-		 * To avoid deadlocks between range_cyclic writeback and callers
+-		 * that hold folios in writeback to aggregate I/O until
+-		 * the writeback iteration finishes, we do not loop back to the
+-		 * start of the file.  Doing so causes a folio lock/folio
+-		 * writeback access order inversion - we should only ever lock
+-		 * multiple folios in ascending folio->index order, and looping
+-		 * back to the start of the file violates that rule and causes
+-		 * deadlocks.
+-		 */
+-		if (wbc->range_cyclic)
+-			mapping->writeback_index = 0;
+-
+-		/*
+-		 * Return the first error we encountered (if there was any) to
+-		 * the caller.
+-		 */
+-		*error = wbc->saved_err;
+-	}
+-	return folio;
+-
+-done:
+-	if (wbc->range_cyclic)
+-		mapping->writeback_index = folio_next_index(folio);
+-	folio_batch_release(&wbc->fbatch);
+-	return NULL;
+-}
+-EXPORT_SYMBOL_GPL(writeback_iter);
+-
+-/*
+- * Helper function for set_page_dirty family.
+- *
+- * NOTE: This relies on being atomic wrt interrupts.
+- */
+-static void folio_account_dirtied(struct folio *folio,
+-		struct address_space *mapping)
+-{
+-	struct inode *inode = mapping->host;
+-
+-	trace_writeback_dirty_folio(folio, mapping);
+-
+-	if (mapping_can_writeback(mapping)) {
+-		struct bdi_writeback *wb;
+-		long nr = folio_nr_pages(folio);
+-
+-		inode_attach_wb(inode, folio);
+-		wb = inode_to_wb(inode);
+-
+-		lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, nr);
+-		if (folio_test_dropbehind(folio))
+-			wb_stat_mod(wb, WB_DONTCACHE_DIRTY, nr);
+-		__zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, nr);
+-		__node_stat_mod_folio(folio, NR_DIRTIED, nr);
+-		wb_stat_mod(wb, WB_RECLAIMABLE, nr);
+-		wb_stat_mod(wb, WB_DIRTIED, nr);
+-		task_io_account_write(nr * PAGE_SIZE);
+-		current->nr_dirtied += nr;
+-		__this_cpu_add(bdp_ratelimits, nr);
+-
+-		mem_cgroup_track_foreign_dirty(folio, wb);
+-	}
+-}
+-
+-/*
+- * Mark the folio dirty, and set it dirty in the page cache.
+- *
+- * If warn is true, then emit a warning if the folio is not uptodate and has
+- * not been truncated.
+- *
+- * It is the caller's responsibility to prevent the folio from being truncated
+- * while this function is in progress, although it may have been truncated
+- * before this function is called.  Most callers have the folio locked.
+- * A few have the folio blocked from truncation through other means (e.g.
+- * zap_vma() has it mapped and is holding the page table lock).
+- * When called from mark_buffer_dirty(), the filesystem should hold a
+- * reference to the buffer_head that is being marked dirty, which causes
+- * try_to_free_buffers() to fail.
+- */
+-void __folio_mark_dirty(struct folio *folio, struct address_space *mapping,
+-			     int warn)
+-{
+-	unsigned long flags;
+-
+-	/*
+-	 * Shmem writeback relies on swap, and swap writeback is LRU based,
+-	 * not using the dirty mark.
+-	 */
+-	VM_WARN_ON_ONCE(folio_test_swapcache(folio) || shmem_mapping(mapping));
+-
+-	xa_lock_irqsave(&mapping->i_pages, flags);
+-	if (folio->mapping) {	/* Race with truncate? */
+-		WARN_ON_ONCE(warn && !folio_test_uptodate(folio));
+-		folio_account_dirtied(folio, mapping);
+-		__xa_set_mark(&mapping->i_pages, folio->index,
+-			      PAGECACHE_TAG_DIRTY);
+-	}
+-	xa_unlock_irqrestore(&mapping->i_pages, flags);
+-}
+-
+-/**
+- * filemap_dirty_folio - Mark a folio dirty for filesystems which do not use buffer_heads.
+- * @mapping: Address space this folio belongs to.
+- * @folio: Folio to be marked as dirty.
+- *
+- * Filesystems which do not use buffer heads should call this function
+- * from their dirty_folio address space operation.  It ignores the
+- * contents of folio_get_private(), so if the filesystem marks individual
+- * blocks as dirty, the filesystem should handle that itself.
+- *
+- * This is also sometimes used by filesystems which use buffer_heads when
+- * a single buffer is being dirtied: we want to set the folio dirty in
+- * that case, but not all the buffers.  This is a "bottom-up" dirtying,
+- * whereas block_dirty_folio() is a "top-down" dirtying.
+- *
+- * The caller must ensure this doesn't race with truncation.  Most will
+- * simply hold the folio lock, but e.g. zap_pte_range() calls with the
+- * folio mapped and the pte lock held, which also locks out truncation.
+- */
+-bool filemap_dirty_folio(struct address_space *mapping, struct folio *folio)
+-{
+-	if (folio_test_set_dirty(folio))
+-		return false;
+-
+-	__folio_mark_dirty(folio, mapping, !folio_test_private(folio));
+-
+-	if (mapping->host) {
+-		/* !PageAnon && !swapper_space */
+-		__mark_inode_dirty(mapping->host, I_DIRTY_PAGES);
+-	}
+-	return true;
+-}
+-EXPORT_SYMBOL(filemap_dirty_folio);
+-
+-/**
+- * folio_redirty_for_writepage - Decline to write a dirty folio.
+- * @wbc: The writeback control.
+- * @folio: The folio.
+- *
+- * When a writepage implementation decides that it doesn't want to write
+- * @folio for some reason, it should call this function, unlock @folio and
+- * return 0.
+- *
+- * Return: True if we redirtied the folio.  False if someone else dirtied
+- * it first.
+- */
+-bool folio_redirty_for_writepage(struct writeback_control *wbc,
+-		struct folio *folio)
+-{
+-	struct address_space *mapping = folio->mapping;
+-	long nr = folio_nr_pages(folio);
+-	bool ret;
+-
+-	wbc->pages_skipped += nr;
+-	ret = filemap_dirty_folio(mapping, folio);
+-	if (mapping && mapping_can_writeback(mapping)) {
+-		struct inode *inode = mapping->host;
+-		struct bdi_writeback *wb;
+-		struct wb_lock_cookie cookie = {};
+-
+-		wb = unlocked_inode_to_wb_begin(inode, &cookie);
+-		current->nr_dirtied -= nr;
+-		node_stat_mod_folio(folio, NR_DIRTIED, -nr);
+-		wb_stat_mod(wb, WB_DIRTIED, -nr);
+-		unlocked_inode_to_wb_end(inode, &cookie);
+-	}
+-	return ret;
+-}
+-EXPORT_SYMBOL(folio_redirty_for_writepage);
+-
+-/*
+- * Clear a folio's dirty flag, while caring for dirty memory accounting.
+- * Returns true if the folio was previously dirty.
+- *
+- * This is for preparing to put the folio under writeout.  We leave
+- * the folio tagged as dirty in the xarray so that a concurrent
+- * write-for-sync can discover it via a PAGECACHE_TAG_DIRTY walk.
+- * The ->writepage implementation will run either folio_start_writeback()
+- * or folio_mark_dirty(), at which stage we bring the folio's dirty flag
+- * and xarray dirty tag back into sync.
+- *
+- * This incoherency between the folio's dirty flag and xarray tag is
+- * unfortunate, but it only exists while the folio is locked.
+- */
+-bool folio_clear_dirty_for_io(struct folio *folio)
+-{
+-	struct address_space *mapping = folio_mapping(folio);
+-	bool ret = false;
+-
+-	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+-
+-	if (mapping && mapping_can_writeback(mapping)) {
+-		struct inode *inode = mapping->host;
+-		struct bdi_writeback *wb;
+-		struct wb_lock_cookie cookie = {};
+-
+-		/*
+-		 * Yes, Virginia, this is indeed insane.
+-		 *
+-		 * We use this sequence to make sure that
+-		 *  (a) we account for dirty stats properly
+-		 *  (b) we tell the low-level filesystem to
+-		 *      mark the whole folio dirty if it was
+-		 *      dirty in a pagetable. Only to then
+-		 *  (c) clean the folio again and return 1 to
+-		 *      cause the writeback.
+-		 *
+-		 * This way we avoid all nasty races with the
+-		 * dirty bit in multiple places and clearing
+-		 * them concurrently from different threads.
+-		 *
+-		 * Note! Normally the "folio_mark_dirty(folio)"
+-		 * has no effect on the actual dirty bit - since
+-		 * that will already usually be set. But we
+-		 * need the side effects, and it can help us
+-		 * avoid races.
+-		 *
+-		 * We basically use the folio "master dirty bit"
+-		 * as a serialization point for all the different
+-		 * threads doing their things.
+-		 */
+-		if (folio_mkclean(folio))
+-			folio_mark_dirty(folio);
+-		/*
+-		 * We carefully synchronise fault handlers against
+-		 * installing a dirty pte and marking the folio dirty
+-		 * at this point.  We do this by having them hold the
+-		 * page lock while dirtying the folio, and folios are
+-		 * always locked coming in here, so we get the desired
+-		 * exclusion.
+-		 */
+-		wb = unlocked_inode_to_wb_begin(inode, &cookie);
+-		if (folio_test_clear_dirty(folio)) {
+-			long nr = folio_nr_pages(folio);
+-			lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, -nr);
+-			if (folio_test_dropbehind(folio))
+-				wb_stat_mod(wb, WB_DONTCACHE_DIRTY, -nr);
+-			zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, -nr);
+-			wb_stat_mod(wb, WB_RECLAIMABLE, -nr);
+-			ret = true;
+-		}
+-		unlocked_inode_to_wb_end(inode, &cookie);
+-		return ret;
+-	}
+-	return folio_test_clear_dirty(folio);
+-}
+-EXPORT_SYMBOL(folio_clear_dirty_for_io);
+-
+-static void wb_inode_writeback_start(struct bdi_writeback *wb)
+-{
+-	atomic_inc(&wb->writeback_inodes);
+-}
+-
+-static void wb_inode_writeback_end(struct bdi_writeback *wb)
+-{
+-	unsigned long flags;
+-	atomic_dec(&wb->writeback_inodes);
+-	/*
+-	 * Make sure estimate of writeback throughput gets updated after
+-	 * writeback completed. We delay the update by BANDWIDTH_INTERVAL
+-	 * (which is the interval other bandwidth updates use for batching) so
+-	 * that if multiple inodes end writeback at a similar time, they get
+-	 * batched into one bandwidth update.
+-	 */
+-	spin_lock_irqsave(&wb->work_lock, flags);
+-	if (test_bit(WB_registered, &wb->state))
+-		queue_delayed_work(bdi_wq, &wb->bw_dwork, BANDWIDTH_INTERVAL);
+-	spin_unlock_irqrestore(&wb->work_lock, flags);
+-}
+-
+-bool __folio_end_writeback(struct folio *folio)
+-{
+-	long nr = folio_nr_pages(folio);
+-	struct address_space *mapping = folio_mapping(folio);
+-	bool ret;
+-
+-	if (mapping && mapping_use_writeback_tags(mapping)) {
+-		struct inode *inode = mapping->host;
+-		struct bdi_writeback *wb;
+-		unsigned long flags;
+-
+-		xa_lock_irqsave(&mapping->i_pages, flags);
+-		ret = folio_xor_flags_has_waiters(folio, 1 << PG_writeback);
+-		__xa_clear_mark(&mapping->i_pages, folio->index,
+-					PAGECACHE_TAG_WRITEBACK);
+-
+-		wb = inode_to_wb(inode);
+-		wb_stat_mod(wb, WB_WRITEBACK, -nr);
+-		__wb_writeout_add(wb, nr);
+-		if (!mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK)) {
+-			wb_inode_writeback_end(wb);
+-			if (mapping->host)
+-				sb_clear_inode_writeback(mapping->host);
+-		}
+-
+-		xa_unlock_irqrestore(&mapping->i_pages, flags);
+-	} else {
+-		ret = folio_xor_flags_has_waiters(folio, 1 << PG_writeback);
+-	}
+-
+-	lruvec_stat_mod_folio(folio, NR_WRITEBACK, -nr);
+-	zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, -nr);
+-	node_stat_mod_folio(folio, NR_WRITTEN, nr);
+-
+-	return ret;
+-}
+-
+-void __folio_start_writeback(struct folio *folio, bool keep_write)
+-{
+-	long nr = folio_nr_pages(folio);
+-	struct address_space *mapping = folio_mapping(folio);
+-	int access_ret;
+-
+-	VM_BUG_ON_FOLIO(folio_test_writeback(folio), folio);
+-	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+-
+-	if (mapping && mapping_use_writeback_tags(mapping)) {
+-		XA_STATE(xas, &mapping->i_pages, folio->index);
+-		struct inode *inode = mapping->host;
+-		struct bdi_writeback *wb;
+-		unsigned long flags;
+-		bool on_wblist;
+-
+-		xas_lock_irqsave(&xas, flags);
+-		xas_load(&xas);
+-		folio_test_set_writeback(folio);
+-
+-		on_wblist = mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK);
+-
+-		xas_set_mark(&xas, PAGECACHE_TAG_WRITEBACK);
+-		wb = inode_to_wb(inode);
+-		wb_stat_mod(wb, WB_WRITEBACK, nr);
+-		if (!on_wblist) {
+-			wb_inode_writeback_start(wb);
+-			/*
+-			 * We can come through here when swapping anonymous
+-			 * folios, so we don't necessarily have an inode to
+-			 * track for sync.
+-			 */
+-			if (mapping->host)
+-				sb_mark_inode_writeback(mapping->host);
+-		}
+-
+-		if (!folio_test_dirty(folio))
+-			xas_clear_mark(&xas, PAGECACHE_TAG_DIRTY);
+-		if (!keep_write)
+-			xas_clear_mark(&xas, PAGECACHE_TAG_TOWRITE);
+-		xas_unlock_irqrestore(&xas, flags);
+-	} else {
+-		folio_test_set_writeback(folio);
+-	}
+-
+-	lruvec_stat_mod_folio(folio, NR_WRITEBACK, nr);
+-	zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, nr);
+-
+-	access_ret = arch_make_folio_accessible(folio);
+-	/*
+-	 * If writeback has been triggered on a page that cannot be made
+-	 * accessible, it is too late to recover here.
+-	 */
+-	VM_BUG_ON_FOLIO(access_ret != 0, folio);
+-}
+-EXPORT_SYMBOL(__folio_start_writeback);
+diff --git a/mm/writeback_io.c b/mm/writeback_io.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..a77b81f581eea803410f528b9dfe2394b61a1119
+--- /dev/null
++++ b/mm/writeback_io.c
+@@ -0,0 +1,658 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * mm/page-writeback.c
++ *
++ * Copyright (C) 2002, Linus Torvalds.
++ * Copyright (C) 2007 Red Hat, Inc., Peter Zijlstra
++ *
++ * Contains functions related to writing back dirty pages at the
++ * address_space level.
++ *
++ * 10Apr2002	Andrew Morton
++ *		Initial version
++ */
++
++#include <linux/kernel.h>
++#include <linux/math64.h>
++#include <linux/export.h>
++#include <linux/spinlock.h>
++#include <linux/fs.h>
++#include <linux/mm.h>
++#include <linux/swap.h>
++#include <linux/slab.h>
++#include <linux/pagemap.h>
++#include <linux/writeback.h>
++#include <linux/init.h>
++#include <linux/backing-dev.h>
++#include <linux/task_io_accounting_ops.h>
++#include <linux/blkdev.h>
++#include <linux/mpage.h>
++#include <linux/rmap.h>
++#include <linux/percpu.h>
++#include <linux/smp.h>
++#include <linux/sysctl.h>
++#include <linux/cpu.h>
++#include <linux/syscalls.h>
++#include <linux/folio_batch.h>
++#include <linux/timer.h>
++#include <linux/sched/rt.h>
++#include <linux/sched/signal.h>
++#include <linux/mm_inline.h>
++#include <linux/shmem_fs.h>
++#include <trace/events/writeback.h>
++
++#include "internal.h"
++#include "writeback_domain.h"
++
++#include "writeback_throttle.h"
++
++#ifdef CONFIG_CGROUP_WRITEBACK
++static struct fprop_local_percpu *wb_memcg_completions(struct bdi_writeback *wb)
++{
++	return &wb->memcg_completions;
++}
++#else
++static struct fprop_local_percpu *wb_memcg_completions(struct bdi_writeback *wb)
++{
++	return NULL;
++}
++#endif
++
++static void wb_domain_writeout_add(struct wb_domain *dom,
++				   struct fprop_local_percpu *completions,
++				   unsigned int max_prop_frac, long nr)
++{
++	__fprop_add_percpu_max(&dom->completions, completions,
++			       max_prop_frac, nr);
++	/* First event after period switching was turned off? */
++	if (unlikely(!dom->period_time)) {
++		/*
++		 * We can race with other wb_domain_writeout_add calls here but
++		 * it does not cause any harm since the resulting time when
++		 * timer will fire and what is in writeout_period_time will be
++		 * roughly the same.
++		 */
++		dom->period_time = wp_next_time(jiffies);
++		mod_timer(&dom->period_timer, dom->period_time);
++	}
++}
++
++/*
++ * Increment @wb's writeout completion count and the global writeout
++ * completion count. Called from __folio_end_writeback().
++ */
++static inline void __wb_writeout_add(struct bdi_writeback *wb, long nr)
++{
++	struct wb_domain *cgdom;
++
++	wb_stat_mod(wb, WB_WRITTEN, nr);
++	wb_domain_writeout_add(&global_wb_domain, &wb->completions,
++			       wb->bdi->max_prop_frac, nr);
++
++	cgdom = mem_cgroup_wb_domain(wb);
++	if (cgdom)
++		wb_domain_writeout_add(cgdom, wb_memcg_completions(wb),
++				       wb->bdi->max_prop_frac, nr);
++}
++
++void wb_writeout_inc(struct bdi_writeback *wb)
++{
++	unsigned long flags;
++
++	local_irq_save(flags);
++	__wb_writeout_add(wb, 1);
++	local_irq_restore(flags);
++}
++EXPORT_SYMBOL_GPL(wb_writeout_inc);
++
++/**
++ * tag_pages_for_writeback - tag pages to be written by writeback
++ * @mapping: address space structure to write
++ * @start: starting page index
++ * @end: ending page index (inclusive)
++ *
++ * This function scans the page range from @start to @end (inclusive) and tags
++ * all pages that have DIRTY tag set with a special TOWRITE tag.  The caller
++ * can then use the TOWRITE tag to identify pages eligible for writeback.
++ * This mechanism is used to avoid livelocking of writeback by a process
++ * steadily creating new dirty pages in the file (thus it is important for this
++ * function to be quick so that it can tag pages faster than a dirtying process
++ * can create them).
++ */
++void tag_pages_for_writeback(struct address_space *mapping,
++			     pgoff_t start, pgoff_t end)
++{
++	XA_STATE(xas, &mapping->i_pages, start);
++	unsigned int tagged = 0;
++	void *page;
++
++	xas_lock_irq(&xas);
++	xas_for_each_marked(&xas, page, end, PAGECACHE_TAG_DIRTY) {
++		xas_set_mark(&xas, PAGECACHE_TAG_TOWRITE);
++		if (++tagged % XA_CHECK_SCHED)
++			continue;
++
++		xas_pause(&xas);
++		xas_unlock_irq(&xas);
++		cond_resched();
++		xas_lock_irq(&xas);
++	}
++	xas_unlock_irq(&xas);
++}
++EXPORT_SYMBOL(tag_pages_for_writeback);
++
++static bool folio_prepare_writeback(struct address_space *mapping,
++		struct writeback_control *wbc, struct folio *folio)
++{
++	/*
++	 * Folio truncated or invalidated. We can freely skip it then,
++	 * even for data integrity operations: the folio has disappeared
++	 * concurrently, so there could be no real expectation of this
++	 * data integrity operation even if there is now a new, dirty
++	 * folio at the same pagecache index.
++	 */
++	if (unlikely(folio->mapping != mapping))
++		return false;
++
++	/*
++	 * Did somebody else write it for us?
++	 */
++	if (!folio_test_dirty(folio))
++		return false;
++
++	if (folio_test_writeback(folio)) {
++		if (wbc->sync_mode == WB_SYNC_NONE)
++			return false;
++		folio_wait_writeback(folio);
++	}
++	BUG_ON(folio_test_writeback(folio));
++
++	if (!folio_clear_dirty_for_io(folio))
++		return false;
++
++	return true;
++}
++
++
++static pgoff_t wbc_end(struct writeback_control *wbc)
++{
++	if (wbc->range_cyclic)
++		return -1;
++	return wbc->range_end >> PAGE_SHIFT;
++}
++
++static struct folio *writeback_get_folio(struct address_space *mapping,
++		struct writeback_control *wbc)
++{
++	struct folio *folio;
++
++retry:
++	folio = folio_batch_next(&wbc->fbatch);
++	if (!folio) {
++		folio_batch_release(&wbc->fbatch);
++		cond_resched();
++		filemap_get_folios_tag(mapping, &wbc->index, wbc_end(wbc),
++				wbc_to_tag(wbc), &wbc->fbatch);
++		folio = folio_batch_next(&wbc->fbatch);
++		if (!folio)
++			return NULL;
++	}
++
++	folio_lock(folio);
++	if (unlikely(!folio_prepare_writeback(mapping, wbc, folio))) {
++		folio_unlock(folio);
++		goto retry;
++	}
++
++	trace_wbc_writepage(wbc, inode_to_bdi(mapping->host));
++	return folio;
++}
++
++/**
++ * writeback_iter - iterate folio of a mapping for writeback
++ * @mapping: address space structure to write
++ * @wbc: writeback context
++ * @folio: previously iterated folio (%NULL to start)
++ * @error: in-out pointer for writeback errors (see below)
++ *
++ * This function returns the next folio for the writeback operation described by
++ * @wbc on @mapping and  should be called in a while loop in the ->writepages
++ * implementation.
++ *
++ * To start the writeback operation, %NULL is passed in the @folio argument, and
++ * for every subsequent iteration the folio returned previously should be passed
++ * back in.
++ *
++ * If there was an error in the per-folio writeback inside the writeback_iter()
++ * loop, @error should be set to the error value.
++ *
++ * Once the writeback described in @wbc has finished, this function will return
++ * %NULL and if there was an error in any iteration restore it to @error.
++ *
++ * Note: callers should not manually break out of the loop using break or goto
++ * but must keep calling writeback_iter() until it returns %NULL.
++ *
++ * Return: the folio to write or %NULL if the loop is done.
++ */
++struct folio *writeback_iter(struct address_space *mapping,
++		struct writeback_control *wbc, struct folio *folio, int *error)
++{
++	if (!folio) {
++		folio_batch_init(&wbc->fbatch);
++		wbc->saved_err = *error = 0;
++
++		/*
++		 * For range cyclic writeback we remember where we stopped so
++		 * that we can continue where we stopped.
++		 *
++		 * For non-cyclic writeback we always start at the beginning of
++		 * the passed in range.
++		 */
++		if (wbc->range_cyclic)
++			wbc->index = mapping->writeback_index;
++		else
++			wbc->index = wbc->range_start >> PAGE_SHIFT;
++
++		/*
++		 * To avoid livelocks when other processes dirty new pages, we
++		 * first tag pages which should be written back and only then
++		 * start writing them.
++		 *
++		 * For data-integrity writeback we have to be careful so that we
++		 * do not miss some pages (e.g., because some other process has
++		 * cleared the TOWRITE tag we set).  The rule we follow is that
++		 * TOWRITE tag can be cleared only by the process clearing the
++		 * DIRTY tag (and submitting the page for I/O).
++		 */
++		if (wbc->sync_mode == WB_SYNC_ALL || wbc->tagged_writepages)
++			tag_pages_for_writeback(mapping, wbc->index,
++					wbc_end(wbc));
++	} else {
++		wbc->nr_to_write -= folio_nr_pages(folio);
++
++		WARN_ON_ONCE(*error > 0);
++
++		/*
++		 * For integrity writeback we have to keep going until we have
++		 * written all the folios we tagged for writeback above, even if
++		 * we run past wbc->nr_to_write or encounter errors.
++		 * We stash away the first error we encounter in wbc->saved_err
++		 * so that it can be retrieved when we're done.  This is because
++		 * the file system may still have state to clear for each folio.
++		 *
++		 * For background writeback we exit as soon as we run past
++		 * wbc->nr_to_write or encounter the first error.
++		 */
++		if (wbc->sync_mode == WB_SYNC_ALL) {
++			if (*error && !wbc->saved_err)
++				wbc->saved_err = *error;
++		} else {
++			if (*error || wbc->nr_to_write <= 0)
++				goto done;
++		}
++	}
++
++	folio = writeback_get_folio(mapping, wbc);
++	if (!folio) {
++		/*
++		 * To avoid deadlocks between range_cyclic writeback and callers
++		 * that hold folios in writeback to aggregate I/O until
++		 * the writeback iteration finishes, we do not loop back to the
++		 * start of the file.  Doing so causes a folio lock/folio
++		 * writeback access order inversion - we should only ever lock
++		 * multiple folios in ascending folio->index order, and looping
++		 * back to the start of the file violates that rule and causes
++		 * deadlocks.
++		 */
++		if (wbc->range_cyclic)
++			mapping->writeback_index = 0;
++
++		/*
++		 * Return the first error we encountered (if there was any) to
++		 * the caller.
++		 */
++		*error = wbc->saved_err;
++	}
++	return folio;
++
++done:
++	if (wbc->range_cyclic)
++		mapping->writeback_index = folio_next_index(folio);
++	folio_batch_release(&wbc->fbatch);
++	return NULL;
++}
++EXPORT_SYMBOL_GPL(writeback_iter);
++
++/*
++ * Helper function for set_page_dirty family.
++ *
++ * NOTE: This relies on being atomic wrt interrupts.
++ */
++static void folio_account_dirtied(struct folio *folio,
++		struct address_space *mapping)
++{
++	struct inode *inode = mapping->host;
++
++	trace_writeback_dirty_folio(folio, mapping);
++
++	if (mapping_can_writeback(mapping)) {
++		struct bdi_writeback *wb;
++		long nr = folio_nr_pages(folio);
++
++		inode_attach_wb(inode, folio);
++		wb = inode_to_wb(inode);
++
++		lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, nr);
++		if (folio_test_dropbehind(folio))
++			wb_stat_mod(wb, WB_DONTCACHE_DIRTY, nr);
++		__zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, nr);
++		__node_stat_mod_folio(folio, NR_DIRTIED, nr);
++		wb_stat_mod(wb, WB_RECLAIMABLE, nr);
++		wb_stat_mod(wb, WB_DIRTIED, nr);
++		task_io_account_write(nr * PAGE_SIZE);
++		current->nr_dirtied += nr;
++		__this_cpu_add(bdp_ratelimits, nr);
++
++		mem_cgroup_track_foreign_dirty(folio, wb);
++	}
++}
++
++/*
++ * Mark the folio dirty, and set it dirty in the page cache.
++ *
++ * If warn is true, then emit a warning if the folio is not uptodate and has
++ * not been truncated.
++ *
++ * It is the caller's responsibility to prevent the folio from being truncated
++ * while this function is in progress, although it may have been truncated
++ * before this function is called.  Most callers have the folio locked.
++ * A few have the folio blocked from truncation through other means (e.g.
++ * zap_vma() has it mapped and is holding the page table lock).
++ * When called from mark_buffer_dirty(), the filesystem should hold a
++ * reference to the buffer_head that is being marked dirty, which causes
++ * try_to_free_buffers() to fail.
++ */
++void __folio_mark_dirty(struct folio *folio, struct address_space *mapping,
++			     int warn)
++{
++	unsigned long flags;
++
++	/*
++	 * Shmem writeback relies on swap, and swap writeback is LRU based,
++	 * not using the dirty mark.
++	 */
++	VM_WARN_ON_ONCE(folio_test_swapcache(folio) || shmem_mapping(mapping));
++
++	xa_lock_irqsave(&mapping->i_pages, flags);
++	if (folio->mapping) {	/* Race with truncate? */
++		WARN_ON_ONCE(warn && !folio_test_uptodate(folio));
++		folio_account_dirtied(folio, mapping);
++		__xa_set_mark(&mapping->i_pages, folio->index,
++			      PAGECACHE_TAG_DIRTY);
++	}
++	xa_unlock_irqrestore(&mapping->i_pages, flags);
++}
++
++/**
++ * filemap_dirty_folio - Mark a folio dirty for filesystems which do not use buffer_heads.
++ * @mapping: Address space this folio belongs to.
++ * @folio: Folio to be marked as dirty.
++ *
++ * Filesystems which do not use buffer heads should call this function
++ * from their dirty_folio address space operation.  It ignores the
++ * contents of folio_get_private(), so if the filesystem marks individual
++ * blocks as dirty, the filesystem should handle that itself.
++ *
++ * This is also sometimes used by filesystems which use buffer_heads when
++ * a single buffer is being dirtied: we want to set the folio dirty in
++ * that case, but not all the buffers.  This is a "bottom-up" dirtying,
++ * whereas block_dirty_folio() is a "top-down" dirtying.
++ *
++ * The caller must ensure this doesn't race with truncation.  Most will
++ * simply hold the folio lock, but e.g. zap_pte_range() calls with the
++ * folio mapped and the pte lock held, which also locks out truncation.
++ */
++bool filemap_dirty_folio(struct address_space *mapping, struct folio *folio)
++{
++	if (folio_test_set_dirty(folio))
++		return false;
++
++	__folio_mark_dirty(folio, mapping, !folio_test_private(folio));
++
++	if (mapping->host) {
++		/* !PageAnon && !swapper_space */
++		__mark_inode_dirty(mapping->host, I_DIRTY_PAGES);
++	}
++	return true;
++}
++EXPORT_SYMBOL(filemap_dirty_folio);
++
++/**
++ * folio_redirty_for_writepage - Decline to write a dirty folio.
++ * @wbc: The writeback control.
++ * @folio: The folio.
++ *
++ * When a writepage implementation decides that it doesn't want to write
++ * @folio for some reason, it should call this function, unlock @folio and
++ * return 0.
++ *
++ * Return: True if we redirtied the folio.  False if someone else dirtied
++ * it first.
++ */
++bool folio_redirty_for_writepage(struct writeback_control *wbc,
++		struct folio *folio)
++{
++	struct address_space *mapping = folio->mapping;
++	long nr = folio_nr_pages(folio);
++	bool ret;
++
++	wbc->pages_skipped += nr;
++	ret = filemap_dirty_folio(mapping, folio);
++	if (mapping && mapping_can_writeback(mapping)) {
++		struct inode *inode = mapping->host;
++		struct bdi_writeback *wb;
++		struct wb_lock_cookie cookie = {};
++
++		wb = unlocked_inode_to_wb_begin(inode, &cookie);
++		current->nr_dirtied -= nr;
++		node_stat_mod_folio(folio, NR_DIRTIED, -nr);
++		wb_stat_mod(wb, WB_DIRTIED, -nr);
++		unlocked_inode_to_wb_end(inode, &cookie);
++	}
++	return ret;
++}
++EXPORT_SYMBOL(folio_redirty_for_writepage);
++
++/*
++ * Clear a folio's dirty flag, while caring for dirty memory accounting.
++ * Returns true if the folio was previously dirty.
++ *
++ * This is for preparing to put the folio under writeout.  We leave
++ * the folio tagged as dirty in the xarray so that a concurrent
++ * write-for-sync can discover it via a PAGECACHE_TAG_DIRTY walk.
++ * The ->writepage implementation will run either folio_start_writeback()
++ * or folio_mark_dirty(), at which stage we bring the folio's dirty flag
++ * and xarray dirty tag back into sync.
++ *
++ * This incoherency between the folio's dirty flag and xarray tag is
++ * unfortunate, but it only exists while the folio is locked.
++ */
++bool folio_clear_dirty_for_io(struct folio *folio)
++{
++	struct address_space *mapping = folio_mapping(folio);
++	bool ret = false;
++
++	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
++
++	if (mapping && mapping_can_writeback(mapping)) {
++		struct inode *inode = mapping->host;
++		struct bdi_writeback *wb;
++		struct wb_lock_cookie cookie = {};
++
++		/*
++		 * Yes, Virginia, this is indeed insane.
++		 *
++		 * We use this sequence to make sure that
++		 *  (a) we account for dirty stats properly
++		 *  (b) we tell the low-level filesystem to
++		 *      mark the whole folio dirty if it was
++		 *      dirty in a pagetable. Only to then
++		 *  (c) clean the folio again and return 1 to
++		 *      cause the writeback.
++		 *
++		 * This way we avoid all nasty races with the
++		 * dirty bit in multiple places and clearing
++		 * them concurrently from different threads.
++		 *
++		 * Note! Normally the "folio_mark_dirty(folio)"
++		 * has no effect on the actual dirty bit - since
++		 * that will already usually be set. But we
++		 * need the side effects, and it can help us
++		 * avoid races.
++		 *
++		 * We basically use the folio "master dirty bit"
++		 * as a serialization point for all the different
++		 * threads doing their things.
++		 */
++		if (folio_mkclean(folio))
++			folio_mark_dirty(folio);
++		/*
++		 * We carefully synchronise fault handlers against
++		 * installing a dirty pte and marking the folio dirty
++		 * at this point.  We do this by having them hold the
++		 * page lock while dirtying the folio, and folios are
++		 * always locked coming in here, so we get the desired
++		 * exclusion.
++		 */
++		wb = unlocked_inode_to_wb_begin(inode, &cookie);
++		if (folio_test_clear_dirty(folio)) {
++			long nr = folio_nr_pages(folio);
++			lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, -nr);
++			if (folio_test_dropbehind(folio))
++				wb_stat_mod(wb, WB_DONTCACHE_DIRTY, -nr);
++			zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, -nr);
++			wb_stat_mod(wb, WB_RECLAIMABLE, -nr);
++			ret = true;
++		}
++		unlocked_inode_to_wb_end(inode, &cookie);
++		return ret;
++	}
++	return folio_test_clear_dirty(folio);
++}
++EXPORT_SYMBOL(folio_clear_dirty_for_io);
++
++static void wb_inode_writeback_start(struct bdi_writeback *wb)
++{
++	atomic_inc(&wb->writeback_inodes);
++}
++
++static void wb_inode_writeback_end(struct bdi_writeback *wb)
++{
++	unsigned long flags;
++	atomic_dec(&wb->writeback_inodes);
++	/*
++	 * Make sure estimate of writeback throughput gets updated after
++	 * writeback completed. We delay the update by BANDWIDTH_INTERVAL
++	 * (which is the interval other bandwidth updates use for batching) so
++	 * that if multiple inodes end writeback at a similar time, they get
++	 * batched into one bandwidth update.
++	 */
++	spin_lock_irqsave(&wb->work_lock, flags);
++	if (test_bit(WB_registered, &wb->state))
++		queue_delayed_work(bdi_wq, &wb->bw_dwork, BANDWIDTH_INTERVAL);
++	spin_unlock_irqrestore(&wb->work_lock, flags);
++}
++
++bool __folio_end_writeback(struct folio *folio)
++{
++	long nr = folio_nr_pages(folio);
++	struct address_space *mapping = folio_mapping(folio);
++	bool ret;
++
++	if (mapping && mapping_use_writeback_tags(mapping)) {
++		struct inode *inode = mapping->host;
++		struct bdi_writeback *wb;
++		unsigned long flags;
++
++		xa_lock_irqsave(&mapping->i_pages, flags);
++		ret = folio_xor_flags_has_waiters(folio, 1 << PG_writeback);
++		__xa_clear_mark(&mapping->i_pages, folio->index,
++					PAGECACHE_TAG_WRITEBACK);
++
++		wb = inode_to_wb(inode);
++		wb_stat_mod(wb, WB_WRITEBACK, -nr);
++		__wb_writeout_add(wb, nr);
++		if (!mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK)) {
++			wb_inode_writeback_end(wb);
++			if (mapping->host)
++				sb_clear_inode_writeback(mapping->host);
++		}
++
++		xa_unlock_irqrestore(&mapping->i_pages, flags);
++	} else {
++		ret = folio_xor_flags_has_waiters(folio, 1 << PG_writeback);
++	}
++
++	lruvec_stat_mod_folio(folio, NR_WRITEBACK, -nr);
++	zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, -nr);
++	node_stat_mod_folio(folio, NR_WRITTEN, nr);
++
++	return ret;
++}
++
++void __folio_start_writeback(struct folio *folio, bool keep_write)
++{
++	long nr = folio_nr_pages(folio);
++	struct address_space *mapping = folio_mapping(folio);
++	int access_ret;
++
++	VM_BUG_ON_FOLIO(folio_test_writeback(folio), folio);
++	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
++
++	if (mapping && mapping_use_writeback_tags(mapping)) {
++		XA_STATE(xas, &mapping->i_pages, folio->index);
++		struct inode *inode = mapping->host;
++		struct bdi_writeback *wb;
++		unsigned long flags;
++		bool on_wblist;
++
++		xas_lock_irqsave(&xas, flags);
++		xas_load(&xas);
++		folio_test_set_writeback(folio);
++
++		on_wblist = mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK);
++
++		xas_set_mark(&xas, PAGECACHE_TAG_WRITEBACK);
++		wb = inode_to_wb(inode);
++		wb_stat_mod(wb, WB_WRITEBACK, nr);
++		if (!on_wblist) {
++			wb_inode_writeback_start(wb);
++			/*
++			 * We can come through here when swapping anonymous
++			 * folios, so we don't necessarily have an inode to
++			 * track for sync.
++			 */
++			if (mapping->host)
++				sb_mark_inode_writeback(mapping->host);
++		}
++
++		if (!folio_test_dirty(folio))
++			xas_clear_mark(&xas, PAGECACHE_TAG_DIRTY);
++		if (!keep_write)
++			xas_clear_mark(&xas, PAGECACHE_TAG_TOWRITE);
++		xas_unlock_irqrestore(&xas, flags);
++	} else {
++		folio_test_set_writeback(folio);
++	}
++
++	lruvec_stat_mod_folio(folio, NR_WRITEBACK, nr);
++	zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, nr);
++
++	access_ret = arch_make_folio_accessible(folio);
++	/*
++	 * If writeback has been triggered on a page that cannot be made
++	 * accessible, it is too late to recover here.
++	 */
++	VM_BUG_ON_FOLIO(access_ret != 0, folio);
++}
++EXPORT_SYMBOL(__folio_start_writeback);
+diff --git a/mm/writeback_throttle.h b/mm/writeback_throttle.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..7ee7429960d22d33d700ce26949b942639893250
+--- /dev/null
++++ b/mm/writeback_throttle.h
+@@ -0,0 +1,9 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _MM_WRITEBACK_THROTTLE_H
++#define _MM_WRITEBACK_THROTTLE_H
++
++#include <linux/percpu-defs.h>
++
++DECLARE_PER_CPU(int, bdp_ratelimits);
++
++#endif
