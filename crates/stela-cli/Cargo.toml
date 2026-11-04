@@ -68,8 +68,6 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
-# `block::RamDisk`, the disk setup's erase layout is written to in tests.
-stela-drivers = { workspace = true, features = ["ram-disk"] }
 
 
 [lints]
