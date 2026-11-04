@@ -32,6 +32,9 @@ pub const VIEWS: u8 = 8;
 const TAG_SPAN: u64 = PAGE * ENTRIES as u64;
 const READ_ONLY: u64 = 1 << u8::BITS;
 const GENERATION_STEP: u64 = READ_ONLY << 1;
+// Outside the usable generation bits. All entries are zero in this state,
+// so the nonzero bit also guarantees a miss for every empty entry.
+const EMPTY_GENERATION: u64 = TAG_SPAN;
 
 /// One page's translation for one view.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -69,7 +72,7 @@ impl Default for Tlb {
     fn default() -> Self {
         Self {
             entries: [Entry::default(); ENTRIES],
-            generation: GENERATION_STEP,
+            generation: EMPTY_GENERATION,
             devices: DevicePages::default(),
         }
     }
@@ -115,6 +118,9 @@ impl Tlb {
     /// `host` page, for writes too when `writable`.
     pub fn fill(&mut self, address: u64, host: u64, writable: bool, view: u8) {
         debug_assert!(host != 0 && host.is_multiple_of(PAGE) && view < VIEWS);
+        if self.generation == EMPTY_GENERATION {
+            self.generation = GENERATION_STEP;
+        }
         let page = address & !(PAGE - 1);
         self.entries[slot(page)] = Entry {
             tag: tag(page, view, self.generation) | (u64::from(!writable) * READ_ONLY),
@@ -124,12 +130,12 @@ impl Tlb {
 
     /// Forget every entry.
     pub fn clear(&mut self) {
-        self.generation += GENERATION_STEP;
-        if self.generation == TAG_SPAN {
-            // Scrub before reusing an earlier generation. Zero is reserved
-            // for the empty entries.
-            self.entries.fill(Entry::default());
-            self.generation = GENERATION_STEP;
+        if self.generation != EMPTY_GENERATION {
+            self.generation += GENERATION_STEP;
+            if self.generation == EMPTY_GENERATION {
+                // Scrub before a fill can reuse an earlier generation.
+                self.entries.fill(Entry::default());
+            }
         }
         self.clear_devices();
     }
@@ -328,6 +334,20 @@ mod tests {
     }
 
     #[test]
+    fn clearing_an_unused_ram_tlb_still_forgets_device_pages() {
+        let mut tlb = Tlb::default();
+        let device_page = device(HOST, true, true);
+        for _ in 0..TAG_SPAN / GENERATION_STEP {
+            tlb.record_device(VA, KERNEL, device_page);
+            assert_eq!(tlb.device_physical(VA, KERNEL, false), Some(HOST));
+            tlb.clear();
+            assert_eq!(tlb.device_physical(VA, KERNEL, false), None);
+            assert_eq!(tlb.generation, EMPTY_GENERATION);
+            assert_eq!(tlb.lookup(0, 8, false, 0), Lookup::Miss { address: 0 });
+        }
+    }
+
+    #[test]
     fn clearing_through_a_generation_wrap_cannot_restore_old_entries() {
         let mut tlb = Tlb::default();
         assert_eq!(tlb.lookup(0, 8, false, 0), Lookup::Miss { address: 0 });
@@ -340,8 +360,12 @@ mod tests {
             assert_eq!(tlb.lookup(0, 8, false, 0), Lookup::Miss { address: 0 });
             assert_eq!(tlb.lookup(VA, 8, false, 1), Lookup::Miss { address: VA });
         }
-        assert_eq!(tlb.generation, GENERATION_STEP);
+        assert_eq!(tlb.generation, EMPTY_GENERATION);
+        assert!(tlb.entries.iter().all(|entry| *entry == Entry::default()));
+        tlb.clear();
+        assert_eq!(tlb.generation, EMPTY_GENERATION);
         tlb.fill(VA, HOST, false, 2);
+        assert_eq!(tlb.generation, GENERATION_STEP);
         assert_eq!(tlb.lookup(VA, 8, false, 2), Lookup::Direct(HOST));
         assert_eq!(tlb.lookup(VA, 8, true, 2), Lookup::Miss { address: VA });
         assert_eq!(tlb.lookup(VA, 8, false, 1), Lookup::Miss { address: VA });
