@@ -144,9 +144,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let enters_guest = !guarded
             && !self.cpu.in_host()
             && super::super::exception::spsr_target(spsr).is_ok_and(|(el, _)| el < 2);
-        if let Some(entry) = self.cpu.apple.impdef.guest_state()
-            && enters_guest
-        {
+        if enters_guest && let Some(entry) = self.cpu.apple.impdef.guest_state() {
             self.degrade(self.requirement(RequirementKind::VmState(entry.name)));
         }
     }
