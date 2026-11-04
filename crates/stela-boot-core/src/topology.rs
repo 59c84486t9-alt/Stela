@@ -336,13 +336,17 @@ pub fn common_native_target(
     const POPCNT: u32 = 1 << 23;
     const AES: u32 = 1 << 25;
     const SHA: u32 = 1 << 29;
+    const GFNI: u32 = 1 << 8;
+    const LZCNT: u32 = 1 << 5;
     const CX8: u32 = 1 << 8;
     const CX16: u32 = 1 << 13;
     if observations.is_empty() || observations.len() > MAX_CORES {
         return Err(CapabilityRefusal::InvalidSnapshot);
     }
-    let (mut ecx, mut edx, mut structured) = (u32::MAX, u32::MAX, u32::MAX);
+    let (mut ecx, mut edx, mut structured_ebx, mut structured_ecx) =
+        (u32::MAX, u32::MAX, u32::MAX, u32::MAX);
     let mut atomic16 = true;
+    let mut lzcnt = true;
     for snapshot in observations {
         let vendor = snapshot
             .get(0, 0)
@@ -353,11 +357,19 @@ pub fn common_native_target(
             .ok_or(CapabilityRefusal::InvalidSnapshot)?;
         ecx &= basic.ecx;
         edx &= basic.edx;
-        structured &= if vendor.eax >= 7 {
-            snapshot.get(7, 0).map_or(0, |record| record.ebx)
+        let structured = if vendor.eax >= 7 {
+            snapshot.get(7, 0).unwrap_or_default()
         } else {
-            0
+            Cpuid::default()
         };
+        structured_ebx &= structured.ebx;
+        structured_ecx &= structured.ecx;
+        lzcnt &= snapshot
+            .get(0x8000_0000, 0)
+            .is_some_and(|maximum| maximum.eax >= 0x8000_0001)
+            && snapshot
+                .get(0x8000_0001, 0)
+                .is_some_and(|record| record.ecx & LZCNT != 0);
         atomic16 &=
             TargetCpu::atomic_load16_guaranteed([vendor.ebx, vendor.edx, vendor.ecx], basic.ecx);
     }
@@ -374,7 +386,9 @@ pub fn common_native_target(
         ),
         (ecx & POPCNT != 0, TargetCpu::with_popcnt),
         (ecx & AES != 0, TargetCpu::with_aes),
-        (structured & SHA != 0, TargetCpu::with_sha),
+        (structured_ebx & SHA != 0, TargetCpu::with_sha),
+        (structured_ecx & GFNI != 0, TargetCpu::with_gfni),
+        (lzcnt, TargetCpu::with_lzcnt),
         (edx & CX8 != 0, TargetCpu::with_cx8),
         (ecx & CX16 != 0, TargetCpu::with_cx16),
         (atomic16, TargetCpu::with_atomic_load16),

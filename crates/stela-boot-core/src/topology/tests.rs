@@ -676,6 +676,43 @@ fn common_target_obeys_leaf_maxima_vendor_atomicity_and_complete_sse_tiers() {
 }
 
 #[test]
+fn common_target_keeps_legacy_extensions_independently_and_checks_both_leaf_maxima() {
+    use stela_compiler::TargetCpu;
+    let mut rich = target_snapshot(TargetCpu::INTEL_VENDOR);
+    rich.records[0].ecx &= !((1 << 19) | (1 << 20) | (1 << 28));
+    rich.records[1].ecx |= 1 << 5;
+    rich.records[2].ecx |= 1 << 8;
+    rich.records[4] = Cpuid {
+        leaf: 0x8000_0000,
+        eax: 0x8000_0001,
+        ..Cpuid::default()
+    };
+    rich.count = 5;
+    let mut older = rich;
+    for (maximum, feature_lost, feature_kept) in [
+        (3, TargetCpu::Gfni, TargetCpu::Lzcnt),
+        (4, TargetCpu::Lzcnt, TargetCpu::Gfni),
+    ] {
+        older.records[maximum].eax -= 1;
+        let common = common_native_target(&[&rich, &older]).unwrap();
+        assert!(common.supports(TargetCpu::Ssse3));
+        assert!(!common.supports(TargetCpu::Sse41));
+        assert!(common.supports(feature_kept));
+        assert!(!common.supports(feature_lost));
+        assert!(!common.supports(TargetCpu::Fma));
+        older = rich;
+    }
+    let common = common_native_target(&[&rich, &older]).unwrap();
+    assert!(common.supports(TargetCpu::Gfni.with_lzcnt()));
+    older.count -= 1;
+    assert!(
+        !common_native_target(&[&rich, &older])
+            .unwrap()
+            .supports(TargetCpu::Lzcnt)
+    );
+}
+
+#[test]
 fn core_floor_and_la57_are_required_independently_of_bsp() {
     let baseline = native_snapshot();
     assert_eq!(baseline.qualify_native(true), Ok(()));

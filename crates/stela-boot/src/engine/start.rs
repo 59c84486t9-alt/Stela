@@ -725,7 +725,7 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
         "ENTRY pc={entry:#x} x0={x0:#x} el={el} mmu=off profile={} target={} apic_hz={apic_hz} \
          prediction_isolation={} faulting_data_barrier={}\n",
         profile.name,
-        target.id(),
+        canonical_ram.target().id(),
         speculation.contexts,
         speculation.faulting_data,
     ));

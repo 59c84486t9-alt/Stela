@@ -58,6 +58,7 @@ struct CpuDeclarations {
     // Only the consumed immutable hardware bits; OSXSAVE is live CR4 state.
     cpuid1_ecx: u32,
     cpuid1_edx: u32,
+    extended_ecx: u32,
     extended_edx: u32,
     cpuid7_ebx: u32,
     cpuid7_ecx: u32,
@@ -85,6 +86,8 @@ const CPUID1_ECX_READ: u32 = CPUID_PCLMULQDQ
     | CPUID_AES
     | (1 << 28);
 const CPUID_SHA: u32 = 1 << 29;
+const CPUID_GFNI: u32 = 1 << 8;
+const CPUID_LZCNT: u32 = 1 << 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct NativeControls {
@@ -154,6 +157,14 @@ impl Observation {
         }
         if d.cpuid7_ebx & CPUID_SHA != 0 {
             target = target.with_sha();
+        }
+        // This target selects the legacy XMM forms of GFNI. VEX and EVEX
+        // forms require additional capabilities that remain unavailable.
+        if d.cpuid7_ecx & CPUID_GFNI != 0 {
+            target = target.with_gfni();
+        }
+        if d.extended_ecx & CPUID_LZCNT != 0 {
+            target = target.with_lzcnt();
         }
         if d.cpuid1_edx & (1 << 8) != 0 {
             target = target.with_cx8();
@@ -460,9 +471,10 @@ fn enumerate(mut cpuid: impl FnMut(u32, u32) -> Cpuid) -> Result<(CpuDeclaration
             vendor,
             cpuid1_ecx: basic.ecx & CPUID1_ECX_READ,
             cpuid1_edx: basic.edx & (CPUID_FLOOR_EDX | (1 << 8)),
+            extended_ecx: ext.ecx & CPUID_LZCNT,
             extended_edx: ext.edx & CPUID_LONG_NX,
             cpuid7_ebx: leaf7.ebx & CPUID_SHA,
-            cpuid7_ecx: leaf7.ecx & (1 << 16),
+            cpuid7_ecx: leaf7.ecx & ((1 << 16) | CPUID_GFNI),
             identity: probe,
         },
         apic_id,
