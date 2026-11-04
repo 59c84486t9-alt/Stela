@@ -404,6 +404,23 @@ fn nonzero_guest_state_is_reported() {
         registers.guest_state().map(|entry| entry.encoding),
         Some(SPRR_CONFIG_EL12)
     );
+    // Multiple live values report the first catalog entry, independent of
+    // write order. Clearing it exposes the next one.
+    let first = TABLE
+        .iter()
+        .take_while(|entry| entry.encoding != guest.encoding)
+        .find(|entry| entry.class == Class::Guest && lookup(entry.encoding).is_some())
+        .unwrap();
+    registers.write(first, 7).unwrap();
+    assert_eq!(
+        registers.guest_state().map(|entry| entry.encoding),
+        Some(first.encoding)
+    );
+    registers.write(first, 0).unwrap();
+    assert_eq!(
+        registers.guest_state().map(|entry| entry.encoding),
+        Some(SPRR_CONFIG_EL12)
+    );
     // The VM keys follow the PAC regime: stored, not guest state.
     registers.write(lookup(APVMKEYLO_EL2).unwrap(), 5).unwrap();
     registers.write(guest, 0).unwrap();

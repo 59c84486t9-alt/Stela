@@ -56,8 +56,16 @@ fn setup() -> (
     Driver<stela_formats::payload::test_support::Memory, u16>,
     Harness,
 ) {
+    setup_with(b"payload")
+}
+fn setup_with(
+    payload: &[u8],
+) -> (
+    Driver<stela_formats::payload::test_support::Memory, u16>,
+    Harness,
+) {
     let d = Driver::new(
-        Answers::new(fixture(b"payload", false)),
+        Answers::new(fixture(payload, false)),
         Route::StelaFirmwareStudy,
     )
     .unwrap();
@@ -223,6 +231,43 @@ fn transcript_short_io_concurrent_control_jobs_and_final_ack_write() {
         "ReceivedFinalStatusMsg"
     );
 }
+#[test]
+fn file_data_on_the_control_stream_drains_before_a_competing_reply() {
+    let payload = vec![5; 5 * 8192 + 1];
+    let (mut d, mut h) = setup_with(&payload);
+    restoring(&mut d, &mut h);
+    let s = h.streams.get_mut(&PORT).unwrap();
+    let start = s.output.len();
+    s.chunk = 1931;
+    append(&mut h, request("SourceBootObjectV4", false));
+    append(&mut h, request("ReceiptManifest", false));
+    for _ in 0..1_000 {
+        assert!(d.poll_prefetched(&mut h).is_pending());
+        d.work();
+        d.prefetch(1);
+        if d.session.outstanding() == 0 && d.session.ledger().len() == 4 {
+            break;
+        }
+    }
+    assert_eq!(d.session.ledger().len(), 4);
+    assert_eq!(d.session.outstanding(), 0);
+    let s = h.streams.get_mut(&PORT).unwrap();
+    let mut stream = Memory::new(s.output[start..].to_vec(), 1931);
+    let mut frame = Framed::new(Endian::Big, Limits::default());
+    for expected in payload.chunks(8192) {
+        let actual = receive(&mut frame, &mut stream).unwrap();
+        assert_eq!(
+            actual.required("FileData").unwrap().data().unwrap(),
+            expected
+        );
+    }
+    let done = receive(&mut frame, &mut stream).unwrap();
+    assert!(done.required("FileDataDone").unwrap().boolean().unwrap());
+    let reply = receive(&mut frame, &mut stream).unwrap();
+    assert!(reply.get("ReceiptManifest").is_some());
+    assert_eq!(stream.at, stream.input.len());
+}
+
 #[test]
 fn blocked_data_keeps_control_live_and_limits_open_handles() {
     let (_, mut h) = setup();

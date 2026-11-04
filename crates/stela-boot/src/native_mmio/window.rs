@@ -207,9 +207,7 @@ impl Window {
         if !guard.state().retiring.begin(range.clone()) {
             return false;
         }
-        for page in 0..count as u64 {
-            let at = address + page * PAGE;
-            let [pointer, directory, _] = page_window::indices(at);
+        for (pointer, directory, slots) in page_window::leaf_runs(address, count) {
             // SAFETY: the aperture's table, a bounded index.
             let upper = unsafe { self.pointers.add(pointer).read_volatile() };
             if upper & PRESENT == 0 {
@@ -220,9 +218,11 @@ impl Window {
             if middle & PRESENT == 0 {
                 continue;
             }
-            if let Some(leaf) = self.leaf(guard.state(), at) {
-                // SAFETY: a leaf this window owns, under its lock.
-                unsafe { leaf.write_volatile(0) };
+            let table = entry_table(middle);
+            for slot in slots {
+                // SAFETY: each slot belongs to this existing leaf table and
+                // the held guard excludes other edits.
+                unsafe { table.add(slot).write_volatile(0) };
             }
         }
         drop(guard);

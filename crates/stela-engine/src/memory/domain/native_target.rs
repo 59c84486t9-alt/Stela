@@ -16,6 +16,8 @@ pub(in crate::memory) fn restrict(actual: TargetCpu, limit: TargetCpu) -> Target
         (TargetCpu::Popcnt, TargetCpu::with_popcnt),
         (TargetCpu::Aes, TargetCpu::with_aes),
         (TargetCpu::Sha, TargetCpu::with_sha),
+        (TargetCpu::Gfni, TargetCpu::with_gfni),
+        (TargetCpu::Lzcnt, TargetCpu::with_lzcnt),
         (TargetCpu::Cx8, TargetCpu::with_cx8),
         (TargetCpu::Cx16, TargetCpu::with_cx16),
         (TargetCpu::AtomicLoad16, TargetCpu::with_atomic_load16),
@@ -36,6 +38,8 @@ mod tests {
         .with_pclmulqdq()
         .with_aes()
         .with_sha()
+        .with_gfni()
+        .with_lzcnt()
         .with_atomic_load16();
 
     #[test]
@@ -55,6 +59,8 @@ mod tests {
                 TargetCpu::Sse42,
                 TargetCpu::Aes,
                 TargetCpu::Sha,
+                TargetCpu::Gfni,
+                TargetCpu::Lzcnt,
                 TargetCpu::AtomicLoad16,
                 LEGACY,
             ] {
@@ -72,6 +78,10 @@ mod tests {
         let actual = TargetCpu::Sse42.with_aes().with_sha().with_atomic_load16();
         let worker = TargetCpu::Sse41.with_aes().with_cx16();
         assert_eq!(restrict(actual, worker), TargetCpu::Sse41.with_aes());
+        assert_eq!(
+            restrict(TargetCpu::Lzcnt.with_gfni(), TargetCpu::Gfni),
+            TargetCpu::Gfni
+        );
         assert_eq!(
             restrict(TargetCpu::Baseline, TargetCpu::X86_64_V4),
             TargetCpu::Baseline

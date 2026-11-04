@@ -5,6 +5,7 @@ fn baseline() -> Observation {
             vendor: TargetCpu::INTEL_VENDOR,
             cpuid1_ecx: 0,
             cpuid1_edx: CPUID_FLOOR_EDX,
+            extended_ecx: 0,
             extended_edx: CPUID_LONG_NX,
             cpuid7_ebx: 0,
             cpuid7_ecx: 0,
@@ -19,6 +20,29 @@ fn baseline() -> Observation {
             flags: 0,
         },
     }
+}
+
+#[test]
+fn optional_legacy_extensions_require_live_declarations_without_osxsave() {
+    let mut actual = baseline();
+    actual.declarations.extended_ecx = CPUID_LZCNT;
+    assert_eq!(actual.target(), Ok(TargetCpu::Lzcnt));
+    actual.declarations.cpuid7_ecx = CPUID_GFNI;
+    assert_eq!(actual.target(), Ok(TargetCpu::Lzcnt.with_gfni()));
+    assert_eq!(actual.controls.cr4 & (1 << 18), 0);
+    let proof = NativeSystemTarget {
+        observed: actual,
+        lease: None,
+        target: actual.target().unwrap(),
+    };
+    actual.declarations.extended_ecx = 0;
+    assert_eq!(actual.target(), Ok(TargetCpu::Gfni));
+    assert_eq!(
+        proof.revalidate_observation(actual),
+        Err(Refusal::TargetChanged)
+    );
+    actual.declarations.cpuid7_ecx = 0;
+    assert_eq!(actual.target(), Ok(TargetCpu::Baseline));
 }
 
 #[test]
@@ -646,6 +670,7 @@ fn one_owner_enumeration_then_one_live_identity_probe_per_boundary() {
                 ..Cpuid::default()
             },
             0x8000_0001 => Cpuid {
+                ecx: CPUID_LZCNT | (1 << 22),
                 edx: CPUID_LONG_NX,
                 ..Cpuid::default()
             },
@@ -655,12 +680,17 @@ fn one_owner_enumeration_then_one_live_identity_probe_per_boundary() {
                 edx: actual.controls.apic_id,
                 ..Cpuid::default()
             },
-            7 => Cpuid::default(),
+            7 => Cpuid {
+                ecx: CPUID_GFNI | 1,
+                ..Cpuid::default()
+            },
             _ => panic!("unexpected leaf"),
         }
     })
     .unwrap();
     assert_eq!(enumerations.get(), 6);
+    assert_eq!(d.extended_ecx, CPUID_LZCNT);
+    assert_eq!(d.cpuid7_ecx, CPUID_GFNI);
     let owner = modeled_owner(Observation {
         declarations: d,
         controls: NativeControls {
@@ -691,6 +721,7 @@ fn one_owner_enumeration_then_one_live_identity_probe_per_boundary() {
         live,
     )
     .unwrap();
+    assert_eq!(proof.target(), TargetCpu::Lzcnt.with_gfni());
     for _ in 1..4 {
         proof
             .revalidate_with(|| panic!("no reenumeration"), live)

@@ -23,6 +23,7 @@ use core::{
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
+use stela_boot_core::memory_budget::MAX_TRANSLATION_PACK_BYTES;
 use stela_drivers::block::BlockDevice;
 use stela_engine::machine::Offer;
 use stela_engine::machine::Translations;
@@ -62,9 +63,6 @@ const PACK_EXTENSION: &str = "pak";
 const SPARE: &str = "spare.bin";
 /// The pack is read in steps of this many bytes, each shown as progress.
 const PROGRESS_STEP: usize = 16 << 20;
-/// The largest pack the boot holds in memory and writes: the bound of
-/// `store.cfg` is cut to it.
-const MAX_PACK_BYTES: u64 = 1 << 30;
 /// The placement record at the start of the handoff file: magic, bound,
 /// partition GUID, flags, pack bytes; the pack follows.
 const PLACEMENT_MAGIC: [u8; 8] = *b"STLTSTOR";
@@ -163,7 +161,7 @@ pub fn read() -> Option<(Region, bool)> {
         let Some(bound) = bound(&mut root) else {
             continue;
         };
-        let bound = bound.min(MAX_PACK_BYTES);
+        let bound = bound.min(MAX_TRANSLATION_PACK_BYTES);
         let path = pack_path(&translator, "\\");
         if open(&mut root, &path, FileMode::Read).is_none() {
             claim_spare(&mut root, &translator);
