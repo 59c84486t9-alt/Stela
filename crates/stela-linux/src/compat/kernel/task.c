@@ -35,10 +35,11 @@
 #include "workqueue_internal.h"
 #include "../io_uring/io-wq.h"
 #include "sched/sched.h"
-#include "sched/fork_backend.h"
+#include <sched/fork_capacity.h>
 
 static_assert(CONFIG_THREAD_INFO_IN_TASK == 1);
 static_assert(!IS_ENABLED(CONFIG_SMP));
+static_assert(!IS_ENABLED(CONFIG_SCHED_CLASS_EXT));
 static_assert(NR_CPUS == 1);
 static_assert(!IS_ENABLED(CONFIG_PREEMPT_RT));
 static_assert(!IS_ENABLED(CONFIG_MUTEX_SPIN_ON_OWNER));
@@ -60,6 +61,7 @@ static_assert(offsetof(struct task_struct, thread_info) == 0);
 static_assert(__alignof__(struct task_struct) >= 64);
 
 enum allocation_kind { BARE_ALLOCATION, INITIAL_ALLOCATION, ORIGINAL_CHILD_ALLOCATION };
+enum source_fork_phase { FORK_UNRESERVED, FORK_RESERVED, FORK_CLASS_SELECTED, FORK_PLACED };
 static bool initial_claimed;
 /* Inline affine source data lease: storage is allocated with the actual
  * record before any native attach. Prepared addresses are not publication
@@ -81,6 +83,9 @@ struct stela_linux_task {
     const struct stela_linux_owner *source_owner;
     struct stela_linux_task_context source_creator;
     bool source_stack_lent;
+    enum source_fork_phase source_fork_phase;
+    enum stela_linux_fork_class source_fork_class;
+    u64 source_fork_flags;
     bool source_c_published, source_free_prepared, source_original_freed;
     bool source_unwound, source_native_returned, source_terminal_prepared;
     bool source_reap_started, source_scheduler_refs_released, source_rcu_joined;
@@ -848,20 +853,90 @@ static struct stela_linux_task_rank source_fork_rank(struct task_struct *task)
     };
 }
 
-int stela_linux_sched_fork_admit(u64 clone_flags, struct task_struct *original)
+static bool source_fork_cpu_ready(const struct task_struct *p)
+{
+    /* boot_cpu_init() publishes these masks. A fully published singleton
+     * cannot form an asymmetric domain. Check the actual retained state. */
+    const struct cpumask *singleton = cpumask_of(0);
+    return smp_processor_id() == 0 && task_cpu(p) == 0 &&
+        cpumask_equal(cpu_possible_mask, singleton) &&
+        cpumask_equal(cpu_present_mask, singleton) &&
+        cpumask_equal(cpu_online_mask, singleton) &&
+        cpumask_equal(cpu_active_mask, singleton) &&
+        p->cpus_ptr == &p->cpus_mask && !p->user_cpus_ptr &&
+        p->nr_cpus_allowed == 1 && cpumask_equal(p->cpus_ptr, singleton) &&
+        !sched_asym_cpucap_active() && list_empty(&asym_cap_list);
+}
+
+static struct stela_linux_task *source_fork_candidate(struct task_struct *p,
+    const struct stela_linux_owner *owner)
+{
+    struct stela_linux_task *record = allocated_task(p);
+    if (!record || source_child_record(record, owner) != record ||
+        !record->source_stack_lent || record->source_c_published ||
+        READ_ONCE(p->__state) != TASK_NEW || p->prio != p->normal_prio ||
+        p->sched_class)
+        return NULL;
+    return record;
+}
+
+int stela_linux_sched_fork_admit(u64 clone_flags, struct task_struct *p)
 {
     const u64 supported = CLONE_VM | CLONE_UNTRACED | CLONE_FS | CLONE_FILES;
-    if ((clone_flags & ~supported) || !(original->flags & PF_KTHREAD))
+    if ((clone_flags & ~supported) || !(p->flags & PF_KTHREAD))
         return -EOPNOTSUPP;
 
     const struct stela_linux_owner *owner = stela_linux_owner();
-    struct stela_linux_task *record = allocated_task(original);
-    if (!record || source_child_record(record, owner) != record ||
-        !record->source_stack_lent || record->source_c_published ||
-        READ_ONCE(original->__state) != TASK_NEW || original->prio != original->normal_prio)
+    struct stela_linux_task *record = source_fork_candidate(p, owner);
+    if (!record || record->source_fork_phase != FORK_UNRESERVED)
         return -EINVAL;
-    struct stela_linux_task_rank rank = source_fork_rank(original);
-    return stela_linux_task_native_reserve_rank(record, owner, &rank);
+    if (!source_fork_cpu_ready(p))
+        return -ENODEV;
+
+    struct stela_linux_task_rank rank = source_fork_rank(p);
+    int error = stela_linux_task_native_reserve_rank(record, owner, &rank);
+    if (error)
+        return error;
+    record->source_fork_flags = clone_flags;
+    record->source_fork_phase = FORK_RESERVED;
+    return 0;
+}
+
+void stela_linux_sched_fork_select(struct task_struct *p, enum stela_linux_fork_class kind)
+{
+    struct stela_linux_task *record = source_fork_candidate(p, stela_linux_owner());
+    if (!record || record->source_fork_phase != FORK_RESERVED ||
+        !((kind == STELA_LINUX_FORK_FAIR && p->policy == SCHED_NORMAL) ||
+          (kind == STELA_LINUX_FORK_RT && p->policy == SCHED_FIFO)))
+        stela_linux_fatal("invalid original fork class selection");
+
+    /* Policy and rank select the native class. The Linux runqueue class
+     * table has no owner in this profile. */
+    record->source_fork_class = kind;
+    record->source_fork_phase = FORK_CLASS_SELECTED;
+}
+
+int stela_linux_sched_fork_place(struct task_struct *p, struct kernel_clone_args *args)
+{
+    const struct stela_linux_owner *owner = stela_linux_owner();
+    struct stela_linux_task *record = source_fork_candidate(p, owner);
+    if (!record || record->source_fork_phase != FORK_CLASS_SELECTED ||
+        !args || !args->kthread || args->flags != record->source_fork_flags ||
+        !irqs_disabled() || !preempt_count())
+        return -EINVAL;
+    if (!source_fork_cpu_ready(p))
+        return -ENODEV;
+
+    /* The checked reserve call is idempotent for the same rank and row.
+     * The source keeps its child pi_lock and the native loan is bounded. */
+    struct stela_linux_task_rank rank = source_fork_rank(p);
+    int error = stela_linux_task_native_reserve_rank(record, owner, &rank);
+    if (error)
+        return error;
+    if (record->source_fork_class == STELA_LINUX_FORK_FAIR)
+        stela_linux_sched_fork_fair_capacity(p);
+    record->source_fork_phase = FORK_PLACED;
+    return 0;
 }
 
 void stela_linux_task_fork_publish(struct task_struct *original)
@@ -870,6 +945,7 @@ void stela_linux_task_fork_publish(struct task_struct *original)
     struct stela_linux_task *record = allocated_task(original);
     if (!record || source_child_record(record, owner) != record ||
         !record->source_thread_prepared || !record->source_stack_lent ||
+        record->source_fork_phase != FORK_PLACED ||
         record->source_native_dormant || record->source_c_published ||
         record->source_original_freed || READ_ONCE(original->__state) != TASK_NEW)
         __builtin_trap();

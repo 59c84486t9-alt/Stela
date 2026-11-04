@@ -71,6 +71,8 @@
 /kernel/sched/cputime_group.c
 /kernel/sched/user_affinity.c
 /kernel/sched/fork_backend.h
+/kernel/sched/capacity_state.c
+/kernel/sched/fork_capacity.h
 /kernel/sched/fork_metadata.c
 /kernel/sched/fork_load.c
 /kernel/sched/fork_support.c
