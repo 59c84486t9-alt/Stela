@@ -108,6 +108,44 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn timer_deadline_survives_transitions_but_uses_the_current_masks() {
+        const CNTV_CVAL_X0: u32 = 0xd51b_e340;
+        const CNTV_CTL_X0: u32 = 0xd51b_e320;
+        const ERET: u32 = 0xd69f_03e0;
+
+        let mut machine = gxf(Chip::AppleM2);
+        machine.cpu.pstate.daif &= !crate::machine::exception::DAIF_F;
+        machine.cpu.state.x[0] = 1500;
+        machine.system_instruction(CNTV_CVAL_X0).unwrap();
+        machine.cpu.state.x[0] = 1;
+        machine.system_instruction(CNTV_CTL_X0).unwrap();
+        let deadline = machine.timer_deadline().expect("armed timer");
+        let cached = Some(Some(deadline));
+        let return_pc = machine.cpu.pc + 4;
+
+        machine.system_instruction(GENTER).unwrap();
+        assert_eq!(machine.timers, cached);
+        machine.host.now = deadline;
+        assert!(!machine.deliver_interrupts(), "GENTER masks FIQ");
+        assert_eq!(machine.cpu.pc, ENTER);
+
+        machine.system_instruction(GEXIT).unwrap();
+        assert_eq!(machine.timers, cached);
+        assert_eq!(machine.cpu.pc, return_pc);
+        assert!(machine.deliver_interrupts(), "GEXIT restores FIQ mask");
+        assert_eq!(machine.timers, cached);
+        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), return_pc);
+
+        machine.system_instruction(ERET).unwrap();
+        assert_eq!(machine.timers, cached);
+        assert_eq!(machine.cpu.pc, return_pc);
+        machine.cpu.state.x[0] = 0;
+        machine.system_instruction(CNTV_CTL_X0).unwrap();
+        assert_eq!(machine.timers, None);
+        assert_eq!(machine.timer_deadline(), None);
+    }
+
+    #[test]
     fn genter_records_its_immediate_and_from_a_gl_returns_there() {
         let mut machine = gxf(Chip::AppleM2);
         machine.cpu.state.sp = 0x7000;
