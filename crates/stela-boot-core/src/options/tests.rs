@@ -56,6 +56,19 @@ fn round_trip(text: &str) -> System {
 }
 
 #[test]
+fn single_user_needs_a_preboot_selection() {
+    let selected = round_trip(&format!("--system --preboot {DISK} {SINGLE_USER}"));
+    assert!(selected.single_user);
+    assert!(System::parse(&format!("--system {SINGLE_USER}")).is_err());
+}
+
+#[test]
+fn scanout_mirror_round_trips() {
+    assert!(!round_trip("--system").scanout_mirror);
+    assert!(round_trip(&format!("--system {SCANOUT_MIRROR}")).scanout_mirror);
+}
+
+#[test]
 fn maintenance_writes_require_an_explicit_preboot_selection() {
     let ordinary = round_trip(&format!("--system --preboot {DISK}"));
     assert!(!ordinary.maintenance_write);

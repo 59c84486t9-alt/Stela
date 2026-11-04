@@ -35,6 +35,10 @@ pub const EXTERNAL_DISKS: &str = "--external-disks";
 pub const NATIVE_CORES: &str = "--native-cores";
 pub const GUEST_PES: &str = "--guest-pes";
 pub const MAINTENANCE_WRITE: &str = "--maintenance-write";
+/// Boots the installed system to its single-user shell.
+pub const SINGLE_USER: &str = "--single-user";
+/// Keeps the newest presented frame at one logged address.
+pub const SCANOUT_MIRROR: &str = "--scanout-mirror";
 pub const WIFI: &str = "--wifi";
 pub const WIFI_KEY: &str = "--wifi-key";
 pub const WIFI_COUNTRY: &str = "--wifi-country";
@@ -204,6 +208,11 @@ pub struct System {
     pub preboot: Option<Target>,
     /// Allow SIP-protected filesystem writes for this explicit maintenance boot.
     pub maintenance_write: bool,
+    /// Boot the installed system single-user, for maintenance at its console.
+    pub single_user: bool,
+    /// Keep the newest presented frame in host memory for a debugger to read:
+    /// a passed-through GPU's picture otherwise leaves only through its port.
+    pub scanout_mirror: bool,
     /// The NVRAM boot volume the loader chose (`--boot-volume`), naming the
     /// Preboot disk's container and volume group.
     pub boot_volume: Option<BootVolume>,
@@ -361,6 +370,8 @@ impl Default for System {
             boot_volume: None,
             safe_boot: false,
             maintenance_write: false,
+            single_user: false,
+            scanout_mirror: false,
             boot_command: None,
             upgrade: false,
             recovery: None,
@@ -704,6 +715,8 @@ impl fmt::Display for System {
         )?;
         line.flag(boot_selection::SAFE_BOOT_OPTION, self.safe_boot)?;
         line.flag(MAINTENANCE_WRITE, self.maintenance_write)?;
+        line.flag(SINGLE_USER, self.single_user)?;
+        line.flag(SCANOUT_MIRROR, self.scanout_mirror)?;
         line.flag(boot_selection::UPGRADE_OPTION, self.upgrade)?;
         line.flag(
             boot_selection::PAIRED_RECOVERY_OPTION,

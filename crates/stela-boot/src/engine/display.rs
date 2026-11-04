@@ -12,6 +12,7 @@
 use crate::Result;
 use crate::console::{self, Framebuffer};
 use crate::output;
+use alloc::{boxed::Box, vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use stela_contracts::refuse;
 use stela_formats::boot_bundle;
@@ -34,6 +35,45 @@ pub struct GopScanout {
 /// line starts `DCP `.
 pub fn print_log(entry: &DisplayLog) {
     output::arguments(format_args!("{entry}\n"));
+}
+
+/// `--scanout-mirror`: any scanout, with its newest frame kept at one address
+/// that the boot log names. A debugger reads it from there, as QEMU's `memsave`
+/// does; a frame's rows are blue-low `width` pixels top to bottom.
+pub struct MirroredScanout {
+    scanout: Box<dyn Scanout>,
+    frame: Box<[u8]>,
+}
+
+impl MirroredScanout {
+    pub fn new(scanout: Box<dyn Scanout>) -> Self {
+        Self {
+            scanout,
+            frame: Box::default(),
+        }
+    }
+}
+
+impl Scanout for MirroredScanout {
+    fn mode(&self) -> ScanoutMode {
+        self.scanout.mode()
+    }
+
+    fn present(&mut self, rows: &[u8]) -> Result<()> {
+        if self.frame.len() != rows.len() {
+            self.frame = vec![0; rows.len()].into_boxed_slice();
+            let mode = self.mode();
+            output::arguments(format_args!(
+                "DISPLAY mirror address={:#x} bytes={:#x} mode={}x{}\n",
+                self.frame.as_ptr() as usize,
+                rows.len(),
+                mode.width,
+                mode.height,
+            ));
+        }
+        self.frame.copy_from_slice(rows);
+        self.scanout.present(rows)
+    }
 }
 
 impl GopScanout {

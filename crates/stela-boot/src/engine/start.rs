@@ -41,6 +41,9 @@ fn from_disk(
             "MAINTENANCE filesystem protection disabled for this boot (--maintenance-write)\n"
         ));
     }
+    if options.single_user {
+        defaults.boot_args.push_str(" -s");
+    }
     let result = if options.upgrade {
         bundle::upgrade_from_disk(partition, options.boot_volume, &defaults)
     } else if let Some(kind) = options.recovery {
@@ -77,7 +80,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     } = start(handoff);
     let mut host = open_host(handoff, &mut options, host_firmware, native_processors);
     let storage = open_storage(handoff, &options, &mut host);
+    // A single-user boot is a console, which draws through no GPU.
     if options.boots_macos()
+        && !options.single_user
         && let Some(reason) = gpu::no_metal_device()
     {
         output::fatal(format_args!("macOS cannot run without a GPU: {reason}"));
@@ -1256,6 +1261,10 @@ fn place_devices(
     let scanout = gpu::display::scanout().or_else(firmware_scanout);
     #[cfg(not(feature = "nvk"))]
     let scanout = firmware_scanout();
+    let scanout = scanout.map(|scanout| match options.scanout_mirror {
+        true => alloc::boxed::Box::new(display::MirroredScanout::new(scanout)) as _,
+        false => scanout,
+    });
     let programmed = mount::memory_locks(placement.read_only_region, core_locks);
     let memory = board.and_then(|board| memory_resources(board, canonical_ram, programmed));
     let cacheless_memory = memory.is_some();
