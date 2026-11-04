@@ -276,7 +276,12 @@ pub(crate) fn page_fault(
             }
         }
     };
-    invlpg(virtual_page);
+    // A not-present fault has no cached translation to invalidate. Every
+    // shadow removal already invalidates that view or marks it stale.
+    // A protection fault can replace a present mapping.
+    if frame.error & 1 != 0 {
+        invlpg(virtual_page);
+    }
     if half == LOWER {
         let entry = tables::index(virtual_page, layout::top_level());
         state.lower_used[entry / 64] |= 1 << (entry % 64);
