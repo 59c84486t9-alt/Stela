@@ -69,6 +69,13 @@ unsafe extern "C" {
 }
 
 impl Service {
+    /// The linked query depends only on the verified module's bytes.
+    #[cfg(target_os = "uefi")]
+    pub(super) fn has_linked_sampler_states(&self) -> bool {
+        let linked = Self::linked(self.nir_options);
+        core::ptr::fn_addr_eq(self.sampler_states, linked.sampler_states)
+    }
+
     #[cfg(target_os = "uefi")]
     pub(super) fn accepts_compilation_projection(&self) -> bool {
         let linked = Self::linked(self.nir_options);
