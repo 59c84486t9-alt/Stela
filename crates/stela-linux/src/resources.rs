@@ -125,5 +125,10 @@ impl<P: Provider> Drop for KernelResources<P> {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(
+    test,
+    feature = "hosted-test-support",
+    target_arch = "x86_64",
+    any(target_os = "linux", target_os = "macos")
+))]
 mod tests;

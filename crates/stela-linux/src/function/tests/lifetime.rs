@@ -183,14 +183,20 @@ fn null_presentation_keeps_actual_host_and_domain_state() {
     unsafe extern "C" {
         static stela_linux_bare: crate::owner::RawOwner;
         fn stela_linux_kernel_claim(owner: *const crate::owner::RawOwner) -> i32;
+        fn stela_linux_kernel_geometry_bind(
+            owner: *const crate::owner::RawOwner,
+            levels: u32,
+        ) -> i32;
         fn stela_linux_kernel_environment(owner: *const crate::owner::RawOwner) -> i32;
         fn stela_linux_kernel_ready(owner: *const crate::owner::RawOwner) -> i32;
     }
     let owner = core::ptr::addr_of!(stela_linux_bare);
     // SAFETY: isolated cold C bookkeeping model with its actual static bare
-    // owner. This does not construct/qualify a KernelOwner or native Runtime.
+    // owner and fixed model geometry. No native root or Runtime is involved.
     unsafe {
         assert_eq!(stela_linux_kernel_claim(owner), 0);
+        assert_eq!(stela_linux_kernel_environment(owner), -1);
+        assert_eq!(stela_linux_kernel_geometry_bind(owner, 4), 0);
         assert_eq!(stela_linux_kernel_environment(owner), 0);
         assert_eq!(stela_linux_kernel_ready(owner), 0);
     }
