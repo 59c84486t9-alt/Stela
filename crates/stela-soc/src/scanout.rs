@@ -277,6 +277,26 @@ fn copy_opaque(source: &[u8], out: &mut [u8], from: PixelFormat, to: PixelFormat
     }
 }
 
+/// Copy a same-format straight-alpha row over black without reading the
+/// destination or calculating coordinates for individual pixels.
+#[inline(never)]
+fn copy_straight_over_black(pixels: &[u8], out: &mut [u8]) {
+    for (out, pixel) in out
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(pixels.as_chunks::<4>().0)
+    {
+        let alpha = u32::from(pixel[3]);
+        *out = [
+            scale(u32::from(pixel[0]), alpha) as u8,
+            scale(u32::from(pixel[1]), alpha) as u8,
+            scale(u32::from(pixel[2]), alpha) as u8,
+            0xff,
+        ];
+    }
+}
+
 /// Compose `layers`, bottom to top, over opaque black on `mode`'s screen and
 /// return the frame for one [`Scanout::present`]: the mode's rows in its
 /// pixel order, alpha opaque. `read` fills a byte range of a surface from
@@ -335,6 +355,10 @@ pub fn compose(
                     || pixels.iter().skip(3).step_by(4).all(|&alpha| alpha == 0xff)
                 {
                     copy_opaque(pixels, out, surface.format, mode.format);
+                    continue;
+                }
+                if over_black && surface.format == mode.format {
+                    copy_straight_over_black(pixels, out);
                     continue;
                 }
             }
@@ -618,6 +642,68 @@ mod tests {
                 "case {case}: {layers:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_full_base_composes_over_black_and_preserves_row_dma_boundaries() {
+        let base = Layer::new(
+            surface(6, 3, 32, 8),
+            Rect {
+                x: 1,
+                y: 1,
+                ..Rect::whole(4, 2)
+            },
+            Rect::whole(4, 2),
+            false,
+        )
+        .unwrap();
+        let overlay = Layer::new(
+            surface(2, 1, 8, 112),
+            Rect::whole(2, 1),
+            Rect {
+                x: 3,
+                y: 1,
+                ..Rect::whole(2, 1)
+            },
+            true,
+        )
+        .unwrap();
+        let mut memory = [0; 128];
+        for (index, byte) in memory.iter_mut().enumerate() {
+            *byte = (index as u8).wrapping_mul(37);
+        }
+        memory[47] = 0;
+        memory[51] = 0xff;
+        for premultiplied in [false, true] {
+            let layers = [
+                Layer {
+                    premultiplied,
+                    ..base
+                },
+                overlay,
+            ];
+            let mut reads = Vec::new();
+            let frame = compose(&layers, MODE, |iova, bytes| {
+                reads.push((iova, bytes.len()));
+                reader(&memory)(iova, bytes)
+            })
+            .unwrap();
+            assert_eq!(reads, [(44, 16), (76, 16), (112, 8)]);
+            assert_eq!(frame, reference(&layers, MODE, &memory));
+        }
+
+        // An unreachable row leaves the frame unpublished and the later
+        // overlay unread.
+        let mut reads = Vec::new();
+        assert!(
+            compose(&[base, overlay], MODE, |iova, bytes| {
+                reads.push(iova);
+                bytes[0] = 99;
+                iova != 76
+            })
+            .is_err()
+        );
+        assert_eq!(reads, [44, 76]);
     }
 
     #[test]
