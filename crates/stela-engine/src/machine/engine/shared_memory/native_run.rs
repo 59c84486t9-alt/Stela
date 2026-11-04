@@ -7,7 +7,7 @@ pub use epoch::{
 };
 mod preparation;
 use preparation::PreparationFailure;
-use stela_compiler::block::Features;
+use stela_compiler::block::{BlockProfile, Features};
 pub(super) mod source;
 #[cfg(feature = "native-profile")]
 use super::super::NativeTimingWork as Work;
@@ -78,7 +78,8 @@ struct ArtifactKey {
     admission: AdmissionPolicy,
     controls_sha256: Arc<str>,
     compiler_source_sha256: &'static str,
-    abi: alloc::string::String,
+    // The typed emitter contract is sufficient for in-memory lookup.
+    profile_abi: BlockProfile,
     target: stela_compiler::TargetCpu,
     guarded: bool,
 }
@@ -351,6 +352,7 @@ impl Artifact {
             self.identity.source_sha256.capacity(),
             self.identity.native_sha256.capacity(),
             self.identity.controls_sha256.capacity(),
+            self.identity.abi.capacity(),
         ]
         .into_iter()
         .try_fold(0usize, usize::checked_add);
@@ -861,8 +863,7 @@ fn prepare<'a>(
         {
             return Err(at("branch target compatibility", MemoryStatus::Unsupported));
         }
-        let profile = stela_compiler::block::BlockProfile::new(Features::SYSTEM_MODE)
-            .with_checked_memory(controls.sp);
+        let profile = BlockProfile::new(Features::SYSTEM_MODE).with_checked_memory(controls.sp);
         let target = memory.ram.target();
         let key = ArtifactKey {
             pe,
@@ -877,7 +878,7 @@ fn prepare<'a>(
             },
             controls_sha256: controls.shared_identity(),
             compiler_source_sha256: stela_compiler::SOURCE_SHA256,
-            abi: profile.abi(),
+            profile_abi: profile,
             target,
             guarded,
         };
@@ -891,6 +892,9 @@ fn prepare<'a>(
                     )
                 })
         };
+        // Both paths can walk into one bounded private source window. A
+        // miss retains only the bytes the compiled artifact actually covers.
+        let mut staging = [0; super::super::MAX_BLOCK_BYTES as usize];
         let candidate = memory
             .artifacts
             .candidate(&key)
@@ -907,7 +911,6 @@ fn prepare<'a>(
             // The existing compiler block bound also bounds private revalidation
             // staging. Every hit still walks source permissions and copies
             // canonical bytes; only the per-round heap allocation disappears.
-            let mut staging = [0; super::super::MAX_BLOCK_BYTES as usize];
             let input = staging
                 .get_mut(..bytes)
                 .ok_or_else(|| at("cached source staging", MemoryStatus::Domain))?;
@@ -929,16 +932,18 @@ fn prepare<'a>(
                 artifact
             }
             None => {
-                let mut input = alloc::vec![0; source_bytes];
+                let input = staging
+                    .get_mut(..source_bytes)
+                    .ok_or_else(|| at("cold source staging", MemoryStatus::Domain))?;
                 // Instruction walks use the same source controls, canonical descriptor
                 // owner and original physical bytes. No direct identity-frame shortcut.
                 source
-                    .read_into(&mut input)
+                    .read_into(input)
                     .map_err(|status| at("cold executable source fetch", status))?;
                 // Admit only the reached words. A later denial ends this
                 // prefix; the held scheduler checks that exact next word.
                 let plan = stela_compiler::block::CompilationPlan::new_admitted_system(
-                    &input,
+                    input,
                     stela_compiler::GuestAddress(pc),
                     controls.sp,
                     target,
@@ -953,8 +958,8 @@ fn prepare<'a>(
                     return Err(at("compiled source extent", MemoryStatus::Domain));
                 }
                 // Planning only selects a prefix of the already admitted bytes.
-                // The owned copy and admission policy have not changed.
-                input.truncate(bytes);
+                // The staged copy and admission policy have not changed.
+                let input = &input[..bytes];
                 let requirements = plan
                     .memory_requirements()
                     .ok_or_else(|| at("checked memory requirements", MemoryStatus::Unsupported))?;
@@ -980,7 +985,7 @@ fn prepare<'a>(
                 let identity = Identity {
                     pe,
                     pc,
-                    source_sha256: stela_formats::sha256(&input),
+                    source_sha256: stela_formats::sha256(input),
                     native_sha256: stela_formats::sha256(&compiled.native.x86_64_code),
                     controls_sha256: key.controls_sha256.as_ref().into(),
                     compiler_source_sha256: stela_compiler::SOURCE_SHA256,
@@ -1000,7 +1005,7 @@ fn prepare<'a>(
                             })?),
                             guarded,
                         ),
-                        source: input,
+                        source: input.to_vec(),
                         requirements,
                         #[cfg(feature = "native-profile")]
                         profile: _profile,

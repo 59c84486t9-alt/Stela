@@ -259,6 +259,7 @@ fn repeated_preparation_reuses_only_immutable_artifact_and_refetches_changed_sou
     let second = prepare_artifact(&mut machine, BINDING).unwrap();
     assert!(Arc::ptr_eq(&first, &second));
     assert_eq!(first.source.len(), 8);
+    assert_eq!(first.source.capacity(), first.source.len());
     // No frame was cached: each attempt still borrows current CPU state.
     machine.cpu.state.x[0] = 0x1234;
     let third = prepare_artifact(&mut machine, BINDING).unwrap();
@@ -517,6 +518,9 @@ fn controls_worker_and_guarded_leaf_are_actual_cache_identity() {
         .set_raw(Register::SCTLR_EL1, 0, sctlr | (1 << 3));
     let controls = prepare_artifact(&mut machine, BINDING).unwrap();
     assert!(!Arc::ptr_eq(&first, &controls));
+    assert_ne!(first.key.profile_abi, controls.key.profile_abi);
+    assert_eq!(first.identity.abi, first.key.profile_abi.abi());
+    assert_eq!(controls.identity.abi, controls.key.profile_abi.abi());
     assert_ne!(
         first.identity.controls_sha256,
         controls.identity.controls_sha256
@@ -1157,7 +1161,8 @@ fn immutable_code_arc_metadata_is_charged_at_the_exact_artifact_budget_boundary(
         + 2 * core::mem::size_of::<usize>()
         + artifact.identity.source_sha256.capacity()
         + artifact.identity.native_sha256.capacity()
-        + artifact.identity.controls_sha256.capacity();
+        + artifact.identity.controls_sha256.capacity()
+        + artifact.identity.abi.capacity();
     #[cfg(feature = "native-profile")]
     let expected = expected + artifact.profile.retained_bytes().unwrap();
     assert_eq!(artifact.retained_bytes(), expected);
