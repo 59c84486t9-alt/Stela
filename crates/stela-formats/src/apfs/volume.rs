@@ -15,7 +15,7 @@ use super::{
     u16_at, u32_at, u64_at, uuid_at,
 };
 use crate::payload::ReadAt;
-use alloc::{format, string::String, vec, vec::Vec};
+use alloc::{collections::VecDeque, format, string::String, vec, vec::Vec};
 use core::cmp::Ordering;
 
 pub const APFS_VOL_ROLE_NONE: u16 = 0x0000;
@@ -181,6 +181,33 @@ pub struct Volume {
     integrity_meta_oid: u64,
 }
 
+/// Successfully opened volumes and trees for one stable container source.
+#[derive(Default)]
+pub(super) struct OpenCache {
+    volumes: VecDeque<Volume>,
+    trees: VecDeque<(TreeKey, Tree)>,
+}
+
+const OPEN_CACHE_SLOTS: usize = 8;
+
+fn remember<T>(cache: &mut VecDeque<T>, item: T) {
+    if cache.len() == OPEN_CACHE_SLOTS {
+        cache.pop_front();
+    }
+    cache.push_back(item);
+}
+
+/// Includes the volume's object-map view and distinguishes seal-checked roots.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TreeKey {
+    omap_root: u64,
+    xid: u64,
+    type_field: u32,
+    oid: u64,
+    integrity_meta_oid: Option<u64>,
+    seal_root: bool,
+}
+
 fn key_id_and_type(key: &[u8]) -> Result<(u64, u8)> {
     let value = u64_at(key, 0)?;
     Ok((value & OBJ_ID_MASK, (value >> OBJ_TYPE_SHIFT) as u8))
@@ -218,9 +245,14 @@ fn extended_fields(blob: &[u8]) -> Result<Vec<(u8, &[u8])>> {
 
 impl Volume {
     pub(crate) fn open<R: ReadAt>(device: &mut Device<R>, paddr: u64) -> Result<Self> {
+        if let Some(volume) = device.open_cache.volumes.iter().find(|v| v.paddr == paddr) {
+            return Ok(volume.clone());
+        }
         let block = Self::superblock(device, paddr)?;
         let omap = Omap::open(device, u64_at(&block, 128)?)?;
-        Self::parse(&block, paddr, omap)
+        let volume = Self::parse(&block, paddr, omap)?;
+        remember(&mut device.open_cache.volumes, volume.clone());
+        Ok(volume)
     }
 
     fn superblock<R: ReadAt>(device: &mut Device<R>, paddr: u64) -> Result<Vec<u8>> {
@@ -309,6 +341,22 @@ impl Volume {
         oid: u64,
         seal_root: bool,
     ) -> Result<Tree> {
+        let key = TreeKey {
+            omap_root: self.omap.tree.root,
+            xid: self.xid,
+            type_field,
+            oid,
+            integrity_meta_oid: self.sealed.then_some(self.integrity_meta_oid),
+            seal_root,
+        };
+        if let Some((_, tree)) = device
+            .open_cache
+            .trees
+            .iter()
+            .find(|(cached, _)| *cached == key)
+        {
+            return Ok(tree.clone());
+        }
         let (root, headerless) = match Storage::of(type_field) {
             Storage::Physical => {
                 // A physical root shows by its zero header whether it has one.
@@ -328,6 +376,7 @@ impl Volume {
         if Storage::of(type_field) == Storage::Virtual {
             tree.relative_to(oid);
         }
+        remember(&mut device.open_cache.trees, (key, tree.clone()));
         Ok(tree)
     }
 
@@ -821,6 +870,26 @@ mod tests {
         let old = volume.snapshot(device, &snapshot)?;
         let raw = old.lookup(device, "pattern.bin", true)?;
         assert_eq!(old.read(device, &raw)?, pattern(300_000));
+        Ok(())
+    }
+
+    #[test]
+    fn cached_tree_keeps_the_transaction_and_seal_identity() -> Result<()> {
+        let mut container = Container::open(sealed_fixture(), 0)?;
+        let mut volume = container.volumes()?.remove(0);
+        let device = &mut container.device;
+        assert_eq!(
+            volume.inode(device, ROOT_DIR_INO_NUM)?.kind,
+            FileKind::Directory
+        );
+
+        let xid = volume.xid;
+        volume.xid = 0;
+        assert!(volume.inode(device, ROOT_DIR_INO_NUM).is_err());
+        volume.xid = xid;
+
+        volume.integrity_meta_oid = u64::MAX;
+        assert!(volume.inode(device, ROOT_DIR_INO_NUM).is_err());
         Ok(())
     }
 
