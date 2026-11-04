@@ -8,6 +8,39 @@ pub(crate) mod cache;
 
 pub static SOURCE: NativeMemory = NativeMemory::new(&crate::ALLOCATOR, cache::verify_writeback);
 
+static AMD_TABLE_HEAP: stela_boot_core::heap::Heap = stela_boot_core::heap::Heap::new();
+pub(crate) static AMD_TABLES: NativeMemory =
+    NativeMemory::new(&AMD_TABLE_HEAP, cache::verify_writeback);
+
+/// Register the separate low physical memory reserved for AMD-Vi tables.
+///
+/// # Safety
+/// The loader's exclusive LOADER_DATA reservation remains mapped in every
+/// native root, outside the guest and driver DMA ranges. Call once on the BSP
+/// before remapper startup.
+pub(crate) unsafe fn initialize_amd_tables(
+    region: crate::handoff::Region,
+) -> Result<(), MemoryError> {
+    if region.bytes == 0 {
+        return Ok(());
+    }
+    let bytes = usize::try_from(region.bytes).map_err(|_| MemoryError::InvalidSize)?;
+    let cpu = crate::layout::physical(region.physical);
+    // SAFETY: the caller retains this reservation and all shared mappings.
+    unsafe { qualify_reserved_writeback(cpu, region.physical, bytes) }?;
+    // SAFETY: unused firmware-owned RAM; the AMD table heap is its only owner.
+    unsafe {
+        AMD_TABLE_HEAP.initialize(cpu as *mut u8, bytes);
+        AMD_TABLES.initialize(
+            cpu as usize,
+            region.physical,
+            bytes,
+            crate::layout::physical(0),
+        );
+    }
+    Ok(())
+}
+
 /// Register the heap's CPU/physical mapping (`NativeMemory::initialize`).
 ///
 /// # Safety
