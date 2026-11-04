@@ -83,10 +83,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     ..self.cpu.requester()
                 },
                 lock: memory.lock,
+                refused: None,
                 host: &mut self.host,
             };
             let outcome = call.run(&mut caller);
+            let refused = caller.refused;
             self.devices.finish_call(outcome);
+            // The tables refuse what a kept translation still reaches: XNU
+            // ages pages by clearing the access flag without a TLBI. The
+            // frontend's retry touches the page, so give up the entry, as a
+            // TLB may at any time, for that touch to take the fault.
+            if let Some(address) = refused {
+                let reach = mmu::tlbi::Reach::Containing(mmu::tlbi::canonical(address));
+                self.tlb_maintained(reach, mmu::tlbi::Everywhere::Addresses(reach), None);
+            }
         }
         let result = match result {
             Ok(()) => Ok(()),

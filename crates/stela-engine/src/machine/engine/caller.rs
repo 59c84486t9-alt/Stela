@@ -10,6 +10,8 @@ pub(super) struct CallerSpace<'a, H: Host> {
     pub controls: Controls,
     pub requester: mmu::Requester,
     pub lock: mmu::MemoryLocks,
+    /// The last address the tables refused, which the frontend will retry.
+    pub refused: Option<u64>,
 }
 
 impl<H: Host> CallerSpace<'_, H> {
@@ -38,6 +40,7 @@ impl<H: Host> CallerSpace<'_, H> {
             ) {
                 Translated::Mapped(translation) => translation,
                 Translated::Fault(_) => {
+                    self.refused = Some(virtual_address);
                     return Err(CallerFault::Denied {
                         address: virtual_address,
                     });

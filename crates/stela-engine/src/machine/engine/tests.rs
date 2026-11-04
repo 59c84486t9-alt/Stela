@@ -892,6 +892,7 @@ fn a_call_reaches_the_callers_ram_across_pages_outside_locks() {
             ..machine.cpu.requester()
         },
         lock: [Some((locked, locked + 0xf)), None, None, None],
+        refused: None,
         host: &mut machine.host,
     };
     let straddling = BASE + FETCH_PAGE - 4;
@@ -903,6 +904,8 @@ fn a_call_reaches_the_callers_ram_across_pages_outside_locks() {
         caller.write(locked - 4, &[0xa5; 8]),
         Err(CallerFault::Denied { address: locked })
     );
+    // A lock refuses the bytes, not the translation: no entry has to go.
+    assert_eq!(caller.refused, None);
     let mut before = [0; 4];
     caller.read(locked - 4, &mut before).unwrap();
     assert_eq!(before, [0; 4]);

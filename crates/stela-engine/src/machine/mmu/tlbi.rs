@@ -341,7 +341,7 @@ pub enum Everywhere {
 }
 
 /// VA[55:0] with bit 55 copied above: the address of either half.
-fn canonical(address: u64) -> u64 {
+pub(in crate::machine) fn canonical(address: u64) -> u64 {
     (((address << 8) as i64) >> 8) as u64
 }
 
