@@ -186,7 +186,7 @@ fn precomputed(s: &mut Store<Memory>, data: &[u8]) -> Vec<u8> {
 
 #[test]
 fn recorded_hashes_check_every_member_before_the_restore_by_default() {
-    let data: Vec<u8> = (0..BLOCK_BYTES * 2 + 5).map(|i| (i * 7) as u8).collect();
+    let data: Vec<u8> = (0..MAX_READ_BYTES + 5).map(|i| (i * 7) as u8).collect();
     let mut s = fixture(&data, true);
     let file = precomputed(&mut s, &data);
     s.adopt_block_hashes(&file).unwrap();
@@ -198,12 +198,13 @@ fn recorded_hashes_check_every_member_before_the_restore_by_default() {
     // The same records refuse a changed block or SHA-384 by name.
     let mut s = fixture(&data, true);
     let mut file = precomputed(&mut s, &data);
-    file[64] ^= 1;
+    let last = file.len() - 32;
+    file[last] ^= 1;
     s.manifest.block_hashes.as_mut().unwrap().sha256 = stela_formats::sha256(&file);
     s.adopt_block_hashes(&file).unwrap();
     let error = s.prepare().unwrap_err().to_string();
     assert!(
-        error.contains("os.dmg: source changed at block 2"),
+        error.contains("os.dmg: source changed at block 16"),
         "{error}"
     );
     let mut s = fixture(&data, false);
