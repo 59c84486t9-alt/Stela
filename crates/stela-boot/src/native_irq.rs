@@ -41,6 +41,16 @@ static TIMEOUT: AtomicU64 = AtomicU64::new(0);
 static ROOT_ADAPTER: AtomicPtr<crate::native_clock::IrqAdapter> =
     AtomicPtr::new(core::ptr::null_mut());
 
+static MOUNTED_CPU: AtomicPtr<crate::engine::host::RootIdentity> =
+    AtomicPtr::new(core::ptr::null_mut());
+
+fn mounted_cpu() -> Option<&'static crate::engine::host::RootIdentity> {
+    let identity = MOUNTED_CPU.load(Ordering::Acquire);
+    // SAFETY: mounted start permanently retains this original Arc for the
+    // static registry and every action that may remain in quarantine.
+    unsafe { identity.as_ref() }
+}
+
 fn root_adapter() -> Option<&'static crate::native_clock::IrqAdapter> {
     let adapter = ROOT_ADAPTER.load(Ordering::Acquire);
     // SAFETY: publication leaks this exact Box for the permanent registry
@@ -122,11 +132,18 @@ pub fn service() -> Result<&'static dyn IrqController, IrqError> {
 /// # Safety
 /// The boot processor after `host::install`, with interrupts off; its IDT
 /// routes 0x50..=0x5f to [`dispatch`] and nothing else owns those vectors.
-pub(crate) unsafe fn start(registers: u64, tsc_hz: u64) -> Result<(), IrqError> {
+pub(crate) unsafe fn start(
+    registers: u64,
+    tsc_hz: u64,
+    identity: Arc<crate::engine::host::RootIdentity>,
+) -> Result<(), IrqError> {
+    identity.check_current().map_err(|_| IrqError::WrongCpu)?;
     let timeout = tsc_hz.checked_mul(2).ok_or(IrqError::Unsupported)?;
-    // SAFETY: forwarded from the caller; `registers` maps the APIC base MSR's
-    // page in every root.
-    unsafe { initialize(apic::base_msr(), registers, timeout) }
+    // SAFETY: forwarded from the caller; the original APIC page is mapped in
+    // every root. Interrupts remain disabled through identity publication.
+    unsafe { initialize(apic::base_msr(), registers, timeout) }?;
+    MOUNTED_CPU.store(Arc::into_raw(identity).cast_mut(), Ordering::Release);
+    Ok(())
 }
 
 /// Whether this processor is running a device interrupt's handler.
@@ -264,6 +281,8 @@ unsafe impl Platform for NativePlatform {
         }
         if let Some(adapter) = root_adapter() {
             adapter.check_irq_cpu().map_err(|_| IrqError::WrongCpu)?;
+        } else if let Some(identity) = mounted_cpu() {
+            identity.check_irq_cpu().map_err(|_| IrqError::WrongCpu)?;
         }
         if id(&controller())? != BSP.load(Ordering::Relaxed) {
             return Err(IrqError::WrongCpu);
