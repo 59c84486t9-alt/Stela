@@ -528,7 +528,11 @@ impl<D: Devices> Devices for SharedDevices<D> {
     }
     /// Only the home machine takes a reset, which stops every PE.
     fn take_reset(&mut self) -> Option<Reset> {
-        if !self.home || !self.board.resetting.swap(false, Ordering::Acquire) {
+        let resetting = &self.board.resetting;
+        if !self.home
+            || !resetting.load(Ordering::Relaxed)
+            || !resetting.swap(false, Ordering::Acquire)
+        {
             return None;
         }
         self.board
