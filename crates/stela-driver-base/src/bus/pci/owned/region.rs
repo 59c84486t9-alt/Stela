@@ -120,19 +120,6 @@ impl<G: Grant> Region<G> {
                 ));
             }
         }
-        if grant.state().close.borrow().is_none() {
-            let close = match grant.custody().admission_close() {
-                Ok(close) => close,
-                Err(error) => {
-                    return Err((
-                        ConfigError::before_effect(ConfigFailure::Mapping(error)),
-                        grant,
-                        mapping,
-                    ));
-                }
-            };
-            *grant.state().close.borrow_mut() = Some(close);
-        }
         Ok(Self {
             grant,
             address,
@@ -144,7 +131,7 @@ impl<G: Grant> Region<G> {
     pub fn admission_close(
         &self,
     ) -> Result<crate::bus::pci::assignment::AdmissionClose, MappingError> {
-        self.grant.custody().admission_close()
+        self.grant.state().admission_close()
     }
     pub fn address(&self) -> Address {
         self.address

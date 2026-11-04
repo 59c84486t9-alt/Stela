@@ -295,6 +295,13 @@ impl AdmissionClose {
     pub fn close(&self) {
         self.original.close_admission();
     }
+    /// Retain the same close-only projection without calling the source.
+    pub(crate) fn retain_close(&self) -> Self {
+        Self {
+            original: ManuallyDrop::new(Arc::clone(&self.original)),
+            dismissed: false,
+        }
+    }
     /// End only this close-handle retention after its source key was returned.
     /// This releases no counted use and acknowledges no native completion.
     pub fn dismiss(mut self) {

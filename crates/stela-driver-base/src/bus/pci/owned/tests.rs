@@ -401,6 +401,35 @@ fn actual_model_epoch_observer_cannot_substitute_same_address_other_allocation()
 }
 
 #[test]
+fn abandoned_unattached_grant_closes_original_assignment_without_mapper_callbacks() {
+    let (source, mapping, counters) = mapped(
+        ADDRESS,
+        window(ADDRESS),
+        PhysicalSpan::new(physical(ADDRESS), FUNCTION_BYTES as u64).unwrap(),
+        0,
+        FUNCTION_BYTES,
+        CacheAttribute::Uncached,
+        Protection::ReadWrite,
+    );
+    let retention = source.retention();
+    let grant = source.into_grant();
+    let close = grant.admission_close().unwrap();
+    close.dismiss();
+    assert_eq!(retention.check_admission(), Ok(()));
+    let contexts = counters.contexts.load(Ordering::Relaxed);
+    drop(grant);
+    assert_eq!(counters.contexts.load(Ordering::Relaxed), contexts);
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+    assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
+    assert_eq!(retention.uses(), 1);
+    assert_eq!(
+        retention.check_admission(),
+        Err(MappingError::Assignment(assignment::Error::Closed))
+    );
+    drop(mapping);
+}
+
+#[test]
 fn abandoned_retirement_failure_closes_new_admission_and_keeps_original_graph() {
     let (config, counters) = fixture(ADDRESS);
     let epoch = config.retain_epoch().unwrap();

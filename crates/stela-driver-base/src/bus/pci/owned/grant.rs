@@ -59,17 +59,10 @@ pub unsafe trait ConfigCustody: Any {
     fn address(&self) -> Address;
     fn window(&self) -> EcamWindow;
     fn resource(&self) -> &Resource;
-    /// Preown the SAME physical endpoint's close-only metadata projection.
-    /// No source entry, allocation, native context or hardware effect occurs.
-    /// Capture before IRQ/DMA publication; refusal preserves this controller.
-    fn admission_close(&self) -> Result<AdmissionClose, MappingError>;
     /// Atomically admit and count this bounded actual operation with close.
     /// Return a use of the SAME original physical product/ancestors; no heap
     /// allocation or mutable/entered borrow survives return (IRQ-safe path).
     fn begin(&self, operation: Operation) -> Result<ConfigOperation, ConfigError>;
-    /// Nonblocking metadata-only close on losing this affine controller. Keep
-    /// every real claim/callback/root; no hardware effect/final Drop allowed.
-    fn abandon(&mut self);
     fn retirement_context(&self) -> Result<(), MappingError>;
     fn retain_epoch(&self) -> Result<Box<dyn ConfigEpoch>, MappingError>;
 }
@@ -89,7 +82,7 @@ pub unsafe trait DriverCustody: ConfigCustody {}
 /// and reattachment. A new Region cannot erase an old failure or BME seal.
 pub(super) struct State {
     pub(super) terminal: Cell<Option<ConfigError>>,
-    pub(super) close: RefCell<Option<AdmissionClose>>,
+    close: RefCell<Option<AdmissionClose>>,
     pub(super) operation: RefCell<Option<ConfigOperation>>,
     pub(super) waiting: Cell<Option<ConfigError>>,
     pub(super) acting: Cell<bool>,
@@ -108,15 +101,22 @@ impl State {
             operation.close_metadata();
         }
     }
+    pub(super) fn admission_close(&self) -> Result<AdmissionClose, MappingError> {
+        self.close
+            .borrow()
+            .as_ref()
+            .map(AdmissionClose::retain_close)
+            .ok_or(MappingError::Retired)
+    }
     pub(super) fn dismiss_close(&self) {
         if let Some(close) = self.close.borrow_mut().take() {
             close.dismiss();
         }
     }
-    fn new() -> Self {
+    fn new(close: AdmissionClose) -> Self {
         Self {
             terminal: Cell::new(None),
-            close: RefCell::new(None),
+            close: RefCell::new(Some(close)),
             operation: RefCell::new(None),
             waiting: Cell::new(None),
             acting: Cell::new(false),
@@ -176,10 +176,20 @@ impl PrepublicationGrant {
         // borrow; no allocation, lifetime or original control is replaced.
         Some(update(unsafe { &mut *original.cast::<P>() }))
     }
-    pub fn from_owned<P: PrepublicationCustody>(original: P) -> Self {
+    /// # Safety
+    /// The preowned close must belong to the same actual assignment and
+    /// ancestor graph as the boxed custody. Capture it before mapping or
+    /// configuration effects. The caller owns the original custody allocation.
+    pub unsafe fn from_boxed<P: PrepublicationCustody>(
+        original: Box<P>,
+        close: AdmissionClose,
+    ) -> Self {
+        let original: Box<dyn PrepublicationCustody> = original;
+        // Keep original custody even if allocating the operation state fails.
+        let original = ManuallyDrop::new(original);
         Self {
-            state: ManuallyDrop::new(Box::new(State::new())),
-            original: ManuallyDrop::new(Box::new(original)),
+            state: ManuallyDrop::new(Box::new(State::new(close))),
+            original,
             returned: false,
         }
     }
@@ -200,12 +210,19 @@ impl PrepublicationGrant {
 }
 impl DriverGrant {
     pub fn admission_close(&self) -> Result<AdmissionClose, MappingError> {
-        self.original.admission_close()
+        self.state.admission_close()
     }
-    pub fn from_owned<P: DriverCustody>(original: P) -> Self {
+    /// # Safety
+    /// The preowned close must belong to the same actual assignment and
+    /// ancestor graph as the boxed custody. Capture it before mapping or
+    /// configuration effects. The caller owns the original custody allocation.
+    pub unsafe fn from_boxed<P: DriverCustody>(original: Box<P>, close: AdmissionClose) -> Self {
+        let original: Box<dyn DriverCustody> = original;
+        // Keep original custody even if allocating the operation state fails.
+        let original = ManuallyDrop::new(original);
         Self {
-            state: ManuallyDrop::new(Box::new(State::new())),
-            original: ManuallyDrop::new(Box::new(original)),
+            state: ManuallyDrop::new(Box::new(State::new(close))),
+            original,
             returned: false,
         }
     }
@@ -251,10 +268,8 @@ impl Drop for PrepublicationGrant {
         if self.returned {
             // SAFETY: explicit owner transfer dismissed the state projection.
             unsafe { ManuallyDrop::drop(&mut self.state) };
-        } else if self.state.close.borrow().is_some() {
-            self.state.close_metadata();
         } else {
-            self.original.abandon();
+            self.state.close_metadata();
         }
         // Abandonment retains the original controller and parked state.
     }
@@ -264,10 +279,8 @@ impl Drop for DriverGrant {
         if self.returned {
             // SAFETY: explicit owner transfer dismissed the state projection.
             unsafe { ManuallyDrop::drop(&mut self.state) };
-        } else if self.state.close.borrow().is_some() {
-            self.state.close_metadata();
         } else {
-            self.original.abandon();
+            self.state.close_metadata();
         }
     }
 }

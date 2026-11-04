@@ -1253,12 +1253,6 @@ unsafe impl crate::bus::pci::owned::grant::ConfigEpoch for PmEpoch {
 // sole controller. The same resource and gate are consumed with its mapping;
 // symbolic geometry grants no native/reset/IRQ/fabric/physical authority.
 unsafe impl crate::bus::pci::owned::grant::ConfigCustody for PmCustody {
-    fn admission_close(
-        &self,
-    ) -> core::result::Result<crate::bus::pci::assignment::AdmissionClose, owned::Error> {
-        self.owner.admission_close()
-    }
-
     fn address(&self) -> Address {
         self.address
     }
@@ -1317,9 +1311,6 @@ unsafe impl crate::bus::pci::owned::grant::ConfigCustody for PmCustody {
         Ok(unsafe {
             crate::bus::pci::owned::grant::ConfigOperation::new(count, completion.clone())
         })
-    }
-    fn abandon(&mut self) {
-        self.owner.abandon_admission();
     }
     fn retirement_context(&self) -> core::result::Result<(), owned::Error> {
         self.retention.check_context()
@@ -1411,15 +1402,6 @@ fn native_config(address: Address, device: u16) -> (Function<ControlledConfig>, 
     };
     let retention = mapping_owner.retention().unwrap();
     let resource = owned::Resource::new(Box::new(ConfigResource(span, retention.clone())));
-    let mapping = authority
-        .map(
-            resource.clone(),
-            0,
-            4096,
-            owned::CacheAttribute::Uncached,
-            owned::Protection::ReadWrite,
-        )
-        .unwrap();
     let window = crate::bus::pci::EcamWindow {
         base: 0x8000_0000,
         segment: 0,
@@ -1428,18 +1410,29 @@ fn native_config(address: Address, device: u16) -> (Function<ControlledConfig>, 
     };
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
     // driver, worker or DMA touches them.
-    let custody = PmCustody {
+    let custody = Box::new(PmCustody {
         owner: mapping_owner,
         completion: Some(Arc::new(PmCompletion {
             retention: retention.clone(),
             fault: stela_driver_base::sync::FirstFault::new(),
         })),
         retention,
-        resource,
+        resource: resource.clone(),
         address,
         window,
-    };
-    let grant = crate::bus::pci::owned::grant::DriverGrant::from_owned(custody);
+    });
+    let close = custody.owner.admission_close().unwrap();
+    // SAFETY: the close is from the same original custody owner before mapping.
+    let grant = unsafe { crate::bus::pci::owned::grant::DriverGrant::from_boxed(custody, close) };
+    let mapping = authority
+        .map(
+            resource,
+            0,
+            4096,
+            owned::CacheAttribute::Uncached,
+            owned::Protection::ReadWrite,
+        )
+        .unwrap();
     let mut config = match OwnedConfig::attach(grant, mapping) {
         Ok(config) => config,
         Err((error, grant, mapping)) => {

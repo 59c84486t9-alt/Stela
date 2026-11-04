@@ -236,6 +236,7 @@ pub fn physical(address: Address) -> u64 {
 /// External fixture controller. Resource inventories contain only its actual
 /// retention projection; config and mapping use the SAME original count gate.
 pub struct FixtureCustody {
+    close: Option<assignment::AdmissionClose>,
     owner: MappingOwner<Arc<Ram>>,
     resource: Option<Resource>,
     retention: Option<MappingRetention<Arc<Ram>>>,
@@ -312,10 +313,6 @@ unsafe impl ConfigEpoch for Epoch {
 // SAFETY: same actual hosted allocation and exclusive controller constructed
 // together below; data geometry cannot create an independent owner or gate.
 unsafe impl ConfigCustody for FixtureCustody {
-    fn admission_close(&self) -> Result<assignment::AdmissionClose, MappingError> {
-        self.owner.admission_close()
-    }
-
     fn address(&self) -> Address {
         self.address
     }
@@ -368,9 +365,6 @@ unsafe impl ConfigCustody for FixtureCustody {
         // fixture RAM/assignment. Arc clone allocates nothing; control stays here.
         Ok(unsafe { ConfigOperation::new(count, completion.clone()) })
     }
-    fn abandon(&mut self) {
-        self.owner.abandon_admission();
-    }
     fn retirement_context(&self) -> Result<(), MappingError> {
         self.retention
             .as_ref()
@@ -391,7 +385,10 @@ unsafe impl ConfigCustody for FixtureCustody {
 unsafe impl DriverCustody for FixtureCustody {}
 impl FixtureCustody {
     pub fn into_grant(self) -> DriverGrant {
-        DriverGrant::from_owned(self)
+        let mut custody = Box::new(self);
+        let close = custody.close.take().expect("preowned fixture close");
+        // SAFETY: the close was captured from this same original model owner.
+        unsafe { DriverGrant::from_boxed(custody, close) }
     }
     pub fn retention(&self) -> MappingRetention<Arc<Ram>> {
         self.retention.as_ref().expect("live fixture epoch").clone()
@@ -412,6 +409,9 @@ impl FixtureCustody {
         drop(self.resource.take());
         drop(self.retention.take());
         drop(self.completion.take());
+        if let Some(close) = self.close.take() {
+            close.dismiss();
+        }
         // SAFETY: caller supplied exact model drain; actual original gate also
         // checks every retained epoch and config operation has ended.
         match unsafe { self.owner.retire() } {
@@ -441,6 +441,7 @@ pub fn mapped(
     // SAFETY: this real allocation has one isolated creator/controller; no
     // firmware, native device, external reset, guest or backedge exists.
     let owner = unsafe { MappingOwner::from_owned(memory.clone(), ram_context) };
+    let close = owner.admission_close().unwrap();
     let retention = owner.retention().unwrap();
     let platform = Arc::new(Model {
         memory: memory.clone(),
@@ -466,6 +467,7 @@ pub fn mapped(
     drop(authority);
     (
         FixtureCustody {
+            close: Some(close),
             owner,
             resource: Some(resource),
             completion: Some(Arc::new(FixtureCompletion {
@@ -705,7 +707,7 @@ mod operation_controls {
             })
             .unwrap();
         assert_eq!(source.uses(), 2, "same mapping and configuration gate");
-        let close = source.admission_close().unwrap();
+        let close = source.owner.admission_close().unwrap();
         close.close();
         assert!(matches!(
             source.begin(Operation::Read {
