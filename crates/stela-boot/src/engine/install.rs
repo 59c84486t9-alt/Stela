@@ -90,7 +90,10 @@ pub(super) fn open(
     };
     let identity = partition.identity();
     let sector_bytes = identity.block_size;
-    let read_limit = identity.features.max_transfer;
+    let features = identity.features;
+    let read_limit = features
+        .max_read_transfer
+        .map_or(features.max_transfer, |limit| limit.get());
     let mut volume = Fat32::open(Bytes::new(partition))
         .map_err(|error| refuse!("install medium: {error}", %error))?;
     let directory = directory.replace('\\', "/");
