@@ -306,7 +306,10 @@ stela_air_construct_constants(struct stela_air_metadata *m)
         global && copy && evaluated; global = LLVMGetNextGlobal(global), copy = LLVMGetNextGlobal(copy)) {
       if (!stela_air_metadata_constructed(global))
          continue;
-      evaluated = count < AIR_MAX_ARGUMENTS;
+      if (count == AIR_MAX_ARGUMENTS) {
+         evaluated = false;
+         break;
+      }
       originals[count] = global;
       copies[count++] = copy;
       LLVMSetLinkage(copy, LLVMExternalLinkage);

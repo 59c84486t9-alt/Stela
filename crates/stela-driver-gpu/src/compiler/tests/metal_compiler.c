@@ -1221,6 +1221,23 @@ derived_constants_are_constructed_from_their_function_constants(void)
           strstr(error.detail, "program-scope constants"));
 }
 
+static void
+constructed_globals_are_bounded(void)
+{
+   char *fixture = ralloc_strdup(NULL, derived);
+   for (unsigned i = 0; i < AIR_MAX_ARGUMENTS; i++)
+      assert(ralloc_asprintf_append(&fixture, "@extra%u = internal addrspace(2) global i32 0\n", i));
+   LLVMMemoryBufferRef input = bitcode(fixture);
+   ralloc_free(fixture);
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   const struct stela_air_constant_value unused = {0};
+   assert(!stela_metal_reflect(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                               "derived", &unused, 0, &reflection, &error));
+   assert(error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "program-scope constants"));
+   LLVMDisposeMemoryBuffer(input);
+}
+
 static unsigned
 count_intrinsic(nir_shader *shader, nir_intrinsic_op op)
 {
@@ -1921,6 +1938,7 @@ main(void)
    mesh_stages_compile_with_their_launch();
    function_constants_reflect_and_specialize();
    derived_constants_are_constructed_from_their_function_constants();
+   constructed_globals_are_bounded();
    function_constants_select_outputs();
    older_kernels_compile();
    unoptimized_kernels_compile();
