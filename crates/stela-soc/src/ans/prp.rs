@@ -13,6 +13,8 @@ use stela_contracts::refuse;
 use {stela_contracts::dma::DmaError, stela_contracts::dma::Port};
 
 pub(super) const MAX_TRANSFER: usize = 1024 * 1024;
+const ENTRY_BYTES: usize = size_of::<u64>();
+const LIST_READ_ENTRIES: usize = 16;
 
 pub(super) fn dma_error(error: DmaError) -> Refusal {
     match error {
@@ -79,28 +81,55 @@ impl Prps {
         let mut ranges = Vec::with_capacity(1 + remaining.div_ceil(page as usize));
         ranges.push(first);
         let mut entry = second;
+        let mut list = [0; ENTRY_BYTES * LIST_READ_ENTRIES];
+        let mut read_entries = LIST_READ_ENTRIES;
         while remaining != 0 {
-            let mut pointer = [0; 8];
-            port.read(entry, &mut pointer)
-                .map_err(dma_error_at(entry, pointer.len()))?;
-            let pointer = u64::from_le_bytes(pointer);
-            if pointer == 0 || !pointer.is_multiple_of(page) {
-                return Err(refuse!("ANS PRP list contains a null or unaligned page"));
-            }
-            let last_in_page = (entry + 8).is_multiple_of(page);
-            if last_in_page && remaining > page as usize {
-                entry = pointer;
+            let page_entries = (page - entry % page) as usize / ENTRY_BYTES;
+            let entries = remaining
+                .div_ceil(page as usize)
+                .min(page_entries)
+                .min(read_entries);
+            let bytes = entries * ENTRY_BYTES;
+            let loaded = port.read_progress(entry, &mut list[..bytes]);
+            if entries > 1
+                && matches!(&loaded, Err(fault) if fault.completed == 0 && fault.error == DmaError::Memory)
+            {
+                // Some RAM owners reject a span before reading its first
+                // byte. Find the failing entry without replaying any prefix.
+                read_entries = 1;
                 continue;
             }
-            let chunk = remaining.min(page as usize);
-            pointer
-                .checked_add(chunk as u64 - 1)
-                .ok_or(refuse!("ANS PRP data address wraps"))?;
-            ranges.push((pointer, chunk));
-            remaining -= chunk;
-            entry = entry
-                .checked_add(8)
-                .ok_or(refuse!("ANS PRP list address wraps"))?;
+            // The first malformed entry in the readable prefix still takes
+            // precedence over a fault on a later entry in this fetch.
+            let readable = loaded
+                .as_ref()
+                .err()
+                .map_or(bytes, |fault| fault.completed.min(bytes - 1));
+            for (index, pointer) in list[..readable]
+                .as_chunks::<ENTRY_BYTES>()
+                .0
+                .iter()
+                .enumerate()
+            {
+                let pointer = u64::from_le_bytes(*pointer);
+                if pointer == 0 || !pointer.is_multiple_of(page) {
+                    return Err(refuse!("ANS PRP list contains a null or unaligned page"));
+                }
+                if index + 1 == page_entries && remaining > page as usize {
+                    entry = pointer;
+                    break;
+                }
+                let chunk = remaining.min(page as usize);
+                pointer
+                    .checked_add(chunk as u64 - 1)
+                    .ok_or(refuse!("ANS PRP data address wraps"))?;
+                ranges.push((pointer, chunk));
+                remaining -= chunk;
+                entry = entry
+                    .checked_add(ENTRY_BYTES as u64)
+                    .ok_or(refuse!("ANS PRP list address wraps"))?;
+            }
+            loaded.map_err(|fault| dma_error_at(entry, ENTRY_BYTES)(fault.error))?;
         }
         Ok(Self::List(ranges))
     }
@@ -138,8 +167,11 @@ impl Prps {
 mod tests {
     use super::*;
     use {
-        stela_contracts::bus::Access, stela_contracts::dma::Physical,
-        stela_contracts::dma::test_support::Ram, stela_contracts::interrupt::InterruptLatch,
+        stela_contracts::bus::Access,
+        stela_contracts::dma::test_support::Ram,
+        stela_contracts::dma::{Memory, Physical, TransferFault},
+        stela_contracts::interrupt::InterruptLatch,
+        stela_contracts::refusal::Value,
     };
 
     #[test]
@@ -236,5 +268,70 @@ mod tests {
         // A list pointer must still be qword-aligned and nonzero.
         assert!(Prps::new(&mut port, base + 0x1000, list + 4, 3 * 4096, 4096).is_err());
         assert!(Prps::new(&mut port, base + 0x1000, 0, 3 * 4096, 4096).is_err());
+    }
+
+    #[test]
+    fn prp_list_validates_the_readable_prefix_before_reporting_a_later_fault() {
+        struct ListPage {
+            first: u64,
+            partial: bool,
+        }
+
+        impl Memory for ListPage {
+            fn read(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
+                self.read_progress(physical, buffer).is_ok()
+            }
+
+            fn write(&mut self, _: u64, _: &[u8]) -> bool {
+                unreachable!()
+            }
+
+            fn read_progress(
+                &mut self,
+                physical: u64,
+                buffer: &mut [u8],
+            ) -> core::result::Result<(), TransferFault> {
+                const LIST: u64 = 0x8000_1000;
+                if physical == LIST && (buffer.len() == ENTRY_BYTES || self.partial) {
+                    buffer[..ENTRY_BYTES].copy_from_slice(&self.first.to_le_bytes());
+                    if buffer.len() == ENTRY_BYTES {
+                        return Ok(());
+                    }
+                    return Err(TransferFault {
+                        error: DmaError::Memory,
+                        completed: ENTRY_BYTES,
+                    });
+                }
+                Err(TransferFault {
+                    error: DmaError::Memory,
+                    completed: 0,
+                })
+            }
+        }
+
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        for partial in [false, true] {
+            for (first, what) in [
+                (0, "ANS PRP list contains a null or unaligned page"),
+                (0x8000_4000, "ANS DMA target is not guest RAM"),
+            ] {
+                let mut page = ListPage { first, partial };
+                let mut port = Port {
+                    iommu: &mut Physical,
+                    stream: 0,
+                    memory: &mut page,
+                    access: &mut access,
+                };
+                let error = Prps::new(&mut port, 0x8000_2000, 0x8000_1000, 3 * 4096, 4096)
+                    .err()
+                    .expect("the PRP list faults");
+                assert_eq!(error.what(), what);
+                if first != 0 {
+                    assert_eq!(error.value("address"), Some(&Value::Hex(0x8000_1008)));
+                    assert_eq!(error.value("bytes"), Some(&Value::Count(8)));
+                }
+            }
+        }
     }
 }
