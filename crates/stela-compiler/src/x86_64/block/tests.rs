@@ -5,6 +5,86 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 #[test]
+fn vector_store_reuses_load_across_integer_rows_and_keeps_recovery() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features, RecoverySiteKind},
+    };
+    let words = [
+        0x3dc0_0280u32, // LDR Q0,[X20]
+        0x8b02_0288,    // ADD X8,X20,X2
+        0x9240_0ce7,    // AND X7,X7,#0xf
+        0x8b02_0133,    // ADD X19,X9,X2
+        0x7100_3cff,    // CMP W7,#15
+        0x3d80_0120,    // STR Q0,[X9]
+        0x7840_2514,    // LDRH W20,[X8],#2
+        0xcb14_0262,    // SUB X2,X19,X20
+        0x5400_00a0,    // B.EQ
+    ];
+    let start = GuestAddress(0x100008e04);
+    let store = GuestAddress(start.0 + 20);
+    let compile = |words: &[u32], pc, profile, target| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        CompilationPlan::new(&source, pc, &Options::new(profile, target))
+            .unwrap()
+            .compile()
+            .unwrap()
+    };
+    let reloads = |block: &NativeBlock, index: usize| {
+        let offset = block.source_map[index].1;
+        let end = block
+            .source_map
+            .get(index + 1)
+            .map_or(block.x86_64_code.len(), |row| row.1);
+        block.x86_64_code[offset..end]
+            .windows(8)
+            .any(|bytes| bytes == [0xf3, 0x0f, 0x6f, 0x87, 8, 1, 0, 0])
+    };
+    let baseline = TargetCpu::Baseline;
+    for profile in [
+        BlockProfile::ORDINARY,
+        BlockProfile::new(Features::SYSTEM_MODE),
+    ] {
+        let grouped = compile(&words, start, profile, baseline);
+        assert_eq!(grouped.native.source_map.len(), words.len());
+        assert_eq!(grouped.native.source_map[5].0, store);
+        assert!(!reloads(&grouped.native, 5));
+
+        let dit = compile(
+            &words,
+            start,
+            profile,
+            baseline.with_data_independent_timing(),
+        );
+        assert!(reloads(&dit.native, 5));
+        let standalone = compile(&words[5..], store, profile, baseline);
+        assert!(reloads(&standalone.native, 0));
+        if profile.has(Features::SYSTEM_MODE) {
+            let access = grouped
+                .fault_recovery
+                .iter()
+                .find(|entry| {
+                    entry.site.kind() == RecoverySiteKind::GuestAccess
+                        && entry.retirement.instruction_pc() == store
+                })
+                .unwrap();
+            assert_eq!(access.retirement.retired_before(), 5);
+            assert!(access.start >= grouped.native.source_map[5].1);
+            assert!(access.end <= grouped.native.source_map[6].1);
+        }
+    }
+
+    // A vector writer between the original load and store replaces XMM0.
+    let clobbered = compile(
+        &[words[0], 0x4f00_e401, words[2], words[5]],
+        start,
+        BlockProfile::ORDINARY,
+        baseline,
+    );
+    assert!(reloads(&clobbered.native, 3));
+}
+
+#[test]
 fn reverse_dword_runs_share_one_mask_with_independent_source_rows() {
     use crate::{Lifter, TargetCpu, aarch64::Decoder};
 

@@ -13,7 +13,7 @@ use core::sync::atomic::{Ordering, fence};
 
 // Common descriptor storage only; the 82574-specific programming/reset/start
 // routines are never called. Addresses are boot-lifetime coherent DMA RAM.
-use crate::ring::{DESCRIPTOR, DESCRIPTORS, Ring};
+use crate::ring::{DESCRIPTOR, DESCRIPTORS, Ring, write_transmit_frame};
 
 const CTRL_EXT: u32 = 0x18;
 const FEXTNVM4: u32 = 0x24;
@@ -733,8 +733,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Link for Ethernet<R, D> {
         }
         let index = self.next_tx;
         let length = frame.len().max(MIN_FRAME);
-        self.transmit.buffer(index)[..length].fill(0);
-        self.transmit.buffer(index)[..frame.len()].copy_from_slice(frame);
+        write_transmit_frame(self.transmit.buffer(index), frame, length);
         let base = index * DESCRIPTOR;
         self.transmit
             .descriptors

@@ -120,18 +120,31 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         if call.request.length > MAX_RECORD_BYTES || call.response.length > MAX_RECORD_BYTES {
             return Err(Fault::malformed("record length"));
         }
-        let request = caller.read(call.request)?;
-        let mut response = vec![0; call.response.length as usize];
-        let outcome = self.call(
-            connection.get(),
-            call.operation,
-            &request,
-            &mut response,
-            caller,
-        );
+        // Common records such as Commit and Poll fit on the service stack.
+        // Keep independent copies even when the guest supplies aliased spans.
+        const INLINE_RECORD_BYTES: usize = 128;
+        let mut inline_request = [0; INLINE_RECORD_BYTES];
+        let heap_request;
+        let request = if let Some(bytes) = inline_request.get_mut(..call.request.length as usize) {
+            caller.0.read(call.request.address, bytes).map_err(fault)?;
+            &*bytes
+        } else {
+            heap_request = caller.read(call.request)?;
+            &heap_request
+        };
+        let mut inline_response = [0; INLINE_RECORD_BYTES];
+        let mut heap_response;
+        let response = if let Some(bytes) = inline_response.get_mut(..call.response.length as usize)
+        {
+            bytes
+        } else {
+            heap_response = vec![0; call.response.length as usize];
+            &mut heap_response
+        };
+        let outcome = self.call(connection.get(), call.operation, request, response, caller);
         if outcome.status != Status::Ok {
             return Err(Fault::new(outcome.status, outcome.reason));
         }
-        caller.write(call.response, &response)
+        caller.write(call.response, response)
     }
 }
