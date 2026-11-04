@@ -1,0 +1,376 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 00:48:09 -0500
+Subject: [PATCH] refactor(ptrace): select original task link and detach
+
+---
+ kernel/ptrace.c        | 151 ---------------------------------------
+ kernel/ptrace_access.c | 156 +++++++++++++++++++++++++++++++++++++++++
+ kernel/ptrace_access.h |   2 +
+ 3 files changed, 158 insertions(+), 151 deletions(-)
+
+diff --git a/kernel/ptrace.c b/kernel/ptrace.c
+index de1858e09275578eea0d274aae4afd41fbb0b3ec..fb60c07fde895bb826e60b3592bdb5b8ac2d3b12 100644
+--- a/kernel/ptrace.c
++++ b/kernel/ptrace.c
+@@ -86,15 +86,6 @@ int ptrace_access_vm(struct task_struct *tsk, unsigned long addr,
+ }
+ 
+ 
+-void __ptrace_link(struct task_struct *child, struct task_struct *new_parent,
+-		   const struct cred *ptracer_cred)
+-{
+-	BUG_ON(!list_empty(&child->ptrace_entry));
+-	list_add(&child->ptrace_entry, &new_parent->ptraced);
+-	child->parent = new_parent;
+-	child->ptracer_cred = get_cred(ptracer_cred);
+-}
+-
+ /*
+  * ptrace a task: make the debugger its new parent and
+  * move it to the ptrace list.
+@@ -106,80 +97,6 @@ static void ptrace_link(struct task_struct *child, struct task_struct *new_paren
+ 	__ptrace_link(child, new_parent, current_cred());
+ }
+ 
+-/**
+- * __ptrace_unlink - unlink ptracee and restore its execution state
+- * @child: ptracee to be unlinked
+- *
+- * Remove @child from the ptrace list, move it back to the original parent,
+- * and restore the execution state so that it conforms to the group stop
+- * state.
+- *
+- * Unlinking can happen via two paths - explicit PTRACE_DETACH or ptracer
+- * exiting.  For PTRACE_DETACH, unless the ptracee has been killed between
+- * ptrace_check_attach() and here, it's guaranteed to be in TASK_TRACED.
+- * If the ptracer is exiting, the ptracee can be in any state.
+- *
+- * After detach, the ptracee should be in a state which conforms to the
+- * group stop.  If the group is stopped or in the process of stopping, the
+- * ptracee should be put into TASK_STOPPED; otherwise, it should be woken
+- * up from TASK_TRACED.
+- *
+- * If the ptracee is in TASK_TRACED and needs to be moved to TASK_STOPPED,
+- * it goes through TRACED -> RUNNING -> STOPPED transition which is similar
+- * to but in the opposite direction of what happens while attaching to a
+- * stopped task.  However, in this direction, the intermediate RUNNING
+- * state is not hidden even from the current ptracer and if it immediately
+- * re-attaches and performs a WNOHANG wait(2), it may fail.
+- *
+- * CONTEXT:
+- * write_lock_irq(tasklist_lock)
+- */
+-void __ptrace_unlink(struct task_struct *child)
+-{
+-	const struct cred *old_cred;
+-	BUG_ON(!child->ptrace);
+-
+-	clear_task_syscall_work(child, SYSCALL_TRACE);
+-#if defined(CONFIG_GENERIC_ENTRY) || defined(TIF_SYSCALL_EMU)
+-	clear_task_syscall_work(child, SYSCALL_EMU);
+-#endif
+-
+-	child->parent = child->real_parent;
+-	list_del_init(&child->ptrace_entry);
+-	old_cred = child->ptracer_cred;
+-	child->ptracer_cred = NULL;
+-	put_cred(old_cred);
+-
+-	spin_lock(&child->sighand->siglock);
+-	child->ptrace = 0;
+-	/*
+-	 * Clear all pending traps and TRAPPING.  TRAPPING should be
+-	 * cleared regardless of JOBCTL_STOP_PENDING.  Do it explicitly.
+-	 */
+-	task_clear_jobctl_pending(child, JOBCTL_TRAP_MASK);
+-	task_clear_jobctl_trapping(child);
+-
+-	/*
+-	 * Reinstate JOBCTL_STOP_PENDING if group stop is in effect and
+-	 * @child isn't dead.
+-	 */
+-	if (!(child->flags & PF_EXITING) &&
+-	    (child->signal->flags & SIGNAL_STOP_STOPPED ||
+-	     child->signal->group_stop_count))
+-		child->jobctl |= JOBCTL_STOP_PENDING;
+-
+-	/*
+-	 * If transition to TASK_STOPPED is pending or in TASK_TRACED, kick
+-	 * @child in the butt.  Note that @resume should be used iff @child
+-	 * is in TASK_TRACED; otherwise, we might unduly disrupt
+-	 * TASK_KILLABLE sleeps.
+-	 */
+-	if (child->jobctl & JOBCTL_STOP_PENDING || task_is_traced(child))
+-		ptrace_signal_wake_up(child, true);
+-
+-	spin_unlock(&child->sighand->siglock);
+-}
+-
+ static bool looks_like_a_spurious_pid(struct task_struct *task)
+ {
+ 	if (task->exit_code != ((PTRACE_EVENT_EXEC << 8) | SIGTRAP))
+@@ -440,57 +357,6 @@ static int ptrace_traceme(void)
+ /*
+  * Called with irqs disabled, returns true if childs should reap themselves.
+  */
+-static int ignoring_children(struct sighand_struct *sigh)
+-{
+-	int ret;
+-	spin_lock(&sigh->siglock);
+-	ret = (sigh->action[SIGCHLD-1].sa.sa_handler == SIG_IGN) ||
+-	      (sigh->action[SIGCHLD-1].sa.sa_flags & SA_NOCLDWAIT);
+-	spin_unlock(&sigh->siglock);
+-	return ret;
+-}
+-
+-/*
+- * Called with tasklist_lock held for writing.
+- * Unlink a traced task, and clean it up if it was a traced zombie.
+- * Return true if it needs to be reaped with release_task().
+- * (We can't call release_task() here because we already hold tasklist_lock.)
+- *
+- * If it's a zombie, our attachedness prevented normal parent notification
+- * or self-reaping.  Do notification now if it would have happened earlier.
+- * If it should reap itself, return true.
+- *
+- * If it's our own child, there is no notification to do. But if our normal
+- * children self-reap, then this child was prevented by ptrace and we must
+- * reap it now, in that case we must also wake up sub-threads sleeping in
+- * do_wait().
+- */
+-static bool __ptrace_detach(struct task_struct *tracer, struct task_struct *p)
+-{
+-	bool dead;
+-
+-	__ptrace_unlink(p);
+-
+-	if (p->exit_state != EXIT_ZOMBIE)
+-		return false;
+-
+-	dead = !thread_group_leader(p);
+-
+-	if (!dead && thread_group_empty(p)) {
+-		if (!same_thread_group(p->real_parent, tracer))
+-			dead = do_notify_parent(p, p->exit_signal);
+-		else if (ignoring_children(tracer->sighand) ||
+-			 p->signal->autoreap) {
+-			__wake_up_parent(p, tracer);
+-			dead = true;
+-		}
+-	}
+-	/* Mark it as in the process of being reaped. */
+-	if (dead)
+-		p->exit_state = EXIT_DEAD;
+-	return dead;
+-}
+-
+ static int ptrace_detach(struct task_struct *child, unsigned int data)
+ {
+ 	if (!valid_signal(data))
+@@ -518,23 +384,6 @@ static int ptrace_detach(struct task_struct *child, unsigned int data)
+ 	return 0;
+ }
+ 
+-/*
+- * Detach all tasks we were using ptrace on. Called with tasklist held
+- * for writing.
+- */
+-void exit_ptrace(struct task_struct *tracer, struct list_head *dead)
+-{
+-	struct task_struct *p, *n;
+-
+-	list_for_each_entry_safe(p, n, &tracer->ptraced, ptrace_entry) {
+-		if (unlikely(p->ptrace & PT_EXITKILL))
+-			send_sig_info(SIGKILL, SEND_SIG_PRIV, p);
+-
+-		if (__ptrace_detach(tracer, p))
+-			list_add(&p->ptrace_entry, dead);
+-	}
+-}
+-
+ int ptrace_readdata(struct task_struct *tsk, unsigned long src, char __user *dst, int len)
+ {
+ 	int copied = 0;
+diff --git a/kernel/ptrace_access.c b/kernel/ptrace_access.c
+index beed03764dd1118c7fbe58f608ffab7f75a0150e..47071df29fb81ec364d7ce4b34c11cfe167938b1 100644
+--- a/kernel/ptrace_access.c
++++ b/kernel/ptrace_access.c
+@@ -13,6 +13,7 @@
+ #include <linux/ptrace.h>
+ #include <linux/sched/coredump.h>
+ #include <linux/sched/exec_state.h>
++#include <linux/sched/signal.h>
+ #include <linux/sched/task.h>
+ #include <linux/security.h>
+ 
+@@ -114,3 +115,158 @@ bool ptrace_may_access(struct task_struct *task, unsigned int mode)
+ 	task_unlock(task);
+ 	return !err;
+ }
++
++void __ptrace_link(struct task_struct *child, struct task_struct *new_parent,
++		   const struct cred *ptracer_cred)
++{
++	BUG_ON(!list_empty(&child->ptrace_entry));
++	list_add(&child->ptrace_entry, &new_parent->ptraced);
++	child->parent = new_parent;
++	child->ptracer_cred = get_cred(ptracer_cred);
++}
++
++/**
++ * __ptrace_unlink - unlink ptracee and restore its execution state
++ * @child: ptracee to be unlinked
++ *
++ * Remove @child from the ptrace list, move it back to the original parent,
++ * and restore the execution state so that it conforms to the group stop
++ * state.
++ *
++ * Unlinking can happen via two paths - explicit PTRACE_DETACH or ptracer
++ * exiting.  For PTRACE_DETACH, unless the ptracee has been killed between
++ * ptrace_check_attach() and here, it's guaranteed to be in TASK_TRACED.
++ * If the ptracer is exiting, the ptracee can be in any state.
++ *
++ * After detach, the ptracee should be in a state which conforms to the
++ * group stop.  If the group is stopped or in the process of stopping, the
++ * ptracee should be put into TASK_STOPPED; otherwise, it should be woken
++ * up from TASK_TRACED.
++ *
++ * If the ptracee is in TASK_TRACED and needs to be moved to TASK_STOPPED,
++ * it goes through TRACED -> RUNNING -> STOPPED transition which is similar
++ * to but in the opposite direction of what happens while attaching to a
++ * stopped task.  However, in this direction, the intermediate RUNNING
++ * state is not hidden even from the current ptracer and if it immediately
++ * re-attaches and performs a WNOHANG wait(2), it may fail.
++ *
++ * CONTEXT:
++ * write_lock_irq(tasklist_lock)
++ */
++void __ptrace_unlink(struct task_struct *child)
++{
++	const struct cred *old_cred;
++	BUG_ON(!child->ptrace);
++
++#if defined(CONFIG_GENERIC_ENTRY) || defined(TIF_SYSCALL_TRACE)
++	clear_task_syscall_work(child, SYSCALL_TRACE);
++#endif
++#if defined(CONFIG_GENERIC_ENTRY) || defined(TIF_SYSCALL_EMU)
++	clear_task_syscall_work(child, SYSCALL_EMU);
++#endif
++
++	child->parent = child->real_parent;
++	list_del_init(&child->ptrace_entry);
++	old_cred = child->ptracer_cred;
++	child->ptracer_cred = NULL;
++	put_cred(old_cred);
++
++	spin_lock(&child->sighand->siglock);
++	child->ptrace = 0;
++	/*
++	 * Clear all pending traps and TRAPPING.  TRAPPING should be
++	 * cleared regardless of JOBCTL_STOP_PENDING.  Do it explicitly.
++	 */
++	task_clear_jobctl_pending(child, JOBCTL_TRAP_MASK);
++	task_clear_jobctl_trapping(child);
++
++	/*
++	 * Reinstate JOBCTL_STOP_PENDING if group stop is in effect and
++	 * @child isn't dead.
++	 */
++	if (!(child->flags & PF_EXITING) &&
++	    (child->signal->flags & SIGNAL_STOP_STOPPED ||
++	     child->signal->group_stop_count))
++		child->jobctl |= JOBCTL_STOP_PENDING;
++
++	/*
++	 * If transition to TASK_STOPPED is pending or in TASK_TRACED, kick
++	 * @child in the butt.  Note that @resume should be used iff @child
++	 * is in TASK_TRACED; otherwise, we might unduly disrupt
++	 * TASK_KILLABLE sleeps.
++	 */
++	if (child->jobctl & JOBCTL_STOP_PENDING || task_is_traced(child))
++		ptrace_signal_wake_up(child, true);
++
++	spin_unlock(&child->sighand->siglock);
++}
++
++static int ignoring_children(struct sighand_struct *sigh)
++{
++	int ret;
++	spin_lock(&sigh->siglock);
++	ret = (sigh->action[SIGCHLD-1].sa.sa_handler == SIG_IGN) ||
++	      (sigh->action[SIGCHLD-1].sa.sa_flags & SA_NOCLDWAIT);
++	spin_unlock(&sigh->siglock);
++	return ret;
++}
++
++/*
++ * Called with tasklist_lock held for writing.
++ * Unlink a traced task, and clean it up if it was a traced zombie.
++ * Return true if it needs to be reaped with release_task().
++ * (We can't call release_task() here because we already hold tasklist_lock.)
++ *
++ * If it's a zombie, our attachedness prevented normal parent notification
++ * or self-reaping.  Do notification now if it would have happened earlier.
++ * If it should reap itself, return true.
++ *
++ * If it's our own child, there is no notification to do. But if our normal
++ * children self-reap, then this child was prevented by ptrace and we must
++ * reap it now, in that case we must also wake up sub-threads sleeping in
++ * do_wait().
++ */
++bool __ptrace_detach(struct task_struct *tracer, struct task_struct *p)
++{
++	bool dead;
++
++	__ptrace_unlink(p);
++
++	if (p->exit_state != EXIT_ZOMBIE)
++		return false;
++
++	dead = !thread_group_leader(p);
++
++	if (!dead && thread_group_empty(p)) {
++		if (!same_thread_group(p->real_parent, tracer))
++			dead = do_notify_parent(p, p->exit_signal);
++		else if (ignoring_children(tracer->sighand) ||
++			 p->signal->autoreap) {
++			__wake_up_parent(p, tracer);
++			dead = true;
++		}
++	}
++	/* Mark it as in the process of being reaped. */
++	if (dead)
++		p->exit_state = EXIT_DEAD;
++	return dead;
++}
++
++/*
++ * Detach all tasks we were using ptrace on. Called with tasklist held
++ * for writing.
++ */
++void exit_ptrace(struct task_struct *tracer, struct list_head *dead)
++{
++	struct list_head *entry, *next;
++
++	list_for_each_safe(entry, next, &tracer->ptraced) {
++		struct task_struct *p = list_entry(entry, struct task_struct, ptrace_entry);
++
++		if (unlikely(p->ptrace & PT_EXITKILL))
++			send_sig_info(SIGKILL, SEND_SIG_PRIV, p);
++
++		if (__ptrace_detach(tracer, p))
++			list_add(&p->ptrace_entry, dead);
++	}
++}
+diff --git a/kernel/ptrace_access.h b/kernel/ptrace_access.h
+index 37fe72539836fe372587ef0ea97895023d886f8e..e1ce17d5295d1600c8a2eff68c0fd8c1efbcd9ee 100644
+--- a/kernel/ptrace_access.h
++++ b/kernel/ptrace_access.h
+@@ -7,4 +7,6 @@ struct task_struct;
+ /* Caller holds task_lock(task). */
+ int __ptrace_may_access(struct task_struct *task, unsigned int mode);
+ 
++bool __ptrace_detach(struct task_struct *tracer, struct task_struct *task);
++
+ #endif
