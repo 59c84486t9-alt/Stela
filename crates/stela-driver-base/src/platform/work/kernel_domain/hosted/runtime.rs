@@ -345,6 +345,22 @@ impl<const N: usize> HostedRuntime<N> {
         Ok(dispatch.epoch)
     }
 
+    /// Use the shared cooperative NORMAL/FIFO policy for future assignments.
+    /// The default executor keeps round-robin ordering.
+    pub fn enable_ranked_scheduling(&self) -> Result<(), WorkError> {
+        self.dispatcher_successor()?;
+        let mut guard = self.queue.lock()?;
+        let state = guard.state();
+        if state.closed {
+            return Err(WorkError::Closed);
+        }
+        if state.jobs.iter().flatten().any(|job| job.running) {
+            return Err(WorkError::Busy);
+        }
+        state.scheduling.enabled = true;
+        Ok(())
+    }
+
     pub fn step(self: Pin<&Self>) -> Result<bool, WorkError> {
         let epoch = self
             .dispatcher_epoch()
@@ -355,60 +371,83 @@ impl<const N: usize> HostedRuntime<N> {
             .checked_add(1)
             .ok_or(WorkError::Exhausted)?;
         self.schedule_service()?;
+        let now = self.queue.execution.now_ns()?;
+        let Some(index) = self.select_ready()? else {
+            return Ok(false);
+        };
+        {
+            // SAFETY: the original dispatcher selected this stopped task.
+            let task = unsafe { &mut *self.task(index) };
+            let sequence = task.job.unwrap_or_else(|| std::process::abort()).1.sequence;
+            let mut guard = self.queue.lock()?;
+            require(guard.state().scheduling.running(task.id, sequence, now));
+            task.state = TaskState::Running;
+        }
+        DISPATCH.set(Dispatch {
+            active: ptr::from_ref(self.get_ref()).cast(),
+            epoch,
+        });
+        self.current.set(index);
+        self.cursor.set((index + 1) % self.count);
+        // SAFETY: both frames are pinned and owned by this thread. All
+        // task/state borrows and queue guards ended before the switch.
+        unsafe {
+            context::switch(
+                self.dispatcher.get(),
+                ptr::addr_of!((*self.task(index)).frame),
+            )
+        };
+        if self.current.get() != NONE {
+            std::process::abort();
+        }
+        DISPATCH.set(Dispatch {
+            active: ptr::null(),
+            epoch,
+        });
+        Ok(true)
+    }
+
+    fn select_ready(&self) -> Result<Option<usize>, WorkError> {
+        let mut guard = self.queue.lock()?;
+        let state = guard.state();
+        let mut selected = None;
         for offset in 0..self.count {
             let index = (self.cursor.get() + offset) % self.count;
-            let now = self.queue.execution.now_ns()?;
+            // SAFETY: the original dispatcher has stopped every continuation.
+            let task = unsafe { &mut *self.task(index) };
+            if task.state == TaskState::Idle {
+                let Some(job) = state.select_job(task.lane, task.stack.geometry, false)? else {
+                    continue;
+                };
+                require(state.scheduling.insert(
+                    task.id,
+                    job.1.sequence,
+                    task.lane == Lane::Service,
+                ));
+                task.assign(job, ());
+            }
+            let sequence = task.job.unwrap_or_else(|| std::process::abort()).1.sequence;
+            if task.state == TaskState::Blocked {
+                if !task.signal.pending.swap(false, Ordering::AcqRel) {
+                    continue;
+                }
+                require(state.scheduling.wake(task.id, sequence));
+                task.state = TaskState::Runnable;
+            }
+            // A due service callback can advance deadlines while ordinary
+            // jobs hold FIFO ranks. Legacy mode keeps the first ready task.
+            if !state.scheduling.enabled || task.lane == Lane::Service {
+                return Ok(Some(index));
+            }
+            let rank_key = (task.id, sequence);
+            if let Some((_, prior)) = selected
+                && !state.scheduling.precedes(rank_key, prior)?
             {
-                // SAFETY: dispatcher on the original thread, no task is running.
-                let task = unsafe { &mut *self.task(index) };
-                let mut guard = self.queue.lock()?;
-                let state = guard.state();
-                if task.state == TaskState::Idle {
-                    let Some(job) = state.select_job(task.lane, task.stack.geometry, false)? else {
-                        continue;
-                    };
-                    require(state.scheduling.insert(
-                        task.id,
-                        job.1.sequence,
-                        task.lane == Lane::Service,
-                    ));
-                    task.assign(job, ());
-                }
-                let sequence = task.job.unwrap_or_else(|| std::process::abort()).1.sequence;
-                if task.state == TaskState::Blocked {
-                    if !task.signal.pending.swap(false, Ordering::AcqRel) {
-                        continue;
-                    }
-                    require(state.scheduling.wake(task.id, sequence));
-                    task.state = TaskState::Runnable;
-                }
-                require(state.scheduling.running(task.id, sequence, now));
-                task.state = TaskState::Running;
+                continue;
             }
-            DISPATCH.set(Dispatch {
-                active: ptr::from_ref(self.get_ref()).cast(),
-                epoch,
-            });
-            self.current.set(index);
-            self.cursor.set((index + 1) % self.count);
-            // SAFETY: both frames are pinned and owned by this thread. All
-            // task/state borrows and queue guards ended before the switch.
-            unsafe {
-                context::switch(
-                    self.dispatcher.get(),
-                    ptr::addr_of!((*self.task(index)).frame),
-                )
-            };
-            if self.current.get() != NONE {
-                std::process::abort();
-            }
-            DISPATCH.set(Dispatch {
-                active: ptr::null(),
-                epoch,
-            });
-            return Ok(true);
+            selected = Some((index, rank_key));
         }
-        Ok(false)
+        Ok(selected.map(|(index, _)| index))
     }
 
     fn depart(&self, index: usize) {

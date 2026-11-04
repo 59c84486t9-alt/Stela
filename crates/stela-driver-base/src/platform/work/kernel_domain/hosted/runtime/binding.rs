@@ -1,6 +1,8 @@
 //! Hosted continuation hooks use actual host stack/current observations.
 use super::*;
-use crate::platform::work::{LeaveReason, ParkOutcome, WakeSignal};
+use crate::platform::work::{
+    ContextId, LeaveReason, ParkOutcome, WakeSignal, scheduling::Snapshot,
+};
 
 /// A retained foreign context attached to one hosted stack.
 ///
@@ -38,6 +40,8 @@ pub unsafe trait HostedSwitchBinding {
 pub struct HostedWake {
     execution: Arc<super::super::HostedExecution>,
     signal: Arc<WakeSignal>,
+    queue: u64,
+    task: ContextId,
     sequence: u64,
 }
 
@@ -82,8 +86,38 @@ impl<const N: usize> HostedRuntime<N> {
         Ok(HostedWake {
             execution: Arc::clone(&self.queue.execution),
             signal: task.signal.clone(),
+            queue: self.queue.id,
+            task: task.id,
             sequence: context.sequence,
         })
+    }
+
+    /// Commit an original source rank change on this runtime's active caller.
+    ///
+    /// # Safety
+    /// The source holds the target task and its serialized priority mutation,
+    /// and commits the matching original fields before releasing that lease.
+    pub unsafe fn update_rank(
+        &self,
+        target: &HostedWake,
+        before: Snapshot,
+        after: Snapshot,
+        head: bool,
+    ) -> Result<(), WorkError> {
+        self.current_context()?;
+        if self.queue.id != target.queue {
+            return Err(WorkError::InvalidTicket);
+        }
+        if target.signal.sequence.load(Ordering::Acquire) != target.sequence {
+            return Err(WorkError::Closed);
+        }
+        let now = self.queue.execution.now_ns()?;
+        let mut guard = self.queue.lock()?;
+        let board = &mut guard.state().scheduling;
+        if !board.enabled {
+            return Err(WorkError::Unavailable);
+        }
+        board.update(target.task, target.sequence, before, after, head, Some(now))
     }
 
     /// # Safety

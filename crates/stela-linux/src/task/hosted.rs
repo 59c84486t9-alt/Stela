@@ -138,13 +138,37 @@ impl<const N: usize> HostedTaskBinding<N> {
     }
 
     unsafe extern "C" fn rank(
-        _: *mut c_void,
-        _: u64,
-        _: *const Rank,
-        _: *const Rank,
-        _: bool,
+        binding: *mut c_void,
+        expected: u64,
+        before: *const Rank,
+        after: *const Rank,
+        head: bool,
     ) -> i32 {
-        -95 // Hosted rank publication has no provider yet.
+        // SAFETY: the original caller retains the target binding and holds
+        // its priority mutation lease on this runtime's owning thread.
+        let this = unsafe { &*binding.cast::<Self>() };
+        let runtime = this.runtime();
+        let wake = this.wake.borrow();
+        let Some(target) = wake.as_ref().filter(|wake| wake.sequence() == expected) else {
+            return -116;
+        };
+        if before.is_null() || after.is_null() || this.detached.get() {
+            return -116;
+        }
+        let result = (|| {
+            // SAFETY: original C lends two initialized scalar records for
+            // this bounded priority update and retains the target lease.
+            let (before, after) = unsafe { ((&*before).snapshot()?, (&*after).snapshot()?) };
+            // SAFETY: the original priority mutation stays serialized until
+            // C commits these same fields. The update cannot switch stacks.
+            unsafe { runtime.update_rank(target, before, after, head) }
+        })();
+        match result {
+            Ok(()) => 0,
+            Err(WorkError::Closed) => -116,
+            Err(WorkError::Unavailable) => -95,
+            Err(_) => -1,
+        }
     }
 
     unsafe extern "C" fn park(scope: *mut c_void) -> i32 {

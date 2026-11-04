@@ -15,6 +15,8 @@ use stela_linux::task::HostedTaskBinding;
 unsafe extern "C" {
     fn stela_linux_enter(owner: *const stela_linux::owner::RawOwner);
     fn stela_linux_exit();
+    fn stela_linux_current() -> *mut c_void;
+    fn sched_set_fifo(task: *mut c_void);
     fn schedule();
     static stela_linux_bare: stela_linux::owner::RawOwner;
 }
@@ -23,12 +25,17 @@ struct Fixture<'a> {
     binding: Rc<HostedTaskBinding<4>>,
     wake: Cell<Option<HostedWake>>,
     phase: Cell<u8>,
+    fifo: Cell<bool>,
 }
 unsafe extern "C" fn body(context: *mut c_void) {
     // SAFETY: the sole producer keeps this fixture through both task steps.
     let fixture = unsafe { &*context.cast::<Fixture<'_>>() };
     // SAFETY: this bound task owns the live bare scope on the sole thread.
     unsafe { stela_linux_enter(&raw const stela_linux_bare) };
+    if fixture.fifo.get() {
+        // SAFETY: this source task is current on its original hosted stack.
+        unsafe { sched_set_fifo(stela_linux_current()) };
+    }
     fixture.phase.set(1);
     // SAFETY: exact live source scope on this executing bound stack.
     unsafe { schedule() };
@@ -68,6 +75,7 @@ fn original_bare_scopes_yield_and_resume_on_separate_hosted_stacks() {
         binding: unsafe { HostedTaskBinding::new_bare(runtime) }.unwrap(),
         wake: Cell::new(None),
         phase: Cell::new(0),
+        fifo: Cell::new(false),
     };
     let fixtures = [fixture(), fixture()];
     let tickets = fixtures.each_ref().map(|fixture| {
@@ -88,17 +96,36 @@ fn original_bare_scopes_yield_and_resume_on_separate_hosted_stacks() {
     }
     let first = &fixtures[0];
     let old_wake = first.wake.take().unwrap();
+    runtime.enable_ranked_scheduling().unwrap();
+    first.fifo.set(true);
+    for fixture in &fixtures {
+        fixture.phase.set(0);
+    }
     // The original dispatcher returns to the first General stack after the
     // second General callback and the empty Notify lane.
     // SAFETY: the same original binding and fixture stay live through reuse.
-    let ticket =
-        unsafe { queue.execute(Kind::General, reuse, ptr::from_ref(first).cast_mut().cast()) }
-            .unwrap();
-    assert!(runtime.step().unwrap());
-    assert_eq!(first.phase.get(), 1);
-    assert!(runtime.step().unwrap());
-    assert!(queue.completed(ticket).unwrap());
-    assert_eq!(first.phase.get(), 2);
+    let tickets = fixtures.each_ref().map(|fixture| {
+        // SAFETY: each original binding and fixture stay live through reuse.
+        unsafe {
+            queue.execute(
+                Kind::General,
+                reuse,
+                ptr::from_ref(fixture).cast_mut().cast(),
+            )
+        }
+        .unwrap()
+    });
+    for expected in [[1, 0], [2, 0], [2, 1], [2, 2]] {
+        assert!(runtime.step().unwrap());
+        assert_eq!(
+            fixtures.each_ref().map(|fixture| fixture.phase.get()),
+            expected
+        );
+        assert_eq!(
+            tickets.map(|ticket| queue.completed(ticket).unwrap()),
+            expected.map(|phase| phase == 2)
+        );
+    }
     // SAFETY: the source scope joined. The earlier assignment is still the
     // wrong detach handle even though the physical stack and C task are same.
     let detached = unsafe { runtime.detach_binding(&old_wake) };
