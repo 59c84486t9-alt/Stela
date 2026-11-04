@@ -207,14 +207,17 @@ impl Host {
                     || (event.kind() == super::TRANSFER_EVENT && hub(event.slot()))
             })
             || self.hubs.iter().any(|hub| hub.recovery.is_some());
-        drop(c);
-        changed || {
-            let current = self.current();
-            current.len() != self.devices.len()
-                || current
-                    .iter()
-                    .any(|device| !self.devices.iter().any(|old| old.id == device.id))
+        if changed {
+            return true;
         }
+        let mut count = 0;
+        for device in Self::current(&c) {
+            if !self.devices.iter().any(|old| old.id == device.id) {
+                return true;
+            }
+            count += 1;
+        }
+        count != self.devices.len()
     }
 
     /// Poll root notifications/PORTSC and queued hub interrupt bitmaps.
@@ -318,37 +321,34 @@ impl Host {
     /// polls. Follow the controller's fresh descriptor inventory without
     /// attempting a second native bind of that already-owned replacement.
     /// The enabled devices the controller's slots hold now.
-    fn current(&self) -> Vec<Device> {
-        let c = self.controller.borrow();
-        c.slots
-            .iter()
-            .enumerate()
-            .filter_map(|(id, state)| {
-                state
-                    .as_ref()
-                    .filter(|state| {
-                        !state.retiring
-                            && !state.suspended
-                            && c.slot_ownership[id] == reset::Ownership::Enabled
-                    })
-                    .and_then(|state| state.inventory.clone())
-            })
-            .collect()
+    fn current(c: &Controller) -> impl Iterator<Item = &Device> {
+        (0..c.slots.len()).filter_map(move |slot| Self::current_slot(c, slot))
+    }
+
+    fn current_slot(c: &Controller, slot: usize) -> Option<&Device> {
+        let state = c.slots.get(slot)?.as_ref()?;
+        if state.retiring || state.suspended || c.slot_ownership[slot] != reset::Ownership::Enabled
+        {
+            return None;
+        }
+        state.inventory.as_ref()
     }
 
     fn reconcile(&mut self, changes: &mut Changes) {
-        let current = self.current();
+        let c = self.controller.borrow();
         self.devices.retain(|old| {
-            if current.iter().any(|device| device.id == old.id) {
+            if Self::current_slot(&c, usize::from(old.slot))
+                .is_some_and(|device| device.id == old.id)
+            {
                 true
             } else {
                 changes.removed.push(old.clone());
                 false
             }
         });
-        for device in current {
+        for device in Self::current(&c) {
             if !self.devices.iter().any(|old| old.id == device.id) {
-                self.devices.push(device);
+                self.devices.push(device.clone());
             }
         }
     }
