@@ -1,7 +1,7 @@
 //! Intel advanced descriptors with one buffer per frame, as the igb and igc
 //! queues use them (82575 and I225 datasheets §7.1–7.2; Linux
 //! `e1000_82575.h`, `igb.h` and `igc_base.h`).
-use super::ring::{BUFFER, DESCRIPTOR, DESCRIPTORS, Ring};
+use super::ring::{BUFFER, DESCRIPTOR, DESCRIPTORS, Ring, write_transmit_frame};
 use crate::{Clock, bus::dma::DmaBuffer};
 use core::sync::atomic::{Ordering, fence};
 
@@ -46,9 +46,7 @@ pub(crate) fn transmitted(descriptors: &DmaBuffer, base: usize) -> bool {
 /// Queue one frame in `ring`'s next descriptor; the caller rings TDT.
 pub(crate) fn queue_frame(ring: &mut Ring, frame: &[u8], length: usize) {
     let index = ring.advance();
-    let buffer = ring.buffer(index);
-    buffer[..length].fill(0);
-    buffer[..frame.len()].copy_from_slice(frame);
+    write_transmit_frame(ring.buffer(index), frame, length);
     let (command, status) = transmit_words(length);
     let base = index * DESCRIPTOR;
     let address = ring.address(index);
