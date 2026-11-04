@@ -338,7 +338,7 @@ pub(super) struct Bot<I: Io> {
 /// none waited for ([`Bot::begin`]).
 struct Begun {
     lun: u8,
-    cdb: Vec<u8>,
+    opcode: u8,
     is_in: bool,
     length: usize,
     out: Option<Vec<u8>>,
@@ -707,7 +707,7 @@ impl<I: Io> Bot<I> {
         };
         self.begun = Some(Begun {
             lun,
-            cdb: cdb.to_vec(),
+            opcode: cdb[0],
             is_in,
             length,
             out,
@@ -754,14 +754,14 @@ impl<I: Io> Bot<I> {
             }
             None => {}
         }
-        let (lun, cdb) = (begun.lun, &begun.cdb);
+        let (lun, opcode) = (begun.lun, begun.opcode);
         // SCSI auto-sense must use the failing command's LUN, and cannot race
         // a different unit's command while the interface is borrowed.
         let sensing = if result == Err(BlockError::CheckCondition) {
-            (cdb[0] != scsi::REQUEST_SENSE).then_some(Sensing::Failed)
+            (opcode != scsi::REQUEST_SENSE).then_some(Sensing::Failed)
         } else {
             (result.is_ok()
-                && cdb.first() == Some(&scsi::SYNCHRONIZE_CACHE_10)
+                && opcode == scsi::SYNCHRONIZE_CACHE_10
                 && self.flags.sense_after_sync())
             .then_some(Sensing::Synchronized)
         };
@@ -902,7 +902,7 @@ impl<I: Io> Bot<I> {
 
     /// The command's result from its CSW.
     fn conclude(&mut self, begun: &mut Begun) -> Result<Vec<u8>, BlockError> {
-        let (cdb, is_in, length, moved) = (&begun.cdb, begun.is_in, begun.length, begun.moved);
+        let (opcode, is_in, length, moved) = (begun.opcode, begun.is_in, begun.length, begun.moved);
         let mut received = core::mem::take(&mut begun.received);
         let bytes = &self.wrapper.bytes()[..13];
         let residue = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
@@ -925,8 +925,8 @@ impl<I: Io> Bot<I> {
         if is_in
             && moved == length
             && residue != 0
-            && ((cdb[0] == scsi::INQUIRY && length == 36)
-                || (cdb[0] == scsi::READ_CAPACITY_10 && length == 8))
+            && ((opcode == scsi::INQUIRY && length == 36)
+                || (opcode == scsi::READ_CAPACITY_10 && length == 8))
         {
             self.flags.learn_residue();
         }
