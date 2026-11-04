@@ -108,17 +108,26 @@ const SHA_CONSTANTS: [u32; 68] = [
 
 pub(super) unsafe fn sha256(state: *mut u32, blocks: *const u8, count: usize) {
     // SAFETY: the caller checks SHA/SSE controls and the complete extents.
-    unsafe { sha256_kernel(state, blocks, count, SHA_CONSTANTS.as_ptr()) };
+    unsafe {
+        sha256_kernel::<{ cfg!(target_os = "uefi") }>(state, blocks, count, SHA_CONSTANTS.as_ptr());
+    }
 }
 
-// SysV passes only pointers and integers. The kernel writes state after all
-// blocks and restores every XMM register it touches, including xmm0, which
-// SHA256RNDS2 uses implicitly. Every data access is unaligned-safe.
+// SysV passes only pointers and integers. Firmware's soft-float callers
+// keep the live vector bank, including the implicit SHA256RNDS2 operand XMM0.
+// Hosted SysV calls already declare all XMM registers caller-saved.
+// Every data access is unaligned-safe.
 #[unsafe(naked)]
-unsafe extern "sysv64" fn sha256_kernel(_: *mut u32, _: *const u8, _: usize, _: *const u32) {
+unsafe extern "sysv64" fn sha256_kernel<const PRESERVE_XMM: bool>(
+    _: *mut u32,
+    _: *const u8,
+    _: usize,
+    _: *const u32,
+) {
     naked_asm!(
         "test rdx, rdx",
         "jz 4f",
+        ".if {preserve_xmm}",
         "sub rsp, 192",
         "movdqu [rsp + 0], xmm0",
         "movdqu [rsp + 16], xmm1",
@@ -132,6 +141,7 @@ unsafe extern "sysv64" fn sha256_kernel(_: *mut u32, _: *const u8, _: usize, _: 
         "movdqu [rsp + 144], xmm9",
         "movdqu [rsp + 160], xmm10",
         "movdqu [rsp + 176], xmm11",
+        ".endif",
         "movdqu xmm1, [rdi]",
         "pshufd xmm1, xmm1, 0xb1",
         "movdqu xmm2, [rdi + 16]",
@@ -315,6 +325,7 @@ unsafe extern "sysv64" fn sha256_kernel(_: *mut u32, _: *const u8, _: usize, _: 
         "palignr xmm2, xmm3, 8",
         "movdqu [rdi], xmm1",
         "movdqu [rdi + 16], xmm2",
+        ".if {preserve_xmm}",
         "movdqu xmm0, [rsp + 0]",
         "movdqu xmm1, [rsp + 16]",
         "movdqu xmm2, [rsp + 32]",
@@ -328,8 +339,10 @@ unsafe extern "sysv64" fn sha256_kernel(_: *mut u32, _: *const u8, _: usize, _: 
         "movdqu xmm10, [rsp + 160]",
         "movdqu xmm11, [rsp + 176]",
         "add rsp, 192",
+        ".endif",
         "4:",
         "ret",
+        preserve_xmm = const PRESERVE_XMM as u8,
     );
 }
 
@@ -950,7 +963,7 @@ mod tests {
         let mut sha1 = [0u32; 5];
         for (kernel, state, constants) in [
             (
-                sha256_kernel as *const () as usize,
+                sha256_kernel::<true> as *const () as usize,
                 sha256.as_mut_ptr() as usize,
                 SHA_CONSTANTS.as_ptr() as usize,
             ),
