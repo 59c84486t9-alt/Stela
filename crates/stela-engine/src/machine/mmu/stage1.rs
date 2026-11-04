@@ -17,11 +17,9 @@ const TCR_T0SZ_SHIFT: u64 = 0;
 const TCR_EPD0: u64 = 1 << 7;
 const TCR_TG0_SHIFT: u64 = 14;
 const TCR_T1SZ_SHIFT: u64 = 16;
-const TCR_A1: u64 = 1 << 22;
 const TCR_EPD1: u64 = 1 << 23;
 const TCR_TG1_SHIFT: u64 = 30;
 const TCR_IPS_SHIFT: u64 = 32;
-const TCR_AS: u64 = 1 << 36;
 const TCR_TBI0: u64 = 1 << 37;
 const TCR_TBI1: u64 = 1 << 38;
 const TCR_HPD0: u64 = 1 << 41;
@@ -39,7 +37,6 @@ const TNSZ_MASK: u64 = 63;
 
 /// TTBR BADDR[47:1]; bit 0 is CnP (FEAT_TTCNP), a hint for shared TLBs.
 const TTBR_BADDR: u64 = 0x0000_ffff_ffff_fffe;
-const TTBR_ASID_SHIFT: u64 = 48;
 /// Tables smaller than 64 bytes are still 64-byte aligned.
 const MIN_TABLE_ALIGNMENT: u64 = 64;
 
@@ -155,17 +152,13 @@ pub fn asid(controls: &Controls) -> u16 {
     if !two_ranges(controls.regime) {
         return 0;
     }
-    let ttbr = if controls.tcr & TCR_A1 != 0 {
-        controls.ttbr1
-    } else {
-        controls.ttbr0
-    };
-    let asid = (ttbr >> TTBR_ASID_SHIFT) as u16;
-    if controls.tcr & TCR_AS != 0 {
-        asid
-    } else {
-        asid & 0xff
-    }
+    super::two_range_asid(controls.tcr, |upper| {
+        if upper {
+            controls.ttbr1
+        } else {
+            controls.ttbr0
+        }
+    })
 }
 
 fn fault(kind: FaultKind, level: i8) -> Outcome {
