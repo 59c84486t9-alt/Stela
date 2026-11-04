@@ -33,6 +33,7 @@ use crate::{
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::arch::{asm, global_asm};
+use stela_boot_core::native_resources::{CODE_INSTALL_ALIGNMENT, CodeExtents};
 use stela_compiler::{GuestState, block::BlockExit};
 use stela_contracts::refuse;
 use stela_engine::machine::FaultCause;
@@ -404,13 +405,11 @@ pub struct State {
     code_virtual: u64,
     code_physical: u64,
     code_bytes: u64,
-    /// The arena's part new code goes to, and the offset after the code
-    /// installed last.
+    /// The arena part new code goes to.
     code_unit: u64,
-    code_used: u64,
     /// Successful initialized installs in each arena unit, from its start.
-    /// These metadata ranges require this State's backing/root/CPU owner.
-    installed_ranges: [Vec<(u32, u32)>; CODE_UNITS as usize],
+    /// These extents require this State's backing, root and CPU owner.
+    installed_extents: [CodeExtents; CODE_UNITS as usize],
     /// The furthest the arena's code has reached: what the run needed of it
     /// until it first filled and new code reclaimed the oldest.
     code_peak: u64,
@@ -603,8 +602,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner> {
             code_physical: config.code_physical,
             code_bytes: config.code_bytes,
             code_unit: 0,
-            code_used: 0,
-            installed_ranges: core::array::from_fn(|_| Vec::new()),
+            installed_extents: core::array::from_fn(|_| CodeExtents::default()),
             code_peak: 0,
             installed_immutable: InstalledCodeCache::default(),
             recorded: None,
@@ -847,15 +845,11 @@ impl State {
         if unit == 0 || end > self.code_bytes {
             return false;
         }
-        let Some(ranges) = self.installed_ranges.get((offset / unit) as usize) else {
+        let Some(extents) = self.installed_extents.get((offset / unit) as usize) else {
             return false;
         };
         let base = offset / unit * unit;
-        let (offset, end) = (offset - base, end - base);
-        let index = ranges.partition_point(|&(_, finish)| u64::from(finish) <= offset);
-        ranges
-            .get(index)
-            .is_some_and(|&(start, finish)| u64::from(start) <= offset && end <= u64::from(finish))
+        extents.contains(offset - base..end - base)
     }
 
     fn host_physical(&self, guest: u64) -> Option<u64> {

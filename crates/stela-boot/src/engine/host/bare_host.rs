@@ -17,7 +17,7 @@ pub struct BareHost<'a> {
 pub(super) const CODE_UNITS: u64 = 32;
 
 pub(super) fn code_unit_bytes(state: &State) -> u64 {
-    state.code_bytes / CODE_UNITS / 16 * 16
+    state.code_bytes / CODE_UNITS / CODE_INSTALL_ALIGNMENT * CODE_INSTALL_ALIGNMENT
 }
 
 impl Host for BareHost<'_> {
@@ -183,34 +183,29 @@ impl Host for BareHost<'_> {
     }
     fn install(&mut self, code: &[u8]) -> Result<NativeCode, InstallError> {
         let state = state();
-        let offset = state.code_used.next_multiple_of(16);
-        let end = offset + code.len() as u64;
-        if end > (state.code_unit + 1) * code_unit_bytes(state) {
-            return Err(InstallError::Full);
-        }
-        state.installed_ranges[state.code_unit as usize]
-            .try_reserve(1)
-            .map_err(|_| InstallError::Full)?;
-        if code.is_empty() {
-            return Err(InstallError::Full);
-        }
-        // SAFETY: arena bytes through the writable physmap alias.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                code.as_ptr(),
-                layout::physical(state.code_physical + offset) as *mut u8,
-                code.len(),
-            );
-        }
-        serialize_code();
-        let unit = state.code_unit * code_unit_bytes(state);
-        state.installed_ranges[state.code_unit as usize]
-            .push(((offset - unit) as u32, (end - unit) as u32));
-        state.code_used = end;
-        state.code_peak = state.code_peak.max(end);
+        let part_bytes = code_unit_bytes(state);
+        let part_offset = state.code_unit * part_bytes;
+        let physical = state.code_physical + part_offset;
+        let extent = state.installed_extents[state.code_unit as usize]
+            .append(part_bytes, code.len(), |start| {
+                // SAFETY: the ledger reserves this nonoverlapping extent in
+                // the owned arena. The writable physmap reaches it.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        code.as_ptr(),
+                        layout::physical(physical + start) as *mut u8,
+                        code.len(),
+                    );
+                }
+                serialize_code();
+            })
+            .ok_or(InstallError::Full)?;
+        state.code_peak = state.code_peak.max(part_offset + extent.end);
         #[cfg(feature = "native-profile")]
         state.native_profile.copied(code.len());
-        Ok(NativeCode((state.code_virtual + offset) as usize))
+        Ok(NativeCode(
+            (state.code_virtual + part_offset + extent.start) as usize,
+        ))
     }
 
     fn install_immutable(&mut self, code: &Arc<Vec<u8>>) -> Result<NativeCode, InstallError> {
@@ -272,9 +267,8 @@ impl Host for BareHost<'_> {
         let state = state();
         state.installed_immutable.clear();
         state.code_unit = 0;
-        state.code_used = 0;
-        for ranges in &mut state.installed_ranges {
-            ranges.clear();
+        for extents in &mut state.installed_extents {
+            extents.clear();
         }
     }
 
@@ -292,9 +286,8 @@ impl Host for BareHost<'_> {
         state.installed_immutable.clear();
         let unit = code_unit_bytes(state);
         state.code_unit = (state.code_unit + 1) % CODE_UNITS;
-        state.installed_ranges[state.code_unit as usize].clear();
-        state.code_used = state.code_unit * unit;
-        let start = (state.code_virtual + state.code_used) as usize;
+        state.installed_extents[state.code_unit as usize].clear();
+        let start = (state.code_virtual + state.code_unit * unit) as usize;
         Some(start..start + unit as usize)
     }
 
@@ -307,12 +300,13 @@ impl Host for BareHost<'_> {
         // blocks again.
         let Some(part) = (1..CODE_UNITS)
             .map(|step| (state.code_unit + step) % CODE_UNITS)
-            .find(|&part| !state.installed_ranges[part as usize].is_empty())
+            .find(|&part| !state.installed_extents[part as usize].is_empty())
         else {
             return Some(0..0);
         };
         state.installed_immutable.clear();
-        state.installed_ranges[part as usize].clear();
+        // This reclaim is for heap pressure, so give back the ledger too.
+        state.installed_extents[part as usize] = CodeExtents::default();
         let unit = code_unit_bytes(state);
         let start = (state.code_virtual + part * unit) as usize;
         Some(start..start + unit as usize)
