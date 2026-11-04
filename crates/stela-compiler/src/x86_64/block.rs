@@ -493,7 +493,13 @@ fn emit_selected(
             && let Some(group) =
                 super::memory_recipe::CompareLoads::new(&instructions[cursor..], held.rax, checks)
         {
-            after.rax = group.emit(code, &mut block.source_map, &instructions[cursor..], checks);
+            after.rax = group.emit(
+                code,
+                &mut block.source_map,
+                &instructions[cursor..],
+                checks,
+                native_branch_after(cursor + 2),
+            );
             cursor += 3;
             continue;
         }

@@ -75,6 +75,33 @@ fn ordinary_compare_reads_both_settled_load_results() {
     };
     let baseline = TargetCpu::Baseline;
     let fast = TargetCpu::X86_64_V2.with_bmi2().with_fast_pdep();
+    let old = compile(&words, pc, baseline);
+    let live = compile(&words, pc, fast);
+    assert_eq!(&old.source_map[..3], &live.source_map[..3]);
+    let compare_at = live.source_map[2].1;
+    let branch_at = live.source_map[3].1;
+    assert_eq!(
+        &old.x86_64_code[..compare_at],
+        &live.x86_64_code[..compare_at]
+    );
+    assert!(live.x86_64_code[compare_at..branch_at].ends_with(&[0x89, 0x87, 0, 1, 0, 0]));
+    assert!(live.x86_64_code[branch_at..].starts_with(&[0x0f, 0x85]));
+    let extract = |code: &[u8]| {
+        code.windows(5)
+            .any(|window| window == [0xc4, 0xe2, 0x7a, 0xf5, 0xc1])
+    };
+    assert!(extract(&live.x86_64_code[compare_at..branch_at]));
+    for target in [
+        baseline,
+        TargetCpu::X86_64_V2.with_bmi2(),
+        TargetCpu::X86_64_V2.with_fast_pdep(),
+        fast.with_data_independent_timing(),
+    ] {
+        assert!(!extract(&compile(&words, pc, target).x86_64_code));
+    }
+    assert!(!extract(&compile(&words[..3], pc, fast).x86_64_code));
+    let branch = compile(&words[3..], live.source_map[3].0, fast);
+    assert_eq!(branch.x86_64_code[0], 0xf6);
     for target in [baseline, fast] {
         let grouped = compile(&words, pc, target);
         let map = &grouped.source_map;

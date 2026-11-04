@@ -302,6 +302,7 @@ impl CompareLoads {
         source_map: &mut Vec<(GuestAddress, usize)>,
         instructions: &[Instruction],
         checks: MemoryChecks,
+        live_nzcv: bool,
     ) -> super::Rax {
         debug_assert!(!code.is_pinned() && !code.constant_time());
         for (instruction, operand, result) in [
@@ -320,8 +321,13 @@ impl CompareLoads {
             self.left,
             self.right,
         );
-        super::nzcv(code, true);
-        super::Rax::Nzcv
+        if live_nzcv {
+            super::flag_word::capture_arm_live(code, true);
+            super::Rax::LiveNzcv
+        } else {
+            super::nzcv(code, true);
+            super::Rax::Nzcv
+        }
     }
 }
 
