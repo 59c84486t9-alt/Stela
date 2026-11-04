@@ -1047,8 +1047,6 @@ fn start_machine(boot: Boot<'_>, parts: MachineParts) -> ! {
     gpu::set_hub(hub.clone(), boot_processor);
     let devices = parallel::Board::new(devices, hub.clone());
     let settings = parallel::Settings {
-        profile: profile.clone(),
-        target: canonical_ram.target(),
         traces: options.traces.clone(),
         watches: options.watches.clone(),
         step_timing: options.profile,

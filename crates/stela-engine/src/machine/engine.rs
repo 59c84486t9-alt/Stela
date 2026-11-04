@@ -155,8 +155,8 @@ use {
     super::registers, super::registers::CpuProfile, super::registers::HCR_TIDCP,
     super::registers::Lines, super::registers::Outcome as RegisterOutcome,
     super::registers::Refusal, super::streaming, super::streaming::Denial,
-    super::system::Register as SystemRegister, super::timer, stela_contracts::Feature,
-    stela_contracts::chip::AdmitTable, stela_contracts::chip::Check,
+    super::system::Register as SystemRegister, super::timer, stela_contracts::Chip,
+    stela_contracts::Feature, stela_contracts::chip::AdmitTable, stela_contracts::chip::Check,
 };
 
 const PROFILE: BlockProfile = BlockProfile::new(Features::SYSTEM_MODE);
@@ -936,6 +936,47 @@ enum Fetched {
 
 type Step = Result<(), Stop>;
 
+/// An owned copy of a parallel machine's CPU profile and its immutable
+/// instruction admission policy. Each worker still owns its execution state.
+#[derive(Clone)]
+pub struct WorkerProfile {
+    profile: CpuProfile,
+    admit_table: Arc<AdmitTable>,
+    target: TargetCpu,
+}
+
+impl WorkerProfile {
+    pub fn chip(&self) -> Chip {
+        self.profile.chip
+    }
+
+    /// Construct the machine on the worker that owns its host resources.
+    pub fn start<H: Host, D: Devices>(
+        self,
+        cpu: Cpu,
+        host: H,
+        devices: D,
+        processor: usize,
+    ) -> Result<Machine<H, D>, &'static str> {
+        Machine::new_at_prepared(
+            cpu,
+            host,
+            devices,
+            self.profile,
+            self.target,
+            processor,
+            Some(self.admit_table),
+        )
+    }
+}
+
+fn profile_admit_table(chip: Chip, withheld: u64) -> Arc<AdmitTable> {
+    Arc::new(
+        chip.admit_table(withheld)
+            .unwrap_or_else(|reason| panic!("the profile has no admit table: {reason}")),
+    )
+}
+
 impl<H: Host, D: Devices> Machine<H, D> {
     pub fn new(cpu: Cpu, host: H, devices: D, profile: CpuProfile, target: TargetCpu) -> Self {
         assert_eq!(
@@ -958,17 +999,49 @@ impl<H: Host, D: Devices> Machine<H, D> {
         target: TargetCpu,
         boot_processor: usize,
     ) -> Result<Self, &'static str> {
+        Self::new_at_prepared(cpu, host, devices, profile, target, boot_processor, None)
+    }
+
+    /// Capture the CPU profile before starting its parallel workers. If the
+    /// caller edited the public profile, derive admission for its current
+    /// policy before giving the immutable table to those workers.
+    pub fn worker_profile(&self) -> WorkerProfile {
+        let profile = &self.profile;
+        let withheld = identification::withheld(profile.chip, &profile.fixed);
+        let admit_table =
+            if self.admit_table.chip() == profile.chip && self.admit_table.withheld() == withheld {
+                Arc::clone(&self.admit_table)
+            } else {
+                profile_admit_table(profile.chip, withheld)
+            };
+        WorkerProfile {
+            profile: profile.clone(),
+            admit_table,
+            target: self.target,
+        }
+    }
+
+    fn new_at_prepared(
+        cpu: Cpu,
+        host: H,
+        devices: D,
+        profile: CpuProfile,
+        target: TargetCpu,
+        boot_processor: usize,
+        admit_table: Option<Arc<AdmitTable>>,
+    ) -> Result<Self, &'static str> {
         if boot_processor >= profile.processors.len().max(1) {
             return Err("the boot PE is outside the CPU profile");
         }
         if cpu.registers.chip() != profile.chip {
             return Err("the boot PE is not the profile's chip");
         }
-        let admit_table = profile
-            .chip
-            .admit_table(identification::withheld(profile.chip, &profile.fixed))
-            .unwrap_or_else(|reason| panic!("the profile has no admit table: {reason}"));
-        let admit_table = Arc::new(admit_table);
+        let admit_table = admit_table.unwrap_or_else(|| {
+            profile_admit_table(
+                profile.chip,
+                identification::withheld(profile.chip, &profile.fixed),
+            )
+        });
         let processor_power = Processors::new(profile.processors.len().max(1))
             .expect("a CPU profile has at least its boot PE");
         let mut machine = Self {

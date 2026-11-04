@@ -280,15 +280,11 @@ fn parallel_pes_refuse_independent_idle_leaps() {
         .collect::<Vec<_>>();
     let mut home = board(&[], NoDevices, identities.clone());
     let prepared = board(&[], NoDevices, identities);
-    let mut worker = Machine::new_at(
-        prepared.cpu,
-        prepared.host,
-        prepared.devices,
-        prepared.profile,
-        prepared.target,
-        1,
-    )
-    .unwrap();
+    let mut worker = home
+        .worker_profile()
+        .start(prepared.cpu, prepared.host, prepared.devices, 1)
+        .unwrap();
+    assert!(Arc::ptr_eq(&home.admit_table, &worker.admit_table));
     home.set_idle_skip(true).unwrap();
     let (hub, _) = hub(2);
     home.enter_parallel(Arc::clone(&hub)).unwrap();
@@ -309,6 +305,28 @@ fn parallel_pes_refuse_independent_idle_leaps() {
     home.host.now = 2000;
     worker.host.now = 2000;
     assert_eq!(home.now(), worker.now());
+}
+
+#[test]
+fn edited_cpu_profile_keeps_its_own_admission_policy() {
+    use super::super::tests::machine_on;
+    use crate::machine::{identification, registers::encodings::ID_AA64ISAR1_EL1};
+    use stela_contracts::Chip;
+
+    const SMMLA: u32 = 0x4e9b_a781;
+    let chip = Chip::AppleM2;
+    let mut home = machine_on(chip, &[]);
+    assert_eq!(home.admit_table.admit(SMMLA), SMMLA);
+    home.profile.fixed =
+        identification::derive(chip, home.target, true, identification::Speculation::NONE);
+    for (register, value) in &mut home.profile.fixed {
+        if *register == ID_AA64ISAR1_EL1 {
+            *value &= !(0xf << 52);
+        }
+    }
+    let worker = home.worker_profile();
+    assert!(!Arc::ptr_eq(&home.admit_table, &worker.admit_table));
+    assert_eq!(worker.admit_table.admit(SMMLA), 0);
 }
 
 #[test]

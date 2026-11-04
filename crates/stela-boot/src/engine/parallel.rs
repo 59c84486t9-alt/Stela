@@ -9,10 +9,8 @@ use super::{SLICE, WAIT_POLLS_PER_SECOND, host, output};
 use crate::Result;
 use crate::{apic::Apic, native_smp::executor::Executors};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use stela_compiler::TargetCpu;
 use stela_contracts::refuse;
 use stela_engine::machine::Cpu;
-use stela_engine::machine::CpuProfile;
 use stela_engine::machine::Host;
 use stela_engine::machine::Machine;
 use stela_engine::machine::Stop;
@@ -20,6 +18,7 @@ use stela_engine::machine::ctrr;
 use stela_engine::machine::engine::Kick;
 use stela_engine::machine::engine::SharedDevices;
 pub(crate) use stela_engine::machine::engine::SourcePhase;
+use stela_engine::machine::engine::WorkerProfile;
 use stela_engine::machine::engine::publication::WorkerBinding;
 pub(crate) use stela_engine::machine::engine::{Counts, RunBudget};
 use stela_engine::machine::exception::Pstate;
@@ -65,8 +64,6 @@ impl Kick for Doorbells {
 
 /// What every PE's machine shares with the home machine's settings.
 pub(crate) struct Settings {
-    pub profile: CpuProfile,
-    pub target: TargetCpu,
     pub traces: Vec<u64>,
     pub watches: Vec<(u64, u64)>,
     /// `--profile`: time each engine phase, as the home machine does.
@@ -84,6 +81,7 @@ pub(crate) fn spawn<H: Host>(
     tsc_hz: u64,
     settings: &Settings,
 ) -> Result<()> {
+    let mut profile = None;
     for binding in bindings {
         if binding.pe == home.processor() {
             continue;
@@ -97,8 +95,7 @@ pub(crate) fn spawn<H: Host>(
             pe: binding.pe,
             devices: home.devices.worker(),
             core_locks: home.cpu.core_locks.clone(),
-            profile: settings.profile.clone(),
-            target: settings.target,
+            profile: profile.get_or_insert_with(|| home.worker_profile()).clone(),
             traces: settings.traces.clone(),
             watches: settings.watches.clone(),
             step_timing: settings.step_timing,
@@ -120,8 +117,7 @@ struct Pe {
     pe: usize,
     devices: Board,
     core_locks: Arc<ctrr::CoreLocks>,
-    profile: CpuProfile,
-    target: TargetCpu,
+    profile: WorkerProfile,
     traces: Vec<u64>,
     watches: Vec<(u64, u64)>,
     step_timing: bool,
@@ -134,7 +130,6 @@ impl Pe {
             devices,
             core_locks,
             profile,
-            target,
             traces,
             watches,
             step_timing,
@@ -146,11 +141,12 @@ impl Pe {
             let mut host = owner.host();
             hub.first_start(pe, || host.wait_for_interrupt())
         };
-        let cpu = Cpu::of(profile.chip, address, Pstate::reset(2));
+        let cpu = Cpu::of(profile.chip(), address, Pstate::reset(2));
         // This core's own allocations, which other PEs' leave alone.
         let own = || crate::ALLOCATOR.own().unwrap_or(0);
         let before = own();
-        let mut machine = Machine::new_at(cpu, owner.host(), devices, profile, target, pe)
+        let mut machine = profile
+            .start(cpu, owner.host(), devices, pe)
             .unwrap_or_else(|error| output::fatal(error));
         machine.set_step_timing(step_timing);
         let observing = !traces.is_empty() || !watches.is_empty();
