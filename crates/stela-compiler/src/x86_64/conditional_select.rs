@@ -1,4 +1,4 @@
-//! Branchless conditional select from the saved guest NZCV.
+//! Branchless conditional select and compare using guest NZCV.
 use super::{capture_nzcv, condition_holds, flag_word, load_with, pinned, store, store_nzcv};
 use crate::aarch64::{
     Register, Width,
@@ -7,15 +7,15 @@ use crate::aarch64::{
 use crate::x86_64::asm::{
     Alu, Asm, Code, Cond,
     Gpr::{R8, Rax, Rdx},
-    Rm, Size, Unary,
+    Mem, Rm, Size, Unary,
 };
 
 const NZCV_SHIFT: u8 = 28;
 
 /// The comparison runs on both arms and a CMOV picks its flags or the
-/// fallback, so the timing depends on neither the condition nor the data.
-pub(super) fn emit_compare(code: &mut Code, operand: &CompareOperand) {
-    let predicate = condition_holds(code, operand.condition, false);
+/// fallback. A preceding pinned capture can supply the predicate directly.
+pub(super) fn emit_compare(code: &mut Code, operand: &CompareOperand, live_nzcv: bool) {
+    let predicate = condition_holds(code, operand.condition, live_nzcv);
     if let Some(cond) = predicate {
         // R8 is scratch under the native leaf ABI.
         code.asm().setcc(cond, R8);
@@ -95,6 +95,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, live_nzcv: bool) {
         let mut asm = code.asm();
         select_input(&mut asm, R8, size, operand.right);
         match operand.otherwise {
+            Otherwise::Increment if live_nzcv => asm.lea(size, R8, Mem::base(R8, 1)),
             Otherwise::Increment => asm.inc(size, R8),
             Otherwise::Invert => asm.unary(Unary::Not, size, R8),
             Otherwise::Negate => asm.unary(Unary::Neg, size, R8),
@@ -195,8 +196,8 @@ mod tests {
                         };
                         let mut frame = Code::new();
                         let mut pinned = Code::pinned();
-                        emit_compare(&mut frame, &operand);
-                        emit_compare(&mut pinned, &operand);
+                        emit_compare(&mut frame, &operand, false);
+                        emit_compare(&mut pinned, &operand, false);
                         pinned.asm().ret();
                         let pinned = super::super::pinned::entered(&pinned);
                         for nzcv in [0, 4] {

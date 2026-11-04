@@ -287,14 +287,19 @@ fn copy_straight_over_black(pixels: &[u8], out: &mut [u8]) {
         .iter_mut()
         .zip(pixels.as_chunks::<4>().0)
     {
-        let alpha = u32::from(pixel[3]);
-        *out = [
-            scale(u32::from(pixel[0]), alpha) as u8,
-            scale(u32::from(pixel[1]), alpha) as u8,
-            scale(u32::from(pixel[2]), alpha) as u8,
-            0xff,
-        ];
+        *out = straight_over_black(*pixel);
     }
+}
+
+#[inline]
+fn straight_over_black(pixel: [u8; 4]) -> [u8; 4] {
+    let alpha = u32::from(pixel[3]);
+    [
+        scale(u32::from(pixel[0]), alpha) as u8,
+        scale(u32::from(pixel[1]), alpha) as u8,
+        scale(u32::from(pixel[2]), alpha) as u8,
+        0xff,
+    ]
 }
 
 /// Blend an unscaled row already in the scanout's channel order.
@@ -354,14 +359,34 @@ pub fn compose(
     mut read: impl FnMut(u64, &mut [u8]) -> bool,
 ) -> Result<Vec<u8>> {
     let width = mode.width as usize;
-    let mut frame = [0, 0, 0, 0xff].repeat(width * mode.height as usize);
     let (red, blue) = mode
         .format
         .red_blue()
         .ok_or(refuse!("scanout mode is not an 8-bit format"))?;
+    // A matching bottom layer replaces every output pixel. Its DART rows
+    // can be read into the frame without first filling opaque black or
+    // routing the pixels through the scratch row.
+    let direct_base = layers.first().is_some_and(|layer| {
+        layer.surface.format == mode.format
+            && layer.source.width == mode.width
+            && layer.source.height == mode.height
+            && layer.destination
+                == (Rect {
+                    x: 0,
+                    y: 0,
+                    width: mode.width,
+                    height: mode.height,
+                })
+    });
+    let pixels = width * mode.height as usize;
+    let mut frame = if direct_base {
+        alloc::vec![0; pixels * 4]
+    } else {
+        [0, 0, 0, 0xff].repeat(pixels)
+    };
     let mut row = Vec::new();
     let mut drawn: Vec<([usize; 2], [usize; 2])> = Vec::new();
-    for layer in layers {
+    for (index, layer) in layers.iter().enumerate() {
         let (surface, source, destination) = (layer.surface, layer.source, layer.destination);
         let Some((xs, ys)) = on_screen(destination, mode.width, mode.height) else {
             continue;
@@ -371,7 +396,10 @@ pub fn compose(
             .iter()
             .any(|(x, y)| x[0] < xs[1] && xs[0] < x[1] && y[0] < ys[1] && ys[0] < y[1]);
         let copies = surface.format.red_blue().is_some();
-        row.resize(source.width as usize * 4, 0);
+        let direct = index == 0 && direct_base;
+        if !direct {
+            row.resize(source.width as usize * 4, 0);
+        }
         for y in ys[0]..ys[1] {
             let from_y = (2 * (y as u64 - u64::from(destination.y)) + 1) * u64::from(source.height)
                 / (2 * u64::from(destination.height));
@@ -380,10 +408,17 @@ pub fn compose(
                 .and_then(|offset| offset.checked_add(u64::from(source.x) * 4))
                 .and_then(|offset| surface.iova.checked_add(offset))
                 .ok_or(refuse!("layer row address overflows"))?;
-            if !read(iova, &mut row) {
+            let out = &mut frame[(y * width + xs[0]) * 4..(y * width + xs[1]) * 4];
+            let input = if direct { &mut *out } else { &mut row[..] };
+            if !read(iova, input) {
                 return Err(refuse!("surface row is not reachable through its DART"));
             }
-            let out = &mut frame[(y * width + xs[0]) * 4..(y * width + xs[1]) * 4];
+            if direct {
+                if !out.iter().skip(3).step_by(4).all(|&alpha| alpha == 0xff) {
+                    opaque_over_black(out, layer.premultiplied);
+                }
+                continue;
+            }
             if unscaled && copies {
                 let start = (xs[0] - destination.x as usize) * 4;
                 let pixels = &row[start..start + out.len()];
@@ -425,6 +460,22 @@ pub fn compose(
         drawn.push((xs, ys));
     }
     Ok(frame)
+}
+
+/// The bottom layer covers this row. Alpha is opaque after composition
+/// over black even if the source is translucent.
+#[inline(never)]
+fn opaque_over_black(row: &mut [u8], premultiplied: bool) {
+    let pixels = row.as_chunks_mut::<4>().0;
+    if premultiplied {
+        for pixel in pixels {
+            *pixel = (u32::from_le_bytes(*pixel) | 0xff00_0000).to_le_bytes();
+        }
+        return;
+    }
+    for pixel in pixels {
+        *pixel = straight_over_black(*pixel);
+    }
 }
 
 #[cfg(test)]
@@ -752,12 +803,18 @@ mod tests {
                 overlay,
             ];
             let mut reads = Vec::new();
+            let mut outputs = Vec::new();
             let frame = compose(&layers, MODE, |iova, bytes| {
                 reads.push((iova, bytes.len()));
+                outputs.push(bytes.as_ptr());
                 reader(&memory)(iova, bytes)
             })
             .unwrap();
             assert_eq!(reads, [(44, 16), (76, 16), (112, 8)]);
+            assert_eq!(
+                outputs[..2],
+                [frame.as_ptr(), frame.as_ptr().wrapping_add(16)]
+            );
             assert_eq!(frame, reference(&layers, MODE, &memory));
         }
 

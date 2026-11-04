@@ -39,7 +39,7 @@ use crate::metal::{
         MemoryProperties, PipelineStages, PrimitiveTopology, ShaderStages,
         backend::{Descriptor, Object},
         command::Command,
-        object::{Buffer, MemoryRequest, Pipeline, PipelineSource},
+        object::{Buffer, MemoryRequest, Pipeline, PipelineSource, QueryType},
     },
 };
 use alloc::{string::String, vec::Vec};
@@ -2342,6 +2342,136 @@ fn command_buffers_are_timed_from_their_first_command_to_their_last() {
 }
 
 #[test]
+fn completion_query_pools_reuse_two_slots_after_retirement() {
+    let mut device = device();
+    device
+        .new_counter_sample_buffer(CounterSet::Timestamp, 17)
+        .unwrap();
+    let first = submit(&mut device);
+    let second = submit(&mut device);
+    let backend = device.backend();
+    let [
+        (public_pool, public_info),
+        (first_pool, first_info),
+        (second_pool, second_info),
+    ] = backend.query_pools.as_slice()
+    else {
+        panic!("expected one public pool and two in-flight completion pools");
+    };
+    assert_eq!(public_info.count, 17);
+    assert_eq!(first_info.query_type, QueryType::Timestamp);
+    assert_eq!(first_info.count, 2);
+    assert_eq!(second_info, first_info);
+    let (public_pool, first_pool, second_pool) = (*public_pool, *first_pool, *second_pool);
+    assert_ne!(first_pool, second_pool);
+    assert_eq!(
+        backend.query_resets,
+        [
+            (public_pool, 0, 17),
+            (first_pool, 0, 2),
+            (second_pool, 0, 2)
+        ]
+    );
+    assert!(backend.query_reads.is_empty());
+
+    backend.queries_ready = true;
+    complete(&mut device, first);
+    assert_eq!(device.command_buffer_times(first), Ok([0, 10]));
+    assert_eq!(device.backend().query_reads, [(first_pool, 0, 2)]);
+    assert_eq!(device.backend().query_resets[3..], [(first_pool, 0, 2)]);
+
+    let third = submit(&mut device);
+    let backend = device.backend();
+    assert_eq!(backend.query_pools.len(), 3);
+    assert_eq!(backend.query_resets.len(), 4);
+    let submission = backend.submissions.last().unwrap();
+    assert!(matches!(
+        submission[0].commands[1],
+        Command::WriteTimestamp { pool, query: 0, .. } if pool == first_pool
+    ));
+
+    complete(&mut device, third);
+    assert_eq!(device.command_buffer_times(second), Ok([0, 10]));
+    assert_eq!(device.command_buffer_times(third), Ok([0, 10]));
+    assert_eq!(
+        device.backend().query_reads,
+        [(first_pool, 0, 2), (second_pool, 0, 2), (first_pool, 0, 2)]
+    );
+    assert_eq!(
+        device.backend().query_resets[3..],
+        [(first_pool, 0, 2), (second_pool, 0, 2), (first_pool, 0, 2)]
+    );
+}
+
+#[test]
+fn failed_completion_preparation_preserves_pending_texture_uploads() {
+    let mut backend = MockBackend::new();
+    backend.physical.as_mut().unwrap().features.host_image_copy = false;
+    let mut device = device_on(backend);
+    let texture = device
+        .new_texture(&TextureDescriptor {
+            options: options(StorageMode::Managed),
+            ..texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ)
+        })
+        .unwrap();
+    device
+        .replace_region(
+            texture,
+            &Region {
+                slice: 0,
+                level: 0,
+                origin: [0; 3],
+                size: [1; 3],
+            },
+            &[1, 2, 3, 4],
+            Strides {
+                bytes_per_row: 4,
+                bytes_per_image: 0,
+            },
+        )
+        .unwrap();
+    let encode = |device: &mut TestDevice| {
+        let mut commands = device.new_command_buffer();
+        commands.begin_compute(DispatchType::Serial).unwrap();
+        commands
+            .set_compute_bytes(&mut device.resolver(), &[7; 64], 0)
+            .unwrap();
+        commands.end_encoding(&mut device.resolver()).unwrap();
+        commands
+    };
+
+    let commands = encode(&mut device);
+    let writes = device.backend().writes.len();
+    let created = device.backend().next;
+    device.backend().query_pool_error = Some(Error::OutOfMemory);
+    assert_eq!(device.commit(commands), Err(Error::OutOfMemory));
+    assert_eq!(device.backend().writes.len(), writes);
+    assert!(device.backend().submissions.is_empty());
+
+    let commands = encode(&mut device);
+    device.backend().write_error = Some(Error::OutOfMemory);
+    assert_eq!(device.commit(commands), Err(Error::OutOfMemory));
+    assert_eq!(device.backend().next, created + 1);
+    let pool = device.backend().query_pools[0].0;
+    assert_eq!(device.backend().query_resets, [(pool, 0, 2)]);
+    assert!(device.backend().submissions.is_empty());
+
+    let commands = encode(&mut device);
+    let serial = device.commit(commands).unwrap();
+    assert_eq!(serial, 1);
+    assert_eq!(device.backend().next, created + 1);
+    assert_eq!(device.backend().query_resets, [(pool, 0, 2)]);
+    let submitted = &device.backend().submissions[0][0].commands;
+    assert!(matches!(submitted[1], Command::CopyBufferToImage { .. }));
+    assert!(matches!(
+        submitted[3],
+        Command::WriteTimestamp { query: 0, .. }
+    ));
+    complete(&mut device, serial);
+    assert_eq!(device.backend().query_resets, [(pool, 0, 2), (pool, 0, 2)]);
+}
+
+#[test]
 fn uncommitted_command_buffers_return_their_upload_memory() {
     let mut device = device();
     let encode = |device: &mut TestDevice| {
@@ -2457,6 +2587,7 @@ fn device_loss_keeps_in_flight_imports_pinned_and_charged() {
         .import_memory(&ranges, core::num::NonZeroU64::new(12).unwrap())
         .unwrap();
     let serial = submit(&mut device);
+    let query_resets = device.backend().query_resets.len();
     device.destroy_buffer(buffer).unwrap();
     device.backend().semaphore_error = Some(Error::DeviceLost);
     assert_eq!(device.poll(), Err(Error::DeviceLost));
@@ -2470,5 +2601,7 @@ fn device_loss_keeps_in_flight_imports_pinned_and_charged() {
     assert_eq!(device.current_allocated_size(), 16384);
     assert_eq!(device.backend().imports.len(), 2);
     assert!(device.backend().destroyed.is_empty());
+    assert_eq!(device.backend().query_resets.len(), query_resets);
+    assert!(device.backend().query_reads.is_empty());
     assert_eq!(device.retired(), None);
 }

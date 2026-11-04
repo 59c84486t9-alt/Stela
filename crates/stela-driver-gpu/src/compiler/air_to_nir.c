@@ -4725,7 +4725,8 @@ static nir_shader *
 translate(const void *bitcode, size_t size, const char *entry,
                  const nir_shader_compiler_options *nir_options,
                  const struct stela_air_options *options,
-                 struct stela_air_error *error, const struct stela_air_stage_options *stage)
+                 struct stela_air_error *error, const struct stela_air_stage_options *stage,
+                 bool *folded_early)
 {
    struct stela_air_error local_error = {0};
    if (!error)
@@ -4816,9 +4817,23 @@ translate(const void *bitcode, size_t size, const char *entry,
    if (!stela_air_metadata_layout(&t.metadata) || !stela_air_metadata_validate(&t.metadata) ||
        !stela_air_specialize_constants(&t.metadata, options->constants, options->constant_count) ||
        !stela_air_construct_constants(&t.metadata) ||
-       !stela_air_link_modules(&t.metadata, options->modules, options->module_count) ||
-       /* A table's pointer may pass through functions to the call it makes. */
-       !stela_air_inline_calls(&t.metadata, NULL, 0, 0) ||
+       !stela_air_link_modules(&t.metadata, options->modules, options->module_count))
+      goto done;
+   LLVMValueRef specialized = NULL;
+   /* Calls through tables may depend on inlining, and logging admission uses
+    * the use lists of its globals. Keep those modules on the original path. */
+   if (folded_early && stage && stage->stage == STELA_AIR_FRAGMENT && options->constant_count &&
+       !options->module_count && !options->linked_function_count &&
+       stela_air_metadata_target(&t.metadata, LLVMGetTarget(t.module)) &&
+       LLVMGetNamedMetadataNumOperands(t.module, "air.function_constants") &&
+       !LLVMGetNamedMetadataNumOperands(t.module, "air.visible") &&
+       !LLVMGetNamedMetadataNumOperands(t.module, "air.visible_function_references") &&
+       !LLVMGetNamedFunction(t.module, "air.get_size_visible_function_table") &&
+       !LLVMGetNamedFunction(t.module, "air.get_function_pointer_visible_function_table") &&
+       !LLVMGetNamedFunction(t.module, "air.os_log"))
+      specialized = LLVMGetNamedFunction(t.module, entry);
+   /* A table's pointer may pass through functions to the call it makes. */
+   if (!stela_air_inline_specialized_calls(&t.metadata, specialized, folded_early) ||
        !stela_air_dispatch_tables(&t.metadata, options->linked_functions,
                                   options->linked_function_count) ||
        /* Walk again only for calls the first pass left or table lowering added. */
@@ -4947,7 +4962,7 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
                   const nir_shader_compiler_options *nir_options,
                   const struct stela_air_options *options, struct stela_air_error *error)
 {
-   return translate(bitcode, size, entry, nir_options, options, error, NULL);
+   return translate(bitcode, size, entry, nir_options, options, error, NULL, NULL);
 }
 
 nir_shader *
@@ -4959,5 +4974,27 @@ stela_air_stage_to_nir(const void *bitcode, size_t size, const char *entry,
       if (error) *error = (struct stela_air_error){.kind = STELA_AIR_INPUT};
       return NULL;
    }
-   return translate(bitcode, size, entry, nir_options, &options->resources, error, options);
+   return translate(bitcode, size, entry, nir_options, &options->resources, error, options, NULL);
+}
+
+nir_shader *
+stela_air_metal_stage_to_nir(const void *bitcode, size_t size, const char *entry,
+                              const nir_shader_compiler_options *nir_options,
+                              const struct stela_air_stage_options *options,
+                              struct stela_air_error *error)
+{
+   if (!options)
+      return stela_air_stage_to_nir(bitcode, size, entry, nir_options, options, error);
+   struct stela_air_error local_error;
+   if (!error)
+      error = &local_error;
+   bool folded_early = false;
+   nir_shader *shader = translate(bitcode, size, entry, nir_options, &options->resources, error,
+                                  options, &folded_early);
+   /* Only a fragment that attempted the early pass can retry. Its temporary
+    * LLVM module and NIR are already gone, and the second call cannot fold
+    * early again. Avoid extra work after an allocation refusal. */
+   if (!shader && folded_early && error->kind != STELA_AIR_ALLOCATION)
+      return stela_air_stage_to_nir(bitcode, size, entry, nir_options, options, error);
+   return shader;
 }
