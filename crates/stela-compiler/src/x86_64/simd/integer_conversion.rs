@@ -18,7 +18,7 @@ use crate::{
     aarch64::{
         Register,
         floating::{
-            FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format, INEXACT,
+            FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_NEP, Format, INEXACT,
             integer::{IntegerFormat, IntegerRounding, IntegerWidth},
         },
         simd::{
@@ -344,9 +344,8 @@ pub(in crate::x86_64) fn from_integer(
     finish_float(code, operand);
 }
 
-fn guard_float_source(code: &mut Code, operand: &IntegerConversion) -> usize {
+fn guard_float_input(code: &mut Code, operand: &IntegerConversion) -> usize {
     let shape = operand.integer.shape();
-    read_numerical_vector(code, shape, operand.float, RESULT_VECTOR);
     if shape == Shape::Scalar {
         exponent_range(code, operand.format, RESULT_VECTOR, INPUT_MINIMUM_EXPONENT);
         branch(code, Condition::AboveOrEqual)
@@ -526,10 +525,26 @@ pub(in crate::x86_64) fn to_integer(
     let packed_result = shape != Shape::Scalar
         && (signed_single
             || vector_extensions::packed_conversion_supported(operand.format, integer, target));
+    let packed_truncate = signed_single
+        && packed_result
+        && mode == IntegerRounding::TowardZero
+        && operand.frac_bits == 0;
     let mut helper_patches = Vec::new();
-    test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
-    helper_patches.push(branch(code, Condition::NotZero));
-    helper_patches.push(guard_float_source(code, operand));
+    let other_controls = if packed_truncate {
+        read_numerical_vector(code, shape, operand.float, RESULT_VECTOR);
+        // With input flushing disabled, CVTTPS2DQ reports inexact for
+        // fractional inputs and invalid for NaNs or out-of-range values.
+        // Its status distinguishes those cases before any guest commit.
+        test_control(code, FPCR_EXCEPTION_ENABLE_MASK | FPCR_FIZ | FPCR_FZ);
+        Some(branch(code, Condition::NotZero))
+    } else {
+        test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
+        helper_patches.push(branch(code, Condition::NotZero));
+        read_numerical_vector(code, shape, operand.float, RESULT_VECTOR);
+        helper_patches.push(guard_float_input(code, operand));
+        None
+    };
+    let convert = code.len();
     environment_round(code, rounding(mode));
     let mut environment_failures = Vec::new();
     if packed_result {
@@ -577,6 +592,15 @@ pub(in crate::x86_64) fn to_integer(
             resolve(code, patch, restore_start);
         }
         restore_environment(code);
+    }
+    if let Some(other_controls) = other_controls {
+        let check_controls = code.len();
+        resolve(code, other_controls, check_controls);
+        test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
+        helper_patches.push(branch(code, Condition::NotZero));
+        helper_patches.push(guard_float_input(code, operand));
+        let resume = jump(code);
+        resolve(code, resume, convert);
     }
     let helper_start = code.len();
     for patch in helper_patches {
