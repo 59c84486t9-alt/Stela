@@ -229,6 +229,7 @@
 /fs/name_hash.h
 /fs/libfs.c
 /fs/pseudo_metadata.c
+/fs/stashed_path.c
 /fs/stat.c
 /fs/anon_inodes.c
 /fs/mnt_idmapping.c
