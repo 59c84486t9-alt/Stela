@@ -475,7 +475,7 @@ pub fn mapped(
     (source, mapping, counters)
 }
 
-fn unmapped(
+pub(super) fn unmapped(
     address: Address,
     window: EcamWindow,
     span: PhysicalSpan,

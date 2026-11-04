@@ -34,6 +34,57 @@ fn mapped() -> (
 }
 
 #[test]
+fn parking_withdraws_the_map_and_preserves_the_source_seal_on_reattach() {
+    let address = test_support::ADDRESS;
+    let span = PhysicalSpan::new(test_support::physical(address), 4096).unwrap();
+    let (source, authority, counters) = test_support::unmapped(
+        address,
+        test_support::window(address),
+        span,
+        CacheAttribute::Uncached,
+    );
+    let retained = source.retention();
+    let map = |prepared: &PreparedConfig<grant::PrepublicationGrant>| {
+        authority
+            .map(
+                prepared.configuration_resource().clone(),
+                0,
+                4096,
+                CacheAttribute::Uncached,
+                Protection::ReadWrite,
+            )
+            .unwrap()
+    };
+    let prepared = UnpublishedConfig::prepare(source.into_prepublication());
+    let mapping = map(&prepared);
+    let mut config = prepared
+        .attach(mapping)
+        .unwrap_or_else(|_| panic!("attach"));
+    config.seal_bus_master().unwrap();
+    // SAFETY: this isolated model has one source and no other map users.
+    let prepared = unsafe { config.park() }.unwrap_or_else(|_| panic!("park"));
+    assert_eq!(retained.uses(), 0);
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
+    let mapping = map(&prepared);
+    let config = prepared
+        .attach(mapping)
+        .unwrap_or_else(|_| panic!("reattach"));
+    // SAFETY: the same fixture owns the original resource and completed all
+    // old accesses. The source's own checked model transition runs here.
+    let mut config = unsafe { config.promote(test_support::FixtureCustody::finish_promotion) }
+        .unwrap_or_else(|_| panic!("promotion"));
+    assert_eq!(
+        config.try_write16(4, 4),
+        Err(ConfigError::before_effect(ConfigFailure::BusMasterSealed))
+    );
+    assert_eq!(retained.uses(), 1);
+    drop(retained);
+    // SAFETY: all synchronous isolated access ended.
+    unsafe { test_support::retire_owned(config) }.unwrap();
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 2);
+}
+
+#[test]
 fn promotion_keeps_the_original_mapping_and_command_seal() {
     let (source, mapping, counters) = mapped();
     let retention = source.retention();

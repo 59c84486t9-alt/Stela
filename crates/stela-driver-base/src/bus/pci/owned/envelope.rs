@@ -31,6 +31,26 @@ pub struct PreparedConfig<G>(Envelope<G>);
 #[must_use]
 pub struct ConfigParts<G>(pub(super) Envelope<G>);
 
+pub(super) unsafe fn park(
+    mut config: UnpublishedConfig,
+) -> Result<PreparedConfig<PrepublicationGrant>, (MappingError, ConfigParts<PrepublicationGrant>)> {
+    // SAFETY: the caller supplied the original source and stopped map users.
+    if let Err(error) = unsafe { config.storage.region_mut().withdraw_for_park() } {
+        if let Some(close) = &config.storage.close {
+            close.close();
+        }
+        return Err((error, config.into_parts()));
+    }
+    let Some(Phase::Attached(region)) = config.storage.phase.take() else {
+        unreachable!("original attached configuration")
+    };
+    **config.storage.phase = Some(Phase::Pending {
+        grant: region.into_parked(),
+        mapping: None,
+    });
+    Ok(PreparedConfig(config.storage))
+}
+
 pub(super) fn promote<P: PrepublicationCustody + DriverCustody>(
     mut config: UnpublishedConfig,
     qualify: impl FnOnce(&mut P) -> Result<(), MappingError>,

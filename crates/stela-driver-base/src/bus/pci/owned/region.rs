@@ -118,14 +118,14 @@ impl Region<grant::PrepublicationGrant> {
         &mut self,
         qualify: impl FnOnce(&mut P) -> Result<(), MappingError>,
     ) -> Result<(), MappingError> {
-        self.check_promotion()?;
+        self.check_transition()?;
         self.grant
             .update_typed(qualify)
             .ok_or(MappingError::InvalidPlatformReply)??;
-        self.check_promotion()
+        self.check_transition()
     }
 
-    fn check_promotion(&self) -> Result<(), MappingError> {
+    fn check_transition(&self) -> Result<(), MappingError> {
         self.grant.state().check_idle()?;
         self.grant.state().check_admission()?;
         self.grant.custody().retirement_context()?;
@@ -137,6 +137,17 @@ impl Region<grant::PrepublicationGrant> {
             return Err(MappingError::InvalidPlatformReply);
         }
         Ok(())
+    }
+
+    pub(super) unsafe fn withdraw_for_park(&mut self) -> Result<(), MappingError> {
+        self.check_transition()?;
+        // SAFETY: the caller ended every use through this exact map. The
+        // grant stays in its envelope through all withdrawal callbacks.
+        unsafe { self.mapping.retire() }
+    }
+
+    pub(super) fn into_parked(self) -> grant::PrepublicationGrant {
+        self.grant
     }
 
     pub(super) fn into_promoted<P: grant::PrepublicationCustody + grant::DriverCustody>(
@@ -158,6 +169,7 @@ impl<G: Grant> Region<G> {
     ) -> Result<(Address, EcamWindow), ConfigError> {
         let address = grant.custody().address();
         let window = grant.custody().window();
+        grant.state().check_admission().map_err(Self::map_error)?;
         validate_mapping(address, window, mapping, Protection::ReadWrite)?;
         grant
             .custody()

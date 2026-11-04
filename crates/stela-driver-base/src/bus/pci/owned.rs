@@ -173,6 +173,22 @@ impl ConfigSpace for OwnedConfig {
     }
 }
 impl UnpublishedConfig {
+    /// Withdraw this temporary map and keep the same prepublication slot,
+    /// resource, admission projection and operation state. A later attach
+    /// maps that original resource again.
+    ///
+    /// # Safety
+    /// All access through this map, including raw and posted-write users,
+    /// has stopped and cannot restart. The same source retains exclusive
+    /// custody and the same physical decode throughout the withdrawal.
+    pub unsafe fn park(
+        self,
+    ) -> Result<PreparedConfig<PrepublicationGrant>, (MappingError, ConfigParts<PrepublicationGrant>)>
+    {
+        // SAFETY: the caller keeps the source and has ended this map's users.
+        unsafe { envelope::park(self) }
+    }
+
     /// Transfer the exact configuration into its driver phase. The mapping,
     /// operation state, command and routing seals survive. Refusal closes
     /// admission and keeps the original owning envelope.
