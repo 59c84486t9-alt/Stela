@@ -5,6 +5,124 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 #[test]
+fn ordinary_scaled_add_uses_a_settled_right_operand() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan},
+    };
+
+    // AND X14,X12,X6; ADD X18,X2,X14,LSL #2 from zlib inflate.
+    let producer = 0x8a06_018e_u32;
+    let add = 0x8b0e_0852_u32;
+    let pc = GuestAddress(0x100004108);
+    let compile = |words: &[u32], pc, target| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        CompilationPlan::new(&source, pc, &Options::new(BlockProfile::ORDINARY, target))
+            .unwrap()
+            .compile()
+            .unwrap()
+            .native
+    };
+    let target = TargetCpu::Baseline;
+    for target in [target, TargetCpu::Sse41, TargetCpu::X86_64_V2.with_bmi2()] {
+        for size_bit in [0, 1 << 31] {
+            for amount in 1..=3 {
+                for destination in [2, 14, 18] {
+                    let add = (add & !(1 << 31 | 63 << 10 | 31))
+                        | size_bit
+                        | (amount << 10)
+                        | destination;
+                    let grouped = compile(&[producer, add], pc, target);
+                    let second = grouped.source_map[1];
+                    assert_eq!(
+                        grouped.source_map,
+                        [(pc, 0), (GuestAddress(pc.0 + 4), second.1)]
+                    );
+                    assert!(
+                        grouped.x86_64_code[..second.1]
+                            .ends_with(&[0x48, 0x89, 0x87, 0x70, 0, 0, 0])
+                    );
+                    let row = &grouped.x86_64_code[second.1..];
+                    let lea = [0x8d, 0x04, 1 | ((amount as u8) << 6)];
+                    let load_size = if size_bit == 0 { 6 } else { 8 };
+                    assert_eq!(&row[load_size..load_size + lea.len()], &lea);
+                    assert!(row[load_size + lea.len()..].starts_with(&[
+                        0x48,
+                        0x89,
+                        0x87,
+                        (destination * 8) as u8,
+                        0,
+                        0,
+                        0
+                    ]));
+                }
+            }
+        }
+    }
+
+    // LDRH W9,[X10,X26,LSL #1]; ADD X8,X8,X9,LSL #2 from SQLite.
+    let from_load = compile(
+        &[0x787a_7949, 0x8b09_0908],
+        GuestAddress(0x100026f8c),
+        target,
+    );
+    let uses_held = |row: &[u8]| {
+        row.starts_with(&[0x48, 0x8b, 0x8f]) && row[7..].starts_with(&[0x48, 0x8d, 0x04, 0x81])
+    };
+    assert!(uses_held(
+        &from_load.x86_64_code[from_load.source_map[1].1..]
+    ));
+    let independent = compile(&[add], GuestAddress(pc.0 + 4), target);
+    assert!(!uses_held(&independent.x86_64_code));
+    // The zlib load-pair compare leaves NZCV in RAX. The following ADD
+    // needs the second load's committed X7 value from the guest frame.
+    let after_compare = compile(
+        &[0x3940_0086, 0x3940_0167, 0x6b07_00df, 0x8b07_0852],
+        GuestAddress(0x100003e14),
+        target,
+    );
+    let cmp = after_compare.source_map[2].1;
+    let next = after_compare.source_map[3].1;
+    assert!(after_compare.x86_64_code[cmp..next].starts_with(&[0x39, 0xc1]));
+    assert!(!uses_held(&after_compare.x86_64_code[next..]));
+    let fast = TargetCpu::X86_64_V2.with_bmi2().with_fast_pdep();
+    let pair = [0x3940_0086, 0x3940_0167, 0x6b07_00df];
+    let branch = 0x5400_0dc1;
+    let paired_pc = GuestAddress(0x100003e14);
+    let separated = compile(
+        &[pair[0], pair[1], pair[2], 0x8b07_0852, branch],
+        paired_pc,
+        fast,
+    );
+    let code = &separated.x86_64_code;
+    let map = &separated.source_map;
+    assert!(code[map[2].1..map[3].1].starts_with(&[0x39, 0xc1]));
+    assert!(!uses_held(&code[map[3].1..map[4].1]));
+    assert_eq!(code[map[4].1], 0xf6); // Test saved NZCV after the intervening ADD.
+
+    let with_producer = compile(
+        &[pair[0], pair[1], pair[2], producer, add, branch],
+        paired_pc,
+        fast,
+    );
+    let code = &with_producer.x86_64_code;
+    let map = &with_producer.source_map;
+    assert!(uses_held(&code[map[4].1..map[5].1]));
+    assert_eq!(code[map[5].1], 0xf6);
+    for fallback in [
+        compile(&[producer, add], pc, target.with_data_independent_timing()),
+        compile(&[producer, add | (1 << 22)], pc, target), // LSR
+        compile(&[producer, add | (1 << 29)], pc, target), // ADDS
+        compile(&[producer, (add & !(63 << 10)) | (4 << 10)], pc, target),
+        compile(&[producer, (add & !(31 << 5)) | (14 << 5)], pc, target),
+    ] {
+        assert!(!uses_held(
+            &fallback.x86_64_code[fallback.source_map[1].1..]
+        ));
+    }
+}
+
+#[test]
 fn ordinary_adjacent_nzcv_uses_native_condition_on_fast_extract_targets() {
     use crate::{
         Options, TargetCpu,

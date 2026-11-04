@@ -1,5 +1,5 @@
 //! Block control transfers: every branch returns to the dispatcher.
-use crate::x86_64::asm::{Alu, Asm, Code, Cond, Gpr, Size};
+use crate::x86_64::asm::{Alu, Asm, Code, Cond, Gpr, Mem, Size};
 use alloc::vec;
 use alloc::vec::Vec;
 pub(crate) mod checked_memory;
@@ -10,7 +10,7 @@ use super::chain::ExitWord;
 use crate::{
     GuestAddress, NativeBlock,
     aarch64::{
-        Instruction, Operation, Register, Width, integer_math, integer_unary, pc_relative,
+        Instruction, Operation, Register, Shift, Width, integer_math, integer_unary, pc_relative,
         simd::{Operand as Simd, rearrange::Operand as Rearrange},
     },
     block::{ExitKind, MAX_BLOCK_INSTRUCTIONS, Terminator},
@@ -914,18 +914,30 @@ fn emit_single(
             destination,
             left: left @ Register::X(_),
             right,
-            amount: 0,
-            ..
+            shift,
+            amount,
         } = instruction.operation
         && right == register
         && left != right
         && destination != Register::Zero
+        && (amount == 0 || (shift == Shift::Lsl && amount <= 3))
     {
-        // ADD is commutative here. The preceding result in RAX can be
-        // the host destination, with the guest's left operand in memory.
         let mut asm = code.asm();
         let left = asm.guest(left).expect("ADD left register");
-        asm.alu_load(Alu::Add, Size::of(width == Width::X64), Gpr::Rax, left);
+        let size = Size::of(width == Width::X64);
+        if amount == 0 {
+            // ADD is commutative with an unshifted right operand.
+            asm.alu_load(Alu::Add, size, Gpr::Rax, left);
+        } else {
+            // The SIB scale uses the settled right operand in RAX. LEA
+            // truncates a W result to 32 bits and clears its upper half.
+            asm.mov_load(size, Gpr::Rcx, left);
+            asm.lea(
+                size,
+                Gpr::Rax,
+                Mem::indexed(Gpr::Rcx, Gpr::Rax, 1 << amount, 0),
+            );
+        }
         super::store(code, destination);
     } else if live_nzcv {
         assert!(
