@@ -332,6 +332,23 @@ fn records_reject_malformed_source_geometry_with_a_valid_checksum() {
 }
 
 #[test]
+fn checksummed_record_count_must_fit_the_remaining_bytes() {
+    let translator = translator_id();
+    let key = Digest::of(b"bounded entry count");
+    let mut record = Record::new(translator, key);
+    record.insert(proved(&words(&[0x9000_0020, 0x9400_0002]), 0x10).unwrap());
+    let mut bytes = record.encode();
+    bytes[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+    let end = bytes.len() - TRAILER_BYTES;
+    let checksum = Sha256::digest(&bytes[..end]);
+    bytes[end..].copy_from_slice(&checksum);
+    assert_eq!(
+        Record::decode(&bytes, &translator, &key),
+        Err(FormatError::Truncated)
+    );
+}
+
+#[test]
 fn records_refuse_any_damaged_framing_byte() {
     let source = words(&[0x9000_0020, 0x9400_0002]);
     let entry = proved(&source, 0x10).unwrap();

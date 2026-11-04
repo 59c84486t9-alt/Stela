@@ -28,6 +28,9 @@ pub const SCHEMA: u32 = 3;
 const RECORD_MAGIC: [u8; 8] = *b"STLTPAGE";
 const HEADER_BYTES: usize = 88;
 const TRAILER_BYTES: usize = 32;
+/// Context, guest offset, source and input lengths, code length, and four
+/// metadata counts. Variable-length payloads follow these fixed fields.
+const ENTRY_MIN_BYTES: usize = 32 + 3 * 2 + 5 * 4;
 /// A relocated field: a little-endian u64 in the native code.
 const FIELD_BYTES: usize = 8;
 /// The bits of a page's address its translations are bound to (the
@@ -458,7 +461,7 @@ impl Record {
         if reader.u32()? != SCHEMA {
             return Err(FormatError::Schema);
         }
-        let count = reader.u32()?;
+        let count = reader.u32()? as usize;
         if reader.digest()? != *translator {
             return Err(FormatError::Translator);
         }
@@ -471,14 +474,16 @@ impl Record {
         if Sha256::digest(body).as_slice() != trailer {
             return Err(FormatError::Checksum);
         }
-        let mut entries = Vec::new();
-        for _ in 0..count {
+        if count > reader.0.len() / ENTRY_MIN_BYTES {
+            return Err(FormatError::Truncated);
+        }
+        let mut entries = decode_items(count, || {
             let entry = reader.entry()?;
             if !entry.consistent() {
                 return Err(FormatError::Entry);
             }
-            entries.push(entry);
-        }
+            Ok(entry)
+        })?;
         if !reader.0.is_empty() {
             return Err(FormatError::Entry);
         }
@@ -491,6 +496,22 @@ impl Record {
             entries,
         })
     }
+}
+
+/// Reserve for the common case without letting a corrupt count make the
+/// decoder allocate a large vector before checking its first item.
+fn decode_items<T>(
+    count: usize,
+    mut next: impl FnMut() -> Result<T, FormatError>,
+) -> Result<Vec<T>, FormatError> {
+    let mut items = Vec::new();
+    items
+        .try_reserve_exact(count.min(256))
+        .map_err(|_| FormatError::Entry)?;
+    for _ in 0..count {
+        items.push(next()?);
+    }
+    Ok(items)
 }
 
 /// Bounded little-endian reads; every count is checked against the bytes
@@ -550,91 +571,79 @@ impl<'a> Reader<'a> {
         }
         let input = self.take(input_bytes)?.to_vec();
         let code_bytes = self.u32()? as usize;
-        let relocations = (0..self.count(4)?)
-            .map(|_| self.u32())
-            .collect::<Result<_, _>>()?;
-        let source_map = (0..self.count(6)?)
-            .map(|_| Ok((self.u16()?, self.u32()?)))
-            .collect::<Result<_, _>>()?;
-        let exits = (0..self.count(15)?)
-            .map(|_| {
-                Ok(Exit {
-                    offset: self.u32()?,
-                    target: self.u64()?,
-                    kind: self.u8()?,
-                    skipped: self.u16()?,
-                })
+        let relocations = decode_items(self.count(4)?, || self.u32())?;
+        let source_map = decode_items(self.count(6)?, || Ok((self.u16()?, self.u32()?)))?;
+        let exits = decode_items(self.count(15)?, || {
+            Ok(Exit {
+                offset: self.u32()?,
+                target: self.u64()?,
+                kind: self.u8()?,
+                skipped: self.u16()?,
             })
-            .collect::<Result<_, _>>()?;
-        let recovery = (0..self.count(24)?)
-            .map(|_| {
-                let start = self.u32()? as usize;
-                let end = self.u32()? as usize;
-                let pc = GuestAddress(self.u64()?);
-                let count = self.u16()?;
-                let phase = match self.u8()? {
-                    0 => RetirementPhase::Before,
-                    1 => RetirementPhase::AfterFallthrough,
+        })?;
+        let recovery = decode_items(self.count(24)?, || {
+            let start = self.u32()? as usize;
+            let end = self.u32()? as usize;
+            let pc = GuestAddress(self.u64()?);
+            let count = self.u16()?;
+            let phase = match self.u8()? {
+                0 => RetirementPhase::Before,
+                1 => RetirementPhase::AfterFallthrough,
+                _ => return Err(FormatError::Entry),
+            };
+            let site = RecoverySiteKind::try_from(self.u8()?).map_err(|_| FormatError::Entry)?;
+            let bindings = decode_items(self.count(4)?, || {
+                let guest = self.u8()?;
+                let kind = self.u8()?;
+                let value = self.u16()?;
+                let source = match kind {
+                    0 => RecoverySource::HostRegister(
+                        u8::try_from(value).map_err(|_| FormatError::Entry)?,
+                    ),
+                    1 => RecoverySource::NativeSpill(
+                        SpillOffset::new(value).map_err(|_| FormatError::Entry)?,
+                    ),
                     _ => return Err(FormatError::Entry),
                 };
-                let site =
-                    RecoverySiteKind::try_from(self.u8()?).map_err(|_| FormatError::Entry)?;
-                let bindings = (0..self.count(4)?)
-                    .map(|_| {
-                        let guest = self.u8()?;
-                        let kind = self.u8()?;
-                        let value = self.u16()?;
-                        let source = match kind {
-                            0 => RecoverySource::HostRegister(
-                                u8::try_from(value).map_err(|_| FormatError::Entry)?,
-                            ),
-                            1 => RecoverySource::NativeSpill(
-                                SpillOffset::new(value).map_err(|_| FormatError::Entry)?,
-                            ),
-                            _ => return Err(FormatError::Entry),
-                        };
-                        Ok(RecoveryBinding { guest, source })
-                    })
-                    .collect::<Result<_, _>>()?;
-                // Build a structurally valid source-backed shape using an
-                // entry view below; no raw After constructor is exposed.
-                let before = RetirementPoint::before(pc, count).map_err(|_| FormatError::Entry)?;
-                let retirement = match phase {
-                    RetirementPhase::Before => before,
-                    RetirementPhase::AfterFallthrough => {
-                        use stela_compiler::Lifter as _;
-                        let at = usize::try_from(
-                            pc.0.checked_sub(u64::from(offset))
-                                .ok_or(FormatError::Entry)?,
-                        )
-                        .map_err(|_| FormatError::Entry)?;
-                        if at.checked_add(4).ok_or(FormatError::Entry)? > usize::from(source_bytes)
-                        {
-                            return Err(FormatError::Entry);
-                        }
-                        let word = u32::from_le_bytes(
-                            input
-                                .get(at..at + 4)
-                                .ok_or(FormatError::Entry)?
-                                .try_into()
-                                .map_err(|_| FormatError::Entry)?,
-                        );
-                        let instruction = stela_compiler::aarch64::Decoder
-                            .lift(pc, word)
-                            .map_err(|_| FormatError::Entry)?;
-                        RetirementPoint::from_instruction(&instruction, count, phase)
-                            .map_err(|_| FormatError::Entry)?
+                Ok(RecoveryBinding { guest, source })
+            })?;
+            // Build a structurally valid source-backed shape using an
+            // entry view below; no raw After constructor is exposed.
+            let before = RetirementPoint::before(pc, count).map_err(|_| FormatError::Entry)?;
+            let retirement = match phase {
+                RetirementPhase::Before => before,
+                RetirementPhase::AfterFallthrough => {
+                    use stela_compiler::Lifter as _;
+                    let at = usize::try_from(
+                        pc.0.checked_sub(u64::from(offset))
+                            .ok_or(FormatError::Entry)?,
+                    )
+                    .map_err(|_| FormatError::Entry)?;
+                    if at.checked_add(4).ok_or(FormatError::Entry)? > usize::from(source_bytes) {
+                        return Err(FormatError::Entry);
                     }
-                };
-                Ok(UnqualifiedFaultRecovery {
-                    start,
-                    end,
-                    bindings,
-                    retirement,
-                    site,
-                })
+                    let word = u32::from_le_bytes(
+                        input
+                            .get(at..at + 4)
+                            .ok_or(FormatError::Entry)?
+                            .try_into()
+                            .map_err(|_| FormatError::Entry)?,
+                    );
+                    let instruction = stela_compiler::aarch64::Decoder
+                        .lift(pc, word)
+                        .map_err(|_| FormatError::Entry)?;
+                    RetirementPoint::from_instruction(&instruction, count, phase)
+                        .map_err(|_| FormatError::Entry)?
+                }
+            };
+            Ok(UnqualifiedFaultRecovery {
+                start,
+                end,
+                bindings,
+                retirement,
+                site,
             })
-            .collect::<Result<_, _>>()?;
+        })?;
         let code = self.take(code_bytes)?.to_vec();
         Ok(Entry {
             context,
