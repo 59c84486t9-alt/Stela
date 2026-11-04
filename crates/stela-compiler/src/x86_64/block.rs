@@ -777,12 +777,15 @@ struct Held {
     rax: super::Rax,
     /// The guest vector XMM0 holds whole.
     xmm0: Option<u8>,
+    /// The guest vectors XMM0 and XMM1 hold after an adjacent pair transfer.
+    xmm_pair: Option<[u8; 2]>,
 }
 
 impl Held {
     const NOTHING: Self = Self {
         rax: super::Rax::Unknown,
         xmm0: None,
+        xmm_pair: None,
     };
 }
 
@@ -842,8 +845,8 @@ fn emit_single(
         let xmm0 = split.as_ref().map(|split| split.result);
         out_of_line.take(code, start, split);
         return Held {
-            rax: super::Rax::Unknown,
             xmm0,
+            ..Held::NOTHING
         };
     }
     let capture: fn(&mut Code, bool) = if live_nzcv {
@@ -853,7 +856,7 @@ fn emit_single(
     };
     let start = code.len();
     if let Operation::Simd(operand) = &instruction.operation {
-        super::simd::emit_after(code, operand, target, checks, held.xmm0);
+        super::simd::emit_after(code, operand, target, checks, held.xmm0, held.xmm_pair);
         // A first load of the vector XMM0 holds changes nothing.
         if let Some(vector) = held.xmm0 {
             let load = super::simd::xmm0_load(scratch, vector);
@@ -998,7 +1001,17 @@ fn emit_single(
         operation if !code.constant_time() && preserves_xmm0(operation) => held.xmm0,
         _ => None,
     };
-    Held { rax, xmm0 }
+    let xmm_pair = match &instruction.operation {
+        Operation::Simd(Simd::MemoryPair { vectors, .. }) if !code.constant_time() => {
+            Some(*vectors)
+        }
+        _ => None,
+    };
+    Held {
+        rax,
+        xmm0,
+        xmm_pair,
+    }
 }
 
 /// Where a branch field or its target lies once the block is laid out.

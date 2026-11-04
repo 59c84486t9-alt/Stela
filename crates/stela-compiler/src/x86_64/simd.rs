@@ -379,17 +379,18 @@ pub(super) fn emit_for_target(
     target: crate::TargetCpu,
     checks: MemoryChecks,
 ) {
-    emit_after(code, operand, target, checks, None);
+    emit_after(code, operand, target, checks, None, None);
 }
 
-/// [`emit_for_target`] where XMM0 holds guest vector `xmm0` whole: a
-/// store of it takes it from there.
+/// [`emit_for_target`] with guest vectors already held whole in XMM0, or
+/// in XMM0 and XMM1 for an immediately preceding pair transfer.
 pub(super) fn emit_after(
     code: &mut Code,
     operand: &Operand,
     target: crate::TargetCpu,
     checks: MemoryChecks,
     xmm0: Option<u8>,
+    xmm_pair: Option<[u8; 2]>,
 ) {
     match *operand {
         Operand::Lut(ref operand) => lut::emit(code, operand, target),
@@ -629,10 +630,13 @@ pub(super) fn emit_after(
                 commit(code, vectors[0], 0);
                 commit(code, vectors[1], 1);
             } else {
-                // Read both sources before either RAM write; duplicate source
-                // registers are allowed.
-                read_vector(code, vectors[0], 0);
-                read_vector(code, vectors[1], 1);
+                // A matching pair already holds both sources. A translated
+                // address check can call a helper that clobbers XMM registers,
+                // so read both sources after it on that path.
+                if xmm_pair != Some(vectors) || checks.translated {
+                    read_vector(code, vectors[0], 0);
+                    read_vector(code, vectors[1], 1);
+                }
                 memory::wide_transfer(code, false, bytes, 0, 0);
                 memory::wide_transfer(code, false, bytes, 1, bytes);
             }

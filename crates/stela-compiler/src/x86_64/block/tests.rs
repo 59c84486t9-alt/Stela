@@ -174,6 +174,92 @@ fn ordinary_adjacent_nzcv_uses_native_condition_on_fast_extract_targets() {
 }
 
 #[test]
+fn adjacent_vector_pairs_forward_both_sources_and_keep_each_access() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features, RecoverySiteKind},
+        x86_64::MemoryChecks,
+    };
+
+    // The signed OpenSSL RSA trace reaches LDP Q0,Q1,[X4]; STP Q0,Q1,[X8].
+    let words = [0xad40_0480u32, 0xad00_0500];
+    let pc = GuestAddress(0xe5c6c);
+    let compile = |words: &[u32], pc, profile, checks, target| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let options = Options::new(profile, target).with_memory_checks(checks);
+        CompilationPlan::new(&source, pc, &options)
+            .unwrap()
+            .compile()
+            .unwrap()
+    };
+    let target = TargetCpu::Baseline;
+    let checks = MemoryChecks::DEFAULT;
+    let next = GuestAddress(pc.0 + 4);
+    let reload = [
+        0xf3, 0x0f, 0x6f, 0x87, 0x08, 0x01, 0, 0, 0xf3, 0x0f, 0x6f, 0x8f, 0x18, 0x01, 0, 0,
+    ];
+    let has_reload = |native: &NativeBlock| {
+        native
+            .x86_64_code
+            .windows(reload.len())
+            .any(|bytes| bytes == reload)
+    };
+    for profile in [
+        BlockProfile::ORDINARY,
+        BlockProfile::new(Features::SYSTEM_MODE),
+    ] {
+        let grouped = compile(&words, pc, profile, checks, target);
+        let fallback = compile(
+            &words,
+            pc,
+            profile,
+            checks,
+            target.with_data_independent_timing(),
+        );
+        assert_eq!(grouped.native.source_map, fallback.native.source_map);
+        assert_eq!(grouped.native.source_map.len(), 2);
+        assert_eq!(grouped.native.source_map[1].0, next);
+        assert_eq!(
+            grouped.native.x86_64_code.len() + reload.len(),
+            fallback.native.x86_64_code.len()
+        );
+        assert!(!has_reload(&grouped.native));
+        assert!(has_reload(&fallback.native));
+        assert!(has_reload(
+            &compile(&words[1..], next, profile, checks, target).native
+        ));
+        if profile == BlockProfile::ORDINARY {
+            continue;
+        }
+        let accesses: Vec<_> = grouped
+            .fault_recovery
+            .iter()
+            .filter(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+            .collect();
+        assert_eq!(accesses.len(), 4);
+        for (i, row) in accesses.into_iter().enumerate() {
+            let guest = if i < 2 { pc } else { next };
+            assert_eq!(row.retirement.instruction_pc(), guest);
+            assert_eq!(row.retirement.retired_before() as usize, i / 2);
+            let code = &grouped.native.x86_64_code[row.start..row.end];
+            assert_eq!(&code[..3], &[0xf3, 0x0f, if i < 2 { 0x6f } else { 0x7f }]);
+            assert_eq!(code.len(), 4 + i % 2);
+        }
+        assert!(has_reload(
+            &compile(&words, pc, profile, checks.with_translation(0x1000), target).native
+        ));
+    }
+    let ordinary = BlockProfile::ORDINARY;
+    let different_pair = [words[0] ^ (2 << 10), words[1]];
+    let separated = [words[0], 0xd503_201f, words[1]];
+    for fallback in [&different_pair[..], &separated[..]] {
+        assert!(has_reload(
+            &compile(fallback, pc, ordinary, checks, target).native
+        ));
+    }
+}
+
+#[test]
 fn ordinary_compare_reads_both_settled_load_results() {
     use crate::{
         Options, TargetCpu,
