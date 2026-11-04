@@ -252,7 +252,11 @@ fn emit_selected(
         frame_loop,
     } = regions;
     let mut fault_recovery = vec![];
-    let mut block = super::Emitted::default();
+    let source_rows = instructions.len() + usize::from(terminal.is_some());
+    let mut block = super::Emitted {
+        source_map: Vec::with_capacity(source_rows),
+        ..super::Emitted::default()
+    };
     let code = &mut block.x86_64_code;
     code.set_pinned(pinned);
     if pinned
@@ -630,6 +634,7 @@ fn emit_selected(
     }
     // After the terminal, whose direct exits end the code before them.
     let instructions_run = block.source_map.len();
+    debug_assert_eq!(instructions_run, source_rows);
     for (jump, target, run) in side_exits {
         let mut asm = code.asm();
         asm.bind(jump);
