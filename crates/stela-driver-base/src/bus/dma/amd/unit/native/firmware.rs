@@ -12,6 +12,8 @@ pub(super) struct Admission {
     pub(super) hardware_errors: bool,
     pub(super) policies: Vec<u8>,
     pub(super) coverage: Vec<bool>,
+    /// IDs independently assigned by an IVHD entry, apart from alias targets.
+    pub(super) sources: Vec<bool>,
     /// Each requester whose DMA arrives under another ID, with that ID.
     pub(super) aliases: Vec<(u16, u16)>,
 }
@@ -93,6 +95,12 @@ pub(super) fn admit(
         .try_reserve_exact(REQUESTERS)
         .map_err(|_| Error::Memory(MemoryError::OutOfMemory))?;
     coverage.resize(REQUESTERS, false);
+    let mut sources = Vec::new();
+    sources
+        .try_reserve_exact(REQUESTERS)
+        .map_err(|_| Error::Memory(MemoryError::OutOfMemory))?;
+    sources.resize(REQUESTERS, false);
+    sources[usize::from(rid)] = true;
     let mut aliases = Vec::new();
     let mut start = None;
     // The device-setting flags (INITPass, EIntPass, NMIPass, SysMgt,
@@ -138,6 +146,7 @@ pub(super) fn admit(
         let (first, last, flags) = range;
         for requester in first..=last {
             coverage[usize::from(requester)] = true;
+            sources[usize::from(requester)] = true;
             policies[usize::from(requester)] = flags;
             aliases.retain(|&(source, _)| source != requester);
             if let Some(target) = alias.filter(|target| *target != requester) {
@@ -171,6 +180,7 @@ pub(super) fn admit(
         hardware_errors: features & (1 << 8) != 0,
         policies,
         coverage,
+        sources,
         aliases,
     })
 }
