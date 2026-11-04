@@ -180,6 +180,40 @@ impl CodePin {
             .map(|section| (virtual_base + section.first)..(virtual_base + section.end))
             .collect())
     }
+    /// Writable non-executable payload ranges in the actual relocated image.
+    /// Each item pairs the CPU span with the corresponding original physical
+    /// start. Section padding supplies no storage membership.
+    ///
+    /// # Safety
+    /// Same original immutable-header/root contract as check_callback.
+    #[cfg(feature = "diagnostics")]
+    pub(crate) unsafe fn writable_data_ranges(
+        &self,
+    ) -> Result<alloc::vec::Vec<(core::ops::Range<usize>, u64)>, Error> {
+        let physical = self.image.geometry.physical().start;
+        let base = layout::physical(physical) as *const u8;
+        let virtual_base = self.image.geometry.virtual_range().start as usize;
+        let mut ranges = alloc::vec::Vec::new();
+        pe::visit_sections(
+            self.image.image_bytes,
+            |offset, out| {
+                // SAFETY: parser-bounded header reads in the kept allocation.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(base.add(offset), out.as_mut_ptr(), out.len())
+                };
+            },
+            |section, payload_end| {
+                if section.writable && !section.executable {
+                    ranges.push((
+                        virtual_base + section.first..virtual_base + payload_end,
+                        physical + section.first as u64,
+                    ));
+                }
+            },
+        )
+        .map_err(Error::Header)?;
+        Ok(ranges)
+    }
     /// Return the original physical byte of a callback in executable PE payload.
     ///
     /// # Safety

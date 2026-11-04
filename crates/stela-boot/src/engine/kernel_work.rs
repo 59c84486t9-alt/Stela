@@ -36,6 +36,8 @@ mod firmware;
 mod pages;
 mod pin;
 mod plan;
+#[cfg(feature = "diagnostics")]
+mod task_data;
 pub(crate) use firmware::FirmwareContext;
 use plan::Plan;
 #[cfg(feature = "diagnostics")]

@@ -1,7 +1,7 @@
 //! The mount's native page source over its heap, and the Linux page catalog
 //! bound to it. The source itself is `stela_boot_core::native_memory`.
 use core::ptr::NonNull;
-use stela_boot_core::native_memory::{NativeMemory, PAGE};
+use stela_boot_core::native_memory::{NativeMemory, PAGE, Registration};
 use stela_drivers::bus::dma::memory::{CacheAttribute, MemoryError, PageSource, PinnedPages};
 
 pub(crate) mod cache;
@@ -17,16 +17,39 @@ pub unsafe fn initialize(cpu: usize, physical: u64, bytes: usize, table_offset: 
     unsafe { SOURCE.initialize(cpu, physical, bytes, table_offset) }
 }
 
-/// Keeps one source generation registered while Linux descriptors can refer
-/// to it. Registration does not import ordinary heap bytes as Linux pages.
-pub struct LinuxPages {
-    generation: u64,
+/// Keeps the same boot heap generation registered through every consumer.
+pub(crate) struct HeapPin {
+    registration: Registration,
 }
 
-impl Drop for LinuxPages {
+impl HeapPin {
+    pub(crate) fn registration(&self) -> Registration {
+        self.registration
+    }
+}
+
+impl Drop for HeapPin {
     fn drop(&mut self) {
         SOURCE.release_catalog();
     }
+}
+
+/// Retain the currently registered physical heap and prevent a new generation.
+///
+/// # Safety
+/// Caller owns the original heap/root lifetime and excludes registration
+/// changes until the pin is acquired. Retiring the last pin is process-only.
+pub(crate) unsafe fn pin_heap() -> Result<HeapPin, MemoryError> {
+    let registration = SOURCE.registration();
+    if registration.generation == 0 || registration.bytes == 0 {
+        return Err(MemoryError::Unavailable);
+    }
+    SOURCE.retain_catalog()?;
+    Ok(HeapPin { registration })
+}
+
+pub struct LinuxPages {
+    heap: HeapPin,
 }
 
 // SAFETY: initialize registered the heap and its WB mapping. The catalog
@@ -35,7 +58,7 @@ impl Drop for LinuxPages {
 // flags and contexts are refused before any heap or cache work.
 unsafe impl stela_linux::pages::Provider for LinuxPages {
     fn validate(&self, request: stela_linux::pages::Request) -> Result<(), MemoryError> {
-        if SOURCE.registration().generation != self.generation
+        if SOURCE.registration().generation != self.heap.registration().generation
             || request.atomic
             || !request.basic_ram()
             || !request.may_block()
@@ -76,18 +99,17 @@ pub unsafe fn linux_pages()
 pub(crate) unsafe fn linux_page_source()
 -> Result<(LinuxPages, stela_linux::pages::Reservation), stela_linux::pages::Error> {
     use stela_linux::pages::{Error, Reservation};
-    let registration = SOURCE.registration();
-    if registration.generation == 0 || registration.bytes == 0 {
-        return Err(Error::InvalidReservation);
-    }
+    // SAFETY: the original catalog source owns this heap/root lifetime.
+    let heap = unsafe { pin_heap() }.map_err(|error| match error {
+        MemoryError::Unavailable => Error::InvalidReservation,
+        _ => Error::OutOfMemory,
+    })?;
+    let registration = heap.registration();
     let cpu = NonNull::new(registration.cpu as *mut u8).ok_or(Error::InvalidReservation)?;
     // SAFETY: the registration records this mapping of the heap's RAM.
     let reservation =
         unsafe { Reservation::new(registration.physical, cpu, registration.bytes / PAGE)? };
-    SOURCE.retain_catalog().map_err(|_| Error::OutOfMemory)?;
-    let provider = LinuxPages {
-        generation: registration.generation,
-    };
+    let provider = LinuxPages { heap };
     Ok((provider, reservation))
 }
 
