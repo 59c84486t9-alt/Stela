@@ -243,7 +243,7 @@ fn evaluate<R: ReadAt>(
         }
         None => None,
     };
-    match preboot::system_seal(container, &set.volume_group) {
+    match preboot::system_seal(container, &set.volume_group, evidence.root_hash.as_deref()) {
         Ok(Some(seal)) => {
             evidence.system_seal = Some(hex::encode(&seal.root));
             if let Some((hash, bytes)) = &record

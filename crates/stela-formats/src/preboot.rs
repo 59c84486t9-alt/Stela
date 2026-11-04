@@ -425,9 +425,15 @@ pub fn root_snapshot_name(root_hash: &str) -> String {
     format!("com.apple.os.update-{}", root_hash.to_ascii_uppercase())
 }
 
-/// The seal of the file system the volume group's System volume roots from
-/// (`apfs_root_to_xid`); `None` when it is not sealed.
-pub fn system_seal<R: ReadAt>(container: &mut Container<R>, group: &str) -> Result<Option<Seal>> {
+/// The seal of the file system the volume group's System volume roots from:
+/// the snapshot `root_hash` names, as a sealed live file system cannot be a
+/// root and may have lost its seal since, or else `apfs_root_to_xid`'s. `None`
+/// when that file system is not sealed.
+pub fn system_seal<R: ReadAt>(
+    container: &mut Container<R>,
+    group: &str,
+    root_hash: Option<&str>,
+) -> Result<Option<Seal>> {
     let systems: Vec<Volume> = container
         .volumes()?
         .into_iter()
@@ -436,7 +442,17 @@ pub fn system_seal<R: ReadAt>(container: &mut Container<R>, group: &str) -> Resu
         })
         .collect();
     match &systems[..] {
-        [system] => Ok(system.root_seal(&mut container.device)?),
+        [system] => {
+            let device = &mut container.device;
+            let named = root_hash
+                .map(|hash| system.snapshot_seal(device, &root_snapshot_name(hash)))
+                .transpose()?
+                .flatten();
+            match named {
+                Some(seal) => Ok(Some(seal)),
+                None => Ok(system.root_seal(device)?),
+            }
+        }
         [] => Err(PrebootError::System(format!(
             "volume group {group} has no System volume"
         ))),
@@ -563,7 +579,7 @@ mod tests {
         assert!(local_policies(&mut container, &preboot, &set.volume_group)?.is_empty());
         // The fixture has a Preboot volume only.
         assert!(matches!(
-            system_seal(&mut container, &set.volume_group),
+            system_seal(&mut container, &set.volume_group, None),
             Err(PrebootError::System(_))
         ));
         Ok(())

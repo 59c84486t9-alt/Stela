@@ -380,13 +380,15 @@ impl Volume {
         Ok(Some(Seal { hash, root }))
     }
 
-    /// A volume tree by its `apfs_*_tree_type` and identifier;
-    /// `seal_root` checks the root node against the seal's root hash.
+    /// A volume tree by its `apfs_*_tree_type` and identifier, read under
+    /// `seal` when the seal covers it; `seal_root` checks the root node
+    /// against the seal's root hash.
     fn tree<R: ReadAt>(
         &self,
         device: &mut Device<R>,
         type_field: u32,
         oid: u64,
+        seal: Option<&Seal>,
         seal_root: bool,
     ) -> Result<Tree> {
         let key = TreeKey {
@@ -419,8 +421,7 @@ impl Volume {
                 return Err(ApfsError::Unsupported("ephemeral volume trees"));
             }
         };
-        let seal = self.seal(device)?;
-        let mut tree = Tree::open(device, root, self.xid, headerless, seal.as_ref(), seal_root)?;
+        let mut tree = Tree::open(device, root, self.xid, headerless, seal, seal_root)?;
         if Storage::of(type_field) == Storage::Virtual {
             tree.relative_to(oid);
         }
@@ -432,7 +433,14 @@ impl Volume {
         if self.encrypted {
             return Err(ApfsError::Encrypted);
         }
-        self.tree(device, self.root_tree_type, self.root_tree_oid, true)
+        let seal = self.seal(device)?;
+        self.tree(
+            device,
+            self.root_tree_type,
+            self.root_tree_oid,
+            seal.as_ref(),
+            true,
+        )
     }
 
     /// Visit the records of object `oid` with type `kind`, in order.
@@ -674,7 +682,14 @@ impl Volume {
     fn extents<R: ReadAt>(&self, device: &mut Device<R>, private_id: u64) -> Result<Vec<Extent>> {
         let mut extents = Vec::new();
         if self.sealed && self.fext_tree_oid != 0 {
-            let tree = self.tree(device, self.fext_tree_type, self.fext_tree_oid, false)?;
+            let seal = self.seal(device)?;
+            let tree = self.tree(
+                device,
+                self.fext_tree_type,
+                self.fext_tree_oid,
+                seal.as_ref(),
+                false,
+            )?;
             let compare = |key: &[u8]| -> Result<Ordering> { Ok(u64_at(key, 0)?.cmp(&private_id)) };
             tree.visit(device, Some(&self.omap), &compare, &mut |key, value| {
                 if u64_at(key, 0)? != private_id {
@@ -818,10 +833,13 @@ impl Volume {
         if self.snapshot_tree_oid == 0 {
             return Ok(Vec::new());
         }
+        // A snapshot's seal is its own, so a live volume whose seal broke
+        // since still lists it: the tree of snapshots lies outside any seal.
         let tree = self.tree(
             device,
             self.snapshot_tree_type,
             self.snapshot_tree_oid,
+            None,
             false,
         )?;
         let mut snapshots = Vec::new();
@@ -863,6 +881,20 @@ impl Volume {
                 "no snapshot has the volume's root_to_xid",
             ))?;
         self.snapshot(device, &snapshot)?.seal(device)
+    }
+
+    /// The seal of the snapshot called `name`; `None` when there is no such
+    /// snapshot or it is not sealed.
+    pub fn snapshot_seal<R: ReadAt>(
+        &self,
+        device: &mut Device<R>,
+        name: &str,
+    ) -> Result<Option<Seal>> {
+        let snapshots = self.snapshots(device)?;
+        match snapshots.iter().find(|snapshot| snapshot.name == name) {
+            Some(snapshot) => self.snapshot(device, snapshot)?.seal(device),
+            None => Ok(None),
+        }
     }
 
     /// The volume as it was when `snapshot` was taken. The superblock it
