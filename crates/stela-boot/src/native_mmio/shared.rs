@@ -706,25 +706,25 @@ impl Source {
 }
 
 impl Source {
-    /// Map bus 0's first configuration page, read it, and retire the mapping
+    /// Map the first captured bus's first configuration page, read it, and retire the mapping
     /// after the other host processors started: the retirement's shootdown
     /// generation, which every processor acknowledged.
     ///
     /// # Safety
-    /// The caller owns bus 0's configuration space.
+    /// The caller owns this function's configuration space.
     pub(crate) unsafe fn check_shootdown(&self) -> Result<u64, Error> {
         let windows = stela_runtime::pc::acpi::mcfg(self.platform.wire().mcfg()).map_err(failed)?;
         let window = windows.first().ok_or(Error::Unavailable)?;
         let before = PROCESSORS.requested();
-        // SAFETY: the read in this scope is the mapping's only use.
+        // SAFETY: the caller keeps the original function stable through the
+        // read and its acknowledged mapping withdrawal.
         let identity = unsafe {
-            self.with_config_bus(
-                window.segment,
-                window.start_bus,
-                PAGE as usize,
-                Protection::ReadOnly,
-                |mapping| mapping.read32(0),
-            )
+            self.read_config_identity(stela_drivers::bus::pci::Address {
+                segment: window.segment,
+                bus: window.start_bus,
+                device: 0,
+                function: 0,
+            })
         }?;
         let generation = PROCESSORS.requested();
         if identity == u32::MAX || generation == before || PROCESSORS.alone() {
@@ -890,59 +890,6 @@ impl Source {
         .map_err(failed)?;
         self.ioapics.borrow_mut().push((descriptor, unit.clone()));
         Ok(unit)
-    }
-    /// Stop PCI INTx contributors before SCI acquires its shared legacy line.
-    /// No bus-master or device-reset state is changed.
-    ///
-    /// # Safety
-    /// Before native probing/AP startup, this boot owns every captured ECAM
-    /// function and the firmware has stopped submitting interrupt work.
-    pub(crate) unsafe fn mask_pci_intx(&self) -> Result<(), Error> {
-        let windows = stela_runtime::pc::acpi::mcfg(self.platform.wire().mcfg()).map_err(failed)?;
-        for window in windows {
-            for bus in window.start_bus..=window.end_bus {
-                // SAFETY: caller owns all captured functions and no pointer
-                // from this bounded loop survives the transient mapping.
-                unsafe {
-                    self.with_config_bus(
-                        window.segment,
-                        bus,
-                        1 << 20,
-                        Protection::ReadWrite,
-                        |mapping| {
-                            for device in 0..32usize {
-                                let first = device << 15;
-                                if mapping.read32(first)? & 0xffff == 0xffff {
-                                    continue;
-                                }
-                                let functions = if mapping.read32(first + 12)? & (0x80 << 16) != 0 {
-                                    8
-                                } else {
-                                    1
-                                };
-                                for function in 0..functions {
-                                    let offset = first | function << 12;
-                                    if mapping.read32(offset)? & 0xffff == 0xffff {
-                                        continue;
-                                    }
-                                    let command =
-                                        mapping.address(offset + 4, 2)?.as_ptr().cast::<u16>();
-                                    // SAFETY: the owned UC command register is aligned,
-                                    // and the16-bit access avoids W1C status bits at+6.
-                                    command.write_volatile(command.read_volatile() | (1 << 10));
-                                    // SAFETY: same command register readback.
-                                    if command.read_volatile() & (1 << 10) == 0 {
-                                        return Err(Error::InvalidPlatformReply);
-                                    }
-                                }
-                            }
-                            Ok(())
-                        },
-                    )?;
-                }
-            }
-        }
-        Ok(())
     }
     pub(crate) fn routing(&self) -> Result<crate::native_irq::madt::Routing, Error> {
         crate::native_irq::madt::Routing::parse(
