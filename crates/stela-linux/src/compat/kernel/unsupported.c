@@ -8,7 +8,6 @@
 #include <linux/rcupdate.h>
 #include <linux/seq_file.h>
 #include <linux/swap.h>
-#include <linux/workqueue.h>
 #include <stela/linux.h>
 #include <unsupported.h>
 
@@ -32,7 +31,3 @@ STELA_UNSUPPORTED(ssize_t, seq_read, struct file *, char __user *, size_t, loff_
 STELA_UNSUPPORTED(loff_t, seq_lseek, struct file *, loff_t, int)
 /* Platform devices, of which only HDMI audio codecs reach DRM. */
 STELA_UNSUPPORTED(void, platform_device_unregister, struct platform_device *)
-
-/* Workqueues that run their work in softirq context. */
-STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_bh_wq);
-STELA_UNSUPPORTED_OBJECT(struct workqueue_struct *, system_bh_highpri_wq);
