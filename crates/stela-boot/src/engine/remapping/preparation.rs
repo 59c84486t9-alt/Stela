@@ -10,6 +10,20 @@ struct VtdRoot {
     _lines: native_mmio::InitialPciLines,
 }
 
+enum BridgeRoot {
+    Intel(BlockedRequester<MmioRegisters>),
+    Amd(amd::ColdRoot),
+}
+
+impl BridgeRoot {
+    fn check(&self) -> Result<(), DmaError> {
+        match self {
+            Self::Intel(blocked) => blocked.check(),
+            Self::Amd(blocked) => blocked.check(),
+        }
+    }
+}
+
 // SAFETY: constructed only from the requester's selected original taken unit,
 // under the mount's frozen routing epoch. The unit keeps its mapped registers,
 // initial DMA backing and uncertain table resources. Engine/IRQ/work stop is
@@ -100,6 +114,54 @@ unsafe impl stela_drivers::bus::pci::requester::preparation::AttachmentBackend f
 }
 
 impl Remappers {
+    /// # Safety
+    /// The original AMD units and the parked PCI fabric exclude all other
+    /// configuration and topology writers. No ports have resumed forwarding.
+    pub(super) unsafe fn recheck_amd_stopped(
+        &self,
+        pci: &native_mmio::ContainedPci<'_>,
+    ) -> Result<(), native_mmio::ContainmentError> {
+        // SAFETY: kept unit configuration reads match the original addresses
+        // and the caller keeps the rest of the stopped fabric exclusive.
+        unsafe {
+            pci.recheck_stopped_scoped(|address, offset, width| {
+                self.amd
+                    .iter()
+                    .find_map(|unit| unit.read_original_config(address, offset, width))
+            })
+        }
+    }
+
+    fn initial_bridge(
+        &self,
+        source: &native_mmio::Source,
+        address: Address,
+        lines: &native_mmio::InitialPciLines,
+        amd: bool,
+    ) -> Result<BridgeRoot, DmaError> {
+        let rid = requester(address);
+        if amd {
+            let taken = self
+                .amd(address.segment, rid)
+                .map_err(|_| DmaError::IommuUnavailable)?
+                .ok_or(DmaError::IommuUnavailable)?;
+            return taken
+                .preparation(address, lines.clone())
+                .map(BridgeRoot::Amd);
+        }
+        let taken = self
+            .vtd(address.segment, rid)
+            .map_err(|_| DmaError::IommuUnavailable)?
+            .ok_or(DmaError::IommuUnavailable)?;
+        let blocked = self
+            .initial_requester(source, taken, rid)?
+            .ok_or(DmaError::DrainUnavailable)?;
+        if blocked.requester() != rid {
+            return Err(DmaError::IommuUnavailable);
+        }
+        Ok(BridgeRoot::Intel(blocked))
+    }
+
     pub(in crate::engine) fn forward_pci_bridges(&self, pci: &native_mmio::ContainedPci<'_>) {
         let Some(lines) = &self.initial_lines else {
             return;
@@ -115,25 +177,26 @@ impl Remappers {
                 return;
             }
         };
+        let amd = self
+            .amd_fabric
+            .is_some_and(|original| core::ptr::eq(original, source));
         // SAFETY: this startup step precedes every driver and competing PCI
         // writer. The same complete blocked remappers and line owners are kept.
-        if let Err(error) = unsafe { pci.recheck_stopped() } {
+        let stopped = unsafe {
+            if amd {
+                self.recheck_amd_stopped(pci)
+            } else {
+                pci.recheck_stopped()
+            }
+        };
+        if let Err(error) = stopped {
             output::arguments(format_args!(
                 "HOST PCI bridge forwarding withheld: {error}\n"
             ));
             return;
         }
         for address in bridges {
-            let rid = requester(address);
-            let blocked = self
-                .vtd(address.segment, rid)
-                .map_err(|_| DmaError::IommuUnavailable)
-                .and_then(|taken| {
-                    let taken = taken.ok_or(DmaError::IommuUnavailable)?;
-                    self.initial_requester(source, taken, rid)?
-                        .ok_or(DmaError::DrainUnavailable)
-                });
-            let blocked = match blocked {
+            let blocked = match self.initial_bridge(source, address, lines, amd) {
                 Ok(blocked) => blocked,
                 Err(error) => {
                     output::arguments(format_args!(
@@ -145,7 +208,7 @@ impl Remappers {
             // SAFETY: exact firmware-selected blocked RID, the original kept
             // line paths, checked stopped leaves and frozen topology. Other
             // reopened ports retain their own original blocked contexts.
-            match unsafe { source.forward_cold_bridge(address, blocked, lines) } {
+            match unsafe { source.forward_cold_bridge(address, lines, move || blocked.check()) } {
                 Ok(()) => output::arguments(format_args!(
                     "HOST PCI bridge {address} forwarding restored with routing sealed\n"
                 )),

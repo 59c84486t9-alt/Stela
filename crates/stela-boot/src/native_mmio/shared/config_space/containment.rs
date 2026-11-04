@@ -1,9 +1,9 @@
 //! Retain the original PCI fabric after disabling each captured function.
 use super::*;
-use crate::native_dma::vtd::{BlockedRequester, MmioRegisters};
 use alloc::rc::Rc;
 use core::{any::Any, cell::RefCell, cmp::Reverse, fmt};
 use stela_boot_core::ecam::topology;
+use stela_drivers::bus::dma::mapping::DmaError;
 use stela_drivers::{
     bus::pci::{
         ConfigEffect, ConfigError, ConfigFailure,
@@ -311,12 +311,12 @@ impl Slot {
 enum Forwarding {
     Open {
         config: OwnedConfig,
-        blocked: BlockedRequester<MmioRegisters>,
+        blocked: Box<dyn Fn() -> Result<(), DmaError>>,
         command: u16,
     },
     Refused {
         _original: ConfigParts<DriverGrant>,
-        _blocked: BlockedRequester<MmioRegisters>,
+        _blocked: Box<dyn Fn() -> Result<(), DmaError>>,
     },
 }
 
@@ -330,7 +330,7 @@ impl Forwarding {
         else {
             return Err(Error::Unavailable.into());
         };
-        blocked.check().map_err(|_| Error::Unavailable)?;
+        blocked().map_err(|_| Error::Unavailable)?;
         check_command(config, *command, ConfigEffect::None)?;
         Ok(())
     }
@@ -742,7 +742,7 @@ impl Source {
         &self,
         address: Address,
         lines: &InitialPciLines,
-        check_blocked: impl Fn() -> Result<(), stela_drivers::bus::dma::mapping::DmaError>,
+        check_blocked: impl Fn() -> Result<(), DmaError>,
     ) -> Result<OwnedConfig, ContainmentError> {
         // SAFETY: same original exclusive, blocked requester and line paths.
         unsafe { self.promote_parked(address, lines, check_blocked, false) }
@@ -754,22 +754,18 @@ impl Source {
     /// # Safety
     /// Same proof as promote_cold_config, plus the complete original cohort
     /// was rechecked before any forwarding and all leaf owners remain parked
-    /// with their master seals and new DMA roots blocked.
+    /// with their master seals and new DMA roots blocked. The checker owns
+    /// this port's original blocked context for as long as the port is kept.
     pub(crate) unsafe fn forward_cold_bridge(
         &self,
         address: Address,
-        blocked: BlockedRequester<MmioRegisters>,
         lines: &InitialPciLines,
+        check_blocked: impl Fn() -> Result<(), DmaError> + 'static,
     ) -> Result<(), ContainmentError> {
-        let rid = u16::from(address.bus) << 8
-            | u16::from(address.device) << 3
-            | u16::from(address.function);
-        if blocked.requester() != rid {
-            return Err(ContainmentError::from(Error::OutsideResource).at(address));
-        }
+        let blocked: Box<dyn Fn() -> Result<(), DmaError>> = Box::new(check_blocked);
         // SAFETY: the caller keeps the original stopped descendant cohort,
         // and this selects only the original Type1 port for the exact RID.
-        let mut config = unsafe { self.promote_parked(address, lines, || blocked.check(), true) }?;
+        let mut config = unsafe { self.promote_parked(address, lines, &blocked, true) }?;
         let result = (|| {
             let command = config.try_read16(COMMAND)? | COMMAND_MASTER;
             // SAFETY: the whole original fabric is drained and held, with
@@ -827,7 +823,7 @@ impl Source {
         &self,
         address: Address,
         lines: &InitialPciLines,
-        check_blocked: impl Fn() -> Result<(), stela_drivers::bus::dma::mapping::DmaError>,
+        check_blocked: impl Fn() -> Result<(), DmaError>,
         bridge: bool,
     ) -> Result<OwnedConfig, ContainmentError> {
         let check_paths = || {
