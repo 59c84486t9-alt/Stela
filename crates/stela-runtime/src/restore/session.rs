@@ -685,9 +685,7 @@ impl Job {
                 };
                 let n = (segment.len() - self.offset).min(FILE_CHUNK as u64) as usize;
                 let bytes = match segment {
-                    Segment::Bytes(bytes) => {
-                        bytes[self.offset as usize..self.offset as usize + n].to_vec()
-                    }
+                    Segment::Bytes(bytes) => &bytes[self.offset as usize..self.offset as usize + n],
                     Segment::Member {
                         path,
                         offset,
@@ -704,15 +702,13 @@ impl Job {
                         self.window
                             .get(self.index, at, n)
                             .ok_or(Error::Invalid("short restore member read"))?
-                            .to_vec()
                     }
                 };
                 self.offset += n as u64;
                 if raw {
-                    self.raw.queue(bytes, FILE_CHUNK)?;
+                    self.raw.queue(bytes.to_vec(), FILE_CHUNK)?;
                 } else {
-                    self.frame
-                        .queue(&Value::dict([("FileData", Value::Data(bytes))]), true)?;
+                    self.frame.queue_file_data(bytes)?;
                 }
             }
         }
