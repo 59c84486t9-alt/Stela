@@ -1,4 +1,6 @@
-//! The software TLB of the translated variant
+//! Software TLBs for translated accesses and device translations.
+//!
+//! The translated variant
 //! (`docs/design/system.md#host-placement`): blocks that access guest
 //! addresses outside the host's native ranges ([`super::placement`]) call a
 //! host helper for each such access, which looks the page up here and
@@ -13,6 +15,11 @@
 //! contiguously, runs there; across discontiguous pages the helper maps
 //! both into its bounce slot, so the returned address is always valid for
 //! the whole access and writes reach the guest's own frames.
+//!
+//! A separate cache records successful translations outside RAM. Its hits
+//! avoid another walk, while the engine still performs each device access.
+
+use super::{Requester, Translation, attributes};
 
 /// The page an entry maps.
 pub const PAGE: u64 = 1 << 12;
@@ -51,12 +58,14 @@ pub enum Lookup {
 #[derive(Debug, Clone)]
 pub struct Tlb {
     entries: [Entry; ENTRIES],
+    devices: DevicePages,
 }
 
 impl Default for Tlb {
     fn default() -> Self {
         Self {
             entries: [Entry::default(); ENTRIES],
+            devices: DevicePages::default(),
         }
     }
 }
@@ -111,7 +120,72 @@ impl Tlb {
     /// Forget every entry.
     pub fn clear(&mut self) {
         self.entries = [Entry::default(); ENTRIES];
+        self.clear_devices();
     }
+
+    /// Drop device translations without changing cached RAM translations.
+    pub fn clear_devices(&mut self) {
+        self.devices.valid = 0;
+    }
+
+    /// A positive device translation, for a requester and access it permits.
+    /// Every access still runs through the engine's device path.
+    pub fn device_physical(&self, address: u64, requester: Requester, write: bool) -> Option<u64> {
+        let (slot, tag) = device_tag(address, requester);
+        if self.devices.valid & (1 << slot) == 0 {
+            return None;
+        }
+        let (recorded, physical) = self.devices.entries[slot];
+        let access = if write { DEVICE_WRITE } else { DEVICE_READ };
+        (recorded == tag && physical & access != 0)
+            .then_some((physical & !(PAGE - 1)) | (address & (PAGE - 1)))
+    }
+
+    /// Record a translated page outside RAM.
+    /// The caller still checks watchpoints. Leave Tagged memory to the walk.
+    pub fn record_device(&mut self, address: u64, requester: Requester, translation: Translation) {
+        if translation.attributes == attributes::TAGGED {
+            return;
+        }
+        debug_assert_eq!(translation.physical % PAGE, address % PAGE);
+        let (slot, tag) = device_tag(address, requester);
+        let rights = u64::from(translation.readable) | (u64::from(translation.writable) << 1);
+        let physical = (translation.physical & !(PAGE - 1)) | rights;
+        self.devices.entries[slot] = (tag, physical);
+        self.devices.valid |= 1 << slot;
+    }
+}
+
+const DEVICE_ENTRIES: usize = 64;
+const DEVICE_READ: u64 = 1;
+const DEVICE_WRITE: u64 = 2;
+
+#[derive(Debug, Clone)]
+struct DevicePages {
+    /// Full virtual tag, physical page with data permissions in its low bits.
+    entries: [(u64, u64); DEVICE_ENTRIES],
+    valid: u64,
+}
+
+impl Default for DevicePages {
+    fn default() -> Self {
+        Self {
+            entries: [(0, 0); DEVICE_ENTRIES],
+            valid: 0,
+        }
+    }
+}
+
+fn device_tag(address: u64, requester: Requester) -> (usize, u64) {
+    let page = address / PAGE;
+    let requester = u64::from(requester.el)
+        | (u64::from(requester.pan) << 8)
+        | (u64::from(requester.unprivileged) << 9)
+        | (u64::from(requester.guarded) << 10);
+    // Registers in separate apertures can start at the same page offset.
+    let slot = ((page ^ (page >> 6) ^ requester ^ (requester >> 6)) as usize) % DEVICE_ENTRIES;
+    let tag = (address & !(PAGE - 1)) | requester;
+    (slot, tag)
 }
 
 #[cfg(test)]
@@ -120,6 +194,96 @@ mod tests {
 
     const VA: u64 = 0xffff_8000_1234_5000;
     const HOST: u64 = 0x7000_0000;
+    const KERNEL: Requester = Requester {
+        el: 1,
+        pan: false,
+        unprivileged: false,
+        guarded: false,
+    };
+
+    fn device(physical: u64, readable: bool, writable: bool) -> Translation {
+        Translation {
+            physical,
+            memory: super::super::MemoryType::Device,
+            attributes: 0x04,
+            shareability: 0b10,
+            readable,
+            writable,
+            executable: false,
+            pan_sensitive: false,
+            guarded: false,
+            global: true,
+            asid: 0,
+            size: PAGE,
+            alignment: super::super::Alignment { device: true },
+        }
+    }
+
+    #[test]
+    fn device_page_hits_require_matching_requester_and_access_permissions() {
+        let mut tlb = Tlb::default();
+        tlb.record_device(VA + 4, KERNEL, device(4, true, false));
+        assert_eq!(tlb.device_physical(VA + 12, KERNEL, false), Some(12));
+        assert_eq!(tlb.device_physical(VA + 12, KERNEL, true), None);
+        for requester in [
+            Requester { el: 2, ..KERNEL },
+            Requester {
+                pan: true,
+                ..KERNEL
+            },
+            Requester {
+                unprivileged: true,
+                ..KERNEL
+            },
+            Requester {
+                guarded: true,
+                ..KERNEL
+            },
+        ] {
+            assert_eq!(tlb.device_physical(VA, requester, false), None);
+        }
+        let with_pan = Requester {
+            pan: true,
+            ..KERNEL
+        };
+        tlb.record_device(VA, with_pan, device(HOST, true, true));
+        assert_eq!(tlb.device_physical(VA, with_pan, true), Some(HOST));
+        assert_eq!(tlb.device_physical(VA, KERNEL, false), Some(0));
+        tlb.record_device(VA, KERNEL, device(HOST, false, true));
+        assert_eq!(tlb.device_physical(VA + 12, KERNEL, true), Some(HOST + 12));
+        assert_eq!(tlb.device_physical(VA + 12, KERNEL, false), None);
+        assert_eq!(tlb.lookup(VA, 1, true, 1), Lookup::Miss { address: VA });
+        tlb.clear();
+        assert_eq!(tlb.device_physical(VA, KERNEL, true), None);
+    }
+
+    #[test]
+    fn clearing_devices_preserves_ram_entries() {
+        let mut tlb = Tlb::default();
+        let ram = VA + PAGE;
+        tlb.fill(ram, HOST, true, 1);
+        tlb.record_device(VA, KERNEL, device(HOST + PAGE, true, true));
+        tlb.clear_devices();
+        assert_eq!(tlb.device_physical(VA, KERNEL, false), None);
+        assert_eq!(tlb.lookup(ram, 1, true, 1), Lookup::Direct(HOST));
+    }
+
+    #[test]
+    fn device_cache_refuses_tagged_memory_and_requires_the_full_virtual_page() {
+        let mut tlb = Tlb::default();
+        let tagged = Translation {
+            attributes: attributes::TAGGED,
+            ..device(HOST, true, true)
+        };
+        tlb.record_device(VA, KERNEL, tagged);
+        assert_eq!(tlb.device_physical(VA, KERNEL, false), None);
+
+        let alias = VA ^ (PAGE << 12);
+        tlb.record_device(VA, KERNEL, device(HOST, true, true));
+        tlb.record_device(alias, KERNEL, device(HOST + PAGE, true, true));
+        assert_eq!(tlb.device_physical(VA, KERNEL, false), None);
+        assert_eq!(tlb.device_physical(alias, KERNEL, false), Some(HOST + PAGE));
+    }
 
     #[test]
     fn an_access_within_a_filled_page_runs_at_its_host_address() {

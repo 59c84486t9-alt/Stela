@@ -869,6 +869,8 @@ impl State {
 
     fn reset_shadow(&mut self, cause: Cause) {
         if !self.legacy_translations_dirty {
+            // Device translations can exist without any populated RAM view.
+            self.tlb.clear_devices();
             return;
         }
         self.clear(LOWER);

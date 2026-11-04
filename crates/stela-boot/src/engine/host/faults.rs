@@ -154,12 +154,22 @@ pub(super) fn resolve(
     write: bool,
     unprivileged: bool,
 ) -> Result<(mmu::Translation, u64), FaultCause> {
-    let regime = state.regime.ok_or(FaultCause::NonCanonical)?;
+    let regime = state.regime.as_ref().ok_or(FaultCause::NonCanonical)?;
     let access = if write { Access::Write } else { Access::Read };
     let requester = mmu::Requester {
         unprivileged: regime.requester.unprivileged || unprivileged,
         ..regime.requester
     };
+    let virtual_page = address & !(PAGE - 1);
+    if let Some(physical) = state.tlb.device_physical(address, requester, write) {
+        // The cached translation already passed both stages and data
+        // permissions. Watchpoint passes can change without a new walk.
+        return Err(if regime.watch.blocks(virtual_page) {
+            FaultCause::Watched
+        } else {
+            FaultCause::Device { physical }
+        });
+    }
     let translation = match mmu::translate(
         &regime.controls,
         address,
@@ -171,16 +181,20 @@ pub(super) fn resolve(
         Outcome::Fault(fault) => return Err(FaultCause::Guest(fault)),
         Outcome::Unsupported(unsupported) => return Err(FaultCause::Translation(unsupported)),
     };
-    if regime.watch.blocks(address & !(PAGE - 1)) {
+    if regime.watch.blocks(virtual_page) {
         return Err(FaultCause::Watched);
     }
     if regime.tag_blocks(address, translation.attributes) {
         return Err(FaultCause::TagChecked);
     }
     let page = translation.physical & !(PAGE - 1);
-    let host = state.host_physical(page).ok_or(FaultCause::Device {
-        physical: translation.physical,
-    })?;
+    let Some(host) = state.host_physical(page) else {
+        // This walker makes no AF or dirty descriptor updates.
+        state.tlb.record_device(address, requester, translation);
+        return Err(FaultCause::Device {
+            physical: translation.physical,
+        });
+    };
     Ok((translation, host))
 }
 
@@ -200,7 +214,7 @@ pub(crate) fn page_fault(
         super::super::interrupts::fatal(frame);
     }
     state.follow_pan(frame.rflags & RFLAGS_AC == 0);
-    let Some(regime) = state.regime else {
+    let Some(tag_checks) = state.regime.as_ref().map(|regime| regime.tag_checks) else {
         super::super::interrupts::fatal(frame);
     };
     // Only the native ranges are shadow; the rest is the engine's. An
@@ -279,7 +293,7 @@ pub(crate) fn page_fault(
     // map its RAM pages that are not watched now, as a TLB entry covers
     // the whole leaf. Pages that were absent need no flush. A Tagged leaf
     // whose tags are checked maps only the passed page.
-    if regime.tag_checks[half] && translation.attributes == mmu::attributes::TAGGED {
+    if tag_checks[half] && translation.attributes == mmu::attributes::TAGGED {
         state.fills += 1;
         return;
     }
@@ -294,9 +308,10 @@ pub(crate) fn page_fault(
         // fall back to page lookups past the end of that physical run.
         let (first_host, available) = state.run(physical).unwrap_or((0, 0));
         let table = slot.wrapping_sub(tables::index(virtual_page, 0));
+        let watch = &state.regime.as_ref().expect("checked above").watch;
         let mut page = first;
         loop {
-            if page != virtual_page && !regime.watch.blocks(page) {
+            if page != virtual_page && !watch.blocks(page) {
                 let offset = page - first;
                 let host = if offset < available {
                     first_host.checked_add(offset)
