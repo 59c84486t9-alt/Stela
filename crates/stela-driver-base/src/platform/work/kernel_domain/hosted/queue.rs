@@ -13,8 +13,8 @@ use core::{
 /// A ticket from this hosted queue. It has no native ticket conversion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostedTicket {
-    queue: u64,
-    sequence: u64,
+    pub(super) queue: u64,
+    pub(super) sequence: u64,
 }
 
 /// The original host execution/code/storage owner remains kept until explicit

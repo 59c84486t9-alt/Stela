@@ -18,6 +18,8 @@ use core::{
 
 mod binding;
 pub use binding::{HostedSwitchBinding, HostedWake};
+mod child;
+pub use child::{HostedChild, HostedChildReservation};
 mod service;
 pub use service::HostedServiceCallback;
 use service::Service;
@@ -52,6 +54,7 @@ pub struct HostedRuntime<const N: usize> {
     tasks: UnsafeCell<Vec<Task>>,
     count: usize,
     service: Option<Service>,
+    initial_controls: context::Controls,
     dispatcher: UnsafeCell<context::Frame>,
     current: Cell<usize>,
     cursor: Cell<usize>,
@@ -240,6 +243,7 @@ impl<const N: usize> HostedExecutor<N> {
             tasks: UnsafeCell::new(tasks),
             count,
             service,
+            initial_controls: controls,
             dispatcher: UnsafeCell::new(context::Frame::new(controls)),
             current: Cell::new(NONE),
             cursor: Cell::new(0),
@@ -432,6 +436,7 @@ impl<const N: usize> HostedRuntime<N> {
             active: ptr::null(),
             epoch,
         });
+        self.observe_child_return(index);
         Ok(true)
     }
 
@@ -443,6 +448,12 @@ impl<const N: usize> HostedRuntime<N> {
             let index = (self.cursor.get() + offset) % self.count;
             // SAFETY: the original dispatcher has stopped every continuation.
             let task = unsafe { &mut *self.task(index) };
+            if matches!(
+                task.state,
+                TaskState::Reserved | TaskState::Dormant | TaskState::Retained
+            ) {
+                continue;
+            }
             if task.state == TaskState::Idle {
                 let Some(job) = state.select_job(task.lane, task.stack.geometry, false)? else {
                     continue;
@@ -529,6 +540,35 @@ impl<const N: usize> HostedRuntime<N> {
         };
     }
 
+    fn finish_current(&self, index: usize, nonreturning: bool) {
+        // SAFETY: only the original running task can finish its own slot.
+        let task = unsafe { &mut *self.task(index) };
+        let (slot, job) = task.job.unwrap_or_else(|| std::process::abort());
+        let mut guard = require(self.queue.lock());
+        let state = guard.state();
+        let child = task.stack_pin_nonce != 0;
+        if state.scheduling.enabled {
+            let now = require(self.thread_cpu_ns());
+            require(state.scheduling.account(now));
+            if child {
+                require(state.scheduling.remove_terminal(task.id, job.sequence));
+            } else {
+                require(state.scheduling.remove(task.id, job.sequence));
+            }
+        }
+        task.signal.sequence.store(0, Ordering::Release);
+        require(state.finish_job(slot, job.sequence, None));
+        task.completed_sequence = job.sequence;
+        task.job = None;
+        task.state = if nonreturning {
+            TaskState::Terminating
+        } else if child {
+            TaskState::Retained
+        } else {
+            TaskState::Idle
+        };
+    }
+
     /// Stop dispatch after the caller closes the queue and drains callbacks.
     pub fn retire(self: Pin<&Self>) -> Result<(), WorkError> {
         self.queue.execution.check_current()?;
@@ -538,7 +578,8 @@ impl<const N: usize> HostedRuntime<N> {
         self.dispatcher_successor()?;
         for index in 0..self.count {
             // SAFETY: all task stacks are stopped on the original dispatcher.
-            if unsafe { (*self.task(index)).binding.is_some() } {
+            let task = unsafe { &*self.task(index) };
+            if task.state != TaskState::Idle || task.binding.is_some() {
                 return Err(WorkError::Busy);
             }
         }
@@ -575,22 +616,7 @@ unsafe extern "sysv64" fn entry<const N: usize>(address: usize, index: usize) ->
         // SAFETY: queue admission retains the original callback/context graph.
         unsafe { (job.1.callback)(job.1.context as *mut c_void) };
         runtime.complete_binding(index);
-        {
-            // SAFETY: only the original running task can complete this slot.
-            let task = unsafe { &mut *runtime.task(index) };
-            let mut guard = require(runtime.queue.lock());
-            let state = guard.state();
-            if state.scheduling.enabled {
-                let now = require(runtime.thread_cpu_ns());
-                require(state.scheduling.account(now));
-                require(state.scheduling.remove(task.id, job.1.sequence));
-            }
-            task.signal.sequence.store(0, Ordering::Release);
-            require(state.finish_job(job.0, job.1.sequence, None));
-            task.completed_sequence = job.1.sequence;
-            task.job = None;
-            task.state = TaskState::Idle;
-        }
+        runtime.finish_current(index, false);
         runtime.depart(index);
     }
 }

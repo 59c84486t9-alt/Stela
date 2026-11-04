@@ -74,5 +74,6 @@ mod tests;
 mod runtime;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub use runtime::{
-    HostedExecutor, HostedRuntime, HostedServiceCallback, HostedSwitchBinding, HostedWake,
+    HostedChild, HostedChildReservation, HostedExecutor, HostedRuntime, HostedServiceCallback,
+    HostedSwitchBinding, HostedWake,
 };

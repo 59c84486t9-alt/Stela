@@ -30,6 +30,18 @@ pub unsafe trait HostedSwitchBinding {
     /// Actual finishing stack after the foreign scope exited.
     unsafe fn complete(&self, context: &TaskContext) -> Result<(), WorkError>;
     /// # Safety
+    /// Exact owned child stack at the original nonreturning source exit.
+    /// Consume its live scope without abandoning any independently owned loan.
+    unsafe fn terminal_prepare(&self, _context: &TaskContext) -> Result<(), WorkError> {
+        Err(WorkError::Unavailable)
+    }
+    /// # Safety
+    /// The original dispatcher has physically returned from the exact
+    /// terminal child. Record only this bounded source transition.
+    unsafe fn terminal_successor(&self, _context: &TaskContext) -> Result<(), WorkError> {
+        Err(WorkError::Unavailable)
+    }
+    /// # Safety
     /// Actual taskless dispatcher, with this stack idle and source users joined.
     unsafe fn detach(&self, context: &TaskContext) -> Result<(), WorkError>;
 }
@@ -160,7 +172,7 @@ impl<const N: usize> HostedRuntime<N> {
             if !Arc::ptr_eq(&task.signal, &wake.signal) {
                 continue;
             }
-            if task.state != TaskState::Idle {
+            if !matches!(task.state, TaskState::Idle | TaskState::Retained) {
                 return Err(WorkError::Busy);
             }
             if task.completed_sequence != wake.sequence {
