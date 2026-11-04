@@ -289,6 +289,9 @@ impl<R: ReadAt, H: Copy + Eq> Driver<R, H> {
             }
             self.session.finish_job(t.job.id, Ok(()))?;
             self.jobs.remove(at);
+            if self.jobs.is_empty() {
+                self.answers.store.release_cursors();
+            }
         }
         Poll::Pending
     }

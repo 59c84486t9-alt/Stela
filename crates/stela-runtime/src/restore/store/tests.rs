@@ -361,3 +361,65 @@ fn corrupt_inventory_fails_before_any_bytes_are_returned() {
     assert!(s.read_at("os.dmg", 0, 1).is_err());
     assert!(s.verified.is_empty());
 }
+
+#[test]
+fn interleaved_deflated_members_resume_without_replaying_prefixes() {
+    struct Counting {
+        source: Memory,
+        bytes: usize,
+    }
+    impl ReadAt for Counting {
+        type Error = &'static str;
+
+        fn len(&self) -> u64 {
+            self.source.len()
+        }
+
+        fn read_at(
+            &mut self,
+            offset: u64,
+            buffer: &mut [u8],
+        ) -> core::result::Result<(), Self::Error> {
+            self.bytes += buffer.len();
+            self.source.read_at(offset, buffer)
+        }
+    }
+
+    let contents = |mut state: u32| -> Vec<u8> {
+        (0..8 * BLOCK_BYTES)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect()
+    };
+    let data = contents(0x5a);
+    let other = contents(0x61);
+    let (source, manifest) = parts(&data, true, &[("Extra", "extra.dmg", &other)], &[], ERASE);
+    let mut store = Store::open(Counting { source, bytes: 0 }, manifest, 0).unwrap();
+    store.prepare().unwrap();
+    let mut read_both = |discard_cursors| {
+        store.reader.bytes = 0;
+        for offset in (0..data.len()).step_by(BLOCK_BYTES) {
+            for (path, expected) in [("os.dmg", &data), ("extra.dmg", &other)] {
+                if discard_cursors {
+                    store.cursors.0.clear();
+                }
+                assert_eq!(
+                    store.read_at(path, offset as u64, BLOCK_BYTES).unwrap(),
+                    expected[offset..offset + BLOCK_BYTES]
+                );
+            }
+        }
+        store.reader.bytes
+    };
+
+    let resumed = read_both(false);
+    let replayed = read_both(true);
+    assert!(
+        replayed >= 4 * resumed,
+        "resumed {resumed}, replayed {replayed}"
+    );
+}

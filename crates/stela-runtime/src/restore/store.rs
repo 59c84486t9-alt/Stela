@@ -23,7 +23,7 @@ use super::{
     plist::{self, Limits, Value},
 };
 use alloc::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     string::{String, ToString},
     vec::Vec,
 };
@@ -31,9 +31,11 @@ use sha2::{Digest, Sha384};
 use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use {
-    stela_formats::payload::MemberRead, stela_formats::payload::PayloadManifest,
-    stela_formats::payload::Purpose, stela_formats::payload::ReadAt,
-    stela_formats::payload::zip::Archive, stela_formats::payload::zip::Entry,
+    stela_formats::payload::MemberRead,
+    stela_formats::payload::PayloadManifest,
+    stela_formats::payload::Purpose,
+    stela_formats::payload::ReadAt,
+    stela_formats::payload::zip::{Archive, Entry, Progress},
 };
 
 pub const BLOCK_BYTES: usize = stela_formats::payload::HASH_BLOCK_BYTES as usize;
@@ -95,6 +97,50 @@ struct Verified {
     /// reach.
     whole: Option<(u64, Sha384)>,
 }
+/// A few simultaneous streams can share one IPSW. Keep their positions
+/// separate, with bounded inflater buffers, so alternating reads do not
+/// replay each deflated member from byte zero.
+#[derive(Default)]
+struct Cursors(VecDeque<(String, Progress)>);
+
+impl Cursors {
+    // Each deflate cursor owns a 64 KiB input buffer, a 32 KiB window,
+    // and the decoder state. Stored cursors have no inflater allocation.
+    const LIMIT: usize = 6;
+
+    fn read<R: ReadAt>(
+        &mut self,
+        archive: &Archive,
+        reader: &mut R,
+        entry: &Entry,
+        offset: u64,
+        output: &mut [u8],
+    ) -> Result<()> {
+        let cached = self
+            .0
+            .iter()
+            .position(|(name, _)| *name == entry.name)
+            .and_then(|index| self.0.remove(index));
+        let (name, mut progress) = match cached {
+            Some((name, progress)) => (Some(name), Some(progress)),
+            None => (None, None),
+        };
+        archive
+            .read_member_resuming(reader, entry, &mut progress, offset, output)
+            .map_err(payload)?;
+        if let Some(progress) = progress
+            && progress.produced() < entry.bytes
+        {
+            if self.0.len() == Self::LIMIT {
+                self.0.pop_front();
+            }
+            self.0
+                .push_back((name.unwrap_or_else(|| entry.name.clone()), progress));
+        }
+        Ok(())
+    }
+}
+
 pub struct Store<R> {
     reader: R,
     archive: Archive,
@@ -106,10 +152,7 @@ pub struct Store<R> {
     verified: BTreeMap<String, Verified>,
     block_count: usize,
     verify: Verify,
-    /// The most recently read member and its resumable inflate position, so
-    /// reading a deflate member block by block inflates it once rather than
-    /// replaying it from the start each block.
-    cursor: Option<(String, stela_formats::payload::zip::Progress)>,
+    cursors: Cursors,
 }
 fn payload(error: impl core::fmt::Debug) -> Error {
     Error::Payload(refuse!("payload: {error}", ?error))
@@ -210,12 +253,16 @@ impl<R: ReadAt> Store<R> {
             verified: BTreeMap::new(),
             block_count: 0,
             verify: Verify::Full,
-            cursor: None,
+            cursors: Cursors::default(),
         })
     }
     pub fn manifest(&self) -> &PayloadManifest {
         &self.manifest
     }
+    pub(super) fn release_cursors(&mut self) {
+        self.cursors.0.clear();
+    }
+
     pub fn reader_mut(&mut self) -> &mut R {
         &mut self.reader
     }
@@ -341,20 +388,13 @@ impl<R: ReadAt> Store<R> {
         let start = blocks.start * BLOCK_BYTES as u64;
         let end = (blocks.end * BLOCK_BYTES as u64).min(verified.entry.bytes);
         bytes.resize((end - start) as usize, 0);
-        let mut progress = match self.cursor.take() {
-            Some((p, progress)) if p == path => Some(progress),
-            _ => None,
-        };
-        self.archive
-            .read_member_resuming(
-                &mut self.reader,
-                &verified.entry,
-                &mut progress,
-                start,
-                bytes,
-            )
-            .map_err(payload)?;
-        self.cursor = progress.map(|progress| (path.to_string(), progress));
+        self.cursors.read(
+            &self.archive,
+            &mut self.reader,
+            &verified.entry,
+            start,
+            bytes,
+        )?;
         let expected = &verified.blocks[blocks.start as usize..blocks.end as usize];
         for (index, (block, expected)) in bytes.chunks(BLOCK_BYTES).zip(expected).enumerate() {
             let actual: [u8; 32] = Sha256::digest(block).into();
@@ -536,16 +576,10 @@ impl<R: ReadAt> Store<R> {
     }
     /// A device-verified member's bytes, as read.
     fn read_unhashed(&mut self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
-        let entry = self.verified[path].entry.clone();
+        let entry = &self.verified[path].entry;
         let mut bytes = vec![0; len];
-        let mut progress = match self.cursor.take() {
-            Some((p, progress)) if p == path => Some(progress),
-            _ => None,
-        };
-        self.archive
-            .read_member_resuming(&mut self.reader, &entry, &mut progress, offset, &mut bytes)
-            .map_err(payload)?;
-        self.cursor = progress.map(|progress| (path.to_string(), progress));
+        self.cursors
+            .read(&self.archive, &mut self.reader, entry, offset, &mut bytes)?;
         Ok(bytes)
     }
     pub fn read_component(&mut self, name: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
