@@ -187,7 +187,7 @@ pub(super) fn map(
     memory: &mut EngineMemory,
     runtime: &Runtime,
     storage: Option<&stela_drivers::Handoff>,
-    native_mmio: Option<&crate::native_mmio::Prepared>,
+    native_mmio: Option<&mut crate::native_mmio::Prepared>,
     host_firmware: &crate::host_firmware::Resources,
 ) -> Result<Storage> {
     let EngineImage {

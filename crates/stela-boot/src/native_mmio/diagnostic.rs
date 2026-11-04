@@ -78,10 +78,23 @@ unsafe fn check_native_hpet(
     handoff: &'static Handoff,
     owner: &mut HostOwner,
 ) -> Result<(), ClockError> {
-    // SAFETY: the original immutable loader capture is held by this boot.
-    let wire = unsafe { captured(handoff) }?;
     // SAFETY: original BSP before other processors or device owners.
-    let source = unsafe { Source::activate(wire, owner, handoff.tsc_hz) }?;
+    let source = unsafe { Source::activate(handoff, owner) }?;
+    // SAFETY: the same BSP has made no device access. The original claim
+    // must refuse a second activation before it can publish another aperture.
+    let duplicate = unsafe { Source::activate(handoff, owner) };
+    if !matches!(duplicate, Err(Error::Busy)) {
+        return Err(Error::InvalidPlatformReply.into());
+    }
+    {
+        let root = owner.enter_root()?;
+        // SAFETY: the BSP owns this scope and the shared source has no
+        // device mappings. The alternate activation must also refuse.
+        let duplicate = unsafe { ScopedSource::activate(handoff, &root) };
+        if !matches!(duplicate, Err(Error::Busy)) {
+            return Err(Error::InvalidPlatformReply.into());
+        }
+    }
     let identity = owner.root_identity()?;
     // SAFETY: this explicit fixture has exclusive HPET control, no SMM,
     // firmware/native comparator routes or other counter readers/writers.
@@ -238,7 +251,7 @@ pub(crate) fn require_notification_owner(
 /// `notification` is the actual retained original CPU/root/controller-format
 /// owner for this SAME handoff. Table/map/timed-CPU data never constructs it.
 pub(crate) unsafe fn check(
-    handoff: &Handoff,
+    handoff: &'static Handoff,
     owner: &mut HostOwner,
     notification: alloc::sync::Arc<dyn stela_drivers::bus::irq::posted_msi::NotificationDomain>,
 ) -> Result<(), Error> {
@@ -247,13 +260,10 @@ pub(crate) unsafe fn check(
     if handoff.native_resources.cores != 1 || handoff.storage.present {
         return Err(Error::Unavailable);
     }
-    // SAFETY: the caller's contract makes this the post-EBS handoff whose sealed capture this
-    // diagnostic owns.
-    let wire = stage("capture", unsafe { captured(handoff) })?;
     let root = owner.enter_root().map_err(failed)?;
-    // SAFETY: this BSP's root execution is entered and `wire` is that handoff's sealed capture.
+    // SAFETY: the BSP entered its original root and holds the sealed handoff.
     let (source, session) = stage("authority-activate", unsafe {
-        ScopedSource::activate(wire, &root)
+        ScopedSource::activate(handoff, &root)
     })?;
     // SAFETY: diagnostic's complete post-EBS wholeblock handoff excludes
     // firmware/SMM/native comparator/counter/decode/route owners. Original SDT

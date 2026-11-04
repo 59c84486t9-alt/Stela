@@ -88,6 +88,8 @@ pub struct Handoff {
     /// Moved original allocation of the relocated static Rust/C engine image.
     /// Observed PE/header ranges cannot recreate this non-Clone owner.
     pub(crate) native_image: crate::native_image::ResidentImage,
+    /// Original aperture capture sealed with this boot's successful exit.
+    pub(crate) native_mmio_capture: crate::native_mmio::CaptureHandoff,
 }
 
 /// A read of the firmware's real-time clock: its time as UTC and its
