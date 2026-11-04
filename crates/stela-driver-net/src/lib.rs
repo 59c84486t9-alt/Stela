@@ -88,6 +88,16 @@ pub trait Link {
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError>;
     /// One frame the adapter received, if any, without blocking.
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError>;
+    /// Receive one frame into caller-owned reusable storage. The buffer is
+    /// unchanged if no frame is available or the adapter reports an error.
+    /// Links that already own an allocated frame can hand it over directly.
+    fn receive_reusing(&mut self, frame: &mut Vec<u8>) -> Result<bool, LinkError> {
+        let Some(received) = self.receive()? else {
+            return Ok(false);
+        };
+        *frame = received;
+        Ok(true)
+    }
     /// Whether the adapter sends its host's completion signal
     /// ([`crate::Handoff::completion`]) when a frame arrives or its link
     /// changes, waking the core that looks for frames, after

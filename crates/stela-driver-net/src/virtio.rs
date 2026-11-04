@@ -234,6 +234,24 @@ impl VirtioNet {
             self.usable().unwrap_err()
         })
     }
+
+    /// Consume a valid DMA buffer before reposting its descriptor.
+    fn receive_frame<T>(&mut self, copy: impl FnOnce(&[u8]) -> T) -> Result<Option<T>, LinkError> {
+        self.usable()?;
+        loop {
+            let taken = self.receive.take();
+            let Some((id, length)) = self.break_on(taken)? else {
+                return Ok(None);
+            };
+            if (SHORTEST_RECEIVE..=LONGEST_RECEIVE).contains(&length) {
+                let frame = copy(&self.receive.buffer(id)[HEADER..length]);
+                self.receive.offer(id);
+                return Ok(Some(frame));
+            }
+            // A runt or oversized buffer is dropped and the next one read.
+            self.receive.offer(id);
+        }
+    }
 }
 
 impl Link for VirtioNet {
@@ -277,21 +295,18 @@ impl Link for VirtioNet {
     }
 
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
-        self.usable()?;
-        loop {
-            let taken = self.receive.take();
-            let Some((id, length)) = self.break_on(taken)? else {
-                return Ok(None);
-            };
-            let frame = (SHORTEST_RECEIVE..=LONGEST_RECEIVE)
-                .contains(&length)
-                .then(|| self.receive.buffer(id)[HEADER..length].to_vec());
-            self.receive.offer(id);
-            // A runt or oversized buffer is dropped and the next one read.
-            if frame.is_some() {
-                return Ok(frame);
+        self.receive_frame(<[u8]>::to_vec)
+    }
+
+    fn receive_reusing(&mut self, frame: &mut Vec<u8>) -> Result<bool, LinkError> {
+        self.receive_frame(|bytes| {
+            frame.clear();
+            if frame.capacity() < MAX_FRAME {
+                frame.reserve_exact(MAX_FRAME);
             }
-        }
+            frame.extend_from_slice(bytes);
+        })
+        .map(|received| received.is_some())
     }
 }
 
@@ -401,6 +416,43 @@ mod tests {
         assert_eq!(received, [0x44; 60]);
         assert_eq!(net.receive(), Ok(None));
         assert_eq!(&net.receive.ring.bytes()[..descriptors.len()], descriptors);
+    }
+
+    #[test]
+    fn reusable_receive_preserves_storage_and_empty_or_error_output() {
+        let mut fixture = Fixture::new();
+        let net = &mut fixture.net;
+        let mut produced = 0;
+        let mut frame = vec![0x52; 17];
+        assert_eq!(net.receive_reusing(&mut frame), Ok(false));
+        assert_eq!(frame, [0x52; 17]);
+
+        let mut storage = None;
+        for (index, length) in [60, MAX_FRAME, ETHERNET_HEADER].into_iter().enumerate() {
+            let id = index as u16;
+            let byte = 0xa0 + index as u8;
+            net.receive.buffer(id)[HEADER..HEADER + length].fill(byte);
+            give_back(
+                &mut net.receive,
+                &mut produced,
+                u32::from(id),
+                (HEADER + length) as u32,
+            );
+            assert_eq!(net.receive_reusing(&mut frame), Ok(true));
+            assert_eq!(frame.len(), length);
+            assert!(frame.iter().all(|&value| value == byte));
+            assert_eq!(net.receive.available, ENTRIES + id + 1);
+            assert_eq!(*storage.get_or_insert(frame.as_ptr()), frame.as_ptr());
+        }
+
+        give_back(&mut net.receive, &mut produced, 3, (HEADER + 13) as u32);
+        assert_eq!(net.receive_reusing(&mut frame), Ok(false));
+        assert_eq!(net.receive.available, 2 * ENTRIES);
+        assert_eq!(frame, [0xa2; ETHERNET_HEADER]);
+        give_back(&mut net.receive, &mut produced, u32::from(ENTRIES), 64);
+        assert!(net.receive_reusing(&mut frame).is_err());
+        assert!(net.receive_reusing(&mut frame).is_err());
+        assert_eq!(frame, [0xa2; ETHERNET_HEADER]);
     }
 
     #[test]
