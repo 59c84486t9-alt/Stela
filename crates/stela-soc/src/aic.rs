@@ -204,7 +204,7 @@ pub struct Aic2 {
     software: Vec<u32>,
     hardware: Vec<u32>,
     mask: Vec<u32>,
-    irq_level: Vec<bool>,
+    irq_level: u64,
     /// The CPUs whose SIQ_CFG_EL1 refuses IRQs ([`Aic2::steer`]).
     refusing: u64,
 }
@@ -304,7 +304,7 @@ impl Aic2 {
             software: vec![0; words],
             hardware: vec![0; words],
             mask: vec![u32::MAX; words],
-            irq_level: vec![false; config.cpus],
+            irq_level: 0,
             refusing: 0,
             config,
             layout,
@@ -421,32 +421,53 @@ impl Aic2 {
         }
         self.update(access);
     }
+    fn accepting_cpus(&self) -> u64 {
+        if self.enabled && self.lifecycle.clocked && !self.lifecycle.quiesced {
+            self.config.default_cpus & !self.refusing
+        } else {
+            0
+        }
+    }
+
+    fn first_pending(&self) -> Option<usize> {
+        // Hardware inputs are range-checked. Bank writes exclude padding
+        // independently on each die, so the lowest set bit is implemented.
+        self.software
+            .iter()
+            .zip(&self.hardware)
+            .zip(&self.mask)
+            .enumerate()
+            .find_map(|(word, ((software, hardware), mask))| {
+                let pending = (software | hardware) & !mask;
+                (pending != 0).then(|| word * 32 + pending.trailing_zeros() as usize)
+            })
+    }
+
     /// The highest-priority deliverable IRQ for `cpu`.
     fn pending_for(&self, cpu: CpuIndex) -> Option<usize> {
-        if !self.enabled
-            || !self.lifecycle.clocked
-            || self.lifecycle.quiesced
-            || self.refusing & 1 << cpu != 0
-            || self.config.default_cpus & 1 << cpu == 0
-        {
+        if self.accepting_cpus() & 1 << cpu == 0 {
             return None;
         }
-        (0..self.software.len())
-            .flat_map(|word| {
-                let pending = (self.software[word] | self.hardware[word]) & !self.mask[word];
-                (0..32)
-                    .filter(move |bit| pending & 1 << bit != 0)
-                    .map(move |bit| word * 32 + bit)
-            })
-            .find(|&irq| irq % usize::from(self.config.max_irq) < usize::from(self.config.nr_irq))
+        self.first_pending()
     }
+
     fn update(&mut self, access: &mut Access<'_>) {
-        for cpu in 0..self.config.cpus {
-            let level = self.pending_for(cpu).is_some();
-            if self.irq_level[cpu] != level {
-                self.irq_level[cpu] = level;
-                access.interrupts.set_level(Wire::Irq(cpu), level);
-            }
+        // TARGET0 is shared by the eligible CPUs. Scan the pending bank once.
+        let accepting = self.accepting_cpus();
+        let level = if accepting != 0 && self.first_pending().is_some() {
+            accepting
+        } else {
+            0
+        };
+        let mut changed = self.irq_level ^ level;
+        self.irq_level = level;
+        while changed != 0 {
+            let cpu = changed.trailing_zeros() as usize;
+            let bit = 1 << cpu;
+            access
+                .interrupts
+                .set_level(Wire::Irq(cpu), level & bit != 0);
+            changed ^= bit;
         }
     }
     fn decode(&self, offset: u64) -> Option<Register> {
