@@ -2335,9 +2335,35 @@ undefined_phi_values(void)
    ralloc_free(nir);
 }
 
+/* An unrelated recursive function does not give a declared entry a body
+ * or make its recursion limit relevant. */
+static void
+reject_declared_entry_in_a_recursive_module(void)
+{
+   LLVMMemoryBufferRef input = stela_air_test_custom_bitcode(
+      "target datalayout = \"e-p:64:64-i64:64-n8:16:32\"\n"
+      "target triple = \"air64_v28-apple-macosx26.7.0\"\n",
+      "define internal void @cycle() {\ncall void @cycle()\nret void\n}\n"
+      "declare void @kernel()\n",
+      "!air.version = !{!0}\n!air.language_version = !{!1}\n!air.kernel = !{!2}\n"
+      "!0 = !{i32 2, i32 8, i32 0}\n!1 = !{!\"Metal\", i32 4, i32 0, i32 0}\n"
+      "!2 = !{ptr @kernel, !3, !3}\n!3 = !{}\n", "");
+   const struct stela_air_options options = {
+      .workgroup_size = {1, 1, 1}, .max_instructions = 100, .max_call_stack_depth = UINT32_MAX,
+   };
+   struct stela_air_error error;
+   nir_shader *nir = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input), "kernel",
+                                     &test_nir_options, &options, &error);
+   if (nir || error.kind != STELA_AIR_ARGUMENT)
+      fprintf(stderr, "declared entry: %u %s\n", error.kind, error.detail);
+   CHECK(!nir && error.kind == STELA_AIR_ARGUMENT && strstr(error.detail, "entry must be a defined"));
+   LLVMDisposeMemoryBuffer(input);
+}
+
 static void
 tests(void)
 {
+   reject_declared_entry_in_a_recursive_module();
    struct stela_air_error error;
    LLVMMemoryBufferRef input = stela_air_test_bitcode(stela_air_test_store_body, "");
    nir_shader *nir = translate(input, &test_nir_options, 100, &error);
