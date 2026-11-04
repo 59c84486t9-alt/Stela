@@ -1,0 +1,775 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 22:21:22 -0500
+Subject: [PATCH] refactor(vfs): separate original inode timestamp handling
+
+---
+ fs/Makefile               |   2 +-
+ fs/inode.c                | 300 ------------------------------------
+ fs/inode_timestamps.c     | 312 ++++++++++++++++++++++++++++++++++++++
+ kernel/time/time.c        |  35 -----
+ kernel/time/timer_round.c |  37 +++++
+ 5 files changed, 350 insertions(+), 336 deletions(-)
+ create mode 100644 fs/inode_timestamps.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index cf56ae3bdd7c0d2c8753907c0c6f8b5bfe0c05e1..6404e0cd26b7577e2c14b377c81d5e5f164d8f20 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -9,7 +9,7 @@
+ 
+ obj-y :=	open.o filp_close.o read_write.o file_table.o file_table_init.o super.o super_anon_dev.o super_lifetime.o \
+ 		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o path_get.o name_hash.o filename.o fcntl.o \
+-		ioctl.o readdir.o select.o dcache.o dcache_init.o dentry_ancestry.o inode.o inode_cache_init.o inode_evict.o \
++		ioctl.o readdir.o select.o dcache.o dcache_init.o dentry_ancestry.o inode.o inode_cache_init.o inode_timestamps.o inode_evict.o \
+ 		attr.o bad_inode.o bad_inode_ops.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o mount_cache.o \
+ 		seq_file.o seq_lifetime.o seq_output.o seq_path.o xattr.o simple_xattr.o libfs.o pseudo_metadata.o stashed_path.o fs-writeback.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+diff --git a/fs/inode.c b/fs/inode.c
+index 586bb86e8327925c594a15f2f121c90ff8eadd60..7cdcdc1383927bbf3acaf2220f9d0c680705efdf 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -24,8 +24,6 @@
+ #include <linux/seq_file.h>
+ #include <linux/debugfs.h>
+ #include <trace/events/writeback.h>
+-#define CREATE_TRACE_POINTS
+-#include <trace/events/timestamp.h>
+ 
+ #include "inode_lru.h"
+ #include "internal.h"
+@@ -57,70 +55,6 @@
+  *   inode->i_lock
+  */
+ 
+-#ifdef CONFIG_DEBUG_FS
+-static DEFINE_PER_CPU(long, mg_ctime_updates);
+-static DEFINE_PER_CPU(long, mg_fine_stamps);
+-static DEFINE_PER_CPU(long, mg_ctime_swaps);
+-
+-static unsigned long get_mg_ctime_updates(void)
+-{
+-	unsigned long sum = 0;
+-	int i;
+-
+-	for_each_possible_cpu(i)
+-		sum += data_race(per_cpu(mg_ctime_updates, i));
+-	return sum;
+-}
+-
+-static unsigned long get_mg_fine_stamps(void)
+-{
+-	unsigned long sum = 0;
+-	int i;
+-
+-	for_each_possible_cpu(i)
+-		sum += data_race(per_cpu(mg_fine_stamps, i));
+-	return sum;
+-}
+-
+-static unsigned long get_mg_ctime_swaps(void)
+-{
+-	unsigned long sum = 0;
+-	int i;
+-
+-	for_each_possible_cpu(i)
+-		sum += data_race(per_cpu(mg_ctime_swaps, i));
+-	return sum;
+-}
+-
+-#define mgtime_counter_inc(__var)	this_cpu_inc(__var)
+-
+-static int mgts_show(struct seq_file *s, void *p)
+-{
+-	unsigned long ctime_updates = get_mg_ctime_updates();
+-	unsigned long ctime_swaps = get_mg_ctime_swaps();
+-	unsigned long fine_stamps = get_mg_fine_stamps();
+-	unsigned long floor_swaps = timekeeping_get_mg_floor_swaps();
+-
+-	seq_printf(s, "%lu %lu %lu %lu\n",
+-		   ctime_updates, ctime_swaps, fine_stamps, floor_swaps);
+-	return 0;
+-}
+-
+-DEFINE_SHOW_ATTRIBUTE(mgts);
+-
+-static int __init mg_debugfs_init(void)
+-{
+-	debugfs_create_file("multigrain_timestamps", S_IFREG | S_IRUGO, NULL, NULL, &mgts_fops);
+-	return 0;
+-}
+-late_initcall(mg_debugfs_init);
+-
+-#else /* ! CONFIG_DEBUG_FS */
+-
+-#define mgtime_counter_inc(__var)	do { } while (0)
+-
+-#endif /* CONFIG_DEBUG_FS */
+-
+ static void inode_pin_lru_isolating(struct inode *inode)
+ {
+ 	lockdep_assert_held(&inode->i_lock);
+@@ -1761,44 +1695,6 @@ int file_remove_privs(struct file *file)
+ }
+ EXPORT_SYMBOL(file_remove_privs);
+ 
+-/**
+- * current_time - Return FS time (possibly fine-grained)
+- * @inode: inode.
+- *
+- * Return the current time truncated to the time granularity supported by
+- * the fs, as suitable for a ctime/mtime change. If the ctime is flagged
+- * as having been QUERIED, get a fine-grained timestamp, but don't update
+- * the floor.
+- *
+- * For a multigrain inode, this is effectively an estimate of the timestamp
+- * that a file would receive. An actual update must go through
+- * inode_set_ctime_current().
+- */
+-struct timespec64 current_time(struct inode *inode)
+-{
+-	struct timespec64 now;
+-	u32 cns;
+-
+-	ktime_get_coarse_real_ts64_mg(&now);
+-
+-	if (!is_mgtime(inode))
+-		goto out;
+-
+-	/* If nothing has queried it, then coarse time is fine */
+-	cns = smp_load_acquire(&inode->i_ctime_nsec);
+-	if (cns & I_CTIME_QUERIED) {
+-		/*
+-		 * If there is no apparent change, then get a fine-grained
+-		 * timestamp.
+-		 */
+-		if (now.tv_nsec == (cns & ~I_CTIME_QUERIED))
+-			ktime_get_real_ts64(&now);
+-	}
+-out:
+-	return timestamp_truncate(now, inode);
+-}
+-EXPORT_SYMBOL(current_time);
+-
+ static inline bool need_cmtime_update(struct inode *inode)
+ {
+ 	struct timespec64 now = current_time(inode), ts;
+@@ -2120,202 +2016,6 @@ void inode_nohighmem(struct inode *inode)
+ }
+ EXPORT_SYMBOL(inode_nohighmem);
+ 
+-struct timespec64 inode_set_ctime_to_ts(struct inode *inode, struct timespec64 ts)
+-{
+-	trace_inode_set_ctime_to_ts(inode, &ts);
+-	set_normalized_timespec64(&ts, ts.tv_sec, ts.tv_nsec);
+-	WRITE_ONCE(inode->i_ctime_sec, ts.tv_sec);
+-	WRITE_ONCE(inode->i_ctime_nsec, ts.tv_nsec);
+-	return ts;
+-}
+-EXPORT_SYMBOL(inode_set_ctime_to_ts);
+-
+-/**
+- * timestamp_truncate - Truncate timespec to a granularity
+- * @t: Timespec
+- * @inode: inode being updated
+- *
+- * Truncate a timespec to the granularity supported by the fs
+- * containing the inode. Always rounds down. gran must
+- * not be 0 nor greater than a second (NSEC_PER_SEC, or 10^9 ns).
+- */
+-struct timespec64 timestamp_truncate(struct timespec64 t, struct inode *inode)
+-{
+-	struct super_block *sb = inode->i_sb;
+-	unsigned int gran = sb->s_time_gran;
+-
+-	t.tv_sec = clamp(t.tv_sec, sb->s_time_min, sb->s_time_max);
+-	if (unlikely(t.tv_sec == sb->s_time_max || t.tv_sec == sb->s_time_min))
+-		t.tv_nsec = 0;
+-
+-	/* Avoid division in the common cases 1 ns and 1 s. */
+-	if (gran == 1)
+-		; /* nothing */
+-	else if (gran == NSEC_PER_SEC)
+-		t.tv_nsec = 0;
+-	else if (gran > 1 && gran < NSEC_PER_SEC)
+-		t.tv_nsec -= t.tv_nsec % gran;
+-	else
+-		WARN(1, "invalid file time granularity: %u", gran);
+-	return t;
+-}
+-EXPORT_SYMBOL(timestamp_truncate);
+-
+-/**
+- * inode_set_ctime_current - set the ctime to current_time
+- * @inode: inode
+- *
+- * Set the inode's ctime to the current value for the inode. Returns the
+- * current value that was assigned. If this is not a multigrain inode, then we
+- * set it to the later of the coarse time and floor value.
+- *
+- * If it is multigrain, then we first see if the coarse-grained timestamp is
+- * distinct from what is already there. If so, then use that. Otherwise, get a
+- * fine-grained timestamp.
+- *
+- * After that, try to swap the new value into i_ctime_nsec. Accept the
+- * resulting ctime, regardless of the outcome of the swap. If it has
+- * already been replaced, then that timestamp is later than the earlier
+- * unacceptable one, and is thus acceptable.
+- */
+-struct timespec64 inode_set_ctime_current(struct inode *inode)
+-{
+-	struct timespec64 now;
+-	u32 cns, cur;
+-
+-	ktime_get_coarse_real_ts64_mg(&now);
+-	now = timestamp_truncate(now, inode);
+-
+-	/* Just return that if this is not a multigrain fs */
+-	if (!is_mgtime(inode)) {
+-		inode_set_ctime_to_ts(inode, now);
+-		goto out;
+-	}
+-
+-	/*
+-	 * A fine-grained time is only needed if someone has queried
+-	 * for timestamps, and the current coarse grained time isn't
+-	 * later than what's already there.
+-	 */
+-	cns = smp_load_acquire(&inode->i_ctime_nsec);
+-	if (cns & I_CTIME_QUERIED) {
+-		struct timespec64 ctime = { .tv_sec = inode_get_ctime_sec(inode),
+-					    .tv_nsec = cns & ~I_CTIME_QUERIED };
+-
+-		if (timespec64_compare(&now, &ctime) <= 0) {
+-			ktime_get_real_ts64_mg(&now);
+-			now = timestamp_truncate(now, inode);
+-			mgtime_counter_inc(mg_fine_stamps);
+-		}
+-	}
+-	mgtime_counter_inc(mg_ctime_updates);
+-
+-	/* No need to cmpxchg if it's exactly the same */
+-	if (cns == now.tv_nsec && inode_get_ctime_sec(inode) == now.tv_sec) {
+-		trace_ctime_xchg_skip(inode, &now);
+-		goto out;
+-	}
+-	cur = cns;
+-retry:
+-	/* Try to swap the nsec value into place. */
+-	if (try_cmpxchg(&inode->i_ctime_nsec, &cur, now.tv_nsec)) {
+-		/* If swap occurred, then we're (mostly) done */
+-		WRITE_ONCE(inode->i_ctime_sec, now.tv_sec);
+-		trace_ctime_ns_xchg(inode, cns, now.tv_nsec, cur);
+-		mgtime_counter_inc(mg_ctime_swaps);
+-	} else {
+-		/*
+-		 * Was the change due to someone marking the old ctime QUERIED?
+-		 * If so then retry the swap. This can only happen once since
+-		 * the only way to clear I_CTIME_QUERIED is to stamp the inode
+-		 * with a new ctime.
+-		 */
+-		if (!(cns & I_CTIME_QUERIED) && (cns | I_CTIME_QUERIED) == cur) {
+-			cns = cur;
+-			goto retry;
+-		}
+-		/* Otherwise, keep the existing ctime */
+-		now.tv_sec = inode_get_ctime_sec(inode);
+-		now.tv_nsec = cur & ~I_CTIME_QUERIED;
+-	}
+-out:
+-	return now;
+-}
+-EXPORT_SYMBOL(inode_set_ctime_current);
+-
+-/**
+- * inode_set_ctime_deleg - try to update the ctime on a delegated inode
+- * @inode: inode to update
+- * @update: timespec64 to set the ctime
+- *
+- * Attempt to atomically update the ctime on behalf of a delegation holder.
+- *
+- * The nfs server can call back the holder of a delegation to get updated
+- * inode attributes, including the mtime. When updating the mtime, update
+- * the ctime to a value at least equal to that.
+- *
+- * This can race with concurrent updates to the inode, in which
+- * case the update is skipped.
+- *
+- * Note that this works even when multigrain timestamps are not enabled,
+- * so it is used in either case.
+- */
+-struct timespec64 inode_set_ctime_deleg(struct inode *inode, struct timespec64 update)
+-{
+-	struct timespec64 now, cur_ts;
+-	u32 cur, old;
+-
+-	/* pairs with try_cmpxchg below */
+-	cur = smp_load_acquire(&inode->i_ctime_nsec);
+-	cur_ts.tv_nsec = cur & ~I_CTIME_QUERIED;
+-	cur_ts.tv_sec = inode_get_ctime_sec(inode);
+-
+-	/* If the update is older than the existing value, skip it. */
+-	if (timespec64_compare(&update, &cur_ts) <= 0)
+-		return cur_ts;
+-
+-	ktime_get_coarse_real_ts64_mg(&now);
+-
+-	/* Clamp the update to "now" if it's in the future */
+-	if (timespec64_compare(&update, &now) > 0)
+-		update = now;
+-
+-	update = timestamp_truncate(update, inode);
+-
+-	/* No need to update if the values are already the same */
+-	if (timespec64_equal(&update, &cur_ts))
+-		return cur_ts;
+-
+-	/*
+-	 * Try to swap the nsec value into place. If it fails, that means
+-	 * it raced with an update due to a write or similar activity. That
+-	 * stamp takes precedence, so just skip the update.
+-	 */
+-retry:
+-	old = cur;
+-	if (try_cmpxchg(&inode->i_ctime_nsec, &cur, update.tv_nsec)) {
+-		WRITE_ONCE(inode->i_ctime_sec, update.tv_sec);
+-		mgtime_counter_inc(mg_ctime_swaps);
+-		return update;
+-	}
+-
+-	/*
+-	 * Was the change due to another task marking the old ctime QUERIED?
+-	 *
+-	 * If so, then retry the swap. This can only happen once since
+-	 * the only way to clear I_CTIME_QUERIED is to stamp the inode
+-	 * with a new ctime.
+-	 */
+-	if (!(old & I_CTIME_QUERIED) && (cur == (old | I_CTIME_QUERIED)))
+-		goto retry;
+-
+-	/* Otherwise, it was a new timestamp. */
+-	cur_ts.tv_sec = inode_get_ctime_sec(inode);
+-	cur_ts.tv_nsec = cur & ~I_CTIME_QUERIED;
+-	return cur_ts;
+-}
+-EXPORT_SYMBOL(inode_set_ctime_deleg);
+-
+ /**
+  * in_group_or_capable - check whether caller is CAP_FSETID privileged
+  * @idmap:	idmap of the mount @inode was found from
+diff --git a/fs/inode_timestamps.c b/fs/inode_timestamps.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b15428c9d938e928022bdabce6f55e9515ad0aa
+--- /dev/null
++++ b/fs/inode_timestamps.c
+@@ -0,0 +1,312 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Inode timestamps from fs/inode.c.
++ * (C) 1997 Linus Torvalds
++ * (C) 1999 Andrea Arcangeli <andrea@suse.de> (dynamic inode allocation)
++ */
++#include <linux/debugfs.h>
++#include <linux/export.h>
++#include <linux/fs.h>
++#include <linux/seq_file.h>
++#include <linux/timekeeping.h>
++
++#define CREATE_TRACE_POINTS
++#include <trace/events/timestamp.h>
++
++#ifdef CONFIG_DEBUG_FS
++static DEFINE_PER_CPU(long, mg_ctime_updates);
++static DEFINE_PER_CPU(long, mg_fine_stamps);
++static DEFINE_PER_CPU(long, mg_ctime_swaps);
++
++static unsigned long get_mg_ctime_updates(void)
++{
++	unsigned long sum = 0;
++	int i;
++
++	for_each_possible_cpu(i)
++		sum += data_race(per_cpu(mg_ctime_updates, i));
++	return sum;
++}
++
++static unsigned long get_mg_fine_stamps(void)
++{
++	unsigned long sum = 0;
++	int i;
++
++	for_each_possible_cpu(i)
++		sum += data_race(per_cpu(mg_fine_stamps, i));
++	return sum;
++}
++
++static unsigned long get_mg_ctime_swaps(void)
++{
++	unsigned long sum = 0;
++	int i;
++
++	for_each_possible_cpu(i)
++		sum += data_race(per_cpu(mg_ctime_swaps, i));
++	return sum;
++}
++
++#define mgtime_counter_inc(__var)	this_cpu_inc(__var)
++
++static int mgts_show(struct seq_file *s, void *p)
++{
++	unsigned long ctime_updates = get_mg_ctime_updates();
++	unsigned long ctime_swaps = get_mg_ctime_swaps();
++	unsigned long fine_stamps = get_mg_fine_stamps();
++	unsigned long floor_swaps = timekeeping_get_mg_floor_swaps();
++
++	seq_printf(s, "%lu %lu %lu %lu\n",
++		   ctime_updates, ctime_swaps, fine_stamps, floor_swaps);
++	return 0;
++}
++
++DEFINE_SHOW_ATTRIBUTE(mgts);
++
++static int __init mg_debugfs_init(void)
++{
++	debugfs_create_file("multigrain_timestamps", S_IFREG | S_IRUGO, NULL, NULL, &mgts_fops);
++	return 0;
++}
++late_initcall(mg_debugfs_init);
++
++#else /* ! CONFIG_DEBUG_FS */
++
++#define mgtime_counter_inc(__var)	do { } while (0)
++
++#endif /* CONFIG_DEBUG_FS */
++
++struct timespec64 inode_set_ctime_to_ts(struct inode *inode, struct timespec64 ts)
++{
++	trace_inode_set_ctime_to_ts(inode, &ts);
++	set_normalized_timespec64(&ts, ts.tv_sec, ts.tv_nsec);
++	WRITE_ONCE(inode->i_ctime_sec, ts.tv_sec);
++	WRITE_ONCE(inode->i_ctime_nsec, ts.tv_nsec);
++	return ts;
++}
++EXPORT_SYMBOL(inode_set_ctime_to_ts);
++
++/**
++ * timestamp_truncate - Truncate timespec to a granularity
++ * @t: Timespec
++ * @inode: inode being updated
++ *
++ * Truncate a timespec to the granularity supported by the fs
++ * containing the inode. Always rounds down. gran must
++ * not be 0 nor greater than a second (NSEC_PER_SEC, or 10^9 ns).
++ */
++struct timespec64 timestamp_truncate(struct timespec64 t, struct inode *inode)
++{
++	struct super_block *sb = inode->i_sb;
++	unsigned int gran = sb->s_time_gran;
++
++	t.tv_sec = clamp(t.tv_sec, sb->s_time_min, sb->s_time_max);
++	if (unlikely(t.tv_sec == sb->s_time_max || t.tv_sec == sb->s_time_min))
++		t.tv_nsec = 0;
++
++	/* Avoid division in the common cases 1 ns and 1 s. */
++	if (gran == 1)
++		; /* nothing */
++	else if (gran == NSEC_PER_SEC)
++		t.tv_nsec = 0;
++	else if (gran > 1 && gran < NSEC_PER_SEC)
++		t.tv_nsec -= t.tv_nsec % gran;
++	else
++		WARN(1, "invalid file time granularity: %u", gran);
++	return t;
++}
++EXPORT_SYMBOL(timestamp_truncate);
++
++/**
++ * inode_set_ctime_current - set the ctime to current_time
++ * @inode: inode
++ *
++ * Set the inode's ctime to the current value for the inode. Returns the
++ * current value that was assigned. If this is not a multigrain inode, then we
++ * set it to the later of the coarse time and floor value.
++ *
++ * If it is multigrain, then we first see if the coarse-grained timestamp is
++ * distinct from what is already there. If so, then use that. Otherwise, get a
++ * fine-grained timestamp.
++ *
++ * After that, try to swap the new value into i_ctime_nsec. Accept the
++ * resulting ctime, regardless of the outcome of the swap. If it has
++ * already been replaced, then that timestamp is later than the earlier
++ * unacceptable one, and is thus acceptable.
++ */
++struct timespec64 inode_set_ctime_current(struct inode *inode)
++{
++	struct timespec64 now;
++	u32 cns, cur;
++
++	ktime_get_coarse_real_ts64_mg(&now);
++	now = timestamp_truncate(now, inode);
++
++	/* Just return that if this is not a multigrain fs */
++	if (!is_mgtime(inode)) {
++		inode_set_ctime_to_ts(inode, now);
++		goto out;
++	}
++
++	/*
++	 * A fine-grained time is only needed if someone has queried
++	 * for timestamps, and the current coarse grained time isn't
++	 * later than what's already there.
++	 */
++	cns = smp_load_acquire(&inode->i_ctime_nsec);
++	if (cns & I_CTIME_QUERIED) {
++		struct timespec64 ctime = { .tv_sec = inode_get_ctime_sec(inode),
++					    .tv_nsec = cns & ~I_CTIME_QUERIED };
++
++		if (timespec64_compare(&now, &ctime) <= 0) {
++			ktime_get_real_ts64_mg(&now);
++			now = timestamp_truncate(now, inode);
++			mgtime_counter_inc(mg_fine_stamps);
++		}
++	}
++	mgtime_counter_inc(mg_ctime_updates);
++
++	/* No need to cmpxchg if it's exactly the same */
++	if (cns == now.tv_nsec && inode_get_ctime_sec(inode) == now.tv_sec) {
++		trace_ctime_xchg_skip(inode, &now);
++		goto out;
++	}
++	cur = cns;
++retry:
++	/* Try to swap the nsec value into place. */
++	if (try_cmpxchg(&inode->i_ctime_nsec, &cur, now.tv_nsec)) {
++		/* If swap occurred, then we're (mostly) done */
++		WRITE_ONCE(inode->i_ctime_sec, now.tv_sec);
++		trace_ctime_ns_xchg(inode, cns, now.tv_nsec, cur);
++		mgtime_counter_inc(mg_ctime_swaps);
++	} else {
++		/*
++		 * Was the change due to someone marking the old ctime QUERIED?
++		 * If so then retry the swap. This can only happen once since
++		 * the only way to clear I_CTIME_QUERIED is to stamp the inode
++		 * with a new ctime.
++		 */
++		if (!(cns & I_CTIME_QUERIED) && (cns | I_CTIME_QUERIED) == cur) {
++			cns = cur;
++			goto retry;
++		}
++		/* Otherwise, keep the existing ctime */
++		now.tv_sec = inode_get_ctime_sec(inode);
++		now.tv_nsec = cur & ~I_CTIME_QUERIED;
++	}
++out:
++	return now;
++}
++EXPORT_SYMBOL(inode_set_ctime_current);
++
++/**
++ * inode_set_ctime_deleg - try to update the ctime on a delegated inode
++ * @inode: inode to update
++ * @update: timespec64 to set the ctime
++ *
++ * Attempt to atomically update the ctime on behalf of a delegation holder.
++ *
++ * The nfs server can call back the holder of a delegation to get updated
++ * inode attributes, including the mtime. When updating the mtime, update
++ * the ctime to a value at least equal to that.
++ *
++ * This can race with concurrent updates to the inode, in which
++ * case the update is skipped.
++ *
++ * Note that this works even when multigrain timestamps are not enabled,
++ * so it is used in either case.
++ */
++struct timespec64 inode_set_ctime_deleg(struct inode *inode, struct timespec64 update)
++{
++	struct timespec64 now, cur_ts;
++	u32 cur, old;
++
++	/* pairs with try_cmpxchg below */
++	cur = smp_load_acquire(&inode->i_ctime_nsec);
++	cur_ts.tv_nsec = cur & ~I_CTIME_QUERIED;
++	cur_ts.tv_sec = inode_get_ctime_sec(inode);
++
++	/* If the update is older than the existing value, skip it. */
++	if (timespec64_compare(&update, &cur_ts) <= 0)
++		return cur_ts;
++
++	ktime_get_coarse_real_ts64_mg(&now);
++
++	/* Clamp the update to "now" if it's in the future */
++	if (timespec64_compare(&update, &now) > 0)
++		update = now;
++
++	update = timestamp_truncate(update, inode);
++
++	/* No need to update if the values are already the same */
++	if (timespec64_equal(&update, &cur_ts))
++		return cur_ts;
++
++	/*
++	 * Try to swap the nsec value into place. If it fails, that means
++	 * it raced with an update due to a write or similar activity. That
++	 * stamp takes precedence, so just skip the update.
++	 */
++retry:
++	old = cur;
++	if (try_cmpxchg(&inode->i_ctime_nsec, &cur, update.tv_nsec)) {
++		WRITE_ONCE(inode->i_ctime_sec, update.tv_sec);
++		mgtime_counter_inc(mg_ctime_swaps);
++		return update;
++	}
++
++	/*
++	 * Was the change due to another task marking the old ctime QUERIED?
++	 *
++	 * If so, then retry the swap. This can only happen once since
++	 * the only way to clear I_CTIME_QUERIED is to stamp the inode
++	 * with a new ctime.
++	 */
++	if (!(old & I_CTIME_QUERIED) && (cur == (old | I_CTIME_QUERIED)))
++		goto retry;
++
++	/* Otherwise, it was a new timestamp. */
++	cur_ts.tv_sec = inode_get_ctime_sec(inode);
++	cur_ts.tv_nsec = cur & ~I_CTIME_QUERIED;
++	return cur_ts;
++}
++EXPORT_SYMBOL(inode_set_ctime_deleg);
++
++/**
++ * current_time - Return FS time (possibly fine-grained)
++ * @inode: inode.
++ *
++ * Return the current time truncated to the time granularity supported by
++ * the fs, as suitable for a ctime/mtime change. If the ctime is flagged
++ * as having been QUERIED, get a fine-grained timestamp, but don't update
++ * the floor.
++ *
++ * For a multigrain inode, this is effectively an estimate of the timestamp
++ * that a file would receive. An actual update must go through
++ * inode_set_ctime_current().
++ */
++struct timespec64 current_time(struct inode *inode)
++{
++	struct timespec64 now;
++	u32 cns;
++
++	ktime_get_coarse_real_ts64_mg(&now);
++
++	if (!is_mgtime(inode))
++		goto out;
++
++	/* If nothing has queried it, then coarse time is fine */
++	cns = smp_load_acquire(&inode->i_ctime_nsec);
++	if (cns & I_CTIME_QUERIED) {
++		/*
++		 * If there is no apparent change, then get a fine-grained
++		 * timestamp.
++		 */
++		if (now.tv_nsec == (cns & ~I_CTIME_QUERIED))
++			ktime_get_real_ts64(&now);
++	}
++out:
++	return timestamp_truncate(now, inode);
++}
++EXPORT_SYMBOL(current_time);
+diff --git a/kernel/time/time.c b/kernel/time/time.c
+index 0dd63a91e7c5805073e3e8b51e31b9ea5d6e7828..e14011052c5a5f47d896c0d95572b3d1db4f0708 100644
+--- a/kernel/time/time.c
++++ b/kernel/time/time.c
+@@ -474,41 +474,6 @@ struct __kernel_old_timeval ns_to_kernel_old_timeval(s64 nsec)
+ }
+ EXPORT_SYMBOL(ns_to_kernel_old_timeval);
+ 
+-/**
+- * set_normalized_timespec64 - set timespec sec and nsec parts and normalize
+- *
+- * @ts:		pointer to timespec variable to be set
+- * @sec:	seconds to set
+- * @nsec:	nanoseconds to set
+- *
+- * Set seconds and nanoseconds field of a timespec variable and
+- * normalize to the timespec storage format
+- *
+- * Note: The tv_nsec part is always in the range of 0 <= tv_nsec < NSEC_PER_SEC.
+- * For negative values only the tv_sec field is negative !
+- */
+-void set_normalized_timespec64(struct timespec64 *ts, time64_t sec, s64 nsec)
+-{
+-	while (nsec >= NSEC_PER_SEC) {
+-		/*
+-		 * The following asm() prevents the compiler from
+-		 * optimising this loop into a modulo operation. See
+-		 * also __iter_div_u64_rem() in include/linux/time.h
+-		 */
+-		asm("" : "+rm"(nsec));
+-		nsec -= NSEC_PER_SEC;
+-		++sec;
+-	}
+-	while (nsec < 0) {
+-		asm("" : "+rm"(nsec));
+-		nsec += NSEC_PER_SEC;
+-		--sec;
+-	}
+-	ts->tv_sec = sec;
+-	ts->tv_nsec = nsec;
+-}
+-EXPORT_SYMBOL(set_normalized_timespec64);
+-
+ /**
+  * ns_to_timespec64 - Convert nanoseconds to timespec64
+  * @nsec:       the nanoseconds value to be converted
+diff --git a/kernel/time/timer_round.c b/kernel/time/timer_round.c
+index 79b6b5814f786f345af4a3d8ca5978ffc45111cd..64a2b67f12e1ee4ee6d8c4d8f5dae7c45d3e9485 100644
+--- a/kernel/time/timer_round.c
++++ b/kernel/time/timer_round.c
+@@ -21,6 +21,7 @@
+ #include <linux/export.h>
+ #include <linux/jiffies.h>
+ #include <linux/smp.h>
++#include <linux/time64.h>
+ #include <linux/timer.h>
+ 
+ static unsigned long round_jiffies_common(unsigned long j, int cpu,
+@@ -182,3 +183,39 @@ unsigned long round_jiffies_up_relative(unsigned long j)
+ 	return __round_jiffies_up_relative(j, raw_smp_processor_id());
+ }
+ EXPORT_SYMBOL_GPL(round_jiffies_up_relative);
++
++/* Timespec normalization from kernel/time/time.c. */
++/**
++ * set_normalized_timespec64 - set timespec sec and nsec parts and normalize
++ *
++ * @ts:		pointer to timespec variable to be set
++ * @sec:	seconds to set
++ * @nsec:	nanoseconds to set
++ *
++ * Set seconds and nanoseconds field of a timespec variable and
++ * normalize to the timespec storage format
++ *
++ * Note: The tv_nsec part is always in the range of 0 <= tv_nsec < NSEC_PER_SEC.
++ * For negative values only the tv_sec field is negative !
++ */
++void set_normalized_timespec64(struct timespec64 *ts, time64_t sec, s64 nsec)
++{
++	while (nsec >= NSEC_PER_SEC) {
++		/*
++		 * The following asm() prevents the compiler from
++		 * optimising this loop into a modulo operation. See
++		 * also __iter_div_u64_rem() in include/linux/time.h
++		 */
++		asm("" : "+rm"(nsec));
++		nsec -= NSEC_PER_SEC;
++		++sec;
++	}
++	while (nsec < 0) {
++		asm("" : "+rm"(nsec));
++		nsec += NSEC_PER_SEC;
++		--sec;
++	}
++	ts->tv_sec = sec;
++	ts->tv_nsec = nsec;
++}
++EXPORT_SYMBOL(set_normalized_timespec64);

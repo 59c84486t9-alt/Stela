@@ -103,6 +103,7 @@
 /kernel/locking/lock_events_list.h
 /lib/timerqueue.c
 /kernel/time/Makefile
+/kernel/time/time.c
 /kernel/time/timer.c
 /kernel/time/timer_round.c
 /init/Kconfig
@@ -235,6 +236,7 @@
 /fs/mnt_idmapping.c
 /fs/inode.c
 /fs/inode_cache_init.c
+/fs/inode_timestamps.c
 /fs/inode_lru.h
 /fs/fs-writeback.c
 /fs/writeback_inode.h
