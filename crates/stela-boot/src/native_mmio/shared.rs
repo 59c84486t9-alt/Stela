@@ -460,6 +460,7 @@ pub(crate) struct Source {
     hpet_assignment: core::cell::RefCell<Option<Assignment<Reservation>>>,
     pci_slots: config_space::PciSlots,
     pci_clock: core::cell::OnceCell<crate::native_clock::Prepared>,
+    verified_framebuffer: core::cell::OnceCell<crate::pci_io::FramebufferSource>,
     /// Each claimed ECAM bus, by its window and bus.
     buses: core::cell::RefCell<Vec<Bus>>,
     ioapics: core::cell::RefCell<MountedIoapics>,
@@ -605,9 +606,14 @@ impl Source {
             hpet_assignment: core::cell::RefCell::new(None),
             pci_slots: config_space::PciSlots::new(),
             pci_clock: core::cell::OnceCell::new(),
+            verified_framebuffer: core::cell::OnceCell::new(),
             buses: core::cell::RefCell::new(Vec::new()),
             ioapics: core::cell::RefCell::new(MountedIoapics::Unclaimed),
         })
+    }
+
+    pub(crate) fn verified_framebuffer(&self) -> Option<crate::pci_io::FramebufferSource> {
+        self.verified_framebuffer.get().copied()
     }
 
     pub(crate) fn authority(&self) -> &Authority {

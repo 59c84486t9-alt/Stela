@@ -60,11 +60,16 @@ impl Scanout for GopScanout {
         if rows.len() < row_bytes * height {
             return Err(refuse!("presented frame is smaller than the scanout mode"));
         }
-        if !DCP_PRESENTED.swap(true, Ordering::Relaxed) {
-            console::release();
-        }
-        for y in 0..height {
-            self.screen.show_row(y, &rows[y * row_bytes..][..row_bytes]);
+        if !self.screen.show_frame(rows, || {
+            if !DCP_PRESENTED.load(Ordering::Relaxed) {
+                if !console::release() {
+                    return false;
+                }
+                DCP_PRESENTED.store(true, Ordering::Relaxed);
+            }
+            true
+        }) {
+            return Err(refuse!("firmware framebuffer access was refused"));
         }
         Ok(())
     }

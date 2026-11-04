@@ -1122,12 +1122,22 @@ fn open_gpus(
             .iter()
             .any(|adapter| adapter.vendor == stela_drivers::gpu::Vendor::Nvidia);
     crate::status::begin("Starting the GPU");
+    let gop = if handoff.screen.is_some() {
+        mmio.verified_framebuffer()
+            .map(Some)
+            .ok_or("the firmware framebuffer PCI source was unavailable")
+    } else {
+        Ok(None)
+    };
     let claimed = work.call_owned(60_000_000, move || {
         let services = services::Services::new(mmio, remappers, None, heap, tsc_hz, Vec::new());
         let random = stela_drivers::probe::NativeServices::entropy(&services)
             .ok()
             .and_then(|entropy| stela_linux::random::Seeded::from_entropy(&*entropy).ok());
-        (gpu::claim_all(&services, &adapters), random)
+        let claimed = random
+            .as_ref()
+            .map_or_else(Vec::new, |_| gpu::claim_all(&services, &adapters, gop));
+        (claimed, random)
     });
     let (claimed, random) = match claimed {
         Ok((claimed, Some(random))) if software || !claimed.is_empty() => (claimed, random),
@@ -1228,11 +1238,14 @@ fn place_devices(
         carried(name).or_else(|| flash.and_then(|flash| flash.image(name)))
     };
     let firmware_scanout = || {
-        handoff.screen.map(|screen| {
-            let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
-            alloc::boxed::Box::new(display::GopScanout::new(screen))
-                as alloc::boxed::Box<dyn stela_soc::machine::Scanout>
-        })
+        handoff
+            .screen
+            .filter(|screen| screen.available())
+            .map(|screen| {
+                let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
+                alloc::boxed::Box::new(display::GopScanout::new(screen))
+                    as alloc::boxed::Box<dyn stela_soc::machine::Scanout>
+            })
     };
     #[cfg(feature = "nvk")]
     let scanout = gpu::display::scanout().or_else(firmware_scanout);

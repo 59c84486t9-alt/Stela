@@ -57,7 +57,11 @@ impl<'a> ContainedPci<'a> {
                 }
                 Ok(())
             })
-        }
+        }?;
+        self.source
+            .verified_framebuffer
+            .set(source)
+            .map_err(|_| Error::Busy)
     }
 
     pub(crate) fn check_observation(
