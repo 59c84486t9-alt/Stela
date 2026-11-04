@@ -1487,7 +1487,6 @@ pub unsafe fn probe_with_provider(
                 // for every discovered companion. The native attach owns
                 // EHCI's BIOS handoff through its original requester and BAR.
                 unsafe { native::ehci(services, address, handoff.clock) }
-                    .map(|(controller, domain)| (services, controller, domain))
             }
             Some(_) => Err((
                 Error::Native(ServiceError::Refused("EHCI companion handoff incomplete")),
@@ -1495,7 +1494,7 @@ pub unsafe fn probe_with_provider(
             )),
             None => Err((Error::Native(ServiceError::Unavailable), None)),
         };
-        let (services, controller, domain) = match attached {
+        let controller = match attached {
             Ok(attached) => attached,
             Err((error, kept)) => {
                 usb_handoff_failures.push(usb::handoff::Kind::Ehci);
@@ -1504,16 +1503,10 @@ pub unsafe fn probe_with_provider(
                 continue;
             }
         };
-        // SAFETY: this domain belongs to the attached controller. The CPU
-        // alone touches these storage buffers through the controller's arena.
-        let mut dma = unsafe {
-            crate::bus::dma::DomainAllocator::new(services.pages(), domain, u64::from(u32::MAX))
-        };
         let found = usb::ehci::host::enumerate(
             &controller,
             &alloc::format!("{address} EHCI"),
             handoff.clock,
-            &mut dma,
         );
         devices.disks.extend(
             found

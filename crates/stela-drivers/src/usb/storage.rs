@@ -411,10 +411,9 @@ pub(in crate::usb) fn discover_ehci(
     interface: &Interface,
     location: String,
     serial: String,
-    dma: &mut dyn DmaAllocator,
     failures: &mut Vec<(String, BlockError)>,
 ) -> Result<(UsbStorage, Vec<UsbDisk>), BlockError> {
-    let bot = Bot::ehci(io, interface, dma)?;
+    let bot = Bot::ehci(io, interface)?;
     let owner = Rc::new(RefCell::new(media::Owner::new(
         bot,
         format!("{location} interface {}", interface.number),

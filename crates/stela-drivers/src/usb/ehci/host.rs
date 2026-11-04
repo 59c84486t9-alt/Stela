@@ -6,7 +6,6 @@ use super::{Controller, DeviceId, Error};
 use crate::{
     Clock,
     block::BlockError,
-    bus::dma::DmaAllocator,
     usb::{
         descriptor::{
             CONFIGURATION_DESCRIPTOR, DEVICE_DESCRIPTOR, DEVICE_TO_HOST, GET_DESCRIPTOR,
@@ -129,18 +128,13 @@ fn string(controller: &mut Controller, id: &DeviceId, index: u8) -> Option<Strin
 }
 
 /// Bring up every connected root of `controller` and bind its storage.
-pub fn enumerate(
-    controller: &Shared,
-    location: &str,
-    clock: Clock,
-    dma: &mut dyn DmaAllocator,
-) -> Found {
+pub fn enumerate(controller: &Shared, location: &str, clock: Clock) -> Found {
     let mut found = Found::default();
     let ports = controller.borrow().ports();
     for port in 1..=ports {
         let at = format!("{location} port {port}");
         match address(controller, port) {
-            Ok(addressed) => bind(controller, addressed, at, clock, dma, &mut found),
+            Ok(addressed) => bind(controller, addressed, at, clock, &mut found),
             // Nothing is connected.
             Err(Error::Stale) => {}
             Err(Error::Unsupported(
@@ -153,14 +147,7 @@ pub fn enumerate(
 }
 
 /// Bind the first Bulk-Only SCSI interface of configuration zero.
-fn bind(
-    controller: &Shared,
-    addressed: Addressed,
-    at: String,
-    clock: Clock,
-    dma: &mut dyn DmaAllocator,
-    found: &mut Found,
-) {
+fn bind(controller: &Shared, addressed: Addressed, at: String, clock: Clock, found: &mut Found) {
     let Addressed { id, descriptor } = addressed;
     let prepared = (|| {
         let mut c = controller.borrow_mut();
@@ -179,8 +166,7 @@ fn bind(
         Ok(Some((setting, serial, pipes))) => {
             let serial = serial.unwrap_or_else(|| at.clone());
             let io = storage::EhciBulk::new(controller.clone(), id, pipes, clock, descriptor);
-            match storage::discover_ehci(io, &setting, at.clone(), serial, dma, &mut found.failures)
-            {
+            match storage::discover_ehci(io, &setting, at.clone(), serial, &mut found.failures) {
                 Ok((kept, disks)) => {
                     found.storage.push(kept);
                     found.disks.extend(disks);

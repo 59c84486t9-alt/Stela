@@ -36,17 +36,46 @@ pub(super) fn supported(device: &Device) -> Result<(), &'static str> {
     quirks::Flags::from_device(device).map(|_| ())
 }
 
+/// BOT's CPU view of transport buffers. Only a direct-DMA transport
+/// has a bus address to pass to its controller.
+pub(super) trait Buffer {
+    fn bytes(&self) -> &[u8];
+    fn bytes_mut(&mut self) -> &mut [u8];
+}
+
+impl Buffer for DmaBuffer {
+    fn bytes(&self) -> &[u8] {
+        self.bytes()
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        self.bytes_mut()
+    }
+}
+
+impl Buffer for Vec<u8> {
+    fn bytes(&self) -> &[u8] {
+        self.as_slice()
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        self.as_mut_slice()
+    }
+}
+
 /// Private seam: every native transfer returns only after completion or
 /// xHCI cancellation. An error may leave poison; ready must expose it before
-/// the CPU touches either DMA buffer again. No hosted USB API is used.
+/// the CPU touches either transport buffer again. No hosted USB API is used.
 pub(super) trait Io {
+    type Buffer: Buffer;
+
     fn ready(&mut self) -> Result<(), BlockError>;
     fn control(&mut self, request: [u8; 8]) -> Result<Vec<u8>, BlockError>;
     fn clear(&mut self, endpoint: Endpoint) -> Result<(), BlockError>;
     fn bulk(
         &mut self,
         endpoint: Endpoint,
-        buffer: &mut DmaBuffer,
+        buffer: &mut Self::Buffer,
         length: usize,
     ) -> Result<usize, BlockError>;
     /// Isolate the device after its transport was poisoned.
@@ -69,7 +98,7 @@ pub(super) trait Io {
     fn submit(
         &mut self,
         endpoint: Endpoint,
-        buffer: &mut DmaBuffer,
+        buffer: &mut Self::Buffer,
         length: usize,
     ) -> Result<Pending, BlockError> {
         Ok(Pending::Done(self.bulk(endpoint, buffer, length)))
@@ -141,6 +170,8 @@ pub(super) struct Native {
     pub endpoints: [Endpoint; 2],
 }
 impl Io for Native {
+    type Buffer = DmaBuffer;
+
     fn signals(&self) -> bool {
         self.controller
             .try_borrow()
@@ -172,7 +203,7 @@ impl Io for Native {
     fn bulk(
         &mut self,
         endpoint: Endpoint,
-        buffer: &mut DmaBuffer,
+        buffer: &mut Self::Buffer,
         length: usize,
     ) -> Result<usize, BlockError> {
         self.controller.borrow_mut().device(self.id)?.transfer(
@@ -203,7 +234,7 @@ impl Io for Native {
     fn submit(
         &mut self,
         endpoint: Endpoint,
-        buffer: &mut DmaBuffer,
+        buffer: &mut Self::Buffer,
         length: usize,
     ) -> Result<Pending, BlockError> {
         let buffer = buffer.physical();
@@ -299,28 +330,28 @@ impl Io for Native {
 /// The unique owner can move to a fresh transport only after whole-device
 /// retirement and successful native reconstruction. Old media aliases
 /// keep their poisoned Bot, whose buffer slots are then permanently empty.
-/// This never manufactures another DmaBuffer or rewinds its allocator.
-struct TransportBuffer(Option<DmaBuffer>);
-impl TransportBuffer {
-    fn new(buffer: DmaBuffer) -> Self {
+/// The replacement takes the original allocation intact.
+struct TransportBuffer<B>(Option<B>);
+impl<B> TransportBuffer<B> {
+    fn new(buffer: B) -> Self {
         Self(Some(buffer))
     }
     fn present(&self) -> bool {
         self.0.is_some()
     }
     fn transfer(&mut self) -> Self {
-        Self(Some(self.0.take().expect("retained BOT DMA owner")))
+        Self(Some(self.0.take().expect("retained BOT buffer")))
     }
 }
-impl Deref for TransportBuffer {
-    type Target = DmaBuffer;
-    fn deref(&self) -> &DmaBuffer {
-        self.0.as_ref().expect("retained BOT DMA owner")
+impl<B> Deref for TransportBuffer<B> {
+    type Target = B;
+    fn deref(&self) -> &B {
+        self.0.as_ref().expect("retained BOT buffer")
     }
 }
-impl DerefMut for TransportBuffer {
-    fn deref_mut(&mut self) -> &mut DmaBuffer {
-        self.0.as_mut().expect("retained BOT DMA owner")
+impl<B> DerefMut for TransportBuffer<B> {
+    fn deref_mut(&mut self) -> &mut B {
+        self.0.as_mut().expect("retained BOT buffer")
     }
 }
 
@@ -328,8 +359,8 @@ pub(super) struct Bot<I: Io> {
     pub io: I,
     interface: u8,
     endpoints: [Endpoint; 2],
-    buffer: TransportBuffer,
-    wrapper: TransportBuffer,
+    buffer: TransportBuffer<I::Buffer>,
+    wrapper: TransportBuffer<I::Buffer>,
     tag: u32,
     max_lun: u8,
     poisoned: bool,
@@ -408,7 +439,7 @@ enum Next {
     Done(Result<Vec<u8>, BlockError>),
 }
 
-impl<I: Io> Bot<I> {
+impl<I: Io<Buffer = DmaBuffer>> Bot<I> {
     #[cfg(test)]
     pub fn new(
         io: I,
@@ -436,6 +467,9 @@ impl<I: Io> Bot<I> {
             max_lun,
         ))
     }
+}
+
+impl<I: Io> Bot<I> {
     /// Perform transport admission before committing any moved buffers.
     fn startup(io: &mut I, interface: u8, flags: quirks::Flags) -> Result<u8, BlockError> {
         io.ready()?;
@@ -465,8 +499,8 @@ impl<I: Io> Bot<I> {
         io: I,
         interface: u8,
         endpoints: [Endpoint; 2],
-        buffer: TransportBuffer,
-        wrapper: TransportBuffer,
+        buffer: TransportBuffer<I::Buffer>,
+        wrapper: TransportBuffer<I::Buffer>,
         flags: quirks::Flags,
         max_lun: u8,
     ) -> Self {

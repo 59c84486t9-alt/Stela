@@ -232,8 +232,7 @@ fn keep_error(error: impl Into<Error>, owner: impl Any) -> Failure {
     (error.into(), Some(Box::new(owner)))
 }
 
-/// Attach an EHCI host controller from its claimed function, BAR0 registers
-/// and requester domain, returning the controller and that domain.
+/// Attach an EHCI host controller with its own requester, BAR0 and DMA arena.
 ///
 /// # Safety
 /// [`NativeServices`]' contract holds for `services`, `clock` is the
@@ -248,7 +247,7 @@ pub(super) unsafe fn ehci(
     services: &dyn NativeServices,
     address: Address,
     clock: Clock,
-) -> Result<(ehci::host::Shared, Arc<dyn DmaDomain>), Failure> {
+) -> Result<ehci::host::Shared, Failure> {
     let minimum = services
         .minimum_delay()
         .map_err(|error| (Error::Native(error), None))?;
@@ -274,7 +273,7 @@ pub(super) unsafe fn ehci(
     // companions. EHCI proves BIOS release and engine HALT, then drains the
     // original root before binding the domain or allocating its arena.
     match unsafe { ehci::attach(resources) } {
-        Ok((controller, domain)) => Ok((Rc::new(RefCell::new(controller)), domain)),
+        Ok((controller, _)) => Ok(Rc::new(RefCell::new(controller))),
         Err(failure) => Err((Error::Ehci(failure.error), Some(Box::new(failure)))),
     }
 }
