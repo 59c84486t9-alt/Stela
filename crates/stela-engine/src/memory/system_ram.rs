@@ -199,7 +199,8 @@ impl RegisteredSystemRam {
     ) -> Result<(), crate::memory::domain::PublicationFault> {
         use crate::memory::domain::PublicationFault;
         // Most reads are a descriptor or a block's source, in one region.
-        let admitted = match self.region(physical) {
+        let mut current = self.region(physical);
+        let admitted = match current {
             Some((region, offset)) if output.len() <= region.bytes - offset => {
                 self.domain.check_execution()
             }
@@ -215,9 +216,7 @@ impl RegisteredSystemRam {
                 status,
                 completed: done,
             };
-            let (region, offset) = self
-                .region(physical + done as u64)
-                .ok_or_else(|| fault(MemoryStatus::Domain))?;
+            let (region, offset) = current.ok_or_else(|| fault(MemoryStatus::Domain))?;
             let count = (output.len() - done).min(region.bytes - offset);
             let pointer = region
                 .backing
@@ -257,6 +256,10 @@ impl RegisteredSystemRam {
                 advanced += width;
                 done += width;
             }
+            if done == output.len() {
+                break;
+            }
+            current = self.region(physical + done as u64);
         }
         Ok(())
     }
