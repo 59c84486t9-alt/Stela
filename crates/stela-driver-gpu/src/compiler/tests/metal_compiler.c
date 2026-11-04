@@ -1538,6 +1538,24 @@ defined_functions_inline_into_their_callers(void)
           error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "recursive"));
 }
 
+/* A module with no direct call edges still checks unsupported calls during lowering. */
+static void
+unresolved_calls_are_rejected_without_a_call_graph(void)
+{
+   const char *callees[] = {"@external", "null"};
+   const char *errors[] = {"unresolved external function external", "only from visible function tables"};
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   for (unsigned i = 0; i < ARRAY_SIZE(callees); i++) {
+      char *fixture = ralloc_asprintf(NULL,
+         "declare void @external()\ndefine void @unresolved() {\ncall void %s()\nret void\n}\n"
+         "!air.kernel = !{!2}\n!2 = !{ptr @unresolved, !3, !3}\n!3 = !{}\n", callees[i]);
+      struct stela_air_error error;
+      assert(!compile(fixture, "unresolved", &specialization, &error));
+      assert(error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, errors[i]));
+      ralloc_free(fixture);
+   }
+}
+
 /* os_log.log_error("hi %d %f %ld", ...) through the method Apple's compiler
  * defines for it, in a kernel, with a float its call promotes and a long. */
 static const char *logging =
@@ -2011,6 +2029,7 @@ main(void)
    arrays_reflect_each_slot();
    bindings_reflect_their_structures();
    defined_functions_inline_into_their_callers();
+   unresolved_calls_are_rejected_without_a_call_graph();
    stitched_functions_call_their_nodes_in_order();
    os_log_appends_self_contained_records();
    linked_functions_resolve_tables_and_externals();
