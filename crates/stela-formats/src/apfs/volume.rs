@@ -605,7 +605,7 @@ impl Volume {
                 let size = u64_at(&data, 8)?;
                 let mut bytes =
                     vec![0; usize::try_from(size).map_err(|_| ApfsError::Malformed("xattr size"))?];
-                self.read_stream(device, stream, size, 0, &mut bytes)?;
+                self.read_stream(device, stream, size, 0, &mut bytes, true)?;
                 Ok(Some(bytes))
             }
             Some(_) => Err(ApfsError::Malformed(
@@ -672,13 +672,17 @@ impl Volume {
         size: u64,
         offset: u64,
         buffer: &mut [u8],
+        zeroed: bool,
     ) -> Result<()> {
         let end = offset
             .checked_add(buffer.len() as u64)
             .filter(|&end| end <= size)
             .ok_or(ApfsError::Malformed("read past the end of the stream"))?;
-        // Holes and the space past the last extent read as zeros.
-        buffer.fill(0);
+        // Holes and the space past the last extent read as zeros. Whole
+        // files and attributes already have a freshly zeroed buffer.
+        if !zeroed {
+            buffer.fill(0);
+        }
         let block_size = u64::from(device.block_size());
         for extent in self.extents(device, private_id)? {
             let start = extent.offset.max(offset);
@@ -701,6 +705,17 @@ impl Volume {
         offset: u64,
         buffer: &mut [u8],
     ) -> Result<()> {
+        self.read_regular_at(device, inode, offset, buffer, false)
+    }
+
+    fn read_regular_at<R: ReadAt>(
+        &self,
+        device: &mut Device<R>,
+        inode: &Inode,
+        offset: u64,
+        buffer: &mut [u8],
+        zeroed: bool,
+    ) -> Result<()> {
         if inode.kind != FileKind::Regular {
             return Err(ApfsError::NotFound(format!(
                 "inode {} is not a regular file",
@@ -710,7 +725,19 @@ impl Volume {
         if inode.bsd_flags & UF_COMPRESSED != 0 {
             return Err(ApfsError::Unsupported("transparently compressed files"));
         }
-        self.read_stream(device, inode.private_id, inode.size, offset, buffer)
+        self.read_stream(device, inode.private_id, inode.size, offset, buffer, zeroed)
+    }
+
+    /// Read a whole regular file without accepting transparent compression.
+    pub(crate) fn read_regular<R: ReadAt>(
+        &self,
+        device: &mut Device<R>,
+        inode: &Inode,
+    ) -> Result<Vec<u8>> {
+        let mut bytes =
+            vec![0; usize::try_from(inode.size).map_err(|_| ApfsError::Malformed("file size"))?];
+        self.read_regular_at(device, inode, 0, &mut bytes, true)?;
+        Ok(bytes)
     }
 
     /// A whole regular file; a transparently compressed one is inflated
@@ -729,10 +756,7 @@ impl Volume {
             };
             return super::decmpfs::decode(&header, fork.as_deref());
         }
-        let mut bytes =
-            vec![0; usize::try_from(inode.size).map_err(|_| ApfsError::Malformed("file size"))?];
-        self.read_at(device, inode, 0, &mut bytes)?;
-        Ok(bytes)
+        self.read_regular(device, inode)
     }
 
     /// The volume's snapshots, oldest first.
@@ -808,6 +832,41 @@ mod tests {
 
     const GROUP: &str = "A304C51B-D22F-4CDD-829D-3E30CB5BD87B";
 
+    #[test]
+    fn caller_buffer_has_zeroed_unread_bytes_after_source_failure() -> Result<()> {
+        struct PartialRead(crate::apfs::tests::Memory);
+
+        impl ReadAt for PartialRead {
+            type Error = &'static str;
+
+            fn len(&self) -> u64 {
+                self.0.len()
+            }
+
+            fn read_at(
+                &mut self,
+                offset: u64,
+                out: &mut [u8],
+            ) -> core::result::Result<(), Self::Error> {
+                if out.len() == 16 {
+                    out[..3].fill(0xa5);
+                    return Err("injected partial source failure");
+                }
+                self.0.read_at(offset, out)
+            }
+        }
+
+        let mut container = Container::open(PartialRead(fixture()), 0)?;
+        let volume = container.volume_with_role(APFS_VOL_ROLE_PREBOOT)?;
+        let device = &mut container.device;
+        let inode = volume.lookup(device, "pattern.bin", true)?;
+        let mut out = [0xff; 16];
+        assert!(volume.read_at(device, &inode, 123_456, &mut out).is_err());
+        assert_eq!(&out[..3], &[0xa5; 3]);
+        assert_eq!(&out[3..], &[0; 13]);
+        Ok(())
+    }
+
     fn pattern(length: usize) -> Vec<u8> {
         (0..length)
             .map(|i| ((i * 7 + i / 251) & 0xff) as u8)
@@ -851,6 +910,9 @@ mod tests {
         assert_eq!(data.len(), 200_004);
         assert!(data[..200_000].iter().all(|&b| b == 0));
         assert_eq!(&data[200_000..], b"tail");
+        let mut last = [0xff; 8];
+        volume.read_at(device, &sparse, 199_996, &mut last)?;
+        assert_eq!(&last, b"\0\0\0\0tail");
         let empty = volume.lookup(device, "empty", true)?;
         assert_eq!(
             volume
