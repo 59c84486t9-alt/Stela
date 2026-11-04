@@ -242,6 +242,15 @@ pub(super) fn parse(
     base: GuestAddress,
     profile: BlockProfile,
 ) -> Result<ParsedBlock, BlockAnalysisError> {
+    parse_admitted(source, base, profile, |_| true)
+}
+
+pub(super) fn parse_admitted(
+    source: &[u8],
+    base: GuestAddress,
+    profile: BlockProfile,
+    mut admit: impl FnMut(u32) -> bool,
+) -> Result<ParsedBlock, BlockAnalysisError> {
     if source.is_empty() || !source.len().is_multiple_of(4) || !base.0.is_multiple_of(4) {
         return Err(BlockAnalysisError {
             pc: base,
@@ -268,6 +277,10 @@ pub(super) fn parse(
     let checked_memory = profile.checked_memory().is_some();
     let restricted_system = profile.has(Features::SYSTEM) && !full_system;
     for bytes in source.as_chunks::<4>().0 {
+        let word = u32::from_le_bytes(*bytes);
+        if !admit(word) {
+            break;
+        }
         let pc = next_pc;
         next_pc = GuestAddress(pc.0.checked_add(4).ok_or(BlockAnalysisError {
             pc,
@@ -275,7 +288,6 @@ pub(super) fn parse(
             kind: CompileErrorKind::GuestAddressOverflow,
         })?);
         source_bytes += 4;
-        let word = u32::from_le_bytes(*bytes);
         if full_system {
             // PAuth hints share the hint space, so they are matched first.
             if let Some(decoded) =
