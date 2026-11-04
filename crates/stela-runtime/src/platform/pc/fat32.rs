@@ -90,6 +90,7 @@ pub struct Fat32<R> {
     /// The FAT bytes last read and their offset in the FAT.
     window: Vec<u8>,
     window_offset: Option<u64>,
+    directory_sector: Vec<u8>,
 }
 
 fn u16_at(bytes: &[u8], at: usize) -> u16 {
@@ -172,6 +173,7 @@ impl<R: ReadAt> Fat32<R> {
             root,
             window: vec![0; FAT_WINDOW],
             window_offset: None,
+            directory_sector: vec![0; bytes_per_sector as usize],
         };
         if !volume.valid(root) {
             return Err(FatError::NotFat32("root directory cluster"));
@@ -284,28 +286,30 @@ impl<R: ReadAt> Fat32<R> {
         name: &[u8; 11],
     ) -> Result<Option<(u8, u32, u32)>, FatError> {
         let directory = self.chain(path, cluster, None)?;
-        let mut entry = [0u8; ENTRY_BYTES];
         for extent in &directory.extents {
-            for at in (0..extent.bytes).step_by(ENTRY_BYTES) {
+            for at in (0..extent.bytes).step_by(self.directory_sector.len()) {
                 self.reader
-                    .read_at(extent.offset + at, &mut entry)
+                    .read_at(extent.offset + at, &mut self.directory_sector)
                     .map_err(|e| FatError::Io(format!("{e:?}")))?;
-                let attributes = entry[11];
-                match entry[0] {
-                    ENTRY_END => return Ok(None),
-                    ENTRY_FREE => continue,
-                    _ if attributes & ATTRIBUTE_LONG_NAME == ATTRIBUTE_LONG_NAME => continue,
-                    _ if attributes & ATTRIBUTE_VOLUME_ID != 0 => continue,
-                    _ => {}
-                }
-                let mut stored = [0u8; 11];
-                stored.copy_from_slice(&entry[..11]);
-                if stored[0] == ENTRY_KANJI_E5 {
-                    stored[0] = ENTRY_FREE;
-                }
-                if stored.to_ascii_uppercase() == *name {
-                    let first = u32::from(u16_at(&entry, 20)) << 16 | u32::from(u16_at(&entry, 26));
-                    return Ok(Some((attributes, first, u32_at(&entry, 28))));
+                for entry in self.directory_sector.as_chunks::<ENTRY_BYTES>().0 {
+                    let attributes = entry[11];
+                    match entry[0] {
+                        ENTRY_END => return Ok(None),
+                        ENTRY_FREE => continue,
+                        _ if attributes & ATTRIBUTE_LONG_NAME == ATTRIBUTE_LONG_NAME => continue,
+                        _ if attributes & ATTRIBUTE_VOLUME_ID != 0 => continue,
+                        _ => {}
+                    }
+                    let mut stored = [0u8; 11];
+                    stored.copy_from_slice(&entry[..11]);
+                    if stored[0] == ENTRY_KANJI_E5 {
+                        stored[0] = ENTRY_FREE;
+                    }
+                    if stored.to_ascii_uppercase() == *name {
+                        let first =
+                            u32::from(u16_at(entry, 20)) << 16 | u32::from(u16_at(entry, 26));
+                        return Ok(Some((attributes, first, u32_at(entry, 28))));
+                    }
                 }
             }
         }
@@ -560,6 +564,47 @@ pub(crate) mod tests {
         ] {
             assert_eq!(fat.file(path).unwrap_err().to_string(), error, "{path}");
         }
+    }
+
+    #[test]
+    fn directory_lookup_reads_each_needed_sector_once() {
+        struct Recorded {
+            disk: Sparse,
+            directory_reads: Vec<(u64, usize)>,
+        }
+
+        impl ReadAt for Recorded {
+            type Error = Refusal;
+
+            fn len(&self) -> u64 {
+                self.disk.len()
+            }
+
+            fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<()> {
+                if offset >= data(2) {
+                    self.directory_reads.push((offset, buffer.len()));
+                }
+                self.disk.read_at(offset, buffer)
+            }
+        }
+
+        let mut volume = Volume::new();
+        volume.link(&[2, 7, 9]);
+        volume.disk.write(data(2), &[ENTRY_FREE; SECTOR as usize]);
+        volume.file(7, 0, b"IPSW    000", b"payload");
+        let mut fat = Fat32::open(Recorded {
+            disk: volume.disk,
+            directory_reads: Vec::new(),
+        })
+        .unwrap();
+        let expected = [(data(2), SECTOR as usize), (data(7), SECTOR as usize)];
+
+        assert_eq!(fat.file("ipsw.000").unwrap().bytes, 7);
+        assert_eq!(fat.reader.directory_reads, expected);
+        fat.reader.directory_reads.clear();
+
+        assert!(matches!(fat.file("absent"), Err(FatError::Missing(_))));
+        assert_eq!(fat.reader.directory_reads, expected);
     }
 
     #[test]

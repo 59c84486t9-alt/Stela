@@ -649,6 +649,118 @@ mod resident {
     }
 
     #[test]
+    fn ordinary_address_pair_respects_standalone_entry_and_truncated_source() -> Result<()> {
+        const ADRP: u32 = 0xb000_0000; // adrp x0, BASE+0x1000
+        const ADD: u32 = 0x9100_2000; // add x0, x0, #8
+        let cache = tempfile::tempdir()?;
+        let add_pc = GuestAddress(BASE.0 + 4);
+        let mut runtime = ordinary(cache.path(), &[ADRP, ADD, RET_X30])?;
+        for (entry, value) in [(BASE, BASE.0 + 0x1008), (add_pc, 5)] {
+            let mut state = thread(u64::MAX - 2);
+            state.pc = entry;
+            let mut expected = state.registers.clone();
+            expected.x[0] = value;
+            // SAFETY: pure register instructions and RET to STOP.
+            let outcome = unsafe { runtime.run(&mut state, Some(STOP), 1)? };
+            assert_eq!(outcome.blocks_executed, 1);
+            assert_eq!(state.registers, expected);
+            assert_eq!(state.pc, STOP);
+        }
+        let map = &runtime.loaded_manifest(BASE).unwrap().source_map;
+        assert_eq!(map[..2], [(BASE, 0), (add_pc, 10)]);
+        assert_eq!(
+            runtime.loaded_manifest(add_pc).unwrap().source_map[0],
+            (add_pc, 0)
+        );
+
+        let mut truncated = ordinary(cache.path(), &[ADRP])?;
+        let mut state = thread(100);
+        let mut expected = state.registers.clone();
+        expected.x[0] = BASE.0 + 0x1000;
+        // SAFETY: the truncated input contains only ADRP.
+        let outcome = unsafe { truncated.run(&mut state, Some(add_pc), 1)? };
+        assert_eq!(outcome.blocks_executed, 1);
+        assert_eq!(state.registers, expected);
+        assert_eq!(state.pc, add_pc);
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_wide_constant_respects_standalone_and_truncated_entries() -> Result<()> {
+        const MOVN: u32 = 0x92c0_0000 | (0xabcd << 5);
+        const MOVK_LOW: u32 = 0xf2a0_0000 | (0x1234 << 5);
+        const MOVK_HIGH: u32 = 0xf2e0_0000 | (0x5678 << 5);
+        const INITIAL: u64 = 0x9876_1357_9abc_def0;
+        let cache = tempfile::tempdir()?;
+        let second = GuestAddress(BASE.0 + 4);
+        let third = GuestAddress(BASE.0 + 8);
+        let mut runtime = ordinary(cache.path(), &[MOVN, MOVK_LOW, MOVK_HIGH, RET_X30])?;
+        for (entry, value) in [
+            (BASE, 0x5678_5432_1234_ffff),
+            (second, 0x5678_1357_1234_def0),
+            (third, 0x5678_1357_9abc_def0),
+        ] {
+            let mut state = thread(INITIAL);
+            state.pc = entry;
+            let mut expected = state.registers.clone();
+            expected.x[0] = value;
+            // SAFETY: only register instructions and RET to STOP.
+            let outcome = unsafe { runtime.run(&mut state, Some(STOP), 1)? };
+            assert_eq!(outcome.blocks_executed, 1);
+            assert_eq!(state.registers, expected);
+            assert_eq!(state.pc, STOP);
+        }
+        let map = &runtime.loaded_manifest(BASE).unwrap().source_map;
+        assert_eq!(map[..3], [(BASE, 0), (second, 1), (third, 11)]);
+        for (words, stop, value) in [
+            (&[MOVN][..], second, 0xffff_5432_ffff_ffff),
+            (&[MOVN, MOVK_LOW][..], third, 0xffff_5432_1234_ffff),
+        ] {
+            let mut truncated = ordinary(cache.path(), words)?;
+            let mut state = thread(INITIAL);
+            let mut expected = state.registers.clone();
+            expected.x[0] = value;
+            // SAFETY: the truncated inputs contain only register instructions.
+            let outcome = unsafe { truncated.run(&mut state, Some(stop), 1)? };
+            assert_eq!(outcome.blocks_executed, 1);
+            assert_eq!(state.registers, expected);
+            assert_eq!(state.pc, stop);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_trailing_zero_pair_respects_truncated_source_and_standalone_entry() -> Result<()> {
+        const RBIT: u32 = 0xdac0_0000; // rbit x0, x0
+        const CLZ: u32 = 0xdac0_1000; // clz x0, x0
+        let cache = tempfile::tempdir()?;
+        let clz_pc = GuestAddress(BASE.0 + 4);
+        let mut runtime = ordinary(cache.path(), &[RBIT, CLZ, RET_X30])?;
+
+        for (entry, result) in [(BASE, 4), (clz_pc, 59)] {
+            let mut state = thread(16);
+            state.pc = entry;
+            let mut expected = state.registers.clone();
+            expected.x[0] = result;
+            // SAFETY: pure register instructions and RET to STOP.
+            let outcome = unsafe { runtime.run(&mut state, Some(STOP), 1)? };
+            assert_eq!(outcome.blocks_executed, 1);
+            assert_eq!(state.registers, expected);
+            assert_eq!(state.pc, STOP);
+        }
+        let mut truncated = ordinary(cache.path(), &[RBIT])?;
+        let mut state = thread(16);
+        let mut expected = state.registers.clone();
+        expected.x[0] = 0x0800_0000_0000_0000;
+        // SAFETY: the truncated input contains only RBIT.
+        let outcome = unsafe { truncated.run(&mut state, Some(clz_pc), 1)? };
+        assert_eq!(outcome.blocks_executed, 1);
+        assert_eq!(state.registers, expected);
+        assert_eq!(state.pc, clz_pc);
+        Ok(())
+    }
+
+    #[test]
     fn ordinary_direct_ram_loop_keeps_budget_state_and_cached_source_map() -> Result<()> {
         const BODY: [u32; 7] = [
             0xf940_0022, // ldr x2, [x1]

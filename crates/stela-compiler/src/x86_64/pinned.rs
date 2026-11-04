@@ -16,7 +16,7 @@ use super::asm::{Alu, Asm, Code, Gpr, Mem, Rm, ShiftOp, Size};
 use super::{flag_word, logical, nzcv, right_operand, store};
 use crate::{
     GuestState,
-    aarch64::{Logical, Operation, Register, Shift, WideMove, Width, simd},
+    aarch64::{Logical, Operation, Register, Shift, WideMove, Width, pc_relative, simd},
     block::HostGprSnapshot,
 };
 
@@ -169,6 +169,13 @@ pub(super) fn compare_held_immediate(code: &mut Code, width: Width, immediate: u
     code.asm()
         .alu_imm(Alu::Cmp, size, Gpr::Rax, immediate as i32);
     nzcv(code, true);
+}
+
+pub(super) fn emit_pc_relative(code: &mut Code, operand: pc_relative::Operand) {
+    // Fixed in size at every address, for a stored block's rebase.
+    let work = working(code, operand.destination);
+    code.asm().mov_imm64(work, operand.address);
+    finish(code, work, operand.destination, false, false);
 }
 
 /// Common integer operations on their native register or frame operands.
@@ -339,10 +346,7 @@ pub(super) fn emit_direct(code: &mut Code, operation: &Operation) -> bool {
         Operation::PcRelative(operand)
             if code.is_pinned() && operand.destination != Register::Zero =>
         {
-            // Fixed in size at every address, for a stored block's rebase.
-            let work = working(code, operand.destination);
-            code.asm().mov_imm64(work, operand.address);
-            finish(code, work, operand.destination, false, false);
+            emit_pc_relative(code, operand);
         }
         _ => return false,
     }

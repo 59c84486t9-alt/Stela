@@ -19,6 +19,9 @@ pub const PROTOCOL: u64 = 15;
 const MAX_JOBS: usize = 16;
 const MAX_LEDGER_BYTES: usize = 16 * 1024 * 1024;
 const FILE_CHUNK: usize = 8192;
+// Four framed chunks fit a single 48 KiB mux write with room for headers.
+const FILE_BATCH_BYTES: usize = 4 * FILE_CHUNK;
+const _: () = assert!(MAX_READ_BYTES.is_multiple_of(FILE_BATCH_BYTES));
 /// Every message type the host understands, with the value the public host
 /// sends for it (idevicerestore 4b3e847e `restore_supported_message_types`,
 /// "extracted from ac2"). Restored's `is_host_compatible` compares this
@@ -534,6 +537,10 @@ pub struct Job {
     raw: Output,
     index: usize,
     offset: u64,
+    /// Payload bytes staged as FileData, committed when the batch drains.
+    file_pending: usize,
+    /// The stream position at which the last staged frame can be sent.
+    file_tail: u64,
     /// Verified member bytes ready to frame.
     window: MemberWindow,
     done: bool,
@@ -551,6 +558,8 @@ impl Job {
             raw: Output::default(),
             index: 0,
             offset: 0,
+            file_pending: 0,
+            file_tail: 0,
             window: MemberWindow::default(),
             done: false,
             failed: false,
@@ -589,22 +598,30 @@ impl Job {
     }
     /// Read the next verified member window, or up to `chunks` ASR chunks.
     pub fn prefetch<R: ReadAt>(&mut self, store: &mut Store<R>, chunks: usize) -> Result<()> {
+        let limit = self.member_chunk_limit();
         match &mut self.plan {
             Plan::Asr(sender) => sender.prefetch(store, chunks)?,
             Plan::File(segments) | Plan::Raw(segments) | Plan::Message(segments)
                 if chunks != 0 && !self.done && !self.failed =>
             {
+                // Keep the existing read-ahead point at the last logical
+                // frame, including when a next-window check can fail.
+                if self.file_pending != 0 && self.frame.written() < self.file_tail {
+                    return Ok(());
+                }
+                let mut index = self.index;
+                let mut cursor = self.offset + self.file_pending as u64;
                 if let Some(Segment::Member {
                     path,
                     offset,
                     bytes,
-                }) = next_segment(segments, &mut self.index, &mut self.offset)
+                }) = next_segment(segments, &mut index, &mut cursor)
                 {
-                    let at = offset + self.offset;
-                    let remaining = bytes - self.offset;
-                    let n = remaining.min(FILE_CHUNK as u64) as usize;
-                    if self.window.get(self.index, at, n).is_none() {
-                        self.window.fill(store, self.index, path, at, remaining)?;
+                    let at = offset + cursor;
+                    let remaining = bytes - cursor;
+                    let n = remaining.min(limit as u64) as usize;
+                    if self.window.get(index, at, n).is_none() {
+                        self.window.fill(store, index, path, at, remaining)?;
                     }
                 }
             }
@@ -625,6 +642,13 @@ impl Job {
     fn sending(&self) -> bool {
         self.frame.sending() || self.raw.is_pending()
     }
+    fn member_chunk_limit(&self) -> usize {
+        if matches!(&self.plan, Plan::File(_)) {
+            FILE_BATCH_BYTES
+        } else {
+            FILE_CHUNK
+        }
+    }
     fn step<R: ReadAt>(
         &mut self,
         s: &mut impl ByteStream,
@@ -639,7 +663,10 @@ impl Job {
         }
         if self.frame.sending() {
             return match self.frame.poll_send(s) {
-                Poll::Ready(Ok(())) => Poll::Pending,
+                Poll::Ready(Ok(())) => {
+                    self.offset += core::mem::take(&mut self.file_pending) as u64;
+                    Poll::Pending
+                }
                 r => r,
             };
         }
@@ -649,6 +676,7 @@ impl Job {
                 r => r,
             };
         }
+        let limit = self.member_chunk_limit();
         match &mut self.plan {
             Plan::Reply(v) => {
                 if self.reply_queued {
@@ -683,7 +711,7 @@ impl Job {
                     }
                     return Poll::Pending;
                 };
-                let n = (segment.len() - self.offset).min(FILE_CHUNK as u64) as usize;
+                let n = (segment.len() - self.offset).min(limit as u64) as usize;
                 let bytes = match segment {
                     Segment::Bytes(bytes) => &bytes[self.offset as usize..self.offset as usize + n],
                     Segment::Member {
@@ -704,11 +732,13 @@ impl Job {
                             .ok_or(Error::Invalid("short restore member read"))?
                     }
                 };
-                self.offset += n as u64;
                 if raw {
+                    self.offset += n as u64;
                     self.raw.queue(bytes.to_vec(), FILE_CHUNK)?;
                 } else {
-                    self.frame.queue_file_data(bytes)?;
+                    let tail = self.frame.queue_file_data(bytes.chunks(FILE_CHUNK))?;
+                    self.file_pending = n;
+                    self.file_tail = self.frame.written() + tail as u64;
                 }
             }
         }

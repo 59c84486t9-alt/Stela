@@ -298,9 +298,27 @@ unroll(struct stela_air_metadata *m, LLVMValueRef entry, unsigned depth, unsigne
    }
 }
 
-bool
-stela_air_inline_calls(struct stela_air_metadata *m, LLVMValueRef entry,
-                       unsigned max_call_stack_depth, unsigned max_instructions)
+/* A branch can make a direct call unreachable after specialization. */
+static bool
+can_prune_calls(LLVMValueRef entry)
+{
+   bool branch = false, call = false;
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(entry); block;
+        block = LLVMGetNextBasicBlock(block)) {
+      LLVMOpcode opcode = LLVMGetInstructionOpcode(LLVMGetBasicBlockTerminator(block));
+      branch |= opcode == LLVMCondBr || opcode == LLVMSwitch;
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst && !call;
+           inst = LLVMGetNextInstruction(inst))
+         call = defined_callee(inst) != NULL;
+      if (branch && call)
+         return true;
+   }
+   return false;
+}
+
+static bool
+inline_calls(struct stela_air_metadata *m, LLVMValueRef entry, unsigned max_call_stack_depth,
+             unsigned max_instructions, LLVMValueRef specialized, bool *folded)
 {
    struct hash_table *states = _mesa_pointer_hash_table_create(NULL);
    if (!states)
@@ -322,10 +340,34 @@ stela_air_inline_calls(struct stela_air_metadata *m, LLVMValueRef entry,
       inline_always(fn);
       inlined = true;
    }
+   /* Keep the original graph's depth and cycle checks before pruning calls. */
+   struct hash_entry *state = walked && inlined && specialized && !m->unoptimized ?
+      _mesa_hash_table_search(states, specialized) : NULL;
+   bool fold = state && (uintptr_t)state->data == ACYCLIC && can_prune_calls(specialized);
    _mesa_hash_table_destroy(states, NULL);
-   if (!walked || (inlined && !run_inliner(m)))
+   if (!walked)
+      return false;
+   if (fold) {
+      *folded = true;
+      if (!stela_air_fold_constants(m, specialized))
+         return false;
+   }
+   if (inlined && !run_inliner(m))
       return false;
    return !recursive || unroll(m, entry, max_call_stack_depth, max_instructions);
+}
+
+bool
+stela_air_inline_calls(struct stela_air_metadata *m, LLVMValueRef entry,
+                       unsigned max_call_stack_depth, unsigned max_instructions)
+{
+   return inline_calls(m, entry, max_call_stack_depth, max_instructions, NULL, NULL);
+}
+
+bool
+stela_air_inline_specialized_calls(struct stela_air_metadata *m, LLVMValueRef entry, bool *folded)
+{
+   return inline_calls(m, NULL, 0, 0, entry, folded);
 }
 
 /* Apple's compiler declares a visible function another module defines as
