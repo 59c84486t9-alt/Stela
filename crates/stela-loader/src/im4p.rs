@@ -6,7 +6,7 @@
 //! firmware ([blacktop/ipsw img4 payload](https://github.com/blacktop/ipsw/blob/master/pkg/img4/payload.go)).
 //! This is not an IMG4 signature validator and never decrypts keybag payloads.
 use crate::Result;
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{borrow::Cow, string::String, vec, vec::Vec};
 use serde::Serialize;
 use stela_contracts::{refuse, require};
 
@@ -203,10 +203,15 @@ pub struct DecodeReceipt {
     pub signature_validated: bool,
 }
 
-impl Im4p<'_> {
+impl<'a> Im4p<'a> {
     /// Decode this parsed payload. Boot bundle callers record the enclosing
     /// Image4's identity and need only the plaintext and IM4P metadata.
     pub(crate) fn decode_payload(&self, maximum: u64) -> Result<(Vec<u8>, &'static str)> {
+        let (decoded, compression) = self.decode_data(maximum)?;
+        Ok((decoded.into_owned(), compression))
+    }
+
+    fn decode_data(&self, maximum: u64) -> Result<(Cow<'a, [u8]>, &'static str)> {
         require!(
             self.declared_uncompressed_bytes
                 .is_none_or(|n| n <= maximum),
@@ -219,7 +224,10 @@ impl Im4p<'_> {
                 "compression record disagrees with LZFSE marker"
             );
             let limit = usize::try_from(maximum).unwrap_or(usize::MAX);
-            (stela_formats::lzfse::decode(self.payload, limit)?, "lzfse")
+            (
+                Cow::Owned(stela_formats::lzfse::decode(self.payload, limit)?),
+                "lzfse",
+            )
         } else {
             require!(
                 self.compression_algorithm.is_none(),
@@ -229,7 +237,7 @@ impl Im4p<'_> {
                 self.payload.len() as u64 <= maximum,
                 "payload exceeds configured limit"
             );
-            (self.payload.to_vec(), "none")
+            (Cow::Borrowed(self.payload), "none")
         };
         require!(!decoded.is_empty(), "decoded payload is empty");
         require!(
@@ -246,8 +254,34 @@ impl Im4p<'_> {
 /// LZFSE streams must be consumed exactly and match the declared size. Other
 /// payloads are copied unchanged and must not carry compression metadata.
 pub fn decode(bytes: &[u8], maximum: u64) -> Result<(Vec<u8>, DecodeReceipt)> {
+    let (decoded, receipt) = decode_with_receipt(bytes, maximum)?;
+    Ok((decoded.into_owned(), receipt))
+}
+
+/// Decode an owned IM4P, retaining its allocation when it carries plaintext.
+pub fn decode_owned(mut bytes: Vec<u8>, maximum: u64) -> Result<(Vec<u8>, DecodeReceipt)> {
+    let (decoded, receipt) = decode_with_receipt(&bytes, maximum)?;
+    match decoded {
+        Cow::Owned(decoded) => Ok((decoded, receipt)),
+        Cow::Borrowed(payload) => {
+            // The plaintext payload is a subslice of the original container.
+            let start = payload.as_ptr().addr() - bytes.as_ptr().addr();
+            let length = payload.len();
+            bytes.copy_within(start..start + length, 0);
+            bytes.truncate(length);
+            Ok((bytes, receipt))
+        }
+    }
+}
+
+fn decode_with_receipt(bytes: &[u8], maximum: u64) -> Result<(Cow<'_, [u8]>, DecodeReceipt)> {
     let im4p = parse(bytes)?;
-    let (decoded, compression) = im4p.decode_payload(maximum)?;
+    let (decoded, compression) = im4p.decode_data(maximum)?;
+    let payload_sha256 = stela_formats::sha256(im4p.payload);
+    let decoded_sha256 = match &decoded {
+        Cow::Borrowed(_) => payload_sha256.clone(),
+        Cow::Owned(decoded) => stela_formats::sha256(decoded),
+    };
     let receipt = DecodeReceipt {
         schema_version: 1,
         container_bytes: bytes.len(),
@@ -256,10 +290,10 @@ pub fn decode(bytes: &[u8], maximum: u64) -> Result<(Vec<u8>, DecodeReceipt)> {
         description: im4p.description,
         compression: compression.into(),
         payload_bytes: im4p.payload.len(),
-        payload_sha256: stela_formats::sha256(im4p.payload),
+        payload_sha256,
         declared_uncompressed_bytes: im4p.declared_uncompressed_bytes,
         decoded_bytes: decoded.len(),
-        decoded_sha256: stela_formats::sha256(&decoded),
+        decoded_sha256,
         opaque_extensions: im4p.opaque_extensions,
         signature_validated: false,
     };
@@ -318,9 +352,16 @@ mod tests {
         assert!(!receipt.signature_validated);
         assert!(decode(&container, 2).is_err());
 
-        let (decoded, receipt) = decode(&fixture(b"trst", b"\x02\0\0\0", &[]), 1024)?;
+        let plaintext = fixture(b"trst", b"\x02\0\0\0", &[]);
+        let container_sha256 = stela_formats::sha256(&plaintext);
+        let address = plaintext.as_ptr();
+        let (decoded, receipt) = decode_owned(plaintext, 1024)?;
+        assert_eq!(decoded.as_ptr(), address);
         assert_eq!(decoded, b"\x02\0\0\0");
         assert_eq!(receipt.compression, "none");
+        assert_eq!(receipt.container_sha256, container_sha256);
+        assert_eq!(receipt.decoded_sha256, stela_formats::sha256(&decoded));
+        assert_eq!(receipt.payload_sha256, receipt.decoded_sha256);
 
         let mut truncated = stored_lzfse(raw);
         truncated.pop();

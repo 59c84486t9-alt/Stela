@@ -780,7 +780,7 @@ impl Prepare {
             let (bytes, container_sha256, payload_type, description, decoded_sha256) =
                 match payload_type {
                     Some(expected) => {
-                        let (bytes, receipt) = stela_loader::im4p::decode(&container, limit)?;
+                        let (bytes, receipt) = stela_loader::im4p::decode_owned(container, limit)?;
                         if receipt.payload_type != expected {
                             bail!(
                                 "{name} is IM4P type {}, expected {expected}",
@@ -913,7 +913,7 @@ impl Prepare {
                     cryptex_trust_caches.push(component(name, None, COMPONENT_LIMIT).and_then(
                         |raw| {
                             let (bytes, receipt) =
-                                stela_loader::im4p::decode(&raw.bytes, COMPONENT_LIMIT)?;
+                                stela_loader::im4p::decode_owned(raw.bytes, COMPONENT_LIMIT)?;
                             Ok(Decoded {
                                 source: Source {
                                     payload_type: receipt.payload_type,
