@@ -124,7 +124,7 @@ fn validate(
     identity: &Identity,
     memory_requirements: Option<stela_compiler::context::memory::MemoryRequirements>,
     profile: stela_compiler::block::BlockProfile,
-) -> Result<Manifest> {
+) -> Result<(Manifest, Vec<u8>)> {
     let manifest_bytes = bounded_file(&directory.join("manifest.json"), MAX_CACHE_MANIFEST_BYTES)?;
     let expected: String = serde_json::from_slice(&bounded_file(
         &directory.join("manifest.sha256.json"),
@@ -141,7 +141,7 @@ fn validate(
     let native = bounded_file(&directory.join("native.bin"), MAX_CACHE_NATIVE_BYTES)?;
     artifact::prepare::validate_preparation_native(&manifest, &native)?;
     artifact::prepare::validate_preparation_claim(&manifest)?;
-    Ok(manifest)
+    Ok((manifest, native))
 }
 
 #[cfg(feature = "std")]
@@ -170,6 +170,7 @@ pub fn prepare_leaf_for_target(
         stela_compiler::compile(source, base, &stela_compiler::Options::new(profile, target))
             .map(|block| block.native)
     })
+    .map(|(prepared, _)| prepared)
 }
 
 #[derive(Debug, Serialize)]
@@ -220,30 +221,12 @@ pub fn prepare_block_for_target(
         base,
         &stela_compiler::Options::new(profile, target),
     )?;
-    prepare_block_plan(source, base, root, target, plan)
-}
-
-/// Ordinary dispatch may choose the resident ABI; service profiles keep their
-/// own call contract.
-#[cfg(feature = "std")]
-pub(crate) fn prepare_runtime_block_for_target(
-    source: &[u8],
-    base: GuestAddress,
-    root: &Path,
-    profile: stela_compiler::block::BlockProfile,
-    target: stela_compiler::TargetCpu,
-) -> Result<(PreparedBlock, stela_compiler::block::BlockProfile)> {
-    let plan = stela_compiler::block::CompilationPlan::new(
-        source,
-        base,
-        &stela_compiler::Options::new(profile, target),
-    )?
-    .with_resident_loops();
-    let artifact_profile = plan.profile();
-    Ok((
-        prepare_block_plan(source, base, root, target, plan)?,
-        artifact_profile,
-    ))
+    let source_bytes = plan.source_bytes();
+    let (prepared, _) = prepare_block_plan(source, base, root, target, plan)?;
+    Ok(PreparedBlock {
+        source_bytes,
+        prepared,
+    })
 }
 
 #[cfg(feature = "std")]
@@ -253,17 +236,12 @@ fn prepare_block_plan(
     root: &Path,
     target: stela_compiler::TargetCpu,
     plan: stela_compiler::block::CompilationPlan,
-) -> Result<PreparedBlock> {
+) -> Result<(Prepared, Vec<u8>)> {
     let profile = plan.profile();
-    let source_bytes = plan.source_bytes();
     let memory_requirements = plan.memory_requirements();
     let identity = block_plan_identity(source, base, target, &plan)?;
-    let prepared = prepare(identity, root, memory_requirements, profile, || {
+    prepare(identity, root, memory_requirements, profile, || {
         plan.compile().map(|b| b.native)
-    })?;
-    Ok(PreparedBlock {
-        source_bytes,
-        prepared,
     })
 }
 
@@ -298,7 +276,7 @@ fn prepare(
     memory_requirements: Option<stela_compiler::context::memory::MemoryRequirements>,
     profile: stela_compiler::block::BlockProfile,
     generate: impl FnOnce() -> Result<NativeBlock, stela_compiler::CompileError>,
-) -> Result<Prepared> {
+) -> Result<(Prepared, Vec<u8>)> {
     let key = sha256(&serde_json::to_vec(&identity)?);
     std::fs::create_dir_all(root).io("create the translation cache")?;
     let root = root.canonicalize().io("resolve the translation cache")?;
@@ -308,14 +286,17 @@ fn prepare(
         cause: alloc::boxed::Box::new(cause),
     };
     if directory.exists() {
-        let manifest =
+        let (manifest, native) =
             validate(&directory, &identity, memory_requirements, profile).map_err(invalid)?;
-        return Ok(Prepared {
-            key,
-            cache_hit: true,
-            directory,
-            manifest,
-        });
+        return Ok((
+            Prepared {
+                key,
+                cache_hit: true,
+                directory,
+                manifest,
+            },
+            native,
+        ));
     }
     // Compile before creating an entry. Unsupported code never produces a hit.
     let (manifest, x86_64_code) =
@@ -323,28 +304,40 @@ fn prepare(
     let pending = tempfile::tempdir_in(&root).io("create a pending cache entry")?;
     let path = pending.path().join("native.bin");
     std::fs::write(&path, &x86_64_code).io("write generated code")?;
-    write_json(&pending.path().join("manifest.json"), &manifest)?;
-    let manifest_hash = sha256(
-        &std::fs::read(pending.path().join("manifest.json")).io("read a generated manifest")?,
-    );
-    write_json(&pending.path().join("manifest.sha256.json"), &manifest_hash)?;
+    // The pending directory is private until the publication rename, so its
+    // files can be written directly. Hash the same bytes that go to disk.
+    let manifest_bytes = json::pretty_bytes(&manifest)?;
+    let manifest_hash = sha256(&manifest_bytes);
+    std::fs::write(pending.path().join("manifest.json"), manifest_bytes)
+        .io("write a generated manifest")?;
+    std::fs::write(
+        pending.path().join("manifest.sha256.json"),
+        json::pretty_bytes(&manifest_hash)?,
+    )
+    .io("write a generated manifest checksum")?;
     match std::fs::rename(pending.path(), &directory) {
-        Ok(()) => Ok(Prepared {
-            key,
-            cache_hit: false,
-            directory,
-            manifest,
-        }),
-        // Another process published the same entry first; it must validate.
-        Err(_) if directory.exists() => {
-            let manifest =
-                validate(&directory, &identity, memory_requirements, profile).map_err(invalid)?;
-            Ok(Prepared {
+        Ok(()) => Ok((
+            Prepared {
                 key,
-                cache_hit: true,
+                cache_hit: false,
                 directory,
                 manifest,
-            })
+            },
+            x86_64_code,
+        )),
+        // Another process published the same entry first; it must validate.
+        Err(_) if directory.exists() => {
+            let (manifest, native) =
+                validate(&directory, &identity, memory_requirements, profile).map_err(invalid)?;
+            Ok((
+                Prepared {
+                    key,
+                    cache_hit: true,
+                    directory,
+                    manifest,
+                },
+                native,
+            ))
         }
         Err(error) => Err(Error::Io {
             operation: "publish a cache entry".into(),

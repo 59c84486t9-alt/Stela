@@ -22,8 +22,6 @@ pub use outcome::{
 use stela_contracts::{refuse, require};
 
 use crate::Result;
-#[cfg(feature = "std")]
-use crate::error::Io;
 use crate::{execution::platform, floating, memory, pauth, system};
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, string::ToString, vec::Vec};
@@ -34,7 +32,7 @@ use services::{
     RuntimeServices, complete_pauth_with_memory, runtime_pauth_key, serialize_instruction_execution,
 };
 #[cfg(feature = "std")]
-use std::{io::Read, path::PathBuf};
+use std::path::PathBuf;
 use stela_compiler::{
     GuestAddress,
     block::{
@@ -48,8 +46,6 @@ use validate::{
     validate_thread_register_exit, validate_trap_exit,
 };
 
-#[cfg(feature = "std")]
-const MAX_NATIVE_BYTES: usize = 64 * 1024 * 1024;
 const INSTRUCTION_BYTES: usize = 4;
 const ZERO_REGISTER_INDEX: u8 = 31;
 const REGISTER_COUNT: u8 = ZERO_REGISTER_INDEX + 1;
@@ -199,59 +195,25 @@ impl BlockRuntime {
     }
 
     fn load(&mut self, pc: GuestAddress, outcome: &mut RunOutcome) -> Result<()> {
-        #[cfg(not(feature = "std"))]
-        {
-            let discovery = self.prepare(pc)?;
-            let profile = discovery.artifact_profile;
-            let generation = discovery.generation;
-            let source_bytes = discovery.analysis.source_bytes;
-            let native = discovery.native;
-            let prepared =
-                crate::artifact::LoadedArtifact::bind(discovery.prepared.manifest, &native)?;
-            let block = LoadedBlock::from_artifact(
-                self.target,
-                profile,
-                discovery.region_base.0,
-                generation,
-                source_bytes,
-                prepared,
-                &native,
-            )?;
-            self.loaded.insert(pc.0, block);
+        let (block, native) = self.prepare_snapshot(pc)?;
+        let prepared = block.prepared;
+        let loaded = LoadedBlock::from_artifact(
+            self.target,
+            block.artifact_profile,
+            block.region_base.0,
+            block.generation,
+            block.analysis.source_bytes,
+            crate::artifact::LoadedArtifact {
+                manifest: prepared.manifest,
+            },
+            &native,
+        )?;
+        if prepared.cache_hit {
+            outcome.disk_cache_hits += 1;
+        } else {
             outcome.compiled_blocks += 1;
         }
-        #[cfg(feature = "std")]
-        {
-            let prepared = self.prepare(pc)?;
-            let profile = prepared.artifact_profile;
-            let base = prepared.region_base.0;
-            let generation = prepared.generation;
-            let source_bytes = prepared.analysis.source_bytes;
-            let prepared = prepared.prepared;
-            let mut native = Vec::new();
-            std::fs::File::open(prepared.directory.join("native.bin"))
-                .io("open a cached native block")?
-                .take((MAX_NATIVE_BYTES + 1) as u64)
-                .read_to_end(&mut native)
-                .io("read a cached native block")?;
-            let loaded_artifact =
-                crate::artifact::LoadedArtifact::bind(prepared.manifest, &native)?;
-            let block = LoadedBlock::from_artifact(
-                self.target,
-                profile,
-                base,
-                generation,
-                source_bytes,
-                loaded_artifact,
-                &native,
-            )?;
-            if prepared.cache_hit {
-                outcome.disk_cache_hits += 1;
-            } else {
-                outcome.compiled_blocks += 1;
-            }
-            self.loaded.insert(pc.0, block);
-        }
+        self.loaded.insert(pc.0, loaded);
 
         Ok(())
     }
