@@ -1009,7 +1009,7 @@ pub(super) enum Rax {
 }
 
 /// What RAX holds after `operation`'s emission by [`emit_instruction`].
-pub(super) fn rax_after(operation: &Operation, pinned: bool) -> Rax {
+pub(super) fn rax_after(operation: &Operation, code: &Code) -> Rax {
     match *operation {
         Operation::Memory {
             transfer: MemoryTransfer::Load { .. },
@@ -1021,7 +1021,9 @@ pub(super) fn rax_after(operation: &Operation, pinned: bool) -> Rax {
             transfer: MemoryTransfer::Load { .. },
             data,
             ..
-        }) if pinned && data != Register::Zero => Rax::Guest(data),
+        }) if (code.is_pinned() || !code.constant_time()) && data != Register::Zero => {
+            Rax::Guest(data)
+        }
         Operation::AddSub { flags: true, .. }
         | Operation::AddSubRegister { flags: true, .. }
         | Operation::AddSubExtended { flags: true, .. }

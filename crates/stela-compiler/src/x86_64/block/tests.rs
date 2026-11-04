@@ -97,6 +97,63 @@ fn reverse_dword_runs_commit_aliased_vectors_in_guest_order() {
 }
 
 #[test]
+fn hosted_result_chain_keeps_both_zlib_compare_inputs() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan},
+    };
+
+    let compile = |words: &[u32], entry, target| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        CompilationPlan::new(
+            &source,
+            GuestAddress(entry),
+            &Options::new(BlockProfile::ORDINARY, target),
+        )
+        .unwrap()
+        .compile()
+        .unwrap()
+        .native
+    };
+    let entry = 0x100003df0;
+    // MOV W5,W1; ADD X4,X8,X5; ADD X6,X4,W12,SXTW;
+    // LDRB W7,[X6]; CMP W7,W3; B.NE.
+    let address = [
+        0x2a01_03e5,
+        0x8b05_0104,
+        0x8b2c_c086,
+        0x3940_00c7,
+        0x6b03_00ff,
+        0x5400_0ea1,
+    ];
+    let native = compile(&address, entry, TargetCpu::Baseline);
+    let bytes = &native.x86_64_code;
+    assert_eq!(native.source_map.len(), address.len());
+    for (index, (pc, _)) in native.source_map.iter().enumerate() {
+        assert_eq!(*pc, GuestAddress(entry + index as u64 * 4));
+    }
+    assert!(bytes[native.source_map[1].1..].starts_with(&[0x48, 0x03, 0x87, 0x40]));
+    assert!(bytes[native.source_map[3].1..].starts_with(&[0x0f, 0xb6, 0x00]));
+    assert!(bytes[native.source_map[4].1..].starts_with(&[0x3b, 0x87, 0x18]));
+    let compare = compile(&address[4..], entry + 16, TargetCpu::Baseline);
+    assert!(compare.x86_64_code.starts_with(&[0x48, 0x8b, 0x87, 0x38]));
+
+    // AND W1,W1,W14; LDRH W1,[X9,W1,UXTW #1]; CMP W13,W1; B.HS.
+    let indexed = [0x0a0e_0021, 0x7861_5921, 0x6b01_01bf, 0x5400_0062];
+    let entry = 0x100003fd8;
+    let native = compile(&indexed, entry, TargetCpu::Baseline);
+    let dit = compile(
+        &indexed,
+        entry,
+        TargetCpu::Baseline.with_data_independent_timing(),
+    );
+    assert_eq!(native.source_map.len(), indexed.len());
+    let held_compare = [0x39, 0x87, 0x68]; // CMP [frame+X13],EAX.
+    assert!(native.x86_64_code[native.source_map[2].1..].starts_with(&held_compare));
+    assert!(!dit.x86_64_code[dit.source_map[2].1..].starts_with(&held_compare));
+}
+
+#[test]
 fn system_address_pair_keeps_source_rows_and_the_following_fault_boundary() {
     use crate::{Lifter, TargetCpu, aarch64::Decoder, block::RecoverySiteKind};
 
