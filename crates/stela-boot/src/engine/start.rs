@@ -679,7 +679,7 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
                 ..
             },
         ram: worker_ram,
-        built,
+        mut built,
         ..
     } = host;
     let Storage {
@@ -724,6 +724,15 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
             &full_profile,
             boot_processor,
         ));
+    }
+    // The verified image is placed and its provenance is owned. The
+    // remaining device and flash consumers read board firmware by name.
+    if let Some(files) = &mut built {
+        let firmware = board
+            .as_ref()
+            .map(board::Board::firmware_files)
+            .unwrap_or_default();
+        files.retain(|(name, _)| firmware.contains(name));
     }
     let projected_bytes = assigned.as_ref().map(|assigned| assigned.tree.serialize());
     let tree = projected_bytes
@@ -796,9 +805,8 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
                 .unwrap_or_else(|error| output::fatal(&error));
         }
     }
-    // This function never returns, so nothing else frees the bundle: guest
-    // memory and the devices now hold what they need of it, and the heap's
-    // room keeps the code caches from evicting.
+    // Device placement has copied the carried firmware. This function
+    // never returns, so release the remaining input buffers here.
     drop(built);
     let processor_power = connect_processor_power(
         &mut devices,
