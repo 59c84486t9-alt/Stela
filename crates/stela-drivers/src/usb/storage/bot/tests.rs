@@ -1,6 +1,7 @@
 use super::super::SHORT_READ;
 use super::*;
 use crate::bus::dma::RegionAllocator;
+use crate::usb::storage::media::scan_bot;
 use alloc::{rc::Rc, vec};
 use core::cell::RefCell;
 
