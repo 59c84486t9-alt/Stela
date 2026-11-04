@@ -283,6 +283,16 @@ impl Buffer {
         // SAFETY: complete aligned span in uniquely CPU-owned memory.
         unsafe { ptr::write_volatile(p, value) };
     }
+    /// Write a whole submission entry through one checked CPU view. The
+    /// caller publishes it only after all words are written.
+    pub(super) fn write_submission(&mut self, offset: usize, words: [u32; 16]) {
+        let entry = &mut self.bytes_mut()[offset..][..size_of_val(&words)];
+        let pointer = entry.as_mut_ptr().cast::<[u32; 16]>();
+        assert!(pointer.is_aligned());
+        // SAFETY: bounds and alignment were checked for the complete array.
+        // The queue granted CPU ownership of this entry until publication.
+        unsafe { pointer.write_volatile(words) };
+    }
     pub(super) fn coherent(&self, offset: usize) -> Result<u32, BlockError> {
         match self {
             Self::Legacy(b) => Ok(b.read(offset)),

@@ -352,6 +352,28 @@ fn running_id(controller: &Controller, tag: u32) -> u16 {
 }
 
 #[test]
+fn submission_publication_keeps_the_whole_wire_entry_and_rings_its_queue() {
+    let fixture = Fixture::new();
+    let mut controller = fixture.disk.controller.borrow_mut();
+    for io in [false, true] {
+        let mut words = core::array::from_fn(|index| 0x1020_3040 + index as u32 * 0x0101_0101);
+        words[0] &= 0xffff;
+        let id = controller.publish(io, words, None).unwrap();
+        words[0] |= u32::from(id) << 16;
+        let queue = if io {
+            &controller.io
+        } else {
+            &controller.admin
+        };
+        let expected = words.map(u32::to_le_bytes).concat();
+        assert_eq!(&queue.submissions.bytes()[..64], &expected);
+        assert_eq!(&queue.submissions.bytes()[64..128], &[0; 64]);
+        let doorbell = DOORBELLS + 2 * usize::from(queue.id) * controller.doorbell_stride;
+        assert_eq!(controller.registers.read32(doorbell), Ok(1));
+    }
+}
+
+#[test]
 fn prp_list_prefixes_follow_each_bounce_mapping_and_only_grow() {
     let mut fixture = Fixture::new();
     let disk = &mut fixture.disk;

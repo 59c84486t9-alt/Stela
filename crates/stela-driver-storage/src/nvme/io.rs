@@ -47,7 +47,7 @@ impl Controller {
     pub(super) fn publish(
         &mut self,
         io: bool,
-        command: [u32; 16],
+        mut command: [u32; 16],
         tag: Option<usize>,
     ) -> Result<u16, BlockError> {
         let stride = self.doorbell_stride;
@@ -70,16 +70,8 @@ impl Controller {
         // than the queue holds.
         unsafe { queue.submissions.resume_writes() };
         let base = usize::from(queue.tail) * 64;
-        for (index, word) in command.iter().enumerate() {
-            queue.submissions.write(
-                base + 4 * index,
-                if index == 0 {
-                    word | u32::from(id) << 16
-                } else {
-                    *word
-                },
-            );
-        }
+        command[0] |= u32::from(id) << 16;
+        queue.submissions.write_submission(base, command);
         queue.submissions.give()?;
         queue.tail = (queue.tail + 1) % queue.entries;
         fence(Ordering::SeqCst);
