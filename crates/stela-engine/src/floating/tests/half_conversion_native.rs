@@ -214,3 +214,109 @@ fn half_widening_keeps_all_finite_lanes_native_on_sse2() {
         assert_eq!(mxcsr(), before_mxcsr);
     }
 }
+
+#[test]
+fn complementary_half_widening_preserves_each_instruction_boundary() {
+    const LOW: u32 = 0x0e21_7820; // FCVTL V0.4S,V1.4H
+    const HIGH: u32 = 0x4e21_7821; // FCVTL2 V1.4S,V1.8H
+    const DESTRUCTIVE_LOW: u32 = 0x0e21_7821; // FCVTL V1.4S,V1.4H
+    let normal = 0x3555_bc00_3c00_4000;
+    let mixed = 0x8000_0000_83ff_0001;
+    for profile in [
+        BlockProfile::ORDINARY,
+        BlockProfile::new(Features::SYSTEM_MODE),
+    ] {
+        let emit = |first, second| {
+            let source: Vec<_> = [PREFIX, first, second, SUFFIX]
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect();
+            CompilationPlan::new(
+                &source,
+                GuestAddress(PC),
+                &stela_compiler::Options::new(profile, TargetCpu::Baseline),
+            )
+            .unwrap()
+            .compile()
+            .unwrap()
+            .native
+        };
+        let ungrouped = emit(DESTRUCTIVE_LOW, HIGH);
+        for (first, second, first_part, grouped) in [
+            (LOW, HIGH, 0, true),
+            (0x4e21_7820, DESTRUCTIVE_LOW, 1, true),
+            (DESTRUCTIVE_LOW, HIGH, 0, false),
+        ] {
+            let native = emit(first, second);
+            assert_eq!(native.source_map.len(), 4);
+            for (index, (pc, _)) in native.source_map.iter().enumerate() {
+                assert_eq!(*pc, GuestAddress(PC + 4 * index as u64));
+            }
+            assert!(
+                native
+                    .source_map
+                    .windows(2)
+                    .all(|rows| rows[0].1 < rows[1].1)
+            );
+            if grouped {
+                assert!(native.x86_64_code.len() < ungrouped.x86_64_code.len());
+            }
+            let code = if profile == BlockProfile::ORDINARY {
+                native.x86_64_code
+            } else {
+                stela_compiler::x86_64::pinned::entered(&native.x86_64_code)
+            };
+            let mapping = Mapping::new(&code).unwrap();
+            let [first, second] =
+                [first, second].map(|word| FloatingPointOperation::decode(word).unwrap().unwrap());
+            let modes = FPCR_FZ16 | FPCR_FZ | FPCR_FIZ | FPCR_DN;
+            let mut first_failure = [normal; 2];
+            first_failure[first_part] = 0x7c01;
+            let mut second_failure = [normal; 2];
+            second_failure[1 - first_part] = 0x7e00;
+            let cases = [
+                ([normal; 2], FPCR_AHP, None),
+                ([mixed, normal], modes, None),
+                ([normal; 2], FPCR_EXCEPTION_ENABLE_MASK, Some(PC + 4)),
+                (first_failure, 0, Some(PC + 4)),
+                (second_failure, 0, Some(PC + 8)),
+            ];
+            for (input, fpcr, failure) in cases {
+                if !grouped && failure == Some(PC + 8) {
+                    // The first write changes the input for this instruction.
+                    continue;
+                }
+                let mut actual = GuestState {
+                    fpcr,
+                    fpsr: FPSR_QC,
+                    ..GuestState::default()
+                };
+                actual.v[0] = [u64::MAX; 2];
+                actual.v[SOURCE] = input;
+                let mut expected = actual.clone();
+                expected.x[8] += 1;
+                if failure != Some(PC + 4) {
+                    complete(&mut expected, &first).unwrap();
+                }
+                if failure.is_none() {
+                    complete(&mut expected, &second).unwrap();
+                    expected.x[9] += 1;
+                }
+                let saved_mxcsr = mxcsr();
+                // SAFETY: the emitted block only accesses its owned state frame.
+                let exit = unsafe { mapping.call_block(&mut actual) }.unwrap();
+                assert_eq!(mxcsr(), saved_mxcsr);
+                assert_eq!(actual, expected, "{profile:?} {first:?} {second:?}");
+                assert_eq!(exit.next_pc, failure.unwrap_or(PC + 16));
+                assert_eq!(
+                    exit.kind,
+                    if failure.is_some() {
+                        ExitKind::FloatingPoint
+                    } else {
+                        ExitKind::Fallthrough
+                    } as u64
+                );
+            }
+        }
+    }
+}
