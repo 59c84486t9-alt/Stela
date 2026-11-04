@@ -2,7 +2,7 @@
 //! takeover path. Unknown devices, routes or active translation features fail.
 use super::{
     dmar::{self, HardwareUnit},
-    vtd::{self, MmioRegisters, Registers, Unit},
+    vtd::{self, InitialBlock, MmioRegisters, Registers, Unit},
 };
 use crate::Result;
 use alloc::{format, string::String, sync::Arc, vec::Vec};
@@ -769,8 +769,8 @@ impl Prepared<UnpublishedFunction> {
     /// uncertain translation state. Unit/lease Drop keeps uncertain resources.
     pub(crate) fn run(mut self) -> Result<Report> {
         self.quiesce()?;
-        let (unit, table_walk_coherent) = self.take_unit()?;
-        let mut prepared = self.promote(&unit)?;
+        let (unit, blocked, table_walk_coherent) = self.take_unit()?;
+        let mut prepared = self.promote(&blocked)?;
         prepared.check_bars()?;
         if prepared.second.is_some() {
             return super::isolation_diagnostic::run(prepared, unit).map(Report::Isolation);
@@ -788,8 +788,8 @@ impl Prepared<UnpublishedFunction> {
         if self.second.is_some() {
             return Err(refuse!("IRQ work requires the single EDU grant"));
         }
-        let (unit, table_walk_coherent) = self.take_unit()?;
-        let mut prepared = self.promote(&unit)?;
+        let (unit, blocked, table_walk_coherent) = self.take_unit()?;
+        let mut prepared = self.promote(&blocked)?;
         prepared.check_bars()?;
         prepared
             .run_single(unit, table_walk_coherent, Some(work))
@@ -877,7 +877,7 @@ impl Prepared<UnpublishedFunction> {
         Ok(())
     }
 
-    fn promote(self, unit: &Arc<Unit<MmioRegisters>>) -> Result<Prepared<Function>> {
+    fn promote(self, blocked: &InitialBlock<MmioRegisters>) -> Result<Prepared<Function>> {
         let mut functions = Vec::new();
         functions
             .try_reserve_exact(self.functions.len())
@@ -888,9 +888,11 @@ impl Prepared<UnpublishedFunction> {
             let rid = u16::from(address.bus) << 8
                 | u16::from(address.device) << 3
                 | u16::from(address.function);
-            if !unit.allows(rid) {
-                return Err(refuse!("fixture original unit omitted a requester"));
-            }
+            blocked
+                .claim(rid)
+                .map_err(|error| refuse!("fixture initial requester: {error}", ?error))?
+                .drain()
+                .map_err(|error| refuse!("fixture initial requester drain: {error}", ?error))?;
             // SAFETY: this exact cohort was reset/stopped, then the one
             // original unit installed and acknowledged its blocked root.
             // No other CPU, firmware, C or driver writer can restart it.
@@ -928,7 +930,7 @@ impl Prepared<UnpublishedFunction> {
 
     /// Install the blocked initial context for the whole actual fixture
     /// cohort after the device-specific stops, before either test binds DMA.
-    fn take_unit(&self) -> Result<(Arc<Unit<MmioRegisters>>, bool)> {
+    fn take_unit(&self) -> Result<(Arc<Unit<MmioRegisters>>, InitialBlock<MmioRegisters>, bool)> {
         let timeout = self
             .clock
             .ticks_per_microsecond
@@ -947,7 +949,7 @@ impl Prepared<UnpublishedFunction> {
         }
         .map_err(|error| refuse!("VT-d registers: {error}", ?error))?;
         let table_walk_coherent = registers.read64(0x10) & 1 != 0;
-        let requesters: Vec<u16> = self
+        let mut requesters: Vec<u16> = self
             .functions
             .iter()
             .map(|function| {
@@ -957,6 +959,7 @@ impl Prepared<UnpublishedFunction> {
                     | u16::from(address.function)
             })
             .collect();
+        requesters.sort_unstable();
         // SAFETY: the unit window is this fixture's matched DMAR unit and every listed requester
         // was reset and stopped above.
         let unit = unsafe {
@@ -974,7 +977,10 @@ impl Prepared<UnpublishedFunction> {
                 ?error
             )
         })?;
-        Ok((unit, table_walk_coherent))
+        let blocked = unit
+            .acknowledge_initial_block(&requesters)
+            .map_err(|error| refuse!("fixture blocked VT-d cohort: {error}", ?error))?;
+        Ok((unit, blocked, table_walk_coherent))
     }
 }
 
