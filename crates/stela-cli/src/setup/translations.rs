@@ -36,6 +36,7 @@ use std::{
     path::{Path, PathBuf},
     time::SystemTime,
 };
+use stela_boot_core::memory_budget::MAX_TRANSLATION_PACK_BYTES;
 
 /// The store's directory on its volume.
 pub(super) const DIRECTORY: &str = "stela/store";
@@ -54,7 +55,7 @@ const ID_BYTES: usize = 32;
 const HEADER_BYTES: usize = PACK_MAGIC.len() + 4 + 4 + ID_BYTES;
 const MIB: u64 = 1024 * 1024;
 /// One pack's bound by default.
-pub(super) const DEFAULT_PACK_BYTES: u64 = 2 * 1024 * MIB;
+pub(super) const DEFAULT_PACK_BYTES: u64 = MAX_TRANSLATION_PACK_BYTES;
 /// The smallest bound worth keeping a store for.
 pub(super) const MIN_PACK_BYTES: u64 = 64 * MIB;
 /// FAT32's largest file, on a 1 MiB boundary.

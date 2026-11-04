@@ -378,6 +378,13 @@ nir_shader *stela_air_stage_to_nir(const void *, size_t, const char *entry,
                                   const struct stela_air_stage_options *,
                                   struct stela_air_error *);
 
+/* Metal's stage callbacks write only to the temporary NIR, so translation
+ * can retry the ordinary lowering order when early specialization fails. */
+nir_shader *stela_air_metal_stage_to_nir(const void *, size_t, const char *entry,
+                                        const nir_shader_compiler_options *,
+                                        const struct stela_air_stage_options *,
+                                        struct stela_air_error *);
+
 /* Input is the hash-checked raw AIR bitcode selected by the archive reader.
  * Success transfers ownership of a real NIR shader to the caller (ralloc_free).
  * Failure returns NULL, destroys partial NIR, and reports an explicit error.

@@ -4,6 +4,10 @@ const PAGE: u64 = 4096;
 const MIB: u64 = 1024 * 1024;
 const MINIMUM: u64 = 16 * MIB;
 const MAXIMUM: u64 = 384 * MIB;
+
+/// Largest persistent translation pack the mount reads into firmware RAM.
+pub const MAX_TRANSLATION_PACK_BYTES: u64 = 1024 * MIB;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InsufficientMemory;
 impl fmt::Display for InsufficientMemory {

@@ -44,6 +44,122 @@ fn conditional_exits_branch_over_the_fallthrough_exit() {
     assert_eq!(code.instructions(), 15);
 }
 
+#[test]
+fn hosted_trailing_zero_pair_preserves_instruction_boundaries() {
+    use crate::{Lifter, TargetCpu, aarch64::Decoder};
+
+    let entry = GuestAddress(0x1000);
+    for words in [[0xdac0_0020_u32, 0xdac0_1000], [0x5ac0_0020, 0x5ac0_1000]] {
+        let instructions = [
+            Decoder.lift(entry, words[0]).unwrap(),
+            Decoder.lift(GuestAddress(entry.0 + 4), words[1]).unwrap(),
+        ];
+        let end = GuestAddress(entry.0 + 8);
+        for target in [TargetCpu::Baseline, TargetCpu::Baseline.with_bmi1()] {
+            let ordinary = emit_ordinary_for_target(&instructions, None, end, target);
+            let separate = emit_for_target(
+                &instructions,
+                None,
+                end,
+                target,
+                super::super::MemoryChecks::DEFAULT,
+            );
+            assert_eq!(ordinary.source_map, [(entry, 0), (instructions[1].pc, 1)]);
+            assert_eq!(ordinary.x86_64_code[0], 0x90);
+            assert!(ordinary.x86_64_code.len() < separate.x86_64_code.len());
+            let tzcnt = if words[0] >> 31 == 1 {
+                &[0xf3, 0x48, 0x0f, 0xbc][..]
+            } else {
+                &[0xf3, 0x0f, 0xbc][..]
+            };
+            assert_eq!(
+                ordinary
+                    .x86_64_code
+                    .windows(tzcnt.len())
+                    .any(|window| window == tzcnt),
+                target.supports(TargetCpu::Bmi1)
+            );
+        }
+        let dit = TargetCpu::Baseline.with_data_independent_timing();
+        assert_eq!(
+            emit_ordinary_for_target(&instructions, None, end, dit).x86_64_code,
+            emit_for_target(
+                &instructions,
+                None,
+                end,
+                dit,
+                super::super::MemoryChecks::DEFAULT,
+            )
+            .x86_64_code
+        );
+        let (system, _) = emit_system_mode(
+            &instructions,
+            None,
+            end,
+            TargetCpu::Baseline,
+            super::super::MemoryChecks::DEFAULT,
+            super::super::NativeSystem::NONE,
+        );
+        assert!(system.source_map[1].1 > 1);
+    }
+
+    // A different width, source or destination leaves the original pair.
+    let first = Decoder.lift(entry, 0xdac0_0020).unwrap();
+    for word in [0x5ac0_1000, 0xdac0_1020, 0xdac0_1001] {
+        let second = Decoder.lift(GuestAddress(entry.0 + 4), word).unwrap();
+        let instructions = [first.clone(), second];
+        assert_eq!(
+            emit_ordinary_for_target(
+                &instructions,
+                None,
+                GuestAddress(entry.0 + 8),
+                TargetCpu::Baseline
+            )
+            .x86_64_code,
+            emit(&instructions, None, GuestAddress(entry.0 + 8)).x86_64_code
+        );
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn hosted_trailing_zero_pair_matches_both_scalar_widths_and_aliases() {
+    use crate::{GuestState, Lifter, TargetCpu, aarch64::Decoder, x86_64::native};
+
+    let entry = GuestAddress(0x1000);
+    let end = GuestAddress(entry.0 + 8);
+    for (reverse, count) in [(0xdac0_0000, 0xdac0_1000), (0x5ac0_0000, 0x5ac0_1000)] {
+        for source in [0, 1, 31] {
+            let instructions = [
+                Decoder.lift(entry, reverse | source << 5).unwrap(),
+                Decoder.lift(GuestAddress(entry.0 + 4), count).unwrap(),
+            ];
+            for target in [TargetCpu::Baseline, TargetCpu::Baseline.with_bmi1()] {
+                if !TargetCpu::detect().supports(target) {
+                    continue;
+                }
+                let block = emit_ordinary_for_target(&instructions, None, end, target);
+                assert_eq!(block.source_map[1].1, 1);
+                for input in [0, 1, 0x1234_5678_0000_0000, 1 << 31, 1 << 63, u64::MAX] {
+                    let mut state = GuestState::default();
+                    state.x[0] = input;
+                    state.x[1] = input;
+                    state.nzcv = 0xa000_0000;
+                    let mut expected = state.clone();
+                    let input = if source == 31 { 0 } else { input };
+                    expected.x[0] = u64::from(if reverse >> 31 == 1 {
+                        input.trailing_zeros()
+                    } else {
+                        (input as u32).trailing_zeros()
+                    });
+                    assert_eq!(native::run(&block.x86_64_code, &mut state), end.0);
+                    assert_eq!(state, expected);
+                }
+            }
+        }
+    }
+}
+
 /// add x10, x10, #4; cmp x10, #0x600; b.ne: the CMP takes X10 from
 /// RAX where the ADD stored it, and the branch tests the NZCV word the
 /// CMP left in EAX, so neither reloads from the frame.
@@ -863,5 +979,58 @@ fn pinned_select_consumes_the_preceding_compare_flags() {
         assert_eq!(native::run(&entry, &mut state), 0x2000);
         assert_eq!(state.x[1], selected);
         assert_eq!(state.nzcv, nzcv);
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn pinned_conditional_increment_consumes_the_preceding_compare_flags() {
+    use crate::{
+        GuestState,
+        block::{BlockProfile, Features},
+        x86_64::{native, pinned},
+    };
+    // CMP X0, #1; CSET W2, EQ; RET.
+    let cset = 0x1a9f_17e2;
+    // CMP X0, #1; CSINC W8, W2, W8, HI; RET.
+    let csinc = 0x1a88_8448;
+    for (select, prefix) in [
+        (cset, &[0x0f, 0x94, 0xc0][..]),                            // SETE AL
+        (csinc, &[0x44, 0x8b, 0xc6, 0x45, 0x8d, 0x40, 0x01, 0xf5]), // MOV, LEA, CMC
+    ] {
+        let source: Vec<_> = [0xf100_041fu32, select, 0xd65f_03c0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let code = crate::testing::block_with(
+            &source,
+            GuestAddress(0x1000),
+            BlockProfile::new(Features::SYSTEM_MODE),
+        )
+        .unwrap()
+        .native;
+        let selected = &code.x86_64_code[code.source_map[1].1..code.source_map[2].1];
+        assert!(selected.starts_with(prefix), "{selected:02x?}");
+        let entry = pinned::entered(&code.x86_64_code);
+        for (compared, equal, higher, nzcv) in [
+            (0, 0, false, 0x8000_0000),
+            (1, 1, false, 0x6000_0000),
+            (2, 0, true, 0x2000_0000),
+        ] {
+            let mut state = GuestState::default();
+            state.x[0] = compared;
+            state.x[2] = 0xaabb_ccdd_0000_0016;
+            state.x[8] = u64::MAX;
+            state.x[30] = 0x2000;
+            let mut expected = state.x;
+            if select == cset {
+                expected[2] = equal;
+            } else {
+                expected[8] = if higher { 22 } else { 0 };
+            }
+            assert_eq!(native::run(&entry, &mut state), 0x2000);
+            assert_eq!(state.x, expected);
+            assert_eq!(state.nzcv, nzcv);
+        }
     }
 }

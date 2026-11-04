@@ -425,6 +425,96 @@ fn resizing_within_a_size_class_keeps_the_allocation() {
 }
 
 #[test]
+fn large_resize_uses_the_right_extent_and_preserves_live_neighbours() {
+    let heap = Heap::new();
+    let mut ram = backing();
+    let layout = |kib: usize| Layout::from_size_align(kib * 1024, 16).unwrap();
+    let (original, gap, guard) = (layout(28), layout(68), layout(28));
+    let (grown, shrunk, reused) = (layout(90), layout(20), layout(70));
+    // SAFETY: the backing stays exclusive, and each operation uses a live
+    // allocation with the layout most recently assigned to it.
+    unsafe {
+        heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
+        let block = heap.alloc(original);
+        let neighbour = heap.alloc(gap);
+        let sentinel = heap.alloc(guard);
+        assert!(!block.is_null() && !neighbour.is_null() && !sentinel.is_null());
+        block.write_bytes(0x5a, original.size());
+        sentinel.write_bytes(0xa5, guard.size());
+        heap.dealloc(neighbour, gap);
+
+        let before = heap.usage();
+        assert!(before.largest < grown.size());
+        let larger = heap.realloc(block, original, grown.size());
+        assert_eq!(larger, block);
+        let after = heap.usage();
+        assert_eq!(after.carves, before.carves);
+        assert_eq!(after.live, grown.size() + guard.size());
+        assert_eq!(after.large[large_bucket(grown.size())], (1, grown.size()));
+        assert!(
+            core::slice::from_raw_parts(larger, original.size())
+                .iter()
+                .all(|&byte| byte == 0x5a)
+        );
+
+        let smaller = heap.realloc(larger, grown, shrunk.size());
+        assert_eq!(smaller, larger);
+        assert_eq!(heap.usage().live, shrunk.size() + guard.size());
+        let reuse = heap.alloc(reused);
+        assert!(!reuse.is_null());
+        assert!(reuse.addr() > smaller.addr() && reuse.addr() < sentinel.addr());
+        reuse.write_bytes(0xc3, reused.size());
+        assert!(
+            core::slice::from_raw_parts(smaller, shrunk.size())
+                .iter()
+                .all(|&byte| byte == 0x5a)
+        );
+        assert!(
+            core::slice::from_raw_parts(sentinel, guard.size())
+                .iter()
+                .all(|&byte| byte == 0xa5)
+        );
+        heap.dealloc(smaller, shrunk);
+        heap.dealloc(sentinel, guard);
+        heap.dealloc(reuse, reused);
+    }
+    let after = heap.usage();
+    assert_eq!((after.live, after.carved, after.extents), (0, 0, 1));
+    assert_eq!(after.largest, ram.0.len());
+}
+
+#[test]
+fn failed_large_growth_preserves_the_owner_and_the_reserve_boundary() {
+    let heap = Heap::new();
+    let mut ram = backing();
+    let reserve = 32 * 1024;
+    let original = Layout::from_size_align(ram.0.len() - reserve - HEADER_BYTES, 16).unwrap();
+    // SAFETY: exclusive backing, with one main-pool allocation held through
+    // the failed growth and returned using its unchanged layout.
+    unsafe {
+        heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
+        heap.reserve_tail(reserve);
+        let block = heap.alloc(original);
+        assert!(!block.is_null());
+        block.write_bytes(0x96, original.size());
+        let before = usage_values(&heap);
+        assert!(
+            heap.realloc(block, original, original.size() + GRANULE)
+                .is_null()
+        );
+        assert_eq!(usage_values(&heap), before);
+        assert!(
+            core::slice::from_raw_parts(block, original.size())
+                .iter()
+                .all(|&byte| byte == 0x96)
+        );
+        heap.dealloc(block, original);
+    }
+    let after = heap.usage();
+    assert_eq!((after.live, after.carved, after.extents), (0, 0, 2));
+}
+
+#[test]
 fn the_class_lists_return_to_the_bins_when_a_request_needs_them() {
     let mut ram = backing();
     let heap = Heap::new();

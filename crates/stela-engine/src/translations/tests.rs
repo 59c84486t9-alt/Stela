@@ -62,6 +62,34 @@ fn address_dependent_blocks_rebase_to_what_the_compiler_emits_at_another_page() 
 }
 
 #[test]
+fn hosted_fused_address_pair_rebases_one_literal_and_both_source_rows() {
+    let source = words(&[0x9000_0020, 0x9100_2000, 0xd65f_03c0]); // adrp; add #8; ret
+    let options = stela_compiler::Options::new(BlockProfile::ORDINARY, TargetCpu::Baseline);
+    let pc = PAGE + 0x40;
+    let compile = |pc| stela_compiler::compile(&source, GuestAddress(pc), &options).unwrap();
+    let block = compile(pc);
+    let probes = probe_displacements(PAGE).map(|delta| compile(pc.wrapping_add(delta)));
+    let entry = prove(
+        &block,
+        &source,
+        PAGE,
+        pc,
+        Digest::of(b"hosted"),
+        [&probes[0], &probes[1]],
+    )
+    .expect("fused address is relocatable");
+    assert_eq!(entry.relocations, [2]);
+    assert_eq!(entry.source_map[..2], [(0x40, 0), (0x44, 10)]);
+    for page in [0x4000, 0x2_3456_8000, 0x7fff_0000_0000] {
+        let expected = compile(page + 0x40);
+        let rebased = entry.rebase(page, &source).unwrap();
+        assert_eq!(rebased.native.x86_64_code, expected.native.x86_64_code);
+        assert_eq!(rebased.native.source_map, expected.native.source_map);
+        assert_eq!(rebased.source_bytes, source.len());
+    }
+}
+
+#[test]
 fn stored_source_witness_requires_the_exact_admitted_compiler_prefix() {
     // The compiler stops at B, but the complete offered analysis input is
     // kept. Changing that suffix must not silently change its witness.
@@ -301,6 +329,23 @@ fn records_reject_malformed_source_geometry_with_a_valid_checksum() {
         );
     }
     assert_eq!(Record::decode(&good.encode(), &translator, &key), Ok(good));
+}
+
+#[test]
+fn checksummed_record_count_must_fit_the_remaining_bytes() {
+    let translator = translator_id();
+    let key = Digest::of(b"bounded entry count");
+    let mut record = Record::new(translator, key);
+    record.insert(proved(&words(&[0x9000_0020, 0x9400_0002]), 0x10).unwrap());
+    let mut bytes = record.encode();
+    bytes[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+    let end = bytes.len() - TRAILER_BYTES;
+    let checksum = Sha256::digest(&bytes[..end]);
+    bytes[end..].copy_from_slice(&checksum);
+    assert_eq!(
+        Record::decode(&bytes, &translator, &key),
+        Err(FormatError::Truncated)
+    );
 }
 
 #[test]
