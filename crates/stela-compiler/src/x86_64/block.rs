@@ -175,8 +175,9 @@ pub(crate) fn emit_system_mode(
     native: super::NativeSystem,
 ) -> (NativeBlock, Vec<crate::block::FaultRecovery>) {
     // Guest registers stay in host registers (`x86_64::pinned`), which the
-    // engine's fault settlement reads, so no block needs the regions, which
-    // spend the same host registers within one block. Accesses check the
+    // engine's fault settlement reads. Pure spans can temporarily keep other
+    // values in scratch registers; the ordinary regions use the reserved
+    // bank and cannot run in this ABI. Accesses check the
     // guest range (`x86_64::guest_range`). PEs run concurrently, so atomics
     // stay locked and barriers fence.
     emit_selected(
@@ -295,6 +296,7 @@ fn emit_selected(
         ..checks_at(index)
     };
     let mut cursor = 0;
+    let mut next_pinned_span = 0;
     // What the last instruction emitted left in registers.
     let mut after = Held::NOTHING;
     let mut out_of_line = OutOfLine::default();
@@ -343,6 +345,52 @@ fn emit_selected(
             after.xmm0 = Some(result);
             cursor += 2;
             continue;
+        }
+        // Pure spans do not cross a guest fault or a native observer.
+        // Flush their frame values before resuming the ordinary pinned path.
+        if pinned && !code.constant_time() && cursor >= next_pinned_span {
+            let (count, plan) = super::pinned::Span::plan(&instructions[cursor..]);
+            next_pinned_span = cursor + count.max(1);
+            if let Some(plan) = plan {
+                let chunk = &instructions[cursor..cursor + count];
+                let (candidate, starts) = plan.emit(chunk, target);
+                let mut baseline = Code::pinned();
+                let mut baseline_after = held;
+                let mut baseline_fixups = vec![];
+                for (index, instruction) in chunk.iter().enumerate() {
+                    baseline_after = emit_single(
+                        &mut baseline,
+                        &mut scratch,
+                        None,
+                        instruction,
+                        &mut baseline_fixups,
+                        SingleOptions {
+                            target,
+                            checks: checks_at(cursor + index),
+                        },
+                        baseline_after,
+                    );
+                }
+                debug_assert!(baseline_fixups.is_empty());
+                debug_assert!(baseline.sites().is_empty() && candidate.sites().is_empty());
+                if candidate.len() < baseline.len()
+                    && candidate.instructions() <= baseline.instructions()
+                {
+                    let offset = code.len();
+                    block.source_map.extend(
+                        chunk
+                            .iter()
+                            .zip(starts)
+                            .map(|(row, start)| (row.pc, offset + start)),
+                    );
+                    code.append(candidate);
+                    // The last destination is outside the local assignment,
+                    // and settlement MOVs do not touch RAX or XMM0.
+                    after = baseline_after;
+                    cursor += count;
+                    continue;
+                }
+            }
         }
         // Build the new candidate privately. Rejection leaves both cursor and
         // output untouched, so the legacy clean-load chunk partition is exact.

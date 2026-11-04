@@ -5,6 +5,112 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 #[test]
+fn pinned_scalar_span_settles_before_the_next_access() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features, RecoverySiteKind},
+    };
+
+    let words = [
+        0x8b06_02d5u32, // ADD X21,X22,X6
+        0x8b06_0259,    // ADD X25,X18,X6
+        0xd100_0eb2,    // SUB X18,X21,#3
+        0xd100_0f26,    // SUB X6,X25,#3
+        0x3940_0cd3,    // LDRB W19,[X6,#3]
+    ];
+    let start = GuestAddress(0x1000045d4);
+    let compile = |words: &[u32], start, target| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let profile = BlockProfile::new(Features::SYSTEM_MODE);
+        CompilationPlan::new(&source, start, &Options::new(profile, target))
+            .unwrap()
+            .compile()
+            .unwrap()
+    };
+    let target = TargetCpu::Baseline;
+    let dit = target.with_data_independent_timing();
+    let grouped = compile(&words, start, target);
+    let fallback = compile(&words, start, dit);
+    assert_eq!(grouped.native.source_map.len(), words.len());
+    for (index, (pc, _)) in grouped.native.source_map.iter().enumerate() {
+        assert_eq!(pc.0, start.0 + index as u64 * 4);
+    }
+    assert!(
+        grouped
+            .native
+            .source_map
+            .windows(2)
+            .all(|rows| rows[0].1 < rows[1].1)
+    );
+    assert!(grouped.native.source_map[4].1 < fallback.native.source_map[4].1);
+    let access = grouped
+        .fault_recovery
+        .iter()
+        .find(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+        .unwrap();
+    assert_eq!(
+        access.retirement.instruction_pc(),
+        grouped.native.source_map[4].0
+    );
+    assert_eq!(access.retirement.retired_before(), 4);
+    assert!(access.start >= grouped.native.source_map[4].1);
+    assert!(access.bindings.is_empty());
+    let mut scratch = Code::default();
+    let load_x6 = super::super::register_load(&mut scratch, Register::X(6), true).unwrap();
+    assert!(!grouped.native.x86_64_code[grouped.native.source_map[4].1..].starts_with(load_x6));
+
+    // A shortened prefix, or an independent entry at its second row,
+    // has fewer than two beneficial values and retains its direct body.
+    for (input, pc) in [
+        (&words[..2], start),
+        (&words[1..4], GuestAddress(start.0 + 4)),
+    ] {
+        let compiled = compile(input, pc, target);
+        assert_eq!(
+            compiled.native.x86_64_code,
+            compile(input, pc, dit).native.x86_64_code
+        );
+    }
+
+    // Execute an X/W mix through the real pinned ABI with stale high input
+    // bits, unchanged flags and unmodified permanently pinned values.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    {
+        use crate::x86_64::asm::vector_extensions::execution::Native;
+        let mut mixed = [words[0] & !(1 << 31), words[1], words[2], words[3]];
+        let native = compile(&mixed, start, target).native;
+        let original = compile(&mixed, start, dit).native;
+        assert!(native.x86_64_code.len() < original.x86_64_code.len());
+        let body = Native::new(&super::super::pinned::entered(&native.x86_64_code));
+        let mut initial = crate::GuestState {
+            nzcv: 0x9000_0000,
+            sp: 0x1234,
+            ..Default::default()
+        };
+        for (index, register) in initial.x.iter_mut().enumerate() {
+            *register = 0xfedc_ba98_7654_3210u64.wrapping_mul(index as u64 + 1);
+        }
+        let mut expected = initial.clone();
+        expected.x[21] = initial.x[22].wrapping_add(initial.x[6]) as u32 as u64;
+        expected.x[25] = initial.x[18].wrapping_add(initial.x[6]);
+        expected.x[18] = expected.x[21].wrapping_sub(3);
+        expected.x[6] = expected.x[25].wrapping_sub(3);
+        body.run(
+            &mut initial,
+            &mut crate::context::ExecutionContext::default(),
+        );
+        assert_eq!(initial, expected);
+
+        // A flag-setting row must split the proposal instead of exposing
+        // an incompletely settled value to another recipe.
+        mixed[2] |= 1 << 29;
+        let split = compile(&mixed, start, target).native;
+        assert_eq!(split.source_map.len(), mixed.len());
+        assert_eq!(split.source_map[2], original.source_map[2]);
+    }
+}
+
+#[test]
 fn bitfields_and_pc_relative_addresses_feed_the_next_frame_reader() {
     use crate::{
         Options, TargetCpu,
