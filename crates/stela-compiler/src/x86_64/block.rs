@@ -317,6 +317,7 @@ fn emit_selected(
             if *condition < 14 && instructions[index].pc.0.checked_add(4) == Some(pc.0))
     };
     let fuse_simd = !target.data_independent_timing() && (pinned || fuse_pairs);
+    let fuse_aes_rounds = fuse_simd && target.supports(crate::TargetCpu::Aes);
     let fuse_ssse3 = fuse_simd && target.supports(crate::TargetCpu::Ssse3);
     let fuse_single_table =
         fuse_ssse3 && !super::asm::vector_extensions::table_supported(1, target);
@@ -373,6 +374,22 @@ fn emit_selected(
             code.set_instruction(block.source_map.len() - 1);
             after.xmm0 = result;
             cursor += count;
+            continue;
+        }
+        if fuse_aes_rounds
+            && matches!(
+                instructions[cursor].operation,
+                Operation::Simd(Simd::Aes(_))
+            )
+            && let Some(result) = super::simd::aes::emit_round_pair(
+                code,
+                &mut block.source_map,
+                &instructions[cursor..],
+                target,
+            )
+        {
+            after.xmm0 = Some(result);
+            cursor += 2;
             continue;
         }
         if fuse_ssse3

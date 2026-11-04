@@ -678,6 +678,87 @@ fn pinned_indexed_address_uses_the_base_without_copying_it() {
 }
 
 #[test]
+fn inplace_aes_round_pair_keeps_source_rows_and_cpu_fallbacks() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features, RecoverySiteKind},
+        x86_64::isa::SimdOpcode,
+    };
+    let pc = GuestAddress(0xb6210);
+    let ordinary = BlockProfile::ORDINARY;
+    let system = BlockProfile::new(Features::SYSTEM_MODE);
+    let targets = [TargetCpu::Aes, TargetCpu::Sse41.with_aes()];
+    let compile = |words: &[u32], pc, profile, target| {
+        let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        CompilationPlan::new(&bytes, pc, &Options::new(profile, target))
+            .unwrap()
+            .compile()
+            .unwrap()
+    };
+    let count = |block: &NativeBlock, opcode: SimdOpcode| {
+        block
+            .x86_64_code
+            .windows(opcode.encoding().len())
+            .filter(|bytes| *bytes == opcode.encoding())
+            .count()
+    };
+    for (words, round, last) in [
+        (
+            [0x4e28_4a00u32, 0x4e28_6800], // OpenSSL AESE V0,V16; AESMC V0,V0.
+            SimdOpcode::AesEncryptRound,
+            SimdOpcode::AesEncryptLast,
+        ),
+        (
+            [0x4e28_5bffu32, 0x4e28_7bff], // AESD V31,V31; AESIMC V31,V31.
+            SimdOpcode::AesDecryptRound,
+            SimdOpcode::AesDecryptLast,
+        ),
+    ] {
+        for profile in [ordinary, system] {
+            for target in targets {
+                let grouped = compile(&words, pc, profile, target);
+                let split = compile(&words, pc, profile, target.with_data_independent_timing());
+                assert!(grouped.native.x86_64_code.len() < split.native.x86_64_code.len());
+                assert_eq!(count(&grouped.native, round), 1);
+                assert_eq!(count(&grouped.native, last), 0);
+                assert_eq!(count(&split.native, last), 1);
+                assert_eq!(grouped.native.source_map.len(), 2);
+                assert_eq!(grouped.native.source_map[0], (pc, 0));
+                let second = grouped.native.source_map[1];
+                assert_eq!(second.0, GuestAddress(pc.0 + 4));
+                assert!(second.1 > 0);
+                assert!(grouped.fault_recovery.is_empty());
+                if profile == system {
+                    let followed = [words[0], words[1], 0xf940_0289]; // LDR X9,[X20].
+                    let compiled = compile(&followed, pc, profile, target);
+                    let fault = compiled
+                        .fault_recovery
+                        .iter()
+                        .find(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+                        .unwrap();
+                    assert_eq!(fault.retirement.instruction_pc(), GuestAddress(pc.0 + 8));
+                    assert_eq!(fault.retirement.retired_before(), 2);
+                    assert!(fault.start >= compiled.native.source_map[2].1);
+                    assert!(fault.bindings.is_empty());
+                }
+                let clipped = compile(&words[..1], pc, profile, target);
+                assert_eq!(count(&clipped.native, last), 1);
+                let mix = compile(&words[1..], second.0, profile, target);
+                assert_eq!(mix.native.source_map, [(second.0, 0)]);
+                let other_destination = [words[0], words[1] ^ 1];
+                let split = compile(&other_destination, pc, profile, target);
+                assert_eq!(count(&split.native, last), 1);
+            }
+            for target in [TargetCpu::Baseline, TargetCpu::Ssse3, TargetCpu::Sse41] {
+                let fallback = compile(&words, pc, profile, target);
+                assert_eq!(count(&fallback.native, round), 0);
+                assert_eq!(count(&fallback.native, last), 0);
+            }
+        }
+    }
+}
+
+#[test]
 fn indexed_load_store_pair_shares_checked_address_with_distinct_fault_rows() {
     use crate::{
         Options, TargetCpu,

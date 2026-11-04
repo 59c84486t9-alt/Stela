@@ -5,10 +5,17 @@ mod sbox;
 
 use super::{Host, commit, packed, read_vector, rearrange::constant, shuffle};
 use crate::{
-    TargetCpu,
-    aarch64::simd::aes::{Kind, Operand},
+    GuestAddress, TargetCpu,
+    aarch64::{
+        Instruction, Operation,
+        simd::{
+            Operand as Simd,
+            aes::{Kind, Operand},
+        },
+    },
     x86_64::isa::ShiftOpcode as Shift,
 };
+use alloc::vec::Vec;
 
 const RCX: u8 = 1;
 const RESULT: u8 = 0;
@@ -130,11 +137,57 @@ fn aes(code: &mut Code, kind: Kind, target: TargetCpu) {
     }
 }
 
-pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
+fn round_input(code: &mut Code, operand: &Operand) {
     read_vector(code, operand.source, RESULT);
+    read_vector(code, operand.destination, OLD_DESTINATION);
+    packed(code, Host::Xor, RESULT, OLD_DESTINATION);
+}
+
+/// An in-place MixColumns consumes and overwrites the immediately preceding
+/// AES row. Both operations are pure once the block has admitted AdvSIMD.
+/// Keep both source rows, but commit only the final value within the block.
+pub(in crate::x86_64) fn emit_round_pair(
+    code: &mut Code,
+    source_map: &mut Vec<(GuestAddress, usize)>,
+    instructions: &[Instruction],
+    target: TargetCpu,
+) -> Option<u8> {
+    let [first, second, ..] = instructions else {
+        return None;
+    };
+    let (Operation::Simd(Simd::Aes(round)), Operation::Simd(Simd::Aes(mix))) =
+        (&first.operation, &second.operation)
+    else {
+        return None;
+    };
+    if first.pc.0.checked_add(4) != Some(second.pc.0)
+        || round.destination != mix.source
+        || mix.source != mix.destination
+    {
+        return None;
+    }
+    let opcode = match (round.kind, mix.kind) {
+        (Kind::Encrypt, Kind::MixColumns) => Host::AesEncryptRound,
+        (Kind::Decrypt, Kind::InverseMixColumns) => Host::AesDecryptRound,
+        _ => return None,
+    };
+    code.set_instruction(source_map.len());
+    source_map.push((first.pc, code.len()));
+    round_input(code, round);
+    code.set_instruction(source_map.len());
+    source_map.push((second.pc, code.len()));
+    // Arm XORs the key before the transforms. AES-NI's final key is zero.
+    packed(code, Host::Xor, MASK, MASK);
+    opcode.register(code, RESULT, MASK, target);
+    commit(code, mix.destination, RESULT);
+    Some(mix.destination)
+}
+
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     if matches!(operand.kind, Kind::Encrypt | Kind::Decrypt) {
-        read_vector(code, operand.destination, OLD_DESTINATION);
-        packed(code, Host::Xor, RESULT, OLD_DESTINATION);
+        round_input(code, operand);
+    } else {
+        read_vector(code, operand.source, RESULT);
     }
     if target.supports(TargetCpu::Aes) {
         aes(code, operand.kind, target);
@@ -159,8 +212,6 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
 mod tests {
     use super::*;
     use alloc::vec;
-    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
-    use alloc::vec::Vec;
 
     fn occurrences(code: &[u8], opcode: Host) -> usize {
         code.windows(opcode.encoding().len())
