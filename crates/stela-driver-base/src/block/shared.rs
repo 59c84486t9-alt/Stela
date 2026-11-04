@@ -267,9 +267,9 @@ impl Held<'_> {
             return;
         }
         let queued = self.depth() > 0;
-        let (block, limit) = {
+        let (block, features) = {
             let identity = self.identity();
-            (identity.block_size as usize, identity.features.max_transfer)
+            (identity.block_size as usize, identity.features)
         };
         loop {
             if queued && !self.room() {
@@ -288,6 +288,8 @@ impl Held<'_> {
                 Command::Read { bytes, .. } => *bytes,
                 _ => 0,
             };
+            let read = matches!(command, Command::Read { .. });
+            let limit = features.transfer_limit(read);
             let mut more = Vec::new();
             let mut offset = first;
             while let Some((next, following, _)) = self.requests().waiting.front() {

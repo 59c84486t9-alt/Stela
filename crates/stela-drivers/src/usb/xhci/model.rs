@@ -249,7 +249,7 @@ fn address_controller_with_capabilities(
         early_setup: false,
     }));
     let mut registers: Box<dyn Registers> = Box::new(AddressRegisters(model.clone()));
-    let iso_caps = if let Some(words) = capability_words {
+    let (version, iso_caps) = if let Some(words) = capability_words {
         registers = Box::new(CapabilityRegisters {
             original: registers,
             words,
@@ -259,9 +259,9 @@ fn address_controller_with_capabilities(
         let version = (registers.read32(0x00) >> 16) as u16;
         let hcs2 = registers.read32(0x08);
         let hcc1 = registers.read32(0x10);
-        iso::Capabilities::new(version, hcs2, hcc1)
+        (version, iso::Capabilities::new(version, hcs2, hcc1))
     } else {
-        iso::Capabilities::new(0x100, 0, 0)
+        (0x100, iso::Capabilities::new(0x100, 0, 0))
     };
     let controller = Controller {
         minimum: crate::usb::xhci::minimum::fixture(clock),
@@ -272,6 +272,7 @@ fn address_controller_with_capabilities(
         runtime: 0x800,
         doorbells: 0x1000,
         context_bytes: 32,
+        version,
         dma_profile: dma::Profile::SPEC,
         hardware: hardware::State::Running,
         quirks: quirks::Profile::default(),

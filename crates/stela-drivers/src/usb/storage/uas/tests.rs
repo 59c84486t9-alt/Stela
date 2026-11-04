@@ -55,6 +55,8 @@ struct State {
     target: Option<Target>,
     reply: Option<Reply>,
     streams: Option<u16>,
+    read_ceiling: usize,
+    chained_reads: Vec<usize>,
 }
 #[derive(Clone)]
 struct Model {
@@ -103,6 +105,8 @@ fn model(memory: &mut [u64], length: usize, input: bool, fault: Fault) -> (Model
             target: None,
             reply: None,
             streams: None,
+            read_ceiling: MAX_TD,
+            chained_reads: Vec::new(),
         })),
         clock: Rc::new(Cell::new(0)),
     };

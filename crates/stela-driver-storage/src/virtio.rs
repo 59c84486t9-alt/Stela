@@ -156,6 +156,7 @@ impl VirtioBlk {
             write_cache: accepted & FEATURE_FLUSH != 0,
             fua: false,
             max_transfer: BOUNCE_BYTES,
+            max_read_transfer: None,
             discard: (accepted & FEATURE_DISCARD != 0)
                 .then(|| DiscardLimits::single(blocks(CONFIG_MAX_DISCARD))),
             write_zeroes: (accepted & FEATURE_WRITE_ZEROES != 0).then(|| WriteZeroes {

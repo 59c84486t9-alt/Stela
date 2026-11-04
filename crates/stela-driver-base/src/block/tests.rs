@@ -280,6 +280,74 @@ fn bulk_submission_respects_window_capacity() {
 }
 
 #[test]
+fn directional_transfer_limits_split_and_merge_only_reads_at_the_larger_bound() {
+    let mut ram = RamDisk::new("directional", 16, 512);
+    ram.identity.features.max_transfer = 512;
+    ram.identity.features.max_read_transfer = NonZeroUsize::new(1024);
+    let read = Plan::new(
+        Request::Read {
+            lba: 0,
+            bytes: 1536,
+        },
+        ram.identity(),
+    )
+    .unwrap();
+    assert_eq!(
+        read.collect::<Vec<_>>(),
+        [
+            (
+                0,
+                Command::Read {
+                    lba: 0,
+                    bytes: 1024
+                }
+            ),
+            (1024, Command::Read { lba: 2, bytes: 512 }),
+        ]
+    );
+    let write_plan = Plan::new(
+        Request::Write {
+            lba: 0,
+            data: vec![3; 1024],
+            durable: false,
+        },
+        ram.identity(),
+    )
+    .unwrap();
+    assert_eq!(write_plan.count(), 2);
+
+    let (delayed, (released, _, given)) = Delayed::new(ram, 1);
+    let disk = Shared::new(Box::new(delayed));
+    let mut window = disk.whole();
+    let commands = [
+        write(0, 1),
+        write(1, 2),
+        write(2, 3),
+        Command::Read { lba: 1, bytes: 512 },
+        Command::Read { lba: 2, bytes: 512 },
+    ];
+    let tags = commands.map(|command| window.start(command).unwrap());
+    released.set(usize::MAX);
+    for tag in &tags[..3] {
+        assert_eq!(window.finish(*tag), Some(Ok(None)));
+    }
+    assert_eq!(window.finish(tags[3]), Some(Ok(Some(vec![2; 512]))));
+    assert_eq!(window.finish(tags[4]), Some(Ok(Some(vec![3; 512]))));
+    assert_eq!(
+        *given.borrow(),
+        [
+            write(0, 1),
+            write(1, 2),
+            write(2, 3),
+            Command::Read {
+                lba: 1,
+                bytes: 1024
+            },
+        ]
+    );
+}
+
+#[test]
 fn adjoining_waiting_commands_reach_the_device_as_one() {
     let (delayed, (released, _, given)) = Delayed::new(RamDisk::new("m", 64, 512), 1);
     let disk = Shared::new(Box::new(delayed));

@@ -182,6 +182,9 @@ impl<T: Scsi> Scsi for Owner<T> {
     fn max_transfer_bytes(&self) -> usize {
         self.transport.max_transfer_bytes()
     }
+    fn read_command_ceiling(&self) -> usize {
+        self.transport.read_command_ceiling()
+    }
     fn capacity16_first(&self) -> bool {
         self.transport.capacity16_first()
     }

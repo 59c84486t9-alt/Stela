@@ -107,6 +107,17 @@ impl Ring {
         &mut self,
         trbs: &[(u64, u32, u32); N],
     ) -> Result<[u64; N], BlockError> {
+        self.push_with_owner(trbs, |_| {})
+    }
+
+    /// Record the exact TRB addresses in software before the first Cycle can
+    /// become visible to hardware. A sync error after this point does not
+    /// revoke the recorded owner or rewind the ring.
+    pub(super) fn push_with_owner<const N: usize>(
+        &mut self,
+        trbs: &[(u64, u32, u32); N],
+        record_owner: impl FnOnce([u64; N]),
+    ) -> Result<[u64; N], BlockError> {
         let mut addresses = [0; N];
         let mut first = None;
         for (n, &(parameter, status, control)) in trbs.iter().enumerate() {
@@ -135,6 +146,7 @@ impl Ring {
                 self.cycle = !self.cycle;
             }
         }
+        record_owner(addresses);
         // Make the complete TD and Link visible while its first Cycle still
         // belongs to software. Only then publish that ownership word.
         self.buffer.sync_dirty()?;
@@ -203,13 +215,20 @@ mod tests {
             ring.push(&[(0, 0, NORMAL << 10)]).unwrap();
         }
         assert!(ring.cycle);
+        let mut recorded = None;
         let addresses = ring
-            .push(&[(1, 0, NORMAL << 10), (2, 0, NORMAL << 10)])
+            .push_with_owner(
+                &[(1, 0, NORMAL << 10 | CHAIN), (2, 0, NORMAL << 10)],
+                |td| {
+                    recorded = Some(td);
+                },
+            )
             .unwrap();
+        assert_eq!(recorded, Some(addresses));
         assert_eq!(addresses[1], ring.buffer.physical());
         assert!(!ring.cycle);
         let link: u32 = ring.buffer.read((RING_TRBS - 1) * TRB + 12);
-        assert_eq!(link, LINK << 10 | TOGGLE | CYCLE);
+        assert_eq!(link, LINK << 10 | TOGGLE | CHAIN | CYCLE);
         let first: u32 = ring.buffer.read((RING_TRBS - 2) * TRB + 12);
         assert_eq!(first & CYCLE, CYCLE);
         let wrapped: u32 = ring.buffer.read(12);

@@ -32,14 +32,16 @@ impl Flags {
         Self(self.0 | MAX_SECTORS_240)
     }
     pub fn max_transfer_bytes(self) -> usize {
+        self.transfer_ceiling(super::MAX_TD)
+    }
+    pub fn transfer_ceiling(self, transport: usize) -> usize {
         // Linux sector limits are in 512-byte units, independent of the
-        // medium's logical block size. The native TD bound currently wins.
-        let enclosure = if self.0 & MAX_SECTORS_240 != 0 {
-            240 * 512
+        // medium's logical block size.
+        if self.0 & MAX_SECTORS_240 != 0 {
+            transport.min(240 * 512)
         } else {
-            usize::MAX
-        };
-        enclosure.min(super::MAX_TD)
+            transport
+        }
     }
     pub fn ignored(self) -> bool {
         self.0 & IGNORE != 0

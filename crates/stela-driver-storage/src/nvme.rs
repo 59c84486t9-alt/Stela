@@ -1008,6 +1008,7 @@ fn features(
         write_cache,
         fua: write_cache,
         max_transfer: transfer.data,
+        max_read_transfer: None,
         discard: (commands & COMMANDS_DATASET_MANAGEMENT != 0).then_some(DiscardLimits {
             blocks: if deallocate != 0 && deallocate <= sectors {
                 deallocate

@@ -257,7 +257,7 @@ pub const SUPER_SPEED_PLUS: u8 = 5;
 const CONTROL_TYPE: u32 = 4;
 const MAX_SLOTS: usize = 32;
 const MAX_TIERS: u8 = 5;
-/// The most one TD moves, and the boundary it must not cross.
+/// The most one data TRB moves, and the boundary it must not cross.
 pub const MAX_TD: usize = 64 * 1024;
 const CONTROL_BYTES: usize = 4096;
 /// Complete descriptor inventory per device, never a silently truncated prefix.
@@ -415,6 +415,7 @@ pub struct Controller {
     runtime: usize,
     doorbells: usize,
     context_bytes: usize,
+    version: u16,
     dma_profile: dma::Profile,
     max_primary_streams: u32,
     stream_policy: streams::Policy,
@@ -704,9 +705,9 @@ impl Controller {
         registers.write64(runtime + ERDP, events.device_address());
         registers.write64(runtime + ERSTBA, event_table.device_address());
         hardware::start(&mut *registers, clock, operational)?;
-        let iso_caps =
-            iso::Capabilities::new((capability >> 16) as u16, parameters2, capabilities1);
-        let iso_caps = if capability >> 16 > 0x100 {
+        let version = (capability >> 16) as u16;
+        let iso_caps = iso::Capabilities::new(version, parameters2, capabilities1);
+        let iso_caps = if version > 0x100 {
             iso_caps.extended(registers.read32(HCCPARAMS2))
         } else {
             iso_caps
@@ -722,6 +723,7 @@ impl Controller {
             runtime,
             doorbells,
             context_bytes,
+            version,
             dma_profile: profile,
             max_primary_streams: 1 << ((capabilities1 >> 12 & 0xf) + 1),
             stream_policy: policy.streams,
@@ -731,7 +733,7 @@ impl Controller {
             max_slots,
             max_ports,
             port_major,
-            lpm: lpm::Host::new((capability >> 16) as u16, parameters3 >> 16, port_protocol),
+            lpm: lpm::Host::new(version, parameters3 >> 16, port_protocol),
             native_memory,
             dcbaa,
             _scratchpads: scratchpads,

@@ -97,6 +97,7 @@ fn unpublished_profile(
         quirks: quirks::Profile::default(),
         max_primary_streams: 4,
         stream_policy: streams::Policy::Standard,
+        version: 0x100,
         iso_caps: iso::Capabilities::new(0x100, 0, 0),
         max_slots,
         max_ports: 1,

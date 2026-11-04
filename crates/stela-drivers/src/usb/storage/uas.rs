@@ -357,7 +357,7 @@ impl Host {
         if let Some(error) = &self.minimum_error {
             return Err(error.clone());
         }
-        admit(self.flags, cdb, &data)?;
+        admit_block_io(self.flags, cdb, &data, self.read_command_ceiling())?;
         self.engine.begin(lun, cdb, data)
     }
     /// The begun command's result once it ended; never waits.

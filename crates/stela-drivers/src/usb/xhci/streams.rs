@@ -17,6 +17,11 @@ const RING_UNDERRUN: u32 = 14;
 const RING_OVERRUN: u32 = 15;
 const STOPPED_LENGTH_INVALID: u32 = 27;
 const INVALID_STREAM_ID: u32 = 34;
+const TRB_LENGTH_MASK: u32 = 0x1ffff;
+const CHAINED_READ_BYTES: usize = 2 * MAX_TD;
+const STREAM_PACKET_BYTES: usize = 1024;
+const TD_SIZE_SHIFT: u32 = 17;
+const MAX_TD_SIZE: usize = 31;
 static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 
 /// Immutable validation for this controller's current reset/ownership
@@ -77,6 +82,36 @@ pub(super) fn dequeue_status(stream: u16) -> u32 {
     u32::from(stream) << 16
 }
 
+fn chained_read_trbs(
+    profile: dma::Profile,
+    buffer: &DmaBuffer,
+    length: usize,
+) -> Result<[(u64, u32, u32); 2], BlockError> {
+    let address = buffer.bus_address();
+    if !(MAX_TD + 1..=CHAINED_READ_BYTES).contains(&length)
+        || length > buffer.len()
+        || !address.is_multiple_of(MAX_TD as u64)
+        || address.checked_add(length as u64).is_none()
+    {
+        return Err(BlockError::Unsupported("xHCI chained read DMA span"));
+    }
+    profile.check(address, length)?;
+    let remaining = length - MAX_TD;
+    let packets = remaining.div_ceil(STREAM_PACKET_BYTES).min(MAX_TD_SIZE) as u32;
+    Ok([
+        (
+            address,
+            MAX_TD as u32 | packets << TD_SIZE_SHIFT,
+            NORMAL << 10 | ISP | CHAIN,
+        ),
+        (
+            address + MAX_TD as u64,
+            remaining as u32,
+            NORMAL << 10 | ISP | IOC,
+        ),
+    ])
+}
+
 /// An exact submitted TD, including its addressed-device generation and
 /// controller-independent, nonwrapping TD identity. Dropping a ticket does not
 /// cancel hardware: the endpoint keeps its active record and blocks reuse
@@ -87,14 +122,13 @@ pub struct StreamTransfer {
     device: SlotId,
     dci: u8,
     stream: u16,
-    trb: u64,
-    length: usize,
+    td: Td,
 }
 
 impl StreamTransfer {
     #[cfg(test)]
     pub(super) fn submitted_pointer(&self) -> u64 {
-        self.trb
+        self.td.first
     }
 
     pub(super) fn hardware_slot(&self) -> u8 {
@@ -103,6 +137,51 @@ impl StreamTransfer {
 
     pub(in crate::usb::xhci) fn device_id(&self) -> SlotId {
         self.device
+    }
+}
+
+/// The two data TRBs can straddle the Link TRB. Only their exact addresses
+/// belong to this TD.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Td {
+    first: u64,
+    last: u64,
+    first_length: usize,
+    length: usize,
+}
+
+impl Td {
+    fn is_chained(self) -> bool {
+        self.first != self.last
+    }
+
+    fn contains(self, address: u64) -> bool {
+        address == self.first || address == self.last
+    }
+
+    fn chained_completion(self, event: Event) -> Result<usize, BlockError> {
+        if event.control & EVENT_DATA != 0 {
+            return Err(BlockError::Protocol("unexpected xHCI stream Event Data"));
+        }
+        if !matches!(event.code(), SUCCESS | SHORT_PACKET) {
+            return Err(BlockError::Device {
+                status: event.code(),
+            });
+        }
+        // A tail event reports the TD residual. An interior short reports
+        // the named TRB's residual and does not retire the remaining chain.
+        if event.parameter == self.last {
+            return self
+                .length
+                .checked_sub(event.residual())
+                .ok_or(BlockError::Protocol("invalid xHCI stream TD residual"));
+        }
+        if event.residual() > self.first_length {
+            return Err(BlockError::Protocol("invalid xHCI stream TRB residual"));
+        }
+        Err(BlockError::Protocol(
+            "short xHCI stream TD requires retirement",
+        ))
     }
 }
 
@@ -173,9 +252,14 @@ impl Layout {
 
 struct Active {
     id: u64,
-    trb: u64,
-    length: usize,
+    td: Td,
     error: Option<BlockError>,
+}
+
+impl Active {
+    fn matches(&self, ticket: &StreamTransfer) -> bool {
+        self.id == ticket.id && self.td == ticket.td
+    }
 }
 struct Stream {
     ring: Ring,
@@ -315,6 +399,79 @@ impl Streams {
         self.recovery
     }
 
+    fn publish<const N: usize>(
+        &mut self,
+        stream_id: u16,
+        trbs: &[(u64, u32, u32); N],
+        length: usize,
+    ) -> Result<(u64, Td), BlockError> {
+        const { assert!(N == 1 || N == 2) };
+        if self.recovery {
+            return Err(BlockError::Unsupported(
+                "stream endpoint requires cancellation",
+            ));
+        }
+        let stream = self.stream(stream_id)?;
+        if stream.active.is_some() {
+            return Err(BlockError::Unsupported(
+                "xHCI stream already has an active TD",
+            ));
+        }
+        let id = NEXT_TICKET
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| BlockError::Unsupported("xHCI stream ticket space exhausted"))?;
+        let active = &mut stream.active;
+        match stream.ring.push_with_owner(trbs, |addresses| {
+            let td = Td {
+                first: addresses[0],
+                last: addresses[N - 1],
+                first_length: (trbs[0].1 & TRB_LENGTH_MASK) as usize,
+                length,
+            };
+            *active = Some(Active {
+                id,
+                td,
+                error: None,
+            });
+        }) {
+            Ok(_) => Ok((id, active.as_ref().unwrap().td)),
+            Err(error) => {
+                // Even a failed sync can follow Cycle publication. Keep the
+                // owner and block submission until endpoint retirement.
+                self.recovery = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn has_chained(&self) -> bool {
+        self.rings.iter().any(|stream| {
+            stream
+                .active
+                .as_ref()
+                .is_some_and(|active| active.td.is_chained())
+        })
+    }
+
+    fn fail_all(&mut self, error: &BlockError) {
+        self.recovery = true;
+        for stream in &mut self.rings {
+            if let Some(active) = &mut stream.active {
+                active.error.get_or_insert_with(|| error.clone());
+            }
+        }
+    }
+
+    fn finish(&mut self, stream: u16, result: &Result<usize, BlockError>) {
+        if let Err(error) = result {
+            self.recovery = true;
+            self.stream(stream).unwrap().active.as_mut().unwrap().error = Some(error.clone());
+        } else {
+            self.errors = 0;
+            self.stream(stream).unwrap().active = None;
+        }
+    }
+
     pub fn cancelled(&mut self) {
         for stream in &mut self.rings {
             stream.active = None;
@@ -335,9 +492,7 @@ impl Controller {
             .and_then(|endpoint| endpoint.streams.as_ref())
             .and_then(|streams| streams.rings.get(usize::from(ticket.stream) - 1))
             .and_then(|stream| stream.active.as_ref())
-            .is_some_and(|active| {
-                (active.id, active.trb, active.length) == (ticket.id, ticket.trb, ticket.length)
-            });
+            .is_some_and(|active| active.matches(ticket));
         if !valid {
             return Err(BlockError::Unsupported(
                 "stale or foreign native stream cancellation",
@@ -492,43 +647,98 @@ impl Controller {
             .streams
             .as_mut()
             .ok_or(BlockError::Unsupported("endpoint has no streams"))?;
-        if streams.recovery {
-            return Err(BlockError::Unsupported(
-                "stream endpoint requires cancellation",
-            ));
-        }
-        let stream = streams.stream(stream_id)?;
-        if stream.active.is_some() {
-            return Err(BlockError::Unsupported(
-                "xHCI stream already has an active TD",
-            ));
-        }
-        let id = NEXT_TICKET
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .map_err(|_| BlockError::Unsupported("xHCI stream ticket space exhausted"))?;
         let direction = if endpoint.is_in { ISP } else { 0 };
-        let trb = stream
-            .ring
-            .push(&[(buffer, length as u32, NORMAL << 10 | IOC | direction)])?[0];
-        stream.active = Some(Active {
-            id,
-            trb,
-            length,
-            error: None,
-        });
+        let trbs = [(buffer, length as u32, NORMAL << 10 | IOC | direction)];
+        let published = streams.publish(stream_id, &trbs, length)?;
+        Ok(self.ring_stream(device, dci, stream_id, published))
+    }
+
+    pub(super) fn chained_stream_read_capacity_owned(
+        &self,
+        slot: u8,
+        dci: u8,
+    ) -> Result<Option<usize>, BlockError> {
+        self.live_slot(slot)?;
+        if self.native_memory.is_some() || self.version < 0x100 {
+            return Ok(None);
+        }
+        if self.command_poisoned || self.error.is_some() {
+            return Err(BlockError::Unsupported(
+                "xHCI controller is not available for stream planning",
+            ));
+        }
+        let state = self.slots[usize::from(slot)].as_ref().unwrap();
+        if !matches!(state.speed, SUPER_SPEED | SUPER_SPEED_PLUS)
+            || !state.current_configuration.is_some_and(|value| value != 0)
+        {
+            return Ok(None);
+        }
+        let endpoint = state
+            .endpoints
+            .get(usize::from(dci))
+            .and_then(Option::as_ref);
+        // Layout::new validates the 1024-byte maximum packet size of every
+        // SuperSpeed bulk endpoint before its primary stream array is enabled.
+        Ok(endpoint
+            .is_some_and(|endpoint| {
+                endpoint.enabled
+                    && endpoint.is_in
+                    && !endpoint.poisoned
+                    && endpoint
+                        .streams
+                        .as_ref()
+                        .is_some_and(|streams| !streams.recovery)
+            })
+            .then_some(CHAINED_READ_BYTES))
+    }
+
+    pub(super) fn submit_chained_stream_read_owned(
+        &mut self,
+        slot: u8,
+        dci: u8,
+        stream: u16,
+        buffer: &DmaBuffer,
+        length: usize,
+    ) -> Result<StreamTransfer, BlockError> {
+        let device = self.device_id(slot)?;
+        self.validate_id(device)?;
+        if self
+            .chained_stream_read_capacity_owned(slot, dci)?
+            .is_none()
+        {
+            return Err(BlockError::Unsupported(
+                "xHCI endpoint cannot chain stream reads",
+            ));
+        }
+        let trbs = chained_read_trbs(self.dma_profile, buffer, length)?;
+        self.endpoint_ready_owned(slot, dci)?;
+        let streams = self.slot(slot)?.endpoints[usize::from(dci)]
+            .as_mut()
+            .and_then(|endpoint| endpoint.streams.as_mut())
+            .unwrap();
+        let published = streams.publish(stream, &trbs, length)?;
+        Ok(self.ring_stream(device, dci, stream, published))
+    }
+
+    fn ring_stream(
+        &mut self,
+        device: SlotId,
+        dci: u8,
+        stream: u16,
+        (id, td): (u64, Td),
+    ) -> StreamTransfer {
         fence(Ordering::SeqCst);
         self.registers.write32(
-            self.doorbells + 4 * usize::from(slot),
-            doorbell_value(dci, stream_id),
+            self.doorbells + 4 * usize::from(device.hardware_slot()),
+            doorbell_value(dci, stream),
         );
-        Ok(StreamTransfer {
+        StreamTransfer {
             id,
             device,
             dci,
-            stream: stream_id,
-            trb,
-            length,
-        })
+            stream,
+            td,
+        }
     }
 
     /// Linux handle_transferless_tx_event: events whose TRB pointer lies in
@@ -551,14 +761,41 @@ impl Controller {
                     && e.slot() == slot
                     && e.endpoint() == dci
                     && e.code() != INCOMPATIBLE_DEVICE
-                    && !streams.rings.iter().any(|stream| {
-                        let base = stream.ring.buffer.device_address();
-                        (base..base + (RING_TRBS * TRB) as u64).contains(&e.parameter)
-                    })
+                    && ((e.control & EVENT_DATA != 0 && streams.has_chained())
+                        || !streams.rings.iter().any(|stream| {
+                            let base = stream.ring.buffer.device_address();
+                            (base..base + (RING_TRBS * TRB) as u64).contains(&e.parameter)
+                        }))
             }) else {
                 return Ok(());
             };
             let event = self.pending.remove(index);
+            if streams.has_chained() {
+                let error = match event.code() {
+                    _ if event.control & EVENT_DATA != 0 => {
+                        Some(BlockError::Protocol("unexpected xHCI stream Event Data"))
+                    }
+                    STALL
+                    | transfer::USB_TRANSACTION_ERROR
+                    | INVALID_STREAM_TYPE
+                    | INVALID_STREAM_ID => Some(BlockError::Device {
+                        status: event.code(),
+                    }),
+                    _ => None,
+                };
+                if let Some(error) = error {
+                    let streams = self.slot(slot)?.endpoints[usize::from(dci)]
+                        .as_mut()
+                        .unwrap()
+                        .streams
+                        .as_mut()
+                        .unwrap();
+                    // A transferless fault cannot identify where a chain
+                    // stopped. No active stream can be rung again safely.
+                    streams.fail_all(&error);
+                    return Err(error);
+                }
+            }
             match event.code() {
                 STALL
                 | transfer::USB_TRANSACTION_ERROR
@@ -618,7 +855,7 @@ impl Controller {
                 .active
                 .as_ref()
                 .ok_or(BlockError::Unsupported("stream ticket is no longer active"))?;
-            if (active.id, active.trb, active.length) != (ticket.id, ticket.trb, ticket.length) {
+            if !active.matches(ticket) {
                 return Err(BlockError::Unsupported("stale or foreign stream ticket"));
             }
             Ok(active.error.clone())
@@ -634,7 +871,7 @@ impl Controller {
             e.kind() == TRANSFER_EVENT
                 && e.slot() == slot
                 && e.endpoint() == ticket.dci
-                && (e.parameter == ticket.trb || e.code() == INCOMPATIBLE_DEVICE)
+                && (ticket.td.contains(e.parameter) || e.code() == INCOMPATIBLE_DEVICE)
         })?;
         let no_soft_retry = self.quirks.no_soft_retry;
         let state = self.slot(slot).unwrap();
@@ -647,20 +884,26 @@ impl Controller {
                 status: event.code(),
             }));
         }
-        if event.control & EVENT_DATA != 0 || event.residual() > ticket.length {
+        if ticket.td.is_chained() {
+            let result = ticket.td.chained_completion(event);
+            streams.finish(ticket.stream, &result);
+            return Some(result);
+        }
+        if event.control & EVENT_DATA != 0 || event.residual() > ticket.td.length {
             endpoint.poisoned = true;
             return Some(Err(BlockError::Unsupported(
                 "invalid xHCI stream transfer event",
             )));
         }
         if matches!(event.code(), SUCCESS | SHORT_PACKET) {
-            streams.errors = 0;
-            streams.stream(ticket.stream).unwrap().active = None;
-            Some(Ok(ticket.length - event.residual()))
+            let result = Ok(ticket.td.length - event.residual());
+            streams.finish(ticket.stream, &result);
+            Some(result)
         } else {
             // Linux process_bulk_intr_td handles stream TDs the same way.
             if event.code() == transfer::USB_TRANSACTION_ERROR
                 && !streams.recovery
+                && !streams.has_chained()
                 && transfer::retry_in_place(&mut streams.errors, no_soft_retry, tt_info)
             {
                 let doorbells: Vec<u32> = (1..=streams.rings.len() as u16)
@@ -676,30 +919,17 @@ impl Controller {
                             .streams
                             .as_mut()
                             .unwrap();
-                        streams.recovery = true;
-                        streams
-                            .stream(ticket.stream)
-                            .unwrap()
-                            .active
-                            .as_mut()
-                            .unwrap()
-                            .error = Some(error.clone());
-                        return Some(Err(error));
+                        let result = Err(error);
+                        streams.finish(ticket.stream, &result);
+                        return Some(result);
                     }
                 }
             }
-            let error = BlockError::Device {
+            let result = Err(BlockError::Device {
                 status: event.code(),
-            };
-            streams.recovery = true;
-            streams
-                .stream(ticket.stream)
-                .unwrap()
-                .active
-                .as_mut()
-                .unwrap()
-                .error = Some(error.clone());
-            Some(Err(error))
+            });
+            streams.finish(ticket.stream, &result);
+            Some(result)
         }
     }
 }

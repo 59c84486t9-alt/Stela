@@ -208,30 +208,42 @@ impl Hardware {
             index: 0,
             cycle: initial as u32 & 1,
         });
-        let trb = cursor.base + (cursor.index * TRB) as u64;
-        let control = Self::word(trb + 12);
-        assert_eq!(control & CYCLE, cursor.cycle, "unpublished/stale TD");
-        assert_eq!(control >> 10 & 0x3f, NORMAL);
-        assert_ne!(control & IOC, 0);
-        let buffer = Self::long(trb);
-        let bytes = (Self::word(trb + 8) & 0x1ffff) as usize;
-        assert!(bytes <= MAX_TD && buffer % MAX_TD as u64 + bytes as u64 <= MAX_TD as u64);
+        let buffer = Self::long(cursor.base + (cursor.index * TRB) as u64);
+        let mut bytes = 0;
+        let trb = loop {
+            let trb = cursor.base + (cursor.index * TRB) as u64;
+            let control = Self::word(trb + 12);
+            assert_eq!(control & CYCLE, cursor.cycle, "unpublished/stale TD");
+            assert_eq!(control >> 10 & 0x3f, NORMAL);
+            let chained = control & CHAIN != 0;
+            assert_eq!(control & IOC != 0, !chained);
+            let segment = Self::long(trb);
+            let length = (Self::word(trb + 8) & TRB_LENGTH_MASK) as usize;
+            assert_eq!(segment, buffer + bytes as u64);
+            assert!(length <= MAX_TD && segment % MAX_TD as u64 + length as u64 <= MAX_TD as u64);
+            bytes += length;
+            cursor.index += 1;
+            if cursor.index == RING_TRBS - 1 {
+                let link = cursor.base + ((RING_TRBS - 1) * TRB) as u64;
+                let link_control = Self::word(link + 12);
+                assert_eq!(Self::long(link), cursor.base);
+                assert_eq!(link_control >> 10 & 0x3f, LINK);
+                assert_eq!(link_control & CYCLE, cursor.cycle);
+                assert_ne!(link_control & TOGGLE, 0);
+                assert_eq!(link_control & CHAIN != 0, chained);
+                cursor.index = 0;
+                cursor.cycle ^= 1;
+            }
+            if !chained {
+                break trb;
+            }
+            assert_eq!(bytes, MAX_TD);
+        };
         assert!(
             self.active
                 .insert((dci, stream), DeviceTd { trb, buffer, bytes })
                 .is_none()
         );
-        cursor.index += 1;
-        if cursor.index == RING_TRBS - 1 {
-            let link = cursor.base + ((RING_TRBS - 1) * TRB) as u64;
-            let control = Self::word(link + 12);
-            assert_eq!(Self::long(link), cursor.base);
-            assert_eq!(control >> 10 & 0x3f, LINK);
-            assert_eq!(control & CYCLE, cursor.cycle);
-            assert_ne!(control & TOGGLE, 0);
-            cursor.index = 0;
-            cursor.cycle ^= 1;
-        }
         self.set_state(dci, ENDPOINT_RUNNING);
         self.doorbells.push((dci, stream));
     }
@@ -366,6 +378,7 @@ fn controller(
             runtime: 0x800,
             doorbells: 0x1000,
             context_bytes,
+            version: 0x100,
             dma_profile: dma::Profile::SPEC,
             hardware: hardware::State::Running,
             quirks: quirks::Profile::default(),
@@ -489,7 +502,7 @@ fn retired_device_stream_ticket_is_pure_before_readiness_and_preserves_current_d
             .unwrap();
         let streams = endpoint.streams.as_mut().unwrap();
         let active = streams.stream(1).unwrap().active.as_ref().unwrap();
-        let active_before = (active.id, active.trb, active.length, active.error.clone());
+        let active_before = (active.id, active.td, active.error.clone());
         let registers = core::mem::replace(&mut current.registers, Box::new(NoAccess));
         for (dci, unhealthy) in [(3, false), (u8::MAX, false), (3, true), (u8::MAX, true)] {
             old.dci = dci;
@@ -527,10 +540,7 @@ fn retired_device_stream_ticket_is_pure_before_readiness_and_preserves_current_d
         let streams = endpoint.streams.as_mut().unwrap();
         assert!(!streams.recovery);
         let active = streams.stream(1).unwrap().active.as_ref().unwrap();
-        assert_eq!(
-            (active.id, active.trb, active.length, active.error.clone()),
-            active_before
-        );
+        assert_eq!((active.id, active.td, active.error.clone()), active_before);
         current.registers = registers;
         current.error = None;
         current.command_poisoned = false;
@@ -764,6 +774,207 @@ fn cancel_retires_every_stream_then_rejects_stale_tickets_and_events() {
         assert_eq!(controller.completed_stream(&fresh), None);
         model.borrow_mut().complete(3, 1, SUCCESS, 0);
         assert_eq!(controller.completed_stream(&fresh), Some(Ok(64)));
+    }
+}
+
+fn submit_wrapped_chain(
+    controller: &mut Controller,
+    hardware: &RefCell<Hardware>,
+    buffer: &DmaBuffer,
+) -> StreamTransfer {
+    let dci = 3;
+    let stream = 1;
+    let device = controller.device_id(1).unwrap();
+    controller.endpoint_ready_owned(1, dci).unwrap();
+    let streams = controller.slot(1).unwrap().endpoints[usize::from(dci)]
+        .as_mut()
+        .unwrap()
+        .streams
+        .as_mut()
+        .unwrap();
+    let ring = &mut streams.stream(stream).unwrap().ring;
+    ring.index = RING_TRBS - 2;
+    let base = ring.buffer.device_address();
+    hardware.borrow_mut().cursors.insert(
+        (dci, stream),
+        Cursor {
+            base,
+            index: ring.index,
+            cycle: u32::from(ring.cycle),
+        },
+    );
+    let mut access = controller.device(device).unwrap();
+    let ticket = access
+        .submit_chained_stream_read(dci, stream, buffer, CHAINED_READ_BYTES)
+        .unwrap();
+    assert_eq!(ticket.td.last, base);
+    assert_eq!(ticket.td.first, base + ((RING_TRBS - 2) * TRB) as u64);
+    assert_eq!(
+        Hardware::word(ticket.td.first + 8),
+        MAX_TD as u32 | 31 << TD_SIZE_SHIFT,
+    );
+    ticket
+}
+
+#[test]
+fn chained_stream_admission_requires_newer_input_stream_and_bounded_dma() {
+    let mut dma = TestRegion::new(256 * 1024 * 8);
+    let (mut controller, model) = controller(&mut dma, 32);
+    let mut bad = endpoint(0x81, 4);
+    bad.max_packet = 512;
+    assert!(
+        controller
+            .configure_streams(1, &[bad], &[0x81], 2, &mut dma)
+            .is_err()
+    );
+    controller
+        .configure_streams(
+            1,
+            &[endpoint(0x81, 4), endpoint(0x02, 4), endpoint(0x83, 4)],
+            &[0x81, 0x02],
+            2,
+            &mut dma,
+        )
+        .unwrap();
+    let device = controller.device_id(1).unwrap();
+    let full = dma.allocate(CHAINED_READ_BYTES, MAX_TD).unwrap();
+    let short = dma.allocate(512, 64).unwrap();
+    let misaligned = dma.allocate(MAX_TD + 1, 64).unwrap();
+    assert!(!misaligned.bus_address().is_multiple_of(MAX_TD as u64));
+    controller.version = 0x96;
+    let mut access = controller.device(device).unwrap();
+    assert_eq!(access.chained_stream_read_capacity(3), Ok(None));
+    assert!(
+        access
+            .submit_chained_stream_read(3, 1, &full, MAX_TD + 1)
+            .is_err()
+    );
+    controller.version = 0x100;
+    let mut access = controller.device(device).unwrap();
+    assert_eq!(
+        access.chained_stream_read_capacity(3),
+        Ok(Some(CHAINED_READ_BYTES))
+    );
+    for dci in [0, 4, 7, 32] {
+        assert_eq!(access.chained_stream_read_capacity(dci), Ok(None));
+        assert!(
+            access
+                .submit_chained_stream_read(dci, 1, &full, MAX_TD + 1)
+                .is_err()
+        );
+    }
+    for (stream, buffer, length) in [
+        (0, &full, MAX_TD + 1),
+        (1, &full, MAX_TD),
+        (1, &full, CHAINED_READ_BYTES + 1),
+        (1, &short, MAX_TD + 1),
+        (1, &misaligned, MAX_TD + 1),
+    ] {
+        assert!(
+            access
+                .submit_chained_stream_read(3, stream, buffer, length)
+                .is_err()
+        );
+    }
+    assert!(model.borrow().doorbells.is_empty());
+    let ticket = access
+        .submit_chained_stream_read(3, 1, &full, MAX_TD + 1)
+        .unwrap();
+    assert_eq!(model.borrow().doorbells, [(3, 1)]);
+    assert_eq!(
+        Hardware::word(ticket.td.first + 8),
+        MAX_TD as u32 | 1 << TD_SIZE_SHIFT
+    );
+    assert_eq!(Hardware::word(ticket.td.last + 8), 1);
+    model.borrow_mut().complete(3, 1, SUCCESS, 0);
+    assert_eq!(access.completed_stream(&ticket), Some(Ok(MAX_TD + 1)));
+}
+
+#[test]
+fn chained_stream_tail_is_exact_and_reports_total_residual() {
+    let mut dma = TestRegion::new(256 * 1024 * 8);
+    let (mut controller, model) = controller(&mut dma, 32);
+    controller
+        .configure_streams(1, &[endpoint(0x81, 4)], &[0x81], 2, &mut dma)
+        .unwrap();
+    let data = dma.allocate(2 * MAX_TD, MAX_TD).unwrap();
+    let sibling_data = dma.allocate(64, 64).unwrap();
+    assert!(
+        controller
+            .submit_stream(1, 3, 1, data.physical(), 2 * MAX_TD)
+            .is_err()
+    );
+    let ticket = submit_wrapped_chain(&mut controller, &model, &data);
+    let sibling = controller
+        .submit_stream(1, 3, 2, sibling_data.physical(), 32)
+        .unwrap();
+    model
+        .borrow_mut()
+        .event(ticket.td.first + TRB as u64, SUCCESS, TRANSFER_EVENT, 3, 0);
+    model.borrow_mut().complete(3, 2, SUCCESS, 0);
+    assert_eq!(controller.completed_stream(&ticket), None);
+    assert_eq!(controller.completed_stream(&sibling), Some(Ok(32)));
+    model.borrow_mut().complete(3, 1, SHORT_PACKET, 511);
+    assert_eq!(
+        controller.completed_stream(&ticket),
+        Some(Ok(2 * MAX_TD - 511))
+    );
+    assert!(matches!(controller.completed_stream(&ticket), Some(Err(_))));
+}
+
+#[test]
+fn chained_stream_uncertain_events_require_acknowledged_retirement() {
+    for (code, residual, transferless, failed_ack) in [
+        (SHORT_PACKET, 37, false, false),
+        (SUCCESS, MAX_TD + 1, false, true),
+        (transfer::USB_TRANSACTION_ERROR, 37, false, false),
+        (INVALID_STREAM_ID, 0, true, false),
+    ] {
+        let mut dma = TestRegion::new(256 * 1024 * 8);
+        let (mut controller, model) = controller(&mut dma, 32);
+        controller
+            .configure_streams(1, &[endpoint(0x81, 4)], &[0x81], 2, &mut dma)
+            .unwrap();
+        let data = dma.allocate(2 * MAX_TD, MAX_TD).unwrap();
+        let ticket = submit_wrapped_chain(&mut controller, &model, &data);
+        {
+            let mut hardware = model.borrow_mut();
+            let address = if transferless { 0 } else { ticket.td.first };
+            hardware.event(address, code, TRANSFER_EVENT, 3, residual);
+            hardware.event(ticket.td.last, SUCCESS, TRANSFER_EVENT, 3, 0);
+        }
+        let first = controller.completed_stream(&ticket);
+        assert!(matches!(first, Some(Err(_))));
+        assert_eq!(controller.completed_stream(&ticket), first);
+        assert!(
+            controller
+                .submit_stream(1, 3, 2, data.physical(), 32)
+                .is_err()
+        );
+        assert_eq!(model.borrow().doorbells.len(), 1);
+        assert_eq!(model.borrow().soft_resets, 0);
+        if failed_ack {
+            model.borrow_mut().fail_command = Some((SET_DEQUEUE, 1));
+        }
+        assert_eq!(
+            controller.cancel_native_stream(&ticket).is_err(),
+            failed_ack
+        );
+        let state = controller.slot(1).unwrap().endpoints[3].as_ref().unwrap();
+        assert_eq!(
+            state.streams.as_ref().unwrap().rings[0].active.is_some(),
+            failed_ack
+        );
+        if !failed_ack {
+            assert!(controller.pending.iter().all(|event| event.endpoint() != 3));
+            let fresh = controller
+                .submit_stream(1, 3, 1, data.physical(), 32)
+                .unwrap();
+            assert_eq!(fresh.td.first, ticket.td.last + TRB as u64);
+            assert!(matches!(controller.completed_stream(&ticket), Some(Err(_))));
+            model.borrow_mut().complete(3, 1, SUCCESS, 0);
+            assert_eq!(controller.completed_stream(&fresh), Some(Ok(32)));
+        }
     }
 }
 

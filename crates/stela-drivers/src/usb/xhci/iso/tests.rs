@@ -377,6 +377,7 @@ fn controller(
             quirks: quirks::Profile::default(),
             max_primary_streams: 4,
             stream_policy: streams::Policy::Unknown,
+            version: 0x110,
             iso_caps: Capabilities::new(0x110, 0xb, if cfc { 1 << 11 } else { 0 }),
             max_slots: 1,
             max_ports: 1,

@@ -542,6 +542,29 @@ impl DeviceAccess<'_> {
             .submit_stream_owned(slot, dci, stream, buffer, length)
     }
 
+    /// Returns the two-TRB read limit for this configured data-in endpoint.
+    /// A capacity query reserves no ring space or DMA.
+    pub fn chained_stream_read_capacity(&self, dci: u8) -> Result<Option<usize>, BlockError> {
+        let slot = self.slot()?;
+        self.controller
+            .chained_stream_read_capacity_owned(slot, dci)
+    }
+
+    /// Queues a read that requires two TRBs on a qualified boot DMA endpoint.
+    /// The caller keeps the complete buffer out of CPU use until this ticket
+    /// completes or endpoint cancellation is acknowledged.
+    pub fn submit_chained_stream_read(
+        &mut self,
+        dci: u8,
+        stream: u16,
+        buffer: &DmaBuffer,
+        length: usize,
+    ) -> Result<StreamTransfer, BlockError> {
+        let slot = self.slot()?;
+        self.controller
+            .submit_chained_stream_read_owned(slot, dci, stream, buffer, length)
+    }
+
     pub fn completed_stream(
         &mut self,
         ticket: &StreamTransfer,

@@ -2,6 +2,10 @@
 //! The SCSI commands USB disks receive (SPC-5, SBC-4) and the mode data
 //! they return.
 
+use super::{BlockError, Sense};
+use alloc::vec::Vec;
+use core::num::NonZeroUsize;
+
 pub(super) const TEST_UNIT_READY: u8 = 0x00;
 pub(super) const REQUEST_SENSE: u8 = 0x03;
 pub(super) const INQUIRY: u8 = 0x12;
@@ -86,6 +90,68 @@ pub(super) fn inquiry() -> [u8; 6] {
     [INQUIRY, 0, 0, 0, INQUIRY_BYTES as u8, 0]
 }
 
+const SUPPORTED_VPD: u8 = 0x00;
+const BLOCK_LIMITS_VPD: u8 = 0xb0;
+const SUPPORTED_VPD_BYTES: u16 = 255;
+const BLOCK_LIMITS_VPD_BYTES: u16 = 64;
+
+/// A separately owned read path supplies its checked controller, DMA and
+/// enclosure ceiling. Probe only when it offers more than the legacy path.
+pub(super) fn probe_read_limit(
+    block: usize,
+    legacy: usize,
+    ceiling: usize,
+    mut inquiry: impl FnMut(&[u8; 6], usize) -> Result<Vec<u8>, BlockError>,
+) -> Result<Option<NonZeroUsize>, BlockError> {
+    let ceiling_blocks = ceiling / block;
+    if ceiling_blocks <= legacy / block {
+        return Ok(None);
+    }
+    let mut read_page = |page, allocation: u16| {
+        let [high, low] = allocation.to_be_bytes();
+        let cdb = [INQUIRY, 1, page, high, low, 0];
+        match inquiry(&cdb, usize::from(allocation)) {
+            Ok(reply) => Ok(Some(reply)),
+            Err(BlockError::Sense(Sense {
+                key: Sense::ILLEGAL_REQUEST,
+                asc: 0x20 | 0x24,
+                ascq: 0,
+            })) => Ok(None),
+            Err(error) => Err(error),
+        }
+    };
+    let Some(pages) = read_page(SUPPORTED_VPD, SUPPORTED_VPD_BYTES)? else {
+        return Ok(None);
+    };
+    if !vpd_payload(&pages, SUPPORTED_VPD).is_some_and(|pages| pages.contains(&BLOCK_LIMITS_VPD)) {
+        return Ok(None);
+    }
+    let Some(limits) = read_page(BLOCK_LIMITS_VPD, BLOCK_LIMITS_VPD_BYTES)? else {
+        return Ok(None);
+    };
+    // Match the minimum complete Block Limits response used by the pinned
+    // SCSI disk driver. The maximum transfer length is in logical blocks.
+    let Some(limits) = vpd_payload(&limits, BLOCK_LIMITS_VPD).and_then(|body| body.get(..12))
+    else {
+        return Ok(None);
+    };
+    let reported = u32::from_be_bytes(limits[4..8].try_into().unwrap());
+    let limit = usize::try_from(reported)
+        .unwrap_or(usize::MAX)
+        .min(ceiling_blocks)
+        * block;
+    Ok(NonZeroUsize::new(limit).filter(|limit| limit.get() != legacy))
+}
+
+fn vpd_payload(bytes: &[u8], page: u8) -> Option<&[u8]> {
+    let &[kind, code, high, low] = bytes.first_chunk()?;
+    if kind != 0 || code != page {
+        return None;
+    }
+    let length = usize::from(u16::from_be_bytes([high, low]));
+    bytes.get(4..4 + length)
+}
+
 pub(super) fn mode_sense(page: u8) -> [u8; 6] {
     [MODE_SENSE_6, 0, page, 0, MODE_SENSE_BYTES as u8, 0]
 }
@@ -125,6 +191,83 @@ pub(super) fn write_cache_enabled(mode: &[u8]) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_limit_queries_only_wide_transports_and_keeps_the_device_ceiling() {
+        const LEGACY: usize = 64 * 1024;
+        const WIDE: usize = 128 * 1024;
+        assert_eq!(
+            probe_read_limit(512, LEGACY, LEGACY, |_, _| unreachable!()),
+            Ok(None)
+        );
+        for (reported, expected) in [
+            (0, None),
+            (128, None),
+            (96, NonZeroUsize::new(96 * 512)),
+            (240, NonZeroUsize::new(240 * 512)),
+            (u32::MAX, NonZeroUsize::new(WIDE)),
+        ] {
+            let mut calls = 0;
+            let result = probe_read_limit(512, LEGACY, WIDE, |cdb, allocation| {
+                calls += 1;
+                let reply = match cdb[2] {
+                    0 => {
+                        assert_eq!((*cdb, allocation), ([INQUIRY, 1, 0, 0, 255, 0], 255));
+                        vec![0, 0, 0, 2, 0, 0xb0]
+                    }
+                    0xb0 => {
+                        assert_eq!((*cdb, allocation), ([INQUIRY, 1, 0xb0, 0, 64, 0], 64));
+                        let mut reply = vec![0; 16];
+                        reply[1] = 0xb0;
+                        reply[3] = 12;
+                        reply[8..12].copy_from_slice(&reported.to_be_bytes());
+                        reply
+                    }
+                    _ => unreachable!(),
+                };
+                Ok(reply)
+            });
+            assert_eq!(result, Ok(expected));
+            assert_eq!(calls, 2);
+        }
+    }
+
+    #[test]
+    fn optional_vpd_never_accepts_unlisted_truncated_or_failed_geometry() {
+        let probe = |reply: Result<Vec<u8>, BlockError>| {
+            let mut reply = Some(reply);
+            probe_read_limit(4096, 64 * 1024, 128 * 1024, |_, _| reply.take().unwrap())
+        };
+        for reply in [
+            vec![],
+            vec![0, 0, 0, 2, 0xb0],
+            vec![0, 0, 0, 1, 0x83],
+            vec![0x60, 0, 0, 1, 0xb0],
+        ] {
+            assert_eq!(probe(Ok(reply)), Ok(None));
+        }
+        for asc in [0x20, 0x24, Sense::UNSUPPORTED_UNIT] {
+            let failed = BlockError::Sense(Sense {
+                key: Sense::ILLEGAL_REQUEST,
+                asc,
+                ascq: 0,
+            });
+            let expected = if asc == Sense::UNSUPPORTED_UNIT {
+                Err(failed.clone())
+            } else {
+                Ok(None)
+            };
+            assert_eq!(probe(Err(failed)), expected);
+        }
+        assert_eq!(probe(Err(BlockError::Timeout)), Err(BlockError::Timeout));
+        let mut replies = [vec![0, 0, 0, 1, 0xb0], vec![0, 0xb0, 0, 12, 0, 0, 0]].into_iter();
+        assert_eq!(
+            probe_read_limit(4096, 64 * 1024, 128 * 1024, |_, _| Ok(replies
+                .next()
+                .unwrap())),
+            Ok(None)
+        );
+    }
 
     #[test]
     fn read_write_commands_keep_wire_width_lba_count_and_fua() {

@@ -10,6 +10,7 @@ use alloc::{
 use core::{
     cell::UnsafeCell,
     fmt,
+    num::NonZeroUsize,
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -276,14 +277,25 @@ pub struct Features {
     /// Writes may complete only once durable (Force Unit Access), so a
     /// durable write needs no flush of the whole cache.
     pub fua: bool,
-    /// The most bytes one command moves; 0 for no limit.
+    /// The common byte limit, also used for writes; 0 for no limit.
     pub max_transfer: usize,
+    /// A distinct read limit in bytes, in whole logical blocks.
+    pub max_read_transfer: Option<NonZeroUsize>,
     /// Discard (NVMe Deallocate, ATA TRIM, SCSI UNMAP), when the device
     /// takes it.
     pub discard: Option<DiscardLimits>,
     /// Write Zeroes: the most blocks one command takes, and whether the
     /// device deallocates the blocks it zeroes when allowed to.
     pub write_zeroes: Option<WriteZeroes>,
+}
+
+impl Features {
+    fn transfer_limit(self, read: bool) -> usize {
+        if read && let Some(limit) = self.max_read_transfer {
+            return limit.get();
+        }
+        self.max_transfer
+    }
 }
 
 /// What one discard command takes: the most blocks in a range, 0 for no
@@ -602,7 +614,9 @@ impl Plan {
             Request::Flush => {}
         }
         let block = identity.block_size as usize;
-        let piece = match identity.features.max_transfer / block * block {
+        let read = matches!(request, Request::Read { .. });
+        let limit = identity.features.transfer_limit(read);
+        let piece = match limit / block * block {
             0 => usize::MAX,
             bytes => bytes,
         };

@@ -150,6 +150,10 @@ trait Scsi {
     fn max_transfer_bytes(&self) -> usize {
         MAX_TD
     }
+    /// Live transport/DMA ceiling for a single read, including enclosure limits.
+    fn read_command_ceiling(&self) -> usize {
+        self.max_transfer_bytes()
+    }
     fn capacity16_first(&self) -> bool {
         false
     }
@@ -321,6 +325,9 @@ impl Scsi for uas::Host {
     }
     fn max_transfer_bytes(&self) -> usize {
         uas::Host::max_transfer_bytes(self)
+    }
+    fn read_command_ceiling(&self) -> usize {
+        uas::Host::read_command_ceiling(self)
     }
     fn read_before_mode_sense(
         &mut self,
@@ -566,15 +573,25 @@ fn publication<T: Scsi>(
     owner
         .borrow_mut()
         .media_publication(lun, media.clone(), removable);
-    let (write_cache, fua) = caching(&mut *owner.borrow_mut(), lun)?;
-    let size = identity.block_size as usize;
-    identity.features = Features {
-        write_cache,
-        fua: write_cache && fua && owner.borrow().fua_permitted(),
-        max_transfer: owner.borrow().max_transfer_bytes() / size * size,
-        discard: None,
-        write_zeroes: None,
-    };
+    {
+        let mut transport = owner.borrow_mut();
+        let (write_cache, fua) = caching(&mut *transport, lun)?;
+        let size = identity.block_size as usize;
+        let max_transfer = transport.max_transfer_bytes() / size * size;
+        let ceiling = transport.read_command_ceiling();
+        let max_read_transfer =
+            scsi::probe_read_limit(size, max_transfer, ceiling, |cdb, bytes| {
+                transport.command(lun, cdb, Data::In(bytes))
+            })?;
+        identity.features = Features {
+            write_cache,
+            fua: write_cache && fua && transport.fua_permitted(),
+            max_transfer,
+            max_read_transfer,
+            discard: None,
+            write_zeroes: None,
+        };
+    }
     Ok(Disk {
         bot: owner.clone(),
         lun,
@@ -980,11 +997,20 @@ impl<T: Scsi> Disk<T> {
     /// The bytes of the next command of a transfer of `remaining` bytes at
     /// `lba`: at most the transport's bound, and the last sector alone
     /// where the device needs it so.
-    fn command_bytes(&self, lba: u64, remaining: usize) -> usize {
+    fn command_bytes(&self, lba: u64, remaining: usize, read: bool) -> usize {
         let size = self.identity.block_size as usize;
-        let maximum = self.bot.borrow().max_transfer_bytes() / size * size;
+        let transport = self.bot.borrow();
+        let legacy = transport.max_transfer_bytes();
+        let maximum = if read && let Some(limit) = self.identity.features.max_read_transfer {
+            limit
+                .get()
+                .min(transport.read_command_ceiling().max(legacy))
+        } else {
+            legacy
+        } / size
+            * size;
         let mut length = remaining.min(maximum);
-        if self.bot.borrow().separate_last_sector()
+        if transport.separate_last_sector()
             && lba + (length / size) as u64 == self.identity.blocks
             && length > size
         {
@@ -1007,11 +1033,11 @@ impl<T: Scsi> Disk<T> {
         let (cdb, length) = match &running.command {
             Command::Read { lba, .. } | Command::Write { lba, .. } if running.done < total => {
                 let at = lba + (running.done / size) as u64;
-                let length = self.command_bytes(at, total - running.done);
                 let (write, fua) = match &running.command {
                     Command::Write { fua, .. } => (true, *fua),
                     _ => (false, false),
                 };
+                let length = self.command_bytes(at, total - running.done, !write);
                 (
                     scsi::read_write(write, fua, at, (length / size) as u32),
                     length,
@@ -1076,7 +1102,7 @@ impl<T: Scsi> Disk<T> {
         let size = self.identity.block_size as usize;
         let (mut lba, mut remaining) = (lba, data);
         while !remaining.is_empty() {
-            let length = self.command_bytes(lba, remaining.len());
+            let length = self.command_bytes(lba, remaining.len(), false);
             let (chunk, rest) = remaining.split_at(length);
             remaining = rest;
             let blocks = (chunk.len() / size) as u32;
@@ -1110,7 +1136,7 @@ impl<T: Scsi> BlockDevice for Disk<T> {
         let size = self.identity.block_size as usize;
         let (mut lba, mut remaining) = (lba, buffer);
         while !remaining.is_empty() {
-            let length = self.command_bytes(lba, remaining.len());
+            let length = self.command_bytes(lba, remaining.len(), true);
             let (chunk, rest) = remaining.split_at_mut(length);
             remaining = rest;
             let blocks = (chunk.len() / size) as u32;
