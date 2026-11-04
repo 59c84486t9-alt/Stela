@@ -7,7 +7,9 @@ use super::{
 };
 use crate::{
     handoff::{Handoff, Region},
-    layout, native_mmio, native_smp,
+    layout,
+    native_clock::ClockServices,
+    native_mmio, native_smp,
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
@@ -25,6 +27,10 @@ use stela_drivers::{
     platform::work::{self, Cpu, Executor, Queue, Stack, StackBacking, WorkError},
 };
 pub(super) const SLOTS: usize = 64;
+#[cfg(feature = "diagnostics")]
+mod clock;
+#[cfg(feature = "diagnostics")]
+pub(crate) use clock::check_native_clock_domain;
 mod firmware;
 #[cfg(feature = "diagnostics")]
 mod pages;
@@ -203,9 +209,10 @@ unsafe impl Cpu for NativeCpu {
 /// never an Arc wrapping this Runtime or a foreign-CPU task-switch permission.
 pub(super) struct KernelWork {
     executor: Executor<SLOTS>,
-    _cpu: Arc<NativeCpu>,
-    /// The queue's own view of `_cpu`, which a service domain must share.
+    reservation: Arc<Reservation>,
+    /// The queue and an attached service domain share this same CPU owner.
     cpu: Arc<dyn Cpu>,
+    native_clock: Option<ClockServices>,
     foreground: Arc<firmware::Foreground>,
     root: u64,
     busy: Cell<bool>,
@@ -245,7 +252,7 @@ impl KernelWork {
         owner: &mut HostOwner,
     ) -> Result<Self, Error> {
         // SAFETY: original caller's handoff/owner/stack lifetime contract.
-        unsafe { Self::prepare_plan(handoff, owner, Plan::new(handoff)?) }
+        unsafe { Self::prepare_plan(handoff, owner, Plan::new(handoff)?, None) }
     }
     /// # Safety
     /// Same original handoff/owner contract as prepare. A Plan describes
@@ -254,11 +261,15 @@ impl KernelWork {
         handoff: &'static Handoff,
         owner: &mut HostOwner,
         plan: Plan,
+        clock: Option<&ClockServices>,
     ) -> Result<Self, Error> {
         plan.validate(handoff)?;
         // SAFETY: inherited handoff/physmap lifetime and sealed capture.
         let wire = unsafe { native_mmio::captured(handoff) }.map_err(|_| Error::Inventory)?;
         let identity = owner.root_identity().map_err(Error::Work)?;
+        if let Some(clock) = clock {
+            clock.check_identity(&identity).map_err(Error::Work)?;
+        }
         let snapshot = identity.memory_snapshot().map_err(Error::Work)?;
         // SAFETY: same immutable processor capture as native admission.
         let capture = unsafe { native_smp::firmware::captured(handoff.native_processors) }
@@ -373,13 +384,15 @@ impl KernelWork {
             released_stack_views: AtomicUsize::new(0),
             pin_epochs: core::array::from_fn(|_| pin::Epoch::new()),
         });
-        let clock = Clock {
-            ticks_per_microsecond: handoff.tsc_hz / 1_000_000,
+        let cpu: Arc<dyn Cpu> = match clock {
+            Some(clock) => clock.cpu(),
+            None => Arc::new(NativeCpu {
+                reservation: reservation.clone(),
+                clock: Clock {
+                    ticks_per_microsecond: handoff.tsc_hz / 1_000_000,
+                },
+            }),
         };
-        let cpu = Arc::new(NativeCpu {
-            reservation: reservation.clone(),
-            clock,
-        });
         #[cfg(feature = "diagnostics")]
         let stack_pages = pages::TaskPageInventory::from_spans(reservation.clone(), &spans)?;
         let (foreground_slot, foreground_physical) = plan.slot(0)?;
@@ -411,11 +424,10 @@ impl KernelWork {
                 .map_err(Error::Work)?,
             );
         }
-        let shared: Arc<dyn Cpu> = cpu.clone();
         // SAFETY: real kept source/root/code ownership; callbacks cannot
         // outlive this boot, and no producer is published by construction.
-        let queue =
-            unsafe { Queue::<SLOTS>::new(shared.clone(), reservation) }.map_err(Error::Work)?;
+        let queue = unsafe { Queue::<SLOTS>::new(cpu.clone(), reservation.clone()) }
+            .map_err(Error::Work)?;
         let executor = Executor::new_with_profile(
             queue,
             stacks,
@@ -427,8 +439,9 @@ impl KernelWork {
         .map_err(Error::Work)?;
         let result = Self {
             executor,
-            _cpu: cpu,
-            cpu: shared,
+            reservation,
+            cpu,
+            native_clock: clock.cloned(),
             foreground,
             root: handoff.root,
             busy: Cell::new(false),
@@ -452,13 +465,11 @@ impl KernelWork {
         timeout_us: u64,
         function: F,
     ) -> Result<T, Error> {
-        self._cpu
-            .reservation
+        self.reservation
             .identity
             .check_clock_root()
             .map_err(Error::Work)?;
-        self._cpu
-            .reservation
+        self.reservation
             .identity
             .check_dispatch()
             .map_err(Error::Work)?;
@@ -473,16 +484,11 @@ impl KernelWork {
         let _root = unsafe { RestoreRoot::enter(self.root) };
         // This checks the original allocation/entered root link only;
         // it supplies no rate, timer, firmware-service or task admission grant.
-        self._cpu
-            .reservation
+        self.reservation
             .identity
             .check_clock_root()
             .map_err(Error::Work)?;
-        let deadline = self
-            ._cpu
-            .ticks()
-            .checked_add(timeout_us)
-            .ok_or(Error::Clock)?;
+        let deadline = self.deadline_us(timeout_us)?;
         if self.busy.replace(true) {
             return Err(Error::Work(WorkError::Busy));
         }
@@ -518,16 +524,26 @@ impl KernelWork {
             // SAFETY: dispatch entered the actual retained LoaderTables root
             // on its owning BSP, excluding IRQ/native frames and table writers.
             let ranges =
-                unsafe { self._cpu.reservation._image.readonly_ranges() }.map_err(Error::Image)?;
+                unsafe { self.reservation._image.readonly_ranges() }.map_err(Error::Image)?;
             if ranges.is_empty() {
                 return Err(Error::Inventory);
             }
             Ok(Arc::new(ReadOnlyImage {
-                _reservation: self._cpu.reservation.clone(),
+                _reservation: self.reservation.clone(),
                 ranges,
             }))
         })?
     }
+    fn deadline_us(&self, timeout: u64) -> Result<u64, Error> {
+        let scale = if self.native_clock.is_some() {
+            1_000
+        } else {
+            1
+        };
+        let ticks = timeout.checked_mul(scale).ok_or(Error::Clock)?;
+        self.cpu.ticks().checked_add(ticks).ok_or(Error::Clock)
+    }
+
     /// The CPU the runtime runs on.
     pub(super) fn cpu(&self) -> Arc<dyn Cpu> {
         self.cpu.clone()
@@ -544,7 +560,7 @@ impl KernelWork {
         // SAFETY: the loader root on this physical BSP, with no native or IRQ
         // frame, which the checks below refuse.
         let _root = unsafe { RestoreRoot::enter(self.root) };
-        let identity = &self._cpu.reservation.identity;
+        let identity = &self.reservation.identity;
         identity.check_clock_root().map_err(Error::Work)?;
         identity.check_dispatch().map_err(Error::Work)?;
         Ok(body(self.executor.runtime()))

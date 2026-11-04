@@ -70,7 +70,7 @@ pub(in crate::engine) unsafe fn check(
     if !matches!(
         // SAFETY: handoff/owner remain genuine; the bad Plan supplies no permission and must
         // fail their pre-effect exact-inventory comparison.
-        unsafe { KernelWork::prepare_plan(handoff, owner, wrong) },
+        unsafe { KernelWork::prepare_plan(handoff, owner, wrong, None) },
         Err(Error::Inventory)
     ) || handoff.native_task_allocations.claimed()
     {
@@ -96,7 +96,7 @@ pub(in crate::engine) unsafe fn check(
     }
     // SAFETY: the original handoff and owner; this diagnostic stops the boot,
     // so nothing else claims the pool.
-    let work = unsafe { KernelWork::prepare_plan(handoff, owner, Plan::new(handoff)?) }?;
+    let work = unsafe { KernelWork::prepare_plan(handoff, owner, Plan::new(handoff)?, None) }?;
     let stack_pages = work.task_pages()?;
     let described = stack_pages.count();
     if described != cases.iter().filter(|case| case.kernel).count() {
@@ -110,7 +110,7 @@ pub(in crate::engine) unsafe fn check(
     crate::output::arguments(format_args!(
         "CHECK native-stack-inventory PASS slots={described} catalog=retired backing=firmware-owned; no C stack or current grant\n"
     ));
-    let retained = work._cpu.reservation.clone();
+    let retained = work.reservation.clone();
     let pointer = work.executor.runtime().get_ref() as *const _ as usize;
     for case in &mut cases {
         case.runtime = pointer;
@@ -118,8 +118,7 @@ pub(in crate::engine) unsafe fn check(
     // If a callback/ticket becomes uncertain, keeping the complete vector is
     // mandatory. Runtime Drop likewise quarantines every paused stack owner.
     let cases = ManuallyDrop::new(cases);
-    work._cpu
-        .reservation
+    work.reservation
         .identity
         .check_dispatch()
         .map_err(Error::Work)?;
@@ -170,11 +169,7 @@ pub(in crate::engine) unsafe fn check(
                 .execute(work::Kind::General, record, context(index))
                 .map_err(Error::Work)?;
         }
-        let deadline = work
-            ._cpu
-            .ticks()
-            .checked_add(2_000_000)
-            .ok_or(Error::Clock)?;
+        let deadline = work.deadline_us(2_000_000)?;
         runtime
             .call_foreground(record, context(0), deadline)
             .map_err(Error::Work)?;

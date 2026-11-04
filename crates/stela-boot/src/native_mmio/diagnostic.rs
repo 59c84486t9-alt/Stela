@@ -45,7 +45,10 @@ impl From<stela_drivers::platform::work::WorkError> for ClockError {
 /// Explicit owned UP diagnostic on the original native host. An HPET capture
 /// selects the whole-controller path; otherwise the existing bounded PM
 /// fixture keeps its explicit source-gap limits. Neither admits a Linux owner.
-pub(crate) unsafe fn clock(handoff: &Handoff, owner: &mut HostOwner) -> Result<(), ClockError> {
+pub(crate) unsafe fn clock(
+    handoff: &'static Handoff,
+    owner: &mut HostOwner,
+) -> Result<(), ClockError> {
     if handoff.native_resources.cores != 1 || handoff.storage.present {
         return Err(Error::Unavailable.into());
     }
@@ -71,7 +74,10 @@ pub(crate) unsafe fn clock(handoff: &Handoff, owner: &mut HostOwner) -> Result<(
 /// The caller supplies the same complete whole-controller diagnostic handoff as
 /// check. The original BSP/root and table/backing stay pinned through
 /// acknowledged configuration restoration, UC unmap and resource retirement.
-unsafe fn check_native_hpet(handoff: &Handoff, owner: &mut HostOwner) -> Result<(), ClockError> {
+unsafe fn check_native_hpet(
+    handoff: &'static Handoff,
+    owner: &mut HostOwner,
+) -> Result<(), ClockError> {
     // SAFETY: the original immutable loader capture is held by this boot.
     let wire = unsafe { captured(handoff) }?;
     // SAFETY: original BSP before other processors or device owners.
@@ -161,7 +167,7 @@ unsafe fn check_native_hpet(handoff: &Handoff, owner: &mut HostOwner) -> Result<
     }
     // SAFETY: original Source/RootIdentity, controller, IDT and ARAT
     // delivery stay pinned. This diagnostic creates no production producer.
-    unsafe { crate::native_clock::diagnostic::check_native(identity, prepared) }?;
+    unsafe { crate::native_clock::diagnostic::check_native(handoff, owner, identity, prepared) }?;
     let mut counter = alloc::sync::Arc::try_unwrap(counter).map_err(|_| Error::ResourceConflict)?;
     // SAFETY: acknowledged clock retirement removed ISR/publication views;
     // unique Arc proves no kept counter reader remains in that graph.
