@@ -23,6 +23,8 @@ impl Registers {
             // SAFETY: this original UC mapping covers all the selected
             // unit's aligned registers and stays installed through check.
             |offset| unsafe { ((self.base + offset) as *const u32).read_volatile() },
+            // SAFETY: the same retained UC mapping covers the aligned AMD-Vi
+            // registers selected for the 64-bit read.
             |offset| unsafe { ((self.base + offset) as *const u64).read_volatile() },
         ) == Found::Inactive
     }
