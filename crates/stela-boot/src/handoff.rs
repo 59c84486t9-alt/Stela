@@ -90,6 +90,8 @@ pub struct Handoff {
     pub(crate) native_image: crate::native_image::ResidentImage,
     /// Original aperture capture sealed with this boot's successful exit.
     pub(crate) native_mmio_capture: crate::native_mmio::CaptureHandoff,
+    /// Original remapping inventory qualified at firmware exit.
+    pub(crate) inactive_firmware_units: crate::native_dma::InactiveFirmwareUnits,
 }
 
 /// A read of the firmware's real-time clock: its time as UTC and its

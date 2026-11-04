@@ -6,7 +6,7 @@ use stela_drivers::bus::pci::requester::preparation::Root;
 struct VtdRoot {
     address: Address,
     unit: Arc<Unit<MmioRegisters>>,
-    blocked: Option<BlockedRequester<MmioRegisters>>,
+    blocked: BlockedRequester<MmioRegisters>,
 }
 
 // SAFETY: constructed only from the requester's selected original taken unit,
@@ -15,10 +15,7 @@ struct VtdRoot {
 // the receipt producer's independent obligation; neither method infers it.
 unsafe impl Root for VtdRoot {
     fn drain(&self) -> Result<(), DmaError> {
-        match &self.blocked {
-            Some(blocked) => blocked.drain(),
-            None => self.unit.drain_initial_requester(requester(self.address)),
-        }
+        self.blocked.drain()
     }
     unsafe fn bind(
         &self,
@@ -118,10 +115,13 @@ impl Remappers {
             .map_err(|_| DmaError::IommuUnavailable)?
             .filter(|taken| taken.unit.allows(rid))
             .ok_or(DmaError::DrainUnavailable)?;
+        let blocked = taken
+            .initial_requester(rid)?
+            .ok_or(DmaError::DrainUnavailable)?;
         Ok(Box::new(VtdRoot {
             address,
             unit: taken.unit.clone(),
-            blocked: taken.initial_requester(rid)?,
+            blocked,
         }))
     }
 }

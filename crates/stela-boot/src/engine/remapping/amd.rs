@@ -2,7 +2,7 @@
 //! own PCI function. The units are process local; the boot processor, which
 //! runs the host drivers, owns them, and their domains refuse other
 //! processors and interrupt handlers.
-use super::CLAIMED_DISPLAYS;
+use super::{CLAIMED_DISPLAYS, InactiveFirmwareUnits, Kind};
 use crate::Result;
 use crate::{native_mmio, output};
 use alloc::{boxed::Box, format, rc::Rc, sync::Arc, vec, vec::Vec};
@@ -170,6 +170,7 @@ fn named(scope: MemoryScope, segment: u16, present: &[Present]) -> Vec<u16> {
 pub(super) struct Taken {
     unit: Rc<RefCell<Unit<Platform, ObservedConfig>>>,
     segment: u16,
+    firmware_inactive: bool,
     requesters: RefCell<Vec<u16>>,
 }
 
@@ -281,6 +282,7 @@ pub(super) unsafe fn take(
     inventories: &[(u16, Vec<Present>)],
     drivers: &Range<u64>,
     mmio: &native_mmio::Source,
+    inactive_firmware_units: &InactiveFirmwareUnits,
     tsc_hz: u64,
     physical_bits: u8,
 ) -> Vec<Taken> {
@@ -403,6 +405,7 @@ pub(super) unsafe fn take(
         taken.push(Taken {
             unit: Rc::new(RefCell::new(unit)),
             segment: id.segment,
+            firmware_inactive: inactive_firmware_units.contains(Kind::AmdVi, id.segment, base),
             requesters: RefCell::new(requesters),
         });
     }
@@ -442,6 +445,9 @@ impl Taken {
         let rid = super::requester(address);
         if !on_boot_processor() || !self.covers(address.segment, rid) {
             return Err(DmaError::IommuUnavailable);
+        }
+        if !self.firmware_inactive {
+            return Err(DmaError::DrainUnavailable);
         }
         Ok(Box::new(ColdRoot {
             address,

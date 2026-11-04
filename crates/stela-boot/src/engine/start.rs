@@ -2067,6 +2067,7 @@ fn start_platform(
                 handoff.root,
                 storage.dma.clone(),
                 pci,
+                &handoff.inactive_firmware_units,
                 handoff.tsc_hz,
             )
         },

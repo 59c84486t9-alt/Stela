@@ -793,7 +793,8 @@ fn load(
     };
     // SAFETY: the firmware's identity map is still loaded, the APs idle in
     // firmware code, and no Stela driver or memory reuse has started.
-    unsafe { crate::native_dma::release_firmware_units(&remapping, tsc_hz) };
+    let inactive_firmware_units =
+        unsafe { crate::native_dma::release_firmware_units(remapping, tsc_hz) };
     let native_mmio_capture = match native_mmio {
         Some(prepared) => match prepared.finish(&mut exit) {
             Ok(sealed) => crate::native_mmio::CaptureHandoff::new(Some(sealed)),
@@ -874,6 +875,7 @@ fn load(
             native_loader_tables: loader_tables,
             native_image: resident,
             native_mmio_capture,
+            inactive_firmware_units,
         });
     }
     // SAFETY: boot services ended; the completed root maps this code and

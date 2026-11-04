@@ -1,8 +1,8 @@
 //! The host's DMA remapping units, VT-d's (DMAR) and AMD-Vi's (IVRS, in
 //! [`amd`]), taken before the host drivers start
-//! ([`stela_boot_core::remapping`] decides which). Every requester a taken
-//! Intel requesters start blocked unless the unit retains an RMRR-backed
-//! window. AMD-Vi units keep their existing window policy. A driver that asks
+//! ([`stela_boot_core::remapping`] decides which). Intel requesters start
+//! blocked unless the unit retains an RMRR-backed window. AMD-Vi units keep
+//! their existing window policy. A driver that asks
 //! the native services for a domain gets its own ([`Remappers::domain`]).
 //!
 //! The display functions a driver maps the firmware's reserved regions for
@@ -14,7 +14,7 @@ mod preparation;
 use super::storage::RestoreRoot;
 use crate::{
     native_dma::{
-        dmar,
+        InactiveFirmwareUnits, dmar, firmware_state::Kind,
         requester::RequesterClaim,
         vtd::{BlockedRequester, BoundRequester, InitialBlock, MmioRegisters, Unit, VtdError},
     },
@@ -105,10 +105,10 @@ impl Remappers {
         }
     }
 
-    /// Take the units of the firmware's DMAR the policy allows, each with a
-    /// window over `drivers` and its USB controllers' reserved regions.
-    /// Units the policy leaves and units that refuse are reported and stay
-    /// untranslated.
+    /// Take the units of the firmware's DMAR the policy allows. A unit with
+    /// retained USB reserved regions gets a window over those regions and
+    /// `drivers`. Other units start blocked. Units the policy leaves and units
+    /// that refuse are reported.
     ///
     /// # Safety
     /// No host driver has started. `root` is the loader root for the ACPI
@@ -120,6 +120,7 @@ impl Remappers {
         root: u64,
         drivers: Range<u64>,
         pci: &native_mmio::ContainedPci<'_>,
+        inactive_firmware_units: &InactiveFirmwareUnits,
         tsc_hz: u64,
     ) -> Self {
         let mmio = pci.source();
@@ -200,8 +201,17 @@ impl Remappers {
         *remappers.topology.get_mut() = inventories.clone();
         if let Some(ivrs) = ivrs {
             // SAFETY: forwarded.
-            remappers.amd =
-                unsafe { amd::take(&ivrs, &inventories, &drivers, mmio, tsc_hz, physical_bits()) };
+            remappers.amd = unsafe {
+                amd::take(
+                    &ivrs,
+                    &inventories,
+                    &drivers,
+                    mmio,
+                    inactive_firmware_units,
+                    tsc_hz,
+                    physical_bits(),
+                )
+            };
         }
         let Some(table) = dmar else {
             return remappers;
@@ -257,7 +267,15 @@ impl Remappers {
                 } {
                     Ok(taken) => {
                         let initial = if window.is_empty() {
-                            let result = taken.acknowledge_initial_block(&requesters);
+                            // A blocked new root cannot qualify a previous
+                            // firmware root that was disabled without a drain.
+                            let result = if inactive_firmware_units.contains(
+                                Kind::Vtd, unit.segment, unit.base,
+                            ) {
+                                taken.acknowledge_initial_block(&requesters)
+                            } else {
+                                Err(DmaError::DrainUnavailable)
+                            };
                             match &result {
                                 Ok(_) => output::arguments(format_args!(
                                     "HOST IOMMU VT-d unit {:#x} blocked and drained {} initial requesters\n",

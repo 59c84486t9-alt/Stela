@@ -134,8 +134,12 @@ impl Units {
         if unit.base == 0 || !unit.base.is_multiple_of(4096) {
             return Err(TableError::Structure(at));
         }
-        if self.as_slice().iter().any(|known| known.base == unit.base) {
-            return Ok(());
+        if let Some(known) = self.as_slice().iter().find(|known| known.base == unit.base) {
+            return if *known == unit {
+                Ok(())
+            } else {
+                Err(TableError::Structure(at))
+            };
         }
         let slot = self.units.get_mut(self.count).ok_or(TableError::Capacity)?;
         *slot = unit;
@@ -285,9 +289,10 @@ pub fn inspect(kind: Kind, window: &impl Window) -> Found {
         }
         Kind::AmdVi => {
             let control = window.read64(CONTROL);
-            if control == u64::MAX {
+            let status = window.read64(STATUS);
+            if control == u64::MAX || status == u64::MAX {
                 Found::Unreadable
-            } else if control & AMD_ACTIVE != 0 {
+            } else if control & AMD_ACTIVE != 0 || status & AMD_RUNNING != 0 {
                 Found::AmdVi { control }
             } else {
                 Found::Inactive
@@ -476,6 +481,18 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_base_cannot_hide_a_conflicting_unit() {
+        let mut units = Units::default();
+        units
+            .add_dmar(&sealed(b"DMAR", 0, &drhd(0xfed9_0000, 0)))
+            .unwrap();
+        assert_eq!(
+            units.add_dmar(&sealed(b"DMAR", 0, &drhd(0xfed9_0000, 1))),
+            Err(TableError::Structure(TABLE_HEADER))
+        );
+    }
+
+    #[test]
     fn more_units_than_capacity_refuse() {
         let body: Vec<u8> = (0..=MAX_UNITS as u64)
             .flat_map(|index| drhd(0xfe00_0000 + index * 4096, 0))
@@ -610,6 +627,19 @@ mod tests {
             unsafe { release(Kind::Vtd, &fake) },
             Err(Failure::Timeout("DMA translation"))
         );
+    }
+
+    #[test]
+    fn amd_vi_observes_engines_after_control_bits_clear() {
+        let fake = Fake::new(Kind::AmdVi, &[(STATUS, 1 << 4)]);
+        assert_eq!(inspect(Kind::AmdVi, &fake), Found::AmdVi { control: 0 });
+        // SAFETY: the fake window stands in for the unit, and this test is its only owner.
+        let released = unsafe { release(Kind::AmdVi, &fake) };
+        assert_eq!(
+            released,
+            Err(Failure::Timeout("AMD-Vi command and log engines"))
+        );
+        assert!(fake.writes.borrow().is_empty());
     }
 
     #[test]
