@@ -844,6 +844,13 @@ impl HostAcpi {
         // exact resource-owned map/unmap leases. Keep namespace-only operation
         // until that complete provider is admitted by the work owner.
         let capabilities = 0;
+        // Controller containment can prepare the route while ACPICA stays
+        // in namespace mode. No hardware callback may take it in that mode.
+        let prepared_sci = if capabilities == 0 {
+            None
+        } else {
+            prepared_sci
+        };
         let provider = Box::new(Provider {
             executor,
             root,

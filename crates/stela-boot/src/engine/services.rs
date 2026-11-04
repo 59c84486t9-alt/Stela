@@ -101,12 +101,11 @@ impl<'a> Services<'a> {
         tsc_hz: u64,
         usb4_approved: Vec<Uuid>,
     ) -> Self {
-        // SAFETY: the engine programs no PIC or I/O APIC pin of its own.
-        let acpi = acpi.filter(|_| match unsafe { mmio.mask_isa(&I8042_IRQS) } {
+        let acpi = acpi.filter(|_| match mmio.require_isa_masked(&I8042_IRQS) {
             Ok(()) => true,
             Err(error) => {
                 output::arguments(format_args!(
-                    "HOST ACPI devices left out: the i8042 interrupts could not be masked ({error:?})\n"
+                    "HOST ACPI devices left out: the i8042 interrupt masks could not be verified ({error:?})\n"
                 ));
                 false
             }

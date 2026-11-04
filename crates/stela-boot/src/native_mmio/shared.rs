@@ -822,18 +822,12 @@ impl Source {
 
 fn in8(port: u16) -> u8 {
     let value: u8;
-    // SAFETY: a port read; the caller owns the port.
+    // SAFETY: only the MADT-qualified PIC interrupt-mask ports are read.
+    // Reading the mask does not change the controller or acknowledge an IRQ.
     unsafe {
         asm!("in al, dx", out("al") value, in("dx") port, options(nomem, nostack, preserves_flags))
     };
     value
-}
-
-fn out8(port: u16, value: u8) {
-    // SAFETY: a port write; the caller owns the port.
-    unsafe {
-        asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags))
-    };
 }
 
 /// A mapping kept by every pin using the controller. Unit serializes
@@ -999,6 +993,7 @@ impl Source {
         let MountedIoapics::Ready { units, domain } = &*state else {
             return Err(Error::Unavailable);
         };
+        domain.check().map_err(failed)?;
         units
             .iter()
             .find(|(old, _)| *old == descriptor)
@@ -1017,11 +1012,12 @@ impl Source {
         self.platform.wire().fadt()
     }
 
-    /// Mask the PICs and the same IOAPIC owners used by SCI routes.
-    ///
-    /// # Safety
-    /// The boot processor owns these PICs and complete IOAPIC handoff.
-    pub(crate) unsafe fn mask_isa(&self, irqs: &[u8]) -> Result<(), Error> {
+    /// Verify the IOAPIC routes and any PC/AT PIC masks for these ISA lines.
+    /// Whole IOAPIC handoff grants no PIC programming permission.
+    pub(crate) fn require_isa_masked(&self, irqs: &[u8]) -> Result<(), Error> {
+        if self.identity.in_interrupt() {
+            return Err(Error::Busy);
+        }
         let routing = self.routing()?;
         let state = self.ioapics.borrow();
         let MountedIoapics::Ready { units, domain } = &*state else {
@@ -1035,7 +1031,10 @@ impl Source {
         for &irq in irqs {
             let line = routing.isa(irq).map_err(failed)?;
             let owner = routing.owner(line, &spans).map_err(failed)?;
-            let unit = self.ioapic(owner)?;
+            let (_, unit) = units
+                .iter()
+                .find(|(descriptor, _)| *descriptor == owner)
+                .ok_or(Error::OutsideResource)?;
             let pin = unit.state(line.gsi).map_err(failed)?;
             if !pin.masked || pin.remote_irr || pin.delivery_pending {
                 return Err(Error::Unavailable);
@@ -1045,7 +1044,6 @@ impl Source {
             for &irq in irqs {
                 let port = if irq < 8 { 0x21 } else { 0xa1 };
                 let mask = 1 << (irq & 7);
-                out8(port, in8(port) | mask);
                 if in8(port) & mask == 0 {
                     return Err(Error::Unavailable);
                 }

@@ -2086,9 +2086,7 @@ fn start_platform(
     }
     let prepared_sci = match (&contained_pci, &handoff.power) {
         (Some(pci), Some(power)) => {
-            // SAFETY: PCI INTx contributors are disabled; the boot owns the
-            // fixed/GPE sources and complete IOAPIC handoff.
-            match unsafe { aml::sci::Prepared::capture(pci.source(), power.clone()) } {
+            match aml::sci::Prepared::capture(pci.source(), power.clone()) {
                 Ok(prepared) => Some(prepared),
                 Err(error) => {
                     output::arguments(format_args!("HOST ACPI SCI unavailable: {error:?}\n"));

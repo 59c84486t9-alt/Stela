@@ -24,14 +24,9 @@ pub(crate) struct Prepared {
     irq: u32,
 }
 impl Prepared {
-    /// # Safety
-    /// The engine has stopped firmware IRQ ownership and owns every fixed/GPE
-    /// SCI source and the controller's selector/window. PCI INTx aliases must
-    /// be stopped before the route is admitted.
-    pub(crate) unsafe fn capture(
-        mmio: &native_mmio::Source,
-        power: HostPower,
-    ) -> Result<Self, IrqError> {
+    /// Observe the masked SCI route on the original contained controller.
+    /// This prepares the route while its fixed/GPE contributors remain separate.
+    pub(crate) fn capture(mmio: &native_mmio::Source, power: HostPower) -> Result<Self, IrqError> {
         if power.refused.is_some() || power.pm1[0].is_none() || power.pm1_event_bytes != 4 {
             return Err(IrqError::Unsupported);
         }
@@ -76,7 +71,9 @@ impl Prepared {
 
     /// # Safety
     /// Called once by this boot's ACPICA activation, with the same permanent
-    /// provider/handler argument kept until acknowledged removal.
+    /// provider/handler argument kept until acknowledged removal. The hardware
+    /// provider exclusively owns every fixed/GPE contributor and has stopped
+    /// the old SCI and PCI INTx sharers.
     pub(super) unsafe fn install(
         self,
         handler: Interrupt,
