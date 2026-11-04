@@ -63,6 +63,7 @@ pub struct SourceObservation {
 #[derive(Default)]
 pub(super) struct Slot {
     sequence: AtomicU64,
+    owner: AtomicU64,
     counter: AtomicU64,
     pc: AtomicU64,
     sp: AtomicU64,
@@ -72,7 +73,7 @@ pub(super) struct Slot {
 }
 
 impl Slot {
-    pub(super) fn publish(&self, source: MaterializedSource) {
+    pub(super) fn publish(&self, owner: u64, source: MaterializedSource) {
         let sequence = self.sequence.load(SeqCst);
         let Some(next) = sequence.checked_add(2).filter(|_| sequence & 1 == 0) else {
             // Never wrap and make a newer copy appear to have an old sequence.
@@ -88,6 +89,7 @@ impl Slot {
         {
             return;
         }
+        self.owner.store(owner, SeqCst);
         self.counter.store(source.host_counter, SeqCst);
         self.pc.store(source.pc, SeqCst);
         self.sp.store(source.sp, SeqCst);
@@ -100,7 +102,7 @@ impl Slot {
         self.sequence.store(next, SeqCst);
     }
 
-    pub(super) fn read(&self) -> Option<SourceObservation> {
+    pub(super) fn read(&self, owner: u64) -> Option<SourceObservation> {
         // A busy writer cannot make a report wait indefinitely.
         for _ in 0..3 {
             let sequence = self.sequence.load(SeqCst);
@@ -110,6 +112,7 @@ impl Slot {
             if sequence & 1 != 0 {
                 continue;
             }
+            let observed_owner = self.owner.load(SeqCst);
             let counter = self.counter.load(SeqCst);
             let pc = self.pc.load(SeqCst);
             let sp = self.sp.load(SeqCst);
@@ -117,6 +120,9 @@ impl Slot {
             let lr = self.lr.load(SeqCst);
             let mode = self.mode.load(SeqCst);
             if self.sequence.load(SeqCst) == sequence {
+                if observed_owner != owner {
+                    return None;
+                }
                 return Some(SourceObservation {
                     sequence,
                     source: MaterializedSource {

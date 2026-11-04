@@ -22,10 +22,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }),
             ScalarRead::Sample(cpu) => {
                 let pc = self.processor_pc(cpu).ok_or_else(|| {
-                    DeviceError::Refused(refuse!(
-                        "debug PC sample: PE {cpu} has no powered execution state",
-                        cpu
-                    ))
+                    let reason = if matches!(self.peers.get(cpu), Some(processors::Peer::Remote)) {
+                        // Keep the refusal stable for deduplication. The
+                        // optional PE SOURCE report carries owner snapshots.
+                        refuse!(
+                            "debug PC sample: PE {cpu} belongs to a remote execution slot",
+                            cpu
+                        )
+                    } else {
+                        refuse!(
+                            "debug PC sample: PE {cpu} has no powered execution state",
+                            cpu
+                        )
+                    };
+                    DeviceError::Refused(reason)
                 })?;
                 self.devices.observe_pc_sample(physical, pc);
                 self.devices.read(self.current, physical, bytes, now)

@@ -371,14 +371,21 @@ impl Hub {
         self.source_observations.load(Ordering::Acquire)
     }
 
-    /// Last materialized state copied by this PE's own Machine. None means
-    /// disabled, unpublished, out of range, or no stable copy in three tries.
+    /// Last materialized state copied by this PE's attached Machine. None
+    /// means disabled, unpublished, out of range, or no stable copy for
+    /// the current owner.
     /// A returned copy can already be stale and is no quiescence receipt.
     pub fn source_observation(&self, pe: usize) -> Option<SourceObservation> {
         if !self.source_observations_enabled() {
             return None;
         }
-        self.inboxes.get(pe)?.source.read()
+        let inbox = self.inboxes.get(pe)?;
+        let owner = inbox.owner.load(Ordering::Acquire);
+        if owner == 0 || owner == u64::MAX {
+            return None;
+        }
+        let observed = inbox.source.read(owner)?;
+        (inbox.owner.load(Ordering::Acquire) == owner).then_some(observed)
     }
 
     /// Bounded kept broadcast counters, enabled with owner observations.
@@ -878,7 +885,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some(inbox) = self.observation_inbox(hub) else {
             return;
         };
-        inbox.source.publish(MaterializedSource {
+        // observation_inbox verified the claim, which self.attached keeps
+        // live throughout this publication.
+        let owner = inbox.owner.load(Ordering::Relaxed);
+        let source = MaterializedSource {
             host_counter: self.host.counter(),
             phase,
             pc: self.cpu.pc,
@@ -887,7 +897,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             lr: self.cpu.state.x[30],
             el: self.cpu.pstate.el,
             daif: self.cpu.pstate.daif,
-        });
+        };
+        inbox.source.publish(owner, source);
     }
 
     fn observation_inbox<'a>(&self, hub: &'a Arc<Hub>) -> Option<&'a Inbox> {

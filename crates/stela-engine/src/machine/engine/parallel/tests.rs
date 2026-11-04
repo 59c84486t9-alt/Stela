@@ -439,6 +439,11 @@ fn source_observation_uses_only_the_attached_owner_and_remains_stale() {
     assert_eq!(dma.sequence, 8);
     assert_eq!(dma.source.phase, SourcePhase::DeviceAdvanceExit);
     assert_eq!(hub.source_observation(1), Some(second));
+
+    drop(worker);
+    assert_eq!(hub.source_observation(1), None, "detached owner");
+    let (_new_owner, _control) = Attached::new(&hub, 1, false).unwrap();
+    assert_eq!(hub.source_observation(1), None, "replacement has no copy");
 }
 
 /// A machine of PE 0 of two in `hub`, running `words`.

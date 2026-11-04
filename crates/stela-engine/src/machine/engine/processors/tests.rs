@@ -1214,10 +1214,25 @@ fn device_pc_sample_observes_the_requested_live_peer_before_consumption() {
     );
     assert_eq!(machine.devices.reads, 3);
     machine.peers[1] = Peer::Off;
-    assert!(machine.device_read(physical, 4, 0).is_err());
+    assert_eq!(
+        machine.device_read(physical, 4, 0),
+        Err(DeviceError::Refused(refuse!(
+            "debug PC sample: PE {cpu} has no powered execution state",
+            cpu = 1_usize
+        )))
+    );
+    machine.peers[1] = Peer::Remote;
+    assert_eq!(machine.processor_pc(1), None);
+    assert_eq!(
+        machine.device_read(physical, 4, 0),
+        Err(DeviceError::Refused(refuse!(
+            "debug PC sample: PE {cpu} belongs to a remote execution slot",
+            cpu = 1_usize
+        )))
+    );
     assert_eq!(
         machine.devices.reads, 3,
-        "missing peer refuses before consuming the device read"
+        "off and remote peers refuse before consuming the device read"
     );
     assert_eq!(machine.devices.observations.len(), 2);
 }
