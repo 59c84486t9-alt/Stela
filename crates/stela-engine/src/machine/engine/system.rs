@@ -430,7 +430,6 @@ const HCR_FB: u32 = 9;
 /// from a cache of every context's translations. EL2 is enabled and
 /// HCR_EL2.E2H is RES1 (`cpu`).
 fn reach(cpu: &Cpu, tlbi: &Tlbi) -> (Reach, tlbi::Everywhere, Option<u16>, Option<tlbi::Scope>) {
-    let controls = cpu.controls(cpu.regime());
     let context = tlbi::Context {
         el: cpu.pstate.el,
         el2: true,
@@ -438,14 +437,10 @@ fn reach(cpu: &Cpu, tlbi: &Tlbi) -> (Reach, tlbi::Everywhere, Option<u16>, Optio
         tge: cpu.hcr(HCR_TGE),
         fb: cpu.hcr(HCR_FB),
     };
-    let current = tlbi::Current {
-        regime: controls.regime,
-        asid: (controls.regime != mmu::Regime::El2).then(|| mmu::current_asid(&controls)),
-    };
     let scope = Scope::new(tlbi, context);
     let broadcast = super::parallel::broadcasts(&scope).then_some(scope);
     (
-        scope.reach(&current),
+        scope.reach(&cpu.tlbi_current()),
         scope.everywhere(),
         scope.named_asid(),
         broadcast,

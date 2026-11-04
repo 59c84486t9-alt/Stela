@@ -531,6 +531,15 @@ pub fn current_asid(controls: &Controls) -> u16 {
     stage1::asid(controls)
 }
 
+/// The ASID in a two-range regime. Read only the table TCR.A1 selects.
+pub(super) fn two_range_asid(tcr: u64, table: impl FnOnce(bool) -> u64) -> u16 {
+    const TCR_A1: u64 = 1 << 22;
+    const TCR_AS: u64 = 1 << 36;
+    const TTBR_ASID_SHIFT: u64 = 48;
+    let asid = (table(tcr & TCR_A1 != 0) >> TTBR_ASID_SHIFT) as u16;
+    if tcr & TCR_AS != 0 { asid } else { asid & 0xff }
+}
+
 /// The stage-2 controls that apply, or the refusal when stage 2 is required
 /// but none were supplied.
 fn second_stage(controls: &Controls) -> Result<Option<Stage2>, Unsupported> {
