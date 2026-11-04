@@ -63,6 +63,7 @@ unsafe impl ResourceBacking for Backing {
 }
 
 struct Captured {
+    _origin: super::capture::Origin,
     wire: &'static Wire,
 }
 
@@ -386,16 +387,19 @@ impl Source {
     /// and before the other host processors start; the TSC runs at `tsc_hz`.
     ///
     /// # Safety
-    /// `wire` is this boot's sealed capture; `owner` is the boot processor's
-    /// installed host; no firmware, SMM or other driver maps the aperture.
+    /// `handoff` is this boot's original transfer; `owner` is the boot
+    /// processor's installed host. No firmware, SMM or other driver maps
+    /// the aperture.
     pub(crate) unsafe fn activate(
-        wire: &'static Wire,
+        handoff: &'static crate::handoff::Handoff,
         owner: &mut HostOwner,
-        tsc_hz: u64,
     ) -> Result<Self, Error> {
-        if !wire.valid() || !PROCESSORS.alone() {
+        if !PROCESSORS.alone() {
             return Err(Error::Unavailable);
         }
+        // SAFETY: the caller supplies the original boot handoff and physmap.
+        let (wire, origin) = unsafe { super::claim_capture(handoff) }?;
+        let tsc_hz = handoff.tsc_hz;
         let (catalog, snapshot, identity) = {
             let execution = owner.enter_root().map_err(failed)?;
             let context = execution.context();
@@ -433,7 +437,10 @@ impl Source {
         // SAFETY: the loader root is an owned table page.
         let loader_entry = unsafe { owned_table(wire, wire.root)?.add(slot).read_volatile() };
         let platform = Arc::new(Platform {
-            captured: Arc::new(Captured { wire }),
+            captured: Arc::new(Captured {
+                _origin: origin,
+                wire,
+            }),
             space,
             flush,
             tsc_hz,

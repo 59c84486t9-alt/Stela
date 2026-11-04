@@ -26,6 +26,7 @@ use stela_drivers::bus::{
 };
 
 struct Resources {
+    _origin: super::capture::Origin,
     wire: &'static Wire,
     _roots: Arc<MmioRoots>,
 }
@@ -394,18 +395,17 @@ impl Drop for Session {
 }
 impl ScopedSource {
     /// # Safety
-    /// Post-EBS dispatcher on its single admitted processor. `wire` is
-    /// the sealed capture kept by this handoff; execution owns the
+    /// Post-EBS dispatcher on its single admitted processor. `handoff` keeps
+    /// the original sealed capture; execution owns the
     /// HostOwner canonical fixed root catalog. Firmware/SMM and native device ownership are
     /// transferred separately by the typed claim methods below. No guest or
     /// outside root/cache publisher runs concurrently with this scope.
     pub(crate) unsafe fn activate(
-        wire: &'static Wire,
+        handoff: &'static crate::handoff::Handoff,
         execution: &RootExecution,
     ) -> Result<(Self, Session), Error> {
-        if !wire.valid() {
-            return Err(Error::Unavailable);
-        }
+        // SAFETY: caller holds the original boot handoff and physmap.
+        let (wire, origin) = unsafe { super::claim_capture(handoff) }?;
         let scope = execution.process_scope().map_err(failed)?;
         let context = scope.context().clone();
         let roots = context.roots().clone();
@@ -433,6 +433,7 @@ impl ScopedSource {
             virtual_bits: if wire.levels == 5 { 57 } else { 48 },
         };
         let resources = Arc::new(Resources {
+            _origin: origin,
             wire,
             _roots: roots,
         });

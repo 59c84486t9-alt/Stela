@@ -1910,10 +1910,7 @@ fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -
     // host it cannot check is reported, and those services refuse.
     // SAFETY: this boot's capture, on the installed boot processor before
     // the other host processors start.
-    let native_mmio = unsafe { crate::native_mmio::captured(handoff) }
-        .and_then(|wire| unsafe {
-            crate::native_mmio::Source::activate(wire, host_owner, handoff.tsc_hz)
-        })
+    let native_mmio = unsafe { crate::native_mmio::Source::activate(handoff, host_owner) }
         .inspect(|_| output::arguments(format_args!("NATIVE MMIO aperture owned\n")))
         .inspect_err(|error| {
             output::arguments(format_args!("NATIVE MMIO unavailable: {error:?}\n"));

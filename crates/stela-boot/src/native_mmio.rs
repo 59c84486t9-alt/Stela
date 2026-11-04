@@ -14,7 +14,7 @@ use ecam::RootWindow;
 pub(crate) mod diagnostic;
 mod platform;
 
-pub(crate) use capture::{Prepared, Wire};
+pub(crate) use capture::{CaptureHandoff, Prepared, Wire};
 pub(crate) use platform::{ExclusiveHpet, HpetMapping};
 #[cfg(feature = "diagnostics")]
 pub(crate) use platform::{QualifiedRam, RootPublication, ScopedSource};
@@ -43,8 +43,13 @@ fn failed<T>(_: T) -> Error {
 /// The real post-EBS main owns this handoff and native physmap. Its loader
 /// allocations remain pinned, and no source bytes have been reconstructed.
 pub(crate) unsafe fn captured(handoff: &crate::handoff::Handoff) -> Result<&'static Wire, Error> {
-    let region = handoff.native_mmio;
-    if region.physical == 0
+    let region = handoff
+        .native_mmio_capture
+        .region()
+        .ok_or(Error::Unavailable)?;
+    if region.physical != handoff.native_mmio.physical
+        || region.bytes != handoff.native_mmio.bytes
+        || region.physical == 0
         || !region.physical.is_multiple_of(PAGE)
         || region.bytes != size_of::<Wire>().next_multiple_of(PAGE as usize) as u64
         || region.physical.checked_add(region.bytes).is_none()
@@ -63,4 +68,15 @@ pub(crate) unsafe fn captured(handoff: &crate::handoff::Handoff) -> Result<&'sta
         return Err(Error::Unavailable);
     }
     Ok(wire)
+}
+
+/// # Safety
+/// The original post-EBS handoff and physmap remain installed throughout the
+/// aperture's lifetime. Shared and scoped activation consume the same claim.
+unsafe fn claim_capture(
+    handoff: &'static crate::handoff::Handoff,
+) -> Result<(&'static Wire, capture::Origin), Error> {
+    // SAFETY: the caller supplies the original handoff and physmap.
+    let wire = unsafe { captured(handoff) }?;
+    Ok((wire, handoff.native_mmio_capture.claim()?))
 }

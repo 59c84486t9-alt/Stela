@@ -85,6 +85,8 @@ pub struct Handoff {
     pub(crate) native_task_allocations: crate::native_smp::resources::TaskAllocations,
     /// Original loader table allocations; root is only their copied descriptor.
     pub(crate) native_loader_tables: crate::paging::loader::LoaderTables,
+    /// Original aperture capture sealed with this boot's successful exit.
+    pub(crate) native_mmio_capture: crate::native_mmio::CaptureHandoff,
 }
 
 /// A read of the firmware's real-time clock: its time as UTC and its

@@ -2,7 +2,12 @@
 //! No firmware protocol, borrowed descriptor buffer or allocator crosses EBS.
 use super::*;
 use crate::Result;
-use crate::{handoff::Region, tables::Frames};
+use crate::{
+    handoff::Region,
+    system::{EbsOwnership, SuccessfulExit},
+    tables::Frames,
+};
+use core::sync::atomic::{AtomicBool, Ordering};
 use stela_contracts::refuse;
 use stela_runtime::pc::acpi;
 use uefi::{
@@ -125,6 +130,46 @@ impl Wire {
 pub(crate) struct Prepared {
     region: Region,
 }
+
+/// The same loader allocation after its final memory inventory is sealed.
+pub(crate) struct Sealed {
+    prepared: Prepared,
+    _exit: EbsOwnership,
+}
+
+/// Immutable capture lending and a single claim for native source activation.
+/// The claim stays spent on refusal or abandonment, even if no mapping escaped.
+pub(crate) struct CaptureHandoff {
+    sealed: Option<Sealed>,
+    claimed: AtomicBool,
+}
+
+/// Unique native source origin backed by the actual kept loader allocation.
+pub(super) struct Origin {
+    _sealed: &'static Sealed,
+}
+
+impl CaptureHandoff {
+    pub(crate) fn new(sealed: Option<Sealed>) -> Self {
+        Self {
+            sealed,
+            claimed: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn region(&self) -> Option<Region> {
+        self.sealed.as_ref().map(|sealed| sealed.prepared.region)
+    }
+
+    pub(super) fn claim(&'static self) -> core::result::Result<Origin, Error> {
+        let sealed = self.sealed.as_ref().ok_or(Error::Unavailable)?;
+        self.claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| Error::Busy)?;
+        Ok(Origin { _sealed: sealed })
+    }
+}
+
 impl Prepared {
     /// Copy root settings without disconnecting the firmware's bus
     /// driver. A missing/unsupported descriptor set leaves MMIO unavailable.
@@ -229,12 +274,14 @@ impl Prepared {
             },
         })
     }
-    pub(crate) fn region(&self) -> Region {
-        self.region
-    }
     /// Prepare one empty shared-window PT. No physical device mapping or cache
     /// policy is created here; the post-EBS owner publishes individual leaves.
-    pub(crate) fn aperture(&self, frames: &mut dyn Frames, root: u64, cores: usize) -> Result<()> {
+    pub(crate) fn aperture(
+        &mut self,
+        frames: &mut dyn Frames,
+        root: u64,
+        cores: usize,
+    ) -> Result<()> {
         // SAFETY: this private pre-EBS capture owns these exact loader pages.
         let wire = unsafe { &mut *(self.region.physical as *mut Wire) };
         let base = crate::layout::window() + APERTURE_OFFSET;
@@ -269,10 +316,10 @@ impl Prepared {
     }
     /// Seal from the successful ExitBootServices map, after every owned
     /// allocation. On overflow magic stays absent and post-EBS admission refuses.
-    pub(crate) fn finish(&self, map: &impl MemoryMap) -> Result<()> {
+    pub(crate) fn finish(self, exit: &mut SuccessfulExit) -> Result<Sealed> {
         // SAFETY: sole loader writer, not published to the engine until sealed.
         let wire = unsafe { &mut *(self.region.physical as *mut Wire) };
-        for entry in map.entries() {
+        for entry in exit.map().entries() {
             if wire.memory_count == MAX_MEMORY {
                 return Err(refuse!("MMIO final memory inventory capacity exceeded"));
             }
@@ -303,7 +350,24 @@ impl Prepared {
             };
             wire.memory_count += 1;
         }
+        let end = self
+            .region
+            .physical
+            .checked_add(self.region.bytes)
+            .ok_or(refuse!("MMIO capture range overflow"))?;
+        if !(self.region.physical..end)
+            .step_by(PAGE as usize)
+            .all(|page| wire.table_owned(page))
+        {
+            return Err(refuse!("MMIO capture outside retained loader memory"));
+        }
+        let ownership = exit
+            .take_ownership()
+            .ok_or(refuse!("MMIO final capture already sealed"))?;
         wire.magic = MAGIC;
-        Ok(())
+        Ok(Sealed {
+            prepared: self,
+            _exit: ownership,
+        })
     }
 }

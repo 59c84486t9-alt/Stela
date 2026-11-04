@@ -32,7 +32,7 @@ use stela_runtime::pc::gpt::Guid;
 use uefi::{
     boot::{self, AllocateType, MemoryType},
     fs::FileSystem,
-    mem::memory_map::MemoryMap,
+    mem::memory_map::{MemoryMap, MemoryMapOwned},
     proto::loaded_image::LoadedImage,
 };
 
@@ -60,6 +60,27 @@ const LOADER_HEAP_KEPT: usize = 16 * MIB as usize;
 const CODE_ALIGNMENT: u64 = 16 * MIB;
 const BELOW_4G: u64 = 0xffff_f000;
 const RELOCATION_DIRECTORY: usize = 5;
+
+/// The unique successful exit used to seal the native aperture capture.
+pub(crate) struct EbsOwnership {
+    _private: (),
+}
+
+/// Keeps the final memory map and its receipt together on the loader side.
+pub(crate) struct SuccessfulExit {
+    map: core::mem::ManuallyDrop<MemoryMapOwned>,
+    ownership: Option<EbsOwnership>,
+}
+
+impl SuccessfulExit {
+    pub(crate) fn map(&self) -> &MemoryMapOwned {
+        &self.map
+    }
+
+    pub(crate) fn take_ownership(&mut self) -> Option<EbsOwnership> {
+        self.ownership.take()
+    }
+}
 const IMAGE_REL_BASED_ABSOLUTE: u16 = 0;
 const IMAGE_REL_BASED_DIR64: u16 = 10;
 
@@ -692,7 +713,7 @@ fn load(
 
     let remapping = crate::native_dma::firmware_units()?;
 
-    let native_mmio = match crate::native_mmio::Prepared::capture() {
+    let mut native_mmio = match crate::native_mmio::Prepared::capture() {
         Ok(prepared) => Some(prepared),
         Err(error) => {
             output::arguments(format_args!("NATIVE MMIO unavailable capture={error}\n"));
@@ -706,7 +727,7 @@ fn load(
         &mut memory,
         &runtime,
         storage.as_ref(),
-        native_mmio.as_ref(),
+        native_mmio.as_mut(),
         &host_firmware,
     )?;
     let memory::EngineImage {
@@ -765,18 +786,22 @@ fn load(
     // SAFETY: no protocol or pool allocation outlives this call; every page
     // Stela keeps is LOADER_DATA or LOADER_CODE.
     let map = unsafe { boot::exit_boot_services(None) };
+    let mut exit = SuccessfulExit {
+        map: core::mem::ManuallyDrop::new(map),
+        ownership: Some(EbsOwnership { _private: () }),
+    };
     // SAFETY: the firmware's identity map is still loaded, the APs idle in
     // firmware code, and no Stela driver or memory reuse has started.
     unsafe { crate::native_dma::release_firmware_units(&remapping, tsc_hz) };
-    let native_mmio_region = match native_mmio {
-        Some(prepared) => match prepared.finish(&map) {
-            Ok(()) => prepared.region(),
+    let native_mmio_capture = match native_mmio {
+        Some(prepared) => match prepared.finish(&mut exit) {
+            Ok(sealed) => crate::native_mmio::CaptureHandoff::new(Some(sealed)),
             Err(error) => {
                 output::arguments(format_args!("NATIVE MMIO unavailable final-map={error}\n"));
-                Region::default()
+                crate::native_mmio::CaptureHandoff::new(None)
             }
         },
-        None => Region::default(),
+        None => crate::native_mmio::CaptureHandoff::new(None),
     };
     // SAFETY: Stop every enabled firmware AP before offering its former code/data to
     // guest RAM, including workers that will later receive their owned SIPI.
@@ -804,8 +829,7 @@ fn load(
         ranges: guest,
         count,
         installed,
-    } = handoff_phase::guest_memory(&map);
-    core::mem::forget(map);
+    } = handoff_phase::guest_memory(exit.map());
     // SAFETY: fresh LOADER_DATA pages sized for the handoff.
     unsafe {
         handoff.write(Handoff {
@@ -831,7 +855,7 @@ fn load(
             apic_base,
             native_processors,
             native_resources,
-            native_mmio: native_mmio_region,
+            native_mmio: native_mmio_capture.region().unwrap_or_default(),
             wall,
             guest,
             guest_count: count,
@@ -847,6 +871,7 @@ fn load(
             },
             native_task_allocations,
             native_loader_tables: loader_tables,
+            native_mmio_capture,
         });
     }
     // SAFETY: boot services ended; the completed root maps this code and
