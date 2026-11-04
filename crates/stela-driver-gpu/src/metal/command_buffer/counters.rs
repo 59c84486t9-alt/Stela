@@ -363,11 +363,11 @@ impl CommandBuffer {
                 self.recorder.push(Command::CopyBuffer {
                     src: samples.buffer,
                     dst: destination.buffer,
-                    regions: alloc::vec![crate::metal::vulkan::command::BufferCopy {
+                    region: crate::metal::vulkan::command::BufferCopy {
                         src_offset: samples.offset,
                         dst_offset: dst,
                         size: samples.length,
-                    }],
+                    },
                 });
                 // The accumulate kernel replaced the pipeline and push
                 // constants.

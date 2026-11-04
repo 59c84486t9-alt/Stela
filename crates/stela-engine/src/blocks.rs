@@ -34,7 +34,7 @@ use services::{
 #[cfg(feature = "std")]
 use std::path::PathBuf;
 use stela_compiler::{
-    GuestAddress,
+    CompileError, GuestAddress,
     block::{
         BlockExit, BlockProfile, ExitKind, Features, MAX_BLOCK_INSTRUCTIONS,
         PointerAuthenticationOperation, analyze_with_profile,
@@ -194,8 +194,11 @@ impl BlockRuntime {
             .map(|(&base, region)| (base, region))
     }
 
-    fn load(&mut self, pc: GuestAddress, outcome: &mut RunOutcome) -> Result<()> {
-        let (block, native) = self.prepare_snapshot(pc)?;
+    fn load(&mut self, pc: GuestAddress, outcome: &mut RunOutcome) -> Result<Option<CompileError>> {
+        let (block, native) = match self.prepare_snapshot_attempt(pc)? {
+            Ok(snapshot) => snapshot,
+            Err(error) => return Ok(Some(error.into())),
+        };
         let prepared = block.prepared;
         let loaded = LoadedBlock::from_artifact(
             self.target,
@@ -215,7 +218,7 @@ impl BlockRuntime {
         }
         self.loaded.insert(pc.0, loaded);
 
-        Ok(())
+        Ok(None)
     }
 
     /// Run native blocks until the stop address, an unsatisfiable dispatch, a
@@ -467,21 +470,31 @@ impl BlockRuntime {
                 outcome.memory_cache_hits += 1;
                 (block, region)
             } else {
-                // Decode ahead of loading so an unsupported instruction is a typed
-                // dispatch stop. Disk corruption and allocation errors remain errors.
-                let offset = (pc.0 - base) as usize;
-                let words = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS);
-                if let Err(error) = stela_compiler::block::source_bytes_with_profile(
-                    &region.source[offset..offset + words * 4],
-                    pc,
-                    self.profile,
-                ) {
+                // Strict AOT misses retain their source refusal ordering
+                // without constructing a plan. Other misses use the parse
+                // that prepares the artifact, including on a disk hit.
+                let preflight = if matches!(self.preparation, ArtifactPreparation::AheadOfTime) {
+                    let offset = (pc.0 - base) as usize;
+                    let words = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS);
+                    stela_compiler::block::source_bytes_with_profile(
+                        &region.source[offset..offset + words * 4],
+                        pc,
+                        self.profile,
+                    )
+                    .err()
+                } else {
+                    None
+                };
+                let unsupported = match preflight {
+                    Some(error) => Some(error),
+                    None => self.load(pc, &mut outcome)?,
+                };
+                if let Some(error) = unsupported {
                     outcome.reason = StopReason::Unsupported {
                         detail: error.to_string(),
                     };
                     break;
                 }
-                self.load(pc, &mut outcome)?;
                 let block = self
                     .loaded
                     .get(&pc.0)

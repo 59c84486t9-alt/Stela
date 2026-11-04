@@ -260,17 +260,17 @@ pub enum Command {
     CopyBuffer {
         src: Buffer,
         dst: Buffer,
-        regions: Vec<BufferCopy>,
+        region: BufferCopy,
     },
     CopyBufferToImage {
         src: Buffer,
         dst: Image,
-        regions: Vec<BufferImageCopy>,
+        region: BufferImageCopy,
     },
     CopyImageToBuffer {
         src: Image,
         dst: Buffer,
-        regions: Vec<BufferImageCopy>,
+        region: BufferImageCopy,
     },
     CopyImage {
         src: Image,

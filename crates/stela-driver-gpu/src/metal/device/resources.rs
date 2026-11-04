@@ -908,7 +908,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 Some(Command::CopyBufferToImage {
                     src: texture.cpu_copy.as_ref()?.buffer,
                     dst: texture.image?,
-                    regions: alloc::vec![region],
+                    region,
                 })
             })
             .collect();
