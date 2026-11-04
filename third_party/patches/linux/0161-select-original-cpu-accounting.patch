@@ -1,0 +1,463 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 01:44:15 -0500
+Subject: [PATCH] refactor(sched): select original task and group CPU
+ accounting
+
+---
+ kernel/sched/Makefile        |   3 +-
+ kernel/sched/cputime.c       | 191 --------------------------------
+ kernel/sched/cputime_group.c | 209 +++++++++++++++++++++++++++++++++++
+ 3 files changed, 211 insertions(+), 192 deletions(-)
+ create mode 100644 kernel/sched/cputime_group.c
+
+diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
+index 5e7c0dfd7422f6a08dbb54e8e2421cd7541d10cd..4585992a08649dd7aa98b425e2adde485a496432 100644
+--- a/kernel/sched/Makefile
++++ b/kernel/sched/Makefile
+@@ -30,6 +30,7 @@ endif
+ # Branch profiling isn't noinstr-safe
+ ifdef CONFIG_TRACE_BRANCH_PROFILING
+ CFLAGS_build_policy.o += -DDISABLE_BRANCH_PROFILING
++CFLAGS_cputime_group.o += -DDISABLE_BRANCH_PROFILING
+ CFLAGS_build_utility.o += -DDISABLE_BRANCH_PROFILING
+ endif
+ #
+@@ -40,5 +41,5 @@ endif
+ #
+ obj-y += core.o wait_support.o user_affinity.o
+ obj-y += fair.o
+-obj-y += build_policy.o
++obj-y += build_policy.o cputime_group.o
+ obj-y += build_utility.o
+diff --git a/kernel/sched/cputime.c b/kernel/sched/cputime.c
+index 06bddaa738e5208d6244298b2c909109fbacdd0b..de557359571646a973cec5b5887f507923976fd8 100644
+--- a/kernel/sched/cputime.c
++++ b/kernel/sched/cputime.c
+@@ -302,62 +302,6 @@ static inline u64 account_other_time(u64 max)
+ 	return accounted;
+ }
+ 
+-#ifdef CONFIG_64BIT
+-static inline u64 read_sum_exec_runtime(struct task_struct *t)
+-{
+-	return t->se.sum_exec_runtime;
+-}
+-#else /* !CONFIG_64BIT: */
+-static u64 read_sum_exec_runtime(struct task_struct *t)
+-{
+-	u64 ns;
+-	struct rq_flags rf;
+-	struct rq *rq;
+-
+-	rq = task_rq_lock(t, &rf);
+-	ns = t->se.sum_exec_runtime;
+-	task_rq_unlock(rq, t, &rf);
+-
+-	return ns;
+-}
+-#endif /* !CONFIG_64BIT */
+-
+-/*
+- * Accumulate raw cputime values of dead tasks (sig->[us]time) and live
+- * tasks (sum on group iteration) belonging to @tsk's group.
+- */
+-void thread_group_cputime(struct task_struct *tsk, struct task_cputime *times)
+-{
+-	struct signal_struct *sig = tsk->signal;
+-	struct task_struct *t;
+-	u64 utime, stime;
+-
+-	/*
+-	 * Update current task runtime to account pending time since last
+-	 * scheduler action or thread_group_cputime() call. This thread group
+-	 * might have other running tasks on different CPUs, but updating
+-	 * their runtime can affect syscall performance, so we skip account
+-	 * those pending times and rely only on values updated on tick or
+-	 * other scheduler action.
+-	 */
+-	if (same_thread_group(current, tsk))
+-		(void) task_sched_runtime(current);
+-
+-	guard(rcu)();
+-	scoped_seqlock_read (&sig->stats_lock, ss_lock_irqsave) {
+-		times->utime = sig->utime;
+-		times->stime = sig->stime;
+-		times->sum_exec_runtime = sig->sum_sched_runtime;
+-
+-		__for_each_thread(sig, t) {
+-			task_cputime(t, &utime, &stime);
+-			times->utime += utime;
+-			times->stime += stime;
+-			times->sum_exec_runtime += read_sum_exec_runtime(t);
+-		}
+-	}
+-}
+-
+ #ifdef CONFIG_IRQ_TIME_ACCOUNTING
+ /*
+  * Account a tick to a process and cpustat
+@@ -654,30 +598,6 @@ void vtime_account_irq(struct task_struct *tsk, unsigned int offset)
+ 	}
+ }
+ 
+-void cputime_adjust(struct task_cputime *curr, struct prev_cputime *prev,
+-		    u64 *ut, u64 *st)
+-{
+-	*ut = curr->utime;
+-	*st = curr->stime;
+-}
+-
+-void task_cputime_adjusted(struct task_struct *p, u64 *ut, u64 *st)
+-{
+-	*ut = p->utime;
+-	*st = p->stime;
+-}
+-EXPORT_SYMBOL_GPL(task_cputime_adjusted);
+-
+-void thread_group_cputime_adjusted(struct task_struct *p, u64 *ut, u64 *st)
+-{
+-	struct task_cputime cputime;
+-
+-	thread_group_cputime(p, &cputime);
+-
+-	*ut = cputime.utime;
+-	*st = cputime.stime;
+-}
+-
+ #else /* !CONFIG_VIRT_CPU_ACCOUNTING_NATIVE: */
+ 
+ /*
+@@ -716,117 +636,6 @@ void account_process_tick(struct task_struct *p, int user_tick)
+ 		account_idle_time(cputime);
+ }
+ 
+-/*
+- * Adjust tick based cputime random precision against scheduler runtime
+- * accounting.
+- *
+- * Tick based cputime accounting depend on random scheduling timeslices of a
+- * task to be interrupted or not by the timer.  Depending on these
+- * circumstances, the number of these interrupts may be over or
+- * under-optimistic, matching the real user and system cputime with a variable
+- * precision.
+- *
+- * Fix this by scaling these tick based values against the total runtime
+- * accounted by the CFS scheduler.
+- *
+- * This code provides the following guarantees:
+- *
+- *   stime + utime == rtime
+- *   stime_i+1 >= stime_i, utime_i+1 >= utime_i
+- *
+- * Assuming that rtime_i+1 >= rtime_i.
+- */
+-void cputime_adjust(struct task_cputime *curr, struct prev_cputime *prev,
+-		    u64 *ut, u64 *st)
+-{
+-	u64 rtime, stime, utime;
+-	unsigned long flags;
+-
+-	/* Serialize concurrent callers such that we can honour our guarantees */
+-	raw_spin_lock_irqsave(&prev->lock, flags);
+-	rtime = curr->sum_exec_runtime;
+-
+-	/*
+-	 * This is possible under two circumstances:
+-	 *  - rtime isn't monotonic after all (a bug);
+-	 *  - we got reordered by the lock.
+-	 *
+-	 * In both cases this acts as a filter such that the rest of the code
+-	 * can assume it is monotonic regardless of anything else.
+-	 */
+-	if (prev->stime + prev->utime >= rtime)
+-		goto out;
+-
+-	stime = curr->stime;
+-	utime = curr->utime;
+-
+-	/*
+-	 * If either stime or utime are 0, assume all runtime is userspace.
+-	 * Once a task gets some ticks, the monotonicity code at 'update:'
+-	 * will ensure things converge to the observed ratio.
+-	 */
+-	if (stime == 0) {
+-		utime = rtime;
+-		goto update;
+-	}
+-
+-	if (utime == 0) {
+-		stime = rtime;
+-		goto update;
+-	}
+-
+-	stime = mul_u64_u64_div_u64(stime, rtime, stime + utime);
+-
+-update:
+-	/*
+-	 * Make sure stime doesn't go backwards; this preserves monotonicity
+-	 * for utime because rtime is monotonic.
+-	 *
+-	 *  utime_i+1 = rtime_i+1 - stime_i
+-	 *            = rtime_i+1 - (rtime_i - utime_i)
+-	 *            = (rtime_i+1 - rtime_i) + utime_i
+-	 *            >= utime_i
+-	 */
+-	if (stime < prev->stime)
+-		stime = prev->stime;
+-	utime = rtime - stime;
+-
+-	/*
+-	 * Make sure utime doesn't go backwards; this still preserves
+-	 * monotonicity for stime, analogous argument to above.
+-	 */
+-	if (utime < prev->utime) {
+-		utime = prev->utime;
+-		stime = rtime - utime;
+-	}
+-
+-	prev->stime = stime;
+-	prev->utime = utime;
+-out:
+-	*ut = prev->utime;
+-	*st = prev->stime;
+-	raw_spin_unlock_irqrestore(&prev->lock, flags);
+-}
+-
+-void task_cputime_adjusted(struct task_struct *p, u64 *ut, u64 *st)
+-{
+-	struct task_cputime cputime = {
+-		.sum_exec_runtime = p->se.sum_exec_runtime,
+-	};
+-
+-	if (task_cputime(p, &cputime.utime, &cputime.stime))
+-		cputime.sum_exec_runtime = task_sched_runtime(p);
+-	cputime_adjust(&cputime, &p->prev_cputime, ut, st);
+-}
+-EXPORT_SYMBOL_GPL(task_cputime_adjusted);
+-
+-void thread_group_cputime_adjusted(struct task_struct *p, u64 *ut, u64 *st)
+-{
+-	struct task_cputime cputime;
+-
+-	thread_group_cputime(p, &cputime);
+-	cputime_adjust(&cputime, &p->signal->prev_cputime, ut, st);
+-}
+ #endif /* !CONFIG_VIRT_CPU_ACCOUNTING_NATIVE */
+ 
+ #ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
+diff --git a/kernel/sched/cputime_group.c b/kernel/sched/cputime_group.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..774a0e67cccdbdf0ed8c5a1e98934ae67147be37
+--- /dev/null
++++ b/kernel/sched/cputime_group.c
+@@ -0,0 +1,209 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Simple CPU accounting cgroup controller
++ */
++#include <linux/export.h>
++#include <linux/math64.h>
++#include <linux/sched/cputime.h>
++
++#ifndef CONFIG_64BIT
++#include "sched.h"
++#endif
++
++#ifdef CONFIG_64BIT
++static inline u64 read_sum_exec_runtime(struct task_struct *t)
++{
++	return t->se.sum_exec_runtime;
++}
++#else /* !CONFIG_64BIT: */
++static u64 read_sum_exec_runtime(struct task_struct *t)
++{
++	u64 ns;
++	struct rq_flags rf;
++	struct rq *rq;
++
++	rq = task_rq_lock(t, &rf);
++	ns = t->se.sum_exec_runtime;
++	task_rq_unlock(rq, t, &rf);
++
++	return ns;
++}
++#endif /* !CONFIG_64BIT */
++
++/*
++ * Accumulate raw cputime values of dead tasks (sig->[us]time) and live
++ * tasks (sum on group iteration) belonging to @tsk's group.
++ */
++void thread_group_cputime(struct task_struct *tsk, struct task_cputime *times)
++{
++	struct signal_struct *sig = tsk->signal;
++	struct task_struct *t;
++	u64 utime, stime;
++
++	/*
++	 * Update current task runtime to account pending time since last
++	 * scheduler action or thread_group_cputime() call. This thread group
++	 * might have other running tasks on different CPUs, but updating
++	 * their runtime can affect syscall performance, so we skip account
++	 * those pending times and rely only on values updated on tick or
++	 * other scheduler action.
++	 */
++	if (same_thread_group(current, tsk))
++		(void) task_sched_runtime(current);
++
++	guard(rcu)();
++	scoped_seqlock_read (&sig->stats_lock, ss_lock_irqsave) {
++		times->utime = sig->utime;
++		times->stime = sig->stime;
++		times->sum_exec_runtime = sig->sum_sched_runtime;
++
++		__for_each_thread(sig, t) {
++			task_cputime(t, &utime, &stime);
++			times->utime += utime;
++			times->stime += stime;
++			times->sum_exec_runtime += read_sum_exec_runtime(t);
++		}
++	}
++}
++
++#ifdef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
++void cputime_adjust(struct task_cputime *curr, struct prev_cputime *prev,
++		    u64 *ut, u64 *st)
++{
++	*ut = curr->utime;
++	*st = curr->stime;
++}
++
++void task_cputime_adjusted(struct task_struct *p, u64 *ut, u64 *st)
++{
++	*ut = p->utime;
++	*st = p->stime;
++}
++EXPORT_SYMBOL_GPL(task_cputime_adjusted);
++
++void thread_group_cputime_adjusted(struct task_struct *p, u64 *ut, u64 *st)
++{
++	struct task_cputime cputime;
++
++	thread_group_cputime(p, &cputime);
++
++	*ut = cputime.utime;
++	*st = cputime.stime;
++}
++#else
++/*
++ * Adjust tick based cputime random precision against scheduler runtime
++ * accounting.
++ *
++ * Tick based cputime accounting depend on random scheduling timeslices of a
++ * task to be interrupted or not by the timer.  Depending on these
++ * circumstances, the number of these interrupts may be over or
++ * under-optimistic, matching the real user and system cputime with a variable
++ * precision.
++ *
++ * Fix this by scaling these tick based values against the total runtime
++ * accounted by the CFS scheduler.
++ *
++ * This code provides the following guarantees:
++ *
++ *   stime + utime == rtime
++ *   stime_i+1 >= stime_i, utime_i+1 >= utime_i
++ *
++ * Assuming that rtime_i+1 >= rtime_i.
++ */
++void cputime_adjust(struct task_cputime *curr, struct prev_cputime *prev,
++		    u64 *ut, u64 *st)
++{
++	u64 rtime, stime, utime;
++	unsigned long flags;
++
++	/* Serialize concurrent callers such that we can honour our guarantees */
++	raw_spin_lock_irqsave(&prev->lock, flags);
++	rtime = curr->sum_exec_runtime;
++
++	/*
++	 * This is possible under two circumstances:
++	 *  - rtime isn't monotonic after all (a bug);
++	 *  - we got reordered by the lock.
++	 *
++	 * In both cases this acts as a filter such that the rest of the code
++	 * can assume it is monotonic regardless of anything else.
++	 */
++	if (prev->stime + prev->utime >= rtime)
++		goto out;
++
++	stime = curr->stime;
++	utime = curr->utime;
++
++	/*
++	 * If either stime or utime are 0, assume all runtime is userspace.
++	 * Once a task gets some ticks, the monotonicity code at 'update:'
++	 * will ensure things converge to the observed ratio.
++	 */
++	if (stime == 0) {
++		utime = rtime;
++		goto update;
++	}
++
++	if (utime == 0) {
++		stime = rtime;
++		goto update;
++	}
++
++	stime = mul_u64_u64_div_u64(stime, rtime, stime + utime);
++
++update:
++	/*
++	 * Make sure stime doesn't go backwards; this preserves monotonicity
++	 * for utime because rtime is monotonic.
++	 *
++	 *  utime_i+1 = rtime_i+1 - stime_i
++	 *            = rtime_i+1 - (rtime_i - utime_i)
++	 *            = (rtime_i+1 - rtime_i) + utime_i
++	 *            >= utime_i
++	 */
++	if (stime < prev->stime)
++		stime = prev->stime;
++	utime = rtime - stime;
++
++	/*
++	 * Make sure utime doesn't go backwards; this still preserves
++	 * monotonicity for stime, analogous argument to above.
++	 */
++	if (utime < prev->utime) {
++		utime = prev->utime;
++		stime = rtime - utime;
++	}
++
++	prev->stime = stime;
++	prev->utime = utime;
++out:
++	*ut = prev->utime;
++	*st = prev->stime;
++	raw_spin_unlock_irqrestore(&prev->lock, flags);
++}
++
++void task_cputime_adjusted(struct task_struct *p, u64 *ut, u64 *st)
++{
++	struct task_cputime cputime = {
++#ifdef CONFIG_STELA
++		.sum_exec_runtime = task_sched_runtime(p),
++#else
++		.sum_exec_runtime = p->se.sum_exec_runtime,
++#endif
++	};
++
++	if (task_cputime(p, &cputime.utime, &cputime.stime))
++		cputime.sum_exec_runtime = task_sched_runtime(p);
++	cputime_adjust(&cputime, &p->prev_cputime, ut, st);
++}
++EXPORT_SYMBOL_GPL(task_cputime_adjusted);
++
++void thread_group_cputime_adjusted(struct task_struct *p, u64 *ut, u64 *st)
++{
++	struct task_cputime cputime;
++
++	thread_group_cputime(p, &cputime);
++	cputime_adjust(&cputime, &p->signal->prev_cputime, ut, st);
++}
++#endif

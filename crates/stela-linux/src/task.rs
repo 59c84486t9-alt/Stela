@@ -74,6 +74,7 @@ struct ScopeOps {
     terminate: unsafe extern "C" fn(*mut c_void) -> !,
     observe_inactive: Option<unsafe extern "C" fn(*mut c_void, *mut c_void, bool) -> i32>,
     end_inactive: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32>,
+    account_current: Option<unsafe extern "C" fn(*mut c_void, *mut u64) -> i32>,
 }
 const _: () = {
     assert!(core::mem::size_of::<TaskContext>() == 64);
@@ -83,7 +84,7 @@ const _: () = {
     assert!(core::mem::offset_of!(TaskOps, service_reserved) == 16);
     assert!(core::mem::offset_of!(TaskOps, rank) == 24);
     assert!(core::mem::offset_of!(TaskOps, retain_inactive) == 32);
-    assert!(core::mem::size_of::<ScopeOps>() == 56);
+    assert!(core::mem::size_of::<ScopeOps>() == 64);
     assert!(core::mem::offset_of!(ScopeOps, park) == 0);
     assert!(core::mem::offset_of!(ScopeOps, yield_now) == 8);
     assert!(core::mem::offset_of!(ScopeOps, reschedule) == 16);
@@ -91,6 +92,7 @@ const _: () = {
     assert!(core::mem::offset_of!(ScopeOps, terminate) == 32);
     assert!(core::mem::offset_of!(ScopeOps, observe_inactive) == 40);
     assert!(core::mem::offset_of!(ScopeOps, end_inactive) == 48);
+    assert!(core::mem::offset_of!(ScopeOps, account_current) == 56);
 };
 #[repr(C)]
 struct CTask {
@@ -259,6 +261,7 @@ impl<const N: usize> TaskBinding<N> {
         terminate: Self::terminate,
         observe_inactive: Some(Self::observe_inactive),
         end_inactive: Some(Self::end_inactive),
+        account_current: Some(Self::account_current),
     };
 
     /// Allocate original task metadata before entering a Linux owner.
@@ -835,6 +838,20 @@ impl<const N: usize> TaskBinding<N> {
                 // SAFETY: invalid/closed providers cannot become a false query.
                 unsafe { core::arch::asm!("ud2", options(noreturn)) };
             }
+        }
+    }
+
+    unsafe extern "C" fn account_current(scope: *mut c_void, total_ns: *mut u64) -> i32 {
+        // SAFETY: the entered C frame keeps its exact current Runtime scope and output alive.
+        let scope = unsafe { &*scope.cast::<Scope<'_, N>>() };
+        match scope.runtime.execution_current() {
+            Ok(sample) => {
+                // SAFETY: the C caller lends one writable result for this synchronous call.
+                unsafe { total_ns.write(sample.total_ns()) };
+                0
+            }
+            Err(WorkError::Unavailable) => -95,
+            Err(_) => -1,
         }
     }
 

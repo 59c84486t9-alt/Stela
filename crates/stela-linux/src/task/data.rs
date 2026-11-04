@@ -32,7 +32,9 @@ struct DataView {
     lease: *mut CData,
     total: *mut u64,
     through: *mut u64,
+    system: *mut u64,
 }
+const _: () = assert!(core::mem::size_of::<DataView>() == 32);
 unsafe extern "C" {
     fn stela_linux_task_data_prepare(
         task: *mut CTask,
@@ -66,6 +68,7 @@ pub(super) struct SourceData {
     lease: NonNull<CData>,
     total: NonNull<u64>,
     through: NonNull<u64>,
+    system: NonNull<u64>,
     backing: UnsafeCell<ManuallyDrop<Option<Arc<dyn TaskDataBacking>>>>,
     phase: AtomicU8,
     queue: AtomicU64,
@@ -104,6 +107,7 @@ impl SourceData {
                 lease: core::ptr::null_mut(),
                 total: core::ptr::null_mut(),
                 through: core::ptr::null_mut(),
+                system: core::ptr::null_mut(),
             },
             _c_returned_success: false,
             backing: ManuallyDrop::new(backing.clone()),
@@ -123,7 +127,9 @@ impl SourceData {
                 .ok_or(ResourceBootstrapError::Work(WorkError::CorruptContext))?;
             let through = NonNull::new(prepared.view.through)
                 .ok_or(ResourceBootstrapError::Work(WorkError::CorruptContext))?;
-            for field in [total, through] {
+            let system = NonNull::new(prepared.view.system)
+                .ok_or(ResourceBootstrapError::Work(WorkError::CorruptContext))?;
+            for field in [total, through, system] {
                 let first = field.as_ptr().addr();
                 let end = first
                     .checked_add(core::mem::size_of::<u64>())
@@ -134,12 +140,12 @@ impl SourceData {
                     return Err(ResourceBootstrapError::Work(WorkError::Unavailable));
                 }
             }
-            if total == through {
+            if total == through || total == system || through == system {
                 return Err(ResourceBootstrapError::Work(WorkError::CorruptContext));
             }
-            Ok((lease, total, through))
+            Ok((lease, total, through, system))
         })();
-        let (lease, total, through) = match result {
+        let (lease, total, through, system) = match result {
             Ok(fields) => fields,
             Err(error) => {
                 return Err(PreparationFailure {
@@ -156,6 +162,7 @@ impl SourceData {
             lease,
             total,
             through,
+            system,
             backing: UnsafeCell::new(ManuallyDrop::new(Some(backing))),
             phase: AtomicU8::new(PREPARED),
             queue: AtomicU64::new(0),
@@ -269,6 +276,8 @@ unsafe impl ExecutionPublication for SourceData {
             self.through
                 .as_ptr()
                 .write_volatile(sample.accounted_through_ns());
+            // The source sink is attached only to the Initial task or a kernel thread.
+            self.system.as_ptr().write_volatile(sample.total_ns());
             self.total.as_ptr().write_volatile(sample.total_ns());
         }
     }

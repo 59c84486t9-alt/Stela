@@ -16,6 +16,7 @@
 #include <linux/sched/task.h>
 #include <linux/sched/mm.h>
 #include <linux/init_task.h>
+#include <linux/sched/cputime.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/rt.h>
 #include <linux/string.h>
@@ -66,7 +67,7 @@ struct stela_linux_task_data {
     struct stela_linux_task *record;
     const struct stela_linux_owner *owner;
     struct stela_linux_task_context context;
-    u64 *total_ns, *accounted_through_ns;
+    u64 *total_ns, *accounted_through_ns, *system_ns;
     bool prepared, claimed, released;
 };
 struct stela_linux_task {
@@ -261,6 +262,29 @@ int task_curr(const struct task_struct *task)
 {
 	/* The serialized Linux owner admits exactly one current continuation. */
 	return task == stela_linux_current();
+}
+
+unsigned long long task_sched_runtime(struct task_struct *p)
+{
+	struct stela_linux_task *task = current_record();
+	(void)stela_linux_owner();
+
+	/* Only current accrues CPU time on this single-CPU Linux owner.
+	 * Every actual native switch publishes the previous task's final sample. */
+	if (p != task->linux_task)
+		return READ_ONCE(p->se.sum_exec_runtime);
+	if (task->kind == BARE_ALLOCATION) {
+		stela_linux_unsupported("task runtime without a measured native context");
+		return READ_ONCE(p->se.sum_exec_runtime);
+	}
+
+	u64 sample;
+	if (!task->data.claimed || !task->scope || !task->scope_ops->account_current ||
+	    task->scope_ops->account_current(task->scope, &sample) ||
+	    READ_ONCE(p->se.sum_exec_runtime) < sample ||
+	    READ_ONCE(p->stime) < sample)
+		stela_linux_fatal("current task runtime publication failed");
+	return sample;
 }
 
 struct task_struct *stela_linux_task_stack_owner(const void *storage, size_t bytes)
@@ -620,7 +644,8 @@ int stela_linux_task_data_prepare(struct stela_linux_task *requested,
         }
         struct task_struct *p = record->linux_task;
         if (!IS_ALIGNED((unsigned long)&p->se.sum_exec_runtime, sizeof(u64)) ||
-            !IS_ALIGNED((unsigned long)&p->se.exec_start, sizeof(u64)))
+            !IS_ALIGNED((unsigned long)&p->se.exec_start, sizeof(u64)) ||
+            !IS_ALIGNED((unsigned long)&p->stime, sizeof(u64)))
             return -EOPNOTSUPP;
         /* Pure original-object projection, still NO task ref, metric writer,
          * current identity, native scheduling or source publication grant. */
@@ -628,10 +653,12 @@ int stela_linux_task_data_prepare(struct stela_linux_task *requested,
         record->data.owner = owner;
         record->data.total_ns = &p->se.sum_exec_runtime;
         record->data.accounted_through_ns = &p->se.exec_start;
+        record->data.system_ns = &p->stime;
         record->data.prepared = true;
         view->lease = &record->data;
         view->total_ns = record->data.total_ns;
         view->accounted_through_ns = record->data.accounted_through_ns;
+        view->system_ns = record->data.system_ns;
         return 0;
     }
     return -ESRCH;
@@ -646,7 +673,8 @@ static bool data_attachable(const struct stela_linux_task *record)
         stela_linux_kernel_owner_allowed(data->owner) &&
         (record->kind == INITIAL_ALLOCATION || record->source_owner == data->owner) &&
         data->total_ns == &record->linux_task->se.sum_exec_runtime &&
-        data->accounted_through_ns == &record->linux_task->se.exec_start;
+        data->accounted_through_ns == &record->linux_task->se.exec_start &&
+        data->system_ns == &record->linux_task->stime;
 }
 static void data_attached(struct stela_linux_task *record,
     const struct stela_linux_task_context *view)

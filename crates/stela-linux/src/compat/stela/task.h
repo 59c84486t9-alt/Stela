@@ -62,6 +62,8 @@ struct stela_linux_task_scope_ops {
 	 * after removing its actual waiter; no loan survives subsequent park. */
 	int (*observe_inactive)(void *scope, void *owner, bool force_wait);
 	int (*end_inactive)(void *scope, void *owner);
+	/* Sample the exact current Runtime row and publish to its live source task. */
+	int (*account_current)(void *scope, u64 *total_ns);
 };
 
 _Static_assert(sizeof(struct stela_linux_task_context) == 64, "TaskContext ABI");
@@ -72,7 +74,7 @@ STELA_TASK_OFFSET(stela_linux_task_ops, wake_target, 8);
 STELA_TASK_OFFSET(stela_linux_task_ops, service_reserved, 16);
 STELA_TASK_OFFSET(stela_linux_task_ops, rank, 24);
 STELA_TASK_OFFSET(stela_linux_task_ops, retain_inactive, 32);
-_Static_assert(sizeof(struct stela_linux_task_scope_ops) == 56, "ScopeOps ABI");
+_Static_assert(sizeof(struct stela_linux_task_scope_ops) == 64, "ScopeOps ABI");
 STELA_TASK_OFFSET(stela_linux_task_scope_ops, park, 0);
 STELA_TASK_OFFSET(stela_linux_task_scope_ops, yield, 8);
 STELA_TASK_OFFSET(stela_linux_task_scope_ops, reschedule, 16);
@@ -80,6 +82,7 @@ STELA_TASK_OFFSET(stela_linux_task_scope_ops, reschedule_requested, 24);
 STELA_TASK_OFFSET(stela_linux_task_scope_ops, terminate, 32);
 STELA_TASK_OFFSET(stela_linux_task_scope_ops, observe_inactive, 40);
 STELA_TASK_OFFSET(stela_linux_task_scope_ops, end_inactive, 48);
+STELA_TASK_OFFSET(stela_linux_task_scope_ops, account_current, 56);
 #undef STELA_TASK_OFFSET
 
 /* Private serialized Linux lease. Suspend is not exit: no callbacks or owner
@@ -158,8 +161,9 @@ struct stela_linux_task_data_identity {
 _Static_assert(sizeof(struct stela_linux_task_data_identity) == 24, "native data identity ABI");
 struct stela_linux_task_data_view {
     struct stela_linux_task_data *lease;
-    u64 *total_ns, *accounted_through_ns;
+    u64 *total_ns, *accounted_through_ns, *system_ns;
 };
+_Static_assert(sizeof(struct stela_linux_task_data_view) == 32, "native task data view ABI");
 /* Bounded original Initial cold metadata or genuine child creator only.
  * Not a raw task/field-address adoption API or task-ref acquisition. */
 int stela_linux_task_data_prepare(struct stela_linux_task *task,

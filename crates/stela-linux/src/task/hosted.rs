@@ -32,6 +32,7 @@ impl<const N: usize> HostedTaskBinding<N> {
         terminate: Self::terminate,
         observe_inactive: None,
         end_inactive: None,
+        account_current: None,
     };
 
     /// # Safety
