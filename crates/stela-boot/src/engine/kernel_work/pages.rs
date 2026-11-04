@@ -19,7 +19,7 @@ pub(super) struct TaskPageInventory {
     owner: Arc<Reservation>,
     rows: Vec<Coverage>,
 }
-pub(super) struct KernelPages {
+pub(in crate::engine) struct KernelPages {
     heap: HeapPages,
     stacks: TaskPageInventory,
 }
@@ -51,12 +51,13 @@ impl TaskPageInventory {
         Ok(Self { owner, rows })
     }
     fn check(&self) -> Result<(), WorkError> {
-        self.owner.identity.check_irq_cpu()?;
+        self.owner.identity.check_clock_root()?;
         if self.owner.identity.in_interrupt() {
             return Err(WorkError::InterruptContext);
         }
         Ok(())
     }
+    #[cfg(feature = "diagnostics")]
     pub(super) fn count(&self) -> usize {
         self.rows.len()
     }
@@ -137,6 +138,23 @@ impl KernelWork {
     /// report NoKernelStacks. This supplies descriptors, not cold-worker access;
     /// the work owner's entered history still rejects hot-frame preparation.
     pub(super) fn task_pages(&self) -> Result<TaskPageInventory, Error> {
-        self.stack_pages.retained_copy()
+        self.stack_pages
+            .as_ref()
+            .ok_or(Error::NoKernelStacks)?
+            .retained_copy()
+    }
+
+    /// Publish the original heap and guarded runtime-stack descriptors
+    /// together, in the actual loader root before Linux starts.
+    pub(in crate::engine) fn register_linux_pages(
+        &self,
+    ) -> Result<&'static Catalog<KernelPages>, Error> {
+        self.dispatch(|_| {
+            let pages = self.task_pages()?;
+            // SAFETY: dispatch holds the original loader root on the owning
+            // BSP, outside source callbacks, through catalogue publication.
+            let catalog = unsafe { pages.register() }?;
+            Ok(&*Box::leak(Box::new(catalog)))
+        })?
     }
 }

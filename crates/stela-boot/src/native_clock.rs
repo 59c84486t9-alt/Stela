@@ -776,10 +776,6 @@ impl DriverExecution<'_> {
     /// # Safety
     /// The body must be bounded and synchronous. It cannot switch, park,
     /// restore interrupts, change roots or retain the borrowed permission.
-    #[cfg_attr(
-        not(feature = "diagnostics"),
-        expect(dead_code, reason = "used by the loader-root qualification")
-    )]
     pub(crate) unsafe fn with_process<R>(
         &self,
         body: impl FnOnce(&dyn EnteredProcess) -> R,

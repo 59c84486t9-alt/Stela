@@ -8,7 +8,7 @@ use super::{
 use crate::{
     handoff::{Handoff, Region},
     layout,
-    native_clock::{ClockServices, Installed as InstalledClock},
+    native_clock::{ClockServices, DriverExecution, Installed as InstalledClock},
     native_mmio, native_smp,
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
@@ -18,6 +18,7 @@ use core::{
     ffi::{c_uint, c_void},
     ops::Range,
     pin::Pin,
+    ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use stela_boot_core::guarded_stacks::mappings;
@@ -32,11 +33,9 @@ mod clock;
 #[cfg(feature = "diagnostics")]
 pub(crate) use clock::check_native_clock_domain;
 mod firmware;
-#[cfg(feature = "diagnostics")]
 mod pages;
 mod pin;
 mod plan;
-#[cfg(feature = "diagnostics")]
 mod task_data;
 pub(crate) use firmware::FirmwareContext;
 use plan::Plan;
@@ -57,9 +56,7 @@ pub(crate) enum Error {
     Work(WorkError),
     Qualification,
     Image(crate::native_image::Error),
-    #[cfg(feature = "diagnostics")]
     NoKernelStacks,
-    #[cfg(feature = "diagnostics")]
     Pages(stela_linux::pages::Error),
 }
 impl core::fmt::Display for Error {
@@ -78,11 +75,9 @@ impl core::fmt::Display for Error {
             Self::Work(error) => write!(f, "native continuation admission: {error:?}"),
             Self::Qualification => f.write_str("native continuation identity or stack differs"),
             Self::Image(error) => write!(f, "kernel work executable backing: {error}"),
-            #[cfg(feature = "diagnostics")]
             Self::NoKernelStacks => {
                 f.write_str("actual work pool has no Linux-compatible stack slots")
             }
-            #[cfg(feature = "diagnostics")]
             Self::Pages(error) => write!(f, "Linux page catalog: {error:?}"),
         }
     }
@@ -299,12 +294,20 @@ pub(super) struct KernelWork {
     cpu: Arc<dyn Cpu>,
     native_clock: Option<ClockServices>,
     installed_clock: Option<&'static InstalledClock>,
+    linux_execution: Cell<Option<NonNull<DriverExecution<'static>>>>,
     foreground: Arc<firmware::Foreground>,
     root: u64,
     busy: Cell<bool>,
-    #[cfg(feature = "diagnostics")]
-    stack_pages: pages::TaskPageInventory,
+    stack_pages: Option<pages::TaskPageInventory>,
 }
+struct ClearLinuxExecution<'a>(&'a Cell<Option<NonNull<DriverExecution<'static>>>>);
+
+impl Drop for ClearLinuxExecution<'_> {
+    fn drop(&mut self) {
+        self.0.set(None);
+    }
+}
+
 /// Owned closure/result storage. It is never made Send/Sync or exposed to an
 /// AP; the real queue checks its BSP before the callback can touch these cells.
 struct OwnedCall<F, T> {
@@ -487,8 +490,9 @@ impl KernelWork {
                 },
             }),
         };
-        #[cfg(feature = "diagnostics")]
-        let stack_pages = pages::TaskPageInventory::from_spans(reservation.clone(), &spans)?;
+        let stack_pages = (clock.is_some() || cfg!(feature = "diagnostics"))
+            .then(|| pages::TaskPageInventory::from_spans(reservation.clone(), &spans))
+            .transpose()?;
         let (foreground_slot, foreground_physical) = plan.slot(0)?;
         let foreground = Arc::new(firmware::Foreground {
             reservation: reservation.clone(),
@@ -537,10 +541,10 @@ impl KernelWork {
             cpu,
             native_clock: clock.cloned(),
             installed_clock: None,
+            linux_execution: Cell::new(None),
             foreground,
             root: handoff.root,
             busy: Cell::new(false),
-            #[cfg(feature = "diagnostics")]
             stack_pages,
         };
         // Validation enters the owned-call boundary, which acquires the
@@ -646,17 +650,46 @@ impl KernelWork {
     /// Enter the original loader root and its installed IRQ execution
     /// scope for a Linux dispatcher segment.
     pub(super) fn dispatch_linux<T>(
-        &self,
-        body: impl FnOnce(Pin<&work::Runtime<SLOTS>>) -> Result<T, WorkError>,
+        &'static self,
+        body: impl FnOnce(Pin<&'static work::Runtime<SLOTS>>) -> Result<T, WorkError>,
     ) -> Result<T, Error> {
         let clock = self.installed_clock.ok_or(Error::Clock)?;
-        self.dispatch(|runtime| {
+        let identity = &self.reservation.identity;
+        identity.check_irq_cpu().map_err(Error::Work)?;
+        if identity.in_interrupt() {
+            return Err(Error::Work(WorkError::InterruptContext));
+        }
+        if self.linux_execution.get().is_some() {
+            return Err(Error::Work(WorkError::Busy));
+        }
+        self.dispatch(|_| {
             // SAFETY: dispatch entered the kept loader root on the owning
             // BSP. This scope ends after every active frame returns or parks.
-            let _execution = unsafe { clock.enter_driver_execution()? };
-            body(runtime)
+            let execution = unsafe { clock.enter_driver_execution()? };
+            self.linux_execution.set(Some(NonNull::from(&execution)));
+            let _clear = ClearLinuxExecution(&self.linux_execution);
+            body(self.executor.runtime())
         })?
         .map_err(Error::Work)
+    }
+
+    /// Lend the actual dispatch segment for one synchronous Linux metadata leaf.
+    /// # Safety
+    /// The callback cannot switch or retain its process loan. An interrupt or
+    /// a call outside the active dispatch segment cannot borrow the slot.
+    pub(super) unsafe fn with_linux_process<T>(
+        &self,
+        body: impl FnOnce(&dyn work::EnteredProcess) -> T,
+    ) -> Result<T, WorkError> {
+        let identity = &self.reservation.identity;
+        identity.check_irq_cpu()?;
+        if identity.in_interrupt() {
+            return Err(WorkError::InterruptContext);
+        }
+        let execution = self.linux_execution.get().ok_or(WorkError::Unavailable)?;
+        // SAFETY: same CPU outside IRQ, and dispatch_linux clears the slot
+        // before destroying the live execution. The leaf cannot suspend it.
+        unsafe { execution.as_ref().with_process(body) }
     }
 
     /// Run `body` in the dispatcher, on the loader's root under the host

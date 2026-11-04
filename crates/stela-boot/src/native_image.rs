@@ -186,7 +186,6 @@ impl CodePin {
     ///
     /// # Safety
     /// Same original immutable-header/root contract as check_callback.
-    #[cfg(feature = "diagnostics")]
     pub(crate) unsafe fn writable_data_ranges(
         &self,
     ) -> Result<alloc::vec::Vec<(core::ops::Range<usize>, u64)>, Error> {

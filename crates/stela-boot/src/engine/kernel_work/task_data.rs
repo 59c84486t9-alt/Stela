@@ -30,7 +30,7 @@ unsafe impl TaskDataBacking for Backing {
 }
 
 impl KernelWork {
-    pub(super) fn task_data(&self) -> Result<Arc<dyn TaskDataBacking>, Error> {
+    pub(in crate::engine) fn task_data(&self) -> Result<Arc<dyn TaskDataBacking>, Error> {
         self.dispatch(|_| {
             let root = &self.reservation;
             let loader = &root._handoff.native_loader_tables;

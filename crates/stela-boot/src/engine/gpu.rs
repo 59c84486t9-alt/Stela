@@ -70,6 +70,7 @@ use stela_linux::{
     owner::{Entered, Errno, Owner, Platform, RawOwner, RealtimeOrigin, RealtimeRead},
     random::Seeded,
     service::Environment as LinuxEnvironment,
+    threads::{KernelThreadPlatform, TaskDataBacking},
 };
 
 type Environment = LinuxEnvironment<SLOTS>;
@@ -329,6 +330,8 @@ struct Line {
 
 /// What Linux code gets from Stela.
 struct Host {
+    work: &'static KernelWork,
+    task_data: Arc<dyn TaskDataBacking>,
     tsc_hz: u64,
     clock: crate::native_clock::CounterEpoch,
     realtime: Option<RealtimeOrigin>,
@@ -375,6 +378,23 @@ impl Host {
 
     fn report(&self, line: core::fmt::Arguments<'_>) {
         output::arguments(format_args!("LINUX {line}\n"));
+    }
+}
+
+// SAFETY: work owns the original queue, code and root. Its live dispatcher
+// scope authenticates the same CPU and loader root for each bounded loan.
+// task_data separately pins the original writable image and heap generation.
+unsafe impl KernelThreadPlatform for Host {
+    fn task_data_backing(&self) -> Result<Arc<dyn TaskDataBacking>, WorkError> {
+        Ok(self.task_data.clone())
+    }
+
+    unsafe fn with_process<R>(
+        &self,
+        body: impl FnOnce(&dyn stela_drivers::platform::work::EnteredProcess) -> R,
+    ) -> Result<R, WorkError> {
+        // SAFETY: the caller supplies the bounded, non-switching metadata leaf.
+        unsafe { self.work.with_linux_process(body) }
     }
 }
 
@@ -1033,6 +1053,7 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         heap_bytes,
     } = machine;
     let image = work.image()?;
+    let task_data = work.task_data()?;
     #[cfg(feature = "nvk")]
     let claiming = !claimed.is_empty();
     let lines = claimed
@@ -1083,6 +1104,8 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         )
     });
     let owner = Owner::new(Host {
+        work,
+        task_data,
         tsc_hz,
         clock: epoch,
         realtime,
@@ -1110,9 +1133,8 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
     unsafe {
         stela_linux::image::register(image).map_err(|_| kernel_work::Error::Inventory)?;
         stela_linux::heap::register(allocate_zeroed).map_err(|_| kernel_work::Error::Inventory)?;
-        let catalog = native_memory::linux_pages().map_err(|_| kernel_work::Error::Inventory)?;
-        core::mem::forget(catalog);
     }
+    let _pages = work.register_linux_pages()?;
     #[cfg(feature = "nvk")]
     BOOT_CPU.store(host::processor(), Ordering::Relaxed);
     let opened = work.dispatch_linux(|runtime| {
