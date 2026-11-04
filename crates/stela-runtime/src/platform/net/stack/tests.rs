@@ -72,6 +72,25 @@ fn transmit_reuses_storage_with_zeroed_bytes_and_the_current_frame_length() {
     }
 }
 
+#[test]
+fn receive_keeps_the_owned_frame_available_while_transmitting() {
+    use smoltcp::phy::{RxToken, TxToken};
+
+    let mut lan = Lan::new(0, TestClock::default());
+    let frame = vec![0x5a; 60];
+    let address = frame.as_ptr();
+    lan.client.out.borrow_mut().0.push_back(frame);
+
+    let (rx, tx) = lan.server.receive(Instant::ZERO).unwrap();
+    tx.consume(14, |bytes| bytes.fill(0x73));
+    rx.consume(|bytes| {
+        assert_eq!(bytes.as_ptr(), address);
+        assert_eq!(bytes, [0x5a; 60]);
+    });
+    assert_eq!(lan.client.receive().unwrap().unwrap(), [0x73; 14]);
+    assert!(lan.server.receive(Instant::ZERO).is_none());
+}
+
 /// A smoltcp HTTP server serving `pattern(offset)` for ranges of a
 /// `size`-byte resource, stepped whenever the client reads its link;
 /// every `drop_every`th frame to the client is lost and every
@@ -116,6 +135,7 @@ impl Lan {
                 into: a,
             },
             tx_frame: Vec::new(),
+            rx_frame: Vec::new(),
             fault: None,
             received: false,
             probes: Vec::new(),

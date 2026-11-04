@@ -57,6 +57,7 @@ const SEND_BUFFER: usize = 64 * 1024;
 struct Phy<L> {
     link: L,
     tx_frame: Vec<u8>,
+    rx_frame: Vec<u8>,
     fault: Option<LinkError>,
     /// Whether the last poll took a frame from the link.
     received: bool,
@@ -67,30 +68,39 @@ struct Phy<L> {
     manage_ipv6: bool,
 }
 
-struct Rx(Vec<u8>);
-struct Tx<'a, L>(&'a mut Phy<L>);
+struct Rx<'a>(&'a [u8]);
 
-impl phy::RxToken for Rx {
+struct Tx<'a, L> {
+    link: &'a mut L,
+    frame: &'a mut Vec<u8>,
+    fault: &'a mut Option<LinkError>,
+    approved_ipv6: Option<&'a [Ipv6Addr]>,
+}
+
+impl phy::RxToken for Rx<'_> {
     fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
-        f(&self.0)
+        f(self.0)
     }
 }
 
 impl<L: Link> phy::TxToken for Tx<'_, L> {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, length: usize, f: F) -> R {
-        let frame = &mut self.0.tx_frame;
+        let frame = self.frame;
         frame.clear();
         frame.resize(length, 0);
         let result = f(frame);
         // Tentative addresses stay off the wire until their DAD probe ends.
-        if self.0.manage_ipv6 && frame.len() >= 54 && frame[12..14] == [0x86, 0xdd] {
+        if let Some(approved) = self.approved_ipv6
+            && frame.len() >= 54
+            && frame[12..14] == [0x86, 0xdd]
+        {
             let source = Ipv6Addr::from(<[u8; 16]>::try_from(&frame[22..38]).unwrap());
-            if !source.is_unspecified() && !self.0.approved_ipv6.contains(&source) {
+            if !source.is_unspecified() && !approved.contains(&source) {
                 return result;
             }
         }
-        if let Err(error) = self.0.link.transmit(frame) {
-            self.0.fault.get_or_insert(error);
+        if let Err(error) = self.link.transmit(frame) {
+            self.fault.get_or_insert(error);
         }
         result
     }
@@ -98,7 +108,7 @@ impl<L: Link> phy::TxToken for Tx<'_, L> {
 
 impl<L: Link> Device for Phy<L> {
     type RxToken<'a>
-        = Rx
+        = Rx<'a>
     where
         Self: 'a;
     type TxToken<'a>
@@ -106,18 +116,27 @@ impl<L: Link> Device for Phy<L> {
     where
         Self: 'a;
 
-    fn receive(&mut self, now: Instant) -> Option<(Rx, Tx<'_, L>)> {
-        match self.link.receive() {
-            Ok(Some(frame)) => {
+    fn receive(&mut self, now: Instant) -> Option<(Rx<'_>, Tx<'_, L>)> {
+        match self.link.receive_reusing(&mut self.rx_frame) {
+            Ok(true) => {
                 self.received = true;
+                let frame = &self.rx_frame;
                 for probe in &mut self.probes {
-                    probe.duplicate |= dad::conflicts(&frame, probe.address, probe.nonce);
+                    probe.duplicate |= dad::conflicts(frame, probe.address, probe.nonce);
                 }
                 self.rdnss
-                    .observe(&frame, self.local_ipv6, now.total_micros().max(0) as u64);
-                Some((Rx(frame), Tx(self)))
+                    .observe(frame, self.local_ipv6, now.total_micros().max(0) as u64);
+                Some((
+                    Rx(frame),
+                    Tx {
+                        link: &mut self.link,
+                        frame: &mut self.tx_frame,
+                        fault: &mut self.fault,
+                        approved_ipv6: self.manage_ipv6.then_some(self.approved_ipv6.as_slice()),
+                    },
+                ))
             }
-            Ok(None) => None,
+            Ok(false) => None,
             Err(error) => {
                 self.fault.get_or_insert(error);
                 None
@@ -126,7 +145,12 @@ impl<L: Link> Device for Phy<L> {
     }
 
     fn transmit(&mut self, _: Instant) -> Option<Tx<'_, L>> {
-        Some(Tx(self))
+        Some(Tx {
+            link: &mut self.link,
+            frame: &mut self.tx_frame,
+            fault: &mut self.fault,
+            approved_ipv6: self.manage_ipv6.then_some(self.approved_ipv6.as_slice()),
+        })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
@@ -235,6 +259,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         let mut phy = Phy {
             link,
             tx_frame: Vec::new(),
+            rx_frame: Vec::new(),
             fault: None,
             received: false,
             probes: Vec::new(),
