@@ -510,7 +510,11 @@ impl Controller {
 
     /// Tag `tag`'s result once its command completed; never waits.
     pub(super) fn finish(&mut self, tag: usize) -> Option<Finished> {
-        self.advance();
+        // An earlier poll can reap several completions. Only a tag whose
+        // result is still pending needs another pass over the queues.
+        if !matches!(self.tags.get(tag), Some(Tag::Done(_))) {
+            self.advance();
+        }
         if !matches!(self.tags.get(tag)?, Tag::Done(_)) {
             return None;
         }

@@ -476,6 +476,28 @@ fn queued_commands_run_together_and_complete_in_any_order() {
 }
 
 #[test]
+fn taking_a_ready_result_leaves_live_deadlines_to_their_poll() {
+    let _clock = crate::test_clock::virtualize();
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let done = disk.start(Command::Flush).unwrap();
+    let live = disk.start(Command::Flush).unwrap();
+    let clock = {
+        let mut controller = disk.controller.borrow_mut();
+        let id = running_id(&controller, done);
+        post(&mut controller, id, 0);
+        controller.advance();
+        controller.clock
+    };
+    crate::test_clock::advance(clock, 1000);
+
+    assert_eq!(disk.finish(done), Some(Ok(None)));
+    assert!(disk.controller.borrow().aborts.is_empty());
+    assert_eq!(disk.finish(live), None);
+    assert_eq!(disk.controller.borrow().aborts.len(), 1);
+}
+
+#[test]
 fn delayed_read_completes_after_submission_ring_wraps() {
     let _clock = crate::test_clock::virtualize();
     for turns in [1, 2] {
