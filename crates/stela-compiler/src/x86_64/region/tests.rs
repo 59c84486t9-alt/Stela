@@ -733,20 +733,21 @@ fn clean_load_tier_declines_unselected_memory_forms() {
 
 #[test]
 fn shared_byte_load_recipe_rejects_any_clobber_or_offset_change() {
-    let mut raw = Code::new();
-    super::super::memory(
-        &mut raw,
+    // The typed recipe keeps its address in RAX and its result in RCX.
+    let (raw, _) = memory_recipe::scalar_recipe(
         super::super::MemoryChecks::DEFAULT,
-        MemoryTransfer::Load {
-            signed: false,
-            width: Width::W32,
-        },
-        1,
-        Register::X(16),
-        crate::x86_64::ImmediateAddress {
-            base: Register::X(15),
-            displacement: -255,
-            mode: AddressMode::Offset,
+        memory_recipe::Scalar {
+            transfer: MemoryTransfer::Load {
+                signed: false,
+                width: Width::W32,
+            },
+            bytes: 1,
+            data: Register::X(16),
+            address: crate::x86_64::ImmediateAddress {
+                base: Register::X(15),
+                displacement: -255,
+                mode: AddressMode::Offset,
+            },
         },
     );
     assert_eq!(
@@ -799,20 +800,20 @@ fn shared_load_recipes_reject_any_clobber_or_offset_change() {
     ];
     for (width, bytes) in sizes {
         for data in [Register::X(16), Register::Zero] {
-            let mut raw = Code::new();
-            super::super::memory(
-                &mut raw,
+            let (raw, _) = memory_recipe::scalar_recipe(
                 super::super::MemoryChecks::DEFAULT,
-                MemoryTransfer::Load {
-                    signed: false,
-                    width,
-                },
-                bytes,
-                data,
-                crate::x86_64::ImmediateAddress {
-                    base: Register::X(15),
-                    displacement: -255,
-                    mode: AddressMode::Offset,
+                memory_recipe::Scalar {
+                    transfer: MemoryTransfer::Load {
+                        signed: false,
+                        width,
+                    },
+                    bytes,
+                    data,
+                    address: crate::x86_64::ImmediateAddress {
+                        base: Register::X(15),
+                        displacement: -255,
+                        mode: AddressMode::Offset,
+                    },
                 },
             );
             let selected = slot(data);
