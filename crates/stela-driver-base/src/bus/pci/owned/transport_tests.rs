@@ -85,6 +85,92 @@ fn parking_withdraws_the_map_and_preserves_the_source_seal_on_reattach() {
 }
 
 #[test]
+fn parked_bridge_retains_the_original_route_through_promotion() {
+    let address = test_support::ADDRESS;
+    let span = PhysicalSpan::new(test_support::physical(address), 4096).unwrap();
+    let (source, authority, counters) = test_support::unmapped(
+        address,
+        test_support::window(address),
+        span,
+        CacheAttribute::Uncached,
+    );
+    let retained = source.retention();
+    let base = source.fixture_base().as_ptr();
+    // SAFETY: this is a private model page, kept through every access below.
+    let at = |offset| unsafe { base.add(usize::from(offset)) };
+    let read = |offset, width| {
+        // SAFETY: these naturally aligned fields are inside that same page.
+        Ok(unsafe {
+            match width {
+                1 => u32::from(at(offset).read_volatile()),
+                2 => u32::from(at(offset).cast::<u16>().read_volatile()),
+                4 => at(offset).cast::<u32>().read_volatile(),
+                _ => unreachable!("configuration field width"),
+            }
+        })
+    };
+    // SAFETY: set the Type 1 header in the original model before attachment.
+    unsafe { at(0x0e).write_volatile(1) };
+    let attach = |prepared: PreparedConfig<grant::PrepublicationGrant>| {
+        let mapping = authority
+            .map(
+                prepared.configuration_resource().clone(),
+                0,
+                4096,
+                CacheAttribute::Uncached,
+                Protection::ReadWrite,
+            )
+            .unwrap();
+        prepared
+            .attach(mapping)
+            .unwrap_or_else(|_| panic!("attach"))
+    };
+    let mut config = attach(UnpublishedConfig::prepare(source.into_prepublication()));
+    config.seal_bus_routing().unwrap();
+    // SAFETY: the original map has no escaping users.
+    let prepared = unsafe { config.park() }.unwrap_or_else(|_| panic!("park"));
+    // SAFETY: emulate hardware updates to the two status fields in the model.
+    unsafe {
+        at(0x1e).cast::<u16>().write_volatile(1 << 13);
+        at(0x3e).cast::<u16>().write_volatile(1 << 10);
+    }
+    assert_eq!(prepared.check_bridge_routing(read), Ok(()));
+
+    // SAFETY: model an out-of-band change to the bridge memory window.
+    unsafe { at(0x20).cast::<u32>().write_volatile(0x1000) };
+    let changed = Err(ConfigError::before_effect(ConfigFailure::Readback {
+        offset: 0x20,
+        width: 4,
+        expected: 0,
+        observed: 0x1000,
+    }));
+    assert_eq!(prepared.check_bridge_routing(read), changed);
+    let mut config = attach(prepared);
+    assert_eq!(config.seal_bus_routing(), changed);
+    // SAFETY: restore the model before starting the independent promotion check.
+    unsafe { at(0x20).cast::<u32>().write_volatile(0) };
+    assert_eq!(config.seal_bus_routing(), Ok(()));
+    // SAFETY: isolated model with no escaped mapping. Only the source callback
+    // models the window drifting after the initial promotion check.
+    let (error, mut original) = unsafe {
+        config.promote(|source: &mut test_support::FixtureCustody| {
+            source.finish_promotion()?;
+            at(0x20).cast::<u32>().write_volatile(0x1000);
+            Ok(())
+        })
+    }
+    .err()
+    .expect("changed route must refuse promotion");
+    assert_eq!(error, MappingError::InvalidPlatformReply);
+    assert_eq!(retained.uses(), 1);
+    assert!(retained.check_admission().is_err());
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
+    // SAFETY: all synchronous test reads and writes ended.
+    unsafe { original.retire() }.unwrap();
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 2);
+}
+
+#[test]
 fn promotion_keeps_the_original_mapping_and_command_seal() {
     let (source, mapping, counters) = mapped();
     let retention = source.retention();

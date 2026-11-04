@@ -77,6 +77,20 @@ impl<'a> ContainedPci<'a> {
                             .map_err(mapping_error)
                     })
                 })
+                .and_then(|()| {
+                    if slot.header.bridge.is_some() {
+                        let prepared = slot
+                            .configuration
+                            .as_ref()
+                            .ok_or_else(|| mapping_error(Error::Unavailable))?;
+                        prepared.check_bridge_routing(|offset, width| {
+                            reader
+                                .read(slot.address, offset, width)
+                                .map_err(mapping_error)
+                        })?;
+                    }
+                    Ok(())
+                })
                 .map_err(|error| ContainmentError::from(error).at(slot.address))?;
         }
         Ok(())

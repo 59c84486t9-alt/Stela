@@ -6,7 +6,7 @@ use super::{
 };
 use crate::bus::{
     mmio::owned::{Error as MappingError, Mapping, Resource},
-    pci::{Address, ConfigError, EcamWindow, assignment::AdmissionClose},
+    pci::{Address, ConfigError, ConfigFailure, EcamWindow, assignment::AdmissionClose},
 };
 use alloc::boxed::Box;
 use core::mem::ManuallyDrop;
@@ -215,6 +215,25 @@ macro_rules! config_phase {
 }
 config_phase!(DriverGrant, OwnedConfig);
 config_phase!(PrepublicationGrant, UnpublishedConfig);
+
+impl PreparedConfig<PrepublicationGrant> {
+    /// Compare a read-only observation of this bridge with the routing seal
+    /// kept in the original grant after its writable mapping was withdrawn.
+    pub fn check_bridge_routing(
+        &self,
+        read: impl FnMut(u16, u8) -> Result<u32, ConfigError>,
+    ) -> Result<(), ConfigError> {
+        let state = self.grant().state();
+        state
+            .check_admission()
+            .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))?;
+        state
+            .routing_seal
+            .get()
+            .ok_or(ConfigError::before_effect(ConfigFailure::RoutingSealed))?
+            .check(read)
+    }
+}
 
 #[cfg(any(test, feature = "test-support"))]
 mod model;

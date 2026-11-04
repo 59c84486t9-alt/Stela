@@ -397,6 +397,11 @@ unsafe impl DriverCustody for FixtureCustody {}
 unsafe impl super::grant::PrepublicationCustody for FixtureCustody {}
 impl FixtureCustody {
     #[cfg(test)]
+    pub(super) fn fixture_base(&self) -> NonNull<u8> {
+        self.memory.pointer()
+    }
+
+    #[cfg(test)]
     pub(super) fn into_prepublication(mut self) -> super::grant::PrepublicationGrant {
         self.prepublication = true;
         let mut custody = Box::new(self);

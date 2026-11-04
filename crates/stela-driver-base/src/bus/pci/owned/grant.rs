@@ -1,5 +1,6 @@
 //! Source-owned configuration custody, separate from noncyclic physical pins.
 //! Neither phase can be manufactured from Address/window/Mapping descriptors.
+use super::region::RoutingSeal;
 use crate::bus::{
     mmio::owned::{Error as MappingError, Resource},
     pci::{Address, ConfigError, ConfigFailure, EcamWindow, assignment::AdmissionClose},
@@ -88,7 +89,7 @@ pub(super) struct State {
     pub(super) acting: Cell<bool>,
     pub(super) effect: Cell<super::super::ConfigEffect>,
     pub(super) master_sealed: Cell<bool>,
-    pub(super) routing_seal: Cell<Option<([u32; 7], u16)>>,
+    pub(super) routing_seal: Cell<Option<RoutingSeal>>,
 }
 impl State {
     pub(super) fn check_admission(&self) -> Result<(), MappingError> {

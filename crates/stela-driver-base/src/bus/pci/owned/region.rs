@@ -107,6 +107,63 @@ pub(super) unsafe fn retire_mapping<G: Grant>(
     Ok(())
 }
 
+const ROUTING_BASE: u16 = 0x18;
+const BRIDGE_CONTROL: u16 = 0x3e;
+const SECONDARY_STATUS_WORD: usize = 1;
+const DISCARD_TIMER_STATUS: u16 = 1 << 10;
+const SECONDARY_BUS_RESET: u16 = 1 << 6;
+
+#[derive(Clone, Copy)]
+pub(super) struct RoutingSeal {
+    words: [u32; 7],
+    control: u16,
+}
+
+impl RoutingSeal {
+    pub(super) fn check(
+        self,
+        mut read: impl FnMut(u16, u8) -> Result<u32, ConfigError>,
+    ) -> Result<(), ConfigError> {
+        if read(0x0e, 1)? & 0x7f != 1 {
+            return Err(ConfigError::before_effect(ConfigFailure::Address));
+        }
+        for (index, expected) in self.words.into_iter().enumerate() {
+            let offset = ROUTING_BASE + index as u16 * 4;
+            // The upper half of 1Ch is Secondary Status, not the I/O window.
+            let mask = if index == SECONDARY_STATUS_WORD {
+                0xffff
+            } else {
+                u32::MAX
+            };
+            check_route_word(offset, 4, expected & mask, read(offset, 4)? & mask)?;
+        }
+        let mask = u32::from(!DISCARD_TIMER_STATUS);
+        check_route_word(
+            BRIDGE_CONTROL,
+            2,
+            u32::from(self.control) & mask,
+            read(BRIDGE_CONTROL, 2)? & mask,
+        )
+    }
+}
+
+fn check_route_word(
+    offset: u16,
+    width: usize,
+    expected: u32,
+    observed: u32,
+) -> Result<(), ConfigError> {
+    if observed != expected {
+        return Err(ConfigError::before_effect(ConfigFailure::Readback {
+            offset,
+            width,
+            expected,
+            observed,
+        }));
+    }
+    Ok(())
+}
+
 pub(super) struct Region<G> {
     address: Address,
     window: EcamWindow,
@@ -135,6 +192,13 @@ impl Region<grant::PrepublicationGrant> {
             .retains_resource(self.grant.custody().resource())?
         {
             return Err(MappingError::InvalidPlatformReply);
+        }
+        if let Some(seal) = self.grant.state().routing_seal.get() {
+            self.check_routing(seal)
+                .map_err(|error| match error.reason {
+                    ConfigFailure::Mapping(error) => error,
+                    _ => MappingError::InvalidPlatformReply,
+                })?;
         }
         Ok(())
     }
@@ -281,34 +345,55 @@ impl<G: Grant> Region<G> {
     /// and the real bridge routing/assignment owner remains frozen. This does
     /// not authorize an endpoint engine or arbitrary bridge reconfiguration.
     pub unsafe fn release_bus_forwarding_seal(&mut self) -> Result<(), ConfigError> {
-        if self.try_read8(0x0e)? & 0x7f != 1 || self.grant.state().routing_seal.get().is_none() {
+        let Some(seal) = self.grant.state().routing_seal.get() else {
             return Err(ConfigError::before_effect(ConfigFailure::Address));
-        }
+        };
+        self.check_routing(seal)?;
+        self.seal_bus_master()?;
         self.grant.state().master_sealed.set(false);
         Ok(())
     }
     /// Freeze actual Type1 bus/routing windows for this root cohort. Driver
     /// control can move, but safe config writes cannot reassign source routes.
     pub fn seal_bus_routing(&mut self) -> Result<(), ConfigError> {
+        if let Some(seal) = self.grant.state().routing_seal.get() {
+            return self.check_routing(seal);
+        }
         if self.try_read8(0x0e)? & 0x7f != 1 {
             return Err(ConfigError::before_effect(ConfigFailure::Address));
         }
         let mut words = [0; 7];
         for (index, word) in words.iter_mut().enumerate() {
-            *word = self.try_read32(0x18 + index as u16 * 4)?;
+            *word = self.try_read32(ROUTING_BASE + index as u16 * 4)?;
+        }
+        let control = self.try_read16(BRIDGE_CONTROL)?;
+        if control & SECONDARY_BUS_RESET != 0 {
+            return Err(ConfigError::before_effect(
+                ConfigFailure::UnqualifiedControl,
+            ));
         }
         self.grant
             .state()
             .routing_seal
-            .set(Some((words, self.try_read16(0x3e)?)));
+            .set(Some(RoutingSeal { words, control }));
         Ok(())
     }
+
+    fn check_routing(&self, seal: RoutingSeal) -> Result<(), ConfigError> {
+        seal.check(|offset, width| match width {
+            1 => self.try_read8(offset).map(u32::from),
+            2 => self.try_read16(offset).map(u32::from),
+            4 => self.try_read32(offset),
+            _ => unreachable!("Type 1 routing register width"),
+        })
+    }
+
     fn check_write(&self, offset: u16, value: u32, bytes: usize) -> Result<(), ConfigError> {
         self.check_terminal()?;
         if self.grant.state().master_sealed.get() && offset == 4 && value & 4 != 0 {
             return Err(ConfigError::before_effect(ConfigFailure::BusMasterSealed));
         }
-        if let Some((words, _)) = &self.grant.state().routing_seal.get()
+        if let Some(RoutingSeal { words, .. }) = &self.grant.state().routing_seal.get()
             && (0x18..0x34).contains(&offset)
         {
             let index = usize::from((offset - 0x18) / 4);
@@ -322,7 +407,7 @@ impl<G: Grant> Region<G> {
                 return Err(ConfigError::before_effect(ConfigFailure::RoutingSealed));
             }
         }
-        if let Some((_, control)) = &self.grant.state().routing_seal.get() {
+        if let Some(RoutingSeal { control, .. }) = &self.grant.state().routing_seal.get() {
             // Secondary-bus reset and ISA/VGA routing live outside 18h..30h.
             // Freeze that actual bridge-control word, while ordinary Interrupt
             // Line metadata at3Ch remains writable.
