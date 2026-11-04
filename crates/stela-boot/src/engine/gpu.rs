@@ -52,12 +52,14 @@ use stela_boot_core::page_window::{self, Cache};
 use stela_drivers::gpu::metal::nvidia::PcieLink;
 use stela_drivers::{
     bus::{
-        dma::mapping::DmaDomain,
         irq::{Disposition, Handler, IrqError, IrqRegistration, Route, Source},
-        mmio::owned,
-        pci::{Bar, ConfigError, ConfigFailure, ConfigSpace, Function, owned::OwnedConfig},
+        mmio::owned::{self, CacheAttribute, Mapping, Protection},
+        pci::{
+            Bar, ConfigError, ConfigFailure, ConfigSpace, Function,
+            owned::{ConfigRetention, OwnedConfig},
+        },
     },
-    firmware::{Catalog, Provider, Requirement, Target},
+    firmware::{Catalog, ErrorKind as FirmwareError, Provider},
     gpu,
     platform::work::{
         WorkError,
@@ -67,6 +69,7 @@ use stela_drivers::{
 };
 use stela_engine::machine::engine::Hub;
 use stela_linux::{
+    catalogue::{FirmwareTarget, FunctionCustody, PciAuthority, PciFirmware},
     function::{self, Attached, Msi, Placement, Region},
     kernel::KernelOwner,
     owner::{Errno, Platform, RealtimeOrigin, RealtimeRead},
@@ -81,7 +84,6 @@ type LinuxKernel = KernelOwner<Host, SLOTS>;
 type LinuxThreads = TaskRuntime<Host, KernelPages, SLOTS>;
 
 const PAGE: u64 = page_window::PAGE;
-const ENOENT: Errno = -2;
 const EIO: Errno = -5;
 const EFAULT: Errno = -14;
 const ERANGE: Errno = -34;
@@ -107,14 +109,6 @@ const RESOURCE_WIDE: u64 = 0x10_0000;
 /// Every DMA mask nouveau sets holds 40 bits. A mapping past it is refused
 /// (`function::Mappings`), not truncated.
 const DMA_LIMIT: u64 = (1 << 40) - 1;
-/// The firmware images Linux names, all under one target: nouveau picks each
-/// by chip and validates its header.
-const FIRMWARE: Target<'static> = Target {
-    driver: "nouveau",
-    hardware: "nvidia",
-    revision: "linux-firmware",
-    board: None,
-};
 /// How long the GPUs may take to boot their firmware before the guest starts.
 const START_SECONDS: u64 = 60;
 /// The longest idle wait while they do, which the timeout above is checked at.
@@ -304,6 +298,9 @@ impl Handler for Fired {
 struct Device {
     config: SharedConfig,
     msi: Option<Msi>,
+    custody: Rc<FunctionCustody>,
+    _views: ManuallyDrop<GpuViews>,
+    _resources: ManuallyDrop<Vec<owned::Resource>>,
 }
 
 impl function::Host for Device {
@@ -341,7 +338,6 @@ struct Host {
     clock: crate::native_clock::CounterEpoch,
     realtime: Option<RealtimeOrigin>,
     window: &'static Window,
-    firmware: Option<Arc<Catalog>>,
     image: Arc<kernel_work::ReadOnlyImage>,
     random: RefCell<Seeded>,
     environment: Cell<*const Environment>,
@@ -432,29 +428,6 @@ impl Platform for Host {
     ) -> Result<Box<dyn stela_linux::owner::MinimumDeadline>, WorkError> {
         let nanoseconds = minimum.checked_mul(1000).ok_or(WorkError::Exhausted)?;
         Ok(Box::new(self.clock.minimum_deadline(nanoseconds)?))
-    }
-
-    fn firmware(&self, name: &CStr) -> Result<&[u8], Errno> {
-        let name = name.to_str().map_err(|_| ENOENT)?;
-        let catalog = self.firmware.as_ref().ok_or(ENOENT)?;
-        catalog
-            .load(Requirement {
-                name,
-                target: FIRMWARE,
-                minimum_bytes: 1,
-            })
-            .map(|image| image.bytes())
-            .map_err(|_| {
-                if let Some((chip, _)) = name
-                    .strip_prefix("nvidia/")
-                    .and_then(|name| name.split_once('/'))
-                {
-                    self.report(format_args!(
-                        "{name} is missing: `stela setup host-firmware fetch --gpu {chip}` adds it"
-                    ));
-                }
-                ENOENT
-            })
     }
 
     fn log(&self, level: i32, message: &CStr) {
@@ -747,10 +720,126 @@ impl Platform for Host {
     }
 }
 
+/// The original pre-reset register observation and configuration epoch.
+struct GpuViews {
+    config: ConfigRetention,
+    pci_words: [u32; 8],
+    registers: Mapping,
+    boot0: u32,
+}
+
+fn gpu_pci_words(function: &mut Function<OwnedConfig>) -> Result<[u32; 8], ConfigError> {
+    // Identity and class/revision, then all six restored BAR registers.
+    let mut words = [0; 8];
+    for (word, offset) in words
+        .iter_mut()
+        .zip([0, 8, 0x10, 0x14, 0x18, 0x1c, 0x20, 0x24])
+    {
+        *word = function.config().read32(offset)?;
+    }
+    Ok(words)
+}
+
+// SAFETY: the exclusive original preparation owns this exact configuration
+// and register BAR. Any original GOP writers were joined before BAR sizing,
+// and its terminal admission remains closed. This checks the same retained
+// epoch and reads a harmless UC register on this function after the CPU fence,
+// completing its posted writes before Cold is allowed to reset it.
+unsafe impl gpu::cold::Views<OwnedConfig> for GpuViews {
+    fn seal(&mut self, function: &mut Function<OwnedConfig>) -> Result<(), gpu::cold::ViewError> {
+        self.check(function)
+    }
+}
+
+impl GpuViews {
+    fn check(&self, function: &mut Function<OwnedConfig>) -> Result<(), gpu::cold::ViewError> {
+        use gpu::cold::ViewError;
+        if !function
+            .config()
+            .matches_retention(&self.config)
+            .map_err(|_| ViewError::Context)?
+        {
+            return Err(ViewError::ForeignSource);
+        }
+        if function
+            .config()
+            .read16(4)
+            .map_err(|_| ViewError::RegisterReadback)?
+            & 2
+            == 0
+            || gpu_pci_words(function).map_err(|_| ViewError::RegisterReadback)? != self.pci_words
+            || self.registers.read32(0) != Ok(self.boot0)
+        {
+            return Err(ViewError::RegisterReadback);
+        }
+        Ok(())
+    }
+}
+
+fn select_firmware(boot0: u32, catalog: Arc<Catalog>) -> Result<PciFirmware, ServiceError> {
+    use stela_loader::host_firmware::{recipes, requirements::Inventory};
+    let chip = gpu::nouveau_chip::Chip::from_boot0(boot0).ok_or(ServiceError::Refused(
+        "the GPU's PMC chipset is unsupported",
+    ))?;
+    let name = chip.name.to_ascii_lowercase();
+    let mut inventory = Inventory::default();
+    recipes::require_gsp(&mut inventory, &name)
+        .map_err(|_| ServiceError::Refused("the GPU has no pinned GSP recipe"))?;
+    let mut names = Vec::new();
+    let request = inventory
+        .requests()
+        .first()
+        .ok_or(ServiceError::Refused("the GPU has no pinned GSP recipe"))?;
+    let target = FirmwareTarget::new(
+        request.target.driver.clone(),
+        request.target.hardware.clone(),
+        request.target.revision.clone(),
+        request.target.board.clone(),
+    )
+    .map_err(|_| ServiceError::Refused("the GPU firmware target is invalid"))?;
+    let plan = recipes::Plan::select(&inventory)
+        .map_err(|_| ServiceError::Refused("the GPU firmware recipe cannot be selected"))?;
+    let mut available = false;
+    for selection in plan.selections() {
+        let request = &selection.request;
+        match catalog.load(request.view()) {
+            Ok(image) => {
+                selection
+                    .recipe
+                    .image
+                    .verify_digest(image.bytes().len(), image.sha256())
+                    .map_err(|_| {
+                        ServiceError::Refused(
+                            "the GPU firmware digest does not match its pinned recipe",
+                        )
+                    })?;
+                available = true;
+            }
+            Err(error) if error.kind == FirmwareError::Missing => (),
+            Err(_) => {
+                return Err(ServiceError::Refused(
+                    "the GPU firmware does not match its exact catalogue target",
+                ));
+            }
+        }
+        names.push(request.name.clone());
+    }
+    if !available {
+        output::arguments(format_args!(
+            "GPU {name}: `stela setup host-firmware fetch --gpu {name}` supplies the pinned firmware\n"
+        ));
+        return Err(ServiceError::Refused(
+            "no pinned firmware for the observed GPU chipset was loaded",
+        ));
+    }
+    PciFirmware::new(target, catalog, names.into_boxed_slice())
+        .map_err(|_| ServiceError::Refused("the GPU firmware image names are invalid"))
+}
+
 /// A function claimed from probe, before Linux sees it.
 pub(super) struct Claimed {
     device: Device,
-    domain: Arc<dyn DmaDomain>,
+    firmware: PciFirmware,
     placement: Placement,
     bars: Vec<Range<u64>>,
     name: String,
@@ -758,8 +847,6 @@ pub(super) struct Claimed {
     drm: client::DrmDevice,
     #[cfg(feature = "nvk")]
     link: Option<PcieLink>,
-    /// The BARs' claims, held for the boot.
-    _resources: Vec<owned::Resource>,
 }
 
 fn claim(
@@ -767,14 +854,18 @@ fn claim(
     adapter: &gpu::Adapter,
     line: u32,
     gop: Option<crate::pci_io::FramebufferSource>,
+    catalog: Arc<Catalog>,
 ) -> Result<Claimed, ServiceError> {
     let address = adapter.address;
-    let requester = services.claim_stopped(address)?;
-    let (requester, binding) = requester
-        .into_dma_binding()
-        .map_err(|(error, _)| ServiceError::Claim(error))?;
-    let domain = services.domain(binding)?;
-    let mut function = requester.into_function();
+    let timer = services.minimum_delay()?;
+    let mut requester = services.prepare_requester(address)?;
+    let function = requester.function_mut();
+    if (function.vendor, function.device, function.class) != (0x10de, adapter.device, adapter.class)
+    {
+        return Err(ServiceError::Refused("the GPU's original identity changed"));
+    }
+    gpu::cold::check_candidate(function, timer.as_ref())
+        .map_err(|error| cold_refusal(address, error))?;
     if let Some(source) = gop.filter(|source| source.address == address) {
         let checked = source.bar.words().try_for_each(|(offset, expected)| {
             let observed = function
@@ -794,28 +885,13 @@ fn claim(
             Ok(())
         });
         // BAR sizing below temporarily turns off memory decode.
-        let retirement = checked.and_then(|()| {
-            if crate::console::retire_firmware() {
-                Ok(())
-            } else {
-                Err(ServiceError::Refused(
-                    "a firmware framebuffer writer is still active",
-                ))
-            }
-        });
-        if let Err(error) = retirement {
-            // There is no terminal release path for claimed configuration and DMA.
-            core::mem::forget((function, domain));
-            return Err(error);
+        checked?;
+        if !crate::console::retire_firmware() {
+            return Err(ServiceError::Refused(
+                "a firmware framebuffer writer is still active",
+            ));
         }
     }
-    let capabilities = function
-        .capabilities()
-        .map_err(ServiceError::PciCapability)?;
-    let msi = capabilities
-        .iter()
-        .find(|(_, id)| *id == MSI_CAPABILITY)
-        .map(|(offset, _)| Msi::at(u16::from(*offset)));
     let mut placement = Placement {
         bus: address.bus,
         devfn: address.device << 3 | address.function,
@@ -823,8 +899,15 @@ fn claim(
         dma_limit: DMA_LIMIT,
         ..Placement::default()
     };
-    let (mut bars, mut resources) = (Vec::new(), Vec::new());
+    let (mut bars, mut resources) = (Vec::new(), ManuallyDrop::new(Vec::new()));
     let function_bars = function.bars().map_err(ServiceError::Config)?;
+    if !matches!(function_bars[0], Some(Bar::Memory { prefetchable: false, size, .. }) if size >= PAGE)
+        || function.config().read16(4).map_err(ServiceError::Config)? & 2 == 0
+    {
+        return Err(ServiceError::Refused(
+            "the GPU's register BAR does not decode",
+        ));
+    }
     for (region, bar) in placement.regions.iter_mut().zip(function_bars) {
         let Some(
             bar @ Bar::Memory {
@@ -837,7 +920,14 @@ fn claim(
         else {
             continue;
         };
-        resources.push(services.bar_resource(address, bar)?);
+        let resource = services.bar_resource(address, bar)?;
+        let physical = resource.physical_span();
+        if physical.start() != start || physical.bytes() != size {
+            return Err(ServiceError::Refused(
+                "the GPU BAR is translated by the host bridge",
+            ));
+        }
+        resources.push(resource);
         bars.push(start..start + size);
         *region = Region {
             start,
@@ -851,6 +941,59 @@ fn claim(
                 | if wide { RESOURCE_WIDE } else { 0 },
         };
     }
+    let config = function
+        .config()
+        .retain_epoch()
+        .map_err(ServiceError::Mapping)?;
+    let pci_words = gpu_pci_words(function).map_err(ServiceError::Config)?;
+    let registers = services
+        .authority()?
+        .map(
+            resources[0].clone(),
+            0,
+            PAGE as usize,
+            CacheAttribute::Uncached,
+            Protection::ReadOnly,
+        )
+        .map_err(ServiceError::Mapping)?;
+    let endian = registers.read32(4).map_err(ServiceError::Mapping)?;
+    if endian == u32::MAX || endian == 0x01000001 {
+        return Err(ServiceError::Refused(
+            "the GPU register byte order is unavailable",
+        ));
+    }
+    let boot0 = registers.read32(0).map_err(ServiceError::Mapping)?;
+    let firmware = select_firmware(boot0, catalog)?;
+    let ready = gpu::cold::Cold::new(gpu::cold::Inputs {
+        requester,
+        views: GpuViews {
+            config,
+            pci_words,
+            registers,
+            boot0,
+        },
+        timer,
+    })
+    .quiesce_and_bind()
+    .map_err(|failure| cold_refusal(address, failure.error))?;
+    // SAFETY: both original owners transfer into this retained function
+    // lifetime before Linux probe. Only the temporary UC observation is retired.
+    let (bound, views) = unsafe { ready.into_parts() };
+    let attachment = ManuallyDrop::new(bound.attachment);
+    let mut function = ManuallyDrop::new(bound.requester.into_function());
+    let mut views = ManuallyDrop::new(views);
+    views
+        .check(&mut function)
+        .map_err(|error| cold_refusal(address, gpu::cold::Error::Views(error)))?;
+    // SAFETY: this scoped BAR observation was the sole user of the UC mapping.
+    unsafe { views.registers.retire() }.map_err(ServiceError::Mapping)?;
+    let capabilities = function
+        .capabilities()
+        .map_err(ServiceError::PciCapability)?;
+    let msi = capabilities
+        .iter()
+        .find(|(_, id)| *id == MSI_CAPABILITY)
+        .map(|(offset, _)| Msi::at(u16::from(*offset)));
     #[cfg(feature = "nvk")]
     let drm = {
         let config = function.config();
@@ -882,10 +1025,13 @@ fn claim(
         .map_err(ServiceError::Config)?;
     Ok(Claimed {
         device: Device {
-            config: SharedConfig(Rc::new(RefCell::new(function))),
+            config: SharedConfig(Rc::new(RefCell::new(ManuallyDrop::into_inner(function)))),
             msi,
+            custody: FunctionCustody::new(ManuallyDrop::into_inner(attachment)),
+            _views: views,
+            _resources: resources,
         },
-        domain,
+        firmware,
         placement,
         bars,
         name: format!("{address}"),
@@ -893,8 +1039,15 @@ fn claim(
         drm,
         #[cfg(feature = "nvk")]
         link,
-        _resources: resources,
     })
+}
+
+fn cold_refusal(
+    address: stela_drivers::bus::pci::Address,
+    error: gpu::cold::Error,
+) -> ServiceError {
+    output::arguments(format_args!("GPU {address} cold preparation: {error:?}\n"));
+    ServiceError::Refused("the GPU's original cold handoff was refused")
 }
 
 /// Claim every NVIDIA adapter, each reported if it cannot be. In a foreground
@@ -903,6 +1056,7 @@ pub(super) fn claim_all(
     services: &dyn NativeServices,
     adapters: &[gpu::Adapter],
     gop: Result<Option<crate::pci_io::FramebufferSource>, &'static str>,
+    catalog: Option<&Arc<Catalog>>,
 ) -> Vec<Claimed> {
     if !cfg!(feature = "nvk") {
         for adapter in adapters
@@ -921,9 +1075,17 @@ pub(super) fn claim_all(
         .filter(|adapter| adapter.vendor == gpu::Vendor::Nvidia);
     let mut claimed = Vec::new();
     for adapter in nvidia {
-        let result = gop
-            .map_err(ServiceError::Refused)
-            .and_then(|source| claim(services, adapter, claimed.len() as u32, source));
+        let result = gop.map_err(ServiceError::Refused).and_then(|source| {
+            let catalog =
+                catalog.ok_or(ServiceError::Refused("no approved GPU firmware catalogue"))?;
+            claim(
+                services,
+                adapter,
+                claimed.len() as u32,
+                source,
+                catalog.clone(),
+            )
+        });
         match result {
             Ok(function) => claimed.push(function),
             Err(error) => {
@@ -944,6 +1106,7 @@ struct Bound {
 
 /// The original managed child runs the driver's initcalls and probe.
 struct Start {
+    kernel: &'static LinuxKernel,
     claimed: ManuallyDrop<Vec<Claimed>>,
     completed: Rc<Cell<Option<ManuallyDrop<Started>>>>,
 }
@@ -961,11 +1124,12 @@ struct Started {
 unsafe impl ManagedJob for Start {
     fn run(mut self: Pin<&mut Self>) {
         let claimed = core::mem::take(&mut *self.claimed);
-        self.completed.set(Some(ManuallyDrop::new(start(claimed))));
+        self.completed
+            .set(Some(ManuallyDrop::new(start(self.kernel, claimed))));
     }
 }
 
-fn start(claimed: Vec<Claimed>) -> Started {
+fn start(kernel: &LinuxKernel, claimed: Vec<Claimed>) -> Started {
     let mut job = Started {
         _attached: Vec::new(),
         #[cfg(feature = "nvk")]
@@ -980,8 +1144,36 @@ fn start(claimed: Vec<Claimed>) -> Started {
         return job;
     }
     for claimed in claimed {
-        // SAFETY: entered, on a task.
-        let attached = unsafe { Attached::new(claimed.device, claimed.domain, claimed.placement) };
+        let authority = {
+            let mut function = claimed.device.config.0.borrow_mut();
+            // SAFETY: the firmware keys came from the real chipset read on the
+            // exact register BAR and were rechecked after its consumed reset.
+            // Device and catalogue share the original native attachment.
+            unsafe {
+                PciAuthority::new(
+                    kernel,
+                    claimed.device.custody.clone(),
+                    function.config(),
+                    claimed.firmware,
+                )
+            }
+        };
+        let authority = match authority {
+            Ok(authority) => authority,
+            Err(error) => {
+                output::arguments(format_args!(
+                    "GPU {} catalogue refused: {error}\n",
+                    claimed.name
+                ));
+                core::mem::forget(claimed.device);
+                continue;
+            }
+        };
+        // SAFETY: entered on the same canonical kernel task. The device and
+        // enrolled catalogue retain the exact original configuration/attachment.
+        let attached = unsafe {
+            Attached::new_catalogued(kernel, claimed.device, claimed.placement, authority)
+        };
         match attached {
             Ok(attached) => {
                 // SAFETY: entered.
@@ -1052,7 +1244,6 @@ fn installed() -> Option<&'static Installed> {
 pub(super) struct Machine {
     pub work: &'static KernelWork,
     pub window: &'static Window,
-    pub firmware: Option<Arc<Catalog>>,
     pub random: Seeded,
     pub tsc_hz: u64,
     pub wall: Option<RtcReading>,
@@ -1110,7 +1301,6 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
     let Machine {
         work,
         window,
-        firmware,
         random,
         tsc_hz,
         wall,
@@ -1175,7 +1365,6 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         clock: epoch,
         realtime,
         window,
-        firmware,
         image: image.clone(),
         random: RefCell::new(random),
         environment: Cell::new(ptr::null()),
@@ -1301,6 +1490,7 @@ fn mount_and_start(
     let ready = unsafe { srcu.join() }.map_err(|failure| Error::Srcu(failure.error))?;
     let completed = Rc::new(Cell::new(None));
     let job = Box::pin(Start {
+        kernel: owner.as_ref(),
         claimed,
         completed: completed.clone(),
     });

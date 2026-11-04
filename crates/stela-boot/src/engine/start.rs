@@ -1129,14 +1129,15 @@ fn open_gpus(
     } else {
         Ok(None)
     };
+    let firmware = firmware.clone();
     let claimed = work.call_owned(60_000_000, move || {
         let services = services::Services::new(mmio, remappers, None, heap, tsc_hz, Vec::new());
         let random = stela_drivers::probe::NativeServices::entropy(&services)
             .ok()
             .and_then(|entropy| stela_linux::random::Seeded::from_entropy(&*entropy).ok());
-        let claimed = random
-            .as_ref()
-            .map_or_else(Vec::new, |_| gpu::claim_all(&services, &adapters, gop));
+        let claimed = random.as_ref().map_or_else(Vec::new, |_| {
+            gpu::claim_all(&services, &adapters, gop, firmware.as_ref())
+        });
         (claimed, random)
     });
     let (claimed, random) = match claimed {
@@ -1153,7 +1154,6 @@ fn open_gpus(
     let machine = gpu::Machine {
         work,
         window,
-        firmware: firmware.clone(),
         random,
         tsc_hz,
         wall: handoff.wall,

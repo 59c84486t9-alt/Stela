@@ -54,7 +54,16 @@ impl Artifact {
     }
     pub fn verify(&self, bytes: &[u8]) -> Result<(), Error> {
         use stela_crypto::{Sha256, digest::Digest};
-        if bytes.len() != self.length || hex::encode(Sha256::digest(bytes)) != self.sha256 {
+        self.check_digest(bytes.len(), || Sha256::digest(bytes).into())
+    }
+
+    /// Check an image whose immutable catalogue already computed its digest.
+    pub fn verify_digest(&self, length: usize, digest: [u8; 32]) -> Result<(), Error> {
+        self.check_digest(length, || digest)
+    }
+
+    fn check_digest(&self, length: usize, digest: impl FnOnce() -> [u8; 32]) -> Result<(), Error> {
+        if length != self.length || hex::encode(digest()) != self.sha256 {
             return Err(Error(format!(
                 "pinned host firmware artifact differs: {}",
                 self.member

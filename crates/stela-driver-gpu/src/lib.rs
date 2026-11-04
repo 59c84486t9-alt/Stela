@@ -24,6 +24,7 @@ pub mod amd;
 pub mod nouveau;
 
 pub mod cold;
+pub mod nouveau_chip;
 
 #[cfg(feature = "linux-kernel")]
 pub mod drm;

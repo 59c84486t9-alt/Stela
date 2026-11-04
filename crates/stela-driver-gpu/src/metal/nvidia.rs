@@ -4,12 +4,7 @@
 //! Hardware access, firmware, memory management, command submission and
 //! shader code generation stay with nouveau, NVK and NAK; this module only
 //! admits a device and supplies the facts Vulkan does not report, and
-//! [`open`] serves it. The chip
-//! table follows nouveau's `nvkm_device_ctor` in
-//! `drivers/gpu/drm/nouveau/nvkm/engine/device/base.c` (Linux v7.2.12): every
-//! Turing and later chipset it names, which are exactly the GPUs nouveau
-//! drives through GSP-RM. Earlier chips use nouveau's register-level paths,
-//! which Stela's NVIDIA route does not carry.
+//! [`open`] serves it.
 use super::{
     abi::DeviceLocation,
     capabilities::Platform,
@@ -21,67 +16,7 @@ pub mod open;
 
 pub const VENDOR_ID: u32 = 0x10de;
 
-/// The GPU generation, which fixes NVK's 3D class and NAK's shader model.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub enum Architecture {
-    Turing,
-    Ampere,
-    Ada,
-    Hopper,
-    Blackwell,
-}
-
-/// One chipset from nouveau's table.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Chip {
-    /// `PMC_BOOT_0` bits 20-28, as nouveau's `device->chipset`.
-    pub chipset: u16,
-    /// nouveau's chipset name, which is also NVK's `chipset_name`.
-    pub name: &'static str,
-    pub architecture: Architecture,
-    /// nouveau instantiates a display engine for this chipset.
-    pub display: bool,
-}
-
-const fn chip(chipset: u16, name: &'static str, architecture: Architecture, display: bool) -> Chip {
-    Chip {
-        chipset,
-        name,
-        architecture,
-        display,
-    }
-}
-
-use Architecture::{Ada, Ampere, Blackwell, Hopper, Turing};
-
-/// nouveau's Turing and later chipsets; GA100, GH100, GB100 and GB102 are
-/// compute parts without a display engine.
-pub static CHIPS: [Chip; 24] = [
-    chip(0x162, "TU102", Turing, true),
-    chip(0x164, "TU104", Turing, true),
-    chip(0x166, "TU106", Turing, true),
-    chip(0x167, "TU117", Turing, true),
-    chip(0x168, "TU116", Turing, true),
-    chip(0x170, "GA100", Ampere, false),
-    chip(0x172, "GA102", Ampere, true),
-    chip(0x173, "GA103", Ampere, true),
-    chip(0x174, "GA104", Ampere, true),
-    chip(0x176, "GA106", Ampere, true),
-    chip(0x177, "GA107", Ampere, true),
-    chip(0x180, "GH100", Hopper, false),
-    chip(0x192, "AD102", Ada, true),
-    chip(0x193, "AD103", Ada, true),
-    chip(0x194, "AD104", Ada, true),
-    chip(0x196, "AD106", Ada, true),
-    chip(0x197, "AD107", Ada, true),
-    chip(0x1a0, "GB100", Blackwell, false),
-    chip(0x1a2, "GB102", Blackwell, false),
-    chip(0x1b2, "GB202", Blackwell, true),
-    chip(0x1b3, "GB203", Blackwell, true),
-    chip(0x1b5, "GB205", Blackwell, true),
-    chip(0x1b6, "GB206", Blackwell, true),
-    chip(0x1b7, "GB207", Blackwell, true),
-];
+pub use crate::nouveau_chip::{Architecture, CHIPS, Chip};
 
 /// The first Turing chipset; nouveau's card type for 0x160-0x16f is TU100.
 const FIRST_GSP_CHIPSET: u16 = 0x160;
@@ -107,10 +42,6 @@ pub enum Refusal {
 }
 
 impl Chip {
-    pub fn find(chipset: u16) -> Option<&'static Chip> {
-        CHIPS.iter().find(|chip| chip.chipset == chipset)
-    }
-
     /// Admits the Vulkan device `identity` whose kernel driver reports
     /// `chipset` (`NOUVEAU_GETPARAM_CHIPSET_ID`).
     pub fn admit(identity: &Identity, chipset: u16) -> Result<&'static Chip, Refusal> {
