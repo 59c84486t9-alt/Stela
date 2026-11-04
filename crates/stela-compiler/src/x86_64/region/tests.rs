@@ -1709,6 +1709,21 @@ fn dead_native_flag_version_needs_no_capture_before_next_producer() {
 }
 
 #[test]
+fn allocation_admission_consumes_reads_before_checking_overwrites() {
+    let destination = Register::X(0);
+    let initial = instruction(0, add(destination, Register::X(1)));
+    let overwrite = instruction(1, add(destination, Register::X(2)));
+    let update = instruction(1, add(destination, destination));
+
+    assert!(
+        emit_allocated_prefix(&[initial.clone(), overwrite])
+            .unwrap()
+            .is_some()
+    );
+    assert!(emit_allocated_prefix(&[initial, update]).unwrap().is_none());
+}
+
+#[test]
 fn caller_pool_is_still_exact_for_legacy_cost_and_load_chunk() {
     let instructions = [
         instruction(0, add(Register::X(2), Register::X(2))),
