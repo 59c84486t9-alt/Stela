@@ -1107,7 +1107,7 @@ fn open_gpus(
     remappers: &'static remapping::Remappers,
     heap: core::ops::Range<u64>,
     firmware: &Option<alloc::sync::Arc<stela_drivers::firmware::Catalog>>,
-    tsc_hz: u64,
+    handoff: &Handoff,
     adapters: Vec<stela_drivers::gpu::Adapter>,
 ) -> bool {
     let Some(window) = mmio.and_then(|mmio| mmio.window()) else {
@@ -1115,6 +1115,7 @@ fn open_gpus(
         return false;
     };
     let Some(mmio) = mmio else { return false };
+    let tsc_hz = handoff.tsc_hz;
     #[cfg(feature = "nvk")]
     let heap_bytes = heap.end - heap.start;
     // A PC with an NVIDIA GPU uses it or says why not; only one with none draws
@@ -1124,6 +1125,13 @@ fn open_gpus(
             .iter()
             .any(|adapter| adapter.vendor == stela_drivers::gpu::Vendor::Nvidia);
     crate::status::begin("Starting the GPU");
+    let gop = if handoff.screen.is_some() {
+        mmio.verified_framebuffer()
+            .map(Some)
+            .ok_or("the firmware framebuffer PCI source was unavailable")
+    } else {
+        Ok(None)
+    };
     let claimed = work.call_owned(60_000_000, move || {
         let services = services::Services::new(mmio, remappers, None, heap, tsc_hz, Vec::new());
         let random = stela_drivers::probe::NativeServices::entropy(&services)
@@ -1131,7 +1139,10 @@ fn open_gpus(
             .and_then(|entropy| {
                 stela_drivers::gpu::linux::random::Seeded::from_entropy(&*entropy).ok()
             });
-        (gpu::claim_all(&services, &adapters), random)
+        let claimed = random
+            .as_ref()
+            .map_or_else(Vec::new, |_| gpu::claim_all(&services, &adapters, gop));
+        (claimed, random)
     });
     let (claimed, random) = match claimed {
         Ok((claimed, Some(random))) if software || !claimed.is_empty() => (claimed, random),
@@ -1231,11 +1242,14 @@ fn place_devices(
         carried(name).or_else(|| flash.and_then(|flash| flash.image(name)))
     };
     let firmware_scanout = || {
-        handoff.screen.map(|screen| {
-            let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
-            alloc::boxed::Box::new(display::GopScanout::new(screen))
-                as alloc::boxed::Box<dyn stela_soc::machine::Scanout>
-        })
+        handoff
+            .screen
+            .filter(|screen| screen.available())
+            .map(|screen| {
+                let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
+                alloc::boxed::Box::new(display::GopScanout::new(screen))
+                    as alloc::boxed::Box<dyn stela_soc::machine::Scanout>
+            })
     };
     #[cfg(feature = "nvk")]
     let scanout = gpu::display::scanout().or_else(firmware_scanout);
@@ -2271,7 +2285,7 @@ fn start_devices(
                     remappers,
                     heap_range,
                     host_firmware,
-                    tsc_hz,
+                    handoff,
                     gpus,
                 )
             {

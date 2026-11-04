@@ -379,6 +379,7 @@ pub(crate) struct Source {
     platform: Arc<Platform>,
     authority: Authority,
     window: Option<super::Window>,
+    verified_framebuffer: core::cell::OnceCell<crate::pci_io::FramebufferSource>,
     /// Each claimed ECAM bus, by its window and bus.
     buses: core::cell::RefCell<Vec<Bus>>,
     ioapics: core::cell::RefCell<Vec<(crate::native_irq::madt::Unit, Arc<IoapicUnit>)>>,
@@ -509,6 +510,7 @@ impl Source {
             platform,
             authority,
             window,
+            verified_framebuffer: core::cell::OnceCell::new(),
             buses: core::cell::RefCell::new(Vec::new()),
             ioapics: core::cell::RefCell::new(Vec::new()),
         })
@@ -646,7 +648,14 @@ impl Source {
         });
         // SAFETY: the synchronous read was the mapping's only use.
         unsafe { mapping.retire() }?;
-        observation
+        observation?;
+        self.verified_framebuffer
+            .set(source)
+            .map_err(|_| Error::Busy)
+    }
+
+    pub(crate) fn verified_framebuffer(&self) -> Option<crate::pci_io::FramebufferSource> {
+        self.verified_framebuffer.get().copied()
     }
 
     /// Map and read the diagnostic's configuration page on the BSP. The

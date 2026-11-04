@@ -20,6 +20,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 use font::Font;
+use stela_boot_core::screen::{Access, Permit};
 use stela_soc::machine::ScanoutMasks;
 use uefi::{
     Handle,
@@ -101,6 +102,20 @@ fn gop() -> Option<(Handle, ScopedProtocol<GraphicsOutput>)> {
     Some((handle, gop))
 }
 
+static FIRMWARE_ACCESS: Access = Access::new();
+
+struct ScreenUse(Option<Permit<'static>>);
+
+impl Drop for ScreenUse {
+    fn drop(&mut self) {
+        if self.0.is_some() {
+            // SAFETY: SFENCE is available on x86-64. Complete this CPU's
+            // write-combining stores before releasing its writer permit.
+            unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+        }
+    }
+}
+
 /// The GOP mode in use when Stela takes over.
 #[derive(Debug, Clone, Copy)]
 pub struct Framebuffer {
@@ -110,6 +125,7 @@ pub struct Framebuffer {
     height: usize,
     stride: usize,
     encoding: Encoding,
+    firmware: bool,
     pub(crate) pci_source: Option<crate::pci_io::FramebufferSource>,
 }
 
@@ -163,6 +179,7 @@ impl Framebuffer {
             height,
             stride: mode.stride(),
             encoding,
+            firmware: true,
             pci_source: None,
         };
         (framebuffer.stride * framebuffer.height * BYTES_PER_PIXEL <= framebuffer.bytes)
@@ -179,6 +196,7 @@ impl Framebuffer {
             height,
             stride,
             encoding: Encoding::Bgr,
+            firmware: false,
             pci_source: None,
         }
     }
@@ -193,11 +211,48 @@ impl Framebuffer {
         (self.width, self.height)
     }
 
+    pub(crate) fn available(&self) -> bool {
+        !self.firmware || !FIRMWARE_ACCESS.is_retired()
+    }
+
+    fn use_screen(&self) -> Option<ScreenUse> {
+        if self.firmware {
+            FIRMWARE_ACCESS
+                .enter()
+                .map(|permit| ScreenUse(Some(permit)))
+        } else {
+            Some(ScreenUse(None))
+        }
+    }
+
+    /// Present one complete frame with a single permit, including the
+    /// console's transfer to guest scanout.
+    pub(crate) fn show_frame(&self, rows: &[u8], before: impl FnOnce() -> bool) -> bool {
+        let Some(_access) = self.use_screen() else {
+            return false;
+        };
+        let row_bytes = self.width * BYTES_PER_PIXEL;
+        if row_bytes == 0 || !before() {
+            return false;
+        }
+        for (y, pixels) in rows.chunks_exact(row_bytes).take(self.height).enumerate() {
+            self.write_row(y, pixels);
+        }
+        true
+    }
+
     /// Row `y` from 32-bit pixels with blue in the low byte, as many as fit.
     pub fn show_row(&self, y: usize, pixels: &[u8]) {
         if y >= self.height {
             return;
         }
+        let Some(_access) = self.use_screen() else {
+            return;
+        };
+        self.write_row(y, pixels);
+    }
+
+    fn write_row(&self, y: usize, pixels: &[u8]) {
         let line = (self.base + y * self.stride * BYTES_PER_PIXEL) as *mut u32;
         let (pixels, _) = pixels.as_chunks::<BYTES_PER_PIXEL>();
         for (column, pixel) in pixels.iter().take(self.width).enumerate() {
@@ -254,6 +309,9 @@ impl Framebuffer {
     /// Fill `width` by `height` pixels from (`x`, `y`), cut to the mode's
     /// visible rows and columns.
     pub fn rectangle(&self, x: usize, y: usize, width: usize, height: usize, value: u32) {
+        let Some(_access) = self.use_screen() else {
+            return;
+        };
         for row in y..(y + height).min(self.height) {
             let line = (self.base + row * self.stride * BYTES_PER_PIXEL) as *mut u32;
             for column in x..(x + width).min(self.width) {
@@ -265,11 +323,12 @@ impl Framebuffer {
 
     /// The pixel at (`x`, `y`), which is visible.
     #[cfg(feature = "diagnostics")]
-    pub fn read(&self, x: usize, y: usize) -> u32 {
+    pub fn read(&self, x: usize, y: usize) -> Option<u32> {
         assert!(x < self.width && y < self.height, "pixel outside the mode");
+        let _access = self.use_screen()?;
         let line = (self.base + y * self.stride * BYTES_PER_PIXEL) as *const u32;
         // SAFETY: inside the mode's visible framebuffer, as checked.
-        unsafe { line.add(x).read_volatile() }
+        Some(unsafe { line.add(x).read_volatile() })
     }
 
     /// Stela's background under its header.
@@ -376,6 +435,9 @@ impl Text {
 
     /// Draw every cell that differs from what the screen shows.
     fn present(&mut self) {
+        let Some(_access) = self.screen.use_screen() else {
+            return;
+        };
         let s = self.scale;
         let (on_width, on_height) = (self.font.width * s, self.font.height * s);
         let off = self.screen.encoding.encode(ui::BACKGROUND);
@@ -413,64 +475,97 @@ fn printable(character: u8) -> u8 {
     }
 }
 
-/// The boot processor is the only writer. While boot services run, the
-/// firmware's timer may draw the running step from its callback, which
-/// interrupts the boot processor; [`BUSY`] makes such a nested draw skip.
+/// Firmware timer callbacks may interrupt the boot CPU. A nested operation
+/// skips the console while its current owner holds BUSY.
 struct Console(UnsafeCell<Option<Text>>);
-// SAFETY: Stela runs on one CPU, and `BUSY` keeps accesses from nesting.
+// SAFETY: every access is exclusive through BUSY.
 unsafe impl Sync for Console {}
 static CONSOLE: Console = Console(UnsafeCell::new(None));
 /// The text [`release`] keeps, which [`reclaim`] shows again.
 static PARKED: Console = Console(UnsafeCell::new(None));
 static BUSY: AtomicBool = AtomicBool::new(false);
 
-fn with<R>(f: impl FnOnce(&mut Text) -> R) -> Option<R> {
+fn with_consoles<R>(f: impl FnOnce(&mut Option<Text>, &mut Option<Text>) -> R) -> Option<R> {
     if BUSY.swap(true, Ordering::Acquire) {
         return None;
     }
-    // SAFETY: see `Console`; `BUSY` makes this the only live access.
-    let result = unsafe { &mut *CONSOLE.0.get() }.as_mut().map(f);
+    // SAFETY: BUSY makes these the only live references to either console.
+    let result = unsafe { f(&mut *CONSOLE.0.get(), &mut *PARKED.0.get()) };
     BUSY.store(false, Ordering::Release);
-    result
+    Some(result)
+}
+
+fn with<R>(f: impl FnOnce(&mut Text) -> R) -> Option<R> {
+    with_consoles(|active, _| {
+        active
+            .as_mut()
+            .filter(|text| text.screen.available())
+            .map(f)
+    })
+    .flatten()
 }
 
 /// Clear the screen and send later text to it.
 pub fn install(screen: Framebuffer) {
-    screen.clear();
-    // SAFETY: see `Console`; no reference to the text is live here.
-    unsafe { *CONSOLE.0.get() = Text::new(screen) };
+    with_consoles(|active, parked| {
+        if screen.available() {
+            screen.clear();
+            *active = Text::new(screen);
+            *parked = None;
+        }
+    });
 }
 
 /// Keep the text [`release`] kept for `screen`, which now shows.
 #[cfg(feature = "nvk")]
 pub fn parked_on(screen: Framebuffer) {
-    // SAFETY: see `Console`; no reference to the text is live here.
-    if let Some(text) = unsafe { &mut *PARKED.0.get() } {
-        text.screen = screen;
-    }
+    with_consoles(|_, parked| {
+        if let Some(text) = parked {
+            text.screen = screen;
+        }
+    });
 }
 
 /// Stop drawing text: the screen now shows something else. The text is
-/// kept for [`reclaim`].
-pub fn release() {
-    // SAFETY: see `Console`; no reference to the text is live here.
-    unsafe { *PARKED.0.get() = (*CONSOLE.0.get()).take() };
+/// kept for [`reclaim`]. False means another console operation was active.
+pub fn release() -> bool {
+    with_consoles(|active, parked| {
+        if let Some(text) = active.take() {
+            *parked = Some(text);
+        }
+    })
+    .is_some()
+}
+
+/// Permanently stop the boot CPU and guest compositor from touching GOP.
+/// Parked text can still be rebound to a native scanout.
+pub(crate) fn retire_firmware() -> bool {
+    with_consoles(|active, parked| {
+        if !FIRMWARE_ACCESS.retire() {
+            return false;
+        }
+        if active.as_ref().is_some_and(|text| text.screen.firmware) {
+            *parked = active.take();
+        }
+        true
+    })
+    .unwrap_or(false)
 }
 
 /// Take the screen back after [`release`] and draw the kept text again, so
 /// a stop shows its reason instead of the guest's last frame.
 pub fn reclaim() {
-    // SAFETY: see `Console`; no reference to either text is live here.
-    unsafe {
-        if (*CONSOLE.0.get()).is_none()
-            && let Some(mut text) = (*PARKED.0.get()).take()
+    with_consoles(|active, parked| {
+        if active.is_none()
+            && parked.as_ref().is_some_and(|text| text.screen.available())
+            && let Some(mut text) = parked.take()
         {
             text.screen.clear();
             text.shown.fill(BLANK);
             text.present();
-            *CONSOLE.0.get() = Some(text);
+            *active = Some(text);
         }
-    }
+    });
 }
 
 /// Whether text reaches the screen.

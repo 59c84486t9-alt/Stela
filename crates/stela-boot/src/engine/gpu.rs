@@ -615,6 +615,7 @@ fn claim(
     services: &dyn NativeServices,
     adapter: &gpu::Adapter,
     line: u32,
+    gop: Option<crate::pci_io::FramebufferSource>,
 ) -> Result<Claimed, ServiceError> {
     let address = adapter.address;
     let requester = services.claim_stopped(address)?;
@@ -623,6 +624,32 @@ fn claim(
         .map_err(|(error, _)| ServiceError::Claim(error))?;
     let domain = services.domain(binding)?;
     let mut function = requester.into_function();
+    if let Some(source) = gop.filter(|source| source.address == address) {
+        let checked = source.bar.words().try_for_each(|(offset, expected)| {
+            if function.config().read32(offset) == expected {
+                Ok(())
+            } else {
+                Err(ServiceError::Refused(
+                    "the GPU firmware framebuffer identity or BAR changed",
+                ))
+            }
+        });
+        // BAR sizing below temporarily turns off memory decode.
+        let retirement = checked.and_then(|()| {
+            if crate::console::retire_firmware() {
+                Ok(())
+            } else {
+                Err(ServiceError::Refused(
+                    "a firmware framebuffer writer is still active",
+                ))
+            }
+        });
+        if let Err(error) = retirement {
+            // There is no terminal release path for claimed configuration and DMA.
+            core::mem::forget((function, domain));
+            return Err(error);
+        }
+    }
     let msi = function
         .capabilities()
         .iter()
@@ -706,7 +733,11 @@ fn claim(
 
 /// Claim every NVIDIA adapter, each reported if it cannot be. In a foreground
 /// continuation, with probe finished.
-pub(super) fn claim_all(services: &dyn NativeServices, adapters: &[gpu::Adapter]) -> Vec<Claimed> {
+pub(super) fn claim_all(
+    services: &dyn NativeServices,
+    adapters: &[gpu::Adapter],
+    gop: Result<Option<crate::pci_io::FramebufferSource>, &'static str>,
+) -> Vec<Claimed> {
     if !cfg!(feature = "nvk") {
         for adapter in adapters
             .iter()
@@ -724,7 +755,10 @@ pub(super) fn claim_all(services: &dyn NativeServices, adapters: &[gpu::Adapter]
         .filter(|adapter| adapter.vendor == gpu::Vendor::Nvidia);
     let mut claimed = Vec::new();
     for adapter in nvidia {
-        match claim(services, adapter, claimed.len() as u32) {
+        let result = gop
+            .map_err(ServiceError::Refused)
+            .and_then(|source| claim(services, adapter, claimed.len() as u32, source));
+        match result {
             Ok(function) => claimed.push(function),
             Err(error) => {
                 output::arguments(format_args!("GPU {} refused: {error:?}\n", adapter.address))

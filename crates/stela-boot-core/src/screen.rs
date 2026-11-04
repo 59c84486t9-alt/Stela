@@ -1,5 +1,56 @@
 //! Geometry, colours and text the mount's screens compute before drawing.
 use alloc::{format, string::String};
+use core::sync::atomic::{AtomicU8, Ordering};
+
+const IDLE: u8 = 0;
+const ACTIVE: u8 = 1;
+const RETIRED: u8 = 2;
+
+/// Exclusive, nonblocking admission for a framebuffer shared by copied views.
+/// The actual writer must finish its CPU stores before dropping its permit.
+pub struct Access(AtomicU8);
+
+impl Access {
+    pub const fn new() -> Self {
+        Self(AtomicU8::new(IDLE))
+    }
+
+    pub fn enter(&self) -> Option<Permit<'_>> {
+        self.0
+            .compare_exchange(IDLE, ACTIVE, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| Permit { gate: self })
+    }
+
+    pub fn is_retired(&self) -> bool {
+        self.0.load(Ordering::Acquire) == RETIRED
+    }
+
+    /// Close admission only after the current writer has acknowledged return.
+    pub fn retire(&self) -> bool {
+        matches!(
+            self.0
+                .compare_exchange(IDLE, RETIRED, Ordering::AcqRel, Ordering::Acquire),
+            Ok(_) | Err(RETIRED)
+        )
+    }
+}
+
+impl Default for Access {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct Permit<'a> {
+    gate: &'a Access,
+}
+
+impl Drop for Permit<'_> {
+    fn drop(&mut self) {
+        self.gate.0.store(IDLE, Ordering::Release);
+    }
+}
 
 /// Screen pixels per page unit: pages are laid out for about 720 rows.
 pub fn scale(rows: usize) -> usize {
@@ -90,6 +141,20 @@ fn mix(from: u32, to: u32, amount: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retirement_requires_the_writer_to_return_and_permanently_closes_admission() {
+        let access = Access::new();
+        let writer = access.enter().unwrap();
+        assert!(access.enter().is_none());
+        assert!(!access.retire());
+        assert!(!access.is_retired());
+        drop(writer);
+        assert!(access.retire());
+        assert!(access.is_retired());
+        assert!(access.enter().is_none());
+        assert!(access.retire());
+    }
 
     #[test]
     fn pages_are_laid_out_for_about_720_rows() {

@@ -755,13 +755,14 @@ fn bars(machine: &mut Machine, screen: &Framebuffer, top: usize) {
     for (index, &(red, green, blue)) in BARS.iter().enumerate() {
         let value = screen.rgb(red, green, blue);
         screen.rectangle(index * bar, top, bar, height - top, value);
-        let read = screen.read(index * bar + bar / 2, middle);
-        if read & 0x00ff_ffff != value {
-            output::arguments(format_args!(
+        match screen.read(index * bar + bar / 2, middle) {
+            Some(read) if read & 0x00ff_ffff == value => continue,
+            Some(read) => output::arguments(format_args!(
                 "DISPLAY bar {index} wrote {value:#08x} read {read:#08x}\n"
-            ));
-            mismatches += 1;
+            )),
+            None => output::arguments(format_args!("DISPLAY bar {index} read was refused\n")),
         }
+        mismatches += 1;
     }
     machine.record(
         "display",
