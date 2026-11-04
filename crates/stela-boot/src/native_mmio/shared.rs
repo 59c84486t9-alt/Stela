@@ -41,7 +41,8 @@ use stela_drivers::bus::{
     pci::{
         EcamWindow,
         assignment::{
-            self, AdmissionClose, Assignment, OpaqueUse, PhysicalAssignment, Retention, UseKind,
+            self, AdmissionClose, Assignment, OpaqueUse, Parent, PhysicalAssignment, Retention,
+            UseKind,
         },
     },
 };
@@ -84,8 +85,36 @@ struct Captured {
     hpet_unregistered: AtomicBool,
 }
 
+/// The actual native aperture ancestry, kept independently of its registry.
+/// A later PCI fabric handoff also has to own and retire device-side routing.
+struct ApertureProduct {
+    _capture: Arc<Captured>,
+    _code: crate::native_image::CodePin,
+    identity: Arc<RootIdentity>,
+}
+
+// SAFETY: Source constructs this only from its unique post-EBS capture and
+// original BSP identity. These retentions contain no mapping, Authority,
+// Source or driver backedge. They cannot release the aperture or a device.
+unsafe impl PhysicalAssignment for ApertureProduct {
+    fn parent(&self) -> Option<&Parent> {
+        None
+    }
+
+    fn check_control(&self) -> Result<(), assignment::Error> {
+        self.identity
+            .check_irq_cpu()
+            .map_err(|_| assignment::Error::Context)?;
+        if self.identity.in_interrupt() {
+            return Err(assignment::Error::Context);
+        }
+        Ok(())
+    }
+}
+
 struct Reservation {
     platform: Arc<Platform>,
+    parent: Parent,
     _span: PhysicalSpan,
 }
 
@@ -94,8 +123,8 @@ struct Reservation {
 // span. Platform contains aperture allocation metadata and no mapping or
 // authority backedge. This reservation is never transferable PCI custody.
 unsafe impl PhysicalAssignment for Reservation {
-    fn parent(&self) -> Option<&assignment::Parent> {
-        None
+    fn parent(&self) -> Option<&Parent> {
+        Some(&self.parent)
     }
 
     fn check_control(&self) -> Result<(), assignment::Error> {
@@ -418,6 +447,7 @@ pub(crate) struct Source {
     /// Keep this affine pin on Source; shared MappingPlatform instances do not
     /// gain a foreign-CPU root ownership or destruction permission.
     identity: Arc<RootIdentity>,
+    aperture: Assignment<ApertureProduct>,
     platform: Arc<Platform>,
     authority: Authority,
     window: Option<super::Window>,
@@ -499,6 +529,14 @@ impl Source {
             held: AtomicBool::new(false),
             mappings: UnsafeCell::new(Vec::new()),
         });
+        // SAFETY: the original installed BSP and retained loader root above
+        // own the relocated immutable engine image and its final handoff.
+        let code = unsafe { handoff.native_image.pin(handoff) }.map_err(failed)?;
+        let aperture = Assignment::from_owned(ApertureProduct {
+            _capture: platform.captured.clone(),
+            _code: code,
+            identity: identity.clone(),
+        });
         let mut written = Vec::new();
         written.try_reserve_exact(LEAVES + 1).map_err(failed)?;
         written.extend_from_slice(&wire.leaves);
@@ -554,6 +592,7 @@ impl Source {
         let window = unsafe { super::Window::new(wire, snapshot.pat, tsc_hz) };
         Ok(Self {
             identity,
+            aperture,
             platform,
             authority,
             window,
@@ -593,6 +632,7 @@ impl Source {
     ) -> Result<(Resource, Assignment<Reservation>), Error> {
         let reservation = Reservation {
             platform: self.platform.clone(),
+            parent: self.aperture.parent(),
             _span: span,
         };
         reservation.check_control().map_err(Error::Assignment)?;
