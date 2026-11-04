@@ -662,6 +662,10 @@ unsafe extern "C" fn msi_with_fp_sentinel(_: *mut AsyncCall) {
         "lea rax, [rsp+1568]",
         "mov [rsp+560], rax",
         "fxrstor64 [rsp+544]",
+        // Clear the seed so an unwritten field fails the readback check.
+        "mov word ptr [rsp+550], 0",
+        "mov qword ptr [rsp+552], 0",
+        "mov qword ptr [rsp+560], 0",
         "fxsave64 [rsp+544]",
         // Preserve preflight bytes for a failed diagnostic, including
         // an oracle that cannot produce meaningful x87 pointer/opcode state.

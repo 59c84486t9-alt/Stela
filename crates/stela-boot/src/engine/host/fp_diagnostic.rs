@@ -228,6 +228,10 @@ stela_helper_fp_divide:
     lea rax, [rip + stela_helper_fp_zero]
     mov [r12 + {expected} + 16], rax
     fxrstor64 [r12 + {expected}]
+    # Clear the restore inputs before checking which fields FXSAVE writes.
+    mov word ptr [r12 + {expected} + 6], 0
+    mov qword ptr [r12 + {expected} + 8], 0
+    mov qword ptr [r12 + {expected} + 16], 0
     fxsave64 [r12 + {expected}]
     mov rbx, 0x1828384858687888
     mov rdx, 0x1929394959697989
