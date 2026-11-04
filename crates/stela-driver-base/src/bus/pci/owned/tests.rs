@@ -205,7 +205,7 @@ fn rejected_metadata_returns_the_live_mapping_for_explicit_retirement() {
             CacheAttribute::Uncached,
             Protection::ReadWrite,
         );
-        let original = mapping.address(0, FUNCTION_BYTES).unwrap();
+        let original = mapping.view(0..FUNCTION_BYTES).unwrap();
         // Actual newly created fixture source carries its model geometry. The
         // constructor rejects it without descriptor-to-native-grant conversion.
         let (error, grant, mapping) = match OwnedConfig::attach(source.into_grant(), mapping) {
@@ -213,7 +213,12 @@ fn rejected_metadata_returns_the_live_mapping_for_explicit_retirement() {
             Ok(_) => panic!("invalid config metadata accepted"),
         };
         assert_eq!(error, expected);
-        assert_eq!(mapping.address(0, FUNCTION_BYTES).unwrap(), original);
+        assert_eq!(mapping.shares_mapping(&original), Ok(true));
+        assert_eq!(
+            mapping.address(0, FUNCTION_BYTES),
+            Err(MappingError::ConfigurationOperationRequired)
+        );
+        drop(original);
         assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
         // SAFETY: exact synchronous RAM fixture; every pointer/borrower stopped.
         unsafe { retire(grant, mapping, &counters) }.unwrap();
@@ -336,7 +341,11 @@ fn actual_fixture_mapping_and_configuration_share_one_original_gate() {
     ));
     // Existing accepted map is retained; close is not unmap/completion proof.
     let view = mapping.view(0..4).unwrap();
-    assert!(view.address(0, 4).is_ok());
+    assert_eq!(view.check_current(), Ok(()));
+    assert_eq!(
+        view.address(0, 4),
+        Err(MappingError::ConfigurationOperationRequired)
+    );
     // SAFETY: this counted model observation performed no IO/raw exposure.
     if let Err(error) = unsafe { operation.finish() } {
         let _retained = core::mem::ManuallyDrop::new(operation);

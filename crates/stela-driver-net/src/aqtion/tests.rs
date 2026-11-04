@@ -1173,7 +1173,7 @@ unsafe impl owned::ResourceBacking for ConfigResource {
         self.0
     }
     fn kind(&self) -> owned::ResourceKind {
-        owned::ResourceKind::Registers
+        owned::ResourceKind::Configuration
     }
 }
 // This unique hosted configuration actor consumes the original RAM controller.

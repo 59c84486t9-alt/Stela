@@ -247,3 +247,6 @@ unsafe impl MsiConfigSpace for OwnedConfig {}
 pub mod test_support;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod transport_tests;

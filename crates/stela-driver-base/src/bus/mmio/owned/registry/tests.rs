@@ -2138,3 +2138,5 @@ fn conflicting_alias_refuses_before_counted_admission_and_same_owner_maps_after_
     drop(resource);
     assert_eq!(dropped.load(Ordering::Relaxed), 1);
 }
+
+mod configuration;

@@ -72,9 +72,13 @@ pub(super) fn validate_mapping(
     {
         return Err(ConfigError::before_effect(ConfigFailure::Protection));
     }
-    let cpu = mapping
-        .address(0, FUNCTION_BYTES)
-        .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))?;
+    let cpu = match protection {
+        Protection::ReadOnly => mapping.address(0, FUNCTION_BYTES),
+        // SAFETY: only check alignment here. The writable region's accesses
+        // retain their exact configuration operation through postvalidation.
+        Protection::ReadWrite => unsafe { mapping.configuration_address(0, FUNCTION_BYTES) },
+    }
+    .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))?;
     let base = cpu.as_ptr() as usize;
     if !base.is_multiple_of(FUNCTION_BYTES) || base.checked_add(FUNCTION_BYTES).is_none() {
         return Err(ConfigError::before_effect(ConfigFailure::CpuAddress));
@@ -297,8 +301,9 @@ impl<G: Grant> Region<G> {
         }
         // Recheck live registry state for each operation instead of keeping
         // a raw pointer across a possible later mapping quarantine.
-        self.mapping
-            .address(start, width)
+        // SAFETY: pointer observation only. All actual volatile accesses below
+        // begin and retain the SAME counted operation through postvalidation.
+        unsafe { self.mapping.configuration_address(start, width) }
             .map(NonNull::cast)
             .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))
     }

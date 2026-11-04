@@ -782,7 +782,34 @@ impl Mapping {
     pub fn protection(&self) -> Result<Protection, Error> {
         Ok(self.lease()?.record.request.protection)
     }
+    /// Immutable classification of the SAME original retained resource.
+    /// Observation supplies no source/config/control or retirement permission.
+    pub fn kind(&self) -> Result<ResourceKind, Error> {
+        Ok(self.lease()?.record.resource.kind())
+    }
+    /// Generic register/buffer access refuses Configuration before returning a
+    /// pointer. Views, clones and physical-resolution aliases retain this veto.
     pub fn address(&self, offset: usize, bytes: usize) -> Result<NonNull<u8>, Error> {
+        if self.lease()?.record.resource.kind() == ResourceKind::Configuration {
+            return Err(Error::ConfigurationOperationRequired);
+        }
+        self.bounded_address(offset, bytes)
+    }
+    /// # Safety
+    /// Any dereference requires the original counted configuration operation
+    /// and its effect policy. Keep that operation and mapping through actual
+    /// postvalidation, and end all raw tails before retirement.
+    pub(crate) unsafe fn configuration_address(
+        &self,
+        offset: usize,
+        bytes: usize,
+    ) -> Result<NonNull<u8>, Error> {
+        if self.kind()? != ResourceKind::Configuration {
+            return Err(Error::ConfigurationOperationRequired);
+        }
+        self.bounded_address(offset, bytes)
+    }
+    fn bounded_address(&self, offset: usize, bytes: usize) -> Result<NonNull<u8>, Error> {
         self.check_current()?;
         self.lease()?
             .address(offset..offset.checked_add(bytes).ok_or(Error::InvalidRange)?)
@@ -831,7 +858,7 @@ impl Mapping {
         view.check_current()?;
         let lease = self.lease()?;
         lease.address(0..lease.bytes)?;
-        view.address(0, view.bytes())?;
+        view.bounded_address(0, view.bytes())?;
         Ok(Arc::ptr_eq(&lease.authority, &view.lease.authority))
     }
     /// Compare the original installed lease, rather than another mapping
@@ -841,7 +868,7 @@ impl Mapping {
         view.check_current()?;
         let lease = self.lease()?;
         lease.address(0..lease.bytes)?;
-        view.address(0, view.bytes())?;
+        view.bounded_address(0, view.bytes())?;
         Ok(Shared::ptr_eq(lease, &view.lease))
     }
     /// # Safety
@@ -978,7 +1005,20 @@ impl MappingView {
     pub fn bytes(&self) -> usize {
         self.range.end - self.range.start
     }
+    /// Immutable classification of the SAME original retained resource.
+    /// Observation supplies no source/config/control or retirement permission.
+    pub fn kind(&self) -> ResourceKind {
+        self.lease.record.resource.kind()
+    }
+    /// Generic register/buffer access refuses Configuration before returning a
+    /// pointer. Views, clones and physical-resolution aliases retain this veto.
     pub fn address(&self, offset: usize, bytes: usize) -> Result<NonNull<u8>, Error> {
+        if self.lease.record.resource.kind() == ResourceKind::Configuration {
+            return Err(Error::ConfigurationOperationRequired);
+        }
+        self.bounded_address(offset, bytes)
+    }
+    fn bounded_address(&self, offset: usize, bytes: usize) -> Result<NonNull<u8>, Error> {
         self.check_current()?;
         let end = offset
             .checked_add(bytes)

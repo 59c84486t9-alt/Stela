@@ -16,8 +16,7 @@ use crate::bus::{
         msi::MsiConfigSpace,
         owned::{
             OwnedConfig,
-            grant::DriverGrant,
-            test_support::{Counters, fixture},
+            test_support::{BarFixture, Counters, bar_fixture, fixture, physical},
         },
     },
 };
@@ -833,10 +832,10 @@ struct Fixture {
     peer: Arc<Peer>,
     config_counts: Arc<Counters>,
     bar_counts: Arc<Counters>,
-    // Unique external model source custody, outside every BAR/provider/IRQ Arc.
-    // ISH has no acknowledged final release in these controls; abandonment
-    // therefore retains this same real grant instead of fabricating completion.
-    _bar_grant: DriverGrant,
+    // Unique external RAM BAR owner, outside every provider/IRQ Arc. ISH has
+    // no acknowledged final release here; default closes and retains this
+    // actual owner without fabricating native/device completion.
+    _bar_fixture: BarFixture,
 }
 /// Native inputs, the firmware peer, and config-space and BAR access counts.
 type Parts = (
@@ -844,7 +843,7 @@ type Parts = (
     Arc<Peer>,
     Arc<Counters>,
     Arc<Counters>,
-    DriverGrant,
+    BarFixture,
 );
 
 fn inputs() -> Parts {
@@ -855,11 +854,18 @@ fn inputs() -> Parts {
         function: 0,
     };
     let (mut config, config_counts) = fixture(address);
-    let (bar, bar_counts) = fixture(Address {
-        device: 1,
-        ..address
-    });
-    let (bar_grant, mapping) = bar.into_parts();
+    // Symbolic geometry only; this separate actual RAM allocation is born as
+    // Registers and never passes through configuration custody or SourceSlot.
+    let bar_span = PhysicalSpan::new(
+        physical(Address {
+            device: 1,
+            ..address
+        }),
+        4096,
+    )
+    .unwrap();
+    let (bar_fixture, mapping) = bar_fixture(bar_span, 4096);
+    let bar_counts = bar_fixture.counters();
     let span = mapping.physical_span().unwrap();
     let view = mapping.view(0..4096).unwrap();
     let peer = Arc::new(Peer {
@@ -924,11 +930,11 @@ fn inputs() -> Parts {
         peer,
         config_counts,
         bar_counts,
-        bar_grant,
+        bar_fixture,
     )
 }
 fn prepared() -> Fixture {
-    let (i, peer, config_counts, bar_counts, bar_grant) = inputs();
+    let (i, peer, config_counts, bar_counts, bar_fixture) = inputs();
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
     // driver, worker or DMA touches them.
     let driver = unsafe { Native::new(i) }.map_err(|(e, _)| e).unwrap();
@@ -937,7 +943,7 @@ fn prepared() -> Fixture {
         peer,
         config_counts,
         bar_counts,
-        _bar_grant: bar_grant,
+        _bar_fixture: bar_fixture,
     }
 }
 fn running() -> Fixture {
@@ -1090,7 +1096,7 @@ fn native_missing_irq_delivery_is_not_checked_by_successful_mailbox_polling() {
 #[test]
 fn profile_admission_rejects_mem_off_wrong_identity_mapping_and_active_dma_before_writes() {
     for variant in 0..5 {
-        let (mut i, peer, _, _, _bar_grant) = inputs();
+        let (mut i, peer, _, _, _bar_fixture) = inputs();
         match variant {
             0 => i.function.config().write16(4, 0x400).unwrap(),
             1 => i.function.config().write32(0, 0x9d34_8086).unwrap(),

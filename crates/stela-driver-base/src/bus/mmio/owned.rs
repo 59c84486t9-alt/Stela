@@ -17,6 +17,8 @@ pub const PAGE_BYTES: u64 = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
+    /// Safe generic mapping I/O cannot bypass the actual configuration guard.
+    ConfigurationOperationRequired,
     InvalidRange,
     OutsideResource,
     ResourceConflict,
@@ -113,6 +115,9 @@ impl AddressSpace {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResourceKind {
+    /// Configuration transport requires its actual affine ConfigOperation.
+    /// This negative classification supplies no grant or hardware permission.
+    Configuration,
     Registers,
     PrefetchableMemory,
 }
@@ -136,6 +141,9 @@ pub struct DeviceCacheRegion {
 /// `PrefetchableMemory` must reflect the hardware resource; it does not
 /// by itself establish WC support. Implementations must keep metadata immutable.
 /// Final Drop is process/deferred context, never implicitly IRQ-safe.
+/// Configuration resources MUST retain that original classification through
+/// every projection/wrapper; a configuration reservation cannot be reissued as
+/// Registers/prefetchable data to bypass its source's operation/phase policy.
 pub unsafe trait ResourceBacking: Any + Send + Sync {
     fn physical_span(&self) -> PhysicalSpan;
     fn kind(&self) -> ResourceKind;
@@ -232,7 +240,9 @@ impl Resource {
         self.cache_regions.as_deref().map(Vec::as_slice)
     }
     fn permits_device_cache(&self, physical: PhysicalSpan, attribute: CacheAttribute) -> bool {
-        if attribute == CacheAttribute::WriteBack {
+        if attribute == CacheAttribute::WriteBack
+            || (self.kind == ResourceKind::Configuration && attribute != CacheAttribute::Uncached)
+        {
             return false;
         }
         match self.device_cache_regions() {

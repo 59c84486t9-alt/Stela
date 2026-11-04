@@ -3,17 +3,13 @@ mod access;
 use crate::bus::pci::regs;
 use crate::bus::pci::{
     Address,
-    owned::{
-        grant::DriverGrant,
-        test_support::{Counters, RetireFailure, finish_retired, fixture, retire, retire_owned},
-    },
+    owned::test_support::{BarFixture, Counters, bar_fixture, fixture, physical, retire_owned},
     requester::FunctionRole,
 };
 use alloc::sync::Arc;
 use alloc::{collections::VecDeque, rc::Rc, vec::Vec};
 use core::{
     cell::{Cell, RefCell},
-    ops::Deref,
     sync::atomic::Ordering,
 };
 
@@ -193,31 +189,6 @@ fn model(device: u16, base: u64, caps: u32) -> ModelResources {
         drops,
     )
 }
-/// Unique external BAR source owner. It is never stored in the resource,
-/// mapping provider or RAM backing; abandoning an unfinished fixture retains
-/// the same affine grant and its real original model controller.
-pub(crate) struct BarFixture {
-    grant: DriverGrant,
-    counts: Arc<Counters>,
-}
-impl Deref for BarFixture {
-    type Target = Counters;
-    fn deref(&self) -> &Counters {
-        &self.counts
-    }
-}
-impl BarFixture {
-    /// Retire the exact BAR mapping after the register owner acknowledged drain.
-    unsafe fn retire(self, mapping: Mapping) -> Result<(), RetireFailure> {
-        // SAFETY: the caller supplies the genuine same mapping after all users end.
-        unsafe { retire(self.grant, mapping, &self.counts) }
-    }
-    /// Finish a BAR mapping that was already explicitly retired by the control.
-    unsafe fn finish_unmapped(self) -> Result<(), RetireFailure> {
-        // SAFETY: no mapping, register view or raw tail remains at the call site.
-        unsafe { finish_retired(self.grant, &self.counts) }
-    }
-}
 pub(crate) type NativeFixture = (Function<OwnedConfig>, Mapping, Arc<Counters>, BarFixture);
 fn native_fixture() -> NativeFixture {
     native_fixture_for(0x9d60)
@@ -230,15 +201,17 @@ pub(crate) fn native_fixture_for(device: u16) -> NativeFixture {
         function: 0,
     };
     let (mut config, config_counts) = fixture(address);
-    let (window, bar_counts) = fixture(Address {
-        function: 1,
-        ..address
-    });
-    let (bar_grant, mapping) = window.into_parts();
-    let bar_counts = BarFixture {
-        grant: bar_grant,
-        counts: bar_counts,
-    };
+    // Symbolic BAR geometry preserves the existing model address. The helper
+    // creates a separate actual RAM owner born Registers, never config custody.
+    let bar_span = crate::bus::mmio::owned::PhysicalSpan::new(
+        physical(Address {
+            function: 1,
+            ..address
+        }),
+        4096,
+    )
+    .unwrap();
+    let (bar_counts, mapping) = bar_fixture(bar_span, 4096);
     let physical = mapping.physical_span().unwrap().start();
     assert!(physical <= u64::from(u32::MAX));
     config.write32(0, u32::from(device) << 16 | 0x8086).unwrap();
@@ -282,7 +255,7 @@ pub(super) fn release_native(
     let (function, mapping) = resources;
     // SAFETY: the synchronous register owner was consumed after its actual
     // stop/drain acknowledgement; no BAR views, raw tails or workers remain.
-    // The helper retains the SAME grant and mapping together on any refusal.
+    // The helper retains the SAME BAR fixture and mapping on any refusal.
     unsafe { bar_counts.retire(mapping) }.unwrap();
     // SAFETY: original stopped model config has no IRQ, binding or worker user.
     unsafe { retire_owned(function.into_config()) }.unwrap();

@@ -1,4 +1,6 @@
 //! The owned-configuration model other drivers' tests attach functions to.
+mod bar;
+pub use bar::{BarFixture, BarRetireFailure, bar_fixture};
 #[cfg(test)]
 mod retirement_tests;
 extern crate std;
@@ -453,7 +455,7 @@ pub fn mapped(
         kind: if attribute == CacheAttribute::WriteCombining {
             ResourceKind::PrefetchableMemory
         } else {
-            ResourceKind::Registers
+            ResourceKind::Configuration
         },
         counters: counters.clone(),
         mapping: retention.clone(),
