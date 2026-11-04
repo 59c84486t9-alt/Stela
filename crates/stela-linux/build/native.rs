@@ -297,6 +297,11 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/maple_tree.c")),
         ];
         let mut upstream = upstream;
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("uefi") {
+            upstream.push(PathBuf::from(format!(
+                "{LINUX}/kernel/sched/sched_class_bounds.c"
+            )));
+        }
         upstream.extend(
             DMA_BUF_SOURCES
                 .iter()

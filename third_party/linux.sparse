@@ -68,6 +68,7 @@
 /kernel/locking/ww_mutex.h
 /kernel/sched/core.c
 /kernel/sched/sched.h
+/kernel/sched/sched_class_bounds.c
 /kernel/sched/cpupri.h
 /kernel/sched/cpudeadline.h
 /kernel/sched/features.h
