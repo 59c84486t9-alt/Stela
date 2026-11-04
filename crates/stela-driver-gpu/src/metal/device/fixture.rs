@@ -56,12 +56,17 @@ pub(crate) struct MockBackend {
     pub(crate) caches: BTreeMap<u64, u8>,
     pub(crate) submissions: Vec<Vec<Segment>>,
     pub(crate) writes: Vec<(Memory, u64, Vec<u8>)>,
+    pub(crate) write_error: Option<Error>,
     pub(crate) invalidated: Vec<(Memory, u64, u64)>,
     /// Host memory each imported memory is, by memory.
     pub(crate) imports: BTreeMap<u64, (Vec<MemoryRange>, NonZeroU64)>,
     pub(crate) retired: VecDeque<NonZeroU64>,
     pub(crate) semaphores: BTreeMap<u64, u64>,
     pub(crate) queries_ready: bool,
+    pub(crate) query_pool_error: Option<Error>,
+    pub(crate) query_pools: Vec<(QueryPool, QueryPoolInfo)>,
+    pub(crate) query_resets: Vec<(QueryPool, u32, u32)>,
+    pub(crate) query_reads: Vec<(QueryPool, u32, usize)>,
     pub(crate) layouts: Vec<IndirectCommandsLayoutInfo>,
     /// Each execution set's pipelines by index.
     pub(crate) execution_sets: BTreeMap<u64, BTreeMap<u32, Pipeline>>,
@@ -212,8 +217,13 @@ impl Backend for MockBackend {
         self.compute.push(*info);
         Ok(Pipeline(self.id()))
     }
-    fn create_query_pool(&mut self, _: &QueryPoolInfo) -> Result<QueryPool> {
-        Ok(QueryPool(self.id()))
+    fn create_query_pool(&mut self, info: &QueryPoolInfo) -> Result<QueryPool> {
+        if let Some(error) = self.query_pool_error.take() {
+            return Err(error);
+        }
+        let pool = QueryPool(self.id());
+        self.query_pools.push((pool, *info));
+        Ok(pool)
     }
     fn create_semaphore(&mut self, initial: u64) -> Result<Semaphore> {
         let id = self.id();
@@ -264,6 +274,9 @@ impl Backend for MockBackend {
         self.descriptors.push((index, descriptor));
     }
     fn write_memory(&mut self, memory: Memory, offset: u64, bytes: &[u8]) -> Result<()> {
+        if let Some(error) = self.write_error.take() {
+            return Err(error);
+        }
         self.writes.push((memory, offset, bytes.to_vec()));
         Ok(())
     }
@@ -292,8 +305,11 @@ impl Backend for MockBackend {
     fn copy_from_image(&mut self, _: Image, _: &BufferImageCopy, _: &mut [u8]) -> Result<()> {
         Ok(())
     }
-    fn reset_queries(&mut self, _: QueryPool, _: u32, _: u32) {}
-    fn query_results(&mut self, _: QueryPool, _: u32, results: &mut [u64]) -> Result<bool> {
+    fn reset_queries(&mut self, pool: QueryPool, first: u32, count: u32) {
+        self.query_resets.push((pool, first, count));
+    }
+    fn query_results(&mut self, pool: QueryPool, first: u32, results: &mut [u64]) -> Result<bool> {
+        self.query_reads.push((pool, first, results.len()));
         results
             .iter_mut()
             .enumerate()
