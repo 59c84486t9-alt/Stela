@@ -15,7 +15,7 @@ use super::{
     Bindings, BufferRef, CommandBuffer, ComputePipelineState, Encoder, Recorder,
     RenderPipelineState, Resolver,
     compute::{COMPUTE, StageInRegion, compute},
-    render::{FactorBuffer, RasterState, VertexBinding, render},
+    render::{Amplification, FactorBuffer, RasterState, VertexBinding, render},
 };
 use crate::metal::{
     abi::{BarrierScope, DispatchType, RenderStages},
@@ -51,7 +51,7 @@ struct SavedRender {
     pipeline: Option<RenderPipelineState>,
     object_threadgroup_lengths: Vec<(u32, u64)>,
     vertex_buffers: [Option<VertexBinding>; 31],
-    amplification: Vec<u32>,
+    amplification: Amplification,
     factors: Option<FactorBuffer>,
     raster: RasterState,
     bindings: Bindings,
