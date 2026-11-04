@@ -5,6 +5,133 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 #[test]
+fn pinned_carry_run_commits_flags_once_before_the_next_guest_fault() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features, RecoverySiteKind},
+    };
+
+    let start = GuestAddress(0xef290);
+    let words = [
+        0xba0e_0317u32, // ADCS X23,X24,X14
+        0xba0f_0338,    // ADCS X24,X25,X15
+        0xba10_0359,    // ADCS X25,X26,X16
+        0xba11_039a,    // ADCS X26,X28,X17
+        0xf940_0349,    // LDR X9,[X26]
+    ];
+    let compile = |words: &[u32], pc, target| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let profile = BlockProfile::new(Features::SYSTEM_MODE);
+        CompilationPlan::new(&source, pc, &Options::new(profile, target))
+            .unwrap()
+            .compile()
+            .unwrap()
+    };
+    let target = TargetCpu::Baseline;
+    let grouped = compile(&words, start, target);
+    let dit = compile(&words, start, target.with_data_independent_timing());
+    let store = nzcv_store(true);
+    let stores_flags = |native: &NativeBlock, row: usize| {
+        let offset = native.source_map[row].1;
+        let end = native
+            .source_map
+            .get(row + 1)
+            .map_or(native.x86_64_code.len(), |row| row.1);
+        native.x86_64_code[offset..end]
+            .windows(store.len())
+            .any(|bytes| bytes == store)
+    };
+    assert_eq!(grouped.native.source_map.len(), words.len());
+    for row in 0..4 {
+        assert_eq!(
+            grouped.native.source_map[row].0,
+            GuestAddress(start.0 + row as u64 * 4)
+        );
+        assert_eq!(stores_flags(&grouped.native, row), row == 3);
+        assert!(stores_flags(&dit.native, row));
+    }
+    let access = grouped
+        .fault_recovery
+        .iter()
+        .find(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+        .unwrap();
+    assert_eq!(
+        access.retirement.instruction_pc(),
+        GuestAddress(start.0 + 16)
+    );
+    assert_eq!(access.retirement.retired_before(), 4);
+    assert!(access.start >= grouped.native.source_map[4].1);
+    assert!(access.bindings.is_empty());
+
+    // Prefix clipping materializes the last flag result actually reached.
+    for len in 1..=4 {
+        let clipped = compile(&words[..len], start, target);
+        assert_eq!(clipped.native.source_map.len(), len);
+        assert!(stores_flags(&clipped.native, len - 1));
+    }
+    let independent = compile(&words[3..], GuestAddress(start.0 + 12), target);
+    assert!(stores_flags(&independent.native, 0));
+
+    let bounded = compile(&[words[0]; 9], start, target);
+    for row in 0..9 {
+        assert_eq!(stores_flags(&bounded.native, row), row >= 7);
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn pinned_carry_run_matches_dit_for_mixed_widths_and_borrow() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features},
+        context::ExecutionContext,
+        x86_64::{asm::vector_extensions::execution::Native, pinned::entered},
+    };
+    let compile = |words: &[u32], target| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let profile = BlockProfile::new(Features::SYSTEM_MODE);
+        let body = CompilationPlan::new(
+            &source,
+            GuestAddress(0x100000),
+            &Options::new(profile, target),
+        )
+        .unwrap()
+        .compile()
+        .unwrap();
+        Native::new(&entered(&body.native.x86_64_code))
+    };
+    let target = TargetCpu::Baseline;
+    let dit = target.with_data_independent_timing();
+    for final_subtract in [0, 1 << 30] {
+        let words = [
+            0xfa0e_02e8u32,               // SBCS X8,X23,X14 (read incoming guest carry)
+            0x7a08_0288,                  // SBCS W8,W20,W8 (right aliases pinned destination)
+            0xba08_0210,                  // ADCS X16,X16,X8 (consume zero-extended W8)
+            0x3a1f_0201 | final_subtract, // ADCS/SBCS W1,W16,WZR
+        ];
+        let grouped = compile(&words, target);
+        let fallback = compile(&words, dit);
+        for source in [0, 1, u64::MAX, 0x8000_0000_8000_0000] {
+            for nzcv in [0, 0x2000_0000, 0xf000_0000] {
+                let mut original = crate::GuestState {
+                    sp: 0x1234,
+                    nzcv,
+                    ..Default::default()
+                };
+                for (index, register) in original.x.iter_mut().enumerate() {
+                    *register = 0xfedc_ba98_7654_3210u64.wrapping_mul(index as u64 + 1);
+                }
+                original.x[23] = source;
+                let mut result = original.clone();
+                grouped.run(&mut result, &mut ExecutionContext::default());
+                fallback.run(&mut original, &mut ExecutionContext::default());
+                assert_eq!(result, original);
+            }
+        }
+    }
+}
+
+#[test]
 fn pinned_carry_follows_live_flags_and_keeps_the_next_fault_boundary() {
     use crate::{
         Options, TargetCpu,
