@@ -1,0 +1,1381 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 01:19:49 -0500
+Subject: [PATCH] refactor(splice): select original page-cache transfers
+
+---
+ fs/Makefile        |   2 +-
+ fs/splice.c        | 472 +-----------------------------------------
+ fs/splice_file.c   | 504 +++++++++++++++++++++++++++++++++++++++++++++
+ fs/splice_file.h   |  11 +
+ mm/filemap.c       | 145 -------------
+ mm/filemap_batch.c | 149 ++++++++++++++
+ 6 files changed, 666 insertions(+), 617 deletions(-)
+ create mode 100644 fs/splice_file.c
+ create mode 100644 fs/splice_file.h
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 44e20f0023c16898a05bade6c6efa31480eb1a63..3e8dffadc3e2e1d88c1ce15ae3131f58cc70bf03 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -12,7 +12,7 @@ obj-y :=	open.o path_open.o filp_close.o read_write.o file_position.o file_table
+ 		ioctl.o readdir.o select.o dcache.o dcache_init.o dentry_ancestry.o inode.o inode_cache_init.o inode_timestamps.o inode_evict.o \
+ 		attr.o bad_inode.o bad_inode_ops.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o namespace_tree.o mount_cache.o \
+ 		seq_file.o seq_lifetime.o seq_output.o seq_path.o xattr.o xattr_access.o simple_xattr.o libfs.o pseudo_metadata.o stashed_path.o fs-writeback.o \
+-		pnode.o splice.o sync.o utimes.o d_path.o \
++		pnode.o splice.o splice_file.o sync.o utimes.o d_path.o \
+ 		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
+ 		fs_dirent.o fs_context.o fs_context_log.o fs_context_params.o fs_parser.o fs_parser_path.o fsopen.o init.o \
+ 		kernel_read_file.o mnt_idmapping.o remap_range.o pidfs.o pidfs_metadata.o \
+diff --git a/fs/splice.c b/fs/splice.c
+index 9d8f63e2fd1abeeb9e912e25d70bd3b4a196cb7a..16f7e70b69c60f3e87f4a12c3e683140315e1150 100644
+--- a/fs/splice.c
++++ b/fs/splice.c
+@@ -38,6 +38,7 @@
+ #include <linux/sched/signal.h>
+ 
+ #include "internal.h"
++#include "splice_file.h"
+ 
+ /*
+  * Splice doesn't support FMODE_NOWAIT. Since pipes may set this flag to
+@@ -55,110 +56,6 @@ static noinline void pipe_clear_nowait(struct file *file)
+ 	} while (!try_cmpxchg(&file->f_mode, &fmode, fmode & ~FMODE_NOWAIT));
+ }
+ 
+-/*
+- * Attempt to steal a page from a pipe buffer. This should perhaps go into
+- * a vm helper function, it's already simplified quite a bit by the
+- * addition of remove_mapping(). If success is returned, the caller may
+- * attempt to reuse this page for another destination.
+- */
+-static bool page_cache_pipe_buf_try_steal(struct pipe_inode_info *pipe,
+-		struct pipe_buffer *buf)
+-{
+-	struct folio *folio = page_folio(buf->page);
+-	struct address_space *mapping;
+-
+-	folio_lock(folio);
+-
+-	mapping = folio_mapping(folio);
+-	if (mapping) {
+-		WARN_ON(!folio_test_uptodate(folio));
+-
+-		/*
+-		 * At least for ext2 with nobh option, we need to wait on
+-		 * writeback completing on this folio, since we'll remove it
+-		 * from the pagecache.  Otherwise truncate wont wait on the
+-		 * folio, allowing the disk blocks to be reused by someone else
+-		 * before we actually wrote our data to them. fs corruption
+-		 * ensues.
+-		 */
+-		folio_wait_writeback(folio);
+-
+-		if (!filemap_release_folio(folio, GFP_KERNEL))
+-			goto out_unlock;
+-
+-		/*
+-		 * If we succeeded in removing the mapping, set LRU flag
+-		 * and return good.
+-		 */
+-		if (remove_mapping(mapping, folio)) {
+-			buf->flags |= PIPE_BUF_FLAG_LRU;
+-			return true;
+-		}
+-	}
+-
+-	/*
+-	 * Raced with truncate or failed to remove folio from current
+-	 * address space, unlock and return failure.
+-	 */
+-out_unlock:
+-	folio_unlock(folio);
+-	return false;
+-}
+-
+-static void page_cache_pipe_buf_release(struct pipe_inode_info *pipe,
+-					struct pipe_buffer *buf)
+-{
+-	put_page(buf->page);
+-	buf->flags &= ~PIPE_BUF_FLAG_LRU;
+-}
+-
+-/*
+- * Check whether the contents of buf is OK to access. Since the content
+- * is a page cache page, IO may be in flight.
+- */
+-static int page_cache_pipe_buf_confirm(struct pipe_inode_info *pipe,
+-				       struct pipe_buffer *buf)
+-{
+-	struct folio *folio = page_folio(buf->page);
+-	int err;
+-
+-	if (!folio_test_uptodate(folio)) {
+-		folio_lock(folio);
+-
+-		/*
+-		 * Folio got truncated/unhashed. This will cause a 0-byte
+-		 * splice, if this is the first page.
+-		 */
+-		if (!folio->mapping) {
+-			err = -ENODATA;
+-			goto error;
+-		}
+-
+-		/*
+-		 * Uh oh, read-error from disk.
+-		 */
+-		if (!folio_test_uptodate(folio)) {
+-			err = -EIO;
+-			goto error;
+-		}
+-
+-		/* Folio is ok after all, we are done */
+-		folio_unlock(folio);
+-	}
+-
+-	return 0;
+-error:
+-	folio_unlock(folio);
+-	return err;
+-}
+-
+-const struct pipe_buf_operations page_cache_pipe_buf_ops = {
+-	.confirm	= page_cache_pipe_buf_confirm,
+-	.release	= page_cache_pipe_buf_release,
+-	.try_steal	= page_cache_pipe_buf_try_steal,
+-	.get		= generic_pipe_buf_get,
+-};
+-
+ static bool user_page_pipe_buf_try_steal(struct pipe_inode_info *pipe,
+ 		struct pipe_buffer *buf)
+ {
+@@ -411,373 +308,6 @@ const struct pipe_buf_operations nosteal_pipe_buf_ops = {
+ };
+ EXPORT_SYMBOL(nosteal_pipe_buf_ops);
+ 
+-static void wakeup_pipe_writers(struct pipe_inode_info *pipe)
+-{
+-	smp_mb();
+-	if (waitqueue_active(&pipe->wr_wait))
+-		wake_up_interruptible(&pipe->wr_wait);
+-	kill_fasync(&pipe->fasync_writers, SIGIO, POLL_OUT);
+-}
+-
+-/**
+- * splice_from_pipe_feed - feed available data from a pipe to a file
+- * @pipe:	pipe to splice from
+- * @sd:		information to @actor
+- * @actor:	handler that splices the data
+- *
+- * Description:
+- *    This function loops over the pipe and calls @actor to do the
+- *    actual moving of a single struct pipe_buffer to the desired
+- *    destination.  It returns when there's no more buffers left in
+- *    the pipe or if the requested number of bytes (@sd->total_len)
+- *    have been copied.  It returns a positive number (one) if the
+- *    pipe needs to be filled with more data, zero if the required
+- *    number of bytes have been copied and -errno on error.
+- *
+- *    This, together with splice_from_pipe_{begin,end,next}, may be
+- *    used to implement the functionality of __splice_from_pipe() when
+- *    locking is required around copying the pipe buffers to the
+- *    destination.
+- */
+-static int splice_from_pipe_feed(struct pipe_inode_info *pipe, struct splice_desc *sd,
+-			  splice_actor *actor)
+-{
+-	unsigned int head = pipe->head;
+-	unsigned int tail = pipe->tail;
+-	int ret;
+-
+-	while (!pipe_empty(head, tail)) {
+-		struct pipe_buffer *buf = pipe_buf(pipe, tail);
+-
+-		sd->len = buf->len;
+-		if (sd->len > sd->total_len)
+-			sd->len = sd->total_len;
+-
+-		ret = pipe_buf_confirm(pipe, buf);
+-		if (unlikely(ret)) {
+-			if (ret == -ENODATA)
+-				ret = 0;
+-			return ret;
+-		}
+-
+-		ret = actor(pipe, buf, sd);
+-		if (ret <= 0)
+-			return ret;
+-
+-		buf->offset += ret;
+-		buf->len -= ret;
+-
+-		sd->num_spliced += ret;
+-		sd->len -= ret;
+-		sd->pos += ret;
+-		sd->total_len -= ret;
+-
+-		if (!buf->len) {
+-			pipe_buf_release(pipe, buf);
+-			tail++;
+-			pipe->tail = tail;
+-			if (pipe->files)
+-				sd->need_wakeup = true;
+-		}
+-
+-		if (!sd->total_len)
+-			return 0;
+-	}
+-
+-	return 1;
+-}
+-
+-/* We know we have a pipe buffer, but maybe it's empty? */
+-static inline bool eat_empty_buffer(struct pipe_inode_info *pipe)
+-{
+-	unsigned int tail = pipe->tail;
+-	struct pipe_buffer *buf = pipe_buf(pipe, tail);
+-
+-	if (unlikely(!buf->len)) {
+-		pipe_buf_release(pipe, buf);
+-		pipe->tail = tail+1;
+-		return true;
+-	}
+-
+-	return false;
+-}
+-
+-/**
+- * splice_from_pipe_next - wait for some data to splice from
+- * @pipe:	pipe to splice from
+- * @sd:		information about the splice operation
+- *
+- * Description:
+- *    This function will wait for some data and return a positive
+- *    value (one) if pipe buffers are available.  It will return zero
+- *    or -errno if no more data needs to be spliced.
+- */
+-static int splice_from_pipe_next(struct pipe_inode_info *pipe, struct splice_desc *sd)
+-{
+-	/*
+-	 * Check for signal early to make process killable when there are
+-	 * always buffers available
+-	 */
+-	if (signal_pending(current))
+-		return -ERESTARTSYS;
+-
+-repeat:
+-	while (pipe_is_empty(pipe)) {
+-		if (!pipe->writers)
+-			return 0;
+-
+-		if (sd->num_spliced)
+-			return 0;
+-
+-		if (sd->flags & SPLICE_F_NONBLOCK)
+-			return -EAGAIN;
+-
+-		if (signal_pending(current))
+-			return -ERESTARTSYS;
+-
+-		if (sd->need_wakeup) {
+-			wakeup_pipe_writers(pipe);
+-			sd->need_wakeup = false;
+-		}
+-
+-		pipe_wait_readable(pipe);
+-	}
+-
+-	if (eat_empty_buffer(pipe))
+-		goto repeat;
+-
+-	return 1;
+-}
+-
+-/**
+- * splice_from_pipe_begin - start splicing from pipe
+- * @sd:		information about the splice operation
+- *
+- * Description:
+- *    This function should be called before a loop containing
+- *    splice_from_pipe_next() and splice_from_pipe_feed() to
+- *    initialize the necessary fields of @sd.
+- */
+-static void splice_from_pipe_begin(struct splice_desc *sd)
+-{
+-	sd->num_spliced = 0;
+-	sd->need_wakeup = false;
+-}
+-
+-/**
+- * splice_from_pipe_end - finish splicing from pipe
+- * @pipe:	pipe to splice from
+- * @sd:		information about the splice operation
+- *
+- * Description:
+- *    This function will wake up pipe writers if necessary.  It should
+- *    be called after a loop containing splice_from_pipe_next() and
+- *    splice_from_pipe_feed().
+- */
+-static void splice_from_pipe_end(struct pipe_inode_info *pipe, struct splice_desc *sd)
+-{
+-	if (sd->need_wakeup)
+-		wakeup_pipe_writers(pipe);
+-}
+-
+-/**
+- * __splice_from_pipe - splice data from a pipe to given actor
+- * @pipe:	pipe to splice from
+- * @sd:		information to @actor
+- * @actor:	handler that splices the data
+- *
+- * Description:
+- *    This function does little more than loop over the pipe and call
+- *    @actor to do the actual moving of a single struct pipe_buffer to
+- *    the desired destination. See pipe_to_file, pipe_to_sendmsg, or
+- *    pipe_to_user.
+- *
+- */
+-ssize_t __splice_from_pipe(struct pipe_inode_info *pipe, struct splice_desc *sd,
+-			   splice_actor *actor)
+-{
+-	int ret;
+-
+-	splice_from_pipe_begin(sd);
+-	do {
+-		cond_resched();
+-		ret = splice_from_pipe_next(pipe, sd);
+-		if (ret > 0)
+-			ret = splice_from_pipe_feed(pipe, sd, actor);
+-	} while (ret > 0);
+-	splice_from_pipe_end(pipe, sd);
+-
+-	return sd->num_spliced ? sd->num_spliced : ret;
+-}
+-EXPORT_SYMBOL(__splice_from_pipe);
+-
+-/**
+- * splice_from_pipe - splice data from a pipe to a file
+- * @pipe:	pipe to splice from
+- * @out:	file to splice to
+- * @ppos:	position in @out
+- * @len:	how many bytes to splice
+- * @flags:	splice modifier flags
+- * @actor:	handler that splices the data
+- *
+- * Description:
+- *    See __splice_from_pipe. This function locks the pipe inode,
+- *    otherwise it's identical to __splice_from_pipe().
+- *
+- */
+-ssize_t splice_from_pipe(struct pipe_inode_info *pipe, struct file *out,
+-			 loff_t *ppos, size_t len, unsigned int flags,
+-			 splice_actor *actor)
+-{
+-	ssize_t ret;
+-	struct splice_desc sd = {
+-		.total_len = len,
+-		.flags = flags,
+-		.pos = *ppos,
+-		.u.file = out,
+-	};
+-
+-	pipe_lock(pipe);
+-	ret = __splice_from_pipe(pipe, &sd, actor);
+-	pipe_unlock(pipe);
+-
+-	return ret;
+-}
+-
+-/**
+- * iter_file_splice_write - splice data from a pipe to a file
+- * @pipe:	pipe info
+- * @out:	file to write to
+- * @ppos:	position in @out
+- * @len:	number of bytes to splice
+- * @flags:	splice modifier flags
+- *
+- * Description:
+- *    Will either move or copy pages (determined by @flags options) from
+- *    the given pipe inode to the given file.
+- *    This one is ->write_iter-based.
+- *
+- */
+-ssize_t
+-iter_file_splice_write(struct pipe_inode_info *pipe, struct file *out,
+-			  loff_t *ppos, size_t len, unsigned int flags)
+-{
+-	struct splice_desc sd = {
+-		.total_len = len,
+-		.flags = flags,
+-		.pos = *ppos,
+-		.u.file = out,
+-	};
+-	int nbufs = pipe->max_usage;
+-	struct bio_vec *array;
+-	ssize_t ret;
+-
+-	if (!out->f_op->write_iter)
+-		return -EINVAL;
+-
+-	array = kzalloc_objs(struct bio_vec, nbufs);
+-	if (unlikely(!array))
+-		return -ENOMEM;
+-
+-	pipe_lock(pipe);
+-
+-	splice_from_pipe_begin(&sd);
+-	while (sd.total_len) {
+-		struct kiocb kiocb;
+-		struct iov_iter from;
+-		unsigned int head, tail;
+-		size_t left;
+-		int n;
+-
+-		ret = splice_from_pipe_next(pipe, &sd);
+-		if (ret <= 0)
+-			break;
+-
+-		if (unlikely(nbufs < pipe->max_usage)) {
+-			kfree(array);
+-			nbufs = pipe->max_usage;
+-			array = kzalloc_objs(struct bio_vec, nbufs);
+-			if (!array) {
+-				ret = -ENOMEM;
+-				break;
+-			}
+-		}
+-
+-		head = pipe->head;
+-		tail = pipe->tail;
+-
+-		/* build the vector */
+-		left = sd.total_len;
+-		for (n = 0; !pipe_empty(head, tail) && left && n < nbufs; tail++) {
+-			struct pipe_buffer *buf = pipe_buf(pipe, tail);
+-			size_t this_len = buf->len;
+-
+-			/* zero-length bvecs are not supported, skip them */
+-			if (!this_len)
+-				continue;
+-			this_len = min(this_len, left);
+-
+-			ret = pipe_buf_confirm(pipe, buf);
+-			if (unlikely(ret)) {
+-				if (ret == -ENODATA)
+-					ret = 0;
+-				goto done;
+-			}
+-
+-			bvec_set_page(&array[n], buf->page, this_len,
+-				      buf->offset);
+-			left -= this_len;
+-			n++;
+-		}
+-
+-		iov_iter_bvec(&from, ITER_SOURCE, array, n, sd.total_len - left);
+-		init_sync_kiocb(&kiocb, out);
+-		kiocb.ki_pos = sd.pos;
+-		ret = out->f_op->write_iter(&kiocb, &from);
+-		sd.pos = kiocb.ki_pos;
+-		if (ret <= 0)
+-			break;
+-		WARN_ONCE(ret > sd.total_len - left,
+-			  "Splice Exceeded! ret=%zd tot=%zu left=%zu\n",
+-			  ret, sd.total_len, left);
+-
+-		sd.num_spliced += ret;
+-		sd.total_len -= ret;
+-		*ppos = sd.pos;
+-
+-		/* dismiss the fully eaten buffers, adjust the partial one */
+-		tail = pipe->tail;
+-		while (ret) {
+-			struct pipe_buffer *buf = pipe_buf(pipe, tail);
+-			if (ret >= buf->len) {
+-				ret -= buf->len;
+-				buf->len = 0;
+-				pipe_buf_release(pipe, buf);
+-				tail++;
+-				pipe->tail = tail;
+-				if (pipe->files)
+-					sd.need_wakeup = true;
+-			} else {
+-				buf->offset += ret;
+-				buf->len -= ret;
+-				ret = 0;
+-			}
+-		}
+-	}
+-done:
+-	kfree(array);
+-	splice_from_pipe_end(pipe, &sd);
+-
+-	pipe_unlock(pipe);
+-
+-	if (sd.num_spliced)
+-		ret = sd.num_spliced;
+-
+-	return ret;
+-}
+-
+-EXPORT_SYMBOL(iter_file_splice_write);
+-
+ #ifdef CONFIG_NET
+ /**
+  * splice_to_socket - splice data from a pipe to a socket
+diff --git a/fs/splice_file.c b/fs/splice_file.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..36442bb43ef6f4857b4c76a39f35ce1653d8dbc4
+--- /dev/null
++++ b/fs/splice_file.c
+@@ -0,0 +1,504 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * "splice": joining two ropes together by interweaving their strands.
++ *
++ * This is the "extended pipe" functionality, where a pipe is used as
++ * an arbitrary in-memory buffer. Think of a pipe as a small kernel
++ * buffer that you can use to transfer data from one end to the other.
++ *
++ * The traditional unix read/write is extended with a "splice()" operation
++ * that transfers data buffers to or from a pipe buffer.
++ *
++ * Named by Larry McVoy, original implementation from Linus, extended by
++ * Jens to support splicing to files, network, direct splicing, etc and
++ * fixing lots of bugs.
++ *
++ * Copyright (C) 2005-2006 Jens Axboe <axboe@kernel.dk>
++ * Copyright (C) 2005-2006 Linus Torvalds <torvalds@osdl.org>
++ * Copyright (C) 2006 Ingo Molnar <mingo@elte.hu>
++ *
++ */
++#include <linux/bvec.h>
++#include <linux/export.h>
++#include <linux/fs.h>
++#include <linux/pagemap.h>
++#include <linux/sched/signal.h>
++#include <linux/slab.h>
++#include <linux/splice.h>
++#include <linux/swap.h>
++#include <linux/uio.h>
++
++#include "splice_file.h"
++
++/*
++ * Attempt to steal a page from a pipe buffer. This should perhaps go into
++ * a vm helper function, it's already simplified quite a bit by the
++ * addition of remove_mapping(). If success is returned, the caller may
++ * attempt to reuse this page for another destination.
++ */
++static bool page_cache_pipe_buf_try_steal(struct pipe_inode_info *pipe,
++		struct pipe_buffer *buf)
++{
++	struct folio *folio = page_folio(buf->page);
++	struct address_space *mapping;
++
++	folio_lock(folio);
++
++	mapping = folio_mapping(folio);
++	if (mapping) {
++		WARN_ON(!folio_test_uptodate(folio));
++
++		/*
++		 * At least for ext2 with nobh option, we need to wait on
++		 * writeback completing on this folio, since we'll remove it
++		 * from the pagecache.  Otherwise truncate wont wait on the
++		 * folio, allowing the disk blocks to be reused by someone else
++		 * before we actually wrote our data to them. fs corruption
++		 * ensues.
++		 */
++		folio_wait_writeback(folio);
++
++		if (!filemap_release_folio(folio, GFP_KERNEL))
++			goto out_unlock;
++
++		/*
++		 * If we succeeded in removing the mapping, set LRU flag
++		 * and return good.
++		 */
++		if (remove_mapping(mapping, folio)) {
++			buf->flags |= PIPE_BUF_FLAG_LRU;
++			return true;
++		}
++	}
++
++	/*
++	 * Raced with truncate or failed to remove folio from current
++	 * address space, unlock and return failure.
++	 */
++out_unlock:
++	folio_unlock(folio);
++	return false;
++}
++
++void page_cache_pipe_buf_release(struct pipe_inode_info *pipe,
++					struct pipe_buffer *buf)
++{
++	put_page(buf->page);
++	buf->flags &= ~PIPE_BUF_FLAG_LRU;
++}
++
++/*
++ * Check whether the contents of buf is OK to access. Since the content
++ * is a page cache page, IO may be in flight.
++ */
++static int page_cache_pipe_buf_confirm(struct pipe_inode_info *pipe,
++				       struct pipe_buffer *buf)
++{
++	struct folio *folio = page_folio(buf->page);
++	int err;
++
++	if (!folio_test_uptodate(folio)) {
++		folio_lock(folio);
++
++		/*
++		 * Folio got truncated/unhashed. This will cause a 0-byte
++		 * splice, if this is the first page.
++		 */
++		if (!folio->mapping) {
++			err = -ENODATA;
++			goto error;
++		}
++
++		/*
++		 * Uh oh, read-error from disk.
++		 */
++		if (!folio_test_uptodate(folio)) {
++			err = -EIO;
++			goto error;
++		}
++
++		/* Folio is ok after all, we are done */
++		folio_unlock(folio);
++	}
++
++	return 0;
++error:
++	folio_unlock(folio);
++	return err;
++}
++
++const struct pipe_buf_operations page_cache_pipe_buf_ops = {
++	.confirm	= page_cache_pipe_buf_confirm,
++	.release	= page_cache_pipe_buf_release,
++	.try_steal	= page_cache_pipe_buf_try_steal,
++	.get		= generic_pipe_buf_get,
++};
++
++void wakeup_pipe_writers(struct pipe_inode_info *pipe)
++{
++	smp_mb();
++	if (waitqueue_active(&pipe->wr_wait))
++		wake_up_interruptible(&pipe->wr_wait);
++	kill_fasync(&pipe->fasync_writers, SIGIO, POLL_OUT);
++}
++
++/**
++ * splice_from_pipe_feed - feed available data from a pipe to a file
++ * @pipe:	pipe to splice from
++ * @sd:		information to @actor
++ * @actor:	handler that splices the data
++ *
++ * Description:
++ *    This function loops over the pipe and calls @actor to do the
++ *    actual moving of a single struct pipe_buffer to the desired
++ *    destination.  It returns when there's no more buffers left in
++ *    the pipe or if the requested number of bytes (@sd->total_len)
++ *    have been copied.  It returns a positive number (one) if the
++ *    pipe needs to be filled with more data, zero if the required
++ *    number of bytes have been copied and -errno on error.
++ *
++ *    This, together with splice_from_pipe_{begin,end,next}, may be
++ *    used to implement the functionality of __splice_from_pipe() when
++ *    locking is required around copying the pipe buffers to the
++ *    destination.
++ */
++static int splice_from_pipe_feed(struct pipe_inode_info *pipe, struct splice_desc *sd,
++			  splice_actor *actor)
++{
++	unsigned int head = pipe->head;
++	unsigned int tail = pipe->tail;
++	int ret;
++
++	while (!pipe_empty(head, tail)) {
++		struct pipe_buffer *buf = pipe_buf(pipe, tail);
++
++		sd->len = buf->len;
++		if (sd->len > sd->total_len)
++			sd->len = sd->total_len;
++
++		ret = pipe_buf_confirm(pipe, buf);
++		if (unlikely(ret)) {
++			if (ret == -ENODATA)
++				ret = 0;
++			return ret;
++		}
++
++		ret = actor(pipe, buf, sd);
++		if (ret <= 0)
++			return ret;
++
++		buf->offset += ret;
++		buf->len -= ret;
++
++		sd->num_spliced += ret;
++		sd->len -= ret;
++		sd->pos += ret;
++		sd->total_len -= ret;
++
++		if (!buf->len) {
++			pipe_buf_release(pipe, buf);
++			tail++;
++			pipe->tail = tail;
++			if (pipe->files)
++				sd->need_wakeup = true;
++		}
++
++		if (!sd->total_len)
++			return 0;
++	}
++
++	return 1;
++}
++
++/* We know we have a pipe buffer, but maybe it's empty? */
++static inline bool eat_empty_buffer(struct pipe_inode_info *pipe)
++{
++	unsigned int tail = pipe->tail;
++	struct pipe_buffer *buf = pipe_buf(pipe, tail);
++
++	if (unlikely(!buf->len)) {
++		pipe_buf_release(pipe, buf);
++		pipe->tail = tail+1;
++		return true;
++	}
++
++	return false;
++}
++
++/**
++ * splice_from_pipe_next - wait for some data to splice from
++ * @pipe:	pipe to splice from
++ * @sd:		information about the splice operation
++ *
++ * Description:
++ *    This function will wait for some data and return a positive
++ *    value (one) if pipe buffers are available.  It will return zero
++ *    or -errno if no more data needs to be spliced.
++ */
++static int splice_from_pipe_next(struct pipe_inode_info *pipe, struct splice_desc *sd)
++{
++	/*
++	 * Check for signal early to make process killable when there are
++	 * always buffers available
++	 */
++	if (signal_pending(current))
++		return -ERESTARTSYS;
++
++repeat:
++	while (pipe_is_empty(pipe)) {
++		if (!pipe->writers)
++			return 0;
++
++		if (sd->num_spliced)
++			return 0;
++
++		if (sd->flags & SPLICE_F_NONBLOCK)
++			return -EAGAIN;
++
++		if (signal_pending(current))
++			return -ERESTARTSYS;
++
++		if (sd->need_wakeup) {
++			wakeup_pipe_writers(pipe);
++			sd->need_wakeup = false;
++		}
++
++		pipe_wait_readable(pipe);
++	}
++
++	if (eat_empty_buffer(pipe))
++		goto repeat;
++
++	return 1;
++}
++
++/**
++ * splice_from_pipe_begin - start splicing from pipe
++ * @sd:		information about the splice operation
++ *
++ * Description:
++ *    This function should be called before a loop containing
++ *    splice_from_pipe_next() and splice_from_pipe_feed() to
++ *    initialize the necessary fields of @sd.
++ */
++static void splice_from_pipe_begin(struct splice_desc *sd)
++{
++	sd->num_spliced = 0;
++	sd->need_wakeup = false;
++}
++
++/**
++ * splice_from_pipe_end - finish splicing from pipe
++ * @pipe:	pipe to splice from
++ * @sd:		information about the splice operation
++ *
++ * Description:
++ *    This function will wake up pipe writers if necessary.  It should
++ *    be called after a loop containing splice_from_pipe_next() and
++ *    splice_from_pipe_feed().
++ */
++static void splice_from_pipe_end(struct pipe_inode_info *pipe, struct splice_desc *sd)
++{
++	if (sd->need_wakeup)
++		wakeup_pipe_writers(pipe);
++}
++
++/**
++ * __splice_from_pipe - splice data from a pipe to given actor
++ * @pipe:	pipe to splice from
++ * @sd:		information to @actor
++ * @actor:	handler that splices the data
++ *
++ * Description:
++ *    This function does little more than loop over the pipe and call
++ *    @actor to do the actual moving of a single struct pipe_buffer to
++ *    the desired destination. See pipe_to_file, pipe_to_sendmsg, or
++ *    pipe_to_user.
++ *
++ */
++ssize_t __splice_from_pipe(struct pipe_inode_info *pipe, struct splice_desc *sd,
++			   splice_actor *actor)
++{
++	int ret;
++
++	splice_from_pipe_begin(sd);
++	do {
++		cond_resched();
++		ret = splice_from_pipe_next(pipe, sd);
++		if (ret > 0)
++			ret = splice_from_pipe_feed(pipe, sd, actor);
++	} while (ret > 0);
++	splice_from_pipe_end(pipe, sd);
++
++	return sd->num_spliced ? sd->num_spliced : ret;
++}
++EXPORT_SYMBOL(__splice_from_pipe);
++
++/**
++ * splice_from_pipe - splice data from a pipe to a file
++ * @pipe:	pipe to splice from
++ * @out:	file to splice to
++ * @ppos:	position in @out
++ * @len:	how many bytes to splice
++ * @flags:	splice modifier flags
++ * @actor:	handler that splices the data
++ *
++ * Description:
++ *    See __splice_from_pipe. This function locks the pipe inode,
++ *    otherwise it's identical to __splice_from_pipe().
++ *
++ */
++ssize_t splice_from_pipe(struct pipe_inode_info *pipe, struct file *out,
++			 loff_t *ppos, size_t len, unsigned int flags,
++			 splice_actor *actor)
++{
++	ssize_t ret;
++	struct splice_desc sd = {
++		.total_len = len,
++		.flags = flags,
++		.pos = *ppos,
++		.u.file = out,
++	};
++
++	pipe_lock(pipe);
++	ret = __splice_from_pipe(pipe, &sd, actor);
++	pipe_unlock(pipe);
++
++	return ret;
++}
++
++/**
++ * iter_file_splice_write - splice data from a pipe to a file
++ * @pipe:	pipe info
++ * @out:	file to write to
++ * @ppos:	position in @out
++ * @len:	number of bytes to splice
++ * @flags:	splice modifier flags
++ *
++ * Description:
++ *    Will either move or copy pages (determined by @flags options) from
++ *    the given pipe inode to the given file.
++ *    This one is ->write_iter-based.
++ *
++ */
++ssize_t
++iter_file_splice_write(struct pipe_inode_info *pipe, struct file *out,
++			  loff_t *ppos, size_t len, unsigned int flags)
++{
++	struct splice_desc sd = {
++		.total_len = len,
++		.flags = flags,
++		.pos = *ppos,
++		.u.file = out,
++	};
++	int nbufs = pipe->max_usage;
++	struct bio_vec *array;
++	ssize_t ret;
++
++	if (!out->f_op->write_iter)
++		return -EINVAL;
++	if (!len)
++		return 0;
++
++	array = kzalloc_objs(struct bio_vec, nbufs);
++	if (unlikely(!array))
++		return -ENOMEM;
++
++	pipe_lock(pipe);
++
++	splice_from_pipe_begin(&sd);
++	while (sd.total_len) {
++		struct kiocb kiocb;
++		struct iov_iter from;
++		unsigned int head, tail;
++		size_t left;
++		int n;
++
++		ret = splice_from_pipe_next(pipe, &sd);
++		if (ret <= 0)
++			break;
++
++		if (unlikely(nbufs < pipe->max_usage)) {
++			kfree(array);
++			nbufs = pipe->max_usage;
++			array = kzalloc_objs(struct bio_vec, nbufs);
++			if (!array) {
++				ret = -ENOMEM;
++				break;
++			}
++		}
++
++		head = pipe->head;
++		tail = pipe->tail;
++
++		/* build the vector */
++		left = sd.total_len;
++		for (n = 0; !pipe_empty(head, tail) && left && n < nbufs; tail++) {
++			struct pipe_buffer *buf = pipe_buf(pipe, tail);
++			size_t this_len = buf->len;
++
++			/* zero-length bvecs are not supported, skip them */
++			if (!this_len)
++				continue;
++			this_len = min(this_len, left);
++
++			ret = pipe_buf_confirm(pipe, buf);
++			if (unlikely(ret)) {
++				if (ret == -ENODATA)
++					ret = 0;
++				goto done;
++			}
++
++			bvec_set_page(&array[n], buf->page, this_len,
++				      buf->offset);
++			left -= this_len;
++			n++;
++		}
++
++		iov_iter_bvec(&from, ITER_SOURCE, array, n, sd.total_len - left);
++		init_sync_kiocb(&kiocb, out);
++		kiocb.ki_pos = sd.pos;
++		ret = out->f_op->write_iter(&kiocb, &from);
++		sd.pos = kiocb.ki_pos;
++		if (ret <= 0)
++			break;
++		WARN_ONCE(ret > sd.total_len - left,
++			  "Splice Exceeded! ret=%zd tot=%zu left=%zu\n",
++			  ret, sd.total_len, left);
++
++		sd.num_spliced += ret;
++		sd.total_len -= ret;
++		*ppos = sd.pos;
++
++		/* dismiss the fully eaten buffers, adjust the partial one */
++		tail = pipe->tail;
++		while (ret) {
++			struct pipe_buffer *buf = pipe_buf(pipe, tail);
++			if (ret >= buf->len) {
++				ret -= buf->len;
++				buf->len = 0;
++				pipe_buf_release(pipe, buf);
++				tail++;
++				pipe->tail = tail;
++				if (pipe->files)
++					sd.need_wakeup = true;
++			} else {
++				buf->offset += ret;
++				buf->len -= ret;
++				ret = 0;
++			}
++		}
++	}
++done:
++	kfree(array);
++	splice_from_pipe_end(pipe, &sd);
++
++	pipe_unlock(pipe);
++
++	if (sd.num_spliced)
++		ret = sd.num_spliced;
++
++	return ret;
++}
++
++EXPORT_SYMBOL(iter_file_splice_write);
+diff --git a/fs/splice_file.h b/fs/splice_file.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..094320a4c61f63f7ea02159f336a25ca7a00b762
+--- /dev/null
++++ b/fs/splice_file.h
+@@ -0,0 +1,11 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#ifndef _FS_SPLICE_FILE_H
++#define _FS_SPLICE_FILE_H
++
++#include <linux/pipe_fs_i.h>
++
++void page_cache_pipe_buf_release(struct pipe_inode_info *pipe,
++				struct pipe_buffer *buf);
++void wakeup_pipe_writers(struct pipe_inode_info *pipe);
++
++#endif
+diff --git a/mm/filemap.c b/mm/filemap.c
+index b63ed2a8316923a5ce364ea02a75c865b3aa11b0..e65508171b790850f7c15d2723110ece1be4d5d8 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -487,151 +487,6 @@ out:
+ 	return folio_batch_count(fbatch);
+ }
+ 
+-/*
+- * Splice subpages from a folio into a pipe.
+- */
+-size_t splice_folio_into_pipe(struct pipe_inode_info *pipe,
+-			      struct folio *folio, loff_t fpos, size_t size)
+-{
+-	struct page *page;
+-	size_t spliced = 0, offset = offset_in_folio(folio, fpos);
+-
+-	page = folio_page(folio, offset / PAGE_SIZE);
+-	size = min(size, folio_size(folio) - offset);
+-	offset %= PAGE_SIZE;
+-
+-	while (spliced < size && !pipe_is_full(pipe)) {
+-		struct pipe_buffer *buf = pipe_head_buf(pipe);
+-		size_t part = min_t(size_t, PAGE_SIZE - offset, size - spliced);
+-
+-		*buf = (struct pipe_buffer) {
+-			.ops	= &page_cache_pipe_buf_ops,
+-			.page	= page,
+-			.offset	= offset,
+-			.len	= part,
+-		};
+-		folio_get(folio);
+-		pipe->head++;
+-		page++;
+-		spliced += part;
+-		offset = 0;
+-	}
+-
+-	return spliced;
+-}
+-
+-/**
+- * filemap_splice_read -  Splice data from a file's pagecache into a pipe
+- * @in: The file to read from
+- * @ppos: Pointer to the file position to read from
+- * @pipe: The pipe to splice into
+- * @len: The amount to splice
+- * @flags: The SPLICE_F_* flags
+- *
+- * This function gets folios from a file's pagecache and splices them into the
+- * pipe.  Readahead will be called as necessary to fill more folios.  This may
+- * be used for blockdevs also.
+- *
+- * Return: On success, the number of bytes read will be returned and *@ppos
+- * will be updated if appropriate; 0 will be returned if there is no more data
+- * to be read; -EAGAIN will be returned if the pipe had no space, and some
+- * other negative error code will be returned on error.  A short read may occur
+- * if the pipe has insufficient space, we reach the end of the data or we hit a
+- * hole.
+- */
+-ssize_t filemap_splice_read(struct file *in, loff_t *ppos,
+-			    struct pipe_inode_info *pipe,
+-			    size_t len, unsigned int flags)
+-{
+-	struct folio_batch fbatch;
+-	struct kiocb iocb;
+-	size_t total_spliced = 0, used, npages;
+-	loff_t isize, end_offset;
+-	bool writably_mapped;
+-	int i, error = 0;
+-
+-	if (unlikely(*ppos >= in->f_mapping->host->i_sb->s_maxbytes))
+-		return 0;
+-
+-	init_sync_kiocb(&iocb, in);
+-	iocb.ki_pos = *ppos;
+-
+-	/* Work out how much data we can actually add into the pipe */
+-	used = pipe_buf_usage(pipe);
+-	npages = max_t(ssize_t, pipe->max_usage - used, 0);
+-	len = min_t(size_t, len, npages * PAGE_SIZE);
+-
+-	folio_batch_init(&fbatch);
+-
+-	do {
+-		cond_resched();
+-
+-		if (*ppos >= i_size_read(in->f_mapping->host))
+-			break;
+-
+-		iocb.ki_pos = *ppos;
+-		error = filemap_get_pages(&iocb, len, &fbatch, true);
+-		if (error < 0)
+-			break;
+-
+-		/*
+-		 * i_size must be checked after we know the pages are Uptodate.
+-		 *
+-		 * Checking i_size after the check allows us to calculate
+-		 * the correct value for "nr", which means the zero-filled
+-		 * part of the page is not copied back to userspace (unless
+-		 * another truncate extends the file - this is desired though).
+-		 */
+-		isize = i_size_read(in->f_mapping->host);
+-		if (unlikely(*ppos >= isize))
+-			break;
+-		end_offset = min_t(loff_t, isize, *ppos + len);
+-
+-		/*
+-		 * Once we start copying data, we don't want to be touching any
+-		 * cachelines that might be contended:
+-		 */
+-		writably_mapped = mapping_writably_mapped(in->f_mapping);
+-
+-		for (i = 0; i < folio_batch_count(&fbatch); i++) {
+-			struct folio *folio = fbatch.folios[i];
+-			size_t n;
+-
+-			if (folio_pos(folio) >= end_offset)
+-				goto out;
+-			folio_mark_accessed(folio);
+-
+-			/*
+-			 * If users can be writing to this folio using arbitrary
+-			 * virtual addresses, take care of potential aliasing
+-			 * before reading the folio on the kernel side.
+-			 */
+-			if (writably_mapped)
+-				flush_dcache_folio(folio);
+-
+-			n = min_t(loff_t, len, isize - *ppos);
+-			n = splice_folio_into_pipe(pipe, folio, *ppos, n);
+-			if (!n)
+-				goto out;
+-			len -= n;
+-			total_spliced += n;
+-			*ppos += n;
+-			in->f_ra.prev_pos = *ppos;
+-			if (pipe_is_full(pipe))
+-				goto out;
+-		}
+-
+-		folio_batch_release(&fbatch);
+-	} while (len);
+-
+-out:
+-	folio_batch_release(&fbatch);
+-	file_accessed(in);
+-
+-	return total_spliced ? total_spliced : error;
+-}
+-EXPORT_SYMBOL(filemap_splice_read);
+-
+ static inline loff_t folio_seek_hole_data(struct xa_state *xas,
+ 		struct address_space *mapping, struct folio *folio,
+ 		loff_t start, loff_t end, bool seek_data)
+diff --git a/mm/filemap_batch.c b/mm/filemap_batch.c
+index 4a7f17c32c3cd232ee6046c3cf6582b869dc16ac..c71eae5bd2f9944e81573c97ef096db1cb0a816e 100644
+--- a/mm/filemap_batch.c
++++ b/mm/filemap_batch.c
+@@ -7,11 +7,13 @@
+ #include <linux/folio_batch.h>
+ #include <linux/highmem.h>
+ #include <linux/page_idle.h>
++#include <linux/pipe_fs_i.h>
+ #include <linux/psi.h>
+ #include <linux/rmap.h>
+ #include <linux/sched.h>
+ #include <linux/sched/mm.h>
+ #include <linux/shmem_fs.h>
++#include <linux/splice.h>
+ #include <linux/uio.h>
+ 
+ #include <linux/swap.h>
+@@ -2827,6 +2829,153 @@ put_folios:
+ }
+ EXPORT_SYMBOL_GPL(filemap_read);
+ 
++/*
++ * Splice subpages from a folio into a pipe.
++ */
++size_t splice_folio_into_pipe(struct pipe_inode_info *pipe,
++			      struct folio *folio, loff_t fpos, size_t size)
++{
++	struct page *page;
++	size_t spliced = 0, offset = offset_in_folio(folio, fpos);
++
++	page = folio_page(folio, offset / PAGE_SIZE);
++	size = min(size, folio_size(folio) - offset);
++	offset %= PAGE_SIZE;
++
++	while (spliced < size && !pipe_is_full(pipe)) {
++		struct pipe_buffer *buf = pipe_head_buf(pipe);
++		size_t part = min_t(size_t, PAGE_SIZE - offset, size - spliced);
++
++		*buf = (struct pipe_buffer) {
++			.ops	= &page_cache_pipe_buf_ops,
++			.page	= page,
++			.offset	= offset,
++			.len	= part,
++		};
++		folio_get(folio);
++		pipe->head++;
++		page++;
++		spliced += part;
++		offset = 0;
++	}
++
++	return spliced;
++}
++
++/**
++ * filemap_splice_read -  Splice data from a file's pagecache into a pipe
++ * @in: The file to read from
++ * @ppos: Pointer to the file position to read from
++ * @pipe: The pipe to splice into
++ * @len: The amount to splice
++ * @flags: The SPLICE_F_* flags
++ *
++ * This function gets folios from a file's pagecache and splices them into the
++ * pipe.  Readahead will be called as necessary to fill more folios.  This may
++ * be used for blockdevs also.
++ *
++ * Return: On success, the number of bytes read will be returned and *@ppos
++ * will be updated if appropriate; 0 will be returned if there is no more data
++ * to be read; -EAGAIN will be returned if the pipe had no space, and some
++ * other negative error code will be returned on error.  A short read may occur
++ * if the pipe has insufficient space, we reach the end of the data or we hit a
++ * hole.
++ */
++ssize_t filemap_splice_read(struct file *in, loff_t *ppos,
++			    struct pipe_inode_info *pipe,
++			    size_t len, unsigned int flags)
++{
++	struct folio_batch fbatch;
++	struct kiocb iocb;
++	size_t total_spliced = 0, used, npages;
++	loff_t isize, end_offset;
++	bool writably_mapped;
++	int i, error = 0;
++
++	if (!len || unlikely(*ppos >= in->f_mapping->host->i_sb->s_maxbytes))
++		return 0;
++
++	init_sync_kiocb(&iocb, in);
++	iocb.ki_pos = *ppos;
++
++	/* Work out how much data we can actually add into the pipe */
++	used = pipe_buf_usage(pipe);
++	if (used >= pipe->max_usage)
++		return *ppos >= i_size_read(in->f_mapping->host) ? 0 : -EAGAIN;
++	npages = pipe->max_usage - used;
++	len = min_t(size_t, len, npages * PAGE_SIZE);
++
++	folio_batch_init(&fbatch);
++
++	do {
++		cond_resched();
++
++		if (*ppos >= i_size_read(in->f_mapping->host))
++			break;
++
++		iocb.ki_pos = *ppos;
++		error = filemap_get_pages(&iocb, len, &fbatch, true);
++		if (error < 0)
++			break;
++
++		/*
++		 * i_size must be checked after we know the pages are Uptodate.
++		 *
++		 * Checking i_size after the check allows us to calculate
++		 * the correct value for "nr", which means the zero-filled
++		 * part of the page is not copied back to userspace (unless
++		 * another truncate extends the file - this is desired though).
++		 */
++		isize = i_size_read(in->f_mapping->host);
++		if (unlikely(*ppos >= isize))
++			break;
++		end_offset = min_t(loff_t, isize, *ppos + len);
++
++		/*
++		 * Once we start copying data, we don't want to be touching any
++		 * cachelines that might be contended:
++		 */
++		writably_mapped = mapping_writably_mapped(in->f_mapping);
++
++		for (i = 0; i < folio_batch_count(&fbatch); i++) {
++			struct folio *folio = fbatch.folios[i];
++			size_t n;
++
++			if (folio_pos(folio) >= end_offset)
++				goto out;
++			folio_mark_accessed(folio);
++
++			/*
++			 * If users can be writing to this folio using arbitrary
++			 * virtual addresses, take care of potential aliasing
++			 * before reading the folio on the kernel side.
++			 */
++			if (writably_mapped)
++				flush_dcache_folio(folio);
++
++			n = min_t(loff_t, len, isize - *ppos);
++			n = splice_folio_into_pipe(pipe, folio, *ppos, n);
++			if (!n)
++				goto out;
++			len -= n;
++			total_spliced += n;
++			*ppos += n;
++			in->f_ra.prev_pos = *ppos;
++			if (pipe_is_full(pipe))
++				goto out;
++		}
++
++		folio_batch_release(&fbatch);
++	} while (len);
++
++out:
++	folio_batch_release(&fbatch);
++	file_accessed(in);
++
++	return total_spliced ? total_spliced : error;
++}
++EXPORT_SYMBOL(filemap_splice_read);
++
+ int kiocb_write_and_wait(struct kiocb *iocb, size_t count)
+ {
+ 	struct address_space *mapping = iocb->ki_filp->f_mapping;

@@ -270,6 +270,9 @@
 /fs/pipe.c
 /fs/pipe_buffers.c
 /fs/pipe_buffers.h
+/fs/splice.c
+/fs/splice_file.c
+/fs/splice_file.h
 /fs/file_async.c
 /fs/fs_context.c
 /fs/fs_context_log.c
