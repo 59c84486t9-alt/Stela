@@ -17,7 +17,10 @@ mod inactive;
     target_os = "linux",
     target_arch = "x86_64"
 ))]
-pub use hosted::{HostedTaskBinding, initialize_hosted_resources};
+pub use hosted::{
+    HostedStackReservation, HostedTaskBinding, initialize_hosted_resources,
+    reserve_hosted_child_stack,
+};
 mod native;
 pub mod runtime;
 use alloc::sync::Arc;

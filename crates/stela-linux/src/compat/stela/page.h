@@ -4,10 +4,11 @@
 #include <linux/types.h>
 struct stela_linux_owner;
 #ifdef __linux__
-/* The exact original hosted Initial lends its retained aligned mmap extent.
- * Its descriptors and model offsets are separate from native RAM custody. */
+/* The original hosted Initial supplies its retained ordinary extent and
+ * exact runtime stack mappings. Guard pages are outside the inventory. */
 int stela_linux_page_model_register(const struct stela_linux_owner *owner,
-                                   void *cpu_base, size_t page_count);
+                                   void *cpu_base, size_t page_count,
+                                   void *const *stacks, size_t stack_count);
 #endif
 /* Pure current-owner/quiescence check; no entry, callback or ownership change. */
 int stela_linux_page_owner_context(const struct stela_linux_owner *expected);
@@ -121,6 +122,7 @@ int stela_linux_page_catalog_register_annotated(
  * ownership through cancellation or permanent quarantine. All calls require
  * the serialized quiescent entered owner. Headers admit tails before use. */
 #define STELA_LINUX_STACK_ADMISSION_V1 1U
+#define STELA_LINUX_MODEL_STACK_V1 2U
 struct stela_linux_stack_admission_v1 {
     u32 version;
     u32 bytes;
@@ -139,6 +141,11 @@ struct stela_linux_stack_ticket_v1 {
 int stela_linux_page_stack_admit(
     const struct stela_linux_stack_admission_v1 *request,
     struct stela_linux_stack_ticket_v1 *ticket);
+#ifdef __linux__
+int stela_linux_page_model_stack_admit(const struct stela_linux_owner *owner,
+                                       void *cpu_base,
+                                       struct stela_linux_stack_ticket_v1 *ticket);
+#endif
 int stela_linux_page_stack_cancel(const struct stela_linux_stack_ticket_v1 *ticket);
 /* Private original-child descriptor lease ABI. The actual affine Rust native
  * pin remains the payload owner. actual_child is opaque source factory identity,

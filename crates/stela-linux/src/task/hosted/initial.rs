@@ -1,7 +1,7 @@
 //! One original init_task on the persistent hosted service stack.
 use super::*;
 use crate::owner::{Owner, Platform, RawOwner};
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 use stela_driver_base::bus::dma::memory::MemoryError;
 use stela_driver_base::platform::work::kernel_domain::{HostedPages, HostedTicket};
 
@@ -11,6 +11,8 @@ struct Initial<P: Platform, const N: usize> {
     owner: Pin<Box<Owner<P>>>,
     _root: HostedPages,
     pages: HostedPages,
+    _stacks: Vec<HostedPages>,
+    stack_bases: Vec<*mut c_void>,
     binding: Option<Rc<HostedTaskBinding<N>>>,
     body: Body,
     context: *mut c_void,
@@ -27,6 +29,8 @@ unsafe extern "C" {
         owner: *const RawOwner,
         cpu_base: *mut c_void,
         page_count: usize,
+        stacks: *const *mut c_void,
+        stack_count: usize,
     ) -> i32;
     fn stela_linux_task_hosted_initialize_resources(owner: *const RawOwner) -> i32;
 }
@@ -68,7 +72,8 @@ impl<const N: usize> HostedTaskBinding<N> {
     /// Mount this process image's actual original init_task and start it on
     /// its one persistent hosted service assignment. The body receives the
     /// exact original owner and enters it on that stack. Linux receives one
-    /// kept hosted inventory of 1 to 16384 pages in a power-of-two extent.
+    /// kept hosted inventory with 1 to 16384 ordinary pages in a power-of-two
+    /// extent and the eligible General stacks of this runtime.
     ///
     /// # Safety
     /// Use the sole archive owner thread in a fresh process. Keep this pinned
@@ -88,9 +93,19 @@ impl<const N: usize> HostedTaskBinding<N> {
         if !page_count.is_power_of_two() || page_count > MAX_MODEL_PAGES {
             return Err(Work(WorkError::Unavailable));
         }
-        runtime
-            .preflight_service(stack_requirement().map_err(Work)?)
-            .map_err(Work)?;
+        let required = stack_requirement().map_err(Work)?;
+        runtime.preflight_service(required).map_err(Work)?;
+        let stacks = runtime.child_stack_inventory(required).map_err(Work)?;
+        let mut stack_bases = Vec::new();
+        stack_bases
+            .try_reserve_exact(stacks.len())
+            .map_err(|_| Work(WorkError::Full))?;
+        for stack in &stacks {
+            let base = stack
+                .cpu_address(0, stack.bytes())
+                .map_err(|_| Work(WorkError::CorruptContext))?;
+            stack_bases.push(base.as_ptr().cast());
+        }
         // One private, inert model PGD. It is an actual retained mmap, with
         // no conversion to a native root, PFN or mapped-page authority.
         let root = allocate(&runtime, 1).map_err(Work)?;
@@ -102,6 +117,8 @@ impl<const N: usize> HostedTaskBinding<N> {
             owner: Owner::new(platform),
             _root: root,
             pages,
+            _stacks: stacks,
+            stack_bases,
             binding: None,
             body,
             context,
@@ -159,9 +176,17 @@ unsafe extern "C" fn enter<P: Platform, const N: usize>(context: *mut c_void) {
         // SAFETY: this original Initial is current. Registration retains its
         // mount's real mmap and performs no source callbacks or switches.
         let _entered = unsafe { crate::owner::Entered::new(owner) };
-        // SAFETY: the extent belongs to this exact permanently kept mount.
-        if unsafe { stela_linux_page_model_register(owner, cpu.as_ptr().cast(), bytes / PAGE) } != 0
-        {
+        // SAFETY: all extents belong to this exact permanently kept mount.
+        let status = unsafe {
+            stela_linux_page_model_register(
+                owner,
+                cpu.as_ptr().cast(),
+                bytes / PAGE,
+                mount.stack_bases.as_ptr(),
+                mount.stack_bases.len(),
+            )
+        };
+        if status != 0 {
             fatal();
         }
     }
@@ -169,7 +194,7 @@ unsafe extern "C" fn enter<P: Platform, const N: usize>(context: *mut c_void) {
     unsafe { (mount.body)(owner, mount.context) };
 }
 
-fn fatal() -> ! {
+pub(super) fn fatal() -> ! {
     // SAFETY: a failed permanent source mount cannot release its live roots.
     unsafe { core::arch::asm!("ud2", options(noreturn)) }
 }

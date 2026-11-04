@@ -7,6 +7,8 @@ use stela_driver_base::platform::work::kernel_domain::{
 };
 mod initial;
 pub use initial::initialize_hosted_resources;
+mod stack;
+pub use stack::{HostedStackReservation, reserve_hosted_child_stack};
 
 /// The original source record attached to one checked hosted continuation.
 pub struct HostedTaskBinding<const N: usize> {

@@ -51,6 +51,27 @@ pub struct HostedChild<'runtime, const N: usize> {
 }
 
 impl<const N: usize> HostedRuntime<N> {
+    /// Retain the constructor-owned model mappings eligible for child use.
+    /// This is an immutable inventory, separate from each stack reservation.
+    pub fn child_stack_inventory(
+        &self,
+        required: StackRequirement,
+    ) -> Result<Vec<HostedPages>, WorkError> {
+        self.dispatcher_successor()?;
+        let mut stacks = Vec::new();
+        stacks
+            .try_reserve_exact(self.count)
+            .map_err(|_| WorkError::Full)?;
+        // SAFETY: every continuation is stopped on the original dispatcher.
+        let tasks = unsafe { &*self.tasks.get() };
+        for task in tasks {
+            if task.lane == Lane::General && required.accepts(task.stack.geometry) {
+                stacks.push(task.stack._pages.clone());
+            }
+        }
+        Ok(stacks)
+    }
+
     /// Exclude one stopped General worker and one job slot. The exact source
     /// stack can then be prepared while the creator continues or suspends.
     pub fn reserve_child_stack(
@@ -190,9 +211,14 @@ impl<'runtime, const N: usize> HostedChildReservation<'runtime, N> {
         unsafe { (*self.runtime.task(self.worker)).stack._pages.clone() }
     }
 
+    /// Authenticate this reservation's original creator on its live stack.
+    pub fn check_creator(&self) -> Result<(), WorkError> {
+        self.creator.check(self.runtime.get_ref())
+    }
+
     /// Keep the source rank and an activation order credit before publication.
     pub fn reserve_rank(&mut self, rank: Snapshot) -> Result<(), WorkError> {
-        self.creator.check(self.runtime.get_ref())?;
+        self.check_creator()?;
         let mut guard = self.runtime.queue.lock()?;
         let state = guard.state();
         // SAFETY: the creator owns this stopped worker and no switch occurs.
@@ -228,7 +254,7 @@ impl<'runtime, const N: usize> HostedChildReservation<'runtime, N> {
         context: *mut c_void,
     ) -> Result<HostedChild<'runtime, N>, (Self, WorkError)> {
         let result = (|| {
-            self.creator.check(self.runtime.get_ref())?;
+            self.check_creator()?;
             let mut guard = self.runtime.queue.lock()?;
             let state = guard.state();
             // SAFETY: exact stopped stack, exclusively excluded by this owner.
@@ -273,7 +299,7 @@ impl<'runtime, const N: usize> HostedChildReservation<'runtime, N> {
     /// only applies before this exact reservation has accepted a callback.
     pub unsafe fn cancel(self) -> Result<(), (Self, WorkError)> {
         let result = (|| {
-            self.creator.check(self.runtime.get_ref())?;
+            self.check_creator()?;
             let mut guard = self.runtime.queue.lock()?;
             let state = guard.state();
             // SAFETY: the reservation owns this stopped stack exclusively.

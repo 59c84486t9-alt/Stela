@@ -10,6 +10,7 @@ use std::{
     io::Read,
     num::NonZeroU64,
     ops::Range,
+    pin::Pin,
     process::{self, Command},
     ptr,
     sync::Arc,
@@ -20,7 +21,7 @@ use stela_driver_base::platform::work::{
     WorkError,
     kernel_domain::{
         DomainRaised, HostedClock, HostedDeadlines, HostedDomain, HostedExecution, HostedExecutor,
-        HostedIdle, HostedQueue,
+        HostedIdle, HostedQueue, HostedRuntime,
     },
 };
 use stela_linux::{
@@ -28,7 +29,10 @@ use stela_linux::{
         Entered, Errno, IrqEnableError, MinimumDeadline, Platform, RawOwner, RealtimeOrigin,
         RealtimeRead,
     },
-    task::{HostedTaskBinding, ResourceBootstrapError, initialize_hosted_resources},
+    task::{
+        HostedTaskBinding, ResourceBootstrapError, initialize_hosted_resources,
+        reserve_hosted_child_stack,
+    },
 };
 
 struct Host {
@@ -180,7 +184,7 @@ unsafe extern "C" {
 
 const MODEL_PAGES: usize = 16;
 
-unsafe extern "C" fn check_initial(owner: *const RawOwner, _: *mut c_void) -> ! {
+unsafe extern "C" fn check_initial(owner: *const RawOwner, context: *mut c_void) -> ! {
     // SAFETY: this callback runs in the exact kept original Initial scope.
     let _entered = unsafe { Entered::new(owner) };
     // SAFETY: the actual current binding and exact owner are live.
@@ -202,6 +206,20 @@ unsafe extern "C" fn check_initial(owner: *const RawOwner, _: *mut c_void) -> ! 
         stela_linux::threads::initial_root_levels(),
         Err(WorkError::Unavailable)
     );
+    // SAFETY: the stopped dispatcher keeps the exact pinned runtime handle.
+    let runtime = unsafe { *context.cast::<Pin<&HostedRuntime<4>>>() };
+    // SAFETY: C checks the owner before using it. A refusal must release the worker.
+    let refused = unsafe { reserve_hosted_child_stack(runtime, ptr::null()) };
+    assert!(matches!(refused, Err(ResourceBootstrapError::Native(-1))));
+    // SAFETY: this is the entered creator on the actual mounted runtime.
+    let child = unsafe { reserve_hosted_child_stack(runtime, owner) }.unwrap();
+    let stack = child.stack();
+    // SAFETY: the original creator is still entered and owns the only worker reservation.
+    let second = unsafe { reserve_hosted_child_stack(runtime, owner) };
+    assert!(matches!(
+        second,
+        Err(ResourceBootstrapError::Work(WorkError::Full))
+    ));
     // SAFETY: actual current owns the fresh 16-page inventory. Use the original
     // C allocation and release calls with the exact order and live address.
     unsafe {
@@ -236,6 +254,13 @@ unsafe extern "C" fn check_initial(owner: *const RawOwner, _: *mut c_void) -> ! 
         free_pages(reused, order);
         stela_linux_pages_finish();
     }
+    // SAFETY: no source child has borrowed or published this reservation.
+    unsafe { child.cancel() }.unwrap_or_else(|(_, error)| panic!("{error:?}"));
+    // SAFETY: this is still the original entered creator.
+    let reused = unsafe { reserve_hosted_child_stack(runtime, owner) }.unwrap();
+    assert!(reused.stack().same_allocation(&stack));
+    // SAFETY: the second reservation was also kept unpublished and unused.
+    unsafe { reused.cancel() }.unwrap_or_else(|(_, error)| panic!("{error:?}"));
     println!("original hosted Initial attached");
     process::exit(0);
 }
@@ -318,6 +343,7 @@ fn in_fresh_process(
     }
     .unwrap();
     let runtime = executor.runtime();
+    runtime.enable_ranked_scheduling().unwrap();
     let start = Instant::now();
     // SAFETY: reading the userspace x86-64 TSC supplies a measured fixture rate.
     let first = unsafe { std::arch::x86_64::_rdtsc() };
@@ -349,12 +375,12 @@ fn in_fresh_process(
         realtime,
         random: RefCell::new(stela_crypto::random::Generator::from_seed(seed)),
     };
-    // SAFETY: this exact static archive and the only dispatcher are retained
-    // for the lifetime of this process. The source check does not return.
-    let ticket = unsafe {
-        HostedTaskBinding::start_initial(runtime, platform, page_count, body, ptr::null_mut())
-    }
-    .unwrap();
+    let context = ptr::from_ref(&runtime).cast_mut().cast();
+    // SAFETY: the exact static archive, dispatcher and local runtime handle
+    // remain live through the source check, which exits this process.
+    let ticket =
+        unsafe { HostedTaskBinding::start_initial(runtime, platform, page_count, body, context) }
+            .unwrap();
     assert_eq!(queue.completed(ticket), Ok(false));
     runtime.step().unwrap();
     panic!("the original Initial returned to its dispatcher");
