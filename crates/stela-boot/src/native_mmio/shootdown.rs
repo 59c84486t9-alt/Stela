@@ -12,7 +12,7 @@
 use super::PROCESSORS;
 use core::{
     arch::{asm, x86_64::__cpuid_count},
-    sync::atomic::{AtomicU8, Ordering},
+    sync::atomic::{AtomicU8, AtomicU64, Ordering},
 };
 
 /// How long a retirement waits before it reports the processors it waits
@@ -132,6 +132,7 @@ pub(super) fn retire(tsc_hz: u64) -> bool {
         let _ = unsafe { sender.notify(apic, crate::engine::interrupts::SHOOTDOWN_VECTOR, tsc_hz) };
     }
     let start = crate::apic::rdtsc();
+    let _counted = Counted(start);
     let (report, limit) = (tsc_hz / 1000 * REPORT_MS, tsc_hz / 1000 * WAIT_MS);
     let mut reported = false;
     // A peer may be publishing a retirement at the same time and cannot
@@ -150,6 +151,28 @@ pub(super) fn retire(tsc_hz: u64) -> bool {
         core::hint::spin_loop();
     }
     true
+}
+
+/// Shootdowns this processor's peers had to acknowledge since [`take_waits`],
+/// and the TSC ticks their retirements waited for them.
+static WAITS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Counts one retirement's wait when it ends, however it ends.
+struct Counted(u64);
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        WAITS[0].fetch_add(1, Ordering::Relaxed);
+        WAITS[1].fetch_add(crate::apic::rdtsc().wrapping_sub(self.0), Ordering::Relaxed);
+    }
+}
+
+/// The shootdowns since the last call and the ticks they waited.
+pub(crate) fn take_waits() -> (u64, u64) {
+    (
+        WAITS[0].swap(0, Ordering::Relaxed),
+        WAITS[1].swap(0, Ordering::Relaxed),
+    )
 }
 
 fn report_unacknowledged(generation: u64, me: Option<usize>, outcome: &str) {

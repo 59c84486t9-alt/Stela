@@ -102,6 +102,10 @@ struct Calls {
     waited: AtomicU64,
     /// Calls answered `Unmapped`, which the frontend repeats.
     unmapped: AtomicU64,
+    /// Requests the calls posted to the host's Linux environment, and the
+    /// ticks they waited for the boot CPU to serve them.
+    posted: AtomicU64,
+    posted_waited: AtomicU64,
 }
 
 /// More slots than the protocol has operations.
@@ -113,12 +117,16 @@ static CALLS: [Calls; 96] = [const {
         longest: AtomicU64::new(0),
         waited: AtomicU64::new(0),
         unmapped: AtomicU64::new(0),
+        posted: AtomicU64::new(0),
+        posted_waited: AtomicU64::new(0),
     }
 }; 96];
 
 /// Counts a call the gate served: the PE that rang runs no guest code until
 /// it returns, so a call that holds the service long is guest time lost.
 fn served(served: Served) {
+    // The PE ran nothing but this call since the last one it served.
+    let (posted, posted_waited) = client::take_mine();
     let key = served.operation.wrapping_add(1);
     // Slots fill in order and stay claimed: the first that is free or
     // already this operation's is its own.
@@ -140,10 +148,15 @@ fn served(served: Served) {
     if served.status == Status::Unmapped {
         calls.unmapped.fetch_add(1, Ordering::Relaxed);
     }
+    calls.posted.fetch_add(posted, Ordering::Relaxed);
+    calls
+        .posted_waited
+        .fetch_add(posted_waited, Ordering::Relaxed);
 }
 
 /// The operations whose calls held the service longest since the last
-/// report: each as count/held/longest/waited/unmapped, microseconds between.
+/// report: each as count/held/longest/waited/unmapped/posted/posted_waited,
+/// microseconds between.
 pub(in crate::engine) fn report_calls(tsc_hz: u64) {
     const SHOWN: usize = 8;
     let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
@@ -160,6 +173,8 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
                     calls.longest.swap(0, Ordering::Relaxed),
                     calls.waited.swap(0, Ordering::Relaxed),
                     calls.unmapped.swap(0, Ordering::Relaxed),
+                    calls.posted.swap(0, Ordering::Relaxed),
+                    calls.posted_waited.swap(0, Ordering::Relaxed),
                 )
             })
         })
@@ -171,21 +186,33 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
     taken.sort_unstable_by_key(|&(_, _, held, ..)| core::cmp::Reverse(held));
     let held: u64 = taken.iter().map(|&(_, _, held, ..)| held).sum();
     output::arguments(format_args!(
-        "GPU CALLS held_us={} operation:count/held_us/longest_us/waited_us/unmapped",
+        "GPU CALLS held_us={} operation:count/held_us/longest_us/waited_us/unmapped/posted/posted_us",
         micros(held)
     ));
-    for &(operation, count, held, longest, waited, unmapped) in taken.iter().take(SHOWN) {
+    for &(operation, count, held, longest, waited, unmapped, posted, posted_waited) in
+        taken.iter().take(SHOWN)
+    {
         output::arguments(format_args!(
-            " {operation:#x}:{count}/{}/{}/{}/{unmapped}",
+            " {operation:#x}:{count}/{}/{}/{}/{unmapped}/{posted}/{}",
             micros(held),
             micros(longest),
             micros(waited),
+            micros(posted_waited),
         ));
     }
     // The host's Linux work the calls asked the boot CPU for, by ioctl.
-    output::arguments(format_args!("\nGPU POSTED request:count/waited_us"));
+    let (shootdowns, shot) = crate::native_mmio::shootdown::take_waits();
+    output::arguments(format_args!(
+        "\nGPU POSTED shootdowns={shootdowns}/{}us request:count/waited_us",
+        micros(shot)
+    ));
     for &(request, count, waited) in posted.iter().take(SHOWN) {
         output::arguments(format_args!(" {request:#x}:{count}/{}", micros(waited)));
+    }
+    // What performing them took the service task, waits for the GPU included.
+    output::arguments(format_args!("\nGPU SERVED request:count/us"));
+    for &(request, count, took) in client::take_served().iter().take(SHOWN) {
+        output::arguments(format_args!(" {request:#x}:{count}/{}", micros(took)));
     }
     output::arguments(format_args!("\n"));
 }

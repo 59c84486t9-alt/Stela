@@ -379,10 +379,60 @@ unsafe extern "C" fn serve(context: *mut c_void) {
     let gpu = installed().expect("requests are posted to a running environment");
     // SAFETY: a task of the environment, whose owner lasts for the boot.
     let _entered = unsafe { Entered::new(gpu.owner.raw()) };
+    let code = request_code(&request.operation);
+    let started = host::rdtsc();
     // SAFETY: entered, on a task, and the poster keeps what the call names.
     let result = unsafe { perform(gpu, request.operation) };
+    count(&SERVED, code, host::rdtsc().wrapping_sub(started));
     request.result.store(result, Ordering::Relaxed);
     request.done.store(true, Ordering::Release);
+}
+
+/// An ioctl by its request code; every other request as zero.
+fn request_code(operation: &Operation) -> u32 {
+    match *operation {
+        Operation::Control { request, .. } => request,
+        _ => 0,
+    }
+}
+
+/// Request counts and ticks by request code plus one, in slots that fill in
+/// order and stay claimed, as the gate's call counts do.
+type Counts = [(AtomicU32, AtomicU64, AtomicU64); 64];
+
+fn count(counts: &Counts, code: u32, ticks: u64) {
+    let key = code.wrapping_add(1);
+    if let Some(slot) = counts.iter().find(|slot| {
+        match slot
+            .0
+            .compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => true,
+            Err(claimed) => claimed == key,
+        }
+    }) {
+        slot.1.fetch_add(1, Ordering::Relaxed);
+        slot.2.fetch_add(ticks, Ordering::Relaxed);
+    }
+}
+
+/// Each code's count and ticks since the last call, most ticks first.
+fn take(counts: &Counts) -> Vec<(u32, u64, u64)> {
+    let mut taken: Vec<_> = counts
+        .iter()
+        .filter_map(|slot| {
+            let count = slot.1.swap(0, Ordering::Relaxed);
+            (count != 0).then(|| {
+                (
+                    slot.0.load(Ordering::Relaxed).wrapping_sub(1),
+                    count,
+                    slot.2.swap(0, Ordering::Relaxed),
+                )
+            })
+        })
+        .collect();
+    taken.sort_unstable_by_key(|&(_, _, ticks)| core::cmp::Reverse(ticks));
+    taken
 }
 
 /// A wake leaf uses the service task's existing owner/process scope. Its
@@ -470,56 +520,54 @@ fn submit(operation: Operation) -> i64 {
         unsafe { stack::on_stack(thread.task, &mut call) };
         return result;
     }
-    // An ioctl by its request code; every other request as zero.
-    let code = match operation {
-        Operation::Control { request, .. } => request,
-        _ => 0,
-    };
+    let code = request_code(&operation);
     let request = Request::new(operation);
     let posted = host::rdtsc();
     wait(gpu, &request, u64::MAX);
     let waited = host::rdtsc().wrapping_sub(posted);
-    let key = code.wrapping_add(1);
-    // Slots fill in order and stay claimed, as the gate's call counts do.
-    if let Some(slot) = POSTED.iter().find(|slot| {
-        match slot
-            .0
-            .compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed)
-        {
-            Ok(_) => true,
-            Err(claimed) => claimed == key,
-        }
-    }) {
-        slot.1.fetch_add(1, Ordering::Relaxed);
-        slot.2.fetch_add(waited, Ordering::Relaxed);
+    if let Some(mine) = MINE.get(host::processor() as usize) {
+        mine.0.fetch_add(1, Ordering::Relaxed);
+        mine.1.fetch_add(waited, Ordering::Relaxed);
     }
+    count(&POSTED, code, waited);
     request.result.load(Ordering::Acquire)
 }
 
-/// Requests posted to the service task since [`take_posted`] by ioctl
-/// request code plus one (one for every other request): how many, and the
-/// TSC ticks their posters waited for them.
-static POSTED: [(AtomicU32, AtomicU64, AtomicU64); 64] =
-    [const { (AtomicU32::new(0), AtomicU64::new(0), AtomicU64::new(0)) }; 64];
+/// Requests posted to the service task since [`take_posted`] by request
+/// code: how many, and the TSC ticks their posters waited for them.
+static POSTED: Counts = [const { (AtomicU32::new(0), AtomicU64::new(0), AtomicU64::new(0)) }; 64];
+
+/// Posted requests the service task performed since [`take_served`] by
+/// request code: how many, and the TSC ticks performing them took, which the
+/// boot CPU spends unless the request sleeps.
+static SERVED: Counts = [const { (AtomicU32::new(0), AtomicU64::new(0), AtomicU64::new(0)) }; 64];
+
+/// Requests each processor posted since it last called [`take_mine`]: how
+/// many, and the TSC ticks it waited for them.
+static MINE: [(AtomicU64, AtomicU64); PROCESSORS] =
+    [const { (AtomicU64::new(0), AtomicU64::new(0)) }; PROCESSORS];
+
+/// How many requests this processor posted since it last asked, and the
+/// ticks it waited for them: a gate call's share of the boot CPU's work.
+pub(super) fn take_mine() -> (u64, u64) {
+    MINE.get(host::processor() as usize).map_or((0, 0), |mine| {
+        (
+            mine.0.swap(0, Ordering::Relaxed),
+            mine.1.swap(0, Ordering::Relaxed),
+        )
+    })
+}
 
 /// The requests posted since the last call: each request code with its
 /// count and the ticks they waited, most waited first.
 pub(super) fn take_posted() -> Vec<(u32, u64, u64)> {
-    let mut posted: Vec<_> = POSTED
-        .iter()
-        .filter_map(|slot| {
-            let count = slot.1.swap(0, Ordering::Relaxed);
-            (count != 0).then(|| {
-                (
-                    slot.0.load(Ordering::Relaxed).wrapping_sub(1),
-                    count,
-                    slot.2.swap(0, Ordering::Relaxed),
-                )
-            })
-        })
-        .collect();
-    posted.sort_unstable_by_key(|&(_, _, waited)| core::cmp::Reverse(waited));
-    posted
+    take(&POSTED)
+}
+
+/// The requests the service task performed since the last call: each
+/// request code with its count and the ticks performing them took.
+pub(super) fn take_served() -> Vec<(u32, u64, u64)> {
+    take(&SERVED)
 }
 
 /// Posts `request` to the service and waits for it, until the host counter
