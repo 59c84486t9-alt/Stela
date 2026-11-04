@@ -33,7 +33,13 @@ fn dma_error_at(address: u64, bytes: usize) -> impl FnOnce(DmaError) -> Refusal 
     }
 }
 
-pub(super) struct Prps(Vec<(u64, usize)>);
+/// Direct transfers keep their ranges inline. Indirect transfers reserve
+/// space for every data page the validated byte count can reach.
+pub(super) enum Prps {
+    One([(u64, usize); 1]),
+    Two([(u64, usize); 2]),
+    List(Vec<(u64, usize)>),
+}
 
 impl Prps {
     pub fn new(
@@ -49,15 +55,14 @@ impl Prps {
         if first == 0 || !first.is_multiple_of(4) {
             return Err(refuse!("ANS PRP1 is null or not dword-aligned"));
         }
-        let mut ranges = Vec::new();
         let first_bytes = bytes.min((page - first % page) as usize);
         first
             .checked_add(first_bytes as u64 - 1)
             .ok_or(refuse!("ANS PRP1 wraps"))?;
-        ranges.push((first, first_bytes));
+        let first = (first, first_bytes);
         let mut remaining = bytes - first_bytes;
         if remaining == 0 {
-            return Ok(Self(ranges));
+            return Ok(Self::One([first]));
         }
         if remaining <= page as usize {
             if second == 0 || !second.is_multiple_of(page) {
@@ -66,12 +71,13 @@ impl Prps {
             second
                 .checked_add(remaining as u64 - 1)
                 .ok_or(refuse!("ANS PRP2 wraps"))?;
-            ranges.push((second, remaining));
-            return Ok(Self(ranges));
+            return Ok(Self::Two([first, (second, remaining)]));
         }
         if second == 0 || !second.is_multiple_of(8) {
             return Err(refuse!("ANS PRP list pointer is null or not qword-aligned"));
         }
+        let mut ranges = Vec::with_capacity(1 + remaining.div_ceil(page as usize));
+        ranges.push(first);
         let mut entry = second;
         while remaining != 0 {
             let mut pointer = [0; 8];
@@ -96,12 +102,20 @@ impl Prps {
                 .checked_add(8)
                 .ok_or(refuse!("ANS PRP list address wraps"))?;
         }
-        Ok(Self(ranges))
+        Ok(Self::List(ranges))
+    }
+
+    fn ranges(&self) -> &[(u64, usize)] {
+        match self {
+            Self::One(ranges) => ranges,
+            Self::Two(ranges) => ranges,
+            Self::List(ranges) => ranges,
+        }
     }
 
     pub fn read(&self, port: &mut Port<'_, '_>, buffer: &mut [u8]) -> Result<()> {
         let mut at = 0;
-        for &(address, bytes) in &self.0 {
+        for &(address, bytes) in self.ranges() {
             port.read(address, &mut buffer[at..at + bytes])
                 .map_err(dma_error_at(address, bytes))?;
             at += bytes;
@@ -111,7 +125,7 @@ impl Prps {
 
     pub fn write(&self, port: &mut Port<'_, '_>, data: &[u8]) -> Result<()> {
         let mut at = 0;
-        for &(address, bytes) in &self.0 {
+        for &(address, bytes) in self.ranges() {
             port.write(address, &data[at..at + bytes])
                 .map_err(dma_error_at(address, bytes))?;
             at += bytes;
@@ -156,6 +170,31 @@ mod tests {
     }
 
     #[test]
+    fn direct_prps_keep_an_offset_first_page_and_short_second_page() {
+        let mut ram = Ram::new(0x8000_0000, 0x8000);
+        let base = ram.base;
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut port = Port {
+            iommu: &mut Physical,
+            stream: 0,
+            memory: &mut ram,
+            access: &mut access,
+        };
+        let first = base + 0xff0;
+        let prps = Prps::new(&mut port, first, 0, 16, 4096).unwrap();
+        assert!(matches!(prps, Prps::One([(address, 16)]) if address == first));
+        let second = base + 0x3000;
+        let prps = Prps::new(&mut port, first, second, 24, 4096).unwrap();
+        assert!(matches!(prps, Prps::Two([(a, 16), (b, 8)]) if (a, b) == (first, second)));
+        let data: [u8; 24] = core::array::from_fn(|index| index as u8);
+        prps.write(&mut port, &data).unwrap();
+        let mut read = [0; 24];
+        prps.read(&mut port, &mut read).unwrap();
+        assert_eq!(read, data);
+    }
+
+    #[test]
     fn a_prp_list_may_start_inside_its_page_and_chains_at_the_page_end() {
         let mut ram = Ram::new(0x8000_0000, 0x20000);
         let base = ram.base;
@@ -175,8 +214,8 @@ mod tests {
             port.write(list + index * 8, &page.to_le_bytes()).unwrap();
         }
         let prps = Prps::new(&mut port, base + 0x1000, list, 21 * 4096, 4096).unwrap();
-        assert_eq!(prps.0.len(), 21);
-        assert_eq!(prps.0[1], (base + 0x2000, 4096));
+        assert_eq!(prps.ranges().len(), 21);
+        assert_eq!(prps.ranges()[1], (base + 0x2000, 4096));
         // A list two entries from its page end: one data entry, then the
         // last slot chains to a page-aligned list page holding the rest.
         let near_end = base + 0xa000 - 16;
@@ -189,7 +228,7 @@ mod tests {
         port.write(base + 0xb008, &(base + 0xe000).to_le_bytes())
             .unwrap();
         let prps = Prps::new(&mut port, base + 0x1000, near_end, 4 * 4096, 4096).unwrap();
-        let pages: Vec<u64> = prps.0.iter().map(|&(address, _)| address).collect();
+        let pages: Vec<u64> = prps.ranges().iter().map(|&(address, _)| address).collect();
         assert_eq!(
             pages,
             [base + 0x1000, base + 0xc000, base + 0xd000, base + 0xe000]
