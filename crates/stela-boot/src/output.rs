@@ -17,6 +17,7 @@ use core::{
     cell::RefCell,
     convert::Infallible,
     fmt::{self, Write},
+    mem::MaybeUninit,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use stela_drivers::block::{BlockDevice, BlockError, Submission};
@@ -93,7 +94,7 @@ const SERIAL_BURST: usize = 8;
 
 /// A ring of bytes not yet sent.
 struct Queue {
-    bytes: Box<[u8]>,
+    bytes: Box<[MaybeUninit<u8>]>,
     head: usize,
     len: usize,
     /// Bytes left out while the queue was full, not reported yet: the
@@ -136,8 +137,8 @@ impl Queue {
         let size = self.bytes.len();
         let tail = (self.head + self.len) % size;
         let first = data.len().min(size - tail);
-        self.bytes[tail..tail + first].copy_from_slice(&data[..first]);
-        self.bytes[..data.len() - first].copy_from_slice(&data[first..]);
+        self.bytes[tail..tail + first].write_copy_of_slice(&data[..first]);
+        self.bytes[..data.len() - first].write_copy_of_slice(&data[first..]);
         self.len += data.len();
         SERIAL_QUEUED.store(true, Ordering::Release);
     }
@@ -146,10 +147,15 @@ impl Queue {
     fn take(&mut self, out: &mut [u8]) -> usize {
         let count = out.len().min(self.len);
         for slot in &mut out[..count] {
-            *slot = self.bytes[self.head];
+            // SAFETY: only the occupied range is read; copy initialized it before increasing len.
+            *slot = unsafe { self.bytes[self.head].assume_init() };
             self.head = (self.head + 1) % self.bytes.len();
         }
         self.len -= count;
+        if self.len == 0 {
+            // Reuse the touched prefix after a drain instead of walking through unused pages.
+            self.head = 0;
+        }
         SERIAL_QUEUED.store(self.len != 0, Ordering::Release);
         count
     }
@@ -158,7 +164,7 @@ impl Queue {
 /// Queue the serial port's output from now on, for [`send_queued`].
 pub fn queue_serial() {
     let queue = Queue {
-        bytes: alloc::vec![0; SERIAL_QUEUE_BYTES].into_boxed_slice(),
+        bytes: Box::new_uninit_slice(SERIAL_QUEUE_BYTES),
         head: 0,
         len: 0,
         dropped: 0,
