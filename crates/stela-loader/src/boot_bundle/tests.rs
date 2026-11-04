@@ -1072,7 +1072,11 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
             patch.field
         );
     }
-    // Every region hash covers its file bytes.
+    // Check both receipts directly, including the whole-file ramdisk and
+    // files split across multiple regions.
+    for entry in &manifest.files {
+        assert_eq!(sha256(file(&entry.name)), entry.sha256, "{}", entry.name);
+    }
     for region in &manifest.regions {
         let at = region.file_offset as usize;
         assert_eq!(

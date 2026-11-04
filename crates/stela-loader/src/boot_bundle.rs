@@ -856,10 +856,18 @@ fn assemble(
         sources: sources(inputs, ramdisk_source),
         files: files
             .iter()
-            .map(|(name, bytes)| File {
-                name: name.clone(),
-                bytes: bytes.len() as u64,
-                sha256: sha256(bytes),
+            .map(|(name, contents)| {
+                let bytes = contents.len() as u64;
+                // A whole-file region (such as a restore ramdisk) already
+                // has the digest of these exact bytes.
+                let whole = regions.iter().find(|region| {
+                    region.file == *name && region.file_offset == 0 && region.bytes == bytes
+                });
+                File {
+                    name: name.clone(),
+                    bytes,
+                    sha256: whole.map_or_else(|| sha256(contents), |region| region.sha256.clone()),
+                }
             })
             .collect(),
         regions,
