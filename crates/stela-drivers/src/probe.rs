@@ -877,6 +877,9 @@ pub unsafe fn probe_with_provider(
     // Broadcom PCIe Bluetooth functions, attached once the scan has found
     // every bridge of their segment.
     let mut broadcom_bluetooth = Vec::new();
+    let mut ehci_hosts = Vec::new();
+    let mut usb_handoff_failures = Vec::new();
+    let mut pci_scan_complete = true;
     // USB4 hosts with a software connection manager come up first: the scan
     // below then finds what they tunnel, as it finds any other function.
     let software_usb4 = services.map_or_else(Vec::new, |services| {
@@ -898,12 +901,14 @@ pub unsafe fn probe_with_provider(
     for window in &handoff.ecam {
         if !handoff.is_mapped(&window.range()) {
             devices.unmapped.push(*window);
+            pci_scan_complete = false;
             continue;
         }
         // SAFETY: mapped as checked; the caller owns the machine.
         let found = match unsafe { Function::enumerate(window) } {
             Ok(found) => found,
             Err(failure) => {
+                pci_scan_complete = false;
                 devices
                     .failures
                     .push((failure.address(), Error::Enumeration(failure.error)));
@@ -966,7 +971,19 @@ pub unsafe fn probe_with_provider(
                 continue;
             }
             if let Some(kind) = usb::handoff::Kind::of(function.class) {
-                let minimum = minimum_for_function!().clone();
+                if kind == usb::handoff::Kind::Ehci {
+                    ehci_hosts.push(address);
+                    continue;
+                }
+                let minimum = match &minimum_result {
+                    Ok(minimum) => minimum,
+                    Err(error) => {
+                        usb_handoff_failures.push(kind);
+                        devices.failures.push((address, Error::Native(*error)));
+                        devices.owners.push(Box::new(function));
+                        continue;
+                    }
+                };
                 // SAFETY: the caller owns the machine and no driver has bound
                 // this controller yet, as Linux's early PCI fixup runs.
                 match unsafe { usb::handoff::early(&mut function, handoff, minimum.as_ref()) } {
@@ -977,6 +994,7 @@ pub unsafe fn probe_with_provider(
                         ),
                     )),
                     Some(Err(error)) => {
+                        usb_handoff_failures.push(kind);
                         devices.platform_failures.push((
                             alloc::format!("{address} {} handoff", kind.name()),
                             PlatformError::Handoff(error),
@@ -1040,46 +1058,6 @@ pub unsafe fn probe_with_provider(
                     native::Kind::Usb4 => {
                         if !software_usb4.contains(&address) {
                             usb4_hosts.push(address);
-                        }
-                        continue;
-                    }
-                    native::Kind::Ehci => {
-                        // SAFETY: as for tg3 below; the handoff above took
-                        // this controller and reset its companions, which
-                        // the scan reaches first as lower functions.
-                        match unsafe { native::ehci(services, address, handoff.clock) } {
-                            Ok((controller, domain)) => {
-                                // SAFETY: `domain` is the claimed controller's;
-                                // the CPU alone touches these storage buffers,
-                                // copying through the controller's own arena.
-                                let mut dma = unsafe {
-                                    crate::bus::dma::DomainAllocator::new(
-                                        services.pages(),
-                                        domain,
-                                        u64::from(u32::MAX),
-                                    )
-                                };
-                                let found = usb::ehci::host::enumerate(
-                                    &controller,
-                                    &alloc::format!("{address} EHCI"),
-                                    handoff.clock,
-                                    &mut dma,
-                                );
-                                devices.disks.extend(
-                                    found
-                                        .disks
-                                        .into_iter()
-                                        .map(|disk| Box::new(disk) as Box<dyn BlockDevice>),
-                                );
-                                devices.usb_storage.extend(found.storage);
-                                devices.usb_failures.extend(found.failures);
-                                devices.usb_unused.extend(found.unused);
-                                devices.ehci_hosts.push(controller);
-                            }
-                            Err((error, kept)) => {
-                                devices.failures.push((address, error));
-                                devices.owners.extend(kept);
-                            }
                         }
                         continue;
                     }
@@ -1498,6 +1476,56 @@ pub unsafe fn probe_with_provider(
             }
         }
     }
+    let companions_released = pci_scan_complete
+        && !usb_handoff_failures
+            .iter()
+            .any(|kind| matches!(kind, usb::handoff::Kind::Uhci | usb::handoff::Kind::Ohci));
+    for address in ehci_hosts {
+        let attached = match services {
+            Some(services) if companions_released => {
+                // SAFETY: the completed scan has run the UHCI/OHCI handoff
+                // for every discovered companion. The native attach owns
+                // EHCI's BIOS handoff through its original requester and BAR.
+                unsafe { native::ehci(services, address, handoff.clock) }
+                    .map(|(controller, domain)| (services, controller, domain))
+            }
+            Some(_) => Err((
+                Error::Native(ServiceError::Refused("EHCI companion handoff incomplete")),
+                None,
+            )),
+            None => Err((Error::Native(ServiceError::Unavailable), None)),
+        };
+        let (services, controller, domain) = match attached {
+            Ok(attached) => attached,
+            Err((error, kept)) => {
+                usb_handoff_failures.push(usb::handoff::Kind::Ehci);
+                devices.failures.push((address, error));
+                devices.owners.extend(kept);
+                continue;
+            }
+        };
+        // SAFETY: this domain belongs to the attached controller. The CPU
+        // alone touches these storage buffers through the controller's arena.
+        let mut dma = unsafe {
+            crate::bus::dma::DomainAllocator::new(services.pages(), domain, u64::from(u32::MAX))
+        };
+        let found = usb::ehci::host::enumerate(
+            &controller,
+            &alloc::format!("{address} EHCI"),
+            handoff.clock,
+            &mut dma,
+        );
+        devices.disks.extend(
+            found
+                .disks
+                .into_iter()
+                .map(|disk| Box::new(disk) as Box<dyn BlockDevice>),
+        );
+        devices.usb_storage.extend(found.storage);
+        devices.usb_failures.extend(found.failures);
+        devices.usb_unused.extend(found.unused);
+        devices.ehci_hosts.push(controller);
+    }
     for address in usb4_hosts {
         let Some(services) = services else {
             devices
@@ -1599,10 +1627,7 @@ pub unsafe fn probe_with_provider(
                     .push((alloc::format!("{address} SMBus"), error)),
             }
         }
-        let usb_released = !devices
-            .platform_failures
-            .iter()
-            .any(|(_, error)| matches!(error, PlatformError::Handoff(_)));
+        let usb_released = pci_scan_complete && usb_handoff_failures.is_empty();
         let smbus_hosts = devices.smbus_hosts.clone();
         platform::attach_i8042(
             session,
@@ -1633,6 +1658,85 @@ mod tests {
     };
     use alloc::format;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn ehci_uses_native_preparation_only_after_companion_handoff() {
+        for companion_refused in [false, true] {
+            let mut ecam = alloc::vec![u32::MAX; (1 << 20) / 4];
+            let mut function = |device: usize, class: u32| {
+                let start = device * (1 << 15) / 4;
+                let page = &mut ecam[start..start + 4096 / 4];
+                page.fill(0);
+                page[0] = 0x1234_4321;
+                page[2] = class;
+            };
+            function(0, 0x0c03_2000);
+            if companion_refused {
+                // The companion's BAR is absent or unmapped. The scan
+                // discovers it after EHCI, and it cannot reach register I/O.
+                function(1, 0x0c03_1000);
+            }
+            let window = EcamWindow {
+                base: ecam.as_mut_ptr() as u64,
+                segment: 0,
+                start_bus: 0,
+                end_bus: 0,
+            };
+            let handoff = Handoff {
+                ecam: alloc::vec![window],
+                mapped: alloc::vec![window.range()],
+                dma: 0..0,
+                clock: Clock {
+                    ticks_per_microsecond: 1,
+                },
+                firmware: None,
+                completion: None,
+            };
+            let services = services::tests::Refusing::minimum_only();
+            // SAFETY: the empty region can allocate no DMA pages. Only the
+            // synthetic ECAM buffer is mapped, and native claims all refuse.
+            let mut dma = unsafe { crate::bus::dma::RegionAllocator::new(0..0) };
+            let devices = unsafe {
+                probe_with_provider(
+                    &handoff,
+                    PlatformCaptures::default(),
+                    &mut dma,
+                    handoff_provider(&handoff),
+                    Some(&services),
+                    None,
+                )
+            };
+            let address = Address {
+                segment: 0,
+                bus: 0,
+                device: 0,
+                function: 0,
+            };
+            assert!(devices.ehci_hosts.is_empty());
+            assert_eq!(ecam[1], 0);
+            assert_eq!(ecam[4], 0);
+            assert!(
+                !devices
+                    .platform_failures
+                    .iter()
+                    .any(|(name, _)| name.ends_with("EHCI handoff"))
+            );
+            if companion_refused {
+                assert!(services.preparations.borrow().is_empty());
+                assert!(matches!(
+                    devices.failures.as_slice(),
+                    [(found, Error::Native(ServiceError::Refused("EHCI companion handoff incomplete")))]
+                        if *found == address
+                ));
+            } else {
+                assert_eq!(*services.preparations.borrow(), [address]);
+                assert!(matches!(
+                    devices.failures.as_slice(),
+                    [(found, Error::Native(ServiceError::Unavailable))] if *found == address
+                ));
+            }
+        }
+    }
 
     #[test]
     fn unclaimed_host_classes_are_reported_and_others_ignored() {
