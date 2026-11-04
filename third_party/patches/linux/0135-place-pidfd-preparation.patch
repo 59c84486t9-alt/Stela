@@ -1,0 +1,175 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 00:12:07 -0500
+Subject: [PATCH] refactor(pidfs): place pidfd preparation with pidfs
+ allocation
+
+---
+ fs/pidfs.c    | 71 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ kernel/fork.c | 71 ---------------------------------------------------
+ 2 files changed, 71 insertions(+), 71 deletions(-)
+
+diff --git a/fs/pidfs.c b/fs/pidfs.c
+index 234a5036a84c163ed0a8f228bbc8cce6d861d5d3..90dfa22fc894be6b198de06ceb964f0d642f5e68 100644
+--- a/fs/pidfs.c
++++ b/fs/pidfs.c
+@@ -972,6 +972,77 @@ struct file *pidfs_alloc_file(struct pid *pid, unsigned int flags)
+ 	return pidfs_dentry_open(&path, flags, current_cred());
+ }
+ 
++/**
++ * pidfd_prepare - allocate a new pidfd_file and reserve a pidfd
++ * @pid:   the struct pid for which to create a pidfd
++ * @flags: flags of the new @pidfd
++ * @ret_file: return the new pidfs file
++ *
++ * Allocate a new file that stashes @pid and reserve a new pidfd number in the
++ * caller's file descriptor table. The pidfd is reserved but not installed yet.
++ *
++ * The helper verifies that @pid is still in use, without PIDFD_THREAD the
++ * task identified by @pid must be a thread-group leader.
++ *
++ * If this function returns successfully the caller is responsible to either
++ * call fd_install() passing the returned pidfd and pidfd file as arguments in
++ * order to install the pidfd into its file descriptor table or they must use
++ * put_unused_fd() and fput() on the returned pidfd and pidfd file
++ * respectively.
++ *
++ * This function is useful when a pidfd must already be reserved but there
++ * might still be points of failure afterwards and the caller wants to ensure
++ * that no pidfd is leaked into its file descriptor table.
++ *
++ * Return: On success, a reserved pidfd is returned from the function and a new
++ *         pidfd file is returned in the last argument to the function. On
++ *         error, a negative error code is returned from the function and the
++ *         last argument remains unchanged.
++ */
++int pidfd_prepare(struct pid *pid, unsigned int flags, struct file **ret_file)
++{
++	struct file *pidfs_file;
++
++	/*
++	 * PIDFD_STALE is only allowed to be passed if the caller knows
++	 * that @pid is already registered in pidfs and thus
++	 * PIDFD_INFO_EXIT information is guaranteed to be available.
++	 */
++	if (!(flags & PIDFD_STALE)) {
++		/*
++		 * While holding the pidfd waitqueue lock removing the
++		 * task linkage for the thread-group leader pid
++		 * (PIDTYPE_TGID) isn't possible. Thus, if there's still
++		 * task linkage for PIDTYPE_PID not having thread-group
++		 * leader linkage for the pid means it wasn't a
++		 * thread-group leader in the first place.
++		 */
++		guard(spinlock_irq)(&pid->wait_pidfd.lock);
++
++		/* Task has already been reaped. */
++		if (!pid_has_task(pid, PIDTYPE_PID))
++			return -ESRCH;
++		/*
++		 * If this struct pid isn't used as a thread-group
++		 * leader but the caller requested to create a
++		 * thread-group leader pidfd then report ENOENT.
++		 */
++		if (!(flags & PIDFD_THREAD) && !pid_has_task(pid, PIDTYPE_TGID))
++			return -ENOENT;
++	}
++
++	CLASS(get_unused_fd, pidfd)(O_CLOEXEC);
++	if (pidfd < 0)
++		return pidfd;
++
++	pidfs_file = pidfs_alloc_file(pid, flags | O_RDWR);
++	if (IS_ERR(pidfs_file))
++		return PTR_ERR(pidfs_file);
++
++	*ret_file = pidfs_file;
++	return take_fd(pidfd);
++}
++
+ void __init pidfs_init(void)
+ {
+ 	pidfs_init_ino_table();
+diff --git a/kernel/fork.c b/kernel/fork.c
+index d0c2aadb5c168a1a647415de3178fefe0521c6b6..747ce4c4e026e9d19a454b986c9f17bd2f44ef91 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -1608,77 +1608,6 @@ static inline void rcu_copy_process(struct task_struct *p)
+ #endif /* #ifdef CONFIG_TASKS_TRACE_RCU */
+ }
+ 
+-/**
+- * pidfd_prepare - allocate a new pidfd_file and reserve a pidfd
+- * @pid:   the struct pid for which to create a pidfd
+- * @flags: flags of the new @pidfd
+- * @ret_file: return the new pidfs file
+- *
+- * Allocate a new file that stashes @pid and reserve a new pidfd number in the
+- * caller's file descriptor table. The pidfd is reserved but not installed yet.
+- *
+- * The helper verifies that @pid is still in use, without PIDFD_THREAD the
+- * task identified by @pid must be a thread-group leader.
+- *
+- * If this function returns successfully the caller is responsible to either
+- * call fd_install() passing the returned pidfd and pidfd file as arguments in
+- * order to install the pidfd into its file descriptor table or they must use
+- * put_unused_fd() and fput() on the returned pidfd and pidfd file
+- * respectively.
+- *
+- * This function is useful when a pidfd must already be reserved but there
+- * might still be points of failure afterwards and the caller wants to ensure
+- * that no pidfd is leaked into its file descriptor table.
+- *
+- * Return: On success, a reserved pidfd is returned from the function and a new
+- *         pidfd file is returned in the last argument to the function. On
+- *         error, a negative error code is returned from the function and the
+- *         last argument remains unchanged.
+- */
+-int pidfd_prepare(struct pid *pid, unsigned int flags, struct file **ret_file)
+-{
+-	struct file *pidfs_file;
+-
+-	/*
+-	 * PIDFD_STALE is only allowed to be passed if the caller knows
+-	 * that @pid is already registered in pidfs and thus
+-	 * PIDFD_INFO_EXIT information is guaranteed to be available.
+-	 */
+-	if (!(flags & PIDFD_STALE)) {
+-		/*
+-		 * While holding the pidfd waitqueue lock removing the
+-		 * task linkage for the thread-group leader pid
+-		 * (PIDTYPE_TGID) isn't possible. Thus, if there's still
+-		 * task linkage for PIDTYPE_PID not having thread-group
+-		 * leader linkage for the pid means it wasn't a
+-		 * thread-group leader in the first place.
+-		 */
+-		guard(spinlock_irq)(&pid->wait_pidfd.lock);
+-
+-		/* Task has already been reaped. */
+-		if (!pid_has_task(pid, PIDTYPE_PID))
+-			return -ESRCH;
+-		/*
+-		 * If this struct pid isn't used as a thread-group
+-		 * leader but the caller requested to create a
+-		 * thread-group leader pidfd then report ENOENT.
+-		 */
+-		if (!(flags & PIDFD_THREAD) && !pid_has_task(pid, PIDTYPE_TGID))
+-			return -ENOENT;
+-	}
+-
+-	CLASS(get_unused_fd, pidfd)(O_CLOEXEC);
+-	if (pidfd < 0)
+-		return pidfd;
+-
+-	pidfs_file = pidfs_alloc_file(pid, flags | O_RDWR);
+-	if (IS_ERR(pidfs_file))
+-		return PTR_ERR(pidfs_file);
+-
+-	*ret_file = pidfs_file;
+-	return take_fd(pidfd);
+-}
+-
+ static void __delayed_free_task(struct rcu_head *rhp)
+ {
+ 	struct task_struct *tsk = container_of(rhp, struct task_struct, rcu);

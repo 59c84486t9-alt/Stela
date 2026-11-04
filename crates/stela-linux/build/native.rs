@@ -194,6 +194,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/name_hash.c")),
             PathBuf::from(format!("{LINUX}/fs/path_get.c")),
             PathBuf::from(format!("{LINUX}/fs/pidfs_metadata.c")),
+            PathBuf::from(format!("{LINUX}/fs/pidfs.c")),
             PathBuf::from(format!("{LINUX}/fs/filename.c")),
             PathBuf::from(format!("{LINUX}/fs/filp_close.c")),
             PathBuf::from(format!("{LINUX}/fs/path_open.c")),
