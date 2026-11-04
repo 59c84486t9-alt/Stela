@@ -7,6 +7,18 @@
 //! An interrupt only records its original epoch ([`IrqEvent::raise`]); the handlers
 //! run on the service task, which sleeps until a line is raised or the next
 //! timer is due (`compat/kernel/service.c`).
+#[cfg(all(
+    feature = "hosted-runtime",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
+mod hosted;
+#[cfg(all(
+    feature = "hosted-runtime",
+    target_os = "linux",
+    target_arch = "x86_64"
+))]
+pub use hosted::run_hosted_service;
 pub(crate) mod initial;
 mod timer;
 /// First exact terminal timer-service failure, retained for diagnostics.

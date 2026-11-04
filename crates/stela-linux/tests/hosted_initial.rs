@@ -152,6 +152,7 @@ impl Platform for Host {
 
 unsafe extern "C" {
     static init_task: u8;
+    static jiffies_64: u64;
     static system_wq: *const c_void;
     static sighand_cachep: *const c_void;
     fn stela_linux_current() -> *const u8;
@@ -294,6 +295,7 @@ fn hosted_initial_enters_the_original_task_without_native_admission() {
         "original hosted Initial attached",
         MODEL_PAGES,
         check_initial,
+        run_once,
     );
 }
 
@@ -304,7 +306,61 @@ fn hosted_initial_bootstraps_original_resource_roots() {
         "original hosted resource bootstrap returned",
         16 * 1024,
         check_resources,
+        run_once,
     );
+}
+
+#[test]
+fn hosted_initial_services_original_timers_after_a_park() {
+    in_fresh_process(
+        "hosted_initial_services_original_timers_after_a_park",
+        "original hosted timer service resumed",
+        16 * 1024,
+        start_timer_service,
+        drive_timer_service,
+    );
+}
+
+unsafe extern "C" fn start_timer_service(owner: *const RawOwner, context: *mut c_void) -> ! {
+    // SAFETY: exact retained original owner/current and dispatcher runtime handle.
+    let (owner, runtime) = unsafe { (&*owner, *context.cast::<Pin<&HostedRuntime<4>>>()) };
+    {
+        // SAFETY: this is the exact original Initial, before the C loop enters it.
+        let _entered = unsafe { Entered::new(owner) };
+        // SAFETY: entered original Initial with its model roots and clock kept.
+        unsafe { initialize_hosted_resources(owner) }.unwrap();
+    }
+    // SAFETY: original resources initialized and the previous guard has left.
+    unsafe { stela_linux::service::run_hosted_service(owner, runtime) }
+}
+
+fn run_once(runtime: Pin<&HostedRuntime<4>>, _: &HostedClock) {
+    runtime.step().unwrap();
+}
+
+fn drive_timer_service(runtime: Pin<&HostedRuntime<4>>, clock: &HostedClock) {
+    let raised = runtime.service_raised_work().unwrap();
+    raised.raise().unwrap();
+    assert!(runtime.step().unwrap());
+    assert!(
+        !runtime.step().unwrap(),
+        "original service should be parked"
+    );
+    // SAFETY: all original continuations are stopped on this dispatcher.
+    let initial = unsafe { ptr::read_volatile(&raw const jiffies_64) };
+    let deadline = clock.now_ns().unwrap() + 30_000_000;
+    runtime.set_service_timer(Some(deadline)).unwrap();
+    while !runtime.step_or_idle().unwrap() {}
+    assert!(clock.now_ns().unwrap() >= deadline);
+    // SAFETY: the original timer phases returned and Initial parked again.
+    let resumed = unsafe { ptr::read_volatile(&raw const jiffies_64) };
+    assert!(
+        resumed.wrapping_sub(initial) > 0,
+        "original jiffy clock did not advance"
+    );
+    assert!(!runtime.step().unwrap());
+    println!("original hosted timer service resumed");
+    process::exit(0);
 }
 
 fn in_fresh_process(
@@ -312,6 +368,7 @@ fn in_fresh_process(
     witness: &str,
     page_count: usize,
     body: unsafe extern "C" fn(*const RawOwner, *mut c_void) -> !,
+    drive: fn(Pin<&HostedRuntime<4>>, &HostedClock),
 ) {
     const CHILD: &str = "STELA_HOSTED_INITIAL_CHILD";
     if std::env::var_os(CHILD).is_none() {
@@ -369,7 +426,7 @@ fn in_fresh_process(
         .read_exact(&mut seed)
         .unwrap();
     let platform = Host {
-        clock,
+        clock: clock.clone(),
         timer: runtime.service_raised_work().unwrap(),
         tsc_hz: NonZeroU64::new(hz.try_into().unwrap()).unwrap(),
         realtime,
@@ -382,6 +439,6 @@ fn in_fresh_process(
         unsafe { HostedTaskBinding::start_initial(runtime, platform, page_count, body, context) }
             .unwrap();
     assert_eq!(queue.completed(ticket), Ok(false));
-    runtime.step().unwrap();
-    panic!("the original Initial returned to its dispatcher");
+    drive(runtime, &clock);
+    panic!("the original Initial check returned to its dispatcher");
 }
