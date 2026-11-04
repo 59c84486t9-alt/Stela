@@ -5,6 +5,84 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 #[test]
+fn indexed_load_store_pair_shares_checked_address_with_distinct_fault_rows() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features, RecoverySiteKind},
+        x86_64::MemoryChecks,
+    };
+    let words = [0xb877_6907u32, 0xb837_6911]; // LDR W7,[X8,X23]; STR W17,[X8,X23]
+    let pc = GuestAddress(0x100008014);
+    let compile = |words: &[u32], pc, profile, target, checks| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let options = Options::new(profile, target).with_memory_checks(checks);
+        CompilationPlan::new(&source, pc, &options)
+            .unwrap()
+            .compile()
+            .unwrap()
+    };
+    let target = TargetCpu::Baseline;
+    let direct = MemoryChecks::DEFAULT;
+    let ordinary = BlockProfile::ORDINARY;
+    let system = BlockProfile::new(Features::SYSTEM_MODE);
+    let dit = target.with_data_independent_timing();
+    for profile in [ordinary, system] {
+        let grouped = compile(&words, pc, profile, target, direct);
+        let old = compile(&words, pc, profile, dit, direct);
+        assert!(grouped.native.x86_64_code.len() < old.native.x86_64_code.len());
+        let second = grouped.native.source_map[1];
+        assert_eq!(second.0, GuestAddress(pc.0 + 4));
+        let standalone = compile(&words[1..], second.0, profile, target, direct);
+        assert_eq!(standalone.native.source_map, [(second.0, 0)]);
+        assert!(
+            !grouped.native.x86_64_code[second.1..]
+                .starts_with(&standalone.native.x86_64_code[..3])
+        );
+        if profile == system {
+            let rows = &grouped.fault_recovery;
+            let accesses: Vec<_> = rows
+                .iter()
+                .filter(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+                .collect();
+            assert_eq!(accesses.len(), 2);
+            assert_eq!(accesses[0].retirement.instruction_pc(), pc);
+            assert_eq!(accesses[0].retirement.retired_before(), 0);
+            assert!(accesses[0].end <= second.1);
+            assert_eq!(accesses[1].retirement.instruction_pc(), second.0);
+            assert_eq!(accesses[1].retirement.retired_before(), 1);
+            assert!(accesses[1].start >= second.1);
+            let failures: Vec<_> = rows
+                .iter()
+                .filter(|row| row.site.kind() == RecoverySiteKind::GuestCheck)
+                .collect();
+            assert_eq!(failures.len(), 1);
+            assert_eq!(failures[0].retirement.instruction_pc(), pc);
+            let mut mask = Code::pinned();
+            super::super::unreachable_if(&mut mask.asm(), Cond::A);
+            let preceding = &grouped.native.x86_64_code[..accesses[0].start];
+            assert!(preceding.ends_with(&mask[..]));
+        }
+    }
+
+    // Replacing the index with the load result invalidates the pair.
+    let alias = [words[0] & !31 | 23, words[1]];
+    let grouped = compile(&alias, pc, ordinary, target, direct);
+    let fallback = compile(&alias, pc, ordinary, dit, direct);
+    assert_eq!(
+        grouped.native.x86_64_code.len(),
+        fallback.native.x86_64_code.len()
+    );
+    for checks in [
+        MemoryChecks::system(true, false, true, true),
+        direct.with_translation(0x1000),
+    ] {
+        let grouped = compile(&words, pc, system, target, checks);
+        let fallback = compile(&words, pc, system, dit, checks);
+        assert_eq!(grouped.native.x86_64_code, fallback.native.x86_64_code);
+    }
+}
+
+#[test]
 fn pinned_carry_run_commits_flags_once_before_the_next_guest_fault() {
     use crate::{
         Options, TargetCpu,

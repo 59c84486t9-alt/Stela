@@ -3,22 +3,82 @@ use super::{
     Access, AddressMode, MemoryTransfer, Register, Shift, Width, memory_address, memory_store,
     right_operand,
 };
-use crate::aarch64::register_offset::{IndexExtend, Operand};
 use crate::x86_64::asm::{Alu, Code, Gpr, Mem, ShiftOp, Size};
+use crate::{
+    GuestAddress,
+    aarch64::{
+        Instruction, Operation,
+        register_offset::{IndexExtend, Operand},
+    },
+};
+use alloc::vec::Vec;
 
 pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChecks) {
     address(
         code,
         checks,
-        IndexedAddress::new(operand.base, operand.index, operand.extend, operand.shift),
+        IndexedAddress::of(operand),
         operand.bytes,
         operand.transfer == MemoryTransfer::Store,
     );
-    transfer(code, operand);
+    let scratch = if code.is_pinned() || !code.constant_time() {
+        Gpr::Rax
+    } else {
+        Gpr::Rcx
+    };
+    transfer(code, operand, scratch);
+}
+
+/// An adjacent load and store may keep their exact effective address, but
+/// both accesses and the first load's architectural result stay separate.
+pub(super) fn emit_load_store(
+    code: &mut Code,
+    source_map: &mut Vec<(GuestAddress, usize)>,
+    instructions: &[Instruction],
+    checks: super::MemoryChecks,
+) -> bool {
+    debug_assert!(!checks.checks_every_access() && !code.constant_time());
+    let Some([load, store]) = instructions.first_chunk() else {
+        return false;
+    };
+    let (Operation::MemoryRegisterOffset(first), Operation::MemoryRegisterOffset(second)) =
+        (load.operation, store.operation)
+    else {
+        return false;
+    };
+    let address = IndexedAddress::of(&first);
+    if !matches!(first.transfer, MemoryTransfer::Load { .. })
+        || second.transfer != MemoryTransfer::Store
+        || first.bytes != second.bytes
+        || address != IndexedAddress::of(&second)
+        || (code.is_pinned() && !checks.guest_range)
+        || matches!(first.base, Register::Sp)
+        || matches!(first.index, Register::Zero)
+        || first.data == first.base
+        || first.data == first.index
+        || load.pc.0.checked_add(4) != Some(store.pc.0)
+    {
+        return false;
+    }
+    source_map.push((load.pc, code.len()));
+    code.set_instruction(source_map.len() - 1);
+    emit_address(
+        code,
+        checks,
+        address,
+        first.bytes,
+        Access::of(false, first.bytes.into()),
+        true,
+    );
+    transfer(code, &first, Gpr::Rcx);
+    source_map.push((store.pc, code.len()));
+    code.set_instruction(source_map.len() - 1);
+    transfer(code, &second, Gpr::Rcx);
+    true
 }
 
 /// A decoded base, index extension and scale.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct IndexedAddress {
     base: Register,
     index: Register,
@@ -27,6 +87,10 @@ pub(super) struct IndexedAddress {
 }
 
 impl IndexedAddress {
+    const fn of(operand: &Operand) -> Self {
+        Self::new(operand.base, operand.index, operand.extend, operand.shift)
+    }
+
     pub(super) const fn new(
         base: Register,
         index: Register,
@@ -52,6 +116,24 @@ pub(super) fn address(
     bytes: u8,
     write: bool,
 ) {
+    emit_address(
+        code,
+        checks,
+        address,
+        bytes,
+        Access::of(write, bytes.into()),
+        false,
+    );
+}
+
+fn emit_address(
+    code: &mut Code,
+    checks: super::MemoryChecks,
+    address: IndexedAddress,
+    bytes: u8,
+    access: Access,
+    shared: bool,
+) {
     let IndexedAddress {
         base,
         index,
@@ -65,7 +147,6 @@ pub(super) fn address(
         guest_range: false,
         ..checks
     };
-    let access = Access::of(write, bytes.into());
     if let (Some(host), false) = (
         code.host(base),
         checks.alignment || checks.checks_every_access(),
@@ -78,6 +159,11 @@ pub(super) fn address(
         index_add(code, index, extend, shift);
         if checks.guest_range {
             checks.range.emit_base(code, Gpr::Rax);
+            if shared {
+                // Retain the first #UD site and make both operands depend
+                // on its range result even if its branch is mispredicted.
+                super::unreachable_if(&mut code.asm(), super::asm::Cond::A);
+            }
         }
         return;
     }
@@ -130,7 +216,7 @@ pub(crate) fn index_add(code: &mut Code, index: Register, extend: IndexExtend, s
     );
 }
 
-fn transfer(code: &mut Code, operand: &Operand) {
+fn transfer(code: &mut Code, operand: &Operand, load_scratch: Gpr) {
     match operand.transfer {
         MemoryTransfer::Store => {
             let source = match code.host(operand.data) {
@@ -147,12 +233,7 @@ fn transfer(code: &mut Code, operand: &Operand) {
             let address = Mem::base(Gpr::Rax, 0);
             // The result may replace the address in RAX. This leaves it
             // available to the next instruction, with no base writeback.
-            let scratch = if code.is_pinned() || !code.constant_time() {
-                Gpr::Rax
-            } else {
-                Gpr::Rcx
-            };
-            let host = code.host(operand.data).unwrap_or(scratch);
+            let host = code.host(operand.data).unwrap_or(load_scratch);
             let mut asm = code.asm();
             asm.guest_access(|asm| match (operand.bytes, signed) {
                 (1, false) => asm.movzx(size, host, Size::Byte, address),
@@ -167,7 +248,7 @@ fn transfer(code: &mut Code, operand: &Operand) {
                 _ => unreachable!("decoder validates signed register-offset size"),
             });
             // A load to ZR still accesses memory and can fault.
-            if host == scratch
+            if host == load_scratch
                 && let Some(data) = asm.guest(operand.data)
             {
                 asm.mov_store(Size::Qword, data, host);

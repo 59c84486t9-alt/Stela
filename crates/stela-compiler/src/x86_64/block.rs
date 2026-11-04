@@ -439,6 +439,23 @@ fn emit_selected(
                 }
             }
         }
+        if (pinned || fuse_pairs)
+            && !code.constant_time()
+            && !checks.checks_every_access()
+            && matches!(
+                instructions[cursor].operation,
+                Operation::MemoryRegisterOffset(_)
+            )
+            && super::register_offset::emit_load_store(
+                code,
+                &mut block.source_map,
+                &instructions[cursor..],
+                checks_at(cursor),
+            )
+        {
+            cursor += 2;
+            continue;
+        }
         // Build the new candidate privately. Rejection leaves both cursor and
         // output untouched, so the legacy clean-load chunk partition is exact.
         if optimize_regions
