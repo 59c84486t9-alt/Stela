@@ -22,6 +22,7 @@ pub(crate) struct Prepared {
     line: LineRoute,
     power: HostPower,
     irq: u32,
+    legacy_pic: bool,
 }
 impl Prepared {
     /// # Safety
@@ -37,6 +38,12 @@ impl Prepared {
         }
         let routing = mmio.routing().map_err(|_| IrqError::Route)?;
         let line = routing.sci(mmio.fadt()).map_err(|_| IrqError::Route)?;
+        // SCI_INT is the original source number. MADT's override changes
+        // its IOAPIC GSI without changing the legacy PIC input.
+        let fadt = mmio.fadt();
+        let irq = u32::from(u16::from_le_bytes([fadt[46], fadt[47]]));
+        let legacy_pic = routing.has_legacy_pic();
+        require_pic_masked(legacy_pic, irq)?;
         let mut units = Vec::new();
         for descriptor in &routing.units {
             // SAFETY: the caller grants the complete IOAPIC handoff.
@@ -53,10 +60,6 @@ impl Prepared {
             .find(|(descriptor, _)| *descriptor == owner)
             .map(|(_, unit)| unit)
             .ok_or(IrqError::Route)?;
-        // SCI_INT is the legacy source number ACPICA passes to install_interrupt;
-        // MADT's override determines the physical GSI separately.
-        let fadt = mmio.fadt();
-        let irq = u32::from(u16::from_le_bytes([fadt[46], fadt[47]]));
         // SAFETY: former firmware route and contributors are owned by caller.
         unsafe { unit.mask_unclaimed(line.gsi) }?;
         Ok(Self {
@@ -64,6 +67,7 @@ impl Prepared {
             line,
             power,
             irq,
+            legacy_pic,
         })
     }
 
@@ -79,6 +83,7 @@ impl Prepared {
         handler: Interrupt,
         argument: *mut c_void,
     ) -> Result<Armed, IrqError> {
+        require_pic_masked(self.legacy_pic, self.irq)?;
         let pending = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(AtomicBool::new(false));
         let devices = Sources::new(self.power);
@@ -101,6 +106,23 @@ impl Prepared {
             argument: argument as usize,
         })
     }
+}
+
+fn require_pic_masked(legacy_pic: bool, irq: u32) -> Result<(), IrqError> {
+    if legacy_pic && irq < 16 {
+        native_irq::NativePlatform::current()?;
+        if crate::engine::host::in_interrupt() {
+            return Err(IrqError::WrongCpu);
+        }
+        let port = if irq < 8 { 0x21 } else { 0xa1 };
+        // SAFETY: MADT identifies an original PC/AT PIC. Reading its mask
+        // neither programs the controller nor acknowledges an interrupt.
+        let mask = unsafe { super::in8(port) };
+        if mask & (1 << (irq & 7)) == 0 {
+            return Err(IrqError::Mask);
+        }
+    }
+    Ok(())
 }
 
 struct Enable {

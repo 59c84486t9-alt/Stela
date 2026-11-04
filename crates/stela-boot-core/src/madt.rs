@@ -37,6 +37,7 @@ pub struct Routing {
     pub units: Vec<Unit>,
     overrides: Vec<Override>,
     nmis: Vec<u32>,
+    legacy_pic: bool,
 }
 fn word(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes(b[o..o + 2].try_into().unwrap())
@@ -89,13 +90,15 @@ impl Routing {
         }
         let madt = table(madt, b"APIC", 44)?;
         // The PC/AT compatibility flag is the only currently defined bit.
-        if dword(madt, 40) & !1 != 0 {
+        let flags = dword(madt, 40);
+        if flags & !1 != 0 {
             return Err(RouteError::InvalidTable);
         }
         let mut routing = Self {
             units: Vec::new(),
             overrides: Vec::new(),
             nmis: Vec::new(),
+            legacy_pic: flags & 1 != 0,
         };
         let mut lapic_override = false;
         let mut offset = 44;
@@ -190,6 +193,10 @@ impl Routing {
             return Err(RouteError::MissingUnit);
         }
         Ok(routing)
+    }
+
+    pub fn has_legacy_pic(&self) -> bool {
+        self.legacy_pic
     }
 
     pub fn isa(&self, irq: u8) -> Result<LineRoute, RouteError> {
@@ -302,6 +309,17 @@ mod tests {
         let mut b = vec![0; 116];
         b[46..48].copy_from_slice(&irq.to_le_bytes());
         finish(b, b"FACP")
+    }
+    #[test]
+    fn pc_at_compatibility_reports_the_independent_legacy_pic() {
+        let mut table = madt(&[]);
+        assert!(!Routing::parse(&table, 48).unwrap().has_legacy_pic());
+        table[40] = 1;
+        assert!(
+            Routing::parse(&finish(table, b"APIC"), 48)
+                .unwrap()
+                .has_legacy_pic()
+        );
     }
     #[test]
     fn sci_override_conform_means_low_level_while_isa_is_high_edge() {
