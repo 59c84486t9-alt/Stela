@@ -243,6 +243,38 @@ fn completed_command_error_is_distinct_from_unresolved_dma() {
 }
 
 #[test]
+fn synchronous_read_changes_the_caller_only_after_success() {
+    let _clock = crate::test_clock::virtualize();
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let mut data = [0x11; 512];
+    {
+        let mut controller = disk.controller.borrow_mut();
+        controller.bounce.bytes_mut()[..512].fill(0x42);
+        controller.io.completions.write(8, 1u32 << 16 | 1);
+        controller.io.completions.write(12, 1u32 << 16 | 1);
+    }
+    disk.read(0, &mut data).unwrap();
+    assert_eq!(data, [0x42; 512]);
+    {
+        let mut controller = disk.controller.borrow_mut();
+        controller.bounce.bytes_mut()[..512].fill(0x87);
+        controller.io.completions.write(16 + 8, 1u32 << 16 | 2);
+        controller
+            .io
+            .completions
+            .write(16 + 12, (STATUS_DO_NOT_RETRY | 2) << 17 | 1 << 16 | 2);
+    }
+    assert_eq!(
+        disk.read(1, &mut data),
+        Err(BlockError::Device {
+            status: STATUS_DO_NOT_RETRY | 2
+        })
+    );
+    assert_eq!(data, [0x42; 512]);
+}
+
+#[test]
 fn a_fatal_controller_is_reset_first_and_poisons_when_it_stays_fatal() {
     let mut fixture = Fixture::new();
     fixture
@@ -473,6 +505,68 @@ fn queued_commands_run_together_and_complete_in_any_order() {
     }
     assert!(!disk.room());
     assert!(disk.start(Command::Flush).is_err());
+}
+
+#[test]
+fn borrowed_read_does_not_consume_another_tags_owned_result() {
+    let _clock = crate::test_clock::virtualize();
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let first = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+    let second = disk.start(Command::Read { lba: 1, bytes: 512 }).unwrap();
+    let mut controller = disk.controller.borrow_mut();
+    let mut data = [0x11; 512];
+    let id = running_id(&controller, first);
+    controller.slot(first as usize).0.bytes_mut()[..512].fill(0x42);
+    post(&mut controller, id, 0);
+    assert_eq!(
+        controller.finish_into(second as usize, Some(&mut data)),
+        None
+    );
+    assert_eq!(data, [0x11; 512]);
+    controller.slot(first as usize).0.bytes_mut()[..512].fill(0x87);
+    let id = running_id(&controller, second);
+    controller.slot(second as usize).0.bytes_mut()[..512].fill(0x5a);
+    post(&mut controller, id, 0);
+    assert_eq!(
+        controller.finish_into(second as usize, Some(&mut data)),
+        Some(Ok(None))
+    );
+    assert_eq!(data, [0x5a; 512]);
+    assert_eq!(
+        controller.finish(first as usize),
+        Some(Ok(Some(vec![0x42; 512])))
+    );
+}
+
+#[test]
+fn a_completed_borrowed_read_survives_a_later_cq_fault() {
+    let _clock = crate::test_clock::virtualize();
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let read = disk.start(Command::Read { lba: 0, bytes: 512 }).unwrap();
+    let other = disk.start(Command::Flush).unwrap();
+    let mut controller = disk.controller.borrow_mut();
+    let id = running_id(&controller, read);
+    controller.slot(read as usize).0.bytes_mut()[..512].fill(0x5a);
+    post(&mut controller, id, 0);
+    let other_id = running_id(&controller, other);
+    controller.io.completions.write(16 + 8, 2u32 << 16 | 2);
+    controller
+        .io
+        .completions
+        .write(16 + 12, 1u32 << 16 | u32::from(other_id));
+    let mut data = [0x11; 512];
+    assert_eq!(
+        controller.finish_into(read as usize, Some(&mut data)),
+        Some(Ok(None))
+    );
+    assert_eq!(data, [0x5a; 512]);
+    assert_eq!(controller.io.head, 1);
+    assert_eq!(
+        controller.finish(other as usize),
+        Some(Err(BlockError::Device { status: 0xffff }))
+    );
 }
 
 #[test]

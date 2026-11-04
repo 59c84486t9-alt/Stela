@@ -1154,12 +1154,16 @@ impl Namespace {
 
     /// Run `command` alone once rescanned, waiting for it.
     fn command(&mut self, command: Command) -> Finished {
+        self.command_to(command, None)
+    }
+
+    fn command_to(&mut self, command: Command, destination: Option<&mut [u8]>) -> Finished {
         let controller = self.controller.clone();
         let mut controller = controller.borrow_mut();
         self.rescan(&mut controller)?;
         let command = command.within(&self.identity, 0)?;
         let block = self.identity.block_size as usize;
-        controller.run(self.namespace, block, command)
+        controller.run(self.namespace, block, command, destination)
     }
 
     fn write_with(&mut self, lba: u64, data: &[u8], fua: bool) -> Result<(), BlockError> {
@@ -1185,8 +1189,7 @@ impl BlockDevice for Namespace {
         for (index, part) in buffer.chunks_mut(chunk).enumerate() {
             let lba = lba + (index * chunk / block) as u64;
             let bytes = part.len();
-            let data = self.command(Command::Read { lba, bytes })?;
-            part.copy_from_slice(&data.unwrap_or_default()[..bytes]);
+            self.command_to(Command::Read { lba, bytes }, Some(part))?;
         }
         Ok(())
     }

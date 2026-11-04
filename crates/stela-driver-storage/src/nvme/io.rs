@@ -3,6 +3,13 @@
 
 use super::*;
 
+/// Borrowed only during a synchronous poll. The controller's tags and DMA
+/// descriptors never retain the caller's buffer.
+struct ReadDestination<'a> {
+    tag: usize,
+    bytes: &'a mut [u8],
+}
+
 impl Controller {
     /// Before the CPU takes back memory a completion released: an owned
     /// controller's completion counts only while its registers answer
@@ -279,7 +286,13 @@ impl Controller {
     /// Run `command` of `namespace` once every queued command ended, and
     /// wait for it. A fatal controller is reset before it is sent, as
     /// Linux's timeout handling would reset it.
-    pub(super) fn run(&mut self, namespace: u32, block: usize, command: Command) -> Finished {
+    pub(super) fn run(
+        &mut self,
+        namespace: u32,
+        block: usize,
+        command: Command,
+        mut destination: Option<&mut [u8]>,
+    ) -> Finished {
         self.ready()?;
         self.settle()?;
         match self.registers.read32(STATUS)? {
@@ -292,7 +305,7 @@ impl Controller {
         }
         let tag = self.start(namespace, block, command)? as usize;
         loop {
-            if let Some(result) = self.finish(tag) {
+            if let Some(result) = self.finish_into(tag, destination.as_deref_mut()) {
                 return result;
             }
             crate::waiting();
@@ -337,6 +350,10 @@ impl Controller {
     /// retries, check the running commands' deadlines and move a reset on;
     /// never waits.
     pub(super) fn advance(&mut self) {
+        self.advance_into(None);
+    }
+
+    fn advance_into(&mut self, mut destination: Option<ReadDestination<'_>>) {
         if self.fault.is_some() {
             self.fail_all();
             return;
@@ -376,7 +393,7 @@ impl Controller {
                         self.fail_all();
                         return;
                     }
-                    if !self.complete(id, status, sq_head) {
+                    if !self.complete(id, status, sq_head, &mut destination) {
                         // A completion for no running command, or for one the
                         // controller had not fetched: the queue is corrupt.
                         // It stays unretired.
@@ -454,7 +471,13 @@ impl Controller {
     /// without Do Not Retry and retries left, runs it again after the delay
     /// its Command Retry Delay selects (`nvme_decide_disposition`). Whether
     /// a running command matched.
-    pub(super) fn complete(&mut self, id: u16, status: u32, head: u16) -> bool {
+    fn complete(
+        &mut self,
+        id: u16,
+        status: u32,
+        head: u16,
+        destination: &mut Option<ReadDestination<'_>>,
+    ) -> bool {
         let io = &self.io;
         // NVMe SQHD is a snapshot when the CQE is created, not the completed
         // command's slot (Base 1.1, section 4.6). A fetched command may remain
@@ -506,7 +529,15 @@ impl Controller {
                 }
             }
             (Ok(()), 0, Command::Read { bytes, .. }) => {
-                Tag::Done(Ok(Some(self.slot(tag).0.bytes()[..bytes].to_vec())))
+                let data = &self.slot(tag).0.bytes()[..bytes];
+                if let Some(read) = destination.as_mut().filter(|read| read.tag == tag) {
+                    // Reset and Identify can reuse tag 0's bounce once this
+                    // completion is reaped, even before its result is taken.
+                    read.bytes.copy_from_slice(data);
+                    Tag::Done(Ok(None))
+                } else {
+                    Tag::Done(Ok(Some(data.to_vec())))
+                }
             }
             (Ok(()), 0, _) => Tag::Done(Ok(None)),
             (Ok(()), status, _) => Tag::Done(Err(BlockError::Device { status })),
@@ -516,10 +547,18 @@ impl Controller {
 
     /// Tag `tag`'s result once its command completed; never waits.
     pub(super) fn finish(&mut self, tag: usize) -> Option<Finished> {
+        self.finish_into(tag, None)
+    }
+
+    pub(super) fn finish_into(
+        &mut self,
+        tag: usize,
+        destination: Option<&mut [u8]>,
+    ) -> Option<Finished> {
         // An earlier poll can reap several completions. Only a tag whose
         // result is still pending needs another pass over the queues.
         if !matches!(self.tags.get(tag), Some(Tag::Done(_))) {
-            self.advance();
+            self.advance_into(destination.map(|bytes| ReadDestination { tag, bytes }));
         }
         if !matches!(self.tags.get(tag)?, Tag::Done(_)) {
             return None;
