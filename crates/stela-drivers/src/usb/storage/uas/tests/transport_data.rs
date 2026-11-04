@@ -149,3 +149,36 @@ fn terminal_status_before_data_completion_still_waits_for_data() {
     assert!(last_status < data);
     assert!(state.active.is_empty());
 }
+
+#[test]
+fn synchronous_read_exposes_only_complete_successful_data() {
+    for streams in [None, Some(2)] {
+        for fault in [
+            Fault::StatusBeforeData,
+            Fault::CommandLast,
+            Fault::ShortData,
+            Fault::ErrorAfterReady,
+            Fault::CancelError,
+        ] {
+            let mut memory = vec![0u64; 32 * 1024];
+            let (io, mut dma) = model(&mut memory, 512, true, fault);
+            let state = io.state.clone();
+            state.borrow_mut().streams = streams;
+            let mut engine = Engine::new(io, &mut dma).unwrap();
+            let mut output = [0xa5; 512];
+            let result = engine.read_into([0; 8], &rw(true, output.len()), &mut output);
+            if matches!(fault, Fault::StatusBeforeData | Fault::CommandLast) {
+                assert_eq!(result, Ok(()));
+                assert_eq!(output, [0x6d; 512]);
+            } else {
+                assert!(result.is_err(), "{fault:?}");
+                assert_eq!(output, [0xa5; 512]);
+            }
+            assert_eq!(engine.poisoned, fault == Fault::CancelError);
+            assert_eq!(
+                state.borrow().active.is_empty(),
+                fault != Fault::CancelError
+            );
+        }
+    }
+}
