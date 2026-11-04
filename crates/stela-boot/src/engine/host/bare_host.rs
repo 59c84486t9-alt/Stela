@@ -83,6 +83,21 @@ impl Host for BareHost<'_> {
         })
     }
 
+    fn read_ram_descriptor(&mut self, physical: u64) -> Option<u64> {
+        super::super::speculation::fence();
+        if let Some(ram) = &state().registered_ram {
+            return ram.read_descriptor(physical).ok();
+        }
+        let (host, bytes) = state().run(physical)?;
+        if bytes < 8 || !host.is_multiple_of(8) {
+            return None;
+        }
+        // SAFETY: this aligned descriptor fits in one live RAM run and
+        // the physical window maps the entire run. No Rust reference to
+        // guest memory is formed.
+        Some(unsafe { (layout::physical(host) as *const u64).read_volatile() })
+    }
+
     fn write_ram(&mut self, physical: u64, data: &[u8]) -> bool {
         if let Some(ram) = &state().registered_ram {
             // SAFETY: private copyout staging; the canonical owner performs

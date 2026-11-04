@@ -60,6 +60,14 @@ pub trait Host {
 
     /// Read guest RAM. False when any byte is not RAM.
     fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool;
+
+    /// Read an aligned, little-endian guest page-table descriptor.
+    fn read_ram_descriptor(&mut self, physical: u64) -> Option<u64> {
+        let mut bytes = [0; 8];
+        self.read_ram(physical, &mut bytes)
+            .then(|| u64::from_le_bytes(bytes))
+    }
+
     /// Write guest RAM. False when any byte is not RAM.
     fn write_ram(&mut self, physical: u64, data: &[u8]) -> bool;
     /// Store `new` at `physical` if guest RAM there holds `expected`, in one

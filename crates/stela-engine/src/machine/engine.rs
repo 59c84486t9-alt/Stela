@@ -1107,10 +1107,7 @@ struct RamTables<'a, H: Host>(&'a mut H);
 
 impl<H: Host> mmu::TableMemory for RamTables<'_, H> {
     fn read_descriptor(&mut self, physical: u64) -> Option<u64> {
-        let mut bytes = [0; 8];
-        self.0
-            .read_ram(physical, &mut bytes)
-            .then(|| u64::from_le_bytes(bytes))
+        self.0.read_ram_descriptor(physical)
     }
 
     fn update_descriptor(&mut self, physical: u64, old: u64, new: u64) -> Option<bool> {
