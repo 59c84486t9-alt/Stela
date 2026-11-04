@@ -277,6 +277,7 @@ mod tests {
     fn each_entry_accounts_for_its_own_image_metadata_and_alignment_slop() {
         // Private layout/extent model only, not a CPU owner or save.
         let owner = XstateOwner {
+            #[cfg(target_arch = "x86_64")]
             processor: 0,
             layout: layout(),
             _local: PhantomData,
