@@ -14,8 +14,7 @@ use stela_compiler::block::CompiledBlock;
 
 /// A block as compiled, with its complete admitted input and the
 /// preparation that compiled it: immutable once made, so the store and every
-/// PE that installs it share one. Its fault recovery rows are qualified; a
-/// stored record's block has none until its owner qualifies them.
+/// PE that installs it share one. Its fault recovery rows are qualified.
 #[derive(Debug, Clone)]
 pub(super) struct Emission {
     pub(super) input: Vec<u8>,
