@@ -134,11 +134,48 @@ struct Mapping {
     coherent: bool,
 }
 
+#[derive(Debug)]
+enum CommandBuffers {
+    One(vk::CommandBuffer),
+    Many(Vec<vk::CommandBuffer>),
+}
+
+impl CommandBuffers {
+    /// The pool belongs to this device and is used only by the caller.
+    fn allocate(device: &ash::Device, pool: vk::CommandPool, count: u32) -> Result<Self> {
+        let info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(count);
+        if count == 1 {
+            let mut buffer = vk::CommandBuffer::null();
+            // SAFETY: one writable handle is sufficient for the requested count.
+            unsafe {
+                (device.fp_v1_0().allocate_command_buffers)(device.handle(), &info, &mut buffer)
+            }
+            .result()
+            .map_err(failure)?;
+            return Ok(Self::One(buffer));
+        }
+        // SAFETY: ash provides output space for the requested count.
+        unsafe { device.allocate_command_buffers(&info) }
+            .map(Self::Many)
+            .map_err(failure)
+    }
+
+    fn as_slice(&self) -> &[vk::CommandBuffer] {
+        match self {
+            Self::One(buffer) => core::slice::from_ref(buffer),
+            Self::Many(buffers) => buffers,
+        }
+    }
+}
+
 /// Command buffers of one submission, freed once the queue's timeline
 /// passes `value`.
 #[derive(Debug)]
 struct InFlight {
-    buffers: Vec<vk::CommandBuffer>,
+    buffers: CommandBuffers,
     timeline: vk::Semaphore,
     value: u64,
 }
@@ -712,13 +749,31 @@ impl NativeBackend {
         if ready == 0 {
             return Ok(());
         }
-        let mut completed = self.in_flight.drain(..ready);
-        let mut buffers = completed.next().expect("a ready submission").buffers;
-        buffers.extend(completed.flat_map(|entry| entry.buffers));
+        let buffers = if ready == 1 {
+            self.in_flight
+                .pop_front()
+                .expect("a ready submission")
+                .buffers
+        } else {
+            let mut completed = self.in_flight.drain(..ready);
+            let first = completed.next().expect("a ready submission").buffers;
+            let mut buffers = match first {
+                CommandBuffers::One(buffer) => {
+                    let mut buffers = Vec::with_capacity(ready);
+                    buffers.push(buffer);
+                    buffers
+                }
+                CommandBuffers::Many(buffers) => buffers,
+            };
+            for entry in completed {
+                buffers.extend_from_slice(entry.buffers.as_slice());
+            }
+            CommandBuffers::Many(buffers)
+        };
         // SAFETY: the queue finished every command buffer in `buffers`.
         unsafe {
             self.device
-                .free_command_buffers(self.command_pool, &buffers)
+                .free_command_buffers(self.command_pool, buffers.as_slice())
         };
         Ok(())
     }
@@ -1415,15 +1470,12 @@ impl Backend for NativeBackend {
         if segments.is_empty() {
             return Ok(());
         }
-        let info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(self.command_pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(segments.len() as u32);
-        // SAFETY: the pool belongs to this device and is used only here.
-        let buffers = unsafe { self.device.allocate_command_buffers(&info) }.map_err(failure)?;
+        let buffers =
+            CommandBuffers::allocate(&self.device, self.command_pool, segments.len() as u32)?;
+        let handles = buffers.as_slice();
         let new_images = core::mem::take(&mut self.new_images);
         let recorded =
-            buffers
+            handles
                 .iter()
                 .zip(segments)
                 .enumerate()
@@ -1431,12 +1483,12 @@ impl Backend for NativeBackend {
                     let adopt = if index == 0 { &new_images[..] } else { &[] };
                     record::segment(self, buffer, adopt, segment)
                 });
-        let submitted = recorded.and_then(|()| self.queue_segments(segments, &buffers));
+        let submitted = recorded.and_then(|()| self.queue_segments(segments, handles));
         if let Err(error) = submitted {
             // Some segments may have reached the queue. A failed idle query
             // leaves their buffers owned by the command pool until device
             // teardown can prove idleness.
-            let _ = free_after_idle(&self.device, self.queue, self.command_pool, &buffers);
+            let _ = free_after_idle(&self.device, self.queue, self.command_pool, handles);
             self.new_images = new_images;
             return Err(error);
         }
@@ -1451,7 +1503,7 @@ impl Backend for NativeBackend {
             // Without a completion signal the buffers are free only once the
             // queue idles.
             None => {
-                free_after_idle(&self.device, self.queue, self.command_pool, &buffers)?;
+                free_after_idle(&self.device, self.queue, self.command_pool, handles)?;
             }
         }
         Ok(())

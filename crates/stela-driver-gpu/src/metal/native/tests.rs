@@ -1,4 +1,4 @@
-use super::{InFlight, failure, objects};
+use super::{CommandBuffers, InFlight, failure, objects};
 use crate::metal::{
     binding::HeapArray,
     error::Error,
@@ -27,13 +27,13 @@ fn in_flight_retirement_observes_a_timeline_once_per_ready_run() {
         .map(|value| InFlight {
             timeline: main,
             value,
-            buffers: Vec::new(),
+            buffers: CommandBuffers::One(vk::CommandBuffer::null()),
         })
         .collect();
     flights.push_back(InFlight {
         timeline: sparse_step,
         value: 1,
-        buffers: Vec::new(),
+        buffers: CommandBuffers::One(vk::CommandBuffer::null()),
     });
     let mut queries = Vec::new();
     assert_eq!(
