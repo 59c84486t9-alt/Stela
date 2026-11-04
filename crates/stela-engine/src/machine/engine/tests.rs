@@ -7133,6 +7133,11 @@ fn watched_pages_exit_and_matching_accesses_take_ec_0x35() {
     machine.sync_regime();
     let watch = machine.host.regimes.last().unwrap().watch;
     assert!(watch.blocks(BASE) && !watch.blocks(BASE + 0x1000));
+    assert!(watch.overlaps(BASE, BASE + 0x3fff));
+    assert!(!watch.overlaps(BASE + 0x1000, BASE + 0x3fff));
+    let mut passing = watch;
+    passing.pass[0] = Some(BASE);
+    assert!(passing.overlaps(BASE, BASE + 0x3fff) && !passing.blocks(BASE));
     machine.cpu.state.x[0] = BASE + 0x100;
     let watched = |address, write, offset| {
         NativeExit::Fault(NativeFault {
