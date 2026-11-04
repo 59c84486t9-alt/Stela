@@ -7,7 +7,7 @@ use stela_contracts::refuse;
 use stela_drivers::{
     Handoff,
     audio::{
-        Direction, PcmFormat,
+        Direction, PcmFormat, Timer as AudioTimer,
         hda::{
             AnalogRoute, CodecGraph, Controller, PinOptions, StreamId, Verb, Vref, WidgetKind, pci,
         },
@@ -80,7 +80,7 @@ fn route(graph: &CodecGraph, direction: Direction) -> Result<AnalogRoute> {
 /// is already enabled. It does not configure or credit function-group power.
 /// A missing mandatory D0 capability remains an explicit strict-route failure.
 /// This uses graph/readback data and never identifies an emulator.
-fn bind_transport<R: stela_drivers::audio::hda::Registers, T: Timer>(
+fn bind_transport<R: stela_drivers::audio::hda::Registers, T: AudioTimer>(
     controller: &mut Controller<R, T>,
     graph: &CodecGraph,
     route: &AnalogRoute,
@@ -173,7 +173,8 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<()> {
             return Err(refuse!("audio ECAM window is not mapped"));
         }
         // SAFETY: mapped and exclusively owned as required by the caller.
-        let all = unsafe { Function::enumerate(window) };
+        let all = unsafe { Function::enumerate(window) }
+            .map_err(|error| refuse!("audio PCI inventory: {error}", ?error))?;
         // A GPU's display-audio function (Linux `get_bound_vga`: function 0
         // of the same device is a display controller) has no analog route.
         let display = |function: &Function| {
@@ -202,7 +203,10 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<()> {
         ));
     }
     let mut function = functions.remove(0);
-    let bar = function.bars()[0].ok_or(refuse!("HDA has no BAR0"))?;
+    let bars = function
+        .bars()
+        .map_err(|error| refuse!("HDA BAR sizing: {error}", %error))?;
+    let bar = bars[0].ok_or(refuse!("HDA has no BAR0"))?;
     let range = bar.memory().ok_or(refuse!("HDA BAR0 is not memory"))?;
     if !handoff.is_mapped(&range) {
         return Err(refuse!("HDA BAR0 was not mapped uncached"));

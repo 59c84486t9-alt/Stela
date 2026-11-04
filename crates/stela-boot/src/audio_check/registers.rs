@@ -46,8 +46,13 @@ impl Observed {
             let base = u64::from(registers.read32(base_low))
                 | u64::from(registers.read32(base_low + 4)) << 32;
             let index = u64::from(registers.read16(pointer) & 0xff);
-            let start = base.saturating_add(index * stride);
-            if start >= dma.start && start.saturating_add(stride) <= dma.end {
+            let Some(start) = base.checked_add(index * stride) else {
+                continue;
+            };
+            if start.is_multiple_of(4)
+                && start >= dma.start
+                && start.checked_add(stride).is_some_and(|end| end <= dma.end)
+            {
                 // SAFETY: live coherent ring inside our reserved DMA range,
                 // naturally aligned; no CPU driver call overlaps this.
                 let value = unsafe { (start as *const u32).read_volatile() };
@@ -65,6 +70,10 @@ impl Observed {
 }
 
 impl Registers for Observed {
+    fn region_bytes(&self) -> usize {
+        self.0.borrow().region_bytes()
+    }
+
     fn read8(&mut self, offset: usize) -> u8 {
         self.0.borrow_mut().read8(offset)
     }
