@@ -662,7 +662,7 @@ impl Experiment {
                 "the restore inventory's block hashes were not loaded"
             ))?;
             store
-                .adopt_block_hashes(blocks)
+                .adopt_static_block_hashes(blocks)
                 .map_err(|error| refuse!("restore block hashes: {error}", %error))?;
         }
         let mut answers = Answers::new(store);

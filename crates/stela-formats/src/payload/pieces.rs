@@ -11,7 +11,7 @@
 //! before the restore starts. A block that differs is refused with its
 //! piece's name.
 use super::{Layout, PayloadError, PayloadManifest, ReadAt, piece_name};
-use alloc::{format, vec::Vec};
+use alloc::{borrow::Cow, format, vec::Vec};
 use stela_crypto::Sha256;
 use stela_crypto::digest::Digest;
 
@@ -49,7 +49,7 @@ pub struct Joined<R> {
     parts: Vec<Part>,
     total: u64,
     block_bytes: u64,
-    hashes: Vec<[u8; 32]>,
+    hashes: Cow<'static, [[u8; 32]]>,
     cached: Option<CachedBlock>,
 }
 
@@ -63,6 +63,28 @@ impl<R: ReadAt> Joined<R> {
         manifest: &PayloadManifest,
         extents: Vec<Vec<Extent>>,
         hashes: &[u8],
+    ) -> Result<Self, PayloadError> {
+        Self::with_hashes(device, manifest, extents, hashes, |blocks| {
+            Cow::Owned(blocks.to_vec())
+        })
+    }
+
+    /// Join pieces using an immutable hash file that outlives the reader.
+    pub fn from_static_hashes(
+        device: R,
+        manifest: &PayloadManifest,
+        extents: Vec<Vec<Extent>>,
+        hashes: &'static [u8],
+    ) -> Result<Self, PayloadError> {
+        Self::with_hashes(device, manifest, extents, hashes, Cow::Borrowed)
+    }
+
+    fn with_hashes<'a>(
+        device: R,
+        manifest: &PayloadManifest,
+        extents: Vec<Vec<Extent>>,
+        hashes: &'a [u8],
+        retain: impl FnOnce(&'a [[u8; 32]]) -> Cow<'static, [[u8; 32]]>,
     ) -> Result<Self, PayloadError> {
         let Layout::Pieces {
             pieces,
@@ -132,7 +154,7 @@ impl<R: ReadAt> Joined<R> {
             parts,
             total: start,
             block_bytes: block_hashes.block_bytes,
-            hashes: hashes.as_chunks::<32>().0.to_vec(),
+            hashes: retain(hashes.as_chunks::<32>().0),
             cached: None,
         })
     }
@@ -392,7 +414,12 @@ mod tests {
         let (mut device, manifest, extents, hashes) = medium(&ipsw, 3072);
         let corrupt = 2 * BLOCK;
         device.0[(extents[0][0].offset + corrupt) as usize] ^= 1;
-        let mut joined = Joined::new(device, &manifest, extents, &hashes).unwrap();
+        let hashes = alloc::boxed::Box::leak(hashes.into_boxed_slice());
+        let mut joined = Joined::from_static_hashes(device, &manifest, extents, hashes).unwrap();
+        assert!(core::ptr::eq(
+            joined.hashes.as_ref(),
+            hashes.as_chunks::<32>().0
+        ));
         let mut data = [0xee; 3072];
         let error = joined.read_at(0, &mut data).unwrap_err();
         assert_eq!(

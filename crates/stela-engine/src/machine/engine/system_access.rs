@@ -10,12 +10,14 @@ pub(super) struct DecodeCache([Option<(u32, SystemOperation)>; Self::SLOTS]);
 
 impl Default for DecodeCache {
     fn default() -> Self {
-        Self([None; Self::SLOTS])
+        // Copy the immutable empty table rather than building a temporary
+        // on each worker's stack.
+        const { Self([None; Self::SLOTS]) }
     }
 }
 
 impl DecodeCache {
-    const SLOTS: usize = 64;
+    const SLOTS: usize = 512;
 
     fn operation(&mut self, pc: u64, word: u32) -> Option<SystemOperation> {
         let slot = (word.wrapping_mul(0x9e37_79b9) >> (u32::BITS - Self::SLOTS.ilog2())) as usize;
