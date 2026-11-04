@@ -156,7 +156,7 @@ impl Layout {
                 target_os = "linux",
                 target_arch = "x86_64"
             ))]
-            Self::HostedService => stacks == 3 && jobs >= 2,
+            Self::HostedService => stacks >= 3 && jobs >= 2,
             Self::FirmwareControl => stacks >= 6 && jobs >= 3,
             Self::NativeFirmware16 => stacks == 16 && jobs >= 16,
             Self::NativeFirmware16Protected(gpe) => {

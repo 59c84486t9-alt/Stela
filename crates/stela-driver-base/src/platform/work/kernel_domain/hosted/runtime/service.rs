@@ -167,7 +167,8 @@ mod tests {
         let runtime = unsafe { Pin::new_unchecked(&*consumer.runtime.get()) };
         let domain = DomainRef::borrow_hosted(runtime).unwrap();
         assert_eq!(domain.hosted_segment().unwrap().check(), Ok(()));
-        assert_eq!(runtime.current.get(), 2);
+        assert_eq!(runtime.current.get(), 3);
+        assert_eq!(runtime.service_current(), Ok(true));
         assert!(batch.raised());
         assert_eq!(runtime.validate_service_batch(batch), Ok(()));
         let deliveries = consumer.deliveries.get();
@@ -192,12 +193,14 @@ mod tests {
             runtime: Cell::new(ptr::null()),
             deliveries: Cell::new(0),
         };
+        let stack = StackRequirement::exact(16 * 1024, 16 * 1024, PAGE).unwrap();
         // SAFETY: the consumer and static callbacks remain alive through this
         // bounded run. No callback unwinds or changes shadow-stack state.
         let executor = unsafe {
-            HostedExecutor::new_with_service(
+            HostedExecutor::new_with_service_stacks(
                 queue.clone(),
-                16,
+                stack,
+                2,
                 deadlines,
                 consume,
                 ptr::from_ref(&consumer).cast_mut().cast(),

@@ -8,7 +8,7 @@ use core::{
     ops::Range,
     ptr::NonNull,
 };
-const PAGE: usize = 4096;
+pub(super) const PAGE: usize = 4096;
 unsafe extern "C" {
     fn mmap(
         address: *mut c_void,

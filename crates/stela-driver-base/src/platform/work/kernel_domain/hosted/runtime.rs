@@ -1,7 +1,8 @@
 //! Linux userspace continuations with distinct guarded mmap stacks.
-use super::{HostedDeadlines, HostedPages, HostedQueue, WorkError, std};
+use super::{HostedDeadlines, HostedPages, HostedQueue, WorkError, memory::PAGE, std};
 use crate::platform::work::{
-    Continuation, Lane, Layout, NONE, TaskContext, TaskState, context, stack_requirement::Geometry,
+    Continuation, Lane, Layout, NONE, StackRequirement, TaskContext, TaskState, context,
+    stack_requirement::Geometry,
 };
 use alloc::{boxed::Box, rc::Rc, sync::Arc, vec::Vec};
 use core::{
@@ -47,6 +48,11 @@ pub struct HostedRuntime<const N: usize> {
 }
 
 impl<const N: usize> HostedExecutor<N> {
+    fn default_stack(pages: usize) -> Result<StackRequirement, WorkError> {
+        let bytes = pages.checked_mul(PAGE).ok_or(WorkError::InvalidStack)?;
+        StackRequirement::exact(bytes, PAGE, PAGE)
+    }
+
     /// Allocate exclusive guarded stacks for General and Notify callbacks.
     ///
     /// # Safety
@@ -54,7 +60,20 @@ impl<const N: usize> HostedExecutor<N> {
     /// jump across the switch boundary. The original thread must keep shadow
     /// stacks disabled while this executor can run, including in callbacks.
     pub unsafe fn new(queue: Arc<HostedQueue<N>>, stack_pages: usize) -> Result<Self, WorkError> {
-        Self::build(queue, stack_pages, None)
+        Self::build(queue, Self::default_stack(stack_pages)?, 1, None)
+    }
+
+    /// Allocate guarded General continuations and one reserved Notify stack.
+    /// Each actual mmap backing meets the caller's source stack requirement.
+    ///
+    /// # Safety
+    /// Same lifetime, unwind and thread requirements as `new`.
+    pub unsafe fn new_with_stacks(
+        queue: Arc<HostedQueue<N>>,
+        stack: StackRequirement,
+        general_stacks: usize,
+    ) -> Result<Self, WorkError> {
+        Self::build(queue, stack, general_stacks, None)
     }
 
     /// Add one guarded service stack and reserve one queue slot for its work.
@@ -71,31 +90,59 @@ impl<const N: usize> HostedExecutor<N> {
         callback: HostedServiceCallback,
         context: *mut c_void,
     ) -> Result<Self, WorkError> {
+        // SAFETY: the caller supplies the same service and callback lifetimes.
+        unsafe {
+            Self::new_with_service_stacks(
+                queue,
+                Self::default_stack(stack_pages)?,
+                1,
+                deadlines,
+                callback,
+                context,
+            )
+        }
+    }
+
+    /// Add the original reserved service lane to an explicit stack layout.
+    ///
+    /// # Safety
+    /// Same lifetime, unwind and thread requirements as `new_with_service`.
+    pub unsafe fn new_with_service_stacks(
+        queue: Arc<HostedQueue<N>>,
+        stack: StackRequirement,
+        general_stacks: usize,
+        deadlines: HostedDeadlines,
+        callback: HostedServiceCallback,
+        context: *mut c_void,
+    ) -> Result<Self, WorkError> {
         Self::build(
             queue,
-            stack_pages,
+            stack,
+            general_stacks,
             Some(Service::new(deadlines, callback, context)),
         )
     }
 
     fn build(
         queue: Arc<HostedQueue<N>>,
-        stack_pages: usize,
+        stack: StackRequirement,
+        general_stacks: usize,
         service: Option<Service>,
     ) -> Result<Self, WorkError> {
         queue.execution.check_current()?;
-        let (layout, count) = if let Some(service) = &service {
+        let layout = if let Some(service) = &service {
             if !service.same_execution(&queue.execution) {
                 return Err(WorkError::InvalidTicket);
             }
-            (Layout::HostedService, 3)
+            Layout::HostedService
         } else {
-            (Layout::Ordinary, 2)
+            Layout::Ordinary
         };
+        let count = general_stacks
+            .checked_add(1 + usize::from(service.is_some()))
+            .filter(|count| general_stacks != 0 && *count <= layout.stack_limit())
+            .ok_or(WorkError::InvalidStack)?;
         layout.validate(count, N)?;
-        if stack_pages < 4 {
-            return Err(WorkError::InvalidStack);
-        }
         // This switch backend uses RET with a replacement RSP. Linux reports
         // the actual shadow-stack state of this thread through arch_prctl.
         let mut features = 0u64;
@@ -115,8 +162,13 @@ impl<const N: usize> HostedExecutor<N> {
         // SAFETY: reads the current thread's user-accessible FP controls.
         let controls = unsafe { context::read_controls() };
         let task = |lane| {
-            let pages = HostedPages::allocate(&queue.execution, stack_pages, 4096, 1)
-                .map_err(|_| WorkError::InvalidStack)?;
+            let pages = HostedPages::allocate(
+                &queue.execution,
+                stack.usable_bytes() / PAGE,
+                stack.alignment().max(PAGE),
+                stack.minimum_guard_bytes() / PAGE,
+            )
+            .map_err(|_| WorkError::InvalidStack)?;
             let start = pages
                 .cpu_address(0, 1)
                 .map_err(|_| WorkError::InvalidStack)?
@@ -144,7 +196,9 @@ impl<const N: usize> HostedExecutor<N> {
         tasks
             .try_reserve_exact(count)
             .map_err(|_| WorkError::Full)?;
-        tasks.push(task(Lane::General)?);
+        for _ in 0..general_stacks {
+            tasks.push(task(Lane::General)?);
+        }
         tasks.push(task(Lane::Notify)?);
         if service.is_some() {
             tasks.push(task(Lane::Service)?);
@@ -418,36 +472,40 @@ mod tests {
 
     struct Call<'a> {
         runtime: Pin<&'a HostedRuntime<4>>,
-        lane: usize,
+        slot: usize,
         visits: &'a Cell<u32>,
     }
     unsafe extern "C" fn run(raw: *mut c_void) {
         // SAFETY: the test retains this call and runtime through dispatch.
         let call = unsafe { &*raw.cast::<Call<'_>>() };
-        assert_eq!(call.runtime.current.get(), call.lane);
+        assert_eq!(call.runtime.current.get(), call.slot);
         let domain = DomainRef::borrow_hosted(call.runtime).unwrap();
         let segment = domain.hosted_segment().unwrap();
         assert!(segment.matches(&domain));
         assert_eq!(segment.check(), Ok(()));
         assert_eq!(domain.dispatcher_successor(), Err(WorkError::Busy));
         // SAFETY: only this task runs, and the borrow ends before yielding.
-        let bounds = unsafe { &(*call.runtime.task(call.lane)).stack.bounds };
-        assert!(bounds.contains(&context::stack_pointer()));
+        let current = domain.current_context().unwrap();
+        assert!((current.stack_start..current.stack_end).contains(&context::stack_pointer()));
+        assert_eq!(current.stack_end - current.stack_start, 16 * 1024);
+        assert_eq!(current.stack_start % (16 * 1024), 0);
+        assert_eq!(current.guard_end - current.guard_start, 2 * PAGE);
         call.visits
-            .set(call.visits.get() * 10 + call.lane as u32 + 1);
-        if call.lane == 0 {
+            .set(call.visits.get() * 10 + call.slot as u32 + 1);
+        if call.slot == 0 {
             call.runtime.yield_now().unwrap();
             assert_eq!(segment.check(), Err(WorkError::InvalidTicket));
             assert_eq!(domain.hosted_segment().unwrap().check(), Ok(()));
-            call.visits.set(call.visits.get() * 10 + 3);
+            call.visits.set(call.visits.get() * 10 + 4);
         }
     }
 
     #[test]
     fn callbacks_resume_on_their_owned_stacks_and_retire_after_return() {
         let queue = HostedQueue::new(HostedExecution::new(), Arc::new(())).unwrap();
+        let stack = StackRequirement::exact(16 * 1024, 16 * 1024, 2 * PAGE).unwrap();
         // SAFETY: bounded callbacks with no shadow-stack changes or unwinds.
-        let executor = unsafe { HostedExecutor::<4>::new(queue.clone(), 16) }.unwrap();
+        let executor = unsafe { HostedExecutor::new_with_stacks(queue.clone(), stack, 2) }.unwrap();
         let runtime = executor.runtime();
         let domain = DomainRef::borrow_hosted(runtime).unwrap();
         assert_eq!(domain.dispatcher_successor(), Ok(()));
@@ -456,27 +514,31 @@ mod tests {
             Err(WorkError::Unavailable)
         ));
         let visits = Cell::new(0);
-        let general = Call {
+        let first = Call {
             runtime,
-            lane: 0,
+            slot: 0,
+            visits: &visits,
+        };
+        let second = Call {
+            runtime,
+            slot: 1,
             visits: &visits,
         };
         let notify = Call {
             runtime,
-            lane: 1,
+            slot: 2,
             visits: &visits,
         };
-        // SAFETY: both call contexts stay on the dispatcher's live stack
+        // SAFETY: call contexts stay on the dispatcher's live stack
         // until their tickets complete, and their contents remain valid.
-        let general_ticket = unsafe {
-            queue.execute(
-                Kind::General,
-                run,
-                ptr::from_ref(&general).cast_mut().cast(),
-            )
-        }
-        .unwrap();
-        // SAFETY: same lifetime as the General call above.
+        let general_ticket =
+            unsafe { queue.execute(Kind::General, run, ptr::from_ref(&first).cast_mut().cast()) }
+                .unwrap();
+        // SAFETY: same lifetime as the first General call.
+        let second_ticket =
+            unsafe { queue.execute(Kind::General, run, ptr::from_ref(&second).cast_mut().cast()) }
+                .unwrap();
+        // SAFETY: same lifetime as the General calls above.
         let notify_ticket =
             unsafe { queue.execute(Kind::Notify, run, ptr::from_ref(&notify).cast_mut().cast()) }
                 .unwrap();
@@ -486,14 +548,16 @@ mod tests {
         assert!(!queue.completed(general_ticket).unwrap());
         assert_eq!(runtime.retire(), Err(WorkError::Busy));
         assert!(runtime.step().unwrap());
+        assert!(queue.completed(second_ticket).unwrap());
+        assert!(runtime.step().unwrap());
         assert!(queue.completed(notify_ticket).unwrap());
         assert!(runtime.step().unwrap());
         assert!(queue.completed(general_ticket).unwrap());
-        assert_eq!(visits.get(), 123);
+        assert_eq!(visits.get(), 1234);
         assert!(!runtime.step().unwrap());
         runtime.retire().unwrap();
         assert_eq!(domain.check(), Err(WorkError::Closed));
-        // SAFETY: the only producer closed and both callbacks have returned.
+        // SAFETY: the only producer closed and every callback returned.
         unsafe { queue.retire() }.unwrap();
     }
 }
