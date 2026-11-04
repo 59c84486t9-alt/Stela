@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2026 Stela contributors
-//! Owned VT-d remapped MSI routes and terminal, non-reused interrupt indexes.
+//! Owned VT-d interrupt modes and terminal, non-reused remapped MSI indexes.
 //! Intel VT-d D51397-017 sections 5.1, 6.5.2 and 6.5.5 define the formats
 //! and IEC/Wait drain. A fence drains old mapped deliveries, not upstream
 //! requests; blocked indexes and their original root therefore remain held.
@@ -29,6 +29,75 @@ const TABLE_SIZE: u64 = 7;
 // fault for intentionally delayed old traffic (VT-d 5.0 sections 5.1.4.1, 9.9).
 // Unqualified faults and live-entry source checking remain fully enabled.
 const BLOCKED_ENTRY: u64 = 1 << 1;
+
+/// Keeps this original unit in direct interrupt-delivery mode. An all-unit
+/// source owner must retain every such pin to admit platform notification.
+pub struct DirectDelivery<R: Registers> {
+    unit: Arc<Unit<R>>,
+    root: u64,
+    valid: AtomicBool,
+}
+
+impl<R: Registers> DirectDelivery<R> {
+    /// Verify the same original DMA root and direct delivery format.
+    ///
+    /// # Safety
+    /// The caller has checked its actual retained CPU/root scope. The
+    /// original register mapping supports lock-free reads in this context,
+    /// including hard IRQ when used for IRQ notification.
+    pub unsafe fn check(&self) -> Result<(), VtdError> {
+        if !self.valid.load(Ordering::Acquire) {
+            return Err(VtdError::Busy);
+        }
+        if let Err(error) = self.unit.check_direct_delivery(self.root) {
+            self.valid.store(false, Ordering::Release);
+            return Err(error);
+        }
+        if !self.valid.load(Ordering::Acquire) {
+            return Err(VtdError::Busy);
+        }
+        Ok(())
+    }
+}
+
+impl<R: Registers> Drop for DirectDelivery<R> {
+    fn drop(&mut self) {
+        // No hardware effect or teardown permission. On a lost mode/root
+        // observation keep the unit closed to later mode changes.
+        if *self.valid.get_mut() {
+            self.unit.direct_delivery.store(false, Ordering::Release);
+        }
+    }
+}
+
+impl<R: Registers> InitialBlock<R> {
+    /// Pin direct interrupt format on this same original blocked unit.
+    /// This grants neither a route nor the whole platform's format.
+    ///
+    /// # Safety
+    /// The caller is in the original process/root context and keeps the
+    /// original unit mapping and exclusive mode/reset ownership.
+    pub unsafe fn pin_direct_delivery(&self) -> Result<DirectDelivery<R>, VtdError> {
+        let unit = &self.unit;
+        let mut guard = unit.lock();
+        let state = guard.state();
+        if state.shutdown
+            || state.poisoned
+            || unit.direct_delivery.load(Ordering::Acquire)
+            || unit.with_interrupts(|irq| irq.is_some())
+        {
+            return Err(VtdError::Busy);
+        }
+        let root = state.root.physical();
+        unit.check_direct_delivery(root)?;
+        unit.direct_delivery.store(true, Ordering::Release);
+        Ok(DirectDelivery {
+            unit: unit.clone(),
+            root,
+            valid: AtomicBool::new(true),
+        })
+    }
+}
 
 /// Immutable context endpoint shared from the original whole-root owner.
 ///
@@ -302,6 +371,20 @@ impl Drop for State {
 }
 
 impl<R: Registers> Unit<R> {
+    fn check_direct_delivery(&self, root: u64) -> Result<(), VtdError> {
+        let status = self.registers.read32(GSTS);
+        if status == u32::MAX {
+            return Err(VtdError::RegisterRead);
+        }
+        if status & (TRANSLATION | ROOT_POINTER | QUEUED_INVALIDATION | INTERRUPT_REMAP)
+            != TRANSLATION | ROOT_POINTER
+            || self.registers.read64(RTADDR) != root
+        {
+            return Err(VtdError::Unsupported);
+        }
+        Ok(())
+    }
+
     /// Install a retained pre-arming whole-root policy; never a DMA-only grant.
     ///
     /// # Safety
@@ -326,7 +409,11 @@ impl<R: Registers> Unit<R> {
         let mut guard = self.lock();
         let state = guard.state();
         let preflight = (|| {
-            if state.shutdown || state.poisoned || self.with_interrupts(|irq| irq.is_some()) {
+            if state.shutdown
+                || state.poisoned
+                || self.direct_delivery.load(Ordering::Acquire)
+                || self.with_interrupts(|irq| irq.is_some())
+            {
                 return Err(VtdError::Busy);
             }
             owner.check()?;

@@ -17,6 +17,7 @@ use crate::{
         InactiveFirmwareUnits, dmar,
         firmware_state::Kind,
         requester::RequesterClaim,
+        vtd::interrupt::DirectDelivery,
         vtd::{BlockedRequester, BoundRequester, InitialBlock, MmioRegisters, Unit, VtdError},
     },
     native_mmio, output,
@@ -66,6 +67,28 @@ struct BlockedFabric {
 }
 
 impl BlockedFabric {
+    /// Observe every original unit in the same direct-delivery epoch. The
+    /// caller may hold the pins across a later IRQ handoff.
+    ///
+    /// # Safety
+    /// The original Source is mapped on the owning process CPU and excludes
+    /// register/reset writers. No native interrupt-format change is in flight.
+    unsafe fn pin_direct_delivery(&self) -> Result<Vec<DirectDelivery<MmioRegisters>>, VtdError> {
+        let mut pins = Vec::new();
+        pins.try_reserve_exact(self.units.len())
+            .map_err(|_| VtdError::Exhausted)?;
+        for (_, cohort) in &self.units {
+            // SAFETY: caller holds this exact mounted source and process root.
+            pins.push(unsafe { cohort.pin_direct_delivery() }?);
+        }
+        for pin in &pins {
+            // SAFETY: same mounted context. All original units remain pinned
+            // until the complete cohort has been checked.
+            unsafe { pin.check() }?;
+        }
+        Ok(pins)
+    }
+
     fn requester(
         &self,
         source: &native_mmio::Source,
@@ -353,14 +376,26 @@ impl Remappers {
             && inactive_firmware_units.matches_dmar(&parsed.units)
             && covered == pci.functions()
         {
-            remappers.initial_fabric = Some(BlockedFabric {
+            let fabric = BlockedFabric {
                 source: mmio,
                 units: cohorts,
-            });
-            output::arguments(format_args!(
-                "HOST IOMMU VT-d blocked PCI fabric qualified: {} units, {covered} functions\n",
-                parsed.units.len()
-            ));
+            };
+            // SAFETY: same original exclusive mount context as unit takeover.
+            // This startup check publishes no IRQ route. The pins release
+            // before later independent IRQ-mode selection.
+            match unsafe { fabric.pin_direct_delivery() } {
+                Ok(pins) => {
+                    drop(pins);
+                    remappers.initial_fabric = Some(fabric);
+                    output::arguments(format_args!(
+                        "HOST IOMMU VT-d blocked PCI fabric qualified: {} units, {covered} functions\n",
+                        parsed.units.len()
+                    ));
+                }
+                Err(error) => output::arguments(format_args!(
+                    "HOST IOMMU VT-d initial interrupt mode refused: {error:?}\n"
+                )),
+            }
         } else if !parsed.units.is_empty() {
             output::arguments(format_args!(
                 "HOST IOMMU VT-d blocked PCI fabric incomplete: {}/{} units, {covered}/{} functions\n",

@@ -142,6 +142,71 @@ fn fence(route: &mut Route<RegistersPeer>) -> Result<(), VtdError> {
 }
 
 #[test]
+fn direct_delivery_pin_excludes_mode_change_and_unit_shutdown() {
+    let f = Fixture::new(true);
+    let blocked = f.unit.acknowledge_initial_block(&[SID]).unwrap();
+    // SAFETY: exclusive isolated fixture, original process/root and register bank.
+    let direct = unsafe { blocked.pin_direct_delivery() }.unwrap();
+    let writes = f.registers.0.lock().unwrap().writes.len();
+    // SAFETY: this model stays in its original context throughout the check.
+    assert!(unsafe { direct.check() }.is_ok());
+    // SAFETY: same isolated model, with no live source that could race a change.
+    let enable = unsafe {
+        f.unit
+            .enable_interrupt_remapping(Box::new(RootGrant(f.root.clone())))
+    };
+    assert!(matches!(
+        enable,
+        Err(EnableFailure {
+            error: VtdError::Busy,
+            returned: Some(_)
+        })
+    ));
+    // SAFETY: all model requesters are stopped; the live direct pin must still refuse.
+    let shutdown = unsafe { f.unit.shut_down() };
+    assert_eq!(shutdown, Err(VtdError::Busy));
+    // SAFETY: same original isolated fixture, second admission must refuse.
+    let duplicate = unsafe { blocked.pin_direct_delivery() };
+    assert!(matches!(duplicate, Err(VtdError::Busy)));
+    assert_eq!(f.registers.0.lock().unwrap().writes.len(), writes);
+    drop(direct);
+    f.enable();
+    // SAFETY: the fixture owns the remapped unit and has no live routes.
+    unsafe { f.unit.shut_down() }.unwrap();
+}
+
+#[test]
+fn direct_delivery_latches_changed_original_hardware_root() {
+    let f = Fixture::new(true);
+    let blocked = f.unit.acknowledge_initial_block(&[SID]).unwrap();
+    // SAFETY: exclusive isolated fixture, original process/root and register bank.
+    let direct = unsafe { blocked.pin_direct_delivery() }.unwrap();
+    let original = f.unit.registers.read64(RTADDR);
+    f.registers
+        .0
+        .lock()
+        .unwrap()
+        .values
+        .insert(RTADDR, original + PAGE as u64);
+    // SAFETY: same held original register allocation; the model changed its live reply.
+    let lost = unsafe { direct.check() };
+    assert_eq!(lost, Err(VtdError::Unsupported));
+    f.registers
+        .0
+        .lock()
+        .unwrap()
+        .values
+        .insert(RTADDR, original);
+    // SAFETY: same held model; a later matching read cannot clear the refusal.
+    let replay = unsafe { direct.check() };
+    assert_eq!(replay, Err(VtdError::Busy));
+    drop(direct);
+    // SAFETY: the original model's active root is still kept; must refuse shutdown.
+    let shutdown = unsafe { f.unit.shut_down() };
+    assert_eq!(shutdown, Err(VtdError::Busy));
+}
+
+#[test]
 fn exact_sid_remapped_message_has_independent_index_and_cpu_vector() {
     let f = Fixture::new(true);
     f.enable();

@@ -391,6 +391,8 @@ pub struct Unit<R: Registers> {
     registers: ManuallyDrop<R>,
     // Persistent GCMD controls only; one-shot SRTP/SIRTP/WBF are never saved.
     command: AtomicU32,
+    /// Acquired under the Unit lock. Released without I/O by the exact pin.
+    direct_delivery: AtomicBool,
     interrupts: ManuallyDrop<UnsafeCell<Option<interrupt::State>>>,
     ecap: u64,
     source: &'static (dyn PageSource + Sync),
@@ -404,8 +406,9 @@ pub struct Unit<R: Registers> {
     table_cacheline: Option<usize>,
 }
 
-// SAFETY: all mutable state/register accesses use the acquire/release lock.
-// IRQ reentry and platform ownership changes are excluded by construction.
+// SAFETY: mutable state and register writes use the acquire/release lock.
+// The direct-delivery pin permits only IRQ-safe register observation with
+// the original root and mode frozen; platform ownership changes are excluded.
 unsafe impl<R: Registers> Sync for Unit<R> {}
 
 enum InitialState {
@@ -634,6 +637,7 @@ impl<R: Registers> Unit<R> {
         let unit = Arc::new(Self {
             registers: ManuallyDrop::new(registers),
             command: AtomicU32::new(0),
+            direct_delivery: AtomicBool::new(false),
             interrupts: ManuallyDrop::new(UnsafeCell::new(None)),
             ecap,
             source,
@@ -1192,7 +1196,7 @@ impl<R: Registers> Unit<R> {
         if state.shutdown {
             return Ok(());
         }
-        if !state.domains.is_empty() {
+        if self.direct_delivery.load(Ordering::Acquire) || !state.domains.is_empty() {
             return Err(VtdError::Busy);
         }
         self.interrupt_shutdown_ready()?;

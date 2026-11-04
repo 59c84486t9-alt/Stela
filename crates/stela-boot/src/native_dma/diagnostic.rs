@@ -980,6 +980,25 @@ impl Prepared<UnpublishedFunction> {
         let blocked = unit
             .acknowledge_initial_block(&requesters)
             .map_err(|error| refuse!("fixture blocked VT-d cohort: {error}", ?error))?;
+        // SAFETY: the fixture owns this exact stopped original unit, and
+        // holds its uncached register mapping on the exclusive boot CPU.
+        let direct = unsafe { blocked.pin_direct_delivery() }
+            .map_err(|error| refuse!("fixture direct VT-d mode: {error}", ?error))?;
+        // SAFETY: same actual original CPU and root as acquisition.
+        unsafe { direct.check() }
+            .map_err(|error| refuse!("fixture direct VT-d mode readback: {error}", ?error))?;
+        // SAFETY: this exact cohort is stopped and blocked, no routes or
+        // drivers have published, and a live mode pin must bar shutdown.
+        let shutdown = unsafe { unit.shut_down() };
+        if shutdown != Err(super::vtd::VtdError::Busy) {
+            return Err(refuse!(
+                "fixture VT-d shutdown bypassed the direct mode pin"
+            ));
+        }
+        drop(direct);
+        crate::output::arguments(format_args!(
+            "CHECK VT-d direct mode retained original root; live pin refused shutdown\n"
+        ));
         Ok((unit, blocked, table_walk_coherent))
     }
 }
