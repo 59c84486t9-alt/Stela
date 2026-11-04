@@ -37,10 +37,11 @@ fn legacy_first_fault_qualification_is_cached_and_reports_dispatcher_cost() {
     );
 }
 
-use super::super::{Prepared, prepare};
-use super::{Emission, Template};
+use super::super::{Offer, Prepared, prepare};
+use super::{Emission, StoredOrigin, Template};
+use crate::translations::{Digest, Record, translator_id};
 use alloc::{sync::Arc, vec::Vec};
-use stela_compiler::block::{FaultRecovery, RecoveryBinding, UnqualifiedFaultRecovery};
+use stela_compiler::block::{FaultRecovery, RecoveryBinding};
 
 fn store_window() -> (
     Arc<super::Preparation>,
@@ -90,25 +91,44 @@ fn a_compiled_owner_keeps_only_its_packed_rows() {
 
 #[test]
 fn exact_lazy_qualification_replaces_portable_bank_with_only_minted_rows() {
-    let (preparation, source, compiled) = store_window();
-    let expected = compiled.fault_recovery.clone();
-    let code_bytes = compiled.native.x86_64_code.len();
-    let template = crate::translations::StoredBlock {
-        native: compiled.native,
-        source_bytes: compiled.source_bytes,
-        direct_exits: compiled.direct_exits,
-        fault_recovery: compiled
-            .fault_recovery
-            .iter()
-            .map(UnqualifiedFaultRecovery::from)
-            .collect(),
+    let preparation = Arc::new(prepare::test_preparation());
+    let mut page = [0u8; crate::translations::PAGE_BYTES];
+    let source: Vec<u8> = [0x9100_0400u32, 0xf940_0043, 0xd400_0001]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    page[..source.len()].copy_from_slice(&source);
+    let key = Digest::of(&page);
+    let context = preparation.context(BASE);
+    let offer = Offer::compile(key, BASE, BASE, context, source, preparation.clone()).unwrap();
+    let expected = &offer.block().fault_recovery;
+    let code_bytes = offer.block().native.x86_64_code.len();
+    assert!(!expected.is_empty());
+    let translator = translator_id();
+    let mut record = Record::new(translator, key);
+    record.insert(offer.prove().unwrap());
+    let record = Record::decode(&record.encode(), &translator, &key).unwrap();
+    let origin = Arc::new(StoredOrigin {
+        key,
+        context,
+        page: BASE,
+        preparation,
+    });
+    let mut owner = {
+        let entry = record.find(0, &context).unwrap();
+        let rebased = entry.rebase(BASE, offer.input()).unwrap();
+        Template::stored(&rebased, &entry.input, origin, 0).installed()
     };
-    let mut owner = Template::stored(template, source, preparation, None).installed();
+    assert_eq!(owner.stored_key(), Some(key));
     assert_eq!(owner.code_bytes(), code_bytes);
-    assert_eq!(owner.qualify(BASE, None).unwrap().rows(), expected);
+    assert_eq!(
+        &owner.qualify(BASE, Some(&record)).unwrap().rows(),
+        expected
+    );
+    assert_eq!(owner.stored_key(), None);
     assert_eq!(owner.code_bytes(), code_bytes);
     assert_eq!(owner.qualification_attempts, 1);
-    assert_eq!(owner.qualify(BASE, None).unwrap().rows(), expected);
+    assert_eq!(&owner.qualify(BASE, None).unwrap().rows(), expected);
     assert_eq!(owner.qualification_attempts, 1);
 }
 

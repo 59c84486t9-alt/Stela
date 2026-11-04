@@ -224,7 +224,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .and_then(|entry| {
                     entry
                         .rebase(page, source)
-                        .map(|block| (block, entry.input.clone()))
+                        .map(|block| (block, entry.input.as_slice()))
                 });
             if let Some((compiled, input)) = found {
                 if compiled.source_bytes > available {
@@ -238,12 +238,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         physical,
                         variant,
                         source,
-                        recovery::Template::stored(
-                            compiled,
-                            input,
-                            preparation.clone(),
-                            Some((origin, offset as u16)),
-                        ),
+                        recovery::Template::stored(&compiled, input, origin, offset as u16),
                     )
                     .map(Some);
             }
@@ -436,7 +431,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         physical: u64,
         variant: Variant,
         source: &[u8],
-        compiled: recovery::Template,
+        compiled: recovery::Template<'_>,
     ) -> Result<Fetched, Stop> {
         let started = self.host.counter();
         let installed = self.place(pc, physical, variant, source, compiled);
@@ -450,7 +445,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         physical: u64,
         variant: Variant,
         source: &[u8],
-        compiled: recovery::Template,
+        compiled: recovery::Template<'_>,
     ) -> Result<Fetched, Stop> {
         let single = variant.single;
         if compiled.portable_requires_unavailable_capture() {
@@ -459,7 +454,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             )));
         }
         let source_bytes = compiled.source_bytes();
-        let instructions = compiled.native().source_map.len();
+        let native = compiled.native();
+        let instructions = native.source_map.len();
         if !compiled.matches_source(source)
             || source_bytes < INSTRUCTION as usize
             || source_bytes > source.len()
@@ -481,20 +477,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.discard_code(Discard::Table);
             }
         }
-        let code = match self.host.install(&compiled.native().x86_64_code) {
+        let code_bytes = &native.x86_64_code;
+        let code = match self.host.install(code_bytes) {
             Ok(code) => code,
             Err(InstallError::Full) => {
                 self.reclaim_code();
-                self.host
-                    .install(&compiled.native().x86_64_code)
-                    .map_err(|_| {
-                        self.unsupported(RequirementKind::Native("block exceeds the code arena"))
-                    })?
+                self.host.install(code_bytes).map_err(|_| {
+                    self.unsupported(RequirementKind::Native("block exceeds the code arena"))
+                })?
             }
         };
         let terminal_pc = pc + last as u64;
-        let mut successors: Vec<Successor> = compiled
-            .direct_exits()
+        let direct_exits = compiled.direct_exits();
+        let mut successors: Vec<Successor> = direct_exits
             .iter()
             .map(|exit| Successor {
                 site: code.0 as u64 + exit.offset as u64,
@@ -508,9 +503,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // side exits follow a terminal's, and of the direct exits only a
         // terminal that has one precedes them: what a thunk completes has
         // none, whatever a side exit just before it leaves unrun.
-        let code_bytes = &compiled.native().x86_64_code;
-        let terminal_end = compiled
-            .direct_exits()
+        let terminal_end = direct_exits
             .iter()
             .map(|exit| exit.offset - chain::link_slot(Some(pc), exit.target, exit.kind))
             .min()
