@@ -713,17 +713,22 @@ impl Platform for Host {
         Ok(crate::ALLOCATOR.available_page_frames_in(start..end))
     }
 
-    fn map_user(&self, _: *mut c_void, address: u64, pfn: u64, prot: u64) -> Result<(), Errno> {
-        // Clients share the window, so its one address space serves them all.
-        let cache = page_window::cache_of(prot);
-        if self.window.install(address, pfn * PAGE, cache) {
+    fn map_user(&self, space: *mut c_void, address: u64, pfn: u64, prot: u64) -> Result<(), Errno> {
+        if !space.is_null() {
+            return Err(EOPNOTSUPP);
+        }
+        let entry = page_window::client_leaf(pfn, prot).ok_or(EINVAL)?;
+        if self.window.install_client(address, entry) {
             Ok(())
         } else {
             Err(ENOMEM)
         }
     }
 
-    fn unmap_user(&self, _: *mut c_void, address: u64, size: usize) -> Result<(), Errno> {
+    fn unmap_user(&self, space: *mut c_void, address: u64, size: usize) -> Result<(), Errno> {
+        if !space.is_null() {
+            return Err(EOPNOTSUPP);
+        }
         if self.window.remove(address, size / PAGE as usize) {
             Ok(())
         } else {

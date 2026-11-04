@@ -66,6 +66,16 @@ pub fn code_leaf(physical: u64) -> u64 {
     leaf(physical, Cache::WriteBack) & !NO_EXECUTE
 }
 
+/// Translate a Linux client protection into a leaf for the shared data window.
+pub fn client_leaf(pfn: u64, prot: u64) -> Option<u64> {
+    const MAX_PFN: u64 = (1 << (52 - 12)) - 1;
+    if pfn > MAX_PFN || prot & (PRESENT | NO_EXECUTE) != PRESENT | NO_EXECUTE {
+        return None;
+    }
+    let entry = leaf(pfn * PAGE, cache_of(prot));
+    Some((entry & !WRITABLE) | (prot & WRITABLE))
+}
+
 /// The cache attribute of a page Linux's page protection `prot` asks for, in
 /// the PWT and PCD bits its `pgprot_writecombine` and `pgprot_noncached` set.
 pub fn cache_of(prot: u64) -> Cache {
@@ -172,6 +182,22 @@ mod tests {
             value & (PRESENT | WRITABLE | NO_EXECUTE),
             PRESENT | WRITABLE | NO_EXECUTE
         );
+    }
+
+    #[test]
+    fn client_leaves_preserve_data_protection() {
+        let read_only = PRESENT | NO_EXECUTE;
+        assert_eq!(
+            client_leaf(7, read_only),
+            Some(leaf(0x7000, Cache::WriteBack) & !WRITABLE)
+        );
+        assert_eq!(
+            client_leaf(7, read_only | WRITABLE | CACHE_DISABLE),
+            Some(leaf(0x7000, Cache::Uncached))
+        );
+        assert_eq!(client_leaf(7, PRESENT), None);
+        assert_eq!(client_leaf(7, NO_EXECUTE), None);
+        assert_eq!(client_leaf(1 << (52 - 12), read_only), None);
     }
 
     #[test]
