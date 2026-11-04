@@ -376,7 +376,7 @@ impl Host for BareHost<'_> {
 
     fn set_regime(&mut self, regime: &Regime) {
         let state = state();
-        let mut changed_roots = false;
+        let mut changed_roots = None;
         if let Some(current) = state.regime
             && current.controls != regime.controls
         {
@@ -411,14 +411,14 @@ impl Host for BareHost<'_> {
             if rest == to && (!lower || asid || !state.extents[UPPER].private()) {
                 if lower {
                     let key = |c: &mmu::Controls| (c.ttbr0, c.tcr & lower_tcr);
-                    changed_roots = state.switch_lower(key(&from), key(&to));
+                    changed_roots = Some(state.switch_lower(key(&from), key(&to)));
                 }
                 let rights = |c: &mmu::Controls| (c.sprr.el0, c.sprr.el1, c.tcr & user_tcr);
                 let (from, to) = (rights(&from), rights(&to));
                 let bank = from != to;
                 if bank {
                     state.switch_bank(from, to);
-                    changed_roots = true;
+                    changed_roots = Some([true; ROOTS]);
                 }
                 // The helper's software TLB keys neither TTBR0 nor the bank.
                 if lower || bank {
@@ -469,14 +469,20 @@ impl Host for BareHost<'_> {
             (_, false, false) => EL1_VIEW,
             (_, true, false) => PAN_VIEW,
         } + if regime.tag_checked() { VIEWS } else { 0 };
-        let switch_view = state.root_of(view) != state.root_of(state.current);
+        let root = state.root_of(view);
+        let switch_view = root != state.root_of(state.current);
         state.current = view;
         state.view_switches += u64::from(switch_view);
         // Lower-half and bank changes, and a switch of the active view,
         // can coincide. Load the final view after applying all of them.
-        if changed_roots {
-            state.reload();
-        } else if switch_view {
+        let mut load = switch_view;
+        if let Some(changed) = changed_roots {
+            for (stale, changed) in state.contexts.stale.iter_mut().zip(changed) {
+                *stale |= changed;
+            }
+            load |= changed[root];
+        }
+        if load {
             state.load_view(view);
         }
     }

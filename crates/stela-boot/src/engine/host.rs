@@ -896,13 +896,13 @@ impl State {
 
     /// TTBR0 or the lower half's TCR fields changed from `from` to `to`:
     /// detach the lower half from every root and keep it, and attach the
-    /// half kept for `to`, if any. Return whether any root entry changed,
-    /// in which case the caller must flush the views.
-    fn switch_lower(&mut self, from: (u64, u64), to: (u64, u64)) -> bool {
+    /// half kept for `to`, if any. Return the views the caller must flush.
+    fn switch_lower(&mut self, from: (u64, u64), to: (u64, u64)) -> [bool; ROOTS] {
         self.lower_switches += 1;
         let mut entries = Vec::new();
+        let mut changed = [false; ROOTS];
         for entry in self.lower_entries() {
-            for root in self.all_roots() {
+            for (view, root) in self.all_roots().enumerate() {
                 // SAFETY: permanent root frames through the physmap.
                 let slot = unsafe { (layout::physical(root) as *mut u64).add(entry) };
                 // SAFETY: as above.
@@ -911,11 +911,15 @@ impl State {
                     entries.push((root, entry, value));
                     // SAFETY: as above.
                     unsafe { slot.write(0) };
+                    // The active roots precede the banked roots, which
+                    // will flush their views when the bank is selected.
+                    if let Some(affected) = changed.get_mut(view) {
+                        *affected = true;
+                    }
                 }
             }
         }
         self.lower_used = [0; ROOT_ENTRIES / 64];
-        let detached = !entries.is_empty();
         let extents = core::mem::take(&mut self.extents[LOWER]);
         if let Some(half) = self.kept.switch(from, entries, extents, to) {
             self.lower_found += 1;
@@ -923,11 +927,13 @@ impl State {
                 // SAFETY: as above; the half's tables are still the pool's.
                 unsafe { (layout::physical(root) as *mut u64).add(entry).write(value) };
                 self.lower_used[entry / 64] |= 1 << (entry % 64);
+                if let Some(view) = self.roots.iter().position(|&active| active == root) {
+                    changed[view] = true;
+                }
             }
             self.extents[LOWER] = half.extents;
-            return true;
         }
-        detached
+        changed
     }
 
     /// The lower half's root entries [`State::lower_used`] names.
