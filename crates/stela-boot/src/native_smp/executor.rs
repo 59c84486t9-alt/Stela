@@ -547,10 +547,14 @@ pub(crate) unsafe fn start(
         ));
         crate::output::flush_log();
         // It may translate through the MMIO aperture from its first fetch,
-        // so it shares the aperture's shootdowns from now on.
+        // so it shares the aperture's shootdowns from now on, and answers
+        // them while it waits for an engine or driver lock whose holder may
+        // be retiring.
         crate::native_mmio::PROCESSORS
             .join_ap(destination)
             .ok_or(StartupFailure::Resources)?;
+        stela_engine::platform::sync::set_wait(crate::native_mmio::shootdown::service);
+        stela_drivers::on_spin(crate::native_mmio::shootdown::service);
         // SAFETY: validated physical AP and pinned complete startup resources.
         unsafe { sender.startup(destination, vector, handoff.tsc_hz) }
             .map_err(StartupFailure::Delivery)?;

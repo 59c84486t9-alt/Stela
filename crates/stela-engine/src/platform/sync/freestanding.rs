@@ -9,8 +9,29 @@ use core::{
     cell::UnsafeCell,
     marker::PhantomData,
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicPtr, AtomicU32, Ordering},
 };
+
+/// What a processor runs on each turn it waits for a lock: the loader's safe
+/// point, which answers requests the holder may itself be waiting on, such as
+/// a TLB shootdown. Without one, a holder that waits for every processor and
+/// a processor that waits for the holder wait for each other.
+static WAIT: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Run `wait` on each turn a lock waits. It must take no lock.
+pub fn set_wait(wait: fn()) {
+    WAIT.store(wait as *mut (), Ordering::Release);
+}
+
+fn relax() {
+    let wait = WAIT.load(Ordering::Acquire);
+    if !wait.is_null() {
+        // SAFETY: only `set_wait` stores here, and it stores a `fn()`.
+        let wait: fn() = unsafe { core::mem::transmute::<*mut (), fn()>(wait) };
+        wait();
+    }
+    core::hint::spin_loop();
+}
 
 #[cfg(not(all(target_arch = "x86_64", target_os = "uefi")))]
 compile_error!("freestanding metadata locks require the x86-64 ring-0 platform");
@@ -61,7 +82,7 @@ impl<T: ?Sized> Mutex<T> {
     pub(crate) fn lock(&self) -> Result<MutexGuard<'_, T>, PoisonError<MutexGuard<'_, T>>> {
         let ticket = self.next.fetch_add(1, Ordering::Relaxed);
         while self.serving.load(Ordering::Acquire) != ticket {
-            core::hint::spin_loop();
+            relax();
         }
         Ok(MutexGuard {
             owner: self,

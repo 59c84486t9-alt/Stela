@@ -95,7 +95,7 @@ impl Inner {
             if let Ok(guard) = self.lock() {
                 return guard;
             }
-            core::hint::spin_loop();
+            crate::spinning();
         }
     }
     fn remove(&self, id: u64) {

@@ -502,6 +502,27 @@ fn broadcast_profile_counts_posts_and_completion_waits_for_the_attached_owner() 
     machine.attached = Some(attached);
 }
 
+/// A PE waiting for others' acknowledgements answers the host at each turn
+/// of the wait: a processor that waits on this one, as a TLB shootdown
+/// does, gets its answer, so the two waits cannot deadlock.
+#[test]
+fn a_completion_wait_answers_the_host_each_turn() {
+    let (hub, _) = hub(2);
+    let mut machine = first_of_two(&[], &hub);
+    machine.post(Maintenance::Code(Some(0x4000)));
+    machine.send_outgoing();
+    let other = Arc::clone(&hub);
+    // PE 1 acknowledges only once this one has relaxed three times.
+    machine.host.on_relax = Some(Box::new(move |turns| {
+        if turns == 3 {
+            let mail = other.take(1).expect("posted mail");
+            other.acknowledge(1, mail.serial);
+        }
+    }));
+    machine.complete_maintenance().unwrap();
+    assert_eq!(machine.host.relaxes, 3);
+}
+
 #[test]
 fn maintenance_waits_for_the_dsb_and_reaches_a_pe_in_one_piece_of_mail() {
     let (hub, _) = hub(2);

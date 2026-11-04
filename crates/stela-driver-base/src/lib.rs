@@ -112,6 +112,28 @@ pub fn working(device: &str) {
     }
 }
 
+/// What a processor runs while it spins for a lock another one holds: the
+/// platform's safe point, where it answers what the holder may be waiting
+/// on. A `fn()` pointer, null when none is set.
+static SPINNING: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Call `hook` on every turn of a driver's lock spin; it must not take a
+/// driver lock or drive a device.
+pub fn on_spin(hook: fn()) {
+    SPINNING.store(hook as *mut (), Ordering::Release);
+}
+
+/// One turn of a lock spin: the [`on_spin`] hook, then a pause.
+pub fn spinning() {
+    let hook = SPINNING.load(Ordering::Acquire);
+    if !hook.is_null() {
+        // SAFETY: `on_spin` stored a `fn()`, the pointer's only source.
+        let hook: fn() = unsafe { core::mem::transmute(hook) };
+        hook();
+    }
+    core::hint::spin_loop();
+}
+
 /// Run the [`on_wait`] hook; drivers call it as they wait.
 pub fn waiting() {
     let hook = WAITING.load(Ordering::Relaxed);

@@ -413,7 +413,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             };
             if self.polls_monitor() {
                 self.clock.poll(|| self.host.counter());
-                core::hint::spin_loop();
+                // A safe point: the host may be waiting for this PE.
+                self.host.relax();
                 // The whole pass is the poll's.
                 self.statistics.spin_ticks += self.host.counter().wrapping_sub(pass);
             } else {

@@ -705,7 +705,8 @@ impl Hub {
     /// Stop every running PE but `home` and `requester`: each parks at its
     /// next return to the engine, or already waits there or sleeps, and
     /// reads its mail before it runs again.
-    fn stop_others(&self, home: usize, requester: usize) {
+    /// `relax` is each turn of the wait ([`Host::relax`]).
+    fn stop_others(&self, home: usize, requester: usize, mut relax: impl FnMut()) {
         self.stopped.store(true, Ordering::SeqCst);
         for pe in self.others(home).filter(|&pe| pe != requester) {
             let inbox = &self.inboxes[pe];
@@ -714,7 +715,7 @@ impl Hub {
                 || !inbox.live.load(Ordering::Acquire))
             {
                 self.interrupt(pe);
-                core::hint::spin_loop();
+                relax();
             }
         }
     }
@@ -1339,7 +1340,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 polls = polls.saturating_add(1);
             }
             applied = applied.and(self.wait_for_others(&hub));
-            core::hint::spin_loop();
+            self.host.relax();
         }
         hub.set_parked(self.current, false);
         self.statistics.broadcasts += 1;
@@ -1418,7 +1419,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.discard_blocks();
         if let Some(hub) = self.parallel.clone() {
             let started = self.host.counter();
+            // Each check is a turn of the wait ([`Host::relax`]).
             hub.finish(self.current, || {
+                self.host.relax();
                 self.host.counter().wrapping_sub(started) < WAIT
             });
         }
@@ -1440,7 +1443,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     .discarded
                     .store(true, Ordering::Release);
             }
-            core::hint::spin_loop();
+            self.host.relax();
         }
         hub.set_parked(self.current, false);
         self.statistics.sync_ticks += self.host.counter().wrapping_sub(started);
@@ -1456,7 +1459,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return Ok(());
         };
         let started = self.host.counter();
-        hub.stop_others(self.current, pe);
+        hub.stop_others(self.current, pe, || self.host.relax());
         let now = self.now();
         let answer = match access {
             Forwarded::Read { physical, shape } => {
@@ -1518,7 +1521,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .is_err()
         {
             applied = applied.and(self.wait_for_others(&hub));
-            core::hint::spin_loop();
+            self.host.relax();
         }
         hub.request(self.current, access);
         let answer = loop {
@@ -1526,7 +1529,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 break answer;
             }
             applied = applied.and(self.wait_for_others(&hub));
-            core::hint::spin_loop();
+            self.host.relax();
         };
         hub.forwarding.store(false, Ordering::Release);
         hub.set_parked(self.current, false);

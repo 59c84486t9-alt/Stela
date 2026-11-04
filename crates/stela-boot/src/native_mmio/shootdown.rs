@@ -15,8 +15,14 @@ use core::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
-/// How long a retirement waits for every acknowledgement.
-const WAIT_MS: u64 = 100;
+/// How long a retirement waits before it reports the processors it waits
+/// for.
+const REPORT_MS: u64 = 100;
+/// How long a retirement waits for every acknowledgement. A processor goes
+/// this long without a safe point only when it is stuck: every engine wait
+/// and engine or driver lock spin is one, and a native epoch ends at its
+/// deadline.
+const WAIT_MS: u64 = 30_000;
 const CR4_PGE: u64 = 1 << 7;
 const CR4_PCIDE: u64 = 1 << 17;
 /// CPUID.(EAX=7,ECX=0):EBX.INVPCID.
@@ -97,7 +103,8 @@ pub(crate) fn service() {
 /// After the caller cleared retired leaf entries and flushed its own TLB:
 /// shoot them down on every other joined processor. Whether each
 /// acknowledged within [`WAIT_MS`]; until then a processor may still
-/// translate through them.
+/// translate through them. The wait is itself a safe point, so processors
+/// retiring at once acknowledge each other.
 pub(super) fn retire(tsc_hz: u64) -> bool {
     if PROCESSORS.alone() {
         return true;
@@ -125,27 +132,31 @@ pub(super) fn retire(tsc_hz: u64) -> bool {
         let _ = unsafe { sender.notify(apic, crate::engine::interrupts::SHOOTDOWN_VECTOR, tsc_hz) };
     }
     let start = crate::apic::rdtsc();
-    let limit = tsc_hz / 1000 * WAIT_MS;
-    loop {
-        // A peer may be publishing a retirement at the same time and
-        // cannot finish until this processor acknowledges its generation.
+    let (report, limit) = (tsc_hz / 1000 * REPORT_MS, tsc_hz / 1000 * WAIT_MS);
+    let mut reported = false;
+    // A peer may be publishing a retirement at the same time and cannot
+    // finish until this processor acknowledges its generation.
+    while !PROCESSORS.flushed(generation, me) {
         service();
-        if PROCESSORS.flushed(generation, me) {
-            return true;
-        }
-        if crate::apic::rdtsc().wrapping_sub(start) >= limit {
-            report_unacknowledged(generation, me);
+        let waited = crate::apic::rdtsc().wrapping_sub(start);
+        if waited >= limit {
+            report_unacknowledged(generation, me, "the mapping stays reserved");
             return false;
+        }
+        if !reported && waited >= report {
+            report_unacknowledged(generation, me, "still waiting");
+            reported = true;
         }
         core::hint::spin_loop();
     }
+    true
 }
 
-fn report_unacknowledged(generation: u64, me: Option<usize>) {
+fn report_unacknowledged(generation: u64, me: Option<usize>, outcome: &str) {
     for (slot, apic) in PROCESSORS.sharers() {
         if Some(slot) != me && PROCESSORS.acknowledged(slot) < generation {
             crate::output::arguments(format_args!(
-                "NATIVE MMIO shootdown {generation} unacknowledged by APIC {apic:#x}; the mapping stays reserved\n"
+                "NATIVE MMIO shootdown {generation} unacknowledged by APIC {apic:#x}; {outcome}\n"
             ));
         }
     }

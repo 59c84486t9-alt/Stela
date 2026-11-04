@@ -389,6 +389,9 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
     fn counter(&mut self) -> u64 {
         self.local.counter()
     }
+    fn relax(&mut self) {
+        self.local.relax();
+    }
     fn tsc_counter(&self) -> Option<(u64, u64)> {
         self.local.tsc_counter()
     }

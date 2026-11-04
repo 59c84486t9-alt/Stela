@@ -137,6 +137,10 @@ pub(super) struct FakeHost {
     refused: Vec<u64>,
     fetch_checks: usize,
     pub(super) counter_reads: usize,
+    /// Turns of waits for other PEs ([`Host::relax`]), and what each does
+    /// as a processor waiting on this one would.
+    pub(super) relaxes: usize,
+    pub(super) on_relax: Option<Box<dyn FnMut(usize)>>,
     /// Counts the counter moves on after each read.
     pub(super) counter_step: u64,
     pub(super) execute_ticks: u64,
@@ -352,6 +356,12 @@ impl Host for FakeHost {
         self.now += self.counter_step;
         now
     }
+    fn relax(&mut self) {
+        self.relaxes += 1;
+        if let Some(on_relax) = &mut self.on_relax {
+            on_relax(self.relaxes);
+        }
+    }
     fn arm_timer(&mut self, until: Option<u64>) {
         self.timers.push(until);
     }
@@ -522,6 +532,8 @@ pub(super) fn board_on<D: Devices>(
         refused: Vec::new(),
         fetch_checks: 0,
         counter_reads: 0,
+        relaxes: 0,
+        on_relax: None,
         counter_step: 0,
         execute_ticks: 0,
         timers: Vec::new(),

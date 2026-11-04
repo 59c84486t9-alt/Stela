@@ -394,7 +394,7 @@ impl Shared {
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            core::hint::spin_loop();
+            crate::spinning();
         }
         Held(&self.0)
     }

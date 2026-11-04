@@ -639,6 +639,11 @@ impl Host for BareHost<'_> {
         unsafe { crate::native_idle::wait(budget) };
     }
 
+    fn relax(&mut self) {
+        crate::native_mmio::shootdown::service();
+        core::hint::spin_loop();
+    }
+
     fn poll_interrupt(&mut self) -> bool {
         crate::native_mmio::shootdown::service();
         crate::output::send_queued();

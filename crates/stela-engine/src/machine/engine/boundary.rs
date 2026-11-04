@@ -281,6 +281,13 @@ pub trait Host {
     }
     /// The guest's system counter.
     fn counter(&mut self) -> u64;
+    /// One turn of a wait for other processors: a safe point where this
+    /// host answers what they may be waiting for from this processor, such
+    /// as a TLB shootdown, so waits that cross do not deadlock. The default
+    /// only eases the spin.
+    fn relax(&mut self) {
+        core::hint::spin_loop();
+    }
     /// The TSC base and 64.64 fixed-point scale of a host whose
     /// [`Host::counter`] is `((tsc - base) * scale) >> 64`, which native
     /// code then reads itself ([`register_read::count_thunk`]).

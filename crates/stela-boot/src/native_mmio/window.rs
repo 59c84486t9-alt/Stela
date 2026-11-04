@@ -98,6 +98,8 @@ impl Window {
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
+            // The holder may be retiring a mapping, which waits for this.
+            shootdown::service();
             core::hint::spin_loop();
         }
         Guard(self)
