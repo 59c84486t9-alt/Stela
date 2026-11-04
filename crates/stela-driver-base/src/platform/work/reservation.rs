@@ -87,7 +87,12 @@ pub enum FirmwareRole {
 pub(super) enum Layout {
     Ordinary,
     LinuxService,
-    #[cfg(all(feature = "test-support", target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(all(
+        feature = "linux-kernel",
+        feature = "test-support",
+        target_os = "linux",
+        target_arch = "x86_64"
+    ))]
     HostedService,
     FirmwareControl,
     NativeFirmware16,
@@ -118,7 +123,12 @@ impl Layout {
     pub(super) fn slots(self) -> usize {
         match self {
             Self::Ordinary | Self::LinuxService => 0,
-            #[cfg(all(feature = "test-support", target_os = "linux", target_arch = "x86_64"))]
+            #[cfg(all(
+                feature = "linux-kernel",
+                feature = "test-support",
+                target_os = "linux",
+                target_arch = "x86_64"
+            ))]
             Self::HostedService => 1,
             Self::FirmwareControl => 2,
             Self::NativeFirmware16 => 8,
@@ -140,7 +150,12 @@ impl Layout {
         let valid = match self {
             Self::Ordinary => true,
             Self::LinuxService => stacks >= 5,
-            #[cfg(all(feature = "test-support", target_os = "linux", target_arch = "x86_64"))]
+            #[cfg(all(
+                feature = "linux-kernel",
+                feature = "test-support",
+                target_os = "linux",
+                target_arch = "x86_64"
+            ))]
             Self::HostedService => stacks == 3 && jobs >= 2,
             Self::FirmwareControl => stacks >= 6 && jobs >= 3,
             Self::NativeFirmware16 => stacks == 16 && jobs >= 16,
@@ -214,9 +229,19 @@ impl Layout {
                 Lane::Foreground => start + 7 + self.pending_gpe()..jobs,
                 _ => 0..start,
             },
-            #[cfg(all(feature = "test-support", target_os = "linux", target_arch = "x86_64"))]
+            #[cfg(all(
+                feature = "linux-kernel",
+                feature = "test-support",
+                target_os = "linux",
+                target_arch = "x86_64"
+            ))]
             Self::HostedService if lane == Lane::Service => start..jobs,
-            #[cfg(all(feature = "test-support", target_os = "linux", target_arch = "x86_64"))]
+            #[cfg(all(
+                feature = "linux-kernel",
+                feature = "test-support",
+                target_os = "linux",
+                target_arch = "x86_64"
+            ))]
             Self::HostedService => 0..start,
             Self::FirmwareControl => match lane {
                 Lane::Service => start..start + 1,
