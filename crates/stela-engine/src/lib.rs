@@ -77,12 +77,10 @@ use artifact::prepare::{MAX_CACHE_MANIFEST_BYTES, MAX_CACHE_NATIVE_BYTES};
 #[cfg(feature = "std")]
 fn bounded_file(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let file = std::fs::File::open(path).io("open a cache file")?;
-    require!(
-        file.metadata().io("read a cache file's size")?.len() <= limit as u64,
-        "cache file exceeds size limit",
-        limit
-    );
+    let size = file.metadata().io("read a cache file's size")?.len();
+    require!(size <= limit as u64, "cache file exceeds size limit", limit);
     let mut bytes = Vec::new();
+    bytes.try_reserve_exact(size as usize)?;
     file.take(limit as u64 + 1)
         .read_to_end(&mut bytes)
         .io("read a cache file")?;
@@ -278,7 +276,9 @@ fn prepare(
     generate: impl FnOnce() -> Result<NativeBlock, stela_compiler::CompileError>,
 ) -> Result<(Prepared, Vec<u8>)> {
     let key = sha256(&serde_json::to_vec(&identity)?);
-    std::fs::create_dir_all(root).io("create the translation cache")?;
+    if !root.is_dir() {
+        std::fs::create_dir_all(root).io("create the translation cache")?;
+    }
     let root = root.canonicalize().io("resolve the translation cache")?;
     let directory = root.join(&key);
     let invalid = |cause| Error::InvalidCacheEntry {
@@ -316,15 +316,19 @@ fn prepare(
     )
     .io("write a generated manifest checksum")?;
     match std::fs::rename(pending.path(), &directory) {
-        Ok(()) => Ok((
-            Prepared {
-                key,
-                cache_hit: false,
-                directory,
-                manifest,
-            },
-            x86_64_code,
-        )),
+        Ok(()) => {
+            // The complete directory moved to its published name.
+            drop(pending.keep());
+            Ok((
+                Prepared {
+                    key,
+                    cache_hit: false,
+                    directory,
+                    manifest,
+                },
+                x86_64_code,
+            ))
+        }
         // Another process published the same entry first; it must validate.
         Err(_) if directory.exists() => {
             let (manifest, native) =

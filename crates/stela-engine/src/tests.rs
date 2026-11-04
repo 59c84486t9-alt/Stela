@@ -681,3 +681,34 @@ fn concurrent_requests_publish_a_complete_single_entry() -> Result<()> {
     assert_eq!(std::fs::read_dir(root.path())?.count(), 1);
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn preparation_resolves_the_cache_root_for_each_publication() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let first_root = root.path().join("first");
+    let second_root = root.path().join("second");
+    let alias = root.path().join("alias");
+    std::fs::create_dir(&first_root)?;
+    std::fs::create_dir(&second_root)?;
+    std::os::unix::fs::symlink("first", &alias)?;
+
+    let input = source(42);
+    let pc = GuestAddress(0x1000);
+    let first = prepare_leaf(&input, pc, &alias)?;
+    assert!(!first.cache_hit);
+    assert_eq!(first.directory, first_root.canonicalize()?.join(&first.key));
+    assert!(prepare_leaf(&input, pc, &alias)?.cache_hit);
+
+    std::fs::remove_file(&alias)?;
+    std::os::unix::fs::symlink("second", &alias)?;
+    let second = prepare_leaf(&input, pc, &alias)?;
+    assert!(!second.cache_hit);
+    assert_eq!(first.key, second.key);
+    assert_eq!(
+        second.directory,
+        second_root.canonicalize()?.join(&second.key)
+    );
+    assert!(prepare_leaf(&input, pc, &alias)?.cache_hit);
+    Ok(())
+}
