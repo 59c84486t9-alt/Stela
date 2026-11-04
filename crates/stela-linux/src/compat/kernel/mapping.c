@@ -188,7 +188,7 @@ static bool unmap_file_pages(struct address_space *mapping, pgoff_t first, pgoff
 			     vm_flags_t required)
 {
 	struct vm_area_struct *vma;
-	bool unmapped = false;
+	bool writable = false;
 
 	i_mmap_lock_read(mapping);
 	for (vma = mapped_iter_first(&mapping->i_mmap, first, last); vma;
@@ -202,26 +202,42 @@ static bool unmap_file_pages(struct address_space *mapping, pgoff_t first, pgoff
 			continue;
 		unmap_client(client, vma->vm_start + ((from - vma->vm_pgoff) << PAGE_SHIFT),
 			     (to - from + 1) << PAGE_SHIFT);
-		unmapped = true;
+		writable |= (vma->vm_flags & (VM_SHARED | VM_WRITE)) == (VM_SHARED | VM_WRITE);
 	}
 	i_mmap_unlock_read(mapping);
-	return unmapped;
+	return writable;
+}
+
+void unmap_mapping_pages(struct address_space *mapping, pgoff_t start,
+			 pgoff_t nr, bool even_cows)
+{
+	/* Native client mappings are shared and have no private COW pages. */
+	(void)even_cows;
+	pgoff_t last = start + nr - 1;
+
+	if (last < start)
+		last = ULONG_MAX;
+	unmap_file_pages(mapping, start, last, 0);
 }
 
 void unmap_mapping_range(struct address_space *mapping, loff_t const holebegin,
 			 loff_t const holelen, int even_cows)
 {
-	(void)even_cows;
-	pgoff_t first = (pgoff_t)(holebegin >> PAGE_SHIFT);
-	pgoff_t count = (pgoff_t)(PAGE_ALIGN(holelen) >> PAGE_SHIFT);
+	pgoff_t first = (pgoff_t)holebegin >> PAGE_SHIFT;
+	pgoff_t count = ((pgoff_t)holelen + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
-	unmap_file_pages(mapping, first, count ? first + count - 1 : ULONG_MAX, 0);
+	unmap_mapping_pages(mapping, first, count, even_cows != 0);
+}
+
+bool stela_linux_unmap_folio(struct folio *folio)
+{
+	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+	return unmap_file_pages(folio->mapping, folio->index, folio_next_index(folio) - 1, 0);
 }
 
 void unmap_mapping_folio(struct folio *folio)
 {
-	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
-	unmap_file_pages(folio->mapping, folio->index, folio_next_index(folio) - 1, 0);
+	stela_linux_unmap_folio(folio);
 }
 
 bool stela_linux_unmap_writable_folio(struct folio *folio)
@@ -391,6 +407,15 @@ int main(void)
 	removed_size = 0;
 	unmap_mapping_range(file->f_mapping, 0, 0, 1);
 	assert(!removed_size);
+
+	/* Rounding a large length must not invalidate a higher file offset. */
+	assert(!stela_linux_mmap(file, SPACE, BASE, PAGE_SIZE, 1ULL << 63, false, &mapping));
+	unmap_mapping_range(file->f_mapping, 0, LLONG_MAX, 1);
+	assert(!removed_size);
+	unmap_mapping_pages(file->f_mapping, 0, 0, true);
+	assert(removed_size == PAGE_SIZE);
+	stela_linux_munmap(mapping);
+	removed_size = 0;
 
 	/* A mapping an exporter redirects lives on the exporter's file. */
 	struct file *own = anon_inode_getfile("exporter", &fops, NULL, O_RDWR);

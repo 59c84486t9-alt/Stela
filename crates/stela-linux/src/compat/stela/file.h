@@ -49,6 +49,8 @@ int stela_linux_export(const struct stela_linux_run *runs, size_t count);
 
 /* Invalidate native shared writers before zeroing a locked folio's new tail.
  * A mapped writer may have changed bytes the native owner cannot query. */
+/* Invalidate every client view and report whether one allowed writes. */
+bool stela_linux_unmap_folio(struct folio *folio);
 bool stela_linux_unmap_writable_folio(struct folio *folio);
 
 /* Maps size bytes of file at offset into space at address, through the file's
