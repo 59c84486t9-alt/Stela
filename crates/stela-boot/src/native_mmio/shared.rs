@@ -18,7 +18,7 @@ use super::{
     platform::{aliases, owned_table},
 };
 use crate::{
-    engine::host::{HostOwner, RootIdentity},
+    engine::host::{HostOwner, MmioRoots, RootIdentity},
     native_smp::memory_types::Image,
 };
 mod hpet;
@@ -34,9 +34,15 @@ use stela_boot_core::aperture::{self, Controls, Flush, Processors};
 use stela_drivers::bus::{
     mmio::owned::{
         AddressSpace, Authority, CacheAttribute, InstalledMapping, MapFailure, MapRequest,
-        MappingPlatform, PhysicalSpan, Protection, Resource, ResourceBacking, ResourceKind,
+        MappingPlatform, PhysicalSpan, Protection, Resource, ResourceBacking, ResourceId,
+        ResourceKind,
     },
-    pci::EcamWindow,
+    pci::{
+        EcamWindow,
+        assignment::{
+            self, AdmissionClose, Assignment, OpaqueUse, PhysicalAssignment, Retention, UseKind,
+        },
+    },
 };
 
 /// Which host processors may hold aperture translations, for the boot.
@@ -45,9 +51,10 @@ pub(crate) static PROCESSORS: Processors = Processors::new();
 /// A span this source reserved outside RAM: a captured ECAM bus, a BAR inside
 /// a root bridge window, or the separately admitted whole HPET controller page.
 struct Backing {
-    owner: Arc<Captured>,
+    platform: Arc<Platform>,
     span: PhysicalSpan,
     kind: ResourceKind,
+    retention: Retention<Reservation>,
 }
 // SAFETY: Source validates every immutable span against the captured MCFG,
 // root bridge windows or HPET descriptor and final non-RAM memory inventory.
@@ -60,10 +67,40 @@ unsafe impl ResourceBacking for Backing {
     fn kind(&self) -> ResourceKind {
         self.kind
     }
+    fn begin_mapping(&self) -> Result<OpaqueUse, Error> {
+        self.platform.check_mapping_control()?;
+        self.retention
+            .begin_use(UseKind::Mapping)
+            .map(|usage| usage.erase())
+            .map_err(Error::Assignment)
+    }
 }
 
 struct Captured {
     wire: &'static Wire,
+    _roots: Arc<MmioRoots>,
+    hpet_unregistered: AtomicBool,
+}
+
+struct Reservation {
+    platform: Arc<Platform>,
+    _span: PhysicalSpan,
+}
+
+// SAFETY: These spans come from Source's checked, exclusive device handoffs.
+// The boot reservation pins the captured tables, root allocations and decoded
+// span. Platform contains aperture allocation metadata and no mapping or
+// authority backedge. This reservation is never transferable PCI custody.
+unsafe impl PhysicalAssignment for Reservation {
+    fn parent(&self) -> Option<&assignment::Parent> {
+        None
+    }
+
+    fn check_control(&self) -> Result<(), assignment::Error> {
+        self.platform
+            .check_mapping_control()
+            .map_err(|_| assignment::Error::Context)
+    }
 }
 
 /// The aperture's two mapping sizes: 4 KiB pages in its leaf tables and
@@ -141,6 +178,12 @@ impl Platform {
     fn wire(&self) -> &'static Wire {
         self.captured.wire
     }
+    fn check_mapping_control(&self) -> Result<(), Error> {
+        if crate::engine::host::in_interrupt() {
+            return Err(Error::Unavailable);
+        }
+        self.check_context(self.space)
+    }
     /// The entry of slot `index` of `size`.
     fn entry(&self, size: Size, index: usize) -> Result<*mut u64, Error> {
         if !size.slots().contains(&index) {
@@ -203,7 +246,7 @@ impl Platform {
     }
     fn resource(&self, resource: &Resource) -> bool {
         if let Some(backing) = resource.backing().downcast_ref::<Backing>() {
-            return Arc::ptr_eq(&backing.owner, &self.captured)
+            return core::ptr::eq(backing.platform.as_ref(), self)
                 && backing.span == resource.physical_span();
         }
         stela_drivers::platform::acpi::resources::reservation_parent(resource)
@@ -376,6 +419,8 @@ pub(crate) struct Source {
     platform: Arc<Platform>,
     authority: Authority,
     window: Option<super::Window>,
+    reservations: core::cell::RefCell<Vec<Assignment<Reservation>>>,
+    hpet_assignment: core::cell::RefCell<Option<Assignment<Reservation>>>,
     /// Each claimed ECAM bus, by its window and bus.
     buses: core::cell::RefCell<Vec<Bus>>,
     ioapics: core::cell::RefCell<Vec<(crate::native_irq::madt::Unit, Arc<IoapicUnit>)>>,
@@ -434,7 +479,11 @@ impl Source {
         // SAFETY: the loader root is an owned table page.
         let loader_entry = unsafe { owned_table(wire, wire.root)?.add(slot).read_volatile() };
         let platform = Arc::new(Platform {
-            captured: Arc::new(Captured { wire }),
+            captured: Arc::new(Captured {
+                wire,
+                _roots: catalog.clone(),
+                hpet_unregistered: AtomicBool::new(false),
+            }),
             space,
             flush,
             tsc_hz,
@@ -501,6 +550,8 @@ impl Source {
             platform,
             authority,
             window,
+            reservations: core::cell::RefCell::new(Vec::new()),
+            hpet_assignment: core::cell::RefCell::new(None),
             buses: core::cell::RefCell::new(Vec::new()),
             ioapics: core::cell::RefCell::new(Vec::new()),
             irq_domain: None,
@@ -517,15 +568,45 @@ impl Source {
     }
 
     fn reserve(&self, span: PhysicalSpan, kind: ResourceKind) -> Result<Resource, Error> {
+        let mut reservations = self
+            .reservations
+            .try_borrow_mut()
+            .map_err(|_| Error::Busy)?;
+        reservations.try_reserve(1).map_err(|_| Error::Exhausted)?;
+        let (resource, _, assignment) = self.register_reservation(span, kind)?;
+        reservations.push(assignment);
+        Ok(resource)
+    }
+
+    fn register_reservation(
+        &self,
+        span: PhysicalSpan,
+        kind: ResourceKind,
+    ) -> Result<(Resource, ResourceId, Assignment<Reservation>), Error> {
+        let reservation = Reservation {
+            platform: self.platform.clone(),
+            _span: span,
+        };
+        reservation.check_control().map_err(Error::Assignment)?;
+        let mut assignment = Assignment::from_owned(reservation);
         let resource = Resource::new(Box::new(Backing {
-            owner: self.platform.captured.clone(),
+            platform: self.platform.clone(),
             span,
             kind,
+            retention: assignment.retain(),
         }));
-        self.authority
-            .register_resource(resource.clone())
-            .map_err(|refusal| refusal.error)?;
-        Ok(resource)
+        match self.authority.register_resource(resource.clone()) {
+            Ok(id) => Ok((resource, id, assignment)),
+            Err(refusal) => {
+                let error = refusal.error;
+                drop(refusal.into_resource());
+                drop(resource);
+                if assignment.close().is_ok() {
+                    let _ = assignment.into_original();
+                }
+                Err(error)
+            }
+        }
     }
 
     /// The ECAM window and reservation of `bus` on `segment`, claimed once.

@@ -132,6 +132,9 @@ unsafe fn check_native_hpet(
         }
     }
     let base = counter.descriptor().registers().start();
+    let retained = source
+        .authority()
+        .resolve_resource(counter.descriptor().registers())?;
     // SAFETY: this stack frame is the only counter reader, no IRQ/publication
     // exists, and every Source/RootIdentity/controller owner remains live.
     unsafe { counter.retire() }?;
@@ -147,6 +150,16 @@ unsafe fn check_native_hpet(
         return Err(Error::UnmapFailed.into());
     }
     drop(counter);
+    if !matches!(
+        source.join_hpet(),
+        Err(Error::Assignment(
+            stela_drivers::bus::pci::assignment::Error::Busy { .. }
+        ))
+    ) {
+        return Err(Error::InvalidPlatformReply.into());
+    }
+    drop(retained);
+    source.join_hpet()?;
     crate::output::arguments(format_args!(
         "CHECK native-hpet-owner PASS source=production identity=actual base={base:#x} counter=progressed retire=config-restored+UC-unmapped+resource-released; no IRQ, Runtime or RAM-adoption grant\n"
     ));
@@ -180,6 +193,8 @@ unsafe fn check_native_hpet(
     {
         return Err(Error::UnmapFailed.into());
     }
+    drop(counter);
+    source.join_hpet()?;
     crate::output::arguments(format_args!(
         "CHECK native-hpet-clock PASS source=production identity=immutable IRQ=elapsed idle=HLT guest_mux=elapsed retire=quiet+source-released; no RAM-adoption or production-service grant\n"
     ));

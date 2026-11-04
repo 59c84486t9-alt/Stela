@@ -16,6 +16,7 @@ pub(crate) struct HpetMapping {
     authority: ManuallyDrop<Authority>,
     platform: ManuallyDrop<Arc<Platform>>,
     registration: Option<ResourceId>,
+    admission: Option<AdmissionClose>,
     mapping_retired: bool,
     closing: bool,
     retired: bool,
@@ -56,6 +57,7 @@ impl HpetMapping {
         if self.retired {
             return Ok(());
         }
+        self.admission.as_ref().ok_or(WorkError::Closed)?.close();
         self.closing = true;
         if !self.mapping_retired {
             if let Some(mapping) = self.mapping.as_mut() {
@@ -71,7 +73,12 @@ impl HpetMapping {
                 .map_err(unavailable)?;
             self.registration = None;
         }
+        self.admission.take().ok_or(WorkError::Closed)?.dismiss();
         self.retired = true;
+        self.platform
+            .captured
+            .hpet_unregistered
+            .store(true, Ordering::Release);
         Ok(())
     }
 }
@@ -105,6 +112,32 @@ fn unavailable<T>(_: T) -> WorkError {
 }
 
 impl Source {
+    /// Reclaim the original controller only after native unmap and resource
+    /// withdrawal acknowledged, and all independent backing pins have joined.
+    pub(crate) fn join_hpet(&self) -> Result<(), Error> {
+        self.identity.check_dispatch().map_err(failed)?;
+        let mut slot = self
+            .hpet_assignment
+            .try_borrow_mut()
+            .map_err(|_| Error::Busy)?;
+        if slot.is_some()
+            && !self
+                .platform
+                .captured
+                .hpet_unregistered
+                .load(Ordering::Acquire)
+        {
+            return Err(Error::Busy);
+        }
+        if let Some(previous) = slot.take()
+            && let Err(refusal) = previous.into_original()
+        {
+            *slot = Some(refusal.owner);
+            return Err(Error::Assignment(refusal.error));
+        }
+        Ok(())
+    }
+
     /// # Safety
     /// The post-EBS BSP dispatcher owns this entire original captured
     /// controller and rounded page, including every firmware/SMM/native route,
@@ -140,15 +173,20 @@ impl Source {
         {
             return Err(Error::OutsideResource);
         }
-        let resource = Resource::new(Box::new(Backing {
-            owner: self.platform.captured.clone(),
-            span: page,
-            kind: ResourceKind::Registers,
-        }));
-        let registration = self
-            .authority
-            .register_resource(resource.clone())
-            .map_err(|refusal| refusal.error)?;
+        self.join_hpet()?;
+        let mut slot = self
+            .hpet_assignment
+            .try_borrow_mut()
+            .map_err(|_| Error::Busy)?;
+        let (resource, registration, assignment) =
+            self.register_reservation(page, ResourceKind::Registers)?;
+        let admission = assignment.admission_close();
+        *slot = Some(assignment);
+        self.platform
+            .captured
+            .hpet_unregistered
+            .store(false, Ordering::Release);
+        drop(slot);
         // Keep every original owner BEFORE an alias/PTE effect. Constructor
         // errors can then quarantine the same real identity/resource bundle.
         let mut owned = HpetMapping {
@@ -158,6 +196,7 @@ impl Source {
             authority: ManuallyDrop::new(self.authority.clone()),
             platform: ManuallyDrop::new(self.platform.clone()),
             registration: Some(registration),
+            admission: Some(admission),
             mapping_retired: false,
             closing: false,
             retired: false,
