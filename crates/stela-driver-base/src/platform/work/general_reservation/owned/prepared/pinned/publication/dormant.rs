@@ -16,6 +16,17 @@ impl<const N: usize> core::fmt::Debug for DormantGeneralStack<'_, N> {
     }
 }
 impl<'runtime, const N: usize> OwnedPinnedGeneral<'runtime, N> {
+    /// Keep scheduling and sequence capacity while the source copies the child.
+    /// Neither the scheduler nor the queue can run the child during this phase.
+    pub fn reserve_child_rank(
+        &mut self,
+        entered: &dyn EnteredProcess,
+        rank: scheduling::Snapshot,
+    ) -> Result<(), WorkError> {
+        self.check(entered)?;
+        self.escrow.reserve_child(entered, rank)
+    }
+
     /// Reserve the final native job and scheduling/order capacity before the
     /// original nofail C publication point. This executes no child callback.
     /// Success cannot be treated as an unpublished/canceled fork refusal.
@@ -27,12 +38,15 @@ impl<'runtime, const N: usize> OwnedPinnedGeneral<'runtime, N> {
     /// unwind; no ordinary original unwind may reclaim an accepted job.
     #[expect(clippy::result_large_err, reason = "exact retained affine owner")]
     pub unsafe fn publish_dormant(
-        self,
+        mut self,
         entered: &dyn EnteredProcess,
         rank: scheduling::Snapshot,
         callback: Callback,
         context: *mut c_void,
     ) -> Result<DormantGeneralStack<'runtime, N>, (Self, WorkError)> {
+        if let Err(error) = self.reserve_child_rank(entered, rank) {
+            return Err((self, error));
+        }
         // SAFETY: caller owns the genuine source nofail transition and complete
         // callback graph; private mode only changes real scheduler eligibility.
         unsafe { self.publish_mode(entered, callback, context, Some(rank)) }

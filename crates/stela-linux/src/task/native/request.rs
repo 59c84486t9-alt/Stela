@@ -35,13 +35,16 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> R
         let Ok(_mutation) = self.mutation() else {
             fatal()
         };
-        // Only called AFTER successful affine NoPublication; this mapping is
-        // the genuine original errno boundary, not cancellation classification.
+        // Project the recorded failure for the source. Its errno alone gives
+        // no publication, cancellation, or lifetime receipt.
         // SAFETY: the mutation guard pins this diagnostic for the errno projection.
         let fault = unsafe { &**self.fault.get() };
         match fault {
             Some(factory::Error::Admission(reason)) => work_errno(reason.error()),
-            Some(factory::Error::Work(error)) => work_errno(*error),
+            Some(
+                factory::Error::Work(error)
+                | factory::Error::Pages(crate::pages::AdmissionError::Work(error)),
+            ) => work_errno(*error),
             Some(factory::Error::Source(value)) if *value < 0 => *value,
             Some(factory::Error::WrongPhase) => -22,
             _ => -5,
@@ -141,6 +144,39 @@ impl<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize> R
         self.prepared.store(true, Ordering::Release);
         0
     }
+    pub(super) unsafe fn reserve_rank(&self, rank: &Rank) -> i32 {
+        let snapshot = match rank.snapshot() {
+            Ok(rank) => rank,
+            Err(error) => {
+                let Ok(_mutation) = self.mutation() else {
+                    return -16;
+                };
+                self.fault(factory::Error::Work(error));
+                return work_errno(error);
+            }
+        };
+        // SAFETY: this takes one native metadata loan. Reserving the row neither
+        // queues the callback nor waits for any original source operation.
+        let result = unsafe {
+            self.broker.kernel.platform().with_process(|entered| {
+                self.advance(|child| child.reserve_child_rank(entered, snapshot))
+            })
+        };
+        match result {
+            Ok(Ok(())) => 0,
+            Ok(Err(Error::WrongPhase)) => self.errno(),
+            Ok(Err(Error::Busy)) => -16,
+            Ok(Err(_)) => -5,
+            Err(error) => {
+                let Ok(_mutation) = self.mutation() else {
+                    return -16;
+                };
+                self.fault(factory::Error::Work(error));
+                work_errno(error)
+            }
+        }
+    }
+
     pub(super) unsafe fn publish(&self, rank: &Rank) {
         if !self.prepared.load(Ordering::Acquire) {
             fatal();

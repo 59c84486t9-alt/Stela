@@ -131,3 +131,47 @@ fn dormant_source_publication_requires_the_actual_enabled_scheduler() {
     assert!(board.rows.iter().all(Option::is_none));
     assert_eq!(board.reserved_tail, 0);
 }
+
+#[test]
+fn reserved_child_rejects_inherited_pi_and_releases_capacity_on_cancel() {
+    let mut board = Board::new();
+    board.enabled = true;
+    let normal = Snapshot::NORMAL;
+    let boosted = Snapshot {
+        effective: 5,
+        ..normal
+    };
+    let id = ContextId(17);
+
+    assert_eq!(
+        board.reserve_child(id, 1, boosted),
+        Err(WorkError::Unavailable)
+    );
+    assert_eq!(board.reserved_tail, 0);
+    let rank = Snapshot {
+        base: BasePolicy::NormalNice(-2),
+        effective: 118,
+    };
+    board.reserve_child(id, 1, rank).unwrap();
+    assert_eq!(board.activity(id, 1), Err(WorkError::Pending));
+    assert!(board.activate(id, 1).is_err());
+    assert!(!board.fair_normal);
+    let slot = board.reserved_child(id, 1, rank).unwrap();
+    board.cancel_reserved_child(slot);
+    assert_eq!(board.reserved_tail, 0);
+    assert!(
+        board
+            .normal_history
+            .iter()
+            .all(|history| *history == (0, 0))
+    );
+
+    board.reserve_child(id, 2, rank).unwrap();
+    let slot = board.reserved_child(id, 2, rank).unwrap();
+    board.publish_reserved_child(slot);
+    assert_eq!(board.activity(id, 2), Ok(Activity::Dormant));
+    assert!(board.fair_normal);
+    board.activate(id, 2).unwrap();
+    assert_eq!(board.reserved_tail, 0);
+    assert_eq!(board.snapshot(id, 2), Ok(rank));
+}

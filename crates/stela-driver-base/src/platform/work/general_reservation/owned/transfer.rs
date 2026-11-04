@@ -83,6 +83,7 @@ impl<'runtime, const N: usize> GeneralReservation<'runtime, '_, N> {
             slot: self.slot,
             nonce: self.nonce,
             requirement: self.requirement,
+            child_rank: None,
             live: true,
             _local: PhantomData,
         };

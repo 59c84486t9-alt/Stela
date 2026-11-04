@@ -147,23 +147,29 @@ unsafe extern "C" fn prepare(p: *mut c_void) {
     let pin = prepared
         .pin(&authority)
         .unwrap_or_else(|_| panic!("pin refused"));
-    let ready = pin
+    let mut ready = pin
         .reconstruct(&authority)
         .unwrap_or_else(|_| panic!("frame refused"));
-    // SAFETY: exact kept fixture graph; native mechanics only, no original C
-    // child/source/PID is manufactured or claimed by accepting this native job.
-    let dormant = unsafe {
-        ready.publish_dormant(
+    let rank = scheduling::Snapshot {
+        base: scheduling::BasePolicy::Normal,
+        effective: 120,
+    };
+    ready.reserve_child_rank(&authority, rank).unwrap();
+    assert_eq!(
+        ready.reserve_child_rank(
             &authority,
             scheduling::Snapshot {
-                base: scheduling::BasePolicy::Normal,
-                effective: 120,
-            },
-            child,
-            p,
-        )
-    }
-    .unwrap_or_else(|_| panic!("dormant publication refused"));
+                effective: 2,
+                ..rank
+            }
+        ),
+        Err(WorkError::InvalidTicket)
+    );
+    assert_eq!(f.calls.load(Ordering::Acquire), 0);
+    // SAFETY: exact kept fixture graph; native mechanics only, no original C
+    // child/source/PID is manufactured or claimed by accepting this native job.
+    let dormant = unsafe { ready.publish_dormant(&authority, rank, child, p) }
+        .unwrap_or_else(|_| panic!("dormant publication refused"));
     assert_eq!(f.calls.load(Ordering::Acquire), 0);
     // SAFETY: same actual fixture CPU, no peer borrows this retained cell.
     unsafe {

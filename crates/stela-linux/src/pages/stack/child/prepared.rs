@@ -50,6 +50,20 @@ impl<'catalog, 'runtime, P: Provider, const N: usize>
         // Installer is bounded metadata by this unsafe producer's contract.
         Ok(install(base, bytes))
     }
+    pub(crate) fn reserve_child_rank(
+        &mut self,
+        entered: &dyn EnteredProcess,
+        rank: scheduling::Snapshot,
+    ) -> Result<(), AdmissionError> {
+        canonical_scope(self.catalog, entered)?;
+        if self.ticket.is_none() || self.target.is_none() {
+            return Err(AdmissionError::Catalog(Error::InvalidReservation));
+        }
+        self.native
+            .reserve_child_rank(entered, rank)
+            .map_err(AdmissionError::Work)
+    }
+
     /// # Safety
     /// Original copy helpers reached their genuine nofail point. rank is the
     /// actual selected source policy/effective priority, and code/context/source

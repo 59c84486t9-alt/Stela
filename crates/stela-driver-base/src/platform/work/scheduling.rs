@@ -57,6 +57,7 @@ impl Snapshot {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum State {
+    Reserved { history: (u64, u128) },
     Dormant,
     Ready,
     Running,
@@ -183,25 +184,75 @@ impl Board {
         sequence: u64,
         service: bool,
     ) -> Result<(), WorkError> {
-        self.insert_mode(id, sequence, service, None)
+        self.insert_mode(id, sequence, service, None, false)
     }
+    #[cfg(test)]
     pub(super) fn insert_dormant(
         &mut self,
         id: ContextId,
         sequence: u64,
         rank: Snapshot,
     ) -> Result<(), WorkError> {
-        self.insert_mode(id, sequence, false, Some(rank))
+        self.insert_mode(id, sequence, false, Some(rank), false)
     }
+    pub(super) fn reserve_child(
+        &mut self,
+        id: ContextId,
+        sequence: u64,
+        rank: Snapshot,
+    ) -> Result<(), WorkError> {
+        self.insert_mode(id, sequence, false, Some(rank), true)
+    }
+
+    pub(super) fn reserved_child(
+        &self,
+        id: ContextId,
+        sequence: u64,
+        rank: Snapshot,
+    ) -> Result<usize, WorkError> {
+        let slot = self.index(id, sequence)?;
+        let row = self.rows[slot].ok_or(WorkError::CorruptContext)?;
+        if !matches!(row.state, State::Reserved { .. })
+            || row.rank != rank
+            || self.reserved_tail == 0
+        {
+            return Err(WorkError::CorruptContext);
+        }
+        Ok(slot)
+    }
+
+    pub(super) fn publish_reserved_child(&mut self, slot: usize) {
+        let row = self.rows[slot].as_mut().unwrap();
+        row.state = State::Dormant;
+        self.fair_normal |= matches!(row.rank.base, BasePolicy::NormalNice(nice) if nice != 0);
+    }
+
+    pub(super) fn cancel_reserved_child(&mut self, slot: usize) {
+        let row = self.rows[slot].take().unwrap();
+        let State::Reserved { history } = row.state else {
+            unreachable!("reserved child changed while locked");
+        };
+        let entry = self
+            .normal_history
+            .iter_mut()
+            .find(|entry| entry.0 == row.id.get())
+            .unwrap();
+        *entry = history;
+        self.reserved_tail -= 1;
+    }
+
     fn insert_mode(
         &mut self,
         id: ContextId,
         sequence: u64,
         service: bool,
         dormant: Option<Snapshot>,
+        reserve: bool,
     ) -> Result<(), WorkError> {
-        if let Some(rank) = dormant {
-            rank.validate()?;
+        if let Some(rank) = dormant
+            && rank.effective != rank.base.priority()?
+        {
+            return Err(WorkError::Unavailable);
         }
         if !self.enabled {
             return if dormant.is_some() {
@@ -228,7 +279,8 @@ impl Board {
                     .position(|(context, _)| *context == 0)
             })
             .ok_or(WorkError::Full)?;
-        let virtual_ns = self.normal_history[history].1.max(self.normal_floor());
+        let previous_history = self.normal_history[history];
+        let virtual_ns = previous_history.1.max(self.normal_floor());
         let (order, reserved_tail) = if dormant.is_some() {
             let reserved = self
                 .reserved_tail
@@ -241,7 +293,9 @@ impl Board {
         } else {
             (self.order(false)?, self.reserved_tail)
         };
-        self.fair_normal |= matches!(dormant, Some(Snapshot { base: BasePolicy::NormalNice(nice), .. }) if nice != 0);
+        if !reserve {
+            self.fair_normal |= matches!(dormant, Some(Snapshot { base: BasePolicy::NormalNice(nice), .. }) if nice != 0);
+        }
         self.reserved_tail = reserved_tail;
         self.normal_history[history] = (id.get(), virtual_ns);
         self.rows[slot] = Some(Row {
@@ -249,7 +303,11 @@ impl Board {
             sequence,
             service,
             rank: dormant.unwrap_or(Snapshot::NORMAL),
-            state: if dormant.is_some() {
+            state: if reserve {
+                State::Reserved {
+                    history: previous_history,
+                }
+            } else if dormant.is_some() {
                 State::Dormant
             } else {
                 State::Ready
@@ -429,6 +487,7 @@ impl Board {
             return Err(WorkError::Unavailable);
         }
         Ok(match self.rows[self.index(id, sequence)?].unwrap().state {
+            State::Reserved { .. } => return Err(WorkError::Pending),
             State::Dormant => Activity::Dormant,
             State::Ready => Activity::Ready,
             State::Running => Activity::Running,
@@ -482,7 +541,7 @@ impl Board {
         after.validate()?;
         let slot = self.index(id, sequence)?;
         let row = self.rows[slot].unwrap();
-        if !self.enabled || row.rank != before {
+        if !self.enabled || row.rank != before || matches!(row.state, State::Reserved { .. }) {
             return Err(WorkError::InvalidTicket);
         }
         if row.service && after.base != BasePolicy::Normal {

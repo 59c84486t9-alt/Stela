@@ -49,6 +49,8 @@ void stela_linux_task_native_abort(struct stela_linux_task *task,
 struct stela_linux_task_rank;
 int stela_linux_task_native_thread_prepare(struct stela_linux_task *task,
     const struct stela_linux_owner *owner, int (*entry)(void *), void *argument);
+int stela_linux_task_native_reserve_rank(struct stela_linux_task *task,
+    const struct stela_linux_owner *owner, const struct stela_linux_task_rank *rank);
 void stela_linux_task_native_publish(struct stela_linux_task *task,
     const struct stela_linux_owner *owner, const struct stela_linux_task_rank *rank);
 void stela_linux_task_native_activate(struct stela_linux_task *task,

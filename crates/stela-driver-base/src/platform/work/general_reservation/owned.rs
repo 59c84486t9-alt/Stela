@@ -28,6 +28,7 @@ pub struct OwnedGeneralEscrow<'runtime, const N: usize> {
     slot: usize,
     nonce: u64,
     requirement: StackRequirement,
+    child_rank: Option<(u64, scheduling::Snapshot)>,
     live: bool,
     _local: PhantomData<*mut ()>,
 }
@@ -95,7 +96,19 @@ impl<const N: usize> OwnedGeneralEscrow<'_, N> {
                 let task = &*self.runtime.task(self.worker);
                 ReleasedStackGeometry::of(&task.stack, !task.ever_entered)
             };
+            let reserved_child = self
+                .child_rank
+                .map(|(sequence, rank)| {
+                    state
+                        .scheduling
+                        .reserved_child(self.context, sequence, rank)
+                })
+                .transpose()?;
             state.resources.reservation_released(shape)?;
+            if let Some(slot) = reserved_child {
+                state.scheduling.cancel_reserved_child(slot);
+                self.child_rank = None;
+            }
             state.reservations[self.slot] = 0;
             // SAFETY: exact private worker and creator ownership checked above;
             // no published callback/stack loan exists and peers remain stopped.

@@ -25,6 +25,7 @@
 #include <stela/page.h>
 #include <stela/task.h>
 #include <stela/task_bootstrap.h>
+#include <sched/fork_backend.h>
 #include <stela/catalogue.h>
 #include <linux/mm_types.h>
 #include <linux/pgtable.h>
@@ -839,6 +840,30 @@ int stela_linux_task_thread_prepare(struct task_struct *original,
     record->source_thread_prepared = true;
     return 0;
 }
+static struct stela_linux_task_rank source_fork_rank(struct task_struct *task)
+{
+    return (struct stela_linux_task_rank) {
+        .policy = task->policy, .realtime = task->rt_priority,
+        .effective = task->prio, .nice = task_nice(task),
+    };
+}
+
+int stela_linux_sched_fork_admit(u64 clone_flags, struct task_struct *original)
+{
+    const u64 supported = CLONE_VM | CLONE_UNTRACED | CLONE_FS | CLONE_FILES;
+    if ((clone_flags & ~supported) || !(original->flags & PF_KTHREAD))
+        return -EOPNOTSUPP;
+
+    const struct stela_linux_owner *owner = stela_linux_owner();
+    struct stela_linux_task *record = allocated_task(original);
+    if (!record || source_child_record(record, owner) != record ||
+        !record->source_stack_lent || record->source_c_published ||
+        READ_ONCE(original->__state) != TASK_NEW || original->prio != original->normal_prio)
+        return -EINVAL;
+    struct stela_linux_task_rank rank = source_fork_rank(original);
+    return stela_linux_task_native_reserve_rank(record, owner, &rank);
+}
+
 void stela_linux_task_fork_publish(struct task_struct *original)
 {
     const struct stela_linux_owner *owner = stela_linux_owner();
@@ -848,10 +873,7 @@ void stela_linux_task_fork_publish(struct task_struct *original)
         record->source_native_dormant || record->source_c_published ||
         record->source_original_freed || READ_ONCE(original->__state) != TASK_NEW)
         __builtin_trap();
-    struct stela_linux_task_rank rank = {
-        .policy = original->policy, .realtime = original->rt_priority,
-        .effective = original->prio, .nice = task_nice(original),
-    };
+    struct stela_linux_task_rank rank = source_fork_rank(original);
     /* This required producer accepts the actual source rank in the SAME
      * Dormant transaction. It cannot return on uncertain native publication;
      * no original bad_fork error path can reclaim an accepted job/context. */

@@ -55,6 +55,49 @@ impl<const N: usize> OwnedGeneralEscrow<'_, N> {
             Err(error) => Err((self, error)),
         }
     }
+    pub(super) fn reserve_child(
+        &mut self,
+        entered: &dyn EnteredProcess,
+        rank: scheduling::Snapshot,
+    ) -> Result<(), WorkError> {
+        self.current(entered)?;
+        let flags = self.queue.cpu.save_disable()?;
+        let result = (|| {
+            self.current(entered)?;
+            let mut guard = self.queue.lock()?;
+            let state = guard.state();
+            if self.runtime.retired.get()
+                || state.closed
+                || state.poisoned
+                || self.queue.abandoned.load(Ordering::Acquire)
+            {
+                return Err(WorkError::Closed);
+            }
+            self.validate(state)?;
+            if let Some((sequence, reserved_rank)) = self.child_rank {
+                if reserved_rank != rank {
+                    return Err(WorkError::InvalidTicket);
+                }
+                state
+                    .scheduling
+                    .reserved_child(self.context, sequence, rank)?;
+                return Ok(());
+            }
+
+            let sequence = state.next;
+            let next = sequence.checked_add(1).ok_or(WorkError::Exhausted)?;
+            state
+                .scheduling
+                .reserve_child(self.context, sequence, rank)?;
+            self.child_rank = Some((sequence, rank));
+            state.next = next;
+            Ok(())
+        })();
+        // SAFETY: all queue/task borrows ended before restoring the enclosing flags.
+        unsafe { self.queue.cpu.restore(flags) };
+        result
+    }
+
     unsafe fn publish(
         &mut self,
         entered: &dyn EnteredProcess,
@@ -89,15 +132,25 @@ impl<const N: usize> OwnedGeneralEscrow<'_, N> {
                 None if task.stack_epoch == task.stack_retired_epoch => {}
                 _ => return Err(WorkError::CorruptContext),
             }
-            let sequence = state.next;
-            let next = sequence.checked_add(1).ok_or(WorkError::Exhausted)?;
-            if let Some(rank) = dormant {
-                state
+            let (sequence, next) = if let Some((sequence, rank)) = self.child_rank {
+                if dormant != Some(rank) || epoch.is_none() {
+                    return Err(WorkError::InvalidTicket);
+                }
+                let slot = state
                     .scheduling
-                    .insert_dormant(self.context, sequence, rank)?;
+                    .reserved_child(self.context, sequence, rank)?;
+                state.scheduling.publish_reserved_child(slot);
+                self.child_rank = None;
+                (sequence, state.next)
             } else {
+                if dormant.is_some() {
+                    return Err(WorkError::InvalidTicket);
+                }
+                let sequence = state.next;
+                let next = sequence.checked_add(1).ok_or(WorkError::Exhausted)?;
                 state.scheduling.insert(self.context, sequence, false)?;
-            }
+                (sequence, next)
+            };
             let job = Job {
                 callback,
                 context: context as usize,

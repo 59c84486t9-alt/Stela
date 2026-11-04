@@ -3,6 +3,23 @@ use super::*;
 impl<'factory, 'kernel, 'catalog, 'runtime, K: KernelThreadPlatform, P: Provider, const N: usize>
     Child<'factory, 'kernel, 'catalog, 'runtime, K, P, N>
 {
+    pub(crate) fn reserve_child_rank(
+        &mut self,
+        entered: &dyn EnteredProcess,
+        rank: scheduling::Snapshot,
+    ) -> Result<(), Error> {
+        let State::Prepared {
+            lease,
+            exposure: Exposure::Lent,
+        } = &mut *self.state
+        else {
+            return Err(Error::WrongPhase);
+        };
+        lease
+            .reserve_child_rank(entered, rank)
+            .map_err(Error::Pages)
+    }
+
     /// # Safety
     /// Actual original copy_process reached its nofail tasklist/PID publication
     /// point for this child. rank comes from its original policy/effective rank,

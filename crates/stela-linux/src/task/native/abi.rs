@@ -12,6 +12,7 @@ pub(super) struct Dispatch {
         Option<NativeEntry>,
         *mut c_void,
     ) -> i32,
+    reserve_rank: unsafe fn(*const c_void, *mut CTask, *const RawOwner, *const Rank) -> i32,
     publish: unsafe fn(*const c_void, *mut CTask, *const RawOwner, *const Rank),
     activate: unsafe fn(*const c_void, *mut CTask, *const RawOwner),
     event: unsafe fn(*const c_void, *mut CTask, *const RawOwner, u64, u8),
@@ -32,6 +33,7 @@ pub(super) unsafe fn publish<
         owner: broker.kernel.raw(),
         allocate: allocate::<K, P, N>,
         thread: thread::<K, P, N>,
+        reserve_rank: reserve_rank::<K, P, N>,
         publish: publish_child::<K, P, N>,
         activate: activate::<K, P, N>,
         event: event::<K, P, N>,
@@ -88,6 +90,22 @@ unsafe fn thread<K: KernelThreadPlatform + 'static, P: Provider + 'static, const
     // SAFETY: The read guard pins the request, and C retains the entry and argument.
     unsafe { (&*read.pointer).prepare_thread(entry, argument) }
 }
+unsafe fn reserve_rank<K: KernelThreadPlatform + 'static, P: Provider + 'static, const N: usize>(
+    context: *const c_void,
+    task: *mut CTask,
+    owner: *const RawOwner,
+    rank: *const Rank,
+) -> i32 {
+    if rank.is_null() {
+        fatal();
+    }
+    // SAFETY: dispatch retains the typed broker.
+    let b = unsafe { broker::<K, P, N>(context) };
+    let read = b.lookup(task, owner, None);
+    // SAFETY: the request stays pinned and C lends the initialized rank.
+    unsafe { (&*read.pointer).reserve_rank(&*rank) }
+}
+
 unsafe fn publish_child<
     K: KernelThreadPlatform + 'static,
     P: Provider + 'static,
@@ -180,6 +198,19 @@ unsafe extern "C" fn stela_linux_task_native_thread_prepare(
     }
     // SAFETY: The owner matches and C lends the task and retained entry argument.
     unsafe { (d.thread)(d.context, task, owner, entry, argument) }
+}
+#[unsafe(no_mangle)]
+unsafe extern "C" fn stela_linux_task_native_reserve_rank(
+    task: *mut CTask,
+    owner: *const RawOwner,
+    rank: *const Rank,
+) -> i32 {
+    let d = dispatch();
+    if d.owner != owner {
+        fatal();
+    }
+    // SAFETY: the owner matches and C lends the task and initialized rank.
+    unsafe { (d.reserve_rank)(d.context, task, owner, rank) }
 }
 #[unsafe(no_mangle)]
 unsafe extern "C" fn stela_linux_task_native_publish(
