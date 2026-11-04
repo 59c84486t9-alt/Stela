@@ -1180,10 +1180,45 @@ unsafe impl owned::ResourceBacking for ConfigResource {
 // Resource inventories retain only ConfigResource's noncyclic projection.
 struct PmCustody {
     owner: owned::model::MappingOwner<Arc<ConfigRam>>,
+    completion: Option<Arc<PmCompletion>>,
     retention: owned::model::MappingRetention<Arc<ConfigRam>>,
     resource: owned::Resource,
     address: Address,
     window: crate::bus::pci::EcamWindow,
+}
+struct PmCompletion {
+    retention: owned::model::MappingRetention<Arc<ConfigRam>>,
+    fault: stela_driver_base::sync::FirstFault<crate::bus::pci::ConfigError>,
+}
+// SAFETY: actual isolated RAM/context retention only, outside physical backing
+// and affine controls. No provider/fault-schedule callback or per-use allocation.
+unsafe impl crate::bus::pci::owned::grant::CompletionCheck for PmCompletion {
+    fn postvalidate(&self) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        use crate::bus::pci::{ConfigError, ConfigFailure};
+        let result = self.retention.check_context().map_err(|error| {
+            ConfigError::before_effect(match error {
+                owned::Error::Assignment(error) => ConfigFailure::Ownership(error),
+                error => ConfigFailure::Mapping(error),
+            })
+        });
+        if let Err(error) = result {
+            self.fault.latch(error);
+        }
+        result
+    }
+    fn failure(&self) -> stela_driver_base::sync::FaultState<crate::bus::pci::ConfigError> {
+        self.fault.observe()
+    }
+}
+impl Drop for PmCustody {
+    fn drop(&mut self) {
+        self.owner.abandon_admission();
+        // Also cover direct model-custody abandonment outside DriverGrant.
+        // The original preowned validator cannot become a per-access final drop.
+        if let Some(completion) = self.completion.take() {
+            core::mem::forget(completion);
+        }
+    }
 }
 struct PmEpoch(owned::model::MappingRetention<Arc<ConfigRam>>);
 // SAFETY: this is only the same actual isolated RAM/count gate. It never
@@ -1236,8 +1271,10 @@ unsafe impl crate::bus::pci::owned::grant::ConfigCustody for PmCustody {
     fn begin(
         &self,
         operation: crate::bus::pci::owned::grant::Operation,
-    ) -> core::result::Result<crate::bus::pci::assignment::OpaqueUse, crate::bus::pci::ConfigError>
-    {
+    ) -> core::result::Result<
+        crate::bus::pci::owned::grant::ConfigOperation,
+        crate::bus::pci::ConfigError,
+    > {
         use crate::bus::pci::{ConfigError, ConfigFailure, owned::grant::Operation};
         let (offset, width) = match operation {
             Operation::Read { offset, width } | Operation::Write { offset, width, .. } => {
@@ -1255,14 +1292,31 @@ unsafe impl crate::bus::pci::owned::grant::ConfigCustody for PmCustody {
                 width,
             }));
         }
-        self.retention
+        let completion = self
+            .completion
+            .as_ref()
+            .ok_or(ConfigError::before_effect(ConfigFailure::ForeignGrant))?;
+        match crate::bus::pci::owned::grant::CompletionCheck::failure(completion.as_ref()) {
+            stela_driver_base::sync::FaultState::Ready(error) => return Err(error),
+            stela_driver_base::sync::FaultState::Publishing => {
+                return Err(ConfigError::before_effect(ConfigFailure::FaultPublishing));
+            }
+            stela_driver_base::sync::FaultState::Empty => {}
+        }
+        let count = self
+            .retention
             .begin_use(crate::bus::pci::assignment::UseKind::Configuration)
             .map_err(|error| {
                 ConfigError::before_effect(match error {
                     owned::Error::Assignment(error) => ConfigFailure::Ownership(error),
                     error => ConfigFailure::Mapping(error),
                 })
-            })
+            })?;
+        // SAFETY: actual original RAM gate and its preowned context validator
+        // were created together; no source/control callback enters physical P.
+        Ok(unsafe {
+            crate::bus::pci::owned::grant::ConfigOperation::new(count, completion.clone())
+        })
     }
     fn abandon(&mut self) {
         self.owner.abandon_admission();
@@ -1376,6 +1430,10 @@ fn native_config(address: Address, device: u16) -> (Function<ControlledConfig>, 
     // driver, worker or DMA touches them.
     let custody = PmCustody {
         owner: mapping_owner,
+        completion: Some(Arc::new(PmCompletion {
+            retention: retention.clone(),
+            fault: stela_driver_base::sync::FirstFault::new(),
+        })),
         retention,
         resource,
         address,

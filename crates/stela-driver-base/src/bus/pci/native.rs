@@ -180,7 +180,15 @@ impl NativeFunction {
 
     fn latch<T>(&mut self, result: Result<T, Error>) -> Result<T, Error> {
         if let Err(error) = result {
-            self.failure.get_or_insert(error);
+            let observation = match error {
+                Error::Config(error) | Error::Dma(DmaError::Config(error)) => {
+                    error.is_observation()
+                }
+                _ => false,
+            };
+            if !observation {
+                self.failure.get_or_insert(error);
+            }
         }
         result
     }

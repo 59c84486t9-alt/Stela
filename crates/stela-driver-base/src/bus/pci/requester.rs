@@ -109,10 +109,6 @@ impl StoppedRequester {
     /// This grants no isolation from aliases and no control over other requesters.
     /// The caller and final release obey process/deferred-context requirements.
     /// Rejection returns the original function and mapping owner.
-    #[expect(
-        clippy::result_large_err,
-        reason = "stopped-claim refusal returns the same function and original config without allocating"
-    )]
     pub unsafe fn from_stopped_pci(
         function: Function<OwnedConfig>,
         role: FunctionRole,

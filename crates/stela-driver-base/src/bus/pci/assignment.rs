@@ -330,6 +330,17 @@ impl<P: PhysicalAssignment> Retention<P> {
     pub fn uses(&self) -> usize {
         self.storage.gate.state.load(Ordering::Acquire) & COUNT
     }
+    /// Observe the local gate only. This is neither ancestor admission nor
+    /// an atomic acquisition for a future operation.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn check_local_admission(&self) -> Result<(), Error> {
+        if self.storage.gate.state.load(Ordering::Acquire) & CLOSED != 0 {
+            Err(Error::Closed)
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn same_assignment(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.storage, &other.storage)
     }
@@ -400,6 +411,14 @@ pub struct OpaqueUse {
     released: bool,
 }
 impl OpaqueUse {
+    /// Actual SAME-use close-only projection. No callback, allocation, counter
+    /// change, control/writer edge or completion/release permission is added.
+    pub(crate) fn admission_close(&self) -> AdmissionClose {
+        AdmissionClose {
+            original: ManuallyDrop::new(Arc::clone(&self.original)),
+            dismissed: false,
+        }
+    }
     pub fn kind(&self) -> UseKind {
         self.kind
     }
@@ -408,9 +427,19 @@ impl OpaqueUse {
     /// obligations as Use::release. No new operation may use this token. This
     /// releases metadata counts only, never hardware resources or reset rights.
     pub unsafe fn release(mut self) -> Result<(), (Error, Self)> {
-        if let Err(error) = self.original.check_control() {
-            return Err((error, self));
+        // SAFETY: caller supplies the same actual completion obligations.
+        match unsafe { self.release_in_place() } {
+            Ok(()) => Ok(()),
+            Err(error) => Err((error, self)),
         }
+    }
+
+    /// # Safety
+    /// As for release. The operation may keep this token in place while its
+    /// original completion-context check runs. Call at most once successfully.
+    pub(crate) unsafe fn release_in_place(&mut self) -> Result<(), Error> {
+        assert!(!self.released);
+        self.original.check_control()?;
         self.original.release();
         self.released = true;
         // SAFETY: one consumed original-use Arc, after exact count release.

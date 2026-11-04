@@ -84,10 +84,6 @@ impl OwnedConfig {
         unsafe { self.region.release_bus_forwarding_seal() }
     }
 
-    #[expect(
-        clippy::result_large_err,
-        reason = "attachment refusal returns the exact grant and mapping without failure-path allocation"
-    )]
     pub fn attach(
         grant: DriverGrant,
         mapping: Mapping,
@@ -170,10 +166,6 @@ impl UnpublishedConfig {
         self.region.seal_bus_routing()
     }
 
-    #[expect(
-        clippy::result_large_err,
-        reason = "attachment refusal returns the exact unpublished grant and mapping without failure-path allocation"
-    )]
     pub fn attach(
         grant: PrepublicationGrant,
         mapping: Mapping,

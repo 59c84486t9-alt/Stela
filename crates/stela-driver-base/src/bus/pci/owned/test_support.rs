@@ -12,7 +12,10 @@ use crate::bus::mmio::owned::{
 use crate::bus::pci::{
     ConfigFailure,
     assignment::{self, OpaqueUse, UseKind},
-    owned::grant::{ConfigCustody, ConfigEpoch, DriverCustody, DriverGrant, Operation},
+    owned::grant::{
+        CompletionCheck, ConfigCustody, ConfigEpoch, ConfigOperation, DriverCustody, DriverGrant,
+        Operation,
+    },
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
@@ -235,8 +238,45 @@ pub struct FixtureCustody {
     resource: Option<Resource>,
     retention: Option<MappingRetention<Arc<Ram>>>,
     memory: Arc<Ram>,
+    completion: Option<Arc<FixtureCompletion>>,
     address: Address,
     window: EcamWindow,
+}
+// Only actual accepted RAM/context retention. No provider, Mapping/View,
+// source writer, fixture control or RootState backedge enters physical P.
+struct FixtureCompletion {
+    retention: MappingRetention<Arc<Ram>>,
+    fault: crate::sync::FirstFault<ConfigError>,
+}
+// SAFETY: validates this SAME original retained RAM context without mutable
+// entry or allocation. Failure observation reads only the original first cause.
+unsafe impl CompletionCheck for FixtureCompletion {
+    fn postvalidate(&self) -> Result<(), ConfigError> {
+        let result = self.retention.check_context().map_err(|error| {
+            ConfigError::before_effect(match error {
+                MappingError::Assignment(error) => ConfigFailure::Ownership(error),
+                error => ConfigFailure::Mapping(error),
+            })
+        });
+        if let Err(error) = result {
+            self.fault.latch(error);
+        }
+        result
+    }
+    fn failure(&self) -> crate::sync::FaultState<ConfigError> {
+        self.fault.observe()
+    }
+}
+impl Drop for FixtureCustody {
+    fn drop(&mut self) {
+        self.owner.abandon_admission();
+        // DriverGrant normally retains the whole source object. A direct
+        // mapped() custody can also be abandoned while a guard survives: keep
+        // its preowned validator so finish never runs its final destructor.
+        if let Some(completion) = self.completion.take() {
+            core::mem::forget(completion);
+        }
+    }
 }
 struct Epoch {
     retention: MappingRetention<Arc<Ram>>,
@@ -283,7 +323,7 @@ unsafe impl ConfigCustody for FixtureCustody {
     fn resource(&self) -> &Resource {
         self.resource.as_ref().expect("live fixture resource")
     }
-    fn begin(&self, operation: Operation) -> Result<OpaqueUse, ConfigError> {
+    fn begin(&self, operation: Operation) -> Result<ConfigOperation, ConfigError> {
         let (offset, width) = match operation {
             Operation::Read { offset, width } | Operation::Write { offset, width, .. } => {
                 (offset, width)
@@ -300,7 +340,19 @@ unsafe impl ConfigCustody for FixtureCustody {
                 width,
             }));
         }
-        self.retention
+        let completion = self
+            .completion
+            .as_ref()
+            .ok_or(ConfigError::before_effect(ConfigFailure::ForeignGrant))?;
+        match completion.failure() {
+            crate::sync::FaultState::Ready(error) => return Err(error),
+            crate::sync::FaultState::Publishing => {
+                return Err(ConfigError::before_effect(ConfigFailure::FaultPublishing));
+            }
+            crate::sync::FaultState::Empty => {}
+        }
+        let count = self
+            .retention
             .as_ref()
             .ok_or(ConfigError::before_effect(ConfigFailure::ForeignGrant))?
             .begin_use(UseKind::Configuration)
@@ -309,7 +361,10 @@ unsafe impl ConfigCustody for FixtureCustody {
                     MappingError::Assignment(error) => ConfigFailure::Ownership(error),
                     error => ConfigFailure::Mapping(error),
                 })
-            })
+            })?;
+        // SAFETY: this count and preowned validator retain the SAME original
+        // fixture RAM/assignment. Arc clone allocates nothing; control stays here.
+        Ok(unsafe { ConfigOperation::new(count, completion.clone()) })
     }
     fn abandon(&mut self) {
         self.owner.abandon_admission();
@@ -348,16 +403,13 @@ impl FixtureCustody {
     /// # Safety
     /// Source caller completed actual model unmap and every raw/callback user.
     /// Failure keeps the complete SAME source actor, never recreates a grant.
-    #[expect(
-        clippy::result_large_err,
-        reason = "retirement refusal keeps the same original fixture ownership graph without allocating"
-    )]
     unsafe fn finish(mut self: Box<Self>) -> Result<(), RetireFailure> {
         if let Err(error) = self.owner.close() {
             return Err(RetireFailure::source(error, self));
         }
         drop(self.resource.take());
         drop(self.retention.take());
+        drop(self.completion.take());
         // SAFETY: caller supplied exact model drain; actual original gate also
         // checks every retained epoch and config operation has ended.
         match unsafe { self.owner.retire() } {
@@ -414,6 +466,10 @@ pub fn mapped(
         FixtureCustody {
             owner,
             resource: Some(resource),
+            completion: Some(Arc::new(FixtureCompletion {
+                retention: retention.clone(),
+                fault: crate::sync::FirstFault::new(),
+            })),
             retention: Some(retention),
             memory,
             address,
@@ -528,10 +584,6 @@ fn preflight_unmap(grant: &DriverGrant, mapping: &Mapping) -> Result<(), Mapping
 /// hosted source. A native/foreign grant is retained and explicitly refused.
 /// # Safety
 /// Actual model mapping unmap acknowledged and every raw/callback user ended.
-#[expect(
-    clippy::result_large_err,
-    reason = "retirement refusal keeps the same original fixture ownership graph without allocating"
-)]
 unsafe fn finish_original(grant: DriverGrant) -> Result<(), RetireFailure> {
     if grant.custody().type_id() != core::any::TypeId::of::<FixtureCustody>() {
         // Keep foreign admission/state/control entirely unchanged. Never call
@@ -567,10 +619,6 @@ unsafe fn finish_original(grant: DriverGrant) -> Result<(), RetireFailure> {
 /// # Safety
 /// Same complete acknowledged source drain as finish_original; no raw user or
 /// callback may restart. Counter assertions inspect effects, never prove them.
-#[expect(
-    clippy::result_large_err,
-    reason = "retirement refusal keeps the same original fixture ownership graph without allocating"
-)]
 pub unsafe fn finish_retired(grant: DriverGrant, counters: &Counters) -> Result<(), RetireFailure> {
     // SAFETY: caller supplies the exact original model retirement contract.
     unsafe { finish_original(grant) }?;
@@ -581,10 +629,6 @@ pub unsafe fn finish_retired(grant: DriverGrant, counters: &Counters) -> Result<
 }
 /// # Safety
 /// Every raw fixture pointer/callback/borrower stopped; no actor can restart.
-#[expect(
-    clippy::result_large_err,
-    reason = "retirement refusal keeps the same original fixture ownership graph without allocating"
-)]
 pub unsafe fn retire(
     grant: DriverGrant,
     mut mapping: Mapping,
@@ -605,10 +649,6 @@ pub unsafe fn retire(
 }
 /// # Safety
 /// Same complete synchronous model drain as retire; no raw user can restart.
-#[expect(
-    clippy::result_large_err,
-    reason = "retirement refusal keeps the same original fixture ownership graph without allocating"
-)]
 pub unsafe fn retire_config(config: OwnedConfig, counters: &Counters) -> Result<(), RetireFailure> {
     let (grant, mapping) = config.into_parts();
     // SAFETY: same exact original model drain supplied by this caller.
@@ -620,10 +660,6 @@ pub unsafe fn retire_config(config: OwnedConfig, counters: &Counters) -> Result<
 /// # Safety
 /// Every actual model producer, callback, raw pointer and alias has ended and
 /// cannot restart. This is the owning fixture's acknowledged retirement path.
-#[expect(
-    clippy::result_large_err,
-    reason = "retirement refusal keeps the same original fixture ownership graph without allocating"
-)]
 pub unsafe fn retire_owned(config: OwnedConfig) -> Result<(), RetireFailure> {
     let (grant, mut mapping) = config.into_parts();
     if let Err(error) = preflight_unmap(&grant, &mapping) {
@@ -637,4 +673,127 @@ pub unsafe fn retire_owned(config: OwnedConfig) -> Result<(), RetireFailure> {
     drop(mapping);
     // SAFETY: acknowledged SAME mapping and caller's source exclusion above.
     unsafe { finish_original(grant) }
+}
+
+#[cfg(test)]
+mod operation_controls {
+    use super::*;
+
+    fn source() -> (FixtureCustody, Mapping, Arc<Counters>) {
+        mapped(
+            ADDRESS,
+            window(ADDRESS),
+            PhysicalSpan::new(physical(ADDRESS), FUNCTION_BYTES as u64).unwrap(),
+            0,
+            FUNCTION_BYTES,
+            CacheAttribute::Uncached,
+            Protection::ReadWrite,
+        )
+    }
+
+    #[test]
+    fn accepted_configuration_finishes_after_close_without_provider_counter_entry() {
+        let (source, mut mapping, counters) = source();
+        let completion = source.completion.as_ref().unwrap().clone();
+        let calls = counters.contexts.load(Ordering::Relaxed);
+        let mut operation = source
+            .begin(Operation::Read {
+                offset: 0,
+                width: 4,
+            })
+            .unwrap();
+        assert_eq!(source.uses(), 2, "same mapping and configuration gate");
+        let close = source.admission_close().unwrap();
+        close.close();
+        assert!(matches!(
+            source.begin(Operation::Read {
+                offset: 0,
+                width: 4
+            }),
+            Err(ConfigError {
+                reason: ConfigFailure::Ownership(assignment::Error::Closed),
+                ..
+            })
+        ));
+        // SAFETY: this accepted RAM-only readonly control issued no volatile
+        // access, raw pointer or callback. Its empty effect/user has ended.
+        unsafe { operation.finish() }.unwrap();
+        assert_eq!(source.uses(), 1, "original mapping remains counted");
+        assert_eq!(counters.contexts.load(Ordering::Relaxed), calls);
+        assert!(matches!(
+            completion.failure(),
+            crate::sync::FaultState::Empty
+        ));
+        close.dismiss();
+        drop(completion);
+        // SAFETY: every actual model user ended; original unmap is acknowledged.
+        unsafe { mapping.retire() }.unwrap();
+        drop(mapping);
+        // SAFETY: same original RAM owner, mapping and operation drained above.
+        unsafe { Box::new(source).finish() }.unwrap();
+        assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
+        assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(counters.platform_drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn abandoned_configuration_retains_count_and_closes_original_admission() {
+        let (source, _mapping, counters) = source();
+        let calls = counters.contexts.load(Ordering::Relaxed);
+        let operation = source
+            .begin(Operation::Read {
+                offset: 0,
+                width: 4,
+            })
+            .unwrap();
+        assert_eq!(source.uses(), 2);
+        drop(operation);
+        assert_eq!(source.uses(), 2, "abandonment is not completion");
+        assert!(matches!(
+            source.begin(Operation::Read {
+                offset: 0,
+                width: 4
+            }),
+            Err(ConfigError {
+                reason: ConfigFailure::Ownership(assignment::Error::Closed),
+                ..
+            })
+        ));
+        assert_eq!(counters.contexts.load(Ordering::Relaxed), calls);
+        assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.platform_drops.load(Ordering::Relaxed), 0);
+        // Default source/mapping destruction keeps the unfinished original RAM
+        // graph. No native retirement or new completed cause is fabricated.
+    }
+
+    #[test]
+    fn direct_source_drop_keeps_preowned_completion_after_accepted_finish() {
+        let (source, mut mapping, counters) = source();
+        let completion = Arc::downgrade(source.completion.as_ref().unwrap());
+        let resource = source.resource.as_ref().unwrap().clone();
+        let mut operation = source
+            .begin(Operation::Read {
+                offset: 0,
+                width: 4,
+            })
+            .unwrap();
+        drop(source);
+        assert!(matches!(
+            resource.begin_mapping(),
+            Err(MappingError::Assignment(assignment::Error::Closed))
+        ));
+        // SAFETY: readonly RAM-only admission issued no volatile effect/user.
+        // Losing source control closed new admission, not this accepted finish.
+        unsafe { operation.finish() }.unwrap();
+        assert!(
+            completion.upgrade().is_some(),
+            "original validator remains preowned"
+        );
+        drop(resource);
+        // SAFETY: this exact accepted RAM mapping has no remaining users.
+        unsafe { mapping.retire() }.unwrap();
+        assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
+        // No assignment completion is claimed after direct source abandonment.
+    }
 }

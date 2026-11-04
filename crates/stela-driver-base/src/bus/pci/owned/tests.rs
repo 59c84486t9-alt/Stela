@@ -306,7 +306,7 @@ fn actual_fixture_mapping_and_configuration_share_one_original_gate() {
         1,
         "mapping counted before any config operation"
     );
-    let operation = source
+    let mut operation = source
         .begin(Operation::Read {
             offset: 0,
             width: 4,
@@ -338,9 +338,9 @@ fn actual_fixture_mapping_and_configuration_share_one_original_gate() {
     let view = mapping.view(0..4).unwrap();
     assert!(view.address(0, 4).is_ok());
     // SAFETY: this counted model observation performed no IO/raw exposure.
-    if let Err((error, retained)) = unsafe { operation.release() } {
-        let _retained = core::mem::ManuallyDrop::new(retained);
-        panic!("actual fixture operation release failed: {error:?}");
+    if let Err(error) = unsafe { operation.finish() } {
+        let _retained = core::mem::ManuallyDrop::new(operation);
+        panic!("actual fixture operation completion failed: {error:?}");
     }
     assert_eq!(source.uses(), 1);
     // SAFETY: caller is stopped but the real outstanding view must veto unmap.

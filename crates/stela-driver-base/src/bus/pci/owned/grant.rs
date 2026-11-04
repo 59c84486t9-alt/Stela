@@ -2,13 +2,16 @@
 //! Neither phase can be manufactured from Address/window/Mapping descriptors.
 use crate::bus::{
     mmio::owned::{Error as MappingError, Resource},
-    pci::{
-        Address, ConfigError, ConfigFailure, EcamWindow,
-        assignment::{AdmissionClose, OpaqueUse},
-    },
+    pci::{Address, ConfigError, ConfigFailure, EcamWindow, assignment::AdmissionClose},
 };
+mod operation;
 use alloc::boxed::Box;
-use core::{any::Any, cell::Cell, mem::ManuallyDrop};
+use core::{
+    any::Any,
+    cell::{Cell, RefCell},
+    mem::ManuallyDrop,
+};
+pub use operation::{CompletionCheck, ConfigOperation};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Operation {
@@ -63,7 +66,7 @@ pub unsafe trait ConfigCustody: Any {
     /// Atomically admit and count this bounded actual operation with close.
     /// Return a use of the SAME original physical product/ancestors; no heap
     /// allocation or mutable/entered borrow survives return (IRQ-safe path).
-    fn begin(&self, operation: Operation) -> Result<OpaqueUse, ConfigError>;
+    fn begin(&self, operation: Operation) -> Result<ConfigOperation, ConfigError>;
     /// Nonblocking metadata-only close on losing this affine controller. Keep
     /// every real claim/callback/root; no hardware effect/final Drop allowed.
     fn abandon(&mut self);
@@ -86,13 +89,38 @@ pub unsafe trait DriverCustody: ConfigCustody {}
 /// and reattachment. A new Region cannot erase an old failure or BME seal.
 pub(super) struct State {
     pub(super) terminal: Cell<Option<ConfigError>>,
+    pub(super) close: RefCell<Option<AdmissionClose>>,
+    pub(super) operation: RefCell<Option<ConfigOperation>>,
+    pub(super) waiting: Cell<Option<ConfigError>>,
+    pub(super) acting: Cell<bool>,
+    pub(super) effect: Cell<super::super::ConfigEffect>,
     pub(super) master_sealed: Cell<bool>,
     pub(super) routing_seal: Cell<Option<([u32; 7], u16)>>,
 }
 impl State {
+    pub(super) fn close_metadata(&self) {
+        if let Some(close) = self.close.borrow().as_ref() {
+            close.close();
+        }
+        if let Ok(operation) = self.operation.try_borrow()
+            && let Some(operation) = operation.as_ref()
+        {
+            operation.close_metadata();
+        }
+    }
+    pub(super) fn dismiss_close(&self) {
+        if let Some(close) = self.close.borrow_mut().take() {
+            close.dismiss();
+        }
+    }
     fn new() -> Self {
         Self {
             terminal: Cell::new(None),
+            close: RefCell::new(None),
+            operation: RefCell::new(None),
+            waiting: Cell::new(None),
+            acting: Cell::new(false),
+            effect: Cell::new(super::super::ConfigEffect::None),
             master_sealed: Cell::new(false),
             routing_seal: Cell::new(None),
         }
@@ -103,14 +131,14 @@ impl State {
 pub struct PrepublicationGrant {
     original: ManuallyDrop<Box<dyn PrepublicationCustody>>,
     returned: bool,
-    state: State,
+    state: ManuallyDrop<Box<State>>,
 }
 /// Original final driver custody from actual whole-fabric promotion, not a
 /// compatibility constructor that accepts an unpublished or raw config view.
 pub struct DriverGrant {
     original: ManuallyDrop<Box<dyn DriverCustody>>,
     returned: bool,
-    state: State,
+    state: ManuallyDrop<Box<State>>,
 }
 impl PrepublicationGrant {
     /// Recover the same source controller for a consuming phase transition.
@@ -125,6 +153,7 @@ impl PrepublicationGrant {
         if (**self.original).type_id() != core::any::TypeId::of::<P>() {
             return Err(self);
         }
+        self.state.dismiss_close();
         self.returned = true;
         // SAFETY: this affine grant transfers the complete controller once.
         let original = unsafe { ManuallyDrop::take(&mut self.original) };
@@ -149,9 +178,9 @@ impl PrepublicationGrant {
     }
     pub fn from_owned<P: PrepublicationCustody>(original: P) -> Self {
         Self {
+            state: ManuallyDrop::new(Box::new(State::new())),
             original: ManuallyDrop::new(Box::new(original)),
             returned: false,
-            state: State::new(),
         }
     }
     /// # Safety
@@ -162,6 +191,7 @@ impl PrepublicationGrant {
     /// extracting a controller cannot authorize recreating unsealed IO.
     pub unsafe fn into_original(mut self) -> Box<dyn PrepublicationCustody> {
         // SAFETY: one consumed grant, never cloned, no implicit native release.
+        self.state.dismiss_close();
         self.returned = true;
         // SAFETY: the consumed grant transfers this same original controller
         // once; caller preserves every live-user, terminal and seal obligation.
@@ -174,9 +204,9 @@ impl DriverGrant {
     }
     pub fn from_owned<P: DriverCustody>(original: P) -> Self {
         Self {
+            state: ManuallyDrop::new(Box::new(State::new())),
             original: ManuallyDrop::new(Box::new(original)),
             returned: false,
-            state: State::new(),
         }
     }
     /// # Safety
@@ -186,6 +216,7 @@ impl DriverGrant {
     /// The source must preserve all terminal/seal state before any new grant.
     pub unsafe fn into_original(mut self) -> Box<dyn DriverCustody> {
         // SAFETY: one consumed actual source grant, no metadata reconstruction.
+        self.state.dismiss_close();
         self.returned = true;
         // SAFETY: the consumed grant transfers this same original controller
         // once; caller preserves every live-user, terminal and seal obligation.
@@ -217,15 +248,25 @@ pub(super) fn foreign_grant() -> ConfigError {
 }
 impl Drop for PrepublicationGrant {
     fn drop(&mut self) {
-        if !self.returned {
+        if self.returned {
+            // SAFETY: explicit owner transfer dismissed the state projection.
+            unsafe { ManuallyDrop::drop(&mut self.state) };
+        } else if self.state.close.borrow().is_some() {
+            self.state.close_metadata();
+        } else {
             self.original.abandon();
         }
-        // ManuallyDrop retains the COMPLETE actual source/control graph.
+        // Abandonment retains the original controller and parked state.
     }
 }
 impl Drop for DriverGrant {
     fn drop(&mut self) {
-        if !self.returned {
+        if self.returned {
+            // SAFETY: explicit owner transfer dismissed the state projection.
+            unsafe { ManuallyDrop::drop(&mut self.state) };
+        } else if self.state.close.borrow().is_some() {
+            self.state.close_metadata();
+        } else {
             self.original.abandon();
         }
     }

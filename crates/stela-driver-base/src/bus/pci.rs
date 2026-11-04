@@ -204,10 +204,6 @@ impl EcamConfig {
             _context: core::marker::PhantomData,
         }
     }
-    #[expect(
-        clippy::result_large_err,
-        reason = "refusal returns the original owned or borrowed transport without allocating"
-    )]
     pub fn into_owned(self) -> Result<owned::OwnedConfig, Self> {
         match self.transport {
             EcamTransport::Owned(config) => Ok(config),

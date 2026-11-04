@@ -7,6 +7,7 @@ fn denied_before_store_and_failed_after_store_keep_distinct_effects_and_mapping_
     for after_store in [false, true] {
         let (mut config, counters) = fixture(ADDRESS);
         config.write32(0x20, 0x1234_5678).unwrap();
+        let pointer = fixture_pointer(&config, 0x20).cast::<u32>();
         let start = counters.contexts.load(Ordering::Relaxed);
         counters
             .fail_context_at
@@ -30,9 +31,7 @@ fn denied_before_store_and_failed_after_store_keep_distinct_effects_and_mapping_
         assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
         assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
         counters.fail_context_at.store(0, Ordering::Relaxed);
-        // Inspect the actual owned RAM rather than resume terminal IO.
-        let pointer = fixture_pointer(&config, 0x20).cast::<u32>();
-        // SAFETY: exact same synchronous hosted RAM; config still keeps it.
+        // Inspect the already acquired pointer into the original fixture RAM.
         assert_eq!(
             // SAFETY: same original synchronous hosted RAM remains pinned by
             // config; no writer or native device can race this observation.

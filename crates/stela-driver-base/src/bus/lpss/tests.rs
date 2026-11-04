@@ -208,19 +208,11 @@ impl Deref for BarFixture {
 }
 impl BarFixture {
     /// Retire the exact BAR mapping after the register owner acknowledged drain.
-    #[expect(
-        clippy::result_large_err,
-        reason = "failed retirement returns the same affine grant and mapping without failure-path allocation"
-    )]
     unsafe fn retire(self, mapping: Mapping) -> Result<(), RetireFailure> {
         // SAFETY: the caller supplies the genuine same mapping after all users end.
         unsafe { retire(self.grant, mapping, &self.counts) }
     }
     /// Finish a BAR mapping that was already explicitly retired by the control.
-    #[expect(
-        clippy::result_large_err,
-        reason = "failed completion retains the same original source controller without allocating"
-    )]
     unsafe fn finish_unmapped(self) -> Result<(), RetireFailure> {
         // SAFETY: no mapping, register view or raw tail remains at the call site.
         unsafe { finish_retired(self.grant, &self.counts) }

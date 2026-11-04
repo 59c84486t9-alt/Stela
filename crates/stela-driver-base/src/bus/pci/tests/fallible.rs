@@ -123,10 +123,6 @@ fn constructor_and_inventory_metadata_unwind_keep_the_original_observation() {
 }
 
 #[test]
-#[expect(
-    clippy::result_large_err,
-    reason = "conversion refusal returns the same actual config without allocating"
-)]
 fn owning_phase_conversion_returns_the_same_config_without_reobservation() {
     let (mut config, counters) = fixture(ADDRESS);
     config.write32(0, 0x9876_1234).unwrap();
@@ -225,6 +221,13 @@ fn common_msi_programming_stops_at_denied_high_address_store() {
             // post-store operation. Its original uncertain use stays counted.
             // SAFETY: raw model users ended; the actual retained operation
             // still must prevent mapping/source retirement.
+            assert_eq!(
+                // SAFETY: actual model raw users ended, but the unacknowledged
+                // store still holds an operation that must veto unmap.
+                unsafe { function.config().retire() },
+                Err(crate::bus::mmio::owned::Error::Busy)
+            );
+            // SAFETY: the consuming fixture path owes the same veto.
             let failure = unsafe { retire_config(function.into_config(), &counters) }.unwrap_err();
             assert_eq!(failure.error, crate::bus::mmio::owned::Error::Busy);
             drop(failure); // owning refusal retains the SAME original graph

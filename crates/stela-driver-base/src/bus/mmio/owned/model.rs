@@ -5,8 +5,6 @@ use super::Error;
 use crate::bus::pci::assignment::{
     self, Assignment, OpaqueUse, PhysicalAssignment, Retention, UseKind,
 };
-use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 struct Product<P> {
     allocation: P,
@@ -28,7 +26,6 @@ pub struct MappingRetention<P: Clone + Send + Sync + 'static> {
     original: Retention<Product<P>>,
     context_pin: P,
     check: fn(&P) -> Result<(), assignment::Error>,
-    closed: Arc<AtomicBool>,
 }
 impl<P: Clone + Send + Sync + 'static> Clone for MappingRetention<P> {
     fn clone(&self) -> Self {
@@ -36,7 +33,6 @@ impl<P: Clone + Send + Sync + 'static> Clone for MappingRetention<P> {
             original: self.original.clone(),
             context_pin: self.context_pin.clone(),
             check: self.check,
-            closed: self.closed.clone(),
         }
     }
 }
@@ -50,11 +46,9 @@ impl<P: Clone + Send + Sync + 'static> MappingRetention<P> {
     /// begin_use atomically with the SAME actual assignment gate.
     pub fn check_admission(&self) -> Result<(), Error> {
         self.check_context()?;
-        if self.closed.load(Ordering::Acquire) {
-            Err(Error::Assignment(assignment::Error::Closed))
-        } else {
-            Ok(())
-        }
+        self.original
+            .check_local_admission()
+            .map_err(Error::Assignment)
     }
     pub fn begin_use(&self, kind: UseKind) -> Result<OpaqueUse, Error> {
         self.check_admission()?;
@@ -82,7 +76,6 @@ pub struct MappingOwner<P: Clone + Send + Sync + 'static> {
     original: Option<Assignment<Product<P>>>,
     context_pin: Option<P>,
     check: fn(&P) -> Result<(), assignment::Error>,
-    closed: Arc<AtomicBool>,
     failure: Option<Error>,
 }
 impl<P: Clone + Send + Sync + 'static> MappingOwner<P> {
@@ -107,7 +100,6 @@ impl<P: Clone + Send + Sync + 'static> MappingOwner<P> {
             })),
             context_pin: Some(allocation),
             check,
-            closed: Arc::new(AtomicBool::new(false)),
             failure: None,
         }
     }
@@ -126,7 +118,6 @@ impl<P: Clone + Send + Sync + 'static> MappingOwner<P> {
             original: self.original.as_ref().ok_or(Error::Retired)?.retain(),
             context_pin: self.context_pin.as_ref().ok_or(Error::Retired)?.clone(),
             check: self.check,
-            closed: self.closed.clone(),
         })
     }
     pub fn record_retention(&mut self, error: Error) {
@@ -144,13 +135,9 @@ impl<P: Clone + Send + Sync + 'static> MappingOwner<P> {
     /// Close BEFORE model source mutation. Busy still leaves real admission
     /// closed and every existing mapping/operation count held.
     pub fn close(&mut self) -> Result<(), Error> {
-        self.closed.store(true, Ordering::Release);
-        let result = self
-            .original
-            .as_mut()
-            .ok_or(Error::Retired)?
-            .close()
-            .map_err(Error::Assignment);
+        let original = self.original.as_mut().ok_or(Error::Retired)?;
+        original.abandon_admission();
+        let result = original.close().map_err(Error::Assignment);
         if let Err(error) = result {
             self.record_retention(error);
         }
@@ -158,7 +145,6 @@ impl<P: Clone + Send + Sync + 'static> MappingOwner<P> {
     }
     /// Metadata-only infallible denial. Never a cleanup/reset/join receipt.
     pub fn abandon_admission(&mut self) {
-        self.closed.store(true, Ordering::Release);
         if let Some(original) = &mut self.original {
             original.abandon_admission();
         }
@@ -198,6 +184,8 @@ impl<P: Clone + Send + Sync + 'static> Drop for MappingOwner<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, Ordering};
 
     #[repr(align(4096))]
     struct Pages([u8; 4096]);
@@ -225,6 +213,10 @@ mod tests {
         let close = owner.admission_close().unwrap();
         close.close();
         allowed.store(true, Ordering::Release);
+        assert_eq!(
+            retained.check_admission(),
+            Err(Error::Assignment(assignment::Error::Closed))
+        );
         assert!(matches!(
             retained.begin_mapping(),
             Err(Error::Assignment(assignment::Error::Closed))

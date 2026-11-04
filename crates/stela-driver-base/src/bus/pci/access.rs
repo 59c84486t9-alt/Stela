@@ -18,6 +18,16 @@ pub enum ConfigFailure {
     Ownership(assignment::Error),
     ForeignGrant,
     UnqualifiedControl,
+    /// Actual external Command admission refused. Its full native/core first
+    /// cause remains retained by the original operation validator.
+    CommandAdmission,
+    /// Negative observation of the SAME producer publishing its first cause.
+    /// This is not a completed physical cause and must not replace one.
+    FaultPublishing,
+    /// Before-effect/retained completion contention, not a physical cause.
+    Busy,
+    /// Caught interruption of this actual bounded configuration transport.
+    Interrupted,
     BusMasterSealed,
     RoutingSealed,
     Readback {
@@ -44,6 +54,16 @@ pub struct ConfigError {
     pub effect: ConfigEffect,
 }
 impl ConfigError {
+    pub fn is_observation(self) -> bool {
+        matches!(
+            self.reason,
+            ConfigFailure::FaultPublishing
+                | ConfigFailure::Busy
+                | ConfigFailure::Mapping(MappingError::Busy)
+                | ConfigFailure::Ownership(assignment::Error::Busy { .. })
+                | ConfigFailure::Mapping(MappingError::Assignment(assignment::Error::Busy { .. }))
+        )
+    }
     pub const fn before_effect(reason: ConfigFailure) -> Self {
         Self {
             reason,

@@ -5,7 +5,7 @@ use super::{
 };
 use crate::bus::{
     mmio::owned::{CacheAttribute, Error as MappingError, Mapping, Protection},
-    pci::{Address, ConfigError, ConfigFailure, EcamWindow},
+    pci::{Address, ConfigEffect, ConfigError, ConfigFailure, EcamWindow},
 };
 use core::{mem::size_of, ptr::NonNull};
 const FUNCTION_BYTES: usize = 4096;
@@ -116,6 +116,19 @@ impl<G: Grant> Region<G> {
                 ));
             }
         }
+        if grant.state().close.borrow().is_none() {
+            let close = match grant.custody().admission_close() {
+                Ok(close) => close,
+                Err(error) => {
+                    return Err((
+                        ConfigError::before_effect(ConfigFailure::Mapping(error)),
+                        grant,
+                        mapping,
+                    ));
+                }
+            };
+            *grant.state().close.borrow_mut() = Some(close);
+        }
         Ok(Self {
             grant,
             address,
@@ -176,9 +189,19 @@ impl<G: Grant> Region<G> {
     /// no new access may start. No assignment/grant release is implied. Failure
     /// retains THIS same complete owner; never reconstruct it from descriptors.
     pub unsafe fn retire(&mut self) -> Result<(), MappingError> {
+        let state = self.grant.state();
+        if state.acting.get()
+            || state.terminal.get().is_some()
+            || state.operation.borrow().is_some()
+        {
+            return Err(MappingError::Busy);
+        }
         self.grant.custody().retirement_context()?;
         // SAFETY: exact original mapping under caller's complete retirement.
-        unsafe { self.mapping.retire() }
+        unsafe { self.mapping.retire() }?;
+        state.close_metadata();
+        state.dismiss_close();
+        Ok(())
     }
 
     pub fn seal_bus_master(&mut self) -> Result<(), ConfigError> {
@@ -225,9 +248,7 @@ impl<G: Grant> Region<G> {
         Ok(())
     }
     fn check_write(&self, offset: u16, value: u32, bytes: usize) -> Result<(), ConfigError> {
-        if let Some(error) = self.grant.state().terminal.get() {
-            return Err(error);
-        }
+        self.check_terminal()?;
         if self.grant.state().master_sealed.get() && offset == 4 && value & 4 != 0 {
             return Err(ConfigError::before_effect(ConfigFailure::BusMasterSealed));
         }
@@ -261,9 +282,7 @@ impl<G: Grant> Region<G> {
         Ok(())
     }
     fn try_register<T>(&self, offset: u16) -> Result<NonNull<T>, ConfigError> {
-        if let Some(error) = self.grant.state().terminal.get() {
-            return Err(error);
-        }
+        self.check_terminal()?;
         let start = usize::from(offset);
         let width = size_of::<T>();
         if !start.is_multiple_of(width)
@@ -284,139 +303,211 @@ impl<G: Grant> Region<G> {
             .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))
     }
 
-    fn stop_after_effect(&self, error: ConfigError) -> ConfigError {
-        if let Some(first) = self.grant.state().terminal.get() {
-            first
+    fn check_terminal(&self) -> Result<(), ConfigError> {
+        let state = self.grant.state();
+        if let Some(error) = state.terminal.get() {
+            return Err(error);
+        }
+        if let Some(waiting) = state.waiting.get() {
+            let operation = state.operation.borrow();
+            let observed = operation
+                .as_ref()
+                .expect("retained original operation")
+                .failure();
+            let error = match observed {
+                crate::sync::FaultState::Ready(error) if !error.is_observation() => {
+                    state.terminal.set(Some(error));
+                    error
+                }
+                crate::sync::FaultState::Publishing => ConfigError {
+                    reason: ConfigFailure::FaultPublishing,
+                    effect: waiting.effect,
+                },
+                _ => waiting,
+            };
+            return Err(error);
+        }
+        Ok(())
+    }
+    fn run<T>(&self, action: impl FnOnce() -> Result<T, ConfigError>) -> Result<T, ConfigError> {
+        self.check_terminal()?;
+        let state = self.grant.state();
+        if state.acting.replace(true) {
+            let error = ConfigError {
+                reason: ConfigFailure::Interrupted,
+                effect: state.effect.get(),
+            };
+            state.close_metadata();
+            if state.terminal.get().is_none() {
+                state.terminal.set(Some(error));
+            }
+            return Err(error);
+        }
+        state.effect.set(ConfigEffect::None);
+        let mut transaction = Transport {
+            state,
+            finished: false,
+        };
+        let result = action();
+        transaction.finished = true;
+        state.acting.set(false);
+        if let Some(error) = state.terminal.get() {
+            Err(error)
         } else {
-            self.grant.state().terminal.set(Some(error));
-            error
+            result
         }
     }
+    fn begin_operation(&self, operation: Operation) -> Result<(), ConfigError> {
+        let operation = self.grant.custody().begin(operation)?;
+        let mut stored = self.grant.state().operation.borrow_mut();
+        assert!(stored.is_none(), "one original configuration operation");
+        *stored = Some(operation);
+        drop(stored);
+        self.check_terminal()
+            .or_else(|error| self.retain_failure(error))
+    }
+    fn retain_failure<T>(&self, error: ConfigError) -> Result<T, ConfigError> {
+        let state = self.grant.state();
+        state.close_metadata();
+        if !error.is_observation() && state.terminal.get().is_none() {
+            state.terminal.set(Some(error));
+        }
+        state.waiting.set(Some(error));
+        Err(state.terminal.get().unwrap_or(error))
+    }
+    fn record_write(&self, offset: u16, width: u8) {
+        let state = self.grant.state();
+        state
+            .effect
+            .set(ConfigEffect::WriteMayHaveApplied { offset, width });
+        // SAFETY: called immediately after the exact bounded volatile store.
+        unsafe {
+            state
+                .operation
+                .borrow_mut()
+                .as_mut()
+                .expect("actual operation")
+                .record_write(offset, width)
+        };
+    }
     fn postvalidate<T>(&self, offset: u16, width: u8, wrote: bool) -> Result<(), ConfigError> {
-        self.try_register::<T>(offset).map(|_| ()).map_err(|error| {
-            self.stop_after_effect(if wrote {
+        if let Err(error) = self.try_register::<T>(offset).map(|_| ()) {
+            return self.retain_failure(if wrote {
                 ConfigError::write_may_have_applied(offset, width, error.reason)
             } else {
                 error
-            })
+            });
+        }
+        let state = self.grant.state();
+        // The SAME complete guard stays in original State through this call.
+        // SAFETY: actual bounded volatile operation/raw tail has ended; its
+        // mandatory source/hardware postvalidation runs before count release.
+        let result = unsafe {
+            state
+                .operation
+                .borrow_mut()
+                .as_mut()
+                .expect("actual operation")
+                .finish()
+        };
+        if let Err(error) = result {
+            return self.retain_failure(error);
+        }
+        drop(state.operation.borrow_mut().take());
+        Ok(())
+    }
+    pub fn try_read8(&self, offset: u16) -> Result<u8, ConfigError> {
+        self.run(|| {
+            let register = self.try_register::<u8>(offset)?;
+            self.begin_operation(Operation::Read { offset, width: 1 })?;
+            // SAFETY: exact checked native width, SAME counted operation held.
+            let value = unsafe { register.as_ptr().read_volatile() };
+            self.postvalidate::<u8>(offset, 1, false)?;
+            Ok(value)
         })
     }
-
-    /// Fallible exact-width accesses for native service boundaries. Revalidate
-    /// the original mapping/context after the volatile effect as well. An error
-    /// after a write does not establish that the write had no hardware effect.
-    pub fn try_read8(&self, offset: u16) -> Result<u8, ConfigError> {
-        let register = self.try_register::<u8>(offset)?;
-        let operation = self
-            .grant
-            .custody()
-            .begin(Operation::Read { offset, width: 1 })?;
-        // SAFETY: complete checked native byte, under the original attach grant.
-        let value = unsafe { register.as_ptr().read_volatile() };
-        self.postvalidate::<u8>(offset, 1, false)?;
-        // SAFETY: bounded volatile read and exact postvalidation completed;
-        // no borrowed owner/entered permit survives or sleeps here.
-        unsafe { operation.release() }.map_err(|(e, _kept)| {
-            self.stop_after_effect(ConfigError::before_effect(ConfigFailure::Ownership(e)))
-        })?;
-        Ok(value)
-    }
     pub fn try_read16(&self, offset: u16) -> Result<u16, ConfigError> {
-        let register = self.try_register::<u16>(offset)?;
-        let operation = self
-            .grant
-            .custody()
-            .begin(Operation::Read { offset, width: 2 })?;
-        // SAFETY: complete checked aligned native word.
-        let value = unsafe { register.as_ptr().read_volatile() };
-        self.postvalidate::<u16>(offset, 2, false)?;
-        // SAFETY: bounded volatile read and exact postvalidation completed;
-        // no borrowed owner/entered permit survives or sleeps here.
-        unsafe { operation.release() }.map_err(|(e, _kept)| {
-            self.stop_after_effect(ConfigError::before_effect(ConfigFailure::Ownership(e)))
-        })?;
-        Ok(u16::from_le(value))
+        self.run(|| {
+            let register = self.try_register::<u16>(offset)?;
+            self.begin_operation(Operation::Read { offset, width: 2 })?;
+            // SAFETY: exact checked native width, SAME counted operation held.
+            let value = unsafe { register.as_ptr().read_volatile() };
+            self.postvalidate::<u16>(offset, 2, false)?;
+            Ok(u16::from_le(value))
+        })
     }
     pub fn try_read32(&self, offset: u16) -> Result<u32, ConfigError> {
-        let register = self.try_register::<u32>(offset)?;
-        let operation = self
-            .grant
-            .custody()
-            .begin(Operation::Read { offset, width: 4 })?;
-        // SAFETY: complete checked aligned native dword.
-        let value = unsafe { register.as_ptr().read_volatile() };
-        self.postvalidate::<u32>(offset, 4, false)?;
-        // SAFETY: bounded volatile read and exact postvalidation completed;
-        // no borrowed owner/entered permit survives or sleeps here.
-        unsafe { operation.release() }.map_err(|(e, _kept)| {
-            self.stop_after_effect(ConfigError::before_effect(ConfigFailure::Ownership(e)))
-        })?;
-        Ok(u32::from_le(value))
+        self.run(|| {
+            let register = self.try_register::<u32>(offset)?;
+            self.begin_operation(Operation::Read { offset, width: 4 })?;
+            // SAFETY: exact checked native width, SAME counted operation held.
+            let value = unsafe { register.as_ptr().read_volatile() };
+            self.postvalidate::<u32>(offset, 4, false)?;
+            Ok(u32::from_le(value))
+        })
     }
     pub fn try_write8(&mut self, offset: u16, value: u8) -> Result<(), ConfigError> {
-        self.check_write(offset, u32::from(value), 1)?;
-        let register = self.try_register::<u8>(offset)?;
-        let operation = self.grant.custody().begin(Operation::Write {
-            offset,
-            width: 1,
-            value: u32::from(value),
-        })?;
-        // SAFETY: a byte store never replays a neighboring W1C register.
-        unsafe { register.as_ptr().write_volatile(value) };
-        self.postvalidate::<u8>(offset, 1, true)?;
-        // SAFETY: exact bounded write/postvalidation ended. Uncertain failure
-        // retains the operation count/graph, never a retry-as-unchanged proof.
-        unsafe { operation.release() }.map_err(|(e, _kept)| {
-            self.stop_after_effect(ConfigError::write_may_have_applied(
+        self.run(|| {
+            self.check_write(offset, u32::from(value), 1)?;
+            let register = self.try_register::<u8>(offset)?;
+            self.begin_operation(Operation::Write {
                 offset,
-                1,
-                ConfigFailure::Ownership(e),
-            ))
-        })?;
-        Ok(())
+                width: 1,
+                value: u32::from(value),
+            })?;
+            // SAFETY: exact checked native width; no adjacent W1C replay.
+            unsafe { register.as_ptr().write_volatile(value) };
+            self.record_write(offset, 1);
+            self.postvalidate::<u8>(offset, 1, true)
+        })
     }
     pub fn try_write16(&mut self, offset: u16, value: u16) -> Result<(), ConfigError> {
-        self.check_write(offset, u32::from(value), 2)?;
-        let register = self.try_register::<u16>(offset)?;
-        let operation = self.grant.custody().begin(Operation::Write {
-            offset,
-            width: 2,
-            value: u32::from(value),
-        })?;
-        // SAFETY: an aligned word store never widens into adjacent Status.
-        unsafe { register.as_ptr().write_volatile(value.to_le()) };
-        self.postvalidate::<u16>(offset, 2, true)?;
-        // SAFETY: exact bounded write/postvalidation ended. Uncertain failure
-        // retains the operation count/graph, never a retry-as-unchanged proof.
-        unsafe { operation.release() }.map_err(|(e, _kept)| {
-            self.stop_after_effect(ConfigError::write_may_have_applied(
+        self.run(|| {
+            self.check_write(offset, u32::from(value), 2)?;
+            let register = self.try_register::<u16>(offset)?;
+            self.begin_operation(Operation::Write {
                 offset,
-                2,
-                ConfigFailure::Ownership(e),
-            ))
-        })?;
-        Ok(())
+                width: 2,
+                value: u32::from(value),
+            })?;
+            // SAFETY: exact checked native width; no adjacent W1C replay.
+            unsafe { register.as_ptr().write_volatile(value.to_le()) };
+            self.record_write(offset, 2);
+            self.postvalidate::<u16>(offset, 2, true)
+        })
     }
     pub fn try_write32(&mut self, offset: u16, value: u32) -> Result<(), ConfigError> {
-        self.check_write(offset, value, 4)?;
-        let register = self.try_register::<u32>(offset)?;
-        let operation = self.grant.custody().begin(Operation::Write {
-            offset,
-            width: 4,
-            value,
-        })?;
-        // SAFETY: complete checked aligned native dword store.
-        unsafe { register.as_ptr().write_volatile(value.to_le()) };
-        self.postvalidate::<u32>(offset, 4, true)?;
-        // SAFETY: exact bounded write/postvalidation ended. Uncertain failure
-        // retains the operation count/graph, never a retry-as-unchanged proof.
-        unsafe { operation.release() }.map_err(|(e, _kept)| {
-            self.stop_after_effect(ConfigError::write_may_have_applied(
+        self.run(|| {
+            self.check_write(offset, value, 4)?;
+            let register = self.try_register::<u32>(offset)?;
+            self.begin_operation(Operation::Write {
                 offset,
-                4,
-                ConfigFailure::Ownership(e),
-            ))
-        })?;
-        Ok(())
+                width: 4,
+                value,
+            })?;
+            // SAFETY: exact checked native width; no adjacent W1C replay.
+            unsafe { register.as_ptr().write_volatile(value.to_le()) };
+            self.record_write(offset, 4);
+            self.postvalidate::<u32>(offset, 4, true)
+        })
+    }
+}
+/// No source callback, allocator or final destructor runs in transport unwind.
+struct Transport<'a> {
+    state: &'a super::grant::State,
+    finished: bool,
+}
+impl Drop for Transport<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.state.close_metadata();
+            if self.state.terminal.get().is_none() {
+                self.state.terminal.set(Some(ConfigError {
+                    reason: ConfigFailure::Interrupted,
+                    effect: self.state.effect.get(),
+                }));
+            }
+            self.state.acting.set(false);
+        }
     }
 }

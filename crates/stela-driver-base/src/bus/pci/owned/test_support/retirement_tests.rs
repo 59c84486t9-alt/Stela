@@ -5,7 +5,7 @@ use super::*;
 fn pending_original_config_use_vetoes_unmap_and_same_parts_retry_after_release() {
     let (config, counters) = fixture(ADDRESS);
     let (grant, mapping) = config.into_parts();
-    let usage = grant
+    let mut usage = grant
         .custody()
         .begin(Operation::Read {
             offset: 0,
@@ -24,7 +24,7 @@ fn pending_original_config_use_vetoes_unmap_and_same_parts_retry_after_release()
     drop(failure);
     // SAFETY: this exact original read admission issued no volatile effect,
     // pointer, callback or alias. Release that actual token, not a replacement.
-    assert!(unsafe { usage.release() }.is_ok());
+    assert!(unsafe { usage.finish() }.is_ok());
     // SAFETY: original token ended; this same mapper/source now performs and
     // acknowledges its real unmap/retirement, with all raw users still stopped.
     unsafe { retire(grant, mapping, &counters) }.unwrap();
