@@ -1,6 +1,7 @@
 //! Configuration access under the activated standalone table owner.
 //! The one native Permission keeps real firmware/root reservations. Captured
 //! MCFG observations alone cannot construct this Source.
+mod inventory;
 mod platform;
 mod prepare;
 use super::{ActivatedTables, PAGE, RootError};
@@ -17,7 +18,11 @@ use stela_drivers::bus::{
         self, AddressSpace, Authority, CacheAttribute, PhysicalSpan, Protection, Resource,
         ResourceBacking, ResourceKind,
     },
-    pci::{Address, ConfigError, EcamWindow, owned::OwnedConfig},
+    pci::{
+        Address, ConfigError, EcamWindow, EnumerationError,
+        assignment::{self, Assignment, OpaqueUse, PhysicalAssignment, Retention, UseKind},
+        owned::OwnedConfig,
+    },
 };
 
 // A separate canonical high-half window; builder refuses any overlap.
@@ -49,6 +54,7 @@ pub(crate) enum Error {
     Root(RootError),
     Tables(Refusal),
     Config(ConfigError),
+    Discovery(EnumerationError),
     NotReady(Address),
 }
 impl fmt::Display for Error {
@@ -64,6 +70,7 @@ impl fmt::Display for Error {
             Self::Root(error) => write!(f, "owned PCI root: {error}"),
             Self::Tables(error) => write!(f, "{error}"),
             Self::Config(error) => write!(f, "owned PCI configuration: {error:?}"),
+            Self::Discovery(error) => write!(f, "owned PCI topology: {error:?}"),
             Self::NotReady(address) => {
                 write!(f, "PCI {address} returned CRS; no qualified retry clock")
             }
@@ -73,6 +80,7 @@ impl fmt::Display for Error {
 struct Bus {
     window: EcamWindow,
     resource: Resource,
+    _assignment: Assignment<BusReservation>,
 }
 pub(crate) struct Source {
     platform: Arc<platform::Platform>,
@@ -83,6 +91,53 @@ pub(crate) struct Source {
 struct Backing {
     platform: Arc<platform::Platform>,
     span: PhysicalSpan,
+}
+struct BusReservation {
+    platform: Arc<platform::Platform>,
+    _span: PhysicalSpan,
+}
+
+// SAFETY: the exclusive post-EBS source owns this validated whole ECAM
+// window. The original ActivatedTables and final firmware exclusions remain
+// held through Platform, without a mapping, registry or driver backedge.
+unsafe impl PhysicalAssignment for BusReservation {
+    fn parent(&self) -> Option<&assignment::Parent> {
+        None
+    }
+
+    fn check_control(&self) -> Result<(), assignment::Error> {
+        self.platform
+            .check()
+            .map_err(|_| assignment::Error::Context)
+    }
+}
+
+struct BusBacking {
+    platform: Arc<platform::Platform>,
+    span: PhysicalSpan,
+    retention: Retention<BusReservation>,
+}
+
+// SAFETY: the source gives each checked ECAM extent its original retained
+// assignment and holds it across every live or quarantined page mapping.
+unsafe impl ResourceBacking for BusBacking {
+    fn physical_span(&self) -> PhysicalSpan {
+        self.span
+    }
+
+    fn kind(&self) -> ResourceKind {
+        ResourceKind::Registers
+    }
+
+    fn begin_mapping(&self) -> Result<OpaqueUse, owned::Error> {
+        self.platform
+            .check()
+            .map_err(|_| owned::Error::Unavailable)?;
+        self.retention
+            .begin_use(UseKind::Mapping)
+            .map(|usage| usage.erase())
+            .map_err(owned::Error::Assignment)
+    }
 }
 // SAFETY: only Source's post-EBS exclusive bus handoff mints these
 // complete ECAM reservations. Original tables/resource exclusions stay pinned;
@@ -121,14 +176,29 @@ impl Source {
             let range = window.range();
             let span =
                 PhysicalSpan::new(range.start, range.end - range.start).map_err(Error::Mapping)?;
-            let resource = Resource::new(Box::new(Backing {
+            let mut assignment = Assignment::from_owned(BusReservation {
+                platform: platform.clone(),
+                _span: span,
+            });
+            let resource = Resource::new(Box::new(BusBacking {
                 platform: platform.clone(),
                 span,
+                retention: assignment.retain(),
             }));
-            authority
-                .register_resource(resource.clone())
-                .map_err(|refusal| Error::Mapping(refusal.error))?;
-            buses.push(Bus { window, resource });
+            if let Err(refusal) = authority.register_resource(resource.clone()) {
+                let error = refusal.error;
+                drop(refusal.into_resource());
+                drop(resource);
+                if assignment.close().is_ok() {
+                    let _ = assignment.into_original();
+                }
+                return Err(Error::Mapping(error));
+            }
+            buses.push(Bus {
+                window,
+                resource,
+                _assignment: assignment,
+            });
         }
         Ok(Self {
             platform,
@@ -139,6 +209,26 @@ impl Source {
     }
     /// Exact function access, keeping its real mapping until explicit retirement.
     pub(crate) fn config(&self, address: Address) -> Result<OwnedConfig, Error> {
+        let (window, mapping) = self.config_mapping(address, Protection::ReadWrite)?;
+        // SAFETY: unique original bus reservation, current root and exact
+        // 4K lease; no raw accessor or second writer is exposed by this Source.
+        match unsafe { OwnedConfig::attach(address, window, mapping) } {
+            Ok(config) => Ok(config),
+            Err((error, mut mapping)) => {
+                // No consumer/device effect occurred. Explicitly retire this
+                // rejected mapping; failure leaves its real owner quarantined.
+                // SAFETY: rejected attachment made no device access and exposed no view.
+                let _ = unsafe { mapping.retire() };
+                Err(Error::Config(error))
+            }
+        }
+    }
+
+    fn config_mapping(
+        &self,
+        address: Address,
+        protection: Protection,
+    ) -> Result<(EcamWindow, owned::Mapping), Error> {
         self.platform.check_bus(address)?;
         let bus = self
             .buses
@@ -169,58 +259,13 @@ impl Source {
                 offset,
                 PAGE,
                 CacheAttribute::Uncached,
-                Protection::ReadWrite,
+                protection,
             )
             .map_err(Error::Mapping)?;
-        // SAFETY: unique original bus reservation, current root and exact
-        // 4K lease; no raw accessor or second writer is exposed by this Source.
-        match unsafe { OwnedConfig::attach(address, bus.window, mapping) } {
-            Ok(config) => Ok(config),
-            Err((error, mut mapping)) => {
-                // No consumer/device effect occurred. Explicitly retire this
-                // rejected mapping; failure leaves its real owner quarantined.
-                // SAFETY: rejected attachment made no device access and exposed no view.
-                let _ = unsafe { mapping.retire() };
-                Err(Error::Config(error))
-            }
-        }
+        Ok((bus.window, mapping))
     }
     pub(crate) fn windows(&self) -> impl Iterator<Item = EcamWindow> + '_ {
         self.buses.iter().map(|bus| bus.window)
-    }
-    /// Read-only bridge/ARI topology through config owners. Even
-    /// absent/CRS mappings are returned to the retirement owner.
-    pub(crate) fn inventory(
-        &self,
-        window: &EcamWindow,
-    ) -> Result<Vec<stela_drivers::bus::pci::Identity>, Error> {
-        use stela_drivers::bus::pci::Function;
-        Function::inventory_with(
-            window,
-            |address| {
-                let config = self.config(address)?;
-                match Function::try_new(address, config) {
-                    Ok(function) => Ok(Some(function)),
-                    Err(config) => {
-                        let vendor = config.try_read16(0).map_err(Error::Config)?;
-                        let mut mapping = config.into_mapping();
-                        // SAFETY: read-only inventory exposed no pointer/view and
-                        // performed no device/DMA/IRQ action through this config.
-                        unsafe { mapping.retire() }.map_err(Error::Mapping)?;
-                        if vendor == 0xffff {
-                            Ok(None)
-                        } else {
-                            Err(Error::NotReady(address))
-                        }
-                    }
-                }
-            },
-            |function| {
-                let mut mapping = function.into_config().into_mapping();
-                // SAFETY: same exclusively read-only discovery scope above.
-                unsafe { mapping.retire() }.map_err(Error::Mapping)
-            },
-        )
     }
     pub(crate) fn verify_retired(&self) -> Result<(), Error> {
         self.platform.verify_empty()?;
