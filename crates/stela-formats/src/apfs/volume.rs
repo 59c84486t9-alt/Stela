@@ -158,8 +158,14 @@ pub(crate) struct RegularStream<'a, R> {
     size: u64,
 }
 
-impl<R: ReadAt> RegularStream<'_, R> {
-    pub(crate) fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<()> {
+impl<R: ReadAt> ReadAt for RegularStream<'_, R> {
+    type Error = ApfsError;
+
+    fn len(&self) -> u64 {
+        self.size
+    }
+
+    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<()> {
         let end = stream_end(self.size, offset, buffer.len())?;
         buffer.fill(0);
         read_extents(self.device, &self.extents, offset, end, buffer)

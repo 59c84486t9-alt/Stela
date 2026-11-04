@@ -7,11 +7,14 @@
 //! This is not an IMG4 signature validator and never decrypts keybag payloads.
 use crate::Result;
 use alloc::{borrow::Cow, string::String, vec, vec::Vec};
+use core::ops::Range;
 use serde::Serialize;
 use stela_contracts::{refuse, require};
 
 /// IM4P compression algorithm 1 is LZFSE, with a `bvx*` block stream.
 const COMPRESSION_LZFSE: u64 = 1;
+
+pub(crate) mod stream;
 
 const DER_SEQUENCE: u8 = 0x30;
 const DER_IA5_STRING: u8 = 0x16;
@@ -22,14 +25,23 @@ const DER_CONTEXT_0: u8 = 0xa0;
 struct Der<'a> {
     bytes: &'a [u8],
     position: usize,
+    end: usize,
 }
 
 impl<'a> Der<'a> {
     fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, position: 0 }
+        Self::prefix(bytes, bytes.len())
     }
 
-    fn next(&mut self) -> Result<(u8, &'a [u8])> {
+    fn prefix(bytes: &'a [u8], end: usize) -> Self {
+        Self {
+            bytes: &bytes[..bytes.len().min(end)],
+            position: 0,
+            end,
+        }
+    }
+
+    fn next_range(&mut self) -> Result<(u8, Range<usize>)> {
         let tag = *self
             .bytes
             .get(self.position)
@@ -72,16 +84,23 @@ impl<'a> Der<'a> {
             .position
             .checked_add(length)
             .ok_or(refuse!("DER range overflow"))?;
-        let value = self
-            .bytes
-            .get(self.position..end)
-            .ok_or(refuse!("DER value is out of bounds"))?;
+        require!(end <= self.end, "DER value is out of bounds");
+        let value = self.position..end;
         self.position = end;
         Ok((tag, value))
     }
 
-    fn value(&mut self, tag: u8) -> Result<&'a [u8]> {
-        let (actual, value) = self.next()?;
+    fn next(&mut self) -> Result<(u8, &'a [u8])> {
+        let (tag, range) = self.next_range()?;
+        let value = self
+            .bytes
+            .get(range)
+            .ok_or(refuse!("DER value is out of bounds"))?;
+        Ok((tag, value))
+    }
+
+    fn value_range(&mut self, tag: u8) -> Result<Range<usize>> {
+        let (actual, value) = self.next_range()?;
         require!(
             actual == tag,
             "unexpected DER tag: {actual:#x}, expected {tag:#x}",
@@ -91,8 +110,15 @@ impl<'a> Der<'a> {
         Ok(value)
     }
 
+    fn value(&mut self, tag: u8) -> Result<&'a [u8]> {
+        let range = self.value_range(tag)?;
+        self.bytes
+            .get(range)
+            .ok_or_else(|| refuse!("DER value is out of bounds").into())
+    }
+
     fn done(&self) -> bool {
-        self.position == self.bytes.len()
+        self.position == self.end
     }
 }
 
@@ -138,11 +164,20 @@ pub struct Im4p<'a> {
     pub opaque_extensions: Vec<Extension>,
 }
 
-/// Parse a bare IM4P container, rejecting keybags and trailing bytes.
-pub fn parse(bytes: &[u8]) -> Result<Im4p<'_>> {
-    let mut outer = Der::new(bytes);
-    let mut sequence = Der::new(outer.value(DER_SEQUENCE)?);
+pub(crate) struct PayloadHeader {
+    pub(crate) payload_type: String,
+    pub(crate) description: String,
+    /// Relative to the start of the original IM4P.
+    pub(crate) payload: Range<usize>,
+}
+
+/// Validate every field up to the payload value and identify its exact range.
+pub(crate) fn payload_header(prefix: &[u8], bytes: usize) -> Result<PayloadHeader> {
+    let mut outer = Der::prefix(prefix, bytes);
+    let fields = outer.value_range(DER_SEQUENCE)?;
     require!(outer.done(), "trailing bytes after IM4P container");
+    let fields_prefix = prefix.get(fields.start..).unwrap_or_default();
+    let mut sequence = Der::prefix(fields_prefix, fields.len());
     require!(
         sequence.value(DER_IA5_STRING)? == b"IM4P",
         "expected a bare IM4P container"
@@ -153,7 +188,34 @@ pub fn parse(bytes: &[u8]) -> Result<Im4p<'_>> {
         "payload type must have four characters"
     );
     let description = text(sequence.value(DER_IA5_STRING)?)?;
-    let payload = sequence.value(DER_OCTET_STRING)?;
+    let payload = sequence.value_range(DER_OCTET_STRING)?;
+    Ok(PayloadHeader {
+        payload_type,
+        description,
+        payload: (fields.start + payload.start)..(fields.start + payload.end),
+    })
+}
+
+pub(crate) struct Compression {
+    algorithm: Option<u64>,
+    declared_bytes: Option<u64>,
+    extensions: Vec<Extension>,
+}
+
+impl Compression {
+    /// Whether the metadata qualifies for bounded LZFSE streaming.
+    pub(crate) fn lzfse_size(&self, maximum: u64) -> Option<usize> {
+        let bytes = self.declared_bytes?;
+        if self.algorithm != Some(COMPRESSION_LZFSE) || !(1..=maximum).contains(&bytes) {
+            return None;
+        }
+        usize::try_from(bytes).ok()
+    }
+}
+
+/// Validate the remaining fields in the original IM4P.
+pub(crate) fn compression_metadata(suffix: &[u8]) -> Result<Compression> {
+    let mut sequence = Der::new(suffix);
     let mut compression_algorithm = None;
     let mut declared_uncompressed_bytes = None;
     let mut opaque_extensions = vec![];
@@ -175,14 +237,34 @@ pub fn parse(bytes: &[u8]) -> Result<Im4p<'_>> {
             _ => return Err(refuse!("unsupported IM4P extension tag {tag:#x}", tag).into()),
         }
     }
-    Ok(Im4p {
-        payload_type,
-        description,
-        payload,
-        compression_algorithm,
-        declared_uncompressed_bytes,
-        opaque_extensions,
+    Ok(Compression {
+        algorithm: compression_algorithm,
+        declared_bytes: declared_uncompressed_bytes,
+        extensions: opaque_extensions,
     })
+}
+
+/// Parse a bare IM4P container, rejecting keybags and trailing bytes.
+pub fn parse(bytes: &[u8]) -> Result<Im4p<'_>> {
+    let header = payload_header(bytes, bytes.len())?;
+    let compression = compression_metadata(&bytes[header.payload.end..])?;
+    Ok(Im4p {
+        payload_type: header.payload_type,
+        description: header.description,
+        payload: &bytes[header.payload],
+        compression_algorithm: compression.algorithm,
+        declared_uncompressed_bytes: compression.declared_bytes,
+        opaque_extensions: compression.extensions,
+    })
+}
+
+/// Owned Image4 output with the enclosing source identity and original manifest.
+pub(crate) struct DecodedImage {
+    pub(crate) payload_type: String,
+    pub(crate) description: String,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) container_sha256: String,
+    pub(crate) manifest: Option<Vec<u8>>,
 }
 
 /// Identities of one decoded IM4P; the payload remains Apple's bytes.

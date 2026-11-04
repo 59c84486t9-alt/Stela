@@ -204,7 +204,10 @@ struct Frame {
 
 impl Frame {
     fn read(src: &[u8], at: usize, magic: u32) -> Result<Self> {
-        let block = &src[at..];
+        Self::from_header(&src[at..], at, magic, src.len())
+    }
+
+    fn from_header(block: &[u8], at: usize, magic: u32, total: usize) -> Result<Self> {
         let (header, literal, lmd_bytes) = match magic {
             UNCOMPRESSED => (8, None, 0),
             COMPRESSED_LZVN => (12, Some(u32_at(block, 8)?), 0),
@@ -233,7 +236,7 @@ impl Frame {
             .ok_or(LzfseError::Truncated)?;
         let end = lmd
             .checked_add(lmd_bytes as usize)
-            .filter(|&end| end <= src.len())
+            .filter(|&end| end <= total)
             .ok_or(LzfseError::Truncated)?;
         Ok(Self {
             raw_bytes,
@@ -302,30 +305,99 @@ fn decode_stream(src: &[u8], out: &mut Output<'_>, decoder: &mut Decoder) -> Res
             return Ok(());
         }
         let frame = Frame::read(src, at, magic)?;
-        match magic {
-            UNCOMPRESSED => {
-                out.begin_block(frame.raw_bytes)?;
-                out.literals(&src[frame.payload..frame.end])?;
-            }
-            COMPRESSED_LZVN => {
-                out.begin_block(frame.raw_bytes)?;
-                lzvn(&src[frame.payload..frame.end], out, true)?;
-            }
-            COMPRESSED_V1 | COMPRESSED_V2 => {
-                let encoded = &src[at..frame.payload];
-                let header = if magic == COMPRESSED_V1 {
-                    Header::v1(encoded)?
-                } else {
-                    Header::v2(encoded)?
-                };
-                header.check()?;
-                out.begin_block(frame.raw_bytes)?;
-                block(src, &frame, &header, out, decoder)?;
-            }
-            _ => unreachable!("validated by Frame::read"),
-        }
-        out.end_block()?;
+        decode_frame(src, at, magic, &frame, out, decoder)?;
         at = frame.end;
+    }
+}
+
+fn decode_frame(
+    src: &[u8],
+    at: usize,
+    magic: u32,
+    frame: &Frame,
+    out: &mut Output<'_>,
+    decoder: &mut Decoder,
+) -> Result<()> {
+    match magic {
+        UNCOMPRESSED => {
+            out.begin_block(frame.raw_bytes)?;
+            out.literals(&src[frame.payload..frame.end])?;
+        }
+        COMPRESSED_LZVN => {
+            out.begin_block(frame.raw_bytes)?;
+            lzvn(&src[frame.payload..frame.end], out, true)?;
+        }
+        COMPRESSED_V1 | COMPRESSED_V2 => {
+            let encoded = &src[at..frame.payload];
+            let header = if magic == COMPRESSED_V1 {
+                Header::v1(encoded)?
+            } else {
+                Header::v2(encoded)?
+            };
+            header.check()?;
+            out.begin_block(frame.raw_bytes)?;
+            block(src, frame, &header, out, decoder)?;
+        }
+        _ => unreachable!("validated by Frame::from_header"),
+    }
+    out.end_block()
+}
+
+/// Read one stream in order, retaining only a bounded encoded frame.
+/// The input closure fills each requested slice exactly, with the next bytes.
+/// The caller supplies a checked maximum output size for the reservation.
+///
+/// `Ok(None)` declines this path when a frame exceeds the staging envelope
+/// or the output allocation cannot be made. The ordinary slice decoder can
+/// still handle streams outside this staging envelope.
+pub fn decode_bounded<E: From<LzfseError>>(
+    mut read: impl FnMut(&mut [u8]) -> core::result::Result<(), E>,
+    mut remaining: usize,
+    output_limit: usize,
+) -> core::result::Result<Option<Vec<u8>>, E> {
+    const MAX_FRAME_BYTES: usize = 1 << 20;
+    let mut output = Vec::new();
+    let mut input = Vec::new();
+    let mut decoder = Decoder::default();
+    let mut out = Output::new(&mut output, output_limit);
+    loop {
+        if remaining < 4 {
+            return Err(LzfseError::Truncated.into());
+        }
+        input.resize(4, 0);
+        read(&mut input)?;
+        let magic = u32_at(&input, 0)?;
+        let header = match magic {
+            END_OF_STREAM => {
+                if remaining != 4 {
+                    return Err(LzfseError::Malformed("bytes follow the end of stream").into());
+                }
+                return Ok(Some(output));
+            }
+            UNCOMPRESSED => 8,
+            COMPRESSED_LZVN => 12,
+            COMPRESSED_V1 => 28,
+            COMPRESSED_V2 => V2_FREQ_OFFSET,
+            _ => return Err(LzfseError::Malformed("unknown block magic").into()),
+        };
+        if remaining < header {
+            return Err(LzfseError::Truncated.into());
+        }
+        input.resize(header, 0);
+        read(&mut input[4..])?;
+        let frame = Frame::from_header(&input, 0, magic, remaining)?;
+        if frame.end > MAX_FRAME_BYTES {
+            return Ok(None);
+        }
+        input.resize(frame.end, 0);
+        read(&mut input[header..])?;
+        // Defer reserving the complete output until the first frame has
+        // passed its size and input checks.
+        if out.bytes.capacity() == 0 && out.bytes.try_reserve_exact(output_limit).is_err() {
+            return Ok(None);
+        }
+        decode_frame(&input, 0, magic, &frame, &mut out, &mut decoder)?;
+        remaining -= frame.end;
     }
 }
 

@@ -490,6 +490,19 @@ pub fn manifest<R: ReadAt>(
         .map(<[u8]>::to_vec))
 }
 
+/// Read a boot object's prefix and keep its original APFS extent layout
+/// while the caller reads further ranges from the same object.
+pub fn open_regular<'a, R: ReadAt + 'a>(
+    container: &'a mut Container<R>,
+    preboot: &Volume,
+    object: &Object,
+    prefix: &mut [u8],
+) -> Result<impl ReadAt<Error = ApfsError> + 'a> {
+    let device = &mut container.device;
+    let inode = preboot.inode(device, object.oid)?;
+    Ok(preboot.read_regular_prefix(device, &inode, prefix)?)
+}
+
 /// Read a whole boot object.
 pub fn read<R: ReadAt>(
     container: &mut Container<R>,

@@ -10,6 +10,7 @@
 //! signature checks belong elsewhere.
 
 use crate::der::{IA5_STRING, SEQUENCE, encode};
+use core::ops::Range;
 
 /// The parts of an Image4 file, each its complete DER encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,9 +41,8 @@ impl core::error::Error for Img4Error {}
 const CONTEXT_0: u8 = 0xa0;
 const CONTEXT_1: u8 = 0xa1;
 
-/// One DER element at the start of `bytes`: tag, contents and the whole
-/// encoding.
-fn element(bytes: &[u8]) -> Result<(u8, &[u8], &[u8]), Img4Error> {
+/// The canonical DER header of one element, without requiring its value.
+fn element_header(bytes: &[u8]) -> Result<(u8, usize, usize), Img4Error> {
     let malformed = Img4Error::Malformed("truncated DER");
     let tag = *bytes.first().ok_or(malformed)?;
     if tag & 0x1f == 0x1f {
@@ -70,6 +70,14 @@ fn element(bytes: &[u8]) -> Result<(u8, &[u8], &[u8]), Img4Error> {
         }
         (length, 2 + width)
     };
+    Ok((tag, header, length))
+}
+
+/// One DER element at the start of `bytes`: tag, contents and the whole
+/// encoding.
+fn element(bytes: &[u8]) -> Result<(u8, &[u8], &[u8]), Img4Error> {
+    let (tag, header, length) = element_header(bytes)?;
+    let malformed = Img4Error::Malformed("truncated DER");
     let end = header.checked_add(length).ok_or(malformed)?;
     let whole = bytes.get(..end).ok_or(malformed)?;
     Ok((tag, &whole[header..], whole))
@@ -90,24 +98,52 @@ fn labeled<'a>(sequence: &'a [u8], label: &[u8]) -> Result<&'a [u8], Img4Error> 
 
 /// Split an `IMG4`, or accept a bare `IM4P` as a payload without manifest.
 pub fn parse(bytes: &[u8]) -> Result<Parts<'_>, Img4Error> {
-    let (_, _, whole) = element(bytes)?;
-    if whole.len() != bytes.len() {
-        return Err(Img4Error::Malformed("trailing bytes"));
-    }
-    if labeled(bytes, b"IM4P").is_ok() {
-        return Ok(Parts {
-            payload: bytes,
-            manifest: None,
-            restore_info: None,
-        });
-    }
-    let mut rest = labeled(bytes, b"IMG4")?;
-    let (tag, _, payload) = element(rest)?;
-    if tag != SEQUENCE {
-        return Err(Img4Error::Malformed("IMG4 without an IM4P"));
-    }
+    let range = payload_range(bytes, bytes.len())?;
+    let payload = &bytes[range.clone()];
     labeled(payload, b"IM4P")?;
-    rest = &rest[payload.len()..];
+    parse_suffix(payload, &bytes[range.end..])
+}
+
+/// Locate the complete IM4P in a bounded original file prefix. The caller
+/// also validates the IM4P itself and the wrapped file's suffix.
+pub fn payload_range(prefix: &[u8], file_bytes: usize) -> Result<Range<usize>, Img4Error> {
+    let prefix = &prefix[..prefix.len().min(file_bytes)];
+    let (tag, header, length) = element_header(prefix)?;
+    if tag != SEQUENCE {
+        return Err(Img4Error::NotImage4);
+    }
+    if header.checked_add(length) != Some(file_bytes) {
+        return Err(Img4Error::Malformed("file size differs from DER length"));
+    }
+    let (tag, label, whole) = element(&prefix[header..])?;
+    if tag != IA5_STRING {
+        return Err(Img4Error::NotImage4);
+    }
+    match label {
+        b"IM4P" => Ok(0..file_bytes),
+        b"IMG4" => {
+            let start = header + whole.len();
+            let (tag, header, length) = element_header(&prefix[start..])?;
+            let end = start
+                .checked_add(header)
+                .and_then(|n| n.checked_add(length))
+                .filter(|&end| end <= file_bytes)
+                .ok_or(Img4Error::Malformed("truncated IM4P"))?;
+            if tag != SEQUENCE {
+                return Err(Img4Error::Malformed("IMG4 without an IM4P"));
+            }
+            Ok(start..end)
+        }
+        _ => Err(Img4Error::NotImage4),
+    }
+}
+
+/// The manifest from the strictly validated suffix after a wrapped IM4P.
+pub fn suffix_manifest(rest: &[u8]) -> Result<Option<&[u8]>, Img4Error> {
+    Ok(parse_suffix(&[], rest)?.manifest)
+}
+
+fn parse_suffix<'a>(payload: &'a [u8], mut rest: &'a [u8]) -> Result<Parts<'a>, Img4Error> {
     let mut parts = Parts {
         payload,
         manifest: None,

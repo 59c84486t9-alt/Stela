@@ -476,23 +476,46 @@ impl<R: ReadAt> Disk<'_, R> {
     /// The single object of `kind`, decoded, and its manifest.
     fn decode(&mut self, kind: &[u8; 4], limit: u64) -> Result<(Decoded, Option<Vec<u8>>)> {
         let object = self.set.require(kind)?.clone();
-        let file = self.read(&object)?;
-        let parts = img4::parse(&file).within(|| refuse!("{path}", path = object.path))?;
-        let im4p = im4p::parse(parts.payload)?;
-        let (bytes, _) = im4p.decode_payload(limit)?;
-        let decoded = Decoded {
-            source: Source {
-                component: format!("Preboot {}", String::from_utf8_lossy(kind)),
-                member: object.path.clone(),
-                container_sha256: sha256(&file),
+        let streamed = if object.bytes >= im4p::stream::MIN_FILE_BYTES {
+            let mut prefix = [0; im4p::stream::PREFIX_BYTES];
+            let mut file =
+                preboot::open_regular(self.container, &self.preboot, &object, &mut prefix)
+                    .within(|| refuse!("{path}", path = object.path))?;
+            im4p::stream::decode(&mut file, &prefix, limit)?
+        } else {
+            None
+        };
+        let decoded = if let Some(image) = streamed {
+            image
+        } else {
+            let file = self.read(&object)?;
+            let parts = img4::parse(&file).within(|| refuse!("{path}", path = object.path))?;
+            let im4p = im4p::parse(parts.payload)?;
+            let (bytes, _) = im4p.decode_payload(limit)?;
+            im4p::DecodedImage {
+                bytes,
                 payload_type: im4p.payload_type,
                 description: im4p.description,
-                decoded_bytes: bytes.len() as u64,
-                decoded_sha256: sha256(&bytes),
-            },
-            bytes,
+                container_sha256: sha256(&file),
+                manifest: parts.manifest.map(<[u8]>::to_vec),
+            }
         };
-        Ok((decoded, parts.manifest.map(<[u8]>::to_vec)))
+        let source = Source {
+            component: format!("Preboot {}", String::from_utf8_lossy(kind)),
+            member: object.path,
+            container_sha256: decoded.container_sha256,
+            payload_type: decoded.payload_type,
+            description: decoded.description,
+            decoded_bytes: decoded.bytes.len() as u64,
+            decoded_sha256: sha256(&decoded.bytes),
+        };
+        Ok((
+            Decoded {
+                bytes: decoded.bytes,
+                source,
+            },
+            decoded.manifest,
+        ))
     }
 
     /// The build the boot set's iBoot names itself with.
