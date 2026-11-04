@@ -543,31 +543,28 @@ fn flush_where(due: impl Fn(&Sink) -> bool, wait: bool) {
     let mut failed = Vec::new();
     with_sinks(false, |sinks| {
         // A log whose store is in progress takes new bytes at its next one.
-        let due: Vec<bool> = sinks
-            .iter()
-            .map(|sink| !sink.writer.storing() && due(sink))
-            .collect();
+        let is_due = |sink: &Sink| !sink.writer.storing() && due(sink);
         // Take the record's new bytes while no processor adds to it, then
-        // store them without holding the others' output up.
-        let _ = exclusive(|| {
-            let Ok(record) = RECORD.0.try_borrow() else {
-                return;
-            };
-            for (sink, _) in sinks.iter_mut().zip(&due).filter(|(_, due)| **due) {
-                let Ok(reached) = record.copy_since(sink.stored, |bytes| {
-                    sink.writer.append(bytes);
-                    Ok::<_, Infallible>(())
-                });
-                sink.stored = reached;
-            }
-        });
+        // store them without holding the others' output up. Polling in-flight
+        // writes needs neither the record nor a list of sinks to prepare.
+        if sinks.iter().any(&is_due) {
+            let _ = exclusive(|| {
+                let Ok(record) = RECORD.0.try_borrow() else {
+                    return;
+                };
+                for sink in sinks.iter_mut().filter(|sink| is_due(sink)) {
+                    let Ok(reached) = record.copy_since(sink.stored, |bytes| {
+                        sink.writer.append(bytes);
+                        Ok::<_, Infallible>(())
+                    });
+                    sink.stored = reached;
+                }
+            });
+        }
         let mut index = 0;
-        let mut position = 0;
         while index < sinks.len() {
-            let is_due = due[position];
-            position += 1;
             let sink = &mut sinks[index];
-            if is_due && sink.writer.begin_store() {
+            if is_due(sink) && sink.writer.begin_store() {
                 sink.began = Some(rdtsc());
             }
             match sink.advance(wait) {

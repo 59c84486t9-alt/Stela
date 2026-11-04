@@ -9,7 +9,7 @@ use crate::{
         Instruction, Operation,
         simd::{
             Operand as Simd,
-            rearrange::{LaneSource, Operand},
+            rearrange::{ByteExtract, LaneSource, Operand},
         },
     },
 };
@@ -212,6 +212,65 @@ fn insert_lane(code: &mut Code, destination: u8, byte: u8, bytes: u8) {
     );
 }
 
+fn byte_extract(code: &mut Code, operand: ByteExtract, target: TargetCpu, held: Option<u8>) {
+    let ByteExtract {
+        destination,
+        left,
+        right,
+        bytes,
+        offset,
+    } = operand;
+    if offset == 0 {
+        if held != Some(left) {
+            read_vector(code, left, 0);
+        }
+    } else if bytes == 16 && target.supports(TargetCpu::Ssse3) {
+        // PALIGNR concatenates the old destination above its source.
+        if left == right {
+            if held != Some(left) {
+                read_vector(code, left, 0);
+            }
+            Host::AlignBytes.register_imm(code, 0, 0, offset, target);
+        } else {
+            if held == Some(left) {
+                packed(code, Host::MoveAligned, 1, 0);
+            } else {
+                read_vector(code, left, 1);
+            }
+            if held != Some(right) {
+                read_vector(code, right, 0);
+            }
+            Host::AlignBytes.register_imm(code, 0, 1, offset, target);
+        }
+    } else {
+        if left != right {
+            if held == Some(right) {
+                packed(code, Host::MoveAligned, 1, 0);
+            } else {
+                read_vector(code, right, 1);
+            }
+        }
+        if held != Some(left) {
+            read_vector(code, left, 0);
+        }
+        if bytes == 8 {
+            packed(code, Host::UnpackLowQword, 0, u8::from(left != right));
+            ShiftOpcode::RightBytes.emit(code, 0, offset);
+        } else {
+            if left == right {
+                packed(code, Host::MoveAligned, 1, 0);
+            }
+            ShiftOpcode::RightBytes.emit(code, 0, offset);
+            ShiftOpcode::LeftBytes.emit(code, 1, 16 - offset);
+            packed(code, Host::Or, 0, 1);
+        }
+    }
+    if bytes == 8 {
+        packed(code, Host::MoveQword, 0, 0);
+    }
+    commit(code, destination, 0);
+}
+
 fn permutation(
     code: &mut Code,
     destination: u8,
@@ -375,7 +434,7 @@ fn table(code: &mut Code, operand: &Operand, target: TargetCpu) {
     commit_halves(code, destination);
 }
 
-pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu, held: Option<u8>) {
     match *operand {
         Operand::Duplicate {
             destination,
@@ -414,6 +473,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
             insert_lane(code, destination, byte, lane_bytes);
         }
         Operand::Extract { .. } => extract(code, operand, false),
+        Operand::ByteExtract(operand) => byte_extract(code, operand, target, held),
         Operand::Permute {
             destination,
             left,
@@ -423,3 +483,10 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
         Operand::Table { .. } => table(code, operand, target),
     }
 }
+
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "linux", target_os = "macos")
+))]
+mod tests;
