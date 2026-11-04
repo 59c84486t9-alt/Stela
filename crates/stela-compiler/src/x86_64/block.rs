@@ -333,6 +333,17 @@ fn emit_selected(
             cursor += count;
             continue;
         }
+        if fuse_simd
+            && let Some(result) = super::simd::precision::emit_half_widen_pair(
+                code,
+                &mut block.source_map,
+                &instructions[cursor..],
+            )
+        {
+            after.xmm0 = Some(result);
+            cursor += 2;
+            continue;
+        }
         // Build the new candidate privately. Rejection leaves both cursor and
         // output untouched, so the legacy clean-load chunk partition is exact.
         if optimize_regions

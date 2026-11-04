@@ -57,7 +57,7 @@ use core::{
     slice, str,
 };
 
-use library_cache::{LoadedLibrary, Selected};
+use library_cache::{LoadedLibrary, ModuleSource, Selected};
 
 /// The constructs the AIR frontend lowers completely (`metal/README.md`).
 const FEATURES: ShaderFeatures = ShaderFeatures::COMPUTE
@@ -225,6 +225,7 @@ pub struct AirCompiler {
     service: Service,
     target: ffi::Target,
     project_reflection: bool,
+    reuse_sampler_states: bool,
     /// MTLB libraries by id; ids are never reused.
     libraries: BTreeMap<u64, LoadedLibrary>,
     next_library: u64,
@@ -268,10 +269,15 @@ impl AirCompiler {
         let project_reflection = service.accepts_compilation_projection();
         #[cfg(not(all(feature = "metal-linked", target_os = "uefi")))]
         let project_reflection = false;
+        #[cfg(all(feature = "metal-linked", target_os = "uefi"))]
+        let reuse_sampler_states = service.has_linked_sampler_states();
+        #[cfg(not(all(feature = "metal-linked", target_os = "uefi")))]
+        let reuse_sampler_states = false;
         Self {
             service,
             target,
             project_reflection,
+            reuse_sampler_states,
             libraries: BTreeMap::new(),
             next_library: 0,
             refusal: None,
@@ -363,8 +369,8 @@ impl Compiler for AirCompiler {
         let sources: Vec<_> = selected
             .iter()
             .map(|selected| ffi::StitchSource {
-                bitcode: selected.bitcode.as_ptr().cast(),
-                size: selected.bitcode.len(),
+                bitcode: selected.module.bitcode.as_ptr().cast(),
+                size: selected.module.bitcode.len(),
                 name: selected.entry.as_ptr(),
             })
             .collect();
@@ -502,7 +508,7 @@ impl Compiler for AirCompiler {
         let selected = select(&self.libraries, library, entry)?;
         let mut bindings = ffi::Bindings::zeroed();
         let mut error = ffi::AirError::NONE;
-        let air = selected.bitcode;
+        let air = selected.module.bitcode;
         let values = constant_values(&specialization.constants);
         let count = u32::try_from(values.len()).map_err(|_| MALFORMED)?;
         // SAFETY: the AIR, entry and values outlive the call, which writes
@@ -531,12 +537,21 @@ impl Compiler for AirCompiler {
         specialization: &Specialization,
     ) -> Result<Vec<u64>> {
         let selected = select(&self.libraries, library, entry)?;
-        let own = (selected.slice_hash, specialization.constants.as_slice());
+        let own = (
+            selected.module.slice_hash,
+            specialization.constants.as_slice(),
+        );
         let linked = linked_modules(&self.libraries, &specialization.linking, own)?;
         let mut states = Vec::new();
-        for bitcode in
-            core::iter::once(selected.bitcode).chain(linked.iter().map(|module| module.bitcode))
+        for module in
+            core::iter::once(selected.module).chain(linked.iter().map(|module| module.source))
         {
+            if self.reuse_sampler_states
+                && let Some(cached) = module.samplers.get()
+            {
+                states.extend_from_slice(cached);
+                continue;
+            }
             let mut listed = [0; ffi::SAMPLER_STATES];
             let mut count = 0;
             let mut error = ffi::AirError::NONE;
@@ -544,8 +559,8 @@ impl Compiler for AirCompiler {
             // SAMPLER_STATES states, the count and the error.
             let valid = unsafe {
                 (self.service.sampler_states)(
-                    bitcode.as_ptr().cast(),
-                    bitcode.len(),
+                    module.bitcode.as_ptr().cast(),
+                    module.bitcode.len(),
                     listed.as_mut_ptr(),
                     &mut count,
                     &mut error,
@@ -554,7 +569,11 @@ impl Compiler for AirCompiler {
             if !valid {
                 return Err(refuse(&mut self.refusal, entry, &error));
             }
-            states.extend_from_slice(listed.get(..count as usize).ok_or(MALFORMED)?);
+            let listed = listed.get(..count as usize).ok_or(MALFORMED)?;
+            if self.reuse_sampler_states {
+                let _ = module.samplers.set(Box::from(listed));
+            }
+            states.extend_from_slice(listed);
         }
         states.sort_unstable();
         states.dedup();
@@ -697,7 +716,7 @@ impl AirCompiler {
             self.project_reflection
                 && function.library == library
                 && function.entry() == entry
-                && function.provenance.slice_hash == selected.slice_hash
+                && function.provenance.slice_hash == selected.module.slice_hash
                 && function.constants == specialization.constants
                 && function
                     .reflection_service
@@ -722,7 +741,10 @@ impl AirCompiler {
             (reflected, *interface, provenance)
         };
         let linking = &specialization.linking;
-        let own = (selected.slice_hash, specialization.constants.as_slice());
+        let own = (
+            selected.module.slice_hash,
+            specialization.constants.as_slice(),
+        );
         let linked = linked_modules(&self.libraries, linking, own)?;
         let values: Vec<_> = linked
             .iter()
@@ -733,8 +755,8 @@ impl AirCompiler {
             .zip(&values)
             .map(|(module, values)| {
                 Ok(ffi::Module {
-                    bitcode: module.bitcode.as_ptr().cast(),
-                    size: module.bitcode.len(),
+                    bitcode: module.source.bitcode.as_ptr().cast(),
+                    size: module.source.bitcode.len(),
                     constants: values
                         .as_ref()
                         .map_or(ptr::null(), |values| values.as_ptr()),
@@ -798,7 +820,7 @@ impl AirCompiler {
             samplers: samplers.as_ptr(),
         };
         let mut error = ffi::AirError::NONE;
-        let air = selected.bitcode;
+        let air = selected.module.bitcode;
         // SAFETY: the AIR, entry, target and specialization, with the arrays,
         // identifiers, values, layouts, modules and names it points to,
         // outlive the call, which writes only the error. The compilation
@@ -928,8 +950,7 @@ fn constant_values(constants: &[(u32, Vec<u8>)]) -> Vec<ffi::ConstantValue> {
 /// An AIR module a function links, with the function constant values of
 /// the functions linked from it, or none for a dynamic library's.
 struct LinkedModule<'a> {
-    digest: [u8; 32],
-    bitcode: &'a [u8],
+    source: ModuleSource<'a>,
     constants: Option<&'a [(u32, Vec<u8>)]>,
 }
 
@@ -951,14 +972,17 @@ fn linked_modules<'a>(
     own: ([u8; 32], &'a [(u32, Vec<u8>)]),
 ) -> Result<Vec<LinkedModule<'a>>> {
     let mut modules: Vec<LinkedModule<'a>> = Vec::new();
-    let mut add = |digest: [u8; 32], bitcode: &'a [u8], constants| {
-        if digest == own.0 {
+    let mut add = |source: ModuleSource<'a>, constants| {
+        if source.slice_hash == own.0 {
             return require(
                 same_values(Some(own.1), constants),
                 "linking a function's own module with other function constant values",
             );
         }
-        match modules.iter_mut().find(|module| module.digest == digest) {
+        match modules
+            .iter_mut()
+            .find(|module| module.source.slice_hash == source.slice_hash)
+        {
             Some(module) => {
                 require(
                     same_values(module.constants, constants),
@@ -966,18 +990,14 @@ fn linked_modules<'a>(
                 )?;
                 module.constants = module.constants.or(constants);
             }
-            None => modules.push(LinkedModule {
-                digest,
-                bitcode,
-                constants,
-            }),
+            None => modules.push(LinkedModule { source, constants }),
         }
         Ok(())
     };
     for function in linking.functions.iter().chain(&linking.private_functions) {
         let selected = select(libraries, function.library, &function.entry)?;
         let constants = Some(function.constants.as_slice());
-        add(selected.slice_hash, selected.bitcode, constants)?;
+        add(selected.module, constants)?;
     }
     for library in &linking.libraries {
         let library = libraries
@@ -985,8 +1005,7 @@ fn linked_modules<'a>(
             .ok_or(Error::Invalid("unknown library"))?;
         ensure(library.dynamic, "a preloaded library that is not dynamic")?;
         for module in library.modules() {
-            let (digest, bitcode) = module?;
-            add(digest, bitcode, None)?;
+            add(module?, None)?;
         }
     }
     Ok(modules)
@@ -1027,7 +1046,7 @@ impl Selected<'_> {
     ) -> Result<Box<ffi::Reflection>> {
         let mut reflection = ffi::Reflection::zeroed();
         let mut error = ffi::AirError::NONE;
-        let air = self.bitcode;
+        let air = self.module.bitcode;
         let (values, count) = match values {
             Some(values) => (
                 values.as_ptr(),
@@ -1057,7 +1076,7 @@ impl Selected<'_> {
     fn decode_reflection(&self, reflection: &ffi::Reflection) -> Result<(Reflection, Provenance)> {
         let provenance = Provenance {
             build_id: name(reflection, reflection.ident, reflection.ident_bytes)?.to_vec(),
-            slice_hash: self.slice_hash,
+            slice_hash: self.module.slice_hash,
             source_map: None,
             entry: self.name.to_string(),
         };
