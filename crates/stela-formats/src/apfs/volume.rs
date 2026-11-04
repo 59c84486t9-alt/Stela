@@ -150,6 +150,50 @@ struct Extent {
     block: u64,
 }
 
+/// A regular file whose layout was resolved while reading its prefix.
+/// The caller keeps the same container source borrowed for trailing reads.
+pub(crate) struct RegularStream<'a, R> {
+    device: &'a mut Device<R>,
+    extents: Vec<Extent>,
+    size: u64,
+}
+
+impl<R: ReadAt> RegularStream<'_, R> {
+    pub(crate) fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<()> {
+        let end = stream_end(self.size, offset, buffer.len())?;
+        buffer.fill(0);
+        read_extents(self.device, &self.extents, offset, end, buffer)
+    }
+}
+
+fn stream_end(size: u64, offset: u64, bytes: usize) -> Result<u64> {
+    offset
+        .checked_add(bytes as u64)
+        .filter(|&end| end <= size)
+        .ok_or(ApfsError::Malformed("read past the end of the stream"))
+}
+
+fn read_extents<R: ReadAt>(
+    device: &mut Device<R>,
+    extents: &[Extent],
+    offset: u64,
+    end: u64,
+    buffer: &mut [u8],
+) -> Result<()> {
+    let block_size = u64::from(device.block_size());
+    for extent in extents {
+        let start = extent.offset.max(offset);
+        let stop = (extent.offset + extent.length).min(end);
+        if start >= stop || extent.block == 0 {
+            continue;
+        }
+        let into = (start - offset) as usize..(stop - offset) as usize;
+        let from = extent.block * block_size + (start - extent.offset);
+        device.read_bytes(from, &mut buffer[into])?;
+    }
+    Ok(())
+}
+
 /// A volume: the fields of `apfs_superblock_t` this reader uses and its
 /// object map. Its trees open on demand, so a volume whose file system is
 /// encrypted can still be listed by name and role.
@@ -674,27 +718,14 @@ impl Volume {
         buffer: &mut [u8],
         zeroed: bool,
     ) -> Result<()> {
-        let end = offset
-            .checked_add(buffer.len() as u64)
-            .filter(|&end| end <= size)
-            .ok_or(ApfsError::Malformed("read past the end of the stream"))?;
+        let end = stream_end(size, offset, buffer.len())?;
         // Holes and the space past the last extent read as zeros. Whole
         // files and attributes already have a freshly zeroed buffer.
         if !zeroed {
             buffer.fill(0);
         }
-        let block_size = u64::from(device.block_size());
-        for extent in self.extents(device, private_id)? {
-            let start = extent.offset.max(offset);
-            let stop = (extent.offset + extent.length).min(end);
-            if start >= stop || extent.block == 0 {
-                continue;
-            }
-            let into = (start - offset) as usize..(stop - offset) as usize;
-            let from = extent.block * block_size + (start - extent.offset);
-            device.read_bytes(from, &mut buffer[into])?;
-        }
-        Ok(())
+        let extents = self.extents(device, private_id)?;
+        read_extents(device, &extents, offset, end, buffer)
     }
 
     /// Read `buffer.len()` bytes of a regular file from `offset`.
@@ -716,6 +747,11 @@ impl Volume {
         buffer: &mut [u8],
         zeroed: bool,
     ) -> Result<()> {
+        Self::check_regular(inode)?;
+        self.read_stream(device, inode.private_id, inode.size, offset, buffer, zeroed)
+    }
+
+    fn check_regular(inode: &Inode) -> Result<()> {
         if inode.kind != FileKind::Regular {
             return Err(ApfsError::NotFound(format!(
                 "inode {} is not a regular file",
@@ -725,7 +761,26 @@ impl Volume {
         if inode.bsd_flags & UF_COMPRESSED != 0 {
             return Err(ApfsError::Unsupported("transparently compressed files"));
         }
-        self.read_stream(device, inode.private_id, inode.size, offset, buffer, zeroed)
+        Ok(())
+    }
+
+    /// Read the header of a regular file and keep its layout for the caller.
+    pub(crate) fn read_regular_prefix<'a, R: ReadAt>(
+        &self,
+        device: &'a mut Device<R>,
+        inode: &Inode,
+        buffer: &mut [u8],
+    ) -> Result<RegularStream<'a, R>> {
+        Self::check_regular(inode)?;
+        let end = stream_end(inode.size, 0, buffer.len())?;
+        buffer.fill(0);
+        let extents = self.extents(device, inode.private_id)?;
+        read_extents(device, &extents, 0, end, buffer)?;
+        Ok(RegularStream {
+            device,
+            extents,
+            size: inode.size,
+        })
     }
 
     /// Read a whole regular file without accepting transparent compression.
