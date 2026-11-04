@@ -92,14 +92,35 @@ pub fn failure(frame: Frame) -> Frame {
 pub fn request(frame: Frame, payload: &mut dyn Payload) -> Result<Frame, Refusal> {
     let mut request = [0; LARGEST_REQUEST];
     if frame.tag != PAYLOAD || payload.input(&mut request).is_err() {
-        return Err(refused(Answer::frame(failure(frame))));
+        return Err(Refusal::answered(
+            refuse!(
+                "SEP credential manager request is not an ACM command",
+                tag = frame.tag
+            ),
+            Answer::frame(failure(frame)),
+        ));
     }
     let mut output = head(&request);
     let Some(served) = output_of(frame, &request) else {
-        return Err(refused(Answer {
-            frame: reply(frame, HEAD_BYTES as u16, UNSUPPORTED),
-            output,
-        }));
+        let command = request[REQUEST_BYTES + COMMAND_MAGIC.len()];
+        let input = input_length(frame).unwrap_or(0);
+        let leading = u32::from_le_bytes(
+            request[REQUEST_BYTES + COMMAND_BYTES..]
+                .try_into()
+                .expect("a u32 of input"),
+        );
+        return Err(Refusal::answered(
+            refuse!(
+                "SEP credential manager command is not implemented",
+                command,
+                input,
+                leading = %format_args!("{leading:#x}")
+            ),
+            Answer {
+                frame: reply(frame, HEAD_BYTES as u16, UNSUPPORTED),
+                output,
+            },
+        ));
     };
     output.extend_from_slice(served);
     payload
@@ -108,11 +129,10 @@ pub fn request(frame: Frame, payload: &mut dyn Payload) -> Result<Frame, Refusal
     Ok(reply(frame, output.len() as u16, 0))
 }
 
-fn refused(answer: Answer) -> Refusal {
-    Refusal::answered(
-        refuse!("SEP credential manager commands are not implemented"),
-        answer,
-    )
+/// The bytes of command input `frame` names after the command head.
+fn input_length(frame: Frame) -> Option<usize> {
+    usize::from(u16::from_le_bytes([frame.opcode, frame.parameter]))
+        .checked_sub(REQUEST_BYTES + COMMAND_BYTES)
 }
 
 /// The output of a served command, by the input length `frame` names.
@@ -121,8 +141,7 @@ fn output_of(frame: Frame, request: &[u8; LARGEST_REQUEST]) -> Option<&'static [
     if &command[..COMMAND_MAGIC.len()] != COMMAND_MAGIC {
         return None;
     }
-    let length = usize::from(u16::from_le_bytes([frame.opcode, frame.parameter]));
-    let input = length.checked_sub(REQUEST_BYTES + COMMAND_BYTES)?;
+    let input = input_length(frame)?;
     match (command[COMMAND_MAGIC.len()], input) {
         (INITIALIZE, 0) => Some(&[]),
         (GET_ENVIRONMENT_VARIABLE, 4)
