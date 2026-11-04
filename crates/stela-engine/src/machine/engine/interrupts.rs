@@ -226,12 +226,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// the last sample. Sampling before the event register is read and before
     /// every write that changes a stream gives each tick the controls it had.
     pub(crate) fn sample_events(&mut self, now: u64) {
-        if let Some(previous) = self.event_sample
+        // An already pending event absorbs every stream edge through this
+        // sample. The running PE is the sole consumer, but the sample still
+        // advances so the next WFE cannot see one of those edges again.
+        if let Some(previous) = self.event_sample.replace(now)
+            && !self.cpu.event_is_set()
             && timer::event(&self.cpu, previous, now)
         {
             self.cpu.signal_event();
         }
-        self.event_sample = Some(now);
     }
 
     pub(super) fn timer_deadline(&mut self) -> Option<u64> {
@@ -289,12 +292,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Timeout { limit, offset }
             }
         });
-        let el = self.cpu.pstate.el;
-        let sctlr = self.cpu.regime_sctlr();
-        let (enable_bit, hcr_trap, form) = match kind {
-            WaitKind::Interrupt => (1u64 << 16, HCR_TWI, 0b00),
-            WaitKind::Event => (1u64 << 18, HCR_TWE, 0b01),
-        };
         let now = self.now();
         if kind == WaitKind::Event {
             self.sample_events(now);
@@ -312,6 +309,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if timeout.is_some_and(|timeout| timeout.expired(now)) {
             return self.next();
         }
+        let el = self.cpu.pstate.el;
+        let sctlr = self.cpu.regime_sctlr();
+        let (enable_bit, hcr_trap, form) = match kind {
+            WaitKind::Interrupt => (1u64 << 16, HCR_TWI, 0b00),
+            WaitKind::Event => (1u64 << 18, HCR_TWE, 0b01),
+        };
         // ISS.TI: 0b00 WFI, 0b01 WFE, 0b10 WFIT, 0b11 WFET; RV and the
         // register for the timeout forms.
         let iss = TRAPPED_AARCH64

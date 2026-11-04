@@ -3607,6 +3607,23 @@ fn wfe_wakes_on_an_event_stream_edge() {
 }
 
 #[test]
+fn pending_event_coalesces_sampled_edges_without_replaying_them() {
+    let mut machine = machine(&[]);
+    machine
+        .cpu
+        .registers
+        .set(SystemRegister::CNTHCTL_EL2, 0, 1 << 2);
+    machine.sample_events(0);
+    machine.cpu.signal_event();
+    machine.sample_events(1);
+    assert!(machine.cpu.consume_event());
+    machine.sample_events(1);
+    assert!(!machine.cpu.consume_event());
+    machine.sample_events(3);
+    assert!(machine.cpu.consume_event());
+}
+
+#[test]
 fn dc_zva_zeroes_one_profile_block_and_at_reports_par() {
     let mut machine = machine(&[]);
     normal_memory(&mut machine, false);
