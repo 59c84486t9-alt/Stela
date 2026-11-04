@@ -70,7 +70,8 @@ fn values_left_in_rax_are_not_reloaded() {
             condition: 1,
         }),
     );
-    let code = emit(&instructions, Some(&terminal), GuestAddress(branch.0 + 4)).x86_64_code;
+    let native = emit(&instructions, Some(&terminal), GuestAddress(branch.0 + 4));
+    let code = &native.x86_64_code;
     let count = |pattern: &[u8]| {
         code.windows(pattern.len())
             .filter(|w| *w == pattern)
@@ -78,6 +79,50 @@ fn values_left_in_rax_are_not_reloaded() {
     };
     assert_eq!(count(&LOAD_X10), 1);
     assert_eq!(count(&LOAD_NZCV), 0);
+    let compare = native.source_map[1].1;
+    assert_eq!(&code[compare..compare + 3], &[0x48, 0x81, 0xf8]); // CMP RAX,imm32.
+}
+
+#[test]
+fn ordinary_integer_operations_read_frame_operands_directly() {
+    use crate::{Lifter, aarch64::Decoder};
+    let pc = GuestAddress(0x1000);
+    // MOV W5,W1; AND W1,W1,W14; CMP W13,W1; CMP W13,#7; ADD X6,X4,W12,SXTW.
+    let instructions: Vec<_> = [
+        0x2a01_03e5_u32,
+        0x0a0e_0021,
+        0x6b01_01bf,
+        0x7100_1dbf,
+        0x8b2c_c086,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, word)| {
+        Decoder
+            .lift(GuestAddress(pc.0 + 4 * index as u64), word)
+            .unwrap()
+    })
+    .collect();
+    let native = emit(&instructions, None, GuestAddress(0x1014));
+    let code = &native.x86_64_code;
+    let map = &native.source_map;
+    assert_eq!(
+        &code[..map[1].1],
+        &[0x8b, 0x87, 8, 0, 0, 0, 0x48, 0x89, 0x87, 40, 0, 0, 0],
+    ); // MOV EAX,[RDI+8]; MOV [RDI+40],RAX.
+    assert_eq!(
+        &code[map[1].1 + 7..map[1].1 + 13],
+        &[0x23, 0x87, 112, 0, 0, 0]
+    );
+    assert_eq!(
+        &code[map[2].1 + 7..map[2].1 + 13],
+        &[0x3b, 0x87, 8, 0, 0, 0]
+    );
+    assert_eq!(&code[map[3].1 + 7..map[3].1 + 10], &[0x83, 0xf8, 7]);
+    assert_eq!(
+        &code[map[4].1 + 7..map[4].1 + 14],
+        &[0x48, 0x63, 0x8f, 96, 0, 0, 0],
+    ); // MOVSXD RCX,[RDI+96].
 }
 
 #[test]

@@ -163,13 +163,8 @@ fn unshifted_binary(
     true
 }
 
-/// `operation` straight in the host registers of its operands: the few forms
-/// that make up most of a program. Any other, and the ones here in frame
-/// code, go through their emitters.
+/// Common integer operations on their native register or frame operands.
 pub(super) fn emit_direct(code: &mut Code, operation: &Operation) -> bool {
-    if !code.is_pinned() {
-        return false;
-    }
     match *operation {
         Operation::AddSub {
             width,
@@ -180,13 +175,17 @@ pub(super) fn emit_direct(code: &mut Code, operation: &Operation) -> bool {
             immediate,
         } => {
             let size = Size::of(width == Width::X64);
-            let op = if subtract { Alu::Sub } else { Alu::Add };
+            let op = match (subtract, destination) {
+                (true, Register::Zero) => Alu::Cmp,
+                (true, _) => Alu::Sub,
+                (false, _) => Alu::Add,
+            };
             let work = working(code, destination);
             let immediate = immediate as i32;
             let mut asm = code.asm();
             match asm.guest(source) {
-                Some(Rm::Reg(host)) if destination == Register::Zero && subtract => {
-                    asm.alu_imm(Alu::Cmp, size, host, immediate);
+                Some(Rm::Reg(host)) if op == Alu::Cmp => {
+                    asm.alu_imm(op, size, host, immediate);
                 }
                 Some(Rm::Reg(host)) if !flags && host != work => {
                     let distance = if subtract { -immediate } else { immediate };
@@ -217,12 +216,18 @@ pub(super) fn emit_direct(code: &mut Code, operation: &Operation) -> bool {
             };
             let work = working(code, destination);
             if amount != 0 || !unshifted_binary(&mut code.asm(), op, size, work, left, operand) {
+                let frame = !code.is_pinned();
+                if frame {
+                    take(&mut code.asm(), Size::Qword, work, left);
+                }
                 let second = right(code, operand, width, shift, amount, work);
                 let mut asm = code.asm();
                 match asm.guest(left) {
                     Some(Rm::Reg(host)) if op == Alu::Cmp => asm.alu(op, size, host, second),
                     _ => {
-                        take(&mut asm, Size::Qword, work, left);
+                        if !frame {
+                            take(&mut asm, Size::Qword, work, left);
+                        }
                         asm.alu(op, size, work, second);
                     }
                 }
@@ -249,6 +254,10 @@ pub(super) fn emit_direct(code: &mut Code, operation: &Operation) -> bool {
                 || amount != 0
                 || !unshifted_binary(&mut code.asm(), logical(kind), size, work, left, operand)
             {
+                let frame = !code.is_pinned();
+                if frame {
+                    take(&mut code.asm(), Size::Qword, work, left);
+                }
                 let second = if invert {
                     right_operand(code, operand, width, shift, amount);
                     code.asm().unary(super::asm::Unary::Not, size, Gpr::Rcx);
@@ -257,7 +266,9 @@ pub(super) fn emit_direct(code: &mut Code, operation: &Operation) -> bool {
                     right(code, operand, width, shift, amount, work)
                 };
                 let mut asm = code.asm();
-                take(&mut asm, Size::Qword, work, left);
+                if !frame {
+                    take(&mut asm, Size::Qword, work, left);
+                }
                 asm.alu(logical(kind), size, work, second);
             }
             finish(code, work, destination, flags, false);
@@ -289,7 +300,7 @@ pub(super) fn emit_direct(code: &mut Code, operation: &Operation) -> bool {
             destination,
             immediate,
             shift,
-        } => {
+        } if code.is_pinned() => {
             let work = working(code, destination);
             let value = u64::from(immediate) << shift;
             let mut asm = code.asm();
@@ -317,7 +328,9 @@ pub(super) fn emit_direct(code: &mut Code, operation: &Operation) -> bool {
             }
             finish(code, work, destination, false, false);
         }
-        Operation::PcRelative(operand) if operand.destination != Register::Zero => {
+        Operation::PcRelative(operand)
+            if code.is_pinned() && operand.destination != Register::Zero =>
+        {
             // Fixed in size at every address, for a stored block's rebase.
             let work = working(code, operand.destination);
             code.asm().mov_imm64(work, operand.address);
