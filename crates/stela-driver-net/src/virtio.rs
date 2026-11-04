@@ -34,6 +34,8 @@ const RECEIVE: u16 = 0;
 const TRANSMIT: u16 = 1;
 /// The queue layout `Modern::queue` uses fits 16 descriptors.
 const QUEUE_ENTRIES: u16 = 16;
+/// Split used-ring flag, since the driver does not negotiate EVENT_IDX.
+const USED_NO_NOTIFY: u16 = 1;
 /// `virtio_net_hdr` under VERSION_1.
 const HEADER: usize = 12;
 const BUFFER: usize = 2048;
@@ -104,8 +106,12 @@ impl Queue {
     fn publish(&mut self) {
         fence(Ordering::SeqCst);
         self.ring.write(AVAIL + 2, self.available);
+        // Expose the new index before checking whether the device needs a
+        // kick. A device rearming notifications can then see the new work.
         fence(Ordering::SeqCst);
-        self.notify.write16(0, 0);
+        if self.ring.read::<u16>(USED) & USED_NO_NOTIFY == 0 {
+            self.notify.write16(0, 0);
+        }
     }
 
     fn offer(&mut self, id: u16) {
@@ -417,6 +423,55 @@ mod tests {
         assert_eq!(received, [0x44; 60]);
         assert_eq!(net.receive(), Ok(None));
         assert_eq!(&net.receive.ring.bytes()[..descriptors.len()], descriptors);
+    }
+
+    #[test]
+    fn receive_reposts_across_wrap_and_rings_after_the_device_rearms() {
+        let mut fixture = Fixture::new();
+        let net = &mut fixture.net;
+        net.receive.available = u16::MAX;
+        net.receive.ring.write(AVAIL + 2, u16::MAX);
+        net.receive.used = u16::MAX;
+        let mut produced = u16::MAX;
+        for (id, flags, kick) in [(0u16, USED_NO_NOTIFY, false), (1, 0, true), (2, 0, true)] {
+            net.receive.ring.write(USED, flags);
+            net.receive.notify.write16(0, u16::MAX);
+            net.receive.buffer(id)[HEADER..HEADER + 60].fill(id as u8);
+            give_back(
+                &mut net.receive,
+                &mut produced,
+                u32::from(id),
+                (HEADER + 60) as u32,
+            );
+            assert_eq!(net.receive(), Ok(Some(vec![id as u8; 60])));
+            assert_eq!(net.receive.ring.read::<u16>(AVAIL + 2), id);
+            assert_eq!(net.receive.used, produced);
+            let slot = usize::from(id.wrapping_sub(1) % ENTRIES);
+            assert_eq!(net.receive.ring.read::<u16>(AVAIL + 4 + 2 * slot), id);
+            assert_eq!(
+                net.receive.notify.read16(0),
+                if kick { 0 } else { u16::MAX }
+            );
+        }
+    }
+
+    #[test]
+    fn transmit_publishes_even_while_the_device_suppresses_kicks() {
+        let mut fixture = Fixture::new();
+        let net = &mut fixture.net;
+        net.transmit.notify.write16(0, u16::MAX);
+        net.transmit.ring.write(USED, USED_NO_NOTIFY);
+        net.transmit(&[0x5a; 60]).unwrap();
+        assert_eq!(net.transmit.ring.read::<u16>(AVAIL + 2), 1);
+        assert_eq!(net.transmit.ring.read::<u16>(AVAIL + 4), 3);
+        assert_eq!(net.transmit.notify.read16(0), u16::MAX);
+        assert_eq!(&net.transmit.buffer(3)[HEADER..HEADER + 60], &[0x5a; 60]);
+
+        net.transmit.ring.write(USED, 0u16);
+        net.transmit(&[0x6b; 60]).unwrap();
+        assert_eq!(net.transmit.ring.read::<u16>(AVAIL + 2), 2);
+        assert_eq!(net.transmit.ring.read::<u16>(AVAIL + 6), 2);
+        assert_eq!(net.transmit.notify.read16(0), 0);
     }
 
     #[test]
