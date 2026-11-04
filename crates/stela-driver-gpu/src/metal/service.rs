@@ -35,7 +35,7 @@ use core::{
     ops::Range,
 };
 use identity::{DeviceEpoch, ObjectHandle, ObjectTable};
-pub use shared::{ServiceHost, SharedService};
+pub use shared::{Served, ServiceHost, SharedService};
 use stela_contracts::gate::MemoryRange;
 use wire::{Fault, Handle, NegotiateRequest, NegotiateResponse, Operation, Record, Span, Status};
 
@@ -248,6 +248,8 @@ pub struct Service<B: Backend, C: Compiler> {
     signaled: u64,
     /// Why the last call was refused, for the platform's log.
     refused: Option<String>,
+    /// The last call's operation and status, for the platform's timing.
+    served: (u32, Status),
     /// Whether a refusal named the work the device was lost running.
     loss_described: bool,
     reopen: Option<Reopen<B, C>>,
@@ -265,6 +267,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             shares: sharing::Shares::default(),
             signaled: 0,
             refused: None,
+            served: (0, Status::Ok),
             loss_described: false,
             reopen: None,
         }

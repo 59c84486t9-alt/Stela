@@ -11,7 +11,7 @@
 //! call would hold up every PE, so [`GateService::signaled`] only reads a
 //! flag. The platform reports each GPU interrupt ([`SharedService::interrupted`]);
 //! whoever next holds the service looks at the device for what completed.
-use super::Service;
+use super::{Service, wire::Status};
 use crate::metal::{shader::Compiler, vulkan::backend::Backend};
 use core::{
     cell::UnsafeCell,
@@ -43,6 +43,23 @@ pub struct ServiceHost {
     pub run: fn(u64, &mut dyn FnMut()),
     /// Told why the service refused a guest's call.
     pub report: fn(&str),
+    /// The platform's tick counter, which times [`Served`].
+    pub ticks: fn() -> u64,
+    /// Told of each guest call the gate served.
+    pub served: fn(Served),
+}
+
+/// A guest call the gate served, in the platform's ticks: the PE that rang
+/// for it runs no guest code from the doorbell until the call returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Served {
+    /// The call's operation code, zero when its record was out of reach.
+    pub operation: u32,
+    pub status: Status,
+    /// Waiting for the turn another call held.
+    pub waited: u64,
+    /// Holding the turn, the look at completed work after the call included.
+    pub held: u64,
 }
 
 // SAFETY: the lock gives one PE at a time the service, which `Send` lets move
@@ -164,9 +181,23 @@ impl<B: Backend + Send, C: Compiler + Send> GateService for SharedService<B, C> 
         record: u64,
         caller: &mut dyn CallerMemory,
     ) -> Result<(), CallerFault> {
-        let (served, refused) = self.call(|service| {
-            let served = service.serve(connection, record, caller);
-            (served, service.refused.take())
+        let rang = (self.host.ticks)();
+        let mut turn = self.turn();
+        let entered = (self.host.ticks)();
+        let mut answer = None;
+        (self.host.run)(self.host.stack, &mut || {
+            let served = turn.serve(connection, record, caller);
+            answer = Some((served, turn.refused.take(), turn.served));
+        });
+        drop(turn);
+        let (served, refused, (operation, status)) =
+            answer.expect("the platform runs what it is given");
+        let left = (self.host.ticks)();
+        (self.host.served)(Served {
+            operation,
+            status,
+            waited: entered.wrapping_sub(rang),
+            held: left.wrapping_sub(entered),
         });
         if let Some(reason) = refused {
             (self.host.report)(&reason);

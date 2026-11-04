@@ -82,6 +82,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         record: u64,
         caller: &mut dyn CallerMemory,
     ) -> Result<(), CallerFault> {
+        // A record out of reach names no operation.
+        self.served = (0, Status::Closed);
         let mut raw = [0; size_of::<GateCall>()];
         caller.read(record, &mut raw)?;
         let mut call: GateCall = wire::read(&raw).expect("a record of its own size");
@@ -112,6 +114,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 (fault.status, fault.reason)
             }
         };
+        self.served = (call.operation, status);
         call.status = status.raw();
         call.reason_length = reason.len() as u64;
         if !reason.is_empty() && call.reason.length >= call.reason_length {

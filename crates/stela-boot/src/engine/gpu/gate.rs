@@ -17,7 +17,7 @@ use core::{
     hint,
     num::NonZeroU64,
     ptr::{self, NonNull},
-    sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering},
 };
 use stela_contracts::gate::{GateService, MemoryRange, window};
 use stela_drivers::gpu::{
@@ -34,7 +34,7 @@ use stela_drivers::gpu::{
             Attachment,
             open::{Gpu, OpenError, open, reopen},
         },
-        service::{ServiceHost, SharedService, identity::DeviceEpoch},
+        service::{Served, ServiceHost, SharedService, identity::DeviceEpoch, wire::Status},
         vulkan::physical::PciBusInfo,
     },
 };
@@ -88,6 +88,100 @@ fn report(reason: &str) {
         }
     }
     output::arguments(format_args!("GPU REFUSED {reason}\n"));
+}
+
+/// The guest calls one operation's gate served since the last report.
+struct Calls {
+    /// The operation plus one; zero while the slot is free.
+    key: AtomicU32,
+    count: AtomicU64,
+    /// TSC ticks holding the service, the longest one call held it, and
+    /// waiting for another call's turn.
+    held: AtomicU64,
+    longest: AtomicU64,
+    waited: AtomicU64,
+    /// Calls answered `Unmapped`, which the frontend repeats.
+    unmapped: AtomicU64,
+}
+
+/// More slots than the protocol has operations.
+static CALLS: [Calls; 96] = [const {
+    Calls {
+        key: AtomicU32::new(0),
+        count: AtomicU64::new(0),
+        held: AtomicU64::new(0),
+        longest: AtomicU64::new(0),
+        waited: AtomicU64::new(0),
+        unmapped: AtomicU64::new(0),
+    }
+}; 96];
+
+/// Counts a call the gate served: the PE that rang runs no guest code until
+/// it returns, so a call that holds the service long is guest time lost.
+fn served(served: Served) {
+    let key = served.operation.wrapping_add(1);
+    // Slots fill in order and stay claimed: the first that is free or
+    // already this operation's is its own.
+    let Some(calls) = CALLS.iter().find(|calls| {
+        match calls
+            .key
+            .compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => true,
+            Err(claimed) => claimed == key,
+        }
+    }) else {
+        return;
+    };
+    calls.count.fetch_add(1, Ordering::Relaxed);
+    calls.held.fetch_add(served.held, Ordering::Relaxed);
+    calls.longest.fetch_max(served.held, Ordering::Relaxed);
+    calls.waited.fetch_add(served.waited, Ordering::Relaxed);
+    if served.status == Status::Unmapped {
+        calls.unmapped.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The operations whose calls held the service longest since the last
+/// report: each as count/held/longest/waited/unmapped, microseconds between.
+pub(in crate::engine) fn report_calls(tsc_hz: u64) {
+    const SHOWN: usize = 8;
+    let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
+    let mut taken: Vec<_> = CALLS
+        .iter()
+        .filter_map(|calls| {
+            let key = calls.key.load(Ordering::Relaxed);
+            let count = calls.count.swap(0, Ordering::Relaxed);
+            (key != 0 && count != 0).then(|| {
+                (
+                    key - 1,
+                    count,
+                    calls.held.swap(0, Ordering::Relaxed),
+                    calls.longest.swap(0, Ordering::Relaxed),
+                    calls.waited.swap(0, Ordering::Relaxed),
+                    calls.unmapped.swap(0, Ordering::Relaxed),
+                )
+            })
+        })
+        .collect();
+    if taken.is_empty() {
+        return;
+    }
+    taken.sort_unstable_by_key(|&(_, _, held, ..)| core::cmp::Reverse(held));
+    let held: u64 = taken.iter().map(|&(_, _, held, ..)| held).sum();
+    output::arguments(format_args!(
+        "GPU CALLS held_us={} operation:count/held_us/longest_us/waited_us/unmapped",
+        micros(held)
+    ));
+    for &(operation, count, held, longest, waited, unmapped) in taken.iter().take(SHOWN) {
+        output::arguments(format_args!(
+            " {operation:#x}:{count}/{}/{}/{}/{unmapped}",
+            micros(held),
+            micros(longest),
+            micros(waited),
+        ));
+    }
+    output::arguments(format_args!("\n"));
 }
 
 /// NVK's entry point, as Vulkan types it.
@@ -181,6 +275,8 @@ fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
             stack,
             run,
             report,
+            ticks: host::rdtsc,
+            served,
         },
     )))
 }

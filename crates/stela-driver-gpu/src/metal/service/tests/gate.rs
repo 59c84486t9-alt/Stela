@@ -2,7 +2,7 @@ use super::{Memory, MockBackend, MockCompiler, Stream, commit, connect, service}
 use crate::metal::{
     capabilities::block::Block,
     service::{
-        GuestMemory, ServiceHost, SharedService,
+        GuestMemory, Served, ServiceHost, SharedService,
         wire::{self, GateCall, NegotiateRequest, NegotiateResponse, Operation, Span, Status},
     },
 };
@@ -188,6 +188,8 @@ const HOST: ServiceHost = ServiceHost {
     stack: 0x4000,
     run: |_, call| call(),
     report: |_| {},
+    ticks: || 0,
+    served: |_| {},
 };
 
 /// The GPU finishes what was committed.
@@ -318,4 +320,64 @@ fn device_loss_is_latched_and_wakes_waiters_only_once() {
         None,
         "loss is not DMA retirement acknowledgement"
     );
+}
+
+#[test]
+fn the_platform_times_each_call_by_its_operation_and_status() {
+    use core::sync::atomic::AtomicU64;
+    static TICKS: AtomicU64 = AtomicU64::new(0);
+    static SERVED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+    fn served(served: Served) {
+        // Each call reads the ticks as it rings, enters and leaves.
+        assert_eq!((served.waited, served.held), (10, 10));
+        let slot = &SERVED[COUNT.fetch_add(1, Ordering::Relaxed)];
+        slot.store(
+            u64::from(served.operation) << 32 | u64::from(served.status.raw()),
+            Ordering::Relaxed,
+        );
+    }
+    let host = ServiceHost {
+        ticks: || TICKS.fetch_add(10, Ordering::Relaxed),
+        served,
+        ..HOST
+    };
+    let shared = SharedService::new(service(), host);
+    let connection = shared.connect().unwrap();
+    let mut memory = Memory::default();
+    let record = gate_call(
+        &mut memory,
+        Operation::Capabilities,
+        &[],
+        size_of::<Block>(),
+    );
+    GateService::serve(&shared, connection, record, &mut memory).unwrap();
+    let poll = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let lost = GateCall {
+        request: Span {
+            address: 0x10,
+            length: 8,
+        },
+        ..completed(&mut memory, poll)
+    };
+    let lost = memory.records(&[lost]).address;
+    GateService::serve(&shared, connection, lost, &mut memory).unwrap();
+    assert_eq!(
+        GateService::serve(&shared, connection, 0x10, &mut memory),
+        Err(CallerFault::Denied { address: 0x10 })
+    );
+    let seen = SERVED.each_ref().map(|slot| slot.load(Ordering::Relaxed));
+    let expect =
+        |operation: u32, status: Status| u64::from(operation) << 32 | u64::from(status.raw());
+    assert_eq!(
+        seen,
+        [
+            // An unnegotiated connection's call.
+            expect(Operation::Capabilities.raw(), Status::Invalid),
+            expect(Operation::Poll.raw(), Status::Unmapped),
+            // A record out of reach.
+            expect(0, Status::Closed),
+        ]
+    );
+    assert_eq!(COUNT.load(Ordering::Relaxed), 3);
 }

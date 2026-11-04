@@ -326,6 +326,8 @@ impl ServiceTimes {
             self.parts.report(tsc_hz),
             service::report(tsc_hz),
         ));
+        #[cfg(feature = "nvk")]
+        super::gpu::gate::report_calls(tsc_hz);
     }
 
     /// Start the next beat's maxima.
