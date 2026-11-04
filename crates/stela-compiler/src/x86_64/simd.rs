@@ -487,10 +487,12 @@ pub(super) fn emit_after(
             lane_bytes,
         } => {
             use IntegerOperation::*;
+            // MOV is the ORR alias with two identical sources.
+            let copy = operation == Orr && left == right;
             // Stage the sources before writing any overlapping V register.
             read_vector(code, left, 0);
             let mut result = 0;
-            if !matches!(operation, Abs | Neg) {
+            if !copy && !matches!(operation, Abs | Neg) {
                 read_vector(code, right, 1);
             }
             match operation {
@@ -499,6 +501,7 @@ pub(super) fn emit_after(
                     packed(code, Host::AndNot, 1, 0);
                     result = 1;
                 }
+                Orr if copy => {}
                 Orr => packed(code, Host::Or, 0, 1),
                 Orn => {
                     packed(code, Host::EqualDword, 2, 2); // pcmpeqd: all ones, including dirty Q=0 upper bits
@@ -1028,6 +1031,89 @@ mod tests {
                 &[prefix, 0x0f, opcode, 0, prefix, 0x0f, opcode, 0x48, bytes]
             );
             assert_eq!(&code[42..], &[0x48, 0x89, 0x97, 248, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn vector_move_keeps_one_source_load_and_one_commit() {
+        use crate::TargetCpu;
+
+        for bytes in [8, 16] {
+            let emit = |right, target| {
+                let mut code = Code::new();
+                emit_for_target(
+                    &mut code,
+                    &Operand::Integer {
+                        operation: IntegerOperation::Orr,
+                        destination: 18,
+                        left: 0,
+                        right,
+                        bytes,
+                        lane_bytes: 1,
+                    },
+                    target,
+                    MemoryChecks::DEFAULT,
+                );
+                code
+            };
+            let baseline = TargetCpu::Baseline;
+            let mov = emit(0, baseline);
+            let orr = emit(1, baseline);
+            let extra = usize::from(bytes == 8);
+            assert_eq!((mov.instructions(), mov.len()), (2 + extra, 16 + 4 * extra));
+            assert_eq!((orr.instructions(), orr.len()), (4 + extra, 28 + 4 * extra));
+            for target in [
+                TargetCpu::Ssse3,
+                TargetCpu::Sse41,
+                TargetCpu::X86_64_V3,
+                baseline.with_data_independent_timing(),
+            ] {
+                assert_eq!(&emit(0, target)[..], &mov[..]);
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn vector_move_preserves_frame_and_zeroes_d_upper_half() {
+        use crate::{
+            GuestAddress, GuestState, Options, TargetCpu,
+            block::{BlockProfile, CompilationPlan},
+        };
+
+        let pc = GuestAddress(0x259f6c);
+        // MOV V18.16B,V0.16B from the OpenSSL SHA-256 block prologue.
+        for (destination, source) in [(18, 0), (0, 0), (31, 31)] {
+            for q in [0, 1] {
+                let word =
+                    0x0ea0_1c00_u32 | (q << 30) | (source << 16) | (source << 5) | destination;
+                let block = CompilationPlan::new(
+                    &word.to_le_bytes(),
+                    pc,
+                    &Options::new(BlockProfile::ORDINARY, TargetCpu::Baseline),
+                )
+                .unwrap()
+                .compile()
+                .unwrap();
+                let mut state = GuestState::default();
+                for (register, lanes) in state.v.iter_mut().enumerate() {
+                    *lanes = [
+                        0xfedc_ba98_7654_3210 ^ register as u64,
+                        0x0123_4567_89ab_cdef,
+                    ];
+                }
+                let mut expected = state.clone();
+                expected.v[destination as usize] = state.v[source as usize];
+                if q == 0 {
+                    expected.v[destination as usize][1] = 0;
+                }
+                assert_eq!(block.native.source_map, [(pc, 0)]);
+                assert_eq!(
+                    crate::x86_64::native::run(&block.native.x86_64_code, &mut state),
+                    pc.0 + 4
+                );
+                assert_eq!(state, expected, "{word:08x}");
+            }
         }
     }
 }
