@@ -11,7 +11,7 @@ mod analysis;
 #[cfg(test)]
 mod apx;
 mod self_loop;
-pub(super) use analysis::MAX_INSTRUCTIONS;
+pub(super) use analysis::{MAX_INSTRUCTIONS, effects as scalar_effects};
 pub(crate) use self_loop::Plan as ResidentLoopPlan;
 pub(super) use self_loop::{FrameLoop, prefix_with_budget};
 mod constant;
