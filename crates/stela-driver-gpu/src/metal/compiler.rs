@@ -261,9 +261,12 @@ impl AirCompiler {
             max_mesh_vertices: mesh.map_or(0, |mesh| mesh.max_mesh_output_vertices),
             max_mesh_primitives: mesh.map_or(0, |mesh| mesh.max_mesh_output_primitives),
         };
-        #[cfg(feature = "metal-linked")]
+        // The boot image mounts the linked AIR compiler. Hosted all-feature
+        // builds also expose `Service::linked`, but only pull in its external
+        // symbols if the caller constructs that service.
+        #[cfg(all(feature = "metal-linked", target_os = "uefi"))]
         let project_reflection = service.accepts_compilation_projection();
-        #[cfg(not(feature = "metal-linked"))]
+        #[cfg(not(all(feature = "metal-linked", target_os = "uefi")))]
         let project_reflection = false;
         Self {
             service,

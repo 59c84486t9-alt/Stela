@@ -69,6 +69,7 @@ unsafe extern "C" {
 }
 
 impl Service {
+    #[cfg(target_os = "uefi")]
     pub(super) fn accepts_compilation_projection(&self) -> bool {
         let linked = Self::linked(self.nir_options);
         core::ptr::fn_addr_eq(self.reflect, linked.reflect)
