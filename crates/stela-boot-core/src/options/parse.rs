@@ -38,6 +38,7 @@ impl ParseState<'_> {
             "--profile" => options.profile = true,
             MAINTENANCE_WRITE => options.maintenance_write = true,
             "--monitor-trace" => options.monitor_trace = true,
+            "--display-trace" => options.display_trace = true,
             "--native-shared-check" => flag(
                 &mut options.native_shared_check,
                 Error::DuplicateNativeShared,

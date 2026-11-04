@@ -77,6 +77,9 @@ fn flush() {
 /// has not flushed it yet. Cheap when nothing is requested: two loads.
 pub(crate) fn service() {
     let requested = PROCESSORS.requested();
+    if requested == 0 {
+        return;
+    }
     let (slot, flushed) = crate::engine::host::shootdown();
     if flushed.load(Ordering::Relaxed) >= requested {
         return;
@@ -85,7 +88,9 @@ pub(crate) fn service() {
         return;
     };
     flush();
-    flushed.store(requested, Ordering::Relaxed);
+    // A waiter may have IF set. An interrupt between the flush and this
+    // publication must not let its newer local acknowledgement regress.
+    flushed.fetch_max(requested, Ordering::Relaxed);
     PROCESSORS.acknowledge(slot, requested);
 }
 

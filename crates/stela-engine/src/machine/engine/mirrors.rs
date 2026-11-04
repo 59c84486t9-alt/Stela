@@ -269,28 +269,11 @@ pub(super) fn stored(register: SystemRegister) -> bool {
 
 /// System registers no read of a System register follows: not its value,
 /// which only a read of the register itself takes, nor whether it traps. A
-/// kernel writes them at each thread switch and timer. What derives from
+/// kernel writes them at each thread switch. What derives from
 /// them goes as ever ([`Machine::forget_derived`]).
 pub(super) fn keeps_reads(register: SystemRegister) -> bool {
     use SystemRegister::*;
-    pointer_key(register)
-        || matches!(
-            register,
-            CONTEXTIDR_EL1
-                | CONTEXTIDR_EL2
-                | CNTP_CTL_EL0
-                | CNTP_CVAL_EL0
-                | CNTP_TVAL_EL0
-                | CNTV_CTL_EL0
-                | CNTV_CVAL_EL0
-                | CNTV_TVAL_EL0
-                | CNTHP_CTL_EL2
-                | CNTHP_CVAL_EL2
-                | CNTHP_TVAL_EL2
-                | CNTHV_CTL_EL2
-                | CNTHV_CVAL_EL2
-                | CNTHV_TVAL_EL2
-        )
+    pointer_key(register) || matches!(register, CONTEXTIDR_EL1 | CONTEXTIDR_EL2)
 }
 
 /// Whether `register` is half of a PAC key.

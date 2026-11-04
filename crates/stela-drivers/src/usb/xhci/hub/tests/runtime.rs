@@ -15,6 +15,7 @@ fn runtime_poll(host: &mut Host, dma: &mut dyn DmaAllocator) -> Changes {
 
 #[test]
 fn runtime_hub_bitmap_disconnect_reconnect_retires_old_alias_before_fresh_binding() {
+    let _clock = crate::test_clock::virtualize();
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         for context in [32, 64] {
             let nodes = BTreeMap::from([(0, Node::hub(speed, 1)), (1, unbound_leaf(speed))]);
@@ -66,7 +67,15 @@ fn runtime_hub_bitmap_disconnect_reconnect_retires_old_alias_before_fresh_bindin
                 port.status |= 3;
                 port.change |= 1;
             }
-            let added = runtime_poll(&mut host, &mut dma);
+            let mut added = runtime_poll(&mut host, &mut dma);
+            if speed == HIGH_SPEED {
+                assert!(added.added.devices.is_empty());
+                for _ in 0..4 {
+                    crate::test_clock::advance(shared.borrow().clock, DEBOUNCE_STEP_US);
+                    added = runtime_poll(&mut host, &mut dma);
+                    assert!(added.added.failures.is_empty());
+                }
+            }
             assert!(added.removed.is_empty());
             assert!(
                 added.added.failures.is_empty(),
@@ -98,6 +107,82 @@ fn runtime_hub_bitmap_disconnect_reconnect_retires_old_alias_before_fresh_bindin
             assert!(runtime_poll(&mut host, &mut dma).added.devices.is_empty());
         }
     }
+}
+
+#[test]
+fn runtime_usb2_hub_debounce_yields_between_samples_and_restarts_on_a_bounce() {
+    let _clock = crate::test_clock::virtualize();
+    let speed = HIGH_SPEED;
+    let mut hub = Node::hub(speed, 1);
+    hub.ports.as_mut().unwrap()[0].status &= !3;
+    let nodes = BTreeMap::from([(0, hub), (1, unbound_leaf(speed))]);
+    let mut dma = TestRegion::new(512 * 1024 * 8);
+    let (mut c, model) = controller(&mut dma, 64, nodes);
+    let clock = c.clock;
+    let mut failures = Vec::new();
+    let devices = c.enumerate(&mut dma, &mut failures);
+    assert!(failures.is_empty());
+    assert_eq!(devices.len(), 1);
+    let shared = Rc::new(RefCell::new(c));
+    let mut host = Host::new(shared.clone(), &devices, &mut dma, &mut failures);
+    runtime_poll(&mut host, &mut dma);
+
+    let arm = || {
+        let mut m = model.borrow_mut();
+        let port = &mut m.nodes.get_mut(&0).unwrap().ports.as_mut().unwrap()[0];
+        port.status |= 1;
+        port.change |= 1;
+    };
+    let reset = setup(0x23, SET_FEATURE, PORT_RESET, 1, 0);
+    let start_requests = model.borrow().requests.len();
+    let assert_no_reset = || {
+        assert!(
+            !model.borrow().requests[start_requests..]
+                .iter()
+                .any(|&(_, _, setup)| setup == reset)
+        );
+    };
+    arm();
+    let mut service_start = Clock::ticks();
+    let first = runtime_poll(&mut host, &mut dma);
+    assert!(first.added.devices.is_empty() && first.added.failures.is_empty());
+    assert!(Clock::ticks().wrapping_sub(service_start) < DEBOUNCE_STEP_US);
+    assert!(!host.attachment_due());
+    assert_no_reset();
+    for _ in 0..3 {
+        crate::test_clock::advance(clock, DEBOUNCE_STEP_US);
+        assert!(host.attachment_due());
+        service_start = Clock::ticks();
+        let changes = runtime_poll(&mut host, &mut dma);
+        assert!(changes.added.devices.is_empty() && changes.added.failures.is_empty());
+        assert!(Clock::ticks().wrapping_sub(service_start) < DEBOUNCE_STEP_US);
+        assert_no_reset();
+    }
+    // A reconnect with the same final level still invalidates all three
+    // observed steps, including when it arrives before the next timer poll.
+    arm();
+    let bounced = runtime_poll(&mut host, &mut dma);
+    assert!(bounced.added.devices.is_empty() && bounced.added.failures.is_empty());
+    let bounced_at = Clock::ticks();
+    assert_no_reset();
+    for _ in 0..3 {
+        crate::test_clock::advance(clock, DEBOUNCE_STEP_US);
+        assert!(runtime_poll(&mut host, &mut dma).added.devices.is_empty());
+        assert_no_reset();
+    }
+    crate::test_clock::advance(clock, DEBOUNCE_STEP_US);
+    let completed = runtime_poll(&mut host, &mut dma);
+    assert!(
+        completed.added.failures.is_empty(),
+        "{:?}",
+        completed.added.failures
+    );
+    assert_eq!(completed.added.devices.len(), 1);
+    let m = model.borrow();
+    let reset_at = (start_requests..m.requests.len())
+        .find(|&i| m.requests[i].2 == reset)
+        .unwrap();
+    assert!(m.request_times[reset_at].wrapping_sub(bounced_at) >= DEBOUNCE_STABLE_US);
 }
 
 #[test]

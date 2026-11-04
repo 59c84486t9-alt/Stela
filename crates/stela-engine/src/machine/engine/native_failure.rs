@@ -82,8 +82,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some(block) = (index < self.blocks.len()).then(|| &self.blocks[index]) else {
             return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
         };
-        let (entry_pc, physical, source_bytes) =
-            (block.pc, block.physical, block.source_bytes as usize);
+        let (entry_pc, physical, source_bytes) = (block.pc, block.physical, block.source_bytes());
         let Some(owner) = self.fault_recovery.get(&index) else {
             return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
         };
@@ -96,7 +95,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let owner = self.fault_recovery.get_mut(&index).expect("found above");
         let qualified = owner.qualify(entry_pc, record.as_deref());
         let table = match qualified {
-            Ok(table) => table,
+            Ok(rows) => rows.rows_at_reusing(fault.offset, &mut self.recovery_scratch),
             Err(reason) => return Err(self.fail_native(index, fault, reason)),
         };
         let recovery_site = match FaultRecovery::site_at(&table, fault.offset) {

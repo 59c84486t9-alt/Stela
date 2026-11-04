@@ -4,6 +4,10 @@ use super::*;
 use crate::pmgr::DomainTransition;
 use stela_contracts::refuse;
 
+/// A small reusable input batch covers steady-state device traffic. A larger
+/// completed batch gives back its storage.
+const RETAINED_INPUTS: usize = 32;
+
 /// A reached wire edge, with the context of its first service attempt.
 /// Retrying delivery must not move an AIC timestamp to a later counter value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +52,18 @@ pub struct ServiceBatch {
 }
 
 impl ServiceBatch {
+    fn finish(&mut self) {
+        let mut inputs = core::mem::take(&mut self.inputs);
+        inputs.clear();
+        if inputs.capacity() > RETAINED_INPUTS {
+            inputs = Vec::new();
+        }
+        *self = Self {
+            inputs,
+            ..Self::default()
+        };
+    }
+
     pub(super) fn retain_reset(&mut self, first: &mut Option<Reset>, reset: Option<Reset>) {
         if let Some(reset) = reset {
             if first.is_none() {
@@ -97,21 +113,15 @@ impl AppleDevices {
     }
 
     fn capture_inputs(&mut self, cpu: CpuIndex, now: u64) {
-        self.service
-            .inputs
-            .extend(
-                self.latch
-                    .take_aic_inputs()
-                    .into_iter()
-                    .map(|(input, level)| {
-                        ServiceInput::Aic(AicDelivery {
-                            input,
-                            level,
-                            cpu,
-                            now,
-                        })
-                    }),
-            );
+        self.latch
+            .append_aic_inputs(&mut self.service.inputs, |(input, level)| {
+                ServiceInput::Aic(AicDelivery {
+                    input,
+                    level,
+                    cpu,
+                    now,
+                })
+            });
     }
 
     /// Forward queued wires and CPU releases, keeping exact progress on any
@@ -128,7 +138,7 @@ impl AppleDevices {
         self.capture_reached(cpu, now, None);
         let result = self.apply_service();
         match &result {
-            Ok(()) => self.service = ServiceBatch::default(),
+            Ok(()) => self.service.finish(),
             Err(error) => self.service.failure = Some(error.clone()),
         }
         result

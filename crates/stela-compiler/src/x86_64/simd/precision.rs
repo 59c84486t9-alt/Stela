@@ -3,13 +3,13 @@
 use super::super::isa::ShiftOpcode;
 use super::numerical::helper_section;
 use super::numerical::{
-    Condition, INPUT_MINIMUM_EXPONENT, MINIMUM_EXPONENT_VECTOR, RESULT_MINIMUM_EXPONENT, Rounding,
-    branch, clear_scalar, commit_inexact, environment_round, exponent_range,
-    prepare_half_result_range, prepare_vector_input_range, prepare_vector_result_range,
-    read_numerical_vector, reject_other_status, resolve, restore_environment, test_control,
-    vector_exponent_range,
+    ArithmeticOpcode, Condition, INPUT_MINIMUM_EXPONENT, MINIMUM_EXPONENT_VECTOR,
+    RESULT_MINIMUM_EXPONENT, Rounding, branch, clear_scalar, commit_inexact, environment_round,
+    exponent_range, jump, prepare_half_result_range, prepare_vector_input_range,
+    prepare_vector_result_range, read_numerical_vector, reject_other_status, resolve,
+    restore_environment, single_vector_arithmetic, test_control, vector_exponent_range,
 };
-use super::{Host, commit, packed, read_vector};
+use super::{Host, commit, encode::guest, packed, read_vector, vector_offset};
 use crate::x86_64::asm::FloatLanes;
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Rm, ShiftOp, Size, vector_extensions};
 use crate::{
@@ -52,11 +52,16 @@ const HALF_FIELD_TO_DWORD_TOP: u8 = u32::BITS as u8 - HALF_TO_SINGLE_SIGN_SHIFT 
 const HALF_EXPONENT_TO_DWORD_BOTTOM: u8 = u32::BITS as u8 - HALF_EXPONENT_BITS;
 const HALF_MAXIMUM_TO_BIAS_BITS: u8 = 2;
 const SINGLE_BIAS_POSITION: u8 = HALF_TO_SINGLE_BIAS.trailing_zeros() as u8;
-const HALF_VALIDITY_MASK: u8 = 0x0f;
-const HALF_EXPONENT_VECTOR: u8 = 2;
-const HALF_VALIDITY_VECTOR: u8 = 3;
+const HALF_VALIDITY_MASK: i8 = 0x0f;
+const HALF_NORMAL_VECTOR: u8 = 2;
+const HALF_FINITE_VECTOR: u8 = 3;
 const HALF_MAXIMUM_VECTOR: u8 = 4;
-const HALF_MINIMUM_VECTOR: u8 = 5;
+const HALF_ZERO_VECTOR: u8 = 5;
+const HALF_SCALED_VECTOR: u8 = 6;
+const HALF_SUBNORMAL_SCALE: u32 = (Format::Single.exponent_bias() + 1
+    - Format::Half.exponent_bias()
+    - Format::Half.fraction_bits())
+    << Format::Single.fraction_bits();
 const DOUBLE_TO_SINGLE_DISCARDED_BITS: u8 = 29;
 const DOUBLE_TO_SINGLE_DISCARDED_MASK: u32 = (1 << DOUBLE_TO_SINGLE_DISCARDED_BITS) - 1;
 const COMPACT_QWORD_LOW_DWORDS: u8 = 0x88;
@@ -211,7 +216,9 @@ fn emit_scalar(
     scalar_commit(code, operand.destination, destination);
 }
 
-fn half_vector_guard(code: &mut Code, helper: &mut Vec<usize>) {
+/// Branch if any exponent is outside the normal IEEE half range. Keep the
+/// normal and finite lane masks for the zero and subnormal path.
+fn half_normal_widening_guard(code: &mut Code) -> usize {
     packed(
         code,
         Host::EqualDword,
@@ -219,63 +226,103 @@ fn half_vector_guard(code: &mut Code, helper: &mut Vec<usize>) {
         HALF_MAXIMUM_VECTOR,
     );
     ShiftOpcode::RightDword.emit(code, HALF_MAXIMUM_VECTOR, HALF_EXPONENT_TO_DWORD_BOTTOM);
-    packed(code, Host::Xor, HALF_MINIMUM_VECTOR, HALF_MINIMUM_VECTOR);
-    packed(code, Host::MoveAligned, HALF_EXPONENT_VECTOR, SOURCE_VECTOR);
-    ShiftOpcode::LeftDword.emit(code, HALF_EXPONENT_VECTOR, HALF_FIELD_TO_DWORD_TOP);
-    ShiftOpcode::RightDword.emit(code, HALF_EXPONENT_VECTOR, HALF_EXPONENT_TO_DWORD_BOTTOM);
+    packed(code, Host::MoveAligned, HALF_NORMAL_VECTOR, SOURCE_VECTOR);
+    ShiftOpcode::LeftDword.emit(code, HALF_NORMAL_VECTOR, HALF_FIELD_TO_DWORD_TOP);
+    ShiftOpcode::RightDword.emit(code, HALF_NORMAL_VECTOR, HALF_EXPONENT_TO_DWORD_BOTTOM);
     packed(
         code,
         Host::MoveAligned,
-        HALF_VALIDITY_VECTOR,
+        HALF_FINITE_VECTOR,
         HALF_MAXIMUM_VECTOR,
     );
     packed(
         code,
         Host::GreaterDword,
-        HALF_VALIDITY_VECTOR,
-        HALF_EXPONENT_VECTOR,
+        HALF_FINITE_VECTOR,
+        HALF_NORMAL_VECTOR,
     );
     packed(
         code,
         Host::GreaterDword,
-        HALF_EXPONENT_VECTOR,
-        HALF_MINIMUM_VECTOR,
+        HALF_NORMAL_VECTOR,
+        HALF_ZERO_VECTOR,
     );
-    packed(code, Host::And, HALF_EXPONENT_VECTOR, HALF_VALIDITY_VECTOR);
-    Host::DwordSignMask.register(code, 0, HALF_EXPONENT_VECTOR, crate::TargetCpu::Baseline);
+    packed(code, Host::And, HALF_NORMAL_VECTOR, HALF_FINITE_VECTOR);
+    Host::DwordSignMask.register(code, 0, HALF_NORMAL_VECTOR, TargetCpu::Baseline);
     code.asm()
-        .alu_imm8(Alu::Cmp, Size::Dword, Rax, HALF_VALIDITY_MASK as i8);
+        .alu_imm8(Alu::Cmp, Size::Dword, Rax, HALF_VALIDITY_MASK);
+    branch(code, Condition::NotZero)
+}
+
+fn add_half_widening_bias(code: &mut Code) {
+    // The guard keeps exponent mask 31; 31 >> 2 gives 7, and 7 << 27 is
+    // exactly the S-vs-H exponent bias adjustment. Reuse that constant.
+    ShiftOpcode::RightDword.emit(code, HALF_MAXIMUM_VECTOR, HALF_MAXIMUM_TO_BIAS_BITS);
+    ShiftOpcode::LeftDword.emit(code, HALF_MAXIMUM_VECTOR, SINGLE_BIAS_POSITION);
+    packed(code, Host::AddDword, SOURCE_VECTOR, HALF_MAXIMUM_VECTOR);
+}
+
+fn widen_finite_half(code: &mut Code, helper: &mut Vec<usize>) {
+    // Exponent 31 needs exact completion for AHP, infinity, and NaNs.
+    Host::DwordSignMask.register(code, 0, HALF_FINITE_VECTOR, TargetCpu::Baseline);
+    code.asm()
+        .alu_imm8(Alu::Cmp, Size::Dword, Rax, HALF_VALIDITY_MASK);
     helper.push(branch(code, Condition::NotZero));
+    // Every 15-bit integer converts exactly to single, and scaling by 2^-24
+    // produces a normal single or +0. The temporary leaves MXCSR untouched
+    // even in lanes where the result comes from the normal representation.
+    ShiftOpcode::LeftDword.emit(code, SOURCE_VECTOR, HALF_FIELD_TO_DWORD_TOP);
+    ShiftOpcode::RightDword.emit(code, SOURCE_VECTOR, HALF_FIELD_TO_DWORD_TOP);
+    packed(
+        code,
+        Host::ConvertPackedDwordToSingle,
+        HALF_SCALED_VECTOR,
+        SOURCE_VECTOR,
+    );
+    code.asm().mov_imm32(Rax, HALF_SUBNORMAL_SCALE);
+    code.asm().movd_to_xmm(HALF_FINITE_VECTOR, Rax);
+    super::shuffle(code, HALF_FINITE_VECTOR, HALF_FINITE_VECTOR, 0);
+    single_vector_arithmetic(
+        code,
+        ArithmeticOpcode::Multiply,
+        HALF_SCALED_VECTOR,
+        HALF_FINITE_VECTOR,
+    );
+    ShiftOpcode::LeftDword.emit(code, SOURCE_VECTOR, HALF_TO_SINGLE_FRACTION_SHIFT);
+    add_half_widening_bias(code);
+    packed(code, Host::And, SOURCE_VECTOR, HALF_NORMAL_VECTOR);
+    packed(code, Host::AndNot, HALF_NORMAL_VECTOR, HALF_SCALED_VECTOR);
+    packed(code, Host::Or, SOURCE_VECTOR, HALF_NORMAL_VECTOR);
 }
 
 fn emit_widen_half(code: &mut Code, operand: &PrecisionOperand, upper: bool, pc: GuestAddress) {
     let mut helper = Vec::new();
     exception_guard(code, &mut helper);
-    read_vector(code, operand.source, SOURCE_VECTOR);
-    if upper {
-        ShiftOpcode::RightBytes.emit(code, SOURCE_VECTOR, UPPER_QWORD_BYTES);
-    }
-    packed(code, Host::Xor, RESULT_VECTOR, RESULT_VECTOR);
-    packed(code, Host::UnpackLowWord, SOURCE_VECTOR, RESULT_VECTOR);
-    half_vector_guard(code, &mut helper);
+    let part = vector_offset(operand.source) + u32::from(upper) * u32::from(UPPER_QWORD_BYTES);
+    Host::MoveQword.emit(code, SOURCE_VECTOR, guest(part), TargetCpu::Baseline);
+    packed(code, Host::Xor, HALF_ZERO_VECTOR, HALF_ZERO_VECTOR);
+    packed(code, Host::UnpackLowWord, SOURCE_VECTOR, HALF_ZERO_VECTOR);
     packed(code, Host::MoveAligned, RESULT_VECTOR, SOURCE_VECTOR);
-    // Strip each half sign, align the remaining fields and adjust the bias.
+    let needs_scaling = half_normal_widening_guard(code);
+    // Normal half lanes need only an exponent bias and a field shift.
     ShiftOpcode::LeftDword.emit(code, SOURCE_VECTOR, HALF_FIELD_TO_DWORD_TOP);
     ShiftOpcode::RightDword.emit(
         code,
         SOURCE_VECTOR,
         HALF_FIELD_TO_DWORD_TOP - HALF_TO_SINGLE_FRACTION_SHIFT,
     );
-    // The guard keeps exponent mask 31; 31 >> 2 gives 7, and 7 << 27 is
-    // exactly the S-vs-H exponent bias adjustment. Reuse that constant.
-    ShiftOpcode::RightDword.emit(code, HALF_MAXIMUM_VECTOR, HALF_MAXIMUM_TO_BIAS_BITS);
-    ShiftOpcode::LeftDword.emit(code, HALF_MAXIMUM_VECTOR, SINGLE_BIAS_POSITION);
-    packed(code, Host::AddDword, SOURCE_VECTOR, HALF_MAXIMUM_VECTOR);
+    add_half_widening_bias(code);
+    let normal = jump(code);
+    let other = code.len();
+    resolve(code, needs_scaling, other);
+    widen_finite_half(code, &mut helper);
+    helper_section(code, &helper, pc);
+    let complete = code.len();
+    resolve(code, normal, complete);
     ShiftOpcode::LeftDword.emit(code, RESULT_VECTOR, HALF_TO_SINGLE_SIGN_SHIFT);
     ShiftOpcode::RightDword.emit(code, RESULT_VECTOR, DWORD_SIGN_TO_LSB_SHIFT);
     ShiftOpcode::LeftDword.emit(code, RESULT_VECTOR, DWORD_SIGN_TO_LSB_SHIFT);
     packed(code, Host::Or, RESULT_VECTOR, SOURCE_VECTOR);
-    helper_section(code, &helper, pc);
     commit(code, operand.destination, RESULT_VECTOR);
 }
 

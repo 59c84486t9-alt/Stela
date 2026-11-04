@@ -44,29 +44,58 @@ impl Controller {
 
     fn hub_port_owned(&mut self, id: SlotId, port: u8) -> Result<Option<u8>, BlockError> {
         let slot = self.validate_topology_id(id)?;
-        let index = u16::from(port);
         self.observe_current_ancestors(slot, true)?;
-        let clock = self.clock;
-        let connected = enumerate::debounce(clock, || {
-            let (status, change) = self.hub_port_status_owned(slot, port)?;
-            powered(status, change)?;
-            let changed = change & HUB_PORT_CONNECTION != 0;
-            for (bit, selector) in [
-                (HUB_PORT_CONNECTION, C_PORT_CONNECTION),
-                (2, 17),
-                (4, 18),
-                (16, 20),
-                (32, 23),
-            ] {
-                if change & bit != 0 {
-                    self.control_owned(slot, setup(0x23, CLEAR_FEATURE, selector, index, 0), &[])?;
-                }
-            }
-            Ok((status & HUB_PORT_CONNECTION != 0, changed))
-        })?;
-        if !connected {
+        if !enumerate::debounce(self.clock, || self.sample_usb2_hub_port_owned(slot, port))? {
             return Ok(None);
         }
+        self.reset_debounced_usb2_hub_port(id, port)
+    }
+
+    pub(in super::super) fn sample_usb2_hub_port(
+        &mut self,
+        id: SlotId,
+        port: u8,
+    ) -> Result<(bool, bool), BlockError> {
+        let slot = self.validate_topology_id(id)?;
+        self.sample_usb2_hub_port_owned(slot, port)
+    }
+
+    fn sample_usb2_hub_port_owned(
+        &mut self,
+        slot: u8,
+        port: u8,
+    ) -> Result<(bool, bool), BlockError> {
+        let (status, change) = self.hub_port_status_owned(slot, port)?;
+        powered(status, change)?;
+        for (bit, selector) in [
+            (HUB_PORT_CONNECTION, C_PORT_CONNECTION),
+            (2, 17),
+            (4, 18),
+            (16, 20),
+            (32, 23),
+        ] {
+            if change & bit != 0 {
+                self.control_owned(
+                    slot,
+                    setup(0x23, CLEAR_FEATURE, selector, u16::from(port), 0),
+                    &[],
+                )?;
+            }
+        }
+        Ok((
+            status & HUB_PORT_CONNECTION != 0,
+            change & HUB_PORT_CONNECTION != 0,
+        ))
+    }
+
+    /// The caller owns a completed stability interval for this exact port.
+    pub(in super::super) fn reset_debounced_usb2_hub_port(
+        &mut self,
+        id: SlotId,
+        port: u8,
+    ) -> Result<Option<u8>, BlockError> {
+        let slot = self.validate_topology_id(id)?;
+        let index = u16::from(port);
         for _ in 0..RESET_ATTEMPTS {
             self.control_owned(slot, setup(0x23, SET_FEATURE, PORT_RESET, index, 0), &[])?;
             let deadline = self.clock.deadline(PORT_RESET_US);

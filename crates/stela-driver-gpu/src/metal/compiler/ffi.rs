@@ -179,8 +179,14 @@ pub struct Reflection {
 }
 
 impl Reflection {
+    #[cfg(test)]
     // SAFETY: every member is an integer or an array of integers.
     pub(super) const ZERO: Self = unsafe { core::mem::zeroed() };
+
+    pub(super) fn zeroed() -> alloc::boxed::Box<Self> {
+        // SAFETY: every member is an integer or an array of integers.
+        unsafe { alloc::boxed::Box::new_zeroed().assume_init() }
+    }
 }
 
 /// `enum stela_metal_binding_kind`.

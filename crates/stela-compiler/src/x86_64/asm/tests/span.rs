@@ -91,6 +91,32 @@ fn guest_site_markers_follow_span_copy_split_and_instruction_elision() {
 }
 
 #[test]
+fn removing_an_access_preserves_sites_on_both_sides() {
+    let mut code = Code::new();
+    code.asm().guest_check();
+    let start = code.len();
+    code.asm()
+        .guest_access(|asm| asm.mov_load(Size::Qword, Gpr::Rcx, Mem::base(Gpr::Rax, 0)));
+    let end = code.len();
+    code.asm().guest_check();
+    let before = code.sites()[0];
+    let after = code.sites()[2];
+    code.remove_instruction(start..end);
+    assert_eq!(code.instructions(), 2);
+    assert_eq!(
+        code.sites(),
+        &[
+            before,
+            EmissionSite {
+                start: 2,
+                end: 4,
+                ..after
+            }
+        ]
+    );
+}
+
+#[test]
 fn lock_prefix_is_part_of_the_guest_operand_site() {
     let mut code = Code::new();
     code.asm().guest_access(|asm| {

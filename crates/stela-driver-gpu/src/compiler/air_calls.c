@@ -124,6 +124,16 @@ called(LLVMValueRef fn)
    return false;
 }
 
+bool
+stela_air_has_defined_calls(LLVMModuleRef module)
+{
+   for (LLVMValueRef fn = LLVMGetFirstFunction(module); fn; fn = LLVMGetNextFunction(fn)) {
+      if (stela_air_defined_function(fn) && called(fn))
+         return true;
+   }
+   return false;
+}
+
 static unsigned
 attribute(const char *name)
 {
@@ -297,10 +307,12 @@ stela_air_inline_calls(struct stela_air_metadata *m, LLVMValueRef entry,
       return fail(m, STELA_AIR_ALLOCATION, "call graph allocation failed");
    bool walked = true, inlined = false, recursive = false;
    for (LLVMValueRef fn = LLVMGetFirstFunction(m->module); fn && walked; fn = LLVMGetNextFunction(fn)) {
-      bool cyclic;
       m->unoptimized |= LLVMGetEnumAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
                                                     attribute("optnone")) != NULL;
-      walked = !stela_air_defined_function(fn) || visit(m, states, fn, true, 0, &cyclic);
+      if (!stela_air_defined_function(fn))
+         continue;
+      bool cyclic;
+      walked = visit(m, states, fn, true, 0, &cyclic);
       recursive |= walked && fn == entry && cyclic;
    }
    for (LLVMValueRef fn = LLVMGetFirstFunction(m->module); fn && walked; fn = LLVMGetNextFunction(fn)) {

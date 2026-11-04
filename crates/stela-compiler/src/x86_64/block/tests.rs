@@ -9,13 +9,20 @@ use alloc::vec::Vec;
 fn removed_instructions_move_the_check_failures_after_them() {
     use super::super::asm::{Cond, Gpr, Mem, Size};
     let mut code = Code::new();
+    code.check_failure(Cond::E);
+    let start = code.len();
     code.asm()
         .mov_load(Size::Qword, Gpr::Rax, Mem::base(Gpr::Rdi, 0));
-    let load = code.len();
+    let end = code.len();
     code.check_failure(Cond::Ne);
-    code.remove_instruction(0..load);
+    code.remove_instruction(start..end);
     code.place_failures();
-    assert_eq!(code[..], [0x0f, 0x85, 0, 0, 0, 0, 0x0f, 0x0b]);
+    assert_eq!(
+        code[..],
+        [
+            0x0f, 0x84, 6, 0, 0, 0, 0x0f, 0x85, 2, 0, 0, 0, 0x0f, 0x0b, 0x0f, 0x0b
+        ],
+    );
 }
 
 /// A conditional exit's branch skips its fallthrough exit, and each of
@@ -63,7 +70,8 @@ fn values_left_in_rax_are_not_reloaded() {
             condition: 1,
         }),
     );
-    let code = emit(&instructions, Some(&terminal), GuestAddress(branch.0 + 4)).x86_64_code;
+    let native = emit(&instructions, Some(&terminal), GuestAddress(branch.0 + 4));
+    let code = &native.x86_64_code;
     let count = |pattern: &[u8]| {
         code.windows(pattern.len())
             .filter(|w| *w == pattern)
@@ -71,6 +79,110 @@ fn values_left_in_rax_are_not_reloaded() {
     };
     assert_eq!(count(&LOAD_X10), 1);
     assert_eq!(count(&LOAD_NZCV), 0);
+    let compare = native.source_map[1].1;
+    assert_eq!(&code[compare..compare + 3], &[0x48, 0x81, 0xf8]); // CMP RAX,imm32.
+}
+
+#[test]
+fn ordinary_integer_operations_read_frame_operands_directly() {
+    use crate::{Lifter, aarch64::Decoder};
+    let pc = GuestAddress(0x1000);
+    // MOV W5,W1; AND W1,W1,W14; CMP W13,W1; CMP W13,#7; ADD X6,X4,W12,SXTW.
+    let instructions: Vec<_> = [
+        0x2a01_03e5_u32,
+        0x0a0e_0021,
+        0x6b01_01bf,
+        0x7100_1dbf,
+        0x8b2c_c086,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, word)| {
+        Decoder
+            .lift(GuestAddress(pc.0 + 4 * index as u64), word)
+            .unwrap()
+    })
+    .collect();
+    let native = emit(&instructions, None, GuestAddress(0x1014));
+    let code = &native.x86_64_code;
+    let map = &native.source_map;
+    assert_eq!(
+        &code[..map[1].1],
+        &[0x8b, 0x87, 8, 0, 0, 0, 0x48, 0x89, 0x87, 40, 0, 0, 0],
+    ); // MOV EAX,[RDI+8]; MOV [RDI+40],RAX.
+    assert_eq!(
+        &code[map[1].1 + 7..map[1].1 + 13],
+        &[0x23, 0x87, 112, 0, 0, 0]
+    );
+    assert_eq!(
+        &code[map[2].1 + 7..map[2].1 + 13],
+        &[0x3b, 0x87, 8, 0, 0, 0]
+    );
+    assert_eq!(
+        &code[map[3].1..map[3].1 + 7],
+        &[0x83, 0xbf, 104, 0, 0, 0, 7]
+    );
+    assert_eq!(
+        &code[map[4].1 + 7..map[4].1 + 14],
+        &[0x48, 0x63, 0x8f, 96, 0, 0, 0],
+    ); // MOVSXD RCX,[RDI+96].
+}
+
+#[test]
+fn pinned_scalar_loads_forward_through_the_block() {
+    use crate::{Lifter, aarch64::Decoder, block::RecoverySiteKind};
+    const FRAME_LOAD: [u8; 4] = [0x48, 0x8b, 0x47, 0x50];
+    let pc = GuestAddress(0x1000);
+    let second = GuestAddress(0x1004);
+    let branch = GuestAddress(0x1008);
+    // LDR X10,[X10]; LDR X10,[X10,X2]; CBZ X10,entry.
+    let instructions = [
+        Decoder.lift(pc, 0xf940_014a).unwrap(),
+        Decoder.lift(second, 0xf862_694a).unwrap(),
+    ];
+    let terminal = (
+        branch,
+        Terminator::Branch(Operation::BranchZero {
+            source: Register::X(10),
+            width: crate::aarch64::Width::X64,
+            nonzero: false,
+            target: pc,
+        }),
+    );
+    let (native, recovery) = emit_system_mode(
+        &instructions,
+        Some(&terminal),
+        GuestAddress(0x100c),
+        crate::TargetCpu::Baseline,
+        super::super::MemoryChecks::DEFAULT,
+        super::super::NativeSystem::NONE,
+    );
+    let code = &native.x86_64_code;
+    assert_eq!(native.source_map.len(), 3);
+    let [(pc1, at1), (pc2, at2), (pc3, at3)] = native.source_map.as_slice() else {
+        unreachable!()
+    };
+    assert_eq!([*pc1, *pc2, *pc3], [pc, second, branch]);
+    assert!(at1 < at2 && at2 < at3);
+    assert_eq!(
+        code.windows(FRAME_LOAD.len())
+            .filter(|w| *w == FRAME_LOAD)
+            .count(),
+        1
+    );
+    assert_eq!(&code[*at3..*at3 + 3], &[0x48, 0x85, 0xc0]); // TEST RAX,RAX
+    let accesses: Vec<_> = recovery
+        .iter()
+        .filter(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+        .collect();
+    assert_eq!(accesses.len(), 2);
+    for (index, access) in accesses.into_iter().enumerate() {
+        let (pc, start) = native.source_map[index];
+        assert!(start <= access.start && access.end <= native.source_map[index + 1].1);
+        let position = access.retirement.position().unwrap();
+        assert_eq!(position.pc, pc);
+        assert_eq!(usize::from(position.retired_instructions), index);
+    }
 }
 
 /// ldr x0, [sp, #8]; ldr x1, [sp, #16]; sub sp, sp, #8; ldr x2, [sp]:

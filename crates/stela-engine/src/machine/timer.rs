@@ -23,6 +23,26 @@ pub const ENABLE: u64 = 1;
 pub const IMASK: u64 = 2;
 pub const ISTATUS: u64 = 4;
 
+/// A channel's comparator or interrupt control, including its relative alias.
+pub(super) fn channel_register(register: Register) -> bool {
+    use Register::*;
+    matches!(
+        register,
+        CNTP_CTL_EL0
+            | CNTP_CVAL_EL0
+            | CNTP_TVAL_EL0
+            | CNTV_CTL_EL0
+            | CNTV_CVAL_EL0
+            | CNTV_TVAL_EL0
+            | CNTHP_CTL_EL2
+            | CNTHP_CVAL_EL2
+            | CNTHP_TVAL_EL2
+            | CNTHV_CTL_EL2
+            | CNTHV_CVAL_EL2
+            | CNTHV_TVAL_EL2
+    )
+}
+
 /// One timer channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Channel {

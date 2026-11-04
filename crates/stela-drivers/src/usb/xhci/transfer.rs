@@ -80,7 +80,24 @@ impl Controller {
     }
 
     pub(super) fn endpoint_ready_owned(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
-        self.completion_ready(slot, dci)?;
+        self.endpoints_ready_owned(slot, &[dci])
+    }
+
+    pub(super) fn endpoints_ready_owned(
+        &mut self,
+        slot: u8,
+        dcis: &[u8],
+    ) -> Result<(), BlockError> {
+        self.live_slot(slot)?;
+        self.ready()?;
+        for &dci in dcis {
+            self.endpoint_enabled(slot, dci)?;
+            self.endpoint_can_submit(slot, dci)?;
+        }
+        Ok(())
+    }
+
+    fn endpoint_can_submit(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
         // Incompatible Device may be transferless; its pointer need not name
         // any ticket. It requires slot retirement before new DMA publication.
         let incompatible = self.pending.iter().any(|event| {
@@ -130,6 +147,10 @@ impl Controller {
 
     fn endpoint_ready_inner(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
         self.ready()?;
+        self.endpoint_enabled(slot, dci)
+    }
+
+    fn endpoint_enabled(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
         let state = self.slot(slot)?;
         if dci != 1 && !state.current_configuration.is_some_and(|value| value != 0) {
             return Err(BlockError::Unsupported(

@@ -47,12 +47,13 @@ unsafe extern "C" {
         data: *mut c_void,
         error: *mut ffi::AirError,
     ) -> bool;
-    fn stela_metal_compile(
+    fn stela_metal_compile_reflected(
         air: *const c_void,
         size: usize,
         entry: *const c_char,
         target: *const ffi::Target,
         specialization: *const ffi::Specialization,
+        reflection: *const ffi::Reflection,
         error: *mut ffi::AirError,
     ) -> *mut c_void;
     fn stela_metal_tessellation_stages(
@@ -68,6 +69,13 @@ unsafe extern "C" {
 }
 
 impl Service {
+    #[cfg(target_os = "uefi")]
+    pub(super) fn accepts_compilation_projection(&self) -> bool {
+        let linked = Self::linked(self.nir_options);
+        core::ptr::fn_addr_eq(self.reflect, linked.reflect)
+            && core::ptr::fn_addr_eq(self.compile, linked.compile)
+    }
+
     /// The linked service, compiling with the driver's `nir_options`.
     pub fn linked(nir_options: NonNull<c_void>) -> Self {
         Self {
@@ -76,7 +84,7 @@ impl Service {
             sampler_states: stela_metal_sampler_states,
             functions: stela_metal_functions,
             stitch: stela_metal_stitch,
-            compile: stela_metal_compile,
+            compile: stela_metal_compile_reflected,
             tessellation_stages: stela_metal_tessellation_stages,
             accumulate_kernel: stela_metal_accumulate_kernel,
             select_kernel: stela_metal_select_kernel,

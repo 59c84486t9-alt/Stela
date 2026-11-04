@@ -31,7 +31,7 @@ use {
     crate::machine::exception, crate::machine::exception::Class, crate::machine::exception::DAIF_A,
     crate::machine::exception::DAIF_D, crate::machine::exception::DAIF_F,
     crate::machine::exception::DAIF_I, crate::machine::exception::Pstate as PstateBits,
-    crate::machine::pmu::Pmu, crate::machine::registers::Lines, crate::machine::registers::Refusal,
+    crate::machine::pmu::Pmu, crate::machine::registers::Refusal,
     crate::machine::registers::trap_iss, crate::machine::system::ACCESSORS,
     crate::machine::system::AtAccess, crate::machine::system::CacheOp,
     crate::machine::system::CacheScope, crate::machine::system::CacheType,
@@ -394,9 +394,8 @@ const ISR_F: u64 = 1 << 6;
 pub(super) struct Access<'a, H: Host, D: Devices> {
     machine: &'a mut Machine<H, D>,
     rt: u8,
-    /// The interrupt lines and the system counter when the access started.
-    lines: Lines,
-    now: u64,
+    /// One counter sample for all timing calculations of this access.
+    now: Option<u64>,
     result: Option<u64>,
     translation: Translation,
     regime: bool,
@@ -467,6 +466,10 @@ enum Code {
 }
 
 impl<H: Host, D: Devices> Access<'_, H, D> {
+    fn now(&mut self) -> u64 {
+        *self.now.get_or_insert_with(|| self.machine.now())
+    }
+
     fn refuse(&self, reason: &'static str) {
         if self.refusal.get().is_none() {
             self.refusal.set(Some(reason));
@@ -547,7 +550,12 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
     /// counter read at EL0 or EL1 outside the host returns the physical
     /// count less its virtual offset: AMEVCNTVOFF0<n>_EL2, or CNTVOFF_EL2
     /// for the constant frequency counter, which has no offset register.
-    fn read_activity_monitor(&self, register: Register, index: u64) -> u64 {
+    fn read_activity_monitor(&mut self, register: Register, index: u64) -> u64 {
+        let now = if register == Register::AMEVCNTR0_EL0 {
+            self.now()
+        } else {
+            0
+        };
         let cpu = &self.machine.cpu;
         let Some(monitors) = cpu.amu.as_ref() else {
             self.refuse("activity monitors without their model");
@@ -556,7 +564,7 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
         if register != Register::AMEVCNTR0_EL0 {
             return monitors.enabled();
         }
-        let count = monitors.count(index as usize, self.now, cpu.retired);
+        let count = monitors.count(index as usize, now, cpu.retired);
         let virtual_view = cpu.registers.has(Feature::FEAT_AMUv1p1)
             && cpu.pstate.el < 2
             && !cpu.in_host()
@@ -588,7 +596,7 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
             Register::AMEVCNTR0_EL0 => None,
             _ => return None,
         };
-        let (now, retired) = (self.now, self.machine.cpu.retired);
+        let (now, retired) = (self.now(), self.machine.cpu.retired);
         let Some(monitors) = self.machine.cpu.amu.as_mut() else {
             return Some(Err(Effect::Refused(
                 "activity monitors without their model",
@@ -603,9 +611,9 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
 
     /// ISR_EL1: virtual interrupts while routed to EL2 from EL1 or EL0
     /// outside the host, physical lines otherwise.
-    fn pending(&self) -> u64 {
+    fn pending(&mut self) -> u64 {
+        let lines = self.machine.lines();
         let cpu = &self.machine.cpu;
-        let lines = self.lines;
         let guest = cpu.pstate.el != 2 && !cpu.in_host();
         let line = |routing: u32, virtual_bit: u32, physical: bool| {
             if guest && cpu.hcr(routing) {
@@ -826,13 +834,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let read =
             access.direction() == stela_compiler::aarch64::system::registers::Direction::Read;
         let (accessor, index) = self.lookup.find(encoding, read)?;
-        let lines = self.lines();
-        let now = self.now();
         let mut context = Access {
             machine: self,
             rt: access.rt(),
-            lines,
-            now,
+            now: None,
             result: None,
             translation: Translation::Unchanged,
             regime: false,

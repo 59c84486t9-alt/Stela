@@ -277,6 +277,62 @@ fn copy_opaque(source: &[u8], out: &mut [u8], from: PixelFormat, to: PixelFormat
     }
 }
 
+/// Copy a same-format straight-alpha row over black without reading the
+/// destination or calculating coordinates for individual pixels.
+#[inline(never)]
+fn copy_straight_over_black(pixels: &[u8], out: &mut [u8]) {
+    for (out, pixel) in out
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(pixels.as_chunks::<4>().0)
+    {
+        let alpha = u32::from(pixel[3]);
+        *out = [
+            scale(u32::from(pixel[0]), alpha) as u8,
+            scale(u32::from(pixel[1]), alpha) as u8,
+            scale(u32::from(pixel[2]), alpha) as u8,
+            0xff,
+        ];
+    }
+}
+
+/// Blend an unscaled row already in the scanout's channel order.
+#[inline(never)]
+fn blend_row(pixels: &[u8], out: &mut [u8], premultiplied: bool) {
+    const LANES: u32 = 0x00ff_00ff;
+    // Two independent 8-bit channels in 16-bit lanes. For products up to
+    // 255², the shifts give the same rounded quotient as (product + 127) / 255.
+    let scale = |lanes: u32, weight: u32| {
+        let biased = lanes * weight + 0x0080_0080;
+        ((biased + ((biased >> 8) & LANES)) >> 8) & LANES
+    };
+    for (out, pixel) in out
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(pixels.as_chunks::<4>().0)
+    {
+        let below = u32::from_le_bytes(*out);
+        let source = u32::from_le_bytes(*pixel);
+        let alpha = u32::from(pixel[3]);
+        let blend = |source: u32, below: u32| {
+            let source = source & LANES;
+            let source = if premultiplied {
+                source
+            } else {
+                scale(source, alpha)
+            };
+            let sum = source + scale(below & LANES, 255 - alpha);
+            let overflow = (sum & 0x0100_0100) >> 8;
+            (sum | (overflow * 255)) & LANES
+        };
+        let even = blend(source, below);
+        let green = blend(source >> 8, below >> 8) & 0xff;
+        *out = (even | (green << 8) | 0xff00_0000).to_le_bytes();
+    }
+}
+
 /// Compose `layers`, bottom to top, over opaque black on `mode`'s screen and
 /// return the frame for one [`Scanout::present`]: the mode's rows in its
 /// pixel order, alpha opaque. `read` fills a byte range of a surface from
@@ -335,6 +391,14 @@ pub fn compose(
                     || pixels.iter().skip(3).step_by(4).all(|&alpha| alpha == 0xff)
                 {
                     copy_opaque(pixels, out, surface.format, mode.format);
+                    continue;
+                }
+                if over_black && surface.format == mode.format {
+                    copy_straight_over_black(pixels, out);
+                    continue;
+                }
+                if surface.format == mode.format {
+                    blend_row(pixels, out, layer.premultiplied);
                     continue;
                 }
             }
@@ -541,6 +605,35 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_rows_round_and_saturate_each_channel_independently() {
+        for premultiplied in [false, true] {
+            for alpha in 0..=255 {
+                for value in 0..=255 {
+                    let source = [value, 255 - value, value ^ 0x55, alpha];
+                    let below = [value ^ 0xaa, value, 255 - value, 0xff];
+                    let mut actual = below;
+                    blend_row(&source, &mut actual, premultiplied);
+                    let alpha = u32::from(alpha);
+                    let mut expected = below;
+                    for (channel, (source, below)) in
+                        source.into_iter().zip(below).take(3).enumerate()
+                    {
+                        let source = u32::from(source);
+                        let source = if premultiplied {
+                            source
+                        } else {
+                            scale(source, alpha)
+                        };
+                        expected[channel] =
+                            (source + scale(u32::from(below), 255 - alpha)).min(255) as u8;
+                    }
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_fast_paths_compose_the_frames_the_general_path_does() {
         // A seeded xorshift draws surfaces (some opaque, some with random
         // alpha) and layer stacks that mix unscaled and scaled, clipped and
@@ -618,6 +711,68 @@ mod tests {
                 "case {case}: {layers:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_full_base_composes_over_black_and_preserves_row_dma_boundaries() {
+        let base = Layer::new(
+            surface(6, 3, 32, 8),
+            Rect {
+                x: 1,
+                y: 1,
+                ..Rect::whole(4, 2)
+            },
+            Rect::whole(4, 2),
+            false,
+        )
+        .unwrap();
+        let overlay = Layer::new(
+            surface(2, 1, 8, 112),
+            Rect::whole(2, 1),
+            Rect {
+                x: 3,
+                y: 1,
+                ..Rect::whole(2, 1)
+            },
+            true,
+        )
+        .unwrap();
+        let mut memory = [0; 128];
+        for (index, byte) in memory.iter_mut().enumerate() {
+            *byte = (index as u8).wrapping_mul(37);
+        }
+        memory[47] = 0;
+        memory[51] = 0xff;
+        for premultiplied in [false, true] {
+            let layers = [
+                Layer {
+                    premultiplied,
+                    ..base
+                },
+                overlay,
+            ];
+            let mut reads = Vec::new();
+            let frame = compose(&layers, MODE, |iova, bytes| {
+                reads.push((iova, bytes.len()));
+                reader(&memory)(iova, bytes)
+            })
+            .unwrap();
+            assert_eq!(reads, [(44, 16), (76, 16), (112, 8)]);
+            assert_eq!(frame, reference(&layers, MODE, &memory));
+        }
+
+        // An unreachable row leaves the frame unpublished and the later
+        // overlay unread.
+        let mut reads = Vec::new();
+        assert!(
+            compose(&[base, overlay], MODE, |iova, bytes| {
+                reads.push(iova);
+                bytes[0] = 99;
+                iova != 76
+            })
+            .is_err()
+        );
+        assert_eq!(reads, [44, 76]);
     }
 
     #[test]

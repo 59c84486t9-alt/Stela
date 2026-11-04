@@ -2,7 +2,6 @@
 //!
 //! Native blocks return only the instruction's PC and exit kind; the runtime
 //! re-decodes the source word before applying the effect.
-use crate::aarch64::Unsupported;
 
 use crate::{
     CompileError, GuestAddress,
@@ -226,13 +225,129 @@ pub fn decode_system_instruction(
     pc: GuestAddress,
     word: u32,
 ) -> Result<Option<SystemInstruction>, CompileError> {
+    decode_instruction(pc, word, synchronization::decode(word), false)
+}
+
+/// Decode the EL1 system instructions the platform completes. NOP, PAuth
+/// aliases and other hints keep their existing decoding.
+pub(super) fn decode_el1_system_instruction(
+    pc: GuestAddress,
+    word: u32,
+) -> Result<Option<SystemInstruction>, CompileError> {
+    let sync = synchronization::decode(word);
+    if let Some(instruction) = decode_instruction(pc, word, sync, false)? {
+        return Ok(Some(instruction));
+    }
+    let Some(operation @ synchronization::Operation::DataCompletion { .. }) = sync else {
+        return Ok(None);
+    };
+    request(pc, word, SystemOperation::Synchronization(operation)).map(Some)
+}
+
+/// Decode every instruction the system-mode profile hands to the runtime: the
+/// [`decode_el1_system_instruction`] families, SYS/SYSL, and the barriers and
+/// hints that the ordinary decoder does not own (DSB, SSBB/PSSBB, ESB,
+/// TSB and unallocated hints), Apple's GXF instructions, SDSB, WKDMC and
+/// WKDMD, the Debug-state-only MOVT GPR/ZT0 forms, and the FEAT_CPA pointer
+/// arithmetic. YIELD, CSDB, SB and DMB stay ordinary and BTI compiles as NOP;
+/// PAuth hints belong to the PAuth decoder, which the profile consults first.
+pub fn decode_system_mode_instruction(
+    pc: GuestAddress,
+    word: u32,
+) -> Result<Option<SystemInstruction>, CompileError> {
+    decode_system_mode_with_sync(pc, word, synchronization::decode(word))
+}
+
+pub(super) fn decode_system_mode_with_sync(
+    pc: GuestAddress,
+    word: u32,
+    sync: Option<synchronization::Operation>,
+) -> Result<Option<SystemInstruction>, CompileError> {
+    decode_instruction(pc, word, sync, true)
+}
+
+fn decode_instruction(
+    pc: GuestAddress,
+    word: u32,
+    sync: Option<synchronization::Operation>,
+    system_mode: bool,
+) -> Result<Option<SystemInstruction>, CompileError> {
     if !pc.0.is_multiple_of(INSTRUCTION_BYTES) {
         return Err(
             CompileError::new(crate::CompileErrorKind::MisalignedInstructionAddress)
                 .at_instruction(pc, word),
         );
     }
-    let synchronization = match synchronization::decode(word) {
+    // Route by the fixed high byte of the encoding classes. Ordinary ALU,
+    // branch and memory words outside these classes need no family probes.
+    // The family decoders still own every fixed bit and operand check.
+    let operation = match word >> 24 {
+        0x00 => exception::decode(word)
+            .map(SystemOperation::Exception)
+            .or_else(|| {
+                if !system_mode {
+                    return None;
+                }
+                GuardedOperation::decode(word)
+                    .map(SystemOperation::Guarded)
+                    .or_else(|| {
+                        AppleMaintenance::decode(word).map(SystemOperation::AppleMaintenance)
+                    })
+                    .or_else(|| decode_sdsb(word).map(SystemOperation::Synchronization))
+                    .or_else(|| crate::wkdm::decode(word).map(SystemOperation::Compression))
+            }),
+        0x08 | 0x48 | 0x88 | 0xc8 if system_mode => {
+            crate::aarch64::exclusive::decode(word).map(SystemOperation::Exclusive)
+        }
+        0x38 | 0x78 | 0xb8 | 0xf8 if system_mode => {
+            // Reserved sizes and opcodes stay with the ordinary decoder.
+            crate::aarch64::unprivileged::decode(word)
+                .and_then(Result::ok)
+                .map(SystemOperation::Unprivileged)
+        }
+        0x68 | 0x69 | 0xd9 => tag_memory::decode(word).map(SystemOperation::TagMemory),
+        0x91 | 0xd1 if system_mode => match tag_arithmetic::decode(word) {
+            Some(
+                operand @ tag_arithmetic::Operand {
+                    kind: tag_arithmetic::Kind::Offset { .. },
+                    ..
+                },
+            ) => Some(SystemOperation::TagOffset(operand)),
+            _ => None,
+        },
+        0x9a => tag_memory::decode(word)
+            .map(SystemOperation::TagMemory)
+            .or_else(|| {
+                if system_mode {
+                    decode_checked_pointer(word)
+                } else {
+                    None
+                }
+            }),
+        0x9b | 0xda if system_mode => decode_checked_pointer(word),
+        0xc0 if system_mode => {
+            DebugStateOperation::decode(word).map(SystemOperation::DebugStateOnly)
+        }
+        0xd4 | 0xd6 => exception::decode(word).map(SystemOperation::Exception),
+        0xd5 => decode_system_class(word, sync, system_mode)?,
+        _ => None,
+    };
+    operation
+        .map(|operation| request(pc, word, operation))
+        .transpose()
+}
+
+fn decode_checked_pointer(word: u32) -> Option<SystemOperation> {
+    crate::aarch64::checked_pointer::decode(word).map(SystemOperation::CheckedPointer)
+}
+
+/// Hints, barriers, CLREX, system registers, PSTATE and SYS/SYSL share 0xd5.
+fn decode_system_class(
+    word: u32,
+    sync: Option<synchronization::Operation>,
+    system_mode: bool,
+) -> Result<Option<SystemOperation>, CompileError> {
+    let terminal_sync = match sync {
         Some(synchronization::Operation::SendEvent { local }) => {
             Some(SystemOperation::SendEvent { local })
         }
@@ -249,128 +364,53 @@ pub fn decode_system_instruction(
         _ => None,
     };
     let mut operations = [
-        exception::decode(word).map(SystemOperation::Exception),
-        tag_memory::decode(word).map(SystemOperation::TagMemory),
-        synchronization,
+        terminal_sync,
         registers::decode(word).map(SystemOperation::Register),
         registers::decode_pstate_immediate(word).map(SystemOperation::PstateImmediate),
     ]
     .into_iter()
     .flatten();
-    let Some(operation) = operations.next() else {
-        return Ok(None);
-    };
-    if operations.next().is_some() {
-        return Err(CompileError::new(
-            crate::CompileErrorKind::AmbiguousSystemInstruction,
-        ));
-    }
-    let next_pc = GuestAddress(
-        pc.0.checked_add(INSTRUCTION_BYTES)
-            .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?,
-    );
-    Ok(Some(SystemInstruction {
-        instruction_pc: pc,
-        next_pc,
-        word,
-        operation,
-    }))
-}
-
-/// Decode the EL1 system instructions the platform completes. NOP, PAuth
-/// aliases and other hints keep their existing decoding.
-pub(super) fn decode_el1_system_instruction(
-    pc: GuestAddress,
-    word: u32,
-) -> Result<Option<SystemInstruction>, CompileError> {
-    if let Some(instruction) = decode_system_instruction(pc, word)? {
-        return Ok(Some(instruction));
-    }
-    let Some(operation @ synchronization::Operation::DataCompletion { .. }) =
-        synchronization::decode(word)
-    else {
-        return Ok(None);
-    };
-    let next_pc = GuestAddress(
-        pc.0.checked_add(INSTRUCTION_BYTES)
-            .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?,
-    );
-    Ok(Some(SystemInstruction {
-        instruction_pc: pc,
-        next_pc,
-        word,
-        operation: SystemOperation::Synchronization(operation),
-    }))
-}
-
-/// Decode every instruction the system-mode profile hands to the runtime: the
-/// [`decode_el1_system_instruction`] families, SYS/SYSL, and the barriers and
-/// hints that the ordinary decoder does not own (DSB, SSBB/PSSBB, ESB,
-/// TSB and unallocated hints), Apple's GXF instructions, SDSB, WKDMC and
-/// WKDMD, the Debug-state-only MOVT
-/// GPR/ZT0 forms, and
-/// the FEAT_CPA pointer arithmetic.
-/// YIELD, CSDB, SB and DMB stay ordinary and BTI compiles as NOP; PAuth hints belong to the PAuth
-/// decoder, which the profile consults first.
-pub fn decode_system_mode_instruction(
-    pc: GuestAddress,
-    word: u32,
-) -> Result<Option<SystemInstruction>, CompileError> {
-    if let Some(instruction) = decode_system_instruction(pc, word)? {
-        return Ok(Some(instruction));
-    }
-    let operation = if let Some(operation) = GuardedOperation::decode(word) {
-        SystemOperation::Guarded(operation)
-    } else if let Some(operation) = AppleMaintenance::decode(word) {
-        SystemOperation::AppleMaintenance(operation)
-    } else if let Some(operation) = decode_sdsb(word) {
-        SystemOperation::Synchronization(operation)
-    } else if let Some(instruction) = crate::wkdm::decode(word) {
-        SystemOperation::Compression(instruction)
-    } else if let Some(operation) = DebugStateOperation::decode(word) {
-        SystemOperation::DebugStateOnly(operation)
-    } else if let Some(decoded) = crate::aarch64::exclusive::decode(word) {
-        SystemOperation::Exclusive(decoded)
-    } else if let Some(operand) = crate::aarch64::checked_pointer::decode(word) {
-        SystemOperation::CheckedPointer(operand)
-    } else if let Some(
-        operand @ tag_arithmetic::Operand {
-            kind: tag_arithmetic::Kind::Offset { .. },
-            ..
-        },
-    ) = tag_arithmetic::decode(word)
-    {
-        SystemOperation::TagOffset(operand)
-    } else if let Some(decoded) = crate::aarch64::unprivileged::decode(word) {
-        // Reserved sizes and opcodes stay with the ordinary decoder.
-        match decoded {
-            Ok(operand) => SystemOperation::Unprivileged(operand),
-            Err(Unsupported) => return Ok(None),
+    if let Some(operation) = operations.next() {
+        if operations.next().is_some() {
+            return Err(CompileError::new(
+                crate::CompileErrorKind::AmbiguousSystemInstruction,
+            ));
         }
-    } else if let Some(access) = registers::decode_sys(word) {
-        SystemOperation::Maintenance(access)
-    } else {
-        match synchronization::decode(word) {
+        return Ok(Some(operation));
+    }
+    if !system_mode {
+        return Ok(None);
+    }
+    Ok(crate::aarch64::exclusive::decode(word)
+        .map(SystemOperation::Exclusive)
+        .or_else(|| registers::decode_sys(word).map(SystemOperation::Maintenance))
+        .or(match sync {
             Some(
                 operation @ (synchronization::Operation::DataCompletion { .. }
                 | synchronization::Operation::StoreBypassBarrier { .. }
                 | synchronization::Operation::ErrorSynchronization
                 | synchronization::Operation::TraceSynchronization
                 | synchronization::Operation::OtherHint { .. }),
-            ) if word != NOP => SystemOperation::Synchronization(operation),
-            _ => return Ok(None),
-        }
-    };
+            ) if word != NOP => Some(SystemOperation::Synchronization(operation)),
+            _ => None,
+        }))
+}
+
+fn request(
+    pc: GuestAddress,
+    word: u32,
+    operation: SystemOperation,
+) -> Result<SystemInstruction, CompileError> {
     let next_pc = GuestAddress(
         pc.0.checked_add(INSTRUCTION_BYTES)
             .ok_or_else(|| CompileError::new(crate::CompileErrorKind::GuestAddressOverflow))?,
     );
-    Ok(Some(SystemInstruction {
+    Ok(SystemInstruction {
         instruction_pc: pc,
         next_pc,
         word,
         operation,
-    }))
+    })
 }
 
 const NOP: u32 = 0xd503_201f;

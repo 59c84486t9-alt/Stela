@@ -13,7 +13,7 @@ mod apx;
 mod self_loop;
 pub(super) use analysis::MAX_INSTRUCTIONS;
 pub(crate) use self_loop::Plan as ResidentLoopPlan;
-pub(super) use self_loop::prefix_with_budget;
+pub(super) use self_loop::{FrameLoop, prefix_with_budget};
 mod constant;
 mod encoding;
 mod flags;

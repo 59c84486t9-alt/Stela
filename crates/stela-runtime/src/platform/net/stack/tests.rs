@@ -46,6 +46,32 @@ impl Link for End {
     }
 }
 
+#[test]
+fn transmit_reuses_storage_with_zeroed_bytes_and_the_current_frame_length() {
+    use smoltcp::phy::TxToken;
+
+    let mut lan = Lan::new(0, TestClock::default());
+    let mut transmit = |length, value| {
+        lan.server
+            .transmit(Instant::ZERO)
+            .unwrap()
+            .consume(length, |frame| {
+                assert!(frame.iter().all(|&byte| byte == 0));
+                frame[0] = value;
+                frame.as_ptr()
+            })
+    };
+    let first = transmit(100, 3);
+    assert_eq!(transmit(60, 7), first);
+    assert_eq!(transmit(100, 2), first);
+    for (length, value) in [(100, 3), (60, 7), (100, 2)] {
+        let frame = lan.client.receive().unwrap().unwrap();
+        assert_eq!(frame.len(), length);
+        assert_eq!(frame[0], value);
+        assert!(frame[1..].iter().all(|&byte| byte == 0));
+    }
+}
+
 /// A smoltcp HTTP server serving `pattern(offset)` for ranges of a
 /// `size`-byte resource, stepped whenever the client reads its link;
 /// every `drop_every`th frame to the client is lost and every
@@ -89,6 +115,7 @@ impl Lan {
                 out: b,
                 into: a,
             },
+            tx_frame: Vec::new(),
             fault: None,
             received: false,
             probes: Vec::new(),

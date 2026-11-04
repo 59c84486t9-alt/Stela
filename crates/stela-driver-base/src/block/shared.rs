@@ -38,12 +38,13 @@ pub(super) struct Requests {
     pub(super) busy_since: u64,
 }
 
-/// A device command and the tickets merged into it: each ticket's offset
-/// and length in a read's data. What the accounting counts it as, and when
-/// its first ticket was submitted.
+/// A device command and its first ticket and read length. Additional tickets
+/// carry their offset and length in the read's data. What the accounting
+/// counts the command as, and when its first ticket was submitted.
 pub(super) struct Merged {
     pub(super) tag: u32,
-    pub(super) tickets: Vec<(u32, usize, usize)>,
+    pub(super) first: (u32, usize),
+    pub(super) more: Vec<(u32, usize, usize)>,
     pub(super) accounted: (Direction, u64),
     pub(super) submitted: u64,
 }
@@ -231,20 +232,39 @@ impl Held<'_> {
             work.finishes = work.finishes.saturating_add(1);
             let merged = self.requests().running.swap_remove(index);
             let now = crate::Clock::ticks();
-            let merges = merged.tickets.len() as u64 - 1;
+            let merges = merged.more.len() as u64;
             self.account(merged.accounted, merges, merged.submitted, now);
             let requests = self.requests();
             if requests.running.is_empty() {
                 requests.stats.busy += now.wrapping_sub(requests.busy_since);
             }
             let finished = &mut self.requests().finished;
-            for (ticket, offset, bytes) in merged.tickets {
+            let (ticket, bytes) = merged.first;
+            if merged.more.is_empty() {
+                let result = result.and_then(|data| match data {
+                    Some(data) if data.len() < bytes => {
+                        Err(BlockError::Protocol("a read returned too little data"))
+                    }
+                    Some(mut data) => {
+                        data.truncate(bytes);
+                        Ok(Some(data))
+                    }
+                    None => Ok(None),
+                });
+                finished.insert(ticket, result);
+                continue;
+            }
+            let tickets = core::iter::once((ticket, 0, bytes)).chain(merged.more);
+            for (ticket, offset, bytes) in tickets {
                 let part = match &result {
                     Ok(Some(data)) => Ok(Some(data[offset..offset + bytes].to_vec())),
                     other => other.clone(),
                 };
                 finished.insert(ticket, part);
             }
+        }
+        if self.requests().waiting.is_empty() {
+            return;
         }
         let queued = self.depth() > 0;
         let (block, limit) = {
@@ -268,13 +288,13 @@ impl Held<'_> {
                 Command::Read { bytes, .. } => *bytes,
                 _ => 0,
             };
-            let mut tickets = vec![(ticket, 0, first)];
+            let mut more = Vec::new();
             let mut offset = first;
             while let Some((next, following, _)) = self.requests().waiting.front() {
                 let Some(bytes) = merge(&mut command, following, block, limit) else {
                     break;
                 };
-                tickets.push((*next, offset, bytes));
+                more.push((*next, offset, bytes));
                 offset += bytes;
                 self.requests().waiting.pop_front();
             }
@@ -288,14 +308,17 @@ impl Held<'_> {
                     }
                     requests.running.push(Merged {
                         tag,
-                        tickets,
+                        first: (ticket, first),
+                        more,
                         accounted,
                         submitted,
                     });
                     requests.stats.deepest = requests.stats.deepest.max(requests.running.len());
                 }
                 Err(error) => {
-                    for (ticket, ..) in tickets {
+                    for ticket in
+                        core::iter::once(ticket).chain(more.into_iter().map(|(id, ..)| id))
+                    {
                         self.requests().finished.insert(ticket, Err(error.clone()));
                     }
                 }

@@ -280,7 +280,15 @@ pub(super) fn scalar(
                 accessed()
             };
             // A fault leaves a host destination as it was.
-            let host = code.host(data).unwrap_or(Gpr::Rcx);
+            // Offset loads have no pending writeback. Keep an unpinned
+            // result in RAX so the following instruction can use it
+            // without reloading it from the frame.
+            let scratch = if code.is_pinned() && mode == AddressMode::Offset {
+                Gpr::Rax
+            } else {
+                Gpr::Rcx
+            };
+            let host = code.host(data).unwrap_or(scratch);
             let checkpoint = code.checkpoint();
             {
                 let mut asm = code.asm();
@@ -302,14 +310,14 @@ pub(super) fn scalar(
                 code,
                 checkpoint,
                 Kind::Load { element: 0, host },
-                mask(Gpr::Rcx),
+                mask(host),
             );
             // A discarded load still performs its faultable access.
-            if host == Gpr::Rcx
+            if host == scratch
                 && let Some(data) = code.asm().guest(data)
             {
                 let start = code.checkpoint();
-                code.asm().mov_store(Size::Qword, data, Gpr::Rcx);
+                code.asm().mov_store(Size::Qword, data, host);
                 mark(&mut recipe, code, start, Kind::Commit, 0);
             }
         }

@@ -481,10 +481,7 @@ pub fn read<R: ReadAt>(
     object: &Object,
 ) -> Result<Vec<u8>> {
     let inode = preboot.inode(&mut container.device, object.oid)?;
-    let mut bytes =
-        vec![0u8; usize::try_from(inode.size).map_err(|_| ApfsError::Malformed("object size"))?];
-    preboot.read_at(&mut container.device, &inode, 0, &mut bytes)?;
-    Ok(bytes)
+    Ok(preboot.read_regular(&mut container.device, &inode)?)
 }
 
 #[cfg(test)]

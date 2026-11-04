@@ -368,14 +368,15 @@ impl<R: ReadAt> Reader<'_, R> {
         let file = self.file(staged)?;
         let parts = img4::parse(&file).within(|| refuse!("{path}", path = staged.path.as_str()))?;
         let im4p_sha384 = im4m::sha384(parts.payload);
-        let (bytes, receipt) = im4p::decode(parts.payload, limit)?;
+        let im4p = im4p::parse(parts.payload)?;
+        let (bytes, _) = im4p.decode_payload(limit)?;
         Ok(Decoded {
             source: Source {
                 component: component.into(),
                 member: staged.path.clone(),
                 container_sha256: sha256(&file),
-                payload_type: receipt.payload_type,
-                description: receipt.description,
+                payload_type: im4p.payload_type,
+                description: im4p.description,
                 decoded_bytes: bytes.len() as u64,
                 decoded_sha256: sha256(&bytes),
             },
@@ -506,7 +507,7 @@ pub fn prepare<R: ReadAt>(
             chip_id: id("CHIP"),
             board_id: id("BORD"),
         },
-        kernel_collection: kernel.input(),
+        kernel_collection: kernel.input().into(),
         auxiliary_collection: None,
         sptm: sptm.input(),
         txm: txm.input(),

@@ -673,7 +673,7 @@ fn unsupported_build_is_refused_before_image_parsing() {
             chip_id: Some(0x8112),
             board_id: Some(0x2e),
         },
-        kernel_collection: input(),
+        kernel_collection: input().into(),
         auxiliary_collection: None,
         sptm: input(),
         txm: input(),
@@ -732,7 +732,7 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
             chip_id: Some(0x8112),
             board_id: Some(0x2e),
         },
-        kernel_collection: input(leak(kernel), "KernelCache"),
+        kernel_collection: input(leak(kernel), "KernelCache").into(),
         auxiliary_collection: None,
         sptm: input(leak(sptm), "Ap,SecurePageTableMonitor"),
         txm: input(leak(txm), "Ap,TrustedExecutionMonitor"),
@@ -866,6 +866,20 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     let firmware = bundle.files.iter().find(|(n, _)| n == "USB-C_HPM,47.bin");
     assert_eq!(firmware.map(|(_, b)| b.as_slice()), Some(&[1u8, 2, 3][..]));
     let supplied = core::mem::take(&mut inputs.board_firmware);
+    let mut appended = prepare(&inputs, &options)?;
+    for (name, image) in &supplied {
+        appended.append_board_firmware(name.clone(), image.bytes.to_vec(), image.source.clone())?;
+    }
+    assert_eq!(appended.files, bundle.files);
+    assert_eq!(
+        serde_json::to_string(&appended.manifest)?,
+        serde_json::to_string(&bundle.manifest)?
+    );
+    assert!(
+        appended
+            .append_board_firmware(KERNEL_FILE.into(), vec![1], source("BoardFirmware"))
+            .is_err()
+    );
     inputs.board_firmware = vec![(KERNEL_FILE.into(), input(leak(vec![1]), "BoardFirmware"))];
     assert!(prepare(&inputs, &options).is_err());
     inputs.board_firmware = supplied;
@@ -1072,7 +1086,11 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
             patch.field
         );
     }
-    // Every region hash covers its file bytes.
+    // Check both receipts directly, including the whole-file ramdisk and
+    // files split across multiple regions.
+    for entry in &manifest.files {
+        assert_eq!(sha256(file(&entry.name)), entry.sha256, "{}", entry.name);
+    }
     for region in &manifest.regions {
         let at = region.file_offset as usize;
         assert_eq!(
@@ -1340,9 +1358,28 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     inputs.auxiliary_collection = None;
 
     // A manifest for another board is refused.
-    let mut other = Inputs { ..inputs };
-    other.target.board_id = Some(0x24);
-    assert!(prepare(&other, &options).is_err());
+    let board_id = inputs.target.board_id.replace(0x24);
+    assert!(prepare(&inputs, &options).is_err());
+    inputs.target.board_id = board_id;
+
+    let owned_kernel = inputs.kernel_collection.bytes.to_vec();
+    let kernel_ptr = owned_kernel.as_ptr();
+    inputs.kernel_collection.source.decoded_bytes = owned_kernel.len() as u64;
+    inputs.kernel_collection.source.decoded_sha256 = sha256(&owned_kernel);
+    let original = prepare(&inputs, &options)?;
+    let moved = assemble(&inputs, &options, Cow::Owned(owned_kernel), None)?;
+    let moved_kernel = &moved
+        .files
+        .iter()
+        .find(|(n, _)| n == KERNEL_FILE)
+        .unwrap()
+        .1;
+    assert_eq!(moved_kernel.as_ptr(), kernel_ptr);
+    assert_eq!(moved.files, bundle.files);
+    assert_eq!(
+        serde_json::to_vec(&moved.manifest)?,
+        serde_json::to_vec(&original.manifest)?
+    );
     Ok(())
 }
 
