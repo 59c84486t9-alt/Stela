@@ -5,10 +5,8 @@
 // a804c5742bff224d4cb4d25dd383554d598be32b. Source hashes and license terms:
 // crates/stela-driver-base/src/platform/THIRD_PARTY.md and LICENSES/GPL-2.0-only.txt.
 //! Exclusive legacy VT-d unit with distinct owned requester contexts/domains.
-//! Every requester the unit covers starts in the window domain (DID 1),
-//! which maps the drivers' shared DMA region one to one, so a driver that
-//! DMAs there by physical address reaches only that region; attaching a
-//! requester moves it to its own domain.
+//! Requesters start blocked or in the explicitly supplied initial window
+//! domain (DID 1). Attaching a requester moves it to its own domain.
 //! Noncoherent table walks use CPUID-checked CLFLUSH plus MFENCE.
 //! This never attaches by guessing a DMAR scope or changes active firmware
 //! domains. ATS, scalable mode, RMRR preservation, peer groups and AMD-Vi need
@@ -339,6 +337,7 @@ struct State {
     domains: BTreeMap<u16, DomainState>,
     next_id: u64,
     next_generation: u64,
+    initial_block: InitialState,
     poisoned: bool,
     shutdown: bool,
 }
@@ -365,6 +364,52 @@ pub struct Unit<R: Registers> {
 // SAFETY: all mutable state/register accesses use the acquire/release lock.
 // IRQ reentry and platform ownership changes are excluded by construction.
 unsafe impl<R: Registers> Sync for Unit<R> {}
+
+enum InitialState {
+    Open,
+    Closed,
+    Issued(Vec<(u16, bool)>),
+}
+
+/// The original blocked root and its exact, drained initial requester cohort.
+pub struct InitialBlock<R: Registers> {
+    unit: Arc<Unit<R>>,
+}
+
+/// One original requester in the blocked cohort. It retains the same unit
+/// and supplies no configuration, IRQ, or engine-stop authority.
+pub struct BlockedRequester<R: Registers> {
+    unit: Arc<Unit<R>>,
+    rid: u16,
+}
+
+impl<R: Registers> InitialBlock<R> {
+    pub fn claim(&self, rid: u16) -> Result<BlockedRequester<R>, DmaError> {
+        let mut guard = self.unit.lock();
+        let state = guard.state();
+        self.unit.check_blocked_requester(state, rid)?;
+        let claimed = state.initial_claim(rid)?;
+        if core::mem::replace(claimed, true) {
+            return Err(DmaError::IommuUnavailable);
+        }
+        Ok(BlockedRequester {
+            unit: self.unit.clone(),
+            rid,
+        })
+    }
+}
+
+impl<R: Registers> BlockedRequester<R> {
+    pub fn drain(&self) -> Result<(), DmaError> {
+        let mut guard = self.unit.lock();
+        let state = guard.state();
+        self.unit.check_blocked_requester(state, self.rid)?;
+        if !*state.initial_claim(self.rid)? {
+            return Err(DmaError::IommuUnavailable);
+        }
+        self.unit.drain_initial(state)
+    }
+}
 
 struct Guard<'a, R: Registers>(&'a Unit<R>);
 impl<R: Registers> Guard<'_, R> {
@@ -558,6 +603,7 @@ impl<R: Registers> Unit<R> {
                 domains: BTreeMap::new(),
                 next_id: 1,
                 next_generation: 1,
+                initial_block: InitialState::Open,
                 poisoned: false,
                 shutdown: false,
             })),
@@ -590,6 +636,96 @@ impl<R: Registers> Unit<R> {
         self.lock().state().allowed.binary_search(&rid).is_ok()
     }
 
+    /// Confirm the installed legacy root is still blocking the exact original
+    /// cohort and obtain checked global context and read/write drain completion.
+    /// Only the first successful acknowledgment issues a cohort. The caller
+    /// retains its independent PCI, engine, IRQ and bypass exclusions.
+    pub fn acknowledge_initial_block(
+        self: &Arc<Self>,
+        requesters: &[u16],
+    ) -> Result<InitialBlock<R>, DmaError> {
+        let mut guard = self.lock();
+        let state = guard.state();
+        if !matches!(state.initial_block, InitialState::Open)
+            || state.next_generation != 1
+            || !state.domains.is_empty()
+            || state.window.is_some()
+            || state.allowed != requesters
+        {
+            return Err(DmaError::IommuUnavailable);
+        }
+        self.check_installed_root(state)?;
+        if self.registers.read32(GSTS) & (QUEUED_INVALIDATION | INTERRUPT_REMAP) != 0 {
+            return Err(DmaError::IommuUnavailable);
+        }
+        if self.cap & (CAP_READ_DRAIN | CAP_WRITE_DRAIN) != CAP_READ_DRAIN | CAP_WRITE_DRAIN {
+            return Err(DmaError::DrainUnavailable);
+        }
+        for bus in 0..=u8::MAX {
+            let index = usize::from(bus) * 2;
+            let context = state.contexts.get(&bus);
+            let expected = context.map_or(0, |table| table.physical() | 1);
+            if state.root.read(index) != expected
+                || state.root.read(index + 1) != 0
+                || context.is_some_and(|table| (0..PAGE / 8).any(|at| table.read(at) != 0))
+            {
+                return Err(DmaError::IommuUnavailable);
+            }
+        }
+        let mut pending = Vec::new();
+        pending
+            .try_reserve_exact(requesters.len())
+            .map_err(|_| DmaError::MappingFailed)?;
+        pending.extend(requesters.iter().map(|&rid| (rid, false)));
+        // Keep the unit closed through every hardware callback, including an
+        // unwind before the acknowledgment can be issued.
+        state.poisoned = true;
+        self.invalidate(true)
+            .map_err(|_| DmaError::InvalidationFailed)?;
+        self.check_root_registers(state)?;
+        state.initial_block = InitialState::Issued(pending);
+        state.poisoned = false;
+        Ok(InitialBlock { unit: self.clone() })
+    }
+
+    fn check_installed_root(&self, state: &State) -> Result<(), DmaError> {
+        if state.shutdown || state.poisoned {
+            return Err(DmaError::IommuUnavailable);
+        }
+        self.check_root_registers(state)
+    }
+
+    fn check_root_registers(&self, state: &State) -> Result<(), DmaError> {
+        let status = self.registers.read32(GSTS);
+        if status == u32::MAX
+            || status & (ROOT_POINTER | TRANSLATION) != ROOT_POINTER | TRANSLATION
+            || self.registers.read64(RTADDR) != state.root.physical()
+        {
+            return Err(DmaError::IommuUnavailable);
+        }
+        Ok(())
+    }
+
+    fn check_blocked_requester(&self, state: &State, rid: u16) -> Result<(), DmaError> {
+        self.check_installed_root(state)?;
+        if state.window.is_some()
+            || state.domains.contains_key(&rid)
+            || !state.allowed.contains(&rid)
+        {
+            return Err(DmaError::IommuUnavailable);
+        }
+        let (table, index) = state.context(rid);
+        let root_index = usize::from(rid >> 8) * 2;
+        if state.root.read(root_index) != table.physical() | 1
+            || state.root.read(root_index + 1) != 0
+            || table.read(index) != 0
+            || table.read(index + 1) != 0
+        {
+            return Err(DmaError::IommuUnavailable);
+        }
+        Ok(())
+    }
+
     /// Complete earlier translated payload writes before a covered requester
     /// leaves its initial window/blocked context. This grants no engine,
     /// IRQ/work or bypass quiescence, and refuses an already attached domain.
@@ -603,15 +739,19 @@ impl<R: Registers> Unit<R> {
         {
             return Err(DmaError::IommuUnavailable);
         }
+        self.drain_initial(state)
+    }
+
+    fn drain_initial(&self, state: &mut State) -> Result<(), DmaError> {
         if self.cap & CAP_WRITE_DRAIN == 0 {
             return Err(DmaError::DrainUnavailable);
         }
         // VT-d 6.5.4's DW acknowledgement covers this original root's
         // translated writes; use the same checked completion as live domains.
-        if self.invalidate(false).is_err() {
-            state.poisoned = true;
-            return Err(DmaError::InvalidationFailed);
-        }
+        state.poisoned = true;
+        self.invalidate(false)
+            .map_err(|_| DmaError::InvalidationFailed)?;
+        state.poisoned = false;
         Ok(())
     }
 
@@ -628,6 +768,9 @@ impl<R: Registers> Unit<R> {
             return Ok(());
         };
         let bus = (rid >> 8) as u8;
+        if matches!(state.initial_block, InitialState::Open) {
+            state.initial_block = InitialState::Closed;
+        }
         if !state.contexts.contains_key(&bus) {
             let context = Table::new(self.source, self.physical_bits)?;
             // Complete and visible before the root entry that leads to it.
@@ -702,6 +845,11 @@ impl<R: Registers> Unit<R> {
             // or change admission while the root is being prepared.
             if self.requester_slot(state, rid)? != (did, generation) {
                 return Err(VtdError::Busy);
+            }
+            if let InitialState::Issued(claims) = &mut state.initial_block
+                && let Ok(index) = claims.binary_search_by_key(&rid, |&(rid, _)| rid)
+            {
+                claims.remove(index);
             }
             state.next_generation = generation + 1;
             tables.push(original.staged.take().expect("prepared requester root"));
@@ -1041,6 +1189,16 @@ impl<R: Registers> Drop for Unit<R> {
 }
 
 impl State {
+    fn initial_claim(&mut self, rid: u16) -> Result<&mut bool, DmaError> {
+        let InitialState::Issued(claims) = &mut self.initial_block else {
+            return Err(DmaError::IommuUnavailable);
+        };
+        let index = claims
+            .binary_search_by_key(&rid, |&(rid, _)| rid)
+            .map_err(|_| DmaError::IommuUnavailable)?;
+        Ok(&mut claims[index].1)
+    }
+
     /// The context table and entry index of requester `rid`, whose bus
     /// every allowed requester's has.
     fn context(&self, rid: u16) -> (&Table, usize) {

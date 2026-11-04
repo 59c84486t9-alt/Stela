@@ -1594,3 +1594,129 @@ fn dynamic_bus_root_publication_preserves_reserved_halves_and_other_buses() {
 }
 
 mod requester_owner;
+
+#[test]
+fn blocked_initial_cohort_is_exact_and_each_requester_is_claimed_once() {
+    let registers = ModelRegisters::new();
+    let requesters = [0x0008, 0x0208];
+    // SAFETY: this test exclusively owns the stopped model and its register bank.
+    let unit =
+        unsafe { Unit::take_over(registers.clone(), source(), &requesters, 48, &[]) }.unwrap();
+    let before = registers.0.lock().unwrap().writes.len();
+    assert!(matches!(
+        unit.acknowledge_initial_block(&requesters[..1]),
+        Err(DmaError::IommuUnavailable)
+    ));
+    assert_eq!(registers.0.lock().unwrap().writes.len(), before);
+    let cohort = unit.acknowledge_initial_block(&requesters).unwrap();
+    let writes = &registers.0.lock().unwrap().writes[before..].to_vec();
+    assert!(writes.contains(&(CCMD, CONTEXT_INVALIDATE | CONTEXT_GLOBAL)));
+    assert!(writes.contains(&(
+        unit.iotlb,
+        IOTLB_INVALIDATE | IOTLB_GLOBAL | IOTLB_READ_DRAIN | IOTLB_WRITE_DRAIN,
+    )));
+    assert!(matches!(
+        unit.acknowledge_initial_block(&requesters),
+        Err(DmaError::IommuUnavailable)
+    ));
+    let first = cohort.claim(requesters[0]).unwrap();
+    assert!(matches!(
+        cohort.claim(requesters[0]),
+        Err(DmaError::IommuUnavailable)
+    ));
+    first.drain().unwrap();
+
+    // SAFETY: model requester remains stopped with no DMA, IRQ or worker users.
+    let domain = unsafe { unit.attach_requester(stopped_claim(requesters[0])) }.unwrap();
+    assert_eq!(first.drain(), Err(DmaError::IommuUnavailable));
+    // SAFETY: the model has no live users or payload mappings.
+    drop(unsafe { domain.detach() }.unwrap());
+    drop(domain);
+    assert_eq!(first.drain(), Err(DmaError::IommuUnavailable));
+    cohort.claim(requesters[1]).unwrap().drain().unwrap();
+    // SAFETY: every modeled requester and transfer remains stopped.
+    unsafe { unit.shut_down() }.unwrap();
+}
+
+#[test]
+fn blocked_initial_cohort_refuses_missing_read_drain_and_context_drift() {
+    let registers = ModelRegisters::new();
+    *registers.0.lock().unwrap().values.get_mut(&CAP).unwrap() &= !CAP_READ_DRAIN;
+    // SAFETY: this test exclusively owns an idle isolated model unit.
+    let unit = unsafe { Unit::take_over(registers.clone(), source(), &[8], 48, &[]) }.unwrap();
+    let before = registers.0.lock().unwrap().writes.len();
+    assert!(matches!(
+        unit.acknowledge_initial_block(&[8]),
+        Err(DmaError::DrainUnavailable)
+    ));
+    assert_eq!(registers.0.lock().unwrap().writes.len(), before);
+    // SAFETY: the model has no transfer or attached requesters.
+    unsafe { unit.shut_down() }.unwrap();
+
+    let registers = ModelRegisters::new();
+    // SAFETY: this test exclusively owns a second idle isolated model unit.
+    let unit = unsafe { Unit::take_over(registers.clone(), source(), &[8], 48, &[]) }.unwrap();
+    {
+        let mut guard = unit.lock();
+        let (table, index) = guard.state().context(8);
+        table.write(index + 1, 1);
+    }
+    let before = registers.0.lock().unwrap().writes.len();
+    assert!(matches!(
+        unit.acknowledge_initial_block(&[8]),
+        Err(DmaError::IommuUnavailable)
+    ));
+    assert_eq!(registers.0.lock().unwrap().writes.len(), before);
+    {
+        let mut guard = unit.lock();
+        let (table, index) = guard.state().context(8);
+        table.write(index + 1, 0);
+    }
+    registers.0.lock().unwrap().block_iotlb = true;
+    assert!(matches!(
+        unit.acknowledge_initial_block(&[8]),
+        Err(DmaError::InvalidationFailed)
+    ));
+    assert!(unit.lock().state().poisoned);
+    assert!(matches!(
+        unit.acknowledge_initial_block(&[8]),
+        Err(DmaError::IommuUnavailable)
+    ));
+}
+
+#[test]
+fn blocked_initial_acknowledgment_cannot_reclassify_hotplug_or_an_initial_window() {
+    let registers = ModelRegisters::new();
+    // SAFETY: exclusive idle model. The initial window is valid model RAM.
+    let unit = unsafe {
+        Unit::take_over(
+            registers.clone(),
+            source(),
+            &[8],
+            48,
+            core::slice::from_ref(&(0x800000..0x801000)),
+        )
+    }
+    .unwrap();
+    let before = registers.0.lock().unwrap().writes.len();
+    assert!(matches!(
+        unit.acknowledge_initial_block(&[8]),
+        Err(DmaError::IommuUnavailable)
+    ));
+    assert_eq!(registers.0.lock().unwrap().writes.len(), before);
+    // SAFETY: no live model users.
+    unsafe { unit.shut_down() }.unwrap();
+
+    let registers = ModelRegisters::new();
+    // SAFETY: exclusive idle model with no initial window.
+    let unit = unsafe { Unit::take_over(registers.clone(), source(), &[8], 48, &[]) }.unwrap();
+    unit.admit_requester(0x108).unwrap();
+    let before = registers.0.lock().unwrap().writes.len();
+    assert!(matches!(
+        unit.acknowledge_initial_block(&[8, 0x108]),
+        Err(DmaError::IommuUnavailable)
+    ));
+    assert_eq!(registers.0.lock().unwrap().writes.len(), before);
+    // SAFETY: no live model users.
+    unsafe { unit.shut_down() }.unwrap();
+}
