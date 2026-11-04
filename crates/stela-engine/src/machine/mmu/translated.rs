@@ -29,15 +29,18 @@ pub const ENTRIES: usize = 256;
 /// entry's tag distinguishes.
 pub const VIEWS: u8 = 8;
 
+const TAG_SPAN: u64 = PAGE * ENTRIES as u64;
+const READ_ONLY: u64 = 1 << u8::BITS;
+const GENERATION_STEP: u64 = READ_ONLY << 1;
+
 /// One page's translation for one view.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Entry {
-    /// The page's virtual address with the view in its low bits; valid
-    /// while `host` is nonzero.
+    /// The high virtual address bits, then the generation, read-only bit
+    /// and view. The slot already distinguishes the low page-number bits.
     tag: u64,
-    /// The host address of the page.
+    /// The aligned host address.
     host: u64,
-    writable: bool,
 }
 
 /// Where an access runs.
@@ -58,6 +61,7 @@ pub enum Lookup {
 #[derive(Debug, Clone)]
 pub struct Tlb {
     entries: [Entry; ENTRIES],
+    generation: u64,
     devices: DevicePages,
 }
 
@@ -65,6 +69,7 @@ impl Default for Tlb {
     fn default() -> Self {
         Self {
             entries: [Entry::default(); ENTRIES],
+            generation: GENERATION_STEP,
             devices: DevicePages::default(),
         }
     }
@@ -74,8 +79,9 @@ const fn slot(page: u64) -> usize {
     ((page / PAGE) as usize) % ENTRIES
 }
 
-const fn tag(page: u64, view: u8) -> u64 {
-    page | view as u64
+const fn tag(page: u64, view: u8, generation: u64) -> u64 {
+    const { assert!(TAG_SPAN.is_power_of_two() && TAG_SPAN > GENERATION_STEP) };
+    (page & !(TAG_SPAN - 1)) | generation | view as u64
 }
 
 impl Tlb {
@@ -84,8 +90,8 @@ impl Tlb {
     fn page(&self, address: u64, write: bool, view: u8) -> Option<u64> {
         let page = address & !(PAGE - 1);
         let entry = &self.entries[slot(page)];
-        (entry.host != 0 && entry.tag == tag(page, view) && (entry.writable || !write))
-            .then_some(entry.host)
+        let ignored = u64::from(!write) * READ_ONLY;
+        (entry.tag & !ignored == tag(page, view, self.generation)).then_some(entry.host)
     }
 
     /// Where the `bytes`-byte access at `address` runs for `view`.
@@ -111,15 +117,20 @@ impl Tlb {
         debug_assert!(host != 0 && host.is_multiple_of(PAGE) && view < VIEWS);
         let page = address & !(PAGE - 1);
         self.entries[slot(page)] = Entry {
-            tag: tag(page, view),
+            tag: tag(page, view, self.generation) | (u64::from(!writable) * READ_ONLY),
             host,
-            writable,
         };
     }
 
     /// Forget every entry.
     pub fn clear(&mut self) {
-        self.entries = [Entry::default(); ENTRIES];
+        self.generation += GENERATION_STEP;
+        if self.generation == TAG_SPAN {
+            // Scrub before reusing an earlier generation. Zero is reserved
+            // for the empty entries.
+            self.entries.fill(Entry::default());
+            self.generation = GENERATION_STEP;
+        }
         self.clear_devices();
     }
 
@@ -313,6 +324,30 @@ mod tests {
         assert_eq!(
             tlb.lookup(alias, 1, false, 1),
             Lookup::Miss { address: alias }
+        );
+    }
+
+    #[test]
+    fn clearing_through_a_generation_wrap_cannot_restore_old_entries() {
+        let mut tlb = Tlb::default();
+        assert_eq!(tlb.lookup(0, 8, false, 0), Lookup::Miss { address: 0 });
+        tlb.fill(0, HOST, true, 0);
+        tlb.fill(VA, HOST + PAGE, false, 1);
+        assert_eq!(tlb.lookup(0, 8, true, 0), Lookup::Direct(HOST));
+        assert_eq!(tlb.lookup(VA, 8, false, 1), Lookup::Direct(HOST + PAGE));
+        for _ in 0..TAG_SPAN / GENERATION_STEP - 1 {
+            tlb.clear();
+            assert_eq!(tlb.lookup(0, 8, false, 0), Lookup::Miss { address: 0 });
+            assert_eq!(tlb.lookup(VA, 8, false, 1), Lookup::Miss { address: VA });
+        }
+        assert_eq!(tlb.generation, GENERATION_STEP);
+        tlb.fill(VA, HOST, false, 2);
+        assert_eq!(tlb.lookup(VA, 8, false, 2), Lookup::Direct(HOST));
+        assert_eq!(tlb.lookup(VA, 8, true, 2), Lookup::Miss { address: VA });
+        assert_eq!(tlb.lookup(VA, 8, false, 1), Lookup::Miss { address: VA });
+        assert_eq!(
+            tlb.lookup(VA, 8, false, u8::MAX),
+            Lookup::Miss { address: VA }
         );
     }
 
