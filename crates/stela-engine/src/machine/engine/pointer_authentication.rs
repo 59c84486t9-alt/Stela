@@ -10,23 +10,33 @@ use super::*;
 /// four enables instead (`__text+0x20e0`).
 const APCTL_KERNEL_KEYS: u64 = 1 << 4;
 
+pub(super) const fn key_enable_bit(key: PointerAuthenticationKey) -> u64 {
+    1 << match key {
+        PointerAuthenticationKey::Ia => 31,
+        PointerAuthenticationKey::Ib => 30,
+        PointerAuthenticationKey::Da => 27,
+        PointerAuthenticationKey::Db => 13,
+    }
+}
+
 impl<H: Host, D: Devices> Machine<H, D> {
-    /// Whether a PAC key is on at the current EL: the current regime's SCTLR
-    /// enables it (EnIA 31, EnIB 30, EnDA 27, EnDB 13), or above EL0 APCTL
-    /// does.
-    pub(super) fn key_enabled(&self, key: PointerAuthenticationKey) -> bool {
-        let bit = match key {
-            PointerAuthenticationKey::Ia => 31,
-            PointerAuthenticationKey::Ib => 30,
-            PointerAuthenticationKey::Da => 27,
-            PointerAuthenticationKey::Db => 13,
-        };
+    /// SCTLR key enables for the current regime, overridden above EL0 by
+    /// APCTL. A single snapshot can reopen all four address keys.
+    pub(super) fn pointer_key_enables(&self) -> u64 {
         let control = match self.cpu.pstate.el {
             1 => self.cpu.apple.apctl[0],
             2 => self.cpu.apple.apctl[1],
             _ => 0,
         };
-        self.cpu.regime_sctlr() & (1 << bit) != 0 || control & APCTL_KERNEL_KEYS != 0
+        if control & APCTL_KERNEL_KEYS != 0 {
+            u64::MAX
+        } else {
+            self.cpu.regime_sctlr()
+        }
+    }
+
+    pub(super) fn key_enabled(&self, key: PointerAuthenticationKey) -> bool {
+        self.pointer_key_enables() & key_enable_bit(key) != 0
     }
 
     /// The PAC keys as (low, high) words in APIA, APIB, APDA, APDB, APGA order.

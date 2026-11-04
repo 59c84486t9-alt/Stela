@@ -125,6 +125,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         let stripping = self.pointer.revalidate(inputs);
         let trapped = self.pointer_authentication_trapped();
+        let enables = self.pointer_key_enables();
         for (key, block) in [
             (
                 stela_contracts::pauth::Key::Ia,
@@ -143,7 +144,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 PointerAuthenticationKey::Db,
             ),
         ] {
-            let enabled = self.key_enabled(block);
+            let enabled = enables & pointer_authentication::key_enable_bit(block) != 0;
             self.pointer.reopen(key, enabled, trapped);
         }
         self.pointer.reopen_generic(trapped);

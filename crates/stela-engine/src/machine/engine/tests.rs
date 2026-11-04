@@ -4433,6 +4433,47 @@ fn pac_setup(mut machine: Machine<FakeHost, NoDevices>) -> Machine<FakeHost, NoD
 }
 
 #[test]
+fn pac_reopening_uses_destination_enables_and_keeps_the_memo_generation() {
+    use PointerAuthenticationKey::{Da, Db, Ia, Ib};
+    let mut machine = pac_machine();
+    let key_tag = |machine: &Machine<FakeHost, NoDevices>, key| {
+        machine.pointer.tags[usize::from(x86_64_pointer::key_index(key))]
+    };
+    machine.cpu.apple.apctl[0] = 1 << 4;
+    machine
+        .cpu
+        .registers
+        .set(SystemRegister::SCTLR_EL1, 0, 1 << 31);
+    machine.revalidate_pointers();
+    let generation = machine.pointer.generation;
+    let ia = key_tag(&machine, Ia);
+    for key in [Ia, Ib, Da, Db] {
+        assert_ne!(key_tag(&machine, key), 0);
+        assert_ne!(key_tag(&machine, key), x86_64_pointer::DISABLED);
+    }
+    machine.pointer.reopen_stripping(true);
+
+    machine.cpu.pstate = Pstate::reset(0);
+    machine.transitioned();
+    assert_eq!(machine.pointer.generation, generation);
+    assert_eq!(key_tag(&machine, Ia), ia);
+    assert_eq!(machine.pointer.strips[1].enabled, 1);
+    for key in [Ib, Da, Db] {
+        assert_eq!(key_tag(&machine, key), x86_64_pointer::DISABLED);
+    }
+
+    machine.cpu.registers.set(SystemRegister::HCR_EL2, 0, 0);
+    machine.transitioned();
+    assert_eq!(machine.pointer.generation, generation);
+    assert_eq!(key_tag(&machine, Ia), 0);
+    assert_eq!(key_tag(&machine, Ib), x86_64_pointer::DISABLED);
+    assert_eq!(
+        machine.pointer.tags[usize::from(x86_64_pointer::GENERIC_KEY)],
+        0
+    );
+}
+
+#[test]
 fn apple_el2_keys_feed_pac_without_aliasing_lower_keys_or_inventing_unknown_pairs() {
     use crate::machine::system::key;
     use stela_compiler::aarch64::system::registers::Encoding;

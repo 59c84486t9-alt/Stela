@@ -130,8 +130,14 @@ impl PointerService {
     /// Forget the context and close every key, as derived state changed.
     pub(super) fn close(&mut self) {
         self.context = None;
+        self.close_native();
+    }
+
+    fn close_native(&mut self) -> [bool; 2] {
         self.tags = [0; pointer::TAG_WORDS];
-        self.strips.iter_mut().for_each(|cell| cell.enabled = 0);
+        self.strips
+            .each_mut()
+            .map(|cell| core::mem::take(&mut cell.enabled) != 0)
     }
 
     /// Derived state changed, now with `inputs`: every tag word and
@@ -140,12 +146,9 @@ impl PointerService {
     /// Returns which stripping cells were open, for the engine to reopen
     /// with [`Self::reopen`].
     pub(super) fn revalidate(&mut self, inputs: PointerInputs) -> [bool; 2] {
-        let stripping = self.strips.map(|cell| cell.enabled != 0);
-        let kept = self.context.take().filter(|_| self.inputs == Some(inputs));
-        self.close();
-        match kept {
-            Some(context) => self.context = Some(context),
-            None => self.open(inputs),
+        let stripping = self.close_native();
+        if self.context.is_none() || self.inputs != Some(inputs) {
+            self.open(inputs);
         }
         stripping
     }
