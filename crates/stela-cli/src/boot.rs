@@ -9,7 +9,8 @@ use std::{fs::OpenOptions, io::Write, path::PathBuf};
 use stela_formats::payload::Purpose;
 use stela_loader::aux_kc::{Linked, TRUSTED_CODE_FILE};
 use stela_loader::boot_bundle::{
-    self, Input, Inputs, Options, OverlayProperty, RootHash, Source, Target,
+    self, Input, Inputs, Options, OverlayProperty, OwnedRamdisk, RAMDISK_FILE, RootHash, Source,
+    Target,
 };
 use stela_loader::boot_policy::{
     KextGrant, OsEnvironment, SealedVolume, SecurityMode, SecurityPolicy,
@@ -982,10 +983,7 @@ impl Prepare {
         let extensions = kexts(&bundles);
         let (auxiliary, kexts) = Self::auxiliary_collection(&kernel.bytes, &extensions)?.unzip();
         let kext_code = Self::kext_code(&extensions)?;
-        // Set below when the images come from the restore ramdisk.
-        let sourced: Vec<(String, Decoded)>;
-        let ramdisk_component: Decoded;
-        let mut inputs = Inputs {
+        let inputs = Inputs {
             target: Target {
                 product_type: model.clone(),
                 device_class: identity.device_class.clone(),
@@ -1009,7 +1007,7 @@ impl Prepare {
                 .chain(&kext_code)
                 .map(input)
                 .collect(),
-            ramdisk: ramdisk.as_ref().map(input),
+            ramdisk: None,
             root_hash: root_hash.as_ref().map(|(volume, decoded)| RootHash {
                 volume: *volume,
                 im4p: decoded.as_ref().map(input),
@@ -1024,7 +1022,13 @@ impl Prepare {
         };
         let mut options = self.options(inputs.dram_base()?)?;
         options.security.kexts = kexts;
-        let mut bundle = boot_bundle::prepare(&inputs, &options)?;
+        let ramdisk_source = ramdisk.as_ref().map(|ramdisk| ramdisk.source.clone());
+        let mut bundle = match ramdisk {
+            Some(Decoded { bytes, source, .. }) => {
+                boot_bundle::prepare_owned(&inputs, OwnedRamdisk { bytes, source }, &options)?
+            }
+            None => boot_bundle::prepare(&inputs, &options)?,
+        };
         let mut unresolved = vec![];
         // The board the bundle's DeviceTree describes names its images, each
         // die the one its own node or its flash's names; the same IPSW's
@@ -1036,29 +1040,34 @@ impl Prepare {
                     .filter(|name| !board_firmware.iter().any(|(given, _)| given == name))
                     .collect();
                 if !names.is_empty() {
-                    let ramdisk = match &ramdisk {
-                        Some(ramdisk)
-                            if ramdisk.source.component == components::RESTORE_RAMDISK =>
-                        {
-                            ramdisk
+                    let separate_ramdisk;
+                    let (bytes, source) = match &ramdisk_source {
+                        Some(source) if source.component == components::RESTORE_RAMDISK => {
+                            let (_, bytes) = bundle
+                                .files
+                                .iter()
+                                .find(|(name, _)| name == RAMDISK_FILE)
+                                .context("the bundle has no restore ramdisk")?;
+                            (bytes.as_slice(), source)
                         }
                         _ => {
-                            ramdisk_component = component(
+                            separate_ramdisk = component(
                                 components::RESTORE_RAMDISK,
                                 Some("rdsk"),
                                 RAMDISK_LIMIT,
                             )?;
-                            &ramdisk_component
+                            (separate_ramdisk.bytes.as_slice(), &separate_ramdisk.source)
                         }
                     };
-                    sourced =
-                        board_firmware::from_ramdisk(ramdisk, board_firmware::DIRECTORY, &names)?;
-                    inputs.board_firmware.extend(
-                        sourced
-                            .iter()
-                            .map(|(name, decoded)| (name.clone(), input(decoded))),
-                    );
-                    bundle = boot_bundle::prepare(&inputs, &options)?;
+                    let sourced = board_firmware::from_ramdisk(
+                        bytes,
+                        source,
+                        board_firmware::DIRECTORY,
+                        &names,
+                    )?;
+                    for (name, Decoded { bytes, source, .. }) in sourced {
+                        bundle.append_board_firmware(name, bytes, source)?;
+                    }
                 }
             }
             Err(error) if board_firmware.is_empty() => unresolved.push(format!(

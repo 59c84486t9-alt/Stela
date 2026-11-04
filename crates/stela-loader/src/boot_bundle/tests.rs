@@ -866,6 +866,20 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     let firmware = bundle.files.iter().find(|(n, _)| n == "USB-C_HPM,47.bin");
     assert_eq!(firmware.map(|(_, b)| b.as_slice()), Some(&[1u8, 2, 3][..]));
     let supplied = core::mem::take(&mut inputs.board_firmware);
+    let mut appended = prepare(&inputs, &options)?;
+    for (name, image) in &supplied {
+        appended.append_board_firmware(name.clone(), image.bytes.to_vec(), image.source.clone())?;
+    }
+    assert_eq!(appended.files, bundle.files);
+    assert_eq!(
+        serde_json::to_string(&appended.manifest)?,
+        serde_json::to_string(&bundle.manifest)?
+    );
+    assert!(
+        appended
+            .append_board_firmware(KERNEL_FILE.into(), vec![1], source("BoardFirmware"))
+            .is_err()
+    );
     inputs.board_firmware = vec![(KERNEL_FILE.into(), input(leak(vec![1]), "BoardFirmware"))];
     assert!(prepare(&inputs, &options).is_err());
     inputs.board_firmware = supplied;

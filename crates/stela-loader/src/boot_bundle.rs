@@ -180,6 +180,31 @@ pub struct Bundle {
     pub manifest: Manifest,
 }
 
+impl Bundle {
+    /// Append firmware named by the prepared board's DeviceTree. These
+    /// files have source receipts but are not guest memory regions.
+    pub fn append_board_firmware(
+        &mut self,
+        name: String,
+        bytes: Vec<u8>,
+        source: Source,
+    ) -> Result<()> {
+        require!(
+            name.len() <= MAX_FILE_NAME && !self.files.iter().any(|(file, _)| file == &name),
+            "board firmware name {name} is too long or already a bundle file",
+            ?name
+        );
+        self.manifest.files.push(File {
+            name: name.clone(),
+            bytes: bytes.len() as u64,
+            sha256: sha256(&bytes),
+        });
+        self.manifest.sources.push(source);
+        self.files.push((name, bytes));
+        Ok(())
+    }
+}
+
 /// Where a split region begins or ends within an image.
 #[derive(Clone, Copy)]
 enum Mark {
@@ -421,7 +446,7 @@ const BOOT_MANIFEST_FILE: &str = "boot-manifest.im4m";
 /// carveout rather than the memory map (`layout::boot_manifest_region`).
 const BOOT_MANIFEST_REGION: &str = "BootManifest";
 const SEP_FILE: &str = "sepfw.im4p";
-const RAMDISK_FILE: &str = "ramdisk.img";
+pub const RAMDISK_FILE: &str = "ramdisk.img";
 /// The engine handoff's file-name capacity (`stela-boot` `handoff::MAX_NAME`).
 const MAX_FILE_NAME: usize = 48;
 const BOOT_ARGS_FILE: &str = "bootargs.bin";
@@ -844,7 +869,7 @@ fn assemble(
         boot_args_bytes,
         core_locks_handed_off,
         owned,
-    )?;
+    );
     hash_regions(&mut regions, &files)?;
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,
@@ -886,7 +911,11 @@ fn assemble(
         security: shaped.security,
         unresolved: shaped.unresolved,
     };
-    Ok(Bundle { files, manifest })
+    let mut bundle = Bundle { files, manifest };
+    for (name, image) in &inputs.board_firmware {
+        bundle.append_board_firmware(name.clone(), image.bytes.to_vec(), source_of(image))?;
+    }
+    Ok(bundle)
 }
 
 /// A global manifest must name the selected board.

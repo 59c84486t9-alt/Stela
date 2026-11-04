@@ -687,7 +687,7 @@ pub(super) fn files(
     boot_args_bytes: Vec<u8>,
     core_locks_handed_off: bool,
     owned: Option<OwnedRamdisk>,
-) -> Result<(Files, Option<Source>)> {
+) -> (Files, Option<Source>) {
     let mut files = vec![
         (KERNEL_FILE.to_owned(), images.kernel.memory),
         (SPTM_FILE.to_owned(), images.sptm.memory),
@@ -722,17 +722,7 @@ pub(super) fn files(
             source_of(ramdisk)
         }),
     };
-    for (name, image) in &inputs.board_firmware {
-        // The manifest admits only simple names; these checks keep the name
-        // within the engine handoff and distinct from the bundle's own files.
-        require!(
-            name.len() <= MAX_FILE_NAME && !files.iter().any(|(file, _)| file == name),
-            "board firmware name {name} is too long or already a bundle file",
-            ?name
-        );
-        files.push((name.clone(), image.bytes.to_vec()));
-    }
-    Ok((files, ramdisk_source))
+    (files, ramdisk_source)
 }
 
 /// Each region's hash, over the bytes its file supplies.
@@ -780,7 +770,6 @@ pub(super) fn sources(inputs: &Inputs, ramdisk_source: Option<Source>) -> Vec<So
             .iter()
             .filter_map(|r| r.im4p.as_ref())
             .chain(&inputs.pivot_root_hash)
-            .chain(inputs.board_firmware.iter().map(|(_, image)| image))
             .map(source_of),
     );
     sources
