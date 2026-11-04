@@ -618,6 +618,37 @@ impl Source {
 }
 
 impl Source {
+    /// Revalidate the original framebuffer function in a scoped read-only map.
+    ///
+    /// # Safety
+    /// The boot CPU owns the function and excludes other configuration writers.
+    pub(crate) unsafe fn check_framebuffer(
+        &self,
+        source: crate::pci_io::FramebufferSource,
+    ) -> Result<(), Error> {
+        let address = source.address;
+        // SAFETY: caller retains the original ECAM bus and excludes writers.
+        let (_, resource) = unsafe { self.claim_bus(address.segment, address.bus) }?;
+        let offset = usize::from(address.device) << 15 | usize::from(address.function) << 12;
+        let mut mapping = self.authority.map(
+            resource,
+            offset,
+            PAGE as usize,
+            CacheAttribute::Uncached,
+            Protection::ReadOnly,
+        )?;
+        let observation = source.bar.words().try_for_each(|(offset, expected)| {
+            if mapping.read32(usize::from(offset))? == expected {
+                Ok(())
+            } else {
+                Err(Error::InvalidPlatformReply)
+            }
+        });
+        // SAFETY: the synchronous read was the mapping's only use.
+        unsafe { mapping.retire() }?;
+        observation
+    }
+
     /// Map and read the diagnostic's configuration page on the BSP. The
     /// returned mapping owns the only lease and may be retired on an AP.
     ///

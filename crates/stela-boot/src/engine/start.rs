@@ -1953,6 +1953,25 @@ fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -
         Err(error) => output::arguments(format_args!("NATIVE IRQ unavailable: {error:?}\n")),
     }
     // The remapping units, taken before any host driver starts DMA.
+    if let Some(screen) = handoff.screen {
+        match (&native_mmio, screen.pci_source) {
+            (Some(mmio), Some(source)) => {
+                // SAFETY: firmware stopped and no native device writer has started.
+                match unsafe { mmio.check_framebuffer(source) } {
+                    Ok(()) => output::arguments(format_args!(
+                        "HOST GOP PCI source {} BAR{} observed before and after firmware exit\n",
+                        source.address,
+                        source.bar.index()
+                    )),
+                    Err(error) => output::arguments(format_args!(
+                        "HOST GOP PCI source {} changed or unavailable: {error:?}\n",
+                        source.address
+                    )),
+                }
+            }
+            _ => output::arguments(format_args!("HOST GOP PCI source unavailable\n")),
+        }
+    }
     let remappers = match (&native_mmio, handoff.storage.handoff()) {
         // SAFETY: no host driver has started; the loader root maps the ACPI
         // tables and configuration space, and the firmware's translation

@@ -30,6 +30,93 @@ pub struct BarRegion {
     pub translation: u64,
     pub pci: Range<u64>,
 }
+
+/// The firmware framebuffer's observed Type 0 PCI BAR. The copied words
+/// allow a later native observer to refuse a changed function or BAR.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FramebufferBar {
+    index: u8,
+    identity: u32,
+    class_revision: u32,
+    layout: u32,
+    low: u32,
+    high: Option<u32>,
+}
+
+impl FramebufferBar {
+    pub fn observe<'a>(
+        header: &[u8; 64],
+        regions: impl IntoIterator<Item = (u8, &'a BarRegion)>,
+        screen: Range<u64>,
+    ) -> Option<Self> {
+        let word = |offset| u32::from_le_bytes(header[offset..offset + 4].try_into().unwrap());
+        let identity = word(0);
+        if matches!(identity as u16, 0 | 1 | u16::MAX)
+            || header[0x0e] & 0x7f != 0
+            || header[0x0b] != 3
+            || screen.start >= screen.end
+        {
+            return None;
+        }
+        let mut lows = [None; 6];
+        let mut index = 0;
+        while index < lows.len() {
+            let low = word(0x10 + index * 4);
+            let width = low & 7;
+            let high = (width == 4 && index + 1 < lows.len()).then(|| word(0x14 + index * 4));
+            if width == 0 || high.is_some() {
+                lows[index] = Some((low, high));
+            }
+            index += if high.is_some() { 2 } else { 1 };
+        }
+        let mut found = None;
+        for (index, region) in regions {
+            let Some((low, high)) = lows.get(usize::from(index)).copied().flatten() else {
+                continue;
+            };
+            let base = u64::from(low & !15) | u64::from(high.unwrap_or_default()) << 32;
+            if region.resource_type == 0
+                && region.host == region.pci
+                && region.granularity == if high.is_some() { 64 } else { 32 }
+                && region.host.start == base
+                && base != 0
+                && base <= screen.start
+                && screen.end <= region.host.end
+            {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(Self {
+                    index,
+                    identity,
+                    class_revision: word(8),
+                    layout: word(0x0c),
+                    low,
+                    high,
+                });
+            }
+        }
+        found
+    }
+
+    pub fn index(self) -> u8 {
+        self.index
+    }
+
+    /// The original identity, class/revision, and BAR words to compare.
+    pub fn words(self) -> impl Iterator<Item = (u16, u32)> {
+        let offset = 0x10 + u16::from(self.index) * 4;
+        [
+            (0, self.identity),
+            (8, self.class_revision),
+            (0x0c, self.layout),
+            (offset, self.low),
+        ]
+        .into_iter()
+        .chain(self.high.map(|word| (offset + 4, word)))
+    }
+}
+
 fn qword(bytes: &[u8; QWORD_BYTES], offset: usize) -> u64 {
     let mut value = [0; 8];
     value.copy_from_slice(&bytes[offset..offset + 8]);
@@ -92,6 +179,40 @@ mod tests {
         value[30..38].copy_from_slice(&translation.to_le_bytes());
         value[38..46].copy_from_slice(&length.to_le_bytes());
         value
+    }
+
+    #[test]
+    fn framebuffer_requires_one_matching_identity_mapped_display_bar() {
+        let base = 0x1_8000_0000;
+        let mut header = [0u8; 64];
+        header[..4].copy_from_slice(&0x1111_1234u32.to_le_bytes());
+        header[0x0b] = 3;
+        header[0x18..0x1c].copy_from_slice(&0x8000_0004u32.to_le_bytes());
+        header[0x1c..0x20].copy_from_slice(&1u32.to_le_bytes());
+        let region = decode_qword(&descriptor(base, 0x2000, 0)).unwrap();
+        let screen = base + 0x100..base + 0x1100;
+        let bar = FramebufferBar::observe(&header, [(2, &region)], screen.clone()).unwrap();
+        assert_eq!(bar.index(), 2);
+        assert_eq!(
+            bar.words().collect::<alloc::vec::Vec<_>>(),
+            [
+                (0, 0x1111_1234),
+                (8, 0x0300_0000),
+                (0x0c, 0),
+                (0x18, 0x8000_0004),
+                (0x1c, 1)
+            ]
+        );
+        assert!(FramebufferBar::observe(&header, [(3, &region)], screen.clone()).is_none());
+        assert!(
+            FramebufferBar::observe(&header, [(2, &region), (2, &region)], screen.clone())
+                .is_none()
+        );
+        let translated = decode_qword(&descriptor(base, 0x2000, 0x1000)).unwrap();
+        assert!(FramebufferBar::observe(&header, [(2, &translated)], screen.clone()).is_none());
+        assert!(FramebufferBar::observe(&header, [(2, &region)], base..base + 0x2001).is_none());
+        header[0x0e] = 1;
+        assert!(FramebufferBar::observe(&header, [(2, &region)], screen).is_none());
     }
     #[test]
     fn host_to_pci_translation_and_full_width_are_preserved() {

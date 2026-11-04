@@ -54,7 +54,7 @@ pub(super) fn prepare_image(snapshot: &Snapshot) -> Result<EngineImage> {
         );
     }
     let ram = firmware::ram()?;
-    let screen = Framebuffer::from_firmware();
+    let screen = Framebuffer::for_engine()?;
     let apic_base = crate::apic::base_msr();
     // The physmap reaches RAM, the framebuffer and the local APIC.
     let apic = apic_base & crate::apic::BASE_ADDRESS;

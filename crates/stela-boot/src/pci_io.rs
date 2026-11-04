@@ -10,7 +10,15 @@ use core::{
     mem::{offset_of, size_of},
     ptr::{self, NonNull},
 };
-use uefi::{Status, proto::unsafe_protocol};
+use uefi::{
+    Handle, Status,
+    boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol},
+    proto::{
+        ProtocolPointer,
+        device_path::{DevicePath, DeviceSubType, DeviceType},
+        unsafe_protocol,
+    },
+};
 
 // Unused slots are opaque pointer-sized fields, never invoked. They preserve
 // the protocol's exact EFI_PCI_IO_PROTOCOL_ACCESS pairs and vtable ordering.
@@ -74,7 +82,88 @@ impl core::fmt::Display for Error {
     }
 }
 pub use stela_boot_core::firmware_pci::BarRegion;
-use stela_boot_core::firmware_pci::{DescriptorError, decode_qword};
+use stela_boot_core::firmware_pci::{DescriptorError, FramebufferBar, decode_qword};
+
+/// Original GOP association copied while both firmware protocols are live.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FramebufferSource {
+    pub address: Address,
+    pub bar: FramebufferBar,
+}
+
+fn get_protocol<P: ProtocolPointer + ?Sized>(handle: Handle) -> uefi::Result<ScopedProtocol<P>> {
+    // SAFETY: a scoped read-only protocol observation during boot services.
+    unsafe {
+        boot::open_protocol::<P>(
+            OpenProtocolParams {
+                handle,
+                agent: boot::image_handle(),
+                controller: None,
+            },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }
+}
+
+fn gop_pci(handle: Handle) -> Option<ScopedProtocol<PciIo>> {
+    if let Ok(pci) = get_protocol(handle) {
+        return Some(pci);
+    }
+    let path = get_protocol::<DevicePath>(handle).ok()?;
+    if path.instance_iter().count() != 1 {
+        return None;
+    }
+    let mut remaining = &*path;
+    let controller = boot::locate_device_path::<PciIo>(&mut remaining).ok()?;
+    // GOP may be on a child framebuffer/output path of the PCI controller.
+    // An unconsumed PCI node means the returned handle is only an ancestor.
+    if !remaining
+        .node_iter()
+        .all(|node| match (node.device_type(), node.sub_type()) {
+            (DeviceType::ACPI, DeviceSubType::ACPI_ADR) => {
+                node.length() >= 8 && node.length().is_multiple_of(4)
+            }
+            (DeviceType::HARDWARE, DeviceSubType::HARDWARE_CONTROLLER) => node.length() == 8,
+            _ => false,
+        })
+    {
+        return None;
+    }
+    get_protocol(controller).ok()
+}
+
+pub(crate) fn framebuffer_source(
+    handle: Handle,
+    base: u64,
+    bytes: u64,
+) -> Result<Option<FramebufferSource>, Error> {
+    let Some(mut pci) = gop_pci(handle) else {
+        return Ok(None);
+    };
+    let address = pci.address()?;
+    let header = pci.read_header()?;
+    let end = base.checked_add(bytes).ok_or(Error::DescriptorRange)?;
+    let mut bars = Vec::new();
+    bars.try_reserve_exact(6).map_err(|_| Error::Allocation)?;
+    for index in 0..6 {
+        match pci.bar_regions(index) {
+            Ok(regions) => bars.push((index, regions)),
+            Err(Error::Firmware(Status::UNSUPPORTED)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(FramebufferBar::observe(
+        &header,
+        bars.iter().filter_map(|(index, regions)| {
+            let [region] = regions.as_slice() else {
+                return None;
+            };
+            Some((*index, region))
+        }),
+        base..end,
+    )
+    .map(|bar| FramebufferSource { address, bar }))
+}
 fn status(value: Status) -> Result<(), Error> {
     if value.is_success() {
         Ok(())
