@@ -156,6 +156,28 @@ impl Window {
         true
     }
 
+    /// Install a data leaf at an address reserved by the Linux client. A repeat
+    /// fault on the same page needs no write. Replacement requires retirement.
+    pub(crate) fn install_client(&self, address: u64, entry: u64) -> bool {
+        if !self.contains(address) || !address.is_multiple_of(PAGE) {
+            return false;
+        }
+        let mut guard = self.lock();
+        let Some(leaf) = self.leaf(guard.state(), address) else {
+            return false;
+        };
+        // SAFETY: the window lock protects software access to this owned leaf.
+        // Client entries publish the accessed and dirty bits already set.
+        unsafe {
+            let current = leaf.read_volatile();
+            if current == 0 {
+                leaf.write_volatile(entry);
+                return true;
+            }
+            current == entry
+        }
+    }
+
     /// Map `physical` at the reserved, empty `address`, to run from.
     pub(crate) fn install_code(&self, address: u64, physical: u64) -> bool {
         let mut guard = self.lock();
