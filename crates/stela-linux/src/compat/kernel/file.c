@@ -160,6 +160,12 @@ void fput_close(struct file *file)
 		release_last_reference(file);
 }
 
+void fput_close_sync(struct file *file)
+{
+	if (file_ref_put_close(&file->f_ref))
+		release(file);
+}
+
 struct file *anon_inode_getfile(const char *name, const struct file_operations *fops, void *priv,
 				int flags)
 {
@@ -484,7 +490,11 @@ int main(void)
 	assert(!file_ref_get(&first->f_ref));
 	struct file *reused = anon_inode_getfile("reused", NULL, NULL, O_RDONLY);
 	assert(reused == first && !reused->f_pos && !reused->private_data);
-	fput(reused);
+	get_file(reused);
+	fput_close_sync(reused);
+	assert(file_count(reused) == 1);
+	fput_close_sync(reused);
+	assert(!file_ref_get(&reused->f_ref));
 
 	struct file *file;
 
