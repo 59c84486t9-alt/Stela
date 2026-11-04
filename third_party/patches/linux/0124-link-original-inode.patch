@@ -1,0 +1,667 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 23:14:59 -0500
+Subject: [PATCH] refactor(vfs): link original inode eviction and final put
+
+---
+ fs/inode.c       | 283 +--------------------------------------------
+ fs/inode_evict.c | 292 +++++++++++++++++++++++++++++++++++++++++++++++
+ fs/inode_lru.h   |   1 +
+ 3 files changed, 295 insertions(+), 281 deletions(-)
+
+diff --git a/fs/inode.c b/fs/inode.c
+index 7cdcdc1383927bbf3acaf2220f9d0c680705efdf..01cdf3a25b5397c045ae8b9ed6ae208d26f98c03 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -72,32 +72,6 @@ static void inode_unpin_lru_isolating(struct inode *inode)
+ 	spin_unlock(&inode->i_lock);
+ }
+ 
+-static void inode_wait_for_lru_isolating(struct inode *inode)
+-{
+-	struct wait_bit_queue_entry wqe;
+-	struct wait_queue_head *wq_head;
+-
+-	lockdep_assert_held(&inode->i_lock);
+-	if (!(inode_state_read(inode) & I_LRU_ISOLATING))
+-		return;
+-
+-	wq_head = inode_bit_waitqueue(&wqe, inode, __I_LRU_ISOLATING);
+-	for (;;) {
+-		prepare_to_wait_event(wq_head, &wqe.wq_entry, TASK_UNINTERRUPTIBLE);
+-		/*
+-		 * Checking I_LRU_ISOLATING with inode->i_lock guarantees
+-		 * memory ordering.
+-		 */
+-		if (!(inode_state_read(inode) & I_LRU_ISOLATING))
+-			break;
+-		spin_unlock(&inode->i_lock);
+-		schedule();
+-		spin_lock(&inode->i_lock);
+-	}
+-	finish_wait(wq_head, &wqe.wq_entry);
+-	WARN_ON(inode_state_read(inode) & I_LRU_ISOLATING);
+-}
+-
+ static unsigned long hash(struct super_block *sb, u64 hashval)
+ {
+ 	unsigned long tmp;
+@@ -182,141 +156,6 @@ void dump_mapping(const struct address_space *mapping)
+ 		a_ops, ino, fname);
+ }
+ 
+-/*
+- * Free the inode passed in, removing it from the lists it is still connected
+- * to. We remove any pages still attached to the inode and wait for any IO that
+- * is still in progress before finally destroying the inode.
+- *
+- * An inode must already be marked I_FREEING so that we avoid the inode being
+- * moved back onto lists if we race with other code that manipulates the lists
+- * (e.g. writeback_single_inode). The caller is responsible for setting this.
+- *
+- * An inode must already be removed from the LRU list before being evicted from
+- * the cache. This should occur atomically with setting the I_FREEING state
+- * flag, so no inodes here should ever be on the LRU when being evicted.
+- */
+-static void evict(struct inode *inode)
+-{
+-	const struct super_operations *op = inode->i_sb->s_op;
+-
+-	BUG_ON(!(inode_state_read_once(inode) & I_FREEING));
+-	BUG_ON(!list_empty(&inode->i_lru));
+-
+-	inode_io_list_del(inode);
+-	inode_sb_list_del(inode);
+-
+-	spin_lock(&inode->i_lock);
+-	inode_wait_for_lru_isolating(inode);
+-
+-	/*
+-	 * Wait for flusher thread to be done with the inode so that filesystem
+-	 * does not start destroying it while writeback is still running. Since
+-	 * the inode has I_FREEING set, flusher thread won't start new work on
+-	 * the inode.  We just have to wait for running writeback to finish.
+-	 */
+-	inode_wait_for_writeback(inode);
+-	spin_unlock(&inode->i_lock);
+-
+-	if (op->evict_inode) {
+-		op->evict_inode(inode);
+-	} else {
+-		truncate_inode_pages_final(&inode->i_data);
+-		clear_inode(inode);
+-	}
+-	if (S_ISCHR(inode->i_mode) && inode->i_cdev)
+-		cd_forget(inode);
+-
+-	remove_inode_hash(inode);
+-
+-	/*
+-	 * Wake up waiters in __wait_on_freeing_inode().
+-	 *
+-	 * It is an invariant that any thread we need to wake up is already
+-	 * accounted for before remove_inode_hash() acquires ->i_lock -- both
+-	 * sides take the lock and sleep is aborted if the inode is found
+-	 * unhashed. Thus either the sleeper wins and goes off CPU, or removal
+-	 * wins and the sleeper aborts after testing with the lock.
+-	 *
+-	 * This also means we don't need any fences for the call below.
+-	 */
+-	inode_wake_up_bit(inode, __I_NEW);
+-	BUG_ON(inode_state_read_once(inode) != (I_FREEING | I_CLEAR));
+-
+-	inode_destroy(inode);
+-}
+-
+-/*
+- * dispose_list - dispose of the contents of a local list
+- * @head: the head of the list to free
+- *
+- * Dispose-list gets a local list with local inodes in it, so it doesn't
+- * need to worry about list corruption and SMP locks.
+- */
+-static void dispose_list(struct list_head *head)
+-{
+-	while (!list_empty(head)) {
+-		struct inode *inode;
+-
+-		inode = list_first_entry(head, struct inode, i_lru);
+-		list_del_init(&inode->i_lru);
+-
+-		evict(inode);
+-		cond_resched();
+-	}
+-}
+-
+-/**
+- * evict_inodes	- evict all evictable inodes for a superblock
+- * @sb:		superblock to operate on
+- *
+- * Make sure that no inodes with zero refcount are retained.  This is
+- * called by superblock shutdown after having SB_ACTIVE flag removed,
+- * so any inode reaching zero refcount during or after that call will
+- * be immediately evicted.
+- */
+-void evict_inodes(struct super_block *sb)
+-{
+-	struct inode *inode;
+-	LIST_HEAD(dispose);
+-
+-	spin_lock(&sb->s_inode_list_lock);
+-	list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
+-		if (icount_read_once(inode))
+-			continue;
+-
+-		spin_lock(&inode->i_lock);
+-		if (icount_read(inode)) {
+-			spin_unlock(&inode->i_lock);
+-			continue;
+-		}
+-		if (inode_state_read(inode) & (I_NEW | I_FREEING | I_WILL_FREE)) {
+-			spin_unlock(&inode->i_lock);
+-			continue;
+-		}
+-
+-		inode_state_set(inode, I_FREEING);
+-		inode_lru_list_del(inode);
+-		spin_unlock(&inode->i_lock);
+-
+-		/*
+-		 * Keep this inode out of dispose so it stays on s_inodes while
+-		 * the list lock is dropped. I_FREEING prevents new references
+-		 * and leaves eviction to us, so we can resume the walk from it.
+-		 */
+-		if (need_resched()) {
+-			spin_unlock(&sb->s_inode_list_lock);
+-			cond_resched();
+-			dispose_list(&dispose);
+-			spin_lock(&sb->s_inode_list_lock);
+-		}
+-		list_add(&inode->i_lru, &dispose);
+-	}
+-	spin_unlock(&sb->s_inode_list_lock);
+-
+-	dispose_list(&dispose);
+-}
+-EXPORT_SYMBOL_GPL(evict_inodes);
+-
+ /*
+  * Isolate the inode from the LRU in preparation for freeing it.
+  *
+@@ -397,7 +236,7 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
+  * Walk the superblock inode LRU for freeable inodes and attempt to free them.
+  * This is called from the superblock shrinker function with a number of inodes
+  * to trim from the LRU. Inodes to be freed are moved to a temporary list and
+- * then are freed outside inode_lock by dispose_list().
++ * then are freed outside inode_lock by inode_dispose_list().
+  */
+ long prune_icache_sb(struct super_block *sb, struct shrink_control *sc)
+ {
+@@ -406,7 +245,7 @@ long prune_icache_sb(struct super_block *sb, struct shrink_control *sc)
+ 
+ 	freed = list_lru_shrink_walk(&sb->s_inode_lru, sc,
+ 				     inode_lru_isolate, &freeable);
+-	dispose_list(&freeable);
++	inode_dispose_list(&freeable);
+ 	return freed;
+ }
+ 
+@@ -863,17 +702,6 @@ ino_t iunique(struct super_block *sb, ino_t max_reserved)
+ }
+ EXPORT_SYMBOL(iunique);
+ 
+-/**
+- * ihold - get a reference on the inode, provided you already have one
+- * @inode:	inode to operate on
+- */
+-void ihold(struct inode *inode)
+-{
+-	VFS_BUG_ON_INODE(icount_read_once(inode) < 1, inode);
+-	WARN_ON(atomic_inc_return(&inode->i_count) < 2);
+-}
+-EXPORT_SYMBOL(ihold);
+-
+ struct inode *igrab(struct inode *inode)
+ {
+ 	/*
+@@ -1243,113 +1071,6 @@ int insert_inode_locked4(struct inode *inode, u64 hashval,
+ }
+ EXPORT_SYMBOL(insert_inode_locked4);
+ 
+-/*
+- * Called when we're dropping the last reference
+- * to an inode.
+- *
+- * Call the FS "drop_inode()" function, defaulting to
+- * the legacy UNIX filesystem behaviour.  If it tells
+- * us to evict inode, do so.  Otherwise, retain inode
+- * in cache if fs is alive, sync and evict if fs is
+- * shutting down.
+- */
+-static void iput_final(struct inode *inode)
+-{
+-	struct super_block *sb = inode->i_sb;
+-	const struct super_operations *op = inode->i_sb->s_op;
+-	int drop;
+-
+-	WARN_ON(inode_state_read(inode) & I_NEW);
+-	VFS_BUG_ON_INODE(icount_read(inode) != 0, inode);
+-
+-	if (op->drop_inode)
+-		drop = op->drop_inode(inode);
+-	else
+-		drop = inode_generic_drop(inode);
+-
+-	if (!drop &&
+-	    !(inode_state_read(inode) & I_DONTCACHE) &&
+-	    (sb->s_flags & SB_ACTIVE)) {
+-		__inode_lru_list_add(inode, true);
+-		spin_unlock(&inode->i_lock);
+-		return;
+-	}
+-
+-	/*
+-	 * Re-check ->i_count in case the ->drop_inode() hooks played games.
+-	 * Note we only execute this if the verdict was to drop the inode.
+-	 */
+-	VFS_BUG_ON_INODE(icount_read(inode) != 0, inode);
+-
+-	if (drop) {
+-		inode_state_set(inode, I_FREEING);
+-	} else {
+-		inode_state_set(inode, I_WILL_FREE);
+-		spin_unlock(&inode->i_lock);
+-
+-		write_inode_now(inode, 1);
+-
+-		spin_lock(&inode->i_lock);
+-		WARN_ON(inode_state_read(inode) & I_NEW);
+-		inode_state_replace(inode, I_WILL_FREE, I_FREEING);
+-	}
+-
+-	inode_lru_list_del(inode);
+-	spin_unlock(&inode->i_lock);
+-
+-	evict(inode);
+-}
+-
+-/**
+- *	iput	- put an inode
+- *	@inode: inode to put
+- *
+- *	Puts an inode, dropping its usage count. If the inode use count hits
+- *	zero, the inode is then freed and may also be destroyed.
+- *
+- *	Consequently, iput() can sleep.
+- */
+-void iput(struct inode *inode)
+-{
+-	might_sleep();
+-	if (unlikely(!inode))
+-		return;
+-
+-retry:
+-	lockdep_assert_not_held(&inode->i_lock);
+-	VFS_BUG_ON_INODE(inode_state_read_once(inode) & (I_FREEING | I_CLEAR), inode);
+-	/*
+-	 * Note this assert is technically racy as if the count is bogusly
+-	 * equal to one, then two CPUs racing to further drop it can both
+-	 * conclude it's fine.
+-	 */
+-	VFS_BUG_ON_INODE(icount_read_once(inode) < 1, inode);
+-
+-	if (atomic_add_unless(&inode->i_count, -1, 1))
+-		return;
+-
+-	if (inode->i_nlink && sync_lazytime(inode))
+-		goto retry;
+-
+-	spin_lock(&inode->i_lock);
+-	if (unlikely((inode_state_read(inode) & I_DIRTY_TIME) && inode->i_nlink)) {
+-		spin_unlock(&inode->i_lock);
+-		goto retry;
+-	}
+-
+-	if (!atomic_dec_and_test(&inode->i_count)) {
+-		spin_unlock(&inode->i_lock);
+-		return;
+-	}
+-
+-	/*
+-	 * iput_final() drops ->i_lock, we can't assert on it as the inode may
+-	 * be deallocated by the time the call returns.
+-	 */
+-	iput_final(inode);
+-}
+-EXPORT_SYMBOL(iput);
+-
+ /**
+  *	iput_not_last	- put an inode assuming this is not the last reference
+  *	@inode: inode to put
+diff --git a/fs/inode_evict.c b/fs/inode_evict.c
+index ffc3f05da35aad82069ed7fdb8f61177f1362180..97ae62ec6ef9ee979fb47c5e97350d208cdb2eb3 100644
+--- a/fs/inode_evict.c
++++ b/fs/inode_evict.c
+@@ -4,6 +4,7 @@
+  * (C) 1997, 2002 Linus Torvalds
+  * (C) 1999 Andrea Arcangeli <andrea@suse.de> (dynamic inode allocation)
+  */
++#include <linux/cdev.h>
+ #include <linux/export.h>
+ #include <linux/fs.h>
+ #include <linux/fsverity.h>
+@@ -15,7 +16,12 @@
+ #include <linux/writeback.h>
+ #include <trace/events/writeback.h>
+ 
++#ifdef CONFIG_STELA
++#include <stela/file.h>
++#endif
++
+ #include "inode_lru.h"
++#include "internal.h"
+ #include "writeback_inode.h"
+ 
+ void clear_inode(struct inode *inode)
+@@ -833,3 +839,289 @@ int write_inode_now(struct inode *inode, int sync)
+ 	return writeback_single_inode(inode, &wbc);
+ }
+ EXPORT_SYMBOL(write_inode_now);
++
++static void inode_wait_for_lru_isolating(struct inode *inode)
++{
++	struct wait_bit_queue_entry wqe;
++	struct wait_queue_head *wq_head;
++
++	lockdep_assert_held(&inode->i_lock);
++	if (!(inode_state_read(inode) & I_LRU_ISOLATING))
++		return;
++
++	wq_head = inode_bit_waitqueue(&wqe, inode, __I_LRU_ISOLATING);
++	for (;;) {
++		prepare_to_wait_event(wq_head, &wqe.wq_entry, TASK_UNINTERRUPTIBLE);
++		/*
++		 * Checking I_LRU_ISOLATING with inode->i_lock guarantees
++		 * memory ordering.
++		 */
++		if (!(inode_state_read(inode) & I_LRU_ISOLATING))
++			break;
++		spin_unlock(&inode->i_lock);
++		schedule();
++		spin_lock(&inode->i_lock);
++	}
++	finish_wait(wq_head, &wqe.wq_entry);
++	WARN_ON(inode_state_read(inode) & I_LRU_ISOLATING);
++}
++
++/*
++ * Free the inode passed in, removing it from the lists it is still connected
++ * to. We remove any pages still attached to the inode and wait for any IO that
++ * is still in progress before finally destroying the inode.
++ *
++ * An inode must already be marked I_FREEING so that we avoid the inode being
++ * moved back onto lists if we race with other code that manipulates the lists
++ * (e.g. writeback_single_inode). The caller is responsible for setting this.
++ *
++ * An inode must already be removed from the LRU list before being evicted from
++ * the cache. This should occur atomically with setting the I_FREEING state
++ * flag, so no inodes here should ever be on the LRU when being evicted.
++ */
++static void evict(struct inode *inode)
++{
++	const struct super_operations *op = inode->i_sb->s_op;
++
++	BUG_ON(!(inode_state_read_once(inode) & I_FREEING));
++	BUG_ON(!list_empty(&inode->i_lru));
++
++	inode_io_list_del(inode);
++	inode_sb_list_del(inode);
++
++	spin_lock(&inode->i_lock);
++	inode_wait_for_lru_isolating(inode);
++
++	/*
++	 * Wait for flusher thread to be done with the inode so that filesystem
++	 * does not start destroying it while writeback is still running. Since
++	 * the inode has I_FREEING set, flusher thread won't start new work on
++	 * the inode.  We just have to wait for running writeback to finish.
++	 */
++	inode_wait_for_writeback(inode);
++	spin_unlock(&inode->i_lock);
++
++	if (op->evict_inode) {
++		op->evict_inode(inode);
++	} else {
++		truncate_inode_pages_final(&inode->i_data);
++		clear_inode(inode);
++	}
++	if (S_ISCHR(inode->i_mode) && inode->i_cdev)
++		cd_forget(inode);
++
++	remove_inode_hash(inode);
++
++	/*
++	 * Wake up waiters in __wait_on_freeing_inode().
++	 *
++	 * It is an invariant that any thread we need to wake up is already
++	 * accounted for before remove_inode_hash() acquires ->i_lock -- both
++	 * sides take the lock and sleep is aborted if the inode is found
++	 * unhashed. Thus either the sleeper wins and goes off CPU, or removal
++	 * wins and the sleeper aborts after testing with the lock.
++	 *
++	 * This also means we don't need any fences for the call below.
++	 */
++	inode_wake_up_bit(inode, __I_NEW);
++	BUG_ON(inode_state_read_once(inode) != (I_FREEING | I_CLEAR));
++
++	inode_destroy(inode);
++}
++
++/*
++ * dispose_list - dispose of the contents of a local list
++ * @head: the head of the list to free
++ *
++ * Dispose-list gets a local list with local inodes in it, so it doesn't
++ * need to worry about list corruption and SMP locks.
++ */
++void inode_dispose_list(struct list_head *head)
++{
++	while (!list_empty(head)) {
++		struct inode *inode;
++
++		inode = list_first_entry(head, struct inode, i_lru);
++		list_del_init(&inode->i_lru);
++
++		evict(inode);
++		cond_resched();
++	}
++}
++
++/**
++ * evict_inodes	- evict all evictable inodes for a superblock
++ * @sb:		superblock to operate on
++ *
++ * Make sure that no inodes with zero refcount are retained.  This is
++ * called by superblock shutdown after having SB_ACTIVE flag removed,
++ * so any inode reaching zero refcount during or after that call will
++ * be immediately evicted.
++ */
++void evict_inodes(struct super_block *sb)
++{
++	struct inode *inode;
++	LIST_HEAD(dispose);
++
++	spin_lock(&sb->s_inode_list_lock);
++	list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
++		if (icount_read_once(inode))
++			continue;
++
++		spin_lock(&inode->i_lock);
++		if (icount_read(inode)) {
++			spin_unlock(&inode->i_lock);
++			continue;
++		}
++		if (inode_state_read(inode) & (I_NEW | I_FREEING | I_WILL_FREE)) {
++			spin_unlock(&inode->i_lock);
++			continue;
++		}
++
++		inode_state_set(inode, I_FREEING);
++		inode_lru_list_del(inode);
++		spin_unlock(&inode->i_lock);
++
++		/*
++		 * Keep this inode out of dispose so it stays on s_inodes while
++		 * the list lock is dropped. I_FREEING prevents new references
++		 * and leaves eviction to us, so we can resume the walk from it.
++		 */
++		if (need_resched()) {
++			spin_unlock(&sb->s_inode_list_lock);
++			cond_resched();
++			inode_dispose_list(&dispose);
++			spin_lock(&sb->s_inode_list_lock);
++		}
++		list_add(&inode->i_lru, &dispose);
++	}
++	spin_unlock(&sb->s_inode_list_lock);
++
++	inode_dispose_list(&dispose);
++}
++EXPORT_SYMBOL_GPL(evict_inodes);
++
++/**
++ * ihold - get a reference on the inode, provided you already have one
++ * @inode:	inode to operate on
++ */
++void ihold(struct inode *inode)
++{
++	VFS_BUG_ON_INODE(icount_read_once(inode) < 1, inode);
++	WARN_ON(atomic_inc_return(&inode->i_count) < 2);
++}
++EXPORT_SYMBOL(ihold);
++
++/*
++ * Called when we're dropping the last reference
++ * to an inode.
++ *
++ * Call the FS "drop_inode()" function, defaulting to
++ * the legacy UNIX filesystem behaviour.  If it tells
++ * us to evict inode, do so.  Otherwise, retain inode
++ * in cache if fs is alive, sync and evict if fs is
++ * shutting down.
++ */
++static void iput_final(struct inode *inode)
++{
++	struct super_block *sb = inode->i_sb;
++	const struct super_operations *op = inode->i_sb->s_op;
++	int drop;
++
++	WARN_ON(inode_state_read(inode) & I_NEW);
++	VFS_BUG_ON_INODE(icount_read(inode) != 0, inode);
++
++	if (op->drop_inode)
++		drop = op->drop_inode(inode);
++	else
++		drop = inode_generic_drop(inode);
++
++	if (!drop &&
++	    !(inode_state_read(inode) & I_DONTCACHE) &&
++	    (sb->s_flags & SB_ACTIVE)) {
++		__inode_lru_list_add(inode, true);
++		spin_unlock(&inode->i_lock);
++		return;
++	}
++
++	/*
++	 * Re-check ->i_count in case the ->drop_inode() hooks played games.
++	 * Note we only execute this if the verdict was to drop the inode.
++	 */
++	VFS_BUG_ON_INODE(icount_read(inode) != 0, inode);
++
++	if (drop) {
++		inode_state_set(inode, I_FREEING);
++	} else {
++		inode_state_set(inode, I_WILL_FREE);
++		spin_unlock(&inode->i_lock);
++
++		write_inode_now(inode, 1);
++
++		spin_lock(&inode->i_lock);
++		WARN_ON(inode_state_read(inode) & I_NEW);
++		inode_state_replace(inode, I_WILL_FREE, I_FREEING);
++	}
++
++	inode_lru_list_del(inode);
++	spin_unlock(&inode->i_lock);
++
++	evict(inode);
++}
++
++/**
++ *	iput	- put an inode
++ *	@inode: inode to put
++ *
++ *	Puts an inode, dropping its usage count. If the inode use count hits
++ *	zero, the inode is then freed and may also be destroyed.
++ *
++ *	Consequently, iput() can sleep.
++ */
++void iput(struct inode *inode)
++{
++#ifdef CONFIG_STELA
++	/* Raw compatibility inodes have no VFS superblock or slab lifetime. */
++	if (inode && !inode->i_sb) {
++		stela_linux_compat_iput(inode);
++		return;
++	}
++#endif
++	might_sleep();
++	if (unlikely(!inode))
++		return;
++
++retry:
++	lockdep_assert_not_held(&inode->i_lock);
++	VFS_BUG_ON_INODE(inode_state_read_once(inode) & (I_FREEING | I_CLEAR), inode);
++	/*
++	 * Note this assert is technically racy as if the count is bogusly
++	 * equal to one, then two CPUs racing to further drop it can both
++	 * conclude it's fine.
++	 */
++	VFS_BUG_ON_INODE(icount_read_once(inode) < 1, inode);
++
++	if (atomic_add_unless(&inode->i_count, -1, 1))
++		return;
++
++	if (inode->i_nlink && sync_lazytime(inode))
++		goto retry;
++
++	spin_lock(&inode->i_lock);
++	if (unlikely((inode_state_read(inode) & I_DIRTY_TIME) && inode->i_nlink)) {
++		spin_unlock(&inode->i_lock);
++		goto retry;
++	}
++
++	if (!atomic_dec_and_test(&inode->i_count)) {
++		spin_unlock(&inode->i_lock);
++		return;
++	}
++
++	/*
++	 * iput_final() drops ->i_lock, we can't assert on it as the inode may
++	 * be deallocated by the time the call returns.
++	 */
++	iput_final(inode);
++}
++EXPORT_SYMBOL(iput);
+diff --git a/fs/inode_lru.h b/fs/inode_lru.h
+index 401e60d42565b47af8b634ffb99b87a80866ad9e..2d5b3c0700e9de22dcc23d08865930e9059580a5 100644
+--- a/fs/inode_lru.h
++++ b/fs/inode_lru.h
+@@ -7,6 +7,7 @@
+ struct inode;
+ DECLARE_PER_CPU(unsigned long, nr_unused_inodes);
+ void __inode_lru_list_add(struct inode *inode, bool rotate);
++void inode_dispose_list(struct list_head *head);
+ void inode_lru_list_del(struct inode *inode);
+ 
+ #endif

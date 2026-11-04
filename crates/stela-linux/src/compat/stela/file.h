@@ -10,7 +10,11 @@
  * space is the owner's opaque `space`; the services copy_from_user,
  * copy_to_user, map_user and unmap_user reach into it. */
 struct file;
+struct inode;
 struct stela_linux_mapping;
+
+/* Releases a raw compatibility inode without VFS superblock ownership. */
+void stela_linux_compat_iput(struct inode *inode);
 
 /* Opens a character device a driver registered, or returns a negative errno. */
 int stela_linux_chrdev_open(dev_t device, unsigned int flags, struct file **file);

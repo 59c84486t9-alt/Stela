@@ -46,12 +46,7 @@ struct inode *alloc_anon_inode(struct super_block *sb)
 	return inode_of_mode(S_IRUSR | S_IWUSR);
 }
 
-void ihold(struct inode *inode)
-{
-	atomic_inc(&inode->i_count);
-}
-
-void iput(struct inode *inode)
+void stela_linux_compat_iput(struct inode *inode)
 {
 	if (inode && atomic_dec_and_test(&inode->i_count)) {
 		if (S_ISCHR(inode->i_mode))
