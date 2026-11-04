@@ -37,6 +37,10 @@ use std::{
     time::SystemTime,
 };
 use stela_boot_core::memory_budget::MAX_TRANSLATION_PACK_BYTES;
+use stela_engine::translations::{
+    Digest,
+    pack::{self, HEADER_BYTES, PackError},
+};
 
 /// The store's directory on its volume.
 pub(super) const DIRECTORY: &str = "stela/store";
@@ -48,11 +52,7 @@ const PACK_EXTENSION: &str = "pak";
 pub(super) const SPARE: &str = "spare.bin";
 /// The translator id bytes a pack's file name holds.
 const NAME_BYTES: usize = 4;
-/// A pack's leading bytes: magic, schema, record count, translator id.
-const PACK_MAGIC: &[u8; 8] = b"STLTPACK";
-const PACK_SCHEMA: u32 = 1;
 const ID_BYTES: usize = 32;
-const HEADER_BYTES: usize = PACK_MAGIC.len() + 4 + 4 + ID_BYTES;
 const MIB: u64 = 1024 * 1024;
 /// One pack's bound by default.
 pub(super) const DEFAULT_PACK_BYTES: u64 = MAX_TRANSLATION_PACK_BYTES;
@@ -264,17 +264,20 @@ fn check(path: &Path, bytes: u64, bound: u64) -> Result<(), String> {
     if header.iter().all(|&byte| byte == 0) {
         return Ok(());
     }
-    if &header[..PACK_MAGIC.len()] != PACK_MAGIC {
-        return Err("is not a STLTPACK pack".into());
+    let id = Digest(header[HEADER_BYTES - ID_BYTES..].try_into().unwrap());
+    match pack::prefix_bytes(&header, &id) {
+        Ok(_) => {}
+        Err(PackError::Magic) => return Err("is not a STLTPACK pack".into()),
+        Err(PackError::Schema) => {
+            let schema = u32::from_le_bytes(header[8..12].try_into().unwrap());
+            return Err(format!("has unsupported pack schema {schema}"));
+        }
+        Err(PackError::Count) => return Err("has too many pack records".into()),
+        Err(_) => return Err("has an invalid pack header".into()),
     }
-    let schema = u32::from_le_bytes(header[8..12].try_into().unwrap());
-    if schema != PACK_SCHEMA {
-        return Err(format!("has pack schema {schema}, not {PACK_SCHEMA}"));
-    }
-    let id = &header[16..16 + ID_BYTES];
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    if !name.eq_ignore_ascii_case(&pack_name(id)) {
-        let id = hex::encode(id);
+    if !name.eq_ignore_ascii_case(&pack_name(&id.0)) {
+        let id = id.hex();
         return Err(format!("names translator {id}, not its file name"));
     }
     Ok(())
@@ -409,8 +412,8 @@ pub(super) mod tests {
 
     /// A pack of translator `id` holding `bytes` bytes in all.
     pub(in crate::setup) fn write_pack(directory: &Path, id: [u8; 32], bytes: usize) -> PathBuf {
-        let mut pack = PACK_MAGIC.to_vec();
-        pack.extend_from_slice(&PACK_SCHEMA.to_le_bytes());
+        let mut pack = pack::MAGIC.to_vec();
+        pack.extend_from_slice(&pack::SCHEMA.to_le_bytes());
         pack.extend_from_slice(&0u32.to_le_bytes());
         pack.extend_from_slice(&id);
         pack.resize(bytes.max(HEADER_BYTES), 0);
@@ -481,6 +484,33 @@ pub(super) mod tests {
         assert_eq!(store.used_bytes(), 100);
         fs::remove_dir_all(checked_directory(&store).unwrap()).unwrap();
         assert!(!store.directory().exists());
+    }
+
+    #[test]
+    fn repair_keeps_a_valid_mixed_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store {
+            volume: dir.path().to_path_buf(),
+            pack_bytes: 4096,
+        };
+        let translator = Digest([1; ID_BYTES]);
+        let path = write_pack(&store.directory(), translator.0, HEADER_BYTES);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[8..12].copy_from_slice(&2u32.to_le_bytes());
+        bytes.extend(Digest::of(&bytes).0);
+        assert!(pack::Pack::parse(&bytes, &translator).is_ok());
+        fs::write(&path, &bytes).unwrap();
+        let unknown = write_pack(&store.directory(), [2; ID_BYTES], HEADER_BYTES);
+        let mut unknown_bytes = fs::read(&unknown).unwrap();
+        unknown_bytes[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        fs::write(&unknown, unknown_bytes).unwrap();
+        assert_eq!(
+            store.packs().iter().filter(|p| p.problem.is_some()).count(),
+            1
+        );
+        store.repair().unwrap();
+        assert_eq!(fs::read(path).unwrap(), bytes);
+        assert!(!unknown.exists());
     }
 
     #[test]

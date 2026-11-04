@@ -24,8 +24,9 @@ impl DecodeCache {
         let entry = &mut self.0[slot];
         if let Some((cached_word, operation)) = *entry
             && cached_word == word
-            // The compiler includes a checked fallthrough address in its
-            // decoded instruction. A cached word must keep that refusal.
+            // Keep the compiler's alignment and checked fallthrough rules
+            // even when an earlier address supplied the same word.
+            && pc.is_multiple_of(INSTRUCTION)
             && pc <= u64::MAX - INSTRUCTION
         {
             return Some(operation);
@@ -41,13 +42,22 @@ impl DecodeCache {
 
 impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn system_instruction(&mut self, word: u32) -> Step {
-        let Some(operation) = self.system_decode.operation(self.cpu.pc, word) else {
-            return Err(self.refuse_system(word, "System exit at a word that is not System"));
-        };
+        let operation = self.decode_system_operation(word);
         self.complete_system_instruction(word, operation)
     }
 
-    fn complete_system_instruction(&mut self, word: u32, operation: SystemOperation) -> Step {
+    pub(super) fn decode_system_operation(&mut self, word: u32) -> Option<SystemOperation> {
+        self.system_decode.operation(self.cpu.pc, word)
+    }
+
+    pub(super) fn complete_system_instruction(
+        &mut self,
+        word: u32,
+        operation: Option<SystemOperation>,
+    ) -> Step {
+        let Some(operation) = operation else {
+            return Err(self.refuse_system(word, "System exit at a word that is not System"));
+        };
         // Apple's SDSB (`0x00201460` plus the domain), WKDMC and WKDMD;
         // `guarded` checks the GXF instructions.
         let apple = match operation {
