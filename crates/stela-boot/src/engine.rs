@@ -218,6 +218,10 @@ fn development_hardware_model(tree: &mut DeviceTree) -> Result<String> {
             "the selected Apple board hardware model is not first in compatible"
         ));
     }
+    // A prepared bundle may already carry the development identity.
+    if value.ends_with(b"DEV") {
+        return Ok(target);
+    }
     let mut development_compatible = Vec::with_capacity(compatible.len());
     development_compatible.extend_from_slice(target.as_bytes());
     development_compatible.push(0);
