@@ -203,45 +203,51 @@ pub struct DecodeReceipt {
     pub signature_validated: bool,
 }
 
+impl Im4p<'_> {
+    /// Decode this parsed payload. Boot bundle callers record the enclosing
+    /// Image4's identity and need only the plaintext and IM4P metadata.
+    pub(crate) fn decode_payload(&self, maximum: u64) -> Result<(Vec<u8>, &'static str)> {
+        require!(
+            self.declared_uncompressed_bytes
+                .is_none_or(|n| n <= maximum),
+            "declared output exceeds configured limit"
+        );
+        let (decoded, compression) = if stela_formats::lzfse::is_lzfse(self.payload) {
+            require!(
+                self.compression_algorithm
+                    .is_none_or(|n| n == COMPRESSION_LZFSE),
+                "compression record disagrees with LZFSE marker"
+            );
+            let limit = usize::try_from(maximum).unwrap_or(usize::MAX);
+            (stela_formats::lzfse::decode(self.payload, limit)?, "lzfse")
+        } else {
+            require!(
+                self.compression_algorithm.is_none(),
+                "unrecognized compressed payload format"
+            );
+            require!(
+                self.payload.len() as u64 <= maximum,
+                "payload exceeds configured limit"
+            );
+            (self.payload.to_vec(), "none")
+        };
+        require!(!decoded.is_empty(), "decoded payload is empty");
+        require!(
+            self.declared_uncompressed_bytes
+                .is_none_or(|n| n == decoded.len() as u64),
+            "decoded size disagrees with IM4P metadata"
+        );
+        Ok((decoded, compression))
+    }
+}
+
 /// Decode a plaintext IM4P payload of any type, returning Apple's bytes.
 ///
 /// LZFSE streams must be consumed exactly and match the declared size. Other
 /// payloads are copied unchanged and must not carry compression metadata.
 pub fn decode(bytes: &[u8], maximum: u64) -> Result<(Vec<u8>, DecodeReceipt)> {
     let im4p = parse(bytes)?;
-    require!(
-        im4p.declared_uncompressed_bytes
-            .is_none_or(|n| n <= maximum),
-        "declared output exceeds configured limit"
-    );
-    let mut decoded = vec![];
-    let compression = if stela_formats::lzfse::is_lzfse(im4p.payload) {
-        require!(
-            im4p.compression_algorithm
-                .is_none_or(|n| n == COMPRESSION_LZFSE),
-            "compression record disagrees with LZFSE marker"
-        );
-        let limit = usize::try_from(maximum).unwrap_or(usize::MAX);
-        decoded = stela_formats::lzfse::decode(im4p.payload, limit)?;
-        "lzfse"
-    } else {
-        require!(
-            im4p.compression_algorithm.is_none(),
-            "unrecognized compressed payload format"
-        );
-        require!(
-            im4p.payload.len() as u64 <= maximum,
-            "payload exceeds configured limit"
-        );
-        decoded.extend_from_slice(im4p.payload);
-        "none"
-    };
-    require!(!decoded.is_empty(), "decoded payload is empty");
-    require!(
-        im4p.declared_uncompressed_bytes
-            .is_none_or(|n| n == decoded.len() as u64),
-        "decoded size disagrees with IM4P metadata"
-    );
+    let (decoded, compression) = im4p.decode_payload(maximum)?;
     let receipt = DecodeReceipt {
         schema_version: 1,
         container_bytes: bytes.len(),
