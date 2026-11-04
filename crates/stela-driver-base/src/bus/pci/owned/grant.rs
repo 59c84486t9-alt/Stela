@@ -91,6 +91,17 @@ pub(super) struct State {
     pub(super) routing_seal: Cell<Option<([u32; 7], u16)>>,
 }
 impl State {
+    pub(super) fn check_idle(&self) -> Result<(), MappingError> {
+        if self.acting.get()
+            || self.terminal.get().is_some()
+            || self.waiting.get().is_some()
+            || self.operation.borrow().is_some()
+        {
+            return Err(MappingError::Busy);
+        }
+        Ok(())
+    }
+
     pub(super) fn close_metadata(&self) {
         if let Some(close) = self.close.borrow().as_ref() {
             close.close();
@@ -141,6 +152,27 @@ pub struct DriverGrant {
     state: ManuallyDrop<Box<State>>,
 }
 impl PrepublicationGrant {
+    pub(super) fn promote<P: PrepublicationCustody + DriverCustody>(self) -> DriverGrant {
+        assert_eq!((**self.original).type_id(), core::any::TypeId::of::<P>());
+        let mut original = ManuallyDrop::new(self);
+        // SAFETY: consume the entire affine grant without dropping either
+        // original allocation or its operation state.
+        let (custody, state) = unsafe {
+            (
+                ManuallyDrop::take(&mut original.original),
+                ManuallyDrop::take(&mut original.state),
+            )
+        };
+        // SAFETY: Any identifies the exact allocation type. Only trait-object
+        // metadata changes.
+        let custody = unsafe { Box::from_raw(Box::into_raw(custody).cast::<P>()) };
+        DriverGrant {
+            original: ManuallyDrop::new(custody),
+            returned: false,
+            state: ManuallyDrop::new(state),
+        }
+    }
+
     /// Recover the same source controller for a consuming phase transition.
     /// Matching the Rust type supplies no resource or epoch provenance; the
     /// controller still owns those original products and must validate them.

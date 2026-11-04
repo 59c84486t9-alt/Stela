@@ -53,6 +53,7 @@ pub unsafe trait PhysicalAssignment: Send + Sync + 'static {
 }
 
 trait Ancestor: Send + Sync {
+    fn check_admission(&self) -> Result<(), Error>;
     fn check_control(&self) -> Result<(), Error>;
     fn close_admission(&self);
     fn acquire(&self) -> Result<(), Error>;
@@ -108,6 +109,16 @@ struct Storage<P: PhysicalAssignment> {
     gate: Gate,
 }
 impl<P: PhysicalAssignment> Ancestor for Storage<P> {
+    fn check_admission(&self) -> Result<(), Error> {
+        if let Some(parent) = &self.gate.parent {
+            parent.original.check_admission()?;
+        }
+        if self.gate.state.load(Ordering::Acquire) & CLOSED != 0 {
+            return Err(Error::Closed);
+        }
+        Ok(())
+    }
+
     fn close_admission(&self) {
         self.gate.state.fetch_or(CLOSED, Ordering::AcqRel);
     }
@@ -332,6 +343,12 @@ impl<P: PhysicalAssignment> Clone for Retention<P> {
     }
 }
 impl<P: PhysicalAssignment> Retention<P> {
+    /// Observe the original assignment and every ancestor's denial state.
+    /// A successful observation does not admit an operation or grant a use.
+    pub fn check_admission(&self) -> Result<(), Error> {
+        self.storage.check_admission()
+    }
+
     /// Read only the same original gate's live use count. This observation
     /// grants no admission, completion, mutation or original-product return.
     pub fn uses(&self) -> usize {

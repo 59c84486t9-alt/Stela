@@ -236,6 +236,8 @@ pub fn physical(address: Address) -> u64 {
 /// External fixture controller. Resource inventories contain only its actual
 /// retention projection; config and mapping use the SAME original count gate.
 pub struct FixtureCustody {
+    #[cfg(test)]
+    prepublication: bool,
     close: Option<assignment::AdmissionClose>,
     owner: MappingOwner<Arc<Ram>>,
     resource: Option<Resource>,
@@ -323,6 +325,12 @@ unsafe impl ConfigCustody for FixtureCustody {
         self.resource.as_ref().expect("live fixture resource")
     }
     fn begin(&self, operation: Operation) -> Result<ConfigOperation, ConfigError> {
+        #[cfg(test)]
+        if self.prepublication && matches!(operation, Operation::Write { .. }) {
+            return Err(ConfigError::before_effect(
+                ConfigFailure::UnqualifiedControl,
+            ));
+        }
         let (offset, width) = match operation {
             Operation::Read { offset, width } | Operation::Write { offset, width, .. } => {
                 (offset, width)
@@ -383,7 +391,29 @@ unsafe impl ConfigCustody for FixtureCustody {
 // SAFETY: cfg-only actual RAM fixture owns the sole model controller. It models
 // driver policy, never native firmware/root/IRQ/DMA retirement or a PCI Source.
 unsafe impl DriverCustody for FixtureCustody {}
+// SAFETY: this isolated model has one source and forbids all prepublication
+// writes. The test joins its synchronous readers before changing policy.
+#[cfg(test)]
+unsafe impl super::grant::PrepublicationCustody for FixtureCustody {}
 impl FixtureCustody {
+    #[cfg(test)]
+    pub(super) fn into_prepublication(mut self) -> super::grant::PrepublicationGrant {
+        self.prepublication = true;
+        let mut custody = Box::new(self);
+        let close = custody.close.take().expect("preowned fixture close");
+        // SAFETY: this is the same original model owner and close.
+        unsafe { super::grant::PrepublicationGrant::from_boxed(custody, close) }
+    }
+
+    #[cfg(test)]
+    pub(super) fn finish_promotion(&mut self) -> Result<(), MappingError> {
+        if !self.prepublication || self.uses() != 1 {
+            return Err(MappingError::Busy);
+        }
+        self.prepublication = false;
+        Ok(())
+    }
+
     pub fn into_grant(self) -> DriverGrant {
         let mut custody = Box::new(self);
         let close = custody.close.take().expect("preowned fixture close");
@@ -480,6 +510,8 @@ fn unmapped(
     }));
     (
         FixtureCustody {
+            #[cfg(test)]
+            prepublication: false,
             close: Some(close),
             owner,
             resource: Some(resource),

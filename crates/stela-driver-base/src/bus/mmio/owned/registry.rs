@@ -753,6 +753,13 @@ pub struct Mapping {
     lease: Option<Shared<Lease>>,
 }
 impl Mapping {
+    pub(crate) fn check_exclusive(&self) -> Result<(), Error> {
+        if Shared::strong_count(self.lease()?) != 1 {
+            return Err(Error::Busy);
+        }
+        self.check_current()
+    }
+
     fn lease(&self) -> Result<&Shared<Lease>, Error> {
         self.lease.as_ref().ok_or(Error::Retired)
     }

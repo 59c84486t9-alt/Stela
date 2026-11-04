@@ -32,6 +32,106 @@ fn mapped() -> (
         Protection::ReadWrite,
     )
 }
+
+#[test]
+fn promotion_keeps_the_original_mapping_and_command_seal() {
+    let (source, mapping, counters) = mapped();
+    let retention = source.retention();
+    let mut config = UnpublishedConfig::prepare(source.into_prepublication())
+        .attach(mapping)
+        .unwrap_or_else(|_| panic!("original prepublication mapping refused"));
+    assert_eq!(
+        config.try_write16(4, 4),
+        Err(ConfigError::before_effect(
+            ConfigFailure::UnqualifiedControl
+        ))
+    );
+    config.seal_bus_master().unwrap();
+    // SAFETY: this synchronous RAM fixture has no native effects or old
+    // users. The original model controller checks its single kept mapping.
+    let mut config = unsafe { config.promote(test_support::FixtureCustody::finish_promotion) }
+        .unwrap_or_else(|_| panic!("original isolated fixture refused promotion"));
+    assert_eq!(retention.uses(), 1);
+    assert_eq!(counters.maps.load(Ordering::Relaxed), 1);
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        config.try_write16(4, 4),
+        Err(ConfigError::before_effect(ConfigFailure::BusMasterSealed))
+    );
+    config.try_write16(4, 2).unwrap();
+    assert_eq!(config.try_read16(4), Ok(2));
+    drop(retention);
+    // SAFETY: all actual model users are joined.
+    unsafe { test_support::retire_config(config, &counters) }.unwrap();
+}
+
+#[test]
+fn refused_promotion_closes_the_same_kept_owner() {
+    let (source, mapping, counters) = mapped();
+    let retention = source.retention();
+    let config = UnpublishedConfig::prepare(source.into_prepublication())
+        .attach(mapping)
+        .unwrap_or_else(|_| panic!("original prepublication mapping refused"));
+    // SAFETY: the isolated controller keeps its original allocation. The
+    // callback reports that the required qualification could not complete.
+    let (error, mut original) = unsafe {
+        config.promote(|_: &mut test_support::FixtureCustody| Err(MappingError::Unavailable))
+    }
+    .err()
+    .expect("source refused promotion");
+    assert_eq!(error, MappingError::Unavailable);
+    assert_eq!(retention.uses(), 1);
+    assert!(retention.check_admission().is_err());
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+    // SAFETY: this failed model callback exposed no hardware/raw user.
+    unsafe { original.retire() }.unwrap();
+    assert_eq!(retention.uses(), 0);
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn retained_prepublication_view_blocks_the_source_callback() {
+    let (source, mapping, counters) = mapped();
+    let config = UnpublishedConfig::prepare(source.into_prepublication())
+        .attach(mapping)
+        .unwrap_or_else(|_| panic!("original prepublication mapping refused"));
+    let view = config.retain_epoch().unwrap();
+    // SAFETY: the model has no raw users. The transport must refuse while
+    // the existing view still pins the prepublication mapping.
+    let (error, mut original) = unsafe {
+        config.promote(|_: &mut test_support::FixtureCustody| {
+            panic!("source callback ran with a retained prepublication view")
+        })
+    }
+    .err()
+    .expect("old view must refuse promotion");
+    assert_eq!(error, MappingError::Busy);
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+    drop(view);
+    // SAFETY: the sole actual model view has ended.
+    unsafe { original.retire() }.unwrap();
+}
+
+#[test]
+fn promotion_callback_unwind_keeps_the_original_live_count_closed() {
+    extern crate std;
+
+    let (source, mapping, counters) = mapped();
+    let retention = source.retention();
+    let config = UnpublishedConfig::prepare(source.into_prepublication())
+        .attach(mapping)
+        .unwrap_or_else(|_| panic!("original prepublication mapping refused"));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: the model has no raw/native users, but qualification
+        // unwinds and must leave the whole original graph parked.
+        unsafe { config.promote(|_: &mut test_support::FixtureCustody| panic!("source unwind")) }
+    }));
+    assert!(result.is_err());
+    assert!(retention.check_admission().is_err());
+    assert_eq!(retention.uses(), 1);
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+}
+
 #[test]
 fn counted_transport_survives_extraction_without_generic_bme_or_pointer_escape() {
     let (source, mapping, counters) = mapped();

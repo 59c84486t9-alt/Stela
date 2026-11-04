@@ -173,6 +173,23 @@ impl ConfigSpace for OwnedConfig {
     }
 }
 impl UnpublishedConfig {
+    /// Transfer the exact configuration into its driver phase. The mapping,
+    /// operation state, command and routing seals survive. Refusal closes
+    /// admission and keeps the original owning envelope.
+    ///
+    /// # Safety
+    /// The sole original producer has joined every prepublication user.
+    /// The source callback must consume the actual completed root/unit and
+    /// source retirement and topology promotion for this physical slot.
+    /// It may update policy while preserving the original mapping, epoch,
+    /// assignment and all hardware obligations.
+    pub unsafe fn promote<P: grant::PrepublicationCustody + grant::DriverCustody>(
+        self,
+        qualify: impl FnOnce(&mut P) -> Result<(), MappingError>,
+    ) -> Result<OwnedConfig, (MappingError, ConfigParts<PrepublicationGrant>)> {
+        envelope::promote(self, qualify)
+    }
+
     pub fn seal_bus_master(&mut self) -> Result<(), ConfigError> {
         self.storage.region_mut().seal_bus_master()
     }

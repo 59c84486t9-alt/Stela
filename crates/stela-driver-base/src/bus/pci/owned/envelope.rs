@@ -1,7 +1,7 @@
 //! The original configuration custody stays parked through mapper callbacks.
 use super::{
     OwnedConfig, UnpublishedConfig,
-    grant::{DriverGrant, Grant, PrepublicationGrant},
+    grant::{DriverCustody, DriverGrant, Grant, PrepublicationCustody, PrepublicationGrant},
     region::{Region, retire_mapping},
 };
 use crate::bus::{
@@ -30,6 +30,35 @@ pub struct PreparedConfig<G>(Envelope<G>);
 /// The original parked grant and any installed mapping, pending or attached.
 #[must_use]
 pub struct ConfigParts<G>(pub(super) Envelope<G>);
+
+pub(super) fn promote<P: PrepublicationCustody + DriverCustody>(
+    mut config: UnpublishedConfig,
+    qualify: impl FnOnce(&mut P) -> Result<(), MappingError>,
+) -> Result<OwnedConfig, (MappingError, ConfigParts<PrepublicationGrant>)> {
+    // Allocate the destination before invoking the original source. Until
+    // qualification succeeds, the original envelope keeps all inputs.
+    let mut phase = Box::new(None);
+    if let Err(error) = config.storage.region_mut().qualify_promotion(qualify) {
+        if let Some(close) = &config.storage.close {
+            close.close();
+        }
+        return Err((error, config.into_parts()));
+    }
+    let Some(Phase::Attached(region)) = config.storage.phase.take() else {
+        unreachable!("original attached configuration")
+    };
+    *phase = Some(Phase::Attached(region.into_promoted::<P>()));
+    let close = config.storage.close.take();
+    // SAFETY: the old envelope is empty. The destination holds the same
+    // source, mapping, operation state and sealed close projection.
+    unsafe { ManuallyDrop::drop(&mut config.storage.phase) };
+    Ok(OwnedConfig {
+        storage: Envelope {
+            phase: ManuallyDrop::new(phase),
+            close,
+        },
+    })
+}
 
 impl<G> Envelope<G> {
     fn phase(&self) -> &Phase<G> {

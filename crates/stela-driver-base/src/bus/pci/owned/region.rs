@@ -93,13 +93,7 @@ pub(super) unsafe fn retire_mapping<G: Grant>(
     mapping: Option<&mut Mapping>,
 ) -> Result<(), MappingError> {
     let state = grant.state();
-    if state.acting.get()
-        || state.terminal.get().is_some()
-        || state.waiting.get().is_some()
-        || state.operation.borrow().is_some()
-    {
-        return Err(MappingError::Busy);
-    }
+    state.check_idle()?;
     grant.custody().retirement_context()?;
     if let Some(mapping) = mapping {
         if !mapping.owns_resource(grant.custody().resource())? {
@@ -119,6 +113,42 @@ pub(super) struct Region<G> {
     mapping: Mapping,
     grant: G,
 }
+impl Region<grant::PrepublicationGrant> {
+    pub(super) fn qualify_promotion<P: grant::PrepublicationCustody + grant::DriverCustody>(
+        &mut self,
+        qualify: impl FnOnce(&mut P) -> Result<(), MappingError>,
+    ) -> Result<(), MappingError> {
+        self.check_promotion()?;
+        self.grant
+            .update_typed(qualify)
+            .ok_or(MappingError::InvalidPlatformReply)??;
+        self.check_promotion()
+    }
+
+    fn check_promotion(&self) -> Result<(), MappingError> {
+        self.grant.state().check_idle()?;
+        self.grant.custody().retirement_context()?;
+        self.mapping.check_exclusive()?;
+        if !self
+            .mapping
+            .retains_resource(self.grant.custody().resource())?
+        {
+            return Err(MappingError::InvalidPlatformReply);
+        }
+        Ok(())
+    }
+
+    pub(super) fn into_promoted<P: grant::PrepublicationCustody + grant::DriverCustody>(
+        self,
+    ) -> Region<grant::DriverGrant> {
+        Region::attached(
+            self.grant.promote::<P>(),
+            self.mapping,
+            (self.address, self.window),
+        )
+    }
+}
+
 impl<G: Grant> Region<G> {
     /// Validate by borrowing the original grant and mapping in their envelope.
     pub fn validate_attachment(
