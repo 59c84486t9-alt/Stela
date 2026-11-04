@@ -102,12 +102,15 @@ pub(super) fn retire(tsc_hz: u64) -> bool {
     if PROCESSORS.alone() {
         return true;
     }
+    let (me, _) = crate::engine::host::shootdown();
+    if me.is_none() {
+        return false;
+    }
     let base = crate::apic::base_msr();
     let sender = crate::apic::Apic::new(
         base,
         crate::layout::physical(base & crate::apic::BASE_ADDRESS),
     );
-    let me = PROCESSORS.slot(sender.id());
     let generation = PROCESSORS.request();
     for (slot, apic) in PROCESSORS.sharers() {
         if Some(slot) == me || PROCESSORS.acknowledged(slot) >= generation {
@@ -117,20 +120,25 @@ pub(super) fn retire(tsc_hz: u64) -> bool {
         // sees the request stored above; one with them off takes it at its
         // next safe point, whether or not this delivery completes.
         // SAFETY: every joined processor's IDT routes the vector to its
-        // shootdown handler; the caller holds the aperture's lock with
-        // interrupts off.
+        // shootdown handler. Retirement runs with interrupts off, with
+        // exclusive access to this processor's local ICR.
         let _ = unsafe { sender.notify(apic, crate::engine::interrupts::SHOOTDOWN_VECTOR, tsc_hz) };
     }
     let start = crate::apic::rdtsc();
     let limit = tsc_hz / 1000 * WAIT_MS;
-    while !PROCESSORS.flushed(generation, me) {
+    loop {
+        // A peer may be publishing a retirement at the same time and
+        // cannot finish until this processor acknowledges its generation.
+        service();
+        if PROCESSORS.flushed(generation, me) {
+            return true;
+        }
         if crate::apic::rdtsc().wrapping_sub(start) >= limit {
             report_unacknowledged(generation, me);
             return false;
         }
         core::hint::spin_loop();
     }
-    true
 }
 
 fn report_unacknowledged(generation: u64, me: Option<usize>) {

@@ -346,7 +346,7 @@ fn current() -> *mut Local {
 }
 
 /// This processor's index, dense from zero. Once [`activate`] has run on it.
-#[cfg(feature = "nvk")]
+/// The BSP installs its record before any AP starts.
 pub(crate) fn processor() -> u32 {
     // SAFETY: the record is pinned for the processor's life, and `index` is set
     // before `this`, which `current` reads through.

@@ -135,12 +135,15 @@ pub(super) fn entered_loader_root(owner: &crate::paging::loader::LoaderTables) -
 /// and the longest wait.
 static HOST_DRIVERS_WAITED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
-/// Take the host drivers' lock, counting the wait.
-fn lock_host_drivers() {
-    if HOST_DRIVERS
+fn try_lock_host_drivers() -> bool {
+    HOST_DRIVERS
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()
-    {
+}
+
+/// Take the host drivers' lock, counting the wait.
+fn lock_host_drivers() {
+    if try_lock_host_drivers() {
         return;
     }
     let started = super::host::rdtsc();
@@ -187,6 +190,28 @@ impl RestoreRoot {
     /// processor's pinned local record is active.
     pub(super) unsafe fn enter(root: u64) -> Self {
         lock_host_drivers();
+        // SAFETY: the caller supplies the live root, and this core holds the lock.
+        unsafe { Self::enter_locked(root) }
+    }
+
+    /// Enter for work that can wait until another service turn.
+    ///
+    /// # Safety
+    /// As for [`Self::enter`].
+    pub(super) unsafe fn try_enter(root: u64) -> Option<Self> {
+        if !try_lock_host_drivers() {
+            // The holder may need this processor to acknowledge a shootdown.
+            crate::native_mmio::shootdown::service();
+            return None;
+        }
+        // SAFETY: the caller supplies the live root, and this core holds the lock.
+        Some(unsafe { Self::enter_locked(root) })
+    }
+
+    /// # Safety
+    /// The caller holds the host drivers' lock and meets [`Self::enter`]'s
+    /// requirements.
+    unsafe fn enter_locked(root: u64) -> Self {
         let (previous, flags): (u64, u64);
         // SAFETY: CPL0 control register read; interrupts remain off until
         // the original root has been restored.
