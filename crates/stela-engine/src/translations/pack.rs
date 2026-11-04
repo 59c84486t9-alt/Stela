@@ -437,60 +437,58 @@ impl<'a> Store<'a> {
         true
     }
 
-    fn shared_room(&mut self, key: &SharedKey, incoming: usize) -> bool {
-        loop {
-            let replaced = self.shared.get(key).map_or(0, |old| old.bytes);
-            if self
-                .shared_usage()
-                .saturating_sub(replaced)
-                .saturating_add(incoming)
-                <= self.shared_bound
-            {
-                return true;
-            }
-            if !self.evict_shared() {
-                self.shared_order = VecDeque::new();
-                return false;
-            }
-        }
-    }
-
     fn keep_shared(&mut self, offer: Offer) {
+        use alloc::collections::btree_map::Entry;
+
+        if self.shared_bound == 0 {
+            return;
+        }
         let key = shared_key(&offer.key(), offer.pc(), &offer.context());
         let bytes = offer
             .retained_bytes()
             .saturating_add(size_of::<(SharedKey, SharedEntry)>());
-        if bytes > self.shared_bound || !self.shared_room(&key, bytes) {
+        if bytes > self.shared_bound {
             return;
         }
-        if !self.shared.contains_key(&key) {
-            // Reuse an oldest slot if bulk FIFO growth cannot be allocated.
-            // An empty cache simply declines the optional entry.
-            if self.shared_order.try_reserve(1).is_err() && !self.evict_shared() {
-                return;
+        loop {
+            let usage = self.shared_usage();
+            match self.shared.entry(key) {
+                Entry::Occupied(mut slot)
+                    if usage.saturating_sub(slot.get().bytes).saturating_add(bytes)
+                        <= self.shared_bound =>
+                {
+                    self.shared_bytes = self.shared_bytes - slot.get().bytes + bytes;
+                    slot.insert(SharedEntry {
+                        translation: offer.shared(),
+                        bytes,
+                    });
+                    return;
+                }
+                Entry::Vacant(slot)
+                    if usage.saturating_add(bytes) <= self.shared_bound
+                        && self.shared_order.try_reserve(1).is_ok() =>
+                {
+                    // A FIFO allocation can itself exceed the budget.
+                    let fifo = self.shared_order.capacity() * size_of::<SharedKey>();
+                    if self.shared_bytes.saturating_add(fifo).saturating_add(bytes)
+                        <= self.shared_bound
+                    {
+                        slot.insert(SharedEntry {
+                            translation: offer.shared(),
+                            bytes,
+                        });
+                        self.shared_order.push_back(key);
+                        self.shared_bytes += bytes;
+                        return;
+                    }
+                }
+                _ => {}
             }
-            if !self.shared_room(&key, bytes) {
+            if !self.evict_shared() {
+                self.shared_order = VecDeque::new();
                 return;
             }
         }
-        let shared = offer.shared();
-        if let Some(present) = self.shared.get_mut(&key) {
-            self.shared_bytes -= present.bytes;
-            *present = SharedEntry {
-                translation: shared,
-                bytes,
-            };
-        } else {
-            self.shared.insert(
-                key,
-                SharedEntry {
-                    translation: shared,
-                    bytes,
-                },
-            );
-            self.shared_order.push_back(key);
-        }
-        self.shared_bytes += bytes;
     }
 
     fn keep_pending(&mut self, offer: &Offer) {
@@ -600,10 +598,11 @@ impl<'a> Store<'a> {
     /// invalid: for a caller to decode ([`Record::decode`]) without holding
     /// the store, then report with [`Self::looked_up`].
     pub fn stored(&self, key: &Digest) -> Option<&'a [u8]> {
+        let pack = self.pack?;
         if self.loaded.get(key) == Some(&false) {
             return None;
         }
-        self.pack.and_then(|pack| pack.get(key))
+        pack.get(key)
     }
 
     /// Count `key`'s first lookup: whether the pack held bytes for it, and
