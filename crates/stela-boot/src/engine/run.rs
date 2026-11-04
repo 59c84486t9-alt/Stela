@@ -783,6 +783,9 @@ pub(super) fn beat_report<H: Host>(
 /// and work profiles, the board's and the home PE's native statistics.
 #[cfg(feature = "native-profile")]
 pub(super) fn native_profile_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
+    if machine.runs_parallel() && machine.step_timing().is_some() {
+        parallel::report_stored_pages(machine, host::fresh_counter());
+    }
     output::arguments(format_args!(
         "NATIVE PROFILE bsp_reference_ticks {:?}\n",
         host::profile_snapshot()

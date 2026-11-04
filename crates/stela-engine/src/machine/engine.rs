@@ -709,6 +709,8 @@ pub struct Machine<H: Host, D: Devices> {
     pages: BTreeMap<u64, stored::StoredPage>,
     /// The most `pages` keeps ([`Self::share_kept_pages`]).
     kept_pages: usize,
+    #[cfg(feature = "native-profile")]
+    stored_pages_peak: usize,
     page_uses: u64,
     /// Entry contexts by variant and address class.
     stored_contexts: BTreeMap<(Variant, u64), crate::translations::Digest>,
@@ -1075,6 +1077,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             stale_cursor: None,
             pages: BTreeMap::new(),
             kept_pages: stored::KEPT_PAGES,
+            #[cfg(feature = "native-profile")]
+            stored_pages_peak: 0,
             page_uses: 0,
             stored_contexts: BTreeMap::new(),
             preparations: BTreeMap::new(),

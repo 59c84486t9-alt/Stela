@@ -167,12 +167,24 @@ impl Pe {
             stopped(pe, stop);
         }
         output::arguments(format_args!("PARALLEL PE {pe} starts at {address:#x}\n"));
+        #[cfg(feature = "native-profile")]
+        let mut stored_report = None;
         loop {
             let limit = machine.statistics.blocks + SLICE;
             let stop = machine.run_with_budget(RunBudget {
                 blocks: limit,
                 host_ticks: Some(host::COUNTER_HZ / WAIT_POLLS_PER_SECOND),
             });
+            #[cfg(feature = "native-profile")]
+            if step_timing {
+                let counter = host::fresh_counter();
+                if stored_report.is_none_or(|before| {
+                    counter.wrapping_sub(before) >= super::run::BEAT_SECONDS * host::COUNTER_HZ
+                }) {
+                    report_stored_pages(&machine, counter);
+                    stored_report = Some(counter);
+                }
+            }
             // Like the home PE, drain outside guest execution and before a
             // terminal stop. Retention is bounded by TRACE_HITS/WATCH_HITS;
             // output uses the shared bounded serial queue, never an ISR.
@@ -191,6 +203,17 @@ impl Pe {
             hub.publish(pe, machine.counts());
         }
     }
+}
+
+/// Owner-local counts sampled after native execution has returned.
+#[cfg(feature = "native-profile")]
+pub(super) fn report_stored_pages<H: Host>(machine: &Machine<H, Board>, counter: u64) {
+    let pe = machine.processor();
+    let (pages, budget, peak) = machine.stored_page_occupancy();
+    output::arguments(format_args!(
+        "PE STORED pe={pe} counter={counter:#x} pages={pages} budget={budget} peak={peak} page_bytes={}\n",
+        stela_engine::translations::PAGE_BYTES,
+    ));
 }
 
 /// The home and secondary PEs' records, including the PE that made each hit.

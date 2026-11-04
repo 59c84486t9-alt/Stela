@@ -359,6 +359,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 used: self.page_uses,
             },
         );
+        #[cfg(feature = "native-profile")]
+        {
+            self.stored_pages_peak = self.stored_pages_peak.max(self.pages.len());
+        }
         Some((key, record))
     }
 
@@ -412,6 +416,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return Some(record.clone());
         }
         self.host.translations()?.record(key)
+    }
+
+    /// Current, configured and lifetime peak retained source pages of this owner.
+    #[cfg(feature = "native-profile")]
+    pub fn stored_page_occupancy(&self) -> (usize, usize, usize) {
+        (self.pages.len(), self.kept_pages, self.stored_pages_peak)
     }
 
     /// Keep `KEPT_PAGES` across `machines` machines, which each keep their
