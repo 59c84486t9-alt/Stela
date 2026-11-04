@@ -90,6 +90,37 @@ fn hosted_fused_address_pair_rebases_one_literal_and_both_source_rows() {
 }
 
 #[test]
+fn hosted_fused_wide_constant_rebases_without_numeric_relocations() {
+    let source = words(&[
+        0x92c0_0000 | (0xabcd << 5), // movn x0, #0xabcd, lsl #32
+        0xf2a0_0000 | (0x1234 << 5), // movk x0, #0x1234, lsl #16
+        0xf2e0_0000 | (0x5678 << 5), // movk x0, #0x5678, lsl #48
+        0xd65f_03c0,                 // ret
+    ]);
+    let options = stela_compiler::Options::new(BlockProfile::ORDINARY, TargetCpu::Baseline);
+    let pc = PAGE + 0x40;
+    let compile = |pc| stela_compiler::compile(&source, GuestAddress(pc), &options).unwrap();
+    let block = compile(pc);
+    let probes = probe_displacements(PAGE).map(|delta| compile(pc.wrapping_add(delta)));
+    let entry = prove(
+        &block,
+        &source,
+        PAGE,
+        pc,
+        Digest::of(b"hosted"),
+        [&probes[0], &probes[1]],
+    )
+    .expect("numeric immediate keeps no address dependency");
+    assert!(entry.relocations.is_empty());
+    assert_eq!(entry.source_map[..3], [(0x40, 0), (0x44, 1), (0x48, 11)]);
+    let page = 0x2_3456_8000;
+    let expected = compile(page + 0x40);
+    let rebased = entry.rebase(page, &source).unwrap();
+    assert_eq!(rebased.native.x86_64_code, expected.native.x86_64_code);
+    assert_eq!(rebased.native.source_map, expected.native.source_map);
+}
+
+#[test]
 fn stored_source_witness_requires_the_exact_admitted_compiler_prefix() {
     // The compiler stops at B, but the complete offered analysis input is
     // kept. Changing that suffix must not silently change its witness.
