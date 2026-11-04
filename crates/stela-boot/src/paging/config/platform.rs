@@ -329,10 +329,20 @@ unsafe impl MappingPlatform for Platform {
         let unchanged = MapFailure::Unchanged;
         self.check_context(request.address_space)
             .map_err(unchanged)?;
-        let owner = resource.backing().downcast_ref::<RegisterBacking>();
-        if !owner.is_some_and(|owner| {
-            core::ptr::eq(self, owner.platform.as_ref()) && owner.span == resource.physical_span()
-        }) {
+        let span = resource.physical_span();
+        let owner = resource
+            .backing()
+            .downcast_ref::<RegisterBacking>()
+            .is_some_and(|owner| {
+                core::ptr::eq(self, owner.platform.as_ref()) && owner.span == span
+            });
+        #[cfg(feature = "diagnostics")]
+        let owner = owner
+            || resource
+                .backing()
+                .downcast_ref::<super::fixture_config::Backing>()
+                .is_some_and(|owner| owner.matches(self, span));
+        if !owner {
             return Err(unchanged(owned::Error::OutsideResource));
         }
         if request.attribute != CacheAttribute::Uncached {

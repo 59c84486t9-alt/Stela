@@ -428,8 +428,11 @@ impl Prepared {
             ));
         }
         let ranges = self.mappings();
-        let mut functions = Vec::new();
-        for (index, identity) in self.functions.into_iter().enumerate() {
+        let mut inputs = Vec::new();
+        inputs
+            .try_reserve_exact(self.functions.len())
+            .map_err(|_| refuse!("fixture config input allocation failed"))?;
+        for (index, identity) in self.functions.iter().enumerate() {
             let permit = ConfigPermit {
                 source,
                 address: identity.address,
@@ -441,8 +444,19 @@ impl Prepared {
                     0
                 },
             };
+            inputs.push(
+                source.observe_fixture_config(&permit).map_err(
+                    |error| refuse!("fixture config command observation: {error}", %error),
+                )?,
+            );
+        }
+        let mut functions = Vec::new();
+        functions
+            .try_reserve_exact(self.functions.len())
+            .map_err(|_| refuse!("fixture config owner allocation failed"))?;
+        for (index, (identity, input)) in self.functions.into_iter().zip(inputs).enumerate() {
             let config = source
-                .fixture_config(&permit)
+                .fixture_config(input)
                 .map_err(|error| refuse!("fixture owned config: {error}", %error))?;
             let mut function = PciFunction::new(identity.address, config).map_err(
                 |refusal| refuse!("fixture requester bind: {reason}", reason = ?refusal.reason),

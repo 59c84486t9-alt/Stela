@@ -38,10 +38,16 @@ unsafe impl PhysicalAssignment for Slot {
     }
 }
 
-struct Backing {
+pub(super) struct Backing {
     platform: Arc<platform::Platform>,
     span: PhysicalSpan,
     owner: Retention<Slot>,
+}
+
+impl Backing {
+    pub(super) fn matches(&self, platform: &platform::Platform, span: PhysicalSpan) -> bool {
+        core::ptr::eq(platform, self.platform.as_ref()) && self.span == span
+    }
 }
 
 // SAFETY: private resource backed by the exact same issued slot as its writer.
@@ -219,23 +225,22 @@ unsafe impl PrepublicationCustody for FixtureConfig {}
 // blocked-root takeover can switch policy in the original configuration owner.
 unsafe impl DriverCustody for FixtureConfig {}
 
+/// Observation from the same source and its retired read-only map. The
+/// complete fixture observes these before it publishes any function writer.
+pub(crate) struct FixtureConfigInput<'a> {
+    source: &'a Source,
+    address: Address,
+    window: EcamWindow,
+    span: PhysicalSpan,
+    containment_command: u16,
+}
+
 impl Source {
-    pub(crate) fn fixture_config(
+    pub(crate) fn observe_fixture_config(
         &self,
         permit: &crate::native_dma::diagnostic::ConfigPermit<'_>,
-    ) -> Result<UnpublishedConfig, Error> {
+    ) -> Result<FixtureConfigInput<'_>, Error> {
         let (address, set_command) = permit.for_source(self).ok_or(Error::ResourceInventory)?;
-        {
-            let mut issued = self
-                .issued_config
-                .try_borrow_mut()
-                .map_err(|_| Error::ResourceConflict)?;
-            if issued.contains(&address) {
-                return Err(Error::ResourceConflict);
-            }
-            issued.try_reserve(1).map_err(|_| Error::Allocation)?;
-            issued.push(address);
-        }
         let (window, mapping) = self.config_mapping(address, Protection::ReadOnly)?;
         let span = mapping.physical_span().map_err(Error::Mapping)?;
         // SAFETY: exact source-owned read-only lease, no competing writer.
@@ -252,6 +257,40 @@ impl Source {
         let command = command.map_err(Error::Config)?;
         if command == u16::MAX {
             return Err(Error::Mapping(owned::Error::InvalidPlatformReply));
+        }
+        Ok(FixtureConfigInput {
+            source: self,
+            address,
+            window,
+            span,
+            containment_command: (command | set_command) & !BUS_MASTER,
+        })
+    }
+
+    pub(crate) fn fixture_config(
+        &self,
+        input: FixtureConfigInput<'_>,
+    ) -> Result<UnpublishedConfig, Error> {
+        let FixtureConfigInput {
+            source,
+            address,
+            window,
+            span,
+            containment_command,
+        } = input;
+        if !core::ptr::eq(self, source) {
+            return Err(Error::ResourceInventory);
+        }
+        {
+            let mut issued = self
+                .issued_config
+                .try_borrow_mut()
+                .map_err(|_| Error::ResourceConflict)?;
+            if issued.contains(&address) {
+                return Err(Error::ResourceConflict);
+            }
+            issued.try_reserve(1).map_err(|_| Error::Allocation)?;
+            issued.push(address);
         }
         let bus = self
             .buses
@@ -281,7 +320,7 @@ impl Source {
             _assignment: assignment,
             address,
             window,
-            containment_command: (command | set_command) & !BUS_MASTER,
+            containment_command,
             driver: false,
         });
         // SAFETY: same exact issued original slot and its preowned close.
