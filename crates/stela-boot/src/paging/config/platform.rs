@@ -40,7 +40,7 @@ impl Platform {
         root.check_current().map_err(Error::Root)?;
         let leaves = prepared.leaves.take().ok_or(Error::ResourceInventory)?;
         // SAFETY: CPL0 BSP/current root; no guest/AP runs.
-        let snapshot = unsafe { crate::native_smp::firmware::observe() }
+        let snapshot = unsafe { crate::native_smp::firmware::observe_with_original_pat() }
             .map_err(|_| Error::ResourceInventory)?;
         let image = Image::from_snapshot(&snapshot).map_err(Error::Tables)?;
         let space = AddressSpace {

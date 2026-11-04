@@ -377,7 +377,7 @@ pub(crate) unsafe fn install(handler: Handler) {
 /// # Safety
 /// Ring 0 with interrupts masked, on a CPU whose extended state nothing has
 /// captured yet.
-unsafe fn enable_avx() {
+pub(crate) unsafe fn enable_avx() {
     use core::arch::x86_64::{__cpuid, _xgetbv, _xsetbv};
     const XSAVE_AND_AVX: u32 = 1 << 26 | 1 << 28;
     const CR4_OSXSAVE: u64 = 1 << 18;
@@ -388,15 +388,19 @@ unsafe fn enable_avx() {
     // SAFETY: CPUID enumerates XSAVE and AVX, so CR4.OSXSAVE and these XCR0
     // bits are defined; the caller holds this CPU in ring 0.
     unsafe {
-        core::arch::asm!(
-            "mov {cr4}, cr4",
-            "or {cr4}, {osxsave}",
-            "mov cr4, {cr4}",
-            cr4 = out(reg) _,
-            osxsave = in(reg) CR4_OSXSAVE,
-            options(nostack, preserves_flags),
-        );
-        _xsetbv(0, _xgetbv(0) | XCR0_AVX);
+        let cr4: u64;
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+        if cr4 & CR4_OSXSAVE == 0 {
+            core::arch::asm!(
+                "mov cr4, {}",
+                in(reg) cr4 | CR4_OSXSAVE,
+                options(nostack, preserves_flags),
+            );
+        }
+        let xcr0 = _xgetbv(0);
+        if xcr0 & XCR0_AVX != XCR0_AVX {
+            _xsetbv(0, xcr0 | XCR0_AVX);
+        }
     }
 }
 
