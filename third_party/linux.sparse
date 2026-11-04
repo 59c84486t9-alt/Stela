@@ -267,6 +267,9 @@
 /fs/sync.c
 /fs/file_table.c
 /fs/fcntl.c
+/fs/pipe.c
+/fs/pipe_buffers.c
+/fs/pipe_buffers.h
 /fs/file_async.c
 /fs/fs_context.c
 /fs/fs_context_log.c
