@@ -677,13 +677,18 @@ impl Cpu {
     /// the HCR_EL2 bit, or the vGIC CPU interface's signal, which Arm ORs
     /// with it. A virtual SError (`HCR_VSE`) has only its bit.
     pub fn virtual_pending(&self, virtual_bit: u32) -> bool {
+        match virtual_bit {
+            HCR_VI | HCR_VF | HCR_VSE => self.virtual_pending_bits() & (1 << virtual_bit) != 0,
+            _ => self.hcr(virtual_bit),
+        }
+    }
+
+    /// The virtual pending lines in their HCR_EL2 bit positions. Observe
+    /// the virtual controller once even when a caller needs all three.
+    pub(crate) fn virtual_pending_bits(&self) -> u64 {
+        let pending = self.read(Register::HCR_EL2) & (1 << HCR_VI | 1 << HCR_VF | 1 << HCR_VSE);
         let signals = self.vgic.signals();
-        self.hcr(virtual_bit)
-            || match virtual_bit {
-                HCR_VI => signals.irq,
-                HCR_VF => signals.fiq,
-                _ => false,
-            }
+        pending | (u64::from(signals.irq) << HCR_VI) | (u64::from(signals.fiq) << HCR_VF)
     }
 
     /// Arm `IsPACMEnabled` for the current PSTATE: PACM sets PSTATE.PACM

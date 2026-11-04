@@ -155,16 +155,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// SError that HCR_EL2.{VI,VF,VSE} hold for EL1 and EL0 outside the host.
     pub(super) fn deliver_interrupts(&mut self) -> bool {
         let lines = self.lines();
-        let virtual_pending = self.cpu.pstate.el != 2
-            && [HCR_VI, HCR_VF, HCR_VSE]
-                .into_iter()
-                .any(|bit| self.cpu.virtual_pending(bit));
-        self.cpu.state.pending = if virtual_pending {
+        let virtual_pending = if self.cpu.pstate.el == 2 {
+            0
+        } else {
+            self.cpu.virtual_pending_bits()
+        };
+        self.cpu.state.pending = if virtual_pending != 0 {
             u32::from(DAIF_A | DAIF_I | DAIF_F)
         } else {
             u32::from(if lines.irq { DAIF_I } else { 0 } | if lines.fiq { DAIF_F } else { 0 })
         };
-        if !lines.irq && !lines.fiq && !virtual_pending {
+        if !lines.irq && !lines.fiq && virtual_pending == 0 {
             return false;
         }
         let mut exception = None;
@@ -178,15 +179,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 break;
             }
         }
-        let guest = self.cpu.pstate.el != 2 && !self.cpu.in_host();
-        if exception.is_none() && guest {
+        if exception.is_none() && virtual_pending != 0 && !self.cpu.in_host() {
             for (vector, routing, virtual_bit, mask) in [
                 (Vector::Fiq, HCR_FMO, HCR_VF, DAIF_F),
                 (Vector::Irq, HCR_IMO, HCR_VI, DAIF_I),
                 (Vector::SError, HCR_AMO, HCR_VSE, DAIF_A),
             ] {
                 if self.cpu.hcr(routing)
-                    && self.cpu.virtual_pending(virtual_bit)
+                    && virtual_pending & (1 << virtual_bit) != 0
                     && self.cpu.pstate.daif & mask == 0
                 {
                     let syndrome = if vector == Vector::SError {
