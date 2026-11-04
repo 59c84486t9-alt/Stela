@@ -40,6 +40,10 @@ pub const MAX_RECORDS: usize = 1 << 22;
 /// The most memory the blocks waiting for proof take; later blocks are
 /// counted as dropped.
 const MAX_PENDING_BYTES: usize = 16 << 20;
+/// A direct-mapped cache of decoded pack records shared by all PEs. Each
+/// slot has its own bound so one large record cannot evict many small ones.
+const DECODED_SLOTS: usize = 128;
+const DECODED_SLOT_BYTES: usize = 64 << 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackError {
@@ -314,6 +318,29 @@ struct SharedEntry {
     bytes: usize,
 }
 
+/// A validated record paired with the immutable pack bytes it came from.
+pub struct DecodedRecord<'a> {
+    bytes: &'a [u8],
+    record: Arc<Record>,
+    retained_bytes: usize,
+}
+
+impl<'a> DecodedRecord<'a> {
+    pub fn decode(bytes: &'a [u8], translator: &Digest, key: &Digest) -> Option<Self> {
+        let record = Arc::new(Record::decode(bytes, translator, key).ok()?);
+        let retained_bytes = record.retained_bytes();
+        Some(Self {
+            bytes,
+            record,
+            retained_bytes,
+        })
+    }
+
+    pub fn into_record(self) -> Arc<Record> {
+        self.record
+    }
+}
+
 /// One boot's store over the pack it read.
 #[derive(Debug)]
 pub struct Store<'a> {
@@ -323,6 +350,7 @@ pub struct Store<'a> {
     /// each. The records themselves are the engine's to keep: decoded, they
     /// take several times the pack's bytes.
     loaded: BTreeMap<Digest, bool>,
+    decoded: Vec<Option<Arc<Record>>>,
     pending: BTreeMap<PendingKey, PendingPage>,
     /// The blocks in `pending`.
     pending_blocks: usize,
@@ -365,6 +393,7 @@ impl<'a> Store<'a> {
             translator,
             pack,
             loaded: BTreeMap::new(),
+            decoded: Vec::new(),
             pending: BTreeMap::new(),
             pending_blocks: 0,
             pending_bytes: 0,
@@ -534,6 +563,39 @@ impl<'a> Store<'a> {
         &self.translator
     }
 
+    fn decoded_slot(key: &Digest) -> usize {
+        usize::from(key.0[0]) % DECODED_SLOTS
+    }
+
+    /// A record already decoded and checked against this pack.
+    pub fn cached_record(&self, key: &Digest) -> Option<Arc<Record>> {
+        let record = self.decoded.get(Self::decoded_slot(key))?.as_ref()?;
+        (record.key == *key).then(|| Arc::clone(record))
+    }
+
+    /// Remember a decoded record from this pack. The caller can drop an
+    /// evicted record after releasing the shared store lock.
+    pub fn remember_record(&mut self, decoded: &DecodedRecord<'a>) -> Option<Arc<Record>> {
+        let record = &decoded.record;
+        if record.translator != self.translator
+            || decoded.retained_bytes > DECODED_SLOT_BYTES
+            || !self
+                .stored(&record.key)
+                .is_some_and(|bytes| core::ptr::eq(bytes, decoded.bytes))
+        {
+            return None;
+        }
+        if self.decoded.is_empty() {
+            self.decoded.try_reserve_exact(DECODED_SLOTS).ok()?;
+            self.decoded.resize_with(DECODED_SLOTS, || None);
+        }
+        let slot = &mut self.decoded[Self::decoded_slot(&record.key)];
+        if slot.as_ref().is_some_and(|held| held.key == record.key) {
+            return None;
+        }
+        slot.replace(Arc::clone(record))
+    }
+
     /// The pack's bytes for `key`, unless an earlier lookup found them
     /// invalid: for a caller to decode ([`Record::decode`]) without holding
     /// the store, then report with [`Self::looked_up`].
@@ -547,15 +609,15 @@ impl<'a> Store<'a> {
     /// Count `key`'s first lookup: whether the pack held bytes for it, and
     /// whether they decoded.
     pub fn looked_up(&mut self, key: &Digest, found: bool, valid: bool) {
-        if self.loaded.contains_key(key) {
+        let alloc::collections::btree_map::Entry::Vacant(slot) = self.loaded.entry(*key) else {
             return;
-        }
+        };
         match (found, valid) {
             (true, true) => self.counters.loaded += 1,
             (true, false) => self.counters.invalid += 1,
             (false, _) => self.counters.absent += 1,
         }
-        self.loaded.insert(*key, valid);
+        slot.insert(valid);
     }
 
     /// The pack read, if valid.
@@ -652,10 +714,16 @@ impl<'a> Store<'a> {
 
 impl Translations for Store<'_> {
     fn record(&mut self, key: &Digest) -> Option<Arc<Record>> {
+        if let Some(record) = self.cached_record(key) {
+            return Some(record);
+        }
         let bytes = self.stored(key);
-        let record = bytes.and_then(|bytes| Record::decode(bytes, &self.translator, key).ok());
-        self.looked_up(key, bytes.is_some(), record.is_some());
-        record.map(Arc::new)
+        let decoded = bytes.and_then(|bytes| DecodedRecord::decode(bytes, &self.translator, key));
+        self.looked_up(key, bytes.is_some(), decoded.is_some());
+        decoded.map(|decoded| {
+            self.remember_record(&decoded);
+            decoded.into_record()
+        })
     }
 
     fn prepared(
@@ -696,6 +764,56 @@ mod tests {
             .collect();
         preparation.admit(&mut input);
         Offer::compile(key, page, pc, preparation.context(page), input, preparation).unwrap()
+    }
+
+    #[test]
+    fn decoded_pack_records_share_an_owner_and_check_the_full_key() {
+        let translator = translator_id();
+        let first = Digest([1; 32]);
+        let mut second = first;
+        second.0[1] = 2;
+        let bytes = Layout::new(
+            &translator,
+            [first, second]
+                .map(|key| (key, Piece::New(Record::new(translator, key).encode())))
+                .into(),
+        )
+        .to_vec();
+        let mut store = Store::new(translator, Some(&bytes)).0;
+        let held = store.record(&first).unwrap();
+        assert!(Arc::ptr_eq(&held, &store.record(&first).unwrap()));
+        assert_eq!(store.record(&second).unwrap().key, second);
+        assert!(!Arc::ptr_eq(&held, &store.record(&first).unwrap()));
+        assert_eq!(store.counters.loaded, 2);
+    }
+
+    #[test]
+    fn decoded_cache_declines_oversized_and_foreign_records() {
+        let translator = translator_id();
+        let key = Digest::of(b"page");
+        let mut large = Record::new(translator, key);
+        let mut entry = offer(0x1000, key).prove().unwrap();
+        entry.code.resize(DECODED_SLOT_BYTES, 0);
+        large.insert(entry);
+        let bytes = Layout::new(&translator, vec![(key, Piece::New(large.encode()))]).to_vec();
+        let mut store = Store::new(translator, Some(&bytes)).0;
+        assert!(store.record(&key).is_some());
+        assert!(store.cached_record(&key).is_none());
+
+        let bytes = Layout::new(
+            &translator,
+            vec![(key, Piece::New(Record::new(translator, key).encode()))],
+        )
+        .to_vec();
+        let foreign = bytes.clone();
+        let mut store = Store::new(translator, Some(&bytes)).0;
+        let foreign = Pack::parse(&foreign, &translator)
+            .unwrap()
+            .get(&key)
+            .unwrap();
+        let decoded = DecodedRecord::decode(foreign, &translator, &key).unwrap();
+        assert!(store.remember_record(&decoded).is_none());
+        assert!(store.cached_record(&key).is_none());
     }
 
     #[test]

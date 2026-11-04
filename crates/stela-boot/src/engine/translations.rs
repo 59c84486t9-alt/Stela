@@ -30,8 +30,8 @@ use stela_engine::translations;
 use stela_engine::translations::Digest;
 use stela_engine::translations::Record;
 use stela_engine::translations::pack;
-use stela_engine::translations::pack::Pack;
 use stela_engine::translations::pack::Store;
+use stela_engine::translations::pack::{DecodedRecord, Pack};
 use stela_runtime::pc::fat32::Fat32;
 use stela_runtime::pc::gpt::Guid;
 use uefi::{
@@ -352,23 +352,31 @@ impl Translations for Shared {
     /// The record, decoded while the other PEs reach the store: the pack's
     /// bytes outlive the lock.
     fn record(&mut self, key: &Digest) -> Option<alloc::sync::Arc<Record>> {
-        let (bytes, translator) = with_boot(|boot| {
+        let lookup = with_boot(|boot| {
             let store = &mut boot.as_mut()?.store;
+            if let Some(record) = store.cached_record(key) {
+                return Some(Ok(record));
+            }
             match store.stored(key) {
-                Some(bytes) => Some((bytes, *store.translator())),
+                Some(bytes) => Some(Err((bytes, *store.translator()))),
                 None => {
                     store.looked_up(key, false, false);
                     None
                 }
             }
         })?;
-        let record = Record::decode(bytes, &translator, key).ok();
-        with_boot(|boot| {
-            if let Some(boot) = boot {
-                boot.store.looked_up(key, true, record.is_some());
-            }
+        let (bytes, translator) = match lookup {
+            Ok(record) => return Some(record),
+            Err(source) => source,
+        };
+        let decoded = DecodedRecord::decode(bytes, &translator, key);
+        let evicted = with_boot(|boot| {
+            let store = &mut boot.as_mut()?.store;
+            store.looked_up(key, true, decoded.is_some());
+            store.remember_record(decoded.as_ref()?)
         });
-        record.map(alloc::sync::Arc::new)
+        drop(evicted);
+        decoded.map(DecodedRecord::into_record)
     }
 
     fn prepared(
