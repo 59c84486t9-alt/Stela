@@ -7,13 +7,15 @@ use super::{
     SpillOffset,
 };
 use crate::GuestAddress;
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{borrow::Cow, boxed::Box, vec::Vec};
 
 const AFTER_FALLTHROUGH: u8 = 1 << 2;
 const TRANSLATED: u8 = 1 << 3;
 const SEPARATE_PC_DELTA: u8 = 1 << 4;
 const BINDINGS_SHIFT: u32 = 5;
 const LONG_BINDINGS: usize = 7;
+const RETAINED_ROWS: usize = 4;
+const RETAINED_BINDINGS: usize = 32;
 
 fn zigzag(value: i64) -> u64 {
     ((value << 1) ^ (value >> 63)) as u64
@@ -54,6 +56,24 @@ impl Reader<'_> {
                 return value;
             }
             shift += 7;
+        }
+    }
+
+    fn skip_bindings(&mut self, count: usize) {
+        // A guest byte and a single-byte source, as for every host GPR.
+        let (head, tail) = self.bytes.split_at(2 * count);
+        if head
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .all(|binding| binding[1] < 0x80)
+        {
+            self.bytes = tail;
+            return;
+        }
+        for _ in 0..count {
+            self.byte();
+            self.value();
         }
     }
 }
@@ -128,22 +148,52 @@ impl PackedRecovery {
 
     /// The rows given to [`Self::new`].
     pub fn rows(&self) -> Vec<FaultRecovery> {
-        self.decode(None)
+        let mut rows = Vec::new();
+        self.decode(None, &mut rows);
+        rows
     }
 
     /// Rows that apply at this native offset, plus any malformed ranges that
     /// the caller must reject regardless of where the fault occurred.
     pub fn rows_at(&self, offset: usize) -> Vec<FaultRecovery> {
-        self.decode(Some(offset))
+        let mut rows = Vec::new();
+        self.decode(Some(offset), &mut rows);
+        rows
     }
 
-    fn decode(&self, offset: Option<usize>) -> Vec<FaultRecovery> {
+    /// Like [`Self::rows_at`], reusing storage across fault lookups. Large
+    /// tables are owned by this lookup alone, so the scratch retains only
+    /// enough space for a few rows and a register file's worth of bindings
+    /// in each.
+    pub fn rows_at_reusing<'a>(
+        &self,
+        offset: usize,
+        scratch: &'a mut Vec<FaultRecovery>,
+    ) -> Cow<'a, [FaultRecovery]> {
+        let count = self.decode(Some(offset), scratch);
+        if scratch.capacity() > RETAINED_ROWS
+            || scratch
+                .iter()
+                .any(|row| row.bindings.capacity() > RETAINED_BINDINGS)
+        {
+            let mut rows = core::mem::take(scratch);
+            rows.truncate(count);
+            Cow::Owned(rows)
+        } else {
+            Cow::Borrowed(&scratch[..count])
+        }
+    }
+
+    fn decode(&self, offset: Option<usize>, rows: &mut Vec<FaultRecovery>) -> usize {
         if self.0.is_empty() {
-            return Vec::new();
+            return 0;
         }
         let mut reader = Reader { bytes: &self.0 };
         let count = reader.value() as usize;
-        let mut rows = Vec::with_capacity(offset.map_or(count, |_| 0));
+        if offset.is_none() {
+            rows.reserve(count);
+        }
+        let mut kept = 0;
         let (mut end, mut pc, mut retired) = (0, 0, 0);
         for _ in 0..count {
             let start = end + unzigzag(reader.value());
@@ -159,20 +209,26 @@ impl PackedRecovery {
             pc = u64::wrapping_add_signed(pc, pc_delta);
             let translated = (tag & TRANSLATED != 0).then(|| (reader.byte(), reader.byte()));
             let inline_bindings = usize::from(tag >> BINDINGS_SHIFT);
-            let bindings = if inline_bindings == LONG_BINDINGS {
+            let binding_count = if inline_bindings == LONG_BINDINGS {
                 reader.value() as usize
             } else {
                 inline_bindings
             };
-            let encoded_bindings = (0..bindings).map(|_| (reader.byte(), reader.value()));
             let range = start as usize..row_end as usize;
             end = row_end;
             if offset.is_some_and(|at| range.start < range.end && !range.contains(&at)) {
-                encoded_bindings.for_each(drop);
+                reader.skip_bindings(binding_count);
                 continue;
             }
-            let bindings = encoded_bindings
-                .map(|(guest, source)| RecoveryBinding {
+            let mut bindings = rows.get_mut(kept).map_or_else(Vec::new, |row| {
+                let mut bindings = core::mem::take(&mut row.bindings);
+                bindings.clear();
+                bindings
+            });
+            bindings.extend((0..binding_count).map(|_| {
+                let guest = reader.byte();
+                let source = reader.value();
+                RecoveryBinding {
                     guest,
                     source: if source & 1 == 0 {
                         RecoverySource::HostRegister((source >> 1) as u8)
@@ -181,9 +237,9 @@ impl PackedRecovery {
                             SpillOffset::new((source >> 1) as u16).expect("packed by new"),
                         )
                     },
-                })
-                .collect();
-            rows.push(FaultRecovery {
+                }
+            }));
+            let row = FaultRecovery {
                 start: range.start,
                 end: range.end,
                 bindings,
@@ -197,9 +253,15 @@ impl PackedRecovery {
                     },
                 ),
                 site: RecoverySite::packed(tag & 3, translated),
-            });
+            };
+            if let Some(prior) = rows.get_mut(kept) {
+                *prior = row;
+            } else {
+                rows.push(row);
+            }
+            kept += 1;
         }
-        rows
+        kept
     }
 }
 
@@ -246,6 +308,38 @@ mod tests {
             [rows[1].clone(), rows[2].clone(), rows[3].clone()],
         );
         assert_eq!(packed.rows_at(16), [rows[3].clone()]);
+
+        let mut scratch = Vec::new();
+        let selected = packed.rows_at_reusing(10, &mut scratch);
+        assert_eq!(selected.as_ref(), packed.rows_at(10));
+        let bindings = selected[0].bindings.as_ptr();
+        let selected = packed.rows_at_reusing(16, &mut scratch);
+        assert_eq!(selected.as_ref(), packed.rows_at(16));
+        assert_eq!(selected[0].bindings.as_ptr(), bindings);
+    }
+
+    #[test]
+    fn oversized_fault_tables_do_not_grow_the_scratch() {
+        let row = FaultRecovery {
+            start: 0,
+            end: 4,
+            bindings: vec![RecoveryBinding::gpr(1, 2)],
+            retirement: RetirementPoint::before(GuestAddress(0x4000), 0).unwrap(),
+            site: RecoverySite::guest_access(),
+        };
+        let rows = vec![row.clone(); RETAINED_ROWS + 1];
+        let bindings = FaultRecovery {
+            bindings: vec![RecoveryBinding::gpr(1, 2); RETAINED_BINDINGS + 1],
+            ..row
+        };
+        for table in [&rows[..], &[bindings][..]] {
+            let packed = PackedRecovery::new(table);
+            let mut scratch = Vec::new();
+            let selected = packed.rows_at_reusing(0, &mut scratch);
+            assert!(matches!(selected, Cow::Owned(_)));
+            assert_eq!(selected.as_ref(), table);
+            assert_eq!(scratch.capacity(), 0);
+        }
     }
 
     #[test]
@@ -260,7 +354,7 @@ mod tests {
                 end: 47,
                 bindings: vec![
                     RecoveryBinding::gpr(3, 9),
-                    RecoveryBinding::spill(30, SpillOffset::new(8).unwrap()),
+                    RecoveryBinding::spill(30, SpillOffset::new(96).unwrap()),
                 ],
                 retirement: point(8, 2),
                 site: RecoverySite::guest_access(),
@@ -290,6 +384,7 @@ mod tests {
         ];
         let packed = PackedRecovery::new(&rows);
         assert_eq!(packed.rows(), rows);
+        assert_eq!(packed.rows_at(13), [rows[1].clone()]);
         assert!(packed.0.len() < 64);
         assert_eq!(PackedRecovery::new(&[]).rows(), []);
     }

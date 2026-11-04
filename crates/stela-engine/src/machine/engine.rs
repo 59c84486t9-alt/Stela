@@ -687,6 +687,7 @@ pub struct Machine<H: Host, D: Devices> {
     /// faultable access, which a native fault applies first. Kept apart
     /// from [`Block`], whose fields every exit reads.
     fault_recovery: recovery::Owners,
+    recovery_scratch: Vec<block::FaultRecovery>,
     native_failure: Option<recovery::CapturedFailure>,
     /// Every variant a block was compiled for, once: what a [`VariantId`]
     /// names.
@@ -987,6 +988,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             reclaimed_at: None,
             memory_release_blocks: MEMORY_RELEASE_BLOCKS,
             fault_recovery: recovery::Owners::new(),
+            recovery_scratch: Vec::new(),
             native_failure: None,
             variants: Vec::new(),
             index: block_index::BlockIndex::new(),
