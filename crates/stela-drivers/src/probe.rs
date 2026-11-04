@@ -1696,6 +1696,8 @@ mod tests {
             // SAFETY: the empty region can allocate no DMA pages. Only the
             // synthetic ECAM buffer is mapped, and native claims all refuse.
             let mut dma = unsafe { crate::bus::dma::RegionAllocator::new(0..0) };
+            // SAFETY: ECAM is the live fixture above. Its legacy BARs are
+            // unmapped and the services refuse all native device access.
             let devices = unsafe {
                 probe_with_provider(
                     &handoff,
