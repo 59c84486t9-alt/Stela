@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 22:16:07 -0500
+Subject: [PATCH] refactor(vfs): link original adjacent mount namespace lookup
+
+---
+ fs/mount_cache.c | 33 +++++++++++++++++++++++++++++++++
+ fs/namespace.c   | 33 ---------------------------------
+ 2 files changed, 33 insertions(+), 33 deletions(-)
+
+diff --git a/fs/mount_cache.c b/fs/mount_cache.c
+index a13e527955b4f7954df9b46e4ad093f5b4847bc7..20ff79402b9fd5b1cb571d5f2ae950167dedfd81 100644
+--- a/fs/mount_cache.c
++++ b/fs/mount_cache.c
+@@ -1141,3 +1141,36 @@ void put_mnt_ns(struct mnt_namespace *ns)
+ 	guard(mount_writer)();
+ 	umount_tree(ns->root, 0);
+ }
++
++struct mnt_namespace *get_sequential_mnt_ns(struct mnt_namespace *mntns, bool previous)
++{
++	struct ns_common *ns;
++
++	guard(rcu)();
++
++	for (;;) {
++		ns = ns_tree_adjoined_rcu(mntns, previous);
++		if (IS_ERR(ns))
++			return ERR_CAST(ns);
++
++		mntns = to_mnt_ns(ns);
++
++		/*
++		 * The last passive reference count is put with RCU
++		 * delay so accessing the mount namespace is not just
++		 * safe but all relevant members are still valid.
++		 */
++		if (!ns_capable_noaudit(mntns->user_ns, CAP_SYS_ADMIN))
++			continue;
++
++		/*
++		 * We need an active reference count as we're persisting
++		 * the mount namespace and it might already be on its
++		 * deathbed.
++		 */
++		if (!ns_ref_get(mntns))
++			continue;
++
++		return mntns;
++	}
++}
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 53eaca825da814ff26cd0afaac1b3e183e54904d..f976883c75ed0e86f584fa2d00faaff9f5295254 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -1008,39 +1008,6 @@ static bool is_mnt_ns_file(struct dentry *dentry)
+ 	return ns->ops == &mntns_operations;
+ }
+ 
+-struct mnt_namespace *get_sequential_mnt_ns(struct mnt_namespace *mntns, bool previous)
+-{
+-	struct ns_common *ns;
+-
+-	guard(rcu)();
+-
+-	for (;;) {
+-		ns = ns_tree_adjoined_rcu(mntns, previous);
+-		if (IS_ERR(ns))
+-			return ERR_CAST(ns);
+-
+-		mntns = to_mnt_ns(ns);
+-
+-		/*
+-		 * The last passive reference count is put with RCU
+-		 * delay so accessing the mount namespace is not just
+-		 * safe but all relevant members are still valid.
+-		 */
+-		if (!ns_capable_noaudit(mntns->user_ns, CAP_SYS_ADMIN))
+-			continue;
+-
+-		/*
+-		 * We need an active reference count as we're persisting
+-		 * the mount namespace and it might already be on its
+-		 * deathbed.
+-		 */
+-		if (!ns_ref_get(mntns))
+-			continue;
+-
+-		return mntns;
+-	}
+-}
+-
+ struct mnt_namespace *mnt_ns_from_dentry(struct dentry *dentry)
+ {
+ 	if (!is_mnt_ns_file(dentry))
