@@ -16,6 +16,8 @@ struct stela_linux_mapping;
 /* Releases a raw compatibility inode without VFS superblock ownership. */
 void stela_linux_compat_iput(struct inode *inode);
 
+struct file *stela_linux_reopen_unowned_path(void);
+
 /* Opens a character device a driver registered, or returns a negative errno. */
 int stela_linux_chrdev_open(dev_t device, unsigned int flags, struct file **file);
 

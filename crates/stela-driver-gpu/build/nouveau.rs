@@ -49,7 +49,10 @@ const OPEN: &[(&str, &[&str])] = &[
     ),
     // Nothing tears a pseudo filesystem's superblock down.
     ("pseudo filesystems", &["kill_anon_super"]),
-    ("DRM leases", &["dentry_open"]),
+    (
+        "reopening a file without a VFS path",
+        &["stela_linux_reopen_unowned_path"],
+    ),
     (
         "HDMI audio",
         &["device_link_add", "platform_device_unregister"],

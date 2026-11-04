@@ -24,6 +24,7 @@
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <stela/file.h>
+#include <stela/linux.h>
 #include <unsupported.h>
 
 static struct inode *inode_of_mode(umode_t mode)
@@ -393,13 +394,16 @@ void simple_release_fs(struct vfsmount **mount, int *count)
 
 /* Nothing tears a superblock down through its filesystem; kern_unmount frees it. */
 STELA_UNSUPPORTED(void, kill_anon_super, struct super_block *)
-/* Opening a second file on a path, which only DRM leases do. */
-STELA_UNSUPPORTED(struct file *, dentry_open, const struct path *, int, const struct cred *)
+/* A raw compatibility file has no VFS path through which to reopen it. */
+struct file *stela_linux_reopen_unowned_path(void)
+{
+	stela_linux_unsupported("stela_linux_reopen_unowned_path");
+	return ERR_PTR(-EOPNOTSUPP);
+}
 
 #ifdef STELA_LINUX_FILE_TEST
 #include <linux/init_task.h>
 #include <linux/statfs.h>
-#include <stela/linux.h>
 #include <stela/page.h>
 #include <stela/page_test.h>
 #include <stela/test.h>

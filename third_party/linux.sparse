@@ -244,6 +244,7 @@
 /fs/writeback_inode.h
 /fs/inode_evict.c
 /fs/open.c
+/fs/path_open.c
 /fs/file_table.c
 /fs/fcntl.c
 /fs/fs_context.c

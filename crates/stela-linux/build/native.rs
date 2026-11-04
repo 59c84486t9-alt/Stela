@@ -194,6 +194,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/pidfs_metadata.c")),
             PathBuf::from(format!("{LINUX}/fs/filename.c")),
             PathBuf::from(format!("{LINUX}/fs/filp_close.c")),
+            PathBuf::from(format!("{LINUX}/fs/path_open.c")),
             PathBuf::from(format!("{LINUX}/lib/string.c")),
             PathBuf::from(format!("{LINUX}/lib/hexdump.c")),
             PathBuf::from(format!("{LINUX}/lib/string_unescape.c")),
