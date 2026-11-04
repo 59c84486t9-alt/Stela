@@ -2104,7 +2104,7 @@ fn start_platform(
         }
     }
     // The remapping units, taken before any host driver starts DMA.
-    let remappers = match (&contained_pci, handoff.storage.handoff()) {
+    let mut remappers = match (&contained_pci, handoff.storage.handoff()) {
         // SAFETY: no host driver has started; the loader root maps the ACPI
         // tables and firmware translation was turned off at ExitBootServices.
         (Some(pci), Some(storage)) => unsafe {

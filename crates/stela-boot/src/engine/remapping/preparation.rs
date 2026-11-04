@@ -7,6 +7,7 @@ struct VtdRoot {
     address: Address,
     unit: Arc<Unit<MmioRegisters>>,
     blocked: BlockedRequester<MmioRegisters>,
+    _lines: native_mmio::InitialPciLines,
 }
 
 // SAFETY: constructed only from the requester's selected original taken unit,
@@ -103,19 +104,24 @@ impl Remappers {
         &self,
         source: &native_mmio::Source,
         address: Address,
-    ) -> Result<Box<dyn Root>, DmaError> {
+    ) -> Result<Box<dyn Root>, PreparationError> {
         let rid = requester(address);
         if let Some(taken) = self
             .amd(address.segment, rid)
             .map_err(|_| DmaError::IommuUnavailable)?
         {
-            return taken.preparation(address);
+            return taken.preparation(address).map_err(PreparationError::Dma);
         }
         let taken = self
             .vtd(address.segment, rid)
             .map_err(|_| DmaError::IommuUnavailable)?
             .filter(|taken| taken.unit.allows(rid))
             .ok_or(DmaError::DrainUnavailable)?;
+        let lines = self
+            .initial_lines
+            .as_ref()
+            .ok_or(PreparationError::Interrupt(MappingError::Unavailable))?;
+        lines.check(source).map_err(PreparationError::Interrupt)?;
         let blocked = self
             .initial_requester(source, taken, rid)?
             .ok_or(DmaError::DrainUnavailable)?;
@@ -123,6 +129,7 @@ impl Remappers {
             address,
             unit: taken.unit.clone(),
             blocked,
+            _lines: lines.clone(),
         }))
     }
 }

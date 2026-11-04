@@ -40,6 +40,8 @@ impl Prepared {
         // MADT's override determines the physical GSI separately.
         let fadt = mmio.fadt();
         let irq = u32::from(u16::from_le_bytes([fadt[46], fadt[47]]));
+        mmio.require_sci_pic_masked(irq)
+            .map_err(|_| IrqError::Mask)?;
         Ok(Self {
             mmio,
             line,
@@ -65,9 +67,12 @@ impl Prepared {
         let pending = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(AtomicBool::new(false));
         let devices = Sources::new(self.power);
+        let unit = self.mmio.original_line(self.line)?;
+        self.mmio
+            .require_sci_pic_masked(self.irq)
+            .map_err(|_| IrqError::Mask)?;
         // SAFETY: capture checked the owned physical route; Sources masks and
         // restores every fixed/GPE enable bit on this exclusive SCI line.
-        let unit = self.mmio.original_line(self.line)?;
         let pin = unsafe { unit.claim(self.line, Box::new(devices)) }?;
         let parent = Arc::new(pin.parent_mask()?);
         let callback = Arc::new(Deferred {

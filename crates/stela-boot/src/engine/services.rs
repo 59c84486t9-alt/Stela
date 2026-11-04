@@ -209,8 +209,17 @@ unsafe impl NativeServices for Services<'_> {
             return Err(ServiceError::Claim(ClaimError::UnsupportedRole(role)));
         }
         let root = self.remappers.preparation(self.mmio, address).map_err(|error| {
-            output::arguments(format_args!("UNSUPPORTED Stela cold requester {address}: original DMA drain unavailable ({error:?})\n"));
-            ServiceError::Refused("cold requester original DMA drain unavailable")
+            use super::remapping::PreparationError;
+            match error {
+                PreparationError::Dma(error) => {
+                    output::arguments(format_args!("UNSUPPORTED Stela cold requester {address}: original DMA drain unavailable ({error:?})\n"));
+                    ServiceError::Refused("cold requester original DMA drain unavailable")
+                }
+                PreparationError::Interrupt(error) => {
+                    output::arguments(format_args!("UNSUPPORTED Stela cold requester {address}: original interrupt containment unavailable ({error:?})\n"));
+                    ServiceError::Mapping(error)
+                }
+            }
         })?;
         let mut function = self.function(address)?;
         self.stop(function.config()).map_err(ServiceError::Claim)?;

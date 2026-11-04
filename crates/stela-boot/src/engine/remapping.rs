@@ -111,11 +111,24 @@ impl BlockedFabric {
 pub(super) struct Remappers {
     taken: Vec<Taken>,
     initial_fabric: Option<BlockedFabric>,
+    initial_lines: Option<native_mmio::InitialPciLines>,
     requesters: core::cell::RefCell<Vec<BoundRequester<MmioRegisters>>>,
     amd: Vec<amd::Taken>,
     roles: core::cell::RefCell<roles::Inventory>,
     topology: core::cell::RefCell<Vec<(u16, Vec<Present>)>>,
     dmar: Option<dmar::Remapping>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum PreparationError {
+    Dma(DmaError),
+    Interrupt(MappingError),
+}
+
+impl From<DmaError> for PreparationError {
+    fn from(error: DmaError) -> Self {
+        Self::Dma(error)
+    }
 }
 
 fn address(segment: u16, rid: u16) -> Address {
@@ -137,6 +150,7 @@ impl Remappers {
         Self {
             taken: Vec::new(),
             initial_fabric: None,
+            initial_lines: None,
             requesters: core::cell::RefCell::new(Vec::new()),
             amd: Vec::new(),
             roles: core::cell::RefCell::new(roles::Inventory::empty()),
@@ -419,7 +433,7 @@ impl Remappers {
     /// Whole native IOAPIC ownership was explicitly handed off. The captured
     /// platform and every current DMA/IRQ mode writer stay exclusive.
     pub(super) unsafe fn install_ioapics(
-        &self,
+        &mut self,
         pci: &native_mmio::ContainedPci<'static>,
     ) -> Result<usize, MappingError> {
         let fabric = self
@@ -435,7 +449,17 @@ impl Remappers {
         })?;
         // SAFETY: forwarded original controller handoff and exact complete
         // mode owners, all from this same retained source.
-        unsafe { fabric.source.install_ioapics(modes) }
+        let count = unsafe { fabric.source.install_ioapics(modes) }?;
+        match fabric.source.initial_pci_lines() {
+            Ok(lines) => {
+                self.initial_lines = Some(lines);
+                output::arguments(format_args!("HOST PCI initial interrupt paths contained\n"));
+            }
+            Err(error) => output::arguments(format_args!(
+                "HOST PCI initial interrupt containment unavailable: {error:?}\n"
+            )),
+        }
+        Ok(count)
     }
 
     fn initial_requester(

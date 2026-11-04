@@ -871,6 +871,34 @@ struct MountedControllers {
     >,
 }
 
+/// The original IOAPIC cohort and its retained notification mode, joined
+/// with a check of the independent legacy PIC delivery path.
+#[derive(Clone)]
+pub(crate) struct InitialPciLines {
+    source: &'static Source,
+    controllers: Rc<MountedControllers>,
+    legacy_pic: bool,
+}
+
+impl InitialPciLines {
+    pub(crate) fn check(&self, source: &Source) -> Result<(), Error> {
+        if !core::ptr::eq(self.source, source) {
+            return Err(Error::OutsideResource);
+        }
+        source.identity.check_irq_cpu().map_err(failed)?;
+        for routes in &self.controllers.routes {
+            routes.verify_contained().map_err(failed)?;
+        }
+        // The IOAPIC's programming permission does not cover the PIC.
+        // Observe its two original interrupt masks without acknowledging or
+        // reprogramming either controller.
+        if self.legacy_pic && (in8(0x21) != u8::MAX || in8(0xa1) != u8::MAX) {
+            return Err(Error::Unavailable);
+        }
+        Ok(())
+    }
+}
+
 impl MountedControllers {
     fn check_line(
         &self,
@@ -1002,9 +1030,9 @@ impl Source {
         *self.ioapics.borrow_mut() = MountedIoapics::Containing(controllers.clone());
         // SAFETY: same exclusive original roster. The Source now retains every
         // controller, plan and mode pin even if the hardware refuses.
-        if let Err(error) =
-            unsafe { crate::native_irq::root::contain_firmware_lines(&controllers.routes) }
-        {
+        let contained =
+            unsafe { crate::native_irq::root::contain_firmware_lines(&controllers.routes) };
+        if let Err(error) = contained {
             controllers.failure.set(Some(error));
             return Err(failed(error));
         }
@@ -1021,6 +1049,25 @@ impl Source {
     }
     pub(crate) fn fadt(&self) -> &'static [u8] {
         self.platform.wire().fadt()
+    }
+
+    /// Join the original controller cohort with the independent legacy line
+    /// mask state. This supplies no ownership of SCI or PCI line contributors.
+    pub(crate) fn initial_pci_lines(&'static self) -> Result<InitialPciLines, Error> {
+        self.identity.check_current().map_err(failed)?;
+        let legacy_pic = self.routing()?.has_legacy_pic();
+        let state = self.ioapics.borrow();
+        let MountedIoapics::Ready(controllers) = &*state else {
+            return Err(Error::Unavailable);
+        };
+        let lines = InitialPciLines {
+            source: self,
+            controllers: controllers.clone(),
+            legacy_pic,
+        };
+        drop(state);
+        lines.check(self)?;
+        Ok(lines)
     }
 
     /// Reuse the original controller after checking this unclaimed route
@@ -1040,6 +1087,19 @@ impl Source {
         controllers.check_line(&routing, line).cloned()
     }
 
+    /// SCI_INT is the firmware source number. Its MADT GSI override
+    /// applies to the IOAPIC and does not move the legacy PIC input.
+    pub(crate) fn require_sci_pic_masked(&self, sci_int: u32) -> Result<(), Error> {
+        self.identity.check_irq_cpu().map_err(failed)?;
+        if self.identity.in_interrupt() {
+            return Err(Error::Busy);
+        }
+        if sci_int < 16 && self.routing()?.has_legacy_pic() {
+            require_pic_masked(sci_int as u8)?;
+        }
+        Ok(())
+    }
+
     /// Verify the IOAPIC routes and any PC/AT PIC masks for these ISA lines.
     /// Whole IOAPIC handoff grants no PIC programming permission.
     pub(crate) fn require_isa_masked(&self, irqs: &[u8]) -> Result<(), Error> {
@@ -1057,13 +1117,18 @@ impl Source {
         }
         if routing.has_legacy_pic() {
             for &irq in irqs {
-                let port = if irq < 8 { 0x21 } else { 0xa1 };
-                let mask = 1 << (irq & 7);
-                if in8(port) & mask == 0 {
-                    return Err(Error::Unavailable);
-                }
+                require_pic_masked(irq)?;
             }
         }
         Ok(())
     }
+}
+
+fn require_pic_masked(irq: u8) -> Result<(), Error> {
+    let port = if irq < 8 { 0x21 } else { 0xa1 };
+    let mask = 1 << (irq & 7);
+    if in8(port) & mask == 0 {
+        return Err(Error::Unavailable);
+    }
+    Ok(())
 }
