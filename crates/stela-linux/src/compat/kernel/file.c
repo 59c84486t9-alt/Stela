@@ -7,6 +7,7 @@
  * mount is the superblock its dentries take their operations from. */
 #include <linux/anon_inodes.h>
 #include <linux/cdev.h>
+#include <linux/cred.h>
 #include <linux/dcache.h>
 #include <linux/err.h>
 #include <linux/fdtable.h>
@@ -66,6 +67,8 @@ void inode_set_bytes(struct inode *inode, loff_t bytes)
 }
 
 extern struct kmem_cache *__filp_cache;
+struct file *alloc_empty_file(int flags, const struct cred *cred);
+void file_free(struct file *file);
 static const struct file_operations empty_file_operations;
 
 /* Takes over the caller's inode reference. */
@@ -76,23 +79,16 @@ static struct file *new_file(struct inode *inode, const struct file_operations *
 		iput(inode);
 		return ERR_PTR(-ENODEV);
 	}
-	struct file *file = kmem_cache_alloc(__filp_cache, GFP_KERNEL);
+	struct file *file = alloc_empty_file((int)flags, current_cred());
 
-	if (!file) {
+	if (IS_ERR(file)) {
 		iput(inode);
-		return ERR_PTR(-ENOMEM);
+		return file;
 	}
-	/* A stale RCU reader must keep seeing the dead reference until the
-	 * recycled slot has been initialized. The freelist uses f_freeptr. */
-	memset(file, 0, offsetof(struct file, f_ref));
-	memset_after(file, 0, f_ref);
 	file->f_inode = inode;
 	file->f_mapping = inode->i_mapping;
 	file->f_op = fops ? fops : &empty_file_operations;
-	file->f_flags = flags;
-	file->f_mode = OPEN_FMODE(flags);
 	file->private_data = private_data;
-	file_ref_init(&file->f_ref, 1);
 	return file;
 }
 
@@ -114,7 +110,7 @@ static void release(struct file *file)
 		iput(dentry->d_inode);
 		kfree(dentry);
 	}
-	kmem_cache_free(__filp_cache, file);
+	file_free(file);
 }
 
 static LLIST_HEAD(release_pending);
@@ -293,7 +289,7 @@ int stela_linux_chrdev_open(dev_t device, unsigned int flags, struct file **resu
 	struct file *file = new_file(inode, &def_chr_fops, flags, NULL);
 	if (IS_ERR(file))
 		return (int)PTR_ERR(file);
-	file->f_mode = FMODE_READ | FMODE_WRITE;
+	file->f_mode |= FMODE_READ | FMODE_WRITE;
 	int error = def_chr_fops.open(inode, file);
 	if (error) {
 		/* chrdev_open already dropped any cdev reference it acquired. */
@@ -476,7 +472,7 @@ int main(void)
 
 	/* Recycle the same type-stable slot without publishing stale fields. */
 	struct file *first = anon_inode_getfile("first", NULL, &opens, O_RDWR);
-	assert(!IS_ERR(first));
+	assert(!IS_ERR(first) && first->f_cred == current_cred());
 	first->f_pos = 99;
 	fput(first);
 	assert(!file_ref_get(&first->f_ref));
