@@ -2,25 +2,25 @@
 use super::stored::Emission;
 use super::{NativeCode, NativeFault, Preparation, table::Table};
 use crate::translations::{Digest, Record, StoredBlock};
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::sync::Arc;
+#[cfg(test)]
+use alloc::{boxed::Box, vec::Vec};
 use stela_compiler::NativeBlock;
 #[cfg(test)]
-use stela_compiler::block::FaultRecovery;
-use stela_compiler::block::{
-    CompiledBlock, PackedRecovery, RecoveryQualificationError, RecoveryTemplate,
-    UnqualifiedFaultRecovery,
-};
+use stela_compiler::block::{FaultRecovery, UnqualifiedFaultRecovery};
+use stela_compiler::block::{PackedRecovery, RecoveryQualificationError, RecoveryTemplate};
 use stela_compiler::x86_64::chain::DirectExit;
 
-/// A block's native template, admitted input and recovery rows as
-/// installation consumes them: for a block compiled in this process, the
-/// emission the store and other PEs share.
-pub(super) struct Template {
-    emission: Arc<Emission>,
-    /// A stored record's portable rows, which carry no minted permission.
-    pending: Option<Box<[UnqualifiedFaultRecovery]>>,
-    /// Where those rows stay once installed, at this page offset.
-    origin: Option<(Arc<StoredOrigin>, u16)>,
+/// The process's shared emission or a rebased record borrowed through
+/// installation. A stored block keeps only its origin once installed.
+pub(super) enum Template<'a> {
+    Compiled(Arc<Emission>),
+    Stored {
+        block: &'a StoredBlock,
+        input: &'a [u8],
+        origin: Arc<StoredOrigin>,
+        offset: u16,
+    },
 }
 
 /// Where a stored block's record lies: everything but the page offset of its
@@ -163,46 +163,46 @@ pub enum NativeFailureReason {
     Recovery(stela_compiler::block::FaultRecoveryError),
 }
 
-impl Template {
+impl<'a> Template<'a> {
     /// The template of a block compiled in this process, here or by a PE
     /// that shared it through the store.
     pub(super) fn compiled(emission: Arc<Emission>) -> Self {
-        Self {
-            emission,
-            pending: None,
-            origin: None,
-        }
+        Self::Compiled(emission)
     }
     pub(super) fn stored(
-        template: StoredBlock,
-        input: Vec<u8>,
-        preparation: Arc<Preparation>,
-        origin: Option<(Arc<StoredOrigin>, u16)>,
+        block: &'a StoredBlock,
+        input: &'a [u8],
+        origin: Arc<StoredOrigin>,
+        offset: u16,
     ) -> Self {
-        let block = CompiledBlock {
-            native: template.native,
-            source_bytes: template.source_bytes,
-            direct_exits: template.direct_exits,
-            fault_recovery: Vec::new(),
-        };
-        Self {
-            emission: Arc::new(Emission::new(input, block, preparation)),
-            pending: Some(template.fault_recovery.into_boxed_slice()),
+        Self::Stored {
+            block,
+            input,
             origin,
+            offset,
         }
     }
 
     /// The native template.
     pub(super) fn native(&self) -> &NativeBlock {
-        &self.emission.block.native
+        match self {
+            Self::Compiled(emission) => &emission.block.native,
+            Self::Stored { block, .. } => &block.native,
+        }
     }
     /// The guest bytes its native template consumed.
     pub(super) fn source_bytes(&self) -> usize {
-        self.emission.block.source_bytes
+        match self {
+            Self::Compiled(emission) => emission.block.source_bytes,
+            Self::Stored { block, .. } => block.source_bytes,
+        }
     }
     /// The native template's direct exits to static successors.
     pub(super) fn direct_exits(&self) -> &[DirectExit] {
-        &self.emission.block.direct_exits
+        match self {
+            Self::Compiled(emission) => &emission.block.direct_exits,
+            Self::Stored { block, .. } => &block.direct_exits,
+        }
     }
     /// A portable request may only reject this legacy implementation. Absence
     /// of tags never grants private/APX admission: that must be derived from an
@@ -218,12 +218,12 @@ impl Template {
                     RecoverySource::NativeSpill(_) => true,
                 })
         };
-        match &self.pending {
-            Some(rows) => rows
+        match self {
+            Self::Stored { block, .. } => block
+                .fault_recovery
                 .iter()
                 .any(|row| requires(row.retirement, &row.bindings)),
-            None => self
-                .emission
+            Self::Compiled(emission) => emission
                 .block
                 .fault_recovery
                 .iter()
@@ -231,28 +231,26 @@ impl Template {
         }
     }
     pub(super) fn matches_source(&self, source: &[u8]) -> bool {
-        source.get(..self.emission.input.len()) == Some(self.emission.input.as_slice())
+        let input = match self {
+            Self::Compiled(emission) => emission.input.as_slice(),
+            Self::Stored { input, .. } => input,
+        };
+        source.get(..input.len()) == Some(input)
     }
 
     /// The owner of the installed template: its rows, packed, or for a stored
     /// record where they are, until its first fault qualifies them.
     pub(super) fn installed(self) -> CodeRecovery {
-        let code_bytes = self.emission.block.native.x86_64_code.len() as u32;
-        let rows = match (self.origin, self.pending) {
-            (Some((origin, offset)), _) => Rows::Stored {
+        let code_bytes = self.native().x86_64_code.len() as u32;
+        let rows = match self {
+            Self::Stored { origin, offset, .. } => Rows::Stored {
                 origin,
                 code_bytes,
                 offset,
             },
-            #[cfg(test)]
-            (None, Some(rows)) => Rows::Pending {
-                template: self.emission,
-                rows,
+            Self::Compiled(emission) => Rows::Qualified {
                 code_bytes,
-            },
-            _ => Rows::Qualified {
-                code_bytes,
-                rows: PackedRecovery::new(&self.emission.block.fault_recovery),
+                rows: PackedRecovery::new(&emission.block.fault_recovery),
             },
         };
         CodeRecovery {
