@@ -8,9 +8,12 @@
 #include "air_test_fixture.h"
 #include "compiler/nir/nir_serialize.h"
 #include "util/blob.h"
+#include "llvm-c/BitReader.h"
 #include "util/ralloc.h"
 #include <assert.h>
+#include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #ifdef NDEBUG
 #error "These tests require active assertions"
@@ -178,6 +181,54 @@ static const char *derived_with_helper = DERIVED("%x = call i32 @twice(i32 %w)\n
    "define internal i32 @twice(i32 %w) {\n%x = shl nsw i32 %w, 1\nret i32 %x\n}\n";
 /* A constructor that calls an AIR function, which no constant folds. */
 static const char *called = DERIVED("%x = call i32 @air.unknown(i32 %w)\n");
+
+/* A texture whose presence and location its constructor derives from index,
+ * as VideoToolbox's transfer kernels declare `[[texture(index),
+ * function_constant(has_image)]]` with has_image = index != -1. The kernel
+ * reads its width when `branch` says, on %on. */
+#define LOCATED(branch)                                                                     \
+   "@index.init = linkonce_odr hidden addrspace(2) externally_initialized constant i32"     \
+   " undef, section \"air.fc_initializer\", align 4\n"                                      \
+   "@has_image = internal addrspace(2) global i8 0, align 1\n"                              \
+   "@image_index = internal addrspace(2) global i32 0, align 4\n"                           \
+   "@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }]"                          \
+   " [{ i32, ptr, ptr } { i32 65535, ptr @init, ptr null }]\n"                              \
+   "@llvm.compiler.used = appending global [2 x ptr] [ptr addrspacecast"                    \
+   " (ptr addrspace(2) @has_image to ptr), ptr addrspacecast (ptr addrspace(2) @image_index" \
+   " to ptr)], section \"llvm.metadata\"\n"                                                 \
+   "declare i8 @air.normalize_function_constant_predicate.i8(i8)\n"                         \
+   "declare i32 @air.get_width_texture_2d(ptr addrspace(1), i32)\n"                         \
+   "define void @located(ptr addrspace(1) %data, ptr addrspace(1) %image) {\n"              \
+   "%u = load i8, ptr addrspace(2) @has_image, align 1\n"                                   \
+   "%on = icmp ne i8 %u, 0\n"                                                               \
+   branch                                                                                   \
+   "read:\n%w = call i32 @air.get_width_texture_2d(ptr addrspace(1) %image, i32 0)\n"       \
+   "store i32 %w, ptr addrspace(1) %data, align 4\nret void\n"                              \
+   "done:\nret void\n}\n"                                                                   \
+   "define internal void @init() section \"air.static_init\" {\n"                           \
+   "%i = load i32, ptr addrspace(2) @index.init, align 4\n"                                 \
+   "%has = icmp ne i32 %i, -1\n"                                                            \
+   "%b = zext i1 %has to i8\n"                                                              \
+   "%p = call i8 @air.normalize_function_constant_predicate.i8(i8 %b)\n"                    \
+   "store i8 %p, ptr addrspace(2) @has_image, align 1\n"                                    \
+   "store i32 %i, ptr addrspace(2) @image_index, align 4\n"                                 \
+   "ret void\n}\n"                                                                          \
+   "!air.kernel = !{!2}\n"                                                                  \
+   "!2 = !{ptr @located, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"                             \
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1,"                 \
+   " !\"air.read_write\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4,"    \
+   " !\"air.arg_type_align_size\", i32 4, !\"air.arg_type_name\", !\"int\","                \
+   " !\"air.arg_name\", !\"data\"}\n"                                                       \
+   "!41 = !{i32 1, !\"air.function_constant\", !43, !\"air.texture\","                      \
+   " !\"air.location_index\", ptr addrspace(2) @image_index, i32 1, !\"air.read\","         \
+   " !\"air.arg_type_name\", !\"texture2d<float, read>\", !\"air.arg_name\", !\"image\"}\n" \
+   "!43 = !{ptr addrspace(2) @has_image, !\"bool\", !\"has_image\"}\n"                      \
+   "!air.function_constants = !{!50}\n"                                                     \
+   "!50 = !{ptr addrspace(2) @index.init, !\"int\", !\"index\", i32 0}\n"
+
+static const char *located = LOCATED("br i1 %on, label %read, label %done\n");
+/* One reading the texture whatever index is. */
+static const char *unguarded_texture = LOCATED("br label %read\n");
 
 /* A [[function_constant(use_tint)]] buffer and one for !use_tint at the
  * same index, as Apple's compiler records them: each argument names an
@@ -1257,22 +1308,43 @@ derived_constants_are_constructed_from_their_function_constants(void)
    assert(reflect(called, "derived", &reflection, &error));
    assert(!compile(called, "derived", &specialization, &error) && error.kind == STELA_AIR_INSTRUCTION &&
           strstr(error.detail, "program-scope constants"));
+
+   /* A module may construct more globals than a function has arguments:
+    * VideoToolbox's transfer kernel constructs 525. */
+   enum { SPARE = 300 };
+   const char *ctors = strstr(derived, "@llvm.global_ctors"), *end = strstr(derived, "ret void\n}\n!air");
+   size_t bytes = strlen(derived) + SPARE * 128;
+   char *many = malloc(bytes), *at = many;
+   assert(many && ctors && end);
+   at += sprintf(at, "%.*s", (int)(ctors - derived), derived);
+   for (unsigned i = 0; i < SPARE; i++)
+      at += sprintf(at, "@spare%u = internal unnamed_addr addrspace(2) global i32 0, align 4\n", i);
+   at += sprintf(at, "%.*s", (int)(end - ctors), ctors);
+   for (unsigned i = 0; i < SPARE; i++)
+      at += sprintf(at, "store i32 %%v, ptr addrspace(2) @spare%u, align 4\n", i);
+   sprintf(at, "%s", end);
+   specialization.constant_count = 1;
+   shader = compile(many, "derived", &specialization, &error);
+   assert(shader && stores_constant(shader, 10));
+   stela_metal_release(shader);
+   free(many);
 }
 
+/* Apple's libraries construct hundreds of program-scope constants; their
+ * count is bounded by the module, not by a fixed table. */
 static void
-constructed_globals_are_bounded(void)
+constructed_globals_are_not_capped(void)
 {
    char *fixture = ralloc_strdup(NULL, derived);
-   for (unsigned i = 0; i < AIR_MAX_ARGUMENTS; i++)
-      assert(ralloc_asprintf_append(&fixture, "@extra%u = internal addrspace(2) global i32 0\n", i));
+   for (unsigned i = 0; i < 300; i++)
+      assert(ralloc_asprintf_append(&fixture, "@extra%u = internal addrspace(2) global i32 %u\n", i, i));
    LLVMMemoryBufferRef input = bitcode(fixture);
    ralloc_free(fixture);
    struct stela_metal_reflection reflection;
    struct stela_air_error error;
    const struct stela_air_constant_value unused = {0};
-   assert(!stela_metal_reflect(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
-                               "derived", &unused, 0, &reflection, &error));
-   assert(error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "program-scope constants"));
+   assert(stela_metal_reflect(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                              "derived", &unused, 0, &reflection, &error));
    LLVMDisposeMemoryBuffer(input);
 }
 
@@ -1445,6 +1517,27 @@ specialized_fragment_calls_preserve_graph_admission(void)
                                        "entry", &nir_options, &stage, &error));
    assert(error.kind == STELA_AIR_LIMIT && strstr(error.detail, "call depth exceeded"));
    LLVMDisposeMemoryBuffer(input);
+}
+
+/* A location expression places a present texture; one its constant leaves
+ * absent may name no slot, until a read of it survives folding. */
+static void
+absent_textures_take_no_location(void)
+{
+   struct stela_air_error error;
+   for (int32_t index = -1; index <= 3; index += 4) {
+      const struct stela_air_constant_value value = {0, &index, sizeof(index)};
+      const struct stela_metal_specialization specialization = {
+         .workgroup_size = {64, 1, 1}, .constants = &value, .constant_count = 1,
+      };
+      nir_shader *shader = compile(located, "located", &specialization, &error);
+      assert(shader);
+      stela_metal_release(shader);
+      shader = compile(unguarded_texture, "located", &specialization, &error);
+      assert(index < 0 ? !shader && error.kind == STELA_AIR_ARGUMENT : shader != NULL);
+      if (shader)
+         stela_metal_release(shader);
+   }
 }
 
 /* An output a false function constant makes absent is not one. */
@@ -1791,6 +1884,422 @@ stitched_functions_call_their_nodes_in_order(void)
    LLVMDisposeMemoryBuffer(source);
 }
 
+/* A kernel that leaves its loop two ways, by returning from each. */
+static const char *returning_kernel =
+   "define void @returns(ptr addrspace(1) %data, i32 %tid) {\n"
+   "entry:\nbr label %loop\n"
+   "loop:\n%i = phi i32 [0, %entry], [%n, %next]\n%p = getelementptr i32, ptr addrspace(1) %data, i32 %i\n"
+   "%v = load i32, ptr addrspace(1) %p, align 4\n%hit = icmp eq i32 %v, %tid\n"
+   "br i1 %hit, label %found, label %next\n"
+   "found:\nstore i32 %i, ptr addrspace(1) %data, align 4\nret void\n"
+   "next:\n%n = add i32 %i, 1\n%more = icmp ult i32 %n, %tid\nbr i1 %more, label %loop, label %done\n"
+   "done:\nret void\n}\n"
+   "!air.kernel = !{!2}\n!2 = !{ptr @returns, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n";
+
+static bool
+jumps(nir_shader *shader, nir_jump_type type)
+{
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_jump && nir_instr_as_jump(instr)->type == type)
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
+/* Returns from a loop leave no return for the backends, whose divergence
+ * analysis takes none. */
+static void
+loops_return_without_return_jumps(void)
+{
+   struct stela_air_error error;
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   nir_shader *shader = compile(returning_kernel, "returns", &specialization, &error);
+   assert(shader && !jumps(shader, nir_jump_return));
+   nir_divergence_analysis(shader);
+   stela_metal_release(shader);
+}
+
+static const char *positioning_kernel =
+   "declare i32 @positioned.MTL_VISIBLE_FN_REF() section \"air.externally_defined\"\n"
+   "define void @positions(ptr addrspace(1) %data) {\n"
+   "%v = call i32 @positioned.MTL_VISIBLE_FN_REF()\n"
+   "store i32 %v, ptr addrspace(1) %data, align 4\nret void\n}\n"
+   "!air.kernel = !{!2}\n!air.visible_function_references = !{!5}\n"
+   "!2 = !{ptr @positions, !3, !4}\n!3 = !{}\n!4 = !{!40}\n"
+   "!5 = !{!\"air.visible_function_reference\", ptr @positioned.MTL_VISIBLE_FN_REF,"
+   " !\"positioned\"}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n";
+
+/* positioned() = doubled(thread_position_in_grid) reads the grid position of
+ * the kernel it inlines into, as the type of the parameter it feeds. */
+static void
+stitched_builtins_read_their_kernels_builtins(void)
+{
+   LLVMMemoryBufferRef source = bitcode(calls);
+   const struct stela_air_stitch_source sources[] = {
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source), "doubled"},
+   };
+   const uint32_t position = 0;
+   const struct stela_air_stitch_node nodes[] = {
+      {.function = STELA_AIR_STITCH_BUILTIN, .input = STELA_AIR_STITCH_THREAD_POSITION_IN_GRID},
+      {.function = 0, .arguments = &position, .argument_count = 1},
+   };
+   const struct stela_air_stitch_graph graph = {"positioned", nodes, 2, 1};
+   struct stela_air_error error;
+   LLVMMemoryBufferRef stitched = NULL;
+   assert(stela_metal_stitch(sources, 1, &graph, 1, keep_stitched, &stitched, &error));
+   const struct stela_air_module modules[] = {
+      {LLVMGetBufferStart(stitched), LLVMGetBufferSize(stitched)},
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source)},
+   };
+   const struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .modules = modules, .module_count = 2,
+   };
+   nir_shader *shader = compile(positioning_kernel, "positions", &specialization, &error);
+   assert(shader && count_intrinsic(shader, nir_intrinsic_load_workgroup_id) >= 1);
+   stela_metal_release(shader);
+   LLVMDisposeMemoryBuffer(stitched);
+
+   /* The position in the threadgroup is the local one. */
+   const struct stela_air_stitch_node local[] = {
+      {.function = STELA_AIR_STITCH_BUILTIN, .input = STELA_AIR_STITCH_THREAD_POSITION_IN_THREADGROUP},
+      nodes[1],
+   };
+   const struct stela_air_stitch_graph locally = {"positioned", local, 2, 1};
+   assert(stela_metal_stitch(sources, 1, &locally, 1, keep_stitched, &stitched, &error));
+   const struct stela_air_module local_modules[] = {
+      {LLVMGetBufferStart(stitched), LLVMGetBufferSize(stitched)}, modules[1],
+   };
+   const struct stela_metal_specialization local_specialization = {
+      .workgroup_size = {64, 1, 1}, .modules = local_modules, .module_count = 2,
+   };
+   shader = compile(positioning_kernel, "positions", &local_specialization, &error);
+   assert(shader && count_intrinsic(shader, nir_intrinsic_load_local_invocation_id) >= 1);
+   stela_metal_release(shader);
+   LLVMDisposeMemoryBuffer(stitched);
+
+   /* A builtin is no output, and only known builtins stitch. */
+   const struct stela_air_stitch_graph outputting = {"outputting", nodes, 1, 0};
+   assert(!stela_metal_stitch(sources, 1, &outputting, 1, keep_stitched, &stitched, &error) &&
+          strstr(error.detail, "outputs a builtin"));
+   const struct stela_air_stitch_node unknown[] = {
+      {.function = STELA_AIR_STITCH_BUILTIN, .input = 0},
+      {.function = 0, .arguments = &position, .argument_count = 1},
+   };
+   const struct stela_air_stitch_graph unknowing = {"unknowing", unknown, 2, 1};
+   assert(!stela_metal_stitch(sources, 1, &unknowing, 1, keep_stitched, &stitched, &error) &&
+          strstr(error.detail, "does not know"));
+   LLVMDisposeMemoryBuffer(source);
+}
+
+/* positioned() = doubled(the int 8 bytes into buffer 1) reads the buffer
+ * the kernel it inlines into binds there, which no argument of it declares. */
+static void
+stitched_buffer_addresses_read_their_kernels_buffers(void)
+{
+   LLVMMemoryBufferRef source = bitcode(calls);
+   const struct stela_air_stitch_source sources[] = {
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source), "doubled"},
+   };
+   const uint32_t address = 0;
+   const struct stela_air_stitch_node nodes[] = {
+      {.function = STELA_AIR_STITCH_BUFFER_ADDRESS, .input = 1, .offset = 8, .dereference = true},
+      {.function = 0, .arguments = &address, .argument_count = 1},
+   };
+   const struct stela_air_stitch_graph graph = {"positioned", nodes, 2, 1};
+   struct stela_air_error error;
+   LLVMMemoryBufferRef stitched = NULL;
+   assert(stela_metal_stitch(sources, 1, &graph, 1, keep_stitched, &stitched, &error));
+   const struct stela_air_module modules[] = {
+      {LLVMGetBufferStart(stitched), LLVMGetBufferSize(stitched)},
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source)},
+   };
+   const struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .modules = modules, .module_count = 2,
+   };
+   nir_shader *shader = compile(positioning_kernel, "positions", &specialization, &error);
+   /* Both buffers' addresses from the table, and the int. */
+   assert(shader && count_intrinsic(shader, nir_intrinsic_load_global) == 3);
+   stela_metal_release(shader);
+   LLVMDisposeMemoryBuffer(stitched);
+
+   /* An int parameter takes no address, and an address is no output. */
+   const struct stela_air_stitch_node addressing[] = {
+      {.function = STELA_AIR_STITCH_BUFFER_ADDRESS, .input = 1},
+      {.function = 0, .arguments = &address, .argument_count = 1},
+   };
+   const struct stela_air_stitch_graph pointing = {"pointing", addressing, 2, 1};
+   assert(!stela_metal_stitch(sources, 1, &pointing, 1, keep_stitched, &stitched, &error) &&
+          strstr(error.detail, "no buffer pointer"));
+   const struct stela_air_stitch_graph outputting = {"outputting", nodes, 1, 0};
+   assert(!stela_metal_stitch(sources, 1, &outputting, 1, keep_stitched, &stitched, &error) &&
+          strstr(error.detail, "outputs what is no call"));
+   LLVMDisposeMemoryBuffer(source);
+}
+
+static const char *early_outs =
+   "define i1 @outside(i32 %x) {\n%o = icmp ugt i32 %x, 7\nret i1 %o\n}\n"
+   "define void @mark(ptr addrspace(1) %data) {\n"
+   "store i32 1, ptr addrspace(1) %data, align 4\nret void\n}\n"
+   "!air.visible = !{!1, !4}\n"
+   "!1 = !{ptr @outside, !2, !3}\n!2 = !{}\n!3 = !{!30}\n"
+   "!30 = !{i32 0, !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"x\"}\n"
+   "!4 = !{ptr @mark, !2, !5}\n!5 = !{!50}\n"
+   "!50 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n";
+
+static const char *guarding_kernel =
+   "declare void @guarded.MTL_VISIBLE_FN_REF(i32, ptr addrspace(1)) section \"air.externally_defined\"\n"
+   "define void @guards(ptr addrspace(1) %data, i32 %tid) {\n"
+   "call void @guarded.MTL_VISIBLE_FN_REF(i32 %tid, ptr addrspace(1) %data)\nret void\n}\n"
+   "!air.kernel = !{!2}\n!air.visible_function_references = !{!5}\n"
+   "!2 = !{ptr @guards, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
+   "!5 = !{!\"air.visible_function_reference\", ptr @guarded.MTL_VISIBLE_FN_REF, !\"guarded\"}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n";
+
+/* guarded(x, data) { if (outside(x)) return; mark(data); }: an early return
+ * branches past the calls after it, in the kernel it inlines into too. */
+static void
+stitched_early_returns_skip_what_follows(void)
+{
+   LLVMMemoryBufferRef source = bitcode(early_outs);
+   const struct stela_air_stitch_source sources[] = {
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source), "outside"},
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source), "mark"},
+   };
+   const uint32_t x = 0, data = 3;
+   const struct stela_air_stitch_node nodes[] = {
+      {.function = STELA_AIR_STITCH_INPUT, .input = 0},
+      {.function = 0, .arguments = &x, .argument_count = 1},
+      {.function = STELA_AIR_STITCH_EARLY_RETURN, .input = 1},
+      {.function = STELA_AIR_STITCH_INPUT, .input = 1},
+      {.function = 1, .arguments = &data, .argument_count = 1},
+   };
+   const struct stela_air_stitch_graph graph = {"guarded", nodes, 5, STELA_AIR_STITCH_NO_OUTPUT};
+   struct stela_air_error error;
+   LLVMMemoryBufferRef stitched = NULL;
+   assert(stela_metal_stitch(sources, 2, &graph, 1, keep_stitched, &stitched, &error));
+   LLVMContextRef context = LLVMContextCreate();
+   LLVMModuleRef module;
+   assert(!LLVMParseBitcodeInContext2(context, stitched, &module));
+   LLVMValueRef guarded = LLVMGetNamedFunction(module, "guarded");
+   assert(guarded && LLVMCountBasicBlocks(guarded) == 3);
+   LLVMDisposeModule(module);
+   LLVMContextDispose(context);
+   const struct stela_air_module modules[] = {
+      {LLVMGetBufferStart(stitched), LLVMGetBufferSize(stitched)},
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source)},
+   };
+   const struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .modules = modules, .module_count = 2,
+   };
+   nir_shader *shader = compile(guarding_kernel, "guards", &specialization, &error);
+   assert(shader && count_intrinsic(shader, nir_intrinsic_store_global) == 1);
+   stela_metal_release(shader);
+   LLVMDisposeMemoryBuffer(stitched);
+
+   /* Its condition is an earlier call's result, and it is no argument. */
+   const struct stela_air_stitch_node unconditioned[] = {
+      {.function = STELA_AIR_STITCH_INPUT, .input = 0},
+      {.function = STELA_AIR_STITCH_EARLY_RETURN, .input = 0},
+      {.function = 0, .arguments = &x, .argument_count = 1},
+   };
+   const struct stela_air_stitch_graph inputs = {"inputs", unconditioned, 3, STELA_AIR_STITCH_NO_OUTPUT};
+   assert(!stela_metal_stitch(sources, 2, &inputs, 1, keep_stitched, &stitched, &error) &&
+          strstr(error.detail, "no earlier call"));
+   const uint32_t early = 2;
+   const struct stela_air_stitch_node passing[] = {
+      nodes[0], nodes[1], nodes[2], {.function = 1, .arguments = &early, .argument_count = 1},
+   };
+   const struct stela_air_stitch_graph passed = {"passed", passing, 4, STELA_AIR_STITCH_NO_OUTPUT};
+   assert(!stela_metal_stitch(sources, 2, &passed, 1, keep_stitched, &stitched, &error) &&
+          strstr(error.detail, "is a call's argument"));
+   const struct stela_air_stitch_graph outputting = {"outputting", nodes, 3, 1};
+   assert(!stela_metal_stitch(sources, 2, &outputting, 1, keep_stitched, &stitched, &error) &&
+          strstr(error.detail, "other than the output's values"));
+
+   /* A function with an output returns a call's value of the output's type:
+    * valued(x) { if (outside(x)) return outside(x); return outside(x); }. */
+   const uint32_t value = 1;
+   const struct stela_air_stitch_node valuing[] = {
+      nodes[0], nodes[1],
+      {.function = STELA_AIR_STITCH_EARLY_RETURN, .input = 1, .arguments = &value, .argument_count = 1},
+      nodes[1],
+   };
+   const struct stela_air_stitch_graph valued = {"valued", valuing, 4, 3};
+   assert(stela_metal_stitch(sources, 2, &valued, 1, keep_stitched, &stitched, &error));
+   LLVMDisposeMemoryBuffer(stitched);
+   const struct stela_air_stitch_graph untyped = {"untyped", valuing, 3, 0};
+   assert(!stela_metal_stitch(sources, 2, &untyped, 1, keep_stitched, &stitched, &error) &&
+          strstr(error.detail, "no earlier call of the output's type"));
+   LLVMDisposeMemoryBuffer(source);
+}
+
+static const char *samples =
+   "declare { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr addrspace(2),"
+   " <2 x float>, i1, <2 x i32>, i1, float, float, i32)\n"
+   "define <4 x float> @sampled(ptr addrspace(1) %t, ptr addrspace(2) %s) {\n"
+   "%r = call { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) %t,"
+   " ptr addrspace(2) %s, <2 x float> <float 0.5, float 0.5>, i1 true, <2 x i32> zeroinitializer,"
+   " i1 false, float 0.0, float 0.0, i32 0)\n"
+   "%v = extractvalue { <4 x float>, i8 } %r, 0\nret <4 x float> %v\n}\n"
+   "!air.visible = !{!71}\n!71 = !{ptr @sampled, !72, !73}\n"
+   "!72 = !{!74}\n!74 = !{!\"air.visible_output\", !\"air.arg_type_name\", !\"float4\"}\n"
+   "!73 = !{!75, !76}\n"
+   "!75 = !{i32 0, !\"air.visible_input\", !\"air.arg_type_name\", !\"__metal_texture_2d_t\","
+   " !\"air.arg_name\", !\"t\"}\n"
+   "!76 = !{i32 1, !\"air.visible_input\", !\"air.arg_type_name\", !\"sampler\","
+   " !\"air.arg_name\", !\"s\"}\n";
+
+static const char *sampling_kernel =
+   "declare <4 x float> @bound.MTL_VISIBLE_FN_REF() section \"air.externally_defined\"\n"
+   "define void @samples(ptr addrspace(1) %data) {\n"
+   "%v = call <4 x float> @bound.MTL_VISIBLE_FN_REF()\n"
+   "store <4 x float> %v, ptr addrspace(1) %data, align 16\nret void\n}\n"
+   "!air.kernel = !{!2}\n!air.visible_function_references = !{!5}\n"
+   "!2 = !{ptr @samples, !3, !4}\n!3 = !{}\n!4 = !{!40}\n"
+   "!5 = !{!\"air.visible_function_reference\", ptr @bound.MTL_VISIBLE_FN_REF, !\"bound\"}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 16, !\"air.arg_type_align_size\","
+   " i32 16, !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"data\"}\n";
+
+/* bound() = sampled(texture 3, sampler 1) samples what the kernel it inlines
+ * into binds there, the texture's type as the sample call names it. */
+static void
+stitched_textures_and_samplers_read_their_kernels_bindings(void)
+{
+   LLVMMemoryBufferRef source = bitcode(samples);
+   const struct stela_air_stitch_source sources[] = {
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source), "sampled"},
+   };
+   const uint32_t resources[] = {0, 1};
+   const struct stela_air_stitch_node nodes[] = {
+      {.function = STELA_AIR_STITCH_TEXTURE, .input = 3},
+      {.function = STELA_AIR_STITCH_SAMPLER, .input = 1},
+      {.function = 0, .arguments = resources, .argument_count = 2},
+   };
+   const struct stela_air_stitch_graph graph = {"bound", nodes, 3, 2};
+   struct stela_air_error error;
+   LLVMMemoryBufferRef stitched = NULL;
+   assert(stela_metal_stitch(sources, 1, &graph, 1, keep_stitched, &stitched, &error));
+   const struct stela_air_module modules[] = {
+      {LLVMGetBufferStart(stitched), LLVMGetBufferSize(stitched)},
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source)},
+   };
+   const struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .modules = modules, .module_count = 2,
+   };
+   nir_shader *shader = compile(sampling_kernel, "samples", &specialization, &error);
+   assert(shader);
+   unsigned sampled = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block)
+            sampled += instr->type == nir_instr_type_tex;
+      }
+   }
+   assert(sampled == 1);
+   stela_metal_release(shader);
+   LLVMDisposeMemoryBuffer(stitched);
+
+   /* A texture feeds a texture parameter, a sampler a sampler one. */
+   const uint32_t swapped[] = {1, 0};
+   const struct stela_air_stitch_node crossed[] = {
+      nodes[0], nodes[1], {.function = 0, .arguments = swapped, .argument_count = 2},
+   };
+   const struct stela_air_stitch_graph crossing = {"crossing", crossed, 3, 2};
+   assert(!stela_metal_stitch(sources, 1, &crossing, 1, keep_stitched, &stitched, &error) &&
+          strstr(error.detail, "no texture"));
+   LLVMDisposeMemoryBuffer(source);
+}
+
+static const char *shares =
+   "define float @shared(ptr addrspace(3) %m) {\n"
+   "store float 1.0, ptr addrspace(3) %m, align 4\n"
+   "%v = load float, ptr addrspace(3) %m, align 4\nret float %v\n}\n"
+   "!air.visible = !{!71}\n!71 = !{ptr @shared, !72, !73}\n"
+   "!72 = !{!74}\n!74 = !{!\"air.visible_output\", !\"air.arg_type_name\", !\"float\"}\n"
+   "!73 = !{!75}\n"
+   "!75 = !{i32 0, !\"air.visible_input\", !\"air.arg_type_name\", !\"float\","
+   " !\"air.arg_name\", !\"m\"}\n";
+
+static const char *sharing_kernel =
+   "declare float @bound.MTL_VISIBLE_FN_REF() section \"air.externally_defined\"\n"
+   "define void @shares(ptr addrspace(1) %data) {\n"
+   "%v = call float @bound.MTL_VISIBLE_FN_REF()\n"
+   "store float %v, ptr addrspace(1) %data, align 4\nret void\n}\n"
+   "!air.kernel = !{!2}\n!air.visible_function_references = !{!5}\n"
+   "!2 = !{ptr @shares, !3, !4}\n!3 = !{}\n!4 = !{!40}\n"
+   "!5 = !{!\"air.visible_function_reference\", ptr @bound.MTL_VISIBLE_FN_REF, !\"bound\"}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"data\"}\n";
+
+/* bound() = shared(threadgroup 2) reads and writes the threadgroup memory
+ * the dispatch of the kernel it inlines into sizes at that index. */
+static void
+stitched_threadgroup_memory_is_its_kernels(void)
+{
+   LLVMMemoryBufferRef source = bitcode(shares);
+   const struct stela_air_stitch_source sources[] = {
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source), "shared"},
+   };
+   const uint32_t memory[] = {0};
+   const struct stela_air_stitch_node nodes[] = {
+      {.function = STELA_AIR_STITCH_THREADGROUP, .input = 2},
+      {.function = 0, .arguments = memory, .argument_count = 1},
+   };
+   const struct stela_air_stitch_graph graph = {"bound", nodes, 2, 1};
+   struct stela_air_error error;
+   LLVMMemoryBufferRef stitched = NULL;
+   assert(stela_metal_stitch(sources, 1, &graph, 1, keep_stitched, &stitched, &error));
+   const struct stela_air_module modules[] = {
+      {LLVMGetBufferStart(stitched), LLVMGetBufferSize(stitched)},
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source)},
+   };
+   const struct stela_metal_threadgroup_length lengths[] = {{2, 128}};
+   struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .modules = modules, .module_count = 2,
+      .threadgroup_length_count = 1, .threadgroup_lengths = lengths,
+   };
+   nir_shader *shader = compile(sharing_kernel, "shares", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "shares: %u %s\n", error.kind, error.detail);
+   assert(shader && shader->info.shared_size >= 128);
+   stela_metal_release(shader);
+
+   /* Its dispatch sizes it, as a kernel's threadgroup buffer. */
+   specialization.threadgroup_length_count = 0;
+   assert(!compile(sharing_kernel, "shares", &specialization, &error) &&
+          strstr(error.detail, "threadgroup buffer 2"));
+   LLVMDisposeMemoryBuffer(stitched);
+
+   /* Threadgroup memory feeds only a threadgroup pointer. */
+   const struct stela_air_stitch_node texture[] = {
+      {.function = STELA_AIR_STITCH_TEXTURE, .input = 2}, nodes[1],
+   };
+   const struct stela_air_stitch_graph crossing = {"crossing", texture, 2, 1};
+   assert(!stela_metal_stitch(sources, 1, &crossing, 1, keep_stitched, &stitched, &error) &&
+          strstr(error.detail, "no texture"));
+   LLVMDisposeMemoryBuffer(source);
+}
+
 /* compile() with the modules and linked functions of a pipeline. */
 static nir_shader *
 compile_linked(const char *fixture, const char *entry, const char *const *modules,
@@ -2083,10 +2592,72 @@ dynamic_kernels_take_their_dispatch_shape(void)
           error.kind == STELA_AIR_INPUT);
 }
 
+/* TEMPORARY host harness (not for commit). */
+static void
+harness(void)
+{
+   const char *path = getenv("STELA_HARNESS");
+   if (!path)
+      return;
+   FILE *file = fopen(path, "rb");
+   assert(file);
+   fseek(file, 0, SEEK_END);
+   long size = ftell(file);
+   fseek(file, 0, SEEK_SET);
+   char *bytes = malloc(size);
+   assert(fread(bytes, 1, size, file) == (size_t)size);
+   fclose(file);
+   static struct stela_air_constant_value values[512];
+   static uint8_t data[512][16];
+   unsigned count = 0;
+   const char *text = getenv("STELA_HARNESS_CONSTANTS");
+   while (text && *text) {
+      unsigned index = strtoul(text, (char **)&text, 10);
+      assert(*text == '=');
+      text++;
+      unsigned bytes_count = 0;
+      while (isxdigit((unsigned char)text[0]) && isxdigit((unsigned char)text[1])) {
+         char pair[3] = {text[0], text[1], 0};
+         data[count][bytes_count++] = strtoul(pair, NULL, 16);
+         text += 2;
+      }
+      values[count] = (struct stela_air_constant_value){index, data[count], bytes_count};
+      count++;
+      if (*text == ',')
+         text++;
+   }
+   static struct stela_metal_linked_varying varyings[32];
+   unsigned varying_count = 0;
+   char *list = getenv("STELA_HARNESS_VARYINGS") ? strdup(getenv("STELA_HARNESS_VARYINGS")) : NULL;
+   for (char *name = list ? strtok(list, ",") : NULL; name; name = strtok(NULL, ","))
+      varyings[varying_count++] = (struct stela_metal_linked_varying){name, strlen(name), 0};
+   static struct stela_air_constexpr_sampler samplers[16];
+   unsigned sampler_count = 0;
+   for (const char *s = getenv("STELA_HARNESS_SAMPLERS"); s && *s; s += *s == ',') {
+      samplers[sampler_count].state = strtoull(s, (char **)&s, 0);
+      samplers[sampler_count].id = 0x5000 + sampler_count;
+      sampler_count++;
+   }
+   struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .constants = values, .constant_count = count,
+      .varyings = varyings, .varying_count = varying_count,
+      .sampler_count = sampler_count, .samplers = samplers,
+   };
+   struct stela_air_error error = {0};
+   nir_shader *shader = stela_metal_compile(bytes, size, getenv("STELA_HARNESS_ENTRY"), &target,
+                                            &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "refused %u %s\n", error.kind, error.detail);
+   else
+      nir_print_shader(shader, stdout);
+   exit(0);
+}
+
 int
 main(void)
 {
    glsl_type_singleton_init_or_ref();
+   harness();
    modules_list_their_functions();
    discovery_reports_malformed_metadata();
    reflection_requires_a_unique_listed_entry();
@@ -2098,8 +2669,9 @@ main(void)
    mesh_stages_compile_with_their_launch();
    function_constants_reflect_and_specialize();
    derived_constants_are_constructed_from_their_function_constants();
-   constructed_globals_are_bounded();
+   constructed_globals_are_not_capped();
    constructor_priorities_are_integer_literals();
+   absent_textures_take_no_location();
    function_constants_select_outputs();
    older_kernels_compile();
    unoptimized_kernels_compile();
@@ -2111,6 +2683,12 @@ main(void)
    defined_functions_inline_into_their_callers();
    unresolved_calls_are_rejected_without_a_call_graph();
    stitched_functions_call_their_nodes_in_order();
+   stitched_builtins_read_their_kernels_builtins();
+   stitched_buffer_addresses_read_their_kernels_buffers();
+   stitched_early_returns_skip_what_follows();
+   stitched_textures_and_samplers_read_their_kernels_bindings();
+   stitched_threadgroup_memory_is_its_kernels();
+   loops_return_without_return_jumps();
    os_log_appends_self_contained_records();
    linked_functions_resolve_tables_and_externals();
    recursion_unrolls_to_the_call_stack_depth();

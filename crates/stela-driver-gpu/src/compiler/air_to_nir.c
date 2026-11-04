@@ -414,6 +414,8 @@ get_value(struct translator *t, LLVMValueRef llvm)
    }
    if (LLVMIsAGlobalVariable(llvm))
       return module_global(t, llvm);
+   if (LLVMIsAConstantPointerNull(llvm))
+      return nir_imm_int64(&t->b, 0);
    unsigned components, bits;
    if (stela_air_matrix_type(LLVMTypeOf(llvm), &bits) && LLVMIsNull(llvm))
       return nir_imm_zero(&t->b, 2, bits);
@@ -487,6 +489,9 @@ put_resource(struct translator *t, LLVMValueRef param, const struct stela_air_te
              const struct stela_air_sampler *sampler)
 {
    unsigned length = texture ? texture->length : sampler->length;
+   if (texture ? texture->index >= AIR_MAX_TEXTURES : sampler->index >= AIR_MAX_SAMPLERS)
+      return fail(t, STELA_AIR_ARGUMENT, "absent texture or sampler %u is read",
+                  texture ? texture->argument : sampler->argument);
    bool bound = texture ? t->options->bind_texture_id != NULL : t->options->bind_sampler_id != NULL;
    if (length && (!t->options->resource_id || !bound))
       return fail(t, STELA_AIR_ARGUMENT, "unbound texture or sampler array %u",
@@ -587,6 +592,184 @@ grid_position(struct translator *t)
    if (!shape || !local)
       return NULL;
    return nir_iadd(&t->b, nir_imul(&t->b, nir_load_workgroup_id(&t->b), shape), local);
+}
+
+/* Whether `name` is `stem.` followed by more. */
+static bool
+named_after(const char *name, size_t name_length, const char *stem)
+{
+   size_t length = strlen(stem);
+   return name_length > length + 1 && !memcmp(name, stem, length) && name[length] == '.';
+}
+
+/* A stitched function's read of a builtin of the function it inlines into,
+ * as air_stitch.c declares it: a call of `name.TYPE` that returns the builtin
+ * as an integer scalar or vector of up to three lanes. */
+static bool
+stitched_builtin_call(struct translator *t, LLVMValueRef call, LLVMValueRef callee, const char *name,
+                      size_t name_length, bool *lowered)
+{
+   bool grid = named_after(name, name_length, STELA_AIR_STITCH_THREAD_POSITION_IN_GRID_NAME);
+   *lowered = grid ||
+              named_after(name, name_length, STELA_AIR_STITCH_THREAD_POSITION_IN_THREADGROUP_NAME);
+   if (!*lowered)
+      return true;
+   unsigned components, bits;
+   if (!LLVMIsDeclaration(callee) || LLVMGetNumArgOperands(call) ||
+       !value_shape(LLVMTypeOf(call), &components, &bits) || components > 3 ||
+       (bits != 16 && bits != 32))
+      return fail(t, STELA_AIR_TYPE, "a stitched thread position of an unsupported type");
+   if (!compute_like(t))
+      return fail(t, STELA_AIR_INPUT, "a stitched thread position outside a kernel, object or mesh function");
+   nir_def *position = grid ? grid_position(t) : local_position(t);
+   if (!position)
+      return false;
+   position = nir_u2uN(&t->b, nir_channels(&t->b, position, nir_component_mask(components)), bits);
+   return put_value(t, call, position, 0);
+}
+
+/* Threadgroup buffer desc: in a dynamic kernel, where its dispatches place
+ * it in the kernel's threadgroup memory, else its own memory of the size its
+ * binding gives, as the offset def into *shared of *shared_size bytes. */
+static bool
+threadgroup_memory(struct translator *t, const struct stela_air_buffer *desc, nir_def **def,
+                   nir_variable **shared, unsigned *shared_size)
+{
+   if (t->options->dynamic_threadgroup_bytes) {
+      *shared = dynamic_threadgroup(t, desc);
+      *def = *shared ? t->options->threadgroup_offset(&t->b, desc, t->options->binding_data) : NULL;
+      if (!binding_prelude(t))
+         return false;
+      if (!*def || (*def)->num_components != 1 || (*def)->bit_size != 32)
+         return fail(t, STELA_AIR_ARGUMENT, "threadgroup offset callback refused buffer %u",
+                     desc->argument);
+      *def = nir_u2u64(&t->b, *def);
+      *shared_size = t->options->dynamic_threadgroup_bytes;
+      return true;
+   }
+   struct stela_air_threadgroup_view view = {0};
+   if (!t->options->bind_threadgroup ||
+       !t->options->bind_threadgroup(desc, &view, t->options->binding_data) ||
+       view.size < desc->type_size || view.alignment < desc->type_alignment ||
+       view.available_access < STELA_AIR_READ || view.available_access > STELA_AIR_READ_WRITE ||
+       (desc->access & ~view.available_access))
+      return fail(t, STELA_AIR_ARGUMENT, "invalid/unbound threadgroup buffer %u", desc->argument);
+   *shared = shared_resource(t, view.size, view.alignment);
+   if (!*shared)
+      return false;
+   *shared_size = (unsigned)view.size;
+   *def = nir_imm_int64(&t->b, 0);
+   return true;
+}
+
+/* Whether `name` is one of air_stitch.c's reads of a bound resource. */
+static bool
+stitched_resource_name(const char *name, size_t name_length)
+{
+   return named_after(name, name_length, STELA_AIR_STITCH_BUFFER_ADDRESS_NAME) ||
+          (name_length == strlen(STELA_AIR_STITCH_TEXTURE_NAME) &&
+           !memcmp(name, STELA_AIR_STITCH_TEXTURE_NAME, name_length)) ||
+          (name_length == strlen(STELA_AIR_STITCH_SAMPLER_NAME) &&
+           !memcmp(name, STELA_AIR_STITCH_SAMPLER_NAME, name_length)) ||
+          (name_length == strlen(STELA_AIR_STITCH_THREADGROUP_NAME) &&
+           !memcmp(name, STELA_AIR_STITCH_THREADGROUP_NAME, name_length));
+}
+
+/* Whether inst calls one of air_stitch.c's reads of a bound resource. */
+static bool
+stitched_resource_call(LLVMValueRef inst)
+{
+   LLVMValueRef callee = LLVMIsACallInst(inst) ? LLVMGetCalledValue(inst) : NULL;
+   size_t name_length = 0;
+   const char *name = callee && LLVMIsAFunction(callee) ? LLVMGetValueName2(callee, &name_length) : "";
+   return stitched_resource_name(name, name_length);
+}
+
+/* The texture or sampler a stitched function's call reads from the binding
+ * at `index`. A texture's type, texel type and access are what the texture
+ * calls that take it need, since a stitched parameter's metadata names only
+ * its kind; one no call takes is never read. */
+static bool
+stitched_texture(struct translator *t, LLVMValueRef call, unsigned index, bool texture)
+{
+   if (!texture)
+      return put_resource(t, call, NULL, &(struct stela_air_sampler){.argument = index, .index = index});
+   struct stela_air_texture described = {.argument = index, .index = index};
+   for (LLVMUseRef use = LLVMGetFirstUse(call); use; use = LLVMGetNextUse(use)) {
+      LLVMValueRef user = LLVMGetUser(use);
+      if (!LLVMIsACallInst(user) || LLVMGetOperand(user, 0) != call ||
+          !stela_air_texture_use(user, &described))
+         return fail(t, STELA_AIR_INPUT, "stitched texture %u is used other than as texture calls agree", index);
+   }
+   if (!described.type)
+      return true;
+   if (described.primitive == STELA_AIR_PRIMITIVE_UNKNOWN)
+      described.primitive = STELA_AIR_FLOAT;
+   return put_resource(t, call, &described, NULL);
+}
+
+/* The resources the stitched functions inlined into fn read: calls on a
+ * constant index, bound in the prelude as arguments are. */
+static bool
+stitched_resources(struct translator *t, LLVMValueRef fn)
+{
+   for (LLVMValueRef read = LLVMGetFirstFunction(LLVMGetGlobalParent(fn)); read;
+        read = LLVMGetNextFunction(read)) {
+      size_t name_length;
+      const char *name = LLVMGetValueName2(read, &name_length);
+      if (!stitched_resource_name(name, name_length))
+         continue;
+      bool buffer = named_after(name, name_length, STELA_AIR_STITCH_BUFFER_ADDRESS_NAME);
+      for (LLVMUseRef use = LLVMGetFirstUse(read); use; use = LLVMGetNextUse(use)) {
+         LLVMValueRef call = LLVMGetUser(use);
+         if (!LLVMIsACallInst(call) || LLVMGetCalledValue(call) != read)
+            return fail(t, STELA_AIR_INPUT, "a stitched buffer address that is not called");
+         if (LLVMGetBasicBlockParent(LLVMGetInstructionParent(call)) != fn)
+            continue;
+         LLVMValueRef index = LLVMGetNumArgOperands(call) == 1 ? LLVMGetOperand(call, 0) : NULL;
+         unsigned space = LLVMGetPointerAddressSpace(LLVMTypeOf(call));
+         if (!index || !LLVMIsAConstantInt(index) || space < 1 || space > 3 || (buffer && space == 3))
+            return fail(t, STELA_AIR_INPUT, "a stitched resource of an unknown form");
+         if (space == 3) {
+            /* Threadgroup memory a dispatch sizes, read and written as a
+             * kernel's threadgroup buffer is. */
+            unsigned bound = (unsigned)LLVMConstIntGetZExtValue(index);
+            struct stela_air_buffer memory = {.argument = bound, .index = bound, .address_space = 3,
+                                              .access = STELA_AIR_READ_WRITE, .type_alignment = 1};
+            nir_def *def;
+            nir_variable *shared;
+            unsigned shared_size;
+            if (!threadgroup_memory(t, &memory, &def, &shared, &shared_size) ||
+                !put_value(t, call, def, memory.access))
+               return false;
+            struct value *value = find_value(t, call);
+            value->pointer_root = call;
+            value->storage = shared;
+            value->storage_size = shared_size;
+            continue;
+         }
+         if (!buffer) {
+            if (!stitched_texture(t, call, (unsigned)LLVMConstIntGetZExtValue(index), space == 1))
+               return false;
+            continue;
+         }
+         if (t->options->bind_ssbo || !t->options->bind_buffer)
+            return fail(t, STELA_AIR_ARGUMENT, "a stitched buffer address requires device addresses");
+         struct stela_air_buffer buffer = {
+            .index = (unsigned)LLVMConstIntGetZExtValue(index), .address_space = space,
+            .access = space == 2 ? STELA_AIR_READ : STELA_AIR_READ_WRITE};
+         nir_def *def = t->options->bind_buffer(&t->b, &buffer, t->options->binding_data);
+         if (!binding_prelude(t))
+            return false;
+         if (!def || def->num_components != 1 || def->bit_size != 64)
+            return fail(t, STELA_AIR_ARGUMENT, "binding callback refused stitched buffer %u",
+                        buffer.index);
+         if (!put_value(t, call, def, buffer.access))
+            return false;
+         find_value(t, call)->pointer_root = call;
+      }
+   }
+   return true;
 }
 
 /* The threads of this threadgroup that a dispatchThreads grid holds. */
@@ -864,30 +1047,9 @@ compute_arguments(struct translator *t, const struct stela_air_kernel *kernel)
       nir_variable *shared = NULL;
       unsigned shared_size = 0;
       if (buffer) {
-         bool threadgroup = desc.address_space == 3;
-         if (threadgroup && t->options->dynamic_threadgroup_bytes) {
-            shared = dynamic_threadgroup(t, &desc);
-            def = shared ? t->options->threadgroup_offset(&t->b, &desc, t->options->binding_data) :
-                           NULL;
-            if (!binding_prelude(t))
+         if (desc.address_space == 3) {
+            if (!threadgroup_memory(t, &desc, &def, &shared, &shared_size))
                return false;
-            if (!def || def->num_components != 1 || def->bit_size != 32)
-               return fail(t, STELA_AIR_ARGUMENT, "threadgroup offset callback refused buffer %u", index);
-            def = nir_u2u64(&t->b, def);
-            shared_size = t->options->dynamic_threadgroup_bytes;
-         } else if (threadgroup) {
-            struct stela_air_threadgroup_view view = {0};
-            if (!t->options->bind_threadgroup ||
-                !t->options->bind_threadgroup(&desc, &view, t->options->binding_data) ||
-                view.size < desc.type_size || view.alignment < desc.type_alignment ||
-                view.available_access < STELA_AIR_READ || view.available_access > STELA_AIR_READ_WRITE ||
-                (desc.access & ~view.available_access))
-               return fail(t, STELA_AIR_ARGUMENT, "invalid/unbound threadgroup buffer %u", index);
-            shared = shared_resource(t, view.size, view.alignment);
-            if (!shared)
-               return false;
-            shared_size = (unsigned)view.size;
-            def = nir_imm_int64(&t->b, 0);
          } else if (t->options->bind_ssbo) {
             if (!t->options->bind_ssbo(&desc, &ssbo_slot, t->options->binding_data) ||
                 ssbo_slot >= t->options->ssbo_count || ssbo_slots[ssbo_slot])
@@ -1747,6 +1909,85 @@ aggregate_insert(struct translator *t, const struct value *a, LLVMTypeRef type,
    }
    v->elements[indices[0]] = aggregate_insert(t, inner, inner_type, indices + 1, depth - 1, leaf);
    return v->elements[indices[0]] ? v : NULL;
+}
+
+/* The leaves of a `type` aggregate at `offset` past `address`, each its own
+ * access at its layout offset: the leaves of `stored`, or loaded into the
+ * aggregate returned. An undefined leaf of `stored` stores nothing. */
+static struct value *
+aggregate_access(struct translator *t, const struct value *address, LLVMTypeRef type,
+                 uint64_t offset, const struct value *stored, enum gl_access_qualifier access,
+                 unsigned alignment)
+{
+   unsigned count = aggregate_count(type);
+   struct value *loaded = stored ? NULL : new_aggregate(t, count, NULL);
+   if (!stored && !loaded)
+      return NULL;
+   bool members = LLVMGetTypeKind(type) == LLVMStructTypeKind;
+   for (unsigned i = 0; i < count; i++) {
+      LLVMTypeRef element = aggregate_element_type(type, i);
+      uint64_t at = offset + (members ? LLVMOffsetOfElement(t->layout, type, i) :
+                                        i * LLVMABISizeOfType(t->layout, element));
+      const struct value *part = stored ? stored->elements[i] : NULL;
+      if (stored && !part)
+         continue;
+      if (aggregate_count(element)) {
+         struct value *inner = aggregate_access(t, address, element, at, part, access, alignment);
+         if (!inner)
+            return NULL;
+         if (loaded)
+            loaded->elements[i] = inner;
+         continue;
+      }
+      unsigned components, bits;
+      if (!value_shape(element, &components, &bits) || bits == 1) {
+         fail(t, STELA_AIR_MEMORY, "sub-byte memory access unsupported");
+         return NULL;
+      }
+      /* The leaf's pointer, derived as a GEP to it would be. */
+      struct value leaf = *address;
+      leaf.def = nir_iadd_imm(&t->b, address->def, at);
+      pointer_offset(&leaf, address, at, 0);
+      nir_def *def = memory_access(t, &leaf, part ? whole_value(t, part) : NULL, NULL, access,
+                                   components, bits, at ? MIN2(alignment, at & -at) : alignment);
+      if (t->error->kind != STELA_AIR_OK)
+         return NULL;
+      if (loaded) {
+         struct value *v = rzalloc(t->values, struct value);
+         if (!v) {
+            fail(t, STELA_AIR_ALLOCATION, "aggregate value allocation failed");
+            return NULL;
+         }
+         v->def = def;
+         v->components = components;
+         v->bits = bits;
+         loaded->elements[i] = v;
+      }
+   }
+   return loaded ? loaded : (struct value *)stored;
+}
+
+/* A load or store of a struct or array, which memory holds leaf by leaf. */
+static bool
+aggregate_memory(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
+{
+   LLVMValueRef value = op == LLVMStore ? LLVMGetOperand(inst, 0) : inst;
+   struct value *address = pointer_value(t, LLVMGetOperand(inst, op == LLVMStore ? 1 : 0));
+   unsigned required = op == LLVMStore ? STELA_AIR_WRITE : STELA_AIR_READ;
+   unsigned alignment = LLVMGetAlignment(inst);
+   if (!address || !(address->access & required) || LLVMGetVolatile(inst) ||
+       LLVMGetOrdering(inst) != LLVMAtomicOrderingNotAtomic)
+      return fail(t, STELA_AIR_MEMORY, "unsupported volatile/atomic/unbound/disallowed aggregate access");
+   if (!alignment)
+      return fail(t, STELA_AIR_MEMORY, "memory access lacks explicit alignment");
+   LLVMTypeRef type = LLVMTypeOf(value);
+   if (op == LLVMStore) {
+      struct value *stored = aggregate_value(t, value);
+      return stored && aggregate_access(t, address, type, 0, stored, 0, alignment);
+   }
+   struct value *loaded = aggregate_access(t, address, type, 0, NULL, 0, alignment);
+   return loaded && (_mesa_hash_table_insert(t->values, inst, loaded) != NULL ||
+                     fail(t, STELA_AIR_ALLOCATION, "aggregate load map failed"));
 }
 
 /* An aggregate's insertvalue or extractvalue. */
@@ -2632,6 +2873,8 @@ integer_funnel(struct translator *t, LLVMValueRef inst, LLVMValueRef callee,
 }
 
 static bool same_pointer_resource(const struct value *a, const struct value *b);
+static const struct value *joined_pointer(const struct value *a, LLVMValueRef b_llvm,
+                                           const struct value *b);
 
 static nir_def *
 texture_operand(void *translator, LLVMValueRef value)
@@ -3669,15 +3912,19 @@ static bool
 pointer_select(struct translator *t, LLVMValueRef inst)
 {
    nir_def *condition = get_value(t, LLVMGetOperand(inst, 0));
-   const struct value *yes = find_value(t, LLVMGetOperand(inst, 1));
-   const struct value *no = find_value(t, LLVMGetOperand(inst, 2));
-   if (!condition)
+   LLVMValueRef yes_llvm = LLVMGetOperand(inst, 1), no_llvm = LLVMGetOperand(inst, 2);
+   const struct value *yes = pointer_value(t, yes_llvm);
+   const struct value *no = yes ? pointer_value(t, no_llvm) : NULL;
+   if (!condition || t->error->kind != STELA_AIR_OK)
       return false;
-   if (!same_pointer_resource(yes, no))
+   const struct value *root = joined_pointer(yes, no_llvm, no);
+   if (!root)
+      root = joined_pointer(no, yes_llvm, yes);
+   if (!root)
       return fail(t, STELA_AIR_MEMORY, "pointer select joins distinct resource origins");
-   if (!put_value(t, inst, nir_bcsel(&t->b, condition, yes->def, no->def), yes->access))
+   if (!put_value(t, inst, nir_bcsel(&t->b, condition, yes->def, no->def), root->access))
       return false;
-   pointer_authority(find_value(t, inst), yes);
+   pointer_authority(find_value(t, inst), root);
    return true;
 }
 
@@ -3708,6 +3955,9 @@ instruction(struct translator *t, LLVMValueRef inst)
       return argument_load(t, inst);
    if (op == LLVMInsertValue || op == LLVMExtractValue)
       return aggregate_instruction(t, inst, op);
+   if ((op == LLVMLoad && aggregate_count(LLVMTypeOf(inst))) ||
+       (op == LLVMStore && aggregate_count(LLVMTypeOf(LLVMGetOperand(inst, 0)))))
+      return aggregate_memory(t, inst, op);
    if ((op == LLVMShuffleVector || op == LLVMExtractElement || op == LLVMInsertElement) &&
        stela_air_matrix_type(LLVMTypeOf(LLVMGetOperand(inst, 0)), &bits))
       return matrix_elements(t, inst, op);
@@ -3827,7 +4077,14 @@ instruction(struct translator *t, LLVMValueRef inst)
             return fail(t, STELA_AIR_INSTRUCTION, "the size of a patch that declares no control points");
          return put_value(t, inst, nir_imm_int(&t->b, points), 0);
       }
+      /* The prelude bound it. */
+      if (stitched_resource_name(name, name_length))
+         return true;
       bool lowered;
+      if (!stitched_builtin_call(t, inst, callee, name, name_length, &lowered))
+         return false;
+      if (lowered)
+         return true;
       if (!control_point_call(t, inst, callee, &lowered))
          return false;
       if (lowered)
@@ -3989,7 +4246,8 @@ instruction(struct translator *t, LLVMValueRef inst)
       const struct value *b = a ? pointer_value(t, LLVMGetOperand(inst, 1)) : NULL;
       if (t->error->kind != STELA_AIR_OK)
          return false;
-      if (!same_pointer_resource(a, b) || !a->def || !b->def ||
+      LLVMValueRef a_llvm = LLVMGetOperand(inst, 0), b_llvm = LLVMGetOperand(inst, 1);
+      if ((!joined_pointer(a, b_llvm, b) && !joined_pointer(b, a_llvm, a)) || !a->def || !b->def ||
           a->def->num_components != 1 || b->def->num_components != 1 ||
           a->def->bit_size != 64 || b->def->bit_size != 64)
          return fail(t, STELA_AIR_MEMORY, "pointer equality requires one validated resource origin");
@@ -4007,8 +4265,12 @@ instruction(struct translator *t, LLVMValueRef inst)
          return fail(t, STELA_AIR_MEMORY, "unsupported volatile/ordered/unbound/disallowed memory access");
       if (atomic && (thread_memory(address) || address->constant_data))
          return fail(t, STELA_AIR_MEMORY, "atomic access to thread memory or constant data");
-      if (op == LLVMStore && !value_shape(LLVMTypeOf(LLVMGetOperand(inst, 0)), &components, &bits))
-         return fail(t, STELA_AIR_TYPE, "unsupported store type");
+      if (op == LLVMStore && !value_shape(LLVMTypeOf(LLVMGetOperand(inst, 0)), &components, &bits)) {
+         char *type = LLVMPrintTypeToString(LLVMTypeOf(LLVMGetOperand(inst, 0)));
+         fail(t, STELA_AIR_TYPE, "unsupported store type %s", type);
+         LLVMDisposeMessage(type);
+         return false;
+      }
       if (bits == 1)
          return fail(t, STELA_AIR_MEMORY, "sub-byte memory access unsupported");
       if (atomic && (components != 1 || (bits != 32 && bits != 64) || LLVMGetAlignment(inst) < bits / 8))
@@ -4157,8 +4419,25 @@ legalize_switches(struct translator *t, LLVMValueRef fn)
    return !invalid && t->error->kind == STELA_AIR_OK && instruction_budget(t, fn);
 }
 
+/* Whether `fn` stores a pointer, whose provenance memory cannot keep. */
+static bool
+stores_pointer(LLVMValueRef fn)
+{
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block;
+        block = LLVMGetNextBasicBlock(block)) {
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst;
+           inst = LLVMGetNextInstruction(inst)) {
+         if (LLVMGetInstructionOpcode(inst) == LLVMStore &&
+             LLVMGetTypeKind(LLVMTypeOf(LLVMGetOperand(inst, 0))) == LLVMPointerTypeKind)
+            return true;
+      }
+   }
+   return false;
+}
+
 /* An unoptimized build keeps every value in memory and bars every pass from
- * its functions, which an optimizing build has no need to undo. */
+ * its functions, which an optimizing build has no need to undo, unless it
+ * left a pointer in a stack slot: only an SSA value keeps its provenance. */
 static bool
 promote_memory(struct translator *t, LLVMValueRef fn)
 {
@@ -4240,6 +4519,27 @@ same_pointer_resource(const struct value *a, const struct value *b)
       a->storage_size == b->storage_size && a->constant_base == b->constant_base;
 }
 
+/* Whether a pointer is a device or constant buffer's numeric address, which
+ * no buffer has at zero, so that a null pointer can stand for it: a join or
+ * comparison with null keeps its authority. Offsets into a variable, constant
+ * data or a bound buffer may be zero, and a pointer off null is not null. */
+static bool
+numeric_address(const struct value *v)
+{
+   return v && v->pointer_root && !v->null && !v->storage && !v->constant_data && !v->ssbo &&
+      !v->array && !v->texture && !v->sampler && !v->object && v->def &&
+      v->def->num_components == 1 && v->def->bit_size == 64;
+}
+
+/* The authority `a` and `b` share, or that a null `b` leaves with `a`. */
+static const struct value *
+joined_pointer(const struct value *a, LLVMValueRef b_llvm, const struct value *b)
+{
+   if (same_pointer_resource(a, b))
+      return a;
+   return LLVMIsAConstantPointerNull(b_llvm) && numeric_address(a) ? a : NULL;
+}
+
 static struct pointer_node *
 pointer_node(struct translator *t, LLVMValueRef llvm)
 {
@@ -4290,7 +4590,7 @@ static bool
 pointer_component(struct translator *t, struct pointer_node **stack,
                   unsigned begin, unsigned end, unsigned component)
 {
-   LLVMValueRef root = NULL;
+   LLVMValueRef root = NULL, null = NULL;
    for (unsigned i = begin; i < end; i++)
       stack[i]->component = component;
    for (unsigned i = begin; i < end; i++) {
@@ -4300,6 +4600,10 @@ pointer_component(struct translator *t, struct pointer_node **stack,
          LLVMValueRef dependency = pointer_dependency(t, node, j);
          if (!dependency)
             continue;
+         if (LLVMIsAConstantPointerNull(dependency)) {
+            null = dependency;
+            continue;
+         }
          struct pointer_node *dep = pointer_node(t, dependency);
          LLVMValueRef candidate;
          if (dep) {
@@ -4318,6 +4622,10 @@ pointer_component(struct translator *t, struct pointer_node **stack,
          root = candidate;
       }
    }
+   if (!root)
+      root = null;
+   else if (null && !numeric_address(find_value(t, root)))
+      return fail(t, STELA_AIR_MEMORY, "pointer PHI joins null with an offset into a resource");
    if (!root)
       return fail(t, STELA_AIR_MEMORY, "pointer PHI has a rootless dependency cycle");
    for (unsigned i = begin; i < end; i++)
@@ -4403,7 +4711,7 @@ pointer_provenance(struct translator *t)
             continue;
          LLVMOpcode op = LLVMGetInstructionOpcode(inst);
          if (op == LLVMAlloca || op == LLVMLoad || stela_air_read_sampler(inst) ||
-             stela_air_null_texture(inst))
+             stela_air_null_texture(inst) || stitched_resource_call(inst))
             continue; /* Roots, like arguments and globals. */
          if (op != LLVMPHI && op != LLVMSelect && op != LLVMGetElementPtr && op != LLVMBitCast)
             return fail(t, STELA_AIR_TYPE, "unsupported pointer provenance producer %d", op);
@@ -4667,7 +4975,7 @@ cfg_emit(struct translator *t)
             /* Constants are materialized before the predecessor's jump. Uses
              * of loop-carried PHIs retain their original simultaneous defs. */
             t->b.cursor = nir_before_instr(nir_block_last_instr(pred->end));
-            if (target->pointer_root && !same_pointer_resource(target, find_value(t, incoming)))
+            if (target->pointer_root && !joined_pointer(target, incoming, find_value(t, incoming)))
                return fail(t, STELA_AIR_MEMORY, "pointer PHI incoming authority differs from proof");
             struct value *aggregate = target->aggregate_count ? aggregate_value(t, incoming) : NULL;
             if (target->aggregate_count &&
@@ -4701,7 +5009,12 @@ cfg_emit(struct translator *t)
    nir_sort_unstructured_blocks(t->b.impl);
    nir_validate_shader(t->b.shader, "AIR flat CFG before Mesa structurization");
    nir_lower_goto_ifs(t->b.shader);
+   /* The structurizer leaves a return where a loop exits the function, which
+    * the backends' passes do not take, as SPIR-V's lowering leaves none. */
+   nir_lower_returns(t->b.shader);
    nir_lower_vars_to_ssa(t->b.shader);
+   /* Its flag's derefs outlive the flag's loads and stores. */
+   nir_remove_dead_derefs(t->b.shader);
    nir_validate_shader(t->b.shader, "AIR structured CFG after Mesa lowering");
    return true;
 }
@@ -4865,7 +5178,7 @@ translate(const void *bitcode, size_t size, const char *entry,
       fail(&t, STELA_AIR_ARGUMENT, "entry must be a defined nonvariadic void C-convention kernel");
       goto done;
    }
-   if ((t.metadata.unoptimized && !promote_memory(&t, fn)) ||
+   if (((t.metadata.unoptimized || stores_pointer(fn)) && !promote_memory(&t, fn)) ||
        !stela_air_fold_constants(&t.metadata, fn))
       goto done;
    if (stage && (!stela_air_metadata_stage(&t.metadata, fn, stage->stage, &t.render) ||
@@ -4902,7 +5215,8 @@ translate(const void *bitcode, size_t size, const char *entry,
    t.b.shader->info.num_ssbos = options->ssbo_count;
    t.values = _mesa_pointer_hash_table_create(t.cfg_scratch);
    if (!t.values || !(!stage ? kernel_arguments(&t, fn) :
-                      compute ? mesh_stage_arguments(&t) : stage_arguments(&t, fn))) {
+                      compute ? mesh_stage_arguments(&t) : stage_arguments(&t, fn)) ||
+       !stitched_resources(&t, fn)) {
       fail(&t, STELA_AIR_ALLOCATION, "AIR shader/value map allocation failed");
       goto done;
    }

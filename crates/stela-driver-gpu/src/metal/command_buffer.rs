@@ -226,6 +226,67 @@ pub struct Recording {
     /// Managed buffers to invalidate on completion, for the host to read
     /// what the GPU wrote.
     pub invalidations: Vec<MappedRange>,
+    /// The pipeline states its encoders set, in first-set order.
+    pub pipelines: Vec<BoundPipeline>,
+    /// What its commands do.
+    pub workload: Workload,
+}
+
+/// What a command buffer recorded, which describes the work in flight when
+/// the device is lost: its draws' sizes, and the commands that can make the
+/// GPU wait or loop on what other work wrote.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Workload {
+    pub direct: u32,
+    pub indirect: u32,
+    /// The most vertices, indices or mesh threadgroups times instances of one
+    /// direct draw.
+    pub largest: u64,
+    pub passes: u32,
+    pub dispatches: u32,
+    /// Copies, blits and fills.
+    pub transfers: u32,
+    /// Query result copies that wait for their queries to be available.
+    pub waited_queries: u32,
+    pub conditional: u32,
+    /// The device's own compute passes, which read counts the GPU wrote.
+    pub internal: u32,
+}
+
+impl Workload {
+    /// Counts the commands of `segments` besides the draws already counted.
+    fn count(mut self, segments: &[Segment]) -> Self {
+        for command in segments.iter().flat_map(|segment| &segment.commands) {
+            match command {
+                Command::BeginRendering(_) => self.passes += 1,
+                Command::Dispatch(_) | Command::DispatchIndirect { .. } => self.dispatches += 1,
+                Command::CopyBuffer { .. }
+                | Command::CopyBufferToImage { .. }
+                | Command::CopyImageToBuffer { .. }
+                | Command::CopyImage { .. }
+                | Command::BlitImage { .. }
+                | Command::FillBuffer { .. } => self.transfers += 1,
+                Command::CopyQueryResults { wait: true, .. } => self.waited_queries += 1,
+                Command::BeginConditionalRendering { .. } => self.conditional += 1,
+                Command::AccumulateResults { .. }
+                | Command::SelectCommands { .. }
+                | Command::ResolveDraws { .. }
+                | Command::ResolveDispatches { .. }
+                | Command::ExecuteGeneratedCommands(_) => self.internal += 1,
+                _ => {}
+            }
+        }
+        self
+    }
+}
+
+/// A pipeline state an encoder set, by its device id, which names the work
+/// in flight when the device is lost. The pipelines an indirect command
+/// buffer sets itself are not among them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BoundPipeline {
+    Render(u64),
+    Compute(u64),
 }
 
 /// One stage's argument table and whether the GPU copy is current.
@@ -459,6 +520,8 @@ pub struct CommandBuffer {
     bindings: Bindings,
     encoder: Encoder,
     features: DynamicFeatures,
+    pipelines: Vec<BoundPipeline>,
+    workload: Workload,
 }
 
 impl CommandBuffer {
@@ -468,6 +531,15 @@ impl CommandBuffer {
             bindings: Bindings::default(),
             encoder: Encoder::None,
             features,
+            pipelines: Vec::new(),
+            workload: Workload::default(),
+        }
+    }
+
+    /// Records that an encoder set `pipeline`.
+    fn bound(&mut self, pipeline: BoundPipeline) {
+        if !self.pipelines.contains(&pipeline) {
+            self.pipelines.push(pipeline);
         }
     }
 
@@ -570,12 +642,15 @@ impl CommandBuffer {
     /// The recording: once finished, for the queue to submit; otherwise
     /// for the device to take back what the commands acquired.
     pub fn into_recording(self) -> Recording {
+        let workload = self.workload.count(&self.recorder.segments);
         Recording {
             segments: self.recorder.segments,
             uploads: self.recorder.uploads.finish(),
             query_pools: self.recorder.query_pools,
             mappings: self.recorder.mappings,
             invalidations: self.recorder.invalidations,
+            pipelines: self.pipelines,
+            workload,
         }
     }
 }

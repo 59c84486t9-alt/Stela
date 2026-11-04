@@ -7,7 +7,7 @@ use crate::metal::{
         CompareFunction, HeapType, SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter,
         SamplerMipFilter, SamplerReductionMode, SparsePageSize, StorageMode, TextureType,
     },
-    device::fixture::MockBackend,
+    device::{fixture::MockBackend, resources::CPU_BAND_BYTES},
     pixel_format::PixelFormat,
     service::{
         GuestMemory, Outcome,
@@ -147,6 +147,67 @@ fn textures_trade_regions_with_guest_memory() {
     assert_eq!(
         memory.read(read.bytes).unwrap(),
         (1..=16).collect::<alloc::vec::Vec<u8>>()
+    );
+
+    // Rows a band apart move one band at a time, never the span whole.
+    let apart = CPU_BAND_BYTES as usize;
+    let mut written = alloc::vec![0xee; apart + 8];
+    written[..8].copy_from_slice(&[21, 22, 23, 24, 25, 26, 27, 28]);
+    written[apart..].copy_from_slice(&[29, 30, 31, 32, 33, 34, 35, 36]);
+    let banded = TextureBytesRequest {
+        bytes: memory.put(&written),
+        bytes_per_row: CPU_BAND_BYTES,
+        ..replace
+    };
+    memory.longest = 0;
+    call::<_, Empty>(
+        &mut service,
+        connection,
+        Operation::ReplaceRegion,
+        &banded,
+        memory,
+    )
+    .unwrap();
+    let mut read = alloc::vec![0x55; apart + 8];
+    read[..8].fill(0);
+    let banded = TextureBytesRequest {
+        bytes: memory.put(&read),
+        ..banded
+    };
+    call::<_, Empty>(
+        &mut service,
+        connection,
+        Operation::GetBytes,
+        &banded,
+        memory,
+    )
+    .unwrap();
+    assert!(memory.longest <= 8, "{}", memory.longest);
+    let read = memory.read(banded.bytes).unwrap();
+    assert_eq!(read[..8], written[..8]);
+    assert_eq!(
+        read[8..apart],
+        alloc::vec![0x55; apart - 8][..],
+        "padding stays"
+    );
+    assert_eq!(read[apart..], written[apart..]);
+    let short = TextureBytesRequest {
+        bytes: memory.put(&[0; 8]),
+        ..banded
+    };
+    assert_eq!(
+        call::<_, Empty>(
+            &mut service,
+            connection,
+            Operation::ReplaceRegion,
+            &short,
+            memory
+        ),
+        Err(Outcome {
+            status: Status::Invalid,
+            reason: "the bytes end before the region",
+        }),
+        "refused before any band moves"
     );
 
     // A view keeps its texture until it is released.

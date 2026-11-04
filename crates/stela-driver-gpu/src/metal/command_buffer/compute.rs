@@ -6,7 +6,7 @@
 //! encoders and explicit memory barriers, as Metal does. A stage-in
 //! pipeline's dispatches carry the address of their stage-in region in the
 //! push constants' `arguments`.
-use super::{BufferRef, CommandBuffer, ComputePipelineState, Encoder, Resolver};
+use super::{BoundPipeline, BufferRef, CommandBuffer, ComputePipelineState, Encoder, Resolver};
 use crate::metal::{
     abi::{BarrierScope, DispatchType},
     binding::ResourceId,
@@ -71,6 +71,7 @@ impl CommandBuffer {
 
     pub fn set_compute_pipeline_state(&mut self, state: &ComputePipelineState) -> Result<()> {
         compute(&mut self.encoder)?.pipeline = Some(state.clone());
+        self.bound(BoundPipeline::Compute(state.id));
         Ok(())
     }
 

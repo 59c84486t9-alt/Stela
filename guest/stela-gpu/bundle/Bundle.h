@@ -448,6 +448,8 @@ id stela_empty_logs(void);
 	StelaGPULogState *_logState;
 	uint64_t _serial;
 	_Atomic(bool) _committed;
+	/* `userDictionary`, made at its first ask. */
+	NSMutableDictionary *_userDictionary;
 }
 @property(copy) NSString *label;
 @property NSUInteger errorOptions;

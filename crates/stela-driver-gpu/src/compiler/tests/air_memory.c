@@ -106,7 +106,10 @@ nak_translate(const nir_shader_compiler_options *options, void *data)
 {
    const struct fixture *fixture = data;
    struct stela_air_error error;
-   return translate(fixture->globals, fixture->body, options, fixed_buffer, &defaults, &error);
+   nir_shader *shader = translate(fixture->globals, fixture->body, options, fixed_buffer, &defaults, &error);
+   if (!shader)
+      fprintf(stderr, "%s: %u %s\n", fixture->body, error.kind, error.detail);
+   return shader;
 }
 #endif
 
@@ -215,6 +218,37 @@ thread_memory_lowers_to_scratch(void)
    const char *five = "%a = alloca [5 x i32], align 4\nstore i32 1, ptr %a, align 4\nret void\n";
    refused("", five, &(struct limits){.private_bytes = 16}, STELA_AIR_LIMIT);
    refused("", five, &(struct limits){0}, STELA_AIR_LIMIT);
+}
+
+/* A null pointer stands in for a device buffer's address, which is never
+ * zero: a PHI or select joins them and equality compares them. An offset into
+ * an allocation may be zero, so it never joins null. */
+static void
+null_joins_device_addresses(void)
+{
+   nir_shader *shader = compiled("",
+      "entry:\n%i = load i32, ptr addrspace(1) %out, align 4\n%c = icmp eq i32 %i, 0\n"
+      "br i1 %c, label %then, label %join\n"
+      "then:\n%h = getelementptr i32, ptr addrspace(1) %out, i64 1\nbr label %join\n"
+      "join:\n%p = phi ptr addrspace(1) [null, %entry], [%h, %then]\n"
+      "%q = select i1 %c, ptr addrspace(1) null, ptr addrspace(1) %p\n"
+      "%z = icmp eq ptr addrspace(1) %q, null\nbr i1 %z, label %done, label %use\n"
+      "use:\n%v = load i32, ptr addrspace(1) %q, align 4\n"
+      "store i32 %v, ptr addrspace(1) %out, align 4\nbr label %done\n"
+      "done:\nret void\n");
+   assert(count(shader, nir_intrinsic_store_global) == 1);
+   ralloc_free(shader);
+
+   refused("",
+      "entry:\n%a = alloca i32, align 4\n%i = load i32, ptr addrspace(1) %out, align 4\n"
+      "%c = icmp eq i32 %i, 0\nbr i1 %c, label %then, label %join\n"
+      "then:\nbr label %join\n"
+      "join:\n%p = phi ptr [null, %entry], [%a, %then]\n"
+      "store i32 1, ptr %p, align 4\nret void\n", &defaults, STELA_AIR_MEMORY);
+   refused("",
+      "%a = alloca i32, align 4\n%i = load i32, ptr addrspace(1) %out, align 4\n"
+      "%c = icmp eq i32 %i, 0\n%p = select i1 %c, ptr null, ptr %a\n"
+      "store i32 1, ptr %p, align 4\nret void\n", &defaults, STELA_AIR_MEMORY);
 }
 
 /* memset, memcpy and memmove of constant lengths, in the largest chunks the
@@ -374,14 +408,58 @@ kernels_read_constant_buffers(void)
           error.kind == STELA_AIR_ARGUMENT);
 }
 
+/* A struct or array crosses memory leaf by leaf at its layout offsets; an
+ * undefined leaf stores nothing. */
+static void
+aggregates_load_and_store_by_leaf(void)
+{
+   nir_shader *shader = compiled("",
+      "%a = alloca { i32, float, [2 x i16] }, align 4\n"
+      "%i = load i32, ptr addrspace(1) %out, align 4\n"
+      "%s = insertvalue { i32, float, [2 x i16] } undef, i32 %i, 0\n"
+      "%t = insertvalue { i32, float, [2 x i16] } %s, float 2.0, 1\n"
+      "store { i32, float, [2 x i16] } %t, ptr %a, align 4\n"
+      "%l = load { i32, float, [2 x i16] }, ptr %a, align 4\n"
+      "%v = extractvalue { i32, float, [2 x i16] } %l, 2, 1\n"
+      "%w = zext i16 %v to i32\n"
+      "store i32 %w, ptr addrspace(1) %out, align 4\nret void\n");
+   assert(shader->scratch_size == 12);
+   ralloc_free(shader);
+
+   /* A constant aggregate stores each of its leaves. */
+   shader = compiled("", "store [2 x i32] [i32 1, i32 2], ptr addrspace(1) %out, align 4\nret void\n");
+   assert(count(shader, nir_intrinsic_store_global) + count(shader, nir_intrinsic_store_ssbo) == 2);
+   ralloc_free(shader);
+
+   refused("", "%a = alloca { i1 }, align 4\nstore { i1 } { i1 true }, ptr %a, align 4\nret void\n",
+           &defaults, STELA_AIR_MEMORY);
+}
+
+/* A pointer left in a stack slot keeps its provenance through promotion. */
+static void
+stack_pointers_keep_their_origin(void)
+{
+   nir_shader *shader = compiled("",
+      "%s = alloca ptr addrspace(1), align 8\n"
+      "store ptr addrspace(1) %out, ptr %s, align 8\n"
+      "%p = load ptr addrspace(1), ptr %s, align 8\n"
+      "store i32 5, ptr addrspace(1) %p, align 4\nret void\n");
+   assert(shader->scratch_size == 0);
+   assert(count(shader, nir_intrinsic_store_global) + count(shader, nir_intrinsic_store_ssbo) == 1);
+   ralloc_free(shader);
+}
+
 int
 main(void)
 {
    glsl_type_singleton_init_or_ref();
    thread_memory_lowers_to_scratch();
    memory_intrinsics_lower_to_chunks();
+   null_joins_device_addresses();
    constant_data_lowers_to_load_constant();
    kernels_read_constant_buffers();
+   aggregates_load_and_store_by_leaf();
+   stack_pointers_keep_their_origin();
    glsl_type_singleton_decref();
    puts("air memory: ok");
    return 0;

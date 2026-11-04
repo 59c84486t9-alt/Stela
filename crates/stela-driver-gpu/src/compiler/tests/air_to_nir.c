@@ -1143,7 +1143,9 @@ pointer_equality_semantics(void)
          "%%ordered = icmp %s ptr addrspace(1) %%wrapped, %%out\nret void\n", predicates[i]);
       expect_refusal(body, "", 100, STELA_AIR_TYPE);
    }
-   const char *invalid[] = {"null", "undef", "poison"};
+   /* A device address compares with null (air_memory.c); undefined operands
+    * compare with nothing. */
+   const char *invalid[] = {"undef", "poison"};
    for (unsigned i = 0; i < ARRAY_SIZE(invalid); i++) {
       for (unsigned ne = 0; ne < 2; ne++) {
          char body[192];

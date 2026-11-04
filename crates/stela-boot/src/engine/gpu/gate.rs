@@ -218,7 +218,7 @@ fn open_gpu(
     constructed: &mut bool,
 ) -> Option<Arc<Shared>> {
     let refuse = |reason: &str| {
-        crate::status::warn(&format!("GPU {}: {reason}", bound.name));
+        crate::output::arguments(format_args!("GPU {}: {reason}\n", bound.name));
         None
     };
     let Some(link) = bound.link else {

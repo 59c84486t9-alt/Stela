@@ -3,8 +3,7 @@
 #include "compiler/nir/nir_format_convert.h"
 #include "util/ralloc.h"
 
-/* As SPIR-V reaches a driver: the offset in the source, the range the block's.
- * Lavapipe reads neither `base` nor a range narrower than that. */
+/* As SPIR-V reaches a driver: the offset in the source, the range the block's. */
 static nir_def *load_push(nir_builder *b, unsigned components, unsigned bit_size, unsigned offset)
 {
    return nir_load_push_constant(b, components, bit_size, nir_imm_int(b, (int)offset),

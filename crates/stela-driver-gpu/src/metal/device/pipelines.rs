@@ -13,7 +13,7 @@ use super::{
 };
 use crate::metal::{
     abi::{DataType, FunctionType, PrimitiveTopologyClass},
-    command_buffer::{ComputePipelineState, IndirectCompute, RenderPipelineState},
+    command_buffer::{BoundPipeline, ComputePipelineState, IndirectCompute, RenderPipelineState},
     error::{Error, Result, ensure, require},
     library::{self, Header, Library},
     pipeline::{
@@ -33,7 +33,7 @@ use crate::metal::{
         object::{ComputePipelineInfo, Pipeline, PipelineCache, PipelineSource, ShaderCode},
     },
 };
-use alloc::{string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 
 /// What a destroyed object's id fails with.
 const DESTROYED: &str = "unknown or destroyed object";
@@ -267,6 +267,39 @@ pub(super) struct Pipelines {
 }
 
 impl Pipelines {
+    /// The entry points of the functions `pipeline` uses: those its
+    /// descriptor names and those it links.
+    /// A pipeline's functions by entry point, each with the function
+    /// constants it was specialized with as `[index=bytes, ...]`.
+    pub(super) fn entries(&self, pipeline: BoundPipeline) -> Result<Vec<String>> {
+        let kept = match pipeline {
+            BoundPipeline::Render(id) => &self.render.get(id as u32)?.kept,
+            BoundPipeline::Compute(id) => &self.compute.get(id as u32)?.kept,
+        };
+        kept.functions
+            .iter()
+            .map(|function| {
+                let function = self.functions.get(function.0)?;
+                let prepared = &function.prepared;
+                let mut named = String::from(prepared.entry());
+                if !prepared.constants.is_empty() {
+                    named.push('[');
+                    for (index, (constant, bytes)) in prepared.constants.iter().enumerate() {
+                        if index > 0 {
+                            named.push(',');
+                        }
+                        named.push_str(&format!("{constant}="));
+                        for byte in bytes {
+                            named.push_str(&format!("{byte:02x}"));
+                        }
+                    }
+                    named.push(']');
+                }
+                Ok(named)
+            })
+            .collect()
+    }
+
     fn interface(&self, id: FunctionId) -> Result<&Interface> {
         self.functions.get(id.0)?.interface()
     }
@@ -509,6 +542,38 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             users: Users::CREATED,
         });
         Ok(LibraryId(index))
+    }
+
+    /// `newLibraryWithData:` of a library's bytes another library already
+    /// keeps, which the two then share: `matches` compares `length` bytes
+    /// with each candidate's. System libraries run to hundreds of megabytes
+    /// and every process loads them.
+    pub fn share_library<E: From<Error>>(
+        &mut self,
+        length: u64,
+        mut matches: impl FnMut(&[u8]) -> core::result::Result<bool, E>,
+    ) -> core::result::Result<Option<LibraryId>, E> {
+        let mut found = None;
+        for held in self.pipelines.libraries.iter() {
+            let data = self.compiler.library_data(held.library)?;
+            if data.len() as u64 == length && matches(data)? {
+                found = Some(held);
+                break;
+            }
+        }
+        let Some(held) = found else {
+            return Ok(None);
+        };
+        let object = LibraryObject {
+            library: self.compiler.share_library(held.library)?,
+            names: held.names.clone(),
+            dynamic: held.dynamic,
+            install_name: held.install_name.clone(),
+            dependencies: Vec::new(),
+            stitched: Vec::new(),
+            users: Users::CREATED,
+        };
+        Ok(Some(LibraryId(self.pipelines.libraries.insert(object))))
     }
 
     /// `functionNames`.

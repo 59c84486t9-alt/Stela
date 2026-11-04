@@ -180,8 +180,13 @@ impl<B: Backend + Send, C: Compiler + Send> GateService for SharedService<B, C> 
         ranges: &[MemoryRange],
         token: NonZeroU64,
     ) -> Result<NonZeroU64, &'static str> {
-        self.call(|service| service.import(connection, ranges, token))
-            .map_err(|fault| fault.reason)
+        let imported = self
+            .call(|service| service.import(connection, ranges, token))
+            .map_err(|fault| fault.reason);
+        if let Err(reason) = imported {
+            (self.host.report)(reason);
+        }
+        imported
     }
 
     fn retired(&self) -> Option<NonZeroU64> {

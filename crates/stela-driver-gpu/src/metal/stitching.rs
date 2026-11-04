@@ -1,7 +1,11 @@
 //! `MTLFunctionStitchingGraph`s, as the frontend's [`decode`] stream carries
 //! them: little-endian 32-bit words, each graph
 //! `[name bytes, node count, output + 1]`, its padded name and its nodes, an
-//! input `[0, argument index]` and a call
+//! input `[0, argument index]`, a builtin `[u32::MAX, builtin]`, a buffer
+//! address `[u32::MAX - 1, buffer index, offset low, offset high, dereference]`,
+//! an early return `[u32::MAX - 2, condition node index, value node index + 1]`,
+//! a texture `[u32::MAX - 3, texture index]`, a sampler
+//! `[u32::MAX - 4, sampler index]` and a call
 //! `[function + 1, argument count, node indices...]`. Nodes follow what they
 //! use, so running them in order keeps every dependency, control or data, and
 //! `function` indexes the descriptor's `functions`.
@@ -12,11 +16,58 @@ use alloc::{string::String, vec::Vec};
 pub enum StitchedNode {
     /// The stitched function's argument.
     Input(u32),
+    /// A builtin of the function the stitched function inlines into.
+    Builtin(StitchedBuiltin),
+    /// `MTLFunctionStitchingInputBufferAddress`: `offset` bytes into the
+    /// buffer the function the stitched function inlines into binds at
+    /// `index`, or with `dereference` the value there.
+    BufferAddress {
+        index: u32,
+        offset: u64,
+        dereference: bool,
+    },
+    /// `MTLFunctionStitchingEarlyReturnNode`: the stitched function returns
+    /// the earlier node `value`, or nothing, here when the earlier node
+    /// `condition` is nonzero.
+    EarlyReturn {
+        condition: u32,
+        value: Option<u32>,
+    },
+    /// `MTLFunctionStitchingInputTexture`: the texture the function the
+    /// stitched function inlines into binds at the index.
+    Texture(u32),
+    /// `MTLFunctionStitchingInputSampler`: likewise its sampler.
+    Sampler(u32),
+    /// `MTLFunctionStitchingInputThreadgroup`: likewise its threadgroup
+    /// memory, which its dispatches size.
+    Threadgroup(u32),
     Call {
         function: u32,
         arguments: Vec<u32>,
     },
 }
+
+/// The builtins a node reads, by the stream's numbers, which are
+/// `enum stela_air_stitch_builtin`'s.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum StitchedBuiltin {
+    /// `MTLFunctionStitchingBuiltinThreadPositionInGrid`.
+    ThreadPositionInGrid = 1,
+    /// `MTLFunctionStitchingBuiltinThreadPositionInThreadgroup`.
+    ThreadPositionInThreadgroup = 2,
+}
+
+/// The first word of a builtin node.
+const BUILTIN: u32 = u32::MAX;
+/// The first word of a buffer address node.
+const BUFFER_ADDRESS: u32 = u32::MAX - 1;
+/// The first word of an early return node.
+const EARLY_RETURN: u32 = u32::MAX - 2;
+/// The first words of texture, sampler and threadgroup memory nodes.
+const TEXTURE: u32 = u32::MAX - 3;
+const SAMPLER: u32 = u32::MAX - 4;
+const THREADGROUP: u32 = u32::MAX - 5;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StitchedGraph {
@@ -55,7 +106,49 @@ impl Words<'_> {
     }
 
     fn node(&mut self, index: usize, functions: usize) -> Result<StitchedNode> {
-        let Some(function) = self.word()?.checked_sub(1) else {
+        let first = self.word()?;
+        if first == BUILTIN {
+            return match self.word()? {
+                1 => Ok(StitchedNode::Builtin(StitchedBuiltin::ThreadPositionInGrid)),
+                2 => Ok(StitchedNode::Builtin(
+                    StitchedBuiltin::ThreadPositionInThreadgroup,
+                )),
+                _ => Err(MALFORMED),
+            };
+        }
+        if first == BUFFER_ADDRESS {
+            let index = self.word()?;
+            let offset = u64::from(self.word()?) | u64::from(self.word()?) << 32;
+            let dereference = match self.word()? {
+                0 => false,
+                1 => true,
+                _ => return Err(MALFORMED),
+            };
+            return Ok(StitchedNode::BufferAddress {
+                index,
+                offset,
+                dereference,
+            });
+        }
+        if first == TEXTURE {
+            return Ok(StitchedNode::Texture(self.word()?));
+        }
+        if first == SAMPLER {
+            return Ok(StitchedNode::Sampler(self.word()?));
+        }
+        if first == THREADGROUP {
+            return Ok(StitchedNode::Threadgroup(self.word()?));
+        }
+        if first == EARLY_RETURN {
+            let earlier = |node: u32| ((node as usize) < index).then_some(node);
+            let condition = earlier(self.word()?).ok_or(MALFORMED)?;
+            let value = match self.word()?.checked_sub(1) {
+                Some(value) => Some(earlier(value).ok_or(MALFORMED)?),
+                None => None,
+            };
+            return Ok(StitchedNode::EarlyReturn { condition, value });
+        }
+        let Some(function) = first.checked_sub(1) else {
             return Ok(StitchedNode::Input(self.word()?));
         };
         if function as usize >= functions {
@@ -138,6 +231,99 @@ mod tests {
                 output: Some(2),
             }]
         );
+    }
+
+    #[test]
+    fn builtins_decode_and_unknown_ones_are_refused() {
+        // `f() = g(thread_position_in_grid)`.
+        let words = [1, 2, 2, 0x66, u32::MAX, 1, 1, 1, 0];
+        assert_eq!(
+            decode(&stream(&words), 1).unwrap()[0].nodes,
+            [
+                StitchedNode::Builtin(StitchedBuiltin::ThreadPositionInGrid),
+                StitchedNode::Call {
+                    function: 0,
+                    arguments: vec![0],
+                },
+            ]
+        );
+        let mut unknown = words;
+        unknown[5] = 3;
+        assert!(decode(&stream(&unknown), 1).is_err());
+    }
+
+    #[test]
+    fn textures_samplers_and_threadgroups_decode_their_indices() {
+        // `f() = g(texture 3, sampler 1, threadgroup 2)`.
+        let words = [
+            1,
+            4,
+            4,
+            0x66,
+            u32::MAX - 3,
+            3,
+            u32::MAX - 4,
+            1,
+            u32::MAX - 5,
+            2,
+            1,
+            3,
+            0,
+            1,
+            2,
+        ];
+        assert_eq!(
+            decode(&stream(&words), 1).unwrap()[0].nodes[..3],
+            [
+                StitchedNode::Texture(3),
+                StitchedNode::Sampler(1),
+                StitchedNode::Threadgroup(2)
+            ]
+        );
+    }
+
+    #[test]
+    fn buffer_addresses_decode_their_offsets() {
+        // `f() = g(*(buffer 3 + 2^32 + 8))`.
+        let words = [1, 2, 2, 0x66, u32::MAX - 1, 3, 8, 1, 1, 1, 1, 0];
+        assert_eq!(
+            decode(&stream(&words), 1).unwrap()[0].nodes[0],
+            StitchedNode::BufferAddress {
+                index: 3,
+                offset: (1 << 32) + 8,
+                dereference: true,
+            }
+        );
+        let mut unknown = words;
+        unknown[8] = 2;
+        assert!(decode(&stream(&unknown), 1).is_err());
+    }
+
+    #[test]
+    fn early_returns_name_an_earlier_condition() {
+        // `f(a) { if (g(a)) return g(a); }`.
+        let words = [1, 3, 0, 0x66, 0, 0, 1, 1, 0, u32::MAX - 2, 1, 2];
+        assert_eq!(
+            decode(&stream(&words), 1).unwrap()[0].nodes[2],
+            StitchedNode::EarlyReturn {
+                condition: 1,
+                value: Some(1),
+            }
+        );
+        let mut nothing = words;
+        nothing[11] = 0;
+        assert_eq!(
+            decode(&stream(&nothing), 1).unwrap()[0].nodes[2],
+            StitchedNode::EarlyReturn {
+                condition: 1,
+                value: None,
+            }
+        );
+        for (at, later) in [(10, 2), (11, 3)] {
+            let mut bad = words;
+            bad[at] = later;
+            assert!(decode(&stream(&bad), 1).is_err(), "{at}");
+        }
     }
 
     #[test]

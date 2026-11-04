@@ -238,6 +238,12 @@ void *IOSurfaceGetBaseAddressOfPlane(IOSurfaceRef surface, size_t plane);
 size_t IOSurfaceGetBytesPerRowOfPlane(IOSurfaceRef surface, size_t plane);
 size_t IOSurfaceGetElementHeightOfPlane(IOSurfaceRef surface, size_t plane);
 size_t IOSurfaceGetAllocSize(IOSurfaceRef surface);
+size_t IOSurfaceGetWidth(IOSurfaceRef surface);
+size_t IOSurfaceGetHeight(IOSurfaceRef surface);
+size_t IOSurfaceGetBytesPerElement(IOSurfaceRef surface);
+size_t IOSurfaceGetBytesPerRow(IOSurfaceRef surface);
+size_t IOSurfaceGetPlaneCount(IOSurfaceRef surface);
+uint32_t IOSurfaceGetPixelFormat(IOSurfaceRef surface);
 
 #define DISPATCH_TIME_FOREVER (~0ull)
 typedef struct dispatch_queue_attr_s *dispatch_queue_attr_t;

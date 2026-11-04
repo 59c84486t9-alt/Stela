@@ -33,6 +33,14 @@ bool stela_air_read_sampler(LLVMValueRef value);
  * uses in place of one its constants left out. */
 bool stela_air_null_texture(LLVMValueRef value);
 
+/* Merges what the texture call inst says of the texture it takes into
+ * *texture: its type, texel type and the access the call needs. A texture
+ * no call has used yet has type 0, an unknown primitive and sample access,
+ * which reads and writes widen. False for a call that is no texture call, or
+ * one that contradicts what earlier calls said; a sample of a texture a
+ * later call writes is refused where the sample is translated. */
+bool stela_air_texture_use(LLVMValueRef inst, struct stela_air_texture *texture);
+
 enum stela_air_texture_status {
    STELA_AIR_TEXTURE_OTHER, /* Not a texture function; nothing was emitted. */
    STELA_AIR_TEXTURE_LOWERED,

@@ -2047,15 +2047,23 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             return fail(t, STELA_AIR_ARGUMENT, "unsupported texture type at %u", index);
          if (sampler && (element_bytes != strlen("sampler") || memcmp(element, "sampler", element_bytes)))
             return fail(t, STELA_AIR_ARGUMENT, "unsupported sampler type at %u", index);
-         unsigned slot = texture ? texture_desc.index : sampler_desc.index;
+         unsigned *slot = texture ? &texture_desc.index : &sampler_desc.index;
          unsigned slots = texture ? AIR_MAX_TEXTURES : AIR_MAX_SAMPLERS;
          bool *indices = texture ? texture_indices : sampler_indices;
-         if (slot >= slots || locations > slots - slot)
-            return fail(t, STELA_AIR_METADATA, "duplicate or out-of-range texture or sampler location");
-         for (unsigned i = slot; i < slot + locations; i++) {
-            if (claims && indices[i])
+         bool in_range = *slot < slots && locations <= slots - *slot;
+         if (claims) {
+            if (!in_range)
                return fail(t, STELA_AIR_METADATA, "duplicate or out-of-range texture or sampler location");
-            indices[i] |= claims;
+            for (unsigned i = *slot; i < *slot + locations; i++) {
+               if (indices[i])
+                  return fail(t, STELA_AIR_METADATA, "duplicate or out-of-range texture or sampler location");
+               indices[i] = true;
+            }
+         } else if (!in_range) {
+            /* An absent argument's location expression may name no slot,
+             * as one its constructors leave at -1; a read that folding
+             * leaves is refused where it binds. */
+            *slot = slots;
          }
          *(texture ? &texture_desc.length : &sampler_desc.length) = array ? locations : 0;
          primitive = STELA_AIR_PRIMITIVE_UNKNOWN;
@@ -2688,6 +2696,7 @@ inspect(const void *bitcode, size_t size, const struct stela_air_constants *cons
    bool parsed = !LLVMParseBitcodeInContext2(context, buffer, &m.module);
    LLVMDisposeMemoryBuffer(buffer);
    bool success = false;
+   struct stela_air_constructed_constants prepared = {0};
    struct decoded_entry {
       LLVMValueRef fn;
       const char *name;
@@ -2721,7 +2730,6 @@ inspect(const void *bitcode, size_t size, const struct stela_air_constants *cons
    }
    if (!stela_air_metadata_layout(&m) || !stela_air_metadata_validate(&m))
       goto done;
-   struct stela_air_constructed_constants prepared;
    bool ready = constants && stela_air_prepare_constants(&m, constants, &prepared);
    if (!stela_air_inline_calls(&m, NULL, 0, 0))
       goto done;
@@ -2823,6 +2831,7 @@ inspect(const void *bitcode, size_t size, const struct stela_air_constants *cons
    }
    success = true;
 done:
+   stela_air_release_constructed_constants(&prepared);
    free(entries);
    if (m.module)
       LLVMDisposeModule(m.module);

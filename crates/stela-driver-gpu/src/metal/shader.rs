@@ -625,6 +625,9 @@ pub trait Compiler {
     /// [`remove_library`]: Self::remove_library
     fn add_library(&mut self, data: Vec<u8>) -> Result<u64>;
 
+    /// Another id for the bytes `library` keeps, which the two share.
+    fn share_library(&mut self, library: u64) -> Result<u64>;
+
     /// Forgets a library; its functions can no longer compile.
     fn remove_library(&mut self, library: u64) -> Result<()>;
 

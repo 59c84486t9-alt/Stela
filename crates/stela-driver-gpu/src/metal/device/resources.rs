@@ -698,6 +698,52 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(created)
     }
 
+    /// `region` as bands that each hold whole block rows of one image, whose
+    /// bytes span at most [`CPU_BAND_BYTES`] of the caller's layout (one row
+    /// at least). A transfer that moves a band at a time holds a bounded
+    /// amount of memory, whatever the texture's size.
+    pub fn cpu_bands(
+        &self,
+        id: TextureId,
+        region: &Region,
+        strides: Strides,
+    ) -> Result<Vec<CpuBand>> {
+        let descriptor = &self.resources.textures.get(id.0)?.descriptor;
+        let shape = RowShape::of(descriptor, region, strides)?;
+        let per_band = CPU_BAND_BYTES
+            .checked_div(strides.bytes_per_row)
+            .map_or(shape.rows, |rows| rows.max(1));
+        let block_height = u64::from(descriptor.pixel_format.describe().block.height);
+        let mut bands = Vec::new();
+        for image in 0..shape.images {
+            let mut row = 0;
+            while row < shape.rows {
+                let count = per_band.min(shape.rows - row);
+                let start = shape.start(strides, image, row)?;
+                let end = shape.start(strides, image, row + count - 1)? + shape.row_bytes;
+                let texel_row = row * block_height;
+                bands.push(CpuBand {
+                    region: Region {
+                        origin: [
+                            region.origin[0],
+                            region.origin[1] + texel_row,
+                            region.origin[2] + image,
+                        ],
+                        size: [
+                            region.size[0],
+                            (count * block_height).min(region.size[1] - texel_row),
+                            1,
+                        ],
+                        ..*region
+                    },
+                    bytes: start..end,
+                });
+                row += count;
+            }
+        }
+        Ok(bands)
+    }
+
     /// `replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:`,
     /// for textures the CPU can write.
     pub fn replace_region(
@@ -752,48 +798,21 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         length: usize,
     ) -> Result<(BufferImageCopy, CpuRows)> {
         let descriptor = &self.resources.textures.get(id.0)?.descriptor;
-        let description = descriptor.pixel_format.describe();
-        ensure(
-            description.is_color(),
-            "the CPU reaches depth and stencil textures through blits",
-        )?;
+        let shape = RowShape::of(descriptor, region, strides)?;
         let (subresource, offset, extent) = region.resolve(descriptor, ImageAspects::COLOR)?;
-        let block = description.block;
-        let row_bytes = region.size[0].div_ceil(u64::from(block.width)) * u64::from(block.bytes);
-        let rows = region.size[1].div_ceil(u64::from(block.height));
-        let images = region.size[2];
-        ensure(
-            strides.bytes_per_row >= row_bytes,
-            "bytesPerRow is smaller than a row",
-        )?;
-        ensure(
-            images <= 1
-                || strides
-                    .bytes_per_row
-                    .checked_mul(rows)
-                    .is_some_and(|bytes| strides.bytes_per_image >= bytes),
-            "bytesPerImage is smaller than an image",
-        )?;
-        let end = if images == 0 || rows == 0 {
-            Some(0)
+        let end = if shape.images == 0 || shape.rows == 0 {
+            0
         } else {
-            (images - 1)
-                .checked_mul(strides.bytes_per_image)
-                .zip((rows - 1).checked_mul(strides.bytes_per_row))
-                .and_then(|(image, row)| image.checked_add(row))
-                .and_then(|start| start.checked_add(row_bytes))
+            shape.start(strides, shape.images - 1, shape.rows - 1)? + shape.row_bytes
         };
-        ensure(
-            end.is_some_and(|end| end <= length as u64),
-            "the bytes end before the region",
-        )?;
+        ensure(end <= length as u64, "the bytes end before the region")?;
         // The validated non-overlapping layout contains all the packed bytes.
         let rows = CpuRows {
             strides,
-            row_bytes,
-            rows,
-            images,
-            packed_bytes: (row_bytes * rows * images) as usize,
+            row_bytes: shape.row_bytes,
+            rows: shape.rows,
+            images: shape.images,
+            packed_bytes: (shape.row_bytes * shape.rows * shape.images) as usize,
         };
         let copy = BufferImageCopy {
             buffer_offset: 0,
@@ -1640,6 +1659,70 @@ fn cpu_copy_rows(
         rows_per_copy,
         next: 0,
     })
+}
+
+/// The most bytes of the caller's layout that one band of a CPU texture
+/// transfer spans ([`Device::cpu_bands`]).
+pub const CPU_BAND_BYTES: u64 = 4 << 20;
+
+/// Whole block rows of one image of a CPU texture transfer: `region`, whose
+/// texels lie at `bytes` of the caller's layout, in the transfer's strides.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CpuBand {
+    pub region: Region,
+    pub bytes: Range<u64>,
+}
+
+/// The block rows of a color region in CPU memory.
+struct RowShape {
+    row_bytes: u64,
+    rows: u64,
+    images: u64,
+}
+
+impl RowShape {
+    /// Validates `strides` for `region` of a color texture. Every row's
+    /// start, at most the last one's, fits in `u64`.
+    fn of(descriptor: &TextureDescriptor, region: &Region, strides: Strides) -> Result<Self> {
+        let description = descriptor.pixel_format.describe();
+        ensure(
+            description.is_color(),
+            "the CPU reaches depth and stencil textures through blits",
+        )?;
+        region.resolve(descriptor, ImageAspects::COLOR)?;
+        let block = description.block;
+        let shape = Self {
+            row_bytes: region.size[0].div_ceil(u64::from(block.width)) * u64::from(block.bytes),
+            rows: region.size[1].div_ceil(u64::from(block.height)),
+            images: region.size[2],
+        };
+        ensure(
+            strides.bytes_per_row >= shape.row_bytes,
+            "bytesPerRow is smaller than a row",
+        )?;
+        ensure(
+            shape.images <= 1
+                || strides
+                    .bytes_per_row
+                    .checked_mul(shape.rows)
+                    .is_some_and(|image| strides.bytes_per_image >= image),
+            "bytesPerImage is smaller than an image",
+        )?;
+        if shape.rows > 0 && shape.images > 0 {
+            shape.start(strides, shape.images - 1, shape.rows - 1)?;
+        }
+        Ok(shape)
+    }
+
+    /// Where `row` of `image` starts in the caller's layout.
+    fn start(&self, strides: Strides, image: u64, row: u64) -> Result<u64> {
+        image
+            .checked_mul(strides.bytes_per_image)
+            .zip(row.checked_mul(strides.bytes_per_row))
+            .and_then(|(image, row)| image.checked_add(row))
+            .and_then(|start| start.checked_add(self.row_bytes).map(|_| start))
+            .ok_or(Error::Invalid("the bytes end before the region"))
+    }
 }
 
 /// The row strides of texels in CPU memory: `bytesPerRow`, and

@@ -4,7 +4,7 @@ use super::{
         MeshPipelineRequest, PipelineArchives, RenderPipelineRequest,
     },
     queue::{AttachmentRequest, CounterSet, RenderPassRequest},
-    resources::Strides,
+    resources::{CPU_BAND_BYTES, CpuBand, Strides},
     *,
 };
 use crate::metal::{
@@ -1204,6 +1204,33 @@ fn source_libraries_name_their_functions_and_keep_what_they_load_with() {
 }
 
 #[test]
+fn libraries_of_held_bytes_share_them() {
+    let mut device = device();
+    let data = fixture(false);
+    let length = data.len() as u64;
+    let unmatched = device.share_library(length, |_| Ok::<_, Error>(false));
+    assert_eq!(unmatched, Ok(None));
+    assert_eq!(
+        device.share_library(length + 1, |_| -> Result<bool> { unreachable!() }),
+        Ok(None),
+        "only bytes of the same length compare"
+    );
+    let shared = device
+        .share_library(length, |held| Ok::<_, Error>(held == data))
+        .unwrap()
+        .unwrap();
+    assert_ne!(shared, LIBRARY);
+    assert_eq!(
+        device.library_function_names(shared),
+        device.library_function_names(LIBRARY)
+    );
+
+    // Each lives on without the other.
+    device.destroy_library(LIBRARY).unwrap();
+    assert!(device.new_function(shared, "kernel", &[]).is_ok());
+}
+
+#[test]
 fn pipelines_keep_their_functions_and_libraries() {
     let mut device = device();
     let library = device.new_library(fixture(false)).unwrap();
@@ -1400,6 +1427,39 @@ fn managed_textures_keep_a_cpu_copy_without_host_image_copy() {
             Err(Error::Invalid(reason))
         );
     }
+
+    // Bands of whole rows, each within CPU_BAND_BYTES of the caller's bytes.
+    assert_eq!(
+        device.cpu_bands(texture, &region, tight).unwrap(),
+        [CpuBand {
+            region,
+            bytes: 0..16
+        }]
+    );
+    let apart = Strides {
+        bytes_per_row: CPU_BAND_BYTES / 2 + 1,
+        ..tight
+    };
+    let row = |y, start| CpuBand {
+        region: Region {
+            origin: [2, y, 0],
+            size: [2, 1, 1],
+            ..region
+        },
+        bytes: start..start + 8,
+    };
+    assert_eq!(
+        device.cpu_bands(texture, &region, apart).unwrap(),
+        [row(1, 0), row(2, CPU_BAND_BYTES / 2 + 1)]
+    );
+    let overflowing = Strides {
+        bytes_per_row: u64::MAX,
+        ..tight
+    };
+    assert_eq!(
+        device.cpu_bands(texture, &region, overflowing),
+        Err(Error::Invalid("the bytes end before the region"))
+    );
 
     let level1 = device.texture_cpu_copy(texture, 1, 0).unwrap().unwrap();
     assert_eq!((level1.offset, level1.bytes_per_row), (8 * 4 * 4, 4 * 4));

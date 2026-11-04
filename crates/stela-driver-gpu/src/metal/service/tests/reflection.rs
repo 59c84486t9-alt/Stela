@@ -55,6 +55,19 @@ fn bindings_flatten_their_types_before_them() {
     let members: Vec<MemberInfo> =
         wire::read_array(records(members, size_of::<MemberInfo>())).unwrap();
     let name = |offset: u32, length: u32| &data[offset as usize..(offset + length) as usize];
+    // The guest builds each type from earlier ones: an element precedes its
+    // type, and a structure or texture has none.
+    for (index, ty) in types.iter().enumerate() {
+        let leaf = [DataType::Struct.raw(), DataType::Texture.raw()].contains(&ty.data_type);
+        assert!(
+            if leaf {
+                ty.element == NO_TYPE
+            } else {
+                ty.element == NO_TYPE || (ty.element as usize) < index
+            },
+            "type {index}: {ty:?}"
+        );
+    }
 
     // The uniforms' pointer, whose structure holds the inlined array.
     let uniforms = bindings[0];

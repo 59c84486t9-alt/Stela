@@ -27,6 +27,7 @@
 #include "util/macros.h"
 #include "util/set.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static bool
@@ -284,22 +285,39 @@ constructed(LLVMModuleRef clone)
                     !LLVMGetArrayLength2(LLVMTypeOf(entries)));
 }
 
+void
+stela_air_release_constructed_constants(struct stela_air_constructed_constants *constants)
+{
+   free(constants->globals);
+   *constants = (struct stela_air_constructed_constants){0};
+}
+
 /* The clone and original have their globals in the same order. Keep the
  * constructor's destinations externally visible so LLVM commits their
- * initializers instead of forwarding their values and removing them. */
+ * initializers instead of forwarding their values and removing them. The
+ * arrays are sized to the module's constructed globals; result owns them,
+ * on failure too, until it is released. */
 static bool
 evaluate_constants(LLVMModuleRef original, LLVMModuleRef clone,
                    struct stela_air_constructed_constants *result)
 {
-   LLVMValueRef copies[AIR_MAX_ARGUMENTS];
-   result->count = 0;
+   stela_air_release_constructed_constants(result);
+   unsigned count = 0;
    LLVMValueRef global = LLVMGetFirstGlobal(original);
+   for (LLVMValueRef copy = LLVMGetFirstGlobal(clone); copy && global;
+        copy = LLVMGetNextGlobal(copy), global = LLVMGetNextGlobal(global))
+      count += !LLVMIsGlobalConstant(copy) && stela_air_metadata_constructed(global);
+   LLVMValueRef *storage = malloc(3 * (size_t)MAX2(count, 1) * sizeof(*storage));
+   if (!storage)
+      return false;
+   result->globals = storage;
+   result->values = storage + count;
+   LLVMValueRef *copies = storage + 2 * (size_t)count;
+   global = LLVMGetFirstGlobal(original);
    for (LLVMValueRef copy = LLVMGetFirstGlobal(clone); copy && global;
         copy = LLVMGetNextGlobal(copy), global = LLVMGetNextGlobal(global)) {
       if (LLVMIsGlobalConstant(copy) || !stela_air_metadata_constructed(global))
          continue;
-      if (result->count == AIR_MAX_ARGUMENTS)
-         return false;
       result->globals[result->count] = global;
       copies[result->count++] = copy;
       LLVMSetLinkage(copy, LLVMExternalLinkage);
@@ -403,22 +421,25 @@ stela_air_construct_prepared_constants(struct stela_air_metadata *m,
    uint64_t functions = LLVMGetArrayLength2(LLVMTypeOf(entries));
    if (functions > AIR_MAX_ARGUMENTS)
       return fail(m, STELA_AIR_LIMIT, "constructor count exceeded");
-   struct stela_air_constructed_constants evaluated;
+   struct stela_air_constructed_constants evaluated = {0};
    if (!prepared || !prepared_matches(m->module, prepared)) {
       LLVMModuleRef clone = LLVMCloneModule(m->module);
       if (!clone)
          return fail(m, STELA_AIR_ALLOCATION, "module clone allocation failed");
       bool ready = evaluate_constants(m->module, clone, &evaluated);
       LLVMDisposeModule(clone);
-      if (!ready)
+      if (!ready) {
+         stela_air_release_constructed_constants(&evaluated);
          return fail(m, STELA_AIR_INSTRUCTION,
                      "program-scope constants depend on more than function constants");
+      }
       prepared = &evaluated;
    }
    for (unsigned i = 0; i < prepared->count; i++) {
       LLVMSetInitializer(prepared->globals[i], prepared->values[i]);
       LLVMSetGlobalConstant(prepared->globals[i], true);
    }
+   stela_air_release_constructed_constants(&evaluated);
    LLVMValueRef dropped[AIR_MAX_ARGUMENTS];
    for (unsigned i = 0; i < functions; i++)
       dropped[i] = LLVMGetOperand(LLVMGetAggregateElement(entries, i), 1);

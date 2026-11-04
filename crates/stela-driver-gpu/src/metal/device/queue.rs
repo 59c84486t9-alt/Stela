@@ -22,8 +22,8 @@ use crate::metal::{
     },
     binding::ResourceId,
     command_buffer::{
-        BufferRef, CommandBuffer, ComputePipelineState, DynamicFeatures, MappedRange,
-        RenderPipelineState, Resolver, Segment,
+        BoundPipeline, BufferRef, CommandBuffer, ComputePipelineState, DynamicFeatures,
+        MappedRange, RenderPipelineState, Resolver, Segment, Workload,
         counters::{self, CounterRange, CounterSample, STATISTIC_SAMPLE_BYTES},
         generated::{GeneratedLayoutKey, IndirectRenderClass},
         render::PassBoundary,
@@ -49,7 +49,7 @@ use crate::metal::{
         },
     },
 };
-use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
+use alloc::{collections::VecDeque, format, string::String, sync::Arc, vec::Vec};
 
 /// Queries per encoder attachment pool.
 const POOL_QUERIES: u32 = 256;
@@ -91,6 +91,8 @@ struct InFlight {
     invalidations: Vec<MappedRange>,
     /// The dedicated pool that times the command buffer.
     times: Option<QueryPool>,
+    pipelines: Vec<BoundPipeline>,
+    workload: Workload,
 }
 
 #[derive(Debug)]
@@ -456,6 +458,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             pools: recording.query_pools,
             invalidations: recording.invalidations,
             times,
+            pipelines: recording.pipelines,
+            workload: recording.workload,
         });
         held.enqueue(&mut self.queue.held);
         self.advance()?;
@@ -702,6 +706,42 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .ok_or(Error::Invalid("unknown upload chunk"))
     }
 
+    /// The work in flight, oldest first: each command buffer's workload and
+    /// its pipelines by their functions' entry points, which name what a lost
+    /// device was running. A pipeline released meanwhile shows as `?`, or as
+    /// whatever reused its slot.
+    pub fn work_in_flight(&self) -> String {
+        let mut work = String::new();
+        for in_flight in &self.queue.in_flight {
+            if !work.is_empty() {
+                work.push_str("; ");
+            }
+            let load = in_flight.workload;
+            work.push_str(&format!(
+                "command buffer {} ({} draws, largest {}, {} indirect, {} passes, {} dispatches, \
+                 {} transfers, {} waited queries, {} conditional, {} internal):",
+                in_flight.serial,
+                load.direct,
+                load.largest,
+                load.indirect,
+                load.passes,
+                load.dispatches,
+                load.transfers,
+                load.waited_queries,
+                load.conditional,
+                load.internal
+            ));
+            for &pipeline in &in_flight.pipelines {
+                let entries = self.pipelines.entries(pipeline);
+                let entries =
+                    entries.map_or_else(|_| String::from("?"), |entries| entries.join("+"));
+                work.push(' ');
+                work.push_str(&entries);
+            }
+        }
+        work
+    }
+
     /// Submits ready held work, retires completed command buffers and
     /// returns the completed serial.
     pub fn poll(&mut self) -> Result<u64> {
@@ -716,6 +756,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.advance()?;
         if self.lost {
             return Err(Error::DeviceLost);
+        }
+        // Nothing outstanding can have completed, and this runs on every pump
+        // of the boot processor: asking would enter the driver for nothing.
+        if self.queue.in_flight.is_empty() {
+            return Ok(self.completed);
         }
         let completed = self
             .backend

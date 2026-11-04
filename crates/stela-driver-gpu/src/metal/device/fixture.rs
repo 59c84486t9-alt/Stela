@@ -492,6 +492,10 @@ impl Compiler for MockCompiler {
         self.libraries.push(Some(data));
         Ok(self.libraries.len() as u64 - 1)
     }
+    fn share_library(&mut self, library: u64) -> Result<u64> {
+        let data = self.library_data(library)?.to_vec();
+        self.add_library(data)
+    }
     fn functions(&mut self, _: &[u8]) -> Result<Vec<(String, FunctionType)>> {
         Ok(alloc::vec![
             (String::from("kernel"), FunctionType::Kernel),

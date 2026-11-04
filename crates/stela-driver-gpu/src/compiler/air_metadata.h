@@ -404,13 +404,50 @@ struct stela_air_stitch_source {
    const char *name;
 };
 #define STELA_AIR_STITCH_INPUT UINT32_MAX
+#define STELA_AIR_STITCH_BUILTIN (UINT32_MAX - 1)
+#define STELA_AIR_STITCH_BUFFER_ADDRESS (UINT32_MAX - 2)
+#define STELA_AIR_STITCH_EARLY_RETURN (UINT32_MAX - 3)
+#define STELA_AIR_STITCH_TEXTURE (UINT32_MAX - 4)
+#define STELA_AIR_STITCH_SAMPLER (UINT32_MAX - 5)
+#define STELA_AIR_STITCH_THREADGROUP (UINT32_MAX - 6)
+/* A node's function below which it calls one. */
+#define STELA_AIR_STITCH_CALLS STELA_AIR_STITCH_THREADGROUP
 #define STELA_AIR_STITCH_NO_OUTPUT UINT32_MAX
-/* A node of a stitched function: an input, argument `input` of the function,
- * or a call of source `function` on the values of earlier nodes. */
+/* The builtins a stitched node reads, as STELA_AIR_STITCH_BUILTIN's `input`. */
+enum stela_air_stitch_builtin {
+   STELA_AIR_STITCH_THREAD_POSITION_IN_GRID = 1,
+   STELA_AIR_STITCH_THREAD_POSITION_IN_THREADGROUP = 2,
+};
+/* The function a stitched function calls for a builtin: it takes nothing and
+ * returns the builtin as the type of the parameter it feeds, which the kernel
+ * the stitched function inlines into supplies. */
+#define STELA_AIR_STITCH_THREAD_POSITION_IN_GRID_NAME "stela.thread_position_in_grid"
+#define STELA_AIR_STITCH_THREAD_POSITION_IN_THREADGROUP_NAME "stela.thread_position_in_threadgroup"
+/* The functions a stitched function calls for the address of the buffer the
+ * function it inlines into binds at a constant index, which that function's
+ * translation answers: `name.pN`, ptr addrspace(N) (i32 index) for device (1)
+ * or constant (2) memory. */
+#define STELA_AIR_STITCH_BUFFER_ADDRESS_NAME "stela.buffer_address"
+/* Likewise the texture, sampler and threadgroup memory bound at a constant
+ * index: ptr addrspace(1), ptr addrspace(2) and ptr addrspace(3), each
+ * (i32 index). */
+#define STELA_AIR_STITCH_TEXTURE_NAME "stela.texture"
+#define STELA_AIR_STITCH_SAMPLER_NAME "stela.sampler"
+#define STELA_AIR_STITCH_THREADGROUP_NAME "stela.threadgroup"
+/* A node of a stitched function: an input, argument `input` of the function;
+ * a builtin, `input` of enum stela_air_stitch_builtin; a buffer address,
+ * `offset` bytes into the buffer bound at `input`, or with `dereference` the
+ * value there, as the parameter it feeds takes either; a texture, sampler or
+ * threadgroup memory, the one bound at `input`; an early return,
+ * taken when earlier call node `input` returns nonzero, of what the earlier
+ * call its one argument names returns, or of nothing from a function with no
+ * output; or a call of source `function` on the values of earlier nodes. */
 struct stela_air_stitch_node {
    uint32_t function, input;
    const uint32_t *arguments;
    uint32_t argument_count;
+   bool dereference;
+   uint64_t offset;
 };
 struct stela_air_stitch_graph {
    const char *name;

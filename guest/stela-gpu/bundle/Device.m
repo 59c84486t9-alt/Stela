@@ -55,6 +55,7 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 @implementation StelaGPUDevice {
 	io_service_t _port;
 	id _acceleratorService;
+	__weak id _deviceWrapper;
 	dispatch_queue_t _completions;
 	IONotificationPortRef _notifications;
 	os_unfair_lock _lock;
@@ -142,6 +143,18 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 - (id)acceleratorService
 {
 	return _acceleratorService;
+}
+
+/* The base class leaves these to the driver. Metal's lookup by registry ID
+ * answers with the wrapper, which is this device until a layer names itself. */
+- (void)_setDeviceWrapper:(id)wrapper
+{
+	_deviceWrapper = wrapper;
+}
+
+- (id)_deviceWrapper
+{
+	return _deviceWrapper ?: self;
 }
 
 /* The block answers these; there is nothing to gather. */
@@ -484,14 +497,16 @@ TABLE(maxVertexAttributes, 31)
 	return [self linearTextureAlignmentBytes];
 }
 
+/* Core Animation holds a surface's rows to this as well as its base. A base is
+ * always a page, so only a row's alignment limits a surface. */
 - (NSUInteger)iosurfaceTextureAlignmentBytes
 {
-	return [self linearTextureAlignmentBytes];
+	return _capabilities->linear_row_alignment;
 }
 
 - (NSUInteger)iosurfaceReadOnlyTextureAlignmentBytes
 {
-	return [self linearTextureAlignmentBytes];
+	return _capabilities->linear_row_alignment;
 }
 
 /* What wiring a client's pages needs of them. */
@@ -584,7 +599,9 @@ TABLE(maxVertexAttributes, 31)
 	StelaFormatAlignmentsResponse alignments = {};
 	StelaFailure failure;
 	if (STELA_CALL(&_gate, FormatAlignments, &request, &alignments, &failure) != StelaStatusOk) {
-		stela_report("a pixel format's alignment", &failure);
+		stela_report([[NSString stringWithFormat:@"the alignment of pixel format %lu", (unsigned long)format]
+			      UTF8String],
+			     &failure);
 	}
 	return alignments;
 }

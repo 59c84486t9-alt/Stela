@@ -24,8 +24,14 @@ use alloc::{string::String, vec::Vec};
 impl<B: Backend, C: Compiler> Service<B, C> {
     pub(super) fn new_library(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: NewLibraryRequest = call.request()?;
-        let data = call.memory.read(request.data)?;
-        let library = self.device.new_library(data)?;
+        let memory = &mut *call.memory;
+        let shared = self.device.share_library(request.data.length, |held| {
+            memory.matches(request.data, held)
+        })?;
+        let library = match shared {
+            Some(library) => library,
+            None => self.device.new_library(memory.read(request.data)?)?,
+        };
         let handle = self.hold(call.connection, Object::Library(library))?;
         call.reply(&handle)
     }

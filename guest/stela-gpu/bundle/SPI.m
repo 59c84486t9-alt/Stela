@@ -52,6 +52,21 @@
 	return [self commitAndWaitUntilSubmitted];
 }
 
+/* What frameworks keep with a command buffer until it is released, such as
+ * the work MPS has encoded into it: one dictionary for its lifetime. */
+static os_unfair_lock userDictionaries = OS_UNFAIR_LOCK_INIT;
+
+- (NSMutableDictionary *)userDictionary
+{
+	os_unfair_lock_lock(&userDictionaries);
+	if (!_userDictionary) {
+		_userDictionary = [NSMutableDictionary dictionary];
+	}
+	NSMutableDictionary *dictionary = _userDictionary;
+	os_unfair_lock_unlock(&userDictionaries);
+	return dictionary;
+}
+
 /* Every agent sees a signal the device makes. */
 - (void)encodeSignalEvent:(id)event value:(uint64_t)value agentMask:(uint64_t)mask
 {

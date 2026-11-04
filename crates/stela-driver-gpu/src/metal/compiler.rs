@@ -56,6 +56,7 @@ use core::{
     ptr::{self, NonNull},
     slice, str,
 };
+use triomphe::Arc;
 
 use library_cache::{LoadedLibrary, ModuleSource, Selected};
 
@@ -221,13 +222,16 @@ impl Drop for InternalKernelCode {
     }
 }
 
+/// Loaded libraries by id: ids that share bytes hold one copy.
+type Libraries = BTreeMap<u64, Arc<LoadedLibrary>>;
+
 pub struct AirCompiler {
     service: Service,
     target: ffi::Target,
     project_reflection: bool,
     reuse_sampler_states: bool,
     /// MTLB libraries by id; ids are never reused.
-    libraries: BTreeMap<u64, LoadedLibrary>,
+    libraries: Libraries,
     next_library: u64,
     refusal: Option<Refusal>,
 }
@@ -288,6 +292,14 @@ impl AirCompiler {
     pub fn refusal(&self) -> Option<&Refusal> {
         self.refusal.as_ref()
     }
+
+    /// A new id for `data`.
+    fn keep_library(&mut self, data: Arc<LoadedLibrary>) -> u64 {
+        let id = self.next_library;
+        self.next_library += 1;
+        self.libraries.insert(id, data);
+        id
+    }
 }
 
 impl Compiler for AirCompiler {
@@ -300,11 +312,15 @@ impl Compiler for AirCompiler {
     }
 
     fn add_library(&mut self, data: Vec<u8>) -> Result<u64> {
-        let loaded = LoadedLibrary::new(data)?;
-        let id = self.next_library;
-        self.next_library += 1;
-        self.libraries.insert(id, loaded);
-        Ok(id)
+        Ok(self.keep_library(Arc::new(LoadedLibrary::new(data)?)))
+    }
+
+    fn share_library(&mut self, library: u64) -> Result<u64> {
+        let loaded = self
+            .libraries
+            .get(&library)
+            .ok_or(Error::Invalid("unknown library"))?;
+        Ok(self.keep_library(loaded.clone()))
     }
 
     fn functions(&mut self, air: &[u8]) -> Result<Vec<(String, FunctionType)>> {
@@ -388,19 +404,56 @@ impl Compiler for AirCompiler {
                     .map(|node| {
                         Ok(match node {
                             StitchedNode::Input(index) => ffi::StitchNode {
-                                function: u32::MAX,
+                                function: ffi::STITCH_INPUT,
                                 input: *index,
-                                arguments: ptr::null(),
-                                argument_count: 0,
+                                ..ffi::StitchNode::NONE
+                            },
+                            &StitchedNode::Builtin(builtin) => ffi::StitchNode {
+                                function: ffi::STITCH_BUILTIN,
+                                input: builtin as u32,
+                                ..ffi::StitchNode::NONE
+                            },
+                            &StitchedNode::BufferAddress {
+                                index,
+                                offset,
+                                dereference,
+                            } => ffi::StitchNode {
+                                function: ffi::STITCH_BUFFER_ADDRESS,
+                                input: index,
+                                dereference,
+                                offset,
+                                ..ffi::StitchNode::NONE
+                            },
+                            StitchedNode::EarlyReturn { condition, value } => ffi::StitchNode {
+                                function: ffi::STITCH_EARLY_RETURN,
+                                input: *condition,
+                                arguments: value.as_slice().as_ptr(),
+                                argument_count: u32::from(value.is_some()),
+                                ..ffi::StitchNode::NONE
+                            },
+                            &StitchedNode::Texture(index) => ffi::StitchNode {
+                                function: ffi::STITCH_TEXTURE,
+                                input: index,
+                                ..ffi::StitchNode::NONE
+                            },
+                            &StitchedNode::Sampler(index) => ffi::StitchNode {
+                                function: ffi::STITCH_SAMPLER,
+                                input: index,
+                                ..ffi::StitchNode::NONE
+                            },
+                            &StitchedNode::Threadgroup(index) => ffi::StitchNode {
+                                function: ffi::STITCH_THREADGROUP,
+                                input: index,
+                                ..ffi::StitchNode::NONE
                             },
                             StitchedNode::Call {
                                 function,
                                 arguments,
                             } => ffi::StitchNode {
                                 function: *function,
-                                input: 0,
                                 arguments: arguments.as_ptr(),
                                 argument_count: count(arguments.len())?,
+                                ..ffi::StitchNode::NONE
                             },
                         })
                     })
@@ -445,7 +498,7 @@ impl Compiler for AirCompiler {
     fn library_data(&self, library: u64) -> Result<&[u8]> {
         self.libraries
             .get(&library)
-            .map(LoadedLibrary::bytes)
+            .map(|loaded| loaded.bytes())
             .ok_or(Error::Invalid("unknown library"))
     }
 
@@ -967,7 +1020,7 @@ fn same_values(a: Option<&[(u32, Vec<u8>)]>, b: Option<&[(u32, Vec<u8>)]>) -> bo
 /// digest and values: each once, by digest. A module links with one set of
 /// values; a dynamic library's takes those of a function linked from it.
 fn linked_modules<'a>(
-    libraries: &'a BTreeMap<u64, LoadedLibrary>,
+    libraries: &'a Libraries,
     linking: &'a Linking,
     own: ([u8; 32], &'a [(u32, Vec<u8>)]),
 ) -> Result<Vec<LinkedModule<'a>>> {
@@ -1012,11 +1065,7 @@ fn linked_modules<'a>(
 }
 
 /// Selects `entry` of `library`.
-fn select<'a>(
-    libraries: &'a BTreeMap<u64, LoadedLibrary>,
-    library: u64,
-    entry: &str,
-) -> Result<Selected<'a>> {
+fn select<'a>(libraries: &'a Libraries, library: u64, entry: &str) -> Result<Selected<'a>> {
     libraries
         .get(&library)
         .ok_or(Error::Invalid("unknown library"))?

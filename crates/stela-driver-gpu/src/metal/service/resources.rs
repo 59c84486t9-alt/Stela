@@ -6,7 +6,7 @@ use super::{
         Handle, HeapBufferSizeRequest, HeapDescriptorRecord, HeapUsageRequest, HeapUsageResponse,
         NewBufferRequest, NewBufferTextureRequest, NewHeapBufferRequest, NewHeapTextureRequest,
         NewImportedBufferRequest, NewTextureViewRequest, PixelFormatRequest,
-        SamplerDescriptorRecord, SamplerResponse, SizeAndAlignRecord, SparseTileRequest,
+        SamplerDescriptorRecord, SamplerResponse, SizeAndAlignRecord, Span, SparseTileRequest,
         SparseTileResponse, Status, TextureBytesRequest, TextureDescriptorRecord, TextureResponse,
     },
 };
@@ -16,6 +16,7 @@ use crate::metal::{
         SamplerMinMagFilter, SamplerMipFilter, SamplerReductionMode, SparsePageSize, StorageMode,
         SwizzleChannels, TextureSwizzle, TextureType, TextureUsage,
     },
+    command_buffer::blit::Region,
     device::{BufferId, Device, HeapId, MemoryId, TextureId, resources::Strides},
     error::Error,
     heap::{HeapDescriptor, SizeAndAlign},
@@ -25,6 +26,7 @@ use crate::metal::{
     shader::Compiler,
     vulkan::backend::Backend,
 };
+use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
 impl<B: Backend, C: Compiler> Service<B, C> {
@@ -125,27 +127,64 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         call.reply(&response)
     }
 
+    /// A band at a time ([`Device::cpu_bands`]), so a texture of any size
+    /// moves through a bounded amount of memory.
     pub(super) fn replace_region(&mut self, call: &mut Call) -> Result<(), Fault> {
-        let request: TextureBytesRequest = call.request()?;
-        let texture = self.object::<TextureId>(call.connection, request.texture)?;
-        let bytes = call.memory.read(request.bytes)?;
-        self.device
-            .replace_region(texture, &region(&request.region), &bytes, strides(&request))?;
+        let transfer = self.transfer(call)?;
+        for (region, span) in transfer.bands {
+            let bytes = call.memory.read(span)?;
+            self.device
+                .replace_region(transfer.texture, &region, &bytes, transfer.strides)?;
+        }
         call.reply(&Empty {})
     }
 
+    /// A band at a time, as [`Self::replace_region`]. The bytes between rows
+    /// keep what the caller had there.
     pub(super) fn get_bytes(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let transfer = self.transfer(call)?;
+        for (region, span) in transfer.bands {
+            let mut bytes = call.memory.read(span)?;
+            self.device
+                .get_bytes(transfer.texture, &region, &mut bytes, transfer.strides)?;
+            call.memory.write(span, &bytes)?;
+        }
+        call.reply(&Empty {})
+    }
+
+    /// A CPU texture transfer, refused whole before any band moves.
+    fn transfer(&mut self, call: &mut Call) -> Result<Transfer, Fault> {
         let request: TextureBytesRequest = call.request()?;
         let texture = self.object::<TextureId>(call.connection, request.texture)?;
-        let mut bytes = call.memory.read(request.bytes)?;
-        self.device.get_bytes(
+        let strides = strides(&request);
+        let bands = self
+            .device
+            .cpu_bands(texture, &region(&request.region), strides)?
+            .into_iter()
+            .map(|band| {
+                if band.bytes.end > request.bytes.length {
+                    return Err(Fault::new(
+                        Status::Invalid,
+                        "the bytes end before the region",
+                    ));
+                }
+                let address = request
+                    .bytes
+                    .address
+                    .checked_add(band.bytes.start)
+                    .ok_or(Fault::malformed("span address"))?;
+                let span = Span {
+                    address,
+                    length: band.bytes.end - band.bytes.start,
+                };
+                Ok((band.region, span))
+            })
+            .collect::<Result<_, Fault>>()?;
+        Ok(Transfer {
             texture,
-            &region(&request.region),
-            &mut bytes,
-            strides(&request),
-        )?;
-        call.memory.write(request.bytes, &bytes)?;
-        call.reply(&Empty {})
+            strides,
+            bands,
+        })
     }
 
     pub(super) fn new_sampler(&mut self, call: &mut Call) -> Result<(), Fault> {
@@ -303,7 +342,15 @@ fn options(raw: u64) -> Result<ResourceOptions, Fault> {
     known(ResourceOptions::from_raw(raw), "resource options")
 }
 
+/// Metal's raw value for `&b38`, the two-plane lossless framebuffer WindowServer
+/// allocates. AGX's encoder writes that layout; this device stores its pixels
+/// as plain BGRA rows (`stela_soc::dcp::swap`).
+const LOSSLESS_BGRA: u64 = 550;
+
 pub(super) fn pixel_format(raw: u64) -> Result<PixelFormat, Fault> {
+    if raw == LOSSLESS_BGRA {
+        return Ok(PixelFormat::Bgra8Unorm);
+    }
     known(PixelFormat::from_raw(raw), "pixel format")
 }
 
@@ -378,6 +425,14 @@ fn sampler_descriptor(record: &SamplerDescriptorRecord) -> Result<SamplerDescrip
             "compare function",
         )?,
     })
+}
+
+/// A CPU texture transfer: its texture and strides, and each band's region
+/// with the caller's bytes of it.
+struct Transfer {
+    texture: TextureId,
+    strides: Strides,
+    bands: Vec<(Region, Span)>,
 }
 
 fn strides(request: &TextureBytesRequest) -> Strides {

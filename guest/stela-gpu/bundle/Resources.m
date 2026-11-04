@@ -962,9 +962,15 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 	}
 	uint8_t *base = IOSurfaceGetBaseAddress(surface);
 	NSUInteger offset = (uint8_t *)IOSurfaceGetBaseAddressOfPlane(surface, plane) - base;
-	NSUInteger bytesPerRow = IOSurfaceGetBytesPerRowOfPlane(surface, plane)
-		* [self alignmentsOfFormat:[descriptor pixelFormat]].block_height
+	StelaFormatAlignmentsResponse format = [self alignmentsOfFormat:[descriptor pixelFormat]];
+	NSUInteger bytesPerRow = IOSurfaceGetBytesPerRowOfPlane(surface, plane) * format.block_height
 		/ IOSurfaceGetElementHeightOfPlane(surface, plane);
+	/* A lossless surface's plane says little of its rows, which this device
+	 * stores plain. */
+	NSUInteger row = [descriptor width] * format.block_bytes;
+	if (IOSurfaceGetPixelFormat(surface) >> 24 == '&' && bytesPerRow < row) {
+		bytesPerRow = row;
+	}
 	CFRetain(surface);
 	StelaGPUBuffer *buffer = [self newBufferWithBytesNoCopy:base
 							 length:IOSurfaceGetAllocSize(surface)
@@ -981,6 +987,18 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 	if (texture) {
 		texture->_surface = surface;
 		texture->_surfacePlane = plane;
+	} else {
+		uint32_t fourcc = IOSurfaceGetPixelFormat(surface);
+		StelaFailure failure = {.reason = "no texture of this surface"};
+		stela_report([[NSString stringWithFormat:@"pixel format %lu of surface %c%c%c%c, %zux%zu, "
+							 "%zu bytes an element, %zu a row, %zu planes, %zu in all",
+							 (unsigned long)[descriptor pixelFormat], fourcc >> 24,
+							 (fourcc >> 16) & 0xff, (fourcc >> 8) & 0xff, fourcc & 0xff,
+							 IOSurfaceGetWidth(surface), IOSurfaceGetHeight(surface),
+							 IOSurfaceGetBytesPerElement(surface),
+							 IOSurfaceGetBytesPerRow(surface), IOSurfaceGetPlaneCount(surface),
+							 IOSurfaceGetAllocSize(surface)] UTF8String],
+			     &failure);
 	}
 	return texture;
 }

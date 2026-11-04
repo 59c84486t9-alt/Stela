@@ -2,7 +2,10 @@
 //! reads. Its `STELA_METAL_*_BYTES` sizes are checked against these.
 use super::super::capabilities::{MAX_BUFFER_BINDINGS, MAX_SAMPLER_BINDINGS, MAX_TEXTURE_BINDINGS};
 use alloc::string::String;
-use core::ffi::{c_char, c_void};
+use core::{
+    ffi::{c_char, c_void},
+    ptr,
+};
 
 /// `stela_metal_visit_function`, whose last argument is a function type.
 pub(super) type VisitFunction =
@@ -336,6 +339,18 @@ pub struct StitchSource {
     pub(super) name: *const c_char,
 }
 
+/// `STELA_AIR_STITCH_INPUT`, `STELA_AIR_STITCH_BUILTIN`,
+/// `STELA_AIR_STITCH_BUFFER_ADDRESS`, `STELA_AIR_STITCH_EARLY_RETURN`,
+/// `STELA_AIR_STITCH_TEXTURE`, `STELA_AIR_STITCH_SAMPLER` and
+/// `STELA_AIR_STITCH_THREADGROUP`, a node's `function` when it calls none.
+pub const STITCH_INPUT: u32 = u32::MAX;
+pub const STITCH_BUILTIN: u32 = u32::MAX - 1;
+pub const STITCH_BUFFER_ADDRESS: u32 = u32::MAX - 2;
+pub const STITCH_EARLY_RETURN: u32 = u32::MAX - 3;
+pub const STITCH_TEXTURE: u32 = u32::MAX - 4;
+pub const STITCH_SAMPLER: u32 = u32::MAX - 5;
+pub const STITCH_THREADGROUP: u32 = u32::MAX - 6;
+
 /// `stela_air_stitch_node`.
 #[repr(C)]
 pub struct StitchNode {
@@ -343,6 +358,20 @@ pub struct StitchNode {
     pub(super) input: u32,
     pub(super) arguments: *const u32,
     pub(super) argument_count: u32,
+    pub(super) dereference: bool,
+    pub(super) offset: u64,
+}
+
+impl StitchNode {
+    /// A node of no kind, whose fields a kind's fill in.
+    pub(super) const NONE: Self = Self {
+        function: 0,
+        input: 0,
+        arguments: ptr::null(),
+        argument_count: 0,
+        dereference: false,
+        offset: 0,
+    };
 }
 
 /// `stela_air_stitch_graph`.

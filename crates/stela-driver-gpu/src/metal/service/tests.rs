@@ -7,8 +7,8 @@ use super::{
         LibraryFunctionNamesRequest, LibraryIdentityRequest, LibraryIdentityResponse,
         LinkedFunctionsRecord, NegotiateRequest, NegotiateResponse, NewBufferRequest,
         NewFunctionRequest, NewImportedBufferRequest, NewLibraryRequest, NewRenderPipelineRequest,
-        NewSourceLibraryRequest, Operation, PipelineFlags, Record, RenderTargetsRecord, Span,
-        Status, TessellationRecord, TextureDescriptorRecord, Value,
+        NewSourceLibraryRequest, Operation, PipelineFlags, Record, RenderTargetsRecord,
+        ReportRequest, Span, Status, TessellationRecord, TextureDescriptorRecord, Value,
         commands::{CommandBufferCode, CommandHeader, CommitRequest},
     },
 };
@@ -49,6 +49,8 @@ type TestService = Service<MockBackend, MockCompiler>;
 #[derive(Default)]
 struct Memory {
     bytes: Vec<u8>,
+    /// The longest span a single read or write has moved.
+    longest: u64,
 }
 
 impl Memory {
@@ -93,10 +95,12 @@ impl Memory {
 
 impl GuestMemory for Memory {
     fn read(&mut self, span: Span) -> Result<Vec<u8>, Fault> {
+        self.longest = self.longest.max(span.length);
         Ok(self.bytes[self.range(span)?].to_vec())
     }
 
     fn write(&mut self, span: Span, bytes: &[u8]) -> Result<(), Fault> {
+        self.longest = self.longest.max(span.length);
         let range = self.range(span)?;
         self.bytes[range].copy_from_slice(bytes);
         Ok(())
@@ -716,6 +720,26 @@ fn functions_reflect_their_constants_and_patches() {
 
     let (response, _) = reflect(patch, 0);
     assert_eq!((response.patch_type, response.patch_control_points), (2, 4));
+}
+
+#[test]
+fn a_report_reaches_the_platform_as_a_refusal_does() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let text = memory.put(b"newTextureWithDescriptor: is absent");
+    call::<_, Empty>(
+        &mut service,
+        connection,
+        Operation::Report,
+        &ReportRequest { text },
+        memory,
+    )
+    .unwrap();
+    assert_eq!(
+        service.refused.take().as_deref(),
+        Some("newTextureWithDescriptor: is absent")
+    );
 }
 
 #[test]

@@ -13,11 +13,15 @@ bool stela_air_specialize_constants(struct stela_air_metadata *m,
                                     unsigned count);
 
 /* Initializers captured from a compact copy of a module before reflection
- * inlines its shader functions. LLVM constants belong to the shared context. */
+ * inlines its shader functions. LLVM constants belong to the shared context.
+ * A module may construct hundreds of globals, so both arrays are allocated
+ * to its count; zero-initialize before use and release after. */
 struct stela_air_constructed_constants {
    unsigned count;
-   LLVMValueRef globals[AIR_MAX_ARGUMENTS], values[AIR_MAX_ARGUMENTS];
+   LLVMValueRef *globals, *values;
 };
+
+void stela_air_release_constructed_constants(struct stela_air_constructed_constants *constants);
 
 /* Prepares initialization when inlining cannot change the constructors. */
 bool stela_air_prepare_constants(struct stela_air_metadata *m,

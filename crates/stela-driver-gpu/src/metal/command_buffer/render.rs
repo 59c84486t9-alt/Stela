@@ -14,8 +14,8 @@
 //! with a negative height; winding is defined in window space by both APIs
 //! and maps unchanged.
 use super::{
-    BufferRef, CommandBuffer, Encoder, Recorder, RenderPipelineState, Resolver, buffer_slot,
-    counters::CounterSample,
+    BoundPipeline, BufferRef, CommandBuffer, Encoder, Recorder, RenderPipelineState, Resolver,
+    buffer_slot, counters::CounterSample,
 };
 use crate::metal::{
     abi::{
@@ -666,6 +666,7 @@ impl CommandBuffer {
             self.recorder
                 .push(Command::SetRasterizerDiscard(!plan.rasterization_enabled));
         }
+        self.bound(BoundPipeline::Render(state.id));
         Ok(())
     }
 
@@ -1611,6 +1612,29 @@ impl CommandBuffer {
     /// constants.
     fn amplified(&mut self, resolver: &mut dyn Resolver, draw: Command) -> Result<()> {
         let views = render(&mut self.encoder)?.amplification.as_slice();
+        let size = match draw {
+            Command::Draw {
+                vertex_count: count,
+                instance_count,
+                ..
+            }
+            | Command::DrawIndexed {
+                index_count: count,
+                instance_count,
+                ..
+            } => Some(u64::from(count) * u64::from(instance_count)),
+            Command::DrawMeshTasks(groups) => {
+                Some(groups.iter().map(|&count| u64::from(count)).product())
+            }
+            _ => None,
+        };
+        match size {
+            Some(size) => {
+                self.workload.direct += 1;
+                self.workload.largest = self.workload.largest.max(size);
+            }
+            None => self.workload.indirect += 1,
+        }
         self.bindings.constants.amplification_count = views.len() as u32;
         for (view, &mapping) in views.iter().enumerate() {
             self.bindings.constants.amplification_id = view as u32;

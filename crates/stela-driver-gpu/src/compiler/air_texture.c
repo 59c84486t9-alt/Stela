@@ -695,6 +695,79 @@ stela_air_null_texture(LLVMValueRef value)
    return name && bytes > stem && !memcmp(name, "air.get_null_texture_", stem);
 }
 
+bool
+stela_air_texture_use(LLVMValueRef inst, struct stela_air_texture *texture)
+{
+   static const struct {
+      const char *suffix;
+      enum stela_air_primitive primitive;
+   } texels[] = {
+      {".v4f32", STELA_AIR_FLOAT}, {".v4f16", STELA_AIR_HALF}, {".s.v4i32", STELA_AIR_INT},
+      {".u.v4i32", STELA_AIR_UINT}, {".s.v4i16", STELA_AIR_SHORT}, {".u.v4i16", STELA_AIR_USHORT},
+      {".f32", STELA_AIR_FLOAT},
+   };
+   size_t bytes;
+   const char *name = called_name(inst, &bytes);
+   if (!name || LLVMGetNumArgOperands(inst) == 0)
+      return false;
+   /* The longest operation stem and shape name that start the name. */
+   int op = -1;
+   unsigned type = 0;
+   bool depth = false;
+   size_t matched = 0;
+   for (unsigned o = 0; o < ARRAY_SIZE(operations); o++) {
+      for (unsigned s = 1; s < ARRAY_SIZE(shapes); s++) {
+         for (unsigned d = 0; d < 2; d++) {
+            const char *shape = d ? shapes[s].depth : shapes[s].name;
+            char prefix[64];
+            int length = shape ? snprintf(prefix, sizeof(prefix), "air.%s_%s", operations[o].stem, shape) : 0;
+            if (length <= 0 || (size_t)length <= matched || (size_t)length > bytes ||
+                memcmp(prefix, name, (size_t)length) ||
+                ((size_t)length < bytes && name[length] != '.' && name[length] != '_'))
+               continue;
+            op = (int)o, type = s, depth = d, matched = (size_t)length;
+         }
+      }
+   }
+   if (op < 0)
+      return false;
+   enum stela_air_primitive primitive = STELA_AIR_PRIMITIVE_UNKNOWN;
+   for (unsigned i = 0; operations[op].typed && i < ARRAY_SIZE(texels); i++) {
+      size_t length = strlen(texels[i].suffix);
+      if (bytes > length && !memcmp(name + bytes - length, texels[i].suffix, length))
+         primitive = texels[i].primitive;
+   }
+   if (operations[op].typed && primitive == STELA_AIR_PRIMITIVE_UNKNOWN)
+      return false;
+   if (texture->type && (texture->type != type || texture->depth != depth))
+      return false;
+   texture->type = type;
+   texture->depth = depth;
+   if (primitive != STELA_AIR_PRIMITIVE_UNKNOWN && !depth) {
+      if (texture->primitive != STELA_AIR_PRIMITIVE_UNKNOWN && texture->primitive != primitive)
+         return false;
+      texture->primitive = primitive;
+   }
+   if (depth)
+      texture->primitive = STELA_AIR_FLOAT;
+   bool writes = op == WRITE, reads = op == READ;
+   bool samples = op == SAMPLE || op == SAMPLE_COMPARE || op == SAMPLE_GRAD ||
+                  op == SAMPLE_COMPARE_GRAD || op == GATHER || op == GATHER_COMPARE;
+   bool wrote = texture->access == STELA_AIR_TEXTURE_WRITE ||
+                texture->access == STELA_AIR_TEXTURE_READ_WRITE;
+   bool read = texture->access == STELA_AIR_TEXTURE_READ ||
+               texture->access == STELA_AIR_TEXTURE_READ_WRITE;
+   if (samples && wrote)
+      return false;
+   if (writes)
+      texture->access = read ? STELA_AIR_TEXTURE_READ_WRITE : STELA_AIR_TEXTURE_WRITE;
+   else if (reads && wrote)
+      texture->access = STELA_AIR_TEXTURE_READ_WRITE;
+   else if (reads && texture->access != STELA_AIR_TEXTURE_SAMPLE)
+      texture->access = STELA_AIR_TEXTURE_READ;
+   return true;
+}
+
 static bool
 read_texel(struct call *call, nir_def **result)
 {

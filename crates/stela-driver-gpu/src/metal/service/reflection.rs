@@ -219,6 +219,7 @@ impl Flat {
         self.members.extend(records);
         Ok(self.push(TypeInfo {
             data_type: DataType::Struct.raw(),
+            element: NO_TYPE,
             first_member,
             member_count: structure.members.len() as u32,
             ..TypeInfo::default()
@@ -243,6 +244,7 @@ impl Flat {
         self.push(TypeInfo {
             data_type: DataType::Texture.raw(),
             element_data_type: texture.data_type.raw(),
+            element: NO_TYPE,
             access: texture.access.raw() as u32,
             texture_type: texture.texture_type.raw() as u32,
             depth: texture.depth.into(),

@@ -100,6 +100,11 @@ const MAX_OBJECTS: NonZeroU32 = NonZeroU32::new(1 << 20).unwrap();
 /// cannot change what the service validated.
 pub trait GuestMemory {
     fn read(&mut self, span: Span) -> Result<Vec<u8>, Fault>;
+
+    /// Whether `span` holds `bytes`.
+    fn matches(&mut self, span: Span, bytes: &[u8]) -> Result<bool, Fault> {
+        Ok(span.length == bytes.len() as u64 && self.read(span)? == bytes)
+    }
     fn write(&mut self, span: Span, bytes: &[u8]) -> Result<(), Fault>;
 }
 
@@ -243,6 +248,8 @@ pub struct Service<B: Backend, C: Compiler> {
     signaled: u64,
     /// Why the last call was refused, for the platform's log.
     refused: Option<String>,
+    /// Whether a refusal named the work the device was lost running.
+    loss_described: bool,
     reopen: Option<Reopen<B, C>>,
 }
 
@@ -258,6 +265,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             shares: sharing::Shares::default(),
             signaled: 0,
             refused: None,
+            loss_described: false,
             reopen: None,
         }
     }
@@ -327,6 +335,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 self.epoch = epoch;
                 self.shares = sharing::Shares::default();
                 self.signaled = 0;
+                self.loss_described = false;
             }
             Err(error) => {
                 self.refused = Some(format!("the lost device did not reopen: {error:?}"));

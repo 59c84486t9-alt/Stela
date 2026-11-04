@@ -8,13 +8,16 @@ use super::{
     wire::{self, Fault, GateCall, Span, Status},
 };
 use crate::metal::{capabilities::block::Block, shader::Compiler, vulkan::backend::Backend};
-use alloc::{format, string::String, vec, vec::Vec};
+use alloc::{format, vec, vec::Vec};
 use core::num::NonZeroU64;
 use stela_contracts::gate::{CallerFault, CallerMemory};
 
 /// Request and response records are fixed-width, the capability block the
 /// largest; variable data travels in spans the operation names.
 const MAX_RECORD_BYTES: u64 = size_of::<Block>() as u64;
+
+/// The bytes [`Caller::matches`] reads at once.
+const COMPARED_BYTES: usize = 1 << 16;
 
 /// The calling thread's memory, as the service reads and writes spans.
 struct Caller<'a>(&'a mut dyn CallerMemory);
@@ -29,6 +32,26 @@ impl GuestMemory for Caller<'_> {
         bytes.resize(length, 0);
         self.0.read(span.address, &mut bytes).map_err(fault)?;
         Ok(bytes)
+    }
+
+    /// Compares a chunk at a time, never holding the span whole.
+    fn matches(&mut self, span: Span, bytes: &[u8]) -> Result<bool, Fault> {
+        if span.length != bytes.len() as u64 {
+            return Ok(false);
+        }
+        let mut chunk = vec![0; COMPARED_BYTES.min(bytes.len())];
+        for (index, expected) in bytes.chunks(COMPARED_BYTES).enumerate() {
+            let address = span
+                .address
+                .checked_add((index * COMPARED_BYTES) as u64)
+                .ok_or(Fault::malformed("span address"))?;
+            let chunk = &mut chunk[..expected.len()];
+            self.0.read(address, chunk).map_err(fault)?;
+            if chunk != expected {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn write(&mut self, span: Span, bytes: &[u8]) -> Result<(), Fault> {
@@ -74,7 +97,16 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                             "{} in {} at {}: {}",
                             fault.reason, refusal.entry, refusal.instruction, refusal.detail
                         ),
-                        None => String::from(fault.reason),
+                        None if fault.status == Status::DeviceLost && !self.loss_described => {
+                            self.loss_described = true;
+                            format!(
+                                "{} in operation {} running {}",
+                                fault.reason,
+                                call.operation,
+                                self.device.work_in_flight()
+                            )
+                        }
+                        None => format!("{} in operation {}", fault.reason, call.operation),
                     });
                 }
                 (fault.status, fault.reason)
