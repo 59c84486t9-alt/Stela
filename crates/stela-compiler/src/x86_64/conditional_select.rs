@@ -1,13 +1,13 @@
 //! Branchless conditional select from the saved guest NZCV.
 use super::{capture_nzcv, condition_holds, flag_word, load, right_operand, store, store_nzcv};
 use crate::aarch64::{
-    Shift, Width,
+    Register, Shift, Width,
     conditional_select::{CompareOperand, CompareRight, Operand, Otherwise},
 };
 use crate::x86_64::asm::{
-    Alu, Code, Cond,
+    Alu, Asm, Code, Cond,
     Gpr::{R8, Rax, Rcx, Rdx},
-    Size, Unary,
+    Rm, Size, Unary,
 };
 
 const NZCV_SHIFT: u8 = 28;
@@ -51,31 +51,117 @@ pub(super) fn emit_compare(code: &mut Code, operand: &CompareOperand) {
     }
 }
 
-pub(super) fn emit(code: &mut Code, operand: &Operand) {
-    let predicate = condition_holds(code, operand.condition, false);
-    if let Some(cond) = predicate {
-        // Save the condition before zero-register loads or false-arm arithmetic
-        // clobber host flags. R8 is scratch under the native leaf ABI.
-        code.asm().setcc(cond, R8);
-    }
-    load(code, operand.left);
+pub(super) fn emit(code: &mut Code, operand: &Operand, live_nzcv: bool) {
     let size = Size::of(operand.width == Width::X64);
-    if operand.width == Width::W32 {
-        // Clear Xd's upper half on both arms.
-        code.asm().mov(Size::Dword, Rax, Rax);
-    }
-    if predicate.is_some() {
-        right_operand(code, operand.right, operand.width, Shift::Lsl, 0);
+    let otherwise = if operand.condition >= 14 {
+        // AL and NV always select Rn.
+        None
+    } else if operand.otherwise == Otherwise::Unchanged
+        && let Some(source) = code.asm().guest(operand.right)
+    {
+        Some(source)
+    } else {
+        // Prepare the false arm before the predicate. R8 survives predicate
+        // emission, and the true arm is a MOV that leaves host flags intact.
         let mut asm = code.asm();
+        select_input(&mut asm, R8, size, operand.right);
         match operand.otherwise {
-            Otherwise::Increment => asm.inc(size, Rcx),
-            Otherwise::Invert => asm.unary(Unary::Not, size, Rcx),
-            Otherwise::Negate => asm.unary(Unary::Neg, size, Rcx),
+            Otherwise::Increment => asm.inc(size, R8),
+            Otherwise::Invert => asm.unary(Unary::Not, size, R8),
+            Otherwise::Negate => asm.unary(Unary::Neg, size, R8),
             Otherwise::Unchanged => {}
         }
-        asm.test(Size::Byte, R8, R8);
-        asm.cmov(Cond::E, size, Rax, Rcx);
+        Some(Rm::Reg(R8))
+    };
+    let predicate = condition_holds(code, operand.condition, live_nzcv);
+    let mut asm = code.asm();
+    select_input(&mut asm, Rax, size, operand.left);
+    if let Some((predicate, otherwise)) = predicate.zip(otherwise) {
+        asm.cmov(predicate.negate(), size, Rax, otherwise);
     }
-    // AL and NV both satisfy ConditionHolds: select Rn without transforming Rm.
     store(code, operand.destination);
+}
+
+/// A W source is zero-extended by the sized MOV. XZR uses an immediate
+/// instead of XOR so it can be loaded after the predicate.
+fn select_input(asm: &mut Asm, host: crate::x86_64::asm::Gpr, size: Size, guest: Register) {
+    if let Some(source) = asm.guest(guest) {
+        asm.mov_load(size, host, source);
+    } else {
+        asm.mov_imm32(host, 0);
+    }
+}
+
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod tests {
+    use super::*;
+    use crate::GuestState;
+
+    #[test]
+    fn selects_preserve_nzcv_and_zero_extend_w_results() {
+        const LEFT: u64 = 0x1234_5678_9abc_def0;
+        const RIGHT: u64 = 0xfedc_ba98_7654_3210;
+        for width in [Width::W32, Width::X64] {
+            for (left, lhs) in [(Register::X(1), LEFT), (Register::Zero, 0)] {
+                for (right, rhs) in [(Register::X(2), RIGHT), (Register::Zero, 0)] {
+                    for (otherwise, alternate) in [
+                        (Otherwise::Unchanged, rhs),
+                        (Otherwise::Increment, rhs.wrapping_add(1)),
+                        (Otherwise::Invert, !rhs),
+                        (Otherwise::Negate, rhs.wrapping_neg()),
+                    ] {
+                        for condition in [0, 1, 10, 12, 14, 15] {
+                            let operand = Operand {
+                                width,
+                                destination: Register::X(1),
+                                left,
+                                right,
+                                condition,
+                                otherwise,
+                            };
+                            let mut frame = Code::new();
+                            let mut pinned = Code::pinned();
+                            emit(&mut frame, &operand, false);
+                            emit(&mut pinned, &operand, false);
+                            pinned.asm().ret();
+                            let pinned = super::super::pinned::entered(&pinned);
+                            for flags in 0..16 {
+                                let n = flags & 8 != 0;
+                                let z = flags & 4 != 0;
+                                let v = flags & 1 != 0;
+                                let select_left = match condition {
+                                    0 => z,
+                                    1 => !z,
+                                    10 => n == v,
+                                    12 => n == v && !z,
+                                    _ => true,
+                                };
+                                let expected = if select_left { lhs } else { alternate };
+                                let expected = if width == Width::W32 {
+                                    u64::from(expected as u32)
+                                } else {
+                                    expected
+                                };
+                                for code in [&frame[..], &pinned] {
+                                    let mut state = GuestState {
+                                        nzcv: flags << 28,
+                                        ..Default::default()
+                                    };
+                                    state.x[1] = LEFT;
+                                    state.x[2] = RIGHT;
+                                    super::super::native::run(code, &mut state);
+                                    assert_eq!(state.x[1], expected, "{operand:?}");
+                                    assert_eq!(state.nzcv, flags << 28);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

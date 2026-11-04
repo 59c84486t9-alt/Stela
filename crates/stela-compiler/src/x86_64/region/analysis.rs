@@ -5,7 +5,6 @@ use crate::aarch64::integer_math::Kind as IntegerMath;
 use crate::aarch64::{
     AddressMode, Instruction, MemoryTransfer, Operation, Register, Shift, WideMove, Width,
 };
-use alloc::vec;
 use alloc::vec::Vec;
 
 pub const MAX_INSTRUCTIONS: usize = 256;
@@ -37,9 +36,10 @@ pub struct Effects {
 /// the default prefix; the separate clean-load tier adds only its selected unsigned loads.
 /// Absence here never means architectural support is absent.
 pub fn effects(operation: &Operation) -> Option<Effects> {
-    let (reads, destination): (Vec<Register>, Register) = match *operation {
-        Operation::Nop => (vec![], Register::Zero),
-        Operation::PcRelative(operand) => (vec![], operand.destination),
+    let none = Register::Zero;
+    let (reads, destination) = match *operation {
+        Operation::Nop => ([none; 3], Register::Zero),
+        Operation::PcRelative(operand) => ([none; 3], operand.destination),
         Operation::MoveWide {
             width,
             kind,
@@ -48,9 +48,9 @@ pub fn effects(operation: &Operation) -> Option<Effects> {
             ..
         } if shift < bits(width) && shift % 16 == 0 => (
             if kind == WideMove::Keep {
-                vec![destination]
+                [destination, none, none]
             } else {
-                vec![]
+                [none; 3]
             },
             destination,
         ),
@@ -60,7 +60,7 @@ pub fn effects(operation: &Operation) -> Option<Effects> {
             source,
             immediate,
             ..
-        } if immediate <= 0x00ff_f000 => (vec![source], destination),
+        } if immediate <= 0x00ff_f000 => ([source, none, none], destination),
         Operation::AddSubRegister {
             width,
             flags: false,
@@ -70,7 +70,7 @@ pub fn effects(operation: &Operation) -> Option<Effects> {
             shift,
             amount,
             ..
-        } if amount < bits(width) && shift != Shift::Ror => (vec![left, right], destination),
+        } if amount < bits(width) && shift != Shift::Ror => ([left, right, none], destination),
         Operation::LogicalRegister {
             width,
             flags: false,
@@ -79,13 +79,13 @@ pub fn effects(operation: &Operation) -> Option<Effects> {
             right,
             amount,
             ..
-        } if amount < bits(width) => (vec![left, right], destination),
+        } if amount < bits(width) => ([left, right, none], destination),
         Operation::LogicalImmediate {
             flags: false,
             destination,
             source,
             ..
-        } => (vec![source], destination),
+        } => ([source, none, none], destination),
         Operation::IntegerMath(operand) => {
             let registers = [
                 operand.destination,
@@ -98,7 +98,7 @@ pub fn effects(operation: &Operation) -> Option<Effects> {
             }
             match operand.kind {
                 IntegerMath::Low { .. } => (
-                    vec![operand.left, operand.right, operand.accumulator],
+                    [operand.left, operand.right, operand.accumulator],
                     operand.destination,
                 ),
                 IntegerMath::Extract { width, amount }
@@ -107,7 +107,7 @@ pub fn effects(operation: &Operation) -> Option<Effects> {
                         && !operand.subtract
                         && operand.accumulator == Register::Zero =>
                 {
-                    (vec![operand.left], operand.destination)
+                    ([operand.left, none, none], operand.destination)
                 }
                 _ => return None,
             }

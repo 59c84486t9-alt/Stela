@@ -192,8 +192,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let whole = available == source_window(pc, variant);
         let page = pc & !(FETCH_PAGE - 1);
         let offset = (pc - page) as usize;
-        let mut source = vec![0u8; available];
-        if !self.host.read_ram(physical, &mut source) {
+        let mut staging = [0; MAX_BLOCK_BYTES as usize];
+        let source = &mut staging[..available];
+        if !self.host.read_ram(physical, source) {
             // The fetch takes the external abort the fabric raises outside
             // memory (IFSC 0b010000).
             self.degrade(self.requirement(RequirementKind::Fetch { physical }));
@@ -210,13 +211,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let reading = self.host.counter();
         let stored = match variant.single {
             true => None,
-            false => self
-                .stored_page(pc, physical, &source)
-                .map(|stored| (stored.key, stored.record.clone())),
+            false => self.stored_page(pc, physical, source),
         };
         self.statistics.page_ticks += self.host.counter().wrapping_sub(reading);
         let preparation = self.preparation(variant);
-        preparation.admit(&mut source);
+        preparation.admit(source);
         let context = stored
             .is_some()
             .then(|| self.stored_context(variant, &preparation, page));
@@ -226,7 +225,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .and_then(|record| record.find(offset as u16, context))
                 .and_then(|entry| {
                     entry
-                        .rebase(page, &source)
+                        .rebase(page, source)
                         .map(|block| (block, entry.input.clone()))
                 });
             if let Some((compiled, input)) = found {
@@ -240,7 +239,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         pc,
                         physical,
                         variant,
-                        &source,
+                        source,
                         recovery::Template::stored(
                             compiled,
                             input,
@@ -259,7 +258,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 if !within(compiled.block()) {
                     return Ok(None);
                 }
-                if compiled.matches(key, pc, context, &source) {
+                if compiled.matches(key, pc, context, source) {
                     self.statistics.shared += 1;
                     self.statistics.shared_ticks += self.host.counter().wrapping_sub(looking);
                     return self
@@ -267,7 +266,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                             pc,
                             physical,
                             variant,
-                            &source,
+                            source,
                             recovery::Template::compiled(compiled.emission.clone()),
                         )
                         .map(Some);
@@ -284,20 +283,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .filter(|&&stop| stop > pc && stop < pc + source.len() as u64)
             .min()
             .map_or(source.len(), |&stop| (stop - pc) as usize);
-        let prepared = preparation.prepare(&source, pc, limit);
-        let past = match &prepared {
-            Ok(Prepared::Block { consumed, .. }) => *consumed == available,
-            Ok(Prepared::Checked(_) | Prepared::FloatingPointTrap) => false,
-            Err(_) => true,
-        };
+        let prepared = preparation.prepare_window(source, pc, limit, whole);
         #[cfg(all(feature = "std", feature = "native-profile"))]
         if let Some(metrics) = &mut self.preparation_metrics {
             let ticks = self.host.counter().wrapping_sub(started);
-            metrics.record(&prepared, ticks, past && !whole);
+            metrics.record(prepared.as_ref(), ticks, !whole);
         }
-        if past && !whole {
-            return Ok(None);
-        }
+        let prepared = match prepared {
+            Some(Err(_)) | None if !whole => return Ok(None),
+            prepared => prepared.expect("complete window"),
+        };
         let (compiled, input, successors) = match prepared {
             Ok(Prepared::Block {
                 compiled,
@@ -311,7 +306,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             Err(refused) => {
                 return Err(self.unsupported_word(
-                    &source,
+                    source,
                     pc,
                     refused.pc,
                     refused.error.to_string(),
@@ -353,7 +348,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pc,
             physical,
             variant,
-            &source,
+            source,
             recovery::Template::compiled(emission),
         )
         .map(Some)

@@ -15,7 +15,7 @@ use super::{
     u16_at, u32_at, u64_at,
 };
 use crate::payload::ReadAt;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::cmp::Ordering;
 use sha2::{Digest, Sha384, Sha512, Sha512_256};
 use stela_crypto::Sha256;
@@ -115,18 +115,67 @@ pub enum Visit {
     Stop,
 }
 
-/// A block holding a B-tree node: a checksummed object, or a header-less
-/// node whose `btn_o` must be zero.
-fn read_node<R: ReadAt>(device: &mut Device<R>, paddr: u64, headerless: bool) -> Result<Vec<u8>> {
-    if headerless {
-        let block = device.read_block(paddr)?;
-        if block[..object::HEADER_BYTES].iter().any(|&b| b != 0) {
-            return Err(ApfsError::Malformed("a header-less node has a header"));
+/// Parsed metadata from one open container. A bounded cache keeps repeated
+/// object-map and file-system seeks from rereading their shared paths.
+#[derive(Default)]
+pub(super) struct NodeCache {
+    entries: Vec<Option<CachedNode>>,
+}
+
+struct CachedNode {
+    paddr: u64,
+    headerless: bool,
+    node: Arc<Node>,
+    digest: Option<(Hash, Vec<u8>)>,
+}
+
+impl CachedNode {
+    fn digest(&mut self, hash: Hash) -> &[u8] {
+        if let Some((cached_hash, _)) = &self.digest
+            && *cached_hash != hash
+        {
+            self.digest = None;
         }
-        Ok(block)
-    } else {
-        device.read_object(paddr)
+        &self
+            .digest
+            .get_or_insert_with(|| (hash, hash.digest(&self.node.block)))
+            .1
     }
+}
+
+fn read_node<R: ReadAt>(
+    device: &mut Device<R>,
+    paddr: u64,
+    headerless: bool,
+) -> Result<&mut CachedNode> {
+    const SLOTS: usize = 128;
+    let index = ((paddr ^ (paddr >> 7) ^ (paddr >> 14)) as usize) & (SLOTS - 1);
+    let hit = device
+        .nodes
+        .entries
+        .get(index)
+        .and_then(Option::as_ref)
+        .is_some_and(|entry| entry.paddr == paddr && entry.headerless == headerless);
+    if !hit {
+        let block = if headerless {
+            let block = device.read_block(paddr)?;
+            if block[..object::HEADER_BYTES].iter().any(|&b| b != 0) {
+                return Err(ApfsError::Malformed("a header-less node has a header"));
+            }
+            block
+        } else {
+            device.read_object(paddr)?
+        };
+        let node = Arc::new(Node::parse(block, headerless)?);
+        device.nodes.entries.resize_with(SLOTS, || None);
+        device.nodes.entries[index] = Some(CachedNode {
+            paddr,
+            headerless,
+            node,
+            digest: None,
+        });
+    }
+    Ok(device.nodes.entries[index].as_mut().unwrap())
 }
 
 pub struct Node {
@@ -267,7 +316,7 @@ pub struct Tree {
 
 /// One node and its position while seeking through a B-tree.
 struct VisitNode {
-    block: Vec<u8>,
+    node: Arc<Node>,
     /// Only the first branch compares keys with the requested lower bound.
     first: bool,
     depth: usize,
@@ -286,14 +335,13 @@ impl Tree {
         seal: Option<&Seal>,
         seal_root: bool,
     ) -> Result<Self> {
-        let block = read_node(device, root, headerless)?;
-        let digest = seal.map(|seal| seal.hash.digest(&block));
-        let node = Node::parse(block, headerless)?;
-        let info = node.info()?;
+        let block_size = device.block_size();
+        let node = read_node(device, root, headerless)?;
+        let info = node.node.info()?;
         if info.flags & BTREE_EPHEMERAL != 0 {
             return Err(ApfsError::Unsupported("ephemeral B-trees"));
         }
-        if info.node_size != device.block_size() {
+        if info.node_size != block_size {
             return Err(ApfsError::Unsupported("B-tree nodes larger than a block"));
         }
         if (info.flags & BTREE_NOHEADER != 0) != headerless {
@@ -305,7 +353,7 @@ impl Tree {
             let seal = seal.ok_or(ApfsError::Malformed(
                 "a hashed B-tree outside a sealed volume",
             ))?;
-            if seal_root && digest.as_deref() != Some(seal.root.as_slice()) {
+            if seal_root && node.digest(seal.hash) != seal.root {
                 return Err(ApfsError::Malformed(
                     "the sealed root node fails its root hash",
                 ));
@@ -350,7 +398,7 @@ impl Tree {
         device: &mut Device<R>,
         omap: Option<&Omap>,
         value: &[u8],
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Arc<Node>> {
         let stored = u64_at(value, 0)?;
         let oid = match self.base_oid {
             Some(base) => base
@@ -375,16 +423,16 @@ impl Tree {
                 return Err(ApfsError::Unsupported("ephemeral B-tree children"));
             }
         };
-        let block = read_node(device, paddr, self.headerless)?;
+        let node = read_node(device, paddr, self.headerless)?;
         if let Some(hash) = self.hash {
             let expected = value
                 .get(OID_BYTES..OID_BYTES + hash.size())
                 .ok_or(ApfsError::Malformed("hashed index entry is short"))?;
-            if hash.digest(&block) != expected {
+            if node.digest(hash) != expected {
                 return Err(ApfsError::Malformed("a sealed B-tree node fails its hash"));
             }
         }
-        Ok(block)
+        Ok(Arc::clone(&node.node))
     }
 
     /// Visit entries in key order, starting with the first whose key is not
@@ -396,12 +444,12 @@ impl Tree {
         compare: &Compare<'_>,
         callback: &mut Callback<'_>,
     ) -> Result<()> {
-        let root = read_node(device, self.root, self.headerless)?;
+        let root = Arc::clone(&read_node(device, self.root, self.headerless)?.node);
         self.visit_node(
             device,
             omap,
             VisitNode {
-                block: root,
+                node: root,
                 first: true,
                 depth: 0,
             },
@@ -419,15 +467,10 @@ impl Tree {
         compare: &Compare<'_>,
         callback: &mut Callback<'_>,
     ) -> Result<Visit> {
-        let VisitNode {
-            block,
-            first,
-            depth,
-        } = visit;
+        let VisitNode { node, first, depth } = visit;
         if depth > MAX_DEPTH {
             return Err(ApfsError::Malformed("B-tree is deeper than 16 levels"));
         }
-        let node = Node::parse(block, self.headerless)?;
         if node.is_leaf() {
             for index in 0..node.keys {
                 let (key, value) = node.entry(index, &self.info)?;
@@ -461,7 +504,7 @@ impl Tree {
                 device,
                 omap,
                 VisitNode {
-                    block: child,
+                    node: child,
                     first,
                     depth: depth + 1,
                 },
@@ -528,5 +571,36 @@ impl Omap {
                 headerless: flags & OMAP_VAL_NOHEADER != 0,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::apfs::tests::Memory;
+    use alloc::vec;
+
+    #[test]
+    fn cached_root_is_checked_against_each_seal() {
+        let mut block = vec![0; 4096];
+        let flags = BTNODE_ROOT | BTNODE_LEAF | BTNODE_NOHEADER;
+        block[32..34].copy_from_slice(&flags.to_le_bytes());
+        let info = 4096 - BTREE_INFO_BYTES;
+        let tree_flags = BTREE_HASHED | BTREE_NOHEADER;
+        block[info..info + 4].copy_from_slice(&tree_flags.to_le_bytes());
+        block[info + 4..info + 8].copy_from_slice(&4096u32.to_le_bytes());
+        let mut seal = Seal {
+            hash: Hash::Sha256,
+            root: Hash::Sha256.digest(&block),
+        };
+        let mut device = Device::new(Memory(block), 0, 4096);
+        Tree::open(&mut device, 0, 1, true, Some(&seal), true).unwrap();
+        seal.root[0] ^= 1;
+        assert!(matches!(
+            Tree::open(&mut device, 0, 1, true, Some(&seal), true),
+            Err(ApfsError::Malformed(
+                "the sealed root node fails its root hash"
+            ))
+        ));
     }
 }

@@ -1,5 +1,5 @@
 //! Block control transfers: every branch returns to the dispatcher.
-use crate::x86_64::asm::{Asm, Code, Cond, Gpr, Size};
+use crate::x86_64::asm::{Alu, Asm, Code, Cond, Gpr, Size};
 use alloc::vec;
 use alloc::vec::Vec;
 pub(crate) mod checked_memory;
@@ -474,6 +474,19 @@ fn emit_single(
                 code.remove_instruction(start..start + load.len());
             }
         }
+    } else if let Operation::ConditionalSelect(operand) = &instruction.operation
+        && code.is_pinned()
+        && !code.constant_time()
+        && held.rax == super::Rax::Nzcv
+        && matches!(
+            operand.otherwise,
+            crate::aarch64::conditional_select::Otherwise::Unchanged
+                | crate::aarch64::conditional_select::Otherwise::Invert
+        )
+    {
+        // The preceding pinned capture preserves the host flags. MOV and
+        // NOT keep them live while preparing these select operands.
+        super::conditional_select::emit(code, operand, true);
     } else {
         super::emit_instruction(code, instruction, fixups, target, checks);
     }
@@ -878,31 +891,36 @@ fn branch_condition(code: &mut Code, operation: &Operation, rax: super::Rax) -> 
             width,
             nonzero,
             ..
-        } => Some(match code.host(source) {
-            Some(host) => {
-                let size = Size::of(width == crate::aarch64::Width::X64);
+        } => {
+            let size = Size::of(width == crate::aarch64::Width::X64);
+            if let Some(host) = code.host(source) {
                 code.asm().test(size, host, host);
-                if nonzero { Cond::Ne } else { Cond::E }
-            }
-            None => {
+            } else if let Some(slot) = super::offset(source)
+                && rax != super::Rax::Guest(source)
+            {
+                code.asm().alu_imm8(Alu::Cmp, size, super::frame(slot), 0);
+            } else {
                 load_unless_held(code, source, rax);
-                super::test_zero(code, width, nonzero)
+                return Some(super::test_zero(code, width, nonzero));
             }
-        }),
+            Some(if nonzero { Cond::Ne } else { Cond::E })
+        }
         Operation::BranchBit {
             source,
             bit,
             nonzero,
             ..
-        } => Some(match code.host(source) {
-            Some(host) => {
-                let bits = code.asm();
-                super::test_bit_of(bits, host, bit, nonzero)
-            }
-            None => {
-                load_unless_held(code, source, rax);
-                super::test_bit(code, bit, nonzero)
-            }
+        } => Some(if let Some(host) = code.host(source) {
+            super::test_bit_of(code.asm(), host, bit, nonzero)
+        } else if let Some(slot) = super::offset(source)
+            && rax != super::Rax::Guest(source)
+        {
+            let byte = super::frame(slot + u32::from(bit / 8));
+            code.asm().test_imm(Size::Byte, byte, 1 << (bit % 8));
+            if nonzero { Cond::Ne } else { Cond::E }
+        } else {
+            load_unless_held(code, source, rax);
+            super::test_bit(code, bit, nonzero)
         }),
         _ => unreachable!("not a conditional branch"),
     }

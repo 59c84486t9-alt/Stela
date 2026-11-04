@@ -24,11 +24,17 @@ pub(crate) fn emit(
     // DIT validation covers the individual recipes, not region allocation.
     let register_regions = register_regions && !target.data_independent_timing();
     let mut cursor = 0;
+    let mut span = Vec::new();
     while cursor < instructions.len() {
-        if register_regions && instructions[cursor].1.ordinary_instruction().is_some() {
+        if register_regions
+            && instructions[cursor..].get(..2).is_some_and(|pair| {
+                pair.iter()
+                    .all(|(_, op)| op.ordinary_instruction().is_some())
+            })
+        {
             // Decode once in CheckedPlan; clone each bounded typed span once,
             // rather than reconsidering an unselected suffix at every word.
-            let mut span = Vec::new();
+            span.clear();
             for (pc, operation) in &instructions[cursor..] {
                 let Some(instruction) = operation.ordinary_instruction() else {
                     break;
@@ -112,17 +118,25 @@ fn emit_register_span(
             Ok(Some(region)) => (Some(region), true),
             _ => (region::emit_register_prefix(remaining).ok(), false),
         };
+        // A singleton cannot pass either cost gate. Emit it straight into
+        // the block instead of building and copying a baseline fragment.
+        let candidate = candidate.filter(|region| region.consumed_instructions >= 2);
         let count = candidate
             .as_ref()
-            .map_or(1, |region| region.consumed_instructions.max(1));
+            .map_or(1, |region| region.consumed_instructions);
         let mut baseline = Emitted::default();
+        let output = if candidate.is_some() {
+            &mut baseline
+        } else {
+            &mut *block
+        };
         let mut fixups = Vec::new();
         for instruction in &remaining[..count] {
-            baseline
+            output
                 .source_map
-                .push((instruction.pc, baseline.x86_64_code.len()));
+                .push((instruction.pc, output.x86_64_code.len()));
             emit_instruction(
-                &mut baseline.x86_64_code,
+                &mut output.x86_64_code,
                 instruction,
                 &mut fixups,
                 target,
@@ -134,9 +148,12 @@ fn emit_register_span(
                 crate::CompileErrorKind::UnexpectedRegisterBranch,
             ));
         }
+        let Some(region) = candidate else {
+            cursor += count;
+            continue;
+        };
         let offset = block.x86_64_code.len();
-        if let Some(region) = candidate
-            && region.fault_recovery.is_empty()
+        if region.fault_recovery.is_empty()
             && if allocated {
                 region::admits_allocated(&region, &baseline.x86_64_code)
             } else {

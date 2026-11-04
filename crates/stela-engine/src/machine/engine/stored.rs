@@ -279,51 +279,48 @@ impl<H: Host, D: Devices> Machine<H, D> {
         pc: u64,
         physical: u64,
         source: &[u8],
-    ) -> Option<&StoredPage> {
+    ) -> Option<(Digest, Option<Arc<Record>>)> {
         let frame = physical & !(FETCH_PAGE - 1);
         let offset = (physical - frame) as usize;
-        if self
-            .pages
-            .get(&frame)
-            .is_some_and(|stored| stored.bytes.get(offset..offset + source.len()) != Some(source))
-        {
+        let matches = |bytes: &[u8]| bytes.get(offset..offset + source.len()) == Some(source);
+        self.page_uses += 1;
+        if let Some(stored) = self.pages.get_mut(&frame) {
+            if matches(stored.bytes.as_slice()) {
+                stored.used = self.page_uses;
+                return Some((stored.key, stored.record.clone()));
+            }
             self.pages.remove(&frame);
         }
-        if !self.pages.contains_key(&frame) {
-            self.host.translations()?;
-            let page = pc & !(FETCH_PAGE - 1);
-            if self
-                .breakpoints
-                .iter()
-                .chain(&self.traces)
-                .any(|&stop| stop & !(FETCH_PAGE - 1) == page)
-            {
-                return None;
-            }
-            let mut bytes = Box::new([0u8; PAGE_BYTES]);
-            if !self.host.read_ram(frame, bytes.as_mut_slice()) {
-                return None;
-            }
-            let key = Digest::of(bytes.as_slice());
-            let record = self.host.translations()?.record(&key);
-            if self.pages.len() >= self.kept_pages {
-                self.forget_least_used_pages();
-            }
-            self.pages.insert(
-                frame,
-                StoredPage {
-                    key,
-                    bytes,
-                    record,
-                    origin: None,
-                    used: 0,
-                },
-            );
+        self.host.translations()?;
+        let page = pc & !(FETCH_PAGE - 1);
+        if self
+            .breakpoints
+            .iter()
+            .chain(&self.traces)
+            .any(|&stop| stop & !(FETCH_PAGE - 1) == page)
+        {
+            return None;
         }
-        self.page_uses += 1;
-        let page = self.pages.get_mut(&frame)?;
-        page.used = self.page_uses;
-        Some(page)
+        let mut bytes = Box::new([0u8; PAGE_BYTES]);
+        if !self.host.read_ram(frame, bytes.as_mut_slice()) || !matches(bytes.as_slice()) {
+            return None;
+        }
+        let key = Digest::of(bytes.as_slice());
+        let record = self.host.translations()?.record(&key);
+        if self.pages.len() >= self.kept_pages {
+            self.forget_least_used_pages();
+        }
+        self.pages.insert(
+            frame,
+            StoredPage {
+                key,
+                bytes,
+                record: record.clone(),
+                origin: None,
+                used: self.page_uses,
+            },
+        );
+        Some((key, record))
     }
 
     /// What a block of the record `key`, in the fetch page at `physical`

@@ -377,13 +377,14 @@ fn allocated_loop(
     let values: Vec<_> = analyzed.iter().map(|(_, values, _)| *values).collect();
     // Initial scope requires a real producer before each loop's flag consumer.
     // Packed flag phis at the header need a separate admitted edge contract.
-    if LiveRanges::compute(&values).inputs() & Value::NZCV.mask() != 0 {
+    let live = LiveRanges::compute(&values);
+    if live.inputs() & Value::NZCV.mask() != 0 {
         return None;
     }
     let gprs: Vec<_> = analyzed.iter().map(|(gprs, _, _)| *gprs).collect();
     let mut best: Option<((usize, usize, usize), NativeBlock)> = None;
     for callee_slots in 0..=encoding::CALLEE_POOL.len() {
-        let plan = allocation::Plan::new(values.clone(), callee_slots, true);
+        let plan = allocation::Plan::new(&values, &live, callee_slots, true);
         let mut emitter = allocation::emitter(&gprs, plan, entry);
         let code = &mut emitter.output.code;
         encoding::push_budget_pointer(code);

@@ -96,6 +96,24 @@ impl Policy {
         });
         MemoryStatus::Unsupported
     }
+    fn check_physical(
+        &mut self,
+        request: DataRequest,
+        part: DataPart,
+        physical: u64,
+    ) -> Result<(), (MemoryStatus, u64)> {
+        self.ram
+            .check_physical(physical, part.bytes)
+            .map_err(|status| {
+                let status = if status == MemoryStatus::Domain {
+                    status
+                } else {
+                    self.unsupported(request, part.address, Refusal::PhysicalGeometry)
+                };
+                (status, part.address)
+            })
+    }
+
     fn fault(
         &mut self,
         request: DataRequest,
@@ -253,6 +271,13 @@ impl DataPolicy for Policy {
         request: DataRequest,
         part: DataPart,
     ) -> Result<u64, (MemoryStatus, u64)> {
+        let eligible = request.operation == DataOperation::Ordinary && !self.controls.cold_m0();
+        if let Some(physical) = self.tlb.lookup(part, eligible) {
+            // The cache admits only contained Normal, untagged parts from a
+            // checked walk. RAM ownership still needs a check on every hit.
+            self.check_physical(request, part, physical)?;
+            return Ok(physical);
+        }
         let access = match part.kind {
             AccessKind::Read => mmu::Access::Read,
             AccessKind::Write => mmu::Access::Write,
@@ -270,27 +295,20 @@ impl DataPolicy for Policy {
         } else {
             mmu::alignment::MemoryCheck::new(shape(request), request.address)
         };
-        let eligible = request.operation == DataOperation::Ordinary && !self.controls.cold_m0();
-        let cached = self.tlb.lookup(part, eligible);
-        let (outcome, failure) = if let Some(mapped) = cached {
-            (mmu::Outcome::Mapped(mapped), None)
-        } else {
-            let mut tables = Tables::new(&self.ram);
-            let outcome = mmu::translate_checked_part(
-                &self.controls.translation,
-                part.address,
-                access,
-                self.controls.requester,
-                alignment,
-                &mut tables,
-            );
-            self.tlb.record_walk(
-                #[cfg(feature = "native-profile")]
-                tables.reads,
-            );
-            (outcome, tables.failure)
-        };
-        if let Some(status) = failure {
+        let mut tables = Tables::new(&self.ram);
+        let outcome = mmu::translate_checked_part(
+            &self.controls.translation,
+            part.address,
+            access,
+            self.controls.requester,
+            alignment,
+            &mut tables,
+        );
+        self.tlb.record_walk(
+            #[cfg(feature = "native-profile")]
+            tables.reads,
+        );
+        if let Some(status) = tables.failure {
             return Err((status, part.address));
         }
         let translated = match outcome {
@@ -374,17 +392,8 @@ impl DataPolicy for Policy {
         // Normal Non-cacheable is not Device memory and needs no Device lock.
         // Mapping the data quantity to an unowned device/aperture cannot acquire
         // canonical-RAM permission just because its ARM descriptor was Normal.
-        if let Err(status) = self.ram.check_physical(translated.physical, part.bytes) {
-            return Err((
-                if status == MemoryStatus::Domain {
-                    status
-                } else {
-                    self.unsupported(request, part.address, Refusal::PhysicalGeometry)
-                },
-                part.address,
-            ));
-        }
-        if cached.is_none() && eligible {
+        self.check_physical(request, part, translated.physical)?;
+        if eligible {
             self.tlb.fill(part, translated);
         }
         Ok(translated.physical)

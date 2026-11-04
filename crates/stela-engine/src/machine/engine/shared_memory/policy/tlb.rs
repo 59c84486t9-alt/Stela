@@ -2,16 +2,35 @@
 //! Valid mappings may remain stale until guest maintenance. Fetches still walk
 //! and compare source bytes; all data hits still resolve RAM.
 use super::{DataPart, mmu};
+use crate::memory::backing::AccessKind;
 use alloc::{boxed::Box, vec};
 
 const PAGE_BYTES: u64 = 4096;
 const PAGE_MASK: u64 = PAGE_BYTES - 1;
 const CELLS: usize = 128;
+const LARGE_LEAVES: usize = 4;
+const READ: u64 = 1;
+const WRITE: u64 = 2;
 
 #[derive(Clone, Copy)]
 struct Entry {
     page: u64,
-    translation: mmu::Translation,
+    // Page-aligned physical base with data permissions in its low bits.
+    physical_rights: u64,
+}
+
+impl Entry {
+    const EMPTY: Self = Self {
+        page: u64::MAX,
+        physical_rights: 0,
+    };
+}
+
+#[derive(Clone, Copy)]
+struct LargeEntry {
+    base: u64,
+    mask: u64,
+    physical_rights: u64,
 }
 
 #[cfg(feature = "native-profile")]
@@ -36,7 +55,11 @@ pub(super) struct DataTlb {
     // None until Machine preparation; stopped helpers disable reuse.
     generation: Option<u64>,
     // Lazy, bounded allocation; no table-sized array on a native callback stack.
-    cells: Box<[Option<Entry>]>,
+    cells: Box<[Entry]>,
+    // Recent large leaves back the 4 KiB hot cache without expanding a
+    // block into thousands of entries. Check these only on a page miss.
+    large: [Option<LargeEntry>; LARGE_LEAVES],
+    next_large: usize,
     #[cfg(feature = "native-profile")]
     statistics: Statistics,
 }
@@ -45,7 +68,7 @@ impl DataTlb {
     pub(super) fn refresh(&mut self, generation: u64, controls_changed: bool) {
         let generation_changed = self.generation != Some(generation);
         if generation_changed || controls_changed {
-            self.cells.fill(None);
+            self.clear();
             #[cfg(feature = "native-profile")]
             {
                 self.statistics.generation_flushes = self
@@ -63,20 +86,25 @@ impl DataTlb {
 
     pub(super) fn disable(&mut self) {
         self.generation = None;
-        self.cells.fill(None);
+        self.clear();
+    }
+
+    fn clear(&mut self) {
+        self.cells.fill(Entry::EMPTY);
+        self.large.fill(None);
+        self.next_large = 0;
     }
 
     fn contained(part: DataPart) -> bool {
-        matches!(part.bytes, 1 | 2 | 4 | 8)
-            && part.address.is_multiple_of(part.bytes as u64)
-            && (part.address & PAGE_MASK) + part.bytes as u64 <= PAGE_BYTES
+        // These naturally aligned widths all divide a page.
+        matches!(part.bytes, 1 | 2 | 4 | 8) && part.address & (part.bytes as u64 - 1) == 0
     }
 
     fn index(address: u64) -> usize {
         (address / PAGE_BYTES) as usize % CELLS
     }
 
-    pub(super) fn lookup(&mut self, part: DataPart, eligible: bool) -> Option<mmu::Translation> {
+    pub(super) fn lookup(&mut self, part: DataPart, eligible: bool) -> Option<u64> {
         if self.generation.is_none() || !eligible || !Self::contained(part) {
             #[cfg(feature = "native-profile")]
             {
@@ -84,21 +112,36 @@ impl DataTlb {
             }
             return None;
         }
-        let entry = self.cells.get(Self::index(part.address)).copied().flatten();
-        if let Some(entry) = entry.filter(|entry| entry.page == part.address & !PAGE_MASK) {
-            let permitted = match part.kind {
-                crate::memory::backing::AccessKind::Read => entry.translation.readable,
-                crate::memory::backing::AccessKind::Write => entry.translation.writable,
-                crate::memory::backing::AccessKind::Execute => false,
+        let page = part.address & !PAGE_MASK;
+        let index = Self::index(page);
+        let hot = self.cells.get(index).copied();
+        let hot = hot.filter(|entry| entry.page == page);
+        let entry = hot.or_else(|| {
+            let leaf = self
+                .large
+                .iter()
+                .flatten()
+                .find(|leaf| part.address & !leaf.mask == leaf.base)?;
+            Some(Entry {
+                page,
+                physical_rights: leaf.physical_rights | (page & leaf.mask),
+            })
+        });
+        if let Some(entry) = entry {
+            let required = match part.kind {
+                AccessKind::Read => READ,
+                AccessKind::Write => WRITE,
+                AccessKind::Execute => 0,
             };
-            if permitted {
-                let mut translation = entry.translation;
-                translation.physical |= part.address & PAGE_MASK;
+            if entry.physical_rights & required != 0 {
+                if hot.is_none() {
+                    self.cells[index] = entry;
+                }
                 #[cfg(feature = "native-profile")]
                 {
                     self.statistics.hits = self.statistics.hits.saturating_add(1);
                 }
-                return Some(translation);
+                return Some((entry.physical_rights & !PAGE_MASK) | (part.address & PAGE_MASK));
             }
             #[cfg(feature = "native-profile")]
             {
@@ -113,7 +156,7 @@ impl DataTlb {
         None
     }
 
-    pub(super) fn fill(&mut self, part: DataPart, mut translation: mmu::Translation) {
+    pub(super) fn fill(&mut self, part: DataPart, translation: mmu::Translation) {
         if self.generation.is_none()
             || !Self::contained(part)
             || translation.memory != mmu::MemoryType::Normal
@@ -126,21 +169,39 @@ impl DataTlb {
             return;
         }
         if self.cells.is_empty() {
-            self.cells = vec![None; CELLS].into_boxed_slice();
+            self.cells = vec![Entry::EMPTY; CELLS].into_boxed_slice();
         }
         let index = Self::index(part.address);
         #[cfg(feature = "native-profile")]
         {
             self.statistics.fills = self.statistics.fills.saturating_add(1);
-            if self.cells[index].is_some() {
+            if self.cells[index].page != Entry::EMPTY.page {
                 self.statistics.replacements = self.statistics.replacements.saturating_add(1);
             }
         }
-        translation.physical &= !PAGE_MASK;
-        self.cells[index] = Some(Entry {
+        let rights =
+            (u64::from(translation.readable) * READ) | (u64::from(translation.writable) * WRITE);
+        let mask = translation.size - 1;
+        if mask > PAGE_MASK && translation.physical & mask == part.address & mask {
+            let base = part.address & !mask;
+            let entry = Some(LargeEntry {
+                base,
+                mask,
+                physical_rights: (translation.physical & !mask) | rights,
+            });
+            if let Some(existing) = self.large.iter_mut().find(|existing| {
+                existing.is_some_and(|leaf| leaf.base == base && leaf.mask == mask)
+            }) {
+                *existing = entry;
+            } else {
+                self.large[self.next_large] = entry;
+                self.next_large = (self.next_large + 1) % LARGE_LEAVES;
+            }
+        }
+        self.cells[index] = Entry {
             page: part.address & !PAGE_MASK,
-            translation,
-        });
+            physical_rights: (translation.physical & !PAGE_MASK) | rights,
+        };
     }
 
     pub(super) fn record_walk(&mut self, #[cfg(feature = "native-profile")] reads: u64) {

@@ -113,7 +113,7 @@ struct Emitter<'a> {
     pinned_hosts: u16,
     /// A fixed loop assignment keeps architectural outputs until its side exit.
     persistent: bool,
-    allocation: Option<allocation::Plan>,
+    allocation: Option<allocation::Plan<'a>>,
     flag_location: flags::Location,
     coalesced: Option<usize>,
     allocating_output: bool,
@@ -377,13 +377,12 @@ impl Emitter<'_> {
         // an element is copied, as with a fault table it may hold a value
         // the frame does not yet have.
         let clobbers = recipe.clobbers();
-        let cached_data: Vec<Option<HostGpr>> = data
-            .iter()
-            .map(|&register| {
-                self.cached(register)
-                    .filter(|host| clobbers & host.mask() == 0)
-            })
-            .collect();
+        let mut cached_data = [None; 2];
+        for (&register, cached) in data.iter().zip(&mut cached_data) {
+            *cached = self
+                .cached(register)
+                .filter(|host| clobbers & host.mask() == 0);
+        }
         let live = self.prepare_access(clobbers, &[]);
         // The base keeps out of the registers the access overwrites.
         self.pinned_hosts |= clobbers;

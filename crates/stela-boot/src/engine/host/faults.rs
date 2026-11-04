@@ -257,21 +257,25 @@ pub(crate) fn page_fault(
     state.pool.half = half;
     // A failed allocation can already have installed intermediate tables.
     state.legacy_translations_dirty = true;
-    if tables::map_page(&mut state.pool, root, virtual_page, host, rights).is_err() {
-        // The half's frames are exhausted: start it over and map again. The
-        // lower half's kept halves hold frames until it is emptied.
-        state.exhausted += 1;
-        if half == LOWER {
-            state.reset_lower();
-        } else {
-            state.reset_shadow(Cause::Exhausted);
+    let slot = match tables::map_page_slot(&mut state.pool, root, virtual_page, host, rights) {
+        Ok(slot) => slot,
+        Err(_) => {
+            // The half's frames are exhausted: start it over and map again.
+            // The lower half's kept halves hold frames until it is emptied.
+            state.exhausted += 1;
+            if half == LOWER {
+                state.reset_lower();
+            } else {
+                state.reset_shadow(Cause::Exhausted);
+            }
+            state.pool.half = half;
+            state.legacy_translations_dirty = true;
+            match tables::map_page_slot(&mut state.pool, root, virtual_page, host, rights) {
+                Ok(slot) => slot,
+                Err(_) => super::super::interrupts::fatal(frame),
+            }
         }
-        state.pool.half = half;
-        state.legacy_translations_dirty = true;
-        if tables::map_page(&mut state.pool, root, virtual_page, host, rights).is_err() {
-            super::super::interrupts::fatal(frame);
-        }
-    }
+    };
     invlpg(virtual_page);
     if half == LOWER {
         let entry = tables::index(virtual_page, layout::top_level());
@@ -286,27 +290,43 @@ pub(crate) fn page_fault(
         state.fills += 1;
         return;
     }
+    const { assert!(FILL_WINDOW.is_power_of_two() && FILL_WINDOW <= tables::LARGE) };
     let (first, last) = shadow::window(address, translation.size, FILL_WINDOW);
-    let mut page = first;
-    loop {
-        if page != virtual_page && !regime.watch.blocks(page) {
-            let physical = translation
-                .physical
-                .wrapping_sub(address)
-                .wrapping_add(page);
-            if let Some(host) = state.host_physical(physical) {
-                state.legacy_translations_dirty = true;
-                if tables::map_page(&mut state.pool, root, page, host, rights).is_err() {
-                    // Out of frames: the rest stays to fault.
-                    break;
+    if last - first >= PAGE {
+        let physical = translation
+            .physical
+            .wrapping_sub(address)
+            .wrapping_add(first);
+        // Contiguous backing is common. Look up the first page once, then
+        // fall back to page lookups past the end of that physical run.
+        let (first_host, available) = state.run(physical).unwrap_or((0, 0));
+        let table = slot.wrapping_sub(tables::index(virtual_page, 0));
+        let mut page = first;
+        loop {
+            if page != virtual_page && !regime.watch.blocks(page) {
+                let offset = page - first;
+                let host = if offset < available {
+                    first_host.checked_add(offset)
+                } else {
+                    state.host_physical(physical.wrapping_add(offset))
+                };
+                if let Some(host) = host {
+                    // SAFETY: the power-of-two prefill window is contained
+                    // in one leaf table. The just-mapped slot belongs to
+                    // that live table, exclusively managed by this host.
+                    unsafe {
+                        table
+                            .add(tables::index(page, 0))
+                            .write_volatile((host & tables::ADDRESS) | rights)
+                    };
+                    state.prefills += 1;
                 }
-                state.prefills += 1;
             }
+            if page >= last & !(PAGE - 1) {
+                break;
+            }
+            page += PAGE;
         }
-        if page >= last & !(PAGE - 1) {
-            break;
-        }
-        page += PAGE;
     }
     state.fills += 1;
 }

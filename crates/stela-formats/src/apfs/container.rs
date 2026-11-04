@@ -9,7 +9,7 @@ use super::{
     volume::Volume,
 };
 use crate::payload::ReadAt;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 /// `NX_MAGIC`, the four-character code 'BSXN' as stored on disk.
 const NX_MAGIC: &[u8; 4] = b"NXSB";
@@ -20,6 +20,8 @@ const MINIMUM_BLOCK_SIZE: u32 = 4096;
 const MAXIMUM_BLOCK_SIZE: u32 = 65536;
 /// The top bit of `nx_xp_desc_blocks` marks a B-tree descriptor area.
 const XP_DESC_NONCONTIGUOUS: u32 = 0x8000_0000;
+/// Read the descriptor ring in bounded, contiguous transfers.
+const XP_DESC_READ_BYTES: usize = 256 * 1024;
 const NX_INCOMPAT_VERSION1: u64 = 0x0000_0001;
 const NX_INCOMPAT_VERSION2: u64 = 0x0000_0002;
 const NX_INCOMPAT_FUSION: u64 = 0x0000_0100;
@@ -100,29 +102,47 @@ impl<R: ReadAt> Container<R> {
         {
             return Err(ApfsError::Malformed("container block size"));
         }
-        device.set_block_size(block_size);
-        let zero = Superblock::parse(&device.read_object(0)?, 0)?;
-        let descriptor_blocks = u32_at(&device.read_block(0)?, 104)?;
+        let block = if block_size == MINIMUM_BLOCK_SIZE {
+            block
+        } else {
+            device.set_block_size(block_size);
+            device.read_block(0)?
+        };
+        if !object::checksum_valid(&block) {
+            return Err(ApfsError::Checksum { paddr: 0 });
+        }
+        let mut newest = Superblock::parse(&block, 0)?;
+        let descriptor_blocks = u32_at(&block, 104)?;
         if descriptor_blocks & XP_DESC_NONCONTIGUOUS != 0 {
             return Err(ApfsError::Unsupported(
                 "checkpoint descriptor areas stored as B-trees",
             ));
         }
-        let descriptor_base = u64_at(&device.read_block(0)?, 112)?;
-        // The newest superblock in the descriptor area that is well formed.
-        let mut newest = zero;
-        for index in 0..u64::from(descriptor_blocks) {
-            let paddr = descriptor_base + index;
-            let block = device.read_block(paddr)?;
-            if !object::checksum_valid(&block) {
-                continue;
+        let descriptor_base = u64_at(&block, 112)?;
+        let max_blocks = XP_DESC_READ_BYTES / block_size as usize;
+        let mut batch = vec![0; max_blocks.min(descriptor_blocks as usize) * block_size as usize];
+        let mut remaining = u64::from(descriptor_blocks);
+        let mut paddr = descriptor_base;
+        while remaining != 0 {
+            let count = remaining.min(max_blocks as u64);
+            let bytes = &mut batch[..(count * u64::from(block_size)) as usize];
+            let offset = paddr
+                .checked_mul(u64::from(block_size))
+                .ok_or(ApfsError::Malformed("block address overflows"))?;
+            device.read_bytes(offset, bytes)?;
+            for (index, block) in bytes.chunks_exact(block_size as usize).enumerate() {
+                if block.get(32..36) != Some(NX_MAGIC)
+                    || u64_at(block, 16)? <= newest.xid
+                    || !object::checksum_valid(block)
+                {
+                    continue;
+                }
+                if let Ok(candidate) = Superblock::parse(block, paddr + index as u64) {
+                    newest = candidate;
+                }
             }
-            let Ok(candidate) = Superblock::parse(&block, paddr) else {
-                continue;
-            };
-            if candidate.xid > newest.xid {
-                newest = candidate;
-            }
+            remaining -= count;
+            paddr += count;
         }
         let known = NX_INCOMPAT_VERSION1 | NX_INCOMPAT_VERSION2 | NX_INCOMPAT_FUSION;
         if newest.incompatible_features & NX_INCOMPAT_FUSION != 0 {
@@ -182,6 +202,29 @@ mod tests {
         assert!(container.superblock.xid > 1);
         let volumes = container.volumes()?;
         assert_eq!(volumes[0].name, "Stela");
+        Ok(())
+    }
+
+    #[test]
+    fn skips_a_newer_checkpoint_with_a_bad_checksum() -> Result<()> {
+        let mut image = fixture();
+        let block_size = u32_at(&image.0, 36)? as usize;
+        let xid = u64_at(&image.0, 16)?;
+        let descriptor_base = (image.0.len() / block_size) as u64;
+        image.0[104..108].copy_from_slice(&2u32.to_le_bytes());
+        image.0[112..120].copy_from_slice(&descriptor_base.to_le_bytes());
+        let mut candidate = image.0[..block_size].to_vec();
+        image.0[..8].copy_from_slice(&object::fletcher64(&candidate).to_le_bytes());
+        candidate[16..24].copy_from_slice(&(xid + 1).to_le_bytes());
+        let checksum = object::fletcher64(&candidate);
+        candidate[..8].copy_from_slice(&checksum.to_le_bytes());
+        image.0.extend_from_slice(&candidate);
+        // Change the transaction ID without recomputing the checksum.
+        candidate[16..24].copy_from_slice(&(xid + 2).to_le_bytes());
+        image.0.extend_from_slice(&candidate);
+        let fallback = Container::open(image, 0)?.superblock;
+        assert_eq!(fallback.xid, xid + 1);
+        assert_eq!(fallback.paddr, descriptor_base);
         Ok(())
     }
 
