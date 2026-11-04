@@ -9,7 +9,7 @@ pub(crate) use super::region::ResidentLoopPlan;
 use super::chain::ExitWord;
 use crate::{
     GuestAddress, NativeBlock,
-    aarch64::{Instruction, Operation, Register, integer_math, integer_unary},
+    aarch64::{Instruction, Operation, Register, Width, integer_math, integer_unary, pc_relative},
     block::{ExitKind, Terminator},
 };
 
@@ -208,6 +208,31 @@ struct RegionPolicy {
     frame_loop: Option<GuestAddress>,
 }
 
+/// The final address of a flagless ADD that overwrites its adjacent ADR(P).
+pub(super) fn fold_address_pair(
+    first: &Operation,
+    second: &Operation,
+) -> Option<pc_relative::Operand> {
+    let Operation::PcRelative(address) = *first else {
+        return None;
+    };
+    let Operation::AddSub {
+        width: Width::X64,
+        subtract: false,
+        flags: false,
+        destination: destination @ Register::X(_),
+        source,
+        immediate,
+    } = *second
+    else {
+        return None;
+    };
+    (destination == address.destination && source == destination).then_some(pc_relative::Operand {
+        destination,
+        address: address.address.wrapping_add(u64::from(immediate)),
+    })
+}
+
 /// With `fault_table`, region accesses keep dirty values in registers and
 /// the returned table says where ([`crate::block::FaultRecovery`]).
 fn emit_selected(
@@ -388,6 +413,27 @@ fn emit_selected(
             continue;
         }
         let instruction = &instructions[cursor];
+        // System chains only enter and poll at block boundaries. Neither
+        // operation has a guest fault site, and an independent entry at ADD
+        // still compiles from its own source. Preserve both retirement rows.
+        if pinned
+            && !code.constant_time()
+            && let Some(second) = instructions.get(cursor + 1)
+            && instruction.pc.0.checked_add(4) == Some(second.pc.0)
+            && let Some(address) = fold_address_pair(&instruction.operation, &second.operation)
+        {
+            block.source_map.push((instruction.pc, code.len()));
+            code.set_instruction(block.source_map.len() - 1);
+            code.asm().nop();
+            block.source_map.push((second.pc, code.len()));
+            code.set_instruction(block.source_map.len() - 1);
+            super::pinned::emit_pc_relative(code, address);
+            if code.host(address.destination).is_none() {
+                after.rax = super::Rax::Guest(address.destination);
+            }
+            cursor += 2;
+            continue;
+        }
         // An ordinary block runs the pair together. A truncated block or
         // an entry at CLZ still emits its original operation.
         if fuse_pairs

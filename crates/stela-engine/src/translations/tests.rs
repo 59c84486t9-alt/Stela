@@ -62,6 +62,28 @@ fn address_dependent_blocks_rebase_to_what_the_compiler_emits_at_another_page() 
 }
 
 #[test]
+fn system_address_pair_rebases_one_fixed_address_and_both_source_rows() {
+    // Both PC-relative encodings retain an eight-byte relocation under
+    // page displacement, including when ADRP wraps to zero.
+    for first in [0x1000_0000, 0xb000_0000] {
+        let source = words(&[first, 0x9100_2000]);
+        let entry = proved(&source, 0x40).expect("pinned address pair is relocatable");
+        assert_eq!(entry.source_map, [(0x40, 0), (0x44, 1)]);
+        assert!(entry.relocations.contains(&3));
+        for page in [0x4000, 0x2_3456_8000, 0xffff_ffff_ffff_f000] {
+            let expected = compile(&source, page + 0x40);
+            let rebased = entry.rebase(page, &source).unwrap();
+            assert_eq!(rebased.native.x86_64_code, expected.native.x86_64_code);
+            assert_eq!(rebased.native.source_map, expected.native.source_map);
+            assert_eq!(rebased.direct_exits, expected.direct_exits);
+            assert!(rebased.fault_recovery.is_empty());
+            assert_eq!(rebased.source_bytes, source.len());
+        }
+        assert!(entry.rebase(PAGE, &source[..4]).is_none());
+    }
+}
+
+#[test]
 fn hosted_fused_address_pair_rebases_one_literal_and_both_source_rows() {
     let source = words(&[0x9000_0020, 0x9100_2000, 0xd65f_03c0]); // adrp; add #8; ret
     let options = stela_compiler::Options::new(BlockProfile::ORDINARY, TargetCpu::Baseline);

@@ -64,25 +64,8 @@ impl ConstantRegisters {
         first: &Operation,
         second: &Operation,
     ) -> Option<ConstantWrite> {
-        let Operation::PcRelative(address) = *first else {
-            return None;
-        };
-        let Operation::AddSub {
-            width: Width::X64,
-            subtract: false,
-            flags: false,
-            destination: destination @ Register::X(_),
-            source,
-            ..
-        } = *second
-        else {
-            return None;
-        };
-        if destination != address.destination || source != destination {
-            return None;
-        }
-        self.step(first);
-        self.step(second)
+        let folded = super::super::block::fold_address_pair(first, second)?;
+        self.write(folded.destination, Some(folded.address))
     }
 
     /// Observe exactly one guest instruction. Returned writes can replace only
