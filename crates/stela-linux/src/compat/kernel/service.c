@@ -145,7 +145,8 @@ void stela_linux_service_loop(const struct stela_linux_service_call *call)
 			if (call->done(call->context))
 				break;
 			set_current_state(TASK_UNINTERRUPTIBLE);
-			schedule();
+			if (stela_linux_task_park_service())
+				__builtin_trap();
 			continue;
 		}
 		struct stela_linux_atomic_callback leaf;

@@ -47,8 +47,9 @@ _Static_assert(sizeof(struct stela_linux_task_ops) == 40, "Linux task callbacks 
 
 struct stela_linux_task_scope_ops {
 	/* Retained shared Runtime borrow on this actual stack. No unwind or
-	 * escape. park: 0 skipped, 1 resumed; yield: 0 resumed; negative errno. */
-	int (*park)(void *scope);
+	 * escape. Service idle is marked only by the original service loop.
+	 * park: 0 skipped, 1 resumed; yield: 0 resumed; negative errno. */
+	int (*park)(void *scope, bool service_idle);
 	int (*yield)(void *scope);
 	int (*reschedule)(void *scope);
 	/* Read actual pending wake/due service state only at eligible process
@@ -228,6 +229,9 @@ int stela_linux_task_scope_end(struct stela_linux_task *task);
  * never borrows the normal-mutex level. Non-PREEMPT_RT mutex waits use this
  * process boundary after their distinct pre-schedule worker preparation. */
 int stela_linux_task_park(bool scheduler_preempt_disabled);
+/* Idle wait after the original service loop finds no batch due. The actual
+ * original Initial and reserved service stack must both be current. */
+int stela_linux_task_park_service(void);
 int stela_linux_task_yield(void);
 struct task_struct *stela_linux_current(void);
 /* Borrowed actual task owning this complete live-generation stack range on

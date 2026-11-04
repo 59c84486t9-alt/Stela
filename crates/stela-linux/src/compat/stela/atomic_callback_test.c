@@ -211,6 +211,12 @@ static int prepared_park(void *opaque)
 	return 0;
 }
 
+static int prepared_wait(void *opaque, bool service_idle)
+{
+	assert(!service_idle);
+	return prepared_park(opaque);
+}
+
 static bool prepared_no_domain(void *opaque)
 {
 	(void)opaque;
@@ -222,7 +228,7 @@ static bool prepared_no_domain(void *opaque)
 void stela_linux_atomic_callback_prepared_fixture(struct stela_linux_task *task,
 	const struct stela_linux_task_context *context)
 {
-	const struct stela_linux_task_scope_ops ops = {.park = prepared_park, .yield = prepared_park,
+	const struct stela_linux_task_scope_ops ops = {.park = prepared_wait, .yield = prepared_park,
 		.reschedule = prepared_park, .reschedule_requested = prepared_no_domain};
 	struct prepared_scope prepared = {.task = task, .context = context};
 	assert(!stela_linux_task_scope_begin(task, &ops, &prepared));

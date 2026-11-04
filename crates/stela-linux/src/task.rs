@@ -75,7 +75,7 @@ struct TaskOps {
 }
 #[repr(C)]
 struct ScopeOps {
-    park: unsafe extern "C" fn(*mut c_void) -> i32,
+    park: unsafe extern "C" fn(*mut c_void, bool) -> i32,
     yield_now: unsafe extern "C" fn(*mut c_void) -> i32,
     reschedule: unsafe extern "C" fn(*mut c_void) -> i32,
     reschedule_requested: unsafe extern "C" fn(*mut c_void) -> bool,
@@ -797,13 +797,15 @@ impl<const N: usize> TaskBinding<N> {
         // prepare then physically switches and joins on actual dispatcher.
         unsafe { (&*scope.cast::<Scope<'_, N>>()).runtime.terminate_current() }
     }
-    unsafe extern "C" fn park(scope: *mut c_void) -> i32 {
+    unsafe extern "C" fn park(scope: *mut c_void, service_idle: bool) -> i32 {
         // SAFETY: run_scoped keeps this pinned shared Runtime borrow until C
         // returns, including the suspended stack and borrowed owners.
-        match unsafe { &*scope.cast::<Scope<'_, N>>() }
-            .runtime
-            .park_if_blocked()
-        {
+        let runtime = unsafe { &*scope.cast::<Scope<'_, N>>() }.runtime;
+        if service_idle && runtime.service_current() != Ok(true) {
+            return -1;
+        }
+        // The native Domain already signals its reserved continuation.
+        match runtime.park_if_blocked() {
             Ok(ParkOutcome::Skipped) => 0,
             Ok(ParkOutcome::Resumed) => 1,
             Err(WorkError::Busy) => -16,

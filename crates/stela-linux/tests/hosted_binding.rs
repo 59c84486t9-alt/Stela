@@ -25,6 +25,7 @@ unsafe extern "C" {
     fn stela_linux_enter(owner: *const stela_linux::owner::RawOwner);
     fn stela_linux_exit();
     fn stela_linux_current() -> *mut c_void;
+    fn stela_linux_task_park_service() -> i32;
     fn sched_set_fifo(task: *mut c_void);
     fn schedule();
     static stela_linux_bare: stela_linux::owner::RawOwner;
@@ -42,6 +43,9 @@ unsafe extern "C" fn body(context: *mut c_void) {
     let fixture = unsafe { &*context.cast::<Fixture<'_>>() };
     // SAFETY: this bound task owns the live bare scope on the sole thread.
     unsafe { stela_linux_enter(&raw const stela_linux_bare) };
+    // SAFETY: check the source refusal on this actual entered bare task.
+    // An ordinary task may never claim the service's special park reason.
+    assert_eq!(unsafe { stela_linux_task_park_service() }, -1);
     if fixture.fifo.get() {
         // SAFETY: this source task is current on its original hosted stack.
         unsafe { sched_set_fifo(stela_linux_current()) };

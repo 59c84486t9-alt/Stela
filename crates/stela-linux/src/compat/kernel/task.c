@@ -1872,9 +1872,9 @@ static int runnable_checkpoint(struct stela_linux_task *task)
     return 0; /* runnable checkpoint, not an actual blocked wait */
 }
 
-int stela_linux_task_park(bool scheduler_preempt_disabled)
+static int task_park(struct stela_linux_task *task, bool scheduler_preempt_disabled,
+		     bool service_idle)
 {
-	struct stela_linux_task *task = current_record();
 	/* As Linux's sched_submit_work, before the switch is prepared. */
 	if (!task->rt_prepared)
 		native_submit_work(task->linux_task);
@@ -1894,7 +1894,7 @@ int stela_linux_task_park(bool scheduler_preempt_disabled)
          * scheduling checkpoint rather than a skipped-park C busy loop. */
         result = runnable_checkpoint(task);
     } else {
-        result = task->scope_ops->park(task->scope);
+        result = task->scope_ops->park(task->scope, service_idle);
         if (result > 1)
             __builtin_trap();
         /* An actual native pending wake can legitimately skip block without
@@ -1907,6 +1907,11 @@ int stela_linux_task_park(bool scheduler_preempt_disabled)
 	if (!task->rt_prepared)
 		native_update_worker(task->linux_task);
 	return result;
+}
+
+int stela_linux_task_park(bool scheduler_preempt_disabled)
+{
+	return task_park(current_record(), scheduler_preempt_disabled, false);
 }
 
 /* Selected !SMP original wait contract on the actual retained native UP
@@ -2058,26 +2063,46 @@ void resched_cpu(int cpu)
  * They never borrow the normal-mutex scheduler level or infer an RT wait.
  * A running caller yields fairly; a sleeping caller uses the same real
  * PREPARE/drain, signal recheck and atomic predicate/park transition. */
-void schedule(void)
+static int schedule_current(bool service_idle)
 {
-	struct task_struct *task = stela_linux_current();
+	struct stela_linux_task *record = current_record();
+	const struct stela_linux_owner *owner = stela_linux_owner();
+	struct task_struct *task = record->linux_task;
 	unsigned int state = READ_ONCE(task->__state);
+	if (service_idle && (record->kind != INITIAL_ALLOCATION ||
+	    state != TASK_UNINTERRUPTIBLE ||
+	    stela_linux_require_current(owner) ||
+	    !record->ops->service_reserved(record->binding)))
+		return -EPERM;
 	bool admitted_state = state == TASK_RUNNING || state == TASK_INTERRUPTIBLE ||
 		state == TASK_UNINTERRUPTIBLE || state == TASK_KILLABLE || state == TASK_IDLE ||
-        (state == TASK_PARKED && current_record()->kind == ORIGINAL_CHILD_ALLOCATION &&
+        (state == TASK_PARKED && record->kind == ORIGINAL_CHILD_ALLOCATION &&
          stela_linux_kthread_current_started() == 0);
 	if (stela_linux_atomic_callback_active() || preempt_count() || irqs_disabled() ||
 	    !admitted_state ||
 	    (task->flags & (PF_KTHREAD | PF_IO_WORKER)) != PF_KTHREAD || task->plug)
 		__builtin_trap();
-	int result = state == TASK_RUNNING ? stela_linux_task_yield() : stela_linux_task_park(false);
+	int result = state == TASK_RUNNING ? stela_linux_task_yield() :
+		task_park(record, false, service_idle);
 	if (result < 0)
-		__builtin_trap();
-    if (state == TASK_RUNNING && !current_record()->rt_prepared)
+		return result;
+    if (state == TASK_RUNNING && !record->rt_prepared)
         native_update_worker(task);
 	/* A pending immutable Runtime wake can skip the actual switch without
 	 * a C wake_up_process/arrive hook. Scheduler return is still runnable. */
 	__set_current_state(TASK_RUNNING);
+	return 0;
+}
+
+void schedule(void)
+{
+	if (schedule_current(false))
+		__builtin_trap();
+}
+
+int stela_linux_task_park_service(void)
+{
+	return schedule_current(true);
 }
 
 /* Original RT-mutex slow paths submit work before publishing their waiter.

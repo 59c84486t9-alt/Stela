@@ -182,9 +182,15 @@ impl<const N: usize> HostedTaskBinding<N> {
         }
     }
 
-    unsafe extern "C" fn park(scope: *mut c_void) -> i32 {
+    unsafe extern "C" fn park(scope: *mut c_void, service_idle: bool) -> i32 {
         // SAFETY: run_scope retains this exact pinned borrow through resume.
-        match unsafe { &*scope.cast::<Pin<&HostedRuntime<N>>>() }.park_if_blocked() {
+        let runtime = *unsafe { &*scope.cast::<Pin<&HostedRuntime<N>>>() };
+        let result = if service_idle {
+            runtime.park_service_if_idle()
+        } else {
+            runtime.park_if_blocked()
+        };
+        match result {
             Ok(ParkOutcome::Skipped) => 0,
             Ok(ParkOutcome::Resumed) => 1,
             Err(WorkError::Busy) => -16,
