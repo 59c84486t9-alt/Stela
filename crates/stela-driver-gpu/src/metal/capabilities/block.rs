@@ -703,7 +703,7 @@ mod tests {
         block.format_count = FORMATS as u32;
         assert_eq!(block.capabilities().unwrap().block().unwrap(), block);
 
-        block.formats[1].format = super::super::FORMAT_RAW_COUNT as u32;
+        block.formats[1].format = u32::MAX;
         assert_eq!(block.capabilities(), Err(MALFORMED));
     }
 

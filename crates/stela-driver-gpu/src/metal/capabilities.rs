@@ -162,30 +162,6 @@ option_set! {
     }
 }
 
-const FORMAT_RAW_COUNT: usize = {
-    let mut index = 0;
-    let mut max = 0;
-    while index < PixelFormat::ALL.len() {
-        let raw = PixelFormat::ALL[index].raw() as usize;
-        if raw > max {
-            max = raw;
-        }
-        index += 1;
-    }
-    max + 1
-};
-
-static FORMAT_INDICES: [u8; FORMAT_RAW_COUNT] = {
-    assert!(PixelFormat::ALL.len() <= u8::MAX as usize + 1);
-    let mut indices = [0; FORMAT_RAW_COUNT];
-    let mut index = 0;
-    while index < PixelFormat::ALL.len() {
-        indices[PixelFormat::ALL[index].raw() as usize] = index as u8;
-        index += 1;
-    }
-    indices
-};
-
 #[derive(Clone, Debug, PartialEq)]
 enum PixelFormats {
     /// The capabilities of every known format, in `PixelFormat::ALL` order.
@@ -197,7 +173,7 @@ enum PixelFormats {
 type IndexedPixelFormats = [FormatCapabilities; PixelFormat::ALL.len()];
 
 fn indexed_format(formats: &IndexedPixelFormats, format: PixelFormat) -> FormatCapabilities {
-    formats[FORMAT_INDICES[format.raw() as usize] as usize]
+    formats[format.index()]
 }
 
 impl PixelFormats {
