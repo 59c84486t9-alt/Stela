@@ -303,10 +303,12 @@ pub fn inspect(kind: Kind, window: &impl Window) -> Found {
         Kind::AmdVi => {
             let control = window.read64(CONTROL);
             let status = window.read64(STATUS);
-            if control == u64::MAX || status == u64::MAX {
+            if control == u64::MAX {
                 Found::Unreadable
-            } else if control & AMD_ACTIVE != 0 || status & AMD_RUNNING != 0 {
+            } else if control & AMD_ACTIVE != 0 || status != u64::MAX && status & AMD_RUNNING != 0 {
                 Found::AmdVi { control }
+            } else if status == u64::MAX {
+                Found::Unreadable
             } else {
                 Found::Inactive
             }
@@ -678,6 +680,19 @@ mod tests {
             Err(Failure::Timeout("AMD-Vi command and log engines"))
         );
         assert!(fake.writes.borrow().is_empty());
+    }
+
+    #[test]
+    fn amd_vi_unreadable_status_does_not_hide_enabled_translation() {
+        let active = Fake::new(Kind::AmdVi, &[(CONTROL, IOMMU_ENABLE), (STATUS, u64::MAX)]);
+        assert_eq!(
+            inspect(Kind::AmdVi, &active),
+            Found::AmdVi {
+                control: IOMMU_ENABLE
+            }
+        );
+        let inactive = Fake::new(Kind::AmdVi, &[(STATUS, u64::MAX)]);
+        assert_eq!(inspect(Kind::AmdVi, &inactive), Found::Unreadable);
     }
 
     #[test]
