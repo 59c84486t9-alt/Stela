@@ -12,6 +12,11 @@ pub const REALTEK_RELEASE: &str = "20250917";
 pub const REALTEK_REVISION: &str = "add225168d0d1ba4c174d5eb15272b53de01ad5a";
 pub const INTEL_RSA_REVISION: &str = "711d3297bac870af42088a467459a0634c1970ca";
 pub const WIFI_FIRMWARE_REVISION: &str = "59f9fc2ef8d1e312d2a613d4e1ffad2ff31a0a01";
+/// MT7925 Bluetooth build 20260605184935. On this PC's controller
+/// (13d3:3602) builds 20260813113236 and 20261016233221 complete download and
+/// FUNC_CTRL but never answer HCI Reset, under Linux btmtk exactly as here;
+/// this build answers it under both.
+pub const MT7925_BLUETOOTH_REVISION: &str = "2d70539375587a68bdef08fec2e0e1a51698c93a";
 pub const GSP_REVISION: &str = "1987bb2044a6c2d68c39d01c360bdbe17f1eb60c";
 /// The GSP-RM release nouveau's newest interface takes.
 const GSP_RELEASE: &str = "570.144";
@@ -217,6 +222,12 @@ const MEDIATEK_LICENSE: Artifact = Artifact {
     sha256: "a90d3f66704d85889945fec5525ea77622549da83aced1aac99828383f8f1805",
 };
 
+/// A notice carries its image's revision, so the MT7925 pin has its own.
+const MT7925_BLUETOOTH_LICENSE: Artifact = Artifact {
+    revision: MT7925_BLUETOOTH_REVISION,
+    ..MEDIATEK_LICENSE
+};
+
 const fn wifi(
     member: &'static str,
     length: usize,
@@ -357,6 +368,30 @@ pub const MEDIATEK_WIFI: &[Recipe] = &[
         1390712,
         "329c0e27f780550789e4eba47452731b1723f69f9e67f525d0e50bf3cd2978ac",
     ),
+];
+
+pub const MEDIATEK_BLUETOOTH: &[Recipe] = &[
+    mediatek_wifi(
+        "mediatek/BT_RAM_CODE_MT7961_1_2_hdr.bin",
+        533870,
+        "7a440a0f7404c73a2f03d8cc0475ac9f7fdc931b494dce37705e7d578153dbae",
+    ),
+    mediatek_wifi(
+        "mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin",
+        517398,
+        "299942dbec7d34af030670ea59f9f7b4fd5c64e738b9e0157d76f4dd3beb190f",
+    ),
+    Recipe {
+        image: Artifact {
+            source: LINUX_FIRMWARE,
+            revision: MT7925_BLUETOOTH_REVISION,
+            member: "mediatek/mt7925/BT_RAM_CODE_MT7925_1_1_hdr.bin",
+            length: 446831,
+            sha256: "d6423564bc4ffbaa5c5252844942f77a6163f3b1ff22cb51d9adf829916f7b53",
+        },
+        license: &MT7925_BLUETOOTH_LICENSE,
+        consumer: Consumer::Wifi,
+    },
 ];
 
 const REALTEK_WIFI_LICENSE: Artifact = Artifact {
@@ -666,6 +701,47 @@ fn select_mediatek_wifi(request: &Request) -> Option<&'static Recipe> {
         .find(|recipe| recipe.image.member == request.name)
 }
 
+/// The MediaTek USB Bluetooth driver's request: the image its live device,
+/// ROM and flavor registers select (`mediatek::identity::Identity::select`).
+fn select_mediatek_bluetooth(request: &Request) -> Option<&'static Recipe> {
+    let usb: Vec<_> = request.target.hardware.split(':').collect();
+    if usb.len() != 4 || usb[0] != "usb" || !usb[1..].iter().all(|f| hex_field(f, 4)) {
+        return None;
+    }
+    let mut fields = request
+        .target
+        .revision
+        .strip_prefix("mt79xx-v1:")?
+        .split(':');
+    let mut register = |prefix: &str| {
+        fields
+            .next()?
+            .strip_prefix(prefix)
+            .filter(|value| hex_field(value, 8))
+            .and_then(|value| u32::from_str_radix(value, 16).ok())
+    };
+    let legacy = register("legacy-")?;
+    let device = register("device-")?;
+    let firmware = register("firmware-")?;
+    let flavor = register("flavor-")?;
+    if fields.next().is_some() || legacy == 0x7663 {
+        return None;
+    }
+    let member = match (device, firmware & 0xff) {
+        (0x7961, 1) if flavor & 0x80 == 0 => "mediatek/BT_RAM_CODE_MT7961_1_2_hdr.bin",
+        (0x7922, 0) => "mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin",
+        (0x7925, 0) => "mediatek/mt7925/BT_RAM_CODE_MT7925_1_1_hdr.bin",
+        _ => return None,
+    };
+    (request.name == member)
+        .then(|| {
+            MEDIATEK_BLUETOOTH
+                .iter()
+                .find(|recipe| recipe.image.member == member)
+        })
+        .flatten()
+}
+
 /// Match the observed production RTL8822C identity emitted by the driver's
 /// `Profile::stage`; retain the complete PCI and SYS_CFG1 values in its request.
 fn select_realtek_wifi(request: &Request) -> Option<&'static Recipe> {
@@ -794,6 +870,7 @@ impl Plan {
                 "wifi-regulatory" => select_regulatory(request),
                 "wifi-intel" => select_intel_wifi(request),
                 "wifi-mt792x" => select_mediatek_wifi(request),
+                "mediatek-bluetooth-usb-mt79xx-v1" => select_mediatek_bluetooth(request),
                 "realtek-wifi" => select_realtek_wifi(request),
                 "nouveau" => select_gsp(request),
                 _ => None,
@@ -1145,6 +1222,57 @@ mod tests {
             ),
         ] {
             assert!(Plan::select(&wifi_inventory(driver, name, hardware)).is_err());
+        }
+    }
+
+    fn mediatek_bluetooth(name: &str, hardware: &str, revision: &str) -> Inventory {
+        let mut request = wifi_inventory("mediatek-bluetooth-usb-mt79xx-v1", name, hardware)
+            .requests()[0]
+            .clone();
+        request.target.revision = revision.into();
+        let mut observed = Inventory::default();
+        observed.observe(request.view()).unwrap();
+        observed
+    }
+
+    #[test]
+    fn mediatek_bluetooth_recipe_follows_the_live_registers() {
+        let mt7925 = "mediatek/mt7925/BT_RAM_CODE_MT7925_1_1_hdr.bin";
+        let live = "mt79xx-v1:legacy-00000000:device-00007925:firmware-00008a00:flavor-00000000";
+        let plan = Plan::select(&mediatek_bluetooth(mt7925, "usb:13d3:3602:0100", live)).unwrap();
+        assert_eq!(plan.selections[0].recipe.image.member, mt7925);
+        assert_eq!(plan.selections[0].request.target.revision, live);
+        assert_eq!(plan.artifacts().len(), 2);
+        let recipe = plan.selections[0].recipe;
+        assert_eq!(
+            (recipe.image.revision, recipe.license.revision),
+            (MT7925_BLUETOOTH_REVISION, MT7925_BLUETOOTH_REVISION)
+        );
+        let mt7961 = "mt79xx-v1:legacy-00000000:device-00007961:firmware-00008a01:flavor-00000000";
+        for (name, hardware, revision) in [
+            (mt7925, "usb:13d3:3602:0100", mt7961),
+            (mt7925, "usb:13d3:3602", live),
+            (mt7925, "pci:14c3:7925:0000", live),
+            (
+                mt7925,
+                "usb:13d3:3602:0100",
+                &live.replace("legacy-00000000", "legacy-00007663"),
+            ),
+            (
+                mt7925,
+                "usb:13d3:3602:0100",
+                &format!("{live}:extra-00000000"),
+            ),
+            (
+                "mediatek/BT_RAM_CODE_MT7961_1_2_hdr.bin",
+                "usb:13d3:3602:0100",
+                &mt7961.replace("flavor-00000000", "flavor-00000080"),
+            ),
+        ] {
+            assert!(
+                Plan::select(&mediatek_bluetooth(name, hardware, revision)).is_err(),
+                "{revision}"
+            );
         }
     }
 
