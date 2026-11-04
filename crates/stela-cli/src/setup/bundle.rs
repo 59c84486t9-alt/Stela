@@ -27,6 +27,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::Read as _,
     path::{Path, PathBuf},
 };
 
@@ -252,6 +253,27 @@ pub(super) fn processors(directory: &Path) -> Result<usize> {
     Ok(listing.processors)
 }
 
+/// Recover the count from the recorded manifest when an older setup omitted
+/// it from the record. The live disk topology is still checked at boot.
+pub(super) fn recorded_processors(directory: &Path, expected: &str) -> Option<usize> {
+    use stela_formats::boot_bundle::MAX_MANIFEST_BYTES;
+
+    if expected.is_empty() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(directory.join(MANIFEST))
+        .ok()?
+        .take((MAX_MANIFEST_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > MAX_MANIFEST_BYTES || stela_formats::sha256(&bytes) != expected {
+        return None;
+    }
+    let listing: Listing = serde_json::from_slice(&bytes).ok()?;
+    Some(listing.processors).filter(|&count| count != 0)
+}
+
 /// Bytes of the files in a prepared bundle directory.
 pub(super) fn bytes(directory: &Path) -> Result<u64> {
     let mut total = 0;
@@ -453,6 +475,26 @@ pub(super) fn verify(directory: &Path, manifest_sha256: &str) -> Vec<String> {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_processor_count_comes_from_the_recorded_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(MANIFEST);
+        let bytes = br#"{"schema_version":4,"processors":8}"#;
+        let digest = stela_formats::sha256(bytes);
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(recorded_processors(temp.path(), &digest), Some(8));
+        assert_eq!(recorded_processors(temp.path(), ""), None);
+        let replacement = br#"{"schema_version":4,"processors":1}"#;
+        fs::write(&path, replacement).unwrap();
+        assert_eq!(recorded_processors(temp.path(), &digest), None);
+        let omitted = br#"{"schema_version":4}"#;
+        fs::write(&path, omitted).unwrap();
+        assert_eq!(
+            recorded_processors(temp.path(), &stela_formats::sha256(omitted)),
+            None
+        );
+    }
 
     pub(in super::super) fn of(schema: u32, revision: u32) -> Generation {
         Generation { schema, revision }

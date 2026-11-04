@@ -115,11 +115,6 @@ pub(crate) unsafe fn validate(
     // SAFETY: the caller keeps the immutable loader allocation.
     let capture = unsafe { firmware::captured(handoff.native_processors) }
         .map_err(firmware::Error::message)?;
-    if requested.is_none() && cores != capture.core_count as usize {
-        return Err(refuse!(
-            "default native assignment differs from the captured physical-core roster"
-        ));
-    }
     if cores > capture.core_count as usize {
         return Err(refuse!(
             "requested native cores exceed physical source inventory"

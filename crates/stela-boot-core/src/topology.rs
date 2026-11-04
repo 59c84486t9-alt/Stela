@@ -30,9 +30,8 @@ pub const BSP: u32 = 1;
 pub const ENABLED: u32 = 1 << 1;
 pub const HEALTHY: u32 = 1 << 2;
 
-/// Number of guest PEs admitted by both the host roster and the
-/// source profile. Extra default workers stay parked; an explicit request
-/// must fit both inventories.
+/// Number of guest PEs and physical owners admitted by both the host
+/// roster and the source profile. An explicit request must fit both.
 pub fn guest_assignment_count(
     requested: Option<usize>,
     available: usize,

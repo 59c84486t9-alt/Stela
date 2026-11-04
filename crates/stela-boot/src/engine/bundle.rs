@@ -143,10 +143,15 @@ fn read_bounded(root: &mut Directory, path: &str, limit: u64) -> Result<Region> 
     })
 }
 
+pub(crate) struct Retained {
+    pub files: Vec<(String, Region)>,
+    pub processors: Option<usize>,
+}
+
 /// Read `bundle.json` from `directory` on the first volume that has it, then
 /// every file it lists, unchanged; `bundle.json` comes first. Run before boot
 /// services end, with no other exclusive opening of the volume.
-pub fn read(directory: &str) -> Result<Vec<(String, Region)>> {
+pub(crate) fn read(directory: &str, verify_topology: bool) -> Result<Retained> {
     let directory = directory.trim_end_matches('\\');
     let manifest_path = format!("{directory}\\{MANIFEST_FILE}");
     let handles =
@@ -176,9 +181,40 @@ pub fn read(directory: &str) -> Result<Vec<(String, Region)>> {
                 .inspect_err(|error| crate::status::fail(&error.to_string()))?;
             files.push((file.name.clone(), contents));
         }
+        let processors = verify_topology
+            .then(|| {
+                source::processor_count(&manifest, &|name| {
+                    files
+                        .iter()
+                        .find(|(file, _)| file == name)
+                        .map(|(_, region)| {
+                            // SAFETY: these live firmware pages were filled by read_file.
+                            unsafe {
+                                core::slice::from_raw_parts(
+                                    region.physical as *const u8,
+                                    region.bytes as usize,
+                                )
+                            }
+                        })
+                })
+            })
+            .transpose();
+        let processors = match processors {
+            Ok(processors) => processors,
+            Err(error) => {
+                for (_, region) in files {
+                    let pages = (region.bytes as usize).div_ceil(PAGE).max(1);
+                    let start = core::ptr::NonNull::new(region.physical as *mut u8)
+                        .expect("live firmware allocation");
+                    // SAFETY: read_file allocated these pages and none were handed off.
+                    let _ = unsafe { boot::free_pages(start, pages) };
+                }
+                return Err(error);
+            }
+        };
         let bytes: u64 = files.iter().map(|(_, region)| region.bytes).sum();
         crate::status::done(&format!("{} MB", bytes >> 20));
-        return Ok(files);
+        return Ok(Retained { files, processors });
     }
     Err(refuse!("no volume has the bundle's bundle.json"))
 }

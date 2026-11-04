@@ -91,13 +91,12 @@ pub(super) fn prepare_image(snapshot: &Snapshot) -> Result<EngineImage> {
 }
 
 /// Reserve the engine's working memory and each physical worker's resources.
-pub(super) fn reserve(
-    system: &System,
-    cores: usize,
-    ram: &[(usize, usize)],
-) -> Result<EngineMemory> {
-    let runners = system.runners(cores, !system.parallel);
-    let sizes = Sizes::for_host(free_ram()?, cores, runners);
+pub(super) fn reserve(cores: usize, ram: &[(usize, usize)]) -> Result<EngineMemory> {
+    let sizes = Sizes::for_host(free_ram()?, cores, cores);
+    // Each claimed core owns a full native part. Check both ends before allocation.
+    for slot in [0, cores - 1] {
+        crate::native_smp::resources::partition(cores, cores, slot, sizes.code, sizes.pool)?;
+    }
     let heap = allocate(sizes.heap)?;
     // The engine allocator uses this existing physmap directly. Prove the
     // complete firmware reservation is covered before publishing the handoff.
@@ -156,13 +155,6 @@ pub(super) fn reserve(
     };
     let code = allocate_large(sizes.code)?;
     let pool = allocate(sizes.pool)?;
-    // The engine splits both among its runners, which a diagnostic may make
-    // every core; check the BSP's and the last worker's part.
-    for runners in [system.runners(cores, false), runners] {
-        for slot in [0, cores - 1] {
-            crate::native_smp::resources::partition(cores, runners, slot, code.bytes, pool.bytes)?;
-        }
-    }
     let handoff_page = allocate(size_of::<Handoff>() as u64)?;
     let trampoline = low_page(MemoryType::LOADER_CODE)?;
     let loader_tables = crate::paging::loader::Builder::new()?;

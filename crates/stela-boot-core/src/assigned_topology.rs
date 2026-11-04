@@ -381,32 +381,6 @@ impl<'a> Source<'a> {
             .collect()
     }
 
-    /// The started workers that host the source's PEs, in source order, with
-    /// the boot PE on the BSP.
-    pub fn placement_workers(
-        &self,
-        roster: &dyn RetainedRoster,
-        capture: &Capture,
-    ) -> Result<Vec<usize>> {
-        let boot = self
-            .resources
-            .resources()
-            .slots
-            .iter()
-            .position(|slot| slot.reg == self.boot_reg)
-            .ok_or(refuse!("assigned source omits the original boot PE"))?;
-        let placement = native::placement(
-            &self.guest_classes()?,
-            &Self::host_classes(roster, capture)?,
-            boot,
-        )
-        .map_err(|error| refuse!("assigned host core placement: {error}", ?error))?;
-        Ok(placement
-            .iter()
-            .map(|index| roster.cores()[*index].worker)
-            .collect())
-    }
-
     fn prepare_with_classes<'s>(
         &'s self,
         roster: &'s dyn RetainedRoster,

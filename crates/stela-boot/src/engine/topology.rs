@@ -64,23 +64,6 @@ impl<'a> AssignedRoster<'a> {
             cores,
         })
     }
-    /// Select started workers before any Plan borrows this roster.
-    /// Physical IDs stay unchanged; omitted executors remain held/parked.
-    pub(crate) fn select(&mut self, workers: &[usize]) -> Result<()> {
-        if workers.is_empty()
-            || !workers.contains(&0)
-            || workers.iter().enumerate().any(|(index, worker)| {
-                workers[..index].contains(worker)
-                    || !self.cores.iter().any(|core| core.worker == *worker)
-            })
-        {
-            return Err(refuse!(
-                "active source roster exceeds retained physical workers"
-            ));
-        }
-        self.cores.retain(|core| workers.contains(&core.worker));
-        Ok(())
-    }
 }
 impl RetainedRoster for AssignedRoster<'_> {
     fn revision(&self) -> u64 {
@@ -88,13 +71,5 @@ impl RetainedRoster for AssignedRoster<'_> {
     }
     fn cores(&self) -> &[AssignedCore] {
         &self.cores
-    }
-}
-
-impl AssignedRoster<'_> {
-    /// Keep the workers `source` places its PEs on.
-    pub(crate) fn select_for(&mut self, source: &Source<'_>, capture: &Capture) -> Result<()> {
-        let workers = source.placement_workers(self, capture)?;
-        self.select(&workers)
     }
 }

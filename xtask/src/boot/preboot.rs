@@ -98,6 +98,10 @@ pub fn prepare(path: &Path) -> Result<Preboot> {
         &Options::default(),
         None,
     )?;
+    ensure!(
+        installed.bundle.manifest.processors != 0,
+        "the installed system has no prepared CPU roster"
+    );
     Ok(Preboot {
         path: path.to_owned(),
         partition: partition.unique_guid.to_string(),
@@ -108,7 +112,10 @@ pub fn prepare(path: &Path) -> Result<Preboot> {
 impl Preboot {
     /// The mount options: system mode on the bundle built from this disk.
     pub fn options(&self) -> String {
-        format!("--system --preboot {SERIAL}:{}", self.partition)
+        format!(
+            "--system --preboot {SERIAL}:{} --guest-pes {}",
+            self.partition, self.expected.processors
+        )
     }
 
     /// Attach the image read-only to the guest through a snapshot overlay.

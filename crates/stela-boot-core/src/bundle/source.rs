@@ -69,6 +69,98 @@ fn word(tree: &DeviceTree, field: &str) -> Result<u32> {
         })
 }
 
+fn original_bytes<'a>(
+    manifest: &Manifest,
+    named: &impl Fn(&str) -> Option<&'a [u8]>,
+) -> Result<(&'a [u8], [u8; 32])> {
+    let original_file = manifest
+        .files
+        .iter()
+        .find(|file| file.name == ORIGINAL_DEVICE_TREE_FILE)
+        .ok_or(refuse!(
+            "selected bundle lacks unchanged original-devicetree.adt; reprepare with schema4"
+        ))?;
+    if manifest
+        .regions
+        .iter()
+        .any(|region| region.file == ORIGINAL_DEVICE_TREE_FILE)
+        || manifest
+            .patches
+            .iter()
+            .any(|patch| patch.file == ORIGINAL_DEVICE_TREE_FILE)
+    {
+        return Err(refuse!(
+            "original DeviceTree metadata cannot be loaded or patched as guest RAM"
+        ));
+    }
+    let original = named(ORIGINAL_DEVICE_TREE_FILE)
+        .ok_or(refuse!("verified original DeviceTree source disappeared"))?;
+    let original_sha256: [u8; 32] = Sha256::digest(original).into();
+    if original.len() as u64 != original_file.bytes
+        || original_sha256 != digest(&original_file.sha256)?
+    {
+        return Err(refuse!(
+            "original DeviceTree differs from its verified whole-file identity"
+        ));
+    }
+    Ok((original, original_sha256))
+}
+
+fn prepared_bytes<'a, 'm>(
+    manifest: &'m Manifest,
+    named: &impl Fn(&str) -> Option<&'a [u8]>,
+) -> Result<(&'a [u8], &'m str)> {
+    let mut regions = manifest
+        .regions
+        .iter()
+        .filter(|region| region.name == "DeviceTree");
+    let region = regions.next().ok_or(refuse!(
+        "selected bundle lacks its prepared DeviceTree region"
+    ))?;
+    if regions.next().is_some() {
+        return Err(refuse!(
+            "selected bundle repeats its prepared DeviceTree region"
+        ));
+    }
+    let file =
+        named(&region.file).ok_or(refuse!("verified prepared DeviceTree file disappeared"))?;
+    let start = usize::try_from(region.file_offset)
+        .map_err(|_| refuse!("prepared ADT offset overflows"))?;
+    let size =
+        usize::try_from(region.bytes).map_err(|_| refuse!("prepared ADT length overflows"))?;
+    let end = start
+        .checked_add(size)
+        .ok_or(refuse!("prepared ADT range overflows"))?;
+    let prepared = file
+        .get(start..end)
+        .ok_or(refuse!("prepared ADT range is outside verified file"))?;
+    Ok((prepared, &region.sha256))
+}
+
+/// The prepared guest roster for early executor reservation. Verify the two
+/// exact tree inputs here; full bundle verification remains mandatory on load.
+pub fn processor_count<'a>(
+    manifest: &Manifest,
+    named: &impl Fn(&str) -> Option<&'a [u8]>,
+) -> Result<usize> {
+    let boot_cpu = manifest.boot_cpu.as_ref().ok_or(refuse!(
+        "selected Apple bundle requires boot_cpu provenance; reprepare with schema4"
+    ))?;
+    let (original, _) = original_bytes(manifest, named)?;
+    let (prepared, expected) = prepared_bytes(manifest, named)?;
+    let actual: [u8; 32] = Sha256::digest(prepared).into();
+    if actual != digest(expected)? {
+        return Err(refuse!(
+            "prepared DeviceTree differs from its verified region identity"
+        ));
+    }
+    let original = DeviceTree::parse(original)
+        .map_err(|error| refuse!("original source ADT: {error}", %error))?;
+    let prepared = DeviceTree::parse(prepared)
+        .map_err(|error| refuse!("prepared selected ADT: {error}", %error))?;
+    Ok(cpus::Prepared::verify(&original, &prepared, boot_cpu)?.count())
+}
+
 #[allow(
     dead_code,
     reason = "retained provenance getters also serve the parent Plan and owner join"
@@ -115,36 +207,7 @@ impl Intake {
                 return Err(refuse!("selected bundle repeats a file identity"));
             }
         }
-        let original_file = manifest
-            .files
-            .iter()
-            .find(|file| file.name == ORIGINAL_DEVICE_TREE_FILE)
-            .ok_or(refuse!(
-                "selected bundle lacks unchanged original-devicetree.adt; reprepare with schema4"
-            ))?;
-        if manifest
-            .regions
-            .iter()
-            .any(|region| region.file == ORIGINAL_DEVICE_TREE_FILE)
-            || manifest
-                .patches
-                .iter()
-                .any(|patch| patch.file == ORIGINAL_DEVICE_TREE_FILE)
-        {
-            return Err(refuse!(
-                "original DeviceTree metadata cannot be loaded or patched as guest RAM"
-            ));
-        }
-        let original = named(ORIGINAL_DEVICE_TREE_FILE)
-            .ok_or(refuse!("verified original DeviceTree source disappeared"))?;
-        let original_sha256: [u8; 32] = Sha256::digest(original).into();
-        if original.len() as u64 != original_file.bytes
-            || original_sha256 != digest(&original_file.sha256)?
-        {
-            return Err(refuse!(
-                "original DeviceTree differs from its verified whole-file identity"
-            ));
-        }
+        let (original, original_sha256) = original_bytes(manifest, named)?;
         let original_tree = DeviceTree::parse(original)
             .map_err(|error| refuse!("original source ADT: {error}", %error))?;
         let mut selected = None;
@@ -187,30 +250,7 @@ impl Intake {
         kept.try_reserve_exact(original.len())
             .map_err(|_| refuse!("original DeviceTree source allocation failed"))?;
         kept.extend_from_slice(original);
-        let mut regions = manifest
-            .regions
-            .iter()
-            .filter(|region| region.name == "DeviceTree");
-        let region = regions.next().ok_or(refuse!(
-            "selected bundle lacks its prepared DeviceTree region"
-        ))?;
-        if regions.next().is_some() {
-            return Err(refuse!(
-                "selected bundle repeats its prepared DeviceTree region"
-            ));
-        }
-        let file =
-            named(&region.file).ok_or(refuse!("verified prepared DeviceTree file disappeared"))?;
-        let start = usize::try_from(region.file_offset)
-            .map_err(|_| refuse!("prepared ADT offset overflows"))?;
-        let size =
-            usize::try_from(region.bytes).map_err(|_| refuse!("prepared ADT length overflows"))?;
-        let end = start
-            .checked_add(size)
-            .ok_or(refuse!("prepared ADT range overflows"))?;
-        let prepared = file
-            .get(start..end)
-            .ok_or(refuse!("prepared ADT range is outside verified file"))?;
+        let (prepared, _) = prepared_bytes(manifest, named)?;
         let prepared_tree = DeviceTree::parse(prepared)
             .map_err(|error| refuse!("prepared selected ADT: {error}", %error))?;
         let cpus = cpus::Prepared::verify(&original_tree, &prepared_tree, boot_cpu)?;
@@ -390,6 +430,34 @@ mod tests {
     }
     fn intake(json: &Value, original: &[u8], prepared: &[u8]) -> Result<Intake> {
         intake_raw(&serde_json::to_vec(json).unwrap(), original, prepared)
+    }
+
+    #[test]
+    fn early_count_checks_both_tree_identities_and_uses_the_prepared_roster() {
+        let original = tree(0, 0);
+        let prepared = tree(0x6000, 8);
+        let count = |spec: &Value, original: &[u8], prepared: &[u8]| {
+            let manifest = Manifest::parse(&serde_json::to_vec(spec).unwrap()).unwrap();
+            processor_count(&manifest, &|name| match name {
+                ORIGINAL_DEVICE_TREE_FILE => Some(original),
+                "devicetree.adt" => Some(prepared),
+                _ => None,
+            })
+        };
+        let full = fixture(&original, &prepared);
+        assert_eq!(count(&full, &original, &prepared), Ok(2));
+
+        let mut retained = DeviceTree::parse(&prepared).unwrap();
+        retained.node_mut("/cpus").unwrap().children.remove(0);
+        let retained = retained.serialize();
+        let projected = fixture(&original, &retained);
+        assert_eq!(count(&projected, &original, &retained), Ok(1));
+        assert!(count(&full, &original, &retained).is_err());
+        assert!(count(&projected, &prepared, &retained).is_err());
+
+        let mut mismatched = projected;
+        mismatched["boot_cpu"]["original_index"] = json!(0);
+        assert!(count(&mismatched, &original, &retained).is_err());
     }
 
     #[test]

@@ -412,6 +412,21 @@ pub(super) fn remove_bundles(record: &Record, stale: &[bundle::Bundle]) -> Resul
 
 /// Write `stela.cfg`, the startup choices and the entry for the record.
 pub(super) fn publish(record: &mut Record) -> Result<()> {
+    if record.bundles.iter().all(|bundle| bundle.processors == 0) {
+        let generation = record.generation();
+        for kept in &mut record.bundles {
+            if kept.build == record.build
+                && kept.generation() == generation
+                && let Some(processors) = bundle::recorded_processors(
+                    &kept.directory(&record.volume),
+                    &kept.manifest_sha256,
+                )
+            {
+                kept.processors = processors;
+                break;
+            }
+        }
+    }
     record.options = record.options_text()?;
     let choices = record.choices_text()?;
     let tool = record.esp.join(LOADER_PATH);

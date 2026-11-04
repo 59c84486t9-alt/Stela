@@ -97,8 +97,12 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         options: &options,
         native_processors,
     };
-    let processors = start_processors(boot, &mut host);
-    run_guest(boot, host, storage, processors)
+    #[cfg(feature = "diagnostics")]
+    if options.native_bootstrap_check || options.native_shared_check {
+        let _ = start_processors(boot, &mut host);
+        output::fatal("native processor diagnostic returned");
+    }
+    run_guest(boot, host, storage)
 }
 
 /// The part of the engine heap that holes cannot take from large requests.
@@ -253,8 +257,6 @@ struct OpenedHost {
     apic_hz: u64,
     /// The TSC origin every physical executor shares.
     tsc_base: u64,
-    /// Whether the BSP runs every PE.
-    serialized: bool,
     acpi: Option<&'static aml::HostAcpi>,
     /// The owned MMIO aperture, which the processor diagnostics check.
     #[cfg(feature = "diagnostics")]
@@ -311,7 +313,6 @@ fn open_host(
         owner: mut host_owner,
         apic_hz,
         tsc_base: native_tsc_base,
-        serialized,
     } = install_host(handoff, options, &ram);
     let Platform {
         acpi: host_acpi,
@@ -404,7 +405,6 @@ fn open_host(
         owner: host_owner,
         apic_hz,
         tsc_base: native_tsc_base,
-        serialized,
         acpi: host_acpi,
         #[cfg(feature = "diagnostics")]
         mmio: native_mmio,
@@ -561,7 +561,6 @@ fn start_processors(boot: Boot<'_>, host: &mut OpenedHost) -> Processors {
     } = boot;
     let OpenedHost {
         tsc_base: native_tsc_base,
-        serialized,
         ram: ref worker_ram,
         ..
     } = *host;
@@ -576,7 +575,6 @@ fn start_processors(boot: Boot<'_>, host: &mut OpenedHost) -> Processors {
             worker_ram,
             native_tsc_base,
             options.native_bootstrap_check,
-            options.runners(handoff.native_resources.cores as usize, serialized),
         )
     }
     .unwrap_or_else(|error| {
@@ -599,12 +597,71 @@ fn start_processors(boot: Boot<'_>, host: &mut OpenedHost) -> Processors {
 /// processors, place the board's devices over its RAM, publish its topology
 /// and run it until it stops. The assigned topology borrows the loaded
 /// source and the roster for the whole run.
-fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Processors) -> ! {
+fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
     let Boot {
         handoff,
         options,
         native_processors,
     } = boot;
+    let target = target(options.parallel);
+    let speculation = speculation::probe();
+    let boot_image::GuestImage {
+        entry,
+        x0,
+        read_only_region,
+        core_locks,
+        #[cfg_attr(not(feature = "nvk"), allow(unused_mut))]
+        mut hidden_devices,
+        live_tree: mut loaded_tree,
+        source: loaded_source,
+        boot_processor: bundle_boot_processor,
+        hidden_clpc,
+    } = boot_image::load(
+        &mut host.owner.host(),
+        handoff,
+        options,
+        host.built.as_deref(),
+        storage.nvram.take(),
+    );
+    let Modeled {
+        mut board,
+        boot_processor,
+        full_profile,
+        active_workers,
+    } = model_board(
+        boot,
+        loaded_tree.as_ref(),
+        bundle_boot_processor,
+        target,
+        speculation,
+    );
+    let topology_source = source_topology(
+        loaded_source.as_ref(),
+        loaded_tree.as_ref(),
+        board.as_ref(),
+        &full_profile,
+        active_workers,
+    );
+    if loaded_tree.is_some() {
+        crate::status::done("");
+    }
+    let Processors { executors, sender } = start_processors(boot, &mut host);
+    if executors.processors().len() + 1 != active_workers {
+        output::fatal("started physical worker count differs from the verified guest assignment");
+    }
+    output::arguments(format_args!(
+        "NATIVE ACTIVE workers={active_workers} parked=0 source_PEs={}\n",
+        full_profile.processors.len().max(1),
+    ));
+    if loaded_tree.is_some() {
+        crate::status::begin("Setting up the Mac's hardware");
+    }
+    let roster = topology::AssignedRoster::new(
+        native_processors.expect("validated native roster"),
+        &executors,
+        &host.owner,
+    )
+    .unwrap_or_else(|error| output::fatal(&error));
     let OpenedHost {
         owner: mut host_owner,
         apic_hz,
@@ -630,53 +687,13 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
         source,
         host_nor,
         nor_image,
-        nvram,
         sep_state,
         board_flash,
+        ..
     } = storage;
-    let Processors { executors, sender } = processors;
-    let mut roster = topology::AssignedRoster::new(
-        native_processors.expect("validated native roster"),
-        &executors,
-        &host_owner,
-    )
-    .unwrap_or_else(|error| output::fatal(&error));
     let mut bare = host_owner.host();
-    let target = target(options.parallel);
-    let speculation = speculation::probe();
-    let boot_image::GuestImage {
-        entry,
-        x0,
-        read_only_region,
-        core_locks,
-        #[cfg_attr(not(feature = "nvk"), allow(unused_mut))]
-        mut hidden_devices,
-        live_tree: mut loaded_tree,
-        source: loaded_source,
-        boot_processor: bundle_boot_processor,
-        hidden_clpc,
-    } = boot_image::load(&mut bare, handoff, options, built.as_deref(), nvram);
-    let Modeled {
-        mut board,
-        boot_processor,
-        full_profile,
-        active_workers,
-    } = model_board(
-        boot,
-        loaded_tree.as_ref(),
-        bundle_boot_processor,
-        target,
-        speculation,
-    );
-    let topology_source = source_topology(
-        loaded_source.as_ref(),
-        loaded_tree.as_ref(),
-        board.as_ref(),
-        &full_profile,
-        active_workers,
-    );
     #[cfg_attr(not(feature = "nvk"), allow(unused_mut))]
-    let mut assigned = assign(boot, &mut roster, topology_source.as_ref(), &full_profile);
+    let mut assigned = assign(boot, &roster, topology_source.as_ref(), &full_profile);
     #[cfg(feature = "nvk")]
     let gpu_gates = assigned
         .as_mut()
@@ -688,9 +705,9 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
             gates
         })
         .unwrap_or_default();
-    // SAFETY: all raw guest input copies have ended; AP executors are parked,
-    // and no guest/device DMA producer has entered. The same loader bytes are
-    // for every subsequent native CPU and synchronous device writer.
+    // SAFETY: all raw guest input copies have ended, AP executors are waiting
+    // for their guest contexts, and no guest/device DMA producer has entered.
+    // The same loader bytes are for every subsequent native CPU and synchronous device writer.
     let canonical_ram = unsafe {
         crate::native_smp::canonical::reserve_for_workers(
             handoff,
@@ -866,12 +883,10 @@ fn model_board(
     target: TargetCpu,
     speculation: Speculation,
 ) -> Modeled {
-    let Boot {
-        handoff, options, ..
-    } = boot;
+    let handoff = boot.handoff;
     let source_tree = loaded_tree.as_ref().map(|tree| tree.bytes());
     if source_tree.is_some() {
-        crate::status::begin("Setting up the Mac's hardware");
+        crate::status::begin("Checking the Mac's CPU topology");
     }
     let board = source_tree.map(|tree| {
         board::board(tree).unwrap_or_else(|error| {
@@ -908,20 +923,15 @@ fn model_board(
         Some(board) => board_profile(board, target, speculation),
         None => test_profile(target, speculation),
     };
-    let active_workers = crate::native_smp::topology::guest_assignment_count(
-        options.native_cores,
-        handoff.native_resources.cores as usize,
-        full_profile.processors.len().max(1),
-    )
-    .unwrap_or_else(|error| output::fatal(error));
-    if options.guest_pes.is_some_and(|pes| active_workers > pes) {
-        output::fatal("the Mac has more PEs than --guest-pes reserved executors for");
-    }
-    output::arguments(format_args!(
-        "NATIVE ACTIVE workers={active_workers} parked={} source_PEs={}\n",
-        handoff.native_resources.cores as usize - active_workers,
-        full_profile.processors.len().max(1),
-    ));
+    let active_workers = handoff.native_resources.cores as usize;
+    let source_pes = full_profile.processors.len().max(1);
+    let available = boot
+        .native_processors
+        .expect("validated native roster")
+        .physical_count as usize;
+    boot.options
+        .validate_native_cores(available, active_workers, source_pes)
+        .unwrap_or_else(|error| output::fatal(&error));
     Modeled {
         board,
         boot_processor,
@@ -1379,11 +1389,10 @@ fn boot_progress(loaded_source: Option<&bundle::source::Intake>) -> progress::Bo
     })
 }
 
-/// Select the host workers for the source board's topology, or the boot
-/// processor alone, and prepare the topology assigned to them.
+/// Assign the source board's projected PEs to the entire started roster.
 fn assign<'s>(
     boot: Boot<'_>,
-    roster: &'s mut topology::AssignedRoster<'_>,
+    roster: &'s topology::AssignedRoster<'_>,
     topology_source: Option<&'s topology::Source<'_>>,
     full_profile: &CpuProfile,
 ) -> Option<topology::Prepared<'s>> {
@@ -1392,19 +1401,10 @@ fn assign<'s>(
         native_processors,
         ..
     } = boot;
-    if let Some(source) = topology_source {
-        roster
-            .select_for(source, native_processors.expect("validated native roster"))
-            .unwrap_or_else(|error| output::fatal(&error));
-    } else {
-        roster
-            .select(&[0])
-            .unwrap_or_else(|error| output::fatal(&error));
-    }
     let mut assigned = topology_source.map(|source| {
         source
             .prepare_on(
-                &*roster,
+                roster,
                 full_profile.clone(),
                 native_processors.expect("validated native roster"),
             )
@@ -1855,22 +1855,15 @@ struct InstalledHost {
     apic_hz: u64,
     /// The TSC origin every physical executor shares.
     tsc_base: u64,
-    /// Whether the BSP runs every PE.
-    serialized: bool,
 }
 
 /// Install the boot processor's host state over `ram`, and run the bounded
 /// diagnostics that stop on it.
 fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) -> InstalledHost {
-    // Serialized, the BSP runs every PE and the workers no guest code.
-    let serialized = !(options.parallel
-        || options.native_rounds
-        || options.native_shared_check
-        || options.native_bootstrap_check);
     let cores = handoff.native_resources.cores as usize;
     let partition = crate::native_smp::resources::partition(
         cores,
-        options.runners(cores, serialized),
+        cores,
         0,
         handoff.code.bytes,
         handoff.pool.bytes,
@@ -1948,7 +1941,6 @@ fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) 
         owner: host_owner,
         apic_hz,
         tsc_base: native_tsc_base,
-        serialized,
     }
 }
 

@@ -156,6 +156,10 @@ impl Prepared {
         Ok(Self { cpus, processor })
     }
 
+    pub fn count(&self) -> usize {
+        self.cpus.len()
+    }
+
     pub fn processor(&self) -> usize {
         self.processor
     }

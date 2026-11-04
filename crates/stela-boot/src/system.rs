@@ -388,16 +388,18 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs> {
     } else {
         None
     };
-    let (source, mut files) = if system.preboot.is_some() {
+    let (source, mut files, bundle_pes) = if system.preboot.is_some() {
         drop(volume);
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), None)
     } else if let Some(directory) = system.bundle_directory.as_deref() {
         drop(volume);
-        (Vec::new(), crate::engine::bundle::read(directory)?)
+        let verify_topology = !(system.native_bootstrap_check || system.native_shared_check);
+        let bundle = crate::engine::bundle::read(directory, verify_topology)?;
+        (Vec::new(), bundle.files, bundle.processors)
     } else {
         let source = firmware::source(&mut volume)?;
         drop(volume);
-        (source, Vec::new())
+        (source, Vec::new(), None)
     };
     let inventory = match (
         system.restore_manifest_path.as_deref(),
@@ -472,17 +474,23 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs> {
             storage = storage::discover().ok();
         }
     }
-    Ok((source, files, storage, wifi_key))
+    Ok(Inputs {
+        source,
+        files,
+        bundle_pes,
+        storage,
+        wifi_key,
+    })
 }
 
-/// `source.bin`, the bundle files, the storage drivers' ranges and the
-/// Wi-Fi key file's bytes.
-type Inputs = (
-    Vec<u8>,
-    BundleFiles,
-    Option<stela_drivers::Handoff>,
-    Vec<u8>,
-);
+/// Loader-owned source files, verified bundle cardinality and host inputs.
+struct Inputs {
+    source: Vec<u8>,
+    files: BundleFiles,
+    bundle_pes: Option<usize>,
+    storage: Option<stela_drivers::Handoff>,
+    wifi_key: Vec<u8>,
+}
 
 /// `EFI_MEMORY_RUNTIME`: the region stays the firmware's after boot
 /// services, for its runtime services.
@@ -690,15 +698,21 @@ fn load(
     host_firmware: crate::host_firmware::Resources,
     snapshot: Snapshot,
 ) -> Result<core::convert::Infallible> {
-    let (source, bundle, storage, wifi_key) = inputs;
+    let Inputs {
+        source,
+        files: bundle,
+        bundle_pes,
+        storage,
+        wifi_key,
+    } = inputs;
     crate::status::begin("Setting up Stela's memory");
     let image = memory::prepare_image(&snapshot)?;
     let text = core::str::from_utf8(&options).map_err(|_| refuse!("stela.cfg is not UTF-8"))?;
     let system = System::parse(text).map_err(stela_boot_core::options::Error::message)?;
-    let (native_processors, cores) =
-        crate::native_smp::firmware::capture_assignment(system.native_cores)
-            .map_err(crate::native_smp::firmware::Error::message)?;
-    let mut memory = memory::reserve(&system, cores, &image.ram)?;
+    let (native_processors, available_cores) = crate::native_smp::firmware::capture_inventory()
+        .map_err(crate::native_smp::firmware::Error::message)?;
+    let cores = system.assigned_native_cores(available_cores, bundle_pes)?;
+    let mut memory = memory::reserve(cores, &image.ram)?;
     let tsc_hz = crate::firmware::tsc_hz();
     if !crate::cpu::INVARIANT_TSC.present() {
         output::arguments(format_args!(

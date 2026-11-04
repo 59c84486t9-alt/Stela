@@ -379,17 +379,13 @@ extern "efiapi" fn observe_ap(argument: *mut c_void) {
     }
 }
 
-/// Observe the assignable physical cores (`min(physical, MAX_CORES)`) even when
-/// no explicit assignment was given. The default assignment is that roster;
-/// --native-cores narrows ownership explicitly, never supplies invented PEs.
-pub(crate) fn capture_assignment(requested: Option<usize>) -> Result<(Region, usize), Error> {
-    let region = capture(requested.unwrap_or(1))?;
+/// Observe the complete physical inventory without assigning its workers.
+pub(crate) fn capture_inventory() -> Result<(Region, usize), Error> {
+    let region = capture(1)?;
     // SAFETY: capture just allocated and initialized this exact UEFI
     // allocation; before EBS its physical address is directly accessible.
     let physical = unsafe { Capture::from_raw(region.physical as *const u8, 0).physical_count };
-    let assigned =
-        topology::assignment_count(requested, physical as usize).map_err(|_| Error::CoreCount)?;
-    Ok((region, assigned))
+    Ok((region, physical as usize))
 }
 
 pub(crate) fn capture(requested: usize) -> Result<Region, Error> {

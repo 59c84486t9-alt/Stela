@@ -310,13 +310,60 @@ fn guest_pes_bound_the_executors_that_run_them() {
     ] {
         assert!(System::parse(text).is_err(), "{text}");
     }
-    let options = System::parse("--system --guest-pes 8").unwrap();
+    let options = System::parse(&format!("--system --preboot {DISK} --guest-pes 8")).unwrap();
     assert_eq!(options.guest_pes, Some(8));
     assert!(options.to_string().contains("--guest-pes 8"));
-    assert_eq!(options.runners(64, false), 8);
-    assert_eq!(options.runners(2, false), 2);
-    assert_eq!(options.runners(64, true), 1);
-    assert_eq!(System::parse("--system").unwrap().runners(64, false), 64);
+    assert_eq!(options.assigned_native_cores(64, None), Ok(8));
+    assert_eq!(options.assigned_native_cores(2, None), Ok(2));
+    assert_eq!(options.assigned_native_cores(64, Some(4)), Ok(4));
+}
+
+#[test]
+fn preboot_checks_the_live_count_before_starting_aps() {
+    let preboot = format!("--system --preboot {DISK} --guest-pes 8");
+    let options = System::parse(&preboot).unwrap();
+    assert_eq!(options.validate_native_cores(64, 8, 8), Ok(()));
+    assert_eq!(options.validate_native_cores(2, 2, 8), Ok(()));
+    assert!(options.validate_native_cores(64, 8, 6).is_err());
+    assert!(options.validate_native_cores(64, 8, 10).is_err());
+    assert!(options.validate_native_cores(2, 2, 10).is_err());
+    let options = System::parse(&format!("{preboot} --native-cores 4")).unwrap();
+    assert_eq!(options.validate_native_cores(64, 4, 8), Ok(()));
+    assert!(options.validate_native_cores(64, 4, 2).is_err());
+    let options = System::parse(&format!("{preboot} --serialized")).unwrap();
+    assert_eq!(options.validate_native_cores(64, 1, 10), Ok(()));
+}
+
+#[test]
+fn exact_roster_distinguishes_verified_disk_authored_and_diagnostic_sources() {
+    let assigned = |options: &str, available, prepared| {
+        System::parse(options)
+            .unwrap()
+            .assigned_native_cores(available, prepared)
+    };
+    let preboot = format!("--system --preboot {DISK}");
+    assert!(assigned(&preboot, 64, None).is_err());
+    assert_eq!(
+        assigned(&format!("{preboot} --native-cores 3"), 64, None),
+        Ok(3)
+    );
+    assert_eq!(
+        assigned(&format!("{preboot} --serialized"), 64, None),
+        Ok(1)
+    );
+    assert_eq!(assigned("--system", 64, None), Ok(1));
+    assert_eq!(assigned("--system", 64, Some(8)), Ok(8));
+    assert_eq!(assigned("--system --native-cores 3", 64, Some(8)), Ok(3));
+    assert!(assigned("--system --native-cores 9", 64, Some(8)).is_err());
+    assert!(assigned("--system --native-cores 3", 2, Some(8)).is_err());
+    assert!(assigned("--system --native-cores 3", 64, None).is_err());
+    assert_eq!(assigned("--system --serialized", 64, Some(8)), Ok(1));
+    assert!(assigned("--system --serialized --native-cores 4", 64, Some(8)).is_err());
+    assert_eq!(
+        assigned("--system --native-shared-check --native-cores 4", 64, None),
+        Ok(4)
+    );
+    assert!(assigned("--system --native-bootstrap-check", 64, None).is_err());
 }
 
 #[test]
