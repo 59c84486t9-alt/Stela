@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 20:58:53 -0500
+Subject: [PATCH] fix(nouveau): treat a completed job's timeout as a lost
+ interrupt
+
+---
+ drivers/gpu/drm/nouveau/nouveau_sched.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/drivers/gpu/drm/nouveau/nouveau_sched.c b/drivers/gpu/drm/nouveau/nouveau_sched.c
+index b3f02c490ecb6791c051d124407a03956f4517fa..c94ab7dc29e9fc5bc43542daaa8c3c7f37e84a1a 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_sched.c
++++ b/drivers/gpu/drm/nouveau/nouveau_sched.c
+@@ -369,8 +369,16 @@ nouveau_sched_timedout_job(struct drm_sched_job *sched_job)
+ {
+ 	struct drm_gpu_scheduler *sched = sched_job->sched;
+ 	struct nouveau_job *job = to_nouveau_job(sched_job);
++	struct dma_fence *done = sched_job->s_fence->parent;
+ 	enum drm_gpu_sched_stat stat = DRM_GPU_SCHED_STAT_RESET;
+ 
++	/* A job whose fence the channel has passed completed, though no
++	 * interrupt told: reading the fence signals it, and nothing hangs. */
++	if (done && nouveau_fence_done(to_nouveau_fence(done))) {
++		NV_PRINTK(warn, job->cli, "Job completed without its completion interrupt.\n");
++		return DRM_GPU_SCHED_STAT_NO_HANG;
++	}
++
+ 	drm_sched_stop(sched, sched_job);
+ 
+ 	if (job->ops->timeout)
