@@ -643,11 +643,9 @@ impl<'a> Store<'a> {
                 }
                 unproven -= 1;
                 let start = block.start as usize;
-                let input = held.inputs[start..start + usize::from(block.length)].to_vec();
+                let input = &held.inputs[start..start + usize::from(block.length)];
                 let pc = page + u64::from(block.offset);
-                let preparation = Arc::clone(&held.preparation);
-                let entry = Offer::compile(key, page, pc, context, input, preparation)
-                    .and_then(|offer| offer.prove());
+                let entry = Offer::prove_input(input, page, pc, context, &held.preparation);
                 match entry {
                     Some(entry) => {
                         count += 1;
