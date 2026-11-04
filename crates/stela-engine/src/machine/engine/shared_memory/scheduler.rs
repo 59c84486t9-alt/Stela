@@ -34,6 +34,25 @@ fn completing<H: Host, D: Devices>(
     step
 }
 
+fn complete_native_system<H: Host, D: Devices>(machine: &mut Machine<H, D>, word: u32) -> Step {
+    use super::super::{Synchronization, SystemOperation};
+    let operation = machine.decode_system_operation(word);
+    if matches!(
+        operation,
+        Some(SystemOperation::Synchronization(
+            Synchronization::DataCompletion { .. } | Synchronization::StoreBypassBarrier { .. }
+        ))
+    ) {
+        // All native owners are held after their CPU fences. Fence this
+        // PE and BSP helper copyout before the instruction completes.
+        // External Device/DMA/MCC completion remains unchecked.
+        machine.host.memory_barrier();
+    }
+    completing(machine, |machine| {
+        machine.complete_system_instruction(word, operation)
+    })
+}
+
 impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     /// Publish the assigned physical owners before the first native round.
     pub fn initialize_native_transport(&mut self, owners: Vec<publication::WorkerOwner>) {
@@ -858,30 +877,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             ) => Ok(()),
             Ok(ExitKind::System) => {
                 self.statistics.system_exits += 1;
-                use super::super::{Synchronization, SystemOperation};
-                if stela_compiler::block::decode_system_mode_instruction(
-                    stela_compiler::GuestAddress(self.cpu.pc),
-                    settlement.terminal,
-                )
-                .is_ok_and(|instruction| {
-                    instruction.is_some_and(|instruction| {
-                        matches!(
-                            instruction.operation,
-                            SystemOperation::Synchronization(
-                                Synchronization::DataCompletion { .. }
-                                    | Synchronization::StoreBypassBarrier { .. }
-                            )
-                        )
-                    })
-                }) {
-                    // All native owners are held after their CPU
-                    // fences; fence this PE and BSP helper copyout as well.
-                    // External Device/DMA/MCC completion remains unchecked.
-                    self.host.memory_barrier();
-                }
-                completing(self, |machine| {
-                    machine.system_instruction(settlement.terminal)
-                })
+                complete_native_system(self, settlement.terminal)
             }
             Ok(ExitKind::FloatingPoint) => {
                 let Some(Ok(operation)) =
@@ -919,6 +915,34 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_completion_reuses_decode_without_changing_fences_or_retirement() {
+        const DSB_SY: u32 = 0xd503_3f9f;
+        const SSBB: u32 = 0xd503_309f;
+        const ISB: u32 = 0xd503_3fdf;
+        let mut machine = crate::machine::engine::tests::machine(&[]);
+
+        for (word, barriers) in [(DSB_SY, 1), (DSB_SY, 2), (SSBB, 3), (ISB, 3)] {
+            let (pc, retired) = (machine.cpu.pc, machine.cpu.retired);
+            complete_native_system(&mut machine, word).unwrap();
+            assert_eq!(machine.host.memory_barriers, barriers);
+            assert_eq!((machine.cpu.pc, machine.cpu.retired), (pc + 4, retired + 1));
+        }
+
+        // The barrier is warm in the decode cache. An invalid source PC
+        // must still refuse without issuing a fence or retiring the word.
+        let retired = machine.cpu.retired;
+        for pc in [machine.cpu.pc + 1, u64::MAX - 3] {
+            machine.cpu.pc = pc;
+            assert!(matches!(
+                complete_native_system(&mut machine, DSB_SY),
+                Err(Stop::Unsupported(_))
+            ));
+            assert_eq!(machine.host.memory_barriers, 3);
+            assert_eq!((machine.cpu.pc, machine.cpu.retired), (pc, retired));
+        }
+    }
     #[test]
     fn explicit_fault_access_overrides_original_atomic_or_write_intent() {
         use crate::memory::{backing::AccessKind, domain::DataOperation};
@@ -965,7 +989,7 @@ mod tests {
         );
         const CLREX: u32 = 0xd503305f;
         assert!(matches!(
-            completing(&mut machine, |machine| machine.system_instruction(CLREX)),
+            complete_native_system(&mut machine, CLREX),
             Err(Stop::Unsupported(_))
         ));
         assert_eq!(
