@@ -354,6 +354,24 @@ fn emit_selected(
             cursor += 2;
             continue;
         }
+        if pinned
+            && !code.constant_time()
+            && matches!(
+                instructions[cursor].operation,
+                Operation::AddSubCarry { flags: true, .. }
+            )
+            && let Some(count) = super::pinned::emit_carry_run(
+                code,
+                &mut block.source_map,
+                &instructions[cursor..],
+                held.rax == super::Rax::Nzcv,
+            )
+        {
+            code.set_instruction(block.source_map.len() - 1);
+            after.rax = super::Rax::Nzcv;
+            cursor += count;
+            continue;
+        }
         // Pure spans do not cross a guest fault or a native observer.
         // Flush their frame values before resuming the ordinary pinned path.
         if pinned && !code.constant_time() && cursor >= next_pinned_span {
