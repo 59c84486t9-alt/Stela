@@ -3,7 +3,7 @@
 use super::memory_recipe::{
     self, Kind as MemoryKind, Recipe as MemoryRecipe, Segment as MemorySegment,
 };
-use crate::x86_64::asm::{Code, Gpr};
+use crate::x86_64::asm::{Code, Gpr, Mem};
 use alloc::vec;
 use alloc::vec::Vec;
 mod allocation;
@@ -444,9 +444,37 @@ impl Emitter<'_> {
         let cached_base = self.cached(base);
         let live = self.prepare_access(recipe.clobbers(), &[data]);
         let start = self.output.code.len();
-        self.access_address(base, displacement, &raw, &recipe, cached_base);
+        let direct = cached_base
+            .filter(|_| {
+                !self.fault_table
+                    && self.range_checks.is_none()
+                    && !self.checks.guest_range
+                    && !self.checks.alignment
+                    && !self.checks.checks_every_access()
+                    && base != Register::Sp
+                    && mode == AddressMode::Offset
+            })
+            .map(|host| Mem::base(host.gpr(), displacement));
+        if direct.is_some() {
+            // Settlement may drop the cached mapping, but its MOVs leave
+            // the base register intact until the original load uses it.
+            self.output.stats.address_cache_hits += 1;
+        } else {
+            self.access_address(base, displacement, &raw, &recipe, cached_base);
+        }
         for segment in recipe.body() {
-            self.emit_recipe_segment(&raw, segment);
+            if let (
+                Some(address),
+                MemoryTransfer::Load { signed, width },
+                MemoryKind::Load { element: 0, host },
+            ) = (direct, transfer, segment.kind)
+            {
+                self.emit(|code| {
+                    memory_recipe::scalar_load(code, bytes, signed, width, address, host);
+                });
+            } else {
+                self.emit_recipe_segment(&raw, segment);
+            }
         }
         self.finish_access(start, live, &[data]);
         self.retain_clean_result(data, HostGpr::Rcx);

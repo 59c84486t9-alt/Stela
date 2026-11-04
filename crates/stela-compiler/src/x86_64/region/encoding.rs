@@ -27,7 +27,7 @@ impl HostGpr {
         1u16 << self as u8
     }
     /// The encoder's register.
-    const fn gpr(self) -> Gpr {
+    pub(super) const fn gpr(self) -> Gpr {
         crate::x86_64::simd::encode::gpr(self as u8)
     }
 }

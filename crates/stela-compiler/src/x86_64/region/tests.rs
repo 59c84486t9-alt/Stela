@@ -887,6 +887,55 @@ fn doubleword_loads_stay_resident_and_pass_the_cost_gate() {
 }
 
 #[test]
+fn cached_scalar_load_folds_the_displacement_into_the_access() {
+    let load = |pc, data, base, displacement| {
+        instruction(
+            pc,
+            Operation::Memory {
+                transfer: MemoryTransfer::Load {
+                    signed: false,
+                    width: Width::X64,
+                },
+                bytes: DOUBLEWORD_LOAD_BYTES,
+                data,
+                base,
+                displacement,
+                mode: AddressMode::Offset,
+            },
+        )
+    };
+    for (displacement, access) in [
+        (0, &[0x48, 0x8b, 0x09][..]),
+        (127, &[0x48, 0x8b, 0x49, 0x7f]),
+        (-128, &[0x48, 0x8b, 0x49, 0x80]),
+        (128, &[0x48, 0x8b, 0x89, 0x80, 0, 0, 0]),
+        (-129, &[0x48, 0x8b, 0x89, 0x7f, 0xff, 0xff, 0xff]),
+        (32760, &[0x48, 0x8b, 0x89, 0xf8, 0x7f, 0, 0]),
+    ] {
+        for destination in [Register::X(8), Register::X(9)] {
+            let instructions = [
+                load(0, Register::X(8), Register::X(0), 0),
+                load(1, destination, Register::X(8), displacement),
+                instruction(2, add(destination, destination)),
+            ];
+            let ordinary = emit_clean_load_prefix(&instructions, true, None).unwrap();
+            assert_eq!(ordinary.stats.address_cache_hits, 1);
+            let row = &ordinary.code[ordinary.source_map[1].1..ordinary.source_map[2].1];
+            assert!(row.starts_with(access));
+            assert!(row[access.len()..].starts_with(&[0x48, 0x89, 0x8f]));
+            let precise = emit_clean_load_prefix_with(
+                &instructions,
+                crate::x86_64::MemoryChecks::DEFAULT,
+                true,
+                None,
+            )
+            .unwrap();
+            assert!(precise.code[precise.source_map[1].1..].starts_with(&[0x48, 0x8d]));
+        }
+    }
+}
+
+#[test]
 fn repeated_read_only_inputs_are_cached_without_architectural_writes() {
     let operation = |destination| Operation::AddSubRegister {
         width: Width::X64,

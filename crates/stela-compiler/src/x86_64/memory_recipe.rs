@@ -228,6 +228,29 @@ pub(super) fn address(
         mask(Gpr::Rax) | mask(Gpr::Rcx),
     );
 }
+pub(super) fn scalar_load(
+    code: &mut Code,
+    bytes: u8,
+    signed: bool,
+    width: Width,
+    source: Mem,
+    host: Gpr,
+) {
+    let size = Size::of(width == Width::X64);
+    code.asm().guest_access(|asm| match (bytes, signed) {
+        (1, false) => asm.movzx(size, host, Size::Byte, source),
+        (2, false) => asm.movzx(size, host, Size::Word, source),
+        (1, true) => asm.movsx(size, host, Size::Byte, source),
+        (2, true) => asm.movsx(size, host, Size::Word, source),
+        (4, true) => {
+            debug_assert!(width == Width::X64);
+            asm.movsxd(host, source);
+        }
+        (4 | 8, false) => asm.mov_load(size, host, source),
+        _ => unreachable!("decoder validates scalar memory size"),
+    });
+}
+
 pub(super) fn scalar(
     code: &mut Code,
     checks: MemoryChecks,
@@ -273,7 +296,6 @@ pub(super) fn scalar(
             mark(&mut recipe, code, checkpoint, Kind::Store, 0);
         }
         MemoryTransfer::Load { signed, width } => {
-            let size = Size::of(width == Width::X64);
             let source = if place.is_some() {
                 Mem::base(at, start)
             } else {
@@ -291,21 +313,7 @@ pub(super) fn scalar(
             };
             let host = code.host(data).unwrap_or(scratch);
             let checkpoint = code.checkpoint();
-            {
-                let mut asm = code.asm();
-                asm.guest_access(|asm| match (bytes, signed) {
-                    (1, false) => asm.movzx(size, host, Size::Byte, source),
-                    (2, false) => asm.movzx(size, host, Size::Word, source),
-                    (1, true) => asm.movsx(size, host, Size::Byte, source),
-                    (2, true) => asm.movsx(size, host, Size::Word, source),
-                    (4, true) => {
-                        debug_assert!(width == Width::X64);
-                        asm.movsxd(host, source);
-                    }
-                    (4 | 8, false) => asm.mov_load(size, host, source),
-                    _ => unreachable!("decoder validates scalar memory size"),
-                });
-            }
+            scalar_load(code, bytes, signed, width, source, host);
             mark(
                 &mut recipe,
                 code,
