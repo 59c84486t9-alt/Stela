@@ -10,6 +10,9 @@
  * refuses its calls as AIR's. */
 bool stela_air_defined_function(LLVMValueRef fn);
 
+/* Whether module has a direct call to one of its defined AIR functions. */
+bool stela_air_has_defined_calls(LLVMModuleRef module);
+
 /* Links modules into m's, after checking each is AIR compiled as m's was,
  * so one profile translates them, and specializing each with its own
  * function constant values. m's own are specialized first, since linking

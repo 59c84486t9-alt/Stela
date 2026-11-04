@@ -2716,8 +2716,11 @@ inspect(const void *bitcode, size_t size, const struct stela_air_constants *cons
       fail(&m, STELA_AIR_TARGET, "unsupported target/globals/inline assembly");
       goto done;
    }
-   if (!stela_air_metadata_layout(&m) || !stela_air_metadata_validate(&m) ||
-       !stela_air_inline_calls(&m, NULL, 0, 0))
+   if (!stela_air_metadata_layout(&m) || !stela_air_metadata_validate(&m))
+      goto done;
+   struct stela_air_constructed_constants prepared;
+   bool ready = constants && stela_air_prepare_constants(&m, constants, &prepared);
+   if (!stela_air_inline_calls(&m, NULL, 0, 0))
       goto done;
    if (!stela_air_metadata_target(&m, target)) {
       fail(&m, STELA_AIR_TARGET, "AIR version and target triple disagree");
@@ -2727,7 +2730,7 @@ inspect(const void *bitcode, size_t size, const struct stela_air_constants *cons
    unsigned constant_count;
    if (!stela_air_metadata_function_constants(&m, function_constants, NULL, &constant_count) ||
        (constants && (!stela_air_specialize_constants(&m, constants->values, constants->count) ||
-                      !stela_air_construct_constants(&m))))
+                      !stela_air_construct_prepared_constants(&m, ready ? &prepared : NULL))))
       goto done;
    struct stela_air_inspection info = {
       .target = target, .target_bytes = strlen(target), .air_minor = m.air_minor,

@@ -173,6 +173,9 @@ static const char *derived = DERIVED("%x = shl nsw i32 %w, 1\n");
 static const char *converted = DERIVED("%f = call float @air.convert.f.f32.s.i32(i32 %w)\n"
                                        "%d = fmul fast float %f, 2.000000e+00\n"
                                        "%x = call i32 @air.convert.s.i32.f.f32(float %d)\n");
+/* A constructor whose helper needs the ordinary inlining path. */
+static const char *derived_with_helper = DERIVED("%x = call i32 @twice(i32 %w)\n")
+   "define internal i32 @twice(i32 %w) {\n%x = shl nsw i32 %w, 1\nret i32 %x\n}\n";
 /* A constructor that calls an AIR function, which no constant folds. */
 static const char *called = DERIVED("%x = call i32 @air.unknown(i32 %w)\n");
 
@@ -1206,6 +1209,11 @@ derived_constants_are_constructed_from_their_function_constants(void)
    stela_metal_release(shader);
 
    shader = compile(converted, "derived", &specialization, &error);
+   assert(shader && stores_constant(shader, 10));
+   stela_metal_release(shader);
+
+   assert(reflect_specialized(derived_with_helper, "derived", values, 1, &reflection, &error));
+   shader = compile(derived_with_helper, "derived", &specialization, &error);
    assert(shader && stores_constant(shader, 10));
    stela_metal_release(shader);
 

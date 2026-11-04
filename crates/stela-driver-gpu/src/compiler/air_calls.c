@@ -124,6 +124,16 @@ called(LLVMValueRef fn)
    return false;
 }
 
+bool
+stela_air_has_defined_calls(LLVMModuleRef module)
+{
+   for (LLVMValueRef fn = LLVMGetFirstFunction(module); fn; fn = LLVMGetNextFunction(fn)) {
+      if (stela_air_defined_function(fn) && called(fn))
+         return true;
+   }
+   return false;
+}
+
 static unsigned
 attribute(const char *name)
 {
