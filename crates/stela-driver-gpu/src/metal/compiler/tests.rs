@@ -6,7 +6,10 @@ use crate::metal::{
         IndexType, TessellationControlPointIndexType, TessellationFactorStepFunction,
         TessellationPartitionMode, Winding,
     },
-    library::tests::{container, fixture},
+    library::{
+        Header, Library,
+        tests::{container, fixture},
+    },
     nvidia::{CHIPS, fixture::nvk},
     shader::{LinkedFunction, Linking, Patch, PatchDomain},
     vertex::{STRIDE_DYNAMIC, StageInputDescriptor, VertexDescriptor},

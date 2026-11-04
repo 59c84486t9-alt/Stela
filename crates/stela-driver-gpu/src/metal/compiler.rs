@@ -22,6 +22,7 @@
 //! call.
 mod bindings;
 pub mod ffi;
+mod library_cache;
 #[cfg(feature = "metal-linked")]
 mod linked;
 #[cfg(test)]
@@ -31,7 +32,7 @@ use super::{
     abi::{DataType, FunctionType, IndexType, TessellationControlPointIndexType, TextureType},
     capabilities::ShaderFeatures,
     error::{Error, Result, ensure, require},
-    library::{Air, Header, Library},
+    library::Air,
     reflection::Binding,
     shader::{
         Access, AttributeUse, BufferUse, ColorOutput, CompiledShader, Compiler, DeclaredAttribute,
@@ -55,6 +56,8 @@ use core::{
     ptr::{self, NonNull},
     slice, str,
 };
+
+use library_cache::{LoadedLibrary, Selected};
 
 /// The constructs the AIR frontend lowers completely (`metal/README.md`).
 const FEATURES: ShaderFeatures = ShaderFeatures::COMPUTE
@@ -220,7 +223,7 @@ pub struct AirCompiler {
     service: Service,
     target: ffi::Target,
     /// MTLB libraries by id; ids are never reused.
-    libraries: BTreeMap<u64, Vec<u8>>,
+    libraries: BTreeMap<u64, LoadedLibrary>,
     next_library: u64,
     refusal: Option<Refusal>,
 }
@@ -280,10 +283,10 @@ impl Compiler for AirCompiler {
     }
 
     fn add_library(&mut self, data: Vec<u8>) -> Result<u64> {
-        Library::parse(&data).map_err(|_| Error::Invalid("Metal library"))?;
+        let loaded = LoadedLibrary::new(data)?;
         let id = self.next_library;
         self.next_library += 1;
-        self.libraries.insert(id, data);
+        self.libraries.insert(id, loaded);
         Ok(id)
     }
 
@@ -349,8 +352,8 @@ impl Compiler for AirCompiler {
         let sources: Vec<_> = selected
             .iter()
             .map(|selected| ffi::StitchSource {
-                bitcode: selected.air.bitcode.as_ptr().cast(),
-                size: selected.air.bitcode.len(),
+                bitcode: selected.bitcode.as_ptr().cast(),
+                size: selected.bitcode.len(),
                 name: selected.entry.as_ptr(),
             })
             .collect();
@@ -425,7 +428,7 @@ impl Compiler for AirCompiler {
     fn library_data(&self, library: u64) -> Result<&[u8]> {
         self.libraries
             .get(&library)
-            .map(Vec::as_slice)
+            .map(LoadedLibrary::bytes)
             .ok_or(Error::Invalid("unknown library"))
     }
 
@@ -463,7 +466,7 @@ impl Compiler for AirCompiler {
         let selected = select(&self.libraries, library, entry)?;
         let mut bindings = ffi::Bindings::zeroed();
         let mut error = ffi::AirError::NONE;
-        let air = selected.air.bitcode;
+        let air = selected.bitcode;
         let values = constant_values(&specialization.constants);
         let count = u32::try_from(values.len()).map_err(|_| MALFORMED)?;
         // SAFETY: the AIR, entry and values outlive the call, which writes
@@ -496,7 +499,7 @@ impl Compiler for AirCompiler {
         let linked = linked_modules(&self.libraries, &specialization.linking, own)?;
         let mut states = Vec::new();
         for bitcode in
-            core::iter::once(selected.air.bitcode).chain(linked.iter().map(|module| module.bitcode))
+            core::iter::once(selected.bitcode).chain(linked.iter().map(|module| module.bitcode))
         {
             let mut listed = [0; ffi::SAMPLER_STATES];
             let mut count = 0;
@@ -676,7 +679,7 @@ impl AirCompiler {
             samplers: samplers.as_ptr(),
         };
         let mut error = ffi::AirError::NONE;
-        let air = selected.air.bitcode;
+        let air = selected.bitcode;
         // SAFETY: the AIR, entry, target and specialization, with the arrays,
         // identifiers, values, layouts, modules and names it points to,
         // outlive the call, which writes only the error.
@@ -822,12 +825,12 @@ fn same_values(a: Option<&[(u32, Vec<u8>)]>, b: Option<&[(u32, Vec<u8>)]>) -> bo
 /// digest and values: each once, by digest. A module links with one set of
 /// values; a dynamic library's takes those of a function linked from it.
 fn linked_modules<'a>(
-    libraries: &'a BTreeMap<u64, Vec<u8>>,
+    libraries: &'a BTreeMap<u64, LoadedLibrary>,
     linking: &'a Linking,
     own: ([u8; 32], &'a [(u32, Vec<u8>)]),
 ) -> Result<Vec<LinkedModule<'a>>> {
     let mut modules: Vec<LinkedModule<'a>> = Vec::new();
-    let mut add = |digest: [u8; 32], air: Air<'a>, constants| {
+    let mut add = |digest: [u8; 32], bitcode: &'a [u8], constants| {
         if digest == own.0 {
             return require(
                 same_values(Some(own.1), constants),
@@ -844,7 +847,7 @@ fn linked_modules<'a>(
             }
             None => modules.push(LinkedModule {
                 digest,
-                bitcode: air.bitcode,
+                bitcode,
                 constants,
             }),
         }
@@ -853,55 +856,31 @@ fn linked_modules<'a>(
     for function in linking.functions.iter().chain(&linking.private_functions) {
         let selected = select(libraries, function.library, &function.entry)?;
         let constants = Some(function.constants.as_slice());
-        add(selected.slice_hash, selected.air, constants)?;
+        add(selected.slice_hash, selected.bitcode, constants)?;
     }
-    let invalid = |_| Error::Invalid("Metal library");
     for library in &linking.libraries {
-        let data = libraries
+        let library = libraries
             .get(library)
             .ok_or(Error::Invalid("unknown library"))?;
-        let parsed = Library::parse(data).map_err(invalid)?;
-        ensure(
-            parsed.header.kind == Header::DYNAMIC,
-            "a preloaded library that is not dynamic",
-        )?;
-        for function in parsed.functions() {
-            add(*function.digest, function.air().map_err(invalid)?, None)?;
+        ensure(library.dynamic, "a preloaded library that is not dynamic")?;
+        for module in library.modules() {
+            let (digest, bitcode) = module?;
+            add(digest, bitcode, None)?;
         }
     }
     Ok(modules)
 }
 
-/// A library function selected for the service.
-struct Selected<'a> {
-    air: Air<'a>,
-    name: &'a str,
-    entry: CString,
-    slice_hash: [u8; 32],
-}
-
 /// Selects `entry` of `library`.
 fn select<'a>(
-    libraries: &'a BTreeMap<u64, Vec<u8>>,
+    libraries: &'a BTreeMap<u64, LoadedLibrary>,
     library: u64,
     entry: &str,
 ) -> Result<Selected<'a>> {
-    let data = libraries
+    libraries
         .get(&library)
-        .ok_or(Error::Invalid("unknown library"))?;
-    let invalid = |_| Error::Invalid("Metal library");
-    let parsed = Library::parse(data).map_err(invalid)?;
-    let function = parsed
-        .functions()
-        .iter()
-        .find(|function| function.name == entry)
-        .ok_or(Error::Invalid("no function of that name"))?;
-    Ok(Selected {
-        air: function.air().map_err(invalid)?,
-        name: function.name,
-        entry: CString::new(function.name).map_err(|_| Error::Invalid("function name"))?,
-        slice_hash: *function.digest,
-    })
+        .ok_or(Error::Invalid("unknown library"))?
+        .select(entry)
 }
 
 impl Selected<'_> {
@@ -916,7 +895,7 @@ impl Selected<'_> {
     ) -> Result<(Reflection, Provenance)> {
         let mut reflection = Box::new(ffi::Reflection::ZERO);
         let mut error = ffi::AirError::NONE;
-        let air = self.air.bitcode;
+        let air = self.bitcode;
         let values = specialization.map(|known| constant_values(&known.constants));
         let (values, count) = match &values {
             Some(values) => (
