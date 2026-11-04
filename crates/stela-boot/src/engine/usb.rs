@@ -177,14 +177,18 @@ impl HostUsb {
         let firmware = HandoffProvider::new(self.firmware.as_deref());
         for host in &mut self.hosts {
             let mut changes = {
-                // SAFETY: the loader root `storage::open` captured maps the
-                // controller and DMA pages used by both readiness and polling.
                 // The software attachment timer is owned by this HostUsb.
                 // Before it or the regular timer is due, a busy driver can
                 // leave topology work queued for another service turn.
                 let root = if timed || host.attachment_due() {
-                    Some(unsafe { RestoreRoot::enter(self.root) })
+                    // SAFETY: the loader root captured by `storage::open`
+                    // keeps the engine window and maps the controller and DMA pages.
+                    // This service runs with the processor's pinned record active.
+                    let root = unsafe { RestoreRoot::enter(self.root) };
+                    Some(root)
                 } else {
+                    // SAFETY: the same root and active pinned record apply here.
+                    // A busy owner leaves the driver state untouched.
                     unsafe { RestoreRoot::try_enter(self.root) }
                 };
                 let Some(_root) = root else {
