@@ -649,6 +649,43 @@ mod resident {
     }
 
     #[test]
+    fn ordinary_address_pair_respects_standalone_entry_and_truncated_source() -> Result<()> {
+        const ADRP: u32 = 0xb000_0000; // adrp x0, BASE+0x1000
+        const ADD: u32 = 0x9100_2000; // add x0, x0, #8
+        let cache = tempfile::tempdir()?;
+        let add_pc = GuestAddress(BASE.0 + 4);
+        let mut runtime = ordinary(cache.path(), &[ADRP, ADD, RET_X30])?;
+        for (entry, value) in [(BASE, BASE.0 + 0x1008), (add_pc, 5)] {
+            let mut state = thread(u64::MAX - 2);
+            state.pc = entry;
+            let mut expected = state.registers.clone();
+            expected.x[0] = value;
+            // SAFETY: pure register instructions and RET to STOP.
+            let outcome = unsafe { runtime.run(&mut state, Some(STOP), 1)? };
+            assert_eq!(outcome.blocks_executed, 1);
+            assert_eq!(state.registers, expected);
+            assert_eq!(state.pc, STOP);
+        }
+        let map = &runtime.loaded_manifest(BASE).unwrap().source_map;
+        assert_eq!(map[..2], [(BASE, 0), (add_pc, 10)]);
+        assert_eq!(
+            runtime.loaded_manifest(add_pc).unwrap().source_map[0],
+            (add_pc, 0)
+        );
+
+        let mut truncated = ordinary(cache.path(), &[ADRP])?;
+        let mut state = thread(100);
+        let mut expected = state.registers.clone();
+        expected.x[0] = BASE.0 + 0x1000;
+        // SAFETY: the truncated input contains only ADRP.
+        let outcome = unsafe { truncated.run(&mut state, Some(add_pc), 1)? };
+        assert_eq!(outcome.blocks_executed, 1);
+        assert_eq!(state.registers, expected);
+        assert_eq!(state.pc, add_pc);
+        Ok(())
+    }
+
+    #[test]
     fn ordinary_direct_ram_loop_keeps_budget_state_and_cached_source_map() -> Result<()> {
         const BODY: [u32; 7] = [
             0xf940_0022, // ldr x2, [x1]

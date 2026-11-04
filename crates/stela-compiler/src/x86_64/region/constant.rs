@@ -59,6 +59,32 @@ impl ConstantRegisters {
         value.map(|value| ConstantWrite { destination, value })
     }
 
+    pub(super) fn fold_address_pair(
+        &mut self,
+        first: &Operation,
+        second: &Operation,
+    ) -> Option<ConstantWrite> {
+        let Operation::PcRelative(address) = *first else {
+            return None;
+        };
+        let Operation::AddSub {
+            width: Width::X64,
+            subtract: false,
+            flags: false,
+            destination: destination @ Register::X(_),
+            source,
+            ..
+        } = *second
+        else {
+            return None;
+        };
+        if destination != address.destination || source != destination {
+            return None;
+        }
+        self.step(first);
+        self.step(second)
+    }
+
     /// Observe exactly one guest instruction. Returned writes can replace only
     /// that instruction's value computation; they never authorize removing its
     /// native commit, source-map entry, or observable intermediate guest value.

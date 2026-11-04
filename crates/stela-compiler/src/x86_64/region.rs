@@ -698,6 +698,33 @@ impl Emitter<'_> {
         self.instruction_with_constant(instruction, None)
     }
 
+    fn emit_constant_write(
+        &mut self,
+        write: constant::ConstantWrite,
+        continuation: Option<GuestAddress>,
+    ) {
+        let guest = slot(write.destination).expect("known constant has a real destination");
+        if next_use(self.effects, self.current + 1, guest) != usize::MAX {
+            let index = self.allocate(guest);
+            self.emit(|code| encoding::immediate(code, POOL[index], write.value, Width::X64));
+            self.locations[guest] = Location::Host(POOL[index]);
+            self.resident[index] = Some(Resident { guest, dirty: true });
+            self.output.stats.commits += 1;
+            if let Some(pc) = continuation {
+                // A resident address needs no separate frame store here.
+                self.output.source_map.push((pc, self.output.code.len()));
+                self.emit(encoding::nop);
+            }
+        } else {
+            self.emit(|code| encoding::immediate(code, RESULT, write.value, Width::X64));
+            if let Some(pc) = continuation {
+                self.output.source_map.push((pc, self.output.code.len()));
+            }
+            self.commit(write.destination, Width::X64);
+        }
+        self.output.stats.constant_writes += 1;
+    }
+
     fn instruction_with_constant(
         &mut self,
         instruction: &Instruction,
@@ -709,18 +736,7 @@ impl Emitter<'_> {
             .source_map
             .push((instruction.pc, self.output.code.len()));
         if let Some(write) = constant {
-            let guest = slot(write.destination).expect("known constant has a real destination");
-            if next_use(self.effects, self.current + 1, guest) != usize::MAX {
-                let index = self.allocate(guest);
-                self.emit(|code| encoding::immediate(code, POOL[index], write.value, Width::X64));
-                self.locations[guest] = Location::Host(POOL[index]);
-                self.resident[index] = Some(Resident { guest, dirty: true });
-                self.output.stats.commits += 1;
-            } else {
-                self.emit(|code| encoding::immediate(code, RESULT, write.value, Width::X64));
-                self.commit(write.destination, Width::X64);
-            }
-            self.output.stats.constant_writes += 1;
+            self.emit_constant_write(write, None);
             return Ok(());
         }
         match instruction.operation {
@@ -1235,8 +1251,31 @@ fn emit_prefix_selected<'a>(
         fault_table,
         full: false,
     };
-    for instruction in instructions.iter().take(consumed) {
-        emitter.instruction(instruction)?;
+    let span = &instructions[..consumed];
+    while let Some(instruction) = span.get(emitter.current) {
+        // Hosted native blocks enter at a guest block head and run this
+        // non-faulting pair as a unit. A compile starting at the ADD, or
+        // ending before it, still sees only its original instruction.
+        if clean_loads
+            && !fault_table
+            && matches!(instruction.operation, Operation::PcRelative(_))
+            && let Some(second) = span.get(emitter.current + 1)
+            && let Some(write) = emitter
+                .constants
+                .fold_address_pair(&instruction.operation, &second.operation)
+        {
+            emitter.pinned_hosts = 0;
+            emitter.coalesced = None;
+            emitter
+                .output
+                .source_map
+                .push((instruction.pc, emitter.output.code.len()));
+            emitter.current += 1;
+            emitter.emit_constant_write(write, Some(second.pc));
+            emitter.output.stats.commits += 1;
+        } else {
+            emitter.instruction(instruction)?;
+        }
         emitter.current += 1;
     }
     for index in 0..POOL.len() {

@@ -19,6 +19,43 @@ fn add(destination: Register, source: Register) -> Operation {
         immediate: 1,
     }
 }
+
+#[test]
+fn address_pair_shares_one_literal_and_preserves_distinct_source_rows() {
+    let x0 = Register::X(0);
+    let instructions = [
+        instruction(
+            0,
+            Operation::PcRelative(crate::aarch64::pc_relative::Operand {
+                destination: x0,
+                address: u64::MAX,
+            }),
+        ),
+        instruction(1, add(x0, x0)),
+        instruction(2, add(Register::X(3), x0)),
+    ];
+    for span in [&instructions[..2], &instructions[..]] {
+        let separate = emit_prefix(span).unwrap();
+        let fused = emit_clean_load_prefix(span, true, None).unwrap();
+        let precise =
+            emit_clean_load_prefix_with(span, crate::x86_64::MemoryChecks::DEFAULT, true, None)
+                .unwrap();
+        assert_eq!(&precise.code[..], &separate.code[..]);
+        assert_eq!(fused.consumed_instructions, span.len());
+        assert_eq!(fused.stats.commits, span.len());
+        assert_eq!(fused.stats.constant_writes, span.len() - 1);
+        assert_eq!(&fused.code[2..10], &[0; 8]); // wrapped address
+        assert_eq!(fused.source_map[..2], [(span[0].pc, 0), (span[1].pc, 10)]);
+        assert!(
+            fused
+                .source_map
+                .windows(2)
+                .all(|pair| pair[0].1 < pair[1].1)
+        );
+        assert!(fused.code.len() < separate.code.len());
+    }
+}
+
 #[test]
 fn chain_reuses_value_and_settles_once() {
     let instructions: Vec<_> = (0..256)
