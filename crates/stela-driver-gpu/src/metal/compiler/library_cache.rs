@@ -5,7 +5,7 @@ use super::{
     super::library::{Air, Header, Library},
     Error, Result,
 };
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
 use core::{cell::OnceCell, ffi::CStr, ops::Range};
 
 const INVALID: Error = Error::Invalid("Metal library");
@@ -27,13 +27,21 @@ struct Module {
     digest: [u8; 32],
     /// The original bitcode range, or a failed digest/framing check.
     checked: OnceCell<Option<Range<usize>>>,
+    /// Successfully listed constexpr sampler declarations.
+    samplers: OnceCell<Box<[u64]>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ModuleSource<'a> {
+    pub(super) bitcode: &'a [u8],
+    pub(super) slice_hash: [u8; 32],
+    pub(super) samplers: &'a OnceCell<Box<[u64]>>,
 }
 
 pub(super) struct Selected<'a> {
-    pub(super) bitcode: &'a [u8],
+    pub(super) module: ModuleSource<'a>,
     pub(super) name: &'a str,
     pub(super) entry: &'a CStr,
-    pub(super) slice_hash: [u8; 32],
 }
 
 impl LoadedLibrary {
@@ -57,6 +65,7 @@ impl LoadedLibrary {
                         wrapped,
                         digest,
                         checked: OnceCell::new(),
+                        samplers: OnceCell::new(),
                     });
                     index
                 });
@@ -88,22 +97,19 @@ impl LoadedLibrary {
         let entry =
             CStr::from_bytes_with_nul(&self.bytes[entry.name.clone()]).map_err(|_| INVALID)?;
         Ok(Selected {
-            bitcode: module.bitcode(&self.bytes)?,
+            module: module.source(&self.bytes)?,
             name: entry.to_str().map_err(|_| INVALID)?,
             entry,
-            slice_hash: module.digest,
         })
     }
 
-    pub(super) fn modules(&self) -> impl Iterator<Item = Result<([u8; 32], &[u8])>> {
-        self.modules
-            .iter()
-            .map(|module| Ok((module.digest, module.bitcode(&self.bytes)?)))
+    pub(super) fn modules(&self) -> impl Iterator<Item = Result<ModuleSource<'_>>> {
+        self.modules.iter().map(|module| module.source(&self.bytes))
     }
 }
 
 impl Module {
-    fn bitcode<'a>(&self, data: &'a [u8]) -> Result<&'a [u8]> {
+    fn source<'a>(&'a self, data: &'a [u8]) -> Result<ModuleSource<'a>> {
         let range = self.checked.get_or_init(|| {
             let wrapped = &data[self.wrapped.clone()];
             let bitcode = Air::verified(wrapped, &self.digest).ok()?.bitcode;
@@ -112,7 +118,11 @@ impl Module {
         });
         range
             .as_ref()
-            .map(|range| &data[range.clone()])
+            .map(|range| ModuleSource {
+                bitcode: &data[range.clone()],
+                slice_hash: self.digest,
+                samplers: &self.samplers,
+            })
             .ok_or(INVALID)
     }
 }
@@ -138,9 +148,12 @@ mod tests {
         let second = loaded.select("second").unwrap();
         assert_eq!(first.entry.to_bytes(), b"first");
         assert_eq!(second.entry.to_bytes(), b"second");
-        assert_eq!(first.bitcode, b"BC\xc0\xdepayload");
-        assert_eq!(first.bitcode.as_ptr(), second.bitcode.as_ptr());
-        assert_eq!(first.slice_hash, second.slice_hash);
+        assert_eq!(first.module.bitcode, b"BC\xc0\xdepayload");
+        assert_eq!(
+            first.module.bitcode.as_ptr(),
+            second.module.bitcode.as_ptr()
+        );
+        assert_eq!(first.module.slice_hash, second.module.slice_hash);
         assert!(matches!(loaded.modules[0].checked.get(), Some(Some(_))));
     }
 
