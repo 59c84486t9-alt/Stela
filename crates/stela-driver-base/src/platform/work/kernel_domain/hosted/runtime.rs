@@ -456,6 +456,7 @@ unsafe extern "sysv64" fn entry<const N: usize>(address: usize, index: usize) ->
             require(state.scheduling.remove(task.id, job.1.sequence));
             task.signal.sequence.store(0, Ordering::Release);
             require(state.finish_job(job.0, job.1.sequence, None));
+            task.completed_sequence = job.1.sequence;
             task.job = None;
             task.state = TaskState::Idle;
         }

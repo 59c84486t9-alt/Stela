@@ -88,7 +88,8 @@ impl<const N: usize> HostedRuntime<N> {
 
     /// # Safety
     /// Actual foreign task/IRQ/wait references have joined. The handle names
-    /// the exact stack to detach, and its binding has not been replaced.
+    /// the latest completed assignment of the exact stack to detach, and
+    /// its binding has not been replaced.
     pub unsafe fn detach_binding(
         self: Pin<&Self>,
         wake: &HostedWake,
@@ -102,6 +103,9 @@ impl<const N: usize> HostedRuntime<N> {
             }
             if task.state != TaskState::Idle {
                 return Err(WorkError::Busy);
+            }
+            if task.completed_sequence != wake.sequence {
+                return Err(WorkError::InvalidTicket);
             }
             let binding = task.binding.as_ref().ok_or(WorkError::Unavailable)?;
             let view = self.context_view(task, task.frame.saved_stack_pointer());
@@ -245,8 +249,12 @@ mod tests {
             self.transition(State::Entered, State::Parked)
         }
         unsafe fn arrive(&self, _: &TaskContext, new_job: bool) -> Result<(), WorkError> {
-            assert!(!new_job);
-            self.transition(State::Parked, State::Entered)
+            let previous = if new_job {
+                State::Completed
+            } else {
+                State::Parked
+            };
+            self.transition(previous, State::Entered)
         }
         unsafe fn complete(&self, _: &TaskContext) -> Result<(), WorkError> {
             self.transition(State::Exited, State::Completed)
@@ -277,6 +285,16 @@ mod tests {
             wait.runtime.park_if_blocked().unwrap(),
             ParkOutcome::Resumed
         );
+        wait.binding
+            .transition(State::Entered, State::Exited)
+            .unwrap();
+    }
+
+    unsafe extern "C" fn reuse(context: *mut c_void) {
+        // SAFETY: the test keeps this context through the exact return.
+        let wait = unsafe { &*context.cast::<Wait<'_>>() };
+        assert_eq!(wait.binding.0.get(), State::Entered);
+        *wait.wake.borrow_mut() = Some(wait.runtime.current_wake().unwrap());
         wait.binding
             .transition(State::Entered, State::Exited)
             .unwrap();
@@ -313,6 +331,23 @@ mod tests {
         assert_eq!(context.binding.0.get(), State::Completed);
         assert!(queue.completed(ticket).unwrap());
         assert_eq!(wake.wake(), Err(WorkError::Closed));
+        // SAFETY: same retained source and actual stack through its new return.
+        let reused = unsafe {
+            queue.execute(
+                Kind::General,
+                reuse,
+                ptr::from_ref(&context).cast_mut().cast(),
+            )
+        }
+        .unwrap();
+        assert!(runtime.step().unwrap());
+        assert!(queue.completed(reused).unwrap());
+        // SAFETY: no source user remains. An old completion still must not
+        // detach the newer assignment of the same physical stack.
+        let detached = unsafe { runtime.detach_binding(&wake) };
+        assert!(matches!(detached, Err(WorkError::InvalidTicket)));
+        assert_eq!(context.binding.0.get(), State::Completed);
+        let wake = context.wake.borrow_mut().take().unwrap();
         queue.close().unwrap();
         assert_eq!(runtime.retire(), Err(WorkError::Busy));
         // SAFETY: the sole callback completed and has no remaining users.
