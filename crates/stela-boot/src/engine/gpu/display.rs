@@ -9,7 +9,7 @@ use crate::{Result, output};
 use alloc::{boxed::Box, format};
 use core::{cell::UnsafeCell, ffi::c_int, ffi::c_void, ptr::NonNull};
 use stela_contracts::refuse;
-use stela_drivers::gpu::metal::kms::{Display, Drm};
+use stela_drivers::gpu::metal::kms::{Display, Drm, Error as DisplayError};
 use stela_soc::machine::{Scanout, ScanoutFormat, ScanoutMode};
 
 /// A GPU's primary node, the DRM master.
@@ -47,6 +47,23 @@ impl Scanout for KmsScanout {
     fn present(&mut self, rows: &[u8]) -> Result<()> {
         console::release();
         let presented = self.0.present(rows);
+        self.finish_present(presented)
+    }
+
+    fn try_present_rows(
+        &mut self,
+        fill: &mut dyn FnMut(usize, &mut [u8]) -> Result<()>,
+    ) -> Result<bool> {
+        let prepared = self.0.prepare_rows(fill)?;
+        console::release();
+        let presented = prepared.present();
+        self.finish_present(presented)?;
+        Ok(true)
+    }
+}
+
+impl KmsScanout {
+    fn finish_present(&self, presented: Result<(), DisplayError>) -> Result<()> {
         // A stop's reason shows on the buffer that does.
         console::parked_on(screen(&self.0));
         presented.map_err(|error| {

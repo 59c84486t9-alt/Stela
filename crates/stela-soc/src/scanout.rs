@@ -81,6 +81,17 @@ pub trait Scanout {
     /// An error leaves presentation uncommitted; the owner may retry the same
     /// swap. Validate fallible inputs before publishing host-visible pixels.
     fn present(&mut self, rows: &[u8]) -> Result<()>;
+
+    /// Present a frame from an ordered producer, keeping each row hidden
+    /// until the whole frame is ready. Call the producer once per row with
+    /// exactly `width * 4` bytes to fill, stopping on its first error.
+    /// A sink without a hidden buffer declines without calling the producer.
+    fn try_present_rows(
+        &mut self,
+        _fill: &mut dyn FnMut(usize, &mut [u8]) -> Result<()>,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// A host framebuffer's 32-bit pixel given as one bit mask per channel: the
@@ -218,6 +229,36 @@ impl Layer {
             premultiplied,
         })
     }
+
+    fn covers_mode(&self, mode: Mode) -> bool {
+        self.surface.format == mode.format
+            && self.source.width == mode.width
+            && self.source.height == mode.height
+            && self.destination
+                == (Rect {
+                    x: 0,
+                    y: 0,
+                    width: mode.width,
+                    height: mode.height,
+                })
+    }
+
+    fn read_row(
+        &self,
+        from_y: u64,
+        out: &mut [u8],
+        read: &mut impl FnMut(u64, &mut [u8]) -> bool,
+    ) -> Result<()> {
+        let iova = (u64::from(self.source.y) + from_y)
+            .checked_mul(self.surface.stride.into())
+            .and_then(|offset| offset.checked_add(u64::from(self.source.x) * 4))
+            .and_then(|offset| self.surface.iova.checked_add(offset))
+            .ok_or(refuse!("layer row address overflows"))?;
+        if !read(iova, out) {
+            return Err(refuse!("surface row is not reachable through its DART"));
+        }
+        Ok(())
+    }
 }
 
 /// `value * weight / 255`, rounded.
@@ -338,6 +379,28 @@ fn blend_row(pixels: &[u8], out: &mut [u8], premultiplied: bool) {
     }
 }
 
+/// Present a matching fullscreen layer directly to a sink that can hide
+/// unfinished rows. Other compositions need the complete packed frame.
+pub(crate) fn present(
+    sink: &mut dyn Scanout,
+    layers: &[Layer],
+    mut read: impl FnMut(u64, &mut [u8]) -> bool,
+) -> Result<()> {
+    let mode = sink.mode();
+    if let [layer] = layers
+        && mode.format.red_blue().is_some()
+        && layer.covers_mode(mode)
+        && sink.try_present_rows(&mut |y, row| {
+            layer.read_row(y as u64, row, &mut read)?;
+            make_opaque(row, layer.premultiplied);
+            Ok(())
+        })?
+    {
+        return Ok(());
+    }
+    sink.present(&compose(layers, mode, read)?)
+}
+
 /// Compose `layers`, bottom to top, over opaque black on `mode`'s screen and
 /// return the frame for one [`Scanout::present`]: the mode's rows in its
 /// pixel order, alpha opaque. `read` fills a byte range of a surface from
@@ -366,18 +429,7 @@ pub fn compose(
     // A matching bottom layer replaces every output pixel. Its DART rows
     // can be read into the frame without first filling opaque black or
     // routing the pixels through the scratch row.
-    let direct_base = layers.first().is_some_and(|layer| {
-        layer.surface.format == mode.format
-            && layer.source.width == mode.width
-            && layer.source.height == mode.height
-            && layer.destination
-                == (Rect {
-                    x: 0,
-                    y: 0,
-                    width: mode.width,
-                    height: mode.height,
-                })
-    });
+    let direct_base = layers.first().is_some_and(|layer| layer.covers_mode(mode));
     let pixels = width * mode.height as usize;
     let mut frame = if direct_base {
         alloc::vec![0; pixels * 4]
@@ -403,20 +455,11 @@ pub fn compose(
         for y in ys[0]..ys[1] {
             let from_y = (2 * (y as u64 - u64::from(destination.y)) + 1) * u64::from(source.height)
                 / (2 * u64::from(destination.height));
-            let iova = (u64::from(source.y) + from_y)
-                .checked_mul(surface.stride.into())
-                .and_then(|offset| offset.checked_add(u64::from(source.x) * 4))
-                .and_then(|offset| surface.iova.checked_add(offset))
-                .ok_or(refuse!("layer row address overflows"))?;
             let out = &mut frame[(y * width + xs[0]) * 4..(y * width + xs[1]) * 4];
             let input = if direct { &mut *out } else { &mut row[..] };
-            if !read(iova, input) {
-                return Err(refuse!("surface row is not reachable through its DART"));
-            }
+            layer.read_row(from_y, input, &mut read)?;
             if direct {
-                if !out.iter().skip(3).step_by(4).all(|&alpha| alpha == 0xff) {
-                    opaque_over_black(out, layer.premultiplied);
-                }
+                make_opaque(out, layer.premultiplied);
                 continue;
             }
             if unscaled && copies {
@@ -460,6 +503,12 @@ pub fn compose(
         drawn.push((xs, ys));
     }
     Ok(frame)
+}
+
+fn make_opaque(row: &mut [u8], premultiplied: bool) {
+    if !row.iter().skip(3).step_by(4).all(|&alpha| alpha == 0xff) {
+        opaque_over_black(row, premultiplied);
+    }
 }
 
 /// The bottom layer covers this row. Alpha is opaque after composition
@@ -830,6 +879,82 @@ mod tests {
             .is_err()
         );
         assert_eq!(reads, [44, 76]);
+    }
+
+    #[test]
+    fn hidden_rows_preserve_fullscreen_dma_order_and_pixels() {
+        #[derive(Default)]
+        struct Hidden {
+            visible: Vec<u8>,
+            streamed: usize,
+        }
+
+        impl Scanout for Hidden {
+            fn mode(&self) -> Mode {
+                MODE
+            }
+
+            fn present(&mut self, rows: &[u8]) -> Result<()> {
+                self.visible = rows.to_vec();
+                Ok(())
+            }
+
+            fn try_present_rows(
+                &mut self,
+                fill: &mut dyn FnMut(usize, &mut [u8]) -> Result<()>,
+            ) -> Result<bool> {
+                let mut rows = [0; 32];
+                for (y, row) in rows.as_chunks_mut::<16>().0.iter_mut().enumerate() {
+                    fill(y, row)?;
+                }
+                self.streamed += 1;
+                self.present(&rows)?;
+                Ok(true)
+            }
+        }
+
+        let layer = Layer::new(
+            surface(6, 3, 32, 8),
+            Rect {
+                x: 1,
+                y: 1,
+                ..Rect::whole(4, 2)
+            },
+            Rect::whole(4, 2),
+            false,
+        )
+        .unwrap();
+        let memory: Vec<u8> = (0..112).map(|i| (i as u8).wrapping_mul(37)).collect();
+        let mut sink = Hidden::default();
+        for premultiplied in [false, true] {
+            let layers = [Layer {
+                premultiplied,
+                ..layer
+            }];
+            let old_visible = sink.visible.clone();
+            let mut reads = Vec::new();
+            assert!(
+                present(&mut sink, &layers, |iova, row| {
+                    reads.push((iova, row.len()));
+                    reader(&memory)(iova, row) && iova != 76
+                })
+                .is_err()
+            );
+            assert_eq!(reads, [(44, 16), (76, 16)]);
+            assert_eq!(sink.visible, old_visible);
+            reads.clear();
+            present(&mut sink, &layers, |iova, row| {
+                reads.push((iova, row.len()));
+                reader(&memory)(iova, row)
+            })
+            .unwrap();
+            assert_eq!(reads, [(44, 16), (76, 16)]);
+            assert_eq!(sink.visible, reference(&layers, MODE, &memory));
+        }
+        assert_eq!(sink.streamed, 2);
+        present(&mut sink, &[layer; 2], reader(&memory)).unwrap();
+        assert_eq!(sink.visible, reference(&[layer; 2], MODE, &memory));
+        assert_eq!(sink.streamed, 2);
     }
 
     #[test]

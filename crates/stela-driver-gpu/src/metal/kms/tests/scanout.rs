@@ -1,6 +1,55 @@
 use super::*;
 
 #[test]
+fn row_fill_failure_keeps_the_front_and_retries_the_hidden_buffer() {
+    let mut card = Card::new(vec![mode(2, 2, PREFERRED)]);
+    card.busy = 2;
+    card.pitches = vec![8, 16, 32];
+    let hidden;
+    {
+        let mut display = Display::take(&mut card, (2, 2)).unwrap();
+        let front = display.front();
+        hidden = display.buffers[2].framebuffer;
+        let failure = display
+            .prepare_rows(|y, row| {
+                row.fill(1);
+                if y == 1 {
+                    return Err(refuse!("second row failed"));
+                }
+                Ok(())
+            })
+            .err();
+        assert_eq!(failure, Some(refuse!("second row failed")));
+        assert_eq!(display.front(), front);
+        assert!(display.drm.flips.is_empty());
+        assert_eq!(display.drm.busy, 2);
+        assert!(display.drm.memory[..2].iter().flatten().all(|&b| b == 0));
+        assert_eq!(&display.drm.memory[2][..8], &[1; 8]);
+        assert!(display.drm.memory[2][8..].iter().all(|&b| b == 0));
+
+        let mut scratch = None;
+        display
+            .prepare_rows(|y, row| {
+                assert_eq!(row.len(), 8);
+                assert_eq!(*scratch.get_or_insert(row.as_ptr()), row.as_ptr());
+                row.fill(if y == 0 { 2 } else { 3 });
+                Ok(())
+            })
+            .unwrap()
+            .present()
+            .unwrap();
+        assert_eq!(display.buffers[0].framebuffer, hidden);
+    }
+    assert_eq!(card.flips, [hidden]);
+    assert_eq!(card.relaxed, 2);
+    let filled = &card.memory[2];
+    assert_eq!(&filled[..8], &[2; 8]);
+    assert_eq!(&filled[32..40], &[3; 8]);
+    assert!(filled[8..32].iter().all(|&b| b == 0));
+    assert!(filled[40..].iter().all(|&b| b == 0));
+}
+
+#[test]
 fn a_failed_flip_keeps_the_front_and_retries_the_hidden_buffer() {
     let mut card = Card::new(vec![mode(2, 2, PREFERRED)]);
     card.flip_error = Some(-5);
