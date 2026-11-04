@@ -686,6 +686,37 @@ mod resident {
     }
 
     #[test]
+    fn ordinary_trailing_zero_pair_respects_truncated_source_and_standalone_entry() -> Result<()> {
+        const RBIT: u32 = 0xdac0_0000; // rbit x0, x0
+        const CLZ: u32 = 0xdac0_1000; // clz x0, x0
+        let cache = tempfile::tempdir()?;
+        let clz_pc = GuestAddress(BASE.0 + 4);
+        let mut runtime = ordinary(cache.path(), &[RBIT, CLZ, RET_X30])?;
+
+        for (entry, result) in [(BASE, 4), (clz_pc, 59)] {
+            let mut state = thread(16);
+            state.pc = entry;
+            let mut expected = state.registers.clone();
+            expected.x[0] = result;
+            // SAFETY: pure register instructions and RET to STOP.
+            let outcome = unsafe { runtime.run(&mut state, Some(STOP), 1)? };
+            assert_eq!(outcome.blocks_executed, 1);
+            assert_eq!(state.registers, expected);
+            assert_eq!(state.pc, STOP);
+        }
+        let mut truncated = ordinary(cache.path(), &[RBIT])?;
+        let mut state = thread(16);
+        let mut expected = state.registers.clone();
+        expected.x[0] = 0x0800_0000_0000_0000;
+        // SAFETY: the truncated input contains only RBIT.
+        let outcome = unsafe { truncated.run(&mut state, Some(clz_pc), 1)? };
+        assert_eq!(outcome.blocks_executed, 1);
+        assert_eq!(state.registers, expected);
+        assert_eq!(state.pc, clz_pc);
+        Ok(())
+    }
+
+    #[test]
     fn ordinary_direct_ram_loop_keeps_budget_state_and_cached_source_map() -> Result<()> {
         const BODY: [u32; 7] = [
             0xf940_0022, // ldr x2, [x1]
