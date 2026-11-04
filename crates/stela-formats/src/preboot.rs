@@ -457,7 +457,7 @@ pub fn manifest<R: ReadAt>(
     let device = &mut container.device;
     let inode = preboot.inode(device, object.oid)?;
     let mut prefix = [0u8; PEEK_BYTES];
-    preboot.read_at(device, &inode, 0, &mut prefix)?;
+    let mut stream = preboot.read_regular_prefix(device, &inode, &mut prefix)?;
     let malformed = |e: img4::Img4Error| PrebootError::Object(format!("{}: {e}", object.path));
     let Some(tail) = img4::tail_offset(&prefix).map_err(malformed)? else {
         return Ok(None);
@@ -468,7 +468,7 @@ pub fn manifest<R: ReadAt>(
         .ok_or_else(|| PrebootError::Object(format!("{}: truncated IMG4", object.path)))?;
     let mut rest =
         vec![0u8; usize::try_from(bytes).map_err(|_| ApfsError::Malformed("object size"))?];
-    preboot.read_at(device, &inode, tail as u64, &mut rest)?;
+    stream.read_at(tail as u64, &mut rest)?;
     Ok(img4::tail_manifest(&rest)
         .map_err(malformed)?
         .map(<[u8]>::to_vec))

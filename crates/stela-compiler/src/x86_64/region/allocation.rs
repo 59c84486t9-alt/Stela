@@ -454,15 +454,21 @@ pub(super) fn prefix(
     if entry.0 & 3 != 0 {
         return Err(RegionError::Misaligned);
     }
-    let analyzed: Vec<_> = instructions
+    let mut analysis = instructions
         .iter()
-        .map_while(|instruction| flags::analyze_value(&instruction.operation))
-        .collect();
-    if analyzed.len() < 2 {
+        .map_while(|instruction| flags::analyze_value(&instruction.operation));
+    let Some(first) = analysis.next() else {
         return Ok(None);
-    }
+    };
+    let Some(second) = analysis.next() else {
+        return Ok(None);
+    };
+    let analyzed: Vec<_> = [first, second].into_iter().chain(analysis).collect();
     let mut has_flags = false;
-    for (index, instruction) in instructions.iter().take(analyzed.len()).enumerate() {
+    let mut participants = 0u32;
+    let mut unread_definitions = 0u32;
+    let mut killed = false;
+    for (index, (instruction, (gprs, _, step))) in instructions.iter().zip(&analyzed).enumerate() {
         let expected = entry
             .0
             .checked_add((index as u64) * u64::from(core::mem::size_of::<u32>() as u32))
@@ -470,7 +476,13 @@ pub(super) fn prefix(
         if instruction.pc.0 != expected {
             return Err(RegionError::NonContiguous);
         }
-        has_flags |= !matches!(analyzed[index].2, flags::ValueStep::Ordinary);
+        has_flags |= !matches!(step, flags::ValueStep::Ordinary);
+        participants |= gprs.reads | gprs.writes;
+        // A definition is dead if a later write replaces it before a read.
+        // Consume inputs first so a read-modify-write keeps the old value live.
+        unread_definitions &= !gprs.reads;
+        killed |= unread_definitions & gprs.writes != 0;
+        unread_definitions |= gprs.writes;
     }
     let exit = entry
         .0
@@ -482,16 +494,6 @@ pub(super) fn prefix(
     {
         return Err(RegionError::NonContiguous);
     }
-    let gprs: Vec<_> = analyzed.iter().map(|(gprs, _, _)| *gprs).collect();
-    let values: Vec<_> = analyzed.iter().map(|(_, values, _)| *values).collect();
-    let live = LiveRanges::compute(&values);
-    let killed = values
-        .iter()
-        .enumerate()
-        .any(|(index, effect)| effect.writes & !live.after(index) != 0);
-    let participants = gprs
-        .iter()
-        .fold(0, |mask, effect| mask | effect.reads | effect.writes);
     // Do not split an existing ALU plus clean-load chunk only to try a larger
     // pool. Spans with flags or dead versions add work; other plain spans need
     // register pressure and must end before the existing terminal.
@@ -502,6 +504,9 @@ pub(super) fn prefix(
     {
         return Ok(None);
     }
+    let gprs: Vec<_> = analyzed.iter().map(|(gprs, _, _)| *gprs).collect();
+    let values: Vec<_> = analyzed.iter().map(|(_, values, _)| *values).collect();
+    let live = LiveRanges::compute(&values);
     let mut best: Option<super::OptimizedRegion> = None;
     for callee_slots in 0..=CALLEE_POOL.len() {
         let plan = Plan::new(&values, &live, callee_slots, false);
