@@ -133,6 +133,112 @@ fn conditional_exits_branch_over_the_fallthrough_exit() {
     assert_eq!(code.instructions(), 15);
 }
 
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn grouped_sha256_rounds_preserve_three_rows_and_both_state_halves() {
+    use crate::{
+        GuestState, Lifter, TargetCpu,
+        aarch64::Decoder,
+        x86_64::{native, pinned},
+    };
+
+    let pc = GuestAddress(0x1000);
+    let checks = super::super::MemoryChecks::DEFAULT;
+    for (a, b, temporary, wk) in [(0, 1, 2, 16), (31, 30, 29, 29), (6, 7, 8, 7)] {
+        let instructions: Vec<_> = [
+            0x4ea0_1c00 | temporary | a << 5 | a << 16,
+            0x5e00_4000 | a | b << 5 | wk << 16,
+            0x5e00_5000 | b | temporary << 5 | wk << 16,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, word)| {
+            Decoder
+                .lift(GuestAddress(pc.0 + index as u64 * 4), word)
+                .unwrap()
+        })
+        .collect();
+        for target in [TargetCpu::Baseline, TargetCpu::Sha] {
+            for (input, separate_hashes) in [
+                (&instructions[..], 2),
+                (&instructions[..2], 1),
+                (&instructions[1..], 2),
+                (&instructions[2..], 1),
+            ] {
+                let return_pc = GuestAddress(input.last().unwrap().pc.0 + 4);
+                let terminal = (
+                    return_pc,
+                    Terminator::Register {
+                        source: Register::X(30),
+                        kind: ExitKind::Return,
+                    },
+                );
+                let next = GuestAddress(return_pc.0 + 4);
+                let (grouped, faults) = emit_system_mode(
+                    input,
+                    Some(&terminal),
+                    next,
+                    target,
+                    checks,
+                    super::super::NativeSystem::NONE,
+                );
+                let plain = emit_for_target(input, Some(&terminal), next, target, checks);
+                let rows = |block: &NativeBlock| {
+                    block.source_map.iter().map(|row| row.0).collect::<Vec<_>>()
+                };
+                assert_eq!(rows(&grouped), rows(&plain));
+                assert!(
+                    grouped
+                        .source_map
+                        .windows(2)
+                        .all(|rows| rows[0].1 < rows[1].1)
+                );
+                assert!(faults.is_empty());
+                let rounds = |code: &[u8]| {
+                    code.windows(3)
+                        .filter(|bytes| *bytes == [0x0f, 0x38, 0xcb])
+                        .count()
+                };
+                if target.supports(TargetCpu::Sha) {
+                    let grouped_rounds = if input.len() == 3 {
+                        2
+                    } else {
+                        2 * separate_hashes
+                    };
+                    assert_eq!(rounds(&grouped.x86_64_code), grouped_rounds);
+                    assert_eq!(rounds(&plain.x86_64_code), 2 * separate_hashes);
+                } else {
+                    assert_eq!(rounds(&grouped.x86_64_code), 0);
+                    assert_eq!(rounds(&plain.x86_64_code), 0);
+                }
+                if input.len() == 3 {
+                    assert!(grouped.source_map[3].1 < plain.source_map[3].1);
+                }
+                if target.supports(TargetCpu::Sha) && !std::arch::is_x86_feature_detected!("sha") {
+                    continue;
+                }
+                let entered = pinned::entered(&grouped.x86_64_code);
+                for seed in [0, 1, u64::MAX] {
+                    let mut state = GuestState {
+                        x: core::array::from_fn(|index| seed ^ index as u64),
+                        v: core::array::from_fn(|index| {
+                            let x = (index as u64).wrapping_mul(0x1234_5678_8765_4321);
+                            [x ^ seed, x.rotate_left(17) ^ !seed]
+                        }),
+                        nzcv: 0xa000_0000,
+                        fpsr: 0x800_0000,
+                        ..GuestState::default()
+                    };
+                    let mut expected = state.clone();
+                    let exit = native::run(&plain.x86_64_code, &mut expected);
+                    assert_eq!(native::run(&entered, &mut state), exit);
+                    assert_eq!(state, expected);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn hosted_trailing_zero_pair_preserves_instruction_boundaries() {
     use crate::{Lifter, TargetCpu, aarch64::Decoder};
