@@ -9,6 +9,8 @@
 mod bluetooth_platform;
 #[cfg(feature = "diagnostics")]
 mod media_check;
+#[cfg(feature = "diagnostics")]
+mod minimum;
 use crate::Result;
 use stela_boot_core::storage as options;
 use stela_contracts::refuse;
@@ -53,9 +55,13 @@ pub struct Prepared {
     open: Vec<Target>,
     check: Vec<Target>,
     #[cfg(feature = "diagnostics")]
-    usb_reset_check: bool,
-    #[cfg(feature = "diagnostics")]
-    usb_media_check: bool,
+    usb_check: Option<(UsbCheck, minimum::Prepared)>,
+}
+
+#[cfg(feature = "diagnostics")]
+enum UsbCheck {
+    Reset,
+    Media,
 }
 
 /// The board captures the drivers read after ExitBootServices, taken while
@@ -87,6 +93,7 @@ pub fn prepare(
     let (open, check, _) = split(text)?;
     let usb_reset_check = options::reset_requested(text, &open, &check)?;
     let usb_media_check = options::media_requested(text, &open, &check)?;
+    options::usb_hpet_handoff(text, usb_reset_check || usb_media_check)?;
     #[cfg(not(feature = "diagnostics"))]
     if usb_reset_check || usb_media_check {
         return Err(refuse!("USB checks require a diagnostics build"));
@@ -96,15 +103,21 @@ pub fn prepare(
     }
     let mut handoff = discover()?;
     handoff.firmware = firmware;
+    #[cfg(feature = "diagnostics")]
+    let usb_check = if usb_media_check {
+        Some((UsbCheck::Media, minimum::Prepared::capture()?))
+    } else if usb_reset_check {
+        Some((UsbCheck::Reset, minimum::Prepared::capture()?))
+    } else {
+        None
+    };
     Ok(Some(Prepared {
         handoff,
         captures,
         open,
         check,
         #[cfg(feature = "diagnostics")]
-        usb_reset_check,
-        #[cfg(feature = "diagnostics")]
-        usb_media_check,
+        usb_check,
     }))
 }
 
@@ -305,7 +318,11 @@ pub fn discover() -> Result<Handoff> {
 
 impl Prepared {
     /// Map ECAM and the controllers' registers uncached.
-    pub fn map(&self, tables: &mut Tables) -> Result<()> {
+    pub fn map(&mut self, tables: &mut Tables) -> Result<()> {
+        #[cfg(feature = "diagnostics")]
+        if let Some((_, clock)) = &mut self.usb_check {
+            clock.map(tables)?;
+        }
         self.handoff
             .mapped
             .iter()
@@ -314,25 +331,26 @@ impl Prepared {
 
     /// After ExitBootServices: bring up the controllers, report every disk,
     /// then open and check the named partitions. Any failure is fatal.
-    pub fn run(self) {
+    pub fn run(self, #[cfg(feature = "diagnostics")] root: &crate::paging::ActivatedTables) {
         // SAFETY: one CPU after ExitBootServices; `dma` was reserved for this.
         let mut dma = unsafe { RegionAllocator::new(self.handoff.dma.clone()) };
         #[cfg(feature = "diagnostics")]
-        let mut devices = if self.usb_media_check {
-            // SAFETY: same exclusive post-EBS grant as probe; this explicit
-            // fixture diagnostic attaches native USB and keeps every owner.
-            match unsafe { media_check::probe_and_rescan(&self.handoff, &mut dma, &self.check[0]) }
-            {
-                Ok(devices) => devices,
-                Err(error) => output::fatal(error),
-            }
-        } else if self.usb_reset_check {
-            // SAFETY: the same exclusive post-EBS grant as probe, restricted
-            // to native USB attachment for this explicit diagnostic.
-            match unsafe { reset_check::probe_and_reset(&self.handoff, &mut dma, &self.check[0]) } {
-                Ok(devices) => devices,
-                Err(error) => output::fatal(error),
-            }
+        let mut devices = if let Some((check, clock)) = self.usb_check {
+            // SAFETY: these explicit USB fixtures own their clocks and
+            // controllers, under the standalone root before any device I/O.
+            let minimum =
+                unsafe { clock.attach(root) }.unwrap_or_else(|error| output::fatal(error));
+            let result = match check {
+                // SAFETY: exact post-EBS fixture ownership and retained timer.
+                UsbCheck::Media => unsafe {
+                    media_check::probe_and_rescan(&self.handoff, &mut dma, &self.check[0], minimum)
+                },
+                // SAFETY: exact post-EBS fixture ownership and retained timer.
+                UsbCheck::Reset => unsafe {
+                    reset_check::probe_and_reset(&self.handoff, &mut dma, &self.check[0], minimum)
+                },
+            };
+            result.unwrap_or_else(|error| output::fatal(error))
         } else {
             // SAFETY: this handoff describes the running machine and its tables.
             unsafe { probe(&self.handoff, self.captures, &mut dma) }

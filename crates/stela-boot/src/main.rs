@@ -190,15 +190,19 @@ fn main() -> Status {
 
 /// Run the host storage check on Stela's own stack.
 extern "sysv64" fn run(handoff: &mut firmware::Handoff) -> ! {
-    match handoff.active_tables.as_ref() {
-        Some(tables) => tables.check_current().unwrap_or_else(|error| {
-            output::arguments(format_args!("activated native root refused: {error}\n"));
-            output::fatal("activated native root is unavailable");
-        }),
-        None => output::fatal("actual activated native table owner is missing"),
-    }
+    let root = handoff
+        .active_tables
+        .as_ref()
+        .unwrap_or_else(|| output::fatal("actual activated native table owner is missing"));
+    root.check_current().unwrap_or_else(|error| {
+        output::arguments(format_args!("activated native root refused: {error}\n"));
+        output::fatal("activated native root is unavailable");
+    });
     if let Some(storage) = handoff.storage.take() {
-        storage.run();
+        storage.run(
+            #[cfg(feature = "diagnostics")]
+            root,
+        );
     }
     output::arguments(format_args!("STORAGE CHECK END\n"));
     output::terminate(0x10)

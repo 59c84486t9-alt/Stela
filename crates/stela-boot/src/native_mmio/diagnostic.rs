@@ -87,7 +87,11 @@ unsafe fn check_native_hpet(
     // firmware/native comparator routes or other counter readers/writers.
     let owned = unsafe { source.take_hpet(identity.clone()) }?;
     let mut counter = crate::native_clock::HpetCounter::attach_native_exclusive(owned)?;
-    if !alloc::sync::Arc::ptr_eq(counter.identity(), &identity) || counter.owner().is_ok() {
+    if counter
+        .identity()
+        .is_none_or(|actual| !alloc::sync::Arc::ptr_eq(actual, &identity))
+        || counter.owner().is_ok()
+    {
         return Err(Error::InvalidPlatformReply.into());
     }
     let before = counter.read_irq()?;

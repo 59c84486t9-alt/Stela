@@ -13,7 +13,10 @@ pub fn split(options: &str) -> Result<(Vec<Target>, Vec<Target>, String)> {
     let mut rest = String::new();
     let mut words = options.split_ascii_whitespace();
     while let Some(word) = words.next() {
-        if matches!(word, "--usb-reset-check" | "--usb-media-check") {
+        if matches!(
+            word,
+            "--usb-reset-check" | "--usb-media-check" | "--usb-own-hpet"
+        ) {
             continue;
         }
         let list = match word {
@@ -68,10 +71,36 @@ pub fn media_requested(text: &str, open: &[Target], check: &[Target]) -> Result<
     Ok(count == 1)
 }
 
+/// The USB diagnostics need an explicit whole-controller clock handoff.
+pub fn usb_hpet_handoff(text: &str, diagnostic: bool) -> Result<()> {
+    let count = text
+        .split_ascii_whitespace()
+        .filter(|word| *word == "--usb-own-hpet")
+        .count();
+    if count != usize::from(diagnostic) {
+        return Err(refuse!(
+            "USB diagnostics and a single --usb-own-hpet handoff are required together"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     const TARGET: &str = "TEST:02020202-0202-0202-0202-020202020202";
+
+    #[test]
+    fn usb_hpet_handoff_is_affine_and_scoped_to_diagnostics() {
+        let text = alloc::format!("--usb-reset-check --usb-own-hpet --storage-check {TARGET}");
+        let (open, check, rest) = split(&text).unwrap();
+        assert!(rest.is_empty());
+        assert!(usb_hpet_handoff(&text, reset_requested(&text, &open, &check).unwrap()).is_ok());
+        assert!(usb_hpet_handoff("--usb-reset-check", true).is_err());
+        assert!(usb_hpet_handoff("--usb-own-hpet --usb-own-hpet", true).is_err());
+        assert!(usb_hpet_handoff("--usb-own-hpet", false).is_err());
+        assert!(usb_hpet_handoff("", false).is_ok());
+    }
 
     #[test]
     fn explicit_reset_has_one_write_target_and_is_not_a_guest_option() {

@@ -279,6 +279,14 @@ fn hpet_is_explicit_and_restricted_to_owned_clock_modes_before_work() {
         ])
         .is_err()
     );
+    let usb_line = "--usb-reset-check --usb-own-hpet --storage-check TEST:02020202-0202-0202-0202-020202020202";
+    let usb = parse(vec!["--append", usb_line]).unwrap();
+    assert!(usb.hpet_enabled());
+    assert!(native_root_preflight(&usb).is_ok());
+    let virtual_clock = parse(vec!["--append", usb_line, "--icount", "1"]).unwrap();
+    assert!(native_root_preflight(&virtual_clock).is_err());
+    let system = parse(vec!["--append", "--system --usb-own-hpet"]).unwrap();
+    assert!(native_root_preflight(&system).is_err());
     let off = qemu_machine("off", false);
     assert_eq!(
         off,

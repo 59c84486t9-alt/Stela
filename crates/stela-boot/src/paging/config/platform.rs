@@ -104,6 +104,13 @@ impl Platform {
         }
         Ok(())
     }
+    #[cfg(feature = "diagnostics")]
+    pub(super) fn hpet(&self) -> Result<crate::native_clock::hpet::Descriptor, Error> {
+        let descriptor = self.prepared.hpet.ok_or(Error::ResourceInventory)?;
+        let start = descriptor.registers().start();
+        self.prepared.device_range(start, start + PAGE as u64)?;
+        Ok(descriptor)
+    }
     pub(super) fn check_bus(&self, address: Address) -> Result<(), Error> {
         self.check()?;
         let inventory = stela_boot_core::ecam::EcamInventory::validate(
@@ -323,7 +330,7 @@ unsafe impl MappingPlatform for Platform {
             .map_err(unchanged)?;
         let backing = resource.backing();
         let owner = backing
-            .downcast_ref::<BusBacking>()
+            .downcast_ref::<RegisterBacking>()
             .map(|bus| (&bus.platform, bus.span))
             .or_else(|| {
                 backing

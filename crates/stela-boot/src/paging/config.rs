@@ -1,6 +1,8 @@
 //! Configuration access under the activated standalone table owner.
 //! The one native Permission keeps real firmware/root reservations. Captured
 //! MCFG observations alone cannot construct this Source.
+#[cfg(feature = "diagnostics")]
+mod hpet;
 mod inventory;
 mod platform;
 mod prepare;
@@ -12,6 +14,8 @@ use core::{
     marker::PhantomData,
     sync::atomic::{AtomicU32, Ordering},
 };
+#[cfg(feature = "diagnostics")]
+pub(crate) use hpet::Hpet;
 pub(crate) use prepare::Prepared;
 use stela_drivers::bus::{
     mmio::owned::{
@@ -80,27 +84,29 @@ impl fmt::Display for Error {
 struct Bus {
     window: EcamWindow,
     resource: Resource,
-    _assignment: Assignment<BusReservation>,
+    _assignment: Assignment<RegisterReservation>,
 }
 pub(crate) struct Source {
     platform: Arc<platform::Platform>,
     authority: Authority,
     buses: Vec<Bus>,
+    #[cfg(feature = "diagnostics")]
+    hpet_assignment: core::cell::RefCell<Option<Assignment<RegisterReservation>>>,
     _local: PhantomData<*mut ()>,
 }
 struct Backing {
     platform: Arc<platform::Platform>,
     span: PhysicalSpan,
 }
-struct BusReservation {
+struct RegisterReservation {
     platform: Arc<platform::Platform>,
     _span: PhysicalSpan,
 }
 
-// SAFETY: the exclusive post-EBS source owns this validated whole ECAM
-// window. The original ActivatedTables and final firmware exclusions remain
-// held through Platform, without a mapping, registry or driver backedge.
-unsafe impl PhysicalAssignment for BusReservation {
+// SAFETY: the exclusive post-EBS source owns the validated ECAM windows and
+// any separately handed off HPET page. The original ActivatedTables and
+// firmware exclusions remain held without a mapping or registry backedge.
+unsafe impl PhysicalAssignment for RegisterReservation {
     fn parent(&self) -> Option<&assignment::Parent> {
         None
     }
@@ -112,15 +118,15 @@ unsafe impl PhysicalAssignment for BusReservation {
     }
 }
 
-struct BusBacking {
+struct RegisterBacking {
     platform: Arc<platform::Platform>,
     span: PhysicalSpan,
-    retention: Retention<BusReservation>,
+    retention: Retention<RegisterReservation>,
 }
 
-// SAFETY: the source gives each checked ECAM extent its original retained
-// assignment and holds it across every live or quarantined page mapping.
-unsafe impl ResourceBacking for BusBacking {
+// SAFETY: the source gives each checked span its original retained assignment
+// and keeps it across every live or quarantined mapping.
+unsafe impl ResourceBacking for RegisterBacking {
     fn physical_span(&self) -> PhysicalSpan {
         self.span
     }
@@ -176,11 +182,11 @@ impl Source {
             let range = window.range();
             let span =
                 PhysicalSpan::new(range.start, range.end - range.start).map_err(Error::Mapping)?;
-            let mut assignment = Assignment::from_owned(BusReservation {
+            let mut assignment = Assignment::from_owned(RegisterReservation {
                 platform: platform.clone(),
                 _span: span,
             });
-            let resource = Resource::new(Box::new(BusBacking {
+            let resource = Resource::new(Box::new(RegisterBacking {
                 platform: platform.clone(),
                 span,
                 retention: assignment.retain(),
@@ -204,6 +210,8 @@ impl Source {
             platform,
             authority,
             buses,
+            #[cfg(feature = "diagnostics")]
+            hpet_assignment: core::cell::RefCell::new(None),
             _local: PhantomData,
         })
     }

@@ -19,6 +19,8 @@ pub(crate) struct Prepared {
     pub(super) roots: Vec<RootWindow>,
     exclusions: Vec<PhysicalSpan>,
     pub(super) physical_bits: u8,
+    #[cfg(feature = "diagnostics")]
+    pub(super) hpet: Option<crate::native_clock::hpet::Descriptor>,
     pub(super) leaves: Option<[u64; LEAVES]>,
 }
 impl Prepared {
@@ -140,12 +142,31 @@ impl Prepared {
             roots,
             exclusions,
             physical_bits,
+            #[cfg(feature = "diagnostics")]
+            hpet: None,
             leaves: None,
         };
         for window in &result.windows {
             result.device_range(window.range().start, window.range().end)?;
         }
         Ok(result)
+    }
+    #[cfg(feature = "diagnostics")]
+    pub(crate) fn capture_hpet(&mut self) -> Result<(), Error> {
+        let rsdp = crate::storage::rsdp().ok_or(Error::ResourceInventory)?;
+        // SAFETY: these are the original UEFI ACPI tables before EBS.
+        let table = unsafe { acpi::find(rsdp, b"HPET") }.map_err(|_| Error::ResourceInventory)?;
+        let descriptor = crate::native_clock::hpet::Descriptor::from_sdt(table)
+            .map_err(|_| Error::ResourceInventory)?;
+        let start = descriptor.registers().start();
+        self.device_range(
+            start,
+            start
+                .checked_add(PAGE as u64)
+                .ok_or(Error::ResourceInventory)?,
+        )?;
+        self.hpet = Some(descriptor);
+        Ok(())
     }
     /// Allocate empty leaf tables before EBS. No device is mapped yet.
     pub(crate) fn map(&mut self, tables: &mut super::super::Tables) -> Result<(), Error> {

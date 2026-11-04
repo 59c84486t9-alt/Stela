@@ -2,9 +2,11 @@
 use super::CHECK_BYTES;
 use crate::Result;
 use crate::output;
+use alloc::rc::Rc;
 use alloc::{boxed::Box, vec, vec::Vec};
 use stela_contracts::Refusal;
 use stela_contracts::refuse;
+use stela_drivers::bus::pci::power::Timer;
 use stela_drivers::{
     Clock, Handoff,
     block::{BlockDevice, BlockError},
@@ -109,6 +111,7 @@ pub(super) unsafe fn probe_and_rescan(
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
     target: &Target,
+    minimum: Rc<dyn Timer>,
 ) -> Result<Devices> {
     let mut owners = Vec::<xhci::Found>::new();
     let mut retained = Vec::<UsbStorage>::new();
@@ -129,7 +132,7 @@ pub(super) unsafe fn probe_and_rescan(
             for mut function in functions {
                 if function.class == xhci::CLASS {
                     owners.push(
-                        xhci::attach(&mut function, handoff, dma)
+                        xhci::attach(&mut function, handoff, dma, minimum.clone())
                             .map_err(|error| failure("native USB attachment", error))?,
                     );
                 }

@@ -156,6 +156,11 @@ impl Prepared {
     ) -> Result<Self, WorkError> {
         Counter::attach_native_exclusive(owner).map(|counter| Self::Hpet(Arc::new(counter)))
     }
+    #[cfg(feature = "diagnostics")]
+    pub(crate) fn standalone_hpet(owner: crate::paging::config::Hpet) -> Result<Self, WorkError> {
+        Counter::attach_standalone(owner).map(|counter| Self::Hpet(Arc::new(counter)))
+    }
+
     pub(crate) fn pci_minimum(&self) -> Result<Rc<dyn Timer>, WorkError> {
         let counter = self.hpet_counter().ok_or(WorkError::Unavailable)?;
         let minimum = HpetMinimum(counter.clone());
@@ -204,7 +209,10 @@ impl Prepared {
             Self::Pm(pm) => pm.admit(),
             Self::Hpet(counter) => {
                 counter.check_process()?;
-                if !Arc::ptr_eq(counter.identity(), identity) {
+                if counter
+                    .identity()
+                    .is_none_or(|owner| !Arc::ptr_eq(owner, identity))
+                {
                     return Err(WorkError::WrongCpu);
                 }
                 Ok(())

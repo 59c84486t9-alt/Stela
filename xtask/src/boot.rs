@@ -696,6 +696,20 @@ fn qemu_machine(keyboard: &str, hpet: bool) -> String {
 }
 
 fn native_root_preflight(arguments: &Run) -> Result<()> {
+    if arguments.usb_hpet_handoff() {
+        let text = arguments.append.as_deref().unwrap_or_default();
+        ensure!(
+            !matches!(
+                text.split_ascii_whitespace().next(),
+                Some("--system" | "--host-check")
+            ) && text
+                .split_ascii_whitespace()
+                .any(|word| matches!(word, "--usb-reset-check" | "--usb-media-check"))
+                && !arguments.host_check()
+                && arguments.icount.is_none(),
+            "USB HPET ownership requires standalone USB diagnostics with the ordinary QEMU clock"
+        );
+    }
     // Clap conflicts can supersede `requires`; enforce the HPET mode before work.
     ensure!(
         !arguments.hpet || arguments.native_mmio_check || arguments.native_clock_check,
@@ -922,8 +936,19 @@ fn launch(arguments: Run) -> Result<ExitCode> {
 }
 
 impl Run {
+    fn usb_hpet_handoff(&self) -> bool {
+        self.append.as_deref().is_some_and(|options| {
+            options
+                .split_ascii_whitespace()
+                .any(|word| word == "--usb-own-hpet")
+        })
+    }
+
     fn hpet_enabled(&self) -> bool {
-        self.hpet || self.audio_check.is_some() || self.native_pci_own_hpet
+        self.hpet
+            || self.audio_check.is_some()
+            || self.native_pci_own_hpet
+            || self.usb_hpet_handoff()
     }
 
     /// A native host fixture: the mount runs a host check, not a guest.
