@@ -27,7 +27,7 @@ static void writer(struct work_struct *work)
 {
 	(void)work;
 	complete(&writer_started);
-	down_write(&lock);
+	assert(!down_write_killable(&lock));
 	assert(readers_left);
 	writer_done = true;
 	up_write(&lock);
