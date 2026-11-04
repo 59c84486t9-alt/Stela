@@ -94,20 +94,15 @@ impl<T: Scsi> Owner<T> {
             })
             .collect();
     }
-}
-impl<T: Scsi> Scsi for Owner<T> {
-    type Lun = T::Lun;
-    fn take_failed_data(&mut self) -> Option<Vec<u8>> {
-        self.transport.take_failed_data()
-    }
-    fn command(
+
+    fn run<R>(
         &mut self,
-        lun: Self::Lun,
+        lun: T::Lun,
         cdb: &[u8],
-        data: Data<'_>,
-    ) -> Result<Vec<u8>, BlockError> {
+        command: impl FnOnce(&mut T) -> Result<R, BlockError>,
+    ) -> Result<R, BlockError> {
         let generation = self.transport.generation();
-        let result = self.transport.command(lun, cdb, data);
+        let result = command(&mut self.transport);
         // A removable unit's UA identifies an invalidated media view, even
         // when a later TUR consumes it and the capacity is unchanged.
         let removable = self.removable(lun);
@@ -134,6 +129,28 @@ impl<T: Scsi> Scsi for Owner<T> {
             self.invalidate();
         }
         result
+    }
+}
+impl<T: Scsi> Scsi for Owner<T> {
+    type Lun = T::Lun;
+    fn take_failed_data(&mut self) -> Option<Vec<u8>> {
+        self.transport.take_failed_data()
+    }
+    fn command(
+        &mut self,
+        lun: Self::Lun,
+        cdb: &[u8],
+        data: Data<'_>,
+    ) -> Result<Vec<u8>, BlockError> {
+        self.run(lun, cdb, |transport| transport.command(lun, cdb, data))
+    }
+    fn read_into(
+        &mut self,
+        lun: Self::Lun,
+        cdb: &[u8],
+        output: &mut [u8],
+    ) -> Result<(), BlockError> {
+        self.run(lun, cdb, |transport| transport.read_into(lun, cdb, output))
     }
     fn delay(&self, micros: u64) {
         self.transport.delay(micros);

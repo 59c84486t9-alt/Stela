@@ -9,6 +9,29 @@ mod observation_tests;
 mod timing_tests;
 
 #[test]
+fn idle_poll_reads_status_once_and_still_checks_a_silent_prefix() {
+    let (mut controller, hardware) = controller(Config::default());
+    controller.initialize().unwrap();
+    let clock = hardware.borrow().time.clone();
+    hardware.borrow_mut().status_delay_us = 1;
+
+    let started = clock.get();
+    assert!(controller.poll().unwrap().is_empty());
+    assert_eq!(clock.get() - started, 1);
+
+    hardware
+        .borrow_mut()
+        .output
+        .push_back((Port::Keyboard, 0xf0, 0));
+    let started = clock.get();
+    assert!(controller.poll().unwrap().is_empty());
+    assert_eq!(clock.get() - started, 3);
+    clock.set(clock.get() + 500);
+    let error = controller.poll().unwrap_err();
+    assert_eq!(error.kind, ErrorKind::PacketTimeout(Port::Keyboard));
+}
+
+#[test]
 fn full_reply_side_queue_preserves_every_consumed_byte_and_leaves_further_hardware_unread() {
     let (mut c, h) = controller(Config::default());
     c.initialize().unwrap();

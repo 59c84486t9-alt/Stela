@@ -203,8 +203,11 @@ impl Engine {
     pub(super) fn input_byte(&self, byte: u8) -> bool {
         self.position != 0 || !matches!(byte, ACK | RESEND | 0xfc | 0xfd)
     }
+    pub(super) fn partial(&self) -> bool {
+        self.position != 0
+    }
     pub(super) fn expire(&mut self, now: u64, timeout: u64) -> Result<(), ErrorKind> {
-        if self.position != 0 && now.wrapping_sub(self.start) >= timeout {
+        if self.partial() && now.wrapping_sub(self.start) >= timeout {
             self.last_fault = Some((self.packet, self.position));
             return Err(ErrorKind::PacketTimeout(Port::Mouse));
         }
