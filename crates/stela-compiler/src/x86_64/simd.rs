@@ -507,20 +507,36 @@ pub(super) fn emit_after(
                 }
                 Eor => packed(code, Host::Xor, 0, 1),
                 Bsl | Bit | Bif => {
-                    read_vector(code, destination, 2);
-                    if operation == Bsl {
-                        packed(code, Host::Xor, 0, 1);
-                        packed(code, Host::And, 0, 2);
-                        packed(code, Host::Xor, 0, 1);
-                    } else {
-                        packed(code, Host::Xor, 0, 2);
-                        if operation == Bit {
-                            packed(code, Host::And, 0, 1);
-                            packed(code, Host::Xor, 0, 2);
+                    // Ternary inputs are left, right and the old destination.
+                    let table = match operation {
+                        Bsl => 0xe4,
+                        Bit => 0xe2,
+                        Bif => 0xb8,
+                        _ => unreachable!(),
+                    };
+                    if !vector_extensions::ternary(
+                        code,
+                        0,
+                        1,
+                        vector_memory(destination),
+                        table,
+                        target,
+                    ) {
+                        read_vector(code, destination, 2);
+                        if operation == Bsl {
+                            packed(code, Host::Xor, 0, 1);
+                            packed(code, Host::And, 0, 2);
+                            packed(code, Host::Xor, 0, 1);
                         } else {
-                            packed(code, Host::AndNot, 1, 0);
-                            packed(code, Host::Xor, 1, 2);
-                            result = 1;
+                            packed(code, Host::Xor, 0, 2);
+                            if operation == Bit {
+                                packed(code, Host::And, 0, 1);
+                                packed(code, Host::Xor, 0, 2);
+                            } else {
+                                packed(code, Host::AndNot, 1, 0);
+                                packed(code, Host::Xor, 1, 2);
+                                result = 1;
+                            }
                         }
                     }
                 }
@@ -755,6 +771,109 @@ mod tests {
                     .flat_map(|word| word.to_le_bytes())
                     .collect();
                 assert!(crate::testing::block(&bytes, GuestAddress(0x1000)).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn bit_select_uses_ternary_logic_only_with_f_and_vl() {
+        use crate::TargetCpu;
+
+        let baseline = TargetCpu::Baseline;
+        let extended = baseline.with_avx512f().with_avx512vl();
+        for operation in [
+            IntegerOperation::Bsl,
+            IntegerOperation::Bit,
+            IntegerOperation::Bif,
+        ] {
+            for bytes in [8, 16] {
+                let operand = Operand::Integer {
+                    operation,
+                    destination: 31,
+                    left: 1,
+                    right: 2,
+                    bytes,
+                    lane_bytes: 1,
+                };
+                let emit = |target| {
+                    let mut code = Code::new();
+                    emit_for_target(&mut code, &operand, target, MemoryChecks::DEFAULT);
+                    code
+                };
+                let old = emit(baseline);
+                let new = emit(extended);
+                assert_eq!(old.instructions(), new.instructions() + 3);
+                assert!(new.len() < old.len());
+                assert!(
+                    new.windows(5)
+                        .any(|word| word[0] == 0x62 && word[4] == 0x25)
+                );
+                for target in [
+                    TargetCpu::Ssse3,
+                    TargetCpu::Sse41,
+                    TargetCpu::X86_64_V3,
+                    baseline.with_avx512f(),
+                    baseline.with_avx512vl(),
+                    extended.with_data_independent_timing(),
+                ] {
+                    assert_eq!(&emit(target)[..], &old[..], "{operation:?} {target:?}");
+                }
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn bit_select_matches_arm_masks_for_each_width_and_alias() {
+        use crate::{
+            GuestAddress, GuestState, Options, TargetCpu,
+            block::{BlockProfile, CompilationPlan},
+        };
+
+        let pc = GuestAddress(0x2a96b0);
+        let baseline = TargetCpu::Baseline;
+        let extended = baseline.with_avx512f().with_avx512vl();
+        // BIF V0.16B,V2.16B,V4.16B is from the ripgrep archive.
+        for (form, mask) in [(0x2e60_1c00_u32, 0), (0x2ea0_1c00, 1), (0x2ee0_1c00, 2)] {
+            for q in [0, 1] {
+                for [d, n, m] in [[0, 2, 4], [0, 0, 4], [0, 2, 0], [0, 2, 2], [31, 31, 31]] {
+                    let word = form | (q << 30) | (m << 16) | (n << 5) | d;
+                    for target in [baseline, extended] {
+                        if !TargetCpu::detect().supports(target) {
+                            continue;
+                        }
+                        let block = CompilationPlan::new(
+                            &word.to_le_bytes(),
+                            pc,
+                            &Options::new(BlockProfile::ORDINARY, target),
+                        )
+                        .unwrap()
+                        .compile()
+                        .unwrap();
+                        let mut state = GuestState::default();
+                        for (register, lanes) in state.v.iter_mut().enumerate() {
+                            let bits = (register as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                            *lanes = [bits ^ 0xcccc_cccc_cccc_cccc, !bits.rotate_left(23)];
+                        }
+                        let mut expected = state.clone();
+                        for lane in 0..=q as usize {
+                            let [old, left, right] = [d, n, m].map(|r| state.v[r as usize][lane]);
+                            expected.v[d as usize][lane] = match mask {
+                                0 => (old & left) | (!old & right),
+                                1 => (right & left) | (!right & old),
+                                _ => (!right & left) | (right & old),
+                            };
+                        }
+                        if q == 0 {
+                            expected.v[d as usize][1] = 0;
+                        }
+                        assert_eq!(
+                            crate::x86_64::native::run(&block.native.x86_64_code, &mut state),
+                            pc.0 + 4
+                        );
+                        assert_eq!(state, expected, "{word:08x} {target:?}");
+                    }
+                }
             }
         }
     }
