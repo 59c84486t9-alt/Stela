@@ -102,7 +102,13 @@ fn chunk(codec: Codec, data: &[u8], bytes: usize) -> Result<Vec<u8>> {
 
 /// Decode into the final file allocation. Each compressed chunk starts
 /// with empty match history even when earlier chunks share the allocation.
-fn append_chunk(codec: Codec, data: &[u8], bytes: usize, output: &mut Vec<u8>) -> Result<()> {
+fn append_chunk(
+    codec: Codec,
+    data: &[u8],
+    bytes: usize,
+    output: &mut Vec<u8>,
+    decoder: &mut crate::lzfse::Decoder,
+) -> Result<()> {
     if let Some(stored) = stored(codec, data) {
         output.extend_from_slice(stored.get(..bytes).ok_or(CHUNK_SIZE_MISMATCH)?);
         return Ok(());
@@ -125,9 +131,9 @@ fn append_chunk(codec: Codec, data: &[u8], bytes: usize, output: &mut Vec<u8>) -
         Codec::Lzvn => {
             crate::lzfse::append_lzvn(data, bytes, output).map_err(|_| CHUNK_SIZE_MISMATCH)?
         }
-        Codec::Lzfse => {
-            crate::lzfse::append(data, bytes, output).map_err(|_| CHUNK_SIZE_MISMATCH)?
-        }
+        Codec::Lzfse => decoder
+            .append(data, bytes, output)
+            .map_err(|_| CHUNK_SIZE_MISMATCH)?,
         Codec::None => unreachable!("stored above"),
     }
     if output.len() - start != bytes {
@@ -207,9 +213,10 @@ pub fn decode(header: &[u8], fork: Option<&[u8]>) -> Result<Vec<u8>> {
     bytes
         .try_reserve_exact(size)
         .map_err(|_| ApfsError::Unsupported("decmpfs file larger than memory"))?;
+    let mut decoder = crate::lzfse::Decoder::default();
     for (i, (start, end)) in chunks(codec, fork, count)?.into_iter().enumerate() {
         let want = (size - i * CHUNK_BYTES).min(CHUNK_BYTES);
-        append_chunk(codec, &fork[start..end], want, &mut bytes)?;
+        append_chunk(codec, &fork[start..end], want, &mut bytes, &mut decoder)?;
     }
     Ok(bytes)
 }

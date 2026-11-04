@@ -268,21 +268,23 @@ fn framed_output_size(src: &[u8], limit: usize) -> Option<usize> {
 /// Decode a whole LZFSE stream, producing at most `limit` bytes.
 pub fn decode(src: &[u8], limit: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    append(src, limit, &mut bytes)?;
+    Decoder::default().append(src, limit, &mut bytes)?;
     Ok(bytes)
 }
 
-/// Append one complete stream. Its matches can use only this stream's output.
-pub(crate) fn append(src: &[u8], limit: usize, bytes: &mut Vec<u8>) -> Result<()> {
-    let mut out = Output::new(bytes, limit);
-    let result = decode_stream(src, &mut out);
-    if result.is_err() {
-        out.bytes.truncate(out.start);
+impl Decoder {
+    /// Append one complete stream. Its matches can use only this stream's output.
+    pub(crate) fn append(&mut self, src: &[u8], limit: usize, bytes: &mut Vec<u8>) -> Result<()> {
+        let mut out = Output::new(bytes, limit);
+        let result = decode_stream(src, &mut out, self);
+        if result.is_err() {
+            out.bytes.truncate(out.start);
+        }
+        result
     }
-    result
 }
 
-fn decode_stream(src: &[u8], out: &mut Output<'_>) -> Result<()> {
+fn decode_stream(src: &[u8], out: &mut Output<'_>, decoder: &mut Decoder) -> Result<()> {
     // A heap without in-place growth copies all preceding output on each
     // resize. Reserve once when all block ranges fit the stream and limit.
     if out.bytes.capacity() - out.start < out.limit
@@ -318,7 +320,7 @@ fn decode_stream(src: &[u8], out: &mut Output<'_>) -> Result<()> {
                 };
                 header.check()?;
                 out.begin_block(frame.raw_bytes)?;
-                block(src, &frame, &header, out)?;
+                block(src, &frame, &header, out, decoder)?;
             }
             _ => unreachable!("validated by Frame::read"),
         }
@@ -579,8 +581,9 @@ struct LiteralEntry {
 }
 
 /// `fse_init_decoder_table`.
-fn literal_table(freq: &[u16; LITERAL_SYMBOLS]) -> Vec<LiteralEntry> {
-    let mut table = Vec::with_capacity(LITERAL_STATES);
+fn fill_literal_table(table: &mut Vec<LiteralEntry>, freq: &[u16; LITERAL_SYMBOLS]) {
+    table.clear();
+    table.reserve_exact(LITERAL_STATES);
     for (symbol, &f) in freq.iter().enumerate() {
         let f = usize::from(f);
         if f == 0 {
@@ -604,7 +607,6 @@ fn literal_table(freq: &[u16; LITERAL_SYMBOLS]) -> Vec<LiteralEntry> {
         }
     }
     table.resize(LITERAL_STATES, LiteralEntry::default());
-    table
 }
 
 /// `fse_value_decoder_entry`: one L, M or D decoder state.
@@ -617,8 +619,15 @@ struct ValueEntry {
 }
 
 /// `fse_init_value_decoder_table`.
-fn value_table(states: usize, freq: &[u16], extra_bits: &[u8], base: &[i32]) -> Vec<ValueEntry> {
-    let mut table = Vec::with_capacity(states);
+fn fill_value_table(
+    table: &mut Vec<ValueEntry>,
+    states: usize,
+    freq: &[u16],
+    extra_bits: &[u8],
+    base: &[i32],
+) {
+    table.clear();
+    table.reserve_exact(states);
     for (symbol, &f) in freq.iter().enumerate() {
         let f = usize::from(f);
         if f == 0 {
@@ -645,7 +654,6 @@ fn value_table(states: usize, freq: &[u16], extra_bits: &[u8], base: &[i32]) -> 
         }
     }
     table.resize(states, ValueEntry::default());
-    table
 }
 
 fn next_state(delta: i16, bits: u64) -> u16 {
@@ -671,27 +679,70 @@ fn decode_value(state: &mut u16, table: &[ValueEntry], input: &mut BitStream) ->
     Ok(entry.base + (bits & ((1u64 << entry.value_bits) - 1)) as i32)
 }
 
+/// Scratch for one framed stream or a sequence of independent streams.
+/// The input header bounds every vector, and each block resets its tables.
+#[derive(Default)]
+pub(crate) struct Decoder {
+    literal_table: Vec<LiteralEntry>,
+    l_table: Vec<ValueEntry>,
+    m_table: Vec<ValueEntry>,
+    d_table: Vec<ValueEntry>,
+    literals: Vec<u8>,
+}
+
 /// Decode the literals and then the L, M, D triples of one LZFSE block
 /// (`lzfse_decode` and `lzfse_decode_lmd`).
-fn block(src: &[u8], frame: &Frame, header: &Header, out: &mut Output<'_>) -> Result<()> {
-    let literal_table = literal_table(&header.literal_freq);
-    let l_table = value_table(L_STATES, &header.l_freq, &L_EXTRA_BITS, &L_BASE_VALUE);
-    let m_table = value_table(M_STATES, &header.m_freq, &M_EXTRA_BITS, &M_BASE_VALUE);
-    let d_table = value_table(D_STATES, &header.d_freq, &D_EXTRA_BITS, &D_BASE_VALUE);
+fn block(
+    src: &[u8],
+    frame: &Frame,
+    header: &Header,
+    out: &mut Output<'_>,
+    decoder: &mut Decoder,
+) -> Result<()> {
+    let Decoder {
+        literal_table,
+        l_table,
+        m_table,
+        d_table,
+        literals,
+    } = decoder;
+    fill_literal_table(literal_table, &header.literal_freq);
+    fill_value_table(
+        l_table,
+        L_STATES,
+        &header.l_freq,
+        &L_EXTRA_BITS,
+        &L_BASE_VALUE,
+    );
+    fill_value_table(
+        m_table,
+        M_STATES,
+        &header.m_freq,
+        &M_EXTRA_BITS,
+        &M_BASE_VALUE,
+    );
+    fill_value_table(
+        d_table,
+        D_STATES,
+        &header.d_freq,
+        &D_EXTRA_BITS,
+        &D_BASE_VALUE,
+    );
 
     // The literal stream may refill from any earlier byte of the input, as
     // the reference allows; a valid stream never consumes those bits.
     let mut input = BitStream::new(src, 0, frame.lmd, header.literal_bits)?;
-    let mut literals = Vec::with_capacity((header.n_literals as usize).next_multiple_of(4));
+    literals.clear();
+    literals.reserve((header.n_literals as usize).next_multiple_of(4));
     let mut states = header.literal_state;
     for _ in (0..header.n_literals).step_by(4) {
         input.refill()?;
         let [a, b, c, d] = &mut states;
         literals.extend_from_slice(&[
-            decode_literal(a, &literal_table, &mut input)?,
-            decode_literal(b, &literal_table, &mut input)?,
-            decode_literal(c, &literal_table, &mut input)?,
-            decode_literal(d, &literal_table, &mut input)?,
+            decode_literal(a, literal_table, &mut input)?,
+            decode_literal(b, literal_table, &mut input)?,
+            decode_literal(c, literal_table, &mut input)?,
+            decode_literal(d, literal_table, &mut input)?,
         ]);
     }
 
@@ -701,9 +752,9 @@ fn block(src: &[u8], frame: &Frame, header: &Header, out: &mut Output<'_>) -> Re
     let mut distance: Option<usize> = None;
     for _ in 0..header.n_matches {
         input.refill()?;
-        let l = decode_value(&mut l_state, &l_table, &mut input)? as usize;
-        let m = decode_value(&mut m_state, &m_table, &mut input)? as usize;
-        let d = decode_value(&mut d_state, &d_table, &mut input)? as usize;
+        let l = decode_value(&mut l_state, l_table, &mut input)? as usize;
+        let m = decode_value(&mut m_state, m_table, &mut input)? as usize;
+        let d = decode_value(&mut d_state, d_table, &mut input)? as usize;
         if d != 0 {
             distance = Some(d);
         }
@@ -898,6 +949,40 @@ mod tests {
     }
 
     #[test]
+    fn rebuilding_underfilled_tables_clears_previous_states() {
+        let mut decoder = Decoder::default();
+        let mut literals = [0; LITERAL_SYMBOLS];
+        literals[42] = LITERAL_STATES as u16;
+        fill_literal_table(&mut decoder.literal_table, &literals);
+        assert_eq!(decoder.literal_table[LITERAL_STATES - 1].symbol, 42);
+        literals[42] = 1;
+        fill_literal_table(&mut decoder.literal_table, &literals);
+        assert_eq!(decoder.literal_table[0].symbol, 42);
+        assert_eq!(decoder.literal_table[LITERAL_STATES - 1].symbol, 0);
+
+        let mut lengths = [0; L_SYMBOLS];
+        lengths[3] = L_STATES as u16;
+        fill_value_table(
+            &mut decoder.l_table,
+            L_STATES,
+            &lengths,
+            &L_EXTRA_BITS,
+            &L_BASE_VALUE,
+        );
+        assert_eq!(decoder.l_table[L_STATES - 1].base, 3);
+        lengths[3] = 1;
+        fill_value_table(
+            &mut decoder.l_table,
+            L_STATES,
+            &lengths,
+            &L_EXTRA_BITS,
+            &L_BASE_VALUE,
+        );
+        assert_eq!(decoder.l_table[0].base, 3);
+        assert_eq!(decoder.l_table[L_STATES - 1].base, 0);
+    }
+
+    #[test]
     fn appended_streams_cannot_match_the_existing_prefix() {
         let mut bytes = b"prefix".to_vec();
         let valid = [0xe3, b'a', b'b', b'c', 0b00_000_111, 3, 0, 0x06];
@@ -916,7 +1001,7 @@ mod tests {
         let mut framed = lzvn_block(4, &[&invalid[..4], &LZVN_END].concat());
         framed.extend(b"bvx$");
         assert_eq!(
-            append(&framed, 4, &mut bytes),
+            Decoder::default().append(&framed, 4, &mut bytes),
             Err(LzfseError::Malformed("match distance"))
         );
         assert_eq!(bytes, b"prefixabcabc");
@@ -924,7 +1009,7 @@ mod tests {
         let mut truncated = stored(b"new");
         truncated.truncate(truncated.len() - 4);
         assert_eq!(
-            append(&truncated, 3, &mut bytes),
+            Decoder::default().append(&truncated, 3, &mut bytes),
             Err(LzfseError::Truncated)
         );
         assert_eq!(bytes, b"prefixabcabc");
