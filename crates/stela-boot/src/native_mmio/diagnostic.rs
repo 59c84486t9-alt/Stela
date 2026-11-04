@@ -150,6 +150,15 @@ unsafe fn check_native_hpet(handoff: &Handoff, owner: &mut HostOwner) -> Result<
     let owned = unsafe { source.take_hpet(identity.clone()) }?;
     let prepared = Prepared::exclusive_native_hpet(owned)?;
     let counter = prepared.hpet_counter().ok_or(Error::Unavailable)?.clone();
+    {
+        let minimum = prepared.pci_minimum()?;
+        let start = counter.read_irq()?;
+        minimum.wait_us(20).map_err(|_| Error::Unavailable)?;
+        let elapsed = counter.elapsed_bounds(counter.read_irq()?.wrapping_sub(start))?;
+        if elapsed.lower_ns < 20_000 {
+            return Err(Error::InvalidPlatformReply.into());
+        }
+    }
     // SAFETY: original Source/RootIdentity, controller, IDT and ARAT
     // delivery stay pinned. This diagnostic creates no production producer.
     unsafe { crate::native_clock::diagnostic::check_native(identity, prepared) }?;

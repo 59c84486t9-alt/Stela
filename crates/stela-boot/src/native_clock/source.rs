@@ -1,14 +1,69 @@
 //! Source selection. No nominal TSC/frequency or bootstrap Cpu.
 use super::{WorkError, counter::Counter, pm};
-use alloc::sync::Arc;
+use alloc::{rc::Rc, sync::Arc};
 pub(crate) use stela_boot_core::hpet::ElapsedBounds;
 pub(super) use stela_boot_core::source_health::Health;
+use stela_drivers::bus::pci::power::{Error as TimerError, Timer};
 
 #[derive(Clone)]
 pub(crate) enum Prepared {
     Pm(pm::Prepared),
     Hpet(Arc<Counter>),
 }
+/// Process-only physical minimum from a retained native HPET handoff.
+struct HpetMinimum(Arc<Counter>);
+
+impl HpetMinimum {
+    fn target(&self, microseconds: u64) -> Result<u64, WorkError> {
+        self.0.check_process()?;
+        let ns = microseconds
+            .checked_mul(1_000)
+            .ok_or(WorkError::Exhausted)?;
+        let ticks = self.0.ticks_for_minimum_ns(ns)?;
+        if ticks > u64::MAX / 2 {
+            return Err(WorkError::Exhausted);
+        }
+        Ok(ticks)
+    }
+
+    fn validate(&self) -> Result<(), WorkError> {
+        // Cover the longest PCI power readiness interval before admitting use.
+        self.target(60_000_000)?;
+        let start = self.0.read_irq()?;
+        self.0.progress_after(start)?;
+        Ok(())
+    }
+}
+
+// SAFETY: the exclusive native counter retains its source and verifies root,
+// process and power continuity. Only conservative HPET ticks satisfy a wait.
+unsafe impl Timer for HpetMinimum {
+    fn check(&self) -> Result<(), TimerError> {
+        self.validate().map_err(|_| TimerError::Clock)
+    }
+
+    fn wait_us(&self, microseconds: u64) -> Result<(), TimerError> {
+        let mut remaining = self.target(microseconds).map_err(|_| TimerError::Clock)?;
+        let mut current = self.0.read_irq().map_err(|_| TimerError::Clock)?;
+        while remaining != 0 {
+            let mut next = self.0.read_irq().map_err(|_| TimerError::Clock)?;
+            if next == current {
+                next = self
+                    .0
+                    .progress_after(current)
+                    .map_err(|_| TimerError::Clock)?;
+            }
+            let elapsed = next.wrapping_sub(current);
+            if elapsed > u64::MAX / 2 {
+                return Err(TimerError::Clock);
+            }
+            remaining = remaining.saturating_sub(elapsed);
+            current = next;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum Observation {
     BoundedPm {
@@ -71,6 +126,13 @@ impl Prepared {
     ) -> Result<Self, WorkError> {
         Counter::attach_native_exclusive(owner).map(|counter| Self::Hpet(Arc::new(counter)))
     }
+    pub(crate) fn pci_minimum(&self) -> Result<Rc<dyn Timer>, WorkError> {
+        let counter = self.hpet_counter().ok_or(WorkError::Unavailable)?;
+        let minimum = HpetMinimum(counter.clone());
+        minimum.validate()?;
+        Ok(Rc::new(minimum))
+    }
+
     pub(crate) fn hpet_counter(&self) -> Option<&Arc<super::HpetCounter>> {
         match self {
             Self::Hpet(counter) => Some(counter),
