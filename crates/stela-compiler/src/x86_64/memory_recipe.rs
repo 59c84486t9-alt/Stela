@@ -280,10 +280,11 @@ pub(super) fn scalar(
                 accessed()
             };
             // A fault leaves a host destination as it was.
-            // Offset loads have no pending writeback. Keep an unpinned
-            // result in RAX so the following instruction can use it
-            // without reloading it from the frame.
-            let scratch = if code.is_pinned() && mode == AddressMode::Offset {
+            // Offset loads have no pending writeback. Keep a direct
+            // result in RAX for the next instruction. Region recipes
+            // retain their separate address and result registers.
+            let hold_result = code.is_pinned() || (recipe.is_none() && !code.constant_time());
+            let scratch = if hold_result && mode == AddressMode::Offset {
                 Gpr::Rax
             } else {
                 Gpr::Rcx
