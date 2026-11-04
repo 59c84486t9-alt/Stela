@@ -426,7 +426,7 @@ struct stela_linux_task *stela_linux_task_allocate(void)
 {
     /* Canonical tasks have actual original factories; never allocate a bare
      * replacement before or after the initial source claim. */
-	if (stela_linux_kernel_catalogue_active() || initial_claimed ||
+	if (stela_linux_kernel_source_active() || initial_claimed ||
 	    stela_linux_kernel_prepare_resource()) {
 		return NULL;
 	}
@@ -459,10 +459,10 @@ struct stela_linux_task *stela_linux_task_allocate(void)
 /* No general task-pointer adoption API exists. The sole initial producer
  * names the actual pinned original object itself. It retains both this record
  * and init_task forever on any uncertain/partial bootstrap. */
-int stela_linux_task_initial_allocate(const struct stela_linux_owner *owner,
+static int initial_allocate(const struct stela_linux_owner *owner,
 	void *pgd, struct stela_linux_task **result)
 {
-	if (!owner || !stela_linux_kernel_catalogue_active() ||
+	if (!owner || !stela_linux_kernel_source_active() ||
 	    !stela_linux_kernel_owner_allowed(owner) || stela_linux_kernel_prepare_resource())
 		return -EPERM;
 	if (!result || !pgd || ((unsigned long)pgd & (PAGE_SIZE - 1UL)))
@@ -487,6 +487,31 @@ int stela_linux_task_initial_allocate(const struct stela_linux_owner *owner,
 	*result = task;
 	return 0;
 }
+
+int stela_linux_task_initial_allocate(const struct stela_linux_owner *owner,
+	void *pgd, struct stela_linux_task **result)
+{
+	if (!stela_linux_kernel_catalogue_active())
+		return -EPERM;
+	return initial_allocate(owner, pgd, result);
+}
+
+#ifdef __linux__
+int stela_linux_task_hosted_initial_allocate(const struct stela_linux_owner *owner,
+	void *pgd, struct stela_linux_task **result)
+{
+	if (!stela_linux_kernel_hosted())
+		return -EPERM;
+	int error = initial_allocate(owner, pgd, result);
+	if (error)
+		return error;
+	/* This actual process image keeps init_task's C storage. The C record
+	 * owns the original task reference after attach. The native Rust data
+	 * publisher and its IRQ writer are never exposed to this model. */
+	struct stela_linux_task_data_view view;
+	return stela_linux_task_data_prepare(*result, owner, &view);
+}
+#endif
 /* Actual source birth -> private metadata only. Native stack/page/rank/record
  * publication and original copy_process resources remain separate obligations. */
 int stela_linux_task_child_allocate(const struct stela_linux_owner *owner,
@@ -669,7 +694,7 @@ static struct stela_linux_task *data_record(struct stela_linux_task_data *lease)
 int stela_linux_task_data_prepare(struct stela_linux_task *requested,
     const struct stela_linux_owner *owner, struct stela_linux_task_data_view *view)
 {
-    if (!owner || !view || !stela_linux_kernel_catalogue_active() ||
+    if (!owner || !view || !stela_linux_kernel_source_active() ||
         !stela_linux_kernel_owner_allowed(owner) || stela_linux_kernel_prepare_resource())
         return -EPERM;
     struct stela_linux_task *record;
@@ -1179,7 +1204,7 @@ int stela_linux_require_current(const struct stela_linux_owner *owner)
 {
 	if (!owner)
 		return -EINVAL;
-	if (!stela_linux_kernel_catalogue_active() || !stela_linux_kernel_owner_allowed(owner))
+	if (!stela_linux_kernel_source_active() || !stela_linux_kernel_owner_allowed(owner))
 		return -EPERM;
 	struct stela_linux_task *task = __atomic_load_n(&active, __ATOMIC_ACQUIRE);
 	if (!task || !live_here(task, &task->context))

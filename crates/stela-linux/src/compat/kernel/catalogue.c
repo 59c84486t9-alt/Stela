@@ -22,11 +22,11 @@ struct entry {
 };
 static const struct stela_linux_owner *kernel_owner;
 static bool ready, canonical_environment;
-/* Irreversible: 0 = untouched, 1 = legacy activity, 2 = canonical claim.
- * Even a finished legacy environment/entry does not qualify global adoption. */
+/* Irreversible. Even a finished legacy entry precludes canonical adoption. */
+enum kernel_mode { COLD, LEGACY, NATIVE, HOSTED };
 static unsigned int bootstrap;
-/* Same original x86 types/runtime folding, populated from the real native
- * root product. Zero is unbound, not an assumed four-level mode. */
+/* The original x86 types share this runtime folding state. Zero is unbound.
+ * Native and hosted geometry each require their own mount. */
 unsigned int __pgtable_l5_enabled;
 unsigned int pgdir_shift;
 unsigned int ptrs_per_p4d;
@@ -40,7 +40,7 @@ static bool geometry_consistent(void)
 }
 static bool geometry_owner(const struct stela_linux_owner *owner)
 {
-	return owner && __atomic_load_n(&bootstrap, __ATOMIC_ACQUIRE) == 2 &&
+	return owner && stela_linux_kernel_catalogue_active() &&
 		owner == __atomic_load_n(&kernel_owner, __ATOMIC_ACQUIRE);
 }
 int stela_linux_kernel_geometry_storage(const struct stela_linux_owner *owner,
@@ -57,6 +57,21 @@ int stela_linux_kernel_geometry_storage(const struct stela_linux_owner *owner,
 	addresses[3] = (unsigned long)&geometry_state;
 	return 0;
 }
+static int publish_geometry(unsigned int actual_levels)
+{
+	if (CONFIG_PGTABLE_LEVELS != 5 || (actual_levels != 4 && actual_levels != 5))
+		return -EINVAL;
+	unsigned int fresh = 0;
+	if (!__atomic_compare_exchange_n(&geometry_state, &fresh, 1, false,
+		__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+		return -EALREADY;
+	/* The commit tail publishes the matching fields together. */
+	__pgtable_l5_enabled = actual_levels == 5;
+	pgdir_shift = actual_levels == 5 ? 48 : 39;
+	ptrs_per_p4d = actual_levels == 5 ? 512 : 1;
+	__atomic_store_n(&geometry_state, 2, __ATOMIC_RELEASE);
+	return 0;
+}
 int stela_linux_kernel_geometry_bind(const struct stela_linux_owner *owner,
                                    unsigned int actual_levels)
 {
@@ -64,18 +79,7 @@ int stela_linux_kernel_geometry_bind(const struct stela_linux_owner *owner,
 	    __atomic_load_n(&canonical_environment, __ATOMIC_ACQUIRE) ||
 	    __atomic_load_n(&ready, __ATOMIC_ACQUIRE))
 		return -EPERM;
-	if (CONFIG_PGTABLE_LEVELS != 5 || (actual_levels != 4 && actual_levels != 5))
-		return -EINVAL;
-	unsigned int fresh = 0;
-	if (!__atomic_compare_exchange_n(&geometry_state, &fresh, 1, false,
-		__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-		return -EALREADY;
-	/* No fallible operation follows this actual native-product commit. */
-	__pgtable_l5_enabled = actual_levels == 5;
-	pgdir_shift = actual_levels == 5 ? 48 : 39;
-	ptrs_per_p4d = actual_levels == 5 ? 512 : 1;
-	__atomic_store_n(&geometry_state, 2, __ATOMIC_RELEASE);
-	return 0;
+	return publish_geometry(actual_levels);
 }
 int stela_linux_kernel_geometry_ready(const struct stela_linux_owner *owner)
 {
@@ -83,26 +87,49 @@ int stela_linux_kernel_geometry_ready(const struct stela_linux_owner *owner)
 }
 unsigned int stela_linux_task_initial_root_levels(void)
 {
-	if (!geometry_consistent())
+	if (!stela_linux_kernel_catalogue_active() || !geometry_consistent())
 		return 0;
 	return __pgtable_l5_enabled ? 5 : 4;
 }
 static LIST_HEAD(devices);
 static u64 quarantined;
 
-int stela_linux_kernel_claim(const struct stela_linux_owner *owner)
+static int claim(const struct stela_linux_owner *owner, enum kernel_mode mode)
 {
 	if (!owner)
 		return -EINVAL;
 	if (stela_linux_pci_devices_present())
 		return -EBUSY;
-	unsigned int fresh = 0;
-	if (!__atomic_compare_exchange_n(&bootstrap, &fresh, 2, false,
+	unsigned int fresh = COLD;
+	if (!__atomic_compare_exchange_n(&bootstrap, &fresh, mode, false,
 		__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-		return fresh == 2 ? -EALREADY : -EBUSY;
+		return fresh == NATIVE || fresh == HOSTED ? -EALREADY : -EBUSY;
 	__atomic_store_n(&kernel_owner, owner, __ATOMIC_RELEASE);
 	return 0;
 }
+int stela_linux_kernel_claim(const struct stela_linux_owner *owner)
+{
+	return claim(owner, NATIVE);
+}
+
+#ifdef __linux__
+int stela_linux_kernel_claim_hosted(const struct stela_linux_owner *owner)
+{
+	if (CONFIG_PGTABLE_LEVELS != 5)
+		return -EOPNOTSUPP;
+	int error = claim(owner, HOSTED);
+	if (error)
+		return error;
+	/* The host fixture owns one inert four-level model root. The actual
+	 * host's hardware geometry is neither queried nor used. */
+	if (publish_geometry(4))
+		__builtin_trap();
+	__atomic_store_n(&canonical_environment, true, __ATOMIC_RELEASE);
+	__atomic_store_n(&ready, true, __ATOMIC_RELEASE);
+	return 0;
+}
+#endif
+
 int stela_linux_kernel_environment(const struct stela_linux_owner *owner)
 {
 	/* Every consumer uses the SAME max5/runtime-folded architecture ABI.
@@ -113,44 +140,46 @@ int stela_linux_kernel_environment(const struct stela_linux_owner *owner)
 		return -EINVAL;
 	const struct stela_linux_owner *claimed = __atomic_load_n(&kernel_owner, __ATOMIC_ACQUIRE);
 	if (claimed) {
-		if (owner != claimed || !geometry_consistent())
+		if (!stela_linux_kernel_catalogue_active() || owner != claimed ||
+		    !geometry_consistent())
 			return -EPERM;
 		bool expected = false;
 		return __atomic_compare_exchange_n(&canonical_environment, &expected, true, false,
 			__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ? 0 : -EALREADY;
 	}
-	unsigned int fresh = 0;
-	if (__atomic_compare_exchange_n(&bootstrap, &fresh, 1, false,
-		__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) || fresh == 1)
+	unsigned int fresh = COLD;
+	if (__atomic_compare_exchange_n(&bootstrap, &fresh, LEGACY, false,
+		__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) || fresh == LEGACY)
 		return 0;
 	return -EPERM;
 }
 bool stela_linux_kernel_owner_allowed(const struct stela_linux_owner *owner)
 {
-	if (__atomic_load_n(&bootstrap, __ATOMIC_ACQUIRE) != 2)
+	if (!stela_linux_kernel_source_active())
 		return true;
 	return owner && owner == __atomic_load_n(&kernel_owner, __ATOMIC_ACQUIRE) &&
 		__atomic_load_n(&ready, __ATOMIC_ACQUIRE);
 }
 int stela_linux_kernel_prepare_resource(void)
 {
-	unsigned int fresh = 0;
-	if (__atomic_compare_exchange_n(&bootstrap, &fresh, 1, false,
-		__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) || fresh == 1)
+	unsigned int fresh = COLD;
+	if (__atomic_compare_exchange_n(&bootstrap, &fresh, LEGACY, false,
+		__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) || fresh == LEGACY)
 		return 0;
 	return __atomic_load_n(&ready, __ATOMIC_ACQUIRE) ? 0 : -EPERM;
 }
 int stela_linux_kernel_entry(const struct stela_linux_owner *owner)
 {
-	unsigned int fresh = 0;
-	if (__atomic_compare_exchange_n(&bootstrap, &fresh, 1, false,
-		__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) || fresh == 1)
+	unsigned int fresh = COLD;
+	if (__atomic_compare_exchange_n(&bootstrap, &fresh, LEGACY, false,
+		__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) || fresh == LEGACY)
 		return 0;
 	return stela_linux_kernel_owner_allowed(owner) ? 0 : -EPERM;
 }
 int stela_linux_kernel_ready(const struct stela_linux_owner *owner)
 {
-	if (!owner || __atomic_load_n(&kernel_owner, __ATOMIC_ACQUIRE) != owner ||
+	if (!stela_linux_kernel_catalogue_active() || !owner ||
+	    __atomic_load_n(&kernel_owner, __ATOMIC_ACQUIRE) != owner ||
 	    !__atomic_load_n(&canonical_environment, __ATOMIC_ACQUIRE) ||
 	    !geometry_consistent())
 		return -EPERM;
@@ -159,11 +188,21 @@ int stela_linux_kernel_ready(const struct stela_linux_owner *owner)
 }
 bool stela_linux_kernel_catalogue_active(void)
 {
-	return __atomic_load_n(&bootstrap, __ATOMIC_ACQUIRE) == 2;
+	return __atomic_load_n(&bootstrap, __ATOMIC_ACQUIRE) == NATIVE;
+}
+bool stela_linux_kernel_source_active(void)
+{
+	unsigned int mode = __atomic_load_n(&bootstrap, __ATOMIC_ACQUIRE);
+	return mode == NATIVE || mode == HOSTED;
+}
+bool stela_linux_kernel_hosted(void)
+{
+	return __atomic_load_n(&bootstrap, __ATOMIC_ACQUIRE) == HOSTED;
 }
 static bool ours(void)
 {
-	return __atomic_load_n(&ready, __ATOMIC_ACQUIRE) &&
+	return stela_linux_kernel_catalogue_active() &&
+           __atomic_load_n(&ready, __ATOMIC_ACQUIRE) &&
            stela_linux_owner() == __atomic_load_n(&kernel_owner, __ATOMIC_ACQUIRE);
 }
 static struct entry *find(const struct device *dev)
@@ -242,6 +281,8 @@ int stela_linux_device_inherit(struct device *dev)
 }
 bool stela_linux_device_publish_allowed(struct device *dev)
 {
+	if (stela_linux_kernel_hosted())
+		return false;
 	if (!stela_linux_kernel_catalogue_active())
 		return true; /* existing non-canonical GPU composition is not migrated */
 	if (!ours())

@@ -114,6 +114,11 @@ struct stela_linux_task *stela_linux_task_allocate(void);
  * is bounded/nonblocking and grants no page-table editing authority. */
 int stela_linux_task_initial_allocate(const struct stela_linux_owner *owner,
 	void *pgd, struct stela_linux_task **result);
+#ifdef __linux__
+/* The same original task, with process-image data and a kept model PGD. */
+int stela_linux_task_hosted_initial_allocate(const struct stela_linux_owner *owner,
+	void *pgd, struct stela_linux_task **result);
+#endif
 /* One genuine original Initial/Managed current + source-owned resource subset.
  * This never establishes global bootstrap/workqueue/SRCU FullReady. */
 int stela_linux_require_current(const struct stela_linux_owner *owner);

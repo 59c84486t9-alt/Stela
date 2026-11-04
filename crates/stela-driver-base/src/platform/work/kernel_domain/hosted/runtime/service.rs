@@ -70,6 +70,29 @@ impl<const N: usize> HostedRuntime<N> {
         self.service.as_ref().ok_or(WorkError::Unavailable)
     }
 
+    /// Verify the constructor-owned persistent service lane before a source
+    /// claims its permanent C record.
+    pub fn preflight_service(&self, required: StackRequirement) -> Result<(), WorkError> {
+        self.dispatcher_successor()?;
+        let service = self.service()?;
+        let Mode::Persistent { started, .. } = &service.mode else {
+            return Err(WorkError::Unavailable);
+        };
+        if service.retired.get() || self.queue.lock()?.state().closed {
+            return Err(WorkError::Closed);
+        }
+        if started.get() {
+            return Err(WorkError::Busy);
+        }
+        // SAFETY: immutable constructor-owned stack geometry, on the
+        // original dispatcher with every hosted continuation stopped.
+        let task = unsafe { &*self.task(self.count - 1) };
+        if !required.accepts(task.stack.geometry) {
+            return Err(WorkError::InvalidStack);
+        }
+        Ok(())
+    }
+
     /// Check that this exact capture is live on its reserved service stack.
     pub fn validate_service_batch(&self, batch: &HostedBatch) -> Result<(), WorkError> {
         self.current_context()?;

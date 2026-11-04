@@ -6,6 +6,10 @@ struct device;
 struct stela_linux_owner;
 /* One mount-lifetime kernel owner. A failed claim is never reset. */
 int stela_linux_kernel_claim(const struct stela_linux_owner *owner);
+#ifdef __linux__
+/* Host-only process image and model page-table geometry. */
+int stela_linux_kernel_claim_hosted(const struct stela_linux_owner *owner);
+#endif
 /* Actual native producer only, exact fresh claimed owner before Environment. */
 int stela_linux_kernel_geometry_bind(const struct stela_linux_owner *owner,
                                    unsigned int actual_levels);
@@ -21,6 +25,8 @@ int stela_linux_kernel_entry(const struct stela_linux_owner *owner);
 /* Pre-entry task/WQ allocation also forbids adopting a legacy kernel later. */
 int stela_linux_kernel_prepare_resource(void);
 bool stela_linux_kernel_catalogue_active(void);
+bool stela_linux_kernel_source_active(void);
+bool stela_linux_kernel_hosted(void);
 /* Root binding takes authority only on success. It retains no self-device ref.
  * Caller owns the initialized original device through publication/final put. */
 int stela_linux_device_bind(struct device *dev, void *authority,

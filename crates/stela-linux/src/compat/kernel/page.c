@@ -20,6 +20,7 @@
 #include <linux/thread_info.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/task_stack.h>
+#include <stela/catalogue.h>
 #include <stela/linux.h>
 #include <stela/page.h>
 #include <stela/task.h>
@@ -262,6 +263,8 @@ static int register_inventory(
     const struct stela_linux_page_reservation *extents, const u32 *kinds,
     size_t extent_count, const struct stela_linux_page_ops *ops, void *context)
 {
+    if (stela_linux_kernel_hosted())
+        return -EPERM;
     require_quiescence();
     if (catalog.pages)
         return -EBUSY;
@@ -384,6 +387,8 @@ int stela_linux_page_catalog_register_extents_v2(
     const struct stela_linux_page_reservation *extents, size_t extent_count,
     const struct stela_linux_page_ops_v2 *ops, void *context)
 {
+    if (stela_linux_kernel_hosted())
+        return -EPERM;
     require_quiescence();
     if (catalog.pages)
         return -EBUSY;
@@ -403,6 +408,8 @@ int stela_linux_page_catalog_register_annotated(
     const struct stela_linux_page_inventory_v3 *inventory,
     const struct stela_linux_page_ops_v2 *ops, void *context)
 {
+    if (stela_linux_kernel_hosted())
+        return -EPERM;
     require_quiescence();
     if (catalog.pages)
         return -EBUSY;

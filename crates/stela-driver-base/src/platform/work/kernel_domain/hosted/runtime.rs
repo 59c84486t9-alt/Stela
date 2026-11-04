@@ -294,6 +294,11 @@ impl<const N: usize> Drop for HostedExecutor<N> {
 }
 
 impl<const N: usize> HostedRuntime<N> {
+    /// Original OS-thread owner of this runtime's modeled memory namespace.
+    pub fn execution(&self) -> &Arc<super::HostedExecution> {
+        &self.queue.execution
+    }
+
     fn task(&self, index: usize) -> *mut Task {
         // SAFETY: internal indices always name one initialized task in the
         // immutable, retained allocation.
