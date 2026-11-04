@@ -122,7 +122,7 @@ impl PreparingRequester {
     /// kept; no Stela submission/IRQ/work user exists yet. This grants no
     /// endpoint engine stop, posted-payload drain or new DMA domain.
     pub unsafe fn new(
-        mut function: Function<OwnedConfig>,
+        function: Function<OwnedConfig>,
         role: FunctionRole,
         root: Box<dyn Root>,
     ) -> Result<Self, Rejected> {
@@ -133,33 +133,43 @@ impl PreparingRequester {
                 root,
             });
         }
-        let address = function.address;
-        if address != function.config().address() {
-            return Err(Rejected {
-                error: ClaimError::IdentityChanged,
-                function,
-                root,
-            });
-        }
-        let retained = match function.config().retain_epoch() {
+        // Keep the original graph before the first configuration callback.
+        // Explicit refusal returns it; an unwind cannot drop its old root.
+        let mut pending = core::mem::ManuallyDrop::new((function, root));
+        let address = pending.0.address;
+        let retained = (|| {
+            let config = pending.0.config();
+            if address != config.address() {
+                return Err(ClaimError::IdentityChanged);
+            }
+            config.retain_epoch().map_err(ClaimError::Mapping)
+        })();
+        let retained = match retained {
             Ok(retained) => retained,
             Err(error) => {
+                let (function, root) = core::mem::ManuallyDrop::into_inner(pending);
                 return Err(Rejected {
-                    error: ClaimError::Mapping(error),
+                    error,
                     function,
                     root,
                 });
             }
         };
-        let identity = (function.vendor, function.device, function.class);
+        let identity = (pending.0.vendor, pending.0.device, pending.0.class);
+        // Allocate the complete retained stage before ending the unwind guard.
+        let mut resources = Box::new_uninit();
+        let (function, root) = core::mem::ManuallyDrop::into_inner(pending);
+        resources.write(Resources {
+            function,
+            retained,
+            address,
+            identity,
+            root,
+        });
+        // SAFETY: the exact resource record was initialized above.
+        let resources = unsafe { resources.assume_init() };
         Ok(Self {
-            owner: Owner(Some(Box::new(Resources {
-                function,
-                retained,
-                address,
-                identity,
-                root,
-            }))),
+            owner: Owner(Some(resources)),
         })
     }
 
@@ -204,13 +214,24 @@ impl QuiescenceReceipt {
             // SAFETY: the consumed driver receipt excludes new producers;
             // the original configuration seal still matches, its root drain
             // completed, and all owners stay in this attempt until success.
-            unsafe {
-                resources.root.bind(RequesterBinding {
-                    address: resources.address,
-                    retention: retained,
-                })
+            let attachment = core::mem::ManuallyDrop::new(
+                unsafe {
+                    resources.root.bind(RequesterBinding {
+                        address: resources.address,
+                        retention: retained,
+                    })
+                }
+                .map_err(Error::Dma)?,
+            );
+            if !function
+                .config()
+                .matches_retention(&resources.retained)
+                .map_err(|error| Error::Claim(ClaimError::Mapping(error)))?
+            {
+                return Err(Error::ForeignOwner);
             }
-            .map_err(Error::Dma)
+            validate_stopped(function).map_err(Error::Claim)?;
+            Ok(core::mem::ManuallyDrop::into_inner(attachment))
         })();
         match result {
             Ok(attachment) => {

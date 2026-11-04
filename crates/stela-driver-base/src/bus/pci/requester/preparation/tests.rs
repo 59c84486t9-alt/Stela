@@ -6,11 +6,15 @@ use crate::bus::{
         mapping::{Direction, DomainMapping},
         pages::DmaPages,
     },
-    pci::{owned::test_support::fixture, regs},
+    pci::{
+        owned::test_support::{fixture, fixture_pointer},
+        regs,
+    },
 };
 use alloc::vec::Vec;
 use core::{
     ops::Range,
+    ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::sync::Mutex;
@@ -39,6 +43,7 @@ struct OldRoot {
     owner: Arc<RootOwner>,
     drain_error: bool,
     bind_error: bool,
+    bind_drift: Option<NonNull<u16>>,
 }
 struct Domain {
     binding: Mutex<Option<RequesterBinding>>,
@@ -76,6 +81,15 @@ unsafe impl Root for OldRoot {
             .push("new domain attachment");
         if self.bind_error {
             return Err(DmaError::MappingFailed);
+        }
+        if let Some(command) = self.bind_drift {
+            // SAFETY: the original model holds the exact isolated RAM
+            // register. Simulate a hardware change during binding.
+            unsafe {
+                command
+                    .as_ptr()
+                    .write_volatile(regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE);
+            }
         }
         Ok(Box::new(Control {
             domain: Arc::new(Domain {
@@ -160,17 +174,26 @@ fn function(address: Address) -> Function<OwnedConfig> {
     Function::new(address, config).unwrap()
 }
 fn preparing(drain_error: bool, bind_error: bool) -> (PreparingRequester, Arc<State>) {
+    preparing_with_drift(drain_error, bind_error, false)
+}
+fn preparing_with_drift(
+    drain_error: bool,
+    bind_error: bool,
+    drift: bool,
+) -> (PreparingRequester, Arc<State>) {
     let state = Arc::new(State::default());
+    let mut function = function(ADDRESS);
+    let bind_drift = drift.then(|| fixture_pointer(function.config(), regs::COMMAND).cast());
     let root = Box::new(OldRoot {
         owner: Arc::new(RootOwner(state.clone())),
         drain_error,
         bind_error,
+        bind_drift,
     });
     // SAFETY: exact isolated function/root, with no firmware/IRQ/work users;
     // the peer starts idle but this construction makes no engine-stop grant.
-    let prepared =
-        unsafe { PreparingRequester::new(function(ADDRESS), FunctionRole::Physical, root) }
-            .unwrap_or_else(|_| panic!("original fixture owners"));
+    let prepared = unsafe { PreparingRequester::new(function, FunctionRole::Physical, root) }
+        .unwrap_or_else(|_| panic!("original fixture owners"));
     (prepared, state)
 }
 #[test]
@@ -273,6 +296,28 @@ fn configuration_activity_is_rechecked_after_old_root_completion() {
         })
     );
     assert_eq!(*state.events.lock().unwrap(), ["old root completion"]);
+}
+
+#[test]
+fn hardware_drift_during_binding_retains_the_new_attachment() {
+    let (prepared, state) = preparing_with_drift(false, false, true);
+    // SAFETY: the model has no active device or callback; the original
+    // command register changes only during the later bind operation.
+    let receipt = unsafe { prepared.acknowledge_quiescence() };
+    let failure = receipt.finalize().err().expect("drift refused");
+    assert_eq!(
+        failure.error,
+        Error::Claim(ClaimError::Active {
+            offset: regs::COMMAND
+        })
+    );
+    assert_eq!(
+        *state.events.lock().unwrap(),
+        ["old root completion", "new domain attachment"]
+    );
+    drop(failure);
+    assert_eq!(state.drops.load(Ordering::Relaxed), 0);
+    assert_eq!(state.detachments.load(Ordering::Relaxed), 0);
 }
 
 #[test]
