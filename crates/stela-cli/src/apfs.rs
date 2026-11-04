@@ -33,8 +33,9 @@ impl ReadAt for Image {
 }
 
 pub fn open_image(path: &Path) -> Result<Image> {
-    let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-    let bytes = file.metadata()?.len();
+    let mut file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    // A block device's metadata has no length; its end has.
+    let bytes = file.seek(SeekFrom::End(0))?;
     Ok(Image { file, bytes })
 }
 
