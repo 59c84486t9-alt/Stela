@@ -1025,6 +1025,10 @@ pub(super) fn rax_after(operation: &Operation, code: &Code) -> Rax {
         }) if (code.is_pinned() || !code.constant_time()) && data != Register::Zero => {
             Rax::Guest(data)
         }
+        Operation::Bitfield(operand) if bitfield::is_low_dword_insert(&operand) => {
+            // This recipe writes the frame or pinned destination directly.
+            Rax::Unknown
+        }
         Operation::Bitfield(crate::aarch64::bitfield::Operand { destination, .. })
         | Operation::PcRelative(crate::aarch64::pc_relative::Operand { destination, .. })
             if !code.constant_time() && destination != Register::Zero =>

@@ -4,7 +4,7 @@ use crate::aarch64::bitfield::{Kind, Operand};
 use crate::x86_64::asm::{
     Alu, Code,
     Gpr::{Rax, Rcx, Rdx},
-    ShiftOp, Size,
+    Rm, ShiftOp, Size,
 };
 
 /// SXTB, UXTH, SXTW and the other extensions of a field at bit zero as one
@@ -35,10 +35,55 @@ fn shift(code: &mut Code, width: Width, op: ShiftOp, amount: u8) {
     }
 }
 
+/// BFXIL Xd, Xn, #0, #32 can write its low half directly.
+pub(super) fn is_low_dword_insert(operand: &Operand) -> bool {
+    operand.width == Width::X64
+        && operand.kind == Kind::Insert
+        && operand.rotation == 0
+        && operand.mask_end == 31
+}
+
+fn insert_low_dword(code: &mut Code, destination: Register, source: Register) {
+    let mut asm = code.asm();
+    if destination == source {
+        // Keep the source row even though the architectural value is unchanged.
+        asm.nop();
+        return;
+    }
+    let destination = asm
+        .guest(destination)
+        .expect("discarded destination handled");
+    let source = asm.guest(source);
+    match destination {
+        Rm::Mem(destination) => match source {
+            Some(Rm::Reg(source)) => asm.mov_store(Size::Dword, destination, source),
+            Some(source) => {
+                asm.mov_load(Size::Dword, Rax, source);
+                asm.mov_store(Size::Dword, destination, Rax);
+            }
+            None => asm.mov_rm_imm32(Size::Dword, destination, 0),
+        },
+        Rm::Reg(destination) => {
+            // XOR the low-half delta into the full destination. EAX
+            // zero-extends, so the high half survives the final XOR.
+            asm.mov_load(Size::Dword, Rax, destination);
+            if let Some(source) = source {
+                asm.alu_load(Alu::Xor, Size::Dword, Rax, source);
+            }
+            asm.alu(Alu::Xor, Size::Qword, destination, Rax);
+        }
+        Rm::Xmm(_) => unreachable!("guest integer storage"),
+    }
+}
+
 pub(super) fn emit(code: &mut Code, operand: &Operand) {
     if operand.destination == Register::Zero {
         // Discarding a result must still own a nonempty source-map interval.
         code.asm().nop();
+        return;
+    }
+    if is_low_dword_insert(operand) {
+        insert_low_dword(code, operand.destination, operand.source);
         return;
     }
     let bits = match operand.width {
@@ -137,6 +182,81 @@ mod tests {
             },
         );
         result.into_bytes()
+    }
+
+    #[test]
+    fn low_dword_insert_updates_each_kind_of_destination_directly() {
+        use crate::aarch64::Operation;
+        use crate::x86_64::{Rax, rax_after};
+
+        // A sampled macOS boot instruction: BFXIL X17, X1, #0, #32.
+        let operand = crate::aarch64::bitfield::decode(0xb340_7c31).unwrap();
+        for pinned in [false, true] {
+            for dit in [false, true] {
+                let mut code = Code::new();
+                code.set_pinned(pinned);
+                code.set_constant_time(dit);
+                emit(&mut code, &operand);
+                if pinned {
+                    assert_eq!(code, [0x41, 0x8b, 0xc5, 0x33, 0xc5, 0x49, 0x31, 0xc5]);
+                } else {
+                    assert_eq!(code, [0x8b, 0x87, 8, 0, 0, 0, 0x89, 0x87, 136, 0, 0, 0]);
+                }
+                assert_eq!(
+                    rax_after(&Operation::Bitfield(operand), &code),
+                    Rax::Unknown
+                );
+                for (destination, source) in [
+                    (operand.destination, operand.destination),
+                    (Register::Zero, operand.source),
+                ] {
+                    code.clear();
+                    code.set_pinned(pinned);
+                    emit(
+                        &mut code,
+                        &Operand {
+                            destination,
+                            source,
+                            ..operand
+                        },
+                    );
+                    assert_eq!(code, [0x90]);
+                }
+                code.clear();
+                code.set_pinned(pinned);
+                emit(
+                    &mut code,
+                    &Operand {
+                        source: Register::Zero,
+                        ..operand
+                    },
+                );
+                if pinned {
+                    assert_eq!(code, [0x41, 0x8b, 0xc5, 0x49, 0x31, 0xc5]);
+                } else {
+                    assert_eq!(code, [0xc7, 0x87, 136, 0, 0, 0, 0, 0, 0, 0]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn low_dword_insert_leaves_a_following_full_width_read() {
+        use crate::{GuestAddress, Options, TargetCpu, block::BlockProfile};
+
+        // BFXIL X17,X1,#0,#32; ADD X14,X17,#1.
+        let source: Vec<_> = [0xb340_7c31u32, 0x9100_062e]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let pc = GuestAddress(0xffff_fe00_3a24_52bc);
+        let options = Options::new(BlockProfile::ORDINARY, TargetCpu::Baseline);
+        let block = crate::compile(&source, pc, &options).unwrap();
+        assert_eq!(
+            block.native.source_map,
+            [(pc, 0), (GuestAddress(pc.0 + 4), 12)]
+        );
+        assert!(block.native.x86_64_code[12..].starts_with(&[0x48, 0x8b, 0x87, 136, 0, 0, 0]));
     }
 
     #[test]
