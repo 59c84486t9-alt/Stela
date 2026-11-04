@@ -374,6 +374,12 @@ impl Queue {
         self.consumed = 0;
     }
 
+    /// The next position after an already validated index.
+    fn next(&self, slot: u16) -> u16 {
+        let next = slot + 1;
+        if next == self.entries { 0 } else { next }
+    }
+
     /// Whether a reported submission head lies no earlier than the last
     /// one and no further than the tail, in ring order: commands fetched
     /// together may complete reporting the same head.
@@ -391,7 +397,11 @@ impl Queue {
 
     /// How many entries `to` lies after `from`, in ring order.
     fn ahead(&self, from: u16, to: u16) -> u16 {
-        (to + self.entries - from) % self.entries
+        if to >= from {
+            to - from
+        } else {
+            self.entries - (from - to)
+        }
     }
 }
 

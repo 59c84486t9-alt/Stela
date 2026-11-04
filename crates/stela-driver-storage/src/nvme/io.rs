@@ -73,7 +73,7 @@ impl Controller {
         command[0] |= u32::from(id) << 16;
         queue.submissions.write_submission(base, command);
         queue.submissions.give()?;
-        queue.tail = (queue.tail + 1) % queue.entries;
+        queue.tail = queue.next(queue.tail);
         fence(Ordering::SeqCst);
         registers.write32(
             DOORBELLS + 2 * usize::from(queue.id) * stride,
@@ -105,7 +105,7 @@ impl Controller {
             return Err(BlockError::Device { status: 0xffff });
         }
         queue.consumed = head;
-        queue.head = (queue.head + 1) % queue.entries;
+        queue.head = queue.next(queue.head);
         if queue.head == 0 {
             queue.phase = !queue.phase;
         }
