@@ -488,38 +488,33 @@ impl Recorder<'_> {
                     buffer: arguments,
                     offset,
                 } => device.cmd_dispatch_indirect(buffer, handle(arguments.0), offset),
-                Command::CopyBuffer { src, dst, regions } => {
-                    let regions: Vec<_> = regions
-                        .iter()
-                        .map(|region| {
-                            vk::BufferCopy2::default()
-                                .src_offset(region.src_offset)
-                                .dst_offset(region.dst_offset)
-                                .size(region.size)
-                        })
-                        .collect();
+                Command::CopyBuffer { src, dst, region } => {
+                    let region = vk::BufferCopy2::default()
+                        .src_offset(region.src_offset)
+                        .dst_offset(region.dst_offset)
+                        .size(region.size);
                     let info = vk::CopyBufferInfo2::default()
                         .src_buffer(handle(src.0))
                         .dst_buffer(handle(dst.0))
-                        .regions(&regions);
+                        .regions(core::slice::from_ref(&region));
                     device.cmd_copy_buffer2(buffer, &info);
                 }
-                Command::CopyBufferToImage { src, dst, regions } => {
-                    let regions: Vec<_> = regions.iter().map(buffer_image).collect();
+                Command::CopyBufferToImage { src, dst, region } => {
+                    let region = buffer_image(region);
                     let info = vk::CopyBufferToImageInfo2::default()
                         .src_buffer(handle(src.0))
                         .dst_image(handle(dst.0))
                         .dst_image_layout(vk::ImageLayout::GENERAL)
-                        .regions(&regions);
+                        .regions(core::slice::from_ref(&region));
                     device.cmd_copy_buffer_to_image2(buffer, &info);
                 }
-                Command::CopyImageToBuffer { src, dst, regions } => {
-                    let regions: Vec<_> = regions.iter().map(buffer_image).collect();
+                Command::CopyImageToBuffer { src, dst, region } => {
+                    let region = buffer_image(region);
                     let info = vk::CopyImageToBufferInfo2::default()
                         .src_image(handle(src.0))
                         .src_image_layout(vk::ImageLayout::GENERAL)
                         .dst_buffer(handle(dst.0))
-                        .regions(&regions);
+                        .regions(core::slice::from_ref(&region));
                     device.cmd_copy_image_to_buffer2(buffer, &info);
                 }
                 Command::CopyImage { src, dst, regions } => {

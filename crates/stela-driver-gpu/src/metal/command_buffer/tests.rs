@@ -47,7 +47,7 @@ use crate::metal::{
         Access, AttachmentLoadOp, AttachmentStoreOp, CullMode, PipelineBindPoint, PipelineStages,
         ShaderStages,
         backend::Requirements,
-        command::{Barrier, BufferCopy, GeneratedCommands},
+        command::{Barrier, BufferCopy, BufferImageCopy, GeneratedCommands},
         object::{
             ExecutionSet, Image, ImageView, IndirectCommandsLayout, IndirectToken, QueryType,
             ShaderCode,
@@ -1334,9 +1334,9 @@ fn unaligned_fills_copy_their_edges() {
         .filter_map(|command| match command {
             Command::CopyBuffer {
                 dst: Buffer(6),
-                regions,
+                region,
                 ..
-            } => Some((regions[0].dst_offset, regions[0].size)),
+            } => Some((region.dst_offset, region.size)),
             _ => None,
         })
         .collect();
@@ -1395,6 +1395,14 @@ fn buffer_texture_copies_use_texel_strides() {
             BlitOption::STENCIL_FROM_DEPTH_STENCIL,
         )
         .unwrap();
+    let destination = BufferLayout {
+        buffer: buffer(3, 1 << 16),
+        offset: 1024,
+        ..source
+    };
+    commands
+        .copy_texture_to_buffer(target, region, destination, BlitOption::EMPTY)
+        .unwrap();
     commands.generate_mipmaps(target, true).unwrap();
     commands.end_encoding(&mut resolver).unwrap();
     let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
@@ -1402,7 +1410,7 @@ fn buffer_texture_copies_use_texel_strides() {
         .commands
         .iter()
         .filter_map(|command| match command {
-            Command::CopyBufferToImage { regions, .. } => Some(regions[0]),
+            Command::CopyBufferToImage { region, .. } => Some(*region),
             _ => None,
         })
         .collect();
@@ -1417,6 +1425,22 @@ fn buffer_texture_copies_use_texel_strides() {
     assert_eq!(
         (copies[1].subresource.aspects, copies[1].buffer_row_length),
         (crate::metal::vulkan::ImageAspects::STENCIL, 512)
+    );
+    let (src, dst, readback) = recording.segments[0]
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            Command::CopyImageToBuffer { src, dst, region } => Some((*src, *dst, *region)),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!((src, dst), (Image(9), Buffer(3)));
+    assert_eq!(
+        readback,
+        BufferImageCopy {
+            buffer_offset: 1024,
+            ..copies[0]
+        }
     );
     let blits = count(&recording.segments[0].commands, |command| {
         matches!(command, Command::BlitImage { .. })
@@ -2204,7 +2228,7 @@ fn blits_copy_records_of_resident_buffers_in_order() {
         .commands
         .iter()
         .filter_map(|command| match command {
-            Command::CopyBuffer { src, dst, regions } => Some((*src, *dst, regions[0])),
+            Command::CopyBuffer { src, dst, region } => Some((*src, *dst, *region)),
             _ => None,
         })
         .collect();
