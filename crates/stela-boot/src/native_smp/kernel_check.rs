@@ -21,7 +21,7 @@ use stela_engine::machine::Stop;
 use stela_engine::machine::engine;
 use stela_engine::machine::engine::publication::WorkerBinding;
 use stela_engine::machine::engine::publication::WorkerId;
-use stela_engine::machine::exception::Pstate;
+use stela_engine::machine::exception::{DAIF_I, Pstate};
 use stela_engine::memory::RegisteredSystemRam;
 use stela_soc::machine;
 
@@ -449,6 +449,9 @@ pub(crate) unsafe fn check(
     let after = states(&machine)?;
     for (old, actual) in before.iter().zip(&after) {
         let mut expected = old.clone();
+        // Both READY writes leave the fixture's IRQ asserted. The timer FIQ
+        // was disabled by its handler, so only IRQ remains in the frame.
+        expected.pending = u32::from(DAIF_I);
         for register in [0, 1, 2, 3, 4, 5, 6, 7, 10, 19, 20, 22, 23, 24] {
             expected.x[register] = actual.x[register];
         }
