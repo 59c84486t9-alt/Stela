@@ -222,13 +222,6 @@ struct file *shmem_file_setup_with_mnt(struct vfsmount *mount, const char *name,
 	return shmem_file_setup(name, size, flags);
 }
 
-loff_t noop_llseek(struct file *file, loff_t offset, int whence)
-{
-	(void)whence;
-	(void)offset;
-	return file->f_pos;
-}
-
 void stela_linux_fd_close(int fd)
 {
 	close_fd((unsigned int)fd);

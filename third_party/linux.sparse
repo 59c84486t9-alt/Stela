@@ -250,6 +250,8 @@
 /fs/inode_evict.c
 /fs/open.c
 /fs/path_open.c
+/fs/read_write.c
+/fs/file_position.c
 /fs/file_table.c
 /fs/fcntl.c
 /fs/fs_context.c
