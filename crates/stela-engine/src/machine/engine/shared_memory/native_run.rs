@@ -935,27 +935,19 @@ fn prepare<'a>(
                 source
                     .read_into(&mut input)
                     .map_err(|status| at("cold executable source fetch", status))?;
-                // A denied later access check must not erase an already reached GPR
-                // prefix. End before it; the held scheduler checks that exact next word.
-                if let Some(boundary) = input
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .position(|raw| !admitted(u32::from_le_bytes(*raw)))
-                {
-                    if boundary == 0 {
-                        return Err(at("instruction admission", MemoryStatus::Unsupported));
-                    }
-                    input.truncate(boundary * 4);
-                }
-                let plan = stela_compiler::block::CompilationPlan::new(
+                // Admit only the reached words. A later denial ends this
+                // prefix; the held scheduler checks that exact next word.
+                let plan = stela_compiler::block::CompilationPlan::new_admitted_system(
                     &input,
                     stela_compiler::GuestAddress(pc),
-                    &stela_compiler::Options::new(profile, target),
+                    controls.sp,
+                    target,
+                    admitted,
                 )
                 .map_err(|error| {
                     at("compilation planning", MemoryStatus::Unsupported).detail(error.to_string())
-                })?;
+                })?
+                .ok_or_else(|| at("instruction admission", MemoryStatus::Unsupported))?;
                 let bytes = plan.source_bytes();
                 if bytes == 0 || !bytes.is_multiple_of(4) || bytes > input.len() {
                     return Err(at("compiled source extent", MemoryStatus::Domain));
