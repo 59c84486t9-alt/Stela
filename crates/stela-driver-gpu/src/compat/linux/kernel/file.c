@@ -440,25 +440,42 @@ void kern_unmount(struct vfsmount *mount)
 	kfree(mount);
 }
 
+static DEFINE_SPINLOCK(pin_fs_lock);
+
 int simple_pin_fs(struct file_system_type *type, struct vfsmount **mount, int *count)
 {
-	if (!*mount) {
-		struct vfsmount *pinned = kern_mount(type);
+	struct vfsmount *candidate = NULL;
 
-		if (IS_ERR(pinned))
-			return (int)PTR_ERR(pinned);
-		*mount = pinned;
+	spin_lock(&pin_fs_lock);
+	if (!*mount) {
+		spin_unlock(&pin_fs_lock);
+		candidate = kern_mount(type);
+		if (IS_ERR(candidate))
+			return (int)PTR_ERR(candidate);
+
+		spin_lock(&pin_fs_lock);
+		if (!*mount) {
+			*mount = candidate;
+			candidate = NULL;
+		}
 	}
 	++*count;
+	spin_unlock(&pin_fs_lock);
+	kern_unmount(candidate);
 	return 0;
 }
 
 void simple_release_fs(struct vfsmount **mount, int *count)
 {
-	if (--*count)
-		return;
-	kern_unmount(*mount);
-	*mount = NULL;
+	struct vfsmount *released = NULL;
+
+	spin_lock(&pin_fs_lock);
+	if (!--*count) {
+		released = *mount;
+		*mount = NULL;
+	}
+	spin_unlock(&pin_fs_lock);
+	kern_unmount(released);
 }
 
 /* Nothing tears a superblock down through its filesystem; kern_unmount frees it. */
@@ -502,6 +519,13 @@ static void test_d_release(struct dentry *dentry)
 
 static const struct dentry_operations dentry_ops = {.d_release = test_d_release};
 
+struct pin_interleave {
+	struct vfsmount *mount;
+	struct vfsmount *winner;
+	int count;
+};
+static struct pin_interleave *interleave;
+
 static int test_init_fs_context(struct fs_context *context)
 {
 	struct pseudo_fs_context *pseudo = init_pseudo(context, 0x7e57);
@@ -509,6 +533,14 @@ static int test_init_fs_context(struct fs_context *context)
 	if (!pseudo)
 		return -ENOMEM;
 	pseudo->dops = &dentry_ops;
+	/* Model a second pin publishing while the first is creating a mount. */
+	if (interleave) {
+		struct pin_interleave *overlap = interleave;
+
+		interleave = NULL;
+		assert(!simple_pin_fs(context->fs_type, &overlap->mount, &overlap->count));
+		overlap->winner = overlap->mount;
+	}
 	return 0;
 }
 
@@ -571,6 +603,15 @@ int main(void)
 	struct file *object = shmem_file_setup("test", 8192, EMPTY_VMA_FLAGS);
 	assert(!IS_ERR(object) && file_inode(object)->i_size == 8192);
 	fput(object);
+
+	struct pin_interleave overlap = {};
+	interleave = &overlap;
+	assert(!simple_pin_fs(&test_fs, &overlap.mount, &overlap.count));
+	assert(!interleave && overlap.mount == overlap.winner && overlap.count == 2);
+	simple_release_fs(&overlap.mount, &overlap.count);
+	assert(overlap.mount == overlap.winner && overlap.count == 1);
+	simple_release_fs(&overlap.mount, &overlap.count);
+	assert(!overlap.mount && !overlap.count);
 
 	struct vfsmount *mount = NULL;
 	int count = 0;
