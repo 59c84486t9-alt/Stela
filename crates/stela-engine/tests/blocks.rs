@@ -77,7 +77,7 @@ mod numerical {
     }
 
     #[test]
-    fn packed_truncation_retires_from_native_status_with_input_flushing_disabled() -> Result<()> {
+    fn packed_truncation_retires_from_native_status_when_flush_has_no_effect() -> Result<()> {
         use stela_compiler::aarch64::floating::{
             FPCR_AH, FPCR_FIZ, FPCR_FZ, Format,
             integer::{IntegerFormat, IntegerRounding, IntegerWidth, to_integer},
@@ -90,10 +90,10 @@ mod numerical {
             BlockProfile::ORDINARY,
             TargetCpu::Baseline,
         );
-        // FCVTZS V0.4S,V1.4S and FCVTZS V2.2S,V2.2S.
+        // The two archived 4S forms followed by a 2S form with poisoned high lanes.
         runtime.register_code(
             GuestAddress(BASE),
-            words(&[ADD_ONE, 0x4ea1_b820, 0x0ea1_b842, ADD_ONE, RET]),
+            words(&[ADD_ONE, 0x4ea1_b884, 0x4ea1_b863, 0x0ea1_b842, ADD_ONE, RET]),
         )?;
         let pack = |low: u32, high: u32| u64::from(low) | (u64::from(high) << 32);
         let integer = IntegerFormat {
@@ -101,6 +101,7 @@ mod numerical {
             signed: true,
         };
         let small = [0, 0x8000_0000, 1, 0x807f_ffff];
+        let signed_zeros = [0, 0x8000_0000, 0x3fe0_0000, 0xc020_0000];
         let normals = [0x3fe0_0000, 0xc020_0000, 0x4eff_ffff, 0xcf00_0000];
         for (fpcr, lanes, helpers) in [
             (0, small, 0),
@@ -108,20 +109,27 @@ mod numerical {
             (FPCR_FZ, small, 1),
             (FPCR_FIZ, small, 1),
             (FPCR_AH | FPCR_FZ, small, 1),
+            (FPCR_FZ, signed_zeros, 0),
+            (FPCR_FIZ, signed_zeros, 0),
+            (FPCR_AH | FPCR_FZ, signed_zeros, 0),
+            (FPCR_AH | FPCR_FZ | FPCR_FIZ, signed_zeros, 0),
+            (FPCR_FZ, [0x0080_0000, 0x8080_0000, 0, 0x8000_0000], 0),
             (FPCR_FZ | FPCR_FIZ, normals, 0),
             (0, normals, 0),
             (0, [0x7f80_0001, 0x7fc0_1234, 0xc020_0000, 0xff80_0000], 1),
+            (
+                FPCR_FZ,
+                [0x7f80_0001, 0x7fc0_1234, 0xc020_0000, 0xff80_0000],
+                1,
+            ),
             (0, [0x4f00_0000, 0xcf00_0001, 1, 0x8000_0000], 1),
+            (FPCR_FIZ, [0x4f00_0000, 0xcf00_0001, 0, 0x8000_0000], 1),
         ] {
             let mut thread = input(false);
             thread.registers.fpcr = fpcr;
-            thread.registers.v[1] = [pack(lanes[0], lanes[1]), pack(lanes[2], lanes[3])];
-            let low_lane = if fpcr & (FPCR_FZ | FPCR_FIZ) == 0 {
-                0x8000_0000
-            } else {
-                0x3f80_0000
-            };
-            thread.registers.v[2] = [pack(low_lane, 0x4080_0000), 0x7f80_0001_7f80_0001];
+            thread.registers.v[4] = [pack(lanes[0], lanes[1]), pack(lanes[2], lanes[3])];
+            thread.registers.v[3] = [pack(0, 0x3f80_0000), pack(0x8000_0000, 0xc000_0000)];
+            thread.registers.v[2] = [pack(0x8000_0000, 0x4080_0000), 0x7f80_0001_7f80_0001];
             let mut expected = thread.registers.clone();
             let converted = lanes.map(|lane| {
                 let result = to_integer(
@@ -137,11 +145,12 @@ mod numerical {
                 result.bits as u32
             });
             expected.x[0] += 2;
-            expected.v[0] = [
+            expected.v[4] = [
                 pack(converted[0], converted[1]),
                 pack(converted[2], converted[3]),
             ];
-            expected.v[2] = [pack(u32::from(low_lane == 0x3f80_0000), 4), 0];
+            expected.v[3] = [pack(0, 1), pack(0, (-2i32) as u32)];
+            expected.v[2] = [pack(0, 4), 0];
             // SAFETY: the program only operates on its own registered code and state.
             let report = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
             assert_eq!(report.reason, StopReason::StopAddress);
