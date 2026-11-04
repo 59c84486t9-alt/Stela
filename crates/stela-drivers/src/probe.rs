@@ -342,6 +342,23 @@ impl Link for Adapter {
             Self::RealtekWifi(device) => device.receive(),
         }
     }
+    fn receive_reusing(&mut self, frame: &mut Vec<u8>) -> Result<bool, LinkError> {
+        match self {
+            Self::Virtio(device) => device.receive_reusing(frame),
+            Self::Igc(device) => device.receive_reusing(frame),
+            Self::E1000e(device) => device.receive_reusing(frame),
+            Self::Igb(device) => device.receive_reusing(frame),
+            Self::Realtek(device) => device.receive_reusing(frame),
+            Self::Usb(device) => device.receive_reusing(frame),
+            Self::UsbVendor(device) => device.receive_reusing(frame),
+            Self::Tg3(device) => device.receive_reusing(frame),
+            Self::Aqtion(device) => device.receive_reusing(frame),
+            #[cfg(feature = "native-acpi")]
+            Self::IntelWifi(device) => device.receive_reusing(frame),
+            Self::MediatekWifi(device) => device.receive_reusing(frame),
+            Self::RealtekWifi(device) => device.receive_reusing(frame),
+        }
+    }
 }
 
 /// Whether a driver here may attach `function`, or probe hands it over from
