@@ -90,6 +90,9 @@ fn bounded_file(path: &Path, limit: usize) -> Result<Vec<u8>> {
 
 pub(crate) mod artifact;
 pub use artifact::{Identity, Manifest};
+#[cfg(feature = "std")]
+mod cache_flight;
+
 fn memory_specialization_sha256(
     profile: stela_compiler::block::BlockProfile,
     requirements: Option<stela_compiler::context::memory::MemoryRequirements>,
@@ -281,14 +284,13 @@ fn prepare(
     }
     let root = root.canonicalize().io("resolve the translation cache")?;
     let directory = root.join(&key);
-    let invalid = |cause| Error::InvalidCacheEntry {
-        directory: directory.clone(),
-        cause: alloc::boxed::Box::new(cause),
-    };
-    if directory.exists() {
-        let (manifest, native) =
-            validate(&directory, &identity, memory_requirements, profile).map_err(invalid)?;
-        return Ok((
+    let hit = |key, directory: PathBuf| {
+        let (manifest, native) = validate(&directory, &identity, memory_requirements, profile)
+            .map_err(|cause| Error::InvalidCacheEntry {
+                directory: directory.clone(),
+                cause: alloc::boxed::Box::new(cause),
+            })?;
+        Ok((
             Prepared {
                 key,
                 cache_hit: true,
@@ -296,7 +298,19 @@ fn prepare(
                 manifest,
             },
             native,
-        ));
+        ))
+    };
+    if directory.exists() {
+        return hit(key, directory);
+    }
+    let flight = cache_flight::Flight::join(&directory);
+    let publisher = flight.wait();
+    // Another publisher may have filled the apparent miss while we waited.
+    // Validation of its immutable entry can proceed alongside other readers.
+    if directory.exists() {
+        drop(publisher);
+        drop(flight);
+        return hit(key, directory);
     }
     // Compile before creating an entry. Unsupported code never produces a hit.
     let (manifest, x86_64_code) =
@@ -315,7 +329,10 @@ fn prepare(
         json::pretty_bytes(&manifest_hash)?,
     )
     .io("write a generated manifest checksum")?;
-    match std::fs::rename(pending.path(), &directory) {
+    let published = std::fs::rename(pending.path(), &directory);
+    drop(publisher);
+    drop(flight);
+    match published {
         Ok(()) => {
             // The complete directory moved to its published name.
             drop(pending.keep());
@@ -330,19 +347,7 @@ fn prepare(
             ))
         }
         // Another process published the same entry first; it must validate.
-        Err(_) if directory.exists() => {
-            let (manifest, native) =
-                validate(&directory, &identity, memory_requirements, profile).map_err(invalid)?;
-            Ok((
-                Prepared {
-                    key,
-                    cache_hit: true,
-                    directory,
-                    manifest,
-                },
-                native,
-            ))
-        }
+        Err(_) if directory.exists() => hit(key, directory),
         Err(error) => Err(Error::Io {
             operation: "publish a cache entry".into(),
             error,

@@ -665,20 +665,116 @@ fn reuses_only_matching_input_and_context() -> Result<()> {
     Ok(())
 }
 #[test]
-fn concurrent_requests_publish_a_complete_single_entry() -> Result<()> {
+fn concurrent_requests_compile_and_publish_a_complete_single_entry() -> Result<()> {
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc::sync_channel,
+        },
+        thread,
+        time::{Duration, Instant},
+    };
+    use stela_compiler::{Options, TargetCpu, block::BlockProfile};
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
     let root = tempfile::tempdir()?;
-    let threads: Vec<_> = (0..4)
-        .map(|_| {
-            let path = root.path().to_path_buf();
-            std::thread::spawn(move || prepare_leaf(&source(42), GuestAddress(0), &path))
+    let path = root.path();
+    let base = GuestAddress(0);
+    let profile = BlockProfile::ORDINARY;
+    let target = TargetCpu::Baseline;
+    let input = source(42);
+    let options = Options::new(profile, target);
+    let plan = stela_compiler::block::CompilationPlan::new(&input, base, &options)?;
+    let identity = block_plan_identity(&input, base, target, &plan)?;
+    let key = sha256(&serde_json::to_vec(&identity)?);
+    let directory = path.canonicalize()?.join(&key);
+    let attempts = AtomicUsize::new(0);
+    let compile = || {
+        attempts.fetch_add(1, Ordering::Relaxed);
+        stela_compiler::compile(&input, base, &options).map(|block| block.native)
+    };
+    let (started, started_rx) = sync_channel(0);
+    let (release, release_rx) = sync_channel(0);
+    thread::scope(|scope| -> Result<()> {
+        let leader_identity = identity.clone();
+        let leader = scope.spawn(move || {
+            prepare(leader_identity, path, None, profile, || {
+                started.send(()).unwrap();
+                release_rx.recv_timeout(TIMEOUT).unwrap();
+                compile()
+            })
+        });
+        started_rx.recv_timeout(TIMEOUT)?;
+        let waiters: Vec<_> = (0..3)
+            .map(|_| {
+                let identity = identity.clone();
+                scope.spawn(move || prepare(identity, path, None, profile, compile))
+            })
+            .collect();
+        let deadline = Instant::now() + TIMEOUT;
+        while cache_flight::Flight::participants(&directory) < 4 {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+
+        // The other key must publish while the first key's writer is held.
+        let distinct = prepare_block_for_target(&input, GuestAddress(4), path, profile, target)?;
+        assert_ne!(distinct.prepared.key, key);
+        assert!(!distinct.prepared.cache_hit);
+        release.send(())?;
+        let (published, native) = leader.join().unwrap()?;
+        assert!(!published.cache_hit);
+        for waiter in waiters {
+            let (hit, code) = waiter.join().unwrap()?;
+            assert!(hit.cache_hit);
+            assert_eq!(hit.key, key);
+            assert_eq!(hit.directory, directory);
+            assert_eq!(hit.manifest.native_sha256, published.manifest.native_sha256);
+            assert_eq!(code, native);
+        }
+        Ok(())
+    })?;
+    assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    assert_eq!(cache_flight::Flight::participants(&directory), 0);
+    assert_eq!(std::fs::read_dir(root.path())?.count(), 2);
+    Ok(())
+}
+
+#[test]
+fn failed_and_panicking_cache_writers_leave_the_key_retryable() -> Result<()> {
+    use stela_compiler::{Options, TargetCpu, UnsupportedReason, block::BlockProfile};
+
+    let root = tempfile::tempdir()?;
+    let path = root.path();
+    let base = GuestAddress(0);
+    let profile = BlockProfile::ORDINARY;
+    let target = TargetCpu::Baseline;
+    let input = source(42);
+    let options = Options::new(profile, target);
+    let plan = stela_compiler::block::CompilationPlan::new(&input, base, &options)?;
+    let identity = block_plan_identity(&input, base, target, &plan)?;
+    let key = sha256(&serde_json::to_vec(&identity)?);
+    let directory = path.canonicalize()?.join(&key);
+    // Keep the original gate alive across the panic as a waiting caller would.
+    let waiter = cache_flight::Flight::join(&directory);
+    let panic = std::panic::catch_unwind(|| {
+        prepare(identity.clone(), path, None, profile, || {
+            panic!("writer abandoned")
         })
-        .collect();
-    let results: Vec<_> = threads
-        .into_iter()
-        .map(|t| t.join().unwrap().unwrap())
-        .collect();
-    assert!(results.iter().all(|r| r.key == results[0].key));
-    assert_eq!(std::fs::read_dir(root.path())?.count(), 1);
+    });
+    assert!(panic.is_err());
+    let failed = prepare(identity.clone(), path, None, profile, || {
+        Err(UnsupportedReason::RuntimeGeneratedCode.into())
+    });
+    assert!(matches!(failed, Err(Error::Compile(_))));
+    assert!(!directory.exists());
+    let (published, _) = prepare(identity, path, None, profile, || {
+        plan.compile().map(|block| block.native)
+    })?;
+    assert!(!published.cache_hit);
+    assert_eq!(published.key, key);
+    drop(waiter);
+    assert_eq!(cache_flight::Flight::participants(&directory), 0);
     Ok(())
 }
 
