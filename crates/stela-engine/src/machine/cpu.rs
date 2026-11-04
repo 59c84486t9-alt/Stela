@@ -730,6 +730,30 @@ impl Cpu {
         }
     }
 
+    /// A TLBI reaches the current regime by its ASID. It needs no table
+    /// walk, stage-2 state or shared CTRR lock.
+    pub(super) fn tlbi_current(&self) -> mmu::tlbi::Current {
+        let (regime, tcr, tables) = match self.regime() {
+            TranslationRegime::El10 => (
+                mmu::Regime::El10,
+                Register::TCR_EL1,
+                [Register::TTBR0_EL1, Register::TTBR1_EL1],
+            ),
+            TranslationRegime::El20 => (
+                mmu::Regime::El20,
+                Register::TCR_EL2,
+                [Register::TTBR0_EL2, Register::TTBR1_EL2],
+            ),
+        };
+        let asid = mmu::two_range_asid(self.read(tcr), |upper| {
+            self.read(tables[usize::from(upper)])
+        });
+        mmu::tlbi::Current {
+            regime,
+            asid: Some(asid),
+        }
+    }
+
     /// SCTLR_ELx of the current regime, without the rest of [`Self::controls`].
     pub fn regime_sctlr(&self) -> u64 {
         self.read(match self.regime() {
@@ -1179,6 +1203,50 @@ mod tests {
     use crate::machine::exception::{DAIF_ALL, DAIF_I};
 
     const HCR_E2H_TGE: u64 = 1 << 34 | 1 << 27;
+
+    #[test]
+    fn tlbi_current_matches_the_translation_controls() {
+        let mut cpu = Cpu::new(0x4000, Pstate::reset(1));
+        for (register, asid) in [
+            (Register::TTBR0_EL1, 0x1234),
+            (Register::TTBR1_EL1, 0x5678),
+            (Register::TTBR0_EL2, 0x9abc),
+            (Register::TTBR1_EL2, 0xdef0),
+        ] {
+            cpu.registers.set_raw(register, 0, asid << 48);
+        }
+        for (el, hcr, regime) in [
+            (0, 0, mmu::Regime::El10),
+            (0, HCR_E2H_TGE, mmu::Regime::El20),
+            (1, HCR_E2H_TGE, mmu::Regime::El10),
+            (2, 0, mmu::Regime::El20),
+        ] {
+            cpu.pstate.el = el;
+            cpu.registers.set_raw(Register::HCR_EL2, 0, hcr);
+            for (tcr, a1, wide) in [
+                (0, false, false),
+                (1 << 22, true, false),
+                (1 << 36, false, true),
+                ((1 << 22) | (1 << 36), true, true),
+            ] {
+                let (active, inactive, asids) = if regime == mmu::Regime::El20 {
+                    (Register::TCR_EL2, Register::TCR_EL1, [0x9abc, 0xdef0])
+                } else {
+                    (Register::TCR_EL1, Register::TCR_EL2, [0x1234, 0x5678])
+                };
+                cpu.registers.set_raw(active, 0, tcr);
+                cpu.registers
+                    .set_raw(inactive, 0, tcr ^ (1 << 22) ^ (1 << 36));
+                let asid = asids[usize::from(a1)] & if wide { u16::MAX } else { 0xff };
+                let current = cpu.tlbi_current();
+                let controls = cpu.controls(cpu.regime());
+                assert_eq!(current.regime, regime);
+                assert_eq!(current.regime, controls.regime);
+                assert_eq!(current.asid, Some(asid));
+                assert_eq!(current.asid, Some(mmu::current_asid(&controls)));
+            }
+        }
+    }
 
     #[test]
     fn exception_entry_and_return_bank_stack_pointers() {
