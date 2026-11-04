@@ -257,6 +257,8 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/rcuref.c")),
             PathBuf::from(format!("{LINUX}/lib/flex_proportions.c")),
             PathBuf::from(format!("{LINUX}/kernel/user.c")),
+            // kthread_mm.c needs the native Linux address-space switch and TLB
+            // owners. The kernel-only mount selects the thread helpers.
             PathBuf::from(format!("{LINUX}/kernel/kthread.c")),
             PathBuf::from(format!("{LINUX}/kernel/workqueue.c")),
             PathBuf::from(format!("{LINUX}/kernel/exec_state.c")),

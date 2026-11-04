@@ -111,6 +111,7 @@
 /kernel/workqueue_internal.h
 /kernel/workqueue.c
 /kernel/kthread.c
+/kernel/kthread_mm.c
 /io_uring/io-wq.h
 /kernel/rcuwait_wake.c
 /kernel/rcu/rcuwait_finish.c
