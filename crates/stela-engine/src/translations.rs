@@ -31,6 +31,11 @@ const TRAILER_BYTES: usize = 32;
 /// Context, guest offset, source and input lengths, code length, and four
 /// metadata counts. Variable-length payloads follow these fixed fields.
 const ENTRY_MIN_BYTES: usize = 32 + 3 * 2 + 5 * 4;
+const RELOCATION_BYTES: usize = 4;
+const SOURCE_MAP_BYTES: usize = 6;
+const EXIT_BYTES: usize = 15;
+const RECOVERY_ROW_BYTES: usize = 24;
+const RECOVERY_BINDING_BYTES: usize = 4;
 /// A relocated field: a little-endian u64 in the native code.
 const FIELD_BYTES: usize = 8;
 /// The bits of a page's address its translations are bound to (the
@@ -379,15 +384,19 @@ impl Record {
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(
-            HEADER_BYTES
-                + TRAILER_BYTES
-                + self
-                    .entries
-                    .iter()
-                    .map(|entry| 64 + entry.code.len() + entry.source_map.len() * 6)
-                    .sum::<usize>(),
-        );
+        let mut encoded_bytes = HEADER_BYTES + TRAILER_BYTES;
+        for entry in &self.entries {
+            encoded_bytes += ENTRY_MIN_BYTES
+                + entry.input.len()
+                + entry.code.len()
+                + entry.relocations.len() * RELOCATION_BYTES
+                + entry.source_map.len() * SOURCE_MAP_BYTES
+                + entry.exits.len() * EXIT_BYTES;
+            for row in &entry.recovery {
+                encoded_bytes += RECOVERY_ROW_BYTES + row.bindings.len() * RECOVERY_BINDING_BYTES;
+            }
+        }
+        let mut out = Vec::with_capacity(encoded_bytes);
         out.extend(RECORD_MAGIC);
         out.extend(SCHEMA.to_le_bytes());
         out.extend((self.entries.len() as u32).to_le_bytes());
@@ -445,6 +454,7 @@ impl Record {
         out[80..88].copy_from_slice(&total.to_le_bytes());
         let checksum = Sha256::digest(&out);
         out.extend(checksum);
+        debug_assert_eq!(out.len(), encoded_bytes);
         out
     }
 
@@ -571,9 +581,11 @@ impl<'a> Reader<'a> {
         }
         let input = self.take(input_bytes)?.to_vec();
         let code_bytes = self.u32()? as usize;
-        let relocations = decode_items(self.count(4)?, || self.u32())?;
-        let source_map = decode_items(self.count(6)?, || Ok((self.u16()?, self.u32()?)))?;
-        let exits = decode_items(self.count(15)?, || {
+        let relocations = decode_items(self.count(RELOCATION_BYTES)?, || self.u32())?;
+        let source_map = decode_items(self.count(SOURCE_MAP_BYTES)?, || {
+            Ok((self.u16()?, self.u32()?))
+        })?;
+        let exits = decode_items(self.count(EXIT_BYTES)?, || {
             Ok(Exit {
                 offset: self.u32()?,
                 target: self.u64()?,
@@ -581,7 +593,7 @@ impl<'a> Reader<'a> {
                 skipped: self.u16()?,
             })
         })?;
-        let recovery = decode_items(self.count(24)?, || {
+        let recovery = decode_items(self.count(RECOVERY_ROW_BYTES)?, || {
             let start = self.u32()? as usize;
             let end = self.u32()? as usize;
             let pc = GuestAddress(self.u64()?);
@@ -592,7 +604,7 @@ impl<'a> Reader<'a> {
                 _ => return Err(FormatError::Entry),
             };
             let site = RecoverySiteKind::try_from(self.u8()?).map_err(|_| FormatError::Entry)?;
-            let bindings = decode_items(self.count(4)?, || {
+            let bindings = decode_items(self.count(RECOVERY_BINDING_BYTES)?, || {
                 let guest = self.u8()?;
                 let kind = self.u8()?;
                 let value = self.u16()?;
