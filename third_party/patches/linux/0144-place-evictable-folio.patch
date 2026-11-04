@@ -1,0 +1,122 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 00:42:57 -0500
+Subject: [PATCH] refactor(mm): place evictable folio rescue with mlock
+ batching
+
+---
+ mm/mlock_batch.c | 46 ++++++++++++++++++++++++++++++++++++++++++++++
+ mm/vmscan.c      | 46 ----------------------------------------------
+ 2 files changed, 46 insertions(+), 46 deletions(-)
+
+diff --git a/mm/mlock_batch.c b/mm/mlock_batch.c
+index d2352d8218aa318f601c4e74dac184d3066bf076..934154393ac641d178c667f9b88b8cb87d91f1f1 100644
+--- a/mm/mlock_batch.c
++++ b/mm/mlock_batch.c
+@@ -278,3 +278,49 @@ void munlock_folio(struct folio *folio)
+ 		mlock_folio_batch(fbatch);
+ 	local_unlock(&mlock_fbatch.lock);
+ }
++
++/**
++ * check_move_unevictable_folios - Move evictable folios to appropriate zone
++ * lru list
++ * @fbatch: Batch of lru folios to check.
++ *
++ * Checks folios for evictability, if an evictable folio is in the unevictable
++ * lru list, moves it to the appropriate evictable lru list. This function
++ * should be only used for lru folios.
++ */
++void check_move_unevictable_folios(struct folio_batch *fbatch)
++{
++	struct lruvec *lruvec = NULL;
++	int pgscanned = 0;
++	int pgrescued = 0;
++	int i;
++
++	for (i = 0; i < fbatch->nr; i++) {
++		struct folio *folio = fbatch->folios[i];
++		int nr_pages = folio_nr_pages(folio);
++
++		pgscanned += nr_pages;
++
++		/* block memcg migration while the folio moves between lrus */
++		if (!folio_test_clear_lru(folio))
++			continue;
++
++		lruvec = folio_lruvec_relock_irq(folio, lruvec);
++		if (folio_evictable(folio) && folio_test_unevictable(folio)) {
++			lruvec_del_folio(lruvec, folio);
++			folio_clear_unevictable(folio);
++			lruvec_add_folio(lruvec, folio);
++			pgrescued += nr_pages;
++		}
++		folio_set_lru(folio);
++	}
++
++	if (lruvec) {
++		__count_vm_events(UNEVICTABLE_PGRESCUED, pgrescued);
++		__count_vm_events(UNEVICTABLE_PGSCANNED, pgscanned);
++		lruvec_unlock_irq(lruvec);
++	} else if (pgscanned) {
++		count_vm_events(UNEVICTABLE_PGSCANNED, pgscanned);
++	}
++}
++EXPORT_SYMBOL_GPL(check_move_unevictable_folios);
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 43ef73f9c7dc614e1b7ee8de289876ad934457b6..6a2b7b15a0bc58f91df569e537c8536376cb28b3 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -7695,52 +7695,6 @@ int user_proactive_reclaim(char *buf,
+ 	return 0;
+ }
+ 
+-/**
+- * check_move_unevictable_folios - Move evictable folios to appropriate zone
+- * lru list
+- * @fbatch: Batch of lru folios to check.
+- *
+- * Checks folios for evictability, if an evictable folio is in the unevictable
+- * lru list, moves it to the appropriate evictable lru list. This function
+- * should be only used for lru folios.
+- */
+-void check_move_unevictable_folios(struct folio_batch *fbatch)
+-{
+-	struct lruvec *lruvec = NULL;
+-	int pgscanned = 0;
+-	int pgrescued = 0;
+-	int i;
+-
+-	for (i = 0; i < fbatch->nr; i++) {
+-		struct folio *folio = fbatch->folios[i];
+-		int nr_pages = folio_nr_pages(folio);
+-
+-		pgscanned += nr_pages;
+-
+-		/* block memcg migration while the folio moves between lrus */
+-		if (!folio_test_clear_lru(folio))
+-			continue;
+-
+-		lruvec = folio_lruvec_relock_irq(folio, lruvec);
+-		if (folio_evictable(folio) && folio_test_unevictable(folio)) {
+-			lruvec_del_folio(lruvec, folio);
+-			folio_clear_unevictable(folio);
+-			lruvec_add_folio(lruvec, folio);
+-			pgrescued += nr_pages;
+-		}
+-		folio_set_lru(folio);
+-	}
+-
+-	if (lruvec) {
+-		__count_vm_events(UNEVICTABLE_PGRESCUED, pgrescued);
+-		__count_vm_events(UNEVICTABLE_PGSCANNED, pgscanned);
+-		lruvec_unlock_irq(lruvec);
+-	} else if (pgscanned) {
+-		count_vm_events(UNEVICTABLE_PGSCANNED, pgscanned);
+-	}
+-}
+-EXPORT_SYMBOL_GPL(check_move_unevictable_folios);
+-
+ #if defined(CONFIG_SYSFS) && defined(CONFIG_NUMA)
+ static ssize_t reclaim_store(struct device *dev,
+ 			     struct device_attribute *attr,
