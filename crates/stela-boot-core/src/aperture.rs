@@ -100,8 +100,8 @@ pub fn shares_aperture(current: u64, loader: u64) -> bool {
 /// and x2APIC's beyond them alike: the boot's processor cap.
 pub const MAX_PROCESSORS: usize = 256;
 
-/// Which other host processors may hold aperture translations, and how far
-/// each has flushed. Until one [`join`]s, only the boot processor runs and a
+/// Which host processors may hold aperture translations, and how far each
+/// has flushed. Until an AP joins, only the boot processor runs and a
 /// retirement's local flush is complete. After that a retirement
 /// [`request`]s a generation, interrupts every [`sharer`], and waits until
 /// each has [`acknowledge`]d it: a processor acknowledges a generation once
@@ -110,7 +110,6 @@ pub const MAX_PROCESSORS: usize = 256;
 /// not-present entries, and the permission's lock orders installations and
 /// retirements.
 ///
-/// [`join`]: Self::join
 /// [`request`]: Self::request
 /// [`sharer`]: Self::sharers
 /// [`acknowledge`]: Self::acknowledge
@@ -138,10 +137,23 @@ impl Processors {
         }
     }
 
-    /// The processor with `apic` ID starts and may translate through the
-    /// aperture from now on; its slot, or `None` when every slot is taken.
-    /// Joins are made by the boot processor, before each one starts.
-    pub fn join(&self, apic: u32) -> Option<usize> {
+    /// Register the installed BSP before admitting any AP.
+    pub fn join_bsp(&self, apic: u32) -> Option<usize> {
+        if self.joined.load(Ordering::Relaxed) != 0 {
+            return None;
+        }
+        self.join(apic)
+    }
+
+    /// The BSP registers each AP before it can translate through the aperture.
+    pub fn join_ap(&self, apic: u32) -> Option<usize> {
+        if self.joined.load(Ordering::Relaxed) == 0 || self.slot(apic).is_some() {
+            return None;
+        }
+        self.join(apic)
+    }
+
+    fn join(&self, apic: u32) -> Option<usize> {
         let slot = self.joined.load(Ordering::Relaxed);
         if slot == MAX_PROCESSORS {
             return None;
@@ -154,7 +166,7 @@ impl Processors {
 
     /// Whether only the boot processor may hold aperture translations.
     pub fn alone(&self) -> bool {
-        self.joined.load(Ordering::Acquire) == 0
+        self.joined.load(Ordering::Acquire) <= 1
     }
 
     /// The slot of the processor with `apic` ID.
@@ -329,8 +341,9 @@ mod tests {
         let processors = Processors::new();
         assert!(processors.alone());
         assert!(processors.flushed(processors.request(), None));
-        let a = processors.join(4).unwrap();
-        let b = processors.join(9).unwrap();
+        let a = processors.join_bsp(4).unwrap();
+        assert!(processors.alone());
+        let b = processors.join_ap(9).unwrap();
         assert!(!processors.alone());
         assert_eq!(processors.slot(9), Some(b));
         assert_eq!(processors.slot(5), None);
@@ -352,12 +365,44 @@ mod tests {
     }
 
     #[test]
+    fn bsp_registration_precedes_aps_and_rejects_duplicate_identities() {
+        let processors = Processors::new();
+        assert_eq!(processors.join_ap(2), None);
+        assert_eq!(processors.join_bsp(0), Some(0));
+        assert!(processors.alone());
+        assert_eq!(processors.join_bsp(1), None);
+        assert_eq!(processors.join_ap(0), None);
+        assert_eq!(processors.join_ap(2), Some(1));
+        assert!(!processors.alone());
+        assert_eq!(processors.join_ap(2), None);
+    }
+
+    #[test]
+    fn bsp_and_ap_retirements_require_the_other_origin_to_acknowledge() {
+        let processors = Processors::new();
+        let bsp = processors.join_bsp(0).unwrap();
+        let ap = processors.join_ap(2).unwrap();
+        let from_bsp = processors.request();
+        let from_ap = processors.request();
+        assert!(!processors.flushed(from_bsp, Some(bsp)));
+        assert!(!processors.flushed(from_ap, Some(ap)));
+        processors.acknowledge(ap, from_ap);
+        assert!(processors.flushed(from_bsp, Some(bsp)));
+        assert!(!processors.flushed(from_ap, Some(ap)));
+        processors.acknowledge(bsp, from_bsp);
+        assert!(!processors.flushed(from_ap, Some(ap)));
+        processors.acknowledge(bsp, from_ap);
+        assert!(processors.flushed(from_ap, Some(ap)));
+    }
+
+    #[test]
     fn joins_stop_at_the_processor_cap() {
         let processors = Processors::new();
-        for apic in 0..MAX_PROCESSORS as u32 {
-            assert!(processors.join(apic).is_some());
+        assert_eq!(processors.join_bsp(0), Some(0));
+        for apic in 1..MAX_PROCESSORS as u32 {
+            assert!(processors.join_ap(apic).is_some());
         }
-        assert_eq!(processors.join(1000), None);
+        assert_eq!(processors.join_ap(1000), None);
     }
 
     #[test]
