@@ -106,9 +106,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.statistics.lookup_forgets[cause] += 1;
             self.spaces[half].clear();
             self.recent[half] = [None; RECENT];
-            self.fetched_sizes[half] = 0;
+            // Bits are inserted with a fetched size and only cleared here.
+            if core::mem::take(&mut self.fetched_sizes[half]) != 0 {
+                self.fetched_leaves[half].fill(0);
+            }
             self.private_fetches[half] = false;
-            self.fetched_leaves[half].fill(0);
             if half == 0 {
                 self.lower_globals = NO_GLOBALS;
             }
@@ -124,8 +126,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.forget_spaces(1..=1, 3);
         }
         let leaf = size.next_power_of_two();
+        let filter = &mut self.fetched_leaves[half];
+        if filter.is_empty() {
+            *filter = vec![0; FETCHED_LEAVES / 64];
+        }
         for (word, bit) in fetched_leaf_bits(pc & !(leaf - 1), leaf) {
-            self.fetched_leaves[half][word] |= bit;
+            filter[word] |= bit;
         }
         self.fetched_sizes[half] |= leaf;
         self.private_fetches[half] |= !global;

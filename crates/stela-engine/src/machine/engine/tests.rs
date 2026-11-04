@@ -2839,6 +2839,37 @@ fn lookup_contexts_follow_translation_inputs_and_outlive_a_return_to_them() {
 }
 
 #[test]
+fn fetched_leaf_filters_allocate_once_for_each_used_half() {
+    let mut machine = machine(&[]);
+    machine.forget_spaces(0..=1, 1);
+    assert!(machine.fetched_leaves.iter().all(Vec::is_empty));
+
+    machine.fetched_through(1, 0xffff_8000_0000_0000, 0x4000, true);
+    assert!(machine.fetched_leaves[0].is_empty());
+    let upper = machine.fetched_leaves[1].as_ptr();
+    assert!(machine.fetched_leaves[1].iter().any(|&word| word != 0));
+
+    // The first non-global upper fetch clears the old upper context and
+    // records its own leaf, without reallocating or touching the lower half.
+    machine.fetched_through(1, 0xffff_8000_0001_0000, 0x10000, false);
+    assert!(machine.fetched_leaves[0].is_empty());
+    assert_eq!(machine.fetched_leaves[1].as_ptr(), upper);
+    assert_eq!(machine.fetched_sizes[1], 0x10000);
+
+    machine.forget_spaces(1..=1, 1);
+    assert_eq!(machine.fetched_sizes, [0; 2]);
+    assert!(machine.fetched_leaves[1].iter().all(|&word| word == 0));
+    machine.forget_spaces(0..=1, 1);
+    assert!(machine.fetched_leaves[0].is_empty());
+    assert_eq!(machine.fetched_leaves[1].as_ptr(), upper);
+
+    machine.fetched_through(0, 0x8000, 0x4000, true);
+    assert_eq!(machine.fetched_sizes, [0x4000, 0]);
+    assert_eq!(machine.fetched_leaves[0].len(), FETCHED_LEAVES / 64);
+    assert_ne!(machine.fetched_leaves[0].as_ptr(), upper);
+}
+
+#[test]
 fn a_tlbi_by_va_drops_the_lookup_entries_of_its_leaf_in_every_context() {
     use mmu::tlbi::{Everywhere, Reach};
     let mut machine = machine(&[]);

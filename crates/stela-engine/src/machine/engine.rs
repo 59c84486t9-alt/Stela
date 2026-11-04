@@ -742,7 +742,8 @@ pub struct Machine<H: Host, D: Devices> {
     lower_globals: (u64, u64),
     /// A filter of the leaves each half fetched through since its contexts
     /// were last forgotten: a TLBI of any other leaf reaches no lookup entry
-    /// and no cached fetch, as most by far do not.
+    /// and no cached fetch, as most by far do not. Each half allocates
+    /// its filter at its first recorded fetch.
     fetched_leaves: [Vec<u64>; 2],
     /// The registers of the stored cells, in the order of the cells.
     stored_reads: Vec<Encoding>,
@@ -1089,7 +1090,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             fetched_sizes: [0; 2],
             private_fetches: [false; 2],
             lower_globals: NO_GLOBALS,
-            fetched_leaves: [vec![0; FETCHED_LEAVES / 64], vec![0; FETCHED_LEAVES / 64]],
+            fetched_leaves: [Vec::new(), Vec::new()],
             stored_reads: Vec::new(),
             stored_writes: Vec::new(),
             code_posted: None,
