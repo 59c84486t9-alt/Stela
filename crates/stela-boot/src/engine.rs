@@ -703,6 +703,14 @@ fn run_machine<H: Host>(
     if !options.breakpoints.is_empty() {
         machine.set_breakpoints(&options.breakpoints);
     }
+    machine
+        .devices
+        .with(|devices| devices.set_display_swap_tracing(options.display_trace));
+    if options.display_trace {
+        output::arguments(format_args!(
+            "DISPLAY TRACE enabled: per-swap DCP reports\n"
+        ));
+    }
     machine.set_monitor_tracing(options.monitor_trace);
     if options.monitor_trace {
         output::arguments(format_args!(
