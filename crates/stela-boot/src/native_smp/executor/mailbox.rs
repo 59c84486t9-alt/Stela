@@ -83,6 +83,8 @@ struct Pending<C: Command> {
 impl<C: Command> Pending<C> {
     fn complete(&mut self) {
         while self.mailbox.state.load(Ordering::Acquire) != DONE {
+            // An AP command may retire an aperture mapping before returning.
+            crate::native_mmio::shootdown::service();
             if apic::rdtsc().wrapping_sub(self.started) >= self.timeout {
                 crate::output::arguments(format_args!(
                     "STELA FATAL native worker {} missed actual frame return; retaining all borrowed resources\n",
@@ -270,6 +272,27 @@ impl Processor {
 }
 #[cfg(feature = "diagnostics")]
 impl Processor {
+    /// Retire the diagnostic's uniquely kept aperture mapping on this AP.
+    ///
+    /// # Safety
+    /// Every consumer has drained and no new access through the mapping can begin.
+    pub(crate) unsafe fn check_aperture_retire(
+        &self,
+        mapping: stela_drivers::bus::mmio::owned::Mapping,
+        sender: &Apic,
+        tsc_hz: u64,
+    ) -> Result<()> {
+        if !shootdown_interrupts_off() {
+            return Err(refuse!(
+                "BSP aperture retirement waiter has interrupts enabled"
+            ));
+        }
+        self.send(ApertureRetirement(mapping), sender, tsc_hz)
+            .map_err(|_| refuse!("AP aperture retirement mailbox busy"))?
+            .finish()
+            .map_err(|error| refuse!("AP aperture retirement refused: {error:?}"))
+    }
+
     /// Run `check` with this AP spinning for the driver's real loader-root
     /// lock. The mailbox command cannot acknowledge a new shootdown at a
     /// native return or take an IPI while the BSP keeps the lock.
@@ -323,6 +346,30 @@ impl Processor {
         pending.finish();
         value
     }
+}
+
+#[cfg(feature = "diagnostics")]
+struct ApertureRetirement(stela_drivers::bus::mmio::owned::Mapping);
+
+#[cfg(feature = "diagnostics")]
+impl Command for ApertureRetirement {
+    type Output = core::result::Result<(), stela_drivers::bus::mmio::owned::Error>;
+
+    fn execute(mut self, _: &mut host::HostOwner, _: &mut Option<WorkerOwner>) -> Self::Output {
+        if !shootdown_interrupts_off() {
+            return Err(stela_drivers::bus::mmio::owned::Error::Unavailable);
+        }
+        // SAFETY: check_aperture_retire requires all access to have drained.
+        unsafe { self.0.retire() }
+    }
+}
+
+#[cfg(feature = "diagnostics")]
+fn shootdown_interrupts_off() -> bool {
+    let flags: u64;
+    // SAFETY: observe the current caller's interrupt mask.
+    unsafe { asm!("pushfq", "pop {}", out(reg) flags) };
+    flags & (1 << 9) == 0
 }
 
 struct Spawned(Box<dyn FnOnce(&mut host::HostOwner) + Send>);
