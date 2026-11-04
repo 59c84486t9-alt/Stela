@@ -129,6 +129,40 @@ fn right(
     }
 }
 
+/// A binary operation without a shifted operand can read a frame slot
+/// directly. A commutative operation can start with the right operand
+/// when it already lives in the destination.
+fn unshifted_binary(
+    asm: &mut Asm,
+    op: Alu,
+    size: Size,
+    work: Gpr,
+    mut left: Register,
+    mut right: Register,
+) -> bool {
+    if asm.guest(right) == Some(Rm::Reg(work)) && right != left {
+        if op == Alu::Sub {
+            return false;
+        }
+        debug_assert_ne!(op, Alu::Cmp, "CMP has no destination register");
+        core::mem::swap(&mut left, &mut right);
+    }
+    let destination = match asm.guest(left) {
+        Some(Rm::Reg(host)) if op == Alu::Cmp => host,
+        _ => {
+            // The ALU operation itself clears the upper half of a W result.
+            take(asm, Size::Qword, work, left);
+            work
+        }
+    };
+    match asm.guest(right) {
+        Some(Rm::Reg(host)) => asm.alu(op, size, destination, host),
+        Some(frame) => asm.alu_load(op, size, destination, frame),
+        None => asm.alu_imm8(op, size, destination, 0),
+    }
+    true
+}
+
 /// `operation` straight in the host registers of its operands: the few forms
 /// that make up most of a program. Any other, and the ones here in frame
 /// code, go through their emitters.
@@ -176,17 +210,21 @@ pub(super) fn emit_direct(code: &mut Code, operation: &Operation) -> bool {
             amount,
         } => {
             let size = Size::of(width == Width::X64);
-            let op = if subtract { Alu::Sub } else { Alu::Add };
+            let op = match (subtract, destination) {
+                (true, Register::Zero) => Alu::Cmp,
+                (true, _) => Alu::Sub,
+                (false, _) => Alu::Add,
+            };
             let work = working(code, destination);
-            let second = right(code, operand, width, shift, amount, work);
-            let mut asm = code.asm();
-            match asm.guest(left) {
-                Some(Rm::Reg(host)) if destination == Register::Zero && subtract => {
-                    asm.alu(Alu::Cmp, size, host, second);
-                }
-                _ => {
-                    take(&mut asm, Size::Qword, work, left);
-                    asm.alu(op, size, work, second);
+            if amount != 0 || !unshifted_binary(&mut code.asm(), op, size, work, left, operand) {
+                let second = right(code, operand, width, shift, amount, work);
+                let mut asm = code.asm();
+                match asm.guest(left) {
+                    Some(Rm::Reg(host)) if op == Alu::Cmp => asm.alu(op, size, host, second),
+                    _ => {
+                        take(&mut asm, Size::Qword, work, left);
+                        asm.alu(op, size, work, second);
+                    }
                 }
             }
             finish(code, work, destination, flags, subtract);
@@ -207,7 +245,10 @@ pub(super) fn emit_direct(code: &mut Code, operation: &Operation) -> bool {
             if kind == Logical::Or && left == Register::Zero && !invert && amount == 0 && !flags {
                 // MOV.
                 take(&mut code.asm(), size, work, operand);
-            } else {
+            } else if invert
+                || amount != 0
+                || !unshifted_binary(&mut code.asm(), logical(kind), size, work, left, operand)
+            {
                 let second = if invert {
                     right_operand(code, operand, width, shift, amount);
                     code.asm().unary(super::asm::Unary::Not, size, Gpr::Rcx);
@@ -439,6 +480,64 @@ mod tests {
             amount: 0,
         });
         assert!(!narrow.is_empty());
+    }
+
+    #[test]
+    fn binary_operands_keep_aliases_widths_and_flags() {
+        use crate::{
+            GuestAddress, Options, TargetCpu,
+            block::{BlockProfile, Features},
+        };
+        const BASE: GuestAddress = GuestAddress(0x1000);
+        let pinned = Options::new(
+            BlockProfile::new(Features::SYSTEM_MODE),
+            TargetCpu::Baseline,
+        );
+        let frame = Options::new(BlockProfile::ORDINARY, TargetCpu::Baseline);
+        let mut initial = GuestState::default();
+        initial.x[0] = 0x1234_5678_7fff_fffe;
+        initial.x[1] = 0xfedc_ba98_0000_0003;
+        initial.x[3] = 0x9182_7364_ffff_ffff;
+        initial.x[16] = 0xaaff_5500_8000_0000;
+        initial.x[17] = 0x0246_8ace_ffff_ff00;
+        initial.nzcv = 0x3000_0000;
+        for base in [
+            0x0b00_0000, // ADD
+            0x0b00_0800, // ADD, LSL #2
+            0x2b00_0000, // ADDS
+            0x4b00_0000, // SUB
+            0x6b00_0000, // SUBS
+            0x4a00_0000, // EOR
+            0x6a00_0000, // ANDS
+        ] {
+            for (rd, rn, rm) in [
+                (1, 0, 1),
+                (16, 17, 1),
+                (17, 1, 16),
+                (0, 3, 0),
+                (3, 0, 3),
+                (1, 1, 1),
+                (31, 16, 3),
+                (1, 31, 1),
+                (16, 17, 31),
+            ] {
+                for width in [0u32, 1 << 31] {
+                    let word = base | width | rm << 16 | rn << 5 | rd;
+                    let run = |options, wrap| {
+                        let native = crate::compile(&word.to_le_bytes(), BASE, options).unwrap();
+                        let code = if wrap {
+                            entered(&native.native.x86_64_code)
+                        } else {
+                            native.native.x86_64_code
+                        };
+                        let mut state = initial.clone();
+                        crate::x86_64::native::run(&code, &mut state);
+                        state
+                    };
+                    assert_eq!(run(&pinned, true), run(&frame, false), "{word:08x}");
+                }
+            }
+        }
     }
 
     struct Random(u64);
