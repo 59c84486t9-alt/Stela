@@ -1917,6 +1917,12 @@ fn smc_places_a_running_wrapper_its_shared_page_and_watchdog() {
     devices.power_button(true).unwrap();
     devices.power_button(false).unwrap();
     assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
+    // A held button turns the machine off with no message from the AP.
+    devices.power_button_held().unwrap();
+    let off = devices.take_reset().unwrap();
+    assert_eq!(off.transition, Transition::PowerOff);
+    assert!(off.reason.contains("power button held"));
+    assert_eq!(devices.take_reset(), None);
     devices.write(0, REGION + 8, 8, 0x1122_3344, 0).unwrap();
     assert_eq!(devices.read(0, REGION + 8, 8, 0), Ok(0x1122_3344));
     // The coprocessor's own memory past the shared page has no model.

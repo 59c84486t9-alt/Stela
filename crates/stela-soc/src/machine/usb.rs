@@ -287,9 +287,17 @@ impl AppleDevices {
         Ok(())
     }
 
-    /// The board's power button held: the machine turns off ([`Smc::power_button_held`]).
+    /// The board's power button held: the SMC cuts the board's power, whatever
+    /// the AP does. That takes no message from the AP, whose next mailbox
+    /// write a stuck guest never makes, so the machine turns off at once.
     pub fn power_button_held(&mut self) -> Result<()> {
-        self.smc()?.power_button_held();
+        self.smc()?;
+        if self.reset.is_none() {
+            self.reset = Some(Reset {
+                transition: Transition::PowerOff,
+                reason: String::from("smc: power button held: system power-off"),
+            });
+        }
         Ok(())
     }
 
