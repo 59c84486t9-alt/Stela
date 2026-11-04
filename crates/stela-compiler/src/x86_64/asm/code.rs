@@ -310,25 +310,33 @@ impl Code {
     pub(crate) fn remove_instruction(&mut self, range: core::ops::Range<usize>) {
         assert!(!range.is_empty());
         let removed = range.len();
-        self.sites.retain_mut(|site| {
+        // Sites and check jumps are appended in code order. Forwarding
+        // removes an instruction near the end, so visit only the suffix.
+        let mut removed_site = None;
+        for (index, site) in self.sites.iter_mut().enumerate().rev() {
             if site.end <= range.start {
-                true
-            } else if site.start >= range.end {
+                break;
+            }
+            if site.start >= range.end {
                 site.start -= removed;
                 site.end -= removed;
-                true
             } else {
                 assert!(
                     site.start == range.start && site.end == range.end,
                     "remove one complete faulting instruction"
                 );
-                false
+                removed_site = Some(index);
+                break;
             }
-        });
-        for (jump, _) in &mut self.failures {
-            if jump.at >= range.end {
-                jump.at -= removed;
+        }
+        if let Some(index) = removed_site {
+            self.sites.remove(index);
+        }
+        for (jump, _) in self.failures.iter_mut().rev() {
+            if jump.at < range.end {
+                break;
             }
+            jump.at -= removed;
         }
         self.bytes.drain(range);
         self.instructions = self

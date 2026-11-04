@@ -9,13 +9,20 @@ use alloc::vec::Vec;
 fn removed_instructions_move_the_check_failures_after_them() {
     use super::super::asm::{Cond, Gpr, Mem, Size};
     let mut code = Code::new();
+    code.check_failure(Cond::E);
+    let start = code.len();
     code.asm()
         .mov_load(Size::Qword, Gpr::Rax, Mem::base(Gpr::Rdi, 0));
-    let load = code.len();
+    let end = code.len();
     code.check_failure(Cond::Ne);
-    code.remove_instruction(0..load);
+    code.remove_instruction(start..end);
     code.place_failures();
-    assert_eq!(code[..], [0x0f, 0x85, 0, 0, 0, 0, 0x0f, 0x0b]);
+    assert_eq!(
+        code[..],
+        [
+            0x0f, 0x84, 6, 0, 0, 0, 0x0f, 0x85, 2, 0, 0, 0, 0x0f, 0x0b, 0x0f, 0x0b
+        ],
+    );
 }
 
 /// A conditional exit's branch skips its fallthrough exit, and each of
