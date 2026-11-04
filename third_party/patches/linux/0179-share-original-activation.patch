@@ -1,0 +1,499 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 04:53:28 -0500
+Subject: [PATCH] refactor(sched): share original activation and stop paths
+
+---
+ kernel/sched/Makefile          |   5 ++
+ kernel/sched/core.c            | 151 +--------------------------------
+ kernel/sched/fork_sources.json |  11 ++-
+ kernel/sched/rq_migration.c    |  71 ++++++++++++++++
+ kernel/sched/rq_tasks.c        |  90 ++++++++++++++++++++
+ kernel/sched/sched.h           |   8 ++
+ 6 files changed, 187 insertions(+), 149 deletions(-)
+ create mode 100644 kernel/sched/rq_migration.c
+ create mode 100644 kernel/sched/rq_tasks.c
+
+diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
+index a9b8b825bf46529b40dcc732bb841a39ba9d4c59..a0a90672a3a253d85338f9258694a655bc02cd21 100644
+--- a/kernel/sched/Makefile
++++ b/kernel/sched/Makefile
+@@ -3,6 +3,8 @@
+ CONTEXT_ANALYSIS_core.o := y
+ CONTEXT_ANALYSIS_rq_lock.o := y
+ CONTEXT_ANALYSIS_rq_resched.o := y
++CONTEXT_ANALYSIS_rq_tasks.o := y
++CONTEXT_ANALYSIS_rq_migration.o := y
+ CONTEXT_ANALYSIS_wait_support.o := y
+ CONTEXT_ANALYSIS_fair.o := y
+ 
+@@ -29,6 +31,8 @@ CFLAGS_core.o := $(PROFILING) -fno-omit-frame-pointer
+ CFLAGS_wait_support.o := $(CFLAGS_core.o)
+ CFLAGS_rq_lock.o := $(CFLAGS_core.o)
+ CFLAGS_rq_resched.o := $(CFLAGS_core.o)
++CFLAGS_rq_tasks.o := $(CFLAGS_core.o)
++CFLAGS_rq_migration.o := $(CFLAGS_core.o)
+ endif
+ 
+ # Branch profiling isn't noinstr-safe
+@@ -44,6 +48,7 @@ endif
+ # build parallelizes well and finishes roughly at once:
+ #
+ obj-y += core.o rq_lock.o rq_clock.o rq_resched.o wait_support.o user_affinity.o
++obj-y += rq_tasks.o rq_migration.o
+ obj-y += fair.o
+ obj-y += build_policy.o cputime_group.o rt_timeslice.o
+ obj-y += build_utility.o capacity_state.o
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 677e5fa06a29379d08c3b46262d93b93cd0f6c5f..b344a738925eca3360336c78d0ccc6ac0ac8f47b 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -524,11 +524,6 @@ void sched_core_put(void)
+ 		schedule_work(&_work);
+ }
+ 
+-#else /* !CONFIG_SCHED_CORE: */
+-
+-static inline void sched_core_enqueue(struct rq *rq, struct task_struct *p) { }
+-static inline void
+-sched_core_dequeue(struct rq *rq, struct task_struct *p, int flags) { }
+ 
+ #endif /* !CONFIG_SCHED_CORE */
+ 
+@@ -1460,7 +1455,7 @@ static inline void uclamp_rq_dec_id(struct rq *rq, struct task_struct *p,
+ 	}
+ }
+ 
+-static inline void uclamp_rq_inc(struct rq *rq, struct task_struct *p, int flags)
++void uclamp_rq_inc(struct rq *rq, struct task_struct *p, int flags)
+ {
+ 	enum uclamp_id clamp_id;
+ 
+@@ -1488,7 +1483,7 @@ static inline void uclamp_rq_inc(struct rq *rq, struct task_struct *p, int flags
+ 		rq->uclamp_flags &= ~UCLAMP_FLAG_IDLE;
+ }
+ 
+-static inline void uclamp_rq_dec(struct rq *rq, struct task_struct *p)
++void uclamp_rq_dec(struct rq *rq, struct task_struct *p)
+ {
+ 	enum uclamp_id clamp_id;
+ 
+@@ -1745,8 +1740,6 @@ static void __init init_uclamp(void)
+ }
+ 
+ #else /* !CONFIG_UCLAMP_TASK: */
+-static inline void uclamp_rq_inc(struct rq *rq, struct task_struct *p, int flags) { }
+-static inline void uclamp_rq_dec(struct rq *rq, struct task_struct *p) { }
+ static inline void uclamp_fork(struct task_struct *p) { }
+ static inline void uclamp_post_fork(struct task_struct *p) { }
+ static inline void init_uclamp(void) { }
+@@ -1776,79 +1769,6 @@ unsigned long get_wchan(struct task_struct *p)
+ 	return ip;
+ }
+ 
+-void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
+-{
+-	if (!(flags & ENQUEUE_NOCLOCK))
+-		update_rq_clock(rq);
+-
+-	/*
+-	 * Can be before ->enqueue_task() because uclamp considers the
+-	 * ENQUEUE_DELAYED task before its ->sched_delayed gets cleared
+-	 * in ->enqueue_task().
+-	 */
+-	uclamp_rq_inc(rq, p, flags);
+-
+-	p->sched_class->enqueue_task(rq, p, flags);
+-
+-	psi_enqueue(p, flags);
+-
+-	if (!(flags & ENQUEUE_RESTORE))
+-		sched_info_enqueue(rq, p);
+-
+-	if (sched_core_enabled(rq))
+-		sched_core_enqueue(rq, p);
+-}
+-
+-/*
+- * Must only return false when DEQUEUE_SLEEP.
+- */
+-inline bool dequeue_task(struct rq *rq, struct task_struct *p, int flags)
+-{
+-	if (sched_core_enabled(rq))
+-		sched_core_dequeue(rq, p, flags);
+-
+-	if (!(flags & DEQUEUE_NOCLOCK))
+-		update_rq_clock(rq);
+-
+-	if (!(flags & DEQUEUE_SAVE))
+-		sched_info_dequeue(rq, p);
+-
+-	psi_dequeue(p, flags);
+-
+-	/*
+-	 * Must be before ->dequeue_task() because ->dequeue_task() can 'fail'
+-	 * and mark the task ->sched_delayed.
+-	 */
+-	uclamp_rq_dec(rq, p);
+-	return p->sched_class->dequeue_task(rq, p, flags);
+-}
+-
+-void activate_task(struct rq *rq, struct task_struct *p, int flags)
+-{
+-	if (task_on_rq_migrating(p))
+-		flags |= ENQUEUE_MIGRATED;
+-
+-	enqueue_task(rq, p, flags);
+-
+-	WRITE_ONCE(p->on_rq, TASK_ON_RQ_QUEUED);
+-	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
+-}
+-
+-void deactivate_task(struct rq *rq, struct task_struct *p, int flags)
+-{
+-	WARN_ON_ONCE(flags & DEQUEUE_SLEEP);
+-
+-	WRITE_ONCE(p->on_rq, TASK_ON_RQ_MIGRATING);
+-	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
+-
+-	/*
+-	 * Code explicitly relies on TASK_ON_RQ_MIGRATING begin set *before*
+-	 * dequeue_task() and cleared *after* enqueue_task().
+-	 */
+-
+-	dequeue_task(rq, p, flags);
+-}
+-
+ static void block_task(struct rq *rq, struct task_struct *p, unsigned long task_state)
+ {
+ 	int flags = DEQUEUE_NOCLOCK;
+@@ -2308,49 +2228,6 @@ out:
+ 	return 0;
+ }
+ 
+-int push_cpu_stop(void *arg)
+-{
+-	struct rq *lowest_rq = NULL, *rq = this_rq();
+-	struct task_struct *p = arg;
+-
+-	raw_spin_lock_irq(&p->pi_lock);
+-	raw_spin_rq_lock(rq);
+-
+-	if (task_rq(p) != rq)
+-		goto out_unlock;
+-
+-	if (is_migration_disabled(p)) {
+-		p->migration_flags |= MDF_PUSH;
+-		goto out_unlock;
+-	}
+-
+-	p->migration_flags &= ~MDF_PUSH;
+-
+-	if (p->sched_class->find_lock_rq)
+-		lowest_rq = p->sched_class->find_lock_rq(p, rq);
+-
+-	if (!lowest_rq)
+-		goto out_unlock;
+-
+-	lockdep_assert_rq_held(lowest_rq);
+-
+-	// XXX validate p is still the highest prio task
+-	if (task_rq(p) == rq) {
+-		move_queued_task_locked(rq, lowest_rq, p);
+-		resched_curr(lowest_rq);
+-	}
+-
+-	double_unlock_balance(rq, lowest_rq);
+-
+-out_unlock:
+-	rq->push_busy = false;
+-	raw_spin_rq_unlock(rq);
+-	raw_spin_unlock_irq(&p->pi_lock);
+-
+-	put_task_struct(p);
+-	return 0;
+-}
+-
+ static void
+ do_set_cpus_allowed(struct task_struct *p, struct affinity_context *ctx)
+ {
+@@ -4630,24 +4507,6 @@ static void do_balance_callbacks(struct rq *rq, struct balance_callback *head)
+ 	}
+ }
+ 
+-static void balance_push(struct rq *rq);
+-
+-/*
+- * balance_push_callback is a right abuse of the callback interface and plays
+- * by significantly different rules.
+- *
+- * Where the normal balance_callback's purpose is to be ran in the same context
+- * that queued it (only later, when it's safe to drop rq->lock again),
+- * balance_push_callback is specifically targeted at __schedule().
+- *
+- * This abuse is tolerated because it places all the unlikely/odd cases behind
+- * a single test, namely: rq->balance_callback == NULL.
+- */
+-struct balance_callback balance_push_callback = {
+-	.next = NULL,
+-	.func = balance_push,
+-};
+-
+ static inline struct balance_callback *
+ __splice_balance_callbacks(struct rq *rq, bool split)
+ {
+@@ -7955,7 +7814,7 @@ static DEFINE_PER_CPU(struct cpu_stop_work, push_work);
+  * This is enabled below SCHED_AP_ACTIVE; when !cpu_active(), but only
+  * effective when the hotplug motion is down.
+  */
+-static void balance_push(struct rq *rq)
++void balance_push(struct rq *rq)
+ 	__must_hold(__rq_lockp(rq))
+ {
+ 	struct task_struct *push_task = rq->curr;
+@@ -8051,10 +7910,6 @@ static void balance_hotplug_wait(void)
+ 
+ #else /* !CONFIG_HOTPLUG_CPU: */
+ 
+-static inline void balance_push(struct rq *rq)
+-{
+-}
+-
+ static inline void balance_push_set(int cpu, bool on)
+ {
+ }
+diff --git a/kernel/sched/fork_sources.json b/kernel/sched/fork_sources.json
+index c2953bb9fa539d9f03bec77509120a001fccd75c..98c4f88c706721625035bd1428137e8619838a15 100644
+--- a/kernel/sched/fork_sources.json
++++ b/kernel/sched/fork_sources.json
+@@ -166,6 +166,14 @@
+       "path": "kernel/sched/rq_resched.h",
+       "sha256": "614eaec1754cce2da690b3d69739ba9ee0f1b4f3a8a67c820effc0e802df1ad8"
+     },
++    {
++      "path": "kernel/sched/rq_tasks.c",
++      "sha256": "4bef99437872d81ece14056986789910aaa44f12b75f8d17ce368ff22a452f4d"
++    },
++    {
++      "path": "kernel/sched/rq_migration.c",
++      "sha256": "bbd6860dfd16294fc8c6dbc2c5d70b9ec9c021e9f710dff6e171d585fb37438b"
++    },
+     {
+       "path": "kernel/sched/rq_lock.c",
+       "sha256": "e187b63ad8a7b3831497bd3e955813bb51268be727a6143d72f856c9cf46df16"
+@@ -176,7 +184,7 @@
+     },
+     {
+       "path": "kernel/sched/sched.h",
+-      "sha256": "302232a6b7e7d0fa5a66a2d1854ba4ff5aae532aab87ce298a9ee2441ed6b1e3"
++      "sha256": "8f2743a77a83795cb551b06ec3d4bba48bea21ced6483595caa463443d0c0d23"
+     },
+     {
+       "path": "kernel/sched/sched_class_bounds.c",
+@@ -194,6 +202,7 @@
+     "Both profiles use the original runqueue clock updates and scheduler feature defaults in rq_clock.c. The native build uses the original stable clock startup and supplies its retained monotonic source in place of the weak jiffy source.",
+     "UEFI COFF class contributions and bounds preserve the order of SCHED_DATA in include/asm-generic/vmlinux.lds.h.",
+     "The original runqueue reschedule and wakeup preemption bodies are shared through rq_resched.c. Class identity and ordering belong to the original scheduler owner.",
++    "Both profiles use the original runqueue task transitions, push callback and stop routine. The hotplug-disabled profile retains the original disabled balance_push body.",
+     "The original runqueue lock bodies are built by both scheduler profiles through rq_lock.c. A separate scheduler owner must provide runqueues.",
+     "The original sched_rr_timeslice definition is shared by the regular and native scheduler builds through rt_timeslice.c.",
+     "Original sched_fork class and placement decisions require the native admit/select/place operations declared in fork_backend.h.",
+diff --git a/kernel/sched/rq_migration.c b/kernel/sched/rq_migration.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..16e3deb37efed7826e21b94236cabf48731e060d
+--- /dev/null
++++ b/kernel/sched/rq_migration.c
+@@ -0,0 +1,71 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Original runqueue push and stop operations from kernel/sched/core.c.
++ * Copyright (C) 1991-2002 Linus Torvalds
++ * Copyright (C) 1998-2024 Ingo Molnar, Red Hat
++ */
++#include "sched.h"
++
++#ifndef CONFIG_HOTPLUG_CPU
++static inline void balance_push(struct rq *rq)
++{
++}
++#endif
++
++/*
++ * balance_push_callback is a right abuse of the callback interface and plays
++ * by significantly different rules.
++ *
++ * Where the normal balance_callback's purpose is to be ran in the same context
++ * that queued it (only later, when it's safe to drop rq->lock again),
++ * balance_push_callback is specifically targeted at __schedule().
++ *
++ * This abuse is tolerated because it places all the unlikely/odd cases behind
++ * a single test, namely: rq->balance_callback == NULL.
++ */
++struct balance_callback balance_push_callback = {
++	.next = NULL,
++	.func = balance_push,
++};
++
++int push_cpu_stop(void *arg)
++{
++	struct rq *lowest_rq = NULL, *rq = this_rq();
++	struct task_struct *p = arg;
++
++	raw_spin_lock_irq(&p->pi_lock);
++	raw_spin_rq_lock(rq);
++
++	if (task_rq(p) != rq)
++		goto out_unlock;
++
++	if (is_migration_disabled(p)) {
++		p->migration_flags |= MDF_PUSH;
++		goto out_unlock;
++	}
++
++	p->migration_flags &= ~MDF_PUSH;
++
++	if (p->sched_class->find_lock_rq)
++		lowest_rq = p->sched_class->find_lock_rq(p, rq);
++
++	if (!lowest_rq)
++		goto out_unlock;
++
++	lockdep_assert_rq_held(lowest_rq);
++
++	// XXX validate p is still the highest prio task
++	if (task_rq(p) == rq) {
++		move_queued_task_locked(rq, lowest_rq, p);
++		resched_curr(lowest_rq);
++	}
++
++	double_unlock_balance(rq, lowest_rq);
++
++out_unlock:
++	rq->push_busy = false;
++	raw_spin_rq_unlock(rq);
++	raw_spin_unlock_irq(&p->pi_lock);
++
++	put_task_struct(p);
++	return 0;
++}
+diff --git a/kernel/sched/rq_tasks.c b/kernel/sched/rq_tasks.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..335c2ac50449772d1262bb677171cba049a1b692
+--- /dev/null
++++ b/kernel/sched/rq_tasks.c
+@@ -0,0 +1,90 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Original runqueue task transitions from kernel/sched/core.c.
++ * Copyright (C) 1991-2002 Linus Torvalds
++ * Copyright (C) 1998-2024 Ingo Molnar, Red Hat
++ */
++#include "sched.h"
++
++#ifndef CONFIG_SCHED_CORE
++static inline void sched_core_enqueue(struct rq *rq, struct task_struct *p) { }
++static inline void
++sched_core_dequeue(struct rq *rq, struct task_struct *p, int flags) { }
++#endif
++
++#ifndef CONFIG_UCLAMP_TASK
++static inline void uclamp_rq_inc(struct rq *rq, struct task_struct *p, int flags) { }
++static inline void uclamp_rq_dec(struct rq *rq, struct task_struct *p) { }
++#endif
++
++void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
++{
++	if (!(flags & ENQUEUE_NOCLOCK))
++		update_rq_clock(rq);
++
++	/*
++	 * Can be before ->enqueue_task() because uclamp considers the
++	 * ENQUEUE_DELAYED task before its ->sched_delayed gets cleared
++	 * in ->enqueue_task().
++	 */
++	uclamp_rq_inc(rq, p, flags);
++
++	p->sched_class->enqueue_task(rq, p, flags);
++
++	psi_enqueue(p, flags);
++
++	if (!(flags & ENQUEUE_RESTORE))
++		sched_info_enqueue(rq, p);
++
++	if (sched_core_enabled(rq))
++		sched_core_enqueue(rq, p);
++}
++
++/*
++ * Must only return false when DEQUEUE_SLEEP.
++ */
++inline bool dequeue_task(struct rq *rq, struct task_struct *p, int flags)
++{
++	if (sched_core_enabled(rq))
++		sched_core_dequeue(rq, p, flags);
++
++	if (!(flags & DEQUEUE_NOCLOCK))
++		update_rq_clock(rq);
++
++	if (!(flags & DEQUEUE_SAVE))
++		sched_info_dequeue(rq, p);
++
++	psi_dequeue(p, flags);
++
++	/*
++	 * Must be before ->dequeue_task() because ->dequeue_task() can 'fail'
++	 * and mark the task ->sched_delayed.
++	 */
++	uclamp_rq_dec(rq, p);
++	return p->sched_class->dequeue_task(rq, p, flags);
++}
++
++void activate_task(struct rq *rq, struct task_struct *p, int flags)
++{
++	if (task_on_rq_migrating(p))
++		flags |= ENQUEUE_MIGRATED;
++
++	enqueue_task(rq, p, flags);
++
++	WRITE_ONCE(p->on_rq, TASK_ON_RQ_QUEUED);
++	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
++}
++
++void deactivate_task(struct rq *rq, struct task_struct *p, int flags)
++{
++	WARN_ON_ONCE(flags & DEQUEUE_SLEEP);
++
++	WRITE_ONCE(p->on_rq, TASK_ON_RQ_MIGRATING);
++	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
++
++	/*
++	 * Code explicitly relies on TASK_ON_RQ_MIGRATING begin set *before*
++	 * dequeue_task() and cleared *after* enqueue_task().
++	 */
++
++	dequeue_task(rq, p, flags);
++}
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index 9c62147515caa8c8b31338d3ef5dc109fefda6f4..e85d10d6cc6f45db24f347d6165ed233f7838e31 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -1848,6 +1848,9 @@ struct rq_flags {
+ };
+ 
+ extern struct balance_callback balance_push_callback;
++#ifdef CONFIG_HOTPLUG_CPU
++void balance_push(struct rq *rq) __must_hold(__rq_lockp(rq));
++#endif
+ 
+ #ifdef CONFIG_SCHED_CLASS_EXT
+ extern const struct sched_class ext_sched_class;
+@@ -4159,6 +4162,11 @@ extern int __sched_setscheduler(struct task_struct *p, const struct sched_attr *
+ extern int __sched_setaffinity(struct task_struct *p, struct affinity_context *ctx);
+ extern const struct sched_class *__setscheduler_class(int policy, int prio);
+ extern void set_load_weight(struct task_struct *p, bool update_load);
++#ifdef CONFIG_UCLAMP_TASK
++void uclamp_rq_inc(struct rq *rq, struct task_struct *p, int flags);
++void uclamp_rq_dec(struct rq *rq, struct task_struct *p);
++#endif
++
+ extern void enqueue_task(struct rq *rq, struct task_struct *p, int flags);
+ extern bool dequeue_task(struct rq *rq, struct task_struct *p, int flags);
+ 

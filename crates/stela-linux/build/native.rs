@@ -280,6 +280,8 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/kernel/sched/rq_lock.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/rq_clock.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/rq_resched.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/rq_tasks.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/rq_migration.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/clock.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/fork_metadata.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/cputime_group.c")),
