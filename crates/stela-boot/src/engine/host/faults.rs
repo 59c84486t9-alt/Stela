@@ -221,23 +221,11 @@ pub(crate) fn page_fault(
         Ok(resolved) => resolved,
         Err(cause) => return abandon(state, frame, address, write, cause, saved),
     };
-    // Filled for EL1 without PAN, a leaf is one PAN guards unless it would
-    // translate the same with PAN set; one filled with PAN set never is.
+    // EL1 and PAN share a root. SMAP guards a leaf if a read with PAN set
+    // would be denied by either stage, or by stage 1's PAN rules.
     let guarded = state.contexts.pan_flag
         && state.current % VIEWS == EL1_VIEW
-        && !matches!(
-            mmu::translate(
-                &regime.controls,
-                address,
-                Access::Read,
-                mmu::Requester {
-                    pan: true,
-                    ..regime.requester
-                },
-                &mut GuestTables(state),
-            ),
-            Outcome::Mapped(same) if same.writable == translation.writable
-        );
+        && (!translation.readable || translation.pan_sensitive);
     let rights = PRESENT
         | NX
         | if translation.writable { WRITABLE } else { 0 }

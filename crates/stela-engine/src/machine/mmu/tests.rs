@@ -12,6 +12,7 @@ fn par_reports_the_output_attributes_or_the_fault() {
         readable: true,
         writable: true,
         executable: false,
+        pan_sensitive: false,
         guarded: false,
         global: true,
         asid: 0,
@@ -262,6 +263,28 @@ fn stage_one_tables_and_output_translate_through_stage_two() {
         par(&Outcome::Fault(walk)),
         Some(1 << 11 | 1 << 9 | 1 << 8 | 0b00_0101 << 1 | 1)
     );
+}
+
+#[test]
+fn pan_shadow_classification_includes_stage_two_read_permissions() {
+    let (controls, mut tables) = two_stages(0x8000_0000);
+    // The table walk still uses the original read/write block. The data
+    // access uses the next block, writable but unreadable at stage 2.
+    tables.0.insert(0x10_0010, STAGE2_BLOCK & !(1 << 6));
+    let Outcome::Mapped(mapped) = translate(&controls, 0x1234, Access::Write, KERNEL, &mut tables)
+    else {
+        panic!("stage 2 must permit the write");
+    };
+    assert!(!mapped.readable && mapped.writable && !mapped.pan_sensitive);
+    let pan = Requester {
+        pan: true,
+        ..KERNEL
+    };
+    let Outcome::Fault(fault) = translate(&controls, 0x1234, Access::Read, pan, &mut tables) else {
+        panic!("stage 2 must deny the read");
+    };
+    assert_eq!(fault.kind, FaultKind::Permission);
+    assert!(fault.second_stage.is_some());
 }
 
 #[test]

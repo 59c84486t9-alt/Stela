@@ -3,11 +3,11 @@
 
 use super::{
     Access, Alignment, Controls, Fault, FaultKind, MemoryType, Outcome, PHYSICAL_ADDRESS_BITS,
-    Regime, Requester, SCTLR_M, SCTLR_WXN, TableMemory, Translation, Unsupported,
+    PagePermissions, Regime, Requester, SCTLR_M, SCTLR_WXN, TableMemory, Translation, Unsupported,
     alignment::MemoryCheck,
     attributes,
     geometry::{self, Geometry},
-    permits, sprr,
+    sprr,
 };
 
 // TCR_EL1, and TCR_EL2 with E2H set.
@@ -219,6 +219,7 @@ fn disabled(
         readable: true,
         writable: true,
         executable: true,
+        pan_sensitive: false,
         guarded: false,
         global: true,
         asid: 0,
@@ -387,7 +388,7 @@ fn walk_enabled(
         } else {
             rights(controls, requester, &hierarchy, descriptor)
         };
-        if !permits(rights, access) {
+        if !rights.permits(access) {
             return fault(FaultKind::Permission, level);
         }
         // Caches off (pseudocode AArch64.S1TreatAsNormalNC), after the
@@ -405,10 +406,11 @@ fn walk_enabled(
             memory,
             attributes,
             shareability,
-            readable: rights.0,
-            writable: rights.1,
-            executable: rights.2,
-            guarded: descriptor & GUARDED != 0 && rights.2,
+            readable: rights.readable,
+            writable: rights.writable,
+            executable: rights.executable,
+            pan_sensitive: rights.pan_sensitive,
+            guarded: descriptor & GUARDED != 0 && rights.executable,
             global,
             asid: if global { 0 } else { asid(controls) },
             size,
@@ -417,7 +419,7 @@ fn walk_enabled(
     }
 }
 
-/// (readable, writable, executable) of a leaf for `requester` (Arm ARM
+/// The rights of a leaf for `requester` (Arm ARM
 /// D8.4, pseudocode AArch64.S1DirectBasePermissions and
 /// AArch64.S1HasPermissionsFault): data rights after PAN, execution at the
 /// requesting EL.
@@ -426,14 +428,19 @@ fn rights(
     requester: Requester,
     hierarchy: &Hierarchy,
     descriptor: u64,
-) -> (bool, bool, bool) {
+) -> PagePermissions {
     let read_only = descriptor & AP_READ_ONLY != 0 || hierarchy.read_only;
     let wxn = controls.sctlr & SCTLR_WXN != 0;
     if !two_ranges(controls.regime) {
         // One privilege level: AP[1] and PXN are ignored, bit 54 is XN.
         let writable = !read_only;
         let executable = descriptor & UXN == 0 && !hierarchy.uxn && !(wxn && writable);
-        return (true, writable, executable);
+        return PagePermissions {
+            readable: true,
+            writable,
+            executable,
+            pan_sensitive: false,
+        };
     }
     let el0_readable = descriptor & AP_EL0 != 0 && !hierarchy.no_el0;
     let el0_writable = el0_readable && !read_only;
@@ -443,19 +450,31 @@ fn rights(
     let el0_executable = descriptor & UXN == 0 && !hierarchy.uxn && !(wxn && el0_writable);
     let privileged_executable =
         descriptor & PXN == 0 && !hierarchy.pxn && !el0_writable && !(wxn && privileged_writable);
-    if requester.el == 0 {
-        return (el0_readable, el0_writable, el0_executable);
-    }
-    if requester.unprivileged {
-        return (el0_readable, el0_writable, privileged_executable);
+    if requester.el == 0 || requester.unprivileged {
+        return PagePermissions {
+            readable: el0_readable,
+            writable: el0_writable,
+            executable: if requester.el == 0 {
+                el0_executable
+            } else {
+                privileged_executable
+            },
+            pan_sensitive: false,
+        };
     }
     // PAN removes kernel-level data access to EL0-accessible locations, and
     // with SCTLR_ELx.EPAN (FEAT_PAN3, RES0 without it) to locations EL0 may
     // execute, before WXN; it never affects execution.
     let el0_execute_permitted = descriptor & UXN == 0 && !hierarchy.uxn;
     let enhanced = controls.sctlr & SCTLR_EPAN != 0;
-    let pan = requester.pan && (el0_readable || enhanced && el0_execute_permitted);
-    (!pan, !pan && privileged_writable, privileged_executable)
+    let pan_sensitive = el0_readable || enhanced && el0_execute_permitted;
+    let pan = requester.pan && pan_sensitive;
+    PagePermissions {
+        readable: !pan,
+        writable: !pan && privileged_writable,
+        executable: privileged_executable,
+        pan_sensitive,
+    }
 }
 
 #[cfg(test)]
