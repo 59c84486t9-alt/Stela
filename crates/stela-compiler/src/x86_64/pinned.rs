@@ -163,6 +163,14 @@ pub(super) fn unshifted_binary(
     true
 }
 
+/// Compare the left operand against the prior instruction's result in RAX.
+pub(super) fn compare_held_right(code: &mut Code, width: Width, left: Register) {
+    let mut asm = code.asm();
+    let left = asm.guest(left).expect("CMP left register");
+    asm.alu(Alu::Cmp, Size::of(width == Width::X64), left, Gpr::Rax);
+    nzcv(code, true);
+}
+
 /// Compare the guest value that the previous instruction left in RAX.
 pub(super) fn compare_held_immediate(code: &mut Code, width: Width, immediate: u32) {
     let size = Size::of(width == Width::X64);

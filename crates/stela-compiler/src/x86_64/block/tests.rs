@@ -288,6 +288,101 @@ fn values_left_in_rax_are_not_reloaded() {
     assert_eq!(&code[compare..compare + 3], &[0x48, 0x81, 0xf8]); // CMP RAX,imm32.
 }
 
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn pinned_compare_reuses_the_preceding_unshifted_right_operand() {
+    use crate::{GuestState, Lifter, TargetCpu, aarch64::Decoder};
+
+    let pc = GuestAddress(0x1000);
+    let compare = GuestAddress(pc.0 + 4);
+    let branch = GuestAddress(pc.0 + 8);
+    let next = GuestAddress(pc.0 + 12);
+    let terminal = (
+        branch,
+        Terminator::Branch(Operation::BranchCondition {
+            target: pc,
+            condition: 3, // LO: borrow.
+        }),
+    );
+    for (sf, mask) in [(0, u64::from(u32::MAX)), (1 << 31, u64::MAX)] {
+        for left in [1, 9] {
+            let instructions = [
+                Decoder.lift(pc, sf | 0x1100_0694).unwrap(), // ADD R20,R20,#1
+                Decoder.lift(compare, sf | 0x6b14_001f | left << 5).unwrap(), // CMP Rleft,R20
+            ];
+            let system = |input: &[Instruction], target| {
+                emit_system_mode(
+                    input,
+                    Some(&terminal),
+                    next,
+                    target,
+                    super::super::MemoryChecks::DEFAULT,
+                    super::super::NativeSystem::NONE,
+                )
+                .0
+            };
+            let native = system(&instructions, TargetCpu::Baseline);
+            let dit = system(
+                &instructions,
+                TargetCpu::Baseline.with_data_independent_timing(),
+            );
+            let standalone = system(&instructions[1..], TargetCpu::Baseline);
+            let code = &native.x86_64_code;
+            let at = native.source_map[1].1;
+            let opcode = if sf == 0 { at } else { at + 1 };
+            let cmp = if left == 1 {
+                &[0x39, 0xc5][..] // CMP EBP/RBP,EAX/RAX.
+            } else {
+                &[0x39, 0x47, 72][..] // CMP [frame+X9],EAX/RAX.
+            };
+            assert_eq!(&code[opcode..opcode + cmp.len()], cmp);
+            assert!(
+                !dit.x86_64_code[dit.source_map[1].1..].starts_with(&code[at..opcode + cmp.len()])
+            );
+            assert!(
+                !standalone
+                    .x86_64_code
+                    .starts_with(&code[at..opcode + cmp.len()])
+            );
+            assert_eq!(
+                native
+                    .source_map
+                    .iter()
+                    .map(|row| row.0)
+                    .collect::<Vec<_>>(),
+                [pc, compare, branch]
+            );
+
+            let entered = super::super::pinned::entered(code);
+            let sign = (mask >> 1) + 1;
+            for (a, before) in [
+                (1, 0),
+                (0, 0),
+                (mask, 0),
+                (sign - 1, mask - 1),
+                (0, sign - 1),
+            ] {
+                let mut state = GuestState::default();
+                state.x[left as usize] = a;
+                state.x[20] = before | !mask;
+                let mut expected = state.clone();
+                let b = before.wrapping_add(1) & mask;
+                let difference = a.wrapping_sub(b) & mask;
+                expected.x[20] = b;
+                expected.nzcv = (u32::from(difference & sign != 0) << 31)
+                    | (u32::from(difference == 0) << 30)
+                    | (u32::from(a >= b) << 29)
+                    | (u32::from((a ^ b) & (a ^ difference) & sign != 0) << 28);
+                assert_eq!(
+                    native::run(&entered, &mut state),
+                    if a < b { pc.0 } else { next.0 }
+                );
+                assert_eq!(state, expected);
+            }
+        }
+    }
+}
+
 #[test]
 fn ordinary_integer_operations_read_frame_operands_directly() {
     use crate::{Lifter, aarch64::Decoder};

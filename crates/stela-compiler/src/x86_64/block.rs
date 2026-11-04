@@ -641,6 +641,23 @@ fn emit_single(
         && source == register
     {
         super::pinned::compare_held_immediate(code, width, immediate);
+    } else if code.is_pinned()
+        && !code.constant_time()
+        && let super::Rax::Guest(register) = held.rax
+        && let Operation::AddSubRegister {
+            width,
+            subtract: true,
+            flags: true,
+            destination: Register::Zero,
+            left: left @ Register::X(_),
+            right,
+            amount: 0,
+            ..
+        } = instruction.operation
+        && right == register
+        && left != right
+    {
+        super::pinned::compare_held_right(code, width, left);
     } else {
         super::emit_instruction(code, instruction, fixups, target, checks);
     }
