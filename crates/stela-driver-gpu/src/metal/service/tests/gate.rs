@@ -291,6 +291,29 @@ fn a_busy_poll_with_a_nonempty_request_takes_the_normal_validation_path() {
 }
 
 #[test]
+fn a_busy_poll_falls_back_after_the_device_loss_notification() {
+    let shared = SharedService::new(service(), HOST);
+    let connection = connect(&mut shared.try_turn().unwrap());
+    let mut memory = Memory::default();
+    let first = gate_call(&mut memory, Operation::Poll, &[], 8);
+    GateService::serve(&shared, connection, first, &mut memory).unwrap();
+    assert_eq!(polled(&mut memory, first), 0);
+
+    shared.try_turn().unwrap().device().mark_lost();
+    assert!(shared.signaled());
+    let busy = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let held = shared.try_turn().unwrap();
+    assert!(!shared.poll_while_held(connection, busy, &mut memory));
+    drop(held);
+
+    GateService::serve(&shared, connection, busy, &mut memory).unwrap();
+    assert_eq!(
+        completed(&mut memory, busy).status,
+        Status::DeviceLost.raw()
+    );
+}
+
+#[test]
 fn every_call_runs_where_the_platform_says() {
     static RUNS: AtomicUsize = AtomicUsize::new(0);
     let host = ServiceHost {

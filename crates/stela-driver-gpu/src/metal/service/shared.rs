@@ -39,10 +39,8 @@ pub struct SharedService<B: Backend, C: Compiler> {
     stale: AtomicBool,
     /// Completed work the gate has not taken.
     completed: AtomicBool,
-    /// The newest serial a holder saw completed, and whether the device
-    /// is lost, as the last holder left them.
+    /// The newest serial a holder saw completed, or POLL_UNAVAILABLE.
     reached: AtomicU64,
-    lost: AtomicBool,
     /// Connections whose `Poll` the service answered, zero for a free slot:
     /// those a busy service answers from `reached`.
     polling: [AtomicU64; POLLING],
@@ -51,6 +49,8 @@ pub struct SharedService<B: Backend, C: Compiler> {
 
 /// More connections than a device's gates open.
 const POLLING: usize = 64;
+/// A lost device or this serial must use the normal poll path.
+const POLL_UNAVAILABLE: u64 = u64::MAX;
 
 /// What the platform does for the shared service.
 #[derive(Clone, Copy)]
@@ -121,14 +121,17 @@ impl<B: Backend, C: Compiler> Drop for Turn<'_, B, C> {
             // without a guest call's stack switch around it.
             (self.0.host.run)(self.0.host.stack, &mut || completed = (**self).signaled());
         }
+        let device = self.device();
+        let reached = if device.is_lost() {
+            POLL_UNAVAILABLE
+        } else {
+            device.completed_serial()
+        };
+        // Publish one snapshot before making the completion observable.
+        self.0.reached.store(reached, Ordering::Release);
         if completed || self.retiring() {
             self.0.completed.store(true, Ordering::Release);
         }
-        let device = self.device();
-        let (reached, lost) = (device.completed_serial(), device.is_lost());
-        // Only the holder writes it, and a reopened device counts afresh.
-        self.0.reached.store(reached, Ordering::Release);
-        self.0.lost.store(lost, Ordering::Release);
         self.0.locked.store(false, Ordering::SeqCst);
         if self.0.stale.load(Ordering::SeqCst) {
             self.0.interrupted();
@@ -144,7 +147,6 @@ impl<B: Backend, C: Compiler> SharedService<B, C> {
             stale: AtomicBool::new(false),
             completed: AtomicBool::new(false),
             reached: AtomicU64::new(0),
-            lost: AtomicBool::new(false),
             polling: [const { AtomicU64::new(0) }; POLLING],
             host,
         }
@@ -166,7 +168,7 @@ impl<B: Backend, C: Compiler> SharedService<B, C> {
         record: u64,
         caller: &mut dyn CallerMemory,
     ) -> bool {
-        if self.lost.load(Ordering::Acquire) || !self.polls(connection) {
+        if !self.polls(connection) {
             return false;
         }
         let mut raw = [0; size_of::<GateCall>()];
@@ -181,9 +183,11 @@ impl<B: Backend, C: Compiler> SharedService<B, C> {
         {
             return false;
         }
-        let value = wire::Value {
-            value: self.reached.load(Ordering::Acquire),
-        };
+        let reached = self.reached.load(Ordering::Acquire);
+        if reached == POLL_UNAVAILABLE {
+            return false;
+        }
+        let value = wire::Value { value: reached };
         let mut response = [0; size_of::<wire::Value>()];
         wire::write(&value, &mut response).expect("a record of its own size");
         if caller.write(call.response.address, &response).is_err() {
