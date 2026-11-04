@@ -130,6 +130,8 @@
 /mm/fadvise.c
 /mm/mm_init.c
 /mm/oom_kill.c
+/mm/oom_victim.c
+/mm/oom_victim.h
 /mm/oom_adj.c
 /mm/system_hash.h
 /mm/list_lru.c

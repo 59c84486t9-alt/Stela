@@ -145,6 +145,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/mm/shrinker.c")),
             PathBuf::from(format!("{LINUX}/mm/reclaim_throttle.c")),
             PathBuf::from(format!("{LINUX}/mm/workingset.c")),
+            PathBuf::from(format!("{LINUX}/mm/oom_victim.c")),
             PathBuf::from(format!("{LINUX}/mm/page-writeback.c")),
             PathBuf::from(format!("{LINUX}/mm/writeback_domain.c")),
             PathBuf::from(format!("{LINUX}/mm/writeback_folio.c")),
