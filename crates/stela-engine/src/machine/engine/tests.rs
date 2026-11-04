@@ -832,6 +832,8 @@ fn device_pairs_are_two_ascending_accesses_in_register_order() {
 /// A real register store can start DMA that commits before later failure.
 /// This fixture distinguishes refused register writes from failed service.
 struct PairFaultDevice {
+    /// The call a gate store makes, taken once.
+    call: Option<GateCall>,
     refused: Option<u64>,
     failed_transfer: Option<usize>,
     reads: Vec<u64>,
@@ -876,7 +878,13 @@ impl Devices for PairFaultDevice {
         self.stores.push((physical, value));
         Ok(())
     }
+    fn take_call(&mut self, _: usize) -> Option<GateCall> {
+        self.call.take()
+    }
     fn transfer(&mut self, _: usize, memory: &mut dyn Memory, _: u64) -> Result<(), DeviceError> {
+        if self.call.is_some() {
+            return Ok(());
+        }
         let index = self.transfers;
         self.transfers += 1;
         let (_, value) = self.stores[index];
@@ -927,8 +935,72 @@ fn a_call_reaches_the_callers_ram_across_pages_outside_locks() {
     ));
 }
 
+/// A service that reads the caller's memory at the record's address.
+struct ReadingService;
+
+impl stela_contracts::gate::GateService for ReadingService {
+    fn connect(&self) -> Result<core::num::NonZeroU64, &'static str> {
+        Err("no connections")
+    }
+    fn disconnect(&self, _: core::num::NonZeroU64) {}
+    fn serve(
+        &self,
+        _: core::num::NonZeroU64,
+        record: u64,
+        caller: &mut dyn CallerMemory,
+    ) -> Result<(), CallerFault> {
+        caller.read(record, &mut [0; 8])
+    }
+    fn import(
+        &self,
+        _: core::num::NonZeroU64,
+        _: &[stela_contracts::gate::MemoryRange],
+        _: core::num::NonZeroU64,
+    ) -> Result<core::num::NonZeroU64, &'static str> {
+        Err("no imports")
+    }
+    fn retired(&self) -> Option<core::num::NonZeroU64> {
+        None
+    }
+    fn quiesced(&self) -> bool {
+        true
+    }
+    fn signaled(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn a_call_the_tables_refuse_gives_up_every_translation_of_the_callers_asid() {
+    use mmu::tlbi::{Everywhere, Reach};
+    let serve = |record| {
+        let request = stela_contracts::gate::GateRequest::Serve {
+            gate: 0,
+            connection: core::num::NonZeroU64::MIN,
+            record,
+        };
+        PairFaultDevice {
+            call: Some(GateCall::new(0, Arc::new(ReadingService), request)),
+            ..pair_fault_device()
+        }
+    };
+    // A page the caller reaches gives nothing up.
+    let mut machine = board(&[], serve(BASE), Vec::new());
+    machine.device_transfer(0).unwrap();
+    assert!(machine.host.reaches.is_empty());
+    // XNU ages a page by clearing its access flag without a TLBI, so other
+    // pages of the call's spans may be aged too: the frontend's retry
+    // touches each, and every one has to fault for XNU to see the touch.
+    let mut machine = board(&[], serve(u64::MAX - 0xfff), Vec::new());
+    let forgets = machine.statistics.lookup_forgets[0];
+    machine.device_transfer(0).unwrap();
+    assert_eq!(machine.host.reaches, [(Reach::All, Everywhere::NonGlobal)]);
+    assert!(machine.statistics.lookup_forgets[0] > forgets);
+}
+
 fn pair_fault_device() -> PairFaultDevice {
     PairFaultDevice {
+        call: None,
         refused: None,
         failed_transfer: None,
         reads: Vec::new(),
