@@ -163,6 +163,14 @@ pub(super) fn unshifted_binary(
     true
 }
 
+/// Compare the guest value that the previous instruction left in RAX.
+pub(super) fn compare_held_immediate(code: &mut Code, width: Width, immediate: u32) {
+    let size = Size::of(width == Width::X64);
+    code.asm()
+        .alu_imm(Alu::Cmp, size, Gpr::Rax, immediate as i32);
+    nzcv(code, true);
+}
+
 /// Common integer operations on their native register or frame operands.
 pub(super) fn emit_direct(code: &mut Code, operation: &Operation) -> bool {
     match *operation {
@@ -184,8 +192,8 @@ pub(super) fn emit_direct(code: &mut Code, operation: &Operation) -> bool {
             let immediate = immediate as i32;
             let mut asm = code.asm();
             match asm.guest(source) {
-                Some(Rm::Reg(host)) if op == Alu::Cmp => {
-                    asm.alu_imm(op, size, host, immediate);
+                Some(operand) if op == Alu::Cmp => {
+                    asm.alu_imm(op, size, operand, immediate);
                 }
                 Some(Rm::Reg(host)) if !flags && host != work => {
                     let distance = if subtract { -immediate } else { immediate };
@@ -447,6 +455,48 @@ mod tests {
         let mut frame = Code::new();
         super::super::load(&mut frame, Register::X(0));
         assert_eq!(&frame[..], [0x48, 0x8b, 0x87, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn immediate_cmp_reads_the_frame_and_preserves_its_operand() {
+        let mut initial = GuestState {
+            sp: 0xfff000,
+            ..GuestState::default()
+        };
+        for width in [Width::W32, Width::X64] {
+            initial.x[2] = match width {
+                Width::W32 => 0x1234_5678_8000_0000,
+                Width::X64 => 1 << 63,
+            };
+            for (source, immediate, expected) in
+                [(Register::X(2), 31, 3), (Register::Sp, 0xfff000, 6)]
+            {
+                let operation = Operation::AddSub {
+                    width,
+                    subtract: true,
+                    flags: true,
+                    destination: Register::Zero,
+                    source,
+                    immediate,
+                };
+                let mut frame = Code::new();
+                assert!(emit_direct(&mut frame, &operation));
+                let start = usize::from(width == Width::X64);
+                assert_eq!(frame[start], if immediate <= 127 { 0x83 } else { 0x81 });
+                assert_eq!(frame[start + 1], 0xbf); // CMP with a frame displacement.
+
+                let mut pinned = direct(operation);
+                pinned.asm().ret();
+                let pinned = entered(&pinned);
+                for bytes in [&frame[..], &pinned[..]] {
+                    let mut state = initial.clone();
+                    super::super::native::run(bytes, &mut state);
+                    assert_eq!(state.x, initial.x);
+                    assert_eq!(state.sp, initial.sp);
+                    assert_eq!(state.nzcv, expected << 28);
+                }
+            }
+        }
     }
 
     fn direct(operation: Operation) -> Code {

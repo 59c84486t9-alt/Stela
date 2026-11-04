@@ -118,7 +118,10 @@ fn ordinary_integer_operations_read_frame_operands_directly() {
         &code[map[2].1 + 7..map[2].1 + 13],
         &[0x3b, 0x87, 8, 0, 0, 0]
     );
-    assert_eq!(&code[map[3].1 + 7..map[3].1 + 10], &[0x83, 0xf8, 7]);
+    assert_eq!(
+        &code[map[3].1..map[3].1 + 7],
+        &[0x83, 0xbf, 104, 0, 0, 0, 7]
+    );
     assert_eq!(
         &code[map[4].1 + 7..map[4].1 + 14],
         &[0x48, 0x63, 0x8f, 96, 0, 0, 0],

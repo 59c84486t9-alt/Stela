@@ -502,6 +502,18 @@ fn emit_single(
         // The preceding pinned capture preserves the host flags. MOV and
         // NOT keep them live while preparing these select operands.
         super::conditional_select::emit(code, operand, true);
+    } else if let super::Rax::Guest(register) = held.rax
+        && let Operation::AddSub {
+            width,
+            subtract: true,
+            flags: true,
+            destination: Register::Zero,
+            source,
+            immediate,
+        } = instruction.operation
+        && source == register
+    {
+        super::pinned::compare_held_immediate(code, width, immediate);
     } else {
         super::emit_instruction(code, instruction, fixups, target, checks);
     }
