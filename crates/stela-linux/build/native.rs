@@ -165,6 +165,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/file_ref.c")),
             PathBuf::from(format!("{LINUX}/fs/file.c")),
             PathBuf::from(format!("{LINUX}/fs/simple_xattr.c")),
+            PathBuf::from(format!("{LINUX}/fs/xattr_access.c")),
             PathBuf::from(format!("{LINUX}/fs/pseudo_metadata.c")),
             PathBuf::from(format!("{LINUX}/fs/stashed_path.c")),
             PathBuf::from(format!("{LINUX}/fs/mount_cache.c")),

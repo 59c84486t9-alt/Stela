@@ -211,6 +211,7 @@
 /fs/file.c
 /fs/file_ref.c
 /fs/xattr.c
+/fs/xattr_access.c
 /fs/fserror.c
 /fs/super.c
 /fs/super_anon_dev.c
