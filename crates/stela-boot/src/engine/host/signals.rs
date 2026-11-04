@@ -56,11 +56,14 @@ pub(crate) fn in_interrupt() -> bool {
 /// is put back less the time slept; a periodic or TSC-deadline timer, or a
 /// timer not yet measured, leaves the caller to poll.
 pub(crate) fn sleep_for(micros: u64) {
+    if micros == 0 || crate::native_clock::host_sleep(micros) {
+        return;
+    }
     const MASKED: u32 = 1 << 16;
     const MODE: u32 = 3 << 17;
     let state = state();
     let lvt = state.apic.read(apic::LVT_TIMER);
-    if state.apic_hz == 0 || micros == 0 || lvt & MODE != 0 {
+    if state.apic_hz == 0 || lvt & MODE != 0 {
         return;
     }
     let remaining = state.apic.read(apic::CURRENT);

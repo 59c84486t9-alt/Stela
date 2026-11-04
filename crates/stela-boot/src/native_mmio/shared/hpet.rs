@@ -142,6 +142,19 @@ impl Source {
             .map_err(|_| refuse!("the native PCI clock is already retained"))
     }
 
+    /// # Safety
+    /// The BSP hands over its quiescent local timer and original IDT and
+    /// keeps the complete HPET ownership and clock root through shutdown.
+    pub(crate) unsafe fn install_service_clock(
+        &self,
+    ) -> Result<crate::native_clock::Installed, WorkError> {
+        let source = self.pci_clock.get().ok_or(WorkError::Unavailable)?;
+        // SAFETY: same kept controller/identity and caller's LAPIC handoff.
+        unsafe {
+            crate::native_clock::Installed::attach_native(self.identity.clone(), source.clone())
+        }
+    }
+
     pub(crate) fn pci_minimum(&self) -> Result<Rc<dyn Timer>, WorkError> {
         self.identity.check_dispatch()?;
         self.pci_clock

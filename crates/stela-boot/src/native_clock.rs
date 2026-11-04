@@ -262,6 +262,12 @@ impl ClockServices {
     pub(crate) fn idle(&self) -> Arc<dyn Idle> {
         self.idle.clone()
     }
+    /// Publish a software wake from the retained service. The service sends
+    /// its own doorbell after this store when another CPU may be waiting.
+    pub(crate) fn notify_dispatch(&self) {
+        self.state.pending.store(true, Ordering::Release);
+    }
+
     pub(crate) fn epoch(&self) -> Result<CounterEpoch, WorkError> {
         self.check_identity(&self.state.cpu.identity)?;
         Ok(CounterEpoch {
@@ -539,6 +545,28 @@ impl State {
         }
         Ok(())
     }
+    /// Wait on the installed mux under the caller's local interrupt save.
+    /// The caller owns the explicit root/IRQ execution boundary for HLT.
+    unsafe fn wait_until(&self, deadline: Option<u64>) -> Result<(), WorkError> {
+        let now = self.cpu.sample()?;
+        if self.pending.swap(false, Ordering::AcqRel)
+            || deadline.is_some_and(|deadline| deadline <= now)
+        {
+            return Ok(());
+        }
+        self.idle.store(deadline.unwrap_or(NONE), Ordering::Relaxed);
+        self.rearm(now)?;
+        let budget = || {
+            let ticks = self.cpu.controller().read(apic::CURRENT);
+            Some(u64::from(ticks) * 1_000_000 / self.apic_hz)
+        };
+        // SAFETY: caller supplies the live IDT/LAPIC and the explicit wait scope.
+        unsafe { crate::native_idle::wait(budget) };
+        self.idle.store(NONE, Ordering::Relaxed);
+        self.pending.swap(false, Ordering::AcqRel);
+        self.rearm(self.cpu.sample()?)
+    }
+
     fn rearm(&self, now: u64) -> Result<(), WorkError> {
         self.cpu.health.check()?;
         self.cpu
@@ -597,26 +625,9 @@ unsafe impl Idle for NativeIdle {
             if flags & IF == 0 {
                 return Err(WorkError::WouldDeadlock);
             }
-            let now = self.state.cpu.sample()?;
-            if self.state.pending.swap(false, Ordering::AcqRel)
-                || deadline.is_some_and(|d| d <= now)
-            {
-                return Ok(());
-            }
-            self.state
-                .idle
-                .store(deadline.unwrap_or(NONE), Ordering::Relaxed);
-            self.state.rearm(now)?;
-            let budget = || {
-                let ticks = self.state.cpu.controller().read(apic::CURRENT);
-                Some(u64::from(ticks) * 1_000_000 / self.state.apic_hz)
-            };
-            // SAFETY: incoming IF was set, root owns IDT/LAPIC. The wait
-            // ends on any interrupt, including one published before it.
-            unsafe { crate::native_idle::wait(budget) };
-            self.state.idle.store(NONE, Ordering::Relaxed);
-            self.state.pending.swap(false, Ordering::AcqRel);
-            self.state.rearm(self.state.cpu.sample()?)
+            // SAFETY: incoming IF was set and process validation owns the
+            // exact installed dispatcher CPU and root for this wait.
+            unsafe { self.state.wait_until(deadline) }
         })();
         // SAFETY: exact flags from the same physical dispatcher entry.
         unsafe {
@@ -1293,6 +1304,41 @@ fn calibrate(cpu: &RootCpu) -> Result<u64, WorkError> {
         apic.write(apic::DIVIDE, saved_divide);
     }
     result
+}
+
+/// Route a host wait through the installed LAPIC owner, when present.
+pub(crate) fn host_sleep(micros: u64) -> bool {
+    let flags = flags_disable();
+    let handled = host_sleep_disabled(micros);
+    // SAFETY: restore the enclosing same-CPU save after returning from idle.
+    unsafe { restore(flags) };
+    handled
+}
+
+fn host_sleep_disabled(micros: u64) -> bool {
+    if !registration_cpu() {
+        return false;
+    }
+    let pointer = ACTIVE.load(Ordering::Acquire);
+    if pointer.is_null() {
+        return false;
+    }
+    // SAFETY: same-CPU IRQ exclusion keeps the active registration's Arc.
+    let state = unsafe { &*pointer };
+    if state.process().is_ok() {
+        let result = (|| {
+            let now = state.cpu.sample()?;
+            let delta = micros.checked_mul(1000).ok_or(WorkError::Exhausted)?;
+            let deadline = now.checked_add(delta).ok_or(WorkError::Exhausted)?;
+            // SAFETY: same installed host root/CPU and existing host wait
+            // boundary, with local IRQ exclusion already held.
+            unsafe { state.wait_until(Some(deadline)) }
+        })();
+        if let Err(error) = result {
+            state.cpu.fatal(error);
+        }
+    }
+    true
 }
 
 /// Existing host owner routes its guest timer count here when registered.

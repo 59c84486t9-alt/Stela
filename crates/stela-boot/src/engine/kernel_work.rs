@@ -8,7 +8,7 @@ use super::{
 use crate::{
     handoff::{Handoff, Region},
     layout,
-    native_clock::ClockServices,
+    native_clock::{ClockServices, Installed as InstalledClock},
     native_mmio, native_smp,
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
@@ -298,6 +298,7 @@ pub(super) struct KernelWork {
     /// The queue and an attached service domain share this same CPU owner.
     cpu: Arc<dyn Cpu>,
     native_clock: Option<ClockServices>,
+    installed_clock: Option<&'static InstalledClock>,
     foreground: Arc<firmware::Foreground>,
     root: u64,
     busy: Cell<bool>,
@@ -335,9 +336,17 @@ impl KernelWork {
     pub(super) unsafe fn prepare(
         handoff: &'static Handoff,
         owner: &mut HostOwner,
+        installed_clock: Option<&'static InstalledClock>,
     ) -> Result<Self, Error> {
+        let clock = installed_clock
+            .map(InstalledClock::services)
+            .transpose()
+            .map_err(Error::Work)?;
         // SAFETY: original caller's handoff/owner/stack lifetime contract.
-        unsafe { Self::prepare_plan(handoff, owner, Plan::new(handoff)?, None) }
+        let mut work =
+            unsafe { Self::prepare_plan(handoff, owner, Plan::new(handoff)?, clock.as_ref()) }?;
+        work.installed_clock = installed_clock;
+        Ok(work)
     }
     /// # Safety
     /// Same original handoff/owner contract as prepare. A Plan describes
@@ -527,6 +536,7 @@ impl KernelWork {
             reservation,
             cpu,
             native_clock: clock.cloned(),
+            installed_clock: None,
             foreground,
             root: handoff.root,
             busy: Cell::new(false),
@@ -629,9 +639,24 @@ impl KernelWork {
         self.cpu.ticks().checked_add(ticks).ok_or(Error::Clock)
     }
 
-    /// The CPU the runtime runs on.
-    pub(super) fn cpu(&self) -> Arc<dyn Cpu> {
-        self.cpu.clone()
+    pub(super) fn service_clock(&self) -> Result<&ClockServices, WorkError> {
+        self.native_clock.as_ref().ok_or(WorkError::Unavailable)
+    }
+
+    /// Enter the original loader root and its installed IRQ execution
+    /// scope for a Linux dispatcher segment.
+    pub(super) fn dispatch_linux<T>(
+        &self,
+        body: impl FnOnce(Pin<&work::Runtime<SLOTS>>) -> Result<T, WorkError>,
+    ) -> Result<T, Error> {
+        let clock = self.installed_clock.ok_or(Error::Clock)?;
+        self.dispatch(|runtime| {
+            // SAFETY: dispatch entered the kept loader root on the owning
+            // BSP. This scope ends after every active frame returns or parks.
+            let _execution = unsafe { clock.enter_driver_execution()? };
+            body(runtime)
+        })?
+        .map_err(Error::Work)
     }
 
     /// Run `body` in the dispatcher, on the loader's root under the host

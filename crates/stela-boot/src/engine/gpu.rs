@@ -59,7 +59,7 @@ use stela_drivers::{
     firmware::{Catalog, Provider, Requirement, Target},
     gpu,
     platform::work::{
-        Cpu, WorkError,
+        WorkError,
         service::{Clock, Domain, Idle},
     },
     probe::{NativeServices, ServiceError},
@@ -69,7 +69,7 @@ use stela_linux::{
     function::{self, Attached, Msi, Placement, Region},
     owner::{Entered, Errno, Owner, Platform, RawOwner, RealtimeOrigin, RealtimeRead},
     random::Seeded,
-    service::{self, Environment as LinuxEnvironment},
+    service::Environment as LinuxEnvironment,
 };
 
 type Environment = LinuxEnvironment<SLOTS>;
@@ -114,27 +114,6 @@ const START_SECONDS: u64 = 60;
 /// The longest idle wait while they do, which the timeout above is checked at.
 const WAIT_MICROS: u64 = 10_000;
 
-/// The boot CPU's monotonic nanoseconds, over the TSC every engine timing uses.
-struct Time {
-    cpu: Arc<dyn Cpu>,
-    tsc_hz: u64,
-}
-
-fn nanoseconds(ticks: u64, tsc_hz: u64) -> u64 {
-    (u128::from(ticks) * 1_000_000_000 / u128::from(tsc_hz)) as u64
-}
-
-// SAFETY: the TSC is the engine's calibrated, progressing boot-CPU counter, and
-// reading it is bounded and calls nothing back.
-unsafe impl Clock for Time {
-    fn cpu(&self) -> &Arc<dyn Cpu> {
-        &self.cpu
-    }
-    fn now_ns(&self) -> Result<u64, WorkError> {
-        Ok(nanoseconds(host::rdtsc(), self.tsc_hz))
-    }
-}
-
 /// Who runs PE work on the boot CPU, once the PEs run.
 static HUB: AtomicPtr<Hub> = AtomicPtr::new(ptr::null_mut());
 static BOOT_PE: AtomicUsize = AtomicUsize::new(0);
@@ -150,21 +129,21 @@ pub(super) fn set_hub(hub: Arc<Hub>, pe: usize) {
 
 /// What wakes the service: a raised line or a call.
 struct Events {
-    clock: Arc<dyn Clock>,
+    clock: crate::native_clock::ClockServices,
+    idle: Arc<dyn Idle>,
     pending: AtomicBool,
 }
 
-// SAFETY: `pending` is published before the boot PE is told, and the wait
-// checks it with interrupts off, so a notification cannot be lost: one that
-// comes from an interrupt during the halt ends it. The dispatcher's IF is clear
-// only for the host drivers' root guard, not for a critical section of Linux
-// code, so the wait may take interrupts, whose handlers only record their line.
+// SAFETY: the native idle owner consumes the software event under its own
+// IRQ exclusion. Publish that event before ringing the boot PE, and use the
+// paired installed clock for each absolute wait.
 unsafe impl Idle for Events {
     fn clock(&self) -> &Arc<dyn Clock> {
-        &self.clock
+        self.idle.clock()
     }
     fn notify(&self) -> Result<(), WorkError> {
         self.pending.store(true, Ordering::Release);
+        self.clock.notify_dispatch();
         // SAFETY: a published hub is leaked, so it lives for the boot.
         if let Some(hub) = unsafe { HUB.load(Ordering::Acquire).as_ref() } {
             hub.call_host(BOOT_PE.load(Ordering::Relaxed));
@@ -172,15 +151,14 @@ unsafe impl Idle for Events {
         Ok(())
     }
     fn wait_until_ns(&self, deadline: Option<u64>) -> Result<(), WorkError> {
-        if self.pending.swap(false, Ordering::AcqRel) {
-            return Ok(());
-        }
-        let now = self.clock.now_ns()?;
-        let left = deadline.map_or(u64::MAX, |deadline| deadline.saturating_sub(now));
-        if left != 0 {
-            host::sleep_for((left / 1000).clamp(1, WAIT_MICROS));
-        }
-        Ok(())
+        let limit = self
+            .idle
+            .clock()
+            .now_ns()?
+            .checked_add(WAIT_MICROS * 1000)
+            .ok_or(WorkError::Exhausted)?;
+        self.idle
+            .wait_until_ns(Some(deadline.map_or(limit, |deadline| deadline.min(limit))))
     }
 }
 
@@ -352,6 +330,7 @@ struct Line {
 /// What Linux code gets from Stela.
 struct Host {
     tsc_hz: u64,
+    clock: crate::native_clock::CounterEpoch,
     realtime: Option<RealtimeOrigin>,
     window: &'static Window,
     firmware: Option<Arc<Catalog>>,
@@ -405,23 +384,29 @@ impl Platform for Host {
     }
 
     fn now_ns(&self) -> i64 {
-        nanoseconds(host::rdtsc(), self.tsc_hz) as i64
+        let sample = self.clock.now_ns().and_then(|now| {
+            i64::try_from(now)
+                .ok()
+                .filter(|&now| now != i64::MAX)
+                .ok_or(WorkError::Exhausted)
+        });
+        sample.unwrap_or_else(|error| output::fatal(format_args!("Linux clock failed: {error:?}")))
     }
 
     fn realtime_at(&self, ns: i64, read: RealtimeRead) -> Option<(i64, u32)> {
         self.realtime.as_ref()?.read(ns, read)
     }
 
-    fn delay_us(&self, minimum: u64, _maximum: u64, atomic: bool) {
-        if !atomic {
-            // SAFETY: Linux calls this on a task of the environment.
-            return unsafe { service::sleep_us(minimum) };
-        }
-        let start = host::rdtsc();
-        let ticks = minimum.saturating_mul(self.tsc_hz / 1_000_000);
-        while host::rdtsc().wrapping_sub(start) < ticks {
-            core::hint::spin_loop();
-        }
+    fn minimum_delay_us(&self, minimum: u64) -> Result<(), WorkError> {
+        self.clock.minimum_delay_us(minimum)
+    }
+
+    fn minimum_deadline_us(
+        &self,
+        minimum: u64,
+    ) -> Result<Box<dyn stela_linux::owner::MinimumDeadline>, WorkError> {
+        let nanoseconds = minimum.checked_mul(1000).ok_or(WorkError::Exhausted)?;
+        Ok(Box::new(self.clock.minimum_deadline(nanoseconds)?))
     }
 
     fn firmware(&self, name: &CStr) -> Result<&[u8], Errno> {
@@ -1063,6 +1048,15 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         .iter()
         .flat_map(|claimed| claimed.bars.iter().cloned())
         .collect();
+    let clock = work.service_clock().map_err(environment_error)?;
+    let epoch = clock.epoch().map_err(environment_error)?;
+    let time = clock.clock();
+    let events = Arc::new(Events {
+        clock: clock.clone(),
+        idle: clock.idle(),
+        pending: AtomicBool::new(false),
+    });
+    let domain = Domain::tickless(time.clone(), events.clone()).map_err(environment_error)?;
     let realtime = wall.and_then(|reading| {
         if tsc_hz == 0
             || !crate::cpu::INVARIANT_TSC.present()
@@ -1071,16 +1065,26 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         {
             return None;
         }
-        // Correlate with the same boot-CPU TSC scale as Host::now_ns.
-        let origin = u128::from(reading.tsc_after) * 1_000_000_000 / u128::from(tsc_hz);
+        // Move the firmware wall sample to a fresh observation in the
+        // installed monotonic epoch, using the boot CPU's invariant TSC
+        // only to carry UTC forward from the firmware read.
+        let monotonic_ns = i64::try_from(epoch.now_ns().ok()?).ok()?;
+        let elapsed = host::rdtsc().checked_sub(reading.tsc_after)?;
+        let wall_ns = u128::from(elapsed) * 1_000_000_000 / u128::from(tsc_hz)
+            + u128::from(reading.utc.nanosecond);
+        let seconds = reading
+            .utc
+            .seconds
+            .checked_add(u64::try_from(wall_ns / 1_000_000_000).ok()?)?;
         RealtimeOrigin::new(
-            i64::try_from(origin).ok()?,
-            i64::try_from(reading.utc.seconds).ok()?,
-            reading.utc.nanosecond,
+            monotonic_ns,
+            i64::try_from(seconds).ok()?,
+            (wall_ns % 1_000_000_000) as u32,
         )
     });
     let owner = Owner::new(Host {
         tsc_hz,
+        clock: epoch,
         realtime,
         window,
         firmware,
@@ -1092,15 +1096,6 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         lines: RefCell::new(lines),
         reported: RefCell::new(BTreeSet::new()),
     });
-    let time: Arc<dyn Clock> = Arc::new(Time {
-        cpu: work.cpu(),
-        tsc_hz,
-    });
-    let events = Arc::new(Events {
-        clock: time.clone(),
-        pending: AtomicBool::new(false),
-    });
-    let domain = Domain::tickless(time.clone(), events.clone()).map_err(environment_error)?;
     let mut job = Box::new(Start {
         owner: owner.raw(),
         claimed,
@@ -1120,8 +1115,11 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
     }
     #[cfg(feature = "nvk")]
     BOOT_CPU.store(host::processor(), Ordering::Relaxed);
-    let deadline = host::rdtsc() + START_SECONDS * tsc_hz;
-    let opened = work.dispatch(|runtime| {
+    let opened = work.dispatch_linux(|runtime| {
+        let deadline = time
+            .now_ns()?
+            .checked_add(START_SECONDS * 1_000_000_000)
+            .ok_or(WorkError::Exhausted)?;
         // SAFETY: in the dispatcher; the owner and runtime last for the boot.
         let environment = unsafe { Environment::new(owner.raw(), runtime, domain.clone()) }?;
         owner.platform().environment.set(addr_of!(*environment));
@@ -1130,7 +1128,7 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
             // SAFETY: `start` enters the owner itself, and the job is kept.
             let ticket = unsafe { environment.as_ref().spawn(start, context) }?;
             let queue = runtime.get_ref().queue();
-            while !queue.completed(ticket)? && host::rdtsc() < deadline {
+            while !queue.completed(ticket)? && time.now_ns()? < deadline {
                 runtime.step_or_idle()?;
             }
             queue.completed(ticket)
@@ -1145,9 +1143,7 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
             }
         }
     });
-    let started = opened
-        .map_err(Error::Environment)
-        .and_then(|started| started.map_err(|error| Error::Environment(environment_error(error))));
+    let started = opened.map_err(Error::Environment);
     let (environment, finished) = match started {
         Ok(started) => started,
         Err(error) => {
@@ -1248,7 +1244,7 @@ pub(super) fn pump() {
     if !gpu.events.pending.swap(false, Ordering::AcqRel) && !due {
         return;
     }
-    let ran = gpu.work.dispatch(|runtime| {
+    let ran = gpu.work.dispatch_linux(|runtime| {
         #[cfg(feature = "nvk")]
         client::start(gpu)?;
         while runtime.step()? {
@@ -1257,14 +1253,11 @@ pub(super) fn pump() {
                 break;
             }
         }
-        Ok::<_, WorkError>(())
-    });
-    if let Err(error) = ran.and_then(|ran| {
-        ran.map_err(environment_error)?;
-        let next = gpu.domain.next_deadline().map_err(environment_error)?;
+        let next = gpu.domain.next_deadline()?;
         gpu.next.store(next.unwrap_or(u64::MAX), Ordering::Relaxed);
         Ok(())
-    }) {
+    });
+    if let Err(error) = ran {
         output::fatal(format_args!("the host's Linux environment failed: {error}"));
     }
     #[cfg(feature = "nvk")]

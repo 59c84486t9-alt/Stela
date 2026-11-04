@@ -1106,6 +1106,12 @@ fn open_gpus(
         return false;
     };
     let Some(mmio) = mmio else { return false };
+    if let Err(error) = work.service_clock().and_then(|clock| clock.epoch()) {
+        crate::status::warn(&format!(
+            "the GPU requires an owned continuous HPET clock: {error:?}"
+        ));
+        return false;
+    }
     let tsc_hz = handoff.tsc_hz;
     #[cfg(feature = "nvk")]
     let heap_bytes = heap.end - heap.start;
@@ -2062,8 +2068,26 @@ fn start_platform(
         },
         _ => remapping::Remappers::none(),
     };
+    let clock = if options.boots_macos() && options.native_pci_own_hpet {
+        native_mmio.and_then(|source| {
+            // SAFETY: this BSP owns the existing timer/IDT and has the
+            // explicit whole HPET handoff. Attach checks quiescence and ARAT
+            // before publishing the shared timer owner.
+            match unsafe { source.install_service_clock() } {
+                Ok(clock) => Some(&*alloc::boxed::Box::leak(alloc::boxed::Box::new(clock))),
+                Err(error) => {
+                    output::arguments(format_args!(
+                        "NATIVE SERVICE CLOCK unavailable: {error:?}\n"
+                    ));
+                    None
+                }
+            }
+        })
+    } else {
+        None
+    };
     // SAFETY: validated BSP handoff, before AP/driver producers.
-    let work = match unsafe { kernel_work::KernelWork::prepare(handoff, host_owner) } {
+    let work = match unsafe { kernel_work::KernelWork::prepare(handoff, host_owner, clock) } {
         Ok(work) => {
             #[cfg(feature = "diagnostics")]
             output::arguments(format_args!(

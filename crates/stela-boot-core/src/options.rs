@@ -301,7 +301,8 @@ pub struct System {
     pub audio_check: Option<AudioCheck>,
     /// Explicit whole-controller handoff for the audio check's physical clock.
     pub audio_own_hpet: bool,
-    /// Exclusive whole HPET handoff for native PCI minimum delays until shutdown.
+    /// Exclusive whole HPET handoff until shutdown. It supplies native PCI
+    /// minimum delays and can serve the Linux scheduler on an admitted BSP timer.
     pub native_pci_own_hpet: bool,
     /// Whole host disks, by serial, that the guest sees as USB mass
     /// storage behind the native hub (`--usb-storage SERIAL`, repeatable).
