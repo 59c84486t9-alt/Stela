@@ -226,6 +226,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/rhashtable.c")),
             PathBuf::from(format!("{LINUX}/lib/timerqueue.c")),
             PathBuf::from(format!("{LINUX}/kernel/time/timer_round.c")),
+            PathBuf::from(format!("{LINUX}/kernel/time/clock_ticks.c")),
             PathBuf::from(format!("{LINUX}/lib/kobject.c")),
             PathBuf::from(format!("{LINUX}/lib/kobject_uevent.c")),
             PathBuf::from(format!("{LINUX}/lib/ctype.c")),

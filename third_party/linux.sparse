@@ -110,6 +110,7 @@
 /lib/timerqueue.c
 /kernel/time/Makefile
 /kernel/time/time.c
+/kernel/time/clock_ticks.c
 /kernel/time/timer.c
 /kernel/time/timer_round.c
 /init/Kconfig

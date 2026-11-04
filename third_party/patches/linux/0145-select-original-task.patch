@@ -1,0 +1,847 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 00:48:09 -0500
+Subject: [PATCH] refactor(signal): select original task exit notification and
+ cleanup
+
+---
+ kernel/exit.c             |   6 -
+ kernel/fork.c             |  12 --
+ kernel/fork_caches.c      |  13 ++
+ kernel/signal.c           | 308 -------------------------------------
+ kernel/signal_state.c     | 316 ++++++++++++++++++++++++++++++++++++++
+ kernel/signal_state.h     |   3 +
+ kernel/time/Makefile      |   2 +-
+ kernel/time/clock_ticks.c |  26 ++++
+ kernel/time/time.c        |  22 ---
+ 9 files changed, 359 insertions(+), 349 deletions(-)
+ create mode 100644 kernel/time/clock_ticks.c
+
+diff --git a/kernel/exit.c b/kernel/exit.c
+index ed4d7a2822ba1c7bc4b51111b47a07451cc7d2fa..08bdc2c01611daf46337f01c0eb8556edf7f6616 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -1580,12 +1580,6 @@ static int child_wait_callback(wait_queue_entry_t *wait, unsigned mode,
+ 	return 0;
+ }
+ 
+-void __wake_up_parent(struct task_struct *p, struct task_struct *parent)
+-{
+-	__wake_up_sync_key(&parent->signal->wait_chldexit,
+-			   TASK_INTERRUPTIBLE, p);
+-}
+-
+ static bool is_effectively_child(struct wait_opts *wo, bool ptrace,
+ 				 struct task_struct *target)
+ {
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 8cbabde9492c481207a894dfccf061083eb49289..6cd7f9f9790146c2761da1f8e5511b9a9cbda8da 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -1276,18 +1276,6 @@ static int copy_sighand(u64 clone_flags, struct task_struct *tsk)
+ 	return 0;
+ }
+ 
+-void __cleanup_sighand(struct sighand_struct *sighand)
+-{
+-	if (refcount_dec_and_test(&sighand->count)) {
+-		signalfd_cleanup(sighand);
+-		/*
+-		 * sighand_cachep is SLAB_TYPESAFE_BY_RCU so we can free it
+-		 * without an RCU grace period, see __lock_task_sighand().
+-		 */
+-		kmem_cache_free(sighand_cachep, sighand);
+-	}
+-}
+-
+ /*
+  * Initialize POSIX timer handling for a thread group.
+  */
+diff --git a/kernel/fork_caches.c b/kernel/fork_caches.c
+index 48946a05c5139bdacfb9b10a77da46915fcdee6a..de0289cf2151abf7f43742aca47c9e0d12f948df 100644
+--- a/kernel/fork_caches.c
++++ b/kernel/fork_caches.c
+@@ -24,6 +24,7 @@
+ #include <linux/sched/task.h>
+ #include <linux/sched/task_stack.h>
+ #include <linux/scs.h>
++#include <linux/signalfd.h>
+ #include <linux/slab.h>
+ #include <linux/uprobes.h>
+ #include <linux/user_namespace.h>
+@@ -54,6 +55,18 @@ static void sighand_ctor(void *data)
+ 	init_waitqueue_head(&sighand->signalfd_wqh);
+ }
+ 
++void __cleanup_sighand(struct sighand_struct *sighand)
++{
++	if (refcount_dec_and_test(&sighand->count)) {
++		signalfd_cleanup(sighand);
++		/*
++		 * sighand_cachep is SLAB_TYPESAFE_BY_RCU so we can free it
++		 * without an RCU grace period, see __lock_task_sighand().
++		 */
++		kmem_cache_free(sighand_cachep, sighand);
++	}
++}
++
+ void __init proc_caches_init(void)
+ {
+ 	sighand_cachep = kmem_cache_create("sighand_cache",
+diff --git a/kernel/signal.c b/kernel/signal.c
+index e61e111e79a6bdf89d8d452d824442adcd903c5e..fe06a99c518677d5ab5977b7030cad09f7517124 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -115,54 +115,6 @@ int next_signal(struct sigpending *pending, sigset_t *mask)
+ 	return sig;
+ }
+ 
+-/**
+- * task_participate_group_stop - participate in a group stop
+- * @task: task participating in a group stop
+- *
+- * @task has %JOBCTL_STOP_PENDING set and is participating in a group stop.
+- * Group stop states are cleared and the group stop count is consumed if
+- * %JOBCTL_STOP_CONSUME was set.  If the consumption completes the group
+- * stop, the appropriate `SIGNAL_*` flags are set.
+- *
+- * CONTEXT:
+- * Must be called with @task->sighand->siglock held.
+- *
+- * RETURNS:
+- * %true if group stop completion should be notified to the parent, %false
+- * otherwise.
+- */
+-static bool task_participate_group_stop(struct task_struct *task)
+-{
+-	struct signal_struct *sig = task->signal;
+-	bool consume = task->jobctl & JOBCTL_STOP_CONSUME;
+-
+-	WARN_ON_ONCE(!(task->jobctl & JOBCTL_STOP_PENDING));
+-
+-	task_clear_jobctl_pending(task, JOBCTL_STOP_PENDING);
+-
+-	if (!consume)
+-		return false;
+-
+-	if (!WARN_ON_ONCE(sig->group_stop_count == 0))
+-		sig->group_stop_count--;
+-
+-	/*
+-	 * Tell the caller to notify completion iff we are entering into a
+-	 * fresh group stop.  Read comment in do_signal_stop() for details.
+-	 */
+-	if (!sig->group_stop_count && !(sig->flags & SIGNAL_STOP_STOPPED)) {
+-		signal_set_stop_flags(sig, SIGNAL_STOP_STOPPED);
+-		return true;
+-	}
+-	return false;
+-}
+-
+-static void sigqueue_dequeue_pending(struct sigpending *queue, struct list_head *head)
+-{
+-	sigemptyset(&queue->signal);
+-	list_splice_init(&queue->list, head);
+-}
+-
+ bool unhandled_signal(struct task_struct *tsk, int sig)
+ {
+ 	void __user *handler = tsk->sighand->action[sig-1].sa.sa_handler;
+@@ -1302,196 +1254,6 @@ static void posixtimer_sig_unignore(struct task_struct *tsk, int sig)
+ static inline void posixtimer_sig_unignore(struct task_struct *tsk, int sig) { }
+ #endif /* !CONFIG_POSIX_TIMERS */
+ 
+-void do_notify_pidfd(struct task_struct *task)
+-{
+-	struct pid *pid = task_pid(task);
+-
+-	WARN_ON(task->exit_state == 0);
+-
+-	__wake_up(&pid->wait_pidfd, TASK_NORMAL, 0,
+-			poll_to_key(EPOLLIN | EPOLLRDNORM));
+-}
+-
+-/*
+- * Let a parent know about the death of a child.
+- * For a stopped/continued status change, use do_notify_parent_cldstop instead.
+- *
+- * Returns true if our parent ignored us and so we've switched to
+- * self-reaping.
+- */
+-bool do_notify_parent(struct task_struct *tsk, int sig)
+-{
+-	struct kernel_siginfo info;
+-	unsigned long flags;
+-	struct sighand_struct *psig;
+-	bool autoreap = false;
+-	u64 utime, stime;
+-
+-	if (WARN_ON_ONCE(!valid_signal(sig)))
+-		return false;
+-
+-	/* do_notify_parent_cldstop should have been called instead.  */
+-	WARN_ON_ONCE(task_is_stopped_or_traced(tsk));
+-
+-	WARN_ON_ONCE(!tsk->ptrace && !thread_group_empty(tsk));
+-
+-	/* ptraced, or group-leader without sub-threads */
+-	do_notify_pidfd(tsk);
+-
+-	if (sig != SIGCHLD) {
+-		/*
+-		 * This is only possible if parent == real_parent.
+-		 * Check if it has changed security domain.
+-		 */
+-		if (tsk->parent_exec_id != READ_ONCE(tsk->parent->self_exec_id))
+-			sig = SIGCHLD;
+-	}
+-
+-	clear_siginfo(&info);
+-	info.si_signo = sig;
+-	info.si_errno = 0;
+-	/*
+-	 * We are under tasklist_lock here so our parent is tied to
+-	 * us and cannot change.
+-	 *
+-	 * task_active_pid_ns will always return the same pid namespace
+-	 * until a task passes through release_task.
+-	 *
+-	 * write_lock() currently calls preempt_disable() which is the
+-	 * same as rcu_read_lock(), but according to Oleg, this is not
+-	 * correct to rely on this
+-	 */
+-	rcu_read_lock();
+-	info.si_pid = task_pid_nr_ns(tsk, task_active_pid_ns(tsk->parent));
+-	info.si_uid = from_kuid_munged(task_cred_xxx(tsk->parent, user_ns),
+-				       task_uid(tsk));
+-	rcu_read_unlock();
+-
+-	task_cputime(tsk, &utime, &stime);
+-	info.si_utime = nsec_to_clock_t(utime + tsk->signal->utime);
+-	info.si_stime = nsec_to_clock_t(stime + tsk->signal->stime);
+-
+-	info.si_status = tsk->exit_code & 0x7f;
+-	if (tsk->exit_code & 0x80)
+-		info.si_code = CLD_DUMPED;
+-	else if (tsk->exit_code & 0x7f)
+-		info.si_code = CLD_KILLED;
+-	else {
+-		info.si_code = CLD_EXITED;
+-		info.si_status = tsk->exit_code >> 8;
+-	}
+-
+-	psig = tsk->parent->sighand;
+-	spin_lock_irqsave(&psig->siglock, flags);
+-	if (!tsk->ptrace && sig == SIGCHLD &&
+-	    (psig->action[SIGCHLD-1].sa.sa_handler == SIG_IGN ||
+-	     (psig->action[SIGCHLD-1].sa.sa_flags & SA_NOCLDWAIT))) {
+-		/*
+-		 * We are exiting and our parent doesn't care.  POSIX.1
+-		 * defines special semantics for setting SIGCHLD to SIG_IGN
+-		 * or setting the SA_NOCLDWAIT flag: we should be reaped
+-		 * automatically and not left for our parent's wait4 call.
+-		 * Rather than having the parent do it as a magic kind of
+-		 * signal handler, we just set this to tell do_exit that we
+-		 * can be cleaned up without becoming a zombie.  Note that
+-		 * we still call __wake_up_parent in this case, because a
+-		 * blocked sys_wait4 might now return -ECHILD.
+-		 *
+-		 * Whether we send SIGCHLD or not for SA_NOCLDWAIT
+-		 * is implementation-defined: we do (if you don't want
+-		 * it, just use SIG_IGN instead).
+-		 */
+-		autoreap = true;
+-		if (psig->action[SIGCHLD-1].sa.sa_handler == SIG_IGN)
+-			sig = 0;
+-	}
+-	if (!tsk->ptrace && tsk->signal->autoreap) {
+-		autoreap = true;
+-		sig = 0;
+-	}
+-	/*
+-	 * Send with __send_signal as si_pid and si_uid are in the
+-	 * parent's namespaces.
+-	 */
+-	if (sig)
+-		__send_signal_locked(sig, &info, tsk->parent, PIDTYPE_TGID, false);
+-	__wake_up_parent(tsk, tsk->parent);
+-	spin_unlock_irqrestore(&psig->siglock, flags);
+-
+-	return autoreap;
+-}
+-
+-/**
+- * do_notify_parent_cldstop - notify parent of stopped/continued state change
+- * @tsk: task reporting the state change
+- * @for_ptracer: the notification is for ptracer
+- * @why: CLD_{CONTINUED|STOPPED|TRAPPED} to report
+- *
+- * Notify @tsk's parent that the stopped/continued state has changed.  If
+- * @for_ptracer is %false, @tsk's group leader notifies to its real parent.
+- * If %true, @tsk reports to @tsk->parent which should be the ptracer.
+- *
+- * CONTEXT:
+- * Must be called with tasklist_lock at least read locked.
+- */
+-static void do_notify_parent_cldstop(struct task_struct *tsk,
+-				     bool for_ptracer, int why)
+-{
+-	struct kernel_siginfo info;
+-	unsigned long flags;
+-	struct task_struct *parent;
+-	struct sighand_struct *sighand;
+-	u64 utime, stime;
+-
+-	if (for_ptracer) {
+-		parent = tsk->parent;
+-	} else {
+-		tsk = tsk->group_leader;
+-		parent = tsk->real_parent;
+-	}
+-
+-	clear_siginfo(&info);
+-	info.si_signo = SIGCHLD;
+-	info.si_errno = 0;
+-	/*
+-	 * see comment in do_notify_parent() about the following 4 lines
+-	 */
+-	rcu_read_lock();
+-	info.si_pid = task_pid_nr_ns(tsk, task_active_pid_ns(parent));
+-	info.si_uid = from_kuid_munged(task_cred_xxx(parent, user_ns), task_uid(tsk));
+-	rcu_read_unlock();
+-
+-	task_cputime(tsk, &utime, &stime);
+-	info.si_utime = nsec_to_clock_t(utime);
+-	info.si_stime = nsec_to_clock_t(stime);
+-
+- 	info.si_code = why;
+- 	switch (why) {
+- 	case CLD_CONTINUED:
+- 		info.si_status = SIGCONT;
+- 		break;
+- 	case CLD_STOPPED:
+- 		info.si_status = tsk->signal->group_exit_code & 0x7f;
+- 		break;
+- 	case CLD_TRAPPED:
+- 		info.si_status = tsk->exit_code & 0x7f;
+- 		break;
+- 	default:
+- 		BUG();
+- 	}
+-
+-	sighand = parent->sighand;
+-	spin_lock_irqsave(&sighand->siglock, flags);
+-	if (sighand->action[SIGCHLD-1].sa.sa_handler != SIG_IGN &&
+-	    !(sighand->action[SIGCHLD-1].sa.sa_flags & SA_NOCLDSTOP))
+-		send_signal_locked(SIGCHLD, &info, parent, PIDTYPE_TGID);
+-	/*
+-	 * Even if SIGCHLD is not generated, we must wake up wait4 calls.
+-	 */
+-	__wake_up_parent(tsk, parent);
+-	spin_unlock_irqrestore(&sighand->siglock, flags);
+-}
+-
+ /*
+  * This must be called with current->sighand->siglock held.
+  *
+@@ -2246,76 +2008,6 @@ void signal_setup_done(int failed, struct ksignal *ksig, int stepping)
+  * group-wide signal. Other threads should be notified now to take
+  * the shared signals in @which since we will not.
+  */
+-static void retarget_shared_pending(struct task_struct *tsk, sigset_t *which)
+-{
+-	sigset_t retarget;
+-	struct task_struct *t;
+-
+-	sigandsets(&retarget, &tsk->signal->shared_pending.signal, which);
+-	if (sigisemptyset(&retarget))
+-		return;
+-
+-	for_other_threads(tsk, t) {
+-		if (t->flags & PF_EXITING)
+-			continue;
+-
+-		if (!has_pending_signals(&retarget, &t->blocked))
+-			continue;
+-		/* Remove the signals this thread can handle. */
+-		sigandsets(&retarget, &retarget, &t->blocked);
+-
+-		if (!task_sigpending(t))
+-			signal_wake_up(t, 0);
+-
+-		if (sigisemptyset(&retarget))
+-			break;
+-	}
+-}
+-
+-void exit_signals(struct task_struct *tsk)
+-{
+-	LIST_HEAD(sigq_list);
+-	int group_stop = 0;
+-
+-	/*
+-	 * @tsk is about to have PF_EXITING set - lock out users which
+-	 * expect a stable threadgroup.
+-	 */
+-	cgroup_threadgroup_change_begin(tsk);
+-
+-	scoped_guard(spinlock_irq, &tsk->sighand->siglock) {
+-		tsk->flags |= PF_EXITING;
+-
+-		sigqueue_dequeue_pending(&tsk->pending, &sigq_list);
+-
+-		if (task_sigpending(tsk) && !thread_group_empty(tsk) &&
+-		    !(tsk->signal->flags & SIGNAL_GROUP_EXIT)) {
+-			sigset_t unblocked = tsk->blocked;
+-
+-			signotset(&unblocked);
+-			retarget_shared_pending(tsk, &unblocked);
+-
+-			if (unlikely(tsk->jobctl & JOBCTL_STOP_PENDING) &&
+-			    task_participate_group_stop(tsk))
+-				group_stop = CLD_STOPPED;
+-		}
+-	}
+-
+-	cgroup_threadgroup_change_end(tsk);
+-
+-	flush_sigqueue_list(&sigq_list);
+-
+-	/*
+-	 * If group stop has completed, deliver the notification.  This
+-	 * should always go to the real parent of the group leader.
+-	 */
+-	if (unlikely(group_stop)) {
+-		read_lock(&tasklist_lock);
+-		do_notify_parent_cldstop(tsk, false, group_stop);
+-		read_unlock(&tasklist_lock);
+-	}
+-}
+-
+ /*
+  * System call entry points.
+  */
+diff --git a/kernel/signal_state.c b/kernel/signal_state.c
+index d1715dacd52b06a45cdff66539607914a66ae87e..012bd5c0a5d78f78ecf1c8be9cf0fd4c62b81418 100644
+--- a/kernel/signal_state.c
++++ b/kernel/signal_state.c
+@@ -16,7 +16,9 @@
+ #include <linux/export.h>
+ #include <linux/freezer.h>
+ #include <linux/init.h>
++#include <linux/poll.h>
+ #include <linux/posix-timers.h>
++#include <linux/sched/cputime.h>
+ #include <linux/sched/signal.h>
+ #include <linux/slab.h>
+ #include <linux/user_namespace.h>
+@@ -1080,3 +1082,317 @@ send_sig(int sig, struct task_struct *p, int priv)
+ 	return send_sig_info(sig, __si_special(priv), p);
+ }
+ EXPORT_SYMBOL(send_sig);
++
++/**
++ * task_participate_group_stop - participate in a group stop
++ * @task: task participating in a group stop
++ *
++ * @task has %JOBCTL_STOP_PENDING set and is participating in a group stop.
++ * Group stop states are cleared and the group stop count is consumed if
++ * %JOBCTL_STOP_CONSUME was set.  If the consumption completes the group
++ * stop, the appropriate `SIGNAL_*` flags are set.
++ *
++ * CONTEXT:
++ * Must be called with @task->sighand->siglock held.
++ *
++ * RETURNS:
++ * %true if group stop completion should be notified to the parent, %false
++ * otherwise.
++ */
++bool task_participate_group_stop(struct task_struct *task)
++{
++	struct signal_struct *sig = task->signal;
++	bool consume = task->jobctl & JOBCTL_STOP_CONSUME;
++
++	WARN_ON_ONCE(!(task->jobctl & JOBCTL_STOP_PENDING));
++
++	task_clear_jobctl_pending(task, JOBCTL_STOP_PENDING);
++
++	if (!consume)
++		return false;
++
++	if (!WARN_ON_ONCE(sig->group_stop_count == 0))
++		sig->group_stop_count--;
++
++	/*
++	 * Tell the caller to notify completion iff we are entering into a
++	 * fresh group stop.  Read comment in do_signal_stop() for details.
++	 */
++	if (!sig->group_stop_count && !(sig->flags & SIGNAL_STOP_STOPPED)) {
++		signal_set_stop_flags(sig, SIGNAL_STOP_STOPPED);
++		return true;
++	}
++	return false;
++}
++
++static void sigqueue_dequeue_pending(struct sigpending *queue, struct list_head *head)
++{
++	sigemptyset(&queue->signal);
++	list_splice_init(&queue->list, head);
++}
++
++void __wake_up_parent(struct task_struct *p, struct task_struct *parent)
++{
++	__wake_up_sync_key(&parent->signal->wait_chldexit,
++			   TASK_INTERRUPTIBLE, p);
++}
++
++void do_notify_pidfd(struct task_struct *task)
++{
++	struct pid *pid = task_pid(task);
++
++	WARN_ON(task->exit_state == 0);
++
++	__wake_up(&pid->wait_pidfd, TASK_NORMAL, 0,
++			poll_to_key(EPOLLIN | EPOLLRDNORM));
++}
++
++/*
++ * Let a parent know about the death of a child.
++ * For a stopped/continued status change, use do_notify_parent_cldstop instead.
++ *
++ * Returns true if our parent ignored us and so we've switched to
++ * self-reaping.
++ */
++bool do_notify_parent(struct task_struct *tsk, int sig)
++{
++	struct kernel_siginfo info;
++	unsigned long flags;
++	struct sighand_struct *psig;
++	bool autoreap = false;
++	u64 utime, stime;
++
++	if (WARN_ON_ONCE(!valid_signal(sig)))
++		return false;
++
++	/* do_notify_parent_cldstop should have been called instead.  */
++	WARN_ON_ONCE(task_is_stopped_or_traced(tsk));
++
++	WARN_ON_ONCE(!tsk->ptrace && !thread_group_empty(tsk));
++
++	/* ptraced, or group-leader without sub-threads */
++	do_notify_pidfd(tsk);
++
++	if (sig != SIGCHLD) {
++		/*
++		 * This is only possible if parent == real_parent.
++		 * Check if it has changed security domain.
++		 */
++		if (tsk->parent_exec_id != READ_ONCE(tsk->parent->self_exec_id))
++			sig = SIGCHLD;
++	}
++
++	clear_siginfo(&info);
++	info.si_signo = sig;
++	info.si_errno = 0;
++	/*
++	 * We are under tasklist_lock here so our parent is tied to
++	 * us and cannot change.
++	 *
++	 * task_active_pid_ns will always return the same pid namespace
++	 * until a task passes through release_task.
++	 *
++	 * write_lock() currently calls preempt_disable() which is the
++	 * same as rcu_read_lock(), but according to Oleg, this is not
++	 * correct to rely on this
++	 */
++	rcu_read_lock();
++	info.si_pid = task_pid_nr_ns(tsk, task_active_pid_ns(tsk->parent));
++	info.si_uid = from_kuid_munged(task_cred_xxx(tsk->parent, user_ns),
++				       task_uid(tsk));
++	rcu_read_unlock();
++
++	task_cputime(tsk, &utime, &stime);
++	info.si_utime = nsec_to_clock_t(utime + tsk->signal->utime);
++	info.si_stime = nsec_to_clock_t(stime + tsk->signal->stime);
++
++	info.si_status = tsk->exit_code & 0x7f;
++	if (tsk->exit_code & 0x80)
++		info.si_code = CLD_DUMPED;
++	else if (tsk->exit_code & 0x7f)
++		info.si_code = CLD_KILLED;
++	else {
++		info.si_code = CLD_EXITED;
++		info.si_status = tsk->exit_code >> 8;
++	}
++
++	psig = tsk->parent->sighand;
++	spin_lock_irqsave(&psig->siglock, flags);
++	if (!tsk->ptrace && sig == SIGCHLD &&
++	    (psig->action[SIGCHLD-1].sa.sa_handler == SIG_IGN ||
++	     (psig->action[SIGCHLD-1].sa.sa_flags & SA_NOCLDWAIT))) {
++		/*
++		 * We are exiting and our parent doesn't care.  POSIX.1
++		 * defines special semantics for setting SIGCHLD to SIG_IGN
++		 * or setting the SA_NOCLDWAIT flag: we should be reaped
++		 * automatically and not left for our parent's wait4 call.
++		 * Rather than having the parent do it as a magic kind of
++		 * signal handler, we just set this to tell do_exit that we
++		 * can be cleaned up without becoming a zombie.  Note that
++		 * we still call __wake_up_parent in this case, because a
++		 * blocked sys_wait4 might now return -ECHILD.
++		 *
++		 * Whether we send SIGCHLD or not for SA_NOCLDWAIT
++		 * is implementation-defined: we do (if you don't want
++		 * it, just use SIG_IGN instead).
++		 */
++		autoreap = true;
++		if (psig->action[SIGCHLD-1].sa.sa_handler == SIG_IGN)
++			sig = 0;
++	}
++	if (!tsk->ptrace && tsk->signal->autoreap) {
++		autoreap = true;
++		sig = 0;
++	}
++	/*
++	 * Send with __send_signal as si_pid and si_uid are in the
++	 * parent's namespaces.
++	 */
++	if (sig)
++		__send_signal_locked(sig, &info, tsk->parent, PIDTYPE_TGID, false);
++	__wake_up_parent(tsk, tsk->parent);
++	spin_unlock_irqrestore(&psig->siglock, flags);
++
++	return autoreap;
++}
++
++/**
++ * do_notify_parent_cldstop - notify parent of stopped/continued state change
++ * @tsk: task reporting the state change
++ * @for_ptracer: the notification is for ptracer
++ * @why: CLD_{CONTINUED|STOPPED|TRAPPED} to report
++ *
++ * Notify @tsk's parent that the stopped/continued state has changed.  If
++ * @for_ptracer is %false, @tsk's group leader notifies to its real parent.
++ * If %true, @tsk reports to @tsk->parent which should be the ptracer.
++ *
++ * CONTEXT:
++ * Must be called with tasklist_lock at least read locked.
++ */
++void do_notify_parent_cldstop(struct task_struct *tsk,
++				     bool for_ptracer, int why)
++{
++	struct kernel_siginfo info;
++	unsigned long flags;
++	struct task_struct *parent;
++	struct sighand_struct *sighand;
++	u64 utime, stime;
++
++	if (for_ptracer) {
++		parent = tsk->parent;
++	} else {
++		tsk = tsk->group_leader;
++		parent = tsk->real_parent;
++	}
++
++	clear_siginfo(&info);
++	info.si_signo = SIGCHLD;
++	info.si_errno = 0;
++	/*
++	 * see comment in do_notify_parent() about the following 4 lines
++	 */
++	rcu_read_lock();
++	info.si_pid = task_pid_nr_ns(tsk, task_active_pid_ns(parent));
++	info.si_uid = from_kuid_munged(task_cred_xxx(parent, user_ns), task_uid(tsk));
++	rcu_read_unlock();
++
++	task_cputime(tsk, &utime, &stime);
++	info.si_utime = nsec_to_clock_t(utime);
++	info.si_stime = nsec_to_clock_t(stime);
++
++	info.si_code = why;
++	switch (why) {
++	case CLD_CONTINUED:
++		info.si_status = SIGCONT;
++		break;
++	case CLD_STOPPED:
++		info.si_status = tsk->signal->group_exit_code & 0x7f;
++		break;
++	case CLD_TRAPPED:
++		info.si_status = tsk->exit_code & 0x7f;
++		break;
++	default:
++		BUG();
++	}
++
++	sighand = parent->sighand;
++	spin_lock_irqsave(&sighand->siglock, flags);
++	if (sighand->action[SIGCHLD-1].sa.sa_handler != SIG_IGN &&
++	    !(sighand->action[SIGCHLD-1].sa.sa_flags & SA_NOCLDSTOP))
++		send_signal_locked(SIGCHLD, &info, parent, PIDTYPE_TGID);
++	/*
++	 * Even if SIGCHLD is not generated, we must wake up wait4 calls.
++	 */
++	__wake_up_parent(tsk, parent);
++	spin_unlock_irqrestore(&sighand->siglock, flags);
++}
++
++void retarget_shared_pending(struct task_struct *tsk, sigset_t *which)
++{
++	sigset_t retarget;
++	struct task_struct *t;
++
++	sigandsets(&retarget, &tsk->signal->shared_pending.signal, which);
++	if (sigisemptyset(&retarget))
++		return;
++
++	for_other_threads(tsk, t) {
++		if (t->flags & PF_EXITING)
++			continue;
++
++		if (!has_pending_signals(&retarget, &t->blocked))
++			continue;
++		/* Remove the signals this thread can handle. */
++		sigandsets(&retarget, &retarget, &t->blocked);
++
++		if (!task_sigpending(t))
++			signal_wake_up(t, 0);
++
++		if (sigisemptyset(&retarget))
++			break;
++	}
++}
++
++void exit_signals(struct task_struct *tsk)
++{
++	LIST_HEAD(sigq_list);
++	int group_stop = 0;
++
++	/*
++	 * @tsk is about to have PF_EXITING set - lock out users which
++	 * expect a stable threadgroup.
++	 */
++	cgroup_threadgroup_change_begin(tsk);
++
++	scoped_guard(spinlock_irq, &tsk->sighand->siglock) {
++		tsk->flags |= PF_EXITING;
++
++		sigqueue_dequeue_pending(&tsk->pending, &sigq_list);
++
++		if (task_sigpending(tsk) && !thread_group_empty(tsk) &&
++		    !(tsk->signal->flags & SIGNAL_GROUP_EXIT)) {
++			sigset_t unblocked = tsk->blocked;
++
++			signotset(&unblocked);
++			retarget_shared_pending(tsk, &unblocked);
++
++			if (unlikely(tsk->jobctl & JOBCTL_STOP_PENDING) &&
++			    task_participate_group_stop(tsk))
++				group_stop = CLD_STOPPED;
++		}
++	}
++
++	cgroup_threadgroup_change_end(tsk);
++
++	flush_sigqueue_list(&sigq_list);
++
++	/*
++	 * If group stop has completed, deliver the notification.  This
++	 * should always go to the real parent of the group leader.
++	 */
++	if (unlikely(group_stop)) {
++		read_lock(&tasklist_lock);
++		do_notify_parent_cldstop(tsk, false, group_stop);
++		read_unlock(&tasklist_lock);
++	}
++}
+diff --git a/kernel/signal_state.h b/kernel/signal_state.h
+index 6f77e328ff5bb8174e9d6d9e5df23a1541b95848..ce75c9952eb1c6a3b7aeebcf22df99767e81b9e2 100644
+--- a/kernel/signal_state.h
++++ b/kernel/signal_state.h
+@@ -32,6 +32,9 @@ bool prepare_signal(int sig, struct task_struct *p, bool force);
+ void complete_signal(int sig, struct task_struct *p, enum pid_type type);
+ int __send_signal_locked(int sig, struct kernel_siginfo *info,
+ 				struct task_struct *t, enum pid_type type, bool force);
++bool task_participate_group_stop(struct task_struct *task);
++void do_notify_parent_cldstop(struct task_struct *tsk, bool for_ptracer, int why);
++void retarget_shared_pending(struct task_struct *tsk, sigset_t *which);
+ bool known_siginfo_layout(unsigned sig, int si_code);
+ 
+ #ifdef CONFIG_POSIX_TIMERS
+diff --git a/kernel/time/Makefile b/kernel/time/Makefile
+index ff5f3785d2546003d8aa23102f7c6644c8de8468..7ba8d9f3f8c5477ae033d5adae815471f6e53757 100644
+--- a/kernel/time/Makefile
++++ b/kernel/time/Makefile
+@@ -5,7 +5,7 @@ ifdef CONFIG_TRACE_BRANCH_PROFILING
+ CFLAGS_sched_clock.o += -DDISABLE_BRANCH_PROFILING
+ endif
+ 
+-obj-y += time.o timer.o timer_round.o hrtimer.o sleep_timeout.o
++obj-y += time.o clock_ticks.o timer.o timer_round.o hrtimer.o sleep_timeout.o
+ obj-y += timekeeping.o ntp.o clocksource.o jiffies.o timer_list.o
+ obj-y += timeconv.o timecounter.o alarmtimer.o
+ 
+diff --git a/kernel/time/clock_ticks.c b/kernel/time/clock_ticks.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..8dbf408f73c631df78a8e3d42281ea61760e2334
+--- /dev/null
++++ b/kernel/time/clock_ticks.c
+@@ -0,0 +1,26 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Time conversion from kernel/time/time.c. */
++#include <linux/jiffies.h>
++#include <linux/math64.h>
++
++/**
++ * nsec_to_clock_t - Convert nsec value to clock_t
++ * @x: nsec value
++ *
++ * Return: nsec value converted to 64-bit "clock_t" (CLOCKS_PER_SEC)
++ */
++u64 nsec_to_clock_t(u64 x)
++{
++#if (NSEC_PER_SEC % USER_HZ) == 0
++	return div_u64(x, NSEC_PER_SEC / USER_HZ);
++#elif (USER_HZ % 512) == 0
++	return div_u64(x * USER_HZ / 512, NSEC_PER_SEC / 512);
++#else
++	/*
++         * max relative error 5.7e-8 (1.8s per year) for USER_HZ <= 1024,
++         * overflow after 64.99 years.
++         * exact for HZ=60, 72, 90, 120, 144, 180, 300, 600, 900, ...
++         */
++	return div_u64(x * 9, (9ull * NSEC_PER_SEC + (USER_HZ / 2)) / USER_HZ);
++#endif
++}
+diff --git a/kernel/time/time.c b/kernel/time/time.c
+index e14011052c5a5f47d896c0d95572b3d1db4f0708..e2ce7f6f7c8b9fe5408556d380af084182dc3e94 100644
+--- a/kernel/time/time.c
++++ b/kernel/time/time.c
+@@ -684,28 +684,6 @@ notrace u64 jiffies_64_to_clock_t(u64 x)
+ }
+ EXPORT_SYMBOL(jiffies_64_to_clock_t);
+ 
+-/**
+- * nsec_to_clock_t - Convert nsec value to clock_t
+- * @x: nsec value
+- *
+- * Return: nsec value converted to 64-bit "clock_t" (CLOCKS_PER_SEC)
+- */
+-u64 nsec_to_clock_t(u64 x)
+-{
+-#if (NSEC_PER_SEC % USER_HZ) == 0
+-	return div_u64(x, NSEC_PER_SEC / USER_HZ);
+-#elif (USER_HZ % 512) == 0
+-	return div_u64(x * USER_HZ / 512, NSEC_PER_SEC / 512);
+-#else
+-	/*
+-         * max relative error 5.7e-8 (1.8s per year) for USER_HZ <= 1024,
+-         * overflow after 64.99 years.
+-         * exact for HZ=60, 72, 90, 120, 144, 180, 300, 600, 900, ...
+-         */
+-	return div_u64(x * 9, (9ull * NSEC_PER_SEC + (USER_HZ / 2)) / USER_HZ);
+-#endif
+-}
+-
+ /**
+  * jiffies64_to_nsecs - Convert jiffies64 to nanoseconds
+  * @j: jiffies64 value
