@@ -17,6 +17,9 @@
 /drivers/gpu/drm/Kconfig
 /lib/rbtree.c
 /lib/errseq.c
+/lib/iov_iter.c
+/lib/iov_iter_copy.c
+/lib/iov_iter_copy.h
 /lib/lockref.c
 /lib/is_single_threaded.c
 /lib/rhashtable.c
@@ -121,6 +124,7 @@
 /mm/backing-dev.c
 /mm/backing-dev-inode.c
 /mm/readahead.c
+/mm/fadvise.c
 /mm/mm_init.c
 /mm/oom_kill.c
 /mm/oom_adj.c
