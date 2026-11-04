@@ -201,6 +201,7 @@
 /fs/mount_cache.c
 /fs/mount_cache.h
 /kernel/ucount.c
+/kernel/capability.c
 /kernel/cred.c
 /kernel/signal.c
 /kernel/signal_state.c
