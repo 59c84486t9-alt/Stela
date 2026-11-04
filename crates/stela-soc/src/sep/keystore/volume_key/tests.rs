@@ -847,3 +847,27 @@ fn unmodeled_operations_and_fields_refuse() {
     let request = Request::new().word(WRAPPED_KEK).word(0);
     assert!(send(&mut keys, GET_SIZE, 0, request, &mut Vec::new()).is_err());
 }
+
+#[test]
+fn sidp_status_reports_nothing_provisioned_in_the_layout_libaks_decodes() {
+    let (mut keys, _) = keys(1);
+    let mut notes = Vec::new();
+    let reply = protect(&mut keys, SIDP_STATUS, [&[], &[], &[]], &mut notes).unwrap();
+    // The reply blob: its length, then SEQUENCE { OCTET STRING (21 zeros) }.
+    let mut expected = 25u32.to_le_bytes().to_vec();
+    expected.extend_from_slice(&[0x30, 23, 0x04, 21]);
+    expected.extend_from_slice(&[0; SIDP_STATUS_BYTES]);
+    expected.resize(expected.len().next_multiple_of(4), 0);
+    assert_eq!(reply, expected);
+    assert_eq!(notes, [UNINTERPRETED, NO_SIDP]);
+    // Any input is not the call libaks makes.
+    let (vek, _) = new_vek(&mut keys, &[], &[]);
+    assert!(protect(&mut keys, SIDP_STATUS, [&[], &[], &vek], &mut notes).is_err());
+    let request = Request::new()
+        .word(SIDP_STATUS)
+        .lword(1)
+        .blob(&[])
+        .blob(&[])
+        .blob(&[]);
+    assert!(send(&mut keys, SET_PROTECTION, 0, request, &mut notes).is_err());
+}

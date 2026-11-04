@@ -43,7 +43,15 @@
 //!   container keybag's tag 2) third. The u64 is 0, or bit 2 when the
 //!   volume is a group's Data volume whose System volume is sealed (bit 5,
 //!   `APFS_INCOMPAT_SEALED_VOLUME`, of its incompatible features, shifted
-//!   right by 3). The call passes no output.
+//!   right by 3). The call passes no output. libaks `aks_fv_sidp_status`
+//!   (statically linked into Setup Assistant; 26A434 arm64e slice
+//!   0x1001942f0) sends 26 with u64 0 and no blobs and decodes the output
+//!   as a DER SEQUENCE holding one OCTET STRING, of which it copies at
+//!   most [`SIDP_STATUS_BYTES`]: "provisioned" is a nonzero u32 at 4 or
+//!   u64 at 8, "initialized" the byte at 16. `-[MacBuddyAppDelegate init]`
+//!   (0x10000b520..0x10000b628) calls a failed call, or a state provisioned
+//!   but not initialized, a bad security state and offers only "Erase and
+//!   Recover" ("Manually Reformatted Disk Detected").
 //! - GET_BLOB_STATE 0x48 (0x2d471f0): handle, parameters, wrapped VEK -> a
 //!   DER dictionary `_decode_fv_blob_state` (0x2d5f8ec) reads: `kt` type,
 //!   `kid` and `id` (16-byte octet strings), `f` flags, `kv` version, `sr`
@@ -76,7 +84,9 @@
 //! does on unmount (`apfs_keybag_unload_class_keys` 0x481e660, call
 //! 0x481e808); the sealed-System bit is not interpreted, which
 //! it reports once. Dropping an unlock record's state releases nothing, as
-//! none is held. Other protection operations, the remaining `fv` commands
+//! none is held. This SEP provisions no SIDP state, so the SIDP status is
+//! all zero, neither provisioned nor initialized; it reports that once.
+//! Other protection operations, the remaining `fv` commands
 //! and other types refuse. [`media`] serves the container media keys under
 //! the same root and inline engine.
 use super::super::Entropy;
@@ -113,6 +123,9 @@ const RETAIN_UNLOCK_RECORD: u32 = 15;
 const LOAD_CLASS_KEYS: u32 = 18;
 const UNLOAD_CLASS_KEYS: u32 = 19;
 const COMMIT_KEK: u32 = 22;
+const SIDP_STATUS: u32 = 26;
+/// The status bytes `aks_fv_sidp_status` copies out of its OCTET STRING.
+const SIDP_STATUS_BYTES: usize = 21;
 /// LOAD_CLASS_KEYS's u64: the volume group's System volume is sealed.
 const SEALED_SYSTEM: u64 = 1 << 2;
 /// The inline key's `cpx` flags: `CP_RAW_KEY_WRAPPEDKEY`.
@@ -148,6 +161,8 @@ const UNRECORDED_COMMIT: &str =
 const UNRETAINED: &str = "SEP volume keys: retained unlock records do not outlive the sepOS start";
 const UNREAD_SEALED_SYSTEM: &str =
     "SEP volume keys: loading class keys does not interpret the sealed-System bit";
+const NO_SIDP: &str =
+    "SEP volume keys: SIDP provisioning is not modeled; its status reports none provisioned";
 
 mod file_key;
 mod keychain;
@@ -299,6 +314,7 @@ impl VolumeKeys {
                 fields.end()?;
                 let vek_only = value == 0 && first.is_empty() && second.is_empty();
                 let kek_only = value == 0 && first.is_empty() && third.is_empty();
+                let no_input = vek_only && third.is_empty();
                 let mut output = Vec::new();
                 match operation {
                     SET_USER_PROTECTION if value == 0 => {
@@ -322,6 +338,10 @@ impl VolumeKeys {
                     }
                     RELEASE_UNLOCK_RECORD if kek_only => {
                         kek_uuid(second)?;
+                    }
+                    SIDP_STATUS if no_input => {
+                        output = sidp_status();
+                        self.report(NO_SIDP, notes);
                     }
                     LOAD_CLASS_KEYS if value & !SEALED_SYSTEM == 0 => {
                         let vek = self.open_vek(third, first, second)?;
@@ -535,6 +555,12 @@ impl<'a> Vek<'a> {
             (b"sr", tagged(4, &[0; 8])),
         ])
     }
+}
+
+/// The SIDP status of a SEP that provisioned none: a DER SEQUENCE holding
+/// the all-zero status as an OCTET STRING.
+fn sidp_status() -> Vec<u8> {
+    tagged(0x30, &tagged(4, &[0; SIDP_STATUS_BYTES]))
 }
 
 /// Reply fields in the codecs' encoding.
