@@ -159,12 +159,46 @@ pub(crate) unsafe fn check_native_clock_domain(
         .as_ref()
         .ok_or(WorkError::CorruptContext)?;
     let epoch = stage("epoch", clock.epoch())?;
+    let root: Arc<dyn stela_linux::threads::OriginalKernelRoot> = work.reservation.clone();
+    // The real Host-root entry must refuse to lend the loader PGD.
+    {
+        // SAFETY: same BSP and original HPET, before service publication.
+        let host = stage("host-root admission", unsafe {
+            clock.enter_dispatch(installed)
+        })?;
+        // SAFETY: immutable root observation only. The loan ends on return.
+        let wrong_root = unsafe { host.with_process(|process| root.pgd(process)) }?;
+        if wrong_root != Err(WorkError::CorruptContext) {
+            return Err(WorkError::CorruptContext);
+        }
+    }
+
     work.dispatch(|runtime| {
         // SAFETY: the original loader root is entered. The clock supplies its
         // exact interrupt owner, and the service and timer join before return.
         let execution = stage("dispatch admission", unsafe {
             clock.enter_dispatch(installed)
         })?;
+        // SAFETY: validate the borrowed loader root and test nested refusal.
+        // Neither operation switches or retains the loan.
+        let pgd = stage("initial PGD", unsafe {
+            execution.with_process(|process| {
+                if execution.with_process(|_| ()).is_ok() {
+                    return Err(WorkError::CorruptContext);
+                }
+                root.pgd(process)
+            })?
+        })?;
+        let expected = layout::physical(handoff.native_loader_tables.root());
+        if pgd.as_ptr().addr() as u64 != expected {
+            return Err(WorkError::CorruptContext);
+        }
+        let flags: u64;
+        // SAFETY: read-only check before Runtime runs under the live guard.
+        unsafe { asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags)) };
+        if flags & (1 << 9) == 0 {
+            return Err(WorkError::CorruptContext);
+        }
         let result = dispatch_timer(runtime, clock, &epoch);
         if let Err(error) = result {
             // A failing fixture may have retained a suspended frame. Stop
@@ -182,7 +216,7 @@ pub(crate) unsafe fn check_native_clock_domain(
     })
     .map_err(failed)??;
     crate::output::arguments(format_args!(
-        "CHECK native-clock-domain PASS cpu=installed clock=HPET service=park+timer+resume loader_irq=elapsed dispatcher_if=restored retired=joined\n"
+        "CHECK native-clock-domain PASS cpu=installed clock=HPET service=park+timer+resume loader_irq=elapsed dispatcher_if=restored pgd=owned+WB wrong_root=refused retired=joined\n"
     ));
     Ok(())
 }

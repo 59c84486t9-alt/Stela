@@ -11,14 +11,14 @@ use crate::{
 use alloc::sync::Arc;
 use core::{
     arch::asm,
-    cell::UnsafeCell,
+    cell::{Cell, UnsafeCell},
     marker::PhantomData,
     mem::ManuallyDrop,
     ptr::{self, NonNull},
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
 };
 use stela_drivers::platform::work::{
-    Cpu, RetainedOwner, WorkError,
+    Cpu, EnteredProcess, RetainedOwner, WorkError,
     service::{Clock, Idle, RaisedWork},
 };
 mod counter;
@@ -640,10 +640,47 @@ impl core::fmt::Debug for Observation {
 pub(crate) struct DriverExecution<'a> {
     installed: &'a Installed,
     flags: u64,
+    root: u64,
     generation: u64,
+    process_borrowed: Cell<bool>,
     scope_leases: Arc<()>,
     _local: PhantomData<*mut ()>,
 }
+struct DriverProcess<'a, 'installed> {
+    execution: &'a DriverExecution<'installed>,
+    saved: u64,
+}
+
+// SAFETY: the borrow is subordinate to the actual DriverExecution and never
+// outlives its interrupt-excluded segment. It validates its physical CPU,
+// active generation and exact entry CR3 before each metadata operation.
+unsafe impl EnteredProcess for DriverProcess<'_, '_> {
+    fn check(&self) -> Result<(), WorkError> {
+        self.execution.check()?;
+        if !self.execution.process_borrowed.get() || self.execution.root != root() {
+            return Err(WorkError::CorruptContext);
+        }
+        let flags: u64;
+        // SAFETY: read-only flag observation on the admitted physical CPU.
+        unsafe { asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags)) };
+        if flags & IF != 0 {
+            return Err(WorkError::Busy);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for DriverProcess<'_, '_> {
+    fn drop(&mut self) {
+        if let Err(error) = self.check() {
+            self.execution.installed.state.cpu.fatal(error);
+        }
+        self.execution.process_borrowed.set(false);
+        // SAFETY: the same admitted CPU/root retains this enclosing IRQ save.
+        unsafe { restore(self.saved) };
+    }
+}
+
 /// Immutable process permission for exported native mapping views. A live scope
 /// view prevents the !Send execution grant from ending; numerical root
 /// equality alone does not supply this permission or reopen an older scope.
@@ -698,6 +735,35 @@ impl DriverExecution<'_> {
         }
         Ok(())
     }
+    /// Lend one process metadata operation the currently entered root.
+    /// # Safety
+    /// The body must be bounded and synchronous. It cannot switch, park,
+    /// restore interrupts, change roots or retain the borrowed permission.
+    #[cfg_attr(
+        not(feature = "diagnostics"),
+        expect(dead_code, reason = "used by the loader-root qualification")
+    )]
+    pub(crate) unsafe fn with_process<R>(
+        &self,
+        body: impl FnOnce(&dyn EnteredProcess) -> R,
+    ) -> Result<R, WorkError> {
+        self.check()?;
+        if root() != self.root {
+            return Err(WorkError::CorruptContext);
+        }
+        if self.process_borrowed.get() {
+            return Err(WorkError::Busy);
+        }
+        let saved = flags_disable();
+        self.process_borrowed.set(true);
+        let process = DriverProcess {
+            execution: self,
+            saved,
+        };
+        process.check()?;
+        Ok(body(&process))
+    }
+
     pub(crate) fn cpu(&self) -> Result<Arc<dyn Cpu>, WorkError> {
         self.check()?;
         Ok(self.installed.state.cpu_view.clone())
@@ -726,7 +792,7 @@ impl Drop for DriverExecution<'_> {
         if self.check().is_err() {
             self.installed.state.cpu.fatal(WorkError::CorruptContext);
         }
-        if Arc::strong_count(&self.scope_leases) != 1 {
+        if self.process_borrowed.get() || Arc::strong_count(&self.scope_leases) != 1 {
             self.installed.state.cpu.fatal(WorkError::Busy);
         }
         flags_disable();
@@ -963,6 +1029,7 @@ impl Installed {
             .execution_generation
             .store(generation, Ordering::Release);
         self.state.executing.store(true, Ordering::Release);
+        let root = root();
         // SAFETY: this is the explicit main-owned execution permission, never
         // an implicit attempt by Idle/Runtime to manufacture interrupt progress.
         unsafe {
@@ -971,7 +1038,9 @@ impl Installed {
         Ok(DriverExecution {
             installed: self,
             flags,
+            root,
             generation,
+            process_borrowed: Cell::new(false),
             scope_leases,
             _local: PhantomData,
         })
