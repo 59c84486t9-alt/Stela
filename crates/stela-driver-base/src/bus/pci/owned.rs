@@ -2,6 +2,8 @@
 use super::{Address, ConfigError, ConfigSpace, EcamWindow, msi::MsiConfigSpace};
 use crate::bus::mmio::owned::{Error as MappingError, Mapping, MappingView};
 pub mod grant;
+mod observed;
+pub use observed::ObservedConfig;
 mod region;
 use grant::{DriverGrant, PrepublicationGrant};
 use region::Region;

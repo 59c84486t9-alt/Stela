@@ -1,71 +1,9 @@
 //! Read-only topology observations under the standalone ECAM assignment.
 use super::*;
-use core::ptr::NonNull;
 use stela_drivers::bus::pci::{
-    ConfigFailure, ConfigSpace, Function, FunctionError, Identity, InventoryError,
-    InventoryReleaseFailure,
+    Function, FunctionError, Identity, InventoryError, InventoryReleaseFailure,
+    owned::ObservedConfig,
 };
-
-struct ReadOnlyConfig(owned::Mapping);
-
-fn mapping_error(error: owned::Error) -> ConfigError {
-    ConfigError::before_effect(ConfigFailure::Mapping(error))
-}
-
-fn read_only() -> ConfigError {
-    ConfigError::before_effect(ConfigFailure::Protection)
-}
-
-impl ReadOnlyConfig {
-    fn address(&self, offset: u16, width: usize) -> Result<NonNull<u8>, ConfigError> {
-        if !usize::from(offset).is_multiple_of(width) {
-            return Err(ConfigError::before_effect(ConfigFailure::Access {
-                offset,
-                width,
-            }));
-        }
-        self.0
-            .address(usize::from(offset), width)
-            .map_err(mapping_error)
-    }
-
-    fn retire(&mut self) -> Result<(), Error> {
-        // SAFETY: every read finished synchronously; no pointer, view or
-        // DMA/IRQ work leaves this read-only observation.
-        unsafe { self.0.retire() }.map_err(Error::Mapping)
-    }
-}
-
-impl ConfigSpace for ReadOnlyConfig {
-    fn read8(&self, offset: u16) -> Result<u8, ConfigError> {
-        let address = self.address(offset, 1)?;
-        // SAFETY: exact live lease and byte width, before retirement.
-        Ok(unsafe { address.as_ptr().read_volatile() })
-    }
-
-    fn read16(&self, offset: u16) -> Result<u16, ConfigError> {
-        let address = self.address(offset, 2)?.cast::<u16>();
-        // SAFETY: aperture pages are aligned and address checked the offset
-        // and live two-byte span. No pointer survives the read.
-        Ok(u16::from_le(unsafe { address.as_ptr().read_volatile() }))
-    }
-
-    fn read32(&self, offset: u16) -> Result<u32, ConfigError> {
-        self.0.read32(usize::from(offset)).map_err(mapping_error)
-    }
-
-    fn write8(&mut self, _: u16, _: u8) -> Result<(), ConfigError> {
-        Err(read_only())
-    }
-
-    fn write16(&mut self, _: u16, _: u16) -> Result<(), ConfigError> {
-        Err(read_only())
-    }
-
-    fn write32(&mut self, _: u16, _: u32) -> Result<(), ConfigError> {
-        Err(read_only())
-    }
-}
 
 impl Source {
     /// Observe bridge and ARI topology without issuing a configuration writer.
@@ -74,11 +12,21 @@ impl Source {
         Function::inventory_with(
             window,
             |address| {
-                let (_, mapping) = self.config_mapping(address, Protection::ReadOnly)?;
-                match Function::new(address, ReadOnlyConfig(mapping)) {
+                let (window, mapping) = self.config_mapping(address, Protection::ReadOnly)?;
+                // SAFETY: the standalone source checked this bus and issued
+                // the exact lease. It keeps the exclusive post-EBS bus owner.
+                let config = match unsafe { ObservedConfig::attach(address, window, mapping) } {
+                    Ok(config) => config,
+                    Err((error, mut mapping)) => {
+                        // SAFETY: no observation or view escaped the refused attach.
+                        unsafe { mapping.retire() }.map_err(Error::Mapping)?;
+                        return Err(Error::Config(error));
+                    }
+                };
+                match Function::new(address, config) {
                     Ok(function) => Ok(Some(function)),
                     Err(mut refused) => {
-                        refused.config.retire()?;
+                        refused.config.retire().map_err(Error::Mapping)?;
                         match refused.reason {
                             FunctionError::Absent => Ok(None),
                             FunctionError::ConfigurationRetry => Err(Error::NotReady(address)),
@@ -91,7 +39,10 @@ impl Source {
                 function
                     .config()
                     .retire()
-                    .map_err(|error| InventoryReleaseFailure { error, function })
+                    .map_err(|error| InventoryReleaseFailure {
+                        error: Error::Mapping(error),
+                        function,
+                    })
             },
         )
         .map_err(|failure| match failure.error {

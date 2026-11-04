@@ -2012,6 +2012,30 @@ fn start_platform(
         Ok(()) => output::arguments(format_args!("NATIVE IRQ device vectors attached\n")),
         Err(error) => output::arguments(format_args!("NATIVE IRQ unavailable: {error:?}\n")),
     }
+    // Mask contributors before a remapper keeps its function's ECAM page.
+    // The aperture rejects overlapping whole-bus and function mappings.
+    let prepared_sci = match (&native_mmio, &handoff.power) {
+        (Some(mmio), Some(power)) => {
+            // SAFETY: firmware is stopped, APs have not started, and native
+            // probing has not published any PCI/controller owner yet.
+            let prepared = unsafe { mmio.mask_pci_intx() }
+                .map_err(|error| refuse!("PCI INTx handoff: {error}", ?error))
+                .and_then(|()| {
+                    // SAFETY: PCI INTx contributors are disabled; the boot
+                    // owns the fixed/GPE sources and complete IOAPIC handoff.
+                    unsafe { aml::sci::Prepared::capture(mmio, power.clone()) }
+                        .map_err(|error| refuse!("SCI route: {error}", ?error))
+                });
+            match prepared {
+                Ok(prepared) => Some(prepared),
+                Err(error) => {
+                    output::arguments(format_args!("HOST ACPI SCI unavailable: {error}\n"));
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
     // The remapping units, taken before any host driver starts DMA.
     let remappers = match (&native_mmio, handoff.storage.handoff()) {
         // SAFETY: no host driver has started; the loader root maps the ACPI
@@ -2042,28 +2066,6 @@ fn start_platform(
             output::arguments(format_args!("NATIVE WORK unavailable: {error}\n"));
             None
         }
-    };
-    let prepared_sci = match (&native_mmio, &handoff.power) {
-        (Some(mmio), Some(power)) => {
-            // SAFETY: firmware is stopped, APs have not started, and native
-            // probing has not published any PCI/controller owner yet.
-            let prepared = unsafe { mmio.mask_pci_intx() }
-                .map_err(|error| refuse!("PCI INTx handoff: {error}", ?error))
-                .and_then(|()| {
-                    // SAFETY: PCI INTx contributors are disabled; the boot
-                    // owns the fixed/GPE sources and complete IOAPIC handoff.
-                    unsafe { aml::sci::Prepared::capture(mmio, power.clone()) }
-                        .map_err(|error| refuse!("SCI route: {error}", ?error))
-                });
-            match prepared {
-                Ok(prepared) => Some(prepared),
-                Err(error) => {
-                    output::arguments(format_args!("HOST ACPI SCI unavailable: {error}\n"));
-                    None
-                }
-            }
-        }
-        _ => None,
     };
     let host_acpi = aml::HostAcpi::start(
         handoff.rsdp,

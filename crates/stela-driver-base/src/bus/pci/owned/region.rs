@@ -12,6 +12,76 @@ const FUNCTION_BYTES: usize = 4096;
 const BUS_SHIFT: u32 = 20;
 const DEVICE_SHIFT: u32 = 15;
 const FUNCTION_SHIFT: u32 = 12;
+pub(super) fn validate_mapping(
+    address: Address,
+    window: EcamWindow,
+    mapping: &Mapping,
+    protection: Protection,
+) -> Result<(), ConfigError> {
+    if window.start_bus > window.end_bus
+        || !window.base.is_multiple_of(1u64 << BUS_SHIFT)
+        || window
+            .base
+            .checked_add((u64::from(window.end_bus) + 1) << BUS_SHIFT)
+            .is_none()
+    {
+        return Err(ConfigError::before_effect(ConfigFailure::Window));
+    }
+    if address.segment != window.segment
+        || address.bus < window.start_bus
+        || address.bus > window.end_bus
+        || address.device >= 32
+        || address.function >= 8
+    {
+        return Err(ConfigError::before_effect(ConfigFailure::Address));
+    }
+    // MCFG bases are relative to bus zero, including windows whose first
+    // admitted bus is nonzero. Never subtract start_bus from this offset.
+    let physical = window
+        .base
+        .checked_add(u64::from(address.bus) << BUS_SHIFT)
+        .and_then(|base| base.checked_add(u64::from(address.device) << DEVICE_SHIFT))
+        .and_then(|base| base.checked_add(u64::from(address.function) << FUNCTION_SHIFT))
+        .ok_or(ConfigError::before_effect(ConfigFailure::PhysicalSpan))?;
+    let end = physical
+        .checked_add(FUNCTION_BYTES as u64)
+        .ok_or(ConfigError::before_effect(ConfigFailure::PhysicalSpan))?;
+    let span = mapping
+        .physical_span()
+        .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))?;
+    if span.start() != physical
+        || span.end() != end
+        || mapping
+            .bytes()
+            .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))?
+            != FUNCTION_BYTES
+    {
+        return Err(ConfigError::before_effect(ConfigFailure::PhysicalSpan));
+    }
+    if mapping
+        .attribute()
+        .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))?
+        != CacheAttribute::Uncached
+    {
+        return Err(ConfigError::before_effect(ConfigFailure::CacheAttribute));
+    }
+    if mapping
+        .protection()
+        .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))?
+        != protection
+    {
+        return Err(ConfigError::before_effect(ConfigFailure::Protection));
+    }
+    let cpu = mapping
+        .address(0, FUNCTION_BYTES)
+        .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))?;
+    let base = cpu.as_ptr() as usize;
+    if !base.is_multiple_of(FUNCTION_BYTES) || base.checked_add(FUNCTION_BYTES).is_none() {
+        return Err(ConfigError::before_effect(ConfigFailure::CpuAddress));
+    }
+    Ok(())
+}
+
 pub(super) struct Region<G: Grant> {
     address: Address,
     window: EcamWindow,
@@ -25,7 +95,7 @@ impl<G: Grant> Region<G> {
     pub fn attach(grant: G, mapping: Mapping) -> Result<Self, (ConfigError, G, Mapping)> {
         let address = grant.custody().address();
         let window = grant.custody().window();
-        if let Err(error) = Self::validate(address, window, &mapping) {
+        if let Err(error) = validate_mapping(address, window, &mapping, Protection::ReadWrite) {
             return Err((error, grant, mapping));
         }
         if let Err(error) = grant
@@ -52,75 +122,6 @@ impl<G: Grant> Region<G> {
             window,
             mapping,
         })
-    }
-
-    fn validate(
-        address: Address,
-        window: EcamWindow,
-        mapping: &Mapping,
-    ) -> Result<(), ConfigError> {
-        if window.start_bus > window.end_bus
-            || !window.base.is_multiple_of(1u64 << BUS_SHIFT)
-            || window
-                .base
-                .checked_add((u64::from(window.end_bus) + 1) << BUS_SHIFT)
-                .is_none()
-        {
-            return Err(ConfigError::before_effect(ConfigFailure::Window));
-        }
-        if address.segment != window.segment
-            || address.bus < window.start_bus
-            || address.bus > window.end_bus
-            || address.device >= 32
-            || address.function >= 8
-        {
-            return Err(ConfigError::before_effect(ConfigFailure::Address));
-        }
-        // MCFG bases are relative to bus zero, including windows whose first
-        // admitted bus is nonzero. Never subtract start_bus from this offset.
-        let physical = window
-            .base
-            .checked_add(u64::from(address.bus) << BUS_SHIFT)
-            .and_then(|base| base.checked_add(u64::from(address.device) << DEVICE_SHIFT))
-            .and_then(|base| base.checked_add(u64::from(address.function) << FUNCTION_SHIFT))
-            .ok_or(ConfigError::before_effect(ConfigFailure::PhysicalSpan))?;
-        let end = physical
-            .checked_add(FUNCTION_BYTES as u64)
-            .ok_or(ConfigError::before_effect(ConfigFailure::PhysicalSpan))?;
-        let span = mapping
-            .physical_span()
-            .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))?;
-        if span.start() != physical
-            || span.end() != end
-            || mapping
-                .bytes()
-                .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))?
-                != FUNCTION_BYTES
-        {
-            return Err(ConfigError::before_effect(ConfigFailure::PhysicalSpan));
-        }
-        if mapping
-            .attribute()
-            .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))?
-            != CacheAttribute::Uncached
-        {
-            return Err(ConfigError::before_effect(ConfigFailure::CacheAttribute));
-        }
-        if mapping
-            .protection()
-            .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))?
-            != Protection::ReadWrite
-        {
-            return Err(ConfigError::before_effect(ConfigFailure::Protection));
-        }
-        let cpu = mapping
-            .address(0, FUNCTION_BYTES)
-            .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))?;
-        let base = cpu.as_ptr() as usize;
-        if !base.is_multiple_of(FUNCTION_BYTES) || base.checked_add(FUNCTION_BYTES).is_none() {
-            return Err(ConfigError::before_effect(ConfigFailure::CpuAddress));
-        }
-        Ok(())
     }
 
     pub fn admission_close(

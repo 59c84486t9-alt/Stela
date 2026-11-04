@@ -324,6 +324,66 @@ fn retire(inputs: Inputs) {
 }
 
 #[test]
+fn inspection_keeps_read_only_ecam_separate_from_writable_unit_registers() {
+    use crate::bus::pci::{ConfigError, ConfigFailure, owned::test_support};
+
+    let (ecam, mut config_model) =
+        make_mapping(test_support::physical(ADDRESS), 4096, Protection::ReadOnly);
+    config_model.set(0, 0x1234_1022 | u64::from(regs::STATUS_CAP_LIST) << 48);
+    config_model.set(8, 0x0806_0001);
+    config_model.set(0x30, u64::from(CAP) << 32);
+    let capability = u32::from(SECURE_DEVICE) | IOMMU_TYPE << 16 | IOMMU_REVISION << 19;
+    config_model.set(
+        usize::from(CAP),
+        u64::from(capability) | ((BASE | u64::from(BASE_ENABLED)) << 32),
+    );
+    config_model.set(usize::from(CAP) + 8, 0xfe00_ab80 << 32);
+    let before = config_model.image();
+    // SAFETY: this isolated registry issued the exact read-only ECAM lease.
+    let config =
+        match unsafe { ObservedConfig::attach(ADDRESS, test_support::window(ADDRESS), ecam) } {
+            Ok(config) => config,
+            Err((error, _)) => panic!("{error:?}"),
+        };
+    let function = match Function::new(ADDRESS, config) {
+        Ok(function) => function,
+        Err(refusal) => panic!("{:?}", refusal.reason),
+    };
+    let (mapping, mut register_model) = make_mapping(BASE, SMALL_APERTURE, Protection::ReadWrite);
+    let table = firmware(&[Unit::small()], 0);
+    let ivrs = Ivrs::parse(&table, 48).unwrap();
+    let inputs = Inputs {
+        function,
+        mappings: vec![mapping],
+    };
+    // SAFETY: the two original isolated owners are held; no fixture writer runs.
+    let inspection = match unsafe { FunctionInspection::inspect(inputs, &ivrs) } {
+        Ok(inspection) => inspection,
+        Err((error, _)) => panic!("{error:?}"),
+    };
+    assert_eq!(inspection.profiles()[0].configuration.base(), BASE);
+    assert_eq!(config_model.unmaps.load(Ordering::Relaxed), 0);
+    let Inputs {
+        function,
+        mut mappings,
+    } = inspection.into_inputs();
+    let mut config = function.into_config();
+    assert_eq!(
+        config.write16(regs::COMMAND, 0xffff),
+        Err(ConfigError::before_effect(ConfigFailure::Protection))
+    );
+    assert_eq!(config_model.image(), before);
+    config.retire().unwrap();
+    // SAFETY: all original inspection consumers have ended.
+    unsafe {
+        mappings.pop().unwrap().retire().unwrap();
+        config_model.finish();
+        register_model.finish();
+    }
+    assert_eq!(config_model.unmaps.load(Ordering::Relaxed), 1);
+}
+
+#[test]
 fn kept_function_and_all_register_bytes_are_unchanged() {
     let mut function = make_function(&[(CAP, BASE, CAP_EXTENDED | EFR_SUPPORTED)], false);
     let original_config: Vec<_> = (0..4096u16)

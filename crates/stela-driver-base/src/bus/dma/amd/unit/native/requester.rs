@@ -36,10 +36,10 @@ impl Mapping {
 
 /// PCI requester, reserved AMD domain ID, DTE/root and payload pins.
 /// Process local ownership preserves the original native context restriction.
-pub struct Requester<P: ColdPlatform> {
-    tree: PageTables<Hardware<P>>,
-    table: Rc<RefCell<DeviceTable<Hardware<P>>>>,
-    engine: Rc<Engine<P>>,
+pub struct Requester<P: ColdPlatform, C: UnitConfig = OwnedConfig> {
+    tree: PageTables<Hardware<P, C>>,
+    table: Rc<RefCell<DeviceTable<Hardware<P, C>>>>,
+    engine: Rc<Engine<P, C>>,
     owner: Rc<Owner>,
     active: Rc<RefCell<Vec<u16>>>,
     seal: Rc<()>,
@@ -82,7 +82,7 @@ fn admit_function(function: &mut Function<OwnedConfig>) -> Result<u16, Error> {
     Ok(u16::from(address.bus) << 8 | u16::from(address.device) << 3 | u16::from(address.function))
 }
 
-impl<P: ColdPlatform> Unit<P> {
+impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
     /// # Safety
     /// `function` is the original covered requester in this unit's root
     /// and firmware epoch. The producer transfers its exclusive reset/removal/
@@ -94,7 +94,7 @@ impl<P: ColdPlatform> Unit<P> {
     pub unsafe fn attach(
         &mut self,
         function: Function<OwnedConfig>,
-    ) -> Result<Requester<P>, Error> {
+    ) -> Result<Requester<P, C>, Error> {
         // Before any fallible access/context callback: an access error does
         // not return/reset/retire this SAME original configuration epoch.
         let mut function = ManuallyDrop::new(function);
@@ -125,7 +125,7 @@ impl<P: ColdPlatform> Unit<P> {
     pub unsafe fn attach_binding(
         &mut self,
         binding: RequesterBinding,
-    ) -> Result<Requester<P>, Error> {
+    ) -> Result<Requester<P, C>, Error> {
         let binding = ManuallyDrop::new(binding);
         if self.engine.retired.get() || self.engine.poisoned.get() {
             return Err(Error::Poisoned);
@@ -145,7 +145,7 @@ impl<P: ColdPlatform> Unit<P> {
 
     /// # Safety
     /// As for [`Self::attach`], for `owner`'s requester `rid`.
-    unsafe fn attach_owner(&mut self, rid: u16, owner: Owner) -> Result<Requester<P>, Error> {
+    unsafe fn attach_owner(&mut self, rid: u16, owner: Owner) -> Result<Requester<P, C>, Error> {
         let owner = ManuallyDrop::new(owner);
         let _guard = self.engine.resources.platform.enter().map_err(Error::Dma)?;
         if !self.coverage[usize::from(rid)] {
@@ -222,7 +222,7 @@ impl<P: ColdPlatform> Unit<P> {
     }
 }
 
-impl<P: ColdPlatform> Requester<P> {
+impl<P: ColdPlatform, C: UnitConfig> Requester<P, C> {
     /// Use the original PCI function, for example to program the
     /// owning driver's IRQs and BusMaster after attachment. No cloned config
     /// or second mapping permission is created.
@@ -461,7 +461,7 @@ impl<P: ColdPlatform> Requester<P> {
     }
 }
 
-impl<P: ColdPlatform> Drop for Requester<P> {
+impl<P: ColdPlatform, C: UnitConfig> Drop for Requester<P, C> {
     fn drop(&mut self) {
         if !self.detached {
             // Also keep metadata pins for an unmap whose translation removal

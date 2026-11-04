@@ -8,7 +8,10 @@
 use crate::bus::{
     dma::amd::ivrs::{HardwareVersion, Ivhd, Ivrs},
     mmio::owned::{CacheAttribute, Error as MappingError, Mapping, Protection},
-    pci::{Address, ConfigSpace, Function, owned::OwnedConfig},
+    pci::{
+        Address, ConfigSpace, Function,
+        owned::{ObservedConfig, OwnedConfig},
+    },
 };
 use alloc::vec::Vec;
 use core::{marker::PhantomData, mem::size_of};
@@ -66,10 +69,28 @@ pub enum Error {
     Mapping(MappingError),
 }
 
+/// An owned configuration view of the IOMMU function. The remapper needs its
+/// PCI identity and capabilities, while the separate unit mapping owns MMIO.
+pub trait UnitConfig: ConfigSpace {
+    fn address(&self) -> Address;
+}
+
+impl UnitConfig for OwnedConfig {
+    fn address(&self) -> Address {
+        self.address()
+    }
+}
+
+impl UnitConfig for ObservedConfig {
+    fn address(&self) -> Address {
+        self.address()
+    }
+}
+
 /// Owners on entry and refusal. Returning these never retires a mapping;
 /// the caller still owes its original context and explicit retirement protocol.
-pub struct Inputs {
-    pub function: Function<OwnedConfig>,
+pub struct Inputs<C = OwnedConfig> {
+    pub function: Function<C>,
     pub mappings: Vec<Mapping>,
 }
 
@@ -135,14 +156,14 @@ pub struct Snapshot {
 /// Keeps one original PCI function and every unit mapping. No independent
 /// per-capability owner can invalidate another unit's configuration/IRQ epoch.
 /// The complete checksum-validated original IVRS bytes remain attached too.
-pub struct FunctionInspection {
-    inputs: Inputs,
+pub struct FunctionInspection<C = OwnedConfig> {
+    inputs: Inputs<C>,
     address: Address,
     profiles: Vec<Profile>,
     firmware: Vec<u8>,
     _process_context: PhantomData<*mut ()>,
 }
-impl FunctionInspection {
+impl<C: UnitConfig> FunctionInspection<C> {
     pub(super) fn native_firmware(&self) -> &[u8] {
         &self.firmware
     }
@@ -185,11 +206,10 @@ impl FunctionInspection {
     /// inspection, snapshots, return and final release. This grants no unit
     /// takeover, engine stop, DMA coherency, IRQ or requester/alias permission.
     /// No hardware state is changed, including on refusal or allocation failure.
-    #[expect(
-        clippy::result_large_err,
-        reason = "same original register inputs return on refusal without a failure-path allocation"
-    )]
-    pub unsafe fn inspect(mut inputs: Inputs, ivrs: &Ivrs<'_>) -> Result<Self, (Error, Inputs)> {
+    pub unsafe fn inspect(
+        mut inputs: Inputs<C>,
+        ivrs: &Ivrs<'_>,
+    ) -> Result<Self, (Error, Inputs<C>)> {
         let mut firmware = Vec::new();
         if firmware.try_reserve_exact(ivrs.raw().len()).is_err() {
             return Err((Error::OutOfMemory, inputs));
@@ -237,7 +257,7 @@ impl FunctionInspection {
     }
     /// No writes or publications took place. Original mapping retirement and
     /// producer epoch obligations survive this consuming transfer unchanged.
-    pub fn into_inputs(self) -> Inputs {
+    pub fn into_inputs(self) -> Inputs<C> {
         self.inputs
     }
 }
@@ -260,7 +280,7 @@ fn read_register(mapping: &Mapping, offset: usize) -> Result<u64, Error> {
     }
 }
 
-fn prepare(inputs: &mut Inputs, ivrs: &Ivrs<'_>) -> Result<Vec<Profile>, Error> {
+fn prepare<C: UnitConfig>(inputs: &mut Inputs<C>, ivrs: &Ivrs<'_>) -> Result<Vec<Profile>, Error> {
     if !matches!(ivrs.revision(), 1 | 2) {
         return Err(Error::Firmware);
     }

@@ -28,7 +28,7 @@ use stela_drivers::{
             pages::DmaPages,
         },
         mmio::owned::{PhysicalSpan, Protection},
-        pci::{Address, Function, owned::OwnedConfig, requester::RequesterBinding},
+        pci::{Address, Function, owned::ObservedConfig, requester::RequesterBinding},
     },
 };
 
@@ -168,19 +168,19 @@ fn named(scope: MemoryScope, segment: u16, present: &[Present]) -> Vec<u16> {
 }
 
 pub(super) struct Taken {
-    unit: Rc<RefCell<Unit<Platform>>>,
+    unit: Rc<RefCell<Unit<Platform, ObservedConfig>>>,
     segment: u16,
     requesters: RefCell<Vec<u16>>,
 }
 
-/// The function at `address`'s own configuration page.
-///
+/// Read the unit's identity and capability list from its original ECAM page.
 /// # Safety
-/// No driver owns the function.
-unsafe fn config(mmio: &native_mmio::Source, address: Address) -> Option<Function<OwnedConfig>> {
-    // SAFETY: forwarded; the bus is shared with the drivers, each owning
-    // its own function's page.
-    let (window, resource) = unsafe { mmio.claim_bus(address.segment, address.bus) }.ok()?;
+/// This boot owns the function's bus through inspection and unit retirement.
+/// Firmware, SMM and other native writers cannot alter the function.
+unsafe fn config(mmio: &native_mmio::Source, address: Address) -> Result<Function<ObservedConfig>> {
+    // SAFETY: forwarded; the source owns this bus's original reservation.
+    let (window, resource) = unsafe { mmio.claim_bus(address.segment, address.bus) }
+        .map_err(|error| refuse!("IOMMU ECAM resource: {error}", ?error))?;
     let offset = usize::from(address.device) << 15 | usize::from(address.function) << 12;
     let mapping = mmio
         .authority()
@@ -189,12 +189,31 @@ unsafe fn config(mmio: &native_mmio::Source, address: Address) -> Option<Functio
             offset,
             PAGE as usize,
             CacheAttribute::Uncached,
-            Protection::ReadWrite,
+            Protection::ReadOnly,
         )
-        .ok()?;
-    // SAFETY: the mapping is the function's own configuration page.
-    let config = unsafe { OwnedConfig::attach(address, window, mapping) }.ok()?;
-    Function::new(address, config)
+        .map_err(|error| refuse!("IOMMU ECAM mapping: {error}", ?error))?;
+    // SAFETY: the original bus source issued this exact UC read-only page;
+    // the caller keeps configuration and decode stable through retirement.
+    let config = match unsafe { ObservedConfig::attach(address, window, mapping) } {
+        Ok(config) => config,
+        Err((error, mut mapping)) => {
+            // SAFETY: the rejected attachment published no view or reader.
+            unsafe { mapping.retire() }
+                .map_err(|error| refuse!("IOMMU ECAM retirement: {error}", ?error))?;
+            return Err(refuse!("IOMMU ECAM geometry: {error}", ?error));
+        }
+    };
+    match Function::new(address, config) {
+        Ok(function) => Ok(function),
+        Err(mut refusal) => {
+            refusal
+                .config
+                .retire()
+                .map_err(|error| refuse!("IOMMU ECAM retirement: {error}", ?error))?;
+            let error = refusal.reason;
+            Err(refuse!("IOMMU function observation: {error}", ?error))
+        }
+    }
 }
 
 /// Inspect the unit at `function` with its register aperture mapped.
@@ -203,10 +222,10 @@ unsafe fn config(mmio: &native_mmio::Source, address: Address) -> Option<Functio
 /// The mount owns the unit's function and registers.
 unsafe fn inspect(
     mmio: &native_mmio::Source,
-    mut function: Function<OwnedConfig>,
+    mut function: Function<ObservedConfig>,
     base: u64,
     ivrs: &Ivrs<'_>,
-) -> Result<FunctionInspection> {
+) -> Result<FunctionInspection<ObservedConfig>> {
     let mut refusals = Vec::new();
     for bytes in APERTURES {
         let span =
@@ -254,6 +273,10 @@ unsafe fn inspect(
             }
         }
     }
+    function
+        .config()
+        .retire()
+        .map_err(|error| refuse!("IOMMU ECAM retirement: {error}", ?error))?;
     Err(refuse!(
         "its function or registers did not match the IVRS: {refusals}",
         ?refusals
@@ -303,9 +326,12 @@ pub(super) unsafe fn take(
             ));
         };
         // SAFETY: forwarded; no driver claims an IOMMU function.
-        let Some(function) = (unsafe { config(mmio, address) }) else {
-            left(&"its configuration space could not be mapped");
-            continue;
+        let function = match unsafe { config(mmio, address) } {
+            Ok(function) => function,
+            Err(error) => {
+                left(&error);
+                continue;
+            }
         };
         // SAFETY: forwarded.
         let inspection = match unsafe { inspect(mmio, function, base, &ivrs) } {
@@ -441,7 +467,7 @@ impl Taken {
 }
 
 fn attach_domain(
-    unit: &Rc<RefCell<Unit<Platform>>>,
+    unit: &Rc<RefCell<Unit<Platform, ObservedConfig>>>,
     binding: RequesterBinding,
 ) -> Result<Arc<Domain>, Error> {
     if !on_boot_processor() {
@@ -464,7 +490,7 @@ fn attach_domain(
 
 struct ColdRoot {
     address: Address,
-    unit: Rc<RefCell<Unit<Platform>>>,
+    unit: Rc<RefCell<Unit<Platform, ObservedConfig>>>,
 }
 // SAFETY: the paired original IVRS unit/window and DMA backing are retained.
 // It is process-local and every operation checks BSP/non-IRQ execution. The
@@ -540,8 +566,8 @@ unsafe impl stela_drivers::bus::pci::requester::preparation::AttachmentBackend f
 }
 
 struct Inner {
-    _unit: Rc<RefCell<Unit<Platform>>>,
-    requester: Requester<Platform>,
+    _unit: Rc<RefCell<Unit<Platform, ObservedConfig>>>,
+    requester: Requester<Platform, ObservedConfig>,
     mappings: Vec<(DomainMapping, Mapping)>,
     next: u64,
 }
