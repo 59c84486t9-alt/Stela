@@ -1,9 +1,10 @@
 //! Original C task ABI on the actual hosted continuation's guarded stack.
 use super::*;
-use alloc::rc::Rc;
+use alloc::{boxed::Box, rc::Rc};
 use core::cell::{Cell, RefCell};
-use stela_driver_base::platform::work::kernel_domain::{
-    DomainRef, HostedRuntime, HostedSwitchBinding, HostedWake,
+use stela_driver_base::platform::work::{
+    InactiveObservation,
+    kernel_domain::{DomainRef, HostedRuntime, HostedSwitchBinding, HostedWake},
 };
 mod fork;
 pub(crate) use fork::service_progress;
@@ -31,13 +32,19 @@ enum Kind {
     Child,
 }
 
+// C also pins the target record and task reference through this exact wait.
+struct InactiveOwner {
+    target: HostedWake,
+    subscribed: bool,
+}
+
 impl<const N: usize> HostedTaskBinding<N> {
     const OPS: TaskOps = TaskOps {
         is_current: Self::is_current,
         wake_target: Self::wake_target,
         service_reserved: Self::service_reserved,
         rank: Self::rank,
-        retain_inactive: None,
+        retain_inactive: Some(Self::retain_inactive),
     };
     const SCOPE_OPS: ScopeOps = ScopeOps {
         park: Self::park,
@@ -45,8 +52,8 @@ impl<const N: usize> HostedTaskBinding<N> {
         reschedule: Self::reschedule,
         reschedule_requested: Self::reschedule_requested,
         terminate: Self::terminate,
-        observe_inactive: None,
-        end_inactive: None,
+        observe_inactive: Some(Self::observe_inactive),
+        end_inactive: Some(Self::end_inactive),
         account_current: Some(Self::account_current),
     };
 
@@ -163,6 +170,75 @@ impl<const N: usize> HostedTaskBinding<N> {
             Err(WorkError::Closed) => -116,
             Err(_) => -1,
         }
+    }
+
+    unsafe extern "C" fn retain_inactive(
+        binding: *mut c_void,
+        sequence: u64,
+        out: *mut *mut c_void,
+    ) -> i32 {
+        // SAFETY: the original wait retains the target record and borrows
+        // its exact installed binding while handing over an output slot.
+        let Some(binding) = (unsafe { binding.cast::<Self>().as_ref() }) else {
+            return -22;
+        };
+        // SAFETY: the original source lends one writable opaque pointer.
+        let Some(out) = (unsafe { out.as_mut() }) else {
+            return -22;
+        };
+        let wake = binding.wake.borrow();
+        let Some(target) = wake.as_ref().filter(|wake| wake.sequence() == sequence) else {
+            return -116;
+        };
+        if binding.detached.get() || sequence == 0 {
+            return -116;
+        }
+        *out = Box::into_raw(Box::new(InactiveOwner {
+            target: target.clone(),
+            subscribed: false,
+        }))
+        .cast();
+        0
+    }
+
+    unsafe extern "C" fn observe_inactive(
+        scope: *mut c_void,
+        opaque: *mut c_void,
+        force_wait: bool,
+    ) -> i32 {
+        // SAFETY: the original wait lends its own scope and retained target.
+        let (runtime, owner) = unsafe {
+            (
+                &*scope.cast::<Pin<&HostedRuntime<N>>>(),
+                &mut *opaque.cast::<InactiveOwner>(),
+            )
+        };
+        match runtime.observe_inactive(&owner.target, force_wait) {
+            Ok(InactiveObservation::Inactive) => 1,
+            Ok(InactiveObservation::Subscribed) => {
+                owner.subscribed = true;
+                0
+            }
+            Err(error) => scope_status(Err(error)),
+        }
+    }
+
+    unsafe extern "C" fn end_inactive(scope: *mut c_void, opaque: *mut c_void) -> i32 {
+        // SAFETY: only the original wait owns this shell and its live scope.
+        let (runtime, owner) = unsafe {
+            (
+                &*scope.cast::<Pin<&HostedRuntime<N>>>(),
+                &*opaque.cast::<InactiveOwner>(),
+            )
+        };
+        if owner.subscribed
+            && let Err(error) = runtime.cancel_inactive(&owner.target)
+        {
+            return scope_status(Err(error));
+        }
+        // SAFETY: the exact registration is gone and C transfers this owner once.
+        drop(unsafe { Box::from_raw(opaque.cast::<InactiveOwner>()) });
+        0
     }
 
     unsafe extern "C" fn service_reserved(binding: *mut c_void) -> bool {

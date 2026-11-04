@@ -1,7 +1,7 @@
 //! Hosted continuation hooks use actual host stack/current observations.
 use super::*;
 use crate::platform::work::{
-    ContextId, LeaveReason, ParkOutcome, WakeSignal, scheduling::Snapshot,
+    ContextId, InactiveObservation, LeaveReason, ParkOutcome, WakeSignal, scheduling::Snapshot,
 };
 
 /// A retained foreign context attached to one hosted stack.
@@ -72,7 +72,101 @@ impl HostedWake {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct InactiveWait {
+    target: usize,
+    target_sequence: u64,
+    waiter_sequence: u64,
+    notified: bool,
+}
+
 impl<const N: usize> HostedRuntime<N> {
+    fn inactive_target(&self, target: &HostedWake) -> Result<usize, WorkError> {
+        if self.queue.id != target.queue {
+            return Err(WorkError::InvalidTicket);
+        }
+        (0..self.count)
+            .find(|&index| {
+                // SAFETY: the checked current continuation owns all runtime metadata.
+                Arc::ptr_eq(&unsafe { &*self.task(index) }.signal, &target.signal)
+            })
+            .ok_or(WorkError::InvalidTicket)
+    }
+
+    /// Observe a different assignment on this cooperative runtime, or arm
+    /// the current assignment for its next physical return to the dispatcher.
+    /// A stopped task with a pending wake cannot satisfy the observation.
+    pub fn observe_inactive(
+        &self,
+        target: &HostedWake,
+        force_wait: bool,
+    ) -> Result<InactiveObservation, WorkError> {
+        let waiter = self.current_context()?;
+        let index = self.current.get();
+        let target_index = self.inactive_target(target)?;
+        if target_index == index {
+            return Err(WorkError::InvalidTicket);
+        }
+        self.check_target(target)?;
+        let slot = &self.inactive[index];
+        if slot.get().is_some() {
+            return Err(WorkError::Busy);
+        }
+        // SAFETY: same checked host thread. The other stack can only move
+        // after this continuation physically returns to the dispatcher.
+        let task = unsafe { &*self.task(target_index) };
+        if !force_wait
+            && task.state == TaskState::Blocked
+            && !target.signal.pending.load(Ordering::Acquire)
+            && !self.inactive_ready(target_index, target.sequence)
+        {
+            return Ok(InactiveObservation::Inactive);
+        }
+        slot.set(Some(InactiveWait {
+            target: target_index,
+            target_sequence: target.sequence,
+            waiter_sequence: waiter.sequence,
+            notified: false,
+        }));
+        Ok(InactiveObservation::Subscribed)
+    }
+
+    /// Close only the current assignment's exact inactive wait. A completed
+    /// target may have cleared its live sequence after notifying this wait.
+    pub fn cancel_inactive(&self, target: &HostedWake) -> Result<(), WorkError> {
+        let waiter = self.current_context()?;
+        let index = self.current.get();
+        let target_index = self.inactive_target(target)?;
+        let slot = &self.inactive[index];
+        let wait = slot.get().ok_or(WorkError::InvalidTicket)?;
+        if wait.waiter_sequence != waiter.sequence
+            || wait.target != target_index
+            || wait.target_sequence != target.sequence
+        {
+            return Err(WorkError::InvalidTicket);
+        }
+        slot.set(None);
+        Ok(())
+    }
+
+    pub(super) fn inactive_ready(&self, index: usize, sequence: u64) -> bool {
+        self.inactive[index]
+            .get()
+            .is_some_and(|wait| wait.waiter_sequence == sequence && wait.notified)
+    }
+
+    pub(super) fn notify_inactive(&self, target: usize, sequence: u64) {
+        for slot in &self.inactive {
+            if let Some(mut wait) = slot.get()
+                && wait.target == target
+                && wait.target_sequence == sequence
+            {
+                wait.notified = true;
+                slot.set(Some(wait));
+            }
+        }
+    }
+
     pub fn bind_current(
         self: Pin<&Self>,
         binding: Rc<dyn HostedSwitchBinding>,
@@ -236,6 +330,7 @@ impl<const N: usize> HostedRuntime<N> {
                 let binding = task.binding.as_ref().ok_or(WorkError::Unavailable)?;
                 // SAFETY: source-prepared condition on the same checked stack.
                 if !unsafe { binding.still_blocked(&view)? }
+                    || self.inactive_ready(index, view.sequence)
                     || task.signal.pending.swap(false, Ordering::AcqRel)
                 {
                     return Ok(ParkOutcome::Skipped);
@@ -445,6 +540,97 @@ mod tests {
         assert_eq!(context.binding.0.get(), State::Detached);
         runtime.retire().unwrap();
         // SAFETY: the only producer stopped and the callback joined.
+        unsafe { queue.retire() }.unwrap();
+    }
+
+    struct WaitTest<'a> {
+        runtime: Pin<&'a HostedRuntime<4>>,
+        target: Cell<Option<HostedWake>>,
+        waiter: Cell<Option<HostedWake>>,
+    }
+
+    unsafe extern "C" fn target(raw: *mut c_void) {
+        // SAFETY: the dispatcher keeps this fixture through both callbacks.
+        let test = unsafe { &*raw.cast::<WaitTest<'_>>() };
+        let runtime = test.runtime;
+        test.target.set(Some(runtime.current_wake().unwrap()));
+        runtime.yield_now().unwrap();
+        let binding = Rc::new(Binding(Cell::new(State::New)));
+        runtime.bind_current(binding.clone()).unwrap();
+        // Post a separate ordinary wake immediately before the dispatcher
+        // records the target's return for the inactive subscription.
+        let waiter = test.waiter.take().unwrap();
+        waiter.wake().unwrap();
+        test.waiter.set(Some(waiter));
+        assert_eq!(runtime.park_if_blocked(), Ok(ParkOutcome::Resumed));
+        binding.transition(State::Entered, State::Exited).unwrap();
+    }
+
+    unsafe extern "C" fn waiter(raw: *mut c_void) {
+        // SAFETY: the dispatcher keeps this fixture through both callbacks.
+        let test = unsafe { &*raw.cast::<WaitTest<'_>>() };
+        let runtime = test.runtime;
+        let binding = Rc::new(Binding(Cell::new(State::New)));
+        test.waiter
+            .set(Some(runtime.bind_current(binding.clone()).unwrap()));
+        let target = test.target.take().unwrap();
+        assert_eq!(
+            runtime.observe_inactive(&target, false),
+            Ok(InactiveObservation::Subscribed)
+        );
+        assert_eq!(runtime.park_if_blocked(), Ok(ParkOutcome::Resumed));
+        runtime.cancel_inactive(&target).unwrap();
+        assert_eq!(
+            runtime.observe_inactive(&target, false),
+            Ok(InactiveObservation::Inactive)
+        );
+        assert_eq!(runtime.park_if_blocked(), Ok(ParkOutcome::Skipped));
+        target.wake().unwrap();
+        assert_eq!(
+            runtime.observe_inactive(&target, false),
+            Ok(InactiveObservation::Subscribed)
+        );
+        assert_eq!(runtime.park_if_blocked(), Ok(ParkOutcome::Resumed));
+        runtime.cancel_inactive(&target).unwrap();
+        assert_eq!(
+            runtime.observe_inactive(&target, false),
+            Err(WorkError::Closed)
+        );
+        test.target.set(Some(target));
+        binding.transition(State::Entered, State::Exited).unwrap();
+    }
+
+    #[test]
+    fn inactive_notification_preserves_an_independent_wake() {
+        let queue = HostedQueue::new(HostedExecution::new(), Arc::new(())).unwrap();
+        let geometry = StackRequirement::exact(16 * 1024, 16 * 1024, PAGE).unwrap();
+        // SAFETY: all calls and bound contexts remain kept through detach.
+        let executor =
+            unsafe { HostedExecutor::new_with_stacks(queue.clone(), geometry, 2) }.unwrap();
+        let runtime = executor.runtime();
+        let test = WaitTest {
+            runtime,
+            target: Cell::new(None),
+            waiter: Cell::new(None),
+        };
+        let raw = ptr::from_ref(&test).cast_mut().cast();
+        // SAFETY: same live fixture, two separate hosted callbacks.
+        let target = unsafe { queue.execute(Kind::General, target, raw) }.unwrap();
+        // SAFETY: the dispatcher retains the context for this second callback.
+        let waiter = unsafe { queue.execute(Kind::General, waiter, raw) }.unwrap();
+        for _ in 0..6 {
+            assert_eq!(runtime.step(), Ok(true));
+        }
+        assert_eq!(queue.completed(target), Ok(true));
+        assert_eq!(queue.completed(waiter), Ok(true));
+        assert_eq!(runtime.step(), Ok(false));
+        // SAFETY: both exact callbacks have physically returned.
+        drop(unsafe { runtime.detach_binding(&test.target.take().unwrap()) }.unwrap());
+        // SAFETY: the source wait and this exact callback have both joined.
+        drop(unsafe { runtime.detach_binding(&test.waiter.take().unwrap()) }.unwrap());
+        queue.close().unwrap();
+        runtime.retire().unwrap();
+        // SAFETY: both bindings and all actual callbacks have joined.
         unsafe { queue.retire() }.unwrap();
     }
 }

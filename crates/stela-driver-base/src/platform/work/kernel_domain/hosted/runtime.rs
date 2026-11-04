@@ -21,6 +21,7 @@ pub use binding::{HostedSwitchBinding, HostedWake};
 mod child;
 pub use child::{HostedChild, HostedChildReservation};
 mod service;
+use binding::InactiveWait;
 pub use service::HostedServiceCallback;
 use service::Service;
 
@@ -52,6 +53,7 @@ pub struct HostedExecutor<const N: usize> {
 pub struct HostedRuntime<const N: usize> {
     queue: Arc<HostedQueue<N>>,
     tasks: UnsafeCell<Vec<Task>>,
+    inactive: Box<[Cell<Option<InactiveWait>>]>,
     count: usize,
     service: Option<Service>,
     initial_controls: context::Controls,
@@ -238,9 +240,15 @@ impl<const N: usize> HostedExecutor<N> {
         if service.is_some() {
             tasks.push(task(Lane::Service)?);
         }
+        let mut inactive = Vec::new();
+        inactive
+            .try_reserve_exact(count)
+            .map_err(|_| WorkError::Full)?;
+        inactive.resize_with(count, || Cell::new(None));
         let runtime = Box::pin(HostedRuntime {
             queue,
             tasks: UnsafeCell::new(tasks),
+            inactive: inactive.into_boxed_slice(),
             count,
             service,
             initial_controls: controls,
@@ -403,7 +411,7 @@ impl<const N: usize> HostedRuntime<N> {
         let Some(index) = self.select_ready()? else {
             return Ok(false);
         };
-        {
+        let sequence = {
             // SAFETY: the original dispatcher selected this stopped task.
             let task = unsafe { &mut *self.task(index) };
             let sequence = task.job.unwrap_or_else(|| std::process::abort()).1.sequence;
@@ -414,7 +422,8 @@ impl<const N: usize> HostedRuntime<N> {
                 require(board.running(task.id, sequence, now));
             }
             task.state = TaskState::Running;
-        }
+            sequence
+        };
         DISPATCH.set(Dispatch {
             active: ptr::from_ref(self.get_ref()).cast(),
             epoch,
@@ -437,6 +446,7 @@ impl<const N: usize> HostedRuntime<N> {
             epoch,
         });
         self.observe_child_return(index);
+        self.notify_inactive(index, sequence);
         Ok(true)
     }
 
@@ -467,7 +477,9 @@ impl<const N: usize> HostedRuntime<N> {
             }
             let sequence = task.job.unwrap_or_else(|| std::process::abort()).1.sequence;
             if task.state == TaskState::Blocked {
-                if !task.signal.pending.swap(false, Ordering::AcqRel) {
+                if !self.inactive_ready(index, sequence)
+                    && !task.signal.pending.swap(false, Ordering::AcqRel)
+                {
                     continue;
                 }
                 require(state.scheduling.wake(task.id, sequence));
@@ -541,6 +553,9 @@ impl<const N: usize> HostedRuntime<N> {
     }
 
     fn finish_current(&self, index: usize, nonreturning: bool) {
+        if self.inactive[index].get().is_some() {
+            std::process::abort(); // an active source wait owner still keeps this assignment
+        }
         // SAFETY: only the original running task can finish its own slot.
         let task = unsafe { &mut *self.task(index) };
         let (slot, job) = task.job.unwrap_or_else(|| std::process::abort());
