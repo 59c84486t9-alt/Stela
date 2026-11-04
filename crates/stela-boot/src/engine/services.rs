@@ -172,9 +172,7 @@ impl<'a> Services<'a> {
         // flight. Bus-master gating alone is not completion of those requests.
         let start = super::host::rdtsc();
         let limit = (self.tsc_hz / 1000 * 64).max(1);
-        wait_for_pending_transactions(config, || {
-            super::host::rdtsc().wrapping_sub(start) >= limit
-        })
+        wait_for_pending_transactions(config, || super::host::rdtsc().wrapping_sub(start) >= limit)
     }
 }
 

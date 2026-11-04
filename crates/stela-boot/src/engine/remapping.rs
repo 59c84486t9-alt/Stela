@@ -14,7 +14,8 @@ mod preparation;
 use super::storage::RestoreRoot;
 use crate::{
     native_dma::{
-        InactiveFirmwareUnits, dmar, firmware_state::Kind,
+        InactiveFirmwareUnits, dmar,
+        firmware_state::Kind,
         requester::RequesterClaim,
         vtd::{BlockedRequester, BoundRequester, InitialBlock, MmioRegisters, Unit, VtdError},
     },
@@ -244,7 +245,10 @@ impl Remappers {
         let mut cohorts = Vec::new();
         remappers.dmar = Some(parsed.clone());
         if cohorts.try_reserve_exact(parsed.units.len()).is_err()
-            || remappers.taken.try_reserve_exact(parsed.units.len()).is_err()
+            || remappers
+                .taken
+                .try_reserve_exact(parsed.units.len())
+                .is_err()
         {
             output::arguments(format_args!(
                 "HOST IOMMU VT-d inventory could not be retained\n"
@@ -296,7 +300,9 @@ impl Remappers {
                             // A blocked new root cannot qualify a previous
                             // firmware root that was disabled without a drain.
                             let result = if inactive_firmware_units.contains(
-                                Kind::Vtd, unit.segment, unit.base,
+                                Kind::Vtd,
+                                unit.segment,
+                                unit.base,
                             ) {
                                 taken.acknowledge_initial_block(&requesters)
                             } else {
@@ -465,12 +471,14 @@ impl Remappers {
         };
         let selected =
             remapping::route(dmar, segment, present, rid).map_err(|_| VtdError::Unsupported)?;
-        selected.map(|descriptor| {
-            self.taken
-                .iter()
-                .find(|taken| taken.descriptor == descriptor)
-                .ok_or(VtdError::Unsupported)
-        }).transpose()
+        selected
+            .map(|descriptor| {
+                self.taken
+                    .iter()
+                    .find(|taken| taken.descriptor == descriptor)
+                    .ok_or(VtdError::Unsupported)
+            })
+            .transpose()
     }
 
     fn amd(&self, segment: u16, rid: u16) -> Result<Option<&amd::Taken>, VtdError> {

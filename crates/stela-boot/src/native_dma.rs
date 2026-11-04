@@ -25,8 +25,14 @@ pub(crate) struct InactiveFirmwareUnits(Option<Units>);
 
 impl InactiveFirmwareUnits {
     pub(crate) fn contains(&self, kind: Kind, segment: u16, base: u64) -> bool {
-        let original = firmware_state::Unit { kind, segment, base };
-        self.0.as_ref().is_some_and(|units| units.as_slice().contains(&original))
+        let original = firmware_state::Unit {
+            kind,
+            segment,
+            base,
+        };
+        self.0
+            .as_ref()
+            .is_some_and(|units| units.as_slice().contains(&original))
     }
 
     pub(crate) fn matches_dmar(&self, descriptors: &[dmar::Drhd]) -> bool {
@@ -42,7 +48,10 @@ impl InactiveFirmwareUnits {
 pub(crate) fn firmware_units() -> Result<FirmwareUnits> {
     let mut units = Units::default();
     let Some(rsdp) = crate::storage::rsdp() else {
-        return Ok(FirmwareUnits { units, complete: false });
+        return Ok(FirmwareUnits {
+            units,
+            complete: false,
+        });
     };
     let mut complete = true;
     for signature in [b"DMAR", b"IVRS"] {
