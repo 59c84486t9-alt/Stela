@@ -246,6 +246,55 @@ fn one_parse_analyzes_and_plans_the_block_it_finds() {
 }
 
 #[test]
+fn checked_system_admission_stops_at_denial_error_or_terminal() {
+    const BASE: GuestAddress = GuestAddress(0x4ff0);
+    const NOP: u32 = 0xd503_201f;
+    const BRANCH: u32 = 0x5400_0020; // b.eq to the next word
+    const DENIED: u32 = 0xd65f_03c0; // ret
+    const UNSUPPORTED: u32 = 0xffff_ffff;
+    let checked = CheckedMemoryProfile::SpAlignmentEnabled;
+    let target = crate::TargetCpu::X86_64_V2;
+    let profile = BlockProfile::new(Features::SYSTEM_MODE).with_checked_memory(checked);
+    let options = crate::Options::new(profile, target);
+    let admits = |word| word != DENIED;
+
+    for (words, reached) in [
+        (&[DENIED, NOP][..], 1),
+        (&[NOP, DENIED, BRANCH][..], 2),
+        (&[NOP, BRANCH, NOP, DENIED][..], 2),
+        (&[NOP, UNSUPPORTED, DENIED][..], 2),
+    ] {
+        let source = bytes(words);
+        let boundary = words.iter().position(|&word| !admits(word)).unwrap();
+        let mut seen = Vec::new();
+        let lazy = CompilationPlan::new_admitted_system(&source, BASE, checked, target, |word| {
+            seen.push(word);
+            admits(word)
+        });
+        assert_eq!(seen.as_slice(), &words[..reached]);
+        let eager = if boundary == 0 {
+            Ok(None)
+        } else {
+            CompilationPlan::new(&source[..4 * boundary], BASE, &options).map(Some)
+        };
+        match (eager, lazy) {
+            (Ok(None), Ok(None)) => assert_eq!(boundary, 0),
+            (Err(eager), Err(lazy)) => assert_eq!(eager, lazy),
+            (Ok(Some(eager)), Ok(Some(lazy))) => {
+                assert_eq!(eager.memory_requirements(), lazy.memory_requirements());
+                let (eager, lazy) = (eager.compile().unwrap(), lazy.compile().unwrap());
+                assert_eq!(eager.source_bytes, lazy.source_bytes);
+                assert_eq!(eager.native.x86_64_code, lazy.native.x86_64_code);
+                assert_eq!(eager.native.source_map, lazy.native.source_map);
+                assert_eq!(eager.direct_exits, lazy.direct_exits);
+                assert_eq!(eager.fault_recovery, lazy.fault_recovery);
+            }
+            _ => panic!("eager and lazy admission outcomes differ"),
+        }
+    }
+}
+
+#[test]
 fn system_mode_blocks_can_omit_the_sp_alignment_check() {
     // test bl,15, on SP's host register.
     const SP_CHECK: [u8; 5] = [0xf6, 0xc3, 15, 0x0f, 0x85];
