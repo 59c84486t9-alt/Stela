@@ -291,7 +291,7 @@ fn values_left_in_rax_are_not_reloaded() {
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 #[test]
 fn pinned_compare_reuses_the_preceding_unshifted_right_operand() {
-    use crate::{GuestState, Lifter, TargetCpu, aarch64::Decoder};
+    use crate::{GuestState, Lifter, TargetCpu, aarch64::Decoder, x86_64::native};
 
     let pc = GuestAddress(0x1000);
     let compare = GuestAddress(pc.0 + 4);
