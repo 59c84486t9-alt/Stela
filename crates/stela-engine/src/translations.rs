@@ -270,6 +270,8 @@ impl Entry {
 /// Why a stored record is not used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatError {
+    /// A bounded decode allocation could not be made.
+    Capacity,
     Truncated,
     Magic,
     Schema,
@@ -517,7 +519,7 @@ fn decode_items<T>(
     let mut items = Vec::new();
     items
         .try_reserve_exact(count.min(256))
-        .map_err(|_| FormatError::Entry)?;
+        .map_err(|_| FormatError::Capacity)?;
     for _ in 0..count {
         items.push(next()?);
     }

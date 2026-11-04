@@ -19,6 +19,7 @@ serde_json = { version = "1", default-features = false, features = ["alloc"] }
 tempfile = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 stela-compiler = { path = "../stela-compiler", default-features = false }
 stela-contracts = { path = "../stela-contracts", default-features = false }
 stela-crypto = { path = "../stela-crypto" }
