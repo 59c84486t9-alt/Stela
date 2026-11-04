@@ -83,8 +83,8 @@ impl Controller {
     }
 
     /// The completion at queue `io`'s head, once the controller has posted
-    /// it: its identifier, result, status and submission head, which must
-    /// not have moved back nor past the tail.
+    /// it: its identifier, admin result (zero for I/O), status and submission
+    /// head, which must not have moved back nor past the tail.
     pub(super) fn posted(&mut self, io: bool) -> Result<Option<(u16, u32, u32, u16)>, BlockError> {
         let queue = if io { &mut self.io } else { &mut self.admin };
         let entry = usize::from(queue.head) * 16;
@@ -94,7 +94,13 @@ impl Controller {
         // The domain checks the coherent observation; this barrier orders
         // later CQ words after the device's final phase/status publication.
         fence(Ordering::SeqCst);
-        let result = queue.completions.coherent(entry)?;
+        // Read/write, flush, discard and write-zeroes completions use only
+        // status. Skip the domain-checked DW0 access on the I/O queue.
+        let result = if io {
+            0
+        } else {
+            queue.completions.coherent(entry)?
+        };
         let submission = queue.completions.coherent(entry + 8)?;
         let tail_word = queue.completions.coherent(entry + 12)?;
         let head = submission as u16;
