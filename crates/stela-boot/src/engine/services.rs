@@ -20,7 +20,10 @@ use stela_drivers::{
             Address, Bar, ConfigSpace, Function, FunctionError,
             owned::OwnedConfig,
             power::Timer,
-            requester::{ClaimError, FunctionRole, RequesterBinding, StoppedRequester},
+            requester::{
+                ClaimError, FunctionRole, RequesterBinding, StoppedRequester, containment::Plan,
+                wait_for_pending_transactions,
+            },
         },
         thunderbolt::manager::{Platform, Uuid},
     },
@@ -29,19 +32,6 @@ use stela_drivers::{
 };
 
 const FUNCTION_BYTES: usize = 4096;
-const COMMAND: u16 = 4;
-const BUS_MASTER: u16 = 1 << 2;
-const INTX_DISABLE: u16 = 1 << 10;
-const STATUS: u16 = 6;
-const CAPABILITY_LIST: u16 = 1 << 4;
-const MSI: u8 = 5;
-const PCIE: u8 = 0x10;
-const MSIX: u8 = 0x11;
-const ATS: u16 = 0xf;
-const PRI: u16 = 0x13;
-const PASID: u16 = 0x1b;
-/// PCIe Device Control's Enable No Snoop (PCIe Base 6.0, 7.5.3.4).
-const NO_SNOOP: u16 = 1 << 11;
 
 /// Whether a passthrough domain was handed out, which is reported once.
 static PASSTHROUGH_REPORTED: AtomicBool = AtomicBool::new(false);
@@ -168,55 +158,24 @@ impl<'a> Services<'a> {
     /// Gate PCI requester DMA and interrupt controls, then wait for its
     /// outstanding requests. A failed access ends the sequence immediately.
     fn stop(&self, config: &mut OwnedConfig) -> Result<(), ClaimError> {
-        let command = read_control(config, COMMAND)?;
-        let status = read_control(config, STATUS)?;
-        config.write16(COMMAND, command & !BUS_MASTER | INTX_DISABLE)?;
-        let mut express = false;
-        if status & CAPABILITY_LIST != 0 {
-            let found: Vec<_> = config.capabilities().collect::<Result<_, _>>()?;
-            for entry in found {
-                let (offset, mask) = match entry.id {
-                    MSI => (entry.offset + 2, 1),
-                    MSIX => (entry.offset + 2, 1 << 15),
-                    PCIE => {
-                        express = true;
-                        (entry.offset + 8, NO_SNOOP)
-                    }
-                    _ => continue,
-                };
-                let control = read_control(config, offset)?;
-                config.write16(offset, control & !mask)?;
-            }
-        }
-        if express && config.read32(0x100)? != u32::MAX {
-            let found: Vec<_> = config.extended_capabilities().collect::<Result<_, _>>()?;
-            for entry in found {
-                let (offset, mask) = match entry.id {
-                    ATS => (entry.offset + 6, 1 << 15),
-                    PASID => (entry.offset + 6, 1),
-                    PRI => (entry.offset + 4, 1),
-                    _ => continue,
-                };
-                let control = read_control(config, offset)?;
-                config.write16(offset, control & !mask)?;
-            }
-        }
+        let plan = Plan::read(|offset, width| {
+            let read = match width {
+                1 => config.read8(offset).map(u32::from),
+                2 => config.read16(offset).map(u32::from),
+                4 => config.read32(offset),
+                _ => unreachable!("PCI capability widths"),
+            };
+            read.map_err(ClaimError::Config)
+        })?;
+        plan.apply(config)?;
         // A bounded wait must refuse an endpoint that still has requests in
         // flight. Bus-master gating alone is not completion of those requests.
         let start = super::host::rdtsc();
         let limit = (self.tsc_hz / 1000 * 64).max(1);
-        stela_drivers::bus::pci::requester::wait_for_pending_transactions(config, || {
+        wait_for_pending_transactions(config, || {
             super::host::rdtsc().wrapping_sub(start) >= limit
         })
     }
-}
-
-fn read_control(config: &OwnedConfig, offset: u16) -> Result<u16, ClaimError> {
-    let value = config.read16(offset)?;
-    if value == u16::MAX {
-        return Err(ClaimError::ReadFailed { offset });
-    }
-    Ok(value)
 }
 
 // SAFETY: each claimed function's or bridge's configuration page and each BAR
