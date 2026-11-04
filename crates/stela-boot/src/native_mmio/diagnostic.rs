@@ -297,6 +297,10 @@ pub(crate) unsafe fn check(handoff: &'static Handoff, owner: &mut HostOwner) -> 
     if mapping.address(0, 4) != Err(Error::Retired) {
         return Err(Error::InvalidPlatformReply);
     }
+    stage(
+        "irq-root-recheck",
+        irq.recheck_firmware_lines().map_err(failed),
+    )?;
     drop(irq);
     source.verify_only_hpet(counter.owner().map_err(failed)?)?;
     let mut reused = source.authority().map(

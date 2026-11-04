@@ -92,8 +92,8 @@ pub struct State {
 
 /// The initial redirection words from one exact controller. This is a
 /// prepublication plan and grants no ownership of the physical contributors.
-pub struct FirmwareRoutes<'a, R: Registers, P: Platform> {
-    unit: &'a Unit<R, P>,
+pub struct FirmwareRoutes<R: Registers, P: Platform> {
+    unit: Arc<Unit<R, P>>,
     entries: Vec<(u32, u32)>,
     phase: Cell<FirmwarePhase>,
 }
@@ -105,7 +105,7 @@ enum FirmwarePhase {
     Contained,
 }
 
-impl<R: Registers, P: Platform> FirmwareRoutes<'_, R, P> {
+impl<R: Registers, P: Platform> FirmwareRoutes<R, P> {
     /// Mask the firmware routes on this same original controller.
     ///
     /// # Safety
@@ -116,7 +116,7 @@ impl<R: Registers, P: Platform> FirmwareRoutes<'_, R, P> {
         if self.phase.get() != FirmwarePhase::Planned {
             return Err(IrqError::Unavailable);
         }
-        let unit = self.unit;
+        let unit = &self.unit;
         unit.platform.check_cpu()?;
         let _guard = unit.lock();
         for (pin, &entry) in (0..unit.pins as u8).zip(&self.entries) {
@@ -147,7 +147,7 @@ impl<R: Registers, P: Platform> FirmwareRoutes<'_, R, P> {
         if self.phase.get() != FirmwarePhase::Contained {
             return Err(IrqError::Unavailable);
         }
-        let unit = self.unit;
+        let unit = &self.unit;
         unit.platform.check_cpu()?;
         let _guard = unit.lock();
         self.phase.set(FirmwarePhase::Uncertain);
@@ -157,7 +157,7 @@ impl<R: Registers, P: Platform> FirmwareRoutes<'_, R, P> {
     }
 
     fn check_masked(&self) -> Result<(), IrqError> {
-        let unit = self.unit;
+        let unit = &self.unit;
         for (pin, &(low, high)) in (0..unit.pins as u8).zip(&self.entries) {
             if unit.firmware_entry(pin)? != (low | MASK, high) {
                 return Err(IrqError::Route);
@@ -244,7 +244,7 @@ impl<R: Registers, P: Platform> Unit<R, P> {
     /// This is the exclusive initial controller handoff in process context, with no driver
     /// claims or competing CPU, firmware or SMM route writers. The caller has
     /// excluded MADT IOAPIC NMI sources and verified the legacy RTE format.
-    pub unsafe fn firmware_routes(&self) -> Result<FirmwareRoutes<'_, R, P>, IrqError> {
+    pub unsafe fn firmware_routes(self: &Arc<Self>) -> Result<FirmwareRoutes<R, P>, IrqError> {
         self.platform.check_cpu()?;
         let mut entries = Vec::new();
         entries
@@ -261,7 +261,7 @@ impl<R: Registers, P: Platform> Unit<R, P> {
             entries.push((low, high));
         }
         Ok(FirmwareRoutes {
-            unit: self,
+            unit: self.clone(),
             entries,
             phase: Cell::new(FirmwarePhase::Planned),
         })

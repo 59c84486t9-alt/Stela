@@ -97,6 +97,7 @@ pub(crate) struct Root {
     routing: madt::Routing,
     units: Vec<(madt::Unit, Arc<Unit>)>,
     spans: Vec<(madt::Unit, u16)>,
+    firmware_routes: Vec<ioapic::FirmwareRoutes<Registers, NativePlatform>>,
     cpu: Arc<dyn Cpu>,
     scope: Arc<ProcessScope>,
     madt: &'static [u8],
@@ -204,30 +205,39 @@ impl Root {
             // MADT supplied no IOAPIC NMI routes. Remapping is off.
             firmware_routes.push(unsafe { unit.firmware_routes() }.map_err(Error::Irq)?);
         }
-        // Keep the same actual controller mappings and CPU scope on a failed
-        // or unwinding containment, including the unattempted suffix.
-        let mut kept = ManuallyDrop::new(units.clone());
-        for plan in &firmware_routes {
+        // Preserve the exact original entries, controller and CPU scope on
+        // failed containment, including every unattempted route.
+        let mut firmware_routes = ManuallyDrop::new(firmware_routes);
+        for plan in firmware_routes.iter() {
             // SAFETY: same exclusive platform handoff, and every original
             // controller and its scope remain retained through containment.
             unsafe { plan.contain() }.map_err(Error::Irq)?;
         }
-        for plan in firmware_routes {
+        for plan in firmware_routes.iter() {
             plan.verify_contained().map_err(Error::Irq)?;
         }
-        // SAFETY: containment succeeded. The returned root retains every
-        // original controller, so only the redundant Arc references end.
-        unsafe { ManuallyDrop::drop(&mut kept) };
+        // SAFETY: containment succeeded. Transfer the original plans once
+        // into the returned root so it can recheck the same routes.
+        let firmware_routes = unsafe { ManuallyDrop::take(&mut firmware_routes) };
         Ok(Self {
             routing,
             units,
             spans,
+            firmware_routes,
             cpu,
             scope,
             madt,
             madt_hash: Sha256::digest(madt).into(),
             _local: PhantomData,
         })
+    }
+
+    /// Recheck all original routes before any contributor is published.
+    pub(crate) fn recheck_firmware_lines(&self) -> Result<(), Error> {
+        for routes in &self.firmware_routes {
+            routes.verify_contained().map_err(Error::Irq)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn resolve<'r, 'd, 'a>(
