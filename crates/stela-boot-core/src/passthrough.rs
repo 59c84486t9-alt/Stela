@@ -1,11 +1,11 @@
 //! The DMA domain a requester gets when no IOMMU unit translates for it: the
 //! device addresses the host's physical pages directly. It confines no DMA;
 //! it maps a request only when the pages are one physically contiguous run
-//! inside the region handed to the drivers and below the device's address
+//! inside a region handed to the drivers and below the device's address
 //! limit, and gives that run's physical address as its IOVA. The host's
 //! caches snoop device DMA to write-back memory, so a sync is the full fence
 //! that drains write-combining buffers before the device reads.
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 use core::{
     any::Any,
     ops::Range,
@@ -17,33 +17,33 @@ use stela_drivers::bus::dma::{
 };
 
 pub struct Passthrough {
-    region: Range<u64>,
+    regions: Vec<Range<u64>>,
     next: AtomicU64,
     /// What the domain keeps for its requester, such as its binding.
     _retained: Option<Box<dyn Any + Send + Sync>>,
 }
 
 impl Passthrough {
-    /// Device DMA to the pages of `region`.
-    pub fn new(region: Range<u64>) -> Self {
+    /// Device DMA to the pages of `regions`.
+    pub fn new(regions: Vec<Range<u64>>) -> Self {
         Self {
-            region,
+            regions,
             next: AtomicU64::new(1),
             _retained: None,
         }
     }
 
-    /// One requester's domain over `region`, keeping `retained` for as long
+    /// One requester's domain over `regions`, keeping `retained` for as long
     /// as the domain lives.
-    pub fn retaining(region: Range<u64>, retained: impl Any + Send + Sync) -> Self {
+    pub fn retaining(regions: Vec<Range<u64>>, retained: impl Any + Send + Sync) -> Self {
         Self {
             _retained: Some(Box::new(retained)),
-            ..Self::new(region)
+            ..Self::new(regions)
         }
     }
 
     /// The one contiguous physical run `physical` (pages of `1 << shift`
-    /// bytes) covers, when it lies in the region and below `limit`.
+    /// bytes) covers, when it lies in a region and below `limit`.
     fn span(&self, physical: &[u64], shift: u8, limit: u64) -> Result<Range<u64>, DmaError> {
         let page = 1u64
             .checked_shl(u32::from(shift))
@@ -56,7 +56,8 @@ impl Passthrough {
             }
             end = end.checked_add(page).ok_or(DmaError::InvalidRange)?;
         }
-        if first < self.region.start || end > self.region.end {
+        let inside = |region: &Range<u64>| first >= region.start && end <= region.end;
+        if !self.regions.iter().any(inside) {
             return Err(DmaError::InvalidRange);
         }
         if end - 1 > limit {
@@ -132,14 +133,14 @@ mod tests {
     const PAGE: u64 = 4096;
 
     fn domain() -> Passthrough {
-        Passthrough::new(0x10_0000..0x20_0000)
+        Passthrough::new(alloc::vec![0x10_0000..0x20_0000, 0x40_0000..0x41_0000])
     }
 
     #[test]
     fn the_domain_names_itself_passthrough() {
         assert_eq!(domain().kind(), DomainKind::Passthrough);
         assert_eq!(
-            Passthrough::retaining(0..PAGE, 7u32).kind(),
+            Passthrough::retaining(alloc::vec![0..PAGE], 7u32).kind(),
             DomainKind::Passthrough
         );
     }
@@ -150,6 +151,14 @@ mod tests {
         assert_eq!(
             domain().span(&pages, 12, u64::MAX),
             Ok(0x10_0000..0x10_3000)
+        );
+    }
+
+    #[test]
+    fn every_region_admits_its_pages() {
+        assert_eq!(
+            domain().span(&[0x40_0000], 12, u64::MAX),
+            Ok(0x40_0000..0x40_1000)
         );
     }
 

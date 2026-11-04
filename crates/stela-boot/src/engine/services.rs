@@ -50,6 +50,7 @@ pub(super) struct Services<'a> {
     remappers: &'a super::remapping::Remappers,
     acpi: Option<&'static HostAcpi>,
     heap: core::ops::Range<u64>,
+    guest_ram: Vec<core::ops::Range<u64>>,
     tsc_hz: u64,
     /// The USB4 devices `--usb4-approve` lists.
     usb4_approved: Vec<Uuid>,
@@ -99,6 +100,13 @@ fn broker_refusal(error: resources::Error) -> ServiceError {
 const I8042_IRQS: [u8; 2] = [1, 12];
 
 impl<'a> Services<'a> {
+    /// These services' DMA domains also admit the host pages behind guest
+    /// RAM, which the guest's GPU work reaches.
+    pub(super) fn with_guest_ram(mut self, guest_ram: Vec<core::ops::Range<u64>>) -> Self {
+        self.guest_ram = guest_ram;
+        self
+    }
+
     /// Services over `mmio` and `acpi`, whose DMA domains admit the native
     /// allocator's pages at `heap`. The ACPI namespace is offered only once
     /// the i8042's interrupts are masked, as its port grant requires.
@@ -121,6 +129,7 @@ impl<'a> Services<'a> {
             }
         });
         Self {
+            guest_ram: Vec::new(),
             mmio,
             remappers,
             acpi,
@@ -355,7 +364,9 @@ unsafe impl NativeServices for Services<'_> {
         if !PASSTHROUGH_REPORTED.swap(true, Ordering::Relaxed) {
             output::arguments(format_args!("no IOMMU: device DMA unrestricted\n"));
         }
-        Ok(Arc::new(Passthrough::retaining(self.heap.clone(), binding)))
+        let mut regions = alloc::vec![self.heap.clone()];
+        regions.extend_from_slice(&self.guest_ram);
+        Ok(Arc::new(Passthrough::retaining(regions, binding)))
     }
 
     fn dma_translated(&self, address: Address) -> bool {

@@ -1111,17 +1111,21 @@ fn open_gpus(
     work: &'static kernel_work::KernelWork,
     mmio: Option<&'static crate::native_mmio::Source>,
     remappers: &'static remapping::Remappers,
-    heap: core::ops::Range<u64>,
-    firmware: &Option<alloc::sync::Arc<stela_drivers::firmware::Catalog>>,
     handoff: &Handoff,
+    firmware: &Option<alloc::sync::Arc<stela_drivers::firmware::Catalog>>,
     adapters: Vec<stela_drivers::gpu::Adapter>,
 ) -> bool {
+    let heap = handoff.heap.physical..handoff.heap.physical + handoff.heap.bytes;
+    let guest_ram = handoff.guest[..handoff.guest_count]
+        .iter()
+        .map(|region| region.physical..region.physical + region.bytes)
+        .collect();
+    let tsc_hz = handoff.tsc_hz;
     let Some(window) = mmio.and_then(|mmio| mmio.window()) else {
         crate::status::warn("this PC cannot map a GPU's memory, so it is left unused");
         return false;
     };
     let Some(mmio) = mmio else { return false };
-    let tsc_hz = handoff.tsc_hz;
     #[cfg(feature = "nvk")]
     let heap_bytes = heap.end - heap.start;
     // A PC with an NVIDIA GPU uses it or says why not; only one with none draws
@@ -1139,7 +1143,8 @@ fn open_gpus(
         Ok(None)
     };
     let claimed = work.call_owned(60_000_000, move || {
-        let services = services::Services::new(mmio, remappers, None, heap, tsc_hz, Vec::new());
+        let services = services::Services::new(mmio, remappers, None, heap, tsc_hz, Vec::new())
+            .with_guest_ram(guest_ram);
         let random = stela_drivers::probe::NativeServices::entropy(&services)
             .ok()
             .and_then(|entropy| {
@@ -2222,7 +2227,6 @@ fn start_devices(
             });
             let root = handoff.root;
             let heap = handoff.heap.physical..handoff.heap.physical + handoff.heap.bytes;
-            let heap_range = heap.clone();
             let tsc_hz = handoff.tsc_hz;
             let host_clock = storage_handoff.clock;
             let captures = handoff.storage.captures;
@@ -2289,15 +2293,7 @@ fn start_devices(
                 acpi.retain_power(power);
             }
             if options.boots_macos()
-                && open_gpus(
-                    work,
-                    mmio,
-                    remappers,
-                    heap_range,
-                    host_firmware,
-                    handoff,
-                    gpus,
-                )
+                && open_gpus(work, mmio, remappers, handoff, host_firmware, gpus)
             {
                 gpu::serve(handoff.screen.map_or((0, 0), |screen| screen.resolution()));
             }
