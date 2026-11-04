@@ -42,15 +42,15 @@ pub(super) fn emit_load_store(
         return false;
     };
     let (Operation::MemoryRegisterOffset(first), Operation::MemoryRegisterOffset(second)) =
-        (load.operation, store.operation)
+        (&load.operation, &store.operation)
     else {
         return false;
     };
-    let address = IndexedAddress::of(&first);
+    let address = IndexedAddress::of(first);
     if !matches!(first.transfer, MemoryTransfer::Load { .. })
         || second.transfer != MemoryTransfer::Store
         || first.bytes != second.bytes
-        || address != IndexedAddress::of(&second)
+        || address != IndexedAddress::of(second)
         || (code.is_pinned() && !checks.guest_range)
         || matches!(first.base, Register::Sp)
         || matches!(first.index, Register::Zero)
@@ -70,10 +70,10 @@ pub(super) fn emit_load_store(
         Access::of(false, first.bytes.into()),
         true,
     );
-    transfer(code, &first, Gpr::Rcx);
+    transfer(code, first, Gpr::Rcx);
     source_map.push((store.pc, code.len()));
     code.set_instruction(source_map.len() - 1);
-    transfer(code, &second, Gpr::Rcx);
+    transfer(code, second, Gpr::Rcx);
     true
 }
 
