@@ -427,7 +427,10 @@ impl Linux {
                 .apply(&mut kernel_build, Some(&uts), &[], None);
             kernel_build
                 .flag("-isystem")
-                .flag(Path::new(LINUX).join("kernel"));
+                .flag(Path::new(LINUX).join("kernel"))
+                // ASan calls libc's two-argument getrusage. The embedded
+                // kernel helper takes a task and must never satisfy that call.
+                .define("getrusage", "stela_linux_hosted_getrusage");
             let crc_objects = linux_crc::objects(&kernel_build, &crc_tables);
             kernel_build.objects(crc_objects);
             linux.hosted = vec![
