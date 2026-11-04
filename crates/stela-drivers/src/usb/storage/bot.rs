@@ -124,6 +124,7 @@ pub(super) enum Pending {
         ticket: super::super::xhci::TransferTicket,
         dci: u8,
         deadline: crate::Deadline,
+        status_due: Option<crate::Deadline>,
     },
     /// The endpoint's cancellation after a failure, which it then reports.
     Cancelling(Operation, BlockError),
@@ -209,6 +210,7 @@ impl Io for Native {
             ticket,
             dci,
             deadline,
+            status_due: None,
         })
     }
     fn begin_control(&mut self, request: [u8; 8]) -> Request {
@@ -250,9 +252,10 @@ impl Io for Native {
             ticket,
             dci,
             deadline,
+            status_due,
         } = pending
         {
-            let error = match device.completed_ticket(ticket) {
+            let error = match device.poll_ticket_until(ticket, deadline, status_due) {
                 Some(Ok(length)) => return Some(Ok(length)),
                 Some(Err(error)) => {
                     let incompatible = matches!(
@@ -266,7 +269,6 @@ impl Io for Native {
                     }
                     error
                 }
-                None if deadline.passed() => BlockError::Timeout,
                 None => return None,
             };
             match device.start_cancel(*dci) {

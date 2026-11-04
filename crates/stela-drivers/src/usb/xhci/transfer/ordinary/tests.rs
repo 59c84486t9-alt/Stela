@@ -1,6 +1,142 @@
 use super::*;
 use crate::bus::dma::{RegionAllocator, TestRegion};
 use crate::usb::xhci::model::*;
+
+#[test]
+fn quiet_class_ticket_polls_still_sample_fatal_controller_status() {
+    let mut dma = TestRegion::new(64 * 1024 * 8);
+    let (mut controller, model) = cancellation_controller(&mut dma);
+    let id = controller.device_id(1).unwrap();
+    model.borrow_mut().silence_transfer = Some(3);
+    let buffer = dma.allocate(64, 64).unwrap().physical();
+    let ticket = controller.submit_ticket(id, 3, buffer, 64).unwrap();
+    controller.clock.ticks_per_microsecond = 1000;
+    let deadline = controller.clock.try_deadline(30_000_000).unwrap();
+    let mut status_due = None;
+    assert_eq!(
+        controller
+            .device(id)
+            .unwrap()
+            .poll_ticket_until(&ticket, &deadline, &mut status_due),
+        None
+    );
+    assert!(!controller.event_posted());
+    controller.quiet_drains = 0;
+    model.borrow_mut().fatal_status = HSE;
+    let before = model.borrow().status_reads;
+    for _ in 1..QUIET_DRAINS {
+        assert_eq!(
+            controller
+                .device(id)
+                .unwrap()
+                .poll_ticket_until(&ticket, &deadline, &mut status_due),
+            None
+        );
+    }
+    assert_eq!(model.borrow().status_reads, before);
+    assert_eq!(
+        controller
+            .device(id)
+            .unwrap()
+            .poll_ticket_until(&ticket, &deadline, &mut status_due),
+        Some(Err(BlockError::Device { status: HSE }))
+    );
+    let endpoint = controller.slots[1].as_ref().unwrap().endpoints[3]
+        .as_ref()
+        .unwrap();
+    assert!(endpoint.ring.normal.contains(ticket.id, ticket.trb));
+    assert_eq!(endpoint.in_flight, 1);
+}
+
+#[test]
+fn sparse_class_ticket_polls_sample_fatal_status_at_the_first_microframe() {
+    let mut dma = TestRegion::new(64 * 1024 * 8);
+    let (mut controller, model) = cancellation_controller(&mut dma);
+    let id = controller.device_id(1).unwrap();
+    model.borrow_mut().silence_transfer = Some(3);
+    let buffer = dma.allocate(64, 64).unwrap().physical();
+    let ticket = controller.submit_ticket(id, 3, buffer, 64).unwrap();
+    controller.clock.ticks_per_microsecond = 1000;
+    let clock = controller.clock;
+    let deadline = clock.try_deadline(30_000_000).unwrap();
+    let mut status_due = None;
+    let mut poll = || {
+        controller
+            .device(id)
+            .unwrap()
+            .poll_ticket_until(&ticket, &deadline, &mut status_due)
+    };
+    assert_eq!(poll(), None);
+    model.borrow_mut().fatal_status = HSE;
+    let before = model.borrow().status_reads;
+    crate::test_clock::advance(clock, 124);
+    assert_eq!(poll(), None);
+    assert_eq!(model.borrow().status_reads, before);
+    crate::test_clock::advance(clock, 1);
+    assert_eq!(poll(), Some(Err(BlockError::Device { status: HSE })));
+}
+
+#[test]
+fn class_ticket_expiry_checks_status_and_retains_real_completions() {
+    for fatal in [false, true] {
+        let mut dma = TestRegion::new(64 * 1024 * 8);
+        let (mut controller, model) = cancellation_controller(&mut dma);
+        let id = controller.device_id(1).unwrap();
+        model.borrow_mut().silence_transfer = Some(3);
+        let buffer = dma.allocate(64, 64).unwrap().physical();
+        let ticket = controller.submit_ticket(id, 3, buffer, 64).unwrap();
+        let expired = controller.clock.try_deadline(0).unwrap();
+        let future = controller.clock.try_deadline(30_000_000).unwrap();
+        let mut status_due = None;
+        let stale = TransferTicket {
+            id: 0,
+            device: id,
+            dci: ticket.dci,
+            trb: ticket.trb,
+        };
+        assert_eq!(
+            controller
+                .device(id)
+                .unwrap()
+                .poll_ticket_until(&stale, &future, &mut status_due),
+            Some(Err(BlockError::Unsupported(
+                "stale or foreign xHCI transfer ticket"
+            )))
+        );
+
+        controller.quiet_drains = 0;
+        let before = model.borrow().status_reads;
+        if fatal {
+            model.borrow_mut().fatal_status = HCE;
+        }
+        assert_eq!(
+            controller
+                .device(id)
+                .unwrap()
+                .poll_ticket_until(&ticket, &expired, &mut status_due),
+            Some(Err(if fatal {
+                BlockError::Device { status: HCE }
+            } else {
+                BlockError::Timeout
+            }))
+        );
+        assert_eq!(model.borrow().status_reads - before, 1);
+        if !fatal {
+            model
+                .borrow_mut()
+                .event(ticket.trb, SHORT_PACKET, TRANSFER_EVENT, 3, 16);
+            assert_eq!(
+                controller.device(id).unwrap().poll_ticket_until(
+                    &ticket,
+                    &expired,
+                    &mut status_due
+                ),
+                Some(Ok(48))
+            );
+        }
+    }
+}
+
 #[test]
 fn transaction_errors_soft_retry_in_place_like_linux() {
     let mut dma = TestRegion::new(64 * 1024 * 8);

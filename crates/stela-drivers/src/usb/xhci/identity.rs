@@ -18,6 +18,9 @@ use super::*;
 use core::sync::atomic::AtomicU64;
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+/// Check again at the first poll a USB microframe after a status sample,
+/// even when the caller polls too sparsely to reach the quiet drain limit.
+const TICKET_STATUS_US: u64 = 125;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Consumer {
@@ -458,6 +461,35 @@ impl DeviceAccess<'_> {
             return Some(Err(BlockError::Unsupported("foreign USB transfer ticket")));
         }
         self.controller.completed_ticket(ticket)
+    }
+
+    /// Poll a class transfer and report expiry only after checking for a
+    /// completion or controller failure.
+    pub(crate) fn poll_ticket_until(
+        &mut self,
+        ticket: &TransferTicket,
+        deadline: &Deadline,
+        status_due: &mut Option<Deadline>,
+    ) -> Option<Result<usize, BlockError>> {
+        if self.id == ticket.device_id()
+            && let Some(sample) = status_due.as_ref()
+            && self.controller.ticket_quiet(ticket)
+        {
+            let now = Clock::ticks();
+            if !sample.passed_at(now) && !deadline.passed_at(now) {
+                return None;
+            }
+        }
+        // Start the interval before checking USBSTS so a slow register read
+        // cannot extend it. An invalid clock keeps the mandatory check.
+        let next_status = self.controller.clock.try_deadline(TICKET_STATUS_US).ok();
+        let result = self
+            .completed_ticket(ticket)
+            .or_else(|| deadline.passed().then_some(Err(BlockError::Timeout)));
+        if result.is_none() {
+            *status_due = next_status;
+        }
+        result
     }
 
     pub fn cancel_ticket(

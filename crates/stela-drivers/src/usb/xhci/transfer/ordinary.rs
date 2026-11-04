@@ -232,6 +232,45 @@ impl Controller {
         })
     }
 
+    /// Whether a deadline-bound client can keep waiting without another
+    /// status-register access. The event drain still samples fatal status
+    /// with each event batch and at the quiet polling interval.
+    pub(in crate::usb::xhci) fn ticket_quiet(&mut self, ticket: &TransferTicket) -> bool {
+        let Ok(slot) = self.validate_id(ticket.device_id()) else {
+            return false;
+        };
+        if self.hardware.ready().is_err()
+            || self
+                .native_memory
+                .as_ref()
+                .is_some_and(|memory| memory.ready().is_err())
+            || self.command_poisoned
+            || self.error.is_some()
+            || self.endpoint_enabled(slot, ticket.dci).is_err()
+        {
+            return false;
+        }
+        let endpoint = self.slots[usize::from(slot)].as_ref().unwrap().endpoints
+            [usize::from(ticket.dci)]
+        .as_ref()
+        .unwrap();
+        if !endpoint.ring.normal.unfinished(ticket.id, ticket.trb) {
+            return false;
+        }
+        self.drain();
+        !self.command_poisoned
+            && self.error.is_none()
+            && self
+                .native_memory
+                .as_ref()
+                .is_none_or(|memory| memory.ready().is_ok())
+            && !self.pending.iter().any(|event| {
+                event.kind() == TRANSFER_EVENT
+                    && event.slot() == slot
+                    && event.endpoint() == ticket.dci
+            })
+    }
+
     /// Polls an exact submitted TD. Only a valid terminal success/short event
     /// releases that buffer. Errors keep records until acknowledged cancel.
     /// Stale/foreign tickets cannot consume a later generation's completion.
