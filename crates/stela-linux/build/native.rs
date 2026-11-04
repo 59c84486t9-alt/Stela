@@ -199,6 +199,8 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/filp_close.c")),
             PathBuf::from(format!("{LINUX}/fs/path_open.c")),
             PathBuf::from(format!("{LINUX}/fs/file_position.c")),
+            PathBuf::from(format!("{LINUX}/fs/fs_dirent.c")),
+            PathBuf::from(format!("{LINUX}/fs/libfs.c")),
             PathBuf::from(format!("{LINUX}/fs/namei.c")),
             PathBuf::from(format!("{LINUX}/fs/namespace_tree.c")),
             PathBuf::from(format!("{LINUX}/fs/nsfs.c")),

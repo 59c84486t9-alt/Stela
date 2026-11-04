@@ -236,6 +236,7 @@
 /fs/name_hash.c
 /fs/name_hash.h
 /fs/libfs.c
+/fs/fs_dirent.c
 /fs/pseudo_metadata.c
 /fs/stashed_path.c
 /fs/stat.c

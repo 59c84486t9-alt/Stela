@@ -41,12 +41,6 @@ static struct inode *inode_of_mode(umode_t mode)
 	return inode;
 }
 
-struct inode *alloc_anon_inode(struct super_block *sb)
-{
-	(void)sb;
-	return inode_of_mode(S_IRUSR | S_IWUSR);
-}
-
 void stela_linux_compat_iput(struct inode *inode)
 {
 	if (inode && atomic_dec_and_test(&inode->i_count)) {
@@ -170,7 +164,7 @@ struct file *anon_inode_getfile(const char *name, const struct file_operations *
 				int flags)
 {
 	(void)name;
-	struct inode *inode = alloc_anon_inode(NULL);
+	struct inode *inode = inode_of_mode(S_IRUSR | S_IWUSR);
 
 	return IS_ERR(inode) ? ERR_CAST(inode) : new_file(inode, fops, (unsigned int)flags, priv);
 }
