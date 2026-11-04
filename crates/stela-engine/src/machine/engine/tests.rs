@@ -3553,6 +3553,30 @@ fn branch_target_compatibility_follows_bti_paciasp_brk_and_hlt() {
     assert!(!machine.branch_target_compatible(PACIASP));
 }
 
+#[test]
+fn a_compiled_pac_landing_uses_the_current_sctlr_for_lookup_entries() {
+    const PACIASP: u32 = 0xd503_233f;
+    const RET: u32 = 0xd65f_03c0;
+    const SCTLR_BT1: u64 = 1 << 36;
+    let mut machine = machine(&[PACIASP, RET]);
+    let pc = machine.cpu.pc;
+    let Ok(Fetched::Block(index)) = machine.fetch_block(pc, false) else {
+        panic!("compiled PAC landing");
+    };
+    let slot = (pc / FETCH_PAGE) as usize % FETCH_CACHE;
+    machine.fetch[slot].as_mut().unwrap().guarded = true;
+    let sctlr = machine.cpu.regime_sctlr();
+    for (bits, targets) in [(0, 0b1111), (SCTLR_BT1, 0b0111)] {
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SCTLR_EL1, 0, sctlr & !SCTLR_BT1 | bits);
+        machine.derived_changed();
+        machine.remember_target(pc, index);
+        assert_eq!(machine.targets[target_slot(&machine, pc)].targets, targets);
+    }
+}
+
 /// SCTLR_EL2 bit 36 is BT with HCR_EL2.TGE clear and BT1 with it set
 /// (E2H is RES1); either way it decides PACIASP at EL2.
 #[test]

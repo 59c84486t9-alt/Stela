@@ -436,8 +436,8 @@ struct Block {
     /// or BLR form (or that form's PAC thunk) ends with, until a lookup dispatcher
     /// serves it.
     dynamic_site: Option<NonZeroU64>,
-    /// Its first instruction, for the Branch Target check of a branch to it.
-    first: u32,
+    /// What its first instruction admits on a guarded page.
+    landing: fetch::Landing,
     /// The word of its last instruction, where it exits to the engine.
     terminal: u32,
     /// Exits to the engine at `terminal`, up to its limit.
@@ -446,18 +446,21 @@ struct Block {
     /// the other contexts of its page
     /// ([`Machine::remember_target_page`]).
     fetched: bool,
-    /// The guest bytes it was compiled from, for [`Machine::stale_code`].
-    source_bytes: u16,
     source_hash: u64,
 }
 
 // Every PE keeps one per block it ran, millions in all.
-const _: () = assert!(size_of::<Block>() <= 80);
+const _: () = assert!(size_of::<Block>() <= 72);
 
 impl Block {
+    /// One source-map entry per four-byte guest instruction.
+    fn source_bytes(&self) -> usize {
+        usize::from(self.instructions) * INSTRUCTION as usize
+    }
+
     /// The PC of its last instruction.
     fn terminal_pc(&self) -> u64 {
-        self.pc + u64::from(self.source_bytes) - INSTRUCTION
+        self.pc + self.source_bytes() as u64 - INSTRUCTION
     }
 }
 

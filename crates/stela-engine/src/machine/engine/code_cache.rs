@@ -25,7 +25,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let mut last = None;
         for (cursor, index) in self.index.sweep(self.stale_cursor).take(STALE_CHECKS) {
             let block = &self.blocks[index];
-            bytes.resize(block.source_bytes as usize, 0);
+            bytes.resize(block.source_bytes(), 0);
             report.blocks += 1;
             if self.host.read_ram(block.physical, &mut bytes)
                 && source_hash(&bytes) != block.source_hash

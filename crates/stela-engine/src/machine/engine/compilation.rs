@@ -136,14 +136,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         {
             return;
         }
-        let (entry, first) = (block.code.0 as u64, block.first);
+        let entry = block.code.0 as u64;
         let page = pc & !(FETCH_PAGE - 1);
         let guarded = self.fetch[(page / FETCH_PAGE) as usize % FETCH_CACHE]
             .is_some_and(|fetched| fetched.page == page && fetched.guarded);
         let targets = match guarded {
-            true => (0..4u8)
-                .filter(|&btype| btype == 0 || self.branch_target_accepts(first, btype))
-                .fold(0, |targets, btype| targets | 1 << btype),
+            true => block.landing.targets(&self.cpu) | 1,
             false => 0b1111,
         };
         let context = self.chain.contexts()[chain::half(pc)];
@@ -460,16 +458,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 "native spill/extended-register invocation capture is not qualified",
             )));
         }
+        let source_bytes = compiled.source_bytes();
+        let instructions = compiled.native().source_map.len();
         if !compiled.matches_source(source)
-            || compiled.source_bytes() < INSTRUCTION as usize
-            || compiled.source_bytes() > source.len()
-            || pc.checked_add(compiled.source_bytes() as u64).is_none()
+            || source_bytes < INSTRUCTION as usize
+            || source_bytes > source.len()
+            || pc.checked_add(source_bytes as u64).is_none()
+            || instructions * INSTRUCTION as usize != source_bytes
         {
             return Err(self.unsupported(RequirementKind::Native(
                 "native template has no matching admitted source extent",
             )));
         }
-        let last = compiled.source_bytes() - INSTRUCTION as usize;
+        let last = source_bytes - INSTRUCTION as usize;
         let terminal = u32::from_le_bytes(source[last..last + 4].try_into().expect("a word"));
         // A heap without room for the block table's next chunk reuses the
         // oldest code's slots instead, or, when none of this machine's
@@ -491,7 +492,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     })?
             }
         };
-        let terminal_pc = pc + compiled.source_bytes() as u64 - INSTRUCTION;
+        let terminal_pc = pc + last as u64;
         let mut successors: Vec<Successor> = compiled
             .direct_exits()
             .iter()
@@ -539,16 +540,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pc,
             physical,
             code,
-            instructions: compiled.native().source_map.len() as u16,
+            instructions: instructions as u16,
             variant: id,
             successors: successors.into_boxed_slice(),
             dynamic_site: dynamic_site.and_then(NonZeroU64::new),
-            first,
+            landing: fetch::Landing::of(first),
             terminal,
             taken: 0,
             fetched: false,
-            source_bytes: compiled.source_bytes() as u16,
-            source_hash: source_hash(&source[..compiled.source_bytes()]),
+            source_hash: source_hash(&source[..source_bytes]),
         };
         let index = match self.free_blocks.pop() {
             Some(slot) => {

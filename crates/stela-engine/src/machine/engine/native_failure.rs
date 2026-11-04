@@ -82,8 +82,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some(block) = (index < self.blocks.len()).then(|| &self.blocks[index]) else {
             return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
         };
-        let (entry_pc, physical, source_bytes) =
-            (block.pc, block.physical, block.source_bytes as usize);
+        let (entry_pc, physical, source_bytes) = (block.pc, block.physical, block.source_bytes());
         let Some(owner) = self.fault_recovery.get(&index) else {
             return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
         };
