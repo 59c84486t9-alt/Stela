@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 19:30:14 -0500
+Subject: [PATCH] refactor(vfs): link original filesystem error lifetime
+
+---
+ fs/fserror.c        | 21 ---------------------
+ fs/super_lifetime.c | 26 ++++++++++++++++++++++++++
+ 2 files changed, 26 insertions(+), 21 deletions(-)
+
+diff --git a/fs/fserror.c b/fs/fserror.c
+index 1e4d11fd9562fd158a23b64ca60e9b7e01719cb8..9e65532cdecb530725c96d42763568e462df2f23 100644
+--- a/fs/fserror.c
++++ b/fs/fserror.c
+@@ -12,27 +12,6 @@
+ 
+ static struct mempool fserror_events_pool;
+ 
+-void fserror_mount(struct super_block *sb)
+-{
+-	/*
+-	 * The pending error counter is biased by 1 so that we don't wake_var
+-	 * until we're actually trying to unmount.
+-	 */
+-	refcount_set(&sb->s_pending_errors, 1);
+-}
+-
+-void fserror_unmount(struct super_block *sb)
+-{
+-	/*
+-	 * If we don't drop the pending error count to zero, then wait for it
+-	 * to drop below 1, which means that the pending errors cleared and
+-	 * hopefully we didn't saturate with 1 billion+ concurrent events.
+-	 */
+-	if (!refcount_dec_and_test(&sb->s_pending_errors))
+-		wait_var_event(&sb->s_pending_errors,
+-			       refcount_read(&sb->s_pending_errors) < 1);
+-}
+-
+ static inline void fserror_pending_dec(struct super_block *sb)
+ {
+ 	if (refcount_dec_and_test(&sb->s_pending_errors))
+diff --git a/fs/super_lifetime.c b/fs/super_lifetime.c
+index 530000ecaa157e56c81d58e802128ece8ab857c2..801225649164871f85ff75694f28f7761ae9de37 100644
+--- a/fs/super_lifetime.c
++++ b/fs/super_lifetime.c
+@@ -2,9 +2,14 @@
+ /*
+  * From fs/super.c.
+  * Copyright (C) 1991, 1992 Linus Torvalds
++ * Filesystem error lifetime from fs/fserror.c.
++ * Copyright (c) 2025 Oracle. All Rights Reserved.
++ * Author: Darrick J. Wong <djwong@kernel.org>
+  */
+ #include <linux/capability.h>
+ #include <linux/export.h>
++#include <linux/fs.h>
++#include <linux/fserror.h>
+ #include <linux/fs_context.h>
+ #include <linux/fsnotify.h>
+ #include <linux/rcupdate.h>
+@@ -269,3 +274,24 @@ bool super_trylock_shared(struct super_block *sb)
+ 
+ 	return false;
+ }
++
++void fserror_mount(struct super_block *sb)
++{
++	/*
++	 * The pending error counter is biased by 1 so that we don't wake_var
++	 * until we're actually trying to unmount.
++	 */
++	refcount_set(&sb->s_pending_errors, 1);
++}
++
++void fserror_unmount(struct super_block *sb)
++{
++	/*
++	 * If we don't drop the pending error count to zero, then wait for it
++	 * to drop below 1, which means that the pending errors cleared and
++	 * hopefully we didn't saturate with 1 billion+ concurrent events.
++	 */
++	if (!refcount_dec_and_test(&sb->s_pending_errors))
++		wait_var_event(&sb->s_pending_errors,
++			       refcount_read(&sb->s_pending_errors) < 1);
++}
