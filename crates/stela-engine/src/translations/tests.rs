@@ -311,7 +311,7 @@ fn records_reject_malformed_source_geometry_with_a_valid_checksum() {
     let entry = proved(&source, 0x40).expect("actual relocatable four-word block");
     assert_eq!(entry.source_map.len(), 4);
     assert!(entry.consistent());
-    assert!(entry.source_map[1].1 > 1);
+    assert!(entry.source_map[2].1 > entry.source_map[1].1 + 1);
     let (translator, key) = (translator_id(), Digest::of(&[7; PAGE_BYTES]));
     let mut good = Record::new(translator, key);
     good.insert(entry.clone());
@@ -332,7 +332,7 @@ fn records_reject_malformed_source_geometry_with_a_valid_checksum() {
             entry.source_map[1].1 = entry.source_map[0].1
         }),
         ("descending native", |entry| {
-            entry.source_map[2].1 = entry.source_map[1].1 - 1
+            entry.source_map[3].1 = entry.source_map[2].1 - 1
         }),
         ("one-past native", |entry| {
             entry.source_map[3].1 = u32::try_from(entry.code.len()).unwrap()
