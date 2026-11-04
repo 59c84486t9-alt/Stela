@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 00:16:06 -0500
+Subject: [PATCH] fix(vfs): share simple superblock operations with libfs
+
+---
+ fs/internal.h        | 5 +++++
+ fs/pseudo_metadata.c | 2 +-
+ 2 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/fs/internal.h b/fs/internal.h
+index 5945187eacef5391fd06beadc9b0fc1213e66a51..7aceabafc867512ee691540cab32577995a4bf39 100644
+--- a/fs/internal.h
++++ b/fs/internal.h
+@@ -132,6 +132,11 @@ static inline void put_file_access(struct file *file)
+ void fput_close_sync(struct file *);
+ void fput_close(struct file *);
+ 
++/*
++ * pseudo_metadata.c
++ */
++extern const struct super_operations simple_super_operations;
++
+ /*
+  * super.c
+  */
+diff --git a/fs/pseudo_metadata.c b/fs/pseudo_metadata.c
+index f4b9cefa91251bb694507b22a0dec78e2cc85d20..93d3b10198fc0b5d14513ec8dd3e9369cf50cbda 100644
+--- a/fs/pseudo_metadata.c
++++ b/fs/pseudo_metadata.c
+@@ -363,7 +363,7 @@ int ns_get_name(char *buf, size_t size, struct task_struct *task,
+ 	return res;
+ }
+ 
+-static const struct super_operations simple_super_operations = {
++const struct super_operations simple_super_operations = {
+ 	.statfs		= simple_statfs,
+ };
+ 
