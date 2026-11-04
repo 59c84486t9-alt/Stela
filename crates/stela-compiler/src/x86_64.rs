@@ -1164,7 +1164,9 @@ pub(crate) fn emit_instruction(
         Operation::Bitfield(operand) => bitfield::emit(code, &operand),
         Operation::PcRelative(operand) => pc_relative::emit(code, &operand),
         Operation::ConditionalSelect(operand) => conditional_select::emit(code, &operand, false),
-        Operation::ConditionalCompare(operand) => conditional_select::emit_compare(code, &operand),
+        Operation::ConditionalCompare(operand) => {
+            conditional_select::emit_compare(code, &operand, false)
+        }
         Operation::Crc(operand) => crc::emit(code, &operand, target),
         Operation::Flags(operand) => flags::emit(code, &operand),
         Operation::Synchronization(operand) => system::synchronization::emit(code, &operand)
