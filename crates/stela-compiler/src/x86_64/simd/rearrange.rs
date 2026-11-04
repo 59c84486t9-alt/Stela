@@ -19,6 +19,8 @@ use alloc::vec::Vec;
 const REVERSE_DWORD_BYTES: [u8; 16] = [3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12];
 const SWAP_WORDS_IN_DWORDS: u8 = 0xb1;
 const REVERSE_MASK: u8 = 2;
+const TABLE_INDEX_VECTOR: u8 = 1;
+const TABLE_BIAS_VECTOR: u8 = 2;
 
 /// REV32 Vd.16B is a one-source permutation. First swap bytes within
 /// words, then swap the two words of each dword with SSE2 shuffles.
@@ -343,6 +345,102 @@ fn commit_halves(code: &mut Code, destination: u8) {
     asm.mov_store(Size::Qword, guest(vector_offset(destination) + 8), Rdx);
 }
 
+fn prepare_single_table_indices(code: &mut Code, indices: u8) {
+    read_vector(code, indices, TABLE_INDEX_VECTOR);
+    let mut asm = code.asm();
+    asm.mov_imm32(Rax, u32::from_le_bytes([0x70; 4]));
+    asm.movd_to_xmm(TABLE_BIAS_VECTOR, Rax);
+    super::shuffle(code, TABLE_BIAS_VECTOR, TABLE_BIAS_VECTOR, 0);
+    // Saturating addition leaves the low nibble of 0..15 unchanged and
+    // sets bit 7 for every index >=16. PSHUFB then zeroes those lanes.
+    packed(
+        code,
+        Host::AddUnsignedSaturatingByte,
+        TABLE_INDEX_VECTOR,
+        TABLE_BIAS_VECTOR,
+    );
+}
+
+fn single_table(code: &mut Code, destination: u8, first: u8, bytes: u8, target: TargetCpu) {
+    read_vector(code, first, 0);
+    Host::ByteShuffle.register(code, 0, TABLE_INDEX_VECTOR, target);
+    if bytes == 8 {
+        packed(code, Host::MoveQword, 0, 0);
+    }
+    commit(code, destination, 0);
+}
+
+struct SingleTable {
+    destination: u8,
+    first: u8,
+    indices: u8,
+    bytes: u8,
+}
+
+fn single_table_operands(instruction: &Instruction) -> Option<SingleTable> {
+    let Operation::Simd(Simd::Rearrange(Operand::Table {
+        destination,
+        first,
+        registers: 1,
+        indices,
+        bytes,
+        preserve: false,
+    })) = instruction.operation
+    else {
+        return None;
+    };
+    Some(SingleTable {
+        destination,
+        first,
+        indices,
+        bytes,
+    })
+}
+
+/// Adjacent one-table lookups may share their range-checked index vector.
+/// Each table is still read before its own write, and a write to the index
+/// register ends the run after completing that lookup.
+pub(in crate::x86_64) fn emit_single_table_run(
+    code: &mut Code,
+    source_map: &mut Vec<(GuestAddress, usize)>,
+    instructions: &[Instruction],
+    target: TargetCpu,
+) -> Option<(usize, u8)> {
+    let [first, second, ..] = instructions else {
+        return None;
+    };
+    let head = single_table_operands(first)?;
+    let next = single_table_operands(second)?;
+    if head.destination == head.indices
+        || head.indices != next.indices
+        || first.pc.0.checked_add(4) != Some(second.pc.0)
+    {
+        return None;
+    }
+    let mut last = None;
+    for (index, instruction) in instructions.iter().take(4).enumerate() {
+        let Some(row) = single_table_operands(instruction) else {
+            break;
+        };
+        if row.indices != head.indices
+            || first.pc.0.checked_add(index as u64 * 4) != Some(instruction.pc.0)
+        {
+            break;
+        }
+        code.set_instruction(source_map.len());
+        source_map.push((instruction.pc, code.len()));
+        if index == 0 {
+            prepare_single_table_indices(code, row.indices);
+        }
+        single_table(code, row.destination, row.first, row.bytes, target);
+        last = Some((index + 1, row.destination));
+        if row.destination == row.indices {
+            break;
+        }
+    }
+    last
+}
+
 fn table(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let Operand::Table {
         destination,
@@ -371,6 +469,11 @@ fn table(code: &mut Code, operand: &Operand, target: TargetCpu) {
         return;
     }
     if target >= TargetCpu::Ssse3 {
+        if registers == 1 && !preserve {
+            prepare_single_table_indices(code, indices);
+            single_table(code, destination, first, bytes, target);
+            return;
+        }
         read_vector(code, indices, 1);
         packed(code, Host::Xor, 0, 0); // result
         packed(code, Host::Xor, 6, 6); // valid-index mask for TBX
