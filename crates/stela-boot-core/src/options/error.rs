@@ -65,6 +65,7 @@ pub enum Error {
     Dns,
     DuplicateDns,
     DuplicateAudioCheck,
+    DuplicateAudioHpet,
     MissingAudioMode,
     MissingNetworkUrl,
     DuplicateNetworkCheck,
@@ -134,6 +135,7 @@ pub enum Constraint {
     ClockCoreCount,
     ClockExclusive,
     HostDiagnosticExclusive,
+    AudioHpetDependency,
 }
 impl Error {
     /// The established stela.cfg diagnostic at presentation-only callers.
@@ -185,6 +187,7 @@ impl Error {
             Self::Dns => "--dns needs 1 to 3 distinct server addresses separated by commas",
             Self::DuplicateDns => "duplicate --dns",
             Self::DuplicateAudioCheck => "duplicate audio check",
+            Self::DuplicateAudioHpet => "duplicate audio HPET handoff",
             Self::MissingAudioMode => "missing audio check mode",
             Self::MissingNetworkUrl => "missing network check URL",
             Self::DuplicateNetworkCheck => "duplicate network check",
@@ -262,6 +265,7 @@ impl Constraint {
             Self::HostDiagnosticExclusive => {
                 "host check: native diagnostic fixture modes are exclusive"
             }
+            Self::AudioHpetDependency => "--audio-own-hpet requires --audio-check",
         }
     }
 }

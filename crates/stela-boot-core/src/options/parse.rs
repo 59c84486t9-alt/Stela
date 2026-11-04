@@ -206,6 +206,9 @@ impl ParseState<'_> {
                 let mode = AudioCheck::parse(value().ok_or(Error::MissingAudioMode)?)?;
                 options.audio_check = Some(mode);
             }
+            "--audio-own-hpet" => {
+                flag(&mut options.audio_own_hpet, Error::DuplicateAudioHpet)?;
+            }
             "--network-check" => {
                 let url = value().ok_or(Error::MissingNetworkUrl)?;
                 parse_url(url)?;

@@ -765,7 +765,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         );
     }
     if let Some(mode) = arguments.audio_check {
-        options.push_str(&format!(" --audio-check {}", mode.option()));
+        options.push_str(&format!(
+            " --audio-check {} --audio-own-hpet",
+            mode.option()
+        ));
     }
     let network = network::Check::start(&arguments, &mut options)?;
     let options = storage::payload(&arguments, &paths, options)?;

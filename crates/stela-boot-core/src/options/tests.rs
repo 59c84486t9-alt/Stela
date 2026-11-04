@@ -1,4 +1,12 @@
 use super::*;
+
+#[test]
+fn audio_hpet_handoff_requires_an_audio_diagnostic() {
+    assert_eq!(
+        System::parse("--system --audio-own-hpet").unwrap_err(),
+        Error::Constraint(Constraint::AudioHpetDependency)
+    );
+}
 use alloc::{format, string::ToString, vec};
 
 #[test]
@@ -100,12 +108,13 @@ fn every_option_survives_a_round_trip() {
          --install-source 11111111-2222-3333-4444-555555555555 --tss --verify-on-read \
          --usb-storage A --usb-storage B --input --idle-skip --sep-observe --native-cores 3 \
          --native-artifacts --serialized --profile --monitor-trace --display-trace \
-         --network-check http://h/p --audio-check transport-duplex --dram-base 0x10000000000 \
+         --network-check http://h/p --audio-check transport-duplex --audio-own-hpet --dram-base 0x10000000000 \
          --load 0x10000004000 --entry 0x10000008000 --x0 7 --budget 99 --break 0x10 \
          --trace 0x20 --watch 0x30,0x40 --dump x21-0x8,0x10 --dump 0x50,0x60"
     ));
     assert_eq!(options.usb_storage, ["A", "B"]);
     assert_eq!(options.audio_check, Some(AudioCheck::TransportDuplex));
+    assert!(options.audio_own_hpet);
     assert!(options.display_trace);
     assert!(!System::default().display_trace);
     assert!(!options.parallel);

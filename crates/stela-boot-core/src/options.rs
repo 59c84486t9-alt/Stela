@@ -299,6 +299,8 @@ pub struct System {
     pub network_check: Option<String>,
     /// Check exclusively owned conventional HDA after ExitBootServices.
     pub audio_check: Option<AudioCheck>,
+    /// Explicit whole-controller handoff for the audio check's physical clock.
+    pub audio_own_hpet: bool,
     /// Whole host disks, by serial, that the guest sees as USB mass
     /// storage behind the native hub (`--usb-storage SERIAL`, repeatable).
     pub usb_storage: Vec<String>,
@@ -396,6 +398,7 @@ impl Default for System {
             ecid: None,
             network_check: None,
             audio_check: None,
+            audio_own_hpet: false,
             usb_storage: Vec::new(),
             usb4_approved: Vec::new(),
             external_disks: false,
@@ -586,6 +589,7 @@ impl System {
             (self.native_bootstrap_check, "--native-bootstrap-check"),
             (self.native_shared_check, "--native-shared-check"),
             (self.audio_check.is_some(), "--audio-check"),
+            (self.audio_own_hpet, "--audio-own-hpet"),
             (self.network_check.is_some(), "--network-check"),
         ]
         .into_iter()
@@ -763,6 +767,7 @@ impl fmt::Display for System {
         line.flag("--display-trace", self.display_trace)?;
         line.value("--network-check", self.network_check.as_deref())?;
         line.value("--audio-check", self.audio_check.map(AudioCheck::name))?;
+        line.flag("--audio-own-hpet", self.audio_own_hpet)?;
         if self.dram_explicit {
             line.value("--dram-base", Some(Hex(self.dram_base)))?;
         }

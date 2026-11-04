@@ -300,6 +300,41 @@ fn native_mmio_emits_system_options_without_host_check_only_keys() {
 }
 
 #[test]
+fn audio_fixture_exposes_hpet_with_smm_disabled() {
+    use clap::Parser;
+    let parsed = crate::Cli::try_parse_from([
+        "xtask",
+        "boot",
+        "run",
+        "--output",
+        "/tmp/audio-hpet",
+        "--audio-check",
+        "transport-duplex",
+    ])
+    .unwrap();
+    let crate::Task::Boot(Command::Run(run)) = parsed.task else {
+        panic!("boot run")
+    };
+    let command = machine::command(
+        &run,
+        machine::MachineOptions {
+            qemu: Path::new("qemu-system-x86_64"),
+            firmware: Path::new("firmware"),
+            variables: Path::new("variables.fd"),
+            format: "raw",
+            system: true,
+            bundle: false,
+        },
+    );
+    let machine = command
+        .get_args()
+        .skip_while(|arg| *arg != "-machine")
+        .nth(1)
+        .unwrap();
+    assert_eq!(machine, qemu_machine("off", true).as_str());
+}
+
+#[test]
 fn native_mmio_refuses_conflicting_cli_and_topology_before_work() {
     use clap::Parser;
     let prefix = ["xtask", "boot", "run", "--output", "/tmp/native-mmio"];

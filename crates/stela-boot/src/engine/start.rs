@@ -285,17 +285,8 @@ fn open_host(
         .chain(options.nor.iter().filter(|_| !state_in_storage))
         .collect();
     #[cfg(feature = "diagnostics")]
-    if let Some(mode) = options.audio_check {
-        let audio_handoff = handoff
-            .storage
-            .handoff()
-            .unwrap_or_else(|| output::fatal("the loader found no host device handoff"));
-        // SAFETY: --audio-check explicitly grants sole conventional HDA ownership;
-        // before host::install, the identity root and DMA pages are live.
-        unsafe { crate::audio_check::run(&audio_handoff, mode) }.unwrap_or_else(|error| {
-            output::arguments(format_args!("AUDIO CHECK failed: {error}\n"));
-            output::fatal("the audio check failed")
-        });
+    if options.audio_check.is_some() && !options.audio_own_hpet {
+        output::fatal("the audio check requires an explicit --audio-own-hpet handoff");
     }
     let InstalledHost {
         owner: mut host_owner,
@@ -308,7 +299,12 @@ fn open_host(
         mmio: native_mmio,
         remappers,
         _work: kernel_work,
-    } = start_platform(handoff, &mut host_owner);
+    } = start_platform(
+        handoff,
+        &mut host_owner,
+        #[cfg(feature = "diagnostics")]
+        options,
+    );
     // The signing service is asked only during a restore, so a boot that
     // restores nothing leaves the adapter to the guest.
     let restoring = options.install.is_some() || options.restore_source.is_some();
@@ -1911,7 +1907,74 @@ struct Platform {
     _work: Option<&'static kernel_work::KernelWork>,
 }
 
-fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -> Platform {
+/// # Safety
+/// The post-EBS diagnostic exclusively owns the conventional HDA controller
+/// and entire original HPET, including firmware/SMM, reset and comparator
+/// exclusion. It runs on the installed BSP before APs or other drivers start.
+#[cfg(feature = "diagnostics")]
+unsafe fn check_audio(
+    handoff: &'static Handoff,
+    owner: &mut host::HostOwner,
+    source: &crate::native_mmio::Source,
+    mode: stela_boot_core::options::AudioCheck,
+) -> Result<()> {
+    use crate::native_clock::Prepared;
+    let audio = handoff
+        .storage
+        .handoff()
+        .ok_or(refuse!("the loader found no host device handoff"))?;
+    let identity = owner
+        .root_identity()
+        .map_err(|error| refuse!("audio root identity: {error}", ?error))?;
+    // SAFETY: original loader root on the installed BSP. The audio handoff's
+    // low ECAM, BAR and DMA addresses are usable only while this guard is held.
+    let _root = unsafe { storage::RestoreRoot::enter(handoff.root) };
+    // SAFETY: same real source and CPU, with the explicit complete controller
+    // handoff. No AP, other driver or outside HPET writer can enter here.
+    let hpet = unsafe { source.take_hpet(identity) }
+        .map_err(|error| refuse!("audio HPET handoff: {error}", ?error))?;
+    let prepared = Prepared::exclusive_native_hpet(hpet)
+        .map_err(|error| refuse!("audio HPET counter: {error}", ?error))?;
+    let counter = prepared
+        .hpet_counter()
+        .ok_or(refuse!("audio HPET counter unavailable"))?
+        .clone();
+    let result = prepared
+        .pci_minimum()
+        .map_err(|error| refuse!("audio HPET minimum: {error}", ?error))
+        .and_then(|minimum| {
+            // SAFETY: the caller supplied the complete HDA handoff and the
+            // loader root still maps its exclusive ECAM/BARs and DMA tail.
+            unsafe { crate::audio_check::run(&audio, mode, minimum) }
+        });
+    drop(prepared);
+    let retired = (|| {
+        let mut counter = alloc::sync::Arc::try_unwrap(counter)
+            .map_err(|_| refuse!("audio retained an HPET timing user"))?;
+        // SAFETY: the only timer was scoped to the diagnostic, and unique
+        // counter ownership proves no retained provider/reader remains.
+        unsafe { counter.retire() }
+            .map_err(|error| refuse!("audio HPET retirement: {error}", ?error))?;
+        drop(counter);
+        source
+            .join_hpet()
+            .map_err(|error| refuse!("audio HPET join: {error}", ?error))
+    })();
+    match (result, retired) {
+        (Err(error), Err(retire)) => Err(refuse!("{error}; also {retire}", %error, %retire)),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(()), Ok(())) => {
+            output::arguments(format_args!("AUDIO CHECK passed\n"));
+            Ok(())
+        }
+    }
+}
+
+fn start_platform(
+    handoff: &'static Handoff,
+    host_owner: &mut host::HostOwner,
+    #[cfg(feature = "diagnostics")] options: &Options,
+) -> Platform {
     // The owned MMIO permission the host devices' services map through. A
     // host it cannot check is reported, and those services refuse.
     // SAFETY: this boot's capture, on the installed boot processor before
@@ -1926,6 +1989,17 @@ fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -
         })
         .ok()
         .map(|source| &*alloc::boxed::Box::leak(alloc::boxed::Box::new(source)));
+    #[cfg(feature = "diagnostics")]
+    if let Some(mode) = options.audio_check {
+        let source =
+            native_mmio.unwrap_or_else(|| output::fatal("audio HPET aperture unavailable"));
+        // SAFETY: the explicit audio and whole HPET handoffs were checked at
+        // the entry. The sole BSP owns both resources before other devices.
+        unsafe { check_audio(handoff, host_owner, source, mode) }.unwrap_or_else(|error| {
+            output::arguments(format_args!("AUDIO CHECK failed: {error}\n"));
+            output::fatal("the audio check failed")
+        });
+    }
     // SAFETY: the installed boot processor with interrupts off; the engine's
     // IDT routes the device vectors to native_irq, and the physmap maps the
     // local APIC in every root.

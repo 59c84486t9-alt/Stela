@@ -9,6 +9,9 @@ pub(super) fn system(options: &System) -> Result<(), Error> {
     boot_selection(options)?;
     dram(options)?;
     clock(options)?;
+    if options.audio_own_hpet && options.audio_check.is_none() {
+        return Err(Error::Constraint(Constraint::AudioHpetDependency));
+    }
     Ok(())
 }
 
