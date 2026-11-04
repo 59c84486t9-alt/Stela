@@ -470,6 +470,7 @@ pub(crate) struct VerifiedSource<'a> {
 pub(crate) fn inventory_from<R: Read + Seek>(
     source: R,
     identity: VerifiedSource<'_>,
+    complete_verification: impl FnOnce(R) -> Result<()>,
 ) -> Result<Inventory> {
     let VerifiedSource {
         image,
@@ -498,6 +499,8 @@ pub(crate) fn inventory_from<R: Read + Seek>(
         })
         .collect::<Result<Vec<_>>>()?;
     progress.finish();
+    // The medium must finish readback before requesting the AEA keys.
+    complete_verification(archive.into_inner())?;
     finish_inventory(
         image,
         selection,
