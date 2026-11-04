@@ -340,25 +340,23 @@ fn open_host(
         .map(|partition| from_disk(partition, options, bluetooth));
     // A system boots as the board it was installed on: libignition finds its
     // Cryptex1 tickets by that board's model.
-    if built.is_some() {
+    if options.bundle || built.is_some() {
         let files = &handoff.files[..handoff.file_count];
-        options.development_board = bundle::development_board(files, built.as_deref())
-            .unwrap_or_else(|error| {
-                output::arguments(format_args!("bundle refusal: {error}\n"));
-                output::fatal("the boot bundle's board could not be read")
-            });
-    }
-    // A bundle runs at the DRAM base it was prepared for, its SoC's.
-    if options.bundle && !options.dram_explicit {
-        let files = &handoff.files[..handoff.file_count];
-        options.dram_base = match bundle::dram_base(files, built.as_deref()) {
-            Ok(base) if base.is_multiple_of(LARGE) => base,
-            Ok(_) => output::fatal("the bundle's DRAM base is not 2 MiB aligned"),
-            Err(error) => {
-                output::arguments(format_args!("bundle refusal: {error}\n"));
-                output::fatal("the boot bundle's DRAM base could not be read")
+        let manifest = bundle::manifest(files, built.as_deref()).unwrap_or_else(|error| {
+            output::arguments(format_args!("bundle refusal: {error}\n"));
+            output::fatal("the boot bundle's manifest could not be read")
+        });
+        options.development_board = manifest
+            .target
+            .is_some_and(|target| target.device_class.ends_with("dev"));
+        // A bundle runs at the DRAM base it was prepared for, its SoC's.
+        if options.bundle && !options.dram_explicit {
+            let base = manifest.options.dram_base;
+            if !base.is_multiple_of(LARGE) {
+                output::fatal("the bundle's DRAM base is not 2 MiB aligned");
             }
-        };
+            options.dram_base = base;
+        }
     }
     ram::place(&mut ram, options.dram_base);
     host_owner
@@ -727,7 +725,7 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
         "ENTRY pc={entry:#x} x0={x0:#x} el={el} mmu=off profile={} target={} apic_hz={apic_hz} \
          prediction_isolation={} faulting_data_barrier={}\n",
         profile.name,
-        target.id(),
+        canonical_ram.target().id(),
         speculation.contexts,
         speculation.faulting_data,
     ));
@@ -1418,6 +1416,7 @@ fn check_processors(
     let OpenedHost {
         owner: ref mut host_owner,
         mmio: native_mmio,
+        ram: ref worker_ram,
         ..
     } = *host;
     for processor in executors.processors() {
@@ -1447,15 +1446,29 @@ fn check_processors(
             doorbells,
         ));
     }
-    if let Some(mmio) = &native_mmio {
-        // SAFETY: the check owns the host's devices; bus 0's first
-        // function is only read here.
-        let generation = unsafe { mmio.check_shootdown() }.unwrap_or_else(|error| {
+    if handoff.native_resources.cores == 1 && executors.processors().is_empty() {
+        output::arguments(format_args!(
+            "CHECK native-shootdown SKIP reason=no-remote-processor\n"
+        ));
+    } else if let Some(mmio) = &native_mmio {
+        let waiter = executors
+            .processors()
+            .first()
+            .unwrap_or_else(|| output::fatal("the shootdown check requires a started AP"));
+        // SAFETY: both processors keep the live loader root. This diagnostic
+        // owns the host's devices and only reads bus 0's first function.
+        let generation = unsafe {
+            waiter.check_driver_wait(handoff.root, sender, handoff.tsc_hz, || {
+                mmio.check_shootdown()
+            })
+        }
+        .unwrap_or_else(|error| output::fatal(error))
+        .unwrap_or_else(|error| {
             output::arguments(format_args!("CHECK native-shootdown FAIL {error:?}\n"));
             output::fatal("the MMIO aperture's shootdown failed")
         });
         output::arguments(format_args!(
-            "CHECK native-shootdown PASS generation={generation} processors={}\n",
+            "CHECK native-shootdown PASS generation={generation} processors={} waiter=driver-lock-if0\n",
             executors.processors().len()
         ));
     }
@@ -1469,6 +1482,7 @@ fn check_processors(
                 executors,
                 host_owner,
                 sender,
+                worker_ram,
             )
         }
         .unwrap_or_else(|error| output::fatal(error));

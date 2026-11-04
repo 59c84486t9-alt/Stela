@@ -62,6 +62,87 @@ fn address_dependent_blocks_rebase_to_what_the_compiler_emits_at_another_page() 
 }
 
 #[test]
+fn system_address_pair_rebases_one_fixed_address_and_both_source_rows() {
+    // Both PC-relative encodings retain an eight-byte relocation under
+    // page displacement, including when ADRP wraps to zero.
+    for first in [0x1000_0000, 0xb000_0000] {
+        let source = words(&[first, 0x9100_2000]);
+        let entry = proved(&source, 0x40).expect("pinned address pair is relocatable");
+        assert_eq!(entry.source_map, [(0x40, 0), (0x44, 1)]);
+        assert!(entry.relocations.contains(&3));
+        for page in [0x4000, 0x2_3456_8000, 0xffff_ffff_ffff_f000] {
+            let expected = compile(&source, page + 0x40);
+            let rebased = entry.rebase(page, &source).unwrap();
+            assert_eq!(rebased.native.x86_64_code, expected.native.x86_64_code);
+            assert_eq!(rebased.native.source_map, expected.native.source_map);
+            assert_eq!(rebased.direct_exits, expected.direct_exits);
+            assert!(rebased.fault_recovery.is_empty());
+            assert_eq!(rebased.source_bytes, source.len());
+        }
+        assert!(entry.rebase(PAGE, &source[..4]).is_none());
+    }
+}
+
+#[test]
+fn hosted_fused_address_pair_rebases_one_literal_and_both_source_rows() {
+    let source = words(&[0x9000_0020, 0x9100_2000, 0xd65f_03c0]); // adrp; add #8; ret
+    let options = stela_compiler::Options::new(BlockProfile::ORDINARY, TargetCpu::Baseline);
+    let pc = PAGE + 0x40;
+    let compile = |pc| stela_compiler::compile(&source, GuestAddress(pc), &options).unwrap();
+    let block = compile(pc);
+    let probes = probe_displacements(PAGE).map(|delta| compile(pc.wrapping_add(delta)));
+    let entry = prove(
+        &block,
+        &source,
+        PAGE,
+        pc,
+        Digest::of(b"hosted"),
+        [&probes[0], &probes[1]],
+    )
+    .expect("fused address is relocatable");
+    assert_eq!(entry.relocations, [2]);
+    assert_eq!(entry.source_map[..2], [(0x40, 0), (0x44, 10)]);
+    for page in [0x4000, 0x2_3456_8000, 0x7fff_0000_0000] {
+        let expected = compile(page + 0x40);
+        let rebased = entry.rebase(page, &source).unwrap();
+        assert_eq!(rebased.native.x86_64_code, expected.native.x86_64_code);
+        assert_eq!(rebased.native.source_map, expected.native.source_map);
+        assert_eq!(rebased.source_bytes, source.len());
+    }
+}
+
+#[test]
+fn hosted_fused_wide_constant_rebases_without_numeric_relocations() {
+    let source = words(&[
+        0x92c0_0000 | (0xabcd << 5), // movn x0, #0xabcd, lsl #32
+        0xf2a0_0000 | (0x1234 << 5), // movk x0, #0x1234, lsl #16
+        0xf2e0_0000 | (0x5678 << 5), // movk x0, #0x5678, lsl #48
+        0xd65f_03c0,                 // ret
+    ]);
+    let options = stela_compiler::Options::new(BlockProfile::ORDINARY, TargetCpu::Baseline);
+    let pc = PAGE + 0x40;
+    let compile = |pc| stela_compiler::compile(&source, GuestAddress(pc), &options).unwrap();
+    let block = compile(pc);
+    let probes = probe_displacements(PAGE).map(|delta| compile(pc.wrapping_add(delta)));
+    let entry = prove(
+        &block,
+        &source,
+        PAGE,
+        pc,
+        Digest::of(b"hosted"),
+        [&probes[0], &probes[1]],
+    )
+    .expect("numeric immediate keeps no address dependency");
+    assert!(entry.relocations.is_empty());
+    assert_eq!(entry.source_map[..3], [(0x40, 0), (0x44, 1), (0x48, 11)]);
+    let page = 0x2_3456_8000;
+    let expected = compile(page + 0x40);
+    let rebased = entry.rebase(page, &source).unwrap();
+    assert_eq!(rebased.native.x86_64_code, expected.native.x86_64_code);
+    assert_eq!(rebased.native.source_map, expected.native.source_map);
+}
+
+#[test]
 fn stored_source_witness_requires_the_exact_admitted_compiler_prefix() {
     // The compiler stops at B, but the complete offered analysis input is
     // kept. Changing that suffix must not silently change its witness.
@@ -230,7 +311,7 @@ fn records_reject_malformed_source_geometry_with_a_valid_checksum() {
     let entry = proved(&source, 0x40).expect("actual relocatable four-word block");
     assert_eq!(entry.source_map.len(), 4);
     assert!(entry.consistent());
-    assert!(entry.source_map[1].1 > 1);
+    assert!(entry.source_map[2].1 > entry.source_map[1].1 + 1);
     let (translator, key) = (translator_id(), Digest::of(&[7; PAGE_BYTES]));
     let mut good = Record::new(translator, key);
     good.insert(entry.clone());
@@ -251,7 +332,7 @@ fn records_reject_malformed_source_geometry_with_a_valid_checksum() {
             entry.source_map[1].1 = entry.source_map[0].1
         }),
         ("descending native", |entry| {
-            entry.source_map[2].1 = entry.source_map[1].1 - 1
+            entry.source_map[3].1 = entry.source_map[2].1 - 1
         }),
         ("one-past native", |entry| {
             entry.source_map[3].1 = u32::try_from(entry.code.len()).unwrap()
@@ -301,6 +382,23 @@ fn records_reject_malformed_source_geometry_with_a_valid_checksum() {
         );
     }
     assert_eq!(Record::decode(&good.encode(), &translator, &key), Ok(good));
+}
+
+#[test]
+fn checksummed_record_count_must_fit_the_remaining_bytes() {
+    let translator = translator_id();
+    let key = Digest::of(b"bounded entry count");
+    let mut record = Record::new(translator, key);
+    record.insert(proved(&words(&[0x9000_0020, 0x9400_0002]), 0x10).unwrap());
+    let mut bytes = record.encode();
+    bytes[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+    let end = bytes.len() - TRAILER_BYTES;
+    let checksum = Sha256::digest(&bytes[..end]);
+    bytes[end..].copy_from_slice(&checksum);
+    assert_eq!(
+        Record::decode(&bytes, &translator, &key),
+        Err(FormatError::Truncated)
+    );
 }
 
 #[test]
@@ -378,4 +476,26 @@ fn unordered_legacy_records_find_the_first_entry_for_each_offset_and_context() {
         Some(&alternate)
     );
     assert_eq!(decoded.find(low.offset + 4, &low.context), None);
+}
+
+#[test]
+fn merge_keeps_current_entries_and_the_first_legacy_duplicate() {
+    let source = words(&[0xd65f_03c0]);
+    let first = proved(&source, 0x40).unwrap();
+    let second = proved(&source, 0x80).unwrap();
+    let third = proved(&source, 0xc0).unwrap();
+    let mut duplicate = first.clone();
+    duplicate.code.push(0);
+    let mut older_second = second.clone();
+    older_second.code.push(0);
+    let translator = translator_id();
+    let key = Digest::of(b"merge fixture");
+    let mut record = Record::new(translator, key);
+    record.insert(second.clone());
+    record.merge(Record {
+        translator,
+        key,
+        entries: vec![first.clone(), duplicate, older_second, third.clone()],
+    });
+    assert_eq!(record.entries(), &[first, second, third]);
 }

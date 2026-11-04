@@ -372,6 +372,13 @@ impl DeviceAccess<'_> {
         self.controller.endpoint_ready_owned(slot, dci)
     }
 
+    /// Check all the endpoints a class operation may use before changing its
+    /// buffers, with one controller readiness check.
+    pub(crate) fn endpoints_ready(&mut self, dcis: &[u8]) -> Result<(), BlockError> {
+        let slot = self.slot()?;
+        self.controller.endpoints_ready_owned(slot, dcis)
+    }
+
     pub fn current_configuration(&mut self) -> Result<Option<u8>, BlockError> {
         let slot = self.slot()?;
         self.controller.current_configuration_owned(slot)

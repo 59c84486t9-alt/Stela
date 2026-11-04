@@ -148,6 +148,9 @@ fn lock_host_drivers() {
         .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
+        // A driver holding this lock can be retiring an aperture mapping.
+        // An interrupt cannot reach this waiter if it entered with IF clear.
+        crate::native_mmio::shootdown::service();
         core::hint::spin_loop();
     }
     let waited = super::host::rdtsc().wrapping_sub(started);
@@ -180,7 +183,8 @@ impl RestoreRoot {
     /// driver never calls back into the engine's host interfaces.
     ///
     /// # Safety
-    /// `root` is the live loader root, keeping the engine window.
+    /// `root` is the live loader root, keeping the engine window. The
+    /// processor's pinned local record is active.
     pub(super) unsafe fn enter(root: u64) -> Self {
         lock_host_drivers();
         let (previous, flags): (u64, u64);
@@ -245,6 +249,17 @@ impl Drop for RestoreRoot {
             }
         }
     }
+}
+
+/// Enter the real host-driver lock for the native contention diagnostic.
+///
+/// # Safety
+/// `root` is the kept loader root, with the current processor installed.
+#[cfg(feature = "diagnostics")]
+pub(crate) unsafe fn with_driver_root<T>(root: u64, operation: impl FnOnce() -> T) -> T {
+    // SAFETY: the caller supplies the live root and local owner.
+    let _guard = unsafe { RestoreRoot::enter(root) };
+    operation()
 }
 
 struct Service {

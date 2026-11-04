@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Owned minimum intervals, distinct from nominal polling deadlines.
 use super::*;
-use crate::bus::pci::power::{Error, Timer};
+use crate::bus::pci::power::{Error, Interval, Timer};
 use core::{cell::Cell, mem::ManuallyDrop, sync::atomic::AtomicU64};
 
 static RETAINED: AtomicU64 = AtomicU64::new(0);
@@ -51,6 +51,19 @@ impl Minimum {
         self.check()?;
         self.source_result(self.0.timer.wait_us(microseconds))?;
         self.check()
+    }
+    pub fn begin_interval(
+        &self,
+        microseconds: u64,
+    ) -> Result<Option<Box<dyn Interval>>, BlockError> {
+        self.check()?;
+        self.source_result(self.0.timer.begin_interval(microseconds))
+    }
+    pub fn interval_elapsed(&self, interval: &dyn Interval) -> Result<bool, BlockError> {
+        if let Some(error) = self.error() {
+            return Err(BlockError::PciPower(error));
+        }
+        self.source_result(interval.elapsed())
     }
     pub fn timer(&self) -> &Rc<dyn Timer> {
         &self.0.timer

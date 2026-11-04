@@ -8,7 +8,7 @@ use crate::{
     apic::{self, Apic},
     engine::{host, interrupts},
 };
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 use core::{
     arch::asm,
     cell::{Cell, UnsafeCell},
@@ -421,6 +421,16 @@ unsafe impl stela_linux::owner::MinimumDeadline for MinimumDeadline {
     }
 }
 
+impl stela_drivers::bus::pci::power::Interval for MinimumDeadline {
+    fn elapsed(&self) -> Result<bool, stela_drivers::bus::pci::power::Error> {
+        use stela_drivers::bus::pci::power::Error;
+        if self.epoch.cpu.in_interrupt() {
+            return Err(Error::Clock);
+        }
+        stela_linux::owner::MinimumDeadline::ready(self).map_err(|_| Error::Clock)
+    }
+}
+
 // SAFETY: the epoch retains and checks the actual HPET/CPU/root on every
 // sample, derives the target from the outward lower bound, and does not wait
 // in PCI interrupt context.
@@ -444,6 +454,22 @@ unsafe impl stela_drivers::bus::pci::power::Timer for CounterEpoch {
         }
         self.minimum_delay_us(microseconds)
             .map_err(|_| Error::Clock)
+    }
+
+    fn begin_interval(
+        &self,
+        microseconds: u64,
+    ) -> Result<
+        Option<Box<dyn stela_drivers::bus::pci::power::Interval>>,
+        stela_drivers::bus::pci::power::Error,
+    > {
+        use stela_drivers::bus::pci::power::Error;
+        if self.cpu.in_interrupt() {
+            return Err(Error::Clock);
+        }
+        let ns = microseconds.checked_mul(1_000).ok_or(Error::Clock)?;
+        let interval = self.minimum_deadline(ns).map_err(|_| Error::Clock)?;
+        Ok(Some(Box::new(interval)))
     }
 }
 

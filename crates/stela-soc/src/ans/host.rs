@@ -48,8 +48,8 @@ struct Discards {
     /// The batch on the disk and its runs.
     running: Option<(Submission, Vec<Extent>)>,
     /// Transfers waiting for discards: each one's key, when it was
-    /// submitted and its requests.
-    held: Vec<(u32, u64, Vec<Request>)>,
+    /// submitted and its request.
+    held: Vec<(u32, u64, Request)>,
     /// Why the disk refused a batch. Discards are hints, so it hears no
     /// more; a flush has nothing to wait for.
     failed: Option<BlockError>,
@@ -184,40 +184,31 @@ impl HostDisk {
         self.discards.outstanding()
     }
 
-    /// Whether `requests` must wait for discards. Their writes take their
-    /// blocks back whatever the answer.
-    fn held(&mut self, requests: &[Request]) -> bool {
-        let block = u64::from(self.identity().block_size);
-        let zeros = self.deallocates_zeroed();
-        requests.iter().fold(false, |held, request| {
-            held | match request {
-                Request::Write { lba, data, .. } => self
-                    .discards
-                    .written(*lba, *lba + data.len() as u64 / block),
-                Request::WriteZeroes { lba, blocks, .. } => {
-                    self.discards.written(*lba, *lba + *blocks)
-                }
-                Request::Flush => zeros && self.discards.outstanding(),
-                _ => false,
+    /// Whether `request` must wait for discards. A write takes its blocks
+    /// back whatever the answer.
+    fn held(&mut self, request: &Request) -> bool {
+        match request {
+            Request::Write { lba, data, .. } => {
+                let block = u64::from(self.identity().block_size);
+                self.discards
+                    .written(*lba, *lba + data.len() as u64 / block)
             }
-        })
+            Request::WriteZeroes { lba, blocks, .. } => self.discards.written(*lba, *lba + *blocks),
+            Request::Flush => self.discards.outstanding() && self.deallocates_zeroed(),
+            _ => false,
+        }
     }
 
-    /// Submit `requests`, one after another, under `key` at counter `now`:
-    /// their result if the first poll finishes them, else `None` until
+    /// Submit `request` under `key` at counter `now`: its result if the
+    /// first poll finishes it, else `None` until
     /// [`Self::poll`] gives it. Synchronous providers can also yield after
     /// the block layer's command admission limit.
-    pub(super) fn submit(
-        &mut self,
-        key: u32,
-        requests: Vec<Request>,
-        now: u64,
-    ) -> Option<Finished> {
-        if self.held(&requests) {
-            self.discards.held.push((key, now, requests));
+    pub(super) fn submit(&mut self, key: u32, request: Request, now: u64) -> Option<Finished> {
+        if self.held(&request) {
+            self.discards.held.push((key, now, request));
             return None;
         }
-        let mut submission = match Submission::batch(requests, self.device.identity()) {
+        let mut submission = match Submission::new(request, self.device.identity()) {
             Ok(submission) => submission,
             Err(error) => return Some(Err(error)),
         };
@@ -274,8 +265,8 @@ impl HostDisk {
                 self.refuse_discards(error);
             }
         }
-        for (key, started, requests) in core::mem::take(&mut self.discards.held) {
-            if let Some(finished) = self.submit(key, requests, started) {
+        for (key, started, request) in core::mem::take(&mut self.discards.held) {
+            if let Some(finished) = self.submit(key, request, started) {
                 done.push((key, finished));
             }
         }

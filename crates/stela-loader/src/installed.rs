@@ -38,7 +38,7 @@ use crate::aux_kc::{self, Kext, Linked};
 use crate::{Error, Result, Within};
 use crate::{
     apple_device_tree::DeviceTree,
-    boot_bundle::{self, Bundle, Input, Inputs, Options, RootHash, Source, Target},
+    boot_bundle::{self, Bundle, Input, Inputs, KernelInput, Options, RootHash, Source, Target},
     boot_policy::{KextGrant, SealedVolume},
     boot_selection::{BootVolume, VolumeType, uuid_text},
     im4m, im4p,
@@ -437,6 +437,16 @@ pub struct Installed {
     pub evidence: Evidence,
 }
 
+/// The installed loader's inputs. Its constructor stays in this module
+/// where the owned kernel and its exact decode receipt originate.
+pub(crate) struct BundleInputs<'a>(Inputs<'a>);
+
+impl<'a> BundleInputs<'a> {
+    pub(crate) fn into_inputs(self) -> Inputs<'a> {
+        self.0
+    }
+}
+
 pub struct Decoded {
     bytes: Vec<u8>,
     source: Source,
@@ -468,14 +478,15 @@ impl<R: ReadAt> Disk<'_, R> {
         let object = self.set.require(kind)?.clone();
         let file = self.read(&object)?;
         let parts = img4::parse(&file).within(|| refuse!("{path}", path = object.path))?;
-        let (bytes, receipt) = im4p::decode(parts.payload, limit)?;
+        let im4p = im4p::parse(parts.payload)?;
+        let (bytes, _) = im4p.decode_payload(limit)?;
         let decoded = Decoded {
             source: Source {
                 component: format!("Preboot {}", String::from_utf8_lossy(kind)),
                 member: object.path.clone(),
                 container_sha256: sha256(&file),
-                payload_type: receipt.payload_type,
-                description: receipt.description,
+                payload_type: im4p.payload_type,
+                description: im4p.description,
                 decoded_bytes: bytes.len() as u64,
                 decoded_sha256: sha256(&bytes),
             },
@@ -710,7 +721,10 @@ pub fn prepare<R: ReadAt>(
             chip_id: manifest_id(manifest.as_ref(), "CHIP")?,
             board_id: manifest_id(manifest.as_ref(), "BORD")?,
         },
-        kernel_collection: kernel.input(),
+        kernel_collection: KernelInput {
+            bytes: kernel.bytes.into(),
+            source: kernel.source,
+        },
         auxiliary_collection: auxiliary.as_ref().map(Decoded::input),
         sptm: sptm.input(),
         txm: txm.input(),
@@ -757,7 +771,7 @@ pub fn prepare<R: ReadAt>(
         volume_group: disk.set.volume_group.clone(),
         boot_hash: disk.set.boot_hash.clone(),
     });
-    let mut bundle = boot_bundle::prepare(&inputs, &options)?;
+    let mut bundle = boot_bundle::prepare_moving_kernel(BundleInputs(inputs), &options)?;
     if !evidence
         .named_by
         .as_deref()

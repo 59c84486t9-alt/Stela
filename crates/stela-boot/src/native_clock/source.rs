@@ -1,9 +1,9 @@
 //! Source selection. No nominal TSC/frequency or bootstrap Cpu.
 use super::{WorkError, counter::Counter, pm};
-use alloc::{rc::Rc, sync::Arc};
+use alloc::{boxed::Box, rc::Rc, sync::Arc};
 pub(crate) use stela_boot_core::hpet::ElapsedBounds;
 pub(super) use stela_boot_core::source_health::Health;
-use stela_drivers::bus::pci::power::{Error as TimerError, Timer};
+use stela_drivers::bus::pci::power::{Error as TimerError, Interval, Timer};
 
 #[derive(Clone)]
 pub(crate) enum Prepared {
@@ -12,6 +12,26 @@ pub(crate) enum Prepared {
 }
 /// Process-only physical minimum from a retained native HPET handoff.
 struct HpetMinimum(Arc<Counter>);
+
+struct HpetInterval {
+    counter: Arc<Counter>,
+    start: u64,
+    ticks: u64,
+}
+
+impl Interval for HpetInterval {
+    fn elapsed(&self) -> Result<bool, TimerError> {
+        self.counter
+            .check_process()
+            .map_err(|_| TimerError::Clock)?;
+        let now = self.counter.read_irq().map_err(|_| TimerError::Clock)?;
+        let elapsed = now.wrapping_sub(self.start);
+        if elapsed > u64::MAX / 2 {
+            return Err(TimerError::Clock);
+        }
+        Ok(elapsed >= self.ticks)
+    }
+}
 
 impl HpetMinimum {
     fn target(&self, microseconds: u64) -> Result<u64, WorkError> {
@@ -61,6 +81,16 @@ unsafe impl Timer for HpetMinimum {
             current = next;
         }
         Ok(())
+    }
+
+    fn begin_interval(&self, microseconds: u64) -> Result<Option<Box<dyn Interval>>, TimerError> {
+        let ticks = self.target(microseconds).map_err(|_| TimerError::Clock)?;
+        let start = self.0.read_irq().map_err(|_| TimerError::Clock)?;
+        Ok(Some(Box::new(HpetInterval {
+            counter: self.0.clone(),
+            start,
+            ticks,
+        })))
     }
 }
 

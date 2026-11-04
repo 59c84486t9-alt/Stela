@@ -366,6 +366,13 @@ static void test_d_release(struct dentry *dentry)
 
 static const struct dentry_operations dentry_ops = {.d_release = test_d_release};
 
+struct pin_interleave {
+	struct vfsmount *mount;
+	struct vfsmount *winner;
+	int count;
+};
+static struct pin_interleave *interleave;
+
 static int test_init_fs_context(struct fs_context *context)
 {
 	struct pseudo_fs_context *pseudo = init_pseudo(context, 0x7e57);
@@ -373,6 +380,14 @@ static int test_init_fs_context(struct fs_context *context)
 	if (!pseudo)
 		return -ENOMEM;
 	pseudo->dops = &dentry_ops;
+	/* Model a second pin publishing while the first is creating a mount. */
+	if (interleave) {
+		struct pin_interleave *overlap = interleave;
+
+		interleave = NULL;
+		assert(!simple_pin_fs(context->fs_type, &overlap->mount, &overlap->count));
+		overlap->winner = overlap->mount;
+	}
 	return 0;
 }
 
@@ -554,6 +569,15 @@ int main(void)
 	struct file *object = shmem_file_setup("test", 8192, EMPTY_VMA_FLAGS);
 	assert(!IS_ERR(object) && file_inode(object)->i_size == 8192);
 	fput(object);
+
+	struct pin_interleave overlap = {};
+	interleave = &overlap;
+	assert(!simple_pin_fs(&test_fs, &overlap.mount, &overlap.count));
+	assert(!interleave && overlap.mount == overlap.winner && overlap.count == 2);
+	simple_release_fs(&overlap.mount, &overlap.count);
+	assert(overlap.mount == overlap.winner && overlap.count == 1);
+	simple_release_fs(&overlap.mount, &overlap.count);
+	assert(!overlap.mount && !overlap.count);
 
 	struct vfsmount *mount = NULL;
 	int count = 0;

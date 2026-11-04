@@ -10,6 +10,9 @@
  * refuses its calls as AIR's. */
 bool stela_air_defined_function(LLVMValueRef fn);
 
+/* Whether module has a direct call to one of its defined AIR functions. */
+bool stela_air_has_defined_calls(LLVMModuleRef module);
+
 /* Links modules into m's, after checking each is AIR compiled as m's was,
  * so one profile translates them, and specializing each with its own
  * function constant values. m's own are specialized first, since linking
@@ -33,4 +36,9 @@ bool stela_air_dispatch_tables(struct stela_air_metadata *m,
  * recursion stay. */
 bool stela_air_inline_calls(struct stela_air_metadata *m, LLVMValueRef entry,
                             unsigned max_call_stack_depth, unsigned max_instructions);
+/* The first inlining pass with an optional specialized entry. After checking
+ * the original graph, it folds constants in an acyclic entry before expanding
+ * its calls, setting *folded when that pass runs. */
+bool stela_air_inline_specialized_calls(struct stela_air_metadata *m, LLVMValueRef entry,
+                                        bool *folded);
 #endif

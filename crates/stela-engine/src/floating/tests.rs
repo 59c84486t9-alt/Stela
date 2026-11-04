@@ -1360,6 +1360,99 @@ fn unsupported_conversion_controls_preserve_every_register_flags_and_status() {
     }
 }
 
+#[test]
+fn vector_self_comparisons_accept_zeros_and_infinities_without_fp_status() {
+    use crate::execution::platform::Mapping;
+    use stela_compiler::{
+        GuestAddress, TargetCpu,
+        aarch64::floating::{FPCR_DN, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FZ, FPCR_FZ16},
+        block::{BlockProfile, CompilationPlan, ExitKind, Features},
+    };
+
+    const PC: u64 = 0x1000;
+    for (word, format, lanes) in [
+        (0x0e41_2420u32, Format::Half, 4),
+        (0x4e41_2420, Format::Half, 8),
+        (0x0e21_e421, Format::Single, 2),
+        (0x4e21_e420, Format::Single, 4),
+        (0x4e61_e420, Format::Double, 2),
+    ] {
+        let (infinity, one, quiet) = match format {
+            Format::Half => (0x7c00, 0x3c00, 0x0200),
+            Format::Single => (0x7f80_0000, 0x3f80_0000, 0x0040_0000),
+            Format::Double => (
+                0x7ff0_0000_0000_0000,
+                0x3ff0_0000_0000_0000,
+                0x0008_0000_0000_0000,
+            ),
+        };
+        let operation = FloatingPointOperation::decode(word).unwrap().unwrap();
+        let block = CompilationPlan::new(
+            &word.to_le_bytes(),
+            GuestAddress(PC),
+            &stela_compiler::Options::new(
+                BlockProfile::new(Features::SYSTEM_MODE),
+                TargetCpu::Baseline,
+            ),
+        )
+        .unwrap()
+        .compile()
+        .unwrap();
+        let mapping = Mapping::new(&stela_compiler::x86_64::pinned::entered(
+            &block.native.x86_64_code,
+        ))
+        .unwrap();
+        let sign = 1 << (format.bits() - 1);
+        for (first, ordinary) in [
+            (0, true),
+            (sign, true),
+            (infinity, true),
+            (infinity | sign, true),
+            (one, true),
+            (1, false),
+            (infinity | 1, false),
+            (infinity | quiet, false),
+        ] {
+            for fpcr in [
+                0,
+                FPCR_AH | FPCR_DN | FPCR_FZ | FPCR_FZ16,
+                FPCR_EXCEPTION_ENABLE_MASK,
+            ] {
+                let mut state = GuestState {
+                    fpcr,
+                    fpsr: FPSR_QC,
+                    ..GuestState::default()
+                };
+                // Signaling NaNs in the inactive high half cannot cause a fallback.
+                for lane in 0..128 / format.bits() {
+                    write_lane(
+                        &mut state.v[1],
+                        format.bits(),
+                        lane,
+                        if lane < lanes { one } else { infinity | 1 },
+                    );
+                }
+                write_lane(&mut state.v[1], format.bits(), 0, first);
+                let mut actual = state.clone();
+                let mut expected = state.clone();
+                let expected_result = complete(&mut expected, &operation);
+                // SAFETY: baseline non-memory code accesses only the provided frame.
+                let exit = unsafe { mapping.call_block(&mut actual) }.unwrap();
+                if ordinary && expected_result.is_ok() {
+                    assert_eq!(exit.kind, ExitKind::Fallthrough as u64);
+                    assert_eq!(exit.next_pc, PC + 4);
+                } else {
+                    assert_eq!(exit.kind, ExitKind::FloatingPoint as u64);
+                    assert_eq!(exit.next_pc, PC);
+                    assert_eq!(actual, state);
+                    assert_eq!(complete(&mut actual, &operation), expected_result);
+                }
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+}
+
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
 mod fused_native;
 mod half_conversion_native;

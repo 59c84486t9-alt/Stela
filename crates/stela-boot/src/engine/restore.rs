@@ -738,8 +738,16 @@ impl Experiment {
     }
     /// Read ahead from the host's storage, without the guest's devices.
     pub fn pump(&mut self) {
-        if !self.terminal {
-            self.driver.answers.store.reader_mut().pump();
+        let source = self.driver.answers.store.reader_mut();
+        if self.terminal {
+            // The service owns the restore and its network here. Retire the
+            // remote range outside the device lock and leave queued disk I/O
+            // to its existing owner.
+            if let Some(remote) = source.remote.take() {
+                remote.borrow_mut().retire();
+            }
+        } else {
+            source.pump();
         }
     }
 
@@ -799,7 +807,7 @@ impl Experiment {
         if let Some(proxy) = &mut self.proxy {
             proxy.poll(&mut client);
         }
-        let result = self.driver.poll_ports(&mut client);
+        let result = self.driver.poll_prefetched(&mut client);
         self.backpressure = client.backpressure();
         for message in &self.driver.session.ledger()[self.ledger..] {
             output::arguments(format_args!("{label} ledger={message:?}\n"));

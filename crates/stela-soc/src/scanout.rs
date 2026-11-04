@@ -81,6 +81,17 @@ pub trait Scanout {
     /// An error leaves presentation uncommitted; the owner may retry the same
     /// swap. Validate fallible inputs before publishing host-visible pixels.
     fn present(&mut self, rows: &[u8]) -> Result<()>;
+
+    /// Present a frame from an ordered producer, keeping each row hidden
+    /// until the whole frame is ready. Call the producer once per row with
+    /// exactly `width * 4` bytes to fill, stopping on its first error.
+    /// A sink without a hidden buffer declines without calling the producer.
+    fn try_present_rows(
+        &mut self,
+        _fill: &mut dyn FnMut(usize, &mut [u8]) -> Result<()>,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// A host framebuffer's 32-bit pixel given as one bit mask per channel: the
@@ -218,6 +229,36 @@ impl Layer {
             premultiplied,
         })
     }
+
+    fn covers_mode(&self, mode: Mode) -> bool {
+        self.surface.format == mode.format
+            && self.source.width == mode.width
+            && self.source.height == mode.height
+            && self.destination
+                == (Rect {
+                    x: 0,
+                    y: 0,
+                    width: mode.width,
+                    height: mode.height,
+                })
+    }
+
+    fn read_row(
+        &self,
+        from_y: u64,
+        out: &mut [u8],
+        read: &mut impl FnMut(u64, &mut [u8]) -> bool,
+    ) -> Result<()> {
+        let iova = (u64::from(self.source.y) + from_y)
+            .checked_mul(self.surface.stride.into())
+            .and_then(|offset| offset.checked_add(u64::from(self.source.x) * 4))
+            .and_then(|offset| self.surface.iova.checked_add(offset))
+            .ok_or(refuse!("layer row address overflows"))?;
+        if !read(iova, out) {
+            return Err(refuse!("surface row is not reachable through its DART"));
+        }
+        Ok(())
+    }
 }
 
 /// `value * weight / 255`, rounded.
@@ -277,6 +318,89 @@ fn copy_opaque(source: &[u8], out: &mut [u8], from: PixelFormat, to: PixelFormat
     }
 }
 
+/// Copy a same-format straight-alpha row over black without reading the
+/// destination or calculating coordinates for individual pixels.
+#[inline(never)]
+fn copy_straight_over_black(pixels: &[u8], out: &mut [u8]) {
+    for (out, pixel) in out
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(pixels.as_chunks::<4>().0)
+    {
+        *out = straight_over_black(*pixel);
+    }
+}
+
+#[inline]
+fn straight_over_black(pixel: [u8; 4]) -> [u8; 4] {
+    let alpha = u32::from(pixel[3]);
+    [
+        scale(u32::from(pixel[0]), alpha) as u8,
+        scale(u32::from(pixel[1]), alpha) as u8,
+        scale(u32::from(pixel[2]), alpha) as u8,
+        0xff,
+    ]
+}
+
+/// Blend an unscaled row already in the scanout's channel order.
+#[inline(never)]
+fn blend_row(pixels: &[u8], out: &mut [u8], premultiplied: bool) {
+    const LANES: u32 = 0x00ff_00ff;
+    // Two independent 8-bit channels in 16-bit lanes. For products up to
+    // 255², the shifts give the same rounded quotient as (product + 127) / 255.
+    let scale = |lanes: u32, weight: u32| {
+        let biased = lanes * weight + 0x0080_0080;
+        ((biased + ((biased >> 8) & LANES)) >> 8) & LANES
+    };
+    for (out, pixel) in out
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(pixels.as_chunks::<4>().0)
+    {
+        let below = u32::from_le_bytes(*out);
+        let source = u32::from_le_bytes(*pixel);
+        let alpha = u32::from(pixel[3]);
+        let blend = |source: u32, below: u32| {
+            let source = source & LANES;
+            let source = if premultiplied {
+                source
+            } else {
+                scale(source, alpha)
+            };
+            let sum = source + scale(below & LANES, 255 - alpha);
+            let overflow = (sum & 0x0100_0100) >> 8;
+            (sum | (overflow * 255)) & LANES
+        };
+        let even = blend(source, below);
+        let green = blend(source >> 8, below >> 8) & 0xff;
+        *out = (even | (green << 8) | 0xff00_0000).to_le_bytes();
+    }
+}
+
+/// Present a matching fullscreen layer directly to a sink that can hide
+/// unfinished rows. Other compositions need the complete packed frame.
+pub(crate) fn present(
+    sink: &mut dyn Scanout,
+    layers: &[Layer],
+    mut read: impl FnMut(u64, &mut [u8]) -> bool,
+) -> Result<()> {
+    let mode = sink.mode();
+    if let [layer] = layers
+        && mode.format.red_blue().is_some()
+        && layer.covers_mode(mode)
+        && sink.try_present_rows(&mut |y, row| {
+            layer.read_row(y as u64, row, &mut read)?;
+            make_opaque(row, layer.premultiplied);
+            Ok(())
+        })?
+    {
+        return Ok(());
+    }
+    sink.present(&compose(layers, mode, read)?)
+}
+
 /// Compose `layers`, bottom to top, over opaque black on `mode`'s screen and
 /// return the frame for one [`Scanout::present`]: the mode's rows in its
 /// pixel order, alpha opaque. `read` fills a byte range of a surface from
@@ -298,14 +422,23 @@ pub fn compose(
     mut read: impl FnMut(u64, &mut [u8]) -> bool,
 ) -> Result<Vec<u8>> {
     let width = mode.width as usize;
-    let mut frame = [0, 0, 0, 0xff].repeat(width * mode.height as usize);
     let (red, blue) = mode
         .format
         .red_blue()
         .ok_or(refuse!("scanout mode is not an 8-bit format"))?;
+    // A matching bottom layer replaces every output pixel. Its DART rows
+    // can be read into the frame without first filling opaque black or
+    // routing the pixels through the scratch row.
+    let direct_base = layers.first().is_some_and(|layer| layer.covers_mode(mode));
+    let pixels = width * mode.height as usize;
+    let mut frame = if direct_base {
+        alloc::vec![0; pixels * 4]
+    } else {
+        [0, 0, 0, 0xff].repeat(pixels)
+    };
     let mut row = Vec::new();
     let mut drawn: Vec<([usize; 2], [usize; 2])> = Vec::new();
-    for layer in layers {
+    for (index, layer) in layers.iter().enumerate() {
         let (surface, source, destination) = (layer.surface, layer.source, layer.destination);
         let Some((xs, ys)) = on_screen(destination, mode.width, mode.height) else {
             continue;
@@ -315,19 +448,20 @@ pub fn compose(
             .iter()
             .any(|(x, y)| x[0] < xs[1] && xs[0] < x[1] && y[0] < ys[1] && ys[0] < y[1]);
         let copies = surface.format.red_blue().is_some();
-        row.resize(source.width as usize * 4, 0);
+        let direct = index == 0 && direct_base;
+        if !direct {
+            row.resize(source.width as usize * 4, 0);
+        }
         for y in ys[0]..ys[1] {
             let from_y = (2 * (y as u64 - u64::from(destination.y)) + 1) * u64::from(source.height)
                 / (2 * u64::from(destination.height));
-            let iova = (u64::from(source.y) + from_y)
-                .checked_mul(surface.stride.into())
-                .and_then(|offset| offset.checked_add(u64::from(source.x) * 4))
-                .and_then(|offset| surface.iova.checked_add(offset))
-                .ok_or(refuse!("layer row address overflows"))?;
-            if !read(iova, &mut row) {
-                return Err(refuse!("surface row is not reachable through its DART"));
-            }
             let out = &mut frame[(y * width + xs[0]) * 4..(y * width + xs[1]) * 4];
+            let input = if direct { &mut *out } else { &mut row[..] };
+            layer.read_row(from_y, input, &mut read)?;
+            if direct {
+                make_opaque(out, layer.premultiplied);
+                continue;
+            }
             if unscaled && copies {
                 let start = (xs[0] - destination.x as usize) * 4;
                 let pixels = &row[start..start + out.len()];
@@ -335,6 +469,14 @@ pub fn compose(
                     || pixels.iter().skip(3).step_by(4).all(|&alpha| alpha == 0xff)
                 {
                     copy_opaque(pixels, out, surface.format, mode.format);
+                    continue;
+                }
+                if over_black && surface.format == mode.format {
+                    copy_straight_over_black(pixels, out);
+                    continue;
+                }
+                if surface.format == mode.format {
+                    blend_row(pixels, out, layer.premultiplied);
                     continue;
                 }
             }
@@ -361,6 +503,28 @@ pub fn compose(
         drawn.push((xs, ys));
     }
     Ok(frame)
+}
+
+fn make_opaque(row: &mut [u8], premultiplied: bool) {
+    if !row.iter().skip(3).step_by(4).all(|&alpha| alpha == 0xff) {
+        opaque_over_black(row, premultiplied);
+    }
+}
+
+/// The bottom layer covers this row. Alpha is opaque after composition
+/// over black even if the source is translucent.
+#[inline(never)]
+fn opaque_over_black(row: &mut [u8], premultiplied: bool) {
+    let pixels = row.as_chunks_mut::<4>().0;
+    if premultiplied {
+        for pixel in pixels {
+            *pixel = (u32::from_le_bytes(*pixel) | 0xff00_0000).to_le_bytes();
+        }
+        return;
+    }
+    for pixel in pixels {
+        *pixel = straight_over_black(*pixel);
+    }
 }
 
 #[cfg(test)]
@@ -541,6 +705,35 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_rows_round_and_saturate_each_channel_independently() {
+        for premultiplied in [false, true] {
+            for alpha in 0..=255 {
+                for value in 0..=255 {
+                    let source = [value, 255 - value, value ^ 0x55, alpha];
+                    let below = [value ^ 0xaa, value, 255 - value, 0xff];
+                    let mut actual = below;
+                    blend_row(&source, &mut actual, premultiplied);
+                    let alpha = u32::from(alpha);
+                    let mut expected = below;
+                    for (channel, (source, below)) in
+                        source.into_iter().zip(below).take(3).enumerate()
+                    {
+                        let source = u32::from(source);
+                        let source = if premultiplied {
+                            source
+                        } else {
+                            scale(source, alpha)
+                        };
+                        expected[channel] =
+                            (source + scale(u32::from(below), 255 - alpha)).min(255) as u8;
+                    }
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_fast_paths_compose_the_frames_the_general_path_does() {
         // A seeded xorshift draws surfaces (some opaque, some with random
         // alpha) and layer stacks that mix unscaled and scaled, clipped and
@@ -618,6 +811,150 @@ mod tests {
                 "case {case}: {layers:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_full_base_composes_over_black_and_preserves_row_dma_boundaries() {
+        let base = Layer::new(
+            surface(6, 3, 32, 8),
+            Rect {
+                x: 1,
+                y: 1,
+                ..Rect::whole(4, 2)
+            },
+            Rect::whole(4, 2),
+            false,
+        )
+        .unwrap();
+        let overlay = Layer::new(
+            surface(2, 1, 8, 112),
+            Rect::whole(2, 1),
+            Rect {
+                x: 3,
+                y: 1,
+                ..Rect::whole(2, 1)
+            },
+            true,
+        )
+        .unwrap();
+        let mut memory = [0; 128];
+        for (index, byte) in memory.iter_mut().enumerate() {
+            *byte = (index as u8).wrapping_mul(37);
+        }
+        memory[47] = 0;
+        memory[51] = 0xff;
+        for premultiplied in [false, true] {
+            let layers = [
+                Layer {
+                    premultiplied,
+                    ..base
+                },
+                overlay,
+            ];
+            let mut reads = Vec::new();
+            let mut outputs = Vec::new();
+            let frame = compose(&layers, MODE, |iova, bytes| {
+                reads.push((iova, bytes.len()));
+                outputs.push(bytes.as_ptr());
+                reader(&memory)(iova, bytes)
+            })
+            .unwrap();
+            assert_eq!(reads, [(44, 16), (76, 16), (112, 8)]);
+            assert_eq!(
+                outputs[..2],
+                [frame.as_ptr(), frame.as_ptr().wrapping_add(16)]
+            );
+            assert_eq!(frame, reference(&layers, MODE, &memory));
+        }
+
+        // An unreachable row leaves the frame unpublished and the later
+        // overlay unread.
+        let mut reads = Vec::new();
+        assert!(
+            compose(&[base, overlay], MODE, |iova, bytes| {
+                reads.push(iova);
+                bytes[0] = 99;
+                iova != 76
+            })
+            .is_err()
+        );
+        assert_eq!(reads, [44, 76]);
+    }
+
+    #[test]
+    fn hidden_rows_preserve_fullscreen_dma_order_and_pixels() {
+        #[derive(Default)]
+        struct Hidden {
+            visible: Vec<u8>,
+            streamed: usize,
+        }
+
+        impl Scanout for Hidden {
+            fn mode(&self) -> Mode {
+                MODE
+            }
+
+            fn present(&mut self, rows: &[u8]) -> Result<()> {
+                self.visible = rows.to_vec();
+                Ok(())
+            }
+
+            fn try_present_rows(
+                &mut self,
+                fill: &mut dyn FnMut(usize, &mut [u8]) -> Result<()>,
+            ) -> Result<bool> {
+                let mut rows = [0; 32];
+                for (y, row) in rows.as_chunks_mut::<16>().0.iter_mut().enumerate() {
+                    fill(y, row)?;
+                }
+                self.streamed += 1;
+                self.present(&rows)?;
+                Ok(true)
+            }
+        }
+
+        let layer = Layer::new(
+            surface(6, 3, 32, 8),
+            Rect {
+                x: 1,
+                y: 1,
+                ..Rect::whole(4, 2)
+            },
+            Rect::whole(4, 2),
+            false,
+        )
+        .unwrap();
+        let memory: Vec<u8> = (0..112).map(|i| (i as u8).wrapping_mul(37)).collect();
+        let mut sink = Hidden::default();
+        for premultiplied in [false, true] {
+            let layers = [Layer {
+                premultiplied,
+                ..layer
+            }];
+            let old_visible = sink.visible.clone();
+            let mut reads = Vec::new();
+            assert!(
+                present(&mut sink, &layers, |iova, row| {
+                    reads.push((iova, row.len()));
+                    reader(&memory)(iova, row) && iova != 76
+                })
+                .is_err()
+            );
+            assert_eq!(reads, [(44, 16), (76, 16)]);
+            assert_eq!(sink.visible, old_visible);
+            reads.clear();
+            present(&mut sink, &layers, |iova, row| {
+                reads.push((iova, row.len()));
+                reader(&memory)(iova, row)
+            })
+            .unwrap();
+            assert_eq!(reads, [(44, 16), (76, 16)]);
+            assert_eq!(sink.visible, reference(&layers, MODE, &memory));
+        }
+        assert_eq!(sink.streamed, 2);
+        present(&mut sink, &[layer; 2], reader(&memory)).unwrap();
+        assert_eq!(sink.visible, reference(&[layer; 2], MODE, &memory));
+        assert_eq!(sink.streamed, 2);
     }
 
     #[test]

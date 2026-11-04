@@ -302,6 +302,46 @@ const HCR_TWI: u64 = 1 << 13;
 
 type TestMachine = super::super::Machine<super::super::tests::FakeHost, super::super::NoDevices>;
 
+#[test]
+fn system_access_samples_the_counter_and_interrupts_only_when_needed() {
+    const ISR_EL1: Encoding = Encoding::new(3, 0, 12, 1, 0);
+    const CNTV_TVAL_EL0: Encoding = Encoding::new(3, 3, 14, 3, 0);
+    const CNTV_CTL_EL0: Encoding = Encoding::new(3, 3, 14, 3, 1);
+    use crate::machine::timer::ENABLE;
+
+    let mut machine = machine_on(Chip::AppleM2, &[]);
+    machine.cpu.pstate = Pstate::reset(1);
+    let reads = machine.host.counter_reads;
+    let queries = machine.statistics.line_queries;
+
+    machine
+        .system_instruction(access(true, MIDR_EL1, 0))
+        .unwrap();
+    machine.system_instruction(TLBI_VMALLE1).unwrap();
+    assert_eq!(machine.host.counter_reads, reads);
+    assert_eq!(machine.statistics.line_queries, queries);
+
+    machine.host.now = 1000;
+    machine.cpu.state.x[1] = 10;
+    machine
+        .system_instruction(access(false, CNTV_TVAL_EL0, 1))
+        .unwrap();
+    assert_eq!(machine.cpu.read(Register::CNTV_CVAL_EL0), 1010);
+    assert_eq!(machine.host.counter_reads, reads + 1);
+    assert_eq!(machine.statistics.line_queries, queries);
+
+    machine.cpu.state.x[1] = ENABLE;
+    machine
+        .system_instruction(access(false, CNTV_CTL_EL0, 1))
+        .unwrap();
+    machine.host.now = 1010;
+    machine
+        .system_instruction(access(true, ISR_EL1, 0))
+        .unwrap();
+    assert_eq!(machine.cpu.state.x[0] & (1 << 6), 1 << 6);
+    assert_eq!(machine.statistics.line_queries, queries + 1);
+}
+
 fn el2_trap(machine: &mut TestMachine, word: u32) -> u64 {
     machine.cpu.pc = BASE;
     machine.cpu.pstate = Pstate::reset(1);
@@ -2082,13 +2122,10 @@ fn el1_traps_to_el2(
         .iter()
         .flat_map(|accessor| (0..1u64 << accessor.index.len()).map(move |m| (accessor, m)))
         .map(|(accessor, m)| {
-            let lines = machine.lines();
-            let now = machine.now();
             let mut context = Access {
                 machine: &mut machine,
                 rt: 0,
-                lines,
-                now,
+                now: None,
                 result: None,
                 translation: Translation::Unchanged,
                 regime: false,

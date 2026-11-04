@@ -75,6 +75,19 @@ pub enum WakeState {
 pub unsafe trait Timer {
     fn check(&self) -> Result<(), Error>;
     fn wait_us(&self, microseconds: u64) -> Result<(), Error>;
+    /// Start a nonblocking minimum interval, when the same source can retain
+    /// and revalidate it. A returned interval has the same physical guarantee
+    /// as `wait_us` and owns the source through every poll.
+    fn begin_interval(
+        &self,
+        _microseconds: u64,
+    ) -> Result<Option<alloc::boxed::Box<dyn Interval>>, Error> {
+        Ok(None)
+    }
+}
+pub trait Interval {
+    /// True only after the retained source proves the requested real interval.
+    fn elapsed(&self) -> Result<bool, Error>;
 }
 // SAFETY: a shared timer is the same timer.
 unsafe impl<T: Timer + ?Sized> Timer for alloc::rc::Rc<T> {
@@ -83,6 +96,12 @@ unsafe impl<T: Timer + ?Sized> Timer for alloc::rc::Rc<T> {
     }
     fn wait_us(&self, microseconds: u64) -> Result<(), Error> {
         (**self).wait_us(microseconds)
+    }
+    fn begin_interval(
+        &self,
+        microseconds: u64,
+    ) -> Result<Option<alloc::boxed::Box<dyn Interval>>, Error> {
+        (**self).begin_interval(microseconds)
     }
 }
 /// The original endpoint configuration, platform power/exclusion and timing

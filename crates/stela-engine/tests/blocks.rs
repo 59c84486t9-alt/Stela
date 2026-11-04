@@ -77,6 +77,81 @@ mod numerical {
     }
 
     #[test]
+    fn packed_truncation_retires_from_native_status_with_input_flushing_disabled() -> Result<()> {
+        use stela_compiler::aarch64::floating::{
+            FPCR_AH, FPCR_FIZ, FPCR_FZ, Format,
+            integer::{IntegerFormat, IntegerRounding, IntegerWidth, to_integer},
+        };
+
+        let cache = tempfile::tempdir()?;
+        let mut runtime = BlockRuntime::new_for_target(
+            76,
+            cache.path().into(),
+            BlockProfile::ORDINARY,
+            TargetCpu::Baseline,
+        );
+        // FCVTZS V0.4S,V1.4S and FCVTZS V2.2S,V2.2S.
+        runtime.register_code(
+            GuestAddress(BASE),
+            words(&[ADD_ONE, 0x4ea1_b820, 0x0ea1_b842, ADD_ONE, RET]),
+        )?;
+        let pack = |low: u32, high: u32| u64::from(low) | (u64::from(high) << 32);
+        let integer = IntegerFormat {
+            width: IntegerWidth::Bits32,
+            signed: true,
+        };
+        let small = [0, 0x8000_0000, 1, 0x807f_ffff];
+        let normals = [0x3fe0_0000, 0xc020_0000, 0x4eff_ffff, 0xcf00_0000];
+        for (fpcr, lanes, helpers) in [
+            (0, small, 0),
+            (FPCR_AH, small, 0),
+            (FPCR_FZ, small, 1),
+            (FPCR_FIZ, small, 1),
+            (FPCR_AH | FPCR_FZ, small, 1),
+            (FPCR_FZ | FPCR_FIZ, normals, 0),
+            (0, normals, 0),
+            (0, [0x7f80_0001, 0x7fc0_1234, 0xc020_0000, 0xff80_0000], 1),
+            (0, [0x4f00_0000, 0xcf00_0001, 1, 0x8000_0000], 1),
+        ] {
+            let mut thread = input(false);
+            thread.registers.fpcr = fpcr;
+            thread.registers.v[1] = [pack(lanes[0], lanes[1]), pack(lanes[2], lanes[3])];
+            let low_lane = if fpcr & (FPCR_FZ | FPCR_FIZ) == 0 {
+                0x8000_0000
+            } else {
+                0x3f80_0000
+            };
+            thread.registers.v[2] = [pack(low_lane, 0x4080_0000), 0x7f80_0001_7f80_0001];
+            let mut expected = thread.registers.clone();
+            let converted = lanes.map(|lane| {
+                let result = to_integer(
+                    Format::Single,
+                    integer,
+                    0,
+                    IntegerRounding::TowardZero,
+                    fpcr,
+                    u64::from(lane),
+                )
+                .expect("supported FP controls");
+                expected.fpsr |= result.exceptions;
+                result.bits as u32
+            });
+            expected.x[0] += 2;
+            expected.v[0] = [
+                pack(converted[0], converted[1]),
+                pack(converted[2], converted[3]),
+            ];
+            expected.v[2] = [pack(u32::from(low_lane == 0x3f80_0000), 4), 0];
+            // SAFETY: the program only operates on its own registered code and state.
+            let report = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
+            assert_eq!(report.reason, StopReason::StopAddress);
+            assert_eq!(report.floating_point_helpers, helpers);
+            assert_eq!(thread.registers, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn interior_half_helper_resumes_after_prefix_and_reuses_disk_code() -> Result<()> {
         let cache = tempfile::tempdir()?;
         let source = words(&[ADD_ONE, FADD_S0_S1_S2, FADD_H3_H4_H5, FMUL_D6_D7_D8, RET]);
@@ -247,6 +322,95 @@ mod numerical {
             if rounding > 0 {
                 assert!(done.disk_cache_hits > 0);
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn finite_half_widening_stays_native_for_both_source_halves() -> Result<()> {
+        use stela_compiler::aarch64::floating::{FPCR_AH, FPCR_AHP, FPCR_FZ, FPCR_FZ16};
+
+        let cache = tempfile::tempdir()?;
+        let mut runtime = BlockRuntime::new_for_target(
+            74,
+            cache.path().into(),
+            BlockProfile::ORDINARY,
+            TargetCpu::Baseline,
+        );
+        // FCVTL V0.4S,V1.4H and FCVTL2 V2.4S,V1.8H.
+        runtime.register_code(
+            GuestAddress(BASE),
+            words(&[ADD_ONE, 0x0e21_7820, 0x4e21_7822, ADD_ONE, RET]),
+        )?;
+        let mut initial = input(false);
+        initial.registers.fpcr = FPCR_AH | FPCR_AHP | FPCR_FZ | FPCR_FZ16;
+        initial.registers.v[1] = [0x3c00_0001_8000_0000, 0x0000_c000_0400_8001];
+        let mut expected = initial.registers.clone();
+        expected.x[0] += 2;
+        expected.v[0] = [0x8000_0000_0000_0000, 0x3f80_0000_3380_0000];
+        expected.v[2] = [0x3880_0000_b380_0000, 0x0000_0000_c000_0000];
+        let mut thread = initial.clone();
+        // SAFETY: the program only operates on its own registered code and state.
+        let report = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
+        assert_eq!(report.reason, StopReason::StopAddress);
+        assert_eq!(report.floating_point_helpers, 0);
+        assert_eq!(thread.registers, expected);
+
+        initial.registers.fpcr |= INVALID << EXCEPTION_ENABLE_SHIFT;
+        let mut prefix = initial.registers.clone();
+        prefix.x[0] += 1;
+        // SAFETY: the program only operates on its own registered code and state.
+        let report = unsafe { runtime.run(&mut initial, Some(GuestAddress(STOP)), 8)? };
+        assert_eq!(
+            report.reason,
+            StopReason::FloatingPointUnsupported {
+                instruction_pc: GuestAddress(BASE + 4),
+                fpcr: prefix.fpcr,
+                enabled_exceptions: INVALID,
+            },
+        );
+        assert_eq!(initial.pc, GuestAddress(BASE + 4));
+        assert_eq!(initial.registers, prefix);
+        Ok(())
+    }
+
+    #[test]
+    fn vector_self_comparison_exits_only_for_exceptional_lanes() -> Result<()> {
+        let cache = tempfile::tempdir()?;
+        let mut runtime = BlockRuntime::new_for_target(
+            75,
+            cache.path().into(),
+            BlockProfile::ORDINARY,
+            TargetCpu::Baseline,
+        );
+        // FCMEQ V0.4S,V1.4S,V1.4S and FCMEQ V2.2S,V2.2S,V2.2S.
+        runtime.register_code(
+            GuestAddress(BASE),
+            words(&[ADD_ONE, 0x4e21_e420, 0x0e22_e442, ADD_ONE, RET]),
+        )?;
+        for exceptional in [false, true] {
+            let mut thread = input(false);
+            thread.registers.v[1] = if exceptional {
+                [0x8000_0000_7fc0_0001, 0x7f80_0000_7f80_0001]
+            } else {
+                [0x8000_0000_0000_0000, 0xff80_0000_7f80_0000]
+            };
+            // The aliased 2S form clears the old signaling NaNs in the high half.
+            thread.registers.v[2] = [0x3f80_0000_8000_0000, 0x7f80_0001_7f80_0001];
+            let mut expected = thread.registers.clone();
+            expected.x[0] += 2;
+            expected.v[2] = [u64::MAX, 0];
+            if exceptional {
+                expected.v[0] = [0xffff_ffff_0000_0000; 2];
+                expected.fpsr |= INVALID;
+            } else {
+                expected.v[0] = [u64::MAX; 2];
+            }
+            // SAFETY: the program only operates on its own registered code and state.
+            let report = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
+            assert_eq!(report.reason, StopReason::StopAddress);
+            assert_eq!(report.floating_point_helpers, usize::from(exceptional));
+            assert_eq!(thread.registers, expected);
         }
         Ok(())
     }

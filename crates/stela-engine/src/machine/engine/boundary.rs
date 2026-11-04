@@ -17,6 +17,14 @@ pub trait LocalRegisters: Send + Sync {
     fn storage(&self, encoding: Encoding) -> Option<u64>;
 }
 
+/// Equal, consecutive native code ranges a host reclaims as whole parts.
+#[derive(Clone, Copy)]
+pub struct CodePartitions {
+    pub base: usize,
+    pub bytes_per_part: usize,
+    pub parts: usize,
+}
+
 /// The x86 machine beneath the engine: guest RAM, native code, shadow
 /// translation, time and waiting.
 pub trait Host {
@@ -60,6 +68,14 @@ pub trait Host {
 
     /// Read guest RAM. False when any byte is not RAM.
     fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool;
+
+    /// Read an aligned, little-endian guest page-table descriptor.
+    fn read_ram_descriptor(&mut self, physical: u64) -> Option<u64> {
+        let mut bytes = [0; 8];
+        self.read_ram(physical, &mut bytes)
+            .then(|| u64::from_le_bytes(bytes))
+    }
+
     /// Write guest RAM. False when any byte is not RAM.
     fn write_ram(&mut self, physical: u64, data: &[u8]) -> bool;
     /// Store `new` at `physical` if guest RAM there holds `expected`, in one
@@ -135,6 +151,12 @@ pub trait Host {
     }
     /// Free every installed block.
     fn discard_code(&mut self);
+    /// Optional layout for indexing reclaimable block slots. It must
+    /// stay fixed from the first block installation until discard, and
+    /// reclamation must return one whole part or an empty range.
+    fn code_partitions(&self) -> Option<CodePartitions> {
+        None
+    }
     /// Free the oldest part of the code arena for new code, as a ring
     /// does, and return the host addresses it held: the engine forgets
     /// every block and leaf there before installing more. `None` from a

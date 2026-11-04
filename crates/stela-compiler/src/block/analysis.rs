@@ -318,15 +318,12 @@ pub(super) fn parse(
                 });
                 continue;
             }
-            if let Some(decoded) =
-                system::decode_system_mode_instruction(pc, word).map_err(|error| {
-                    BlockAnalysisError {
-                        pc,
-                        encoding: Some(word),
-                        kind: error.kind,
-                    }
-                })?
-            {
+            if let Some(decoded) = system::decode_system_mode_with_sync(pc, word, synchronization)
+                .map_err(|error| BlockAnalysisError {
+                pc,
+                encoding: Some(word),
+                kind: error.kind,
+            })? {
                 // The shared lane executes these through the existing typed
                 // all-writer memory service, not the single-agent CPU monitor.
                 let checked = checked_memory

@@ -22,8 +22,8 @@ use crate::metal::{
     },
     reflection::Binding,
     shader::{
-        CompiledShader, Compiler, Interface, LinkedFunction, Linking, Reflection, Specialization,
-        Stage, Tessellation, TessellationStages, Varying,
+        CompiledShader, Compiler, Interface, LinkedFunction, Linking, PreparedFunction, Reflection,
+        Specialization, Stage, Tessellation, TessellationStages, Varying,
     },
     stitching::StitchedGraph,
     vertex::{StageInputDescriptor, VertexDescriptor},
@@ -141,16 +141,14 @@ impl Sources {
 #[derive(Debug)]
 struct FunctionObject {
     library: LibraryId,
-    entry: String,
-    constants: Vec<(u32, Vec<u8>)>,
-    reflection: Reflection,
+    prepared: PreparedFunction,
     users: Users,
 }
 
 impl FunctionObject {
     /// The interface of a function that becomes a pipeline stage.
     fn interface(&self) -> Result<&Interface> {
-        match &self.reflection {
+        match &self.prepared.reflection {
             Reflection::Stage(interface) => Ok(interface.as_ref()),
             Reflection::Visible { .. } => Err(Error::Invalid("a visible function is not a stage")),
         }
@@ -463,14 +461,14 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         for &id in functions {
             let function = self.pipelines.functions.get(id.0)?;
             ensure(
-                matches!(function.reflection, Reflection::Visible { .. }),
+                matches!(function.prepared.reflection, Reflection::Visible { .. }),
                 "stitched functions are visible functions",
             )?;
-            let mut constants = function.constants.clone();
+            let mut constants = function.prepared.constants.clone();
             constants.sort_unstable_by_key(|&(index, _)| index);
             stitched.push(LinkedFunction {
                 library: self.pipelines.library(function.library)?,
-                entry: function.entry.clone(),
+                entry: String::from(function.prepared.entry()),
                 constants,
             });
             libraries.push(function.library);
@@ -646,11 +644,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .iter()
             .map(|&(index, value)| (index, value.value.clone()))
             .collect();
-        let specialization = Specialization {
-            constants: constants.clone(),
-            ..Specialization::default()
-        };
-        let reflection = self.compiler.reflect(compiled, entry, &specialization)?;
+        let prepared = self.compiler.prepare_function(compiled, entry, constants)?;
+        let reflection = &prepared.reflection;
         reflection.validate()?;
         for constant in reflection.constants() {
             match indexed.iter().find(|(index, _)| *index == constant.index) {
@@ -669,9 +664,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         }
         let function = FunctionObject {
             library,
-            entry: String::from(entry),
-            constants,
-            reflection,
+            prepared,
             users: Users::CREATED,
         };
         self.keep(&kept)?;
@@ -685,7 +678,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
 
     /// What the compiler reflects of a function.
     pub fn function_reflection(&self, id: FunctionId) -> Result<&Reflection> {
-        Ok(&self.pipelines.functions.get(id.0)?.reflection)
+        Ok(&self.pipelines.functions.get(id.0)?.prepared.reflection)
     }
 
     /// The bindings of a function specialized with its function constant
@@ -694,11 +687,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let function = self.pipelines.functions.get(id.0)?;
         let library = self.pipelines.library(function.library)?;
         let specialization = Specialization {
-            constants: function.constants.clone(),
+            constants: function.prepared.constants.clone(),
             ..Specialization::default()
         };
         self.compiler
-            .bindings(library, &function.entry, &specialization)
+            .bindings(library, function.prepared.entry(), &specialization)
     }
 
     pub fn function_type(&self, id: FunctionId) -> Result<FunctionType> {
@@ -706,6 +699,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .pipelines
             .functions
             .get(id.0)?
+            .prepared
             .reflection
             .function_type())
     }
@@ -765,10 +759,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         &mut self,
         id: FunctionId,
         specialization: Specialization,
-    ) -> Result<(u64, String, Specialization)> {
+    ) -> Result<Specialization> {
         let function = self.pipelines.functions.get(id.0)?;
         let library = self.pipelines.library(function.library)?;
-        let entry = function.entry.clone();
         let mut linking = specialization.linking;
         for &dependency in &self
             .pipelines
@@ -782,24 +775,20 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             }
         }
         let specialization = Specialization {
-            constants: function.constants.clone(),
+            constants: function.prepared.constants.clone(),
             linking,
             ..specialization
         };
         let samplers = self
             .compiler
-            .sampler_states(library, &entry, &specialization)?
+            .sampler_states(library, function.prepared.entry(), &specialization)?
             .into_iter()
             .map(|state| Ok((state, self.constexpr_sampler(state)?.0)))
             .collect::<Result<_>>()?;
-        Ok((
-            library,
-            entry,
-            Specialization {
-                samplers,
-                ..specialization
-            },
-        ))
+        Ok(Specialization {
+            samplers,
+            ..specialization
+        })
     }
 
     fn compile(
@@ -808,8 +797,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         specialization: Specialization,
     ) -> Result<CompiledShader> {
         let stage = self.pipelines.interface(id)?.stage;
-        let (library, entry, specialization) = self.specialize(id, specialization)?;
-        let compiled = self.compiler.compile(library, &entry, &specialization)?;
+        let specialization = self.specialize(id, specialization)?;
+        let function = &self.pipelines.functions.get(id.0)?.prepared;
+        let compiled = self.compiler.compile_prepared(function, &specialization)?;
         if compiled.interface.stage != stage {
             self.compiler.release(compiled.code);
             return Err(Error::Invalid("the compiler changed the function's stage"));
@@ -827,10 +817,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .pipelines
             .interface(id)
             .map(|interface| (interface.stage, interface.patch))?;
-        let (library, entry, specialization) = self.specialize(id, specialization)?;
+        let specialization = self.specialize(id, specialization)?;
+        let function = &self.pipelines.functions.get(id.0)?.prepared;
         let stages =
             self.compiler
-                .compile_tessellation(library, &entry, &specialization, tessellation)?;
+                .compile_prepared_tessellation(function, &specialization, tessellation)?;
         let interface = &stages.evaluation.interface;
         if (interface.stage, interface.patch) != expected {
             for code in [stages.vertex, stages.control, stages.evaluation.code] {
@@ -1440,7 +1431,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         for &id in functions() {
             let function = self.pipelines.functions.get(id.0)?;
             ensure(
-                matches!(function.reflection, Reflection::Visible { .. }),
+                matches!(function.prepared.reflection, Reflection::Visible { .. }),
                 "linked functions are visible functions",
             )?;
         }
@@ -1448,11 +1439,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             ids.iter()
                 .map(|id| {
                     let function = self.pipelines.functions.get(id.0)?;
-                    let mut constants = function.constants.clone();
+                    let mut constants = function.prepared.constants.clone();
                     constants.sort_unstable_by_key(|&(index, _)| index);
                     Ok(LinkedFunction {
                         library: self.pipelines.library(function.library)?,
-                        entry: function.entry.clone(),
+                        entry: String::from(function.prepared.entry()),
                         constants,
                     })
                 })

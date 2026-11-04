@@ -268,6 +268,63 @@ impl Processor {
         Ok(())
     }
 }
+#[cfg(feature = "diagnostics")]
+impl Processor {
+    /// Run `check` with this AP spinning for the driver's real loader-root
+    /// lock. The mailbox command cannot acknowledge a new shootdown at a
+    /// native return or take an IPI while the BSP keeps the lock.
+    ///
+    /// # Safety
+    /// `root` is the live loader root shared by the BSP and this installed AP.
+    pub(crate) unsafe fn check_driver_wait<T>(
+        &self,
+        root: u64,
+        sender: &Apic,
+        tsc_hz: u64,
+        check: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let ready = alloc::sync::Arc::new(AtomicU8::new(0));
+        let observed = ready.clone();
+        let work = Spawned(Box::new(move |_| {
+            let flags: u64;
+            // SAFETY: observes the AP mailbox's real interrupt mask.
+            unsafe { asm!("pushfq", "pop {}", out(reg) flags) };
+            if flags & (1 << 9) != 0 {
+                observed.store(2, Ordering::Release);
+                return;
+            }
+            observed.store(1, Ordering::Release);
+            // SAFETY: the live loader root and this AP's pinned local owner.
+            unsafe { crate::engine::storage::with_driver_root(root, || ()) };
+        }));
+        // SAFETY: the same live root belongs to this BSP. Keep the lock
+        // through the check and release it before collecting the AP.
+        let (pending, value) = unsafe {
+            crate::engine::storage::with_driver_root(root, || -> Result<_> {
+                let pending = self
+                    .send(work, sender, tsc_hz)
+                    .map_err(|_| refuse!("AP driver wait mailbox busy"))?;
+                let started = apic::rdtsc();
+                let value = loop {
+                    match ready.load(Ordering::Acquire) {
+                        1 => break Ok(check()),
+                        2 => {
+                            break Err(refuse!("AP driver waiter entered with interrupts enabled"));
+                        }
+                        _ if apic::rdtsc().wrapping_sub(started) >= tsc_hz => {
+                            break Err(refuse!("AP did not enter the driver wait"));
+                        }
+                        _ => core::hint::spin_loop(),
+                    }
+                };
+                Ok((pending, value))
+            })
+        }?;
+        pending.finish();
+        value
+    }
+}
+
 struct Spawned(Box<dyn FnOnce(&mut host::HostOwner) + Send>);
 impl Command for Spawned {
     type Output = ();

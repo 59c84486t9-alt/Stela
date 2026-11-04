@@ -416,13 +416,25 @@ impl AppleDevices {
         self.smc().ok()?.take_log()
     }
 
+    /// Choose per-swap display tracing or bounded presentation reports.
+    pub fn set_display_swap_tracing(&mut self, enabled: bool) {
+        for master in &self.dcp_masters {
+            if let Some(display) = self
+                .bus
+                .device_mut::<Asc>(master.asc)
+                .and_then(Asc::firmware_mut::<dcp::Coprocessor>)
+            {
+                display.set_swap_tracing(enabled);
+            }
+        }
+    }
+
     /// The next entry of a display coprocessor's log: what the guest sent
     /// the DCP model and what it answered or refused.
     pub fn take_display_log(&mut self) -> Option<DisplayLog> {
-        let ids: Vec<DeviceId> = self.dcp_masters.iter().map(|master| master.asc).collect();
-        ids.into_iter().find_map(|id| {
+        self.dcp_masters.iter().find_map(|master| {
             self.bus
-                .device_mut::<Asc>(id)
+                .device_mut::<Asc>(master.asc)
                 .and_then(Asc::firmware_mut::<dcp::Coprocessor>)
                 .and_then(dcp::Coprocessor::take_log)
         })

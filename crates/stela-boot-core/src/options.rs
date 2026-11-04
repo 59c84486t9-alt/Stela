@@ -338,6 +338,8 @@ pub struct System {
     pub traces: Vec<u64>,
     /// Log raw guarded entries, exits, exceptions and returns (`--monitor-trace`).
     pub monitor_trace: bool,
+    /// Log every display swap's DCP calls, present and callback (`--display-trace`).
+    pub display_trace: bool,
     /// Log every device access in these physical ranges (`--watch BASE,BYTES`).
     pub watches: Vec<(u64, u64)>,
     /// Guest virtual ranges the stop's report shows (`--dump BASE,BYTES`).
@@ -408,6 +410,7 @@ impl Default for System {
             breakpoints: Vec::new(),
             traces: Vec::new(),
             monitor_trace: false,
+            display_trace: false,
             watches: Vec::new(),
             dumps: Vec::new(),
         }
@@ -757,6 +760,7 @@ impl fmt::Display for System {
         line.flag("--serialized", !self.parallel && !implied_serial)?;
         line.flag("--profile", self.profile)?;
         line.flag("--monitor-trace", self.monitor_trace)?;
+        line.flag("--display-trace", self.display_trace)?;
         line.value("--network-check", self.network_check.as_deref())?;
         line.value("--audio-check", self.audio_check.map(AudioCheck::name))?;
         if self.dram_explicit {

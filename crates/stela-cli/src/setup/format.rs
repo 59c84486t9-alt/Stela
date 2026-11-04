@@ -245,39 +245,106 @@ fn volume_label(label: &str) -> Result<[u8; 11]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stela_drivers::block::RamDisk;
+    use std::ops::Range;
+    use stela_drivers::block::{BlockDevice, BlockError, Identity, Transport};
     use {stela_formats::payload::ReadAt, stela_runtime::pc::fat32::Fat32};
 
-    /// A disk holding the layout's writes over bytes that are not zero.
-    fn image(bytes: u64, block_size: u32, layout: &Layout) -> RamDisk {
-        let mut disk = RamDisk::new("USB", bytes / u64::from(block_size), block_size);
-        disk.bytes.fill(0xa5);
-        for write in &layout.writes {
-            match write {
-                Write::Bytes(at, data) => {
-                    let at = *at as usize;
-                    disk.bytes[at..at + data.len()].copy_from_slice(data);
+    /// A dirty disk with the layout's ordered writes applied only to reads.
+    struct Image<'a> {
+        identity: Identity,
+        writes: Vec<(Range<u64>, Option<&'a [u8]>)>,
+    }
+
+    impl<'a> Image<'a> {
+        fn new(bytes: u64, block_size: u32, layout: &'a Layout) -> Self {
+            let block = u64::from(block_size);
+            assert!(bytes.is_multiple_of(block));
+            let writes = layout
+                .writes
+                .iter()
+                .map(|write| {
+                    let (start, length, data) = match write {
+                        Write::Bytes(at, data) => (*at, data.len() as u64, Some(data.as_slice())),
+                        Write::Zeros(at, length) => (*at, *length, None),
+                    };
+                    let end = start.checked_add(length).expect("layout write overflows");
+                    assert!(end <= bytes, "layout write exceeds disk capacity");
+                    (start..end, data)
+                })
+                .collect();
+            Self {
+                identity: Identity {
+                    transport: Transport::Ram,
+                    location: "test".into(),
+                    model: "layout".into(),
+                    serial: "USB".into(),
+                    blocks: bytes / block,
+                    block_size,
+                    read_only: true,
+                    features: Default::default(),
+                },
+                writes,
+            }
+        }
+
+        fn read_bytes(&self, offset: u64, buffer: &mut [u8]) {
+            let end = offset + buffer.len() as u64;
+            assert!(end <= self.identity.bytes());
+            buffer.fill(0xa5);
+            for (write, data) in &self.writes {
+                let start = offset.max(write.start);
+                let end = end.min(write.end);
+                if start >= end {
+                    continue;
                 }
-                Write::Zeros(at, length) => {
-                    disk.bytes[*at as usize..(*at + *length) as usize].fill(0);
+                let output = &mut buffer[(start - offset) as usize..(end - offset) as usize];
+                if let Some(data) = data {
+                    output.copy_from_slice(
+                        &data[(start - write.start) as usize..(end - write.start) as usize],
+                    );
+                } else {
+                    output.fill(0);
                 }
             }
         }
-        disk
+    }
+
+    impl BlockDevice for Image<'_> {
+        fn identity(&self) -> &Identity {
+            &self.identity
+        }
+
+        fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+            self.identity.check(lba, buffer.len())?;
+            self.read_bytes(lba * u64::from(self.identity.block_size), buffer);
+            Ok(())
+        }
+
+        fn write(&mut self, _lba: u64, _data: &[u8]) -> Result<(), BlockError> {
+            Err(BlockError::ReadOnly)
+        }
     }
 
     /// One partition's bytes, as the FAT reader reads them.
-    struct Volume<'a>(&'a [u8]);
+    struct Volume<'a> {
+        disk: &'a Image<'a>,
+        start: u64,
+        bytes: u64,
+    }
 
     impl ReadAt for Volume<'_> {
         type Error = &'static str;
         fn len(&self) -> u64 {
-            self.0.len() as u64
+            self.bytes
         }
         fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<(), Self::Error> {
-            let at = usize::try_from(offset).map_err(|_| "offset")?;
-            let bytes = self.0.get(at..at + buffer.len()).ok_or("past the end")?;
-            buffer.copy_from_slice(bytes);
+            if offset
+                .checked_add(buffer.len() as u64)
+                .is_none_or(|end| end > self.bytes)
+            {
+                return Err("past the end");
+            }
+            self.disk.read_bytes(self.start + offset, buffer);
             Ok(())
         }
     }
@@ -297,7 +364,7 @@ mod tests {
     fn erase_creates_bootable_fat32_layout() {
         let bytes = 2u64 << 30;
         let layout = layout(bytes, 512, "STELA", &mut counter()).unwrap();
-        let mut disk = image(bytes, 512, &layout);
+        let mut disk = Image::new(bytes, 512, &layout);
         let table = gpt::read(&mut disk).unwrap();
         let [esp, data] = &table.partitions[..] else {
             panic!("{:?}", table.partitions)
@@ -310,22 +377,34 @@ mod tests {
         assert_eq!(data.first_lba * 512 % ALIGNMENT, 0);
         // The backup GPT ends the disk.
         assert!((data.last_lba + 1) * 512 <= bytes - 33 * 512);
+        let mut sector = [0; 512];
+        disk.read_bytes(bytes - 512, &mut sector);
+        assert_eq!(&sector[..8], b"EFI PART");
         assert_ne!(esp.unique, data.unique);
         // The gap before the ESP is zeroed but for the GPT.
-        assert!(
-            disk.bytes[34 * 512..ALIGNMENT as usize]
-                .iter()
-                .all(|b| *b == 0)
-        );
+        let mut buffer = [0; 4096];
+        for start in (34 * 512..ALIGNMENT).step_by(buffer.len()) {
+            let len = (ALIGNMENT - start).min(buffer.len() as u64) as usize;
+            disk.read_bytes(start, &mut buffer[..len]);
+            assert!(buffer[..len].iter().all(|&byte| byte == 0));
+        }
+        disk.read_bytes(data.last_lba * 512, &mut sector);
+        assert_eq!(sector, [0xa5; 512]);
         for (partition, label) in [(esp, b"EFI        "), (data, b"STELA      ")] {
-            let first = (partition.first_lba * 512) as usize;
-            let end = ((partition.last_lba + 1) * 512) as usize;
-            let volume = &disk.bytes[first..end];
-            assert_eq!(&volume[71..82], label);
-            assert_eq!(&volume[82..90], b"FAT32   ");
+            let first = partition.first_lba * 512;
+            disk.read_bytes(first, &mut sector);
+            assert_eq!(&sector[71..82], label);
+            assert_eq!(&sector[82..90], b"FAT32   ");
             // The backup boot sector, and an empty root directory.
-            assert_eq!(volume[..512], volume[6 * 512..7 * 512]);
-            let mut fat = Fat32::open(Volume(volume)).unwrap();
+            let mut backup = [0; 512];
+            disk.read_bytes(first + 6 * 512, &mut backup);
+            assert_eq!(sector, backup);
+            let mut fat = Fat32::open(Volume {
+                disk: &disk,
+                start: first,
+                bytes: partition.blocks() * 512,
+            })
+            .unwrap();
             assert!(fat.file("EFI/BOOT/BOOTX64.EFI").is_err());
         }
     }

@@ -16,7 +16,7 @@ use super::{
         object::{Memory, Semaphore},
     },
 };
-use alloc::vec::Vec;
+use alloc::{collections::VecDeque, vec::Vec};
 
 mod execution_sets;
 #[cfg(test)]
@@ -116,8 +116,9 @@ pub struct Device<B: Backend, C: Compiler> {
     lost: bool,
     quiesce: Option<lifecycle::QuiesceStatus>,
     /// Objects waiting for a serial to complete, with the allocation bytes
-    /// charged until their backend memory is destroyed.
-    deferred: Vec<(u64, Object, u64)>,
+    /// charged until their backend memory is destroyed. Entries follow
+    /// submission order.
+    deferred: VecDeque<(u64, Object, u64)>,
     allocated: u64,
     resources: resources::Resources,
     pipelines: pipelines::Pipelines,
@@ -163,7 +164,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             completed: 0,
             lost: false,
             quiesce: None,
-            deferred: Vec::new(),
+            deferred: VecDeque::new(),
             allocated: 0,
             resources: resources::Resources::default(),
             pipelines: pipelines::Pipelines::default(),
@@ -215,7 +216,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             self.backend.destroy(object);
             self.allocated -= allocated;
         } else {
-            self.deferred.push((self.submitted, object, allocated));
+            self.deferred.push_back((self.submitted, object, allocated));
         }
     }
 

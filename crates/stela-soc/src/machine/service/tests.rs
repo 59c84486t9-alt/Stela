@@ -124,6 +124,29 @@ fn missing_aic_resumes_original_edges_and_timestamp_after_binding() {
     );
 }
 
+#[test]
+fn completed_aic_batches_reuse_only_small_input_buffers() {
+    let mut board = AppleDevices::new();
+    board.add_aic(AIC, 32, AicLayout::V1).unwrap();
+    edge(&mut board, 1, true);
+    board.settle(0, 1, None).unwrap();
+    let capacity = board.service.inputs.capacity();
+    assert_ne!(capacity, 0);
+    edge(&mut board, 1, false);
+    board.settle(0, 2, None).unwrap();
+    assert_eq!(board.service.inputs.capacity(), capacity);
+    assert_eq!(hardware(&mut board), 0);
+    assert!(board.pending_service().is_none());
+
+    for index in 0..=RETAINED_INPUTS {
+        edge(&mut board, 1, index % 2 == 0);
+    }
+    board.settle(0, 3, None).unwrap();
+    assert_eq!(hardware(&mut board), 1 << 1);
+    assert!(board.pending_service().is_none());
+    assert_eq!(board.service.inputs.capacity(), 0);
+}
+
 fn rvbar(board: &mut AppleDevices, pe: usize) {
     board
         .add_lockdown(

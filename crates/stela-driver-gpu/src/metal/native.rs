@@ -134,13 +134,78 @@ struct Mapping {
     coherent: bool,
 }
 
+#[derive(Debug)]
+enum CommandBuffers {
+    One(vk::CommandBuffer),
+    Many(Vec<vk::CommandBuffer>),
+}
+
+impl CommandBuffers {
+    /// The pool belongs to this device and is used only by the caller.
+    fn allocate(device: &ash::Device, pool: vk::CommandPool, count: u32) -> Result<Self> {
+        let info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(count);
+        if count == 1 {
+            let mut buffer = vk::CommandBuffer::null();
+            // SAFETY: one writable handle is sufficient for the requested count.
+            unsafe {
+                (device.fp_v1_0().allocate_command_buffers)(device.handle(), &info, &mut buffer)
+            }
+            .result()
+            .map_err(failure)?;
+            return Ok(Self::One(buffer));
+        }
+        // SAFETY: ash provides output space for the requested count.
+        unsafe { device.allocate_command_buffers(&info) }
+            .map(Self::Many)
+            .map_err(failure)
+    }
+
+    fn as_slice(&self) -> &[vk::CommandBuffer] {
+        match self {
+            Self::One(buffer) => core::slice::from_ref(buffer),
+            Self::Many(buffers) => buffers,
+        }
+    }
+}
+
 /// Command buffers of one submission, freed once the queue's timeline
 /// passes `value`.
 #[derive(Debug)]
 struct InFlight {
-    buffers: Vec<vk::CommandBuffer>,
+    buffers: CommandBuffers,
     timeline: vk::Semaphore,
     value: u64,
+}
+
+impl InFlight {
+    /// Counts finished submissions from the front of the queue. Timeline
+    /// values only increase, so one observation covers consecutive
+    /// submissions that signal the same semaphore.
+    fn completed_prefix(
+        flights: &VecDeque<Self>,
+        mut observe: impl FnMut(vk::Semaphore) -> Result<u64>,
+    ) -> Result<usize> {
+        let mut observed = None;
+        let mut ready = 0;
+        for entry in flights {
+            let value = match observed {
+                Some((timeline, value)) if timeline == entry.timeline => value,
+                _ => {
+                    let value = observe(entry.timeline)?;
+                    observed = Some((entry.timeline, value));
+                    value
+                }
+            };
+            if value < entry.value {
+                break;
+            }
+            ready += 1;
+        }
+        Ok(ready)
+    }
 }
 
 /// The bindless descriptor heap: set 0 of every pipeline.
@@ -204,7 +269,7 @@ pub struct NativeBackend {
     null_sampler: vk::Sampler,
     layout: vk::PipelineLayout,
     command_pool: vk::CommandPool,
-    in_flight: Vec<InFlight>,
+    in_flight: VecDeque<InFlight>,
     mappings: BTreeMap<u64, Mapping>,
     exporter: ManuallyDrop<Box<dyn MemoryExporter>>,
     /// What each imported memory came from, and its token.
@@ -381,7 +446,7 @@ impl NativeBackend {
             null_sampler: vk::Sampler::null(),
             layout: vk::PipelineLayout::null(),
             command_pool: vk::CommandPool::null(),
-            in_flight: Vec::new(),
+            in_flight: VecDeque::new(),
             mappings: BTreeMap::new(),
             exporter: ManuallyDrop::new(exporter),
             imports: BTreeMap::new(),
@@ -676,27 +741,45 @@ impl NativeBackend {
 
     /// Frees the command buffers of submissions the queue has finished.
     fn reclaim(&mut self) -> Result<()> {
-        let mut finished = Vec::new();
-        let mut index = 0;
-        while index < self.in_flight.len() {
-            let entry = &self.in_flight[index];
+        // Leave the queue intact if observing a completion fails.
+        let ready = InFlight::completed_prefix(&self.in_flight, |timeline| {
             // SAFETY: the timeline semaphore is alive while submissions use it.
-            let value = unsafe { self.device.get_semaphore_counter_value(entry.timeline) }
-                .map_err(failure)?;
-            if value >= entry.value {
-                finished.extend(self.in_flight.swap_remove(index).buffers);
-            } else {
-                index += 1;
-            }
-        }
-        if !finished.is_empty() {
-            // SAFETY: the queue finished every command buffer in `finished`.
-            unsafe {
-                self.device
-                    .free_command_buffers(self.command_pool, &finished)
-            };
-        }
+            unsafe { self.device.get_semaphore_counter_value(timeline) }.map_err(failure)
+        })?;
+        self.free_completed(ready);
         Ok(())
+    }
+
+    fn free_completed(&mut self, ready: usize) {
+        if ready == 0 {
+            return;
+        }
+        let buffers = if ready == 1 {
+            self.in_flight
+                .pop_front()
+                .expect("a ready submission")
+                .buffers
+        } else {
+            let mut completed = self.in_flight.drain(..ready);
+            let first = completed.next().expect("a ready submission").buffers;
+            let mut buffers = match first {
+                CommandBuffers::One(buffer) => {
+                    let mut buffers = Vec::with_capacity(ready);
+                    buffers.push(buffer);
+                    buffers
+                }
+                CommandBuffers::Many(buffers) => buffers,
+            };
+            for entry in completed {
+                buffers.extend_from_slice(entry.buffers.as_slice());
+            }
+            CommandBuffers::Many(buffers)
+        };
+        // SAFETY: the queue finished every command buffer in `buffers`.
+        unsafe {
+            self.device
+                .free_command_buffers(self.command_pool, buffers.as_slice())
+        };
     }
 }
 
@@ -1360,8 +1443,20 @@ impl Backend for NativeBackend {
     }
 
     fn semaphore_value(&mut self, semaphore: Semaphore) -> Result<u64> {
+        let timeline = handle(semaphore.0);
         // SAFETY: the semaphore is alive.
-        unsafe { self.device.get_semaphore_counter_value(handle(semaphore.0)) }.map_err(failure)
+        let value =
+            unsafe { self.device.get_semaphore_counter_value(timeline) }.map_err(failure)?;
+        // The Metal completion poll already observed this timeline. Free the
+        // prefix it proves complete so the next submission need not query it
+        // again just to free these command buffers.
+        let ready = self
+            .in_flight
+            .iter()
+            .take_while(|entry| entry.timeline == timeline && entry.value <= value)
+            .count();
+        self.free_completed(ready);
+        Ok(value)
     }
 
     fn signal_semaphore(&mut self, semaphore: Semaphore, value: u64) -> Result<()> {
@@ -1391,15 +1486,12 @@ impl Backend for NativeBackend {
         if segments.is_empty() {
             return Ok(());
         }
-        let info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(self.command_pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(segments.len() as u32);
-        // SAFETY: the pool belongs to this device and is used only here.
-        let buffers = unsafe { self.device.allocate_command_buffers(&info) }.map_err(failure)?;
+        let buffers =
+            CommandBuffers::allocate(&self.device, self.command_pool, segments.len() as u32)?;
+        let handles = buffers.as_slice();
         let new_images = core::mem::take(&mut self.new_images);
         let recorded =
-            buffers
+            handles
                 .iter()
                 .zip(segments)
                 .enumerate()
@@ -1407,19 +1499,19 @@ impl Backend for NativeBackend {
                     let adopt = if index == 0 { &new_images[..] } else { &[] };
                     record::segment(self, buffer, adopt, segment)
                 });
-        let submitted = recorded.and_then(|()| self.queue_segments(segments, &buffers));
+        let submitted = recorded.and_then(|()| self.queue_segments(segments, handles));
         if let Err(error) = submitted {
             // Some segments may have reached the queue. A failed idle query
             // leaves their buffers owned by the command pool until device
             // teardown can prove idleness.
-            let _ = free_after_idle(&self.device, self.queue, self.command_pool, &buffers);
+            let _ = free_after_idle(&self.device, self.queue, self.command_pool, handles);
             self.new_images = new_images;
             return Err(error);
         }
         // A commit appends the queue's completion signal last.
         let completion = segments.last().and_then(|segment| segment.signals.last());
         match completion {
-            Some(&(timeline, value)) => self.in_flight.push(InFlight {
+            Some(&(timeline, value)) => self.in_flight.push_back(InFlight {
                 buffers,
                 timeline: handle(timeline.0),
                 value,
@@ -1427,7 +1519,7 @@ impl Backend for NativeBackend {
             // Without a completion signal the buffers are free only once the
             // queue idles.
             None => {
-                free_after_idle(&self.device, self.queue, self.command_pool, &buffers)?;
+                free_after_idle(&self.device, self.queue, self.command_pool, handles)?;
             }
         }
         Ok(())
@@ -1481,6 +1573,31 @@ fn flush(
     submitted.map_err(failure)
 }
 
+/// Keep the Vulkan packet for a single ordinary segment on the stack.
+fn submit_single_segment(
+    device: &ash::Device,
+    queue: vk::Queue,
+    segments: &[Segment],
+    buffers: &[vk::CommandBuffer],
+) -> Option<Result<()>> {
+    let ([segment], [buffer]) = (segments, buffers) else {
+        return None;
+    };
+    if !segment.binds.is_empty() || segment.waits.len() > 1 || segment.signals.len() > 1 {
+        return None;
+    }
+    let wait = segment.waits.first().copied().map(objects::semaphore);
+    let signal = segment.signals.first().copied().map(objects::semaphore);
+    let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(*buffer)];
+    let submits = [vk::SubmitInfo2::default()
+        .wait_semaphore_infos(wait.as_slice())
+        .command_buffer_infos(&commands)
+        .signal_semaphore_infos(signal.as_slice())];
+    // SAFETY: the backend owns the queue and recorded buffer. All packet
+    // arrays stay alive for the call, which consumes their contents.
+    Some(unsafe { device.queue_submit2(queue, &submits, vk::Fence::null()) }.map_err(failure))
+}
+
 impl NativeBackend {
     /// Submits the recorded segments in order. A segment with sparse binds
     /// splits the submission: the queue signals the bind timeline once
@@ -1491,6 +1608,10 @@ impl NativeBackend {
         segments: &[Segment],
         buffers: &[vk::CommandBuffer],
     ) -> Result<()> {
+        if let Some(submitted) = submit_single_segment(&self.device, self.queue, segments, buffers)
+        {
+            return submitted;
+        }
         let bound: Vec<Option<u64>> = segments
             .iter()
             .map(|segment| {

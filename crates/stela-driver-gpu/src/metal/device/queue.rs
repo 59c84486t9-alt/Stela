@@ -22,7 +22,7 @@ use crate::metal::{
     },
     binding::ResourceId,
     command_buffer::{
-        BufferRef, CommandBuffer, ComputePipelineState, DynamicFeatures, MappedRange, Recording,
+        BufferRef, CommandBuffer, ComputePipelineState, DynamicFeatures, MappedRange,
         RenderPipelineState, Resolver, Segment,
         counters::{self, CounterRange, CounterSample, STATISTIC_SAMPLE_BYTES},
         generated::{GeneratedLayoutKey, IndirectRenderClass},
@@ -51,8 +51,11 @@ use crate::metal::{
 };
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 
-/// Queries per occlusion, statistics or timestamp pool.
+/// Queries per encoder attachment pool.
 const POOL_QUERIES: u32 = 256;
+
+/// Start and end timestamps for one command buffer.
+const COMPLETION_QUERIES: u32 = 2;
 
 /// Completed command buffers whose GPU times are kept.
 const TIMES_KEPT: usize = 1024;
@@ -86,9 +89,15 @@ struct InFlight {
     chunks: Vec<Chunk>,
     pools: Vec<(QueryType, QueryPool)>,
     invalidations: Vec<MappedRange>,
-    /// The pool, among `pools`, whose first two queries time the command
-    /// buffer.
+    /// The dedicated pool that times the command buffer.
     times: Option<QueryPool>,
+}
+
+#[derive(Debug)]
+struct FreeQueryPool {
+    query_type: QueryType,
+    count: u32,
+    pool: QueryPool,
 }
 
 /// Segments of a committed command buffer that the host submits: either all
@@ -109,8 +118,8 @@ pub(super) struct Queue {
     /// Upload chunks with their memory; free ones are reused.
     chunks: Vec<(Chunk, Memory)>,
     free_chunks: Vec<Chunk>,
-    free_pools: Vec<(QueryType, QueryPool)>,
-    in_flight: Vec<InFlight>,
+    free_pools: Vec<FreeQueryPool>,
+    in_flight: VecDeque<InFlight>,
     events: Slab<Semaphore>,
     counters: Slab<CounterBuffer>,
     /// Committed work not yet submitted, in commit order.
@@ -377,28 +386,50 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .and_then(|()| commands.finish(&mut self.resolver(), completion));
         let recording = commands.into_recording();
         if let Err(error) = finished.and_then(|()| self.check_mappings(&recording.mappings)) {
-            self.recycle(recording);
+            self.recycle(recording.uploads, recording.query_pools);
             return Err(error);
         }
-        let mut held = self.hold(serial, recording.segments, recording.mappings)?;
-        let mut pools = recording.query_pools;
-        let times = self.time(&mut held)?;
-        pools.extend(times.map(|pool| (QueryType::Timestamp, pool)));
+        let mut times = None;
+        let prepared = (|| {
+            let mut held = self.hold(serial, recording.segments, recording.mappings)?;
+            times = self.time(&mut held)?;
+            let mut chunks = Vec::with_capacity(recording.uploads.len());
+            for (chunk, bytes) in &recording.uploads {
+                let memory = self.chunk_memory(chunk.buffer)?;
+                self.backend.write_memory(memory, 0, bytes)?;
+                chunks.push(*chunk);
+            }
+            Ok((held, chunks))
+        })();
+        let (mut held, chunks) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.recycle(recording.uploads, recording.query_pools);
+                if let Some(pool) = times {
+                    // The recording never reached the queue, so the pool
+                    // remains reset and can be returned without a GPU call.
+                    self.queue.free_pools.push(FreeQueryPool {
+                        query_type: QueryType::Timestamp,
+                        count: COMPLETION_QUERIES,
+                        pool,
+                    });
+                }
+                if error == Error::DeviceLost {
+                    self.mark_lost();
+                }
+                return Err(error);
+            }
+        };
         // CPU-copy writes reach the images first, after the opening barrier
-        // and outside the command buffer's GPU times.
+        // and outside the command buffer's GPU times. Keep pending copies
+        // available for the next commit until preparation succeeds.
         let uploads = self.take_cpu_copy_uploads();
         held[0].segments[0].commands.splice(1..1, uploads);
-        let mut chunks = Vec::with_capacity(recording.uploads.len());
-        for (chunk, bytes) in &recording.uploads {
-            let memory = self.chunk_memory(chunk.buffer)?;
-            self.backend.write_memory(memory, 0, bytes)?;
-            chunks.push(*chunk);
-        }
         self.submitted = serial;
-        self.queue.in_flight.push(InFlight {
+        self.queue.in_flight.push_back(InFlight {
             serial,
             chunks,
-            pools,
+            pools: recording.query_pools,
             invalidations: recording.invalidations,
             times,
         });
@@ -413,7 +444,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         if self.capabilities.timestamp_frequency == 0 {
             return Ok(None);
         }
-        let (pool, _) = self.resolver().query_pool(QueryType::Timestamp)?;
+        let pool = self.take_query_pool(QueryType::Timestamp, COMPLETION_QUERIES)?;
         held[0].segments[0].commands.insert(
             1,
             Command::WriteTimestamp {
@@ -433,6 +464,38 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(Some(pool))
     }
 
+    fn take_query_pool(&mut self, query_type: QueryType, count: u32) -> Result<QueryPool> {
+        let free = &mut self.queue.free_pools;
+        if let Some(index) = free
+            .iter()
+            .position(|entry| entry.query_type == query_type && entry.count == count)
+        {
+            return Ok(free.swap_remove(index).pool);
+        }
+        let statistics = if query_type == QueryType::PipelineStatistics {
+            counters::STATISTICS
+        } else {
+            PipelineStatistics::EMPTY
+        };
+        let info = QueryPoolInfo {
+            query_type,
+            count,
+            statistics,
+        };
+        let pool = self.backend.create_query_pool(&info)?;
+        self.backend.reset_queries(pool, 0, count);
+        Ok(pool)
+    }
+
+    fn retire_query_pool(&mut self, pool: QueryPool, query_type: QueryType, count: u32) {
+        self.backend.reset_queries(pool, 0, count);
+        self.queue.free_pools.push(FreeQueryPool {
+            query_type,
+            count,
+            pool,
+        });
+    }
+
     /// `GPUStartTime` and `GPUEndTime` of the completed command buffer with
     /// `serial`, in timestamp ticks; the latest [`TIMES_KEPT`] are kept.
     pub fn command_buffer_times(&self, serial: u64) -> Result<[u64; 2]> {
@@ -450,15 +513,22 @@ impl<B: Backend, C: Compiler> Device<B, C> {
 
     /// Drops a command buffer that will not be committed.
     pub fn discard(&mut self, commands: CommandBuffer) {
-        self.recycle(commands.into_recording());
+        let recording = commands.into_recording();
+        self.recycle(recording.uploads, recording.query_pools);
     }
 
     /// Takes back the upload chunks and query pools of a recording that was
     /// never submitted, so its queries are still reset.
-    fn recycle(&mut self, recording: Recording) {
-        let chunks = recording.uploads.into_iter().map(|(chunk, _)| chunk);
+    fn recycle(&mut self, uploads: Vec<(Chunk, Vec<u8>)>, pools: Vec<(QueryType, QueryPool)>) {
+        let chunks = uploads.into_iter().map(|(chunk, _)| chunk);
         self.queue.free_chunks.extend(chunks);
-        self.queue.free_pools.extend(recording.query_pools);
+        self.queue
+            .free_pools
+            .extend(pools.into_iter().map(|(query_type, pool)| FreeQueryPool {
+                query_type,
+                count: POOL_QUERIES,
+                pool,
+            }));
     }
 
     fn check_mappings(&self, mappings: &[(usize, Mapping)]) -> Result<()> {
@@ -635,12 +705,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             return Ok(());
         }
         self.completed = completed;
-        let (done, pending): (Vec<_>, Vec<_>) = core::mem::take(&mut self.queue.in_flight)
-            .into_iter()
-            .partition(|flight| flight.serial <= completed);
-        self.queue.in_flight = pending;
         let mut outcome = Ok(());
-        for flight in done {
+        while let Some(flight) = self
+            .queue
+            .in_flight
+            .pop_front_if(|flight| flight.serial <= completed)
+        {
             // Before deferred destruction, which may free the memory.
             for range in flight.invalidations {
                 outcome = outcome.and(self.backend.invalidate_memory(
@@ -657,18 +727,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                     Ok(false) => {}
                     Err(error) => outcome = outcome.and(Err(error)),
                 }
+                self.retire_query_pool(pool, QueryType::Timestamp, COMPLETION_QUERIES);
             }
             self.queue.free_chunks.extend(flight.chunks);
             for (query_type, pool) in flight.pools {
-                self.backend.reset_queries(pool, 0, POOL_QUERIES);
-                self.queue.free_pools.push((query_type, pool));
+                self.retire_query_pool(pool, query_type, POOL_QUERIES);
             }
         }
-        let (ready, waiting): (Vec<_>, Vec<_>) = core::mem::take(&mut self.deferred)
-            .into_iter()
-            .partition(|(serial, _, _)| *serial <= completed);
-        self.deferred = waiting;
-        for (_, object, allocated) in ready {
+        while let Some((_, object, allocated)) = self
+            .deferred
+            .pop_front_if(|(serial, _, _)| *serial <= completed)
+        {
             self.backend.destroy(object);
             self.allocated -= allocated;
         }
@@ -979,22 +1048,7 @@ impl<B: Backend, C: Compiler> Resolver for DeviceResolver<'_, B, C> {
     }
 
     fn query_pool(&mut self, query_type: QueryType) -> Result<(QueryPool, u32)> {
-        let free = &mut self.device.queue.free_pools;
-        if let Some(index) = free.iter().position(|&(free, _)| free == query_type) {
-            return Ok((free.swap_remove(index).1, POOL_QUERIES));
-        }
-        let statistics = if query_type == QueryType::PipelineStatistics {
-            counters::STATISTICS
-        } else {
-            PipelineStatistics::EMPTY
-        };
-        let info = QueryPoolInfo {
-            query_type,
-            count: POOL_QUERIES,
-            statistics,
-        };
-        let pool = self.device.backend.create_query_pool(&info)?;
-        self.device.backend.reset_queries(pool, 0, POOL_QUERIES);
+        let pool = self.device.take_query_pool(query_type, POOL_QUERIES)?;
         Ok((pool, POOL_QUERIES))
     }
 

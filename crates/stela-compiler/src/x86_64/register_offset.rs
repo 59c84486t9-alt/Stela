@@ -145,7 +145,10 @@ fn transfer(code: &mut Code, operand: &Operand) {
         MemoryTransfer::Load { signed, width } => {
             let size = Size::of(width == Width::X64);
             let address = Mem::base(Gpr::Rax, 0);
-            let host = code.host(operand.data).unwrap_or(Gpr::Rcx);
+            // The result may replace the address in RAX. This leaves it
+            // available to the next instruction, with no base writeback.
+            let scratch = if code.is_pinned() { Gpr::Rax } else { Gpr::Rcx };
+            let host = code.host(operand.data).unwrap_or(scratch);
             let mut asm = code.asm();
             asm.guest_access(|asm| match (operand.bytes, signed) {
                 (1, false) => asm.movzx(size, host, Size::Byte, address),
@@ -160,10 +163,10 @@ fn transfer(code: &mut Code, operand: &Operand) {
                 _ => unreachable!("decoder validates signed register-offset size"),
             });
             // A load to ZR still accesses memory and can fault.
-            if host == Gpr::Rcx
+            if host == scratch
                 && let Some(data) = asm.guest(operand.data)
             {
-                asm.mov_store(Size::Qword, data, Gpr::Rcx);
+                asm.mov_store(Size::Qword, data, host);
             }
         }
     }

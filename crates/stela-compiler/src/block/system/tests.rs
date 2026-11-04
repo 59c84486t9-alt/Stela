@@ -203,8 +203,16 @@ fn system_mode_claims_cpa_arithmetic_with_its_operands() {
 fn system_mode_claims_exclusives_and_their_undefined_overlaps() {
     use crate::aarch64::exclusive::{ConstrainedUndefined, Operand};
     let pc = GuestAddress(0x1000);
-    // LDXR X1, [X2]; STXR W3, X1, [X2]; LDAXP X1, X4, [X2]; CLREX.
-    for word in [0xc85f_7c41, 0xc803_7c41, 0xc87f_9041, 0xd503_305f] {
+    // LDXRB/H, LDXR W/X, STXR, LDAXP and CLREX.
+    for word in [
+        0x085f_7c41,
+        0x485f_7c41,
+        0x885f_7c41,
+        0xc85f_7c41,
+        0xc803_7c41,
+        0xc87f_9041,
+        0xd503_305f,
+    ] {
         let instruction = decode_system_mode_instruction(pc, word).unwrap().unwrap();
         assert!(
             matches!(instruction.operation, SystemOperation::Exclusive(Ok(_))),
@@ -231,8 +239,8 @@ fn system_mode_claims_exclusives_and_their_undefined_overlaps() {
 #[test]
 fn system_mode_claims_unprivileged_transfers_but_not_reserved_forms() {
     let pc = GuestAddress(0x1000);
-    // LDTR X1, [X2, #8]; STTR W1, [X2]; LDTRSB W3, [X2].
-    for word in [0xf840_8841, 0xb800_0841, 0x38c0_0843] {
+    // LDTR X1, [X2, #8]; STTR W1, [X2]; LDTRSH and LDTRSB W3, [X2].
+    for word in [0xf840_8841, 0xb800_0841, 0x78c0_0843, 0x38c0_0843] {
         let instruction = decode_system_mode_instruction(pc, word).unwrap().unwrap();
         assert!(
             matches!(instruction.operation, SystemOperation::Unprivileged(_)),

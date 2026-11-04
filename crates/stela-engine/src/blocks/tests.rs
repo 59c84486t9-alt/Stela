@@ -648,6 +648,208 @@ mod resident {
         Ok(runtime)
     }
 
+    #[test]
+    fn ordinary_address_pair_respects_standalone_entry_and_truncated_source() -> Result<()> {
+        const ADRP: u32 = 0xb000_0000; // adrp x0, BASE+0x1000
+        const ADD: u32 = 0x9100_2000; // add x0, x0, #8
+        let cache = tempfile::tempdir()?;
+        let add_pc = GuestAddress(BASE.0 + 4);
+        let mut runtime = ordinary(cache.path(), &[ADRP, ADD, RET_X30])?;
+        for (entry, value) in [(BASE, BASE.0 + 0x1008), (add_pc, 5)] {
+            let mut state = thread(u64::MAX - 2);
+            state.pc = entry;
+            let mut expected = state.registers.clone();
+            expected.x[0] = value;
+            // SAFETY: pure register instructions and RET to STOP.
+            let outcome = unsafe { runtime.run(&mut state, Some(STOP), 1)? };
+            assert_eq!(outcome.blocks_executed, 1);
+            assert_eq!(state.registers, expected);
+            assert_eq!(state.pc, STOP);
+        }
+        let map = &runtime.loaded_manifest(BASE).unwrap().source_map;
+        assert_eq!(map[..2], [(BASE, 0), (add_pc, 10)]);
+        assert_eq!(
+            runtime.loaded_manifest(add_pc).unwrap().source_map[0],
+            (add_pc, 0)
+        );
+
+        let mut truncated = ordinary(cache.path(), &[ADRP])?;
+        let mut state = thread(100);
+        let mut expected = state.registers.clone();
+        expected.x[0] = BASE.0 + 0x1000;
+        // SAFETY: the truncated input contains only ADRP.
+        let outcome = unsafe { truncated.run(&mut state, Some(add_pc), 1)? };
+        assert_eq!(outcome.blocks_executed, 1);
+        assert_eq!(state.registers, expected);
+        assert_eq!(state.pc, add_pc);
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_wide_constant_respects_standalone_and_truncated_entries() -> Result<()> {
+        const MOVN: u32 = 0x92c0_0000 | (0xabcd << 5);
+        const MOVK_LOW: u32 = 0xf2a0_0000 | (0x1234 << 5);
+        const MOVK_HIGH: u32 = 0xf2e0_0000 | (0x5678 << 5);
+        const INITIAL: u64 = 0x9876_1357_9abc_def0;
+        let cache = tempfile::tempdir()?;
+        let second = GuestAddress(BASE.0 + 4);
+        let third = GuestAddress(BASE.0 + 8);
+        let mut runtime = ordinary(cache.path(), &[MOVN, MOVK_LOW, MOVK_HIGH, RET_X30])?;
+        for (entry, value) in [
+            (BASE, 0x5678_5432_1234_ffff),
+            (second, 0x5678_1357_1234_def0),
+            (third, 0x5678_1357_9abc_def0),
+        ] {
+            let mut state = thread(INITIAL);
+            state.pc = entry;
+            let mut expected = state.registers.clone();
+            expected.x[0] = value;
+            // SAFETY: only register instructions and RET to STOP.
+            let outcome = unsafe { runtime.run(&mut state, Some(STOP), 1)? };
+            assert_eq!(outcome.blocks_executed, 1);
+            assert_eq!(state.registers, expected);
+            assert_eq!(state.pc, STOP);
+        }
+        let map = &runtime.loaded_manifest(BASE).unwrap().source_map;
+        assert_eq!(map[..3], [(BASE, 0), (second, 1), (third, 11)]);
+        for (words, stop, value) in [
+            (&[MOVN][..], second, 0xffff_5432_ffff_ffff),
+            (&[MOVN, MOVK_LOW][..], third, 0xffff_5432_1234_ffff),
+        ] {
+            let mut truncated = ordinary(cache.path(), words)?;
+            let mut state = thread(INITIAL);
+            let mut expected = state.registers.clone();
+            expected.x[0] = value;
+            // SAFETY: the truncated inputs contain only register instructions.
+            let outcome = unsafe { truncated.run(&mut state, Some(stop), 1)? };
+            assert_eq!(outcome.blocks_executed, 1);
+            assert_eq!(state.registers, expected);
+            assert_eq!(state.pc, stop);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_trailing_zero_pair_respects_truncated_source_and_standalone_entry() -> Result<()> {
+        const RBIT: u32 = 0xdac0_0000; // rbit x0, x0
+        const CLZ: u32 = 0xdac0_1000; // clz x0, x0
+        let cache = tempfile::tempdir()?;
+        let clz_pc = GuestAddress(BASE.0 + 4);
+        let mut runtime = ordinary(cache.path(), &[RBIT, CLZ, RET_X30])?;
+
+        for (entry, result) in [(BASE, 4), (clz_pc, 59)] {
+            let mut state = thread(16);
+            state.pc = entry;
+            let mut expected = state.registers.clone();
+            expected.x[0] = result;
+            // SAFETY: pure register instructions and RET to STOP.
+            let outcome = unsafe { runtime.run(&mut state, Some(STOP), 1)? };
+            assert_eq!(outcome.blocks_executed, 1);
+            assert_eq!(state.registers, expected);
+            assert_eq!(state.pc, STOP);
+        }
+        let mut truncated = ordinary(cache.path(), &[RBIT])?;
+        let mut state = thread(16);
+        let mut expected = state.registers.clone();
+        expected.x[0] = 0x0800_0000_0000_0000;
+        // SAFETY: the truncated input contains only RBIT.
+        let outcome = unsafe { truncated.run(&mut state, Some(clz_pc), 1)? };
+        assert_eq!(outcome.blocks_executed, 1);
+        assert_eq!(state.registers, expected);
+        assert_eq!(state.pc, clz_pc);
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_direct_ram_loop_keeps_budget_state_and_cached_source_map() -> Result<()> {
+        const BODY: [u32; 7] = [
+            0xf940_0022, // ldr x2, [x1]
+            0xf940_0423, // ldr x3, [x1, #8]
+            SUBS_X0_ONE,
+            0x9100_4021, // add x1, x1, #16
+            0x8b02_0084, // add x4, x4, x2
+            0x8b03_0084, // add x4, x4, x3
+            0x54ff_ff41, // b.ne BASE
+        ];
+        const BRK: u32 = 0xd420_0120;
+        const DATA: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+        let words: Vec<_> = BODY.into_iter().chain([BRK]).collect();
+        let next = GuestAddress(BASE.0 + (BODY.len() * size_of::<u32>()) as u64);
+        let mut input = DATA.to_vec();
+        let base = input.as_mut_ptr() as u64;
+        let iterations = DATA.len() / 2;
+        let initial = || {
+            let mut state = thread(iterations as u64);
+            state.registers.x[1] = base;
+            state
+        };
+        let expected = |completed: usize| {
+            let mut state = initial().registers;
+            if completed != 0 {
+                let last = completed * 2 - 2;
+                state.x[0] -= completed as u64;
+                state.x[1] += (completed * 2 * size_of::<u64>()) as u64;
+                state.x[2] = DATA[last];
+                state.x[3] = DATA[last + 1];
+                state.x[4] = state.x[4].wrapping_add(DATA[..last + 2].iter().sum());
+                state.nzcv = ARM_CARRY | if completed == iterations { ARM_ZERO } else { 0 };
+            }
+            state
+        };
+        let cache = tempfile::tempdir()?;
+        let mut runtime = ordinary(cache.path(), &words)?;
+        for budget in 0..=iterations {
+            let mut state = initial();
+            // SAFETY: each iteration reads two aligned, live elements of
+            // input before advancing the pointer. The loop writes no RAM.
+            let outcome = unsafe { runtime.run(&mut state, Some(next), budget)? };
+            assert_eq!(outcome.blocks_executed, budget);
+            assert_eq!(state.registers, expected(budget));
+            if budget == iterations {
+                assert_eq!(state.pc, next);
+                assert_eq!(outcome.reason, StopReason::StopAddress);
+            } else {
+                assert_eq!(state.pc, BASE);
+                assert_eq!(outcome.reason, StopReason::BudgetExhausted);
+            }
+        }
+
+        let manifest = runtime.loaded_manifest(BASE).unwrap();
+        let source: Vec<_> = BODY.into_iter().flat_map(u32::to_le_bytes).collect();
+        assert_eq!(
+            manifest.identity.source_sha256,
+            stela_formats::sha256(&source)
+        );
+        assert_eq!(
+            manifest.identity.abi,
+            BlockProfile::new(Features::RESIDENT_LOOPS).abi()
+        );
+        assert_eq!(manifest.source_map[0], (BASE, 0));
+        assert_eq!(manifest.source_map.len(), BODY.len());
+        assert!(manifest.source_map.windows(2).all(|pair| {
+            pair[1].0.0 - pair[0].0.0 == size_of::<u32>() as u64 && pair[1].1 > pair[0].1
+        }));
+        let mut reload = ordinary(cache.path(), &words)?;
+        let mut state = initial();
+        // SAFETY: the same immutable array and source, followed by a BRK
+        // that returns a modeled trap instead of accessing memory.
+        let outcome = unsafe { reload.run(&mut state, None, iterations + 1)? };
+        assert_eq!(outcome.blocks_executed, iterations + 1);
+        assert_eq!(outcome.disk_cache_hits, 1);
+        assert_eq!(
+            reload.loaded_manifest(BASE).unwrap().source_map,
+            manifest.source_map
+        );
+        assert_eq!(state.registers, expected(iterations));
+        assert_eq!(state.pc, next);
+        assert!(
+            matches!(outcome.reason, StopReason::SynchronousTrap { trap }
+            if trap.kind == stela_compiler::block::TrapKind::SoftwareBreakpoint
+                && trap.instruction_pc == next && trap.immediate == 9)
+        );
+        Ok(())
+    }
+
     fn crc_thread() -> (ThreadState, GuestState) {
         let mut state = thread(0);
         state.registers.x[8] = 0x1234_5678_0000_0000 | u64::from(CRC_INITIAL);

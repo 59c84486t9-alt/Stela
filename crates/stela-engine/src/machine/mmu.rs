@@ -409,6 +409,9 @@ pub struct Translation {
     pub readable: bool,
     pub writable: bool,
     pub executable: bool,
+    /// PAN masks this requester's data permissions for this translation.
+    /// The classification is available even while PSTATE.PAN is clear.
+    pub pan_sensitive: bool,
     /// FEAT_BTI: the stage-1 leaf's GP bit for a location executable at the
     /// requesting EL (Arm `InGuardedPage`).
     pub guarded: bool,
@@ -500,12 +503,26 @@ pub fn par(outcome: &Outcome) -> Option<u64> {
     }
 }
 
-/// Whether `access` is permitted by (readable, writable, executable).
-fn permits(rights: (bool, bool, bool), access: Access) -> bool {
-    match access {
-        Access::Read => rights.0,
-        Access::Write => rights.1,
-        Access::Execute => rights.2,
+/// Stage-1 access rights and whether PAN masks the data rights.
+struct PagePermissions {
+    readable: bool,
+    writable: bool,
+    executable: bool,
+    pan_sensitive: bool,
+}
+
+impl PagePermissions {
+    fn permits(&self, access: Access) -> bool {
+        match access {
+            Access::Read => self.readable,
+            Access::Write => self.writable,
+            Access::Execute => self.executable,
+        }
+    }
+
+    #[cfg(test)]
+    fn rights(self) -> (bool, bool, bool) {
+        (self.readable, self.writable, self.executable)
     }
 }
 

@@ -233,13 +233,15 @@ impl LookupTable {
 
     /// The entry of `pc` in `context`'s set for `slot`: one in `context` if
     /// there is one, as a thunk would find it, else one in another context.
+    #[inline]
     pub fn find(&self, slot: usize, pc: u64, context: u64) -> LookupEntry {
-        let (first, second) = (self[slot], self[neighbour(slot)]);
-        if second.pc == pc && (first.pc != pc || first.context != context) {
-            second
-        } else {
-            first
+        let set = &self.0[slot / 2].0;
+        let first = &set[slot % 2];
+        if first.pc == pc && first.context == context {
+            return *first;
         }
+        let second = &set[(slot % 2) ^ 1];
+        if second.pc == pc { *second } else { *first }
     }
 
     /// Put `entry` in the slot its PC and context pick, and what held it

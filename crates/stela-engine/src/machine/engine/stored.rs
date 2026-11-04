@@ -156,6 +156,7 @@ impl Offer {
     }
     /// Off-path preparation from canonical immutable input. No native template
     /// or copied site can be supplied; this owner emits the block itself.
+    #[cfg(test)]
     pub(crate) fn compile(
         key: Digest,
         page: u64,
@@ -224,22 +225,49 @@ impl Offer {
     /// addresses of its page, proven to move only by them
     /// ([`translations::prove`](crate::translations::prove)).
     pub fn prove(&self) -> Option<crate::translations::Entry> {
-        let probes = crate::translations::probe_displacements(self.page).map(|displacement| {
-            self.preparation()
-                .compile_input(self.input(), self.pc.wrapping_add(displacement))
-                .ok()
-        });
-        let [Some(first), Some(second)] = &probes else {
-            return None;
-        };
-        crate::translations::prove(
+        Self::prove_block(
             self.block(),
             self.input(),
             self.page,
             self.pc,
             self.context,
-            [first, second],
+            self.preparation(),
         )
+    }
+
+    /// A pending source window owns no installed emission. Compile it for
+    /// proof without building an owned offer for other PEs.
+    pub(crate) fn prove_input(
+        input: &[u8],
+        page: u64,
+        pc: u64,
+        context: Digest,
+        preparation: &Preparation,
+    ) -> Option<crate::translations::Entry> {
+        if page != pc & !(PAGE_BYTES as u64 - 1) || preparation.context(page) != context {
+            return None;
+        }
+        let block = preparation.compile_input(input, pc).ok()?;
+        Self::prove_block(&block, input, page, pc, context, preparation)
+    }
+
+    fn prove_block(
+        block: &CompiledBlock,
+        input: &[u8],
+        page: u64,
+        pc: u64,
+        context: Digest,
+        preparation: &Preparation,
+    ) -> Option<crate::translations::Entry> {
+        let probes = crate::translations::probe_displacements(page).map(|displacement| {
+            preparation
+                .compile_input(input, pc.wrapping_add(displacement))
+                .ok()
+        });
+        let [Some(first), Some(second)] = &probes else {
+            return None;
+        };
+        crate::translations::prove(block, input, page, pc, context, [first, second])
     }
 }
 

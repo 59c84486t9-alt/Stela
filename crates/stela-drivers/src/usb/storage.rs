@@ -14,7 +14,9 @@ use crate::{
     },
     bus::dma::DmaAllocator,
 };
-use alloc::{format, rc::Rc, string::String, vec, vec::Vec};
+#[cfg(test)]
+use alloc::vec;
+use alloc::{format, rc::Rc, string::String, vec::Vec};
 use core::cell::{Cell, RefCell};
 mod media;
 pub use media::UsbStorage;
@@ -964,7 +966,10 @@ impl<T: Scsi> Disk<T> {
                     Command::Write { fua, .. } => (true, *fua),
                     _ => (false, false),
                 };
-                (self.cdb(write, fua, at, (length / size) as u32), length)
+                (
+                    scsi::read_write(write, fua, at, (length / size) as u32),
+                    length,
+                )
             }
             Command::Read { .. } | Command::Write { .. } => {
                 let running = self.running.as_mut().unwrap();
@@ -973,7 +978,7 @@ impl<T: Scsi> Disk<T> {
                 running.result = Some(Ok(read.then_some(data)));
                 return;
             }
-            Command::Flush if running.done == 0 => (scsi::synchronize_cache().to_vec(), 0),
+            Command::Flush if running.done == 0 => (scsi::Cdb::Ten(scsi::synchronize_cache()), 0),
             Command::Flush => {
                 self.running.as_mut().unwrap().result = Some(Ok(None));
                 return;
@@ -987,13 +992,14 @@ impl<T: Scsi> Disk<T> {
         let begun = {
             let running = self.running.as_ref().unwrap();
             let mut bot = self.bot.borrow_mut();
+            let cdb = cdb.as_ref();
             match &running.command {
                 Command::Write { data, .. } => {
                     let part = &data[running.done..running.done + length];
-                    bot.begin(self.lun, &cdb, Data::Out(part))
+                    bot.begin(self.lun, cdb, Data::Out(part))
                 }
-                Command::Read { .. } => bot.begin(self.lun, &cdb, Data::In(length)),
-                _ => bot.begin(self.lun, &cdb, Data::None),
+                Command::Read { .. } => bot.begin(self.lun, cdb, Data::In(length)),
+                _ => bot.begin(self.lun, cdb, Data::None),
             }
         };
         let running = self.running.as_mut().unwrap();
@@ -1028,35 +1034,11 @@ impl<T: Scsi> Disk<T> {
             let (chunk, rest) = remaining.split_at(length);
             remaining = rest;
             let blocks = (chunk.len() / size) as u32;
-            let cdb = self.cdb(true, fua, lba, blocks);
-            self.io(&cdb, Data::Out(chunk))?;
+            let cdb = scsi::read_write(true, fua, lba, blocks);
+            self.io(cdb.as_ref(), Data::Out(chunk))?;
             lba += u64::from(blocks);
         }
         Ok(())
-    }
-
-    /// READ or WRITE of `blocks` at `lba`, (10) when it fits, else (16),
-    /// with Force Unit Access when `fua`.
-    fn cdb(&self, write: bool, fua: bool, lba: u64, blocks: u32) -> Vec<u8> {
-        let flags = if fua { scsi::FUA } else { 0 };
-        if lba
-            .checked_add(u64::from(blocks))
-            .is_some_and(|end| end <= u64::from(u32::MAX) + 1)
-            && blocks <= u32::from(u16::MAX)
-        {
-            let mut cdb = vec![if write { scsi::WRITE_10 } else { scsi::READ_10 }, flags];
-            cdb.extend_from_slice(&(lba as u32).to_be_bytes());
-            cdb.push(0);
-            cdb.extend_from_slice(&(blocks as u16).to_be_bytes());
-            cdb.push(0);
-            cdb
-        } else {
-            let mut cdb = vec![if write { scsi::WRITE_16 } else { scsi::READ_16 }, flags];
-            cdb.extend_from_slice(&lba.to_be_bytes());
-            cdb.extend_from_slice(&blocks.to_be_bytes());
-            cdb.extend_from_slice(&[0, 0]);
-            cdb
-        }
     }
 }
 impl<T: Scsi> BlockDevice for Disk<T> {
@@ -1086,8 +1068,8 @@ impl<T: Scsi> BlockDevice for Disk<T> {
             let (chunk, rest) = remaining.split_at_mut(length);
             remaining = rest;
             let blocks = (chunk.len() / size) as u32;
-            let cdb = self.cdb(false, false, lba, blocks);
-            let data = self.io(&cdb, Data::In(chunk.len()))?;
+            let cdb = scsi::read_write(false, false, lba, blocks);
+            let data = self.io(cdb.as_ref(), Data::In(chunk.len()))?;
             if data.len() != chunk.len() {
                 return Err(BlockError::Protocol("short USB storage read"));
             }

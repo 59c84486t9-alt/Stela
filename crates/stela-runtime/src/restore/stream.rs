@@ -128,6 +128,34 @@ impl Framed {
         self.output
             .queue(bytes, self.limits.bytes.saturating_add(4))
     }
+    /// Queue consecutive binary FileData frames and return the final frame's
+    /// byte offset in the send buffer.
+    pub(super) fn queue_file_data<'a>(
+        &mut self,
+        chunks: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<usize> {
+        if self.failed {
+            return Err(Error::Invalid("framing stream failed"));
+        }
+        if self.output.is_pending() {
+            return Err(Error::Invalid("output already pending"));
+        }
+        let out = &mut self.output.bytes;
+        let mut last = 0;
+        for data in chunks {
+            let at = out.len();
+            last = at;
+            out.resize(at + 4, 0);
+            match plist::append_file_data(out, data, self.limits) {
+                Ok(length) => out[at..at + 4].copy_from_slice(&self.endian.encode(length)),
+                Err(error) => {
+                    out.clear();
+                    return Err(error);
+                }
+            }
+        }
+        Ok(last)
+    }
     pub fn poll_send(&mut self, s: &mut impl ByteStream) -> Poll<Result<()>> {
         if self.failed {
             return Poll::Ready(Err(Error::Invalid("framing stream failed")));
@@ -333,6 +361,51 @@ pub(crate) mod tests {
                 assert!(receive(&mut f, &mut s).is_err());
             }
         }
+    }
+    #[test]
+    fn file_data_reuses_the_frame_buffer_and_preserves_the_wire_bytes() {
+        let limits = Limits::default();
+        for endian in [Endian::Big, Endian::Little] {
+            let mut frame = Framed::new(endian, limits);
+            let mut stream = Memory::new(Vec::new(), 31);
+            for len in [8192, 0, 1, 14, 15, 8192] {
+                let data = vec![0x5a; len];
+                let expected = plist::encode_binary(
+                    &Value::dict([("FileData", Value::Data(data.clone()))]),
+                    limits,
+                )
+                .unwrap();
+                let buffer = frame.output.bytes.as_ptr();
+                let capacity = frame.output.bytes.capacity();
+                frame.queue_file_data([data.as_slice()]).unwrap();
+                if capacity >= frame.output.bytes.len() {
+                    assert_eq!(frame.output.bytes.as_ptr(), buffer);
+                }
+                assert!(frame.queue_file_data([b"pending".as_slice()]).is_err());
+                while frame.sending() {
+                    if let Poll::Ready(result) = frame.poll_send(&mut stream) {
+                        result.unwrap();
+                    }
+                }
+                assert_eq!(&stream.output[..4], &endian.encode(expected.len() as u32));
+                assert_eq!(&stream.output[4..], expected);
+                stream.output.clear();
+            }
+        }
+        let mut limited = Framed::new(
+            Endian::Big,
+            Limits {
+                bytes: 100,
+                ..limits
+            },
+        );
+        assert!(
+            limited
+                .queue_file_data([b"ok".as_slice(), &[0; 100]])
+                .is_err()
+        );
+        assert!(limited.queue_file_data([[0; 40].as_slice()]).is_err());
+        assert!(!limited.sending());
     }
     #[test]
     fn untrusted_lengths_fail_before_body_allocation() {

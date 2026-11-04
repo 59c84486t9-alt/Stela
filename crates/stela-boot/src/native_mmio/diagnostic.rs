@@ -171,10 +171,14 @@ unsafe fn check_native_hpet(
     let counter = prepared.hpet_counter().ok_or(Error::Unavailable)?.clone();
     {
         let minimum = prepared.pci_minimum()?;
+        let interval = minimum
+            .begin_interval(20)
+            .map_err(|_| Error::Unavailable)?
+            .ok_or(Error::Unavailable)?;
         let start = counter.read_irq()?;
         minimum.wait_us(20).map_err(|_| Error::Unavailable)?;
         let elapsed = counter.elapsed_bounds(counter.read_irq()?.wrapping_sub(start))?;
-        if elapsed.lower_ns < 20_000 {
+        if elapsed.lower_ns < 20_000 || !interval.elapsed().map_err(|_| Error::Unavailable)? {
             return Err(Error::InvalidPlatformReply.into());
         }
     }

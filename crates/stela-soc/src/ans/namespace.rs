@@ -222,22 +222,19 @@ impl Medium {
         Ok(())
     }
 
-    /// The host address of a read of `blocks` blocks of namespace `id` at
-    /// `lba`, for the host disk to serve later, and the byte ranges of it
-    /// that read as zeros; no address when every block does.
-    pub fn plan_read(&self, id: u32, lba: u64, blocks: u64) -> Option<ReadPlan> {
-        let address = self.address(id, lba, blocks)?;
+    /// The already validated host address and the byte ranges of this read
+    /// that return zeros. Omit the host read when every block returns zero.
+    pub fn plan_read(&self, address: u64, blocks: u64) -> ReadPlan {
         let start = address / self.host_blocks_per_lba;
         let end = start + blocks;
         let at = |block: u64| ((block - start) * u64::from(BLOCK_BYTES)) as usize;
-        Some(ReadPlan {
-            address: (!self.erased.covers(start, end)).then_some(address),
-            zeros: self
-                .erased
-                .overlapping(start, end)
-                .map(|(s, e)| (at(s), at(e)))
-                .collect(),
-        })
+        let mut overlaps = self.erased.overlapping(start, end).peekable();
+        let all_erased = overlaps.peek() == Some(&(start, end))
+            || (start == end && self.erased.covers(start, end));
+        ReadPlan {
+            address: (!all_erased).then_some(address),
+            zeros: overlaps.map(|(s, e)| (at(s), at(e))).collect(),
+        }
     }
 
     /// `blocks` blocks of namespace `id` at `lba` were written: they hold
@@ -404,6 +401,36 @@ mod tests {
         let host = disk.window(0, blocks).unwrap();
         let medium = Medium::new(Box::new(disk.window(0, blocks).unwrap()), &records).unwrap();
         (medium, host)
+    }
+
+    #[test]
+    fn read_plans_distinguish_erased_blocks_from_untouched_and_partial_reads() {
+        for block_size in [512, 4096] {
+            let (mut medium, _) = erasable(block_size);
+            medium.deallocate(2, 10, 5).unwrap();
+            medium.deallocate(2, 20, 2).unwrap();
+            let block = BLOCK_BYTES as usize;
+            for (lba, blocks, host, zeros) in [
+                (8, 2, true, &[][..]),
+                (10, 4, false, &[(0, 4 * block)]),
+                (9, 14, true, &[(11 * block, 13 * block), (block, 6 * block)]),
+                (15, 0, false, &[]),
+                (19, 0, true, &[]),
+            ] {
+                let address = medium.address(2, lba, blocks).unwrap();
+                let plan = medium.plan_read(address, blocks);
+                assert_eq!(plan.address, host.then_some(address));
+                assert_eq!(plan.zeros, zeros);
+                let mut expected = alloc::vec![0x5a; blocks as usize * block];
+                for &(start, end) in zeros {
+                    expected[start..end].fill(0);
+                }
+                assert_eq!(
+                    plan.finish(expected.len(), Some(alloc::vec![0x5a; expected.len()])),
+                    expected
+                );
+            }
+        }
     }
 
     #[test]

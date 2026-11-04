@@ -508,15 +508,14 @@ pub(super) fn image_to_memory(
         .image_extent(extent(region.extent))
 }
 
-/// Timeline waits or signals of a submission, at every stage.
+/// A timeline wait or signal of a submission, at every stage.
+pub(super) fn semaphore((semaphore, value): (Semaphore, u64)) -> vk::SemaphoreSubmitInfo<'static> {
+    vk::SemaphoreSubmitInfo::default()
+        .semaphore(handle(semaphore.0))
+        .value(value)
+        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+}
+
 pub(super) fn semaphores(values: &[(Semaphore, u64)]) -> Vec<vk::SemaphoreSubmitInfo<'static>> {
-    values
-        .iter()
-        .map(|&(semaphore, value)| {
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(handle(semaphore.0))
-                .value(value)
-                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-        })
-        .collect()
+    values.iter().copied().map(semaphore).collect()
 }
