@@ -788,6 +788,7 @@ pub struct Machine<H: Host, D: Devices> {
     mirrors: alloc::boxed::Box<Mirrors>,
     /// The chip's `Chip::admit`, indexed.
     admit_table: Arc<AdmitTable>,
+    system_decode: system_access::DecodeCache,
     /// The watched pages the host keeps unmapped.
     watch: Watch,
     /// The context the host last isolated predictions for.
@@ -1022,6 +1023,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pointer: alloc::boxed::Box::new(pointer::PointerService::new()),
             mirrors: alloc::boxed::Box::default(),
             admit_table,
+            system_decode: system_access::DecodeCache::default(),
             watch: Watch::default(),
             prediction_context: None,
             current: boot_processor,
