@@ -157,7 +157,9 @@ pub(super) fn run<H: Host>(
         if !machine.runs_parallel() || quiet || service::starved(tsc_hz, requested) {
             machine.exclude_host_time(|_| service::serve(true));
         }
+        service.parts.lap(ServiceParts::SERVICE, host::rdtsc());
         machine.exclude_host_time(|_| super::gpu::pump());
+        service.parts.lap(ServiceParts::PUMP, host::rdtsc());
         if service::shutdown_pending() {
             machine.exclude_host_time(|_| service::serve(true));
         }
@@ -335,6 +337,8 @@ impl ServiceTimes {
         self.gap = 0;
         self.longest = 0;
         self.parts.longest = [0; ServiceParts::PARTS];
+        self.parts.total = [0; ServiceParts::PARTS];
+        self.parts.sliced = 0;
     }
 }
 
@@ -943,39 +947,52 @@ pub(super) fn sample_report(samples: &mut Vec<[u64; CHAIN]>, user: u32) {
 pub(super) struct ServiceParts {
     pub(super) at: u64,
     pub(super) longest: [u64; Self::PARTS],
+    /// Each part's ticks in all since the last beat.
+    pub(super) total: [u64; Self::PARTS],
+    /// The guest's slices' ticks since the last beat.
+    pub(super) sliced: u64,
 }
 
 impl ServiceParts {
-    const PARTS: usize = 3;
+    const PARTS: usize = 4;
     const REPORTS: usize = 0;
     const SERVICE: usize = 1;
     const BEAT: usize = 2;
-    const NAMES: [&str; Self::PARTS] = ["reports", "service", "beat"];
+    /// The host's Linux work, which the GPU's interrupts and timers bring.
+    const PUMP: usize = 3;
+    const NAMES: [&str; Self::PARTS] = ["reports", "service", "beat", "pump"];
 
     pub(super) fn new(now: u64) -> Self {
         Self {
             at: now,
             longest: [0; Self::PARTS],
+            total: [0; Self::PARTS],
+            sliced: 0,
         }
     }
 
     pub(super) fn start(&mut self, now: u64) {
+        self.sliced += now.wrapping_sub(self.at);
         self.at = now;
     }
 
     /// The part `part` ended at `now`.
     pub(super) fn lap(&mut self, part: usize, now: u64) {
-        self.longest[part] = self.longest[part].max(now.wrapping_sub(self.at));
+        let spent = now.wrapping_sub(self.at);
+        self.longest[part] = self.longest[part].max(spent);
+        self.total[part] += spent;
         self.at = now;
     }
 
     pub(super) fn report(&self, tsc_hz: u64) -> String {
+        let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz);
         let mut line = String::from("longest_us");
         for (name, ticks) in Self::NAMES.iter().zip(self.longest) {
-            line.push_str(&format!(
-                " {name}={}",
-                u128::from(ticks) * 1_000_000 / u128::from(tsc_hz)
-            ));
+            line.push_str(&format!(" {name}={}", micros(ticks)));
+        }
+        line.push_str(&format!(" total_us sliced={}", micros(self.sliced)));
+        for (name, ticks) in Self::NAMES.iter().zip(self.total) {
+            line.push_str(&format!(" {name}={}", micros(ticks)));
         }
         line
     }
