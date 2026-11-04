@@ -73,6 +73,10 @@
 /kernel/sched/cpupri.h
 /kernel/sched/cpudeadline.h
 /kernel/sched/cpudeadline.c
+/kernel/sched/deadline.c
+/kernel/sched/rt.c
+/kernel/sched/pelt.c
+/kernel/sched/autogroup.h
 /kernel/sched/cpupri.c
 /kernel/sched/features.h
 /kernel/sched/stats.h

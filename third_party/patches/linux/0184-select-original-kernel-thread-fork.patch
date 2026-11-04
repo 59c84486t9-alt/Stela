@@ -1,0 +1,291 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 05:33:39 -0500
+Subject: [PATCH] fix(fork): select the original kernel-thread path for Stela
+
+---
+ kernel/fork.c                  | 50 +++++++++++++++++++++++++++++-
+ kernel/sched/deadline.c        |  1 +
+ kernel/sched/fork_sources.json | 56 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 106 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 5c414d20aabed9a078ee6f8b5799cfc7732397cb..a7a8a5501e895f7eb591abe09729f74bf9a11ac9 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -126,9 +126,15 @@
+ 
+ #include <trace/events/sched.h>
+ 
++#ifndef CONFIG_STELA
+ #define CREATE_TRACE_POINTS
++#endif
+ #include <trace/events/task.h>
+ 
++#ifdef CONFIG_STELA
++#include <stela/task.h>
++#include <stela/task_bootstrap.h>
++#else
+ #include <kunit/visibility.h>
+ 
+ void dup_mm_exe_file(struct mm_struct *mm, struct mm_struct *oldmm)
+@@ -529,6 +535,8 @@ struct mm_struct *mm_access(struct task_struct *task, unsigned int mode)
+ 	return mm;
+ }
+ 
++#endif /* !CONFIG_STELA */
++
+ static int wait_for_vfork_done(struct task_struct *child,
+ 				struct completion *vfork)
+ {
+@@ -549,6 +557,7 @@ static int wait_for_vfork_done(struct task_struct *child,
+ 	return killed;
+ }
+ 
++#ifndef CONFIG_STELA
+ /**
+  * dup_mm() - duplicates an existing mm structure
+  * @tsk: the task_struct with which the new mm will be associated.
+@@ -600,9 +609,13 @@ fail_nomem:
+ 	return NULL;
+ }
+ 
++#endif /* !CONFIG_STELA */
++
+ static int copy_mm(u64 clone_flags, struct task_struct *tsk)
+ {
++#ifndef CONFIG_STELA
+ 	struct mm_struct *mm, *oldmm;
++#endif
+ 
+ 	tsk->min_flt = tsk->maj_flt = 0;
+ 	tsk->nvcsw = tsk->nivcsw = 0;
+@@ -614,6 +627,10 @@ static int copy_mm(u64 clone_flags, struct task_struct *tsk)
+ 	tsk->mm = NULL;
+ 	tsk->active_mm = NULL;
+ 
++#ifdef CONFIG_STELA
++	/* The native fork admits kernel threads without a user mm. */
++	return current->mm ? -EOPNOTSUPP : 0;
++#else
+ 	/*
+ 	 * Are we cloning a kernel thread?
+ 	 *
+@@ -636,6 +653,7 @@ static int copy_mm(u64 clone_flags, struct task_struct *tsk)
+ 	tsk->active_mm = mm;
+ 	sched_cache_fork(tsk);
+ 	return 0;
++#endif
+ }
+ 
+ static int copy_exec_state(u64 clone_flags, struct task_struct *tsk)
+@@ -936,6 +954,12 @@ __latent_entropy struct task_struct *copy_process(
+ 	struct task_struct *p;
+ 	struct multiprocess_signals delayed;
+ 	struct file *pidfile = NULL;
++
++#ifdef CONFIG_STELA
++	retval = stela_linux_task_clone_check(args);
++	if (retval)
++		return ERR_PTR(retval);
++#endif
+ 	const u64 clone_flags = args->flags;
+ 	struct nsproxy *nsp = current->nsproxy;
+ 
+@@ -1292,7 +1316,9 @@ __latent_entropy struct task_struct *copy_process(
+ 	 * child regardless of CLONE_PTRACE.
+ 	 */
+ 	user_disable_single_step(p);
++#if defined(CONFIG_GENERIC_ENTRY) || defined(TIF_SYSCALL_TRACE)
+ 	clear_task_syscall_work(p, SYSCALL_TRACE);
++#endif
+ #if defined(CONFIG_GENERIC_ENTRY) || defined(TIF_SYSCALL_EMU)
+ 	clear_task_syscall_work(p, SYSCALL_EMU);
+ #endif
+@@ -1415,6 +1441,9 @@ __latent_entropy struct task_struct *copy_process(
+ 	}
+ 
+ 	/* No more failure paths after this point. */
++#ifdef CONFIG_STELA
++	stela_linux_task_fork_publish(p);
++#endif
+ 
+ 	/*
+ 	 * Copy seccomp details explicitly here, in case they were changed
+@@ -1471,6 +1500,9 @@ __latent_entropy struct task_struct *copy_process(
+ 		attach_pid(p, PIDTYPE_PID);
+ 		nr_threads++;
+ 	}
++#ifdef CONFIG_STELA
++	stela_linux_task_fork_visible(p);
++#endif
+ 	total_forks++;
+ 	hlist_del_init(&delayed.node);
+ 	spin_unlock(&current->sighand->siglock);
+@@ -1520,10 +1552,14 @@ bad_fork_cleanup_namespaces:
+ 	exit_nsproxy_namespaces(p);
+ bad_fork_cleanup_mm:
+ 	sched_cache_fork_cleanup(p);
++#ifdef CONFIG_STELA
++	BUG_ON(p->mm || p->active_mm);
++#else
+ 	if (p->mm) {
+ 		mm_clear_owner(p->mm, p);
+ 		mmput(p->mm);
+ 	}
++#endif
+ bad_fork_cleanup_signal:
+ 	if (!(clone_flags & CLONE_THREAD))
+ 		free_signal_struct(p->signal);
+@@ -1570,6 +1606,7 @@ fork_out:
+ 	return ERR_PTR(retval);
+ }
+ 
++#ifndef CONFIG_STELA
+ static inline void init_idle_pids(struct task_struct *idle)
+ {
+ 	enum pid_type type;
+@@ -1627,6 +1664,8 @@ struct task_struct *create_io_thread(int (*fn)(void *), void *arg, int node)
+ 	return copy_process(NULL, 0, node, &args);
+ }
+ 
++#endif /* !CONFIG_STELA */
++
+ /*
+  *  Ok, this is the main fork-routine.
+  *
+@@ -1635,13 +1674,20 @@ struct task_struct *create_io_thread(int (*fn)(void *), void *arg, int node)
+  */
+ pid_t kernel_clone(struct kernel_clone_args *args)
+ {
+-	u64 clone_flags = args->flags;
++	u64 clone_flags;
+ 	struct completion vfork;
+ 	struct pid *pid;
+ 	struct task_struct *p;
+ 	int trace = 0;
+ 	pid_t nr;
+ 
++#ifdef CONFIG_STELA
++	int error = stela_linux_task_clone_check(args);
++	if (error)
++		return error;
++#endif
++	clone_flags = args->flags;
++
+ 	/*
+ 	 * Creating an empty mount namespace implies creating a new mount
+ 	 * namespace.  Set this before copy_process() so that the
+@@ -1751,6 +1797,7 @@ pid_t kernel_thread(int (*fn)(void *), void *arg, const char *name,
+ 	return kernel_clone(&args);
+ }
+ 
++#ifndef CONFIG_STELA
+ /*
+  * Create a user mode thread.
+  */
+@@ -2296,3 +2343,4 @@ static int __init init_fork_sysctl(void)
+ }
+ 
+ subsys_initcall(init_fork_sysctl);
++#endif /* !CONFIG_STELA */
+diff --git a/kernel/sched/deadline.c b/kernel/sched/deadline.c
+index 7ae0f0cf5bb6d622927f84263190805b66ac0314..f9223bb3d892a4c60a10d31bdebe2f77e1790e91 100644
+--- a/kernel/sched/deadline.c
++++ b/kernel/sched/deadline.c
+@@ -20,6 +20,7 @@
+ #include <linux/sched/clock.h>
+ #include <linux/sched/deadline.h>
+ #include <uapi/linux/sched/types.h>
++#include <linux/sched/isolation.h>
+ #include "sched.h"
+ #include "pelt.h"
+ 
+diff --git a/kernel/sched/fork_sources.json b/kernel/sched/fork_sources.json
+index 395f4132114b58ffe5de1a97c17e73210013a385..d0050b2beae7bfd425464d51611338d30a1cedbb 100644
+--- a/kernel/sched/fork_sources.json
++++ b/kernel/sched/fork_sources.json
+@@ -311,6 +311,12 @@
+           "first_line": 3726,
+           "last_line": 3737,
+           "sha256": "2e7096799ec0346d58a5b3a97dbea9d6c5cc71fe4a0af4a49f9d818ca82ad6ff"
++        },
++        {
++          "symbol": "init_dl_entity",
++          "first_line": 3963,
++          "last_line": 3969,
++          "sha256": "9823e4fef632c0a69f2db4390bd2cd5d5f4f14666fbdc09330888260c98eee36"
+         }
+       ]
+     },
+@@ -325,6 +331,43 @@
+       "git_blob": "8f2237e8b484fbcbec297af8596ffc2788e1c6ef",
+       "sha256": "d6d4e35c48cb22a9605db489809b0afa9360bcbf2c3d82e39f7278215b5e8f68",
+       "functions": []
++    },
++    {
++      "path": "kernel/fork.c",
++      "git_blob": "854448152696b2cf87df45b11aa28559eebc209c",
++      "sha256": "4548f28fd8ee2b7f3a974260b871f3d49159a4e8b9d121be19f26e7671b65200",
++      "functions": [
++        {
++          "symbol": "copy_mm",
++          "first_line": 1567,
++          "last_line": 1603,
++          "sha256": "0c88b56169cba8005a60b2ee7ba8e2db34c675a7e2a15a6177185dae2cfe2efc"
++        },
++        {
++          "symbol": "copy_process",
++          "first_line": 1994,
++          "last_line": 2633,
++          "sha256": "ce7513abf79ea6bb05aae47badc06d9f81d1bb8f0e8a5c4a21607c19de5255c9"
++        },
++        {
++          "symbol": "kernel_clone",
++          "first_line": 2698,
++          "last_line": 2796,
++          "sha256": "d9a03a6be2cd523d2dfc1cfb109631430dd808b509194dec2809ee77500061d1"
++        },
++        {
++          "symbol": "kernel_thread",
++          "first_line": 2801,
++          "last_line": 2814,
++          "sha256": "d2118d1df85accc0ff5fd8be2e40f27d2eb7e887d65aa122cbcc64fb16543488"
++        }
++      ]
++    },
++    {
++      "path": "kernel/sched/pelt.c",
++      "git_blob": "897790889ba3821747dac964553866d30bce362f",
++      "sha256": "38f51d27379335eb7a3370c0f00262000e79c342d97d340ff92fb3f5ded3b218",
++      "functions": []
+     }
+   ],
+   "outputs": [
+@@ -415,6 +458,18 @@
+     {
+       "path": "kernel/sched/rq_class.c",
+       "sha256": "6908dd1858f2bb21c50ea3bae8c131db868ca0b4e58994d63b59e832e005305f"
++    },
++    {
++      "path": "kernel/fork.c",
++      "sha256": "58ed3a075d528f9ebc48ab125c1898b7ca29e99a75c1c8eb028620ae32a53a02"
++    },
++    {
++      "path": "kernel/sched/deadline.c",
++      "sha256": "34e9a2502dcb7b1ddb76d41ae99ffc3b30e5611064c685c704bb024c9bb20fe5"
++    },
++    {
++      "path": "kernel/sched/rt.c",
++      "sha256": "9e03a1e2281768e638d4f44e56881a02f94224eb7e11ab78a41a9dbb3ba2d482"
+     }
+   ],
+   "adaptations": [
+@@ -433,6 +488,7 @@
+     "Both profiles share the original root-domain lifecycle and runqueue membership operations. The native archive also builds unmodified CPU priority and deadline management. The original realtime bandwidth defaults and deadline bandwidth initialization have one owner in sched_ratio.c.",
+     "The regular scheduler keeps fair.c runtime accounting. Native class callbacks consume the increment of the retained Runtime sample. The native publication owns the execution total and system time. The Linux runqueue clock owns exec_start.",
+     "The original fair, RT and deadline queue constructors are shared by the regular scheduler and the native Initial task.",
++    "The native archive builds the kernel-thread branch of original fork.c and keeps its resource constructors and unwind. Native copy_process uses the existing stack, admission, dormant publication, and activation hooks. The regular kernel retains its user process and memory-management paths.",
+     "This manifest records source provenance only; it does not establish compilation, linking, execution or native admission."
+   ]
+ }
