@@ -12,6 +12,7 @@ fn par_reports_the_output_attributes_or_the_fault() {
         readable: true,
         writable: true,
         executable: false,
+        pan_sensitive: false,
         guarded: false,
         global: true,
         asid: 0,
@@ -262,6 +263,107 @@ fn stage_one_tables_and_output_translate_through_stage_two() {
         par(&Outcome::Fault(walk)),
         Some(1 << 11 | 1 << 9 | 1 << 8 | 0b00_0101 << 1 | 1)
     );
+}
+
+#[test]
+fn pan_shadow_classification_includes_stage_two_read_permissions() {
+    let (controls, mut tables) = two_stages(0x8000_0000);
+    // The table walk still uses the original read/write block. The data
+    // access uses the next block, writable but unreadable at stage 2.
+    tables.0.insert(0x10_0010, STAGE2_BLOCK & !(1 << 6));
+    let Outcome::Mapped(mapped) = translate(&controls, 0x1234, Access::Write, KERNEL, &mut tables)
+    else {
+        panic!("stage 2 must permit the write");
+    };
+    assert!(!mapped.readable && mapped.writable && !mapped.pan_sensitive);
+    let pan = Requester {
+        pan: true,
+        ..KERNEL
+    };
+    let Outcome::Fault(fault) = translate(&controls, 0x1234, Access::Read, pan, &mut tables) else {
+        panic!("stage 2 must deny the read");
+    };
+    assert_eq!(fault.kind, FaultKind::Permission);
+    assert!(fault.second_stage.is_some());
+}
+
+#[test]
+fn device_tlb_uses_stage_two_permissions_and_rewalks_after_maintenance() {
+    let (controls, mut tables) = two_stages(0x8000_0000);
+    let slot = 0x10_0010;
+    let address = 0x1234;
+    let mut tlb = translated::Tlb::default();
+    // The first-stage walk remains readable. The data output is write-only.
+    tables.0.insert(slot, STAGE2_BLOCK & !(1 << 6));
+    let Outcome::Mapped(mapped) = translate(&controls, address, Access::Write, KERNEL, &mut tables)
+    else {
+        panic!("stage 2 must permit the write");
+    };
+    tlb.record_device(address, KERNEL, mapped);
+    assert_eq!(
+        tlb.device_physical(address, KERNEL, true),
+        Some(mapped.physical)
+    );
+    assert_eq!(tlb.device_physical(address, KERNEL, false), None);
+    assert!(matches!(
+        translate(&controls, address, Access::Read, KERNEL, &mut tables),
+        Outcome::Fault(Fault {
+            kind: FaultKind::Permission,
+            second_stage: Some(_),
+            ..
+        })
+    ));
+
+    // Clearing AF after caching requires maintenance. The next translation
+    // reports the fault instead of writing AF back or reusing the old entry.
+    tables.0.insert(slot, STAGE2_BLOCK & !(1 << 10));
+    tlb.clear();
+    assert_eq!(tlb.device_physical(address, KERNEL, true), None);
+    assert!(matches!(
+        translate(&controls, address, Access::Write, KERNEL, &mut tables),
+        Outcome::Fault(Fault {
+            kind: FaultKind::AccessFlag,
+            second_stage: Some(_),
+            ..
+        })
+    ));
+
+    tables.0.insert(slot, STAGE2_BLOCK);
+    *tables.0.get_mut(&0x8000_0000).unwrap() &= !(1 << 10);
+    assert!(matches!(
+        translate(&controls, address, Access::Write, KERNEL, &mut tables),
+        Outcome::Fault(Fault {
+            kind: FaultKind::AccessFlag,
+            second_stage: None,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn device_tlb_cannot_admit_writes_to_a_ctrr_locked_page() {
+    let (mut controls, mut tables) = two_stages(0x4000_0000);
+    controls.ctrr.memory[0] = Some((0x8000_4000, 0x8000_4fff));
+    let address = 0x4008;
+    let Outcome::Mapped(mapped) = translate(&controls, address, Access::Read, KERNEL, &mut tables)
+    else {
+        panic!("CTRR must permit the read");
+    };
+    let mut tlb = translated::Tlb::default();
+    tlb.record_device(address, KERNEL, mapped);
+    assert_eq!(
+        tlb.device_physical(address, KERNEL, false),
+        Some(mapped.physical)
+    );
+    assert_eq!(tlb.device_physical(address, KERNEL, true), None);
+    assert!(matches!(
+        translate(&controls, address, Access::Write, KERNEL, &mut tables),
+        Outcome::Fault(Fault {
+            kind: FaultKind::Permission,
+            second_stage: None,
+            ..
+        })
+    ));
 }
 
 #[test]

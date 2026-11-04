@@ -112,7 +112,7 @@ static HOST_FIRMWARE_INTERFACE: [u8; 21] = stela_loader::host_firmware::MOUNT_CA
 #[uefi::entry]
 fn main() -> Status {
     // Before any Rust state exists: the system engine runs from this copy.
-    system::take_snapshot();
+    let snapshot = system::take_snapshot();
     // Referenced, so the linker keeps the marker setup reads.
     core::hint::black_box(&MOUNT_INTERFACE);
     core::hint::black_box(&HOST_FIRMWARE_INTERFACE);
@@ -150,8 +150,9 @@ fn main() -> Status {
     let options = choice::choose(&mut volume, options, held);
     status::take_screen(console::Framebuffer::from_firmware());
     if options.starts_with(b"--system") {
-        system::boot(options, volume, log, host_firmware);
+        system::boot(options, volume, log, host_firmware, snapshot);
     }
+    drop(snapshot);
     if options.starts_with(stela_boot_core::options::HOST_CHECK.as_bytes()) {
         drop(volume);
         #[cfg(feature = "diagnostics")]

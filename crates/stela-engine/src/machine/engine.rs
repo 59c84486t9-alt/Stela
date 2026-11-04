@@ -5,7 +5,8 @@ mod mirrors;
 mod reports;
 use boundary::*;
 pub use boundary::{
-    ConsumedPair, DeviceError, Devices, Host, LocalRegisters, NoDevices, ScalarRead, Start,
+    CodePartitions, ConsumedPair, DeviceError, Devices, Host, LocalRegisters, NoDevices,
+    ScalarRead, Start,
 };
 use mirrors::*;
 use reports::*;
@@ -20,6 +21,7 @@ mod caller;
 mod chain_control;
 mod clock;
 mod code_cache;
+mod code_slots;
 mod compilation;
 mod compression;
 mod data_access;
@@ -434,8 +436,8 @@ struct Block {
     /// or BLR form (or that form's PAC thunk) ends with, until a lookup dispatcher
     /// serves it.
     dynamic_site: Option<NonZeroU64>,
-    /// Its first instruction, for the Branch Target check of a branch to it.
-    first: u32,
+    /// What its first instruction admits on a guarded page.
+    landing: fetch::Landing,
     /// The word of its last instruction, where it exits to the engine.
     terminal: u32,
     /// Exits to the engine at `terminal`, up to its limit.
@@ -444,18 +446,21 @@ struct Block {
     /// the other contexts of its page
     /// ([`Machine::remember_target_page`]).
     fetched: bool,
-    /// The guest bytes it was compiled from, for [`Machine::stale_code`].
-    source_bytes: u16,
     source_hash: u64,
 }
 
 // Every PE keeps one per block it ran, millions in all.
-const _: () = assert!(size_of::<Block>() <= 80);
+const _: () = assert!(size_of::<Block>() <= 72);
 
 impl Block {
+    /// One source-map entry per four-byte guest instruction.
+    fn source_bytes(&self) -> usize {
+        usize::from(self.instructions) * INSTRUCTION as usize
+    }
+
     /// The PC of its last instruction.
     fn terminal_pc(&self) -> u64 {
-        self.pc + u64::from(self.source_bytes) - INSTRUCTION
+        self.pc + self.source_bytes() as u64 - INSTRUCTION
     }
 }
 
@@ -668,6 +673,7 @@ pub struct Machine<H: Host, D: Devices> {
     preparation_metrics: Option<metrics::PreparationMetrics>,
     target: TargetCpu,
     blocks: table::Table<Block>,
+    code_slots: code_slots::CodeSlots,
     /// Slots of `blocks` whose code was reclaimed, for new blocks.
     free_blocks: Vec<usize>,
     /// The blocks this machine held when it last reclaimed code for memory,
@@ -681,6 +687,7 @@ pub struct Machine<H: Host, D: Devices> {
     /// faultable access, which a native fault applies first. Kept apart
     /// from [`Block`], whose fields every exit reads.
     fault_recovery: recovery::Owners,
+    recovery_scratch: Vec<block::FaultRecovery>,
     native_failure: Option<recovery::CapturedFailure>,
     /// Every variant a block was compiled for, once: what a [`VariantId`]
     /// names.
@@ -788,6 +795,7 @@ pub struct Machine<H: Host, D: Devices> {
     mirrors: alloc::boxed::Box<Mirrors>,
     /// The chip's `Chip::admit`, indexed.
     admit_table: Arc<AdmitTable>,
+    system_decode: system_access::DecodeCache,
     /// The watched pages the host keeps unmapped.
     watch: Watch,
     /// The context the host last isolated predictions for.
@@ -975,10 +983,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             preparation_metrics: None,
             target,
             blocks: table::Table::new(),
+            code_slots: code_slots::CodeSlots::default(),
             free_blocks: Vec::new(),
             reclaimed_at: None,
             memory_release_blocks: MEMORY_RELEASE_BLOCKS,
             fault_recovery: recovery::Owners::new(),
+            recovery_scratch: Vec::new(),
             native_failure: None,
             variants: Vec::new(),
             index: block_index::BlockIndex::new(),
@@ -1022,6 +1032,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pointer: alloc::boxed::Box::new(pointer::PointerService::new()),
             mirrors: alloc::boxed::Box::default(),
             admit_table,
+            system_decode: system_access::DecodeCache::default(),
             watch: Watch::default(),
             prediction_context: None,
             current: boot_processor,
@@ -1105,10 +1116,7 @@ struct RamTables<'a, H: Host>(&'a mut H);
 
 impl<H: Host> mmu::TableMemory for RamTables<'_, H> {
     fn read_descriptor(&mut self, physical: u64) -> Option<u64> {
-        let mut bytes = [0; 8];
-        self.0
-            .read_ram(physical, &mut bytes)
-            .then(|| u64::from_le_bytes(bytes))
+        self.0.read_ram_descriptor(physical)
     }
 
     fn update_descriptor(&mut self, physical: u64, old: u64, new: u64) -> Option<bool> {

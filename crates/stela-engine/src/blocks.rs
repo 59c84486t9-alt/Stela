@@ -22,8 +22,6 @@ pub use outcome::{
 use stela_contracts::{refuse, require};
 
 use crate::Result;
-#[cfg(feature = "std")]
-use crate::error::Io;
 use crate::{execution::platform, floating, memory, pauth, system};
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, string::ToString, vec::Vec};
@@ -34,7 +32,7 @@ use services::{
     RuntimeServices, complete_pauth_with_memory, runtime_pauth_key, serialize_instruction_execution,
 };
 #[cfg(feature = "std")]
-use std::{io::Read, path::PathBuf};
+use std::path::PathBuf;
 use stela_compiler::{
     GuestAddress,
     block::{
@@ -48,8 +46,6 @@ use validate::{
     validate_thread_register_exit, validate_trap_exit,
 };
 
-#[cfg(feature = "std")]
-const MAX_NATIVE_BYTES: usize = 64 * 1024 * 1024;
 const INSTRUCTION_BYTES: usize = 4;
 const ZERO_REGISTER_INDEX: u8 = 31;
 const REGISTER_COUNT: u8 = ZERO_REGISTER_INDEX + 1;
@@ -199,69 +195,25 @@ impl BlockRuntime {
     }
 
     fn load(&mut self, pc: GuestAddress, outcome: &mut RunOutcome) -> Result<()> {
-        let (base, region) = self
-            .region(pc)
-            .ok_or_else(|| refuse!("instruction mapping disappeared", pc = pc.0))?;
-        if let Some(block) = self.loaded.get(&pc.0) {
-            require!(
-                block.region_base == base && block.generation == region.generation,
-                "stale native block generation"
-            );
-            outcome.memory_cache_hits += 1;
-            return Ok(());
-        }
-        #[cfg(not(feature = "std"))]
-        {
-            let discovery = self.prepare(pc)?;
-            let profile = discovery.artifact_profile;
-            let generation = discovery.generation;
-            let source_bytes = discovery.analysis.source_bytes;
-            let native = discovery.native;
-            let prepared =
-                crate::artifact::LoadedArtifact::bind(discovery.prepared.manifest, &native)?;
-            let block = LoadedBlock::from_artifact(
-                self.target,
-                profile,
-                base,
-                generation,
-                source_bytes,
-                prepared,
-                &native,
-            )?;
-            self.loaded.insert(pc.0, block);
+        let (block, native) = self.prepare_snapshot(pc)?;
+        let prepared = block.prepared;
+        let loaded = LoadedBlock::from_artifact(
+            self.target,
+            block.artifact_profile,
+            block.region_base.0,
+            block.generation,
+            block.analysis.source_bytes,
+            crate::artifact::LoadedArtifact {
+                manifest: prepared.manifest,
+            },
+            &native,
+        )?;
+        if prepared.cache_hit {
+            outcome.disk_cache_hits += 1;
+        } else {
             outcome.compiled_blocks += 1;
         }
-        #[cfg(feature = "std")]
-        {
-            let prepared = self.prepare(pc)?;
-            let profile = prepared.artifact_profile;
-            let generation = prepared.generation;
-            let source_bytes = prepared.analysis.source_bytes;
-            let prepared = prepared.prepared;
-            let mut native = Vec::new();
-            std::fs::File::open(prepared.directory.join("native.bin"))
-                .io("open a cached native block")?
-                .take((MAX_NATIVE_BYTES + 1) as u64)
-                .read_to_end(&mut native)
-                .io("read a cached native block")?;
-            let loaded_artifact =
-                crate::artifact::LoadedArtifact::bind(prepared.manifest, &native)?;
-            let block = LoadedBlock::from_artifact(
-                self.target,
-                profile,
-                base,
-                generation,
-                source_bytes,
-                loaded_artifact,
-                &native,
-            )?;
-            if prepared.cache_hit {
-                outcome.disk_cache_hits += 1;
-            } else {
-                outcome.compiled_blocks += 1;
-            }
-            self.loaded.insert(pc.0, block);
-        }
+        self.loaded.insert(pc.0, loaded);
 
         Ok(())
     }
@@ -511,9 +463,12 @@ impl BlockRuntime {
             } else {
                 None
             };
-            // Decode ahead of loading so an unsupported instruction is a typed
-            // dispatch stop. Disk corruption and allocation errors remain errors.
-            if !self.loaded.contains_key(&pc.0) {
+            let (block, current) = if let Some(block) = self.loaded.get(&pc.0) {
+                outcome.memory_cache_hits += 1;
+                (block, region)
+            } else {
+                // Decode ahead of loading so an unsupported instruction is a typed
+                // dispatch stop. Disk corruption and allocation errors remain errors.
                 let offset = (pc.0 - base) as usize;
                 let words = ((region.source.len() - offset) / 4).min(MAX_BLOCK_INSTRUCTIONS);
                 if let Err(error) = stela_compiler::block::source_bytes_with_profile(
@@ -526,17 +481,20 @@ impl BlockRuntime {
                     };
                     break;
                 }
-            }
-            self.load(pc, &mut outcome)?;
-            let block = self
-                .loaded
-                .get(&pc.0)
-                .ok_or_else(|| refuse!("loaded block disappeared", pc = pc.0))?;
-            let (_, current) = self
-                .region(pc)
-                .ok_or_else(|| refuse!("loaded block unmapped", pc = pc.0))?;
+                self.load(pc, &mut outcome)?;
+                let block = self
+                    .loaded
+                    .get(&pc.0)
+                    .ok_or_else(|| refuse!("loaded block disappeared", pc = pc.0))?;
+                let (_, current) = self
+                    .region(pc)
+                    .ok_or_else(|| refuse!("loaded block unmapped", pc = pc.0))?;
+                (block, current)
+            };
             require!(
-                block.generation == current.generation && block.source_bytes > 0,
+                block.region_base == base
+                    && block.generation == current.generation
+                    && block.source_bytes > 0,
                 "refusing stale block execution"
             );
             let mut completed_blocks = 1;
@@ -563,6 +521,19 @@ impl BlockRuntime {
             let BlockExit { next_pc, kind } = native_exit;
             let exit_kind = ExitKind::try_from(kind)
                 .map_err(|_| refuse!("invalid native block exit kind", kind))?;
+            if matches!(
+                exit_kind,
+                ExitKind::Fallthrough
+                    | ExitKind::Direct
+                    | ExitKind::Indirect
+                    | ExitKind::Call
+                    | ExitKind::Return
+            ) {
+                state.pc = GuestAddress(next_pc);
+                outcome.last_exit = Some((next_pc, kind));
+                outcome.blocks_executed += completed_blocks;
+                continue;
+            }
             require!(
                 exit_kind != ExitKind::ScalableNumerical,
                 "context-block numerical exit requires owned scalable entry"

@@ -125,6 +125,11 @@ pub fn decode_pointer_authentication(
                 .at_instruction(pc, word),
         );
     }
+    // The PAuth and PAuth_LR forms below occupy these encoding classes.
+    // Reject other words before probing the exact forms and operand masks.
+    if !matches!(word >> 24, 0x55 | 0x9a | 0xd5..=0xd7 | 0xda | 0xf3 | 0xf8) {
+        return Ok(None);
+    }
     let operation = if let Some(instruction) = pauth_lr::decode(word) {
         PointerAuthenticationOperation::LinkRegister(instruction)
     } else {

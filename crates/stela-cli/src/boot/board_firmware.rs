@@ -54,12 +54,13 @@ impl ReadAt for Slice<'_> {
 /// Each of `names` from `directory` of the decoded restore ramdisk's APFS
 /// volumes, with its source.
 pub(super) fn from_ramdisk(
-    ramdisk: &Decoded,
+    ramdisk: &[u8],
+    ramdisk_source: &Source,
     directory: &str,
     names: &[String],
 ) -> Result<Vec<(String, Decoded)>> {
-    let member = &ramdisk.source.member;
-    let mut source = Slice(&ramdisk.bytes);
+    let member = &ramdisk_source.member;
+    let mut source = Slice(ramdisk);
     let offsets = apfs::containers(&mut source)
         .with_context(|| format!("the restore ramdisk {member} holds no APFS container"))?;
     let [offset] = offsets[..] else {
@@ -93,11 +94,11 @@ pub(super) fn from_ramdisk(
             let source = Source {
                 component: "BoardFirmware".into(),
                 member: member.clone(),
-                container_sha256: ramdisk.source.container_sha256.clone(),
+                container_sha256: ramdisk_source.container_sha256.clone(),
                 payload_type: "raw".into(),
                 description: format!(
                     "board device firmware /{path} in the {} (decoded SHA-256 {})",
-                    ramdisk.source.component, ramdisk.source.decoded_sha256
+                    ramdisk_source.component, ramdisk_source.decoded_sha256
                 ),
                 decoded_bytes: bytes.len() as u64,
                 decoded_sha256: digest,
@@ -145,7 +146,8 @@ mod tests {
     #[test]
     fn named_images_come_from_the_ramdisk_with_their_source() {
         let ramdisk = ramdisk();
-        let found = from_ramdisk(&ramdisk, "", &["pattern.bin".into()]).unwrap();
+        let found =
+            from_ramdisk(&ramdisk.bytes, &ramdisk.source, "", &["pattern.bin".into()]).unwrap();
         let [(name, image)] = &found[..] else {
             panic!("one image");
         };
@@ -165,7 +167,12 @@ mod tests {
             image.source.description
         );
 
-        let Err(error) = from_ramdisk(&ramdisk, DIRECTORY, &["USB-C_HPM,47.bin".into()]) else {
+        let Err(error) = from_ramdisk(
+            &ramdisk.bytes,
+            &ramdisk.source,
+            DIRECTORY,
+            &["USB-C_HPM,47.bin".into()],
+        ) else {
             panic!("an image the ramdisk lacks is refused");
         };
         assert_eq!(

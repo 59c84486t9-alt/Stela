@@ -598,35 +598,38 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
             })
         };
-        let mut deadlines = Vec::new();
+        let mut earliest = None;
+        let mut consider = |deadline| {
+            if let Some(deadline) = deadline {
+                earliest = Some(earliest.map_or(deadline, |prior: u64| prior.min(deadline)));
+            }
+        };
         if !self.processor_paused(self.current) && !down(self.waiting) {
-            deadlines.extend([
-                self.timer_deadline(),
-                self.cpu.pmu.as_ref().and_then(|monitor| monitor.deadline()),
-                streams(&self.cpu, self.waiting),
-                timeout(self.waiting),
-            ]);
+            consider(self.timer_deadline());
+            consider(self.cpu.pmu.as_ref().and_then(|monitor| monitor.deadline()));
+            consider(streams(&self.cpu, self.waiting));
+            consider(timeout(self.waiting));
         }
         for (pe, peer) in self.peers.iter().enumerate() {
             if let Peer::Parked(parked) = peer
                 && !self.processor_paused(pe)
                 && !down(parked.waiting)
             {
-                deadlines.push(timer::deadline(&parked.cpu));
-                deadlines.push(
+                consider(timer::deadline(&parked.cpu));
+                consider(
                     parked
                         .cpu
                         .pmu
                         .as_ref()
                         .and_then(|monitor| monitor.deadline()),
                 );
-                deadlines.push(streams(&parked.cpu, parked.waiting));
-                deadlines.push(timeout(parked.waiting));
+                consider(streams(&parked.cpu, parked.waiting));
+                consider(timeout(parked.waiting));
             }
         }
-        deadlines.push(self.devices.deadline(now));
-        deadlines.push(self.devices.dma_deadline());
-        deadlines.into_iter().flatten().min()
+        consider(self.devices.deadline(now));
+        consider(self.devices.dma_deadline());
+        earliest
     }
 
     /// Run PE `next` in place of the running one, which parks with its state.

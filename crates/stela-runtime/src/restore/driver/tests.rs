@@ -135,7 +135,9 @@ fn transcript_short_io_concurrent_control_jobs_and_final_ack_write() {
         ]),
     );
     for _ in 0..100_000 {
-        assert!(d.poll(&mut h).is_pending());
+        assert!(d.poll_prefetched(&mut h).is_pending());
+        d.work();
+        d.prefetch(1);
         if d.session.ledger().len() == 6 && d.session.outstanding() == 0 {
             break;
         }

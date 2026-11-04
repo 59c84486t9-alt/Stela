@@ -293,6 +293,24 @@ impl Record {
         &self.entries
     }
 
+    /// Heap bytes owned by a shared decoded record, excluding allocator
+    /// bookkeeping. The per-PE source page cache accounts for its own pages.
+    fn retained_bytes(&self) -> usize {
+        let mut bytes = core::mem::size_of::<Self>() + 2 * core::mem::size_of::<usize>();
+        bytes += self.entries.capacity() * core::mem::size_of::<Entry>();
+        for entry in &self.entries {
+            bytes += entry.input.capacity() + entry.code.capacity();
+            bytes += entry.relocations.capacity() * core::mem::size_of::<u32>();
+            bytes += entry.source_map.capacity() * core::mem::size_of::<(u16, u32)>();
+            bytes += entry.exits.capacity() * core::mem::size_of::<Exit>();
+            bytes += entry.recovery.capacity() * core::mem::size_of::<UnqualifiedFaultRecovery>();
+            for row in &entry.recovery {
+                bytes += row.bindings.capacity() * core::mem::size_of::<RecoveryBinding>();
+            }
+        }
+        bytes
+    }
+
     fn entry_index(&self, offset: u16, context: &Digest) -> Result<usize, usize> {
         // Keep the first entry when decoding a legacy record with duplicate
         // keys, as the previous sequential lookup did.
@@ -329,12 +347,32 @@ impl Record {
     }
 
     /// Add the entries of `other` this record lacks.
-    pub fn merge(&mut self, other: Self) {
-        for entry in other.entries {
-            if let Err(index) = self.entry_index(entry.offset, &entry.context) {
-                self.entries.insert(index, entry);
-            }
+    pub fn merge(&mut self, mut other: Self) {
+        if other.entries.is_empty() {
+            return;
         }
+        let key = |entry: &Entry| (entry.offset, entry.context);
+        // Legacy packs can contain duplicate keys. The first one wins
+        // unless this record already holds an entry for that key.
+        other.entries.dedup_by_key(|entry| key(entry));
+        if self.entries.is_empty() {
+            self.entries = other.entries;
+            return;
+        }
+        let mut merged = Vec::with_capacity(self.entries.len() + other.entries.len());
+        let mut incoming = other.entries.into_iter().peekable();
+        for entry in self.entries.drain(..) {
+            let current = key(&entry);
+            while incoming.peek().is_some_and(|next| key(next) < current) {
+                merged.extend(incoming.next());
+            }
+            if incoming.peek().is_some_and(|next| key(next) == current) {
+                incoming.next();
+            }
+            merged.push(entry);
+        }
+        merged.extend(incoming);
+        self.entries = merged;
     }
 
     pub fn encode(&self) -> Vec<u8> {

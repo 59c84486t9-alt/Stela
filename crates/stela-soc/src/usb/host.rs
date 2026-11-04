@@ -371,7 +371,16 @@ impl Host {
         if data.len() > MAX_TRANSFER {
             return Err(refuse!("USB host transfer bound exceeded"));
         }
-        self.submit(false, data.to_vec(), data.len(), terminate_with_zlp)
+        self.submit_out_owned(data.to_vec(), terminate_with_zlp)
+    }
+    /// The same transfer, keeping an existing frame buffer through completion.
+    pub(super) fn submit_out_owned(
+        &mut self,
+        data: Vec<u8>,
+        terminate_with_zlp: bool,
+    ) -> Result<u64> {
+        let length = data.len();
+        self.submit(false, data, length, terminate_with_zlp)
     }
     /// A bulk IN of up to `length` bytes, pending until the device sends.
     pub fn submit_in(&mut self, length: usize) -> Result<u64> {
@@ -576,7 +585,7 @@ impl Host {
             else {
                 continue;
             };
-            let mut transfer = self.bulk.remove(position).unwrap();
+            let transfer = &mut self.bulk[position];
             let endpoints = self.endpoints.unwrap();
             let (endpoint, token) = if transfer.input {
                 (endpoints.input, Token::In)
@@ -589,22 +598,12 @@ impl Host {
                 packet[..length]
                     .copy_from_slice(&transfer.data[transfer.done..transfer.done + length]);
             }
-            let reply = match peer.packet(endpoint, token, &mut packet[..length]) {
-                Ok(reply) => reply,
-                Err(error) => {
-                    self.bulk.insert(position, transfer);
-                    return Err(error);
-                }
-            };
+            let reply = peer.packet(endpoint, token, &mut packet[..length])?;
             let status = match reply {
-                Reply::Nak => {
-                    self.bulk.insert(position, transfer);
-                    continue;
-                }
+                Reply::Nak => continue,
                 Reply::Stall => Some(TransferStatus::Stall),
                 Reply::Ack(bytes) => {
                     if bytes > length || (!transfer.input && bytes != length) {
-                        self.bulk.insert(position, transfer);
                         return Err(refuse!(
                             "USB peer returned an invalid bulk acknowledgement length"
                         ));
@@ -620,14 +619,13 @@ impl Host {
             };
             self.prefer_input = !transfer.input;
             if let Some(status) = status {
+                let transfer = self.bulk.remove(position).unwrap();
                 self.completions.push_back(Completion {
                     id: transfer.id,
                     status,
                     bytes: transfer.data,
                     transferred: transfer.done,
                 });
-            } else {
-                self.bulk.insert(position, transfer);
             }
             return Ok(true);
         }
@@ -808,5 +806,47 @@ mod tests {
         // With only the NAKing IN pending, nothing moves.
         assert!(!host.advance(&mut peer, 0).unwrap());
         assert_eq!(peer.0, 2);
+    }
+
+    #[test]
+    fn a_failed_bulk_packet_preserves_progress_and_queue_order() {
+        struct Peer {
+            fail: bool,
+            seen: Vec<u8>,
+        }
+        impl BusPeer for Peer {
+            fn reset(&mut self) -> Result<()> {
+                Ok(())
+            }
+            fn packet(&mut self, _: u8, token: Token, data: &mut [u8]) -> Result<Reply> {
+                assert_eq!(token, Token::Out);
+                if self.fail {
+                    return Err(refuse!("test USB peer failure"));
+                }
+                self.seen.push(data[0]);
+                Ok(Reply::Ack(data.len()))
+            }
+        }
+        let mut host = Host::new();
+        host.state = Enumerate::Ready;
+        host.endpoints = mux_endpoints(&configuration(0x85, 9)).unwrap();
+        let mut bytes = [1; 1024];
+        bytes[512..].fill(2);
+        let first = host.submit_out(&bytes, false).unwrap();
+        let second = host.submit_out(&[3; 17], false).unwrap();
+        let mut peer = Peer {
+            fail: false,
+            seen: Vec::new(),
+        };
+        assert!(host.advance(&mut peer, 0).unwrap());
+        peer.fail = true;
+        assert!(host.advance(&mut peer, 0).is_err());
+        assert!(host.completion().is_none());
+        peer.fail = false;
+        assert!(host.advance(&mut peer, 0).unwrap());
+        assert_eq!(host.completion().unwrap().id, first);
+        assert!(host.advance(&mut peer, 0).unwrap());
+        assert_eq!(host.completion().unwrap().id, second);
+        assert_eq!(peer.seen, [1, 2, 3]);
     }
 }

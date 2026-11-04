@@ -11,7 +11,7 @@
 //! before the restore starts. A block that differs is refused with its
 //! piece's name.
 use super::{Layout, PayloadError, PayloadManifest, ReadAt, piece_name};
-use alloc::{format, vec, vec::Vec};
+use alloc::{format, vec::Vec};
 use stela_crypto::Sha256;
 use stela_crypto::digest::Digest;
 
@@ -33,14 +33,24 @@ struct Part {
     first_block: usize,
 }
 
+/// Bound the scratch buffer to the native install reader's request size.
+const MAX_BATCH_BYTES: u64 = 1 << 20;
+
+struct CachedBlock {
+    piece: usize,
+    block: u64,
+    /// Only this suffix of the scratch buffer stays cached.
+    start: usize,
+    scratch: Vec<u8>,
+}
+
 pub struct Joined<R> {
     device: R,
     parts: Vec<Part>,
     total: u64,
     block_bytes: u64,
     hashes: Vec<[u8; 32]>,
-    /// The last block read and verified: its piece, block and bytes.
-    cached: Option<(usize, u64, Vec<u8>)>,
+    cached: Option<CachedBlock>,
 }
 
 impl<R: ReadAt> Joined<R> {
@@ -153,34 +163,64 @@ impl<R: ReadAt> Joined<R> {
         Ok(())
     }
 
-    /// Block `block` of piece `index`, read whole and verified.
-    fn block(&mut self, index: usize, block: u64) -> Result<&[u8], PayloadError> {
-        if self
-            .cached
-            .as_ref()
-            .is_none_or(|(piece, cached, _)| (*piece, *cached) != (index, block))
+    /// Copy a bounded run of requested blocks, verifying each one before
+    /// copying its bytes. Keep only the last block cached for later reads.
+    fn copy_blocks(
+        &mut self,
+        index: usize,
+        block: u64,
+        mut skip: usize,
+        output: &mut [u8],
+    ) -> Result<usize, PayloadError> {
+        if let Some(cached) = &self.cached
+            && (cached.piece, cached.block) == (index, block)
         {
-            let part = &self.parts[index];
-            let start = block * self.block_bytes;
-            let bytes = (part.bytes - start).min(self.block_bytes) as usize;
-            let hash = self.hashes[part.first_block + block as usize];
-            let mut data = match self.cached.take() {
-                Some((_, _, mut data)) => {
-                    data.resize(bytes, 0);
-                    data
-                }
-                None => vec![0; bytes],
-            };
-            self.read_part(index, start, &mut data)?;
-            if <[u8; 32]>::from(Sha256::digest(&data)) != hash {
+            let data = &cached.scratch[cached.start..];
+            let count = (data.len() - skip).min(output.len());
+            output[..count].copy_from_slice(&data[skip..skip + count]);
+            return Ok(count);
+        }
+        let part = &self.parts[index];
+        let start = block * self.block_bytes;
+        let requested = (part.bytes - start).min((skip + output.len()) as u64);
+        let blocks = requested
+            .div_ceil(self.block_bytes)
+            .min((MAX_BATCH_BYTES / self.block_bytes).max(1));
+        // Two 64 KiB blocks can exceed a high-speed BOT command's 120 KiB
+        // bound and add a data descriptor without saving a command.
+        let blocks = if blocks < 3 { 1 } else { blocks };
+        let bytes = (part.bytes - start).min(blocks * self.block_bytes) as usize;
+        let first_hash = part.first_block + block as usize;
+        let mut data = self
+            .cached
+            .take()
+            .map_or_else(Vec::new, |cached| cached.scratch);
+        if bytes > data.capacity() {
+            data.reserve_exact(bytes - data.len());
+        }
+        data.resize(bytes, 0);
+        self.read_part(index, start, &mut data)?;
+
+        let mut done = 0;
+        for (relative, bytes) in data.chunks(self.block_bytes as usize).enumerate() {
+            if <[u8; 32]>::from(Sha256::digest(bytes)) != self.hashes[first_hash + relative] {
                 return Err(PayloadError::Verification {
-                    member: format!("{} block {block}", piece_name(index)),
+                    member: format!("{} block {}", piece_name(index), block + relative as u64),
                     reason: "its bytes differ from the piece's block hash",
                 });
             }
-            self.cached = Some((index, block, data));
+            let count = (bytes.len() - skip).min(output.len() - done);
+            output[done..done + count].copy_from_slice(&bytes[skip..skip + count]);
+            done += count;
+            skip = 0;
         }
-        Ok(&self.cached.as_ref().expect("cached above").2)
+        self.cached = Some(CachedBlock {
+            piece: index,
+            block: block + blocks - 1,
+            start: ((blocks - 1) * self.block_bytes) as usize,
+            scratch: data,
+        });
+        Ok(done)
     }
 }
 
@@ -206,9 +246,7 @@ impl<R: ReadAt> ReadAt for Joined<R> {
             let within = offset - self.parts[index].start;
             let block = within / self.block_bytes;
             let skip = (within - block * self.block_bytes) as usize;
-            let data = self.block(index, block)?;
-            let count = (data.len() - skip).min(buffer.len());
-            buffer[..count].copy_from_slice(&data[skip..skip + count]);
+            let count = self.copy_blocks(index, block, skip, buffer)?;
             buffer = &mut buffer[count..];
             offset += count as u64;
         }
@@ -222,6 +260,7 @@ mod tests {
     use crate::payload::{
         BlockHashes, PIECE_HASHES_FILE, Piece, piece_sizes, test_support::Memory,
     };
+    use alloc::vec;
 
     const BLOCK: u64 = 512;
 
@@ -306,6 +345,63 @@ mod tests {
         let mut tail = vec![0; 1];
         assert!(joined.read_at(ipsw.len() as u64, &mut tail).is_err());
         joined.read_at(ipsw.len() as u64, &mut []).unwrap();
+    }
+
+    #[test]
+    fn reads_one_run_per_extent_and_caches_only_the_last_block() {
+        struct Traced {
+            device: Memory,
+            reads: Vec<(u64, usize)>,
+        }
+        impl ReadAt for Traced {
+            type Error = <Memory as ReadAt>::Error;
+
+            fn len(&self) -> u64 {
+                self.device.len()
+            }
+
+            fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<(), Self::Error> {
+                self.reads.push((offset, buffer.len()));
+                self.device.read_at(offset, buffer)
+            }
+        }
+
+        let ipsw = ipsw();
+        let (device, manifest, extents, hashes) = medium(&ipsw, 3072);
+        let first = extents[0].clone();
+        let traced = Traced {
+            device,
+            reads: Vec::new(),
+        };
+        let mut joined = Joined::new(traced, &manifest, extents, &hashes).unwrap();
+        let mut data = [0; 3000];
+        joined.read_at(17, &mut data).unwrap();
+        assert_eq!(data, ipsw[17..3017]);
+        let expected: Vec<_> = first.iter().map(|e| (e.offset, e.bytes as usize)).collect();
+        assert_eq!(joined.device.reads, expected);
+        joined.read_at(3017, &mut data[..55]).unwrap();
+        assert_eq!(data[..55], ipsw[3017..3072]);
+        assert_eq!(joined.device.reads, expected);
+        joined.device.device.0[first[0].offset as usize] ^= 1;
+        assert!(joined.read_at(0, &mut data[..10]).is_err());
+    }
+
+    #[test]
+    fn a_corrupt_block_never_reaches_the_output_of_a_batched_read() {
+        let ipsw = ipsw();
+        let (mut device, manifest, extents, hashes) = medium(&ipsw, 3072);
+        let corrupt = 2 * BLOCK;
+        device.0[(extents[0][0].offset + corrupt) as usize] ^= 1;
+        let mut joined = Joined::new(device, &manifest, extents, &hashes).unwrap();
+        let mut data = [0xee; 3072];
+        let error = joined.read_at(0, &mut data).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ipsw.000 block 2: its bytes differ from the piece's block hash"
+        );
+        let (before, after) = data.split_at(corrupt as usize);
+        assert_eq!(before, &ipsw[..before.len()]);
+        assert!(after.iter().all(|byte| *byte == 0xee));
     }
 
     #[test]

@@ -860,7 +860,7 @@ impl Fixture {
 }
 
 #[test]
-fn owned_protocol_initializes_identifies_transfers_prps_wraps_and_retires() {
+fn owned_protocol_reuses_prps_across_reset_then_wraps_and_retires() {
     let f = Fixture::new();
     let mut attached = f.attach().unwrap();
     assert!(attached.failures.is_empty());
@@ -875,10 +875,23 @@ fn owned_protocol_initializes_identifies_transfers_prps_wraps_and_retires() {
     let mut read = vec![0; pattern.len()];
     disk.read(8, &mut read).unwrap();
     assert_eq!(read, pattern);
+    let (before, mappings) = {
+        let mut m = f.model.lock().unwrap();
+        m.fatal = true;
+        (
+            m.events.len(),
+            m.maps.values().map(|lease| lease.token).collect::<Vec<_>>(),
+        )
+    };
     let replacement: Vec<u8> = pattern.iter().map(|byte| byte ^ 0xa5).collect();
     disk.write(8, &replacement).unwrap();
     disk.read(8, &mut read).unwrap();
     assert_eq!(read, replacement);
+    {
+        let m = f.model.lock().unwrap();
+        assert!(m.events[before..].contains(&"drain"));
+        assert!(m.maps.values().map(|lease| lease.token).eq(mappings));
+    }
     for _ in 0..35 {
         disk.flush().unwrap();
     }

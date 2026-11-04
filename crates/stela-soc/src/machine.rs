@@ -250,13 +250,13 @@ const USB_PACKETS_PER_MICROFRAME: usize = 13;
 /// work under the devices' lock.
 const USB_BACKLOG_MICROFRAMES: u64 = 8;
 
-/// The packets a poll at `now`, due at `next_poll`, moves: a microframe's
-/// for each microframe since the last poll, so one that comes late moves
-/// those it missed.
-fn usb_packets(now: u64, next_poll: u64) -> usize {
-    let microframes =
-        (now.saturating_sub(next_poll) / USB_POLL_TICKS + 1).min(USB_BACKLOG_MICROFRAMES);
-    microframes as usize * USB_PACKETS_PER_MICROFRAME
+/// A due poll's packet budget and the next boundary. A late poll catches
+/// up at most one frame while keeping the microframe clock's phase.
+fn usb_poll(now: u64, due: u64) -> (usize, u64) {
+    let late = now - due;
+    let microframes = (late / USB_POLL_TICKS + 1).min(USB_BACKLOG_MICROFRAMES);
+    let next = now.saturating_add(USB_POLL_TICKS - late % USB_POLL_TICKS);
+    (microframes as usize * USB_PACKETS_PER_MICROFRAME, next)
 }
 /// A native host handle, owned by this AppleDevices instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1483,8 +1483,8 @@ impl AppleDevices {
                 master.attached = true;
             }
             if now >= master.next_poll {
-                let packets = usb_packets(now, master.next_poll);
-                master.next_poll = now.saturating_add(USB_POLL_TICKS);
+                let (packets, next) = usb_poll(now, master.next_poll);
+                master.next_poll = next;
                 let advanced = (|| {
                     // Moving stops where every pending transfer NAKs.
                     for _ in 0..packets {

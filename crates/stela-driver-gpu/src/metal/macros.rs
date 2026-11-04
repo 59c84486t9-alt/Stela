@@ -7,12 +7,14 @@
 
 /// A closed enumeration with fixed raw values. Decoding refuses any value the
 /// list does not name; `ALL` lists the variants in declaration order.
+/// `decode with` can select an enum's own lookup method.
 macro_rules! raw_enum {
     (
         $(#[$meta:meta])*
         $vis:vis enum $name:ident: $raw:ty {
             $($(#[$variant_meta:meta])* $variant:ident = $value:expr,)+
         }
+        $(decode with $decode:ident;)?
     ) => {
         $(#[$meta])*
         #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -29,9 +31,15 @@ macro_rules! raw_enum {
             }
 
             pub fn from_raw(raw: $raw) -> Option<Self> {
-                Self::ALL.iter().copied().find(|value| value.raw() == raw)
+                raw_enum!(@decode raw $(, $decode)?)
             }
         }
+    };
+    (@decode $raw:ident, $decode:ident) => {
+        Self::$decode($raw)
+    };
+    (@decode $raw:ident) => {
+        Self::ALL.iter().copied().find(|value| value.raw() == $raw)
     };
 }
 

@@ -32,6 +32,9 @@ enum Task {
         /// Also build and check the complete NVIDIA/NVK UEFI image.
         #[arg(long)]
         nvk: bool,
+        /// Run check lanes, build jobs, and tests one at a time.
+        #[arg(long)]
+        low_memory: bool,
     },
     /// Build the release `stela` with its matching `stela.efi` embedded.
     Dist {
@@ -66,7 +69,11 @@ enum Task {
 
 fn main() -> ExitCode {
     let result = match Cli::parse().task {
-        Task::Check { fix, nvk } => check::run(fix, nvk).map(|()| ExitCode::SUCCESS),
+        Task::Check {
+            fix,
+            nvk,
+            low_memory,
+        } => check::run(fix, nvk, low_memory).map(|()| ExitCode::SUCCESS),
         Task::Dist { nvk } => dist::run(nvk).map(|()| ExitCode::SUCCESS),
         Task::Links => links::run().map(|()| ExitCode::SUCCESS),
         Task::Oracles(task) => task.run().map(|()| ExitCode::SUCCESS),

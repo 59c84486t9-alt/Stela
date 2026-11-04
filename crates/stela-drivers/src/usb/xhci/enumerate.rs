@@ -20,25 +20,46 @@ fn debounce_with_delay(
     mut sample: impl FnMut() -> Result<(bool, bool), BlockError>,
     mut delay: impl FnMut() -> Result<(), BlockError>,
 ) -> Result<bool, BlockError> {
-    let mut connection = None;
-    let mut stable = 0;
+    let mut debounce = Debounce::default();
     let mut total = 0;
     loop {
         let (connected, changed) = sample()?;
-        if !changed && connection == Some(connected) {
-            stable += DEBOUNCE_STEP_US;
-            if stable >= DEBOUNCE_STABLE_US {
-                return Ok(connected);
-            }
-        } else {
-            stable = 0;
-            connection = Some(connected);
+        if let Some(connected) = debounce.observe(connected, changed) {
+            return Ok(connected);
         }
         if total >= DEBOUNCE_TIMEOUT_US {
             return Err(BlockError::Unsupported("USB port connection never settled"));
         }
         delay()?;
         total += DEBOUNCE_STEP_US;
+    }
+}
+
+#[derive(Default)]
+pub(super) struct Debounce {
+    connection: Option<bool>,
+    stable: u64,
+}
+
+impl Debounce {
+    /// A notification between timed samples can invalidate stability, but
+    /// cannot contribute a sample to the interval.
+    pub(super) fn restart_on_change(&mut self, connected: bool, changed: bool) -> bool {
+        if !changed && self.connection == Some(connected) {
+            return false;
+        }
+        self.stable = 0;
+        self.connection = Some(connected);
+        true
+    }
+
+    /// Timed observations are at least one debounce step apart.
+    pub(super) fn observe(&mut self, connected: bool, changed: bool) -> Option<bool> {
+        if self.restart_on_change(connected, changed) {
+            return None;
+        }
+        self.stable += DEBOUNCE_STEP_US;
+        (self.stable >= DEBOUNCE_STABLE_US).then_some(connected)
     }
 }
 

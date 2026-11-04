@@ -392,6 +392,39 @@ fn size_class_reuse_preserves_other_live_bytes() {
 }
 
 #[test]
+fn resizing_within_a_size_class_keeps_the_allocation() {
+    let heap = Heap::new();
+    let mut ram = backing();
+    let layout = Layout::from_size_align(50, 16).unwrap();
+    let smaller = Layout::from_size_align(34, 16).unwrap();
+    let larger = Layout::from_size_align(62, 16).unwrap();
+    let next_class = Layout::from_size_align(65, 16).unwrap();
+    // SAFETY: exclusive backing, valid nonzero layouts, and each resize
+    // receives the immediately preceding live allocation and layout.
+    unsafe {
+        heap.initialize(ram.0.as_mut_ptr(), ram.0.len());
+        let before = heap.alloc(layout);
+        assert!(!before.is_null());
+        before.write_bytes(0x5a, layout.size());
+        let usage = usage_values(&heap);
+        let after = heap.realloc(before, layout, larger.size());
+        assert_eq!(after, before);
+        assert_eq!(usage_values(&heap), usage);
+        let shrunk = heap.realloc(after, larger, smaller.size());
+        assert_eq!(shrunk, after);
+        assert_eq!(usage_values(&heap), usage);
+        let moved = heap.realloc(shrunk, smaller, next_class.size());
+        assert!(!moved.is_null() && moved != shrunk);
+        assert_eq!(
+            core::slice::from_raw_parts(moved, smaller.size()),
+            &[0x5a; 34]
+        );
+        heap.dealloc(moved, next_class);
+    }
+    assert_eq!(heap.usage().live, 0);
+}
+
+#[test]
 fn the_class_lists_return_to_the_bins_when_a_request_needs_them() {
     let mut ram = backing();
     let heap = Heap::new();
