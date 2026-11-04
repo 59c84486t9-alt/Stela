@@ -297,6 +297,42 @@ fn copy_straight_over_black(pixels: &[u8], out: &mut [u8]) {
     }
 }
 
+/// Blend an unscaled row already in the scanout's channel order.
+#[inline(never)]
+fn blend_row(pixels: &[u8], out: &mut [u8], premultiplied: bool) {
+    const LANES: u32 = 0x00ff_00ff;
+    // Two independent 8-bit channels in 16-bit lanes. For products up to
+    // 255², the shifts give the same rounded quotient as (product + 127) / 255.
+    let scale = |lanes: u32, weight: u32| {
+        let biased = lanes * weight + 0x0080_0080;
+        ((biased + ((biased >> 8) & LANES)) >> 8) & LANES
+    };
+    for (out, pixel) in out
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(pixels.as_chunks::<4>().0)
+    {
+        let below = u32::from_le_bytes(*out);
+        let source = u32::from_le_bytes(*pixel);
+        let alpha = u32::from(pixel[3]);
+        let blend = |source: u32, below: u32| {
+            let source = source & LANES;
+            let source = if premultiplied {
+                source
+            } else {
+                scale(source, alpha)
+            };
+            let sum = source + scale(below & LANES, 255 - alpha);
+            let overflow = (sum & 0x0100_0100) >> 8;
+            (sum | (overflow * 255)) & LANES
+        };
+        let even = blend(source, below);
+        let green = blend(source >> 8, below >> 8) & 0xff;
+        *out = (even | (green << 8) | 0xff00_0000).to_le_bytes();
+    }
+}
+
 /// Compose `layers`, bottom to top, over opaque black on `mode`'s screen and
 /// return the frame for one [`Scanout::present`]: the mode's rows in its
 /// pixel order, alpha opaque. `read` fills a byte range of a surface from
@@ -359,6 +395,10 @@ pub fn compose(
                 }
                 if over_black && surface.format == mode.format {
                     copy_straight_over_black(pixels, out);
+                    continue;
+                }
+                if surface.format == mode.format {
+                    blend_row(pixels, out, layer.premultiplied);
                     continue;
                 }
             }
@@ -562,6 +602,35 @@ mod tests {
                 pixel
             })
             .collect()
+    }
+
+    #[test]
+    fn overlapping_rows_round_and_saturate_each_channel_independently() {
+        for premultiplied in [false, true] {
+            for alpha in 0..=255 {
+                for value in 0..=255 {
+                    let source = [value, 255 - value, value ^ 0x55, alpha];
+                    let below = [value ^ 0xaa, value, 255 - value, 0xff];
+                    let mut actual = below;
+                    blend_row(&source, &mut actual, premultiplied);
+                    let alpha = u32::from(alpha);
+                    let mut expected = below;
+                    for (channel, (source, below)) in
+                        source.into_iter().zip(below).take(3).enumerate()
+                    {
+                        let source = u32::from(source);
+                        let source = if premultiplied {
+                            source
+                        } else {
+                            scale(source, alpha)
+                        };
+                        expected[channel] =
+                            (source + scale(u32::from(below), 255 - alpha)).min(255) as u8;
+                    }
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
     }
 
     #[test]
