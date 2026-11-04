@@ -20,18 +20,48 @@ use stela_drivers::bus::{
     mmio::owned::{
         AddressSpace, Authority, CacheAttribute, ExistingAlias, InstalledMapping, MapFailure,
         MapRequest, MappingPlatform, PhysicalSpan, Protection, Resource, ResourceBacking,
-        ResourceKind,
+        ResourceId, ResourceKind,
     },
-    pci::EcamWindow,
+    pci::{
+        EcamWindow,
+        assignment::{self, Assignment, OpaqueUse, PhysicalAssignment, Retention, UseKind},
+    },
 };
 
 struct Resources {
     wire: &'static Wire,
     _roots: Arc<MmioRoots>,
 }
+struct Reservation {
+    _resources: Arc<Resources>,
+    context: Arc<RootContext>,
+    _span: PhysicalSpan,
+}
+
+// SAFETY: Only the scoped source's exclusive handoff methods construct this
+// boot-lifetime reservation. It pins the original roots and checked interval,
+// with no mapping or authority backedge. These root-owned claims have no
+// separately transferable parent assignment.
+unsafe impl PhysicalAssignment for Reservation {
+    fn parent(&self) -> Option<&assignment::Parent> {
+        None
+    }
+
+    fn check_control(&self) -> Result<(), assignment::Error> {
+        self.context
+            .check_current()
+            .map_err(|_| assignment::Error::Context)?;
+        if self.context.in_interrupt() {
+            return Err(assignment::Error::Context);
+        }
+        Ok(())
+    }
+}
+
 struct Backing {
     owner: Arc<Resources>,
     span: PhysicalSpan,
+    retention: Retention<Reservation>,
 }
 // SAFETY: ScopedSource's concrete claim methods reserve only the
 // MADT/MCFG resources after the explicit native device handoff. The original
@@ -42,6 +72,13 @@ unsafe impl ResourceBacking for Backing {
     }
     fn kind(&self) -> ResourceKind {
         ResourceKind::Registers
+    }
+
+    fn begin_mapping(&self) -> Result<OpaqueUse, Error> {
+        self.retention
+            .begin_use(UseKind::Mapping)
+            .map(|usage| usage.erase())
+            .map_err(Error::Assignment)
     }
 }
 struct Allocation {
@@ -356,6 +393,7 @@ unsafe impl MappingPlatform for Platform {
 pub(crate) struct ScopedSource {
     platform: Arc<Platform>,
     authority: Authority,
+    reservations: core::cell::RefCell<Vec<Assignment<Reservation>>>,
 }
 /// Local process grant kept across every OriginalMapping/MappingView. A
 /// failed retirement cannot let the dispatcher leave the root execution scope.
@@ -474,6 +512,7 @@ impl ScopedSource {
             Self {
                 platform,
                 authority,
+                reservations: core::cell::RefCell::new(Vec::new()),
             },
             session,
         ))
@@ -523,6 +562,32 @@ impl ScopedSource {
         }
         Ok(())
     }
+    fn register_handoff(&self, span: PhysicalSpan) -> Result<(Resource, ResourceId), Error> {
+        let mut reservations = self
+            .reservations
+            .try_borrow_mut()
+            .map_err(|_| Error::Busy)?;
+        reservations.try_reserve(1).map_err(|_| Error::Exhausted)?;
+        let assignment = Assignment::from_owned(Reservation {
+            _resources: self.platform.resources.clone(),
+            context: self.platform.context.clone(),
+            _span: span,
+        });
+        let backing = Backing {
+            owner: self.platform.resources.clone(),
+            span,
+            retention: assignment.retain(),
+        };
+        reservations.push(assignment);
+        drop(reservations);
+        let resource = Resource::new(Box::new(backing));
+        let registration = self
+            .authority
+            .register_resource(resource.clone())
+            .map_err(|refusal| refusal.error)?;
+        Ok((resource, registration))
+    }
+
     pub(crate) fn madt(&self) -> &'static [u8] {
         self.platform.resources.wire.madt()
     }
@@ -550,12 +615,7 @@ impl ScopedSource {
                 self.platform.report_memory_refusal("ioapic", span);
                 return Err(Error::OutsideResource);
             }
-            self.authority
-                .register_resource(Resource::new(Box::new(Backing {
-                    owner: self.platform.resources.clone(),
-                    span,
-                })))
-                .map_err(|refusal| refusal.error)?;
+            self.register_handoff(span)?;
         }
         Ok(count)
     }
@@ -619,13 +679,7 @@ impl ScopedSource {
             self.platform.report_memory_refusal("ecam", span);
             return Err(Error::OutsideResource);
         }
-        let resource = Resource::new(Box::new(Backing {
-            owner: self.platform.resources.clone(),
-            span,
-        }));
-        self.authority
-            .register_resource(resource.clone())
-            .map_err(|refusal| refusal.error)?;
+        let (resource, _) = self.register_handoff(span)?;
         Ok((window, resource))
     }
 }

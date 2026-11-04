@@ -208,14 +208,7 @@ impl ScopedSource {
             Arc::from_raw(pointer)
         };
         scope.check().map_err(failed)?;
-        let resource = Resource::new(Box::new(Backing {
-            owner: self.platform.resources.clone(),
-            span: page,
-        }));
-        let registration = self
-            .authority
-            .register_resource(resource.clone())
-            .map_err(|refusal| refusal.error)?;
+        let (resource, registration) = self.register_handoff(page)?;
         let mapping =
             match self
                 .authority
