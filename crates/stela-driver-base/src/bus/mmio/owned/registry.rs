@@ -712,6 +712,11 @@ impl Mapping {
     pub fn protection(&self) -> Result<Protection, Error> {
         Ok(self.lease()?.record.request.protection)
     }
+    /// Immutable classification of the SAME original retained resource.
+    /// Observation supplies no source/config/control or retirement permission.
+    pub fn kind(&self) -> Result<ResourceKind, Error> {
+        Ok(self.lease()?.record.resource.kind())
+    }
     pub fn address(&self, offset: usize, bytes: usize) -> Result<NonNull<u8>, Error> {
         self.check_current()?;
         self.lease()?

@@ -26,6 +26,7 @@ use stela_drivers::bus::dma::{
 };
 
 use crate::requester::RequesterClaim;
+use stela_drivers::bus::mmio::owned::{Mapping, Protection, ResourceKind};
 
 const PAGE: usize = 4096;
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
@@ -144,13 +145,21 @@ fn qualified_flush_line(edx: u32, ebx: u32) -> Result<usize, VtdError> {
     }
 }
 
-/// Physical MMIO, kept valid by the platform's unit/mapping owner.
+/// Physical MMIO, kept valid by its owned mapping or exclusive fixture owner.
 pub struct MmioRegisters {
-    base: NonNull<u8>,
+    base: UcAddress,
     bytes: usize,
     clock: fn() -> u64,
     timeout: u64,
+    mapping: Option<Mapping>,
 }
+
+struct UcAddress(NonNull<u8>);
+// SAFETY: this is an exclusive root-stable UC register address with no CPU
+// memory references. Its original mapping is kept by the register owner.
+unsafe impl Send for UcAddress {}
+// SAFETY: Unit serializes register accesses, and the mapping remains owned.
+unsafe impl Sync for UcAddress {}
 
 impl MmioRegisters {
     /// # Safety
@@ -172,11 +181,39 @@ impl MmioRegisters {
             return Err(VtdError::RegisterRange);
         }
         Ok(Self {
-            base,
+            base: UcAddress(base),
             bytes,
             clock,
             timeout,
+            mapping: None,
         })
+    }
+
+    /// Keep the actual original UC register mapping in the remapping unit.
+    ///
+    /// # Safety
+    /// The mapping is the unit's exclusive register window and stays reachable
+    /// in every admitted CPU root. No separate alias issues register accesses.
+    pub unsafe fn from_mapping(
+        mapping: Mapping,
+        clock: fn() -> u64,
+        timeout: u64,
+    ) -> Result<Self, VtdError> {
+        if mapping.kind() != Ok(ResourceKind::Registers)
+            || mapping.attribute() != Ok(CacheAttribute::Uncached)
+            || mapping.protection() != Ok(Protection::ReadWrite)
+        {
+            return Err(VtdError::RegisterRange);
+        }
+        let bytes = mapping.bytes().map_err(|_| VtdError::RegisterRange)?;
+        let base = mapping
+            .address(0, bytes)
+            .map_err(|_| VtdError::RegisterRange)?;
+        // SAFETY: actual UC register owner and all-root context checked above
+        // and by the caller. Keep that same mapping before returning.
+        let mut registers = unsafe { Self::new(base, bytes, clock, timeout) }?;
+        registers.mapping = Some(mapping);
+        Ok(registers)
     }
 
     fn address<T>(&self, offset: usize) -> *mut T {
@@ -187,15 +224,20 @@ impl MmioRegisters {
                 .is_some_and(|end| end <= self.bytes)
         );
         // SAFETY: the full checked register access is in the mapping.
-        unsafe { self.base.as_ptr().add(offset).cast() }
+        unsafe { self.base.0.as_ptr().add(offset).cast() }
     }
 }
 
-// SAFETY: exclusive register ownership is serialized by Unit; no safe CPU
-// memory references are exposed, and its physical mapping is root-stable.
-unsafe impl Send for MmioRegisters {}
-// SAFETY: volatile accesses are serialized by the unit's process-context lock.
-unsafe impl Sync for MmioRegisters {}
+impl Drop for MmioRegisters {
+    fn drop(&mut self) {
+        if let Some(mapping) = &mut self.mapping {
+            // SAFETY: the original register owner has no raw callers left.
+            // Unit keeps the registers if shutdown is uncertain. Retirement
+            // itself checks the actual mapping context and quarantines failure.
+            let _ = unsafe { mapping.retire() };
+        }
+    }
+}
 // SAFETY: construction requires the UC mapping and monotonic clock.
 unsafe impl Registers for MmioRegisters {
     fn bytes(&self) -> usize {
