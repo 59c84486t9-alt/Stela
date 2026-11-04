@@ -6,11 +6,16 @@ use crate::bus::{
         mapping::{Direction, DomainMapping},
         pages::DmaPages,
     },
-    pci::{owned::test_support::fixture, regs},
+    pci::{
+        ConfigFailure,
+        owned::test_support::{fixture, fixture_pointer},
+        regs,
+    },
 };
 use alloc::vec::Vec;
 use core::{
     ops::Range,
+    ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::sync::Mutex;
@@ -44,6 +49,7 @@ struct OldRoot {
     owner: Arc<RootOwner>,
     drain_error: bool,
     bind_error: bool,
+    bind_drift: Option<NonNull<u16>>,
 }
 struct Domain {
     binding: Mutex<Option<RequesterBinding>>,
@@ -84,6 +90,15 @@ unsafe impl Root for OldRoot {
             .push("new domain attachment");
         if self.bind_error {
             return Err(DmaError::MappingFailed);
+        }
+        if let Some(command) = self.bind_drift {
+            // SAFETY: the original model holds the exact isolated RAM
+            // register. Simulate a hardware change during binding.
+            unsafe {
+                command
+                    .as_ptr()
+                    .write_volatile(regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE);
+            }
         }
         Ok(Box::new(Control {
             domain: Arc::new(Domain {
@@ -188,23 +203,42 @@ fn function(address: Address) -> Function<OwnedConfig> {
     Function::new(address, config).unwrap()
 }
 fn preparing(drain_error: bool, bind_error: bool) -> (PreparingRequester, Arc<State>) {
+    preparing_with_drift(drain_error, bind_error, false)
+}
+fn preparing_with_drift(
+    drain_error: bool,
+    bind_error: bool,
+    drift: bool,
+) -> (PreparingRequester, Arc<State>) {
     let state = Arc::new(State::default());
+    let mut function = function(ADDRESS);
+    let bind_drift = drift.then(|| fixture_pointer(function.config(), regs::COMMAND).cast());
     let root = Box::new(OldRoot {
         owner: Arc::new(RootOwner(state.clone())),
         drain_error,
         bind_error,
+        bind_drift,
     });
     // SAFETY: exact isolated function/root, with no firmware/IRQ/work users;
     // the peer starts idle but this construction makes no engine-stop grant.
-    let prepared =
-        unsafe { PreparingRequester::new(function(ADDRESS), FunctionRole::Physical, root) }
-            .unwrap_or_else(|_| panic!("original fixture owners"));
+    let prepared = unsafe { PreparingRequester::new(function, FunctionRole::Physical, root) }
+        .unwrap_or_else(|_| panic!("original fixture owners"));
     (prepared, state)
 }
 #[test]
 fn old_root_completion_precedes_attachment_and_owners_follow_the_bound_domain() {
-    let (prepared, state) = preparing(false, false);
+    let (mut prepared, state) = preparing(false, false);
     assert!(state.events.lock().unwrap().is_empty());
+    let enabled = regs::COMMAND_INTX_DISABLE | regs::COMMAND_MASTER;
+    assert_eq!(
+        prepared
+            .function_mut()
+            .config()
+            .write16(regs::COMMAND, enabled),
+        Err(crate::bus::pci::ConfigError::before_effect(
+            ConfigFailure::BusMasterSealed
+        ))
+    );
     // SAFETY: the synchronous fixture has no DMA engines, submissions or IRQ/work.
     let receipt = unsafe { prepared.acknowledge_quiescence() };
     assert!(state.events.lock().unwrap().is_empty());
@@ -220,6 +254,11 @@ fn old_root_completion_precedes_attachment_and_owners_follow_the_bound_domain() 
     let (error, requester) = bound.requester.into_dma_binding().err().unwrap();
     assert_eq!(error, ClaimError::AlreadyBound);
     let mut config = requester.into_function().into_config();
+    assert_eq!(config.read16(regs::COMMAND), Ok(regs::COMMAND_INTX_DISABLE));
+    config.write16(regs::COMMAND, enabled).unwrap();
+    config
+        .write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE)
+        .unwrap();
     // SAFETY: isolated idle fixture; the retained binding must refuse reuse.
     assert_eq!(unsafe { config.retire() }, Err(MappingError::Busy));
     // SAFETY: no modeled DMA/IRQ/work user exists, and all original owners stay kept.
@@ -286,14 +325,15 @@ fn abandoning_preparation_does_not_release_an_unstopped_owner() {
 #[test]
 fn configuration_activity_is_rechecked_after_old_root_completion() {
     let (mut prepared, state) = preparing(false, false);
-    prepared
-        .function_mut()
-        .config()
-        .write16(
-            regs::COMMAND,
-            regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE,
-        )
-        .unwrap();
+    let command = fixture_pointer(prepared.function_mut().config(), regs::COMMAND);
+    // SAFETY: this isolated model is the sole owner of the original register
+    // bytes. Model hardware drift without giving the software a writer.
+    unsafe {
+        command
+            .cast::<u16>()
+            .as_ptr()
+            .write_volatile(regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE);
+    }
     // SAFETY: no modeled engine/submission/IRQ/work exists; the deliberately
     // enabled configuration bit must independently fail stopped validation.
     let receipt = unsafe { prepared.acknowledge_quiescence() };
@@ -305,6 +345,37 @@ fn configuration_activity_is_rechecked_after_old_root_completion() {
         })
     );
     assert_eq!(*state.events.lock().unwrap(), ["old root completion"]);
+}
+
+#[test]
+fn new_binding_does_not_release_the_seal_after_hardware_drift() {
+    let (prepared, state) = preparing_with_drift(false, false, true);
+    // SAFETY: the original fixture has no active device or callback; the
+    // modeled register changes only during the later bind operation.
+    let receipt = unsafe { prepared.acknowledge_quiescence() };
+    let mut failure = receipt.finalize().err().expect("drift refused");
+    assert_eq!(
+        failure.error,
+        Error::Claim(ClaimError::Active {
+            offset: regs::COMMAND,
+        })
+    );
+    assert_eq!(
+        *state.events.lock().unwrap(),
+        ["old root completion", "new domain attachment"]
+    );
+    let config = failure._owner.resources().function.config();
+    assert_eq!(
+        config.write16(
+            regs::COMMAND,
+            regs::COMMAND_INTX_DISABLE | regs::COMMAND_MASTER,
+        ),
+        Err(crate::bus::pci::ConfigError::before_effect(
+            ConfigFailure::BusMasterSealed,
+        ))
+    );
+    drop(failure);
+    assert_eq!(state.drops.load(Ordering::Relaxed), 0);
 }
 
 #[test]
