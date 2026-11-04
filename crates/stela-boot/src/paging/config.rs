@@ -17,7 +17,7 @@ use stela_drivers::bus::{
         self, AddressSpace, Authority, CacheAttribute, PhysicalSpan, Protection, Resource,
         ResourceBacking, ResourceKind,
     },
-    pci::{Address, EcamWindow, owned::OwnedConfig},
+    pci::{Address, ConfigError, EcamWindow, owned::OwnedConfig},
 };
 
 // A separate canonical high-half window; builder refuses any overlap.
@@ -48,7 +48,7 @@ pub(crate) enum Error {
     Mapping(owned::Error),
     Root(RootError),
     Tables(Refusal),
-    Config(stela_drivers::bus::pci::owned::ConfigError),
+    Config(ConfigError),
     NotReady(Address),
 }
 impl fmt::Display for Error {

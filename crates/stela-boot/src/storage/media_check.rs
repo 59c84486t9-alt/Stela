@@ -124,7 +124,9 @@ pub(super) unsafe fn probe_and_rescan(
                 return Err(refuse!("USB media check requires mapped ECAM"));
             }
             // SAFETY: caller owns the mapped ECAM and native devices.
-            for mut function in unsafe { Function::enumerate(window) } {
+            let functions = unsafe { Function::enumerate(window) }
+                .map_err(|error| failure("native PCI inventory", format_args!("{error:?}")))?;
+            for mut function in functions {
                 if function.class == xhci::CLASS {
                     owners.push(
                         xhci::attach(&mut function, handoff, dma)
