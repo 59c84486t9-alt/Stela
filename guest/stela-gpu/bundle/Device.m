@@ -100,6 +100,7 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 		stela_report("the service's protocol", &failure);
 		return nil;
 	}
+	stela_report_to(&_gate);
 	StelaEmpty nothing = {};
 	if (agreed.capability_bytes != sizeof(*_capabilities)) {
 		NSLog(@"StelaGPU: the capability block is %u bytes, not %zu", agreed.capability_bytes,

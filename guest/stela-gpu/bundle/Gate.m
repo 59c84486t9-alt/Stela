@@ -19,6 +19,26 @@ static void touch(StelaSpan span, bool write)
 	}
 }
 
+/* Tries for a span the service cannot reach. The pager takes back a page at
+ * most a few times; past this, mapping it again will not help. */
+#define MAX_UNMAPPED 1024u
+
+/* Fails a call whose memory stays out of reach, naming what it could not map. */
+static void report_unreachable(uint32_t operation, StelaSpans spans, StelaFailure *failure)
+{
+	NSMutableString *named = [NSMutableString new];
+	for (size_t i = 0; i < spans.read_count; i++) {
+		[named appendFormat:@" read %llx+%llx", spans.reads[i].address, spans.reads[i].length];
+	}
+	for (size_t i = 0; i < spans.write_count; i++) {
+		[named appendFormat:@" write %llx+%llx", spans.writes[i].address, spans.writes[i].length];
+	}
+	NSString *what = [NSString stringWithFormat:@"operation %u, unreachable after %u tries:%@", operation,
+						    MAX_UNMAPPED, named];
+	failure->status = StelaStatusUnmapped;
+	stela_report(what.UTF8String, failure);
+}
+
 uint32_t stela_gate_call(StelaGate *gate, uint32_t operation, const void *request, size_t request_bytes,
 			 void *response, size_t response_bytes, StelaSpans spans, StelaFailure *failure)
 {
@@ -26,7 +46,12 @@ uint32_t stela_gate_call(StelaGate *gate, uint32_t operation, const void *reques
 	failure = failure ? failure : &unread;
 	volatile StelaGateCall call;
 	unsigned denials = 0;
+	unsigned tries = 0;
 	do {
+		if (++tries > MAX_UNMAPPED) {
+			report_unreachable(operation, spans, failure);
+			return failure->status;
+		}
 		touch(stela_span(response, response_bytes), true);
 		for (size_t i = 0; i < spans.read_count; i++) {
 			touch(spans.reads[i], false);
@@ -61,6 +86,13 @@ NSError *stela_error(NSString *domain, NSInteger code, const StelaFailure *failu
 	return [NSError errorWithDomain:domain code:code userInfo:information];
 }
 
+static StelaGate *_Atomic reporting;
+
+void stela_report_to(StelaGate *gate)
+{
+	reporting = gate;
+}
+
 void stela_report(const char *what, const StelaFailure *failure)
 {
 	static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
@@ -74,6 +106,12 @@ void stela_report(const char *what, const StelaFailure *failure)
 	os_unfair_lock_unlock(&lock);
 	if (first) {
 		NSLog(@"StelaGPU: %@", message);
+		StelaGate *gate = reporting;
+		if (gate) {
+			StelaReportRequest request = {.text = stela_span(message.UTF8String, strlen(message.UTF8String))};
+			StelaEmpty empty;
+			STELA_CALL(gate, Report, &request, &empty, NULL);
+		}
 	}
 }
 

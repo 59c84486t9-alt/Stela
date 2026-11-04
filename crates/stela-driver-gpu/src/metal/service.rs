@@ -447,6 +447,12 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 self.release(connection, handle)?;
                 call.reply(&wire::Empty {})
             }
+            Operation::Report => {
+                let request: wire::ReportRequest = call.request()?;
+                let text = call.memory.read(request.text)?;
+                self.refused = Some(String::from_utf8_lossy(&text).into_owned());
+                call.reply(&wire::Empty {})
+            }
             Operation::NewLibrary => self.new_library(&mut call),
             Operation::LibraryFunctionNames => self.library_function_names(&mut call),
             Operation::LibraryIdentity => self.library_identity(&mut call),

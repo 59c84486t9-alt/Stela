@@ -180,6 +180,11 @@ records! {
         pub graphs: Span,
     }
 
+    /// `Report`: what the frontend could not answer its caller with.
+    pub struct ReportRequest {
+        pub text: Span,
+    }
+
     /// `NewArchive`: the bytes of an archive's file, if it has one.
     pub struct NewArchiveRequest {
         pub data: Span,
@@ -1010,6 +1015,9 @@ operations! {
     /// Releases an object; the device keeps what other objects and
     /// in-flight work still use.
     Release = 0x0003 => Handle, Empty;
+    /// Logs on the host what the frontend could not do, which may never
+    /// reach a refusal: an absent selector answers its caller with nil.
+    Report = 0x0004 => ReportRequest, Empty;
     /// `newLibraryWithData:`.
     NewLibrary = 0x0101 => NewLibraryRequest, Handle;
     /// `functionNames`.

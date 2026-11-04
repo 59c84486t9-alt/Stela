@@ -59,7 +59,9 @@ static inline StelaSpan stela_span(const void *address, size_t length)
 
 /* An NSError of `domain` from a failed call. */
 NSError *stela_error(NSString *domain, NSInteger code, const StelaFailure *failure);
-/* Says in the system log, once for each, that `what` could not be done. */
+/* Says in the system log and the host's, once for each, that `what` could not
+ * be done. Until `stela_report_to` names a gate, only in the system log. */
+void stela_report_to(StelaGate *gate);
 void stela_report(const char *what, const StelaFailure *failure);
 
 /* A growing command stream. */
