@@ -499,7 +499,7 @@ pub fn source_bytes_with_profile(
     let parsed = parse(source, base, profile).map_err(CompileError::from)?;
     if let Some(selected) = profile.checked_memory() {
         memory::CheckedPlan::new(
-            &parsed.instructions,
+            parsed.instructions,
             parsed.terminal.as_ref(),
             selected,
             profile,

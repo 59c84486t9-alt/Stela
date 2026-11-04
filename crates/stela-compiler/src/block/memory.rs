@@ -123,7 +123,7 @@ pub(super) struct CheckedPlan {
 }
 impl CheckedPlan {
     pub(super) fn new(
-        instructions: &[crate::aarch64::Instruction],
+        instructions: Vec<crate::aarch64::Instruction>,
         terminal: Option<&(GuestAddress, super::Terminator)>,
         profile: CheckedMemoryProfile,
         outer: super::BlockProfile,
@@ -175,13 +175,14 @@ impl CheckedPlan {
         let mut requirements = MemoryRequirements::default();
         let mut decoded = Vec::with_capacity(instructions.len());
         for instruction in instructions {
-            let operation = CheckedOperation::new(instruction.clone(), profile)?;
+            let pc = instruction.pc;
+            let operation = CheckedOperation::new(instruction, profile)?;
             requirements = requirements
                 .merge(operation.requirements())
                 .ok_or_else(|| {
                     CompileError::new(crate::CompileErrorKind::IncompatibleMemoryRequirements)
                 })?;
-            decoded.push((instruction.pc, operation));
+            decoded.push((pc, operation));
         }
         Ok(Self {
             decoded,

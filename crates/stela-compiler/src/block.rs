@@ -397,7 +397,7 @@ impl CompilationPlan {
         })
     }
 
-    fn block(parsed: ParsedBlock, options: &crate::Options) -> Result<Self, CompileError> {
+    fn block(mut parsed: ParsedBlock, options: &crate::Options) -> Result<Self, CompileError> {
         let profile = options.profile();
         let target = options.target();
         let checks = options.memory_checks();
@@ -429,7 +429,7 @@ impl CompilationPlan {
             .checked_memory()
             .map(|selected| {
                 memory::CheckedPlan::new(
-                    &parsed.instructions,
+                    core::mem::take(&mut parsed.instructions),
                     parsed.terminal.as_ref(),
                     selected,
                     profile,

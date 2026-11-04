@@ -281,6 +281,8 @@ fn checked_system_admission_stops_at_denial_error_or_terminal() {
             (Ok(None), Ok(None)) => assert_eq!(boundary, 0),
             (Err(eager), Err(lazy)) => assert_eq!(eager, lazy),
             (Ok(Some(eager)), Ok(Some(lazy))) => {
+                assert_eq!(eager.parsed().instructions.capacity(), 0);
+                assert_eq!(lazy.parsed().instructions.capacity(), 0);
                 assert_eq!(eager.memory_requirements(), lazy.memory_requirements());
                 let (eager, lazy) = (eager.compile().unwrap(), lazy.compile().unwrap());
                 assert_eq!(eager.source_bytes, lazy.source_bytes);
