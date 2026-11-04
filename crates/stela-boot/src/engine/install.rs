@@ -81,7 +81,7 @@ pub(super) fn open(
     partition: Box<dyn BlockDevice>,
     manifest: &PayloadManifest,
     directory: &str,
-    hashes: &[u8],
+    hashes: &'static [u8],
 ) -> Result<Medium> {
     let Layout::Pieces { pieces, .. } = &manifest.layout else {
         return Err(refuse!(
@@ -98,6 +98,6 @@ pub(super) fn open(
             .map_err(|error| refuse!("install medium: {error}", %error))?;
         extents.push(file.extents);
     }
-    Joined::new(volume.into_inner(), manifest, extents, hashes)
+    Joined::from_static_hashes(volume.into_inner(), manifest, extents, hashes)
         .map_err(|error| refuse!("install medium: {error}", %error))
 }

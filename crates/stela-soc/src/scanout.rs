@@ -465,9 +465,7 @@ pub fn compose(
             if unscaled && copies {
                 let start = (xs[0] - destination.x as usize) * 4;
                 let pixels = &row[start..start + out.len()];
-                if (layer.premultiplied && over_black)
-                    || pixels.iter().skip(3).step_by(4).all(|&alpha| alpha == 0xff)
-                {
+                if (layer.premultiplied && over_black) || all_opaque(pixels) {
                     copy_opaque(pixels, out, surface.format, mode.format);
                     continue;
                 }
@@ -505,8 +503,19 @@ pub fn compose(
     Ok(frame)
 }
 
+/// Reject a translucent group at once while ignoring the colour bytes.
+fn all_opaque(row: &[u8]) -> bool {
+    const ALPHA: u64 = 0xff00_0000_ff00_0000;
+    let (groups, tail) = row.as_chunks::<16>();
+    groups.iter().all(|group| {
+        let words = group.as_chunks::<8>().0;
+        let combined = u64::from_le_bytes(words[0]) & u64::from_le_bytes(words[1]);
+        combined & ALPHA == ALPHA
+    }) && tail.iter().skip(3).step_by(4).all(|&alpha| alpha == 0xff)
+}
+
 fn make_opaque(row: &mut [u8], premultiplied: bool) {
-    if !row.iter().skip(3).step_by(4).all(|&alpha| alpha == 0xff) {
+    if !all_opaque(row) {
         opaque_over_black(row, premultiplied);
     }
 }
@@ -553,6 +562,26 @@ mod tests {
             let start = iova as usize;
             bytes.copy_from_slice(&memory[start..start + bytes.len()]);
             true
+        }
+    }
+
+    #[test]
+    fn the_opaque_check_reads_only_alpha_across_group_boundaries() {
+        let mut bytes = [0; 41];
+        for length in 0..=40 {
+            for offset in 0..=1 {
+                let row = &mut bytes[offset..][..length];
+                row.fill(0);
+                for alpha in row.iter_mut().skip(3).step_by(4) {
+                    *alpha = 0xff;
+                }
+                assert!(all_opaque(row));
+                for alpha in (3..row.len()).step_by(4) {
+                    row[alpha] = 0xfe;
+                    assert!(!all_opaque(row));
+                    row[alpha] = 0xff;
+                }
+            }
         }
     }
 

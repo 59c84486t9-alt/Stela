@@ -23,6 +23,7 @@ use super::{
     plist::{self, Limits, Value},
 };
 use alloc::{
+    borrow::Cow,
     collections::{BTreeMap, VecDeque},
     string::{String, ToString},
     vec::Vec,
@@ -89,7 +90,7 @@ pub enum Verify {
 }
 struct Verified {
     entry: Entry,
-    blocks: Vec<[u8; 32]>,
+    blocks: Cow<'static, [[u8; 32]]>,
     /// Absent for a device-verified member, which has no blocks either.
     sha384: Option<[u8; 48]>,
     /// For recorded hashes not yet checked against the whole member: the
@@ -315,6 +316,19 @@ impl<R: ReadAt> Store<R> {
     /// the contents of the file it names, in place of scanning to build
     /// them; members are checked against them as [`Verify`] says.
     pub fn adopt_block_hashes(&mut self, file: &[u8]) -> Result<()> {
+        self.adopt_hashes(file, |blocks| Cow::Owned(blocks.to_vec()))
+    }
+
+    /// Adopt hashes from an immutable file that outlives the store.
+    pub fn adopt_static_block_hashes(&mut self, file: &'static [u8]) -> Result<()> {
+        self.adopt_hashes(file, Cow::Borrowed)
+    }
+
+    fn adopt_hashes<'a>(
+        &mut self,
+        file: &'a [u8],
+        retain: impl Fn(&'a [[u8; 32]]) -> Cow<'static, [[u8; 32]]>,
+    ) -> Result<()> {
         let blocks = self
             .manifest
             .block_hashes
@@ -331,6 +345,7 @@ impl<R: ReadAt> Store<R> {
         if count > MAX_BLOCKS || file.len() != count * 32 {
             return Err(Error::Invalid("block hash file size"));
         }
+        let hashes = file.as_chunks::<32>().0;
         let mut at = 0;
         let mut adopted = BTreeMap::new();
         for member in &self.manifest.members {
@@ -350,7 +365,7 @@ impl<R: ReadAt> Store<R> {
             hex::decode_to_slice(member.sha384.as_deref().unwrap_or(""), &mut sha384)
                 .map_err(|_| Error::Invalid("member SHA-384"))?;
             let n = member.bytes.div_ceil(BLOCK_BYTES as u64) as usize;
-            let blocks = file[at * 32..(at + n) * 32].as_chunks::<32>().0.to_vec();
+            let blocks = retain(&hashes[at..at + n]);
             at += n;
             adopted.insert(
                 member.name.clone(),
@@ -451,7 +466,7 @@ impl<R: ReadAt> Store<R> {
         }
         Ok(Verified {
             entry,
-            blocks: Vec::new(),
+            blocks: Cow::Borrowed(&[]),
             sha384: None,
             whole: None,
         })
@@ -522,7 +537,7 @@ impl<R: ReadAt> Store<R> {
             path.into(),
             Verified {
                 entry,
-                blocks: hashes,
+                blocks: Cow::Owned(hashes),
                 sha384: Some(hash384.finalize().into()),
                 whole: None,
             },
