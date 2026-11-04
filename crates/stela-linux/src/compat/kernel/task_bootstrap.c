@@ -4,6 +4,7 @@
  * a second Linux scheduler. Every resource operation below is original code.
  * No callback-presence/flag-only producer or successful missing-resource shim.
  */
+#include <linux/backing-dev.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/delay.h>
@@ -226,6 +227,9 @@ static int native_kernel_supervisor(void *argument)
     workqueue_init();
     init_mm_internals();
     workqueue_init_topology();
+    int error = bdi_init_writeback_workqueue();
+    if (error)
+        panic("cannot initialize writeback workqueue: %d", error);
 
     /* REQUIRED actual retained native request/reaper service on THIS real
      * source process. It owns original fork/kthread request execution and
