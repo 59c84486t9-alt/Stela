@@ -1364,8 +1364,10 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
 
     let owned_kernel = inputs.kernel_collection.bytes.to_vec();
     let kernel_ptr = owned_kernel.as_ptr();
-    inputs.kernel_collection.bytes = Cow::Owned(owned_kernel);
-    let moved = prepare_moving_kernel(inputs, &options)?;
+    inputs.kernel_collection.source.decoded_bytes = owned_kernel.len() as u64;
+    inputs.kernel_collection.source.decoded_sha256 = sha256(&owned_kernel);
+    let original = prepare(&inputs, &options)?;
+    let moved = assemble(&inputs, &options, Cow::Owned(owned_kernel), None)?;
     let moved_kernel = &moved
         .files
         .iter()
@@ -1376,7 +1378,7 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     assert_eq!(moved.files, bundle.files);
     assert_eq!(
         serde_json::to_vec(&moved.manifest)?,
-        serde_json::to_vec(&bundle.manifest)?
+        serde_json::to_vec(&original.manifest)?
     );
     Ok(())
 }

@@ -457,6 +457,8 @@ struct LoadedImage {
     file: &'static str,
     collection: KernelCollection,
     memory: Vec<u8>,
+    /// The validated file already had this layout and was moved unchanged.
+    kept_input: bool,
     /// `(region name, image offset range)` in split order.
     pieces: Vec<(String, core::ops::Range<u64>)>,
 }
@@ -483,9 +485,9 @@ impl LoadedImage {
         bytes: Cow<'_, [u8]>,
         splits: &[Split],
     ) -> Result<Self> {
-        let memory = match bytes {
-            Cow::Owned(bytes) if collection.file_is_memory_image(bytes.len()) => bytes,
-            bytes => collection.memory_image(&bytes)?,
+        let (memory, kept_input) = match bytes {
+            Cow::Owned(bytes) if collection.file_is_memory_image(bytes.len()) => (bytes, true),
+            bytes => (collection.memory_image(&bytes)?, false),
         };
         let mut pieces = vec![];
         for split in splits {
@@ -522,6 +524,7 @@ impl LoadedImage {
             file,
             collection,
             memory,
+            kept_input,
             pieces,
         })
     }
@@ -704,9 +707,14 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
     )
 }
 
-/// Let the bundle retain the decoded kernel's buffer when it already has
-/// the exact layout the loader needs.
-pub(crate) fn prepare_moving_kernel(mut inputs: Inputs, options: &Options) -> Result<Bundle> {
+/// Build an installed bundle from the decoder's owned kernel and source
+/// receipt. When the kernel already has the required layout, move its
+/// bytes unchanged and reuse the decoder's SHA-256 for the file receipt.
+pub(crate) fn prepare_moving_kernel(
+    installed: crate::installed::BundleInputs<'_>,
+    options: &Options,
+) -> Result<Bundle> {
+    let mut inputs = installed.into_inputs();
     let kernel = core::mem::take(&mut inputs.kernel_collection.bytes);
     assemble(&inputs, options, kernel, None)
 }
@@ -861,6 +869,10 @@ fn assemble(
 
     let manifest_images = images.manifest_images(&regions)?;
     let entry = manifest_images[0].entry.clone();
+    let kernel_source = &inputs.kernel_collection.source;
+    let kernel_digest = (images.kernel.kept_input
+        && images.kernel.memory.len() as u64 == kernel_source.decoded_bytes)
+        .then_some(&kernel_source.decoded_sha256);
     let (files, ramdisk_source) = files(
         inputs,
         images,
@@ -885,13 +897,23 @@ fn assemble(
                 let bytes = contents.len() as u64;
                 // A whole-file region (such as a restore ramdisk) already
                 // has the digest of these exact bytes.
-                let whole = regions.iter().find(|region| {
-                    region.file == *name && region.file_offset == 0 && region.bytes == bytes
-                });
+                let whole = || {
+                    regions
+                        .iter()
+                        .find(|region| {
+                            region.file == *name && region.file_offset == 0 && region.bytes == bytes
+                        })
+                        .map(|region| &region.sha256)
+                };
+                let digest = if name == KERNEL_FILE {
+                    kernel_digest.or_else(whole)
+                } else {
+                    whole()
+                };
                 File {
                     name: name.clone(),
                     bytes,
-                    sha256: whole.map_or_else(|| sha256(contents), |region| region.sha256.clone()),
+                    sha256: digest.cloned().unwrap_or_else(|| sha256(contents)),
                 }
             })
             .collect(),

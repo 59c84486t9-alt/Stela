@@ -437,6 +437,16 @@ pub struct Installed {
     pub evidence: Evidence,
 }
 
+/// The installed loader's inputs. Its constructor stays in this module
+/// where the owned kernel and its exact decode receipt originate.
+pub(crate) struct BundleInputs<'a>(Inputs<'a>);
+
+impl<'a> BundleInputs<'a> {
+    pub(crate) fn into_inputs(self) -> Inputs<'a> {
+        self.0
+    }
+}
+
 pub struct Decoded {
     bytes: Vec<u8>,
     source: Source,
@@ -761,7 +771,7 @@ pub fn prepare<R: ReadAt>(
         volume_group: disk.set.volume_group.clone(),
         boot_hash: disk.set.boot_hash.clone(),
     });
-    let mut bundle = boot_bundle::prepare_moving_kernel(inputs, &options)?;
+    let mut bundle = boot_bundle::prepare_moving_kernel(BundleInputs(inputs), &options)?;
     if !evidence
         .named_by
         .as_deref()
