@@ -33,6 +33,14 @@ struct Part {
     first_block: usize,
 }
 
+impl Part {
+    fn extent_index(&self, offset: u64) -> usize {
+        self.extents
+            .partition_point(|(start, _)| *start <= offset)
+            .saturating_sub(1)
+    }
+}
+
 /// Bound the scratch buffer to the native install reader's request size.
 const MAX_BATCH_BYTES: u64 = 1 << 20;
 
@@ -51,6 +59,7 @@ pub struct Joined<R> {
     block_bytes: u64,
     hashes: Cow<'static, [[u8; 32]]>,
     cached: Option<CachedBlock>,
+    pair_alignment: Option<u64>,
 }
 
 impl<R: ReadAt> Joined<R> {
@@ -77,6 +86,19 @@ impl<R: ReadAt> Joined<R> {
         hashes: &'static [u8],
     ) -> Result<Self, PayloadError> {
         Self::with_hashes(device, manifest, extents, hashes, Cow::Borrowed)
+    }
+
+    /// Allow two demanded hash blocks in one aligned device read when the
+    /// backing device reports a large enough read command. Unknown limits
+    /// and pairs that span distinct extents keep the conservative path.
+    pub fn with_two_block_reads(mut self, read_limit: usize, sector_bytes: u32) -> Self {
+        let alignment = u64::from(sector_bytes);
+        self.pair_alignment = (alignment.is_power_of_two()
+            && self.block_bytes.is_multiple_of(alignment)
+            && self.block_bytes <= MAX_BATCH_BYTES / 2
+            && self.block_bytes <= read_limit as u64 / 2)
+            .then_some(alignment);
+        self
     }
 
     fn with_hashes<'a>(
@@ -156,7 +178,18 @@ impl<R: ReadAt> Joined<R> {
             block_bytes: block_hashes.block_bytes,
             hashes: retain(hashes.as_chunks::<32>().0),
             cached: None,
+            pair_alignment: None,
         })
+    }
+
+    fn can_read_pair(&self, part: &Part, offset: u64) -> bool {
+        let Some(alignment) = self.pair_alignment else {
+            return false;
+        };
+        let (start, extent) = part.extents[part.extent_index(offset)];
+        let within = offset - start;
+        (extent.offset + within).is_multiple_of(alignment)
+            && extent.bytes - within >= 2 * self.block_bytes
     }
 
     /// Read from piece `index` at its own offset, through its extents.
@@ -167,10 +200,7 @@ impl<R: ReadAt> Joined<R> {
         mut buffer: &mut [u8],
     ) -> Result<(), PayloadError> {
         let part = &self.parts[index];
-        let mut at = part
-            .extents
-            .partition_point(|(start, _)| *start <= offset)
-            .saturating_sub(1);
+        let mut at = part.extent_index(offset);
         while !buffer.is_empty() {
             let (start, extent) = part.extents[at];
             let within = offset - start;
@@ -209,8 +239,13 @@ impl<R: ReadAt> Joined<R> {
             .div_ceil(self.block_bytes)
             .min((MAX_BATCH_BYTES / self.block_bytes).max(1));
         // Two 64 KiB blocks can exceed a high-speed BOT command's 120 KiB
-        // bound and add a data descriptor without saving a command.
-        let blocks = if blocks < 3 { 1 } else { blocks };
+        // bound and add a data descriptor without saving a command. Require
+        // the reported read limit and alignment before trying a pair.
+        let blocks = match blocks {
+            2 if self.can_read_pair(part, start) => 2,
+            0..=2 => 1,
+            blocks => blocks,
+        };
         let bytes = (part.bytes - start).min(blocks * self.block_bytes) as usize;
         let first_hash = part.first_block + block as usize;
         let mut data = self
@@ -285,6 +320,23 @@ mod tests {
     use alloc::vec;
 
     const BLOCK: u64 = 512;
+
+    struct Traced {
+        device: Memory,
+        reads: Vec<(u64, usize)>,
+    }
+    impl ReadAt for Traced {
+        type Error = <Memory as ReadAt>::Error;
+
+        fn len(&self) -> u64 {
+            self.device.len()
+        }
+
+        fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<(), Self::Error> {
+            self.reads.push((offset, buffer.len()));
+            self.device.read_at(offset, buffer)
+        }
+    }
 
     /// A medium holding `ipsw` as pieces of `piece_bytes`, each scattered
     /// over two extents in reverse order, its manifest and its piece hash
@@ -371,23 +423,6 @@ mod tests {
 
     #[test]
     fn reads_one_run_per_extent_and_caches_only_the_last_block() {
-        struct Traced {
-            device: Memory,
-            reads: Vec<(u64, usize)>,
-        }
-        impl ReadAt for Traced {
-            type Error = <Memory as ReadAt>::Error;
-
-            fn len(&self) -> u64 {
-                self.device.len()
-            }
-
-            fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<(), Self::Error> {
-                self.reads.push((offset, buffer.len()));
-                self.device.read_at(offset, buffer)
-            }
-        }
-
         let ipsw = ipsw();
         let (device, manifest, extents, hashes) = medium(&ipsw, 3072);
         let first = extents[0].clone();
@@ -406,6 +441,100 @@ mod tests {
         assert_eq!(joined.device.reads, expected);
         joined.device.device.0[first[0].offset as usize] ^= 1;
         assert!(joined.read_at(0, &mut data[..10]).is_err());
+    }
+
+    #[test]
+    fn pairs_require_demand_capacity_alignment_and_one_extent() {
+        let block = BLOCK as usize;
+        let ipsw = &ipsw()[..4 * block];
+        let (_, manifest, _, hashes) = medium(ipsw, ipsw.len() as u64);
+        for (limit, sector, start, fragmented, pair) in [
+            (0, 512, 0, false, false),
+            (1023, 512, 0, false, false),
+            (1024, 0, 0, false, false),
+            (1024, 768, 0, false, false),
+            (1024, 1024, 0, false, false),
+            (1024, 512, 1, false, false),
+            (1024, 512, 0, true, false),
+            (1024, 512, 0, false, true),
+        ] {
+            let mut device = vec![0; start];
+            let extents = if fragmented {
+                device.extend_from_slice(&ipsw[..block]);
+                device.resize(device.len() + block, 0xee);
+                let tail = device.len() as u64;
+                device.extend_from_slice(&ipsw[block..]);
+                vec![
+                    Extent {
+                        offset: start as u64,
+                        bytes: BLOCK,
+                    },
+                    Extent {
+                        offset: tail,
+                        bytes: ipsw.len() as u64 - BLOCK,
+                    },
+                ]
+            } else {
+                device.extend_from_slice(ipsw);
+                vec![Extent {
+                    offset: start as u64,
+                    bytes: ipsw.len() as u64,
+                }]
+            };
+            let device = Traced {
+                device: Memory(device),
+                reads: Vec::new(),
+            };
+            let mut joined = Joined::new(device, &manifest, vec![extents], &hashes)
+                .unwrap()
+                .with_two_block_reads(limit, sector);
+            let mut data = vec![0; 2 * block];
+            joined.read_at(0, &mut data).unwrap();
+            assert_eq!(data, ipsw[..2 * block]);
+            let reads = if pair { 1 } else { 2 };
+            assert_eq!(joined.device.reads.len(), reads);
+            assert_eq!(
+                joined.device.reads[0],
+                (start as u64, if pair { 2 * block } else { block })
+            );
+
+            joined.read_at(BLOCK + 1, &mut data[..13]).unwrap();
+            assert_eq!(data[..13], ipsw[block + 1..block + 14]);
+            assert_eq!(joined.device.reads.len(), reads);
+            joined.read_at(0, &mut data[..13]).unwrap();
+            assert_eq!(data[..13], ipsw[..13]);
+            assert_eq!(joined.device.reads[reads], (start as u64, block));
+        }
+    }
+
+    #[test]
+    fn a_corrupt_second_block_preserves_the_verified_prefix() {
+        let block = BLOCK as usize;
+        let ipsw = &ipsw()[..3 * block];
+        let (_, manifest, _, hashes) = medium(ipsw, ipsw.len() as u64);
+        let mut device = ipsw.to_vec();
+        device[block + 7] ^= 1;
+        let device = Traced {
+            device: Memory(device),
+            reads: Vec::new(),
+        };
+        let extent = Extent {
+            offset: 0,
+            bytes: ipsw.len() as u64,
+        };
+        let mut joined = Joined::new(device, &manifest, vec![vec![extent]], &hashes)
+            .unwrap()
+            .with_two_block_reads(2 * block, BLOCK as u32);
+        let mut data = vec![0xee; 2 * block];
+        let error = joined.read_at(0, &mut data).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ipsw.000 block 1: its bytes differ from the piece's block hash"
+        );
+        assert_eq!(data[..block], ipsw[..block]);
+        assert!(data[block..].iter().all(|&byte| byte == 0xee));
+        assert_eq!(joined.device.reads, [(0, 2 * block)]);
+        assert!(joined.cached.is_none());
     }
 
     #[test]

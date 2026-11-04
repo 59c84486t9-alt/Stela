@@ -88,6 +88,9 @@ pub(super) fn open(
             "--install names a payload that is not an install medium"
         ));
     };
+    let identity = partition.identity();
+    let sector_bytes = identity.block_size;
+    let read_limit = identity.features.max_transfer;
     let mut volume = Fat32::open(Bytes::new(partition))
         .map_err(|error| refuse!("install medium: {error}", %error))?;
     let directory = directory.replace('\\', "/");
@@ -99,5 +102,6 @@ pub(super) fn open(
         extents.push(file.extents);
     }
     Joined::from_static_hashes(volume.into_inner(), manifest, extents, hashes)
+        .map(|joined| joined.with_two_block_reads(read_limit, sector_bytes))
         .map_err(|error| refuse!("install medium: {error}", %error))
 }
