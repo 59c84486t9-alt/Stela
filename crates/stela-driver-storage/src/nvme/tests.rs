@@ -807,6 +807,55 @@ fn errors_without_do_not_retry_run_again_after_their_retry_delay() {
     assert_eq!(disk.finish(flush), Some(Ok(None)));
 }
 
+#[test]
+fn due_retries_publish_before_expired_commands_abort_in_tag_order() {
+    let _clock = crate::test_clock::virtualize();
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let first = disk.start(Command::Flush).unwrap();
+    let ready = disk.start(Command::Flush).unwrap();
+    let pending = disk.start(Command::Flush).unwrap();
+    let last = disk.start(Command::Flush).unwrap();
+    let mut controller = disk.controller.borrow_mut();
+    controller.retry_delays = [1, 0, 0];
+    let first_id = running_id(&controller, first);
+    let ready_id = running_id(&controller, ready);
+    let pending_id = running_id(&controller, pending);
+    let last_id = running_id(&controller, last);
+    post(&mut controller, pending_id, 0x82 | 1 << 11);
+    controller.advance();
+    assert!(controller.aborts.is_empty());
+    assert!(matches!(
+        controller.tags[pending as usize],
+        Tag::Delayed { .. }
+    ));
+
+    crate::test_clock::advance(controller.clock, controller.command_timeout_us);
+    post(&mut controller, ready_id, 0x82);
+    controller.advance();
+    let retry_id = running_id(&controller, ready);
+    assert_eq!(retry_id, last_id + 1);
+    assert_eq!(controller.aborts, [retry_id + 1, retry_id + 2]);
+    for (entry, command) in controller
+        .admin
+        .submissions
+        .bytes()
+        .chunks_exact(64)
+        .zip([first_id, last_id])
+    {
+        assert_eq!(entry[0], ADMIN_ABORT);
+        assert_eq!(entry[40..44], (u32::from(command) << 16 | 1).to_le_bytes());
+    }
+    assert!(matches!(
+        controller.tags[pending as usize],
+        Tag::Delayed { .. }
+    ));
+    assert!(matches!(
+        controller.tags[ready as usize],
+        Tag::Running { aborted: false, .. }
+    ));
+}
+
 /// Each state idles into the deepest usable non-operational state below
 /// it, one per latency tolerance, as Linux `nvme_configure_apst`.
 #[test]

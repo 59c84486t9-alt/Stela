@@ -418,34 +418,13 @@ impl Controller {
         }
         // One clock reading serves every retry delay and command deadline.
         let now = crate::Clock::ticks();
-        for tag in 0..self.tags.len() {
-            if matches!(&self.tags[tag], Tag::Delayed { until, .. } if until.passed_at(now)) {
-                let Tag::Delayed {
-                    namespace,
-                    block,
-                    command,
-                    retries,
-                    ..
-                } = core::mem::take(&mut self.tags[tag])
-                else {
-                    unreachable!();
-                };
-                self.submit(tag, namespace, block, command, retries);
-            }
-        }
-        for tag in 0..self.tags.len() {
-            let Tag::Running {
-                id,
-                deadline,
-                aborted,
-                ..
-            } = &self.tags[tag]
-            else {
-                continue;
+        let mut expired = self.retry_and_find_expired(now);
+        while expired != 0 {
+            let tag = expired.trailing_zeros() as usize;
+            expired &= expired - 1;
+            let Tag::Running { id, aborted, .. } = &self.tags[tag] else {
+                unreachable!();
             };
-            if !deadline.passed_at(now) {
-                continue;
-            }
             if *aborted {
                 self.reset();
                 return;
@@ -464,6 +443,41 @@ impl Controller {
                 }
             }
         }
+    }
+
+    /// Run all due retries before issuing any Abort. The same counter
+    /// snapshot can identify expired running tags during the retry pass.
+    fn retry_and_find_expired(&mut self, now: u64) -> u8 {
+        const _: () = assert!(DEPTH <= u8::BITS as usize);
+
+        let mut expired = 0;
+        for tag in 0..self.tags.len() {
+            let deadline = match &self.tags[tag] {
+                Tag::Running { deadline, .. } => *deadline,
+                Tag::Delayed { until, .. } if until.passed_at(now) => {
+                    let Tag::Delayed {
+                        namespace,
+                        block,
+                        command,
+                        retries,
+                        ..
+                    } = core::mem::take(&mut self.tags[tag])
+                    else {
+                        unreachable!();
+                    };
+                    self.submit(tag, namespace, block, command, retries);
+                    let Tag::Running { deadline, .. } = self.tags[tag] else {
+                        continue;
+                    };
+                    deadline
+                }
+                _ => continue,
+            };
+            if deadline.passed_at(now) {
+                expired |= 1 << tag;
+            }
+        }
+        expired
     }
 
     /// Command `id` completed with `status`, the controller reporting
