@@ -89,6 +89,7 @@ pub(crate) mod asm;
 mod atomic;
 mod bitfield;
 pub(crate) mod block;
+mod byte_prefix;
 pub mod chain;
 pub(crate) mod checked_pointer;
 mod conditional_select;

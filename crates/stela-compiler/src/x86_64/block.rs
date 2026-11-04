@@ -276,6 +276,13 @@ fn emit_selected(
     // The DIT audit covers each instruction's own lowering, not the
     // register-allocated and clean-load regions' recipes.
     let optimize_regions = optimize_regions && !target.data_independent_timing();
+    let prefix_sum =
+        if optimize_regions && !pinned && !fault_table && checks == super::MemoryChecks::DEFAULT {
+            super::byte_prefix::Plan::new(instructions, terminal)
+                .map(|plan| plan.emit(code, target))
+        } else {
+            None
+        };
     let fuse_pairs = optimize_regions && frame_loop.is_none() && !fault_table && !pinned;
     // Long-mode LAHF is part of the v2 floor. Some BMI2 hosts execute PEXT
     // in microcode and keep the existing capture and predicate there.
@@ -727,6 +734,13 @@ fn emit_selected(
         "ordinary instruction prefix cannot branch"
     );
     out_of_line.place(code);
+    if let Some(fast) = prefix_sum {
+        code.asm().bind(fast);
+        // All fast-path state is settled. The scalar source rows describe
+        // its fallback accesses, while the single vector fault is at row zero.
+        block.source_map[0].1 = 0;
+        after = Held::NOTHING;
+    }
     if let Some(frame_loop) = frame_loop {
         let Some((pc, Terminator::Branch(operation))) = terminal else {
             unreachable!("a frame loop has a validated direct branch")
