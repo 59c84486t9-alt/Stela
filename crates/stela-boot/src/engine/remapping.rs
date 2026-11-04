@@ -407,6 +407,29 @@ impl Remappers {
         remappers
     }
 
+    /// # Safety
+    /// Whole native IOAPIC ownership was explicitly handed off. The captured
+    /// platform and every current DMA/IRQ mode writer stay exclusive.
+    pub(super) unsafe fn install_ioapics(
+        &self,
+        pci: &native_mmio::ContainedPci<'static>,
+    ) -> Result<usize, MappingError> {
+        let fabric = self
+            .initial_fabric
+            .as_ref()
+            .filter(|fabric| core::ptr::eq(fabric.source, pci.source()))
+            .ok_or(MappingError::Unavailable)?;
+        // SAFETY: the same original source and complete unit cohort remain
+        // held in the accepting mount context.
+        let modes = unsafe { fabric.pin_direct_delivery() }.map_err(|error| {
+            output::arguments(format_args!("HOST IOAPIC direct mode refused: {error:?}\n"));
+            MappingError::Unavailable
+        })?;
+        // SAFETY: forwarded original controller handoff and exact complete
+        // mode owners, all from this same retained source.
+        unsafe { fabric.source.install_ioapics(modes) }
+    }
+
     fn initial_requester(
         &self,
         source: &native_mmio::Source,

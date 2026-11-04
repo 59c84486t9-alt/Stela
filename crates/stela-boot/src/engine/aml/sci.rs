@@ -39,8 +39,9 @@ impl Prepared {
         let line = routing.sci(mmio.fadt()).map_err(|_| IrqError::Route)?;
         let mut units = Vec::new();
         for descriptor in &routing.units {
-            // SAFETY: the caller grants the complete IOAPIC handoff.
-            let unit = unsafe { mmio.ioapic(*descriptor) }.map_err(|_| IrqError::Unavailable)?;
+            let unit = mmio
+                .ioapic(*descriptor)
+                .map_err(|_| IrqError::Unavailable)?;
             units.push((*descriptor, unit));
         }
         let spans: Vec<_> = units
@@ -57,8 +58,10 @@ impl Prepared {
         // MADT's override determines the physical GSI separately.
         let fadt = mmio.fadt();
         let irq = u32::from(u16::from_le_bytes([fadt[46], fadt[47]]));
-        // SAFETY: former firmware route and contributors are owned by caller.
-        unsafe { unit.mask_unclaimed(line.gsi) }?;
+        let state = unit.state(line.gsi)?;
+        if !state.masked || state.remote_irr || state.delivery_pending {
+            return Err(IrqError::Drain);
+        }
         Ok(Self {
             unit,
             line,

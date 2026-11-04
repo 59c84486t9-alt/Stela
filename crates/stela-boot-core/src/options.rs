@@ -304,6 +304,8 @@ pub struct System {
     /// Exclusive whole HPET handoff until shutdown. It supplies native PCI
     /// minimum delays and can serve the Linux scheduler on an admitted BSP timer.
     pub native_pci_own_hpet: bool,
+    /// Exclusive handoff of the original IOAPICs through shutdown.
+    pub native_pci_own_ioapic: bool,
     /// Whole host disks, by serial, that the guest sees as USB mass
     /// storage behind the native hub (`--usb-storage SERIAL`, repeatable).
     pub usb_storage: Vec<String>,
@@ -403,6 +405,7 @@ impl Default for System {
             audio_check: None,
             audio_own_hpet: false,
             native_pci_own_hpet: false,
+            native_pci_own_ioapic: false,
             usb_storage: Vec::new(),
             usb4_approved: Vec::new(),
             external_disks: false,
@@ -773,6 +776,7 @@ impl fmt::Display for System {
         line.value("--audio-check", self.audio_check.map(AudioCheck::name))?;
         line.flag("--audio-own-hpet", self.audio_own_hpet)?;
         line.flag("--native-pci-own-hpet", self.native_pci_own_hpet)?;
+        line.flag("--native-pci-own-ioapic", self.native_pci_own_ioapic)?;
         if self.dram_explicit {
             line.value("--dram-base", Some(Hex(self.dram_base)))?;
         }

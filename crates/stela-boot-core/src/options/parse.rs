@@ -215,6 +215,12 @@ impl ParseState<'_> {
                     Error::DuplicateNativePciHpet,
                 )?;
             }
+            "--native-pci-own-ioapic" => {
+                flag(
+                    &mut options.native_pci_own_ioapic,
+                    Error::DuplicateNativePciIoapic,
+                )?;
+            }
             "--network-check" => {
                 let url = value().ok_or(Error::MissingNetworkUrl)?;
                 parse_url(url)?;

@@ -12,7 +12,7 @@ pub(super) fn system(options: &System) -> Result<(), Error> {
     if options.audio_own_hpet && options.audio_check.is_none() {
         return Err(Error::Constraint(Constraint::AudioHpetDependency));
     }
-    if options.native_pci_own_hpet
+    if (options.native_pci_own_hpet || options.native_pci_own_ioapic)
         && (options.audio_check.is_some()
             || options.native_clock_check
             || options.native_mmio_check
@@ -20,7 +20,11 @@ pub(super) fn system(options: &System) -> Result<(), Error> {
             || options.native_bootstrap_check
             || options.native_shared_check)
     {
-        return Err(Error::Constraint(Constraint::NativePciHpetExclusive));
+        return Err(Error::Constraint(if options.native_pci_own_hpet {
+            Constraint::NativePciHpetExclusive
+        } else {
+            Constraint::NativePciIoapicExclusive
+        }));
     }
     Ok(())
 }

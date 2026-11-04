@@ -37,6 +37,7 @@ pub struct Routing {
     pub units: Vec<Unit>,
     overrides: Vec<Override>,
     nmis: Vec<u32>,
+    legacy_pic: bool,
 }
 fn word(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes(b[o..o + 2].try_into().unwrap())
@@ -96,6 +97,7 @@ impl Routing {
             units: Vec::new(),
             overrides: Vec::new(),
             nmis: Vec::new(),
+            legacy_pic: dword(madt, 40) & 1 != 0,
         };
         let mut lapic_override = false;
         let mut offset = 44;
@@ -234,6 +236,10 @@ impl Routing {
             polarity,
             trigger,
         })
+    }
+
+    pub fn has_legacy_pic(&self) -> bool {
+        self.legacy_pic
     }
 
     pub fn has_ioapic_nmis(&self) -> bool {

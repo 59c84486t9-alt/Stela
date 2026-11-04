@@ -2048,20 +2048,6 @@ fn start_platform(
             }
         }
     });
-    let prepared_sci = match (&contained_pci, &handoff.power) {
-        (Some(pci), Some(power)) => {
-            // SAFETY: PCI INTx contributors are disabled; the boot owns the
-            // fixed/GPE sources and complete IOAPIC handoff.
-            match unsafe { aml::sci::Prepared::capture(pci.source(), power.clone()) } {
-                Ok(prepared) => Some(prepared),
-                Err(error) => {
-                    output::arguments(format_args!("HOST ACPI SCI unavailable: {error:?}\n"));
-                    None
-                }
-            }
-        }
-        _ => None,
-    };
     // The remapping units, taken before any host driver starts DMA.
     let remappers = match (&contained_pci, handoff.storage.handoff()) {
         // SAFETY: no host driver has started; the loader root maps the ACPI
@@ -2077,6 +2063,40 @@ fn start_platform(
             )
         },
         _ => remapping::Remappers::none(),
+    };
+    if options.native_pci_own_ioapic {
+        let result = contained_pci
+            .as_ref()
+            .ok_or(stela_drivers::bus::mmio::owned::Error::Unavailable)
+            .and_then(|pci| {
+                // SAFETY: the explicit whole-controller handoff excludes
+                // firmware/SMM/other route writers through shutdown. The
+                // original stopped PCI census and all-unit remapper pins
+                // remain held while the sole BSP contains the IOAPICs.
+                unsafe { remappers.install_ioapics(pci) }
+            });
+        match result {
+            Ok(units) => output::arguments(format_args!(
+                "HOST IOAPIC contained: {units} original controllers; VT-d direct mode retained\n"
+            )),
+            Err(error) => output::arguments(format_args!(
+                "HOST IOAPIC containment unavailable: {error:?}\n"
+            )),
+        }
+    }
+    let prepared_sci = match (&contained_pci, &handoff.power) {
+        (Some(pci), Some(power)) => {
+            // SAFETY: PCI INTx contributors are disabled; the boot owns the
+            // fixed/GPE sources and complete IOAPIC handoff.
+            match unsafe { aml::sci::Prepared::capture(pci.source(), power.clone()) } {
+                Ok(prepared) => Some(prepared),
+                Err(error) => {
+                    output::arguments(format_args!("HOST ACPI SCI unavailable: {error:?}\n"));
+                    None
+                }
+            }
+        }
+        _ => None,
     };
     let clock = if options.boots_macos() && options.native_pci_own_hpet {
         native_mmio.and_then(|source| {

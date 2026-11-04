@@ -34,6 +34,22 @@ fn native_pci_hpet_round_trips_only_on_the_normal_system_path() {
     }
 }
 
+#[test]
+fn native_pci_ioapic_handoff_round_trips_and_refuses_diagnostic_paths() {
+    let text = "--system --native-pci-own-ioapic";
+    let options = System::parse(text).unwrap();
+    assert!(options.native_pci_own_ioapic);
+    assert_eq!(System::parse(&options.to_string()), Ok(options));
+    assert_eq!(
+        System::parse("--system --native-pci-own-ioapic --native-pci-own-ioapic").unwrap_err(),
+        Error::DuplicateNativePciIoapic
+    );
+    assert_eq!(
+        System::parse("--system --native-pci-own-ioapic --native-mmio-check").unwrap_err(),
+        Error::Constraint(Constraint::NativePciIoapicExclusive)
+    );
+}
+
 use alloc::{format, string::ToString, vec};
 
 #[test]

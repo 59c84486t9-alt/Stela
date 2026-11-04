@@ -34,6 +34,7 @@ use core::{
 pub(crate) use hpet::{ExclusiveHpet as NativeExclusiveHpet, HpetMapping as NativeHpetMapping};
 use stela_boot_core::aperture::{self, Controls, Flush, Processors};
 use stela_drivers::bus::{
+    irq::{self, Platform as _, posted_msi::NotificationDomain},
     mmio::owned::{
         AddressSpace, Authority, CacheAttribute, InstalledMapping, MapFailure, MapRequest,
         MappingPlatform, PhysicalSpan, Protection, Resource, ResourceBacking, ResourceId,
@@ -459,8 +460,7 @@ pub(crate) struct Source {
     pci_clock: core::cell::OnceCell<crate::native_clock::Prepared>,
     /// Each claimed ECAM bus, by its window and bus.
     buses: core::cell::RefCell<Vec<Bus>>,
-    ioapics: core::cell::RefCell<Vec<(crate::native_irq::madt::Unit, Arc<IoapicUnit>)>>,
-    irq_domain: Option<Arc<dyn stela_drivers::bus::irq::posted_msi::NotificationDomain>>,
+    ioapics: core::cell::RefCell<MountedIoapics>,
 }
 
 impl Source {
@@ -604,8 +604,7 @@ impl Source {
             pci_slots: config_space::PciSlots::new(),
             pci_clock: core::cell::OnceCell::new(),
             buses: core::cell::RefCell::new(Vec::new()),
-            ioapics: core::cell::RefCell::new(Vec::new()),
-            irq_domain: None,
+            ioapics: core::cell::RefCell::new(MountedIoapics::Unclaimed),
         })
     }
 
@@ -874,81 +873,139 @@ impl Drop for IoapicRegisters {
 pub(crate) type IoapicUnit =
     crate::native_irq::ioapic::Unit<IoapicRegisters, crate::native_irq::NativePlatform>;
 
-impl Source {
-    // Positive PCI mode ownership does not supply original IOAPIC/RTE custody.
-    // A separate real line-controller producer is required before this domain
-    // can be installed; current Line/SCI admission stays unavailable.
+type IoapicEntry = (crate::native_irq::madt::Unit, Arc<IoapicUnit>);
+type ModePin =
+    crate::native_dma::vtd::interrupt::DirectDelivery<crate::native_dma::vtd::MmioRegisters>;
 
-    /// Reuse this source's one selector/window owner and UC mapping.
+enum MountedIoapics {
+    Unclaimed,
+    Unavailable,
+    Ready {
+        units: Vec<IoapicEntry>,
+        domain: Arc<dyn NotificationDomain>,
+    },
+}
+
+struct MountedNotification {
+    identity: Arc<RootIdentity>,
+    modes: Vec<ModePin>,
+}
+
+// SAFETY: the mounted source supplies its actual retained RootIdentity and
+// the original mode pin for every remapper before any controller is published.
+// The immutable CPU/root check precedes lock-free reads of kept UC registers.
+unsafe impl NotificationDomain for MountedNotification {
+    fn check(&self) -> Result<(), irq::posted_msi::Error> {
+        self.identity
+            .check_irq_cpu()
+            .map_err(|_| irq::posted_msi::Error::Context)?;
+        for mode in &self.modes {
+            // SAFETY: checked original IRQ CPU/root; the actual register maps
+            // stay held by the pins across every admitted root.
+            unsafe { mode.check() }.map_err(|_| irq::posted_msi::Error::RootFailed)?;
+        }
+        Ok(())
+    }
+}
+
+impl Source {
+    /// Publish the complete original IOAPIC cohort once.
     ///
     /// # Safety
-    /// This boot owns the complete physical IOAPIC handoff. Individual lines
-    /// require separate contributor ownership before they can be claimed.
-    pub(crate) unsafe fn ioapic(
+    /// This boot has exclusive whole-controller ownership, including SMM
+    /// exclusion. Prior destinations and firmware execution are stopped and
+    /// their contributors/backing remain kept. `modes` contains the same
+    /// source's exact complete pinned remapper inventory.
+    pub(crate) unsafe fn install_ioapics(&self, modes: Vec<ModePin>) -> Result<usize, Error> {
+        self.identity.check_current().map_err(failed)?;
+        let platform = crate::native_irq::NativePlatform::current().map_err(failed)?;
+        platform.check_process().map_err(failed)?;
+        {
+            let mut state = self.ioapics.borrow_mut();
+            if !matches!(*state, MountedIoapics::Unclaimed) {
+                return Err(Error::Busy);
+            }
+            *state = MountedIoapics::Unavailable;
+        }
+        let routing = self.routing()?;
+        if modes.is_empty() || routing.units.is_empty() || routing.has_ioapic_nmis() {
+            return Err(Error::Unavailable);
+        }
+        let domain: Arc<dyn NotificationDomain> = Arc::new(MountedNotification {
+            identity: self.identity.clone(),
+            modes,
+        });
+        domain.check().map_err(failed)?;
+        let mut units = Vec::new();
+        let mut spans = Vec::new();
+        units
+            .try_reserve_exact(routing.units.len())
+            .map_err(|_| Error::Exhausted)?;
+        spans
+            .try_reserve_exact(routing.units.len())
+            .map_err(|_| Error::Exhausted)?;
+        for &descriptor in &routing.units {
+            let span = PhysicalSpan::new(descriptor.base, PAGE)?;
+            // SAFETY: explicit exclusive handoff and exact original MADT unit.
+            let resource = unsafe { self.claim_platform(span) }?;
+            let mapping = self.authority.map(
+                resource,
+                0,
+                PAGE as usize,
+                CacheAttribute::Uncached,
+                Protection::ReadWrite,
+            )?;
+            let address = mapping.address(0, 68)?.as_ptr() as usize;
+            // SAFETY: the exact full controller's exclusive all-root UC mapping.
+            let mmio = unsafe { crate::native_irq::ioapic::Mmio::new(address) }.map_err(failed)?;
+            let registers = IoapicRegisters {
+                mapping: core::mem::ManuallyDrop::new(mapping),
+                mmio,
+            };
+            // SAFETY: same original controller and complete direct-mode owner.
+            let unit = unsafe {
+                IoapicUnit::attach(
+                    registers,
+                    crate::native_irq::NativePlatform::current().map_err(failed)?,
+                    domain.clone(),
+                    crate::native_irq::CONTROLLER.identity(),
+                    descriptor.id,
+                    descriptor.gsi_base,
+                )
+            }
+            .map_err(failed)?;
+            spans.push((descriptor, unit.pins()));
+            units.push((descriptor, unit));
+        }
+        routing.validate_units(&spans).map_err(failed)?;
+        // SAFETY: exact complete inventory with no IOAPIC NMI, original
+        // mode pins, and the caller's exclusive controller handoff.
+        unsafe { crate::native_irq::root::contain_firmware_lines(&units) }.map_err(failed)?;
+        let count = units.len();
+        *self.ioapics.borrow_mut() = MountedIoapics::Ready { units, domain };
+        Ok(count)
+    }
+
+    /// Reuse the already contained controller; no second map or route writer.
+    pub(crate) fn ioapic(
         &self,
         descriptor: crate::native_irq::madt::Unit,
     ) -> Result<Arc<IoapicUnit>, Error> {
-        self.identity.check_current().map_err(failed)?;
+        self.identity.check_irq_cpu().map_err(failed)?;
         if self.identity.in_interrupt() {
             return Err(Error::Busy);
         }
-        let domain = self
-            .irq_domain
-            .as_ref()
-            .cloned()
-            .ok_or(Error::Unavailable)?;
-        domain.check().map_err(failed)?;
-        if let Some((_, unit)) = self
-            .ioapics
-            .borrow()
+        let state = self.ioapics.borrow();
+        let MountedIoapics::Ready { units, domain } = &*state else {
+            return Err(Error::Unavailable);
+        };
+        units
             .iter()
             .find(|(old, _)| *old == descriptor)
-        {
-            return Ok(unit.clone());
-        }
-        let routing = self.routing()?;
-        if !routing.units.contains(&descriptor) {
-            return Err(Error::OutsideResource);
-        }
-        let span = PhysicalSpan::new(descriptor.base, PAGE)?;
-        if !self
-            .platform
-            .wire()
-            .excludes_memory(span.start(), span.end())
-        {
-            return Err(Error::OutsideResource);
-        }
-        let resource = self.reserve(span, ResourceKind::Registers)?;
-        let mapping = self.authority.map(
-            resource,
-            0,
-            PAGE as usize,
-            CacheAttribute::Uncached,
-            Protection::ReadWrite,
-        )?;
-        let address = mapping.address(0, 68)?.as_ptr() as usize;
-        // SAFETY: exclusive all-root UC mapping of the MADT controller page.
-        let mmio = unsafe { crate::native_irq::ioapic::Mmio::new(address) }.map_err(failed)?;
-        let registers = IoapicRegisters {
-            mapping: core::mem::ManuallyDrop::new(mapping),
-            mmio,
-        };
-        let platform = crate::native_irq::NativePlatform::current().map_err(failed)?;
-        // SAFETY: mapping and complete exclusive controller handoff above.
-        let unit = unsafe {
-            IoapicUnit::attach(
-                registers,
-                platform,
-                domain,
-                crate::native_irq::CONTROLLER.identity(),
-                descriptor.id,
-                descriptor.gsi_base,
-            )
-        }
-        .map_err(failed)?;
-        self.ioapics.borrow_mut().push((descriptor, unit.clone()));
-        Ok(unit)
+            .map(|(_, unit)| unit.clone())
+            .ok_or(Error::OutsideResource)
     }
+
     pub(crate) fn routing(&self) -> Result<crate::native_irq::madt::Routing, Error> {
         crate::native_irq::madt::Routing::parse(
             self.platform.wire().madt(),
@@ -965,23 +1022,32 @@ impl Source {
     /// # Safety
     /// The boot processor owns these PICs and complete IOAPIC handoff.
     pub(crate) unsafe fn mask_isa(&self, irqs: &[u8]) -> Result<(), Error> {
-        for &irq in irqs {
-            let port = if irq < 8 { 0x21 } else { 0xa1 };
-            out8(port, in8(port) | 1 << (irq & 7));
-        }
         let routing = self.routing()?;
-        for descriptor in &routing.units {
-            // SAFETY: forwarded exclusive controller handoff.
-            let unit = unsafe { self.ioapic(*descriptor) }?;
+        let state = self.ioapics.borrow();
+        let MountedIoapics::Ready { units, domain } = &*state else {
+            return Err(Error::Unavailable);
+        };
+        domain.check().map_err(failed)?;
+        let spans: Vec<_> = units
+            .iter()
+            .map(|(descriptor, unit)| (*descriptor, unit.pins()))
+            .collect();
+        for &irq in irqs {
+            let line = routing.isa(irq).map_err(failed)?;
+            let owner = routing.owner(line, &spans).map_err(failed)?;
+            let unit = self.ioapic(owner)?;
+            let pin = unit.state(line.gsi).map_err(failed)?;
+            if !pin.masked || pin.remote_irr || pin.delivery_pending {
+                return Err(Error::Unavailable);
+            }
+        }
+        if routing.has_legacy_pic() {
             for &irq in irqs {
-                let line = routing.isa(irq).map_err(failed)?;
-                if line
-                    .gsi
-                    .checked_sub(unit.gsi_base())
-                    .is_some_and(|pin| pin < u32::from(unit.pins()))
-                {
-                    // SAFETY: caller owns these firmware lines; active claims refuse.
-                    unsafe { unit.mask_unclaimed(line.gsi) }.map_err(failed)?;
+                let port = if irq < 8 { 0x21 } else { 0xa1 };
+                let mask = 1 << (irq & 7);
+                out8(port, in8(port) | mask);
+                if in8(port) & mask == 0 {
+                    return Err(Error::Unavailable);
                 }
             }
         }
