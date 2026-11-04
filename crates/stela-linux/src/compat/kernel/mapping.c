@@ -17,6 +17,7 @@
 #include <stela/linux.h>
 
 #include <internal.h>
+#include <vma.h>
 
 struct pinned_client_page {
 	struct rb_node node;
@@ -62,13 +63,42 @@ pgprot_t vm_get_page_prot(vm_flags_t vm_flags)
 	return __pgprot(bits);
 }
 
+/* The native client supplies its already reserved range. Translate the
+ * original descriptor-based file callback into that VMA. */
+static int prepare_client_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	struct vm_area_desc desc = {
+		.mm = vma->vm_mm, .file = file,
+		.start = vma->vm_start, .end = vma->vm_end,
+		.pgoff = vma->vm_pgoff, .vm_file = vma->vm_file,
+		.vma_flags = vma->flags, .page_prot = vma->vm_page_prot,
+		.action.type = MMAP_NOTHING,
+	};
+	int error = vfs_mmap_prepare(file, &desc);
+
+	if (error)
+		return error;
+	if (desc.action.type != MMAP_NOTHING || (desc.vm_ops && desc.vm_ops->mapped)) {
+		stela_linux_unsupported("client mmap action or mapped callback needs a native provider");
+		return -EOPNOTSUPP;
+	}
+	if (!desc.vm_file || desc.pgoff > ULONG_MAX - (vma_pages(vma) - 1))
+		return -EINVAL;
+	if (!vma_desc_test(&desc, VMA_SHARED_BIT) || vma_desc_test(&desc, VMA_EXEC_BIT) ||
+	    (vma_desc_test(&desc, VMA_WRITE_BIT) && !(vma->vm_flags & VM_WRITE)))
+		return -EACCES;
+	compat_set_vma_from_desc(vma, &desc);
+
+	return 0;
+}
+
 int stela_linux_mmap(struct file *file, void *space, unsigned long address, size_t size,
 		     u64 offset, bool writable, struct stela_linux_mapping **result)
 {
 	if (!PAGE_ALIGNED(address) || !PAGE_ALIGNED(size) || !PAGE_ALIGNED(offset) ||
 	    !size || size > ULONG_MAX - address)
 		return -EINVAL;
-	if (!file->f_op->mmap)
+	if (!can_mmap_file(file))
 		return -ENODEV;
 	struct stela_linux_mapping *mapping = kmalloc_obj(*mapping);
 
@@ -87,7 +117,14 @@ int stela_linux_mmap(struct file *file, void *space, unsigned long address, size
 			   (writable ? VM_WRITE | VM_MAYWRITE : 0));
 	vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
 	vma->vm_file = get_file(file);
-	int error = file->f_op->mmap(file, vma);
+	int error;
+	if (file->f_op->mmap_prepare) {
+		mmap_write_lock(vma->vm_mm);
+		error = prepare_client_mmap(file, vma);
+		mmap_write_unlock(vma->vm_mm);
+	} else {
+		error = file->f_op->mmap(file, vma);
+	}
 
 	/* An exporter's mmap may have redirected the mapping to its own file. */
 	file = vma->vm_file;
@@ -507,18 +544,18 @@ static vm_fault_t file_page_fault(struct vm_fault *vmf)
 	return 0;
 }
 
-static int test_file_mmap(struct file *file, struct vm_area_struct *vma)
+static int test_file_mmap_prepare(struct vm_area_desc *desc)
 {
 	static const struct vm_operations_struct page_ops = {.fault = file_page_fault};
 
-	assert(vma->vm_file == file);
-	vma->vm_ops = &page_ops;
+	assert(desc->vm_file == desc->file && desc->start == BASE && desc->end == BASE + PAGE_SIZE);
+	desc->vm_ops = &page_ops;
 	return 0;
 }
 
 static void test_file_page_pin(void)
 {
-	static const struct file_operations page_fops = {.mmap = test_file_mmap};
+	static const struct file_operations page_fops = {.mmap_prepare = test_file_mmap_prepare};
 	struct file *file = anon_inode_getfile("page", &page_fops, NULL, O_RDWR);
 	struct stela_linux_mapping *mapping;
 

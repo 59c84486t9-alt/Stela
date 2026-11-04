@@ -54,7 +54,7 @@ bool stela_linux_unmap_folio(struct folio *folio);
 bool stela_linux_unmap_writable_folio(struct folio *folio);
 
 /* Maps size bytes of file at offset into space at address, through the file's
- * mmap, or returns a negative errno. Pages arrive by the client's faults. */
+ * mmap or mmap_prepare, or returns a negative errno. Pages arrive by the client's faults. */
 int stela_linux_mmap(struct file *file, void *space, unsigned long address, size_t size,
 		     u64 offset, bool writable, struct stela_linux_mapping **mapping);
 void stela_linux_munmap(struct stela_linux_mapping *mapping);
