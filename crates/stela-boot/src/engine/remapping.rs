@@ -413,15 +413,10 @@ impl Remappers {
                 Protection::ReadWrite,
             )
             .map_err(|_| VtdError::RegisterRange)?;
-        let base = mapping
-            .address(0, unit.bytes)
-            .map_err(|_| VtdError::RegisterRange)?;
-        // The unit keeps its registers for the boot.
-        core::mem::forget(mapping);
-        // SAFETY: the mapping is the unit's uncached register window in the
-        // aperture, which every root maps, kept above.
+        // SAFETY: the unit's exclusive uncached register window is mapped
+        // through this boot's shared aperture.
         let registers =
-            unsafe { MmioRegisters::new(base, unit.bytes, crate::apic::rdtsc, tsc_hz.max(1)) }?;
+            unsafe { MmioRegisters::from_mapping(mapping, crate::apic::rdtsc, tsc_hz.max(1)) }?;
         // SAFETY: forwarded: the policy resolved the scope and the window
         // holds the reserved regions the covered requesters use.
         unsafe {

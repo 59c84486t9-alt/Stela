@@ -1596,6 +1596,24 @@ fn dynamic_bus_root_publication_preserves_reserved_halves_and_other_buses() {
 mod requester_owner;
 
 #[test]
+fn mapped_registers_keep_and_retire_the_original_counted_mapping() {
+    use stela_driver_base::bus::{
+        mmio::owned::PhysicalSpan, pci::owned::test_support::bar_fixture,
+    };
+
+    let (owner, mapping) = bar_fixture(PhysicalSpan::new(0xfed9_0000, 4096).unwrap(), 4096);
+    // SAFETY: the actual isolated register fixture owns this sole mapping;
+    // no hardware or register accessor runs in this lifetime check.
+    let registers = unsafe { MmioRegisters::from_mapping(mapping, || 0, 1) }.unwrap();
+    assert_eq!(owner.unmaps.load(Ordering::Relaxed), 0);
+    drop(registers);
+    assert_eq!(owner.unmaps.load(Ordering::Relaxed), 1);
+    // SAFETY: the same mapping has acknowledged unmap, and this test
+    // published no raw access, alias or device callback.
+    unsafe { owner.finish_unmapped() }.unwrap();
+}
+
+#[test]
 fn blocked_initial_cohort_is_exact_and_each_requester_is_claimed_once() {
     let registers = ModelRegisters::new();
     let requesters = [0x0008, 0x0208];
