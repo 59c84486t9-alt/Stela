@@ -1,6 +1,6 @@
 //! Compile-time constant facts for non-faulting scalar sequences. Each separately
 //! entered region starts with no facts.
-use crate::aarch64::{Operation, Register, WideMove, Width};
+use crate::aarch64::{Instruction, Operation, Register, WideMove, Width};
 
 const REGISTER_SLOTS: usize = 32;
 const SP_SLOT: usize = 31;
@@ -83,6 +83,46 @@ impl ConstantRegisters {
         }
         self.step(first);
         self.step(second)
+    }
+
+    pub(super) fn fold_wide_run(
+        &mut self,
+        instructions: &[Instruction],
+    ) -> Option<(usize, ConstantWrite)> {
+        let (first, rest) = instructions.split_first()?;
+        let Operation::MoveWide {
+            width,
+            kind: WideMove::Zero | WideMove::Not,
+            destination: destination @ Register::X(_),
+            ..
+        } = first.operation
+        else {
+            return None;
+        };
+        let mut keeps = rest.iter().take_while(|instruction| {
+            matches!(
+                instruction.operation,
+                Operation::MoveWide {
+                    width: next_width,
+                    kind: WideMove::Keep,
+                    destination: next_destination,
+                    ..
+                } if next_width == width && next_destination == destination
+            )
+        });
+        let second = keeps.next()?;
+        self.step(&first.operation);
+        let mut write = self
+            .step(&second.operation)
+            .expect("wide move initializer supplies the destination");
+        let mut count = 2;
+        for instruction in keeps {
+            write = self
+                .step(&instruction.operation)
+                .expect("wide move continuation retains its constant destination");
+            count += 1;
+        }
+        Some((count, write))
     }
 
     /// Observe exactly one guest instruction. Returned writes can replace only

@@ -57,6 +57,59 @@ fn address_pair_shares_one_literal_and_preserves_distinct_source_rows() {
 }
 
 #[test]
+fn hosted_wide_constants_use_one_literal_and_keep_all_source_rows() {
+    let wide = |index, width, kind, immediate, shift| {
+        instruction(
+            index,
+            Operation::MoveWide {
+                width,
+                kind,
+                destination: Register::X(0),
+                immediate,
+                shift,
+            },
+        )
+    };
+    let narrow = [
+        wide(0, Width::W32, WideMove::Zero, 0x1234, 0),
+        wide(1, Width::W32, WideMove::Keep, 0x5678, 16),
+    ];
+    let narrow_fused = emit_clean_load_prefix(&narrow, true, None).unwrap();
+    assert_eq!(
+        narrow_fused.source_map,
+        [(narrow[0].pc, 0), (narrow[1].pc, 5)]
+    );
+    assert_eq!(&narrow_fused.code[..5], &[0xb8, 0x34, 0x12, 0x78, 0x56]);
+    assert_eq!(narrow_fused.stats.commits, 2);
+    assert_eq!(narrow_fused.stats.constant_writes, 1);
+
+    let wide = [
+        wide(0, Width::X64, WideMove::Not, 0xabcd, 32),
+        wide(1, Width::X64, WideMove::Keep, 0x1234, 16),
+        wide(2, Width::X64, WideMove::Keep, 0x5678, 48),
+    ];
+    let fused = emit_clean_load_prefix(&wide, true, None).unwrap();
+    let precise =
+        emit_clean_load_prefix_with(&wide, crate::x86_64::MemoryChecks::DEFAULT, true, None)
+            .unwrap();
+    assert_eq!(
+        fused.source_map,
+        [(wide[0].pc, 0), (wide[1].pc, 1), (wide[2].pc, 11)]
+    );
+    assert_eq!(&fused.code[..3], &[0x90, 0x48, 0xb8]);
+    assert_eq!(&fused.code[3..11], &0x5678_5432_1234_ffff_u64.to_le_bytes());
+    assert_eq!(fused.stats.commits, 3);
+    assert_eq!(fused.stats.constant_writes, 1);
+    assert_eq!(precise.stats.constant_writes, 3);
+    assert!(fused.code.len() < precise.code.len());
+    assert!(fused.stats.native_instructions < precise.stats.native_instructions);
+
+    let different_width = [narrow[0].clone(), wide[1].clone()];
+    let separate = emit_clean_load_prefix(&different_width, true, None).unwrap();
+    assert_eq!(separate.stats.constant_writes, 2);
+}
+
+#[test]
 fn chain_reuses_value_and_settles_once() {
     let instructions: Vec<_> = (0..256)
         .map(|index| instruction(index, add(Register::X(0), Register::X(0))))

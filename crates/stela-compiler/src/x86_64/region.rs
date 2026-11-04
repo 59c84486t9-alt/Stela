@@ -701,28 +701,54 @@ impl Emitter<'_> {
     fn emit_constant_write(
         &mut self,
         write: constant::ConstantWrite,
+        immediate_width: Width,
         continuation: Option<GuestAddress>,
     ) {
         let guest = slot(write.destination).expect("known constant has a real destination");
         if next_use(self.effects, self.current + 1, guest) != usize::MAX {
             let index = self.allocate(guest);
-            self.emit(|code| encoding::immediate(code, POOL[index], write.value, Width::X64));
+            self.emit(|code| encoding::immediate(code, POOL[index], write.value, immediate_width));
             self.locations[guest] = Location::Host(POOL[index]);
             self.resident[index] = Some(Resident { guest, dirty: true });
             self.output.stats.commits += 1;
             if let Some(pc) = continuation {
-                // A resident address needs no separate frame store here.
+                // A resident value needs no separate frame store here.
                 self.output.source_map.push((pc, self.output.code.len()));
                 self.emit(encoding::nop);
             }
         } else {
-            self.emit(|code| encoding::immediate(code, RESULT, write.value, Width::X64));
+            self.emit(|code| encoding::immediate(code, RESULT, write.value, immediate_width));
             if let Some(pc) = continuation {
                 self.output.source_map.push((pc, self.output.code.len()));
             }
             self.commit(write.destination, Width::X64);
         }
         self.output.stats.constant_writes += 1;
+    }
+
+    fn emit_constant_group(
+        &mut self,
+        group: &[Instruction],
+        write: constant::ConstantWrite,
+        immediate_width: Width,
+    ) {
+        let [markers @ .., materialization, last] = group else {
+            unreachable!("constant group needs two source rows");
+        };
+        self.pinned_hosts = 0;
+        self.coalesced = None;
+        for instruction in markers {
+            self.output
+                .source_map
+                .push((instruction.pc, self.output.code.len()));
+            self.emit(encoding::nop);
+        }
+        self.output
+            .source_map
+            .push((materialization.pc, self.output.code.len()));
+        self.current += group.len() - 1;
+        self.emit_constant_write(write, immediate_width, Some(last.pc));
+        self.output.stats.commits += group.len() - 1;
     }
 
     fn instruction_with_constant(
@@ -736,7 +762,7 @@ impl Emitter<'_> {
             .source_map
             .push((instruction.pc, self.output.code.len()));
         if let Some(write) = constant {
-            self.emit_constant_write(write, None);
+            self.emit_constant_write(write, Width::X64, None);
             return Ok(());
         }
         match instruction.operation {
@@ -1253,26 +1279,36 @@ fn emit_prefix_selected<'a>(
     };
     let span = &instructions[..consumed];
     while let Some(instruction) = span.get(emitter.current) {
-        // Hosted native blocks enter at a guest block head and run this
-        // non-faulting pair as a unit. A compile starting at the ADD, or
-        // ending before it, still sees only its original instruction.
-        if clean_loads
-            && !fault_table
-            && matches!(instruction.operation, Operation::PcRelative(_))
-            && let Some(second) = span.get(emitter.current + 1)
-            && let Some(write) = emitter
-                .constants
-                .fold_address_pair(&instruction.operation, &second.operation)
-        {
-            emitter.pinned_hosts = 0;
-            emitter.coalesced = None;
-            emitter
-                .output
-                .source_map
-                .push((instruction.pc, emitter.output.code.len()));
-            emitter.current += 1;
-            emitter.emit_constant_write(write, Some(second.pc));
-            emitter.output.stats.commits += 1;
+        // A hosted block enters at a guest block head and runs these
+        // non-faulting groups as units. A compile starting inside a group,
+        // or ending before its tail, still sees only the original slice.
+        let rest = &span[emitter.current..];
+        let group = if clean_loads && !fault_table {
+            match instruction.operation {
+                Operation::PcRelative(_) => rest.get(1).and_then(|second| {
+                    emitter
+                        .constants
+                        .fold_address_pair(&instruction.operation, &second.operation)
+                        .map(|write| (2, write, Width::X64))
+                }),
+                Operation::MoveWide { .. } => {
+                    emitter.constants.fold_wide_run(rest).map(|(count, write)| {
+                        // A numeric literal has no AOT relocation field.
+                        let width = if u32::try_from(write.value).is_ok() {
+                            Width::W32
+                        } else {
+                            Width::X64
+                        };
+                        (count, write, width)
+                    })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some((count, write, immediate_width)) = group {
+            emitter.emit_constant_group(&rest[..count], write, immediate_width);
         } else {
             emitter.instruction(instruction)?;
         }
