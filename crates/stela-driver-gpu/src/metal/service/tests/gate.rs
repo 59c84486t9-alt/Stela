@@ -56,28 +56,39 @@ fn completed(memory: &mut Memory, record: u64) -> GateCall {
 }
 
 #[test]
-fn a_gate_call_completes_in_the_callers_memory() {
+fn a_gate_call_completes_when_the_request_and_response_overlap() {
     let mut service = service();
     let connection = service.connect().unwrap();
     let mut memory = Memory::default();
-    let mut request = [0; size_of::<NegotiateRequest>()];
+    let mut buffer = [0xa5; size_of::<NegotiateResponse>()];
     let negotiate = NegotiateRequest {
         major: wire::MAJOR,
         minor: wire::MINOR,
     };
-    wire::write(&negotiate, &mut request).unwrap();
-    let record = gate_call(
-        &mut memory,
-        Operation::Negotiate,
-        &request,
-        size_of::<NegotiateResponse>(),
-    );
+    let request_bytes = size_of::<NegotiateRequest>();
+    wire::write(&negotiate, &mut buffer[..request_bytes]).unwrap();
+    let response = memory.put(&buffer);
+    let reason = memory.put(&[0; 64]);
+    let record = memory
+        .records(&[GateCall {
+            operation: Operation::Negotiate.raw(),
+            status: u32::MAX,
+            request: Span {
+                address: response.address,
+                length: request_bytes as u64,
+            },
+            response,
+            reason,
+            reason_length: 0,
+        }])
+        .address;
     service.serve(connection, record, &mut memory).unwrap();
     let call = completed(&mut memory, record);
     assert_eq!((call.status, call.reason_length), (Status::Ok.raw(), 0));
     let response: NegotiateResponse =
         wire::read(&GuestMemory::read(&mut memory, call.response).unwrap()).unwrap();
     assert_eq!(response.major, wire::MAJOR);
+    assert_eq!(response.reserved, 0);
 }
 
 #[test]
