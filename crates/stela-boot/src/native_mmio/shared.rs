@@ -24,7 +24,7 @@ use crate::{
 mod config_space;
 pub(crate) use config_space::ContainedPci;
 mod hpet;
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, rc::Rc, sync::Arc, vec::Vec};
 use core::{
     arch::asm,
     cell::UnsafeCell,
@@ -855,10 +855,39 @@ type ModePin =
 enum MountedIoapics {
     Unclaimed,
     Unavailable,
-    Ready {
-        units: Vec<IoapicEntry>,
-        domain: Arc<dyn NotificationDomain>,
-    },
+    Containing(Rc<MountedControllers>),
+    Ready(Rc<MountedControllers>),
+}
+
+struct MountedControllers {
+    units: Vec<IoapicEntry>,
+    spans: Vec<(crate::native_irq::madt::Unit, u16)>,
+    failure: core::cell::Cell<Option<irq::IrqError>>,
+    routes: Vec<
+        crate::native_irq::ioapic::FirmwareRoutes<
+            IoapicRegisters,
+            crate::native_irq::NativePlatform,
+        >,
+    >,
+}
+
+impl MountedControllers {
+    fn check_line(
+        &self,
+        routing: &crate::native_irq::madt::Routing,
+        line: irq::LineRoute,
+    ) -> Result<&Arc<IoapicUnit>, irq::IrqError> {
+        let owner = routing
+            .owner(line, &self.spans)
+            .map_err(|_| irq::IrqError::Route)?;
+        let index = self
+            .units
+            .iter()
+            .position(|(descriptor, _)| *descriptor == owner)
+            .ok_or(irq::IrqError::Route)?;
+        self.routes[index].verify_line(line.gsi)?;
+        Ok(&self.units[index].1)
+    }
 }
 
 struct MountedNotification {
@@ -891,16 +920,22 @@ impl Source {
     /// exclusion. Prior destinations and firmware execution are stopped and
     /// their contributors/backing remain kept. `modes` contains the same
     /// source's exact complete pinned remapper inventory.
-    pub(crate) unsafe fn install_ioapics(&self, modes: Vec<ModePin>) -> Result<usize, Error> {
+    pub(crate) unsafe fn install_ioapics(
+        &'static self,
+        modes: Vec<ModePin>,
+    ) -> Result<usize, Error> {
         self.identity.check_current().map_err(failed)?;
         let platform = crate::native_irq::NativePlatform::current().map_err(failed)?;
         platform.check_process().map_err(failed)?;
         {
             let mut state = self.ioapics.borrow_mut();
-            if !matches!(*state, MountedIoapics::Unclaimed) {
-                return Err(Error::Busy);
+            match &*state {
+                MountedIoapics::Unclaimed => *state = MountedIoapics::Unavailable,
+                MountedIoapics::Containing(controllers) => {
+                    return Err(controllers.failure.get().map_or(Error::Busy, failed));
+                }
+                _ => return Err(Error::Busy),
             }
-            *state = MountedIoapics::Unavailable;
         }
         let routing = self.routing()?;
         if modes.is_empty() || routing.units.is_empty() || routing.has_ioapic_nmis() {
@@ -955,31 +990,26 @@ impl Source {
         routing.validate_units(&spans).map_err(failed)?;
         // SAFETY: exact complete inventory with no IOAPIC NMI, original
         // mode pins, and the caller's exclusive controller handoff.
-        unsafe { crate::native_irq::root::contain_firmware_lines(&units) }.map_err(failed)?;
+        let routes =
+            unsafe { crate::native_irq::root::plan_firmware_lines(&units) }.map_err(failed)?;
         let count = units.len();
-        *self.ioapics.borrow_mut() = MountedIoapics::Ready { units, domain };
-        Ok(count)
-    }
-
-    /// Reuse the already contained controller; no second map or route writer.
-    pub(crate) fn ioapic(
-        &self,
-        descriptor: crate::native_irq::madt::Unit,
-    ) -> Result<Arc<IoapicUnit>, Error> {
-        self.identity.check_irq_cpu().map_err(failed)?;
-        if self.identity.in_interrupt() {
-            return Err(Error::Busy);
+        let controllers = Rc::new(MountedControllers {
+            units,
+            spans,
+            routes,
+            failure: core::cell::Cell::new(None),
+        });
+        *self.ioapics.borrow_mut() = MountedIoapics::Containing(controllers.clone());
+        // SAFETY: same exclusive original roster. The Source now retains every
+        // controller, plan and mode pin even if the hardware refuses.
+        if let Err(error) =
+            unsafe { crate::native_irq::root::contain_firmware_lines(&controllers.routes) }
+        {
+            controllers.failure.set(Some(error));
+            return Err(failed(error));
         }
-        let state = self.ioapics.borrow();
-        let MountedIoapics::Ready { units, domain } = &*state else {
-            return Err(Error::Unavailable);
-        };
-        domain.check().map_err(failed)?;
-        units
-            .iter()
-            .find(|(old, _)| *old == descriptor)
-            .map(|(_, unit)| unit.clone())
-            .ok_or(Error::OutsideResource)
+        *self.ioapics.borrow_mut() = MountedIoapics::Ready(controllers);
+        Ok(count)
     }
 
     pub(crate) fn routing(&self) -> Result<crate::native_irq::madt::Routing, Error> {
@@ -993,6 +1023,23 @@ impl Source {
         self.platform.wire().fadt()
     }
 
+    /// Reuse the original controller after checking this unclaimed route
+    /// against its retained masked firmware entry.
+    pub(crate) fn original_line(
+        &self,
+        line: irq::LineRoute,
+    ) -> Result<Arc<IoapicUnit>, irq::IrqError> {
+        if self.identity.in_interrupt() {
+            return Err(irq::IrqError::WrongCpu);
+        }
+        let routing = self.routing().map_err(|_| irq::IrqError::Route)?;
+        let state = self.ioapics.borrow();
+        let MountedIoapics::Ready(controllers) = &*state else {
+            return Err(irq::IrqError::Unavailable);
+        };
+        controllers.check_line(&routing, line).cloned()
+    }
+
     /// Verify the IOAPIC routes and any PC/AT PIC masks for these ISA lines.
     /// Whole IOAPIC handoff grants no PIC programming permission.
     pub(crate) fn require_isa_masked(&self, irqs: &[u8]) -> Result<(), Error> {
@@ -1001,25 +1048,12 @@ impl Source {
         }
         let routing = self.routing()?;
         let state = self.ioapics.borrow();
-        let MountedIoapics::Ready { units, domain } = &*state else {
+        let MountedIoapics::Ready(controllers) = &*state else {
             return Err(Error::Unavailable);
         };
-        domain.check().map_err(failed)?;
-        let spans: Vec<_> = units
-            .iter()
-            .map(|(descriptor, unit)| (*descriptor, unit.pins()))
-            .collect();
         for &irq in irqs {
             let line = routing.isa(irq).map_err(failed)?;
-            let owner = routing.owner(line, &spans).map_err(failed)?;
-            let (_, unit) = units
-                .iter()
-                .find(|(descriptor, _)| *descriptor == owner)
-                .ok_or(Error::OutsideResource)?;
-            let pin = unit.state(line.gsi).map_err(failed)?;
-            if !pin.masked || pin.remote_irr || pin.delivery_pending {
-                return Err(Error::Unavailable);
-            }
+            controllers.check_line(&routing, line).map_err(failed)?;
         }
         if routing.has_legacy_pic() {
             for &irq in irqs {

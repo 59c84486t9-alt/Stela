@@ -97,32 +97,34 @@ pub(crate) type Source = ioapic::Pin<Registers, NativePlatform>;
 /// The slice retains every original controller under exclusive ownership.
 /// The caller validated its complete MADT inventory, excludes IOAPIC NMIs
 /// and keeps old destinations/contributors through independent retirement.
-pub(crate) unsafe fn contain_firmware_lines<R: ioapic::Registers>(
+pub(crate) unsafe fn plan_firmware_lines<R: ioapic::Registers>(
     units: &[(madt::Unit, Arc<ioapic::Unit<R, NativePlatform>>)],
-) -> Result<(), IrqError> {
-    let mut firmware_routes = Vec::new();
-    firmware_routes
+) -> Result<Vec<ioapic::FirmwareRoutes<R, NativePlatform>>, IrqError> {
+    let mut routes = Vec::new();
+    routes
         .try_reserve_exact(units.len())
         .map_err(|_| IrqError::Exhausted)?;
     for (_, unit) in units {
-        // SAFETY: this is the complete original controller handoff and
-        // MADT supplied no IOAPIC NMI routes. Remapping is off.
-        firmware_routes.push(unsafe { unit.firmware_routes() }?);
+        // SAFETY: complete original controller handoff, no IOAPIC NMI,
+        // and direct delivery, as required by the caller.
+        routes.push(unsafe { unit.firmware_routes() }?);
     }
-    // Keep the same actual controller mappings and CPU scope on a failed
-    // or unwinding containment, including the unattempted suffix.
-    let mut kept = ManuallyDrop::new(units.to_vec());
-    for plan in &firmware_routes {
-        // SAFETY: same exclusive platform handoff, and every original
-        // controller and its scope remain retained through containment.
+    Ok(routes)
+}
+
+/// # Safety
+/// Same original complete controller ownership and source exclusions used
+/// for planning. The caller retains all plans across a refusal or unwind.
+pub(crate) unsafe fn contain_firmware_lines<R: ioapic::Registers>(
+    routes: &[ioapic::FirmwareRoutes<R, NativePlatform>],
+) -> Result<(), IrqError> {
+    for plan in routes {
+        // SAFETY: forwarded original controller and source exclusions.
         unsafe { plan.contain() }?;
     }
-    for plan in firmware_routes {
+    for plan in routes {
         plan.verify_contained()?;
     }
-    // SAFETY: containment succeeded. The returned root retains every
-    // original controller, so only the redundant Arc references end.
-    unsafe { ManuallyDrop::drop(&mut kept) };
     Ok(())
 }
 
@@ -133,6 +135,7 @@ pub(crate) struct Root {
     routing: madt::Routing,
     units: Vec<(madt::Unit, Arc<Unit>)>,
     spans: Vec<(madt::Unit, u16)>,
+    firmware_routes: Vec<ioapic::FirmwareRoutes<Registers, NativePlatform>>,
     cpu: Arc<dyn Cpu>,
     scope: Arc<ProcessScope>,
     madt: &'static [u8],
@@ -238,17 +241,33 @@ impl Root {
         }
         routing.validate_units(&spans).map_err(Error::Route)?;
         // SAFETY: the original complete MADT/controller roster was validated above.
-        unsafe { contain_firmware_lines(&units) }.map_err(Error::Irq)?;
+        let routes = unsafe { plan_firmware_lines(&units) }.map_err(Error::Irq)?;
+        // Keep all original plans and controllers if any mask may have applied.
+        let mut routes = ManuallyDrop::new(routes);
+        // SAFETY: same exclusive roster, with the entire original plan kept.
+        unsafe { contain_firmware_lines(&routes) }.map_err(Error::Irq)?;
+        // SAFETY: containment succeeded. Transfer the original plans once
+        // into the returned root so it can recheck the same routes.
+        let firmware_routes = unsafe { ManuallyDrop::take(&mut routes) };
         Ok(Self {
             routing,
             units,
             spans,
+            firmware_routes,
             cpu,
             scope,
             madt,
             madt_hash: Sha256::digest(madt).into(),
             _local: PhantomData,
         })
+    }
+
+    /// Recheck all original routes before any contributor is published.
+    pub(crate) fn recheck_firmware_lines(&self) -> Result<(), Error> {
+        for routes in &self.firmware_routes {
+            routes.verify_contained().map_err(Error::Irq)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn resolve<'r, 'd, 'a>(

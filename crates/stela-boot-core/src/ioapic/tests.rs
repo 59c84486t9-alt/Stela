@@ -301,13 +301,21 @@ fn firmware_containment_masks_only_original_ordinary_routes() {
     // SAFETY: the fixture retains the exact original controller and its sources.
     unsafe { plan.contain() }.unwrap();
     plan.verify_contained().unwrap();
-    let hardware = board.hw.lock().unwrap();
-    assert_eq!(&hardware.regs[0x12..0x14], &[MASK | 0x38, 2 << 24]);
-    assert_eq!(
-        &hardware.regs[0x16..0x18],
-        &[MASK | LOWEST_PRIORITY | 0x42, 3 << 24]
-    );
-    assert_eq!(hardware.events, ["mask", "mask"]);
+    plan.verify_line(unit.gsi_base() + 1).unwrap();
+    plan.verify_line(unit.gsi_base() + 3).unwrap();
+    {
+        let mut hardware = board.hw.lock().unwrap();
+        assert_eq!(&hardware.regs[0x12..0x14], &[MASK | 0x38, 2 << 24]);
+        assert_eq!(
+            &hardware.regs[0x16..0x18],
+            &[MASK | LOWEST_PRIORITY | 0x42, 3 << 24]
+        );
+        assert_eq!(hardware.events, ["mask", "mask"]);
+        hardware.regs[0x13] = 4 << 24;
+    }
+    assert_eq!(plan.verify_line(unit.gsi_base() + 1), Err(IrqError::Route));
+    plan.verify_line(unit.gsi_base() + 3).unwrap();
+    assert_eq!(board.hw.lock().unwrap().events, ["mask", "mask"]);
 }
 
 #[test]

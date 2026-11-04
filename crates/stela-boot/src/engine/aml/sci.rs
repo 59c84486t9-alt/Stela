@@ -18,7 +18,7 @@ pub(super) type Endpoint =
     ioapic::ParentMask<native_mmio::IoapicRegisters, native_irq::NativePlatform>;
 
 pub(crate) struct Prepared {
-    unit: Arc<native_mmio::IoapicUnit>,
+    mmio: &'static native_mmio::Source,
     line: LineRoute,
     power: HostPower,
     irq: u32,
@@ -26,39 +26,22 @@ pub(crate) struct Prepared {
 impl Prepared {
     /// Observe the masked SCI route on the original contained controller.
     /// This prepares the route while its fixed/GPE contributors remain separate.
-    pub(crate) fn capture(mmio: &native_mmio::Source, power: HostPower) -> Result<Self, IrqError> {
+    pub(crate) fn capture(
+        mmio: &'static native_mmio::Source,
+        power: HostPower,
+    ) -> Result<Self, IrqError> {
         if power.refused.is_some() || power.pm1[0].is_none() || power.pm1_event_bytes != 4 {
             return Err(IrqError::Unsupported);
         }
         let routing = mmio.routing().map_err(|_| IrqError::Route)?;
         let line = routing.sci(mmio.fadt()).map_err(|_| IrqError::Route)?;
-        let mut units = Vec::new();
-        for descriptor in &routing.units {
-            let unit = mmio
-                .ioapic(*descriptor)
-                .map_err(|_| IrqError::Unavailable)?;
-            units.push((*descriptor, unit));
-        }
-        let spans: Vec<_> = units
-            .iter()
-            .map(|(descriptor, unit)| (*descriptor, unit.pins()))
-            .collect();
-        let owner = routing.owner(line, &spans).map_err(|_| IrqError::Route)?;
-        let unit = units
-            .into_iter()
-            .find(|(descriptor, _)| *descriptor == owner)
-            .map(|(_, unit)| unit)
-            .ok_or(IrqError::Route)?;
+        mmio.original_line(line)?;
         // SCI_INT is the legacy source number ACPICA passes to install_interrupt;
         // MADT's override determines the physical GSI separately.
         let fadt = mmio.fadt();
         let irq = u32::from(u16::from_le_bytes([fadt[46], fadt[47]]));
-        let state = unit.state(line.gsi)?;
-        if !state.masked || state.remote_irr || state.delivery_pending {
-            return Err(IrqError::Drain);
-        }
         Ok(Self {
-            unit,
+            mmio,
             line,
             power,
             irq,
@@ -84,7 +67,8 @@ impl Prepared {
         let devices = Sources::new(self.power);
         // SAFETY: capture checked the owned physical route; Sources masks and
         // restores every fixed/GPE enable bit on this exclusive SCI line.
-        let pin = unsafe { self.unit.claim(self.line, Box::new(devices)) }?;
+        let unit = self.mmio.original_line(self.line)?;
+        let pin = unsafe { unit.claim(self.line, Box::new(devices)) }?;
         let parent = Arc::new(pin.parent_mask()?);
         let callback = Arc::new(Deferred {
             parent: parent.clone(),
