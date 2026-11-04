@@ -125,3 +125,87 @@ fn desktop_extracts_forward_the_committed_left_source() {
         }
     }
 }
+
+fn table_reference(state: &mut GuestState, word: u32) {
+    let table = state.v[((word >> 5) & 31) as usize]
+        .map(u64::to_le_bytes)
+        .concat();
+    let indices = state.v[((word >> 16) & 31) as usize]
+        .map(u64::to_le_bytes)
+        .concat();
+    let width = if word & (1 << 30) == 0 { 8 } else { 16 };
+    let mut result = [0; 16];
+    for (destination, index) in result[..width].iter_mut().zip(indices) {
+        *destination = table.get(usize::from(index)).copied().unwrap_or(0);
+    }
+    state.v[(word & 31) as usize] = core::array::from_fn(|lane| {
+        u64::from_le_bytes(result[lane * 8..lane * 8 + 8].try_into().unwrap())
+    });
+}
+
+#[test]
+fn single_table_groups_share_indices_until_the_guest_overwrites_them() {
+    const RIPGREP: [u32; 7] = [
+        0x4e15_0016,
+        0x4e15_0057,
+        0x4e15_00d8,
+        0x4e14_0039,
+        0x4e14_007a,
+        0x4e14_00fb,
+        0x4e15_0215,
+    ];
+    const WRITES_INDEX: [u32; 3] = [0x4e15_0016, 0x0e15_0215, 0x4e15_0057];
+    let start = GuestAddress(0x2dcef8);
+    let target = TargetCpu::Ssse3;
+    for system in [false, true] {
+        for (words, prepared) in [(&RIPGREP[..], 3), (&WRITES_INDEX[..], 2)] {
+            let block = compile(words, start, target, system);
+            assert_eq!(block.source_map.len(), words.len());
+            for (index, (pc, _)) in block.source_map.iter().enumerate() {
+                assert_eq!(*pc, GuestAddress(start.0 + index as u64 * 4));
+            }
+            assert!(
+                block
+                    .source_map
+                    .windows(2)
+                    .all(|rows| rows[0].1 < rows[1].1)
+            );
+            assert_eq!(
+                block
+                    .x86_64_code
+                    .windows(3)
+                    .filter(|bytes| *bytes == Host::AddUnsignedSaturatingByte.encoding())
+                    .count(),
+                prepared,
+            );
+
+            if !TargetCpu::detect().supports(target) {
+                continue;
+            }
+            let code = if system {
+                pinned::entered(&block.x86_64_code)
+            } else {
+                block.x86_64_code
+            };
+            for base in (0..=u8::MAX).step_by(16) {
+                let mut actual = input();
+                for register in [20, 21] {
+                    actual.v[register] = core::array::from_fn(|lane| {
+                        u64::from_le_bytes(core::array::from_fn(|byte| {
+                            base + (lane * 8 + byte) as u8
+                        }))
+                    });
+                }
+                let mut expected = actual.clone();
+                for &word in words {
+                    table_reference(&mut expected, word);
+                }
+                assert_eq!(
+                    native::run(&code, &mut actual),
+                    start.0 + (words.len() * 4) as u64
+                );
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+}

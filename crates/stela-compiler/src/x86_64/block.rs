@@ -9,7 +9,10 @@ pub(crate) use super::region::ResidentLoopPlan;
 use super::chain::ExitWord;
 use crate::{
     GuestAddress, NativeBlock,
-    aarch64::{Instruction, Operation, Register, Width, integer_math, integer_unary, pc_relative},
+    aarch64::{
+        Instruction, Operation, Register, Width, integer_math, integer_unary, pc_relative,
+        simd::{Operand as Simd, rearrange::Operand as Rearrange},
+    },
     block::{ExitKind, MAX_BLOCK_INSTRUCTIONS, Terminator},
 };
 
@@ -275,7 +278,9 @@ fn emit_selected(
     let optimize_regions = optimize_regions && !target.data_independent_timing();
     let fuse_pairs = optimize_regions && frame_loop.is_none() && !fault_table && !pinned;
     let fuse_simd = !target.data_independent_timing() && (pinned || fuse_pairs);
-    let fuse_reverse_dwords = fuse_simd && target.supports(crate::TargetCpu::Ssse3);
+    let fuse_ssse3 = fuse_simd && target.supports(crate::TargetCpu::Ssse3);
+    let fuse_single_table =
+        fuse_ssse3 && !super::asm::vector_extensions::table_supported(1, target);
     // The parser bounds the block, so these per-instruction rows stay local
     // to the emitter. Region admission can still borrow a suffix of them.
     let mut range_rows = [true; MAX_BLOCK_INSTRUCTIONS];
@@ -331,17 +336,33 @@ fn emit_selected(
             cursor += count;
             continue;
         }
-        if fuse_reverse_dwords
-            && let Some((count, result)) = super::simd::rearrange::emit_reverse_dword_run(
-                code,
-                &mut block.source_map,
-                &instructions[cursor..],
-                target,
-            )
+        if fuse_ssse3
+            && let Operation::Simd(Simd::Rearrange(operand)) = instructions[cursor].operation
         {
-            after.xmm0 = Some(result);
-            cursor += count;
-            continue;
+            let group = match operand {
+                Rearrange::Permute { .. } => super::simd::rearrange::emit_reverse_dword_run(
+                    code,
+                    &mut block.source_map,
+                    &instructions[cursor..],
+                    target,
+                ),
+                Rearrange::Table {
+                    registers: 1,
+                    preserve: false,
+                    ..
+                } if fuse_single_table => super::simd::rearrange::emit_single_table_run(
+                    code,
+                    &mut block.source_map,
+                    &instructions[cursor..],
+                    target,
+                ),
+                _ => None,
+            };
+            if let Some((count, result)) = group {
+                after.xmm0 = Some(result);
+                cursor += count;
+                continue;
+            }
         }
         if fuse_simd
             && let Some(result) = super::simd::precision::emit_half_widen_pair(
