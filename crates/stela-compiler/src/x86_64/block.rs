@@ -269,7 +269,8 @@ fn emit_selected(
     // register-allocated and clean-load regions' recipes.
     let optimize_regions = optimize_regions && !target.data_independent_timing();
     let fuse_pairs = optimize_regions && frame_loop.is_none() && !fault_table && !pinned;
-    let fuse_hash = !target.data_independent_timing() && (pinned || fuse_pairs);
+    let fuse_simd = !target.data_independent_timing() && (pinned || fuse_pairs);
+    let fuse_reverse_dwords = fuse_simd && target.supports(crate::TargetCpu::Ssse3);
     // Which accesses check the guest range (`guest_range`), and each
     // instruction's checks.
     let ranges = if checks.guest_range && checks.checks_every_access() {
@@ -305,7 +306,7 @@ fn emit_selected(
     let mut side_exits = vec![];
     while cursor < instructions.len() {
         let held = core::mem::replace(&mut after, Held::NOTHING);
-        if fuse_hash
+        if fuse_simd
             && let Some(group) = super::simd::sha256::HashGroup::recognize(&instructions[cursor..])
         {
             let (offsets, count, result) = group.emit(code, target);
@@ -317,6 +318,18 @@ fn emit_selected(
             );
             code.set_instruction(block.source_map.len() - 1);
             after.xmm0 = result;
+            cursor += count;
+            continue;
+        }
+        if fuse_reverse_dwords
+            && let Some((count, result)) = super::simd::rearrange::emit_reverse_dword_run(
+                code,
+                &mut block.source_map,
+                &instructions[cursor..],
+                target,
+            )
+        {
+            after.xmm0 = Some(result);
             cursor += count;
             continue;
         }
