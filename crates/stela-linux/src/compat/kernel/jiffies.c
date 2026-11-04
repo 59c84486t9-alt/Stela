@@ -36,7 +36,10 @@ int main(void)
 	WRITE_ONCE(jiffies_64, jiffies_64 + HZ / 10 - 1);
 	assert(!__ratelimit(&state) && !messages);
 	WRITE_ONCE(jiffies_64, jiffies_64 + 2);
-	assert(__ratelimit(&state) && messages == 1);
+	assert(__ratelimit(&state));
+	/* The original warning is deferred while the rate-limit lock is held. */
+	stela_linux_printk_flush();
+	assert(messages == 1);
 	assert(__ratelimit(&state) && !__ratelimit(&state));
 	stela_linux_exit();
 	printf("Linux jiffies: one tick word under both names and tick-driven rate limits passed\n");
