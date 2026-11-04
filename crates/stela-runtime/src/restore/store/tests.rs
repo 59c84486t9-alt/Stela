@@ -240,11 +240,12 @@ fn verify_on_read_checks_recorded_hashes_as_reads_reach_them() {
         s.digest384("os.dmg").unwrap().unwrap(),
         &Sha384::digest(&data)[..]
     );
-    assert_eq!(
-        s.read_at("os.dmg", 10, 20).unwrap(),
-        data[10..30],
-        "a random read"
-    );
+    let mut buffer = Vec::with_capacity(BLOCK_BYTES);
+    buffer.extend_from_slice(b"old");
+    let pointer = buffer.as_ptr();
+    let bytes = s.read_at_reusing("os.dmg", 10, 20, buffer).unwrap();
+    assert_eq!(bytes, data[10..30], "a random read");
+    assert_eq!(bytes.as_ptr(), pointer);
     // Read in order from the start, the whole member meets its SHA-384.
     let mut whole = s.read_at("os.dmg", 0, BLOCK_BYTES).unwrap();
     whole.extend(
@@ -310,7 +311,10 @@ fn random_reads_refuse_changed_bytes() {
                 .position(|w| w == &data[..16])
                 .unwrap();
             s.reader.0[at] ^= 1;
-            assert!(s.read_at("os.dmg", 0, 1).is_err());
+            assert!(
+                s.read_at_reusing("os.dmg", 0, 1, Vec::with_capacity(BLOCK_BYTES))
+                    .is_err()
+            );
         }
     }
 }

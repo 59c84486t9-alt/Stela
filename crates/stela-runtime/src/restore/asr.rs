@@ -23,6 +23,24 @@ pub trait ImageSource {
     fn size(&self, component: &str) -> Result<u64>;
     /// Returns exactly len bytes, or fails. Must preserve source identity.
     fn read_at(&mut self, component: &str, offset: u64, len: usize) -> Result<Vec<u8>>;
+
+    /// Read with an owned buffer available for reuse. The result follows
+    /// the same verification and length rules as [`Self::read_at`].
+    fn read_at_reusing(
+        &mut self,
+        component: &str,
+        offset: u64,
+        len: usize,
+        mut buffer: Vec<u8>,
+    ) -> Result<Vec<u8>> {
+        let data = self.read_at(component, offset, len)?;
+        if data.len() != len {
+            return Err(Error::Invalid("short ASR payload read"));
+        }
+        buffer.clear();
+        buffer.extend_from_slice(&data);
+        Ok(buffer)
+    }
 }
 impl<R: ReadAt> ImageSource for Store<R> {
     fn size(&self, path: &str) -> Result<u64> {
@@ -30,6 +48,15 @@ impl<R: ReadAt> ImageSource for Store<R> {
     }
     fn read_at(&mut self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
         self.read_at(path, offset, len)
+    }
+    fn read_at_reusing(
+        &mut self,
+        path: &str,
+        offset: u64,
+        len: usize,
+        buffer: Vec<u8>,
+    ) -> Result<Vec<u8>> {
+        Store::read_at_reusing(self, path, offset, len, buffer)
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,26 +131,42 @@ impl Sender {
             return Ok(());
         }
         let n = (self.size - self.ahead_at).min((room * CHUNK_BYTES) as u64) as usize;
-        let bytes = source
-            .read_at(&self.image, self.ahead_at, n)
-            .inspect_err(|_| self.recycled.clear())?;
+        let one_chunk = n <= CHUNK_BYTES;
+        let read = if one_chunk {
+            let buffer = self.chunk_buffer(n);
+            source.read_at_reusing(&self.image, self.ahead_at, n, buffer)
+        } else {
+            source.read_at(&self.image, self.ahead_at, n)
+        };
+        let bytes = read.inspect_err(|_| self.recycled.clear())?;
         if bytes.len() != n {
             self.recycled.clear();
             return Err(Error::Invalid("short ASR payload read"));
         }
-        for chunk in bytes.chunks(CHUNK_BYTES) {
-            let mut queued = self
-                .recycled
-                .pop()
-                .unwrap_or_else(|| Vec::with_capacity(chunk.len() + SHA1_BYTES));
-            queued.extend_from_slice(chunk);
-            if self.checksum {
-                queued.extend_from_slice(&Sha1::digest(chunk));
+        if one_chunk {
+            self.queue_chunk(bytes);
+        } else {
+            for chunk in bytes.chunks(CHUNK_BYTES) {
+                let mut queued = self.chunk_buffer(chunk.len());
+                queued.extend_from_slice(chunk);
+                self.queue_chunk(queued);
             }
-            self.ahead.push_back((chunk.len(), queued));
         }
         self.ahead_at += n as u64;
         Ok(())
+    }
+    fn chunk_buffer(&mut self, bytes: usize) -> Vec<u8> {
+        self.recycled
+            .pop()
+            .unwrap_or_else(|| Vec::with_capacity(bytes + SHA1_BYTES))
+    }
+    fn queue_chunk(&mut self, mut bytes: Vec<u8>) {
+        let len = bytes.len();
+        if self.checksum {
+            let digest = Sha1::digest(&bytes);
+            bytes.extend_from_slice(&digest);
+        }
+        self.ahead.push_back((len, bytes));
     }
     /// The `n` payload bytes at `offset`, with their checksum if asked.
     fn payload_chunk(

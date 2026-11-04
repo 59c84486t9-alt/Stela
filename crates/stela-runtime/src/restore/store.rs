@@ -545,6 +545,16 @@ impl<R: ReadAt> Store<R> {
         Ok(())
     }
     pub fn read_at(&mut self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
+        self.read_at_reusing(path, offset, len, Vec::new())
+    }
+
+    pub(super) fn read_at_reusing(
+        &mut self,
+        path: &str,
+        offset: u64,
+        len: usize,
+        mut result: Vec<u8>,
+    ) -> Result<Vec<u8>> {
         if len > MAX_READ_BYTES {
             return Err(Error::Limit("payload random read"));
         }
@@ -553,15 +563,15 @@ impl<R: ReadAt> Store<R> {
             return Err(Error::Invalid("payload read range"));
         }
         self.verify(path)?;
+        result.clear();
         if self.verified[path].sha384.is_none() {
-            return self.read_unhashed(path, offset, len);
+            return self.read_unhashed(path, offset, len, result);
         }
         if len == 0 {
-            return Ok(Vec::new());
+            return Ok(result);
         }
         let block = BLOCK_BYTES as u64;
         let first = offset / block;
-        let mut result = Vec::new();
         self.read_blocks(
             path,
             first..(offset + len as u64).div_ceil(block),
@@ -590,9 +600,15 @@ impl<R: ReadAt> Store<R> {
         Ok(result)
     }
     /// A device-verified member's bytes, as read.
-    fn read_unhashed(&mut self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
+    fn read_unhashed(
+        &mut self,
+        path: &str,
+        offset: u64,
+        len: usize,
+        mut bytes: Vec<u8>,
+    ) -> Result<Vec<u8>> {
         let entry = &self.verified[path].entry;
-        let mut bytes = vec![0; len];
+        bytes.resize(len, 0);
         self.cursors
             .read(&self.archive, &mut self.reader, entry, offset, &mut bytes)?;
         Ok(bytes)
