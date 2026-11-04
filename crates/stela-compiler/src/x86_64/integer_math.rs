@@ -25,10 +25,12 @@ fn size(width: Width) -> Size {
 }
 
 pub(super) fn emit_with(asm: &mut Asm, operand: &Operand, target: TargetCpu) {
-    if let Kind::Extract { width, amount } = operand.kind
-        && operand.left != operand.right
-    {
-        extract_distinct(asm, operand, width, amount);
+    if let Kind::Extract { width, amount } = operand.kind {
+        if operand.left == operand.right {
+            rotate_immediate(asm, operand, width, amount, target);
+        } else {
+            extract_distinct(asm, operand, width, amount);
+        }
         return;
     }
     load_with(asm, operand.left);
@@ -155,13 +157,6 @@ pub(super) fn emit_with(asm: &mut Asm, operand: &Operand, target: TargetCpu) {
             store_with(asm, operand.destination);
             return;
         }
-        Kind::Extract { width, amount } => {
-            asm.shrd_imm(size(width), Rcx, Rax, amount);
-            // The W move also clears the upper half at shift zero.
-            asm.mov(size(width), Rax, Rcx);
-            store_with(asm, operand.destination);
-            return;
-        }
         _ => {}
     }
     if let Kind::Divide { signed, width } = operand.kind {
@@ -211,6 +206,36 @@ pub(super) fn emit_with(asm: &mut Asm, operand: &Operand, target: TargetCpu) {
         asm.alu(Alu::Add, size(width), Rax, Rcx);
     }
     store_with(asm, operand.destination);
+}
+
+fn rotate_immediate(asm: &mut Asm, operand: &Operand, width: Width, amount: u8, target: TargetCpu) {
+    let destination = asm.guest(operand.destination);
+    let result = match destination {
+        Some(Rm::Reg(host)) => host,
+        _ => Rax,
+    };
+    let size = size(width);
+    if let Some(source) = asm.guest(operand.left) {
+        // A resident in-place rotate has a shorter encoding than RORX.
+        let in_place = source == Rm::Reg(result);
+        if amount != 0 && !in_place && target.supports(TargetCpu::Bmi2) {
+            asm.rorx(size, result, source, amount);
+        } else {
+            // At count zero the move keeps a source-map range and provides
+            // the required zero-extension for W, even in place.
+            if amount == 0 || !in_place {
+                asm.mov_load(size, result, source);
+            }
+            if amount != 0 {
+                asm.shift_imm(ShiftOp::Ror, size, result, amount);
+            }
+        }
+    } else {
+        asm.alu(Alu::Xor, Size::Dword, result, result);
+    }
+    if let Some(Rm::Mem(slot)) = destination {
+        asm.mov_store(Size::Qword, slot, result);
+    }
 }
 
 fn extract_distinct(asm: &mut Asm, operand: &Operand, width: Width, amount: u8) {
