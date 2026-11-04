@@ -263,6 +263,9 @@ impl Held<'_> {
                 finished.insert(ticket, part);
             }
         }
+        if self.requests().waiting.is_empty() {
+            return;
+        }
         let queued = self.depth() > 0;
         let (block, limit) = {
             let identity = self.identity();
