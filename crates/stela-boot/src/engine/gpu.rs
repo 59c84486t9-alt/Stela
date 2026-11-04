@@ -1469,10 +1469,12 @@ fn mount_and_start(
     let threads = unsafe { TaskRuntime::install(owner.clone(), runtime, pages, SLOTS) }
         .map_err(Error::Threads)?;
     let threads = &*Box::leak(Box::new(threads));
+    // Reserve the error envelope before Initial can publish native state.
+    let initial_failure = Box::new_uninit();
     // SAFETY: this exact source, root and broker remain kept on refusal. Each
     // runtime step runs inside the same live native execution segment.
     unsafe { Pin::new(owner.as_ref()).start_initial(work.linux_root(), threads) }
-        .map_err(Error::Initial)?;
+        .map_err(|error| Error::Initial(Box::write(initial_failure, error)))?;
 
     // SAFETY: submit via this actual original task broker. The service
     // initializes the original resources before dispatching accepted jobs.
@@ -1542,7 +1544,7 @@ pub(super) enum Error {
     Environment(kernel_work::Error),
     Kernel(stela_linux::kernel::Error),
     Threads(stela_linux::task::runtime::RuntimeError),
-    Initial(stela_linux::kernel::InitialStartError),
+    Initial(Box<stela_linux::kernel::InitialStartError>),
     SrcuStart(stela_linux::srcu::StartError),
     Srcu(stela_linux::srcu::Error),
     Submit(stela_linux::task::runtime::SubmitError),
