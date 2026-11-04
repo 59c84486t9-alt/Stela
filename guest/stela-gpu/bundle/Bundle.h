@@ -99,6 +99,13 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 /* Completes `buffer`, whose commit `failure` refused. */
 - (void)failed:(StelaGPUCommandBuffer *)buffer with:(StelaFailure)failure;
 - (void)releaseHandle:(uint64_t)handle;
+/* Releases `handle` once the GPU completes everything committed so far,
+ * keeping `slab` until then. */
+- (void)releaseHandleAfterWork:(uint64_t)handle slab:(id)slab;
+/* A shared buffer placed in a heap of the device's own, or nil. */
+- (id)pooledBufferWithLength:(NSUInteger)length options:(NSUInteger)options;
+/* The serial of a commit the service accepted. */
+- (void)noteSubmitted:(uint64_t)serial;
 /* The host seconds of a GPU timestamp, as `GPUStartTime` counts them. */
 - (CFTimeInterval)secondsOfTick:(uint64_t)tick;
 /* Indirect command buffers with encoding the next commit takes. */
@@ -111,6 +118,8 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 @interface StelaGPUDevice (Resources)
 - (id)newTextureWithDescriptor:(id)descriptor;
 - (id)newBufferWithLength:(NSUInteger)length options:(NSUInteger)options;
+/* A heap of `record`, which imports the task's memory for a CPU-visible one. */
+- (id)newHeapWithRecord:(StelaHeapDescriptorRecord)record;
 @end
 
 @interface StelaGPUDevice (Pipelines)
@@ -160,6 +169,9 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 	/* Memory of the bundle's own, unmapped with the buffer. */
 	uint64_t _mappedBytes;
 	void (^_deallocator)(void *, NSUInteger);
+	/* The device's own heap this buffer was placed in, which the app never
+	 * sees; its place is given back once the GPU is past it. */
+	id _slab;
 }
 - (instancetype)initWithDevice:(StelaGPUDevice *)device
 		      response:(const StelaBufferResponse *)response
@@ -209,7 +221,10 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 	void *_contents;
 	NSUInteger _size, _options, _type;
 	uint64_t _mappedBytes;
+	/* The device's pooled buffers placed in it that are not yet released. */
+	NSUInteger _pooled;
 }
+- (id)newBufferWithLength:(NSUInteger)length options:(NSUInteger)options;
 @end
 
 @interface StelaGPUFence : NSObject <MTLFence> {

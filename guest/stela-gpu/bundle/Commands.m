@@ -248,6 +248,7 @@ static CFTimeInterval host_time(void)
 	stela_stream_free(&_stream);
 	_serial = serial.value;
 	_kernelEnd = host_time();
+	[_device noteSubmitted:_serial];
 	[_device track:self];
 }
 

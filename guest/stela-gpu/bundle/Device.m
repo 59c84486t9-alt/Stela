@@ -6,6 +6,8 @@
  */
 #include "Bundle.h"
 
+#include <stdatomic.h>
+
 #define FLAG(selector, flag)                                                                       \
 	-(BOOL)selector                                                                            \
 	{                                                                                          \
@@ -40,6 +42,36 @@ static const uint8_t PATTERN_16[][2] = {{9, 9},	 {7, 5},  {5, 10}, {12, 7}, {3, 
 
 static void completed(void *reference, int result, void *count);
 
+/* Small shared buffers share heaps of the device's own, as a GPU driver
+ * suballocates them: each new heap imports memory once, while a buffer of its
+ * own would import, map and unmap its pages through the host's kernel. */
+#define POOLED_MAX_BYTES (256u << 10)
+#define SLAB_BYTES (4u << 20)
+
+/* Metal's values for the modes a pool is kept by: CPU cache mode (default,
+ * write-combined) and hazard tracking mode (default, untracked, tracked). */
+enum {
+	POOL_CACHE_MODES = 2,
+	POOL_HAZARD_DEFAULT = 0,
+	POOL_HAZARD_TRACKED = 2,
+	POOL_HAZARD_MODES = 3,
+	POOL_KINDS = POOL_CACHE_MODES * POOL_HAZARD_MODES,
+	/* MTLHeapDescriptor's defaults. */
+	POOL_HEAP_AUTOMATIC = 0,
+	POOL_SPARSE_PAGE_16 = 101,
+};
+
+/* A handle whose release waits for the GPU, and the heap kept until then. */
+@interface StelaDeferredRelease : NSObject {
+@public
+	uint64_t _handle, _serial;
+	id _slab;
+}
+@end
+
+@implementation StelaDeferredRelease
+@end
+
 /* The tiles a pixel span covers, or lies across whole for an inward mode. */
 static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUInteger mode, NSUInteger *first,
 		      NSUInteger *count)
@@ -68,6 +100,16 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 	uint64_t _anchorTick;
 	double _anchorSeconds;
 	BOOL _shouldMaximizeConcurrentCompilation;
+	/* The newest serial the service accepted a commit at, and the newest it
+	 * reached; releases waiting for the GPU, in serial order. */
+	_Atomic(uint64_t) _submitted;
+	uint64_t _reached;
+	NSMutableArray *_deferred;
+	os_unfair_lock _deferLock;
+	/* The pooled buffers' heaps by cache and hazard tracking mode, newest
+	 * last. */
+	NSMutableArray *_slabs[POOL_KINDS];
+	os_unfair_lock _poolLock;
 }
 
 - (instancetype)initWithAcceleratorPort:(io_service_t)port
@@ -81,6 +123,12 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 	_lock = OS_UNFAIR_LOCK_INIT;
 	_inFlight = [NSMutableArray arrayWithCapacity:64];
 	_indirect = [NSMutableArray arrayWithCapacity:4];
+	_deferred = [NSMutableArray arrayWithCapacity:64];
+	for (NSUInteger i = 0; i < POOL_KINDS; i++) {
+		_slabs[i] = [NSMutableArray arrayWithCapacity:4];
+	}
+	_deferLock = OS_UNFAIR_LOCK_INIT;
+	_poolLock = OS_UNFAIR_LOCK_INIT;
 	mach_vm_address_t page = 0;
 	mach_vm_size_t bytes = 0;
 	if (IOServiceOpen(port, mach_task_self(), kStelaGPUUserClientType, &_gate.connect) != KERN_SUCCESS) {
@@ -211,7 +259,123 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 	for (NSUInteger i = 0; i < done.count; i++) {
 		[[done objectAtIndex:i] didCompleteWith:lost ? &failure : NULL];
 	}
+	[self releaseDeferredReaching:lost ? UINT64_MAX : reached.value];
 	[self arm];
+}
+
+- (void)noteSubmitted:(uint64_t)serial
+{
+	uint64_t seen = atomic_load(&_submitted);
+	while (seen < serial && !atomic_compare_exchange_weak(&_submitted, &seen, serial)) {
+	}
+}
+
+- (void)releaseHandleAfterWork:(uint64_t)handle slab:(id)slab
+{
+	StelaDeferredRelease *entry = [StelaDeferredRelease new];
+	entry->_handle = handle;
+	entry->_slab = slab;
+	os_unfair_lock_lock(&_deferLock);
+	entry->_serial = atomic_load(&_submitted);
+	bool now = entry->_serial <= _reached;
+	if (!now) {
+		[_deferred addObject:entry];
+	}
+	os_unfair_lock_unlock(&_deferLock);
+	if (now) {
+		[self released:entry];
+	}
+}
+
+/* Releases what waited for the GPU to reach `reached`. */
+- (void)releaseDeferredReaching:(uint64_t)reached
+{
+	NSMutableArray *ready = [NSMutableArray array];
+	os_unfair_lock_lock(&_deferLock);
+	_reached = reached > _reached ? reached : _reached;
+	while (_deferred.count) {
+		StelaDeferredRelease *entry = [_deferred objectAtIndex:0];
+		if (entry->_serial > _reached) {
+			break;
+		}
+		[ready addObject:entry];
+		[_deferred removeObjectAtIndex:0];
+	}
+	os_unfair_lock_unlock(&_deferLock);
+	for (NSUInteger i = 0; i < ready.count; i++) {
+		[self released:[ready objectAtIndex:i]];
+	}
+}
+
+/* A pooled buffer's place is free: its heap goes once no buffer holds it and
+ * a newer one takes the pool's allocations. */
+- (void)released:(StelaDeferredRelease *)entry
+{
+	[self releaseHandle:entry->_handle];
+	StelaGPUHeap *slab = entry->_slab;
+	if (!slab) {
+		return;
+	}
+	os_unfair_lock_lock(&_poolLock);
+	if (--slab->_pooled == 0) {
+		for (NSUInteger kind = 0; kind < POOL_KINDS; kind++) {
+			NSMutableArray *slabs = _slabs[kind];
+			NSUInteger index = [slabs indexOfObjectIdenticalTo:slab];
+			if (index != NSNotFound && index + 1 < slabs.count) {
+				[slabs removeObjectAtIndex:index];
+			}
+		}
+	}
+	os_unfair_lock_unlock(&_poolLock);
+}
+
+- (id)pooledBufferWithLength:(NSUInteger)length options:(NSUInteger)options
+{
+	NSUInteger mode = (options & MTLResourceStorageModeMask) >> MTLResourceStorageModeShift;
+	NSUInteger cache = (options & MTLResourceCPUCacheModeMask) >> MTLResourceCPUCacheModeShift;
+	NSUInteger hazard = (options & MTLResourceHazardTrackingModeMask) >> MTLResourceHazardTrackingModeShift;
+	/* Other modes and options take the path that reports what they are. */
+	NSUInteger kept = MTLResourceCPUCacheModeMask | MTLResourceStorageModeMask | MTLResourceHazardTrackingModeMask;
+	if (mode != MTLStorageModeShared || (options & ~kept) || cache >= POOL_CACHE_MODES ||
+	    hazard >= POOL_HAZARD_MODES || length == 0 || length > POOLED_MAX_BYTES) {
+		return nil;
+	}
+	NSMutableArray *slabs = _slabs[cache * POOL_HAZARD_MODES + hazard];
+	StelaGPUBuffer *buffer = nil;
+	StelaGPUHeap *slab = nil;
+	os_unfair_lock_lock(&_poolLock);
+	/* Only the newest heap takes buffers; older ones are kept only while
+	 * buffers remain in them, so each drains and goes. */
+	if (slabs.count) {
+		slab = [slabs objectAtIndex:slabs.count - 1];
+		buffer = [slab newBufferWithLength:length options:options];
+	}
+	if (!buffer) {
+		/* A buffer of its own is tracked unless the app says otherwise. */
+		NSUInteger tracking = hazard == POOL_HAZARD_DEFAULT ? POOL_HAZARD_TRACKED : hazard;
+		StelaHeapDescriptorRecord record = {
+			.size = SLAB_BYTES,
+			.options = (cache << MTLResourceCPUCacheModeShift) |
+				   ((NSUInteger)MTLStorageModeShared << MTLResourceStorageModeShift) |
+				   (tracking << MTLResourceHazardTrackingModeShift),
+			.heap_type = POOL_HEAP_AUTOMATIC,
+			.sparse_page_size = POOL_SPARSE_PAGE_16,
+		};
+		slab = [self newHeapWithRecord:record];
+		buffer = [slab newBufferWithLength:length options:options];
+		if (buffer) {
+			[slabs addObject:slab];
+		}
+	}
+	if (buffer) {
+		slab->_pooled++;
+		/* An app's buffer of its own: no heap, at no heap offset. */
+		buffer->_heap = nil;
+		buffer->_heapOffset = 0;
+		buffer->_slab = slab;
+	}
+	os_unfair_lock_unlock(&_poolLock);
+	return buffer;
 }
 
 static void completed(void *reference, int result, void *count)

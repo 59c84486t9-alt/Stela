@@ -187,7 +187,11 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 
 - (void)dealloc
 {
-	if (_deallocator) {
+	if (_slab) {
+		/* Commands committed before this may still reach its place. */
+		[_device releaseHandleAfterWork:_handle slab:_slab];
+		_handle = 0;
+	} else if (_deallocator) {
 		_deallocator(_contents, _length);
 	} else if (_mappedBytes) {
 		mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)_contents, _mappedBytes);
@@ -887,6 +891,10 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 		}
 		return [[StelaGPUBuffer alloc] initWithDevice:self response:&response options:options length:length];
 	}
+	StelaGPUBuffer *pooled = [self pooledBufferWithLength:length options:options];
+	if (pooled) {
+		return pooled;
+	}
 	uint64_t mapped = page_aligned(length);
 	void *contents = NULL;
 	uint64_t memory = [self importLength:mapped contents:&contents failure:&failure];
@@ -1045,13 +1053,18 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 
 - (id)newHeapWithDescriptor:(id)descriptor
 {
-	NSUInteger options = [descriptor resourceOptions];
-	StelaHeapDescriptorRecord request = {
+	StelaHeapDescriptorRecord record = {
 		.size = [descriptor size],
-		.options = options,
+		.options = [descriptor resourceOptions],
 		.heap_type = [descriptor type],
 		.sparse_page_size = [descriptor sparsePageSize],
 	};
+	return [self newHeapWithRecord:record];
+}
+
+- (id)newHeapWithRecord:(StelaHeapDescriptorRecord)request
+{
+	NSUInteger options = request.options;
 	void *contents = NULL;
 	uint64_t mapped = 0;
 	StelaFailure failure;
