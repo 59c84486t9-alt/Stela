@@ -625,11 +625,12 @@ impl Prepared<Function> {
             | u16::from(address.function);
         // SAFETY: QEMU-only flat topology, exact matched DMAR owner; all
         // other requesters are reset/drained, EDU idle, ATS/NoSnoop off.
-        let requesters: Vec<u16> = self
+        let mut requesters: Vec<u16> = self
             .functions
             .iter()
             .map(|f| u16::from(f.address.device) * 8 + u16::from(f.address.function))
             .collect();
+        requesters.sort_unstable();
         let function = self.functions.swap_remove(self.edu);
         // SAFETY: same exclusive, idle fixture function and kept root.
         let claim = unsafe { super::requester::RequesterClaim::from_stopped_pci(function) }
@@ -651,6 +652,14 @@ impl Prepared<Function> {
                 ?error
             )
         })?;
+        let blocked = unit
+            .acknowledge_initial_block(&requesters)
+            .map_err(|error| refuse!("VT-d initial blocked cohort: {error}", ?error))?;
+        blocked
+            .claim(requester)
+            .map_err(|error| refuse!("VT-d initial requester: {error}", ?error))?
+            .drain()
+            .map_err(|error| refuse!("VT-d initial requester drain: {error}", ?error))?;
         // SAFETY: same stopped requester epoch and coherent grant.
         let domain = unsafe { unit.attach_requester(claim) }
             .map_err(|error| refuse!("requester domain: {error}", ?error))?;

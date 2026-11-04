@@ -129,11 +129,12 @@ pub(super) fn run(
         )
     }
     .map_err(|e| refuse!("isolation registers: {e}", ?e))?;
-    let requesters: Vec<u16> = prepared
+    let mut requesters: Vec<u16> = prepared
         .functions
         .iter()
         .map(|f| u16::from(f.address.device) * 8 + u16::from(f.address.function))
         .collect();
+    requesters.sort_unstable();
     // Remove descending indices so both unique configuration owners
     // survive inventory changes. Neither a RID nor an address creates a claim.
     let mut indices = [prepared.edu, second_index];
@@ -161,8 +162,16 @@ pub(super) fn run(
         )
     }
     .map_err(|e| refuse!("isolation takeover: {e}", ?e))?;
+    let blocked = unit
+        .acknowledge_initial_block(&requesters)
+        .map_err(|error| refuse!("isolation initial blocked cohort: {error}", ?error))?;
     let mut domains = Vec::new();
     for claim in claims {
+        blocked
+            .claim(claim.requester())
+            .map_err(|error| refuse!("isolation initial requester: {error}", ?error))?
+            .drain()
+            .map_err(|error| refuse!("isolation initial requester drain: {error}", ?error))?;
         // SAFETY: stopped claim, same checked
         // endpoint coherency grant, no alternate config/reset/IRQ owner.
         domains.push(
