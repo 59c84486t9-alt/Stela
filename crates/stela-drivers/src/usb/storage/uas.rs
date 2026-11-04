@@ -6,7 +6,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Linux uas.c reference: Hans de Goede/Red Hat 2013-2016;
 // Matthew Wilcox/Intel Corp 2010; Sarah Sharp/Intel Corp 2010.
-use super::{Data, Device, DmaAllocator, Endpoint, MAX_TD, Shared};
+use super::{Data, Device, DmaAllocator, Endpoint, MAX_TD, Shared, copy_read};
 use crate::{
     block::{BlockError, Sense},
     bus::dma::DmaBuffer,
@@ -323,6 +323,17 @@ impl Host {
         data: Data<'_>,
     ) -> Result<Vec<u8>, BlockError> {
         execute(&mut self.engine, self.flags, lun, cdb, data)
+    }
+
+    pub(super) fn read_into(
+        &mut self,
+        lun: [u8; 8],
+        cdb: &[u8],
+        output: &mut [u8],
+    ) -> Result<(), BlockError> {
+        let data = Data::In(output.len());
+        admit(self.flags, cdb, &data)?;
+        self.engine.read_into(lun, cdb, output)
     }
 
     /// Begin a CDB as [`Self::command`] runs it, without waiting for any
@@ -649,9 +660,29 @@ impl<I: Io> Engine<I> {
         abort_timeout: Option<u64>,
         abort: &mut Option<AbortTaskOutcome>,
     ) -> Result<Vec<u8>, BlockError> {
+        let received = self.wait(lun, cdb, data, abort_timeout, abort)?;
+        Ok(self.received_data(received).to_vec())
+    }
+    fn read_into(&mut self, lun: [u8; 8], cdb: &[u8], output: &mut [u8]) -> Result<(), BlockError> {
+        // The caller's slice stays on the stack. Only a retired command
+        // with successful status can give the CPU its received data.
+        let received = self.wait(lun, cdb, Data::In(output.len()), None, &mut None)?;
+        copy_read(output, self.received_data(received))
+    }
+    fn received_data(&self, received: Option<usize>) -> &[u8] {
+        received.map_or(&[], |bytes| &self.data.bytes()[..bytes])
+    }
+    fn wait(
+        &mut self,
+        lun: [u8; 8],
+        cdb: &[u8],
+        data: Data<'_>,
+        abort_timeout: Option<u64>,
+        abort: &mut Option<AbortTaskOutcome>,
+    ) -> Result<Option<usize>, BlockError> {
         self.begin(lun, cdb, data)?;
         loop {
-            if let Some(result) = self.poll(abort_timeout, abort) {
+            if let Some(result) = self.poll_completion(abort_timeout, abort) {
                 return result;
             }
             self.io.pause();
@@ -731,6 +762,16 @@ impl<I: Io> Engine<I> {
         abort_timeout: Option<u64>,
         abort: &mut Option<AbortTaskOutcome>,
     ) -> Option<Result<Vec<u8>, BlockError>> {
+        self.poll_completion(abort_timeout, abort)
+            .map(|result| result.map(|received| self.received_data(received).to_vec()))
+    }
+    /// The byte count of a retired successful input command. Writes and
+    /// no-data commands have no input to expose.
+    fn poll_completion(
+        &mut self,
+        abort_timeout: Option<u64>,
+        abort: &mut Option<AbortTaskOutcome>,
+    ) -> Option<Result<Option<usize>, BlockError>> {
         let mut active = self.active.take()?;
         let result = self.advance(&mut active, abort_timeout, abort);
         if result.is_none() {
@@ -743,7 +784,7 @@ impl<I: Io> Engine<I> {
         active: &mut Active,
         abort_timeout: Option<u64>,
         abort: &mut Option<AbortTaskOutcome>,
-    ) -> Option<Result<Vec<u8>, BlockError>> {
+    ) -> Option<Result<Option<usize>, BlockError>> {
         let (length, input, streams) = (active.length, active.input, active.streams);
         for pipe in [Pipe::Command, Pipe::Status, Pipe::Input, Pipe::Output] {
             let index = pipe.index();
@@ -841,11 +882,7 @@ impl<I: Io> Engine<I> {
                 if !input && moved != length {
                     return Some(Err(BlockError::Protocol("short UAS write")));
                 }
-                return Some(Ok(if input {
-                    self.data.bytes()[..moved].to_vec()
-                } else {
-                    Vec::new()
-                }));
+                return Some(Ok(input.then_some(moved)));
             }
         }
         if self.io.now().wrapping_sub(active.started) >= abort_timeout.unwrap_or(TIMEOUT_US) {
