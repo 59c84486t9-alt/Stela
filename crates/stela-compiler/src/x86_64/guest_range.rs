@@ -20,7 +20,6 @@ use crate::aarch64::{
     Instruction, MemoryTransfer, Operation, Register, Width, atomic, literal, non_temporal,
     ordered, simd,
 };
-use alloc::vec::Vec;
 
 /// A register's bit in a set of bases: X0-X30 and SP as bit 31.
 fn bit(register: Register) -> u32 {
@@ -35,17 +34,13 @@ fn bit(register: Register) -> u32 {
 /// range: all but the immediate-offset accesses through a base the block
 /// has already made such an access through, unmodified since but by
 /// immediates.
-pub(crate) fn checks(instructions: &[Instruction]) -> Vec<bool> {
+pub(crate) fn checks(instructions: &[Instruction], rows: &mut [bool]) {
+    assert_eq!(rows.len(), instructions.len());
     let mut bases = 0u32;
-    instructions
-        .iter()
-        .map(|instruction| {
-            let check =
-                immediate_base(&instruction.operation).is_none_or(|base| bases & bit(base) == 0);
-            bases = after(&instruction.operation, bases);
-            check
-        })
-        .collect()
+    for (row, instruction) in rows.iter_mut().zip(instructions) {
+        *row = immediate_base(&instruction.operation).is_none_or(|base| bases & bit(base) == 0);
+        bases = after(&instruction.operation, bases);
+    }
 }
 
 /// The base of an access whose address is the base plus an immediate.
@@ -230,8 +225,10 @@ mod tests {
             0xf869_68c8,
             0xf940_00ca,
         ];
+        let mut rows = [false; 13];
+        checks(&lift(&words), &mut rows);
         assert_eq!(
-            checks(&lift(&words)),
+            rows,
             [
                 true,  // the first access through SP
                 true,  // a move
@@ -264,9 +261,8 @@ mod tests {
             0x4cdf_7020,
             0xf940_0029,
         ];
-        assert_eq!(
-            checks(&lift(&words)),
-            [true, true, true, false, true, false, false]
-        );
+        let mut rows = [false; 7];
+        checks(&lift(&words), &mut rows);
+        assert_eq!(rows, [true, true, true, false, true, false, false]);
     }
 }
