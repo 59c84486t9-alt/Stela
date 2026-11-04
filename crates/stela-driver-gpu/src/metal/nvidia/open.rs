@@ -8,7 +8,7 @@ use super::{Attachment, Chip, Refusal};
 #[cfg(feature = "metal-vulkan")]
 use crate::metal::{
     compiler::{self, AirCompiler},
-    native::{InternalKernels, Loader, MemoryExporter, NativeBackend, Target, vk},
+    native::{InternalKernels, Loader, MemoryExporter, NativeBackend, vk},
 };
 use crate::metal::{
     device::Device,
@@ -79,7 +79,7 @@ pub type NativeService = Service<NativeBackend, AirCompiler>;
 #[cfg(feature = "metal-vulkan")]
 pub unsafe fn stack(
     loader: Loader,
-    target: Target,
+    pci: PciBusInfo,
     exporter: Box<dyn MemoryExporter>,
     compiler: impl FnOnce(vk::PhysicalDevice) -> compiler::Service,
 ) -> Result<(NativeBackend, AirCompiler), Error> {
@@ -100,7 +100,7 @@ pub unsafe fn stack(
     };
     // SAFETY: the caller guarantees the entry point, and the kernels are the
     // service's NIR for the driver.
-    let backend = unsafe { NativeBackend::new(loader, target, exporter, kernels) }?;
+    let backend = unsafe { NativeBackend::new(loader, pci, exporter, kernels) }?;
     let Some((service, kernels)) = built else {
         return Err(Error::Invalid("the backend asked for no kernels"));
     };
@@ -127,7 +127,7 @@ pub unsafe fn open(
     epoch: DeviceEpoch,
 ) -> Result<NativeService, OpenError> {
     // SAFETY: the caller's guarantees.
-    let (backend, compiler) = unsafe { stack(loader, Target::Pci(gpu.pci), exporter, compiler) }?;
+    let (backend, compiler) = unsafe { stack(loader, gpu.pci, exporter, compiler) }?;
     serve(backend, compiler, gpu, epoch)
 }
 

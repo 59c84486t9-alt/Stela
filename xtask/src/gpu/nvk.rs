@@ -1,4 +1,4 @@
-//! NVK, lavapipe, NIR and NAK for `stela.efi`.
+//! NVK, NIR and NAK for `stela.efi`.
 //!
 //! Meson configures Mesa for `sysroot`'s machine, the same from every build
 //! host, which leaves its generated sources and its compile plan. This task
@@ -28,13 +28,13 @@ use std::{
     time::SystemTime,
 };
 
-/// What NVK and lavapipe need and nothing else: no window system, no cache on
+/// What NVK needs and nothing else: no window system, no cache on
 /// disk and no host compiler. NVK's OpenCL kernels are `compat/mesa/nvkcl.c`, so
 /// the tools that would build them are never run.
-const OPTIONS: [&str; 22] = [
+const OPTIONS: [&str; 21] = [
     "-Dcpp_rtti=false",
-    "-Dvulkan-drivers=nouveau,swrast",
-    "-Dgallium-drivers=llvmpipe",
+    "-Dvulkan-drivers=nouveau",
+    "-Dgallium-drivers=",
     "-Dplatforms=",
     "-Dopengl=false",
     "-Dgles1=disabled",
@@ -42,8 +42,7 @@ const OPTIONS: [&str; 22] = [
     "-Dglx=disabled",
     "-Degl=disabled",
     "-Dgbm=disabled",
-    "-Dllvm=enabled",
-    "-Dshared-llvm=disabled",
+    "-Dllvm=disabled",
     "-Dzlib=disabled",
     "-Dzstd=disabled",
     "-Dshader-cache=disabled",
@@ -56,42 +55,9 @@ const OPTIONS: [&str; 22] = [
     "-Dbuildtype=debugoptimized",
 ];
 /// The Vulkan drivers the image links, as Meson's targets.
-const DRIVERS: [&str; 2] = [
-    "src/nouveau/vulkan/libvulkan_nouveau.so",
-    "src/gallium/targets/lavapipe/libvulkan_lvp.so",
-];
-/// What each driver exports under one name, which lavapipe's unit gives a name
-/// of its own for both to link.
-const ENTRY_POINTS: [&str; 3] = [
-    "vk_icdGetInstanceProcAddr",
-    "vk_icdGetPhysicalDeviceProcAddr",
-    "vk_icdNegotiateLoaderICDInterfaceVersion",
-];
+const DRIVERS: [&str; 1] = ["src/nouveau/vulkan/libvulkan_nouveau.so"];
 /// Tools the configuration asks for that nothing runs.
 const UNUSED_TOOLS: [&str; 2] = ["mesa_clc", "vtn_bindgen2"];
-/// `llvm-config` for what `llvm::build` left, whose units this task compiles:
-/// Meson only learns the version and where the headers are.
-const LLVM_CONFIG: &str = r#"import sys
-answers = {
-    "--version": "23.1.4",
-    "--cppflags": "@FLAGS@",
-    "--cxxflags": "@FLAGS@",
-    "--cflags": "@FLAGS@",
-    "--includedir": "@INCLUDE@",
-    "--libdir": "@LIBDIR@",
-    "--shared-mode": "static",
-    "--has-rtti": "NO",
-    "--targets-built": "X86",
-    "--components": "all all-targets bitwriter core coroutines engine executionengine "
-    "instcombine mcdisassembler mcjit native scalaropts transformutils x86",
-}
-for word in sys.argv[1:]:
-    if word in answers:
-        print(answers[word])
-        break
-else:
-    print()
-"#;
 /// What Mesa's configuration asks of `glslangValidator`, only for the compute
 /// shaders that build acceleration structures and decode ASTC in Vulkan's
 /// runtime. The device enables neither, as no Metal path uses them, so they
@@ -118,18 +84,15 @@ const LIBELF_VERSION: &str = "0.190";
 /// Units not built, by a part of their source path: each either has a stand-in
 /// in `compat/mesa`, or needs what the image lacks and nothing here calls it.
 /// The libraries Meson links whole, by their objects' names.
-const WHOLE_LIBRARIES: [&str; 5] = [
+const WHOLE_LIBRARIES: [&str; 4] = [
     "libvulkan_lite_runtime_a",
     "libvulkan_runtime_a",
     "libvulkan_instance_a",
-    "liblavapipe_st_a",
     "libnvk_a",
 ];
 
-const SKIPPED: [&str; 13] = [
+const SKIPPED: [&str; 11] = [
     "nvkcl",
-    "hud_hud",
-    "lp_bld_debug",
     "build_id",
     "nv_cubin.c",
     "texcompress_astc",
@@ -170,8 +133,6 @@ const AIR: [&str; 16] = [
     "threadgroup",
 ];
 const MODEL_UNIT: &str = "nvk_query_pool.c";
-/// What `compat/mesa/lvp_options.c` needs of lavapipe's flags.
-const LAVAPIPE_MODEL_UNIT: &str = "lvp_query.c";
 /// The C library, under `compat/libc`.
 pub(super) const LIBC: [&str; 6] = ["libc", "stdio", "pthread", "math", "system", "wchar"];
 /// Original LLVM units behind `compat/libc/regex.h`, also present in the
@@ -298,8 +259,7 @@ fn setup(
 ) -> Result<()> {
     let packages = directory.join("pkgconfig");
     let machine = directory.join("machine.ini");
-    let llvm_config = directory.join("llvm-config.py");
-    let description = sysroot.machine_file(toolchain, &packages, &llvm_config)?;
+    let description = sysroot.machine_file(toolchain, &packages)?;
     let plan = build.join("build.ninja");
     let modified = |path: &Path| fs::metadata(path).and_then(|file| file.modified()).ok();
     if modified(&plan) > modified(&sysroot.libc())
@@ -311,16 +271,6 @@ fn setup(
         fs::remove_dir_all(build)?;
     }
     fs::write(&machine, description)?;
-    let include = slashed(&third_party("llvm").join("llvm/include"));
-    let generated = slashed(&build_directory("llvm").join("generated"));
-    let compat = slashed(&gpu().join("compat/llvm/include"));
-    fs::write(
-        &llvm_config,
-        LLVM_CONFIG
-            .replace("@FLAGS@", &format!("-I{compat} -I{include} -I{generated}"))
-            .replace("@INCLUDE@", &include)
-            .replace("@LIBDIR@", &slashed(directory)),
-    )?;
     let (stubs, _) = paths(directory)?;
     fs::create_dir_all(&stubs)?;
     let unused = UNUSED_TOOLS.map(|name| (name, "#!/usr/bin/env python3\nraise SystemExit(1)\n"));
@@ -582,7 +532,6 @@ fn units(
         serde_json::from_str(&fs::read_to_string(build.join("compile_commands.json"))?)?;
     let mut units = Vec::new();
     let mut model = None;
-    let mut lavapipe_model = None;
     let entries = database.as_array().context("compile database")?;
     // A source two libraries compile is the one's that is linked whole.
     let whole: BTreeSet<&str> = entries
@@ -604,9 +553,6 @@ fn units(
         if file.ends_with(MODEL_UNIT) {
             model = Some((file.to_owned(), words.clone()));
         }
-        if file.ends_with(LAVAPIPE_MODEL_UNIT) {
-            lavapipe_model = Some((file.to_owned(), words.clone()));
-        }
         if file.ends_with(".S")
             || SKIPPED
                 .iter()
@@ -620,13 +566,6 @@ fn units(
             "{file} is neither C nor C++"
         );
         let mut arguments = retarget(&words, if is_cxx { cxx } else { common });
-        if file.ends_with("lvp_device.c") {
-            arguments.extend(
-                ENTRY_POINTS
-                    .iter()
-                    .map(|name| format!("-D{name}=lvp_{name}")),
-            );
-        }
         if file.ends_with("rust/bindings.c") {
             arguments.extend(
                 FLOAT_WRAPPERS
@@ -665,11 +604,6 @@ fn units(
         let source = compat.join("mesa").join(format!("{name}.c"));
         units.push(model_unit(&source, name, &[]));
     }
-    let (file, words) = lavapipe_model.context("no lavapipe model unit")?;
-    let source = compat.join("mesa/lvp_options.c");
-    units.push(like(&file, &words, &source, "lvp_options", &[]));
-    let source = compat.join("mesa/lp_bld_debug.c");
-    units.push(like(&file, &words, &source, "lp_bld_debug", &[]));
     let compiler = gpu().join("compiler");
     let added = [
         compiler.clone(),

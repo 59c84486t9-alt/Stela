@@ -1,5 +1,5 @@
 # Shared NIR, the AMD, Intel and NVIDIA shader compilers with their command,
-# surface and sampler support, and lavapipe with llvmpipe. Other vendors' drivers,
+# surface and sampler support. Other vendors' drivers,
 # window systems and CI are left out; directories Mesa's Meson build names
 # unconditionally stay.
 /*
@@ -55,7 +55,6 @@
 !/src/gallium/winsys/v3d/
 !/src/gallium/winsys/radeon/
 !/src/gallium/targets/
-/src/gallium/targets/lavapipe/
 !/src/amd/ci/
 !/src/intel/ci/
 !/src/nouveau/ci/

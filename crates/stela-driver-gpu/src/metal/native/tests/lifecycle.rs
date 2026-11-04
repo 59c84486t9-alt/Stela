@@ -90,9 +90,6 @@ impl Drop for Exporter {
 }
 
 impl MemoryExporter for Exporter {
-    fn import(&self) -> Import {
-        Import::DmaBuf
-    }
     fn export(&self, _: &[MemoryRange]) -> Result<ExportedMemory> {
         unreachable!()
     }
@@ -151,7 +148,6 @@ fn backend(device: ash::Device, drops: &Arc<AtomicUsize>) -> NativeBackend {
             mesh: None,
             calibrated: None,
             external_memory_fd: None,
-            external_memory_host: None,
             conditional,
             generated: None,
         },

@@ -230,9 +230,6 @@ static void test_anonymous_files(void)
 	CHECK(mmap(place, 4096, PROT_READ, MAP_SHARED | MAP_FIXED | MAP_ANONYMOUS, -1, 0) == place);
 	CHECK(file_mapped_fd == -1 && file_mapped_address == place);
 	CHECK(!close(file));
-	int device = open("/dev/udmabuf", O_RDWR);
-	CHECK(device >= STELA_LIBC_FILE_BASE);
-	CHECK(!close(device));
 }
 
 static void test_refusals(void)

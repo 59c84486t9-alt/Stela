@@ -822,11 +822,6 @@ static int checked(int result)
 int open(const char *path, int flags, ...)
 {
 	(void)flags;
-	/* llvmpipe opens this to learn that it may lay a resource out at a stride
-	 * it is given. An empty file stands in for the device: nothing here exports
-	 * lavapipe's memory, and UDMABUF_CREATE on it fails. */
-	if (!strcmp(path, "/dev/udmabuf"))
-		return checked(stela_libc_file_create());
 	static const char prefix[] = "/dev/dri/renderD";
 	if (strncmp(path, prefix, sizeof(prefix) - 1))
 		return fail(ENOENT);

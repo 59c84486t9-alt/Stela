@@ -98,7 +98,7 @@ enum Operation {
 }
 
 /// What Mesa's threads run on: their calls go to Linux, off this stack. Linux's
-/// default, as llvmpipe's compiled shaders probe nothing and one frame can pass 1 MiB.
+/// default.
 const THREAD_STACK_BYTES: usize = 8 << 20;
 /// What stays free of a task's stack below `run_thread`'s frame, which a
 /// thread's Linux calls start past.
@@ -234,10 +234,10 @@ pub(super) fn export(runs: &[client::Run]) -> Option<(c_int, NonNull<u8>)> {
     Some((fd, address))
 }
 
-/// The host's mapping of `runs`, in one piece, then `tail` pages of `scratch`.
-pub(super) fn map_runs(runs: &[client::Run], tail: u64, scratch: u64) -> Option<NonNull<u8>> {
+/// The host's mapping of `runs`, in one piece.
+fn map_runs(runs: &[client::Run]) -> Option<NonNull<u8>> {
     let gpu = installed()?;
-    let pages: u64 = runs.iter().map(|run| run.bytes / PAGE).sum::<u64>() + tail;
+    let pages: u64 = runs.iter().map(|run| run.bytes / PAGE).sum();
     let address = gpu.window.reserve(pages as usize)?;
     let mut next = address;
     for run in runs {
@@ -250,15 +250,6 @@ pub(super) fn map_runs(runs: &[client::Run], tail: u64, scratch: u64) -> Option<
                 return None;
             }
             next += PAGE;
-        }
-    }
-    for page in 0..tail {
-        if !gpu
-            .window
-            .install(next + page * PAGE, scratch, Cache::WriteBack)
-        {
-            unmap_export(address, pages * PAGE);
-            return None;
         }
     }
     NonNull::new(address as *mut u8)

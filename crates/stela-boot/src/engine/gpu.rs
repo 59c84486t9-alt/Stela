@@ -9,8 +9,6 @@
 #[cfg(feature = "nvk")]
 pub(super) mod client;
 #[cfg(feature = "nvk")]
-mod code;
-#[cfg(feature = "nvk")]
 pub(super) mod display;
 #[cfg(feature = "nvk")]
 mod file;
@@ -889,7 +887,7 @@ pub(super) struct Machine {
     pub firmware: Option<Arc<Catalog>>,
     pub random: Seeded,
     pub tsc_hz: u64,
-    /// What the heap can give, which is all a software device's memory.
+    /// What the heap can give.
     #[cfg(feature = "nvk")]
     pub heap_bytes: u64,
 }
@@ -948,8 +946,6 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         heap_bytes,
     } = machine;
     let image = ReadOnlyImage::locate().ok_or(kernel_work::Error::Inventory)?;
-    #[cfg(feature = "nvk")]
-    let claiming = !claimed.is_empty();
     let lines = claimed
         .iter()
         .map(|claimed| Line {
@@ -1047,9 +1043,8 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         crate::status::warn("Linux could not start, so the GPUs are unavailable");
         result = Err(Error::Init(error));
     }
-    // With nothing claimed, the environment serves software Metal.
     #[cfg(feature = "nvk")]
-    if finished && result.is_ok() && claiming && job.bound.is_empty() {
+    if finished && result.is_ok() && job.bound.is_empty() {
         result = Err(Error::NoDevices);
     }
     let next = match domain.next_deadline() {

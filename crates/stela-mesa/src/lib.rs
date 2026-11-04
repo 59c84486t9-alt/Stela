@@ -1,4 +1,4 @@
-//! NVK, lavapipe, NIR and NAK, linked into `stela.efi`
+//! NVK, NIR and NAK, linked into `stela.efi`
 //! (`docs/design/metal-device.md`).
 //!
 //! The C is the archive `cargo xtask gpu nvk` builds; the Rust is NAK and NIL
@@ -15,11 +15,6 @@ use core::ffi::{c_char, c_void};
 unsafe extern "system" {
     /// The Vulkan loader-ICD entry of NVK.
     pub fn vk_icdGetInstanceProcAddr(instance: *mut c_void, name: *const c_char) -> *const c_void;
-    /// The Vulkan loader-ICD entry of lavapipe, renamed by `xtask gpu nvk`.
-    pub fn lvp_vk_icdGetInstanceProcAddr(
-        instance: *mut c_void,
-        name: *const c_char,
-    ) -> *const c_void;
 }
 
 unsafe extern "C" {

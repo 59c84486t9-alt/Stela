@@ -369,10 +369,9 @@ pub(crate) unsafe fn install(handler: Handler) {
     unsafe { install_on(&mut *tables, handler) };
 }
 
-/// Turn AVX on where this CPU has it, which firmware leaves off. The host
-/// service's shader compilers need it: without F16C, whose detection requires
-/// AVX state, llvmpipe has no half arithmetic. The translator admits no AVX
-/// target; the entry stubs save the enabled state whatever it is.
+/// Turn AVX on where this CPU has it, which firmware leaves off, so host
+/// code that detects AVX or F16C through XCR0 finds it usable. The translator
+/// admits no AVX target; the entry stubs save the enabled state whatever it is.
 ///
 /// # Safety
 /// Ring 0 with interrupts masked, on a CPU whose extended state nothing has

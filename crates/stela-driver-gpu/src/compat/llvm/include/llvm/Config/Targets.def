@@ -1,4 +1,2 @@
 /* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception */
-/* The JIT's target, as llvmpipe draws on this machine. */
-LLVM_TARGET(X86)
 #undef LLVM_TARGET

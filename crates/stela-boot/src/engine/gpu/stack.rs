@@ -3,12 +3,7 @@
 //! absent pages, so running off either end faults.
 use super::PAGE;
 use crate::{native_memory::SOURCE, native_mmio::Window};
-use core::{
-    arch::naked_asm,
-    ffi::c_void,
-    mem::ManuallyDrop,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use core::{arch::naked_asm, ffi::c_void, mem::ManuallyDrop};
 use stela_boot_core::page_window::Cache;
 use stela_drivers::bus::dma::memory::{CacheAttribute, PageSource, PinnedPages};
 
@@ -21,24 +16,6 @@ pub(super) struct Stack {
 
 /// The absent pages beneath and above a stack.
 const GUARD_PAGES: usize = 2;
-
-/// The one page every software mapping's tail shows (`gate`).
-static SCRATCH: AtomicU64 = AtomicU64::new(0);
-
-pub(super) fn scratch_page() -> Option<u64> {
-    let known = SCRATCH.load(Ordering::Acquire);
-    if known != 0 {
-        return Some(known);
-    }
-    let memory = SOURCE
-        .allocate(PAGE as usize, PAGE as usize, CacheAttribute::WriteBack)
-        .ok()?;
-    let physical = memory.physical_pages()[0];
-    // It lasts for the boot; the service's lock keeps this to one.
-    core::mem::forget(memory);
-    SCRATCH.store(physical, Ordering::Release);
-    Some(physical)
-}
 
 impl Stack {
     pub(super) fn map(window: &'static Window, bytes: usize) -> Option<Self> {

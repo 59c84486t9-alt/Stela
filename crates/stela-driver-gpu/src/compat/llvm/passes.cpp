@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // LLVM's pass C API (`llvm-c/Transforms/PassBuilder.h`) over only the passes
-// the AIR compiler and llvmpipe name. `PassBuilder` parses a pipeline by reaching
+// the AIR compiler names. `PassBuilder` parses a pipeline by reaching
 // every pass LLVM has, every code generator's included, so the image would carry
 // them all; these run the same passes under the same analyses, and any other name
 // fails. The verifier's C entry lives here too, as its own unit reaches the legacy
@@ -31,26 +31,11 @@
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include "llvm/Transforms/IPO/GlobalOpt.h"
 #include "llvm/Transforms/Scalar/DCE.h"
+#include "llvm/Transforms/Scalar/InstSimplifyPass.h"
 #include "llvm/Transforms/Scalar/SCCP.h"
 #include "llvm/Transforms/Scalar/SROA.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/LowerSwitch.h"
-#ifndef STELA_LLVM_AIR_ONLY
-#include "llvm/Analysis/LastRunTrackingAnalysis.h"
-#include "llvm/Analysis/LazyCallGraph.h"
-#include "llvm/Target/TargetMachine.h"
-#include "llvm/Transforms/Coroutines/CoroCleanup.h"
-#include "llvm/Transforms/Coroutines/CoroConditionalWrapper.h"
-#include "llvm/Transforms/Coroutines/CoroEarly.h"
-#include "llvm/Transforms/Coroutines/CoroSplit.h"
-#include "llvm/Transforms/IPO/GlobalDCE.h"
-#include "llvm/Transforms/InstCombine/InstCombine.h"
-#include "llvm/Transforms/Scalar/EarlyCSE.h"
-#include "llvm/Transforms/Scalar/InstSimplifyPass.h"
-#include "llvm/Transforms/Scalar/Reassociate.h"
-#include "llvm/Transforms/Scalar/SimplifyCFG.h"
-#include "llvm/Transforms/Utils/Mem2Reg.h"
-#endif
 #include <string.h>
 
 using namespace llvm;
@@ -92,10 +77,6 @@ struct Analyses {
 			[this] { return FunctionAnalysisManagerCGSCCProxy(); });
 		modules.registerPass([] { return PassInstrumentationAnalysis(); });
 		modules.registerPass([] { return ProfileSummaryAnalysis(); });
-#ifndef STELA_LLVM_AIR_ONLY
-		functions.registerPass([] { return LastRunTrackingAnalysis(); });
-		modules.registerPass([] { return LazyCallGraphAnalysis(); });
-#endif
 		modules.registerPass([this] { return FunctionAnalysisManagerModuleProxy(functions); });
 		modules.registerPass([this] { return CGSCCAnalysisManagerModuleProxy(components); });
 	}
@@ -119,41 +100,6 @@ LLVMErrorRef unknown(StringRef pipeline)
 					    inconvertibleErrorCode()));
 }
 
-#ifndef STELA_LLVM_AIR_ONLY
-/* llvmpipe's pipelines (`lp_bld_passmgr.c`), as `PassBuilder` parses them. */
-bool llvmpipe_pipeline(StringRef pipeline, ModulePassManager &manager)
-{
-	if (pipeline == "default<O0>") {
-		ModulePassManager coroutines;
-		coroutines.addPass(CoroEarlyPass());
-		CGSCCPassManager components;
-		components.addPass(CoroSplitPass());
-		coroutines.addPass(createModuleToPostOrderCGSCCPassAdaptor(std::move(components)));
-		coroutines.addPass(CoroCleanupPass());
-		coroutines.addPass(GlobalDCEPass());
-		manager.addPass(AlwaysInlinerPass(false));
-		manager.addPass(CoroConditionalWrapper(std::move(coroutines)));
-		return true;
-	}
-	FunctionPassManager functions;
-	if (pipeline == "mem2reg") {
-		functions.addPass(PromotePass());
-	} else if (pipeline == "sroa,early-cse,simplifycfg,reassociate,mem2reg,instsimplify,"
-			       "instcombine<no-verify-fixpoint>") {
-		functions.addPass(SROAPass(SROAOptions::PreserveCFG));
-		functions.addPass(EarlyCSEPass());
-		functions.addPass(SimplifyCFGPass());
-		functions.addPass(ReassociatePass());
-		functions.addPass(PromotePass());
-		functions.addPass(InstSimplifyPass());
-		functions.addPass(InstCombinePass(InstCombineOptions().setVerifyFixpoint(false)));
-	} else {
-		return false;
-	}
-	manager.addPass(createModuleToFunctionPassAdaptor(std::move(functions)));
-	return true;
-}
-#endif
 
 } // namespace
 
@@ -193,13 +139,6 @@ LLVMErrorRef LLVMRunPasses(LLVMModuleRef module, const char *passes, LLVMTargetM
 		manager.addPass(AlwaysInlinerPass());
 	else if (pipeline == "globalopt")
 		manager.addPass(GlobalOptPass());
-#ifndef STELA_LLVM_AIR_ONLY
-	else if (machine && llvmpipe_pipeline(pipeline, manager)) {
-		Analyses analyses(reinterpret_cast<TargetMachine *>(machine)->getTargetIRAnalysis());
-		manager.run(*unwrap(module), analyses.modules);
-		return LLVMErrorSuccess;
-	}
-#endif
 	else
 		return unknown(pipeline);
 	if (machine)

@@ -1128,12 +1128,6 @@ fn open_gpus(
     let Some(mmio) = mmio else { return false };
     #[cfg(feature = "nvk")]
     let heap_bytes = heap.end - heap.start;
-    // A PC with an NVIDIA GPU uses it or says why not; only one with none draws
-    // in software.
-    let software = cfg!(feature = "nvk")
-        && !adapters
-            .iter()
-            .any(|adapter| adapter.vendor == stela_drivers::gpu::Vendor::Nvidia);
     crate::status::begin("Starting the GPU");
     let gop = if handoff.screen.is_some() {
         mmio.verified_framebuffer()
@@ -1156,9 +1150,9 @@ fn open_gpus(
         (claimed, random)
     });
     let (claimed, random) = match claimed {
-        Ok((claimed, Some(random))) if software || !claimed.is_empty() => (claimed, random),
+        Ok((claimed, Some(random))) if !claimed.is_empty() => (claimed, random),
         Ok(_) => {
-            crate::status::warn("no GPU to start");
+            crate::status::warn("this PC has no NVIDIA GPU to start");
             return false;
         }
         Err(error) => {

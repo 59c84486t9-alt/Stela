@@ -1,5 +1,5 @@
-//! Anonymous files: llvmpipe keeps device memory in one and binds its pages to
-//! the addresses of sparse resources. As with memfd, every mapping shares a
+//! Anonymous files, and NVK's fixed overmaps of a mapping it retires. As with
+//! memfd, every mapping shares a
 //! file's pages, and they last until the file and its mappings have gone.
 use super::{PAGE, installed};
 use crate::{layout, native_memory::SOURCE, native_mmio::Window};

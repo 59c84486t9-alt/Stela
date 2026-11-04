@@ -36,7 +36,6 @@ pub mod resource;
 pub mod sampler;
 pub mod service;
 pub mod shader;
-pub mod software;
 pub mod sparse;
 pub mod stitching;
 pub mod upload;
