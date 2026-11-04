@@ -7449,3 +7449,25 @@ fn upper_occupancy_lists_the_mapped_level_one_ranges_and_outermost_blocks() {
 }
 
 mod recovery;
+
+#[test]
+fn host_work_holds_the_shared_count_only_for_a_pe_stopped_in_the_kernel() {
+    use super::clock::SharedClock;
+    let held_during = |el: u8| {
+        let mut machine = machine(&[]);
+        let shared = Arc::new(SharedClock::new(2));
+        machine.clock.attach(Arc::clone(&shared), 0, 0);
+        machine.clock.start_slice(|| 0, 0, 1);
+        machine.cpu.pstate.el = el;
+        let watched = Arc::clone(&shared);
+        let holder = machine.exclude_host_time(|_| watched.status(|| u64::MAX / 2).holder);
+        // Back in guest code, the PE holds the count again.
+        assert_eq!(
+            shared.status(|| u64::MAX / 2).holder.map(|(pe, _)| pe),
+            Some(0)
+        );
+        holder.map(|(pe, _)| pe)
+    };
+    assert_eq!(held_during(1), Some(0), "a kernel lock may be held");
+    assert_eq!(held_during(0), None);
+}

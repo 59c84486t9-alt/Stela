@@ -5,11 +5,19 @@ use super::*;
 impl<H: Host, D: Devices> Machine<H, D> {
     /// Run host-side work on the devices, such as an external peer's
     /// computation, between steps: the host time it takes is not guest
-    /// time, so the system counter does not advance across it.
+    /// time, so the system counter does not advance across it. A parallel
+    /// PE stopped at EL0 holds no lock the kernel times, so the other PEs'
+    /// count goes on meanwhile, as across its own gate calls.
     pub fn exclude_host_time<T>(&mut self, work: impl FnOnce(&mut D) -> T) -> T {
+        let progress = self.work();
+        let released =
+            self.cpu.pstate.el == 0 && self.clock.release(|| self.host.counter(), progress);
         let before = self.host.counter();
         let result = work(&mut self.devices);
         let after = self.host.counter();
+        if released {
+            self.clock.resume(|| self.host.counter(), progress);
+        }
         self.clock.exclude(after.saturating_sub(before));
         result
     }
