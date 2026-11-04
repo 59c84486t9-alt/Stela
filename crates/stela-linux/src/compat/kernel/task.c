@@ -257,6 +257,12 @@ struct task_struct *stela_linux_current(void)
 	return task->linux_task;
 }
 
+int task_curr(const struct task_struct *task)
+{
+	/* The serialized Linux owner admits exactly one current continuation. */
+	return task == stela_linux_current();
+}
+
 struct task_struct *stela_linux_task_stack_owner(const void *storage, size_t bytes)
 {
 	/* Establish real CPU/current/RSP/owner BEFORE any mutable catalog read.

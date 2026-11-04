@@ -16,4 +16,7 @@ struct stela_linux_slab_pages {
 /* Requires an entered serialized Linux owner; no allocation or provider call.
  * Counts persist across owner exits while actual slab backing remains owned. */
 struct stela_linux_slab_pages stela_linux_slab_owned_pages(void);
+/* Ensure ordinary backing has an unused slot, growing only while quiescent. */
+struct kmem_cache;
+bool stela_linux_cache_prime(struct kmem_cache *cache);
 #endif

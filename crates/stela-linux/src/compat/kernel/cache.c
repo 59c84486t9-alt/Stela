@@ -298,6 +298,22 @@ static struct cache_slab *grow_cache(struct kmem_cache *cache, gfp_t flags)
 	return slab;
 }
 
+bool stela_linux_cache_prime(struct kmem_cache *cache)
+{
+	if (!stela_linux_quiescent())
+		return false;
+
+	cache = require_cache(cache);
+	if (cache->destroying)
+		return false;
+
+	for (struct cache_slab *slab = cache->slabs; slab; slab = slab->next)
+		if (slab->free_count)
+			return true;
+
+	return grow_cache(cache, GFP_KERNEL | __GFP_NOWARN) != NULL;
+}
+
 void *kmem_cache_alloc_noprof(struct kmem_cache *cache, gfp_t flags)
 {
 	cache = require_cache(cache);
