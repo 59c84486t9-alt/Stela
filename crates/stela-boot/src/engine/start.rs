@@ -1416,6 +1416,7 @@ fn check_processors(
     let OpenedHost {
         owner: ref mut host_owner,
         mmio: native_mmio,
+        ram: ref worker_ram,
         ..
     } = *host;
     for processor in executors.processors() {
@@ -1477,6 +1478,7 @@ fn check_processors(
                 executors,
                 host_owner,
                 sender,
+                worker_ram,
             )
         }
         .unwrap_or_else(|error| output::fatal(error));

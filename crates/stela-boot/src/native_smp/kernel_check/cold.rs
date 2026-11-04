@@ -148,28 +148,8 @@ pub(super) unsafe fn check(
     executors: &Executors,
     owner: &mut host::HostOwner,
     sender: &Apic,
+    ram: Arc<RegisteredSystemRam>,
 ) -> Result<()> {
-    let reservation = handoff.guest[..handoff.guest_count]
-        .iter()
-        .find(|region| region.bytes >= source::BYTES as u64)
-        .ok_or(refuse!("cold fixture has no actual loader RAM reservation"))?;
-    let range = host::RamRange {
-        guest: source::BASE,
-        host: reservation.physical,
-        bytes: source::BYTES as u64,
-    };
-    // SAFETY: bounded loader-owned scratch reservation, before registration or
-    // any guest frame/publisher; this check does not enter original macOS.
-    unsafe {
-        core::ptr::write_bytes(
-            crate::layout::physical(range.host) as *mut u8,
-            0,
-            source::BYTES,
-        )
-    };
-    // SAFETY: the loader reserved this scratch range for the boot and zeroed it above; nothing else
-    // reaches it.
-    let ram = unsafe { super::super::canonical::reserve(handoff, &[range]) }?;
     // SAFETY: before any frame, guest entry or other publisher; this exact
     // registered allocation is held by the following Machine.
     unsafe { tree::check(&ram) }?;
