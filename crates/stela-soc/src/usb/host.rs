@@ -371,7 +371,16 @@ impl Host {
         if data.len() > MAX_TRANSFER {
             return Err(refuse!("USB host transfer bound exceeded"));
         }
-        self.submit(false, data.to_vec(), data.len(), terminate_with_zlp)
+        self.submit_out_owned(data.to_vec(), terminate_with_zlp)
+    }
+    /// The same transfer, keeping an existing frame buffer through completion.
+    pub(super) fn submit_out_owned(
+        &mut self,
+        data: Vec<u8>,
+        terminate_with_zlp: bool,
+    ) -> Result<u64> {
+        let length = data.len();
+        self.submit(false, data, length, terminate_with_zlp)
     }
     /// A bulk IN of up to `length` bytes, pending until the device sends.
     pub fn submit_in(&mut self, length: usize) -> Result<u64> {
