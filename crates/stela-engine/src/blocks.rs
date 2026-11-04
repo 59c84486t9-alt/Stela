@@ -521,6 +521,19 @@ impl BlockRuntime {
             let BlockExit { next_pc, kind } = native_exit;
             let exit_kind = ExitKind::try_from(kind)
                 .map_err(|_| refuse!("invalid native block exit kind", kind))?;
+            if matches!(
+                exit_kind,
+                ExitKind::Fallthrough
+                    | ExitKind::Direct
+                    | ExitKind::Indirect
+                    | ExitKind::Call
+                    | ExitKind::Return
+            ) {
+                state.pc = GuestAddress(next_pc);
+                outcome.last_exit = Some((next_pc, kind));
+                outcome.blocks_executed += completed_blocks;
+                continue;
+            }
             require!(
                 exit_kind != ExitKind::ScalableNumerical,
                 "context-block numerical exit requires owned scalable entry"
