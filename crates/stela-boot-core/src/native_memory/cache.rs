@@ -1,6 +1,5 @@
 //! Read-only validation of the native heap's effective WB cache policy.
 //! This does not change PAT/MTRRs or authorize aliases with another policy.
-use alloc::vec::Vec;
 use core::ops::Range;
 use stela_drivers::bus::dma::memory::MemoryError;
 
@@ -71,6 +70,7 @@ pub fn verify_mappings(
 }
 
 /// One enabled variable-range MTRR.
+#[derive(Clone)]
 pub struct Variable {
     pub range: Range<u64>,
     pub kind: u8,
@@ -82,12 +82,18 @@ pub struct Policy {
     pub caches_enabled: bool,
     pub default_kind: u8,
     pub physical_bits: u8,
-    pub variables: Vec<Variable>,
 }
 
 impl Policy {
     /// The whole range is write-back: no non-WB overlap and full coverage.
-    pub fn writeback(&self, start: u64, bytes: usize) -> Result<(), MemoryError> {
+    /// Each clone of the iterator must read the same bounded, immutable
+    /// register state. A decoding error invalidates the whole proof.
+    pub fn writeback(
+        &self,
+        start: u64,
+        bytes: usize,
+        variables: impl Clone + Iterator<Item = Result<Variable, MemoryError>>,
+    ) -> Result<(), MemoryError> {
         let end = start
             .checked_add(bytes as u64)
             .ok_or(MemoryError::InvalidSize)?;
@@ -100,38 +106,47 @@ impl Policy {
         {
             return Err(MemoryError::CacheAttributeUnavailable);
         }
-        // Reject all non-WB overlaps, including UC precedence and mixed-type
-        // overlaps. We never guess a permissive type for an undefined mix.
-        if self.variables.iter().any(|entry| {
-            entry.range.start < end && start < entry.range.end && entry.kind != WRITE_BACK
-        }) {
-            return Err(MemoryError::CacheAttributeUnavailable);
-        }
-        if self.default_kind == WRITE_BACK {
-            return Ok(());
-        }
-        // Extend through every interval touching the covered prefix. This
-        // handles unsorted overlaps without an infallible scratch allocation;
-        // each pass consumes at least one of the bounded MTRR endpoints.
+        // Check every register even when the default is WB. Otherwise extend
+        // coverage across unsorted WB ranges one endpoint at a time.
         let mut cursor = start;
-        while cursor < end {
-            cursor = self
-                .variables
-                .iter()
-                .filter(|entry| entry.kind == WRITE_BACK && entry.range.start <= cursor)
-                .map(|entry| entry.range.end)
-                .filter(|next| *next > cursor)
-                .max()
-                .ok_or(MemoryError::CacheAttributeUnavailable)?;
+        loop {
+            let mut covered = cursor;
+            for entry in variables.clone() {
+                let entry = entry?;
+                if entry.range.start >= end || entry.range.end <= start {
+                    continue;
+                }
+                if entry.kind != WRITE_BACK {
+                    return Err(MemoryError::CacheAttributeUnavailable);
+                }
+                if entry.range.start <= cursor {
+                    covered = covered.max(entry.range.end);
+                }
+            }
+            if self.default_kind == WRITE_BACK || covered >= end {
+                return Ok(());
+            }
+            if covered == cursor {
+                return Err(MemoryError::CacheAttributeUnavailable);
+            }
+            cursor = covered;
         }
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::collections::BTreeMap;
+    use alloc::{collections::BTreeMap, vec::Vec};
+
+    fn check_policy(
+        policy: &Policy,
+        start: u64,
+        bytes: usize,
+        variables: &[Variable],
+    ) -> Result<(), MemoryError> {
+        policy.writeback(start, bytes, variables.iter().cloned().map(Ok))
+    }
 
     fn tables(
         levels: u32,
@@ -224,61 +239,72 @@ mod tests {
             caches_enabled: true,
             default_kind: WRITE_BACK,
             physical_bits: 48,
-            variables: Vec::new(),
         };
+        let mut variables = Vec::new();
         let range = 0x200000..0x204000;
-        assert_eq!(policy.writeback(range.start, 0x4000), Ok(()));
+        assert_eq!(
+            check_policy(&policy, range.start, 0x4000, &variables),
+            Ok(())
+        );
+        let invalid = Err(MemoryError::CacheAttributeUnavailable);
+        assert_eq!(
+            policy.writeback(range.start, 0x4000, [invalid].into_iter()),
+            Err(MemoryError::CacheAttributeUnavailable)
+        );
         policy.enabled = false;
-        assert!(policy.writeback(range.start, 0x4000).is_err());
+        assert!(check_policy(&policy, range.start, 0x4000, &variables).is_err());
         policy.enabled = true;
-        policy.variables.push(Variable {
+        variables.push(Variable {
             range: 0x203000..0x204000,
             kind: 0,
         });
-        assert!(policy.writeback(range.start, 0x4000).is_err());
-        policy.variables.clear();
+        assert!(check_policy(&policy, range.start, 0x4000, &variables).is_err());
+        variables.clear();
         policy.default_kind = 0;
-        policy.variables.push(Variable {
+        variables.push(Variable {
             range: 0x200000..0x202000,
             kind: WRITE_BACK,
         });
-        assert!(policy.writeback(range.start, 0x4000).is_err());
-        policy.variables.push(Variable {
+        assert!(check_policy(&policy, range.start, 0x4000, &variables).is_err());
+        variables.push(Variable {
             range: 0x202000..0x204000,
             kind: WRITE_BACK,
         });
-        assert_eq!(policy.writeback(range.start, 0x4000), Ok(()));
-        assert!(policy.writeback(0, 4096).is_err());
-        assert!(policy.writeback(u64::MAX - 4095, 8192).is_err());
-        assert!(policy.writeback(1 << 48, 4096).is_err());
+        assert_eq!(
+            check_policy(&policy, range.start, 0x4000, &variables),
+            Ok(())
+        );
+        assert!(check_policy(&policy, 0, 4096, &variables).is_err());
+        assert!(check_policy(&policy, u64::MAX - 4095, 8192, &variables).is_err());
+        assert!(check_policy(&policy, 1 << 48, 4096, &variables).is_err());
     }
 
     #[test]
     fn unsorted_wb_coverage_and_gaps_require_no_allocation() {
         use super::super::tests::allocation_failure;
-        let mut policy = Policy {
+        let policy = Policy {
             enabled: true,
             caches_enabled: true,
             default_kind: 0,
             physical_bits: 48,
-            variables: [
-                0x203000..0x205000,
-                0x201000..0x204000,
-                0x205000..0x206000,
-                0x200000..0x202000,
-            ]
-            .into_iter()
-            .map(|range| Variable {
-                range,
-                kind: WRITE_BACK,
-            })
-            .collect(),
         };
+        let mut variables = [
+            0x203000..0x205000,
+            0x201000..0x204000,
+            0x205000..0x206000,
+            0x200000..0x202000,
+        ]
+        .into_iter()
+        .map(|range| Variable {
+            range,
+            kind: WRITE_BACK,
+        })
+        .collect::<Vec<_>>();
         allocation_failure::arm(0);
-        let covered = policy.writeback(0x200000, 0x6000);
-        let gap = policy.writeback(0x200000, 0x7000);
-        policy.variables[1].kind = 0;
-        let conflict = policy.writeback(0x200000, 0x6000);
+        let covered = check_policy(&policy, 0x200000, 0x6000, &variables);
+        let gap = check_policy(&policy, 0x200000, 0x7000, &variables);
+        variables[1].kind = 0;
+        let conflict = check_policy(&policy, 0x200000, 0x6000, &variables);
         let observation = allocation_failure::disarm();
         assert_eq!(covered, Ok(()));
         assert_eq!(gap, Err(MemoryError::CacheAttributeUnavailable));
