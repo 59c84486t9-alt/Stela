@@ -148,6 +148,8 @@ int stela_linux_require_full_kthread_current(const struct stela_linux_owner *own
  * classifies an existing allocation, never obtains a reference or authorizes
  * dereferencing a foreign task pointer. Future original children are distinct. */
 bool stela_linux_task_is_bare(const struct task_struct *task);
+/* Consume measured time for the runqueue's locked, bound current task. */
+s64 stela_linux_task_account_class(struct task_struct *current_task);
 /* Exact original task-object data projection for the native measured
  * execution sink. No C calls/allocations are permitted from IRQ publication.
  * Prepared pointers must NOT be written before genuine attach accepts them.
@@ -161,9 +163,9 @@ struct stela_linux_task_data_identity {
 _Static_assert(sizeof(struct stela_linux_task_data_identity) == 24, "native data identity ABI");
 struct stela_linux_task_data_view {
     struct stela_linux_task_data *lease;
-    u64 *total_ns, *accounted_through_ns, *system_ns;
+    u64 *total_ns, *system_ns;
 };
-_Static_assert(sizeof(struct stela_linux_task_data_view) == 32, "native task data view ABI");
+_Static_assert(sizeof(struct stela_linux_task_data_view) == 24, "native task data view ABI");
 /* Bounded original Initial cold metadata or genuine child creator only.
  * Not a raw task/field-address adoption API or task-ref acquisition. */
 int stela_linux_task_data_prepare(struct stela_linux_task *task,

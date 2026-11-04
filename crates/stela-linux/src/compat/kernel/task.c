@@ -71,7 +71,8 @@ struct stela_linux_task_data {
     struct stela_linux_task *record;
     const struct stela_linux_owner *owner;
     struct stela_linux_task_context context;
-    u64 *total_ns, *accounted_through_ns, *system_ns;
+    u64 *total_ns, *system_ns;
+    u64 class_runtime_ns;
     bool prepared, claimed, released;
 };
 struct stela_linux_task {
@@ -271,6 +272,19 @@ int task_curr(const struct task_struct *task)
 	return task == stela_linux_current();
 }
 
+static u64 measured_runtime(struct stela_linux_task *task)
+{
+	struct task_struct *p = task->linux_task;
+	u64 sample;
+
+	if (!task->data.claimed || !task->scope || !task->scope_ops->account_current ||
+	    task->scope_ops->account_current(task->scope, &sample) ||
+	    READ_ONCE(p->se.sum_exec_runtime) < sample ||
+	    READ_ONCE(p->stime) < sample)
+		stela_linux_fatal("current task runtime publication failed");
+	return sample;
+}
+
 unsigned long long task_sched_runtime(struct task_struct *p)
 {
 	struct stela_linux_task *task = current_record();
@@ -285,13 +299,28 @@ unsigned long long task_sched_runtime(struct task_struct *p)
 		return READ_ONCE(p->se.sum_exec_runtime);
 	}
 
-	u64 sample;
-	if (!task->data.claimed || !task->scope || !task->scope_ops->account_current ||
-	    task->scope_ops->account_current(task->scope, &sample) ||
-	    READ_ONCE(p->se.sum_exec_runtime) < sample ||
-	    READ_ONCE(p->stime) < sample)
-		stela_linux_fatal("current task runtime publication failed");
-	return sample;
+	return measured_runtime(task);
+}
+
+s64 stela_linux_task_account_class(struct task_struct *current_task)
+{
+	struct stela_linux_task *task = current_record();
+	const struct stela_linux_owner *owner = stela_linux_owner();
+
+	if (!preempt_count() || current_task != task->linux_task ||
+	    task->kind == BARE_ALLOCATION || task->data.owner != owner)
+		stela_linux_fatal("class accounting without the current native runqueue task");
+
+	/* The native sampler already publishes sum_exec_runtime.
+	 * Class callbacks consume the measured increment since their last update;
+	 * an ordinary task_sched_runtime() observation only refreshes the total.
+	 * The runqueue transition must update the outgoing class before changing it. */
+	u64 total = measured_runtime(task);
+	u64 previous = task->data.class_runtime_ns;
+	if (total < previous || total - previous > S64_MAX)
+		stela_linux_fatal("invalid native class runtime increment");
+	task->data.class_runtime_ns = total;
+	return (s64)(total - previous);
 }
 
 struct task_struct *stela_linux_task_stack_owner(const void *storage, size_t bytes)
@@ -651,7 +680,6 @@ int stela_linux_task_data_prepare(struct stela_linux_task *requested,
         }
         struct task_struct *p = record->linux_task;
         if (!IS_ALIGNED((unsigned long)&p->se.sum_exec_runtime, sizeof(u64)) ||
-            !IS_ALIGNED((unsigned long)&p->se.exec_start, sizeof(u64)) ||
             !IS_ALIGNED((unsigned long)&p->stime, sizeof(u64)))
             return -EOPNOTSUPP;
         /* Pure original-object projection, still NO task ref, metric writer,
@@ -659,12 +687,10 @@ int stela_linux_task_data_prepare(struct stela_linux_task *requested,
         record->data.record = record;
         record->data.owner = owner;
         record->data.total_ns = &p->se.sum_exec_runtime;
-        record->data.accounted_through_ns = &p->se.exec_start;
         record->data.system_ns = &p->stime;
         record->data.prepared = true;
         view->lease = &record->data;
         view->total_ns = record->data.total_ns;
-        view->accounted_through_ns = record->data.accounted_through_ns;
         view->system_ns = record->data.system_ns;
         return 0;
     }
@@ -680,7 +706,6 @@ static bool data_attachable(const struct stela_linux_task *record)
         stela_linux_kernel_owner_allowed(data->owner) &&
         (record->kind == INITIAL_ALLOCATION || record->source_owner == data->owner) &&
         data->total_ns == &record->linux_task->se.sum_exec_runtime &&
-        data->accounted_through_ns == &record->linux_task->se.exec_start &&
         data->system_ns == &record->linux_task->stime;
 }
 static void data_attached(struct stela_linux_task *record,
@@ -693,6 +718,7 @@ static void data_attached(struct stela_linux_task *record,
      * get_task_struct pins the actual slab object independently of metadata. */
     get_task_struct(record->linux_task);
     record->data.context = *view;
+    record->data.class_runtime_ns = 0;
     record->data.claimed = true;
 }
 int stela_linux_task_data_release(struct stela_linux_task_data *lease,
