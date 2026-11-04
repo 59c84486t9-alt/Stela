@@ -83,8 +83,6 @@ pub(super) enum Kind {
     /// A Broadcom PCIe Bluetooth function, as `bcm4377_devid_table` lists
     /// them.
     Bcm4377,
-    /// An EHCI host controller (class 0c0320).
-    Ehci,
     /// An HD Audio controller the bounded identity table admits.
     Hda,
     /// A USB4/Thunderbolt host interface, as `pci.c::nhi_ids` lists them.
@@ -121,8 +119,6 @@ impl Kind {
             && bcm4377::Chip::of_device(function.device).is_some()
         {
             Some(Self::Bcm4377)
-        } else if function.class == ehci::CLASS {
-            Some(Self::Ehci)
         } else if crate::audio::hda::pci::identify(function).is_ok() {
             Some(Self::Hda)
         } else if crate::bus::thunderbolt::controller::Profile::identify(
@@ -220,8 +216,9 @@ pub(super) type Failure = (Error, Option<Box<dyn Any>>);
 ///
 /// # Safety
 /// [`NativeServices`]' contract holds for `services`, `clock` is the
-/// handoff's calibrated clock, and the handoff took this controller from
-/// its BIOS owner and reset every companion controller of its roots.
+/// handoff's calibrated clock, and every companion controller of its roots
+/// completed the legacy handoff. This path takes the EHCI BIOS semaphore
+/// through the original requester and register owners.
 #[expect(
     clippy::result_large_err,
     reason = "a failed attach hands back the owners that must outlive the device"
@@ -242,9 +239,9 @@ pub(super) unsafe fn ehci(
         clock,
     };
     // SAFETY: paired original configuration/root/BAR owners and masked/drained
-    // IRQ/work exclusion from the cold mount grant. The caller owns the BIOS
-    // handoff and companions. EHCI proves engine HALT and consumes the original
-    // root drain receipt before binding the domain or allocating its arena.
+    // IRQ/work exclusion from the cold mount grant. The caller owns the
+    // companions. EHCI proves BIOS release and engine HALT, then drains the
+    // original root before binding the domain or allocating its arena.
     match unsafe { ehci::attach(resources) } {
         Ok((controller, domain)) => Ok((Rc::new(RefCell::new(controller)), domain)),
         Err(failure) => Err((Error::Ehci(failure.error), Some(Box::new(failure)))),
