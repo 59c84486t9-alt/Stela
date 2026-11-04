@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 12:54:40 -0500
+Subject: [PATCH] nak: widen 16-bit derivatives
+
+---
+ src/compiler/nir/nir_lower_bit_size.c | 26 +++++++++++++++++++++++++-
+ src/nouveau/compiler/nak_nir.c        |  6 ++++++
+ 2 files changed, 31 insertions(+), 1 deletion(-)
+
+diff --git a/src/compiler/nir/nir_lower_bit_size.c b/src/compiler/nir/nir_lower_bit_size.c
+index 52f0817b280e515a437b6f4ede4fc4040f6e03d8..ca44b1bc29f79ba155df1b3a0734f2a91cce02aa 100644
+--- a/src/compiler/nir/nir_lower_bit_size.c
++++ b/src/compiler/nir/nir_lower_bit_size.c
+@@ -176,6 +176,22 @@ lower_alu_instr(nir_builder *bld, nir_alu_instr *alu, unsigned bit_size)
+    }
+ }
+ 
++static bool
++is_derivative(nir_intrinsic_op intrinsic)
++{
++   switch (intrinsic) {
++   case nir_intrinsic_ddx:
++   case nir_intrinsic_ddx_coarse:
++   case nir_intrinsic_ddx_fine:
++   case nir_intrinsic_ddy:
++   case nir_intrinsic_ddy_coarse:
++   case nir_intrinsic_ddy_fine:
++      return true;
++   default:
++      return false;
++   }
++}
++
+ static void
+ lower_intrinsic_instr(nir_builder *b, nir_intrinsic_instr *intrin,
+                       unsigned bit_size)
+@@ -209,13 +225,21 @@ lower_intrinsic_instr(nir_builder *b, nir_intrinsic_instr *intrin,
+    case nir_intrinsic_quad_swap_diagonal:
+    case nir_intrinsic_reduce:
+    case nir_intrinsic_inclusive_scan:
+-   case nir_intrinsic_exclusive_scan: {
++   case nir_intrinsic_exclusive_scan:
++   case nir_intrinsic_ddx:
++   case nir_intrinsic_ddx_coarse:
++   case nir_intrinsic_ddx_fine:
++   case nir_intrinsic_ddy:
++   case nir_intrinsic_ddy_coarse:
++   case nir_intrinsic_ddy_fine: {
+       const unsigned old_bit_size = intrin->def.bit_size;
+       assert(old_bit_size < bit_size);
+ 
+       nir_alu_type type = nir_type_uint;
+       if (old_bit_size == 1)
+          type = nir_type_bool;
++      else if (is_derivative(intrin->intrinsic))
++         type = nir_type_float;
+       else if (nir_intrinsic_has_reduction_op(intrin))
+          type = nir_op_infos[nir_intrinsic_reduction_op(intrin)].input_types[0];
+ 
+diff --git a/src/nouveau/compiler/nak_nir.c b/src/nouveau/compiler/nak_nir.c
+index b03b38e24ee12adee1c83f49c2587da05f0582ac..cdda0dabbbbaf4b044d05cfc4b50f96ea6dc6f92 100644
+--- a/src/nouveau/compiler/nak_nir.c
++++ b/src/nouveau/compiler/nak_nir.c
+@@ -341,6 +341,12 @@ lower_bit_size_cb(const nir_instr *instr, void *data)
+             return 32;
+          return 0;
+ 
++      case nir_intrinsic_ddx:
++      case nir_intrinsic_ddx_coarse:
++      case nir_intrinsic_ddx_fine:
++      case nir_intrinsic_ddy:
++      case nir_intrinsic_ddy_coarse:
++      case nir_intrinsic_ddy_fine:
+       case nir_intrinsic_vote_feq:
+       case nir_intrinsic_read_invocation:
+       case nir_intrinsic_read_first_invocation:
