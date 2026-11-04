@@ -61,13 +61,13 @@ pub(super) struct Images {
 }
 
 impl Images {
-    pub(super) fn load(inputs: &Inputs) -> Result<Self> {
+    pub(super) fn load(inputs: &Inputs, kernel: Cow<'_, [u8]>) -> Result<Self> {
         Ok(Self {
             kernel: LoadedImage::new(
                 "BootKC",
                 KERNEL_FILE,
-                KernelCollection::parse(inputs.kernel_collection.bytes)?,
-                inputs.kernel_collection.bytes,
+                KernelCollection::parse(&kernel)?,
+                kernel,
                 KERNEL_SPLITS,
             )?,
             auxiliary: inputs
@@ -78,7 +78,7 @@ impl Images {
                         "AuxKC",
                         AUXILIARY_FILE,
                         KernelCollection::parse_auxiliary(input.bytes)?,
-                        input.bytes,
+                        Cow::Borrowed(input.bytes),
                         AUXILIARY_SPLITS,
                     )
                 })
@@ -87,14 +87,14 @@ impl Images {
                 "SPTM",
                 SPTM_FILE,
                 KernelCollection::parse_executable(inputs.sptm.bytes)?,
-                inputs.sptm.bytes,
+                Cow::Borrowed(inputs.sptm.bytes),
                 SPTM_SPLITS,
             )?,
             txm: LoadedImage::new(
                 "TXM",
                 TXM_FILE,
                 KernelCollection::parse_executable(inputs.txm.bytes)?,
-                inputs.txm.bytes,
+                Cow::Borrowed(inputs.txm.bytes),
                 TXM_SPLITS,
             )?,
         })
@@ -756,7 +756,7 @@ pub(super) fn hash_regions(regions: &mut [Region], files: &[(String, Vec<u8>)]) 
 
 /// Every input's source, in manifest order.
 pub(super) fn sources(inputs: &Inputs, ramdisk_source: Option<Source>) -> Vec<Source> {
-    let mut sources = vec![source_of(&inputs.kernel_collection)];
+    let mut sources = vec![inputs.kernel_collection.source.clone()];
     sources.extend(inputs.auxiliary_collection.iter().map(source_of));
     sources.extend([
         source_of(&inputs.sptm),

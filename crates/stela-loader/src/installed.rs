@@ -38,7 +38,7 @@ use crate::aux_kc::{self, Kext, Linked};
 use crate::{Error, Result, Within};
 use crate::{
     apple_device_tree::DeviceTree,
-    boot_bundle::{self, Bundle, Input, Inputs, Options, RootHash, Source, Target},
+    boot_bundle::{self, Bundle, Input, Inputs, KernelInput, Options, RootHash, Source, Target},
     boot_policy::{KextGrant, SealedVolume},
     boot_selection::{BootVolume, VolumeType, uuid_text},
     im4m, im4p,
@@ -711,7 +711,10 @@ pub fn prepare<R: ReadAt>(
             chip_id: manifest_id(manifest.as_ref(), "CHIP")?,
             board_id: manifest_id(manifest.as_ref(), "BORD")?,
         },
-        kernel_collection: kernel.input(),
+        kernel_collection: KernelInput {
+            bytes: kernel.bytes.into(),
+            source: kernel.source,
+        },
         auxiliary_collection: auxiliary.as_ref().map(Decoded::input),
         sptm: sptm.input(),
         txm: txm.input(),
@@ -758,7 +761,7 @@ pub fn prepare<R: ReadAt>(
         volume_group: disk.set.volume_group.clone(),
         boot_hash: disk.set.boot_hash.clone(),
     });
-    let mut bundle = boot_bundle::prepare(&inputs, &options)?;
+    let mut bundle = boot_bundle::prepare_moving_kernel(inputs, &options)?;
     if !evidence
         .named_by
         .as_deref()

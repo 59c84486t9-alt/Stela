@@ -980,7 +980,7 @@ impl Prepare {
                 chip_id: parse_id(identity.ap_chip_id.as_deref())?,
                 board_id: parse_id(identity.ap_board_id.as_deref())?,
             },
-            kernel_collection: input(&kernel),
+            kernel_collection: input(&kernel).into(),
             auxiliary_collection: auxiliary.as_ref().map(input),
             sptm: input(&sptm),
             txm: input(&txm),

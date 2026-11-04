@@ -673,7 +673,7 @@ fn unsupported_build_is_refused_before_image_parsing() {
             chip_id: Some(0x8112),
             board_id: Some(0x2e),
         },
-        kernel_collection: input(),
+        kernel_collection: input().into(),
         auxiliary_collection: None,
         sptm: input(),
         txm: input(),
@@ -732,7 +732,7 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
             chip_id: Some(0x8112),
             board_id: Some(0x2e),
         },
-        kernel_collection: input(leak(kernel), "KernelCache"),
+        kernel_collection: input(leak(kernel), "KernelCache").into(),
         auxiliary_collection: None,
         sptm: input(leak(sptm), "Ap,SecurePageTableMonitor"),
         txm: input(leak(txm), "Ap,TrustedExecutionMonitor"),
@@ -1340,9 +1340,26 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     inputs.auxiliary_collection = None;
 
     // A manifest for another board is refused.
-    let mut other = Inputs { ..inputs };
-    other.target.board_id = Some(0x24);
-    assert!(prepare(&other, &options).is_err());
+    let board_id = inputs.target.board_id.replace(0x24);
+    assert!(prepare(&inputs, &options).is_err());
+    inputs.target.board_id = board_id;
+
+    let owned_kernel = inputs.kernel_collection.bytes.to_vec();
+    let kernel_ptr = owned_kernel.as_ptr();
+    inputs.kernel_collection.bytes = Cow::Owned(owned_kernel);
+    let moved = prepare_moving_kernel(inputs, &options)?;
+    let moved_kernel = &moved
+        .files
+        .iter()
+        .find(|(n, _)| n == KERNEL_FILE)
+        .unwrap()
+        .1;
+    assert_eq!(moved_kernel.as_ptr(), kernel_ptr);
+    assert_eq!(moved.files, bundle.files);
+    assert_eq!(
+        serde_json::to_vec(&moved.manifest)?,
+        serde_json::to_vec(&bundle.manifest)?
+    );
     Ok(())
 }
 

@@ -507,7 +507,7 @@ pub fn prepare<R: ReadAt>(
             chip_id: id("CHIP"),
             board_id: id("BORD"),
         },
-        kernel_collection: kernel.input(),
+        kernel_collection: kernel.input().into(),
         auxiliary_collection: None,
         sptm: sptm.input(),
         txm: txm.input(),

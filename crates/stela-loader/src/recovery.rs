@@ -620,7 +620,7 @@ pub fn prepare<R: ReadAt>(
             chip_id: manifest_id(manifest.as_ref(), "CHIP")?,
             board_id: manifest_id(manifest.as_ref(), "BORD")?,
         },
-        kernel_collection: kernel.input(),
+        kernel_collection: kernel.input().into(),
         auxiliary_collection: None,
         sptm: sptm.input(),
         txm: txm.input(),
