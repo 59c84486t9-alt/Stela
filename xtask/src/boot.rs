@@ -59,6 +59,11 @@ const VVFAT_BYTES: u64 = 480 * 1024 * 1024;
 const MAX_LONG_TIMEOUT_SECONDS: f64 = 24.0 * 3600.0;
 const FIRMWARE_CODE: &str = "edk2-x86_64-code.fd";
 const FIRMWARE_VARIABLES: &str = "edk2-i386-vars.fd";
+/// The `ovmf` package's code and variables, which need no SMM.
+const PACKAGED_FIRMWARE: [&str; 2] = [
+    "/usr/share/OVMF/OVMF_CODE_4M.fd",
+    "/usr/share/OVMF/OVMF_VARS_4M.fd",
+];
 
 /// The blank target disk of a staging run, sparse on the host.
 const TARGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -224,6 +229,14 @@ pub struct Run {
     /// Serve the QEMU monitor over telnet on this loopback port.
     #[arg(long)]
     monitor: Option<u16>,
+    /// Serve the UART on this loopback port as well as logging it, so that
+    /// something can type at the guest's console. A window then shows no UART.
+    #[arg(long)]
+    console: Option<u16>,
+    /// Serve QEMU's QMP on this loopback port, whose `input-send-event` takes
+    /// the absolute pointer positions the monitor's commands do not.
+    #[arg(long)]
+    qmp: Option<u16>,
     /// Hide five-level paging from the guest CPU, so system mode runs on
     /// its four-level placement, as on a host without LA57.
     #[arg(long)]
@@ -253,27 +266,27 @@ pub struct Run {
     #[arg(long, conflicts_with_all = [
         "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
         "storage_check", "storage_disk", "network", "usb_network", "input",
-        "usb_input", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
+        "usb_input", "usb_host", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
     ])]
     native_dma_check: bool,
     /// Two isolated EDU domains, same IOVAs and a matched wrong-domain fault.
     #[arg(long, conflicts_with_all = [
         "native_dma_check", "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
         "storage_check", "storage_disk", "network", "usb_network", "input",
-        "usb_input", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
+        "usb_input", "usb_host", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
     ])]
     native_dma_isolation_check: bool,
     /// Check BSP deferred-work contexts, ABI/control/IRQ flags and guards.
     #[arg(long, conflicts_with_all = [
         "native_dma_check", "native_dma_isolation_check", "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
         "storage_check", "storage_disk", "network", "usb_network", "input",
-        "usb_input", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
+        "usb_input", "usb_host", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
     ])]
     native_work_check: bool,
     /// Check EDU MSI admission into the native BSP work executor.
     #[arg(long, conflicts_with_all = [
         "native_dma_check", "native_dma_isolation_check", "native_work_check", "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
-        "storage_check", "storage_disk", "network", "usb_network", "input", "usb_input", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
+        "storage_check", "storage_disk", "network", "usb_network", "input", "usb_input", "usb_host", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
     ])]
     native_irq_work_check: bool,
     /// Check single-BSP MMIO mapping, context refusal, retirement and reuse.
@@ -282,7 +295,7 @@ pub struct Run {
     #[arg(long, group = "owned_clock_check", conflicts_with_all = [
         "native_dma_check", "native_dma_isolation_check", "native_work_check", "native_irq_work_check",
         "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
-        "storage_check", "storage_disk", "network", "usb_network", "input", "usb_input",
+        "storage_check", "storage_disk", "network", "usb_network", "input", "usb_input", "usb_host",
         "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check",
         "gdb", "monitor", "icount"
     ])]
@@ -293,6 +306,13 @@ pub struct Run {
         "native_dma_check", "native_dma_isolation_check", "native_irq_work_check"
     ])]
     iommu: Option<Iommu>,
+    /// Hand the mount a physical GPU through VFIO: this PCI function of the
+    /// host (such as `0000:01:00.0`) and the other functions of its slot, in
+    /// a slot of their own behind a PCIe root port. The emulated VGA stays as
+    /// the firmware's display, for a card with no monitor; one with a monitor
+    /// takes the display. `xtask/scripts/vfio-gpu.sh` binds it for a run.
+    #[arg(long, requires = "kvm", conflicts_with = "iommu", value_parser = parse_pci_function)]
+    vfio_gpu: Option<String>,
     /// Expose QEMU's HPET to the owned MMIO or native-clock check.
     #[arg(long, requires = "owned_clock_check")]
     hpet: bool,
@@ -300,7 +320,7 @@ pub struct Run {
     #[arg(long, group = "owned_clock_check", conflicts_with_all = [
         "native_dma_check", "native_dma_isolation_check", "native_work_check", "native_irq_work_check", "native_mmio_check",
         "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
-        "storage_check", "storage_disk", "network", "usb_network", "input", "usb_input",
+        "storage_check", "storage_disk", "network", "usb_network", "input", "usb_input", "usb_host",
         "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check",
         "gdb", "monitor", "icount"
     ])]
@@ -381,6 +401,12 @@ pub struct Run {
     /// takes `--input` from the stick's options instead.
     #[arg(long, conflicts_with_all = ["module", "payload"])]
     usb_input: bool,
+    /// Lend the mount a USB device of this PC, by `VENDOR:PRODUCT` in hex,
+    /// on the `qemu-xhci` (`usb-host`), such as a Bluetooth adapter for the
+    /// mount to bridge; repeat for more. QEMU needs write access to the
+    /// device's `/dev/bus/usb` node.
+    #[arg(long, value_parser = parse_usb_id, conflicts_with_all = ["module", "payload"])]
+    usb_host: Vec<(u16, u16)>,
     /// Give the mount its host network adapter as a USB CDC-ECM device on
     /// the `qemu-xhci` (`usb-net`), on a LAN peer of its own
     /// (`usb-network.log`), for `--tss` and `--network-check`.
@@ -460,6 +486,35 @@ impl NetworkModel {
 /// directory such as `bundles/Mac14,2` stays one value.
 pub(crate) fn option_path(path: &std::path::Path) -> String {
     path.display().to_string().replace(',', ",,")
+}
+
+/// A PCI function's sysfs name, `0000:01:00.0`, as VFIO and sysfs spell it.
+fn parse_pci_function(value: &str) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    let hex = |range: std::ops::Range<usize>| bytes[range].iter().all(u8::is_ascii_hexdigit);
+    if bytes.len() == 12
+        && (bytes[4], bytes[7], bytes[10]) == (b':', b':', b'.')
+        && hex(0..4)
+        && hex(5..7)
+        && hex(8..10)
+        && matches!(bytes[11], b'0'..=b'7')
+    {
+        Ok(value.to_ascii_lowercase())
+    } else {
+        Err(format!("{value:?} is not a PCI function like 0000:01:00.0"))
+    }
+}
+
+/// A USB device's `VENDOR:PRODUCT`, in hex.
+fn parse_usb_id(text: &str) -> Result<(u16, u16), String> {
+    let (vendor, product) = text
+        .split_once(':')
+        .ok_or_else(|| format!("{text}: not VENDOR:PRODUCT"))?;
+    let hex = |part: &str| {
+        u16::from_str_radix(part.trim_start_matches("0x"), 16)
+            .map_err(|_| format!("{text}: {part} is not a 16-bit hex number"))
+    };
+    Ok((hex(vendor)?, hex(product)?))
 }
 
 fn parse_storage_serial(value: &str) -> Result<String, String> {
@@ -581,13 +636,28 @@ fn build_with_diagnostics(release: bool, diagnostics: bool, nvk: bool) -> Result
         .join("stela.efi"))
 }
 
-/// The directory of QEMU's bundled firmware, from `qemu -L help`.
-fn firmware(qemu: &Path) -> Result<PathBuf> {
+/// The firmware a run's QEMU loads and the variable store it starts from.
+struct Firmware {
+    code: PathBuf,
+    variables: PathBuf,
+}
+
+/// QEMU's bundled firmware, from `qemu -L help`, else the OVMF that Debian
+/// and Ubuntu package apart from their QEMU.
+fn firmware(qemu: &Path) -> Result<Firmware> {
     let output = Process::new(qemu).args(["-L", "help"]).output()?;
     String::from_utf8(output.stdout)?
         .lines()
-        .map(PathBuf::from)
+        .map(Path::new)
         .find(|directory| directory.join(FIRMWARE_CODE).exists())
+        .map(|directory| Firmware {
+            code: directory.join(FIRMWARE_CODE),
+            variables: directory.join(FIRMWARE_VARIABLES),
+        })
+        .or_else(|| {
+            let [code, variables] = PACKAGED_FIRMWARE.map(PathBuf::from);
+            code.exists().then_some(Firmware { code, variables })
+        })
         .with_context(|| format!("QEMU has no {FIRMWARE_CODE}"))
 }
 
@@ -828,11 +898,13 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         &mut command,
     );
     machine::attach_display(&arguments, bundle, &mut command);
+    machine::attach_vfio_gpu(&arguments, &mut command)?;
     machine::attach_audio(&arguments, &mut command);
     network::attach(&arguments, &paths.output, &mut command)?;
     machine::attach_usb(&arguments, &mut command);
     storage::attach_usb_boot(&arguments, &mut command);
     machine::attach_usb_input(&arguments, &mut command);
+    machine::attach_usb_host(&arguments, &mut command);
     network::attach_usb(&arguments, &paths.output, &mut command)?;
     storage::attach_usb_disks(&arguments, &mut command);
     machine::attach_console(&arguments, &paths.serial, &mut command);

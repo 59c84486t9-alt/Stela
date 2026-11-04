@@ -350,6 +350,85 @@ fn parallel_cpu_default_and_icount_select_distinct_modes() {
 }
 
 #[test]
+fn usb_host_takes_hex_vendor_and_product() {
+    assert_eq!(parse_usb_id("13d3:3602"), Ok((0x13d3, 0x3602)));
+    assert_eq!(parse_usb_id("0x0A12:0x0001"), Ok((0x0a12, 0x0001)));
+    for bad in [
+        "13d3",
+        "13d3:",
+        ":3602",
+        "13d3:3602:1",
+        "g000:0001",
+        "10000:1",
+    ] {
+        assert!(parse_usb_id(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn vfio_gpu_needs_kvm_and_a_full_pci_function() {
+    use clap::Parser;
+    let prefix = ["xtask", "boot", "run", "--output", "/tmp/vfio"];
+    let parse = |options: Vec<&str>| crate::Cli::try_parse_from(prefix.into_iter().chain(options));
+    assert_eq!(
+        parse_pci_function("0000:01:00.0").as_deref(),
+        Ok("0000:01:00.0")
+    );
+    assert_eq!(
+        parse_pci_function("0000:0A:1f.7").as_deref(),
+        Ok("0000:0a:1f.7")
+    );
+    for bad in ["01:00.0", "0000:01:00.8", "0000:01:00", "0000-01-00.0", ""] {
+        assert!(parse_pci_function(bad).is_err(), "{bad}");
+    }
+    assert!(parse(vec!["--vfio-gpu", "0000:01:00.0"]).is_err());
+    assert!(parse(vec!["--kvm", "--vfio-gpu", "0000:01:00.0"]).is_ok());
+    assert!(
+        parse(vec![
+            "--kvm",
+            "--vfio-gpu",
+            "0000:01:00.0",
+            "--iommu",
+            "amd"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn vfio_gpu_takes_its_whole_slot_bound_to_vfio_pci() {
+    let root = std::env::temp_dir().join(format!("stela-vfio-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let device = |name: &str, driver: &str| {
+        let directory = root.join(name);
+        fs::create_dir_all(&directory).unwrap();
+        std::os::unix::fs::symlink(format!("/drivers/{driver}"), directory.join("driver")).unwrap();
+    };
+    device("0000:01:00.0", "vfio-pci");
+    device("0000:01:00.1", "vfio-pci");
+    device("0000:02:00.0", "nvme");
+    let functions = machine::vfio_functions("0000:01:00.0", &root).unwrap();
+    assert_eq!(functions, ["0000:01:00.0", "0000:01:00.1"]);
+    assert_eq!(
+        machine::vfio_devices(&functions),
+        [
+            "pcie-root-port,id=host-gpu-port,chassis=1,slot=1,addr=0x1c",
+            "vfio-pci,host=0000:01:00.0,bus=host-gpu-port,addr=0.0,rombar=0,multifunction=on",
+            "vfio-pci,host=0000:01:00.1,bus=host-gpu-port,addr=0.1,rombar=0",
+        ]
+    );
+    // The function asked for leads its slot.
+    assert_eq!(
+        machine::vfio_functions("0000:01:00.1", &root).unwrap(),
+        ["0000:01:00.1", "0000:01:00.0"]
+    );
+    assert!(machine::vfio_functions("0000:03:00.0", &root).is_err());
+    device("0000:01:00.2", "snd_hda_intel");
+    assert!(machine::vfio_functions("0000:01:00.0", &root).is_err());
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn cpu_selection_preserves_model_and_baseline_overrides() {
     assert_eq!(qemu_cpu(None, false, true), "max,vendor=GenuineIntel");
     assert_eq!(qemu_cpu(None, false, false), "qemu64");

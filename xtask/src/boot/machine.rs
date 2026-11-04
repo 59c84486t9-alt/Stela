@@ -1,8 +1,8 @@
 //! A run's QEMU machine: its CPU, memory, firmware, devices other than
 //! storage and network, console and debugging.
 use super::{
-    Display, FIRMWARE_CODE, FIRMWARE_VARIABLES, Iommu, Run, UsbDiskModel, option_path, overlay,
-    qemu_accelerator, qemu_cpu, qemu_machine,
+    Display, Firmware, Iommu, Run, UsbDiskModel, option_path, overlay, qemu_accelerator, qemu_cpu,
+    qemu_machine,
 };
 use anyhow::{Result, ensure};
 use std::{
@@ -14,7 +14,7 @@ use std::{
 /// Paths used to create or reopen QEMU firmware variables.
 pub(super) struct VariableStoreOptions<'a> {
     pub(super) qemu: &'a Path,
-    pub(super) firmware: &'a Path,
+    pub(super) firmware: &'a Firmware,
     pub(super) output: &'a Path,
 }
 
@@ -41,12 +41,12 @@ pub(super) fn variables(
             .unwrap()
             .with_extension("vars.qcow2");
         if !variables.exists() {
-            overlay(qemu, &firmware.join(FIRMWARE_VARIABLES), &variables)?;
+            overlay(qemu, &firmware.variables, &variables)?;
         }
         (variables, "qcow2")
     } else {
         let variables = output.join("variables.fd");
-        fs::copy(firmware.join(FIRMWARE_VARIABLES), &variables)?;
+        fs::copy(&firmware.variables, &variables)?;
         (variables, "raw")
     };
     ensure!(
@@ -59,7 +59,7 @@ pub(super) fn variables(
 /// QEMU binary, firmware state and guest execution class.
 pub(super) struct MachineOptions<'a> {
     pub(super) qemu: &'a Path,
-    pub(super) firmware: &'a Path,
+    pub(super) firmware: &'a Firmware,
     pub(super) variables: &'a Path,
     pub(super) format: &'a str,
     pub(super) system: bool,
@@ -137,7 +137,7 @@ pub(super) fn command(arguments: &Run, options: MachineOptions<'_>) -> Process {
         .arg("-drive")
         .arg(format!(
             "if=pflash,format=raw,readonly=on,file={}",
-            option_path(&firmware.join(FIRMWARE_CODE))
+            option_path(&firmware.code)
         ))
         .arg("-drive")
         .arg(format!(
@@ -181,6 +181,61 @@ pub(super) fn attach_display(arguments: &Run, bundle: bool, command: &mut Proces
     }
 }
 
+/// The root port `--vfio-gpu` hangs behind. An explicit slot, past those the
+/// other parts number in order, leaves their addresses as they were.
+const VFIO_PORT: &str = "pcie-root-port,id=host-gpu-port,chassis=1,slot=1,addr=0x1c";
+
+/// `--vfio-gpu`'s functions, the given one first: all of its slot, since
+/// they share a reset and usually an IOMMU group. Each must be vfio-pci's.
+pub(super) fn vfio_functions(function: &str, devices: &Path) -> Result<Vec<String>> {
+    let (slot, _) = function.rsplit_once('.').expect("parsed as a PCI function");
+    let mut functions = Vec::new();
+    for entry in fs::read_dir(devices)? {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if name
+            .rsplit_once('.')
+            .is_some_and(|(other, _)| other == slot)
+        {
+            let driver = fs::read_link(devices.join(&name).join("driver")).ok();
+            ensure!(
+                driver.as_deref().and_then(Path::file_name) == Some("vfio-pci".as_ref()),
+                "{name} is not bound to vfio-pci: run through xtask/scripts/vfio-gpu.sh"
+            );
+            functions.push(name);
+        }
+    }
+    ensure!(
+        functions.iter().any(|name| name == function),
+        "the host has no PCI function {function}"
+    );
+    functions.sort_by_key(|name| (name != function, name.clone()));
+    Ok(functions)
+}
+
+/// The QEMU devices of `functions`, in one multifunction slot of the port.
+///
+/// No option ROM: Stela drives the card with no firmware help, and a card nothing
+/// has posted since it lost power hangs the firmware in the ROM's GOP driver.
+pub(super) fn vfio_devices(functions: &[String]) -> Vec<String> {
+    let mut devices = vec![VFIO_PORT.to_owned()];
+    devices.extend(functions.iter().enumerate().map(|(index, host)| {
+        let multifunction = if index == 0 { ",multifunction=on" } else { "" };
+        format!("vfio-pci,host={host},bus=host-gpu-port,addr=0.{index},rombar=0{multifunction}")
+    }));
+    devices
+}
+
+/// `--vfio-gpu`'s root port and the card's functions.
+pub(super) fn attach_vfio_gpu(arguments: &Run, command: &mut Process) -> Result<()> {
+    if let Some(function) = &arguments.vfio_gpu {
+        let functions = vfio_functions(function, Path::new("/sys/bus/pci/devices"))?;
+        for device in vfio_devices(&functions) {
+            command.arg("-device").arg(device);
+        }
+    }
+    Ok(())
+}
+
 /// `--host-audio`'s HD Audio controller and codec.
 pub(super) fn attach_audio(arguments: &Run, command: &mut Process) {
     if arguments.host_audio {
@@ -195,19 +250,22 @@ pub(super) fn attach_audio(arguments: &Run, command: &mut Process) {
     }
 }
 
-/// The host's xHCI controller, when a USB device needs it.
+/// The host's xHCI controller, when a USB device needs it. Eight USB2 root
+/// ports seat the boot stick, the input devices and lent devices with none
+/// behind a hub QEMU adds when the ports run out, which runs at full speed.
 pub(super) fn attach_usb(arguments: &Run, command: &mut Process) {
     let host_usb = arguments.usb_image.is_some()
         || arguments.usb_input
         || arguments.usb_network
-        || !arguments.usb_disk.is_empty();
+        || !arguments.usb_disk.is_empty()
+        || !arguments.usb_host.is_empty();
     if host_usb {
         command.args([
             "-device",
             if arguments.usb_disk_model == Some(UsbDiskModel::UasUsb2) {
-                "qemu-xhci,id=host-usb,p3=0"
+                "qemu-xhci,id=host-usb,p2=8,p3=0"
             } else {
-                "qemu-xhci,id=host-usb"
+                "qemu-xhci,id=host-usb,p2=8"
             },
         ]);
     }
@@ -224,8 +282,48 @@ pub(super) fn attach_usb_input(arguments: &Run, command: &mut Process) {
     }
 }
 
+/// `--usb-host`'s devices of this PC.
+pub(super) fn attach_usb_host(arguments: &Run, command: &mut Process) {
+    for (vendor, product) in &arguments.usb_host {
+        command.arg("-device").arg(format!(
+            "usb-host,vendorid={vendor:#06x},productid={product:#06x},bus=host-usb.0"
+        ));
+    }
+}
+
 /// The UART, logged to `serial`, and the monitor.
 pub(super) fn attach_console(arguments: &Run, serial: &Path, command: &mut Process) {
+    if let Some(port) = arguments.console {
+        let display = match arguments.display {
+            Display::None => "none",
+            Display::Window if cfg!(target_os = "macos") => "cocoa",
+            Display::Window => "gtk",
+        };
+        command
+            .args(["-display", display, "-chardev"])
+            .arg(format!(
+                "socket,id=uart,host=127.0.0.1,port={port},server=on,wait=off,logfile={}",
+                option_path(serial)
+            ))
+            .args(["-serial", "chardev:uart"]);
+    } else {
+        attach_uart(arguments, serial, command);
+    }
+    match arguments.monitor {
+        Some(port) => command
+            .arg("-monitor")
+            .arg(format!("telnet:127.0.0.1:{port},server=on,wait=off")),
+        None => command.args(["-monitor", "none"]),
+    };
+    if let Some(port) = arguments.qmp {
+        command
+            .arg("-qmp")
+            .arg(format!("tcp:127.0.0.1:{port},server=on,wait=off"));
+    }
+}
+
+/// The UART on the run's display, logged to `serial`.
+fn attach_uart(arguments: &Run, serial: &Path, command: &mut Process) {
     match arguments.display {
         Display::None => command
             .args(["-display", "none"])
@@ -244,12 +342,6 @@ pub(super) fn attach_console(arguments: &Run, serial: &Path, command: &mut Proce
             .args(["-display", "gtk", "-chardev"])
             .arg(format!("vc,id=uart,logfile={}", option_path(serial)))
             .args(["-serial", "chardev:uart"]),
-    };
-    match arguments.monitor {
-        Some(port) => command
-            .arg("-monitor")
-            .arg(format!("telnet:127.0.0.1:{port},server=on,wait=off")),
-        None => command.args(["-monitor", "none"]),
     };
 }
 
