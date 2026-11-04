@@ -283,6 +283,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/kernel/sched/rq_resched.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/rq_tasks.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/rq_root.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/rq_class.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/cpudeadline.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/cpupri.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/sched_ratio.c")),

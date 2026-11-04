@@ -123,6 +123,14 @@ struct stela_linux_task {
  * actual CPU/IRQ/RSP before any admitted task service uses mutable metadata. */
 static struct stela_linux_task *active;
 
+static void publish_current(struct stela_linux_task *previous,
+			    struct stela_linux_task *next)
+{
+	stela_linux_rq_switch(previous ? previous->linux_task : NULL,
+			      next ? next->linux_task : NULL);
+	__atomic_store_n(&active, next, __ATOMIC_RELEASE);
+}
+
 /* Actual attached stack leases only. Registration/retirement are bounded IF0
  * hooks on the single qualified CPU; no native ISR can read this catalog.
  * Rust's retained binding owns each metadata pointer through actual detach.
@@ -1159,7 +1167,7 @@ int stela_linux_task_attach(struct stela_linux_task *task,
 	task->linux_task->on_rq = 1;
 	stack_tasks[(unsigned int)slot] = task;
 	data_attached(task, view);
-	__atomic_store_n(&active, task, __ATOMIC_RELEASE);
+	publish_current(NULL, task);
 	return 0;
 }
 
@@ -1426,7 +1434,7 @@ int stela_linux_task_leave(struct stela_linux_task *task,
 	stela_linux_lease_suspend(&lease);
 	task->active = false;
 	task->suspended = true;
-	__atomic_store_n(&active, NULL, __ATOMIC_RELEASE);
+	publish_current(task, NULL);
 	return 0;
 }
 
@@ -1463,7 +1471,7 @@ int stela_linux_task_arrive(struct stela_linux_task *task,
 	/* A genuine resume makes this sleeper runnable. Original lock/wait code
 	 * must still recheck its own condition; this never grants lock ownership. */
 	WRITE_ONCE(task->linux_task->__state, TASK_RUNNING);
-	__atomic_store_n(&active, task, __ATOMIC_RELEASE);
+	publish_current(NULL, task);
 	return 0;
 }
 
@@ -1510,7 +1518,7 @@ int stela_linux_task_terminal_prepare(struct stela_linux_task *record,
     record->source_terminal_prepared = true;
     record->active = false;
     record->suspended = false;
-    __atomic_store_n(&active, NULL, __ATOMIC_RELEASE);
+    publish_current(record, NULL);
     return 0;
 }
 int stela_linux_task_terminal_successor(struct stela_linux_task *record,
@@ -1674,7 +1682,7 @@ int stela_linux_task_complete(struct stela_linux_task *task,
 	task->linux_task->on_cpu = 0;
 	task->linux_task->on_rq = 0;
 	task->active = false;
-	__atomic_store_n(&active, NULL, __ATOMIC_RELEASE);
+	publish_current(task, NULL);
 	return 0;
 }
 

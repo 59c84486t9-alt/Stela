@@ -119,6 +119,11 @@ int stela_linux_task_bootstrap_resources(const struct stela_linux_owner *owner)
     early_boot_irqs_disabled = false;
     local_irq_restore(flags);
     sched_clock_init();
+    error = stela_linux_rq_init_queues(owner);
+    if (error) {
+        resource_phase = FAILED;
+        return error;
+    }
 
     /* Linux initializes the descriptor cache during mm_core_init(), before
      * creating the first threads. The native owner supplies their stacks. */

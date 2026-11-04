@@ -1,0 +1,303 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 05:25:51 -0500
+Subject: [PATCH] refactor(sched): share per-class runqueue initialization
+
+---
+ kernel/sched/Makefile          |  2 +-
+ kernel/sched/deadline.c        | 30 --------------
+ kernel/sched/fair.c            |  7 ----
+ kernel/sched/fork_sources.json | 33 +++++++++++++++-
+ kernel/sched/rq_class.c        | 71 ++++++++++++++++++++++++++++++++++
+ kernel/sched/rt.c              | 29 --------------
+ kernel/sched/sched.h           |  1 +
+ 7 files changed, 104 insertions(+), 69 deletions(-)
+ create mode 100644 kernel/sched/rq_class.c
+
+diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
+index 9478a84899047d7c970009c0be393fb2ec645691..afe8a788daa65e648facc7f5762e4aad78e25b09 100644
+--- a/kernel/sched/Makefile
++++ b/kernel/sched/Makefile
+@@ -50,7 +50,7 @@ endif
+ # build parallelizes well and finishes roughly at once:
+ #
+ obj-y += core.o rq_lock.o rq_clock.o rq_resched.o wait_support.o user_affinity.o
+-obj-y += rq_tasks.o rq_migration.o rq_root.o sched_ratio.o
++obj-y += rq_tasks.o rq_migration.o rq_root.o rq_class.o sched_ratio.o
+ obj-y += fair.o
+ obj-y += build_policy.o cputime_group.o rt_timeslice.o
+ obj-y += build_utility.o capacity_state.o
+diff --git a/kernel/sched/deadline.c b/kernel/sched/deadline.c
+index 860cc7acee27b73d2add42a71c6a999a4e2063ff..7ae0f0cf5bb6d622927f84263190805b66ac0314 100644
+--- a/kernel/sched/deadline.c
++++ b/kernel/sched/deadline.c
+@@ -504,23 +504,6 @@ static inline int is_leftmost(struct sched_dl_entity *dl_se, struct dl_rq *dl_rq
+ 	return rb_first_cached(&dl_rq->root) == &dl_se->rb_node;
+ }
+ 
+-static void init_dl_rq_bw_ratio(struct dl_rq *dl_rq);
+-
+-void init_dl_rq(struct dl_rq *dl_rq)
+-{
+-	dl_rq->root = RB_ROOT_CACHED;
+-
+-	/* zero means no -deadline tasks */
+-	dl_rq->earliest_dl.curr = dl_rq->earliest_dl.next = 0;
+-
+-	dl_rq->overloaded = 0;
+-	dl_rq->pushable_dl_tasks_root = RB_ROOT_CACHED;
+-
+-	dl_rq->running_bw = 0;
+-	dl_rq->this_bw = 0;
+-	init_dl_rq_bw_ratio(dl_rq);
+-}
+-
+ static inline int dl_overloaded(struct rq *rq)
+ {
+ 	return atomic_read(&rq->rd->dlo_count);
+@@ -3713,19 +3696,6 @@ next:
+ 	return ret;
+ }
+ 
+-static void init_dl_rq_bw_ratio(struct dl_rq *dl_rq)
+-{
+-	if (global_rt_runtime() == RUNTIME_INF) {
+-		dl_rq->bw_ratio = 1 << RATIO_SHIFT;
+-		dl_rq->max_bw = dl_rq->extra_bw = 1 << BW_SHIFT;
+-	} else {
+-		dl_rq->bw_ratio = to_ratio(global_rt_runtime(),
+-			  global_rt_period()) >> (BW_SHIFT - RATIO_SHIFT);
+-		dl_rq->max_bw = dl_rq->extra_bw =
+-			to_ratio(global_rt_period(), global_rt_runtime());
+-	}
+-}
+-
+ void sched_dl_do_global(void)
+ {
+ 	u64 new_bw = -1;
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 9808e88a377865e912ab547e2972bbc5e7189964..e7bc4858e9dde9400c36764e673d98ecf039a112 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -15403,13 +15403,6 @@ static void set_next_task_fair(struct rq *rq, struct task_struct *p, bool first)
+ 	sched_fair_update_stop_tick(rq, p);
+ }
+ 
+-void init_cfs_rq(struct cfs_rq *cfs_rq)
+-{
+-	cfs_rq->tasks_timeline = RB_ROOT_CACHED;
+-	cfs_rq->zero_vruntime = (u64)(-(1LL << 20));
+-	raw_spin_lock_init(&cfs_rq->removed.lock);
+-}
+-
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+ static void task_change_group_fair(struct task_struct *p)
+ {
+diff --git a/kernel/sched/fork_sources.json b/kernel/sched/fork_sources.json
+index 3e4454b9f1b570889afd5cbc74f05e39d6f5f4cf..395f4132114b58ffe5de1a97c17e73210013a385 100644
+--- a/kernel/sched/fork_sources.json
++++ b/kernel/sched/fork_sources.json
+@@ -151,6 +151,12 @@
+           "first_line": 2184,
+           "last_line": 2230,
+           "sha256": "5147a46d0d3df94765cbebaa93ed9544506aa739cb1c5df784bc230bf17a19d7"
++        },
++        {
++          "symbol": "init_cfs_rq",
++          "first_line": 15389,
++          "last_line": 15394,
++          "sha256": "f4818e43d3a2506830031568c7fb55d15d44b1e3ccf275d7a9823efe8191cb05"
+         }
+       ]
+     },
+@@ -170,6 +176,12 @@
+           "first_line": 24,
+           "last_line": 24,
+           "sha256": "0e66315f245b11d8b4fa51b43389463c05d7886a904800fa76601022803ff5e8"
++        },
++        {
++          "symbol": "init_rt_rq",
++          "first_line": 68,
++          "last_line": 95,
++          "sha256": "01725835e8b232175327a67cc1b4bb8ab3700ea66bfeab9151362a13f21b00b6"
+         }
+       ]
+     },
+@@ -287,6 +299,18 @@
+           "first_line": 509,
+           "last_line": 517,
+           "sha256": "ad86dcc7e23cc40d57da811e2ad300cf963639cf01d4da1c0b9feb4135f1cbdd"
++        },
++        {
++          "symbol": "init_dl_rq",
++          "first_line": 519,
++          "last_line": 532,
++          "sha256": "9335f487315759f8127b4d1714b86f7d13dd6a16314cac1c67306d6b786bea54"
++        },
++        {
++          "symbol": "init_dl_rq_bw_ratio",
++          "first_line": 3726,
++          "last_line": 3737,
++          "sha256": "2e7096799ec0346d58a5b3a97dbea9d6c5cc71fe4a0af4a49f9d818ca82ad6ff"
+         }
+       ]
+     },
+@@ -350,7 +374,7 @@
+     },
+     {
+       "path": "kernel/sched/sched.h",
+-      "sha256": "8f2743a77a83795cb551b06ec3d4bba48bea21ced6483595caa463443d0c0d23"
++      "sha256": "52a6275a821e64e5e254447dace0c1a29787523340c5e305cc2df5c52bb70b1e"
+     },
+     {
+       "path": "kernel/sched/sched_class_bounds.c",
+@@ -386,7 +410,11 @@
+     },
+     {
+       "path": "kernel/sched/fair.c",
+-      "sha256": "f4a3eb8c35ef9a0e13ed81eb549cbce596d7f5277306642372de4381558b0a8d"
++      "sha256": "f09f6b6e0debadc89f1f98369b1788446aa7e7b06a854147b8b7b82533a18390"
++    },
++    {
++      "path": "kernel/sched/rq_class.c",
++      "sha256": "6908dd1858f2bb21c50ea3bae8c131db868ca0b4e58994d63b59e832e005305f"
+     }
+   ],
+   "adaptations": [
+@@ -404,6 +432,7 @@
+     "The original scheduler bandwidth scaling and RT/deadline output bodies are shared. The regular debug unit retains the original group path and time formatting helpers. The native archive also builds unmodified lib/plist.c.",
+     "Both profiles share the original root-domain lifecycle and runqueue membership operations. The native archive also builds unmodified CPU priority and deadline management. The original realtime bandwidth defaults and deadline bandwidth initialization have one owner in sched_ratio.c.",
+     "The regular scheduler keeps fair.c runtime accounting. Native class callbacks consume the increment of the retained Runtime sample. The native publication owns the execution total and system time. The Linux runqueue clock owns exec_start.",
++    "The original fair, RT and deadline queue constructors are shared by the regular scheduler and the native Initial task.",
+     "This manifest records source provenance only; it does not establish compilation, linking, execution or native admission."
+   ]
+ }
+diff --git a/kernel/sched/rq_class.c b/kernel/sched/rq_class.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..0c9145132333a07f002f0909340f8a52dbe1bcaa
+--- /dev/null
++++ b/kernel/sched/rq_class.c
+@@ -0,0 +1,71 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Runqueue constructors from kernel/sched/{fair,rt,deadline}.c.
++ * Copyright (C) 1998-2024 Ingo Molnar, Red Hat
++ * Copyright (C) 2007, Linutronix GmbH, Thomas Gleixner
++ * Copyright (C) 2007 Red Hat, Inc., Peter Zijlstra
++ */
++#include "sched.h"
++
++void init_cfs_rq(struct cfs_rq *cfs_rq)
++{
++	cfs_rq->tasks_timeline = RB_ROOT_CACHED;
++	cfs_rq->zero_vruntime = (u64)(-(1LL << 20));
++	raw_spin_lock_init(&cfs_rq->removed.lock);
++}
++
++void init_rt_rq(struct rt_rq *rt_rq)
++{
++	struct rt_prio_array *array;
++	int i;
++
++	array = &rt_rq->active;
++	for (i = 0; i < MAX_RT_PRIO; i++) {
++		INIT_LIST_HEAD(array->queue + i);
++		__clear_bit(i, array->bitmap);
++	}
++	/* delimiter for bitsearch: */
++	__set_bit(MAX_RT_PRIO, array->bitmap);
++
++	rt_rq->highest_prio.curr = MAX_RT_PRIO-1;
++	rt_rq->highest_prio.next = MAX_RT_PRIO-1;
++	rt_rq->overloaded = 0;
++	plist_head_init(&rt_rq->pushable_tasks);
++	/* We start is dequeued state, because no RT tasks are queued */
++	rt_rq->rt_queued = 0;
++
++#ifdef CONFIG_RT_GROUP_SCHED
++	rt_rq->rt_time = 0;
++	rt_rq->rt_throttled = 0;
++	rt_rq->rt_runtime = 0;
++	raw_spin_lock_init(&rt_rq->rt_runtime_lock);
++	rt_rq->tg = &root_task_group;
++#endif
++}
++
++void init_dl_rq_bw_ratio(struct dl_rq *dl_rq)
++{
++	if (global_rt_runtime() == RUNTIME_INF) {
++		dl_rq->bw_ratio = 1 << RATIO_SHIFT;
++		dl_rq->max_bw = dl_rq->extra_bw = 1 << BW_SHIFT;
++	} else {
++		dl_rq->bw_ratio = to_ratio(global_rt_runtime(),
++			  global_rt_period()) >> (BW_SHIFT - RATIO_SHIFT);
++		dl_rq->max_bw = dl_rq->extra_bw =
++			to_ratio(global_rt_period(), global_rt_runtime());
++	}
++}
++
++void init_dl_rq(struct dl_rq *dl_rq)
++{
++	dl_rq->root = RB_ROOT_CACHED;
++
++	/* zero means no -deadline tasks */
++	dl_rq->earliest_dl.curr = dl_rq->earliest_dl.next = 0;
++
++	dl_rq->overloaded = 0;
++	dl_rq->pushable_dl_tasks_root = RB_ROOT_CACHED;
++
++	dl_rq->running_bw = 0;
++	dl_rq->this_bw = 0;
++	init_dl_rq_bw_ratio(dl_rq);
++}
+diff --git a/kernel/sched/rt.c b/kernel/sched/rt.c
+index 2caa9f2ebcf2f1db4b5135839e3e803ab8736ecb..692569b143cfe929362b4721fbca0adc62f21f6a 100644
+--- a/kernel/sched/rt.c
++++ b/kernel/sched/rt.c
+@@ -53,35 +53,6 @@ static int __init sched_rt_sysctl_init(void)
+ late_initcall(sched_rt_sysctl_init);
+ #endif /* CONFIG_SYSCTL */
+ 
+-void init_rt_rq(struct rt_rq *rt_rq)
+-{
+-	struct rt_prio_array *array;
+-	int i;
+-
+-	array = &rt_rq->active;
+-	for (i = 0; i < MAX_RT_PRIO; i++) {
+-		INIT_LIST_HEAD(array->queue + i);
+-		__clear_bit(i, array->bitmap);
+-	}
+-	/* delimiter for bitsearch: */
+-	__set_bit(MAX_RT_PRIO, array->bitmap);
+-
+-	rt_rq->highest_prio.curr = MAX_RT_PRIO-1;
+-	rt_rq->highest_prio.next = MAX_RT_PRIO-1;
+-	rt_rq->overloaded = 0;
+-	plist_head_init(&rt_rq->pushable_tasks);
+-	/* We start is dequeued state, because no RT tasks are queued */
+-	rt_rq->rt_queued = 0;
+-
+-#ifdef CONFIG_RT_GROUP_SCHED
+-	rt_rq->rt_time = 0;
+-	rt_rq->rt_throttled = 0;
+-	rt_rq->rt_runtime = 0;
+-	raw_spin_lock_init(&rt_rq->rt_runtime_lock);
+-	rt_rq->tg = &root_task_group;
+-#endif
+-}
+-
+ #ifdef CONFIG_RT_GROUP_SCHED
+ 
+ static int do_sched_rt_period_timer(struct rt_bandwidth *rt_b, int overrun);
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index e85d10d6cc6f45db24f347d6165ed233f7838e31..8e9e4b0335d01be3d6c0bac97e848ab47bd80415 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -3408,6 +3408,7 @@ print_numa_stats(struct seq_file *m, int node, unsigned long tsf,
+ extern void init_cfs_rq(struct cfs_rq *cfs_rq);
+ extern void init_rt_rq(struct rt_rq *rt_rq);
+ extern void init_dl_rq(struct dl_rq *dl_rq);
++extern void init_dl_rq_bw_ratio(struct dl_rq *dl_rq);
+ 
+ extern void cfs_bandwidth_usage_inc(void);
+ extern void cfs_bandwidth_usage_dec(void);

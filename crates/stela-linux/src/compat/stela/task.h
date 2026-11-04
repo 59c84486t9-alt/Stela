@@ -150,6 +150,10 @@ int stela_linux_require_full_kthread_current(const struct stela_linux_owner *own
 bool stela_linux_task_is_bare(const struct task_struct *task);
 /* Consume measured time for the runqueue's locked, bound current task. */
 s64 stela_linux_task_account_class(struct task_struct *current_task);
+/* Same-CPU dispatcher transitions after the native current check. */
+void stela_linux_rq_switch(struct task_struct *previous, struct task_struct *next);
+/* Initialize the per-class queues on the canonical Initial task. */
+int stela_linux_rq_init_queues(const struct stela_linux_owner *owner);
 /* Exact original task-object data projection for the native measured
  * execution sink. No C calls/allocations are permitted from IRQ publication.
  * Prepared pointers must NOT be written before genuine attach accepts them.

@@ -82,6 +82,7 @@
 /kernel/sched/rq_resched.c
 /kernel/sched/rq_tasks.c
 /kernel/sched/rq_root.c
+/kernel/sched/rq_class.c
 /kernel/sched/rq_root.h
 /kernel/sched/sched_ratio.c
 /kernel/sched/rq_debug.c
