@@ -34,6 +34,32 @@ impl<'a> ContainedPci<'a> {
         self.functions
     }
 
+    /// Compare firmware's framebuffer association with the same parked
+    /// function and its current BAR. This grants no reset or scanout access.
+    ///
+    /// # Safety
+    /// The caller keeps the original configuration writers excluded.
+    pub(crate) unsafe fn check_framebuffer(
+        &self,
+        source: crate::pci_io::FramebufferSource,
+    ) -> Result<(), Error> {
+        // SAFETY: the original source and its configuration exclusion are kept.
+        unsafe {
+            self.source.with_config_inventory(|_, reader| {
+                for (offset, expected) in source.bar.words() {
+                    let observed = reader.read32(source.address, offset)?;
+                    if offset < 0x10 {
+                        self.check_observation(source.address, offset, observed)?;
+                    }
+                    if expected != observed {
+                        return Err(Error::InvalidPlatformReply);
+                    }
+                }
+                Ok(())
+            })
+        }
+    }
+
     pub(crate) fn check_observation(
         &self,
         address: Address,

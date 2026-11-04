@@ -110,6 +110,7 @@ pub struct Framebuffer {
     height: usize,
     stride: usize,
     encoding: Encoding,
+    pub(crate) pci_source: Option<crate::pci_io::FramebufferSource>,
 }
 
 impl Framebuffer {
@@ -121,9 +122,32 @@ impl Framebuffer {
     /// keep their own handle open, so this only reads the protocol rather
     /// than opening it exclusively.
     pub fn from_firmware() -> Option<Self> {
+        Self::firmware_mode().map(|(_, screen)| screen)
+    }
+
+    fn firmware_mode() -> Option<(Handle, Self)> {
         let (handle, mut gop) = gop()?;
         mode::select(handle, &mut gop);
-        Self::current(&mut gop)
+        Some((handle, Self::current(&mut gop)?))
+    }
+
+    /// Capture the original display function before the engine handoff.
+    pub(crate) fn for_engine() -> crate::Result<Option<Self>> {
+        let Some((handle, mut screen)) = Self::firmware_mode() else {
+            return Ok(None);
+        };
+        match crate::pci_io::framebuffer_source(handle, screen.base as u64, screen.bytes as u64) {
+            Ok(source) => screen.pci_source = source,
+            Err(crate::pci_io::Error::Release(status)) => {
+                return Err(
+                    stela_contracts::refuse!("GOP PCI resource buffer remains retained: {status}", status = ?status),
+                );
+            }
+            Err(error) => crate::output::arguments(format_args!(
+                "GOP PCI source observation refused: {error}\n"
+            )),
+        }
+        Ok(Some(screen))
     }
 
     /// `gop`'s current mode, when Stela can draw in it.
@@ -139,6 +163,7 @@ impl Framebuffer {
             height,
             stride: mode.stride(),
             encoding,
+            pci_source: None,
         };
         (framebuffer.stride * framebuffer.height * BYTES_PER_PIXEL <= framebuffer.bytes)
             .then_some(framebuffer)
@@ -154,6 +179,7 @@ impl Framebuffer {
             height,
             stride,
             encoding: Encoding::Bgr,
+            pci_source: None,
         }
     }
 

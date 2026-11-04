@@ -2070,6 +2070,26 @@ fn start_platform(
             }
         }
     });
+    if let Some(screen) = handoff.screen {
+        match (&contained_pci, screen.pci_source) {
+            (Some(pci), Some(source)) => {
+                // SAFETY: the original parked PCI fabric still excludes all
+                // competing configuration writers at this point in startup.
+                match unsafe { pci.check_framebuffer(source) } {
+                    Ok(()) => output::arguments(format_args!(
+                        "HOST GOP PCI source {} BAR{} observed before and after firmware exit\n",
+                        source.address,
+                        source.bar.index()
+                    )),
+                    Err(error) => output::arguments(format_args!(
+                        "HOST GOP PCI source {} changed or unavailable: {error:?}\n",
+                        source.address
+                    )),
+                }
+            }
+            _ => output::arguments(format_args!("HOST GOP PCI source unavailable\n")),
+        }
+    }
     // The remapping units, taken before any host driver starts DMA.
     let remappers = match (&contained_pci, handoff.storage.handoff()) {
         // SAFETY: no host driver has started; the loader root maps the ACPI
