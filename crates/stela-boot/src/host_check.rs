@@ -207,6 +207,9 @@ pub fn boot(options: Vec<u8>) -> ! {
     // the drivers and the APIC use.
     unsafe {
         asm!("cli", options(nomem, nostack));
+        // The interrupt tables will keep this same extended-state layout.
+        // Configure it before the table owner seals its CR4 snapshot.
+        interrupts::enable_avx();
         machine.active_tables = Some(paging::activate(tables).unwrap_or_else(|error| {
             output::arguments(format_args!("native table activation refused: {error}"));
             output::fatal("native table activation failed");

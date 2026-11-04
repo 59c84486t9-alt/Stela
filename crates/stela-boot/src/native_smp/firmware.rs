@@ -172,6 +172,23 @@ fn push_msr(snapshot: &mut Snapshot, index: u32, value: u64) -> Result<(), Error
 /// callback or under its owned native executor. No CPU feature is cached from
 /// another processor, and unsupported leaves/MSRs are not probed.
 pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
+    // SAFETY: forwarded original CPU/control capture contract.
+    unsafe { observe_controls(true) }
+}
+
+/// Observe the same installed CPU without changing its retained PAT.
+/// # Safety
+/// The same original CPU/MSR context as observe, with any required PAT
+/// configuration already complete before its owner sealed the controls.
+#[cfg(feature = "diagnostics")]
+pub(crate) unsafe fn observe_with_original_pat() -> Result<Snapshot, Error> {
+    // SAFETY: forwarded original CPU/control capture contract.
+    unsafe { observe_controls(false) }
+}
+
+/// # Safety
+/// Current non-migrating CPL0 CPU, with exclusive control of its memory types.
+unsafe fn observe_controls(configure_pat: bool) -> Result<Snapshot, Error> {
     let mut snapshot = Snapshot::default();
     let maximum = __cpuid(0).eax;
     let extended = __cpuid(0x8000_0000).eax;
@@ -244,10 +261,12 @@ pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
             snapshot.apic_base = msr::APIC_BASE.read();
         }
         if basic.edx & (1 << 16) != 0 {
-            // Before anything records PAT: every processor's stays the same.
-            msr::PAT.write(stela_boot_core::page_window::with_write_combining(
-                msr::PAT.read(),
-            ));
+            if configure_pat {
+                // Before anything records PAT: every processor's stays the same.
+                msr::PAT.write(stela_boot_core::page_window::with_write_combining(
+                    msr::PAT.read(),
+                ));
+            }
             snapshot.pat = msr::PAT.read();
             snapshot.pat_valid = true;
         }
