@@ -10,6 +10,7 @@ pub(crate) struct Code {
     pub(super) sites: Vec<EmissionSite>,
     /// Whether guest registers live in host registers ([`super::super::pinned`]).
     pub(super) pinned: bool,
+    locals: Option<super::super::pinned::LocalRegisters>,
     /// The block's PC, in code whose exits keep a link slot
     /// ([`super::super::chain::link_slot`]).
     pub(super) linked_block: Option<u64>,
@@ -80,6 +81,7 @@ impl Code {
             instructions: 0,
             sites: Vec::new(),
             pinned: false,
+            locals: None,
             constant_time: false,
             linked_block: None,
             instruction: 0,
@@ -127,11 +129,20 @@ impl Code {
     }
     /// The host register that holds `register` in this code.
     pub(crate) fn host(&self, register: crate::aarch64::Register) -> Option<super::Gpr> {
-        self.pinned.then(|| super::super::pinned::host(register))?
+        self.pinned
+            .then(|| super::super::pinned::host_or_local(register, self.locals))?
     }
     /// Keep guest registers in host registers from here on, or not.
     pub(crate) fn set_pinned(&mut self, pinned: bool) {
         self.pinned = pinned;
+    }
+    /// Map temporary guest registers only while emitting a pure pinned span.
+    pub(in crate::x86_64) fn set_local_registers(
+        &mut self,
+        locals: Option<super::super::pinned::LocalRegisters>,
+    ) {
+        debug_assert!(self.pinned);
+        self.locals = locals;
     }
     /// Give the exits from here on a link slot, in the block at `pc`.
     pub(crate) fn set_linked_block(&mut self, pc: u64) {
@@ -145,6 +156,7 @@ impl Code {
             shared: Some(&mut self.instructions),
             sites: Some(&mut self.sites),
             pinned: self.pinned,
+            locals: self.locals,
             linked_block: self.linked_block,
         }
     }
@@ -185,6 +197,7 @@ impl Code {
     }
     /// Append `other`'s bytes and instructions.
     pub(crate) fn append(&mut self, other: Code) {
+        debug_assert!(other.locals.is_none());
         let base = self.bytes.len();
         self.sites
             .extend(other.sites.into_iter().map(|site| EmissionSite {
