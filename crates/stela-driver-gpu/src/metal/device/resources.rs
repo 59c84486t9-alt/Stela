@@ -708,11 +708,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         strides: Strides,
     ) -> Result<()> {
         let (copy, rows) = self.cpu_region(id, region, strides, bytes.len())?;
-        let packed: Vec<u8> = rows
-            .into_iter()
-            .flat_map(|row| &bytes[row])
-            .copied()
-            .collect();
+        if rows.tight() {
+            return self.write_region(id, &copy, &bytes[..rows.packed_bytes]);
+        }
+        let mut packed = Vec::with_capacity(rows.packed_bytes);
+        for row in rows.ranges() {
+            packed.extend_from_slice(&bytes[row]);
+        }
         self.write_region(id, &copy, &packed)
     }
 
@@ -725,10 +727,14 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         strides: Strides,
     ) -> Result<()> {
         let (copy, rows) = self.cpu_region(id, region, strides, bytes.len())?;
-        let mut packed = alloc::vec![0; rows.iter().map(ExactSizeIterator::len).sum()];
+        let mut packed = alloc::vec![0; rows.packed_bytes];
         self.read_region(id, &copy, &mut packed)?;
+        if rows.tight() {
+            bytes[..rows.packed_bytes].copy_from_slice(&packed);
+            return Ok(());
+        }
         let mut packed = packed.as_slice();
-        for row in rows {
+        for row in rows.ranges() {
             let (head, rest) = packed.split_at(row.len());
             bytes[row].copy_from_slice(head);
             packed = rest;
@@ -744,7 +750,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         region: &Region,
         strides: Strides,
         length: usize,
-    ) -> Result<(BufferImageCopy, Vec<Range<usize>>)> {
+    ) -> Result<(BufferImageCopy, CpuRows)> {
         let descriptor = &self.resources.textures.get(id.0)?.descriptor;
         let description = descriptor.pixel_format.describe();
         ensure(
@@ -761,19 +767,34 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             "bytesPerRow is smaller than a row",
         )?;
         ensure(
-            images <= 1 || strides.bytes_per_image >= strides.bytes_per_row * rows,
+            images <= 1
+                || strides
+                    .bytes_per_row
+                    .checked_mul(rows)
+                    .is_some_and(|bytes| strides.bytes_per_image >= bytes),
             "bytesPerImage is smaller than an image",
         )?;
-        let starts = (0..images).flat_map(|image| {
-            (0..rows).map(move |row| image * strides.bytes_per_image + row * strides.bytes_per_row)
-        });
-        let rows = starts
-            .map(|start| {
-                let end = start + row_bytes;
-                ensure(end <= length as u64, "the bytes end before the region")?;
-                Ok(start as usize..end as usize)
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let end = if images == 0 || rows == 0 {
+            Some(0)
+        } else {
+            (images - 1)
+                .checked_mul(strides.bytes_per_image)
+                .zip((rows - 1).checked_mul(strides.bytes_per_row))
+                .and_then(|(image, row)| image.checked_add(row))
+                .and_then(|start| start.checked_add(row_bytes))
+        };
+        ensure(
+            end.is_some_and(|end| end <= length as u64),
+            "the bytes end before the region",
+        )?;
+        // The validated non-overlapping layout contains all the packed bytes.
+        let rows = CpuRows {
+            strides,
+            row_bytes,
+            rows,
+            images,
+            packed_bytes: (row_bytes * rows * images) as usize,
+        };
         let copy = BufferImageCopy {
             buffer_offset: 0,
             buffer_row_length: 0,
@@ -804,11 +825,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             copy.memory,
             cpu_copy_rows(&texture.descriptor, region, bytes.len())?,
         );
-        for (offset, packed) in rows.clone() {
+        let first = rows.first;
+        for (offset, packed) in rows {
             self.backend.write_memory(memory, offset, &bytes[packed])?;
         }
         let upload = BufferImageCopy {
-            buffer_offset: rows.first,
+            buffer_offset: first,
             ..*region
         };
         let upload = cpu_copy_region(&texture.descriptor, upload);
@@ -1181,6 +1203,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         descriptor: &TextureDescriptor,
     ) -> Result<SizeAndAlign> {
         let plan = resource::texture(&self.capabilities, descriptor)?;
+        self.heap_texture_requirements(&plan)
+    }
+
+    fn heap_texture_requirements(&mut self, plan: &TexturePlan) -> Result<SizeAndAlign> {
         let requirements = self.backend.image_requirements(&plan.image)?;
         SizeAndAlign::from_requirements(requirements.size, requirements.alignment)
             .ok_or(Error::Invalid("requirements"))
@@ -1272,7 +1298,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             ensure(offset.is_none(), "sparse heaps place textures themselves")?;
             return self.new_sparse_texture(id, descriptor);
         }
-        let requirement = self.heap_texture_size_and_align(descriptor)?;
+        let plan = resource::texture(&self.capabilities, descriptor)?;
+        let requirement = self.heap_texture_requirements(&plan)?;
         let (memory, offset) = self.place(id, descriptor.options, requirement, offset)?;
         let backing = Backing::Heap {
             heap: id,
@@ -1280,7 +1307,6 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             size: requirement.size,
             aliasable: false,
         };
-        let plan = resource::texture(&self.capabilities, descriptor)?;
         let image = match self
             .backend
             .create_placed_image(&plan.image, memory, offset)
@@ -1492,18 +1518,45 @@ fn make_aliasable(backing: &mut Backing) -> Result<(HeapId, u64, u64)> {
     }
 }
 
-/// The rows `region` covers in a texture's CPU copy, as (copy offset,
+/// Validated row layout in the caller's bytes.
+struct CpuRows {
+    strides: Strides,
+    row_bytes: u64,
+    rows: u64,
+    images: u64,
+    packed_bytes: usize,
+}
+
+impl CpuRows {
+    fn tight(&self) -> bool {
+        self.packed_bytes == 0
+            || (self.rows <= 1 || self.strides.bytes_per_row == self.row_bytes)
+                && (self.images <= 1 || self.strides.bytes_per_image == self.row_bytes * self.rows)
+    }
+
+    fn ranges(&self) -> impl Iterator<Item = Range<usize>> + '_ {
+        (0..self.images).flat_map(move |image| {
+            (0..self.rows).map(move |row| {
+                let start = image * self.strides.bytes_per_image + row * self.strides.bytes_per_row;
+                start as usize..(start + self.row_bytes) as usize
+            })
+        })
+    }
+}
+
+/// Contiguous spans `region` covers in a texture's CPU copy, as (copy offset,
 /// range in tightly packed bytes of `length`); `first` is the region's
 /// first byte in the copy.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct CopyRows {
     first: u64,
     bytes_per_row: u64,
     bytes_per_image: u64,
     row_bytes: usize,
-    rows: u32,
-    images: u32,
-    next: u32,
+    rows: u64,
+    images: u64,
+    rows_per_copy: u64,
+    next: u64,
 }
 
 impl Iterator for CopyRows {
@@ -1514,12 +1567,13 @@ impl Iterator for CopyRows {
             return None;
         }
         let (image, row) = (self.next / self.rows, self.next % self.rows);
-        let offset = self.first
-            + u64::from(image) * self.bytes_per_image
-            + u64::from(row) * self.bytes_per_row;
+        let offset = self.first + image * self.bytes_per_image + row * self.bytes_per_row;
         let start = self.next as usize * self.row_bytes;
-        self.next += 1;
-        Some((offset, start..start + self.row_bytes))
+        self.next += self.rows_per_copy;
+        Some((
+            offset,
+            start..start + self.rows_per_copy as usize * self.row_bytes,
+        ))
     }
 }
 
@@ -1566,6 +1620,13 @@ fn cpu_copy_rows(
         row_bytes * rows * size[2] == length as u64,
         "the bytes are the region, tightly packed",
     )?;
+    let rows_per_copy = if bytes_per_row != row_bytes {
+        1
+    } else if bytes_per_image != bytes_per_row * rows {
+        rows
+    } else {
+        rows * size[2]
+    };
     Ok(CopyRows {
         first: offset
             + origin[2] * bytes_per_image
@@ -1574,8 +1635,9 @@ fn cpu_copy_rows(
         bytes_per_row,
         bytes_per_image,
         row_bytes: row_bytes as usize,
-        rows: rows as u32,
-        images: size[2] as u32,
+        rows,
+        images: size[2],
+        rows_per_copy,
         next: 0,
     })
 }

@@ -509,10 +509,7 @@ impl<'a> Function<'a> {
 
     /// Verify the archive's digest before returning the LLVM reader's input.
     pub fn air(&self) -> Result<Air<'a>> {
-        if Sha256::digest(self.module).as_slice() != self.digest {
-            return Err(error(self.module_offset, ErrorKind::Hash));
-        }
-        Air::parse(self.module).map_err(|mut failure| {
+        Air::verified(self.module, self.digest).map_err(|mut failure| {
             failure.offset += self.module_offset;
             failure
         })
@@ -551,6 +548,13 @@ pub struct Air<'a> {
 }
 
 impl<'a> Air<'a> {
+    pub(super) fn verified(data: &'a [u8], digest: &[u8; 32]) -> Result<Self> {
+        if Sha256::digest(data).as_slice() != digest {
+            return Err(error(0, ErrorKind::Hash));
+        }
+        Self::parse(data)
+    }
+
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         if data.starts_with(LLVM_MAGIC) {
             return Ok(Self {

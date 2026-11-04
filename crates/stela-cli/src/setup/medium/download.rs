@@ -74,7 +74,8 @@ fn write_from(
     }
     let mut pieces = Vec::new();
     let mut piece_blocks = Vec::new();
-    let mut whole = Whole::default();
+    let mut whole_sha256 = Sha256::new();
+    let mut whole_sha1 = Sha1::new();
     let progress = crate::progress::Phase::bytes("Downloading macOS onto USB", total);
     for (index, &size) in sizes.iter().enumerate() {
         let mut file = fs::File::create(directory.join(format!("{}.partial", piece_name(index))))?;
@@ -82,8 +83,8 @@ fn write_from(
         stream(&mut source, size, |bytes| {
             file.write_all(bytes)?;
             hashes.update(bytes);
-            whole.sha256.update(bytes);
-            whole.sha1.update(bytes);
+            whole_sha256.update(bytes);
+            whole_sha1.update(bytes);
             progress.advance(bytes.len() as u64);
             Ok(())
         })?;
@@ -99,8 +100,8 @@ fn write_from(
         source.read(&mut [0])? == 0,
         "download exceeds the expected image size"
     );
-    let sha256 = hex::encode(whole.sha256.finalize());
-    let sha1 = hex::encode(whole.sha1.finalize());
+    let sha256 = hex::encode(whole_sha256.finalize());
+    let sha1 = hex::encode(whole_sha1.finalize());
     ensure!(
         image
             .sha1

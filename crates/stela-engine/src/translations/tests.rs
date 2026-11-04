@@ -379,3 +379,25 @@ fn unordered_legacy_records_find_the_first_entry_for_each_offset_and_context() {
     );
     assert_eq!(decoded.find(low.offset + 4, &low.context), None);
 }
+
+#[test]
+fn merge_keeps_current_entries_and_the_first_legacy_duplicate() {
+    let source = words(&[0xd65f_03c0]);
+    let first = proved(&source, 0x40).unwrap();
+    let second = proved(&source, 0x80).unwrap();
+    let third = proved(&source, 0xc0).unwrap();
+    let mut duplicate = first.clone();
+    duplicate.code.push(0);
+    let mut older_second = second.clone();
+    older_second.code.push(0);
+    let translator = translator_id();
+    let key = Digest::of(b"merge fixture");
+    let mut record = Record::new(translator, key);
+    record.insert(second.clone());
+    record.merge(Record {
+        translator,
+        key,
+        entries: vec![first.clone(), duplicate, older_second, third.clone()],
+    });
+    assert_eq!(record.entries(), &[first, second, third]);
+}

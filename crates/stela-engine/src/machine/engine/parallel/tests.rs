@@ -974,6 +974,10 @@ fn only_the_home_machine_advances_the_devices_with_time_and_tells_the_others() {
     // Asking again changes nothing.
     home.deadline(30);
     assert_eq!(hub.lines_epoch(1), epoch + 1);
+    // A call from a PE whose counter read lagged cannot undo that advance.
+    assert!(!home.lines_and_deadline(0, 10).0.irq);
+    assert_eq!(hub.lines_epoch(1), epoch + 1);
+    assert!(worker.lines(1, 10).irq);
 }
 
 #[test]

@@ -41,13 +41,6 @@ pub struct Manifest {
 pub(crate) struct LoadedArtifact {
     pub(crate) manifest: Manifest,
 }
-impl LoadedArtifact {
-    pub(crate) fn bind(manifest: Manifest, native: &[u8]) -> Result<Self, Refusal> {
-        validate_native_snapshot(&manifest, native)?;
-        Ok(Self { manifest })
-    }
-}
-
 pub(crate) fn validate_native_snapshot(manifest: &Manifest, native: &[u8]) -> Result<(), Refusal> {
     if native.len() != manifest.native_bytes
         || stela_formats::sha256(native) != manifest.native_sha256

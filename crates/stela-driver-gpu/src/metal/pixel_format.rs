@@ -162,7 +162,32 @@ raw_enum! {
         Bgr10Xr = 554,
         Bgr10XrSrgb = 555,
     }
+    decode with decode_indexed;
 }
+
+const RAW_COUNT: usize = {
+    let mut index = 0;
+    let mut max = 0;
+    while index < PixelFormat::ALL.len() {
+        let raw = PixelFormat::ALL[index].raw() as usize;
+        if raw > max {
+            max = raw;
+        }
+        index += 1;
+    }
+    max + 1
+};
+
+static INDICES: [u8; RAW_COUNT] = {
+    assert!(PixelFormat::ALL.len() <= u8::MAX as usize + 1);
+    let mut indices = [0; RAW_COUNT];
+    let mut index = 0;
+    while index < PixelFormat::ALL.len() {
+        indices[PixelFormat::ALL[index].raw() as usize] = index as u8;
+        index += 1;
+    }
+    indices
+};
 
 /// How shaders read a color format's components.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -352,10 +377,18 @@ impl PixelFormat {
     }
 
     pub fn describe(self) -> &'static Description {
-        DESCRIPTIONS
-            .iter()
-            .find(|description| description.format == self)
-            .expect("every pixel format has a description")
+        &DESCRIPTIONS[self.index()]
+    }
+
+    pub(super) fn index(self) -> usize {
+        usize::from(INDICES[self.raw() as usize])
+    }
+
+    fn decode_indexed(raw: u64) -> Option<Self> {
+        let index = *INDICES.get(usize::try_from(raw).ok()?)?;
+        let format = Self::ALL[usize::from(index)];
+        // Holes contain the first format's index, so check its raw value.
+        (format.raw() == raw).then_some(format)
     }
 }
 
@@ -813,6 +846,15 @@ static DESCRIPTIONS: &[Description] = &[
     unrealized(P::Bgr10XrSrgb, true, 4, Unrealized::ExtendedRange),
 ];
 
+const _: () = {
+    assert!(DESCRIPTIONS.len() == PixelFormat::ALL.len());
+    let mut index = 0;
+    while index < DESCRIPTIONS.len() {
+        assert!(DESCRIPTIONS[index].format.raw() == PixelFormat::ALL[index].raw());
+        index += 1;
+    }
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -827,11 +869,12 @@ mod tests {
 
     #[test]
     fn raw_values_round_trip_and_placeholders_are_refused() {
-        for format in PixelFormat::ALL {
-            assert_eq!(PixelFormat::from_raw(format.raw()), Some(*format));
-        }
-        for raw in [0, 2, 21, 44, 191, 263, 556] {
-            assert_eq!(PixelFormat::from_raw(raw), None, "{raw}");
+        for raw in (0..=RAW_COUNT as u64).chain([(1 << 32) + 1, u64::MAX]) {
+            let listed = PixelFormat::ALL
+                .iter()
+                .copied()
+                .find(|format| format.raw() == raw);
+            assert_eq!(PixelFormat::from_raw(raw), listed, "{raw}");
         }
     }
 

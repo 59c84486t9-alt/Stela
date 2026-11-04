@@ -22,6 +22,7 @@
  * paths a false constant disables are removed rather than translated. */
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_constants.h"
+#include "air_calls.h"
 #include "llvm-c/Transforms/PassBuilder.h"
 #include "util/macros.h"
 #include "util/set.h"
@@ -283,55 +284,140 @@ constructed(LLVMModuleRef clone)
                     !LLVMGetArrayLength2(LLVMTypeOf(entries)));
 }
 
+/* The clone and original have their globals in the same order. Keep the
+ * constructor's destinations externally visible so LLVM commits their
+ * initializers instead of forwarding their values and removing them. */
+static bool
+evaluate_constants(LLVMModuleRef original, LLVMModuleRef clone,
+                   struct stela_air_constructed_constants *result)
+{
+   LLVMValueRef copies[AIR_MAX_ARGUMENTS];
+   result->count = 0;
+   LLVMValueRef global = LLVMGetFirstGlobal(original);
+   for (LLVMValueRef copy = LLVMGetFirstGlobal(clone); copy && global;
+        copy = LLVMGetNextGlobal(copy), global = LLVMGetNextGlobal(global)) {
+      if (LLVMIsGlobalConstant(copy) || !stela_air_metadata_constructed(global))
+         continue;
+      if (result->count == AIR_MAX_ARGUMENTS)
+         return false;
+      result->globals[result->count] = global;
+      copies[result->count++] = copy;
+      LLVMSetLinkage(copy, LLVMExternalLinkage);
+   }
+   cast_conversions(clone);
+   LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
+   if (!options)
+      return false;
+   LLVMErrorRef error = LLVMRunPasses(clone, "globalopt", NULL, options);
+   LLVMDisposePassBuilderOptions(options);
+   if (error) {
+      LLVMDisposeErrorMessage(LLVMGetErrorMessage(error));
+      return false;
+   }
+   if (!constructed(clone))
+      return false;
+   for (unsigned i = 0; i < result->count; i++) {
+      result->values[i] = LLVMGetInitializer(copies[i]);
+      if (!plain(result->values[i], 0))
+         return false;
+   }
+   return true;
+}
+
+/* An unassociated constructor whose only reference is its list entry and
+ * whose calls reach only declarations is independent of shader inlining. */
+static bool
+leaf_constructor(LLVMValueRef entry)
+{
+   LLVMValueRef fn = LLVMGetOperand(entry, 1);
+   LLVMUseRef use = LLVMGetFirstUse(fn);
+   if (!LLVMIsAConstantPointerNull(LLVMGetOperand(entry, 2)) ||
+       !use || LLVMGetUser(use) != entry || LLVMGetNextUse(use))
+      return false;
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block; block = LLVMGetNextBasicBlock(block)) {
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst; inst = LLVMGetNextInstruction(inst)) {
+         if (LLVMIsAInvokeInst(inst) || LLVMIsACallBrInst(inst))
+            return false;
+         if (LLVMIsACallInst(inst)) {
+            LLVMValueRef callee = LLVMGetCalledValue(inst);
+            if (!LLVMIsAFunction(callee) || !LLVMIsDeclaration(callee))
+               return false;
+         }
+      }
+   }
+   return true;
+}
+
 bool
-stela_air_construct_constants(struct stela_air_metadata *m)
+stela_air_prepare_constants(struct stela_air_metadata *m, const struct stela_air_constants *constants,
+                            struct stela_air_constructed_constants *prepared)
+{
+   LLVMValueRef constructors = stela_air_metadata_constructors(m->module);
+   if (!constructors || !stela_air_has_defined_calls(m->module))
+      return false;
+   LLVMValueRef entries = LLVMGetInitializer(constructors);
+   uint64_t functions = LLVMGetArrayLength2(LLVMTypeOf(entries));
+   if (functions > AIR_MAX_ARGUMENTS)
+      return false;
+   for (unsigned i = 0; i < functions; i++) {
+      if (!leaf_constructor(LLVMGetAggregateElement(entries, i)))
+         return false;
+   }
+   LLVMModuleRef clone = LLVMCloneModule(m->module);
+   if (!clone)
+      return false;
+   struct stela_air_error prior = *m->error;
+   struct stela_air_metadata copy = *m;
+   copy.module = clone;
+   bool ready = stela_air_specialize_constants(&copy, constants->values, constants->count) &&
+                evaluate_constants(m->module, clone, prepared) && m->error->kind == STELA_AIR_OK;
+   LLVMDisposeModule(clone);
+   /* A compact clone that cannot evaluate uses the ordinary path and its diagnostic. */
+   *m->error = prior;
+   return ready;
+}
+
+/* Inlining can change whether a global is used only by AIR logging. Match
+ * the destinations of the post-inline module before using the staged values. */
+static bool
+prepared_matches(LLVMModuleRef module, const struct stela_air_constructed_constants *prepared)
+{
+   unsigned index = 0;
+   for (LLVMValueRef global = LLVMGetFirstGlobal(module); global; global = LLVMGetNextGlobal(global)) {
+      if (!stela_air_metadata_constructed(global))
+         continue;
+      if (index == prepared->count || prepared->globals[index++] != global)
+         return false;
+   }
+   return index == prepared->count;
+}
+
+bool
+stela_air_construct_prepared_constants(struct stela_air_metadata *m,
+                                        const struct stela_air_constructed_constants *prepared)
 {
    LLVMValueRef constructors = stela_air_metadata_constructors(m->module);
    if (!constructors)
       return true;
    LLVMValueRef entries = LLVMGetInitializer(constructors);
-   unsigned functions = LLVMGetArrayLength2(LLVMTypeOf(entries));
+   uint64_t functions = LLVMGetArrayLength2(LLVMTypeOf(entries));
    if (functions > AIR_MAX_ARGUMENTS)
       return fail(m, STELA_AIR_LIMIT, "constructor count exceeded");
-   /* The globals constructors may store, paired with the clone's; those stay
-    * defined there, so the optimizer keeps them and only commits their
-    * values. */
-   LLVMModuleRef clone = LLVMCloneModule(m->module);
-   if (!clone)
-      return fail(m, STELA_AIR_ALLOCATION, "module clone allocation failed");
-   LLVMValueRef originals[AIR_MAX_ARGUMENTS], copies[AIR_MAX_ARGUMENTS];
-   unsigned count = 0;
-   bool evaluated = true;
-   for (LLVMValueRef global = LLVMGetFirstGlobal(m->module), copy = LLVMGetFirstGlobal(clone);
-        global && copy && evaluated; global = LLVMGetNextGlobal(global), copy = LLVMGetNextGlobal(copy)) {
-      if (!stela_air_metadata_constructed(global))
-         continue;
-      evaluated = count < AIR_MAX_ARGUMENTS;
-      originals[count] = global;
-      copies[count++] = copy;
-      LLVMSetLinkage(copy, LLVMExternalLinkage);
+   struct stela_air_constructed_constants evaluated;
+   if (!prepared || !prepared_matches(m->module, prepared)) {
+      LLVMModuleRef clone = LLVMCloneModule(m->module);
+      if (!clone)
+         return fail(m, STELA_AIR_ALLOCATION, "module clone allocation failed");
+      bool ready = evaluate_constants(m->module, clone, &evaluated);
+      LLVMDisposeModule(clone);
+      if (!ready)
+         return fail(m, STELA_AIR_INSTRUCTION,
+                     "program-scope constants depend on more than function constants");
+      prepared = &evaluated;
    }
-   cast_conversions(clone);
-   LLVMPassBuilderOptionsRef options = evaluated ? LLVMCreatePassBuilderOptions() : NULL;
-   LLVMErrorRef error = options ? LLVMRunPasses(clone, "globalopt", NULL, options) : NULL;
-   if (options)
-      LLVMDisposePassBuilderOptions(options);
-   if (error) {
-      LLVMDisposeErrorMessage(LLVMGetErrorMessage(error));
-      evaluated = false;
-   }
-   evaluated &= options && constructed(clone);
-   LLVMValueRef values[AIR_MAX_ARGUMENTS];
-   for (unsigned i = 0; evaluated && i < count; i++)
-      evaluated = plain(values[i] = LLVMGetInitializer(copies[i]), 0);
-   /* The values are the context's, which outlives the clone. */
-   LLVMDisposeModule(clone);
-   if (!evaluated)
-      return fail(m, STELA_AIR_INSTRUCTION,
-                  "program-scope constants depend on more than function constants");
-   for (unsigned i = 0; i < count; i++) {
-      LLVMSetInitializer(originals[i], values[i]);
-      LLVMSetGlobalConstant(originals[i], true);
+   for (unsigned i = 0; i < prepared->count; i++) {
+      LLVMSetInitializer(prepared->globals[i], prepared->values[i]);
+      LLVMSetGlobalConstant(prepared->globals[i], true);
    }
    LLVMValueRef dropped[AIR_MAX_ARGUMENTS];
    for (unsigned i = 0; i < functions; i++)
@@ -345,6 +431,12 @@ stela_air_construct_constants(struct stela_air_metadata *m)
          LLVMDeleteFunction(dropped[i]);
    }
    return true;
+}
+
+bool
+stela_air_construct_constants(struct stela_air_metadata *m)
+{
+   return stela_air_construct_prepared_constants(m, NULL);
 }
 
 static bool

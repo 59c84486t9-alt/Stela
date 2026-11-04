@@ -39,6 +39,45 @@ const DPOFUA: u8 = 0x10;
 /// READ/WRITE (10) and (16) byte 1: Force Unit Access.
 pub(super) const FUA: u8 = 0x08;
 
+pub(super) enum Cdb {
+    Ten([u8; 10]),
+    Sixteen([u8; 16]),
+}
+
+impl AsRef<[u8]> for Cdb {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Ten(bytes) => bytes,
+            Self::Sixteen(bytes) => bytes,
+        }
+    }
+}
+
+/// READ or WRITE of `blocks` at `lba`, (10) when it fits, else (16),
+/// with Force Unit Access when `fua`.
+pub(super) fn read_write(write: bool, fua: bool, lba: u64, blocks: u32) -> Cdb {
+    let flags = if fua { FUA } else { 0 };
+    if lba
+        .checked_add(u64::from(blocks))
+        .is_some_and(|end| end <= u64::from(u32::MAX) + 1)
+        && blocks <= u32::from(u16::MAX)
+    {
+        let mut cdb = [0; 10];
+        cdb[0] = if write { WRITE_10 } else { READ_10 };
+        cdb[1] = flags;
+        cdb[2..6].copy_from_slice(&(lba as u32).to_be_bytes());
+        cdb[7..9].copy_from_slice(&(blocks as u16).to_be_bytes());
+        Cdb::Ten(cdb)
+    } else {
+        let mut cdb = [0; 16];
+        cdb[0] = if write { WRITE_16 } else { READ_16 };
+        cdb[1] = flags;
+        cdb[2..10].copy_from_slice(&lba.to_be_bytes());
+        cdb[10..14].copy_from_slice(&blocks.to_be_bytes());
+        Cdb::Sixteen(cdb)
+    }
+}
+
 pub(super) fn request_sense() -> [u8; 6] {
     [REQUEST_SENSE, 0, 0, 0, SENSE_BYTES as u8, 0]
 }
@@ -86,6 +125,25 @@ pub(super) fn write_cache_enabled(mode: &[u8]) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_write_commands_keep_wire_width_lba_count_and_fua() {
+        let last = u64::from(u32::MAX);
+        assert_eq!(
+            read_write(false, false, last, 1).as_ref(),
+            &[READ_10, 0, 0xff, 0xff, 0xff, 0xff, 0, 0, 1, 0]
+        );
+        assert_eq!(
+            read_write(true, true, last, 2).as_ref(),
+            &[
+                WRITE_16, FUA, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 2, 0, 0
+            ]
+        );
+        assert_eq!(
+            read_write(true, false, 17, 0x1_0000).as_ref(),
+            &[WRITE_16, 0, 0, 0, 0, 0, 0, 0, 0, 17, 0, 1, 0, 0, 0, 0]
+        );
+    }
 
     #[test]
     fn mode_data_yields_write_protection_and_the_write_cache() {

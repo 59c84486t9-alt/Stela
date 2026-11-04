@@ -76,6 +76,8 @@ const LOG_CAPACITY: usize = 4096;
 const LOGGED_INPUT: usize = 64;
 /// How many `swap_submit_dcp` inputs are logged whole.
 const DUMPED_SWAPS: u32 = 2;
+/// Report progress once this many swaps have reached the scanout.
+const PRESENT_SUMMARY_INTERVAL: u64 = 256;
 /// `IOMFBPARAM_ADAPTIVE_SYNC` (Asahi `iomfb.h`).
 const ADAPTIVE_SYNC: u32 = 14;
 /// `D594 swap_complete_ap_gated`'s input starts with the swap ID. Its
@@ -143,6 +145,10 @@ pub struct Methods {
     log: VecDeque<Log>,
     dropped: u64,
     dumped: u32,
+    /// Whether to report each swap's calls, present and completion.
+    trace_swaps: bool,
+    /// Swaps whose pixels reached the host since this display was placed.
+    presented: u64,
     /// The monitor's power and sleep state, shared with its IOAV controller.
     display: Rc<RefCell<DisplayState>>,
     /// Open IOMFB clients (`first_client_open` minus `last_client_close`).
@@ -222,6 +228,8 @@ impl Methods {
             log: VecDeque::new(),
             dropped: 0,
             dumped: 0,
+            trace_swaps: true,
+            presented: 0,
             display,
             clients: 0,
             digital_out: None,
@@ -264,6 +272,15 @@ impl Methods {
         self.last_refusal.as_deref()
     }
 
+    /// Choose per-swap tracing or bounded presentation reports.
+    pub(super) fn set_swap_tracing(&mut self, enabled: bool) {
+        self.trace_swaps = enabled;
+    }
+
+    fn trace_swap(&self, swap_id: u32) -> bool {
+        self.trace_swaps || swap_id <= DUMPED_SWAPS
+    }
+
     /// The next display-log entry.
     pub fn take_log(&mut self) -> Option<Log> {
         self.log.pop_front().or_else(|| {
@@ -302,10 +319,19 @@ impl Methods {
         // owns its surfaces until presentation succeeds, or the AP explicitly
         // aborts/shuts down; neither failure consumes it or queues D594.
         let frame = self.frames.pop_front().expect("presented front frame");
-        self.record_log(Log::Presented {
-            swap_id: frame.swap_id,
-            surfaces: frame.layers.iter().map(|layer| layer.surface).collect(),
-        });
+        self.presented = self.presented.saturating_add(1);
+        if self.trace_swap(frame.swap_id) {
+            self.record_log(Log::Presented {
+                swap_id: frame.swap_id,
+                surfaces: frame.layers.iter().map(|layer| layer.surface).collect(),
+            });
+        }
+        if !self.trace_swaps && self.presented.is_multiple_of(PRESENT_SUMMARY_INTERVAL) {
+            self.record_log(Log::PresentSummary {
+                total: self.presented,
+                last_swap: frame.swap_id,
+            });
+        }
         self.completed.push_back(frame.swap_id);
         Ok(())
     }
@@ -426,11 +452,15 @@ impl Methods {
 
 impl Service for Methods {
     fn call(&mut self, tag: [u8; 4], input: &[u8], output: u32) -> Result<Step<Self>> {
-        self.record_log(Log::Call {
-            tag,
-            input: input[..input.len().min(LOGGED_INPUT)].to_vec(),
-            output,
-        });
+        if !matches!(&tag, b"A406" | b"A407")
+            || self.trace_swap(self.open_swap.unwrap_or(self.next_swap))
+        {
+            self.record_log(Log::Call {
+                tag,
+                input: input[..input.len().min(LOGGED_INPUT)].to_vec(),
+                output,
+            });
+        }
         let Some(row) = abi::method(&tag) else {
             return self.refuse(tag, refuse!("tag is not a method of this DCP interface"));
         };
@@ -746,7 +776,9 @@ impl Service for Methods {
         input[0..4].copy_from_slice(&swap_id.to_le_bytes());
         input[SWAP_COMPLETE_DATA_NULL] = 1;
         self.in_flight = true;
-        self.callback_log(SWAP_COMPLETE, length, 0);
+        if self.trace_swap(swap_id) {
+            self.callback_log(SWAP_COMPLETE, length, 0);
+        }
         Some(Callback {
             tag: SWAP_COMPLETE,
             input,

@@ -116,7 +116,7 @@ impl Mux {
         version.extend_from_slice(&2u32.to_be_bytes());
         version.extend_from_slice(&0u32.to_be_bytes());
         version.extend_from_slice(&0u32.to_be_bytes());
-        mux.emit(VERSION, &version)
+        mux.emit(VERSION, &version, &[])
             .expect("one version frame fits the empty queue");
         mux
     }
@@ -169,9 +169,9 @@ impl Mux {
             && bytes <= MAX_FRAME
             && self.queued_bytes + bytes <= MAX_QUEUED_BYTES
     }
-    fn emit(&mut self, protocol: u32, payload: &[u8]) -> Result<()> {
+    fn emit(&mut self, protocol: u32, prefix: &[u8], data: &[u8]) -> Result<()> {
         let header = self.header();
-        let bytes = header + payload.len();
+        let bytes = header + prefix.len() + data.len();
         if bytes > TX_MTU || !self.can_emit(bytes) {
             return Err(refuse!("usbmux transmit queue backpressure"));
         }
@@ -188,7 +188,8 @@ impl Mux {
             packet.extend_from_slice(&self.rx_sequence.to_be_bytes());
             self.tx_sequence = self.tx_sequence.wrapping_add(1);
         }
-        packet.extend_from_slice(payload);
+        packet.extend_from_slice(prefix);
+        packet.extend_from_slice(data);
         self.outgoing.push_back(packet);
         self.queued_bytes += bytes;
         Ok(())
@@ -248,17 +249,15 @@ impl Mux {
     }
     fn send_tcp(&mut self, index: usize, flags: u8, sequence: u32, data: &[u8]) -> Result<()> {
         let stream = &self.streams[index];
-        let mut payload = tcp_header(
+        let header = tcp_header(
             stream.id.port,
             stream.destination,
             sequence,
             stream.received,
             flags,
             ((RX_WINDOW - stream.input.len()) >> 8) as u16,
-        )
-        .to_vec();
-        payload.extend_from_slice(data);
-        self.emit(TCP, &payload)?;
+        );
+        self.emit(TCP, &header, data)?;
         // Every segment carries the current ACK, and an RST ends the stream.
         self.streams[index].reply = None;
         Ok(())
@@ -336,43 +335,57 @@ impl Mux {
     /// Consumes fragmented/coalesced bulk bytes, including empty USB ZLPs.
     /// Parsing is length-bounded before reserving space. A protocol error
     /// terminates this connection; reset is the only recovery path.
-    pub fn receive(&mut self, mut bytes: &[u8]) -> Result<()> {
+    pub fn receive(&mut self, bytes: &[u8]) -> Result<()> {
         if self.state == State::Failed {
             return Err(refuse!("usbmux connection requires reset"));
         }
-        let result = self.receive_inner(&mut bytes);
+        let result = self.receive_inner(bytes);
         if result.is_err() {
             self.state = State::Failed;
         }
         self.flush_replies();
         result
     }
-    fn receive_inner(&mut self, bytes: &mut &[u8]) -> Result<()> {
+    fn frame_length(&self, bytes: &[u8]) -> Result<usize> {
+        let length = u32::from_be_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        if length < self.header() || length > MAX_FRAME {
+            return Err(refuse!("invalid usbmux frame length"));
+        }
+        Ok(length)
+    }
+    fn receive_inner(&mut self, mut bytes: &[u8]) -> Result<()> {
         while !bytes.is_empty() {
-            let target = if self.receive.len() < VERSION_HEADER {
-                VERSION_HEADER
-            } else {
-                let length = u32::from_be_bytes(self.receive[4..8].try_into().unwrap()) as usize;
-                if length < self.header() || length > MAX_FRAME {
-                    return Err(refuse!("invalid usbmux frame length"));
+            // ACKs and other complete frames can be handled directly in
+            // the bulk transfer that delivered them.
+            if self.receive.is_empty() && bytes.len() >= VERSION_HEADER {
+                let length = self.frame_length(bytes)?;
+                if let Some((packet, rest)) = bytes.split_at_checked(length) {
+                    self.input(packet)?;
+                    bytes = rest;
+                    continue;
                 }
-                length
-            };
-            let count = (target - self.receive.len()).min(bytes.len());
-            self.receive.extend_from_slice(&bytes[..count]);
-            *bytes = &bytes[count..];
+            }
             if self.receive.len() < VERSION_HEADER {
-                continue;
+                let missing = VERSION_HEADER - self.receive.len();
+                let (header, rest) = bytes.split_at(missing.min(bytes.len()));
+                self.receive.extend_from_slice(header);
+                bytes = rest;
+                if self.receive.len() < VERSION_HEADER {
+                    break;
+                }
             }
-            let length = u32::from_be_bytes(self.receive[4..8].try_into().unwrap()) as usize;
-            if length < self.header() || length > MAX_FRAME {
-                return Err(refuse!("invalid usbmux frame length"));
+            let length = self.frame_length(&self.receive)?;
+            let missing = length - self.receive.len();
+            let (fragment, rest) = bytes.split_at(missing.min(bytes.len()));
+            self.receive.extend_from_slice(fragment);
+            bytes = rest;
+            if self.receive.len() == length {
+                let mut packet = core::mem::take(&mut self.receive);
+                let result = self.input(&packet);
+                packet.clear();
+                self.receive = packet;
+                result?;
             }
-            if self.receive.len() != length {
-                continue;
-            }
-            let packet = core::mem::take(&mut self.receive);
-            self.input(&packet)?;
         }
         Ok(())
     }
@@ -401,7 +414,7 @@ impl Mux {
                 }
                 self.version = major;
                 if major == 2 {
-                    self.emit(SETUP, &[7])?;
+                    self.emit(SETUP, &[7], &[])?;
                 }
                 self.state = State::Active;
             }
@@ -440,7 +453,11 @@ impl Mux {
             // With the queue full the RST is dropped, as a lost segment
             // would be; the peer's next segment draws another.
             if flags & RST == 0 && self.can_emit(self.header() + TCP_HEADER) {
-                self.emit(TCP, &tcp_header(destination, source, 0, sequence, RST, 0))?;
+                self.emit(
+                    TCP,
+                    &tcp_header(destination, source, 0, sequence, RST, 0),
+                    &[],
+                )?;
             }
             return Ok(());
         };
@@ -528,7 +545,7 @@ pub mod test_support {
         mux.outgoing.clear();
         mux.queued_bytes = 0;
         mux.version = version;
-        mux.emit(protocol, payload).unwrap();
+        mux.emit(protocol, payload, &[]).unwrap();
         mux.take_packet().unwrap()
     }
     pub(crate) fn version(major: u32) -> Vec<u8> {
@@ -636,6 +653,23 @@ mod tests {
         assert!(mux.stream_state(id).is_err());
     }
     #[test]
+    fn complete_and_split_frames_switch_header_sizes_during_negotiation() {
+        let mut bytes = version(2);
+        bytes.extend(wire(CONTROL, b"first", 2));
+        bytes.extend(wire(CONTROL, b"second", 2));
+        for split in 0..=bytes.len() {
+            let mut mux = Mux::new();
+            mux.take_packet().unwrap();
+            mux.receive(&bytes[..split]).unwrap();
+            mux.receive(&bytes[split..]).unwrap();
+            assert_eq!(mux.state(), State::Active);
+            assert_eq!(mux.take_packet().unwrap()[MUX2_HEADER..], [7]);
+            assert_eq!(mux.take_log().as_deref(), Some(b"first".as_slice()));
+            assert_eq!(mux.take_log().as_deref(), Some(b"second".as_slice()));
+            assert!(mux.receive.is_empty());
+        }
+    }
+    #[test]
     fn sequence_wrap_windows_and_close() {
         let (mut mux, id) = connected();
         let stream = &mut mux.streams[0];
@@ -697,7 +731,7 @@ mod tests {
             mux.open(62078).unwrap();
         }
         assert!(mux.open(62078).is_err());
-        while mux.emit(CONTROL, b"log").is_ok() {}
+        while mux.emit(CONTROL, b"log", &[]).is_ok() {}
         assert!(mux.queued_bytes <= MAX_QUEUED_BYTES);
         assert!(mux.outgoing.len() <= MAX_QUEUED);
     }
@@ -720,7 +754,7 @@ mod tests {
         mux.streams[0].window = u32::MAX;
         while mux.write(id, &[0; 4096]).unwrap() != 0 {}
         while mux.write(id, b"x").unwrap() != 0 {}
-        while mux.emit(CONTROL, &[]).is_ok() {}
+        while mux.emit(CONTROL, &[], &[]).is_ok() {}
         assert!(!mux.control_ready());
         let sent = mux.streams[0].next;
         for sequence in [1, 3] {

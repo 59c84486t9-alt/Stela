@@ -15,7 +15,6 @@ fn allocate_large(bytes: u64) -> Result<Region> {
 
 /// The relocated engine image and the host ranges its mappings must reach.
 pub(super) struct EngineImage {
-    pub snapshot: Snapshot,
     pub image: firmware::Image,
     pub engine: Region,
     pub ram: Vec<(usize, usize)>,
@@ -40,9 +39,7 @@ pub(super) struct EngineMemory {
 }
 
 /// Copy and relocate the pristine image into the selected host window.
-pub(super) fn prepare_image() -> Result<EngineImage> {
-    // SAFETY: written once at entry, read here.
-    let snapshot = unsafe { *PRISTINE.0.get() }.ok_or(refuse!("no pristine image copy"))?;
+pub(super) fn prepare_image(snapshot: &Snapshot) -> Result<EngineImage> {
     let image = firmware::Image::loaded()?;
     if image.start != snapshot.start || image.end - image.start != snapshot.bytes {
         return Err(refuse!("image layout changed after the snapshot"));
@@ -51,7 +48,7 @@ pub(super) fn prepare_image() -> Result<EngineImage> {
     // SAFETY: two distinct live allocations of `bytes`.
     unsafe {
         core::ptr::copy_nonoverlapping(
-            snapshot.copy as *const u8,
+            snapshot.copy.as_ptr(),
             engine.physical as *mut u8,
             snapshot.bytes,
         );
@@ -78,7 +75,6 @@ pub(super) fn prepare_image() -> Result<EngineImage> {
         layout::image().wrapping_sub(image.start as u64),
     )?;
     Ok(EngineImage {
-        snapshot,
         image,
         engine,
         ram,
@@ -190,7 +186,6 @@ pub(super) fn map(
     host_firmware: &crate::host_firmware::Resources,
 ) -> Result<Storage> {
     let EngineImage {
-        snapshot,
         image,
         engine,
         ram,
@@ -249,7 +244,7 @@ pub(super) fn map(
         )?;
     }
     // The window: the engine image with section rights, heap, stack, code.
-    let bytes = snapshot.bytes as u64;
+    let bytes = engine.bytes;
     let mut page = 0;
     while page < bytes {
         let rights = image.rights(image.start + page as usize);

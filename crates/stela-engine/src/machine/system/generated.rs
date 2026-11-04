@@ -40655,20 +40655,20 @@ fn a806(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         {
-            let value = c.error_record(
-                ErrorRecord::Addr,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Addr, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
-            let value = c.error_record(
-                ErrorRecord::Addr,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Addr, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
@@ -40699,22 +40699,16 @@ fn a807(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         }
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Addr,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Addr, index, value)?;
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Addr,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Addr, index, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -40743,20 +40737,20 @@ fn a808(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         {
-            let value = c.error_record(
-                ErrorRecord::Ctlr,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Ctlr, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
-            let value = c.error_record(
-                ErrorRecord::Ctlr,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Ctlr, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
@@ -40787,22 +40781,16 @@ fn a809(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         }
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Ctlr,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Ctlr, index, value)?;
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Ctlr,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Ctlr, index, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -40831,20 +40819,20 @@ fn a810(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         {
-            let value = c.error_record(
-                ErrorRecord::Fr,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Fr, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
-            let value = c.error_record(
-                ErrorRecord::Fr,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Fr, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
@@ -40877,20 +40865,20 @@ fn a811(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         {
-            let value = c.error_record(
-                ErrorRecord::Gsr,
-                bits(bits(c.read(Register::ERRSELR_EL1, 0), 0, 16), 6, 10),
-            );
+            let value = {
+                let index = bits(bits(c.read(Register::ERRSELR_EL1, 0), 0, 16), 6, 10);
+                c.error_record(ErrorRecord::Gsr, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
-            let value = c.error_record(
-                ErrorRecord::Gsr,
-                bits(bits(c.read(Register::ERRSELR_EL1, 0), 0, 16), 6, 10),
-            );
+            let value = {
+                let index = bits(bits(c.read(Register::ERRSELR_EL1, 0), 0, 16), 6, 10);
+                c.error_record(ErrorRecord::Gsr, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
@@ -40920,20 +40908,20 @@ fn a812(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         {
-            let value = c.error_record(
-                ErrorRecord::Misc0,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Misc0, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
-            let value = c.error_record(
-                ErrorRecord::Misc0,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Misc0, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
@@ -40964,22 +40952,16 @@ fn a813(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         }
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Misc0,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Misc0, index, value)?;
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Misc0,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Misc0, index, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -41008,20 +40990,20 @@ fn a814(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         {
-            let value = c.error_record(
-                ErrorRecord::Misc1,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Misc1, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
-            let value = c.error_record(
-                ErrorRecord::Misc1,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Misc1, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
@@ -41052,22 +41034,16 @@ fn a815(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         }
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Misc1,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Misc1, index, value)?;
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Misc1,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Misc1, index, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -41096,20 +41072,20 @@ fn a816(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         {
-            let value = c.error_record(
-                ErrorRecord::Misc2,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Misc2, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
-            let value = c.error_record(
-                ErrorRecord::Misc2,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Misc2, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
@@ -41140,22 +41116,16 @@ fn a817(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         }
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Misc2,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Misc2, index, value)?;
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Misc2,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Misc2, index, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -41184,20 +41154,20 @@ fn a818(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         {
-            let value = c.error_record(
-                ErrorRecord::Misc3,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Misc3, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
-            let value = c.error_record(
-                ErrorRecord::Misc3,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Misc3, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
@@ -41228,22 +41198,16 @@ fn a819(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         }
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Misc3,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Misc3, index, value)?;
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Misc3,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Misc3, index, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -41272,20 +41236,20 @@ fn a820(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         {
-            let value = c.error_record(
-                ErrorRecord::Pfgcdn,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Pfgcdn, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
-            let value = c.error_record(
-                ErrorRecord::Pfgcdn,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Pfgcdn, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
@@ -41316,22 +41280,16 @@ fn a821(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         }
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Pfgcdn,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Pfgcdn, index, value)?;
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Pfgcdn,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Pfgcdn, index, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -41360,20 +41318,20 @@ fn a822(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         {
-            let value = c.error_record(
-                ErrorRecord::Pfgctl,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Pfgctl, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
-            let value = c.error_record(
-                ErrorRecord::Pfgctl,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Pfgctl, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
@@ -41404,22 +41362,16 @@ fn a823(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         }
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Pfgctl,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Pfgctl, index, value)?;
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Pfgctl,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Pfgctl, index, value)?;
         }
         return Ok(Effect::Done);
     }
@@ -41448,20 +41400,20 @@ fn a824(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         {
-            let value = c.error_record(
-                ErrorRecord::Pfgf,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Pfgf, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
-            let value = c.error_record(
-                ErrorRecord::Pfgf,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Pfgf, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
@@ -41491,20 +41443,20 @@ fn a825(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
             });
         }
         {
-            let value = c.error_record(
-                ErrorRecord::Status,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Status, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
-            let value = c.error_record(
-                ErrorRecord::Status,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-            );
+            let value = {
+                let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+                c.error_record(ErrorRecord::Status, index)
+            };
             c.set_x(value);
         }
         return Ok(Effect::Done);
@@ -41535,22 +41487,16 @@ fn a826(c: &mut dyn Context, m: u64) -> Result<Effect, Effect> {
         }
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Status,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Status, index, value)?;
         }
         return Ok(Effect::Done);
     }
     if (c.el()) == (2) {
         {
             let value = c.x();
-            c.set_error_record(
-                ErrorRecord::Status,
-                bits(c.read(Register::ERRSELR_EL1, 0), 0, 16),
-                value,
-            )?;
+            let index = bits(c.read(Register::ERRSELR_EL1, 0), 0, 16);
+            c.set_error_record(ErrorRecord::Status, index, value)?;
         }
         return Ok(Effect::Done);
     }

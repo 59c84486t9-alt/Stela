@@ -1009,8 +1009,19 @@ pub(super) enum Rax {
 }
 
 /// What RAX holds after `operation`'s emission by [`emit_instruction`].
-pub(super) fn rax_after(operation: &Operation) -> Rax {
+pub(super) fn rax_after(operation: &Operation, pinned: bool) -> Rax {
     match *operation {
+        Operation::Memory {
+            transfer: MemoryTransfer::Load { .. },
+            data,
+            mode: AddressMode::Offset,
+            ..
+        }
+        | Operation::MemoryRegisterOffset(crate::aarch64::register_offset::Operand {
+            transfer: MemoryTransfer::Load { .. },
+            data,
+            ..
+        }) if pinned && data != Register::Zero => Rax::Guest(data),
         Operation::AddSub { flags: true, .. }
         | Operation::AddSubRegister { flags: true, .. }
         | Operation::AddSubExtended { flags: true, .. }
@@ -1038,18 +1049,26 @@ pub(super) fn rax_after(operation: &Operation) -> Rax {
     }
 }
 
-/// [`load`]'s bytes for a register in code like `like`, but for XZR.
-pub(super) fn register_load(like: &Code, register: Register) -> Option<Code> {
-    let mut code = like.alike();
-    load(&mut code, register);
-    offset(register).map(|_| code)
+/// [`load`]'s bytes for a register, but for XZR.
+pub(super) fn register_load(scratch: &mut Code, register: Register, pinned: bool) -> Option<&[u8]> {
+    offset(register)?;
+    scratch.clear();
+    scratch.set_pinned(pinned);
+    load(scratch, register);
+    Some(scratch)
 }
 
-/// [`store`]'s bytes for a register in code like `like`, but for XZR.
-pub(super) fn register_store(like: &Code, register: Register) -> Option<Code> {
-    let mut code = like.alike();
-    store(&mut code, register);
-    offset(register).map(|_| code)
+/// [`store`]'s bytes for a register, but for XZR.
+pub(super) fn register_store(
+    scratch: &mut Code,
+    register: Register,
+    pinned: bool,
+) -> Option<&[u8]> {
+    offset(register)?;
+    scratch.clear();
+    scratch.set_pinned(pinned);
+    store(scratch, register);
+    Some(scratch)
 }
 
 /// `movabs rax,value`.
@@ -1131,6 +1150,12 @@ pub(crate) fn emit_instruction(
         return;
     }
     match instruction.operation {
+        Operation::AddSub { .. }
+        | Operation::AddSubRegister { .. }
+        | Operation::LogicalImmediate { .. }
+        | Operation::LogicalRegister { .. } => {
+            unreachable!("common integer emitter handled the operation")
+        }
         Operation::FloatingPoint(_) => {
             unreachable!("numerical instructions require block emission")
         }
@@ -1246,24 +1271,6 @@ pub(crate) fn emit_instruction(
                 nzcv(code, false);
             }
         }
-        Operation::AddSubRegister {
-            width,
-            subtract,
-            flags,
-            destination,
-            left,
-            right,
-            shift,
-            amount,
-        } => {
-            load(code, left);
-            right_operand(code, right, width, shift, amount);
-            add_sub(code, width, subtract);
-            store(code, destination);
-            if flags {
-                nzcv(code, subtract);
-            }
-        }
         Operation::AddSubExtended {
             width,
             subtract,
@@ -1276,17 +1283,22 @@ pub(crate) fn emit_instruction(
         } => {
             // Read both operands before a possibly overlapping destination/SP write.
             load(code, left);
-            right_operand(code, right, Width::X64, Shift::Lsl, 0);
             use asm::Size::{Byte, Dword, Qword, Word};
             let mut asm = code.asm();
-            match extend {
-                RegisterExtend::Uxtb => asm.movzx(Dword, Rcx, Byte, Rcx),
-                RegisterExtend::Uxth => asm.movzx(Dword, Rcx, Word, Rcx),
-                RegisterExtend::Uxtw => asm.mov(Dword, Rcx, Rcx),
-                RegisterExtend::Sxtb => asm.movsx(Qword, Rcx, Byte, Rcx),
-                RegisterExtend::Sxth => asm.movsx(Qword, Rcx, Word, Rcx),
-                RegisterExtend::Sxtw => asm.movsxd(Rcx, Rcx),
-                RegisterExtend::Uxtx | RegisterExtend::Sxtx => {}
+            if let Some(storage) = asm.guest(right) {
+                match extend {
+                    RegisterExtend::Uxtb => asm.movzx(Dword, Rcx, Byte, storage),
+                    RegisterExtend::Uxth => asm.movzx(Dword, Rcx, Word, storage),
+                    RegisterExtend::Uxtw => asm.mov_load(Dword, Rcx, storage),
+                    RegisterExtend::Sxtb => asm.movsx(Qword, Rcx, Byte, storage),
+                    RegisterExtend::Sxth => asm.movsx(Qword, Rcx, Word, storage),
+                    RegisterExtend::Sxtw => asm.movsxd(Rcx, storage),
+                    RegisterExtend::Uxtx | RegisterExtend::Sxtx => {
+                        asm.mov_load(Qword, Rcx, storage)
+                    }
+                }
+            } else {
+                asm.alu(Alu::Xor, Dword, Rcx, Rcx);
             }
             if amount != 0 {
                 asm.shift_imm(asm::ShiftOp::Shl, Qword, Rcx, amount);
@@ -1305,47 +1317,6 @@ pub(crate) fn emit_instruction(
         Operation::Atomic(operand) => atomic::emit(code, &operand, target, checks),
         Operation::Ordered(operand) => ordered::emit(code, &operand, target, checks),
         Operation::Prefetch(operand) => prefetch::emit(code, &operand),
-        Operation::LogicalImmediate {
-            width,
-            kind,
-            flags,
-            destination,
-            source,
-            immediate,
-        } => {
-            load(code, source);
-            let mut asm = code.asm();
-            asm.mov_imm64(Rcx, immediate);
-            asm.alu(logical(kind), asm::Size::of(width == Width::X64), Rax, Rcx);
-            store(code, destination); // MOV preserves the logical result flags.
-            if flags {
-                nzcv(code, false); // AND clears CF/OF, matching ARM C/V=0.
-            }
-        }
-        Operation::LogicalRegister {
-            width,
-            kind,
-            invert,
-            flags,
-            destination,
-            left,
-            right,
-            shift,
-            amount,
-        } => {
-            load(code, left);
-            right_operand(code, right, width, shift, amount);
-            let size = asm::Size::of(width == Width::X64);
-            let mut asm = code.asm();
-            if invert {
-                asm.unary(asm::Unary::Not, size, Rcx);
-            }
-            asm.alu(logical(kind), size, Rax, Rcx);
-            store(code, destination);
-            if flags {
-                nzcv(code, false);
-            } // AND clears host CF/OF, matching ARM C/V=0.
-        }
         Operation::Return => code.asm().ret(),
         Operation::Exclusive(_) => unreachable!("exclusive requires checked context emitter"),
         Operation::CheckedPointer(_) => {
@@ -1378,26 +1349,6 @@ pub(crate) fn emit_instruction(
                 code.asm().mov(Dword, Rax, Rax);
             }
             store(code, destination);
-        }
-        Operation::AddSub {
-            width,
-            subtract,
-            flags,
-            destination,
-            source,
-            immediate,
-        } => {
-            load(code, source);
-            code.asm().alu_imm32(
-                if subtract { Alu::Sub } else { Alu::Add },
-                asm::Size::of(width == Width::X64),
-                Rax,
-                immediate as i32,
-            );
-            store(code, destination); // MOV leaves arithmetic flags unchanged.
-            if flags {
-                nzcv(code, subtract);
-            }
         }
     }
 }

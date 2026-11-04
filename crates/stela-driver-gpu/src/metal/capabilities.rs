@@ -20,7 +20,7 @@ use super::{
         physical::{Features, FormatSupport, PhysicalDevice},
     },
 };
-use alloc::{string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 
 pub mod block;
 
@@ -162,6 +162,32 @@ option_set! {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum PixelFormats {
+    /// The capabilities of every known format, in `PixelFormat::ALL` order.
+    Indexed(Box<IndexedPixelFormats>),
+    /// A decoded list with its original omissions, order and duplicates.
+    Listed(Box<[(PixelFormat, FormatCapabilities)]>),
+}
+
+type IndexedPixelFormats = [FormatCapabilities; PixelFormat::ALL.len()];
+
+fn indexed_format(formats: &IndexedPixelFormats, format: PixelFormat) -> FormatCapabilities {
+    formats[format.index()]
+}
+
+impl PixelFormats {
+    fn get(&self, format: PixelFormat) -> FormatCapabilities {
+        match self {
+            Self::Indexed(formats) => indexed_format(formats, format),
+            Self::Listed(formats) => formats
+                .iter()
+                .find(|(known, _)| *known == format)
+                .map_or(FormatCapabilities::EMPTY, |(_, capabilities)| *capabilities),
+        }
+    }
+}
+
 /// `MTLSize`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Size {
@@ -289,7 +315,7 @@ pub struct Capabilities {
     sparse_samples: Vec<(PixelFormat, SampleCounts)>,
     vertex_formats: Vec<VertexFormat>,
     families: Vec<GpuFamily>,
-    formats: Vec<(PixelFormat, FormatCapabilities)>,
+    formats: PixelFormats,
     gaps: Vec<Gap>,
     linear_row_alignment: u64,
     linear_offset_alignment: u64,
@@ -340,10 +366,7 @@ impl Capabilities {
 
     /// Capabilities of `format`; empty for formats this device cannot store.
     pub fn format(&self, format: PixelFormat) -> FormatCapabilities {
-        self.formats
-            .iter()
-            .find(|(known, _)| *known == format)
-            .map_or(FormatCapabilities::EMPTY, |(_, capabilities)| *capabilities)
+        self.formats.get(format)
     }
 
     /// Every refused capability, each listed once.
@@ -605,12 +628,7 @@ impl Derivation<'_> {
         let features = &device.features;
 
         let formats = self.formats();
-        let caps = |format: PixelFormat| {
-            formats
-                .iter()
-                .find(|(known, _)| *known == format)
-                .map_or(FormatCapabilities::EMPTY, |(_, capabilities)| *capabilities)
-        };
+        let caps = |format| indexed_format(&formats, format);
         let float32 = [
             PixelFormat::R32Float,
             PixelFormat::Rg32Float,
@@ -933,7 +951,7 @@ impl Derivation<'_> {
             sparse_samples,
             vertex_formats,
             families: Vec::new(),
-            formats,
+            formats: PixelFormats::Indexed(formats),
             gaps: Vec::new(),
             linear_row_alignment: self.platform.linear_row_alignment,
             linear_offset_alignment: self.platform.linear_offset_alignment,
@@ -950,23 +968,26 @@ impl Derivation<'_> {
         capabilities
     }
 
-    fn formats(&mut self) -> Vec<(PixelFormat, FormatCapabilities)> {
-        let mut formats = Vec::with_capacity(PixelFormat::ALL.len());
-        for format in PixelFormat::ALL {
+    fn formats(&mut self) -> Box<IndexedPixelFormats> {
+        let mut formats = Box::new([FormatCapabilities::EMPTY; PixelFormat::ALL.len()]);
+        for (format, capabilities) in PixelFormat::ALL.iter().zip(formats.iter_mut()) {
             let description = format.describe();
-            let capabilities = match description.realization {
+            *capabilities = match description.realization {
                 Ok(realization) => {
                     let support = self.device.formats.get(realization.format);
                     self.format_capabilities(description, support, realization.is_identity())
                 }
                 Err(_) => FormatCapabilities::EMPTY,
             };
-            formats.push((*format, capabilities));
         }
         self.compression_gaps(&formats);
-        if formats.iter().any(|(format, capabilities)| {
-            format.describe().realization.is_err() && capabilities.is_empty()
-        }) {
+        if PixelFormat::ALL
+            .iter()
+            .zip(formats.iter())
+            .any(|(format, capabilities)| {
+                format.describe().realization.is_err() && capabilities.is_empty()
+            })
+        {
             self.gap("extended-range and 4:2:2 pixel formats", Cause::Driver);
         }
         formats
@@ -1016,7 +1037,7 @@ impl Derivation<'_> {
         supported
     }
 
-    fn compression_gaps(&mut self, formats: &[(PixelFormat, FormatCapabilities)]) {
+    fn compression_gaps(&mut self, formats: &IndexedPixelFormats) {
         let groups = [
             (Compression::Bc, "BC pixel formats"),
             (Compression::Etc2Eac, "ETC2 and EAC pixel formats"),
@@ -1025,8 +1046,9 @@ impl Derivation<'_> {
             (Compression::Pvrtc, "PVRTC pixel formats"),
         ];
         for (compression, name) in groups {
-            let unusable = formats
+            let unusable = PixelFormat::ALL
                 .iter()
+                .zip(formats)
                 .filter(|(format, _)| format.describe().compression == compression)
                 .all(|(_, capabilities)| !capabilities.contains(FormatCapabilities::READ));
             if unusable {
@@ -1140,10 +1162,7 @@ impl Derivation<'_> {
 
     /// Tier 1 reads and writes the 32-bit single-channel formats in one
     /// function; tier 2 adds Apple's listed 8-, 16- and 32-bit formats.
-    fn read_write_tier(
-        &mut self,
-        formats: &[(PixelFormat, FormatCapabilities)],
-    ) -> ReadWriteTextureTier {
+    fn read_write_tier(&mut self, formats: &IndexedPixelFormats) -> ReadWriteTextureTier {
         use PixelFormat as P;
         const TIER1: [PixelFormat; 3] = [P::R32Float, P::R32Uint, P::R32Sint];
         const TIER2: [PixelFormat; 12] = [
@@ -1162,9 +1181,7 @@ impl Derivation<'_> {
         ];
         const TIER2_8BIT: [PixelFormat; 3] = [P::R8Unorm, P::R8Uint, P::R8Sint];
         let read_write = |format: &PixelFormat| {
-            formats.iter().any(|(known, capabilities)| {
-                known == format && capabilities.contains(FormatCapabilities::READ_WRITE)
-            })
+            indexed_format(formats, *format).contains(FormatCapabilities::READ_WRITE)
         };
         let tier1 = TIER1.iter().all(read_write);
         let tier2 = tier1 && TIER2.iter().chain(&TIER2_8BIT).all(read_write);

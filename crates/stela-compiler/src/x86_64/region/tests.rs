@@ -1605,14 +1605,18 @@ fn wider_loop_admission_uses_capacity_not_five_participants() {
             condition: 1,
         }),
     );
-    let plan = self_loop::Plan::new(&instructions, Some(&terminal), GuestAddress(0x1024)).unwrap();
-    let native = plan.emit(&instructions).unwrap();
+    let fallthrough = GuestAddress(0x1024);
+    let target = crate::TargetCpu::Baseline;
+    let plan = self_loop::Plan::new(&instructions, Some(&terminal), fallthrough).unwrap();
+    let native = plan
+        .emit(&instructions, Some(&terminal), fallthrough, target)
+        .unwrap();
     assert_eq!(native.source_map.len(), instructions.len() + 1);
     assert_eq!(native.source_map[0].1, 0);
     let changed = [instruction(0, Operation::Nop)];
-    let plan = self_loop::Plan::new(&instructions, Some(&terminal), GuestAddress(0x1024)).unwrap();
+    let plan = self_loop::Plan::new(&instructions, Some(&terminal), fallthrough).unwrap();
     assert!(matches!(
-        plan.emit(&changed),
+        plan.emit(&changed, Some(&terminal), fallthrough, target),
         Err(RegionError::ChangedInstructions)
     ));
 }

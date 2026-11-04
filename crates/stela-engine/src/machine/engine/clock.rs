@@ -164,9 +164,9 @@ impl SharedClock {
         self.unlock(sequence);
     }
 
-    /// The count now, with the host's counter sampled while one published
-    /// state holds.
-    fn read(&self, counter: &mut impl Counter) -> u64 {
+    /// The count and offset from one publication, with the host's counter
+    /// sampled while that state holds.
+    fn read(&self, counter: &mut impl Counter) -> (u64, u64) {
         loop {
             let sequence = self.state.sequence.load(Ordering::Acquire);
             if sequence & 1 != 0 {
@@ -178,7 +178,7 @@ impl SharedClock {
             let host = sampled(counter);
             fence(Ordering::Acquire);
             if self.state.sequence.load(Ordering::Relaxed) == sequence {
-                return host.wrapping_add(offset).min(ceiling);
+                return (host.wrapping_add(offset).min(ceiling), offset);
             }
         }
     }
@@ -256,7 +256,7 @@ impl SharedClock {
 
     /// The count now, and the PE whose horizon holds it, if one does.
     pub fn status(&self, mut counter: impl Counter) -> ClockStatus {
-        let count = self.read(&mut counter);
+        let (count, _) = self.read(&mut counter);
         let ceiling = self.state.ceiling.load(Ordering::Acquire);
         let holder = (count >= ceiling)
             .then(|| {
@@ -401,8 +401,9 @@ impl Clock {
     pub(super) fn read(&mut self, mut counter: impl Counter) -> u64 {
         let count = match &mut self.shared {
             Some(attachment) => {
-                attachment.offset = attachment.clock.state.offset.load(Ordering::Relaxed);
-                attachment.clock.read(&mut counter)
+                let (count, offset) = attachment.clock.read(&mut counter);
+                attachment.offset = offset;
+                count
             }
             None => return self.read_at(counter()),
         };
@@ -485,8 +486,9 @@ impl Clock {
             if attachment.waiting {
                 attachment.waiting = false;
                 attachment.blocks = blocks;
-                let (clock, pe) = (Arc::clone(&attachment.clock), attachment.pe);
-                clock.publish(pe, Progress::Ran(0), &mut counter);
+                attachment
+                    .clock
+                    .publish(attachment.pe, Progress::Ran(0), &mut counter);
             }
             return;
         }
@@ -511,8 +513,9 @@ impl Clock {
             if !attachment.waiting {
                 let ran = blocks.saturating_sub(attachment.blocks);
                 attachment.blocks = blocks;
-                let (clock, pe) = (Arc::clone(&attachment.clock), attachment.pe);
-                clock.publish(pe, Progress::Ran(ran), &mut counter);
+                attachment
+                    .clock
+                    .publish(attachment.pe, Progress::Ran(ran), &mut counter);
             }
             return;
         }
@@ -540,8 +543,9 @@ impl Clock {
                 || attachment.clock.horizons[attachment.pe].load(Ordering::Relaxed) != UNBOUNDED)
         {
             attachment.waiting = true;
-            let (clock, pe) = (Arc::clone(&attachment.clock), attachment.pe);
-            clock.publish(pe, Progress::Waits, &mut counter);
+            attachment
+                .clock
+                .publish(attachment.pe, Progress::Waits, &mut counter);
         }
     }
 
@@ -551,10 +555,11 @@ impl Clock {
         if let Some(attachment) = &mut self.shared {
             let host = counter();
             if !attachment.waiting && host >= attachment.next_poll {
-                let (clock, pe) = (Arc::clone(&attachment.clock), attachment.pe);
-                let period = clock.lookahead.load(Ordering::Relaxed) / 2;
+                let period = attachment.clock.lookahead.load(Ordering::Relaxed) / 2;
                 attachment.next_poll = host.saturating_add(period);
-                clock.publish(pe, Progress::Polls, &mut counter);
+                attachment
+                    .clock
+                    .publish(attachment.pe, Progress::Polls, &mut counter);
             }
         }
     }
@@ -772,6 +777,24 @@ mod tests {
         // The lag makes that bound loose until the next read tightens it.
         first.end_slice(|| 5000, 100);
         assert_eq!(first.read(|| 5040), 1140);
+        assert!(first.below(1141, || 5040));
+        assert!(!first.below(1140, || 5040));
+    }
+
+    #[test]
+    fn a_retried_shared_sample_uses_the_accepted_offset() {
+        let (_, mut first, mut second) = pair();
+        first.start_slice(|| 1000, 0, 1);
+        second.start_slice(|| 1000, 0, 1);
+        let mut samples = 0;
+        let count = first.read(|| {
+            samples += 1;
+            if samples == 1 {
+                second.end_slice(|| 5000, 10_000);
+            }
+            5040
+        });
+        assert_eq!((count, samples), (1100, 2));
         assert!(first.below(1141, || 5040));
         assert!(!first.below(1140, || 5040));
     }

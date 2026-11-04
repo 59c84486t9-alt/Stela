@@ -316,7 +316,7 @@ fn a_block_longer_than_the_first_window_compiles_and_is_stored_whole() {
     let Ok(Fetched::Block(index)) = first.fetch_block(BASE, false) else {
         panic!("block")
     };
-    assert_eq!(first.blocks[index].source_bytes as usize, block_bytes);
+    assert_eq!(first.blocks[index].source_bytes(), block_bytes);
     let offer = first.host.store.as_mut().unwrap().offers.pop().unwrap();
     assert_eq!(offer.input().len(), block_bytes);
     let mut record = Record::new(translations::translator_id(), offer.key);
@@ -332,7 +332,7 @@ fn a_block_longer_than_the_first_window_compiles_and_is_stored_whole() {
         (second.statistics.compiled, second.statistics.stored),
         (0, 1)
     );
-    assert_eq!(second.blocks[stored].source_bytes as usize, block_bytes);
+    assert_eq!(second.blocks[stored].source_bytes(), block_bytes);
     // A changed word past the first window, inside the block: the stored
     // block's bytes no longer match, and it is compiled.
     words[ADDS - 1] = 0x9100_0800;

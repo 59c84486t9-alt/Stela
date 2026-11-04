@@ -30,6 +30,11 @@ impl<T> Table<T> {
         self.len == 0
     }
 
+    #[cfg(test)]
+    pub(super) fn capacity(&self) -> usize {
+        self.chunks.len() * CHUNK
+    }
+
     /// Drop every entry, keeping the chunks for the next ones.
     pub(super) fn clear(&mut self) {
         self.chunks.iter_mut().for_each(Vec::clear);
