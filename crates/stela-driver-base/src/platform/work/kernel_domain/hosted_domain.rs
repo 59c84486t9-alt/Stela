@@ -7,6 +7,21 @@ pub struct HostKept<const N: usize>(NonNull<HostedRuntime<N>>);
 pub struct HostSegment<'a, const N: usize> {
     runtime: Pin<&'a HostedRuntime<N>>,
     epoch: u64,
+    phase: HostPhase,
+}
+
+#[derive(Clone, Copy)]
+enum HostPhase {
+    Task,
+    Dispatcher,
+}
+impl HostPhase {
+    fn epoch<const N: usize>(self, runtime: &HostedRuntime<N>) -> Result<u64, WorkError> {
+        match self {
+            Self::Task => runtime.segment_epoch(),
+            Self::Dispatcher => runtime.dispatcher_epoch(),
+        }
+    }
 }
 
 impl<'runtime, const N: usize> DomainRef<'runtime, HostedDomain, N> {
@@ -19,11 +34,23 @@ impl<'runtime, const N: usize> DomainRef<'runtime, HostedDomain, N> {
     }
 
     pub fn hosted_segment(&self) -> Result<Segment<'_, HostedDomain, N>, WorkError> {
-        let epoch = self.inner.segment_epoch()?;
+        self.segment(HostPhase::Task)
+    }
+
+    /// A fresh host metadata loan after physical return from all hosted stacks
+    /// on this OS thread. Any subsequent dispatch invalidates this loan, even
+    /// if it uses a different executor and returns to this same dispatcher.
+    pub fn hosted_dispatcher_segment(&self) -> Result<Segment<'_, HostedDomain, N>, WorkError> {
+        self.segment(HostPhase::Dispatcher)
+    }
+
+    fn segment(&self, phase: HostPhase) -> Result<Segment<'_, HostedDomain, N>, WorkError> {
+        let epoch = phase.epoch(self.inner.get_ref())?;
         Ok(Segment {
             inner: HostSegment {
                 runtime: self.inner,
                 epoch,
+                phase,
             },
             _domain: PhantomData,
         })
@@ -68,7 +95,7 @@ impl sealed::Domain for HostedDomain {
         unsafe { Pin::new_unchecked(kept.0.as_ref()) }
     }
     fn check_segment<const N: usize>(segment: &Self::Segment<'_, N>) -> Result<(), WorkError> {
-        if segment.runtime.segment_epoch()? != segment.epoch {
+        if segment.phase.epoch(segment.runtime.get_ref())? != segment.epoch {
             return Err(WorkError::InvalidTicket);
         }
         Ok(())

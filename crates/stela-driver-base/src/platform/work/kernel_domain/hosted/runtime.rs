@@ -30,6 +30,20 @@ struct Stack {
 }
 type Task = Continuation<Stack, (), Rc<dyn HostedSwitchBinding>>;
 
+// All hosted executors on one OS thread share the actual dispatcher boundary.
+// Keeping this in each Runtime separately would let a running callback borrow
+// another Runtime's apparent dispatcher or even enter a nested source stack.
+#[derive(Clone, Copy)]
+struct Dispatch {
+    active: *const (),
+    epoch: u64,
+}
+std::thread_local! {
+    static DISPATCH: Cell<Dispatch> = const {
+        Cell::new(Dispatch { active: ptr::null(), epoch: 0 })
+    };
+}
+
 pub struct HostedExecutor<const N: usize> {
     runtime: ManuallyDrop<Pin<Box<HostedRuntime<N>>>>,
 }
@@ -40,7 +54,6 @@ pub struct HostedRuntime<const N: usize> {
     service: Option<Service>,
     dispatcher: UnsafeCell<context::Frame>,
     current: Cell<usize>,
-    dispatch_epoch: Cell<u64>,
     cursor: Cell<usize>,
     retired: Cell<bool>,
     _local: PhantomData<*mut ()>,
@@ -210,7 +223,6 @@ impl<const N: usize> HostedExecutor<N> {
             service,
             dispatcher: UnsafeCell::new(context::Frame::new(controls)),
             current: Cell::new(NONE),
-            dispatch_epoch: Cell::new(0),
             cursor: Cell::new(0),
             retired: Cell::new(false),
             _local: PhantomData,
@@ -285,6 +297,9 @@ impl<const N: usize> HostedRuntime<N> {
         if index == NONE {
             return Err(WorkError::Unavailable);
         }
+        if DISPATCH.get().active != ptr::from_ref(self).cast() {
+            return Err(WorkError::CorruptContext);
+        }
         // SAFETY: the checked original thread is executing this task. No
         // mutable task borrow spans a call to this observation.
         let task = unsafe { &*self.task(index) };
@@ -310,30 +325,33 @@ impl<const N: usize> HostedRuntime<N> {
 
     pub(in crate::platform::work::kernel_domain) fn segment_epoch(&self) -> Result<u64, WorkError> {
         self.current_context()?;
-        Ok(self.dispatch_epoch.get())
+        Ok(DISPATCH.get().epoch)
     }
 
     pub(in crate::platform::work::kernel_domain) fn dispatcher_successor(
         &self,
     ) -> Result<(), WorkError> {
+        self.dispatcher_epoch().map(|_| ())
+    }
+
+    pub(in crate::platform::work::kernel_domain) fn dispatcher_epoch(
+        &self,
+    ) -> Result<u64, WorkError> {
         self.check()?;
-        if self.current.get() != NONE {
+        let dispatch = DISPATCH.get();
+        if !dispatch.active.is_null() || self.current.get() != NONE {
             return Err(WorkError::Busy);
         }
-        Ok(())
+        Ok(dispatch.epoch)
     }
 
     pub fn step(self: Pin<&Self>) -> Result<bool, WorkError> {
-        self.queue.execution.check_current()?;
-        if self.current.get() != NONE {
-            return Err(WorkError::WouldDeadlock);
-        }
-        if self.retired.get() {
-            return Err(WorkError::Closed);
-        }
         let epoch = self
-            .dispatch_epoch
-            .get()
+            .dispatcher_epoch()
+            .map_err(|error| match error {
+                WorkError::Busy => WorkError::WouldDeadlock,
+                other => other,
+            })?
             .checked_add(1)
             .ok_or(WorkError::Exhausted)?;
         self.schedule_service()?;
@@ -367,7 +385,10 @@ impl<const N: usize> HostedRuntime<N> {
                 require(state.scheduling.running(task.id, sequence, now));
                 task.state = TaskState::Running;
             }
-            self.dispatch_epoch.set(epoch);
+            DISPATCH.set(Dispatch {
+                active: ptr::from_ref(self.get_ref()).cast(),
+                epoch,
+            });
             self.current.set(index);
             self.cursor.set((index + 1) % self.count);
             // SAFETY: both frames are pinned and owned by this thread. All
@@ -381,6 +402,10 @@ impl<const N: usize> HostedRuntime<N> {
             if self.current.get() != NONE {
                 std::process::abort();
             }
+            DISPATCH.set(Dispatch {
+                active: ptr::null(),
+                epoch,
+            });
             return Ok(true);
         }
         Ok(false)
@@ -404,9 +429,7 @@ impl<const N: usize> HostedRuntime<N> {
         if self.retired.get() {
             return Ok(());
         }
-        if self.current.get() != NONE {
-            return Err(WorkError::Busy);
-        }
+        self.dispatcher_successor()?;
         for index in 0..self.count {
             // SAFETY: all task stacks are stopped on the original dispatcher.
             if unsafe { (*self.task(index)).binding.is_some() } {
@@ -498,6 +521,68 @@ mod tests {
             assert_eq!(segment.check(), Err(WorkError::InvalidTicket));
             assert_eq!(domain.hosted_segment().unwrap().check(), Ok(()));
             call.visits.set(call.visits.get() * 10 + 4);
+        }
+    }
+
+    #[test]
+    fn another_executor_cannot_dispatch_or_borrow_the_dispatcher_from_a_callback() {
+        unsafe extern "C" fn refuse_nested(raw: *mut c_void) {
+            // SAFETY: the original dispatcher keeps the second runtime alive
+            // until this exact callback returns.
+            let other = unsafe { *raw.cast::<Pin<&HostedRuntime<2>>>() };
+            let domain = DomainRef::borrow_hosted(other).unwrap();
+            assert_eq!(domain.dispatcher_successor(), Err(WorkError::Busy));
+            assert!(matches!(
+                domain.hosted_dispatcher_segment(),
+                Err(WorkError::Busy)
+            ));
+            assert_eq!(other.step(), Err(WorkError::WouldDeadlock));
+            assert_eq!(other.retire(), Err(WorkError::Busy));
+        }
+        unsafe extern "C" fn ordinary(_: *mut c_void) {}
+
+        let first_queue = HostedQueue::<2>::new(HostedExecution::new(), Arc::new(())).unwrap();
+        let second_queue = HostedQueue::<2>::new(HostedExecution::new(), Arc::new(())).unwrap();
+        // SAFETY: each callback is bounded, with no shadow-stack changes.
+        let first = unsafe { HostedExecutor::new(first_queue.clone(), 4) }.unwrap();
+        // SAFETY: same conditions, with separate actual continuation stacks.
+        let second = unsafe { HostedExecutor::new(second_queue.clone(), 4) }.unwrap();
+        let first_runtime = first.runtime();
+        let second_runtime = second.runtime();
+        let first_domain = DomainRef::borrow_hosted(first_runtime).unwrap();
+        let second_domain = DomainRef::borrow_hosted(second_runtime).unwrap();
+        let segment = second_domain.hosted_dispatcher_segment().unwrap();
+        assert!(segment.matches(&second_domain));
+        assert!(!segment.matches(&first_domain));
+        assert_eq!(segment.check(), Ok(()));
+
+        // SAFETY: static callback, no context.
+        let pending =
+            unsafe { second_queue.execute(Kind::General, ordinary, ptr::null_mut()) }.unwrap();
+        // SAFETY: second_runtime and the local reference outlive this callback.
+        unsafe {
+            first_queue.execute(
+                Kind::General,
+                refuse_nested,
+                ptr::from_ref(&second_runtime).cast_mut().cast(),
+            )
+        }
+        .unwrap();
+        assert!(first_runtime.step().unwrap());
+        assert!(!second_queue.completed(pending).unwrap());
+        assert_eq!(segment.check(), Err(WorkError::InvalidTicket));
+        assert_eq!(
+            second_domain.hosted_dispatcher_segment().unwrap().check(),
+            Ok(())
+        );
+        assert!(second_runtime.step().unwrap());
+        assert!(second_queue.completed(pending).unwrap());
+
+        for (queue, runtime) in [(first_queue, first_runtime), (second_queue, second_runtime)] {
+            queue.close().unwrap();
+            runtime.retire().unwrap();
+            // SAFETY: both callbacks and all producers joined.
+            unsafe { queue.retire() }.unwrap();
         }
     }
 
