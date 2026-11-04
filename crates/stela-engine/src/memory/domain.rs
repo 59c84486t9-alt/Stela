@@ -634,7 +634,7 @@ pub struct MemoryThread<P> {
 /// through the final infallible CPU/controller settlement.
 pub(crate) struct PreparedLocalClear<'a> {
     clear: monitor::PreparedClear<'a, MemoryBacking, MemoryView, MappingAttributes>,
-    _loan: MemoryExecutionLoan,
+    _loan: lifecycle::BorrowedExecutionLoan<'a>,
 }
 impl PreparedLocalClear<'_> {
     pub(crate) fn commit(self) {
@@ -798,7 +798,7 @@ impl<P: DataPolicy> MemoryThread<P> {
     pub(crate) fn prepare_clear_reservation(
         &mut self,
     ) -> Result<PreparedLocalClear<'_>, MemoryStatus> {
-        let loan = self.domain.execution_loan()?;
+        let loan = self.domain.borrow_execution()?;
         let clear = self
             .domain
             .system

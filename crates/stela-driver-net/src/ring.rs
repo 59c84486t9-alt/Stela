@@ -22,6 +22,15 @@ const TRANSMIT_WAIT_US: u64 = 100_000;
 /// `E1000_RX_BUFFER_WRITE`: the tail is an MMIO write a hypervisor traps.
 pub(crate) const RECEIVE_BATCH: usize = 16;
 
+/// Write a frame to a CPU-owned transmit buffer and clear any transmitted padding.
+pub(crate) fn write_transmit_frame(buffer: &mut [u8], frame: &[u8], length: usize) {
+    let (payload, padding) = buffer[..length].split_at_mut(frame.len());
+    payload.copy_from_slice(frame);
+    if !padding.is_empty() {
+        padding.fill(0);
+    }
+}
+
 pub(crate) struct Ring {
     pub(crate) descriptors: DmaBuffer,
     buffers: DmaBuffer,
@@ -157,5 +166,32 @@ impl Ring {
         self.next = 0;
         self.clean = 0;
         self.unposted = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transmit_copy_replaces_payload_and_clears_only_the_wire_padding() {
+        let mut buffer = [0x5a; BUFFER];
+        let frame = [0x36; crate::MAX_FRAME];
+        write_transmit_frame(&mut buffer, &frame, frame.len());
+        assert_eq!(&buffer[..frame.len()], &frame);
+        assert!(buffer[frame.len()..].iter().all(|&byte| byte == 0x5a));
+
+        let short = [0x7b; crate::HEADER];
+        write_transmit_frame(&mut buffer, &short, crate::MIN_FRAME);
+        assert_eq!(&buffer[..short.len()], &short);
+        assert!(
+            buffer[short.len()..crate::MIN_FRAME]
+                .iter()
+                .all(|&byte| byte == 0)
+        );
+        assert_eq!(
+            &buffer[crate::MIN_FRAME..frame.len()],
+            &frame[crate::MIN_FRAME..]
+        );
     }
 }

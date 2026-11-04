@@ -356,6 +356,9 @@ fn emit_selected(
                     .source_map
                     .extend(region.source_map.iter().map(|(pc, at)| (*pc, offset + at)));
                 code.append(region.code);
+                // The value allocator emits only GPR operations and GPR
+                // saves. A vector loaded before this span stays in XMM0.
+                after.xmm0 = held.xmm0;
                 cursor += count;
                 continue;
             }
@@ -412,6 +415,13 @@ fn emit_selected(
                     }
                 }));
                 code.append(region.code);
+                if held.xmm0.is_some()
+                    && chunk
+                        .iter()
+                        .all(|instruction| preserves_xmm0(&instruction.operation))
+                {
+                    after.xmm0 = held.xmm0;
+                }
             } else {
                 // Reject the complete eligible chunk. Rescanning its suffix
                 // could bypass the measured cost gate with a different shape.
@@ -590,6 +600,23 @@ impl Held {
     };
 }
 
+/// These recipes only touch GPRs, flags and their frame slots. A memory
+/// access can call a helper, and integer math can use vector scratch.
+fn preserves_xmm0(operation: &Operation) -> bool {
+    matches!(
+        operation,
+        Operation::AddSub { .. }
+            | Operation::AddSubRegister { .. }
+            | Operation::AddSubExtended { .. }
+            | Operation::LogicalImmediate { .. }
+            | Operation::LogicalRegister { .. }
+            | Operation::MoveWide { .. }
+            | Operation::Bitfield(_)
+            | Operation::PcRelative(_)
+            | Operation::Nop
+    )
+}
+
 struct SingleOptions {
     target: crate::TargetCpu,
     checks: super::MemoryChecks,
@@ -741,6 +768,7 @@ fn emit_single(
         Operation::Simd(operand) => {
             super::simd::xmm0_after(scratch, operand, &code[start..], held.xmm0)
         }
+        operation if !code.constant_time() && preserves_xmm0(operation) => held.xmm0,
         _ => None,
     };
     Held { rax, xmm0 }
