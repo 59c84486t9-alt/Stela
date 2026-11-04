@@ -13,33 +13,26 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // The count is read only when an answer can change with it alone: a
         // device answer with a deadline, a timer's or a PMI's. Every exit
         // asks, and a raw validation PE has none of them.
-        let timed = !matches!(self.device_lines, Some((_, u64::MAX, _)))
-            || self.timer_deadline().is_some()
-            || self
-                .cpu
-                .pmu
-                .as_ref()
-                .is_some_and(|monitor| monitor.deadline().is_some());
-        let now = match timed {
-            true if self.lines_hold() => self.clock.last(),
-            true => self.now(),
-            false => 0,
-        };
-        self.lines_at(now)
-    }
-
-    /// Whether the count is below every count at which the running PE's
-    /// cached lines change with the count alone.
-    fn lines_hold(&mut self) -> bool {
         let Some((_, devices, pe)) = self.device_lines else {
-            return false;
+            let now = self.now();
+            return self.lines_at(now);
         };
+        let timer = self.timer_deadline();
         let monitor = self.cpu.pmu.as_ref().and_then(|monitor| monitor.deadline());
-        let change = [self.timer_deadline(), monitor]
-            .into_iter()
-            .flatten()
-            .fold(devices, u64::min);
-        pe == self.current && self.clock.below(change, || self.host.counter())
+        let now = if devices == u64::MAX && timer.is_none() && monitor.is_none() {
+            0
+        } else {
+            let change = devices
+                .min(timer.unwrap_or(u64::MAX))
+                .min(monitor.unwrap_or(u64::MAX));
+            if pe == self.current && self.clock.below(change, || self.host.counter()) {
+                self.clock.last()
+            } else {
+                self.now()
+            }
+        };
+        let device = self.device_lines_of(self.current, now);
+        self.merge_lines(device, now, timer)
     }
 
     /// The lines the devices drive into PE `pe` at count `now`: the cached
@@ -84,12 +77,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let device = self.device_lines_of(self.current, now);
         // A timer signals exactly when the count reaches its deadline, which
         // only System register writes change.
-        let deadline = self.timer_deadline();
+        let timer = self.timer_deadline();
+        self.merge_lines(device, now, timer)
+    }
+
+    fn merge_lines(&self, device: Lines, now: u64, timer: Option<u64>) -> Lines {
         self.cpu.core_lines(Lines {
             irq: device.irq,
             // Apple cores signal the generic timers and the PMI as FIQ.
             fiq: device.fiq
-                || deadline.is_some_and(|deadline| now >= deadline)
+                || timer.is_some_and(|deadline| now >= deadline)
                 || monitor_asserted(&self.cpu, now),
         })
     }
