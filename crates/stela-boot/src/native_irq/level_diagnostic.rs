@@ -3,6 +3,7 @@
 //! pinned ACPICA (_PIC(1), PCI0._PRT and GSIG._CRS). This fixture grant never
 //! supplies a production AML/PIRQ resolver or SCI deferred-work provider.
 use super::{
+    diagnostic::read_control,
     ioapic::{self, Devices},
     madt::{self, Routing},
 };
@@ -189,14 +190,26 @@ impl Prepared {
         {
             return Err(refuse!("level fixture original EDU owner mismatch"));
         }
-        if function.config().read8(0x3d) != 1
-            || function.config().read16(4) & (4 | INTX_DISABLE) != INTX_DISABLE
+        let config = function.config();
+        if config
+            .read8(0x3d)
+            .map_err(|error| refuse!("EDU interrupt pin: {error}", %error))?
+            != 1
+            || read_control(config, 4).map_err(|error| refuse!("EDU command: {error}", ?error))?
+                & (4 | INTX_DISABLE)
+                != INTX_DISABLE
         {
             return Err(refuse!("EDU INTA/MSI-retired state mismatch"));
         }
-        let interrupts = function.interrupts();
+        let interrupts = function
+            .interrupts()
+            .map_err(|error| refuse!("EDU interrupt capabilities: {error}", ?error))?;
         let msi = interrupts.msi.ok_or(refuse!("EDU MSI metadata missing"))?;
-        if function.config().read16(u16::from(msi.offset) + 2) & 1 != 0 || interrupts.msix.is_some()
+        if read_control(function.config(), u16::from(msi.offset) + 2)
+            .map_err(|error| refuse!("EDU MSI control: {error}", ?error))?
+            & 1
+            != 0
+            || interrupts.msix.is_some()
         {
             return Err(refuse!("EDU MSI remains active before INTx"));
         }
@@ -380,6 +393,15 @@ struct Contributors {
     function: Option<Function>,
     edu: Arc<Edu>,
 }
+impl Contributors {
+    fn config(&mut self) -> Result<&mut OwnedConfig, IrqError> {
+        Ok(self
+            .function
+            .as_mut()
+            .ok_or(IrqError::Unregistered)?
+            .config())
+    }
+}
 impl Drop for Contributors {
     fn drop(&mut self) {
         // Pin releases contributors ONLY after its registry/IOAPIC/
@@ -396,29 +418,10 @@ impl Drop for Contributors {
 // all other sharers stopped; INTx-disable readback and real EDU idle/cause ACK.
 unsafe impl Devices for Contributors {
     fn mask(&mut self) -> Result<(), IrqError> {
-        let command = self
-            .function
-            .as_mut()
-            .ok_or(IrqError::Unregistered)?
-            .config()
-            .read16(4);
-        if command == u16::MAX {
-            return Err(IrqError::FailedRead);
-        }
-        self.function
-            .as_mut()
-            .ok_or(IrqError::Unregistered)?
-            .config()
-            .write16(4, command | INTX_DISABLE);
-        let actual = self
-            .function
-            .as_mut()
-            .ok_or(IrqError::Unregistered)?
-            .config()
-            .read16(4);
-        if actual == u16::MAX {
-            return Err(IrqError::FailedRead);
-        }
+        let config = self.config()?;
+        let command = read_control(config, 4)?;
+        config.write16(4, command | INTX_DISABLE)?;
+        let actual = read_control(config, 4)?;
         if actual & INTX_DISABLE == 0 {
             return Err(IrqError::Mask);
         }
@@ -427,15 +430,7 @@ unsafe impl Devices for Contributors {
     fn quiesce(&mut self) -> Result<(), IrqError> {
         // SAFETY: `base` maps the EDU register BAR, which holds its DMA command at 0x98.
         let dma = unsafe { ((self.edu.base + 0x98) as *const u64).read_volatile() };
-        let command = self
-            .function
-            .as_mut()
-            .ok_or(IrqError::Unregistered)?
-            .config()
-            .read16(4);
-        if command == u16::MAX {
-            return Err(IrqError::FailedRead);
-        }
+        let command = read_control(self.config()?, 4)?;
         if dma & 1 != 0 || self.edu.read(0x20) & 1 != 0 || command & 4 != 0 {
             return Err(IrqError::Quiesce);
         }
@@ -446,32 +441,13 @@ unsafe impl Devices for Contributors {
         Ok(())
     }
     unsafe fn enable(&mut self) -> Result<(), IrqError> {
-        let command = self
-            .function
-            .as_mut()
-            .ok_or(IrqError::Unregistered)?
-            .config()
-            .read16(4);
-        if command == u16::MAX {
-            return Err(IrqError::FailedRead);
-        }
+        let config = self.config()?;
+        let command = read_control(config, 4)?;
         if command & 4 != 0 {
             return Err(IrqError::Quiesce);
         }
-        self.function
-            .as_mut()
-            .ok_or(IrqError::Unregistered)?
-            .config()
-            .write16(4, command & !INTX_DISABLE);
-        let actual = self
-            .function
-            .as_mut()
-            .ok_or(IrqError::Unregistered)?
-            .config()
-            .read16(4);
-        if actual == u16::MAX {
-            return Err(IrqError::FailedRead);
-        }
+        config.write16(4, command & !INTX_DISABLE)?;
+        let actual = read_control(config, 4)?;
         if actual & (4 | INTX_DISABLE) != 0 {
             return Err(IrqError::Mask);
         }

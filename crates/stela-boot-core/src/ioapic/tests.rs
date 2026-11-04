@@ -48,6 +48,7 @@ struct Board {
     vector: core::sync::atomic::AtomicU8,
     domain_live: AtomicBool,
     arming_old_edge: AtomicBool,
+    in_interrupt: AtomicBool,
 }
 impl Board {
     fn new() -> Arc<Self> {
@@ -74,6 +75,7 @@ impl Board {
             vector: core::sync::atomic::AtomicU8::new(0),
             domain_live: AtomicBool::new(true),
             arming_old_edge: AtomicBool::new(false),
+            in_interrupt: AtomicBool::new(false),
         })
     }
 }
@@ -157,6 +159,9 @@ unsafe impl Platform for Cpu {
         Ok(())
     }
     fn check_process(&self) -> Result<(), stela_drivers::bus::irq::IrqError> {
+        if self.0.in_interrupt.load(Ordering::Acquire) {
+            return Err(IrqError::WrongCpu);
+        }
         self.check_cpu()
     }
     fn save_and_disable(&self) -> u64 {
@@ -278,6 +283,41 @@ fn fixture_version(version: u8) -> Fixture {
             trigger: Trigger::Level,
         },
     )
+}
+
+#[test]
+fn local_contributors_require_process_context_before_device_access() {
+    struct Local(alloc::rc::Rc<()>, Contributors);
+    // SAFETY: this wrapper owns the fixture's same contributor and delegates
+    // all device effects to it while holding the local ownership marker.
+    unsafe impl Devices for Local {
+        fn mask(&mut self) -> Result<(), IrqError> {
+            assert_eq!(alloc::rc::Rc::strong_count(&self.0), 2);
+            self.1.mask()
+        }
+        fn quiesce(&mut self) -> Result<(), IrqError> {
+            self.1.quiesce()
+        }
+        unsafe fn enable(&mut self) -> Result<(), IrqError> {
+            // SAFETY: the enclosing source supplies the published route.
+            unsafe { self.1.enable() }
+        }
+    }
+    let (board, unit, _, line) = fixture();
+    let local = alloc::rc::Rc::new(());
+    let devices = Box::new(Local(local.clone(), Contributors(board.clone())));
+    // SAFETY: the fixture owns this stopped line and its only contributor.
+    let mut pin = unsafe { unit.claim(line, devices) }.unwrap();
+    let before = board.hw.lock().unwrap().events.len();
+    board.in_interrupt.store(true, Ordering::Release);
+    assert_eq!(pin.mask(), Err(IrqError::WrongCpu));
+    assert_eq!(pin.quiesce(), Err(IrqError::WrongCpu));
+    assert_eq!(board.hw.lock().unwrap().events.len(), before);
+    board.in_interrupt.store(false, Ordering::Release);
+    pin.mask().unwrap();
+    pin.quiesce().unwrap();
+    drop(pin);
+    assert_eq!(alloc::rc::Rc::strong_count(&local), 1);
 }
 
 #[test]

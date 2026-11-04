@@ -179,12 +179,19 @@ pub(super) struct EduSource {
     edu: Arc<Edu>,
 }
 impl EduSource {
-    fn control(&mut self) -> u16 {
-        self.function
-            .config()
-            .read16(u16::from(self.msi.offset) + 2)
+    fn control(&mut self) -> Result<u16, IrqError> {
+        read_control(self.function.config(), u16::from(self.msi.offset) + 2)
     }
 }
+
+pub(super) fn read_control(config: &OwnedConfig, offset: u16) -> Result<u16, IrqError> {
+    let value = config.read16(offset)?;
+    if value == u16::MAX {
+        return Err(IrqError::FailedRead);
+    }
+    Ok(value)
+}
+
 // SAFETY: only the exact QEMU EDU fixture creates this source, after DMA has
 // completed, BusMaster is off and VT-d shutdown acknowledged. It has no queued
 // worker/timer; RUN-clear/idle, cause ACK and synchronous TCG device callbacks
@@ -192,21 +199,13 @@ impl EduSource {
 unsafe impl Source for EduSource {
     fn mask(&mut self) -> Result<(), IrqError> {
         let offset = u16::from(self.msi.offset);
-        let control = self.control();
-        if control == u16::MAX {
-            return Err(IrqError::FailedRead);
-        }
-        self.function.config().write16(offset + 2, control & !1);
-        let command = self.function.config().read16(4);
-        if command == u16::MAX {
-            return Err(IrqError::FailedRead);
-        }
-        self.function.config().write16(4, command | 1 << 10);
-        let actual_command = self.function.config().read16(4);
-        let control = self.control();
-        if control == u16::MAX || actual_command == u16::MAX {
-            Err(IrqError::FailedRead)
-        } else if control & 1 != 0 || actual_command & (1 << 10) == 0 {
+        let control = self.control()?;
+        let config = self.function.config();
+        config.write16(offset + 2, control & !1)?;
+        let command = read_control(config, 4)?;
+        config.write16(4, command | 1 << 10)?;
+        let actual_command = read_control(config, 4)?;
+        if self.control()? & 1 != 0 || actual_command & (1 << 10) == 0 {
             Err(IrqError::Mask)
         } else {
             Ok(())
@@ -216,16 +215,10 @@ unsafe impl Source for EduSource {
         if !self.edu.dma_idle() || self.edu.read(0x20) & 1 != 0 {
             return Err(IrqError::Quiesce);
         }
-        let command = self.function.config().read16(4);
-        if command == u16::MAX {
-            return Err(IrqError::FailedRead);
-        }
-        self.function.config().write16(4, command & !4);
-        let actual = self.function.config().read16(4);
-        if actual == u16::MAX {
-            return Err(IrqError::FailedRead);
-        }
-        if actual & 4 != 0 {
+        let config = self.function.config();
+        let command = read_control(config, 4)?;
+        config.write16(4, command & !4)?;
+        if read_control(config, 4)? & 4 != 0 {
             return Err(IrqError::Quiesce);
         }
         self.edu.write(0x20, 0);
@@ -251,59 +244,47 @@ unsafe impl Source for EduSource {
         let Route::Msi(message) = route.programming() else {
             return Err(IrqError::Route);
         };
-        if self.control() & 1 != 0
+        let control = self.control()?;
+        if control & 1 != 0
             || message.address > u64::from(u32::MAX)
             || message.data > u32::from(u16::MAX)
         {
             return Err(IrqError::Route);
         }
         let offset = u16::from(self.msi.offset);
-        let control = self.control() & !(7 << 4);
         let config = self.function.config();
-        config.write16(offset + 2, control);
-        config.write32(offset + 4, message.address as u32);
+        config.write16(offset + 2, control & !(7 << 4))?;
+        config.write32(offset + 4, message.address as u32)?;
         let data_offset = if self.msi.wide {
-            config.write32(offset + 8, 0);
+            config.write32(offset + 8, 0)?;
             offset + 12
         } else {
             offset + 8
         };
-        config.write16(data_offset, message.data as u16);
-        if config.read32(offset + 4) != message.address as u32
-            || config.read16(data_offset) != message.data as u16
-            || (self.msi.wide && config.read32(offset + 8) != 0)
+        config.write16(data_offset, message.data as u16)?;
+        if config.read32(offset + 4)? != message.address as u32
+            || config.read16(data_offset)? != message.data as u16
+            || (self.msi.wide && config.read32(offset + 8)? != 0)
         {
             return Err(IrqError::Route);
         }
         Ok(())
     }
     unsafe fn unmask(&mut self) -> Result<(), IrqError> {
-        let control = self.control();
-        if control == u16::MAX {
-            return Err(IrqError::FailedRead);
-        }
+        let control = self.control()?;
         self.function
             .config()
-            .write16(u16::from(self.msi.offset) + 2, control | 1);
-        let actual = self.control();
-        if actual == u16::MAX {
-            Err(IrqError::FailedRead)
-        } else if actual & 1 == 0 {
+            .write16(u16::from(self.msi.offset) + 2, control | 1)?;
+        if self.control()? & 1 == 0 {
             Err(IrqError::Mask)
         } else {
             // An MSI is itself a bus-master memory write. The exact stopped
             // EDU fixture has no queued DMA/factorial work and issues no new
             // DMA command; enable only after the route/handler is published.
-            let command = self.function.config().read16(4);
-            if command == u16::MAX {
-                return Err(IrqError::FailedRead);
-            }
-            self.function.config().write16(4, command | 4);
-            let command = self.function.config().read16(4);
-            if command == u16::MAX {
-                return Err(IrqError::FailedRead);
-            }
-            if command & 4 == 0 {
+            let config = self.function.config();
+            let command = read_control(config, 4)?;
+            config.write16(4, command | 4)?;
+            if read_control(config, 4)? & 4 == 0 {
                 return Err(IrqError::Route);
             }
             Ok(())
@@ -318,7 +299,9 @@ pub(super) struct Parts {
     pub edu: Arc<Edu>,
 }
 pub(super) fn prepare_source(function: Function, base: u64, clock: Clock) -> Result<Parts> {
-    let interrupts = function.interrupts();
+    let interrupts = function
+        .interrupts()
+        .map_err(|error| refuse!("EDU interrupt capabilities: {error}", ?error))?;
     if interrupts.msix.is_some() {
         return Err(refuse!("EDU fixture has unexpected MSI-X"));
     }

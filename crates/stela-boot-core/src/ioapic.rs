@@ -74,15 +74,16 @@ unsafe impl Registers for Mmio {
     }
 }
 
-/// Real contributors to one physical line, kept as an immutable group.
+/// Real contributors to one physical line, kept by the CPU-local pin source.
 /// # Safety
 /// Every physical sharer, SCI fixed/GPE source or PCI INTx contributor is
 /// owned/kept here. Mask and stop acknowledge real device effects, drain
 /// workers/timers/posted writes and exclude new causes until enable. No final
 /// release in IRQ context. No missing sharer may keep this line asserted.
 /// SharedHandlers membership and this source group must describe the same
-/// pre-bound lifetime; dynamic join/remove is unavailable.
-pub unsafe trait Devices: Send {
+/// pre-bound lifetime; dynamic join/remove is unavailable. IRQ publication
+/// carries the controller and EOI endpoint separately from these owners.
+pub unsafe trait Devices {
     fn mask(&mut self) -> Result<(), IrqError>;
     fn quiesce(&mut self) -> Result<(), IrqError>;
     /// # Safety
@@ -236,7 +237,8 @@ impl<R: Registers, P: Platform> Unit<R, P> {
         }
     }
     /// # Safety
-    /// Validated MADT electrical route, no NMI/PIRQ alias and ownership
+    /// On the owning CPU in process context. Validated MADT electrical route,
+    /// no NMI/PIRQ alias and ownership
     /// of every physical sharer. All contributors are stopped/drained with no
     /// old firmware/CPU callback, pending interrupt or worker. The initially
     /// masked entry is not evidence of this grant. Complete group retirement
@@ -246,7 +248,7 @@ impl<R: Registers, P: Platform> Unit<R, P> {
         line: LineRoute,
         devices: Box<dyn Devices>,
     ) -> Result<Pin<R, P>, IrqError> {
-        self.platform.check_cpu()?;
+        self.platform.check_process()?;
         // This slice has an end-to-end level completion proof through
         // Remote IRR/EOI. Edge IOAPIC drain is not inferred from MSI coverage.
         if line.trigger != Trigger::Level {
@@ -565,7 +567,7 @@ unsafe impl<R: Registers + 'static, P: Platform + 'static> Source for Pin<R, P> 
         })))
     }
     fn mask(&mut self) -> Result<(), IrqError> {
-        self.unit.platform.check_cpu()?;
+        self.unit.platform.check_process()?;
         let result = {
             let _guard = self.unit.lock();
             let low = self.unit.low(self.pin)?;
@@ -581,6 +583,7 @@ unsafe impl<R: Registers + 'static, P: Platform + 'static> Source for Pin<R, P> 
         self.devices.mask()
     }
     fn quiesce(&mut self) -> Result<(), IrqError> {
+        self.unit.platform.check_process()?;
         self.devices.quiesce()
     }
     fn route_kind(&self) -> stela_drivers::bus::irq::RouteKind {
@@ -651,7 +654,7 @@ unsafe impl<R: Registers + 'static, P: Platform + 'static> Source for Pin<R, P> 
         Ok(())
     }
     unsafe fn unmask(&mut self) -> Result<(), IrqError> {
-        self.unit.platform.check_cpu()?;
+        self.unit.platform.check_process()?;
         if self.target.is_none() || self.retired {
             return Err(IrqError::Route);
         }
@@ -671,7 +674,7 @@ unsafe impl<R: Registers + 'static, P: Platform + 'static> Source for Pin<R, P> 
         Ok(())
     }
     unsafe fn synchronize(&mut self) -> Result<(), IrqError> {
-        self.unit.platform.check_cpu()?;
+        self.unit.platform.check_process()?;
         if self.lifetime.failed.load(Ordering::Acquire) {
             return Err(IrqError::Drain);
         }
