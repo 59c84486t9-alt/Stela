@@ -213,9 +213,13 @@ fn key_id_and_type(key: &[u8]) -> Result<(u64, u8)> {
     Ok((value & OBJ_ID_MASK, (value >> OBJ_TYPE_SHIFT) as u8))
 }
 
-fn c_string(bytes: &[u8]) -> Result<String> {
+fn c_str(bytes: &[u8]) -> Result<&str> {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    String::from_utf8(bytes[..end].to_vec()).map_err(|_| ApfsError::Malformed("name is not UTF-8"))
+    core::str::from_utf8(&bytes[..end]).map_err(|_| ApfsError::Malformed("name is not UTF-8"))
+}
+
+fn c_string(bytes: &[u8]) -> Result<String> {
+    c_str(bytes).map(String::from)
 }
 
 /// The extended fields of an inode or directory entry: `(type, data)`.
@@ -440,10 +444,13 @@ impl Volume {
         })
     }
 
-    /// The entries of directory `oid`.
-    pub fn entries<R: ReadAt>(&self, device: &mut Device<R>, oid: u64) -> Result<Vec<Entry>> {
+    fn visit_entries<R: ReadAt>(
+        &self,
+        device: &mut Device<R>,
+        oid: u64,
+        mut visit: impl FnMut(&str, u64, FileKind),
+    ) -> Result<()> {
         let hashed = self.hashed_names();
-        let mut entries = Vec::new();
         self.records(device, oid, APFS_TYPE_DIR_REC, &mut |key, value| {
             let name = if hashed {
                 let length = (u32_at(key, 8)? & J_DREC_LEN_MASK) as usize;
@@ -453,12 +460,24 @@ impl Volume {
                 key.get(10..10 + length)
             }
             .ok_or(ApfsError::Malformed("directory entry name"))?;
-            entries.push(Entry {
-                name: c_string(name)?,
-                oid: u64_at(value, 0)?,
-                kind: FileKind::from_drec(u16_at(value, 16)?),
-            });
+            visit(
+                c_str(name)?,
+                u64_at(value, 0)?,
+                FileKind::from_drec(u16_at(value, 16)?),
+            );
             Ok(Visit::Continue)
+        })
+    }
+
+    /// The entries of directory `oid`.
+    pub fn entries<R: ReadAt>(&self, device: &mut Device<R>, oid: u64) -> Result<Vec<Entry>> {
+        let mut entries = Vec::new();
+        self.visit_entries(device, oid, |name, oid, kind| {
+            entries.push(Entry {
+                name: String::from(name),
+                oid,
+                kind,
+            });
         })?;
         Ok(entries)
     }
@@ -478,10 +497,17 @@ impl Volume {
         parent: u64,
         name: &str,
     ) -> Result<Entry> {
-        self.entries(device, parent)?
-            .into_iter()
-            .find(|entry| self.names_match(&entry.name, name))
-            .ok_or_else(|| ApfsError::NotFound(String::from(name)))
+        let mut found = None;
+        self.visit_entries(device, parent, |stored, oid, kind| {
+            if found.is_none() && self.names_match(stored, name) {
+                found = Some(Entry {
+                    name: String::from(stored),
+                    oid,
+                    kind,
+                });
+            }
+        })?;
+        found.ok_or_else(|| ApfsError::NotFound(String::from(name)))
     }
 
     /// The inode at `path` from the volume root. Symbolic links in
