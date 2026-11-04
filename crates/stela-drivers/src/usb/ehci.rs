@@ -186,6 +186,11 @@ enum State {
     Stopped,
 }
 
+enum RootReset {
+    Empty,
+    Ready,
+}
+
 pub struct Controller {
     hardware: Option<Box<dyn Hardware>>,
     arena: Option<Arena>,
@@ -460,10 +465,15 @@ impl Controller {
             .checked_add(1)
             .ok_or(Error::Exhausted)?;
         self.next_generation = generation;
-        self.ports[index] = None;
+        let untracked = self.ports[index].take().is_none() && self.default_port != Some(port);
         // Keep any old address0 reservation throughout the owned transition.
         // A failed reset can leave that exact device reachable at address0.
-        let result = self.reset_root(index);
+        let result = match self.reset_root(index) {
+            Ok(RootReset::Ready) => Ok(()),
+            Ok(RootReset::Empty) if untracked => return Err(Error::Stale),
+            Ok(RootReset::Empty) => Err(Error::Stale),
+            Err(error) => Err(error),
+        };
         if let Err(error) = result {
             // Only these paths observed OWNER handoff or a disabled
             // FS/LS port after completed reset. Every ambiguous failure closes
@@ -495,7 +505,7 @@ impl Controller {
             port,
         })
     }
-    fn reset_root(&mut self, index: usize) -> Result<(), Error> {
+    fn reset_root(&mut self, index: usize) -> Result<RootReset, Error> {
         self.schedule_off()?;
         let at = self.port_at(index);
         let mut value = self.read(at)?;
@@ -509,6 +519,11 @@ impl Controller {
             if value & POWER == 0 {
                 return Err(Error::Device(value));
             }
+        }
+        // An idle port that has no connected device never enters reset.
+        // Keep this observation distinct from a disconnect during reset.
+        if value & (CONNECT | ENABLE | OVERCURRENT | PORT_RESET | PORT_RESUME | PORT_SUSPEND) == 0 {
+            return Ok(RootReset::Empty);
         }
         if value & CONNECT == 0 || value & OVERCURRENT != 0 {
             return Err(Error::Stale);
@@ -541,7 +556,8 @@ impl Controller {
             return Err(Error::Unsupported("EHCI FS/LS companion traffic"));
         }
         self.write(at, (value & !PORT_CHANGES) | (value & PORT_CHANGES))?;
-        self.health()
+        self.health()?;
+        Ok(RootReset::Ready)
     }
 
     /// Observe kept roots. Disconnect/change invalidates old IDs
