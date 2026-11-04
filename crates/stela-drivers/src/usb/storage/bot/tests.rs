@@ -69,6 +69,8 @@ struct State {
     override_payload: Vec<(u8, Vec<u8>)>,
     poisoned: bool,
     transfers: usize,
+    /// If enabled, each REQUEST SENSE transfer waits on its first poll.
+    sense_polls: Option<usize>,
     delays: usize,
     now: u64,
     reset_ready: Option<u64>,
@@ -135,6 +137,24 @@ impl Io for Model {
     }
     fn now_us(&self) -> u64 {
         self.0.borrow().now
+    }
+    fn reap(&mut self, pending: &mut Pending) -> Option<Result<usize, BlockError>> {
+        let mut state = self.0.borrow_mut();
+        if state
+            .history
+            .last()
+            .is_some_and(|(_, _, cdb)| cdb[0] == scsi::REQUEST_SENSE)
+            && let Some(polls) = &mut state.sense_polls
+        {
+            *polls += 1;
+            if !polls.is_multiple_of(2) {
+                return None;
+            }
+        }
+        let Pending::Done(result) = pending else {
+            unreachable!("BOT model has no transfer tickets");
+        };
+        Some(result.clone())
     }
     fn bulk(
         &mut self,
@@ -437,6 +457,7 @@ fn model(start: u64, end: u64, units: Vec<Option<Unit>>) -> Model {
         override_payload: Vec::new(),
         poisoned: false,
         transfers: 0,
+        sense_polls: None,
         delays: 0,
         now: 0,
         reset_ready: None,
@@ -1300,11 +1321,13 @@ fn synchronous_read_keeps_full_recovered_data_across_autosense() {
     let [disk] = disks.as_mut_slice() else {
         panic!("expected one published disk");
     };
+    state.borrow_mut().sense_polls = Some(0);
     state.borrow_mut().fault = Fault::RecoveredData;
     let mut output = [0xa5; 512];
     assert_eq!(disk.read(0, &mut output), Ok(()));
     assert_eq!(output, [0x64; 512]);
     let state_ref = state.borrow();
+    assert_eq!(state_ref.sense_polls, Some(6));
     let [read, sense] = &state_ref.history[state_ref.history.len() - 2..] else {
         unreachable!();
     };
@@ -1323,12 +1346,14 @@ fn synchronous_read_keeps_full_recovered_data_across_autosense() {
         }))
     );
     assert_eq!(output, [0xa5; 512]);
+    assert_eq!(state.borrow().sense_polls, Some(12));
 
     state.borrow_mut().fault = Fault::AbortReadThenWrongTag;
     let first = state.borrow().history.len();
     assert_eq!(disk.read(0, &mut output), Err(PROTOCOL_ERROR));
     assert_eq!(output, [0xa5; 512]);
     assert!(!disk.media.get());
+    assert_eq!(state.borrow().sense_polls, Some(18));
     assert!(
         state.borrow().history[first..]
             .iter()

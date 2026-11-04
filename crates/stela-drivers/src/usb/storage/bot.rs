@@ -753,9 +753,12 @@ impl<I: Io> Bot<I> {
 
     fn end_with_output(
         &mut self,
-        mut output: Option<&mut [u8]>,
+        output: Option<&mut [u8]>,
     ) -> Option<Result<Vec<u8>, BlockError>> {
         let mut begun = self.begun.take()?;
+        // Auto-sense can resume on a later poll of the original read.
+        // Its response belongs to the sense parser, not the read's buffer.
+        let mut output = output.filter(|_| begun.sensing.is_none());
         let result = loop {
             match self.advance(&mut begun, output.as_deref_mut()) {
                 Next::Wait => {
