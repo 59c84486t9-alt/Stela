@@ -73,13 +73,40 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, live_nzcv: bool) {
         }
         Some(Rm::Reg(R8))
     };
+    let destination = code.host(operand.destination);
+    let output = destination.unwrap_or(Rax);
+    // If the unchanged false arm already lives in the result register,
+    // keep it there and conditionally move the true arm instead.
+    let keep_false = operand.left != operand.destination
+        && matches!(otherwise, Some(Rm::Reg(source)) if source == output);
+    let (initial, alternate) = if keep_false {
+        let mut asm = code.asm();
+        let source = asm.guest(operand.left).unwrap_or_else(|| {
+            asm.mov_imm32(R8, 0);
+            Rm::Reg(R8)
+        });
+        (operand.destination, Some(source))
+    } else {
+        (operand.left, otherwise)
+    };
     let predicate = condition_holds(code, operand.condition, live_nzcv);
     let mut asm = code.asm();
-    select_input(&mut asm, Rax, size, operand.left);
-    if let Some((predicate, otherwise)) = predicate.zip(otherwise) {
-        asm.cmov(predicate.negate(), size, Rax, otherwise);
+    let selected = predicate.zip(alternate);
+    let already_placed = destination.is_some() && initial == operand.destination;
+    if selected.is_none() || !already_placed || size != Size::Qword {
+        select_input(&mut asm, output, size, initial);
     }
-    store(code, operand.destination);
+    if let Some((predicate, alternate)) = selected {
+        let take_alternate = if keep_false {
+            predicate
+        } else {
+            predicate.negate()
+        };
+        asm.cmov(take_alternate, size, output, alternate);
+    }
+    if destination.is_none() {
+        store(code, operand.destination);
+    }
 }
 
 /// A W source is zero-extended by the sized MOV. XZR uses an immediate
@@ -105,9 +132,12 @@ mod tests {
     fn selects_preserve_nzcv_and_zero_extend_w_results() {
         const LEFT: u64 = 0x1234_5678_9abc_def0;
         const RIGHT: u64 = 0xfedc_ba98_7654_3210;
-        for width in [Width::W32, Width::X64] {
+        let cases = [Width::W32, Width::X64]
+            .into_iter()
+            .flat_map(|width| [1, 2, 8].map(|destination| (width, destination)));
+        for (width, destination) in cases {
             for (left, lhs) in [(Register::X(1), LEFT), (Register::Zero, 0)] {
-                for (right, rhs) in [(Register::X(2), RIGHT), (Register::Zero, 0)] {
+                for (right, rhs) in [(Register::X(8), RIGHT), (Register::Zero, 0)] {
                     for (otherwise, alternate) in [
                         (Otherwise::Unchanged, rhs),
                         (Otherwise::Increment, rhs.wrapping_add(1)),
@@ -117,7 +147,7 @@ mod tests {
                         for condition in [0, 1, 10, 12, 14, 15] {
                             let operand = Operand {
                                 width,
-                                destination: Register::X(1),
+                                destination: Register::X(destination),
                                 left,
                                 right,
                                 condition,
@@ -152,9 +182,13 @@ mod tests {
                                         ..Default::default()
                                     };
                                     state.x[1] = LEFT;
-                                    state.x[2] = RIGHT;
+                                    state.x[8] = RIGHT;
                                     super::super::native::run(code, &mut state);
-                                    assert_eq!(state.x[1], expected, "{operand:?}");
+                                    let mut expected_registers = [0; 31];
+                                    expected_registers[1] = LEFT;
+                                    expected_registers[8] = RIGHT;
+                                    expected_registers[usize::from(destination)] = expected;
+                                    assert_eq!(state.x, expected_registers, "{operand:?}");
                                     assert_eq!(state.nzcv, flags << 28);
                                 }
                             }
