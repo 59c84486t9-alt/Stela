@@ -223,9 +223,13 @@ struct pci_dev *stela_linux_pci_attach(const struct stela_linux_pci_function *fu
 	dev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
 	dev->dev.release = release;
 	set_dma_ops(&dev->dev, &mapping_ops);
+	/* Before it is added, as adding it probes its driver. */
+	if (dev_set_name(&dev->dev, "%04x:%02x:%02x.%d", 0, function->bus,
+			 PCI_SLOT(function->devfn), PCI_FUNC(function->devfn))) {
+		kfree(host);
+		return NULL;
+	}
 	stela_linux_pci_add_device(dev);
-	dev_set_name(&dev->dev, "%04x:%02x:%02x.%d", 0, function->bus, PCI_SLOT(function->devfn),
-		     PCI_FUNC(function->devfn));
 	return dev;
 }
 
