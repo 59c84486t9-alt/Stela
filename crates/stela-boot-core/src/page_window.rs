@@ -7,7 +7,8 @@
 //!
 //! Pure functions over addresses and leaf values, and the allocator of the
 //! window's pages.
-use alloc::collections::BTreeMap;
+use alloc::{collections::BTreeMap, vec::Vec};
+use core::ops::Range;
 
 pub const PAGE: u64 = 4096;
 /// Bytes one paging-structure entry's level covers, from the leaf up.
@@ -150,11 +151,58 @@ impl Free {
     }
 }
 
+/// Window ranges whose old translations may still be held by a processor.
+#[derive(Default)]
+pub struct Retirements(Vec<Range<u64>>);
+
+impl Retirements {
+    pub fn overlaps(&self, range: &Range<u64>) -> bool {
+        self.0
+            .iter()
+            .any(|active| range.start < active.end && active.start < range.end)
+    }
+
+    /// Keep a range reserved before clearing any of its entries.
+    pub fn begin(&mut self, range: Range<u64>) -> bool {
+        if range.is_empty() || self.overlaps(&range) || self.0.try_reserve(1).is_err() {
+            return false;
+        }
+        self.0.push(range);
+        true
+    }
+
+    /// Remove only an exact range after all required processors acknowledged.
+    pub fn finish(&mut self, range: &Range<u64>) {
+        let slot = self
+            .0
+            .iter()
+            .position(|active| active == range)
+            .expect("unowned window retirement");
+        self.0.swap_remove(slot);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const GIB: u64 = 1 << 30;
+
+    #[test]
+    fn retiring_ranges_remain_excluded_until_acknowledged() {
+        let mut retiring = Retirements::default();
+        assert!(retiring.begin(PAGE..4 * PAGE));
+        assert!(retiring.overlaps(&(PAGE..2 * PAGE)));
+        assert!(retiring.overlaps(&(3 * PAGE..5 * PAGE)));
+        assert!(!retiring.overlaps(&(4 * PAGE..5 * PAGE)));
+        assert!(!retiring.begin(2 * PAGE..3 * PAGE));
+        assert!(retiring.begin(4 * PAGE..5 * PAGE));
+
+        retiring.finish(&(PAGE..4 * PAGE));
+        assert!(!retiring.overlaps(&(PAGE..4 * PAGE)));
+        assert!(retiring.overlaps(&(4 * PAGE..5 * PAGE)));
+        assert!(retiring.begin(PAGE..4 * PAGE));
+    }
 
     #[test]
     fn only_the_write_combining_entry_changes() {

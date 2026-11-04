@@ -15,13 +15,14 @@ use core::{
     cell::UnsafeCell,
     sync::atomic::{AtomicBool, Ordering},
 };
-use stela_boot_core::page_window::{self, Cache, Free};
+use stela_boot_core::page_window::{self, Cache, Free, Retirements};
 use stela_drivers::bus::dma::memory::{CacheAttribute, PageSource, PinnedPages};
 
 const ENTRIES: usize = 512;
 
 struct State {
     free: Free,
+    retiring: Retirements,
     /// The pages of the tables the window grew. They last as long as it does.
     tables: Vec<PinnedPages>,
 }
@@ -85,6 +86,7 @@ impl Window {
             held: AtomicBool::new(false),
             state: UnsafeCell::new(State {
                 free: Free::new(page_window::span(layout::window())),
+                retiring: Retirements::default(),
                 tables: Vec::new(),
             }),
         })
@@ -147,27 +149,33 @@ impl Window {
 
     /// Map `physical` at the reserved, empty `address`.
     pub(crate) fn install(&self, address: u64, physical: u64, cache: Cache) -> bool {
-        let mut guard = self.lock();
-        let Some(leaf) = self.leaf(guard.state(), address) else {
-            return false;
-        };
-        // SAFETY: a leaf this window owns, under its lock.
-        unsafe { leaf.write_volatile(page_window::leaf(physical, cache)) };
-        true
+        self.install_entry(address, page_window::leaf(physical, cache))
     }
 
-    /// Install a data leaf at an address reserved by the Linux client. A repeat
-    /// fault on the same page needs no write. Replacement requires retirement.
+    /// Map `physical` at the reserved, empty `address`, to run from.
+    pub(crate) fn install_code(&self, address: u64, physical: u64) -> bool {
+        self.install_entry(address, page_window::code_leaf(physical))
+    }
+
+    /// Install a data leaf at an address reserved by the Linux client.
     pub(crate) fn install_client(&self, address: u64, entry: u64) -> bool {
+        self.install_entry(address, entry)
+    }
+
+    fn install_entry(&self, address: u64, entry: u64) -> bool {
         if !self.contains(address) || !address.is_multiple_of(PAGE) {
             return false;
         }
         let mut guard = self.lock();
-        let Some(leaf) = self.leaf(guard.state(), address) else {
+        let state = guard.state();
+        if state.retiring.overlaps(&(address..address + PAGE)) {
+            return false;
+        }
+        let Some(leaf) = self.leaf(state, address) else {
             return false;
         };
-        // SAFETY: the window lock protects software access to this owned leaf.
-        // Client entries publish the accessed and dirty bits already set.
+        // SAFETY: the window lock protects this owned leaf. Entries start
+        // with the accessed and dirty bits set. A matching install is inert.
         unsafe {
             let current = leaf.read_volatile();
             if current == 0 {
@@ -178,22 +186,27 @@ impl Window {
         }
     }
 
-    /// Map `physical` at the reserved, empty `address`, to run from.
-    pub(crate) fn install_code(&self, address: u64, physical: u64) -> bool {
-        let mut guard = self.lock();
-        let Some(leaf) = self.leaf(guard.state(), address) else {
-            return false;
-        };
-        // SAFETY: a leaf this window owns, under its lock.
-        unsafe { leaf.write_volatile(page_window::code_leaf(physical)) };
-        true
-    }
-
     /// Unmap `count` reserved pages at `address`, whether installed or not.
     /// False when a processor may still translate through them, which leaves
     /// the caller holding their reservation for good.
     pub(crate) fn remove(&self, address: u64, count: usize) -> bool {
+        if count == 0 {
+            return true;
+        }
+        let Some(end) = (count as u64)
+            .checked_mul(PAGE)
+            .and_then(|bytes| address.checked_add(bytes))
+        else {
+            return false;
+        };
+        if !address.is_multiple_of(PAGE) || !self.contains(address) || !self.contains(end - 1) {
+            return false;
+        }
+        let range = address..end;
         let mut guard = self.lock();
+        if !guard.state().retiring.begin(range.clone()) {
+            return false;
+        }
         for page in 0..count as u64 {
             let at = address + page * PAGE;
             let [pointer, directory, _] = page_window::indices(at);
@@ -222,7 +235,11 @@ impl Window {
             }
             asm!("mfence", options(nostack, preserves_flags));
         }
-        shootdown::retire(self.tsc_hz)
+        if !shootdown::retire(self.tsc_hz) {
+            return false;
+        }
+        self.lock().state().retiring.finish(&range);
+        true
     }
 }
 
