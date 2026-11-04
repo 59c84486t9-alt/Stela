@@ -3206,6 +3206,16 @@ fn tlbi_invalidates_and_wfi_waits_for_the_virtual_timer() {
 }
 
 #[test]
+fn untimed_wfi_uses_cached_lines_without_reading_the_counter() {
+    let mut machine = machine_on(one_timer_bank(), &[]);
+    machine.lines();
+    let reads = machine.host.counter_reads;
+    machine.system_instruction(0xd503_207f).unwrap(); // wfi
+    assert!(machine.waiting.is_some());
+    assert_eq!(machine.host.counter_reads, reads);
+}
+
+#[test]
 fn timer_snapshot_tracks_guest_reads_and_wfi_when_the_clock_lags() {
     let mut machine = machine_on(one_timer_bank(), &[]);
     // Three slow slices each run ten blocks in 1000 host counts. The

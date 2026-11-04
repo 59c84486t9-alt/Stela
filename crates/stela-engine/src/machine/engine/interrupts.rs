@@ -292,21 +292,28 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Timeout { limit, offset }
             }
         });
-        let now = self.now();
-        if kind == WaitKind::Event {
-            self.sample_events(now);
-        }
-        match kind {
-            WaitKind::Event if self.cpu.consume_event() => {
-                // The WFE of a spin-wait ends the PE's time slice: the PE
-                // it waits for runs next instead of after the slice.
-                self.slice_end = self.statistics.blocks;
-                return self.next();
+        let event_sample = match kind {
+            WaitKind::Event => {
+                let now = self.now();
+                self.sample_events(now);
+                if self.cpu.consume_event() {
+                    // The WFE of a spin-wait ends the PE's time slice: the PE
+                    // it waits for runs next instead of after the slice.
+                    self.slice_end = self.statistics.blocks;
+                    return self.next();
+                }
+                Some(now)
             }
-            WaitKind::Interrupt if self.interrupt_pending() => return self.next(),
-            _ => {}
-        }
-        if timeout.is_some_and(|timeout| timeout.expired(now)) {
+            WaitKind::Interrupt => {
+                if self.interrupt_pending() {
+                    return self.next();
+                }
+                None
+            }
+        };
+        if timeout
+            .is_some_and(|timeout| timeout.expired(event_sample.unwrap_or_else(|| self.now())))
+        {
             return self.next();
         }
         let el = self.cpu.pstate.el;
