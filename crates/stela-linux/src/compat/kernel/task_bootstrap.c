@@ -135,8 +135,10 @@ int stela_linux_task_bootstrap_resources(const struct stela_linux_owner *owner)
     proc_root_init();
     nsfs_init();
     pidfs_init();
-    /* Run the original built-in initcall before publishing root readiness. */
+    /* Run the original built-in initcalls before publishing root readiness. */
     error = workingset_init();
+    if (!error)
+        error = fcntl_init();
     if (error) {
         resource_phase = FAILED;
         return error;
