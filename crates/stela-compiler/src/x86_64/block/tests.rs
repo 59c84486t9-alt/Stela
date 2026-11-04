@@ -5,6 +5,68 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 #[test]
+fn bitfields_and_pc_relative_addresses_feed_the_next_frame_reader() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features, RecoverySiteKind},
+    };
+    let compile = |words: &[u32], pc, profile, target| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        CompilationPlan::new(&source, pc, &Options::new(profile, target))
+            .unwrap()
+            .compile()
+            .unwrap()
+    };
+    let target = TargetCpu::Baseline;
+    let ordinary = BlockProfile::ORDINARY;
+    let system = BlockProfile::new(Features::SYSTEM_MODE);
+    let lz4 = GuestAddress(0x10000800c);
+    let lz4_words = [0xd372_fce7, 0x927e_2cf7]; // LSR X7,X7,#50; AND X23,X7,#0x3ffc
+    let mut scratch = Code::default();
+    let load_x7 = super::super::register_load(&mut scratch, Register::X(7), false).unwrap();
+    let grouped = compile(&lz4_words, lz4, ordinary, target);
+    let second = grouped.native.source_map[1];
+    assert_eq!(second.0, GuestAddress(lz4.0 + 4));
+    assert!(!grouped.native.x86_64_code[second.1..].starts_with(load_x7));
+    let independent = compile(&lz4_words[1..], second.0, ordinary, target);
+    assert!(independent.native.x86_64_code.starts_with(load_x7));
+    let dit = compile(
+        &lz4_words,
+        lz4,
+        ordinary,
+        target.with_data_independent_timing(),
+    );
+    assert!(dit.native.x86_64_code[dit.native.source_map[1].1..].starts_with(load_x7));
+
+    let sqlite = GuestAddress(0x10000fee0);
+    let sqlite_words = [0x106f_9c89, 0x7868_7929]; // ADR X9,...; LDRH W9,[X9,X8,LSL #1]
+    for profile in [ordinary, system] {
+        let load_x9 = super::super::register_load(
+            &mut scratch,
+            Register::X(9),
+            profile.has(Features::SYSTEM_MODE),
+        )
+        .unwrap();
+        let grouped = compile(&sqlite_words, sqlite, profile, target);
+        let second = grouped.native.source_map[1];
+        assert_eq!(second.0, GuestAddress(sqlite.0 + 4));
+        assert!(!grouped.native.x86_64_code[second.1..].starts_with(load_x9));
+        let independent = compile(&sqlite_words[1..], second.0, profile, target);
+        assert!(independent.native.x86_64_code.starts_with(load_x9));
+        if profile.has(Features::SYSTEM_MODE) {
+            let access = grouped
+                .fault_recovery
+                .iter()
+                .find(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+                .unwrap();
+            assert_eq!(access.retirement.instruction_pc(), second.0);
+            assert_eq!(access.retirement.retired_before(), 1);
+            assert!(access.start >= second.1);
+        }
+    }
+}
+
+#[test]
 fn vector_store_reuses_load_across_integer_rows_and_keeps_recovery() {
     use crate::{
         Options, TargetCpu,
