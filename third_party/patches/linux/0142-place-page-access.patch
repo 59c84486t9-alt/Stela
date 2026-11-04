@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 00:34:52 -0500
+Subject: [PATCH] refactor(mm): place page access wrapper with folio accounting
+
+---
+ mm/folio-compat.c | 6 ------
+ mm/swap.c         | 6 ++++++
+ 2 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/mm/folio-compat.c b/mm/folio-compat.c
+index 349f3c5b9359bf0717b612684741db54f277f370..22b4d94408847ee0033637e5251a073ec9841778 100644
+--- a/mm/folio-compat.c
++++ b/mm/folio-compat.c
+@@ -29,12 +29,6 @@ void wait_on_page_writeback(struct page *page)
+ }
+ EXPORT_SYMBOL_GPL(wait_on_page_writeback);
+ 
+-void mark_page_accessed(struct page *page)
+-{
+-	folio_mark_accessed(page_folio(page));
+-}
+-EXPORT_SYMBOL(mark_page_accessed);
+-
+ void set_page_writeback(struct page *page)
+ {
+ 	folio_start_writeback(page_folio(page));
+diff --git a/mm/swap.c b/mm/swap.c
+index 37699d0c5334fd387e15686b341574ada38ba263..86b790fd005465af2fc69cdc22f566d4a628468f 100644
+--- a/mm/swap.c
++++ b/mm/swap.c
+@@ -462,6 +462,12 @@ void folio_mark_accessed(struct folio *folio)
+ }
+ EXPORT_SYMBOL(folio_mark_accessed);
+ 
++void mark_page_accessed(struct page *page)
++{
++	folio_mark_accessed(page_folio(page));
++}
++EXPORT_SYMBOL(mark_page_accessed);
++
+ /**
+  * folio_add_lru - Add a folio to an LRU list.
+  * @folio: The folio to be added to the LRU.
