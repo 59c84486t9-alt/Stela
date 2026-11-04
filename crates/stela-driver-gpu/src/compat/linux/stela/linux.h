@@ -21,6 +21,9 @@
 struct stela_linux_services {
 	/* Monotonic nanoseconds. */
 	s64 (*now_ns)(void *context);
+	/* A timer became the earliest pending, which the service task, asleep
+	 * until the one before it, has to see. Must not sleep. */
+	void (*timer_armed)(void *context);
 	/* Wait at least minimum and preferably at most maximum microseconds;
 	 * atomic waits must not sleep. */
 	void (*delay_us)(void *context, u64 minimum, u64 maximum, bool atomic);
@@ -86,8 +89,8 @@ struct stela_linux_owner {
 
 /* Private x86-64 C ABI. All producers and consumers rebuild from this header;
  * Rust currently passes owners opaquely rather than mirroring this table. */
-_Static_assert(sizeof(struct stela_linux_services) == 152, "Linux services ABI");
-_Static_assert(__builtin_offsetof(struct stela_linux_services, random_bytes) == 48,
+_Static_assert(sizeof(struct stela_linux_services) == 160, "Linux services ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, random_bytes) == 56,
 	       "Linux random callback ABI");
 _Static_assert(sizeof(struct stela_linux_owner) == 16, "Linux owner ABI");
 

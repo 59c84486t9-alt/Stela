@@ -222,6 +222,15 @@ pub unsafe fn initialize(base: u64, registers: u64, timeout_ticks: u64) -> Resul
     Ok(())
 }
 
+/// Take the device interrupts pending on this CPU, whose code runs with them
+/// off. The caller holds no lock a handler takes.
+pub(crate) fn interrupt_window() {
+    if NativePlatform(()).check_cpu().is_ok() {
+        // SAFETY: on the owning CPU, with the caller's promise above.
+        unsafe { NativePlatform(()).interrupt_window() };
+    }
+}
+
 pub fn dispatch(vector: u8) -> bool {
     // SAFETY: Existing CPU entry calls this with local IRQs off. It does not supply
     // an interrupted-SP witness, so no such frame proof may be claimed.

@@ -50,10 +50,12 @@ static void enqueue(struct timer_list *timer, unsigned long expires)
 			break;
 		before = entry;
 	}
-	if (before)
+	if (before) {
 		hlist_add_behind(&timer->entry, &before->entry);
-	else
+	} else {
 		hlist_add_head(&timer->entry, &pending);
+		stela_linux_timer_armed();
+	}
 }
 
 enum modify {

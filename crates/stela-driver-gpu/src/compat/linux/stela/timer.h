@@ -19,4 +19,7 @@ void stela_linux_timers_run(void);
 bool stela_linux_hrtimers_next(unsigned long *expires);
 bool stela_linux_hrtimers_next_ns(s64 *expires);
 void stela_linux_hrtimers_run(void);
+/* After a timer became the earliest pending. */
+void stela_linux_timer_armed(void);
+
 #endif

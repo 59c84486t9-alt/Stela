@@ -318,10 +318,11 @@ impl ServiceTimes {
 
     pub(super) fn report(&self, tsc_hz: u64) {
         output::arguments(format_args!(
-            "HOST SERVICE boundaries={} maximum_gap_us={} maximum_service_us={} {} {}\n",
+            "HOST SERVICE boundaries={} maximum_gap_us={} maximum_service_us={} gpu_interrupts={} {} {}\n",
             self.boundaries,
             u128::from(self.gap) * 1_000_000 / u128::from(tsc_hz),
             u128::from(self.longest) * 1_000_000 / u128::from(tsc_hz),
+            super::gpu::interrupts(),
             self.parts.report(tsc_hz),
             service::report(tsc_hz),
         ));

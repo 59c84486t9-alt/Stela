@@ -2,10 +2,9 @@
 //! (`docs/design/metal-device.md`).
 //!
 //! It lives on the boot CPU and takes time from the boot PE as Linux steals it
-//! from an interrupted thread. A GPU's MSI targets that CPU and only records
-//! its line ([`Fired`]), which ends the PE's run at its next chained transfer
-//! (`Hub::call_host`); the run loop then runs what is ready ([`pump`]) and the
-//! guest goes on. Nothing reserves a core, and a Linux environment with nothing
+//! from an interrupted thread. A GPU's MSI targets that CPU, which takes it
+//! between slices or when the PE waits, and only records its line ([`Fired`]);
+//! the run loop then runs what is ready ([`pump`]) and the guest goes on. Nothing reserves a core, and a Linux environment with nothing
 //! to do costs the boot PE one comparison a slice.
 #[cfg(feature = "nvk")]
 pub(super) mod client;
@@ -303,6 +302,14 @@ unsafe impl Source for MsiSource {
     }
 }
 
+/// The GPU interrupts taken, which the host beat reports.
+static FIRED: AtomicU64 = AtomicU64::new(0);
+
+/// The GPU interrupts taken since boot.
+pub(super) fn interrupts() -> u64 {
+    FIRED.load(Ordering::Relaxed)
+}
+
 /// Records an interrupt for the service task.
 struct Fired {
     environment: *const Environment,
@@ -317,6 +324,7 @@ unsafe impl Sync for Fired {}
 
 impl Handler for Fired {
     fn handle(&self) -> Disposition {
+        FIRED.fetch_add(1, Ordering::Relaxed);
         // SAFETY: the environment outlives every route, as above.
         match unsafe { &*self.environment }.raise(self.line) {
             Ok(()) => Disposition::Handled,
@@ -405,6 +413,14 @@ impl Host {
 impl Platform for Host {
     fn now_ns(&self) -> i64 {
         nanoseconds(host::rdtsc(), self.tsc_hz) as i64
+    }
+
+    fn timer_armed(&self) {
+        // None yet means no service is asleep to miss it.
+        // SAFETY: the owner keeps a published environment for the boot.
+        if let Some(environment) = unsafe { self.environment.get().as_ref() } {
+            environment.wake().expect("the service's raised work");
+        }
     }
 
     fn delay_us(&self, minimum: u64, _maximum: u64, atomic: bool) {
@@ -1106,6 +1122,9 @@ pub(super) fn pump() {
     let Some(gpu) = installed() else {
         return;
     };
+    // Compiled code runs with interrupts off and a busy PE never waits, so this
+    // is where the GPU's MSI gets in.
+    native_irq::interrupt_window();
     let due = match gpu.time.now_ns() {
         Ok(now) => now >= gpu.next.load(Ordering::Relaxed),
         Err(_) => true,

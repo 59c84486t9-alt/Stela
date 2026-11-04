@@ -339,6 +339,11 @@ impl<const N: usize> Environment<N> {
         self.raised.raise()
     }
 
+    /// Have the service task look at its timers again. Safe in an interrupt.
+    pub fn wake(&self) -> Result<(), WorkError> {
+        self.raised.raise()
+    }
+
     /// Ask the service task to finish.
     pub fn stop(&self) -> Result<(), WorkError> {
         self.stopping.store(true, Ordering::Release);

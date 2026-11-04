@@ -49,6 +49,14 @@ static s64 hrtimer_deadline(s64 now, s64 expires)
 	return now == S64_MAX - 1 ? now : now + 1;
 }
 
+void stela_linux_timer_armed(void)
+{
+	const struct stela_linux_owner *owner = stela_linux_owner();
+
+	if (owner->services->timer_armed)
+		owner->services->timer_armed(owner->context);
+}
+
 s64 stela_linux_service_run(void)
 {
 	update_jiffies();

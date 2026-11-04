@@ -40,6 +40,9 @@ pub type Errno = i32;
 pub trait Platform {
     /// Monotonic nanoseconds.
     fn now_ns(&self) -> i64;
+    /// A timer became the earliest pending: run the service early enough for
+    /// it. Must not sleep.
+    fn timer_armed(&self) {}
     /// Wait at least `minimum` and preferably at most `maximum` microseconds.
     /// An `atomic` wait must not sleep.
     fn delay_us(&self, minimum: u64, maximum: u64, atomic: bool);
@@ -92,6 +95,7 @@ pub trait Platform {
 #[repr(C)]
 struct Services {
     now_ns: unsafe extern "C" fn(*mut c_void) -> i64,
+    timer_armed: unsafe extern "C" fn(*mut c_void),
     delay_us: unsafe extern "C" fn(*mut c_void, u64, u64, bool),
     firmware: unsafe extern "C" fn(*mut c_void, *const c_char, *mut *const u8, *mut usize) -> c_int,
     log: unsafe extern "C" fn(*mut c_void, c_int, *const c_char),
@@ -112,7 +116,7 @@ struct Services {
     unmap_user: unsafe extern "C" fn(*mut c_void, *mut c_void, u64, usize) -> c_int,
 }
 
-const _: () = assert!(size_of::<Services>() == 152);
+const _: () = assert!(size_of::<Services>() == 160);
 
 /// `struct stela_linux_owner`.
 #[repr(C)]
@@ -149,6 +153,11 @@ mod trampolines {
     pub unsafe extern "C" fn now_ns<P: Platform>(context: *mut c_void) -> i64 {
         // SAFETY: see the module.
         unsafe { platform::<P>(context) }.now_ns()
+    }
+
+    pub unsafe extern "C" fn timer_armed<P: Platform>(context: *mut c_void) {
+        // SAFETY: see the module.
+        unsafe { platform::<P>(context) }.timer_armed();
     }
 
     pub unsafe extern "C" fn delay_us<P: Platform>(
@@ -371,6 +380,7 @@ impl<P: Platform> Owner<P> {
         let mut owner = Box::new(Self {
             services: Services {
                 now_ns: t::now_ns::<P>,
+                timer_armed: t::timer_armed::<P>,
                 delay_us: t::delay_us::<P>,
                 firmware: t::firmware::<P>,
                 log: t::log::<P>,

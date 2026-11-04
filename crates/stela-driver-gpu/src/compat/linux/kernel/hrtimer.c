@@ -37,7 +37,8 @@ void hrtimer_setup(struct hrtimer *timer, enum hrtimer_restart (*function)(struc
 static void enqueue(struct hrtimer *timer)
 {
 	timer->is_queued = true;
-	timerqueue_linked_add(&pending, &timer->node);
+	if (timerqueue_linked_add(&pending, &timer->node))
+		stela_linux_timer_armed();
 }
 
 static void dequeue(struct hrtimer *timer)
