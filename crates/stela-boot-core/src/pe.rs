@@ -85,6 +85,18 @@ impl<F: FnMut(usize, &mut [u8])> Reader<F> {
 /// Parse metadata through short bounded copies, avoiding a shared Rust slice
 /// over the live image's writable statics while allocating the inventory.
 pub fn sections(bytes: usize, read: impl FnMut(usize, &mut [u8])) -> Result<Vec<Section>> {
+    let mut sections = Vec::new();
+    visit_sections(bytes, read, |section, _| sections.push(section))?;
+    Ok(sections)
+}
+
+/// Visit each mapped section and its exclusive, unrounded payload end without
+/// allocation. Do not use a visited result unless the complete parse succeeds.
+pub fn visit_sections(
+    bytes: usize,
+    read: impl FnMut(usize, &mut [u8]),
+    mut visit: impl FnMut(Section, usize),
+) -> Result<()> {
     let mut image = Reader { bytes, read };
     image.extent(0, DOS_HEADER)?;
     if image.half(0)? != 0x5a4d {
@@ -150,7 +162,7 @@ pub fn sections(bytes: usize, read: impl FnMut(usize, &mut [u8])) -> Result<Vec<
     let mut previous = headers
         .checked_next_multiple_of(alignment)
         .ok_or(refuse!("loaded image header alignment overflows"))?;
-    let mut sections = Vec::with_capacity(count);
+    let mut mapped = false;
     for index in 0..count {
         // The complete table extent was checked above.
         let section = table + index * SECTION_HEADER;
@@ -175,9 +187,11 @@ pub fn sections(bytes: usize, read: impl FnMut(usize, &mut [u8])) -> Result<Vec<
         if size == 0 {
             continue;
         }
-        let end = first
+        let payload_end = first
             .checked_add(size)
-            .and_then(|end| end.checked_next_multiple_of(PAGE))
+            .ok_or(refuse!("loaded image section escapes loaded image"))?;
+        let end = payload_end
+            .checked_next_multiple_of(PAGE)
             .filter(|&end| end <= image_bytes)
             .ok_or(refuse!("loaded image section escapes loaded image"))?;
         let executable = flags & EXECUTE != 0;
@@ -187,18 +201,22 @@ pub fn sections(bytes: usize, read: impl FnMut(usize, &mut [u8])) -> Result<Vec<
                 "loaded image section overlaps or has unsupported access rights"
             ));
         }
-        sections.push(Section {
-            first,
-            end,
-            executable,
-            writable,
-        });
+        visit(
+            Section {
+                first,
+                end,
+                executable,
+                writable,
+            },
+            payload_end,
+        );
         previous = end;
+        mapped = true;
     }
-    if sections.is_empty() {
+    if !mapped {
         return Err(refuse!("loaded image has no mapped sections"));
     }
-    Ok(sections)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -307,6 +325,35 @@ mod tests {
         let mut zero_virtual_size = pe();
         word(&mut zero_virtual_size, TABLE + 8, 0);
         assert_eq!(parse(&zero_virtual_size).unwrap(), sections);
+    }
+
+    #[test]
+    fn visitor_exposes_exact_payload_and_validates_the_rest_of_the_table() {
+        let mut bytes = pe();
+        let last = TABLE + 2 * SECTION_HEADER;
+        word(&mut bytes, last + 16, 512);
+        let mut writable = None;
+        visit_sections(
+            bytes.len(),
+            |first, out| out.copy_from_slice(&bytes[first..first + out.len()]),
+            |section, end| {
+                if section.writable {
+                    writable = Some((section.first, end, section.end));
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(writable, Some((3 * PAGE, 4 * PAGE - 5, 4 * PAGE)));
+
+        word(&mut bytes, last + 36, READ | EXECUTE | WRITE);
+        let mut visited = 0;
+        let result = visit_sections(
+            bytes.len(),
+            |first, out| out.copy_from_slice(&bytes[first..first + out.len()]),
+            |_, _| visited += 1,
+        );
+        assert!(result.is_err());
+        assert_eq!(visited, 2);
     }
 
     #[test]
