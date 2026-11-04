@@ -21,6 +21,7 @@ use crate::{
     engine::host::{HostOwner, MmioRoots, RootIdentity},
     native_smp::memory_types::Image,
 };
+mod config_space;
 mod hpet;
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
@@ -580,23 +581,32 @@ impl Source {
         Ok(resource)
     }
 
-    fn register_reservation(
+    fn reservation(
         &self,
         span: PhysicalSpan,
         kind: ResourceKind,
-    ) -> Result<(Resource, ResourceId, Assignment<Reservation>), Error> {
+    ) -> Result<(Resource, Assignment<Reservation>), Error> {
         let reservation = Reservation {
             platform: self.platform.clone(),
             _span: span,
         };
         reservation.check_control().map_err(Error::Assignment)?;
-        let mut assignment = Assignment::from_owned(reservation);
+        let assignment = Assignment::from_owned(reservation);
         let resource = Resource::new(Box::new(Backing {
             platform: self.platform.clone(),
             span,
             kind,
             retention: assignment.retain(),
         }));
+        Ok((resource, assignment))
+    }
+
+    fn register_reservation(
+        &self,
+        span: PhysicalSpan,
+        kind: ResourceKind,
+    ) -> Result<(Resource, ResourceId, Assignment<Reservation>), Error> {
+        let (resource, mut assignment) = self.reservation(span, kind)?;
         match self.authority.register_resource(resource.clone()) {
             Ok(id) => Ok((resource, id, assignment)),
             Err(refusal) => {
@@ -705,19 +715,17 @@ impl Source {
     pub(crate) unsafe fn check_shootdown(&self) -> Result<u64, Error> {
         let windows = stela_runtime::pc::acpi::mcfg(self.platform.wire().mcfg()).map_err(failed)?;
         let window = windows.first().ok_or(Error::Unavailable)?;
-        // SAFETY: forwarded from the caller.
-        let (_, resource) = unsafe { self.claim_bus(window.segment, window.start_bus) }?;
-        let mut mapping = self.authority.map(
-            resource,
-            0,
-            PAGE as usize,
-            CacheAttribute::Uncached,
-            Protection::ReadOnly,
-        )?;
-        let identity = mapping.read32(0)?;
         let before = PROCESSORS.requested();
-        // SAFETY: the read above was the mapping's only use.
-        unsafe { mapping.retire() }?;
+        // SAFETY: the read in this scope is the mapping's only use.
+        let identity = unsafe {
+            self.with_config_bus(
+                window.segment,
+                window.start_bus,
+                PAGE as usize,
+                Protection::ReadOnly,
+                |mapping| mapping.read32(0),
+            )
+        }?;
         let generation = PROCESSORS.requested();
         if identity == u32::MAX || generation == before || PROCESSORS.alone() {
             return Err(Error::InvalidPlatformReply);
@@ -893,48 +901,45 @@ impl Source {
         let windows = stela_runtime::pc::acpi::mcfg(self.platform.wire().mcfg()).map_err(failed)?;
         for window in windows {
             for bus in window.start_bus..=window.end_bus {
-                // SAFETY: caller owns every function on this captured bus.
-                let (_, resource) = unsafe { self.claim_bus(window.segment, bus) }?;
-                let mut mapping = self.authority.map(
-                    resource,
-                    0,
-                    1 << 20,
-                    CacheAttribute::Uncached,
-                    Protection::ReadWrite,
-                )?;
-                let result = (|| {
-                    for device in 0..32usize {
-                        let first = device << 15;
-                        if mapping.read32(first)? & 0xffff == 0xffff {
-                            continue;
-                        }
-                        let functions = if mapping.read32(first + 12)? & (0x80 << 16) != 0 {
-                            8
-                        } else {
-                            1
-                        };
-                        for function in 0..functions {
-                            let offset = first | function << 12;
-                            if mapping.read32(offset)? & 0xffff == 0xffff {
-                                continue;
+                // SAFETY: caller owns all captured functions and no pointer
+                // from this bounded loop survives the transient mapping.
+                unsafe {
+                    self.with_config_bus(
+                        window.segment,
+                        bus,
+                        1 << 20,
+                        Protection::ReadWrite,
+                        |mapping| {
+                            for device in 0..32usize {
+                                let first = device << 15;
+                                if mapping.read32(first)? & 0xffff == 0xffff {
+                                    continue;
+                                }
+                                let functions = if mapping.read32(first + 12)? & (0x80 << 16) != 0 {
+                                    8
+                                } else {
+                                    1
+                                };
+                                for function in 0..functions {
+                                    let offset = first | function << 12;
+                                    if mapping.read32(offset)? & 0xffff == 0xffff {
+                                        continue;
+                                    }
+                                    let command =
+                                        mapping.address(offset + 4, 2)?.as_ptr().cast::<u16>();
+                                    // SAFETY: the owned UC command register is aligned,
+                                    // and the16-bit access avoids W1C status bits at+6.
+                                    command.write_volatile(command.read_volatile() | (1 << 10));
+                                    // SAFETY: same command register readback.
+                                    if command.read_volatile() & (1 << 10) == 0 {
+                                        return Err(Error::InvalidPlatformReply);
+                                    }
+                                }
                             }
-                            let command = mapping.address(offset + 4, 2)?.as_ptr().cast::<u16>();
-                            // SAFETY: the owned UC command register is aligned,
-                            // and the16-bit access avoids W1C status bits at+6.
-                            unsafe {
-                                command.write_volatile(command.read_volatile() | (1 << 10));
-                            }
-                            // SAFETY: same command register readback.
-                            if unsafe { command.read_volatile() } & (1 << 10) == 0 {
-                                return Err(Error::InvalidPlatformReply);
-                            }
-                        }
-                    }
-                    Ok(())
-                })();
-                // SAFETY: no borrowed register pointer survives the loop.
-                unsafe { mapping.retire() }?;
-                result?;
+                            Ok(())
+                        },
+                    )?;
+                }
             }
         }
         Ok(())

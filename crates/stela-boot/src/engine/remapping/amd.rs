@@ -178,21 +178,10 @@ pub(super) struct Taken {
 /// This boot owns the function's bus through inspection and unit retirement.
 /// Firmware, SMM and other native writers cannot alter the function.
 unsafe fn config(mmio: &native_mmio::Source, address: Address) -> Result<Function<ObservedConfig>> {
-    // SAFETY: forwarded; the source owns this bus's original reservation.
-    let (window, resource) = unsafe { mmio.claim_bus(address.segment, address.bus) }
-        .map_err(|error| refuse!("IOMMU ECAM resource: {error}", ?error))?;
-    let offset = usize::from(address.device) << 15 | usize::from(address.function) << 12;
-    let mapping = mmio
-        .authority()
-        .map(
-            resource,
-            offset,
-            PAGE as usize,
-            CacheAttribute::Uncached,
-            Protection::ReadOnly,
-        )
+    // SAFETY: forwarded; this boot owns the original function for inspection.
+    let (window, mapping) = unsafe { mmio.observe_config_page(address) }
         .map_err(|error| refuse!("IOMMU ECAM mapping: {error}", ?error))?;
-    // SAFETY: the original bus source issued this exact UC read-only page;
+    // SAFETY: the source issued this exact original UC read-only page;
     // the caller keeps configuration and decode stable through retirement.
     let config = match unsafe { ObservedConfig::attach(address, window, mapping) } {
         Ok(config) => config,

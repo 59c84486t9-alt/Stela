@@ -2027,8 +2027,8 @@ fn start_platform(
         Ok(()) => output::arguments(format_args!("NATIVE IRQ device vectors attached\n")),
         Err(error) => output::arguments(format_args!("NATIVE IRQ unavailable: {error:?}\n")),
     }
-    // Mask contributors before a remapper keeps its function's ECAM page.
-    // The aperture rejects overlapping whole-bus and function mappings.
+    // Mask contributors while the whole-bus mappings can still be temporary.
+    // Once a remapper keeps its function page, the aperture refuses overlap.
     let prepared_sci = match (&native_mmio, &handoff.power) {
         (Some(mmio), Some(power)) => {
             // SAFETY: firmware is stopped, APs have not started, and native

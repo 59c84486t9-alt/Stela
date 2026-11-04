@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::ops::RangeInclusive;
 use stela_drivers::bus::{
     mmio::owned::{Error, PhysicalSpan},
-    pci::EcamWindow,
+    pci::{Address, EcamWindow},
 };
 
 #[repr(C)]
@@ -23,7 +23,10 @@ pub struct RootWindow {
 }
 
 fn physical(window: EcamWindow, bits: u8) -> Result<PhysicalSpan, Error> {
-    if !(32..=52).contains(&bits) || window.start_bus > window.end_bus {
+    if !(32..=52).contains(&bits)
+        || window.start_bus > window.end_bus
+        || !window.base.is_multiple_of(1 << 20)
+    {
         return Err(Error::InvalidRange);
     }
     let start = window
@@ -70,6 +73,29 @@ impl<'a> EcamInventory<'a> {
             spans.push(span);
         }
         Ok(Self { windows, bits })
+    }
+
+    /// Select one original function's exact 4 KiB configuration extent.
+    pub fn function(
+        &self,
+        address: Address,
+        roots: &[RootWindow],
+    ) -> Result<(EcamWindow, PhysicalSpan), Error> {
+        if address.device >= 32 || address.function >= 8 {
+            return Err(Error::InvalidRange);
+        }
+        let index = self
+            .windows
+            .iter()
+            .position(|window| {
+                window.segment == address.segment
+                    && (window.start_bus..=window.end_bus).contains(&address.bus)
+            })
+            .ok_or(Error::OutsideResource)?;
+        let (window, bus) = self.subset(index, address.bus..=address.bus, roots)?;
+        let offset = (u64::from(address.device) << 15) | (u64::from(address.function) << 12);
+        let start = bus.start().checked_add(offset).ok_or(Error::InvalidRange)?;
+        Ok((window, PhysicalSpan::new(start, 4096)?))
     }
 
     pub fn subset(
@@ -181,6 +207,58 @@ mod tests {
         );
         assert_eq!(
             inventory.subset(1, 32..=32, &roots),
+            Err(Error::OutsideResource)
+        );
+    }
+
+    #[test]
+    fn functions_on_the_same_nonzero_bus_get_disjoint_original_pages() {
+        let original = [window(0x8000_0000, 0, 32, 63)];
+        let inventory = EcamInventory::validate(&original, 48).unwrap();
+        let roots = [parent(32, 32)];
+        let address = Address {
+            segment: 0,
+            bus: 32,
+            device: 31,
+            function: 6,
+        };
+        let (window, first) = inventory.function(address, &roots).unwrap();
+        let (_, last) = inventory
+            .function(
+                Address {
+                    function: 7,
+                    ..address
+                },
+                &roots,
+            )
+            .unwrap();
+        assert_eq!(window.start_bus, 32);
+        assert_eq!(window.end_bus, 32);
+        assert_eq!(first.start(), 0x820f_e000);
+        assert_eq!(first.end(), last.start());
+        assert_eq!(last.end(), 0x8210_0000);
+        assert_eq!(
+            inventory.function(
+                Address {
+                    device: 32,
+                    ..address
+                },
+                &roots
+            ),
+            Err(Error::InvalidRange)
+        );
+        assert_eq!(
+            inventory.function(
+                Address {
+                    function: 8,
+                    ..address
+                },
+                &roots
+            ),
+            Err(Error::InvalidRange)
+        );
+        assert_eq!(
+            inventory.function(Address { bus: 33, ..address }, &roots),
             Err(Error::OutsideResource)
         );
     }
