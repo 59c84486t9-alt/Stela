@@ -576,16 +576,18 @@ impl Volume {
         path: &str,
         follow: bool,
     ) -> Result<Inode> {
-        let mut pending: Vec<String> = path
-            .split('/')
-            .filter(|c| !c.is_empty())
-            .rev()
-            .map(String::from)
-            .collect();
+        let mut path_components = path.split('/').filter(|c| !c.is_empty()).peekable();
+        // Only components read from a link target need owned storage.
+        let mut link_components: Vec<String> = Vec::new();
         let mut current = self.inode(device, ROOT_DIR_INO_NUM)?;
         let mut links = 0;
-        while let Some(component) = pending.pop() {
-            match component.as_str() {
+        loop {
+            let link_component = link_components.pop();
+            let Some(component) = link_component.as_deref().or_else(|| path_components.next())
+            else {
+                break;
+            };
+            match component {
                 "." => continue,
                 ".." => {
                     if current.oid != ROOT_DIR_INO_NUM {
@@ -602,10 +604,12 @@ impl Volume {
                 )));
             }
             let entry = self
-                .child(device, current.oid, &component)
+                .child(device, current.oid, component)
                 .map_err(|_| ApfsError::NotFound(format!("{path} ({component})")))?;
             let inode = self.inode(device, entry.oid)?;
-            if inode.kind == FileKind::Symlink && (follow || !pending.is_empty()) {
+            if inode.kind == FileKind::Symlink
+                && (follow || !link_components.is_empty() || path_components.peek().is_some())
+            {
                 links += 1;
                 if links > MAX_SYMLINKS {
                     return Err(ApfsError::Malformed("too many symbolic links"));
@@ -614,7 +618,7 @@ impl Volume {
                 if target.starts_with('/') {
                     current = self.inode(device, ROOT_DIR_INO_NUM)?;
                 }
-                pending.extend(
+                link_components.extend(
                     target
                         .split('/')
                         .filter(|c| !c.is_empty())
@@ -996,6 +1000,12 @@ mod tests {
         )?;
         let bytes = volume.read(device, &tree)?;
         assert!(bytes.windows(17).any(|w| w == b"device tree bytes"));
+        let same_tree = volume.lookup(
+            device,
+            &format!("//{lower}/CURRENT//usr/../usr/./standalone/firmware/devicetree.img4/"),
+            false,
+        )?;
+        assert_eq!(same_tree.oid, tree.oid);
         // A sparse file reads its hole as zeros.
         let sparse = volume.lookup(device, "sparse", true)?;
         let data = volume.read(device, &sparse)?;
