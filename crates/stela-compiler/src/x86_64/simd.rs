@@ -424,7 +424,7 @@ pub(super) fn emit_after(
         Operand::Saturate(ref operand) => saturating::emit(code, operand, target),
         Operand::Reduce(ref operand) => reductions::emit(code, operand, target),
         Operand::Shift(ref operand) => shifts::emit(code, operand, target),
-        Operand::Rearrange(ref operand) => rearrange::emit(code, operand, target),
+        Operand::Rearrange(ref operand) => rearrange::emit(code, operand, target, xmm0),
         Operand::Compare {
             operation,
             destination,
@@ -686,6 +686,9 @@ pub(super) fn xmm0_after(
             crate::aarch64::simd::rearrange::Operand::Extract { .. },
         ))
         | Operand::Rearrange(crate::aarch64::simd::rearrange::Operand::Extract { .. }) => held,
+        Operand::Rearrange(crate::aarch64::simd::rearrange::Operand::ByteExtract(operand)) => {
+            committed(operand.destination)
+        }
         Operand::Reduce(ref operand) => committed(operand.destination),
         Operand::Compare { destination, .. } | Operand::Integer { destination, .. } => {
             committed(destination)
