@@ -55,7 +55,8 @@ pgprot_t vm_get_page_prot(vm_flags_t vm_flags)
 int stela_linux_mmap(struct file *file, void *space, unsigned long address, size_t size,
 		     u64 offset, bool writable, struct stela_linux_mapping **result)
 {
-	if (!PAGE_ALIGNED(address) || !PAGE_ALIGNED(size) || !PAGE_ALIGNED(offset) || !size)
+	if (!PAGE_ALIGNED(address) || !PAGE_ALIGNED(size) || !PAGE_ALIGNED(offset) ||
+	    !size || size > ULONG_MAX - address)
 		return -EINVAL;
 	if (!file->f_op->mmap)
 		return -ENODEV;
@@ -313,6 +314,9 @@ int main(void)
 
 	assert(!IS_ERR(file));
 	assert(stela_linux_mmap(file, SPACE, BASE + 1, PAGE_SIZE, 0, true, &mapping) == -EINVAL);
+	assert(stela_linux_mmap(file, SPACE, ULONG_MAX & PAGE_MASK, PAGE_SIZE,
+			       0, true, &mapping) == -EINVAL);
+	assert(!mmaps);
 	mmap_error = -EPERM;
 	assert(stela_linux_mmap(file, SPACE, BASE, PAGE_SIZE, 0, true, &mapping) == -EPERM);
 	mmap_error = 0;
