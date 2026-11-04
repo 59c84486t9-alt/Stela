@@ -776,29 +776,43 @@ impl Prepare {
             } else {
                 format!("{name} ({})", owner.variant)
             };
-            let (bytes, receipt) = match payload_type {
-                Some(expected) => {
-                    let (bytes, receipt) = stela_loader::im4p::decode(&container, limit)?;
-                    if receipt.payload_type != expected {
-                        bail!(
-                            "{name} is IM4P type {}, expected {expected}",
-                            receipt.payload_type
-                        );
+            let (bytes, container_sha256, payload_type, description, decoded_sha256) =
+                match payload_type {
+                    Some(expected) => {
+                        let (bytes, receipt) = stela_loader::im4p::decode(&container, limit)?;
+                        if receipt.payload_type != expected {
+                            bail!(
+                                "{name} is IM4P type {}, expected {expected}",
+                                receipt.payload_type
+                            );
+                        }
+                        (
+                            bytes,
+                            receipt.container_sha256,
+                            receipt.payload_type,
+                            receipt.description,
+                            receipt.decoded_sha256,
+                        )
                     }
-                    (bytes, Some(receipt))
-                }
-                None => (container.clone(), None),
-            };
+                    None => {
+                        let digest = stela_formats::sha256(&container);
+                        (
+                            container,
+                            digest.clone(),
+                            "opaque".into(),
+                            String::new(),
+                            digest,
+                        )
+                    }
+                };
             let source = Source {
                 component: label,
                 member: entry.path.clone(),
-                container_sha256: stela_formats::sha256(&container),
-                payload_type: receipt
-                    .as_ref()
-                    .map_or_else(|| "opaque".into(), |r| r.payload_type.clone()),
-                description: receipt.map(|r| r.description).unwrap_or_default(),
+                container_sha256,
+                payload_type,
+                description,
                 decoded_bytes: bytes.len() as u64,
-                decoded_sha256: stela_formats::sha256(&bytes),
+                decoded_sha256,
             };
             Ok(Decoded {
                 bytes,
@@ -840,6 +854,7 @@ impl Prepare {
                 return Ok(None);
             }
             let bytes = restore::archive::read_member(&ipsw, &member, COMPONENT_LIMIT)?;
+            let digest = stela_formats::sha256(&bytes);
             let source = Source {
                 component: if cryptex1 {
                     "Cryptex1 manifest"
@@ -848,11 +863,11 @@ impl Prepare {
                 }
                 .into(),
                 member,
-                container_sha256: stela_formats::sha256(&bytes),
+                container_sha256: digest.clone(),
                 payload_type: "im4m".into(),
                 description: String::new(),
                 decoded_bytes: bytes.len() as u64,
-                decoded_sha256: stela_formats::sha256(&bytes),
+                decoded_sha256: digest,
             };
             Ok(Some(Decoded {
                 bytes,
@@ -903,7 +918,7 @@ impl Prepare {
                                     payload_type: receipt.payload_type,
                                     description: receipt.description,
                                     decoded_bytes: bytes.len() as u64,
-                                    decoded_sha256: stela_formats::sha256(&bytes),
+                                    decoded_sha256: receipt.decoded_sha256,
                                     ..raw.source
                                 },
                                 bytes,
