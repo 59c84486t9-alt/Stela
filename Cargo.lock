@@ -2329,6 +2329,7 @@ dependencies = [
  "anyhow",
  "hex",
  "libc",
+ "miniz_oxide",
  "serde",
  "serde_json",
  "stela-compiler",
