@@ -46,7 +46,7 @@ fail(struct stela_air_error *error, enum stela_air_error_kind kind, const char *
    return false;
 }
 
-/* The function stages of stela_air_entry_stage's stages: kernels, then
+/* AIR entry stages: kernels, then
  * enum stela_air_stage. */
 static const enum stela_metal_function_stage function_stages[] = {
    STELA_METAL_KERNEL, STELA_METAL_VERTEX, STELA_METAL_FRAGMENT, STELA_METAL_OBJECT,
@@ -313,13 +313,8 @@ inspect_entry(const void *air, size_t size, const char *entry,
               stela_air_visit_stage stage_entry, void *data, const bool *found, unsigned *stage,
               struct stela_air_error *error)
 {
-   if (!stela_air_entry_stage(air, size, entry, stage, error))
-      return false;
-   bool inspected = *stage ? stela_air_inspect_stage(air, size, constants, entry,
-                                                     (enum stela_air_stage)*stage, stage_entry,
-                                                     data, error) :
-                             stela_air_inspect(air, size, constants, AIR_MAX_METADATA_OPERANDS,
-                                               kernel, data, error);
+   bool inspected = stela_air_inspect_entry(air, size, constants, entry, stage, kernel, stage_entry,
+                                           data, error);
    /* A receiver's refusal is reported as the inspector's; keep the cause. */
    return inspected ? *found || fail(error, STELA_AIR_ARGUMENT, "entry is not an AIR kernel") :
                       false;

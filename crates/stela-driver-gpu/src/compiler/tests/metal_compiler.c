@@ -901,6 +901,26 @@ modules_list_their_functions(void)
 }
 
 static void
+reflection_requires_a_unique_listed_entry(void)
+{
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   char *fixture = ralloc_asprintf(NULL, "%s!air.visible = !{!2}\n", kernel);
+   LLVMMemoryBufferRef input = bitcode(fixture);
+   ralloc_free(fixture);
+   assert(!stela_metal_reflect(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                               "kernel", NULL, 0, &reflection, &error));
+   assert(error.kind == STELA_AIR_METADATA && strstr(error.detail, "entry listed more than once"));
+   LLVMDisposeMemoryBuffer(input);
+
+   input = bitcode(kernel);
+   assert(!stela_metal_reflect(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                               "air.wg.barrier", NULL, 0, &reflection, &error));
+   assert(error.kind == STELA_AIR_ARGUMENT);
+   LLVMDisposeMemoryBuffer(input);
+}
+
+static void
 render_stages_compile_at_their_linked_locations(void)
 {
    struct stela_metal_reflection reflection;
@@ -1892,6 +1912,7 @@ main(void)
 {
    glsl_type_singleton_init_or_ref();
    modules_list_their_functions();
+   reflection_requires_a_unique_listed_entry();
    kernels_reflect_and_compile_their_threadgroup_memory();
    dynamic_kernels_take_their_dispatch_shape();
    render_stages_compile_at_their_linked_locations();

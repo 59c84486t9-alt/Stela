@@ -2621,21 +2621,53 @@ command_use(LLVMModuleRef module)
    return use;
 }
 
+/* In enum stela_air_stage order after the kernels. */
+static const char *const entry_lists[] = {"air.kernel", "air.vertex", "air.fragment",
+                                          "air.object", "air.mesh", "air.visible"};
+
+static bool
+entry_stage(struct stela_air_metadata *m, const char *entry, unsigned *stage)
+{
+   bool found = false;
+   LLVMValueRef fn = LLVMGetNamedFunction(m->module, entry);
+   for (unsigned list = 0; fn && list < ARRAY_SIZE(entry_lists); list++) {
+      LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
+      unsigned count;
+      if (!stela_air_named_md(m, entry_lists[list], nodes, &count))
+         return false;
+      for (unsigned i = 0; i < count; i++) {
+         LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+         unsigned fields_count;
+         if (!stela_air_md_node(m, nodes[i], fields, &fields_count) || !fields_count)
+            return false;
+         if (fields[0] != fn)
+            continue;
+         if (found)
+            return fail(m, STELA_AIR_METADATA, "entry listed more than once");
+         found = true;
+         *stage = list;
+      }
+   }
+   return found || fail(m, STELA_AIR_ARGUMENT, "entry is not a listed AIR function");
+}
+
 static bool
 inspect(const void *bitcode, size_t size, const struct stela_air_constants *constants,
         unsigned max_entries,
-         stela_air_visit_entry visit, void *data, struct stela_air_error *error,
-         const char *render_name, enum stela_air_stage stage, stela_air_visit_stage render_visit)
+        stela_air_visit_entry visit, void *data, struct stela_air_error *error,
+        const char *entry_name, enum stela_air_stage stage, stela_air_visit_stage render_visit,
+        unsigned *listed_stage)
 {
    struct stela_air_error local = {0};
    if (!error)
       error = &local;
    *error = (struct stela_air_error){0};
-   struct stela_air_metadata m = {.error = error, .render = render_name != NULL};
+   struct stela_air_metadata m = {.error = error};
    if (!bitcode || size < 4 || size > AIR_MAX_BITCODE_BYTES ||
        memcmp(bitcode, "BC\xc0\xde", 4) || !max_entries ||
-       max_entries > AIR_MAX_METADATA_OPERANDS || (!render_name && !visit) ||
-       (render_name && (!render_visit || !stage_text(render_name, strlen(render_name)))))
+       max_entries > AIR_MAX_METADATA_OPERANDS ||
+       (entry_name && (!render_visit || !stage_text(entry_name, strlen(entry_name)))) ||
+       ((!entry_name || listed_stage) && !visit))
       return fail(&m, STELA_AIR_INPUT, "invalid AIR inspection input/budget");
    unsigned major, minor, patch;
    LLVMGetVersion(&major, &minor, &patch);
@@ -2663,6 +2695,12 @@ inspect(const void *bitcode, size_t size, const struct stela_air_constants *cons
       fail(&m, STELA_AIR_BITCODE, "LLVM refused AIR bitcode");
       goto done;
    }
+   if (listed_stage) {
+      if (!entry_stage(&m, entry_name, listed_stage))
+         goto done;
+      stage = (enum stela_air_stage)*listed_stage;
+   }
+   m.render = stage != 0;
    char *verification = NULL;
    if (LLVMVerifyModule(m.module, LLVMReturnStatusAction, &verification)) {
       fail(&m, STELA_AIR_VERIFY, "%s", verification ? verification : "invalid LLVM module");
@@ -2700,10 +2738,10 @@ inspect(const void *bitcode, size_t size, const struct stela_air_constants *cons
       .commands = command_use(m.module),
       .metadata = &m,
    };
-   if (render_name) {
+   if (m.render) {
       struct stela_air_render render = {.entry = {.stage = stage}};
       if (stage != STELA_AIR_VISIBLE &&
-          !stela_air_metadata_stage(&m, LLVMGetNamedFunction(m.module, render_name), stage, &render)) goto done;
+          !stela_air_metadata_stage(&m, LLVMGetNamedFunction(m.module, entry_name), stage, &render)) goto done;
       success = render_visit(&info, &render.entry, data);
       if (!success) fail(&m, STELA_AIR_LIMIT, "AIR stage receiver refused entry");
       goto done;
@@ -2791,7 +2829,7 @@ stela_air_inspect(const void *bitcode, size_t size, const struct stela_air_const
                   unsigned max_entries, stela_air_visit_entry visit, void *data,
                   struct stela_air_error *error)
 {
-   return inspect(bitcode, size, constants, max_entries, visit, data, error, NULL, 0, NULL);
+   return inspect(bitcode, size, constants, max_entries, visit, data, error, NULL, 0, NULL, NULL);
 }
 
 bool
@@ -2805,7 +2843,20 @@ stela_air_inspect_stage(const void *bitcode, size_t size, const struct stela_air
       return false;
    }
    return inspect(bitcode, size, constants, AIR_MAX_METADATA_OPERANDS, NULL, data, error, entry,
-                  stage, visit);
+                  stage, visit, NULL);
+}
+
+bool
+stela_air_inspect_entry(const void *bitcode, size_t size, const struct stela_air_constants *constants,
+                        const char *entry, unsigned *stage, stela_air_visit_entry kernel_visit,
+                        stela_air_visit_stage stage_visit, void *data, struct stela_air_error *error)
+{
+   if (!entry || !stage) {
+      if (error) *error = (struct stela_air_error){.kind = STELA_AIR_INPUT};
+      return false;
+   }
+   return inspect(bitcode, size, constants, AIR_MAX_METADATA_OPERANDS, kernel_visit, data, error,
+                  entry, 0, stage_visit, stage);
 }
 
 /* Parses AIR bitcode into m->module, in *context; false after reporting
@@ -2842,10 +2893,6 @@ valid_bitcode(const void *bitcode, size_t size)
           !memcmp(bitcode, "BC\xc0\xde", 4);
 }
 
-/* In enum stela_air_stage order after the kernels. */
-static const char *const entry_lists[] = {"air.kernel", "air.vertex", "air.fragment",
-                                          "air.object", "air.mesh", "air.visible"};
-
 bool
 stela_air_functions(const void *bitcode, size_t size, stela_air_visit_function visit, void *data,
                     struct stela_air_error *error)
@@ -2878,47 +2925,6 @@ stela_air_functions(const void *bitcode, size_t size, stela_air_visit_function v
       fail(&m, STELA_AIR_METADATA, "a function the module lists");
    close_module(&m, context);
    return visited;
-}
-
-bool
-stela_air_entry_stage(const void *bitcode, size_t size, const char *entry, unsigned *stage,
-                      struct stela_air_error *error)
-{
-   struct stela_air_error local = {0};
-   struct stela_air_metadata m = {.error = error ? error : &local};
-   *m.error = (struct stela_air_error){0};
-   if (!valid_bitcode(bitcode, size) || !entry || !stage_text(entry, strlen(entry)))
-      return fail(&m, STELA_AIR_INPUT, "invalid AIR entry query");
-   LLVMContextRef context;
-   bool found = false;
-   if (!parse_module(&m, bitcode, size, &context))
-      goto done;
-   LLVMValueRef fn = LLVMGetNamedFunction(m.module, entry);
-   for (unsigned list = 0; fn && list < ARRAY_SIZE(entry_lists); list++) {
-      LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
-      unsigned count;
-      if (!stela_air_named_md(&m, entry_lists[list], nodes, &count))
-         goto done;
-      for (unsigned i = 0; i < count; i++) {
-         LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
-         unsigned fields_count;
-         if (!stela_air_md_node(&m, nodes[i], fields, &fields_count) || !fields_count)
-            goto done;
-         if (fields[0] != fn)
-            continue;
-         if (found) {
-            fail(&m, STELA_AIR_METADATA, "entry listed more than once");
-            goto done;
-         }
-         found = true;
-         *stage = list;
-      }
-   }
-   if (!found)
-      fail(&m, STELA_AIR_ARGUMENT, "entry is not a listed AIR function");
-done:
-   close_module(&m, context);
-   return found && m.error->kind == STELA_AIR_OK;
 }
 
 bool
