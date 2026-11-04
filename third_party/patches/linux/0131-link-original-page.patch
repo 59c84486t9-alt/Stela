@@ -1,0 +1,467 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 23:49:06 -0500
+Subject: [PATCH] refactor(mm): link original page cache reads
+
+---
+ mm/filemap.c       | 197 --------------------------------------------
+ mm/filemap_batch.c | 199 +++++++++++++++++++++++++++++++++++++++++++++
+ mm/filemap_batch.h |   2 +
+ 3 files changed, 201 insertions(+), 197 deletions(-)
+
+diff --git a/mm/filemap.c b/mm/filemap.c
+index 1fef6f8b6054bab531eeb75017f50a270cd3d601..f8d55ba54122f9402ef76a2ae33d5f2c8597e2da 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -931,26 +931,6 @@ out:
+ 	return folio_batch_count(fbatch);
+ }
+ 
+-/*
+- * CD/DVDs are error prone. When a medium error occurs, the driver may fail
+- * a _large_ part of the i/o request. Imagine the worst scenario:
+- *
+- *      ---R__________________________________________B__________
+- *         ^ reading here                             ^ bad block(assume 4k)
+- *
+- * read(R) => miss => readahead(R...B) => media error => frustrating retries
+- * => failing the whole request => read(R) => read(R+1) =>
+- * readahead(R+1...B+1) => bang => read(R+2) => read(R+3) =>
+- * readahead(R+3...B+2) => bang => read(R+3) => read(R+4) =>
+- * readahead(R+4...B+3) => bang => read(R+4) => read(R+5) => ......
+- *
+- * It is going insane. Fix it by quickly scaling down the readahead size.
+- */
+-static void shrink_readahead_size_eio(struct file_ra_state *ra)
+-{
+-	ra->ra_pages /= 4;
+-}
+-
+ /*
+  * filemap_get_read_batch - Get a batch of folios for read
+  *
+@@ -996,32 +976,6 @@ retry:
+ 	rcu_read_unlock();
+ }
+ 
+-static int filemap_read_folio(struct file *file, filler_t filler,
+-		struct folio *folio)
+-{
+-	bool workingset = folio_test_workingset(folio);
+-	unsigned long pflags;
+-	int error;
+-
+-	/* Start the actual read. The read will unlock the page. */
+-	if (unlikely(workingset))
+-		psi_memstall_enter(&pflags);
+-	error = filler(file, folio);
+-	if (unlikely(workingset))
+-		psi_memstall_leave(&pflags);
+-	if (error)
+-		return error;
+-
+-	error = folio_wait_locked_killable(folio);
+-	if (error)
+-		return error;
+-	if (folio_test_uptodate(folio))
+-		return 0;
+-	if (file)
+-		shrink_readahead_size_eio(&file->f_ra);
+-	return -EIO;
+-}
+-
+ static bool filemap_range_uptodate(struct address_space *mapping,
+ 		loff_t pos, size_t count, struct folio *folio,
+ 		bool need_uptodate)
+@@ -2588,157 +2542,6 @@ EXPORT_SYMBOL(generic_file_mmap_prepare);
+ EXPORT_SYMBOL(generic_file_readonly_mmap);
+ EXPORT_SYMBOL(generic_file_readonly_mmap_prepare);
+ 
+-static struct folio *do_read_cache_folio(struct address_space *mapping,
+-		pgoff_t index, filler_t filler, struct file *file, gfp_t gfp)
+-{
+-	struct folio *folio;
+-	int err;
+-
+-	if (!filler)
+-		filler = mapping->a_ops->read_folio;
+-repeat:
+-	folio = filemap_get_folio(mapping, index);
+-	if (IS_ERR(folio)) {
+-		folio = filemap_alloc_folio(gfp, mapping_min_folio_order(mapping), NULL);
+-		if (!folio)
+-			return ERR_PTR(-ENOMEM);
+-		index = mapping_align_index(mapping, index);
+-		err = filemap_add_folio(mapping, folio, index, gfp);
+-		if (unlikely(err)) {
+-			folio_put(folio);
+-			if (err == -EEXIST)
+-				goto repeat;
+-			/* Presumably ENOMEM for xarray node */
+-			return ERR_PTR(err);
+-		}
+-
+-		goto filler;
+-	}
+-	if (folio_test_uptodate(folio))
+-		goto out;
+-
+-	if (!folio_trylock(folio)) {
+-		folio_put_wait_locked(folio, TASK_UNINTERRUPTIBLE);
+-		goto repeat;
+-	}
+-
+-	/* Folio was truncated from mapping */
+-	if (!folio->mapping) {
+-		folio_unlock(folio);
+-		folio_put(folio);
+-		goto repeat;
+-	}
+-
+-	/* Someone else locked and filled the page in a very small window */
+-	if (folio_test_uptodate(folio)) {
+-		folio_unlock(folio);
+-		goto out;
+-	}
+-
+-filler:
+-	err = filemap_read_folio(file, filler, folio);
+-	if (err) {
+-		folio_put(folio);
+-		if (err == AOP_TRUNCATED_PAGE)
+-			goto repeat;
+-		return ERR_PTR(err);
+-	}
+-
+-out:
+-	folio_mark_accessed(folio);
+-	return folio;
+-}
+-
+-/**
+- * read_cache_folio - Read into page cache, fill it if needed.
+- * @mapping: The address_space to read from.
+- * @index: The index to read.
+- * @filler: Function to perform the read, or NULL to use aops->read_folio().
+- * @file: Passed to filler function, may be NULL if not required.
+- *
+- * Read one page into the page cache.  If it succeeds, the folio returned
+- * will contain @index, but it may not be the first page of the folio.
+- *
+- * If the filler function returns an error, it will be returned to the
+- * caller.
+- *
+- * Context: May sleep.  Expects mapping->invalidate_lock to be held.
+- * Return: An uptodate folio on success, ERR_PTR() on failure.
+- */
+-struct folio *read_cache_folio(struct address_space *mapping, pgoff_t index,
+-		filler_t filler, struct file *file)
+-{
+-	return do_read_cache_folio(mapping, index, filler, file,
+-			mapping_gfp_mask(mapping));
+-}
+-EXPORT_SYMBOL(read_cache_folio);
+-
+-/**
+- * mapping_read_folio_gfp - Read into page cache, using specified allocation flags.
+- * @mapping:	The address_space for the folio.
+- * @index:	The index that the allocated folio will contain.
+- * @gfp:	The page allocator flags to use if allocating.
+- *
+- * This is the same as "read_cache_folio(mapping, index, NULL, NULL)", but with
+- * any new memory allocations done using the specified allocation flags.
+- *
+- * The most likely error from this function is EIO, but ENOMEM is
+- * possible and so is EINTR.  If ->read_folio returns another error,
+- * that will be returned to the caller.
+- *
+- * The function expects mapping->invalidate_lock to be already held.
+- *
+- * Return: Uptodate folio on success, ERR_PTR() on failure.
+- */
+-struct folio *mapping_read_folio_gfp(struct address_space *mapping,
+-		pgoff_t index, gfp_t gfp)
+-{
+-	return do_read_cache_folio(mapping, index, NULL, NULL, gfp);
+-}
+-EXPORT_SYMBOL(mapping_read_folio_gfp);
+-
+-static struct page *do_read_cache_page(struct address_space *mapping,
+-		pgoff_t index, filler_t *filler, struct file *file, gfp_t gfp)
+-{
+-	struct folio *folio;
+-
+-	folio = do_read_cache_folio(mapping, index, filler, file, gfp);
+-	if (IS_ERR(folio))
+-		return &folio->page;
+-	return folio_file_page(folio, index);
+-}
+-
+-struct page *read_cache_page(struct address_space *mapping,
+-			pgoff_t index, filler_t *filler, struct file *file)
+-{
+-	return do_read_cache_page(mapping, index, filler, file,
+-			mapping_gfp_mask(mapping));
+-}
+-EXPORT_SYMBOL(read_cache_page);
+-
+-/**
+- * read_cache_page_gfp - read into page cache, using specified page allocation flags.
+- * @mapping:	the page's address_space
+- * @index:	the page index
+- * @gfp:	the page allocator flags to use if allocating
+- *
+- * This is the same as "read_mapping_page(mapping, index, NULL)", but with
+- * any new page allocations done using the specified allocation flags.
+- *
+- * If the page does not get brought uptodate, return -EIO.
+- *
+- * The function expects mapping->invalidate_lock to be already held.
+- *
+- * Return: up to date page on success, ERR_PTR() on failure.
+- */
+-struct page *read_cache_page_gfp(struct address_space *mapping,
+-				pgoff_t index,
+-				gfp_t gfp)
+-{
+-	return do_read_cache_page(mapping, index, NULL, NULL, gfp);
+-}
+-EXPORT_SYMBOL(read_cache_page_gfp);
+-
+ /*
+  * Warn about a page cache invalidation failure during a direct I/O write.
+  */
+diff --git a/mm/filemap_batch.c b/mm/filemap_batch.c
+index b814f937080f1822fcdaf4b2f6f343f17df3c66a..9ab21818c38ae5948e163610e30431a154404379 100644
+--- a/mm/filemap_batch.c
++++ b/mm/filemap_batch.c
+@@ -7,6 +7,7 @@
+ #include <linux/folio_batch.h>
+ #include <linux/highmem.h>
+ #include <linux/page_idle.h>
++#include <linux/psi.h>
+ #include <linux/rmap.h>
+ #include <linux/sched.h>
+ #include <linux/sched/mm.h>
+@@ -18,6 +19,7 @@
+ 
+ #include "filemap_batch.h"
+ #include "internal.h"
++#include "pagecache_wait.h"
+ #include "swap.h"
+ 
+ /**
+@@ -1649,3 +1651,200 @@ void truncate_inode_pages_final(struct address_space *mapping)
+ 	truncate_inode_pages(mapping, 0);
+ }
+ EXPORT_SYMBOL(truncate_inode_pages_final);
++
++/*
++ * CD/DVDs are error prone. When a medium error occurs, the driver may fail
++ * a _large_ part of the i/o request. Imagine the worst scenario:
++ *
++ *      ---R__________________________________________B__________
++ *         ^ reading here                             ^ bad block(assume 4k)
++ *
++ * read(R) => miss => readahead(R...B) => media error => frustrating retries
++ * => failing the whole request => read(R) => read(R+1) =>
++ * readahead(R+1...B+1) => bang => read(R+2) => read(R+3) =>
++ * readahead(R+3...B+2) => bang => read(R+3) => read(R+4) =>
++ * readahead(R+4...B+3) => bang => read(R+4) => read(R+5) => ......
++ *
++ * It is going insane. Fix it by quickly scaling down the readahead size.
++ */
++static void shrink_readahead_size_eio(struct file_ra_state *ra)
++{
++	ra->ra_pages /= 4;
++}
++
++int filemap_read_folio(struct file *file, filler_t filler,
++		struct folio *folio)
++{
++	bool workingset = folio_test_workingset(folio);
++	unsigned long pflags;
++	int error;
++
++	/* Start the actual read. The read will unlock the page. */
++	if (unlikely(workingset))
++		psi_memstall_enter(&pflags);
++	error = filler(file, folio);
++	if (unlikely(workingset))
++		psi_memstall_leave(&pflags);
++	if (error)
++		return error;
++
++	error = folio_wait_locked_killable(folio);
++	if (error)
++		return error;
++	if (folio_test_uptodate(folio))
++		return 0;
++	if (file)
++		shrink_readahead_size_eio(&file->f_ra);
++	return -EIO;
++}
++
++static struct folio *do_read_cache_folio(struct address_space *mapping,
++		pgoff_t index, filler_t filler, struct file *file, gfp_t gfp)
++{
++	struct folio *folio;
++	int err;
++
++	if (!filler)
++		filler = mapping->a_ops->read_folio;
++repeat:
++	folio = filemap_get_folio(mapping, index);
++	if (IS_ERR(folio)) {
++		folio = filemap_alloc_folio(gfp, mapping_min_folio_order(mapping), NULL);
++		if (!folio)
++			return ERR_PTR(-ENOMEM);
++		index = mapping_align_index(mapping, index);
++		err = filemap_add_folio(mapping, folio, index, gfp);
++		if (unlikely(err)) {
++			folio_put(folio);
++			if (err == -EEXIST)
++				goto repeat;
++			/* Presumably ENOMEM for xarray node */
++			return ERR_PTR(err);
++		}
++
++		goto filler;
++	}
++	if (folio_test_uptodate(folio))
++		goto out;
++
++	if (!folio_trylock(folio)) {
++		folio_put_wait_locked(folio, TASK_UNINTERRUPTIBLE);
++		goto repeat;
++	}
++
++	/* Folio was truncated from mapping */
++	if (!folio->mapping) {
++		folio_unlock(folio);
++		folio_put(folio);
++		goto repeat;
++	}
++
++	/* Someone else locked and filled the page in a very small window */
++	if (folio_test_uptodate(folio)) {
++		folio_unlock(folio);
++		goto out;
++	}
++
++filler:
++	err = filemap_read_folio(file, filler, folio);
++	if (err) {
++		folio_put(folio);
++		if (err == AOP_TRUNCATED_PAGE)
++			goto repeat;
++		return ERR_PTR(err);
++	}
++
++out:
++	folio_mark_accessed(folio);
++	return folio;
++}
++
++/**
++ * read_cache_folio - Read into page cache, fill it if needed.
++ * @mapping: The address_space to read from.
++ * @index: The index to read.
++ * @filler: Function to perform the read, or NULL to use aops->read_folio().
++ * @file: Passed to filler function, may be NULL if not required.
++ *
++ * Read one page into the page cache.  If it succeeds, the folio returned
++ * will contain @index, but it may not be the first page of the folio.
++ *
++ * If the filler function returns an error, it will be returned to the
++ * caller.
++ *
++ * Context: May sleep.  Expects mapping->invalidate_lock to be held.
++ * Return: An uptodate folio on success, ERR_PTR() on failure.
++ */
++struct folio *read_cache_folio(struct address_space *mapping, pgoff_t index,
++		filler_t filler, struct file *file)
++{
++	return do_read_cache_folio(mapping, index, filler, file,
++			mapping_gfp_mask(mapping));
++}
++EXPORT_SYMBOL(read_cache_folio);
++
++/**
++ * mapping_read_folio_gfp - Read into page cache, using specified allocation flags.
++ * @mapping:	The address_space for the folio.
++ * @index:	The index that the allocated folio will contain.
++ * @gfp:	The page allocator flags to use if allocating.
++ *
++ * This is the same as "read_cache_folio(mapping, index, NULL, NULL)", but with
++ * any new memory allocations done using the specified allocation flags.
++ *
++ * The most likely error from this function is EIO, but ENOMEM is
++ * possible and so is EINTR.  If ->read_folio returns another error,
++ * that will be returned to the caller.
++ *
++ * The function expects mapping->invalidate_lock to be already held.
++ *
++ * Return: Uptodate folio on success, ERR_PTR() on failure.
++ */
++struct folio *mapping_read_folio_gfp(struct address_space *mapping,
++		pgoff_t index, gfp_t gfp)
++{
++	return do_read_cache_folio(mapping, index, NULL, NULL, gfp);
++}
++EXPORT_SYMBOL(mapping_read_folio_gfp);
++
++static struct page *do_read_cache_page(struct address_space *mapping,
++		pgoff_t index, filler_t *filler, struct file *file, gfp_t gfp)
++{
++	struct folio *folio;
++
++	folio = do_read_cache_folio(mapping, index, filler, file, gfp);
++	if (IS_ERR(folio))
++		return &folio->page;
++	return folio_file_page(folio, index);
++}
++
++struct page *read_cache_page(struct address_space *mapping,
++			pgoff_t index, filler_t *filler, struct file *file)
++{
++	return do_read_cache_page(mapping, index, filler, file,
++			mapping_gfp_mask(mapping));
++}
++EXPORT_SYMBOL(read_cache_page);
++
++/**
++ * read_cache_page_gfp - read into page cache, using specified page allocation flags.
++ * @mapping:	the page's address_space
++ * @index:	the page index
++ * @gfp:	the page allocator flags to use if allocating
++ *
++ * This is the same as "read_mapping_page(mapping, index, NULL)", but with
++ * any new page allocations done using the specified allocation flags.
++ *
++ * If the page does not get brought uptodate, return -EIO.
++ *
++ * The function expects mapping->invalidate_lock to be already held.
++ *
++ * Return: up to date page on success, ERR_PTR() on failure.
++ */
++struct page *read_cache_page_gfp(struct address_space *mapping,
++				pgoff_t index,
++				gfp_t gfp)
++{
++	return do_read_cache_page(mapping, index, NULL, NULL, gfp);
++}
++EXPORT_SYMBOL(read_cache_page_gfp);
+diff --git a/mm/filemap_batch.h b/mm/filemap_batch.h
+index 3cde19cd998f6928bb9affc3c31791b24c527fb1..52f8799dfa2bebb52530235bc85ce42f257be2f8 100644
+--- a/mm/filemap_batch.h
++++ b/mm/filemap_batch.h
+@@ -41,6 +41,8 @@ reset:
+ 
+ struct folio_batch;
+ 
++int filemap_read_folio(struct file *file, filler_t filler, struct folio *folio);
++
+ void clear_shadow_entries(struct address_space *mapping,
+ 			  unsigned long start, unsigned long max);
+ void truncate_folio_batch_exceptionals(struct address_space *mapping,
