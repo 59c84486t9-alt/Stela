@@ -385,25 +385,28 @@ impl Translations for Shared {
                 return Some(Ok(record));
             }
             match store.stored(key) {
-                Some(bytes) => Some(Err((bytes, *store.translator()))),
+                Some(stored) => Some(Err((
+                    stored,
+                    *store.translator(),
+                    store.take_decode_scratch(stored),
+                ))),
                 None => {
                     store.looked_up(key, false, false);
                     None
                 }
             }
         })?;
-        let (bytes, translator) = match lookup {
+        let (stored, translator, mut scratch) = match lookup {
             Ok(record) => return Some(record),
             Err(source) => source,
         };
-        let decoded = DecodedRecord::decode(bytes, &translator, key);
+        let decoded = DecodedRecord::decode(stored, &translator, key, &mut scratch);
         let evicted = with_boot(|boot| {
             let store = &mut boot.as_mut()?.store;
-            store.looked_up(key, true, decoded.is_some());
-            store.remember_record(decoded.as_ref()?)
+            store.finish_decode(key, stored, &decoded, &mut scratch)
         });
         drop(evicted);
-        decoded.map(DecodedRecord::into_record)
+        decoded.ok().map(DecodedRecord::into_record)
     }
 
     fn prepared(
