@@ -459,6 +459,7 @@ impl Linux {
             return;
         };
         self.environment.apply(&mut build, None, &[], None);
+        build.flag("-isystem").flag(Path::new(LINUX).join("kernel"));
         let archives = self.hosted.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         // Dedicated lifecycle fixture: unchanged original kobject/uevent APIs.
         tests.add(
