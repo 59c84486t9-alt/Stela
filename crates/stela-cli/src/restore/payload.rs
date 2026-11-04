@@ -174,17 +174,28 @@ struct Hashed {
     blocks: Vec<u8>,
 }
 
+/// Whether the caller publishes the per-block digests alongside the manifest.
+#[derive(Clone, Copy)]
+enum BlockDigests {
+    Record,
+    Omit,
+}
+
 /// Stream one member through `sink`, returning its length and hashes.
 fn stream<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
     name: &str,
+    block_digests: BlockDigests,
     mut sink: impl FnMut(&[u8]) -> Result<()>,
 ) -> Result<Hashed> {
     let mut member = archive.by_name(name)?;
     let expected = member.size();
     let mut hash = Sha256::new();
     let mut hash384 = Sha384::new();
-    let mut block = Sha256::new();
+    let mut block = match block_digests {
+        BlockDigests::Record => Some(Sha256::new()),
+        BlockDigests::Omit => None,
+    };
     let mut in_block = 0u64;
     let mut blocks = Vec::new();
     let mut total = 0u64;
@@ -201,21 +212,25 @@ fn stream<R: Read + Seek>(
         );
         hash.update(&buffer[..count]);
         hash384.update(&buffer[..count]);
-        let mut rest = &buffer[..count];
-        while !rest.is_empty() {
-            let take = rest.len().min((HASH_BLOCK_BYTES - in_block) as usize);
-            block.update(&rest[..take]);
-            in_block += take as u64;
-            rest = &rest[take..];
-            if in_block == HASH_BLOCK_BYTES {
-                blocks.extend_from_slice(&std::mem::take(&mut block).finalize());
-                in_block = 0;
+        if let Some(block) = &mut block {
+            let mut rest = &buffer[..count];
+            while !rest.is_empty() {
+                let take = rest.len().min((HASH_BLOCK_BYTES - in_block) as usize);
+                block.update(&rest[..take]);
+                in_block += take as u64;
+                rest = &rest[take..];
+                if in_block == HASH_BLOCK_BYTES {
+                    blocks.extend_from_slice(&std::mem::take(block).finalize());
+                    in_block = 0;
+                }
             }
         }
         sink(&buffer[..count])?;
     }
     ensure!(total == expected, "{name} is truncated");
-    if in_block > 0 {
+    if let Some(block) = block
+        && in_block > 0
+    {
         blocks.extend_from_slice(&block.finalize());
     }
     Ok(Hashed {
@@ -244,7 +259,11 @@ fn block_hashes(hashed: &[Hashed]) -> (Vec<u8>, BlockHashes) {
 }
 
 /// Hash the named members on several threads; each opens the IPSW itself.
-fn hash_members(image: &Path, names: &[String]) -> Result<Vec<Hashed>> {
+fn hash_members(
+    image: &Path,
+    names: &[String],
+    block_digests: BlockDigests,
+) -> Result<Vec<Hashed>> {
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
     let next = std::sync::atomic::AtomicUsize::new(0);
     let results: Vec<Result<Vec<(usize, Hashed)>>> = std::thread::scope(|scope| {
@@ -258,7 +277,10 @@ fn hash_members(image: &Path, names: &[String]) -> Result<Vec<Hashed>> {
                         let Some(name) = names.get(index) else {
                             return Ok(done);
                         };
-                        done.push((index, stream(&mut archive, name, |_| Ok(()))?));
+                        done.push((
+                            index,
+                            stream(&mut archive, name, block_digests, |_| Ok(()))?,
+                        ));
                     }
                 })
             })
@@ -430,7 +452,7 @@ pub fn inventory(image: &Path, model: &str, keys: KeyOptions<'_>) -> Result<Inve
     let metadata = aea_metadata(&mut archive, image, &selection.names)?;
     let (ipsw, members) = std::thread::scope(|scope| {
         let whole = scope.spawn(|| file_sha256(image));
-        let members = hash_members(image, &selection.names);
+        let members = hash_members(image, &selection.names, BlockDigests::Record);
         (whole.join().expect("hash worker panicked"), members)
     });
     let hashed = members?;
@@ -469,7 +491,7 @@ pub(crate) fn inventory_from<R: Read + Seek>(
         .names
         .iter()
         .map(|name| {
-            stream(&mut archive, name, |bytes| {
+            stream(&mut archive, name, BlockDigests::Record, |bytes| {
                 progress.advance(bytes.len() as u64);
                 Ok(())
             })
@@ -631,7 +653,7 @@ pub fn remote_inventory<R: Read + Seek>(
                 sha384: None,
             });
         } else {
-            let member = stream(&mut archive, name, |_| Ok(()))?;
+            let member = stream(&mut archive, name, BlockDigests::Record, |_| Ok(()))?;
             members.push(member.member.clone());
             hashed.push(member);
         }
@@ -804,7 +826,7 @@ pub fn write(options: &WriteOptions<'_>) -> Result<serde_json::Value> {
             let copy = directory.join(name);
             ensure!(!copy.exists(), "{} exists", copy.display());
             let whole = copy_hashed(image, &copy)?;
-            let members = hash_members(&copy, &selection.names)?
+            let members = hash_members(&copy, &selection.names, BlockDigests::Omit)?
                 .into_iter()
                 .map(|h| h.member)
                 .collect();
@@ -862,7 +884,7 @@ fn write_slices(
     let mut index = 0usize;
     let mut file = File::create(&paths[0])?;
     let mut in_slice = 0u64;
-    let member = stream(archive, name, |mut chunk| {
+    let member = stream(archive, name, BlockDigests::Omit, |mut chunk| {
         while !chunk.is_empty() {
             if in_slice == slice_bytes {
                 file.sync_all()?;
@@ -1063,6 +1085,7 @@ mod tests {
                 (3, Purpose::Installed)
             ]
         );
+        assert!(manifest.block_hashes.is_none());
         assert_eq!(manifest.global_manifests.len(), 1);
         assert!(manifest.aea_keys.is_empty());
         assert_eq!(manifest.source.sha256, Some(file_sha256(&image)?.1));
@@ -1079,6 +1102,7 @@ mod tests {
             archive.by_name(&member.name)?.read_to_end(&mut original)?;
             assert_eq!(joined, original);
             assert_eq!(Some(stela_formats::sha256(&joined)), member.sha256);
+            assert_eq!(Some(hex::encode(Sha384::digest(&joined))), member.sha384);
         }
         assert!(directory.join("Firmware/stelatest-os.dmg.003").exists());
         assert!(!directory.join("Firmware/unrelated.bin.000").exists());
@@ -1194,6 +1218,7 @@ mod tests {
                 input: None,
             },
         )?;
+        assert!(manifest.block_hashes.is_none());
         assert_eq!(report["payload"]["members"], json!(manifest.members));
         // The in-place manifest describes the same archive bytes.
         assert_eq!(in_place.members, manifest.members);
