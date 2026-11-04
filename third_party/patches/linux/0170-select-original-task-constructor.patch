@@ -1,0 +1,1121 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 02:43:03 -0500
+Subject: [PATCH] refactor(fork): select native task construction
+
+---
+ kernel/Makefile    |   2 +-
+ kernel/fork.c      | 396 +---------------------------
+ kernel/fork_task.c | 629 +++++++++++++++++++++++++++++++++++++++++++++
+ kernel/fork_task.h |  11 +
+ 4 files changed, 647 insertions(+), 391 deletions(-)
+ create mode 100644 kernel/fork_task.c
+ create mode 100644 kernel/fork_task.h
+
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 5162dbd6833970e77d9353bf6a707246e1a74efc..1aa5056e74183b1bbaa08b6bc67706918bce93fd 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -3,7 +3,7 @@
+ # Makefile for the linux kernel.
+ #
+ 
+-obj-y     = fork.o fork_caches.o fork_stack.o fork_release.o fork_mm.o exec_domain.o exec_state.o panic.o \
++obj-y     = fork.o fork_task.o fork_caches.o fork_stack.o fork_release.o fork_mm.o exec_domain.o exec_state.o panic.o \
+ 	    cpu.o cpu_topology.o exit.o task_exit.o task_wait.o task_rcu.o rcuwait_wake.o softirq.o resource.o \
+ 	    sysctl.o capability.o ptrace.o ptrace_access.o user.o \
+ 	    signal.o signal_state.o restart_no_syscall.o sys.o task_rusage.o umh.o workqueue.o pid.o task_work.o \
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 3c8b4f96506d62ac2ade76d46815c03cb36bdd77..5c414d20aabed9a078ee6f8b5799cfc7732397cb 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -122,6 +122,7 @@
+ #include "fork_caches.h"
+ #include "fork_stack.h"
+ #include "fork_mm.h"
++#include "fork_task.h"
+ 
+ #include <trace/events/sched.h>
+ 
+@@ -130,267 +131,6 @@
+ 
+ #include <kunit/visibility.h>
+ 
+-static inline struct task_struct *alloc_task_struct_node(int node)
+-{
+-	return kmem_cache_alloc_node(task_struct_cachep, GFP_KERNEL, node);
+-}
+-
+-#ifdef CONFIG_VMAP_STACK
+-/*
+- * vmalloc() is a bit slow, and calling vfree() enough times will force a TLB
+- * flush.  Try to minimize the number of calls by caching stacks.
+- */
+-#define NR_CACHED_STACKS 2
+-static DEFINE_PER_CPU(struct vm_struct *, cached_stacks[NR_CACHED_STACKS]);
+-/*
+- * Allocated stacks are cached and later reused by new threads, so memcg
+- * accounting is performed by the code assigning/releasing stacks to tasks.
+- * We need a zeroed memory without __GFP_ACCOUNT.
+- */
+-#define GFP_VMAP_STACK (GFP_KERNEL | __GFP_ZERO | __GFP_SKIP_KASAN)
+-
+-struct vm_stack {
+-	struct rcu_head rcu;
+-	struct vm_struct *stack_vm_area;
+-};
+-
+-static struct vm_struct *alloc_thread_stack_node_from_cache(struct task_struct *tsk, int node)
+-{
+-	struct vm_struct *vm_area;
+-	unsigned int i;
+-
+-	/*
+-	 * If the node has memory, we are guaranteed the stacks are backed by local pages.
+-	 * Otherwise the pages are arbitrary.
+-	 *
+-	 * Note that depending on cpuset it is possible we will get migrated to a different
+-	 * node immediately after allocating here, so this does *not* guarantee locality for
+-	 * arbitrary callers.
+-	 */
+-	scoped_guard(preempt) {
+-		if (node != NUMA_NO_NODE && numa_node_id() != node)
+-			return NULL;
+-
+-		for (i = 0; i < NR_CACHED_STACKS; i++) {
+-			vm_area = this_cpu_xchg(cached_stacks[i], NULL);
+-			if (vm_area)
+-				return vm_area;
+-		}
+-	}
+-
+-	return NULL;
+-}
+-
+-static bool try_release_thread_stack_to_cache(struct vm_struct *vm_area)
+-{
+-	unsigned int i;
+-	int nid;
+-
+-	/*
+-	 * Don't cache stacks if any of the pages don't match the local domain, unless
+-	 * there is no local memory to begin with.
+-	 *
+-	 * Note that lack of local memory does not automatically mean it makes no difference
+-	 * performance-wise which other domain backs the stack. In this case we are merely
+-	 * trying to avoid constantly going to vmalloc.
+-	 */
+-	scoped_guard(preempt) {
+-		nid = numa_node_id();
+-		if (node_state(nid, N_MEMORY)) {
+-			for (i = 0; i < vm_area->nr_pages; i++) {
+-				struct page *page = vm_area->pages[i];
+-				if (page_to_nid(page) != nid)
+-					return false;
+-			}
+-		}
+-
+-		for (i = 0; i < NR_CACHED_STACKS; i++) {
+-			struct vm_struct *tmp = NULL;
+-
+-			if (this_cpu_try_cmpxchg(cached_stacks[i], &tmp, vm_area))
+-				return true;
+-		}
+-	}
+-	return false;
+-}
+-
+-static void thread_stack_free_rcu(struct rcu_head *rh)
+-{
+-	struct vm_stack *vm_stack = container_of(rh, struct vm_stack, rcu);
+-	struct vm_struct *vm_area = vm_stack->stack_vm_area;
+-
+-	if (try_release_thread_stack_to_cache(vm_stack->stack_vm_area))
+-		return;
+-
+-	vfree(vm_area->addr);
+-}
+-
+-static void thread_stack_delayed_free(struct task_struct *tsk)
+-{
+-	struct vm_stack *vm_stack = tsk->stack;
+-
+-	vm_stack->stack_vm_area = tsk->stack_vm_area;
+-	call_rcu(&vm_stack->rcu, thread_stack_free_rcu);
+-}
+-
+-int free_vm_stack_cache(unsigned int cpu)
+-{
+-	struct vm_struct **cached_vm_stack_areas = per_cpu_ptr(cached_stacks, cpu);
+-	int i;
+-
+-	for (i = 0; i < NR_CACHED_STACKS; i++) {
+-		struct vm_struct *vm_area = cached_vm_stack_areas[i];
+-
+-		if (!vm_area)
+-			continue;
+-
+-		vfree(vm_area->addr);
+-		cached_vm_stack_areas[i] = NULL;
+-	}
+-
+-	return 0;
+-}
+-
+-static int memcg_charge_kernel_stack(struct vm_struct *vm_area)
+-{
+-	int i;
+-	int ret;
+-	int nr_charged = 0;
+-
+-	BUG_ON(vm_area->nr_pages != THREAD_SIZE / PAGE_SIZE);
+-
+-	for (i = 0; i < THREAD_SIZE / PAGE_SIZE; i++) {
+-		ret = memcg_kmem_charge_page(vm_area->pages[i], GFP_KERNEL, 0);
+-		if (ret)
+-			goto err;
+-		nr_charged++;
+-	}
+-	return 0;
+-err:
+-	for (i = 0; i < nr_charged; i++)
+-		memcg_kmem_uncharge_page(vm_area->pages[i], 0);
+-	return ret;
+-}
+-
+-static int alloc_thread_stack_node(struct task_struct *tsk, int node)
+-{
+-	struct vm_struct *vm_area;
+-	void *stack;
+-
+-	vm_area = alloc_thread_stack_node_from_cache(tsk, node);
+-	if (vm_area) {
+-		if (memcg_charge_kernel_stack(vm_area)) {
+-			vfree(vm_area->addr);
+-			return -ENOMEM;
+-		}
+-
+-		/* Reset stack metadata. */
+-		if (!kasan_hw_tags_enabled())
+-			kasan_unpoison_range(vm_area->addr, THREAD_SIZE);
+-
+-		stack = kasan_reset_tag(vm_area->addr);
+-
+-		/* Clear stale pointers from reused stack. */
+-		clear_pages(vm_area->addr, vm_area->nr_pages);
+-
+-		tsk->stack_vm_area = vm_area;
+-		tsk->stack = stack;
+-		return 0;
+-	}
+-
+-	stack = __vmalloc_node(THREAD_SIZE, THREAD_ALIGN,
+-				     GFP_VMAP_STACK,
+-				     node, __builtin_return_address(0));
+-	if (!stack)
+-		return -ENOMEM;
+-
+-	vm_area = find_vm_area(stack);
+-	if (memcg_charge_kernel_stack(vm_area)) {
+-		vfree(stack);
+-		return -ENOMEM;
+-	}
+-	/*
+-	 * We can't call find_vm_area() in interrupt context, and
+-	 * free_thread_stack() can be called in interrupt context,
+-	 * so cache the vm_struct.
+-	 */
+-	tsk->stack_vm_area = vm_area;
+-	stack = kasan_reset_tag(stack);
+-	tsk->stack = stack;
+-	return 0;
+-}
+-
+-void free_thread_stack(struct task_struct *tsk)
+-{
+-	if (!try_release_thread_stack_to_cache(tsk->stack_vm_area))
+-		thread_stack_delayed_free(tsk);
+-
+-	tsk->stack = NULL;
+-	tsk->stack_vm_area = NULL;
+-}
+-
+-#else /* !CONFIG_VMAP_STACK */
+-
+-/*
+- * Allocate pages if THREAD_SIZE is >= PAGE_SIZE, otherwise use a
+- * kmemcache based allocator.
+- */
+-#if THREAD_SIZE >= PAGE_SIZE
+-
+-static int alloc_thread_stack_node(struct task_struct *tsk, int node)
+-{
+-	struct page *page = alloc_pages_node(node, THREADINFO_GFP,
+-					     THREAD_SIZE_ORDER);
+-
+-	if (likely(page)) {
+-		tsk->stack = kasan_reset_tag(page_address(page));
+-		return 0;
+-	}
+-	return -ENOMEM;
+-}
+-
+-#else /* !(THREAD_SIZE >= PAGE_SIZE) */
+-
+-static struct kmem_cache *thread_stack_cache;
+-
+-static void thread_stack_free_rcu(struct rcu_head *rh)
+-{
+-	kmem_cache_free(thread_stack_cache, rh);
+-}
+-
+-static void thread_stack_delayed_free(struct task_struct *tsk)
+-{
+-	struct rcu_head *rh = tsk->stack;
+-
+-	call_rcu(rh, thread_stack_free_rcu);
+-}
+-
+-static int alloc_thread_stack_node(struct task_struct *tsk, int node)
+-{
+-	unsigned long *stack;
+-	stack = kmem_cache_alloc_node(thread_stack_cache, THREADINFO_GFP, node);
+-	stack = kasan_reset_tag(stack);
+-	tsk->stack = stack;
+-	return stack ? 0 : -ENOMEM;
+-}
+-
+-void free_thread_stack(struct task_struct *tsk)
+-{
+-	thread_stack_delayed_free(tsk);
+-	tsk->stack = NULL;
+-}
+-
+-void thread_stack_cache_init(void)
+-{
+-	thread_stack_cache = kmem_cache_create_usercopy("thread_stack",
+-					THREAD_SIZE, THREAD_SIZE, 0, 0,
+-					THREAD_SIZE, NULL);
+-	BUG_ON(thread_stack_cache == NULL);
+-}
+-
+-#endif /* THREAD_SIZE >= PAGE_SIZE */
+-#endif /* CONFIG_VMAP_STACK */
+-
+ void dup_mm_exe_file(struct mm_struct *mm, struct mm_struct *oldmm)
+ {
+ 	struct file *exe_file;
+@@ -417,134 +157,6 @@ static inline int mm_alloc_pgd(struct mm_struct *mm)
+ #define mm_alloc_pgd(mm)	(0)
+ #endif /* CONFIG_MMU */
+ 
+-int __weak arch_dup_task_struct(struct task_struct *dst,
+-					       struct task_struct *src)
+-{
+-	*dst = *src;
+-	return 0;
+-}
+-
+-void set_task_stack_end_magic(struct task_struct *tsk)
+-{
+-	unsigned long *stackend;
+-
+-	stackend = end_of_stack(tsk);
+-	*stackend = STACK_END_MAGIC;	/* for overflow detection */
+-}
+-
+-static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
+-{
+-	struct task_struct *tsk;
+-	int err;
+-
+-	if (node == NUMA_NO_NODE)
+-		node = tsk_fork_get_node(orig);
+-	tsk = alloc_task_struct_node(node);
+-	if (!tsk)
+-		return NULL;
+-
+-	err = arch_dup_task_struct(tsk, orig);
+-	if (err)
+-		goto free_tsk;
+-
+-	err = alloc_thread_stack_node(tsk, node);
+-	if (err)
+-		goto free_tsk;
+-
+-#ifdef CONFIG_THREAD_INFO_IN_TASK
+-	refcount_set(&tsk->stack_refcount, 1);
+-#endif
+-	account_kernel_stack(tsk, 1);
+-
+-	err = scs_prepare(tsk, node);
+-	if (err)
+-		goto free_stack;
+-
+-#ifdef CONFIG_SECCOMP
+-	/*
+-	 * We must handle setting up seccomp filters once we're under
+-	 * the sighand lock in case orig has changed between now and
+-	 * then. Until then, filter must be NULL to avoid messing up
+-	 * the usage counts on the error path calling free_task.
+-	 */
+-	tsk->seccomp.filter = NULL;
+-#endif
+-
+-	RCU_INIT_POINTER(tsk->exec_state, NULL);
+-
+-	setup_thread_stack(tsk, orig);
+-	clear_user_return_notifier(tsk);
+-	clear_tsk_need_resched(tsk);
+-	set_task_stack_end_magic(tsk);
+-	clear_syscall_work_syscall_user_dispatch(tsk);
+-
+-#ifdef CONFIG_STACKPROTECTOR
+-	tsk->stack_canary = get_random_canary();
+-#endif
+-	if (orig->cpus_ptr == &orig->cpus_mask)
+-		tsk->cpus_ptr = &tsk->cpus_mask;
+-	dup_user_cpus_ptr(tsk, orig, node);
+-
+-	/*
+-	 * One for the user space visible state that goes away when reaped.
+-	 * One for the scheduler.
+-	 */
+-	refcount_set(&tsk->rcu_users, 2);
+-	/* One for the rcu users */
+-	refcount_set(&tsk->usage, 1);
+-#ifdef CONFIG_BLK_DEV_IO_TRACE
+-	tsk->btrace_seq = 0;
+-#endif
+-	tsk->splice_pipe = NULL;
+-	tsk->task_frag.page = NULL;
+-	tsk->wake_q.next = NULL;
+-	tsk->worker_private = NULL;
+-
+-	kcov_task_init(tsk);
+-	kmsan_task_create(tsk);
+-	kmap_local_fork(tsk);
+-
+-#ifdef CONFIG_FAULT_INJECTION
+-	tsk->fail_nth = 0;
+-#endif
+-
+-#ifdef CONFIG_BLK_CGROUP
+-	tsk->throttle_disk = NULL;
+-	tsk->use_memdelay = 0;
+-#endif
+-
+-#ifdef CONFIG_ARCH_HAS_CPU_PASID
+-	tsk->pasid_activated = 0;
+-#endif
+-
+-#ifdef CONFIG_MEMCG
+-	tsk->active_memcg = NULL;
+-#endif
+-
+-#ifdef CONFIG_X86_BUS_LOCK_DETECT
+-	tsk->reported_split_lock = 0;
+-#endif
+-
+-#ifdef CONFIG_SCHED_MM_CID
+-	tsk->mm_cid.cid = MM_CID_UNSET;
+-	tsk->mm_cid.active = 0;
+-	INIT_HLIST_NODE(&tsk->mm_cid.node);
+-#endif
+-
+-#ifdef CONFIG_BPF_SYSCALL
+-	RCU_INIT_POINTER(tsk->bpf_storage, NULL);
+-	tsk->bpf_ctx = NULL;
+-#endif
+-	return tsk;
+-
+-free_stack:
+-	exit_task_stack_account(tsk);
+-	free_thread_stack(tsk);
+-free_tsk:
+-	free_task_struct(tsk);
+-	return NULL;
+-}
+-
+ __cacheline_aligned_in_smp DEFINE_SPINLOCK(mmlist_lock);
+ 
+ static unsigned long coredump_filter = MMF_DUMP_FILTER_DEFAULT;
+@@ -1320,6 +932,7 @@ __latent_entropy struct task_struct *copy_process(
+ 					struct kernel_clone_args *args)
+ {
+ 	int pidfd = -1, retval;
++	u64 native_birth_generation = 0;
+ 	struct task_struct *p;
+ 	struct multiprocess_signals delayed;
+ 	struct file *pidfile = NULL;
+@@ -1434,7 +1047,7 @@ __latent_entropy struct task_struct *copy_process(
+ 		goto fork_out;
+ 
+ 	retval = -ENOMEM;
+-	p = dup_task_struct(current, node);
++	p = dup_task_struct(current, node, &native_birth_generation);
+ 	if (!p)
+ 		goto fork_out;
+ 	/*
+@@ -1951,6 +1564,9 @@ fork_out:
+ 	spin_lock_irq(&current->sighand->siglock);
+ 	hlist_del_init(&delayed.node);
+ 	spin_unlock_irq(&current->sighand->siglock);
++#ifdef CONFIG_STELA
++	stela_linux_task_fork_abort(native_birth_generation);
++#endif
+ 	return ERR_PTR(retval);
+ }
+ 
+diff --git a/kernel/fork_task.c b/kernel/fork_task.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..1911a26257901f8e767548d316addecb69e5edd5
+--- /dev/null
++++ b/kernel/fork_task.c
+@@ -0,0 +1,629 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *  linux/kernel/fork.c
++ *
++ *  Copyright (C) 1991, 1992  Linus Torvalds
++ */
++
++/*
++ *  'fork.c' contains the help-routines for the 'fork' system call
++ * (see also entry.S and others).
++ * Fork is rather simple, once you get the hang of it, but the memory
++ * management can be a bitch. See 'mm/memory.c': 'copy_page_range()'
++ */
++
++#include <linux/anon_inodes.h>
++#include <linux/slab.h>
++#include <linux/sched/autogroup.h>
++#include <linux/sched/mm.h>
++#include <linux/sched/user.h>
++#include <linux/sched/numa_balancing.h>
++#include <linux/sched/stat.h>
++#include <linux/sched/task.h>
++#include <linux/sched/task_stack.h>
++#include <linux/sched/cputime.h>
++#include <linux/sched/ext.h>
++#include <linux/sched/exec_state.h>
++#include <linux/seq_file.h>
++#include <linux/rtmutex.h>
++#include <linux/init.h>
++#include <linux/unistd.h>
++#include <linux/module.h>
++#include <linux/vmalloc.h>
++#include <linux/completion.h>
++#include <linux/personality.h>
++#include <linux/mempolicy.h>
++#include <linux/sem.h>
++#include <linux/file.h>
++#include <linux/fdtable.h>
++#include <linux/iocontext.h>
++#include <linux/key.h>
++#include <linux/kmsan.h>
++#include <linux/binfmts.h>
++#include <linux/mman.h>
++#include <linux/mmu_notifier.h>
++#include <linux/fs.h>
++#include <linux/mm.h>
++#include <linux/mm_inline.h>
++#include <linux/memblock.h>
++#include <linux/nsproxy.h>
++#include <linux/ns/ns_common_types.h>
++#include <linux/capability.h>
++#include <linux/cpu.h>
++#include <linux/cgroup.h>
++#include <linux/security.h>
++#include <linux/hugetlb.h>
++#include <linux/seccomp.h>
++#include <linux/swap.h>
++#include <linux/syscalls.h>
++#include <linux/syscall_user_dispatch.h>
++#include <linux/jiffies.h>
++#include <linux/futex.h>
++#include <linux/compat.h>
++#include <linux/kthread.h>
++#include <linux/task_io_accounting_ops.h>
++#include <linux/rcupdate.h>
++#include <linux/ptrace.h>
++#include <linux/mount.h>
++#include <linux/audit.h>
++#include <linux/memcontrol.h>
++#include <linux/ftrace.h>
++#include <linux/proc_fs.h>
++#include <linux/profile.h>
++#include <linux/rmap.h>
++#include <linux/ksm.h>
++#include <linux/acct.h>
++#include <linux/userfaultfd_k.h>
++#include <linux/tsacct_kern.h>
++#include <linux/cn_proc.h>
++#include <linux/freezer.h>
++#include <linux/delayacct.h>
++#include <linux/taskstats_kern.h>
++#include <linux/tty.h>
++#include <linux/fs_struct.h>
++#include <linux/magic.h>
++#include <linux/perf_event.h>
++#include <linux/posix-timers.h>
++#include <linux/user-return-notifier.h>
++#include <linux/oom.h>
++#include <linux/khugepaged.h>
++#include <linux/signalfd.h>
++#include <linux/uprobes.h>
++#include <linux/aio.h>
++#include <linux/compiler.h>
++#include <linux/sysctl.h>
++#include <linux/kcov.h>
++#include <linux/livepatch.h>
++#include <linux/thread_info.h>
++#include <linux/kstack_erase.h>
++#include <linux/kasan.h>
++#include <linux/randomize_kstack.h>
++#include <linux/scs.h>
++#include <linux/io_uring.h>
++#include <linux/io_uring_types.h>
++#include <linux/bpf.h>
++#include <linux/stackprotector.h>
++#include <linux/user_events.h>
++#include <linux/iommu.h>
++#include <linux/rseq.h>
++#include <uapi/linux/pidfd.h>
++#include <linux/pidfs.h>
++#include <linux/tick.h>
++#include <linux/unwind_deferred.h>
++#include <linux/pgalloc.h>
++#include <linux/uaccess.h>
++
++#include <asm/mmu_context.h>
++#include <asm/cacheflush.h>
++#include <asm/tlbflush.h>
++
++/* For dup_mmap(). */
++#include "../mm/internal.h"
++#include "fork_caches.h"
++#include "fork_stack.h"
++#include "fork_task.h"
++
++#include <trace/events/sched.h>
++
++#include <trace/events/task.h>
++
++#ifdef CONFIG_STELA
++#include <stela/linux.h>
++#include <stela/task.h>
++#include <stela/task_bootstrap.h>
++
++#if defined(CONFIG_VMAP_STACK) || THREAD_SIZE < PAGE_SIZE
++#error "Native task stack admission requires page-backed stacks"
++#endif
++
++/* Actual source-owned allocation birth, borrowed only during this original
++ * constructor. Native children retain their own moved C record/native lease;
++ * no pointer to this constructor frame may escape stack_allocate. */
++struct stela_linux_task_birth {
++	struct list_head node;
++	struct task_struct *task, *parent;
++	const struct stela_linux_owner *owner;
++	u64 generation;
++	bool taken, live;
++};
++static LIST_HEAD(native_task_births);
++static u64 native_task_birth_serial;
++
++static void native_task_birth_begin(struct stela_linux_task_birth *birth,
++	struct task_struct *task)
++{
++	const struct stela_linux_owner *owner = stela_linux_owner();
++	if (stela_linux_require_current(owner) || !task || task == current ||
++		native_task_birth_serial == ~(u64)0)
++		__builtin_trap();
++	*birth = (struct stela_linux_task_birth) {
++		.task = task, .parent = current, .owner = owner,
++		.generation = ++native_task_birth_serial, .live = true,
++	};
++	list_add_tail(&birth->node, &native_task_births);
++}
++int stela_linux_task_birth_take(struct stela_linux_task_birth *requested,
++	struct task_struct **task, u64 *generation)
++{
++	int error = stela_linux_require_current(stela_linux_owner());
++	if (error)
++		return error;
++	if (!requested || !task || !generation)
++		return -EINVAL;
++	struct stela_linux_task_birth *birth;
++	list_for_each_entry(birth, &native_task_births, node) {
++		/* Compare against genuine live factory tokens BEFORE dereference of
++		 * caller storage. The token is synchronous and never retained. */
++		if (birth != requested)
++			continue;
++		if (!birth->live || birth->taken || birth->parent != current ||
++			birth->owner != stela_linux_owner())
++			return -EPERM;
++		birth->taken = true;
++		*task = birth->task;
++		*generation = birth->generation;
++		return 0;
++	}
++	return -ESTALE;
++}
++static void native_task_birth_end(struct stela_linux_task_birth *birth)
++{
++	if (!birth->live)
++		return;
++	list_del_init(&birth->node);
++	birth->live = false;
++	birth->task = NULL;
++	birth->parent = NULL;
++	birth->owner = NULL;
++}
++#endif
++
++static inline struct task_struct *alloc_task_struct_node(int node)
++{
++	return kmem_cache_alloc_node(task_struct_cachep, GFP_KERNEL, node);
++}
++
++#ifdef CONFIG_VMAP_STACK
++/*
++ * vmalloc() is a bit slow, and calling vfree() enough times will force a TLB
++ * flush.  Try to minimize the number of calls by caching stacks.
++ */
++#define NR_CACHED_STACKS 2
++static DEFINE_PER_CPU(struct vm_struct *, cached_stacks[NR_CACHED_STACKS]);
++/*
++ * Allocated stacks are cached and later reused by new threads, so memcg
++ * accounting is performed by the code assigning/releasing stacks to tasks.
++ * We need a zeroed memory without __GFP_ACCOUNT.
++ */
++#define GFP_VMAP_STACK (GFP_KERNEL | __GFP_ZERO | __GFP_SKIP_KASAN)
++
++struct vm_stack {
++	struct rcu_head rcu;
++	struct vm_struct *stack_vm_area;
++};
++
++static struct vm_struct *alloc_thread_stack_node_from_cache(struct task_struct *tsk, int node)
++{
++	struct vm_struct *vm_area;
++	unsigned int i;
++
++	/*
++	 * If the node has memory, we are guaranteed the stacks are backed by local pages.
++	 * Otherwise the pages are arbitrary.
++	 *
++	 * Note that depending on cpuset it is possible we will get migrated to a different
++	 * node immediately after allocating here, so this does *not* guarantee locality for
++	 * arbitrary callers.
++	 */
++	scoped_guard(preempt) {
++		if (node != NUMA_NO_NODE && numa_node_id() != node)
++			return NULL;
++
++		for (i = 0; i < NR_CACHED_STACKS; i++) {
++			vm_area = this_cpu_xchg(cached_stacks[i], NULL);
++			if (vm_area)
++				return vm_area;
++		}
++	}
++
++	return NULL;
++}
++
++static bool try_release_thread_stack_to_cache(struct vm_struct *vm_area)
++{
++	unsigned int i;
++	int nid;
++
++	/*
++	 * Don't cache stacks if any of the pages don't match the local domain, unless
++	 * there is no local memory to begin with.
++	 *
++	 * Note that lack of local memory does not automatically mean it makes no difference
++	 * performance-wise which other domain backs the stack. In this case we are merely
++	 * trying to avoid constantly going to vmalloc.
++	 */
++	scoped_guard(preempt) {
++		nid = numa_node_id();
++		if (node_state(nid, N_MEMORY)) {
++			for (i = 0; i < vm_area->nr_pages; i++) {
++				struct page *page = vm_area->pages[i];
++				if (page_to_nid(page) != nid)
++					return false;
++			}
++		}
++
++		for (i = 0; i < NR_CACHED_STACKS; i++) {
++			struct vm_struct *tmp = NULL;
++
++			if (this_cpu_try_cmpxchg(cached_stacks[i], &tmp, vm_area))
++				return true;
++		}
++	}
++	return false;
++}
++
++static void thread_stack_free_rcu(struct rcu_head *rh)
++{
++	struct vm_stack *vm_stack = container_of(rh, struct vm_stack, rcu);
++	struct vm_struct *vm_area = vm_stack->stack_vm_area;
++
++	if (try_release_thread_stack_to_cache(vm_stack->stack_vm_area))
++		return;
++
++	vfree(vm_area->addr);
++}
++
++static void thread_stack_delayed_free(struct task_struct *tsk)
++{
++	struct vm_stack *vm_stack = tsk->stack;
++
++	vm_stack->stack_vm_area = tsk->stack_vm_area;
++	call_rcu(&vm_stack->rcu, thread_stack_free_rcu);
++}
++
++int free_vm_stack_cache(unsigned int cpu)
++{
++	struct vm_struct **cached_vm_stack_areas = per_cpu_ptr(cached_stacks, cpu);
++	int i;
++
++	for (i = 0; i < NR_CACHED_STACKS; i++) {
++		struct vm_struct *vm_area = cached_vm_stack_areas[i];
++
++		if (!vm_area)
++			continue;
++
++		vfree(vm_area->addr);
++		cached_vm_stack_areas[i] = NULL;
++	}
++
++	return 0;
++}
++
++static int memcg_charge_kernel_stack(struct vm_struct *vm_area)
++{
++	int i;
++	int ret;
++	int nr_charged = 0;
++
++	BUG_ON(vm_area->nr_pages != THREAD_SIZE / PAGE_SIZE);
++
++	for (i = 0; i < THREAD_SIZE / PAGE_SIZE; i++) {
++		ret = memcg_kmem_charge_page(vm_area->pages[i], GFP_KERNEL, 0);
++		if (ret)
++			goto err;
++		nr_charged++;
++	}
++	return 0;
++err:
++	for (i = 0; i < nr_charged; i++)
++		memcg_kmem_uncharge_page(vm_area->pages[i], 0);
++	return ret;
++}
++
++static int alloc_thread_stack_node(struct task_struct *tsk, int node)
++{
++	struct vm_struct *vm_area;
++	void *stack;
++
++	vm_area = alloc_thread_stack_node_from_cache(tsk, node);
++	if (vm_area) {
++		if (memcg_charge_kernel_stack(vm_area)) {
++			vfree(vm_area->addr);
++			return -ENOMEM;
++		}
++
++		/* Reset stack metadata. */
++		if (!kasan_hw_tags_enabled())
++			kasan_unpoison_range(vm_area->addr, THREAD_SIZE);
++
++		stack = kasan_reset_tag(vm_area->addr);
++
++		/* Clear stale pointers from reused stack. */
++		clear_pages(vm_area->addr, vm_area->nr_pages);
++
++		tsk->stack_vm_area = vm_area;
++		tsk->stack = stack;
++		return 0;
++	}
++
++	stack = __vmalloc_node(THREAD_SIZE, THREAD_ALIGN,
++				     GFP_VMAP_STACK,
++				     node, __builtin_return_address(0));
++	if (!stack)
++		return -ENOMEM;
++
++	vm_area = find_vm_area(stack);
++	if (memcg_charge_kernel_stack(vm_area)) {
++		vfree(stack);
++		return -ENOMEM;
++	}
++	/*
++	 * We can't call find_vm_area() in interrupt context, and
++	 * free_thread_stack() can be called in interrupt context,
++	 * so cache the vm_struct.
++	 */
++	tsk->stack_vm_area = vm_area;
++	stack = kasan_reset_tag(stack);
++	tsk->stack = stack;
++	return 0;
++}
++
++void free_thread_stack(struct task_struct *tsk)
++{
++	if (!try_release_thread_stack_to_cache(tsk->stack_vm_area))
++		thread_stack_delayed_free(tsk);
++
++	tsk->stack = NULL;
++	tsk->stack_vm_area = NULL;
++}
++
++#else /* !CONFIG_VMAP_STACK */
++
++/*
++ * Allocate pages if THREAD_SIZE is >= PAGE_SIZE, otherwise use a
++ * kmemcache based allocator.
++ */
++#if THREAD_SIZE >= PAGE_SIZE
++
++#ifdef CONFIG_STELA
++static int native_task_stack_allocate(struct stela_linux_task_birth *birth, int node)
++{
++	struct task_struct *tsk = birth->task;
++	bool unexposed = false;
++
++	/* The copied parent stack does not belong to this child. The native
++	 * producer installs the child's prepared stack and its page lease. */
++	tsk->stack = NULL;
++	int error = stela_linux_task_stack_allocate(birth, node, &unexposed);
++
++	if ((error && (!unexposed || tsk->stack)) ||
++	    (!error && (!tsk->stack || !birth->taken)))
++		stela_linux_fatal("uncertain original task stack ownership");
++	return error;
++}
++#else
++static int alloc_thread_stack_node(struct task_struct *tsk, int node)
++{
++	struct page *page = alloc_pages_node(node, THREADINFO_GFP,
++					     THREAD_SIZE_ORDER);
++
++	if (likely(page)) {
++		tsk->stack = kasan_reset_tag(page_address(page));
++		return 0;
++	}
++	return -ENOMEM;
++}
++#endif
++
++#else /* !(THREAD_SIZE >= PAGE_SIZE) */
++
++static struct kmem_cache *thread_stack_cache;
++
++static void thread_stack_free_rcu(struct rcu_head *rh)
++{
++	kmem_cache_free(thread_stack_cache, rh);
++}
++
++static void thread_stack_delayed_free(struct task_struct *tsk)
++{
++	struct rcu_head *rh = tsk->stack;
++
++	call_rcu(rh, thread_stack_free_rcu);
++}
++
++static int alloc_thread_stack_node(struct task_struct *tsk, int node)
++{
++	unsigned long *stack;
++	stack = kmem_cache_alloc_node(thread_stack_cache, THREADINFO_GFP, node);
++	stack = kasan_reset_tag(stack);
++	tsk->stack = stack;
++	return stack ? 0 : -ENOMEM;
++}
++
++void free_thread_stack(struct task_struct *tsk)
++{
++	thread_stack_delayed_free(tsk);
++	tsk->stack = NULL;
++}
++
++void thread_stack_cache_init(void)
++{
++	thread_stack_cache = kmem_cache_create_usercopy("thread_stack",
++					THREAD_SIZE, THREAD_SIZE, 0, 0,
++					THREAD_SIZE, NULL);
++	BUG_ON(thread_stack_cache == NULL);
++}
++
++#endif /* THREAD_SIZE >= PAGE_SIZE */
++#endif /* CONFIG_VMAP_STACK */
++
++int __weak arch_dup_task_struct(struct task_struct *dst,
++					       struct task_struct *src)
++{
++	*dst = *src;
++	return 0;
++}
++
++void set_task_stack_end_magic(struct task_struct *tsk)
++{
++	unsigned long *stackend;
++
++	stackend = end_of_stack(tsk);
++	*stackend = STACK_END_MAGIC;	/* for overflow detection */
++}
++
++struct task_struct *dup_task_struct(struct task_struct *orig, int node,
++				   u64 *source_birth_generation)
++{
++	struct task_struct *tsk;
++	int err;
++#ifdef CONFIG_STELA
++	struct stela_linux_task_birth birth = {};
++#endif
++
++	*source_birth_generation = 0;
++	if (node == NUMA_NO_NODE)
++		node = tsk_fork_get_node(orig);
++	tsk = alloc_task_struct_node(node);
++	if (!tsk)
++		return NULL;
++
++	err = arch_dup_task_struct(tsk, orig);
++	if (err)
++		goto free_tsk;
++
++#ifdef CONFIG_STELA
++	/* Actual successful allocator/arch-copy ownership, not supplied ranges,
++	 * labels or a caller task pointer. The token dies before this ctor exits. */
++	native_task_birth_begin(&birth, tsk);
++	err = native_task_stack_allocate(&birth, node);
++#else
++	err = alloc_thread_stack_node(tsk, node);
++#endif
++	if (err)
++		goto free_tsk;
++
++#ifdef CONFIG_THREAD_INFO_IN_TASK
++	refcount_set(&tsk->stack_refcount, 1);
++#endif
++	account_kernel_stack(tsk, 1);
++
++	err = scs_prepare(tsk, node);
++	if (err)
++		goto free_stack;
++
++#ifdef CONFIG_SECCOMP
++	/*
++	 * We must handle setting up seccomp filters once we're under
++	 * the sighand lock in case orig has changed between now and
++	 * then. Until then, filter must be NULL to avoid messing up
++	 * the usage counts on the error path calling free_task.
++	 */
++	tsk->seccomp.filter = NULL;
++#endif
++
++	RCU_INIT_POINTER(tsk->exec_state, NULL);
++
++	setup_thread_stack(tsk, orig);
++	clear_user_return_notifier(tsk);
++	clear_tsk_need_resched(tsk);
++	set_task_stack_end_magic(tsk);
++	clear_syscall_work_syscall_user_dispatch(tsk);
++
++#ifdef CONFIG_STACKPROTECTOR
++	tsk->stack_canary = get_random_canary();
++#endif
++	if (orig->cpus_ptr == &orig->cpus_mask)
++		tsk->cpus_ptr = &tsk->cpus_mask;
++	dup_user_cpus_ptr(tsk, orig, node);
++
++	/*
++	 * One for the user space visible state that goes away when reaped.
++	 * One for the scheduler.
++	 */
++	refcount_set(&tsk->rcu_users, 2);
++	/* One for the rcu users */
++	refcount_set(&tsk->usage, 1);
++#ifdef CONFIG_BLK_DEV_IO_TRACE
++	tsk->btrace_seq = 0;
++#endif
++	tsk->splice_pipe = NULL;
++	tsk->task_frag.page = NULL;
++	tsk->wake_q.next = NULL;
++	tsk->worker_private = NULL;
++
++	kcov_task_init(tsk);
++	kmsan_task_create(tsk);
++	kmap_local_fork(tsk);
++
++#ifdef CONFIG_FAULT_INJECTION
++	tsk->fail_nth = 0;
++#endif
++
++#ifdef CONFIG_BLK_CGROUP
++	tsk->throttle_disk = NULL;
++	tsk->use_memdelay = 0;
++#endif
++
++#ifdef CONFIG_ARCH_HAS_CPU_PASID
++	tsk->pasid_activated = 0;
++#endif
++
++#ifdef CONFIG_MEMCG
++	tsk->active_memcg = NULL;
++#endif
++
++#ifdef CONFIG_X86_BUS_LOCK_DETECT
++	tsk->reported_split_lock = 0;
++#endif
++
++#ifdef CONFIG_SCHED_MM_CID
++	tsk->mm_cid.cid = MM_CID_UNSET;
++	tsk->mm_cid.active = 0;
++	INIT_HLIST_NODE(&tsk->mm_cid.node);
++#endif
++
++#ifdef CONFIG_BPF_SYSCALL
++	RCU_INIT_POINTER(tsk->bpf_storage, NULL);
++	tsk->bpf_ctx = NULL;
++#endif
++#ifdef CONFIG_STELA
++	*source_birth_generation = birth.generation;
++	native_task_birth_end(&birth);
++#endif
++	return tsk;
++
++free_stack:
++	exit_task_stack_account(tsk);
++	free_thread_stack(tsk);
++free_tsk:
++#ifdef CONFIG_STELA
++	native_task_birth_end(&birth);
++#endif
++	free_task_struct(tsk);
++#ifdef CONFIG_STELA
++	/* Join by saved identity after the original object is gone. */
++	stela_linux_task_fork_abort(birth.generation);
++#endif
++	return NULL;
++}
+diff --git a/kernel/fork_task.h b/kernel/fork_task.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a9ef7832333ca34915ea4c3774e202a560e7b8f
+--- /dev/null
++++ b/kernel/fork_task.h
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _KERNEL_FORK_TASK_H
++#define _KERNEL_FORK_TASK_H
++
++#include <linux/types.h>
++
++struct task_struct;
++struct task_struct *dup_task_struct(struct task_struct *orig, int node,
++				   u64 *source_birth_generation);
++
++#endif

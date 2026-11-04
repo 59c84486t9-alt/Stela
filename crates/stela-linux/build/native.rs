@@ -156,6 +156,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/kernel/task_rcu.c")),
             PathBuf::from(format!("{LINUX}/kernel/task_work.c")),
             PathBuf::from(format!("{LINUX}/kernel/fork_caches.c")),
+            PathBuf::from(format!("{LINUX}/kernel/fork_task.c")),
             PathBuf::from(format!("{LINUX}/kernel/fork_stack.c")),
             PathBuf::from(format!("{LINUX}/kernel/fork_release.c")),
             PathBuf::from(format!("{LINUX}/kernel/fork_mm.c")),
