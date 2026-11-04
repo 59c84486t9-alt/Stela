@@ -13,7 +13,7 @@ use stela_driver_base::bus::pci::{
     owned::{ConfigRetention, OwnedConfig},
     requester::{RequesterId, preparation::Attachment},
 };
-use stela_driver_core::firmware::{Catalog, Target};
+use stela_driver_core::firmware::{Catalog, Error as FirmwareError, Target, validate_name};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -127,15 +127,57 @@ pub struct PciAuthority {
     _execution: super::kernel::ExecutionPin,
     source: Rc<FunctionCustody>,
     requester: RequesterId,
+    firmware: PciFirmware,
+}
+
+/// The exact image keys approved for one observed PCI function. A catalogue
+/// may contain other images with the same target label.
+pub struct PciFirmware {
     target: FirmwareTarget,
     catalog: Arc<Catalog>,
+    names: Box<[String]>,
 }
+
+impl PciFirmware {
+    /// Prepare the selection data. Only binding it to the original PCI
+    /// attachment through `PciAuthority::new` can grant lookup authority.
+    pub fn new(
+        target: FirmwareTarget,
+        catalog: Arc<Catalog>,
+        mut names: Box<[String]>,
+    ) -> Result<Self, FirmwareError> {
+        for name in &names {
+            validate_name(name)?;
+        }
+        names.sort_unstable();
+        Ok(Self {
+            target,
+            catalog,
+            names,
+        })
+    }
+
+    pub(crate) fn allows(&self, name: &str) -> bool {
+        self.names
+            .binary_search_by(|approved| approved.as_str().cmp(name))
+            .is_ok()
+    }
+
+    pub(crate) fn target(&self) -> Target<'_> {
+        self.target.view()
+    }
+
+    pub(crate) fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+}
+
 impl PciAuthority {
     /// Qualify a manifest target against this actual original native function.
     ///
     /// # Safety
-    /// The exact driver/hardware/revision/board labels and Catalog resources
-    /// are approved for this same observed original OwnedConfig allocation and
+    /// The exact target and every selected image key in `firmware` are
+    /// approved for this same observed original OwnedConfig allocation and
     /// retained attachment, including the actual board identity when required.
     /// This is the native source/manifest qualification boundary: syntax,
     /// filename, BDF, driver name or another device's valid image is no proof.
@@ -145,8 +187,7 @@ impl PciAuthority {
         kernel: &super::kernel::KernelOwner<P, N>,
         source: Rc<FunctionCustody>,
         original: &OwnedConfig,
-        target: FirmwareTarget,
-        catalog: Arc<Catalog>,
+        firmware: PciFirmware,
     ) -> Result<Self, Error> {
         let requester = {
             let source = source
@@ -169,13 +210,17 @@ impl PciAuthority {
             _execution: kernel.execution(),
             source,
             requester,
-            target,
-            catalog,
+            firmware,
         })
     }
     pub fn requester(&self) -> &RequesterId {
         &self.requester
     }
+
+    pub(crate) fn firmware(&self) -> &PciFirmware {
+        &self.firmware
+    }
+
     pub(crate) fn domain(
         &self,
     ) -> Result<Arc<dyn stela_driver_base::bus::dma::mapping::DmaDomain>, Error> {
@@ -194,8 +239,8 @@ impl PciAuthority {
 /// Only explicit enrollment of the original regulatory device creates this
 /// route. It is never inferred from a resource or faux-device name.
 pub struct GlobalAuthority {
-    target: FirmwareTarget,
-    catalog: Arc<Catalog>,
+    pub(crate) target: FirmwareTarget,
+    pub(crate) catalog: Arc<Catalog>,
     _execution: super::kernel::ExecutionPin,
 }
 pub enum Authority {
@@ -213,18 +258,6 @@ impl Authority {
             catalog,
             _execution: execution,
         })
-    }
-    pub fn target(&self) -> Target<'_> {
-        match self {
-            Self::Pci(pci) => pci.target.view(),
-            Self::GlobalRegulatory(global) => global.target.view(),
-        }
-    }
-    pub fn catalog(&self) -> &Catalog {
-        match self {
-            Self::Pci(pci) => &pci.catalog,
-            Self::GlobalRegulatory(global) => &global.catalog,
-        }
     }
     pub fn requester(&self) -> Option<&RequesterId> {
         match self {
