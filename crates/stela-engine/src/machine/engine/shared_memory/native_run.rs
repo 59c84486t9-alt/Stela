@@ -957,15 +957,12 @@ fn prepare<'a>(
                     at("compilation planning", MemoryStatus::Unsupported).detail(error.to_string())
                 })?;
                 let bytes = plan.source_bytes();
-                input.truncate(bytes);
-                if !input
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .all(|raw| admitted(u32::from_le_bytes(*raw)))
-                {
-                    return Err(at("compiled prefix admission", MemoryStatus::Unsupported));
+                if bytes == 0 || !bytes.is_multiple_of(4) || bytes > input.len() {
+                    return Err(at("compiled source extent", MemoryStatus::Domain));
                 }
+                // Planning only selects a prefix of the already admitted bytes.
+                // The owned copy and admission policy have not changed.
+                input.truncate(bytes);
                 let requirements = plan
                     .memory_requirements()
                     .ok_or_else(|| at("checked memory requirements", MemoryStatus::Unsupported))?;
