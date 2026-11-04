@@ -1468,6 +1468,28 @@ fn check_processors(
             "CHECK native-shootdown PASS generation={generation} processors={} waiter=driver-lock-if0\n",
             executors.processors().len()
         ));
+        // SAFETY: the BSP still owns the diagnostic's configuration space.
+        // It reads the mapped page before handing the sole lease to the AP.
+        let (scope, identity) = unsafe { mmio.check_shootdown_mapping() }
+            .unwrap_or_else(|_| output::fatal("AP shootdown diagnostic mapping refused"));
+        let bsp = host::shootdown()
+            .0
+            .unwrap_or_else(|| output::fatal("the BSP has no shootdown slot"));
+        // SAFETY: the sole read completed on the BSP and no consumer remains.
+        unsafe {
+            scope.retire_remotely(|mapping| {
+                waiter.check_aperture_retire(mapping, sender, handoff.tsc_hz)
+            })
+        }
+        .unwrap_or_else(|error| output::fatal(error));
+        let processors = &crate::native_mmio::PROCESSORS;
+        let retired = processors.requested();
+        if identity == u32::MAX || retired <= generation || processors.acknowledged(bsp) < retired {
+            output::fatal("AP shootdown did not receive the BSP's acknowledgement");
+        }
+        output::arguments(format_args!(
+            "CHECK native-shootdown AP-origin PASS generation={retired} bsp=acknowledged waiter=mailbox-if0\n"
+        ));
     }
     if options.native_shared_check {
         // SAFETY: the bounded fixture owns all source RAM and frame

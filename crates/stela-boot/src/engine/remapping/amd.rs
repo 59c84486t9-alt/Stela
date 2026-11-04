@@ -39,10 +39,9 @@ const APERTURES: [u64; 2] = [16 << 10, 512 << 10];
 /// The most IVHD blocks one IVRS may hold.
 const MAXIMUM_BLOCKS: usize = 64;
 
-/// Whether this is the boot processor: the application processors join the
-/// aperture shootdown, and the boot processor holds no slot.
+/// Whether the BSP's processor-local record is active outside interrupts.
 fn on_boot_processor() -> bool {
-    crate::engine::host::shootdown().0.is_none() && !crate::engine::host::in_interrupt()
+    crate::engine::host::local::processor() == 0 && !crate::engine::host::in_interrupt()
 }
 
 /// The boot processor's cold-unit services: the native allocator's pages,

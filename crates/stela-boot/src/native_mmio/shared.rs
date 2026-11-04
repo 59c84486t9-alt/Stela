@@ -250,6 +250,8 @@ impl Platform {
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
+            // The holder may be waiting for this processor's acknowledgement.
+            shootdown::service();
             core::hint::spin_loop();
         }
         Guard(self)
@@ -763,33 +765,6 @@ impl Source {
 }
 
 impl Source {
-    /// Map the first captured bus's first configuration page, read it, and retire the mapping
-    /// after the other host processors started: the retirement's shootdown
-    /// generation, which every processor acknowledged.
-    ///
-    /// # Safety
-    /// The caller owns this function's configuration space.
-    pub(crate) unsafe fn check_shootdown(&self) -> Result<u64, Error> {
-        let windows = stela_runtime::pc::acpi::mcfg(self.platform.wire().mcfg()).map_err(failed)?;
-        let window = windows.first().ok_or(Error::Unavailable)?;
-        let before = PROCESSORS.requested();
-        // SAFETY: the caller keeps the original function stable through the
-        // read and its acknowledged mapping withdrawal.
-        let identity = unsafe {
-            self.read_config_identity(stela_drivers::bus::pci::Address {
-                segment: window.segment,
-                bus: window.start_bus,
-                device: 0,
-                function: 0,
-            })
-        }?;
-        let generation = PROCESSORS.requested();
-        if identity == u32::MAX || generation == before || PROCESSORS.alone() {
-            return Err(Error::InvalidPlatformReply);
-        }
-        Ok(generation)
-    }
-
     /// Whether the final memory map leaves `first..end` to the firmware,
     /// overlapping no RAM the host allocates.
     pub(crate) fn firmware_owned(&self, first: u64, end: u64) -> bool {

@@ -8,7 +8,7 @@ mod containment;
 pub(crate) use containment::ContainedPci;
 pub(super) use containment::PciSlots;
 
-struct ConfigScope {
+pub(crate) struct ConfigScope {
     pending: ManuallyDrop<Box<Pending>>,
     close: Option<AdmissionClose>,
 }
@@ -56,6 +56,34 @@ impl ConfigScope {
             unsafe { mapping.retire() }?;
             self.pending.mapping = None;
         }
+        self.return_assignment()
+    }
+
+    /// Keep the original configuration assignment on this CPU while the
+    /// unique shared mapping is retired by the other processor.
+    ///
+    /// # Safety
+    /// All mapping users have drained. The callback returns success only
+    /// after retiring this exact mapping and acquiring the remote return.
+    #[cfg(feature = "diagnostics")]
+    pub(crate) unsafe fn retire_remotely(
+        mut self,
+        retire: impl FnOnce(Mapping) -> crate::Result<()>,
+    ) -> crate::Result<()> {
+        self.close
+            .as_ref()
+            .expect("original configuration gate")
+            .close();
+        retire(self.pending.mapping.take().expect("original map"))?;
+        self.return_assignment().map_err(|error| {
+            stela_contracts::refuse!(
+                "AP configuration assignment return refused: {error}",
+                ?error
+            )
+        })
+    }
+
+    fn return_assignment(&mut self) -> Result<(), Error> {
         drop(self.pending.resource.take());
         self.close
             .take()
@@ -266,11 +294,22 @@ impl Source {
         Ok((window, mapping))
     }
 
+    /// Map and read the first captured configuration page on the BSP. The
+    /// scope keeps the original reservation and sole mapping for retirement.
+    ///
     /// # Safety
-    /// This boot holds the original function stable and excludes competing
+    /// This boot keeps the original function stable and excludes competing
     /// writers until the scope withdraws the mapping.
-    pub(super) unsafe fn read_config_identity(&self, address: Address) -> Result<u32, Error> {
-        let (_, span) = self.config_page(address)?;
+    #[cfg(feature = "diagnostics")]
+    pub(crate) unsafe fn check_shootdown_mapping(&self) -> Result<(ConfigScope, u32), Error> {
+        let windows = stela_runtime::pc::acpi::mcfg(self.platform.wire().mcfg()).map_err(failed)?;
+        let window = windows.first().ok_or(Error::Unavailable)?;
+        let (_, span) = self.config_page(Address {
+            segment: window.segment,
+            bus: window.start_bus,
+            device: 0,
+            function: 0,
+        })?;
         // SAFETY: the caller keeps this exact original configuration extent.
         let mut scope = unsafe { ConfigScope::open(self, span) }?;
         let result = scope
@@ -279,8 +318,31 @@ impl Source {
             .as_ref()
             .expect("original map")
             .read32(0);
-        // SAFETY: the synchronous observation has no aliases.
+        match result {
+            Ok(identity) => Ok((scope, identity)),
+            Err(error) => {
+                // SAFETY: the synchronous observation has no aliases.
+                unsafe { scope.retire() }?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Retire on the BSP after the APs start and return the acknowledged generation.
+    ///
+    /// # Safety
+    /// This boot retains the diagnostic configuration page through retirement.
+    #[cfg(feature = "diagnostics")]
+    pub(crate) unsafe fn check_shootdown(&self) -> Result<u64, Error> {
+        // SAFETY: the caller keeps the original function stable.
+        let (mut scope, identity) = unsafe { self.check_shootdown_mapping() }?;
+        let before = PROCESSORS.requested();
+        // SAFETY: the synchronous read was the mapping's only use.
         unsafe { scope.retire() }?;
-        result
+        let generation = PROCESSORS.requested();
+        if identity == u32::MAX || generation == before || PROCESSORS.alone() {
+            return Err(Error::InvalidPlatformReply);
+        }
+        Ok(generation)
     }
 }
