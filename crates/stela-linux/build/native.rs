@@ -276,6 +276,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/kernel/locking/rtmutex_api.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/capacity_state.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/fork_load.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/rt_timeslice.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/fork_metadata.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/cputime_group.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/user_affinity.c")),
