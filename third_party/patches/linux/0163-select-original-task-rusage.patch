@@ -1,0 +1,387 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 01:48:06 -0500
+Subject: [PATCH] refactor(sched): select original task resource usage
+
+---
+ kernel/Makefile           |   2 +-
+ kernel/sys.c              | 131 -------------------------------
+ kernel/task_rusage.c      | 159 ++++++++++++++++++++++++++++++++++++++
+ kernel/time/clock_ticks.c |  14 ++++
+ kernel/time/time.c        |  12 ---
+ 5 files changed, 174 insertions(+), 144 deletions(-)
+ create mode 100644 kernel/task_rusage.c
+
+diff --git a/kernel/Makefile b/kernel/Makefile
+index d617d154a6fb7627d287d5a71b4f5e6cbd78e3f6..a62977d37b7d7722a23ce565c77ab303ad3ebbf9 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -6,7 +6,7 @@
+ obj-y     = fork.o fork_caches.o fork_stack.o fork_release.o fork_mm.o exec_domain.o exec_state.o panic.o \
+ 	    cpu.o cpu_topology.o exit.o task_rcu.o rcuwait_wake.o softirq.o resource.o \
+ 	    sysctl.o capability.o ptrace.o ptrace_access.o user.o \
+-	    signal.o signal_state.o restart_no_syscall.o sys.o umh.o workqueue.o pid.o task_work.o \
++	    signal.o signal_state.o restart_no_syscall.o sys.o task_rusage.o umh.o workqueue.o pid.o task_work.o \
+ 	    extable.o params.o \
+ 	    kthread.o sys_ni.o nsproxy.o nstree.o nscommon.o \
+ 	    notifier.o ksysfs.o cred.o reboot.o \
+diff --git a/kernel/sys.c b/kernel/sys.c
+index 35b538ba843c705dba5378f3626ce5610e9db0cf..34bd49781f1fa5f03c4336cebde3923b7763187a 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -1800,137 +1800,6 @@ SYSCALL_DEFINE2(setrlimit, unsigned int, resource, struct rlimit __user *, rlim)
+ 	return do_prlimit(current, resource, &new_rlim, NULL);
+ }
+ 
+-/*
+- * It would make sense to put struct rusage in the task_struct,
+- * except that would make the task_struct be *really big*.  After
+- * task_struct gets moved into malloc'ed memory, it would
+- * make sense to do this.  It will make moving the rest of the information
+- * a lot simpler!  (Which we're not doing right now because we're not
+- * measuring them yet).
+- *
+- * When sampling multiple threads for RUSAGE_SELF, under SMP we might have
+- * races with threads incrementing their own counters.  But since word
+- * reads are atomic, we either get new values or old values and we don't
+- * care which for the sums.  We always take the siglock to protect reading
+- * the c* fields from p->signal from races with exit.c updating those
+- * fields when reaping, so a sample either gets all the additions of a
+- * given child after it's reaped, or none so this sample is before reaping.
+- *
+- * Locking:
+- * We need to take the siglock for CHILDEREN, SELF and BOTH
+- * for  the cases current multithreaded, non-current single threaded
+- * non-current multithreaded.  Thread traversal is now safe with
+- * the siglock held.
+- * Strictly speaking, we donot need to take the siglock if we are current and
+- * single threaded,  as no one else can take our signal_struct away, no one
+- * else can  reap the  children to update signal->c* counters, and no one else
+- * can race with the signal-> fields. If we do not take any lock, the
+- * signal-> fields could be read out of order while another thread was just
+- * exiting. So we should  place a read memory barrier when we avoid the lock.
+- * On the writer side,  write memory barrier is implied in  __exit_signal
+- * as __exit_signal releases  the siglock spinlock after updating the signal->
+- * fields. But we don't do this yet to keep things simple.
+- *
+- */
+-
+-static void accumulate_thread_rusage(struct task_struct *t, struct rusage *r)
+-{
+-	r->ru_nvcsw += t->nvcsw;
+-	r->ru_nivcsw += t->nivcsw;
+-	r->ru_minflt += t->min_flt;
+-	r->ru_majflt += t->maj_flt;
+-	r->ru_inblock += task_io_get_inblock(t);
+-	r->ru_oublock += task_io_get_oublock(t);
+-}
+-
+-void getrusage(struct task_struct *p, int who, struct rusage *r)
+-{
+-	struct task_struct *t;
+-	unsigned long flags;
+-	u64 tgutime, tgstime, utime, stime;
+-	unsigned long maxrss;
+-	struct mm_struct *mm;
+-	struct signal_struct *sig = p->signal;
+-	unsigned int seq = 0;
+-
+-retry:
+-	memset(r, 0, sizeof(*r));
+-	utime = stime = 0;
+-	maxrss = 0;
+-
+-	if (who == RUSAGE_THREAD) {
+-		task_cputime_adjusted(current, &utime, &stime);
+-		accumulate_thread_rusage(p, r);
+-		maxrss = sig->maxrss;
+-		goto out_thread;
+-	}
+-
+-	flags = read_seqbegin_or_lock_irqsave(&sig->stats_lock, &seq);
+-
+-	switch (who) {
+-	case RUSAGE_BOTH:
+-	case RUSAGE_CHILDREN:
+-		utime = sig->cutime;
+-		stime = sig->cstime;
+-		r->ru_nvcsw = sig->cnvcsw;
+-		r->ru_nivcsw = sig->cnivcsw;
+-		r->ru_minflt = sig->cmin_flt;
+-		r->ru_majflt = sig->cmaj_flt;
+-		r->ru_inblock = sig->cinblock;
+-		r->ru_oublock = sig->coublock;
+-		maxrss = sig->cmaxrss;
+-
+-		if (who == RUSAGE_CHILDREN)
+-			break;
+-		fallthrough;
+-
+-	case RUSAGE_SELF:
+-		r->ru_nvcsw += sig->nvcsw;
+-		r->ru_nivcsw += sig->nivcsw;
+-		r->ru_minflt += sig->min_flt;
+-		r->ru_majflt += sig->maj_flt;
+-		r->ru_inblock += sig->inblock;
+-		r->ru_oublock += sig->oublock;
+-		if (maxrss < sig->maxrss)
+-			maxrss = sig->maxrss;
+-
+-		rcu_read_lock();
+-		__for_each_thread(sig, t)
+-			accumulate_thread_rusage(t, r);
+-		rcu_read_unlock();
+-
+-		break;
+-
+-	default:
+-		BUG();
+-	}
+-
+-	if (need_seqretry(&sig->stats_lock, seq)) {
+-		seq = 1;
+-		goto retry;
+-	}
+-	done_seqretry_irqrestore(&sig->stats_lock, seq, flags);
+-
+-	if (who == RUSAGE_CHILDREN)
+-		goto out_children;
+-
+-	thread_group_cputime_adjusted(p, &tgutime, &tgstime);
+-	utime += tgutime;
+-	stime += tgstime;
+-
+-out_thread:
+-	mm = get_task_mm(p);
+-	if (mm) {
+-		setmax_mm_hiwater_rss(&maxrss, mm);
+-		mmput(mm);
+-	}
+-
+-out_children:
+-	r->ru_maxrss = maxrss * (PAGE_SIZE / 1024); /* convert pages to KBs */
+-	r->ru_utime = ns_to_kernel_old_timeval(utime);
+-	r->ru_stime = ns_to_kernel_old_timeval(stime);
+-}
+-
+ SYSCALL_DEFINE2(getrusage, int, who, struct rusage __user *, ru)
+ {
+ 	struct rusage r;
+diff --git a/kernel/task_rusage.c b/kernel/task_rusage.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..184cf9865b98d03ddc94e22702f7d607e9d1657a
+--- /dev/null
++++ b/kernel/task_rusage.c
+@@ -0,0 +1,159 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ *  linux/kernel/sys.c
++ *
++ *  Copyright (C) 1991, 1992  Linus Torvalds
++ */
++
++#include <linux/mm.h>
++#include <linux/resource.h>
++#include <linux/sched/cputime.h>
++#include <linux/sched/mm.h>
++#include <linux/task_io_accounting_ops.h>
++#include <linux/time32.h>
++
++#ifdef CONFIG_STELA
++#include <stela/linux.h>
++#endif
++
++/*
++ * It would make sense to put struct rusage in the task_struct,
++ * except that would make the task_struct be *really big*.  After
++ * task_struct gets moved into malloc'ed memory, it would
++ * make sense to do this.  It will make moving the rest of the information
++ * a lot simpler!  (Which we're not doing right now because we're not
++ * measuring them yet).
++ *
++ * When sampling multiple threads for RUSAGE_SELF, under SMP we might have
++ * races with threads incrementing their own counters.  But since word
++ * reads are atomic, we either get new values or old values and we don't
++ * care which for the sums.  We always take the siglock to protect reading
++ * the c* fields from p->signal from races with exit.c updating those
++ * fields when reaping, so a sample either gets all the additions of a
++ * given child after it's reaped, or none so this sample is before reaping.
++ *
++ * Locking:
++ * We need to take the siglock for CHILDEREN, SELF and BOTH
++ * for  the cases current multithreaded, non-current single threaded
++ * non-current multithreaded.  Thread traversal is now safe with
++ * the siglock held.
++ * Strictly speaking, we donot need to take the siglock if we are current and
++ * single threaded,  as no one else can take our signal_struct away, no one
++ * else can  reap the  children to update signal->c* counters, and no one else
++ * can race with the signal-> fields. If we do not take any lock, the
++ * signal-> fields could be read out of order while another thread was just
++ * exiting. So we should  place a read memory barrier when we avoid the lock.
++ * On the writer side,  write memory barrier is implied in  __exit_signal
++ * as __exit_signal releases  the siglock spinlock after updating the signal->
++ * fields. But we don't do this yet to keep things simple.
++ *
++ */
++
++static void accumulate_thread_rusage(struct task_struct *t, struct rusage *r)
++{
++	r->ru_nvcsw += t->nvcsw;
++	r->ru_nivcsw += t->nivcsw;
++	r->ru_minflt += t->min_flt;
++	r->ru_majflt += t->maj_flt;
++	r->ru_inblock += task_io_get_inblock(t);
++	r->ru_oublock += task_io_get_oublock(t);
++}
++
++void getrusage(struct task_struct *p, int who, struct rusage *r)
++{
++	struct task_struct *t;
++	unsigned long flags;
++	u64 tgutime, tgstime, utime, stime;
++	unsigned long maxrss;
++#ifndef CONFIG_STELA
++	struct mm_struct *mm;
++#endif
++	struct signal_struct *sig = p->signal;
++	unsigned int seq = 0;
++
++#ifdef CONFIG_STELA
++	/* A kernel thread's borrowed address space is excluded by get_task_mm().
++	 * A user process requires a native address-space owner. */
++	if (!(p->flags & PF_KTHREAD))
++		stela_linux_fatal("user resource usage needs a native address-space owner");
++#endif
++
++retry:
++	memset(r, 0, sizeof(*r));
++	utime = stime = 0;
++	maxrss = 0;
++
++	if (who == RUSAGE_THREAD) {
++		task_cputime_adjusted(current, &utime, &stime);
++		accumulate_thread_rusage(p, r);
++		maxrss = sig->maxrss;
++		goto out_thread;
++	}
++
++	flags = read_seqbegin_or_lock_irqsave(&sig->stats_lock, &seq);
++
++	switch (who) {
++	case RUSAGE_BOTH:
++	case RUSAGE_CHILDREN:
++		utime = sig->cutime;
++		stime = sig->cstime;
++		r->ru_nvcsw = sig->cnvcsw;
++		r->ru_nivcsw = sig->cnivcsw;
++		r->ru_minflt = sig->cmin_flt;
++		r->ru_majflt = sig->cmaj_flt;
++		r->ru_inblock = sig->cinblock;
++		r->ru_oublock = sig->coublock;
++		maxrss = sig->cmaxrss;
++
++		if (who == RUSAGE_CHILDREN)
++			break;
++		fallthrough;
++
++	case RUSAGE_SELF:
++		r->ru_nvcsw += sig->nvcsw;
++		r->ru_nivcsw += sig->nivcsw;
++		r->ru_minflt += sig->min_flt;
++		r->ru_majflt += sig->maj_flt;
++		r->ru_inblock += sig->inblock;
++		r->ru_oublock += sig->oublock;
++		if (maxrss < sig->maxrss)
++			maxrss = sig->maxrss;
++
++		rcu_read_lock();
++		__for_each_thread(sig, t)
++			accumulate_thread_rusage(t, r);
++		rcu_read_unlock();
++
++		break;
++
++	default:
++		BUG();
++	}
++
++	if (need_seqretry(&sig->stats_lock, seq)) {
++		seq = 1;
++		goto retry;
++	}
++	done_seqretry_irqrestore(&sig->stats_lock, seq, flags);
++
++	if (who == RUSAGE_CHILDREN)
++		goto out_children;
++
++	thread_group_cputime_adjusted(p, &tgutime, &tgstime);
++	utime += tgutime;
++	stime += tgstime;
++
++out_thread:
++#ifndef CONFIG_STELA
++	mm = get_task_mm(p);
++	if (mm) {
++		setmax_mm_hiwater_rss(&maxrss, mm);
++		mmput(mm);
++	}
++#endif
++
++out_children:
++	r->ru_maxrss = maxrss * (PAGE_SIZE / 1024); /* convert pages to KBs */
++	r->ru_utime = ns_to_kernel_old_timeval(utime);
++	r->ru_stime = ns_to_kernel_old_timeval(stime);
++}
+diff --git a/kernel/time/clock_ticks.c b/kernel/time/clock_ticks.c
+index 8dbf408f73c631df78a8e3d42281ea61760e2334..bc33a69d75743a9e4c3e65aaa64cb33abfeab920 100644
+--- a/kernel/time/clock_ticks.c
++++ b/kernel/time/clock_ticks.c
+@@ -1,7 +1,9 @@
+ // SPDX-License-Identifier: GPL-2.0
+ /* Time conversion from kernel/time/time.c. */
++#include <linux/export.h>
+ #include <linux/jiffies.h>
+ #include <linux/math64.h>
++#include <linux/time32.h>
+ 
+ /**
+  * nsec_to_clock_t - Convert nsec value to clock_t
+@@ -24,3 +26,15 @@ u64 nsec_to_clock_t(u64 x)
+ 	return div_u64(x * 9, (9ull * NSEC_PER_SEC + (USER_HZ / 2)) / USER_HZ);
+ #endif
+ }
++
++struct __kernel_old_timeval ns_to_kernel_old_timeval(s64 nsec)
++{
++	struct timespec64 ts = ns_to_timespec64(nsec);
++	struct __kernel_old_timeval tv;
++
++	tv.tv_sec = ts.tv_sec;
++	tv.tv_usec = (suseconds_t)ts.tv_nsec / 1000;
++
++	return tv;
++}
++EXPORT_SYMBOL(ns_to_kernel_old_timeval);
+diff --git a/kernel/time/time.c b/kernel/time/time.c
+index e2ce7f6f7c8b9fe5408556d380af084182dc3e94..39586afc307096815ba9c8eab01cf3cdc3446f32 100644
+--- a/kernel/time/time.c
++++ b/kernel/time/time.c
+@@ -462,18 +462,6 @@ time64_t mktime64(const unsigned int year0, const unsigned int mon0,
+ }
+ EXPORT_SYMBOL(mktime64);
+ 
+-struct __kernel_old_timeval ns_to_kernel_old_timeval(s64 nsec)
+-{
+-	struct timespec64 ts = ns_to_timespec64(nsec);
+-	struct __kernel_old_timeval tv;
+-
+-	tv.tv_sec = ts.tv_sec;
+-	tv.tv_usec = (suseconds_t)ts.tv_nsec / 1000;
+-
+-	return tv;
+-}
+-EXPORT_SYMBOL(ns_to_kernel_old_timeval);
+-
+ /**
+  * ns_to_timespec64 - Convert nanoseconds to timespec64
+  * @nsec:       the nanoseconds value to be converted

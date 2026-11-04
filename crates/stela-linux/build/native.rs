@@ -166,6 +166,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/security/commoncap_ptrace.c")),
             PathBuf::from(format!("{LINUX}/kernel/signal_state.c")),
             PathBuf::from(format!("{LINUX}/kernel/restart_no_syscall.c")),
+            PathBuf::from(format!("{LINUX}/kernel/task_rusage.c")),
             PathBuf::from(format!("{LINUX}/fs/fs_struct.c")),
             PathBuf::from(format!("{LINUX}/fs/init_fdtable.c")),
             PathBuf::from(format!("{LINUX}/fs/file_ref.c")),
