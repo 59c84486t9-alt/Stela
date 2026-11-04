@@ -236,9 +236,13 @@ impl Routing {
         })
     }
 
+    pub fn has_ioapic_nmis(&self) -> bool {
+        !self.nmis.is_empty()
+    }
+
     /// Bind IOAPIC version-reported pin counts, never a guessed 24-pin
     /// span. Every MADT unit must be present exactly once, with disjoint GSIs.
-    pub fn owner(&self, line: LineRoute, actual: &[(Unit, u16)]) -> Result<Unit, RouteError> {
+    pub fn validate_units(&self, actual: &[(Unit, u16)]) -> Result<(), RouteError> {
         if actual.len() != self.units.len() {
             return Err(RouteError::MissingUnit);
         }
@@ -260,6 +264,11 @@ impl Routing {
                 }
             }
         }
+        Ok(())
+    }
+
+    pub fn owner(&self, line: LineRoute, actual: &[(Unit, u16)]) -> Result<Unit, RouteError> {
+        self.validate_units(actual)?;
         if self.nmis.contains(&line.gsi) {
             return Err(RouteError::NmiConflict);
         }

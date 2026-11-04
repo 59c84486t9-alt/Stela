@@ -7,9 +7,9 @@
 //! and arch/x86/include/asm/io_apic.h (Ingo Molnar and contributors), recorded
 //! in stela-drivers/src/platform/THIRD_PARTY.md. CPU/IDT/AP bootstrap is never
 //! owned here.
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
-    cell::UnsafeCell,
+    cell::{Cell, UnsafeCell},
     mem::ManuallyDrop,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
@@ -21,6 +21,8 @@ use stela_drivers::bus::irq::{
 const MASK: u32 = 1 << 16;
 const REMOTE_IRR: u32 = 1 << 14;
 const DELIVERY: u32 = 1 << 12;
+const DELIVERY_MODE: u32 = 7 << 8;
+const LOWEST_PRIORITY: u32 = 1 << 8;
 const CONFIG: u32 = 0xff | 7 << 8 | 1 << 11 | 1 << 13 | 1 << 15 | MASK;
 const MAX_PINS: usize = 120;
 
@@ -86,6 +88,83 @@ pub struct State {
     pub masked: bool,
     pub remote_irr: bool,
     pub delivery_pending: bool,
+}
+
+/// The initial redirection words from one exact controller. This is a
+/// prepublication plan and grants no ownership of the physical contributors.
+pub struct FirmwareRoutes<'a, R: Registers, P: Platform> {
+    unit: &'a Unit<R, P>,
+    entries: Vec<(u32, u32)>,
+    phase: Cell<FirmwarePhase>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FirmwarePhase {
+    Planned,
+    Uncertain,
+    Contained,
+}
+
+impl<R: Registers, P: Platform> FirmwareRoutes<'_, R, P> {
+    /// Mask the firmware routes on this same original controller.
+    ///
+    /// # Safety
+    /// The original controller and firmware route exclusion used for the
+    /// snapshot still hold. Keep all old contributors and their backing
+    /// until their independent stop and delivery obligations are satisfied.
+    pub unsafe fn contain(&self) -> Result<(), IrqError> {
+        if self.phase.get() != FirmwarePhase::Planned {
+            return Err(IrqError::Unavailable);
+        }
+        let unit = self.unit;
+        unit.platform.check_cpu()?;
+        let _guard = unit.lock();
+        for (pin, &entry) in (0..unit.pins as u8).zip(&self.entries) {
+            if unit.firmware_entry(pin)? != entry {
+                return Err(IrqError::Route);
+            }
+        }
+        self.phase.set(FirmwarePhase::Uncertain);
+        for (pin, &(low, high)) in (0..unit.pins as u8).zip(&self.entries) {
+            if low & MASK != 0 {
+                continue;
+            }
+            let masked = low | MASK;
+            unit.registers.write(0x10 + pin * 2, masked);
+            let actual = unit.firmware_entry(pin)?;
+            if actual != (masked, high) {
+                return Err(IrqError::Mask);
+            }
+        }
+        self.check_masked()?;
+        self.phase.set(FirmwarePhase::Contained);
+        Ok(())
+    }
+
+    /// Check that every original entry is still masked and has no delivery
+    /// pending at either the controller or the admitted receiving CPU.
+    pub fn verify_contained(&self) -> Result<(), IrqError> {
+        if self.phase.get() != FirmwarePhase::Contained {
+            return Err(IrqError::Unavailable);
+        }
+        let unit = self.unit;
+        unit.platform.check_cpu()?;
+        let _guard = unit.lock();
+        self.phase.set(FirmwarePhase::Uncertain);
+        self.check_masked()?;
+        self.phase.set(FirmwarePhase::Contained);
+        Ok(())
+    }
+
+    fn check_masked(&self) -> Result<(), IrqError> {
+        let unit = self.unit;
+        for (pin, &(low, high)) in (0..unit.pins as u8).zip(&self.entries) {
+            if unit.firmware_entry(pin)? != (low | MASK, high) {
+                return Err(IrqError::Route);
+            }
+        }
+        Ok(())
+    }
 }
 
 pub struct Unit<R: Registers, P: Platform> {
@@ -158,6 +237,60 @@ impl<R: Registers, P: Platform> Unit<R, P> {
     }
     pub fn quarantine_count(&self) -> u64 {
         self.quarantined.load(Ordering::Relaxed)
+    }
+    /// Snapshot every former route before the first RTE is changed.
+    ///
+    /// # Safety
+    /// This is the exclusive initial controller handoff in process context, with no driver
+    /// claims or competing CPU, firmware or SMM route writers. The caller has
+    /// excluded MADT IOAPIC NMI sources and verified the legacy RTE format.
+    pub unsafe fn firmware_routes(&self) -> Result<FirmwareRoutes<'_, R, P>, IrqError> {
+        self.platform.check_cpu()?;
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(usize::from(self.pins))
+            .map_err(|_| IrqError::Exhausted)?;
+        let _guard = self.lock();
+        for pin in 0..self.pins as u8 {
+            let (low, high) = self.firmware_entry(pin)?;
+            if low & MASK == 0
+                && (!matches!(low & DELIVERY_MODE, 0 | LOWEST_PRIORITY) || (low as u8) < 16)
+            {
+                return Err(IrqError::Unsupported);
+            }
+            entries.push((low, high));
+        }
+        Ok(FirmwareRoutes {
+            unit: self,
+            entries,
+            phase: Cell::new(FirmwarePhase::Planned),
+        })
+    }
+
+    fn firmware_entry(&self, pin: u8) -> Result<(u32, u32), IrqError> {
+        // SAFETY: the caller holds the selector and claims lock.
+        if unsafe { (*self.claims.get())[usize::from(pin)] } {
+            return Err(IrqError::Route);
+        }
+        let low = self.low(pin)?;
+        let high = self.registers.read(0x11 + pin * 2);
+        if high == u32::MAX {
+            return Err(IrqError::FailedRead);
+        }
+        if low & (REMOTE_IRR | DELIVERY) != 0 {
+            return Err(IrqError::Drain);
+        }
+        if low & !CONFIG != 0 || high & 0x00ff_ffff != 0 {
+            return Err(IrqError::Unsupported);
+        }
+        let vector = low as u8;
+        if matches!(low & DELIVERY_MODE, 0 | LOWEST_PRIORITY)
+            && vector >= 16
+            && self.platform.pending(vector)?
+        {
+            return Err(IrqError::Drain);
+        }
+        Ok((low, high))
     }
     pub fn state(&self, gsi: u32) -> Result<State, IrqError> {
         self.platform.check_cpu()?;
