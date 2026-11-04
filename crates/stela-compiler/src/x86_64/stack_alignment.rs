@@ -8,7 +8,6 @@
 //! own: had SP been misaligned, the earlier access would have faulted, and
 //! a block's instructions run in order.
 use crate::aarch64::{AddressMode, Instruction, Operation, Register, simd};
-use alloc::vec::Vec;
 
 /// SCTLR_ELx.SA's alignment of SP.
 const STACK_ALIGNMENT_BYTES: i64 = 16;
@@ -16,16 +15,13 @@ const STACK_ALIGNMENT_BYTES: i64 = 16;
 /// For each instruction of a block, whether an access of it through SP
 /// checks SP's alignment: all but those after an access through SP that
 /// checked it, with SP aligned since.
-pub(crate) fn checks(instructions: &[Instruction]) -> Vec<bool> {
+pub(crate) fn checks(instructions: &[Instruction], rows: &mut [bool]) {
+    assert_eq!(rows.len(), instructions.len());
     let mut aligned = false;
-    instructions
-        .iter()
-        .map(|instruction| {
-            let check = !aligned;
-            aligned = after(&instruction.operation, aligned);
-            check
-        })
-        .collect()
+    for (row, instruction) in rows.iter_mut().zip(instructions) {
+        *row = !aligned;
+        aligned = after(&instruction.operation, aligned);
+    }
 }
 
 /// Whether a move of SP by `bytes` keeps it aligned.
@@ -142,6 +138,7 @@ fn after(operation: &Operation, aligned: bool) -> bool {
 mod tests {
     use super::*;
     use crate::{GuestAddress, Lifter, aarch64::Decoder};
+    use alloc::vec::Vec;
 
     fn lift(words: &[u32]) -> Vec<Instruction> {
         words
@@ -177,8 +174,10 @@ mod tests {
             0xf840_87e8,
             0xf940_03e9,
         ];
+        let mut rows = [false; 14];
+        checks(&lift(&words), &mut rows);
         assert_eq!(
-            checks(&lift(&words)),
+            rows,
             [
                 true,  // the first access through SP
                 false, // aligned since

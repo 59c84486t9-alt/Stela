@@ -1532,11 +1532,10 @@ fn region_census_of_real_code() {
             return;
         }
         runs += 1;
-        let ranges = if system {
-            super::super::guest_range::checks(run)
-        } else {
-            vec![false; run.len()]
-        };
+        let mut ranges = [false; MAX_BLOCK_INSTRUCTIONS];
+        if system {
+            super::super::guest_range::checks(run, &mut ranges[..run.len()]);
+        }
         let checks_at = |index: usize| super::super::MemoryChecks {
             guest_range: ranges[index],
             ..super::super::MemoryChecks::DEFAULT
