@@ -443,10 +443,10 @@ impl Taken {
     /// Cover requester `rid`, which arrived below a covered bridge. Its
     /// device table entry is left as it was until it attaches.
     pub(super) fn admit(&self, rid: u16) -> Result<(), Error> {
-        let unit = self.unit.try_borrow().map_err(|_| Error::Busy)?;
-        if !unit.covers(self.segment, rid) {
-            return Err(Error::Requester);
-        }
+        self.unit
+            .try_borrow_mut()
+            .map_err(|_| Error::Busy)?
+            .admit_requester(rid)?;
         let mut requesters = self.requesters.borrow_mut();
         if !requesters.contains(&rid) {
             requesters.push(rid);

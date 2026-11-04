@@ -402,6 +402,59 @@ fn alias_domain_ownership() {
 }
 
 #[test]
+fn an_alias_cannot_take_an_independently_routed_requester() {
+    let (mut unit, peer) = unit_with_entries(&[0x42, 0x20, 0, 0, 0, 0x21, 0, 0, 2, 0x21, 0, 0]);
+    let before = peer.commands();
+    assert!(matches!(
+        // SAFETY: isolated stopped model; the conflicting RID is firmware-declared.
+        unsafe { unit.attach(function(0x20)) },
+        Err(Error::Requester)
+    ));
+    assert_eq!(peer.commands(), before);
+    // SAFETY: the refused request published no private tables and there are no users.
+    unsafe { unit.retire() }.unwrap();
+}
+
+#[test]
+fn an_alias_cannot_take_another_observed_pci_function() {
+    let (mut unit, peer) = unit_with_entries(&[0x42, 0x20, 0, 0, 0, 0x21, 0, 0]);
+    let pages = peer.pages(4096);
+    // SAFETY: both physical functions were independently observed. The
+    // stopped model owns the complete window and its payload.
+    unsafe { unit.window(&[0x20, 0x21], vec![pages.into()]) }.unwrap();
+    let before = peer.commands();
+    assert!(matches!(
+        // SAFETY: no request is live and the modeled requester stays stopped.
+        unsafe { unit.attach(function(0x20)) },
+        Err(Error::Requester)
+    ));
+    assert_eq!(peer.commands(), before);
+    // SAFETY: no active requester remains.
+    unsafe { unit.retire() }.unwrap();
+}
+
+#[test]
+fn an_arrival_cannot_join_an_existing_private_alias() {
+    let (mut unit, peer) = unit_with_entries(&[0x42, 0x20, 0, 0, 0, 0x21, 0, 0]);
+    // SAFETY: no live traffic, and no other device owns the alias in this model.
+    let mut requester = unsafe { unit.attach(function(0x20)) }.unwrap();
+    let before = peer.commands();
+    assert_eq!(unit.admit_requester(0x21), Err(Error::Requester));
+    assert_eq!(peer.commands(), before);
+    // SAFETY: the attached model requester has no outstanding users or mappings.
+    unsafe { requester.detach() }.unwrap();
+    drop(requester);
+    assert!(matches!(
+        // SAFETY: the model has no live requests; the newly observed function
+        // is still a distinct owner of the alias ID.
+        unsafe { unit.attach(function(0x20)) },
+        Err(Error::Requester)
+    ));
+    // SAFETY: both original physical functions are stopped.
+    unsafe { unit.retire() }.unwrap();
+}
+
+#[test]
 fn device_settings_override_order() {
     // SysMgt=01 and Lint1Pass on every requester, then plain settings for
     // 0x20; an IOAPIC special entry names only an interrupt source.

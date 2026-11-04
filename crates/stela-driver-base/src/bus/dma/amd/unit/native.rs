@@ -315,6 +315,8 @@ pub struct Unit<P: ColdPlatform, C: UnitConfig = OwnedConfig> {
     engine: Rc<Engine<P, C>>,
     table: Rc<RefCell<DeviceTable<Hardware<P, C>>>>,
     coverage: Vec<bool>,
+    /// IDs independently assigned by firmware or observed on a PCI function.
+    sources: Vec<bool>,
     aliases: Vec<(u16, u16)>,
     window: Option<Window<P, C>>,
     active: Rc<RefCell<Vec<u16>>>,
@@ -394,6 +396,7 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
             engine,
             table: Rc::new(RefCell::new(table)),
             coverage: admitted.coverage,
+            sources: admitted.sources,
             aliases: admitted.aliases,
             window: None,
             active: Rc::new(RefCell::new(Vec::new())),
@@ -421,12 +424,38 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
         group
     }
 
-    /// Whether another requester's DMA arrives under one of `group`'s IDs,
-    /// so `group` cannot have a domain of its own.
+    /// Whether another requester can address a member of this group, either
+    /// through a firmware alias or by using its own independently routed ID.
     fn shared(&self, rid: u16, group: &[u16]) -> bool {
-        self.aliases.iter().any(|&(source, target)| {
-            source != rid && (group.contains(&target) || group.contains(&source))
-        })
+        group
+            .iter()
+            .any(|&member| member != rid && self.sources[usize::from(member)])
+            || self.aliases.iter().any(|&(source, target)| {
+                source != rid && (group.contains(&target) || group.contains(&source))
+            })
+    }
+
+    /// Observe a real stopped arrival before it can use DMA. An arrival
+    /// sharing an already-private group must stay stopped and unadmitted.
+    pub fn admit_requester(&mut self, rid: u16) -> Result<(), Error> {
+        if !self.covers(self.segment, rid) {
+            return Err(Error::Requester);
+        }
+        // Keep the observation even if this function must stay stopped. A
+        // later attachment cannot reuse its RID after the current owner retires.
+        self.sources[usize::from(rid)] = true;
+        let group = self.group(rid);
+        if self.active.borrow().iter().copied().any(|active| {
+            active != rid
+                && (group.contains(&active)
+                    || self
+                        .aliases
+                        .iter()
+                        .any(|&(source, target)| source == active && group.contains(&target)))
+        }) {
+            return Err(Error::Requester);
+        }
+        Ok(())
     }
 
     /// Give `requesters`, with their aliases, the window domain, which maps
@@ -434,9 +463,10 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
     /// physical address.
     ///
     /// # Safety
-    /// Each requester DMAs only to `ranges` until it attaches, and each
+    /// `requesters` is the complete original set of present covered PCI
+    /// requesters. Each DMAs only to `ranges` until it attaches, and each
     /// range is memory the platform admits for device DMA and keeps for the
-    /// boot.
+    /// boot. Later arrivals stay stopped until `admit_requester` accepts them.
     pub unsafe fn window(
         &mut self,
         requesters: &[u16],
@@ -445,7 +475,7 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
         if self.engine.retired.get() || self.engine.poisoned.get() {
             return Err(Error::Poisoned);
         }
-        if self.window.is_some() || ranges.is_empty() {
+        if self.window.is_some() || ranges.is_empty() || !self.active.borrow().is_empty() {
             return Err(Error::Busy);
         }
         let mut covered = Vec::new();
@@ -453,6 +483,7 @@ impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
             if !self.coverage[usize::from(rid)] {
                 return Err(Error::Requester);
             }
+            self.sources[usize::from(rid)] = true;
             for member in self.group(rid) {
                 if !covered.contains(&member) {
                     covered.push(member);
