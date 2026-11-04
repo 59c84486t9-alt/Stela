@@ -93,6 +93,15 @@ struct AbsentGroup {
     forms: &'static [AbsentForm],
 }
 
+/// The slice of one mask's sorted forms that contains its absent
+/// candidates for one instruction prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AdmitRange {
+    group: u16,
+    first: u16,
+    end: u16,
+}
+
 /// `UDF #0`: an absent form's word is UNDEFINED as UDF is (EC 0x00, ISS 0).
 const UDF: u32 = 0;
 const NOP: u32 = 0xd503_201f;
@@ -116,14 +125,16 @@ pub struct AdmitTable {
     withheld: u64,
     /// The chip's features without them.
     presented: u64,
-    /// The range of `groups` for each prefix, and its end.
-    starts: Vec<u32>,
-    groups: Vec<u16>,
+    /// One packed start and end in `groups` per prefix. Zero preserves the
+    /// word, and `UNALLOCATED` returns UDF without searching any groups.
+    spans: Vec<u32>,
+    groups: Vec<AdmitRange>,
 }
 
 impl AdmitTable {
     const SHIFT: u32 = 21;
     const PREFIXES: usize = 1 << (32 - Self::SHIFT);
+    const UNALLOCATED: u32 = u32::MAX;
 
     /// The immutable chip policy used to construct this table.
     pub fn chip(&self) -> Chip {
@@ -133,17 +144,22 @@ impl AdmitTable {
     /// [`Chip::admit`] of the table's chip, where the forms of the features
     /// its PE withholds are absent too.
     pub fn admit(&self, word: u32) -> u32 {
-        if unallocated_group(word) {
-            return UDF;
-        }
         let prefix = (word >> Self::SHIFT) as usize;
-        let groups = &self.groups[self.starts[prefix] as usize..self.starts[prefix + 1] as usize];
+        let span = match self.spans[prefix] {
+            0 => return word,
+            Self::UNALLOCATED => return UDF,
+            span => span,
+        };
+        let start = (span & u32::from(u16::MAX)) as usize;
+        let end = (span >> u16::BITS) as usize;
         self.chip.admit_in(
             word,
             self.presented,
-            groups
-                .iter()
-                .map(|&group| &forms::ABSENT[usize::from(group)]),
+            self.groups[start..end].iter().map(|range| {
+                let group = &forms::ABSENT[usize::from(range.group)];
+                let forms = &group.forms[usize::from(range.first)..usize::from(range.end)];
+                (group.mask, forms)
+            }),
         )
     }
 
@@ -229,14 +245,30 @@ impl Chip {
             // Every prefix that agrees with a form on the group's mask.
             let free = !(group.mask >> AdmitTable::SHIFT) & PREFIX;
             let absent =
-                |form: &&AbsentForm| form.chips & bit != 0 || !met(form.requires, presented);
-            for form in group.forms.iter().filter(absent) {
+                |form: &AbsentForm| form.chips & bit != 0 || !met(form.requires, presented);
+            for (position, form) in group
+                .forms
+                .iter()
+                .enumerate()
+                .filter(|(_, form)| absent(form))
+            {
+                let end = u16::try_from(position + 1).expect("form ranges fit in u16");
                 let fixed = form.value >> AdmitTable::SHIFT & !free;
                 let mut varying = free;
                 loop {
-                    let groups: &mut Vec<u16> = &mut by_prefix[(fixed | varying) as usize];
-                    if groups.last() != Some(&index) {
-                        groups.push(index);
+                    let groups: &mut Vec<AdmitRange> = &mut by_prefix[(fixed | varying) as usize];
+                    if let Some(last) = groups.last_mut()
+                        && last.group == index
+                    {
+                        // The slice can include present forms between its
+                        // first and last absent candidates.
+                        last.end = end;
+                    } else {
+                        groups.push(AdmitRange {
+                            group: index,
+                            first: end - 1,
+                            end,
+                        });
                     }
                     if varying == 0 {
                         break;
@@ -245,18 +277,26 @@ impl Chip {
                 }
             }
         }
-        let mut starts = Vec::with_capacity(AdmitTable::PREFIXES + 1);
+        let mut spans = Vec::with_capacity(AdmitTable::PREFIXES);
         let mut groups = Vec::new();
-        for prefix in by_prefix {
-            starts.push(groups.len() as u32);
-            groups.extend(prefix);
+        for (prefix, matches) in by_prefix.into_iter().enumerate() {
+            let span = if unallocated_group((prefix as u32) << AdmitTable::SHIFT) {
+                AdmitTable::UNALLOCATED
+            } else if matches.is_empty() {
+                0
+            } else {
+                let start = groups.len() as u32;
+                groups.extend(matches);
+                let end = u16::try_from(groups.len()).expect("absent-form group spans fit in u16");
+                start | (u32::from(end) << u16::BITS)
+            };
+            spans.push(span);
         }
-        starts.push(groups.len() as u32);
         Ok(AdmitTable {
             chip: self,
             withheld,
             presented,
-            starts,
+            spans,
             groups,
         })
     }
@@ -268,7 +308,11 @@ impl Chip {
         if unallocated_group(word) {
             return UDF;
         }
-        self.admit_in(word, self.features(), forms::ABSENT.iter())
+        self.admit_in(
+            word,
+            self.features(),
+            forms::ABSENT.iter().map(|group| (group.mask, group.forms)),
+        )
     }
 
     /// The first of `groups` holding a form that `word` is and that this
@@ -277,17 +321,14 @@ impl Chip {
         self,
         word: u32,
         presented: u64,
-        groups: impl Iterator<Item = &'a AbsentGroup>,
+        groups: impl Iterator<Item = (u32, &'a [AbsentForm])>,
     ) -> u32 {
         let bit = 1u8 << self as u8;
-        for group in groups {
-            let Ok(index) = group
-                .forms
-                .binary_search_by_key(&(word & group.mask), |form| form.value)
-            else {
+        for (mask, forms) in groups {
+            let Ok(index) = forms.binary_search_by_key(&(word & mask), |form| form.value) else {
                 continue;
             };
-            let form = &group.forms[index];
+            let form = &forms[index];
             let kept = form.unless.iter().any(|(mask, value, chips, requires)| {
                 chips & bit != 0 && word & mask == *value && met(requires, presented)
             });
