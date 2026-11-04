@@ -260,9 +260,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
         &self.suspended
     }
 
-    /// Record that software at `now` replaces the running thread pointer
-    /// (TPIDR_EL1) with `next`: the thread it named is suspended where the
-    /// PE stands, and `next` runs.
     pub(super) fn trace(&mut self, pc: u64) {
         if self.trace_hits.len() == TRACE_HITS {
             if let Some(last) = self.trace_hits.last_mut() {
@@ -281,13 +278,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         });
     }
 
-    pub(super) fn switch_thread(&mut self, next: u64, now: u64) {
+    /// Record the previous thread's suspension on a TPIDR_EL1 change.
+    pub(super) fn switch_thread(&mut self, next: u64) {
         let previous = self.cpu.read(SystemRegister::TPIDR_EL1);
         if previous == next {
             return;
         }
         self.suspended.remove(&next);
         if previous != 0 && self.suspended.len() < SUSPENSIONS {
+            let now = self.now();
             let state = &self.cpu.state;
             let suspension = Suspension {
                 at: now,

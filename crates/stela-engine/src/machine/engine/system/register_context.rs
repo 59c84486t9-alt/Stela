@@ -336,8 +336,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             self.machine.sample_events(now);
         }
         if register == Register::TPIDR_EL1 {
-            let now = self.now();
-            self.machine.switch_thread(value, now);
+            self.machine.switch_thread(value);
         }
         let cpu = &mut self.machine.cpu;
         let sctlr = matches!(register, Register::SCTLR_EL1 | Register::SCTLR_EL2);

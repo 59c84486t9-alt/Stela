@@ -2055,12 +2055,17 @@ fn replacing_the_thread_pointer_suspends_the_thread_it_named() {
             .system_instruction(access(false, TPIDR_EL1, 0))
             .unwrap();
     };
-    // The first thread pointer suspends nothing; rewriting it neither.
+    // The first write and a rewrite leave no suspension to timestamp.
+    let reads = machine.host.counter_reads;
     switch(&mut machine, 0x100, 0);
     switch(&mut machine, 0x100, 0);
     assert!(machine.suspended().is_empty());
+    assert_eq!(machine.host.counter_reads, reads);
+    machine.host.now = 101;
     switch(&mut machine, 0x200, 0x8000);
+    assert_eq!(machine.host.counter_reads, reads + 1);
     let suspension = machine.suspended()[&0x100];
+    assert_eq!(suspension.at, 101);
     assert_eq!(
         (suspension.pc, suspension.frame, suspension.link),
         (BASE, 0x8000, 0x8004)
