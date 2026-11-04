@@ -318,6 +318,44 @@ struct SharedEntry {
     bytes: usize,
 }
 
+/// One local producer's shared offer, allocated and charged before the
+/// producer acquires the store lock.
+pub struct StagedOffer {
+    key: SharedKey,
+    entry: Option<SharedEntry>,
+}
+
+impl StagedOffer {
+    /// `bound` is the producer's snapshot of the shared cache limit.
+    /// Admission rechecks the store's limit.
+    pub fn new(offer: Offer, bound: usize) -> Option<Self> {
+        if bound == 0 {
+            return None;
+        }
+        let bytes = offer
+            .retained_bytes()
+            .saturating_add(size_of::<(SharedKey, SharedEntry)>());
+        (bytes <= bound).then(|| Self {
+            key: shared_key(&offer.key(), offer.pc(), &offer.context()),
+            entry: Some(SharedEntry {
+                translation: offer.shared(),
+                bytes,
+            }),
+        })
+    }
+}
+
+/// At most one displaced owner per producer can outlive the store lock.
+/// The cap covers charged cache bytes, with the same exclusions as the
+/// shared cache budget. Larger or additional owners are released inside.
+const RETIRED_OWNER_BYTES: usize = 64 << 10;
+
+fn retire(entry: SharedEntry, deferred: &mut Option<Arc<SharedTranslation>>) {
+    if deferred.is_none() && entry.bytes <= RETIRED_OWNER_BYTES {
+        *deferred = Some(entry.translation);
+    }
+}
+
 /// A validated record paired with the immutable pack bytes it came from.
 pub struct DecodedRecord<'a> {
     bytes: &'a [u8],
@@ -415,7 +453,7 @@ impl<'a> Store<'a> {
     pub fn share(&mut self, bound: usize) {
         self.shared_bound = bound;
         while self.shared_usage() > bound {
-            if !self.evict_shared() {
+            if self.evict_shared().is_none() {
                 self.shared_order = VecDeque::new();
                 break;
             }
@@ -427,29 +465,28 @@ impl<'a> Store<'a> {
             .saturating_add(self.shared_order.capacity() * size_of::<SharedKey>())
     }
 
-    fn evict_shared(&mut self) -> bool {
-        let Some(oldest) = self.shared_order.pop_front() else {
-            return false;
-        };
-        if let Some(evicted) = self.shared.remove(&oldest) {
-            self.shared_bytes -= evicted.bytes;
+    fn evict_shared(&mut self) -> Option<SharedEntry> {
+        while let Some(oldest) = self.shared_order.pop_front() {
+            if let Some(evicted) = self.shared.remove(&oldest) {
+                self.shared_bytes -= evicted.bytes;
+                return Some(evicted);
+            }
         }
-        true
+        None
     }
 
-    fn keep_shared(&mut self, offer: Offer) {
+    /// Admit a preallocated shared block. The producer can drop a displaced
+    /// owner after releasing the lock. The producer still owns a declined
+    /// block, so declining it does not drop its buffers while locked.
+    pub fn accept_shared(&mut self, staged: &mut StagedOffer) -> Option<Arc<SharedTranslation>> {
         use alloc::collections::btree_map::Entry;
 
-        if self.shared_bound == 0 {
-            return;
-        }
-        let key = shared_key(&offer.key(), offer.pc(), &offer.context());
-        let bytes = offer
-            .retained_bytes()
-            .saturating_add(size_of::<(SharedKey, SharedEntry)>());
+        let key = staged.key;
+        let bytes = staged.entry.as_ref()?.bytes;
         if bytes > self.shared_bound {
-            return;
+            return None;
         }
+        let mut deferred = None;
         loop {
             let usage = self.shared_usage();
             match self.shared.entry(key) {
@@ -458,11 +495,9 @@ impl<'a> Store<'a> {
                         <= self.shared_bound =>
                 {
                     self.shared_bytes = self.shared_bytes - slot.get().bytes + bytes;
-                    slot.insert(SharedEntry {
-                        translation: offer.shared(),
-                        bytes,
-                    });
-                    return;
+                    let old = slot.insert(staged.entry.take().expect("staged entry"));
+                    retire(old, &mut deferred);
+                    return deferred;
                 }
                 Entry::Vacant(slot)
                     if usage.saturating_add(bytes) <= self.shared_bound
@@ -473,21 +508,19 @@ impl<'a> Store<'a> {
                     if self.shared_bytes.saturating_add(fifo).saturating_add(bytes)
                         <= self.shared_bound
                     {
-                        slot.insert(SharedEntry {
-                            translation: offer.shared(),
-                            bytes,
-                        });
+                        slot.insert(staged.entry.take().expect("staged entry"));
                         self.shared_order.push_back(key);
                         self.shared_bytes += bytes;
-                        return;
+                        return deferred;
                     }
                 }
                 _ => {}
             }
-            if !self.evict_shared() {
+            let Some(evicted) = self.evict_shared() else {
                 self.shared_order = VecDeque::new();
-                return;
-            }
+                return deferred;
+            };
+            retire(evicted, &mut deferred);
         }
     }
 
@@ -736,11 +769,13 @@ impl Translations for Store<'_> {
 
     fn offer(&mut self, offer: Offer) {
         self.keep_pending(&offer);
-        self.keep_shared(offer);
+        self.lend(offer);
     }
 
     fn lend(&mut self, offer: Offer) {
-        self.keep_shared(offer);
+        if let Some(mut staged) = StagedOffer::new(offer, self.shared_bound) {
+            drop(self.accept_shared(&mut staged));
+        }
     }
 }
 
@@ -881,6 +916,42 @@ mod tests {
         store.share(0);
         assert!(store.prepared(&key, 0x1000, &context).is_none());
         assert_eq!(store.shared_order.capacity(), 0);
+    }
+
+    #[test]
+    fn staged_admission_defers_eviction_and_keeps_a_declined_owner() {
+        let translator = Digest::of(b"translator");
+        let key = Digest::of(b"page");
+        let first = offer(0x1000, key);
+        let second = offer(0x1008, key);
+        let context = first.context();
+        let charge = first.retained_bytes() + size_of::<(SharedKey, SharedEntry)>();
+        let mut queue = VecDeque::<SharedKey>::new();
+        queue.try_reserve(1).unwrap();
+        let bound = charge + queue.capacity() * size_of::<SharedKey>();
+
+        let (mut store, _) = Store::new(translator, None);
+        store.share(bound);
+        let mut staged = StagedOffer::new(first, bound).unwrap();
+        assert!(store.accept_shared(&mut staged).is_none());
+        assert!(staged.entry.is_none());
+        let old = Arc::downgrade(&store.prepared(&key, 0x1000, &context).unwrap());
+
+        let mut staged = StagedOffer::new(second, bound).unwrap();
+        let retired = store.accept_shared(&mut staged).unwrap();
+        assert!(store.prepared(&key, 0x1000, &context).is_none());
+        assert!(Arc::ptr_eq(&retired, &old.upgrade().unwrap()));
+        assert!(store.prepared(&key, 0x1008, &context).is_some());
+        assert!(store.shared_usage() <= bound);
+        assert_eq!(store.pending(), 0);
+        drop(retired);
+        assert!(old.upgrade().is_none());
+
+        let mut staged = StagedOffer::new(offer(0x1000, key), bound).unwrap();
+        store.share(0);
+        assert!(store.accept_shared(&mut staged).is_none());
+        assert!(staged.entry.is_some());
+        assert!(store.prepared(&key, 0x1000, &context).is_none());
     }
 
     #[test]
