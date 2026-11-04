@@ -15,12 +15,13 @@ use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Rm, ShiftOp, Size, vector_extensi
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
+        FloatingPointOperation, Instruction, Operation,
         floating::{
             FPCR_AHP, FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format, precision::PrecisionRounding,
         },
         simd::{
             arithmetic::Shape,
-            conversion::{PrecisionMode, PrecisionOperand},
+            conversion::{Operand, PrecisionMode, PrecisionOperand},
         },
     },
     block::ExitKind,
@@ -58,6 +59,8 @@ const HALF_FINITE_VECTOR: u8 = 3;
 const HALF_MAXIMUM_VECTOR: u8 = 4;
 const HALF_ZERO_VECTOR: u8 = 5;
 const HALF_SCALED_VECTOR: u8 = 6;
+const HALF_PAIR_SOURCE: u8 = 7;
+const HALF_PAIR_SWAP_QWORDS: u8 = 0x4e;
 const HALF_SUBNORMAL_SCALE: u32 = (Format::Single.exponent_bias() + 1
     - Format::Half.exponent_bias()
     - Format::Half.fraction_bits())
@@ -262,12 +265,12 @@ fn add_half_widening_bias(code: &mut Code) {
     packed(code, Host::AddDword, SOURCE_VECTOR, HALF_MAXIMUM_VECTOR);
 }
 
-fn widen_finite_half(code: &mut Code, helper: &mut Vec<usize>) {
+fn widen_finite_half(code: &mut Code) -> usize {
     // Exponent 31 needs exact completion for AHP, infinity, and NaNs.
     Host::DwordSignMask.register(code, 0, HALF_FINITE_VECTOR, TargetCpu::Baseline);
     code.asm()
         .alu_imm8(Alu::Cmp, Size::Dword, Rax, HALF_VALIDITY_MASK);
-    helper.push(branch(code, Condition::NotZero));
+    let exceptional = branch(code, Condition::NotZero);
     // Every 15-bit integer converts exactly to single, and scaling by 2^-24
     // produces a normal single or +0. The temporary leaves MXCSR untouched
     // even in lanes where the result comes from the normal representation.
@@ -293,14 +296,12 @@ fn widen_finite_half(code: &mut Code, helper: &mut Vec<usize>) {
     packed(code, Host::And, SOURCE_VECTOR, HALF_NORMAL_VECTOR);
     packed(code, Host::AndNot, HALF_NORMAL_VECTOR, HALF_SCALED_VECTOR);
     packed(code, Host::Or, SOURCE_VECTOR, HALF_NORMAL_VECTOR);
+    exceptional
 }
 
-fn emit_widen_half(code: &mut Code, operand: &PrecisionOperand, upper: bool, pc: GuestAddress) {
-    let mut helper = Vec::new();
-    exception_guard(code, &mut helper);
-    let part = vector_offset(operand.source) + u32::from(upper) * u32::from(UPPER_QWORD_BYTES);
-    Host::MoveQword.emit(code, SOURCE_VECTOR, guest(part), TargetCpu::Baseline);
-    packed(code, Host::Xor, HALF_ZERO_VECTOR, HALF_ZERO_VECTOR);
+/// Widen the low four halves of SOURCE_VECTOR. Keeps the packed pair source
+/// and the zero constant live across an accepted instruction.
+fn widen_half_lanes(code: &mut Code, destination: u8, pc: GuestAddress, control: Option<usize>) {
     packed(code, Host::UnpackLowWord, SOURCE_VECTOR, HALF_ZERO_VECTOR);
     packed(code, Host::MoveAligned, RESULT_VECTOR, SOURCE_VECTOR);
     let needs_scaling = half_normal_widening_guard(code);
@@ -315,15 +316,92 @@ fn emit_widen_half(code: &mut Code, operand: &PrecisionOperand, upper: bool, pc:
     let normal = jump(code);
     let other = code.len();
     resolve(code, needs_scaling, other);
-    widen_finite_half(code, &mut helper);
-    helper_section(code, &helper, pc);
+    let exceptional = widen_finite_half(code);
+    match control {
+        Some(control) => helper_section(code, &[control, exceptional], pc),
+        None => helper_section(code, &[exceptional], pc),
+    }
     let complete = code.len();
     resolve(code, normal, complete);
     ShiftOpcode::LeftDword.emit(code, RESULT_VECTOR, HALF_TO_SINGLE_SIGN_SHIFT);
     ShiftOpcode::RightDword.emit(code, RESULT_VECTOR, DWORD_SIGN_TO_LSB_SHIFT);
     ShiftOpcode::LeftDword.emit(code, RESULT_VECTOR, DWORD_SIGN_TO_LSB_SHIFT);
     packed(code, Host::Or, RESULT_VECTOR, SOURCE_VECTOR);
-    commit(code, operand.destination, RESULT_VECTOR);
+    commit(code, destination, RESULT_VECTOR);
+}
+
+fn emit_widen_half(code: &mut Code, operand: &PrecisionOperand, upper: bool, pc: GuestAddress) {
+    test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
+    let control = branch(code, Condition::NotZero);
+    let part = vector_offset(operand.source) + u32::from(upper) * u32::from(UPPER_QWORD_BYTES);
+    Host::MoveQword.emit(code, SOURCE_VECTOR, guest(part), TargetCpu::Baseline);
+    packed(code, Host::Xor, HALF_ZERO_VECTOR, HALF_ZERO_VECTOR);
+    widen_half_lanes(code, operand.destination, pc, Some(control));
+}
+
+fn half_widen(instruction: &Instruction) -> Option<(PrecisionOperand, bool)> {
+    let Operation::FloatingPoint(FloatingPointOperation::Conversion(Operand::Precision(operand))) =
+        instruction.operation
+    else {
+        return None;
+    };
+    let PrecisionMode::Widen {
+        source: Format::Half,
+        upper,
+    } = operand.mode
+    else {
+        return None;
+    };
+    Some((operand, upper))
+}
+
+/// Two independent four-lane conversions from the same packed input. A
+/// destructive first destination would change the second input and cannot
+/// use the snapshot. Each half keeps its original exact completion boundary.
+pub(in crate::x86_64) fn emit_half_widen_pair(
+    code: &mut Code,
+    source_map: &mut Vec<(GuestAddress, usize)>,
+    instructions: &[Instruction],
+) -> Option<u8> {
+    let [first, second, ..] = instructions else {
+        return None;
+    };
+    let (left, left_upper) = half_widen(first)?;
+    let (right, right_upper) = half_widen(second)?;
+    if first.pc.0.checked_add(4) != Some(second.pc.0)
+        || left.source != right.source
+        || left.destination == left.source
+        || left_upper == right_upper
+    {
+        return None;
+    }
+
+    for (index, (instruction, operand, upper)) in
+        [(first, left, left_upper), (second, right, right_upper)]
+            .into_iter()
+            .enumerate()
+    {
+        code.set_instruction(source_map.len());
+        source_map.push((instruction.pc, code.len()));
+        let control = if index == 0 {
+            // Neither widening can update FPCR. Its conservative trap gate
+            // belongs to the first instruction, before either write.
+            test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
+            let enabled = branch(code, Condition::NotZero);
+            read_vector(code, left.source, HALF_PAIR_SOURCE);
+            packed(code, Host::Xor, HALF_ZERO_VECTOR, HALF_ZERO_VECTOR);
+            Some(enabled)
+        } else {
+            None
+        };
+        if upper {
+            super::shuffle(code, SOURCE_VECTOR, HALF_PAIR_SOURCE, HALF_PAIR_SWAP_QWORDS);
+        } else {
+            packed(code, Host::MoveAligned, SOURCE_VECTOR, HALF_PAIR_SOURCE);
+        }
+        widen_half_lanes(code, operand.destination, instruction.pc, control);
+    }
+    Some(right.destination)
 }
 
 fn emit_widen(code: &mut Code, operand: &PrecisionOperand, upper: bool, pc: GuestAddress) {
