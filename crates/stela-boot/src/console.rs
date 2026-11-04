@@ -255,7 +255,8 @@ impl Framebuffer {
     fn write_row(&self, y: usize, pixels: &[u8]) {
         let line = (self.base + y * self.stride * BYTES_PER_PIXEL) as *mut u32;
         let (pixels, _) = pixels.as_chunks::<BYTES_PER_PIXEL>();
-        for (column, pixel) in pixels.iter().take(self.width).enumerate() {
+        let pixels = &pixels[..pixels.len().min(self.width)];
+        for (column, pixel) in pixels.iter().enumerate() {
             let value = self.encoding.encode(u32::from_le_bytes(*pixel));
             // SAFETY: `column < width` and `y < height`, inside the mode's
             // visible framebuffer.
