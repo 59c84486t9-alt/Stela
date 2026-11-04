@@ -939,11 +939,15 @@ int fstat(int fd, struct stat *result)
 	return 0;
 }
 
+/* The only named files are DRM's nodes, which open answers. */
 int stat(const char *path, struct stat *result)
 {
-	(void)path;
-	(void)result;
-	return fail(ENOENT);
+	int fd = open(path, O_RDWR);
+	if (fd < 0)
+		return -1;
+	int status = fstat(fd, result);
+	close(fd);
+	return status;
 }
 
 int lstat(const char *path, struct stat *result)
