@@ -367,6 +367,10 @@ fn vector_copy_keeps_pair_across_scalar_rows() {
             );
             assert_eq!(reloads(&dit.native, 3), 2);
             if profile != system {
+                let advance = grouped.native.source_map[4].1;
+                assert!(
+                    grouped.native.x86_64_code[advance..].starts_with(&[0x48, 0x8d, 0x40, 0x30])
+                );
                 continue;
             }
             let accesses: Vec<_> = grouped
@@ -390,6 +394,124 @@ fn vector_copy_keeps_pair_across_scalar_rows() {
             }
             let translated = compile(&words, pc, profile, target, checks.with_translation(0x1000));
             assert_eq!(reloads(&translated.native, 3), 2);
+        }
+    }
+}
+
+#[test]
+fn vector_pair_store_forwards_its_offset_address_to_the_next_base_add() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features, RecoverySiteKind},
+        x86_64::MemoryChecks,
+    };
+
+    // STP Q0,Q1,[X10,#-16]; ADD X10,X10,#32 from zlib.
+    let pc = GuestAddress(0x10000b62c);
+    let words = [0xad3f_8540u32, 0x9100_814a];
+    let target = TargetCpu::Baseline;
+    let ordinary = BlockProfile::ORDINARY;
+    let checks = MemoryChecks::DEFAULT;
+    let compile = |words: &[u32], pc, profile, target, checks| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        CompilationPlan::new(
+            &source,
+            pc,
+            &Options::new(profile, target).with_memory_checks(checks),
+        )
+        .unwrap()
+        .compile()
+        .unwrap()
+    };
+    let grouped = compile(&words, pc, ordinary, target, checks);
+    let independent = compile(
+        &words[1..],
+        GuestAddress(pc.0 + 4),
+        ordinary,
+        target,
+        checks,
+    );
+    let fallback = compile(
+        &words,
+        pc,
+        ordinary,
+        target.with_data_independent_timing(),
+        checks,
+    );
+    let row = grouped.native.source_map[1].1;
+    assert_eq!(
+        grouped.native.source_map,
+        [(pc, 0), (GuestAddress(pc.0 + 4), row)]
+    );
+    assert_eq!(grouped.native.source_map, fallback.native.source_map);
+    assert_eq!(
+        &grouped.native.x86_64_code[..row],
+        &fallback.native.x86_64_code[..row]
+    );
+    let frame_load = [0x48, 0x8b, 0x87, 0x50, 0, 0, 0];
+    let commit = [0x48, 0x89, 0x87, 0x50, 0, 0, 0];
+    let forwarded = [0x48, 0x8d, 0x40, 0x30];
+    assert!(grouped.native.x86_64_code[row..].starts_with(&forwarded));
+    assert!(fallback.native.x86_64_code[row..].starts_with(&frame_load));
+    assert!(independent.native.x86_64_code.starts_with(&frame_load));
+    assert_eq!(
+        grouped.native.x86_64_code.len() + frame_load.len(),
+        fallback.native.x86_64_code.len()
+    );
+
+    for (offset, immediate, shifted) in [
+        (-1024i32, 4095u32, true),
+        (1008, 0, false),
+        (32, 32, false),
+        (0, 32, false),
+    ] {
+        let store = (words[0] & !(0x7f << 15)) | (((offset / 16) as u32 & 0x7f) << 15);
+        let add = (words[1] & !(0x1fff << 10)) | (immediate << 10) | (u32::from(shifted) << 22);
+        let block = compile(&[store, add], pc, ordinary, target, checks);
+        let mut expected = Code::new();
+        let adjustment = ((immediate << if shifted { 12 } else { 0 }) as i32) - offset;
+        super::super::address_add(&mut expected, adjustment, super::super::AddressMode::Offset);
+        assert!(
+            block.native.x86_64_code[block.native.source_map[1].1..]
+                .starts_with(&[&expected[..], &commit].concat())
+        );
+    }
+
+    // Aliased numeric Q/X register indices are separate architectural banks.
+    let same_number = [words[0] | 10, words[1]];
+    let aliased = compile(&same_number, pc, ordinary, target, checks);
+    assert!(aliased.native.x86_64_code[aliased.native.source_map[1].1..].starts_with(&forwarded));
+    let gap = [words[0], 0xaa0b_03eau32, words[1]]; // MOV X10,X11 supersedes the store base.
+    let gap = compile(&gap, pc, ordinary, target, checks);
+    assert!(!gap.native.x86_64_code[gap.native.source_map[2].1..].starts_with(&forwarded));
+    for (store, add) in [
+        (words[0], words[1] ^ 1),                          // Different destination.
+        (words[0], words[1] ^ (1 << 5)),                   // Different input.
+        (words[0], words[1] ^ (1 << 31)),                  // W32.
+        (words[0], words[1] | (1 << 29)),                  // ADDS.
+        (words[0] ^ (1 << 23), words[1]),                  // Writeback.
+        (words[0] | (31 << 5), words[1] | (31 << 5) | 31), // SP.
+    ] {
+        let block = compile(&[store, add], pc, ordinary, target, checks);
+        assert!(!block.native.x86_64_code[block.native.source_map[1].1..].starts_with(&forwarded));
+    }
+    let system = BlockProfile::new(Features::SYSTEM_MODE);
+    for checks in [checks, checks.with_translation(0x1000)] {
+        let block = compile(&words, pc, system, target, checks);
+        assert!(!block.native.x86_64_code[block.native.source_map[1].1..].starts_with(&forwarded));
+        let stores: Vec<_> = block
+            .fault_recovery
+            .iter()
+            .filter(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+            .collect();
+        assert_eq!(stores.len(), 2);
+        for row in stores {
+            assert_eq!(row.retirement.instruction_pc(), pc);
+            assert_eq!(row.retirement.retired_before(), 0);
+            assert_eq!(
+                &block.native.x86_64_code[row.start..row.start + 3],
+                &[0xf3, 0x0f, 0x7f]
+            );
         }
     }
 }

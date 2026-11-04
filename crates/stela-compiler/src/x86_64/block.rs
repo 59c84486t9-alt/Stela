@@ -1017,6 +1017,24 @@ fn emit_single(
             );
         }
         super::store(code, destination);
+    } else if let super::Rax::PairStoreAddress { base, displacement } = held.rax
+        && let Operation::AddSub {
+            width: Width::X64,
+            subtract: false,
+            flags: false,
+            destination,
+            source,
+            immediate,
+        } = instruction.operation
+        && source == base
+        && destination == base
+    {
+        // The paired store and both of its fault sites precede this row.
+        // Undo its displacement while applying the guest's base advance.
+        let adjustment = i32::try_from(i64::from(immediate) - i64::from(displacement))
+            .expect("decoded Q pair displacement and ADD immediate fit i32");
+        super::address_add(code, adjustment, super::AddressMode::Offset);
+        super::store(code, destination);
     } else if live_nzcv {
         assert!(
             super::pinned::emit_direct_with_add_sub_capture(
@@ -1038,7 +1056,7 @@ fn emit_single(
     {
         code.remove_instruction(start..start + load.len());
     }
-    let rax = match super::rax_after(&instruction.operation, code) {
+    let rax = match super::rax_after(&instruction.operation, code, checks) {
         // A direct form may leave the result only in its host register.
         super::Rax::Guest(register)
             if code.is_pinned()
@@ -1051,7 +1069,7 @@ fn emit_single(
         rax => rax,
     };
     debug_assert!(match rax {
-        super::Rax::Unknown => true,
+        super::Rax::Unknown | super::Rax::PairStoreAddress { .. } => true,
         super::Rax::Nzcv | super::Rax::LiveNzcv => code.ends_with(&nzcv_store(code.is_pinned())),
         super::Rax::Guest(register) => super::register_store(scratch, register, code.is_pinned())
             .is_some_and(|store| code.ends_with(store)),

@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn low_dword_insert_updates_each_kind_of_destination_directly() {
         use crate::aarch64::Operation;
-        use crate::x86_64::{Rax, rax_after};
+        use crate::x86_64::{MemoryChecks, Rax, rax_after};
 
         // A sampled macOS boot instruction: BFXIL X17, X1, #0, #32.
         let operand = crate::aarch64::bitfield::decode(0xb340_7c31).unwrap();
@@ -203,7 +203,7 @@ mod tests {
                     assert_eq!(code, [0x8b, 0x87, 8, 0, 0, 0, 0x89, 0x87, 136, 0, 0, 0]);
                 }
                 assert_eq!(
-                    rax_after(&Operation::Bitfield(operand), &code),
+                    rax_after(&Operation::Bitfield(operand), &code, MemoryChecks::DEFAULT),
                     Rax::Unknown
                 );
                 for (destination, source) in [

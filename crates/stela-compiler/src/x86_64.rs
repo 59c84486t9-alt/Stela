@@ -1011,10 +1011,16 @@ pub(super) enum Rax {
     /// The emission ended by storing RAX to this register's frame slot
     /// ([`store`]).
     Guest(Register),
+    /// The direct Q pair store left its offset address in RAX and did
+    /// not change the guest base register.
+    PairStoreAddress {
+        base: Register,
+        displacement: i32,
+    },
 }
 
 /// What RAX holds after `operation`'s emission by [`emit_instruction`].
-pub(super) fn rax_after(operation: &Operation, code: &Code) -> Rax {
+pub(super) fn rax_after(operation: &Operation, code: &Code, checks: MemoryChecks) -> Rax {
     match *operation {
         Operation::Memory {
             transfer: MemoryTransfer::Load { .. },
@@ -1028,6 +1034,18 @@ pub(super) fn rax_after(operation: &Operation, code: &Code) -> Rax {
             ..
         }) if (code.is_pinned() || !code.constant_time()) && data != Register::Zero => {
             Rax::Guest(data)
+        }
+        Operation::Simd(crate::aarch64::simd::Operand::MemoryPair {
+            load: false,
+            bytes: 16,
+            base: base @ Register::X(_),
+            displacement,
+            mode: AddressMode::Offset,
+            ..
+        }) if !code.is_pinned() && !code.constant_time() && checks == MemoryChecks::DEFAULT => {
+            // The ordinary recipe forms base + displacement in RAX.
+            // Vector reads and both native stores leave it in place.
+            Rax::PairStoreAddress { base, displacement }
         }
         Operation::Bitfield(operand) if bitfield::is_low_dword_insert(&operand) => {
             // This recipe writes the frame or pinned destination directly.
