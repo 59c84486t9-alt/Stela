@@ -45,6 +45,7 @@ fn bare_owner_cannot_authorize_physical_minimum_or_reuse_its_owners() {
         // Reporter's unreachable minimum provider could ever run.
         unsafe { __udelay(1) };
     } else {
+        // SAFETY: the isolated C owner stays entered for the sleep refusal.
         unsafe { msleep(1) };
     }
     std::fs::write(path, "minimum returned and caller reused original owners").unwrap();

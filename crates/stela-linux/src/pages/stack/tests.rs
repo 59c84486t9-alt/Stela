@@ -350,6 +350,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
     }
     let reserved = runtime.reserve_unstarted_general(&guard, kernel()).unwrap();
     let owned = reserved.into_owned().unwrap();
+    // SAFETY: the creator holds the entered guard for this unstarted reservation.
     let cold = match unsafe { owned.prepare_stack(&guard) } {
         Ok(cold) => cold,
         Err((_, error)) => panic!("cold prepare: {error:?}"),
@@ -385,6 +386,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         drop(busy);
         drop(guard);
         let fresh = scene.guard();
+        // SAFETY: the renewed guard belongs to the same creator and cold stack.
         unsafe { admission.cancel(&fresh) }.unwrap();
         catalog.try_retire().unwrap();
         assert_eq!(scene.pool.native_pin_drops.load(Ordering::Relaxed), 1);
@@ -406,6 +408,8 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
             Case::Stale => {
                 scene.pool.hooks.active.store(false, Ordering::Release);
                 assert_eq!(
+                    // SAFETY: same cold admission; the stale guard must be
+                    // rejected before the cancellation touches its backing.
                     cancellation_error(unsafe { admission.cancel(&guard) }),
                     AdmissionError::Work(WorkError::Unavailable)
                 );
@@ -427,6 +431,7 @@ unsafe extern "C" fn creator(pointer: *mut c_void) {
         -16
     );
     drop(owner);
+    // SAFETY: the creator still holds the guard and the cold stack never ran.
     unsafe { admission.cancel(&guard) }.unwrap();
     assert_eq!(scene.pool.native_pin_drops.load(Ordering::Relaxed), 1);
     catalog.try_retire().unwrap();

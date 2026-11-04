@@ -61,7 +61,7 @@ fn misses_and_invalid_names_keep_typed_refusal() {
         assert!(matches!(&error, Error::Catalog(error) if error.kind == ErrorKind::InvalidName));
         assert_eq!(error.errno(), -22);
     }
-    let invalid = CStr::from_bytes_with_nul(b"vendor/\xff.bin\0").unwrap();
+    let invalid = c"vendor/\xff.bin";
     assert_eq!(
         from_catalog(&catalog, target("first"), invalid),
         Err(Error::InvalidEncoding)

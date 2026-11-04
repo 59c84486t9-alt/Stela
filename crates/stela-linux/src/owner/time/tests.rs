@@ -82,18 +82,19 @@ fn actual_owned_record_default_drop_keeps_failed_original_source() {
         target: 100,
     };
     assert_eq!(model.ready(), Err(WorkError::Closed));
-    let value = Owned {
-        header: Header {
-            ready,
-            wake_ns,
-            remaining,
-            release,
-        },
-        source: ManuallyDrop::new(Box::new(model)),
-        owner: ptr::null(),
-        task: ptr::null_mut(),
-    };
-    drop(value);
+    {
+        let _value = Owned {
+            header: Header {
+                ready,
+                wake_ns,
+                remaining,
+                release,
+            },
+            source: ManuallyDrop::new(Box::new(model)),
+            owner: ptr::null(),
+            task: ptr::null_mut(),
+        };
+    }
     assert_eq!(source.drops.get(), 0);
     // No actual-current C callback was invoked or bypassed by this ownership
     // control; success/cancel/wrong-owner integration requires the real root.
