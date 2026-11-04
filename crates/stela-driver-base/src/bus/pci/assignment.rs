@@ -301,6 +301,10 @@ pub struct AdmissionClose {
     dismissed: bool,
 }
 impl AdmissionClose {
+    pub(super) fn check_admission(&self) -> Result<(), Error> {
+        self.original.check_admission()
+    }
+
     /// Infallible, nonblocking metadata denial; no context callback or hardware
     /// effect occurs, and every accepted original user remains counted.
     pub fn close(&self) {

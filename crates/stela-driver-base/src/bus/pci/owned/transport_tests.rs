@@ -113,6 +113,32 @@ fn retained_prepublication_view_blocks_the_source_callback() {
 }
 
 #[test]
+fn promotion_rechecks_admission_after_the_source_callback() {
+    let (source, mapping, counters) = mapped();
+    let config = UnpublishedConfig::prepare(source.into_prepublication())
+        .attach(mapping)
+        .unwrap_or_else(|_| panic!("original prepublication mapping refused"));
+    // SAFETY: this isolated fixture has no old native or raw access. Model
+    // the original close racing the callback's successful phase decision.
+    let (error, mut original) = unsafe {
+        config.promote(|source: &mut test_support::FixtureCustody| {
+            source.finish_promotion()?;
+            assert!(source.close().is_err());
+            Ok(())
+        })
+    }
+    .err()
+    .expect("closed original slot must refuse promotion");
+    assert_eq!(
+        error,
+        MappingError::Assignment(crate::bus::pci::assignment::Error::Closed)
+    );
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+    // SAFETY: the isolated allocation has no additional users.
+    unsafe { original.retire() }.unwrap();
+}
+
+#[test]
 fn promotion_callback_unwind_keeps_the_original_live_count_closed() {
     extern crate std;
 

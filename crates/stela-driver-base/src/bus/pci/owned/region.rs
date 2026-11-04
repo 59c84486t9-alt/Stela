@@ -127,6 +127,7 @@ impl Region<grant::PrepublicationGrant> {
 
     fn check_promotion(&self) -> Result<(), MappingError> {
         self.grant.state().check_idle()?;
+        self.grant.state().check_admission()?;
         self.grant.custody().retirement_context()?;
         self.mapping.check_exclusive()?;
         if !self

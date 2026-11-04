@@ -91,6 +91,15 @@ pub(super) struct State {
     pub(super) routing_seal: Cell<Option<([u32; 7], u16)>>,
 }
 impl State {
+    pub(super) fn check_admission(&self) -> Result<(), MappingError> {
+        self.close
+            .borrow()
+            .as_ref()
+            .ok_or(MappingError::Retired)?
+            .check_admission()
+            .map_err(MappingError::Assignment)
+    }
+
     pub(super) fn check_idle(&self) -> Result<(), MappingError> {
         if self.acting.get()
             || self.terminal.get().is_some()
