@@ -1,6 +1,7 @@
 //! Original ECAM scopes. Temporary bus maps and kept read-only function
 //! views are private to their consumers and never enter physical lookup.
 use super::*;
+use crate::native_mmio::ecam::EcamInventory;
 use core::mem::ManuallyDrop;
 use stela_drivers::bus::{mmio::owned::Mapping, pci::Address};
 
@@ -16,6 +17,33 @@ struct Pending {
 }
 
 impl ConfigScope {
+    /// # Safety
+    /// The caller holds this original configuration extent and exclusion.
+    unsafe fn open(
+        source: &Source,
+        span: PhysicalSpan,
+        protection: Protection,
+    ) -> Result<Self, Error> {
+        let bytes = usize::try_from(span.bytes()).map_err(|_| Error::InvalidRange)?;
+        let (resource, assignment) = source.reservation(span, ResourceKind::Registers)?;
+        let close = assignment.admission_close();
+        let mut scope = Self {
+            pending: ManuallyDrop::new(Box::new(Pending {
+                assignment: Some(assignment),
+                resource: Some(resource.clone()),
+                mapping: None,
+            })),
+            close: Some(close),
+        };
+        scope.pending.mapping =
+            Some(
+                source
+                    .authority
+                    .map(resource, 0, bytes, CacheAttribute::Uncached, protection)?,
+            );
+        Ok(scope)
+    }
+
     /// # Safety
     /// Every accepted mapping user has stopped, with no escaping aliases.
     unsafe fn retire(&mut self) -> Result<(), Error> {
@@ -58,7 +86,103 @@ impl Drop for ConfigScope {
     }
 }
 
+/// The original source lends a read-only bus at a time. A mapped bus is
+/// withdrawn and acknowledged before a different bus is admitted.
+pub(crate) struct ConfigInventory<'a> {
+    source: &'a Source,
+    windows: &'a [EcamWindow],
+    geometry: EcamInventory<'a>,
+    mapped: Option<((u16, u8), ConfigScope)>,
+}
+
+impl ConfigInventory<'_> {
+    pub(crate) fn read32(&mut self, address: Address, offset: u16) -> Result<u32, Error> {
+        if address.device >= 32
+            || address.function >= 8
+            || offset > 4092
+            || !offset.is_multiple_of(4)
+        {
+            return Err(Error::InvalidRange);
+        }
+        let key = (address.segment, address.bus);
+        if !self
+            .mapped
+            .as_ref()
+            .is_some_and(|(current, _)| *current == key)
+        {
+            self.withdraw()?;
+            let index = self
+                .windows
+                .iter()
+                .position(|window| {
+                    window.segment == address.segment
+                        && (window.start_bus..=window.end_bus).contains(&address.bus)
+                })
+                .ok_or(Error::OutsideResource)?;
+            let (_, span) = self.geometry.subset(
+                index,
+                address.bus..=address.bus,
+                self.source.platform.wire().roots(),
+            )?;
+            // SAFETY: the caller owns the original complete captured buses.
+            // Only this bounded read observes the newly mapped bus.
+            let scope = unsafe { ConfigScope::open(self.source, span, Protection::ReadOnly) }?;
+            self.mapped = Some((key, scope));
+        }
+        let (_, scope) = self.mapped.as_ref().expect("current read-only bus");
+        let offset = (usize::from(address.device) << 15)
+            | (usize::from(address.function) << 12)
+            | usize::from(offset);
+        scope
+            .pending
+            .mapping
+            .as_ref()
+            .expect("original map")
+            .read32(offset)
+    }
+
+    fn withdraw(&mut self) -> Result<(), Error> {
+        if let Some((_, mut scope)) = self.mapped.take() {
+            // SAFETY: only synchronous reads, with no external map views.
+            unsafe { scope.retire() }?;
+        }
+        Ok(())
+    }
+}
+
 impl Source {
+    /// # Safety
+    /// The boot owns all captured configuration buses, excluding firmware,
+    /// reset, topology and SR-IOV writers through the observation and its use.
+    pub(crate) unsafe fn with_config_inventory<T>(
+        &self,
+        body: impl FnOnce(&[EcamWindow], &mut ConfigInventory<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let wire = self.platform.wire();
+        let windows = stela_runtime::pc::acpi::mcfg(wire.mcfg()).map_err(failed)?;
+        if windows.is_empty() {
+            return Err(Error::Unavailable);
+        }
+        let geometry = EcamInventory::validate(&windows, self.platform.space.physical_bits)?;
+        for (index, window) in windows.iter().enumerate() {
+            for bus in window.start_bus..=window.end_bus {
+                let (_, span) = geometry.subset(index, bus..=bus, wire.roots())?;
+                if !wire.excludes_memory(span.start(), span.end()) {
+                    return Err(Error::OutsideResource);
+                }
+            }
+        }
+        let mut reader = ConfigInventory {
+            source: self,
+            windows: &windows,
+            geometry,
+            mapped: None,
+        };
+        let result = body(&windows, &mut reader);
+        reader.withdraw()?;
+        result
+    }
+
     fn config_page(&self, address: Address) -> Result<(EcamWindow, PhysicalSpan), Error> {
         let wire = self.platform.wire();
         let windows = stela_runtime::pc::acpi::mcfg(wire.mcfg()).map_err(failed)?;
@@ -146,21 +270,9 @@ impl Source {
         protection: Protection,
         body: impl FnOnce(&Mapping) -> Result<T, Error>,
     ) -> Result<T, Error> {
-        let bytes = usize::try_from(span.bytes()).map_err(|_| Error::InvalidRange)?;
-        let (resource, assignment) = self.reservation(span, ResourceKind::Registers)?;
-        let close = assignment.admission_close();
-        let mut scope = ConfigScope {
-            pending: ManuallyDrop::new(Box::new(Pending {
-                assignment: Some(assignment),
-                resource: Some(resource.clone()),
-                mapping: None,
-            })),
-            close: Some(close),
-        };
-        let mapping =
-            self.authority
-                .map(resource, 0, bytes, CacheAttribute::Uncached, protection)?;
-        let result = body(scope.pending.mapping.insert(mapping));
+        // SAFETY: the caller keeps this exact original configuration extent.
+        let mut scope = unsafe { ConfigScope::open(self, span, protection) }?;
+        let result = body(scope.pending.mapping.as_ref().expect("original map"));
         // A failed writable scope may already have changed a command word.
         // Keep the original mapping and assignment closed to further users
         // until a source can account for that effect.

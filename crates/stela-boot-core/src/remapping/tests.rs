@@ -143,6 +143,37 @@ fn disjoint_ecam_windows_share_one_complete_segment_inventory() {
 }
 
 #[test]
+fn a_failed_configuration_read_refuses_the_entire_segment_census() {
+    let windows = [EcamWindow {
+        base: 0x8000_0000,
+        segment: 0,
+        start_bus: 1,
+        end_bus: 1,
+    }];
+    let mut reads = Vec::new();
+    let result = try_enumerate_segments(&windows, |_, rid, offset| {
+        reads.push((rid, offset));
+        match (rid, offset) {
+            (0x0100 | 0x0101, VENDOR) => Ok(Some(0x0001_1234)),
+            (0x0100, CLASS | HEADER) => Ok(Some(0)),
+            (0x0101, CLASS) => Err("configuration mapping lost"),
+            _ => panic!("continued reading after the failed access"),
+        }
+    });
+    assert_eq!(result, Err("configuration mapping lost"));
+    assert_eq!(
+        reads,
+        [
+            (0x0100, VENDOR),
+            (0x0100, CLASS),
+            (0x0100, HEADER),
+            (0x0101, VENDOR),
+            (0x0101, CLASS),
+        ]
+    );
+}
+
+#[test]
 fn scopes_resolve_endpoints_paths_and_bridge_subtrees() {
     let present = inventory();
     let endpoint = Scope {

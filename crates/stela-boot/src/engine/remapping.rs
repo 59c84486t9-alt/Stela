@@ -27,9 +27,9 @@ use core::ops::Range;
 use stela_boot_core::remapping::{self, Present};
 use stela_drivers::bus::{
     dma::{mapping::DmaDomain, memory::CacheAttribute},
-    mmio::owned::{PhysicalSpan, Protection},
+    mmio::owned::{Error as MappingError, PhysicalSpan, Protection},
     pci::{
-        Address, ConfigError, EcamWindow,
+        Address, ConfigError, ConfigFailure,
         requester::{FunctionRole, RequesterBinding, roles},
     },
 };
@@ -59,27 +59,13 @@ pub(super) struct Remappers {
     dmar: Option<dmar::Remapping>,
 }
 
-/// Every present function, grouped by PCI segment across the platform's
-/// validated ECAM windows, so each remapping unit sees its entire scope.
-///
-/// # Safety
-/// The current root maps every window's configuration space uncached.
-unsafe fn inventory(windows: &[EcamWindow]) -> Vec<(u16, Vec<Present>)> {
-    remapping::enumerate_segments(windows, |window, rid, offset| {
-        // SAFETY: enumerate_segments selects the validated window containing
-        // this requester, and offset names an aligned configuration dword.
-        let value = unsafe { configuration(window, rid, offset) };
-        (value != u32::MAX).then_some(value)
-    })
-}
-
-/// # Safety
-/// The validated window is mapped uncached in this root and contains rid's
-/// bus. offset is an aligned dword no later than 4092 in this function.
-unsafe fn configuration(window: &EcamWindow, rid: u16, offset: u16) -> u32 {
-    let address = window.base + (u64::from(rid) << 12) + u64::from(offset);
-    // SAFETY: the caller supplies this exact complete mapped ECAM dword.
-    unsafe { (address as *const u32).read_volatile() }
+fn address(segment: u16, rid: u16) -> Address {
+    Address {
+        segment,
+        bus: (rid >> 8) as u8,
+        device: (rid >> 3 & 31) as u8,
+        function: (rid & 7) as u8,
+    }
 }
 
 /// The requester ID of the function at `address`.
@@ -105,22 +91,20 @@ impl Remappers {
     /// untranslated.
     ///
     /// # Safety
-    /// No host driver has started; `root` is the loader root, which maps
-    /// the ACPI tables at `rsdp` and `ecam`'s configuration space. The
-    /// firmware's translation was turned off at ExitBootServices. PCI function,
-    /// SR-IOV, reset and routing writers stay excluded through the inventory and
-    /// later claims; ECAM lists every admitted bus, not only remapped segments.
+    /// No host driver has started. `root` is the loader root for the ACPI
+    /// tables at `rsdp`, and firmware translation ended at ExitBootServices.
+    /// PCI function, SR-IOV, reset and routing writers stay excluded through
+    /// inventory and later claims. `mmio` owns all captured ECAM buses.
     pub(super) unsafe fn take(
         rsdp: u64,
         root: u64,
-        ecam: &[EcamWindow],
         drivers: Range<u64>,
         mmio: &native_mmio::Source,
         tsc_hz: u64,
     ) -> Self {
         let mut remappers = Self::none();
-        let (dmar, ivrs, inventories, roles) = {
-            // SAFETY: forwarded; the loader root maps the tables and ECAM.
+        let (dmar, ivrs) = {
+            // SAFETY: forwarded; the loader root maps the original tables.
             let _root = unsafe { RestoreRoot::enter(root) };
             let find = |signature| {
                 if rsdp == 0 {
@@ -131,34 +115,59 @@ impl Remappers {
                     .ok()
                     .map(<[u8]>::to_vec)
             };
-            let (dmar, ivrs) = (find(b"DMAR"), find(b"IVRS"));
-            // SAFETY: the loader root maps every validated ECAM window.
-            let inventories = unsafe { inventory(ecam) };
-            let functions: Vec<_> = inventories
-                .iter()
-                .flat_map(|(segment, present)| {
-                    present.iter().map(|function| Address {
-                        segment: *segment,
-                        bus: (function.rid >> 8) as u8,
-                        device: ((function.rid >> 3) & 31) as u8,
-                        function: (function.rid & 7) as u8,
-                    })
-                })
-                .collect();
-            let roles = roles::Inventory::capture(&functions, |address, offset| {
-                if offset > 4092 || !offset.is_multiple_of(4) {
-                    return Ok(None);
+            (find(b"DMAR"), find(b"IVRS"))
+        };
+        // SAFETY: the original source owns every captured bus and excludes
+        // configuration writers throughout the complete topology/role census.
+        let inventory = unsafe {
+            mmio.with_config_inventory(|windows, reader| {
+                let inventories =
+                    remapping::try_enumerate_segments(windows, |window, rid, offset| {
+                        let value = reader.read32(address(window.segment, rid), offset)?;
+                        if offset != 0 && value == u32::MAX {
+                            return Err(MappingError::InvalidPlatformReply);
+                        }
+                        Ok(Some(value))
+                    })?;
+                // A bridge whose live downstream range leaves the captured
+                // ECAM windows cannot establish a complete requester scope.
+                for (segment, functions) in &inventories {
+                    for (first, last) in functions.iter().filter_map(|function| function.bridge) {
+                        if (first..=last).any(|bus| {
+                            !windows.iter().any(|window| {
+                                window.segment == *segment
+                                    && (window.start_bus..=window.end_bus).contains(&bus)
+                            })
+                        }) {
+                            return Err(MappingError::OutsideResource);
+                        }
+                    }
                 }
-                let window = ecam.iter().find(|window| {
-                    window.segment == address.segment
-                        && (window.start_bus..=window.end_bus).contains(&address.bus)
+                let functions: Vec<_> = inventories
+                    .iter()
+                    .flat_map(|(segment, present)| {
+                        present
+                            .iter()
+                            .map(|function| address(*segment, function.rid))
+                    })
+                    .collect();
+                let roles = roles::Inventory::capture(&functions, |address, offset| {
+                    reader
+                        .read32(address, offset)
+                        .map(Some)
+                        .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))
                 });
-                // SAFETY: current loader root maps this checked window;
-                // capture runs before any host driver/configuration writer starts.
-                Ok(window
-                    .map(|window| unsafe { configuration(window, requester(address), offset) }))
-            });
-            (dmar, ivrs, inventories, roles)
+                Ok((inventories, roles))
+            })
+        };
+        let (inventories, roles) = match inventory {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                output::arguments(format_args!(
+                    "UNSUPPORTED Stela PCI topology inventory: {error:?}\n"
+                ));
+                return remappers;
+            }
         };
         let roles = match roles {
             Ok(roles) => roles,

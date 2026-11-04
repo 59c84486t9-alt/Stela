@@ -2051,13 +2051,12 @@ fn start_platform(
     // The remapping units, taken before any host driver starts DMA.
     let remappers = match (&native_mmio, handoff.storage.handoff()) {
         // SAFETY: no host driver has started; the loader root maps the ACPI
-        // tables and configuration space, and the firmware's translation
+        // tables, the MMIO source owns ECAM, and the firmware's translation
         // was turned off at ExitBootServices.
         (Some(mmio), Some(storage)) => unsafe {
             remapping::Remappers::take(
                 handoff.rsdp,
                 handoff.root,
-                &storage.ecam,
                 storage.dma.clone(),
                 mmio,
                 handoff.tsc_hz,
