@@ -42,6 +42,8 @@ const _: () = {
     assert!(offset_of!(PciIo, rom_size) == 144);
 };
 use stela_drivers::bus::pci::Address;
+#[cfg(feature = "diagnostics")]
+use stela_drivers::bus::pci::{ConfigError, ConfigFailure, ConfigSpace};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
     Firmware(Status),
@@ -247,16 +249,44 @@ pub(crate) struct ConfigurationSnapshot {
     bytes: usize,
 }
 #[cfg(feature = "diagnostics")]
-impl stela_drivers::bus::pci::ConfigSpace for ConfigurationSnapshot {
-    fn read32(&self, offset: u16) -> u32 {
-        assert!(
-            usize::from(offset).is_multiple_of(4) && usize::from(offset) + 4 <= self.bytes,
-            "unobserved firmware configuration bytes"
-        );
-        self.words[usize::from(offset) / 4]
+impl ConfigurationSnapshot {
+    fn read<const WIDTH: usize>(&self, offset: u16) -> Result<[u8; WIDTH], ConfigError> {
+        let first = usize::from(offset);
+        if !first.is_multiple_of(WIDTH) || first + WIDTH > self.bytes {
+            return Err(ConfigError::before_effect(ConfigFailure::Access {
+                offset,
+                width: WIDTH,
+            }));
+        }
+        let word = self.words[first / 4].to_le_bytes();
+        Ok(core::array::from_fn(|byte| word[first % 4 + byte]))
     }
-    fn write32(&mut self, _: u16, _: u32) {
-        panic!("firmware config observations are read only");
+}
+#[cfg(feature = "diagnostics")]
+impl ConfigSpace for ConfigurationSnapshot {
+    fn read8(&self, offset: u16) -> Result<u8, ConfigError> {
+        Ok(self.read::<1>(offset)?[0])
+    }
+    fn read16(&self, offset: u16) -> Result<u16, ConfigError> {
+        self.read(offset).map(u16::from_le_bytes)
+    }
+    fn read32(&self, offset: u16) -> Result<u32, ConfigError> {
+        self.read(offset).map(u32::from_le_bytes)
+    }
+    fn write8(&mut self, _: u16, _: u8) -> Result<(), ConfigError> {
+        Err(ConfigError::before_effect(
+            ConfigFailure::UnqualifiedControl,
+        ))
+    }
+    fn write16(&mut self, _: u16, _: u16) -> Result<(), ConfigError> {
+        Err(ConfigError::before_effect(
+            ConfigFailure::UnqualifiedControl,
+        ))
+    }
+    fn write32(&mut self, _: u16, _: u32) -> Result<(), ConfigError> {
+        Err(ConfigError::before_effect(
+            ConfigFailure::UnqualifiedControl,
+        ))
     }
 }
 pub struct FunctionObservation {

@@ -15,7 +15,10 @@ use stela_drivers::{
             mapping::{Direction, DmaMapping},
             memory::{CacheAttribute, PageSource},
         },
-        pci::{Bar, CAPABILITY_VENDOR, ConfigSpace, Function as PciFunction, owned::OwnedConfig},
+        pci::{
+            Bar, CAPABILITY_EXPRESS, CAPABILITY_VENDOR, ConfigError, ConfigSpace,
+            Function as PciFunction, owned::OwnedConfig,
+        },
     },
 };
 use stela_runtime::pc::acpi;
@@ -114,13 +117,34 @@ fn observed_bars(observation: &crate::pci_io::FunctionObservation) -> Result<[Op
     Ok(result)
 }
 
+fn config_error(error: ConfigError) -> crate::Refusal {
+    refuse!("fixture PCI configuration: {error}", %error)
+}
+
+fn read_command(config: &OwnedConfig) -> Result<u16> {
+    let command = config.read16(COMMAND).map_err(config_error)?;
+    if command == u16::MAX {
+        return Err(refuse!("fixture PCI command read returned all ones"));
+    }
+    Ok(command)
+}
+
 fn translation_features_stopped<C: ConfigSpace>(function: &mut PciFunction<C>) -> Result<()> {
-    for (offset, id) in function.capabilities() {
-        if id == 0x10 && function.config().read16(u16::from(offset) + 8) & (1 << 11) != 0 {
+    let capabilities = function
+        .capabilities()
+        .map_err(|error| refuse!("fixture PCI capabilities: {error}", ?error))?;
+    let mut express = false;
+    let config = function.config();
+    for (offset, id) in capabilities {
+        if id != CAPABILITY_EXPRESS {
+            continue;
+        }
+        express = true;
+        if config.read16(u16::from(offset) + 8).map_err(config_error)? & (1 << 11) != 0 {
             return Err(refuse!("fixture PCIe NoSnoop is enabled"));
         }
     }
-    if !function.capabilities().iter().any(|(_, id)| *id == 0x10) {
+    if !express {
         return Ok(());
     }
     let mut visited = Vec::new();
@@ -133,7 +157,7 @@ fn translation_features_stopped<C: ConfigSpace>(function: &mut PciFunction<C>) -
             return Err(refuse!("malformed fixture extended capabilities"));
         }
         visited.push(offset);
-        let header = function.config().read32(offset);
+        let header = config.read32(offset).map_err(config_error)?;
         if matches!(header, 0 | u32::MAX) {
             return Ok(());
         }
@@ -141,9 +165,9 @@ fn translation_features_stopped<C: ConfigSpace>(function: &mut PciFunction<C>) -
             return Err(refuse!("truncated fixture translation capability"));
         }
         let active = match header as u16 {
-            0x000f => function.config().read16(offset + 6) & (1 << 15) != 0,
-            0x0013 => function.config().read16(offset + 4) & 1 != 0,
-            0x001b => function.config().read16(offset + 6) & 1 != 0,
+            0x000f => config.read16(offset + 6).map_err(config_error)? & (1 << 15) != 0,
+            0x0013 => config.read16(offset + 4).map_err(config_error)? & 1 != 0,
+            0x001b => config.read16(offset + 6).map_err(config_error)? & 1 != 0,
             _ => false,
         };
         if active {
@@ -202,8 +226,9 @@ impl Prepared {
                 .configuration
                 .take()
                 .ok_or(refuse!("fixture configuration DATA missing"))?;
-            let function = PciFunction::try_new(observation.address, config)
-                .map_err(|_| refuse!("fixture firmware function absent or CRS"))?;
+            let function = PciFunction::new(observation.address, config).map_err(
+                |refusal| refuse!("fixture firmware function: {reason}", reason = ?refusal.reason),
+            )?;
             observations.push((function, bars));
         }
         observations.sort_by_key(|(function, _)| {
@@ -290,29 +315,32 @@ impl Prepared {
         let bars = observed[virtio];
         let mut virtio_status = None;
         let mut virtio_resource = None;
-        for (offset, id) in functions[virtio].capabilities() {
+        let capabilities = functions[virtio]
+            .capabilities()
+            .map_err(|error| refuse!("virtio fixture PCI capabilities: {error}", ?error))?;
+        for (offset, id) in capabilities {
             if id != CAPABILITY_VENDOR {
                 continue;
             }
             let base = u16::from(offset);
             let config = functions[virtio].config();
-            if config.read8(base + 3) != 1 {
+            if config.read8(base + 3).map_err(config_error)? != 1 {
                 continue;
             }
-            let capability_bytes = u16::from(config.read8(base + 2));
+            let capability_bytes = u16::from(config.read8(base + 2).map_err(config_error)?);
             if capability_bytes < 16 || base + capability_bytes > 256 {
                 return Err(refuse!("short virtio common capability"));
             }
             let bar = memory_bar(
-                bars.get(usize::from(config.read8(base + 4)))
+                bars.get(usize::from(config.read8(base + 4).map_err(config_error)?))
                     .copied()
                     .flatten(),
             )?;
             let start = bar
                 .start
-                .checked_add(u64::from(config.read32(base + 8)))
+                .checked_add(u64::from(config.read32(base + 8).map_err(config_error)?))
                 .ok_or_else(|| refuse!("virtio common offset overflow"))?;
-            let bytes = u64::from(config.read32(base + 12));
+            let bytes = u64::from(config.read32(base + 12).map_err(config_error)?);
             if bytes < 0x15 || start.checked_add(bytes).is_none_or(|end| end > bar.end) {
                 return Err(refuse!("virtio common capability outside BAR"));
             }
@@ -400,8 +428,9 @@ impl Prepared {
             let config = source
                 .config(identity.address)
                 .map_err(|error| refuse!("fixture owned config: {error}", %error))?;
-            let mut function = Function::try_new(identity.address, config)
-                .map_err(|_| refuse!("fixture requester disappeared during owned bind"))?;
+            let mut function = Function::new(identity.address, config).map_err(
+                |refusal| refuse!("fixture requester bind: {reason}", reason = ?refusal.reason),
+            )?;
             if function.identity() != identity {
                 return Err(refuse!(
                     "fixture identity changed during native ownership bind"
@@ -412,7 +441,8 @@ impl Prepared {
                 let Some(plan) = plan else {
                     continue;
                 };
-                let raw = function.config().read32(16 + bar as u16 * 4);
+                let config = function.config();
+                let raw = config.read32(16 + bar as u16 * 4).map_err(config_error)?;
                 let address = match *plan {
                     Bar::Memory {
                         wide, prefetchable, ..
@@ -423,7 +453,8 @@ impl Prepared {
                         }
                         u64::from(raw & !15)
                             | if wide {
-                                u64::from(function.config().read32(20 + bar as u16 * 4)) << 32
+                                u64::from(config.read32(20 + bar as u16 * 4).map_err(config_error)?)
+                                    << 32
                             } else {
                                 0
                             }
@@ -527,9 +558,11 @@ impl Prepared<Function> {
                 && index != self.virtio
             {
                 let config = function.config();
-                let command = config.read16(COMMAND);
-                config.write16(COMMAND, command & !BUS_MASTER);
-                if config.read16(COMMAND) & BUS_MASTER != 0 {
+                let command = read_command(config)?;
+                config
+                    .write16(COMMAND, command & !BUS_MASTER)
+                    .map_err(config_error)?;
+                if read_command(config)? & BUS_MASTER != 0 {
                     return Err(refuse!("fixture chipset bus master remained enabled"));
                 }
             }
@@ -547,9 +580,11 @@ impl Prepared<Function> {
             return Err(refuse!("virtio reset did not quiesce DMA"));
         }
         let config = self.functions[self.virtio].config();
-        let command = config.read16(COMMAND);
-        config.write16(COMMAND, command & !BUS_MASTER);
-        if config.read16(COMMAND) & BUS_MASTER != 0 {
+        let command = read_command(config)?;
+        config
+            .write16(COMMAND, command & !BUS_MASTER)
+            .map_err(config_error)?;
+        if read_command(config)? & BUS_MASTER != 0 {
             return Err(refuse!("virtio bus master remained enabled"));
         }
         let mut devices = alloc::vec![(self.edu, self.edu_registers.clone())];
@@ -558,11 +593,10 @@ impl Prepared<Function> {
         }
         for (index, bar) in devices {
             let config = self.functions[index].config();
-            let command = config.read16(COMMAND);
-            if command == u16::MAX {
-                return Err(refuse!("EDU command read failed"));
-            }
-            config.write16(COMMAND, (command | MEMORY | INTX_DISABLE) & !BUS_MASTER);
+            let command = read_command(config)?;
+            config
+                .write16(COMMAND, (command | MEMORY | INTX_DISABLE) & !BUS_MASTER)
+                .map_err(config_error)?;
             let device = Device {
                 edu_registers: bar,
                 clock: self.clock,
@@ -587,7 +621,7 @@ impl Prepared<Function> {
                     .second
                     .as_ref()
                     .is_some_and(|(second, _)| index == *second);
-            if selected && function.bars() != self.bars[index] {
+            if selected && function.bars().map_err(config_error)? != self.bars[index] {
                 return Err(refuse!(
                     "native BAR sizing disagrees with firmware observation"
                 ));
