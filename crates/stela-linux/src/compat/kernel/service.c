@@ -5,12 +5,14 @@
  * a distinct required runtime source. No timer callback permission follows
  * from a numeric now/deadline or an unowned batch pointer. */
 #include <linux/hrtimer.h>
+#include <linux/interrupt.h>
 #include <linux/jiffies.h>
 #include <linux/ktime.h>
 #include <linux/limits.h>
 #include <linux/typecheck.h>
 #include <linux/sched.h>
 #include <stela/atomic_callback.h>
+#include <stela/catalogue.h>
 #include <stela/irq.h>
 #include <stela/linux.h>
 #include <stela/service.h>
@@ -70,6 +72,12 @@ void stela_linux_timers_changed(void)
     owner->services->timer_changed(owner->context);
 }
 
+void stela_linux_service_softirq_raised(void)
+{
+    if (stela_linux_kernel_hosted())
+        stela_linux_timers_changed();
+}
+
 void stela_linux_timer_delivery_require(const struct stela_linux_timer_delivery *delivery)
 {
     const struct stela_linux_owner *owner = stela_linux_owner();
@@ -112,6 +120,8 @@ s64 stela_linux_service_run(const struct stela_linux_timer_delivery *delivery)
     stela_linux_hrtimers_run_hard(delivery);
     stela_linux_timers_run(delivery);
     stela_linux_hrtimers_run_soft(delivery);
+    if (stela_linux_kernel_hosted())
+        do_softirq();
     /* Every callback returned before selecting the original remaining queue
      * minima. No mutable queue/Domain borrow spans foreign delivery. */
     s64 now = service_now_ns();

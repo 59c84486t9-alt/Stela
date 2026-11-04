@@ -79,9 +79,8 @@ pub trait Platform {
     /// as now_ns/service timers. It retains source/provider/code across park;
     /// no borrowed execution/process/queue scope may escape this call.
     fn minimum_deadline_us(&self, minimum: u64) -> Result<Box<dyn MinimumDeadline>, WorkError>;
-    /// Notify this SAME retained Environment of a real C timer queue change.
-    /// Bounded/IRQ-safe, including atomic callbacks. This wakes inspection;
-    /// it grants no timer delivery/native IRQ/physical minimum permission.
+    /// Notify the same retained service of a real C timer queue change or a
+    /// posted hosted softirq. This IRQ-safe callback wakes service inspection.
     fn timer_changed(&self) -> Result<(), WorkError>;
     /// One formatted kernel message at its printk level.
     fn log(&self, level: i32, message: &CStr);

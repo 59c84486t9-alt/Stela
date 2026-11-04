@@ -9,6 +9,9 @@
  * again, or S64_MAX when nothing is armed. */
 s64 stela_linux_service_run(const struct stela_linux_timer_delivery *delivery);
 
+/* Notify the hosted service after original source posts a softirq. */
+void stela_linux_service_softirq_raised(void);
+
 struct stela_linux_owner;
 
 struct stela_linux_service_call {

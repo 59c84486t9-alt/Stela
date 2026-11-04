@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 18:37:52 -0500
+Subject: [PATCH] fix(softirq): notify the hosted service after source raises
+
+---
+ kernel/softirq.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/kernel/softirq.c b/kernel/softirq.c
+index d1656388495908c553766cc34c093c252bac2a9c..d6be7f31a22659cb69ce2ce152fe1e02ae0791e8 100644
+--- a/kernel/softirq.c
++++ b/kernel/softirq.c
+@@ -40,6 +40,7 @@
+ #endif
+ #include <stela/atomic_callback.h>
+ #include <stela/linux.h>
++#include <stela/service.h>
+ #include <stela/task.h>
+ #endif
+ 
+@@ -823,6 +824,9 @@ void __raise_softirq_irqoff(unsigned int nr)
+ 	lockdep_assert_irqs_disabled();
+ 	trace_softirq_raise(nr);
+ 	or_softirq_pending(1UL << nr);
++#ifdef CONFIG_STELA
++	stela_linux_service_softirq_raised();
++#endif
+ }
+ 
+ void open_softirq(int nr, void (*action)(void))

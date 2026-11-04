@@ -13,14 +13,17 @@ use std::{
     pin::Pin,
     process::{self, Command},
     ptr,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant, SystemTime},
 };
 use stela_driver_base::platform::work::{
-    WorkError,
+    Kind, WorkError,
     kernel_domain::{
-        DomainRaised, HostedClock, HostedDeadlines, HostedDomain, HostedExecution, HostedExecutor,
-        HostedIdle, HostedQueue, HostedRuntime,
+        DomainRaised, DomainRef, HostedClock, HostedDeadlines, HostedDomain, HostedExecution,
+        HostedExecutor, HostedIdle, HostedQueue, HostedRuntime,
     },
 };
 use stela_driver_base::{
@@ -37,6 +40,9 @@ use stela_linux::{
         reserve_hosted_child_stack, start_hosted_threads, step_hosted,
     },
 };
+
+type TestRuntime = HostedRuntime<16>;
+type TestQueue = HostedQueue<16>;
 
 struct Host {
     clock: Arc<HostedClock>,
@@ -200,6 +206,13 @@ unsafe extern "C" {
     static sighand_cachep: *const c_void;
     fn stela_linux_current() -> *const u8;
     fn task_sched_runtime(task: *const u8) -> u64;
+    fn kernel_thread(
+        entry: unsafe extern "C" fn(*mut c_void) -> i32,
+        arg: *mut c_void,
+        name: *const std::ffi::c_char,
+        flags: usize,
+    ) -> i32;
+    fn kernel_wait4(pid: i32, status: *mut i32, options: i32, usage: *mut c_void) -> isize;
     fn stela_linux_require_current(owner: *const RawOwner) -> i32;
     fn stela_linux_device_publish_allowed(device: *const c_void) -> bool;
     fn stela_linux_page_catalog_register_extents_v2(
@@ -261,7 +274,7 @@ unsafe extern "C" fn check_initial(owner: *const RawOwner, context: *mut c_void)
         Err(WorkError::Unavailable)
     );
     // SAFETY: the stopped dispatcher keeps the exact pinned runtime handle.
-    let runtime = unsafe { *context.cast::<Pin<&HostedRuntime<8>>>() };
+    let runtime = unsafe { *context.cast::<Pin<&TestRuntime>>() };
     // SAFETY: C checks the owner before using it. A refusal must release the worker.
     let refused = unsafe { reserve_hosted_child_stack(runtime, ptr::null()) };
     assert!(matches!(refused, Err(ResourceBootstrapError::Native(-1))));
@@ -403,7 +416,7 @@ fn hosted_original_fork_returns_enomem_without_an_unowned_stack() {
 
 unsafe extern "C" fn check_threads_exhausted(owner: *const RawOwner, context: *mut c_void) -> ! {
     // SAFETY: the stopped dispatcher keeps the exact pinned runtime handle.
-    let runtime = unsafe { *context.cast::<Pin<&HostedRuntime<8>>>() };
+    let runtime = unsafe { *context.cast::<Pin<&TestRuntime>>() };
     // SAFETY: the mounted Initial is the real entered source creator.
     let _entered = unsafe { Entered::new(owner) };
     // SAFETY: the permanent model inventory and clock are retained.
@@ -419,7 +432,7 @@ unsafe extern "C" fn check_threads_exhausted(owner: *const RawOwner, context: *m
 
 unsafe extern "C" fn check_threads_published(owner: *const RawOwner, context: *mut c_void) -> ! {
     // SAFETY: exact retained original owner/current and dispatcher runtime handle.
-    let (owner, runtime) = unsafe { (&*owner, *context.cast::<Pin<&HostedRuntime<8>>>()) };
+    let (owner, runtime) = unsafe { (&*owner, *context.cast::<Pin<&TestRuntime>>()) };
     {
         // SAFETY: the mounted Initial is the real entered source creator.
         let _entered = unsafe { Entered::new(owner) };
@@ -440,7 +453,7 @@ unsafe extern "C" fn check_threads_published(owner: *const RawOwner, context: *m
     unsafe { stela_linux::service::run_hosted_service(owner, runtime) }
 }
 
-fn drive_first_children(runtime: Pin<&HostedRuntime<8>>, _: &HostedClock) {
+fn drive_first_children(runtime: Pin<&TestRuntime>, _: &HostedClock, _: &TestQueue) {
     assert!(step_hosted(runtime, false).unwrap()); // Initial parks
     assert!(step_hosted(runtime, false).unwrap()); // PID1 waits for kthreadd
     assert!(step_hosted(runtime, false).unwrap()); // kthreadd enters and parks
@@ -448,9 +461,102 @@ fn drive_first_children(runtime: Pin<&HostedRuntime<8>>, _: &HostedClock) {
     process::exit(0);
 }
 
+#[test]
+fn hosted_original_workqueue_startup_reaps_and_releases_a_child_stack() {
+    in_fresh_process(
+        "hosted_original_workqueue_startup_reaps_and_releases_a_child_stack",
+        "original hosted child stack reused",
+        16 * 1024,
+        14,
+        start_reap_service,
+        drive_reap_service,
+    );
+}
+
+static FINITE_STACK: AtomicUsize = AtomicUsize::new(0);
+static OBSERVED_STACK: AtomicUsize = AtomicUsize::new(0);
+
+fn current_stack(runtime: Pin<&TestRuntime>) -> usize {
+    DomainRef::borrow_hosted(runtime)
+        .unwrap()
+        .current_context()
+        .unwrap()
+        .stack_start
+}
+
+unsafe extern "C" fn finite_child(context: *mut c_void) -> i32 {
+    // SAFETY: the stopped dispatcher keeps its runtime handle for this process.
+    let runtime = unsafe { *context.cast::<Pin<&TestRuntime>>() };
+    FINITE_STACK.store(current_stack(runtime), Ordering::Relaxed);
+    0
+}
+
+unsafe extern "C" fn observe_stack(context: *mut c_void) {
+    // SAFETY: the dispatcher retains this handle through the exact callback.
+    let runtime = unsafe { *context.cast::<Pin<&TestRuntime>>() };
+    OBSERVED_STACK.store(current_stack(runtime), Ordering::Relaxed);
+}
+
+unsafe extern "C" fn start_reap_service(owner: *const RawOwner, context: *mut c_void) -> ! {
+    const CLONE_FS_FILES: usize = 0x600;
+    const WAIT_ALL: i32 = 0x4000_0000;
+    // SAFETY: same kept original owner and dispatcher runtime handle.
+    let (owner, runtime) = unsafe { (&*owner, *context.cast::<Pin<&TestRuntime>>()) };
+    {
+        // SAFETY: the mounted Initial is the entered original creator.
+        let _entered = unsafe { Entered::new(owner) };
+        // SAFETY: actual Initial with retained original model resources.
+        unsafe { initialize_hosted_resources(owner) }.unwrap();
+        // SAFETY: the entered Initial has completed its original resources.
+        unsafe { start_hosted_threads(owner, runtime) }.unwrap();
+        // SAFETY: actual source fork with a resident callback and kept context.
+        let pid = unsafe {
+            kernel_thread(
+                finite_child,
+                context,
+                c"finite-audit".as_ptr(),
+                CLONE_FS_FILES,
+            )
+        };
+        assert_eq!(pid, 3);
+        // SAFETY: the original parent waits on its own published child.
+        let reaped = unsafe { kernel_wait4(pid, ptr::null_mut(), WAIT_ALL, ptr::null_mut()) };
+        assert_eq!(reaped, pid as isize);
+    }
+    // SAFETY: mounted Initial with actual resources and no active owner guard.
+    unsafe { stela_linux::service::run_hosted_service(owner, runtime) }
+}
+
+fn drive_reap_service(runtime: Pin<&TestRuntime>, _: &HostedClock, queue: &TestQueue) {
+    let mut steps = 0;
+    while step_hosted(runtime, false).unwrap() {
+        steps += 1;
+        assert!(steps < 128, "original startup and reap did not quiesce");
+    }
+    let retired_stack = FINITE_STACK.load(Ordering::Relaxed);
+    assert_ne!(retired_stack, 0);
+    for _ in 0..14 {
+        // SAFETY: runtime handle remains live until this callback completes.
+        let context = ptr::from_ref(&runtime).cast_mut().cast();
+        // SAFETY: the dispatcher keeps the callback and context through return.
+        let ticket = unsafe { queue.execute(Kind::General, observe_stack, context) }.unwrap();
+        let mut probes = 0;
+        while !queue.completed(ticket).unwrap() {
+            assert!(step_hosted(runtime, false).unwrap());
+            probes += 1;
+            assert!(probes < 128, "the stack probe did not complete");
+        }
+        if OBSERVED_STACK.load(Ordering::Relaxed) == retired_stack {
+            println!("original hosted child stack reused");
+            process::exit(0);
+        }
+    }
+    panic!("original source did not release the child's exact stack");
+}
+
 unsafe extern "C" fn start_timer_service(owner: *const RawOwner, context: *mut c_void) -> ! {
     // SAFETY: exact retained original owner/current and dispatcher runtime handle.
-    let (owner, runtime) = unsafe { (&*owner, *context.cast::<Pin<&HostedRuntime<8>>>()) };
+    let (owner, runtime) = unsafe { (&*owner, *context.cast::<Pin<&TestRuntime>>()) };
     {
         // SAFETY: this is the exact original Initial, before the C loop enters it.
         let _entered = unsafe { Entered::new(owner) };
@@ -461,11 +567,11 @@ unsafe extern "C" fn start_timer_service(owner: *const RawOwner, context: *mut c
     unsafe { stela_linux::service::run_hosted_service(owner, runtime) }
 }
 
-fn run_once(runtime: Pin<&HostedRuntime<8>>, _: &HostedClock) {
+fn run_once(runtime: Pin<&TestRuntime>, _: &HostedClock, _: &TestQueue) {
     runtime.step().unwrap();
 }
 
-fn drive_timer_service(runtime: Pin<&HostedRuntime<8>>, clock: &HostedClock) {
+fn drive_timer_service(runtime: Pin<&TestRuntime>, clock: &HostedClock, _: &TestQueue) {
     let raised = runtime.service_raised_work().unwrap();
     raised.raise().unwrap();
     assert!(runtime.step().unwrap());
@@ -496,7 +602,7 @@ fn in_fresh_process(
     page_count: usize,
     general_stacks: usize,
     body: unsafe extern "C" fn(*const RawOwner, *mut c_void) -> !,
-    drive: fn(Pin<&HostedRuntime<8>>, &HostedClock),
+    drive: fn(Pin<&TestRuntime>, &HostedClock, &TestQueue),
 ) {
     const CHILD: &str = "STELA_HOSTED_INITIAL_CHILD";
     if std::env::var_os(CHILD).is_none() {
@@ -520,7 +626,7 @@ fn in_fresh_process(
     let clock = HostedClock::new(&execution).unwrap();
     let idle = HostedIdle::new(&clock).unwrap();
     let deadlines = HostedDeadlines::new(&clock, &idle).unwrap();
-    let queue = HostedQueue::<8>::new(execution, Arc::new(())).unwrap();
+    let queue = TestQueue::new(execution, Arc::new(())).unwrap();
     let stack = stela_linux::task::stack_requirement().unwrap();
     // SAFETY: this fresh process retains its only executor through exit.
     let executor = unsafe {
@@ -567,6 +673,6 @@ fn in_fresh_process(
         unsafe { HostedTaskBinding::start_initial(runtime, platform, page_count, body, context) }
             .unwrap();
     assert_eq!(queue.completed(ticket), Ok(false));
-    drive(runtime, &clock);
+    drive(runtime, &clock, &queue);
     panic!("the original Initial check returned to its dispatcher");
 }
