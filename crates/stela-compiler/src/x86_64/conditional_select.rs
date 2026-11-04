@@ -1,12 +1,12 @@
 //! Branchless conditional select from the saved guest NZCV.
-use super::{capture_nzcv, condition_holds, flag_word, load, right_operand, store, store_nzcv};
+use super::{capture_nzcv, condition_holds, flag_word, load_with, pinned, store, store_nzcv};
 use crate::aarch64::{
-    Register, Shift, Width,
+    Register, Width,
     conditional_select::{CompareOperand, CompareRight, Operand, Otherwise},
 };
 use crate::x86_64::asm::{
     Alu, Asm, Code, Cond,
-    Gpr::{R8, Rax, Rcx, Rdx},
+    Gpr::{R8, Rax, Rdx},
     Rm, Size, Unary,
 };
 
@@ -20,16 +20,26 @@ pub(super) fn emit_compare(code: &mut Code, operand: &CompareOperand) {
         // R8 is scratch under the native leaf ABI.
         code.asm().setcc(cond, R8);
     }
-    load(code, operand.left);
+    let size = Size::of(operand.width == Width::X64);
+    let op = if operand.subtract { Alu::Cmp } else { Alu::Add };
     match operand.right {
         CompareRight::Register(register) => {
-            right_operand(code, register, operand.width, Shift::Lsl, 0)
+            let emitted =
+                pinned::unshifted_binary(&mut code.asm(), op, size, Rax, operand.left, register);
+            debug_assert!(emitted, "RAX is scratch for conditional compare");
         }
-        CompareRight::Immediate(value) => code.asm().mov_imm32(Rcx, u32::from(value)),
+        CompareRight::Immediate(value) => {
+            let mut asm = code.asm();
+            let destination = match asm.guest(operand.left) {
+                Some(left) if operand.subtract => left,
+                _ => {
+                    load_with(&mut asm, operand.left);
+                    Rax.into()
+                }
+            };
+            asm.alu_imm(op, size, destination, i32::from(value));
+        }
     }
-    let op = if operand.subtract { Alu::Sub } else { Alu::Add };
-    code.asm()
-        .alu(op, Size::of(operand.width == Width::X64), Rax, Rcx);
     let pinned = code.is_pinned();
     if pinned {
         flag_word::capture_in_rax(code, operand.subtract);
@@ -146,6 +156,68 @@ fn select_input(asm: &mut Asm, host: crate::x86_64::asm::Gpr, size: Size, guest:
 mod tests {
     use super::*;
     use crate::GuestState;
+
+    #[test]
+    fn compares_registers_and_immediates_without_changing_operands() {
+        for width in [Width::W32, Width::X64] {
+            let sign = match width {
+                Width::W32 => 1 << 31,
+                Width::X64 => 1 << 63,
+            };
+            let initial = {
+                let mut state = GuestState::default();
+                state.x[1] = sign;
+                state.x[2] = u64::MAX;
+                state.x[3] = sign;
+                state.x[8] = u64::MAX;
+                state
+            };
+            use CompareRight::{Immediate, Register as FromRegister};
+            use Register::{X, Zero};
+            for (left, right, sub_flags, add_flags) in [
+                (X(1), FromRegister(X(2)), 8, 3),
+                (X(3), FromRegister(X(8)), 8, 3),
+                (X(1), FromRegister(X(1)), 6, 7),
+                (X(1), FromRegister(Zero), 10, 8),
+                (X(3), Immediate(0), 10, 8),
+                (X(3), Immediate(31), 3, 8),
+                (Zero, Immediate(31), 8, 0),
+            ] {
+                for (subtract, flags) in [(true, sub_flags), (false, add_flags)] {
+                    for condition in [0, 14, 15] {
+                        let operand = CompareOperand {
+                            width,
+                            subtract,
+                            left,
+                            right,
+                            condition,
+                            fallback: 5,
+                        };
+                        let mut frame = Code::new();
+                        let mut pinned = Code::pinned();
+                        emit_compare(&mut frame, &operand);
+                        emit_compare(&mut pinned, &operand);
+                        pinned.asm().ret();
+                        let pinned = super::super::pinned::entered(&pinned);
+                        for nzcv in [0, 4] {
+                            let expected = if condition == 0 && nzcv == 0 {
+                                5
+                            } else {
+                                flags
+                            };
+                            for bytes in [&frame[..], &pinned[..]] {
+                                let mut state = initial.clone();
+                                state.nzcv = nzcv << NZCV_SHIFT;
+                                super::super::native::run(bytes, &mut state);
+                                assert_eq!(state.x, initial.x, "{operand:?}");
+                                assert_eq!(state.nzcv, expected << NZCV_SHIFT, "{operand:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn selects_preserve_nzcv_and_zero_extend_w_results() {

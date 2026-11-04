@@ -132,7 +132,7 @@ fn right(
 /// A binary operation without a shifted operand can read a frame slot
 /// directly. A commutative operation can start with the right operand
 /// when it already lives in the destination.
-fn unshifted_binary(
+pub(super) fn unshifted_binary(
     asm: &mut Asm,
     op: Alu,
     size: Size,
