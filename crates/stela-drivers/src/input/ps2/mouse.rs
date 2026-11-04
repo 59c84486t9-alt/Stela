@@ -21,8 +21,11 @@ impl Mouse {
         self.protocol = protocol;
         self.position = 0;
     }
+    pub(super) fn partial(&self) -> bool {
+        self.position != 0
+    }
     pub(super) fn expire(&mut self, now: u64, timeout: u64) -> Result<(), ErrorKind> {
-        if self.position != 0 && now.wrapping_sub(self.start) >= timeout {
+        if self.partial() && now.wrapping_sub(self.start) >= timeout {
             self.position = 0;
             return Err(ErrorKind::PacketTimeout(Port::Mouse));
         }

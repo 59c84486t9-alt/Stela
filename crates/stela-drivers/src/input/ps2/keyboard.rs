@@ -30,7 +30,7 @@ impl Keyboard {
         self.released = false;
         self.pause = None;
     }
-    fn prefix(&self) -> bool {
+    pub(super) fn prefix(&self) -> bool {
         self.extended || self.released || self.pause.is_some()
     }
     fn key(&mut self, usage: u8, pressed: bool, events: &mut Vec<Input>) {

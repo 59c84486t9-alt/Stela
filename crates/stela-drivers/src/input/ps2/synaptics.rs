@@ -238,8 +238,11 @@ impl Engine {
                     }
                 })
     }
+    pub(super) fn partial(&self) -> bool {
+        self.position != 0
+    }
     pub(super) fn expire(&self, now: u64, timeout: u64) -> Result<(), ErrorKind> {
-        if self.position != 0 && now.wrapping_sub(self.start) >= timeout {
+        if self.partial() && now.wrapping_sub(self.start) >= timeout {
             return Err(ErrorKind::PacketTimeout(Port::Mouse));
         }
         Ok(())
