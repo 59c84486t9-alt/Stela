@@ -97,6 +97,17 @@ impl Remote {
         }
     }
 
+    /// Release the restore-only range and ring after the protocol has ended.
+    pub(super) fn retire(&mut self) {
+        self.stop();
+        self.ahead = false;
+        let bytes = self.buffer.capacity();
+        self.buffer = VecDeque::new();
+        output::arguments(format_args!(
+            "REMOTE IMAGE retired read-ahead capacity={bytes}\n"
+        ));
+    }
+
     /// Takes what has arrived, opening a range at the buffer's end first
     /// when none is open.
     fn step(&mut self) -> Result<(), NetError> {
