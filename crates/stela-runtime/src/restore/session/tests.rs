@@ -1,4 +1,5 @@
 use super::super::{
+    plist,
     store::tests::fixture,
     stream::tests::{Memory, receive},
 };
@@ -410,17 +411,32 @@ fn an_optional_missing_global_manifest_sends_only_file_data_done() {
 /// several FileData frames, and its end.
 #[test]
 fn one_poll_moves_every_frame_a_ready_stream_takes() {
-    struct Open(Vec<u8>);
-    impl ByteStream for Open {
+    use stela_soc::usb::mux::{Mux, StreamId, test_support::connected};
+
+    struct MuxSink {
+        mux: Mux,
+        stream: StreamId,
+        bytes: Vec<u8>,
+        writes: Vec<usize>,
+    }
+    impl ByteStream for MuxSink {
         fn read(&mut self, _: &mut [u8]) -> Poll<Result<usize>> {
             Poll::Pending
         }
         fn write(&mut self, b: &[u8]) -> Poll<Result<usize>> {
-            self.0.extend_from_slice(b);
-            Poll::Ready(Ok(b.len()))
+            let n = self.mux.write(self.stream, b).map_err(Error::Transport)?;
+            if n == 0 {
+                return Poll::Pending;
+            }
+            let packet = self.mux.take_packet().expect("mux write emitted a packet");
+            // Mux v2 header and fixed TCP header.
+            assert_eq!(packet.len(), 36 + n);
+            self.bytes.extend_from_slice(&packet[36..]);
+            self.writes.push(n);
+            Poll::Ready(Ok(n))
         }
     }
-    let data = vec![5; 4 * FILE_CHUNK + 1];
+    let data = vec![5; FILE_BATCH_BYTES + 1];
     let mut answers = Answers::new(fixture(&data, false));
     answers.store.prepare().unwrap();
     let request = Value::dict([
@@ -429,12 +445,86 @@ fn one_poll_moves_every_frame_a_ready_stream_takes() {
     ]);
     let plan = answers.plan(&request).unwrap();
     let mut job = Job::new(1, Some(2345), request, plan);
-    let mut stream = Open(Vec::new());
+    let (mux, stream) = connected();
+    let mut stream = MuxSink {
+        mux,
+        stream,
+        bytes: Vec::new(),
+        writes: Vec::new(),
+    };
     assert!(matches!(
         job.poll(&mut stream, &mut answers.store),
         Poll::Ready(Ok(()))
     ));
-    assert!(stream.0.len() > data.len());
+    let mut expected = Vec::new();
+    for chunk in data.chunks(FILE_CHUNK) {
+        let frame = plist::encode_binary(
+            &Value::dict([("FileData", Value::Data(chunk.to_vec()))]),
+            Limits::default(),
+        )
+        .unwrap();
+        expected.extend((frame.len() as u32).to_be_bytes());
+        expected.extend(frame);
+    }
+    let done = plist::encode_binary(
+        &Value::dict([("FileDataDone", Value::Boolean(true))]),
+        Limits::default(),
+    )
+    .unwrap();
+    expected.extend((done.len() as u32).to_be_bytes());
+    expected.extend(done);
+    assert_eq!(stream.bytes, expected);
+    assert_eq!(stream.writes.len(), 3);
+    assert_eq!(stream.writes[0], FILE_BATCH_BYTES + 4 * 104);
+}
+
+#[test]
+fn blocked_file_data_keeps_its_offset_and_a_partial_write_refusal_is_terminal() {
+    let data = vec![5; MAX_READ_BYTES + 1];
+    let mut answers = Answers::new(fixture(&data, false));
+    answers.store.prepare().unwrap();
+    let request = Value::dict([
+        ("DataType", Value::from("SourceBootObjectV4")),
+        ("Arguments", Value::dict([("ImageName", Value::from("OS"))])),
+    ]);
+    let plan = answers.plan(&request).unwrap();
+    let mut job = Job::new(1, Some(2345), request, plan);
+    let mut stream = Memory::new(Vec::new(), 31);
+    job.prefetch(&mut answers.store, 1).unwrap();
+    let offset = (MAX_READ_BYTES - FILE_BATCH_BYTES) as u64;
+    job.offset = offset;
+    assert!(
+        job.poll_with_source(&mut stream, &mut answers.store, true)
+            .is_pending()
+    );
+    assert_eq!((job.offset, stream.output.len()), (offset, 0));
+    job.prefetch(&mut answers.store, 1).unwrap();
+    assert_eq!(job.window.at, 0);
+    assert!(
+        job.poll_with_source(&mut stream, &mut answers.store, true)
+            .is_pending()
+    );
+    assert_eq!((job.offset, stream.output.len()), (offset, 31));
+    let last_frame = 3 * (FILE_CHUNK + 104);
+    stream.chunk = last_frame - 31;
+    assert!(
+        job.poll_with_source(&mut stream, &mut answers.store, true)
+            .is_pending()
+    );
+    assert_eq!((job.offset, stream.output.len()), (offset, last_frame));
+    job.prefetch(&mut answers.store, 1).unwrap();
+    assert_eq!(job.window.at, MAX_READ_BYTES as u64);
+    stream.chunk = 0;
+    assert!(matches!(
+        job.poll_with_source(&mut stream, &mut answers.store, true),
+        Poll::Ready(Err(_))
+    ));
+    stream.chunk = FILE_BATCH_BYTES;
+    assert!(matches!(
+        job.poll_with_source(&mut stream, &mut answers.store, true),
+        Poll::Ready(Err(_))
+    ));
+    assert_eq!((job.offset, stream.output.len()), (offset, last_frame));
 }
 #[test]
 fn unknown_updater_recovery_policy_and_failure_status_keep_full_context() {
