@@ -75,6 +75,8 @@
 /kernel/sched/ext/ext.h
 /kernel/sched/rq_lock.c
 /kernel/sched/rq_clock.c
+/kernel/sched/rq_resched.c
+/kernel/sched/rq_resched.h
 /kernel/sched/clock.c
 /kernel/sched/pelt.h
 /kernel/sched/sched-pelt.h
