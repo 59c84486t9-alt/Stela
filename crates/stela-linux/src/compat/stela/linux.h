@@ -86,6 +86,8 @@ struct stela_linux_services {
 	 * Only mode 1 takes a nonzero tick_ns. False leaves outputs unchanged. */
 	bool (*realtime_at)(void *context, s64 now_ns, u32 mode, u32 tick_ns,
 			    s64 *seconds, u32 *nanoseconds);
+	/* Mix auxiliary input into the already seeded owner stream. */
+	bool (*mix_random)(void *context, const void *bytes, size_t size);
 };
 
 struct stela_linux_owner {
@@ -95,7 +97,7 @@ struct stela_linux_owner {
 
 /* Private x86-64 C ABI. All producers and consumers rebuild from this header;
  * Rust mirrors this exact table and checks every x86-64 field offset. */
-_Static_assert(sizeof(struct stela_linux_services) == 192, "Linux services ABI");
+_Static_assert(sizeof(struct stela_linux_services) == 200, "Linux services ABI");
 _Static_assert(__builtin_offsetof(struct stela_linux_services, now_ns) == 0, "Linux now_ns ABI");
 _Static_assert(__builtin_offsetof(struct stela_linux_services, minimum_delay_us) == 8, "Linux minimum_delay_us ABI");
 _Static_assert(__builtin_offsetof(struct stela_linux_services, minimum_deadline_us) == 16, "Linux minimum_deadline_us ABI");
@@ -120,6 +122,7 @@ _Static_assert(__builtin_offsetof(struct stela_linux_services, calibrated_tsc_hz
 _Static_assert(__builtin_offsetof(struct stela_linux_services, copy_from_kernel_nofault) == 168, "Linux nofault read ABI");
 _Static_assert(__builtin_offsetof(struct stela_linux_services, available_page_frames) == 176, "Linux page availability ABI");
 _Static_assert(__builtin_offsetof(struct stela_linux_services, realtime_at) == 184, "Linux realtime ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_services, mix_random) == 192, "Linux random input ABI");
 _Static_assert(sizeof(struct stela_linux_owner) == 16, "Linux owner ABI");
 
 /* An owner for Linux code that needs none of these services. */

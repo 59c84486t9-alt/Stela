@@ -8,6 +8,8 @@
  * records that the high product half fits. Byte generation is Stela's
  * already-seeded platform CSPRNG, not Linux CRNG readiness or pool accounting.
  */
+#include <crypto/blake2s.h>
+#include <linux/irqflags.h>
 #include <linux/preempt.h>
 #include <linux/random.h>
 #include <stela/linux.h>
@@ -28,6 +30,43 @@ void get_random_bytes(void *bytes, size_t size)
 	owner->services->random_bytes(owner->context, bytes, size);
 	if (!stela_linux_lease_matches(&lease) || preempt_count() != count)
 		__builtin_trap();
+}
+
+void add_device_randomness(const void *bytes, size_t size)
+{
+	const struct stela_linux_owner *owner = stela_linux_owner();
+	unsigned long flags;
+
+	if ((!bytes && size) || size > LONG_MAX)
+		stela_linux_fatal("invalid kernel random input range");
+	local_irq_save(flags);
+	struct stela_linux_lease lease;
+	stela_linux_lease_snapshot(&lease);
+	int count = preempt_count();
+	bool mixed = owner->services->mix_random &&
+		owner->services->mix_random(owner->context, bytes, size);
+	if (!stela_linux_lease_matches(&lease) || preempt_count() != count)
+		__builtin_trap();
+	local_irq_restore(flags);
+	if (!mixed)
+		stela_linux_unsupported("kernel random device input unavailable");
+}
+
+/* RFC 7693 keyed BLAKE2s over the domain, counter sample and device bytes.
+ * The key is private output taken from the existing owner stream. */
+void stela_linux_random_mix_key(const u8 *key, u64 ticks, const void *bytes,
+			       size_t size, u8 *seed)
+{
+	static const u8 domain[] = "Stela Linux device data v1";
+	struct blake2s_ctx context;
+	__le64 sample = cpu_to_le64(ticks);
+
+	blake2s_init_key(&context, BLAKE2S_HASH_SIZE, key, BLAKE2S_KEY_SIZE);
+	blake2s_update(&context, domain, sizeof(domain) - 1);
+	blake2s_update(&context, (const u8 *)&sample, sizeof(sample));
+	if (size)
+		blake2s_update(&context, bytes, size);
+	blake2s_final(&context, seed);
 }
 
 u8 get_random_u8(void)

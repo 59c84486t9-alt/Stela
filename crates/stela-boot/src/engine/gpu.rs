@@ -469,6 +469,11 @@ impl Platform for Host {
         self.random.borrow_mut().fill(bytes);
     }
 
+    fn mix_random(&self, bytes: &[u8]) -> bool {
+        self.random.borrow_mut().mix(host::rdtsc(), bytes);
+        true
+    }
+
     fn timer_changed(&self) -> Result<(), WorkError> {
         // SAFETY: after publication this points to the original pinned
         // environment, kept for the boot. A prepublication call is refused.

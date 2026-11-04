@@ -85,6 +85,11 @@ pub trait Platform {
     fn unsupported(&self, operation: &CStr);
     /// Bytes from an already seeded generator. Must not sleep or allocate.
     fn random_bytes(&self, bytes: &mut [u8]);
+    /// Mix auxiliary device input into the same retained stream. False means
+    /// this owner lacks an input provider. No entropy is credited by this call.
+    fn mix_random(&self, _bytes: &[u8]) -> bool {
+        false
+    }
     /// Power the machine off.
     fn shutdown(&self, force: bool);
     /// Map page-aligned device memory uncached, or write-combining where its
@@ -170,9 +175,10 @@ struct Services {
         unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, usize) -> c_int,
     available_page_frames: unsafe extern "C" fn(*mut c_void, usize, usize, *mut usize) -> c_int,
     realtime_at: unsafe extern "C" fn(*mut c_void, i64, u32, u32, *mut i64, *mut u32) -> bool,
+    mix_random: unsafe extern "C" fn(*mut c_void, *const c_void, usize) -> bool,
 }
 
-const _: () = assert!(size_of::<Services>() == 192);
+const _: () = assert!(size_of::<Services>() == 200);
 const _: () = {
     assert!(core::mem::offset_of!(Services, now_ns) == 0);
     assert!(core::mem::offset_of!(Services, minimum_delay_us) == 8);
@@ -198,6 +204,7 @@ const _: () = {
     assert!(core::mem::offset_of!(Services, copy_from_kernel_nofault) == 168);
     assert!(core::mem::offset_of!(Services, available_page_frames) == 176);
     assert!(core::mem::offset_of!(Services, realtime_at) == 184);
+    assert!(core::mem::offset_of!(Services, mix_random) == 192);
 };
 
 /// `struct stela_linux_owner`.
@@ -329,6 +336,21 @@ mod trampolines {
         unsafe {
             platform::<P>(context).random_bytes(slice::from_raw_parts_mut(bytes.cast(), size));
         }
+    }
+
+    pub unsafe extern "C" fn mix_random<P: Platform>(
+        context: *mut c_void,
+        bytes: *const c_void,
+        size: usize,
+    ) -> bool {
+        let input = if size == 0 {
+            &[]
+        } else {
+            // SAFETY: the C caller validated the range and lends the device bytes for this call.
+            unsafe { slice::from_raw_parts(bytes.cast(), size) }
+        };
+        // SAFETY: see the module. The C caller serializes access to this owner.
+        unsafe { platform::<P>(context) }.mix_random(input)
     }
 
     pub unsafe extern "C" fn shutdown<P: Platform>(context: *mut c_void, force: bool) {
@@ -530,6 +552,7 @@ impl<P: Platform> Owner<P> {
                 warn: t::warn::<P>,
                 unsupported: t::unsupported::<P>,
                 random_bytes: t::random_bytes::<P>,
+                mix_random: t::mix_random::<P>,
                 shutdown: t::shutdown::<P>,
                 map_device: t::map_device::<P>,
                 unmap_device: t::unmap_device::<P>,

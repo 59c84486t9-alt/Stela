@@ -52,6 +52,7 @@
 /lib/scatterlist*.c
 /lib/Makefile
 /lib/math/div64.c
+/lib/crypto/blake2s.c
 /include/
 !/include/**/netfilter/
 !/include/**/netfilter_ipv4/

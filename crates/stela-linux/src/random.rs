@@ -4,6 +4,16 @@ use stela_crypto::random::Generator;
 use stela_driver_base::entropy::{Entropy, EntropyError};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
+unsafe extern "C" {
+    fn stela_linux_random_mix_key(
+        key: *const u8,
+        ticks: u64,
+        bytes: *const u8,
+        size: usize,
+        seed: *mut u8,
+    );
+}
+
 /// An owned stream created only after the platform supplied its secure seed.
 /// Construction belongs before kernel registration. The eventual owner keeps
 /// this value private and supplies IRQ-safe, non-migrating serialization
@@ -25,6 +35,26 @@ impl Seeded {
     /// provider, allocating or waiting. Exclusive access remains the owner's.
     pub fn fill(&mut self, output: &mut [u8]) {
         self.generator.fill(output);
+    }
+
+    /// Rekey the stream with auxiliary input. The keyed digest consumes
+    /// private bytes from the prior stream and credits no additional entropy.
+    pub fn mix(&mut self, ticks: u64, bytes: &[u8]) {
+        let mut key = Zeroizing::new([0; 32]);
+        let mut seed = Zeroizing::new([0; 32]);
+        self.generator.fill(key.as_mut());
+        // SAFETY: the pure BLAKE2s helper reads the fixed key and input slice,
+        // writes exactly 32 seed bytes and retains no pointers.
+        unsafe {
+            stela_linux_random_mix_key(
+                key.as_ptr(),
+                ticks,
+                bytes.as_ptr(),
+                bytes.len(),
+                seed.as_mut_ptr(),
+            );
+        }
+        self.generator = Generator::from_seed(*seed);
     }
 }
 impl ZeroizeOnDrop for Seeded {}
@@ -66,6 +96,24 @@ mod tests {
             output.fill(0x93);
             Ok(())
         }
+    }
+
+    #[test]
+    fn device_input_rekeys_the_seeded_stream() {
+        let mut stream = Seeded {
+            generator: Generator::from_seed([0; 32]),
+        };
+        stream.mix(7, b"device input");
+        let mut actual = [0; 64];
+        stream.fill(&mut actual);
+        let mut expected = [0; 64];
+        Generator::from_seed([
+            0x48, 0x81, 0x02, 0x98, 0x6d, 0xdf, 0xdb, 0x7a, 0x93, 0xee, 0xcb, 0xf6, 0xc7, 0x17,
+            0xfb, 0x3d, 0x89, 0x01, 0xfe, 0x84, 0xba, 0x21, 0x59, 0xef, 0x8e, 0x8b, 0xdf, 0x18,
+            0x98, 0x24, 0x73, 0x5a,
+        ])
+        .fill(&mut expected);
+        assert_eq!(actual, expected);
     }
 
     #[test]
