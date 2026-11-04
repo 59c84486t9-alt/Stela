@@ -192,7 +192,7 @@ impl Remappers {
                         if offset != 0 || value as u16 != u16::MAX {
                             pci.check_observation(address, offset, value)?;
                         }
-                        Ok(Some(value))
+                        Ok::<_, MappingError>(Some(value))
                     })?;
                 let functions: Vec<_> = inventories
                     .iter()
@@ -203,7 +203,7 @@ impl Remappers {
                     })
                     .collect();
                 if functions.len() != pci.functions() {
-                    return Err(MappingError::InvalidPlatformReply);
+                    return Err(MappingError::InvalidPlatformReply.into());
                 }
                 let roles = roles::Inventory::capture(&functions, |address, offset| {
                     reader
@@ -211,7 +211,7 @@ impl Remappers {
                         .map(Some)
                         .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))
                 });
-                Ok((inventories, roles))
+                pci.check_stopped(reader).map(|()| (inventories, roles))
             })
         };
         let (inventories, roles) = match inventory {
@@ -376,6 +376,14 @@ impl Remappers {
             && inactive_firmware_units.matches_dmar(&parsed.units)
             && covered == pci.functions()
         {
+            // SAFETY: no PCI driver, controller or AP can write configuration
+            // between the original census and this post-drain readback.
+            if let Err(error) = unsafe { pci.recheck_stopped() } {
+                output::arguments(format_args!(
+                    "HOST IOMMU VT-d blocked PCI fabric changed after drain: {error}\n"
+                ));
+                return remappers;
+            }
             let fabric = BlockedFabric {
                 source: mmio,
                 units: cohorts,

@@ -140,7 +140,11 @@ impl Plan {
     /// Recheck each changed word and retain the last write on a later refusal.
     pub fn apply(&self, config: &mut impl ConfigSpace) -> Result<ConfigEffect, ConfigError> {
         for &control in &self.0 {
-            verify(config, control.offset, control.original)?;
+            verify(
+                control.offset,
+                control.original,
+                config.read16(control.offset)?,
+            )?;
         }
         let mut effect = ConfigEffect::None;
         for &control in &self.0 {
@@ -152,11 +156,24 @@ impl Plan {
                     offset: control.offset,
                     width: 2,
                 };
-                verify(config, control.offset, control.disabled)
+                config
+                    .read16(control.offset)
+                    .and_then(|observed| verify(control.offset, control.disabled, observed))
                     .map_err(|error| with_prefix(error, effect))?;
             }
         }
         Ok(effect)
+    }
+
+    /// Recheck the stopped controls with a read-only configuration view.
+    pub fn check_disabled(
+        &self,
+        mut read: impl FnMut(u16) -> Result<u16, ConfigError>,
+    ) -> Result<(), ConfigError> {
+        for control in &self.0 {
+            verify(control.offset, control.disabled, read(control.offset)?)?;
+        }
+        Ok(())
     }
 }
 
@@ -175,8 +192,7 @@ fn record_capability(
     Ok(())
 }
 
-fn verify(config: &impl ConfigSpace, offset: u16, expected: u16) -> Result<(), ConfigError> {
-    let observed = config.read16(offset)?;
+fn verify(offset: u16, expected: u16, observed: u16) -> Result<(), ConfigError> {
     if expected != observed {
         return Err(ConfigError::before_effect(ConfigFailure::Readback {
             offset,

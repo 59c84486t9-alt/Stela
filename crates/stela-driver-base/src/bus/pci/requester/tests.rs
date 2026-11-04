@@ -639,6 +639,36 @@ fn containment_only_writes_the_exact_disabled_command_and_msi_controls() {
 }
 
 #[test]
+fn containment_readback_refuses_msi_reenabled_after_the_stop() {
+    use crate::bus::pci::{ConfigEffect, ConfigFailure};
+
+    let mut function = endpoint();
+    cap(&mut function, 0x50, MSI, 0);
+    let config = function.config();
+    config.write16(regs::COMMAND, 7).unwrap();
+    config.write16(0x52, 0x81).unwrap();
+    let plan = containment_plan(config).unwrap();
+    plan.apply(config).unwrap();
+    assert_eq!(plan.check_disabled(|offset| config.read16(offset)), Ok(()));
+
+    config.write16(0x52, 0x81).unwrap();
+    let failure = plan
+        .check_disabled(|offset| config.read16(offset))
+        .unwrap_err();
+    assert_eq!(failure.effect, ConfigEffect::None);
+    assert!(matches!(
+        failure.reason,
+        ConfigFailure::Readback {
+            offset: 0x52,
+            expected: 0x80,
+            observed: 0x81,
+            ..
+        }
+    ));
+    assert_eq!(config.read16(0x52), Ok(0x81));
+}
+
+#[test]
 fn containment_refuses_changed_control_before_the_first_write() {
     use crate::bus::pci::{ConfigEffect, ConfigFailure};
 

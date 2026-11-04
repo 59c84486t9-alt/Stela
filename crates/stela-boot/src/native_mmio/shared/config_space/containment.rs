@@ -53,6 +53,46 @@ impl<'a> ContainedPci<'a> {
         }
         Ok(())
     }
+
+    /// Observe every parked function through the same read-only census.
+    pub(crate) fn check_stopped(
+        &self,
+        reader: &mut ConfigInventory<'_>,
+    ) -> Result<(), ContainmentError> {
+        if !core::ptr::eq(self.source, reader.source) {
+            return Err(Error::InvalidPlatformReply.into());
+        }
+        let cohort = self.source.pci_slots.0.borrow();
+        let Cohort::Parked(fabric) = &*cohort else {
+            return Err(Error::Unavailable.into());
+        };
+        for slot in &fabric.slots {
+            slot.header
+                .verify(|offset| reader.read32(slot.address, offset).map_err(mapping_error))
+                .and_then(|()| {
+                    slot.plan.check_disabled(|offset| {
+                        reader
+                            .read(slot.address, offset, 2)
+                            .map(|value| value as u16)
+                            .map_err(mapping_error)
+                    })
+                })
+                .map_err(|error| ContainmentError::from(error).at(slot.address))?;
+        }
+        Ok(())
+    }
+
+    /// Reopen a read-only view after the remapping units have drained.
+    ///
+    /// # Safety
+    /// The original source still excludes every configuration and topology writer.
+    pub(crate) unsafe fn recheck_stopped(&self) -> Result<(), ContainmentError> {
+        // SAFETY: the caller retains the original exclusive census ownership.
+        unsafe {
+            self.source
+                .with_config_inventory(|_, reader| self.check_stopped(reader))
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -190,12 +230,15 @@ impl Header {
         }
     }
 
-    fn verify(self, config: &UnpublishedConfig) -> Result<(), ConfigError> {
+    fn verify(
+        self,
+        mut read: impl FnMut(u16) -> Result<u32, ConfigError>,
+    ) -> Result<(), ConfigError> {
         for offset in [0, 8, 0x0c, 0x18] {
             let Some(expected) = self.word(offset) else {
                 continue;
             };
-            let observed = config.try_read32(offset)?;
+            let observed = read(offset)?;
             if observed != expected {
                 return Err(ConfigError::before_effect(ConfigFailure::Readback {
                     offset,
@@ -601,7 +644,7 @@ impl Source {
         let mut config = prepared
             .attach(mapping)
             .map_err(|(error, _original)| error)?;
-        header.verify(&config)?;
+        header.verify(|offset| config.try_read32(offset))?;
         let effect = plan.apply(&mut config)?;
         let acknowledge = (|| -> Result<(), ClaimError> {
             let started = crate::apic::rdtsc();
@@ -609,11 +652,12 @@ impl Source {
             wait_for_pending_transactions(&config, || {
                 crate::apic::rdtsc().wrapping_sub(started) >= limit
             })?;
+            plan.check_disabled(|offset| config.try_read16(offset))?;
             config.seal_bus_master()?;
             if header.bridge.is_some() {
                 config.seal_bus_routing()?;
             }
-            header.verify(&config)?;
+            header.verify(|offset| config.try_read32(offset))?;
             Ok(())
         })();
         acknowledge.map_err(|cause| ContainmentError {
