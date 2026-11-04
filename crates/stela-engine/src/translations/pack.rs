@@ -15,7 +15,9 @@
 //! again at its page's probe addresses) and lays out the next pack within a
 //! bound: the records that gained entries, then the records this boot used,
 //! then the others, as long as they fit.
-use super::{Digest, Record};
+mod codec;
+
+use super::{Digest, FormatError, Record};
 use crate::machine::engine::SharedTranslation;
 use crate::machine::{Offer, Preparation, Translations};
 use alloc::{
@@ -23,12 +25,14 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
+pub use codec::{DecodeError, DecodeScratch};
 use core::mem::size_of;
 use stela_crypto::Sha256;
 use stela_crypto::digest::Digest as _;
 
 pub const MAGIC: [u8; 8] = *b"STLTPACK";
 pub const SCHEMA: u32 = 1;
+const MIXED_SCHEMA: u32 = 2;
 /// Magic, schema, record count and translator id.
 pub const HEADER_BYTES: usize = MAGIC.len() + 4 + 4 + DIGEST_BYTES;
 const DIGEST_BYTES: usize = 32;
@@ -57,6 +61,27 @@ pub enum PackError {
     Index,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+enum PackFormat {
+    Raw = SCHEMA,
+    Mixed = MIXED_SCHEMA,
+}
+
+impl PackFormat {
+    fn read(header: &[u8]) -> Result<Self, PackError> {
+        match u32::from_le_bytes(
+            header[MAGIC.len()..][..4]
+                .try_into()
+                .expect("a schema word"),
+        ) {
+            SCHEMA => Ok(Self::Raw),
+            MIXED_SCHEMA => Ok(Self::Mixed),
+            _ => Err(PackError::Schema),
+        }
+    }
+}
+
 /// The bytes of the header, index and index checksum of the pack whose
 /// header is `header`: what to read before its records.
 pub fn prefix_bytes(header: &[u8], translator: &Digest) -> Result<usize, PackError> {
@@ -67,9 +92,7 @@ pub fn prefix_bytes(header: &[u8], translator: &Digest) -> Result<usize, PackErr
         return Err(PackError::Magic);
     }
     let word = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().expect("a word"));
-    if word(MAGIC.len()) != SCHEMA {
-        return Err(PackError::Schema);
-    }
+    PackFormat::read(header)?;
     let count = word(MAGIC.len() + 4) as usize;
     if count > MAX_RECORDS {
         return Err(PackError::Count);
@@ -86,6 +109,7 @@ pub struct Pack<'a> {
     bytes: &'a [u8],
     count: usize,
     length: usize,
+    format: PackFormat,
 }
 
 impl<'a> Pack<'a> {
@@ -107,6 +131,7 @@ impl<'a> Pack<'a> {
             bytes: &bytes[..length],
             count,
             length,
+            format: PackFormat::read(bytes)?,
         })
     }
 
@@ -164,11 +189,52 @@ impl<'a> Pack<'a> {
         None
     }
 
+    fn record(&self, key: &Digest) -> Option<PackedRecord<'a>> {
+        Some(PackedRecord {
+            bytes: self.get(key)?,
+            format: self.format,
+        })
+    }
+
     /// Every record's page key and bytes, in key order.
     pub fn iter(&self) -> impl Iterator<Item = (Digest, &'a [u8])> + '_ {
         (0..self.count).map(|index| {
             let (key, offset, bytes) = entry(self.bytes, index);
             (key, &self.bytes[offset as usize..(offset + bytes) as usize])
+        })
+    }
+}
+
+/// The stored bytes and the verified index's record format.
+#[derive(Debug, Clone, Copy)]
+pub struct PackedRecord<'a> {
+    bytes: &'a [u8],
+    format: PackFormat,
+}
+
+impl PackedRecord<'_> {
+    pub fn is_compressed(self) -> bool {
+        self.format == PackFormat::Mixed && self.bytes.starts_with(codec::MAGIC)
+    }
+
+    fn same_storage(self, other: Self) -> bool {
+        self.format == other.format && core::ptr::eq(self.bytes, other.bytes)
+    }
+
+    fn decode(
+        self,
+        translator: &Digest,
+        key: &Digest,
+        scratch: &mut DecodeScratch,
+    ) -> Result<Record, DecodeError> {
+        let raw = if self.is_compressed() {
+            scratch.inflate(self.bytes)?
+        } else {
+            self.bytes
+        };
+        Record::decode(raw, translator, key).map_err(|error| match error {
+            FormatError::Capacity => DecodeError::Capacity,
+            _ => DecodeError::Invalid,
         })
     }
 }
@@ -218,13 +284,21 @@ pub struct Layout<'a> {
 impl<'a> Layout<'a> {
     /// The pack of `records` (page keys and their record bytes, each key
     /// once) for `translator`.
-    pub fn new(translator: &Digest, mut records: Vec<(Digest, Piece<'a>)>) -> Self {
+    pub fn new(translator: &Digest, records: Vec<(Digest, Piece<'a>)>) -> Self {
+        Self::with_format(translator, records, PackFormat::Raw)
+    }
+
+    fn with_format(
+        translator: &Digest,
+        mut records: Vec<(Digest, Piece<'a>)>,
+        format: PackFormat,
+    ) -> Self {
         records.sort_by_key(|record| record.0);
         let count = records.len();
         let mut prefix =
             Vec::with_capacity(HEADER_BYTES + count * INDEX_ENTRY_BYTES + CHECKSUM_BYTES);
         prefix.extend(MAGIC);
-        prefix.extend(SCHEMA.to_le_bytes());
+        prefix.extend((format as u32).to_le_bytes());
         prefix.extend((count as u32).to_le_bytes());
         prefix.extend(translator.0);
         let mut offset = (HEADER_BYTES + count * INDEX_ENTRY_BYTES + CHECKSUM_BYTES) as u64;
@@ -358,17 +432,22 @@ fn retire(entry: SharedEntry, deferred: &mut Option<Arc<SharedTranslation>>) {
 
 /// A validated record paired with the immutable pack bytes it came from.
 pub struct DecodedRecord<'a> {
-    bytes: &'a [u8],
+    stored: PackedRecord<'a>,
     record: Arc<Record>,
     retained_bytes: usize,
 }
 
 impl<'a> DecodedRecord<'a> {
-    pub fn decode(bytes: &'a [u8], translator: &Digest, key: &Digest) -> Option<Self> {
-        let record = Arc::new(Record::decode(bytes, translator, key).ok()?);
+    pub fn decode(
+        stored: PackedRecord<'a>,
+        translator: &Digest,
+        key: &Digest,
+        scratch: &mut DecodeScratch,
+    ) -> Result<Self, DecodeError> {
+        let record = Arc::new(stored.decode(translator, key, scratch)?);
         let retained_bytes = record.retained_bytes();
-        Some(Self {
-            bytes,
+        Ok(Self {
+            stored,
             record,
             retained_bytes,
         })
@@ -389,6 +468,7 @@ pub struct Store<'a> {
     /// take several times the pack's bytes.
     loaded: BTreeMap<Digest, bool>,
     decoded: Vec<Option<Arc<Record>>>,
+    decode_scratch: DecodeScratch,
     pending: BTreeMap<PendingKey, PendingPage>,
     /// The blocks in `pending`.
     pending_blocks: usize,
@@ -432,6 +512,7 @@ impl<'a> Store<'a> {
             pack,
             loaded: BTreeMap::new(),
             decoded: Vec::new(),
+            decode_scratch: DecodeScratch::default(),
             pending: BTreeMap::new(),
             pending_blocks: 0,
             pending_bytes: 0,
@@ -604,16 +685,10 @@ impl<'a> Store<'a> {
         (record.key == *key).then(|| Arc::clone(record))
     }
 
-    /// Remember a decoded record from this pack. The caller can drop an
-    /// evicted record after releasing the shared store lock.
-    pub fn remember_record(&mut self, decoded: &DecodedRecord<'a>) -> Option<Arc<Record>> {
+    /// Keep a validated slot's decoded record within the cache budget.
+    fn remember_record(&mut self, decoded: &DecodedRecord<'a>) -> Option<Arc<Record>> {
         let record = &decoded.record;
-        if record.translator != self.translator
-            || decoded.retained_bytes > DECODED_SLOT_BYTES
-            || !self
-                .stored(&record.key)
-                .is_some_and(|bytes| core::ptr::eq(bytes, decoded.bytes))
-        {
+        if decoded.retained_bytes > DECODED_SLOT_BYTES {
             return None;
         }
         if self.decoded.is_empty() {
@@ -627,15 +702,56 @@ impl<'a> Store<'a> {
         slot.replace(Arc::clone(record))
     }
 
-    /// The pack's bytes for `key`, unless an earlier lookup found them
-    /// invalid: for a caller to decode ([`Record::decode`]) without holding
-    /// the store, then report with [`Self::looked_up`].
-    pub fn stored(&self, key: &Digest) -> Option<&'a [u8]> {
+    /// The pack's slot for `key`, unless an earlier lookup found it invalid.
+    /// Its immutable bytes may be decoded after releasing the store lock.
+    pub fn stored(&self, key: &Digest) -> Option<PackedRecord<'a>> {
         let pack = self.pack?;
         if self.loaded.get(key) == Some(&false) {
             return None;
         }
-        pack.get(key)
+        pack.record(key)
+    }
+
+    pub fn take_decode_scratch(&mut self, stored: PackedRecord<'a>) -> DecodeScratch {
+        if stored.is_compressed() {
+            core::mem::take(&mut self.decode_scratch)
+        } else {
+            DecodeScratch::default()
+        }
+    }
+
+    /// A transient capacity failure can be retried. Only record a result
+    /// for the exact stored slot we gave the decoder. The caller can drop
+    /// an evicted record and the returned scratch outside the store lock.
+    pub fn finish_decode(
+        &mut self,
+        key: &Digest,
+        stored: PackedRecord<'a>,
+        decoded: &Result<DecodedRecord<'a>, DecodeError>,
+        scratch: &mut DecodeScratch,
+    ) -> Option<Arc<Record>> {
+        self.decode_scratch.retain(scratch);
+        if !self
+            .stored(key)
+            .is_some_and(|current| current.same_storage(stored))
+        {
+            return None;
+        }
+        match decoded {
+            Ok(decoded)
+                if decoded.stored.same_storage(stored)
+                    && decoded.record.key == *key
+                    && decoded.record.translator == self.translator =>
+            {
+                self.looked_up(key, true, true);
+                self.remember_record(decoded)
+            }
+            Err(DecodeError::Invalid) => {
+                self.looked_up(key, true, false);
+                None
+            }
+            _ => None,
+        }
     }
 
     /// Count `key`'s first lookup: whether the pack held bytes for it, and
@@ -694,18 +810,23 @@ impl<'a> Store<'a> {
         self.pending_blocks = 0;
         self.pending_bytes = 0;
         // Gained entries first, then this boot's records, then the others.
-        let stored = |key: &Digest| {
-            self.pack
-                .and_then(|pack| pack.get(key))
-                .and_then(|bytes| Record::decode(bytes, &self.translator, key).ok())
-        };
+        let mut scratch = core::mem::take(&mut self.decode_scratch);
         let mut candidates: Vec<(Digest, Piece<'a>)> = Vec::new();
         for (key, record) in &mut proven {
-            if let Some(stored) = stored(key) {
-                record.merge(stored);
+            if let Some(stored) = self.pack.and_then(|pack| pack.record(key)) {
+                match stored.decode(&self.translator, key, &mut scratch) {
+                    Ok(previous) => record.merge(previous),
+                    Err(DecodeError::Invalid) => {}
+                    Err(DecodeError::Capacity) => {
+                        candidates.push((*key, Piece::Kept(stored.bytes)));
+                        continue;
+                    }
+                }
             }
             candidates.push((*key, Piece::New(record.encode())));
         }
+        self.decode_scratch.retain(&mut scratch);
+        drop(scratch);
         if let Some(pack) = self.pack {
             for (key, valid) in &self.loaded {
                 if *valid
@@ -733,7 +854,11 @@ impl<'a> Store<'a> {
             }
         }
         Planned {
-            layout: Layout::new(&self.translator, kept),
+            layout: Layout::with_format(
+                &self.translator,
+                kept,
+                self.pack.map_or(PackFormat::Raw, |pack| pack.format),
+            ),
             proven: count,
             unprovable,
             unproven,
@@ -747,13 +872,14 @@ impl Translations for Store<'_> {
         if let Some(record) = self.cached_record(key) {
             return Some(record);
         }
-        let bytes = self.stored(key);
-        let decoded = bytes.and_then(|bytes| DecodedRecord::decode(bytes, &self.translator, key));
-        self.looked_up(key, bytes.is_some(), decoded.is_some());
-        decoded.map(|decoded| {
-            self.remember_record(&decoded);
-            decoded.into_record()
-        })
+        let Some(stored) = self.stored(key) else {
+            self.looked_up(key, false, false);
+            return None;
+        };
+        let mut scratch = self.take_decode_scratch(stored);
+        let decoded = DecodedRecord::decode(stored, &self.translator, key, &mut scratch);
+        self.finish_decode(key, stored, &decoded, &mut scratch);
+        decoded.ok().map(DecodedRecord::into_record)
     }
 
     fn prepared(
@@ -841,11 +967,72 @@ mod tests {
         let mut store = Store::new(translator, Some(&bytes)).0;
         let foreign = Pack::parse(&foreign, &translator)
             .unwrap()
-            .get(&key)
+            .record(&key)
             .unwrap();
-        let decoded = DecodedRecord::decode(foreign, &translator, &key).unwrap();
-        assert!(store.remember_record(&decoded).is_none());
+        let mut scratch = DecodeScratch::default();
+        let decoded = DecodedRecord::decode(foreign, &translator, &key, &mut scratch);
+        assert!(decoded.is_ok());
+        assert!(
+            store
+                .finish_decode(&key, foreign, &decoded, &mut scratch)
+                .is_none()
+        );
         assert!(store.cached_record(&key).is_none());
+    }
+
+    #[test]
+    fn mixed_records_bind_their_original_index_slot_and_survive_rewrite() {
+        let translator = translator_id();
+        let first = Digest::of(b"compressed");
+        let second = Digest::of(b"raw");
+        let mut compressed_record = Record::new(translator, first);
+        let mut entry = offer(0x1000, first).prove().unwrap();
+        entry.code.resize(4096, 0);
+        compressed_record.insert(entry);
+        let raw = compressed_record.encode();
+        let compressed = codec::test_envelope(&raw);
+        let records = || {
+            vec![
+                (first, Piece::New(compressed.clone())),
+                (second, Piece::New(Record::new(translator, second).encode())),
+            ]
+        };
+        let bytes = Layout::with_format(&translator, records(), PackFormat::Mixed).to_vec();
+        let foreign = bytes.clone();
+        let mut store = Store::new(translator, Some(&bytes)).0;
+        let mut scratch = DecodeScratch::default();
+        let stored = store.stored(&first).unwrap();
+        store.finish_decode(&first, stored, &Err(DecodeError::Capacity), &mut scratch);
+        assert_eq!(store.counters.invalid, 0);
+        assert!(store.stored(&first).is_some());
+        let foreign = Pack::parse(&foreign, &translator)
+            .unwrap()
+            .record(&first)
+            .unwrap();
+        let decoded = DecodedRecord::decode(foreign, &translator, &first, &mut scratch);
+        assert!(decoded.is_ok());
+        assert!(
+            store
+                .finish_decode(&first, stored, &decoded, &mut scratch)
+                .is_none()
+        );
+        assert_eq!(store.counters.loaded, 0);
+        assert!(store.cached_record(&first).is_none());
+
+        let held = store.record(&first).unwrap();
+        assert_eq!(*held, compressed_record);
+        assert!(Arc::ptr_eq(&held, &store.record(&first).unwrap()));
+        assert_eq!(store.record(&second).unwrap().key, second);
+        let output = store.plan(u64::MAX, || true).layout.to_vec();
+        let pack = Pack::parse(&output, &translator).unwrap();
+        assert_eq!(pack.format, PackFormat::Mixed);
+        assert_eq!(pack.get(&first), Some(compressed.as_slice()));
+
+        let old = Layout::new(&translator, records()).to_vec();
+        let mut store = Store::new(translator, Some(&old)).0;
+        assert!(store.record(&first).is_none());
+        assert_eq!(store.counters.invalid, 1);
+        assert_eq!(store.record(&second).unwrap().key, second);
     }
 
     #[test]
