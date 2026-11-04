@@ -187,8 +187,8 @@ void unmap_mapping_range(struct address_space *mapping, loff_t const holebegin,
 			 loff_t const holelen, int even_cows)
 {
 	(void)even_cows;
-	unsigned long first = (unsigned long)(holebegin >> PAGE_SHIFT);
-	unsigned long count = (unsigned long)(PAGE_ALIGN(holelen) >> PAGE_SHIFT);
+	unsigned long first = (unsigned long)holebegin >> PAGE_SHIFT;
+	unsigned long count = ((unsigned long)holelen + PAGE_SIZE - 1) >> PAGE_SHIFT;
 	unsigned long last = count ? first + count - 1 : ULONG_MAX;
 	struct vm_area_struct *vma;
 
@@ -352,6 +352,15 @@ int main(void)
 	removed_size = 0;
 	unmap_mapping_range(file->f_mapping, 0, 0, 1);
 	assert(!removed_size);
+
+	/* Rounding a large length must not invalidate a higher file offset. */
+	assert(!stela_linux_mmap(file, SPACE, BASE, PAGE_SIZE, 1ULL << 63, false, &mapping));
+	unmap_mapping_range(file->f_mapping, 0, LLONG_MAX, 1);
+	assert(!removed_size);
+	unmap_mapping_range(file->f_mapping, 0, 0, 1);
+	assert(removed_size == PAGE_SIZE);
+	stela_linux_munmap(mapping);
+	removed_size = 0;
 
 	/* A mapping an exporter redirects lives on the exporter's file. */
 	struct file *own = anon_inode_getfile("exporter", &fops, NULL, O_RDWR);
