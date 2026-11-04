@@ -209,15 +209,17 @@ struct kmem_cache *__kmem_cache_create_args(const char *name, unsigned int objec
 	return cache;
 }
 
-/* Policy is checked even for an already retained slot. A ready slot cannot
- * justify silently accepting reserve, placement or forward-progress policy.
- * Nonblocking ordinary requests can use a ready slot, but never grow backing
- * or allocate metadata through the current process-only native provider. */
+/* Policy is checked even for an already retained slot. GFP_ATOMIC makes
+ * ordinary ready slots eligible and permits emergency reserves when present.
+ * This cache has no emergency reserves. Nonblocking requests may take an
+ * ordinary ready slot, then fail without backing growth or metadata allocation. */
 static bool request_supported(gfp_t flags)
 {
 	/* Growth already makes one fallible attempt and forwards NORETRY. */
 	gfp_t allowed = GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN | __GFP_NOMEMALLOC |
 		__GFP_ACCOUNT | __GFP_NORETRY;
+	if ((flags & (__GFP_HIGH | __GFP_RECLAIM)) == GFP_ATOMIC)
+		allowed |= __GFP_HIGH;
 	if ((flags & ~allowed) ||
 	    (gfpflags_allow_blocking(flags) && !stela_linux_quiescent())) {
 		stela_linux_unsupported("cache allocation policy or context");
@@ -1122,6 +1124,7 @@ static void capacity_and_failures(void)
 	}
 	unsigned int validations = fixture.validations;
 	assert(!kmem_cache_alloc(cache, GFP_NOWAIT));
+	assert(!kmem_cache_alloc(cache, GFP_ATOMIC | __GFP_NOWARN));
 	assert(!kmem_cache_alloc(cache, 0));
 	assert(fixture.validations == validations && cache->live == count);
 	objects[count] = kmem_cache_alloc(cache, GFP_KERNEL);
@@ -1213,7 +1216,7 @@ static void policy_and_creation(void)
 	assert(fixture.seen_gfp == (__force u32)(no_retry | __GFP_COMP));
 	kmem_cache_free(cache, object);
 	const gfp_t unsupported_requests[] = {
-		GFP_ATOMIC, GFP_KERNEL | __GFP_HIGH, GFP_KERNEL | __GFP_MEMALLOC,
+		GFP_KERNEL | __GFP_HIGH, GFP_KERNEL | __GFP_MEMALLOC,
 		GFP_KERNEL | __GFP_NOFAIL, GFP_KERNEL | __GFP_RETRY_MAYFAIL,
 		GFP_KERNEL | __GFP_RECLAIMABLE,
 		GFP_KERNEL | __GFP_MOVABLE, GFP_KERNEL | __GFP_DMA,
@@ -1243,6 +1246,9 @@ static void policy_and_creation(void)
 		assert(fixture.refusals == refusals + 4);
 		void *ready = kmem_cache_alloc(cache, GFP_NOWAIT);
 		assert(ready == object);
+		kmem_cache_free(cache, ready);
+		ready = kmem_cache_alloc(cache, GFP_ATOMIC | __GFP_NOWARN);
+		assert(ready == object && fixture.refusals == refusals + 4);
 		kmem_cache_free(cache, ready);
 		switch (context) {
 		case 0: preempt_enable(); break;
