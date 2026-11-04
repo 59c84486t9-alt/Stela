@@ -270,6 +270,7 @@
 /fs/pipe.c
 /fs/pipe_buffers.c
 /fs/pipe_buffers.h
+/fs/pipe_create.c
 /fs/splice.c
 /fs/splice_file.c
 /fs/splice_file.h
