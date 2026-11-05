@@ -9,6 +9,8 @@ mod minimum;
 pub use minimum::LowerScale;
 mod features;
 mod measurement;
+mod rate;
+pub use rate::NominalRate;
 mod sequence;
 pub use calibration::{RateWindow, RationalRate, ReferenceScale, Sample, wrapped_delta};
 pub use features::{

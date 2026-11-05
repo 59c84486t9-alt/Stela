@@ -1,9 +1,10 @@
 //! One physical root's fixed-clock producer, multiplexed through the engine's
 //! existing local APIC timer/vector. No Linux callback enters from this ISR.
 //!
-//! General wall time is an exclusively owned HPET64 source, read with
-//! coherent32 sampling. The old bounded PM path exists only for its explicit
-//! short fixture. No source grants NTP, suspend or cross-CPU synchronization.
+//! General time is the invariant TSC at the boot's calibrated rate, else an
+//! exclusively owned HPET64 source read with coherent32 sampling. The old
+//! bounded PM path exists only for its explicit short fixture. No source
+//! grants NTP, suspend or cross-CPU synchronization.
 use crate::{
     apic::{self, Apic},
     engine::{host, interrupts},
@@ -347,16 +348,11 @@ pub(crate) struct MinimumDeadline {
 
 impl CounterEpoch {
     fn minimum_target(&self, start: u64, minimum_ns: u64) -> Result<u64, WorkError> {
-        let counter = self
-            .cpu
-            .source
-            .hpet_counter()
-            .ok_or(WorkError::Unavailable)?;
-        let ticks = counter.ticks_for_minimum_ns(minimum_ns)?;
+        let ticks = self.cpu.source.ticks_for_minimum_ns(minimum_ns)?;
         start.checked_add(ticks).ok_or(WorkError::Exhausted)
     }
 
-    /// Atomic physical wait on this CPU's continuously qualified HPET.
+    /// Atomic physical wait on this CPU's continuously qualified source.
     pub(crate) fn minimum_delay_us(&self, minimum_us: u64) -> Result<(), WorkError> {
         let minimum_ns = minimum_us.checked_mul(1000).ok_or(WorkError::Exhausted)?;
         let start = self.sample_ticks()?;

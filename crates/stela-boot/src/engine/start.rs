@@ -2027,6 +2027,30 @@ unsafe fn check_audio(
     }
 }
 
+/// The kernel work clock: the invariant TSC, which reads fastest and needs
+/// no controller, else the HPET when this boot retained the whole block.
+/// Attach checks the local timer's quiescence and ARAT before publishing.
+///
+/// # Safety
+/// The installed BSP owns the existing local timer and IDT, before any
+/// native driver or AP, and a retained HPET's complete handoff.
+unsafe fn service_clock(
+    handoff: &Handoff,
+    host_owner: &mut host::HostOwner,
+    native_mmio: Option<&crate::native_mmio::Source>,
+) -> Result<crate::native_clock::Installed, stela_drivers::platform::work::WorkError> {
+    let identity = host_owner.root_identity()?;
+    match crate::native_clock::Prepared::tsc(handoff.tsc_hz) {
+        // SAFETY: the caller's timer/IDT handoff; the TSC has no owner.
+        Ok(tsc) => unsafe { crate::native_clock::Installed::attach_native(identity, tsc) },
+        // SAFETY: the caller's timer/IDT and retained HPET handoffs.
+        Err(_) => native_mmio.map_or(
+            Err(stela_drivers::platform::work::WorkError::Unavailable),
+            |source| unsafe { source.install_service_clock() },
+        ),
+    }
+}
+
 fn start_platform(
     handoff: &'static Handoff,
     host_owner: &mut host::HostOwner,
@@ -2175,21 +2199,17 @@ fn start_platform(
         }
         _ => None,
     };
-    let clock = if options.boots_macos() && options.native_pci_own_hpet {
-        native_mmio.and_then(|source| {
-            // SAFETY: this BSP owns the existing timer/IDT and has the
-            // explicit whole HPET handoff. Attach checks quiescence and ARAT
-            // before publishing the shared timer owner.
-            match unsafe { source.install_service_clock() } {
-                Ok(clock) => Some(&*alloc::boxed::Box::leak(alloc::boxed::Box::new(clock))),
-                Err(error) => {
-                    output::arguments(format_args!(
-                        "NATIVE SERVICE CLOCK unavailable: {error:?}\n"
-                    ));
-                    None
-                }
-            }
-        })
+    let clock = if options.boots_macos() {
+        // SAFETY: this BSP owns the existing timer/IDT before any driver,
+        // and the HPET only after its whole-controller handoff above.
+        unsafe { service_clock(handoff, host_owner, native_mmio) }
+            .inspect_err(|error| {
+                output::arguments(format_args!(
+                    "NATIVE SERVICE CLOCK unavailable: {error:?}\n"
+                ));
+            })
+            .ok()
+            .map(|clock| &*alloc::boxed::Box::leak(alloc::boxed::Box::new(clock)))
     } else {
         None
     };

@@ -1,27 +1,22 @@
 //! Device minimum delays on the invariant TSC: one unprivileged read, the
 //! same on bare metal and in a VM, with no controller to own.
+use super::fenced as now;
 use alloc::{boxed::Box, rc::Rc};
-use core::arch::x86_64::{_mm_lfence, _rdtsc};
-use stela_boot_core::tsc::LowerScale;
+use stela_boot_core::tsc::NominalRate;
 use stela_drivers::bus::pci::power::{Error, Interval, Timer};
 
-/// The calibrated rate is a nominal (CPUID crystal ratio, rounded base
-/// frequency) or firmware-stall estimate; counting a second as 1/64 more
-/// ticks covers its error several times over at no noticeable cost.
-const MARGIN_SHIFT: u32 = 6;
 /// The longest interval accepted, far past PCI's 60 s readiness bound, so a
 /// raw counter difference never wraps inside one.
 const LONGEST_US: u64 = 3_600_000_000;
 
-pub(crate) struct Minimum(LowerScale);
+pub(crate) struct Minimum(NominalRate);
 
 impl Minimum {
     /// A timer on `hz`, the boot's calibrated TSC rate, when the counter is
     /// invariant: it then runs at that rate through P-, C- and T-states.
     pub(crate) fn timer(hz: u64, invariant: bool) -> Option<Rc<dyn Timer>> {
-        let ticks = hz.checked_add(hz >> MARGIN_SHIFT)?;
-        let scale = LowerScale::from_minimum(1_000_000, ticks).ok()?;
-        invariant.then(|| Rc::new(Self(scale)) as Rc<dyn Timer>)
+        let rate = NominalRate::new(hz).ok()?;
+        invariant.then(|| Rc::new(Self(rate)) as Rc<dyn Timer>)
     }
 
     fn ticks(&self, microseconds: u64) -> Result<u64, Error> {
@@ -29,18 +24,8 @@ impl Minimum {
             return Err(Error::Clock);
         }
         self.0
-            .ticks_for_minimum_us(microseconds)
+            .ticks_for_minimum_ns(microseconds * 1000)
             .map_err(|_| Error::Clock)
-    }
-}
-
-/// The counter after every earlier instruction, so an interval starts no
-/// sooner than the device access before it.
-fn now() -> u64 {
-    // SAFETY: LFENCE and RDTSC have no memory effects; x86-64 has both.
-    unsafe {
-        _mm_lfence();
-        _rdtsc()
     }
 }
 
@@ -56,7 +41,7 @@ impl Interval for Deadline {
 }
 
 // SAFETY: an invariant TSC counts real time at the calibrated rate, whose
-// error the margin covers, and the scale rounds every wait up. Waits count
+// error the rate's margin covers, and every wait rounds up. Waits count
 // from a fenced start, and an interval holds its own start.
 unsafe impl Timer for Minimum {
     fn check(&self) -> Result<(), Error> {
