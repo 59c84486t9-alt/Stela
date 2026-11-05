@@ -4,7 +4,7 @@
 //! physical owner never reuse an entry they should not.
 use super::super::{
     Controls, Failure, MemoryStatus, Policy, flags,
-    tests::{fixture, ordinary_transfer},
+    tests::{fixture, fixture_for, ordinary_transfer},
 };
 use super::*;
 use crate::{
@@ -12,6 +12,7 @@ use crate::{
     memory::{RegisteredSystemRam, domain::MemoryThread},
 };
 use alloc::sync::Arc;
+use stela_compiler::TargetCpu;
 
 const VA: u64 = 0x4000;
 const DATA: u64 = 0x14000;
@@ -20,7 +21,10 @@ const LEAF: u64 = 0x13020;
 const DESCRIPTOR: u64 = DATA | 3 | (1 << 10) | (3 << 8);
 
 fn thread() -> (MemoryThread<Policy>, Arc<RegisteredSystemRam>) {
-    let (cpu, profile, missing, ram) = fixture();
+    thread_for(TargetCpu::Baseline)
+}
+fn thread_for(target: TargetCpu) -> (MemoryThread<Policy>, Arc<RegisteredSystemRam>) {
+    let (cpu, profile, missing, ram) = fixture_for(target);
     let controls = Controls::capture(&cpu, profile.name, &missing).unwrap();
     let mut policy = Policy::new(controls.clone(), Arc::clone(&ram));
     policy.refresh(controls, 1);
@@ -127,7 +131,13 @@ fn context_changes_cannot_revive_old_entries_and_helpers_disable_caching() {
 
 #[test]
 fn cached_translation_covers_an_unaligned_sca_part_and_a_full_pair() {
-    let (mut thread, ram) = thread();
+    // A part spanning a host doubleword inside its granule is single-copy
+    // atomic only through a 16-byte load; Baseline refuses it instead
+    // (`policy::tests`).
+    if !TargetCpu::AtomicLoad16.supported() {
+        return;
+    }
+    let (mut thread, ram) = thread_for(TargetCpu::AtomicLoad16);
     let data = *b"0123456789abcdef";
     let other = *b"fedcba9876543210";
     publish(&ram, DATA, &data);

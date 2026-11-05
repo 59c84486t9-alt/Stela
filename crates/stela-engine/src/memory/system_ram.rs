@@ -499,16 +499,31 @@ pub unsafe fn fixture<O: Send + Sync + 'static>(
     ranges: &[ReservedSystemRamRange],
     owner: Arc<O>,
 ) -> RegisteredSystemRam {
+    // SAFETY: the caller upholds this function's contract.
+    unsafe { fixture_for(ranges, owner, TargetCpu::Baseline) }
+}
+
+/// [`fixture`] on an admitted `target`, for parts only some hosts transfer
+/// atomically.
+///
+/// # Safety
+/// As [`fixture`].
+#[cfg(any(test, feature = "test-support"))]
+pub unsafe fn fixture_for<O: Send + Sync + 'static>(
+    ranges: &[ReservedSystemRamRange],
+    owner: Arc<O>,
+    target: TargetCpu,
+) -> RegisteredSystemRam {
     validate(ranges).unwrap();
     // SAFETY: The fixture caller keeps initialized pinned mappings and excludes
     // external writers. Checked ranges and cloned owner pins outlive every backing.
     let (regions, views, system) = unsafe { bindings(ranges, owner, 64, 8) }.unwrap();
-    let domain = MemoryDomain::new(Arc::clone(&system), views, TargetCpu::Baseline).unwrap();
+    let domain = MemoryDomain::new(Arc::clone(&system), views, target).unwrap();
     RegisteredSystemRam {
         regions,
         domain,
         system,
-        target: TargetCpu::Baseline,
+        target,
         erg_bytes: 64,
     }
 }

@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     machine::system::Register,
-    memory::{ReservedSystemRamRange, system_ram::fixture as ram_fixture},
+    memory::{ReservedSystemRamRange, system_ram::fixture_for as ram_fixture},
 };
 use core::{cell::UnsafeCell, ptr::NonNull};
 const BASE: u64 = 0x10000;
@@ -22,6 +22,17 @@ pub(in crate::machine::engine::shared_memory) fn fixture() -> (
     Vec<Register>,
     Arc<RegisteredSystemRam>,
 ) {
+    fixture_for(stela_compiler::TargetCpu::Baseline)
+}
+/// [`fixture`] with its RAM domain on `target`, which the host must admit.
+pub(in crate::machine::engine::shared_memory) fn fixture_for(
+    target: stela_compiler::TargetCpu,
+) -> (
+    crate::machine::Cpu,
+    crate::machine::CpuProfile,
+    Vec<Register>,
+    Arc<RegisteredSystemRam>,
+) {
     let storage = Arc::new(Storage(UnsafeCell::new([0; 6 * PAGE])));
     let range = ReservedSystemRamRange {
         source_pa: BASE,
@@ -30,7 +41,7 @@ pub(in crate::machine::engine::shared_memory) fn fixture() -> (
         bytes: 6 * PAGE,
     };
     // SAFETY: test-only byte owner.
-    let ram = Arc::new(unsafe { ram_fixture(&[range], storage) });
+    let ram = Arc::new(unsafe { ram_fixture(&[range], storage, target) });
     for (address, descriptor) in [
         (BASE, (BASE + PAGE as u64) | 3),
         (BASE + PAGE as u64, (BASE + 2 * PAGE as u64) | 3),
