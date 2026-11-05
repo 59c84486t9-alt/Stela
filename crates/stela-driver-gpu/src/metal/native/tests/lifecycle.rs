@@ -139,6 +139,7 @@ fn backend(device: ash::Device, drops: &Arc<AtomicUsize>) -> NativeBackend {
     NativeBackend {
         _entry: ManuallyDrop::new(entry),
         instance,
+        messenger: None,
         device,
         fns: ExtensionFns {
             host_image_copy: None,

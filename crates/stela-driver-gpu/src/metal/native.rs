@@ -45,14 +45,86 @@ use alloc::{
 };
 pub use ash::vk;
 use ash::{ext, khr};
-use core::{mem::ManuallyDrop, num::NonZeroU64, ptr::NonNull};
+use core::{
+    ffi::{CStr, c_void},
+    mem::ManuallyDrop,
+    num::NonZeroU64,
+    ptr::NonNull,
+};
 use physical::{Extensions, FeatureChain};
 use stela_contracts::gate::MemoryRange;
 
-/// The driver's loader entry point.
+/// The driver's loader entry point, and where its messages go.
 #[derive(Clone, Copy)]
 pub struct Loader {
     pub get_instance_proc_addr: vk::PFN_vkGetInstanceProcAddr,
+    /// Told each error and warning the driver reports, such as why a call
+    /// failed with only a generic result.
+    pub log: fn(&str),
+}
+
+/// Forwards the driver's errors and warnings to a [`Loader::log`] through
+/// `VK_EXT_debug_utils`, for drivers that keep them otherwise.
+struct Messenger {
+    fns: ext::debug_utils::Instance,
+    handle: vk::DebugUtilsMessengerEXT,
+}
+
+impl Messenger {
+    /// # Safety
+    ///
+    /// `instance` was created from `entry` with `VK_EXT_debug_utils`.
+    unsafe fn new(entry: &ash::Entry, instance: &ash::Instance, log: fn(&str)) -> Option<Self> {
+        let fns = ext::debug_utils::Instance::new(entry, instance);
+        let info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+            .message_severity(
+                vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
+                    | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING,
+            )
+            .message_type(
+                vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                    | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+            )
+            .pfn_user_callback(Some(forward))
+            .user_data(log as *mut c_void);
+        // SAFETY: the instance enables the extension; `forward` reads the
+        // user data as the `fn(&str)` given here, which is 'static.
+        let handle = unsafe { fns.create_debug_utils_messenger(&info, None) }.ok()?;
+        Some(Self { fns, handle })
+    }
+
+    /// # Safety
+    ///
+    /// Called once, before the instance is destroyed.
+    unsafe fn destroy(&self) {
+        // SAFETY: the caller's guarantee.
+        unsafe { self.fns.destroy_debug_utils_messenger(self.handle, None) };
+    }
+}
+
+/// Hands a driver message to the `fn(&str)` its messenger was made with.
+unsafe extern "system" fn forward(
+    _: vk::DebugUtilsMessageSeverityFlagsEXT,
+    _: vk::DebugUtilsMessageTypeFlagsEXT,
+    data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
+    user: *mut c_void,
+) -> vk::Bool32 {
+    // SAFETY: `Messenger::new` made `user` from a `fn(&str)`, and the driver
+    // passes valid callback data or null.
+    let (log, data) = unsafe {
+        (
+            core::mem::transmute::<*mut c_void, fn(&str)>(user),
+            data.as_ref(),
+        )
+    };
+    if let Some(data) = data.filter(|data| !data.p_message.is_null()) {
+        // SAFETY: the driver's message is a NUL-terminated string for the call.
+        if let Ok(message) = unsafe { CStr::from_ptr(data.p_message) }.to_str() {
+            log(message.trim_end());
+        }
+    }
+    vk::FALSE
 }
 
 /// The backend's own kernels: the NIR of `stela_metal_accumulate_kernel`,
@@ -210,6 +282,7 @@ pub struct NativeBackend {
     // A failed idle query leaves the driver's code and export owner live.
     _entry: ManuallyDrop<ash::Entry>,
     instance: ash::Instance,
+    messenger: Option<Messenger>,
     device: ash::Device,
     fns: ExtensionFns,
     queue: vk::Queue,
@@ -313,12 +386,30 @@ impl NativeBackend {
             .application_name(c"Stela Metal")
             .engine_name(c"Stela")
             .api_version(vk::API_VERSION_1_3);
-        let info = vk::InstanceCreateInfo::default().application_info(&application);
+        // SAFETY: the caller guarantees the entry point.
+        let debug_utils =
+            unsafe { entry.enumerate_instance_extension_properties(None) }.is_ok_and(|offered| {
+                offered
+                    .iter()
+                    .any(|offer| offer.extension_name_as_c_str() == Ok(ext::debug_utils::NAME))
+            });
+        let names = [ext::debug_utils::NAME.as_ptr()];
+        let info = vk::InstanceCreateInfo::default()
+            .application_info(&application)
+            .enabled_extension_names(if debug_utils { &names } else { &[] });
         // SAFETY: the create info and its application info outlive the call.
         let instance = unsafe { entry.create_instance(&info, None) }.map_err(failure)?;
+        // SAFETY: the instance enables the extension when the driver offers it.
+        let messenger = debug_utils
+            .then(|| unsafe { Messenger::new(&entry, &instance, loader.log) })
+            .flatten();
         // SAFETY: the instance was just created and nothing else uses it.
-        let destroy_instance =
-            |instance: &ash::Instance| unsafe { instance.destroy_instance(None) };
+        let destroy_instance = |instance: &ash::Instance| unsafe {
+            if let Some(messenger) = &messenger {
+                messenger.destroy();
+            }
+            instance.destroy_instance(None);
+        };
         let selected = Self::select(&instance, pci);
         let Some((physical, extensions, snapshot, family)) = selected else {
             destroy_instance(&instance);
@@ -391,6 +482,7 @@ impl NativeBackend {
         let mut backend = Self {
             _entry: ManuallyDrop::new(entry),
             instance,
+            messenger,
             device,
             fns,
             queue,
@@ -760,6 +852,9 @@ impl Drop for NativeBackend {
             self.device
                 .destroy_descriptor_set_layout(self.heap.layout, None);
             self.device.destroy_device(None);
+            if let Some(messenger) = &self.messenger {
+                messenger.destroy();
+            }
             self.instance.destroy_instance(None);
             ManuallyDrop::drop(&mut self.exporter);
             ManuallyDrop::drop(&mut self._entry);

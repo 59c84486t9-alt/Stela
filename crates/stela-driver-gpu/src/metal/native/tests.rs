@@ -1,4 +1,4 @@
-use super::{CommandBuffers, InFlight, failure, objects};
+use super::{CommandBuffers, InFlight, failure, forward, objects};
 use crate::metal::{
     binding::HeapArray,
     error::Error,
@@ -288,6 +288,30 @@ fn mesh_pipelines_have_no_vertex_input() {
         Ok(())
     })
     .unwrap();
+}
+
+#[test]
+fn driver_messages_reach_the_loader_s_log() {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static HEARD: AtomicBool = AtomicBool::new(false);
+    fn log(message: &str) {
+        HEARD.store(message == "thrd_create failed", Ordering::SeqCst);
+    }
+    let data = vk::DebugUtilsMessengerCallbackDataEXT::default().message(c"thrd_create failed\n");
+    // SAFETY: the data and message outlive the call, and the user data is
+    // a `fn(&str)` as a messenger's is.
+    let answer = unsafe {
+        forward(
+            vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
+            vk::DebugUtilsMessageTypeFlagsEXT::GENERAL,
+            &data,
+            log as *mut core::ffi::c_void,
+        )
+    };
+    // The driver's call goes on, and the log heard the message without its
+    // line end.
+    assert_eq!(answer, vk::FALSE);
+    assert!(HEARD.load(Ordering::SeqCst));
 }
 
 #[test]

@@ -95,6 +95,15 @@ fn report(reason: &str) {
     }
 }
 
+/// Logs each distinct error or warning NVK reports, such as why a call failed
+/// with only a generic result.
+fn driver_message(text: &str) {
+    static SEEN: [AtomicU64; 128] = [const { AtomicU64::new(0) }; 128];
+    if first_time(&SEEN, text) {
+        output::arguments(format_args!("GPU DRIVER {text}\n"));
+    }
+}
+
 /// Logs what a guest call made or met, such as a render pipeline, once for
 /// each distinct note.
 fn note(text: &str) {
@@ -300,6 +309,7 @@ fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
     };
     let loader = Loader {
         get_instance_proc_addr: entry,
+        log: driver_message,
     };
     // SAFETY: the linked NVK and compiler, which last for the boot.
     let service = unsafe {
