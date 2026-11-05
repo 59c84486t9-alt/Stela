@@ -73,6 +73,9 @@ pub fn invocation_stacks(
 }
 
 pub const TASK_STACKS: usize = 32;
+/// An ordinary task's Rust stack. Native driver probes run on one, through
+/// controller attach paths whose frames alone pass 128 KiB.
+pub const ORDINARY_TASK_STACK_BYTES: u64 = 1024 * 1024;
 pub const TASK_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
 /// The BSP's work pool. A Linux task runs only on a stack of exactly its
 /// configured size and alignment, so the service and twenty General
@@ -82,7 +85,7 @@ pub fn task_stacks(
 ) -> Result<crate::guarded_stacks::MixedLayout, crate::guarded_stacks::Error> {
     use crate::guarded_stacks::{Error, Geometry, MixedLayout};
     let kernel = Geometry::new(16 * 1024, 16 * 1024)?;
-    let ordinary = Geometry::new(128 * 1024, PAGE)?;
+    let ordinary = Geometry::new(ORDINARY_TASK_STACK_BYTES, PAGE)?;
     let geometries = core::array::from_fn::<_, TASK_STACKS, _>(|index| {
         if index == 2 || (8..28).contains(&index) {
             kernel
@@ -217,8 +220,11 @@ mod tests {
     fn task_plan_keeps_exact_payload_padding_guards_and_classes() {
         let layout = task_stacks(0x8_0000_0000).unwrap();
         assert_eq!(layout.count(), 32);
-        assert_eq!(layout.physical_bytes(), 1_785_856);
-        assert_eq!(layout.raw_allocation_bytes(), 1_798_144);
+        assert_eq!(layout.physical_bytes(), 21 * 16 * 1024 + 11 * 1024 * 1024);
+        assert_eq!(
+            layout.raw_allocation_bytes(),
+            layout.physical_bytes() + 12_288
+        );
         let mut counts = (0, 0);
         for index in 0..32 {
             let slot = layout.slot(index).unwrap();
@@ -227,7 +233,7 @@ mod tests {
                 counts.0 += 1;
                 assert_eq!(slot.usable.start % (16 * 1024), 0);
             } else {
-                assert_eq!(bytes, 128 * 1024);
+                assert_eq!(bytes, ORDINARY_TASK_STACK_BYTES);
                 counts.1 += 1;
             }
             assert_eq!(slot.lower_guard.end, slot.usable.start);

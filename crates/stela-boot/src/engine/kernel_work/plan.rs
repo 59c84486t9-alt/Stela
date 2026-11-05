@@ -70,7 +70,12 @@ pub(super) fn profile() -> Result<work::StackProfile, Error> {
     }
     work::StackProfile::new(
         kernel,
-        work::StackRequirement::at_least(128 * 1024, 4096, 4096).map_err(Error::Work)?,
+        work::StackRequirement::at_least(
+            native_smp::resources::ORDINARY_TASK_STACK_BYTES as usize,
+            4096,
+            4096,
+        )
+        .map_err(Error::Work)?,
         20,
         4,
     )
