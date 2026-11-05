@@ -2,7 +2,7 @@
 use super::*;
 use core::sync::atomic::AtomicUsize;
 fn prototype() -> ReservationPolicy {
-    ReservationPolicy::NativeFirmware32Protected {
+    ReservationPolicy::NativeFirmwareProtected {
         gpe: GpeQueueBudget::QUALIFICATION,
     }
 }
@@ -64,7 +64,7 @@ fn prototype_geometry_overflow_and_nonempty_admission_leave_old_queue_untouched(
     let huge = GpeQueueBudget::with_pending(usize::MAX - 16).unwrap();
     refused::<33>(
         32,
-        ReservationPolicy::NativeFirmware32Protected { gpe: huge },
+        ReservationPolicy::NativeFirmwareProtected { gpe: huge },
         false,
         WorkError::Exhausted,
     );

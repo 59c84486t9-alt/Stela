@@ -73,14 +73,22 @@ pub fn invocation_stacks(
     crate::guarded_stacks::Layout::new(INVOCATION_STACK_BYTES, cores)
 }
 
-pub const TASK_STACKS: usize = 32;
+/// The BSP's work pool holds as many stacks as its executor can.
+pub const TASK_STACKS: usize = stela_driver_base::platform::work::MAX_CONTINUATIONS;
+/// General workers on ordinary stacks, for native driver probes.
+pub const ORDINARY_GENERAL_TASKS: usize = 4;
+/// General workers on Linux task stacks: every General stack but the ordinary
+/// ones. Each Linux kthread, ioctl worker and driver thread holds one.
+pub const KERNEL_GENERAL_TASKS: usize =
+    TASK_STACKS - stela_driver_base::platform::work::ROLE_STACKS - ORDINARY_GENERAL_TASKS;
 /// An ordinary task's Rust stack. Native driver probes run on one, through
 /// controller attach paths whose frames alone pass 128 KiB.
 pub const ORDINARY_TASK_STACK_BYTES: u64 = 1024 * 1024;
-pub const TASK_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
+pub const TASK_WINDOW_BYTES: u64 = 32 * 1024 * 1024;
 /// The BSP's work pool. A Linux task runs only on a stack of exactly its
-/// configured size and alignment, so the service and twenty General
-/// continuations have that shape; the other roles keep generic stacks.
+/// configured size and alignment, so the service and the kernel General
+/// continuations have that shape; the other roles and the last
+/// [`ORDINARY_GENERAL_TASKS`] keep generic stacks.
 pub fn task_stacks(
     base: u64,
 ) -> Result<crate::guarded_stacks::MixedLayout, crate::guarded_stacks::Error> {
@@ -88,7 +96,8 @@ pub fn task_stacks(
     let kernel = Geometry::new(16 * 1024, 16 * 1024)?;
     let ordinary = Geometry::new(ORDINARY_TASK_STACK_BYTES, PAGE)?;
     let geometries = core::array::from_fn::<_, TASK_STACKS, _>(|index| {
-        if index == 2 || (8..28).contains(&index) {
+        let roles = stela_driver_base::platform::work::ROLE_STACKS;
+        if index == 2 || (roles..roles + KERNEL_GENERAL_TASKS).contains(&index) {
             kernel
         } else {
             ordinary
@@ -408,14 +417,21 @@ mod tests {
     #[test]
     fn task_plan_keeps_exact_payload_padding_guards_and_classes() {
         let layout = task_stacks(0x8_0000_0000).unwrap();
-        assert_eq!(layout.count(), 32);
-        assert_eq!(layout.physical_bytes(), 21 * 16 * 1024 + 11 * 1024 * 1024);
+        let (kernel, ordinary) = (
+            KERNEL_GENERAL_TASKS + 1,
+            TASK_STACKS - KERNEL_GENERAL_TASKS - 1,
+        );
+        assert_eq!(layout.count(), TASK_STACKS);
+        assert_eq!(
+            layout.physical_bytes(),
+            kernel as u64 * 16 * 1024 + ordinary as u64 * ORDINARY_TASK_STACK_BYTES
+        );
         assert_eq!(
             layout.raw_allocation_bytes(),
             layout.physical_bytes() + 12_288
         );
         let mut counts = (0, 0);
-        for index in 0..32 {
+        for index in 0..TASK_STACKS {
             let slot = layout.slot(index).unwrap();
             let bytes = slot.usable.end - slot.usable.start;
             if bytes == 16 * 1024 {
@@ -428,7 +444,7 @@ mod tests {
             assert_eq!(slot.lower_guard.end, slot.usable.start);
             assert_eq!(slot.upper_guard.start, slot.usable.end);
         }
-        assert_eq!(counts, (21, 11));
+        assert_eq!(counts, (kernel, ordinary));
         assert!(layout.virtual_bytes() < TASK_WINDOW_BYTES);
     }
     #[test]

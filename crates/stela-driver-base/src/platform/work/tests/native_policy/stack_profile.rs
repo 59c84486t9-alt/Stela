@@ -1,6 +1,7 @@
 //! Stack geometry controls dispatch; descriptors alone grant no native permission.
 use super::super::super::StackBacking;
 use super::*;
+use crate::platform::work::{MAX_CONTINUATIONS, ROLE_STACKS};
 use core::sync::atomic::AtomicUsize;
 mod support;
 use support::{Fixture, record};
@@ -14,7 +15,7 @@ fn profile() -> StackProfile {
     StackProfile::new(kernel(), ordinary(), 20, 4).unwrap()
 }
 fn policy() -> ReservationPolicy {
-    ReservationPolicy::NativeFirmware32Protected {
+    ReservationPolicy::NativeFirmwareProtected {
         gpe: GpeQueueBudget::QUALIFICATION,
     }
 }
@@ -34,7 +35,10 @@ fn descriptors_reject_invalid_size_alignment_guard_and_counts() {
             Err(WorkError::InvalidStack)
         );
     }
-    for (kernel_count, ordinary_count) in [(0, 24), (20, 0), (21, 4), (usize::MAX, 1)] {
+    // Each shape takes a stack, and no executor holds more General stacks
+    // than its ceiling leaves after the roles.
+    let general = MAX_CONTINUATIONS - ROLE_STACKS;
+    for (kernel_count, ordinary_count) in [(0, 24), (20, 0), (general, 1), (usize::MAX, 1)] {
         assert_eq!(
             StackProfile::new(kernel(), ordinary(), kernel_count, ordinary_count),
             Err(WorkError::Unavailable)

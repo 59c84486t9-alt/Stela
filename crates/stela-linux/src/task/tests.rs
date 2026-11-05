@@ -844,10 +844,15 @@ fn clock_service_roundtrip(mode: u64) {
     assert_eq!(quarantined(), 0);
 }
 
+/// The C catalog's capacity, which one executor's stacks fill.
+const CATALOG: usize = stela_driver_base::platform::work::MAX_CONTINUATIONS;
+/// Jobs for a full catalog's executor: its stacks and the protected GPE job.
+const CATALOG_JOBS: usize = 2 * CATALOG;
+use stela_driver_base::platform::work::ROLE_STACKS;
 struct CatalogFixture {
     cpu: Arc<CpuModel>,
-    runtime: AtomicPtr<Runtime<64>>,
-    bindings: Mutex<Vec<Arc<TaskBinding<64>>>>,
+    runtime: AtomicPtr<Runtime<CATALOG_JOBS>>,
+    bindings: Mutex<Vec<Arc<TaskBinding<CATALOG_JOBS>>>>,
     refused: AtomicBool,
 }
 impl CatalogFixture {
@@ -859,19 +864,19 @@ impl CatalogFixture {
             refused: AtomicBool::new(false),
         })
     }
-    unsafe fn runtime(&self) -> Pin<&Runtime<64>> {
+    unsafe fn runtime(&self) -> Pin<&Runtime<CATALOG_JOBS>> {
         self.cpu.check_cpu().unwrap();
         // SAFETY: fixture owner keeps this pinned runtime through
         // all admitted callbacks, detach and process-context metadata free.
         unsafe { Pin::new_unchecked(&*self.runtime.load(Ordering::Acquire)) }
     }
-    fn publish(&self, runtime: Pin<&Runtime<64>>) {
+    fn publish(&self, runtime: Pin<&Runtime<CATALOG_JOBS>>) {
         self.runtime.store(
-            runtime.get_ref() as *const Runtime<64> as *mut Runtime<64>,
+            runtime.get_ref() as *const Runtime<CATALOG_JOBS> as *mut Runtime<CATALOG_JOBS>,
             Ordering::Release,
         );
     }
-    fn detach(&self, runtime: Pin<&Runtime<64>>) {
+    fn detach(&self, runtime: Pin<&Runtime<CATALOG_JOBS>>) {
         let bindings = core::mem::take(&mut *self.bindings.lock().unwrap());
         for binding in bindings {
             // SAFETY: all real jobs completed, no source/storage/foreign refs.
@@ -887,7 +892,7 @@ unsafe extern "C" fn catalog_bind(context: *mut c_void) {
     // SAFETY: rooted fixture owns this pointer through completion.
     let f = unsafe { &*context.cast::<CatalogFixture>() };
     // SAFETY: process context on the runtime CPU with the hosted heap initialized.
-    let binding = unsafe { TaskBinding::<64>::new() }.unwrap();
+    let binding = unsafe { TaskBinding::<CATALOG_JOBS>::new() }.unwrap();
     // SAFETY: the harness keeps the pinned executor through every callback and retirement.
     binding.bind_current(unsafe { f.runtime() }).unwrap();
     f.bindings.lock().unwrap().push(binding);
@@ -899,7 +904,7 @@ unsafe extern "C" fn catalog_refused(context: *mut c_void) {
     let runtime = unsafe { f.runtime() };
     let before = runtime.current_context().unwrap();
     // SAFETY: process context on the runtime CPU with the hosted heap initialized.
-    let binding = unsafe { TaskBinding::<64>::new() }.unwrap();
+    let binding = unsafe { TaskBinding::<CATALOG_JOBS>::new() }.unwrap();
     assert_eq!(binding.bind_current(runtime), Err(WorkError::Full));
     assert_eq!(runtime.current_context(), Ok(before));
     // SAFETY: admission failed before original metadata/publication effects.
@@ -912,11 +917,11 @@ fn stack_catalog_capacity() {
     let first = CatalogFixture::new(cpu.clone());
     // SAFETY: the fixture is the queue's owner, and only this test thread produces
     // work.
-    let queue = unsafe { Queue::<64>::new(cpu.clone(), first.clone()) }.unwrap();
+    let queue = unsafe { Queue::<CATALOG_JOBS>::new(cpu.clone(), first.clone()) }.unwrap();
     let executor = Executor::new_hosted_policy_for_test(
         queue,
-        stacks_count(&dropped, 16 * 1024, 32),
-        stela_driver_base::platform::work::ReservationPolicy::NativeFirmware32Protected {
+        stacks_count(&dropped, 16 * 1024, CATALOG),
+        stela_driver_base::platform::work::ReservationPolicy::NativeFirmwareProtected {
             gpe: stela_driver_base::platform::work::GpeQueueBudget::QUALIFICATION,
         },
     )
@@ -936,7 +941,7 @@ fn stack_catalog_capacity() {
         // SAFETY: each accepted Portal permit owns a distinct stack.
         unsafe { runtime.queue().execute_portal(catalog_bind, context) }.unwrap();
     }
-    for _ in 0..24 {
+    for _ in 0..CATALOG - ROLE_STACKS {
         // SAFETY: each General callback keeps first and binds one mapped continuation.
         unsafe {
             runtime
@@ -945,7 +950,7 @@ fn stack_catalog_capacity() {
         }
         .unwrap();
     }
-    // SAFETY: Foreground's mapped stack is distinct from all31 peers above.
+    // SAFETY: Foreground's mapped stack is distinct from all its peers above.
     unsafe { runtime.call_foreground(catalog_bind, context, 10000) }.unwrap();
     runtime.drain(10000).unwrap();
     let mut ids: Vec<_> = first
@@ -957,11 +962,11 @@ fn stack_catalog_capacity() {
         .collect();
     ids.sort_unstable();
     ids.dedup();
-    assert_eq!(ids.len(), 32);
+    assert_eq!(ids.len(), CATALOG);
     let second = CatalogFixture::new(cpu.clone());
     // SAFETY: the fixture is the queue's owner, and only this test thread produces
     // work.
-    let queue = unsafe { Queue::<64>::new(cpu.clone(), second.clone()) }.unwrap();
+    let queue = unsafe { Queue::<CATALOG_JOBS>::new(cpu.clone(), second.clone()) }.unwrap();
     let refused = Executor::new_hosted_for_test(queue, stacks(&dropped, 16 * 1024)).unwrap();
     let rejected = refused.runtime();
     second.publish(rejected);
@@ -983,12 +988,12 @@ fn stack_catalog_capacity() {
     // checked refusal.
     unsafe { runtime.retire() }.unwrap();
     drop(executor);
-    assert_eq!(dropped.load(Ordering::Relaxed), 36);
+    assert_eq!(dropped.load(Ordering::Relaxed), CATALOG as u64 + 4);
     // Every retired slot is available to fresh mappings again.
     let third = CatalogFixture::new(cpu.clone());
     // SAFETY: the fixture is the queue's owner, and only this test thread produces
     // work.
-    let queue = unsafe { Queue::<64>::new(cpu.clone(), third.clone()) }.unwrap();
+    let queue = unsafe { Queue::<CATALOG_JOBS>::new(cpu.clone(), third.clone()) }.unwrap();
     let reused = Executor::new_hosted_for_test(queue, stacks(&dropped, 16 * 1024)).unwrap();
     let available = reused.runtime();
     third.publish(available);
@@ -1003,7 +1008,7 @@ fn stack_catalog_capacity() {
     // checked refusal.
     unsafe { available.retire() }.unwrap();
     drop(reused);
-    assert_eq!(dropped.load(Ordering::Relaxed), 40);
+    assert_eq!(dropped.load(Ordering::Relaxed), CATALOG as u64 + 8);
     assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
     assert_eq!(quarantined(), 0);
 }

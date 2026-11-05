@@ -76,8 +76,8 @@ pub(super) fn profile() -> Result<work::StackProfile, Error> {
             4096,
         )
         .map_err(Error::Work)?,
-        20,
-        4,
+        native_smp::resources::KERNEL_GENERAL_TASKS,
+        native_smp::resources::ORDINARY_GENERAL_TASKS,
     )
     .map_err(Error::Work)
 }

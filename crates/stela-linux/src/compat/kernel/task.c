@@ -135,7 +135,8 @@ static void publish_current(struct stela_linux_task *previous,
  * hooks on the single qualified CPU; no native ISR can read this catalog.
  * Rust's retained binding owns each metadata pointer through actual detach.
  * A closed job remains registered until detach but never owns live storage. */
-#define STACK_TASKS 32U
+/* The work layer's MAX_CONTINUATIONS, which task.rs checks at start. */
+#define STACK_TASKS 128U
 static struct stela_linux_task *stack_tasks[STACK_TASKS];
 
 /* Allocation identity is independent of attachment/stack publication. Only

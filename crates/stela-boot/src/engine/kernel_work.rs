@@ -27,7 +27,9 @@ use stela_drivers::{
     bus::dma::memory::MemoryError,
     platform::work::{self, Cpu, Executor, Queue, Stack, StackBacking, WorkError},
 };
-pub(super) const SLOTS: usize = 64;
+/// Jobs the BSP's queue admits: one for every stack of its pool, and as many
+/// again waiting, which covers the firmware's protected pending events.
+pub(super) const SLOTS: usize = 2 * native_smp::resources::TASK_STACKS;
 #[cfg(feature = "diagnostics")]
 mod clock;
 #[cfg(feature = "diagnostics")]
@@ -530,7 +532,7 @@ impl KernelWork {
         let executor = Executor::new_with_profile(
             queue,
             stacks,
-            work::ReservationPolicy::NativeFirmware32Protected {
+            work::ReservationPolicy::NativeFirmwareProtected {
                 gpe: work::GpeQueueBudget::QUALIFICATION,
             },
             plan::profile()?,

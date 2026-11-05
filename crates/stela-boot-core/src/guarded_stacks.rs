@@ -7,7 +7,8 @@ mod mixed;
 use core::ops::Range;
 pub use mixed::{Geometry, MixedLayout};
 const PAGE: u64 = 4096;
-const MAX_STACKS: usize = 64;
+/// The most stacks a layout holds: the BSP's whole work pool.
+const MAX_STACKS: usize = crate::native_resources::TASK_STACKS;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {

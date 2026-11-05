@@ -114,8 +114,8 @@ impl ReleasedStackGeometry {
             && self.guard >= requirement.minimum_guard_bytes()
     }
 }
-/// Expected mixed geometry of the 32-stack pool.
-/// General counts are validated against unambiguously matching owners.
+/// Expected mixed geometry of a protected pool: how many of its General
+/// stacks take each shape. The executor's stacks must match these counts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StackProfile {
     kernel: StackRequirement,
@@ -130,9 +130,12 @@ impl StackProfile {
         kernel_general: usize,
         ordinary_general: usize,
     ) -> Result<Self, WorkError> {
+        let general = MAX_CONTINUATIONS - super::ROLE_STACKS;
         if kernel_general == 0
             || ordinary_general == 0
-            || kernel_general.checked_add(ordinary_general) != Some(24)
+            || kernel_general
+                .checked_add(ordinary_general)
+                .is_none_or(|total| total > general)
         {
             return Err(WorkError::Unavailable);
         }
@@ -215,7 +218,7 @@ impl Catalog {
         profile: StackProfile,
         layout: super::Layout,
     ) -> Result<Self, WorkError> {
-        if !matches!(layout, super::Layout::NativeFirmware32Protected(_)) || stacks.len() != 32 {
+        if !matches!(layout, super::Layout::NativeFirmwareProtected(_)) {
             return Err(WorkError::Unavailable);
         }
         let mut result = Self::empty();

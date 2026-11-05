@@ -881,7 +881,13 @@ mod continuation;
 use continuation::{Continuation, TaskState};
 #[cfg(target_arch = "x86_64")]
 type Task = Continuation<Stack, u64, Arc<dyn SwitchBinding>>;
-pub const MAX_CONTINUATIONS: usize = 32;
+/// The most stacks an executor holds: the eight role stacks and its General
+/// workers. A Linux kthread, a driver's ioctl worker and each thread a driver
+/// such as NVK starts takes a General stack for its life.
+pub const MAX_CONTINUATIONS: usize = 128;
+/// The role stacks before the first General one: foreground, Notify, the
+/// Linux service, firmware control, GPE, two portals and Notify.
+pub const ROLE_STACKS: usize = 8;
 
 /// CPU-affine pinned executor. Task zero is a real foreground continuation,
 /// task one is serial Notify; an optional Linux service reserves task two and
@@ -1277,7 +1283,7 @@ impl<const N: usize> Executor<N> {
             )?),
         })
     }
-    /// Opt into mixed stack geometry for the 32-stack pool.
+    /// Opt into the mixed stack geometry of a protected firmware pool.
     /// Empty-queue validation is transactional. Descriptors supply no native
     /// mapping/current/kernel-thread/IRQ permission.
     pub fn new_with_profile(

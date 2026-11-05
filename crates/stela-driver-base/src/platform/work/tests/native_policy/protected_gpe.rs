@@ -121,7 +121,7 @@ fn full_admission_policy<const N: usize>(
     drop(executor);
     assert_eq!(
         dropped.load(Ordering::Relaxed),
-        reservation.layout().stack_limit()
+        test_support::pool_stacks(reservation)
     );
     assert_eq!(cpu.flags(), 0x202);
 }

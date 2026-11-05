@@ -470,7 +470,7 @@ fn run(case: Case) {
     let executor = Executor::new_hosted_profile_for_test(
         queue,
         stacks,
-        work::ReservationPolicy::NativeFirmware32Protected {
+        work::ReservationPolicy::NativeFirmwareProtected {
             gpe: work::GpeQueueBudget::QUALIFICATION,
         },
         StackProfile::new(kernel(), ordinary(), 20, 4).unwrap(),

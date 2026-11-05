@@ -167,6 +167,15 @@ pub fn backing(
     })
 }
 
+/// The stacks a test pool of `policy` holds: a protected pool models
+/// production's layout at 32 stacks, under its ceiling, and the others hold
+/// their fixed count.
+pub fn pool_stacks(policy: ReservationPolicy) -> usize {
+    match policy {
+        ReservationPolicy::NativeFirmwareProtected { .. } => 32,
+        _ => policy.layout().stack_limit(),
+    }
+}
 pub fn executor<const N: usize>(
     owner: RetainedOwner,
 ) -> (Executor<N>, Arc<CpuModel>, Arc<AtomicUsize>) {
@@ -181,7 +190,7 @@ pub fn executor_with_policy<const N: usize>(
     // all access/switches stay on the modeled constructing thread until join.
     let queue = unsafe { Queue::new(cpu.clone(), owner) }.unwrap();
     let dropped = Arc::new(AtomicUsize::new(0));
-    let stacks = stacks_count(&dropped, policy.layout().stack_limit());
+    let stacks = stacks_count(&dropped, pool_stacks(policy));
     let executor = Executor::new_hosted_policy_for_test(queue, stacks, policy).unwrap();
     (executor, cpu, dropped)
 }

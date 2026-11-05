@@ -59,7 +59,7 @@ fn physical_alignment_keeps_all_prefix_and_per_slot_padding() {
 fn invalid_counts_alignment_and_wrapping_extents_refuse_transactionally() {
     assert!(matches!(MixedLayout::new(0, &[]), Err(Error::Capacity)));
     assert!(matches!(
-        MixedLayout::new(0, &[linux(); 65]),
+        MixedLayout::new(0, &[linux(); MAX_STACKS + 1]),
         Err(Error::Capacity)
     ));
     assert!(matches!(
