@@ -20,8 +20,10 @@ static int level_of(const char **fmt)
 }
 
 /* The selected Linux CPU is serialized. Buffer a bounded prefix while the
- * caller holds source locks; the next safe drain reports any dropped tail. */
-#define DEFERRED_RECORDS 4
+ * caller holds source locks; the next safe drain reports any dropped tail.
+ * Lockup reports such as show_all_workqueues print dozens of lines under a
+ * pool lock, so keep 64 KiB, half of Linux's default 128 KiB ring. */
+#define DEFERRED_RECORDS 64
 struct log_record {
 	int level;
 	char text[1024];
@@ -269,12 +271,12 @@ static void deferred_records(void)
 	printk_deferred_exit();
 	pr_info("two");
 	printk_deferred_exit();
-	printk_deferred(KERN_INFO "three");
-	printk_deferred(KERN_INFO "four");
+	for (int record = 2; record < DEFERRED_RECORDS; record++)
+		printk_deferred(KERN_INFO "more");
 	printk_deferred(KERN_INFO "dropped");
 	assert(messages == before);
 	arch_local_irq_restore(irq);
-	assert(messages == before + 5);
+	assert(messages == before + DEFERRED_RECORDS + 1);
 	assert(observed_level == LOGLEVEL_WARNING &&
 	       !strcmp(observed, "printk: dropped 1 deferred records\n"));
 	messages = before;
