@@ -40,6 +40,10 @@ const DNS_TTL: u32 = 60;
 const WINDOW: u16 = 65535;
 const MSS: usize = 1460;
 const RETRANSMIT: Duration = Duration::from_secs(1);
+/// Retransmission timeouts double up to this many times while the guest
+/// acknowledges nothing new (RFC 6298 5.5), so a slow guest is not buried
+/// under copies of what it has yet to read.
+const BACKOFFS: u32 = 6;
 const IDLE: Duration = Duration::from_secs(300);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const TICK: Duration = Duration::from_millis(50);
@@ -107,6 +111,8 @@ struct Connection {
     fin_acknowledged: bool,
     guest_closed: bool,
     last_sent: Instant,
+    /// Timeouts since the guest last acknowledged new data.
+    retransmits: u32,
     last_activity: Instant,
     to_guest: u64,
     to_host: u64,
@@ -214,8 +220,13 @@ impl Lan {
                 || !c.flight.is_empty()
                 || (c.fin_sent && !c.fin_acknowledged)
                 || (c.window == 0 && !c.unsent.is_empty());
-            if waiting && now.duration_since(c.last_sent) >= RETRANSMIT {
+            let timeout = RETRANSMIT * (1 << c.retransmits.min(BACKOFFS));
+            if waiting && now.duration_since(c.last_sent) >= timeout {
                 self.retransmit(key);
+                // The next timeout runs from this one.
+                if let Some(c) = self.connections.get_mut(&key) {
+                    c.last_sent = now;
+                }
             }
         }
     }
@@ -553,6 +564,7 @@ impl Lan {
                 fin_acknowledged: false,
                 guest_closed: false,
                 last_sent: now,
+                retransmits: 0,
                 last_activity: now,
                 to_guest: 0,
                 to_host: 0,
@@ -627,6 +639,7 @@ impl Lan {
                     c.fin_acknowledged = true;
                 }
                 c.send_unacknowledged = ack;
+                c.retransmits = 0;
             }
             c.window = u32::from(segment.window) << c.scale.unwrap_or(0);
         }
@@ -717,26 +730,30 @@ impl Lan {
         }
     }
 
+    /// Resends the oldest unacknowledged segment, as a timeout does (RFC
+    /// 6298 5.4): the guest's acknowledgment then says what else it lacks.
     fn retransmit(&mut self, key: Key) {
-        let Some(c) = self.connections.get(&key) else {
+        let Some(c) = self.connections.get_mut(&key) else {
             return;
         };
+        c.retransmits = c.retransmits.saturating_add(1);
+        let c = &*c;
         if c.state == State::Accepted {
             let iss = c.iss;
             return self.send(key, iss, SYN | ACK, &[], true);
         }
         let mut segments = Vec::new();
-        let mut sequence = c.send_unacknowledged;
+        let sequence = c.send_unacknowledged;
         if c.flight.is_empty() && c.window == 0 && !c.unsent.is_empty() {
             // A zero window probe: one byte past the window (RFC 9293 3.8.6.1).
             segments.push((sequence, ACK, vec![c.unsent[0]]));
         }
-        let window = (c.window as usize).max(1);
-        for chunk in c.flight[..c.flight.len().min(window)].chunks(c.mss) {
-            segments.push((sequence, ACK | PSH, chunk.to_vec()));
-            sequence = sequence.wrapping_add(chunk.len() as u32);
+        let oldest = c.flight.len().min((c.window as usize).max(1)).min(c.mss);
+        if oldest != 0 {
+            segments.push((sequence, ACK | PSH, c.flight[..oldest].to_vec()));
         }
-        if c.fin_sent && !c.fin_acknowledged && c.unsent.is_empty() {
+        // The FIN follows the data, so it goes again once nothing precedes it.
+        if c.fin_sent && !c.fin_acknowledged && c.unsent.is_empty() && oldest == c.flight.len() {
             segments.push((c.send_next.wrapping_sub(1), FIN | ACK, Vec::new()));
         }
         for (sequence, flags, bytes) in segments {
@@ -932,6 +949,53 @@ mod tests {
         ] {
             assert!(text.contains(line), "missing {line:?} in\n{text}");
         }
+    }
+
+    #[test]
+    fn timeouts_resend_only_the_oldest_segment_and_back_off() {
+        let (events, _inbox) = channel();
+        let mut lan = Lan::new(events, Box::new(Log::default()), host_resolver);
+        let start = Instant::now();
+        let key = (49152, [10, 0, 0, 35], 8765);
+        lan.connections.insert(
+            key,
+            Connection {
+                state: State::Established,
+                writer: None,
+                iss: 0,
+                receive_next: 0,
+                send_unacknowledged: 1,
+                send_next: 1 + 3 * MSS as u32,
+                window: 65535,
+                scale: None,
+                mss: MSS,
+                flight: vec![0x5a; 3 * MSS],
+                unsent: VecDeque::new(),
+                queued: Arc::new(AtomicUsize::new(0)),
+                host_closed: false,
+                fin_sent: false,
+                fin_acknowledged: false,
+                guest_closed: false,
+                last_sent: start,
+                retransmits: 0,
+                last_activity: start,
+                to_guest: 0,
+                to_host: 0,
+            },
+        );
+        // Ethernet, IPv4 and TCP headers, then one full segment.
+        let segment = 14 + 20 + 20 + MSS;
+        let mut resent = |at: Duration| {
+            lan.tick(start + at);
+            lan.take_frames().iter().map(Vec::len).collect::<Vec<_>>()
+        };
+        assert!(resent(Duration::from_millis(900)).is_empty());
+        assert_eq!(resent(Duration::from_secs(1)), [segment]);
+        // The next timeout is twice as long, measured from that resend.
+        assert!(resent(Duration::from_millis(2900)).is_empty());
+        assert_eq!(resent(Duration::from_millis(3100)), [segment]);
+        assert!(resent(Duration::from_millis(7000)).is_empty());
+        assert_eq!(resent(Duration::from_millis(7200)), [segment]);
     }
 
     #[test]
