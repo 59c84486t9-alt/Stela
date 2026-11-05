@@ -179,11 +179,11 @@ impl Transfer {
     }
     /// Only a real successful completion or acknowledged cancellation returns
     /// CPU access. Dropping an unresolved transfer quarantines original pins.
-    pub fn into_payload(self) -> Result<Payload, Self> {
+    pub fn into_payload(self) -> Result<Payload, Box<Self>> {
         if self.retired {
             Ok(self.payload)
         } else {
-            Err(self)
+            Err(Box::new(self))
         }
     }
 }

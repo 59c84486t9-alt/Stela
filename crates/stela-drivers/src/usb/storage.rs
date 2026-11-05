@@ -327,7 +327,9 @@ impl Scsi for uas::Host {
         uas::Host::max_transfer_bytes(self)
     }
     fn read_command_ceiling(&self) -> usize {
-        uas::Host::read_command_ceiling(self)
+        // UAS's transfer limit already includes its enclosure-specific
+        // sector cap, so it is the complete read-command ceiling.
+        uas::Host::max_transfer_bytes(self)
     }
     fn read_before_mode_sense(
         &mut self,
