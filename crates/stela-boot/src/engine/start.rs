@@ -313,7 +313,7 @@ fn open_host(
         owner: mut host_owner,
         apic_hz,
         tsc_base: native_tsc_base,
-    } = install_host(handoff, options, &ram);
+    } = install_host(handoff, &ram);
     let Platform {
         acpi: host_acpi,
         mmio: native_mmio,
@@ -1865,7 +1865,7 @@ struct InstalledHost {
 
 /// Install the boot processor's host state over `ram`, and run the bounded
 /// diagnostics that stop on it.
-fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) -> InstalledHost {
+fn install_host(handoff: &'static Handoff, ram: &[RamRange]) -> InstalledHost {
     let cores = handoff.native_resources.cores as usize;
     let partition = crate::native_smp::resources::partition(
         cores,

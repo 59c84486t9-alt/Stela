@@ -16,7 +16,6 @@
 //! same way (`stela_loader::upgrade`, `stela_loader::recovery`).
 use crate::Result;
 use crate::{
-    firmware,
     handoff::{File, MAX_FILES, Region},
     layout, output,
     paging::PAGE,
