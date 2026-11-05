@@ -91,10 +91,12 @@ pub struct LinuxPages {
 // flags and contexts are refused before any heap or cache work.
 unsafe impl stela_linux::pages::Provider for LinuxPages {
     fn validate(&self, request: stela_linux::pages::Request) -> Result<(), MemoryError> {
+        // The pinned heap never sleeps or reclaims, so a request that may
+        // not block (TTM's GFP_DMA32 page, say) gets what it asked for. Only
+        // atomic context, where the heap's lock could be held, is refused.
         if SOURCE.registration().generation != self.heap.registration().generation
             || request.atomic
             || !(request.basic_ram() || request.reclaimable_ram())
-            || !request.may_block()
         {
             return Err(MemoryError::Unavailable);
         }
