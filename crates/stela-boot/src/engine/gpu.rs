@@ -414,6 +414,12 @@ impl Platform for Host {
         sample.unwrap_or_else(|error| output::fatal(format_args!("Linux clock failed: {error:?}")))
     }
 
+    fn boottime_ns(&self) -> Result<u64, WorkError> {
+        // The retained native counter epoch starts before Linux starts, and
+        // its admission excludes suspend. Both Linux clocks share this epoch.
+        self.clock.now_ns()
+    }
+
     fn realtime_at(&self, ns: i64, read: RealtimeRead) -> Option<(i64, u32)> {
         self.realtime.as_ref()?.read(ns, read)
     }
