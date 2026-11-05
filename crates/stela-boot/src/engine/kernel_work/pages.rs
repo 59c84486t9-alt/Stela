@@ -76,11 +76,21 @@ impl TaskPageInventory {
         })
     }
     /// # Safety
+    /// Actual loader-root BSP owns these allocations through retirement.
+    #[cfg(feature = "diagnostics")]
+    pub(super) unsafe fn register(self) -> Result<Catalog<KernelPages>, Error> {
+        // SAFETY: original task and heap allocations are retained.
+        let (provider, extents) = unsafe { self.into_inventory() }?;
+        // SAFETY: diagnostic owns the taskless legacy entry for this boot.
+        unsafe { Catalog::register_annotated(provider, extents) }.map_err(Error::Pages)
+    }
+
+    /// # Safety
     /// Serialized native process/deferred context excludes C reentry, migration,
     /// root/cache mutation and source retargeting through catalog retirement.
     /// This is taskless metadata entry; a taskful C caller must use its
     /// entered-owner boundary rather than reentering this leaf constructor.
-    pub(super) unsafe fn register(self) -> Result<Catalog<KernelPages>, Error> {
+    unsafe fn into_inventory(self) -> Result<(KernelPages, Vec<Extent>), Error> {
         self.check().map_err(Error::Work)?;
         if self.rows.is_empty() {
             return Err(Error::NoKernelStacks);
@@ -104,11 +114,7 @@ impl TaskPageInventory {
                 .map_err(Error::Pages)?;
             extents.push(Extent::runtime_stack(reservation));
         }
-        let provider = KernelPages { heap, stacks: self };
-        // SAFETY: provider owns both heap-generation and task allocation/
-        // mapping lifetimes. Ordinary allocation delegates only to heap pages;
-        // RuntimeStack coverage stays reserved and supplies no payload loan.
-        unsafe { Catalog::register_annotated(provider, extents) }.map_err(Error::Pages)
+        Ok((KernelPages { heap, stacks: self }, extents))
     }
 }
 // SAFETY: NativeMemory heap pins keep its generation and WB mappings.
@@ -144,17 +150,23 @@ impl KernelWork {
             .retained_copy()
     }
 
-    /// Publish the original heap and guarded runtime-stack descriptors
-    /// together, in the actual loader root before Linux starts.
-    pub(in crate::engine) fn register_linux_pages(
+    /// Publish the original heap and guarded runtime-stack descriptors under
+    /// the already claimed kernel before its first source task is published.
+    ///
+    /// # Safety
+    /// Inside this work owner's admitted native Linux dispatcher segment,
+    /// with this exact kernel and no active source entry or task.
+    pub(in crate::engine) unsafe fn register_linux_pages<K: stela_linux::owner::Platform>(
         &self,
+        kernel: &stela_linux::kernel::KernelOwner<K, SLOTS>,
     ) -> Result<&'static Catalog<KernelPages>, Error> {
-        self.dispatch(|_| {
-            let pages = self.task_pages()?;
-            // SAFETY: dispatch holds the original loader root on the owning
-            // BSP, outside source callbacks, through catalogue publication.
-            let catalog = unsafe { pages.register() }?;
-            Ok(&*Box::leak(Box::new(catalog)))
-        })?
+        let pages = self.task_pages()?;
+        // SAFETY: exact retained heap and slot allocations on the loader root.
+        let (provider, extents) = unsafe { pages.into_inventory() }?;
+        // SAFETY: exact claimed owner on this taskless dispatcher before
+        // Initial. Provider keeps the actual backing through publication.
+        let catalog = unsafe { Catalog::register_annotated_bootstrap(kernel, provider, extents) }
+            .map_err(Error::Pages)?;
+        Ok(&*Box::leak(Box::new(catalog)))
     }
 }

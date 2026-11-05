@@ -1384,7 +1384,6 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         stela_linux::image::register(image).map_err(|_| kernel_work::Error::Inventory)?;
         stela_linux::heap::register(allocate_zeroed).map_err(|_| kernel_work::Error::Inventory)?;
     }
-    let pages = work.register_linux_pages()?;
     #[cfg(feature = "nvk")]
     BOOT_CPU.store(host::processor(), Ordering::Relaxed);
     let (owner, threads, job, next) = work.dispatch_linux(|runtime| {
@@ -1393,7 +1392,6 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
             runtime,
             platform,
             domain.clone(),
-            pages,
             claimed,
             time.as_ref(),
         ))
@@ -1444,7 +1442,6 @@ fn mount_and_start(
     runtime: Pin<&'static stela_drivers::platform::work::Runtime<SLOTS>>,
     platform: Host,
     domain: Arc<Domain<SLOTS>>,
-    pages: &'static stela_linux::pages::Catalog<KernelPages>,
     claimed: ManuallyDrop<Vec<Claimed>>,
     time: &dyn Clock,
 ) -> Result<MountedStartup, Error> {
@@ -1470,6 +1467,9 @@ fn mount_and_start(
         .platform()
         .environment
         .set(addr_of!(*owner.environment()));
+    // SAFETY: this same native dispatcher owns the already claimed kernel
+    // and no task has been published. The catalogue must retain this owner.
+    let pages = unsafe { work.register_linux_pages(owner.as_ref()) }?;
     // SAFETY: the permanent, same-owner runtime, catalogue and service
     // domain were installed above. No original child has started yet.
     let threads = unsafe { TaskRuntime::install(owner.clone(), runtime, pages, SLOTS) }

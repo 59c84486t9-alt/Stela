@@ -276,9 +276,14 @@ unsafe extern "C" {
 pub(super) struct Entered;
 impl Entered {
     pub(super) fn try_new() -> Result<Self, Error> {
-        // SAFETY: only the address of the original C owner is used. A failed
-        // try-enter touches no borrowed owner and never waits recursively.
-        if unsafe { stela_linux_try_enter(ptr::addr_of!(stela_linux_bare).cast()) } {
+        // SAFETY: the original C legacy owner is permanent.
+        unsafe { Self::try_with(ptr::addr_of!(stela_linux_bare).cast()) }
+    }
+
+    unsafe fn try_with(owner: *const c_void) -> Result<Self, Error> {
+        // SAFETY: caller retains this exact owner. A failed try-enter touches
+        // no borrowed owner and never waits recursively.
+        if unsafe { stela_linux_try_enter(owner) } {
             Ok(Self)
         } else {
             Err(Error::Busy)
@@ -704,6 +709,29 @@ impl<P: Provider> Catalog<P> {
     ) -> Result<Self, Error> {
         // SAFETY: caller supplies original composed inventory and current owner.
         unsafe { Self::register_current_inventory(kernel, provider, extents, true) }
+    }
+    /// Publish the page inventory on the canonical dispatcher before Initial.
+    ///
+    /// # Safety
+    /// On the exact kernel's admitted native dispatcher CPU/root, with no
+    /// active Linux entry, task, native IRQ or reentry. Keep the kernel and
+    /// actual reservation/provider owners through the whole mount. This
+    /// bounded metadata entry cannot run source code requiring current.
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn register_annotated_bootstrap<K: super::owner::Platform, const N: usize>(
+        kernel: &super::kernel::KernelOwner<K, N>,
+        provider: P,
+        extents: Vec<Extent>,
+    ) -> Result<Self, Error> {
+        kernel
+            .environment()
+            .preflight_initial()
+            .map_err(|_| Error::Busy)?;
+        // SAFETY: caller supplies the admitted dispatcher and keeps the exact
+        // already-claimed canonical owner. No task/current is published.
+        let _entered = unsafe { Entered::try_with(kernel.raw().cast()) }?;
+        // SAFETY: exact entered bootstrap owner and kept provider above.
+        unsafe { Self::register_annotated_current(kernel, provider, extents) }
     }
     #[cfg(target_arch = "x86_64")]
     unsafe fn register_current_inventory<K: super::owner::Platform, const N: usize>(
