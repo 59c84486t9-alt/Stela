@@ -195,6 +195,8 @@ impl ConfigSpace for SharedConfig {
 struct MsiSource {
     config: SharedConfig,
     msi: Msi,
+    /// The function the route was attached for, which only it may program.
+    requester: stela_drivers::bus::pci::requester::RequesterId,
     programmed: bool,
     event: stela_linux::service::IrqEvent,
     environment: *const Environment,
@@ -235,7 +237,7 @@ unsafe impl Source for MsiSource {
         stela_drivers::bus::irq::RouteKind::Msi
     }
     fn requester(&self) -> Option<&stela_drivers::bus::pci::requester::RequesterId> {
-        None
+        Some(&self.requester)
     }
     unsafe fn program(
         &mut self,
@@ -332,6 +334,7 @@ impl function::Host for Device {
 struct Line {
     config: SharedConfig,
     msi: Option<Msi>,
+    custody: Rc<FunctionCustody>,
     registration: Option<Box<dyn IrqRegistration>>,
     retired: Option<stela_drivers::bus::irq::RetiredSource<dyn Source>>,
 }
@@ -542,12 +545,23 @@ impl Platform for Host {
             // SAFETY: no native attempt or service epoch was issued.
             return Err(unsafe { IrqEnableError::unexposed(EOPNOTSUPP) });
         };
+        // The attachment's own route: its root decides how messages arrive.
+        // SAFETY: a short borrow on the original process; nothing reenters.
+        let route = match unsafe {
+            line.custody
+                .with_native(|attachment| attachment.irq_route())
+        } {
+            Ok(Ok(route)) => route,
+            // SAFETY: no route, event or source was issued.
+            _ => return Err(unsafe { IrqEnableError::unexposed(EOPNOTSUPP) }),
+        };
         // SAFETY: actual original entered process; any preceding epoch joined.
         let event = unsafe { self.environment().irq_epoch(irq) }
             .map_err(|_| IrqEnableError::retained(EIO))?;
         let source = Box::new(MsiSource {
             config: line.config.clone(),
             msi,
+            requester: line.custody.requester().clone(),
             programmed: false,
             event: event.clone(),
             environment: self.environment.get(),
@@ -559,9 +573,7 @@ impl Platform for Host {
         match controller.request(stela_drivers::bus::irq::Request {
             source,
             handler,
-            routing: stela_drivers::bus::irq::RouteRequest::Msi(
-                stela_drivers::bus::irq::posted_msi::MsiRoute::unavailable(),
-            ),
+            routing: stela_drivers::bus::irq::RouteRequest::Msi(route),
         }) {
             Ok(registration) => {
                 line.registration = Some(registration);
@@ -596,9 +608,20 @@ impl Platform for Host {
                 let stela_drivers::bus::irq::RouteRequest::Msi(route) = routing else {
                     return Err(IrqEnableError::retained(EIO));
                 };
-                route
-                    .cancel_unattached()
-                    .map_err(|_| IrqEnableError::retained(EIO))?;
+                // SAFETY: a short borrow on the original process; the grant
+                // was never published, and a failed cancel keeps it retained.
+                let cancelled = unsafe {
+                    line.custody.with_native(|attachment| {
+                        // A failed cancel hands the grant back; keep it.
+                        attachment
+                            .cancel_unpublished_irq(route)
+                            .map_err(core::mem::forget)
+                            .is_ok()
+                    })
+                };
+                if cancelled != Ok(true) {
+                    return Err(IrqEnableError::retained(EIO));
+                }
                 event.begin_close();
                 // SAFETY: RequestError returned actual untouched owners before
                 // Slot/root/source publication, so this new event has no native
@@ -1344,6 +1367,7 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         .map(|claimed| Line {
             config: claimed.device.config.clone(),
             msi: claimed.device.msi,
+            custody: claimed.device.custody.clone(),
             registration: None,
             retired: None,
         })

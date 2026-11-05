@@ -18,6 +18,7 @@ use stela_boot_core::crs;
 use stela_boot_core::irq_context as context;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod diagnostic;
+pub(crate) mod direct;
 pub use stela_boot_core::ioapic;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod level_diagnostic;

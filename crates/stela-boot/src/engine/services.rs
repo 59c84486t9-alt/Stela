@@ -472,11 +472,18 @@ unsafe impl Root for UnremappedRoot {
 struct UnremappedAttachment(Arc<Passthrough>);
 
 // SAFETY: the domain is this requester's untranslated physical view, kept
-// with its binding. With no root to block and no lease ledger to prove the
+// with its binding, and its messages reach the APIC untranslated. With no root to block and no lease ledger to prove the
 // requester unmapped, detach refuses before any effect and keeps them all.
 unsafe impl AttachmentBackend for UnremappedAttachment {
     fn domain(&self) -> Arc<dyn DmaDomain> {
         self.0.clone()
+    }
+    fn irq_owner(
+        &mut self,
+        _requester: &stela_drivers::bus::pci::requester::RequesterId,
+        _config: Option<&stela_drivers::bus::pci::owned::ConfigRetention>,
+    ) -> Result<Option<Box<dyn stela_drivers::bus::irq::posted_msi::RouteOwner>>, DmaError> {
+        Ok(Some(crate::native_irq::direct::route_owner()))
     }
     unsafe fn detach(&mut self) -> Result<(), DetachError> {
         Err(DetachError::Unexposed(DmaError::IommuUnavailable))
