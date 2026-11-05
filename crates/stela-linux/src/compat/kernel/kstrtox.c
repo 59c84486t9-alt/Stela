@@ -123,6 +123,34 @@ int kstrtou16(const char *s, unsigned int base, u16 *res)
 	return 0;
 }
 
+/* Original lib/kstrtox.c accepts initials and does not inspect suffixes. */
+int kstrtobool(const char *value, bool *result)
+{
+	if (!value)
+		return -EINVAL;
+	switch (value[0]) {
+	case 'e': case 'E': case 'y': case 'Y': case 't': case 'T': case '1':
+		*result = true;
+		return 0;
+	case 'd': case 'D': case 'n': case 'N': case 'f': case 'F': case '0':
+		*result = false;
+		return 0;
+	case 'o': case 'O':
+		if (value[1] == 'n' || value[1] == 'N') {
+			*result = true;
+			return 0;
+		}
+		if (value[1] == 'f' || value[1] == 'F') {
+			*result = false;
+			return 0;
+		}
+		break;
+	default:
+		break;
+	}
+	return -EINVAL;
+}
+
 #ifdef STELA_LINUX_KSTRTOX_TEST
 #include <stela/test.h>
 
@@ -152,6 +180,13 @@ int main(void)
 	assert(kstrtoint("-2147483649", 10, &s32_value) == -ERANGE && s32_value == INT_MIN);
 	assert(!kstrtoint("2147483647", 10, &s32_value) && s32_value == INT_MAX);
 	assert(kstrtoint("2147483648", 10, &s32_value) == -ERANGE && s32_value == INT_MAX);
+	bool boolean;
+	assert(!kstrtobool("Enabled\n", &boolean) && boolean);
+	assert(!kstrtobool("oF", &boolean) && !boolean);
+	assert(!kstrtobool("OnSuffix", &boolean) && boolean);
+	assert(kstrtobool("o", &boolean) == -EINVAL && boolean);
+	assert(kstrtobool("", &boolean) == -EINVAL && boolean);
+	assert(kstrtobool(NULL, &boolean) == -EINVAL && boolean);
 	printf("Linux integer parsing: signs, bases, bounds and trailing newline passed\n");
 	return 0;
 }

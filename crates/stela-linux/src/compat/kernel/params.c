@@ -398,34 +398,13 @@ int param_get_ullong(char *buffer, const struct kernel_param *parameter)
 	return scnprintf(buffer, PAGE_SIZE, "%llu\n", *(unsigned long long *)parameter->arg);
 }
 
-/* Pinned kstrtobool checks initials, not complete words or suffixes. */
 static int boolean_value(const char *value, bool *result)
 {
-	if (!value) {
-		*result = true;
-		return 0;
-	}
-	switch (value[0]) {
-	case 'e': case 'E': case 'y': case 'Y': case 't': case 'T': case '1':
-		*result = true;
-		return 0;
-	case 'd': case 'D': case 'n': case 'N': case 'f': case 'F': case '0':
-		*result = false;
-		return 0;
-	case 'o': case 'O':
-		if (value[1] == 'n' || value[1] == 'N') {
-			*result = true;
-			return 0;
-		}
-		if (value[1] == 'f' || value[1] == 'F') {
-			*result = false;
-			return 0;
-		}
-		break;
-	default:
-		break;
-	}
-	return -EINVAL;
+	if (value)
+		return kstrtobool(value, result);
+	/* A module parameter with no assigned value means true. */
+	*result = true;
+	return 0;
 }
 
 int param_set_bool(const char *value, const struct kernel_param *parameter)
