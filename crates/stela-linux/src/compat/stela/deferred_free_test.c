@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-/* Original nonbatched RCU-free helpers over actual canonical C allocator and
- * RCU implementations. ELF wrappers observe real heap/queue routes, never
- * replace their effects. The hosted heap and CPU are explicit model peers. */
+/* Original nonbatched RCU-free helpers. The hosted source fixture joins real
+ * RCU and both fixtures observe the actual allocator/queue through ELF wrappers. */
 #include <linux/bottom_half.h>
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
@@ -15,11 +14,12 @@ void *__real_stela_linux_heap_alloc(size_t, size_t);
 void __real_stela_linux_heap_free(void *, size_t, size_t);
 void __real_call_rcu(struct rcu_head *, rcu_callback_t);
 
-static bool capture_allocation, forbid_free, forbid_enqueue;
-static void *captured_base;
-static const struct rcu_head *expected_callback;
-static unsigned int captured_frees, queued;
-static unsigned long required_cookie;
+/* All original continuations in the fixture run on the same host thread. */
+static _Thread_local bool capture_allocation, forbid_free, forbid_enqueue;
+static _Thread_local void *captured_base;
+static _Thread_local const struct rcu_head *expected_callback;
+static _Thread_local unsigned int captured_frees, queued;
+static _Thread_local unsigned long required_cookie;
 
 void *__wrap_stela_linux_heap_alloc(size_t size, size_t align)
 {
@@ -55,11 +55,8 @@ void __wrap_call_rcu(struct rcu_head *head, rcu_callback_t callback)
 	__real_call_rcu(head, callback);
 }
 
-struct record {
-	u8 prefix[64];
-	struct rcu_head head;
-	u8 payload[32];
-};
+#ifdef STELA_LINUX_DEFERRED_FREE_SOURCE_TEST
+void stela_linux_deferred_free_source_test(void);
 
 static void reset_observer(void)
 {
@@ -116,6 +113,21 @@ static void headless(void)
 	kvfree(NULL);
 	kvfree(ZERO_SIZE_PTR);
 }
+
+void stela_linux_deferred_free_source_test(void)
+{
+	embedded(0);
+	embedded(64);
+	embedded(4080);
+	headless();
+}
+#else
+
+struct record {
+	u8 prefix[64];
+	struct rcu_head head;
+	u8 payload[32];
+};
 
 static void bad_context(void)
 {
@@ -198,10 +210,6 @@ int main(void)
 {
 	stela_linux_enter(&stela_linux_bare);
 	raw_allocation_lifetimes();
-	embedded(0);
-	embedded(64);
-	embedded(4080);
-	headless();
 	assert(stela_test_traps(bad_context));
 	assert(stela_test_traps(foreign));
 	assert(stela_test_traps(mismatched_base));
@@ -209,6 +217,7 @@ int main(void)
 	assert(stela_test_traps(offset_too_large));
 	assert(stela_test_traps(early_callback));
 	stela_linux_exit();
-	printf("Canonical RCU free: 129 live allocation lifetimes,3 embedded offsets, headless grace and6 before-effect refusals passed\n");
+	printf("Canonical allocation: 129 lifetimes and six deferred-free refusals passed\n");
 	return 0;
 }
+#endif

@@ -12,6 +12,29 @@
 #include <stela/page.h>
 #include <stela/resources.h>
 #include <stela/test.h>
+
+#ifdef STELA_LINUX_RESOURCES_SOURCE_TEST
+void stela_linux_exec_state_source_test(void);
+
+void stela_linux_exec_state_source_test(void)
+{
+    unsigned int initial_refs = refcount_read(&init_task_exec_state.count);
+    struct task_exec_state *value = alloc_task_exec_state(&init_user_ns);
+    assert(value && value->user_ns == &init_user_ns && value->dumpable == TASK_DUMPABLE_OFF);
+    refcount_inc(&value->count);
+    put_task_exec_state(value);
+    assert(refcount_read(&value->count) == 1);
+    unsigned long address = (unsigned long)value;
+    rcu_read_lock();
+    put_task_exec_state(value);
+    struct stela_linux_allocation allocation;
+    assert(stela_linux_allocation_range(value, sizeof(*value), &allocation));
+    rcu_read_unlock();
+    stela_linux_rcu_finish();
+    assert(!stela_linux_allocation_range((void *)address, sizeof(*value), &allocation));
+    assert(refcount_read(&init_task_exec_state.count) == initial_refs);
+}
+#else
 #define PAGES 16U
 #define BYTES ((size_t)PAGES * PAGE_SIZE)
 #define PHYSICAL 0x400000000ULL
@@ -94,21 +117,12 @@ int main(void)
     memory.exhausted=true;
     assert(!alloc_task_exec_state(&init_user_ns));
     memory.exhausted=false;
-    struct task_exec_state *value=alloc_task_exec_state(&init_user_ns);
-    assert(value && value->user_ns==&init_user_ns && value->dumpable==TASK_DUMPABLE_OFF);
-    refcount_inc(&value->count); put_task_exec_state(value);
-    assert(refcount_read(&value->count)==1);
-    unsigned long address=(unsigned long)value;
-    rcu_read_lock(); put_task_exec_state(value);
-    struct stela_linux_allocation allocation;
-    assert(stela_linux_allocation_range(value,sizeof(*value),&allocation));
-    rcu_read_unlock(); stela_linux_rcu_finish();
-    assert(!stela_linux_allocation_range((void *)address,sizeof(*value),&allocation));
     assert(refcount_read(&init_task_exec_state.count)==2);
     assert(stela_linux_page_catalog_unregister(2)==-EBUSY);
     stela_linux_exit();
     /* The one kernel retains its initial caches/catalog/backing until process
-     * termination. Per-object refs and RCU cleanup above still ran normally. */
-    printf("Linux resources: original allocation/ref/RCU, fixed headers and kernel retention passed\n");
+     * termination. The hosted source fixture exercises exec-state RCU cleanup. */
+    printf("Linux resources: fixed headers, allocation refusal and kernel retention passed\n");
     return 0;
 }
+#endif

@@ -390,6 +390,18 @@ impl Linux {
             let helper_objects = helper.compile_intermediates();
             let mut fixture = configure();
             linux.environment.apply(&mut fixture, None, &[], None);
+            if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+                fixture
+                    .define("STELA_LINUX_DEFERRED_FREE_SOURCE_TEST", None)
+                    .define("STELA_LINUX_RESOURCES_SOURCE_TEST", None)
+                    .files([
+                        format!("{COMPAT}/stela/deferred_free_test.c"),
+                        format!("{COMPAT}/stela/resources_test.c"),
+                    ]);
+                for symbol in DEFERRED_FREE_OBSERVERS {
+                    println!("cargo:rustc-link-arg-tests=-Wl,--wrap={symbol}");
+                }
+            }
             fixture
                 .define("STELA_LINUX_TREES_TEST", None)
                 .define("STELA_LINUX_TREES_CALLABLE", None)
@@ -482,11 +494,7 @@ impl Linux {
         // This fixture observes calls with the ELF linker's --wrap.
         if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
             let mut deferred = build.clone();
-            for symbol in [
-                "stela_linux_heap_alloc",
-                "stela_linux_heap_free",
-                "call_rcu",
-            ] {
+            for symbol in DEFERRED_FREE_OBSERVERS {
                 deferred.flag(format!("-Wl,--wrap={symbol}"));
             }
             tests.add(
@@ -614,6 +622,12 @@ impl Linux {
         }
     }
 }
+
+const DEFERRED_FREE_OBSERVERS: [&str; 3] = [
+    "stela_linux_heap_alloc",
+    "stela_linux_heap_free",
+    "call_rcu",
+];
 
 /// Generic kernel registrations precede every class's registrations in the
 /// canonical image, retaining one definition of their descriptor globals.

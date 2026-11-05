@@ -622,6 +622,8 @@ mod original_fixtures {
     unsafe extern "C" {
         fn stela_linux_timer_test_sleeper();
         fn stela_linux_srcu_source_cases();
+        fn stela_linux_deferred_free_source_test();
+        fn stela_linux_exec_state_source_test();
         fn stela_linux_srcu_queue_before_threads();
         fn stela_linux_srcu_negative_case(which: u32, witness: unsafe extern "C" fn());
         fn stela_linux_workqueue_test_main();
@@ -710,6 +712,18 @@ mod original_fixtures {
         );
     }
 
+    #[test]
+    fn original_rcu_reclaims_allocations_after_the_observed_grace_period() {
+        in_fresh_process(
+            "original_fixtures::original_rcu_reclaims_allocations_after_the_observed_grace_period",
+            "original deferred-free callbacks reclaimed their allocations",
+            16 * 1024,
+            14,
+            mount_deferred_free,
+            drive_deferred_free,
+        );
+    }
+
     const SRCU_WITNESS: &str = "entered original SRCU refusal case\n";
 
     #[test]
@@ -777,6 +791,16 @@ mod original_fixtures {
         0
     }
 
+    unsafe extern "C" fn deferred_free_job(_: *mut c_void) -> i32 {
+        // SAFETY: the original task owns its C allocation and RCU joins.
+        unsafe {
+            stela_linux_deferred_free_source_test();
+            stela_linux_exec_state_source_test();
+        }
+        BODY_RETURNED.store(true, Ordering::Relaxed);
+        0
+    }
+
     unsafe extern "C" fn srcu_witness() {
         let bytes = SRCU_WITNESS.as_bytes();
         // SAFETY: resident bytes and the child process's captured stderr.
@@ -826,6 +850,11 @@ mod original_fixtures {
         unsafe { mount(owner, context, srcu_negative_job, c"srcu-refusal", None) }
     }
 
+    unsafe extern "C" fn mount_deferred_free(owner: *const RawOwner, context: *mut c_void) -> ! {
+        // SAFETY: exact retained Initial scope and live fixture callback.
+        unsafe { mount(owner, context, deferred_free_job, c"deferred-free", None) }
+    }
+
     unsafe fn mount(
         owner: *const RawOwner,
         context: *mut c_void,
@@ -868,6 +897,12 @@ mod original_fixtures {
     fn drive_srcu(runtime: Pin<&TestRuntime>, _: &HostedClock, _: &TestQueue) {
         await_fixture(runtime);
         println!("original SRCU grace periods and cleanup completed");
+        process::exit(0);
+    }
+
+    fn drive_deferred_free(runtime: Pin<&TestRuntime>, _: &HostedClock, _: &TestQueue) {
+        await_fixture(runtime);
+        println!("original deferred-free callbacks reclaimed their allocations");
         process::exit(0);
     }
 
