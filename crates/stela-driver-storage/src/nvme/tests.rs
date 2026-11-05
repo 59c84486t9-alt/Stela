@@ -840,7 +840,9 @@ fn due_retries_publish_before_expired_commands_abort_in_tag_order() {
         .admin
         .submissions
         .bytes()
-        .chunks_exact(64)
+        .as_chunks::<64>()
+        .0
+        .iter()
         .zip([first_id, last_id])
     {
         assert_eq!(entry[0], ADMIN_ABORT);
