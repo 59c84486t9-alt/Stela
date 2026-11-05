@@ -38,6 +38,8 @@ pub mod service;
 pub mod srcu;
 #[cfg(all(feature = "kernel", target_arch = "x86_64"))]
 pub mod task;
+#[cfg(all(feature = "hosted-test-support", target_os = "linux"))]
+pub mod test_heap;
 #[cfg(all(feature = "kernel", target_arch = "x86_64"))]
 pub mod threads;
 

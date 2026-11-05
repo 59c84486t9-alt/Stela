@@ -5,145 +5,15 @@ extern crate std;
 use super::*;
 use crate::owner::RawOwner;
 use alloc::{boxed::Box, vec::Vec};
-use core::{
-    alloc::{GlobalAlloc, Layout},
-    cell::UnsafeCell,
-    ops::Range,
-    ptr,
-    sync::atomic::{AtomicPtr, AtomicUsize},
-};
-use std::{alloc::System, sync::Mutex, thread};
+use core::{ops::Range, ptr, sync::atomic::AtomicPtr};
+use std::{sync::Mutex, thread};
 use stela_driver_base::platform::image::NativeReadOnlyImage;
 use stela_driver_base::platform::work::service;
 use stela_driver_base::platform::work::{Cpu, Executor, Kind, Queue, Stack, StackBacking};
 
-/// Page-aligned backing, reached only through the raw storage pointer.
-#[repr(align(4096))]
-struct Span(
-    #[expect(dead_code, reason = "reached only through the raw storage pointer")] [u8; 64 * 1024],
-);
-struct Raw {
-    storage: UnsafeCell<Span>,
-    enabled: AtomicBool,
-    occupied: AtomicBool,
-    size: AtomicUsize,
-    align: AtomicUsize,
-}
-// SAFETY: allocation wins one CAS; its unique live owner excludes concurrent
-// read/free/reuse of the raw bytes. No libc allocation/growth/lock fallback.
-unsafe impl Sync for Raw {}
-static RAW: Raw = Raw {
-    storage: UnsafeCell::new(Span([0; 64 * 1024])),
-    enabled: AtomicBool::new(false),
-    occupied: AtomicBool::new(false),
-    size: AtomicUsize::new(0),
-    align: AtomicUsize::new(0),
-};
-impl Raw {
-    fn base(&self) -> *mut u8 {
-        self.storage.get().cast::<u8>()
-    }
-    unsafe fn allocate(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: sole test-only C counter owner; fixed atomics and a
-        // refusal flag, with no allocator/lock/drop/spin or replacement.
-        if !unsafe { stela_test_allocation_attempt(1) } {
-            return ptr::null_mut();
-        }
-        if !self.enabled.load(Ordering::Acquire)
-            || layout.size() == 0
-            || layout.size() > 64 * 1024
-            || layout.align() > 4096
-        {
-            return ptr::null_mut();
-        }
-        if self
-            .occupied
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            return ptr::null_mut();
-        }
-        self.size.store(layout.size(), Ordering::Relaxed);
-        self.align.store(layout.align(), Ordering::Relaxed);
-        // SAFETY: sole successful CAS owner holds the entire aligned span.
-        unsafe { ptr::write_bytes(self.base(), 0, layout.size()) };
-        self.base()
-    }
-    unsafe fn free(&self, pointer: *mut u8, layout: Layout) {
-        if pointer != self.base()
-            || !self.occupied.load(Ordering::Relaxed)
-            || layout.size() != self.size.load(Ordering::Relaxed)
-            || layout.align() != self.align.load(Ordering::Relaxed)
-        {
-            std::process::abort();
-        }
-        // SAFETY: unique exact-layout owner frees once, before release/reuse.
-        unsafe { ptr::write_bytes(pointer, 0xd3, layout.size()) };
-        self.occupied.store(false, Ordering::Release);
-    }
-    fn address_in_storage(&self, pointer: *const u8) -> bool {
-        (pointer as usize).wrapping_sub(self.base() as usize) < 64 * 1024
-    }
-}
-struct CanonicalHeap;
 #[global_allocator]
-static CANONICAL: CanonicalHeap = CanonicalHeap;
-// SAFETY: all ordinary layouts belong to System; the canonical raw try span
-// has exact base/layout/live identity and this SAME GlobalAlloc's free branch.
-// Raw free does not allocate/drop/spin. Other unit tests keep System behavior.
-unsafe impl GlobalAlloc for CanonicalHeap {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: observe this ordinary backend attempt once;
-        // refusal returns NULL before the SAME canonical System call.
-        if !unsafe { stela_test_allocation_attempt(0) } {
-            return ptr::null_mut();
-        }
-        // SAFETY: ordinary valid GlobalAlloc layout, delegated unchanged.
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: observe this ordinary backend attempt once;
-        // refusal returns NULL before the SAME canonical System call.
-        if !unsafe { stela_test_allocation_attempt(0) } {
-            return ptr::null_mut();
-        }
-        // SAFETY: same ordinary System owner and exact layout.
-        unsafe { System.alloc_zeroed(layout) }
-    }
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        if RAW.address_in_storage(pointer) {
-            // SAFETY: canonical raw span branch checks exact identity/layout.
-            unsafe { RAW.free(pointer, layout) };
-        } else {
-            // SAFETY: ordinary canonical allocation has this same System owner.
-            unsafe { System.dealloc(pointer, layout) };
-        }
-    }
-}
-unsafe fn try_allocate(layout: Layout) -> *mut u8 {
-    // SAFETY: immutable registry uses this canonical allocator's raw branch;
-    // matching free goes through the production Rust heap bridge.
-    unsafe { RAW.allocate(layout) }
-}
-#[unsafe(no_mangle)]
-extern "C" fn stela_test_heap_try_enable(enable: bool) {
-    if RAW.occupied.load(Ordering::Acquire) {
-        std::process::abort();
-    }
-    // Fixture policy only: false forces ordinary exhaustion; permanent registry
-    // capability stays installed. Caller excludes concurrent allocator users.
-    RAW.enabled.store(enable, Ordering::Release);
-}
-#[unsafe(no_mangle)]
-extern "C" fn stela_test_heap_try_contains(pointer: *const c_void) -> bool {
-    // Diagnostic contract: caller owns a live returned allocation and excludes
-    // concurrent free/reuse. occupied does not publish later size/align stores.
-    RAW.occupied.load(Ordering::Acquire)
-        && (pointer as usize).wrapping_sub(RAW.base() as usize) < RAW.size.load(Ordering::Relaxed)
-}
-
+static HEAP: crate::test_heap::TestHeap = crate::test_heap::TestHeap;
 unsafe extern "C" {
-    fn stela_test_allocation_attempt(route: u32) -> bool;
     fn stela_linux_trees_fixture() -> i32;
     fn stela_linux_task_test_taskless();
     fn stela_linux_percpu_fixture(context: *mut c_void);
@@ -487,7 +357,7 @@ pub(crate) fn run_trees_child() {
 fn trees_child() {
     // SAFETY: isolated single test child; same canonical GlobalAlloc owns this
     // real raw span and ordinary System storage until exact-layout free.
-    assert!(unsafe { crate::heap::register(try_allocate) }.is_ok());
+    assert!(crate::test_heap::register());
     // SAFETY: the C test hook only checks task state on this thread's entered continuation.
     unsafe { stela_linux_task_test_taskless() };
     // SAFETY: taskless dispatcher, before any TaskBinding attach;
@@ -566,7 +436,7 @@ fn trees_child() {
         f.late.lock().unwrap().as_ref().unwrap().wake(),
         Err(WorkError::Closed)
     );
-    assert!(!RAW.occupied.load(Ordering::Acquire));
+    assert!(!crate::test_heap::span_occupied());
     assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
     runtime.queue().close().unwrap();
     // SAFETY: the queue is closed and this test thread is the only producer; pending work is a
@@ -1390,7 +1260,7 @@ mod rt_mutex;
 fn mutex_child() {
     // SAFETY: isolated canonical allocator registry, same real GlobalAlloc
     // owns ordinary and raw-span allocations and their exact-layout frees.
-    assert!(unsafe { crate::heap::register(try_allocate) }.is_ok());
+    assert!(crate::test_heap::register());
     assert_eq!(core::mem::size_of::<MutexCall>(), 24);
     let dropped = Arc::new(AtomicU64::new(0));
     // Scenario 5 is retired: nothing runs during a waiter's PREPARE that
@@ -1460,7 +1330,7 @@ fn mutex_child() {
         drop(executor);
         assert_eq!(dropped.load(Ordering::Relaxed), (round as u64 + 1) * 4);
         assert_eq!(quarantined(), 0);
-        assert!(!RAW.occupied.load(Ordering::Acquire));
+        assert!(!crate::test_heap::span_occupied());
         // SAFETY: the C test hook only checks task state on this thread's entered continuation.
         unsafe { stela_linux_task_test_taskless() };
     }
