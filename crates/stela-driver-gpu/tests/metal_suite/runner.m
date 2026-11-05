@@ -5716,8 +5716,10 @@ int main(int argc, const char **argv)
 	@autoreleasepool {
 		case_lookups = [NSMutableDictionary new];
 		lookup_tables = [NSMutableDictionary new];
-		/* Launched by launchd as the bundle's share service. */
-		if (getenv("XPC_SERVICE_NAME"))
+		/* launchd names every job it starts, not only this service: a
+		 * console shell has "0". Only the service's own name selects it. */
+		const char *service = getenv("XPC_SERVICE_NAME");
+		if (service && !strcmp(service, share_service.UTF8String))
 			return serve_shares();
 		if (argc < 3) {
 			fprintf(stderr, "usage: %s PLAN_DIR RESULTS_DIR [--only SUBSTRING]... [--skip-done]\n", argv[0]);
