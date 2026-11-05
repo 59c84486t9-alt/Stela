@@ -256,6 +256,48 @@ fn formats() -> Vec<Format> {
             let q = fields(word(b), &[10, 10, 10, 2]);
             [q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64]
         }),
+        entry!("a8unorm", 1, Float, |b| [
+            0.0,
+            0.0,
+            0.0,
+            unorm(b[0].into(), 8)
+        ]),
+        entry!("r8unorm_srgb", 1, Float, |b| lanes(&[srgb(unorm(
+            b[0].into(),
+            8
+        ))])),
+        entry!("rg8unorm_srgb", 2, Float, |b| lanes(&[
+            srgb(unorm(b[0].into(), 8)),
+            srgb(unorm(b[1].into(), 8))
+        ])),
+        entry!("rg8snorm", 2, Float, |b| lanes(&[
+            snorm(b[0].into(), 8),
+            snorm(b[1].into(), 8)
+        ])),
+        entry!("rg16snorm", 4, Float, |b| lanes(&[
+            snorm(short(b, 0), 16),
+            snorm(short(b, 1), 16)
+        ])),
+        entry!("r8sint", 1, Int, |b| lanes(&[b[0] as i8 as f64])),
+        entry!("rg8sint", 2, Int, |b| lanes(&[
+            b[0] as i8 as f64,
+            b[1] as i8 as f64
+        ])),
+        entry!("r16sint", 2, Int, |b| lanes(&[
+            signed(short(b, 0), 16) as f64
+        ])),
+        entry!("rg16uint", 4, Uint, |b| lanes(&[
+            short(b, 0) as f64,
+            short(b, 1) as f64
+        ])),
+        entry!("rg16sint", 4, Int, |b| lanes(&[
+            signed(short(b, 0), 16) as f64,
+            signed(short(b, 1), 16) as f64
+        ])),
+        entry!("rg32sint", 8, Int, |b| lanes(&[
+            word(b) as u32 as i32 as f64,
+            word(&b[4..]) as u32 as i32 as f64
+        ])),
     ]
 }
 
@@ -540,6 +582,11 @@ struct Sampler {
     border: &'static str,
     lod: Option<(f64, f64)>,
     compare: Option<&'static str>,
+    /// How filtered texels combine: their weighted average, or the
+    /// minimum or maximum of those with weight.
+    reduction: &'static str,
+    lod_bias: f64,
+    anisotropy: u32,
 }
 
 impl Sampler {
@@ -553,6 +600,9 @@ impl Sampler {
             border: "transparent_black",
             lod: None,
             compare: None,
+            reduction: "weighted_average",
+            lod_bias: 0.0,
+            anisotropy: 1,
         }
     }
 
@@ -567,6 +617,15 @@ impl Sampler {
         }
         if let Some(c) = self.compare {
             s["compare"] = json!(c);
+        }
+        if self.reduction != "weighted_average" {
+            s["reduction"] = json!(self.reduction);
+        }
+        if self.lod_bias != 0.0 {
+            s["lod_bias"] = json!(self.lod_bias);
+        }
+        if self.anisotropy > 1 {
+            s["anisotropy"] = json!(self.anisotropy);
         }
         s
     }
@@ -630,7 +689,11 @@ impl Level {
         let (x0, fx) = axis(x, true);
         let (y0, fy) = axis(y, dims > 1);
         let (z0, fz) = axis(z, dims > 2);
-        let mut out = [0.0; 4];
+        let mut out = match s.reduction {
+            "minimum" => [f64::INFINITY; 4],
+            "maximum" => [f64::NEG_INFINITY; 4],
+            _ => [0.0; 4],
+        };
         for dz in 0..if dims > 2 { 2 } else { 1 } {
             for dy in 0..if dims > 1 { 2 } else { 1 } {
                 for dx in 0..2 {
@@ -647,7 +710,12 @@ impl Level {
                         });
                     let t = self.fetch(s, x0 + dx, y0 + dy, z0 + dz);
                     for k in 0..4 {
-                        out[k] += t[k] * weight;
+                        out[k] = match s.reduction {
+                            "minimum" if weight > 0.0 => out[k].min(t[k]),
+                            "maximum" if weight > 0.0 => out[k].max(t[k]),
+                            "minimum" | "maximum" => out[k],
+                            _ => out[k] + t[k] * weight,
+                        };
                     }
                 }
             }
@@ -660,7 +728,10 @@ impl Level {
 /// coordinates and a level of detail.
 fn sample(levels: &[Level], s: &Sampler, uvw: [f64; 3], lod: f64, dims: u32) -> Texel {
     let (lo, hi) = s.lod.unwrap_or((0.0, 1000.0));
-    let lod = lod.max(lo).min(hi).min((levels.len() - 1) as f64);
+    let lod = (lod + s.lod_bias)
+        .max(lo)
+        .min(hi)
+        .min((levels.len() - 1) as f64);
     let linear = if lod <= 0.0 { s.mag } else { s.min } == "linear";
     let at = |l: usize| levels[l].filter(s, linear, uvw[0], uvw[1], uvw[2], dims);
     match s.mip {
@@ -674,7 +745,11 @@ fn sample(levels: &[Level], s: &Sampler, uvw: [f64; 3], lod: f64, dims: u32) -> 
                 return first;
             }
             let second = at(base + 1);
-            [0, 1, 2, 3].map(|k| first[k] * (1.0 - frac) + second[k] * frac)
+            [0, 1, 2, 3].map(|k| match s.reduction {
+                "minimum" => first[k].min(second[k]),
+                "maximum" => first[k].max(second[k]),
+                _ => first[k] * (1.0 - frac) + second[k] * frac,
+            })
         }
     }
 }
@@ -712,7 +787,11 @@ fn samplers() -> Vec<Sampler> {
     clamp.lod = Some((1.0, 2.5));
     let mut min_mag = mip("min_mag", "nearest", "nearest");
     min_mag.mag = "linear";
+    // An explicit level of detail leaves anisotropy nothing to change.
+    let mut aniso = mip("anisotropic", "linear", "linear");
+    aniso.anisotropy = 16;
     out.extend([
+        aniso,
         black,
         white,
         mixed,
@@ -949,6 +1028,59 @@ fn forms(plan: &mut Plan, library: &str, rng: &mut Random) {
                 .texture(tex())
                 .sampler(lin.json()),
         );
+    }
+    // The same gradients through samplers that bias the computed level
+    // of detail or reduce the footprint to its minimum or maximum.
+    if plan.has(SOURCE, "sample2d_grad") {
+        let mut biased = Sampler::new("biased", "linear", "repeat");
+        biased.mip = "linear";
+        biased.lod_bias = 0.75;
+        let reduced = |reduction| {
+            let mut s = Sampler::new("reduced", "linear", "repeat");
+            s.mip = "linear";
+            s.reduction = reduction;
+            s
+        };
+        for (label, sampler) in [
+            ("lod_bias", biased),
+            ("reduction.minimum", reduced("minimum")),
+            ("reduction.maximum", reduced("maximum")),
+        ] {
+            let mut coords = vec![];
+            let mut expected = vec![];
+            for p in &pts {
+                // A level that the bias keeps off the last one.
+                let lod = lattice(p[3] * 0.7);
+                let dx = f32r(2f64.powf(lod) / 16.0);
+                coords.extend([p[0], p[1], dx, dx]);
+                expected.extend(sample(&levels, &sampler, [p[0], p[1], 0.0], lod, 2).map(f32r));
+            }
+            let mut case = Case::compute1(
+                &format!("texture.sample.gradient.{label}"),
+                library,
+                "sample2d_grad",
+                256,
+            )
+            .buffer(Buffer::data("coords", 0, f32s(&coords)))
+            .buffer(Buffer::zeroed("out", 1, 256 * 16))
+            .output(
+                Output::new("out", Dtype::F32, mip.clone()).expect(f32s(&expected), mip.clone()),
+            )
+            .texture(tex())
+            .sampler(sampler.json());
+            // Both are macOS 26 sampler properties the M1 Pro ignores: it
+            // filters by weighted average at the unbiased level.
+            let ignored = if label == "lod_bias" {
+                "lodBias"
+            } else {
+                "reductionMode"
+            };
+            case = case.set(
+                "reference_divergence",
+                format!("the M1 Pro ignores {ignored}"),
+            );
+            plan.add(case);
+        }
     }
     // gradient2d((c.z, 0), (0, c.z)) with min_lod_clamp(c.w).
     let mut coords = vec![];
@@ -1347,10 +1479,12 @@ fn encode(name: &str, values: &[f64]) -> Vec<u8> {
         v.iter()
             .flat_map(|&x| (x as i64 as u32).to_le_bytes())
             .collect()
-    } else if name.ends_with("16uint") {
-        v.iter().flat_map(|&x| (x as u16).to_le_bytes()).collect()
-    } else if name.ends_with("8uint") {
-        v.iter().map(|&x| x as u8).collect()
+    } else if name.ends_with("16uint") || name.ends_with("16sint") {
+        v.iter()
+            .flat_map(|&x| (x as i64 as u16).to_le_bytes())
+            .collect()
+    } else if name.ends_with("8uint") || name.ends_with("8sint") {
+        v.iter().map(|&x| x as i64 as u8).collect()
     } else {
         panic!("no encoder for {name}")
     }
@@ -1406,6 +1540,74 @@ fn writes(plan: &mut Plan, library: &str) {
                 texels_as(dtype, &texels.concat()),
             ))
             .output(Output::new("t", Dtype::U8, Tolerance::default()).expect_same(expected))
+            .texture(t2d("t", name, w, h).usage(&["read", "write"])),
+        );
+    }
+    // Every other format Metal makes writable on Apple7 and Mac2 GPUs:
+    // texels written as they read back give their bytes again. Signed
+    // normalized texels avoid their most negative value, which reads as
+    // -1 like the one above it.
+    for name in [
+        "r8snorm",
+        "r8uint",
+        "r8sint",
+        "r16unorm",
+        "r16snorm",
+        "r16uint",
+        "r16sint",
+        "r16float",
+        "rg8snorm",
+        "rg8uint",
+        "rg8sint",
+        "rg16unorm",
+        "rg16snorm",
+        "rg16uint",
+        "rg16sint",
+        "rg16float",
+        "rgba8snorm",
+        "rgba8sint",
+        "bgra8unorm",
+        "rgb10a2unorm",
+        "rgb10a2uint",
+        "rg32uint",
+        "rg32sint",
+        "rgba16unorm",
+        "rgba16snorm",
+        "rgba16sint",
+    ] {
+        let f = format_named(name);
+        let texels: Vec<Vec<u8>> = (0..w * h)
+            .map(|_| {
+                loop {
+                    let t = texel_bytes(&f, &mut rng);
+                    let lane = if name.contains("16") { 2 } else { 1 };
+                    let lowest = t.chunks(lane).any(|c| match lane {
+                        1 => c[0] == 0x80,
+                        _ => c == [0x00, 0x80],
+                    });
+                    if !(name.contains("snorm") && lowest) {
+                        break t;
+                    }
+                }
+            })
+            .collect();
+        let (shader, dtype) = match f.kind {
+            Kind::Float => ("float", Dtype::F32),
+            Kind::Uint => ("uint", Dtype::U32),
+            Kind::Int => ("int", Dtype::I32),
+        };
+        let values: Vec<f64> = texels.iter().flat_map(|t| decode(&f, t)).collect();
+        plan.add(
+            Case::compute(
+                &format!("texture.write.{name}"),
+                library,
+                &format!("write2d_{shader}"),
+                [w, h, 1],
+                [8, 8, 1],
+            )
+            .dispatch_threads()
+            .buffer(Buffer::data("values", 0, texels_as(dtype, &values)))
+            .output(Output::new("t", Dtype::U8, Tolerance::default()).expect_same(texels.concat()))
             .texture(t2d("t", name, w, h).usage(&["read", "write"])),
         );
     }
@@ -1486,6 +1688,12 @@ fn writes(plan: &mut Plan, library: &str) {
             .requires(&[], &["read_write_textures_tier2"]),
         );
     }
+    if plan.has(SOURCE, "read_write") {
+        read_write_formats(plan, library, &mut rng);
+    }
+    if plan.has(SOURCE, "texture_atomics_ops") {
+        texture_atomic_ops(plan, library, &mut rng);
+    }
     if plan.has(SOURCE, "texture_atomics") {
         let n = 1024;
         let values: Vec<u32> = (0..n).map(|_| rng.u32() % 100_000).collect();
@@ -1508,6 +1716,223 @@ fn writes(plan: &mut Plan, library: &str) {
                 ),
         );
     }
+}
+
+/// Every format read-write textures of tier 2 support, each texel read,
+/// changed and written back in place.
+fn read_write_formats(plan: &mut Plan, library: &str, rng: &mut Random) {
+    let (w, h) = (8u32, 8u32);
+    for (name, lanes, kind) in [
+        ("rgba16float", 4, Kind::Float),
+        ("rgba8unorm", 4, Kind::Float),
+        ("r32float", 1, Kind::Float),
+        ("r16float", 1, Kind::Float),
+        ("r8unorm", 1, Kind::Float),
+        ("rgba32uint", 4, Kind::Uint),
+        ("rgba16uint", 4, Kind::Uint),
+        ("rgba8uint", 4, Kind::Uint),
+        ("r32uint", 1, Kind::Uint),
+        ("r16uint", 1, Kind::Uint),
+        ("r8uint", 1, Kind::Uint),
+        ("rgba32sint", 4, Kind::Int),
+        ("rgba16sint", 4, Kind::Int),
+        ("rgba8sint", 4, Kind::Int),
+        ("r32sint", 1, Kind::Int),
+        ("r16sint", 1, Kind::Int),
+        ("r8sint", 1, Kind::Int),
+    ] {
+        let bits: i64 = if name.contains("32") {
+            32
+        } else if name.contains("16") {
+            16
+        } else {
+            8
+        };
+        // Integers small enough that three times one plus another stays
+        // in range; floats exact in their format.
+        let value = |rng: &mut Random| -> f64 {
+            match kind {
+                Kind::Uint => (rng.u32() as i64 % (1i64 << (bits - 3))) as f64,
+                Kind::Int => {
+                    ((rng.u32() as i64 % (1i64 << (bits - 3))) - (1i64 << (bits - 4))) as f64
+                }
+                Kind::Float if name.contains("8unorm") => f64::from(rng.u32() % 256) / 255.0,
+                Kind::Float if name.contains("16float") => f16r(rng.uniform(-8.0, 8.0)),
+                Kind::Float => f32r(rng.uniform(-8.0, 8.0)),
+            }
+        };
+        let mut texels = vec![];
+        let mut expected = vec![];
+        for _ in 0..w * h {
+            let mut v = [0.0, 0.0, 0.0, 1.0];
+            for lane in v.iter_mut().take(lanes) {
+                *lane = value(rng);
+            }
+            texels.extend(encode(name, &v));
+            let rotated = [v[1], v[2], v[3], v[0]];
+            let out: Vec<f64> = match kind {
+                Kind::Float => [v[3], v[2], v[1], v[0]]
+                    .iter()
+                    .map(|x| f32r(x * 0.5 + 0.25))
+                    .collect(),
+                Kind::Uint => (0..4).map(|k| v[k] * 3.0 + rotated[k] + 1.0).collect(),
+                Kind::Int => (0..4).map(|k| v[k] * 3.0 + rotated[k] - 1.0).collect(),
+            };
+            let out: Vec<f64> = if name.contains("16float") {
+                out.iter().map(|&x| f16r(x)).collect()
+            } else {
+                out
+            };
+            expected.extend(encode(name, &out));
+        }
+        let shader = match kind {
+            Kind::Float => "read_write",
+            Kind::Uint => "read_write_uint",
+            Kind::Int => "read_write_int",
+        };
+        // Unorm results round to the nearest step, half results either
+        // way from a float.
+        let (dtype, tol) = if name.contains("unorm") {
+            (Dtype::U8, Tolerance::units(1.0))
+        } else if name.contains("16float") {
+            (Dtype::F16, Tolerance::ulp(1.0))
+        } else {
+            (Dtype::U8, Tolerance::default())
+        };
+        plan.add(
+            Case::compute(
+                &format!("texture.read_write.{name}"),
+                library,
+                shader,
+                [w, h, 1],
+                [8, 8, 1],
+            )
+            .dispatch_threads()
+            .output(Output::new("t", dtype, tol.clone()).expect(expected, tol))
+            .texture(t2d("t", name, w, h).usage(&["read", "write"]).data(texels))
+            .requires(&[], &["read_write_textures_tier2"]),
+        );
+    }
+}
+
+/// Each texture atomic on 32-bit unsigned and signed texels, a compare
+/// and exchange only one thread wins, and atomics on every texture type.
+fn texture_atomic_ops(plan: &mut Plan, library: &str, rng: &mut Random) {
+    let n = 512u32;
+    for (format, signed) in [("r32uint", false), ("r32sint", true)] {
+        let values: Vec<u32> = (0..n).map(|_| rng.u32()).collect();
+        let mut row: [u32; 8] = [
+            0,
+            0,
+            u32::MAX,
+            0,
+            0,
+            if signed { i32::MAX as u32 } else { u32::MAX },
+            if signed { i32::MIN as u32 } else { 0 },
+            0,
+        ];
+        let initial = row;
+        for (i, &v) in values.iter().enumerate() {
+            let t = &mut row[i % 8];
+            *t = match i % 8 {
+                0 => t.wrapping_add(v),
+                1 => t.wrapping_sub(v),
+                2 => *t & v,
+                3 => *t | v,
+                4 => *t ^ v,
+                5 if signed => (*t as i32).min(v as i32) as u32,
+                5 => (*t).min(v),
+                6 if signed => (*t as i32).max(v as i32) as u32,
+                6 => (*t).max(v),
+                _ => t.wrapping_add(1),
+            };
+        }
+        let mut data = u32s(&initial);
+        data.extend(vec![0u8; 32]);
+        let mut expected = u32s(&row);
+        expected.extend(vec![0u8; 32]);
+        let kernel = if signed {
+            "texture_atomics_int"
+        } else {
+            "texture_atomics_uint"
+        };
+        plan.add(
+            Case::compute1(&format!("texture.atomics.ops.{format}"), library, kernel, n)
+                .buffer(Buffer::data("values", 0, u32s(&values)))
+                .buffer(Buffer::zeroed("wins", 1, 16))
+                .output(
+                    Output::new("t", Dtype::U32, Tolerance::default())
+                        .expect_same(expected)
+                        .expect_mask([vec![1; 8], vec![0; 8]].concat()),
+                )
+                .output(
+                    Output::new("wins", Dtype::U32, Tolerance::default())
+                        .expect_same(u32s(&[1, 0, 0, 0])),
+                )
+                .texture(
+                    t2d("t", format, 8, 2)
+                        .usage(&["read", "write", "atomic"])
+                        .data(data),
+                ),
+        );
+    }
+    // 64 threads, each adding to texel i % 4 of each texture type.
+    let adds = |k: u32| u32s(&[16 * k; 4]);
+    let zeros = |texels: usize| vec![0u8; texels * 4];
+    let place = |texels: usize, at: usize, k: u32| {
+        let mut v = zeros(texels);
+        v[at * 4..at * 4 + 16].copy_from_slice(&adds(k));
+        v
+    };
+    plan.add(
+        Case::compute1(
+            "texture.atomics.types",
+            library,
+            "texture_atomics_types",
+            64,
+        )
+        .buffer(Buffer::zeroed("storage", 0, 256).unbound())
+        .texture(
+            Texture::new("t1", "r32uint", "1d", [4, 1, 1])
+                .index(0)
+                .usage(&["read", "write", "atomic"])
+                .data(zeros(4)),
+        )
+        .texture(
+            Texture::new("t1a", "r32uint", "1d_array", [4, 1, 1])
+                .array(2)
+                .index(1)
+                .usage(&["read", "write", "atomic"])
+                .data(zeros(8)),
+        )
+        .texture(
+            Texture::new("t2a", "r32uint", "2d_array", [4, 2, 1])
+                .array(2)
+                .index(2)
+                .usage(&["read", "write", "atomic"])
+                .data(zeros(16)),
+        )
+        .texture(
+            Texture::new("t3", "r32uint", "3d", [4, 2, 2])
+                .index(3)
+                .usage(&["read", "write", "atomic"])
+                .data(zeros(16)),
+        )
+        .texture(
+            Texture::new("tb", "r32uint", "buffer", [4, 1, 1])
+                .index(4)
+                .usage(&["read", "write", "atomic"])
+                .set("buffer", "storage"),
+        )
+        .output(Output::new("t1", Dtype::U32, Tolerance::default()).expect_same(adds(1)))
+        .output(Output::new("t1a", Dtype::U32, Tolerance::default()).expect_same(place(8, 4, 2)))
+        .output(Output::new("t2a", Dtype::U32, Tolerance::default()).expect_same(place(16, 12, 3)))
+        .output(Output::new("t3", Dtype::U32, Tolerance::default()).expect_same(place(16, 12, 4)))
+        .output(
+            Output::new("storage", Dtype::U32, Tolerance::default())
+                .expect_same([adds(5), vec![0; 240]].concat()),
+        ),
+    );
 }
 
 fn queries(plan: &mut Plan, library: &str) {
@@ -1951,6 +2376,7 @@ pub fn build(plan: &mut Plan) {
     writes(plan, &library);
     queries(plan, &library);
     variants(plan, &library, &mut Random::new(907));
+    super::compressed::build(plan, &library);
 }
 
 #[cfg(test)]

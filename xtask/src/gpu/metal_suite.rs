@@ -23,9 +23,11 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use std::{fs, path::PathBuf};
 
+mod api;
 mod arguments;
 mod blits;
 mod check;
+mod compressed;
 mod compute;
 mod convert;
 mod coverage;
@@ -200,6 +202,7 @@ fn build(plan: &mut plan::Plan) {
     stages::build(plan);
     resources::build(plan);
     extras::build(plan);
+    api::build(plan);
 }
 
 fn availability() -> Result<plan::Availability> {

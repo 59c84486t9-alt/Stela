@@ -778,6 +778,45 @@ fn store(format: &str, texel: [f64; 4]) -> (Vec<u8>, Dtype) {
             Dtype::U8,
         ),
         "r8unorm" => (vec![unorm_bytes(r, 8) as u8], Dtype::U8),
+        "r8snorm" => (vec![snorm_bits(r, 8) as u8], Dtype::U8),
+        "rg8snorm" => (
+            vec![snorm_bits(r, 8) as u8, snorm_bits(g, 8) as u8],
+            Dtype::U8,
+        ),
+        "r16unorm" => (u16s(&[unorm_bytes(r, 16)]), Dtype::U16),
+        "r16snorm" => (u16s(&[snorm_bits(r, 16)]), Dtype::U16),
+        "rg16unorm" => (u16s(&[unorm_bytes(r, 16), unorm_bytes(g, 16)]), Dtype::U16),
+        "rg16snorm" => (u16s(&[snorm_bits(r, 16), snorm_bits(g, 16)]), Dtype::U16),
+        "r8unorm_srgb" => (vec![unorm_bytes(srgb_encode(r), 8) as u8], Dtype::U8),
+        "rg8unorm_srgb" => (
+            vec![
+                unorm_bytes(srgb_encode(r), 8) as u8,
+                unorm_bytes(srgb_encode(g), 8) as u8,
+            ],
+            Dtype::U8,
+        ),
+        // Packed 16-bit formats, lanes from the least significant bits.
+        "abgr4unorm" => (
+            u16s(&[unorm_bytes(a, 4)
+                | unorm_bytes(b, 4) << 4
+                | unorm_bytes(g, 4) << 8
+                | unorm_bytes(r, 4) << 12]),
+            Dtype::U16,
+        ),
+        "a1bgr5unorm" => (
+            u16s(&[unorm_bytes(a, 1)
+                | unorm_bytes(b, 5) << 1
+                | unorm_bytes(g, 5) << 6
+                | unorm_bytes(r, 5) << 11]),
+            Dtype::U16,
+        ),
+        "bgr5a1unorm" => (
+            u16s(&[unorm_bytes(b, 5)
+                | unorm_bytes(g, 5) << 5
+                | unorm_bytes(r, 5) << 10
+                | unorm_bytes(a, 1) << 15]),
+            Dtype::U16,
+        ),
         "rg8unorm" => (
             vec![unorm_bytes(r, 8) as u8, unorm_bytes(g, 8) as u8],
             Dtype::U8,
@@ -874,12 +913,26 @@ fn targets(plan: &mut Plan, library: &str) {
         "r32float",
         "rg32float",
         "rg11b10float",
+        "r8snorm",
+        "rg8snorm",
+        "r16unorm",
+        "r16snorm",
+        "rg16unorm",
+        "rg16snorm",
+        "r8unorm_srgb",
+        "rg8unorm_srgb",
+        "abgr4unorm",
+        "a1bgr5unorm",
+        "bgr5a1unorm",
     ] {
         let float = format.contains("float");
         let snorm = format.contains("snorm");
         let steps = |lane: usize| match format {
             "b5g6r5unorm" if lane == 1 => 63.0,
             "b5g6r5unorm" => 31.0,
+            "abgr4unorm" => 15.0,
+            "a1bgr5unorm" | "bgr5a1unorm" if lane == 3 => 1.0,
+            "a1bgr5unorm" | "bgr5a1unorm" => 31.0,
             f if f.contains("10a2") && lane == 3 => 3.0,
             f if f.contains("10a2") => 1023.0,
             f if f.contains("16") && snorm => 32767.0,
@@ -922,6 +975,94 @@ fn targets(plan: &mut Plan, library: &str) {
             )
             .texture(target("c", format))
             .output(Output::new("c", dtype, tol.clone()).expect(expected, tol)),
+        );
+    }
+    // Integer targets: in-range values stored as they are.
+    for (format, lanes, bits, signed) in [
+        ("r8uint", 1, 8, false),
+        ("r8sint", 1, 8, true),
+        ("rg8uint", 2, 8, false),
+        ("rg8sint", 2, 8, true),
+        ("rgba8uint", 4, 8, false),
+        ("rgba8sint", 4, 8, true),
+        ("r16uint", 1, 16, false),
+        ("r16sint", 1, 16, true),
+        ("rg16uint", 2, 16, false),
+        ("rg16sint", 2, 16, true),
+        ("rgba16uint", 4, 16, false),
+        ("rgba16sint", 4, 16, true),
+        ("r32uint", 1, 32, false),
+        ("r32sint", 1, 32, true),
+        ("rg32uint", 2, 32, false),
+        ("rg32sint", 2, 32, true),
+        ("rgba32uint", 4, 32, false),
+        ("rgba32sint", 4, 32, true),
+        ("rgb10a2uint", 4, 10, false),
+    ] {
+        let width = |lane: usize| {
+            if format == "rgb10a2uint" && lane == 3 {
+                2
+            } else {
+                bits
+            }
+        };
+        let texels: Vec<[i64; 4]> = (0..W * H)
+            .map(|_| {
+                std::array::from_fn(|lane| {
+                    let w = width(lane);
+                    let v = i64::from(rng.u32()) & ((1i64 << w) - 1);
+                    if signed && v >= 1 << (w - 1) {
+                        v - (1 << w)
+                    } else {
+                        v
+                    }
+                })
+            })
+            .collect();
+        let shader: Vec<u8> = texels
+            .iter()
+            .flatten()
+            .flat_map(|&v| (v as i32).to_le_bytes())
+            .collect();
+        let stored: Vec<i128> = texels
+            .iter()
+            .flat_map(|t| t[..lanes].iter().map(|&v| i128::from(v)))
+            .collect();
+        let (dtype, bytes) = if format == "rgb10a2uint" {
+            let words: Vec<u32> = texels
+                .iter()
+                .map(|t| (t[0] | t[1] << 10 | t[2] << 20 | t[3] << 30) as u32)
+                .collect();
+            (Dtype::U32, u32s(&words))
+        } else {
+            let dtype = match (bits, signed) {
+                (8, false) => Dtype::U8,
+                (8, true) => Dtype::I8,
+                (16, false) => Dtype::U16,
+                (16, true) => Dtype::I16,
+                (_, false) => Dtype::U32,
+                _ => Dtype::I32,
+            };
+            (dtype, ints(dtype, &stored))
+        };
+        let fragment = if signed {
+            "frag_color_int"
+        } else {
+            "frag_color_uint"
+        };
+        plan.add(
+            Case::render(
+                &format!("render.target.{format}"),
+                library,
+                "vert_full",
+                Some(fragment),
+                json!({"vertex_count": 3, "colors": [{"texture": "c", "clear": [0, 0, 0, 0]}]}),
+            )
+            .buffer(Buffer::data("colors", 0, shader).stage("fragment"))
+            .buffer(Buffer::data("width", 1, u32s(&[W])).stage("fragment"))
+            .buffer(Buffer::data("depth", 2, f32s(&[0.5])).stage("vertex"))
+            .texture(target("c", format))
+            .output(Output::new("c", dtype, Tolerance::exact()).expect_same(bytes)),
         );
     }
     // A half4 fragment output.
@@ -2084,6 +2225,82 @@ fn vertex_formats() -> Vec<VertexFormat> {
         )),
         vf!("uint4", 16, "uint", |b| [0, 1, 2, 3]
             .map(|i| f64::from(u32_at(b, i)))),
+        vf!("uchar3", 3, "uint", |b| lanes(
+            &[0, 1, 2].map(|i| f64::from(b[i]))
+        )),
+        vf!("char2", 2, "int", |b| lanes(
+            &[0, 1].map(|i| f64::from(b[i] as i8))
+        )),
+        vf!("uchar3normalized", 3, "float", |b| lanes(
+            &[0, 1, 2].map(|i| f64::from(b[i]) / 255.0)
+        )),
+        vf!("charnormalized", 1, "float", |b| lanes(&[snorm_of(
+            f64::from(b[0] as i8),
+            127.0
+        )])),
+        vf!("char3normalized", 3, "float", |b| lanes(
+            &[0, 1, 2].map(|i| snorm_of(f64::from(b[i] as i8), 127.0))
+        )),
+        vf!("ushort2", 4, "uint", |b| lanes(
+            &[0, 1].map(|i| f64::from(u16_at(b, i)))
+        )),
+        vf!("ushort3", 6, "uint", |b| lanes(
+            &[0, 1, 2].map(|i| f64::from(u16_at(b, i)))
+        )),
+        vf!("short", 2, "int", |b| lanes(&[f64::from(
+            u16_at(b, 0) as i16
+        )])),
+        vf!("short3", 6, "int", |b| lanes(
+            &[0, 1, 2].map(|i| f64::from(u16_at(b, i) as i16))
+        )),
+        vf!("ushortnormalized", 2, "float", |b| lanes(&[f64::from(
+            u16_at(b, 0)
+        ) / 65535.0])),
+        vf!("ushort3normalized", 6, "float", |b| lanes(
+            &[0, 1, 2].map(|i| f64::from(u16_at(b, i)) / 65535.0)
+        )),
+        vf!("shortnormalized", 2, "float", |b| lanes(&[snorm_of(
+            f64::from(u16_at(b, 0) as i16),
+            32767.0
+        )])),
+        vf!("short2normalized", 4, "float", |b| lanes(
+            &[0, 1].map(|i| snorm_of(f64::from(u16_at(b, i) as i16), 32767.0))
+        )),
+        vf!("short3normalized", 6, "float", |b| lanes(
+            &[0, 1, 2].map(|i| snorm_of(f64::from(u16_at(b, i) as i16), 32767.0))
+        )),
+        vf!("half3", 6, "half", |b| lanes(
+            &[0, 1, 2].map(|i| super::values::f16_from_bits(u16_at(b, i)))
+        )),
+        vf!("int2", 8, "int", |b| lanes(
+            &[0, 1].map(|i| f64::from(u32_at(b, i) as i32))
+        )),
+        vf!("int4", 16, "int", |b| [0, 1, 2, 3]
+            .map(|i| f64::from(u32_at(b, i) as i32))),
+        vf!("uint", 4, "uint", |b| lanes(&[f64::from(u32_at(b, 0))])),
+        vf!("uint3", 12, "uint", |b| lanes(
+            &[0, 1, 2].map(|i| f64::from(u32_at(b, i)))
+        )),
+        vf!("floatrg11b10", 4, "float", |b| {
+            let w = u32_at(b, 0);
+            let small = |at: u32, bits: u32, mantissa: u32| {
+                let q = (w >> at) & ((1 << bits) - 1);
+                let (e, m) = (q >> mantissa, q & ((1 << mantissa) - 1));
+                let fraction = f64::from(m) / f64::from(1u32 << mantissa);
+                if e == 0 {
+                    fraction * 2f64.powi(-14)
+                } else {
+                    (1.0 + fraction) * 2f64.powi(e as i32 - 15)
+                }
+            };
+            [small(0, 11, 6), small(11, 11, 6), small(22, 10, 5), 1.0]
+        }),
+        vf!("floatrgb9e5", 4, "float", |b| {
+            let w = u32_at(b, 0);
+            let scale = 2f64.powi((w >> 27) as i32 - 15 - 9);
+            let lane = |at: u32| f64::from((w >> at) & 511) * scale;
+            [lane(0), lane(9), lane(18), 1.0]
+        }),
         vf!("int1010102normalized", 4, "float", |b| {
             let w = u32_at(b, 0);
             let field = |at: u32, bits: u32| {
@@ -2107,6 +2324,14 @@ fn vertex_formats() -> Vec<VertexFormat> {
 
 /// Random bytes for a vertex format, finite for its float lanes.
 fn vertex_bytes(f: &VertexFormat, rng: &mut Random) -> Vec<u8> {
+    if f.name == "floatrg11b10" {
+        // Exponents below 31: no infinities or NaNs.
+        let field = |rng: &mut Random, mantissa: u32| {
+            (rng.below(31) << mantissa) | rng.below(1 << mantissa)
+        };
+        let w = field(rng, 6) | (field(rng, 6) << 11) | (field(rng, 5) << 22);
+        return (w as u32).to_le_bytes().to_vec();
+    }
     match f.shader {
         "half" => (0..f.size / 2)
             .flat_map(|_| f16_bits(f16r(rng.uniform(-100.0, 100.0))).to_le_bytes())

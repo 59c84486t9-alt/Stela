@@ -85,7 +85,8 @@ fn mac_script(plan: &Value) -> String {
     }
     lines.push(
         "clang -fobjc-arc -arch arm64 -mmacosx-version-min=14.0 -O1 -Wall -Wextra -Wno-unused-parameter \
-         -framework Foundation -framework Metal runner.m -o runner"
+         -framework Foundation -framework Metal -framework MetalPerformanceShaders -framework CoreImage \
+         -framework CoreGraphics runner.m -o runner"
             .into(),
     );
     lines.join("\n") + "\n"

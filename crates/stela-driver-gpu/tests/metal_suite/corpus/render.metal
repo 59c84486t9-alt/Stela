@@ -155,6 +155,19 @@ fragment float4 frag_color(Full in [[stage_in]], device const float4 *c [[buffer
     return c[pixel(in.position, width)];
 }
 
+// Integer outputs for integer targets, from the same per-pixel buffer.
+fragment uint4 frag_color_uint(Full in [[stage_in]], device const uint4 *c [[buffer(0)]],
+                               constant uint &width [[buffer(1)]])
+{
+    return c[pixel(in.position, width)];
+}
+
+fragment int4 frag_color_int(Full in [[stage_in]], device const int4 *c [[buffer(0)]],
+                             constant uint &width [[buffer(1)]])
+{
+    return c[pixel(in.position, width)];
+}
+
 fragment half4 frag_color_half(Full in [[stage_in]], device const float4 *c [[buffer(0)]],
                                constant uint &width [[buffer(1)]])
 {

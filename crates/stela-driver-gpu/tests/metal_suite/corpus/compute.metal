@@ -243,6 +243,19 @@ kernel void simdgroup_matrix(device const float *a [[buffer(0)]], device const f
 }
 #endif
 
+#ifndef SKIP_simdgroup_matrix_bfloat
+// An 8x8 bfloat SIMD-group matrix product, A * B + A.
+kernel void simdgroup_matrix_bfloat(device const bfloat *a [[buffer(0)]], device const bfloat *b [[buffer(1)]],
+                                    device bfloat *out [[buffer(2)]])
+{
+    simdgroup_bfloat8x8 ma, mb, mc;
+    simdgroup_load(ma, a, 8);
+    simdgroup_load(mb, b, 8);
+    simdgroup_multiply_accumulate(mc, ma, mb, ma);
+    simdgroup_store(mc, out, 8);
+}
+#endif
+
 struct Mixed {
     char c;
     short s;

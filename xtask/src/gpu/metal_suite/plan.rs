@@ -539,6 +539,15 @@ impl Case {
         case
     }
 
+    /// Work one of Apple's frameworks encodes with its own shaders over
+    /// the case's resources: `framework` names it and its parameters.
+    pub fn framework(name: &str, framework: Value) -> Self {
+        let mut case = Self::new(name, "framework", None);
+        case.json.insert("framework".into(), framework);
+        case.render = true;
+        case
+    }
+
     /// The device's families, features and limits.
     pub fn device(name: &str) -> Self {
         Self::new(name, "device", None)
@@ -616,6 +625,9 @@ pub struct Library {
     pub dynamic: bool,
     /// The dynamic libraries it links against.
     pub links: Vec<String>,
+    /// Compiled by the device at run time from source, with these
+    /// `MTLCompileOptions`, in place of a metallib the Mac builds.
+    pub runtime: Option<Value>,
 }
 
 /// Which functions of each guarded corpus source Apple's compiler refuses
@@ -664,6 +676,7 @@ impl Plan {
                     flags: all,
                     dynamic: false,
                     links: vec![],
+                    runtime: None,
                 },
             );
         }
@@ -675,6 +688,15 @@ impl Plan {
     pub fn dynamic_library(&mut self, name: &str, source: &str, version: &str) -> String {
         let name = self.library(name, source, &[], version);
         self.libraries.get_mut(&name).unwrap().dynamic = true;
+        name
+    }
+
+    /// A library the device compiles from a corpus source at run time with
+    /// `options`: `language`, `fast_math`, `macros`, `preserve_invariance`
+    /// and `optimization`, as `MTLCompileOptions` takes them.
+    pub fn runtime_library(&mut self, name: &str, source: &str, options: Value) -> String {
+        let name = self.library(name, source, &[], LATEST);
+        self.libraries.get_mut(&name).unwrap().runtime = Some(options);
         name
     }
 
@@ -818,6 +840,7 @@ impl Plan {
         used.extend(linked);
         let mut libraries = Map::new();
         let mut builds = Map::new();
+        let mut runtime_sources = vec![];
         for (name, library) in &self.libraries {
             if !used.contains(name.as_str()) {
                 continue;
@@ -828,7 +851,16 @@ impl Plan {
                 flags,
                 dynamic,
                 links,
+                runtime,
             } = library;
+            let base = Path::new(source).file_name().unwrap().to_string_lossy();
+            if let Some(options) = runtime {
+                let mut entry = options.as_object().cloned().unwrap_or_default();
+                entry.insert("source".into(), format!("sources/{base}").into());
+                libraries.insert(name.clone(), entry.into());
+                runtime_sources.push(source.as_str());
+                continue;
+            }
             libraries.insert(name.clone(), format!("lib/{name}.metallib").into());
             builds.insert(
                 name.clone(),
@@ -844,8 +876,8 @@ impl Plan {
         }
         let sources = dir.join("sources");
         fs::create_dir_all(&sources)?;
-        for build in builds.values() {
-            let source = build["source"].as_str().unwrap();
+        let built = builds.values().map(|b| b["source"].as_str().unwrap());
+        for source in built.chain(runtime_sources) {
             let base = Path::new(source).file_name().unwrap();
             fs::write(sources.join(base), self.source_text(source, corpus)?)?;
         }

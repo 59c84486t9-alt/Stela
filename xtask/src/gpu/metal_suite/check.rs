@@ -45,6 +45,27 @@ impl Elements {
         self
     }
 
+    /// The property an output's `derive` names, element by element:
+    /// `nonzero` (1 where an element is not zero) or `ordered` (1 where it
+    /// is not zero and not below the element before it), for results whose
+    /// values Metal leaves open but whose relations it fixes.
+    fn derive(self, kind: &str) -> Result<Self> {
+        fn property<T: PartialOrd + Default>(v: &[T], kind: &str) -> Result<Vec<i128>> {
+            let zero = T::default();
+            Ok(match kind {
+                "nonzero" => v.iter().map(|x| i128::from(*x != zero)).collect(),
+                "ordered" => (0..v.len())
+                    .map(|i| i128::from(v[i] != zero && (i == 0 || v[i] >= v[i - 1])))
+                    .collect(),
+                other => bail!("unknown derived property {other}"),
+            })
+        }
+        Ok(Self::Int(match &self {
+            Self::Int(v) => property(v, kind)?,
+            Self::Float(v, _) => property(v, kind)?,
+        }))
+    }
+
     fn show(&self, i: usize) -> String {
         match self {
             Self::Float(v, _) => format!("{:?}", v[i]),
@@ -178,6 +199,11 @@ fn compare(
         out.max_ulps = Some(worst);
     }
     out
+}
+
+/// Whether a results directory holds the reference device's results.
+fn is_reference(results: &Path) -> bool {
+    results.file_name().is_some_and(|n| n == "mac")
 }
 
 fn status(dir: &Path) -> Value {
@@ -363,7 +389,11 @@ pub fn run(
             lines.push(format!("UNSUPPORTED {name}: {}", error(&test_status)));
             continue;
         }
-        let reference_root = if status_name(&ref_status) == "unsupported" {
+        // A case the reference device diverges on is held to its
+        // expectation, not to that device's results.
+        let reference_root = if status_name(&ref_status) == "unsupported"
+            || case["reference_divergence"].is_string()
+        {
             None
         } else {
             reference
@@ -433,12 +463,14 @@ pub fn run(
                 data.extend(read(by_name.get(next).context("appended output")?)?);
             }
             let dtype = dtype_of(output)?;
-            let e = Elements::of(dtype, &data);
-            Ok(if output["sorted_compare"].as_bool() == Some(true) {
-                e.sorted()
-            } else {
-                e
-            })
+            let mut e = Elements::of(dtype, &data);
+            if output["sorted_compare"].as_bool() == Some(true) {
+                e = e.sorted();
+            }
+            match output["derive"].as_str() {
+                Some(kind) => e.derive(kind),
+                None => Ok(e),
+            }
         };
         let mut problems = vec![];
         let mut checked = 0;
@@ -458,6 +490,12 @@ pub fn run(
             } else if let Some(file) = output["expect"].as_str() {
                 let read = |f: &str| -> Result<Elements> {
                     let data = fs::read(plan_dir.join(f)).with_context(|| f.to_string())?;
+                    // A derived output's expectation is the property itself.
+                    let dtype = if output["derive"].is_null() {
+                        dtype
+                    } else {
+                        Dtype::U32
+                    };
                     let e = Elements::of(dtype, &data);
                     Ok(if output["sorted_compare"].as_bool() == Some(true) {
                         e.sorted()
@@ -511,7 +549,12 @@ pub fn run(
             summary.add("match");
             continue;
         }
-        let informational = case["informational"].as_bool() == Some(true);
+        // A divergence the reference device is known for counts against
+        // that device only as information; every other device is held to
+        // the specification.
+        let divergence =
+            case["reference_divergence"].is_string() && reference.is_none() && is_reference(test);
+        let informational = case["informational"].as_bool() == Some(true) || divergence;
         summary.add(if informational {
             "informational"
         } else {
@@ -519,6 +562,7 @@ pub fn run(
         });
         let note = case["note"]
             .as_str()
+            .or(case["reference_divergence"].as_str().filter(|_| divergence))
             .map(|n| format!(" ({n})"))
             .unwrap_or_default();
         lines.push(format!(
@@ -674,6 +718,20 @@ mod tests {
                 .error
                 .is_some()
         );
+    }
+
+    #[test]
+    fn derived_properties_replace_open_values() {
+        let t = Elements::Int(vec![5, 0, 7, 6, 9]);
+        assert_eq!(
+            t.clone().derive("nonzero").unwrap(),
+            Elements::Int(vec![1, 0, 1, 1, 1])
+        );
+        assert_eq!(
+            t.derive("ordered").unwrap(),
+            Elements::Int(vec![1, 0, 1, 0, 1])
+        );
+        assert!(Elements::Int(vec![]).derive("other").is_err());
     }
 
     #[test]

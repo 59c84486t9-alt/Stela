@@ -426,6 +426,9 @@ fn simd(plan: &mut Plan, library: &str) {
         .buffer(Buffer::zeroed("out", 1, n * 32))
         .output(exact("out", Dtype::U32, words(&quad))),
     );
+    if plan.has(SOURCE, "simdgroup_matrix_bfloat") {
+        simdgroup_matrix_bfloat(plan, library);
+    }
     if plan.has(SOURCE, "simdgroup_matrix") {
         let mut rng = Random::new(33);
         let a: Vec<f64> = (0..64).map(|_| (rng.u32() % 7) as f64 - 3.0).collect();
@@ -462,6 +465,39 @@ fn simd(plan: &mut Plan, library: &str) {
             .requires(&[], &["simd_reduction"]),
         );
     }
+}
+
+/// An 8x8 bfloat SIMD-group matrix product of small integers, exact in
+/// bfloat: A * B + A.
+fn simdgroup_matrix_bfloat(plan: &mut Plan, library: &str) {
+    let mut rng = Random::new(34);
+    let a: Vec<f64> = (0..64).map(|_| (rng.u32() % 7) as f64 - 3.0).collect();
+    let b: Vec<f64> = (0..64).map(|_| (rng.u32() % 7) as f64 - 3.0).collect();
+    let bf = |v: &[f64]| -> Vec<u8> {
+        v.iter()
+            .flat_map(|&x| (((x as f32).to_bits() >> 16) as u16).to_le_bytes())
+            .collect()
+    };
+    let prod: Vec<f64> = (0..64)
+        .map(|i| {
+            let (r, c) = (i / 8, i % 8);
+            sum((0..8).map(|k| a[r * 8 + k] * b[k * 8 + c])) + a[i]
+        })
+        .collect();
+    plan.add(
+        Case::compute(
+            "compute.simdgroup_matrix.bfloat",
+            library,
+            "simdgroup_matrix_bfloat",
+            [32, 1, 1],
+            [32, 1, 1],
+        )
+        .buffer(Buffer::data("a", 0, bf(&a)))
+        .buffer(Buffer::data("b", 1, bf(&b)))
+        .buffer(Buffer::zeroed("out", 2, 128))
+        .output(exact("out", Dtype::U16, bf(&prod)))
+        .requires(&[], &["simd_reduction"]),
+    );
 }
 
 /// struct Mixed: char, short, float3 at 16, packed_float3 at 32, half at

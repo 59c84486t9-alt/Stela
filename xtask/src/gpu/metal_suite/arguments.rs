@@ -434,10 +434,84 @@ fn dynamic_libraries(plan: &mut Plan, rng: &mut Random) {
     );
 }
 
+/// The constant types `constants` leaves out, set by their bytes.
+fn more_constants(plan: &mut Plan, library: &str) {
+    let ints = |v: &[i32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
+    let words = [0xDEAD_BEEFu32, 1, 0x8000_0000, 42];
+    let halves = [0.5f64, -1.0, 65504.0, -0.0];
+    let floats2 = [3.25f32, -7.5];
+    let list = json!([
+        constant("char", 20, -5),
+        constant("uchar", 21, 250),
+        constant("ushort", 22, 65000),
+        {"type": "int2", "index": 23, "bytes": base64(&ints(&[-9, 123_456]))},
+        {"type": "uint4", "index": 24, "bytes": base64(&u32s(&words))},
+        {"type": "half4", "index": 25, "bytes": base64(&halves.iter().flat_map(|&h| f16_bits(h).to_le_bytes()).collect::<Vec<_>>())},
+        {"type": "float2", "index": 26, "bytes": base64(&floats2.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<_>>())},
+    ]);
+    let mut expected = vec![(-5i32) as u32, 250, 65000, (-9i32) as u32, 123_456];
+    expected.extend(words);
+    expected.extend(halves.map(|h| u32::from(f16_bits(h))));
+    expected.extend(floats2.map(f32::to_bits));
+    plan.add(
+        Case::compute(
+            "arguments.constants.more_types",
+            library,
+            "constants_more",
+            [1, 1, 1],
+            [1, 1, 1],
+        )
+        .set("constants", list)
+        .buffer(Buffer::zeroed("out", 0, 64))
+        .output(
+            Output::new("out", Dtype::U32, Tolerance::exact())
+                .expect_same(u32s(&expected))
+                .set("length", 60),
+        ),
+    );
+}
+
+/// A Tier 2 argument buffer a fragment function reads: each pixel's texel
+/// times one of two tints.
+fn fragment_arguments(plan: &mut Plan, library: &str) {
+    let mut rng = Random::new(1005);
+    let size = 8u32;
+    let image: Vec<f64> = (0..size * size * 4)
+        .map(|_| f32r(rng.uniform(0.0, 1.0)))
+        .collect();
+    let tints = [0.5, 1.0, 0.25, 2.0, 1.5, 0.75, 1.0, 0.5];
+    let expected: Vec<f64> = (0..(size * size) as usize)
+        .flat_map(|i| {
+            let tint = &tints[4 * (i % 2)..4 * (i % 2) + 4];
+            (0..4).map(move |k| (i, k, tint[k]))
+        })
+        .map(|(i, k, t)| f32r(image[4 * i + k] * t))
+        .collect();
+    plan.add(
+        Case::render(
+            "arguments.argument_buffer.fragment",
+            library,
+            "vert_argument_pixel",
+            Some("frag_arguments"),
+            json!({"colors": [{"texture": "a", "clear": [0, 0, 0, 0]}], "primitive": "triangle_strip",
+                   "vertex_count": 4}),
+        )
+        .requires(&[], &["argument_buffers_tier2"])
+        .buffer(Buffer::zeroed("args", 0, 16).stage("fragment"))
+        .buffer(Buffer::data("tint", 0, f32s(&tints)).unbound())
+        .texture(Texture::d2("image", "rgba32float", size, size).data(f32s(&image)))
+        .texture(Texture::d2("a", "rgba32float", size, size).usage(&["render"]))
+        .set("arguments", json!([{"buffer": "args", "entries": [entry("texture", 0, "image"), entry("buffer", 8, "tint")]}]))
+        .output(Output::new("a", Dtype::F32, Tolerance::ulp(1.0)).expect_same(f32s(&expected))),
+    );
+}
+
 pub fn build(plan: &mut Plan) {
     let library = plan.library("arguments", SOURCE, &[], LATEST);
     constants(plan, &library);
+    more_constants(plan, &library);
     argument_buffers(plan, &library);
+    fragment_arguments(plan, &library);
     function_pointers(plan, &library);
     dynamic_libraries(plan, &mut Random::new(1004));
 }

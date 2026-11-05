@@ -741,6 +741,70 @@ fn api_ordering(plan: &mut Plan, library: &str, rng: &mut Random) {
     );
 }
 
+/// Ordering across queues and command buffers: a second queue's work an
+/// event orders before the first's, a listener the host registers for a
+/// value the GPU signals, command buffers that retain nothing, a
+/// concurrent encoder whose barrier orders two dispatches, and completion
+/// handlers that run in commit order after scheduling.
+fn queues_and_handlers(plan: &mut Plan, library: &str, rng: &mut Random) {
+    let v: Vec<u32> = (0..N).map(|_| rng.u32()).collect();
+    let expect = u32s(&neighbours(&scaled(&v)));
+    let base = |name: &str, steps: Vec<Step>| {
+        Case::sequence(name, library, steps)
+            .buffer(Buffer::data("in", 0, u32s(&v)).unbound())
+            .buffer(Buffer::zeroed("mid", 0, N as usize * 4).unbound())
+            .buffer(Buffer::zeroed("out", 0, N as usize * 4).unbound())
+            .buffer(Buffer::data("n", 0, u32s(&[N])).unbound())
+            .output(exact("out", Dtype::U32, expect.clone()))
+    };
+    let scale = || Step::compute("scale", grid(N), [64, 1, 1]).bind(&[("in", 0), ("mid", 1)]);
+    let neighbour = || {
+        Step::compute("neighbours", grid(N), [64, 1, 1]).bind(&[("mid", 0), ("out", 1), ("n", 2)])
+    };
+    plan.add(base(
+        "sequence.queues.event",
+        vec![
+            scale().set("queue", 1).signal_events(&[("e", 1)]),
+            neighbour().wait_events(&[("e", 1)]),
+        ],
+    ));
+    plan.add(
+        base(
+            "sequence.event.listener",
+            vec![
+                scale().signal_events(&[("e", 5)]),
+                neighbour().new_command_buffer(),
+            ],
+        )
+        .set("listen", json!([["e", 5, "heard"]]))
+        .buffer(Buffer::zeroed("heard", 0, 16).unbound())
+        .output(exact("heard", Dtype::U32, u32s(&[1, 5, 0, 0]))),
+    );
+    plan.add(base("sequence.unretained", vec![scale(), neighbour()]).set("unretained", true));
+    plan.add(base(
+        "sequence.compute.concurrent_barrier",
+        vec![
+            scale().set("concurrent", true),
+            neighbour().continues().set("barrier", "buffers"),
+        ],
+    ));
+    plan.add(
+        base(
+            "sequence.handlers",
+            vec![scale(), neighbour().new_command_buffer()],
+        )
+        .set("handlers", "order")
+        .buffer(Buffer::zeroed("order", 0, 40).unbound())
+        // Buffers 0 and 1 complete in order, each after its scheduling,
+        // the last with MTLCommandBufferStatusCompleted (4).
+        .output(exact(
+            "order",
+            Dtype::U32,
+            u32s(&[0, 1, 0, 0, 0, 0, 0, 0, 1, 4]),
+        )),
+    );
+}
+
 pub fn build(plan: &mut Plan) {
     let library = plan.library("sequences", SOURCE, &[], super::plan::LATEST);
     let mut rng = Random::new(5150);
@@ -750,4 +814,5 @@ pub fn build(plan: &mut Plan) {
     indirect_commands(plan, &library, &mut rng);
     indirect_commands_more(plan, &library, &mut rng);
     api_ordering(plan, &library, &mut rng);
+    queues_and_handlers(plan, &library, &mut rng);
 }

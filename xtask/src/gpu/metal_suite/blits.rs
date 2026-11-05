@@ -1,6 +1,9 @@
-//! Blit commands: buffer copies and fills, copies between buffers and
-//! textures with row and image pitches, texture copies between levels and
-//! slices, and mipmap generation.
+//! Blit commands: buffer copies and fills, small and large, copies between
+//! buffers and textures with row and image pitches into any slice, level,
+//! 3D region or depth-stencil plane, texture copies of a region, of whole
+//! textures and of slice and level ranges, of compressed blocks, mipmap
+//! generation for 2D, array, cube and 3D textures, and access hints that
+//! leave contents as they were.
 use super::plan::{Buffer, Case, Output, Plan, Texture, Tolerance};
 use super::values::{Dtype, Random};
 use serde_json::json;
@@ -13,8 +16,291 @@ fn exact(name: &str, data: Vec<u8>) -> Output {
     Output::new(name, Dtype::U8, Tolerance::exact()).expect_same(data)
 }
 
+/// Where each (slice, level) of a texture starts in the runner's packed
+/// layout (slices outermost, levels inner), and the total length.
+struct Layout {
+    size: [usize; 3],
+    slices: usize,
+    levels: usize,
+    texel: usize,
+}
+
+impl Layout {
+    fn extent(&self, level: usize) -> [usize; 3] {
+        self.size.map(|s| (s >> level).max(1))
+    }
+
+    fn level_bytes(&self, level: usize) -> usize {
+        self.extent(level).iter().product::<usize>() * self.texel
+    }
+
+    fn offset(&self, slice: usize, level: usize) -> usize {
+        let per_slice: usize = (0..self.levels).map(|l| self.level_bytes(l)).sum();
+        slice * per_slice + (0..level).map(|l| self.level_bytes(l)).sum::<usize>()
+    }
+
+    fn total(&self) -> usize {
+        self.offset(self.slices, 0)
+    }
+
+    /// The byte of texel (x, y, z) of a subresource.
+    fn at(&self, slice: usize, level: usize, [x, y, z]: [usize; 3]) -> usize {
+        let [w, h, _] = self.extent(level);
+        self.offset(slice, level) + ((z * h + y) * w + x) * self.texel
+    }
+}
+
+/// A 2x2 (2x2x2 for 3D) box filter of one level into the next, rounded
+/// to the nearest unorm8 step.
+fn box_level(level: &[u8], [w, h, d]: [usize; 3], channels: usize) -> Vec<u8> {
+    let next = [(w / 2).max(1), (h / 2).max(1), (d / 2).max(1)];
+    let mut out = vec![0u8; next.iter().product::<usize>() * channels];
+    for z in 0..next[2] {
+        for y in 0..next[1] {
+            for x in 0..next[0] {
+                for c in 0..channels {
+                    let mut sum = 0.0;
+                    let mut count = 0.0;
+                    for dz in 0..if d > 1 { 2 } else { 1 } {
+                        for dy in 0..if h > 1 { 2 } else { 1 } {
+                            for dx in 0..if w > 1 { 2 } else { 1 } {
+                                let (xx, yy, zz) = (2 * x + dx, 2 * y + dy, 2 * z + dz);
+                                sum += f64::from(level[((zz * h + yy) * w + xx) * channels + c]);
+                                count += 1.0;
+                            }
+                        }
+                    }
+                    out[((z * next[1] + y) * next[0] + x) * channels + c] =
+                        (sum / count).round() as u8;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn more(plan: &mut Plan, rng: &mut Random) {
+    // A buffer region into level 1 of slice 1 of an array, rows padded.
+    let array = Layout {
+        size: [8, 8, 1],
+        slices: 2,
+        levels: 2,
+        texel: 4,
+    };
+    let texture = bytes(rng, array.total());
+    let source = bytes(rng, 32 * 2);
+    let mut expected = texture.clone();
+    for y in 0..2 {
+        let to = array.at(1, 1, [1, 1 + y, 0]);
+        expected[to..to + 12].copy_from_slice(&source[y * 32..y * 32 + 12]);
+    }
+    plan.add(
+        Case::blit(
+            "blit.buffer_to_texture.array_level",
+            json!([{"op": "buffer_to_texture", "src": "staging", "bytes_per_row": 32, "bytes_per_image": 64,
+                    "size": [3, 2, 1], "dst": "t", "slice": 1, "level": 1, "origin": [1, 1, 0]}]),
+        )
+        .buffer(Buffer::data("staging", 0, source).unbound())
+        .texture(Texture::new("t", "rgba8unorm", "2d_array", [8, 8, 1]).array(2).mipmaps(2).data(texture))
+        .output(exact("t", expected)),
+    );
+    // A 2x2x2 region of a 3D texture from and to buffers with padded rows
+    // and images.
+    let volume = Layout {
+        size: [4, 4, 4],
+        slices: 1,
+        levels: 1,
+        texel: 4,
+    };
+    let texture = bytes(rng, volume.total());
+    let source = bytes(rng, 48 * 2);
+    let mut expected = texture.clone();
+    let mut read = vec![0x33u8; 48 * 2];
+    for z in 0..2 {
+        for y in 0..2 {
+            let at = volume.at(0, 0, [1, 1 + y, 1 + z]);
+            expected[at..at + 8].copy_from_slice(&source[z * 48 + y * 16..z * 48 + y * 16 + 8]);
+            read[z * 48 + y * 16..z * 48 + y * 16 + 8].copy_from_slice(&texture[at..at + 8]);
+        }
+    }
+    plan.add(
+        Case::blit(
+            "blit.buffer_to_texture.volume",
+            json!([{"op": "buffer_to_texture", "src": "staging", "bytes_per_row": 16, "bytes_per_image": 48,
+                    "size": [2, 2, 2], "dst": "t", "origin": [1, 1, 1]}]),
+        )
+        .buffer(Buffer::data("staging", 0, source).unbound())
+        .texture(Texture::new("t", "r32uint", "3d", [4, 4, 4]).data(texture.clone()))
+        .output(exact("t", expected)),
+    );
+    plan.add(
+        Case::blit(
+            "blit.texture_to_buffer.volume",
+            json!([{"op": "texture_to_buffer", "src": "t", "origin": [1, 1, 1], "size": [2, 2, 2], "dst": "out",
+                    "bytes_per_row": 16, "bytes_per_image": 48}]),
+        )
+        .buffer(Buffer::data("out", 0, vec![0x33; 96]).unbound())
+        .texture(Texture::new("t", "r32uint", "3d", [4, 4, 4]).data(texture))
+        .output(exact("out", read)),
+    );
+    // Each plane of a depth-stencil texture written and read on its own.
+    let (w, h) = (8usize, 4usize);
+    let depth: Vec<u8> = (0..w * h)
+        .flat_map(|i| (i as f32 / 32.0).to_le_bytes())
+        .collect();
+    let stencil = bytes(rng, w * h);
+    plan.add(
+        Case::blit(
+            "blit.depth_stencil_planes",
+            json!([{"op": "buffer_to_texture_plane", "aspect": "depth", "src": "depth", "bytes_per_row": w * 4,
+                    "bytes_per_image": w * h * 4, "size": [w, h, 1], "dst": "ds", "origin": [0, 0, 0]},
+                   {"op": "buffer_to_texture_plane", "aspect": "stencil", "src": "stencil", "bytes_per_row": w,
+                    "bytes_per_image": w * h, "size": [w, h, 1], "dst": "ds", "origin": [0, 0, 0]},
+                   {"op": "texture_to_buffer_plane", "aspect": "stencil", "src": "ds", "origin": [0, 0, 0],
+                    "size": [w, h, 1], "dst": "stencil_out", "bytes_per_row": w, "bytes_per_image": w * h}]),
+        )
+        .buffer(Buffer::data("depth", 0, depth.clone()).unbound())
+        .buffer(Buffer::data("stencil", 0, stencil.clone()).unbound())
+        .buffer(Buffer::zeroed("stencil_out", 0, w * h).unbound())
+        .texture(Texture::d2("ds", "depth32float_stencil8", w as u32, h as u32).usage(&["render"]))
+        .output(exact("stencil_out", stencil))
+        .output(exact("ds", depth).set("aspect", "depth")),
+    );
+    // A whole mipmapped array, then two of four slices with both levels.
+    let full = Layout {
+        size: [8, 4, 1],
+        slices: 4,
+        levels: 2,
+        texel: 8,
+    };
+    let a = bytes(rng, full.total());
+    let b = bytes(rng, full.total());
+    let mut sliced = b.clone();
+    for slice in 0..2 {
+        for level in 0..2 {
+            let (from, to) = (full.offset(slice + 1, level), full.offset(slice, level));
+            let n = full.level_bytes(level);
+            sliced[to..to + n].copy_from_slice(&a[from..from + n]);
+        }
+    }
+    let arrays = |data: &[u8]| {
+        Texture::new("", "rgba16uint", "2d_array", [8, 4, 1])
+            .array(4)
+            .mipmaps(2)
+            .data(data.to_vec())
+    };
+    let named = |t: Texture, name: &str| t.set("name", name);
+    plan.add(
+        Case::blit(
+            "blit.copy_whole_texture",
+            json!([{"op": "copy_whole_texture", "src": "a", "dst": "b"}]),
+        )
+        .texture(named(arrays(&a), "a"))
+        .texture(named(arrays(&b), "b"))
+        .output(exact("b", a.clone())),
+    );
+    plan.add(
+        Case::blit(
+            "blit.copy_slices",
+            json!([{"op": "copy_slices", "src": "a", "src_slice": 1, "dst": "b", "dst_slice": 0, "slices": 2, "levels": 2}]),
+        )
+        .texture(named(arrays(&a), "a"))
+        .texture(named(arrays(&b), "b"))
+        .output(exact("b", sliced)),
+    );
+    // A block of a compressed texture copied to another position.
+    let blocks = bytes(rng, 4 * 8);
+    let mut moved = blocks.clone();
+    moved[3 * 8..4 * 8].copy_from_slice(&blocks[..8]);
+    plan.add(
+        Case::blit(
+            "blit.copy_texture.compressed",
+            json!([{"op": "copy_texture", "src": "a", "src_origin": [0, 0, 0], "size": [4, 4, 1], "dst": "b",
+                    "dst_origin": [4, 4, 0]}]),
+        )
+        .requires(&[], &["bc_compression"])
+        .texture(Texture::d2("a", "bc1_rgba", 8, 8).data(blocks.clone()))
+        .texture(Texture::d2("b", "bc1_rgba", 8, 8).data(blocks))
+        .output(exact("b", moved)),
+    );
+    // Large copies and fills, past any single transfer's size.
+    let large = 4 << 20;
+    let src = bytes(rng, large + 16);
+    let mut expected = vec![0u8; large + 16];
+    expected[8..8 + large].copy_from_slice(&src[4..4 + large]);
+    plan.add(
+        Case::blit(
+            "blit.buffers.large",
+            json!([{"op": "copy_buffer", "src": "src", "src_offset": 4, "dst": "dst", "dst_offset": 8, "size": large},
+                   {"op": "fill_buffer", "dst": "filled", "offset": 0, "size": large, "value": 0x5C}]),
+        )
+        .buffer(Buffer::data("src", 0, src).unbound())
+        .buffer(Buffer::zeroed("dst", 0, large + 16).unbound())
+        .buffer(Buffer::zeroed("filled", 0, large).unbound())
+        .output(exact("dst", expected))
+        .output(exact("filled", vec![0x5C; large])),
+    );
+    // Mipmaps of each slice of an array, each face of a cube and a volume.
+    for (name, kind, size, slices) in [
+        ("array", "2d_array", [8usize, 8, 1], 2usize),
+        ("cube", "cube", [8, 8, 1], 6),
+        ("volume", "3d", [8, 8, 8], 1),
+    ] {
+        let layout = Layout {
+            size,
+            slices,
+            levels: 4,
+            texel: 4,
+        };
+        let mut data = vec![0u8; layout.total()];
+        let mut expected = vec![0u8; layout.total()];
+        for slice in 0..slices {
+            let mut level = bytes(rng, layout.level_bytes(0));
+            let at = layout.offset(slice, 0);
+            data[at..at + level.len()].copy_from_slice(&level);
+            expected[at..at + level.len()].copy_from_slice(&level);
+            for l in 1..4 {
+                level = box_level(&level, layout.extent(l - 1), 4);
+                let at = layout.offset(slice, l);
+                expected[at..at + level.len()].copy_from_slice(&level);
+            }
+        }
+        let mut t = Texture::new(
+            "t",
+            "rgba8unorm",
+            kind,
+            [size[0] as u32, size[1] as u32, size[2] as u32],
+        )
+        .mipmaps(4)
+        .usage(&["read", "render"])
+        .data(data);
+        if kind == "2d_array" {
+            t = t.array(slices as u32);
+        }
+        plan.add(
+            Case::blit(
+                &format!("blit.generate_mipmaps.{name}"),
+                json!([{"op": "generate_mipmaps", "texture": "t"}]),
+            )
+            .texture(t)
+            .output(Output::new("t", Dtype::U8, Tolerance::units(2.0)).expect_same(expected)),
+        );
+    }
+    // Access hints change no texel.
+    let data = bytes(rng, 16 * 16 * 4);
+    plan.add(
+        Case::blit(
+            "blit.optimize_access",
+            json!([{"op": "optimize_gpu_access", "texture": "t"}, {"op": "optimize_cpu_access", "texture": "t"}]),
+        )
+        .texture(Texture::d2("t", "rgba8unorm", 16, 16).data(data.clone()))
+        .output(exact("t", data)),
+    );
+}
+
 pub fn build(plan: &mut Plan) {
     let mut rng = Random::new(1101);
+    more(plan, &mut Random::new(1102));
     // Copies and fills at 4-byte aligned offsets and sizes, overlapping
     // nothing, then a copy within one buffer to a disjoint range.
     let (src, dst) = (bytes(&mut rng, 256), bytes(&mut rng, 256));

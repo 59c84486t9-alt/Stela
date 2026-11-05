@@ -164,6 +164,82 @@ kernel void read_write(texture2d<float, access::read_write> t [[texture(0)]], ui
 }
 #endif
 
+#ifndef SKIP_read_write
+// Read-write integer textures: each texel times three plus its rotated
+// lanes, plus or minus one.
+kernel void read_write_uint(texture2d<uint, access::read_write> t [[texture(0)]], uint2 p [[thread_position_in_grid]])
+{
+    uint4 v = t.read(p);
+    t.fence();
+    t.write(v * 3u + v.yzwx + 1u, p);
+}
+
+kernel void read_write_int(texture2d<int, access::read_write> t [[texture(0)]], uint2 p [[thread_position_in_grid]])
+{
+    int4 v = t.read(p);
+    t.fence();
+    t.write(v * 3 + v.yzwx - 1, p);
+}
+#endif
+
+#ifndef SKIP_texture_atomics_ops
+// Every texture atomic: thread i applies op i % 8 to texel i % 8 of row 0;
+// in row 1, every thread tries once to swap 0 for its index + 1 and
+// counts its success, and exchanges its index + 1 into texel 1.
+template <typename T>
+static void atomic_ops(texture2d<T, access::read_write> t, device atomic_uint *wins, T v, uint i)
+{
+    uint2 p = uint2(i % 8, 0);
+    switch (i % 8) {
+    case 0: t.atomic_fetch_add(p, v); break;
+    case 1: t.atomic_fetch_sub(p, v); break;
+    case 2: t.atomic_fetch_and(p, v); break;
+    case 3: t.atomic_fetch_or(p, v); break;
+    case 4: t.atomic_fetch_xor(p, v); break;
+    case 5: t.atomic_fetch_min(p, v); break;
+    case 6: t.atomic_fetch_max(p, v); break;
+    default: t.atomic_fetch_add(p, T(1)); break;
+    }
+    // A weak exchange may fail spuriously: retried while the texel is 0.
+    vec<T, 4> expected = vec<T, 4>(0);
+    while (!t.atomic_compare_exchange_weak(uint2(0, 1), &expected, T(i + 1))) {
+        if (expected.x != 0)
+            break;
+    }
+    if (expected.x == 0)
+        atomic_fetch_add_explicit(wins, 1u, memory_order_relaxed);
+    t.atomic_exchange(uint2(1, 1), T(i + 1));
+}
+
+kernel void texture_atomics_uint(texture2d<uint, access::read_write> t [[texture(0)]], device const uint *v [[buffer(0)]],
+                                 device atomic_uint *wins [[buffer(1)]], uint i [[thread_position_in_grid]])
+{
+    atomic_ops(t, wins, v[i], i);
+}
+
+kernel void texture_atomics_int(texture2d<int, access::read_write> t [[texture(0)]], device const int *v [[buffer(0)]],
+                                device atomic_uint *wins [[buffer(1)]], uint i [[thread_position_in_grid]])
+{
+    atomic_ops(t, wins, v[i], i);
+}
+
+// An atomic add on each texture type that has atomics, at texel i % 4.
+kernel void texture_atomics_types(texture1d<uint, access::read_write> t1 [[texture(0)]],
+                                  texture1d_array<uint, access::read_write> t1a [[texture(1)]],
+                                  texture2d_array<uint, access::read_write> t2a [[texture(2)]],
+                                  texture3d<uint, access::read_write> t3 [[texture(3)]],
+                                  texture_buffer<uint, access::read_write> tb [[texture(4)]],
+                                  uint i [[thread_position_in_grid]])
+{
+    uint k = i % 4;
+    t1.atomic_fetch_add(k, 1u);
+    t1a.atomic_fetch_add(k, 1, 2u);
+    t2a.atomic_fetch_add(uint2(k, 1), 1, 3u);
+    t3.atomic_fetch_add(uint3(k, 1, 1), 4u);
+    tb.atomic_fetch_add(k, 5u);
+}
+#endif
+
 #ifndef SKIP_texture_atomics
 // Texture atomics: every thread adds to one of 16 texels.
 kernel void texture_atomics(texture2d<uint, access::read_write> t [[texture(0)]],

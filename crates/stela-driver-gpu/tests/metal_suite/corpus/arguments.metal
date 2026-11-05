@@ -35,6 +35,30 @@ kernel void constants(device uint *out [[buffer(0)]],
         out[9 + k] = as_type<uint>(c_vector[k]);
 }
 
+// The other scalar and vector types a constant can have.
+constant char k_char [[function_constant(20)]];
+constant uchar k_uchar [[function_constant(21)]];
+constant ushort k_ushort [[function_constant(22)]];
+constant int2 k_int2 [[function_constant(23)]];
+constant uint4 k_uint4 [[function_constant(24)]];
+constant half4 k_half4 [[function_constant(25)]];
+constant float2 k_float2 [[function_constant(26)]];
+
+kernel void constants_more(device uint *out [[buffer(0)]])
+{
+    out[0] = uint(int(k_char));
+    out[1] = k_uchar;
+    out[2] = k_ushort;
+    out[3] = uint(k_int2.x);
+    out[4] = uint(k_int2.y);
+    for (uint k = 0; k < 4; k++) {
+        out[5 + k] = k_uint4[k];
+        out[9 + k] = as_type<ushort>(k_half4[k]);
+    }
+    out[13] = as_type<uint>(k_float2.x);
+    out[14] = as_type<uint>(k_float2.y);
+}
+
 // Constants select code: a loop bound and a branch the compiler removes.
 kernel void constant_branches(device const float *in [[buffer(0)]], device float *out [[buffer(1)]],
                               uint i [[thread_position_in_grid]])
@@ -132,6 +156,26 @@ fragment float4 frag_visible(VisiblePixel p [[stage_in]], device const float *in
     return float4(table[which[i]](in[i]), 0.0f, 0.0f, 1.0f);
 }
 #endif
+
+// An argument buffer read from a fragment function: a texture and a
+// pointer to constants.
+struct FragmentArguments {
+    texture2d<float> image;
+    constant float4 *tint;
+};
+
+struct ArgumentPixel {
+    float4 position [[position]];
+};
+
+vertex ArgumentPixel vert_argument_pixel(uint v [[vertex_id]])
+{ return {float4(v & 1 ? 1.0f : -1.0f, v & 2 ? 1.0f : -1.0f, 0.0f, 1.0f)}; }
+
+fragment float4 frag_arguments(ArgumentPixel p [[stage_in]], constant FragmentArguments &args [[buffer(0)]])
+{
+    uint2 at = uint2(p.position.xy);
+    return args.image.read(at) * args.tint[at.x % 2];
+}
 
 #ifndef SKIP_stitched_call
 [[stitchable]] float stitch_mul(float a, float b)
