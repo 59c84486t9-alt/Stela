@@ -74,7 +74,9 @@ void stela_linux_timers_changed(void)
 
 void stela_linux_service_softirq_raised(void)
 {
-    if (stela_linux_kernel_hosted())
+    /* The original raise owns the pending bit. Wake its service batch even
+     * when there is no timer deadline to bring the source task back. */
+    if (stela_linux_kernel_source_active())
         stela_linux_timers_changed();
 }
 
@@ -120,8 +122,9 @@ s64 stela_linux_service_run(const struct stela_linux_timer_delivery *delivery)
     stela_linux_hrtimers_run_hard(delivery);
     stela_linux_timers_run(delivery);
     stela_linux_hrtimers_run_soft(delivery);
-    if (stela_linux_kernel_hosted())
-        do_softirq();
+    /* Dispatch only original pending softirqs on the authenticated service
+     * task. Periodic tick production is a separate source obligation. */
+    do_softirq();
     /* Every callback returned before selecting the original remaining queue
      * minima. No mutable queue/Domain borrow spans foreign delivery. */
     s64 now = service_now_ns();

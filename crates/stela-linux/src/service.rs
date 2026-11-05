@@ -394,7 +394,7 @@ impl<const N: usize> Environment<N> {
         Ok(())
     }
     /// Notify this SAME retained service of a genuine source timer queue
-    /// mutation. Bounded existing IRQ-safe signal only; no C/current lookup,
+    /// mutation or softirq post. Bounded existing IRQ-safe signal only; no C/current lookup,
     /// process lock, timer polling or callback-presence readiness.
     pub fn timer_changed(&self) -> Result<(), WorkError> {
         self.raised.raise()

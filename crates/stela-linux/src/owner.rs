@@ -80,7 +80,7 @@ pub trait Platform {
     /// no borrowed execution/process/queue scope may escape this call.
     fn minimum_deadline_us(&self, minimum: u64) -> Result<Box<dyn MinimumDeadline>, WorkError>;
     /// Notify the same retained service of a real C timer queue change or a
-    /// posted hosted softirq. This IRQ-safe callback wakes service inspection.
+    /// posted source softirq. This IRQ-safe callback wakes service inspection.
     fn timer_changed(&self) -> Result<(), WorkError>;
     /// One formatted kernel message at its printk level.
     fn log(&self, level: i32, message: &CStr);

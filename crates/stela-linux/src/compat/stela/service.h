@@ -4,12 +4,12 @@
 #include <linux/types.h>
 #include <stela/timer.h>
 
-/* Bring jiffies up to the clock and run the expired timers, on the owner's
- * service task in an entered owner. Returns the clock reading at which to run
- * again, or S64_MAX when nothing is armed. */
+/* Bring jiffies up to the clock and run expired timers and pending softirqs
+ * on the owner's entered service task. Returns the next timer deadline, or
+ * S64_MAX when no timer is armed. */
 s64 stela_linux_service_run(const struct stela_linux_timer_delivery *delivery);
 
-/* Notify the hosted service after original source posts a softirq. */
+/* Notify the mounted service after original source posts a softirq. */
 void stela_linux_service_softirq_raised(void);
 
 struct stela_linux_owner;
