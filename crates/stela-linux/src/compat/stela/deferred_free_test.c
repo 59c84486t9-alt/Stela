@@ -2,11 +2,14 @@
 /* Original nonbatched RCU-free helpers. The hosted source fixture joins real
  * RCU and both fixtures observe the actual allocator/queue through ELF wrappers. */
 #include <linux/bottom_half.h>
+#include <linux/backing-dev.h>
+#include <linux/mm.h>
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <stela/allocation.h>
 #include <stela/linux.h>
+#include <stela/page.h>
 #include <stela/test.h>
 
 void kvfree_rcu_cb(struct rcu_head *);
@@ -114,12 +117,55 @@ static void headless(void)
 	kvfree(ZERO_SIZE_PTR);
 }
 
+struct page_callback {
+	struct rcu_head head;
+	struct page *page;
+	bool retired;
+};
+
+static void retire_page(struct rcu_head *head)
+{
+	struct page_callback *callback = container_of(head, struct page_callback, head);
+	assert(stela_linux_rcu_callback_current(head) && in_serving_softirq() && !stela_linux_quiescent());
+	assert(!callback->retired);
+	__free_page(callback->page);
+	callback->retired = true;
+}
+
+static void page_backing_returns_after_callback(void)
+{
+	/* Let the original startup finish populating its page-backed workers
+	 * before measuring the exact free inventory across the callback. */
+	for (unsigned int tick = 0; tick < HZ && !READ_ONCE(bdi_wq); tick++)
+		schedule_timeout_uninterruptible(1);
+	assert(READ_ONCE(bdi_wq));
+	stela_linux_pages_finish();
+	unsigned long before, available;
+	assert(!stela_linux_available_page_frames(&before) && before);
+	struct page_callback callback = {.page = alloc_page(GFP_KERNEL)};
+	assert(callback.page);
+	assert(!stela_linux_available_page_frames(&available) && available == before - 1);
+	rcu_read_lock();
+	call_rcu(&callback.head, retire_page);
+	assert(!callback.retired && page_ref_count(callback.page) == 1);
+	rcu_read_unlock();
+	stela_linux_rcu_finish();
+	assert(callback.retired);
+	stela_linux_pages_finish();
+	assert(!stela_linux_available_page_frames(&available) && available == before);
+	struct page *reused = alloc_page(GFP_KERNEL);
+	assert(reused == callback.page);
+	__free_page(reused);
+	stela_linux_pages_finish();
+}
+
 void stela_linux_deferred_free_source_test(void)
 {
 	embedded(0);
 	embedded(64);
 	embedded(4080);
 	headless();
+	page_backing_returns_after_callback();
 }
 #else
 

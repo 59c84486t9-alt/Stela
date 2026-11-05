@@ -1914,18 +1914,6 @@ static void noncompound_head_put(void)
 	(void)page_to_pfn(page);
 }
 
-struct page_callback {
-	struct rcu_head head;
-	struct page *page;
-};
-
-static void retire_callback(struct rcu_head *head)
-{
-	struct page_callback *callback = container_of(head, struct page_callback, head);
-	assert(in_serving_softirq() && !stela_linux_quiescent());
-	__free_page(callback->page);
-}
-
 static void refusal_and_rollback(void)
 {
 	unsigned int allocations = fixture.allocations;
@@ -2066,12 +2054,7 @@ static void compound_and_split(void)
 	assert(address && !(fixture.seen_gfp & (__force u32)__GFP_HIGHMEM));
 	free_pages(address, 1);
 	stela_linux_pages_finish();
-	struct page_callback callback = {.page = alloc_page(GFP_KERNEL)};
-	assert(callback.page);
-	unsigned int releases = fixture.releases;
-	call_rcu(&callback.head, retire_callback);
 	stela_linux_exit();
-	assert(fixture.releases == releases + 1);
 }
 
 static void capacity(void)
