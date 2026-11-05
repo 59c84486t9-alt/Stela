@@ -385,8 +385,8 @@ unsafe extern "C" fn foreground(context: *mut c_void) {
     let wake = binding.current_wake().unwrap();
     *f.late.lock().unwrap() = Some(wake.clone());
     *f.wake.lock().unwrap() = Some(wake);
-    // Worker executes only after the blocked foreground released its
-    // prepared owner lease. It wakes this exact old job's signal.
+    // Worker executes at the foreground's first scheduling checkpoint, after
+    // it released its prepared owner lease. It wakes this exact old job.
     // SAFETY: the callbacks are static, never unwind, and take the fixture the queue keeps
     // until completion.
     unsafe { runtime.queue().execute(Kind::General, worker, context) }.unwrap();
@@ -1166,7 +1166,6 @@ struct MutexFixture {
     completed: AtomicU64,
     signals: AtomicU64,
     stale: AtomicU64,
-    prepare_signals: AtomicU64,
     self_signals: AtomicU64,
 }
 impl MutexFixture {
@@ -1188,7 +1187,6 @@ impl MutexFixture {
             completed: AtomicU64::new(0),
             signals: AtomicU64::new(0),
             stale: AtomicU64::new(0),
-            prepare_signals: AtomicU64::new(0),
             self_signals: AtomicU64::new(0),
         })
     }
@@ -1265,22 +1263,16 @@ unsafe extern "C" fn mutex_checkpoint(context: *mut c_void, event: u32) {
             f.enqueue(2);
             f.enqueue(3);
         }
-        2..=4 => {
+        2 | 3 => {
             let target = f.target(1);
             let kind = if event == 3 {
                 WaitSignal::Fatal
             } else {
                 WaitSignal::Interrupt
             };
-            // SAFETY: called by the real same-CPU entered C owner. Event4
-            // is process PREPARE's bounded softirq-accounted callback, not
-            // a native interrupt producer or an IF0 switch hook.
+            // SAFETY: called by the real same-CPU entered C owner.
             unsafe { target.signal(runtime, kind) }.unwrap();
-            if event == 4 {
-                f.prepare_signals.fetch_add(1, Ordering::Relaxed);
-            } else {
-                f.signals.fetch_add(1, Ordering::Relaxed);
-            }
+            f.signals.fetch_add(1, Ordering::Relaxed);
         }
         5 => {
             let old = f.target(1);
@@ -1401,7 +1393,9 @@ fn mutex_child() {
     assert!(unsafe { crate::heap::register(try_allocate) }.is_ok());
     assert_eq!(core::mem::size_of::<MutexCall>(), 24);
     let dropped = Arc::new(AtomicU64::new(0));
-    for scenario in 0..11 {
+    // Scenario 5 is retired: nothing runs during a waiter's PREPARE that
+    // could post it a signal after its condition check.
+    for (round, scenario) in [0, 1, 2, 3, 4, 6, 7, 8, 9, 10].into_iter().enumerate() {
         let cpu = CpuModel::new();
         let f = MutexFixture::new(cpu.clone(), scenario);
         // SAFETY: the fixture is the queue's owner, and only this test thread produces
@@ -1419,10 +1413,6 @@ fn mutex_child() {
         assert_eq!(
             f.completed.load(Ordering::Relaxed),
             if scenario == 0 { 5 } else { 2 }
-        );
-        assert_eq!(
-            f.prepare_signals.load(Ordering::Relaxed),
-            u64::from(scenario == 5)
         );
         assert_eq!(
             f.stale.load(Ordering::Relaxed),
@@ -1468,10 +1458,7 @@ fn mutex_child() {
         // is a checked refusal.
         unsafe { runtime.retire() }.unwrap();
         drop(executor);
-        assert_eq!(
-            dropped.load(Ordering::Relaxed),
-            (u64::from(scenario) + 1) * 4
-        );
+        assert_eq!(dropped.load(Ordering::Relaxed), (round as u64 + 1) * 4);
         assert_eq!(quarantined(), 0);
         assert!(!RAW.occupied.load(Ordering::Acquire));
         // SAFETY: the C test hook only checks task state on this thread's entered continuation.

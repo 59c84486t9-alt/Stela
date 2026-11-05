@@ -17,22 +17,20 @@
 
 void stela_linux_atomic_callback_fixture(void);
 void stela_linux_atomic_callback_taskless_fixture(void);
+/* The fixture is a bare scoped binding, never an original child, so terminal
+ * closure has nothing to switch to: reaching it is corruption. */
+static void __noreturn prepared_terminate(void *opaque)
+{
+	(void)opaque;
+	__builtin_trap();
+}
+
 void stela_linux_atomic_callback_prepared_fixture(struct stela_linux_task *task,
 	const struct stela_linux_task_context *context);
 
 static struct rcu_head retirement;
-static unsigned int retired;
 static struct task_struct *expected_task;
 static const struct stela_linux_owner *expected_owner;
-
-static void counted_retirement(struct rcu_head *head)
-{
-	assert(head == &retirement && current == expected_task);
-	assert(stela_linux_owner() == expected_owner);
-	assert(!stela_linux_atomic_callback_active());
-	assert(preempt_count() == (int)SOFTIRQ_OFFSET && !irqs_disabled());
-	retired++;
-}
 
 static void forbidden_retirement(struct rcu_head *head)
 {
@@ -159,7 +157,7 @@ static void rebalanced_prepare(void)
 	assert(stela_linux_task_park(false) == -EBUSY);
 	assert(stela_linux_task_yield() == -EBUSY);
 	assert(stela_linux_lease_matches(&lease));
-	assert(current == expected_task && retired == 1);
+	assert(current == expected_task);
 	assert(stela_linux_atomic_callback_active());
 	/* A returning error must precede RCU/page drainage and all lease mutation.
 	 * End this child with a distinct status, without claiming callback cleanup.
@@ -229,7 +227,8 @@ void stela_linux_atomic_callback_prepared_fixture(struct stela_linux_task *task,
 	const struct stela_linux_task_context *context)
 {
 	const struct stela_linux_task_scope_ops ops = {.park = prepared_wait, .yield = prepared_park,
-		.reschedule = prepared_park, .reschedule_requested = prepared_no_domain};
+		.reschedule = prepared_park, .reschedule_requested = prepared_no_domain,
+		.terminate = prepared_terminate};
 	struct prepared_scope prepared = {.task = task, .context = context};
 	assert(!stela_linux_task_scope_begin(task, &ops, &prepared));
 	stela_linux_enter(&stela_linux_bare);
@@ -375,7 +374,6 @@ void stela_linux_atomic_callback_fixture(void)
 	struct stela_linux_atomic_callback scope;
 	struct stela_linux_lease lease;
 	DEFINE_RAW_SPINLOCK(lock);
-	retired = 0;
 	expected_task = current;
 	expected_owner = stela_linux_owner();
 	assert(!stela_linux_atomic_callback_active() && stela_linux_quiescent());
@@ -392,13 +390,9 @@ void stela_linux_atomic_callback_fixture(void)
 	rcu_read_unlock();
 	assert(stela_linux_task_yield() == -EBUSY);
 	assert(stela_linux_task_park(false) == -EBUSY);
-	call_rcu(&retirement, counted_retirement);
-	assert(!retired);
 	stela_linux_atomic_callback_end(&scope);
 	assert(!stela_linux_atomic_callback_active() && stela_linux_quiescent());
 	assert(stela_linux_lease_matches(&lease) && current == expected_task);
-	stela_linux_rcu_finish();
-	assert(retired == 1);
 	assert(stela_test_traps(recursive_begin));
 	assert(stela_test_traps(wrong_end));
 	assert(stela_test_traps(duplicate_end));

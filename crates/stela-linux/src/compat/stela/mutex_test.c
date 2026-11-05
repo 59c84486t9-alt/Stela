@@ -33,8 +33,6 @@ static DEFINE_WW_CLASS(wound_class);
 static struct task_struct *tasks[4];
 static unsigned int attempted, finished, acquired, arrivals[3], winners[3];
 static unsigned int payload, deadlocks, reused, reuse_finished;
-static struct rcu_head signal_retirement;
-static const struct stela_mutex_test_call *retirement_call;
 
 static void checkpoint(const struct stela_mutex_test_call *call, u32 event)
 {
@@ -154,17 +152,6 @@ static void uncontended(const struct stela_mutex_test_call *call)
 	wake_queue_and_refs();
 }
 
-static void post_during_prepare(struct rcu_head *head)
-{
-	assert(head == &signal_retirement && retirement_call);
-	assert(current == tasks[1]);
-	/* Original process retirement has real softirq/preempt accounting. The
-	 * Rust checkpoint only tries its uncontended metadata lock and uses
-	 * bounded atomic/refcount operations; it never allocates or parks. */
-	assert(preempt_count() == (int)SOFTIRQ_OFFSET && !irqs_disabled());
-	checkpoint(retirement_call, 4);
-}
-
 static void reset(unsigned int scenario)
 {
 	assert(!attempted || finished == attempted);
@@ -172,7 +159,6 @@ static void reset(unsigned int scenario)
 	memset(arrivals, 0, sizeof(arrivals));
 	memset(winners, 0, sizeof(winners));
 	attempted = finished = acquired = payload = deadlocks = reused = reuse_finished = 0;
-	retirement_call = NULL;
 	mutex_init(&lock);
 	mutex_init(&auxiliary);
 	struct ww_class *class = scenario == 7 ? &die_class : &wound_class;
@@ -200,13 +186,8 @@ static void ordinary_worker(const struct stela_mutex_test_call *call)
 	assert(!mutex_trylock(&lock));
 	arrivals[attempted++] = role;
 	int result = 0;
-	if (scenario == 5) {
-		retirement_call = call;
-		call_rcu(&signal_retirement, post_during_prepare);
-	}
 	switch (scenario) {
 	case 1:
-	case 5:
 	case 6:
 		result = mutex_lock_interruptible(&lock);
 		break;
@@ -230,7 +211,7 @@ static void ordinary_worker(const struct stela_mutex_test_call *call)
 		mutex_lock(&lock);
 		break;
 	}
-	if (scenario == 1 || scenario == 2 || scenario == 5) {
+	if (scenario == 1 || scenario == 2) {
 		assert(result == -EINTR && !current->blocked_on);
 		assert(mutex_get_owner(&lock) == (unsigned long)tasks[0]);
 		assert(stela_linux_task_pending_signals() == (scenario == 2 ? 3U : 1U));
@@ -299,7 +280,7 @@ static void ordinary_owner(const struct stela_mutex_test_call *call)
 		assert((unsigned long)atomic_long_read(&lock.owner) & 2UL);
 		checkpoint(call, 2);
 	}
-	if (scenario == 1 || scenario == 2 || scenario == 5) {
+	if (scenario == 1 || scenario == 2) {
 		until(&finished, 1);
 		assert(!acquired && !lock.first_waiter);
 	}

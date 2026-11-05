@@ -31,15 +31,11 @@ void stela_linux_task_test_closed_stack(void);
 void stela_linux_atomic_callback_fixture(void);
 void stela_linux_atomic_callback_taskless_fixture(void);
 
-static unsigned int callbacks;
-static const struct stela_linux_owner *callback_owner;
 static struct task_struct *foreground_task;
 static bool worker_done;
 static bool schedule_worker_ran;
 static bool schedule_worker_done;
 static struct task_struct *schedule_worker;
-static struct rcu_head retirement;
-static struct rcu_head signal_retirement;
 static unsigned int refused_schedule_state;
 static struct rcuwait *published_wait;
 static bool wait_condition, wait_worker_done, idle_worker_done;
@@ -47,7 +43,6 @@ static unsigned int wait_payload;
 static struct task_struct *reserved_service_task;
 static struct task_struct *scope_end_target;
 static void *closed_stack;
-static struct rcu_head reschedule_retirement;
 
 struct service_call {
 	void *context;
@@ -93,16 +88,11 @@ void stela_linux_task_test_unprepared_end(void)
 	stela_linux_exit();
 }
 
-static void retired(struct rcu_head *head)
+/* A real pending signal, as a signal sender leaves it. */
+static void post_signal(void)
 {
-	assert(head == &retirement);
-	assert(stela_linux_owner() == callback_owner);
-	assert(current == foreground_task);
-	/* Original rcu_barrier invokes each callback under its real softirq
-	 * accounting; process PREPARE rechecks quiescence after that drain. */
-	assert(preempt_count() == (int)SOFTIRQ_OFFSET && !irqs_disabled());
-	assert(!stela_linux_quiescent());
-	callbacks++;
+	sigaddset(&current->pending.signal, SIGUSR1);
+	set_tsk_thread_flag(current, TIF_SIGPENDING);
 }
 
 static void check_current(void)
@@ -126,24 +116,8 @@ static void check_current(void)
 	assert(!stela_linux_task_stack_owner(task, sizeof(*task)));
 }
 
-static void signal_at_prepare(struct rcu_head *head)
-{
-	assert(head == &signal_retirement && current == foreground_task);
-	assert(preempt_count() == (int)SOFTIRQ_OFFSET && !irqs_disabled());
-	sigaddset(&current->pending.signal, SIGUSR1);
-	set_tsk_thread_flag(current, TIF_SIGPENDING);
-}
-
-static void forbidden_schedule_retirement(struct rcu_head *head)
-{
-	(void)head;
-	/* Unsupported state must trap before PREPARE drains anything. */
-	assert(false);
-}
-
 static void unsupported_schedule_state(void)
 {
-	call_rcu(&signal_retirement, forbidden_schedule_retirement);
 	set_current_state(refused_schedule_state);
 	schedule();
 }
@@ -164,20 +138,17 @@ static void original_rcuwait(void)
 	assert(!rcuwait_active(&wait) && !rcuwait_wake_up(&wait));
 	assert(current == foreground_task && READ_ONCE(current->__state) == TASK_RUNNING);
 	assert(!stela_linux_task_waiting_io() && !stela_linux_task_waiting_load());
-	unsigned long cookie = get_state_synchronize_rcu();
-	synchronize_rcu();
-	assert(poll_state_synchronize_rcu(cookie));
-	/* Already-satisfied condition and a signal delivered by real process
-	 * PREPARE both execute original finish, clearing the published pointer. */
+	/* An already-satisfied condition and a pending signal both execute
+	 * original finish, clearing the published pointer. */
 	assert(!rcuwait_wait_event(&wait, true, TASK_UNINTERRUPTIBLE));
 	assert(!rcuwait_active(&wait) && current->__state == TASK_RUNNING);
-	call_rcu(&signal_retirement, signal_at_prepare);
+	post_signal();
 	error = rcuwait_wait_event(&wait, false, TASK_INTERRUPTIBLE);
 	assert(error == -EINTR && !rcuwait_active(&wait));
 	assert(current->__state == TASK_RUNNING && stela_linux_task_pending_signals() == 1);
 	assert(!stela_linux_task_ack_signal(1));
 	published_wait = NULL;
-	printf("Linux rcuwait: original wait/wake/finish, atomic delivery, signals and RCU lifetime passed\n");
+	printf("Linux rcuwait: original wait/wake/finish, atomic delivery and signals passed\n");
 }
 
 static void original_idle_wait(void)
@@ -205,7 +176,6 @@ void stela_linux_task_test_foreground(void *context)
 	check_current();
 	stela_linux_atomic_callback_fixture();
 	foreground_task = current;
-	callback_owner = &owner;
 	assert(stela_linux_quiescent());
 	preempt_disable();
 	assert(stela_linux_task_yield() == -EBUSY);
@@ -224,44 +194,43 @@ void stela_linux_task_test_foreground(void *context)
 	assert(stela_linux_task_yield() == -EBUSY);
 	assert(preempt_count() == 1);
 	rcu_read_unlock();
-	/* Real predicate skips a TASK_RUNNING park without switching/leaving. */
+	/* A TASK_RUNNING park is still a genuine scheduling checkpoint: the
+	 * queued worker runs there and wakes this task before it blocks. */
+	assert(!worker_done);
 	assert(!stela_linux_task_park(false));
-	assert(!worker_done && current == foreground_task);
-	/* This one known preempt level is this fixture's scheduler level, never
-	 * an outer RCU/BH/IRQ critical section. Whole-original-mutex callers of
+	assert(worker_done && current == foreground_task);
+	/* That early wake is kept, so the next park skips blocking. This one
+	 * known preempt level is this fixture's scheduler level, never an outer
+	 * RCU/BH/IRQ critical section. Whole-original-mutex callers of
 	 * schedule_preempt_disabled are exercised by the separate mutex suite. */
 	set_current_state(TASK_UNINTERRUPTIBLE);
 	preempt_disable();
-	call_rcu(&retirement, retired);
-	assert(!callbacks);
-	assert(stela_linux_task_park(true) == 1);
-	assert(callbacks == 1 && worker_done && preempt_count() == 1);
+	assert(!stela_linux_task_park(true));
+	assert(preempt_count() == 1);
 	assert(current == foreground_task && current->__state == TASK_RUNNING);
 	assert(stela_linux_owner() == &owner);
 	preempt_enable();
 	assert(!stela_linux_task_yield());
-	/* Generic PREPARE drains may post a signal after the caller's condition
-	 * check. The real pending bit must cancel this interruptible park. */
+	/* A signal posted after the caller's condition check: the real pending
+	 * bit must cancel this interruptible park. */
 	set_current_state(TASK_INTERRUPTIBLE);
-	call_rcu(&signal_retirement, signal_at_prepare);
+	post_signal();
 	schedule();
 	assert(current == foreground_task && current->__state == TASK_RUNNING);
 	assert(stela_linux_task_pending_signals() == 1);
 	assert(!stela_linux_task_ack_signal(1));
 	/* A separate real worker is now sleeping at generic preempt0. Wake its
-	 * original task, then block here until its original wake returns us.
-	 * PREPARE must drain this owner's RCU at count0 before changing stacks. */
-	assert(schedule_worker && !schedule_worker_done && callbacks == 1);
+	 * original task, then block here until its original wake returns us. */
+	assert(schedule_worker && !schedule_worker_done);
 	assert(wake_up_process(schedule_worker) == 1);
 	/* A no-op RUNNING schedule would leave this peer checkpoint unset. */
 	schedule();
-	assert(schedule_worker_ran && !schedule_worker_done && callbacks == 1);
+	assert(schedule_worker_ran && !schedule_worker_done);
 	assert(current == foreground_task && current->__state == TASK_RUNNING);
 	assert(wake_up_process(schedule_worker) == 1);
 	set_current_state(TASK_UNINTERRUPTIBLE);
-	call_rcu(&retirement, retired);
 	schedule();
-	assert(schedule_worker_done && callbacks == 2);
+	assert(schedule_worker_done);
 	assert(current == foreground_task && current->__state == TASK_RUNNING);
 	assert(!preempt_count() && !irqs_disabled() && stela_linux_owner() == &owner);
 	/* TASK_RUNNING schedule is an actual cooperative yield, not a skip. */
@@ -278,7 +247,6 @@ void stela_linux_task_test_foreground(void *context)
 	assert(stela_test_traps(unsupported_schedule_state));
 	check_current();
 	assert(stela_linux_quiescent());
-	callback_owner = NULL;
 	/* Scope-end must consume this real request through an actual dispatch. */
 	set_tsk_thread_flag(current, TIF_NEED_RESCHED);
 	stela_linux_exit();
@@ -292,12 +260,12 @@ void stela_linux_task_test_schedule_worker(void *context)
 	schedule_worker = current;
 	set_current_state(TASK_UNINTERRUPTIBLE);
 	schedule();
-	assert(callbacks == 1 && foreground_task->__state == TASK_RUNNING);
+	assert(foreground_task->__state == TASK_RUNNING);
 	schedule_worker_ran = true;
 	set_current_state(TASK_UNINTERRUPTIBLE);
 	schedule();
 	assert(current == schedule_worker && current->__state == TASK_RUNNING);
-	assert(!preempt_count() && !irqs_disabled() && callbacks == 2);
+	assert(!preempt_count() && !irqs_disabled());
 	assert(stela_linux_owner() == &stela_linux_bare);
 	schedule_worker_done = true;
 	assert(wake_up_process(foreground_task) == 1);
@@ -335,7 +303,7 @@ void stela_linux_task_test_worker(void *context)
 	const struct stela_linux_owner owner = {.services = &services};
 	stela_linux_enter(&owner);
 	check_current();
-	assert(current != foreground_task && callbacks == 1);
+	assert(current != foreground_task);
 	closed_stack = current->stack;
 	assert(!preempt_count() && !irqs_disabled());
 	assert(stela_linux_owner() == &owner);
@@ -422,13 +390,6 @@ struct runnable_boundary_call {
 	u64 (*ticks)(void *context);
 };
 
-static void need_at_prepare(struct rcu_head *head)
-{
-	assert(head == &reschedule_retirement && current == foreground_task);
-	assert(preempt_count() == (int)SOFTIRQ_OFFSET);
-	set_tsk_thread_flag(current, TIF_NEED_RESCHED);
-}
-
 void stela_linux_task_test_runnable_boundary(void *context)
 {
 	const struct runnable_boundary_call *call = context;
@@ -450,9 +411,10 @@ void stela_linux_task_test_runnable_boundary(void *context)
 		assert(!__cond_resched());
 		stela_linux_atomic_callback_end(&scope);
 		assert(call->reads(call->context) == reads);
-		call_rcu(&reschedule_retirement, need_at_prepare);
+		/* The due service tick, then an explicit reschedule request. */
 		assert(__cond_resched() == 1);
-		assert(test_tsk_thread_flag(current, TIF_NEED_RESCHED));
+		assert(!test_tsk_thread_flag(current, TIF_NEED_RESCHED));
+		set_tsk_thread_flag(current, TIF_NEED_RESCHED);
 		assert(__cond_resched() == 1);
 		assert(!test_tsk_thread_flag(current, TIF_NEED_RESCHED));
 		assert(call->ticks(call->context) == 1);
