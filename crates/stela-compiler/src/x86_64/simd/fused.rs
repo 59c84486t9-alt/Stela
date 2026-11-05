@@ -7,7 +7,7 @@ use super::numerical::{
     prepare_vector_result_range, read_inputs, read_numerical_right, read_numerical_vector,
     reject_other_status, reject_product_status, resolve, restore_environment,
     restore_environment_with_product, save_product_status, sticky_inexact, sticky_result_check,
-    test_control, vector_exponent_range, zero_product_check,
+    test_control, vector_normal_or_zero_range, zero_product_check,
 };
 use super::{Host, commit, packed};
 use crate::x86_64::asm::Code;
@@ -28,6 +28,8 @@ const RIGHT: u8 = 1;
 const SIGN_MASK: u8 = 2;
 const ADDEND: u8 = 6;
 const ORIGINAL_ADDEND: u8 = 7;
+/// The zero classifier's scratch: the scalar-only original addend's register.
+const ZERO_RANGE_SCRATCH: u8 = ORIGINAL_ADDEND;
 
 fn emit_checked_fma(code: &mut Code, operand: &Operand, target: TargetCpu) {
     emit_fma(
@@ -118,7 +120,16 @@ pub(in crate::x86_64) fn emit(
             exponent_range(code, operand.format, source, INPUT_MINIMUM_EXPONENT);
             Condition::AboveOrEqual
         } else {
-            vector_exponent_range(code, operand.format, operand.shape, source);
+            // A zero lane is exact on both sides: FPMulAdd and the host's
+            // FMA follow IEEE 754's signed-zero sums under the installed
+            // rounding, and the excluded infinities keep 0 x inf out.
+            vector_normal_or_zero_range(
+                code,
+                operand.format,
+                operand.shape,
+                source,
+                ZERO_RANGE_SCRATCH,
+            );
             Condition::NotZero
         };
         helper.push(branch(code, condition));
@@ -158,7 +169,15 @@ pub(in crate::x86_64) fn emit(
         Condition::Below
     } else {
         prepare_vector_result_range(code);
-        vector_exponent_range(code, operand.format, operand.shape, LEFT);
+        // A zero result is exact: one that underflowed raised the host's
+        // underflow status, which went to the helper above.
+        vector_normal_or_zero_range(
+            code,
+            operand.format,
+            operand.shape,
+            LEFT,
+            ZERO_RANGE_SCRATCH,
+        );
         Condition::Zero
     };
     let success = branch(code, success_condition);

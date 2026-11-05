@@ -2655,6 +2655,99 @@ fn sp_alignment_is_checked_once_while_it_holds() {
     assert_eq!(checks, 2);
 }
 
+/// A vector FMLA whose lanes hold exact zeros completes in the block, as
+/// FADD and FMUL do: a zero input or result is exact on both sides, so only
+/// infinities, NaNs, subnormals and tiny results need the helper.
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn vector_fused_multiply_add_keeps_zero_lanes_in_the_block() {
+    use crate::{GuestState, Lifter, aarch64::Decoder};
+    use core::ffi::c_void;
+    unsafe extern "C" {
+        fn mmap(
+            address: *mut c_void,
+            bytes: usize,
+            protection: i32,
+            flags: i32,
+            fd: i32,
+            offset: i64,
+        ) -> *mut c_void;
+        fn mprotect(address: *mut c_void, bytes: usize, protection: i32) -> i32;
+        fn munmap(address: *mut c_void, bytes: usize) -> i32;
+    }
+    #[cfg(target_os = "macos")]
+    const MAP_ANONYMOUS: i32 = 0x1000;
+    #[cfg(target_os = "linux")]
+    const MAP_ANONYMOUS: i32 = 0x20;
+    const PAGE: usize = 4096;
+    const IXC: u32 = 1 << 4;
+    #[repr(C)]
+    #[derive(Debug, PartialEq, Eq)]
+    struct Exit {
+        pc: u64,
+        kind: u64,
+    }
+    let lanes = |values: [f32; 4]| {
+        let bits = values.map(|value| u64::from(value.to_bits()));
+        [bits[0] | bits[1] << 32, bits[2] | bits[3] << 32]
+    };
+    let pc = GuestAddress(0x1000);
+    // fmla v26.4s, v21.4s, v22.4s
+    let instruction = Decoder.lift(pc, 0x4e36_ceba).unwrap();
+    let fallthrough = GuestAddress(pc.0 + 4);
+    let left = [0.0, 1.5, -0.0, 2.0];
+    let right = [3.0, 0.0, 4.0, 3.0];
+    let addend = [2.5, -1.25, 0.0, 0.0];
+    let expected = lanes(core::array::from_fn(|lane| {
+        f32::mul_add(left[lane], right[lane], addend[lane])
+    }));
+    for target in [crate::TargetCpu::Baseline, crate::TargetCpu::detect()] {
+        let code = emit_for_target(
+            core::slice::from_ref(&instruction),
+            None,
+            fallthrough,
+            target,
+            super::super::MemoryChecks::DEFAULT,
+        )
+        .x86_64_code;
+        let bytes = code.len().next_multiple_of(PAGE);
+        // The full path, and the sticky-inexact path.
+        for fpsr in [0, IXC] {
+            let mut state = GuestState::default();
+            state.v[21] = lanes(left);
+            state.v[22] = lanes(right);
+            state.v[26] = lanes(addend);
+            state.fpsr = fpsr;
+            // SAFETY: private anonymous memory, RX after the copy and
+            // unmapped after the call; the block writes only `state` and
+            // its own stack slots.
+            let exit = unsafe {
+                let page = mmap(core::ptr::null_mut(), bytes, 3, 2 | MAP_ANONYMOUS, -1, 0);
+                assert_ne!(page as usize, usize::MAX);
+                core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
+                assert_eq!(mprotect(page, bytes, 5), 0);
+                let entry: unsafe extern "sysv64" fn(*mut GuestState) -> Exit =
+                    core::mem::transmute(page);
+                let exit = entry(&mut state);
+                assert_eq!(munmap(page, bytes), 0);
+                exit
+            };
+            let case = (target, fpsr);
+            assert_eq!(
+                exit,
+                Exit {
+                    pc: fallthrough.0,
+                    kind: ExitKind::Fallthrough as u64,
+                },
+                "{case:?}"
+            );
+            assert_eq!(state.v[26], expected, "{case:?}");
+            // Every lane is exact: no new status.
+            assert_eq!(state.fpsr, fpsr, "{case:?}");
+        }
+    }
+}
+
 /// A block whose numerical slow paths are out of line, with runs that
 /// check FPCR and FPSR once and inputs taken from XMM0 where the
 /// previous instruction left them, runs on the host exactly as its
