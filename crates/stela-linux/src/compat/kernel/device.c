@@ -112,11 +112,6 @@ void device_unregister(struct device *dev)
 	put_device(dev);
 }
 
-struct fwnode_handle *__dev_fwnode(struct device *dev)
-{
-	return dev->fwnode;
-}
-
 /* A driver's managed actions, undone last first when it detaches. */
 struct managed_action {
 	struct list_head node;
@@ -253,9 +248,47 @@ static void undo(void *data)
 	undone[undone_count++] = *(const char *)data;
 }
 
+static bool test_property_bool(const struct fwnode_handle *node, const char *name)
+{
+	return !node->secondary && !strcmp(name, "test-enabled");
+}
+
+static int test_property_int(const struct fwnode_handle *node, const char *name,
+			     unsigned int size, void *out, size_t count)
+{
+	if (node->secondary || strcmp(name, "test-values"))
+		return -EINVAL;
+
+	u32 *values = out;
+	assert(values && size == sizeof(*values) && count == 2);
+	values[0] = 7;
+	values[1] = 13;
+	return 0;
+}
+
+static void test_properties(void)
+{
+	static const struct fwnode_operations ops = {
+		.property_read_bool = test_property_bool,
+		.property_read_int_array = test_property_int,
+	};
+	struct fwnode_handle secondary = {.ops = &ops};
+	struct fwnode_handle primary = {.ops = &ops, .secondary = &secondary};
+	const struct device dev = {.fwnode = &primary};
+	u32 values[2] = {};
+
+	assert(dev_fwnode(&dev) == &primary);
+	assert(device_property_read_bool(&dev, "test-enabled"));
+	assert(!device_property_read_bool(&dev, "absent"));
+	assert(!device_property_read_u32_array(&dev, "test-values", values,
+					       ARRAY_SIZE(values)));
+	assert(values[0] == 7 && values[1] == 13);
+}
+
 int main(void)
 {
 	stela_linux_enter(&stela_linux_bare);
+	test_properties();
 	struct device dev = {.release = release};
 	device_initialize(&dev);
 	assert(get_device(&dev) == &dev && !get_device(NULL));

@@ -184,6 +184,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/fs/mount_cache.c")),
             PathBuf::from(format!("{LINUX}/fs/mnt_idmapping.c")),
             PathBuf::from(format!("{LINUX}/drivers/base/map.c")),
+            PathBuf::from(format!("{LINUX}/drivers/base/property.c")),
             PathBuf::from(format!("{LINUX}/fs/char_dev.c")),
             PathBuf::from(format!("{LINUX}/fs/d_path.c")),
             PathBuf::from(format!("{LINUX}/fs/dcache.c")),
