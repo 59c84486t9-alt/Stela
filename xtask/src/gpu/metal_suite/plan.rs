@@ -548,6 +548,14 @@ impl Case {
         case
     }
 
+    /// Host work around the device over the case's buffers: `host` names
+    /// it and its parameters, and the runner records what it observes.
+    pub fn host(name: &str, library: &str, host: Value) -> Self {
+        let mut case = Self::new(name, "host", Some(library));
+        case.json.insert("host".into(), host);
+        case
+    }
+
     /// The device's families, features and limits.
     pub fn device(name: &str) -> Self {
         Self::new(name, "device", None)

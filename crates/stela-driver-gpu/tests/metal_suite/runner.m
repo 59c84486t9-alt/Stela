@@ -13,11 +13,17 @@
  * case that does not complete within its timeout stops the runner with exit
  * status 2, since the device may not recover; --skip-done resumes after it.
  * Nothing here interprets results: the plan says what to bind and dispatch.
+ *
+ * The binary runs from Runner.app, whose Share.xpc service is the same
+ * binary: launched by launchd for `host` cases that share a texture and an
+ * event with another process.
  */
 #import <Foundation/Foundation.h>
 #import <CoreImage/CoreImage.h>
+#import <IOSurface/IOSurface.h>
 #import <Metal/Metal.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
+#import <QuartzCore/CAMetalLayer.h>
 #include <stdio.h>
 
 static NSString *plan_dir;
@@ -2313,6 +2319,595 @@ static void run_framework(Case *c, id<MTLCommandQueue> queue, NSDictionary *spec
 	wait_for(cb, spec);
 }
 
+/*
+ * Host work around the device: drawables of a layer, IOSurface-backed
+ * textures, textures and events another process opens, binary archives,
+ * the errors creation calls report, command buffer status and order,
+ * purgeable state, and work at scale. Each writes what it observed into
+ * the case's buffers as plain numbers; the plan holds the expectations.
+ */
+static void put(Case *c, NSString *buffer, NSUInteger index, uint32_t value)
+{
+	id<MTLBuffer> b = c.buffers[buffer];
+	if (!b || (index + 1) * sizeof(uint32_t) > b.length)
+		@throw failure(@"no room for observation %lu in %@", (unsigned long)index, buffer);
+	((uint32_t *)b.contents)[index] = value;
+}
+
+static id<MTLComputePipelineState> host_pipeline(Case *c, NSString *function)
+{
+	id<MTLLibrary> library = library_named(c.device, c.plan, c.spec[@"library"], c.libraries);
+	NSError *error = nil;
+	id<MTLComputePipelineState> p = [c.device newComputePipelineStateWithFunction:function_named(library, function, nil)
+										error:&error];
+	if (!p)
+		@throw failure(@"pipeline %@: %@", function, error.localizedDescription);
+	return p;
+}
+
+static void dispatch_one(id<MTLComputeCommandEncoder> e, id<MTLComputePipelineState> p, NSArray<id<MTLBuffer>> *buffers,
+			 uint32_t constant, MTLSize threads)
+{
+	[e setComputePipelineState:p];
+	for (NSUInteger i = 0; i < buffers.count; i++)
+		[e setBuffer:buffers[i] offset:0 atIndex:i];
+	[e setBytes:&constant length:sizeof constant atIndex:buffers.count];
+	[e dispatchThreads:threads threadsPerThreadgroup:MTLSizeMake(MIN(threads.width, 64), 1, 1)];
+}
+
+static id<MTLRenderPipelineState> host_render_pipeline(Case *c, MTLRenderPipelineDescriptor *d, NSString *vertex,
+						       NSString *fragment, MTLPixelFormat format, NSError **error)
+{
+	id<MTLLibrary> library = library_named(c.device, c.plan, c.spec[@"library"], c.libraries);
+	d.vertexFunction = function_named(library, vertex, nil);
+	d.fragmentFunction = function_named(library, fragment, nil);
+	d.colorAttachments[0].pixelFormat = format;
+	return [c.device newRenderPipelineStateWithDescriptor:d error:error];
+}
+
+/* Clears a target, then draws its left half in `color`. */
+static void clear_and_draw_left(Case *c, id<MTLCommandBuffer> cb, id<MTLRenderPipelineState> p, id<MTLTexture> t,
+				NSArray *clear, NSArray *color)
+{
+	MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+	pass.colorAttachments[0].texture = t;
+	pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+	pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+	pass.colorAttachments[0].clearColor =
+		MTLClearColorMake([clear[0] doubleValue], [clear[1] doubleValue], [clear[2] doubleValue], [clear[3] doubleValue]);
+	id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
+	float rgba[4] = {[color[0] floatValue], [color[1] floatValue], [color[2] floatValue], [color[3] floatValue]};
+	[e setRenderPipelineState:p];
+	[e setFragmentBytes:rgba length:sizeof rgba atIndex:0];
+	[e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+	[e endEncoding];
+}
+
+/* Drawables of a layer in no window: each rendered, read back unless the
+ * layer is framebuffer only, and presented. */
+static void host_drawables(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	MTLPixelFormat format = lookup(pixel_formats(), @"pixel format", h[@"format"]);
+	NSUInteger w = number(h, @"width", 1), height = number(h, @"height", 1), count = number(h, @"count", 1), block = 1;
+	BOOL framebuffer_only = [h[@"framebuffer_only"] boolValue];
+	CAMetalLayer *layer = [CAMetalLayer layer];
+	layer.device = c.device;
+	layer.pixelFormat = format;
+	layer.framebufferOnly = framebuffer_only;
+	layer.drawableSize = CGSizeMake(w, height);
+	layer.maximumDrawableCount = 3;
+	NSError *error = nil;
+	id<MTLRenderPipelineState> p =
+		host_render_pipeline(c, [MTLRenderPipelineDescriptor new], @"vert_left_half", @"frag_constant", format, &error);
+	if (!p)
+		@throw failure(@"drawable pipeline: %@", error.localizedDescription);
+	NSUInteger texel = pixel_bytes(format, &block), image = w * height * texel;
+	for (NSUInteger i = 0; i < count; i++) {
+		id<CAMetalDrawable> drawable = [layer nextDrawable];
+		if (!drawable)
+			@throw failure(@"no drawable %lu", (unsigned long)i);
+		id<MTLTexture> t = drawable.texture;
+		NSUInteger at = i * 5;
+		put(c, @"props", at, (uint32_t)t.width);
+		put(c, @"props", at + 1, (uint32_t)t.height);
+		put(c, @"props", at + 2, (uint32_t)t.pixelFormat);
+		put(c, @"props", at + 3, (t.usage & MTLTextureUsageRenderTarget) != 0);
+		put(c, @"props", at + 4, (t.usage & MTLTextureUsageShaderRead) != 0);
+		id<MTLCommandBuffer> cb = [queue commandBuffer];
+		clear_and_draw_left(c, cb, p, t, h[@"clears"][i], h[@"color"]);
+		if (!framebuffer_only) {
+			id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+			[b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+				sourceSize:MTLSizeMake(w, height, 1) toBuffer:c.buffers[@"out"] destinationOffset:i * image
+			   destinationBytesPerRow:w * texel destinationBytesPerImage:image];
+			[b endEncoding];
+		}
+		[cb presentDrawable:drawable];
+		wait_for(cb, c.spec);
+	}
+}
+
+static IOSurfaceRef make_surface(NSDictionary *properties)
+{
+	IOSurfaceRef s = IOSurfaceCreate((__bridge CFDictionaryRef)properties);
+	if (!s)
+		@throw failure(@"IOSurfaceCreate refused %@", properties);
+	return s;
+}
+
+/* Copies tight rows into a surface plane, or out of it, under its lock. */
+static void surface_rows(IOSurfaceRef s, size_t plane, NSData *in, NSMutableData *out, size_t row, size_t rows)
+{
+	IOSurfaceLock(s, in ? 0 : kIOSurfaceLockReadOnly, NULL);
+	uint8_t *base = IOSurfaceGetBaseAddressOfPlane(s, plane);
+	size_t stride = IOSurfaceGetBytesPerRowOfPlane(s, plane);
+	for (size_t y = 0; y < rows; y++) {
+		if (in)
+			memcpy(base + y * stride, (const uint8_t *)in.bytes + y * row, row);
+		else
+			memcpy((uint8_t *)out.mutableBytes + y * row, base + y * stride, row);
+	}
+	IOSurfaceUnlock(s, in ? 0 : kIOSurfaceLockReadOnly, NULL);
+}
+
+static id<MTLTexture> surface_texture(Case *c, IOSurfaceRef s, size_t plane, MTLPixelFormat format, MTLTextureUsage usage)
+{
+	MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+										     width:IOSurfaceGetWidthOfPlane(s, plane)
+										    height:IOSurfaceGetHeightOfPlane(s, plane)
+										 mipmapped:NO];
+	d.usage = usage;
+	d.storageMode = c.device.hasUnifiedMemory ? MTLStorageModeShared : MTLStorageModeManaged;
+	id<MTLTexture> t = [c.device newTextureWithDescriptor:d iosurface:s plane:plane];
+	if (!t)
+		@throw failure(@"no texture over plane %zu", plane);
+	return t;
+}
+
+static NSData *contents(id<MTLBuffer> b)
+{
+	return [NSData dataWithBytes:b.contents length:b.length];
+}
+
+/* A BGRA surface the CPU fills and a kernel inverts into a second one the
+ * CPU reads; then a two-plane 4:2:0 surface a kernel reads both planes of. */
+static void host_iosurface(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	size_t w = number(h, @"width", 1), height = number(h, @"height", 1);
+	NSDictionary *bgra = @{
+		(__bridge id)kIOSurfaceWidth : @(w), (__bridge id)kIOSurfaceHeight : @(height), (__bridge id)kIOSurfaceBytesPerElement : @4,
+		(__bridge id)kIOSurfacePixelFormat : @((uint32_t)'BGRA'),
+		(__bridge id)kIOSurfaceBytesPerRow : @(IOSurfaceAlignProperty(kIOSurfaceBytesPerRow, w * 4)),
+	};
+	IOSurfaceRef src = make_surface(bgra), dst = make_surface(bgra);
+	surface_rows(src, 0, contents(c.buffers[@"in"]), nil, w * 4, height);
+	id<MTLTexture> ts = surface_texture(c, src, 0, MTLPixelFormatBGRA8Unorm, MTLTextureUsageShaderRead);
+	id<MTLTexture> td = surface_texture(c, dst, 0, MTLPixelFormatBGRA8Unorm, MTLTextureUsageShaderWrite);
+	put(c, @"props", 0, ts.iosurface == src);
+	put(c, @"props", 1, (uint32_t)ts.iosurfacePlane);
+	put(c, @"props", 2, (uint32_t)td.width);
+	put(c, @"props", 3, (uint32_t)td.height);
+
+	size_t uw = w / 2, uh = height / 2;
+	size_t y_row = IOSurfaceAlignProperty(kIOSurfacePlaneBytesPerRow, w);
+	size_t uv_row = IOSurfaceAlignProperty(kIOSurfacePlaneBytesPerRow, uw * 2);
+	size_t uv_offset = IOSurfaceAlignProperty(kIOSurfacePlaneOffset, y_row * height);
+	NSDictionary *planar = @{
+		(__bridge id)kIOSurfaceWidth : @(w), (__bridge id)kIOSurfaceHeight : @(height),
+		(__bridge id)kIOSurfacePixelFormat : @((uint32_t)'420v'),
+		(__bridge id)kIOSurfaceAllocSize : @(uv_offset + uv_row * uh),
+		(__bridge id)kIOSurfacePlaneInfo : @[
+			@{(__bridge id)kIOSurfacePlaneWidth : @(w), (__bridge id)kIOSurfacePlaneHeight : @(height),
+			  (__bridge id)kIOSurfacePlaneBytesPerElement : @1, (__bridge id)kIOSurfacePlaneBytesPerRow : @(y_row),
+			  (__bridge id)kIOSurfacePlaneOffset : @0, (__bridge id)kIOSurfacePlaneSize : @(y_row * height)},
+			@{(__bridge id)kIOSurfacePlaneWidth : @(uw), (__bridge id)kIOSurfacePlaneHeight : @(uh),
+			  (__bridge id)kIOSurfacePlaneBytesPerElement : @2, (__bridge id)kIOSurfacePlaneBytesPerRow : @(uv_row),
+			  (__bridge id)kIOSurfacePlaneOffset : @(uv_offset), (__bridge id)kIOSurfacePlaneSize : @(uv_row * uh)},
+		],
+	};
+	IOSurfaceRef yuv = make_surface(planar);
+	surface_rows(yuv, 0, contents(c.buffers[@"luma"]), nil, w, height);
+	surface_rows(yuv, 1, contents(c.buffers[@"chroma"]), nil, uw * 2, uh);
+	id<MTLTexture> ty = surface_texture(c, yuv, 0, MTLPixelFormatR8Unorm, MTLTextureUsageShaderRead);
+	id<MTLTexture> tc = surface_texture(c, yuv, 1, MTLPixelFormatRG8Unorm, MTLTextureUsageShaderRead);
+
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+	[e setComputePipelineState:host_pipeline(c, @"surface_invert")];
+	[e setTexture:ts atIndex:0];
+	[e setTexture:td atIndex:1];
+	[e dispatchThreads:MTLSizeMake(w, height, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+	[e setComputePipelineState:host_pipeline(c, @"surface_planes")];
+	[e setTexture:ty atIndex:0];
+	[e setTexture:tc atIndex:1];
+	[e setBuffer:c.buffers[@"planes"] offset:0 atIndex:0];
+	[e dispatchThreads:MTLSizeMake(w, height, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+	[e endEncoding];
+	if (td.storageMode == MTLStorageModeManaged) {
+		id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+		[b synchronizeResource:td];
+		[b endEncoding];
+	}
+	wait_for(cb, c.spec);
+	NSMutableData *out = [NSMutableData dataWithLength:w * 4 * height];
+	surface_rows(dst, 0, nil, out, w * 4, height);
+	memcpy(c.buffers[@"out"].contents, out.bytes, MIN(out.length, c.buffers[@"out"].length));
+	CFRelease(src);
+	CFRelease(dst);
+	CFRelease(yuv);
+}
+
+/* What another process does to a texture and event this one shares. */
+@protocol Sharer
+- (void)writeRows:(NSData *)rows into:(MTLSharedTextureHandle *)texture
+	    after:(MTLSharedEventHandle *)event value:(uint64_t)value
+	    reply:(void (^)(NSString *error))reply;
+@end
+
+static NSString *const share_service = @"com.stela.metal-suite.share";
+
+/* The share service: opens the handles with its own device, waits on the
+ * event, copies rows into the texture's top and signals the next value. */
+@interface ShareService : NSObject <NSXPCListenerDelegate, Sharer>
+@end
+@implementation ShareService
+- (BOOL)listener:(NSXPCListener *)listener shouldAcceptNewConnection:(NSXPCConnection *)connection
+{
+	connection.exportedInterface = [NSXPCInterface interfaceWithProtocol:@protocol(Sharer)];
+	connection.exportedObject = self;
+	[connection resume];
+	return YES;
+}
+
+- (void)writeRows:(NSData *)rows into:(MTLSharedTextureHandle *)handle
+	    after:(MTLSharedEventHandle *)event_handle value:(uint64_t)value
+	    reply:(void (^)(NSString *error))reply
+{
+	id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+	id<MTLTexture> t = [device newSharedTextureWithHandle:handle];
+	id<MTLSharedEvent> event = [device newSharedEventWithHandle:event_handle];
+	if (!t || !event) {
+		reply(@"the service could not open the shared texture or event");
+		return;
+	}
+	NSUInteger row = t.width * 4, count = rows.length / row;
+	id<MTLBuffer> staging = [device newBufferWithBytes:rows.bytes length:rows.length options:MTLResourceStorageModeShared];
+	id<MTLCommandBuffer> cb = [[device newCommandQueue] commandBuffer];
+	[cb encodeWaitForEvent:event value:value];
+	id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+	[b copyFromBuffer:staging sourceOffset:0 sourceBytesPerRow:row sourceBytesPerImage:rows.length
+	       sourceSize:MTLSizeMake(t.width, count, 1) toTexture:t destinationSlice:0 destinationLevel:0
+	destinationOrigin:MTLOriginMake(0, 0, 0)];
+	[b endEncoding];
+	[cb encodeSignalEvent:event value:value + 1];
+	[cb commit];
+	[cb waitUntilCompleted];
+	reply(cb.error ? cb.error.localizedDescription : nil);
+}
+@end
+
+static int serve_shares(void)
+{
+	ShareService *service = [ShareService new];
+	NSXPCListener *listener = [NSXPCListener serviceListener];
+	listener.delegate = service;
+	[listener resume];
+	return 0;
+}
+
+/* This process clears a shared texture and signals 1; the share service
+ * waits for 1, writes the top rows and signals 2; this process waits for
+ * 2 and reads the texture back. */
+static void host_share(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	NSUInteger w = number(h, @"width", 1), height = number(h, @"height", 1);
+	MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+										     width:w
+										    height:height
+										 mipmapped:NO];
+	d.storageMode = MTLStorageModePrivate;
+	d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	id<MTLTexture> t = [c.device newSharedTextureWithDescriptor:d];
+	id<MTLSharedEvent> event = [c.device newSharedEvent];
+	if (!t || !event)
+		@throw failure(@"no shared texture or event");
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+	pass.colorAttachments[0].texture = t;
+	pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+	pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+	NSArray *k = h[@"clear"];
+	pass.colorAttachments[0].clearColor =
+		MTLClearColorMake([k[0] doubleValue], [k[1] doubleValue], [k[2] doubleValue], [k[3] doubleValue]);
+	[[cb renderCommandEncoderWithDescriptor:pass] endEncoding];
+	[cb encodeSignalEvent:event value:1];
+	[cb commit];
+
+	NSXPCConnection *connection = [[NSXPCConnection alloc] initWithServiceName:share_service];
+	connection.remoteObjectInterface = [NSXPCInterface interfaceWithProtocol:@protocol(Sharer)];
+	[connection resume];
+	__block NSString *problem = nil;
+	dispatch_semaphore_t done = dispatch_semaphore_create(0);
+	id<Sharer> sharer = [connection remoteObjectProxyWithErrorHandler:^(NSError *e) {
+		problem = e.localizedDescription ?: @"connection failed";
+		dispatch_semaphore_signal(done);
+	}];
+	[sharer writeRows:contents(c.buffers[@"rows"]) into:[t newSharedTextureHandle]
+		    after:[event newSharedEventHandle] value:1
+		    reply:^(NSString *error) {
+			    problem = error;
+			    dispatch_semaphore_signal(done);
+		    }];
+	long late = dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC));
+	[connection invalidate];
+	if (late)
+		@throw failure(@"the share service did not answer");
+	if (problem)
+		@throw failure(@"share service: %@", problem);
+
+	id<MTLCommandBuffer> read = [queue commandBuffer];
+	[read encodeWaitForEvent:event value:2];
+	id<MTLBlitCommandEncoder> b = [read blitCommandEncoder];
+	[b copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, height, 1)
+		  toBuffer:c.buffers[@"out"] destinationOffset:0 destinationBytesPerRow:w * 4
+	  destinationBytesPerImage:w * 4 * height];
+	[b endEncoding];
+	wait_for(read, c.spec);
+	put(c, @"props", 0, (uint32_t)event.signaledValue);
+}
+
+/* An archive given a compute and a render pipeline's functions, written to
+ * a file and loaded again: pipelines it holds are created though a miss
+ * would fail them, and one it does not hold fails. */
+static void host_archive(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	id<MTLLibrary> library = library_named(c.device, c.plan, c.spec[@"library"], c.libraries);
+	NSError *error = nil;
+	id<MTLBinaryArchive> archive = [c.device newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&error];
+	put(c, @"props", 0, archive != nil);
+	MTLComputePipelineDescriptor *compute = [MTLComputePipelineDescriptor new];
+	compute.computeFunction = function_named(library, @"archived", nil);
+	put(c, @"props", 1, [archive addComputePipelineFunctionsWithDescriptor:compute error:&error]);
+	MTLRenderPipelineDescriptor *render = [MTLRenderPipelineDescriptor new];
+	render.vertexFunction = function_named(library, @"vert_left_half", nil);
+	render.fragmentFunction = function_named(library, @"frag_constant", nil);
+	render.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+	put(c, @"props", 2, [archive addRenderPipelineFunctionsWithDescriptor:render error:&error]);
+	NSURL *url = [NSURL fileURLWithPath:[NSTemporaryDirectory()
+						    stringByAppendingPathComponent:[NSString stringWithFormat:@"stela-suite-%d.metallib",
+													       getpid()]]];
+	put(c, @"props", 3, [archive serializeToURL:url error:&error]);
+	MTLBinaryArchiveDescriptor *from_file = [MTLBinaryArchiveDescriptor new];
+	from_file.url = url;
+	id<MTLBinaryArchive> loaded = [c.device newBinaryArchiveWithDescriptor:from_file error:&error];
+	put(c, @"props", 4, loaded != nil);
+	compute.binaryArchives = loaded ? @[ loaded ] : @[];
+	id<MTLComputePipelineState> hit = [c.device newComputePipelineStateWithDescriptor:compute
+										  options:MTLPipelineOptionFailOnBinaryArchiveMiss
+									       reflection:nil
+										    error:&error];
+	put(c, @"props", 5, hit != nil);
+	MTLComputePipelineDescriptor *other = [MTLComputePipelineDescriptor new];
+	other.computeFunction = function_named(library, @"not_archived", nil);
+	other.binaryArchives = compute.binaryArchives;
+	put(c, @"props", 6, [c.device newComputePipelineStateWithDescriptor:other options:MTLPipelineOptionFailOnBinaryArchiveMiss
+							     reflection:nil
+								  error:&error] == nil);
+	render.binaryArchives = compute.binaryArchives;
+	put(c, @"props", 7, [c.device newRenderPipelineStateWithDescriptor:render options:MTLPipelineOptionFailOnBinaryArchiveMiss
+							    reflection:nil
+								 error:&error] != nil);
+	[[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+	if (!hit)
+		return;
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+	id<MTLBuffer> data = c.buffers[@"data"];
+	dispatch_one(e, hit, @[ data ], 0, MTLSizeMake(data.length / 4, 1, 1));
+	[e endEncoding];
+	wait_for(cb, c.spec);
+}
+
+/* The errors creation calls report for bad input, a command buffer's
+ * status through its life, and command buffers running in the order they
+ * were enqueued rather than committed. */
+static void host_errors(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	NSError *error = nil;
+	id<MTLLibrary> broken = [c.device newLibraryWithSource:@"kernel void broken(" options:nil error:&error];
+	put(c, @"props", 0, broken == nil);
+	put(c, @"props", 1, [error.domain isEqualToString:MTLLibraryErrorDomain]);
+	put(c, @"props", 2, (uint32_t)error.code);
+	id<MTLLibrary> library = library_named(c.device, c.plan, c.spec[@"library"], c.libraries);
+	put(c, @"props", 3, [library newFunctionWithName:@"absent"] == nil);
+	error = nil;
+	put(c, @"props", 4,
+	    host_render_pipeline(c, [MTLRenderPipelineDescriptor new], @"vert_left_half", @"frag_unwritten_input",
+				 MTLPixelFormatRGBA8Unorm, &error) == nil &&
+		    error != nil);
+
+	MTLCommandBufferDescriptor *d = [MTLCommandBufferDescriptor new];
+	d.errorOptions = MTLCommandBufferErrorOptionEncoderExecutionStatus;
+	id<MTLCommandBuffer> cb = [queue commandBufferWithDescriptor:d];
+	put(c, @"props", 5, (uint32_t)cb.status);
+	[cb enqueue];
+	put(c, @"props", 6, (uint32_t)cb.status);
+	[[cb blitCommandEncoder] endEncoding];
+	wait_for(cb, c.spec);
+	put(c, @"props", 7, (uint32_t)cb.status);
+	put(c, @"props", 8, cb.error == nil);
+
+	id<MTLComputePipelineState> digit = host_pipeline(c, @"append_digit");
+	id<MTLCommandBuffer> first = [queue commandBuffer], second = [queue commandBuffer];
+	[second enqueue];
+	[first enqueue];
+	for (id<MTLCommandBuffer> each in @[ first, second ]) {
+		id<MTLComputeCommandEncoder> e = [each computeCommandEncoder];
+		dispatch_one(e, digit, @[ c.buffers[@"order"] ], each == first ? 1 : 2, MTLSizeMake(1, 1, 1));
+		[e endEncoding];
+	}
+	[first commit];
+	wait_for(second, c.spec);
+	[first waitUntilCompleted];
+}
+
+/* The state setPurgeableState: returns, which is the one before it: for a
+ * buffer, a private texture and a heap, through empty and back. */
+static void host_purgeable(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+										      width:64
+										     height:64
+										  mipmapped:NO];
+	td.storageMode = MTLStorageModePrivate;
+	MTLHeapDescriptor *hd = [MTLHeapDescriptor new];
+	hd.size = 1 << 20;
+	hd.storageMode = MTLStorageModePrivate;
+	NSArray *resources = @[
+		[c.device newBufferWithLength:1 << 16 options:MTLResourceStorageModeShared], [c.device newTextureWithDescriptor:td],
+		[c.device newHeapWithDescriptor:hd]
+	];
+	MTLPurgeableState steps[] = {MTLPurgeableStateKeepCurrent, MTLPurgeableStateEmpty,       MTLPurgeableStateKeepCurrent,
+				     MTLPurgeableStateNonVolatile, MTLPurgeableStateKeepCurrent, MTLPurgeableStateVolatile};
+	NSUInteger at = 0;
+	for (id r in resources)
+		for (size_t i = 0; i < sizeof steps / sizeof *steps; i++)
+			put(c, @"props", at++, (uint32_t)[r setPurgeableState:steps[i]]);
+}
+
+/* Many dispatches in one encoder, many command buffers in one queue,
+ * threads encoding into one queue at once, and queues adding at once. */
+static void host_streams(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	NSUInteger dispatches = number(h, @"dispatches", 1), buffers = number(h, @"command_buffers", 1);
+	NSUInteger threads = number(h, @"threads", 1), each = number(h, @"per_thread", 1);
+	id<MTLBuffer> counts = c.buffers[@"counts"];
+	id<MTLComputePipelineState> bump = host_pipeline(c, @"bump"), add = host_pipeline(c, @"bump_atomic");
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+	for (NSUInteger i = 0; i < dispatches; i++)
+		dispatch_one(e, bump, @[ counts ], 0, MTLSizeMake(1, 1, 1));
+	[e endEncoding];
+	wait_for(cb, c.spec);
+	for (NSUInteger i = 0; i < buffers; i++) {
+		cb = [queue commandBuffer];
+		e = [cb computeCommandEncoder];
+		dispatch_one(e, bump, @[ counts ], 1, MTLSizeMake(1, 1, 1));
+		[e endEncoding];
+		if (i + 1 < buffers)
+			[cb commit];
+	}
+	wait_for(cb, c.spec);
+	NSMutableArray *queues = [NSMutableArray new];
+	for (NSUInteger t = 0; t < threads; t++)
+		[queues addObject:[c.device newCommandQueue]];
+	for (int phase = 0; phase < 2; phase++) {
+		dispatch_apply(threads, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t t) {
+			id<MTLCommandQueue> q = phase ? queues[t] : queue;
+			id<MTLCommandBuffer> last = nil;
+			for (NSUInteger i = 0; i < each; i++) {
+				last = [q commandBuffer];
+				id<MTLComputeCommandEncoder> te = [last computeCommandEncoder];
+				dispatch_one(te, phase ? add : bump, @[ counts ], phase ? (uint32_t)(2 + threads) : (uint32_t)(2 + t),
+					     MTLSizeMake(1, 1, 1));
+				[te endEncoding];
+				[last commit];
+			}
+			[last waitUntilCompleted];
+		});
+	}
+}
+
+/* Buffers and textures made, used by a command buffer and dropped before
+ * it runs, many times over: what each held must reach the output. */
+static void host_churn(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	NSUInteger rounds = number(h, @"rounds", 1), size = number(h, @"size", 4096);
+	MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint
+										      width:64
+										     height:64
+										  mipmapped:NO];
+	td.storageMode = MTLStorageModePrivate;
+	td.usage = MTLTextureUsageRenderTarget;
+	id<MTLCommandBuffer> cb = nil;
+	for (NSUInteger i = 0; i < rounds; i++) {
+		@autoreleasepool {
+			id<MTLBuffer> b = [c.device newBufferWithLength:size options:MTLResourceStorageModeShared];
+			uint32_t word = (uint32_t)(i * 2654435761u);
+			memset_pattern4(b.contents, &word, size);
+			id<MTLTexture> t = [c.device newTextureWithDescriptor:td];
+			cb = [queue commandBuffer];
+			MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+			pass.colorAttachments[0].texture = t;
+			pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+			pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+			pass.colorAttachments[0].clearColor = MTLClearColorMake(i, 0, 0, 0);
+			[[cb renderCommandEncoderWithDescriptor:pass] endEncoding];
+			id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
+			[e copyFromBuffer:b sourceOffset:(i * 4096) % size toBuffer:c.buffers[@"words"] destinationOffset:i * 4 size:4];
+			[e copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(i % 64, i / 64 % 64, 0)
+				sourceSize:MTLSizeMake(1, 1, 1) toBuffer:c.buffers[@"texels"] destinationOffset:i * 4
+			   destinationBytesPerRow:4 destinationBytesPerImage:4];
+			[e endEncoding];
+			if (i + 1 < rounds)
+				[cb commit];
+		}
+	}
+	wait_for(cb, c.spec);
+}
+
+/* A private buffer past 4 GiB: kernels stamp windows below 2 GiB, across
+ * 2 and 4 GiB and at its end, a fill lands past 4 GiB, and blits bring
+ * each back. */
+static void host_large_buffer(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	NSUInteger length = number(h, @"length", 0);
+	if (c.device.maxBufferLength < length)
+		@throw [NSException exceptionWithName:@"CaseUnsupported" reason:@"maxBufferLength" userInfo:nil];
+	id<MTLBuffer> big = [c.device newBufferWithLength:length options:MTLResourceStorageModePrivate];
+	if (!big)
+		@throw failure(@"no %lu-byte buffer", (unsigned long)length);
+	id<MTLComputePipelineState> stamp = host_pipeline(c, @"stamp");
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+	for (NSArray *w in h[@"windows"])
+		dispatch_one(e, stamp, @[ big ], [w[0] unsignedIntValue], MTLSizeMake([w[1] unsignedIntegerValue], 1, 1));
+	[e endEncoding];
+	id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+	NSArray *fill = h[@"fill"];
+	[b fillBuffer:big range:NSMakeRange([fill[0] unsignedIntegerValue], [fill[1] unsignedIntegerValue]) value:[fill[2] unsignedCharValue]];
+	NSUInteger at = 0;
+	for (NSArray *w in h[@"windows"]) {
+		NSUInteger bytes = [w[1] unsignedIntegerValue] * 4;
+		[b copyFromBuffer:big sourceOffset:[w[0] unsignedIntegerValue] * 4 toBuffer:c.buffers[@"out"] destinationOffset:at size:bytes];
+		at += bytes;
+	}
+	[b copyFromBuffer:big sourceOffset:[fill[0] unsignedIntegerValue] toBuffer:c.buffers[@"out"] destinationOffset:at
+		     size:[fill[1] unsignedIntegerValue]];
+	[b endEncoding];
+	wait_for(cb, c.spec);
+}
+
+static void run_host(Case *c, id<MTLCommandQueue> queue, NSDictionary *spec)
+{
+	NSDictionary *h = spec[@"host"];
+	NSDictionary *work = @{
+		@"drawables" : [NSValue valueWithPointer:host_drawables],
+		@"iosurface" : [NSValue valueWithPointer:host_iosurface],
+		@"share" : [NSValue valueWithPointer:host_share],
+		@"archive" : [NSValue valueWithPointer:host_archive],
+		@"errors" : [NSValue valueWithPointer:host_errors],
+		@"purgeable" : [NSValue valueWithPointer:host_purgeable],
+		@"streams" : [NSValue valueWithPointer:host_streams],
+		@"churn" : [NSValue valueWithPointer:host_churn],
+		@"large_buffer" : [NSValue valueWithPointer:host_large_buffer],
+	};
+	NSValue *v = work[h[@"kind"]];
+	if (!v)
+		@throw failure(@"unknown host work %@", h[@"kind"]);
+	((void (*)(Case *, id<MTLCommandQueue>, NSDictionary *))v.pointerValue)(c, queue, h);
+}
+
 static void run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, NSDictionary *plan, NSDictionary *spec,
 		     NSString *dir, NSMutableDictionary *libraries)
 {
@@ -2356,6 +2951,8 @@ static void run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, NSDictiona
 		run_blits(c, queue, spec);
 	} else if ([kind isEqualToString:@"framework"]) {
 		run_framework(c, queue, spec);
+	} else if ([kind isEqualToString:@"host"]) {
+		run_host(c, queue, spec);
 	} else if ([kind isEqualToString:@"sequence"]) {
 		run_sequence(c, queue, plan, spec, libraries);
 	} else {
@@ -2373,6 +2970,9 @@ static void run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, NSDictiona
 int main(int argc, const char **argv)
 {
 	@autoreleasepool {
+		/* Launched by launchd as the bundle's share service. */
+		if (getenv("XPC_SERVICE_NAME"))
+			return serve_shares();
 		if (argc < 3) {
 			fprintf(stderr, "usage: %s PLAN_DIR RESULTS_DIR [--only SUBSTRING]... [--skip-done]\n", argv[0]);
 			return 64;

@@ -34,6 +34,7 @@ mod coverage;
 mod extras;
 mod features;
 mod guest;
+mod host;
 mod integer;
 mod math;
 mod plan;
@@ -203,6 +204,7 @@ fn build(plan: &mut plan::Plan) {
     resources::build(plan);
     extras::build(plan);
     api::build(plan);
+    host::build(plan);
 }
 
 fn availability() -> Result<plan::Availability> {

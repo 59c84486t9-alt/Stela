@@ -86,10 +86,53 @@ fn mac_script(plan: &Value) -> String {
     lines.push(
         "clang -fobjc-arc -arch arm64 -mmacosx-version-min=14.0 -O1 -Wall -Wextra -Wno-unused-parameter \
          -framework Foundation -framework Metal -framework MetalPerformanceShaders -framework CoreImage \
-         -framework CoreGraphics runner.m -o runner"
+         -framework CoreGraphics -framework QuartzCore -framework IOSurface runner.m -o runner.bin"
             .into(),
     );
+    lines.extend(bundle_script());
     lines.join("\n") + "\n"
+}
+
+/// Puts the runner in `Runner.app`, with the same binary as its embedded
+/// `Share.xpc` service, signs both and leaves `runner` as a script that
+/// starts the bundled binary. `host` cases sharing a texture and an event
+/// across processes reach the service by its bundle identifier.
+fn bundle_script() -> Vec<String> {
+    let plist = |id: &str, executable: &str, package: &str, extra: &str| {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
+             <key>CFBundleIdentifier</key><string>{id}</string>\
+             <key>CFBundleExecutable</key><string>{executable}</string>\
+             <key>CFBundleName</key><string>{executable}</string>\
+             <key>CFBundlePackageType</key><string>{package}</string>\
+             <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>\
+             <key>CFBundleVersion</key><string>1</string>{extra}</dict></plist>"
+        )
+    };
+    let app = "Runner.app/Contents";
+    let service = format!("{app}/XPCServices/Share.xpc/Contents");
+    vec![
+        "rm -rf Runner.app runner".into(),
+        format!("mkdir -p {app}/MacOS {service}/MacOS"),
+        format!("cp runner.bin {app}/MacOS/runner"),
+        format!("mv runner.bin {service}/MacOS/share"),
+        format!(
+            "cat > {app}/Info.plist <<'PLIST'\n{}\nPLIST",
+            plist("com.stela.metal-suite", "runner", "APPL", "")
+        ),
+        format!(
+            "cat > {service}/Info.plist <<'PLIST'\n{}\nPLIST",
+            plist(
+                "com.stela.metal-suite.share",
+                "share",
+                "XPC!",
+                "<key>XPCService</key><dict><key>ServiceType</key><string>Application</string></dict>"
+            )
+        ),
+        "codesign -s - -f Runner.app/Contents/XPCServices/Share.xpc && codesign -s - -f Runner.app".into(),
+        "printf '#!/bin/sh\\nexec \"$(dirname \"$0\")/Runner.app/Contents/MacOS/runner\" \"$@\"\\n' > runner".into(),
+        "chmod +x runner".into(),
+    ]
 }
 
 /// Copies DIR/plan to the Mac, builds it there, runs every case and brings
@@ -125,7 +168,7 @@ pub fn mac(out: &Path, plan: &Value, host: &str) -> Result<()> {
     pipe(
         ssh(
             host,
-            &format!("tar -C {REMOTE_DIR} -cf - plan/lib plan/runner results/mac"),
+            &format!("tar -C {REMOTE_DIR} -cf - plan/lib plan/runner plan/Runner.app results/mac"),
         ),
         extract,
     )
@@ -346,6 +389,8 @@ mod tests {
         let plan = json!({"builds": {"m": {"source": "x/m.metal", "flags": ["-std=metal4.1"]}}});
         let script = mac_script(&plan);
         assert!(script.contains("metal -std=metal4.1 -c sources/m.metal -o lib/m.air"));
-        assert!(script.contains("runner.m -o runner"));
+        assert!(script.contains("runner.m -o runner.bin"));
+        assert!(script.contains("<string>com.stela.metal-suite.share</string>"));
+        assert!(script.contains("exec \"$(dirname \"$0\")/Runner.app/Contents/MacOS/runner\""));
     }
 }
