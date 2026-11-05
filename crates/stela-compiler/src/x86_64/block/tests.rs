@@ -1030,6 +1030,15 @@ fn post_index_loads_feed_subtraction_after_settling_both_accesses() {
     assert!(
         !alias.native.x86_64_code[alias.native.source_map[2].1..].starts_with(&[0x44, 0x29, 0xc1])
     );
+
+    // LDR X7,[X17],#8; LDR X20,[X7],#8. The second writeback replaces
+    // the first load's X7, so the compare must read the settled X7.
+    let writeback_alias = [lz4[0], 0xf840_84f4, lz4[2], lz4[3]];
+    let pc = GuestAddress(0x1000081cc);
+    let alias = compile(&writeback_alias, pc, ordinary, target);
+    let ungrouped = compile(&writeback_alias, pc, ordinary, dit);
+    assert_eq!(alias.native.source_map, ungrouped.native.source_map);
+    assert_eq!(alias.native.x86_64_code, ungrouped.native.x86_64_code);
 }
 
 #[test]
