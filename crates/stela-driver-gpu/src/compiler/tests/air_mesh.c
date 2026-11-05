@@ -262,6 +262,11 @@ objects_launch_mesh_grids(void)
    assert(shader->info.stage == MESA_SHADER_TASK);
    assert(shader->info.task_payload_size == 128);
    assert(intrinsics(shader, nir_intrinsic_store_task_payload) == 1);
+   /* The driver's own layout of what remains places nothing again. */
+   unsigned shared = shader->info.shared_size;
+   nir_lower_vars_to_explicit_types(shader, nir_var_mem_task_payload | nir_var_mem_shared,
+                                    glsl_get_natural_size_align_bytes);
+   assert(shader->info.task_payload_size == 128 && shader->info.shared_size == shared);
    /* One launch at the end, carrying the payload; the grid is set by one
     * thread, so it goes through threadgroup memory. */
    nir_intrinsic_instr *launch = intrinsic(shader, nir_intrinsic_launch_mesh_workgroups);

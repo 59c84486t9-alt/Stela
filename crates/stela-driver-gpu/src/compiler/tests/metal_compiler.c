@@ -2572,6 +2572,9 @@ dynamic_kernels_take_their_dispatch_shape(void)
    assert(shader && shader->info.workgroup_size[0] == 64);
    /* The threadgroup buffers share all of the target's threadgroup memory. */
    assert(shader->info.shared_size == target.max_threadgroup_bytes);
+   /* The driver's own layout of what remains places nothing again. */
+   nir_lower_vars_to_explicit_types(shader, nir_var_mem_shared, glsl_get_natural_size_align_bytes);
+   assert(shader->info.shared_size == target.max_threadgroup_bytes);
 
    struct air_effect_store trace[8];
    assert(run_shaped(shader, 5, trace, ARRAY_SIZE(trace)) == 4);

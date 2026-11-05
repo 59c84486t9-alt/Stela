@@ -5233,7 +5233,11 @@ translate(const void *bitcode, size_t size, const char *entry,
       nir_lower_vars_to_explicit_types(t.b.shader, nir_var_mem_task_payload,
                                        glsl_get_natural_size_align_bytes);
       nir_lower_explicit_io(t.b.shader, nir_var_mem_task_payload, nir_address_format_32bit_offset);
+      nir_remove_dead_variables(t.b.shader, nir_var_mem_task_payload, NULL);
    }
+   /* Each layout drops the variables it placed: a driver lays out what
+    * variables remain after what the shader's size already holds, so
+    * keeping them would place the same memory twice. */
    if (t.shared_resources || t.mesh_state) {
       nir_lower_vars_to_explicit_types(t.b.shader, nir_var_mem_shared, glsl_get_natural_size_align_bytes);
       if (t.b.shader->info.shared_size > options->max_threadgroup_bytes) {
@@ -5241,6 +5245,7 @@ translate(const void *bitcode, size_t size, const char *entry,
          goto done;
       }
       nir_lower_explicit_io(t.b.shader, nir_var_mem_shared, nir_address_format_32bit_offset);
+      nir_remove_dead_variables(t.b.shader, nir_var_mem_shared, NULL);
    }
    if (t.private_allocations) {
       nir_lower_vars_to_explicit_types(t.b.shader, nir_var_function_temp, glsl_get_natural_size_align_bytes);
