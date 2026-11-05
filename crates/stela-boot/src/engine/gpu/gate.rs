@@ -193,6 +193,9 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
             })
         })
         .collect();
+    if let Some(pool) = client::pool_report(tsc_hz) {
+        output::arguments(format_args!("{pool}\n"));
+    }
     let posted = client::take_posted();
     if taken.is_empty() && posted.is_empty() {
         return;

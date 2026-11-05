@@ -170,6 +170,8 @@ struct Request {
     result: AtomicI64,
     done: AtomicU32,
     wake_task: bool,
+    /// The TSC at posting, for the report of calls that wait.
+    posted: u64,
 }
 
 impl Request {
@@ -180,6 +182,7 @@ impl Request {
             result: AtomicI64::new(0),
             done: AtomicU32::new(0),
             wake_task: false,
+            posted: host::rdtsc(),
         }
     }
 
@@ -468,13 +471,34 @@ unsafe impl ManagedJob for Worker {
     }
 }
 
+/// The calls workers are performing: each slot's request code plus one
+/// (zero when free) and when it started.
+static SERVING: [(AtomicU32, AtomicU64); 32] =
+    [const { (AtomicU32::new(0), AtomicU64::new(0)) }; 32];
+
 /// Performs `request` on this task and answers its poster.
 fn serve(gpu: &Installed, request: &Request) {
     let code = request_code(&request.operation);
     let started = host::rdtsc();
+    let slot = SERVING.iter().find(|slot| {
+        slot.0
+            .compare_exchange(
+                0,
+                code.wrapping_add(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+    });
+    if let Some(slot) = slot {
+        slot.1.store(started, Ordering::Relaxed);
+    }
     // SAFETY: an original task entered in the canonical Linux owner. The
     // poster keeps the operation's inputs until it is done.
     let result = unsafe { perform(gpu, request.operation) };
+    if let Some(slot) = slot {
+        slot.0.store(0, Ordering::Relaxed);
+    }
     count(&SERVED, code, host::rdtsc().wrapping_sub(started));
     if request.complete(result) {
         // SAFETY: the same source task owns the Linux wait queue.
@@ -835,6 +859,43 @@ pub(super) fn take_posted() -> Vec<(u32, u64, u64)> {
 /// request code with its count and the ticks performing them took.
 pub(super) fn take_served() -> Vec<(u32, u64, u64)> {
     take(&SERVED)
+}
+
+/// The worker pool's state when a call waits or runs long: its workers,
+/// idle and starting ones, queued calls with the oldest one's wait, and each
+/// call still running with how long it has. On the boot CPU, between pumps.
+pub(super) fn pool_report(tsc_hz: u64) -> Option<alloc::string::String> {
+    use core::fmt::Write;
+    let gpu = installed()?;
+    let service = &gpu.service;
+    let now = host::rdtsc();
+    let ms = |since: u64| now.wrapping_sub(since) / (tsc_hz / 1000).max(1);
+    let queue = service.queue.borrow();
+    // SAFETY: a queued call's poster keeps it until it is done.
+    let oldest = queue
+        .front()
+        .map_or(0, |request| ms(unsafe { request.as_ref() }.posted));
+    let mut serving = alloc::string::String::new();
+    for slot in &SERVING {
+        let code = slot.0.load(Ordering::Relaxed);
+        let took = ms(slot.1.load(Ordering::Relaxed));
+        if code != 0 && took >= 1000 {
+            let _ = write!(serving, " {:#x}:{took}ms", code.wrapping_sub(1));
+        }
+    }
+    if queue.is_empty() && serving.is_empty() {
+        return None;
+    }
+    let mut line = alloc::string::String::new();
+    let _ = write!(
+        line,
+        "GPU WORKERS workers={} idle={} starting={} queued={} oldest_ms={oldest} serving:{serving}",
+        service.workers.get(),
+        service.idle.get(),
+        service.starting.get(),
+        queue.len(),
+    );
+    Some(line)
 }
 
 /// Posts `request` to the service and waits for it, until the host counter
