@@ -622,6 +622,7 @@ mod original_fixtures {
     unsafe extern "C" {
         fn stela_linux_timer_test_sleeper();
         fn stela_linux_srcu_source_cases();
+        fn stela_linux_srcu_queue_before_threads();
         fn stela_linux_srcu_negative_case(which: u32, witness: unsafe extern "C" fn());
         fn stela_linux_workqueue_test_main();
         fn stela_linux_workqueue_test_shutdown(force: bool);
@@ -722,6 +723,7 @@ mod original_fixtures {
                 "rebalanced sleep",
                 "unbalanced return",
                 "cleanup with live reader",
+                "reader arriving during cleanup join",
             ];
             for (which, description) in cases.into_iter().enumerate() {
                 let result = Command::new(std::env::current_exe().unwrap())
@@ -797,23 +799,31 @@ mod original_fixtures {
 
     unsafe extern "C" fn mount_timers(owner: *const RawOwner, context: *mut c_void) -> ! {
         // SAFETY: exact retained Initial scope and live fixture callback.
-        unsafe { mount(owner, context, timer_job, c"timer-fixture") }
+        unsafe { mount(owner, context, timer_job, c"timer-fixture", None) }
     }
 
     unsafe extern "C" fn mount_workqueues(owner: *const RawOwner, context: *mut c_void) -> ! {
         SOFTWARE_PEER.store(true, Ordering::Relaxed);
         // SAFETY: exact retained Initial scope and live fixture callback.
-        unsafe { mount(owner, context, workqueue_job, c"workqueue-fixture") }
+        unsafe { mount(owner, context, workqueue_job, c"workqueue-fixture", None) }
     }
 
     unsafe extern "C" fn mount_srcu(owner: *const RawOwner, context: *mut c_void) -> ! {
         // SAFETY: exact retained Initial scope and live fixture callback.
-        unsafe { mount(owner, context, srcu_job, c"srcu-fixture") }
+        unsafe {
+            mount(
+                owner,
+                context,
+                srcu_job,
+                c"srcu-fixture",
+                Some(stela_linux_srcu_queue_before_threads),
+            )
+        }
     }
 
     unsafe extern "C" fn mount_srcu_negative(owner: *const RawOwner, context: *mut c_void) -> ! {
         // SAFETY: exact retained Initial scope and live fixture callback.
-        unsafe { mount(owner, context, srcu_negative_job, c"srcu-refusal") }
+        unsafe { mount(owner, context, srcu_negative_job, c"srcu-refusal", None) }
     }
 
     unsafe fn mount(
@@ -821,6 +831,7 @@ mod original_fixtures {
         context: *mut c_void,
         job: unsafe extern "C" fn(*mut c_void) -> i32,
         name: &CStr,
+        before_threads: Option<unsafe extern "C" fn()>,
     ) -> ! {
         // SAFETY: same original owner and the kept dispatcher runtime handle.
         let (owner, runtime) = unsafe { (&*owner, *context.cast::<Pin<&TestRuntime>>()) };
@@ -829,6 +840,10 @@ mod original_fixtures {
             let _entered = unsafe { Entered::new(owner) };
             // SAFETY: actual Initial with retained original model resources.
             unsafe { initialize_hosted_resources(owner) }.unwrap();
+            if let Some(before_threads) = before_threads {
+                // SAFETY: original Initial holds the early source resources.
+                unsafe { before_threads() };
+            }
             // SAFETY: actual entered Initial with original resources.
             unsafe { start_hosted_threads(owner, runtime) }.unwrap();
             // SAFETY: resident callback and name supplied to original kthreadd.

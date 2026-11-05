@@ -22,6 +22,7 @@ struct srcu_test_control {
 static_assert(sizeof(struct srcu_test_control) == 16);
 void stela_linux_srcu_test(const struct srcu_test_control *control);
 void stela_linux_srcu_early_test(void);
+void stela_linux_srcu_queue_before_threads(void);
 void stela_linux_srcu_source_cases(void);
 void stela_linux_srcu_negative_case(unsigned int which, void (*witness)(void));
 int stela_linux_srcu_bootstrap_joined(const struct stela_linux_owner *owner);
@@ -287,7 +288,7 @@ static void cleanup_race_reader(struct work_struct *work)
 	wait_for_completion(&state->release);
 	srcu_read_unlock(&state->domain, state->old_index);
 }
-static void cleanup_with_reader_arriving_during_join(void)
+static void cleanup_with_reader_arriving_during_join(void (*witness)(void))
 {
 	struct cleanup_race state = {};
 	assert(!init_srcu_struct(&state.domain));
@@ -314,11 +315,18 @@ static void cleanup_with_reader_arriving_during_join(void)
 	int next = srcu_read_lock(&state.domain);
 	assert(next != state.old_index);
 	complete(&state.release);
+	if (witness)
+		witness();
 	flush_work(&state.cleanup);
 	/* Returning here would falsely permit storage release with a live reader.
 	 * Only the final counter check traps; entry-only validation is insufficient. */
 	srcu_read_unlock(&state.domain, next);
 	flush_work(&state.reader);
+}
+
+static void run_cleanup_race(void)
+{
+	cleanup_with_reader_arriving_during_join(NULL);
 }
 static void callback_sleep(struct rcu_head *head)
 {
@@ -380,6 +388,17 @@ void stela_linux_srcu_early_test(void)
 	srcu_barrier(&early_domain);
 	assert(early.calls == 1);
 }
+
+void stela_linux_srcu_queue_before_threads(void)
+{
+	assert(!READ_ONCE(bdi_wq));
+	/* The inactive scheduler allows the original synchronous fastpath.
+	 * The queued callback still requires actual worker startup. */
+	synchronize_srcu(&early_domain);
+	init_completion(&early.done);
+	call_srcu(&early_domain, &early.head, observed_callback);
+	assert(!early.calls && irq_work_is_pending(&early_domain.srcu_irq_work));
+}
 static void source_cases(bool check_cleanup_refusal)
 {
 	srcu();
@@ -402,6 +421,9 @@ void stela_linux_srcu_source_cases(void)
 {
 	wait_for_workqueues();
 	const struct stela_linux_owner *owner = stela_linux_owner();
+	assert(wait_for_completion_timeout(&early.done, HZ));
+	srcu_barrier(&early_domain);
+	assert(early.calls == 1);
 	assert(!stela_linux_srcu_bootstrap(owner));
 	assert(stela_linux_srcu_bootstrap(owner) == -EALREADY);
 	assert(stela_linux_srcu_bootstrap_joined(owner) == -EPERM);
@@ -426,14 +448,16 @@ void stela_linux_srcu_negative_case(unsigned int which, void (*witness)(void))
 		negative_witness = witness;
 		invalid_callback = invalid_callbacks[which];
 		queue_invalid_callback(witnessed_invalid_callback);
-	} else {
-		assert(which == ARRAY_SIZE(invalid_callbacks));
+	} else if (which == ARRAY_SIZE(invalid_callbacks)) {
 		struct srcu_struct domain;
 		assert(!init_srcu_struct(&domain));
 		int reader = srcu_read_lock(&domain);
 		assert(domain.srcu_lock_nesting[reader] == 1 && stela_linux_quiescent());
 		witness();
 		cleanup_srcu_struct(&domain);
+	} else {
+		assert(which == ARRAY_SIZE(invalid_callbacks) + 1);
+		cleanup_with_reader_arriving_during_join(witness);
 	}
 }
 
@@ -442,7 +466,7 @@ void stela_linux_srcu_test(const struct srcu_test_control *control)
 	assert(stela_linux_srcu_bootstrap(stela_linux_owner()) == -EALREADY);
 	refused_worker_keeps_callback_until_explicit_recovery(control);
 	source_cases(true);
-	assert(stela_test_traps(cleanup_with_reader_arriving_during_join));
+	assert(stela_test_traps(run_cleanup_race));
 	callback_guards();
 }
 
