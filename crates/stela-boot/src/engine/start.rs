@@ -2164,20 +2164,15 @@ fn start_platform(
         },
         _ => remapping::Remappers::none(),
     };
-    if options.native_pci_own_ioapic {
-        let result = contained_pci
-            .as_ref()
-            .ok_or(stela_drivers::bus::mmio::owned::Error::Unavailable)
-            .and_then(|pci| {
-                // SAFETY: the explicit whole-controller handoff excludes
-                // firmware/SMM/other route writers through shutdown. The
-                // original stopped PCI census and all-unit remapper pins
-                // remain held while the sole BSP contains the IOAPICs.
-                unsafe { remappers.install_ioapics(pci) }
-            });
-        match result {
+    // The IOAPICs are the operating system's after ExitBootServices, as
+    // every OS takes them: firmware and SMM program no routes at runtime.
+    if let Some(pci) = &contained_pci {
+        // SAFETY: firmware has exited and no driver or AP has started. The
+        // original stopped PCI census and all-unit remapper pins remain held
+        // while the sole BSP contains the IOAPICs.
+        match unsafe { remappers.install_ioapics(pci) } {
             Ok(units) => output::arguments(format_args!(
-                "HOST IOAPIC contained: {units} original controllers; remapper direct mode retained\n"
+                "HOST IOAPIC contained: {units} original controllers in direct delivery\n"
             )),
             Err(error) => output::arguments(format_args!(
                 "HOST IOAPIC containment unavailable: {error:?}\n"
