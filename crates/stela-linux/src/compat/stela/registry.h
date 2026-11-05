@@ -160,6 +160,8 @@ int stela_linux_registry_status(const struct stela_linux_registry *, size_t,
 /* Original NULL/tail/ERR_PTR result from an already-attempted pass0..9.
  * A tail borrows the registry token storage until successful retirement. */
 int stela_linux_registry_parse_result(const struct stela_linux_registry *, unsigned int, char **);
+/* Actual retirement requires an entered source task that can wait for RCU.
+ * A context refusal precedes the drain and all exit/free callbacks. */
 int stela_linux_registry_retire(struct stela_linux_registry **,
  const struct stela_linux_registry_retirement *);
 /* Run an image's initcalls as start_kernel does, once per boot. */

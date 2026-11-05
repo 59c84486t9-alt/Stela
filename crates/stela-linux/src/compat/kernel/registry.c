@@ -33,7 +33,7 @@ struct stela_linux_registry {
 static struct stela_linux_registry *active;
 static const struct stela_linux_registry_image *owned_image;
 static bool permanently_retired;
-#ifdef STELA_LINUX_REGISTRY_TEST
+#if defined(STELA_LINUX_REGISTRY_TEST) || defined(STELA_LINUX_REGISTRY_SOURCE_TEST)
 static bool fail_registry_allocation;
 static size_t registry_allocations, registry_releases;
 #endif
@@ -338,7 +338,7 @@ int stela_linux_registry_begin(const struct stela_linux_registry_image *im,
  args_at = size;
  if (!add_size(&size, PARSE_PASSES, length + 1)) return -EOVERFLOW;
  struct stela_linux_registry *r;
-#ifdef STELA_LINUX_REGISTRY_TEST
+#if defined(STELA_LINUX_REGISTRY_TEST) || defined(STELA_LINUX_REGISTRY_SOURCE_TEST)
  r = fail_registry_allocation ? NULL : stela_linux_heap_alloc(size, __alignof__(*r));
  if (r) registry_allocations++;
 #else
@@ -677,6 +677,10 @@ int stela_linux_registry_retire(struct stela_linux_registry **handle,
   if (!paired_exit(im, im->inits[r->completed[i]]->group, &ignored))
    return leave_call(r, &guard, -EOPNOTSUPP, NULL);
  }
+ /* Retirement may block in the original RCU barrier. Refuse a taskless
+  * caller before draining consumers or invoking irreversible exit callbacks. */
+ error = stela_linux_require_current(guard.lease.owner);
+ if (error) return leave_call(r, &guard, error, NULL);
  error = authority->drain_all_consumers(authority->context);
  if (guard_check(r, &guard)) return leave_call(r, &guard, -EPROTO, NULL);
  if (error) return leave_call(r, &guard, error < 0 ? error : -EPROTO, NULL);
@@ -708,15 +712,16 @@ int stela_linux_registry_retire(struct stela_linux_registry **handle,
  active = NULL;
  *handle = NULL;
  stela_linux_heap_free(r, size, __alignof__(*r));
-#ifdef STELA_LINUX_REGISTRY_TEST
+#if defined(STELA_LINUX_REGISTRY_TEST) || defined(STELA_LINUX_REGISTRY_SOURCE_TEST)
  registry_releases++;
 #endif
  return 0;
 }
 
-#ifdef STELA_LINUX_REGISTRY_TEST
+#if defined(STELA_LINUX_REGISTRY_TEST) || defined(STELA_LINUX_REGISTRY_SOURCE_TEST)
 #include <linux/irqflags.h>
 #include <linux/preempt.h>
+#include <linux/rcupdate.h>
 #include <stela/test.h>
 /* Each finite scenario runs in its own process. This never resets production
  * singleton/retirement state or turns a returned callback into a fake driver. */
@@ -725,17 +730,42 @@ static unsigned events[128], event_count, drains, frees, live_i2c;
 static bool consumers_stopped;
 static const char *retained_value;
 static struct stela_linux_registry *test_registry;
+#ifdef STELA_LINUX_REGISTRY_TEST
 static struct stela_linux_owner *mutable_owner;
+#endif
+#ifdef STELA_LINUX_REGISTRY_SOURCE_TEST
+static struct rcu_head exit_callback, parameter_callback;
+static bool exit_reclaimed, parameter_reclaimed;
+static void reclaim_exit(struct rcu_head *head)
+{
+ assert(head == &exit_callback && !frees);
+ exit_reclaimed = true;
+}
+static void reclaim_parameter(struct rcu_head *head)
+{
+ assert(head == &parameter_callback && frees == 1);
+ parameter_reclaimed = true;
+}
+#endif
 static void event(unsigned id) { assert(event_count < ARRAY_SIZE(events)); events[event_count++] = id; }
 #define INIT_FN(n, result) static int init_##n(void) { event(n); return result; }
 INIT_FN(1, 0) INIT_FN(2, -ENODEV) INIT_FN(3, 0)
+#ifdef STELA_LINUX_REGISTRY_TEST
 INIT_FN(10, 0) INIT_FN(11, 0) INIT_FN(12, 0) INIT_FN(13, 0)
 INIT_FN(14, 0) INIT_FN(15, 0) INIT_FN(16, 0) INIT_FN(17, 0)
 INIT_FN(18, 0) INIT_FN(19, 0) INIT_FN(20, 0) INIT_FN(21, 0)
 INIT_FN(22, 0) INIT_FN(23, 0) INIT_FN(24, 0)
 INIT_FN(26, 3) INIT_FN(27, -EINVAL) INIT_FN(28, 0)
+#endif
 #undef INIT_FN
-static void exit_1(void) { assert(consumers_stopped && !live_i2c); event(101); }
+static void exit_1(void)
+{
+ assert(consumers_stopped && !live_i2c);
+ event(101);
+#ifdef STELA_LINUX_REGISTRY_SOURCE_TEST
+ call_rcu(&exit_callback, reclaim_exit);
+#endif
+}
 static void exit_2(void) { event(102); assert(0); }
 static void exit_3(void) { assert(consumers_stopped && !live_i2c); event(103); }
 static int drain_consumers(void *context)
@@ -759,6 +789,10 @@ static void free_retained(void *arg)
  assert(event_count >= 2 && events[event_count-1] == 101 && events[event_count-2] == 103);
  assert(!strcmp(retained_value, "kept after owner exit"));
  frees++; event(150);
+#ifdef STELA_LINUX_REGISTRY_SOURCE_TEST
+ assert(exit_reclaimed && !parameter_reclaimed);
+ call_rcu(&parameter_callback, reclaim_parameter);
+#endif
 }
 static const struct kernel_param_ops retained_ops = {.set = set_retained, .free = free_retained};
 struct registry_fixture {
@@ -821,6 +855,7 @@ static void fixture_parameter(struct registry_fixture *f, unsigned u, const stru
   .group = &f->group[u], .unit = &f->unit[u], .label = p->name, .target = p};
  f->parameters[i] = &f->parameter[i];
 }
+#ifdef STELA_LINUX_REGISTRY_TEST
 static void fixture_setup(struct registry_fixture *f, unsigned u, bool early,
  const char *name, int (*fn)(char *))
 {
@@ -830,6 +865,7 @@ static void fixture_setup(struct registry_fixture *f, unsigned u, bool early,
   .group = &f->group[u], .unit = &f->unit[u], .label = name, .target = fn};
  f->setups[i] = &f->setup[i];
 }
+#endif
 static void begin_fixture(struct registry_fixture *f, const char *args)
 {
  assert(!stela_linux_registry_begin(&f->image, args, strlen(args), &test_registry));
@@ -854,7 +890,9 @@ static struct stela_linux_registry_retirement fixture_authority(struct registry_
 }
 static void lifecycle_case(void)
 {
+#ifdef STELA_LINUX_REGISTRY_TEST
  stela_linux_enter(&stela_linux_bare);
+#endif
  struct registry_fixture f; fixture_init(&f);
  fixture_call(&f,0,STELA_LINUX_REG_MODULE_INIT,6,0,init_1);
  fixture_call(&f,1,STELA_LINUX_REG_MODULE_INIT,6,0,init_2);
@@ -866,10 +904,12 @@ static void lifecycle_case(void)
  option_phases();
  assert(event_count == 1 && events[0] == 50);
  const char *kept = retained_value;
+#ifdef STELA_LINUX_REGISTRY_TEST
  stela_linux_exit();
  const struct stela_linux_services s = {};
  const struct stela_linux_owner different = {.services = &s, .context = &f};
  stela_linux_enter(&different);
+#endif
  assert(retained_value == kept && !strcmp(kept,"kept after owner exit"));
  assert(stela_linux_registry_run_stage(test_registry,STELA_LINUX_STAGE_DEVICE,NULL) == -EINVAL);
  all_stages(-ENODEV);
@@ -883,16 +923,24 @@ static void lifecycle_case(void)
  assert(stela_linux_registry_retire(&test_registry,&a) == -EOPNOTSUPP && !drains);
  a.group_count++;
  live_i2c = 1;
+#ifdef STELA_LINUX_REGISTRY_TEST
+ assert(stela_linux_registry_retire(&test_registry,&a) == -EPERM);
+ assert(test_registry == active && !drains && !frees && event_count == 4);
+ assert(!strcmp(retained_value,"kept after owner exit"));
+ stela_linux_exit();
+#else
  assert(stela_linux_registry_retire(&test_registry,&a) == -EBUSY && drains == 1 && event_count == 4 && !frees);
  assert(!strcmp(retained_value,"kept after owner exit"));
  live_i2c = 0;
  assert(!stela_linux_registry_retire(&test_registry,&a));
  assert(!test_registry && !active && permanently_retired && frees == 1 && drains == 2);
  assert(event_count == 7 && events[4] == 103 && events[5] == 101 && events[6] == 150);
+ assert(parameter_reclaimed);
  struct stela_linux_registry *second = (void *)1;
  assert(stela_linux_registry_begin(&f.image,"",0,&second) == -EBUSY && !second);
- stela_linux_exit();
+#endif
 }
+#ifdef STELA_LINUX_REGISTRY_TEST
 static void ordering_case(void)
 {
  stela_linux_enter(&stela_linux_bare);
@@ -1043,9 +1091,12 @@ static void shape_case(void)
  assert(stela_linux_registry_run_stage(r,STELA_LINUX_STAGE_CONSOLE,NULL) == -EINVAL && !event_count);
  stela_linux_exit();
 }
+#endif
 static void parameter_failure_case(void)
 {
+#ifdef STELA_LINUX_REGISTRY_TEST
  stela_linux_enter(&stela_linux_bare);
+#endif
  struct registry_fixture f; fixture_init(&f);
  fixture_call(&f,0,STELA_LINUX_REG_MODULE_INIT,6,0,init_1);
  int first=81, later=82;
@@ -1062,10 +1113,26 @@ static void parameter_failure_case(void)
  assert(stela_linux_registry_initial_parameters(test_registry,NULL,NULL) == -EALREADY);
  assert(stela_linux_registry_run_stage(test_registry,0,NULL) == -EINVAL && !event_count);
  struct stela_linux_registry_retirement authority=fixture_authority(&f);
+#ifdef STELA_LINUX_REGISTRY_TEST
+ assert(stela_linux_registry_retire(&test_registry,&authority) == -EPERM);
+ assert(test_registry == active && !event_count && !drains && !registry_releases);
+ stela_linux_exit();
+#else
  assert(!stela_linux_registry_retire(&test_registry,&authority));
  assert(!test_registry && !event_count && drains==1 && registry_releases==1);
- stela_linux_exit();
+#endif
 }
+#ifdef STELA_LINUX_REGISTRY_SOURCE_TEST
+void stela_linux_registry_source_test(bool parameter_failure);
+void stela_linux_registry_source_test(bool parameter_failure)
+{
+ if (parameter_failure)
+  parameter_failure_case();
+ else
+  lifecycle_case();
+}
+#endif
+#ifdef STELA_LINUX_REGISTRY_TEST
 static void missing_exit_case(void)
 {
  stela_linux_enter(&stela_linux_bare);
@@ -1192,4 +1259,5 @@ int main(void)
  printf("Linux static registry: source lifecycle/order/options/context fixtures passed\n");
  return 0;
 }
+#endif
 #endif

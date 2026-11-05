@@ -626,6 +626,7 @@ mod original_fixtures {
         fn stela_linux_srcu_bootstrap_pressure_test();
         fn stela_linux_deferred_free_source_test();
         fn stela_linux_exec_state_source_test();
+        fn stela_linux_registry_source_test(parameter_failure: bool);
         fn stela_linux_srcu_queue_before_threads();
         fn stela_linux_srcu_negative_case(which: u32, witness: unsafe extern "C" fn());
         fn stela_linux_workqueue_test_main();
@@ -750,6 +751,30 @@ mod original_fixtures {
         );
     }
 
+    #[test]
+    fn original_registry_joins_before_releasing_parameters() {
+        in_fresh_process(
+            "original_fixtures::original_registry_joins_before_releasing_parameters",
+            "original registry retirement completed",
+            16 * 1024,
+            14,
+            mount_registry::<false>,
+            drive_registry,
+        );
+    }
+
+    #[test]
+    fn original_registry_retires_after_parameter_failure() {
+        in_fresh_process(
+            "original_fixtures::original_registry_retires_after_parameter_failure",
+            "original registry retirement completed",
+            16 * 1024,
+            14,
+            mount_registry::<true>,
+            drive_registry,
+        );
+    }
+
     const SRCU_WITNESS: &str = "entered original SRCU refusal case\n";
 
     #[test]
@@ -841,6 +866,13 @@ mod original_fixtures {
         0
     }
 
+    unsafe extern "C" fn registry_job<const PARAMETER_FAILURE: bool>(_: *mut c_void) -> i32 {
+        // SAFETY: original kthreadd bound this entered source task.
+        unsafe { stela_linux_registry_source_test(PARAMETER_FAILURE) };
+        BODY_RETURNED.store(true, Ordering::Relaxed);
+        0
+    }
+
     unsafe extern "C" fn srcu_witness() {
         let bytes = SRCU_WITNESS.as_bytes();
         // SAFETY: resident bytes and the child process's captured stderr.
@@ -916,6 +948,22 @@ mod original_fixtures {
         unsafe { mount(owner, context, deferred_free_job, c"deferred-free", None) }
     }
 
+    unsafe extern "C" fn mount_registry<const PARAMETER_FAILURE: bool>(
+        owner: *const RawOwner,
+        context: *mut c_void,
+    ) -> ! {
+        // SAFETY: exact retained Initial scope and live fixture callback.
+        unsafe {
+            mount(
+                owner,
+                context,
+                registry_job::<PARAMETER_FAILURE>,
+                c"registry-fixture",
+                None,
+            )
+        }
+    }
+
     unsafe fn mount(
         owner: *const RawOwner,
         context: *mut c_void,
@@ -964,6 +1012,12 @@ mod original_fixtures {
     fn drive_deferred_free(runtime: Pin<&TestRuntime>, _: &HostedClock, _: &TestQueue) {
         await_fixture(runtime);
         println!("original deferred-free callbacks reclaimed their allocations");
+        process::exit(0);
+    }
+
+    fn drive_registry(runtime: Pin<&TestRuntime>, _: &HostedClock, _: &TestQueue) {
+        await_fixture(runtime);
+        println!("original registry retirement completed");
         process::exit(0);
     }
 
