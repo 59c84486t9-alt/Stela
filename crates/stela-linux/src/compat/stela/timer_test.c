@@ -75,6 +75,12 @@ static void timer_list_waits(void)
 	timer_setup(&waker, wake_queue, 0);
 	mod_timer(&waker, jiffies + 2);
 	assert(wait_event_timeout(queue, READ_ONCE(ready), 1000) > 0);
+	/* A finite wait past the timer wheel's horizon, as DRM's fence waits
+	 * make "forever", ends at its wake and reports what it had left. */
+	WRITE_ONCE(ready, false);
+	mod_timer(&waker, jiffies + 2);
+	assert(wait_event_timeout(queue, READ_ONCE(ready), MAX_JIFFY_OFFSET) >
+	       MAX_JIFFY_OFFSET - 1000);
 	init_completion(&done);
 	start = jiffies;
 	assert(!wait_for_completion_timeout(&done, 3) && time_after_eq(jiffies, start + 3));

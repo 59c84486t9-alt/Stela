@@ -232,6 +232,17 @@ static void process_timeout(struct timer_list *timer)
     wake_up_process(container_of(timer, struct process_timer, timer)->task);
 }
 
+/* Linux's timer wheel arms no further out than WHEEL_TIMEOUT_MAX jiffies
+ * (kernel/time/timer.c): a longer timeout wakes there and schedule_timeout
+ * returns the rest, which callers' wait loops pass back in. The physical
+ * minimum keeps that bound, so its deadline stays inside the clock's range
+ * however far out a finite timeout (DRM's fence "forever", say) reaches. */
+#define WHEEL_LEVEL_SHIFT 3
+#define WHEEL_DEPTH (HZ > 100 ? 9 : 8)
+#define WHEEL_TIMEOUT_CUTOFF (63L << ((WHEEL_DEPTH - 1) * WHEEL_LEVEL_SHIFT))
+#define WHEEL_TIMEOUT_MAX \
+    (WHEEL_TIMEOUT_CUTOFF - (1L << ((WHEEL_DEPTH - 1) * WHEEL_LEVEL_SHIFT)))
+
 long schedule_timeout(long timeout)
 {
     if (timeout == MAX_SCHEDULE_TIMEOUT) {
@@ -259,14 +270,13 @@ long schedule_timeout(long timeout)
     }
     _Static_assert(USEC_PER_SEC % HZ == 0, "relative physical jiffy conversion");
     u64 quantum_us = USEC_PER_SEC / HZ;
-    if ((u64)timeout > U64_MAX / quantum_us)
-        stela_linux_fatal("physical schedule timeout conversion overflow");
+    long armed = timeout >= WHEEL_TIMEOUT_CUTOFF ? WHEEL_TIMEOUT_MAX : timeout;
     unsigned int state = READ_ONCE(current->__state);
-    u64 remaining = stela_linux_minimum_sleep((u64)timeout * quantum_us,
+    u64 remaining = stela_linux_minimum_sleep((u64)armed * quantum_us,
         state, STELA_MINIMUM_EARLY, quantum_us);
-    if (remaining > LONG_MAX)
+    if (remaining > (u64)armed)
         stela_linux_fatal("physical schedule timeout remainder overflow");
-    return (long)remaining;
+    return (long)remaining + (timeout - armed);
 }
 
 long schedule_timeout_interruptible(long timeout)
