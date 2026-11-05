@@ -1253,11 +1253,11 @@ struct Installed {
     time: Arc<dyn Clock>,
     events: Arc<Events>,
     domain: Arc<Domain<SLOTS>>,
-    /// When the service is next due, in the clock's nanoseconds.
+    /// When the service is next due, as a TSC value: the clock reads only
+    /// in the Linux environment's root, and the boot loop asks outside it.
     next: AtomicU64,
     #[cfg(feature = "nvk")]
     window: &'static Window,
-    #[cfg(feature = "nvk")]
     tsc_hz: u64,
     #[cfg(feature = "nvk")]
     heap_bytes: u64,
@@ -1434,7 +1434,7 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
     }
     #[cfg(feature = "nvk")]
     BOOT_CPU.store(host::processor(), Ordering::Relaxed);
-    let (owner, threads, job, next) = work.dispatch_linux(|runtime| {
+    let (owner, threads, job) = work.dispatch_linux(|runtime| {
         Ok(mount_and_start(
             work,
             runtime,
@@ -1458,10 +1458,10 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         time,
         events,
         domain,
-        next: AtomicU64::new(next),
+        // Due at once: the first pump finds Linux's own deadline.
+        next: AtomicU64::new(0),
         #[cfg(feature = "nvk")]
         window,
-        #[cfg(feature = "nvk")]
         tsc_hz,
         #[cfg(feature = "nvk")]
         heap_bytes,
@@ -1483,7 +1483,6 @@ type MountedStartup = (
     &'static Arc<LinuxKernel>,
     &'static LinuxThreads,
     ManuallyDrop<Started>,
-    u64,
 );
 
 fn mount_and_start(
@@ -1566,11 +1565,7 @@ fn mount_and_start(
         .ok_or(environment_error(WorkError::CorruptContext))?;
     drop(joined.into_job());
     drop(ready);
-    let next = domain
-        .next_deadline()
-        .map_err(environment_error)?
-        .unwrap_or(u64::MAX);
-    Ok((owner, threads, job, next))
+    Ok((owner, threads, job))
 }
 
 fn wait_for_child(
@@ -1637,6 +1632,14 @@ impl core::fmt::Display for Error {
     }
 }
 
+impl Installed {
+    /// The TSC ticks in `ns` nanoseconds.
+    fn tsc_after(&self, ns: u64) -> u64 {
+        let ticks = u128::from(ns) * u128::from(self.tsc_hz) / 1_000_000_000;
+        ticks.min(u128::from(u64::MAX)) as u64
+    }
+}
+
 /// Run what is ready in the environment, between the boot PE's slices.
 pub(super) fn pump() {
     let Some(gpu) = installed() else {
@@ -1645,14 +1648,12 @@ pub(super) fn pump() {
     // Compiled code runs with interrupts off and a busy PE never waits, so this
     // is where the GPU's MSI gets in.
     native_irq::interrupt_window();
-    let due = match gpu.time.now_ns() {
-        Ok(now) => now >= gpu.next.load(Ordering::Relaxed),
-        Err(_) => true,
-    };
+    let due = host::rdtsc() >= gpu.next.load(Ordering::Relaxed);
     if !gpu.events.pending.swap(false, Ordering::AcqRel) && !due {
         return;
     }
-    let started = gpu.time.now_ns();
+    let started = host::rdtsc();
+    let budget = gpu.tsc_after(PUMP_NS);
     let ran = gpu.work.dispatch_linux(|runtime| {
         loop {
             gpu.advance_children();
@@ -1661,17 +1662,21 @@ pub(super) fn pump() {
             if !runtime.step()? {
                 break;
             }
-            let spent = match (&started, gpu.time.now_ns()) {
-                (Ok(started), Ok(now)) => now.saturating_sub(*started),
-                _ => u64::MAX,
-            };
-            if super::service::shutdown_pending() || spent >= PUMP_NS {
+            if super::service::shutdown_pending()
+                || host::rdtsc().wrapping_sub(started) >= budget
+            {
                 gpu.events.pending.store(true, Ordering::Release);
                 break;
             }
         }
-        let next = gpu.domain.next_deadline()?;
-        gpu.next.store(next.unwrap_or(u64::MAX), Ordering::Relaxed);
+        let next = match gpu.domain.next_deadline()? {
+            Some(next) => {
+                let left = next.saturating_sub(gpu.time.now_ns()?);
+                host::rdtsc().saturating_add(gpu.tsc_after(left))
+            }
+            None => u64::MAX,
+        };
+        gpu.next.store(next, Ordering::Relaxed);
         Ok(())
     });
     if let Err(error) = ran {
@@ -1691,7 +1696,7 @@ static LOOKED: AtomicU64 = AtomicU64::new(0);
 /// A service a call held asked to look again.
 static LOOK: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "nvk")]
-/// When a pump next looks though nothing asked, in host nanoseconds.
+/// When a pump next looks though nothing asked, as a TSC value.
 static NEXT_LOOK: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(feature = "nvk")]
@@ -1708,9 +1713,12 @@ fn look_due(gpu: &Installed) -> bool {
     let fired = FIRED.load(Ordering::Acquire);
     let interrupted = LOOKED.swap(fired, Ordering::Relaxed) != fired;
     let asked = LOOK.swap(false, Ordering::AcqRel);
-    let now = gpu.time.now_ns().unwrap_or(u64::MAX);
+    let now = host::rdtsc();
     if interrupted || asked || now >= NEXT_LOOK.load(Ordering::Relaxed) {
-        NEXT_LOOK.store(now.saturating_add(LOOK_FALLBACK_NS), Ordering::Relaxed);
+        NEXT_LOOK.store(
+            now.saturating_add(gpu.tsc_after(LOOK_FALLBACK_NS)),
+            Ordering::Relaxed,
+        );
         return true;
     }
     false
@@ -1732,10 +1740,7 @@ pub(super) fn slice(ticks: u64) -> u64 {
     let Some(gpu) = installed() else {
         return ticks;
     };
-    let next = gpu.next.load(Ordering::Relaxed);
-    let Ok(now) = gpu.time.now_ns() else {
-        return ticks;
-    };
-    let left = u128::from(next.saturating_sub(now)) * u128::from(host::COUNTER_HZ) / 1_000_000_000;
+    let left = gpu.next.load(Ordering::Relaxed).saturating_sub(host::rdtsc());
+    let left = u128::from(left) * u128::from(host::COUNTER_HZ) / u128::from(gpu.tsc_hz.max(1));
     ticks.min(left.min(u128::from(u64::MAX)) as u64).max(1)
 }
