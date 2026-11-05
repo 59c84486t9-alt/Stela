@@ -2,6 +2,7 @@
 /* Native ownership/progress boundaries for original Tiny SRCU. */
 #include <linux/completion.h>
 #include <linux/errno.h>
+#include <linux/printk.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
 #include <linux/sched/task.h>
@@ -213,12 +214,19 @@ int stela_linux_srcu_bootstrap(const struct stela_linux_owner *owner)
 		       !wait_for_completion_timeout(&high.first_done, PROBE_TICKS) ||
 		       !wait_for_completion_timeout(&clock.delivered, PROBE_TICKS)))
 		error = -ETIMEDOUT;
+	bool normal_done = completion_done(&normal.first_done);
+	bool high_done = completion_done(&high.first_done);
+	bool clock_done = completion_done(&clock.delivered);
 	pool_join(&normal);
 	pool_join(&high);
 	timer_delete_sync(&clock.timer);
 	if (normal.error || high.error)
 		error = normal.error ? normal.error : high.error;
 	if (error) {
+		pr_err("SRCU bootstrap refused (%d): normal work %s (%d), high work %s (%d), timer %s\n",
+		       error, normal_done ? "ran" : "stalled", normal.error,
+		       high_done ? "ran" : "stalled", high.error,
+		       clock_done ? "fired" : "stalled");
 		__atomic_store_n(&phase, REFUSED, __ATOMIC_RELEASE);
 		return error;
 	}
