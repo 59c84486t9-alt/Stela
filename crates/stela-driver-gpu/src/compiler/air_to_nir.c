@@ -3204,6 +3204,9 @@ pair_member(struct translator *t, LLVMValueRef inst, const struct value *pair)
  *   air.atomic.<global|local>.<add|sub|and|or|xor|min|max>.<sign><type>(
  *       pointer, value, order, scope, volatile)
  *
+ * From AIR 2.9 an i32 follows the scope. Apple's compiler emits 0, the only
+ * value taken; the volatility, when present, stays last.
+ *
  * A floating-point type is bare ("f32"); an integer one carries its sign
  * ("s.i32") for arithmetic, which selects min and max. Orders are relaxed;
  * scopes need no lowering, as NIR's atomics are device-scope. A
@@ -3238,13 +3241,13 @@ air_atomic_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, co
           !memcmp(operation, forms[i].name, strlen(forms[i].name)))
          form = i;
    }
-   /* Then the orders, a compare-exchange's success and failure, the scope
-    * and, from Metal 2, the volatility. */
+   /* Then the orders, a compare-exchange's success and failure, the scope,
+    * from AIR 2.9 its qualifier and, from Metal 2, the volatility. */
    unsigned operands = forms[form].operands, scope = operands + (form == COMPARE ? 2 : 1);
    unsigned count = LLVMGetNumArgOperands(inst);
    if (!LLVMIsAFunction(callee) || !LLVMIsDeclaration(callee) ||
        LLVMGetFunctionCallConv(callee) != LLVMCCallConv ||
-       LLVMGetInstructionCallConv(inst) != LLVMCCallConv || (count != scope + 1 && count != scope + 2) ||
+       LLVMGetInstructionCallConv(inst) != LLVMCCallConv || count < scope + 1 || count > scope + 3 ||
        LLVMCountParams(callee) != count || LLVMIsFunctionVarArg(LLVMGlobalGetValueType(callee)) ||
        LLVMGetCalledFunctionType(inst) != LLVMGlobalGetValueType(callee) ||
        LLVMGetNumOperandBundles(inst))
@@ -3260,11 +3263,20 @@ air_atomic_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, co
       return fail(t, STELA_AIR_INSTRUCTION, "AIR atomic types disagree with its name");
    for (unsigned i = operands; i < count; i++) {
       LLVMValueRef value = LLVMGetOperand(inst, i);
+      /* The volatility is the one i1; a lone operand past the scope is it
+       * only when it is one bit wide. */
+      LLVMTypeRef kind = LLVMTypeOf(value);
+      bool volatility = i == count - 1 && i > scope &&
+                        LLVMGetTypeKind(kind) == LLVMIntegerTypeKind && LLVMGetIntTypeWidth(kind) == 1;
+      bool qualifier = i == scope + 1 && !volatility;
       if (!LLVMIsAConstantInt(value) ||
-          LLVMGetIntTypeWidth(LLVMTypeOf(value)) != (i > scope ? 1u : 32u))
+          LLVMGetIntTypeWidth(LLVMTypeOf(value)) != (volatility ? 1u : 32u) ||
+          (i > scope && !volatility && !qualifier))
          return fail(t, STELA_AIR_INSTRUCTION, "AIR atomic order, scope and volatility must be constants");
       if (i < scope && LLVMConstIntGetZExtValue(value))
          return fail(t, STELA_AIR_MEMORY, "only relaxed AIR atomics are supported");
+      if (qualifier && LLVMConstIntGetZExtValue(value))
+         return fail(t, STELA_AIR_MEMORY, "unsupported AIR atomic scope qualifier");
    }
    char overload[16], expected[64];
    stela_air_call_overload(type, overload, sizeof(overload));

@@ -249,6 +249,22 @@ air_atomics_follow_their_names(void)
       "%a = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 0, i32 2)\n"
       "store i32 %a, ptr addrspace(1) %out, align 4\nret void\n",
       added, ARRAY_SIZE(added));
+   /* AIR 2.9 puts a qualifier, 0, between the scope and the volatility. */
+   const nir_atomic_op qualified[] = {nir_atomic_op_iadd, nir_atomic_op_cmpxchg};
+   expect_atomics(
+      "declare i32 @air.atomic.global.add.u.i32(ptr addrspace(1), i32, i32, i32, i32, i1)\n"
+      "declare i32 @air.atomic.global.load.i32(ptr addrspace(1), i32, i32, i32, i1)\n"
+      "declare void @air.atomic.global.store.i32(ptr addrspace(1), i32, i32, i32, i32, i1)\n"
+      "declare i32 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1), ptr, i32, i32, i32, i32, i32, i1)\n",
+      "%x = alloca i32, align 4\n"
+      "%a = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 0, i32 2, i32 0, i1 false)\n"
+      "%l = call i32 @air.atomic.global.load.i32(ptr addrspace(1) %out, i32 0, i32 2, i32 0, i1 false)\n"
+      "store i32 %l, ptr %x, align 4\n"
+      "%o = call i32 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1) %out, ptr %x, i32 %a,"
+      " i32 0, i32 0, i32 2, i32 0, i1 false)\n"
+      "call void @air.atomic.global.store.i32(ptr addrspace(1) %out, i32 %o, i32 0, i32 2, i32 0, i1 false)\n"
+      "ret void\n",
+      qualified, ARRAY_SIZE(qualified));
    /* Loads and stores are coherent accesses; a compare-exchange compares
     * and receives through its thread pointer; 64-bit min and max return
     * nothing. */
@@ -301,6 +317,14 @@ refuses_unqualified_atomics(void)
    refused("declare i32 @air.atomic.global.add.u.i32(ptr addrspace(1), i32, i32, i32, i1)\n",
            "%a = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 5, i32 3, i1 true)\nret void\n",
            STELA_AIR_MEMORY);
+   /* A qualifier other than the 0 Apple's compiler emits is not taken. */
+   refused("declare i32 @air.atomic.global.add.u.i32(ptr addrspace(1), i32, i32, i32, i32, i1)\n",
+           "%a = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 0, i32 2, i32 1, i1 false)\nret void\n",
+           STELA_AIR_MEMORY);
+   /* Nothing follows the volatility. */
+   refused("declare i32 @air.atomic.global.add.u.i32(ptr addrspace(1), i32, i32, i32, i1, i32)\n",
+           "%a = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 0, i32 2, i1 false, i32 0)\nret void\n",
+           STELA_AIR_INSTRUCTION);
 }
 
 static void
