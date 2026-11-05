@@ -257,16 +257,46 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let request: NewHeapTextureRequest = call.request()?;
         let heap = self.object::<HeapId>(call.connection, request.heap)?;
         let descriptor = texture_descriptor(&request.descriptor)?;
-        let texture = self
+        let texture = match self
             .device
-            .new_heap_texture(heap, &descriptor, offset(request.offset))?;
+            .new_heap_texture(heap, &descriptor, offset(request.offset))
+        {
+            Err(Error::OutOfMemory) => {
+                self.note_heap_full(heap, &descriptor);
+                return Err(Error::OutOfMemory.into());
+            }
+            texture => texture?,
+        };
         let response = self.adopt_texture(call.connection, texture)?;
         call.reply(&response)
+    }
+
+    /// Why a heap refused a texture, for the platform's log. Metal answers
+    /// nil, which callers that checked `maxAvailableSizeWithAlignment:` may
+    /// not expect: the note shows the alignment they last asked with.
+    fn note_heap_full(&mut self, heap: HeapId, descriptor: &TextureDescriptor) {
+        let Ok(required) = self.device.heap_texture_size_and_align(descriptor) else {
+            return;
+        };
+        let (Ok((used, aligned)), Ok((_, largest))) = (
+            self.device.heap_usage(heap, required.align),
+            self.device.heap_usage(heap, 1),
+        ) else {
+            return;
+        };
+        self.noted = Some(alloc::format!(
+            "HEAP FULL used={used} largest={largest} largest_aligned={aligned} texture={}@{:#x} \
+             asked_alignment={:#x}",
+            required.size,
+            required.align,
+            self.asked_alignment
+        ));
     }
 
     pub(super) fn heap_usage(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: HeapUsageRequest = call.request()?;
         let heap = self.object::<HeapId>(call.connection, request.heap)?;
+        self.asked_alignment = request.alignment;
         let (used_size, max_available_size) = self.device.heap_usage(heap, request.alignment)?;
         call.reply(&HeapUsageResponse {
             used_size,

@@ -251,6 +251,8 @@ pub struct Service<B: Backend, C: Compiler> {
     /// What the last call made, for the platform's log: a render pipeline's
     /// stages and vertex fetch.
     noted: Option<String>,
+    /// The alignment the guest last asked a heap's free space with.
+    asked_alignment: u64,
     /// The last call's operation and status, for the platform's timing.
     served: (u32, Status),
     /// Whether a refusal named the work the device was lost running.
@@ -271,6 +273,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             signaled: 0,
             refused: None,
             noted: None,
+            asked_alignment: 0,
             served: (0, Status::Ok),
             loss_described: false,
             reopen: None,

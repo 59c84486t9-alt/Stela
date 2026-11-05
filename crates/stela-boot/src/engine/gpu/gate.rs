@@ -97,11 +97,12 @@ fn report(reason: &str) {
     }
 }
 
-/// Logs a render pipeline the guest made, once for each distinct one.
+/// Logs what a guest call made or met, such as a render pipeline, once for
+/// each distinct note.
 fn note(text: &str) {
     static SEEN: [AtomicU64; 512] = [const { AtomicU64::new(0) }; 512];
     if first_time(&SEEN, text) {
-        output::arguments(format_args!("GPU PIPELINE {text}\n"));
+        output::arguments(format_args!("GPU {text}\n"));
     }
 }
 
