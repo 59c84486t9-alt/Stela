@@ -14,13 +14,19 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use stela_boot_core::passthrough::Passthrough;
 use stela_drivers::{
     bus::{
-        dma::{mapping::DmaDomain, memory::PageSource},
+        dma::{
+            mapping::{DmaDomain, DmaError},
+            memory::PageSource,
+        },
         mmio::owned::{self, CacheAttribute, Mapping, PhysicalSpan, Protection},
         pci::{
             Address, Bar, Function, FunctionError,
             owned::OwnedConfig,
             power::Timer,
-            requester::{ClaimError, FunctionRole, RequesterBinding, StoppedRequester},
+            requester::{
+                ClaimError, FunctionRole, RequesterBinding, StoppedRequester,
+                preparation::{AttachmentBackend, DetachError, Root},
+            },
         },
         thunderbolt::manager::{Platform, Uuid},
     },
@@ -91,6 +97,14 @@ impl<'a> Services<'a> {
     pub(super) fn with_guest_ram(mut self, guest_ram: Vec<core::ops::Range<u64>>) -> Self {
         self.guest_ram = guest_ram;
         self
+    }
+
+    /// The RAM device DMA may reach untranslated: the drivers' heap and the
+    /// guest's memory.
+    fn dma_regions(&self) -> Vec<core::ops::Range<u64>> {
+        let mut regions = alloc::vec![self.heap.clone()];
+        regions.extend_from_slice(&self.guest_ram);
+        regions
     }
 
     /// Services over `mmio` and `acpi`, whose DMA domains admit the native
@@ -167,7 +181,18 @@ unsafe impl NativeServices for Services<'_> {
         if role != FunctionRole::Physical {
             return Err(ServiceError::Claim(ClaimError::UnsupportedRole(role)));
         }
-        let (config, root) = self.remappers.preparation(self.mmio, address).map_err(|error| {
+        let prepared = match self.remappers.unremapped_preparation(self.mmio, address) {
+            Some(prepared) => prepared.map(|(config, lines)| {
+                let root: Box<dyn Root> = Box::new(UnremappedRoot {
+                    address,
+                    regions: self.dma_regions(),
+                    _lines: lines,
+                });
+                (config, root)
+            }),
+            None => self.remappers.preparation(self.mmio, address),
+        };
+        let (config, root) = prepared.map_err(|error| {
             use super::remapping::PreparationError;
             match error {
                 PreparationError::Dma(error) => {
@@ -279,9 +304,10 @@ unsafe impl NativeServices for Services<'_> {
         if !PASSTHROUGH_REPORTED.swap(true, Ordering::Relaxed) {
             output::arguments(format_args!("no IOMMU: device DMA unrestricted\n"));
         }
-        let mut regions = alloc::vec![self.heap.clone()];
-        regions.extend_from_slice(&self.guest_ram);
-        Ok(Arc::new(Passthrough::retaining(regions, binding)))
+        Ok(Arc::new(Passthrough::retaining(
+            self.dma_regions(),
+            binding,
+        )))
     }
 
     fn dma_translated(&self, address: Address) -> bool {
@@ -408,5 +434,51 @@ unsafe impl NativeServices for Services<'_> {
             .ok_or(ServiceError::Refused(
                 "firmware memory lies beyond the identity map",
             ))
+    }
+}
+
+/// A requester's original root on a platform with no remapping hardware.
+struct UnremappedRoot {
+    address: Address,
+    regions: Vec<core::ops::Range<u64>>,
+    _lines: native_mmio::InitialPciLines,
+}
+
+// SAFETY: with no remapping hardware, no translation path, IOTLB or blocked
+// context sits between the endpoint and memory: its writes reach RAM in PCIe
+// order, ahead of the completions the receipt producer's register reads
+// return, and the parked master seal has held since containment. Binding
+// hands out the same untranslated physical view every requester already has.
+unsafe impl Root for UnremappedRoot {
+    fn drain(&self) -> Result<(), DmaError> {
+        Ok(())
+    }
+    unsafe fn bind(
+        &self,
+        binding: RequesterBinding,
+    ) -> Result<Box<dyn AttachmentBackend>, DmaError> {
+        if binding.address() != self.address {
+            return Err(DmaError::IommuUnavailable);
+        }
+        if !PASSTHROUGH_REPORTED.swap(true, Ordering::Relaxed) {
+            output::arguments(format_args!("no IOMMU: device DMA unrestricted\n"));
+        }
+        Ok(Box::new(UnremappedAttachment(Arc::new(
+            Passthrough::retaining(self.regions.clone(), binding),
+        ))))
+    }
+}
+
+struct UnremappedAttachment(Arc<Passthrough>);
+
+// SAFETY: the domain is this requester's untranslated physical view, kept
+// with its binding. With no root to block and no lease ledger to prove the
+// requester unmapped, detach refuses before any effect and keeps them all.
+unsafe impl AttachmentBackend for UnremappedAttachment {
+    fn domain(&self) -> Arc<dyn DmaDomain> {
+        self.0.clone()
+    }
+    unsafe fn detach(&mut self) -> Result<(), DetachError> {
+        Err(DetachError::Unexposed(DmaError::IommuUnavailable))
     }
 }

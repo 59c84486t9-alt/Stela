@@ -801,6 +801,9 @@ type IoapicEntry = (crate::native_irq::madt::Unit, Arc<IoapicUnit>);
 pub(crate) enum ModePin {
     Intel(crate::native_dma::vtd::interrupt::DirectDelivery<crate::native_dma::vtd::MmioRegisters>),
     Amd(stela_drivers::bus::dma::amd::unit::native::DirectDelivery),
+    /// The platform describes no remapping hardware (neither DMAR nor IVRS),
+    /// so every interrupt message is delivered directly.
+    Unremapped,
 }
 impl ModePin {
     unsafe fn check(&self) -> Result<(), irq::posted_msi::Error> {
@@ -809,6 +812,7 @@ impl ModePin {
             Self::Intel(pin) => unsafe { pin.check() }.is_ok(),
             // SAFETY: forwarded original CPU/root and kept AMD register view.
             Self::Amd(pin) => unsafe { pin.check() }.is_ok(),
+            Self::Unremapped => true,
         };
         if alive {
             Ok(())

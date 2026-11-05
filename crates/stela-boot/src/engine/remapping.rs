@@ -119,6 +119,9 @@ pub(super) struct Remappers {
     roles: core::cell::RefCell<roles::Inventory>,
     topology: core::cell::RefCell<Vec<(u16, Vec<Present>)>>,
     dmar: Option<dmar::Remapping>,
+    /// The firmware describes no remapping hardware: every requester's DMA
+    /// and interrupt messages reach memory and the APICs untranslated.
+    unremapped: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -166,6 +169,7 @@ impl Remappers {
             roles: core::cell::RefCell::new(roles::Inventory::empty()),
             topology: core::cell::RefCell::new(Vec::new()),
             dmar: None,
+            unremapped: false,
         }
     }
 
@@ -263,6 +267,12 @@ impl Remappers {
         }
         *remappers.roles.get_mut() = roles;
         *remappers.topology.get_mut() = inventories.clone();
+        if dmar.is_none() && ivrs.is_none() {
+            remappers.unremapped = true;
+            output::arguments(format_args!(
+                "HOST IOMMU none described: device DMA and interrupts are untranslated\n"
+            ));
+        }
         if let Some(ivrs) = ivrs {
             // SAFETY: forwarded.
             let (units, blocked) = unsafe {
@@ -500,6 +510,8 @@ impl Remappers {
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()?
+        } else if self.unremapped {
+            alloc::vec![native_mmio::ModePin::Unremapped]
         } else {
             return Err(MappingError::Unavailable);
         };

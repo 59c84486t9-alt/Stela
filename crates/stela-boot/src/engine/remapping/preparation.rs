@@ -13,6 +13,8 @@ struct VtdRoot {
 enum BridgeRoot {
     Intel(BlockedRequester<MmioRegisters>),
     Amd(amd::ColdRoot),
+    /// No remapping hardware exists to hold a context for the port.
+    Unremapped,
 }
 
 impl BridgeRoot {
@@ -20,6 +22,7 @@ impl BridgeRoot {
         match self {
             Self::Intel(blocked) => blocked.check(),
             Self::Amd(blocked) => blocked.check(),
+            Self::Unremapped => Ok(()),
         }
     }
 }
@@ -139,6 +142,9 @@ impl Remappers {
         lines: &native_mmio::InitialPciLines,
         amd: bool,
     ) -> Result<BridgeRoot, DmaError> {
+        if self.unremapped {
+            return Ok(BridgeRoot::Unremapped);
+        }
         let rid = requester(address);
         if amd {
             let taken = self
@@ -217,6 +223,33 @@ impl Remappers {
                 )),
             }
         }
+    }
+
+    /// A requester's cold configuration on a platform that describes no
+    /// remapping hardware, with the contained interrupt paths it keeps. None
+    /// when an IOMMU is described, whose own preparation then applies.
+    pub(in crate::engine) fn unremapped_preparation(
+        &self,
+        source: &native_mmio::Source,
+        address: Address,
+    ) -> Option<Result<(OwnedConfig, native_mmio::InitialPciLines), PreparationError>> {
+        if !self.unremapped {
+            return None;
+        }
+        Some((|| {
+            let lines = self
+                .initial_lines
+                .as_ref()
+                .ok_or(PreparationError::Interrupt(MappingError::Unavailable))?;
+            lines.check(source).map_err(PreparationError::Interrupt)?;
+            // SAFETY: with no remapping hardware the complete remapping
+            // fabric is empty and no root can block or translate this RID.
+            // The parked master seal holds, and the kept line paths and
+            // source exclude every other configuration and topology writer.
+            let config = unsafe { source.promote_cold_config(address, lines, || Ok(())) }
+                .map_err(PreparationError::Configuration)?;
+            Ok((config, lines.clone()))
+        })())
     }
 
     pub(in crate::engine) fn preparation(
