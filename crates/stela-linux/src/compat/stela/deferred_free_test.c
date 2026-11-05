@@ -8,6 +8,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <stela/allocation.h>
+#include <stela/cache.h>
 #include <stela/linux.h>
 #include <stela/page.h>
 #include <stela/test.h>
@@ -159,6 +160,55 @@ static void page_backing_returns_after_callback(void)
 	stela_linux_pages_finish();
 }
 
+struct cache_object {
+	u8 prefix[64];
+	struct rcu_head head;
+	u8 payload[32];
+};
+
+static void cache_destruction_joins_deferred_objects(void)
+{
+	struct stela_linux_slab_pages totals = stela_linux_slab_owned_pages();
+	unsigned long before, available;
+	assert(!stela_linux_available_page_frames(&before));
+	struct kmem_cache_args args = {.align = 128};
+	struct kmem_cache *cache = __kmem_cache_create_args("source-cache-rcu",
+		sizeof(struct cache_object), &args, SLAB_TYPESAFE_BY_RCU);
+	assert(cache);
+	struct cache_object *object = kmem_cache_alloc(cache, GFP_KERNEL);
+	assert(object);
+	unsigned long address = (unsigned long)object;
+	memset(object->prefix, 0x49, sizeof(object->prefix));
+	memset(object->payload, 0x92, sizeof(object->payload));
+	struct stela_linux_allocation allocation;
+	assert(stela_linux_allocation_range(&object->head, sizeof(object->head), &allocation));
+	assert(allocation.object == object && allocation.cache == cache && allocation.bytes == sizeof(*object));
+	assert(!stela_linux_allocation_range((u8 *)object + sizeof(*object) - 8, 16, &allocation));
+	rcu_read_lock();
+	kvfree_rcu(object, head);
+	assert(stela_linux_allocation_range(object, sizeof(*object), &allocation));
+	for (size_t i = 0; i < sizeof(object->prefix); i++) assert(object->prefix[i] == 0x49);
+	for (size_t i = 0; i < sizeof(object->payload); i++) assert(object->payload[i] == 0x92);
+	rcu_read_unlock();
+	/* Destroy must join the queued object free while its cache is still live,
+	 * then join the detached slab before returning its backing. */
+	kmem_cache_destroy(cache);
+	assert(!stela_linux_allocation_range((void *)address, 1, &allocation));
+	assert(!stela_linux_available_page_frames(&available) && available == before);
+
+	cache = __kmem_cache_create_args("source-cache-kfree", sizeof(struct cache_object), &args, 0);
+	assert(cache);
+	object = kmem_cache_alloc(cache, GFP_KERNEL);
+	assert(object);
+	address = (unsigned long)object;
+	kfree(object);
+	assert(!stela_linux_allocation_range((void *)address, 1, &allocation));
+	kmem_cache_destroy(cache);
+	assert(!stela_linux_available_page_frames(&available) && available == before);
+	struct stela_linux_slab_pages after = stela_linux_slab_owned_pages();
+	assert(after.reclaimable == totals.reclaimable && after.unreclaimable == totals.unreclaimable);
+}
+
 void stela_linux_deferred_free_source_test(void)
 {
 	embedded(0);
@@ -166,6 +216,7 @@ void stela_linux_deferred_free_source_test(void)
 	embedded(4080);
 	headless();
 	page_backing_returns_after_callback();
+	cache_destruction_joins_deferred_objects();
 }
 #else
 

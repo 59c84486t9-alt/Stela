@@ -1447,48 +1447,6 @@ static void outside_owner(void)
 	(void)__kmem_cache_create_args("outside", 96, NULL, 0);
 }
 
-static void canonical_deferred_cache_free(void)
-{
-	struct deferred_object {
-		u8 prefix[64];
-		struct rcu_head head;
-		u8 payload[32];
-	};
-	struct kmem_cache_args args = {.align = 128};
-	struct kmem_cache *cache = __kmem_cache_create_args("canonical-rcu", sizeof(struct deferred_object),
-		&args, SLAB_TYPESAFE_BY_RCU);
-	assert(cache);
-	struct deferred_object *object = kmem_cache_alloc(cache, GFP_KERNEL);
-	assert(object);
-	memset(object->prefix, 0x49, sizeof(object->prefix));
-	memset(object->payload, 0x92, sizeof(object->payload));
-	struct stela_linux_allocation allocation;
-	assert(stela_linux_allocation_range(&object->head, sizeof(object->head), &allocation));
-	assert(allocation.object == object && allocation.cache == cache &&
-	       allocation.bytes == sizeof(*object));
-	assert(!stela_linux_allocation_range((u8 *)object + sizeof(*object) - 8, 16, &allocation));
-	rcu_read_lock();
-	kvfree_rcu(object, head);
-	assert(cache->live == 1);
-	for (size_t i = 0; i < sizeof(object->prefix); i++) assert(object->prefix[i] == 0x49);
-	for (size_t i = 0; i < sizeof(object->payload); i++) assert(object->payload[i] == 0x92);
-	rcu_read_unlock();
-	/* Destruction sets its private destroying flag then drains real callbacks.
-	 * Lookup must retain and resolve this actual live slot until that drain. */
-	kmem_cache_destroy(cache);
-	check_clean();
-
-	cache = __kmem_cache_create_args("canonical-kfree", sizeof(struct deferred_object), &args, 0);
-	assert(cache);
-	object = kmem_cache_alloc(cache, GFP_KERNEL);
-	assert(object);
-	unsigned long address = (unsigned long)object;
-	kfree(object); /* Original public kfree accepts kmem_cache objects too. */
-	assert(!cache->live && !stela_linux_allocation_range((void *)address, 1, &allocation));
-	kmem_cache_destroy(cache);
-	check_clean();
-}
-
 int main(void)
 {
 	fixture.cpu = aligned_alloc(TEST_BYTES, TEST_BYTES);
@@ -1502,7 +1460,6 @@ int main(void)
 	fixture.reclaimable_fallback = true;
 	stela_linux_enter(&owner);
 	assert(!stela_linux_page_catalog_register(&reservation, &test_ops, &fixture));
-	canonical_deferred_cache_free();
 	constructor_and_rcu_reuse();
 	alignment_and_zeroing();
 	page_and_sg_lifetime();
