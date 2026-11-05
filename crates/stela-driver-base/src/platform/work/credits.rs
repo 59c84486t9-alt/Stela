@@ -112,13 +112,13 @@ impl Resources {
             .filter(|observer| observer.closing.is_none())
         {
             let next = observer.epoch.checked_add(1).ok_or(WorkError::Exhausted)?;
-            let mut pending = observer.pending;
+            // In place, not through a copy: the batch spans every stack, and
+            // this runs on a releasing task's own small stack. `with_stack`
+            // changes nothing when it fails, so the event stays transactional.
             if let Some(shape) = shape {
-                pending.with_stack(shape)?;
+                observer.pending.with_stack(shape)?;
             }
-            pending.queue_credit |= credit;
-            // All fallible ledger checks precede any event/native mutation.
-            observer.pending = pending;
+            observer.pending.queue_credit |= credit;
             observer.epoch = next;
         }
         Ok(())
