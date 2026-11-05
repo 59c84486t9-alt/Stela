@@ -1,0 +1,186 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 18:43:43 -0500
+Subject: [PATCH] nvk: map memory once per PTE kind for the images bound to it
+
+---
+ src/nouveau/vulkan/nvk_device_memory.c | 56 ++++++++++++++++++++++++++
+ src/nouveau/vulkan/nvk_device_memory.h | 25 ++++++++++++
+ src/nouveau/vulkan/nvk_image.c         | 33 ++++++++++-----
+ 3 files changed, 105 insertions(+), 9 deletions(-)
+
+diff --git a/src/nouveau/vulkan/nvk_device_memory.c b/src/nouveau/vulkan/nvk_device_memory.c
+index c035c4712694b436dd4c74b6338ce2ea3310b5c3..c932b9392f1fe9d7fc2dcf4e1556ddfac5dd2a3a 100644
+--- a/src/nouveau/vulkan/nvk_device_memory.c
++++ b/src/nouveau/vulkan/nvk_device_memory.c
+@@ -305,6 +305,8 @@ nvk_AllocateMemory(VkDevice device,
+    struct nvk_memory_heap *heap = &pdev->mem_heaps[type->heapIndex];
+    p_atomic_add(&heap->used, mem->mem->size_B);
+ 
++   simple_mtx_init(&mem->kind_mutex, mtx_plain);
++
+    *pMem = nvk_device_memory_to_handle(mem);
+ 
+    return VK_SUCCESS;
+@@ -332,11 +334,65 @@ nvk_FreeMemory(VkDevice device,
+    struct nvk_memory_heap *heap = &pdev->mem_heaps[type->heapIndex];
+    p_atomic_add(&heap->used, -((int64_t)mem->mem->size_B));
+ 
++   for (uint32_t i = 0; i < NVK_MEM_KIND_VAS; i++) {
++      if (mem->kind_vas[i] != NULL)
++         nvkmd_va_free(mem->kind_vas[i]);
++   }
++   simple_mtx_destroy(&mem->kind_mutex);
++
+    nvkmd_mem_unref(mem->mem);
+ 
+    vk_device_memory_destroy(&dev->vk, pAllocator, &mem->vk);
+ }
+ 
++VkResult
++nvk_device_memory_kind_addr(struct nvk_device *dev,
++                            struct nvk_device_memory *mem,
++                            uint8_t pte_kind,
++                            uint64_t *addr_out)
++{
++   VkResult result = VK_SUCCESS;
++   *addr_out = 0;
++
++   simple_mtx_lock(&mem->kind_mutex);
++
++   struct nvkmd_va **free_slot = NULL;
++   for (uint32_t i = 0; i < NVK_MEM_KIND_VAS; i++) {
++      if (mem->kind_vas[i] == NULL) {
++         if (free_slot == NULL)
++            free_slot = &mem->kind_vas[i];
++      } else if (mem->kind_vas[i]->pte_kind == pte_kind) {
++         *addr_out = mem->kind_vas[i]->addr;
++         goto out;
++      }
++   }
++   if (free_slot == NULL)
++      goto out;
++
++   struct nvkmd_va *va;
++   result = nvkmd_dev_alloc_va(dev->nvkmd, &mem->vk.base, 0, pte_kind,
++                               align64(mem->mem->size_B,
++                                       NVK_MEM_KIND_VA_ALIGN_B),
++                               NVK_MEM_KIND_VA_ALIGN_B,
++                               0 /* fixed_addr */, &va);
++   if (result != VK_SUCCESS)
++      goto out;
++
++   result = nvkmd_va_bind_mem(va, &mem->vk.base, 0, mem->mem, 0,
++                              mem->mem->size_B);
++   if (result != VK_SUCCESS) {
++      nvkmd_va_free(va);
++      goto out;
++   }
++
++   *free_slot = va;
++   *addr_out = va->addr;
++
++out:
++   simple_mtx_unlock(&mem->kind_mutex);
++   return result;
++}
++
+ VKAPI_ATTR VkResult VKAPI_CALL
+ nvk_MapMemory2KHR(VkDevice device,
+                   const VkMemoryMapInfoKHR *pMemoryMapInfo,
+diff --git a/src/nouveau/vulkan/nvk_device_memory.h b/src/nouveau/vulkan/nvk_device_memory.h
+index cfceeae5352c8b4d62399bb581f26698e4eb0a7f..6ad195a40e82f6e2c24b82c5bd63e96ae456ea56 100644
+--- a/src/nouveau/vulkan/nvk_device_memory.h
++++ b/src/nouveau/vulkan/nvk_device_memory.h
+@@ -10,9 +10,20 @@
+ #include "vk_device_memory.h"
+ 
+ #include "util/list.h"
++#include "util/simple_mtx.h"
+ 
++struct nvk_device;
+ struct nvk_image;
+ struct nvkmd_mem;
++struct nvkmd_va;
++
++/* The PTE kinds one memory object maps whole for the images bound to it. */
++#define NVK_MEM_KIND_VAS 4
++
++/* The alignment of a whole-memory PTE kind mapping, which serves every image
++ * plane aligned to at most this.
++ */
++#define NVK_MEM_KIND_VA_ALIGN_B (2ull << 20)
+ 
+ struct nvk_device_memory {
+    struct vk_device_memory vk;
+@@ -20,8 +31,22 @@ struct nvk_device_memory {
+    struct nvk_image *dedicated_image;
+ 
+    struct nvkmd_mem *mem;
++
++   /* The memory mapped whole with each PTE kind its bound images need, so
++    * binding such an image maps nothing of its own.
++    */
++   simple_mtx_t kind_mutex;
++   struct nvkmd_va *kind_vas[NVK_MEM_KIND_VAS];
+ };
+ 
++/* The address of mem mapped whole with pte_kind, or 0 when mem maps no more
++ * kinds and the image needs a range of its own.
++ */
++VkResult nvk_device_memory_kind_addr(struct nvk_device *dev,
++                                     struct nvk_device_memory *mem,
++                                     uint8_t pte_kind,
++                                     uint64_t *addr_out);
++
+ VK_DEFINE_NONDISP_HANDLE_CASTS(nvk_device_memory, vk.base, VkDeviceMemory,
+                                VK_OBJECT_TYPE_DEVICE_MEMORY)
+ 
+diff --git a/src/nouveau/vulkan/nvk_image.c b/src/nouveau/vulkan/nvk_image.c
+index e5267ef20ce313dd17d96bd990d8bf0760ac3487..e9ce464c03b86e7c76274585f383636f0534982d 100644
+--- a/src/nouveau/vulkan/nvk_image.c
++++ b/src/nouveau/vulkan/nvk_image.c
+@@ -1611,19 +1611,34 @@ nvk_image_plane_bind(struct nvk_device *dev,
+    const bool not_shared = !(mem->mem->flags & NVKMD_MEM_SHARED);
+ 
+    if (plane->nil.pte_kind != 0) {
++      /* Images placed in one memory object share its mapping with their
++       * kind, rather than each mapping a range of its own.
++       */
++      uint64_t kind_addr = 0;
+       if (mem->dedicated_image == image && image->can_compress && not_shared) {
+          image->is_compressed = true;
+          plane->addr = mem->mem->va->addr + offset_B;
+       } else {
+-         VkResult result = nvk_image_plane_alloc_va(dev, image, plane);
+-         if (result != VK_SUCCESS)
+-            return result;
+-
+-         result = nvkmd_va_bind_mem(plane->va, &image->vk.base, 0,
+-                                    mem->mem, offset_B,
+-                                    plane->va->size_B);
+-         if (result != VK_SUCCESS)
+-            return result;
++         if (plane->plane_align_B <= NVK_MEM_KIND_VA_ALIGN_B) {
++            VkResult result = nvk_device_memory_kind_addr(dev, mem,
++                                                          plane->nil.pte_kind,
++                                                          &kind_addr);
++            if (result != VK_SUCCESS)
++               return result;
++         }
++         if (kind_addr != 0) {
++            plane->addr = kind_addr + offset_B;
++         } else {
++            VkResult result = nvk_image_plane_alloc_va(dev, image, plane);
++            if (result != VK_SUCCESS)
++               return result;
++
++            result = nvkmd_va_bind_mem(plane->va, &image->vk.base, 0,
++                                       mem->mem, offset_B,
++                                       plane->va->size_B);
++            if (result != VK_SUCCESS)
++               return result;
++         }
+       }
+    } else {
+       plane->addr = mem->mem->va->addr + offset_B;
