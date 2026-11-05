@@ -531,13 +531,21 @@ fn metadata<'a>(
     }
     let offset = section.start + relative;
     let size = u32_at(data, offset)? as usize;
-    if size < 8 || size > section.len() - relative {
-        return Err(error(offset, ErrorKind::Metadata));
-    }
-    Ok(Some(Tags::checked(
-        &data[offset + 4..offset + size],
-        offset + 4,
-    )?))
+    let available = section.len() - relative;
+    // A block is its size and then tags ending in ENDT. Apple's toolchains
+    // record the size either with its own four bytes or without them, both
+    // within one MTLB version, so the tags are those that end in ENDT at
+    // either length.
+    let tags = |length: usize| {
+        (length >= 4 && 4 + length <= available)
+            .then(|| Tags::checked(&data[offset + 4..offset + 4 + length], offset + 4).ok())
+            .flatten()
+    };
+    size.checked_sub(4)
+        .and_then(tags)
+        .or_else(|| tags(size))
+        .map(Some)
+        .ok_or_else(|| error(offset, ErrorKind::Metadata))
 }
 
 /// Validated LLVM wrapper framing, not LLVM IR validation or shader compilation.
@@ -680,6 +688,23 @@ pub(crate) mod tests {
         let file_size = data.len();
         u64_field(&mut data, 16, file_size);
         data
+    }
+
+    #[test]
+    fn metadata_sizes_with_or_without_their_own_field_parse() {
+        let mut data = fixture(false);
+        for at in [40, 56] {
+            let block = u64::from_le_bytes(data[at..at + 8].try_into().unwrap()) as usize;
+            // Each block holds only ENDT: four bytes after the size field.
+            data[block..block + 4].copy_from_slice(&4u32.to_le_bytes());
+        }
+        let library = Library::parse(&data).unwrap();
+        let function = &library.functions()[0];
+        assert_eq!(function.public_metadata.unwrap().count(), 0);
+        assert_eq!(function.private_metadata.unwrap().count(), 0);
+        let block = u64::from_le_bytes(data[40..48].try_into().unwrap()) as usize;
+        data[block..block + 4].copy_from_slice(&3u32.to_le_bytes());
+        assert_eq!(Library::parse(&data).unwrap_err().kind, ErrorKind::Metadata);
     }
 
     #[test]
