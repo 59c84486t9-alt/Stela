@@ -22,6 +22,8 @@ void stela_linux_atomic_callback_end(struct stela_linux_atomic_callback *scope);
 /* Known soft Timer callback: balanced process entry, enabled simulated IRQs;
  * supplies only SOFTIRQ_OFFSET and restores it through callback_end(). */
 void stela_linux_atomic_callback_begin_soft(struct stela_linux_atomic_callback *scope);
+/* TIMER_IRQSAFE keeps softirq nesting and masks local IRQs until end(). */
+void stela_linux_atomic_callback_begin_soft_irqsafe(struct stela_linux_atomic_callback *scope);
 
 /* Passive lifecycle guard around original softirq dispatch. Entry may retain
  * arbitrary process-only PREEMPT_MASK nesting and either simulated IRQ state.

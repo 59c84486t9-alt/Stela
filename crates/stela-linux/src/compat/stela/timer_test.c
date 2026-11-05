@@ -24,7 +24,7 @@ static unsigned long word;
 
 static void count(struct timer_list *timer)
 {
-	assert(timer == &first && in_serving_softirq());
+	assert(timer == &first && in_serving_softirq() && !irqs_disabled());
 	counted++;
 }
 
@@ -44,6 +44,7 @@ static void complete_done(struct timer_list *timer)
 static void clear_bit_zero(struct timer_list *timer)
 {
 	(void)timer;
+	assert(in_serving_softirq() && !in_hardirq() && irqs_disabled());
 	clear_and_wake_up_bit(0, &word);
 }
 
@@ -81,9 +82,10 @@ static void timer_list_waits(void)
 	mod_timer(&completer, jiffies + 2);
 	assert(wait_for_completion_timeout(&done, 1000) > 0 && completion_done(&done));
 	set_bit(0, &word);
-	timer_setup(&clearer, clear_bit_zero, 0);
+	timer_setup(&clearer, clear_bit_zero, TIMER_IRQSAFE);
 	mod_timer(&clearer, jiffies + 2);
 	assert(!wait_on_bit(&word, 0, TASK_UNINTERRUPTIBLE) && !test_bit(0, &word));
+	assert(!irqs_disabled() && !in_interrupt());
 }
 
 static DECLARE_COMPLETION(high_fired);

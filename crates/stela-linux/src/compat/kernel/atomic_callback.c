@@ -13,7 +13,7 @@ static_assert(IS_ENABLED(CONFIG_PREEMPT_COUNT));
 static_assert(!IS_ENABLED(CONFIG_DEBUG_LOCK_ALLOC));
 static_assert(!IS_ENABLED(CONFIG_TRACE_IRQFLAGS));
 
-enum callback_kind { CALLBACK_HARD, CALLBACK_SOFT, CALLBACK_DISPATCH, CALLBACK_BH, CALLBACK_PROCESS };
+enum callback_kind { CALLBACK_HARD, CALLBACK_SOFT, CALLBACK_SOFT_IRQSAFE, CALLBACK_DISPATCH, CALLBACK_BH, CALLBACK_PROCESS };
 struct callback_state {
 	const struct stela_linux_atomic_callback *scope;
 	struct task_struct *task;
@@ -58,13 +58,15 @@ static void begin(struct stela_linux_atomic_callback *scope, enum callback_kind 
 		__builtin_trap();
 	active = (struct callback_state){.scope = scope, .task = task, .entry = entry,
 		.kind = kind, .count = count};
-	if (kind == CALLBACK_HARD) {
+	if (kind == CALLBACK_HARD || kind == CALLBACK_SOFT_IRQSAFE) {
 		unsigned long flags;
 		raw_local_irq_save(flags);
 		if (flags != entry.irq_flags)
 			__builtin_trap();
+	}
+	if (kind == CALLBACK_HARD) {
 		__irq_enter_raw();
-	} else if (kind == CALLBACK_SOFT) {
+	} else if (kind == CALLBACK_SOFT || kind == CALLBACK_SOFT_IRQSAFE) {
 		preempt_count_add(SOFTIRQ_OFFSET);
 	}
 	stela_linux_lease_snapshot(&active.callback);
@@ -78,6 +80,11 @@ void stela_linux_atomic_callback_begin(struct stela_linux_atomic_callback *scope
 void stela_linux_atomic_callback_begin_soft(struct stela_linux_atomic_callback *scope)
 {
 	begin(scope, CALLBACK_SOFT);
+}
+
+void stela_linux_atomic_callback_begin_soft_irqsafe(struct stela_linux_atomic_callback *scope)
+{
+	begin(scope, CALLBACK_SOFT_IRQSAFE);
 }
 
 void stela_linux_atomic_softirq_dispatch_begin(struct stela_linux_atomic_callback *scope)
@@ -105,16 +112,17 @@ static void end(struct stela_linux_atomic_callback *scope, unsigned int release_
 	int expected = active.count;
 	if (active.kind == CALLBACK_HARD)
 		expected += (int)HARDIRQ_OFFSET;
-	else if (active.kind == CALLBACK_SOFT)
+	else if (active.kind == CALLBACK_SOFT || active.kind == CALLBACK_SOFT_IRQSAFE)
 		expected += (int)SOFTIRQ_OFFSET;
 	if (preempt_count() != expected || !stela_linux_lease_matches(&active.callback))
 		__builtin_trap();
 	if (active.kind == CALLBACK_HARD) {
 		__irq_exit_raw();
-		raw_local_irq_restore(active.entry.irq_flags);
-	} else if (active.kind == CALLBACK_SOFT) {
+	} else if (active.kind == CALLBACK_SOFT || active.kind == CALLBACK_SOFT_IRQSAFE) {
 		preempt_count_sub(SOFTIRQ_OFFSET);
 	}
+	if (active.kind == CALLBACK_HARD || active.kind == CALLBACK_SOFT_IRQSAFE)
+		raw_local_irq_restore(active.entry.irq_flags);
 	if (preempt_count() != active.count || stela_linux_current() != active.task ||
 	    !stela_linux_lease_matches(&active.entry))
 		__builtin_trap();

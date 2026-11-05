@@ -28,10 +28,6 @@ void timer_init_key(struct timer_list *timer, void (*func)(struct timer_list *),
         stela_linux_unsupported("NO_HZ deferrable timer requires actual original idle/base producer");
         stela_linux_fatal("missing NO_HZ timer producer; original timer retained");
     }
-    if (flags & TIMER_IRQSAFE) {
-        stela_linux_unsupported("IRQ-safe timer requires original softirq callback with IRQs disabled");
-        stela_linux_fatal("missing IRQ-safe timer callback producer; original timer retained");
-    }
     /* With selected !NO_HZ_COMMON, original Linux uses one base, including
      * TIMER_DEFERRABLE. Genuine HZ_PERIODIC tick delivery remains a required
      * runtime producer; an idle-suppression bool is not its substitute. */
@@ -216,7 +212,10 @@ void stela_linux_timers_run(const struct stela_linux_timer_delivery *delivery)
 		void (*function)(struct timer_list *) = timer->function;
 		hlist_del_init(&timer->entry);
 		struct stela_linux_atomic_callback scope;
-		stela_linux_atomic_callback_begin_soft(&scope);
+		if (timer->flags & TIMER_IRQSAFE)
+			stela_linux_atomic_callback_begin_soft_irqsafe(&scope);
+		else
+			stela_linux_atomic_callback_begin_soft(&scope);
         running_timer = timer;
         function(timer);
         running_timer = NULL;
