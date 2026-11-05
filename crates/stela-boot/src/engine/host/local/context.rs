@@ -108,16 +108,15 @@ impl ProcessRootScope<'_> {
 impl RootIdentity {
     fn validate_process_root(&self) -> Result<(), WorkError> {
         self.affinity()?;
-        let (flags, cr4): (u64, u64);
-        // SAFETY: native CPU, after affinity before table access.
+        let flags: u64;
+        // SAFETY: native CPU, after affinity before table access. The paging
+        // depth was checked at identity capture: CR4.LA57 is fixed while
+        // paging is on, and reading CR4 exits to a hypervisor.
         unsafe {
-            asm!("pushfq", "pop {}", "mov {}, cr4", out(reg) flags, out(reg) cr4, options(nomem, preserves_flags));
+            asm!("pushfq", "pop {}", out(reg) flags, options(nomem, preserves_flags));
         }
         if flags & IF != 0 {
             return Err(WorkError::Busy);
-        }
-        if self.loader_tables.levels() != if cr4 & (1 << 12) != 0 { 5 } else { 4 } {
-            return Err(WorkError::CorruptContext);
         }
         if root() != self.snapshot.cr3
             && !crate::engine::storage::entered_loader_root(self.loader_tables)
@@ -165,9 +164,10 @@ impl RootIdentity {
     }
     fn affinity(&self) -> Result<(), WorkError> {
         // BEFORE any GS-local dereference: no other CPU has this GS record,
-        // so none can borrow this processor's removable scope. Each timer
-        // interrupt comes here; CPUID would exit to a hypervisor.
-        if gs_base() != self.gs || crate::apic::base_msr() != self.snapshot.apic_base {
+        // so none can borrow this processor's removable scope. Every Linux
+        // context check comes here; CPUID or reading APIC_BASE would exit to
+        // a hypervisor, and the GS record already names one processor.
+        if gs_base() != self.gs {
             return Err(WorkError::WrongCpu);
         }
         // SAFETY: immutable architectural observation; original owner kept.
@@ -421,6 +421,10 @@ impl Owner {
             return Err(WorkError::CorruptContext);
         }
         let state = state();
+        let levels = if snapshot.cr4 & (1 << 12) != 0 { 5 } else { 4 };
+        if state._loader_tables.levels() != levels {
+            return Err(WorkError::CorruptContext);
+        }
         if state.native || snapshot.cr3 != state.host_root {
             return Err(WorkError::Busy);
         }
