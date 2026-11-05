@@ -17,13 +17,6 @@
 #include <stela/srcu.h>
 #include <stela/test.h>
 
-struct srcu_test_control {
-	const void *context;
-	void (*workers)(const void *, bool);
-};
-static_assert(sizeof(struct srcu_test_control) == 16);
-void stela_linux_srcu_test(const struct srcu_test_control *control);
-void stela_linux_srcu_early_test(void);
 void stela_linux_srcu_queue_before_threads(void);
 void stela_linux_srcu_source_cases(void);
 void stela_linux_srcu_negative_case(unsigned int which, void (*witness)(void));
@@ -138,26 +131,6 @@ static void disabled_unlock_requires_counter_recheck(void)
 	assert(item.calls == 1);
 	cleanup_srcu_struct(&domain);
 }
-static void refused_worker_keeps_callback_until_explicit_recovery(const struct srcu_test_control *control)
-{
-	struct srcu_struct domain;
-	struct observed item = {};
-	assert(!init_srcu_struct(&domain));
-	init_completion(&item.done);
-	control->workers(control->context, true);
-	call_srcu(&domain, &item.head, observed_callback);
-	assert(!item.calls && irq_work_is_pending(&domain.srcu_irq_work));
-	msleep(150);
-	assert(!item.calls && !domain.srcu_gp_running);
-	/* This is an explicit model resource-availability event. The service's
-	 * native Runtime event subscription remains an integration prerequisite. */
-	control->workers(control->context, false);
-	irq_work_run();
-	wait_for_completion(&item.done);
-	srcu_barrier(&domain);
-	assert(item.calls == 1);
-	cleanup_srcu_struct(&domain);
-}
 struct ordered_state;
 struct ordered_item {
 	struct rcu_head head;
@@ -216,12 +189,7 @@ static void fifo_and_requeue_need_distinct_generations(void)
 	assert(state.count == 3 && state.order[2] == 'c');
 	cleanup_srcu_struct(&state.domain);
 }
-static struct srcu_struct *invalid_cleanup_domain;
-static void invalid_cleanup(void)
-{
-	cleanup_srcu_struct(invalid_cleanup_domain);
-}
-static void polling_wrap_and_dynamic_cleanup(bool check_cleanup_refusal)
+static void polling_wrap_and_dynamic_cleanup(void)
 {
 	struct srcu_struct *domain = kzalloc(sizeof(*domain), GFP_KERNEL);
 	assert(domain && !init_srcu_struct(domain));
@@ -236,10 +204,6 @@ static void polling_wrap_and_dynamic_cleanup(bool check_cleanup_refusal)
 		cookie = start_poll_synchronize_srcu(domain);
 		wait_for_gp(domain);
 		assert(!poll_state_synchronize_srcu(domain, cookie));
-		if (check_cleanup_refusal) {
-			invalid_cleanup_domain = domain;
-			assert(stela_test_traps(invalid_cleanup));
-		}
 		srcu_read_unlock(domain, reader);
 		srcu_barrier(domain);
 		assert(poll_state_synchronize_srcu(domain, cookie));
@@ -248,7 +212,6 @@ static void polling_wrap_and_dynamic_cleanup(bool check_cleanup_refusal)
 	 * access and GP work before this containing allocation is released. */
 	cleanup_srcu_struct(domain);
 	kfree(domain);
-	invalid_cleanup_domain = NULL;
 }
 static void pending_kick_cleanup_joins_before_free(void)
 {
@@ -328,10 +291,6 @@ static void cleanup_with_reader_arriving_during_join(void (*witness)(void))
 	flush_work(&state.reader);
 }
 
-static void run_cleanup_race(void)
-{
-	cleanup_with_reader_arriving_during_join(NULL);
-}
 static void callback_sleep(struct rcu_head *head)
 {
 	(void)head;
@@ -362,36 +321,10 @@ static void queue_invalid_callback(rcu_callback_t callback)
 	call_srcu(&domain, &head, callback);
 	srcu_barrier(&domain);
 }
-static void run_invalid_callback(void)
-{
-	queue_invalid_callback(invalid_callback);
-}
 static rcu_callback_t const invalid_callbacks[] = {callback_sleep, callback_exit,
 	callback_rebalanced_sleep, callback_unbalanced_return};
-static void callback_guards(void)
-{
-	for (unsigned int n = 0; n != ARRAY_SIZE(invalid_callbacks); n++) {
-		invalid_callback = invalid_callbacks[n];
-		assert(stela_test_traps(run_invalid_callback));
-	}
-}
 DEFINE_STATIC_SRCU(early_domain);
 static struct observed early;
-static void early_sync(void)
-{
-	synchronize_srcu(&early_domain);
-}
-void stela_linux_srcu_early_test(void)
-{
-	assert(stela_linux_srcu_bootstrapping(stela_linux_owner()));
-	assert(stela_test_traps(early_sync));
-	init_completion(&early.done);
-	call_srcu(&early_domain, &early.head, observed_callback);
-	assert(!early.calls);
-	wait_for_completion(&early.done);
-	srcu_barrier(&early_domain);
-	assert(early.calls == 1);
-}
 
 void stela_linux_srcu_queue_before_threads(void)
 {
@@ -403,13 +336,13 @@ void stela_linux_srcu_queue_before_threads(void)
 	call_srcu(&early_domain, &early.head, observed_callback);
 	assert(!early.calls && irq_work_is_pending(&early_domain.srcu_irq_work));
 }
-static void source_cases(bool check_cleanup_refusal)
+static void source_cases(void)
 {
 	srcu();
 	sleeping_and_independent_domains();
 	disabled_unlock_requires_counter_recheck();
 	fifo_and_requeue_need_distinct_generations();
-	polling_wrap_and_dynamic_cleanup(check_cleanup_refusal);
+	polling_wrap_and_dynamic_cleanup();
 	pending_kick_cleanup_joins_before_free();
 }
 
@@ -541,8 +474,9 @@ void stela_linux_srcu_source_cases(void)
 	assert(!stela_linux_srcu_bootstrap(owner));
 	assert(stela_linux_srcu_bootstrap(owner) == -EALREADY);
 	assert(stela_linux_srcu_bootstrap_joined(owner) == -EPERM);
+	assert(stela_linux_srcu_current_active(NULL) == -EINVAL);
 	assert(stela_linux_srcu_current_active(owner) == -EPERM);
-	source_cases(false);
+	source_cases();
 }
 
 static void (*negative_witness)(void);
@@ -573,23 +507,4 @@ void stela_linux_srcu_negative_case(unsigned int which, void (*witness)(void))
 		assert(which == ARRAY_SIZE(invalid_callbacks) + 1);
 		cleanup_with_reader_arriving_during_join(witness);
 	}
-}
-
-void stela_linux_srcu_test(const struct srcu_test_control *control)
-{
-	assert(stela_linux_srcu_bootstrap(stela_linux_owner()) == -EALREADY);
-	refused_worker_keeps_callback_until_explicit_recovery(control);
-	source_cases(true);
-	assert(stela_test_traps(run_cleanup_race));
-	callback_guards();
-}
-
-void stela_linux_srcu_joined_admission_test(bool expected);
-void stela_linux_srcu_joined_admission_test(bool expected)
-{
-    const struct stela_linux_owner *owner = stela_linux_owner();
-    assert(current);
-    assert(stela_linux_srcu_current_active(NULL) == -EINVAL);
-    assert(stela_linux_srcu_current_active((const struct stela_linux_owner *)1) == -EPERM);
-    assert(stela_linux_srcu_current_active(owner) == (expected ? 0 : -EAGAIN));
 }

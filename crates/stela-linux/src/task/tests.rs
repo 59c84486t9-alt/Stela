@@ -3,10 +3,7 @@
 //! assertions are held. This plain Rust child is not whole-C ASan/UBSan.
 extern crate std;
 use super::*;
-use crate::{
-    owner::{Errno, Owner, Platform, RawOwner},
-    service::Environment,
-};
+use crate::owner::RawOwner;
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     alloc::{GlobalAlloc, Layout},
@@ -160,7 +157,6 @@ unsafe extern "C" {
     fn stela_linux_task_test_service_wait(context: *mut c_void);
     fn stela_linux_task_test_service_cancel(context: *mut c_void);
     fn stela_linux_task_test_clock_service(context: *mut c_void);
-    fn stela_linux_service_test_body(context: *mut c_void);
     fn stela_linux_task_test_runnable_boundary(context: *mut c_void);
     fn stela_linux_task_test_closed_stack();
     fn stela_linux_atomic_callback_prepared_fixture(task: *mut CTask, context: *const TaskContext);
@@ -234,7 +230,6 @@ fn stacks_count(dropped: &Arc<AtomicU64>, usable: usize, count: usize) -> Vec<St
 }
 struct CpuModel {
     thread: thread::ThreadId,
-    publication_probe: Mutex<Option<srcu::PublicationObserver>>,
     flags: AtomicU64,
     irq: AtomicBool,
     time: AtomicU64,
@@ -243,7 +238,6 @@ impl CpuModel {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             thread: thread::current().id(),
-            publication_probe: Mutex::new(None),
             flags: AtomicU64::new(0x202),
             irq: AtomicBool::new(false),
             time: AtomicU64::new(0),
@@ -269,12 +263,6 @@ unsafe impl Cpu for CpuModel {
     }
     unsafe fn restore(&self, flags: u64) {
         self.flags.store(flags, Ordering::Release);
-        // The optional diagnostic observer never holds this mutex across a
-        // queue read or panic, and nested restore observation is disarmed.
-        let observer = self.publication_probe.lock().unwrap().clone();
-        if let Some(observer) = observer {
-            observer.after_restore(flags);
-        }
     }
     fn ticks(&self) -> u64 {
         self.time.fetch_add(1, Ordering::Relaxed)
@@ -612,7 +600,6 @@ fn trees_child() {
     // SAFETY: this child borrows no constant Linux names, which classifying
     // no address as immutable data requires.
     assert!(unsafe { crate::image::register(alloc::sync::Arc::new(NoImage)) }.is_ok());
-    environment_roundtrip();
     stack_catalog_capacity();
 }
 
@@ -987,339 +974,6 @@ fn clock_service_roundtrip(mode: u64) {
     drop(executor);
     assert_eq!(dropped.load(Ordering::Relaxed), 5);
     assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
-    assert_eq!(quarantined(), 0);
-}
-
-/// What Linux code in [`environment_roundtrip`] needs of its machine.
-#[derive(Default)]
-struct Machine {
-    start: core::cell::OnceCell<std::time::Instant>,
-    clock: Option<Arc<dyn service::Clock>>,
-    refuse_workers: AtomicBool,
-    worker_attempts: [AtomicU64; 3],
-    worker_limits: [AtomicU64; 3],
-    environment: AtomicPtr<Environment<16>>,
-    irq: Mutex<Option<crate::service::IrqEvent>>,
-    retired_irq: Mutex<Option<crate::service::IrqEvent>>,
-    irq_masked: AtomicBool,
-}
-
-impl Machine {
-    fn environment(&self) -> Pin<&Environment<16>> {
-        // SAFETY: the test keeps the pinned environment through every task.
-        unsafe { Pin::new_unchecked(&*self.environment.load(Ordering::Acquire)) }
-    }
-}
-
-/// Hosted scheduler-model source only. Bare tasks still fail actual-current
-/// admission: a genuine Initial/Managed root fixture is an open prerequisite.
-struct HostedMinimum {
-    origin: std::time::Instant,
-    target: std::time::Instant,
-}
-// SAFETY: isolated std monotonic source and owned original target; no native
-// clock/CPU/device permission. The actual C current guard is never bypassed.
-unsafe impl crate::owner::MinimumDeadline for HostedMinimum {
-    fn ready(&self) -> Result<bool, WorkError> {
-        Ok(std::time::Instant::now() >= self.target)
-    }
-    fn wake_ns(&self) -> Result<i64, WorkError> {
-        i64::try_from(self.target.duration_since(self.origin).as_nanos())
-            .map_err(|_| WorkError::Exhausted)
-    }
-    fn remaining_quanta_ceil(&self, quantum_us: u64) -> Result<u64, WorkError> {
-        let quantum = u128::from(quantum_us)
-            .checked_mul(1000)
-            .filter(|q| *q != 0)
-            .ok_or(WorkError::InvalidTicket)?;
-        let left = self
-            .target
-            .saturating_duration_since(std::time::Instant::now())
-            .as_nanos();
-        u64::try_from(left.div_ceil(quantum)).map_err(|_| WorkError::Exhausted)
-    }
-}
-
-impl Platform for Machine {
-    fn now_ns(&self) -> i64 {
-        if let Some(clock) = &self.clock {
-            return clock.now_ns().unwrap().try_into().unwrap();
-        }
-        let start = self.start.get_or_init(std::time::Instant::now);
-        start.elapsed().as_nanos() as i64
-    }
-    fn minimum_delay_us(&self, minimum: u64) -> Result<(), WorkError> {
-        // Explicit hosted model source, never a native Installed grant.
-        let until = std::time::Instant::now()
-            .checked_add(std::time::Duration::from_micros(minimum))
-            .ok_or(WorkError::Exhausted)?;
-        while std::time::Instant::now() < until {
-            core::hint::spin_loop();
-        }
-        Ok(())
-    }
-    fn minimum_deadline_us(
-        &self,
-        minimum: u64,
-    ) -> Result<Box<dyn crate::owner::MinimumDeadline>, WorkError> {
-        let origin = *self.start.get_or_init(std::time::Instant::now);
-        let target = std::time::Instant::now()
-            .checked_add(std::time::Duration::from_micros(minimum))
-            .ok_or(WorkError::Exhausted)?;
-        Ok(Box::new(HostedMinimum { origin, target }))
-    }
-    fn timer_changed(&self) -> Result<(), WorkError> {
-        self.environment().timer_changed()
-    }
-    fn log(&self, _: i32, message: &core::ffi::CStr) {
-        std::eprintln!("{message:?}");
-    }
-    fn warn(&self, file: &core::ffi::CStr, line: i32, _: Option<&core::ffi::CStr>) {
-        panic!("WARN at {file:?}:{line}");
-    }
-    fn unsupported(&self, operation: &core::ffi::CStr) {
-        panic!("unsupported: {operation:?}");
-    }
-    fn random_bytes(&self, _: &mut [u8]) {
-        unreachable!();
-    }
-    fn start_worker(&self, kind: crate::owner::WorkerKind) -> Result<(), Errno> {
-        let attempt = self.worker_attempts[kind as usize].fetch_add(1, Ordering::Relaxed);
-        let limit = self.worker_limits[kind as usize].load(Ordering::Acquire);
-        if self.refuse_workers.load(Ordering::Acquire) || (limit != 0 && attempt >= limit) {
-            return Err(-11);
-        }
-        self.environment()
-            .start_worker(kind)
-            .map(drop)
-            .map_err(|_| -11)
-    }
-    fn shutdown(&self, _: bool) {
-        unreachable!();
-    }
-    fn map_device(&self, _: u64, _: usize, _: bool) -> Option<*mut c_void> {
-        unreachable!();
-    }
-    unsafe fn unmap_device(&self, _: *mut c_void) {
-        unreachable!();
-    }
-    fn map_pages(&self, _: &[u64]) -> Option<*mut c_void> {
-        unreachable!();
-    }
-    unsafe fn unmap_pages(&self, _: *mut c_void, _: usize) {
-        unreachable!();
-    }
-    fn irq_enable(&self, irq: u32) -> Result<(), crate::owner::IrqEnableError> {
-        assert_eq!(irq, 7);
-        if self.irq.lock().unwrap().is_none() {
-            // SAFETY: exact synchronous software-only fixture source, with no
-            // hardware, root route or alternate native producer.
-            let event = unsafe { self.environment().irq_epoch(irq) }.unwrap();
-            if let Some(old) = self.retired_irq.lock().unwrap().as_ref() {
-                assert_eq!(old.raise(), Err(WorkError::Closed));
-            }
-            *self.irq.lock().unwrap() = Some(event);
-        }
-        self.irq_masked.store(false, Ordering::Release);
-        Ok(())
-    }
-    fn irq_disable(&self, irq: u32) -> Result<(), Errno> {
-        assert_eq!(irq, 7);
-        self.irq_masked.store(true, Ordering::Release);
-        Ok(())
-    }
-    fn irq_retire(&self, irq: u32) -> Result<(), Errno> {
-        assert_eq!(irq, 7);
-        let event = self.irq.lock().unwrap().take().unwrap();
-        event.begin_close();
-        // SAFETY: this fixture has no hardware route and its only synchronous
-        // software raiser is this owner task; C already joined actual IRQ work.
-        unsafe { self.environment().join_irq(&event) }.unwrap();
-        *self.retired_irq.lock().unwrap() = Some(event);
-        Ok(())
-    }
-    unsafe fn copy_from_user(&self, _: *mut u8, _: *const u8, _: usize) -> usize {
-        unreachable!();
-    }
-    unsafe fn copy_to_user(&self, _: *mut u8, _: *const u8, _: usize) -> usize {
-        unreachable!();
-    }
-    fn map_user(&self, _: *mut c_void, _: u64, _: u64, _: u64) -> Result<(), Errno> {
-        unreachable!();
-    }
-    fn unmap_user(&self, _: *mut c_void, _: u64, _: usize) -> Result<(), Errno> {
-        unreachable!();
-    }
-}
-
-#[repr(C)]
-struct EnvironmentTest {
-    owner: *const RawOwner,
-    context: *mut c_void,
-    raise: unsafe extern "C" fn(*mut c_void, u32),
-    masked: unsafe extern "C" fn(*mut c_void, u32) -> bool,
-}
-
-unsafe extern "C" fn raise_line(context: *mut c_void, line: u32) {
-    // SAFETY: the test's machine, alive through the task.
-    let machine = unsafe { &*context.cast::<Machine>() };
-    assert_eq!(line, 7);
-    assert!(!machine.irq_masked.load(Ordering::Acquire));
-    let event = machine.irq.lock().unwrap().as_ref().unwrap().clone();
-    event.raise().unwrap();
-}
-
-unsafe extern "C" fn line_masked(context: *mut c_void, line: u32) -> bool {
-    // SAFETY: exact retained synchronous controller peer of this fixture.
-    let machine = unsafe { &*context.cast::<Machine>() };
-    assert_eq!(line, 7);
-    machine.irq_masked.load(Ordering::Acquire)
-}
-
-struct ServicePressure {
-    owner: *const RawOwner,
-    runtime: *const Runtime<16>,
-    word: core::sync::atomic::AtomicU32,
-    started: AtomicBool,
-    delivered: AtomicUsize,
-}
-unsafe extern "C" fn pressure_wait(context: *mut c_void) {
-    // SAFETY: environment_roundtrip keeps this storage and owner through join.
-    let pressure = unsafe { &*context.cast::<ServicePressure>() };
-    // SAFETY: this is a real retained General task of the owner's environment.
-    let _entered = unsafe { crate::owner::Entered::new(pressure.owner) };
-    pressure.started.store(true, Ordering::Release);
-    // SAFETY: the word is retained through the original Linux wait and wake.
-    unsafe { crate::client::wait(pressure.word.as_ptr(), 0, u64::MAX) };
-}
-unsafe extern "C" fn pressure_leaf(context: *mut c_void) {
-    // SAFETY: environment_roundtrip keeps this storage through all deliveries.
-    let pressure = unsafe { &*context.cast::<ServicePressure>() };
-    // SAFETY: the pinned runtime outlives this actual service callback.
-    let runtime = unsafe { Pin::new_unchecked(&*pressure.runtime) };
-    assert!(runtime.service_current().unwrap());
-    unsafe extern "C" {
-        fn stela_linux_service_test_leaf_context();
-    }
-    // SAFETY: this service leaf has a real entered process task and callback guard.
-    unsafe { stela_linux_service_test_leaf_context() };
-    pressure.word.store(1, Ordering::Release);
-    // SAFETY: already entered in the service owner; original wake is nonblocking.
-    unsafe { crate::client::wake() };
-    pressure.delivered.fetch_add(1, Ordering::Relaxed);
-}
-
-/// A task sleeping on the service task's timer, a raised line reaching its
-/// handler there, and the work that handler queued reaching a worker task.
-fn environment_roundtrip() {
-    let cpu = CpuModel::new();
-    let f = Fixture::new(cpu.clone());
-    // SAFETY: the fixture is the queue's owner, and only this test thread produces
-    // work.
-    let queue = unsafe { Queue::<16>::new(cpu.clone(), f) }.unwrap();
-    let dropped = Arc::new(AtomicU64::new(0));
-    let executor =
-        Executor::new_hosted_service_for_test(queue, stacks_count(&dropped, 16 * 1024, 8)).unwrap();
-    let runtime = executor.runtime();
-    let clock: Arc<dyn service::Clock> = Arc::new(ServiceClock {
-        cpu: cpu.clone(),
-        reads: Arc::new(AtomicU64::new(0)),
-        start: std::time::Instant::now(),
-    });
-    let idle = Arc::new(ServiceIdle {
-        clock: clock.clone(),
-        owner: thread::current(),
-        waits: AtomicU64::new(0),
-    });
-    let domain = service::Domain::new(clock, idle).unwrap();
-    let owner = Owner::new(Machine::default());
-    // SAFETY: the taskless dispatcher, and this function keeps the owner and
-    // runtime past every task.
-    let environment = unsafe { Environment::new(owner.raw(), runtime, domain) }.unwrap();
-    owner.platform().environment.store(
-        ptr::from_ref(environment.as_ref().get_ref()).cast_mut(),
-        Ordering::Release,
-    );
-    environment.as_ref().start().unwrap();
-    let mut test = EnvironmentTest {
-        owner: owner.raw(),
-        context: ptr::from_ref(owner.platform()).cast_mut().cast(),
-        raise: raise_line,
-        masked: line_masked,
-    };
-    // SAFETY: the body enters and leaves the owner, and `test` outlives it.
-    let task = unsafe {
-        environment
-            .as_ref()
-            .spawn(stela_linux_service_test_body, (&raw mut test).cast())
-    }
-    .unwrap();
-    let mut steps = 0;
-    while !runtime.queue().completed(task).unwrap() {
-        assert!(steps < 100_000, "the task did not complete");
-        runtime.step_or_idle().unwrap();
-        steps += 1;
-    }
-    let mut pressure = ServicePressure {
-        owner: owner.raw(),
-        runtime: runtime.get_ref(),
-        word: core::sync::atomic::AtomicU32::new(0),
-        started: AtomicBool::new(false),
-        delivered: AtomicUsize::new(0),
-    };
-    let pressure_context = (&raw mut pressure).cast();
-    // With five General stacks, the four pool credits leave one Owner credit.
-    // SAFETY: pressure storage and owner remain live until this task joins.
-    let sleeper = unsafe { environment.as_ref().spawn(pressure_wait, pressure_context) }.unwrap();
-    while !pressure.started.load(Ordering::Acquire) {
-        runtime.step_or_idle().unwrap();
-    }
-    assert!(!runtime.queue().completed(sleeper).unwrap());
-    assert_eq!(
-        // SAFETY: refusal transfers no callback/context; the same storage is kept.
-        unsafe { environment.as_ref().spawn(pressure_wait, pressure_context) },
-        Err(WorkError::Full)
-    );
-    for _ in 0..32 {
-        // SAFETY: this bounded wake leaf cannot sleep and pressure storage stays live.
-        unsafe {
-            environment
-                .as_ref()
-                .defer_service(pressure_leaf, pressure_context)
-        }
-        .unwrap();
-    }
-    assert_eq!(
-        pressure.delivered.load(Ordering::Relaxed),
-        0,
-        "no inline leaf delivery"
-    );
-    assert_eq!(
-        // SAFETY: a full leaf queue accepts no callback/context.
-        unsafe {
-            environment
-                .as_ref()
-                .defer_service(pressure_leaf, pressure_context)
-        },
-        Err(WorkError::Full)
-    );
-    while !runtime.queue().completed(sleeper).unwrap() {
-        runtime.step_or_idle().unwrap();
-    }
-    assert_eq!(pressure.delivered.load(Ordering::Relaxed), 32);
-    environment.stop().unwrap();
-    while !environment.finished().unwrap() {
-        assert!(steps < 100_000, "the service and workers did not stop");
-        runtime.step_or_idle().unwrap();
-        steps += 1;
-    }
-    // SAFETY: every task finished, and this test thread raises no more lines.
-    unsafe { environment.as_ref().retire() }.unwrap();
-    runtime.queue().close().unwrap();
-    // SAFETY: the queue is closed and this test thread is the only producer.
-    unsafe { runtime.retire() }.unwrap();
-    drop(environment);
-    drop(executor);
     assert_eq!(quarantined(), 0);
 }
 
@@ -1943,9 +1597,4 @@ pub(crate) unsafe fn terminal_foreground(
     // actual switched foreground stack. The bound body terminates this process.
     unsafe { runtime.call_foreground(foreground, (&raw mut call).cast(), 10000) }.unwrap();
     std::process::exit(98);
-}
-
-mod srcu;
-pub(crate) fn run_srcu_child() {
-    srcu::run_child();
 }

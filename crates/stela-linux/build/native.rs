@@ -418,7 +418,6 @@ impl Linux {
                     format!("{COMPAT}/stela/mutex_test.c"),
                     format!("{COMPAT}/stela/rtmutex_test.c"),
                     format!("{COMPAT}/stela/resource_test.c"),
-                    format!("{COMPAT}/stela/service_test.c"),
                     format!("{COMPAT}/stela/timer_test.c"),
                     format!("{COMPAT}/stela/workqueue_test.c"),
                     format!("{COMPAT}/stela/i2c_test.c"),

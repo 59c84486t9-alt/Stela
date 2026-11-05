@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 /* Linux's workqueues on the original worker tasks. */
 #include <linux/backing-dev.h>
+#include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/errno.h>
 #include <linux/err.h>
@@ -67,6 +68,7 @@ void stela_linux_workqueue_test_shutdown(bool force)
 }
 
 static unsigned int line_enables, line_disables;
+static bool line_masked;
 static bool enable_notify, enable_refuse;
 static unsigned int enable_primary_calls;
 
@@ -80,6 +82,7 @@ int stela_linux_workqueue_test_irq_enable(unsigned int irq, bool *unexposed)
 		return -ENOSYS;
 	}
 	line_enables++;
+	line_masked = false;
 	if (enable_notify)
 		stela_linux_irq_run(irq);
 	return 0;
@@ -96,6 +99,7 @@ int stela_linux_workqueue_test_irq_disable(unsigned int irq)
 {
 	assert(irq == 7);
 	line_disables++;
+	line_masked = true;
 	return 0;
 }
 int stela_linux_workqueue_test_irq_retire(unsigned int irq)
@@ -242,6 +246,64 @@ static irqreturn_t thread_handler(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+/* Two oneshot sharers. A sharer's running thread keeps the line masked until
+ * it ends; freeing a sharer whose thread is still queued cancels that thread
+ * and unmasks the line for the live sharer, which needs none. */
+static DECLARE_COMPLETION(sharer_a_done);
+static DECLARE_COMPLETION(sharer_b_entered);
+static DECLARE_COMPLETION(sharer_b_gate);
+static DECLARE_COMPLETION(sharer_b_done);
+static int sharer_a, sharer_b;
+static bool wake_b = true;
+static unsigned int sharer_a_runs;
+
+static irqreturn_t sharer_primary(int irq, void *data)
+{
+	assert(irq == 7 && (data == &sharer_a || data == &sharer_b) && in_hardirq());
+	return data == &sharer_a || wake_b ? IRQ_WAKE_THREAD : IRQ_HANDLED;
+}
+
+static irqreturn_t sharer_thread(int irq, void *data)
+{
+	assert(irq == 7 && !in_interrupt());
+	if (data == &sharer_a) {
+		sharer_a_runs++;
+		complete(&sharer_a_done);
+	} else {
+		assert(data == &sharer_b);
+		complete(&sharer_b_entered);
+		wait_for_completion(&sharer_b_gate);
+		complete(&sharer_b_done);
+	}
+	return IRQ_HANDLED;
+}
+
+static void oneshot_sharers_hold_the_line_masked(void)
+{
+	unsigned long flags = IRQF_SHARED | IRQF_ONESHOT;
+	assert(!request_threaded_irq(7, sharer_primary, sharer_thread, flags, "A", &sharer_a));
+	assert(!request_threaded_irq(7, sharer_primary, sharer_thread, flags, "B", &sharer_b));
+	stela_linux_irq_run(7);
+	wait_for_completion(&sharer_a_done);
+	wait_for_completion(&sharer_b_entered);
+	msleep(2);
+	assert(line_masked);
+	complete(&sharer_b_gate);
+	wait_for_completion(&sharer_b_done);
+	assert(!line_masked);
+	free_irq(7, &sharer_a);
+	free_irq(7, &sharer_b);
+
+	wake_b = false;
+	assert(!request_threaded_irq(7, sharer_primary, sharer_thread, flags, "A", &sharer_a));
+	assert(!request_threaded_irq(7, sharer_primary, sharer_thread, flags, "B", &sharer_b));
+	stela_linux_irq_run(7);
+	assert(line_masked);
+	free_irq(7, &sharer_a);
+	assert(sharer_a_runs == 1 && !line_masked);
+	free_irq(7, &sharer_b);
+}
+
 void stela_linux_workqueue_test_main(void)
 {
 	/* PID1 publishes the writeback queue only after the original workqueue
@@ -318,6 +380,7 @@ void stela_linux_workqueue_test_main(void)
 	assert(line_disables == 1 && line_enables == 2);
 	assert(!strcmp(free_irq(7, &hard_runs), "threaded") && line_disables == 1);
 	assert(!strcmp(free_irq(7, &forced), "other") && line_disables == 2);
+	oneshot_sharers_hold_the_line_masked();
 	stela_linux_i2c_test();
 	dedicated_identity_and_join();
 	stela_linux_sync_test();
