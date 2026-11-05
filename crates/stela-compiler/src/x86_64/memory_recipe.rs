@@ -235,9 +235,11 @@ pub(super) fn address(
 pub(super) struct CompareLoads {
     first: Scalar,
     second: Scalar,
+    second_host: Gpr,
     width: Width,
     left: Gpr,
     right: Gpr,
+    destination: Register,
 }
 
 impl CompareLoads {
@@ -267,7 +269,7 @@ impl CompareLoads {
             width,
             subtract: true,
             flags: true,
-            destination: Register::Zero,
+            destination,
             left,
             right,
             amount: 0,
@@ -277,25 +279,51 @@ impl CompareLoads {
             return None;
         };
         let operands = (first_load.data, second_load.data);
+        let writes_back = first_load.address.mode != AddressMode::Offset
+            || second_load.address.mode != AddressMode::Offset;
+        if writes_back {
+            // The ordinary address recipe keeps its pending writeback in
+            // RDX. Both results survive only when address setup cannot
+            // call a helper or borrow RCX for checks.
+            if checks != MemoryChecks::DEFAULT
+                || first_load.address.base == first_load.data
+                || first_load.address.base == second_load.data
+                || second_load.address.base == second_load.data
+                || destination != Register::Zero
+                    && destination != operands.0
+                    && destination != operands.1
+            {
+                return None;
+            }
+        } else if destination != Register::Zero {
+            return None;
+        }
+        let second_host = if second_load.address.mode == AddressMode::Offset {
+            Gpr::Rax
+        } else {
+            Gpr::R8
+        };
         let (left, right) = if (left, right) == operands {
-            (Gpr::Rcx, Gpr::Rax)
+            (Gpr::Rcx, second_host)
         } else if (right, left) == operands {
-            (Gpr::Rax, Gpr::Rcx)
+            (second_host, Gpr::Rcx)
         } else {
             return None;
         };
         Some(Self {
             first: first_load,
             second: second_load,
+            second_host,
             width,
             left,
             right,
+            destination,
         })
     }
 
-    /// Commit each load at its own row before the next guest access. The
-    /// second unchecked offset load uses RAX for address and result, so the
-    /// first value in RCX survives to the compare without a frame reload.
+    /// Commit each load and its writeback before the next guest access. An
+    /// offset load can reuse RAX for its result. A post-index load keeps
+    /// both address temporaries and stages its result separately.
     pub(super) fn emit(
         self,
         code: &mut Code,
@@ -307,7 +335,7 @@ impl CompareLoads {
         debug_assert!(!code.is_pinned() && !code.constant_time());
         for (instruction, operand, result) in [
             (&instructions[0], self.first, Gpr::Rcx),
-            (&instructions[1], self.second, Gpr::Rax),
+            (&instructions[1], self.second, self.second_host),
         ] {
             source_map.push((instruction.pc, code.len()));
             code.set_instruction(source_map.len() - 1);
@@ -315,12 +343,22 @@ impl CompareLoads {
         }
         source_map.push((instructions[2].pc, code.len()));
         code.set_instruction(source_map.len() - 1);
-        code.asm().alu(
-            Alu::Cmp,
+        let mut asm = code.asm();
+        let destination = asm.guest(self.destination);
+        let op = if destination.is_some() {
+            Alu::Sub
+        } else {
+            Alu::Cmp
+        };
+        asm.alu(
+            op,
             Size::of(self.width == Width::X64),
             self.left,
             self.right,
         );
+        if let Some(destination) = destination {
+            asm.mov_store(Size::Qword, destination, self.left);
+        }
         if live_nzcv {
             super::flag_word::capture_arm_live(code, true);
             super::Rax::LiveNzcv
@@ -338,7 +376,7 @@ fn compare_input(operation: &Operation) -> Option<Scalar> {
         data: data @ Register::X(_),
         base: base @ Register::X(_),
         displacement,
-        mode: AddressMode::Offset,
+        mode: mode @ (AddressMode::Offset | AddressMode::PostIndex),
     } = *operation
     else {
         return None;
@@ -350,7 +388,7 @@ fn compare_input(operation: &Operation) -> Option<Scalar> {
         address: ImmediateAddress {
             base,
             displacement,
-            mode: AddressMode::Offset,
+            mode,
         },
     })
 }

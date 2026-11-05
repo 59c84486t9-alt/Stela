@@ -534,7 +534,7 @@ fn emit_selected(
                 instructions[cursor].operation,
                 Operation::Memory {
                     transfer: super::MemoryTransfer::Load { .. },
-                    mode: super::AddressMode::Offset,
+                    mode: super::AddressMode::Offset | super::AddressMode::PostIndex,
                     ..
                 }
             )

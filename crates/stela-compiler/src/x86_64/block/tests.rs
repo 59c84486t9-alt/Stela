@@ -965,6 +965,74 @@ fn settled_x_index_is_reused_by_single_and_shared_accesses() {
 }
 
 #[test]
+fn post_index_loads_feed_subtraction_after_settling_both_accesses() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features, RecoverySiteKind},
+    };
+    let compile = |words: &[u32], pc, profile, target| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        CompilationPlan::new(&source, pc, &Options::new(profile, target))
+            .unwrap()
+            .compile()
+            .unwrap()
+    };
+    let ordinary = BlockProfile::ORDINARY;
+    let system = BlockProfile::new(Features::SYSTEM_MODE);
+    let target = TargetCpu::Baseline;
+    let dit = target.with_data_independent_timing();
+    let sqlite = [0x3840_1408, 0x3840_1429, 0x6b09_0108, 0x5400_0081];
+    let lz4 = [0xf840_8627, 0xf940_0314, 0xeb14_00ff, 0x5400_06c1];
+    for (pc, words, subtract) in [
+        // LDRB W8,[X0],#1; LDRB W9,[X1],#1; SUBS W8,W8,W9; B.NE.
+        (GuestAddress(0x1000002cc), sqlite, [0x44, 0x29, 0xc1]),
+        // LDR X7,[X17],#8; LDR X20,[X24]; CMP X7,X20; B.NE.
+        (GuestAddress(0x1000081cc), lz4, [0x48, 0x39, 0xc1]),
+    ] {
+        let grouped = compile(&words, pc, ordinary, target);
+        let fallback = compile(&words, pc, ordinary, dit);
+        let code = &grouped.native.x86_64_code;
+        let map = &grouped.native.source_map;
+        assert_eq!(map.len(), words.len());
+        assert!(
+            map.windows(2)
+                .all(|rows| rows[1].0.0 == rows[0].0.0 + 4 && rows[0].1 < rows[1].1)
+        );
+        assert!(code[map[2].1..].starts_with(&subtract));
+        assert!(
+            !fallback.native.x86_64_code[fallback.native.source_map[2].1..].starts_with(&subtract)
+        );
+        for row in 1..words.len() {
+            let entry = compile(&words[row..], map[row].0, ordinary, target);
+            assert_eq!(entry.native.source_map[0], (map[row].0, 0));
+            assert!(!entry.native.x86_64_code.starts_with(&subtract));
+        }
+        // Checked system code retains both original access/retirement sites.
+        let checked = compile(&words, pc, system, target);
+        let checked_map = &checked.native.source_map;
+        assert!(!checked.native.x86_64_code[checked_map[2].1..].starts_with(&subtract));
+        let accesses: Vec<_> = checked
+            .fault_recovery
+            .iter()
+            .filter(|site| site.site.kind() == RecoverySiteKind::GuestAccess)
+            .collect();
+        assert_eq!(accesses.len(), 2);
+        for (row, site) in accesses.into_iter().enumerate() {
+            assert_eq!(site.retirement.instruction_pc(), checked_map[row].0);
+            assert_eq!(site.retirement.retired_before(), row as u16);
+            assert!(site.start >= checked_map[row].1 && site.end <= checked_map[row + 1].1);
+        }
+    }
+
+    // The first writeback may feed the second address. Leave that case alone.
+    let shared_base = [sqlite[0], sqlite[1] & !(31 << 5), sqlite[2], sqlite[3]];
+    let alias = compile(&shared_base, GuestAddress(0x1000002cc), ordinary, target);
+    assert!(
+        !alias.native.x86_64_code[alias.native.source_map[2].1..].starts_with(&[0x44, 0x29, 0xc1])
+    );
+}
+
+#[test]
 fn indexed_load_store_pair_shares_checked_address_with_distinct_fault_rows() {
     use crate::{
         Options, TargetCpu,
