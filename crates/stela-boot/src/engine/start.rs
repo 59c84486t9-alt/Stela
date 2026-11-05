@@ -11,6 +11,7 @@ use stela_contracts::refuse;
 fn from_disk(
     partition: alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>,
     options: &Options,
+    bluetooth: bool,
 ) -> Vec<(String, Vec<u8>)> {
     crate::status::begin("Reading macOS's boot files from its disk");
     // The kernel's text on the screen and on the debug UART, which the
@@ -18,22 +19,26 @@ fn from_disk(
     // waits for every PE to answer: 10 s at 24 MHz, not XNU's 1.44 ms, which
     // is too short for PEs that answer at their next exit. System sleep is
     // not modeled, so `noidle` stops the idle timer that would ask for it.
-    // The guest's only Bluetooth is a bridged USB controller, so bluetoothd
-    // and BlueTool take USB, transport 0 (26A434 bluetoothd's transport
-    // switch at x86_64 0x1001f84e7). BlueTool ignores overrides from 10, its
-    // virtual transport, and on the DeviceTree's PCIe Skywalk (7) waits for
-    // the hidden radio's AppleOLYHAL while bluetoothd stays Unknown for good.
-    // Without a bridge, bluetoothd reports Unsupported once BlueTool's boot
-    // script times out, about a minute in; a client that checked in before
-    // then is never told (Language Chooser waits for it without a timeout).
+    // The guest's Bluetooth is a host controller bridged over USB, when the
+    // host lends one: bluetoothd and BlueTool then take USB, transport 0
+    // (26A434 bluetoothd's transport switch at x86_64 0x1001f84e7). Without
+    // one there is no chip on any transport, and bluetoothd does what it does
+    // on a Mac whose radio fails to boot: it logs "Bluetooth error -
+    // restarting" (reason 1214, chip boot failure) and restarts its stack
+    // every 40 s or so, whether it looks on its default UART (3) or the
+    // board's PCIe (7). Overriding it to USB then would be worse: its HCI
+    // initialization fails (`OI_HCIAPI_Init_Vars`) and it aborts with
+    // "Bluetooth fatal error" (reason 0x5c), each time with a crash report.
     let mut defaults = boot_bundle::Options {
         ecid: options.ecid,
         boot_command: options.boot_command,
-        boot_args: "-v serial=3 serial-device-name=uart0 ml-timeout-debug-ack=240000000 noidle=1 \
-                     bt-transport-override=0"
+        boot_args: "-v serial=3 serial-device-name=uart0 ml-timeout-debug-ack=240000000 noidle=1"
             .into(),
         ..boot_bundle::Options::default()
     };
+    if bluetooth {
+        defaults.boot_args.push_str(" bt-transport-override=0");
+    }
     if options.maintenance_write {
         // CSR_ALLOW_UNRESTRICTED_FS; the kext grant and other policy bits stay separate.
         defaults.security.sip_bits |= 2;
@@ -350,7 +355,7 @@ fn open_host(
     let built = devices
         .preboot
         .take()
-        .map(|partition| from_disk(partition, options));
+        .map(|partition| from_disk(partition, options, devices.host_bluetooth.is_some()));
     // A system boots as the board it was installed on: libignition finds its
     // Cryptex1 tickets by that board's model.
     if options.bundle || built.is_some() {
