@@ -90,15 +90,10 @@ pub fn run(fix: bool, nvk: bool, low_memory: bool) -> Result<()> {
         uefi(["-p", "stela-driver-net", "--features", "native-acpi"]),
         uefi(["-p", "stela-driver-storage"]),
         uefi(["-p", "stela-driver-audio"]),
-        // Native GPU hooks are optional while their larger vendor ports are
+        // Native GPU hooks are optional while their larger vendor port is
         // in progress, but their C/Rust ABI and UEFI target still belong to
         // the gate.
-        uefi([
-            "-p",
-            "stela-driver-gpu",
-            "--features",
-            "nvidia-port,intel-port,amd-port",
-        ]),
+        uefi(["-p", "stela-driver-gpu", "--features", "nvidia-port"]),
         uefi(["-p", "stela-drivers", "--features", "native-acpi"]),
     ];
     if nvk {

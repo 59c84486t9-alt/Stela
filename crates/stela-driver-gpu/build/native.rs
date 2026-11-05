@@ -11,16 +11,12 @@ use stela_c_build::{
 };
 #[cfg(feature = "linux-kernel")]
 pub const LINUX: &str = "../../third_party/linux";
-#[cfg(feature = "intel-port")]
-pub const MESA: &str = "../../third_party/mesa";
 #[cfg(feature = "nvidia-port")]
 pub const NVIDIA: &str = "../../third_party/nvidia";
 
 pub fn require_sources() {
     #[cfg(feature = "linux-kernel")]
     require_source(LINUX);
-    #[cfg(feature = "intel-port")]
-    require_source(MESA);
     #[cfg(feature = "nvidia-port")]
     require_source(NVIDIA);
 }
@@ -49,7 +45,7 @@ pub struct Linux {
 /// DRM's core and the helpers nouveau selects, as Linux's `drm-y`,
 /// `drm_kms_helper-y`, `ttm-y`, `gpu-sched-y` and `drm_display_helper-y`
 /// compose them under Stela's Kconfig.
-#[cfg(any(feature = "nouveau-port", feature = "amd-port"))]
+#[cfg(feature = "nouveau-port")]
 const DRM_SOURCES: &[&str] = &[
     "drm_atomic",
     "drm_atomic_uapi",
@@ -201,19 +197,15 @@ impl Linux {
         .into_iter()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-        #[cfg(any(feature = "nouveau-port", feature = "amd-port"))]
+        #[cfg(feature = "nouveau-port")]
         let mut upstream = upstream;
-        #[cfg(any(feature = "nouveau-port", feature = "amd-port"))]
+        #[cfg(feature = "nouveau-port")]
         upstream.extend(
             DRM_SOURCES
                 .iter()
                 .map(|source| PathBuf::from(format!("{DRM}/{source}.c"))),
         );
-        let hosted_upstream = if cfg!(feature = "amd-port") {
-            upstream.clone()
-        } else {
-            upstream[..4].to_vec()
-        };
+        let hosted_upstream = upstream[..4].to_vec();
         let mut build = stela_c_build::native::configure();
         environment.apply(&mut build, None, &[], None);
         #[cfg(feature = "nouveau-port")]

@@ -11,14 +11,8 @@ use crate::bus::pci::{Address, ConfigSpace, Function};
 #[cfg(feature = "nvidia-port")]
 pub mod nvidia;
 
-#[cfg(feature = "intel-port")]
-pub mod intel;
-
 #[cfg(feature = "metal")]
 pub mod metal;
-
-#[cfg(any(feature = "amd-commands", feature = "amd-port"))]
-pub mod amd;
 
 #[cfg(feature = "nouveau-port")]
 pub mod nouveau;

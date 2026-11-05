@@ -1,12 +1,3 @@
-#[cfg(feature = "amd-port")]
-#[path = "build/amd.rs"]
-mod amd;
-#[cfg(feature = "amd-commands")]
-#[path = "build/amd_commands.rs"]
-mod amd_commands;
-#[cfg(feature = "intel-port")]
-#[path = "build/intel.rs"]
-mod intel;
 #[cfg(feature = "nouveau-port")]
 #[path = "build/kbuild.rs"]
 mod kbuild;
@@ -42,14 +33,8 @@ fn main() {
     );
     #[cfg(feature = "linux-kernel")]
     linux.tests(&mut tests);
-    #[cfg(feature = "amd-port")]
-    amd::port(&linux, &mut tests);
-    #[cfg(feature = "amd-commands")]
-    amd_commands::build();
     #[cfg(feature = "nvidia-port")]
     nvidia::port();
-    #[cfg(feature = "intel-port")]
-    intel::port(&linux, &mut tests);
     #[cfg(feature = "nouveau-port")]
     let mut linux = linux;
     #[cfg(feature = "nouveau-port")]
