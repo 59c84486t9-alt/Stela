@@ -219,9 +219,6 @@ int stela_linux_srcu_bootstrap(const struct stela_linux_owner *owner)
 	bool normal_done = completion_done(&normal.first_done);
 	bool high_done = completion_done(&high.first_done);
 	bool clock_done = completion_done(&clock.delivered);
-	/* While the probes are still queued: Linux's own lockup report. */
-	if (error)
-		show_all_workqueues();
 	pool_join(&normal);
 	pool_join(&high);
 	timer_delete_sync(&clock.timer);

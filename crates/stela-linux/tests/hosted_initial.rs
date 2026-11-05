@@ -1098,8 +1098,10 @@ fn in_fresh_process(
         assert!(stdout.contains(witness), "{stdout}");
         return;
     }
+    // A hang guard, not a deadline: under worker exhaustion SRCU's readiness
+    // probe waits out its whole ten-second bound (compat/kernel/srcu.c).
     // SAFETY: this isolated process has no other alarm or host signal user.
-    unsafe { libc::alarm(10) };
+    unsafe { libc::alarm(30) };
     // SAFETY: all C names in the fixture come from this resident executable
     // or the original owned name allocator. The process preserves the maps.
     assert!(unsafe { stela_linux::image::register(Arc::new(ProcessImage::current())) }.is_ok());
