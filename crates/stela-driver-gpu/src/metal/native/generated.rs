@@ -260,25 +260,7 @@ impl Fns {
         let data: Vec<Option<TokenData>> = info
             .tokens
             .iter()
-            .map(|(_, token)| match *token {
-                IndirectToken::ExecutionSet(stages) => Some(TokenData {
-                    execution_set: [PIPELINES as u32, stages.bits()],
-                }),
-                IndirectToken::PushConstants { offset, size } => Some(TokenData {
-                    push_constant: vk::PushConstantRange {
-                        stage_flags: vk::ShaderStageFlags::ALL,
-                        offset,
-                        size,
-                    },
-                }),
-                IndirectToken::IndexBuffer => Some(TokenData {
-                    index_buffer: VULKAN_INDEX_BUFFER,
-                }),
-                IndirectToken::VertexBuffer(binding) => Some(TokenData {
-                    vertex_buffer: binding,
-                }),
-                _ => None,
-            })
+            .map(|&(_, token)| token_data(token, stages))
             .collect();
         let tokens: Vec<LayoutToken> = info
             .tokens
@@ -412,6 +394,35 @@ impl Fns {
     }
 }
 
+/// The structure a token of a layout over `stages` points to, if any.
+/// Push constants update the layout's own stages: the range lies within the
+/// pipeline layout's, and a graphics layout's sequences never touch compute
+/// state (NVK builds graphics updates only for graphics stages).
+fn token_data(token: IndirectToken, stages: vk::ShaderStageFlags) -> Option<TokenData> {
+    match token {
+        IndirectToken::ExecutionSet(set) => Some(TokenData {
+            execution_set: [PIPELINES as u32, set.bits()],
+        }),
+        IndirectToken::PushConstants { offset, size } => Some(TokenData {
+            push_constant: vk::PushConstantRange {
+                stage_flags: stages,
+                offset,
+                size,
+            },
+        }),
+        IndirectToken::IndexBuffer => Some(TokenData {
+            index_buffer: VULKAN_INDEX_BUFFER,
+        }),
+        IndirectToken::VertexBuffer(binding) => Some(TokenData {
+            vertex_buffer: binding,
+        }),
+        IndirectToken::Draw
+        | IndirectToken::DrawIndexed
+        | IndirectToken::DrawMeshTasks
+        | IndirectToken::Dispatch => None,
+    }
+}
+
 /// `VkIndirectCommandsTokenTypeEXT`.
 fn token_type(token: IndirectToken) -> i32 {
     match token {
@@ -464,6 +475,26 @@ mod tests {
         assert_eq!(size_of::<LayoutToken>(), 40);
         assert_eq!(size_of::<LayoutCreateInfo>(), 56);
         assert_eq!(size_of::<TokenData>(), 12);
+    }
+
+    #[test]
+    fn push_constants_update_only_the_layout_s_stages() {
+        let token = IndirectToken::PushConstants {
+            offset: 16,
+            size: 8,
+        };
+        for stages in [
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            vk::ShaderStageFlags::COMPUTE,
+        ] {
+            let data = token_data(token, stages).expect("push constants carry a range");
+            // SAFETY: a push constant token's data is its range.
+            let range = unsafe { data.push_constant };
+            assert_eq!(
+                (range.stage_flags.as_raw(), range.offset, range.size),
+                (stages.as_raw(), 16, 8)
+            );
+        }
     }
 
     #[test]
