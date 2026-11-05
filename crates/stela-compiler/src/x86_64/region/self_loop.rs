@@ -5,14 +5,15 @@ use super::{
 };
 use crate::x86_64::asm::{Code, Cond, Gpr, Mem, Patch, Size};
 use crate::{
-    GuestAddress, NativeBlock,
-    aarch64::{AddressMode, Instruction, MemoryTransfer, Operation, Register},
+    GuestAddress, NativeBlock, TargetCpu,
+    aarch64::{AddressMode, Instruction, MemoryTransfer, Operation, Register, Width},
     block::{ExitKind, Terminator},
 };
 use alloc::vec;
 use alloc::vec::Vec;
 
 const ARM_CONDITION_INVERSE_BIT: u8 = 1;
+const ARM_CONDITION_NE: u8 = 1;
 const INSTRUCTION_BYTES: u64 = core::mem::size_of::<u32>() as u64;
 const SHORT_FRAME_LOOP_INSTRUCTIONS: usize = 32;
 const MAX_FRAME_LOOP_INSTRUCTIONS: usize = 64;
@@ -72,13 +73,70 @@ fn settle_frame_budget(asm: &mut crate::x86_64::asm::Asm<'_>) {
     asm.pop(FRAME_LOOP_COUNTER);
 }
 
+/// Recognize the three non-branch rows of a forward, counted byte copy.
+/// Keep the ordinary load, subtraction and store recipes in source order,
+/// including both writebacks. Source and destination memory can overlap.
+fn byte_copy_body(instructions: &[Instruction]) -> bool {
+    let [load, subtract, store] = instructions else {
+        return false;
+    };
+    let Operation::Memory {
+        transfer:
+            MemoryTransfer::Load {
+                signed: false,
+                width: Width::W32,
+            },
+        bytes: 1,
+        data: data @ Register::X(_),
+        base: source @ Register::X(_),
+        displacement: 1,
+        mode: AddressMode::PostIndex,
+    } = load.operation
+    else {
+        return false;
+    };
+    let Operation::AddSub {
+        width: Width::X64,
+        subtract: true,
+        flags: true,
+        destination: count @ Register::X(_),
+        source: counter_input,
+        immediate: 1,
+    } = subtract.operation
+    else {
+        return false;
+    };
+    let Operation::Memory {
+        transfer: MemoryTransfer::Store,
+        bytes: 1,
+        data: stored,
+        base: destination @ Register::X(_),
+        displacement: 1,
+        mode: AddressMode::PostIndex,
+    } = store.operation
+    else {
+        return false;
+    };
+    let registers = [source, destination, count, data];
+    counter_input == count
+        && stored == data
+        && load.pc.0.checked_add(INSTRUCTION_BYTES) == Some(subtract.pc.0)
+        && subtract.pc.0.checked_add(INSTRUCTION_BYTES) == Some(store.pc.0)
+        && registers
+            .iter()
+            .enumerate()
+            .all(|(index, register)| !registers[..index].contains(register))
+}
+
 fn direct_ram_loop(
     instructions: &[Instruction],
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
+    target_cpu: TargetCpu,
 ) -> Option<GuestAddress> {
     let entry = instructions.first()?.pc;
-    let (branch_pc, Terminator::Branch(Operation::BranchCondition { target, .. })) = terminal?
+    let (branch_pc, Terminator::Branch(Operation::BranchCondition { target, condition })) =
+        terminal?
     else {
         return None;
     };
@@ -91,6 +149,12 @@ fn direct_ram_loop(
         || fallthrough.0 != branch_pc.0.checked_add(INSTRUCTION_BYTES)?
     {
         return None;
+    }
+    if *condition == ARM_CONDITION_NE
+        && !target_cpu.data_independent_timing()
+        && byte_copy_body(instructions)
+    {
+        return Some(entry);
     }
     let mut loads = 0;
     for (index, instruction) in instructions.iter().enumerate() {
@@ -123,6 +187,117 @@ fn direct_ram_loop(
         instructions.len().div_ceil(4)
     };
     (loads >= minimum_loads).then_some(entry)
+}
+
+#[cfg(test)]
+#[test]
+fn byte_copy_retains_only_the_reviewed_post_index_body() {
+    use crate::{
+        Options,
+        block::{BlockProfile, CompilationPlan, Features},
+    };
+
+    // Original yyjson record() byte tail.
+    let words = [0x3840_158bu32, 0xf100_0529, 0x3800_154b, 0x54ff_ffa1];
+    let entry = GuestAddress(0x1000005ac);
+    let plan = |words: &[u32], target, profile| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        CompilationPlan::new(&source, entry, &Options::new(profile, target))
+            .unwrap()
+            .with_resident_loops()
+    };
+    let target = TargetCpu::Baseline;
+    let ordinary = BlockProfile::ORDINARY;
+    let selected = plan(&words, target, ordinary);
+    assert!(selected.profile().has(Features::RESIDENT_LOOPS));
+    let native = selected.compile().unwrap().native;
+    assert_eq!(native.source_map.len(), words.len());
+    assert_eq!(native.source_map[0], (entry, 0));
+    assert!(
+        native.source_map.windows(2).all(|rows| {
+            rows[1].0.0 == rows[0].0.0 + INSTRUCTION_BYTES && rows[0].1 < rows[1].1
+        })
+    );
+
+    for (row, word) in [
+        (0, 0x3940_018b), // LDRB without writeback.
+        (1, 0xf100_052a), // Counter destination differs.
+        (2, 0x3800_254b), // Store advances by two.
+        (2, 0x3800_154e), // Store data differs.
+        (2, 0x3800_158b), // Store and load share a base register.
+        (3, 0x54ff_ffa0), // B.EQ.
+        (3, 0x54ff_ffc1), // B.NE to the subtraction row.
+    ] {
+        let mut changed = words;
+        changed[row] = word;
+        assert!(
+            !plan(&changed, target, ordinary)
+                .profile()
+                .has(Features::RESIDENT_LOOPS)
+        );
+    }
+    assert!(
+        !plan(&words, target.with_data_independent_timing(), ordinary)
+            .profile()
+            .has(Features::RESIDENT_LOOPS)
+    );
+    assert!(
+        !plan(&words, target, BlockProfile::new(Features::SYSTEM_MODE))
+            .profile()
+            .has(Features::RESIDENT_LOOPS)
+    );
+
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    {
+        use crate::{GuestState, block::loop_budget::LoopBudget, x86_64::native::run_with_budget};
+
+        let fallthrough = entry.0 + 4 * INSTRUCTION_BYTES;
+        for (read, write) in [(0, 8), (0, 1), (1, 0), (0, 0)] {
+            for count in [0, 5, 1 << 63] {
+                for allowed in 0..=6 {
+                    let mut ram: [u8; 16] = core::array::from_fn(|index| (index + 32) as u8);
+                    let pointer = ram.as_mut_ptr() as u64;
+                    let mut initial = GuestState {
+                        nzcv: 0xb000_0000,
+                        ..GuestState::default()
+                    };
+                    initial.x[9] = count;
+                    initial.x[10] = pointer + write as u64;
+                    initial.x[11] = u64::MAX;
+                    initial.x[12] = pointer + read as u64;
+                    let mut expected = initial.clone();
+                    let mut expected_ram = ram;
+                    let mut exit = entry.0;
+                    let mut remaining = allowed;
+                    for index in 0..allowed {
+                        let byte = expected_ram[read + index];
+                        expected_ram[write + index] = byte;
+                        expected.x[11] = u64::from(byte);
+                        expected.x[12] += 1;
+                        expected.x[10] += 1;
+                        let before = expected.x[9];
+                        let next = before.wrapping_sub(1);
+                        expected.x[9] = next;
+                        expected.nzcv = (u32::from(next >> 63 != 0) << 31)
+                            | (u32::from(next == 0) << 30)
+                            | (u32::from(before != 0) << 29)
+                            | (u32::from(before == 1 << 63) << 28);
+                        remaining -= 1;
+                        if next == 0 {
+                            exit = fallthrough;
+                            break;
+                        }
+                    }
+                    let mut budget = LoopBudget::new(allowed);
+                    let next = run_with_budget(&native.x86_64_code, &mut initial, &mut budget);
+                    assert_eq!(next, exit);
+                    assert_eq!(budget.remaining(), remaining as u64);
+                    assert_eq!(initial, expected);
+                    assert_eq!(ram, expected_ram);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -239,6 +414,7 @@ impl Plan {
         instructions: &[Instruction],
         terminal: Option<&(GuestAddress, Terminator)>,
         fallthrough: GuestAddress,
+        target: TargetCpu,
     ) -> Option<Self> {
         if let Some(plan) = LegacyPlan::new(instructions, terminal, fallthrough) {
             return Some(Self {
@@ -251,7 +427,12 @@ impl Plan {
                 native,
             }
         } else {
-            Choice::DirectRam(direct_ram_loop(instructions, terminal, fallthrough)?)
+            Choice::DirectRam(direct_ram_loop(
+                instructions,
+                terminal,
+                fallthrough,
+                target,
+            )?)
         };
         Some(Self { choice })
     }
@@ -268,7 +449,7 @@ impl Plan {
             Choice::DirectRam(entry) => {
                 // The caller's immutable parse and source identity own the
                 // words. Recheck the emitter's no-helper contract here too.
-                if direct_ram_loop(instructions, terminal, fallthrough) != Some(entry) {
+                if direct_ram_loop(instructions, terminal, fallthrough, target) != Some(entry) {
                     return Err(super::RegionError::ChangedInstructions);
                 }
                 Ok(super::super::block::emit_frame_loop(

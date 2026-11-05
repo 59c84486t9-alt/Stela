@@ -441,6 +441,7 @@ impl CompilationPlan {
                 &parsed.instructions,
                 parsed.terminal.as_ref(),
                 parsed.next_pc,
+                target,
             )
         } else {
             None
@@ -468,6 +469,7 @@ impl CompilationPlan {
                 &parsed.instructions,
                 parsed.terminal.as_ref(),
                 parsed.next_pc,
+                self.options.target(),
             );
             if resident.is_some() {
                 self.options = crate::Options::new(
