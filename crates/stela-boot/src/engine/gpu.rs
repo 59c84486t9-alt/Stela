@@ -110,6 +110,10 @@ const DMA_LIMIT: u64 = (1 << 40) - 1;
 const START_SECONDS: u64 = 60;
 /// The longest idle wait while they do, which the timeout above is checked at.
 const WAIT_MICROS: u64 = 10_000;
+/// The longest one pump runs Linux between the boot PE's slices. What is
+/// still runnable stays pending for the next, so a busy driver shares the
+/// boot CPU with the guest and the host's devices instead of holding it.
+const PUMP_NS: u64 = 2_000_000;
 
 /// Who runs PE work on the boot CPU, once the PEs run.
 static HUB: AtomicPtr<Hub> = AtomicPtr::new(ptr::null_mut());
@@ -1648,6 +1652,7 @@ pub(super) fn pump() {
     if !gpu.events.pending.swap(false, Ordering::AcqRel) && !due {
         return;
     }
+    let started = gpu.time.now_ns();
     let ran = gpu.work.dispatch_linux(|runtime| {
         loop {
             gpu.advance_children();
@@ -1656,7 +1661,11 @@ pub(super) fn pump() {
             if !runtime.step()? {
                 break;
             }
-            if super::service::shutdown_pending() {
+            let spent = match (&started, gpu.time.now_ns()) {
+                (Ok(started), Ok(now)) => now.saturating_sub(*started),
+                _ => u64::MAX,
+            };
+            if super::service::shutdown_pending() || spent >= PUMP_NS {
                 gpu.events.pending.store(true, Ordering::Release);
                 break;
             }
