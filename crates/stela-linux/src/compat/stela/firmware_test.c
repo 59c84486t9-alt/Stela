@@ -404,6 +404,8 @@ static void changed_callback_context(void)
 int main(void)
 {
 	assert(!stela_linux_kernel_claim(&canonical_owner));
+	/* Supply model geometry for the C-only catalogue and firmware fixture. */
+	assert(!stela_linux_kernel_geometry_bind(&canonical_owner, 4));
 	assert(!stela_linux_kernel_environment(&canonical_owner));
 	assert(!stela_linux_kernel_ready(&canonical_owner));
 	release_firmware(NULL);

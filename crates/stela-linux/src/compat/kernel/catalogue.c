@@ -534,6 +534,13 @@ int main(void)
 	assert(stela_linux_kernel_ready(&owner) == -EPERM);
 	assert(stela_linux_kernel_prepare_resource() == -EPERM);
 	assert(stela_linux_kernel_environment(&other) == -EPERM);
+	assert(stela_linux_kernel_environment(&owner) == -EPERM);
+	assert(stela_linux_kernel_geometry_bind(&other, 4) == -EPERM);
+	assert(stela_linux_kernel_geometry_bind(&owner, 3) == -EINVAL);
+	/* Exercise the C catalogue with model geometry and no hardware root. */
+	assert(!stela_linux_kernel_geometry_bind(&owner, 4));
+	assert(!stela_linux_kernel_geometry_ready(&owner));
+	assert(stela_linux_task_initial_root_levels() == 4);
 	assert(!stela_linux_kernel_environment(&owner));
 	assert(stela_linux_kernel_environment(&owner) == -EALREADY);
 	assert(!stela_linux_kernel_owner_allowed(&owner));
