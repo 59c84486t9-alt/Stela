@@ -400,15 +400,32 @@ fn board_profile(board: &board::Board, target: TargetCpu, speculation: Speculati
     }
 }
 
+/// How long the guest's console goes without looking at the host's serial
+/// port once it found no input. The device model asks at each of its passes,
+/// thousands a second on the boot PE, and each look is a port read that a
+/// hypervisor takes as an exit and real hardware as a slow bus cycle. The
+/// port's 16-byte FIFO holds more than a millisecond at 115200 baud.
+const INPUT_IDLE_MICROS: u64 = 1000;
+
 /// The guest's console UART, shown line by line as `GUEST| ...`.
 #[derive(Default)]
 struct GuestConsole {
     lines: console_lines::Lines,
+    /// The TSC before which the host's port is not looked at again.
+    next_input: u64,
 }
 
 impl ConsoleSink for GuestConsole {
     fn poll(&mut self) -> Option<u8> {
-        crate::serial::read()
+        let now = host::rdtsc();
+        if now < self.next_input {
+            return None;
+        }
+        let byte = crate::serial::read();
+        if byte.is_none() {
+            self.next_input = now + crate::firmware::tsc_hz() / 1_000_000 * INPUT_IDLE_MICROS;
+        }
+        byte
     }
 
     fn transmit(&mut self, byte: u8) -> Result<(), ConsoleBusy> {
