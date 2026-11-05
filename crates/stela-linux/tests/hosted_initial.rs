@@ -196,7 +196,11 @@ impl Platform for Host {
         self.random.borrow_mut().mix(ticks, bytes);
         true
     }
-    fn shutdown(&self, _: bool) {
+    fn shutdown(&self, _force: bool) {
+        #[cfg(feature = "hosted-test-support")]
+        if original_fixtures::software_peer_active() {
+            return original_fixtures::shutdown(_force);
+        }
         process::abort()
     }
     fn map_device(&self, _: u64, _: usize, _: bool) -> Option<*mut c_void> {
@@ -211,13 +215,25 @@ impl Platform for Host {
     unsafe fn unmap_pages(&self, _: *mut c_void, _: usize) {
         process::abort()
     }
-    fn irq_enable(&self, _: u32) -> Result<(), IrqEnableError> {
+    fn irq_enable(&self, _irq: u32) -> Result<(), IrqEnableError> {
+        #[cfg(feature = "hosted-test-support")]
+        if original_fixtures::software_peer_active() {
+            return original_fixtures::enable_line(_irq);
+        }
         Err(IrqEnableError::retained(-95))
     }
-    fn irq_disable(&self, _: u32) -> Result<(), Errno> {
+    fn irq_disable(&self, _irq: u32) -> Result<(), Errno> {
+        #[cfg(feature = "hosted-test-support")]
+        if original_fixtures::software_peer_active() {
+            return original_fixtures::disable_line(_irq);
+        }
         Err(-95)
     }
-    fn irq_retire(&self, _: u32) -> Result<(), Errno> {
+    fn irq_retire(&self, _irq: u32) -> Result<(), Errno> {
+        #[cfg(feature = "hosted-test-support")]
+        if original_fixtures::software_peer_active() {
+            return original_fixtures::retire_line(_irq);
+        }
         Err(-95)
     }
     unsafe fn copy_from_user(&self, _: *mut u8, _: *const u8, size: usize) -> usize {
@@ -591,14 +607,20 @@ fn drive_reap_service(runtime: Pin<&TestRuntime>, _: &HostedClock, queue: &TestQ
 }
 
 #[cfg(feature = "hosted-test-support")]
-mod original_timers {
+mod original_fixtures {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
-    static TIMER_BODY_RETURNED: AtomicBool = AtomicBool::new(false);
+    static BODY_RETURNED: AtomicBool = AtomicBool::new(false);
+    static SOFTWARE_PEER: AtomicBool = AtomicBool::new(false);
 
     unsafe extern "C" {
         fn stela_linux_timer_test_sleeper();
+        fn stela_linux_workqueue_test_main();
+        fn stela_linux_workqueue_test_shutdown(force: bool);
+        fn stela_linux_workqueue_test_irq_enable(irq: u32, unexposed: *mut bool) -> Errno;
+        fn stela_linux_workqueue_test_irq_disable(irq: u32) -> Errno;
+        fn stela_linux_workqueue_test_irq_retire(irq: u32) -> Errno;
         fn kthread_create_on_node(
             entry: unsafe extern "C" fn(*mut c_void) -> i32,
             arg: *mut c_void,
@@ -609,14 +631,61 @@ mod original_timers {
         fn wake_up_process(task: *mut c_void) -> i32;
     }
 
+    pub(super) fn software_peer_active() -> bool {
+        SOFTWARE_PEER.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn shutdown(force: bool) {
+        // SAFETY: the selected fixture is the only user of this software peer.
+        unsafe { stela_linux_workqueue_test_shutdown(force) };
+    }
+
+    pub(super) fn enable_line(irq: u32) -> Result<(), IrqEnableError> {
+        let mut unexposed = false;
+        // SAFETY: selected software peer in the original entered callback.
+        let error = unsafe { stela_linux_workqueue_test_irq_enable(irq, &mut unexposed) };
+        if error == 0 {
+            Ok(())
+        } else if unexposed {
+            // SAFETY: the software refusal occurred before any callback or route.
+            Err(unsafe { IrqEnableError::unexposed(error) })
+        } else {
+            Err(IrqEnableError::retained(error))
+        }
+    }
+
+    pub(super) fn disable_line(irq: u32) -> Result<(), Errno> {
+        // SAFETY: selected synchronous software peer, with no hardware route.
+        let status = unsafe { stela_linux_workqueue_test_irq_disable(irq) };
+        if status == 0 { Ok(()) } else { Err(status) }
+    }
+
+    pub(super) fn retire_line(irq: u32) -> Result<(), Errno> {
+        // SAFETY: the peer checks original action join and has no other producer.
+        let status = unsafe { stela_linux_workqueue_test_irq_retire(irq) };
+        if status == 0 { Ok(()) } else { Err(status) }
+    }
+
     #[test]
     fn original_timer_callbacks_resume_a_real_source_child() {
         in_fresh_process(
-            "original_timers::original_timer_callbacks_resume_a_real_source_child",
+            "original_fixtures::original_timer_callbacks_resume_a_real_source_child",
             "original timer and hrtimer waits completed",
             16 * 1024,
             14,
-            mount,
+            mount_timers,
+            drive,
+        );
+    }
+
+    #[test]
+    fn original_workqueues_run_on_bound_workers() {
+        in_fresh_process(
+            "original_fixtures::original_workqueues_run_on_bound_workers",
+            "original workqueue, IRQ and synchronization fixtures completed",
+            16 * 1024,
+            14,
+            mount_workqueues,
             drive,
         );
     }
@@ -624,11 +693,34 @@ mod original_timers {
     unsafe extern "C" fn timer_job(_: *mut c_void) -> i32 {
         // SAFETY: the original kthread enters this exact owner before the body.
         unsafe { stela_linux_timer_test_sleeper() };
-        TIMER_BODY_RETURNED.store(true, Ordering::Relaxed);
+        BODY_RETURNED.store(true, Ordering::Relaxed);
         0
     }
 
-    unsafe extern "C" fn mount(owner: *const RawOwner, context: *mut c_void) -> ! {
+    unsafe extern "C" fn workqueue_job(_: *mut c_void) -> i32 {
+        // SAFETY: the original kthread has entered the exact retained owner.
+        unsafe { stela_linux_workqueue_test_main() };
+        BODY_RETURNED.store(true, Ordering::Relaxed);
+        0
+    }
+
+    unsafe extern "C" fn mount_timers(owner: *const RawOwner, context: *mut c_void) -> ! {
+        // SAFETY: exact retained Initial scope and live fixture callback.
+        unsafe { mount(owner, context, timer_job, c"timer-fixture") }
+    }
+
+    unsafe extern "C" fn mount_workqueues(owner: *const RawOwner, context: *mut c_void) -> ! {
+        SOFTWARE_PEER.store(true, Ordering::Relaxed);
+        // SAFETY: exact retained Initial scope and live fixture callback.
+        unsafe { mount(owner, context, workqueue_job, c"workqueue-fixture") }
+    }
+
+    unsafe fn mount(
+        owner: *const RawOwner,
+        context: *mut c_void,
+        job: unsafe extern "C" fn(*mut c_void) -> i32,
+        name: &CStr,
+    ) -> ! {
         // SAFETY: same original owner and the kept dispatcher runtime handle.
         let (owner, runtime) = unsafe { (&*owner, *context.cast::<Pin<&TestRuntime>>()) };
         {
@@ -639,9 +731,7 @@ mod original_timers {
             // SAFETY: actual entered Initial with original resources.
             unsafe { start_hosted_threads(owner, runtime) }.unwrap();
             // SAFETY: resident callback and name supplied to original kthreadd.
-            let task = unsafe {
-                kthread_create_on_node(timer_job, ptr::null_mut(), -1, c"timer-fixture".as_ptr())
-            };
+            let task = unsafe { kthread_create_on_node(job, ptr::null_mut(), -1, name.as_ptr()) };
             assert!(!task.is_null() && task.addr() < usize::MAX - 4095);
             // SAFETY: the genuine returned child has been kept by original source.
             assert_eq!(unsafe { wake_up_process(task) }, 1);
@@ -652,12 +742,16 @@ mod original_timers {
 
     fn drive(runtime: Pin<&TestRuntime>, _: &HostedClock, _: &TestQueue) {
         let mut steps = 0;
-        while !TIMER_BODY_RETURNED.load(Ordering::Relaxed) {
+        while !BODY_RETURNED.load(Ordering::Relaxed) {
             step_hosted(runtime, true).unwrap();
             steps += 1;
-            assert!(steps < 512, "the original timer child did not complete");
+            assert!(steps < 2048, "the original fixture child did not complete");
         }
-        println!("original timer and hrtimer waits completed");
+        if software_peer_active() {
+            println!("original workqueue, IRQ and synchronization fixtures completed");
+        } else {
+            println!("original timer and hrtimer waits completed");
+        }
         process::exit(0);
     }
 }

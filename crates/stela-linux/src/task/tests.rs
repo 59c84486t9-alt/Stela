@@ -161,7 +161,6 @@ unsafe extern "C" {
     fn stela_linux_task_test_service_cancel(context: *mut c_void);
     fn stela_linux_task_test_clock_service(context: *mut c_void);
     fn stela_linux_service_test_body(context: *mut c_void);
-    fn stela_linux_workqueue_test_main(context: *mut c_void);
     fn stela_linux_task_test_runnable_boundary(context: *mut c_void);
     fn stela_linux_task_test_closed_stack();
     fn stela_linux_atomic_callback_prepared_fixture(task: *mut CTask, context: *const TaskContext);
@@ -613,7 +612,6 @@ fn trees_child() {
     // SAFETY: this child borrows no constant Linux names, which classifying
     // no address as immutable data requires.
     assert!(unsafe { crate::image::register(alloc::sync::Arc::new(NoImage)) }.is_ok());
-    workqueue_roundtrip();
     environment_roundtrip();
     stack_catalog_capacity();
 }
@@ -1322,98 +1320,6 @@ fn environment_roundtrip() {
     unsafe { runtime.retire() }.unwrap();
     drop(environment);
     drop(executor);
-    assert_eq!(quarantined(), 0);
-}
-
-unsafe extern "C" fn workqueue_register_service(context: *mut c_void) {
-    // SAFETY: the queue owner retains this fixture through service join.
-    let f = unsafe { fixture(context) };
-    let _binding = f.binding(2);
-    // SAFETY: the pinned test executor outlives the reserved callback.
-    f.service_domain
-        .lock()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .bind_current(unsafe { f.runtime() })
-        .unwrap();
-}
-/// Linux's workqueues, which start and own their workers.
-fn workqueue_roundtrip() {
-    let cpu = CpuModel::new();
-    let f = Fixture::new(cpu.clone());
-    // SAFETY: the fixture is the queue's owner, and only this test thread produces
-    // work.
-    let queue = unsafe { Queue::<16>::new(cpu.clone(), f.clone()) }.unwrap();
-    let dropped = Arc::new(AtomicU64::new(0));
-    let executor =
-        Executor::new_hosted_service_for_test(queue, stacks_count(&dropped, 16 * 1024, 11))
-            .unwrap();
-    let runtime = executor.runtime();
-    f.runtime.store(
-        runtime.get_ref() as *const Runtime<16> as *mut Runtime<16>,
-        Ordering::Release,
-    );
-    let context = Arc::as_ptr(&f) as *mut c_void;
-    let clock: Arc<dyn service::Clock> = Arc::new(ServiceClock {
-        cpu: cpu.clone(),
-        reads: f.clock_reads.clone(),
-        start: std::time::Instant::now(),
-    });
-    let idle = Arc::new(ServiceIdle {
-        clock: clock.clone(),
-        owner: thread::current(),
-        waits: AtomicU64::new(0),
-    });
-    let domain = service::Domain::tickless(clock, idle).unwrap();
-    unsafe extern "C" {
-        fn stela_linux_workqueue_test_owner() -> *const RawOwner;
-    }
-    // SAFETY: static C fixture owner and pinned runtime/domain outlive all jobs.
-    let environment =
-        unsafe { Environment::new(stela_linux_workqueue_test_owner(), runtime, domain.clone()) }
-            .unwrap();
-    *f.service_domain.lock().unwrap() = Some(domain.clone());
-    // SAFETY: no original C service producers are installed by this fixture;
-    // its reserved registration and all context backing are kept until join.
-    let registered = unsafe { runtime.start_service(workqueue_register_service, context) }.unwrap();
-    runtime.drain(10000).unwrap();
-    assert!(runtime.queue().completed(registered).unwrap());
-    // SAFETY: the callbacks are static, never unwind, and take the fixture the queue keeps
-    // until completion.
-    let main = unsafe {
-        environment
-            .as_ref()
-            .spawn(stela_linux_workqueue_test_main, context)
-    }
-    .unwrap();
-    runtime.drain(100_000).unwrap();
-    assert!(runtime.queue().completed(main).unwrap());
-    assert!(environment.finished().unwrap());
-    domain.stop_producers().unwrap();
-    // The fixture's registration-only service has already joined. stop still
-    // records the terminal flag; its wake correctly refuses the closed domain.
-    assert_eq!(environment.stop(), Err(WorkError::Closed));
-    // SAFETY: every C task/worker finished and no original producer remains.
-    unsafe { environment.as_ref().retire() }.unwrap();
-    f.service_domain.lock().unwrap().take();
-    let bindings = f
-        .bindings
-        .iter()
-        .filter_map(|slot| slot.lock().unwrap().take())
-        .collect::<Vec<_>>();
-    for binding in bindings {
-        // SAFETY: the main job and every worker completed.
-        let retained = unsafe { runtime.detach_binding(binding.context_id().unwrap()) }.unwrap();
-        drop(retained);
-        // SAFETY: the runtime detached this binding and no job or waker still uses it.
-        assert!(unsafe { binding.release_quiescent() }.is_ok());
-    }
-    runtime.queue().close().unwrap();
-    // SAFETY: the queue is closed and this test thread is the only producer.
-    unsafe { runtime.retire() }.unwrap();
-    drop(executor);
-    assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
     assert_eq!(quarantined(), 0);
 }
 

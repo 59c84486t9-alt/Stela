@@ -1,29 +1,25 @@
 // SPDX-License-Identifier: MIT
 /* Linux's workqueues on the original worker tasks. */
+#include <linux/backing-dev.h>
 #include <linux/interrupt.h>
 #include <linux/errno.h>
 #include <linux/err.h>
 #include <linux/kthread.h>
+#include <linux/rcupdate.h>
 #include <linux/reboot.h>
 #include <linux/sched.h>
 #include <linux/workqueue.h>
 #include <stela/irq.h>
 #include <stela/linux.h>
 #include <stela/test.h>
-#include <stela/workqueue.h>
 
-void stela_linux_workqueue_test_main(void *context);
+void stela_linux_workqueue_test_main(void);
+void stela_linux_workqueue_test_shutdown(bool force);
+int stela_linux_workqueue_test_irq_enable(unsigned int irq, bool *unexposed);
+int stela_linux_workqueue_test_irq_disable(unsigned int irq);
+int stela_linux_workqueue_test_irq_retire(unsigned int irq);
 void stela_linux_i2c_test(void);
 void stela_linux_sync_test(void);
-
-/* The owner's clock, which the sync test moves. */
-s64 stela_linux_test_now = NSEC_PER_SEC;
-
-static s64 now_ns(void *context)
-{
-	(void)context;
-	return stela_linux_test_now;
-}
 
 static struct kthread_worker *dedicated;
 static struct kthread_work dedicated_work, dedicated_cancelled;
@@ -61,20 +57,20 @@ static void dedicated_identity_and_join(void)
 
 static void dedicated_exhaustion_preserves_both_workqueue_pools(void);
 static bool forced;
+static DECLARE_COMPLETION(shutdown_done);
 
-static void shutdown(void *context, bool force)
+void stela_linux_workqueue_test_shutdown(bool force)
 {
-	(void)context;
 	forced = force;
+	complete(&shutdown_done);
 }
 
 static unsigned int line_enables, line_disables;
 static bool enable_notify, enable_refuse;
 static unsigned int enable_primary_calls;
 
-static int irq_enable(void *context, unsigned int irq, bool *unexposed)
+int stela_linux_workqueue_test_irq_enable(unsigned int irq, bool *unexposed)
 {
-	(void)context;
 	assert(irq == 7);
 	*unexposed = false;
 	if (enable_refuse) {
@@ -95,34 +91,22 @@ static irqreturn_t initial_enable_handler(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static int irq_disable(void *context, unsigned int irq)
+int stela_linux_workqueue_test_irq_disable(unsigned int irq)
 {
-	(void)context;
 	assert(irq == 7);
 	line_disables++;
 	return 0;
 }
-static int irq_retire(void *context, unsigned int irq)
+int stela_linux_workqueue_test_irq_retire(unsigned int irq)
 {
-	(void)context;
 	assert(irq == 7 && stela_linux_irq_actions_joined(irq));
 	return 0;
 }
 
-static const struct stela_linux_services services = {
-	.now_ns = now_ns,
-	.shutdown = shutdown,
-	.irq_enable = irq_enable,
-	.irq_disable = irq_disable,
-	.irq_retire = irq_retire,
-};
-static const struct stela_linux_owner owner = {.services = &services};
-
-const struct stela_linux_owner *stela_linux_workqueue_test_owner(void) { return &owner; }
-
 static struct workqueue_struct *wq, *ordered;
 static struct work_struct outer, inner, steps[3], cancelled, shared;
 static struct delayed_work later;
+static DECLARE_COMPLETION(later_ran);
 static struct task_struct *outer_task;
 static bool outer_done, inner_done, shared_done, later_done, cancelled_ran;
 static char order[4];
@@ -165,6 +149,7 @@ static void run_later(struct work_struct *work)
 {
 	(void)work;
 	later_done = true;
+	complete(&later_ran);
 }
 
 static struct work_struct nice_ordinary, nice_highpri;
@@ -193,18 +178,18 @@ static void run_nice_ordinary(struct work_struct *work)
 
 static void highpri_normal_nice_and_independent_pool(void)
 {
+	nice_highpri_done = false;
 	INIT_WORK(&nice_ordinary, run_nice_ordinary);
 	INIT_WORK(&nice_highpri, run_nice_highpri);
 	assert(schedule_work(&nice_ordinary));
 	assert(flush_work(&nice_ordinary) && nice_highpri_done);
 }
 
-/* Native pool profile: eight General continuations, four permanently
- * reserved for the two nice pools. The main owner occupies one of the other
- * four, so exactly three dedicated workers can be retained simultaneously. */
+/* Keep allocating original workers until the mounted runtime refuses a fork.
+ * The original workqueue pools already have their own retained workers. */
 static void dedicated_exhaustion_preserves_both_workqueue_pools(void)
 {
-	struct kthread_worker *held[8];
+	struct kthread_worker *held[16];
 	unsigned int count = 0;
 	for (;;) {
 		struct kthread_worker *next = kthread_create_worker(0, "stela-capacity");
@@ -215,18 +200,20 @@ static void dedicated_exhaustion_preserves_both_workqueue_pools(void)
 		assert(count < ARRAY_SIZE(held));
 		held[count++] = next;
 	}
-	assert(count == 3);
-	/* These execute with all dedicated credits occupied, including a normal
+	assert(count >= 3);
+	/* These execute with the remaining stacks occupied, including a normal
 	 * callback waiting on its separately scheduled high-priority dependency. */
-	nice_highpri_done = false;
 	highpri_normal_nice_and_independent_pool();
 	for (unsigned int slot = 0; slot < count; slot++)
 		kthread_destroy_worker(held[slot]);
-	for (unsigned int pass = 0; pass < 3; pass++) {
-		struct kthread_worker *recreated = kthread_create_worker(0, "stela-recreated");
-		assert(!IS_ERR(recreated) && recreated->task != current);
-		kthread_destroy_worker(recreated);
+	rcu_barrier();
+	for (unsigned int slot = 0; slot < 3; slot++) {
+		held[slot] = kthread_create_worker(0, "stela-recreated");
+		assert(!IS_ERR(held[slot]) && held[slot]->task != current);
 	}
+	for (unsigned int slot = 0; slot < 3; slot++)
+		kthread_destroy_worker(held[slot]);
+	rcu_barrier();
 }
 
 static unsigned int hard_runs, other_runs, thread_runs;
@@ -254,10 +241,16 @@ static irqreturn_t thread_handler(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-void stela_linux_workqueue_test_main(void *context)
+void stela_linux_workqueue_test_main(void)
 {
-	(void)context;
-	stela_linux_enter(&owner);
+	/* PID1 publishes the writeback queue only after the original workqueue
+	 * startup and topology passes have returned. Early system queues alone
+	 * do not permit flush_work. */
+	for (unsigned int tick = 0; tick < HZ && !READ_ONCE(bdi_wq); tick++)
+		schedule_timeout_uninterruptible(1);
+	assert(READ_ONCE(bdi_wq));
+	highpri_normal_nice_and_independent_pool();
+	dedicated_exhaustion_preserves_both_workqueue_pools();
 	wq = alloc_workqueue("stela-test-%d", WQ_UNBOUND, 2, 1);
 	ordered = alloc_ordered_workqueue("stela-ordered", 0);
 	assert(wq && ordered && !current_work());
@@ -281,17 +274,20 @@ void stela_linux_workqueue_test_main(void *context)
 	assert(cancel_delayed_work_sync(&later) && !later_done);
 	assert(queue_delayed_work(wq, &later, 100));
 	assert(flush_delayed_work(&later) && later_done);
+	later_done = false;
+	reinit_completion(&later_ran);
+	assert(queue_delayed_work(wq, &later, 2) && !later_done);
+	assert(wait_for_completion_timeout(&later_ran, HZ) && later_done);
+	flush_delayed_work(&later);
 	destroy_workqueue(ordered);
 	destroy_workqueue(wq);
 
-	highpri_normal_nice_and_independent_pool();
 	orderly_poweroff(true);
-	flush_workqueue(system_wq);
-	assert(forced);
+	assert(wait_for_completion_timeout(&shutdown_done, HZ) && forced);
 
 	/* Two sharers: the oneshot's thread keeps the line masked until it ends. */
 	/* A truly unexposed refusal removes only this initialized action; retry
-	 * proves there is no phantom list member. The next native enable delivers
+	 * proves there is no phantom list member. The software peer then delivers
 	 * synchronously while request_irq still holds its request mutex. */
 	enable_refuse = true;
 	assert(request_irq(7, initial_enable_handler, 0, "initial-refused", &enable_primary_calls) == -ENOSYS);
@@ -318,7 +314,5 @@ void stela_linux_workqueue_test_main(void *context)
 	assert(!strcmp(free_irq(7, &forced), "other") && line_disables == 2);
 	stela_linux_i2c_test();
 	dedicated_identity_and_join();
-	dedicated_exhaustion_preserves_both_workqueue_pools();
 	stela_linux_sync_test();
-	stela_linux_exit();
 }
