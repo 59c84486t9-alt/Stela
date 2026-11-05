@@ -131,6 +131,16 @@ pub(super) fn entered_loader_root(owner: &crate::paging::loader::LoaderTables) -
         && (context == LOADER_CONTEXT || context == 0)
         && root & !CONTEXT == owner.root()
 }
+/// Whether this processor is inside the host drivers: a fault stopped it
+/// there, as no driver calls back into Stela's output.
+pub(super) fn host_drivers_held_here() -> bool {
+    if !HOST_DRIVERS.load(Ordering::Acquire) {
+        return false;
+    }
+    // SAFETY: CPL0 read of this processor's own GS base.
+    let gs = unsafe { crate::cpu::msr::GS_BASE.read() };
+    gs != 0 && HOST_DRIVERS_GS.load(Ordering::Acquire) == gs
+}
 /// Counter ticks cores waited for [`HOST_DRIVERS`] since the last report,
 /// and the longest wait.
 static HOST_DRIVERS_WAITED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];

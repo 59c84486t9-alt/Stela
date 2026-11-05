@@ -990,6 +990,12 @@ fn finish<H: Host>(
     }
 }
 
+/// Whether this processor stopped inside the host drivers, whose lock it
+/// holds: storing a log from here would wait on itself.
+pub(crate) fn inside_host_drivers() -> bool {
+    storage::host_drivers_held_here()
+}
+
 /// Unload the GPUs' firmware before a fatal stop, where one can
 /// (`gpu::gate::stop_for_fatal`).
 pub(crate) fn stop_gpus_for_fatal() {

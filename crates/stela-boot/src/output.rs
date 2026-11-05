@@ -546,6 +546,17 @@ pub fn advance_logs() {
 static STORING: AtomicBool = AtomicBool::new(false);
 
 fn flush_where(due: impl Fn(&Sink) -> bool, wait: bool) {
+    // The interrupted driver call holds the disks' lock and may be partway
+    // through a request of its own.
+    if crate::engine::inside_host_drivers() {
+        static SAID: AtomicBool = AtomicBool::new(false);
+        if !SAID.swap(true, Ordering::Relaxed) {
+            arguments(format_args!(
+                "BOOT LOG not stored: this processor stopped inside the host drivers\n"
+            ));
+        }
+        return;
+    }
     let mut failed = Vec::new();
     with_sinks(false, |sinks| {
         // A log whose store is in progress takes new bytes at its next one.
@@ -703,6 +714,8 @@ fn stopped(message: &str) {
 pub fn fatal(message: impl core::fmt::Display) -> ! {
     let message = alloc::string::ToString::to_string(&message);
     arguments(format_args!("\nSTELA FATAL {message}\n"));
+    // The reason reaches the port before any later step can stop for good.
+    unqueue_serial();
     crate::engine::stop_gpus_for_fatal();
     stopped(&message);
     terminate(0x11)
