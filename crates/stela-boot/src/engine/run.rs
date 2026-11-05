@@ -320,11 +320,14 @@ impl ServiceTimes {
 
     pub(super) fn report(&self, tsc_hz: u64) {
         output::arguments(format_args!(
-            "HOST SERVICE boundaries={} maximum_gap_us={} maximum_service_us={} gpu_interrupts={} {} {}\n",
+            "HOST SERVICE boundaries={} maximum_gap_us={} maximum_service_us={} gpu_interrupts={} linux_irqs={} irq_quarantined={} irq_fault={:?} {} {}\n",
             self.boundaries,
             u128::from(self.gap) * 1_000_000 / u128::from(tsc_hz),
             u128::from(self.longest) * 1_000_000 / u128::from(tsc_hz),
             super::gpu::interrupts(),
+            stela_linux::service::serviced_irqs(),
+            crate::native_irq::CONTROLLER.quarantine_count(),
+            crate::native_irq::CONTROLLER.controller_failure(),
             self.parts.report(tsc_hz),
             service::report(tsc_hz),
         ));

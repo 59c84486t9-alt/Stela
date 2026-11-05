@@ -86,6 +86,14 @@ unsafe extern "C" {
 /// Interrupt lines an owner may give Linux.
 pub const LINES: u32 = 256;
 
+/// Interrupts whose original handlers the service ran, for host reports.
+static SERVICED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// How many raised interrupts the service has run Linux's handlers for.
+pub fn serviced_irqs() -> u64 {
+    SERVICED.load(Ordering::Relaxed)
+}
+
 const IRQ_OPEN: u8 = 0;
 const IRQ_CLOSING: u8 = 1;
 const IRQ_JOINED: u8 = 2;
@@ -499,6 +507,7 @@ unsafe extern "C" fn complete_irq<const N: usize>(context: *mut c_void) {
     let epoch = unsafe { &mut *this.active_irq.get() }
         .take()
         .expect("active original IRQ service body");
+    SERVICED.fetch_add(1, Ordering::Relaxed);
     assert_eq!(epoch.active.fetch_sub(1, Ordering::AcqRel), 1);
 }
 
