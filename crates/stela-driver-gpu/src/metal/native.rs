@@ -221,6 +221,10 @@ pub struct NativeBackend {
     layout: vk::PipelineLayout,
     command_pool: vk::CommandPool,
     in_flight: VecDeque<InFlight>,
+    /// Command buffers of submissions without a completion signal of their
+    /// own: the next signal covers them, as a signal's first synchronization
+    /// scope includes every command earlier in submission order.
+    unsignaled: Vec<vk::CommandBuffer>,
     mappings: BTreeMap<u64, Mapping>,
     exporter: ManuallyDrop<Box<dyn MemoryExporter>>,
     /// What each imported memory came from, and its token.
@@ -382,6 +386,7 @@ impl NativeBackend {
             layout: vk::PipelineLayout::null(),
             command_pool: vk::CommandPool::null(),
             in_flight: VecDeque::new(),
+            unsignaled: Vec::new(),
             mappings: BTreeMap::new(),
             exporter: ManuallyDrop::new(exporter),
             imports: BTreeMap::new(),
@@ -1410,16 +1415,24 @@ impl Backend for NativeBackend {
         // A commit appends the queue's completion signal last.
         let completion = segments.last().and_then(|segment| segment.signals.last());
         match completion {
-            Some(&(timeline, value)) => self.in_flight.push_back(InFlight {
-                buffers,
-                timeline: handle(timeline.0),
-                value,
-            }),
-            // Without a completion signal the buffers are free only once the
-            // queue idles.
-            None => {
-                free_after_idle(&self.device, self.queue, self.command_pool, handles)?;
+            Some(&(timeline, value)) => {
+                let buffers = if self.unsignaled.is_empty() {
+                    buffers
+                } else {
+                    let mut covered = core::mem::take(&mut self.unsignaled);
+                    covered.extend_from_slice(buffers.as_slice());
+                    CommandBuffers::Many(covered)
+                };
+                self.in_flight.push_back(InFlight {
+                    buffers,
+                    timeline: handle(timeline.0),
+                    value,
+                });
             }
+            // Free with the next submission that signals (its signal waits for
+            // all commands submitted before it), or with the pool, rather than
+            // waiting here for the queue to idle.
+            None => self.unsignaled.extend_from_slice(handles),
         }
         Ok(())
     }

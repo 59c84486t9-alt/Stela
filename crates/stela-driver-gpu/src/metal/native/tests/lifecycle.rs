@@ -162,6 +162,7 @@ fn backend(device: ash::Device, drops: &Arc<AtomicUsize>) -> NativeBackend {
         layout: vk::PipelineLayout::null(),
         command_pool: vk::CommandPool::null(),
         in_flight: VecDeque::new(),
+        unsignaled: Vec::new(),
         mappings: BTreeMap::new(),
         exporter: ManuallyDrop::new(Box::new(Exporter(drops.clone()))),
         imports: BTreeMap::new(),
