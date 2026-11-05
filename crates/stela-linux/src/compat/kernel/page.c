@@ -1232,6 +1232,21 @@ static size_t find_model_run(size_t count)
     return NO_INDEX;
 }
 
+#ifdef STELA_LINUX_HOSTED_PAGE_TEST
+/* The hosted model's pages share the test allocation routes, so a hosted
+ * fixture refuses and counts them as it does heap allocations (route 2). */
+bool stela_test_allocation_attempt(unsigned int route);
+static bool hosted_page_attempt(void)
+{
+	return stela_test_allocation_attempt(2);
+}
+#else
+static bool hosted_page_attempt(void)
+{
+	return true;
+}
+#endif
+
 struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
 				nodemask_t *nodemask)
 {
@@ -1280,7 +1295,7 @@ retry:
 	size_t count = (size_t)1 << order;
 	size_t first;
 	if (catalog.hosted) {
-		first = find_model_run(count);
+		first = hosted_page_attempt() ? find_model_run(count) : NO_INDEX;
 		if (first == NO_INDEX) {
 			recycle_record(record_index);
 			goto exhausted;
