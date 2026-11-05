@@ -305,4 +305,9 @@ fn vulkan_failures_map_to_metal_errors() {
         failure(vk::Result::ERROR_INITIALIZATION_FAILED),
         Error::Unsupported(_)
     ));
+    // A refusal names the driver's result.
+    let Error::Unsupported(reason) = failure(vk::Result::ERROR_UNKNOWN) else {
+        panic!("an unknown driver failure is unsupported");
+    };
+    assert!(reason.contains("VK_ERROR_UNKNOWN"));
 }

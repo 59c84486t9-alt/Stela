@@ -264,7 +264,25 @@ fn failure(result: vk::Result) -> Error {
         | vk::Result::ERROR_FRAGMENTED_POOL
         | vk::Result::ERROR_OUT_OF_POOL_MEMORY => Error::OutOfMemory,
         vk::Result::PIPELINE_COMPILE_REQUIRED => Error::NotArchived,
-        _ => Error::Unsupported("Vulkan device operation"),
+        // The rest name the driver's result, so a refusal says what failed.
+        vk::Result::ERROR_UNKNOWN => Error::Unsupported("Vulkan driver failure (VK_ERROR_UNKNOWN)"),
+        vk::Result::ERROR_INITIALIZATION_FAILED => {
+            Error::Unsupported("Vulkan initialization (VK_ERROR_INITIALIZATION_FAILED)")
+        }
+        vk::Result::ERROR_MEMORY_MAP_FAILED => {
+            Error::Unsupported("Vulkan memory map (VK_ERROR_MEMORY_MAP_FAILED)")
+        }
+        vk::Result::ERROR_FEATURE_NOT_PRESENT => {
+            Error::Unsupported("Vulkan feature (VK_ERROR_FEATURE_NOT_PRESENT)")
+        }
+        vk::Result::ERROR_FORMAT_NOT_SUPPORTED => {
+            Error::Unsupported("Vulkan format (VK_ERROR_FORMAT_NOT_SUPPORTED)")
+        }
+        vk::Result::ERROR_INVALID_EXTERNAL_HANDLE => {
+            Error::Unsupported("Vulkan external handle (VK_ERROR_INVALID_EXTERNAL_HANDLE)")
+        }
+        vk::Result::TIMEOUT => Error::Unsupported("Vulkan wait (VK_TIMEOUT)"),
+        _ => Error::Unsupported("Vulkan device operation (another VkResult)"),
     }
 }
 
