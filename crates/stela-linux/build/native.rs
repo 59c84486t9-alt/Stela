@@ -383,6 +383,9 @@ impl Linux {
             build.define("STELA_LINUX_REGISTRY_SOURCE_TEST", None);
             build.define("STELA_LINUX_HOSTED_PAGE_TEST", None);
             build.define("STELA_LINUX_CACHE_SOURCE_TEST", None);
+            // Fixture code shares archive members with the services it
+            // tests and calls the hosted harness (`stela/test.h`).
+            println!("cargo:hosted_fixtures=1");
         }
         linux_archive(&build, "stela-linux", &kernel, &upstream, Path::new(COMPAT));
         // A callable target-ABI fixture plus host helpers only. It links the

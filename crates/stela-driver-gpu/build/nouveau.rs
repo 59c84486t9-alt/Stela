@@ -27,6 +27,10 @@ const COMPOSITES: [&str; 1] = ["nouveau"];
 const RUNTIME: [&str; 4] = ["memcpy", "memmove", "memset", "memcmp"];
 /// The prefix of what Stela's Rust side exports to the environment.
 const PLATFORM: &str = "stela_linux_";
+/// The prefix of the hosted test harness (`stela/test.h`). Only a hosted
+/// environment built with its source fixtures reaches it, from fixture code
+/// sharing archive members with the services nouveau imports.
+const HARNESS: &str = "stela_test_";
 
 /// The kernel services the composites import that Stela's Linux environment
 /// lacks, or defines only as a trap, by service. Building fails when the
@@ -204,6 +208,7 @@ fn check_imports(port: &Path, environment: &[&Path]) {
         .flat_map(|member| &member.defined)
         .collect::<BTreeSet<_>>();
     let traps = traps();
+    let harness = env::var_os("DEP_STELA_LINUX_HOSTED_FIXTURES").is_some();
     let mut reached = port
         .iter()
         .flat_map(|member| &member.imported)
@@ -222,7 +227,9 @@ fn check_imports(port: &Path, environment: &[&Path]) {
                     .iter()
                     .filter(|&import| !defined.contains(import) && seen.insert(import)),
             ),
-            None if RUNTIME.contains(&symbol.as_str()) || symbol.starts_with(PLATFORM) => {}
+            None if RUNTIME.contains(&symbol.as_str())
+                || symbol.starts_with(PLATFORM)
+                || (harness && symbol.starts_with(HARNESS)) => {}
             None => {
                 open.insert(symbol.clone());
             }
