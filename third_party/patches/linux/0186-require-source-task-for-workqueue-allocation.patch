@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 04 Nov 2026 20:21:43 -0500
+Subject: [PATCH] fix(workqueue): refuse allocation without an original task
+
+diff --git a/kernel/workqueue.c b/kernel/workqueue.c
+index cb7055aee..01744df15 100644
+--- a/kernel/workqueue.c
++++ b/kernel/workqueue.c
+@@ -57,6 +57,11 @@
+ #include <linux/delay.h>
+ #include <linux/irq_work.h>
+ 
++#ifdef CONFIG_STELA
++#include <stela/linux.h>
++#include <stela/task.h>
++#endif
++
+ #include "workqueue_internal.h"
+ 
+ enum worker_pool_flags {
+@@ -5807,6 +5812,15 @@ static struct workqueue_struct *__alloc_workqueue(const char *fmt,
+ 	size_t wq_size;
+ 	int name_len;
+ 
++#ifdef CONFIG_STELA
++	/* The pool mutex and worker cleanup require an original process. */
++	if (stela_linux_require_current(stela_linux_owner()) ||
++	    !stela_linux_quiescent()) {
++		stela_linux_unsupported("workqueue allocation context");
++		return NULL;
++	}
++#endif
++
+ 	if (flags & WQ_BH) {
+ 		if (WARN_ON_ONCE(flags & ~__WQ_BH_ALLOWS))
+ 			return NULL;

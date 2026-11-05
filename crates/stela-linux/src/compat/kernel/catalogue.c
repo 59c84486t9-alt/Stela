@@ -592,19 +592,28 @@ int main(void)
 #ifdef STELA_LINUX_CATALOGUE_WORKQUEUE_TEST
 #include <linux/workqueue.h>
 #include <stela/test.h>
+
+static void workqueue_refused(void *context, const char *operation)
+{
+	unsigned int *refusals = context;
+	assert(!strcmp(operation, "workqueue allocation context"));
+	(*refusals)++;
+}
+
 int main(void)
 {
-	/* GFP_KERNEL allocation requires the actual entered process owner. */
-	stela_linux_enter(&stela_linux_bare);
-	struct workqueue_struct *wq = alloc_workqueue("legacy-catalogue-peer", 0, 1);
-	assert(wq);
+	unsigned int refusals = 0;
+	const struct stela_linux_services services = {.unsupported = workqueue_refused};
+	const struct stela_linux_owner owner = {.services = &services, .context = &refusals};
+	/* Legacy entry has an owner but no original process or worker pool. */
+	stela_linux_enter(&owner);
+	stela_test_allocations_begin(false);
+	assert(!alloc_workqueue("legacy-catalogue-peer", WQ_PERCPU, 1));
+	assert(!alloc_ordered_workqueue("legacy-catalogue-ordered", 0));
+	struct stela_test_allocations attempts = stela_test_allocations_end();
+	assert(refusals == 2 && !attempts.heap && !attempts.heap_try && !attempts.pages);
 	stela_linux_exit();
-	/* The real global queue survives its allocating legacy entry. */
-	assert(stela_linux_kernel_claim(&stela_linux_bare) == -EBUSY);
-	stela_linux_enter(&stela_linux_bare);
-	destroy_workqueue(wq);
-	stela_linux_exit();
-	assert(stela_linux_kernel_claim(&stela_linux_bare) == -EBUSY);
+	assert(stela_linux_kernel_claim(&owner) == -EBUSY);
 	return 0;
 }
 #endif

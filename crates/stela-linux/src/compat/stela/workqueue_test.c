@@ -9,6 +9,7 @@
 #include <linux/reboot.h>
 #include <linux/sched.h>
 #include <linux/workqueue.h>
+#include <stela/catalogue.h>
 #include <stela/irq.h>
 #include <stela/linux.h>
 #include <stela/test.h>
@@ -254,6 +255,9 @@ void stela_linux_workqueue_test_main(void)
 	wq = alloc_workqueue("stela-test-%d", WQ_UNBOUND, 2, 1);
 	ordered = alloc_ordered_workqueue("stela-ordered", 0);
 	assert(wq && ordered && !current_work());
+	const struct stela_linux_owner *owner = stela_linux_owner();
+	assert(stela_linux_kernel_claim(owner) == -EALREADY);
+	assert(!stela_linux_kernel_catalogue_active());
 	INIT_WORK(&outer, run_outer);
 	INIT_WORK(&inner, run_inner);
 	assert(queue_work(wq, &outer));
@@ -281,6 +285,8 @@ void stela_linux_workqueue_test_main(void)
 	flush_delayed_work(&later);
 	destroy_workqueue(ordered);
 	destroy_workqueue(wq);
+	assert(stela_linux_kernel_claim(owner) == -EALREADY);
+	assert(!stela_linux_kernel_catalogue_active());
 
 	orderly_poweroff(true);
 	assert(wait_for_completion_timeout(&shutdown_done, HZ) && forced);
