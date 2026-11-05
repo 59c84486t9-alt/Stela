@@ -16,6 +16,9 @@ use super::{
 use crate::bus::mmio::owned::{Error as MappingError, Mapping};
 use core::mem::ManuallyDrop;
 
+mod irq_identity;
+pub use irq_identity::RequesterId;
+pub mod containment;
 pub mod preparation;
 pub mod roles;
 
@@ -38,6 +41,7 @@ pub enum FunctionRole {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClaimError {
+    Config(super::ConfigError),
     Mapping(MappingError),
     AlreadyBound,
     IdentityChanged,
@@ -49,6 +53,11 @@ pub enum ClaimError {
     UnsupportedCapability { id: u16, extended: bool },
     UnsupportedVersion { id: u16, version: u8 },
     UnsupportedPcieType(u8),
+}
+impl From<super::ConfigError> for ClaimError {
+    fn from(error: super::ConfigError) -> Self {
+        Self::Config(error)
+    }
 }
 
 /// The original configuration owner, with its immutable ECAM BDF and root/
@@ -66,6 +75,13 @@ pub struct StoppedRequester {
 pub struct RequesterBinding {
     address: Address,
     retention: ConfigRetention,
+}
+impl core::fmt::Debug for RequesterBinding {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RequesterBinding")
+            .field("address", &self.address)
+            .finish_non_exhaustive()
+    }
 }
 impl RequesterBinding {
     pub fn address(&self) -> Address {
@@ -178,7 +194,7 @@ impl StoppedRequester {
 }
 
 fn read16<C: ConfigSpace>(config: &C, offset: u16) -> Result<u16, ClaimError> {
-    let value = config.read16(offset);
+    let value = config.read16(offset)?;
     if value == u16::MAX {
         Err(ClaimError::ReadFailed { offset })
     } else {
@@ -197,6 +213,7 @@ fn inactive<C: ConfigSpace>(config: &C, offset: u16, mask: u16) -> Result<u16, C
 impl From<CapabilityError> for ClaimError {
     fn from(error: CapabilityError) -> Self {
         match error {
+            CapabilityError::Config { error, .. } => Self::Config(error),
             CapabilityError::FailedRead { offset } => Self::ReadFailed { offset },
             error => Self::MalformedCapability {
                 offset: error.offset(),
@@ -319,7 +336,7 @@ fn extended<C: ConfigSpace>(config: &C) -> Result<(), ClaimError> {
     // Linux `pci_cfg_space_size_ext`: an all-ones first extended header means
     // no extended space, as on every conventional PCI function. A removal is
     // caught by the identity read that follows the walk.
-    if config.read32(0x100) == u32::MAX {
+    if config.read32(0x100)? == u32::MAX {
         return Ok(());
     }
     let mut singleton = 0u32;
@@ -368,11 +385,11 @@ pub fn validate_stopped<C: ConfigSpace>(function: &mut Function<C>) -> Result<()
     let expected = u32::from(function.vendor) | u32::from(function.device) << 16;
     let class = function.class;
     let config = function.config();
-    let identity = config.read32(0);
+    let identity = config.read32(0)?;
     if identity == u32::MAX {
         return Err(ClaimError::ReadFailed { offset: 0 });
     }
-    let actual_class = config.read32(8);
+    let actual_class = config.read32(8)?;
     if actual_class == u32::MAX {
         return Err(ClaimError::ReadFailed { offset: 8 });
     }
@@ -385,7 +402,7 @@ pub fn validate_stopped<C: ConfigSpace>(function: &mut Function<C>) -> Result<()
     {
         return Err(ClaimError::IdentityChanged);
     }
-    let header = config.read8(0x0e);
+    let header = config.read8(0x0e)?;
     if header == u8::MAX {
         return Err(ClaimError::ReadFailed { offset: 0x0e });
     }
@@ -401,7 +418,7 @@ pub fn validate_stopped<C: ConfigSpace>(function: &mut Function<C>) -> Result<()
     extended(config)?;
     // A second identity read catches observed removal/reset during traversal.
     // The kept epoch grant, not this observation, excludes concurrent change.
-    if config.read32(0) != identity {
+    if config.read32(0)? != identity {
         return Err(ClaimError::IdentityChanged);
     }
     Ok(())

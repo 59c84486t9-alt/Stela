@@ -148,6 +148,9 @@ fn finish_stop(driver: &mut ManagedClient<Bar, Q, NativeGuard>, model: &Model) {
 }
 #[test]
 fn managed_scan_uses_policy_revokes_real_scan_then_stops_and_releases() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (client, model) = setup();
     let mut driver = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
     let count = model.response.lock().unwrap().client_commands.len();
@@ -241,6 +244,9 @@ fn awaiting(
 }
 #[test]
 fn managed_modern_ap_observation_configures_eht_keys_qos_and_revocation() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (client, model) = setup_modern();
     let (mut driver, model) = awaiting(client, model, country());
     driver.configure_modern(105).unwrap();
@@ -278,6 +284,9 @@ fn managed_modern_ap_observation_configures_eht_keys_qos_and_revocation() {
 }
 #[test]
 fn source_hardware_footprint_refuses_before_configuration() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (client, model) = setup();
     let (mut driver, model) = awaiting(client, model, country());
     let before = model.response.lock().unwrap().client_commands.len();
@@ -295,6 +304,9 @@ fn source_hardware_footprint_refuses_before_configuration() {
 }
 #[test]
 fn a_domain_wider_than_its_country_is_refused_at_attachment() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (client, model) = setup_modern();
     // 80 MHz programmed where the country allows 40 MHz.
     let narrow = country_of(&[
@@ -312,6 +324,9 @@ fn a_domain_wider_than_its_country_is_refused_at_attachment() {
 }
 #[test]
 fn unequal_wide_power_rows_refuse_split_eirp_rules_before_configuration() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (client, model) = setup_modern_power(true);
     let original = fixture();
     let mut b = vec![0; 128];
@@ -352,6 +367,9 @@ fn unequal_wide_power_rows_refuse_split_eirp_rules_before_configuration() {
 }
 #[test]
 fn restricted_edca_publication_waits_for_ack_and_preserves_ap_metadata() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for accepted in [true, false] {
         let (client, model) = setup_modern();
         let mut b = fixture();
@@ -449,6 +467,9 @@ fn restricted_edca_publication_waits_for_ack_and_preserves_ap_metadata() {
 }
 #[test]
 fn active_six_ghz_rnr_requires_programmed_probe_policy_and_reuses_refused_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use crate::wifi::mediatek::mailbox::clc::remaining::tests::caps;
     let six = Channel {
         band: Band::Ghz6,
@@ -658,6 +679,9 @@ fn active_six_ghz_rnr_requires_programmed_probe_policy_and_reuses_refused_owner(
 }
 #[test]
 fn mismatched_country_returns_original_owner_and_sku_padding_is_not_power() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (client, model) = setup();
     let mut bytes = fixture();
     bytes[8..10].copy_from_slice(b"DE");

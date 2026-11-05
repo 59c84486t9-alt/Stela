@@ -1,0 +1,397 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 23:36:24 -0500
+Subject: [PATCH] refactor(fs): separate directory name hashing from path
+ lookup
+
+---
+ fs/Makefile    |   2 +-
+ fs/name_hash.c |  96 ++++++++++++++++++++++++++++++
+ fs/name_hash.h |  85 ++++++++++++++++++++++++++
+ fs/namei.c     | 158 +------------------------------------------------
+ 4 files changed, 183 insertions(+), 158 deletions(-)
+ create mode 100644 fs/name_hash.c
+ create mode 100644 fs/name_hash.h
+
+diff --git a/fs/Makefile b/fs/Makefile
+index d285c15ea7bd1e2ec4292edb4dca91286a47746a..8179dcfea1c9c9eaf8a089fbb7b698db9894dce4 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -8,7 +8,7 @@
+ 
+ 
+ obj-y :=	open.o filp_close.o read_write.o file_table.o super.o \
+-		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o fcntl.o \
++		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o name_hash.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o inode.o inode_evict.o \
+ 		attr.o bad_inode.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o \
+ 		seq_file.o seq_lifetime.o seq_output.o xattr.o simple_xattr.o libfs.o pseudo_metadata.o fs-writeback.o \
+diff --git a/fs/name_hash.c b/fs/name_hash.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6b69984c192287c8ba669fe92946a70910f06b1
+--- /dev/null
++++ b/fs/name_hash.c
+@@ -0,0 +1,96 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ *  linux/fs/namei.c
++ *
++ *  Copyright (C) 1991, 1992  Linus Torvalds
++ */
++
++#include <linux/dcache.h>
++#include <linux/export.h>
++#include <linux/stringhash.h>
++
++#ifdef CONFIG_DCACHE_WORD_ACCESS
++#include <linux/uaccess.h>
++#include "name_hash.h"
++
++/*
++ * Return the hash of a string of known length.  This is carfully
++ * designed to match hash_name(), which is the more critical function.
++ * In particular, we must end by hashing a final word containing 0..7
++ * payload bytes, to match the way that hash_name() iterates until it
++ * finds the delimiter after the name.
++ */
++unsigned int full_name_hash(const void *salt, const char *name, unsigned int len)
++{
++	unsigned long a, x = 0, y = (unsigned long)salt;
++
++	for (;;) {
++		if (!len)
++			goto done;
++		a = load_unaligned_zeropad(name);
++		if (len < sizeof(unsigned long))
++			break;
++		HASH_MIX(x, y, a);
++		name += sizeof(unsigned long);
++		len -= sizeof(unsigned long);
++	}
++	x ^= a & bytemask_from_count(len);
++done:
++	return fold_hash(x, y);
++}
++EXPORT_SYMBOL(full_name_hash);
++
++/* Return the "hash_len" (hash and length) of a null-terminated string */
++u64 hashlen_string(const void *salt, const char *name)
++{
++	unsigned long a = 0, x = 0, y = (unsigned long)salt;
++	unsigned long adata, mask, len;
++	const struct word_at_a_time constants = WORD_AT_A_TIME_CONSTANTS;
++
++	len = 0;
++	goto inside;
++
++	do {
++		HASH_MIX(x, y, a);
++		len += sizeof(unsigned long);
++inside:
++		a = load_unaligned_zeropad(name+len);
++	} while (!has_zero(a, &adata, &constants));
++
++	adata = prep_zero_mask(a, adata, &constants);
++	mask = create_zero_mask(adata);
++	x ^= a & zero_bytemask(mask);
++
++	return hashlen_create(fold_hash(x, y), len + find_zero(mask));
++}
++EXPORT_SYMBOL(hashlen_string);
++
++#else
++
++/* Return the hash of a string of known length */
++unsigned int full_name_hash(const void *salt, const char *name, unsigned int len)
++{
++	unsigned long hash = init_name_hash(salt);
++	while (len--)
++		hash = partial_name_hash((unsigned char)*name++, hash);
++	return end_name_hash(hash);
++}
++EXPORT_SYMBOL(full_name_hash);
++
++/* Return the "hash_len" (hash and length) of a null-terminated string */
++u64 hashlen_string(const void *salt, const char *name)
++{
++	unsigned long hash = init_name_hash(salt);
++	unsigned long len = 0, c;
++
++	c = (unsigned char)*name;
++	while (c) {
++		len++;
++		hash = partial_name_hash(c, hash);
++		c = (unsigned char)name[len];
++	}
++	return hashlen_create(end_name_hash(hash), len);
++}
++EXPORT_SYMBOL(hashlen_string);
++
++#endif
+diff --git a/fs/name_hash.h b/fs/name_hash.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..1180cb9518b7212ff31319d993fb126ad15a59e5
+--- /dev/null
++++ b/fs/name_hash.h
+@@ -0,0 +1,85 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _FS_NAME_HASH_H
++#define _FS_NAME_HASH_H
++
++#include <asm/word-at-a-time.h>
++
++#ifdef HASH_MIX
++
++/* Architecture provides HASH_MIX and fold_hash() in <asm/hash.h> */
++
++#elif defined(CONFIG_64BIT)
++/*
++ * Register pressure in the mixing function is an issue, particularly
++ * on 32-bit x86, but almost any function requires one state value and
++ * one temporary.  Instead, use a function designed for two state values
++ * and no temporaries.
++ *
++ * This function cannot create a collision in only two iterations, so
++ * we have two iterations to achieve avalanche.  In those two iterations,
++ * we have six layers of mixing, which is enough to spread one bit's
++ * influence out to 2^6 = 64 state bits.
++ *
++ * Rotate constants are scored by considering either 64 one-bit input
++ * deltas or 64*63/2 = 2016 two-bit input deltas, and finding the
++ * probability of that delta causing a change to each of the 128 output
++ * bits, using a sample of random initial states.
++ *
++ * The Shannon entropy of the computed probabilities is then summed
++ * to produce a score.  Ideally, any input change has a 50% chance of
++ * toggling any given output bit.
++ *
++ * Mixing scores (in bits) for (12,45):
++ * Input delta: 1-bit      2-bit
++ * 1 round:     713.3    42542.6
++ * 2 rounds:   2753.7   140389.8
++ * 3 rounds:   5954.1   233458.2
++ * 4 rounds:   7862.6   256672.2
++ * Perfect:    8192     258048
++ *            (64*128) (64*63/2 * 128)
++ */
++#define HASH_MIX(x, y, a)	\
++	(	x ^= (a),	\
++	y ^= x,	x = rol64(x,12),\
++	x += y,	y = rol64(y,45),\
++	y *= 9			)
++
++/*
++ * Fold two longs into one 32-bit hash value.  This must be fast, but
++ * latency isn't quite as critical, as there is a fair bit of additional
++ * work done before the hash value is used.
++ */
++static inline unsigned int fold_hash(unsigned long x, unsigned long y)
++{
++	y ^= x * GOLDEN_RATIO_64;
++	y *= GOLDEN_RATIO_64;
++	return y >> 32;
++}
++
++#else	/* 32-bit case */
++
++/*
++ * Mixing scores (in bits) for (7,20):
++ * Input delta: 1-bit      2-bit
++ * 1 round:     330.3     9201.6
++ * 2 rounds:   1246.4    25475.4
++ * 3 rounds:   1907.1    31295.1
++ * 4 rounds:   2042.3    31718.6
++ * Perfect:    2048      31744
++ *            (32*64)   (32*31/2 * 64)
++ */
++#define HASH_MIX(x, y, a)	\
++	(	x ^= (a),	\
++	y ^= x,	x = rol32(x, 7),\
++	x += y,	y = rol32(y,20),\
++	y *= 9			)
++
++static inline unsigned int fold_hash(unsigned long x, unsigned long y)
++{
++	/* Use arch-optimized multiply if one exists */
++	return __hash_32(y ^ __hash_32(x));
++}
++
++#endif
++
++#endif
+diff --git a/fs/namei.c b/fs/namei.c
+index 27e0637bfdda2a474a001b82cac57fd1ff9ac63a..f0bb966614d4d1effb016be6101e60a67e25f7ac 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -2336,137 +2336,7 @@ static __always_inline const char *walk_component(struct nameidata *nd, int flag
+  */
+ #ifdef CONFIG_DCACHE_WORD_ACCESS
+ 
+-#include <asm/word-at-a-time.h>
+-
+-#ifdef HASH_MIX
+-
+-/* Architecture provides HASH_MIX and fold_hash() in <asm/hash.h> */
+-
+-#elif defined(CONFIG_64BIT)
+-/*
+- * Register pressure in the mixing function is an issue, particularly
+- * on 32-bit x86, but almost any function requires one state value and
+- * one temporary.  Instead, use a function designed for two state values
+- * and no temporaries.
+- *
+- * This function cannot create a collision in only two iterations, so
+- * we have two iterations to achieve avalanche.  In those two iterations,
+- * we have six layers of mixing, which is enough to spread one bit's
+- * influence out to 2^6 = 64 state bits.
+- *
+- * Rotate constants are scored by considering either 64 one-bit input
+- * deltas or 64*63/2 = 2016 two-bit input deltas, and finding the
+- * probability of that delta causing a change to each of the 128 output
+- * bits, using a sample of random initial states.
+- *
+- * The Shannon entropy of the computed probabilities is then summed
+- * to produce a score.  Ideally, any input change has a 50% chance of
+- * toggling any given output bit.
+- *
+- * Mixing scores (in bits) for (12,45):
+- * Input delta: 1-bit      2-bit
+- * 1 round:     713.3    42542.6
+- * 2 rounds:   2753.7   140389.8
+- * 3 rounds:   5954.1   233458.2
+- * 4 rounds:   7862.6   256672.2
+- * Perfect:    8192     258048
+- *            (64*128) (64*63/2 * 128)
+- */
+-#define HASH_MIX(x, y, a)	\
+-	(	x ^= (a),	\
+-	y ^= x,	x = rol64(x,12),\
+-	x += y,	y = rol64(y,45),\
+-	y *= 9			)
+-
+-/*
+- * Fold two longs into one 32-bit hash value.  This must be fast, but
+- * latency isn't quite as critical, as there is a fair bit of additional
+- * work done before the hash value is used.
+- */
+-static inline unsigned int fold_hash(unsigned long x, unsigned long y)
+-{
+-	y ^= x * GOLDEN_RATIO_64;
+-	y *= GOLDEN_RATIO_64;
+-	return y >> 32;
+-}
+-
+-#else	/* 32-bit case */
+-
+-/*
+- * Mixing scores (in bits) for (7,20):
+- * Input delta: 1-bit      2-bit
+- * 1 round:     330.3     9201.6
+- * 2 rounds:   1246.4    25475.4
+- * 3 rounds:   1907.1    31295.1
+- * 4 rounds:   2042.3    31718.6
+- * Perfect:    2048      31744
+- *            (32*64)   (32*31/2 * 64)
+- */
+-#define HASH_MIX(x, y, a)	\
+-	(	x ^= (a),	\
+-	y ^= x,	x = rol32(x, 7),\
+-	x += y,	y = rol32(y,20),\
+-	y *= 9			)
+-
+-static inline unsigned int fold_hash(unsigned long x, unsigned long y)
+-{
+-	/* Use arch-optimized multiply if one exists */
+-	return __hash_32(y ^ __hash_32(x));
+-}
+-
+-#endif
+-
+-/*
+- * Return the hash of a string of known length.  This is carfully
+- * designed to match hash_name(), which is the more critical function.
+- * In particular, we must end by hashing a final word containing 0..7
+- * payload bytes, to match the way that hash_name() iterates until it
+- * finds the delimiter after the name.
+- */
+-unsigned int full_name_hash(const void *salt, const char *name, unsigned int len)
+-{
+-	unsigned long a, x = 0, y = (unsigned long)salt;
+-
+-	for (;;) {
+-		if (!len)
+-			goto done;
+-		a = load_unaligned_zeropad(name);
+-		if (len < sizeof(unsigned long))
+-			break;
+-		HASH_MIX(x, y, a);
+-		name += sizeof(unsigned long);
+-		len -= sizeof(unsigned long);
+-	}
+-	x ^= a & bytemask_from_count(len);
+-done:
+-	return fold_hash(x, y);
+-}
+-EXPORT_SYMBOL(full_name_hash);
+-
+-/* Return the "hash_len" (hash and length) of a null-terminated string */
+-u64 hashlen_string(const void *salt, const char *name)
+-{
+-	unsigned long a = 0, x = 0, y = (unsigned long)salt;
+-	unsigned long adata, mask, len;
+-	const struct word_at_a_time constants = WORD_AT_A_TIME_CONSTANTS;
+-
+-	len = 0;
+-	goto inside;
+-
+-	do {
+-		HASH_MIX(x, y, a);
+-		len += sizeof(unsigned long);
+-inside:
+-		a = load_unaligned_zeropad(name+len);
+-	} while (!has_zero(a, &adata, &constants));
+-
+-	adata = prep_zero_mask(a, adata, &constants);
+-	mask = create_zero_mask(adata);
+-	x ^= a & zero_bytemask(mask);
+-
+-	return hashlen_create(fold_hash(x, y), len + find_zero(mask));
+-}
+-EXPORT_SYMBOL(hashlen_string);
++#include "name_hash.h"
+ 
+ /*
+  * hash_name - Calculate the length and hash of the path component
+@@ -2537,32 +2407,6 @@ static inline const char *hash_name(struct nameidata *nd,
+ 
+ #else	/* !CONFIG_DCACHE_WORD_ACCESS: Slow, byte-at-a-time version */
+ 
+-/* Return the hash of a string of known length */
+-unsigned int full_name_hash(const void *salt, const char *name, unsigned int len)
+-{
+-	unsigned long hash = init_name_hash(salt);
+-	while (len--)
+-		hash = partial_name_hash((unsigned char)*name++, hash);
+-	return end_name_hash(hash);
+-}
+-EXPORT_SYMBOL(full_name_hash);
+-
+-/* Return the "hash_len" (hash and length) of a null-terminated string */
+-u64 hashlen_string(const void *salt, const char *name)
+-{
+-	unsigned long hash = init_name_hash(salt);
+-	unsigned long len = 0, c;
+-
+-	c = (unsigned char)*name;
+-	while (c) {
+-		len++;
+-		hash = partial_name_hash(c, hash);
+-		c = (unsigned char)name[len];
+-	}
+-	return hashlen_create(end_name_hash(hash), len);
+-}
+-EXPORT_SYMBOL(hashlen_string);
+-
+ /*
+  * We know there's a real path component here of at least
+  * one character.

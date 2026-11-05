@@ -152,8 +152,8 @@ impl<T: Scsi> Scsi for Owner<T> {
     ) -> Result<(), BlockError> {
         self.run(lun, cdb, |transport| transport.read_into(lun, cdb, output))
     }
-    fn delay(&self, micros: u64) {
-        self.transport.delay(micros);
+    fn delay(&mut self, micros: u64) -> Result<(), BlockError> {
+        self.transport.delay(micros)
     }
     fn now_us(&self) -> u64 {
         self.transport.now_us()

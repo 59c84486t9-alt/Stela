@@ -21,8 +21,28 @@ mod rotation;
 /// fields. Its existence proves key installation, not negotiated PMF policy.
 /// The real OS service must own SA Query transactions, timers and departure/
 /// action decisions; this backend never infers those from authenticated bytes.
+/// Kept physical custody is process-local, including retained observations.
+/// The public names used by the refusal examples must resolve:
+///
+/// ```
+/// use stela_driver_net::wifi::mediatek::bootstrap::client::management::{Received, Session};
+/// fn actual_types(_: Option<&Session>, _: Option<&Received>) {}
+/// actual_types(None, None);
+/// ```
+///
+/// ```compile_fail
+/// use stela_driver_net::wifi::mediatek::bootstrap::client::management::Session;
+/// fn require_send<T: Send>() {}
+/// require_send::<Session>();
+/// ```
+///
+/// ```compile_fail
+/// use stela_driver_net::wifi::mediatek::bootstrap::client::management::Session;
+/// fn require_sync<T: Sync>() {}
+/// require_sync::<Session>();
+/// ```
 pub struct Session {
-    _resource: Arc<dyn Any + Send + Sync>,
+    _resource: Arc<dyn Any>,
     association: u64,
     peer_generation: u64,
     profile: Profile,
@@ -32,6 +52,26 @@ pub struct Session {
     igtk: bip::Identity,
     igtks: [Option<bip::Identity>; 2],
 }
+// Compile-time negative controls use the actual internal types, independently
+// of doctest imports: a Send/Sync implementation makes inference ambiguous.
+#[cfg(test)]
+const _: fn() = || {
+    trait AmbiguousIfSend<A> {
+        fn witness() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+    impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
+    trait AmbiguousIfSync<A> {
+        fn witness() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSync<()> for T {}
+    impl<T: ?Sized + Sync> AmbiguousIfSync<u8> for T {}
+    let _ = <Session as AmbiguousIfSend<_>>::witness;
+    let _ = <Session as AmbiguousIfSync<_>>::witness;
+    let _ = <Received as AmbiguousIfSend<_>>::witness;
+    let _ = <Received as AmbiguousIfSync<_>>::witness;
+};
+
 impl Session {
     pub const fn association_epoch(&self) -> u64 {
         self.association
@@ -61,6 +101,18 @@ impl Session {
 /// AssociationContext. Body access is a historical observation; acting
 /// on it requires with_management or guarded with_management_modern
 /// to recheck the original namespace under the serialized current Client.
+///
+/// ```compile_fail
+/// use stela_driver_net::wifi::mediatek::bootstrap::client::management::Received;
+/// fn require_send<T: Send>() {}
+/// require_send::<Received>();
+/// ```
+///
+/// ```compile_fail
+/// use stela_driver_net::wifi::mediatek::bootstrap::client::management::Received;
+/// fn require_sync<T: Sync>() {}
+/// require_sync::<Received>();
+/// ```
 pub struct Received {
     session: Arc<Session>,
     frame: Mpdu,
@@ -254,10 +306,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         ptk: KeyIdentity,
         gtk: KeyIdentity,
         igtk: bip::Identity,
-    ) -> Result<Arc<Session>, Error>
-    where
-        C: Send + Sync,
-    {
+    ) -> Result<Arc<Session>, Error> {
         if let Some(session) = &s.management {
             Self::validate_management(s, session)?;
             return Ok(session.clone());
@@ -265,6 +314,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         // Initial attachment and rotation require all old BA users drained.
         s.ba_management = None;
         s.ba_management_pn = None;
+        #[expect(
+            clippy::arc_with_non_send_sync,
+            reason = "retain the same process-local physical custody and Session identity"
+        )]
         let session = Arc::new(Session {
             _resource: s.controller.state().resource.clone(),
             association: epoch,
@@ -302,10 +355,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         index: u8,
         material: &[u8],
         receive: PacketNumber,
-    ) -> Result<Arc<Session>, Error>
-    where
-        C: Send + Sync,
-    {
+    ) -> Result<Arc<Session>, Error> {
         let s = self.state_mut();
         let (ptk, gtk) = Self::management_keys(s)?;
         if s.station.association_epoch() != Some(epoch) {

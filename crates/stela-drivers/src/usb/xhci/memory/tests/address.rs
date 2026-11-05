@@ -269,6 +269,9 @@ fn initial_output_visibility_precedes_address_ack_and_failed_address_retirement(
             hardware::Policy::default(),
             || Ok(()),
             Some(memory(&peer)),
+            crate::usb::xhci::minimum::fixture(Clock {
+                ticks_per_microsecond: 1000,
+            }),
         )
         .unwrap();
         let speed = controller.root_port(1).unwrap().unwrap();

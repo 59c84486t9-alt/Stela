@@ -23,6 +23,10 @@ const SECURITY: [u8; 5] = [0x10, 0xa4, 0xad, 0, 0xb0];
 const COMMAND_US: u64 = 5_000_000;
 const ATTEMPT_US: u64 = 120_000_000;
 
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub(super) fn run<B: Io>(hci: &mut Hci<B>, provider: &dyn Provider) -> Result<OwnedReport> {
     let usb = UsbIdentity::read(hci.binding.device());
     if usb.project().is_none() {
@@ -65,6 +69,10 @@ struct Engine<'a, B: Io> {
     credits: u8,
 }
 impl<B: Io> Engine<'_, B> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn command(&mut self, opcode: u16, parameters: &[u8]) -> Result<Vec<u8>> {
         if !self.pending.is_empty() {
             return Err(Error::protocol("stale command response", &self.pending[0]));
@@ -139,6 +147,10 @@ impl<B: Io> Engine<'_, B> {
             core::hint::spin_loop();
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn register(&mut self, which: &[u8; 5]) -> Result<[u8; 2]> {
         let p = self.command(REGISTER, which)?;
         if p.len() != 3 {
@@ -146,6 +158,10 @@ impl<B: Io> Engine<'_, B> {
         }
         Ok([p[1], p[2]])
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn run(&mut self, usb: UsbIdentity, provider: &dyn Provider) -> Result<OwnedReport> {
         let subversion = u16::from_le_bytes(self.register(&SUBVERSION)?);
         self.attempt.register_subversion = Some(subversion);

@@ -31,22 +31,22 @@ impl Elapsed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Clock, bus::pci::power::Timer};
+    use crate::Clock;
 
     #[test]
-    fn native_clock_rejects_unusable_rates_before_waiting() {
+    fn nominal_clock_rejects_unrepresentable_deadlines_before_waiting() {
         for rate in [0, u64::MAX] {
             let clock = Clock {
                 ticks_per_microsecond: rate,
             };
-            assert!(clock.check().is_err());
-            assert!(clock.wait_us(40_000).is_err());
+            assert!(clock.check_duration(40_000).is_err());
+            assert!(clock.try_delay(40_000).is_err());
         }
         assert!(
             Clock {
                 ticks_per_microsecond: 3_000
             }
-            .check()
+            .check_duration(40_000)
             .is_ok()
         );
     }

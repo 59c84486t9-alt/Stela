@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2018 Intel Corporation
 //! Checked boot-lifetime adaptation of Linux igc_base/mac/phy/nvm/i225.c.
-use crate::{Clock, block::BlockError, bus::mmio::Mmio};
+use crate::{block::BlockError, bus::mmio::Mmio};
 
 pub(super) trait Registers {
     fn read(&self, register: usize) -> u32;
@@ -17,11 +17,11 @@ impl Registers for Mmio {
     }
 }
 pub(super) trait Timer {
-    fn delay(&self, microseconds: u64);
+    fn delay(&self, microseconds: u64) -> Result<(), BlockError>;
 }
-impl Timer for Clock {
-    fn delay(&self, microseconds: u64) {
-        Clock::delay(self, microseconds);
+impl Timer for crate::timing::Timing {
+    fn delay(&self, us: u64) -> Result<(), BlockError> {
+        crate::timing::Timing::delay(self, us)
     }
 }
 
@@ -274,7 +274,7 @@ pub(super) fn flush_receive_fifo<R: Registers, T: Timer>(
         registers.write(rxdctl(index), *control & !RXDCTL_ENABLE);
     }
     for _ in 0..10 {
-        timer.delay(1_000);
+        timer.delay(1_000)?;
         let mut enabled = 0;
         for index in 0..queues.len() {
             enabled |= read(rxdctl(index))?;
@@ -292,7 +292,7 @@ pub(super) fn flush_receive_fifo<R: Registers, T: Timer>(
     registers.write(RCTL, rejecting);
     registers.write(RCTL, rejecting | RCTL_EN);
     read(STATUS)?;
-    timer.delay(2_000);
+    timer.delay(2_000)?;
     for (index, control) in queues.into_iter().enumerate() {
         registers.write(rxdctl(index), control);
     }
@@ -356,7 +356,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
             if (value & mask != 0) == set {
                 return Ok(value);
             }
-            self.timer.delay(delay);
+            self.timer.delay(delay)?;
         }
         Err(BlockError::Timeout)
     }
@@ -371,7 +371,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
         self.registers.write(RCTL, 0);
         self.registers.write(TCTL, 1 << 3);
         self.read(STATUS)?; // Posted write flush before the required settle.
-        self.timer.delay(10_000);
+        self.timer.delay(10_000)?;
         self.modify(CTRL, 0, MAC_RESET)?;
         self.poll(CTRL, MAC_RESET, false, 10, 1_000)?;
         self.poll(EECD, AUTO_READ_DONE, true, 10, 1_000)?;
@@ -388,7 +388,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
         self.modify(RCTL, RCTL_EN, 0)?;
         self.modify(TCTL, TCTL_EN, 0)?;
         self.read(STATUS)?;
-        self.timer.delay(10_000);
+        self.timer.delay(10_000)?;
         self.reset()
     }
 
@@ -409,7 +409,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
                     acquired = true;
                     break;
                 }
-                self.timer.delay(500);
+                self.timer.delay(500)?;
             }
             if acquired {
                 break;
@@ -425,7 +425,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
             if self.read(SWSM)? & SWESMBI != 0 {
                 return Ok(());
             }
-            self.timer.delay(500);
+            self.timer.delay(500)?;
         }
         self.put_hw_semaphore()?;
         Err(BlockError::Timeout)
@@ -453,7 +453,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
                 };
             }
             self.put_hw_semaphore()?;
-            self.timer.delay(5_000);
+            self.timer.delay(5_000)?;
         }
         Err(BlockError::Timeout)
     }
@@ -497,7 +497,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
         self.registers.write(MDIC, command);
         let mut value = 0;
         for _ in 0..1920 {
-            self.timer.delay(50);
+            self.timer.delay(50)?;
             value = self.read(MDIC)?;
             if value & MDIC_READY != 0 {
                 break;
@@ -555,17 +555,17 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
             let ctrl = hw.read(CTRL)?;
             hw.registers.write(CTRL, ctrl | PHY_RESET);
             hw.read(STATUS)?;
-            hw.timer.delay(100);
+            hw.timer.delay(100)?;
             hw.registers.write(CTRL, ctrl);
             hw.read(STATUS)?;
-            hw.timer.delay(100);
+            hw.timer.delay(100)?;
             hw.poll(PHPM, 1 << 8, true, 10_000, 1)?;
-            hw.timer.delay(100);
+            hw.timer.delay(100)?;
             Ok(())
         })?;
         self.synchronized(PHY_SYNC, |hw| {
             let upper = hw.mdio(2, None)?;
-            hw.timer.delay(200);
+            hw.timer.delay(200)?;
             let lower = hw.mdio(3, None)?;
             let identity = u32::from(upper) << 16 | u32::from(lower);
             if upper == 0 || upper == u16::MAX || lower == u16::MAX {

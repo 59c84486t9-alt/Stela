@@ -27,9 +27,17 @@ pub(super) struct Sfi<'a> {
     pub build: [u8; 3],
 }
 impl<'a> Sfi<'a> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn parse(bytes: &'a [u8], minimum: [u8; 3]) -> Result<Self> {
         Self::parse_format(bytes, minimum, None)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn parse_tlv(
         bytes: &'a [u8],
         minimum: [u8; 3],
@@ -64,6 +72,10 @@ impl<'a> Sfi<'a> {
         }
         Self::parse_format(bytes, minimum, Some(engine))
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn parse_format(bytes: &'a [u8], minimum: [u8; 3], engine: Option<u8>) -> Result<Self> {
         const ECDSA_BYTES: usize = 320;
         let payload = RSA_BYTES + if engine.is_some() { ECDSA_BYTES } else { 0 };
@@ -124,6 +136,10 @@ impl<'a> Sfi<'a> {
         };
         Self::parse_payload(bytes, minimum, sections, payload)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn parse_payload(
         bytes: &'a [u8],
         minimum: [u8; 3],
@@ -179,6 +195,10 @@ fn empty(bytes: &[u8]) -> bool {
     bytes.iter().all(|b| *b == 0) || bytes.iter().all(|b| *b == 0xff)
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub(super) fn ddc(bytes: &[u8]) -> Result<Vec<&[u8]>> {
     if bytes.is_empty() || bytes.len() > 64 * 1024 {
         return Err(Error::FirmwareFormat("DDC size"));

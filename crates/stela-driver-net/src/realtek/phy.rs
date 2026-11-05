@@ -234,7 +234,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         self.phy_write(PHY_PAGE, 0)?;
         let mut ready = false;
         for _ in 0..12 {
-            self.timer.delay(50_000);
+            self.timer.delay(50_000)?;
             if self.phy_read(PHY_CONTROL)? & PHY_RESET == 0 {
                 ready = true;
                 break;
@@ -321,7 +321,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
             self.phy_write(14, 0)?;
         }
         self.phy_modify(PHY_CONTROL, 1 << 11, 0)?; // genphy_resume
-        self.timer.delay(20_000);
+        self.timer.delay(20_000)?;
         let mut nbase_capability = 0;
         if id == 0x001c_c800 || self.revision.nbase() {
             // realtek_main.c distinguishes the generic FE/GE PHY from the

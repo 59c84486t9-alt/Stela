@@ -154,6 +154,10 @@ pub enum Named {
 /// the translation store `stela.efi` rewrites are partitions of one USB, and
 /// one partition may be named twice. When any is refused, no disk is taken
 /// and the refused one's index comes back with the reason.
+#[expect(
+    clippy::result_large_err,
+    reason = "preserve the exact partition index and typed device failure without allocating on the error path"
+)]
 pub fn open_shared(
     devices: &mut Vec<Box<dyn BlockDevice>>,
     named: &[Named],

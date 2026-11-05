@@ -1,0 +1,447 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 13:03:43 -0500
+Subject: [PATCH] refactor(fs): separate original bad inode recognition
+
+---
+ fs/Makefile        |   2 +-
+ fs/bad_inode.c     | 181 +----------------------------------------
+ fs/bad_inode_ops.c | 197 +++++++++++++++++++++++++++++++++++++++++++++
+ fs/internal.h      |   1 +
+ 4 files changed, 201 insertions(+), 180 deletions(-)
+ create mode 100644 fs/bad_inode_ops.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index fd01d4a593252d5944e4610210461cb029efbc06..a2161dfacfe2ac2f4fb44ea0833c34a3d396e9ec 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -10,7 +10,7 @@
+ obj-y :=	open.o filp_close.o read_write.o file_table.o file_table_init.o super.o super_anon_dev.o super_lifetime.o \
+ 		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o path_get.o name_hash.o filename.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o dcache_init.o dentry_ancestry.o inode.o inode_cache_init.o inode_evict.o \
+-		attr.o bad_inode.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o mount_cache.o \
++		attr.o bad_inode.o bad_inode_ops.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o mount_cache.o \
+ 		seq_file.o seq_lifetime.o seq_output.o seq_path.o xattr.o simple_xattr.o libfs.o pseudo_metadata.o fs-writeback.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+ 		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
+diff --git a/fs/bad_inode.c b/fs/bad_inode.c
+index acf8613f5e368ece22e4afaaf1a4684663336de5..aea2835f41e28cbef359e8102a42338f4ad1fded 100644
+--- a/fs/bad_inode.c
++++ b/fs/bad_inode.c
+@@ -17,6 +17,8 @@
+ #include <linux/poll.h>
+ #include <linux/fiemap.h>
+ 
++#include "internal.h"
++
+ static int bad_file_open(struct inode *inode, struct file *filp)
+ {
+ 	return -EIO;
+@@ -27,165 +29,6 @@ static const struct file_operations bad_file_ops =
+ 	.open		= bad_file_open,
+ };
+ 
+-static int bad_inode_create(struct mnt_idmap *idmap,
+-			    struct inode *dir, struct dentry *dentry,
+-			    umode_t mode, bool excl)
+-{
+-	return -EIO;
+-}
+-
+-static struct dentry *bad_inode_lookup(struct inode *dir,
+-			struct dentry *dentry, unsigned int flags)
+-{
+-	return ERR_PTR(-EIO);
+-}
+-
+-static int bad_inode_link (struct dentry *old_dentry, struct inode *dir,
+-		struct dentry *dentry)
+-{
+-	return -EIO;
+-}
+-
+-static int bad_inode_unlink(struct inode *dir, struct dentry *dentry)
+-{
+-	return -EIO;
+-}
+-
+-static int bad_inode_symlink(struct mnt_idmap *idmap,
+-			     struct inode *dir, struct dentry *dentry,
+-			     const char *symname)
+-{
+-	return -EIO;
+-}
+-
+-static struct dentry *bad_inode_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+-				      struct dentry *dentry, umode_t mode)
+-{
+-	return ERR_PTR(-EIO);
+-}
+-
+-static int bad_inode_rmdir (struct inode *dir, struct dentry *dentry)
+-{
+-	return -EIO;
+-}
+-
+-static int bad_inode_mknod(struct mnt_idmap *idmap, struct inode *dir,
+-			   struct dentry *dentry, umode_t mode, dev_t rdev)
+-{
+-	return -EIO;
+-}
+-
+-static int bad_inode_rename2(struct mnt_idmap *idmap,
+-			     struct inode *old_dir, struct dentry *old_dentry,
+-			     struct inode *new_dir, struct dentry *new_dentry,
+-			     unsigned int flags)
+-{
+-	return -EIO;
+-}
+-
+-static int bad_inode_readlink(struct dentry *dentry, char __user *buffer,
+-		int buflen)
+-{
+-	return -EIO;
+-}
+-
+-static int bad_inode_permission(struct mnt_idmap *idmap,
+-				struct inode *inode, int mask)
+-{
+-	return -EIO;
+-}
+-
+-static int bad_inode_getattr(struct mnt_idmap *idmap,
+-			     const struct path *path, struct kstat *stat,
+-			     u32 request_mask, unsigned int query_flags)
+-{
+-	return -EIO;
+-}
+-
+-static int bad_inode_setattr(struct mnt_idmap *idmap,
+-			     struct dentry *direntry, struct iattr *attrs)
+-{
+-	return -EIO;
+-}
+-
+-static ssize_t bad_inode_listxattr(struct dentry *dentry, char *buffer,
+-			size_t buffer_size)
+-{
+-	return -EIO;
+-}
+-
+-static const char *bad_inode_get_link(struct dentry *dentry,
+-				      struct inode *inode,
+-				      struct delayed_call *done)
+-{
+-	return ERR_PTR(-EIO);
+-}
+-
+-static struct posix_acl *bad_inode_get_acl(struct inode *inode, int type, bool rcu)
+-{
+-	return ERR_PTR(-EIO);
+-}
+-
+-static int bad_inode_fiemap(struct inode *inode,
+-			    struct fiemap_extent_info *fieinfo, u64 start,
+-			    u64 len)
+-{
+-	return -EIO;
+-}
+-
+-static int bad_inode_update_time(struct inode *inode, enum fs_update_time type,
+-				 unsigned int flags)
+-{
+-	return -EIO;
+-}
+-
+-static int bad_inode_atomic_open(struct inode *inode, struct dentry *dentry,
+-				 struct file *file, unsigned int open_flag,
+-				 umode_t create_mode)
+-{
+-	return -EIO;
+-}
+-
+-static int bad_inode_tmpfile(struct mnt_idmap *idmap,
+-			     struct inode *inode, struct file *file,
+-			     umode_t mode)
+-{
+-	return -EIO;
+-}
+-
+-static int bad_inode_set_acl(struct mnt_idmap *idmap,
+-			     struct dentry *dentry, struct posix_acl *acl,
+-			     int type)
+-{
+-	return -EIO;
+-}
+-
+-static const struct inode_operations bad_inode_ops =
+-{
+-	.create		= bad_inode_create,
+-	.lookup		= bad_inode_lookup,
+-	.link		= bad_inode_link,
+-	.unlink		= bad_inode_unlink,
+-	.symlink	= bad_inode_symlink,
+-	.mkdir		= bad_inode_mkdir,
+-	.rmdir		= bad_inode_rmdir,
+-	.mknod		= bad_inode_mknod,
+-	.rename		= bad_inode_rename2,
+-	.readlink	= bad_inode_readlink,
+-	.permission	= bad_inode_permission,
+-	.getattr	= bad_inode_getattr,
+-	.setattr	= bad_inode_setattr,
+-	.listxattr	= bad_inode_listxattr,
+-	.get_link	= bad_inode_get_link,
+-	.get_inode_acl	= bad_inode_get_acl,
+-	.fiemap		= bad_inode_fiemap,
+-	.update_time	= bad_inode_update_time,
+-	.atomic_open	= bad_inode_atomic_open,
+-	.tmpfile	= bad_inode_tmpfile,
+-	.set_acl	= bad_inode_set_acl,
+-};
+-
+-
+ /*
+  * When a filesystem is unable to read an inode due to an I/O error in
+  * its read_inode() function, it can call make_bad_inode() to return a
+@@ -216,26 +59,6 @@ void make_bad_inode(struct inode *inode)
+ }
+ EXPORT_SYMBOL(make_bad_inode);
+ 
+-/*
+- * This tests whether an inode has been flagged as bad. The test uses
+- * &bad_inode_ops to cover the case of invalidated inodes as well as
+- * those created by make_bad_inode() above.
+- */
+- 
+-/**
+- *	is_bad_inode - is an inode errored
+- *	@inode: inode to test
+- *
+- *	Returns true if the inode in question has been marked as bad.
+- */
+- 
+-bool is_bad_inode(struct inode *inode)
+-{
+-	return (inode->i_op == &bad_inode_ops);	
+-}
+-
+-EXPORT_SYMBOL(is_bad_inode);
+-
+ /**
+  * iget_failed - Mark an under-construction inode as dead and release it
+  * @inode: The inode to discard
+diff --git a/fs/bad_inode_ops.c b/fs/bad_inode_ops.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c4b689d62169705eec5bfd1be60e3c20c103f10
+--- /dev/null
++++ b/fs/bad_inode_ops.c
+@@ -0,0 +1,197 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ *  linux/fs/bad_inode.c
++ *
++ *  Copyright (C) 1997, Stephen Tweedie
++ *
++ *  Provide stub functions for unreadable inodes
++ *
++ *  Fabian Frederick : August 2003 - All file operations assigned to EIO
++ */
++
++#include <linux/fs.h>
++#include <linux/export.h>
++#include <linux/stat.h>
++#include <linux/time.h>
++#include <linux/namei.h>
++#include <linux/fiemap.h>
++
++#include "internal.h"
++
++static int bad_inode_create(struct mnt_idmap *idmap,
++			    struct inode *dir, struct dentry *dentry,
++			    umode_t mode, bool excl)
++{
++	return -EIO;
++}
++
++static struct dentry *bad_inode_lookup(struct inode *dir,
++			struct dentry *dentry, unsigned int flags)
++{
++	return ERR_PTR(-EIO);
++}
++
++static int bad_inode_link (struct dentry *old_dentry, struct inode *dir,
++		struct dentry *dentry)
++{
++	return -EIO;
++}
++
++static int bad_inode_unlink(struct inode *dir, struct dentry *dentry)
++{
++	return -EIO;
++}
++
++static int bad_inode_symlink(struct mnt_idmap *idmap,
++			     struct inode *dir, struct dentry *dentry,
++			     const char *symname)
++{
++	return -EIO;
++}
++
++static struct dentry *bad_inode_mkdir(struct mnt_idmap *idmap, struct inode *dir,
++				      struct dentry *dentry, umode_t mode)
++{
++	return ERR_PTR(-EIO);
++}
++
++static int bad_inode_rmdir (struct inode *dir, struct dentry *dentry)
++{
++	return -EIO;
++}
++
++static int bad_inode_mknod(struct mnt_idmap *idmap, struct inode *dir,
++			   struct dentry *dentry, umode_t mode, dev_t rdev)
++{
++	return -EIO;
++}
++
++static int bad_inode_rename2(struct mnt_idmap *idmap,
++			     struct inode *old_dir, struct dentry *old_dentry,
++			     struct inode *new_dir, struct dentry *new_dentry,
++			     unsigned int flags)
++{
++	return -EIO;
++}
++
++static int bad_inode_readlink(struct dentry *dentry, char __user *buffer,
++		int buflen)
++{
++	return -EIO;
++}
++
++static int bad_inode_permission(struct mnt_idmap *idmap,
++				struct inode *inode, int mask)
++{
++	return -EIO;
++}
++
++static int bad_inode_getattr(struct mnt_idmap *idmap,
++			     const struct path *path, struct kstat *stat,
++			     u32 request_mask, unsigned int query_flags)
++{
++	return -EIO;
++}
++
++static int bad_inode_setattr(struct mnt_idmap *idmap,
++			     struct dentry *direntry, struct iattr *attrs)
++{
++	return -EIO;
++}
++
++static ssize_t bad_inode_listxattr(struct dentry *dentry, char *buffer,
++			size_t buffer_size)
++{
++	return -EIO;
++}
++
++static const char *bad_inode_get_link(struct dentry *dentry,
++				      struct inode *inode,
++				      struct delayed_call *done)
++{
++	return ERR_PTR(-EIO);
++}
++
++static struct posix_acl *bad_inode_get_acl(struct inode *inode, int type, bool rcu)
++{
++	return ERR_PTR(-EIO);
++}
++
++static int bad_inode_fiemap(struct inode *inode,
++			    struct fiemap_extent_info *fieinfo, u64 start,
++			    u64 len)
++{
++	return -EIO;
++}
++
++static int bad_inode_update_time(struct inode *inode, enum fs_update_time type,
++				 unsigned int flags)
++{
++	return -EIO;
++}
++
++static int bad_inode_atomic_open(struct inode *inode, struct dentry *dentry,
++				 struct file *file, unsigned int open_flag,
++				 umode_t create_mode)
++{
++	return -EIO;
++}
++
++static int bad_inode_tmpfile(struct mnt_idmap *idmap,
++			     struct inode *inode, struct file *file,
++			     umode_t mode)
++{
++	return -EIO;
++}
++
++static int bad_inode_set_acl(struct mnt_idmap *idmap,
++			     struct dentry *dentry, struct posix_acl *acl,
++			     int type)
++{
++	return -EIO;
++}
++
++const struct inode_operations bad_inode_ops =
++{
++	.create		= bad_inode_create,
++	.lookup		= bad_inode_lookup,
++	.link		= bad_inode_link,
++	.unlink		= bad_inode_unlink,
++	.symlink	= bad_inode_symlink,
++	.mkdir		= bad_inode_mkdir,
++	.rmdir		= bad_inode_rmdir,
++	.mknod		= bad_inode_mknod,
++	.rename		= bad_inode_rename2,
++	.readlink	= bad_inode_readlink,
++	.permission	= bad_inode_permission,
++	.getattr	= bad_inode_getattr,
++	.setattr	= bad_inode_setattr,
++	.listxattr	= bad_inode_listxattr,
++	.get_link	= bad_inode_get_link,
++	.get_inode_acl	= bad_inode_get_acl,
++	.fiemap		= bad_inode_fiemap,
++	.update_time	= bad_inode_update_time,
++	.atomic_open	= bad_inode_atomic_open,
++	.tmpfile	= bad_inode_tmpfile,
++	.set_acl	= bad_inode_set_acl,
++};
++
++/*
++ * This tests whether an inode has been flagged as bad. The test uses
++ * &bad_inode_ops to cover the case of invalidated inodes as well as
++ * those created by make_bad_inode() above.
++ */
++
++/**
++ *	is_bad_inode - is an inode errored
++ *	@inode: inode to test
++ *
++ *	Returns true if the inode in question has been marked as bad.
++ */
++
++bool is_bad_inode(struct inode *inode)
++{
++	return (inode->i_op == &bad_inode_ops);
++}
++
++EXPORT_SYMBOL(is_bad_inode);
+diff --git a/fs/internal.h b/fs/internal.h
+index 3fb532b80f05a033c74d293cc4506d7b5468db33..2f4c9a4053a0185142a743567c562a288de137d8 100644
+--- a/fs/internal.h
++++ b/fs/internal.h
+@@ -224,6 +224,7 @@ bool in_group_or_capable(struct mnt_idmap *idmap,
+  * fs-writeback.c
+  */
+ long get_nr_dirty_inodes(void);
++extern const struct inode_operations bad_inode_ops;
+ bool sync_lazytime(struct inode *inode);
+ 
+ /*

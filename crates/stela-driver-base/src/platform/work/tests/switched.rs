@@ -499,3 +499,6 @@ fn timeout_quarantines_executor() {
 mod bound;
 
 mod firmware;
+
+#[cfg(feature = "linux-kernel")]
+mod service_geometry;

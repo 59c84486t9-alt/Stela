@@ -176,9 +176,9 @@ unsafe impl Registers for NativeRegisters {
             return Err(Error::Address);
         }
         Ok(match width {
-            1 => u32::from(self.function.config().read8(offset)),
-            2 => u32::from(self.function.config().read16(offset)),
-            _ => self.function.config().read32(offset),
+            1 => u32::from(self.function.config().read8(offset)?),
+            2 => u32::from(self.function.config().read16(offset)?),
+            _ => self.function.config().read32(offset)?,
         })
     }
     fn parent_write(&mut self, offset: u16, width: u8, value: u32) -> Result<(), Error> {
@@ -189,10 +189,10 @@ unsafe impl Registers for NativeRegisters {
             return Err(Error::Address);
         }
         match width {
-            1 => self.function.config().write8(offset, value as u8),
-            2 => self.function.config().write16(offset, value as u16),
-            _ => self.function.config().write32(offset, value),
-        }
+            1 => self.function.config().write8(offset, value as u8)?,
+            2 => self.function.config().write16(offset, value as u16)?,
+            _ => self.function.config().write32(offset, value)?,
+        };
         Ok(())
     }
     fn bar(&self, index: u8) -> (u64, u64, bool) {

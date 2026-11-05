@@ -3,8 +3,8 @@
 //! This is an access/lifetime boundary, not a host bridge, driver registry or
 //! DMA attachment. Its unsafe producer must keep the real exclusion owner.
 use super::{
-    Address, EcamWindow, Function,
-    owned::{ConfigError, ConfigRetention, OwnedConfig},
+    Address, ConfigError, ConfigFailure, EcamWindow, Function,
+    owned::{ConfigRetention, OwnedConfig},
 };
 use crate::bus::dma::{
     mapping::{DmaDomain, DmaError},
@@ -151,7 +151,7 @@ impl NativeFunction {
             Ok(value) => value,
             Err(error) => {
                 return Err((
-                    Error::Config(ConfigError::Mapping(error)),
+                    Error::Config(ConfigError::before_effect(ConfigFailure::Mapping(error))),
                     (function, exclusion),
                 ));
             }
@@ -172,7 +172,15 @@ impl NativeFunction {
 
     fn latch<T>(&mut self, result: Result<T, Error>) -> Result<T, Error> {
         if let Err(error) = result {
-            self.failure.get_or_insert(error);
+            let observation = match error {
+                Error::Config(error) | Error::Dma(DmaError::Config(error)) => {
+                    error.is_observation()
+                }
+                _ => false,
+            };
+            if !observation {
+                self.failure.get_or_insert(error);
+            }
         }
         result
     }
@@ -186,7 +194,7 @@ impl NativeFunction {
         }
         self.retention
             .check_live()
-            .map_err(|e| Error::Config(ConfigError::Mapping(e)))?;
+            .map_err(|e| Error::Config(ConfigError::before_effect(ConfigFailure::Mapping(e))))?;
         if let Some((domain, generation)) = &*self.bound {
             let actual = domain
                 .check_current_configuration(&self.function.config)
@@ -258,9 +266,9 @@ impl NativeFunction {
             if observe(self.function.config())? != self.description {
                 return Err(Error::IdentityChanged);
             }
-            self.retention
-                .check_live()
-                .map_err(|error| Error::Config(ConfigError::Mapping(error)))
+            self.retention.check_live().map_err(|error| {
+                Error::Config(ConfigError::before_effect(ConfigFailure::Mapping(error)))
+            })
         })();
         self.latch(result)
     }

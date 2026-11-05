@@ -23,6 +23,7 @@ pub struct NativeResources {
     pub registers: Mapping,
     pub memory: &'static dyn PageSource,
     pub clock: Clock,
+    pub minimum: Rc<dyn crate::bus::pci::power::Timer>,
 }
 
 /// Attach a native EHCI requester. Initialization errors keep the
@@ -57,6 +58,7 @@ pub unsafe fn attach(
             registers: resources.registers,
             memory: resources.memory,
             clock: resources.clock,
+            minimum: resources.minimum,
         }),
     }))?;
     match controller.hw().domain() {
@@ -109,6 +111,7 @@ struct Resources {
     registers: Mapping,
     memory: &'static dyn PageSource,
     clock: Clock,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
 }
 struct Native {
     resources: Option<Resources>,
@@ -125,23 +128,37 @@ impl Native {
 impl Hardware for Native {
     fn validate(&mut self) -> Result<(), Error> {
         let r = self.r();
+        r.minimum.check().map_err(Error::Minimum)?;
         if r.requester.function()?.class != CLASS {
             return Err(Error::Invalid);
         }
         // The shared native timer checks duration multiplication before effects
         // and uses wrapping elapsed TSC ticks, including counter rollover.
-        r.clock.check().map_err(|_| Error::Clock)?;
+        r.clock
+            .check_duration(BIOS_HANDOFF_US)
+            .map_err(|_| Error::Clock)?;
         if r.registers.attribute() != Ok(CacheAttribute::Uncached)
             || r.registers.protection() != Ok(Protection::ReadWrite)
         {
             return Err(Error::Register);
         }
-        let bar = r.requester.function()?.config().read32(0x10);
+        let bar = r
+            .requester
+            .function()?
+            .config()
+            .read32(0x10)
+            .map_err(Error::Config)?;
         if bar & 1 != 0 || bar & 6 == 2 || bar & 6 == 6 {
             return Err(Error::Unsupported("EHCI BAR format"));
         }
         let upper = if bar & 6 == 4 {
-            u64::from(r.requester.function()?.config().read32(0x14)) << 32
+            u64::from(
+                r.requester
+                    .function()?
+                    .config()
+                    .read32(0x14)
+                    .map_err(Error::Config)?,
+            ) << 32
         } else {
             0
         };
@@ -153,15 +170,28 @@ impl Hardware for Native {
         {
             return Err(Error::Register);
         }
-        let command = r.requester.function()?.config().read16(4);
+        let command = r
+            .requester
+            .function()?
+            .config()
+            .read16(4)
+            .map_err(Error::Config)?;
         if command & 4 != 0 {
             return Err(Error::Unsupported("EHCI initially uncontained requester"));
         }
         r.requester
             .function()?
             .config()
-            .write16(4, command | 2 | 0x400); // memory decode + INTx disabled, BME stays clear
-        if r.requester.function()?.config().read16(4) & 0x406 != 0x402 {
+            .write16(4, command | 2 | 0x400)
+            .map_err(Error::Config)?; // memory decode + INTx disabled, BME stays clear
+        if r.requester
+            .function()?
+            .config()
+            .read16(4)
+            .map_err(Error::Config)?
+            & 0x406
+            != 0x402
+        {
             return Err(Error::Register);
         }
         self.registers()?
@@ -185,7 +215,12 @@ impl Hardware for Native {
         if offset > 252 || !offset.is_multiple_of(4) {
             return Err(Error::Register);
         }
-        Ok(self.r().requester.function()?.config().read32(offset))
+        self.r()
+            .requester
+            .function()?
+            .config()
+            .read32(offset)
+            .map_err(Error::Config)
     }
     fn config_write(&mut self, offset: u16, value: u32) -> Result<(), Error> {
         if offset > 252 || !offset.is_multiple_of(4) {
@@ -195,7 +230,8 @@ impl Hardware for Native {
             .requester
             .function()?
             .config()
-            .write32(offset, value);
+            .write32(offset, value)
+            .map_err(Error::Config)?;
         Ok(())
     }
     fn config_os_owned(&mut self, offset: u16) -> Result<(), Error> {
@@ -207,7 +243,8 @@ impl Hardware for Native {
             .requester
             .function()?
             .config()
-            .write8(offset + 3, 1);
+            .write8(offset + 3, 1)
+            .map_err(Error::Config)?;
         Ok(())
     }
     fn bytes(&self) -> usize {
@@ -224,7 +261,7 @@ impl Hardware for Native {
         core::hint::spin_loop();
     }
     fn delay_us(&mut self, us: u64) -> Result<(), Error> {
-        self.r().clock.wait_us(us).map_err(|_| Error::Clock)
+        self.r().minimum.wait_us(us).map_err(Error::Minimum)
     }
     fn allocate(&mut self, limit: u64) -> Result<Arena, Error> {
         let r = self.r();
@@ -242,9 +279,11 @@ impl Hardware for Native {
     }
     fn bus_master(&mut self, enabled: bool) -> Result<(), Error> {
         let config = self.r().requester.function()?.config();
-        let old = config.read16(4);
-        config.write16(4, if enabled { old | 6 | 0x400 } else { old & !4 });
-        if (config.read16(4) & 4 != 0) != enabled {
+        let old = config.read16(4).map_err(Error::Config)?;
+        config
+            .write16(4, if enabled { old | 6 | 0x400 } else { old & !4 })
+            .map_err(Error::Config)?;
+        if (config.read16(4).map_err(Error::Config)? & 4 != 0) != enabled {
             return Err(Error::Register);
         }
         Ok(())
@@ -267,20 +306,18 @@ impl Hardware for Native {
         unsafe { self.r().requester.retire() }
     }
     fn retire(&mut self) -> Result<(), Error> {
-        if !self.r().requester.is_retired() {
+        let resources = self.resources.as_mut().ok_or(Error::Quarantined)?;
+        if !resources.requester.is_retired() {
             return Err(Error::Quarantined);
         }
-        // SAFETY: Controller::shutdown has stopped engines, BME and DMA,
-        // drained the domain and removed its arena mapping; no callbacks exist.
-        unsafe { self.r().registers.retire() }.map_err(|_| Error::Register)?;
-        let resources = self.resources.take().ok_or(Error::Register)?;
-        let mut configuration = resources
-            .requester
-            .into_function()?
-            .into_config()
-            .into_mapping();
-        // SAFETY: same exclusive stopped owner, all register views retired.
-        unsafe { configuration.retire() }.map_err(|_| Error::Register)
+        // SAFETY: Controller::shutdown has stopped engines/BME/DMA and
+        // completed original payload, IRQ/users and unique attachment/pin
+        // retirement. Keep SAME native requester/function/provider graph
+        // before either external retirement callback can fail or unwind.
+        unsafe { resources.registers.retire() }.map_err(Error::Mapping)?;
+        // SAFETY: every register/table accessor is retired; original actual
+        // configuration custody remains inside that same Retired requester.
+        unsafe { resources.requester.retire_configuration() }
     }
     fn domain(&mut self) -> Result<Arc<dyn DmaDomain>, Error> {
         self.r().requester.domain()
@@ -294,6 +331,7 @@ impl Controller {
             arena: None,
             owner: Rc::new(()),
             state: State::Failed,
+            fault: None,
             operational: 0,
             ports: Vec::new(),
             next_generation: 0,
@@ -373,7 +411,7 @@ impl Controller {
         self.wait(self.operational + STS, HALT, 0, TRANSITION_US)?;
         self.put(CONFIG, 1)?;
         self.wait(self.operational + CONFIG, 1, 1, TRANSITION_US)?;
-        self.hw().delay_us(5_000)?; // Root-routing settle, not register readback.
+        self.delay_minimum(5_000)?; // Root-routing settle, not register readback.
         // HCRST is not USB device-address retirement. Before minting any
         // default-address owner, prove every untracked EHCI root isolated.
         for index in 0..self.ports.len() {
@@ -454,8 +492,10 @@ impl Controller {
             }
         }
         self.arena = None;
-        self.hw().detach_requester()?;
-        self.hw().retire()?;
+        let detached = self.hw().detach_requester();
+        self.guard(detached)?;
+        let retired = self.hw().retire();
+        self.guard(retired)?;
         self.ports.iter_mut().for_each(|port| *port = None);
         self.state = State::Stopped;
         Ok(())

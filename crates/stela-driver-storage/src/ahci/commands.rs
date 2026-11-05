@@ -160,6 +160,12 @@ impl AhciDisk {
         issues: &mut [&mut Issue],
     ) -> Vec<Option<Result<(), BlockError>>> {
         let mut results: Vec<_> = issues.iter().map(|_| None).collect();
+        if let Err(error) = self.minimum.ready() {
+            for result in &mut results {
+                *result = Some(Err(error.clone()));
+            }
+            return results;
+        }
         let mut launched = issues
             .iter()
             .filter(|issue| issue.launched.is_some())
@@ -275,6 +281,10 @@ impl AhciDisk {
 
     /// An internal command (`ata_exec_internal`): a failure kicks the engine
     /// so it forgets the command, and is returned as is.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Return complete typed command failure and recovery context without allocation on the failure path."
+    )]
     pub(super) fn internal(
         &mut self,
         port: &impl CommandPort,
@@ -299,6 +309,7 @@ impl AhciDisk {
         ) else {
             return Ok(());
         };
+        self.minimum.ready().map_err(Failure::new)?;
         stop_engine(port, self.clock).map_err(Failure::new)?;
         start_engine(port);
         Err(failure)
@@ -306,6 +317,10 @@ impl AhciDisk {
 
     /// Issue the command once in slot 0, the port running nothing else, and
     /// wait for its completion or error.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Return complete typed command failure and recovery context without allocation on the failure path."
+    )]
     pub(super) fn attempt(
         &mut self,
         port: &impl CommandPort,
@@ -313,6 +328,7 @@ impl AhciDisk {
     ) -> Result<(), Failure> {
         let launched = self.launch(port, 0, true, request)?;
         loop {
+            self.minimum.ready().map_err(Failure::new)?;
             if let Some(seen) = self.look(port, &[&launched]) {
                 return seen.failure.map_or(Ok(()), Err);
             }
@@ -323,6 +339,10 @@ impl AhciDisk {
 
     /// Issue the command once in `slot`; `alone` when the port runs no
     /// other command, whose interrupts and ending FIS marks it may clear.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Return complete typed command failure and recovery context without allocation on the failure path."
+    )]
     pub(super) fn launch(
         &mut self,
         port: &impl CommandPort,
@@ -330,6 +350,7 @@ impl AhciDisk {
         alone: bool,
         request: AtaRequest,
     ) -> Result<Launched, Failure> {
+        self.ready().map_err(Failure::new)?;
         let AtaRequest {
             command,
             feature,
@@ -369,7 +390,7 @@ impl AhciDisk {
             (count >> 8) as u8,
         ];
         let entries = u32::from(bytes > 0);
-        let tables = match slot {
+        let tables: &mut DmaBuffer = match slot {
             0 => &mut self.table,
             slot => &mut self.slots[slot - 1].table,
         };

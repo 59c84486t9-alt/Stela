@@ -1,0 +1,247 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 01:36:10 -0500
+Subject: [PATCH] refactor(fs): separate original file table initialization
+
+---
+ fs/Makefile          |  2 +-
+ fs/file_table.c      | 69 +------------------------------------
+ fs/file_table_init.c | 82 ++++++++++++++++++++++++++++++++++++++++++++
+ fs/file_table_init.h | 30 ++++++++++++++++
+ 4 files changed, 114 insertions(+), 69 deletions(-)
+ create mode 100644 fs/file_table_init.c
+ create mode 100644 fs/file_table_init.h
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 37a69a75d657442d5d45c684161d129badb63ba6..8c5e07d5493dac07f07686e2cc9ee7c8fca905ba 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -7,7 +7,7 @@
+ # 
+ 
+ 
+-obj-y :=	open.o filp_close.o read_write.o file_table.o super.o \
++obj-y :=	open.o filp_close.o read_write.o file_table.o file_table_init.o super.o \
+ 		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o path_get.o name_hash.o filename.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o dcache_init.o inode.o inode_cache_init.o inode_evict.o \
+ 		attr.o bad_inode.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o \
+diff --git a/fs/file_table.c b/fs/file_table.c
+index c68b8c0a4097ae9dcf6d0320fef39c80f1517bcc..87ee96b31b39a40bfdb19862449e62e66751db3b 100644
+--- a/fs/file_table.c
++++ b/fs/file_table.c
+@@ -32,33 +32,12 @@
+ 
+ #include <asm/runtime-const.h>
+ 
++#include "file_table_init.h"
+ #include "internal.h"
+ 
+-/* sysctl tunables... */
+-static struct files_stat_struct files_stat = {
+-	.max_files = NR_FILE
+-};
+-
+-/* SLAB cache for file structures */
+-static struct kmem_cache *__filp_cache __ro_after_init;
+ #define filp_cache runtime_const_ptr(__filp_cache)
+-static struct kmem_cache *__bfilp_cache __ro_after_init;
+ #define bfilp_cache runtime_const_ptr(__bfilp_cache)
+ 
+-static struct percpu_counter nr_files __cacheline_aligned_in_smp;
+-
+-/* Container for backing file with optional user path */
+-struct backing_file {
+-	struct file file;
+-	union {
+-		struct path user_path;
+-		freeptr_t bf_freeptr;
+-	};
+-#ifdef CONFIG_SECURITY
+-	void *security;
+-#endif
+-};
+-
+ #define backing_file(f) container_of(f, struct backing_file, file)
+ 
+ const struct path *backing_file_user_path(const struct file *f)
+@@ -113,15 +92,6 @@ static long get_nr_files(void)
+ 	return percpu_counter_read_positive(&nr_files);
+ }
+ 
+-/*
+- * Return the maximum number of open files in the system
+- */
+-unsigned long get_max_files(void)
+-{
+-	return files_stat.max_files;
+-}
+-EXPORT_SYMBOL_GPL(get_max_files);
+-
+ #if defined(CONFIG_SYSCTL) && defined(CONFIG_PROC_FS)
+ 
+ /*
+@@ -628,40 +598,3 @@ void fput_close(struct file *file)
+ 	if (file_ref_put_close(&file->f_ref))
+ 		__fput_deferred(file);
+ }
+-
+-void __init files_init(void)
+-{
+-	struct kmem_cache_args args = {
+-		.use_freeptr_offset = true,
+-		.freeptr_offset = offsetof(struct file, f_freeptr),
+-	};
+-
+-	__filp_cache = kmem_cache_create("filp", sizeof(struct file), &args,
+-				SLAB_HWCACHE_ALIGN | SLAB_PANIC |
+-				SLAB_ACCOUNT | SLAB_TYPESAFE_BY_RCU);
+-	runtime_const_init(ptr, __filp_cache);
+-
+-	args.freeptr_offset = offsetof(struct backing_file, bf_freeptr);
+-	__bfilp_cache = kmem_cache_create("bfilp", sizeof(struct backing_file),
+-				&args, SLAB_HWCACHE_ALIGN | SLAB_PANIC |
+-				SLAB_ACCOUNT | SLAB_TYPESAFE_BY_RCU);
+-	runtime_const_init(ptr, __bfilp_cache);
+-
+-	percpu_counter_init(&nr_files, 0, GFP_KERNEL);
+-}
+-
+-/*
+- * One file with associated inode and dcache is very roughly 1K. Per default
+- * do not use more than 10% of our memory for files.
+- */
+-void __init files_maxfiles_init(void)
+-{
+-	unsigned long n;
+-	unsigned long nr_pages = totalram_pages();
+-	unsigned long memreserve = (nr_pages - nr_free_pages()) * 3/2;
+-
+-	memreserve = min(memreserve, nr_pages - 1);
+-	n = ((nr_pages - memreserve) * (PAGE_SIZE / 1024)) / 10;
+-
+-	files_stat.max_files = max_t(unsigned long, n, NR_FILE);
+-}
+diff --git a/fs/file_table_init.c b/fs/file_table_init.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..c17be024af45dcebf8ba2441cad4e9b5aedcd1e2
+--- /dev/null
++++ b/fs/file_table_init.c
+@@ -0,0 +1,82 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * From fs/file_table.c.
++ * Copyright (C) 1991, 1992 Linus Torvalds
++ * Copyright (C) 1997 David S. Miller (davem@caip.rutgers.edu)
++ */
++#include <linux/export.h>
++#include <linux/fs.h>
++#include <linux/slab.h>
++#include <linux/swap.h>
++#include <asm/runtime-const.h>
++#ifdef CONFIG_STELA
++#include <stela/linux.h>
++#include <stela/page.h>
++#endif
++
++#include "file_table_init.h"
++
++/* sysctl tunables... */
++struct files_stat_struct files_stat = {
++	.max_files = NR_FILE
++};
++
++/* SLAB cache for file structures */
++struct kmem_cache *__filp_cache __ro_after_init;
++struct kmem_cache *__bfilp_cache __ro_after_init;
++
++struct percpu_counter nr_files __cacheline_aligned_in_smp;
++
++/*
++ * Return the maximum number of open files in the system
++ */
++unsigned long get_max_files(void)
++{
++	return files_stat.max_files;
++}
++EXPORT_SYMBOL_GPL(get_max_files);
++
++void __init files_init(void)
++{
++	struct kmem_cache_args args = {
++		.use_freeptr_offset = true,
++		.freeptr_offset = offsetof(struct file, f_freeptr),
++	};
++
++	__filp_cache = kmem_cache_create("filp", sizeof(struct file), &args,
++				SLAB_HWCACHE_ALIGN | SLAB_PANIC |
++				SLAB_ACCOUNT | SLAB_TYPESAFE_BY_RCU);
++	runtime_const_init(ptr, __filp_cache);
++
++	args.freeptr_offset = offsetof(struct backing_file, bf_freeptr);
++	__bfilp_cache = kmem_cache_create("bfilp", sizeof(struct backing_file),
++				&args, SLAB_HWCACHE_ALIGN | SLAB_PANIC |
++				SLAB_ACCOUNT | SLAB_TYPESAFE_BY_RCU);
++	runtime_const_init(ptr, __bfilp_cache);
++
++	percpu_counter_init(&nr_files, 0, GFP_KERNEL);
++}
++
++/*
++ * One file with associated inode and dcache is very roughly 1K. Per default
++ * do not use more than 10% of our memory for files.
++ */
++void __init files_maxfiles_init(void)
++{
++	unsigned long n;
++	unsigned long nr_pages = totalram_pages();
++	unsigned long free_pages;
++#ifdef CONFIG_STELA
++	if (stela_linux_available_page_frames(&free_pages) || !nr_pages ||
++	    free_pages > nr_pages)
++		stela_linux_fatal("file table free-frame snapshot unavailable");
++#else
++	free_pages = nr_free_pages();
++#endif
++	unsigned long memreserve = (nr_pages - free_pages) * 3/2;
++
++	memreserve = min(memreserve, nr_pages - 1);
++	n = ((nr_pages - memreserve) * (PAGE_SIZE / 1024)) / 10;
++
++	files_stat.max_files = max_t(unsigned long, n, NR_FILE);
++}
+diff --git a/fs/file_table_init.h b/fs/file_table_init.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..5e53081a6a7c0b68cdd800e47211ad07e9bcc7b4
+--- /dev/null
++++ b/fs/file_table_init.h
+@@ -0,0 +1,30 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * From fs/file_table.c.
++ * Copyright (C) 1991, 1992 Linus Torvalds
++ * Copyright (C) 1997 David S. Miller (davem@caip.rutgers.edu)
++ */
++#ifndef _FS_FILE_TABLE_INIT_H
++#define _FS_FILE_TABLE_INIT_H
++
++#include <linux/fs.h>
++#include <linux/percpu_counter.h>
++
++extern struct files_stat_struct files_stat;
++extern struct kmem_cache *__filp_cache;
++extern struct kmem_cache *__bfilp_cache;
++extern struct percpu_counter nr_files;
++
++/* Container for backing file with optional user path */
++struct backing_file {
++	struct file file;
++	union {
++		struct path user_path;
++		freeptr_t bf_freeptr;
++	};
++#ifdef CONFIG_SECURITY
++	void *security;
++#endif
++};
++
++#endif

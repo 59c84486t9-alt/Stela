@@ -54,6 +54,10 @@ pub(super) struct Native {
 }
 impl Hci<Host> {
     /// Owned SCO/queued wideband for an initialized source QCA profile.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn into_qca_media(
         mut self,
         dma: &mut dyn DmaAllocator,
@@ -65,6 +69,10 @@ impl Hci<Host> {
     }
     /// Open USB2 CVSD SCO on this already initialized exact Realtek function.
     /// The host stack supplies voice state and owns HCI command credits.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn into_realtek_sco(
         mut self,
         dma: &mut dyn DmaAllocator,
@@ -78,6 +86,10 @@ impl Hci<Host> {
     /// evidence and a current HCI command allowance. This must precede
     /// concurrent host/guest stack ownership; it neither performs nor permits a
     /// shared Wi-Fi/Bluetooth reset. All DMA comes from this attachment's owner.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn into_mt7925_media(
         mut self,
         dma: &mut dyn DmaAllocator,
@@ -328,6 +340,10 @@ impl Native {
             }
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn write(&mut self, host: &mut Host, kind: Kind, bytes: &[u8]) -> media::Result<()> {
         host.validate()?;
         let deadline = host
@@ -462,6 +478,10 @@ impl Native {
     /// One HCI packet's isochronous services. `btusb_isoc_tx` paces every
     /// alternate-6 URB (`__fill_isoc_descriptor_msbc`): six or seven empty
     /// services, alternately, then the packet, for its 7.5 ms interval.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn sco_lengths(&self, pair: Pair, packet: usize) -> media::Result<Vec<usize>> {
         let flow = (pair.alternate == 6).then_some(self.alt6_packet_flow);
         crate::usb::bluetooth::realtek::media::output_lengths(
@@ -470,6 +490,10 @@ impl Native {
             flow,
         )
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn queue_sco(&mut self, host: &mut Host, bytes: &[u8]) -> media::Result<Option<u64>> {
         host.validate()?;
         self.active()?;
@@ -554,6 +578,10 @@ impl Native {
         })?;
         Ok(Some(sequence))
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn poll_sco_output(&mut self, host: &mut Host) -> media::Result<Option<media::OutputReceipt>> {
         host.validate()?;
         if self.poisoned || self.retired {
@@ -798,9 +826,17 @@ impl Host {
     }
 }
 impl MediaIo for Host {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn queue_sco(&mut self, bytes: &[u8]) -> media::Result<Option<u64>> {
         self.with_media(|m, h| m.queue_sco(h, bytes))
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn poll_sco_output(&mut self) -> media::Result<Option<media::OutputReceipt>> {
         self.with_media(|m, h| m.poll_sco_output(h))
     }
@@ -818,6 +854,10 @@ impl MediaIo for Host {
     fn read_media(&mut self, kind: Kind) -> Result<Option<Read>, BlockError> {
         self.with_media(|m, h| m.read(h, kind))
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn write_media(&mut self, kind: Kind, bytes: &[u8]) -> media::Result<()> {
         self.with_media(|m, h| m.write(h, kind, bytes))
     }

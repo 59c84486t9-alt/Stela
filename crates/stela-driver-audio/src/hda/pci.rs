@@ -18,16 +18,14 @@ use super::{
     Config, CorbReset, MmioRegisters, PositionPolicy, ProbePolicy, Registers, ResetPolicy,
     StreamTagPolicy,
 };
+use crate::Timer;
 use crate::bus::pci::regs;
-use crate::bus::{
-    i2c::Timer,
-    pci::{Address, Bar, ConfigSpace, Function, Layout},
-};
+use crate::bus::pci::{Address, Bar, ConfigSpace, Function, Layout};
 
 mod power;
 mod registers;
 pub use power::PowerError;
-pub use registers::PciRegisters;
+pub use registers::{BindingFailure, OwnedBindingResult, PciRegisters};
 
 pub const CLASS: [u8; 3] = [0x04, 0x03, 0x00];
 const INTEL: u16 = 0x8086;
@@ -116,13 +114,13 @@ impl Control {
                 mask,
                 value,
             } => {
-                let previous = config.read8(offset);
+                let previous = config.read8(offset)?;
                 if previous == u8::MAX {
                     return Err(AttachError::ConfigurationRejected);
                 }
                 let next = previous & !mask | value;
-                config.write8(offset, next);
-                if config.read8(offset) != next {
+                config.write8(offset, next)?;
+                if config.read8(offset)? != next {
                     return Err(AttachError::ConfigurationRejected);
                 }
             }
@@ -131,7 +129,7 @@ impl Control {
                 mask,
                 value,
             } => {
-                let previous = config.read16(offset);
+                let previous = config.read16(offset)?;
                 if previous == u16::MAX {
                     return Err(AttachError::ConfigurationRejected);
                 }
@@ -139,8 +137,8 @@ impl Control {
                 if next == previous {
                     return Ok(());
                 }
-                config.write16(offset, next);
-                let observed = config.read16(offset);
+                config.write16(offset, next)?;
+                let observed = config.read16(offset)?;
                 if observed == u16::MAX || observed != next {
                     return Err(AttachError::ConfigurationRejected);
                 }
@@ -218,6 +216,9 @@ pub enum Ownership {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttachError {
+    MinimumDelay(crate::bus::pci::power::Error),
+    Config(crate::bus::pci::ConfigError),
+    PciCapability(crate::bus::pci::CapabilityError),
     UnsupportedController,
     Ownership,
     IdentityChanged,
@@ -340,7 +341,7 @@ fn check_subsystem<C: ConfigSpace>(
     if identity.vendor != AMD || !matches!(identity.device, 0x1457 | 0x1487 | 0x15e3) {
         return Ok(());
     }
-    let subsystem = config.read32(regs::SUBSYSTEM_VENDOR_ID);
+    let subsystem = config.read32(regs::SUBSYSTEM_VENDOR_ID)?;
     if subsystem == u32::MAX {
         return Err(AttachError::SubsystemUnavailable);
     }
@@ -439,7 +440,11 @@ fn capabilities<C: ConfigSpace>(
     reset_policy: ResetPolicy,
 ) -> Result<Capabilities, AttachError> {
     let mut found = Capabilities::default();
-    if config.read16(regs::STATUS) & regs::STATUS_CAP_LIST == 0 {
+    let status = config.read16(regs::STATUS)?;
+    if status == u16::MAX {
+        return Err(AttachError::InvalidCapabilities);
+    }
+    if status & regs::STATUS_CAP_LIST == 0 {
         return if controls.contains(&PCH_SNOOP) {
             Err(AttachError::InvalidCapabilities)
         } else {
@@ -449,14 +454,14 @@ fn capabilities<C: ConfigSpace>(
     // Capability bodies and controls are checked separately so the one owned
     // PCIe Device Control field is allowed without allowing body/body aliases.
     for entry in config.capabilities() {
-        let entry = entry.map_err(|_| AttachError::InvalidCapabilities)?;
+        let entry = entry?;
         let (offset16, id) = (entry.offset, entry.id);
         let mut owned_pcie_device_control = false;
         let slot = match id {
             CAP_PM => Some(&mut found.pm),
             CAP_MSI => Some(&mut found.msi),
             CAP_MSIX => {
-                if config.read16(offset16 + 2) == u16::MAX {
+                if config.read16(offset16 + 2)? == u16::MAX {
                     return Err(AttachError::InvalidCapabilities);
                 }
                 Some(&mut found.msix)
@@ -465,7 +470,7 @@ fn capabilities<C: ConfigSpace>(
                 if entry.layout != Layout::Sized {
                     return Err(AttachError::InvalidCapabilities);
                 }
-                let kind = (config.read16(offset16 + 2) >> 4) & 15;
+                let kind = (config.read16(offset16 + 2)? >> 4) & 15;
                 owned_pcie_device_control =
                     offset16 + 8 == SCH_HDA_DEVC && matches!(kind, 0 | 1 | 9);
                 Some(&mut found.pcie)
@@ -507,26 +512,28 @@ fn capabilities<C: ConfigSpace>(
     Ok(found)
 }
 
-fn delay(timer: &impl Timer, us: u64) {
-    let start = timer.now_us();
-    while timer.now_us().wrapping_sub(start) < us {
-        timer.relax();
-    }
+fn delay(timer: &impl Timer, us: u64) -> Result<(), AttachError> {
+    timer.check().map_err(AttachError::MinimumDelay)?;
+    timer.wait_us(us).map_err(AttachError::MinimumDelay)
 }
 
-fn bar_matches<C: ConfigSpace>(config: &C, base: u64, wide: bool) -> bool {
-    let low = config.read32(regs::BASE_ADDRESS_0);
+fn bar_matches<C: ConfigSpace>(
+    config: &C,
+    base: u64,
+    wide: bool,
+) -> Result<bool, crate::bus::pci::ConfigError> {
+    let low = config.read32(regs::BASE_ADDRESS_0)?;
     let expected_type = if wide { 4 } else { 0 };
     if low & 15 != expected_type {
-        return false;
+        return Ok(false);
     }
     let actual = u64::from(low & !15)
         | if wide {
-            u64::from(config.read32(regs::BASE_ADDRESS_0 + 4)) << 32
+            u64::from(config.read32(regs::BASE_ADDRESS_0 + 4)?) << 32
         } else {
             0
         };
-    actual == base
+    Ok(actual == base)
 }
 
 fn validated_bar<C: ConfigSpace>(config: &C, bar0: Bar) -> Result<(u64, u64, bool), AttachError> {
@@ -547,7 +554,7 @@ fn validated_bar<C: ConfigSpace>(config: &C, bar0: Bar) -> Result<(u64, u64, boo
         }
         _ => return Err(AttachError::InvalidBar),
     };
-    if !bar_matches(config, base, wide) {
+    if !bar_matches(config, base, wide)? {
         return Err(AttachError::InvalidBar);
     }
     Ok((base, bytes, wide))
@@ -572,25 +579,58 @@ pub unsafe fn prepare_with_registers<'a, C: ConfigSpace, R: Registers>(
     bar0: Bar,
     timer: &impl Timer,
     ownership: Ownership,
+    registers: R,
+) -> Result<PciRegisters<R, &'a mut Function<C>>, AttachError> {
+    // SAFETY: forwarded complete original platform and stopped-DMA contract.
+    unsafe { prepare_mapped(function, bar0, timer, ownership, registers, true) }
+}
+
+/// Prepare conventional PCI power/decode/snoop without enabling bus mastering.
+/// This deliberately permits inherited conventional stream RUN state so the
+/// owning driver can stop it under its original root before new DMA binding.
+///
+/// # Safety
+/// ExclusiveLegacy ownership, real original config/BAR/root/backing, D0/decode
+/// and firmware/DSP/AML/SMM exclusion from prepare_with_registers apply. Prior
+/// DMA backing remains pinned; no root/private-domain migration is yet allowed.
+/// An owning lifecycle must retain both arguments on every error or unwind.
+pub unsafe fn prepare_cold_with_registers<'a, C: ConfigSpace, R: Registers>(
+    function: &'a mut Function<C>,
+    bar0: Bar,
+    timer: &impl Timer,
+    ownership: Ownership,
+    registers: R,
+) -> Result<PciRegisters<R, &'a mut Function<C>>, AttachError> {
+    // SAFETY: forwarded original-owner cold containment prerequisites.
+    unsafe { prepare_mapped(function, bar0, timer, ownership, registers, false) }
+}
+
+unsafe fn prepare_mapped<'a, C: ConfigSpace, R: Registers>(
+    function: &'a mut Function<C>,
+    bar0: Bar,
+    timer: &impl Timer,
+    ownership: Ownership,
     mut registers: R,
-) -> Result<PciRegisters<'a, R, C>, AttachError> {
+    stopped: bool,
+) -> Result<PciRegisters<R, &'a mut Function<C>>, AttachError> {
     use super::registers::{
         COMMAND_RUN, CORBCTL, GCAP, RIRBCTL, SD_CTL, SD_RUN, VMAJ, VMIN, stream_base,
     };
     use crate::Error;
+    timer.check().map_err(AttachError::MinimumDelay)?;
     if ownership != Ownership::ExclusiveLegacy {
         return Err(AttachError::Ownership);
     }
     let selected = identify(function)?;
     let config = function.config();
-    let id = config.read32(regs::VENDOR_ID);
-    let class = config.read32(regs::CLASS_REVISION);
+    let id = config.read32(regs::VENDOR_ID)?;
+    let class = config.read32(regs::CLASS_REVISION)?;
     let actual = identity(
         id as u16,
         (id >> 16) as u16,
         [(class >> 24) as u8, (class >> 16) as u8, (class >> 8) as u8],
     )?;
-    if actual != selected || config.read8(regs::HEADER_TYPE) & 0x7f != 0 {
+    if actual != selected || config.read8(regs::HEADER_TYPE)? & 0x7f != 0 {
         return Err(AttachError::IdentityChanged);
     }
     check_subsystem(config, selected, BoardIdentity::Unknown)?;
@@ -599,18 +639,18 @@ pub unsafe fn prepare_with_registers<'a, C: ConfigSpace, R: Registers>(
         return Err(AttachError::InvalidBar);
     }
     let caps = capabilities(config, selected.setup.controls(), selected.reset_policy)?;
-    let command = config.read16(regs::COMMAND);
+    let command = config.read16(regs::COMMAND)?;
     if command == u16::MAX || command & regs::COMMAND_MEMORY == 0 {
         return Err(AttachError::PowerNotReady);
     }
     if let Some(pm) = caps.pm {
-        let version = config.read16(pm + 2) & 7;
-        let state = config.read16(pm + 4);
+        let version = config.read16(pm + 2)? & 7;
+        let state = config.read16(pm + 4)?;
         if !(1..=3).contains(&version) || state == u16::MAX || state & PM_STATE != 0 {
             return Err(AttachError::PowerNotReady);
         }
     }
-    if selected.reset_policy == ResetPolicy::IntelClockGate && config.read32(CGCTL) == u32::MAX {
+    if selected.reset_policy == ResetPolicy::IntelClockGate && config.read32(CGCTL)? == u32::MAX {
         return Err(AttachError::ConfigurationRejected);
     }
     let (major, minor) = (registers.read8(VMAJ), registers.read8(VMIN));
@@ -640,7 +680,7 @@ pub unsafe fn prepare_with_registers<'a, C: ConfigSpace, R: Registers>(
         } else {
             SD_RUN
         };
-        if value & run != 0 {
+        if stopped && value & run != 0 {
             return Err(AttachError::ActiveDma { offset });
         }
     }
@@ -652,8 +692,9 @@ pub unsafe fn prepare_with_registers<'a, C: ConfigSpace, R: Registers>(
             .map_err(AttachError::MmioPreflight)?;
     }
     // SAFETY: the caller supplies exclusive platform ownership, power and a
-    // matching register mapping. Preflight above checked D0, stopped DMA and
-    // the identity-selected link controls before configuration writes.
+    // matching register mapping. Preflight checked D0 and the identity-selected
+    // link controls. The legacy entry requires stopped DMA; the cold entry
+    // leaves BME clear for the owning inherited-engine stop before root bind.
     let prepared = unsafe {
         prepare_inner(
             function,
@@ -661,7 +702,11 @@ pub unsafe fn prepare_with_registers<'a, C: ConfigSpace, R: Registers>(
             timer,
             ownership,
             BoardIdentity::Unknown,
-            true,
+            if stopped {
+                Preparation::Mapped
+            } else {
+                Preparation::ColdMapped
+            },
         )
     }?;
     // SAFETY: preparation and the register implementation refer to
@@ -717,7 +762,22 @@ pub unsafe fn prepare_with_board<C: ConfigSpace>(
     // SAFETY: the caller keeps exclusive PCI/platform ownership, stable
     // power and coherent reachable DMA, and supplies firmware-derived board
     // identity. This path performs no mapped-register preflight.
-    unsafe { prepare_inner(function, bar0, timer, ownership, board, false) }
+    unsafe {
+        prepare_inner(
+            function,
+            bar0,
+            timer,
+            ownership,
+            board,
+            Preparation::Unmapped,
+        )
+    }
+}
+
+enum Preparation {
+    Unmapped,
+    Mapped,
+    ColdMapped,
 }
 
 unsafe fn prepare_inner<C: ConfigSpace>(
@@ -726,35 +786,38 @@ unsafe fn prepare_inner<C: ConfigSpace>(
     timer: &impl Timer,
     ownership: Ownership,
     board: BoardIdentity<'_>,
-    mapped_preflight: bool,
+    preparation: Preparation,
 ) -> Result<Prepared, AttachError> {
+    timer.check().map_err(AttachError::MinimumDelay)?;
     if ownership != Ownership::ExclusiveLegacy {
         return Err(AttachError::Ownership);
     }
     let selected = identify(function)?;
     let address = function.address;
     let config = function.config();
-    let id = config.read32(regs::VENDOR_ID);
-    let class = config.read32(regs::CLASS_REVISION);
+    let id = config.read32(regs::VENDOR_ID)?;
+    let class = config.read32(regs::CLASS_REVISION)?;
     let actual = identity(
         id as u16,
         (id >> 16) as u16,
         [(class >> 24) as u8, (class >> 16) as u8, (class >> 8) as u8],
     )?;
-    if actual != selected || config.read8(regs::HEADER_TYPE) & 0x7f != 0 {
+    if actual != selected || config.read8(regs::HEADER_TYPE)? & 0x7f != 0 {
         return Err(AttachError::IdentityChanged);
     }
-    if selected.requires_mapped_preflight() && !mapped_preflight {
+    if selected.requires_mapped_preflight() && matches!(preparation, Preparation::Unmapped) {
         return Err(AttachError::MappedPreflightRequired);
     }
     check_subsystem(config, actual, board)?;
     let (base, bytes, wide) = validated_bar(config, bar0)?;
     let controls = selected.setup.controls();
     let caps = capabilities(config, controls, selected.reset_policy)?;
-    let pmcsr = caps.pm.map(|pm| {
-        let version = config.read16(pm + 2) & 7;
-        (pm + 4, version, config.read16(pm + 4))
-    });
+    let pmcsr = if let Some(pm) = caps.pm {
+        let version = config.read16(pm + 2)? & 7;
+        Some((pm + 4, version, config.read16(pm + 4)?))
+    } else {
+        None
+    };
     if let Some((_, version, value)) = pmcsr
         && (!(1..=3).contains(&version) || value == u16::MAX)
     {
@@ -762,22 +825,27 @@ unsafe fn prepare_inner<C: ConfigSpace>(
     }
     // Save resources before a D3hot exit can reset them. Disable decode/mastering
     // before restoring any BAR; PCI status is never written by command updates.
-    let bars: [u32; 6] =
-        core::array::from_fn(|i| config.read32(regs::BASE_ADDRESS_0 + i as u16 * 4));
-    let command = config.read16(regs::COMMAND);
+    let mut bars = [0; 6];
+    for (index, bar) in bars.iter_mut().enumerate() {
+        *bar = config.read32(regs::BASE_ADDRESS_0 + index as u16 * 4)?;
+    }
+    if bars.contains(&u32::MAX) {
+        return Err(AttachError::ConfigurationRejected);
+    }
+    let command = config.read16(regs::COMMAND)?;
     if command == u16::MAX {
         return Err(AttachError::ConfigurationRejected);
     }
     let command = command & !(regs::COMMAND_MEMORY | regs::COMMAND_MASTER);
-    config.write16(regs::COMMAND, command | regs::COMMAND_INTX_DISABLE);
+    config.write16(regs::COMMAND, command | regs::COMMAND_INTX_DISABLE)?;
     let result = (|| {
-        if config.read16(regs::COMMAND) & (regs::COMMAND_MEMORY | regs::COMMAND_MASTER) != 0 {
+        if config.read16(regs::COMMAND)? & (regs::COMMAND_MEMORY | regs::COMMAND_MASTER) != 0 {
             return Err(AttachError::ConfigurationRejected);
         }
         if let Some((offset, _, value)) = pmcsr {
             let state = value & PM_STATE;
             // PME_Status is W1C: write zero to preserve pending wake evidence.
-            config.write16(offset, value & !(PM_STATE | PM_PME_ENABLE | PM_PME_STATUS));
+            config.write16(offset, value & !(PM_STATE | PM_PME_ENABLE | PM_PME_STATUS))?;
             delay(
                 timer,
                 match state {
@@ -785,18 +853,18 @@ unsafe fn prepare_inner<C: ConfigSpace>(
                     2 => 200,
                     _ => 0,
                 },
-            );
-            if config.read16(offset) & PM_STATE != 0 {
+            )?;
+            if config.read16(offset)? & PM_STATE != 0 {
                 return Err(AttachError::PowerTransition);
             }
             if state == 3 && value & PM_NO_SOFT_RESET == 0 {
-                config.write16(regs::COMMAND, command | regs::COMMAND_INTX_DISABLE);
+                config.write16(regs::COMMAND, command | regs::COMMAND_INTX_DISABLE)?;
                 for (index, value) in bars.iter().enumerate() {
-                    config.write32(regs::BASE_ADDRESS_0 + index as u16 * 4, *value);
+                    config.write32(regs::BASE_ADDRESS_0 + index as u16 * 4, *value)?;
                 }
             }
         }
-        if !bar_matches(config, base, wide) {
+        if !bar_matches(config, base, wide)? {
             return Err(AttachError::InvalidBar);
         }
         // The exact identity selects ICH TCSEL, PCH TCSEL+word snoop, or
@@ -806,23 +874,30 @@ unsafe fn prepare_inner<C: ConfigSpace>(
         }
         for (offset, enable) in [(caps.msi, 1), (caps.msix, 1 << 15)] {
             if let Some(offset) = offset {
-                let previous = config.read16(offset + 2);
+                let previous = config.read16(offset + 2)?;
                 if previous == u16::MAX {
                     return Err(AttachError::ConfigurationRejected);
                 }
-                config.write16(offset + 2, previous & !enable);
-                if config.read16(offset + 2) & enable != 0 {
+                config.write16(offset + 2, previous & !enable)?;
+                if config.read16(offset + 2)? & enable != 0 {
                     return Err(AttachError::ConfigurationRejected);
                 }
             }
         }
-        let enabled =
-            command | regs::COMMAND_MEMORY | regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE;
-        config.write16(regs::COMMAND, enabled);
-        let readback = config.read16(regs::COMMAND);
+        let enabled = command
+            | regs::COMMAND_MEMORY
+            | regs::COMMAND_INTX_DISABLE
+            | if matches!(preparation, Preparation::ColdMapped) {
+                0
+            } else {
+                regs::COMMAND_MASTER
+            };
+        config.write16(regs::COMMAND, enabled)?;
+        let readback = config.read16(regs::COMMAND)?;
         if readback == u16::MAX
             || readback & (regs::COMMAND_MEMORY | regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE)
-                != regs::COMMAND_MEMORY | regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE
+                != enabled
+                    & (regs::COMMAND_MEMORY | regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE)
         {
             return Err(AttachError::ConfigurationRejected);
         }
@@ -833,11 +908,22 @@ unsafe fn prepare_inner<C: ConfigSpace>(
             bytes,
         })
     })();
-    if result.is_err() {
-        config.write16(regs::COMMAND, command | regs::COMMAND_INTX_DISABLE);
-    }
+    // Failure may follow a real config or minimum-delay effect. Preserve its
+    // exact cause and original owning graph; do not issue another write as
+    // though that effect had been rolled back. ColdMapped never enables BME.
     result
 }
 
 #[cfg(test)]
 pub(super) mod tests;
+
+impl From<crate::bus::pci::ConfigError> for AttachError {
+    fn from(error: crate::bus::pci::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+impl From<crate::bus::pci::CapabilityError> for AttachError {
+    fn from(error: crate::bus::pci::CapabilityError) -> Self {
+        Self::PciCapability(error)
+    }
+}

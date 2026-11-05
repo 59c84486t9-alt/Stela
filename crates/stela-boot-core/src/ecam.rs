@@ -1,5 +1,6 @@
 //! Pure geometry for original captured ECAM/RootBridge descriptions.
 //! This module creates no Resource, mapping, device exclusion or root permission.
+pub mod topology;
 use alloc::vec::Vec;
 use core::ops::RangeInclusive;
 use stela_drivers::bus::{
@@ -20,6 +21,18 @@ pub struct RootWindow {
     pub maximum: u64,
     pub translation: u64,
     pub length: u64,
+}
+
+impl RootWindow {
+    fn buses(&self) -> Option<RangeInclusive<u8>> {
+        (self.space == 2
+            && self.translation == 0
+            && self.flags & !0x0f == 0
+            && self.flags & 2 == 0
+            && self.maximum <= 255
+            && self.maximum.checked_sub(self.minimum)?.checked_add(1)? == self.length)
+            .then_some(self.minimum as u8..=self.maximum as u8)
+    }
 }
 
 fn physical(window: EcamWindow, bits: u8) -> Result<PhysicalSpan, Error> {
@@ -75,6 +88,84 @@ impl<'a> EcamInventory<'a> {
         Ok(Self { windows, bits })
     }
 
+    /// Select every bus granted by the captured root bridges. MCFG can
+    /// describe a wider decode aperture than the firmware assigned to roots.
+    /// Every granted bus must be accounted for by one original MCFG window.
+    pub fn root_windows(&self, roots: &[RootWindow]) -> Result<Vec<EcamWindow>, Error> {
+        for descriptor in roots {
+            if !roots.iter().any(|root| {
+                root.bridge == descriptor.bridge
+                    && root.segment == descriptor.segment
+                    && root.space == 2
+            }) {
+                return Err(Error::OutsideResource);
+            }
+        }
+        let mut selected = Vec::new();
+        for root in roots.iter().filter(|root| root.space == 2) {
+            let buses = root.buses().ok_or(Error::InvalidRange)?;
+            let mut first = *buses.start();
+            loop {
+                let index = self.window_for_bus(root.segment, first)?;
+                let last = self.windows[index].end_bus.min(*buses.end());
+                let (window, _) = self.subset(index, first..=last, roots)?;
+                selected.try_reserve(1).map_err(|_| Error::Exhausted)?;
+                selected.push(window);
+                if last == *buses.end() {
+                    break;
+                }
+                first = last + 1;
+            }
+        }
+        if selected.is_empty() {
+            return Err(Error::OutsideResource);
+        }
+        // Also reject partially overlapping grants. A wider grant can contain
+        // an entire subset while another root claims only part of that subset.
+        EcamInventory::validate(&selected, self.bits)?;
+        Ok(selected)
+    }
+
+    /// Check that an observed bridge cannot route outside its own root grant.
+    pub fn check_bridge(
+        &self,
+        roots: &[RootWindow],
+        address: Address,
+        downstream: RangeInclusive<u8>,
+    ) -> Result<(), Error> {
+        let segment = u32::from(address.segment);
+        let mut matching = roots.iter().filter_map(|root| {
+            (root.segment == segment)
+                .then(|| root.buses())
+                .flatten()
+                .filter(|buses| buses.contains(&address.bus))
+        });
+        let root = matching.next().ok_or(Error::OutsideResource)?;
+        if matching.next().is_some() {
+            return Err(Error::ResourceConflict);
+        }
+        if downstream.is_empty()
+            || !root.contains(downstream.start())
+            || !root.contains(downstream.end())
+        {
+            return Err(Error::OutsideResource);
+        }
+        for bus in downstream {
+            self.window_for_bus(segment, bus)?;
+        }
+        Ok(())
+    }
+
+    fn window_for_bus(&self, segment: u32, bus: u8) -> Result<usize, Error> {
+        self.windows
+            .iter()
+            .position(|window| {
+                u32::from(window.segment) == segment
+                    && (window.start_bus..=window.end_bus).contains(&bus)
+            })
+            .ok_or(Error::OutsideResource)
+    }
+
     /// Select one original function's exact 4 KiB configuration extent.
     pub fn function(
         &self,
@@ -84,14 +175,7 @@ impl<'a> EcamInventory<'a> {
         if address.device >= 32 || address.function >= 8 {
             return Err(Error::InvalidRange);
         }
-        let index = self
-            .windows
-            .iter()
-            .position(|window| {
-                window.segment == address.segment
-                    && (window.start_bus..=window.end_bus).contains(&address.bus)
-            })
-            .ok_or(Error::OutsideResource)?;
+        let index = self.window_for_bus(u32::from(address.segment), address.bus)?;
         let (window, bus) = self.subset(index, address.bus..=address.bus, roots)?;
         let offset = (u64::from(address.device) << 15) | (u64::from(address.function) << 12);
         let start = bus.start().checked_add(offset).ok_or(Error::InvalidRange)?;
@@ -114,18 +198,9 @@ impl<'a> EcamInventory<'a> {
         }
         let mut matching = roots.iter().filter(|root| {
             root.segment == u32::from(window.segment)
-                && root.space == 2
-                && root.translation == 0
-                && root.flags & !0x0f == 0
-                && root.flags & 2 == 0
-                && root.minimum <= u64::from(first)
-                && u64::from(last) <= root.maximum
-                && root.maximum <= 255
                 && root
-                    .maximum
-                    .checked_sub(root.minimum)
-                    .and_then(|bytes| bytes.checked_add(1))
-                    == Some(root.length)
+                    .buses()
+                    .is_some_and(|buses| buses.contains(&first) && buses.contains(&last))
         });
         matching.next().ok_or(Error::OutsideResource)?;
         if matching.next().is_some() {
@@ -181,6 +256,48 @@ mod tests {
         assert!(exhausted.is_empty());
         assert_eq!(
             inventory.subset(0, exhausted, &roots),
+            Err(Error::OutsideResource)
+        );
+    }
+
+    #[test]
+    fn census_uses_the_root_grants_and_refuses_uncovered_or_overlapping_buses() {
+        let original = [
+            window(0xe000_0000, 0, 0, 63),
+            window(0xe000_0000, 0, 64, 255),
+        ];
+        let inventory = EcamInventory::validate(&original, 48).unwrap();
+        assert_eq!(
+            inventory
+                .root_windows(&[parent(0, 0), parent(60, 65)])
+                .unwrap(),
+            [
+                window(0xe000_0000, 0, 0, 0),
+                window(0xe000_0000, 0, 60, 63),
+                window(0xe000_0000, 0, 64, 65)
+            ]
+        );
+        assert_eq!(
+            inventory.root_windows(&[parent(0, 63), parent(31, 65)]),
+            Err(Error::ResourceConflict)
+        );
+        assert_eq!(
+            inventory.root_windows(&[RootWindow {
+                segment: 1,
+                ..parent(0, 0)
+            }]),
+            Err(Error::OutsideResource)
+        );
+        let root_bridge = Address {
+            segment: 0,
+            bus: 60,
+            device: 0,
+            function: 0,
+        };
+        let roots = [parent(0, 59), parent(60, 65), parent(66, 255)];
+        assert_eq!(inventory.check_bridge(&roots, root_bridge, 61..=65), Ok(()));
+        assert_eq!(
+            inventory.check_bridge(&roots, root_bridge, 61..=66),
             Err(Error::OutsideResource)
         );
     }

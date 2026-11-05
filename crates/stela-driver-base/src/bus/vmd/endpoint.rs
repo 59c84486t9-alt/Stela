@@ -8,12 +8,9 @@
 //! as VMD forwards it under the parent's requester ID: an IOMMU domain or the
 //! named passthrough domain. There is no hotplug or BAR reassignment.
 use super::{Address, Child, ChildConfig, Error, Host, NativeRegisters, Registers, Window};
-use crate::{
-    Clock,
-    bus::{
-        dma::mapping::DmaDomain,
-        mmio::owned::{Authority, CacheAttribute, Mapping, Protection, Resource},
-    },
+use crate::bus::{
+    dma::mapping::DmaDomain,
+    mmio::owned::{Authority, CacheAttribute, Mapping, Protection, Resource},
 };
 use alloc::{rc::Rc, sync::Arc, vec::Vec};
 use core::cell::RefCell;
@@ -198,16 +195,17 @@ pub struct Endpoint<R: Registers = NativeRegisters> {
     returned: Rc<RefCell<Returned<R>>>,
     hierarchy: Option<Hierarchy>,
     domain: Option<Arc<dyn DmaDomain>>,
-    clock: Clock,
+    minimum: Option<Rc<dyn crate::bus::pci::power::Timer>>,
     phase: Phase,
 }
 impl<R: Registers> Endpoint<R> {
     /// Consume `host`, with the handle that later receives its original
-    /// owners. Nothing is discovered or changed yet.
+    /// owners. Nothing is discovered or changed yet. `minimum` retains the
+    /// actual platform clock/CPU/root epoch; a nominal frequency is insufficient.
     pub fn new(
         host: Host<R>,
         domain: Arc<dyn DmaDomain>,
-        clock: Clock,
+        minimum: Rc<dyn crate::bus::pci::power::Timer>,
     ) -> (Self, RetiredHierarchy<R>) {
         let returned = Rc::new(RefCell::new(Returned(None)));
         let handle = RetiredHierarchy(Rc::clone(&returned));
@@ -216,7 +214,7 @@ impl<R: Registers> Endpoint<R> {
             returned,
             hierarchy: None,
             domain: Some(domain),
-            clock,
+            minimum: Some(minimum),
             phase: Phase::Claimed,
         };
         (endpoint, handle)
@@ -235,7 +233,11 @@ impl<R: Registers> Endpoint<R> {
 
     fn transition(
         &mut self,
-        effect: impl FnOnce(&mut Host<R>, &mut Hierarchy, Clock) -> Result<(), Error>,
+        effect: impl FnOnce(
+            &mut Host<R>,
+            &mut Hierarchy,
+            &dyn crate::bus::pci::power::Timer,
+        ) -> Result<(), Error>,
     ) -> Result<(), Error> {
         if self.phase == Phase::Quarantined || self.phase == Phase::Released {
             return Err(Error::Quarantined);
@@ -243,7 +245,7 @@ impl<R: Registers> Endpoint<R> {
         let result = effect(
             self.host.as_mut().ok_or(Error::Quarantined)?,
             self.hierarchy.as_mut().ok_or(Error::InvalidResource)?,
-            self.clock,
+            self.minimum.as_deref().ok_or(Error::Quarantined)?,
         );
         if result.is_err() {
             self.phase = Phase::Quarantined;
@@ -256,7 +258,7 @@ impl<R: Registers> Endpoint<R> {
         if self.phase != Phase::Claimed {
             return Err(Error::ActiveChild);
         }
-        self.transition(|host, hierarchy, clock| hierarchy.prepare(host, clock))?;
+        self.transition(|host, hierarchy, minimum| hierarchy.prepare(host, minimum))?;
         self.phase = Phase::Prepared;
         Ok(())
     }
@@ -317,6 +319,9 @@ impl<R: Registers> Drop for Endpoint<R> {
             }
             if let Some(domain) = self.domain.take() {
                 core::mem::forget(domain);
+            }
+            if let Some(minimum) = self.minimum.take() {
+                core::mem::forget(minimum);
             }
         }
     }

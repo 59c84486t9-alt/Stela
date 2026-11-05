@@ -1,3 +1,4 @@
+mod fallible_pci;
 extern crate std;
 use self::std::sync::Mutex;
 use super::*;
@@ -323,7 +324,10 @@ fn a_requester_that_arrives_later_joins_the_unit() {
     assert!(matches!(
         // SAFETY: the model requester is stopped and owned by this test, with no DMA in flight.
         unsafe { unit.attach_requester(stopped_claim(0x300)) },
-        Err(VtdError::Busy)
+        Err(AttachRequesterFailure {
+            error: VtdError::Busy,
+            ..
+        })
     ));
     unit.admit_requester(0x300).unwrap();
     unit.admit_requester(0x300).unwrap();
@@ -679,7 +683,10 @@ fn contexts_separate_same_iova_and_reject_cross_domain_or_stale_tokens() {
             // SAFETY: the model requester is stopped and owned by this test, with no DMA in
             // flight.
             unsafe { unit.attach_requester(stopped_claim(rejected)) },
-            Err(VtdError::Busy)
+            Err(AttachRequesterFailure {
+                error: VtdError::Busy,
+                ..
+            })
         ));
     }
     assert_eq!(
@@ -817,7 +824,10 @@ fn failed_context_detach_keeps_hardware_did_claim_and_tables_until_ack() {
     assert!(matches!(
         // SAFETY: the model requester is stopped and owned by this test, with no DMA in flight.
         unsafe { unit.attach_requester(stopped_claim(8)) },
-        Err(VtdError::Busy)
+        Err(AttachRequesterFailure {
+            error: VtdError::Busy,
+            ..
+        })
     ));
     // SAFETY: no requester is attached, or the refusal leaves them all attached.
     assert_eq!(unsafe { unit.shut_down() }, Err(VtdError::Busy));
@@ -899,14 +909,17 @@ fn hardware_did_capacity_quarantine_and_software_epochs_never_wrap_or_reuse_earl
     assert!(matches!(
         // SAFETY: the model requester is stopped and owned by this test, with no DMA in flight.
         unsafe { unit.attach_requester(stopped_claim(15)) },
-        Err(VtdError::Busy)
+        Err(AttachRequesterFailure {
+            error: VtdError::Busy,
+            ..
+        })
     ));
     let abandoned = domains.remove(3);
     let quarantined_did = abandoned.domain_id();
     drop(abandoned);
     {
         let mut g = unit.lock();
-        assert!(g.state().domains[&3].quarantined);
+        assert!(!g.state().domains[&3].lifetime.is_live());
     }
     let retired = domains.remove(3);
     let reusable = retired.domain_id();
@@ -927,7 +940,10 @@ fn hardware_did_capacity_quarantine_and_software_epochs_never_wrap_or_reuse_earl
     assert!(matches!(
         // SAFETY: the model requester is stopped and owned by this test, with no DMA in flight.
         unsafe { unit.attach_requester(stopped_claim(15)) },
-        Err(VtdError::Unsupported)
+        Err(AttachRequesterFailure {
+            error: VtdError::Unsupported,
+            ..
+        })
     ));
     {
         let mut g = unit.lock();
@@ -1577,6 +1593,26 @@ fn dynamic_bus_root_publication_preserves_reserved_halves_and_other_buses() {
     unsafe { unit.shut_down() }.unwrap();
 }
 
+mod requester_owner;
+
+#[test]
+fn mapped_registers_keep_and_retire_the_original_counted_mapping() {
+    use stela_driver_base::bus::{
+        mmio::owned::PhysicalSpan, pci::owned::test_support::bar_fixture,
+    };
+
+    let (owner, mapping) = bar_fixture(PhysicalSpan::new(0xfed9_0000, 4096).unwrap(), 4096);
+    // SAFETY: the actual isolated register fixture owns this sole mapping;
+    // no hardware or register accessor runs in this lifetime check.
+    let registers = unsafe { MmioRegisters::from_mapping(mapping, || 0, 1) }.unwrap();
+    assert_eq!(owner.unmaps.load(Ordering::Relaxed), 0);
+    drop(registers);
+    assert_eq!(owner.unmaps.load(Ordering::Relaxed), 1);
+    // SAFETY: the same mapping has acknowledged unmap, and this test
+    // published no raw access, alias or device callback.
+    unsafe { owner.finish_unmapped() }.unwrap();
+}
+
 #[test]
 fn blocked_initial_cohort_is_exact_and_each_requester_is_claimed_once() {
     let registers = ModelRegisters::new();
@@ -1602,6 +1638,10 @@ fn blocked_initial_cohort_is_exact_and_each_requester_is_claimed_once() {
         Err(DmaError::IommuUnavailable)
     ));
     let first = cohort.claim(requesters[0]).unwrap();
+    assert_eq!(first.requester(), requesters[0]);
+    let before_check = registers.0.lock().unwrap().writes.len();
+    first.check().unwrap();
+    assert_eq!(registers.0.lock().unwrap().writes.len(), before_check);
     assert!(matches!(
         cohort.claim(requesters[0]),
         Err(DmaError::IommuUnavailable)
@@ -1610,6 +1650,7 @@ fn blocked_initial_cohort_is_exact_and_each_requester_is_claimed_once() {
 
     // SAFETY: model requester remains stopped with no DMA, IRQ or worker users.
     let domain = unsafe { unit.attach_requester(stopped_claim(requesters[0])) }.unwrap();
+    assert_eq!(first.check(), Err(DmaError::IommuUnavailable));
     assert_eq!(first.drain(), Err(DmaError::IommuUnavailable));
     // SAFETY: the model has no live users or payload mappings.
     drop(unsafe { domain.detach() }.unwrap());

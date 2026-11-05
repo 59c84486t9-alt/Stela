@@ -1,0 +1,183 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 23:54:40 -0500
+Subject: [PATCH] refactor(fork): separate task stack release
+
+---
+ kernel/Makefile     |  2 +-
+ kernel/fork.c       | 39 +++--------------------------------
+ kernel/fork_stack.c | 50 +++++++++++++++++++++++++++++++++++++++++++++
+ kernel/fork_stack.h |  9 ++++++++
+ 4 files changed, 63 insertions(+), 37 deletions(-)
+ create mode 100644 kernel/fork_stack.c
+ create mode 100644 kernel/fork_stack.h
+
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 55e716bf7c90133a0883a2a7d713757d7a1b59af..6998b7772b425a8eb39d5d27219d9fded36d6f4d 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -3,7 +3,7 @@
+ # Makefile for the linux kernel.
+ #
+ 
+-obj-y     = fork.o fork_caches.o exec_domain.o exec_state.o panic.o \
++obj-y     = fork.o fork_caches.o fork_stack.o exec_domain.o exec_state.o panic.o \
+ 	    cpu.o cpu_topology.o exit.o task_rcu.o rcuwait_wake.o softirq.o resource.o \
+ 	    sysctl.o capability.o ptrace.o ptrace_access.o user.o \
+ 	    signal.o signal_state.o restart_no_syscall.o sys.o umh.o workqueue.o pid.o task_work.o \
+diff --git a/kernel/fork.c b/kernel/fork.c
+index b23060725a96c4321ed4828028b1ef990664645e..a366981bfeab821f13a3b182fe9c670ef27b4b23 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -120,6 +120,7 @@
+ /* For dup_mmap(). */
+ #include "../mm/internal.h"
+ #include "fork_caches.h"
++#include "fork_stack.h"
+ 
+ #include <trace/events/sched.h>
+ 
+@@ -365,7 +366,7 @@ static int alloc_thread_stack_node(struct task_struct *tsk, int node)
+ 	return 0;
+ }
+ 
+-static void free_thread_stack(struct task_struct *tsk)
++void free_thread_stack(struct task_struct *tsk)
+ {
+ 	if (!try_release_thread_stack_to_cache(tsk->stack_vm_area))
+ 		thread_stack_delayed_free(tsk);
+@@ -382,18 +383,6 @@ static void free_thread_stack(struct task_struct *tsk)
+  */
+ #if THREAD_SIZE >= PAGE_SIZE
+ 
+-static void thread_stack_free_rcu(struct rcu_head *rh)
+-{
+-	__free_pages(virt_to_page(rh), THREAD_SIZE_ORDER);
+-}
+-
+-static void thread_stack_delayed_free(struct task_struct *tsk)
+-{
+-	struct rcu_head *rh = tsk->stack;
+-
+-	call_rcu(rh, thread_stack_free_rcu);
+-}
+-
+ static int alloc_thread_stack_node(struct task_struct *tsk, int node)
+ {
+ 	struct page *page = alloc_pages_node(node, THREADINFO_GFP,
+@@ -406,12 +395,6 @@ static int alloc_thread_stack_node(struct task_struct *tsk, int node)
+ 	return -ENOMEM;
+ }
+ 
+-static void free_thread_stack(struct task_struct *tsk)
+-{
+-	thread_stack_delayed_free(tsk);
+-	tsk->stack = NULL;
+-}
+-
+ #else /* !(THREAD_SIZE >= PAGE_SIZE) */
+ 
+ static struct kmem_cache *thread_stack_cache;
+@@ -437,7 +420,7 @@ static int alloc_thread_stack_node(struct task_struct *tsk, int node)
+ 	return stack ? 0 : -ENOMEM;
+ }
+ 
+-static void free_thread_stack(struct task_struct *tsk)
++void free_thread_stack(struct task_struct *tsk)
+ {
+ 	thread_stack_delayed_free(tsk);
+ 	tsk->stack = NULL;
+@@ -489,22 +472,6 @@ void exit_task_stack_account(struct task_struct *tsk)
+ 	}
+ }
+ 
+-static void release_task_stack(struct task_struct *tsk)
+-{
+-	if (WARN_ON(READ_ONCE(tsk->__state) != TASK_DEAD))
+-		return;  /* Better to leak the stack than to free prematurely */
+-
+-	free_thread_stack(tsk);
+-}
+-
+-#ifdef CONFIG_THREAD_INFO_IN_TASK
+-void put_task_stack(struct task_struct *tsk)
+-{
+-	if (refcount_dec_and_test(&tsk->stack_refcount))
+-		release_task_stack(tsk);
+-}
+-#endif
+-
+ void free_task(struct task_struct *tsk)
+ {
+ #ifdef CONFIG_SECCOMP
+diff --git a/kernel/fork_stack.c b/kernel/fork_stack.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..c451c4f4b7ec8d2af20abcf0faf0cac36bdbd427
+--- /dev/null
++++ b/kernel/fork_stack.c
+@@ -0,0 +1,50 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *  linux/kernel/fork.c
++ *
++ *  Copyright (C) 1991, 1992  Linus Torvalds
++ */
++
++#include <linux/export.h>
++#include <linux/mm.h>
++#include <linux/rcupdate.h>
++#include <linux/sched/task.h>
++#include <linux/sched/task_stack.h>
++
++#include "fork_stack.h"
++
++#if !defined(CONFIG_VMAP_STACK) && THREAD_SIZE >= PAGE_SIZE
++static void thread_stack_free_rcu(struct rcu_head *rh)
++{
++	__free_pages(virt_to_page(rh), THREAD_SIZE_ORDER);
++}
++
++static void thread_stack_delayed_free(struct task_struct *tsk)
++{
++	struct rcu_head *rh = tsk->stack;
++
++	call_rcu(rh, thread_stack_free_rcu);
++}
++
++void free_thread_stack(struct task_struct *tsk)
++{
++	thread_stack_delayed_free(tsk);
++	tsk->stack = NULL;
++}
++#endif
++
++void release_task_stack(struct task_struct *tsk)
++{
++	if (WARN_ON(READ_ONCE(tsk->__state) != TASK_DEAD))
++		return;  /* Better to leak the stack than to free prematurely */
++
++	free_thread_stack(tsk);
++}
++
++#ifdef CONFIG_THREAD_INFO_IN_TASK
++void put_task_stack(struct task_struct *tsk)
++{
++	if (refcount_dec_and_test(&tsk->stack_refcount))
++		release_task_stack(tsk);
++}
++#endif
+diff --git a/kernel/fork_stack.h b/kernel/fork_stack.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..dac3790079b7d8b38f371960cad8784bc43244e7
+--- /dev/null
++++ b/kernel/fork_stack.h
+@@ -0,0 +1,9 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _KERNEL_FORK_STACK_H
++#define _KERNEL_FORK_STACK_H
++
++struct task_struct;
++void free_thread_stack(struct task_struct *tsk);
++void release_task_stack(struct task_struct *tsk);
++
++#endif

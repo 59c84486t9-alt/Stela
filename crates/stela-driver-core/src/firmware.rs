@@ -542,10 +542,16 @@ fn error(name: &str, kind: ErrorKind) -> Error {
     }
 }
 
-fn validate(name: &str, target: Target<'_>) -> Result<(), Error> {
+/// Validate the exact relative resource name before consulting a provider.
+pub fn validate_name(name: &str) -> Result<(), Error> {
     if !path(name) {
         return Err(error(name, ErrorKind::InvalidName));
     }
+    Ok(())
+}
+
+fn validate(name: &str, target: Target<'_>) -> Result<(), Error> {
+    validate_name(name)?;
     for (field, value) in [
         ("driver", target.driver),
         ("hardware", target.hardware),

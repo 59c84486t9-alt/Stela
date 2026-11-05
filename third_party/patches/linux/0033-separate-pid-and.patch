@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 22:53:57 -0500
+Subject: [PATCH] refactor(pid): separate PID and namespace metadata helpers
+ from VFS
+
+---
+ fs/namespace.c   |  5 -----
+ fs/pidfs.c       |  7 -------
+ kernel/nsproxy.c |  5 +++++
+ kernel/pid.c     | 13 ++++++++++---
+ 4 files changed, 15 insertions(+), 15 deletions(-)
+
+diff --git a/fs/namespace.c b/fs/namespace.c
+index ec93bdac9e7894d880c107adc62bf1e8c3091a73..1df3c892d91d0bab7bdf16d7b47d53728d9f666a 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -2125,11 +2125,6 @@ static bool is_mnt_ns_file(struct dentry *dentry)
+ 	return ns->ops == &mntns_operations;
+ }
+ 
+-struct ns_common *from_mnt_ns(struct mnt_namespace *mnt)
+-{
+-	return &mnt->ns;
+-}
+-
+ struct mnt_namespace *get_sequential_mnt_ns(struct mnt_namespace *mntns, bool previous)
+ {
+ 	struct ns_common *ns;
+diff --git a/fs/pidfs.c b/fs/pidfs.c
+index a6a643f15d08a9491d858ed36fac6c89f8006c10..99e36a425b19bab92e4b0f891a6fd5fed69831b8 100644
+--- a/fs/pidfs.c
++++ b/fs/pidfs.c
+@@ -164,13 +164,6 @@ static u64 pidfs_alloc_ino(void)
+ 
+ #endif
+ 
+-void pidfs_prepare_pid(struct pid *pid)
+-{
+-	pid->stashed = NULL;
+-	pid->attr = NULL;
+-	pid->ino = 0;
+-}
+-
+ int pidfs_add_pid(struct pid *pid)
+ {
+ 	int ret;
+diff --git a/kernel/nsproxy.c b/kernel/nsproxy.c
+index cdcf51b97405009d37a638b92d5902380d7e0800..9c21ab0b87d46d506926f8ccb234274aafb873d6 100644
+--- a/kernel/nsproxy.c
++++ b/kernel/nsproxy.c
+@@ -54,6 +54,11 @@ struct nsproxy init_nsproxy = {
+ #endif
+ };
+ 
++struct ns_common *from_mnt_ns(struct mnt_namespace *mnt)
++{
++	return &mnt->ns;
++}
++
+ /* Active references belong to the installed namespace bundle. */
+ void nsproxy_ns_active_get(struct nsproxy *ns)
+ {
+diff --git a/kernel/pid.c b/kernel/pid.c
+index c3ed06a313c8de2adbb8dd458201279ba3f24daf..d7120a77d79b05421fa7dfa41ab2ca608067611e 100644
+--- a/kernel/pid.c
++++ b/kernel/pid.c
+@@ -63,15 +63,15 @@ struct pid init_struct_pid = {
+ static int pid_max_min = RESERVED_PIDS + 1;
+ static int pid_max_max = PID_MAX_LIMIT;
+ 
++/* Original kernel/reboot.c recipient, installed with an owned PID ref. */
++struct pid __rcu *cad_pid;
++
+ /*
+  * PID-map pages start out as NULL, they get allocated upon
+  * first use and are never deallocated. This way a low pid_max
+  * value does not cause lots of bitmaps to be allocated, but
+  * the scheme scales to up to 4 million PIDs, runtime.
+  */
+-/* Original kernel/reboot.c recipient, installed with an owned PID ref. */
+-struct pid __rcu *cad_pid;
+-
+ struct pid_namespace init_pid_ns = {
+ 	.ns = NS_COMMON_INIT(init_pid_ns),
+ 	.idr = IDR_INIT(init_pid_ns.idr),
+@@ -159,6 +159,13 @@ void free_pids(struct pid **pids)
+ 			free_pid(pids[tmp]);
+ }
+ 
++void pidfs_prepare_pid(struct pid *pid)
++{
++	pid->stashed = NULL;
++	pid->attr = NULL;
++	pid->ino = 0;
++}
++
+ struct pid *alloc_pid(struct pid_namespace *ns, pid_t *arg_set_tid,
+ 		      size_t arg_set_tid_size)
+ {

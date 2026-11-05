@@ -20,7 +20,10 @@ pub enum IdleOutcome {
     Waited,
 }
 const CLOSED: u64 = 1 << 63;
-static NEXT_DOMAIN: AtomicU64 = AtomicU64::new(1);
+pub(super) mod reason;
+use reason::ReasonCore;
+pub(super) mod deadline;
+use deadline::{Capture, DeadlineCore};
 
 /// Owned nanosecond clock over the exact CPU/root permission.
 ///
@@ -50,7 +53,7 @@ pub unsafe trait Idle: Send + Sync {
 }
 
 struct Signal {
-    epoch: AtomicU64,
+    reason: ReasonCore,
     idle: Arc<dyn Idle>,
 }
 
@@ -68,22 +71,7 @@ impl Clone for RaisedWork {
 }
 impl RaisedWork {
     pub fn raise(&self) -> Result<(), WorkError> {
-        self.signal
-            .epoch
-            .try_update(Ordering::Release, Ordering::Acquire, |epoch| {
-                if epoch & CLOSED != 0 || epoch == CLOSED - 1 {
-                    None
-                } else {
-                    Some(epoch + 1)
-                }
-            })
-            .map_err(|epoch| {
-                if epoch & CLOSED != 0 {
-                    WorkError::Closed
-                } else {
-                    WorkError::Exhausted
-                }
-            })?;
+        self.signal.reason.publish()?;
         // A failure keeps the published reason; it never invents delivery.
         self.signal.idle.notify()
     }
@@ -104,37 +92,25 @@ impl Drop for RaisedWork {
 /// One nonforgeable capture. Acknowledgement retires only its observed epoch,
 /// so a requeue during real callback delivery remains pending for another batch.
 pub struct Batch {
-    domain: u64,
-    serial: u64,
-    epoch: u64,
-    raised: bool,
-    tick: bool,
-    timer: bool,
+    capture: Capture,
 }
 impl Batch {
     pub fn raised(&self) -> bool {
-        self.raised
+        self.capture.raised
     }
     pub fn tick(&self) -> bool {
-        self.tick
+        self.capture.tick
     }
     pub fn timer(&self) -> bool {
-        self.timer
+        self.capture.timer
     }
 }
 
 /// Same-CPU serialized timing state shared by timer and IRQ-work consumers.
 /// Default Runtime construction does not create or enable this service.
 pub struct Deadlines {
-    id: u64,
     signal: ManuallyDrop<Arc<Signal>>,
-    last_ns: u64,
-    tick: Option<u64>,
-    timer: Option<u64>,
-    delivered: u64,
-    serial: u64,
-    running: bool,
-    retired: bool,
+    core: DeadlineCore,
 }
 impl Deadlines {
     pub fn new(clock: Arc<dyn Clock>, idle: Arc<dyn Idle>) -> Result<Self, WorkError> {
@@ -146,22 +122,13 @@ impl Deadlines {
             return Err(WorkError::InterruptContext);
         }
         let now = clock.now_ns()?;
-        let id = NEXT_DOMAIN
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .map_err(|_| WorkError::Exhausted)?;
+        let core = DeadlineCore::new(now)?;
         Ok(Self {
-            id,
             signal: ManuallyDrop::new(Arc::new(Signal {
-                epoch: AtomicU64::new(0),
+                reason: ReasonCore::new(),
                 idle,
             })),
-            last_ns: now,
-            tick: None,
-            timer: None,
-            delivered: 0,
-            serial: 0,
-            running: false,
-            retired: false,
+            core,
         })
     }
     fn process(&self) -> Result<(), WorkError> {
@@ -170,7 +137,7 @@ impl Deadlines {
         if cpu.in_interrupt() {
             return Err(WorkError::InterruptContext);
         }
-        if self.retired {
+        if self.core.retired() {
             return Err(WorkError::Closed);
         }
         Ok(())
@@ -178,15 +145,12 @@ impl Deadlines {
     fn now(&mut self) -> Result<u64, WorkError> {
         self.process()?;
         let now = self.signal.idle.clock().now_ns()?;
-        if now < self.last_ns {
-            return Err(WorkError::CorruptContext);
-        }
-        self.last_ns = now;
+        self.core.observe(now)?;
         Ok(now)
     }
     pub fn raised_work(&self) -> Result<RaisedWork, WorkError> {
         self.process()?;
-        if self.signal.epoch.load(Ordering::Acquire) & CLOSED != 0 {
+        if self.signal.reason.is_closed() {
             return Err(WorkError::Closed);
         }
         Ok(RaisedWork {
@@ -196,70 +160,43 @@ impl Deadlines {
     /// Establish the real 1-ms periodic deadline before IRQ-work admission.
     pub fn start_irq_ticks(&mut self) -> Result<(), WorkError> {
         self.process()?;
-        if self.tick.is_some()
-            || self.running
-            || self.signal.epoch.load(Ordering::Acquire) & CLOSED != 0
-        {
+        if !self.core.can_start_ticks() || self.signal.reason.is_closed() {
             return Err(WorkError::Busy);
         }
-        let deadline = self
-            .now()?
-            .checked_add(IRQ_WORK_TICK_NS)
-            .ok_or(WorkError::Exhausted)?;
-        self.tick = Some(deadline);
-        Ok(())
+        let now = self.now()?;
+        self.core.start_ticks(now)
     }
     /// The owner copies the original timerqueue's earliest deadline.
     pub fn set_timer(&mut self, deadline: Option<u64>) -> Result<(), WorkError> {
         self.process()?;
-        if self.signal.epoch.load(Ordering::Acquire) & CLOSED != 0 {
+        if self.signal.reason.is_closed() {
             return Err(WorkError::Closed);
         }
-        self.timer = deadline;
+        self.core.set_timer(deadline);
         Ok(())
     }
     pub fn next_deadline(&self) -> Result<Option<u64>, WorkError> {
         self.process()?;
-        Ok(match (self.tick, self.timer) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        })
+        Ok(self.core.next_deadline())
     }
     /// No callback, switch, fake tick count or global jiffies effect.
     pub fn due(&mut self) -> Result<bool, WorkError> {
         let now = self.now()?;
-        Ok(
-            (self.signal.epoch.load(Ordering::Acquire) & !CLOSED) != self.delivered
-                || self.tick.is_some_and(|deadline| deadline <= now)
-                || self.timer.is_some_and(|deadline| deadline <= now),
-        )
+        Ok(self.core.due(now, self.signal.reason.observed_epoch()))
     }
     pub fn begin(&mut self) -> Result<Option<Batch>, WorkError> {
         self.process()?;
-        if self.running {
+        if self.core.running() {
             return Err(WorkError::Busy);
         }
         let now = self.now()?;
         // Capture BEFORE task/service inspection. A later raise is not
         // cleared by finish and remains eligible even if its notify was early.
-        let epoch = self.signal.epoch.load(Ordering::Acquire) & !CLOSED;
-        let raised = epoch != self.delivered;
-        let tick = self.tick.is_some_and(|deadline| deadline <= now);
-        let timer = self.timer.is_some_and(|deadline| deadline <= now);
-        if !(raised || tick || timer) {
-            return Ok(None);
-        }
-        let serial = self.serial.checked_add(1).ok_or(WorkError::Exhausted)?;
-        self.serial = serial;
-        self.running = true;
-        Ok(Some(Batch {
-            domain: self.id,
-            serial,
-            epoch,
-            raised,
-            tick,
-            timer,
-        }))
+        let epoch = self.signal.reason.observed_epoch();
+        Ok(self
+            .core
+            .begin(now, epoch)?
+            .map(|capture| Batch { capture }))
     }
     /// # Safety
     /// The kept service task delivered the captured original work
@@ -273,33 +210,14 @@ impl Deadlines {
     ) -> Result<(), WorkError> {
         self.finish_batch(batch, next_timer)
     }
-    fn finish_batch(&mut self, batch: Batch, next_timer: Option<u64>) -> Result<(), WorkError> {
+    fn validate_batch(&self, batch: &Batch) -> Result<(), WorkError> {
         self.process()?;
-        if !self.running || batch.domain != self.id || batch.serial != self.serial {
-            return Err(WorkError::InvalidTicket);
-        }
+        self.core.validate(&batch.capture)
+    }
+    fn finish_batch(&mut self, batch: Batch, next_timer: Option<u64>) -> Result<(), WorkError> {
+        self.validate_batch(&batch)?;
         let now = self.now()?;
-        let tick = if batch.tick {
-            let previous = self.tick.ok_or(WorkError::CorruptContext)?;
-            let phases =
-                now.checked_sub(previous).ok_or(WorkError::CorruptContext)? / IRQ_WORK_TICK_NS + 1;
-            Some(
-                previous
-                    .checked_add(
-                        phases
-                            .checked_mul(IRQ_WORK_TICK_NS)
-                            .ok_or(WorkError::Exhausted)?,
-                    )
-                    .ok_or(WorkError::Exhausted)?,
-            )
-        } else {
-            self.tick
-        };
-        self.tick = tick;
-        self.timer = next_timer;
-        self.delivered = batch.epoch;
-        self.running = false;
-        Ok(())
+        self.core.finish(batch.capture, now, next_timer)
     }
     /// # Safety
     /// Call only on the real taskless domain dispatcher, with no entered Linux
@@ -307,10 +225,10 @@ impl Deadlines {
     /// native idle/event permission; this method never installs that permission.
     pub unsafe fn idle(&mut self) -> Result<IdleOutcome, WorkError> {
         self.process()?;
-        if self.signal.epoch.load(Ordering::Acquire) & CLOSED != 0 {
+        if self.signal.reason.is_closed() {
             return Err(WorkError::Closed);
         }
-        if self.running {
+        if self.core.running() {
             return Err(WorkError::Busy);
         }
         // Ordinary arrival between dispatcher inspection and idle is progress,
@@ -323,7 +241,7 @@ impl Deadlines {
     }
     pub fn stop_producers(&mut self) -> Result<(), WorkError> {
         self.process()?;
-        self.signal.epoch.fetch_or(CLOSED, Ordering::AcqRel);
+        self.signal.reason.close();
         Ok(())
     }
     /// # Safety
@@ -332,24 +250,14 @@ impl Deadlines {
     /// its separate runtime/domain ownership. Numerical emptiness is no proof.
     pub unsafe fn retire(&mut self) -> Result<(), WorkError> {
         self.process()?;
-        let epoch = self.signal.epoch.load(Ordering::Acquire);
-        if epoch & CLOSED == 0
-            || epoch & !CLOSED != self.delivered
-            || self.running
-            || self.timer.is_some()
-        {
-            return Err(WorkError::Busy);
-        }
-        self.tick = None;
-        self.timer = None;
-        self.retired = true;
-        Ok(())
+        let epoch = self.signal.reason.load();
+        self.core.retire(epoch)
     }
 }
 impl Drop for Deadlines {
     fn drop(&mut self) {
         let cpu = self.signal.idle.clock().cpu();
-        if self.retired && cpu.check_cpu().is_ok() && !cpu.in_interrupt() {
+        if self.core.retired() && cpu.check_cpu().is_ok() && !cpu.in_interrupt() {
             // SAFETY: explicit quiescent retirement preceded process release.
             unsafe { ManuallyDrop::drop(&mut self.signal) };
         } else {
@@ -478,6 +386,19 @@ impl<const N: usize> Domain<N> {
         self.current(runtime)?;
         // SAFETY: service; no borrow survives delivery/return.
         unsafe { &mut *self.deadlines.get() }.begin()
+    }
+    /// Validate an actual outstanding owned Batch from this SAME current
+    /// reserved service/domain. This borrows only metadata, holds no queue/
+    /// deadline lock across delivery, and grants no native IRQ/data access.
+    pub fn validate_batch(
+        &self,
+        runtime: Pin<&Runtime<N>>,
+        batch: &Batch,
+    ) -> Result<(), WorkError> {
+        self.current(runtime)?;
+        // SAFETY: same serialized service; this shared immutable observation
+        // ends before any foreign callback or source timer body is invoked.
+        unsafe { &*self.deadlines.get() }.validate_batch(batch)
     }
     /// # Safety
     /// The original work/expiry consumers completed this captured batch on the

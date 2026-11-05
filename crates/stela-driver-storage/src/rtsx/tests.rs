@@ -852,40 +852,53 @@ impl Chip {
 #[derive(Clone)]
 struct Config(Rc<RefCell<Chip>>);
 impl ConfigSpace for Config {
-    fn read8(&self, at: u16) -> u8 {
-        let mut c = self.0.borrow_mut();
-        c.accesses += 1;
-        c.config[usize::from(at)]
+    fn read8(&self, at: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        let value = {
+            let mut c = self.0.borrow_mut();
+            c.accesses += 1;
+            c.config[usize::from(at)]
+        };
+        Ok(value)
     }
-    fn read16(&self, at: u16) -> u16 {
-        let mut c = self.0.borrow_mut();
-        c.accesses += 1;
-        let at = usize::from(at);
-        u16::from_le_bytes(c.config[at..at + 2].try_into().unwrap())
+    fn read16(&self, at: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        let value = {
+            let mut c = self.0.borrow_mut();
+            c.accesses += 1;
+            let at = usize::from(at);
+            u16::from_le_bytes(c.config[at..at + 2].try_into().unwrap())
+        };
+        Ok(value)
     }
-    fn read32(&self, at: u16) -> u32 {
-        let mut c = self.0.borrow_mut();
-        c.accesses += 1;
-        let at = usize::from(at);
-        u32::from_le_bytes(c.config[at..at + 4].try_into().unwrap())
+    fn read32(&self, at: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        let value = {
+            let mut c = self.0.borrow_mut();
+            c.accesses += 1;
+            let at = usize::from(at);
+            u32::from_le_bytes(c.config[at..at + 4].try_into().unwrap())
+        };
+        Ok(value)
     }
-    fn write8(&mut self, at: u16, value: u8) {
+    fn write8(&mut self, at: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
         let mut c = self.0.borrow_mut();
         c.accesses += 1;
         c.effects.push(Effect::Config(at, 1, u32::from(value)));
         if c.deny_pci != Some(at) {
             c.config[usize::from(at)] = value;
         }
+
+        Ok(())
     }
-    fn write16(&mut self, at: u16, value: u16) {
+    fn write16(&mut self, at: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
         let mut c = self.0.borrow_mut();
         c.accesses += 1;
         c.effects.push(Effect::Config(at, 2, u32::from(value)));
         if c.deny_pci != Some(at) {
             c.config[usize::from(at)..usize::from(at) + 2].copy_from_slice(&value.to_le_bytes());
         }
+
+        Ok(())
     }
-    fn write32(&mut self, _: u16, _: u32) {
+    fn write32(&mut self, _: u16, _: u32) -> Result<(), crate::bus::pci::ConfigError> {
         panic!("no broad PCI stores across W1C status or source vendor setup");
     }
 }
@@ -1003,26 +1016,39 @@ fn function(chip: &Rc<RefCell<Chip>>) -> Function<Config> {
     .unwrap()
 }
 fn make_host(chip: &Rc<RefCell<Chip>>, timeline: bool) -> Result<Host, BlockError> {
+    make_host_with_minimum(
+        chip,
+        timeline,
+        Rc::new(ModelTimer(Clock {
+            ticks_per_microsecond: 1000,
+        })),
+    )
+}
+fn make_host_with_minimum(
+    chip: &Rc<RefCell<Chip>>,
+    timeline: bool,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
+) -> Result<Host, BlockError> {
     let mut function = function(chip);
     let admission = controller::admission(&mut function)?;
     super::super::pci::quiesce_pio(&mut function)?;
     let clock = Clock {
         ticks_per_microsecond: 1000,
     };
-    function.power_up(&clock)?;
+    function.power_up(&ModelTimer(clock))?;
     let config = controller::Configuration::capture(&mut function, admission)?;
     super::super::pci::set_pio_command(&mut function, true)?;
     chip.borrow_mut().timeline = timeline;
-    let engine = Engine::new(
+    let host = Host::new(
         Box::new(function),
         Box::new(Mmio(chip.clone())),
         config,
         clock,
+        minimum,
         "native RTS5227 model".into(),
-    )?;
-    Ok(Host {
-        inner: Rc::new(RefCell::new(engine)),
-    })
+    )
+    .map_err(|failure| failure.error)?;
+    Ok(host)
 }
 #[test]
 fn invalid_operation_clock_refuses_before_original_controller_access() {
@@ -1039,13 +1065,16 @@ fn invalid_operation_clock_refuses_before_original_controller_access() {
             chip.borrow().accesses,
         );
         assert!(
-            Engine::new(
+            Host::new(
                 Box::new(function),
                 Box::new(Mmio(chip.clone())),
                 config,
                 Clock {
                     ticks_per_microsecond
                 },
+                Rc::new(ModelTimer(Clock {
+                    ticks_per_microsecond: 1000
+                })),
                 "unadmitted RTSX clock".into()
             )
             .is_err()
@@ -2292,3 +2321,24 @@ fn native_rts522a_late_timeout_status_is_fatal_not_another_phase() {
     assert!(!host.inner.borrow().tuning_rejection_observed);
     assert!(host.inner.borrow().medium.is_none());
 }
+
+struct ModelTimer(Clock);
+// SAFETY: explicit RTSX protocol model only. This uses its existing checked
+// software counter budget and never supplies native clock permission.
+unsafe impl crate::bus::pci::power::Timer for ModelTimer {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        self.0
+            .check_duration(60_000_000)
+            .map_err(|_| crate::bus::pci::power::Error::Clock)
+    }
+    fn wait_us(&self, microseconds: u64) -> Result<(), crate::bus::pci::power::Error> {
+        self.check()?;
+        self.0
+            .try_delay(microseconds)
+            .map_err(|_| crate::bus::pci::power::Error::Clock)
+    }
+}
+
+mod minimum_failures;
+
+mod unwind;

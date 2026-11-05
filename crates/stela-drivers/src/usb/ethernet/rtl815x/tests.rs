@@ -16,7 +16,9 @@ pub(crate) struct Model {
     phy_reset: usize,
     pub trace: Vec<([u8; 8], Vec<u8>)>,
     pub delays: Vec<u64>,
+    pub minimum_elapsed: u64,
     pub fail_at: Option<usize>,
+    pub refuse_minimum: bool,
     pub short_at: Option<usize>,
     pub link: bool,
     pub(crate) phy_status: u32,
@@ -34,7 +36,9 @@ impl Model {
             phy_reset: 0,
             trace: Vec::new(),
             delays: Vec::new(),
+            minimum_elapsed: 0,
             fail_at: None,
+            refuse_minimum: false,
             short_at: None,
             link: true,
             phy_status: 0x0a,
@@ -173,6 +177,20 @@ impl Control for Io {
     }
     fn delay_us(&mut self, us: u64) {
         self.0.borrow_mut().delays.push(us);
+    }
+    fn minimum_wait(&mut self, us: u64) -> Result<(), BlockError> {
+        let mut state = self.0.borrow_mut();
+        state.delays.push(us);
+        if state.refuse_minimum {
+            return Err(BlockError::PciPower(
+                crate::bus::pci::power::Error::Interrupted,
+            ));
+        }
+        state.minimum_elapsed = state
+            .minimum_elapsed
+            .checked_add(us)
+            .ok_or(BlockError::PciPower(crate::bus::pci::power::Error::Clock))?;
+        Ok(())
     }
 }
 
@@ -390,7 +408,7 @@ fn unchanged_linux_ocp_request_trace_matches_native_helpers() {
     use core::fmt::Write;
     let model = Rc::new(RefCell::new(Model::new(0x4c10)));
     let mut chip = Chip {
-        io: Io(model.clone()),
+        io: crate::usb::ethernet::MinimumControl::new(Io(model.clone())),
         revision: Revision(0x4c10),
         base: None,
         accessible: true,
@@ -894,3 +912,5 @@ fn rtl8153_native_usb2_usb3_binding_uploads_exact_provider_and_keeps_owned_recei
         assert!(link.transmit(&[0; 60]).is_err());
     }
 }
+
+mod minimum;

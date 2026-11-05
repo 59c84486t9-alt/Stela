@@ -239,7 +239,8 @@ impl Controller {
         let Ok(slot) = self.validate_id(ticket.device_id()) else {
             return false;
         };
-        if self.hardware.ready().is_err()
+        if self.check_minimum().is_err()
+            || self.hardware.ready().is_err()
             || self
                 .native_memory
                 .as_ref()

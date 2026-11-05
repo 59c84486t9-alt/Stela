@@ -1,6 +1,7 @@
 //! Explicit short native-root fixture. PM/LAPIC/IDT/HLT effects are
 //! checked; these authored words are not an original Linux timer-wheel test.
 use super::*;
+use stela_linux::owner::MinimumDeadline as _;
 
 struct Words {
     jiffies: AtomicU64,
@@ -56,6 +57,32 @@ pub(crate) unsafe fn check_native(
 }
 
 fn run(installed: Installed, epoch: Option<CounterEpoch>) -> Result<(), WorkError> {
+    if let Some(epoch) = &epoch {
+        use stela_drivers::bus::pci::power::Timer;
+        Timer::check(epoch).map_err(|_| WorkError::Unavailable)?;
+        let start = epoch.sample()?;
+        Timer::wait_us(epoch, 100).map_err(|_| WorkError::Unavailable)?;
+        let end = epoch.sample()?;
+        if epoch.elapsed_bounds(&start, &end)?.lower_ns < 100_000 {
+            return Err(WorkError::CorruptContext);
+        }
+        let start = epoch.sample()?;
+        let minimum = epoch.minimum_deadline(100_000)?;
+        if minimum.remaining_quanta_ceil(10)? > 10 {
+            return Err(WorkError::CorruptContext);
+        }
+        while !minimum.ready()? {
+            core::hint::spin_loop();
+        }
+        let end = epoch.sample()?;
+        let wake = u64::try_from(minimum.wake_ns()?).map_err(|_| WorkError::CorruptContext)?;
+        if epoch.now_ns()?.saturating_add(1) < wake
+            || minimum.remaining_quanta_ceil(10)? != 0
+            || epoch.elapsed_bounds(&start, &end)?.lower_ns < 100_000
+        {
+            return Err(WorkError::CorruptContext);
+        }
+    }
     let epoch_start = epoch.as_ref().map(CounterEpoch::sample).transpose()?;
     let observation = installed.observation()?;
     let clock = Arc::clone(&installed.clock);

@@ -31,7 +31,7 @@ pub(super) fn capability<C: ConfigSpace>(config: &C, id: u8) -> Result<Option<u1
 
 pub(super) fn quiesce_pio<C: ConfigSpace>(function: &mut Function<C>) -> Result<(), BlockError> {
     let identity = u32::from(function.vendor) | u32::from(function.device) << 16;
-    if function.config().read32(0) != identity {
+    if function.config().read32(0)? != identity {
         return Err(BlockError::Unsupported(
             "storage PCI identity changed before PIO ownership",
         ));
@@ -39,18 +39,18 @@ pub(super) fn quiesce_pio<C: ConfigSpace>(function: &mut Function<C>) -> Result<
     let [msi, msix] = checked_capabilities(function.config(), None)?.0;
     set_pio_command(function, false)?;
     if let Some(at) = msi {
-        let value = function.config().read16(at) & !PCI_MSI_ENABLE;
-        function.config().write16(at, value);
-        if function.config().read16(at) & PCI_MSI_ENABLE != 0 {
+        let value = function.config().read16(at)? & !PCI_MSI_ENABLE;
+        function.config().write16(at, value)?;
+        if function.config().read16(at)? & PCI_MSI_ENABLE != 0 {
             return Err(BlockError::Unsupported(
                 "storage PIO MSI disable did not acknowledge",
             ));
         }
     }
     if let Some(at) = msix {
-        let value = function.config().read16(at) & !PCI_MSIX_ENABLE;
-        function.config().write16(at, value);
-        if function.config().read16(at) & PCI_MSIX_ENABLE != 0 {
+        let value = function.config().read16(at)? & !PCI_MSIX_ENABLE;
+        function.config().write16(at, value)?;
+        if function.config().read16(at)? & PCI_MSIX_ENABLE != 0 {
             return Err(BlockError::Unsupported(
                 "storage PIO MSI-X disable did not acknowledge",
             ));
@@ -66,14 +66,14 @@ fn checked_capabilities<C: ConfigSpace>(
     target: Option<u8>,
 ) -> Result<([Option<u16>; 2], Option<u16>), BlockError> {
     let malformed = BlockError::Unsupported("storage malformed PCI capability chain");
-    if config.read8(regs::HEADER_TYPE) & 0x7f != 0 {
+    if config.read8(regs::HEADER_TYPE)? & 0x7f != 0 {
         return Err(malformed);
     }
     let mut controls = [None; 2];
     let mut found = None;
     let mut singletons = [false; 256];
     for entry in config.capabilities() {
-        let entry = entry.map_err(|_| malformed.clone())?;
+        let entry = entry?;
         let (at, id) = (entry.offset, entry.id);
         if id == 0 {
             return Err(malformed);
@@ -92,7 +92,7 @@ fn checked_capabilities<C: ConfigSpace>(
         match id {
             PCI_PM | PCI_VPD | PCI_SSVID | PCI_VENDOR => {}
             PCI_EXPRESS => {
-                let flags = config.read16(at + PCI_CAP_CONTROL);
+                let flags = config.read16(at + PCI_CAP_CONTROL)?;
                 let kind = (flags & PCI_EXP_TYPE) >> 4;
                 if flags & PCI_EXP_SLOT != 0 {
                     return Err(BlockError::Unsupported(
@@ -132,12 +132,10 @@ pub(super) fn measured_extended<C: ConfigSpace + ?Sized>(
     target: u16,
     invalid: BlockError,
 ) -> Result<Option<u16>, BlockError> {
-    if config.read32(0x100) == u32::MAX {
+    if config.read32(0x100)? == u32::MAX {
         return Err(invalid);
     }
-    let entries = capability::extended_capabilities(config)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| invalid.clone())?;
+    let entries = capability::extended_capabilities(config).collect::<Result<Vec<_>, _>>()?;
     let mut singletons = 0u32;
     let mut found = None;
     for entry in &entries {
@@ -150,7 +148,7 @@ pub(super) fn measured_extended<C: ConfigSpace + ?Sized>(
             1 => {
                 if at + 0x2c > 0x1000
                     || capability::overlap(entries.iter().map(|e| e.span()), at, 0x2c).is_some()
-                    || config.read32(at + 0x18) & (1 << 11 | 1 << 12 | 1 << 18) != 0
+                    || config.read32(at + 0x18)? & (1 << 11 | 1 << 12 | 1 << 18) != 0
                 {
                     return Err(invalid);
                 }
@@ -176,7 +174,7 @@ pub(super) fn set_pio_command<C: ConfigSpace>(
     function: &mut Function<C>,
     grant_memory: bool,
 ) -> Result<(), BlockError> {
-    let command = (function.config().read16(regs::COMMAND)
+    let command = (function.config().read16(regs::COMMAND)?
         & !(regs::COMMAND_MASTER | regs::COMMAND_MEMORY))
         | regs::COMMAND_INTX_DISABLE
         | if grant_memory {
@@ -186,9 +184,9 @@ pub(super) fn set_pio_command<C: ConfigSpace>(
         };
     // Clear DMA ownership before power-up/BAR probing; grant memory only after
     // every register mapping has been validated. Neither phase grants DMA.
-    function.config().write16(regs::COMMAND, command);
+    function.config().write16(regs::COMMAND, command)?;
     let mask = regs::COMMAND_MASTER | regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE;
-    if function.config().read16(regs::COMMAND) & mask != command & mask {
+    if function.config().read16(regs::COMMAND)? & mask != command & mask {
         return Err(BlockError::Unsupported(
             "storage PIO PCI command did not acknowledge",
         ));

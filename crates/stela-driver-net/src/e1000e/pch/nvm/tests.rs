@@ -7,6 +7,11 @@ use core::{
 };
 
 struct State {
+    timing_failure: Option<crate::bus::pci::power::Error>,
+    fail_delay_at: Option<usize>,
+    delay_calls: usize,
+    timer_drops: Arc<AtomicUsize>,
+
     layout: Layout,
     fw: u32,
     gfpreg: u32,
@@ -163,14 +168,46 @@ unsafe impl Registers for Io {
         Ok(())
     }
 }
-struct Timer(Rc<RefCell<State>>);
-impl Delay for Timer {
-    fn delay(&mut self, us: u64) {
+struct Timer(Rc<RefCell<State>>, Arc<AtomicUsize>);
+impl Timer {
+    fn new(state: Rc<RefCell<State>>) -> Self {
+        let drops = state.borrow().timer_drops.clone();
+        Self(state, drops)
+    }
+}
+// SAFETY: isolated owned virtual-time model; this grants no native permission.
+unsafe impl Delay for Timer {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        if let Some(error) = self.0.borrow().timing_failure {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+    fn wait_us(&self, us: u64) -> Result<(), crate::bus::pci::power::Error> {
+        self.check()?;
+        {
+            let mut state = self.0.borrow_mut();
+            let at = state.delay_calls;
+            state.delay_calls += 1;
+            if state.fail_delay_at == Some(at) {
+                let error = crate::bus::pci::power::Error::Clock;
+                state.timing_failure = Some(error);
+                return Err(error);
+            }
+        }
         let mut s = self.0.borrow_mut();
         s.waits += 1;
         s.record(4, us as u32, 0);
+        Ok(())
     }
 }
+impl Drop for Timer {
+    fn drop(&mut self) {
+        self.1.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 fn make_state(layout: Layout, bank: u8) -> State {
     let base = if layout == Layout::Spt { 0 } else { 0x2000 };
     let mut memory = vec![0u8; base + 8192];
@@ -192,6 +229,10 @@ fn make_state(layout: Layout, bank: u8) -> State {
         }
     }
     State {
+        timing_failure: None,
+        fail_delay_at: None,
+        delay_calls: 0,
+        timer_drops: Arc::new(AtomicUsize::new(0)),
         layout,
         fw: 0x40,
         gfpreg: (3 << 16) | 2,
@@ -223,7 +264,7 @@ fn fixture(layout: Layout, bank: u8) -> Fixture {
         released: released.clone(),
     };
     // SAFETY: one controlled fresh model matches its selected layout.
-    let nvm = unsafe { Nvm::new(layout, io, Timer(state.clone())) }.unwrap();
+    let nvm = unsafe { Nvm::new(layout, io, Timer::new(state.clone())) }.unwrap();
     (nvm, state, released)
 }
 #[test]
@@ -399,7 +440,7 @@ fn geometry_and_me_qualification_refuse_without_sequencer_writes() {
         };
         assert!(matches!(
             // SAFETY: sole model reservation, with the chosen layout.
-            unsafe { Nvm::new(layout, io, Timer(state.clone())) },
+            unsafe { Nvm::new(layout, io, Timer::new(state.clone())) },
             Err(Error::FirmwareOwned)
         ));
         assert!(!state.borrow().ops.iter().any(|op| matches!(op[0], 2 | 3)));
@@ -484,4 +525,30 @@ fn unchanged_linux_pch_nvm_register_effects_and_payloads() {
         cases += 1;
     }
     assert_eq!(cases, 648);
+}
+
+#[test]
+fn failed_flash_minimum_keeps_output_and_actual_register_timer_pair() {
+    for layout in [Layout::Pch2, Layout::Lpt, Layout::Spt] {
+        let (mut nvm, state, released) = fixture(layout, 0);
+        {
+            let mut model = state.borrow_mut();
+            model.delay_reads = 1;
+            model.fail_delay_at = Some(model.delay_calls);
+        }
+        let cause = crate::bus::pci::power::Error::Clock;
+        let mut output = [0xa55a; 3];
+        assert_eq!(nvm.read(0, &mut output), Err(Error::Minimum(cause)));
+        assert_eq!(output, [0xa55a; 3]);
+        assert!(nvm.is_poisoned());
+        let observed = state.borrow().ops.clone();
+        let accesses = state.borrow().accesses;
+        state.borrow_mut().timing_failure = None;
+        assert_eq!(nvm.read(0, &mut output), Err(Error::Minimum(cause)));
+        assert_eq!(state.borrow().ops, observed);
+        assert_eq!(state.borrow().accesses, accesses);
+        drop(nvm);
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+        assert_eq!(state.borrow().timer_drops.load(Ordering::SeqCst), 0);
+    }
 }

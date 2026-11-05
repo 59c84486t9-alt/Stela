@@ -13,8 +13,9 @@ impl Timer for Time {
     fn now(&self) -> u64 {
         self.0.get()
     }
-    fn delay(&self, us: u64) {
-        self.0.set(self.0.get() + us)
+    fn delay(&self, us: u64) -> Result<(), BlockError> {
+        self.0.set(self.0.get() + us);
+        Ok(())
     }
 }
 #[derive(Default)]

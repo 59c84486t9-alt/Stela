@@ -1,0 +1,270 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 01:48:05 -0500
+Subject: [PATCH] refactor(fork): select original task MM lifetime helpers
+
+---
+ kernel/fork.c    |  97 ----------------------------------------
+ kernel/fork_mm.c | 112 +++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 112 insertions(+), 97 deletions(-)
+
+diff --git a/kernel/fork.c b/kernel/fork.c
+index c0cefb5240bb101398ec7d535c3d2e174439c25b..91bb00bcd5863affc8b25410ce9518d38e4aa581 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -917,32 +917,6 @@ struct file *get_task_exe_file(struct task_struct *task)
+ 	return exe_file;
+ }
+ 
+-/**
+- * get_task_mm - acquire a reference to the task's mm
+- * @task: The task.
+- *
+- * Returns %NULL if the task has no mm.  Checks PF_KTHREAD (meaning
+- * this kernel workthread has transiently adopted a user mm with kthread_use_mm,
+- * to do its AIO) is not set and if so returns a reference to it, after
+- * bumping up the use count.  User must release the mm via mmput()
+- * after use.  Typically used by /proc and ptrace.
+- */
+-struct mm_struct *get_task_mm(struct task_struct *task)
+-{
+-	struct mm_struct *mm;
+-
+-	if (task->flags & PF_KTHREAD)
+-		return NULL;
+-
+-	task_lock(task);
+-	mm = task->mm;
+-	if (mm)
+-		mmget(mm);
+-	task_unlock(task);
+-	return mm;
+-}
+-EXPORT_SYMBOL_GPL(get_task_mm);
+-
+ static bool may_access_mm(struct mm_struct *mm, struct task_struct *task, unsigned int mode)
+ {
+ 	if (mm == current->mm)
+@@ -975,19 +949,6 @@ struct mm_struct *mm_access(struct task_struct *task, unsigned int mode)
+ 	return mm;
+ }
+ 
+-static void complete_vfork_done(struct task_struct *tsk)
+-{
+-	struct completion *vfork;
+-
+-	task_lock(tsk);
+-	vfork = tsk->vfork_done;
+-	if (likely(vfork)) {
+-		tsk->vfork_done = NULL;
+-		complete(vfork);
+-	}
+-	task_unlock(tsk);
+-}
+-
+ static int wait_for_vfork_done(struct task_struct *child,
+ 				struct completion *vfork)
+ {
+@@ -1008,64 +969,6 @@ static int wait_for_vfork_done(struct task_struct *child,
+ 	return killed;
+ }
+ 
+-/* Please note the differences between mmput and mm_release.
+- * mmput is called whenever we stop holding onto a mm_struct,
+- * error success whatever.
+- *
+- * mm_release is called after a mm_struct has been removed
+- * from the current process.
+- *
+- * This difference is important for error handling, when we
+- * only half set up a mm_struct for a new process and need to restore
+- * the old one.  Because we mmput the new mm_struct before
+- * restoring the old one. . .
+- * Eric Biederman 10 January 1998
+- */
+-static void mm_release(struct task_struct *tsk, struct mm_struct *mm)
+-{
+-	uprobe_free_utask(tsk);
+-
+-	/* Get rid of any cached register state */
+-	deactivate_mm(tsk, mm);
+-
+-	/*
+-	 * Signal userspace if we're not exiting with a core dump
+-	 * because we want to leave the value intact for debugging
+-	 * purposes.
+-	 */
+-	if (tsk->clear_child_tid) {
+-		if (atomic_read(&mm->mm_users) > 1) {
+-			/*
+-			 * We don't check the error code - if userspace has
+-			 * not set up a proper pointer then tough luck.
+-			 */
+-			put_user(0, tsk->clear_child_tid);
+-			do_futex(tsk->clear_child_tid, FUTEX_WAKE,
+-					1, NULL, NULL, 0, 0);
+-		}
+-		tsk->clear_child_tid = NULL;
+-	}
+-
+-	/*
+-	 * All done, finally we can wake up parent and return this mm to him.
+-	 * Also kthread_stop() uses this completion for synchronization.
+-	 */
+-	if (tsk->vfork_done)
+-		complete_vfork_done(tsk);
+-}
+-
+-void exit_mm_release(struct task_struct *tsk, struct mm_struct *mm)
+-{
+-	futex_exit_release(tsk);
+-	mm_release(tsk, mm);
+-}
+-
+-void exec_mm_release(struct task_struct *tsk, struct mm_struct *mm)
+-{
+-	futex_exec_release(tsk);
+-	mm_release(tsk, mm);
+-}
+-
+ /**
+  * dup_mm() - duplicates an existing mm structure
+  * @tsk: the task_struct with which the new mm will be associated.
+diff --git a/kernel/fork_mm.c b/kernel/fork_mm.c
+index f61e5f2a19c102d9a350b89451005161ed7c35fc..eb5f4657f0f8fea410db74ed068d2bbb67277023 100644
+--- a/kernel/fork_mm.c
++++ b/kernel/fork_mm.c
+@@ -12,6 +12,8 @@
+  * management can be a bitch. See 'mm/memory.c': 'copy_page_range()'
+  */
+ 
++#include <linux/completion.h>
++#include <linux/futex.h>
+ #include <linux/idr.h>
+ #include <linux/init.h>
+ #include <linux/iommu.h>
+@@ -20,10 +22,16 @@
+ #include <linux/sched/mm.h>
+ #include <linux/sched/task.h>
+ #include <linux/slab.h>
++#include <linux/uaccess.h>
++#include <linux/uprobes.h>
+ 
+ #include <asm/mmu_context.h>
+ #include <asm/pgalloc.h>
+ 
++#ifdef CONFIG_STELA
++#include <stela/linux.h>
++#endif
++
+ #include "fork_mm.h"
+ 
+ #define NAMED_ARRAY_INDEX(x)	[x] = __stringify(x)
+@@ -223,3 +231,107 @@ void __init mm_cache_init(void)
+ 			sizeof_field(struct mm_struct, saved_auxv),
+ 			NULL);
+ }
++
++static void complete_vfork_done(struct task_struct *tsk)
++{
++	struct completion *vfork;
++
++	task_lock(tsk);
++	vfork = tsk->vfork_done;
++	if (likely(vfork)) {
++		tsk->vfork_done = NULL;
++		complete(vfork);
++	}
++	task_unlock(tsk);
++}
++
++/* Please note the differences between mmput and mm_release.
++ * mmput is called whenever we stop holding onto a mm_struct,
++ * error success whatever.
++ *
++ * mm_release is called after a mm_struct has been removed
++ * from the current process.
++ *
++ * This difference is important for error handling, when we
++ * only half set up a mm_struct for a new process and need to restore
++ * the old one.  Because we mmput the new mm_struct before
++ * restoring the old one. . .
++ * Eric Biederman 10 January 1998
++ */
++static void mm_release(struct task_struct *tsk, struct mm_struct *mm)
++{
++	uprobe_free_utask(tsk);
++
++#ifdef CONFIG_STELA
++	/* Native continuations retain their host segment state. Linux currently
++	 * owns no user address space or clear-child-tid word in this profile. */
++	if (!(tsk->flags & PF_KTHREAD) || mm || tsk->clear_child_tid)
++		stela_linux_fatal("user address-space release needs a native owner");
++#else
++	/* Get rid of any cached register state */
++	deactivate_mm(tsk, mm);
++
++	/*
++	 * Signal userspace if we're not exiting with a core dump
++	 * because we want to leave the value intact for debugging
++	 * purposes.
++	 */
++	if (tsk->clear_child_tid) {
++		if (atomic_read(&mm->mm_users) > 1) {
++			/*
++			 * We don't check the error code - if userspace has
++			 * not set up a proper pointer then tough luck.
++			 */
++			put_user(0, tsk->clear_child_tid);
++			do_futex(tsk->clear_child_tid, FUTEX_WAKE,
++					1, NULL, NULL, 0, 0);
++		}
++		tsk->clear_child_tid = NULL;
++	}
++#endif
++
++	/*
++	 * All done, finally we can wake up parent and return this mm to him.
++	 * Also kthread_stop() uses this completion for synchronization.
++	 */
++	if (tsk->vfork_done)
++		complete_vfork_done(tsk);
++}
++
++void exit_mm_release(struct task_struct *tsk, struct mm_struct *mm)
++{
++	futex_exit_release(tsk);
++	mm_release(tsk, mm);
++}
++
++void exec_mm_release(struct task_struct *tsk, struct mm_struct *mm)
++{
++	futex_exec_release(tsk);
++	mm_release(tsk, mm);
++}
++
++/**
++ * get_task_mm - acquire a reference to the task's mm
++ * @task: The task.
++ *
++ * Returns %NULL if the task has no mm.  Checks PF_KTHREAD (meaning
++ * this kernel workthread has transiently adopted a user mm with kthread_use_mm,
++ * to do its AIO) is not set and if so returns a reference to it, after
++ * bumping up the use count.  User must release the mm via mmput()
++ * after use.  Typically used by /proc and ptrace.
++ */
++struct mm_struct *get_task_mm(struct task_struct *task)
++{
++	struct mm_struct *mm;
++
++	if (task->flags & PF_KTHREAD)
++		return NULL;
++
++	task_lock(task);
++	mm = task->mm;
++	if (mm)
++		mmget(mm);
++	task_unlock(task);
++	return mm;
++}
++EXPORT_SYMBOL_GPL(get_task_mm);

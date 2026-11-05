@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 23:29:05 -0500
+Subject: [PATCH] refactor(fs): separate pseudo-filesystem metadata helpers
+
+---
+ fs/Makefile          |  2 +-
+ fs/d_path.c          | 21 ---------------------
+ fs/libfs.c           | 12 ------------
+ fs/pseudo_metadata.c | 39 +++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 40 insertions(+), 34 deletions(-)
+ create mode 100644 fs/pseudo_metadata.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 96243f4924d74beb2c7b9311967a0dd6b28cfc72..169f5ec6f0026a273d173663b7388d62d1a2c961 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -11,7 +11,7 @@ obj-y :=	open.o filp_close.o read_write.o file_table.o super.o \
+ 		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o inode.o \
+ 		attr.o bad_inode.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o \
+-		seq_file.o seq_lifetime.o seq_output.o xattr.o simple_xattr.o libfs.o fs-writeback.o \
++		seq_file.o seq_lifetime.o seq_output.o xattr.o simple_xattr.o libfs.o pseudo_metadata.o fs-writeback.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+ 		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
+ 		fs_dirent.o fs_context.o fs_parser.o fsopen.o init.o \
+diff --git a/fs/d_path.c b/fs/d_path.c
+index a48957c0971ef6297be2024f3239c0b437058f72..386ab71ac6f3dc0b3b73ef62bf5d0174ed7cb9c3 100644
+--- a/fs/d_path.c
++++ b/fs/d_path.c
+@@ -295,27 +295,6 @@ char *d_path(const struct path *path, char *buf, int buflen)
+ }
+ EXPORT_SYMBOL(d_path);
+ 
+-/*
+- * Helper function for dentry_operations.d_dname() members
+- */
+-char *dynamic_dname(char *buffer, int buflen, const char *fmt, ...)
+-{
+-	va_list args;
+-	char *start;
+-	int sz;
+-
+-	va_start(args, fmt);
+-	sz = vsnprintf(buffer, buflen, fmt, args) + 1;
+-	va_end(args);
+-
+-	if (sz > NAME_MAX || sz > buflen)
+-		return ERR_PTR(-ENAMETOOLONG);
+-
+-	/* Move the formatted d_name to the end of the buffer. */
+-	start = buffer + (buflen - sz);
+-	return memmove(start, buffer, sz);
+-}
+-
+ char *simple_dname(struct dentry *dentry, char *buffer, int buflen)
+ {
+ 	DECLARE_BUFFER(b, buffer, buflen);
+diff --git a/fs/libfs.c b/fs/libfs.c
+index 5a0d276379d13b5f1c790b9582572d7a11b00bf7..49222d977a8ae6e9bd7f2c38c7a36ccafda85d74 100644
+--- a/fs/libfs.c
++++ b/fs/libfs.c
+@@ -40,18 +40,6 @@ int simple_getattr(struct mnt_idmap *idmap, const struct path *path,
+ }
+ EXPORT_SYMBOL(simple_getattr);
+ 
+-int simple_statfs(struct dentry *dentry, struct kstatfs *buf)
+-{
+-	u64 id = huge_encode_dev(dentry->d_sb->s_dev);
+-
+-	buf->f_fsid = u64_to_fsid(id);
+-	buf->f_type = dentry->d_sb->s_magic;
+-	buf->f_bsize = PAGE_SIZE;
+-	buf->f_namelen = NAME_MAX;
+-	return 0;
+-}
+-EXPORT_SYMBOL(simple_statfs);
+-
+ /*
+  * Retaining negative dentries for an in-memory filesystem just wastes
+  * memory and lookup time: arrange for them to be deleted immediately.
+diff --git a/fs/pseudo_metadata.c b/fs/pseudo_metadata.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..34d8aa8d6c514f82e94f8109f853e30f4bb12400
+--- /dev/null
++++ b/fs/pseudo_metadata.c
+@@ -0,0 +1,39 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Simple pseudo-filesystem metadata from fs/d_path.c and fs/libfs.c. */
++#include <linux/export.h>
++#include <linux/fs.h>
++#include <linux/mm.h>
++#include <linux/statfs.h>
++
++int simple_statfs(struct dentry *dentry, struct kstatfs *buf)
++{
++	u64 id = huge_encode_dev(dentry->d_sb->s_dev);
++
++	buf->f_fsid = u64_to_fsid(id);
++	buf->f_type = dentry->d_sb->s_magic;
++	buf->f_bsize = PAGE_SIZE;
++	buf->f_namelen = NAME_MAX;
++	return 0;
++}
++EXPORT_SYMBOL(simple_statfs);
++
++/*
++ * Helper function for dentry_operations.d_dname() members
++ */
++char *dynamic_dname(char *buffer, int buflen, const char *fmt, ...)
++{
++	va_list args;
++	char *start;
++	int sz;
++
++	va_start(args, fmt);
++	sz = vsnprintf(buffer, buflen, fmt, args) + 1;
++	va_end(args);
++
++	if (sz > NAME_MAX || sz > buflen)
++		return ERR_PTR(-ENAMETOOLONG);
++
++	/* Move the formatted d_name to the end of the buffer. */
++	start = buffer + (buflen - sz);
++	return memmove(start, buffer, sz);
++}

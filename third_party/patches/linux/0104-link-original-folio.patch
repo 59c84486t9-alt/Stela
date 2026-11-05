@@ -1,0 +1,318 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 14:33:55 -0500
+Subject: [PATCH] refactor(mm): link original folio reclaim removal
+
+---
+ mm/filemap_batch.c | 136 ++++++++++++++++++++++++++++++++++++++++++++-
+ mm/internal.h      |   2 +
+ mm/vmscan.c        | 134 --------------------------------------------
+ 3 files changed, 137 insertions(+), 135 deletions(-)
+
+diff --git a/mm/filemap_batch.c b/mm/filemap_batch.c
+index 14d586b644664679016a2e437e79f7fb54039811..6b6ae69876546c4a8d58ff602afedc34db51df40 100644
+--- a/mm/filemap_batch.c
++++ b/mm/filemap_batch.c
+@@ -1,5 +1,5 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+-/* Page-cache batch helpers from mm/filemap.c and mm/swap.c. */
++/* Page-cache helpers from mm/filemap.c, mm/swap.c and mm/vmscan.c. */
+ #include <linux/backing-dev.h>
+ #include <linux/cpuset.h>
+ #include <linux/dax.h>
+@@ -1046,3 +1046,137 @@ no_page:
+ 	return folio;
+ }
+ EXPORT_SYMBOL(__filemap_get_folio_mpol);
++
++/*
++ * Same as remove_mapping, but if the folio is removed from the mapping, it
++ * gets returned with a refcount of 0.
++ */
++int __remove_mapping(struct address_space *mapping, struct folio *folio,
++			    bool reclaimed, struct mem_cgroup *target_memcg)
++{
++	int refcount;
++	void *shadow = NULL;
++	struct swap_cluster_info *ci;
++
++	BUG_ON(!folio_test_locked(folio));
++	BUG_ON(mapping != folio_mapping(folio));
++
++	if (folio_test_swapcache(folio)) {
++		ci = swap_cluster_get_and_lock_irq(folio);
++	} else {
++		spin_lock(&mapping->host->i_lock);
++		xa_lock_irq(&mapping->i_pages);
++	}
++
++	/*
++	 * The non racy check for a busy folio.
++	 *
++	 * Must be careful with the order of the tests. When someone has
++	 * a ref to the folio, it may be possible that they dirty it then
++	 * drop the reference. So if the dirty flag is tested before the
++	 * refcount here, then the following race may occur:
++	 *
++	 * get_user_pages(&page);
++	 * [user mapping goes away]
++	 * write_to(page);
++	 *				!folio_test_dirty(folio)    [good]
++	 * folio_set_dirty(folio);
++	 * folio_put(folio);
++	 *				!refcount(folio)   [good, discard it]
++	 *
++	 * [oops, our write_to data is lost]
++	 *
++	 * Reversing the order of the tests ensures such a situation cannot
++	 * escape unnoticed. The smp_rmb is needed to ensure the folio->flags
++	 * load is not satisfied before that of folio->_refcount.
++	 *
++	 * Note that if the dirty flag is always set via folio_mark_dirty,
++	 * and thus under the i_pages lock, then this ordering is not required.
++	 */
++	refcount = 1 + folio_nr_pages(folio);
++	if (!folio_ref_freeze(folio, refcount))
++		goto cannot_free;
++	/* note: atomic_cmpxchg in folio_ref_freeze provides the smp_rmb */
++	if (unlikely(folio_test_dirty(folio))) {
++		folio_ref_unfreeze(folio, refcount);
++		goto cannot_free;
++	}
++
++	if (folio_test_swapcache(folio)) {
++		swp_entry_t swap = folio->swap;
++
++		if (reclaimed && !mapping_exiting(mapping))
++			shadow = workingset_eviction(folio, target_memcg);
++		__memcg1_swapout(folio, ci);
++		__swap_cache_del_folio(ci, folio, swap, shadow);
++		swap_cluster_unlock_irq(ci);
++	} else {
++		void (*free_folio)(struct folio *);
++
++		free_folio = mapping->a_ops->free_folio;
++		/*
++		 * Remember a shadow entry for reclaimed file cache in
++		 * order to detect refaults, thus thrashing, later on.
++		 *
++		 * But don't store shadows in an address space that is
++		 * already exiting.  This is not just an optimization,
++		 * inode reclaim needs to empty out the radix tree or
++		 * the nodes are lost.  Don't plant shadows behind its
++		 * back.
++		 *
++		 * We also don't store shadows for DAX mappings because the
++		 * only page cache folios found in these are zero pages
++		 * covering holes, and because we don't want to mix DAX
++		 * exceptional entries and shadow exceptional entries in the
++		 * same address_space.
++		 */
++		if (reclaimed && folio_is_file_lru(folio) &&
++		    !mapping_exiting(mapping) && !dax_mapping(mapping))
++			shadow = workingset_eviction(folio, target_memcg);
++		__filemap_remove_folio(folio, shadow);
++		xa_unlock_irq(&mapping->i_pages);
++		if (mapping_shrinkable(mapping))
++			inode_lru_list_add(mapping->host);
++		spin_unlock(&mapping->host->i_lock);
++
++		if (free_folio)
++			free_folio(folio);
++	}
++
++	return 1;
++
++cannot_free:
++	if (folio_test_swapcache(folio)) {
++		swap_cluster_unlock_irq(ci);
++	} else {
++		xa_unlock_irq(&mapping->i_pages);
++		spin_unlock(&mapping->host->i_lock);
++	}
++	return 0;
++}
++
++/**
++ * remove_mapping() - Attempt to remove a folio from its mapping.
++ * @mapping: The address space.
++ * @folio: The folio to remove.
++ *
++ * If the folio is dirty, under writeback or if someone else has a ref
++ * on it, removal will fail.
++ * Return: The number of pages removed from the mapping.  0 if the folio
++ * could not be removed.
++ * Context: The caller should have a single refcount on the folio and
++ * hold its lock.
++ */
++long remove_mapping(struct address_space *mapping, struct folio *folio)
++{
++	if (__remove_mapping(mapping, folio, false, NULL)) {
++		/*
++		 * Unfreezing the refcount with 1 effectively
++		 * drops the pagecache ref for us without requiring another
++		 * atomic operation.
++		 */
++		folio_ref_unfreeze(folio, 1);
++		return folio_nr_pages(folio);
++	}
++	return 0;
++}
+diff --git a/mm/internal.h b/mm/internal.h
+index 9e74600b24d934280df2ec63f975f15b7f48b850..9e572071d014ed0721d5065c87e5136d2ed27c75 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -1769,6 +1769,8 @@ void __meminit __init_page_from_nid(unsigned long pfn, int nid);
+ #ifdef CONFIG_STELA
+ int __init workingset_init(void);
+ #endif
++int __remove_mapping(struct address_space *mapping, struct folio *folio,
++		     bool reclaimed, struct mem_cgroup *target_memcg);
+ unsigned long shrink_slab(gfp_t gfp_mask, int nid, struct mem_cgroup *memcg,
+ 			  int priority);
+ 
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 2a17e91368f7b854211d248b81f33380e4d5440c..43ef73f9c7dc614e1b7ee8de289876ad934457b6 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -544,140 +544,6 @@ static pageout_t pageout(struct folio *folio, struct address_space *mapping,
+ 	return PAGE_SUCCESS;
+ }
+ 
+-/*
+- * Same as remove_mapping, but if the folio is removed from the mapping, it
+- * gets returned with a refcount of 0.
+- */
+-static int __remove_mapping(struct address_space *mapping, struct folio *folio,
+-			    bool reclaimed, struct mem_cgroup *target_memcg)
+-{
+-	int refcount;
+-	void *shadow = NULL;
+-	struct swap_cluster_info *ci;
+-
+-	BUG_ON(!folio_test_locked(folio));
+-	BUG_ON(mapping != folio_mapping(folio));
+-
+-	if (folio_test_swapcache(folio)) {
+-		ci = swap_cluster_get_and_lock_irq(folio);
+-	} else {
+-		spin_lock(&mapping->host->i_lock);
+-		xa_lock_irq(&mapping->i_pages);
+-	}
+-
+-	/*
+-	 * The non racy check for a busy folio.
+-	 *
+-	 * Must be careful with the order of the tests. When someone has
+-	 * a ref to the folio, it may be possible that they dirty it then
+-	 * drop the reference. So if the dirty flag is tested before the
+-	 * refcount here, then the following race may occur:
+-	 *
+-	 * get_user_pages(&page);
+-	 * [user mapping goes away]
+-	 * write_to(page);
+-	 *				!folio_test_dirty(folio)    [good]
+-	 * folio_set_dirty(folio);
+-	 * folio_put(folio);
+-	 *				!refcount(folio)   [good, discard it]
+-	 *
+-	 * [oops, our write_to data is lost]
+-	 *
+-	 * Reversing the order of the tests ensures such a situation cannot
+-	 * escape unnoticed. The smp_rmb is needed to ensure the folio->flags
+-	 * load is not satisfied before that of folio->_refcount.
+-	 *
+-	 * Note that if the dirty flag is always set via folio_mark_dirty,
+-	 * and thus under the i_pages lock, then this ordering is not required.
+-	 */
+-	refcount = 1 + folio_nr_pages(folio);
+-	if (!folio_ref_freeze(folio, refcount))
+-		goto cannot_free;
+-	/* note: atomic_cmpxchg in folio_ref_freeze provides the smp_rmb */
+-	if (unlikely(folio_test_dirty(folio))) {
+-		folio_ref_unfreeze(folio, refcount);
+-		goto cannot_free;
+-	}
+-
+-	if (folio_test_swapcache(folio)) {
+-		swp_entry_t swap = folio->swap;
+-
+-		if (reclaimed && !mapping_exiting(mapping))
+-			shadow = workingset_eviction(folio, target_memcg);
+-		__memcg1_swapout(folio, ci);
+-		__swap_cache_del_folio(ci, folio, swap, shadow);
+-		swap_cluster_unlock_irq(ci);
+-	} else {
+-		void (*free_folio)(struct folio *);
+-
+-		free_folio = mapping->a_ops->free_folio;
+-		/*
+-		 * Remember a shadow entry for reclaimed file cache in
+-		 * order to detect refaults, thus thrashing, later on.
+-		 *
+-		 * But don't store shadows in an address space that is
+-		 * already exiting.  This is not just an optimization,
+-		 * inode reclaim needs to empty out the radix tree or
+-		 * the nodes are lost.  Don't plant shadows behind its
+-		 * back.
+-		 *
+-		 * We also don't store shadows for DAX mappings because the
+-		 * only page cache folios found in these are zero pages
+-		 * covering holes, and because we don't want to mix DAX
+-		 * exceptional entries and shadow exceptional entries in the
+-		 * same address_space.
+-		 */
+-		if (reclaimed && folio_is_file_lru(folio) &&
+-		    !mapping_exiting(mapping) && !dax_mapping(mapping))
+-			shadow = workingset_eviction(folio, target_memcg);
+-		__filemap_remove_folio(folio, shadow);
+-		xa_unlock_irq(&mapping->i_pages);
+-		if (mapping_shrinkable(mapping))
+-			inode_lru_list_add(mapping->host);
+-		spin_unlock(&mapping->host->i_lock);
+-
+-		if (free_folio)
+-			free_folio(folio);
+-	}
+-
+-	return 1;
+-
+-cannot_free:
+-	if (folio_test_swapcache(folio)) {
+-		swap_cluster_unlock_irq(ci);
+-	} else {
+-		xa_unlock_irq(&mapping->i_pages);
+-		spin_unlock(&mapping->host->i_lock);
+-	}
+-	return 0;
+-}
+-
+-/**
+- * remove_mapping() - Attempt to remove a folio from its mapping.
+- * @mapping: The address space.
+- * @folio: The folio to remove.
+- *
+- * If the folio is dirty, under writeback or if someone else has a ref
+- * on it, removal will fail.
+- * Return: The number of pages removed from the mapping.  0 if the folio
+- * could not be removed.
+- * Context: The caller should have a single refcount on the folio and
+- * hold its lock.
+- */
+-long remove_mapping(struct address_space *mapping, struct folio *folio)
+-{
+-	if (__remove_mapping(mapping, folio, false, NULL)) {
+-		/*
+-		 * Unfreezing the refcount with 1 effectively
+-		 * drops the pagecache ref for us without requiring another
+-		 * atomic operation.
+-		 */
+-		folio_ref_unfreeze(folio, 1);
+-		return folio_nr_pages(folio);
+-	}
+-	return 0;
+-}
+-
+ /**
+  * folio_putback_lru - Put previously isolated folio onto appropriate LRU list.
+  * @folio: Folio to be returned to an LRU list.

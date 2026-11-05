@@ -16,6 +16,9 @@ fn group_received(driver: &mut Native, model: &Model, index: u8, key: u8, pn: u6
 
 #[test]
 fn native_live_igtk_update_revokes_old_envelopes_and_keeps_both_real_rx_windows() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, ptk, gtk) = keys(&mut driver);
@@ -99,6 +102,9 @@ fn native_live_igtk_update_revokes_old_envelopes_and_keeps_both_real_rx_windows(
 
 #[test]
 fn native_live_igtk_overlap_never_clears_hardware_integrity_failures() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, _, _) = keys(&mut driver);
@@ -130,6 +136,9 @@ fn native_live_igtk_overlap_never_clears_hardware_integrity_failures() {
 
 #[test]
 fn native_live_igtk_requires_tx_descriptor_free_and_unmap_drain() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, _, _) = keys(&mut driver);
@@ -194,6 +203,9 @@ fn native_live_igtk_requires_tx_descriptor_free_and_unmap_drain() {
 
 #[test]
 fn native_live_igtk_uncertain_firmware_quarantines_old_new_keys_and_requester() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fault in 0..3 {
         let (mut driver, model) = setup();
         associated(&mut driver, &model, 0);

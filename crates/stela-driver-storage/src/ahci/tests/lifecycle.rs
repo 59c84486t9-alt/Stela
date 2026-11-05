@@ -5,10 +5,28 @@ fn supported_amd_raid_classes_match_controller_profiles() {
     // Reference: ahci_pci_tbl.
     struct Config([u32; 4]);
     impl ConfigSpace for Config {
-        fn read32(&self, offset: u16) -> u32 {
-            self.0[usize::from(offset / 4)]
+        fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+            Ok(self.0[usize::from(offset / 4)])
         }
-        fn write32(&mut self, _: u16, _: u32) {}
+        fn write32(&mut self, _: u16, _: u32) -> Result<(), crate::bus::pci::ConfigError> {
+            Ok(())
+        }
+
+        fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+        }
+
+        fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+        }
+
+        fn write8(&mut self, _: u16, _: u8) -> Result<(), crate::bus::pci::ConfigError> {
+            panic!("unexpected narrow PCI store in identity/reset fixture");
+        }
+
+        fn write16(&mut self, _: u16, _: u16) -> Result<(), crate::bus::pci::ConfigError> {
+            panic!("unexpected narrow PCI store in identity/reset fixture");
+        }
     }
     let function = |vendor: u32, class: u32| {
         let address = crate::bus::pci::Address {

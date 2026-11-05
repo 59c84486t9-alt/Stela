@@ -63,14 +63,14 @@ pub(super) fn runtime_configuration<C: ConfigSpace>(
 ) -> Result<&mut dyn ConfigSpace, BlockError> {
     if f.vendor != 0x17a0
         || !matches!(f.device, 0x9755 | 0x9767 | 0xe763)
-        || f.config().read32(0) != u32::from(f.device) << 16 | 0x17a0
-        || f.config().read32(8) & 0xffff_0000 != 0x0805_0000
+        || f.config().read32(0)? != u32::from(f.device) << 16 | 0x17a0
+        || f.config().read32(8)? & 0xffff_0000 != 0x0805_0000
     {
         return Err(BlockError::Unsupported(
             "GL9755 runtime PCI identity changed",
         ));
     }
-    if f.device == 0x9767 && f.config().read32(0x940) & 3 != 0 {
+    if f.device == 0x9767 && f.config().read32(0x940)? & 3 != 0 {
         return Err(BlockError::Unsupported(
             "GL9767 SD Express transition requires its child owner",
         ));
@@ -80,15 +80,15 @@ pub(super) fn runtime_configuration<C: ConfigSpace>(
     ))?;
     for (id, mask) in [(5, 1), (0x11, 1 << 15)] {
         if let Some(at) = crate::pci::capability(f.config(), id)?
-            && f.config().read16(at + 2) & mask != 0
+            && f.config().read16(at + 2)? & mask != 0
         {
             return Err(BlockError::Unsupported(
                 "GL9755 runtime interrupt ownership changed",
             ));
         }
     }
-    let command = f.config().read16(4);
-    if f.config().read16(pm + 4) & 3 != 0
+    let command = f.config().read16(4)?;
+    if f.config().read16(pm + 4)? & 3 != 0
         || command == u16::MAX
         || command & 0x402 != 0x402
         || (command & 4 != 0) != dma_enabled
@@ -100,27 +100,38 @@ pub(super) fn runtime_configuration<C: ConfigSpace>(
     Ok(f.config())
 }
 
-pub(super) fn prepare(
-    mut function: Function,
-    mut registers: crate::bus::mmio::Mmio,
-    clock: Clock,
-) -> Result<Native, BlockError> {
-    validate_clock(clock)?;
-    // These are held firmware mappings/configuration views, with no Drop
-    // that releases a physical resource. Failed PIO admission publishes no
-    // command/DMA and leaves the original firmware mapping intact.
-    if function.device == 0xe763 {
-        gl9763e::initialize(&mut function, &mut registers, clock)?;
-    } else if function.device == 0x9767 {
-        gl9767::initialize(&mut function, &mut registers, clock)?;
-    } else if function.device == 0x9755 {
-        gl9755::initialize(&mut function, &mut registers, clock)?;
-    } else {
-        setup(&mut function, &mut registers, clock)?;
+#[expect(
+    clippy::result_large_err,
+    reason = "Return the same affine device, mapping and timer graph without a fallible failure-path allocation."
+)]
+pub(super) fn prepare(mut owner: Retained<OwnedPreparation>) -> Result<Native, OwnedAttachFailure> {
+    let result = {
+        let owner = owner.get_mut();
+        owner.stage = PreparationStage::ProfileInitialization;
+        let f = &mut owner.function;
+        let r = &mut owner.registers;
+        let clock = owner.clock;
+        let minimum = owner.minimum.as_ref();
+        if f.device == 0xe763 {
+            gl9763e::initialize(f, r, clock)
+        } else if f.device == 0x9767 {
+            gl9767::initialize(f, r, clock, minimum)
+        } else if f.device == 0x9755 {
+            gl9755::initialize(f, r, clock, minimum)
+        } else {
+            setup(f, r, clock, minimum)
+        }
+    };
+    if let Err(error) = result {
+        return Err(OwnedAttachFailure {
+            error,
+            owner: Retained::new(FailedAttachment::Preparation(owner.into_inner())),
+        });
     }
+    let owner = owner.into_inner();
     Ok(Native {
-        registers,
-        function,
+        registers: owner.registers,
+        function: owner.function,
         dma_enabled: false,
     })
 }
@@ -133,7 +144,7 @@ pub(super) fn dma_grant<C: ConfigSpace>(
     if !matches!(
         identity,
         0x9750_17a0 | 0x9755_17a0 | 0x9767_17a0 | 0xe763_17a0
-    ) || function.config().read32(0) != identity
+    ) || function.config().read32(0)? != identity
     {
         return Err(BlockError::Unsupported(
             "GL9750 DMA requester identity changed",
@@ -147,15 +158,15 @@ pub(super) fn dma_grant<C: ConfigSpace>(
     ))?;
     for (id, enabled_mask) in [(5, 1), (0x11, 1 << 15)] {
         if let Some(at) = crate::pci::capability(function.config(), id)?
-            && function.config().read16(at + 2) & enabled_mask != 0
+            && function.config().read16(at + 2)? & enabled_mask != 0
         {
             return Err(BlockError::Unsupported(
                 "GL9750 DMA interrupt ownership changed",
             ));
         }
     }
-    let command = function.config().read16(4);
-    if function.config().read16(pm + 4) & 3 != 0
+    let command = function.config().read16(4)?;
+    if function.config().read16(pm + 4)? & 3 != 0
         || command == u16::MAX
         || command & 0x402 != 0x402
         || (command & 4 != 0) != *enabled
@@ -165,12 +176,12 @@ pub(super) fn dma_grant<C: ConfigSpace>(
         ));
     }
     if !*enabled {
-        function.config().write16(4, command | 4);
+        function.config().write16(4, command | 4)?;
     }
-    let acknowledged = function.config().read16(4);
+    let acknowledged = function.config().read16(4)?;
     if acknowledged == u16::MAX
         || acknowledged & 0x406 != 0x406
-        || function.config().read32(0) != identity
+        || function.config().read32(0)? != identity
     {
         return Err(BlockError::Unsupported(
             "GL9750 PCI DMA grant did not acknowledge",
@@ -184,9 +195,11 @@ pub(super) fn setup<C: ConfigSpace>(
     function: &mut Function<C>,
     registers: &mut dyn Registers,
     clock: Clock,
+    minimum: &dyn crate::bus::pci::power::Timer,
 ) -> Result<(), BlockError> {
+    minimum.check().map_err(BlockError::PciPower)?;
     validate_clock(clock)?;
-    if function.config().read32(0) != 0x9750_17a0 {
+    if function.config().read32(0)? != 0x9750_17a0 {
         return Err(BlockError::Unsupported("GL9750 owned PCI identity changed"));
     }
     let pm = crate::pci::capability(function.config(), 1)?.ok_or(BlockError::Unsupported(
@@ -208,9 +221,11 @@ pub(super) fn setup<C: ConfigSpace>(
         update(registers, CFG2, 31 << 24, 31 << 24)?;
         // Use word stores: adjacent PM status is W1C. Save the real BAR inventory
         // before D3hot; a soft reset must not silently change the mapped resource.
-        let bars: [u32; 6] =
-            core::array::from_fn(|i| function.config().read32(0x10 + i as u16 * 4));
-        let control = function.config().read16(pm + 4);
+        let mut bars = [0u32; 6];
+        for (i, saved) in bars.iter_mut().enumerate() {
+            *saved = function.config().read32(0x10 + i as u16 * 4)?;
+        }
+        let control = function.config().read16(pm + 4)?;
         if control == u16::MAX || control & 3 != 0 {
             return Err(BlockError::Unsupported(
                 "GL9750 power cycle requires actual D0",
@@ -220,17 +235,17 @@ pub(super) fn setup<C: ConfigSpace>(
         // Keep decode contained through the power transition itself: a D0
         // soft reset may clear BARs while keeping the previous command word.
         set_pio_command(function, false)?;
-        function.config().write16(pm + 4, (control & !0x8003) | 3);
-        clock.delay(10_000);
-        if function.config().read16(pm + 4) & 3 != 3 {
+        function.config().write16(pm + 4, (control & !0x8003) | 3)?;
+        minimum.wait_us(10_000).map_err(BlockError::PciPower)?;
+        if function.config().read16(pm + 4)? & 3 != 3 {
             return Err(BlockError::Unsupported("GL9750 D3hot did not acknowledge"));
         }
-        function.config().write16(pm + 4, control & !0x8003);
-        clock.delay(10_000);
-        if function.config().read16(pm + 4) & 3 != 0 {
+        function.config().write16(pm + 4, control & !0x8003)?;
+        minimum.wait_us(10_000).map_err(BlockError::PciPower)?;
+        if function.config().read16(pm + 4)? & 3 != 0 {
             return Err(BlockError::Unsupported("GL9750 D0 did not acknowledge"));
         }
-        if function.config().read32(0) != 0x9750_17a0
+        if function.config().read32(0)? != 0x9750_17a0
             || crate::pci::capability(function.config(), 1)? != Some(pm)
             || find_aer(function.config())? != aer
         {
@@ -244,8 +259,8 @@ pub(super) fn setup<C: ConfigSpace>(
         quiesce_pio(function)?;
         for (index, value) in bars.into_iter().enumerate() {
             let at = 0x10 + index as u16 * 4;
-            function.config().write32(at, value);
-            if function.config().read32(at) != value {
+            function.config().write32(at, value)?;
+            if function.config().read32(at)? != value {
                 return Err(BlockError::Unsupported(
                     "GL9750 BAR restoration did not acknowledge",
                 ));
@@ -254,9 +269,9 @@ pub(super) fn setup<C: ConfigSpace>(
         set_pio_command(function, true)?;
         mapped = true;
         if let Some(aer) = aer {
-            let mask = function.config().read32(aer + 0x14) | 1 << 12;
-            function.config().write32(aer + 0x14, mask);
-            if function.config().read32(aer + 0x14) != mask {
+            let mask = function.config().read32(aer + 0x14)? | 1 << 12;
+            function.config().write32(aer + 0x14, mask)?;
+            if function.config().read32(aer + 0x14)? != mask {
                 return Err(BlockError::Unsupported(
                     "GL9750 AER replay mask did not acknowledge",
                 ));
@@ -266,17 +281,28 @@ pub(super) fn setup<C: ConfigSpace>(
     })();
     // Close the original window only while the function is accessible.
     // A failed D3/D0 transition keeps the unresolved hardware owner instead.
-    let close = if mapped
-        && function.config().read32(0) == 0x9750_17a0
-        && function.config().read16(pm + 4) & 3 == 0
-        && function.config().read16(4) & 2 != 0
-    {
-        update(registers, WT, 1, 0)
-    } else {
-        Err(BlockError::Unsupported(
-            "GL9750 write window remains inaccessible",
-        ))
-    };
+
+    if matches!(
+        &result,
+        Err(BlockError::Config(_)
+            | BlockError::PciPower(_)
+            | BlockError::PciCapability(crate::bus::pci::CapabilityError::Config { .. }))
+    ) {
+        return result;
+    }
+    let close = (|| {
+        if mapped
+            && function.config().read32(0)? == 0x9750_17a0
+            && function.config().read16(pm + 4)? & 3 == 0
+            && function.config().read16(4)? & 2 != 0
+        {
+            update(registers, WT, 1, 0)
+        } else {
+            Err(BlockError::Unsupported(
+                "GL9750 write window remains inaccessible",
+            ))
+        }
+    })();
     result.and(close)
 }
 

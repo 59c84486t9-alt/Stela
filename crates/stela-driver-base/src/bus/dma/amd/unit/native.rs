@@ -22,7 +22,7 @@ mod firmware;
 mod queue;
 mod requester;
 
-use super::registers::{self, FunctionInspection};
+use super::registers::{self, FunctionInspection, UnitConfig};
 use crate::{
     Clock,
     bus::dma::{
@@ -37,15 +37,16 @@ use crate::{
         memory::{CacheAttribute, MemoryError, PageGeometry, PageSource, PinnedPages},
         pages::DmaPages,
     },
+    bus::{mmio::owned::MappingView, pci::owned::OwnedConfig},
 };
-use alloc::{rc::Rc, vec::Vec};
+use alloc::{rc::Rc, sync::Arc, vec::Vec};
 use buffer::Buffer;
 use core::{
     cell::{Cell, RefCell},
     mem::ManuallyDrop,
     ops::Range,
     ptr::NonNull,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 pub use requester::{Mapping, Requester};
 
@@ -80,6 +81,8 @@ pub fn quarantined_units() -> u64 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
+    Config(crate::bus::pci::ConfigError),
+    PciCapability(crate::bus::pci::CapabilityError),
     Firmware,
     Profile,
     NotCold,
@@ -161,8 +164,8 @@ pub struct Limits {
     pub wait_us: u64,
 }
 
-struct Resources<P> {
-    inspection: FunctionInspection,
+struct Resources<P, C> {
+    inspection: FunctionInspection<C>,
     platform: P,
     command: Buffer,
     completion: Buffer,
@@ -174,8 +177,8 @@ struct Queue {
     sequence: u64,
 }
 
-struct Engine<P> {
-    resources: ManuallyDrop<Resources<P>>,
+struct Engine<P, C> {
+    resources: ManuallyDrop<Resources<P, C>>,
     queue: RefCell<Queue>,
     poisoned: Cell<bool>,
     exposed: Cell<bool>,
@@ -186,7 +189,7 @@ struct Engine<P> {
     table_base: Cell<u64>,
 }
 
-impl<P> Drop for Engine<P> {
+impl<P, C> Drop for Engine<P, C> {
     fn drop(&mut self) {
         if self.exposed.get() && !self.retired.get() {
             let _ = QUARANTINED_UNITS.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
@@ -202,14 +205,14 @@ impl<P> Drop for Engine<P> {
     }
 }
 
-struct Hardware<P> {
-    engine: Rc<Engine<P>>,
+struct Hardware<P, C> {
+    engine: Rc<Engine<P, C>>,
     domain: Option<DomainId>,
     // A poisoned/exposed tree keeps its original requester configuration
     // together with the original unit/root and payload/table pins.
     requester: Option<Rc<requester::Owner>>,
 }
-impl<P> Clone for Hardware<P> {
+impl<P, C> Clone for Hardware<P, C> {
     fn clone(&self) -> Self {
         Self {
             engine: self.engine.clone(),
@@ -218,7 +221,7 @@ impl<P> Clone for Hardware<P> {
         }
     }
 }
-impl<P: ColdPlatform> PageSource for Hardware<P> {
+impl<P: ColdPlatform, C: UnitConfig> PageSource for Hardware<P, C> {
     fn page_geometry(&self) -> Result<PageGeometry, MemoryError> {
         self.engine.resources.platform.page_geometry()
     }
@@ -250,7 +253,7 @@ impl<P: ColdPlatform> PageSource for Hardware<P> {
 }
 // SAFETY: the original unsafe platform supplies table visibility; this
 // adapter preserves the exact bytes and original unit context.
-unsafe impl<P: ColdPlatform> TableVisibility for Hardware<P> {
+unsafe impl<P: ColdPlatform, C: UnitConfig> TableVisibility for Hardware<P, C> {
     unsafe fn publish(&self, cpu: NonNull<u8>, bytes: usize) -> Result<(), MemoryError> {
         // SAFETY: inherited exact WB span contract, forwarded without escape.
         unsafe { self.engine.resources.platform.publish(cpu, bytes) }
@@ -258,7 +261,7 @@ unsafe impl<P: ColdPlatform> TableVisibility for Hardware<P> {
 }
 // SAFETY: one closed, externally exclusive unit; enter keeps its CX16
 // execution context. Queue completion is a real exact-sequence coherent store.
-unsafe impl<P: ColdPlatform> DeviceTableHardware for Hardware<P> {
+unsafe impl<P: ColdPlatform, C: UnitConfig> DeviceTableHardware for Hardware<P, C> {
     type Access<'a>
         = P::Access<'a>
     where
@@ -281,7 +284,7 @@ unsafe impl<P: ColdPlatform> DeviceTableHardware for Hardware<P> {
 // SAFETY: every tree is bound to its reserved domain and original requester;
 // full-domain invalidation includes PDE caches and exact completion. Payload
 // cache/encryption admission is supplied by the native platform.
-unsafe impl<P: ColdPlatform> TableHardware for Hardware<P> {
+unsafe impl<P: ColdPlatform, C: UnitConfig> TableHardware for Hardware<P, C> {
     fn invalidate(&self, _: u64, _: usize) -> Result<(), DmaError> {
         let id = self.domain.ok_or(DmaError::IommuUnavailable)?;
         self.engine
@@ -298,32 +301,67 @@ unsafe impl<P: ColdPlatform> TableHardware for Hardware<P> {
 
 /// The window domain: one to one page tables shared by the requesters that
 /// have no domain of their own.
-struct Window<P: ColdPlatform> {
+struct Window<P: ColdPlatform, C: UnitConfig> {
     id: DomainId,
     root: PhysicalAddress,
     level: TableLevel,
-    tree: PageTables<Hardware<P>>,
+    tree: PageTables<Hardware<P, C>>,
     requesters: Vec<u16>,
+}
+
+/// The original cold AMD unit's direct interrupt format, without a
+/// reference to its process-local command engine or configuration owner.
+pub struct DirectDelivery {
+    _mapping: MappingView,
+    valid: Arc<AtomicBool>,
+    base: usize,
+    table: u64,
+    control: u64,
+}
+
+impl DirectDelivery {
+    /// # Safety
+    /// The caller has checked the original IRQ CPU and admitted root. That
+    /// context keeps the retained UC register aperture reachable, including
+    /// in an IRQ. This reads only immutable mode and root register fields.
+    pub unsafe fn check(&self) -> Result<(), Error> {
+        if !self.valid.load(Ordering::Acquire) {
+            return Err(Error::Fault);
+        }
+        // SAFETY: caller's current root keeps this aligned, retained aperture.
+        let table = unsafe { ((self.base + DEVICE_TABLE) as *const u64).read_volatile() };
+        // SAFETY: same original retained mapping and bounded 64-bit register.
+        let control = unsafe { ((self.base + CONTROL) as *const u64).read_volatile() };
+        if u64::from_le(table) != self.table || u64::from_le(control) != self.control {
+            self.valid.store(false, Ordering::Release);
+            return Err(Error::Fault);
+        }
+        if !self.valid.load(Ordering::Acquire) {
+            return Err(Error::Fault);
+        }
+        Ok(())
+    }
 }
 
 /// Original cold unit plus complete blocked DTE table and bounded RID policy.
 /// Requesters and their page trees keep this exact engine independently.
-pub struct Unit<P: ColdPlatform> {
-    engine: Rc<Engine<P>>,
-    table: Rc<RefCell<DeviceTable<Hardware<P>>>>,
+pub struct Unit<P: ColdPlatform, C: UnitConfig = OwnedConfig> {
+    engine: Rc<Engine<P, C>>,
+    table: Rc<RefCell<DeviceTable<Hardware<P, C>>>>,
     coverage: Vec<bool>,
     /// IDs independently assigned by firmware or observed on a PCI function.
     sources: Vec<bool>,
     aliases: Vec<(u16, u16)>,
-    window: Option<Window<P>>,
+    window: Option<Window<P, C>>,
     active: Rc<RefCell<Vec<u16>>>,
+    direct_delivery: Arc<AtomicBool>,
     next_domain: Cell<u32>,
     segment: u16,
     physical_bits: u8,
     limits: Limits,
 }
 
-impl<P: ColdPlatform> Unit<P> {
+impl<P: ColdPlatform, C: UnitConfig> Unit<P, C> {
     /// # Safety
     /// `platform` is the original cold/exclusive native owner described by
     /// ColdPlatform, for this exact inspection and complete original IVRS. No
@@ -331,7 +369,7 @@ impl<P: ColdPlatform> Unit<P> {
     /// does not derive cold/reset permission from register observations. Failure
     /// after first publication quarantines original resources.
     pub unsafe fn cold(
-        inspection: FunctionInspection,
+        inspection: FunctionInspection<C>,
         ivrs: &Ivrs<'_>,
         platform: P,
         limits: Limits,
@@ -397,10 +435,53 @@ impl<P: ColdPlatform> Unit<P> {
             aliases: admitted.aliases,
             window: None,
             active: Rc::new(RefCell::new(Vec::new())),
+            direct_delivery: Arc::new(AtomicBool::new(true)),
             next_domain: Cell::new(1),
             segment: admitted.segment,
             physical_bits: admitted.bits,
             limits,
+        })
+    }
+
+    /// A scalar read through the original function observation retained by
+    /// this exact unit. No new configuration mapping or writer is issued.
+    pub fn read_original_config(
+        &self,
+        offset: u16,
+        width: u8,
+    ) -> Result<u32, crate::bus::pci::ConfigError> {
+        let _guard = self.engine.resources.platform.enter().map_err(|_| {
+            crate::bus::pci::ConfigError::before_effect(
+                crate::bus::pci::ConfigFailure::UnqualifiedControl,
+            )
+        })?;
+        self.engine.resources.inspection.read_config(offset, width)
+    }
+
+    /// Pin the original cold unit's direct interrupt format. The private
+    /// table starts with IV clear for every DTE. Its only live entry updates
+    /// preserve IV and its interrupt fields (AMD 48882 §2.2.2, Table 9).
+    pub fn pin_direct_delivery(&self) -> Result<DirectDelivery, Error> {
+        let _guard = self.engine.resources.platform.enter().map_err(Error::Dma)?;
+        self.engine.health()?;
+        if self.table.borrow().is_poisoned() || !self.direct_delivery.load(Ordering::Acquire) {
+            return Err(Error::Poisoned);
+        }
+        let view = self
+            .engine
+            .resources
+            .inspection
+            .native_view(CONTROL + 8)
+            .map_err(Error::Register)?;
+        let base = view
+            .address(0, CONTROL + 8)
+            .map_err(|error| Error::Register(registers::Error::Mapping(error)))?;
+        Ok(DirectDelivery {
+            _mapping: view,
+            valid: self.direct_delivery.clone(),
+            base: base.as_ptr() as usize,
+            table: self.engine.table_base.get(),
+            control: self.engine.control,
         })
     }
 
@@ -570,6 +651,20 @@ impl<P: ColdPlatform> Unit<P> {
     /// A private DTE, including one reached through an alias, cannot be
     /// mistaken for this requester's original cold path.
     pub fn drain_initial_requester(&self, rid: u16) -> Result<(), DmaError> {
+        self.check_initial_entries(rid)?;
+        self.drain_posted_writes()
+    }
+
+    /// Observe the original cold blocked entries without any unit command.
+    pub fn check_blocked_requester(&self, rid: u16) -> Result<(), DmaError> {
+        if self.window.is_some() || self.active.borrow().contains(&rid) {
+            return Err(DmaError::IommuUnavailable);
+        }
+        self.check_health().map_err(invalidation_error)?;
+        self.check_initial_entries(rid)
+    }
+
+    fn check_initial_entries(&self, rid: u16) -> Result<(), DmaError> {
         if !self.coverage[usize::from(rid)] {
             return Err(DmaError::IommuUnavailable);
         }
@@ -589,7 +684,7 @@ impl<P: ColdPlatform> Unit<P> {
                     })?;
             }
         }
-        self.drain_posted_writes()
+        Ok(())
     }
 
     /// Complete earlier translated payload transactions through this unit.
@@ -619,7 +714,10 @@ impl<P: ColdPlatform> Unit<P> {
     /// Success retires internal walker/command/event targets, not PCI mappings;
     /// their original native platform retirement obligations still apply.
     pub unsafe fn retire(&mut self) -> Result<(), Error> {
-        if !self.active.borrow().is_empty() || Rc::strong_count(&self.table) != 1 {
+        if !self.active.borrow().is_empty()
+            || Rc::strong_count(&self.table) != 1
+            || Arc::strong_count(&self.direct_delivery) != 1
+        {
             return Err(Error::Busy);
         }
         let _guard = self.engine.resources.platform.enter().map_err(Error::Dma)?;

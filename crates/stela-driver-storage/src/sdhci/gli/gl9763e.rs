@@ -11,15 +11,15 @@ const CQ_CFG: usize = 0x208;
 const CQ_CONTROL: usize = 0x20c;
 
 fn update(c: &mut dyn ConfigSpace, at: u16, mask: u32, bits: u32) -> Result<(), BlockError> {
-    if c.read32(0) != ID {
+    if c.read32(0)? != ID {
         return Err(BlockError::Unsupported(
             "GL9763E original PCI identity lost",
         ));
     }
-    let old = c.read32(at);
-    c.write32(at, (old & !mask) | bits);
-    let actual = c.read32(at);
-    if c.read32(0) != ID || actual & mask != bits {
+    let old = c.read32(at)?;
+    c.write32(at, (old & !mask) | bits)?;
+    let actual = c.read32(at)?;
+    if c.read32(0)? != ID || actual & mask != bits {
         return Err(BlockError::Unsupported(
             "GL9763E PCI write did not acknowledge",
         ));

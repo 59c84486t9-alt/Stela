@@ -1,0 +1,220 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 03:11:24 -0500
+Subject: [PATCH] refactor(kthread): isolate address-space adoption
+
+---
+ kernel/Makefile     |  2 +-
+ kernel/kthread.c    | 80 ---------------------------------------
+ kernel/kthread_mm.c | 91 +++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 92 insertions(+), 81 deletions(-)
+ create mode 100644 kernel/kthread_mm.c
+
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 1aa5056e74183b1bbaa08b6bc67706918bce93fd..edca9069585d1a8b662996fea159474381d7ad9f 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -8,7 +8,7 @@ obj-y     = fork.o fork_task.o fork_caches.o fork_stack.o fork_release.o fork_mm
+ 	    sysctl.o capability.o ptrace.o ptrace_access.o user.o \
+ 	    signal.o signal_state.o restart_no_syscall.o sys.o task_rusage.o umh.o workqueue.o pid.o task_work.o \
+ 	    extable.o params.o \
+-	    kthread.o sys_ni.o nsproxy.o nstree.o nscommon.o \
++	    kthread.o kthread_mm.o sys_ni.o nsproxy.o nstree.o nscommon.o \
+ 	    notifier.o ksysfs.o cred.o reboot.o \
+ 	    async.o range.o smpboot.o ucount.o regset.o ksyms_common.o
+ 
+diff --git a/kernel/kthread.c b/kernel/kthread.c
+index 78bc7b20845eb4aad055055aea2354d63b8f6d1e..767c8a65592d6f22bacc0182932e2765da16ce19 100644
+--- a/kernel/kthread.c
++++ b/kernel/kthread.c
+@@ -9,7 +9,6 @@
+  */
+ #include <uapi/linux/sched/types.h>
+ #include <linux/mm.h>
+-#include <linux/mmu_context.h>
+ #include <linux/sched.h>
+ #include <linux/sched/mm.h>
+ #include <linux/sched/task.h>
+@@ -1731,85 +1730,6 @@ void kthread_destroy_worker(struct kthread_worker *worker)
+ }
+ EXPORT_SYMBOL(kthread_destroy_worker);
+ 
+-/**
+- * kthread_use_mm - make the calling kthread operate on an address space
+- * @mm: address space to operate on
+- */
+-void kthread_use_mm(struct mm_struct *mm)
+-{
+-	struct mm_struct *active_mm;
+-	struct task_struct *tsk = current;
+-
+-	WARN_ON_ONCE(!(tsk->flags & PF_KTHREAD));
+-	WARN_ON_ONCE(tsk->mm);
+-
+-	/*
+-	 * It is possible for mm to be the same as tsk->active_mm, but
+-	 * we must still mmgrab(mm) and mmdrop_lazy_tlb(active_mm),
+-	 * because these references are not equivalent.
+-	 */
+-	mmgrab(mm);
+-
+-	task_lock(tsk);
+-	/* Hold off tlb flush IPIs while switching mm's */
+-	local_irq_disable();
+-	active_mm = tsk->active_mm;
+-	tsk->active_mm = mm;
+-	tsk->mm = mm;
+-	membarrier_update_current_mm(mm);
+-	switch_mm_irqs_off(active_mm, mm, tsk);
+-	local_irq_enable();
+-	task_unlock(tsk);
+-#ifdef finish_arch_post_lock_switch
+-	finish_arch_post_lock_switch();
+-#endif
+-
+-	/*
+-	 * When a kthread starts operating on an address space, the loop
+-	 * in membarrier_{private,global}_expedited() may not observe
+-	 * that tsk->mm, and not issue an IPI. Membarrier requires a
+-	 * memory barrier after storing to tsk->mm, before accessing
+-	 * user-space memory. A full memory barrier for membarrier
+-	 * {PRIVATE,GLOBAL}_EXPEDITED is implicitly provided by
+-	 * mmdrop_lazy_tlb().
+-	 */
+-	mmdrop_lazy_tlb(active_mm);
+-}
+-EXPORT_SYMBOL_GPL(kthread_use_mm);
+-
+-/**
+- * kthread_unuse_mm - reverse the effect of kthread_use_mm()
+- * @mm: address space to operate on
+- */
+-void kthread_unuse_mm(struct mm_struct *mm)
+-{
+-	struct task_struct *tsk = current;
+-
+-	WARN_ON_ONCE(!(tsk->flags & PF_KTHREAD));
+-	WARN_ON_ONCE(!tsk->mm);
+-
+-	task_lock(tsk);
+-	/*
+-	 * When a kthread stops operating on an address space, the loop
+-	 * in membarrier_{private,global}_expedited() may not observe
+-	 * that tsk->mm, and not issue an IPI. Membarrier requires a
+-	 * memory barrier after accessing user-space memory, before
+-	 * clearing tsk->mm.
+-	 */
+-	smp_mb__after_spinlock();
+-	local_irq_disable();
+-	tsk->mm = NULL;
+-	membarrier_update_current_mm(NULL);
+-	mmgrab_lazy_tlb(mm);
+-	/* active_mm is still 'mm' */
+-	enter_lazy_tlb(mm, tsk);
+-	local_irq_enable();
+-	task_unlock(tsk);
+-
+-	mmdrop(mm);
+-}
+-EXPORT_SYMBOL_GPL(kthread_unuse_mm);
+-
+ #ifdef CONFIG_BLK_CGROUP
+ /**
+  * kthread_associate_blkcg - associate blkcg to current kthread
+diff --git a/kernel/kthread_mm.c b/kernel/kthread_mm.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..cbaef0ce442cd1dbca8c61718b6e6a8615bbb9f7
+--- /dev/null
++++ b/kernel/kthread_mm.c
+@@ -0,0 +1,91 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Kernel thread address-space helpers from kthread.c.
++ *   Copyright (C) 2004 IBM Corporation, Rusty Russell.
++ *   Copyright (C) 2009 Red Hat, Inc.
++ */
++#include <linux/export.h>
++#include <linux/irqflags.h>
++#include <linux/kthread.h>
++#include <linux/mm.h>
++#include <linux/mmu_context.h>
++#include <linux/sched/mm.h>
++#include <linux/sched/task.h>
++
++/**
++ * kthread_use_mm - make the calling kthread operate on an address space
++ * @mm: address space to operate on
++ */
++void kthread_use_mm(struct mm_struct *mm)
++{
++	struct mm_struct *active_mm;
++	struct task_struct *tsk = current;
++
++	WARN_ON_ONCE(!(tsk->flags & PF_KTHREAD));
++	WARN_ON_ONCE(tsk->mm);
++
++	/*
++	 * It is possible for mm to be the same as tsk->active_mm, but
++	 * we must still mmgrab(mm) and mmdrop_lazy_tlb(active_mm),
++	 * because these references are not equivalent.
++	 */
++	mmgrab(mm);
++
++	task_lock(tsk);
++	/* Hold off tlb flush IPIs while switching mm's */
++	local_irq_disable();
++	active_mm = tsk->active_mm;
++	tsk->active_mm = mm;
++	tsk->mm = mm;
++	membarrier_update_current_mm(mm);
++	switch_mm_irqs_off(active_mm, mm, tsk);
++	local_irq_enable();
++	task_unlock(tsk);
++#ifdef finish_arch_post_lock_switch
++	finish_arch_post_lock_switch();
++#endif
++
++	/*
++	 * When a kthread starts operating on an address space, the loop
++	 * in membarrier_{private,global}_expedited() may not observe
++	 * that tsk->mm, and not issue an IPI. Membarrier requires a
++	 * memory barrier after storing to tsk->mm, before accessing
++	 * user-space memory. A full memory barrier for membarrier
++	 * {PRIVATE,GLOBAL}_EXPEDITED is implicitly provided by
++	 * mmdrop_lazy_tlb().
++	 */
++	mmdrop_lazy_tlb(active_mm);
++}
++EXPORT_SYMBOL_GPL(kthread_use_mm);
++
++/**
++ * kthread_unuse_mm - reverse the effect of kthread_use_mm()
++ * @mm: address space to operate on
++ */
++void kthread_unuse_mm(struct mm_struct *mm)
++{
++	struct task_struct *tsk = current;
++
++	WARN_ON_ONCE(!(tsk->flags & PF_KTHREAD));
++	WARN_ON_ONCE(!tsk->mm);
++
++	task_lock(tsk);
++	/*
++	 * When a kthread stops operating on an address space, the loop
++	 * in membarrier_{private,global}_expedited() may not observe
++	 * that tsk->mm, and not issue an IPI. Membarrier requires a
++	 * memory barrier after accessing user-space memory, before
++	 * clearing tsk->mm.
++	 */
++	smp_mb__after_spinlock();
++	local_irq_disable();
++	tsk->mm = NULL;
++	membarrier_update_current_mm(NULL);
++	mmgrab_lazy_tlb(mm);
++	/* active_mm is still 'mm' */
++	enter_lazy_tlb(mm, tsk);
++	local_irq_enable();
++	task_unlock(tsk);
++
++	mmdrop(mm);
++}
++EXPORT_SYMBOL_GPL(kthread_unuse_mm);

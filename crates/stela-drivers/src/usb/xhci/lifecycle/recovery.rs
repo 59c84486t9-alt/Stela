@@ -58,13 +58,13 @@ impl Host {
         }
         // A persistent fault is retried only after another complete cooldown;
         // polling frequency must not shorten the source's recovery interval.
-        c.clock.delay(
+        c.minimum_wait(
             if owner.port.is_some() && status & 2 == 0 && change & 2 == 0 {
                 PORT_COOLDOWN_US
             } else {
                 HUB_COOLDOWN_US
             },
-        );
+        )?;
         c.observe_current_ancestors_for(owner.id(), false)?;
         // Never substitute bus power for a lost self-powered contract. Preserve
         // the full old current ledger while waiting for restoration.
@@ -90,7 +90,7 @@ impl Host {
                 )?;
             }
         }
-        c.clock.delay(MAX_POWER_GOOD_US);
+        c.minimum_wait(MAX_POWER_GOOD_US)?;
         c.observe_current_ancestors_for(owner.id(), false)?;
         if hub_status(&mut c, owner)? != (0, 0) {
             return Err(BlockError::Unsupported(

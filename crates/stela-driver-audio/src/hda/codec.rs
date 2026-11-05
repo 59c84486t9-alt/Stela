@@ -3,7 +3,7 @@
 //! from Linux sound/hda/core/device.c and include/sound/hda_verbs.h.
 use super::super::{Error, PcmFormat};
 use super::{Controller, ControllerToken, Registers};
-use crate::bus::i2c::Timer;
+use crate::Timer;
 use alloc::vec::Vec;
 
 const GET_PARAMETER: u16 = 0xf00;
@@ -190,6 +190,7 @@ impl CodecGraph {
 
 impl<R: Registers, T: Timer> Controller<R, T> {
     pub(super) fn parameter(&mut self, codec: u8, node: u8, parameter: u8) -> Result<u32, Error> {
+        self.minimum_guard()?;
         self.verb(Verb::short(codec, node, GET_PARAMETER, parameter)?)
     }
 
@@ -198,6 +199,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// remain represented in the graph; their policy is not inferred.
     /// `probe_codec`: the vendor ID read, which never falls back.
     pub(super) fn probe_codec(&mut self, address: u8) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.probing = true;
         let result = self.parameter(address, 0, PAR_VENDOR);
         self.probing = false;
@@ -207,6 +209,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
     }
     pub fn enumerate_codec(&mut self, address: u8) -> Result<CodecGraph, Error> {
+        self.minimum_guard()?;
         if address > 14 {
             return Err(Error::InvalidVerb);
         }
@@ -341,6 +344,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     pub(super) fn connections(&mut self, codec: u8, node: u8) -> Result<Vec<u8>, Error> {
+        self.minimum_guard()?;
         let length = self.parameter(codec, node, PAR_CONNECTIONS)?;
         let count = (length & 0x7f) as u8;
         let long = length & 0x80 != 0;
@@ -393,6 +397,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         group: u8,
         widget: &Widget,
     ) -> Result<u32, Error> {
+        self.minimum_guard()?;
         if widget.capabilities & WCAP_IN_AMP == 0 || widget.input_amplifier.is_none() {
             return Err(Error::UnsupportedTopology);
         }
@@ -413,6 +418,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         group: u8,
         widget: &Widget,
     ) -> Result<u32, Error> {
+        self.minimum_guard()?;
         if widget.capabilities & WCAP_OUT_AMP == 0 || widget.output_amplifier.is_none() {
             return Err(Error::UnsupportedTopology);
         }
@@ -431,6 +437,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<LiveAnalogCodec, Error> {
+        self.minimum_guard()?;
         if graph.token != self.token {
             return Err(Error::InvalidCodecGraph);
         }

@@ -54,6 +54,8 @@ impl Kind {
 /// Why a controller could not be handed over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    Minimum(crate::bus::pci::power::Error),
+    Config(crate::bus::pci::ConfigError),
     /// The function has no BAR of the kind its interface decodes registers in.
     NoRegisters,
     /// Its register BAR lies outside the ranges the mount mapped uncached.
@@ -67,12 +69,14 @@ pub enum Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::NoRegisters => "no register BAR",
-            Self::Unmapped => "register BAR not mapped",
-            Self::Removed => "registers read as all ones",
-            Self::Malformed => "malformed capability registers",
-        })
+        match self {
+            Self::Config(error) => error.fmt(f),
+            Self::Minimum(error) => write!(f, "USB handoff minimum delay: {error:?}"),
+            Self::NoRegisters => f.write_str("no register BAR"),
+            Self::Unmapped => f.write_str("register BAR not mapped"),
+            Self::Removed => f.write_str("registers read as all ones"),
+            Self::Malformed => f.write_str("malformed capability registers"),
+        }
     }
 }
 
@@ -151,7 +155,8 @@ impl Dwords for Ports {
 
 /// Hand the USB host controller `function` over from firmware; none for a
 /// function of another class. Decoding of its register BAR is on while this
-/// runs and the command register is restored afterwards.
+/// runs and the command register is restored after success. Any failure leaves
+/// the complete function with the caller, without a successful handoff receipt.
 ///
 /// # Safety
 /// `handoff` describes the running machine after ExitBootServices, and
@@ -159,36 +164,57 @@ impl Dwords for Ports {
 pub unsafe fn early<C: ConfigSpace>(
     function: &mut Function<C>,
     handoff: &Handoff,
+    minimum: &dyn crate::bus::pci::power::Timer,
 ) -> Option<Result<Handed, Error>> {
     let kind = Kind::of(function.class)?;
+    Some(prepare(function, handoff, kind, minimum))
+}
+
+fn prepare<C: ConfigSpace>(
+    function: &mut Function<C>,
+    handoff: &Handoff,
+    kind: Kind,
+    minimum: &dyn crate::bus::pci::power::Timer,
+) -> Result<Handed, Error> {
+    minimum.check().map_err(Error::Minimum)?;
     let clock = handoff.clock;
-    let bars = function.bars();
+    let bars = function.bars().map_err(Error::Config)?;
     let config = function.config();
-    let command = config.read16(regs::COMMAND);
+    let command = config.read16(regs::COMMAND).map_err(Error::Config)?;
     if command == u16::MAX {
-        return Some(Err(Error::Removed));
+        return Err(Error::Removed);
     }
-    let result = if kind == Kind::Uhci {
-        let port = bars.iter().find_map(|bar| match bar {
-            Some(Bar::Io { port, size }) if *size >= 0x20 && *port <= 0xffe0 => Some(*port as u16),
-            _ => None,
-        });
-        port.ok_or(Error::NoRegisters).map(|port| {
-            config.write16(regs::COMMAND, command | regs::COMMAND_IO);
-            uhci(config, &mut Ports(port), clock)
-        })
+    let handed = if kind == Kind::Uhci {
+        let port = bars
+            .iter()
+            .find_map(|bar| match bar {
+                Some(Bar::Io { port, size }) if *size >= 0x20 && *port <= 0xffe0 => {
+                    Some(*port as u16)
+                }
+                _ => None,
+            })
+            .ok_or(Error::NoRegisters)?;
+        config
+            .write16(regs::COMMAND, command | regs::COMMAND_IO)
+            .map_err(Error::Config)?;
+        uhci(config, &mut Ports(port), minimum)?
     } else {
-        memory(&bars, handoff).map(|(mut mmio, bytes)| {
-            config.write16(regs::COMMAND, command | regs::COMMAND_MEMORY);
-            match kind {
-                Kind::Ohci => ohci(&mut mmio, bytes, clock),
-                Kind::Ehci => ehci(config, &mut mmio, bytes, clock),
-                _ => xhci(&mut mmio, bytes, clock),
-            }
-        })
+        let (mut mmio, bytes) = memory(&bars, handoff)?;
+        config
+            .write16(regs::COMMAND, command | regs::COMMAND_MEMORY)
+            .map_err(Error::Config)?;
+        match kind {
+            Kind::Ohci => ohci(&mut mmio, bytes, clock, minimum)?,
+            Kind::Ehci => ehci(config, &mut mmio, bytes, clock, minimum)?,
+            _ => xhci(&mut mmio, bytes, clock, minimum)?,
+        }
     };
-    config.write16(regs::COMMAND, command);
-    Some(result.and_then(|handed| handed))
+    // A failed access supplies no permission for rollback. Return immediately
+    // with the function still owned by the caller; restore only after success.
+    config
+        .write16(regs::COMMAND, command)
+        .map_err(Error::Config)?;
+    Ok(handed)
 }
 
 /// BAR0's registers and their size, after checking that the mount mapped them.
@@ -220,9 +246,10 @@ const UHCI_INTR_RESUME: u16 = 2;
 fn uhci<C: ConfigSpace>(
     config: &mut C,
     ports: &mut impl Registers,
-    clock: Clock,
+    minimum: &dyn crate::bus::pci::power::Timer,
 ) -> Result<Handed, Error> {
-    let legsup = config.read16(UHCI_LEGSUP);
+    minimum.check().map_err(Error::Minimum)?;
+    let legsup = config.read16(UHCI_LEGSUP).map_err(Error::Config)?;
     let command = ports.read16(UHCI_USBCMD);
     if legsup == u16::MAX || command == u16::MAX {
         return Err(Error::Removed);
@@ -234,9 +261,11 @@ fn uhci<C: ConfigSpace>(
         || command & UHCI_EGSM == 0
         || ports.read16(UHCI_USBINTR) & !UHCI_INTR_RESUME != 0
     {
-        config.write16(UHCI_LEGSUP, UHCI_LEGSUP_RWC);
+        config
+            .write16(UHCI_LEGSUP, UHCI_LEGSUP_RWC)
+            .map_err(Error::Config)?;
         ports.write16(UHCI_USBCMD, UHCI_HCRESET);
-        clock.delay(5);
+        minimum.wait_us(5).map_err(Error::Minimum)?;
         ports.write16(UHCI_USBINTR, 0);
         ports.write16(UHCI_USBCMD, 0);
     }
@@ -261,7 +290,13 @@ const OHCI_HANDOFF_US: u64 = 500_000;
 /// `quirk_usb_handoff_ohci`: request ownership change while firmware routes
 /// interrupts to SMI, then reset the controller into USB_RESET with
 /// InterruptRouting clear and HcFmInterval preserved.
-fn ohci(registers: &mut impl Registers, bytes: usize, clock: Clock) -> Result<Handed, Error> {
+fn ohci(
+    registers: &mut impl Registers,
+    bytes: usize,
+    clock: Clock,
+    minimum: &dyn crate::bus::pci::power::Timer,
+) -> Result<Handed, Error> {
+    minimum.check().map_err(Error::Minimum)?;
     if bytes < 0x40 {
         return Err(Error::Malformed);
     }
@@ -274,9 +309,13 @@ fn ohci(registers: &mut impl Registers, bytes: usize, clock: Clock) -> Result<Ha
     if from_firmware {
         registers.write32(OHCI_INTRENABLE, OHCI_INTR_OC);
         registers.write32(OHCI_CMDSTATUS, OHCI_OCR);
-        forced = !clock.wait(OHCI_HANDOFF_US, || {
+        let released = clock.wait(OHCI_HANDOFF_US, || {
             registers.read32(OHCI_CONTROL) & OHCI_CTRL_IR == 0
         });
+        if !released {
+            minimum.wait_us(OHCI_HANDOFF_US).map_err(Error::Minimum)?;
+            forced = registers.read32(OHCI_CONTROL) & OHCI_CTRL_IR != 0;
+        }
     }
     registers.write32(OHCI_INTRDISABLE, u32::MAX);
     registers.write32(OHCI_CONTROL, control & OHCI_CTRL_RWC);
@@ -310,7 +349,9 @@ fn ehci<C: ConfigSpace>(
     registers: &mut impl Registers,
     bytes: usize,
     clock: Clock,
+    minimum: &dyn crate::bus::pci::power::Timer,
 ) -> Result<Handed, Error> {
+    minimum.check().map_err(Error::Minimum)?;
     let parameters = registers.read32(EHCI_HCCPARAMS);
     if parameters == u32::MAX {
         return Err(Error::Removed);
@@ -330,13 +371,13 @@ fn ehci<C: ConfigSpace>(
         if offset < 0x40 || offset & 3 != 0 {
             return Err(Error::Malformed);
         }
-        let capability = config.read32(offset);
+        let capability = config.read32(offset).map_err(Error::Config)?;
         if capability == u32::MAX {
             return Err(Error::Removed);
         }
         match capability & 0xff {
             EHCI_LEGSUP => {
-                handed = Some(ehci_bios(config, offset, capability, clock));
+                handed = Some(ehci_bios(config, offset, capability, clock, minimum)?);
                 if handed.is_some_and(|handed| handed.from_firmware) {
                     registers.write32(operational + EHCI_CONFIGFLAG, 0);
                 }
@@ -354,7 +395,7 @@ fn ehci<C: ConfigSpace>(
         registers.write32(operational + EHCI_USBCMD, command & !EHCI_RUN);
         for _ in 0..20 {
             registers.write32(operational + EHCI_USBSTS, 0x3f);
-            clock.delay(100);
+            minimum.wait_us(100).map_err(Error::Minimum)?;
             let status = registers.read32(operational + EHCI_USBSTS);
             if status == u32::MAX || status & EHCI_HALTED != 0 {
                 break;
@@ -366,22 +407,43 @@ fn ehci<C: ConfigSpace>(
     Ok(handed.unwrap_or_default())
 }
 
-fn ehci_bios<C: ConfigSpace>(config: &mut C, offset: u16, capability: u32, clock: Clock) -> Handed {
+fn ehci_bios<C: ConfigSpace>(
+    config: &mut C,
+    offset: u16,
+    capability: u32,
+    clock: Clock,
+    minimum: &dyn crate::bus::pci::power::Timer,
+) -> Result<Handed, Error> {
+    minimum.check().map_err(Error::Minimum)?;
     let from_firmware = capability & EHCI_BIOS_OWNED != 0;
     if from_firmware {
-        config.write8(offset + 3, 1);
+        config.write8(offset + 3, 1).map_err(Error::Config)?;
     }
-    let released = clock.wait(EHCI_HANDOFF_US, || {
-        config.read32(offset) & EHCI_BIOS_OWNED == 0
+    let mut failure = None;
+    let released = clock.wait(EHCI_HANDOFF_US, || match config.read32(offset) {
+        Ok(value) => value & EHCI_BIOS_OWNED == 0,
+        Err(error) => {
+            failure = Some(error);
+            true
+        }
     });
-    if !released {
-        config.write8(offset + 2, 0);
+    if let Some(error) = failure {
+        return Err(Error::Config(error));
     }
-    config.write32(offset + 4, 0);
-    Handed {
+    let released = if released {
+        true
+    } else {
+        minimum.wait_us(EHCI_HANDOFF_US).map_err(Error::Minimum)?;
+        config.read32(offset).map_err(Error::Config)? & EHCI_BIOS_OWNED == 0
+    };
+    if !released {
+        config.write8(offset + 2, 0).map_err(Error::Config)?;
+    }
+    config.write32(offset + 4, 0).map_err(Error::Config)?;
+    Ok(Handed {
         from_firmware,
         forced: !released,
-    }
+    })
 }
 
 const XHCI_HCCPARAMS1: usize = 0x10;
@@ -408,12 +470,21 @@ pub(crate) fn xhci_legacy<R: Dwords + ?Sized>(
     registers: &mut R,
     at: usize,
     clock: Clock,
-) -> Handed {
+    minimum: &dyn crate::bus::pci::power::Timer,
+) -> Result<Handed, crate::bus::pci::power::Error> {
+    minimum.check()?;
     let header = registers.read32(at);
     registers.write32(at, header | XHCI_OS_OWNED);
     let released = clock.wait(XHCI_HANDOFF_US, || {
         registers.read32(at) & XHCI_BIOS_OWNED == 0
     });
+    let released = if released {
+        true
+    } else {
+        // Nominal timeout data cannot shorten the physical firmware grace.
+        minimum.wait_us(XHCI_HANDOFF_US)?;
+        registers.read32(at) & XHCI_BIOS_OWNED == 0
+    };
     if !released {
         let header = registers.read32(at);
         registers.write32(at, header & !XHCI_BIOS_OWNED | XHCI_OS_OWNED);
@@ -423,16 +494,21 @@ pub(crate) fn xhci_legacy<R: Dwords + ?Sized>(
         at + 4,
         control & XHCI_LEGACY_DISABLE_SMI | XHCI_LEGACY_SMI_EVENTS,
     );
-    Handed {
+    Ok(Handed {
         from_firmware: header & XHCI_BIOS_OWNED != 0,
         forced: !released,
-    }
+    })
 }
 
 /// `quirk_usb_handoff_xhci`: take the USB Legacy Support semaphore, clear
 /// the SMI enables and events, then halt the controller with its interrupts
 /// off once it is ready.
-fn xhci(registers: &mut impl Registers, bytes: usize, clock: Clock) -> Result<Handed, Error> {
+fn xhci(
+    registers: &mut impl Registers,
+    bytes: usize,
+    clock: Clock,
+    minimum: &dyn crate::bus::pci::power::Timer,
+) -> Result<Handed, Error> {
     let parameters = registers.read32(XHCI_HCCPARAMS1);
     if parameters == u32::MAX {
         return Err(Error::Removed);
@@ -452,7 +528,7 @@ fn xhci(registers: &mut impl Registers, bytes: usize, clock: Clock) -> Result<Ha
             return Err(Error::Removed);
         }
         if header & 0xff == XHCI_LEGACY {
-            handed = xhci_legacy(registers, offset, clock);
+            handed = xhci_legacy(registers, offset, clock, minimum).map_err(Error::Minimum)?;
             break;
         }
         let next = (header >> 8) & 0xff;

@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn revoked_initial_key_admission() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = fixture();
     let epoch = driver.station().association_epoch().unwrap();
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
@@ -68,6 +71,9 @@ fn revoked_initial_key_admission() {
 
 #[test]
 fn pending_block_ack_prevents_initial_igtk() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for mode in 0..3 {
         let (mut driver, model, mut owner, state) = fixture();
         if mode != 0 {

@@ -395,33 +395,47 @@ impl Registers for Regs {
 }
 struct NativeConfig(Rc<RefCell<Hardware>>);
 impl ConfigSpace for NativeConfig {
-    fn read32(&self, offset: u16) -> u32 {
-        let mut h = self.0.borrow_mut();
-        match offset {
-            0 => {
-                h.identity_reads += 1;
-                h.identity
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        let value = {
+            let mut h = self.0.borrow_mut();
+            match offset {
+                0 => {
+                    h.identity_reads += 1;
+                    h.identity
+                }
+                8 => 0x0c05_0000,
+                12 => 0,
+                _ => 0,
             }
-            8 => 0x0c05_0000,
-            12 => 0,
-            _ => 0,
-        }
+        };
+        Ok(value)
     }
-    fn write32(&mut self, _: u16, _: u32) {
+    fn write32(&mut self, _: u16, _: u32) -> Result<(), crate::bus::pci::ConfigError> {
         panic!("no wide PCI writes");
     }
-    fn read8(&self, offset: u16) -> u8 {
-        assert_eq!(offset, 0x40);
-        let mut h = self.0.borrow_mut();
-        h.configuration_reads += 1;
-        if h.jump_configuration && h.configuration_reads == 2 {
-            h.time.0.set(h.time.now_us().wrapping_add(1000));
-        }
-        h.configuration
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        let value = {
+            assert_eq!(offset, 0x40);
+            let mut h = self.0.borrow_mut();
+            h.configuration_reads += 1;
+            if h.jump_configuration && h.configuration_reads == 2 {
+                h.time.0.set(h.time.now_us().wrapping_add(1000));
+            }
+            h.configuration
+        };
+        Ok(value)
     }
-    fn write8(&mut self, _: u16, _: u8) {
+    fn write8(&mut self, _: u16, _: u8) -> Result<(), crate::bus::pci::ConfigError> {
         self.0.borrow_mut().configuration_writes += 1;
         panic!("PEC does not change PCI host timing");
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+    }
+
+    fn write16(&mut self, _: u16, _: u16) -> Result<(), crate::bus::pci::ConfigError> {
+        panic!("unexpected narrow PCI store in controller fixture");
     }
 }
 type Host = Controller<Regs, Time, OwnedConfiguration<NativeConfig, Lease>>;

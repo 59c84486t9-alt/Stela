@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn originator_delba_waits_for_packet_drain() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     begin(&mut driver, &mut owner, &session, NOW);
@@ -60,6 +63,9 @@ fn originator_delba_waits_for_packet_drain() {
 
 #[test]
 fn timeout_disables_before_guarded_delba() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     let epoch = driver.station().association_epoch().unwrap();

@@ -217,6 +217,9 @@ mod tests {
 
     #[test]
     fn packet_ids_request_status_like_mt76_tx_status_skb_add() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let state = State::default();
         assert_eq!(state.pid(true, true, 0), NO_ACK);
         // The first frame samples; the next quarter second needs a request.
@@ -232,6 +235,9 @@ mod tests {
     /// reports its frame; only the setup link's records give the rate.
     #[test]
     fn another_links_status_reports_its_frame_without_its_rate() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let mut state = State::default();
         let mut bytes = vec![0; 8];
         bytes.extend_from_slice(&record(true, 4 << 6 | 1 << 10 | 7, 2, 3, 6));
@@ -243,6 +249,9 @@ mod tests {
 
     #[test]
     fn status_reports_ack_and_rate_like_mt7925_mac_add_txs() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let mut state = State::default();
         let receipt = Receipt::for_tests;
         // A TXS before its TX-free, one after, and one that never arrives.

@@ -6,11 +6,9 @@
 //! are not selected by their common I217 PHY ID. Initial PHY identity must be
 //! accessible; firmware/SMM, ME ownership and other users remain excluded.
 use super::{
-    Bus, Controller, Delay, Error, Fault, Identity, Kind, Phy, Profile, Register, Registers, i219,
-    lpt, nvm,
+    Controller, Delay, Error, Fault, Identity, Kind, Phy, Profile, Register, Registers, i219, lpt,
+    nvm,
 };
-use alloc::rc::Rc;
-use core::cell::RefCell;
 
 pub(super) const DESCRIPTOR_STATUS: u16 = 0xe4;
 pub(super) const FLUSH_REQUIRED: u16 = 0x100;
@@ -88,7 +86,7 @@ impl<R: lpt::LptRegisters, D: Delay + Clone> Controller<R, D> {
         delay: D,
         profile: impl FnOnce(lpt::Limits) -> Profile,
     ) -> Result<Self, Error> {
-        let bus = Bus(Rc::new(RefCell::new(io)));
+        let (bus, delay) = super::qualified_bus(io, delay)?;
         let limits = (|| {
             let snoop = bus.0.borrow_mut().read_config16(0xa8)?;
             let nosnoop = bus.0.borrow_mut().read_config16(0xaa)?;
@@ -97,7 +95,7 @@ impl<R: lpt::LptRegisters, D: Delay + Clone> Controller<R, D> {
         let limits = match limits {
             Ok(value) => value,
             Err(error) => {
-                core::mem::forget(bus);
+                core::mem::forget((bus, delay));
                 return Err(error);
             }
         };
@@ -135,6 +133,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         self.i219_family() == Some(i219::Family::Spt)
     }
     pub(super) fn spt_config_status(&mut self) -> Result<u16, Error> {
+        self.phy.check_minimum()?;
         let read = self.config_read.ok_or(Error::Configuration)?;
         let io = self.phy.io.as_ref().expect("retained same-function owner");
         let value = read(&mut *io.0.borrow_mut(), DESCRIPTOR_STATUS)?;
@@ -164,7 +163,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
         self.phy_reset()?;
         self.configuration_done()?;
         self.post_reset()?;
-        self.phy.delay.delay(50_000);
+        self.phy.wait_minimum(50_000)?;
         self.qualify()?;
         self.identity = self.phy.identify()?;
         if self.phy.read(ULP_CONFIG)? & ULP_CLEAR != 0 {
@@ -207,18 +206,18 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
             let value = (value | LANPHYPC_OVERRIDE) & !LANPHYPC_VALUE;
             p.write_mac(super::CTRL, value)?;
             p.read_mac(super::STATUS)?;
-            p.delay.delay(10);
+            p.wait_minimum(10)?;
             p.write_mac(super::CTRL, value & !LANPHYPC_OVERRIDE)?;
             p.read_mac(super::STATUS)?;
             let mut done = false;
             for _ in 0..=20 {
-                p.delay.delay(5_000);
+                p.wait_minimum(5_000)?;
                 if p.read_mac(CTRL_EXT)? & POWER_CYCLE_DONE != 0 {
                     done = true;
                     break;
                 }
             }
-            p.delay.delay(30_000);
+            p.wait_minimum(30_000)?;
             if !done {
                 return Ok(false);
             }
@@ -232,7 +231,7 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Controller<R, D> {
                 Err(error) if smbus_read_unavailable(error) => {
                     let value = p.read_mac(CTRL_EXT)?;
                     p.write_mac(CTRL_EXT, value | FORCE_SMBUS)?;
-                    p.delay.delay(50_000);
+                    p.wait_minimum(50_000)?;
                     p.page(SMB_CONTROL.page)?;
                     p.mdic(1, SMB_CONTROL.index, None)?
                 }

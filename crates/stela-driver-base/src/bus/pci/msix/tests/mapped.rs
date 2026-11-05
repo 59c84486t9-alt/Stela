@@ -27,10 +27,14 @@ fn owned_mapping_windows() {
     };
     use alloc::boxed::Box;
     use core::ptr::NonNull;
-    struct Backing;
+    struct Backing(crate::bus::mmio::owned::model::MappingRetention<Arc<Platform>>);
     // SAFETY: this immutable symbolic span belongs only to the private child
     // provider; its mappings are backed by the aligned Box pages below.
     unsafe impl ResourceBacking for Backing {
+        fn begin_mapping(&self) -> Result<crate::bus::pci::assignment::OpaqueUse, owned::Error> {
+            self.0.begin_mapping()
+        }
+
         fn physical_span(&self) -> PhysicalSpan {
             PhysicalSpan::new(BASE, BYTES).unwrap()
         }
@@ -95,7 +99,18 @@ fn owned_mapping_windows() {
         )
     }
     .unwrap();
-    let resource = Resource::new(Box::new(Backing));
+    // SAFETY: SAME isolated actual allocation pool; it owns every Box buffer
+    // and no Authority/Resource/control/view points back through this product.
+    let mut mapping_owner = unsafe {
+        crate::bus::mmio::owned::model::MappingOwner::from_owned(platform.clone(), |pool| {
+            // A live synchronized pool remains valid while another mapper holds its lock.
+            if pool.0.is_poisoned() {
+                return Err(crate::bus::pci::assignment::Error::Context);
+            }
+            Ok(())
+        })
+    };
+    let resource = Resource::new(Box::new(Backing(mapping_owner.retention().unwrap())));
     let mut first = authority
         .map(
             resource.clone(),
@@ -204,6 +219,9 @@ fn owned_mapping_windows() {
     // live until this retirement calls unmap.
     unsafe { read_only.retire() }.unwrap();
     assert!(platform.0.lock().unwrap().is_empty());
+    // SAFETY: all views/users ended and every model unmap acknowledged. Only
+    // this external controller may now recover the same original pool.
+    unsafe { mapping_owner.retire() }.unwrap();
 }
 
 #[test]

@@ -34,6 +34,12 @@ pub fn initialize<P: Platform>(
     provider: &dyn Provider,
     platform: intel::PlatformInputs,
 ) -> Result<Report, Error> {
+    if let Err(error) = transport.active() {
+        return Err(Error {
+            cause: Box::new(intel::Error::PcieTransport(error)),
+            received: Vec::new(),
+        });
+    }
     let mut io = Native {
         transport,
         received: Vec::new(),
@@ -57,6 +63,10 @@ struct Native<'a, P: Platform> {
     received_bytes: usize,
 }
 impl<P: Platform> Native<'_, P> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn finish<T>(&mut self, result: Result<T, intel::Error>) -> Result<T, intel::Error> {
         // send/poll/D0 can queue complete packets before a later fault. Closing
         // does not erase them. Transfer the final batch on every exit and apply
@@ -162,6 +172,9 @@ mod tests {
     use super::*;
     #[test]
     fn final_pending_batch_enforces_budget_before_success_and_preserves_prior_error() {
+        if crate::model_test_process::isolate() {
+            return;
+        }
         for prior_error in [false, true] {
             let mut backing = alloc::vec![0u64; 1024 * 1024];
             let mut dma = super::super::tests::allocator(&mut backing);

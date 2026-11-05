@@ -392,6 +392,9 @@ mod tests {
 
     #[test]
     fn changed_prepublication_policy_withdraws_native_request_before_reuse() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         struct Changing(usize);
         impl scan::Policy for Changing {
             fn allow_receive(&mut self, _: Channel) -> bool {
@@ -453,6 +456,9 @@ mod tests {
 
     #[test]
     fn mt7925_six_ghz_passive_scan_uses_programmed_policy_and_owned_dma() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let mut f = NativeFixture::new(Chip::Mt7925);
         f.model.lock().unwrap().capability_payload = Some(caps(Chip::Mt7925, [true; 3]));
         f.install().unwrap();

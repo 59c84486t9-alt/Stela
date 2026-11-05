@@ -317,6 +317,9 @@ mod tests {
     }
     #[test]
     fn a_peers_mode_sizes_its_queue_up_to_the_family() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         assert_eq!(data_slots(Family::Ax200, Mode::He), 256);
         assert_eq!(data_slots(Family::Ax210, Mode::Vht), 256);
         assert_eq!(data_slots(Family::Ax210, Mode::He), 1024);
@@ -326,6 +329,9 @@ mod tests {
 
     #[test]
     fn exact_queue_abi_geometry_failure_flags_and_raw_write_pointer_boundaries() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let bytes = firmware(&[[0x17, 5, 3, 2]]);
         let fw = Firmware::parse(&bytes).unwrap();
         for family in [Family::Ax200, Family::Ax210] {
@@ -424,6 +430,9 @@ mod tests {
     }
     #[test]
     fn unpublished_native_rings_initialize_invalid_targets_and_keep_real_dma_failures() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let bytes = firmware(&[[0x17, 5, 3, 2]]);
         let fw = Firmware::parse(&bytes).unwrap();
         for family in [Family::Ax200, Family::Ax210] {
@@ -508,6 +517,9 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn images_select_queue_command3_reply2_and_stage_canonical_native_maps() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         for family in [Family::Ax200, Family::Ax210] {
             let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
             let bytes =
@@ -531,6 +543,9 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_TX_QUEUE_ORACLE"]
     fn unchanged_linux_queue_allocation_and_reply_helpers_match_exact_wire_bytes() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         use sha2::{Digest, Sha256};
         let trace = std::fs::read(std::env::var("STELA_IWLWIFI_TX_QUEUE_ORACLE").unwrap()).unwrap();
         assert_eq!(

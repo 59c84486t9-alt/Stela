@@ -28,6 +28,7 @@ extern crate alloc;
 pub use stela_driver_audio as audio;
 pub use stela_driver_base::{
     Clock, ClockError, Deadline, Handoff, block, bus, entropy, on_spin, on_wait, on_work, platform,
+    sync,
 };
 pub use stela_driver_core::firmware;
 pub use stela_driver_gpu as gpu;
@@ -40,7 +41,11 @@ pub mod probe;
 pub mod usb;
 
 #[cfg(test)]
+mod model_test_process;
+#[cfg(test)]
 use stela_driver_base::test_clock;
+#[cfg(test)]
+mod minimum_model;
 use stela_driver_base::{registers, waiting, working};
 use stela_driver_core::bytes;
 

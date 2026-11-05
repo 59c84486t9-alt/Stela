@@ -19,6 +19,7 @@ use crate::bus::{
     i2c::Timer,
 };
 use alloc::{sync::Arc, vec::Vec};
+pub mod cold;
 mod descriptor;
 pub mod pci;
 mod report;
@@ -80,6 +81,9 @@ pub enum SensorState {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    Config(crate::bus::pci::ConfigError),
+    Capability(crate::bus::pci::CapabilityError),
+    Claim(crate::bus::pci::requester::ClaimError),
     Clock(crate::ClockError),
     UnsupportedController,
     UnsupportedDialect(u8),

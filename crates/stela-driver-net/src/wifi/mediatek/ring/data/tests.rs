@@ -213,6 +213,9 @@ fn quiesce(ring: &mut DataRing<Io, Context>, model: &mut Model) -> Vec<Context> 
 }
 #[test]
 fn refused_final_admission_changes_no_descriptor_token_or_context_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut ring, mut model) = setup(Chip::Mt7925, 8);
     let before = model.memory.lock().unwrap().mappings.len();
     let descriptor = ring.descriptors.read32(0).unwrap();
@@ -257,6 +260,9 @@ fn refused_final_admission_changes_no_descriptor_token_or_context_owner() {
 }
 #[test]
 fn requester_reads_txwi_then_late_payload_until_both_completions_through_wrap_and_reuse() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         let (mut ring, mut model) = setup(chip, if chip == Chip::Mt7925 { 2048 } else { 8 });
         let baseline = model.memory.lock().unwrap().mappings.len();
@@ -301,6 +307,9 @@ fn requester_reads_txwi_then_late_payload_until_both_completions_through_wrap_an
 }
 #[test]
 fn whole_free_batch_is_validated_before_any_token_changes() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for chip in [Chip::Mt7921, Chip::Mt7925] {
         for case in 0..5 {
             let (mut ring, mut model) = setup(chip, 8);
@@ -359,6 +368,9 @@ fn whole_free_batch_is_validated_before_any_token_changes() {
 }
 #[test]
 fn token_pressure_refuses_without_new_mappings() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let chip = Chip::Mt7925;
     let (mut ring, mut model) = setup(chip, 4);
     for n in 0..8192 {
@@ -392,6 +404,9 @@ fn token_pressure_refuses_without_new_mappings() {
 
 #[test]
 fn ring_pressure_and_bad_frames_publish_nothing() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let chip = Chip::Mt7925;
     let (mut ring, mut model) = setup(chip, 4);
     for n in 0..2 {
@@ -436,6 +451,9 @@ fn ring_pressure_and_bad_frames_publish_nothing() {
 }
 #[test]
 fn uncertain_publication_drop_keeps_real_queue_pins_and_context() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for failure in [false, true] {
         let chip = Chip::Mt7925;
         let (mut ring, mut model) = setup(chip, 8);
@@ -462,6 +480,9 @@ fn uncertain_publication_drop_keeps_real_queue_pins_and_context() {
 }
 #[test]
 fn unmap_and_completion_visibility_failures_keep_context_until_quiescent_retry() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for failure in 0..6 {
         let chip = Chip::Mt7925;
         let (mut ring, mut model) = setup(chip, 8);
@@ -504,6 +525,9 @@ fn unmap_and_completion_visibility_failures_keep_context_until_quiescent_retry()
 
 #[test]
 fn every_submission_visibility_failure_distinguishes_unpublished_from_reachable_context() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fail in 1..=5 {
         let chip = Chip::Mt7921;
         let (mut ring, mut model) = setup(chip, 8);
@@ -540,6 +564,9 @@ fn every_submission_visibility_failure_distinguishes_unpublished_from_reachable_
 
 #[test]
 fn invalid_indices_and_uncertain_constructor_keep_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for actual in [1, u16::MAX] {
         let (mut ring, mut model) = setup(Chip::Mt7921, 8);
         model.tx.lock().unwrap().index = actual;
@@ -572,6 +599,9 @@ fn invalid_indices_and_uncertain_constructor_keep_owner() {
 
 #[test]
 fn failed_partial_quiescent_unmap_drop_keeps_context_with_remaining_mappings() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut ring, mut model) = setup(Chip::Mt7925, 8);
     ring.submit(
         &Source,
@@ -602,6 +632,9 @@ fn failed_partial_quiescent_unmap_drop_keeps_context_with_remaining_mappings() {
 #[test]
 #[ignore = "oracle: STELA_MT792X_DATA_ORACLE"]
 fn unchanged_dma_add_buf_matches_owned_queue_descriptors() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use std::{
         io::Write,
         process::{Command, Stdio},

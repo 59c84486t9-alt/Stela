@@ -40,13 +40,13 @@ pub type Wifi<C> = Station<MmioBar, MmioQueue, C, &'static dyn PageSource>;
 pub type Station<I, Q, C, S> = Keeper<Mt7925<I, Q, C, S>>;
 
 /// A managed MT7925 link and its station interface.
-pub struct Mt7925<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> {
+pub struct Mt7925<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> {
     link: ManagedLink<I, Q, C, S>,
     interface: Context,
     country: Country,
 }
 
-impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Station<I, Q, C, S> {
+impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> Station<I, Q, C, S> {
     /// Keep `link`, whose station interface is `interface`, connected to
     /// `network` in `country`; `entropy` gives each handshake's SNonce.
     pub fn new(
@@ -71,16 +71,14 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
 }
 
 #[cfg(test)]
-impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Mt7925<I, Q, C, S> {
+impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> Mt7925<I, Q, C, S> {
     /// One pass with no keeper behind it, for what the link says after it.
     pub(crate) fn link_mut(&mut self) -> &mut ManagedLink<I, Q, C, S> {
         &mut self.link
     }
 }
 
-impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Link
-    for Mt7925<I, Q, C, S>
-{
+impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> Link for Mt7925<I, Q, C, S> {
     fn mac(&self) -> Mac {
         self.link.mac()
     }
@@ -101,9 +99,7 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Li
     }
 }
 
-impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Radio
-    for Mt7925<I, Q, C, S>
-{
+impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> Radio for Mt7925<I, Q, C, S> {
     type Handle = BssHandle;
     type Profile = Profile;
     type Management = Arc<Session>;

@@ -1,0 +1,118 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 22:27:25 -0500
+Subject: [PATCH] refactor(task): separate original RCU user release and PID
+ storage
+
+---
+ kernel/Makefile   |  2 +-
+ kernel/exit.c     | 17 -----------------
+ kernel/pid.c      |  3 +++
+ kernel/reboot.c   |  1 -
+ kernel/task_rcu.c | 30 ++++++++++++++++++++++++++++++
+ 5 files changed, 34 insertions(+), 19 deletions(-)
+ create mode 100644 kernel/task_rcu.c
+
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 4cb7e3c54ac0c7d480d077047e8a543fd38f1475..623e162956bacd95423c5926447dc94f6b60b373 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -4,7 +4,7 @@
+ #
+ 
+ obj-y     = fork.o exec_domain.o exec_state.o panic.o \
+-	    cpu.o cpu_topology.o exit.o rcuwait_wake.o softirq.o resource.o \
++	    cpu.o cpu_topology.o exit.o task_rcu.o rcuwait_wake.o softirq.o resource.o \
+ 	    sysctl.o capability.o ptrace.o user.o \
+ 	    signal.o signal_state.o restart_no_syscall.o sys.o umh.o workqueue.o pid.o task_work.o \
+ 	    extable.o params.o \
+diff --git a/kernel/exit.c b/kernel/exit.c
+index 0d303a97e91fe84614861412a3078b673e5abe06..ed4d7a2822ba1c7bc4b51111b47a07451cc7d2fa 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -225,23 +225,6 @@ static void __exit_signal(struct release_task_post *post, struct task_struct *ts
+ 		tty_kref_put(tty);
+ }
+ 
+-static void delayed_put_task_struct(struct rcu_head *rhp)
+-{
+-	struct task_struct *tsk = container_of(rhp, struct task_struct, rcu);
+-
+-	kprobe_flush_task(tsk);
+-	rethook_flush_task(tsk);
+-	perf_event_delayed_put(tsk);
+-	trace_sched_process_free(tsk);
+-	put_task_struct(tsk);
+-}
+-
+-void put_task_struct_rcu_user(struct task_struct *task)
+-{
+-	if (refcount_dec_and_test(&task->rcu_users))
+-		call_rcu(&task->rcu, delayed_put_task_struct);
+-}
+-
+ void __weak release_thread(struct task_struct *dead_task)
+ {
+ }
+diff --git a/kernel/pid.c b/kernel/pid.c
+index 95b8ccfa82690698768d45322ca48a8c03a26857..c3ed06a313c8de2adbb8dd458201279ba3f24daf 100644
+--- a/kernel/pid.c
++++ b/kernel/pid.c
+@@ -69,6 +69,9 @@ static int pid_max_max = PID_MAX_LIMIT;
+  * value does not cause lots of bitmaps to be allocated, but
+  * the scheme scales to up to 4 million PIDs, runtime.
+  */
++/* Original kernel/reboot.c recipient, installed with an owned PID ref. */
++struct pid __rcu *cad_pid;
++
+ struct pid_namespace init_pid_ns = {
+ 	.ns = NS_COMMON_INIT(init_pid_ns),
+ 	.idr = IDR_INIT(init_pid_ns.idr),
+diff --git a/kernel/reboot.c b/kernel/reboot.c
+index d177d89fcc33e2f7312f3fcf724d1b5b02c84daf..cd50c30b0bb505fdf85898dd5fa4e90398541368 100644
+--- a/kernel/reboot.c
++++ b/kernel/reboot.c
+@@ -26,7 +26,6 @@
+  */
+ 
+ static int C_A_D = 1;
+-struct pid __rcu *cad_pid;
+ 
+ #if defined(CONFIG_ARM)
+ #define DEFAULT_REBOOT_MODE		= REBOOT_HARD
+diff --git a/kernel/task_rcu.c b/kernel/task_rcu.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..d68522b30f1fcb39d8e6c5551a322be49f2ac40f
+--- /dev/null
++++ b/kernel/task_rcu.c
+@@ -0,0 +1,30 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *  linux/kernel/exit.c
++ *
++ *  Copyright (C) 1991, 1992  Linus Torvalds
++ */
++
++#include <linux/kprobes.h>
++#include <linux/perf_event.h>
++#include <linux/rcupdate.h>
++#include <linux/rethook.h>
++#include <linux/sched/task.h>
++#include <trace/events/sched.h>
++
++static void delayed_put_task_struct(struct rcu_head *rhp)
++{
++	struct task_struct *tsk = container_of(rhp, struct task_struct, rcu);
++
++	kprobe_flush_task(tsk);
++	rethook_flush_task(tsk);
++	perf_event_delayed_put(tsk);
++	trace_sched_process_free(tsk);
++	put_task_struct(tsk);
++}
++
++void put_task_struct_rcu_user(struct task_struct *task)
++{
++	if (refcount_dec_and_test(&task->rcu_users))
++		call_rcu(&task->rcu, delayed_put_task_struct);
++}

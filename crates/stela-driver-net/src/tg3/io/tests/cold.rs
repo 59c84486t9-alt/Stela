@@ -10,7 +10,7 @@ use crate::bus::{
         owned::test_support::fixture,
         requester::{
             FunctionRole, RequesterBinding,
-            preparation::{self, Attachment, Root},
+            preparation::{self, Root},
         },
     },
 };
@@ -45,7 +45,10 @@ unsafe impl Root for OldRoot {
             Ok(())
         }
     }
-    unsafe fn bind(&self, binding: RequesterBinding) -> Result<Box<dyn Attachment>, DmaError> {
+    unsafe fn bind(
+        &self,
+        binding: RequesterBinding,
+    ) -> Result<Box<dyn crate::bus::pci::requester::preparation::AttachmentBackend>, DmaError> {
         binding.check_live().unwrap();
         self.0.events.lock().unwrap().push("private bind");
         if self.0.fail_bind.load(Ordering::Relaxed) {
@@ -67,11 +70,13 @@ impl Drop for Control {
 }
 // SAFETY: no mapping can be created by this model; detach makes the shared
 // binding absent before releasing its original configuration retention.
-unsafe impl Attachment for Control {
+unsafe impl crate::bus::pci::requester::preparation::AttachmentBackend for Control {
     fn domain(&self) -> Arc<dyn DmaDomain> {
         self.0.clone()
     }
-    unsafe fn detach(&mut self) -> Result<(), DmaError> {
+    unsafe fn detach(
+        &mut self,
+    ) -> Result<(), crate::bus::pci::requester::preparation::DetachError> {
         self.0
             .binding
             .lock()
@@ -115,11 +120,11 @@ fn preparing(state: Arc<State>) -> preparation::PreparingRequester {
         function: 0,
     };
     let (mut config, _) = fixture(address);
-    config.write32(0, 0x165f_14e4);
-    config.write32(4, 0x402);
-    config.write32(8, 0x0200_0000);
-    config.write32(0x0c, 0);
-    config.write32(0x100, 0);
+    config.write32(0, 0x165f_14e4).unwrap();
+    config.write32(4, 0x402).unwrap();
+    config.write32(8, 0x0200_0000).unwrap();
+    config.write32(0x0c, 0).unwrap();
+    config.write32(0x100, 0).unwrap();
     let function = Function::new(address, config).unwrap();
     // SAFETY: the exclusive symbolic fixture has no native firmware/IRQ/work
     // users; its original root and configuration are paired in this attempt.

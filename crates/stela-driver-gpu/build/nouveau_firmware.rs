@@ -3,7 +3,7 @@
 use std::{env, path::PathBuf};
 
 #[cfg(feature = "linux-kernel")]
-use super::native::{self, LINUX, Linux, Tests, check_declarations, run};
+use super::native::{self, LINUX, Linux};
 #[cfg(feature = "linux-kernel")]
 use std::{
     process::{self, Command},
@@ -11,6 +11,8 @@ use std::{
 };
 #[cfg(feature = "linux-kernel")]
 use stela_c_build::linux::Module;
+#[cfg(feature = "linux-kernel")]
+use stela_c_build::linux_build::{Tests, check_declarations, run};
 #[cfg(feature = "linux-kernel")]
 use stela_c_build::native::hosted;
 

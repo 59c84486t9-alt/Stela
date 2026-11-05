@@ -397,9 +397,9 @@ impl Hierarchy {
     pub(super) fn prepare<R: Registers>(
         &mut self,
         host: &mut Host<R>,
-        clock: Clock,
+        minimum: &(impl crate::bus::pci::power::Timer + ?Sized),
     ) -> Result<(), Error> {
-        crate::bus::pci::power::Timer::check(&clock).map_err(|_| Error::Clock)?;
+        minimum.check()?;
         self.recheck(host, false)?;
         // This initial attachment profile checked parent D0 before child
         // discovery; the grant excludes outside PM changes.
@@ -410,7 +410,7 @@ impl Hierarchy {
         for &index in &order {
             let function = &self.children[index];
             config(host, function.child.address, |config| {
-                function.capabilities.power_up(config, clock)?;
+                function.capabilities.power_up(config, minimum)?;
                 function.capabilities.check_d0(config)
             })?;
             // A bridge's D3hot transition can reset its bus/window registers.

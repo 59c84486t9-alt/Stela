@@ -427,6 +427,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// What the last beacons left to do, once firmware is free.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub(super) fn run_tracking(&mut self, queue: &mut Queue<Q, B>, now: u64) -> Result<(), Error> {
         let client = &mut self.client;
         if client.leaving || client.station.phase() != Peering::Associated {
@@ -509,6 +513,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// `BSS_CHANGED_TPE`, as `iwl_mld_send_ap_tx_power_constraint_cmd` tells
     /// firmware.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn update_power(&mut self, queue: &mut Queue<Q, B>, heard: Heard) -> Result<(), Error> {
         let client = &self.client;
         let seat = client.seat_of(heard.ap).ok_or(Error::Refused("no link"))?;
@@ -536,6 +544,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// `ieee80211_link_change_chanreq` and `ieee80211_link_info_change_notify`:
     /// firmware's link takes what `heard` says.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn update_link(&mut self, queue: &mut Queue<Q, B>, heard: Heard) -> Result<(), Error> {
         let client = &self.client;
         let seat = client.seat_of(heard.ap).ok_or(Error::Refused("no link"))?;
@@ -573,6 +585,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// `iwl_mld_switch_vif_chanctx_swap` for firmware's started switch: the
     /// link leaves its PHY for one on the new channel, and waits to hear the AP.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn follow_switch(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
         let client = &mut self.client;
         client.bluetooth.link_changed();

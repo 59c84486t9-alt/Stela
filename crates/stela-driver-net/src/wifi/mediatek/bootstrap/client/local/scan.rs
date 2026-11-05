@@ -224,6 +224,9 @@ mod tests {
 
     #[test]
     fn empty_custom_composition_preserves_all_source_owned_probe_bytes() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         for band in [Band::Ghz2, Band::Ghz5, Band::Ghz6] {
             let actual = make(
                 band,
@@ -253,6 +256,9 @@ mod tests {
 
     #[test]
     fn source_custom_split_keeps_fragment_chain_and_unknown_tail_in_input_order() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let actual = make(
             Band::Ghz2,
             3,
@@ -288,6 +294,9 @@ mod tests {
 
     #[test]
     fn custom_fragment_validity_requires_a_full_immediate_predecessor() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let mut valid = vec![10, 255];
         valid.extend_from_slice(&[0xab; 255]);
         valid.extend_from_slice(&[242, 255]);
@@ -309,6 +318,9 @@ mod tests {
 
     #[test]
     fn source_usable_band_union_never_turns_flags_into_probe_permission() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         use crate::wifi::mediatek::identity::Chip;
         let blocked = domain::Channel {
             hardware_value: 1,
@@ -340,6 +352,9 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_MT7925_PROBE_ORACLE"]
     fn probe_ies_and_commands_match_source() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let root = std::path::PathBuf::from(std::env::var_os("STELA_MT7925_PROBE_ORACLE").unwrap());
         let trace = std::fs::read(root.join("client.trace")).unwrap();
         let mut at = 0;

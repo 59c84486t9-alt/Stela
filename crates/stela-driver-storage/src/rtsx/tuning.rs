@@ -14,7 +14,7 @@ impl Engine {
         }
         let budget = Budget::new(self, 100_000);
         let result = (|| {
-            self.clock.delay(1_000);
+            self.quiet(1_000)?;
             self.check_card_before(budget)?;
             if self.read_reg_before(SD_BUS_STAT, Some(budget))? & SD_DAT_MASK == SD_DAT_MASK {
                 return Err(BlockError::Unsupported("SD CMD11 did not pull DAT low"));
@@ -31,7 +31,7 @@ impl Engine {
                     self.write_reg_before(at, 0xff, drive, Some(budget))?;
                 }
             }
-            self.clock.delay(10_000);
+            self.quiet(10_000)?;
             self.check_card_before(budget)?;
             self.write_reg_before(CARD_CLK_EN, SD_CLK_EN, SD_CLK_EN, Some(budget))?;
             self.write_reg_before(
@@ -40,7 +40,7 @@ impl Engine {
                 SD_CLK_TOGGLE_EN,
                 Some(budget),
             )?;
-            self.clock.delay(1_000);
+            self.quiet(1_000)?;
             let pins = self.read_reg_before(SD_BUS_STAT, Some(budget))?;
             self.write_reg_before(
                 SD_BUS_STAT,

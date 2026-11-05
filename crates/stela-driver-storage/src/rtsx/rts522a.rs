@@ -9,7 +9,7 @@ impl Engine {
         self.write_reg(ASPM_FORCE_CTL, 0x30, 0x30)?;
         // Source register-mode ASPM: PCI Link Control is not the actuator.
         if old & 0x30 != 0x30 {
-            self.clock.delay(10_000);
+            self.quiet(10_000)?;
         }
         Ok(())
     }
@@ -99,7 +99,7 @@ impl Engine {
     }
     pub(super) fn rts522a_clear_ocp(&mut self, budget: Budget) -> Result<(), BlockError> {
         self.write_reg_before(REG_OCPCTL, SD_OCP_CLEAR, SD_OCP_CLEAR, Some(budget))?;
-        self.clock.delay(100);
+        self.quiet(100)?;
         self.write_reg_before(REG_OCPCTL, SD_OCP_CLEAR, 0, Some(budget))
     }
 }

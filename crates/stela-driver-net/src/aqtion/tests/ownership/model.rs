@@ -69,7 +69,10 @@ unsafe impl Root for OldRoot {
     unsafe fn bind(
         &self,
         binding: RequesterBinding,
-    ) -> core::result::Result<Box<dyn Attachment>, DmaError> {
+    ) -> core::result::Result<
+        Box<dyn crate::bus::pci::requester::preparation::AttachmentBackend>,
+        DmaError,
+    > {
         self.state.stopped();
         assert!(!self.state.old_pending.load(Ordering::Relaxed));
         assert_eq!(self.state.old_backing.load(Ordering::Relaxed), 0x55aa);
@@ -100,18 +103,24 @@ impl Drop for Control {
 }
 // SAFETY: one original model binding; detach checks every mapping and actual
 // model DMA/engine state, then releases that exact config binding once.
-unsafe impl Attachment for Control {
+unsafe impl crate::bus::pci::requester::preparation::AttachmentBackend for Control {
     fn domain(&self) -> Arc<dyn DmaDomain> {
         Arc::new(super::domain::NativeDomain(self.0.clone()))
     }
-    unsafe fn detach(&mut self) -> core::result::Result<(), DmaError> {
+    unsafe fn detach(
+        &mut self,
+    ) -> core::result::Result<(), crate::bus::pci::requester::preparation::DetachError> {
         self.0.current()?;
         self.0.stopped();
         assert!(self.0.base.maps.lock().unwrap().is_empty());
         assert_eq!(self.0.base.pending_dma.load(Ordering::Relaxed), 0);
         assert!(self.0.base.posted.lock().unwrap().is_empty());
         if self.0.record("detach") {
-            return Err(DmaError::InvalidationFailed);
+            return Err(
+                crate::bus::pci::requester::preparation::DetachError::Uncertain(
+                    DmaError::InvalidationFailed,
+                ),
+            );
         }
         self.0.binding.lock().unwrap().take().unwrap();
         self.0.detached.store(true, Ordering::Relaxed);
@@ -189,11 +198,11 @@ pub(super) fn inputs(device: u16) -> Fixture {
     };
     let (function, pm) = native_config(address, device);
     let ControlledConfig { mut native, .. } = function.into_config();
-    native.write16(4, 1 << 10);
+    native.write16(4, 1 << 10).unwrap();
     // The complete stopped-claim validator requires a real PM capability version.
-    native.write16(0x42, 3);
-    native.write32(0x10, BAR_BASE as u32);
-    native.write32(0x100, 0);
+    native.write16(0x42, 3).unwrap();
+    native.write32(0x10, BAR_BASE as u32).unwrap();
+    native.write32(0x100, 0).unwrap();
     *base.config.lock().unwrap() = Some(pm.clone());
     *peer.native_pm.borrow_mut() = Some(pm.clone());
     let bar_retired = Arc::new(AtomicBool::new(false));
@@ -256,6 +265,10 @@ pub(super) fn inputs(device: u16) -> Fixture {
         dropped,
     }
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "return the original owner and precise failure without allocating during refusal or retirement"
+)]
 pub(super) fn attach(
     inputs: adapter::Inputs<ModelRegisters, Rc<Peer>>,
     pages: &Pages,

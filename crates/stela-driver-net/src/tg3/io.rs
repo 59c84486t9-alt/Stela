@@ -96,19 +96,23 @@ unsafe impl<C: ConfigSpace> Registers for Mmio<C> {
         if at & 3 != 0 || at > 4092 {
             return Err(Error::Bounds);
         }
-        let value = self.function.config().read32(at);
-        if value == u32::MAX {
-            Err(Error::Removed)
-        } else {
-            Ok(value)
-        }
+        self.function.config().read32(at).map_err(Error::Config)
     }
     fn config_write32(&mut self, at: u16, value: u32) -> Result<(), Error> {
         if at & 3 != 0 || at > 4092 {
             return Err(Error::Bounds);
         }
-        self.function.config().write32(at, value);
-        self.config_read32(0)?; // Real config remains reachable after a write.
+        self.function.config().write32(at, value)?;
+        match self.config_read32(0) {
+            Ok(u32::MAX) => return Err(Error::Removed),
+            Err(Error::Config(error)) => {
+                return Err(Error::Config(
+                    crate::bus::pci::ConfigError::write_may_have_applied(at, 4, error.reason),
+                ));
+            }
+            Err(error) => return Err(error),
+            Ok(_) => {}
+        }
         Ok(())
     }
     fn config_write16(&mut self, at: u16, value: u16) -> Result<(), Error> {
@@ -117,8 +121,17 @@ unsafe impl<C: ConfigSpace> Registers for Mmio<C> {
         }
         // Native ConfigSpace overrides this with a narrow store,
         // never a dword RMW that could acknowledge adjacent W1C status.
-        self.function.config().write16(at, value);
-        self.config_read32(0)?;
+        self.function.config().write16(at, value)?;
+        match self.config_read32(0) {
+            Ok(u32::MAX) => return Err(Error::Removed),
+            Err(Error::Config(error)) => {
+                return Err(Error::Config(
+                    crate::bus::pci::ConfigError::write_may_have_applied(at, 2, error.reason),
+                ));
+            }
+            Err(error) => return Err(error),
+            Ok(_) => {}
+        }
         Ok(())
     }
     fn read32(&mut self, at: u32) -> Result<u32, Error> {

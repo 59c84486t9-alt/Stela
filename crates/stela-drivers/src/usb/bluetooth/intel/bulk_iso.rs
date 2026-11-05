@@ -98,6 +98,10 @@ pub struct Session<B: Io> {
     shutdown: Option<ShutdownReport>,
 }
 impl<B: Io> Session<B> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn start(mut hci: Hci<B>, command_credits: u8) -> Result<Self, Error> {
         let report = prepare(&mut hci, command_credits)?;
         Ok(Self {
@@ -120,6 +124,10 @@ impl<B: Io> Session<B> {
     /// by acknowledged native retirement. Caller owns command allowance
     /// and retires stack connections. The source LED-workaround USB aliases
     /// 8087:07dc/0a2a/0aa7 are excluded by current Intel initialization admission.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn shutdown(&mut self, credits: u8) -> Result<&ShutdownReport, Error> {
         let report = transact(&mut self.hci, credits, |engine, usb, hardware_variant| {
             if engine.command(0x0c03)?.as_slice() != [0] {
@@ -149,10 +157,18 @@ impl<B: Io> Session<B> {
     /// Reset and re-read LE capabilities/buffers. The caller retires its
     /// host-stack connections/credits; no successful previous report is current
     /// after a failed attempt, as the native owner is terminal then.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn reset(&mut self, command_credits: u8) -> Result<&Report, Error> {
         self.report = prepare(&mut self.hci, command_credits)?;
         Ok(&self.report)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn submit_command(&mut self, packet: &[u8]) -> Result<(), Error> {
         self.hci.open()?;
         if packet.len() >= 2 {
@@ -165,6 +181,10 @@ impl<B: Io> Session<B> {
         }
         self.hci.submit_command(packet).map_err(Into::into)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn submit_acl(&mut self, packet: &[u8]) -> Result<(), Error> {
         self.hci.open()?;
         if is_iso(&self.report, packet) {
@@ -177,6 +197,10 @@ impl<B: Io> Session<B> {
     /// One complete ISO header+data load in one real bulk OUT transfer. Credits
     /// are the stack's remaining ISO packet allowance. Validation is
     /// effect-free; an attempted USB delivery consumes one credit even on error.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn submit_iso(&mut self, packet: &[u8], credits: &mut u8) -> Result<(), Error> {
         self.hci.open()?;
         if !is_iso(&self.report, packet)
@@ -206,6 +230,10 @@ impl<B: Io> Session<B> {
                 packet: retained,
             })
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn poll(&mut self) -> Result<Vec<Received>, Error> {
         self.hci
             .poll()
@@ -223,11 +251,19 @@ impl<B: Io> Session<B> {
             .map_err(Into::into)
     }
     /// Acknowledged native transport retirement, without inferred power/PM.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn close(&mut self) -> Result<(), Error> {
         self.hci.close().map_err(Into::into)
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 fn profile<B: Io>(hci: &Hci<B>) -> Result<((u16, u16, u16), u8), Error> {
     hci.open()?;
     if !super::is_candidate(hci.binding().device()) {
@@ -264,11 +300,19 @@ fn profile<B: Io>(hci: &Hci<B>) -> Result<((u16, u16, u16), u8), Error> {
     }
     Ok((usb, after.hardware_variant()))
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 fn prepare<B: Io>(hci: &mut Hci<B>, credits: u8) -> Result<Report, Error> {
     transact(hci, credits, |engine, usb, hardware_variant| {
         engine.run(usb, hardware_variant)
     })
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 fn transact<B: Io, T>(
     hci: &mut Hci<B>,
     credits: u8,
@@ -307,6 +351,10 @@ struct Engine<'a, B: Io> {
     attempt: Attempt,
 }
 impl<B: Io> Engine<'_, B> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn check(&self, start: u64) -> Result<(), Error> {
         let now = self.hci.io.now_us();
         if now.wrapping_sub(self.start) >= ATTEMPT_US || now.wrapping_sub(start) >= COMMAND_US {
@@ -314,6 +362,10 @@ impl<B: Io> Engine<'_, B> {
         }
         Ok(())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn command(&mut self, opcode: u16) -> Result<Vec<u8>, Error> {
         let start = self.hci.io.now_us();
         let packet = command::packet(opcode, &[]).map_err(Error::Protocol)?;
@@ -381,6 +433,10 @@ impl<B: Io> Engine<'_, B> {
             core::hint::spin_loop();
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn run(&mut self, usb: (u16, u16, u16), hardware_variant: u8) -> Result<Report, Error> {
         if self.command(0x0c03)?.as_slice() != [0] {
             return Err(Error::Protocol("HCI Reset response length"));

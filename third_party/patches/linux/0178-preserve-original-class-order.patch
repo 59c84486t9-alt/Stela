@@ -1,0 +1,120 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 04:47:08 -0500
+Subject: [PATCH] fix(sched): preserve original class order in UEFI
+
+---
+ kernel/sched/fork_sources.json    | 15 +++++++++++++++
+ kernel/sched/sched.h              | 20 +++++++++++++++++++-
+ kernel/sched/sched_class_bounds.c | 26 ++++++++++++++++++++++++++
+ 3 files changed, 60 insertions(+), 1 deletion(-)
+ create mode 100644 kernel/sched/sched_class_bounds.c
+
+diff --git a/kernel/sched/fork_sources.json b/kernel/sched/fork_sources.json
+index e57ec17ee1b3e57da70177e8dc8b9234a50242d3..c2953bb9fa539d9f03bec77509120a001fccd75c 100644
+--- a/kernel/sched/fork_sources.json
++++ b/kernel/sched/fork_sources.json
+@@ -2,6 +2,12 @@
+   "format": 1,
+   "source_revision": "0dd21a0e03a3941434e58ac6d12eab1a8dff0e80",
+   "inputs": [
++    {
++      "path": "include/asm-generic/vmlinux.lds.h",
++      "git_blob": "ee9c5d354a856701e2ce5e42dbd285decdb98c7f",
++      "sha256": "0a3d2a86890d53ad4e0c97ba01442f8d4f0c73ea22f8fcc454ace9ed3c24ff5a",
++      "functions": []
++    },
+     {
+       "path": "kernel/sched/core.c",
+       "git_blob": "64427c1e88de3f2e0af1ce09591a06577fe6793b",
+@@ -168,6 +174,14 @@
+       "path": "kernel/sched/rt_timeslice.c",
+       "sha256": "381e0d09ddb4c941a6d9b9aa2dea214299a99c07e5a7199aaabd58b79fa40d3d"
+     },
++    {
++      "path": "kernel/sched/sched.h",
++      "sha256": "302232a6b7e7d0fa5a66a2d1854ba4ff5aae532aab87ce298a9ee2441ed6b1e3"
++    },
++    {
++      "path": "kernel/sched/sched_class_bounds.c",
++      "sha256": "f99a071fd62aed12ee6d8fcbae2d9ec464e2b2e0947b473bd1533923f4c00fe1"
++    },
+     {
+       "path": "kernel/sched/fork_support.c",
+       "sha256": "05d7a95728b383c3efa8e0a7ac409c2106560264c2443f8d85f7f09b4e863fb6"
+@@ -178,6 +192,7 @@
+     "Task-local weights, slice defaults, and average initialization are built separately from the original asymmetric-capacity helper. The native 64-bit non-group branch uses the matching original sched.h scaling and entity rules.",
+     "set_task_max_allowed_capacity is named stela_linux_sched_fork_fair_capacity; it reads the original capacity/static-key definitions moved from topology.c into capacity_state.c. The native and regular scheduler paths share the original declarations and static-key query in fork_capacity.h.",
+     "Both profiles use the original runqueue clock updates and scheduler feature defaults in rq_clock.c. The native build uses the original stable clock startup and supplies its retained monotonic source in place of the weak jiffy source.",
++    "UEFI COFF class contributions and bounds preserve the order of SCHED_DATA in include/asm-generic/vmlinux.lds.h.",
+     "The original runqueue reschedule and wakeup preemption bodies are shared through rq_resched.c. Class identity and ordering belong to the original scheduler owner.",
+     "The original runqueue lock bodies are built by both scheduler profiles through rq_lock.c. A separate scheduler owner must provide runqueues.",
+     "The original sched_rr_timeslice definition is shared by the regular and native scheduler builds through rt_timeslice.c.",
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index 4531efbf866e4fab2517890fd778bfb05154fe1e..9c62147515caa8c8b31338d3ef5dc109fefda6f4 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -2759,12 +2759,30 @@ static inline void put_prev_set_next_task(struct rq *rq,
+  *
+  * Also enforce alignment on the instance, not the type, to guarantee layout.
+  */
++#if defined(CONFIG_STELA) && defined(__CYGWIN__)
++/* COFF sorts the contributions to .rdata by their $ suffix. */
++#define STELA_SCHED_CLASS_SECTION ".rdata$stela_sched$"
++#define STELA_SCHED_CLASS_stop "00"
++#define STELA_SCHED_CLASS_dl   "01"
++#define STELA_SCHED_CLASS_rt   "02"
++#define STELA_SCHED_CLASS_fair "03"
++#define STELA_SCHED_CLASS_ext  "04"
++#define STELA_SCHED_CLASS_idle "05"
++
++#define DEFINE_SCHED_CLASS(name) \
++const struct sched_class name##_sched_class \
++	__aligned(__alignof__(struct sched_class)) \
++	__attribute__((section(STELA_SCHED_CLASS_SECTION STELA_SCHED_CLASS_##name)))
++
++#else
+ #define DEFINE_SCHED_CLASS(name) \
+ const struct sched_class name##_sched_class \
+ 	__aligned(__alignof__(struct sched_class)) \
+ 	__section("__" #name "_sched_class")
+ 
+-/* Defined in include/asm-generic/vmlinux.lds.h */
++#endif
++
++/* The linker script or native COFF bounds define this class range. */
+ extern struct sched_class __sched_class_highest[];
+ extern struct sched_class __sched_class_lowest[];
+ 
+diff --git a/kernel/sched/sched_class_bounds.c b/kernel/sched/sched_class_bounds.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef4e3f9bf00f854d892db5e6b87d34d4b615ad64
+--- /dev/null
++++ b/kernel/sched/sched_class_bounds.c
+@@ -0,0 +1,26 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* COFF bounds for the class range supplied by SCHED_DATA in Linux's linker. */
++#include "sched.h"
++
++static_assert(__alignof__(struct sched_class) == 8);
++
++/* Keep the actual class objects when callers reference only the range. The
++ * leading relocations and the final padding lie outside the class range.
++ */
++__asm__(
++	".section " STELA_SCHED_CLASS_SECTION ",\"dr\"\n"
++	".p2align 3\n"
++	".quad stop_sched_class, dl_sched_class, rt_sched_class, fair_sched_class\n"
++#ifdef CONFIG_SCHED_CLASS_EXT
++	".quad ext_sched_class\n"
++#endif
++	".quad idle_sched_class\n"
++	".global __sched_class_highest\n"
++	"__sched_class_highest:\n"
++	".section " STELA_SCHED_CLASS_SECTION "99,\"dr\"\n"
++	".p2align 3\n"
++	".global __sched_class_lowest\n"
++	"__sched_class_lowest:\n"
++	".quad 0\n"
++	".text\n"
++);

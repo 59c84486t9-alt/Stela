@@ -12,9 +12,10 @@
 //! ([`super::storage::RestoreRoot`]), with interrupts off and the host drivers' lock held.
 //! There RAM, ACPI tables and NVS included, is reached through the physmap,
 //! write-back; any other address, device registers, through an identity
-//! mapping the provider adds to the loader root uncached on first use. As
-//! Linux, configuration registers below 256 on segment 0 go through
-//! configuration mechanism #1, the rest through the MCFG's ECAM windows.
+//! mapping the provider adds to the loader root uncached on first use. When
+//! the native PCI source takes configuration custody, AML has scoped scalar
+//! reads through that source. Otherwise the firmware provider uses PCI
+//! configuration mechanism #1 and the MCFG's ECAM windows.
 pub(super) mod sci;
 use super::{
     host,
@@ -22,7 +23,7 @@ use super::{
     power::{in8, in16, in32, out8, out16, out32},
 };
 use crate::{
-    layout, output,
+    layout, native_mmio, output,
     tables::{self, Frames, NX, PAGE, PRESENT, UNCACHED, WRITABLE},
 };
 use alloc::{boxed::Box, collections::VecDeque, string::String, vec::Vec};
@@ -35,7 +36,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use stela_drivers::{
-    bus::pci::EcamWindow,
+    bus::pci::{Address, EcamWindow},
     platform::acpi::{
         Interrupt, Mode, PciId, SERVICES_ABI_BYTES, SERVICES_ABI_VERSION, Services, Session,
         Status, Value, Work,
@@ -75,6 +76,8 @@ enum Gap {
     Config = 2,
     /// An address beyond what the loader root can map by identity.
     Address = 4,
+    /// Access that would bypass the native PCI configuration owner.
+    PciCustody = 8,
 }
 
 struct Provider {
@@ -83,6 +86,7 @@ struct Provider {
     /// The loader root, which takes the identity mappings of device pages.
     root: u64,
     ecam: Vec<EcamWindow>,
+    pci: Option<&'static native_mmio::Source>,
     tsc_hz: u64,
     /// `acpi_os_execute`'s work, run in order by [`drain_work`].
     work: RefCell<VecDeque<(Work, usize)>>,
@@ -110,6 +114,18 @@ impl Provider {
     /// not yet mapped uncached.
     fn reach(&self, physical: u64, bytes: u64) -> Option<*mut u8> {
         let end = physical.checked_add(bytes.max(1))?;
+        if self.pci.is_some()
+            && self.ecam.iter().any(|window| {
+                let range = window.range();
+                physical < range.end && range.start < end
+            })
+        {
+            self.report(
+                Gap::PciCustody,
+                format_args!("native PCI configuration owns the requested ECAM range"),
+            );
+            return None;
+        }
         let pages = (physical & !(PAGE - 1)..end).step_by(PAGE as usize);
         if pages
             .clone()
@@ -160,6 +176,21 @@ impl Provider {
                     | u64::from(id.function) << 12
                     | u64::from(register))
         })
+    }
+
+    fn permits_port(&self, port: u16, width: u32) -> bool {
+        let first = u32::from(port);
+        if self.pci.is_some()
+            && first < u32::from(PCI_DATA) + 4
+            && first + width / 8 > u32::from(PCI_ADDRESS)
+        {
+            self.report(
+                Gap::PciCustody,
+                format_args!("native PCI configuration owns the legacy configuration ports"),
+            );
+            return false;
+        }
+        true
     }
 
     fn dispatch_sci(&self, work: bool) -> bool {
@@ -508,10 +539,22 @@ unsafe extern "C" fn stall(context: *mut c_void, microseconds: u32) {
     }
 }
 
-unsafe extern "C" fn read_port(_: *mut c_void, port: u64, value: *mut u32, width: u32) -> Status {
+unsafe extern "C" fn read_port(
+    context: *mut c_void,
+    port: u64,
+    value: *mut u32,
+    width: u32,
+) -> Status {
     let Ok(port) = u16::try_from(port) else {
         return AE_BAD_PARAMETER;
     };
+    if !matches!(width, 8 | 16 | 32) {
+        return AE_BAD_PARAMETER;
+    }
+    // SAFETY: ACPICA passes the session's provider.
+    if !unsafe { provider(context) }.permits_port(port, width) {
+        return AE_SUPPORT;
+    }
     // SAFETY: the firmware's AML or FADT names the port; ACPICA screens it
     // as Linux's does; the output is writable.
     unsafe {
@@ -519,23 +562,30 @@ unsafe extern "C" fn read_port(_: *mut c_void, port: u64, value: *mut u32, width
             8 => in8(port).into(),
             16 => in16(port).into(),
             32 => in32(port),
-            _ => return AE_BAD_PARAMETER,
+            _ => unreachable!("port width was checked"),
         })
     };
     AE_OK
 }
 
-unsafe extern "C" fn write_port(_: *mut c_void, port: u64, value: u32, width: u32) -> Status {
+unsafe extern "C" fn write_port(context: *mut c_void, port: u64, value: u32, width: u32) -> Status {
     let Ok(port) = u16::try_from(port) else {
         return AE_BAD_PARAMETER;
     };
+    if !matches!(width, 8 | 16 | 32) {
+        return AE_BAD_PARAMETER;
+    }
+    // SAFETY: ACPICA passes the session's provider.
+    if !unsafe { provider(context) }.permits_port(port, width) {
+        return AE_SUPPORT;
+    }
     // SAFETY: as in `read_port`.
     unsafe {
         match width {
             8 => out8(port, value as u8),
             16 => out16(port, value as u16),
             32 => out32(port, value),
-            _ => return AE_BAD_PARAMETER,
+            _ => unreachable!("port width was checked"),
         }
     }
     AE_OK
@@ -636,7 +686,34 @@ unsafe extern "C" fn read_pci(
     if !matches!(width, 8 | 16 | 32) {
         return AE_ERROR;
     }
-    let read = if let Some(address) = mechanism_one(id, register) {
+    let read = if let Some(pci) = provider.pci {
+        let (Ok(bus), Ok(device), Ok(function), Ok(offset)) = (
+            u8::try_from(id.bus),
+            u8::try_from(id.device),
+            u8::try_from(id.function),
+            u16::try_from(register),
+        ) else {
+            return AE_BAD_PARAMETER;
+        };
+        let address = Address {
+            segment: id.segment,
+            bus,
+            device,
+            function,
+        };
+        match pci.read_firmware_config(address, offset, (width / 8) as u16) {
+            Ok(value) => u64::from(value),
+            Err(error) => {
+                provider.report(
+                    Gap::Config,
+                    format_args!(
+                        "native PCI read of {address} register {offset:#x} refused: {error:?}"
+                    ),
+                );
+                return AE_SUPPORT;
+            }
+        }
+    } else if let Some(address) = mechanism_one(id, register) {
         let port = PCI_DATA + (register & 3) as u16;
         // SAFETY: mechanism #1's ports, under the host drivers' lock.
         unsafe {
@@ -679,6 +756,13 @@ unsafe extern "C" fn write_pci(
     let (provider, id) = unsafe { (provider(context), &*id) };
     if !matches!(width, 8 | 16 | 32) {
         return AE_ERROR;
+    }
+    if provider.pci.is_some() {
+        provider.report(
+            Gap::PciCustody,
+            format_args!("native PCI configuration excludes AML writes"),
+        );
+        return AE_SUPPORT;
     }
     if let Some(address) = mechanism_one(id, register) {
         let port = PCI_DATA + (register & 3) as u16;
@@ -802,7 +886,8 @@ impl HostAcpi {
     pub(super) fn start(
         rsdp: u64,
         root: u64,
-        ecam: Vec<EcamWindow>,
+        mut ecam: Vec<EcamWindow>,
+        pci: Option<&'static native_mmio::Source>,
         tsc_hz: u64,
         prepared_sci: Option<sci::Prepared>,
         executor: Option<&'static KernelWork>,
@@ -813,8 +898,25 @@ impl HostAcpi {
             ));
             return None;
         };
+        let pci = if let Some(source) = pci {
+            match source.configuration_windows() {
+                Ok(windows) if windows.is_empty() => None,
+                Ok(windows) => {
+                    ecam = windows;
+                    Some(source)
+                }
+                Err(error) => {
+                    output::arguments(format_args!(
+                        "ACPI firmware AML unavailable: native PCI configuration inventory refused ({error:?})\n"
+                    ));
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
         match executor.call_owned(5_000_000, move || {
-            Self::start_entered(rsdp, root, ecam, tsc_hz, prepared_sci, executor)
+            Self::start_entered(rsdp, root, ecam, pci, tsc_hz, prepared_sci, executor)
         }) {
             Ok(acpi) => acpi,
             Err(error) => {
@@ -831,6 +933,7 @@ impl HostAcpi {
         rsdp: u64,
         root: u64,
         ecam: Vec<EcamWindow>,
+        pci: Option<&'static native_mmio::Source>,
         tsc_hz: u64,
         prepared_sci: Option<sci::Prepared>,
         executor: &'static KernelWork,
@@ -844,10 +947,18 @@ impl HostAcpi {
         // exact resource-owned map/unmap leases. Keep namespace-only operation
         // until that complete provider is admitted by the work owner.
         let capabilities = 0;
+        // Controller containment can prepare the route while ACPICA stays
+        // in namespace mode. No hardware callback may take it in that mode.
+        let prepared_sci = if capabilities == 0 {
+            None
+        } else {
+            prepared_sci
+        };
         let provider = Box::new(Provider {
             executor,
             root,
             ecam,
+            pci,
             tsc_hz,
             work: RefCell::new(VecDeque::new()),
             queued: AtomicBool::new(false),

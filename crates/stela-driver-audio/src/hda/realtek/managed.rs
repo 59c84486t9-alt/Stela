@@ -8,8 +8,7 @@ use super::{
     oem::{self, RealtekOem},
 };
 use crate::{
-    Error,
-    bus::i2c::Timer,
+    Error, Timer,
     hda::{
         AnalogRoute, CodecGraph, Controller, PinOptions, PinSense, Registers, StreamId, Verb,
         Widget, WidgetKind, routing::RoutePolicy,
@@ -97,6 +96,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .any(|state| state.address == address)
     }
     fn realtek_guard(&self, graph: &CodecGraph) -> Result<(), Error> {
+        self.minimum_guard()?;
         if graph.token != self.token {
             return Err(Error::InvalidCodecGraph);
         }
@@ -109,6 +109,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn realtek_graph_authority(&mut self, graph: &CodecGraph) -> Result<(), Error> {
+        self.minimum_guard()?;
         // Full live re-enumeration prevents public cached defaults, amp, power,
         // PCM or connection fields from manufacturing electrical permission.
         if !same_graph(graph, &self.enumerate_codec(graph.address)?) {
@@ -117,6 +118,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn realtek_hidden_read(&mut self, address: u8, node: u8, index: u16) -> Result<u16, Error> {
+        self.minimum_guard()?;
         self.verb(Verb::long(address, node, 5, index)?)?;
         if self.verb(Verb::long(address, node, 13, 0)?)? != u32::from(index) {
             return Err(Error::CoefficientRejected { node, index });
@@ -125,6 +127,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .map_err(|_| Error::CoefficientRejected { node, index })
     }
     fn realtek_active(&mut self, graph: &CodecGraph) -> Result<State, Error> {
+        self.minimum_guard()?;
         self.realtek_guard(graph)?;
         let state = self
             .realtek_codecs
@@ -182,6 +185,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<bool, Error> {
+        self.minimum_guard()?;
         Ok(self
             .registers
             .codec_pci_subsystem()?
@@ -192,6 +196,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Unknown boards use only their firmware analog routes; this is
     /// not a claim that their speakers or headset wiring are ready.
     pub fn initialize_realtek_codec(&mut self, graph: &CodecGraph) -> Result<RealtekReport, Error> {
+        self.minimum_guard()?;
         self.initialize_realtek_owned(graph, false)
     }
     /// Select only an original PCI-subsystem-bound ALC1220 X570/P950 procedure.
@@ -201,6 +206,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<RealtekReport, Error> {
+        self.minimum_guard()?;
         self.initialize_realtek_owned(graph, true)
     }
     fn initialize_realtek_owned(
@@ -208,6 +214,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         graph: &CodecGraph,
         require_oem: bool,
     ) -> Result<RealtekReport, Error> {
+        self.minimum_guard()?;
         self.realtek_guard(graph)?;
         self.realtek_common_guard(graph)?;
         let family = family::family(graph.vendor_id, graph.revision_id)?;
@@ -319,6 +326,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         primary: super::RealtekHeadphoneRoute<'_>,
         secondary: Option<super::RealtekHeadphoneRoute<'_>>,
     ) -> Result<RealtekReport, Error> {
+        self.minimum_guard()?;
         self.realtek_guard(graph)?;
         self.realtek_common_guard(graph)?;
         if !matches!(
@@ -487,6 +495,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.realtek_guard(graph)?;
         self.preflight_analog_route(graph, route, id, channel, options)?;
         let state = self.realtek_active(graph)?;
@@ -508,6 +517,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         graph: &CodecGraph,
         pin: u8,
     ) -> Result<PinSense, Error> {
+        self.minimum_guard()?;
         self.realtek_active(graph)?;
         let result = self.poll_pin_sense_policy(graph, pin, true);
         if result
@@ -529,6 +539,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         gain: u8,
         muted: bool,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         let state = self.realtek_active(graph)?;
         if !self.routes.iter().any(|(_, route)| {
             route.codec_address() == graph.address
@@ -579,6 +590,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         stream: StreamId,
         node: u8,
     ) -> Result<(Widget, u8, u8), Error> {
+        self.minimum_guard()?;
         self.realtek_guard(graph)?;
         // An old/foreign stream or unreserved node must not trigger even the
         // live codec-permission reads, much less change an amplifier.
@@ -665,6 +677,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         stream: StreamId,
         node: u8,
     ) -> Result<RealtekCaptureGain, Error> {
+        self.minimum_guard()?;
         let (widget, index, channels) = self.realtek_capture_amplifier(graph, stream, node)?;
         let caps = widget.input_amplifier.unwrap();
         let result = (|| {
@@ -709,6 +722,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         gain: u8,
         muted: bool,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         let (widget, index, channels) = self.realtek_capture_amplifier(graph, stream, node)?;
         let caps = widget.input_amplifier.unwrap();
         if gain > ((caps >> 8) & 0x7f) as u8 {
@@ -745,6 +759,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         result
     }
     pub(in crate::hda) fn shutdown_realtek_codecs(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         for index in 0..self.realtek_codecs.len() {
             let state = self.realtek_codecs[index].clone();
             if state.quiet {
@@ -774,7 +789,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             if family::family(state.graph.vendor_id, state.graph.revision_id)?
                 == RealtekFamily::Alc662
             {
-                self.delay(200_000);
+                self.delay(200_000)?;
             }
             for widget in state.graph.groups.iter().flat_map(|group| &group.widgets) {
                 if widget.pin_capabilities.is_some() {

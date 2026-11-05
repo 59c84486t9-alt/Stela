@@ -4,6 +4,11 @@ use alloc::{collections::BTreeMap, sync::Arc, vec};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub(super) struct Model {
+    pub(super) timing_failure: Option<crate::bus::pci::power::Error>,
+    pub(super) fail_delay_at: Option<usize>,
+    pub(super) delay_calls: usize,
+    pub(super) timer_drops: Arc<AtomicUsize>,
+
     pub(super) mac: BTreeMap<u32, u32>,
     pub(super) config: BTreeMap<u16, u16>,
     pub(super) spt: bool,
@@ -51,6 +56,10 @@ impl Model {
         // LCD: page769, indexed data; then page772 and another value.
         words[128..136].copy_from_slice(&[769 << 5, 31, 0x125a, 20, 772 << 5, 31, 0x5601, 21]);
         Self {
+            timing_failure: None,
+            fail_delay_at: None,
+            delay_calls: 0,
+            timer_drops: Arc::new(AtomicUsize::new(0)),
             mac: BTreeMap::from([
                 (super::super::FWSM, super::super::RESET_PERMITTED),
                 (super::super::EXTCNF_CTRL, 64 << 16),
@@ -374,14 +383,46 @@ unsafe impl nvm::Registers for Io {
     }
 }
 #[derive(Clone)]
-pub(super) struct Timer(Rc<RefCell<Model>>);
-impl Delay for Timer {
-    fn delay(&mut self, us: u64) {
+pub(super) struct Timer(Rc<RefCell<Model>>, Arc<AtomicUsize>);
+impl Timer {
+    fn new(state: Rc<RefCell<Model>>) -> Self {
+        let drops = state.borrow().timer_drops.clone();
+        Self(state, drops)
+    }
+}
+// SAFETY: isolated owned virtual-time model; this grants no native permission.
+unsafe impl Delay for Timer {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        if let Some(error) = self.0.borrow().timing_failure {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+    fn wait_us(&self, us: u64) -> Result<(), crate::bus::pci::power::Error> {
+        self.check()?;
+        {
+            let mut state = self.0.borrow_mut();
+            let at = state.delay_calls;
+            state.delay_calls += 1;
+            if state.fail_delay_at == Some(at) {
+                let error = crate::bus::pci::power::Error::Clock;
+                state.timing_failure = Some(error);
+                return Err(error);
+            }
+        }
         let mut m = self.0.borrow_mut();
         m.time += us;
         m.operations.push([2, us as u32, 0]);
+        Ok(())
     }
 }
+impl Drop for Timer {
+    fn drop(&mut self) {
+        self.1.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 type Fixture = (Rc<RefCell<Model>>, Arc<AtomicUsize>, Io, Timer);
 pub(super) fn fixture() -> Fixture {
     let state = Rc::new(RefCell::new(Model::ready()));
@@ -390,7 +431,7 @@ pub(super) fn fixture() -> Fixture {
         state.clone(),
         released.clone(),
         Io(state.clone(), released),
-        Timer(state),
+        Timer::new(state.clone()),
     )
 }
 pub(super) fn start(io: Io, timer: Timer) -> Result<Controller<Io, Timer>, Error> {
@@ -722,4 +763,28 @@ fn unchanged_linux_post_reset_lcd_and_oem_effects() {
         cases += 1;
     }
     assert_eq!(cases, 32);
+}
+
+#[test]
+fn missing_minimum_before_each_cold_profile_keeps_original_io_and_provider() {
+    for device in [0x1502, 0x153a, 0x156f] {
+        let (state, released, io, timer) = fixture();
+        let cause = crate::bus::pci::power::Error::Clock;
+        state.borrow_mut().timing_failure = Some(cause);
+        // SAFETY: same isolated model pair; no native hardware permission.
+        let result = unsafe {
+            match device {
+                0x1502 => Controller::new(device, io, timer),
+                0x153a => Controller::new_lpt(device, io, timer),
+                _ => Controller::new_spt(device, io, timer),
+            }
+        };
+        match result {
+            Err(error) => assert_eq!(error, Fault::Minimum(cause).into()),
+            Ok(_) => panic!("unavailable minimum admitted"),
+        }
+        assert!(state.borrow().operations.is_empty());
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+        assert_eq!(state.borrow().timer_drops.load(Ordering::SeqCst), 0);
+    }
 }

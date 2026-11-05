@@ -19,14 +19,8 @@ impl Timer for OpaqueTime {
 #[test]
 fn opaque_intervals_preserve_real_first_poll_and_complete_across_divided_rollover() {
     let (old, state) = controller(0x8086, 0x7113, 0);
-    let Piix4 {
-        registers,
-        timer,
-        info,
-        config,
-        ..
-    } = old;
-    let mut host = Piix4::new(registers, OpaqueTime(timer.0), info, config).unwrap();
+    let (registers, timer, info, config, minimum) = parts(old);
+    let mut host = Piix4::new(registers, OpaqueTime(timer.0), info, config, minimum).unwrap();
     let mut value = 0xa5a5;
     host.transaction(
         address(),
@@ -84,13 +78,7 @@ impl Registers for Late {
 fn preload_final_data_and_cleanup_are_inside_one_deadline_without_early_output_or_replay() {
     for stage in 0..4 {
         let (old, state) = controller(0x8086, 0x7113, 0);
-        let Piix4 {
-            registers,
-            timer,
-            info,
-            config,
-            ..
-        } = old;
+        let (registers, timer, info, config, minimum) = parts(old);
         let armed = Rc::new(Cell::new(false));
         let mut host = Piix4::new(
             Late {
@@ -102,6 +90,7 @@ fn preload_final_data_and_cleanup_are_inside_one_deadline_without_early_output_o
             timer,
             info,
             config,
+            minimum,
         )
         .unwrap();
         armed.set(true);
@@ -133,16 +122,10 @@ fn preload_final_data_and_cleanup_are_inside_one_deadline_without_early_output_o
 #[test]
 fn completion_observed_at_the_expired_boundary_is_not_reported_as_success() {
     let (old, state) = controller(0x8086, 0x7113, 0);
-    let Piix4 {
-        registers,
-        timer,
-        info,
-        mut config,
-        ..
-    } = old;
+    let (registers, timer, info, mut config, minimum) = parts(old);
     config.timeout_us = 250;
     state.borrow_mut().latency = 250;
-    let mut host = Piix4::new(registers, timer, info, config).unwrap();
+    let mut host = Piix4::new(registers, timer, info, config, minimum).unwrap();
     let mut value = 0xa5a5;
     let error = host
         .transaction(

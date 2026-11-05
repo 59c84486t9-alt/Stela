@@ -16,7 +16,7 @@ use crate::bus::{
         msi::MsiConfigSpace,
         owned::{
             OwnedConfig,
-            test_support::{Counters, fixture},
+            test_support::{BarFixture, Counters, bar_fixture, fixture, physical},
         },
     },
 };
@@ -566,32 +566,46 @@ struct Config {
     peer: Arc<Peer>,
 }
 impl ConfigSpace for Config {
-    fn read32(&self, at: u16) -> u32 {
+    fn read32(&self, at: u16) -> core::result::Result<u32, crate::bus::pci::ConfigError> {
         self.native.read32(at)
     }
-    fn read16(&self, at: u16) -> u16 {
+    fn read16(&self, at: u16) -> core::result::Result<u16, crate::bus::pci::ConfigError> {
         self.native.read16(at)
     }
-    fn read8(&self, at: u16) -> u8 {
+    fn read8(&self, at: u16) -> core::result::Result<u8, crate::bus::pci::ConfigError> {
         self.native.read8(at)
     }
-    fn write32(&mut self, at: u16, v: u32) {
-        self.native.write32(at, v);
+    fn write32(
+        &mut self,
+        at: u16,
+        v: u32,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        self.native.write32(at, v)?;
+
+        Ok(())
     }
-    fn write8(&mut self, at: u16, v: u8) {
-        self.native.write8(at, v);
+    fn write8(&mut self, at: u16, v: u8) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        self.native.write8(at, v)?;
+
+        Ok(())
     }
-    fn write16(&mut self, at: u16, v: u16) {
+    fn write16(
+        &mut self,
+        at: u16,
+        v: u16,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
         if at == 0x52 && self.peer.state.lock().unwrap().ignore_msi {
-            return;
+            return Ok(());
         }
-        self.native.write16(at, v);
+        self.native.write16(at, v)?;
         if at == 4 {
             self.peer.command.store(usize::from(v), Ordering::Release);
         }
         if at == 0x52 {
             self.peer.msi.store(v & 1 != 0, Ordering::Release);
         }
+
+        Ok(())
     }
 }
 // SAFETY: forwards exact-width native stores through the owned fixture.
@@ -704,11 +718,84 @@ unsafe impl DmaDomain for Domain {
         }
     }
 }
+struct NotificationPeer {
+    peer: Arc<Peer>,
+    thread: std::thread::ThreadId,
+}
+// SAFETY: actual original bounded BAR/device peer and its creating thread;
+// no native requester, fabric completion or Attachment receipt is supplied.
+unsafe impl irq::posted_msi::NotificationDomain for NotificationPeer {
+    fn check(&self) -> core::result::Result<(), irq::posted_msi::Error> {
+        if self.thread != std::thread::current().id() {
+            return Err(irq::posted_msi::Error::Context);
+        }
+        self.peer
+            .view
+            .check_current()
+            .map_err(|_| irq::posted_msi::Error::Context)
+    }
+}
+struct DeliveryPeer {
+    peer: Arc<Peer>,
+    thread: std::thread::ThreadId,
+    allocated: bool,
+}
+// SAFETY: synchronous explicit source model, no native root/endpoint grant.
+unsafe impl irq::posted_msi::RouteOwner for DeliveryPeer {
+    fn allocate(
+        &mut self,
+        target: &irq::CpuTarget<'_>,
+    ) -> core::result::Result<irq::MsiMessage, irq::posted_msi::AllocationError> {
+        self.validate()
+            .map_err(irq::posted_msi::AllocationError::Unexposed)?;
+        target.check_current().map_err(|_| {
+            irq::posted_msi::AllocationError::Unexposed(irq::posted_msi::Error::Context)
+        })?;
+        if self.allocated {
+            return Err(irq::posted_msi::AllocationError::Unexposed(
+                irq::posted_msi::Error::AlreadyBound,
+            ));
+        }
+        self.allocated = true;
+        let target = target.descriptor();
+        Ok(irq::MsiMessage {
+            address: 0xfee0_0000 | u64::from(target.destination) << 12,
+            data: u32::from(target.vector),
+        })
+    }
+    fn validate(&self) -> core::result::Result<(), irq::posted_msi::Error> {
+        irq::posted_msi::NotificationDomain::check(&NotificationPeer {
+            peer: self.peer.clone(),
+            thread: self.thread,
+        })
+    }
+    fn notification_domain(
+        &self,
+    ) -> core::result::Result<Arc<dyn irq::posted_msi::NotificationDomain>, irq::posted_msi::Error>
+    {
+        self.validate()?;
+        Ok(Arc::new(NotificationPeer {
+            peer: self.peer.clone(),
+            thread: self.thread,
+        }))
+    }
+    unsafe fn release_endpoint(
+        &mut self,
+        _proof: &irq::posted_msi::EndpointRetirement<'_>,
+    ) -> core::result::Result<(), irq::posted_msi::Error> {
+        // NativeSource deliberately cannot retire yet. Never turn the missing
+        // source protocol into a successful empty fixture acknowledgement.
+        Err(irq::posted_msi::Error::Unsupported)
+    }
+}
 struct Cpu(Arc<Peer>);
 // SAFETY: serial software CPU/real Registry fixture, not a native IRQ adapter.
 unsafe impl irq::Platform for Cpu {
     fn check_cpu(&self) -> core::result::Result<(), irq::IrqError> {
         Ok(())
+    }
+    fn check_process(&self) -> core::result::Result<(), crate::bus::irq::IrqError> {
+        self.check_cpu()
     }
     fn save_and_disable(&self) -> u64 {
         0
@@ -724,8 +811,12 @@ unsafe impl irq::Platform for Cpu {
     fn pending(&self, _: u8) -> core::result::Result<bool, irq::IrqError> {
         Ok(false)
     }
-    fn eoi(&self) {
+    fn eoi(
+        &self,
+        _vector: u8,
+    ) -> core::result::Result<crate::bus::irq::Trigger, crate::bus::irq::IrqError> {
         self.0.eois.fetch_add(1, Ordering::Relaxed);
+        Ok(crate::bus::irq::Trigger::Edge)
     }
     fn ticks(&self) -> u64 {
         self.0.state.lock().unwrap().now
@@ -741,6 +832,10 @@ struct Fixture {
     peer: Arc<Peer>,
     config_counts: Arc<Counters>,
     bar_counts: Arc<Counters>,
+    // Unique external RAM BAR owner, outside every provider/IRQ Arc. ISH has
+    // no acknowledged final release here; default closes and retains this
+    // actual owner without fabricating native/device completion.
+    _bar_fixture: BarFixture,
 }
 /// Native inputs, the firmware peer, and config-space and BAR access counts.
 type Parts = (
@@ -748,6 +843,7 @@ type Parts = (
     Arc<Peer>,
     Arc<Counters>,
     Arc<Counters>,
+    BarFixture,
 );
 
 fn inputs() -> Parts {
@@ -758,11 +854,18 @@ fn inputs() -> Parts {
         function: 0,
     };
     let (mut config, config_counts) = fixture(address);
-    let (bar, bar_counts) = fixture(Address {
-        device: 1,
-        ..address
-    });
-    let mapping = bar.into_mapping();
+    // Symbolic geometry only; this separate actual RAM allocation is born as
+    // Registers and never passes through configuration custody or SourceSlot.
+    let bar_span = PhysicalSpan::new(
+        physical(Address {
+            device: 1,
+            ..address
+        }),
+        4096,
+    )
+    .unwrap();
+    let (bar_fixture, mapping) = bar_fixture(bar_span, 4096);
+    let bar_counts = bar_fixture.counters();
     let span = mapping.physical_span().unwrap();
     let view = mapping.view(0..4096).unwrap();
     let peer = Arc::new(Peer {
@@ -782,16 +885,16 @@ fn inputs() -> Parts {
     });
     peer.raw_write(FWSTS, 0x4000);
     peer.raw_write(PIMR, 0x40); // Unrelated bit must survive every mask/rearm.
-    config.write32(0, 0x9d35_8086);
-    config.write32(4, 0x0010_0402);
-    config.write32(8, 0x1180_0002);
-    config.write32(0x10, span.start() as u32);
-    config.write32(0x2c, 0x1234_8086);
-    config.write8(0x34, 0x40);
-    config.write16(0x40, 0x5001);
-    config.write16(0x44, 0);
-    config.write16(0x50, 5);
-    config.write16(0x52, 0x80);
+    config.write32(0, 0x9d35_8086).unwrap();
+    config.write32(4, 0x0010_0402).unwrap();
+    config.write32(8, 0x1180_0002).unwrap();
+    config.write32(0x10, span.start() as u32).unwrap();
+    config.write32(0x2c, 0x1234_8086).unwrap();
+    config.write8(0x34, 0x40).unwrap();
+    config.write16(0x40, 0x5001).unwrap();
+    config.write16(0x44, 0).unwrap();
+    config.write16(0x50, 5).unwrap();
+    config.write16(0x52, 0x80).unwrap();
     let config = Config {
         native: config,
         peer: peer.clone(),
@@ -814,15 +917,24 @@ fn inputs() -> Parts {
             },
             domain: Arc::new(Domain(peer.clone())),
             interrupts: registry,
+            // SAFETY: exact original bounded fixture peer only, no native pin.
+            msi_route: unsafe {
+                irq::posted_msi::MsiRoute::bounded_fixture(Box::new(DeliveryPeer {
+                    peer: peer.clone(),
+                    thread: std::thread::current().id(),
+                    allocated: false,
+                }))
+            },
             clock: ClockModel(peer.clone()),
         },
         peer,
         config_counts,
         bar_counts,
+        bar_fixture,
     )
 }
 fn prepared() -> Fixture {
-    let (i, peer, config_counts, bar_counts) = inputs();
+    let (i, peer, config_counts, bar_counts, bar_fixture) = inputs();
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
     // driver, worker or DMA touches them.
     let driver = unsafe { Native::new(i) }.map_err(|(e, _)| e).unwrap();
@@ -831,6 +943,7 @@ fn prepared() -> Fixture {
         peer,
         config_counts,
         bar_counts,
+        _bar_fixture: bar_fixture,
     }
 }
 fn running() -> Fixture {
@@ -983,11 +1096,11 @@ fn native_missing_irq_delivery_is_not_checked_by_successful_mailbox_polling() {
 #[test]
 fn profile_admission_rejects_mem_off_wrong_identity_mapping_and_active_dma_before_writes() {
     for variant in 0..5 {
-        let (mut i, peer, _, _) = inputs();
+        let (mut i, peer, _, _, _bar_fixture) = inputs();
         match variant {
-            0 => i.function.config().write16(4, 0x400),
-            1 => i.function.config().write32(0, 0x9d34_8086),
-            2 => i.function.config().write32(0x10, 0x8000),
+            0 => i.function.config().write16(4, 0x400).unwrap(),
+            1 => i.function.config().write32(0, 0x9d34_8086).unwrap(),
+            2 => i.function.config().write32(0x10, 0x8000).unwrap(),
             3 => peer.raw_write(RMP2, 1),
             _ => peer.raw_write(FWSTS, 0x4000 | IN_DMA),
         }

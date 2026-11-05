@@ -31,7 +31,7 @@ impl Profile {
     pub fn pci<C: ConfigSpace>(function: &mut Function<C>) -> Result<Self, BlockError> {
         // Read back the owner. A copied Function identity is not proof.
         streams::pci_policy(function)?;
-        let revision = function.config().read8(8);
+        let revision = function.config().read8(8).map_err(BlockError::Config)?;
         if (function.vendor, function.device, revision) == (0x1b73, 0x1000, 0) {
             return Err(BlockError::Unsupported(
                 "Fresco evaluation controller requires deprecated reset-endpoint quirk",
@@ -84,7 +84,7 @@ impl Profile {
 
 fn asmedia_ready<C: ConfigSpace>(config: &mut C, clock: Clock) -> Result<(), BlockError> {
     for _ in 0..ASMEDIA_RETRIES {
-        let control = config.read8(ASMEDIA_CONTROL);
+        let control = config.read8(ASMEDIA_CONTROL).map_err(BlockError::Config)?;
         if control == u8::MAX {
             return Err(BlockError::Unsupported(
                 "ASMedia PCI function disappeared during flow control",
@@ -110,14 +110,37 @@ pub(super) fn after_reset<C: ConfigSpace>(
     }
     let config = function.config();
     asmedia_ready(config, clock)?;
-    config.write32(ASMEDIA_DATA0, ASMEDIA_WRITE_COMMAND);
-    config.write32(ASMEDIA_DATA1, ASMEDIA_FLOW_ADDRESS);
-    config.write8(ASMEDIA_CONTROL, ASMEDIA_WRITE);
-    asmedia_ready(config, clock)?;
-    config.write32(ASMEDIA_DATA0, ASMEDIA_FLOW_VALUE);
-    config.write32(ASMEDIA_DATA1, 0);
-    config.write8(ASMEDIA_CONTROL, ASMEDIA_WRITE);
-    asmedia_ready(config, clock)
+    config.write32(ASMEDIA_DATA0, ASMEDIA_WRITE_COMMAND)?;
+    config
+        .write32(ASMEDIA_DATA1, ASMEDIA_FLOW_ADDRESS)
+        .map_err(|error| published(BlockError::Config(error), ASMEDIA_DATA0, 4))?;
+    config
+        .write8(ASMEDIA_CONTROL, ASMEDIA_WRITE)
+        .map_err(|error| published(BlockError::Config(error), ASMEDIA_DATA1, 4))?;
+    asmedia_ready(config, clock).map_err(|error| published(error, ASMEDIA_CONTROL, 1))?;
+    config
+        .write32(ASMEDIA_DATA0, ASMEDIA_FLOW_VALUE)
+        .map_err(|error| published(BlockError::Config(error), ASMEDIA_CONTROL, 1))?;
+    config
+        .write32(ASMEDIA_DATA1, 0)
+        .map_err(|error| published(BlockError::Config(error), ASMEDIA_DATA0, 4))?;
+    config
+        .write8(ASMEDIA_CONTROL, ASMEDIA_WRITE)
+        .map_err(|error| published(BlockError::Config(error), ASMEDIA_DATA1, 4))?;
+    asmedia_ready(config, clock).map_err(|error| published(error, ASMEDIA_CONTROL, 1))
+}
+
+fn published(error: BlockError, offset: u16, width: u8) -> BlockError {
+    match error {
+        BlockError::Config(error) if error.effect == crate::bus::pci::ConfigEffect::None => {
+            BlockError::Config(crate::bus::pci::ConfigError::write_may_have_applied(
+                offset,
+                width,
+                error.reason,
+            ))
+        }
+        error => error,
+    }
 }
 
 #[cfg(test)]
@@ -133,32 +156,61 @@ mod tests {
         acknowledge: bool,
     }
     impl ConfigSpace for Config {
-        fn read32(&self, at: u16) -> u32 {
-            match at {
-                0 => self.id,
-                8 => 0x0c03_3000,
-                _ => 0,
-            }
-        }
-        fn read8(&self, at: u16) -> u8 {
-            if at == ASMEDIA_CONTROL {
-                let value = self.control.get();
-                if self.acknowledge {
-                    self.control.set(0);
+        fn read32(&self, at: u16) -> core::result::Result<u32, crate::bus::pci::ConfigError> {
+            Ok({
+                match at {
+                    0 => self.id,
+                    8 => 0x0c03_3000,
+                    _ => 0,
                 }
-                value
-            } else {
-                (self.read32(at & !3) >> ((at & 3) * 8)) as u8
-            }
+            })
         }
-        fn write32(&mut self, at: u16, value: u32) {
+        fn read8(&self, at: u16) -> core::result::Result<u8, crate::bus::pci::ConfigError> {
+            Ok({
+                if at == ASMEDIA_CONTROL {
+                    let value = self.control.get();
+                    if self.acknowledge {
+                        self.control.set(0);
+                    }
+                    value
+                } else {
+                    (self.read32(at & !3)? >> ((at & 3) * 8)) as u8
+                }
+            })
+        }
+        fn write32(
+            &mut self,
+            at: u16,
+            value: u32,
+        ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
             self.writes.push((at, value, 4));
+
+            Ok(())
         }
-        fn write8(&mut self, at: u16, value: u8) {
+        fn write8(
+            &mut self,
+            at: u16,
+            value: u8,
+        ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
             self.writes.push((at, u32::from(value), 1));
             if at == ASMEDIA_CONTROL {
                 self.control.set(value);
             }
+
+            Ok(())
+        }
+
+        fn read16(&self, offset: u16) -> core::result::Result<u16, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+        }
+        fn write16(
+            &mut self,
+            offset: u16,
+            value: u16,
+        ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+            let shift = (offset & 2) * 8;
+            let word = self.read32(offset & !3)? & !(0xffff << shift) | u32::from(value) << shift;
+            self.write32(offset & !3, word)
         }
     }
     fn function(acknowledge: bool) -> Function<Config> {
@@ -252,4 +304,5 @@ mod tests {
         assert!(Profile::identity(0x1b6f, 0x7052, 0).no_soft_retry);
         assert!(!Profile::identity(0x1022, 0x43f7, 0).no_soft_retry);
     }
+    mod config_access;
 }

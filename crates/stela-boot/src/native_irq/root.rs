@@ -59,6 +59,9 @@ unsafe impl ioapic::Registers for Registers {
     fn write(&self, index: u8, value: u32) {
         ioapic::Registers::write(&self.mmio, index, value);
     }
+    fn write_eoi(&self, vector: u8) {
+        ioapic::Registers::write_eoi(&self.mmio, vector);
+    }
 }
 impl Drop for Registers {
     fn drop(&mut self) {
@@ -89,6 +92,41 @@ impl Drop for Registers {
 }
 type Unit = ioapic::Unit<Registers, NativePlatform>;
 pub(crate) type Source = ioapic::Pin<Registers, NativePlatform>;
+
+/// # Safety
+/// The slice retains every original controller under exclusive ownership.
+/// The caller validated its complete MADT inventory, excludes IOAPIC NMIs
+/// and keeps old destinations/contributors through independent retirement.
+pub(crate) unsafe fn plan_firmware_lines<R: ioapic::Registers>(
+    units: &[(madt::Unit, Arc<ioapic::Unit<R, NativePlatform>>)],
+) -> Result<Vec<ioapic::FirmwareRoutes<R, NativePlatform>>, IrqError> {
+    let mut routes = Vec::new();
+    routes
+        .try_reserve_exact(units.len())
+        .map_err(|_| IrqError::Exhausted)?;
+    for (_, unit) in units {
+        // SAFETY: complete original controller handoff, no IOAPIC NMI,
+        // and direct delivery, as required by the caller.
+        routes.push(unsafe { unit.firmware_routes() }?);
+    }
+    Ok(routes)
+}
+
+/// # Safety
+/// Same original complete controller ownership and source exclusions used
+/// for planning. The caller retains all plans across a refusal or unwind.
+pub(crate) unsafe fn contain_firmware_lines<R: ioapic::Registers>(
+    routes: &[ioapic::FirmwareRoutes<R, NativePlatform>],
+) -> Result<(), IrqError> {
+    for plan in routes {
+        // SAFETY: forwarded original controller and source exclusions.
+        unsafe { plan.contain() }?;
+    }
+    for plan in routes {
+        plan.verify_contained()?;
+    }
+    Ok(())
+}
 
 /// One complete MADT unit inventory. The original Permission supplies
 /// registered exclusive resources and all-root UC mapping acknowledgements;
@@ -136,7 +174,11 @@ impl Root {
         execution: &crate::native_clock::DriverExecution<'_>,
         authority: &Authority,
         madt: &'static [u8],
+        domain: Arc<dyn stela_drivers::bus::irq::posted_msi::NotificationDomain>,
     ) -> Result<Self, Error> {
+        domain
+            .check()
+            .map_err(|error| Error::Irq(IrqError::Delivery(error)))?;
         let scope = execution.process_scope().map_err(Error::Cpu)?;
         let cpu = scope.cpu().map_err(Error::Cpu)?;
         let routing = madt::Routing::parse(madt, authority.address_space().physical_bits)
@@ -165,7 +207,7 @@ impl Root {
             let mut mapping = authority
                 .map_physical(physical, CacheAttribute::Uncached, Protection::ReadWrite)
                 .map_err(Error::Mapping)?;
-            let address = match mapping.address(0, 32) {
+            let address = match mapping.address(0, 68) {
                 Ok(address) => address.as_ptr() as usize,
                 Err(error) => {
                     // SAFETY: No IOAPIC access or published source has occurred.
@@ -187,6 +229,8 @@ impl Root {
                 ioapic::Unit::attach(
                     registers,
                     NativePlatform(()),
+                    domain.clone(),
+                    super::CONTROLLER.identity(),
                     descriptor.id,
                     descriptor.gsi_base,
                 )
@@ -196,29 +240,15 @@ impl Root {
             units.push((*descriptor, unit));
         }
         routing.validate_units(&spans).map_err(Error::Route)?;
-        let mut firmware_routes = Vec::new();
-        firmware_routes
-            .try_reserve_exact(units.len())
-            .map_err(|_| Error::Irq(IrqError::Exhausted))?;
-        for (_, unit) in &units {
-            // SAFETY: this is the complete original controller handoff and
-            // MADT supplied no IOAPIC NMI routes. Remapping is off.
-            firmware_routes.push(unsafe { unit.firmware_routes() }.map_err(Error::Irq)?);
-        }
-        // Preserve the exact original entries, controller and CPU scope on
-        // failed containment, including every unattempted route.
-        let mut firmware_routes = ManuallyDrop::new(firmware_routes);
-        for plan in firmware_routes.iter() {
-            // SAFETY: same exclusive platform handoff, and every original
-            // controller and its scope remain retained through containment.
-            unsafe { plan.contain() }.map_err(Error::Irq)?;
-        }
-        for plan in firmware_routes.iter() {
-            plan.verify_contained().map_err(Error::Irq)?;
-        }
+        // SAFETY: the original complete MADT/controller roster was validated above.
+        let routes = unsafe { plan_firmware_lines(&units) }.map_err(Error::Irq)?;
+        // Keep all original plans and controllers if any mask may have applied.
+        let mut routes = ManuallyDrop::new(routes);
+        // SAFETY: same exclusive roster, with the entire original plan kept.
+        unsafe { contain_firmware_lines(&routes) }.map_err(Error::Irq)?;
         // SAFETY: containment succeeded. Transfer the original plans once
         // into the returned root so it can recheck the same routes.
-        let firmware_routes = unsafe { ManuallyDrop::take(&mut firmware_routes) };
+        let firmware_routes = unsafe { ManuallyDrop::take(&mut routes) };
         Ok(Self {
             routing,
             units,

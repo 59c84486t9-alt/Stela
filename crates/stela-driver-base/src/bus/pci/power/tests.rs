@@ -83,16 +83,16 @@ impl Drop for Config {
     }
 }
 impl ConfigSpace for Config {
-    fn read8(&self, offset: u16) -> u8 {
-        self.0.borrow_mut().read(offset, 1) as u8
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok(self.0.borrow_mut().read(offset, 1) as u8)
     }
-    fn read16(&self, offset: u16) -> u16 {
-        self.0.borrow_mut().read(offset, 2) as u16
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok(self.0.borrow_mut().read(offset, 2) as u16)
     }
-    fn read32(&self, offset: u16) -> u32 {
-        self.0.borrow_mut().read(offset, 4)
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        Ok(self.0.borrow_mut().read(offset, 4))
     }
-    fn write32(&mut self, offset: u16, value: u32) {
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         let mut d = self.0.borrow_mut();
         assert!(
             (0x10..=0x30).contains(&offset),
@@ -102,12 +102,13 @@ impl ConfigSpace for Config {
         if d.effect(Effect::Dword(offset, value)) {
             d.put_dword(offset, value);
         }
+        Ok(())
     }
-    fn write16(&mut self, offset: u16, value: u16) {
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
         let mut d = self.0.borrow_mut();
         assert!(offset == 4 || offset == CSR);
         if !d.effect(Effect::Word(offset, value)) {
-            return;
+            return Ok(());
         }
         if offset == CSR {
             let old = d.word(CSR);
@@ -130,6 +131,13 @@ impl ConfigSpace for Config {
         } else {
             d.put_word(offset, value);
         }
+        Ok(())
+    }
+
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        let shift = (offset & 3) * 8;
+        let word = self.read32(offset & !3)? & !(0xff << shift) | u32::from(value) << shift;
+        self.write32(offset & !3, word)
     }
 }
 // SAFETY: this independent device model implements real-width PCI writes and
@@ -415,16 +423,16 @@ fn every_effect_followed_by_config_loss_quarantines_without_retry() {
     for failure in 1..=count {
         let (mut power, d) = owner(false);
         d.borrow_mut().lose_after_effect = Some(failure);
-        assert!(
-            suspend(&mut power).and_then(|()| power.resume()).is_err(),
-            "effect {failure}"
-        );
+        let error = suspend(&mut power)
+            .and_then(|()| power.resume())
+            .unwrap_err();
+        assert_eq!(power.first_error(), Some(error), "effect {failure}");
         assert_eq!(power.state(), State::Unknown);
         let reads = d.borrow().reads;
         let effects = d.borrow().effects.len();
-        assert_eq!(power.resume(), Err(Error::State));
+        assert_eq!(power.resume(), Err(error));
         // SAFETY: even a benign callback must be refused after uncertainty.
-        assert_eq!(unsafe { power.with_d0(|_| ()) }, Err(Error::State));
+        assert_eq!(unsafe { power.with_d0(|_| ()) }, Err(error));
         assert_eq!(d.borrow().reads, reads);
         assert_eq!(d.borrow().effects.len(), effects);
         assert_retained(power, &d);
@@ -526,29 +534,38 @@ fn lost_clock_and_changed_identity_refuse_before_power_writes() {
         crate::Clock {
             ticks_per_microsecond: 0
         }
-        .check(),
-        Err(Error::Clock)
+        .check_duration(READY_TIMEOUT),
+        Err(crate::ClockError::Uncalibrated)
     );
 }
 
 #[test]
-fn native_pm_timer_uses_canonical_clock_checked_duration() {
-    for rate in [0, u64::MAX, u64::MAX / 4 / READY_TIMEOUT + 1] {
+fn nominal_clock_duration_checks_do_not_grant_physical_minimum_waits() {
+    for (rate, error) in [
+        (0, crate::ClockError::Uncalibrated),
+        (u64::MAX, crate::ClockError::DurationOverflow),
+        (
+            u64::MAX / 4 / READY_TIMEOUT + 1,
+            crate::ClockError::DurationTooLong,
+        ),
+    ] {
         let clock = crate::Clock {
             ticks_per_microsecond: rate,
         };
-        assert_eq!(clock.check(), Err(Error::Clock));
-        assert_eq!(clock.wait_us(1), Err(Error::Clock));
+        assert_eq!(clock.check_duration(READY_TIMEOUT), Err(error));
     }
     let largest = crate::Clock {
         ticks_per_microsecond: u64::MAX / 4 / READY_TIMEOUT,
     };
-    assert_eq!(largest.check(), Ok(()));
+    assert_eq!(largest.check_duration(READY_TIMEOUT), Ok(()));
     let ordinary = crate::Clock {
         ticks_per_microsecond: 3_000,
     };
-    assert_eq!(ordinary.wait_us(0), Ok(()));
-    assert_eq!(ordinary.wait_us(u64::MAX), Err(Error::Clock));
+    assert_eq!(ordinary.check_duration(0), Ok(()));
+    assert_eq!(
+        ordinary.check_duration(u64::MAX),
+        Err(crate::ClockError::DurationOverflow)
+    );
 }
 
 #[test]
@@ -562,6 +579,22 @@ fn unwinding_original_function_access_keeps_its_owner_quarantined() {
     }));
     assert!(result.is_err());
     assert_eq!(power.state(), State::Unknown);
+    assert_eq!(power.first_error(), Some(Error::Interrupted));
+    let reads = d.borrow().reads;
+    let effects = d.borrow().effects.len();
+    assert_eq!(power.resume(), Err(Error::Interrupted));
+    assert_eq!(suspend(&mut power), Err(Error::Interrupted));
+    // SAFETY: the interrupted model must refuse before this benign callback.
+    assert_eq!(unsafe { power.with_d0(|_| ()) }, Err(Error::Interrupted));
+    // SAFETY: the interrupted model must refuse before any PME callback.
+    assert_eq!(
+        // SAFETY: same retained interrupted model; no real PME action or
+        // actor is authorized, and the terminal check must precede effects.
+        unsafe { power.configure_pme(WakeState::D0, false) },
+        Err(Error::Interrupted)
+    );
+    assert_eq!(d.borrow().reads, reads);
+    assert_eq!(d.borrow().effects.len(), effects);
     assert_retained(power, &d);
 }
 
@@ -582,12 +615,12 @@ fn owned_native_config_is_the_same_original_mapping_through_d0_release() {
         function: 0,
     };
     let (mut config, counters) = fixture(address);
-    config.write32(0, ID);
-    config.write32(8, 0x0200_0001);
-    config.write16(6, 0x10);
-    config.write8(0x34, PM as u8);
-    config.write16(PM, 1);
-    config.write16(PM + 2, 3);
+    config.write32(0, ID).unwrap();
+    config.write32(8, 0x0200_0001).unwrap();
+    config.write16(6, 0x10).unwrap();
+    config.write8(0x34, PM as u8).unwrap();
+    config.write16(PM, 1).unwrap();
+    config.write16(PM + 2, 3).unwrap();
     let function = Function::new(address, config).unwrap();
     let (_, timer, d) = super::tests::fixture(true);
     // SAFETY: owned native volatile-RAM mapping fixture, no physical power
@@ -595,12 +628,12 @@ fn owned_native_config_is_the_same_original_mapping_through_d0_release() {
     let mut power = unsafe { Power::attach(function, timer, Platform(d), D3_DELAY) }
         .unwrap_or_else(|_| panic!("valid original native owner"));
     // SAFETY: keep the function, change only native Command.
-    unsafe { power.with_d0(|f| f.config().write16(4, regs::COMMAND_INTX_DISABLE)) }.unwrap();
+    unsafe { power.with_d0(|f| f.config().write16(4, regs::COMMAND_INTX_DISABLE).unwrap()) }
+        .unwrap();
     assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
     let (function, _, _) = power.release().unwrap_or_else(|_| panic!("verified D0"));
-    let mut mapping = function.into_config().into_mapping();
     // SAFETY: every synchronous fixture consumer has stopped; no device/IRQ.
-    unsafe { mapping.retire() }.unwrap();
+    unsafe { crate::bus::pci::owned::test_support::retire_owned(function.into_config()) }.unwrap();
     assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
     assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 1);
 }

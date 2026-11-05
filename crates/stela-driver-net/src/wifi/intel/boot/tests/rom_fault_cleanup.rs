@@ -6,6 +6,9 @@ use super::*;
 
 #[test]
 fn every_allocation_map_and_visibility_failure_before_pointer_publication_releases() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = firmware_bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     for stage in 0..3 {
@@ -72,6 +75,9 @@ fn every_allocation_map_and_visibility_failure_before_pointer_publication_releas
 
 #[test]
 fn failed_csr_read_sentinels_and_cpu_visibility_never_become_alive() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = firmware_bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let source = Source::default();

@@ -5,7 +5,7 @@
 //! This explicitly scoped setup does not select OEM fixups or establish board,
 //! GPIO, companion-amplifier, headset or speaker readiness. See THIRD_PARTY.md.
 use super::{CodecGraph, Controller, Registers, Verb};
-use crate::{Error, bus::i2c::Timer};
+use crate::{Error, Timer};
 use alloc::vec::Vec;
 
 mod family;
@@ -76,9 +76,11 @@ pub struct Alc269CommonReport {
 
 impl<R: Registers, T: Timer> Controller<R, T> {
     fn realtek_parameter(&mut self, codec: u8, node: u8, parameter: u8) -> Result<u32, Error> {
+        self.minimum_guard()?;
         self.verb(Verb::short(codec, node, GET_PARAMETER, parameter)?)
     }
     fn coefficient_index(&mut self, codec: u8, index: u16) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.verb(Verb::long(codec, PROCESSING, 5, index)?)?;
         if self.verb(Verb::long(codec, PROCESSING, 13, 0)?)? != u32::from(index) {
             return Err(Error::CoefficientRejected {
@@ -89,6 +91,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn read_coefficient(&mut self, codec: u8, index: u16) -> Result<u16, Error> {
+        self.minimum_guard()?;
         self.coefficient_index(codec, index)?;
         u16::try_from(self.verb(Verb::long(codec, PROCESSING, 12, 0)?)?).map_err(|_| {
             Error::CoefficientRejected {
@@ -104,6 +107,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         previous: u16,
         current: u16,
     ) -> Result<CoefficientChange, Error> {
+        self.minimum_guard()?;
         self.coefficient_index(codec, index)?;
         self.verb(Verb::long(codec, PROCESSING, 4, current)?)?;
         self.coefficient_index(codec, index)?;
@@ -126,6 +130,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         mask: u16,
         set: u16,
     ) -> Result<CoefficientChange, Error> {
+        self.minimum_guard()?;
         let previous = self.read_coefficient(codec, index)?;
         let current = (previous & !mask) | set;
         if current == previous {
@@ -143,10 +148,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         index: u16,
         mask: u16,
     ) -> Result<CoefficientChange, Error> {
+        self.minimum_guard()?;
         self.update_coefficient(codec, index, mask, 0)
     }
 
     fn realtek_common_guard(&self, graph: &CodecGraph) -> Result<(), Error> {
+        self.minimum_guard()?;
         if graph.token != self.token {
             return Err(Error::InvalidCodecGraph);
         }
@@ -182,6 +189,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<(u32, u32, u32, bool), Error> {
+        self.minimum_guard()?;
         let group = graph
             .groups
             .iter()
@@ -249,6 +257,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<RealtekCommonReport, Error> {
+        self.minimum_guard()?;
         self.realtek_common_guard(graph)?;
         let selected = profile(graph.vendor_id)?;
         let (codec_id, revision_id, subsystem_id, vendor_power) =
@@ -281,6 +290,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<Alc269CommonReport, Error> {
+        self.minimum_guard()?;
         self.realtek_common_guard(graph)?;
         if graph.vendor_id != 0x10ec_0269 {
             return Err(Error::UnsupportedTopology);

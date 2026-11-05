@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn guard_revalidation_before_block_ack_changes() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for begin_exchange in [false, true] {
         let (mut driver, model, mut owner, state) = fixture();
         let session = attach(&mut driver, &mut owner);
@@ -42,6 +45,9 @@ fn guard_revalidation_before_block_ack_changes() {
 
 #[test]
 fn stale_block_ack_observation() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for disconnect in [false, true] {
         let (mut driver, model, mut owner, state) = fixture();
         let first = attach(&mut driver, &mut owner);
@@ -99,6 +105,9 @@ fn stale_block_ack_observation() {
 
 #[test]
 fn queued_action_policy_revocation() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for before_command in [false, true] {
         let (mut driver, model, mut owner, state) = fixture();
         let session = attach(&mut driver, &mut owner);

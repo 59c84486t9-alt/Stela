@@ -3,6 +3,9 @@
 use super::*;
 #[test]
 fn every_unmap_failure_permanently_fences_rebuild_and_retries_original_retirement() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         for failed in 1..=4 {
             let (mut owner, peer, domain, dropped) = setup(device);
@@ -66,6 +69,9 @@ fn every_unmap_failure_permanently_fences_rebuild_and_retries_original_retiremen
 }
 #[test]
 fn retiring_suspended_owner_refuses_pm_resume_before_configuration_or_mmio() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         let (mut owner, peer, domain, dropped) = setup(device);
         let pm = peer.native_pm.borrow().as_ref().unwrap().clone();

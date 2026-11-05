@@ -71,6 +71,10 @@ impl Client {
 
     /// `iwl_mld_handle_scan_complete_notif`: only a whole scan of both
     /// channels chooses.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub(super) fn link_scan_finished(&mut self, status: u8, ebs_failed: bool) -> Result<(), Error> {
         let Some((mut scanner, ticket)) = self.link_scan.running.take() else {
             return Ok(());
@@ -97,6 +101,10 @@ fn protocol(error: scan::Error) -> Error {
 
 impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// Start the scan that is due, and stop the one that may not go on.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub(super) fn run_link_scan(&mut self, queue: &mut Queue<Q, B>, now: u64) -> Result<(), Error> {
         let client = &mut self.client;
         let leaving = client.leaving;

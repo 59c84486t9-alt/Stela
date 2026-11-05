@@ -20,15 +20,38 @@ const SET_DEQUEUE: u32 = 16;
 
 struct Config;
 impl ConfigSpace for Config {
-    fn read32(&self, at: u16) -> u32 {
-        match at {
-            0 => 0x0014_1b36,
-            8 => 0x0c03_3001,
-            _ => 0,
-        }
+    fn read32(&self, at: u16) -> core::result::Result<u32, crate::bus::pci::ConfigError> {
+        Ok({
+            match at {
+                0 => 0x0014_1b36,
+                8 => 0x0c03_3001,
+                _ => 0,
+            }
+        })
     }
-    fn write32(&mut self, _: u16, _: u32) {
+    fn write32(
+        &mut self,
+        _: u16,
+        _: u32,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
         panic!("read-only qualification");
+    }
+
+    fn read8(&self, offset: u16) -> core::result::Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+    fn write8(&mut self, _: u16, _: u8) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        panic!("unexpected narrow configuration write")
+    }
+    fn read16(&self, offset: u16) -> core::result::Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+    }
+    fn write16(
+        &mut self,
+        _: u16,
+        _: u16,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        panic!("unexpected narrow configuration write")
     }
 }
 #[derive(Clone)]

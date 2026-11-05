@@ -30,8 +30,10 @@ mod packet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    Config(crate::bus::pci::ConfigError),
+    PciCapability(crate::bus::pci::CapabilityError),
     Access,
-    Clock,
+    Timing(crate::bus::pci::power::Error),
     Removed,
     Bounds,
     UnsupportedDevice,
@@ -68,9 +70,23 @@ pub enum Error {
 
 impl From<crate::bus::pci::CapabilityError> for Error {
     fn from(error: crate::bus::pci::CapabilityError) -> Self {
-        match error {
-            crate::bus::pci::CapabilityError::FailedRead { .. } => Self::Removed,
-            _ => Self::UnsupportedPcie,
+        Self::PciCapability(error)
+    }
+}
+impl From<crate::bus::pci::ConfigError> for Error {
+    fn from(error: crate::bus::pci::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+impl Error {
+    fn into_link(self) -> crate::LinkError {
+        match self {
+            Self::Timing(error) => crate::LinkError::Pci(crate::block::BlockError::PciPower(error)),
+            Self::Config(error) => crate::LinkError::Pci(crate::block::BlockError::Config(error)),
+            Self::PciCapability(error) => {
+                crate::LinkError::Pci(crate::block::BlockError::PciCapability(error))
+            }
+            error => crate::LinkError::Adapter(alloc::format!("tg3: {error:?}")),
         }
     }
 }

@@ -1,0 +1,145 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 13:35:23 -0500
+Subject: [PATCH] refactor(fs): link original superblock inode list ownership
+
+---
+ fs/inode.c            | 48 -------------------------------------------
+ fs/inode_cache_init.c | 48 +++++++++++++++++++++++++++++++++++++++++++
+ fs/internal.h         |  1 +
+ 3 files changed, 49 insertions(+), 48 deletions(-)
+
+diff --git a/fs/inode.c b/fs/inode.c
+index 91c206010aefa3eab43aaebcb0f52f07ec424722..586bb86e8327925c594a15f2f121c90ff8eadd60 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -164,31 +164,6 @@ static void inode_wait_for_lru_isolating(struct inode *inode)
+ 	WARN_ON(inode_state_read(inode) & I_LRU_ISOLATING);
+ }
+ 
+-/**
+- * inode_sb_list_add - add inode to the superblock list of inodes
+- * @inode: inode to add
+- */
+-void inode_sb_list_add(struct inode *inode)
+-{
+-	struct super_block *sb = inode->i_sb;
+-
+-	spin_lock(&sb->s_inode_list_lock);
+-	list_add(&inode->i_sb_list, &sb->s_inodes);
+-	spin_unlock(&sb->s_inode_list_lock);
+-}
+-EXPORT_SYMBOL_GPL(inode_sb_list_add);
+-
+-static inline void inode_sb_list_del(struct inode *inode)
+-{
+-	struct super_block *sb = inode->i_sb;
+-
+-	if (!list_empty(&inode->i_sb_list)) {
+-		spin_lock(&sb->s_inode_list_lock);
+-		list_del_init(&inode->i_sb_list);
+-		spin_unlock(&sb->s_inode_list_lock);
+-	}
+-}
+-
+ static unsigned long hash(struct super_block *sb, u64 hashval)
+ {
+ 	unsigned long tmp;
+@@ -599,29 +574,6 @@ repeat:
+ 	return NULL;
+ }
+ 
+-/**
+- *	new_inode 	- obtain an inode
+- *	@sb: superblock
+- *
+- *	Allocates a new inode for given superblock. The default gfp_mask
+- *	for allocations related to inode->i_mapping is GFP_HIGHUSER_MOVABLE.
+- *	If HIGHMEM pages are unsuitable or it is known that pages allocated
+- *	for the page cache are not reclaimable or migratable,
+- *	mapping_set_gfp_mask() must be called with suitable flags on the
+- *	newly created inode's mapping
+- *
+- */
+-struct inode *new_inode(struct super_block *sb)
+-{
+-	struct inode *inode;
+-
+-	inode = alloc_inode(sb);
+-	if (inode)
+-		inode_sb_list_add(inode);
+-	return inode;
+-}
+-EXPORT_SYMBOL(new_inode);
+-
+ void discard_new_inode(struct inode *inode)
+ {
+ 	lockdep_annotate_inode_mutex_key(inode);
+diff --git a/fs/inode_cache_init.c b/fs/inode_cache_init.c
+index 45941341f04f8cb250c8f6428b1761d42be40dfb..cd9c5f39c497e8ea66f7effda2b1d362cca60b33 100644
+--- a/fs/inode_cache_init.c
++++ b/fs/inode_cache_init.c
+@@ -454,3 +454,51 @@ void inode_destroy(struct inode *inode)
+ 	inode->free_inode = ops->free_inode;
+ 	call_rcu(&inode->i_rcu, i_callback);
+ }
++
++/**
++ * inode_sb_list_add - add inode to the superblock list of inodes
++ * @inode: inode to add
++ */
++void inode_sb_list_add(struct inode *inode)
++{
++	struct super_block *sb = inode->i_sb;
++
++	spin_lock(&sb->s_inode_list_lock);
++	list_add(&inode->i_sb_list, &sb->s_inodes);
++	spin_unlock(&sb->s_inode_list_lock);
++}
++EXPORT_SYMBOL_GPL(inode_sb_list_add);
++
++void inode_sb_list_del(struct inode *inode)
++{
++	struct super_block *sb = inode->i_sb;
++
++	if (!list_empty(&inode->i_sb_list)) {
++		spin_lock(&sb->s_inode_list_lock);
++		list_del_init(&inode->i_sb_list);
++		spin_unlock(&sb->s_inode_list_lock);
++	}
++}
++
++/**
++ *	new_inode 	- obtain an inode
++ *	@sb: superblock
++ *
++ *	Allocates a new inode for given superblock. The default gfp_mask
++ *	for allocations related to inode->i_mapping is GFP_HIGHUSER_MOVABLE.
++ *	If HIGHMEM pages are unsuitable or it is known that pages allocated
++ *	for the page cache are not reclaimable or migratable,
++ *	mapping_set_gfp_mask() must be called with suitable flags on the
++ *	newly created inode's mapping
++ *
++ */
++struct inode *new_inode(struct super_block *sb)
++{
++	struct inode *inode;
++
++	inode = alloc_inode(sb);
++	if (inode)
++		inode_sb_list_add(inode);
++	return inode;
++}
++EXPORT_SYMBOL(new_inode);
+diff --git a/fs/internal.h b/fs/internal.h
+index 4812ff99bc19a612a7e6d9a4596de7b5120ce85c..dc9f70e348c5e6303b6b919f6208de281f62aeb2 100644
+--- a/fs/internal.h
++++ b/fs/internal.h
+@@ -225,6 +225,7 @@ bool in_group_or_capable(struct mnt_idmap *idmap,
+  */
+ long get_nr_dirty_inodes(void);
+ void inode_destroy(struct inode *inode);
++void inode_sb_list_del(struct inode *inode);
+ extern const struct inode_operations bad_inode_ops;
+ bool sync_lazytime(struct inode *inode);
+ 

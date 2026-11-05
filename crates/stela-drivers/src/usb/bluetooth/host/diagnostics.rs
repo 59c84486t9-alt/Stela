@@ -33,6 +33,10 @@ pub(super) struct Native {
 impl Hci<Host> {
     /// Separate diagnostic bulk endpoints of this initialized native
     /// PatchRAM function. This neither opens SCO nor changes controller firmware.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn into_broadcom_diagnostics(
         self,
         dma: &mut dyn DmaAllocator,

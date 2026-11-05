@@ -191,6 +191,10 @@ pub const PROFILES: &[Profile] = &[
     },
 ];
 impl Version {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         Ok(Self {
             raw: bytes
@@ -210,6 +214,10 @@ impl Version {
     pub fn flags(&self) -> u16 {
         u16::from_le_bytes([self.raw[14], self.raw[15]])
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn profile(&self) -> Result<Profile> {
         PROFILES
             .iter()
@@ -285,6 +293,10 @@ pub struct RampatchVersion {
     pub patch: u16,
 }
 impl RampatchVersion {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn parse(bytes: &[u8], version: &Version, profile: Profile) -> Result<Self> {
         if bytes.len() < profile.rampatch_header {
             return Err(Error::protocol(

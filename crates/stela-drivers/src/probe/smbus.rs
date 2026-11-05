@@ -138,7 +138,8 @@ pub(super) unsafe fn attach(
     let mut function = requester.into_function();
     let info = ControllerInfo::from_pci_id(function.vendor, function.device)
         .ok_or(PlatformError::Refused("not an i801 SMBus host"))?;
-    let Some(Bar::Io { port, size }) = function.bars()[SMBUS_BAR] else {
+    let Some(Bar::Io { port, size }) = function.bars().map_err(PlatformError::Config)?[SMBUS_BAR]
+    else {
         return Err(PlatformError::Refused(
             "SMBus base address uninitialized, as Linux i801_probe reports it",
         ));
@@ -171,19 +172,27 @@ pub(super) unsafe fn attach(
         }
     };
     let config = function.config();
-    let command = config.read16(regs::COMMAND);
+    let command = config
+        .read16(regs::COMMAND)
+        .map_err(PlatformError::Config)?;
     if command & regs::COMMAND_IO == 0 {
-        config.write16(regs::COMMAND, command | regs::COMMAND_IO);
+        config
+            .write16(regs::COMMAND, command | regs::COMMAND_IO)
+            .map_err(PlatformError::Config)?;
     }
     // i801_setup_hstcfg: SMBus timing, host enabled. A host whose interrupts
     // go to SMI# stays with firmware.
-    let original = config.read8(HOST_CONFIGURATION);
+    let original = config
+        .read8(HOST_CONFIGURATION)
+        .map_err(PlatformError::Config)?;
     let setup = (original & !HOST_I2C) | HOST_ENABLED;
     if setup & HOST_SMI != 0 {
         return Err(PlatformError::Smbus(ErrorKind::FirmwareSmi.into()));
     }
     if setup != original {
-        config.write8(HOST_CONFIGURATION, setup);
+        config
+            .write8(HOST_CONFIGURATION, setup)
+            .map_err(PlatformError::Config)?;
     }
     // SAFETY: the window is the function's decoded I/O BAR, which the mount
     // grants; AML reaches it only through the arbitration above.

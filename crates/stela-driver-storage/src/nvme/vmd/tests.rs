@@ -197,6 +197,7 @@ impl Fixture {
                 self.domain.as_ref().unwrap().clone(),
                 self.protocol.pages(),
                 clock,
+                model_timer(),
                 "composed VMD behind root and bridge".into(),
                 (|_| Ok(protocol.registers()), protocol::attach),
             )

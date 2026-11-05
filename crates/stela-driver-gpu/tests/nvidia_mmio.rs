@@ -45,10 +45,28 @@ struct Backing {
     kind: ResourceKind,
     window: Arc<Window>,
     dropped: Arc<AtomicUsize>,
+    mapping: stela_driver_base::bus::mmio::owned::model::MappingRetention<(
+        Arc<Window>,
+        Arc<AtomicBool>,
+    )>,
+}
+fn mapping_context(
+    pin: &(Arc<Window>, Arc<AtomicBool>),
+) -> Result<(), stela_driver_base::bus::pci::assignment::Error> {
+    if pin.1.load(Ordering::Acquire) {
+        Ok(())
+    } else {
+        Err(stela_driver_base::bus::pci::assignment::Error::Context)
+    }
 }
 // SAFETY: each immutable model reservation owns a distinct aligned allocation
 // and isolated physical interval. There is no firmware, physical map or device.
 unsafe impl ResourceBacking for Backing {
+    fn begin_mapping(
+        &self,
+    ) -> Result<stela_driver_base::bus::pci::assignment::OpaqueUse, MappingError> {
+        self.mapping.begin_mapping()
+    }
     fn physical_span(&self) -> PhysicalSpan {
         self.span
     }
@@ -87,7 +105,7 @@ struct State {
 }
 struct Model {
     state: Mutex<State>,
-    allowed: AtomicBool,
+    allowed: Arc<AtomicBool>,
 }
 impl Model {
     fn new() -> Arc<Self> {
@@ -102,7 +120,7 @@ impl Model {
                 reenter: None,
                 map_gates: None,
             }),
-            allowed: AtomicBool::new(true),
+            allowed: Arc::new(AtomicBool::new(true)),
         })
     }
     fn calls(&self) -> (usize, usize, usize) {
@@ -230,16 +248,34 @@ unsafe impl MappingPlatform for Model {
     }
 }
 
-fn resource(start: u64, bytes: u64, kind: ResourceKind) -> (Resource, Arc<AtomicUsize>) {
+type MappingControl =
+    stela_driver_base::bus::mmio::owned::model::MappingOwner<(Arc<Window>, Arc<AtomicBool>)>;
+fn resource(
+    start: u64,
+    bytes: u64,
+    kind: ResourceKind,
+    guard: &Arc<AtomicBool>,
+) -> (Resource, Arc<AtomicUsize>, MappingControl) {
     let dropped = Arc::new(AtomicUsize::new(0));
+    let window = Arc::new(Window(UnsafeCell::new(Pages([0; 65536]))));
+    // SAFETY: the SAME real allocated model RAM and original isolated guard;
+    // neither owns a Resource, Authority, Source or mapping/control callback.
+    let mapping = unsafe {
+        stela_driver_base::bus::mmio::owned::model::MappingOwner::from_owned(
+            (window.clone(), guard.clone()),
+            mapping_context,
+        )
+    };
     (
         Resource::new(Box::new(Backing {
             span: PhysicalSpan::new(start, bytes).unwrap(),
             kind,
-            window: Arc::new(Window(UnsafeCell::new(Pages([0; 65536])))),
+            window,
+            mapping: mapping.retention().unwrap(),
             dropped: Arc::clone(&dropped),
         })),
         dropped,
+        mapping,
     )
 }
 
@@ -297,11 +333,22 @@ fn original_global_abi_keeps_real_canonical_leases_and_quarantines_failures() {
         )
     }
     .unwrap();
-    let (registers, register_drop) = resource(BASE, 16 * PAGE, ResourceKind::Registers);
+    let (registers, register_drop, mut register_control) =
+        resource(BASE, 16 * PAGE, ResourceKind::Registers, &model.allowed);
     let register_id = authority.register_resource(registers.clone()).unwrap();
-    let (prefetch, prefetch_drop) = resource(PREFETCH, 16 * PAGE, ResourceKind::PrefetchableMemory);
+    let (prefetch, prefetch_drop, mut prefetch_control) = resource(
+        PREFETCH,
+        16 * PAGE,
+        ResourceKind::PrefetchableMemory,
+        &model.allowed,
+    );
     let prefetch_id = authority.register_resource(prefetch).unwrap();
-    let (partial, partial_drop) = resource(PARTIAL + 1, PAGE - 2, ResourceKind::Registers);
+    let (partial, partial_drop, mut partial_control) = resource(
+        PARTIAL + 1,
+        PAGE - 2,
+        ResourceKind::Registers,
+        &model.allowed,
+    );
     let partial_id = authority.register_resource(partial).unwrap();
     let mut services = Box::pin(MmioServices::new(authority.clone()));
     let mut second = Box::pin(MmioServices::new(authority.clone()));
@@ -788,6 +835,15 @@ fn original_global_abi_keeps_real_canonical_leases_and_quarantines_failures() {
     );
     authority.unregister_resource(prefetch_id).unwrap();
     authority.unregister_resource(partial_id).unwrap();
+    // SAFETY: these exact normal resources have no lookup, mapping/view or raw
+    // C tail after acknowledged unmaps and service uninstall above. Controllers
+    // stay outside their backings and return the same actual allocated Windows.
+    unsafe { prefetch_control.retire() }.unwrap();
+    // SAFETY: the partial resource never produced a pointer and lookup is gone.
+    unsafe { partial_control.retire() }.unwrap();
+    // The register resource still has real quarantined users. Deny admission
+    // only; default source-control abandonment keeps its same actual allocation.
+    register_control.abandon_admission();
     assert_eq!(prefetch_drop.load(Ordering::Relaxed), 1);
     assert_eq!(partial_drop.load(Ordering::Relaxed), 1);
     assert_eq!(authority.status().unwrap().quarantined, 3);

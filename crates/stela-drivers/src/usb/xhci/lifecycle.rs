@@ -399,14 +399,14 @@ impl Host {
         let status = if status & OVER_CURRENT_CHANGE != 0 {
             let mut c = self.controller.borrow_mut();
             c.write_port(port, OVER_CURRENT_CHANGE);
-            c.clock.delay(OVER_CURRENT_COOLDOWN_US);
+            c.minimum_wait(OVER_CURRENT_COOLDOWN_US)?;
             for root in 1..=c.max_ports {
                 let at = c.port_offset(root);
                 if c.registers.read32(at) & PP == 0 {
                     c.write_port(root, PP);
                 }
             }
-            c.clock.delay(PORT_POWER_US);
+            c.minimum_wait(PORT_POWER_US)?;
             let at = c.port_offset(port);
             c.registers.read32(at)
         } else {
@@ -665,11 +665,11 @@ impl Host {
             {
                 // The change latch was consumed above. A bounce reported
                 // between timer samples must still restart the interval.
-                pending.notice(c.clock, status & 1 != 0, change & 1 != 0);
-                return Ok(());
+                return pending.notice(&mut c, status & 1 != 0, change & 1 != 0);
             }
-            if status & 1 != 0 {
-                let pending = attach::Pending::start(&mut c, id, port)?;
+            if status & 1 != 0
+                && let Some(pending) = attach::Pending::start(&mut c, id, port)?
+            {
                 self.hubs[index].attachments.push(pending);
                 return Ok(());
             }

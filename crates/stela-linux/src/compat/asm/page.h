@@ -1,0 +1,74 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef _ASM_STELA_PAGE_H
+#define _ASM_STELA_PAGE_H
+/* x86-64's 4 KiB base page and its page table entry types, from
+ * arch/x86/include/asm/pgtable_64_types.h. Stela's memory owners, not a
+ * kernel direct map, hold memory. The checked page catalog translates only
+ * its live grants between pages, frames and CPU addresses; Linux code edits
+ * no CPU page tables. */
+#include <linux/const.h>
+#include <linux/pfn.h>
+#include <linux/types.h>
+#include <vdso/page.h>
+
+struct page;
+
+typedef unsigned long	pteval_t;
+typedef unsigned long	pmdval_t;
+typedef unsigned long	pudval_t;
+typedef unsigned long	p4dval_t;
+typedef unsigned long	pgdval_t;
+typedef unsigned long	pgprotval_t;
+
+typedef struct { pteval_t pte; } pte_t;
+typedef struct { pmdval_t pmd; } pmd_t;
+typedef struct { pudval_t pud; } pud_t;
+typedef struct { p4dval_t p4d; } p4d_t;
+typedef struct { pgdval_t pgd; } pgd_t;
+typedef struct pgprot { pgprotval_t pgprot; } pgprot_t;
+
+typedef struct page *pgtable_t;
+
+/* Clients are in-process, wherever the placement put the shared window, so
+ * every address can be a user pointer. */
+#define TASK_SIZE_MAX	(_AC(0, UL) - PAGE_SIZE)
+#define TASK_SIZE	TASK_SIZE_MAX
+
+/* Stela has no kernel direct map: the platform translates between physical
+ * and virtual addresses. */
+extern unsigned long __phys_addr(unsigned long);
+extern void *__phys_to_virt(phys_addr_t);
+#define __pa(x)		__phys_addr((unsigned long)(x))
+#define __va(x)		__phys_to_virt((phys_addr_t)(x))
+
+/* The registered reservation has one actual C struct-page array in PFN order.
+ * These checked conversions accept only live page payloads, never arbitrary
+ * heap, metadata or borrowed addresses. */
+struct page *pfn_to_page(unsigned long pfn);
+unsigned long page_to_pfn(const struct page *page);
+#define pfn_to_page pfn_to_page
+#define page_to_pfn page_to_pfn
+/* Declaration only: requires a genuine native live page-address predicate.
+ * No direct-map, identity conversion or arbitrary-pointer admission is implied. */
+extern bool __virt_addr_valid(unsigned long kaddr);
+#define virt_addr_valid(kaddr) __virt_addr_valid((unsigned long) (kaddr))
+struct page *stela_linux_virt_to_page(unsigned long address);
+void *stela_linux_page_to_virt(const struct page *page);
+phys_addr_t stela_linux_page_to_phys(const struct page *page);
+struct page *stela_linux_phys_to_page(phys_addr_t address);
+#define virt_to_page(kaddr)	stela_linux_virt_to_page((unsigned long)(kaddr))
+#define page_to_virt(page)	stela_linux_page_to_virt(page)
+#define page_to_phys(page)	stela_linux_page_to_phys(page)
+#define __pfn_to_phys(pfn)	PFN_PHYS(pfn)
+#define __phys_to_pfn(paddr)	PHYS_PFN(paddr)
+#define phys_to_page(phys)	stela_linux_phys_to_page(phys)
+
+/* Pages are ordinary memory to Linux code, which clears and copies them
+ * with the compiler's memset and memcpy. */
+#define clear_page(page)	__builtin_memset((page), 0, PAGE_SIZE)
+#define copy_page(to,from)	__builtin_memcpy((to), (from), PAGE_SIZE)
+#define clear_user_page(page, vaddr, pg)	clear_page(page)
+#define copy_user_page(to, from, vaddr, pg)	copy_page(to, from)
+
+#include <asm-generic/getorder.h>
+#endif

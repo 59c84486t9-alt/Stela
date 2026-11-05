@@ -102,6 +102,9 @@ fn replenish_prefix_for_receive(
 }
 #[test]
 fn second_scan_uses_a_new_ticket() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -198,6 +201,9 @@ fn second_scan_uses_a_new_ticket() {
 }
 #[test]
 fn every_scan_result_variant_pins_retirement_until_real_consumer_drop() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..4 {
         let bytes = bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -262,6 +268,9 @@ fn every_scan_result_variant_pins_retirement_until_real_consumer_drop() {
 }
 #[test]
 fn late_completed_rb_is_raw_only_and_its_observer_must_finish_before_uid_reuse() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for rejected in [false, true] {
         let bytes = bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -333,6 +342,9 @@ fn late_completed_rb_is_raw_only_and_its_observer_must_finish_before_uid_reuse()
 }
 #[test]
 fn duplicate_completion_mcc_and_unrelated_notifications_are_never_dropped_for_retirement() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..3 {
         let bytes = bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -371,6 +383,9 @@ fn duplicate_completion_mcc_and_unrelated_notifications_are_never_dropped_for_re
 }
 #[test]
 fn stale_first_request_completion_after_retirement_cannot_complete_second_request() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -407,6 +422,9 @@ fn stale_first_request_completion_after_retirement_cannot_complete_second_reques
 }
 #[test]
 fn retirement_native_read_fault_is_sticky_and_keeps_original_owners() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -436,6 +454,9 @@ fn retirement_native_read_fault_is_sticky_and_keeps_original_owners() {
 }
 #[test]
 fn abort_ack_and_aborted_completion_retire_without_repairing_revoked_country() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for revoked in [false, true] {
         let bytes = bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -504,6 +525,9 @@ fn abort_ack_and_aborted_completion_retire_without_repairing_revoked_country() {
 
 #[test]
 fn retirement_backpressure_preserves_hidden_rb_and_requires_real_notification_consumption() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -572,6 +596,9 @@ fn retirement_backpressure_preserves_hidden_rb_and_requires_real_notification_co
 }
 #[test]
 fn command_reclaim_failure_cannot_retire_even_with_terminal_packet_already_in_same_rb() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();

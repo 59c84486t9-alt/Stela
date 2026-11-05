@@ -1,0 +1,265 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 02:41:05 -0500
+Subject: [PATCH] fix(rcu): guard Tiny SRCU with native source ownership
+
+---
+ include/linux/srcutiny.h |  6 ++++++
+ kernel/rcu/Makefile      |  2 +-
+ kernel/rcu/srcutiny.c    | 44 ++++++++++++++++++++++++++++++++++++++++
+ kernel/rcu/update.c      | 13 ------------
+ kernel/rcu/wakeme.c      | 36 ++++++++++++++++++++++++++++++++
+ 5 files changed, 87 insertions(+), 14 deletions(-)
+ create mode 100644 kernel/rcu/wakeme.c
+
+diff --git a/include/linux/srcutiny.h b/include/linux/srcutiny.h
+index 905b629e8fa38e3a970fc1b82ebb7beb235afbef..9ef901cffdddfdd23fe198e723633b5544e0d326 100644
+--- a/include/linux/srcutiny.h
++++ b/include/linux/srcutiny.h
+@@ -13,6 +13,9 @@
+ 
+ #include <linux/irq_work_types.h>
+ #include <linux/swait.h>
++#ifdef CONFIG_STELA
++#include <stela/srcu.h>
++#endif
+ 
+ struct srcu_struct {
+ 	short srcu_lock_nesting[2];	/* srcu_read_lock() nesting depth. */
+@@ -81,6 +84,9 @@ static inline int __srcu_read_lock(struct srcu_struct *ssp)
+ {
+ 	int idx;
+ 
++#ifdef CONFIG_STELA
++	stela_linux_srcu_require_bound();
++#endif
+ 	preempt_disable();  // Needed for PREEMPT_LAZY
+ 	idx = ((READ_ONCE(ssp->srcu_idx) + 1) & 0x2) >> 1;
+ 	WRITE_ONCE(ssp->srcu_lock_nesting[idx], READ_ONCE(ssp->srcu_lock_nesting[idx]) + 1);
+diff --git a/kernel/rcu/Makefile b/kernel/rcu/Makefile
+index 51653f8ae7e530a5a412b99b771529ebb739ad85..d2838c9bf9a2842b0b794598b825eb26cf9fc5fc 100644
+--- a/kernel/rcu/Makefile
++++ b/kernel/rcu/Makefile
+@@ -7,7 +7,7 @@ ifeq ($(CONFIG_KCSAN),y)
+ KBUILD_CFLAGS += -g -fno-omit-frame-pointer
+ endif
+ 
+-obj-y += update.o rcuwait_finish.o sync.o
++obj-y += update.o wakeme.o rcuwait_finish.o sync.o
+ obj-$(CONFIG_TREE_SRCU) += srcutree.o
+ obj-$(CONFIG_TINY_SRCU) += srcutiny.o
+ obj-$(CONFIG_RCU_TORTURE_TEST) += rcutorture.o
+diff --git a/kernel/rcu/srcutiny.c b/kernel/rcu/srcutiny.c
+index a2e2d516e51b9d943f66b0ff3e71704861537f35..902c493e107119b42ff036c3e4e79cc8f2ae80a6 100644
+--- a/kernel/rcu/srcutiny.c
++++ b/kernel/rcu/srcutiny.c
+@@ -16,6 +16,9 @@
+ #include <linux/sched.h>
+ #include <linux/delay.h>
+ #include <linux/srcu.h>
++#ifdef CONFIG_STELA
++#include <stela/srcu.h>
++#endif
+ 
+ #include <linux/rcu_node_tree.h>
+ #include "rcu_segcblist.h"
+@@ -31,6 +34,9 @@ static bool srcu_init_done;
+ 
+ static int init_srcu_struct_fields(struct srcu_struct *ssp)
+ {
++#ifdef CONFIG_STELA
++	stela_linux_srcu_require_bound();
++#endif
+ 	ssp->srcu_lock_nesting[0] = 0;
+ 	ssp->srcu_lock_nesting[1] = 0;
+ 	init_swait_queue_head(&ssp->srcu_wq);
+@@ -85,6 +91,9 @@ EXPORT_SYMBOL_GPL(init_srcu_struct);
+  */
+ void cleanup_srcu_struct(struct srcu_struct *ssp)
+ {
++#ifdef CONFIG_STELA
++	stela_linux_srcu_cleanup_begin(ssp);
++#endif
+ 	WARN_ON(ssp->srcu_lock_nesting[0] || ssp->srcu_lock_nesting[1]);
+ 	irq_work_sync(&ssp->srcu_irq_work);
+ 	flush_work(&ssp->srcu_work);
+@@ -94,6 +103,9 @@ void cleanup_srcu_struct(struct srcu_struct *ssp)
+ 	WARN_ON(&ssp->srcu_cb_head != ssp->srcu_cb_tail);
+ 	WARN_ON(ssp->srcu_idx != ssp->srcu_idx_max);
+ 	WARN_ON(ssp->srcu_idx & 0x1);
++#ifdef CONFIG_STELA
++	stela_linux_srcu_cleanup_end(ssp);
++#endif
+ }
+ EXPORT_SYMBOL_GPL(cleanup_srcu_struct);
+ 
+@@ -105,6 +117,9 @@ void __srcu_read_unlock(struct srcu_struct *ssp, int idx)
+ {
+ 	int newval;
+ 
++#ifdef CONFIG_STELA
++	stela_linux_srcu_require_bound();
++#endif
+ 	preempt_disable();  // Needed for PREEMPT_LAZY
+ 	newval = READ_ONCE(ssp->srcu_lock_nesting[idx]) - 1;
+ 	WRITE_ONCE(ssp->srcu_lock_nesting[idx], newval);
+@@ -121,6 +136,9 @@ EXPORT_SYMBOL_GPL(__srcu_read_unlock);
+  */
+ void srcu_drive_gp(struct work_struct *wp)
+ {
++#ifdef CONFIG_STELA
++	stela_linux_srcu_require_wait_context();
++#endif
+ 	int idx;
+ 	struct rcu_head *lh;
+ 	struct rcu_head *rhp;
+@@ -161,7 +179,11 @@ void srcu_drive_gp(struct work_struct *wp)
+ 		lh = lh->next;
+ 		debug_rcu_head_callback(rhp);
+ 		local_bh_disable();
++#ifdef CONFIG_STELA
++		stela_linux_srcu_invoke(rhp);
++#else
+ 		rhp->func(rhp);
++#endif
+ 		local_bh_enable();
+ 	}
+ 
+@@ -187,6 +209,9 @@ EXPORT_SYMBOL_GPL(srcu_drive_gp);
+  */
+ void srcu_tiny_irq_work(struct irq_work *irq_work)
+ {
++#ifdef CONFIG_STELA
++	stela_linux_srcu_require_bound();
++#endif
+ 	struct srcu_struct *ssp;
+ 
+ 	ssp = container_of(irq_work, struct srcu_struct, srcu_irq_work);
+@@ -221,6 +246,9 @@ void call_srcu(struct srcu_struct *ssp, struct rcu_head *rhp,
+ {
+ 	unsigned long flags;
+ 
++#ifdef CONFIG_STELA
++	stela_linux_srcu_require_bound();
++#endif
+ 	rhp->func = func;
+ 	rhp->next = NULL;
+ 	preempt_disable();  // Needed for PREEMPT_LAZY
+@@ -240,6 +268,10 @@ void synchronize_srcu(struct srcu_struct *ssp)
+ {
+ 	struct rcu_synchronize rs;
+ 
++#ifdef CONFIG_STELA
++	stela_linux_srcu_require_bound();
++#endif
++
+ 	srcu_lock_sync(&ssp->dep_map);
+ 
+ 	RCU_LOCKDEP_WARN(lockdep_is_held(ssp) ||
+@@ -251,6 +283,9 @@ void synchronize_srcu(struct srcu_struct *ssp)
+ 	if (rcu_scheduler_active == RCU_SCHEDULER_INACTIVE)
+ 		return;
+ 
++#ifdef CONFIG_STELA
++	stela_linux_srcu_require_wait_context();
++#endif
+ 	might_sleep();
+ 	init_rcu_head_on_stack(&rs.head);
+ 	init_completion(&rs.completion);
+@@ -265,6 +300,9 @@ EXPORT_SYMBOL_GPL(synchronize_srcu);
+  */
+ unsigned long get_state_synchronize_srcu(struct srcu_struct *ssp)
+ {
++#ifdef CONFIG_STELA
++	stela_linux_srcu_require_bound();
++#endif
+ 	unsigned long ret;
+ 
+ 	barrier();
+@@ -298,6 +336,9 @@ EXPORT_SYMBOL_GPL(start_poll_synchronize_srcu);
+  */
+ bool poll_state_synchronize_srcu(struct srcu_struct *ssp, unsigned long cookie)
+ {
++#ifdef CONFIG_STELA
++	stela_linux_srcu_require_bound();
++#endif
+ 	unsigned long cur_s = READ_ONCE(ssp->srcu_idx);
+ 
+ 	barrier();
+@@ -321,6 +362,9 @@ void __init rcu_scheduler_starting(void)
+  */
+ void __init srcu_init(void)
+ {
++#ifdef CONFIG_STELA
++	stela_linux_srcu_require_bound();
++#endif
+ 	struct srcu_struct *ssp;
+ 
+ 	srcu_init_done = true;
+diff --git a/kernel/rcu/update.c b/kernel/rcu/update.c
+index b9941d79e17468ea71fe275bbc74cffe18943196..d377ee7a1042896c2c82387284dbe5bc05747592 100644
+--- a/kernel/rcu/update.c
++++ b/kernel/rcu/update.c
+@@ -393,20 +393,7 @@ EXPORT_SYMBOL_GPL(rcu_read_lock_any_held);
+ 
+ #endif /* #ifdef CONFIG_DEBUG_LOCK_ALLOC */
+ 
+-/**
+- * wakeme_after_rcu() - Callback function to awaken a task after grace period
+- * @head: Pointer to rcu_head member within rcu_synchronize structure
+- *
+- * Awaken the corresponding task now that a grace period has elapsed.
+- */
+-void wakeme_after_rcu(struct rcu_head *head)
+-{
+-	struct rcu_synchronize *rcu;
+ 
+-	rcu = container_of(head, struct rcu_synchronize, head);
+-	complete(&rcu->completion);
+-}
+-EXPORT_SYMBOL_GPL(wakeme_after_rcu);
+ 
+ void __wait_rcu_gp(bool checktiny, unsigned int state, int n, call_rcu_func_t *crcu_array,
+ 		   struct rcu_synchronize *rs_array)
+diff --git a/kernel/rcu/wakeme.c b/kernel/rcu/wakeme.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..cdb255a0ea56210f349c632d7079f3ec38716374
+--- /dev/null
++++ b/kernel/rcu/wakeme.c
+@@ -0,0 +1,36 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Read-Copy Update mechanism for mutual exclusion
++ *
++ * Copyright IBM Corporation, 2001
++ *
++ * Authors: Dipankar Sarma <dipankar@in.ibm.com>
++ *	    Manfred Spraul <manfred@colorfullife.com>
++ *
++ * Based on the original work by Paul McKenney <paulmck@linux.ibm.com>
++ * and inputs from Rusty Russell, Andrea Arcangeli and Andi Kleen.
++ * Papers:
++ * http://www.rdrop.com/users/paulmck/paper/rclockpdcsproof.pdf
++ * http://lse.sourceforge.net/locking/rclock_OLS.2001.05.01c.sc.pdf (OLS2001)
++ *
++ * For detailed explanation of Read-Copy Update mechanism see -
++ *		http://lse.sourceforge.net/locking/rcupdate.html
++ *
++ */
++#include <linux/export.h>
++#include <linux/rcupdate_wait.h>
++
++/**
++ * wakeme_after_rcu() - Callback function to awaken a task after grace period
++ * @head: Pointer to rcu_head member within rcu_synchronize structure
++ *
++ * Awaken the corresponding task now that a grace period has elapsed.
++ */
++void wakeme_after_rcu(struct rcu_head *head)
++{
++	struct rcu_synchronize *rcu;
++
++	rcu = container_of(head, struct rcu_synchronize, head);
++	complete(&rcu->completion);
++}
++EXPORT_SYMBOL_GPL(wakeme_after_rcu);

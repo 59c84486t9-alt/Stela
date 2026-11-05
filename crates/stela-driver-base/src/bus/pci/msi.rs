@@ -34,7 +34,7 @@ static QUARANTINED: AtomicU64 = AtomicU64::new(0);
 /// # Safety
 /// Configuration reads/writes have real serialized effects. In particular,
 /// `write16` never replays adjacent Status W1C bits through a dword RMW. It
-/// must override the generic model fallback. Access remains valid under the
+/// has an explicit fallible exact-width implementation. Access remains valid under the
 /// enclosing owner and occurs only in process/deferred context.
 pub unsafe trait MsiConfigSpace: ConfigSpace {}
 // SAFETY: EcamConfig overrides write16 with Mmio::write16, a native volatile
@@ -46,6 +46,7 @@ pub type Released<C> = (Function<C>, RetainedOwner);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MsiError {
+    Config(super::ConfigError),
     MissingCapability,
     MalformedCapability,
     Unsupported,
@@ -59,6 +60,7 @@ pub enum MsiError {
     NotProgrammed,
     TerminalRetirement,
     StopAlreadyAttempted,
+    Interrupted,
     Released,
 }
 
@@ -83,13 +85,19 @@ impl Layout {
 impl From<CapabilityError> for MsiError {
     fn from(error: CapabilityError) -> Self {
         match error {
+            CapabilityError::Config { error, .. } => Self::Config(error),
             CapabilityError::FailedRead { offset } => Self::FailedRead { offset },
             _ => Self::MalformedCapability,
         }
     }
 }
+impl From<super::ConfigError> for MsiError {
+    fn from(error: super::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
 fn read16<C: ConfigSpace>(c: &C, offset: u16) -> Result<u16, MsiError> {
-    let value = c.read16(offset);
+    let value = c.read16(offset)?;
     if value == u16::MAX {
         Err(MsiError::FailedRead { offset })
     } else {
@@ -97,7 +105,7 @@ fn read16<C: ConfigSpace>(c: &C, offset: u16) -> Result<u16, MsiError> {
     }
 }
 fn verify16<C: MsiConfigSpace>(c: &C, offset: u16, expected: u16) -> Result<(), MsiError> {
-    let actual = c.read16(offset);
+    let actual = c.read16(offset)?;
     if actual == expected {
         Ok(())
     } else if actual == u16::MAX {
@@ -107,7 +115,7 @@ fn verify16<C: MsiConfigSpace>(c: &C, offset: u16, expected: u16) -> Result<(), 
     }
 }
 fn verify32<C: MsiConfigSpace>(c: &C, offset: u16, expected: u32) -> Result<(), MsiError> {
-    let actual = c.read32(offset);
+    let actual = c.read32(offset)?;
     if actual == expected {
         Ok(())
     } else if actual == u32::MAX {
@@ -117,25 +125,39 @@ fn verify32<C: MsiConfigSpace>(c: &C, offset: u16, expected: u32) -> Result<(), 
     }
 }
 fn write16<C: MsiConfigSpace>(c: &mut C, offset: u16, value: u16) -> Result<(), MsiError> {
-    c.write16(offset, value);
-    verify16(c, offset, value)
+    c.write16(offset, value)?;
+    verify16(c, offset, value).map_err(|error| match error {
+        MsiError::Config(error) => MsiError::Config(super::ConfigError::write_may_have_applied(
+            offset,
+            2,
+            error.reason,
+        )),
+        error => error,
+    })
 }
 fn write32<C: MsiConfigSpace>(c: &mut C, offset: u16, value: u32) -> Result<(), MsiError> {
-    c.write32(offset, value);
-    verify32(c, offset, value)
+    c.write32(offset, value)?;
+    verify32(c, offset, value).map_err(|error| match error {
+        MsiError::Config(error) => MsiError::Config(super::ConfigError::write_may_have_applied(
+            offset,
+            4,
+            error.reason,
+        )),
+        error => error,
+    })
 }
 
 fn discover<C: MsiConfigSpace>(f: &mut Function<C>) -> Result<(Layout, u16), MsiError> {
     let expected = u32::from(f.vendor) | u32::from(f.device) << 16;
     let c = f.config();
-    let id = c.read32(0);
+    let id = c.read32(0)?;
     if id == u32::MAX {
         return Err(MsiError::FailedRead { offset: 0 });
     }
     if id != expected {
         return Err(MsiError::IdentityChanged);
     }
-    let header_type = c.read8(0x0e) & 0x7f;
+    let header_type = c.read8(0x0e)? & 0x7f;
     if !matches!(header_type, 0 | 1) {
         return Err(MsiError::Unsupported);
     }
@@ -193,7 +215,14 @@ pub struct MsiConfig<C: MsiConfigSpace = EcamConfig> {
     owner: Option<Released<C>>,
     layout: Layout,
     message: Option<MsiMessage>,
-    terminal: bool,
+    phase: Phase,
+}
+#[derive(Clone, Copy)]
+enum Phase {
+    Live,
+    Acting,
+    Retiring,
+    Failed(MsiError),
 }
 impl<C: MsiConfigSpace> MsiConfig<C> {
     /// # Safety
@@ -202,36 +231,57 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
     /// dummy token. This keeps the real mapped configuration transport even
     /// if abandoned. Native config accesses and every source/worker/reset are
     /// serialized; no firmware/alias/other CPU can reconfigure or revoke it.
-    /// Old MSI/INTx delivery, callbacks and device work have drained;
-    /// initially disabled MSI alone does not establish this. The platform has
-    /// checked MSI routing. No vector or requester-coherency grant is created.
+    /// Old source actions, CPU/EOI/callbacks and captured service/work have
+    /// joined under the actual stable notification domain; any old device
+    /// cause remains owned. A delayed ordinary fixed/edge packet may notify a
+    /// current valid status-checking handler. Unknown format/root handover needs
+    /// its independent real completion proof. Initially disabled MSI proves
+    /// none of this. No vector, domain or requester-coherency grant is created.
     /// Errors return both owners without modifying configuration.
     pub unsafe fn new(
-        mut function: Function<C>,
+        function: Function<C>,
         retained: RetainedOwner,
     ) -> Result<Self, (MsiError, Released<C>)> {
-        match discover(&mut function) {
+        let mut original = super::kept::Kept::new((function, retained));
+        let discovered = discover(&mut original.get_mut().0);
+        match discovered {
             Ok((layout, control)) if control & ENABLE == 0 => Ok(Self {
-                owner: Some((function, retained)),
+                owner: Some(original.take()),
                 layout,
                 message: None,
-                terminal: false,
+                phase: Phase::Live,
             }),
-            Ok(_) => Err((MsiError::ActiveMsi, (function, retained))),
-            Err(error) => Err((error, (function, retained))),
+            Ok(_) => Err((MsiError::ActiveMsi, original.take())),
+            Err(error) => Err((error, original.take())),
         }
     }
     pub fn address(&self) -> Result<Address, MsiError> {
         Ok(self.owner.as_ref().ok_or(MsiError::Released)?.0.address)
     }
     fn normal(&self) -> Result<(), MsiError> {
-        if self.terminal {
-            Err(MsiError::TerminalRetirement)
-        } else if self.owner.is_none() {
-            Err(MsiError::Released)
-        } else {
-            Ok(())
+        match self.phase {
+            Phase::Live if self.owner.is_some() => Ok(()),
+            Phase::Live => Err(MsiError::Released),
+            Phase::Acting => Err(MsiError::Interrupted),
+            Phase::Retiring => Err(MsiError::TerminalRetirement),
+            Phase::Failed(error) => Err(error),
         }
+    }
+    fn operation<T>(
+        &mut self,
+        run: impl FnOnce(&mut Self) -> Result<T, MsiError>,
+    ) -> Result<T, MsiError> {
+        self.normal()?;
+        self.phase = Phase::Acting;
+        let result = run(self);
+        self.phase = match result.as_ref() {
+            Ok(_) => Phase::Live,
+            Err(error) => Phase::Failed(*error),
+        };
+        if result.is_err() {
+            self.message = None;
+        }
+        result
     }
     /// Irreversibly disable MSI and fallback INTx before a device stop that
     /// needs the original configuration owner. This establishes no DMA, posted
@@ -243,9 +293,12 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
     /// Ordinary admission-time mask remains reversible and does not use this.
     pub fn begin_device_retirement(&mut self) -> Result<DisabledMsiConfig<C>, MsiError> {
         self.normal()?;
-        self.terminal = true;
+        self.phase = Phase::Retiring;
         self.message = None;
-        self.mask_inner()?;
+        if let Err(error) = self.mask_inner() {
+            self.phase = Phase::Failed(error);
+            return Err(error);
+        }
         Ok(DisabledMsiConfig::new(
             self.owner.take().ok_or(MsiError::Released)?,
         ))
@@ -270,7 +323,7 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
         let command = read16(c, regs::COMMAND)?;
         write16(c, regs::COMMAND, command | regs::COMMAND_INTX_DISABLE)?;
         if let Some(offset) = layout.mask() {
-            let mask = c.read32(offset);
+            let mask = c.read32(offset)?;
             // All-ones is a valid mask bitmap. Presence/control reads check
             // this transport; never interpret valid all-masked as failed data.
             write32(c, offset, mask | 1)?;
@@ -280,12 +333,7 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
     /// Mask and acknowledge MSI plus fallback INTx. This does not stop a device
     /// or drain already posted writes, callbacks, timers or deferred work.
     pub fn mask(&mut self) -> Result<(), MsiError> {
-        self.normal()?;
-        let result = self.mask_inner();
-        if result.is_err() {
-            self.message = None;
-        }
-        result
+        self.operation(|owner| owner.mask_inner())
     }
     /// Disable the route and forget its authorization for subsequent unmask.
     /// Unrelated command/control/mask bits and message fields are preserved.
@@ -297,30 +345,34 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
     ///
     /// # Safety
     /// This typed message belongs to the registry's checked route;
-    /// every callback/resource remains held. Reprogramming requires real
-    /// source/callback/posted-write drain; masking alone is insufficient.
+    /// every callback/resource remains held. Reprogramming requires actual old
+    /// source/pending-cause closure plus CPU/EOI/captured service/work joins
+    /// under the same retained notification domain. This is not an all-issued
+    /// MSI or payload completion receipt; masking alone is insufficient.
     pub unsafe fn program(&mut self, message: MsiMessage) -> Result<(), MsiError> {
         self.normal()?;
-        if message.address & 3 != 0
+        if !message.valid_pci_format()
             || message.data > u32::from(u16::MAX)
             || (!self.layout.wide() && message.address > u64::from(u32::MAX))
         {
             return Err(MsiError::InvalidMessage);
         }
-        self.message = None;
-        self.mask()?;
-        let layout = self.layout;
-        let control = self.checked()? & !(ENABLE | MME);
-        let c = self.config()?;
-        write16(c, layout.offset + 2, control)?;
-        write32(c, layout.offset + 4, message.address as u32)?;
-        if layout.wide() {
-            write32(c, layout.offset + 8, (message.address >> 32) as u32)?;
-        }
-        write16(c, layout.data(), message.data as u16)?;
-        verify16(c, layout.offset + 2, control)?;
-        self.message = Some(message);
-        Ok(())
+        self.operation(|owner| {
+            owner.message = None;
+            owner.mask_inner()?;
+            let layout = owner.layout;
+            let control = owner.checked()? & !(ENABLE | MME);
+            let c = owner.config()?;
+            write16(c, layout.offset + 2, control)?;
+            write32(c, layout.offset + 4, message.address as u32)?;
+            if layout.wide() {
+                write32(c, layout.offset + 8, (message.address >> 32) as u32)?;
+            }
+            write16(c, layout.data(), message.data as u16)?;
+            verify16(c, layout.offset + 2, control)?;
+            owner.message = Some(message);
+            Ok(())
+        })
     }
     /// # Safety
     /// The registry keeps/publishes the callback and checked route;
@@ -329,11 +381,11 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
     pub unsafe fn unmask(&mut self) -> Result<(), MsiError> {
         self.normal()?;
         let message = self.message.ok_or(MsiError::NotProgrammed)?;
-        self.mask()?;
-        let layout = self.layout;
-        let control = self.checked()?;
-        let result = (|| {
-            let c = self.config()?;
+        self.operation(|owner| {
+            owner.mask_inner()?;
+            let layout = owner.layout;
+            let control = owner.checked()?;
+            let c = owner.config()?;
             verify32(c, layout.offset + 4, message.address as u32)?;
             if layout.wide() {
                 verify32(c, layout.offset + 8, (message.address >> 32) as u32)?;
@@ -343,23 +395,21 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
                 return Err(MsiError::CapabilityChanged);
             }
             if let Some(offset) = layout.mask() {
-                let mask = c.read32(offset);
+                let mask = c.read32(offset)?;
                 write32(c, offset, mask & !1)?;
             }
             write16(c, layout.offset + 2, control | ENABLE)
-        })();
-        if result.is_err() {
-            self.message = None;
-        }
-        result
+        })
     }
     /// Return the owners only after independent source/IRQ/work drain.
     ///
     /// # Safety
-    /// The device is stopped, posted MSI writes/CPU pending vectors,
-    /// callbacks and all deferred/timer/reset users have drained and cannot
-    /// restart. Every DMA lease/fence/IOTLB obligation remains independently
-    /// owned until completed; this helper does not prove any of them.
+    /// Device engines are stopped and old IRQ actions have joined their
+    /// CPU/EOI/callbacks and captured service/thread/work; former reset users
+    /// cannot restart. Stable CPU/root/format ownership remains retained for
+    /// delayed ordinary notifications; this is not all-issued MSI completion.
+    /// Every payload/DMA lease/fence/IOTLB obligation stays independently owned
+    /// until completed; returning config owners proves none of them.
     pub unsafe fn release(&mut self) -> Result<Released<C>, MsiError> {
         self.disable()?;
         self.owner.take().ok_or(MsiError::Released)

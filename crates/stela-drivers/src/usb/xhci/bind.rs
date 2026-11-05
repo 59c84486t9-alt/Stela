@@ -14,6 +14,10 @@ pub(crate) fn bind(shared: &Shared, device: Device, dma: &mut dyn DmaAllocator, 
     );
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub(crate) fn bind_with_provider(
     shared: &Shared,
     device: Device,

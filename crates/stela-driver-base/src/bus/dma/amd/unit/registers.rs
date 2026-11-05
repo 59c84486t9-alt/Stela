@@ -7,8 +7,11 @@
 //! borrowed mapping view, numeric permission or successful completion is exposed.
 use crate::bus::{
     dma::amd::ivrs::{HardwareVersion, Ivhd, Ivrs},
-    mmio::owned::{CacheAttribute, Error as MappingError, Mapping, Protection},
-    pci::{Address, ConfigSpace, Function, owned::OwnedConfig},
+    mmio::owned::{CacheAttribute, Error as MappingError, Mapping, MappingView, Protection},
+    pci::{
+        Address, ConfigSpace, Function,
+        owned::{ObservedConfig, OwnedConfig},
+    },
 };
 use alloc::vec::Vec;
 use core::{marker::PhantomData, mem::size_of};
@@ -43,6 +46,8 @@ const STATUS: usize = 0x2020;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
+    Config(crate::bus::pci::ConfigError),
+    PciCapability(crate::bus::pci::CapabilityError),
     Identity,
     Header(u8),
     ReadFailed(u16),
@@ -64,10 +69,28 @@ pub enum Error {
     Mapping(MappingError),
 }
 
+/// An owned configuration view of the IOMMU function. The remapper needs its
+/// PCI identity and capabilities, while the separate unit mapping owns MMIO.
+pub trait UnitConfig: ConfigSpace {
+    fn address(&self) -> Address;
+}
+
+impl UnitConfig for OwnedConfig {
+    fn address(&self) -> Address {
+        self.address()
+    }
+}
+
+impl UnitConfig for ObservedConfig {
+    fn address(&self) -> Address {
+        self.address()
+    }
+}
+
 /// Owners on entry and refusal. Returning these never retires a mapping;
 /// the caller still owes its original context and explicit retirement protocol.
-pub struct Inputs {
-    pub function: Function<OwnedConfig>,
+pub struct Inputs<C = OwnedConfig> {
+    pub function: Function<C>,
     pub mappings: Vec<Mapping>,
 }
 
@@ -133,14 +156,14 @@ pub struct Snapshot {
 /// Keeps one original PCI function and every unit mapping. No independent
 /// per-capability owner can invalidate another unit's configuration/IRQ epoch.
 /// The complete checksum-validated original IVRS bytes remain attached too.
-pub struct FunctionInspection {
-    inputs: Inputs,
+pub struct FunctionInspection<C = OwnedConfig> {
+    inputs: Inputs<C>,
     address: Address,
     profiles: Vec<Profile>,
     firmware: Vec<u8>,
     _process_context: PhantomData<*mut ()>,
 }
-impl FunctionInspection {
+impl<C: UnitConfig> FunctionInspection<C> {
     pub(super) fn native_firmware(&self) -> &[u8] {
         &self.firmware
     }
@@ -151,6 +174,34 @@ impl FunctionInspection {
             return Err(Error::MappingCount);
         }
         read_register(&self.inputs.mappings[self.profiles[0].mapping], offset)
+    }
+
+    pub(super) fn read_config(
+        &self,
+        offset: u16,
+        width: u8,
+    ) -> Result<u32, crate::bus::pci::ConfigError> {
+        let config = self.inputs.function.config_ref();
+        match width {
+            1 => config.read8(offset).map(u32::from),
+            2 => config.read16(offset).map(u32::from),
+            4 => config.read32(offset),
+            _ => Err(crate::bus::pci::ConfigError::before_effect(
+                crate::bus::pci::ConfigFailure::Access {
+                    offset,
+                    width: usize::from(width),
+                },
+            )),
+        }
+    }
+
+    pub(super) fn native_view(&self, bytes: usize) -> Result<MappingView, Error> {
+        let [profile] = self.profiles.as_slice() else {
+            return Err(Error::MappingCount);
+        };
+        self.inputs.mappings[profile.mapping]
+            .view(0..bytes)
+            .map_err(Error::Mapping)
     }
 
     pub(super) fn native_write(&self, offset: usize, value: u64) -> Result<(), Error> {
@@ -183,7 +234,10 @@ impl FunctionInspection {
     /// inspection, snapshots, return and final release. This grants no unit
     /// takeover, engine stop, DMA coherency, IRQ or requester/alias permission.
     /// No hardware state is changed, including on refusal or allocation failure.
-    pub unsafe fn inspect(mut inputs: Inputs, ivrs: &Ivrs<'_>) -> Result<Self, (Error, Inputs)> {
+    pub unsafe fn inspect(
+        mut inputs: Inputs<C>,
+        ivrs: &Ivrs<'_>,
+    ) -> Result<Self, (Error, Inputs<C>)> {
         let mut firmware = Vec::new();
         if firmware.try_reserve_exact(ivrs.raw().len()).is_err() {
             return Err((Error::OutOfMemory, inputs));
@@ -231,7 +285,7 @@ impl FunctionInspection {
     }
     /// No writes or publications took place. Original mapping retirement and
     /// producer epoch obligations survive this consuming transfer unchanged.
-    pub fn into_inputs(self) -> Inputs {
+    pub fn into_inputs(self) -> Inputs<C> {
         self.inputs
     }
 }
@@ -254,7 +308,7 @@ fn read_register(mapping: &Mapping, offset: usize) -> Result<u64, Error> {
     }
 }
 
-fn prepare(inputs: &mut Inputs, ivrs: &Ivrs<'_>) -> Result<Vec<Profile>, Error> {
+fn prepare<C: UnitConfig>(inputs: &mut Inputs<C>, ivrs: &Ivrs<'_>) -> Result<Vec<Profile>, Error> {
     if !matches!(ivrs.revision(), 1 | 2) {
         return Err(Error::Firmware);
     }
@@ -263,15 +317,15 @@ fn prepare(inputs: &mut Inputs, ivrs: &Ivrs<'_>) -> Result<Vec<Profile>, Error> 
     let expected_id = u32::from(function.vendor) | u32::from(function.device) << 16;
     let expected_class = function.class;
     let config = function.config();
-    let class = config.read32(8);
+    let class = config.read32(8).map_err(Error::Config)?;
     if config.address() != address
-        || config.read32(0) != expected_id
+        || config.read32(0).map_err(Error::Config)? != expected_id
         || expected_class != [0x08, 0x06, 0]
         || class >> 8 != 0x080600
     {
         return Err(Error::Identity);
     }
-    let header = config.read8(0x0e) & 0x7f;
+    let header = config.read8(0x0e).map_err(Error::Config)? & 0x7f;
     if header != 0 {
         return Err(Error::Header(header));
     }

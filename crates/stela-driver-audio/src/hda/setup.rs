@@ -5,7 +5,7 @@ use super::{
     Alc269CommonReport, CirrusReport, CodecGraph, ConexantHeadsetInitialization, ConexantReport,
     Controller, RealtekReport, Registers, SigmatelReport, cirrus, conexant, realtek, sigmatel,
 };
-use crate::{Error, bus::i2c::Timer};
+use crate::{Error, Timer};
 
 /// What [`Controller::initialize_codec`] applied.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +40,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Apply the vendor setup `graph`'s identity selects. A codec outside
     /// every vendor table is left as discovered.
     pub fn initialize_codec(&mut self, graph: &CodecGraph) -> Result<CodecSetup, Error> {
+        self.minimum_guard()?;
         let id = graph.vendor_id;
         if id == 0x10ec_0269 {
             self.initialize_realtek_alc269_common(graph)

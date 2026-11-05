@@ -20,23 +20,21 @@ use core::{
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering},
 };
 use stela_contracts::gate::{GateService, MemoryRange, window};
-use stela_drivers::gpu::{
-    linux::{
-        client::Run,
-        function::{dma_quarantine_status, quarantined_functions},
+use stela_drivers::gpu::metal::{
+    compiler::{self, AirCompiler},
+    device::lifecycle::QuiesceStatus,
+    error::Error,
+    native::{ExportedMemory, Loader, MemoryExporter, NativeBackend, vk},
+    nvidia::{
+        Attachment,
+        open::{Gpu, OpenError, open, reopen},
     },
-    metal::{
-        compiler::{self, AirCompiler},
-        device::lifecycle::QuiesceStatus,
-        error::Error,
-        native::{ExportedMemory, Loader, MemoryExporter, NativeBackend, vk},
-        nvidia::{
-            Attachment,
-            open::{Gpu, OpenError, open, reopen},
-        },
-        service::{Served, ServiceHost, SharedService, identity::DeviceEpoch, wire::Status},
-        vulkan::physical::PciBusInfo,
-    },
+    service::{Served, ServiceHost, SharedService, identity::DeviceEpoch, wire::Status},
+    vulkan::physical::PciBusInfo,
+};
+use stela_linux::{
+    client::Run,
+    function::{dma_quarantine_status, quarantined_functions},
 };
 use stela_loader::{apple_device_tree::DeviceTree, stela_gpu};
 

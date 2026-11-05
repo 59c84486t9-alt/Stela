@@ -1,0 +1,553 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:07:11 -0500
+Subject: [PATCH] refactor(fs): link original mount and path reference release
+
+---
+ fs/mount_cache.c | 171 +++++++++++++++++++++++++++++++++++++++
+ fs/mount_cache.h |  39 +++++++++
+ fs/namei.c       |  13 ---
+ fs/namespace.c   | 204 -----------------------------------------------
+ fs/path_get.c    |  15 +++-
+ 5 files changed, 224 insertions(+), 218 deletions(-)
+
+diff --git a/fs/mount_cache.c b/fs/mount_cache.c
+index d101435e14babb80694b3f8329c27d5277fece8c..526414e814c059430333a5a341deb410495320f5 100644
+--- a/fs/mount_cache.c
++++ b/fs/mount_cache.c
+@@ -2,7 +2,11 @@
+ /* Mount cache initialization from fs/namespace.c.
+  * (C) Copyright Al Viro 2000, 2001
+  */
++#include <linux/export.h>
+ #include <linux/fs.h>
++#include <linux/fsnotify.h>
++#include <linux/sched/task.h>
++#include <linux/task_work.h>
+ #include <linux/memblock.h>
+ #include <linux/rculist.h>
+ #include <linux/slab.h>
+@@ -317,3 +321,170 @@ void free_vfsmnt(struct mount *mnt)
+ #endif
+ 	kmem_cache_free(mnt_cache, mnt);
+ }
++
++/*
++ * vfsmount lock must be held for write
++ */
++int mnt_get_count(struct mount *mnt)
++{
++#ifdef CONFIG_SMP
++	unsigned int gets = 0, puts = 0;
++	int cpu;
++
++	/* puts first, so a put counted here has its get counted below */
++	for_each_possible_cpu(cpu)
++		puts += per_cpu_ptr(mnt->mnt_pcp, cpu)->mnt_puts;
++	smp_mb();	/* pairs with the smp_wmb() in mntput_no_expire() */
++	for_each_possible_cpu(cpu)
++		gets += per_cpu_ptr(mnt->mnt_pcp, cpu)->mnt_gets;
++
++	return gets - puts;
++#else
++	return mnt->mnt_count;
++#endif
++}
++
++static inline void mnt_del_instance(struct mount *m)
++{
++	struct mount **p = m->mnt_pprev_for_sb;
++	struct mount *next = m->mnt_next_for_sb;
++
++	if (next)
++		next->mnt_pprev_for_sb = p;
++	*p = next;
++}
++
++static void delayed_free_vfsmnt(struct rcu_head *head)
++{
++	free_vfsmnt(container_of(head, struct mount, mnt_rcu));
++}
++
++static void cleanup_mnt(struct mount *mnt)
++{
++	struct hlist_node *p;
++	struct mount *m;
++	/*
++	 * The warning here probably indicates that somebody messed
++	 * up a mnt_want/drop_write() pair.  If this happens, the
++	 * filesystem was probably unable to make r/w->r/o transitions.
++	 * The locking used to deal with mnt_count decrement provides barriers,
++	 * so mnt_get_writers() below is safe.
++	 */
++	WARN_ON(mnt_get_writers(mnt));
++	if (unlikely(mnt->mnt_pins.first))
++		mnt_pin_kill(mnt);
++	hlist_for_each_entry_safe(m, p, &mnt->mnt_stuck_children, mnt_umount) {
++		hlist_del(&m->mnt_umount);
++		mntput(&m->mnt);
++	}
++	fsnotify_vfsmount_delete(&mnt->mnt);
++	dput(mnt->mnt.mnt_root);
++	deactivate_super(mnt->mnt.mnt_sb);
++	mnt_free_id(mnt);
++	call_rcu(&mnt->mnt_rcu, delayed_free_vfsmnt);
++}
++
++static void __cleanup_mnt(struct rcu_head *head)
++{
++	cleanup_mnt(container_of(head, struct mount, mnt_rcu));
++}
++
++static LLIST_HEAD(delayed_mntput_list);
++static void delayed_mntput(struct work_struct *unused)
++{
++	struct llist_node *node = llist_del_all(&delayed_mntput_list);
++	struct mount *m, *t;
++
++	llist_for_each_entry_safe(m, t, node, mnt_llist)
++		cleanup_mnt(m);
++}
++static DECLARE_DELAYED_WORK(delayed_mntput_work, delayed_mntput);
++
++static void noinline mntput_no_expire_slowpath(struct mount *mnt)
++{
++	LIST_HEAD(list);
++	int count;
++
++	VFS_BUG_ON(mnt->mnt_ns);
++	lock_mount_hash();
++	/*
++	 * make sure that if __legitimize_mnt() has not seen us grab
++	 * mount_lock, we'll see their refcount increment here.
++	 */
++	smp_mb();
++	mnt_dec_count(mnt);
++	count = mnt_get_count(mnt);
++	if (count != 0) {
++		WARN_ON(count < 0);
++		rcu_read_unlock();
++		unlock_mount_hash();
++		return;
++	}
++	if (unlikely(mnt->mnt.mnt_flags & MNT_DOOMED)) {
++		rcu_read_unlock();
++		unlock_mount_hash();
++		return;
++	}
++	mnt->mnt.mnt_flags |= MNT_DOOMED;
++	rcu_read_unlock();
++
++	mnt_del_instance(mnt);
++	if (unlikely(!list_empty(&mnt->mnt_expire)))
++		list_del(&mnt->mnt_expire);
++
++	if (unlikely(!list_empty(&mnt->mnt_mounts))) {
++		struct mount *p, *tmp;
++		list_for_each_entry_safe(p, tmp, &mnt->mnt_mounts,  mnt_child) {
++			__umount_mnt(p, &list);
++			hlist_add_head(&p->mnt_umount, &mnt->mnt_stuck_children);
++		}
++	}
++	unlock_mount_hash();
++	shrink_dentry_list(&list);
++
++	if (likely(!(mnt->mnt.mnt_flags & MNT_INTERNAL))) {
++		struct task_struct *task = current;
++		if (likely(!(task->flags & PF_KTHREAD))) {
++			init_task_work(&mnt->mnt_rcu, __cleanup_mnt);
++			if (!task_work_add(task, &mnt->mnt_rcu, TWA_RESUME))
++				return;
++		}
++		if (llist_add(&mnt->mnt_llist, &delayed_mntput_list))
++			schedule_delayed_work(&delayed_mntput_work, 1);
++		return;
++	}
++	cleanup_mnt(mnt);
++}
++
++void mntput_no_expire(struct mount *mnt)
++{
++	rcu_read_lock();
++	if (likely(READ_ONCE(mnt->mnt_ns))) {
++		/*
++		 * Since we don't do lock_mount_hash() here,
++		 * ->mnt_ns can change under us.  However, if it's
++		 * non-NULL, then there's a reference that won't
++		 * be dropped until after an RCU delay done after
++		 * turning ->mnt_ns NULL.  So if we observe it
++		 * non-NULL under rcu_read_lock(), the reference
++		 * we are dropping is not the final one.
++		 */
++		smp_wmb();	/* pairs with the smp_mb() in mnt_get_count() */
++		mnt_dec_count(mnt);
++		rcu_read_unlock();
++		return;
++	}
++	mntput_no_expire_slowpath(mnt);
++}
++
++void mntput(struct vfsmount *mnt)
++{
++	if (mnt) {
++		struct mount *m = real_mount(mnt);
++		/* avoid cacheline pingpong */
++		if (unlikely(m->mnt_expiry_mark))
++			WRITE_ONCE(m->mnt_expiry_mark, 0);
++		mntput_no_expire(m);
++	}
++}
++EXPORT_SYMBOL(mntput);
+diff --git a/fs/mount_cache.h b/fs/mount_cache.h
+index cf9f5bc37a078ee43a4b3dbdee5ac0ac315c7e62..44cfa334f79c43c701d6f1278ce41c4a131ebac8 100644
+--- a/fs/mount_cache.h
++++ b/fs/mount_cache.h
+@@ -37,6 +37,45 @@ void __umount_mnt(struct mount *mnt, struct list_head *shrink_list);
+ void make_visible(struct mount *mnt);
+ void attach_mnt(struct mount *mnt, struct mount *parent, struct mountpoint *mp);
+ 
++void mntput_no_expire(struct mount *mnt);
++
++static inline void lock_mount_hash(void)
++{
++	write_seqlock(&mount_lock);
++}
++
++static inline void unlock_mount_hash(void)
++{
++	write_sequnlock(&mount_lock);
++}
++
++static inline void mnt_dec_count(struct mount *mnt)
++{
++#ifdef CONFIG_SMP
++	this_cpu_inc(mnt->mnt_pcp->mnt_puts);
++#else
++	preempt_disable();
++	mnt->mnt_count--;
++	preempt_enable();
++#endif
++}
++
++static inline unsigned int mnt_get_writers(struct mount *mnt)
++{
++#ifdef CONFIG_SMP
++	unsigned int count = 0;
++	int cpu;
++
++	for_each_possible_cpu(cpu) {
++		count += per_cpu_ptr(mnt->mnt_pcp, cpu)->mnt_writers;
++	}
++
++	return count;
++#else
++	return mnt->mnt_writers;
++#endif
++}
++
+ static inline struct hlist_head *m_hash(struct vfsmount *mnt, struct dentry *dentry)
+ {
+ 	unsigned long tmp = ((unsigned long)mnt / L1_CACHE_BYTES);
+diff --git a/fs/namei.c b/fs/namei.c
+index 6a75b8f64c84f166dd470f5aa03856ea4d18e99c..18e0f816b4c52bd5ef7172fce07250053db9ac98 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -473,19 +473,6 @@ static __always_inline int lookup_inode_permission_may_exec(struct mnt_idmap *id
+ 	return security_inode_permission(inode, mask);
+ }
+ 
+-/**
+- * path_put - put a reference to a path
+- * @path: path to put the reference to
+- *
+- * Given a path decrement the reference count to the dentry and the vfsmount.
+- */
+-void path_put(const struct path *path)
+-{
+-	dput(path->dentry);
+-	mntput(path->mnt);
+-}
+-EXPORT_SYMBOL(path_put);
+-
+ #define EMBEDDED_LEVELS 2
+ struct nameidata {
+ 	struct path	path;
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 21c76e8b26de7123a912ad0169019e9dc94a7b5a..281d67616eb2ac3e957fcdb2e750ea64d051daf6 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -157,16 +157,6 @@ static struct mnt_namespace *lookup_mnt_ns(u64 mnt_ns_id)
+ 	return mnt_ns;
+ }
+ 
+-static inline void lock_mount_hash(void)
+-{
+-	write_seqlock(&mount_lock);
+-}
+-
+-static inline void unlock_mount_hash(void)
+-{
+-	write_sequnlock(&mount_lock);
+-}
+-
+ /*
+  * Allocate a new peer group ID
+  */
+@@ -189,39 +179,6 @@ void mnt_release_group_id(struct mount *mnt)
+ 	mnt->mnt_group_id = 0;
+ }
+ 
+-static inline void mnt_dec_count(struct mount *mnt)
+-{
+-#ifdef CONFIG_SMP
+-	this_cpu_inc(mnt->mnt_pcp->mnt_puts);
+-#else
+-	preempt_disable();
+-	mnt->mnt_count--;
+-	preempt_enable();
+-#endif
+-}
+-
+-/*
+- * vfsmount lock must be held for write
+- */
+-int mnt_get_count(struct mount *mnt)
+-{
+-#ifdef CONFIG_SMP
+-	unsigned int gets = 0, puts = 0;
+-	int cpu;
+-
+-	/* puts first, so a put counted here has its get counted below */
+-	for_each_possible_cpu(cpu)
+-		puts += per_cpu_ptr(mnt->mnt_pcp, cpu)->mnt_puts;
+-	smp_mb();	/* pairs with the smp_wmb() in mntput_no_expire() */
+-	for_each_possible_cpu(cpu)
+-		gets += per_cpu_ptr(mnt->mnt_pcp, cpu)->mnt_gets;
+-
+-	return gets - puts;
+-#else
+-	return mnt->mnt_count;
+-#endif
+-}
+-
+ /*
+  * Most r/o checks on a fs are for operations that take
+  * discrete amounts of time, like a write() or unlink().
+@@ -265,22 +222,6 @@ static inline void mnt_dec_writers(struct mount *mnt)
+ #endif
+ }
+ 
+-static unsigned int mnt_get_writers(struct mount *mnt)
+-{
+-#ifdef CONFIG_SMP
+-	unsigned int count = 0;
+-	int cpu;
+-
+-	for_each_possible_cpu(cpu) {
+-		count += per_cpu_ptr(mnt->mnt_pcp, cpu)->mnt_writers;
+-	}
+-
+-	return count;
+-#else
+-	return mnt->mnt_writers;
+-#endif
+-}
+-
+ static int mnt_is_readonly(const struct vfsmount *mnt)
+ {
+ 	if (READ_ONCE(mnt->mnt_sb->s_readonly_remount))
+@@ -544,16 +485,6 @@ static inline void mnt_unhold_writers(struct mount *mnt)
+ 	clear_write_hold(mnt);
+ }
+ 
+-static inline void mnt_del_instance(struct mount *m)
+-{
+-	struct mount **p = m->mnt_pprev_for_sb;
+-	struct mount *next = m->mnt_next_for_sb;
+-
+-	if (next)
+-		next->mnt_pprev_for_sb = p;
+-	*p = next;
+-}
+-
+ static inline void mnt_add_instance(struct mount *m, struct super_block *s)
+ {
+ 	struct mount *first = s->s_mounts;
+@@ -606,11 +537,6 @@ int sb_prepare_remount_readonly(struct super_block *sb)
+ 	return err;
+ }
+ 
+-static void delayed_free_vfsmnt(struct rcu_head *head)
+-{
+-	free_vfsmnt(container_of(head, struct mount, mnt_rcu));
+-}
+-
+ /* call under rcu_read_lock */
+ int __legitimize_mnt(struct vfsmount *bastard, unsigned seq)
+ {
+@@ -1001,136 +927,6 @@ static struct mount *clone_mnt(struct mount *old, struct dentry *root,
+ 	return ERR_PTR(err);
+ }
+ 
+-static void cleanup_mnt(struct mount *mnt)
+-{
+-	struct hlist_node *p;
+-	struct mount *m;
+-	/*
+-	 * The warning here probably indicates that somebody messed
+-	 * up a mnt_want/drop_write() pair.  If this happens, the
+-	 * filesystem was probably unable to make r/w->r/o transitions.
+-	 * The locking used to deal with mnt_count decrement provides barriers,
+-	 * so mnt_get_writers() below is safe.
+-	 */
+-	WARN_ON(mnt_get_writers(mnt));
+-	if (unlikely(mnt->mnt_pins.first))
+-		mnt_pin_kill(mnt);
+-	hlist_for_each_entry_safe(m, p, &mnt->mnt_stuck_children, mnt_umount) {
+-		hlist_del(&m->mnt_umount);
+-		mntput(&m->mnt);
+-	}
+-	fsnotify_vfsmount_delete(&mnt->mnt);
+-	dput(mnt->mnt.mnt_root);
+-	deactivate_super(mnt->mnt.mnt_sb);
+-	mnt_free_id(mnt);
+-	call_rcu(&mnt->mnt_rcu, delayed_free_vfsmnt);
+-}
+-
+-static void __cleanup_mnt(struct rcu_head *head)
+-{
+-	cleanup_mnt(container_of(head, struct mount, mnt_rcu));
+-}
+-
+-static LLIST_HEAD(delayed_mntput_list);
+-static void delayed_mntput(struct work_struct *unused)
+-{
+-	struct llist_node *node = llist_del_all(&delayed_mntput_list);
+-	struct mount *m, *t;
+-
+-	llist_for_each_entry_safe(m, t, node, mnt_llist)
+-		cleanup_mnt(m);
+-}
+-static DECLARE_DELAYED_WORK(delayed_mntput_work, delayed_mntput);
+-
+-static void noinline mntput_no_expire_slowpath(struct mount *mnt)
+-{
+-	LIST_HEAD(list);
+-	int count;
+-
+-	VFS_BUG_ON(mnt->mnt_ns);
+-	lock_mount_hash();
+-	/*
+-	 * make sure that if __legitimize_mnt() has not seen us grab
+-	 * mount_lock, we'll see their refcount increment here.
+-	 */
+-	smp_mb();
+-	mnt_dec_count(mnt);
+-	count = mnt_get_count(mnt);
+-	if (count != 0) {
+-		WARN_ON(count < 0);
+-		rcu_read_unlock();
+-		unlock_mount_hash();
+-		return;
+-	}
+-	if (unlikely(mnt->mnt.mnt_flags & MNT_DOOMED)) {
+-		rcu_read_unlock();
+-		unlock_mount_hash();
+-		return;
+-	}
+-	mnt->mnt.mnt_flags |= MNT_DOOMED;
+-	rcu_read_unlock();
+-
+-	mnt_del_instance(mnt);
+-	if (unlikely(!list_empty(&mnt->mnt_expire)))
+-		list_del(&mnt->mnt_expire);
+-
+-	if (unlikely(!list_empty(&mnt->mnt_mounts))) {
+-		struct mount *p, *tmp;
+-		list_for_each_entry_safe(p, tmp, &mnt->mnt_mounts,  mnt_child) {
+-			__umount_mnt(p, &list);
+-			hlist_add_head(&p->mnt_umount, &mnt->mnt_stuck_children);
+-		}
+-	}
+-	unlock_mount_hash();
+-	shrink_dentry_list(&list);
+-
+-	if (likely(!(mnt->mnt.mnt_flags & MNT_INTERNAL))) {
+-		struct task_struct *task = current;
+-		if (likely(!(task->flags & PF_KTHREAD))) {
+-			init_task_work(&mnt->mnt_rcu, __cleanup_mnt);
+-			if (!task_work_add(task, &mnt->mnt_rcu, TWA_RESUME))
+-				return;
+-		}
+-		if (llist_add(&mnt->mnt_llist, &delayed_mntput_list))
+-			schedule_delayed_work(&delayed_mntput_work, 1);
+-		return;
+-	}
+-	cleanup_mnt(mnt);
+-}
+-
+-static void mntput_no_expire(struct mount *mnt)
+-{
+-	rcu_read_lock();
+-	if (likely(READ_ONCE(mnt->mnt_ns))) {
+-		/*
+-		 * Since we don't do lock_mount_hash() here,
+-		 * ->mnt_ns can change under us.  However, if it's
+-		 * non-NULL, then there's a reference that won't
+-		 * be dropped until after an RCU delay done after
+-		 * turning ->mnt_ns NULL.  So if we observe it
+-		 * non-NULL under rcu_read_lock(), the reference
+-		 * we are dropping is not the final one.
+-		 */
+-		smp_wmb();	/* pairs with the smp_mb() in mnt_get_count() */
+-		mnt_dec_count(mnt);
+-		rcu_read_unlock();
+-		return;
+-	}
+-	mntput_no_expire_slowpath(mnt);
+-}
+-
+-void mntput(struct vfsmount *mnt)
+-{
+-	if (mnt) {
+-		struct mount *m = real_mount(mnt);
+-		/* avoid cacheline pingpong */
+-		if (unlikely(m->mnt_expiry_mark))
+-			WRITE_ONCE(m->mnt_expiry_mark, 0);
+-		mntput_no_expire(m);
+-	}
+-}
+-EXPORT_SYMBOL(mntput);
+-
+ /*
+  * Make a mount point inaccessible to new lookups.
+  * Because there may still be current users, the caller MUST WAIT
+diff --git a/fs/path_get.c b/fs/path_get.c
+index 08efe794d50de34a19b6c86721e2e7c0d5cd85fa..ae9c17b7e58f1640f14b44d54aa069046653871c 100644
+--- a/fs/path_get.c
++++ b/fs/path_get.c
+@@ -1,6 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /*
+- * Path reference acquisition from fs/namei.c and fs/namespace.c.
++ * Path reference operations from fs/namei.c and fs/namespace.c.
+  * Copyright (C) 1991, 1992 Linus Torvalds
+  * Copyright (C) 2000, 2001 Al Viro
+  */
+@@ -30,3 +30,16 @@ void path_get(const struct path *path)
+ 	dget(path->dentry);
+ }
+ EXPORT_SYMBOL(path_get);
++
++/**
++ * path_put - put a reference to a path
++ * @path: path to put the reference to
++ *
++ * Given a path decrement the reference count to the dentry and the vfsmount.
++ */
++void path_put(const struct path *path)
++{
++	dput(path->dentry);
++	mntput(path->mnt);
++}
++EXPORT_SYMBOL(path_put);

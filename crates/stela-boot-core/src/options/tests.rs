@@ -1,21 +1,56 @@
 use super::*;
-use alloc::{format, string::ToString, vec};
 
 #[test]
-fn native_pci_hpet_handoff_round_trips_and_excludes_diagnostics() {
-    let text = "--system --native-pci-own-hpet";
-    let options = System::parse(text).unwrap();
-    assert!(options.native_pci_own_hpet);
-    assert_eq!(System::parse(&options.to_string()), Ok(options));
+fn audio_hpet_handoff_requires_an_audio_diagnostic() {
     assert_eq!(
-        System::parse(&format!("{text} --native-pci-own-hpet")),
-        Err(Error::DuplicateNativePciHpet)
-    );
-    assert_eq!(
-        System::parse(&format!("{text} --native-mmio-check")),
-        Err(Error::Constraint(Constraint::NativePciHpetExclusive))
+        System::parse("--system --audio-own-hpet").unwrap_err(),
+        Error::Constraint(Constraint::AudioHpetDependency)
     );
 }
+#[test]
+fn native_pci_hpet_round_trips_only_on_the_normal_system_path() {
+    let flag = "--native-pci-own-hpet";
+    let text = format!("--system {flag}");
+    let options = System::parse(&text).unwrap();
+    assert!(options.native_pci_own_hpet);
+    assert_eq!(options.diagnostic_option(), None);
+    assert_eq!(System::parse(&options.to_string()), Ok(options));
+    assert_eq!(
+        System::parse(&format!("{text} {flag}")).unwrap_err(),
+        Error::DuplicateNativePciHpet
+    );
+    for fixture in [
+        "--audio-check transport-duplex --audio-own-hpet",
+        "--native-cores 1 --native-clock-check",
+        "--native-mmio-check",
+        "--native-memory-check",
+        "--native-cores 2 --native-bootstrap-check",
+        "--native-cores 2 --native-shared-check",
+    ] {
+        assert_eq!(
+            System::parse(&format!("{text} {fixture}")).unwrap_err(),
+            Error::Constraint(Constraint::NativePciHpetExclusive)
+        );
+    }
+}
+
+#[test]
+fn native_pci_ioapic_handoff_round_trips_and_refuses_diagnostic_paths() {
+    let text = "--system --native-pci-own-ioapic";
+    let options = System::parse(text).unwrap();
+    assert!(options.native_pci_own_ioapic);
+    assert_eq!(System::parse(&options.to_string()), Ok(options));
+    assert_eq!(
+        System::parse("--system --native-pci-own-ioapic --native-pci-own-ioapic").unwrap_err(),
+        Error::DuplicateNativePciIoapic
+    );
+    assert_eq!(
+        System::parse("--system --native-pci-own-ioapic --native-mmio-check").unwrap_err(),
+        Error::Constraint(Constraint::NativePciIoapicExclusive)
+    );
+}
+
+use alloc::{format, string::ToString, vec};
 
 #[test]
 fn diagnostic_options_are_typed() {
@@ -129,12 +164,13 @@ fn every_option_survives_a_round_trip() {
          --install-source 11111111-2222-3333-4444-555555555555 --tss --verify-on-read \
          --usb-storage A --usb-storage B --input --idle-skip --sep-observe --native-cores 3 \
          --native-artifacts --serialized --profile --monitor-trace --display-trace \
-         --network-check http://h/p --audio-check transport-duplex --dram-base 0x10000000000 \
+         --network-check http://h/p --audio-check transport-duplex --audio-own-hpet --dram-base 0x10000000000 \
          --load 0x10000004000 --entry 0x10000008000 --x0 7 --budget 99 --break 0x10 \
          --trace 0x20 --watch 0x30,0x40 --dump x21-0x8,0x10 --dump 0x50,0x60"
     ));
     assert_eq!(options.usb_storage, ["A", "B"]);
     assert_eq!(options.audio_check, Some(AudioCheck::TransportDuplex));
+    assert!(options.audio_own_hpet);
     assert!(options.display_trace);
     assert!(!System::default().display_trace);
     assert!(!options.parallel);

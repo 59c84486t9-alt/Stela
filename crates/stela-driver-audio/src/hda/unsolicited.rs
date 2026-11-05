@@ -4,7 +4,7 @@
 //! Copyright (c) 2011-2012 Takashi Iwai <tiwai@suse.de>.
 //! Raw notifications invalidate measurements; use pin sense for state.
 use super::{CodecGraph, Controller, ControllerToken, Registers, Verb, WidgetKind};
-use crate::{Error, bus::i2c::Timer};
+use crate::{Error, Timer};
 use alloc::{collections::VecDeque, vec::Vec};
 
 const QUEUE: usize = 64;
@@ -93,6 +93,7 @@ impl State {
 
 impl<R: Registers, T: Timer> Controller<R, T> {
     fn jack_ready(&self) -> Result<(), Error> {
+        self.minimum_guard()?;
         if self.lifecycle_failed || self.command_poisoned {
             return Err(Error::NeedsReset);
         }
@@ -102,12 +103,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn jack_index(&self, id: JackNotificationId) -> Result<usize, Error> {
+        self.minimum_guard()?;
         if id.token != self.token || id.index >= self.unsolicited.subscriptions.len() {
             return Err(Error::InvalidJackNotification);
         }
         Ok(id.index)
     }
     pub(super) fn jack_gate(&mut self, enable: bool) -> Result<(), Error> {
+        self.minimum_guard()?;
         use super::registers::{GCTL, GCTL_RESET, GCTL_UNSOL};
         let value = self.registers.read32(GCTL);
         if value == u32::MAX || value & GCTL_RESET == 0 {
@@ -128,6 +131,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn jack_control(&mut self, codec: u8, pin: u8, value: u8) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.verb(Verb::short(codec, pin, SET_UNSOL, value)?)?;
         let actual = self.verb(Verb::short(codec, pin, GET_UNSOL, 0)?)?;
         if actual == u32::MAX || actual & 255 != u32::from(value) {
@@ -144,6 +148,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         graph: &CodecGraph,
         pin: u8,
     ) -> Result<JackNotificationId, Error> {
+        self.minimum_guard()?;
         if graph.token != self.token {
             return Err(Error::InvalidCodecGraph);
         }
@@ -213,6 +218,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Acknowledged codec disable precedes tag retirement and last global gate
     /// disable. The original tag reservation survives until a real full reset.
     pub fn disable_jack_notifications(&mut self, id: JackNotificationId) -> Result<(), Error> {
+        self.minimum_guard()?;
         let index = self.jack_index(id)?; // stale handles never reach MMIO
         self.jack_ready()?;
         let subscription = &self.unsolicited.subscriptions[index];
@@ -237,6 +243,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// by that same real RIRB drain. Even cached events require a live
     /// command/ownership epoch. Raw event bits never replace fresh pin sense.
     pub fn next_unsolicited(&mut self) -> Result<Option<UnsolicitedEvent>, Error> {
+        self.minimum_guard()?;
         self.jack_ready()?;
         if let Err(error) = self.update_rirb() {
             self.command_poisoned = true;
@@ -253,6 +260,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(None)
     }
     pub(super) fn shutdown_jack_notifications(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         let mut error = None;
         for index in 0..self.unsolicited.subscriptions.len() {
             let subscription = &self.unsolicited.subscriptions[index];

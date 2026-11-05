@@ -9,6 +9,7 @@
 //! Hosts whose firmware runs the connection manager are served by [`icm`];
 //! the others by the software one in [`manager`].
 pub mod channel;
+pub mod cold;
 pub mod config;
 pub mod controller;
 pub mod drom;

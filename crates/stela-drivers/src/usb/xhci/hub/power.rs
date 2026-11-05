@@ -170,6 +170,7 @@ impl Controller {
         id: SlotId,
         port: u8,
     ) -> Result<(), BlockError> {
+        self.check_minimum()?;
         let slot = self.validate_topology_id(id)?;
         self.suspend_hub_port_owned(slot, port)
     }
@@ -186,7 +187,7 @@ impl Controller {
             }
             self.control_owned(slot, link_request(port, ss, true), &[])?;
         }
-        self.clock.delay(SUSPEND_SETTLE_US);
+        self.minimum_wait(SUSPEND_SETTLE_US)?;
         let deadline = self.clock.deadline(LINK_TRANSITION_US);
         loop {
             let state = self.suspend_port_state(slot, port, ss)?;
@@ -219,6 +220,7 @@ impl Controller {
         id: SlotId,
         port: u8,
     ) -> Result<(), BlockError> {
+        self.check_minimum()?;
         let slot = self.validate_topology_id(id)?;
         self.resume_hub_port_owned(slot, port)
     }
@@ -234,7 +236,7 @@ impl Controller {
                 ));
             }
             self.control_owned(slot, link_request(port, ss, false), &[])?;
-            self.clock.delay(RESUME_SIGNAL_US);
+            self.minimum_wait(RESUME_SIGNAL_US)?;
         }
         let deadline = self.clock.deadline(LINK_TRANSITION_US);
         loop {
@@ -246,7 +248,7 @@ impl Controller {
             }
             if state.resumed(ss) {
                 self.clear_suspend_change(slot, port, ss, state)?;
-                self.clock.delay(RESUME_RECOVERY_US);
+                self.minimum_wait(RESUME_RECOVERY_US)?;
                 let final_state = self.suspend_port_state(slot, port, ss)?;
                 if !final_state.resumed(ss)
                     || final_state.change != 0

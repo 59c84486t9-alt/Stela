@@ -154,6 +154,9 @@ fn payload(kind: PeerCommandKind, flush: bool) -> Vec<u8> {
 }
 #[test]
 fn peer_commands_complete_on_ack() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for (tlc, flush) in [(1, 0), (3, 1), (4, 1)] {
         exercise(&image(tlc, flush), tlc, flush);
     }
@@ -166,6 +169,9 @@ fn peer_commands_complete_on_ack() {
 }
 #[test]
 fn mld_or_old_station_layout_and_missing_tlc_refuse_before_peer_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..4 {
         let bytes = match case {
             0 => feature(image(4, 1), 30, 110, true),
@@ -305,6 +311,9 @@ fn exercise(bytes: &[u8], tlc: u8, flush: u8) {
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn ax200_mld_peer_schema_requires_distinct_mac_link_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =
@@ -332,6 +341,9 @@ fn ax200_mld_peer_schema_requires_distinct_mac_link_owner() {
 }
 #[test]
 fn peer_invalid_beacon_or_rates_denial_partial_tlc_and_untracked_flush_freeze_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..5 {
         let bytes = image(4, 1);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -460,6 +472,9 @@ fn peer_invalid_beacon_or_rates_denial_partial_tlc_and_untracked_flush_freeze_ow
 }
 #[test]
 fn peer_rejected_or_malformed_add_and_missing_ack_never_publish_tlc() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..3 {
         let bytes = image(4, 1);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

@@ -11,6 +11,10 @@ const SRIOV: u16 = 0x10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Issue {
+    Config {
+        address: Address,
+        error: crate::bus::pci::ConfigError,
+    },
     Read {
         address: Address,
         offset: u16,
@@ -26,6 +30,7 @@ pub enum Issue {
 impl Issue {
     fn address(&self) -> Address {
         match *self {
+            Self::Config { address, .. } => address,
             Self::Read { address, .. }
             | Self::Capability { address, .. }
             | Self::Sriov(address)
@@ -58,8 +63,8 @@ impl Inventory {
     /// establish Physical: the caller's platform grant must supply completeness.
     pub fn capture(
         functions: &[Address],
-        mut read32: impl FnMut(Address, u16) -> Option<u32>,
-    ) -> Self {
+        mut read32: impl FnMut(Address, u16) -> Result<Option<u32>, crate::bus::pci::ConfigError>,
+    ) -> Result<Self, crate::bus::pci::ConfigError> {
         let mut inventory = Self {
             present: functions.to_vec(),
             ..Self::default()
@@ -77,6 +82,7 @@ impl Inventory {
                 continue;
             }
             match function(address, &mut read32) {
+                Err(Issue::Config { error, .. }) => return Err(error),
                 Err(issue) => inventory.issues.push(issue),
                 Ok(None) => {}
                 Ok(Some(vfs)) => {
@@ -97,7 +103,7 @@ impl Inventory {
         }
         inventory.virtuals = virtuals;
         inventory.sources = sources;
-        inventory
+        Ok(inventory)
     }
     /// Add a complete newly adopted subtree while the previous configuration
     /// and SR-IOV epoch remains unchanged. Present but unclaimed functions may
@@ -169,16 +175,17 @@ impl Inventory {
 }
 
 fn read(
-    read32: &mut impl FnMut(Address, u16) -> Option<u32>,
+    read32: &mut impl FnMut(Address, u16) -> Result<Option<u32>, crate::bus::pci::ConfigError>,
     address: Address,
     offset: u16,
 ) -> Result<u32, Issue> {
     read32(address, offset)
+        .map_err(|error| Issue::Config { address, error })?
         .filter(|value| *value != u32::MAX)
         .ok_or(Issue::Read { address, offset })
 }
 fn fields(
-    read32: &mut impl FnMut(Address, u16) -> Option<u32>,
+    read32: &mut impl FnMut(Address, u16) -> Result<Option<u32>, crate::bus::pci::ConfigError>,
     address: Address,
     at: u16,
 ) -> Result<[u16; 5], Issue> {
@@ -196,7 +203,7 @@ fn fields(
 }
 fn function(
     address: Address,
-    read32: &mut impl FnMut(Address, u16) -> Option<u32>,
+    read32: &mut impl FnMut(Address, u16) -> Result<Option<u32>, crate::bus::pci::ConfigError>,
 ) -> Result<Option<Vec<Address>>, Issue> {
     let identity = read(read32, address, 0)?;
     if matches!(identity as u16, 0 | 1 | u16::MAX) || address.device >= 32 || address.function >= 8
@@ -206,15 +213,18 @@ fn function(
     // An all-ones first extended header denotes no extended configuration,
     // including conventional PCI. Classification still examines every PF,
     // rather than inferring this function's role from that local absence.
-    let first = read32(address, 0x100).ok_or(Issue::Read {
-        address,
-        offset: 0x100,
-    })?;
+    let first = read32(address, 0x100)
+        .map_err(|error| Issue::Config { address, error })?
+        .ok_or(Issue::Read {
+            address,
+            offset: 0x100,
+        })?;
     let mut sriov = None;
     if first != u32::MAX {
         let transport = Transport(|offset: u16, bytes: u8| {
-            let value =
-                read32(address, offset & !3).ok_or(CapabilityError::FailedRead { offset })?;
+            let value = read32(address, offset & !3)
+                .map_err(|error| CapabilityError::Config { offset, error })?
+                .ok_or(CapabilityError::FailedRead { offset })?;
             Ok::<_, CapabilityError>(match bytes {
                 1 => value >> ((offset & 3) * 8) & 0xff,
                 2 => value >> ((offset & 2) * 8) & 0xffff,
@@ -222,7 +232,10 @@ fn function(
             })
         });
         for entry in ExtendedCapabilities::new(transport) {
-            let entry = entry.map_err(|error| Issue::Capability { address, error })?;
+            let entry = entry.map_err(|error| match error {
+                CapabilityError::Config { error, .. } => Issue::Config { address, error },
+                error => Issue::Capability { address, error },
+            })?;
             if entry.id == SRIOV && (entry.version != 1 || sriov.replace(entry.offset).is_some()) {
                 return Err(Issue::Sriov(address));
             }
@@ -259,7 +272,9 @@ fn function(
     } else {
         None
     };
-    if read(read32, address, 0)? != identity || read32(address, 0x100) != Some(first) {
+    if read(read32, address, 0)? != identity
+        || read32(address, 0x100).map_err(|error| Issue::Config { address, error })? != Some(first)
+    {
         return Err(Issue::Sriov(address));
     }
     Ok(virtuals)
@@ -300,10 +315,37 @@ mod tests {
     fn capture(spaces: &BTreeMap<Address, [u32; 1024]>) -> Inventory {
         let functions: Vec<_> = spaces.keys().copied().collect();
         Inventory::capture(&functions, |address, offset| {
-            spaces
+            Ok(spaces
                 .get(&address)
-                .map(|words| words[usize::from(offset) / 4])
+                .map(|words| words[usize::from(offset) / 4]))
         })
+        .unwrap()
+    }
+    #[test]
+    fn transport_denial_aborts_without_absence_or_a_physical_role() {
+        use crate::bus::pci::{ConfigError, ConfigFailure, assignment};
+        let words = pf(2, 8, 1);
+        let mut accesses = 0;
+        Inventory::capture(&[PF], |_, offset| {
+            accesses += 1;
+            Ok(Some(words[usize::from(offset) / 4]))
+        })
+        .unwrap();
+        for fault in 1..=accesses {
+            let mut observed = 0;
+            let denied =
+                ConfigError::before_effect(ConfigFailure::Ownership(assignment::Error::Closed));
+            let result = Inventory::capture(&[PF], |_, offset| {
+                observed += 1;
+                if observed == fault {
+                    Err(denied)
+                } else {
+                    Ok(Some(words[usize::from(offset) / 4]))
+                }
+            });
+            assert_eq!(result.err(), Some(denied));
+            assert_eq!(observed, fault, "no read after denied original permission");
+        }
     }
     #[test]
     fn vfs_without_local_capabilities_are_classified_from_their_pf_across_a_bus_boundary() {
@@ -357,11 +399,12 @@ mod tests {
         let functions: Vec<_> = spaces.keys().copied().collect();
         let inventory = Inventory::capture(&functions, |address, offset| {
             if address == PF && offset == 0x100 {
-                None
+                Ok(None)
             } else {
-                Some(spaces[&address][usize::from(offset) / 4])
+                Ok(Some(spaces[&address][usize::from(offset) / 4]))
             }
-        });
+        })
+        .unwrap();
         assert_eq!(inventory.role(at(0, 0x100)), FunctionRole::Unverified);
     }
     #[test]
@@ -383,10 +426,11 @@ mod tests {
         let inventory = Inventory::capture(&[PF], |_, offset| {
             if offset == 0x110 {
                 samples += 1;
-                return Some(if samples == 1 { 2 } else { 1 });
+                return Ok(Some(if samples == 1 { 2 } else { 1 }));
             }
-            Some(words[usize::from(offset) / 4])
-        });
+            Ok(Some(words[usize::from(offset) / 4]))
+        })
+        .unwrap();
         assert_eq!(inventory.role(PF), FunctionRole::Unverified);
     }
     #[test]

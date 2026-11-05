@@ -176,6 +176,9 @@ fn finish_add(
 }
 #[test]
 fn quota_cache_requires_ack_reclaim_and_survives_same_original_owner_rebind() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = quota_bytes(true, false, Some(2));
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -253,6 +256,9 @@ fn quota_cache_requires_ack_reclaim_and_survives_same_original_owner_rebind() {
 }
 #[test]
 fn missing_quota_schema_refuses_before_binding_and_quota_fault_never_advances_remove() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..4 {
         let bytes = quota_bytes(
             false,
@@ -342,6 +348,9 @@ fn missing_quota_schema_refuses_before_binding_and_quota_fault_never_advances_re
 }
 #[test]
 fn cold_binding_checks_every_rate_and_limit() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for layout in [false, true] {
         exercise(&binding_bytes(layout), layout);
     }
@@ -354,6 +363,9 @@ fn cold_binding_checks_every_rate_and_limit() {
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn ax200_binding_schema_does_not_bypass_mld_mac_link_requirement() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =
@@ -507,6 +519,9 @@ fn exercise(bytes: &[u8], layout: bool) {
 }
 #[test]
 fn binding_requires_entire_os_envelope_and_ceiling_before_any_dma_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..5 {
         let bytes = binding_bytes(true);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -550,6 +565,9 @@ fn binding_requires_entire_os_envelope_and_ceiling_before_any_dma_publication() 
 }
 #[test]
 fn binding_status_failure_partial_power_failure_and_missing_ack_keep_original_epoch() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..4 {
         let bytes = binding_bytes(false);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

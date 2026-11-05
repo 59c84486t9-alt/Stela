@@ -36,12 +36,10 @@ fn record(leaf: u32, words: [u32; 4]) -> Cpuid {
     }
 }
 impl PowerControl {
-    /// Called only after the real native mapping owner checks its dispatcher
-    /// CPU. CPUID observations select which control is architecturally read.
-    pub(in crate::native_clock) fn capture(
-        identity_owner: &crate::engine::host::RootIdentity,
-    ) -> Result<Self, WorkError> {
-        identity_owner.check_dispatch()?;
+    /// # Safety
+    /// Caller checked its original privileged process CPU. CPUID observations
+    /// select which controls are architecturally readable.
+    pub(in crate::native_clock) unsafe fn capture() -> Result<Self, WorkError> {
         let identity = query(0);
         if identity[0] < 1 {
             return Err(WorkError::Unavailable);
@@ -87,13 +85,10 @@ impl PowerControl {
         })
     }
 
-    /// Same IRQ-checked CPU as capture; no mapping or process-only
-    /// operation occurs here. Changed observations retire this source epoch.
-    pub(in crate::native_clock) fn check(
-        &self,
-        identity_owner: &crate::engine::host::RootIdentity,
-    ) -> Result<(), WorkError> {
-        identity_owner.check_irq_cpu()?;
+    /// # Safety
+    /// Caller checked the same privileged CPU as capture. Changed
+    /// observations invalidate this source epoch.
+    pub(in crate::native_clock) unsafe fn check(&self) -> Result<(), WorkError> {
         if query(0) != self.identity
             || query(1) != self.basic
             || self.monitor.is_some_and(|value| query(5) != value)

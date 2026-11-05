@@ -1,0 +1,188 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 20:36:21 -0500
+Subject: [PATCH] refactor(vfs): link original single mount cloning
+
+---
+ fs/mount_cache.c | 65 +++++++++++++++++++++++++++++++++++++++++++++++-
+ fs/mount_cache.h |  2 +-
+ fs/namespace.c   | 63 ----------------------------------------------
+ 3 files changed, 65 insertions(+), 65 deletions(-)
+
+diff --git a/fs/mount_cache.c b/fs/mount_cache.c
+index 687390bf10e3bb22b947077b954a7d95c47c9905..2bd6fde52dd0edb90a3a8fe2283b6e67b3ba6be5 100644
+--- a/fs/mount_cache.c
++++ b/fs/mount_cache.c
+@@ -359,7 +359,7 @@ static inline void mnt_add_instance(struct mount *m, struct super_block *s)
+ 	s->s_mounts = m;
+ }
+ 
+-void setup_mnt(struct mount *m, struct dentry *root)
++static void setup_mnt(struct mount *m, struct dentry *root)
+ {
+ 	struct super_block *s = root->d_sb;
+ 
+@@ -451,6 +451,69 @@ struct vfsmount *vfs_kern_mount(struct file_system_type *type,
+ }
+ EXPORT_SYMBOL_GPL(vfs_kern_mount);
+ 
++struct mount *clone_mnt(struct mount *old, struct dentry *root,
++					int flag)
++{
++	struct mount *mnt;
++	int err;
++
++	mnt = alloc_vfsmnt(old->mnt_devname);
++	if (!mnt)
++		return ERR_PTR(-ENOMEM);
++
++	mnt->mnt.mnt_flags = READ_ONCE(old->mnt.mnt_flags) &
++			     ~MNT_INTERNAL_FLAGS;
++	mnt->mnt_t_flags = old->mnt_t_flags & T_UNBINDABLE;
++
++	if (flag & (CL_SLAVE | CL_PRIVATE))
++		mnt->mnt_group_id = 0; /* not a peer of original */
++	else
++		mnt->mnt_group_id = old->mnt_group_id;
++
++	if ((flag & CL_MAKE_SHARED) && !mnt->mnt_group_id) {
++		err = mnt_alloc_group_id(mnt);
++		if (err)
++			goto out_free;
++	}
++
++	if (mnt->mnt_group_id)
++		set_mnt_shared(mnt);
++
++	mnt->mnt.mnt_idmap = mnt_idmap_get(mnt_idmap(&old->mnt));
++
++	setup_mnt(mnt, root);
++
++	if (flag & CL_PRIVATE)	// we are done with it
++		return mnt;
++
++	if (peers(mnt, old))
++		list_add(&mnt->mnt_share, &old->mnt_share);
++
++	if ((flag & CL_SLAVE) && old->mnt_group_id) {
++		hlist_add_head(&mnt->mnt_slave, &old->mnt_slave_list);
++		mnt->mnt_master = old;
++	} else if (IS_MNT_SLAVE(old)) {
++		hlist_add_behind(&mnt->mnt_slave, &old->mnt_slave);
++		mnt->mnt_master = old->mnt_master;
++	}
++	return mnt;
++
++ out_free:
++	mnt_free_id(mnt);
++	free_vfsmnt(mnt);
++	return ERR_PTR(err);
++}
++
++struct vfsmount *mnt_clone_internal(const struct path *path)
++{
++	struct mount *p;
++	p = clone_mnt(real_mount(path->mnt), path->dentry, CL_PRIVATE);
++	if (IS_ERR(p))
++		return ERR_CAST(p);
++	p->mnt.mnt_flags |= MNT_INTERNAL;
++	return &p->mnt;
++}
++
+ static inline void mnt_del_instance(struct mount *m)
+ {
+ 	struct mount **p = m->mnt_pprev_for_sb;
+diff --git a/fs/mount_cache.h b/fs/mount_cache.h
+index b58d739f6ca3c276d19a7dc796220347e3b262c2..0c775cc8f6934870e1801c6f787f7f8b24502e88 100644
+--- a/fs/mount_cache.h
++++ b/fs/mount_cache.h
+@@ -20,7 +20,7 @@ extern struct kmem_cache *mnt_cache;
+ #define MNT_UNIQUE_ID_OFFSET (1ULL << 31)
+ 
+ struct mount *alloc_vfsmnt(const char *name);
+-void setup_mnt(struct mount *m, struct dentry *root);
++struct mount *clone_mnt(struct mount *old, struct dentry *root, int flag);
+ void mnt_free_id(struct mount *mnt);
+ int mnt_alloc_group_id(struct mount *mnt);
+ void free_vfsmnt(struct mount *mnt);
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 3c9a1b84f3cc139aeec0bc4808fef29aa22c50be..425fe2e818d87f95fbb4fc85a9d04e0bf0e131f1 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -644,59 +644,6 @@ static void commit_tree(struct mount *mnt)
+ 	touch_mnt_namespace(n);
+ }
+ 
+-static struct mount *clone_mnt(struct mount *old, struct dentry *root,
+-					int flag)
+-{
+-	struct mount *mnt;
+-	int err;
+-
+-	mnt = alloc_vfsmnt(old->mnt_devname);
+-	if (!mnt)
+-		return ERR_PTR(-ENOMEM);
+-
+-	mnt->mnt.mnt_flags = READ_ONCE(old->mnt.mnt_flags) &
+-			     ~MNT_INTERNAL_FLAGS;
+-	mnt->mnt_t_flags = old->mnt_t_flags & T_UNBINDABLE;
+-
+-	if (flag & (CL_SLAVE | CL_PRIVATE))
+-		mnt->mnt_group_id = 0; /* not a peer of original */
+-	else
+-		mnt->mnt_group_id = old->mnt_group_id;
+-
+-	if ((flag & CL_MAKE_SHARED) && !mnt->mnt_group_id) {
+-		err = mnt_alloc_group_id(mnt);
+-		if (err)
+-			goto out_free;
+-	}
+-
+-	if (mnt->mnt_group_id)
+-		set_mnt_shared(mnt);
+-
+-	mnt->mnt.mnt_idmap = mnt_idmap_get(mnt_idmap(&old->mnt));
+-
+-	setup_mnt(mnt, root);
+-
+-	if (flag & CL_PRIVATE)	// we are done with it
+-		return mnt;
+-
+-	if (peers(mnt, old))
+-		list_add(&mnt->mnt_share, &old->mnt_share);
+-
+-	if ((flag & CL_SLAVE) && old->mnt_group_id) {
+-		hlist_add_head(&mnt->mnt_slave, &old->mnt_slave_list);
+-		mnt->mnt_master = old;
+-	} else if (IS_MNT_SLAVE(old)) {
+-		hlist_add_behind(&mnt->mnt_slave, &old->mnt_slave);
+-		mnt->mnt_master = old->mnt_master;
+-	}
+-	return mnt;
+-
+- out_free:
+-	mnt_free_id(mnt);
+-	free_vfsmnt(mnt);
+-	return ERR_PTR(err);
+-}
+-
+ /*
+  * Make a mount point inaccessible to new lookups.
+  * Because there may still be current users, the caller MUST WAIT
+@@ -738,16 +685,6 @@ bool path_is_mountpoint(const struct path *path)
+ }
+ EXPORT_SYMBOL(path_is_mountpoint);
+ 
+-struct vfsmount *mnt_clone_internal(const struct path *path)
+-{
+-	struct mount *p;
+-	p = clone_mnt(real_mount(path->mnt), path->dentry, CL_PRIVATE);
+-	if (IS_ERR(p))
+-		return ERR_CAST(p);
+-	p->mnt.mnt_flags |= MNT_INTERNAL;
+-	return &p->mnt;
+-}
+-
+ /*
+  * Returns the mount which either has the specified mnt_id, or has the next
+  * smallest id afer the specified one.

@@ -8,14 +8,14 @@
 //! Software hosts come up before the PCI scan ([`bring_up`]), so the scan
 //! finds what they tunnel as it finds any other function, and a USB device
 //! behind a USB3 tunnel is there when the xHCI controllers attach.
-use super::{Bridge, Claimed, Failure, Kind, NativeServices, ServiceError, claim, map};
+use super::{Bridge, Failure, Kind, NativeServices, ServiceError, map};
 use crate::{
     Clock,
     bus::{
-        mmio::owned::Mapping,
-        pci::{Address, ConfigSpace, EcamWindow, Function, hotplug, owned::OwnedConfig, regs},
+        pci::{Address, ConfigSpace, EcamWindow, Function, hotplug, regs},
         thunderbolt::{
             channel::{self, Channel},
+            cold::{self, MappedRegisters},
             controller::{self, Controller},
             icm,
             manager::Manager,
@@ -24,8 +24,12 @@ use crate::{
     },
     probe::{Devices, Error, Handoff, Warning},
 };
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
-use core::fmt;
+use alloc::{boxed::Box, format, string::String, vec::Vec};
+use core::{fmt, mem::ManuallyDrop};
+mod ownership;
+mod transport;
+use ownership::Owners;
+pub use ownership::{Error as RetirementError, Failure as RetirementFailure, RetiredTransport};
 
 /// How long a domain's routers stay silent before it counts as found, and
 /// the longest the finding takes.
@@ -45,7 +49,7 @@ pub enum Connection {
     /// Its firmware: the ICM transport and the firmware's protocol
     /// parameters, with what arrived before DRIVER_READY was answered.
     Firmware {
-        icm: Box<icm::Host<ring::Mmio>>,
+        icm: Box<icm::Host<MappedRegisters>>,
         ready: icm::DriverReady,
         early: Vec<icm::Event>,
     },
@@ -56,19 +60,37 @@ pub enum Connection {
 /// An attached host, with the claimed function and BAR0 mapping it runs on.
 pub struct Host {
     pub location: String,
-    pub connection: Connection,
-    _owners: (Function<OwnedConfig>, Mapping),
+    connection: ManuallyDrop<Box<Connection>>,
+    _owners: ManuallyDrop<Box<Owners>>,
 }
 
+impl Host {
+    /// Borrow the active protocol while its actual original native owner stays
+    /// retained. Abandoned Host Drop never destroys the CM/router future.
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+    /// Borrow protocol and diagnostic location together without splitting any
+    /// actual native owner or creating a second CM/transport capability.
+    pub fn protocol(&mut self) -> (&str, &mut Connection) {
+        (&self.location, &mut self.connection)
+    }
+    pub fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
+}
 /// Why a host was not attached.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The `IMR_VALID` property says the firmware image is invalid, which
     /// `nhi_imr_valid` refuses.
     InvalidFirmwareImage,
     Clock,
+    Minimum(crate::bus::pci::power::Error),
+    Config(crate::bus::pci::ConfigError),
     Ring(ring::Error),
     Controller(controller::Error),
+    Cold(cold::Error),
     Icm(icm::Error),
     Channel(channel::Error),
     Platform(ServiceError),
@@ -81,11 +103,18 @@ impl fmt::Display for Refusal {
         match self {
             Self::InvalidFirmwareImage => f.write_str("firmware image not valid"),
             Self::Clock => f.write_str("uncalibrated clock"),
+            Self::Config(error) => error.fmt(f),
+            Self::Minimum(error) => write!(f, "USB4 minimum delay: {error:?}"),
             Self::Ring(error) => write!(f, "NHI ring: {error:?}"),
             Self::Controller(error) => write!(f, "NHI preparation: {error:?}"),
+            Self::Cold(error) => write!(f, "NHI cold ownership: {error:?}"),
             Self::Icm(error) => write!(f, "ICM: {error:?}"),
             Self::Channel(error) => write!(f, "control channel: {error:?}"),
             Self::Platform(error) => write!(f, "connection manager: {error}"),
+            Self::Arrival(hotplug::Error::Config(error)) => error.fmt(f),
+            Self::Arrival(hotplug::Error::PciCapability(error)) => {
+                write!(f, "tunnelled PCIe capability: {error:?}")
+            }
             Self::Arrival(hotplug::Error::Buses) => {
                 f.write_str("tunnelled PCIe device: the bridge has no bus numbers left for it")
             }
@@ -133,47 +162,101 @@ pub(in crate::probe) unsafe fn attach(
     clock: Clock,
     isolated: bool,
 ) -> Result<Host, Failure> {
+    let minimum = services
+        .minimum_delay()
+        .map_err(|error| (Error::Native(error), None))?;
     let refused =
         |refusal: Refusal, kept: Option<Box<dyn core::any::Any>>| (Error::Usb4(refusal), kept);
     if invalid_image(services, address, bridges) {
         return Err(refused(Refusal::InvalidFirmwareImage, None));
     }
-    let Claimed {
-        mut function,
-        domain,
-        bars,
-    } = claim(services, address).map_err(|error| (Error::Native(error), None))?;
+    if clock.check_duration(60_000_000).is_err() {
+        return Err(refused(Refusal::Clock, None));
+    }
+    // Keep the actual original preparation. Config containment alone never
+    // supplies the old engine/root/IRQ receipt or a private domain.
+    let mut requester = ManuallyDrop::new(
+        services
+            .prepare_requester(address)
+            .map_err(|error| (Error::Native(error), None))?,
+    );
+    let function = requester.function_mut();
+    if function.address != address {
+        return Err(refused(
+            Refusal::Cold(cold::Error::Identity),
+            Some(Box::new((requester, minimum))),
+        ));
+    }
     let family = icm::Family::of(function.vendor, function.device);
     let location = format!("{address}");
+    if let Err(error) = cold::check_flr(function, minimum.as_ref()) {
+        return Err(refused(
+            Refusal::Cold(error),
+            Some(Box::new((requester, minimum))),
+        ));
+    }
+    let bars = match function.bars() {
+        Ok(bars) => bars,
+        Err(error) => return Err((error.into(), Some(Box::new((requester, minimum))))),
+    };
     let mapping = match map(services, address, &bars, 0) {
         Ok(mapping) => mapping,
-        Err(error) => {
-            return Err((Error::Native(error), Some(Box::new((function, domain)))));
-        }
+        Err(error) => return Err((Error::Native(error), Some(Box::new((requester, minimum))))),
     };
-    let window = mapping
-        .bytes()
-        .and_then(|bytes| Ok((mapping.address(0, bytes)?, bytes)));
-    let (window, bytes) = match window {
-        Ok(window) => window,
+    let command = match function.config().read16(regs::COMMAND) {
+        Ok(command) => command,
         Err(error) => {
             return Err((
-                Error::Native(ServiceError::Mapping(error)),
-                Some(Box::new((function, domain, mapping))),
+                error.into(),
+                Some(Box::new((requester, ManuallyDrop::new(mapping), minimum))),
             ));
         }
     };
-    // SAFETY: `window` is the whole owned uncached BAR0 mapping, which the
-    // host keeps with every reference to these registers.
-    let registers = match unsafe { ring::Mmio::new(window, bytes) } {
-        Ok(registers) => Arc::new(registers),
-        Err(error) => {
+    if command == u16::MAX {
+        return Err(refused(
+            Refusal::Cold(cold::Error::Identity),
+            Some(Box::new((requester, ManuallyDrop::new(mapping), minimum))),
+        ));
+    }
+    // Memory decode only, with Bus Master still contained in the original
+    // global/configuration custody. No ring data allocation/publication exists.
+    if let Err(error) = function
+        .config()
+        .write16(regs::COMMAND, command | regs::COMMAND_MEMORY)
+    {
+        return Err((
+            error.into(),
+            Some(Box::new((requester, ManuallyDrop::new(mapping), minimum))),
+        ));
+    }
+    let inputs = cold::Inputs {
+        requester: ManuallyDrop::into_inner(requester),
+        mapping,
+    };
+    // SAFETY: actual first original requester and its same owned whole BAR0;
+    // platform retains original/consumed global DMA custody, excluded firmware
+    // IRQ/work/config owners, D0/shared power, no Stela CM/ring/IRQ publisher.
+    // This cold reset is function-local; HRR is not used as inherited stop.
+    let cold = unsafe { cold::Cold::new(inputs) };
+    let ready = match cold.quiesce_and_bind(minimum.as_ref()) {
+        Ok(ready) => ready,
+        Err(failed) => {
             return Err(refused(
-                Refusal::Ring(error),
-                Some(Box::new((function, domain, mapping))),
+                Refusal::Cold(failed.error.clone()),
+                Some(Box::new((failed, minimum))),
             ));
         }
     };
+    // SAFETY: immediate paired transfer into one retained native owner graph,
+    // before any bus-master/ring/CM publication. Actual Attachment is kept.
+    let (function, attachment, registers) = unsafe { ready.into_parts() };
+    let mut owners = ManuallyDrop::new(Box::new(Owners {
+        function,
+        attachment,
+        registers,
+        software: None,
+        minimum,
+    }));
     let now = || {
         clock
             .try_now_us()
@@ -181,17 +264,27 @@ pub(in crate::probe) unsafe fn attach(
             .map_err(|_| Refusal::Clock)
     };
     let started = (|| {
-        let config = function.config();
-        let command = config.read16(regs::COMMAND);
+        let owners = &mut **owners;
+        let config = owners.function.config();
+        let command = config.read16(regs::COMMAND).map_err(Refusal::Config)?;
         if command & regs::COMMAND_MEMORY == 0 {
-            config.write16(regs::COMMAND, command | regs::COMMAND_MEMORY);
+            config
+                .write16(regs::COMMAND, command | regs::COMMAND_MEMORY)
+                .map_err(Refusal::Config)?;
         }
         {
             // SAFETY: the configuration and registers are the claimed
             // function's and its BAR0, and the claimed requester's DMA and
             // interrupts are stopped.
-            let mut controller = unsafe { Controller::new(&mut *config, registers.clone()) }
-                .map_err(Refusal::Controller)?;
+            let mut controller = unsafe {
+                Controller::new_with_router_reset(
+                    &mut *config,
+                    owners.registers.clone(),
+                    controller::RouterReset::Preserve,
+                    owners.minimum.clone(),
+                )
+            }
+            .map_err(Refusal::Controller)?;
             while controller
                 .poll(now()?)
                 .map_err(Refusal::Controller)?
@@ -201,8 +294,15 @@ pub(in crate::probe) unsafe fn attach(
             }
         }
         // `nhi_probe`'s pci_set_master, now that the domain is attached.
-        let command = config.read16(regs::COMMAND);
-        config.write16(regs::COMMAND, command | regs::COMMAND_MASTER);
+        let command = config.read16(regs::COMMAND).map_err(Refusal::Config)?;
+        config
+            .write16(regs::COMMAND, command | regs::COMMAND_MASTER)
+            .map_err(Refusal::Config)?;
+        if config.read16(regs::COMMAND).map_err(Refusal::Config)?
+            != (command | regs::COMMAND_MASTER)
+        {
+            return Err(Refusal::Cold(cold::Error::Registers));
+        }
         if family.is_none() {
             let platform = services
                 .usb4_platform(&location, isolated)
@@ -212,15 +312,17 @@ pub(in crate::probe) unsafe fn attach(
             // no firmware runs a connection manager on it.
             let mut channel = unsafe {
                 Channel::new(
-                    registers.clone(),
+                    owners.registers.clone(),
                     services.pages(),
-                    domain.clone(),
+                    owners.attachment.domain(),
                     u64::MAX,
                 )
             }
             .map_err(Refusal::Channel)?;
             channel.start(now()?).map_err(Refusal::Channel)?;
-            let manager = Manager::new(Box::new(channel), platform);
+            let shared = transport::SharedChannel::new(channel);
+            owners.software = Some(shared.clone());
+            let manager = Manager::new(Box::new(transport::Sender(shared)), platform);
             return Ok(Connection::Software { manager });
         }
         // SAFETY: as above; this mount negotiates no native USB4 control, so
@@ -228,9 +330,9 @@ pub(in crate::probe) unsafe fn attach(
         let mut host = unsafe {
             icm::Host::new(
                 &*config,
-                registers.clone(),
+                owners.registers.clone(),
                 services.pages(),
-                domain.clone(),
+                owners.attachment.domain(),
                 u64::MAX,
             )
         }
@@ -258,13 +360,10 @@ pub(in crate::probe) unsafe fn attach(
     match started {
         Ok(connection) => Ok(Host {
             location,
-            connection,
-            _owners: (function, mapping),
+            connection: ManuallyDrop::new(Box::new(connection)),
+            _owners: owners,
         }),
-        Err(refusal) => Err(refused(
-            refusal,
-            Some(Box::new((function, domain, mapping, registers))),
-        )),
+        Err(refusal) => Err(refused(refusal, Some(Box::new(owners)))),
     }
 }
 
@@ -279,7 +378,7 @@ impl Slot {
     ///
     /// # Safety
     /// As for [`bring_up`].
-    unsafe fn arrived(&self) -> bool {
+    unsafe fn arrived(&self) -> Result<bool, hotplug::Error> {
         let Address {
             bus,
             device,
@@ -305,26 +404,55 @@ struct Survey {
 
 /// # Safety
 /// As for [`bring_up`].
-unsafe fn survey(handoff: &Handoff) -> Survey {
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
+unsafe fn survey(handoff: &Handoff, devices: &mut Devices) -> Survey {
     let mut found = Survey::default();
     for window in &handoff.ecam {
         if !handoff.is_mapped(&window.range()) {
             continue;
         }
         // SAFETY: mapped as checked; the caller owns the machine.
-        for mut function in unsafe { Function::enumerate(window) } {
+        let functions = match unsafe { Function::enumerate(window) } {
+            Ok(functions) => functions,
+            Err(failure) => {
+                devices
+                    .failures
+                    .push((failure.address(), Error::Enumeration(failure.error)));
+                devices.owners.push(Box::new(failure));
+                continue;
+            }
+        };
+        for mut function in functions {
             let address = function.address;
             if function.class[..2] == [6, 4] {
-                found.bridges.push(Bridge {
-                    address,
-                    secondary: function.config().read8(0x19),
-                    aspm: crate::bus::pci::aspm_control(&function),
-                });
-                if hotplug::hot_plug_capable(&*function.config()) {
-                    found.slots.push(Slot {
-                        window: *window,
+                let checked = (|| -> Result<_, Error> {
+                    let bridge = Bridge {
                         address,
-                    });
+                        secondary: function.config().read8(0x19)?,
+                        aspm: crate::bus::pci::aspm_control(&function)?,
+                    };
+                    let hotplug = hotplug::hot_plug_capable(&*function.config())
+                        .map_err(|error| Error::Usb4(Refusal::Arrival(error)))?;
+                    Ok((bridge, hotplug))
+                })();
+                match checked {
+                    Ok((bridge, hotplug)) => {
+                        found.bridges.push(bridge);
+                        if hotplug {
+                            found.slots.push(Slot {
+                                window: *window,
+                                address,
+                            });
+                        }
+                    }
+                    Err(error) => {
+                        devices.failures.push((address, error));
+                        devices.owners.push(Box::new(function));
+                        continue;
+                    }
                 }
             }
             if Kind::of(&function) == Some(Kind::Usb4)
@@ -346,7 +474,7 @@ fn pump(hosts: &mut [Host], clock: Clock, ms: u64, mut done: impl FnMut(bool) ->
     loop {
         let mut busy = false;
         for host in hosts.iter_mut() {
-            if let Connection::Software { manager } = &mut host.connection {
+            if let Connection::Software { manager } = host.connection_mut() {
                 busy |= manager.poll() && !manager.idle();
             }
         }
@@ -380,7 +508,7 @@ pub(in crate::probe) unsafe fn bring_up(
         bridges,
         slots,
         hosts,
-    } = unsafe { survey(handoff) };
+    } = unsafe { survey(handoff, devices) };
     let clock = handoff.clock;
     let isolated = hosts
         .iter()
@@ -412,7 +540,7 @@ pub(in crate::probe) unsafe fn bring_up(
     });
     let tunnels: usize = attached
         .iter()
-        .map(|host| match &host.connection {
+        .map(|host| match host.connection() {
             Connection::Software { manager } => manager.pcie_tunnels(),
             Connection::Firmware { .. } => 0,
         })
@@ -420,14 +548,60 @@ pub(in crate::probe) unsafe fn bring_up(
     if tunnels == 0 {
         return hosts;
     }
-    let waiting = || {
-        // SAFETY: forwarded.
-        slots.iter().filter(|slot| unsafe { slot.arrived() })
+    let (adopting, failed_arrivals) = {
+        let mut failed = Vec::new();
+        let mut failures = Vec::new();
+        let ready = {
+            let mut waiting = || {
+                let mut ready = Vec::new();
+                for (index, slot) in slots.iter().enumerate() {
+                    if failed.contains(&index) {
+                        continue;
+                    }
+                    // SAFETY: original mapped slot remains probe-owned.
+                    match unsafe { slot.arrived() } {
+                        Ok(true) => ready.push(index),
+                        Ok(false) => {}
+                        Err(error) => {
+                            failed.push(index);
+                            failures.push((slot.address, error));
+                        }
+                    }
+                }
+                ready
+            };
+            pump(attached, clock, LINK_MS, |_| waiting().len() >= tunnels);
+            // PCIe requires this physical recovery interval before the next
+            // configuration request. Nominal polling timeout data is not a
+            // lower-bound timing capability. Keep all actual owners on failure
+            // and remove every protocol from future live service.
+            let host = attached
+                .first()
+                .expect("a live software tunnel has its host");
+            let address = host._owners.function.address;
+            let minimum = host._owners.minimum.clone();
+            if let Err(error) = minimum.wait_us(LINK_RECOVERY_MS * 1000) {
+                devices
+                    .failures
+                    .push((address, Error::Usb4(Refusal::Minimum(error))));
+                devices.owners.extend(
+                    attached
+                        .drain(..)
+                        .map(|host| Box::new(host) as Box<dyn core::any::Any>),
+                );
+                return hosts;
+            }
+            waiting()
+        };
+        (ready, failures)
     };
-    pump(attached, clock, LINK_MS, |_| waiting().count() >= tunnels);
-    pump(attached, clock, LINK_RECOVERY_MS, |_| false);
-    let adopting: Vec<&Slot> = waiting().collect();
-    for slot in adopting {
+    for (address, error) in failed_arrivals {
+        devices
+            .failures
+            .push((address, Error::Usb4(Refusal::Arrival(error))));
+    }
+    'adoption: for index in adopting {
+        let slot = &slots[index];
         let bridge = slot.address;
         // SAFETY: forwarded; the functions below a bridge are still probe's.
         let adopted = hotplug::adopt(
@@ -452,7 +626,17 @@ pub(in crate::probe) unsafe fn bring_up(
             slot.window
                 .config(bridge.bus, bridge.device, bridge.function)
         };
-        let (first, last) = (configuration.read8(0x19), configuration.read8(0x1a));
+        let buses = (|| -> Result<_, crate::bus::pci::ConfigError> {
+            Ok((configuration.read8(0x19)?, configuration.read8(0x1a)?))
+        })();
+        let (first, last) = match buses {
+            Ok(buses) => buses,
+            Err(error) => {
+                devices.failures.push((bridge, error.into()));
+                devices.owners.push(Box::new(configuration));
+                continue;
+            }
+        };
         if first <= bridge.bus
             || last < first
             || first < slot.window.start_bus
@@ -479,8 +663,14 @@ pub(in crate::probe) unsafe fn bring_up(
                 // no child driver has started or configuration writer overlaps.
                 let configuration =
                     unsafe { slot.window.config(bus, address.device, address.function) };
-                if configuration.read16(0) != u16::MAX {
-                    functions.push(address);
+                match configuration.read16(0) {
+                    Ok(u16::MAX) => {}
+                    Ok(_) => functions.push(address),
+                    Err(error) => {
+                        devices.failures.push((address, error.into()));
+                        devices.owners.push(Box::new(configuration));
+                        continue 'adoption;
+                    }
                 }
             }
         }
@@ -493,7 +683,7 @@ pub(in crate::probe) unsafe fn bring_up(
                 || offset > 4092
                 || !offset.is_multiple_of(4)
             {
-                return None;
+                return Ok(None);
             }
             // SAFETY: bring_up owns this exact complete adopted subtree and
             // its original bridge under the same kept mapped ECAM window.
@@ -501,7 +691,7 @@ pub(in crate::probe) unsafe fn bring_up(
                 slot.window
                     .config(address.bus, address.device, address.function)
             };
-            Some(config.read32(offset))
+            config.read32(offset).map(Some)
         };
         // SAFETY: adopt just completed the entire subtree under this owned
         // slot. No child driver has started; all prior PF/VF assignments and

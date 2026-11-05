@@ -1,0 +1,178 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 11:41:24 -0500
+Subject: [PATCH] refactor(fs): separate anonymous superblock device allocation
+
+---
+ fs/Makefile         |  2 +-
+ fs/super.c          | 51 -----------------------------
+ fs/super_anon_dev.c | 78 +++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 79 insertions(+), 52 deletions(-)
+ create mode 100644 fs/super_anon_dev.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 081473d7347a512558bc260f30e6fb8bd82d8e70..71d834e8eacabfb1a0a1f701225df2c53c349e33 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -7,7 +7,7 @@
+ # 
+ 
+ 
+-obj-y :=	open.o filp_close.o read_write.o file_table.o file_table_init.o super.o \
++obj-y :=	open.o filp_close.o read_write.o file_table.o file_table_init.o super.o super_anon_dev.o \
+ 		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o path_get.o name_hash.o filename.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o dcache_init.o dentry_ancestry.o inode.o inode_cache_init.o inode_evict.o \
+ 		attr.o bad_inode.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o mount_cache.o \
+diff --git a/fs/super.c b/fs/super.c
+index addf3ad54a583cad6b7d051f161e1a5062623b71..c154dd3e8a1ee6f7f48323fe2046862dadf98466 100644
+--- a/fs/super.c
++++ b/fs/super.c
+@@ -1182,51 +1182,6 @@ void filesystems_thaw(void)
+ 	__iterate_supers(filesystems_thaw_callback, NULL, SUPER_ITER_UNLOCKED);
+ }
+ 
+-static DEFINE_IDA(unnamed_dev_ida);
+-
+-/**
+- * get_anon_bdev - Allocate a block device for filesystems which don't have one.
+- * @p: Pointer to a dev_t.
+- *
+- * Filesystems which don't use real block devices can call this function
+- * to allocate a virtual block device.
+- *
+- * Context: Any context.  Frequently called while holding sb_lock.
+- * Return: 0 on success, -EMFILE if there are no anonymous bdevs left
+- * or -ENOMEM if memory allocation failed.
+- */
+-int get_anon_bdev(dev_t *p)
+-{
+-	int dev;
+-
+-	/*
+-	 * Many userspace utilities consider an FSID of 0 invalid.
+-	 * Always return at least 1 from get_anon_bdev.
+-	 */
+-	dev = ida_alloc_range(&unnamed_dev_ida, 1, (1 << MINORBITS) - 1,
+-			GFP_ATOMIC);
+-	if (dev == -ENOSPC)
+-		dev = -EMFILE;
+-	if (dev < 0)
+-		return dev;
+-
+-	*p = MKDEV(0, dev);
+-	return 0;
+-}
+-EXPORT_SYMBOL(get_anon_bdev);
+-
+-void free_anon_bdev(dev_t dev)
+-{
+-	ida_free(&unnamed_dev_ida, MINOR(dev));
+-}
+-EXPORT_SYMBOL(free_anon_bdev);
+-
+-int set_anon_super(struct super_block *s, void *data)
+-{
+-	return get_anon_bdev(&s->s_dev);
+-}
+-EXPORT_SYMBOL(set_anon_super);
+-
+ void kill_anon_super(struct super_block *sb)
+ {
+ 	dev_t dev = sb->s_dev;
+@@ -1236,12 +1191,6 @@ void kill_anon_super(struct super_block *sb)
+ }
+ EXPORT_SYMBOL(kill_anon_super);
+ 
+-int set_anon_super_fc(struct super_block *sb, struct fs_context *fc)
+-{
+-	return set_anon_super(sb, NULL);
+-}
+-EXPORT_SYMBOL(set_anon_super_fc);
+-
+ static int test_keyed_super(struct super_block *sb, struct fs_context *fc)
+ {
+ 	return sb->s_fs_info == fc->s_fs_info;
+diff --git a/fs/super_anon_dev.c b/fs/super_anon_dev.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..4832687992c6f2641dc28f3db84b0583b0cc654a
+--- /dev/null
++++ b/fs/super_anon_dev.c
+@@ -0,0 +1,78 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ *  linux/fs/super.c
++ *
++ *  Copyright (C) 1991, 1992  Linus Torvalds
++ *
++ *  super.c contains code to handle: - mount structures
++ *                                   - super-block tables
++ *                                   - filesystem drivers list
++ *                                   - mount system call
++ *                                   - umount system call
++ *                                   - ustat system call
++ *
++ * GK 2/5/95  -  Changed to support mounting the root fs via NFS
++ *
++ *  Added kerneld support: Jacques Gelinas and Bjorn Ekwall
++ *  Added change_root: Werner Almesberger & Hans Lermen, Feb '96
++ *  Added options to /proc/mounts:
++ *    Torbjörn Lindh (torbjorn.lindh@gopta.se), April 14, 1996.
++ *  Added devfs support: Richard Gooch <rgooch@atnf.csiro.au>, 13-JAN-1998
++ *  Heavily rewritten for 'one fs - one tree' dcache architecture. AV, Mar 2000
++ */
++
++#include <linux/export.h>
++#include <linux/fs.h>
++#include <linux/idr.h>
++#include <linux/kdev_t.h>
++
++static DEFINE_IDA(unnamed_dev_ida);
++
++/**
++ * get_anon_bdev - Allocate a block device for filesystems which don't have one.
++ * @p: Pointer to a dev_t.
++ *
++ * Filesystems which don't use real block devices can call this function
++ * to allocate a virtual block device.
++ *
++ * Context: Any context.  Frequently called while holding sb_lock.
++ * Return: 0 on success, -EMFILE if there are no anonymous bdevs left
++ * or -ENOMEM if memory allocation failed.
++ */
++int get_anon_bdev(dev_t *p)
++{
++	int dev;
++
++	/*
++	 * Many userspace utilities consider an FSID of 0 invalid.
++	 * Always return at least 1 from get_anon_bdev.
++	 */
++	dev = ida_alloc_range(&unnamed_dev_ida, 1, (1 << MINORBITS) - 1,
++			GFP_ATOMIC);
++	if (dev == -ENOSPC)
++		dev = -EMFILE;
++	if (dev < 0)
++		return dev;
++
++	*p = MKDEV(0, dev);
++	return 0;
++}
++EXPORT_SYMBOL(get_anon_bdev);
++
++void free_anon_bdev(dev_t dev)
++{
++	ida_free(&unnamed_dev_ida, MINOR(dev));
++}
++EXPORT_SYMBOL(free_anon_bdev);
++
++int set_anon_super(struct super_block *s, void *data)
++{
++	return get_anon_bdev(&s->s_dev);
++}
++EXPORT_SYMBOL(set_anon_super);
++
++int set_anon_super_fc(struct super_block *sb, struct fs_context *fc)
++{
++	return set_anon_super(sb, NULL);
++}
++EXPORT_SYMBOL(set_anon_super_fc);

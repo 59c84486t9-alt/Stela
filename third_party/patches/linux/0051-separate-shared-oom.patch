@@ -1,0 +1,117 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 00:00:50 -0500
+Subject: [PATCH] refactor(mm): separate shared OOM adjustment serialization
+
+---
+ include/linux/oom.h |  1 +
+ kernel/fork.c       | 19 -------------------
+ mm/Makefile         |  2 +-
+ mm/oom_adj.c        | 28 ++++++++++++++++++++++++++++
+ mm/oom_kill.c       |  3 ---
+ 5 files changed, 30 insertions(+), 23 deletions(-)
+ create mode 100644 mm/oom_adj.c
+
+diff --git a/include/linux/oom.h b/include/linux/oom.h
+index 7b02bc1d0a7eaedde6f5f07fdfd0de4cc2c39e12..f0ec1faefc02a42ca6ee5d1e0b2dc13489021bc5 100644
+--- a/include/linux/oom.h
++++ b/include/linux/oom.h
+@@ -55,6 +55,7 @@ struct oom_control {
+ 
+ extern struct mutex oom_lock;
+ extern struct mutex oom_adj_mutex;
++void copy_oom_score_adj(u64 clone_flags, struct task_struct *tsk);
+ 
+ static inline void set_current_oom_origin(void)
+ {
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 5388348656fad573e67b7b12bfb33070436dd511..d0c2aadb5c168a1a647415de3178fefe0521c6b6 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -1694,25 +1694,6 @@ static __always_inline void delayed_free_task(struct task_struct *tsk)
+ 		free_task(tsk);
+ }
+ 
+-static void copy_oom_score_adj(u64 clone_flags, struct task_struct *tsk)
+-{
+-	/* Skip if kernel thread */
+-	if (!tsk->mm)
+-		return;
+-
+-	/* Skip if spawning a thread or using vfork */
+-	if ((clone_flags & (CLONE_VM | CLONE_THREAD | CLONE_VFORK)) != CLONE_VM)
+-		return;
+-
+-	/* We need to synchronize with __set_oom_adj */
+-	mutex_lock(&oom_adj_mutex);
+-	mm_flags_set(MMF_MULTIPROCESS, tsk->mm);
+-	/* Update the values in case they were changed after copy_signal */
+-	tsk->signal->oom_score_adj = current->signal->oom_score_adj;
+-	tsk->signal->oom_score_adj_min = current->signal->oom_score_adj_min;
+-	mutex_unlock(&oom_adj_mutex);
+-}
+-
+ #ifdef CONFIG_RV
+ static void rv_task_fork(struct task_struct *p)
+ {
+diff --git a/mm/Makefile b/mm/Makefile
+index 6beedb960fca73feb46c6965266de133a58deb5f..197a3a727ae5e9b6f9d1d13091bbec4bff620022 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -48,7 +48,7 @@ ifdef CONFIG_64BIT
+ mmu-$(CONFIG_MMU)	+= mseal.o
+ endif
+ 
+-obj-y			:= filemap.o pagecache_init.o mempool.o oom_kill.o fadvise.o \
++obj-y			:= filemap.o pagecache_init.o mempool.o oom_kill.o oom_adj.o fadvise.o \
+ 			   maccess.o page-writeback.o writeback_domain.o folio-compat.o \
+ 			   readahead.o swap.o truncate.o vmscan.o shrinker.o \
+ 			   shmem.o util.o mmzone.o vmstat.o vmstat_init.o backing-dev.o \
+diff --git a/mm/oom_adj.c b/mm/oom_adj.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..ca9f888ed684e282f89d3f488bc6a65e8226d555
+--- /dev/null
++++ b/mm/oom_adj.c
+@@ -0,0 +1,28 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* OOM adjustment serialization from mm/oom_kill.c and kernel/fork.c. */
++#include <linux/mm.h>
++#include <linux/mutex.h>
++#include <linux/oom.h>
++#include <linux/sched/signal.h>
++
++/* Serializes oom_score_adj and oom_score_adj_min updates */
++DEFINE_MUTEX(oom_adj_mutex);
++
++void copy_oom_score_adj(u64 clone_flags, struct task_struct *tsk)
++{
++	/* Skip if kernel thread */
++	if (!tsk->mm)
++		return;
++
++	/* Skip if spawning a thread or using vfork */
++	if ((clone_flags & (CLONE_VM | CLONE_THREAD | CLONE_VFORK)) != CLONE_VM)
++		return;
++
++	/* We need to synchronize with __set_oom_adj */
++	mutex_lock(&oom_adj_mutex);
++	mm_flags_set(MMF_MULTIPROCESS, tsk->mm);
++	/* Update the values in case they were changed after copy_signal */
++	tsk->signal->oom_score_adj = current->signal->oom_score_adj;
++	tsk->signal->oom_score_adj_min = current->signal->oom_score_adj_min;
++	mutex_unlock(&oom_adj_mutex);
++}
+diff --git a/mm/oom_kill.c b/mm/oom_kill.c
+index 5f372f6e26fa329d3152fac961a7bdb82d7f06cd..1ff5ca5d3484083922b47878cb1f9bc67bf13a36 100644
+--- a/mm/oom_kill.c
++++ b/mm/oom_kill.c
+@@ -66,9 +66,6 @@ static int sysctl_oom_dump_tasks = 1;
+  * and mark_oom_victim
+  */
+ DEFINE_MUTEX(oom_lock);
+-/* Serializes oom_score_adj and oom_score_adj_min updates */
+-DEFINE_MUTEX(oom_adj_mutex);
+-
+ static inline bool is_memcg_oom(struct oom_control *oc)
+ {
+ 	return oc->memcg != NULL;

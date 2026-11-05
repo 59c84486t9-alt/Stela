@@ -19,7 +19,7 @@ pub(super) struct Admission {
 }
 
 pub(super) fn admit(
-    inspection: &FunctionInspection,
+    inspection: &FunctionInspection<impl UnitConfig>,
     ivrs: &Ivrs<'_>,
     actual_bits: u8,
 ) -> Result<Admission, Error> {

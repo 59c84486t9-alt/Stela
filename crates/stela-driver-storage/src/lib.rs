@@ -15,6 +15,8 @@ pub mod ahci;
 mod mmc;
 pub mod nvme;
 mod pci;
+mod retention;
+pub use retention::Retained;
 pub mod rtsx;
 pub mod sdhci;
 pub mod virtio;

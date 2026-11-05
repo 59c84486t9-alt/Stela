@@ -266,3 +266,27 @@ fn initial_window_drain_requires_the_exact_root_and_dte() {
     // SAFETY: the original window entry is restored and no requester is active.
     unsafe { unit.retire() }.unwrap();
 }
+
+#[test]
+fn direct_delivery_keeps_the_root_and_latches_a_mode_change() {
+    let (mut unit, peer) = model::unit();
+    let mode = unit.pin_direct_delivery().unwrap();
+    // SAFETY: the isolated model keeps its exact mapping and owning context.
+    unsafe { mode.check() }.unwrap();
+    let before = peer.commands();
+    // SAFETY: there are no requester users. The live mode pin must still
+    // independently prevent retirement before any command or register effect.
+    assert_eq!(unsafe { unit.retire() }, Err(Error::Busy));
+    assert_eq!(peer.commands(), before);
+    let control = peer.register(CONTROL);
+    peer.set(CONTROL, control ^ COHERENT);
+    // SAFETY: still the same original mapped registers.
+    assert_eq!(unsafe { mode.check() }, Err(Error::Fault));
+    peer.set(CONTROL, control);
+    // SAFETY: the same mapping remains live; a repaired value grants no new pin.
+    assert_eq!(unsafe { mode.check() }, Err(Error::Fault));
+    drop(mode);
+    assert!(matches!(unit.pin_direct_delivery(), Err(Error::Poisoned)));
+    // SAFETY: the isolated model now has no mode pin, requester or IRQ users.
+    unsafe { unit.retire() }.unwrap();
+}

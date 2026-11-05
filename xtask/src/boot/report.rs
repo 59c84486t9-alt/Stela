@@ -235,7 +235,7 @@ pub(super) fn finish(arguments: &Run, outcome: Outcome) -> Result<ExitCode> {
     });
     report["native_mmio"] = native_mmio.unwrap_or(Value::Null);
     report["native_clock"] = native_clock.unwrap_or(Value::Null);
-    report["hpet"] = json!(arguments.hpet);
+    report["hpet"] = json!(arguments.hpet_enabled());
     fs::write(output.join("run.json"), format!("{report:#}\n"))?;
     println!("{report:#}");
     if let Some(Err(error)) = storage {

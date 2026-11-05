@@ -18,6 +18,9 @@ fn parts_for(chip: u32) -> (Hardware<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<
 
 #[test]
 fn rdma_modes_match_source_for_every_asic() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for chip in [0x0572_0000, 0x0576_1000, 0x0576_2000] {
         let (hardware, pages, domain, peer) = parts_for(chip);
         // These are firmware-observed control bits, with RESET/ENABLE clear.
@@ -47,6 +50,9 @@ fn rdma_modes_match_source_for_every_asic() {
 
 #[test]
 fn independent_peer_rejects_deleted_source_lso_mode_before_any_dma_effect() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for chip in [0x0572_0000, 0x0576_1000, 0x0576_2000] {
         let (hardware, pages, domain, peer) = parts_for(chip);
         // SAFETY: the model device, its pages and its domain belong to this test alone; no other
@@ -72,6 +78,9 @@ fn independent_peer_rejects_deleted_source_lso_mode_before_any_dma_effect() {
 #[test]
 #[ignore = "oracle: STELA_TG3_RDMA_MODE_ORACLE"]
 fn unchanged_linux_complete_rdma_mode_matches_register_and_raw_traffic() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let trace = std::fs::read_to_string(
         std::env::var("STELA_TG3_RDMA_MODE_ORACLE").expect("fresh original-source trace required"),
     )

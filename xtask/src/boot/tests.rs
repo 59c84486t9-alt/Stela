@@ -266,6 +266,27 @@ fn hpet_is_explicit_and_restricted_to_owned_clock_modes_before_work() {
         )
         .is_err()
     );
+    let pci = parse(vec!["--native-pci-own-hpet"]).unwrap();
+    assert!(!pci.hpet);
+    assert!(pci.hpet_enabled());
+    assert!(native_root_preflight(&pci).is_ok());
+    assert!(parse(vec!["--native-pci-own-hpet", "--native-mmio-check"]).is_err());
+    assert!(
+        parse(vec![
+            "--native-pci-own-hpet",
+            "--audio-check",
+            "transport-duplex"
+        ])
+        .is_err()
+    );
+    let usb_line = "--usb-reset-check --usb-own-hpet --storage-check TEST:02020202-0202-0202-0202-020202020202";
+    let usb = parse(vec!["--append", usb_line]).unwrap();
+    assert!(usb.hpet_enabled());
+    assert!(native_root_preflight(&usb).is_ok());
+    let virtual_clock = parse(vec!["--append", usb_line, "--icount", "1"]).unwrap();
+    assert!(native_root_preflight(&virtual_clock).is_err());
+    let system = parse(vec!["--append", "--system --usb-own-hpet"]).unwrap();
+    assert!(native_root_preflight(&system).is_err());
     let off = qemu_machine("off", false);
     assert_eq!(
         off,
@@ -297,6 +318,44 @@ fn native_mmio_emits_system_options_without_host_check_only_keys() {
     for forbidden in ["--host-check", "--deadline", "--key-seconds"] {
         assert!(!words.contains(&forbidden));
     }
+}
+
+#[test]
+fn audio_fixture_exposes_hpet_with_smm_disabled() {
+    use clap::Parser;
+    let parsed = crate::Cli::try_parse_from([
+        "xtask",
+        "boot",
+        "run",
+        "--output",
+        "/tmp/audio-hpet",
+        "--audio-check",
+        "transport-duplex",
+    ])
+    .unwrap();
+    let crate::Task::Boot(Command::Run(run)) = parsed.task else {
+        panic!("boot run")
+    };
+    let command = machine::command(
+        &run,
+        machine::MachineOptions {
+            qemu: Path::new("qemu-system-x86_64"),
+            firmware: &Firmware {
+                code: "firmware".into(),
+                variables: "firmware-variables.fd".into(),
+            },
+            variables: Path::new("variables.fd"),
+            format: "raw",
+            system: true,
+            bundle: false,
+        },
+    );
+    let machine = command
+        .get_args()
+        .skip_while(|arg| *arg != "-machine")
+        .nth(1)
+        .unwrap();
+    assert_eq!(machine, qemu_machine("off", true).as_str());
 }
 
 #[test]

@@ -78,15 +78,21 @@ impl RegisterIo for Registers {
 fn usb2_root_resume_preserves_source_forty_millisecond_signal_before_u0() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         let mut memory = vec![0u64; 512 * 1024];
-        let (mut host, devices, hardware, state, mut dma) =
-            fixture_with_leaf(&mut memory, speed, false, Node::bot_disk(speed));
+        let (mut host, devices, hardware, state, mut dma) = fixture_with_leaf_at_clock(
+            &mut memory,
+            speed,
+            false,
+            Node::bot_disk(speed),
+            Clock {
+                ticks_per_microsecond: 1_000,
+            },
+        );
         let mut original = bind_root_disk(&host, &devices, &mut dma);
         let payload = [0x6c; 512];
         original.disks[0].write(2, &payload).unwrap();
         // Independent test TSC scale, not a measured host-clock calibration.
         // The model's physical PORTSC
         // assertion uses the original source macro, not the production constant.
-        host.controller.borrow_mut().clock.ticks_per_microsecond = 1_000;
         state.borrow_mut().minimum_resume_ticks = 40_000 * 1_000;
         let suspended = host.suspend();
         assert!(
@@ -281,6 +287,24 @@ fn fixture(memory: &mut [u64], speed: u8, hub: bool) -> Fixture {
 }
 
 fn fixture_with_leaf(memory: &mut [u64], speed: u8, hub: bool, leaf: Node) -> Fixture {
+    fixture_with_leaf_at_clock(
+        memory,
+        speed,
+        hub,
+        leaf,
+        Clock {
+            ticks_per_microsecond: 1,
+        },
+    )
+}
+
+fn fixture_with_leaf_at_clock(
+    memory: &mut [u64],
+    speed: u8,
+    hub: bool,
+    leaf: Node,
+    clock: Clock,
+) -> Fixture {
     let start = memory.as_mut_ptr() as u64;
     // SAFETY: the caller keeps this exclusive backing through every owner.
     let mut dma =
@@ -299,11 +323,10 @@ fn fixture_with_leaf(memory: &mut [u64], speed: u8, hub: bool, leaf: Node) -> Fi
     };
     let mut c = Controller::new(
         Box::new(registers),
-        Clock {
-            ticks_per_microsecond: 1,
-        },
+        clock,
         &mut dma,
         "suspend model".into(),
+        crate::minimum_model::owned(clock),
     )
     .unwrap();
     let mut failures = Vec::new();

@@ -125,6 +125,10 @@ impl<T: Timer> Spi<NativeRegisters, T> {
     /// # Safety
     /// The parent's native claim and this adapter's clock, pins and firmware
     /// arbitration contracts hold for the same function and complete UC BAR.
+    #[expect(
+        clippy::result_large_err,
+        reason = "claim failure keeps the same original config, mapping and timer without failure-path allocation"
+    )]
     pub unsafe fn attach_native(
         requester: StoppedRequester,
         mapping: Mapping,

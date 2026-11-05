@@ -1,0 +1,180 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 00:23:18 -0500
+Subject: [PATCH] refactor(vfs): separate inode initialization and writeback
+ waits
+
+---
+ fs/fs-writeback.c | 27 -------------------
+ fs/inode.c        | 37 --------------------------
+ fs/inode_evict.c  | 67 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 67 insertions(+), 64 deletions(-)
+
+diff --git a/fs/fs-writeback.c b/fs/fs-writeback.c
+index c0363c3bdb0e999bdbfa0f2a671d970944f8f4d7..4a3820828552f5385e717d3f4f331c6b45877f20 100644
+--- a/fs/fs-writeback.c
++++ b/fs/fs-writeback.c
+@@ -1626,33 +1626,6 @@ static int write_inode(struct inode *inode, struct writeback_control *wbc)
+ 	return 0;
+ }
+ 
+-/*
+- * Wait for writeback on an inode to complete. Called with i_lock held.
+- * Caller must make sure inode cannot go away when we drop i_lock.
+- */
+-void inode_wait_for_writeback(struct inode *inode)
+-{
+-	struct wait_bit_queue_entry wqe;
+-	struct wait_queue_head *wq_head;
+-
+-	assert_spin_locked(&inode->i_lock);
+-
+-	if (!(inode_state_read(inode) & I_SYNC))
+-		return;
+-
+-	wq_head = inode_bit_waitqueue(&wqe, inode, __I_SYNC);
+-	for (;;) {
+-		prepare_to_wait_event(wq_head, &wqe.wq_entry, TASK_UNINTERRUPTIBLE);
+-		/* Checking I_SYNC with inode->i_lock guarantees memory ordering. */
+-		if (!(inode_state_read(inode) & I_SYNC))
+-			break;
+-		spin_unlock(&inode->i_lock);
+-		schedule();
+-		spin_lock(&inode->i_lock);
+-	}
+-	finish_wait(wq_head, &wqe.wq_entry);
+-}
+-
+ /*
+  * Sleep until I_SYNC is cleared. This function must be called with i_lock
+  * held and drops it. It is aimed for callers not holding any inode reference
+diff --git a/fs/inode.c b/fs/inode.c
+index 6baf52785272c83c5f90f003a8f3c4c033c7def0..88676e0af41b4635df2a1f7818f757e27666882c 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -399,43 +399,6 @@ static void init_once(void *foo)
+ 	inode_init_once(inode);
+ }
+ 
+-struct wait_queue_head *inode_bit_waitqueue(struct wait_bit_queue_entry *wqe,
+-					    struct inode *inode, u32 bit)
+-{
+-	void *bit_address;
+-
+-	bit_address = inode_state_wait_address(inode, bit);
+-	init_wait_var_entry(wqe, bit_address, 0);
+-	return __var_waitqueue(bit_address);
+-}
+-EXPORT_SYMBOL(inode_bit_waitqueue);
+-
+-void wait_on_new_inode(struct inode *inode)
+-{
+-	struct wait_bit_queue_entry wqe;
+-	struct wait_queue_head *wq_head;
+-
+-	spin_lock(&inode->i_lock);
+-	if (!(inode_state_read(inode) & I_NEW)) {
+-		spin_unlock(&inode->i_lock);
+-		return;
+-	}
+-
+-	wq_head = inode_bit_waitqueue(&wqe, inode, __I_NEW);
+-	for (;;) {
+-		prepare_to_wait_event(wq_head, &wqe.wq_entry, TASK_UNINTERRUPTIBLE);
+-		if (!(inode_state_read(inode) & I_NEW))
+-			break;
+-		spin_unlock(&inode->i_lock);
+-		schedule();
+-		spin_lock(&inode->i_lock);
+-	}
+-	finish_wait(wq_head, &wqe.wq_entry);
+-	WARN_ON(inode_state_read(inode) & I_NEW);
+-	spin_unlock(&inode->i_lock);
+-}
+-EXPORT_SYMBOL(wait_on_new_inode);
+-
+ static void __inode_lru_list_add(struct inode *inode, bool rotate)
+ {
+ 	lockdep_assert_held(&inode->i_lock);
+diff --git a/fs/inode_evict.c b/fs/inode_evict.c
+index 0e1d24d17b1829c9da5625a54a5dc46382c5be6a..707d96386e284d74dd3dff084c5b318f1f7357ae 100644
+--- a/fs/inode_evict.c
++++ b/fs/inode_evict.c
+@@ -6,6 +6,9 @@
+ #include <linux/export.h>
+ #include <linux/fs.h>
+ #include <linux/fsverity.h>
++#include <linux/sched.h>
++#include <linux/wait_bit.h>
++#include <linux/writeback.h>
+ 
+ void clear_inode(struct inode *inode)
+ {
+@@ -155,3 +158,67 @@ void inode_init_once(struct inode *inode)
+ 	i_size_ordered_init(inode);
+ }
+ EXPORT_SYMBOL(inode_init_once);
++
++struct wait_queue_head *inode_bit_waitqueue(struct wait_bit_queue_entry *wqe,
++					    struct inode *inode, u32 bit)
++{
++	void *bit_address;
++
++	bit_address = inode_state_wait_address(inode, bit);
++	init_wait_var_entry(wqe, bit_address, 0);
++	return __var_waitqueue(bit_address);
++}
++EXPORT_SYMBOL(inode_bit_waitqueue);
++
++void wait_on_new_inode(struct inode *inode)
++{
++	struct wait_bit_queue_entry wqe;
++	struct wait_queue_head *wq_head;
++
++	spin_lock(&inode->i_lock);
++	if (!(inode_state_read(inode) & I_NEW)) {
++		spin_unlock(&inode->i_lock);
++		return;
++	}
++
++	wq_head = inode_bit_waitqueue(&wqe, inode, __I_NEW);
++	for (;;) {
++		prepare_to_wait_event(wq_head, &wqe.wq_entry, TASK_UNINTERRUPTIBLE);
++		if (!(inode_state_read(inode) & I_NEW))
++			break;
++		spin_unlock(&inode->i_lock);
++		schedule();
++		spin_lock(&inode->i_lock);
++	}
++	finish_wait(wq_head, &wqe.wq_entry);
++	WARN_ON(inode_state_read(inode) & I_NEW);
++	spin_unlock(&inode->i_lock);
++}
++EXPORT_SYMBOL(wait_on_new_inode);
++
++/*
++ * Wait for writeback on an inode to complete. Called with i_lock held.
++ * Caller must make sure inode cannot go away when we drop i_lock.
++ */
++void inode_wait_for_writeback(struct inode *inode)
++{
++	struct wait_bit_queue_entry wqe;
++	struct wait_queue_head *wq_head;
++
++	assert_spin_locked(&inode->i_lock);
++
++	if (!(inode_state_read(inode) & I_SYNC))
++		return;
++
++	wq_head = inode_bit_waitqueue(&wqe, inode, __I_SYNC);
++	for (;;) {
++		prepare_to_wait_event(wq_head, &wqe.wq_entry, TASK_UNINTERRUPTIBLE);
++		/* Checking I_SYNC with inode->i_lock guarantees memory ordering. */
++		if (!(inode_state_read(inode) & I_SYNC))
++			break;
++		spin_unlock(&inode->i_lock);
++		schedule();
++		spin_lock(&inode->i_lock);
++	}
++	finish_wait(wq_head, &wqe.wq_entry);
++}

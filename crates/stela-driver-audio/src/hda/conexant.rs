@@ -10,7 +10,7 @@ use super::routing::RoutePolicy;
 use super::{
     AnalogRoute, CodecGraph, Controller, PinOptions, Registers, StreamId, Verb, WidgetKind,
 };
-use crate::{Direction, Error, bus::i2c::Timer};
+use crate::{Direction, Error, Timer};
 use alloc::vec::Vec;
 
 pub(super) mod headset;
@@ -80,11 +80,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .any(|state| state.address == address)
     }
     fn conexant_guard(&self, graph: &CodecGraph) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.vendor_codec_guard(graph)?;
         profile(graph.vendor_id)?;
         Ok(())
     }
     fn conexant_identity(&mut self, graph: &CodecGraph) -> Result<(u8, u32, Vec<u8>), Error> {
+        self.minimum_guard()?;
         let live = self.validate_live_analog_codec(graph)?;
         let pins: Vec<_> = live
             .pins
@@ -97,6 +99,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok((live.group, live.subsystem, pins))
     }
     fn conexant_eapd(&mut self, codec: u8, pin: u8, enabled: bool) -> Result<u8, Error> {
+        self.minimum_guard()?;
         // Match cx_auto_turn_eapd exactly, including its whole control value.
         let value = if enabled { 2 } else { 0 };
         self.route_control(codec, pin, SET_EAPD, GET_EAPD, value)?;
@@ -110,6 +113,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<ConexantReport, Error> {
+        self.minimum_guard()?;
         self.conexant_guard(graph)?;
         if headset::is_profile(graph.vendor_id) {
             return Err(Error::UnsupportedTopology);
@@ -117,6 +121,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.initialize_conexant_common(graph)
     }
     fn initialize_conexant_common(&mut self, graph: &CodecGraph) -> Result<ConexantReport, Error> {
+        self.minimum_guard()?;
         self.conexant_guard(graph)?;
         self.require_routing_stopped()?;
         if self
@@ -197,6 +202,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         result
     }
     fn conexant_active(&mut self, graph: &CodecGraph) -> Result<State, Error> {
+        self.minimum_guard()?;
         self.conexant_guard(graph)?;
         let state = self
             .conexant_codecs
@@ -241,6 +247,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.conexant_guard(graph)?;
         let policy = route_policy(graph.vendor_id)?;
         self.preflight_analog_route_policy(graph, route, id, channel, options, policy)?;
@@ -266,6 +273,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         graph: &CodecGraph,
         enabled: bool,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         if self.streams.iter().flatten().any(|s| s.poisoned) {
             return Err(Error::NeedsReset);
         }
@@ -288,6 +296,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         converter: u8,
         muted: bool,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.conexant_guard(graph)?;
         if graph.vendor_id != 0x14f1_5051 || !matches!(converter, 0x10 | 0x11) {
             return Err(Error::UnsupportedTopology);
@@ -327,6 +336,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Called only after every stream stop has acknowledged, before CORB
     /// and RIRB stop. Unknown codec effects remain held through error/reset.
     pub(super) fn shutdown_conexant_codecs(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         for index in 0..self.conexant_codecs.len() {
             let state = self.conexant_codecs[index].clone();
             if state.retired {

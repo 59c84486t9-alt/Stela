@@ -16,7 +16,7 @@ use stela_contracts::refuse;
 use stela_drivers::{
     Clock,
     bus::{
-        irq::{Disposition, Handler, IrqError, Platform, Route, RouteRequest, Source},
+        irq::{Disposition, Handler, IrqError, Platform, Source},
         pci::{Function as PciFunction, owned::OwnedConfig},
     },
     platform::work::{Cpu, Executor, Kind, Queue, WorkError},
@@ -166,10 +166,16 @@ unsafe impl Source for WorkSource {
     fn mask(&mut self) -> Result<(), IrqError> {
         self.inner.mask()
     }
-    fn route(&self) -> RouteRequest {
-        self.inner.route()
+    fn route_kind(&self) -> stela_drivers::bus::irq::RouteKind {
+        self.inner.route_kind()
     }
-    unsafe fn program(&mut self, route: Route) -> Result<(), IrqError> {
+    fn requester(&self) -> Option<&stela_drivers::bus::pci::requester::RequesterId> {
+        self.inner.requester()
+    }
+    unsafe fn program(
+        &mut self,
+        route: &stela_drivers::bus::irq::AllocatedRoute<'_>,
+    ) -> Result<(), IrqError> {
         // SAFETY: forwards the registry's own call under the same contract.
         unsafe { self.inner.program(route) }
     }
@@ -399,7 +405,11 @@ pub(crate) fn run(
         clock,
     });
     let mut registration = super::CONTROLLER
-        .request_owned(*source, handler.clone())
+        .request_owned(stela_drivers::bus::irq::Request {
+            source: *source,
+            handler: handler.clone(),
+            routing: super::diagnostic::tcg_route(parts.edu.clone()),
+        })
         .map_err(|e| refuse!("IRQ work request: {e}", ?e))?;
     let vector = registration.vector();
     // Dispatcher permits MSI progress. All callbacks run
@@ -457,7 +467,15 @@ pub(crate) fn run(
         .map_err(|e| refuse!("IRQ work mask/synchronize/drain: {e}", ?e))?;
     // SAFETY: route+callback+work drain just completed on this BSP;
     // keep returned callback while consuming its original concrete source.
-    let (source, returned_handler, _route) = unsafe { retired.into_parts() };
+    let (source, returned_handler, mut route) =
+        unsafe { retired.into_parts() }.map_err(|failure| {
+            let error = failure.error;
+            refuse!("IRQ work retirement context changed: {error}", ?error)
+        })?;
+    route
+        .release_unattached_fixture()
+        .map_err(|e| refuse!("IRQ work bounded route release: {e}", ?e))?;
+    drop(route);
     let WorkSource {
         inner,
         executor: source_executor,

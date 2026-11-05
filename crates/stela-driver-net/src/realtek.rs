@@ -58,7 +58,7 @@
 
 use super::{Link, LinkError, MAX_FRAME, MIN_FRAME, Mac, check_frame};
 use crate::{
-    Clock, Handoff,
+    Handoff,
     block::BlockError,
     bus::{
         dma::DmaAllocator,
@@ -183,14 +183,14 @@ impl Registers for Mmio {
 }
 trait Timer {
     fn now(&self) -> u64;
-    fn delay(&self, microseconds: u64);
+    fn delay(&self, microseconds: u64) -> Result<(), BlockError>;
 }
-impl Timer for Clock {
+impl Timer for crate::timing::Timing {
     fn now(&self) -> u64 {
         self.now_us()
     }
-    fn delay(&self, us: u64) {
-        self.delay(us)
+    fn delay(&self, us: u64) -> Result<(), BlockError> {
+        crate::timing::Timing::delay(self, us)
     }
 }
 
@@ -218,7 +218,7 @@ impl fmt::Display for Warning {
 
 pub struct Realtek {
     device: Mmio,
-    clock: Clock,
+    clock: crate::timing::Timing,
     receive: Ring,
     transmit: Ring,
     mac: Mac,
@@ -256,7 +256,9 @@ impl Realtek {
         handoff: &Handoff,
         dma: &mut dyn DmaAllocator,
         provider: &dyn resources::Provider,
+        minimum: alloc::rc::Rc<dyn crate::bus::pci::power::Timer>,
     ) -> Result<Self, Error> {
+        let clock = crate::timing::Timing::new(handoff.clock, minimum)?;
         if !matches(function) {
             return Err(
                 BlockError::Unsupported("not a supported Realtek PCI Ethernet candidate").into(),
@@ -266,14 +268,14 @@ impl Realtek {
             // SAFETY: caller grants exclusive PCI segment access and valid ECAM.
             unsafe { pci::disable_aspm_link(function, handoff) }
         })?;
-        function.power_up(&handoff.clock)?;
-        let bars = function.bars();
+        function.power_up(clock.minimum())?;
+        let bars = function.bars()?;
         let bar = bars
             .into_iter()
             .flatten()
             .find(|b| matches!(b, pci::Bar::Memory { .. }));
         let device = map_registers(handoff, bar, 0, 256)?;
-        function.enable_polled();
+        function.enable_polled()?;
         let txconfig = device.read32(TX_CONFIG);
         let revision = detect_revision(&device, txconfig, |bytes| {
             map_registers(handoff, bar, 0, bytes).map(|_| ())
@@ -289,9 +291,8 @@ impl Realtek {
             }
             _ => false,
         };
-        let subsystem = function.config().read32(0x2c);
-        let mut hardware =
-            Hardware::new(&device, &handoff.clock, revision, function.address.function);
+        let subsystem = function.config().read32(0x2c)?;
+        let mut hardware = Hardware::new(&device, &clock, revision, function.address.function);
         if revision.nbase() && hardware.mac_ocp_read(0xd006)? & 0xff == 7 {
             return Err(BlockError::Unsupported("Realtek SFP mode").into());
         }
@@ -300,7 +301,7 @@ impl Realtek {
         hardware.dp_start()?;
         hardware.ep_start()?;
         if revision.version <= 6 {
-            function.config().write16(0x0c, 0x4008); // Linux cache-line/latency values, narrow config write.
+            function.config().write16(0x0c, 0x4008)?; // Linux cache-line/latency values, narrow config write.
             device.write8(0x82, 1);
         }
         let mac = read_station(&hardware)?;
@@ -323,7 +324,7 @@ impl Realtek {
         // Nothing has a descriptor address yet. Allocation faults cannot start DMA.
         let mut net = Self {
             device,
-            clock: handoff.clock,
+            clock,
             receive: Ring::new(dma, revision.version >= 18)?,
             transmit: Ring::new(dma, revision.version >= 18)?,
             mac,
@@ -355,6 +356,9 @@ impl Realtek {
     fn update_link(&mut self) -> Result<bool, LinkError> {
         let hardware = Hardware::new(&self.device, &self.clock, self.revision, self.function);
         self.link.update(&hardware).map_err(|error| {
+            if matches!(error, BlockError::PciPower(_)) {
+                return LinkError::Pci(error);
+            }
             LinkError::Adapter(format!("{} link configuration: {error}", self.location))
         })
     }
@@ -447,7 +451,7 @@ fn clock_request<C: ConfigSpace>(
     link_control: u16,
     enabled: bool,
 ) -> Result<(), BlockError> {
-    let value = config.read16(link_control);
+    let value = config.read16(link_control)?;
     if value == u16::MAX {
         return Err(BlockError::Device {
             status: u32::from(value),
@@ -456,7 +460,7 @@ fn clock_request<C: ConfigSpace>(
     config.write16(
         link_control,
         (value & !(1 << 8)) | (u16::from(enabled) << 8),
-    );
+    )?;
     Ok(())
 }
 
@@ -467,7 +471,7 @@ fn prepare_pcie_link<C: ConfigSpace>(
     let invalid = || BlockError::Unsupported("invalid Realtek PCIe capabilities");
     let mut control = None;
     for entry in crate::bus::pci::capability::capabilities(function.config()) {
-        let entry = entry.map_err(|_| invalid())?;
+        let entry = entry?;
         if entry.id == 0x10 {
             let offset = entry.offset + 0x10;
             if offset + 2 > 0x100 || control.replace(offset).is_some() {
@@ -640,7 +644,7 @@ fn publish<R: Registers, T: Timer>(
     let r = hw.registers;
     let revision = hw.revision;
     r.write8(CONFIG_LOCK, CONFIG_UNLOCKED);
-    let result = (|| {
+    let result: Result<(), BlockError> = (|| {
         let low = u32::from_le_bytes(mac.0[..4].try_into().expect("MAC low word"));
         let high = u32::from(u16::from_le_bytes([mac.0[4], mac.0[5]]));
         r.write32(MAC4, high);
@@ -719,7 +723,7 @@ impl Link for Realtek {
         if !self.update_link()? {
             return Err(LinkError::NoCarrier);
         }
-        let clock = self.clock;
+        let clock = &self.clock;
         if !clock.wait(100_000, || self.transmit.available()) {
             return Err(LinkError::Adapter(format!(
                 "{} transmit ring stalled",
@@ -754,3 +758,17 @@ impl Link for Realtek {
 
 #[cfg(test)]
 mod tests;
+
+impl From<pci::ConfigError> for Error {
+    fn from(error: pci::ConfigError) -> Self {
+        Self::Device(BlockError::Config(error))
+    }
+}
+impl From<pci::CapabilityError> for Error {
+    fn from(error: pci::CapabilityError) -> Self {
+        Self::Device(BlockError::PciCapability(error))
+    }
+}
+
+#[cfg(test)]
+use crate::Clock;

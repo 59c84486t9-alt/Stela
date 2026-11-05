@@ -5,6 +5,7 @@
 //! Owned AX200 continuation from LARI through thermal/device-power
 //! commands. Regulatory setup, scanning and a station remain subsequent work.
 use super::*;
+use crate::Clock;
 use crate::wifi::intel::radio::{
     bios::service::{self, BiosIo},
     control::{self, Control, Kind, Ltr, PowerMode},

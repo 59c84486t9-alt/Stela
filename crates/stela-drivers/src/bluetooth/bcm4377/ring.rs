@@ -620,6 +620,7 @@ impl<P: Platform> Transport<P> {
                 ring.release()?;
             }
         }
+        self.platform().retire_resources()?;
         Ok(())
     }
 }

@@ -18,11 +18,13 @@ use super::{
     platform::{aliases, owned_table},
 };
 use crate::{
-    engine::host::{HostOwner, RootIdentity},
+    engine::host::{HostOwner, MmioRoots, RootIdentity},
     native_smp::memory_types::Image,
 };
+mod config_space;
+pub(crate) use config_space::{ContainedPci, ContainmentError};
 mod hpet;
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, rc::Rc, sync::Arc, vec::Vec};
 use core::{
     arch::asm,
     cell::UnsafeCell,
@@ -32,11 +34,19 @@ use core::{
 pub(crate) use hpet::{ExclusiveHpet as NativeExclusiveHpet, HpetMapping as NativeHpetMapping};
 use stela_boot_core::aperture::{self, Controls, Flush, Processors};
 use stela_drivers::bus::{
+    irq::{self, Platform as _, posted_msi::NotificationDomain},
     mmio::owned::{
         AddressSpace, Authority, CacheAttribute, InstalledMapping, MapFailure, MapRequest,
-        MappingPlatform, PhysicalSpan, Protection, Resource, ResourceBacking, ResourceKind,
+        MappingPlatform, PhysicalSpan, Protection, Resource, ResourceBacking, ResourceId,
+        ResourceKind,
     },
-    pci::EcamWindow,
+    pci::{
+        EcamWindow,
+        assignment::{
+            self, AdmissionClose, Assignment, OpaqueUse, Parent, PhysicalAssignment, Retention,
+            UseKind,
+        },
+    },
 };
 
 /// Which host processors may hold aperture translations, for the boot.
@@ -45,9 +55,10 @@ pub(crate) static PROCESSORS: Processors = Processors::new();
 /// A span this source reserved outside RAM: a captured ECAM bus, a BAR inside
 /// a root bridge window, or the separately admitted whole HPET controller page.
 struct Backing {
-    owner: Arc<Captured>,
+    platform: Arc<Platform>,
     span: PhysicalSpan,
     kind: ResourceKind,
+    retention: Retention<Reservation>,
 }
 // SAFETY: Source validates every immutable span against the captured MCFG,
 // root bridge windows or HPET descriptor and final non-RAM memory inventory.
@@ -60,11 +71,70 @@ unsafe impl ResourceBacking for Backing {
     fn kind(&self) -> ResourceKind {
         self.kind
     }
+    fn begin_mapping(&self) -> Result<OpaqueUse, Error> {
+        self.platform.check_mapping_control()?;
+        self.retention
+            .begin_use(UseKind::Mapping)
+            .map(|usage| usage.erase())
+            .map_err(Error::Assignment)
+    }
 }
 
 struct Captured {
     _origin: super::capture::Origin,
     wire: &'static Wire,
+    _roots: Arc<MmioRoots>,
+    hpet_unregistered: AtomicBool,
+}
+
+/// The actual native aperture ancestry, kept independently of its registry.
+/// A later PCI fabric handoff also has to own and retire device-side routing.
+struct ApertureProduct {
+    _capture: Arc<Captured>,
+    _code: crate::native_image::CodePin,
+    identity: Arc<RootIdentity>,
+}
+
+// SAFETY: Source constructs this only from its unique post-EBS capture and
+// original BSP identity. These retentions contain no mapping, Authority,
+// Source or driver backedge. They cannot release the aperture or a device.
+unsafe impl PhysicalAssignment for ApertureProduct {
+    fn parent(&self) -> Option<&Parent> {
+        None
+    }
+
+    fn check_control(&self) -> Result<(), assignment::Error> {
+        self.identity
+            .check_irq_cpu()
+            .map_err(|_| assignment::Error::Context)?;
+        if self.identity.in_interrupt() {
+            return Err(assignment::Error::Context);
+        }
+        Ok(())
+    }
+}
+
+struct Reservation {
+    platform: Arc<Platform>,
+    parent: Parent,
+    _span: PhysicalSpan,
+}
+
+// SAFETY: These spans come from Source's checked, exclusive device handoffs.
+// The boot reservation pins the captured tables, root allocations and decoded
+// span. Platform contains aperture allocation metadata and no mapping or
+// authority backedge. The parent keeps any upstream assignment. A reservation
+// alone conveys no PCI writer or driver authority.
+unsafe impl PhysicalAssignment for Reservation {
+    fn parent(&self) -> Option<&Parent> {
+        Some(&self.parent)
+    }
+
+    fn check_control(&self) -> Result<(), assignment::Error> {
+        self.platform
+            .check_mapping_control()
+            .map_err(|_| assignment::Error::Context)
+    }
 }
 
 /// The aperture's two mapping sizes: 4 KiB pages in its leaf tables and
@@ -142,6 +212,12 @@ impl Platform {
     fn wire(&self) -> &'static Wire {
         self.captured.wire
     }
+    fn check_mapping_control(&self) -> Result<(), Error> {
+        if crate::engine::host::in_interrupt() {
+            return Err(Error::Unavailable);
+        }
+        self.check_context(self.space)
+    }
     /// The entry of slot `index` of `size`.
     fn entry(&self, size: Size, index: usize) -> Result<*mut u64, Error> {
         if !size.slots().contains(&index) {
@@ -207,7 +283,7 @@ impl Platform {
     }
     fn resource(&self, resource: &Resource) -> bool {
         if let Some(backing) = resource.backing().downcast_ref::<Backing>() {
-            return Arc::ptr_eq(&backing.owner, &self.captured)
+            return core::ptr::eq(backing.platform.as_ref(), self)
                 && backing.span == resource.physical_span();
         }
         stela_drivers::platform::acpi::resources::reservation_parent(resource)
@@ -363,28 +439,22 @@ unsafe impl MappingPlatform for Platform {
     }
 }
 
-/// A claimed ECAM bus: its MCFG window index and bus, the window, and the
-/// reservation of the bus's configuration space.
-struct Bus {
-    at: (usize, u8),
-    window: EcamWindow,
-    resource: Resource,
-}
-
 /// The owned MMIO permission over the captured firmware description.
 pub(crate) struct Source {
     /// The original BSP owner, independent of finite RAM absence scopes.
     /// Keep this affine pin on Source; shared MappingPlatform instances do not
     /// gain a foreign-CPU root ownership or destruction permission.
     identity: Arc<RootIdentity>,
+    aperture: Assignment<ApertureProduct>,
     platform: Arc<Platform>,
     authority: Authority,
     window: Option<super::Window>,
+    reservations: core::cell::RefCell<Vec<Assignment<Reservation>>>,
+    hpet_assignment: core::cell::RefCell<Option<Assignment<Reservation>>>,
+    pci_slots: config_space::PciSlots,
+    pci_clock: core::cell::OnceCell<crate::native_clock::Prepared>,
     verified_framebuffer: core::cell::OnceCell<crate::pci_io::FramebufferSource>,
-    pci_clock: core::cell::OnceCell<alloc::rc::Rc<hpet::PciMinimum>>,
-    /// Each claimed ECAM bus, by its window and bus.
-    buses: core::cell::RefCell<Vec<Bus>>,
-    ioapics: core::cell::RefCell<Vec<(crate::native_irq::madt::Unit, Arc<IoapicUnit>)>>,
+    ioapics: core::cell::RefCell<MountedIoapics>,
 }
 
 impl Source {
@@ -445,6 +515,8 @@ impl Source {
             captured: Arc::new(Captured {
                 _origin: origin,
                 wire,
+                _roots: catalog.clone(),
+                hpet_unregistered: AtomicBool::new(false),
             }),
             space,
             flush,
@@ -453,6 +525,14 @@ impl Source {
             slot,
             held: AtomicBool::new(false),
             mappings: UnsafeCell::new(Vec::new()),
+        });
+        // SAFETY: the original installed BSP and retained loader root above
+        // own the relocated immutable engine image and its final handoff.
+        let code = unsafe { handoff.native_image.pin(handoff) }.map_err(failed)?;
+        let aperture = Assignment::from_owned(ApertureProduct {
+            _capture: platform.captured.clone(),
+            _code: code,
+            identity: identity.clone(),
         });
         let mut written = Vec::new();
         written.try_reserve_exact(LEAVES + 1).map_err(failed)?;
@@ -509,14 +589,21 @@ impl Source {
         let window = unsafe { super::Window::new(wire, snapshot.pat, tsc_hz) };
         Ok(Self {
             identity,
+            aperture,
             platform,
             authority,
             window,
-            verified_framebuffer: core::cell::OnceCell::new(),
+            reservations: core::cell::RefCell::new(Vec::new()),
+            hpet_assignment: core::cell::RefCell::new(None),
+            pci_slots: config_space::PciSlots::new(),
             pci_clock: core::cell::OnceCell::new(),
-            buses: core::cell::RefCell::new(Vec::new()),
-            ioapics: core::cell::RefCell::new(Vec::new()),
+            verified_framebuffer: core::cell::OnceCell::new(),
+            ioapics: core::cell::RefCell::new(MountedIoapics::Unclaimed),
         })
+    }
+
+    pub(crate) fn verified_framebuffer(&self) -> Option<crate::pci_io::FramebufferSource> {
+        self.verified_framebuffer.get().copied()
     }
 
     pub(crate) fn authority(&self) -> &Authority {
@@ -529,54 +616,64 @@ impl Source {
     }
 
     fn reserve(&self, span: PhysicalSpan, kind: ResourceKind) -> Result<Resource, Error> {
-        let resource = Resource::new(Box::new(Backing {
-            owner: self.platform.captured.clone(),
-            span,
-            kind,
-        }));
-        self.authority.register_resource(resource.clone())?;
+        let mut reservations = self
+            .reservations
+            .try_borrow_mut()
+            .map_err(|_| Error::Busy)?;
+        reservations.try_reserve(1).map_err(|_| Error::Exhausted)?;
+        let (resource, _, assignment) = self.register_reservation(span, kind)?;
+        reservations.push(assignment);
         Ok(resource)
     }
 
-    /// The ECAM window and reservation of `bus` on `segment`, claimed once.
-    ///
-    /// # Safety
-    /// The caller owns every function on that bus: its configuration space,
-    /// resets and the drivers that reach it.
-    pub(crate) unsafe fn claim_bus(
+    fn reservation(
         &self,
-        segment: u16,
-        bus: u8,
-    ) -> Result<(EcamWindow, Resource), Error> {
-        let wire = self.platform.wire();
-        let windows = stela_runtime::pc::acpi::mcfg(wire.mcfg()).map_err(failed)?;
-        let index = windows
-            .iter()
-            .position(|window| {
-                window.segment == segment && (window.start_bus..=window.end_bus).contains(&bus)
-            })
-            .ok_or(Error::OutsideResource)?;
-        if let Some(claimed) = self
-            .buses
-            .borrow()
-            .iter()
-            .find(|claimed| claimed.at == (index, bus))
-        {
-            return Ok((claimed.window, claimed.resource.clone()));
+        span: PhysicalSpan,
+        kind: ResourceKind,
+    ) -> Result<(Resource, Assignment<Reservation>), Error> {
+        self.reservation_under(span, kind, self.aperture.parent())
+    }
+
+    fn reservation_under(
+        &self,
+        span: PhysicalSpan,
+        kind: ResourceKind,
+        parent: Parent,
+    ) -> Result<(Resource, Assignment<Reservation>), Error> {
+        let reservation = Reservation {
+            platform: self.platform.clone(),
+            parent,
+            _span: span,
+        };
+        reservation.check_control().map_err(Error::Assignment)?;
+        let assignment = Assignment::from_owned(reservation);
+        let resource = Resource::new(Box::new(Backing {
+            platform: self.platform.clone(),
+            span,
+            kind,
+            retention: assignment.retain(),
+        }));
+        Ok((resource, assignment))
+    }
+
+    fn register_reservation(
+        &self,
+        span: PhysicalSpan,
+        kind: ResourceKind,
+    ) -> Result<(Resource, ResourceId, Assignment<Reservation>), Error> {
+        let (resource, mut assignment) = self.reservation(span, kind)?;
+        match self.authority.register_resource(resource.clone()) {
+            Ok(id) => Ok((resource, id, assignment)),
+            Err(refusal) => {
+                let error = refusal.error;
+                drop(refusal.into_resource());
+                drop(resource);
+                if assignment.close().is_ok() {
+                    let _ = assignment.into_original();
+                }
+                Err(error)
+            }
         }
-        let inventory =
-            super::ecam::EcamInventory::validate(&windows, self.platform.space.physical_bits)?;
-        let (window, span) = inventory.subset(index, bus..=bus, wire.roots())?;
-        if !wire.excludes_memory(span.start(), span.end()) {
-            return Err(Error::OutsideResource);
-        }
-        let resource = self.reserve(span, ResourceKind::Registers)?;
-        self.buses.borrow_mut().push(Bus {
-            at: (index, bus),
-            window,
-            resource: resource.clone(),
-        });
-        Ok((window, resource))
     }
 
     /// Reserve the memory BAR at bus address `address` for `bytes` on
@@ -623,86 +720,6 @@ impl Source {
 }
 
 impl Source {
-    /// Revalidate the original framebuffer function in a scoped read-only map.
-    ///
-    /// # Safety
-    /// The boot CPU owns the function and excludes other configuration writers.
-    pub(crate) unsafe fn check_framebuffer(
-        &self,
-        source: crate::pci_io::FramebufferSource,
-    ) -> Result<(), Error> {
-        let address = source.address;
-        // SAFETY: caller retains the original ECAM bus and excludes writers.
-        let (_, resource) = unsafe { self.claim_bus(address.segment, address.bus) }?;
-        let offset = usize::from(address.device) << 15 | usize::from(address.function) << 12;
-        let mut mapping = self.authority.map(
-            resource,
-            offset,
-            PAGE as usize,
-            CacheAttribute::Uncached,
-            Protection::ReadOnly,
-        )?;
-        let observation = source.bar.words().try_for_each(|(offset, expected)| {
-            if mapping.read32(usize::from(offset))? == expected {
-                Ok(())
-            } else {
-                Err(Error::InvalidPlatformReply)
-            }
-        });
-        // SAFETY: the synchronous read was the mapping's only use.
-        unsafe { mapping.retire() }?;
-        observation?;
-        self.verified_framebuffer
-            .set(source)
-            .map_err(|_| Error::Busy)
-    }
-
-    pub(crate) fn verified_framebuffer(&self) -> Option<crate::pci_io::FramebufferSource> {
-        self.verified_framebuffer.get().copied()
-    }
-
-    /// Map and read the diagnostic's configuration page on the BSP. The
-    /// returned mapping owns the only lease and may be retired on an AP.
-    ///
-    /// # Safety
-    /// The caller owns bus 0's configuration space.
-    #[cfg(feature = "diagnostics")]
-    pub(crate) unsafe fn check_shootdown_mapping(
-        &self,
-    ) -> Result<(stela_drivers::bus::mmio::owned::Mapping, u32), Error> {
-        let windows = stela_runtime::pc::acpi::mcfg(self.platform.wire().mcfg()).map_err(failed)?;
-        let window = windows.first().ok_or(Error::Unavailable)?;
-        // SAFETY: forwarded from the caller.
-        let (_, resource) = unsafe { self.claim_bus(window.segment, window.start_bus) }?;
-        let mapping = self.authority.map(
-            resource,
-            0,
-            PAGE as usize,
-            CacheAttribute::Uncached,
-            Protection::ReadOnly,
-        )?;
-        let identity = mapping.read32(0)?;
-        Ok((mapping, identity))
-    }
-
-    /// Retire on the BSP after the APs started. Return the acknowledged generation.
-    ///
-    /// # Safety
-    /// The caller owns bus 0's configuration space.
-    #[cfg(feature = "diagnostics")]
-    pub(crate) unsafe fn check_shootdown(&self) -> Result<u64, Error> {
-        // SAFETY: forwarded from the caller.
-        let (mut mapping, identity) = unsafe { self.check_shootdown_mapping() }?;
-        let before = PROCESSORS.requested();
-        // SAFETY: the read above was the mapping's only use.
-        unsafe { mapping.retire() }?;
-        let generation = PROCESSORS.requested();
-        if identity == u32::MAX || generation == before || PROCESSORS.alone() {
-            return Err(Error::InvalidPlatformReply);
-        }
-        Ok(generation)
-    }
-
     /// Whether the final memory map leaves `first..end` to the firmware,
     /// overlapping no RAM the host allocates.
     pub(crate) fn firmware_owned(&self, first: u64, end: u64) -> bool {
@@ -735,18 +752,12 @@ impl Source {
 
 fn in8(port: u16) -> u8 {
     let value: u8;
-    // SAFETY: a port read; the caller owns the port.
+    // SAFETY: only the MADT-qualified PIC interrupt-mask ports are read.
+    // Reading the mask does not change the controller or acknowledge an IRQ.
     unsafe {
         asm!("in al, dx", out("al") value, in("dx") port, options(nomem, nostack, preserves_flags))
     };
     value
-}
-
-fn out8(port: u16, value: u8) {
-    // SAFETY: a port write; the caller owns the port.
-    unsafe {
-        asm!("out dx, al", in("dx") port, in("al") value, options(nomem, nostack, preserves_flags))
-    };
 }
 
 /// A mapping kept by every pin using the controller. Unit serializes
@@ -763,6 +774,9 @@ unsafe impl crate::native_irq::ioapic::Registers for IoapicRegisters {
     }
     fn write(&self, index: u8, value: u32) {
         crate::native_irq::ioapic::Registers::write(&self.mmio, index, value);
+    }
+    fn write_eoi(&self, vector: u8) {
+        crate::native_irq::ioapic::Registers::write_eoi(&self.mmio, vector);
     }
 }
 impl Drop for IoapicRegisters {
@@ -783,115 +797,215 @@ impl Drop for IoapicRegisters {
 pub(crate) type IoapicUnit =
     crate::native_irq::ioapic::Unit<IoapicRegisters, crate::native_irq::NativePlatform>;
 
-impl Source {
-    /// Reuse this source's one selector/window owner and UC mapping.
-    ///
-    /// # Safety
-    /// This boot owns the complete physical IOAPIC handoff. Individual lines
-    /// require separate contributor ownership before they can be claimed.
-    pub(crate) unsafe fn ioapic(
-        &self,
-        descriptor: crate::native_irq::madt::Unit,
-    ) -> Result<Arc<IoapicUnit>, Error> {
-        if let Some((_, unit)) = self
-            .ioapics
-            .borrow()
-            .iter()
-            .find(|(old, _)| *old == descriptor)
-        {
-            return Ok(unit.clone());
-        }
-        let routing = self.routing()?;
-        if !routing.units.contains(&descriptor) {
-            return Err(Error::OutsideResource);
-        }
-        let span = PhysicalSpan::new(descriptor.base, PAGE)?;
-        if !self
-            .platform
-            .wire()
-            .excludes_memory(span.start(), span.end())
-        {
-            return Err(Error::OutsideResource);
-        }
-        let resource = self.reserve(span, ResourceKind::Registers)?;
-        let mapping = self.authority.map(
-            resource,
-            0,
-            PAGE as usize,
-            CacheAttribute::Uncached,
-            Protection::ReadWrite,
-        )?;
-        let address = mapping.address(0, 32)?.as_ptr() as usize;
-        // SAFETY: exclusive all-root UC mapping of the MADT controller page.
-        let mmio = unsafe { crate::native_irq::ioapic::Mmio::new(address) }.map_err(failed)?;
-        let registers = IoapicRegisters {
-            mapping: core::mem::ManuallyDrop::new(mapping),
-            mmio,
+type IoapicEntry = (crate::native_irq::madt::Unit, Arc<IoapicUnit>);
+pub(crate) enum ModePin {
+    Intel(crate::native_dma::vtd::interrupt::DirectDelivery<crate::native_dma::vtd::MmioRegisters>),
+    Amd(stela_drivers::bus::dma::amd::unit::native::DirectDelivery),
+}
+impl ModePin {
+    unsafe fn check(&self) -> Result<(), irq::posted_msi::Error> {
+        let alive = match self {
+            // SAFETY: both projections use the same checked IRQ CPU/root.
+            Self::Intel(pin) => unsafe { pin.check() }.is_ok(),
+            // SAFETY: forwarded original CPU/root and kept AMD register view.
+            Self::Amd(pin) => unsafe { pin.check() }.is_ok(),
         };
-        let platform = crate::native_irq::NativePlatform::current().map_err(failed)?;
-        // SAFETY: mapping and complete exclusive controller handoff above.
-        let unit =
-            unsafe { IoapicUnit::attach(registers, platform, descriptor.id, descriptor.gsi_base) }
-                .map_err(failed)?;
-        self.ioapics.borrow_mut().push((descriptor, unit.clone()));
-        Ok(unit)
+        if alive {
+            Ok(())
+        } else {
+            Err(irq::posted_msi::Error::RootFailed)
+        }
     }
-    /// Stop PCI INTx contributors before SCI acquires its shared legacy line.
-    /// No bus-master or device-reset state is changed.
-    ///
-    /// # Safety
-    /// Before native probing/AP startup, this boot owns every captured ECAM
-    /// function and the firmware has stopped submitting interrupt work.
-    pub(crate) unsafe fn mask_pci_intx(&self) -> Result<(), Error> {
-        let windows = stela_runtime::pc::acpi::mcfg(self.platform.wire().mcfg()).map_err(failed)?;
-        for window in windows {
-            for bus in window.start_bus..=window.end_bus {
-                // SAFETY: caller owns every function on this captured bus.
-                let (_, resource) = unsafe { self.claim_bus(window.segment, bus) }?;
-                let mut mapping = self.authority.map(
-                    resource,
-                    0,
-                    1 << 20,
-                    CacheAttribute::Uncached,
-                    Protection::ReadWrite,
-                )?;
-                let result = (|| {
-                    for device in 0..32usize {
-                        let first = device << 15;
-                        if mapping.read32(first)? & 0xffff == 0xffff {
-                            continue;
-                        }
-                        let functions = if mapping.read32(first + 12)? & (0x80 << 16) != 0 {
-                            8
-                        } else {
-                            1
-                        };
-                        for function in 0..functions {
-                            let offset = first | function << 12;
-                            if mapping.read32(offset)? & 0xffff == 0xffff {
-                                continue;
-                            }
-                            let command = mapping.address(offset + 4, 2)?.as_ptr().cast::<u16>();
-                            // SAFETY: the owned UC command register is aligned,
-                            // and the16-bit access avoids W1C status bits at+6.
-                            unsafe {
-                                command.write_volatile(command.read_volatile() | (1 << 10));
-                            }
-                            // SAFETY: same command register readback.
-                            if unsafe { command.read_volatile() } & (1 << 10) == 0 {
-                                return Err(Error::InvalidPlatformReply);
-                            }
-                        }
-                    }
-                    Ok(())
-                })();
-                // SAFETY: no borrowed register pointer survives the loop.
-                unsafe { mapping.retire() }?;
-                result?;
-            }
+}
+
+enum MountedIoapics {
+    Unclaimed,
+    Unavailable,
+    Containing(Rc<MountedControllers>),
+    Ready(Rc<MountedControllers>),
+}
+
+struct MountedControllers {
+    units: Vec<IoapicEntry>,
+    spans: Vec<(crate::native_irq::madt::Unit, u16)>,
+    failure: core::cell::Cell<Option<irq::IrqError>>,
+    routes: Vec<
+        crate::native_irq::ioapic::FirmwareRoutes<
+            IoapicRegisters,
+            crate::native_irq::NativePlatform,
+        >,
+    >,
+}
+
+/// The original IOAPIC cohort and its retained notification mode, joined
+/// with a check of the independent legacy PIC delivery path.
+#[derive(Clone)]
+pub(crate) struct InitialPciLines {
+    source: &'static Source,
+    controllers: Rc<MountedControllers>,
+    legacy_pic: bool,
+}
+
+impl InitialPciLines {
+    pub(crate) fn check(&self, source: &Source) -> Result<(), Error> {
+        if !core::ptr::eq(self.source, source) {
+            return Err(Error::OutsideResource);
+        }
+        source.identity.check_irq_cpu().map_err(failed)?;
+        for routes in &self.controllers.routes {
+            routes.verify_contained().map_err(failed)?;
+        }
+        // The IOAPIC's programming permission does not cover the PIC.
+        // Observe its two original interrupt masks without acknowledging or
+        // reprogramming either controller.
+        if self.legacy_pic && (in8(0x21) != u8::MAX || in8(0xa1) != u8::MAX) {
+            return Err(Error::Unavailable);
         }
         Ok(())
     }
+}
+
+impl MountedControllers {
+    fn check_line(
+        &self,
+        routing: &crate::native_irq::madt::Routing,
+        line: irq::LineRoute,
+    ) -> Result<&Arc<IoapicUnit>, irq::IrqError> {
+        let owner = routing
+            .owner(line, &self.spans)
+            .map_err(|_| irq::IrqError::Route)?;
+        let index = self
+            .units
+            .iter()
+            .position(|(descriptor, _)| *descriptor == owner)
+            .ok_or(irq::IrqError::Route)?;
+        self.routes[index].verify_line(line.gsi)?;
+        Ok(&self.units[index].1)
+    }
+}
+
+struct MountedNotification {
+    identity: Arc<RootIdentity>,
+    modes: Vec<ModePin>,
+}
+
+// SAFETY: the mounted source supplies its actual retained RootIdentity and
+// the original mode pin for every remapper before any controller is published.
+// The immutable CPU/root check precedes lock-free reads of kept UC registers.
+unsafe impl NotificationDomain for MountedNotification {
+    fn check(&self) -> Result<(), irq::posted_msi::Error> {
+        self.identity
+            .check_irq_cpu()
+            .map_err(|_| irq::posted_msi::Error::Context)?;
+        for mode in &self.modes {
+            // SAFETY: checked original IRQ CPU/root; the actual register maps
+            // stay held by the pins across every admitted root.
+            unsafe { mode.check() }?;
+        }
+        Ok(())
+    }
+}
+
+impl Source {
+    /// Publish the complete original IOAPIC cohort once.
+    ///
+    /// # Safety
+    /// This boot has exclusive whole-controller ownership, including SMM
+    /// exclusion. Prior destinations and firmware execution are stopped and
+    /// their contributors/backing remain kept. `modes` contains the same
+    /// source's exact complete pinned remapper inventory.
+    pub(crate) unsafe fn install_ioapics(
+        &'static self,
+        modes: Vec<ModePin>,
+    ) -> Result<usize, Error> {
+        self.identity.check_current().map_err(failed)?;
+        let platform = crate::native_irq::NativePlatform::current().map_err(failed)?;
+        platform.check_process().map_err(failed)?;
+        {
+            let mut state = self.ioapics.borrow_mut();
+            match &*state {
+                MountedIoapics::Unclaimed => *state = MountedIoapics::Unavailable,
+                MountedIoapics::Containing(controllers) => {
+                    return Err(controllers.failure.get().map_or(Error::Busy, failed));
+                }
+                _ => return Err(Error::Busy),
+            }
+        }
+        let routing = self.routing()?;
+        if modes.is_empty() || routing.units.is_empty() || routing.has_ioapic_nmis() {
+            return Err(Error::Unavailable);
+        }
+        let domain: Arc<dyn NotificationDomain> = Arc::new(MountedNotification {
+            identity: self.identity.clone(),
+            modes,
+        });
+        domain.check().map_err(failed)?;
+        let mut units = Vec::new();
+        let mut spans = Vec::new();
+        units
+            .try_reserve_exact(routing.units.len())
+            .map_err(|_| Error::Exhausted)?;
+        spans
+            .try_reserve_exact(routing.units.len())
+            .map_err(|_| Error::Exhausted)?;
+        for &descriptor in &routing.units {
+            let span = PhysicalSpan::new(descriptor.base, PAGE)?;
+            // SAFETY: explicit exclusive handoff and exact original MADT unit.
+            let resource = unsafe { self.claim_platform(span) }?;
+            let mapping = self.authority.map(
+                resource,
+                0,
+                PAGE as usize,
+                CacheAttribute::Uncached,
+                Protection::ReadWrite,
+            )?;
+            let address = mapping.address(0, 68)?.as_ptr() as usize;
+            // SAFETY: the exact full controller's exclusive all-root UC mapping.
+            let mmio = unsafe { crate::native_irq::ioapic::Mmio::new(address) }.map_err(failed)?;
+            let registers = IoapicRegisters {
+                mapping: core::mem::ManuallyDrop::new(mapping),
+                mmio,
+            };
+            // SAFETY: same original controller and complete direct-mode owner.
+            let unit = unsafe {
+                IoapicUnit::attach(
+                    registers,
+                    crate::native_irq::NativePlatform::current().map_err(failed)?,
+                    domain.clone(),
+                    crate::native_irq::CONTROLLER.identity(),
+                    descriptor.id,
+                    descriptor.gsi_base,
+                )
+            }
+            .map_err(failed)?;
+            spans.push((descriptor, unit.pins()));
+            units.push((descriptor, unit));
+        }
+        routing.validate_units(&spans).map_err(failed)?;
+        // SAFETY: exact complete inventory with no IOAPIC NMI, original
+        // mode pins, and the caller's exclusive controller handoff.
+        let routes =
+            unsafe { crate::native_irq::root::plan_firmware_lines(&units) }.map_err(failed)?;
+        let count = units.len();
+        let controllers = Rc::new(MountedControllers {
+            units,
+            spans,
+            routes,
+            failure: core::cell::Cell::new(None),
+        });
+        *self.ioapics.borrow_mut() = MountedIoapics::Containing(controllers.clone());
+        // SAFETY: same exclusive original roster. The Source now retains every
+        // controller, plan and mode pin even if the hardware refuses.
+        let contained =
+            unsafe { crate::native_irq::root::contain_firmware_lines(&controllers.routes) };
+        if let Err(error) = contained {
+            controllers.failure.set(Some(error));
+            return Err(failed(error));
+        }
+        *self.ioapics.borrow_mut() = MountedIoapics::Ready(controllers);
+        Ok(count)
+    }
+
     pub(crate) fn routing(&self) -> Result<crate::native_irq::madt::Routing, Error> {
         crate::native_irq::madt::Routing::parse(
             self.platform.wire().madt(),
@@ -903,31 +1017,84 @@ impl Source {
         self.platform.wire().fadt()
     }
 
-    /// Mask the PICs and the same IOAPIC owners used by SCI routes.
-    ///
-    /// # Safety
-    /// The boot processor owns these PICs and complete IOAPIC handoff.
-    pub(crate) unsafe fn mask_isa(&self, irqs: &[u8]) -> Result<(), Error> {
-        for &irq in irqs {
-            let port = if irq < 8 { 0x21 } else { 0xa1 };
-            out8(port, in8(port) | 1 << (irq & 7));
+    /// Join the original controller cohort with the independent legacy line
+    /// mask state. This supplies no ownership of SCI or PCI line contributors.
+    pub(crate) fn initial_pci_lines(&'static self) -> Result<InitialPciLines, Error> {
+        self.identity.check_current().map_err(failed)?;
+        let legacy_pic = self.routing()?.has_legacy_pic();
+        let state = self.ioapics.borrow();
+        let MountedIoapics::Ready(controllers) = &*state else {
+            return Err(Error::Unavailable);
+        };
+        let lines = InitialPciLines {
+            source: self,
+            controllers: controllers.clone(),
+            legacy_pic,
+        };
+        drop(state);
+        lines.check(self)?;
+        Ok(lines)
+    }
+
+    /// Reuse the original controller after checking this unclaimed route
+    /// against its retained masked firmware entry.
+    pub(crate) fn original_line(
+        &self,
+        line: irq::LineRoute,
+    ) -> Result<Arc<IoapicUnit>, irq::IrqError> {
+        if self.identity.in_interrupt() {
+            return Err(irq::IrqError::WrongCpu);
+        }
+        let routing = self.routing().map_err(|_| irq::IrqError::Route)?;
+        let state = self.ioapics.borrow();
+        let MountedIoapics::Ready(controllers) = &*state else {
+            return Err(irq::IrqError::Unavailable);
+        };
+        controllers.check_line(&routing, line).cloned()
+    }
+
+    /// SCI_INT is the firmware source number. Its MADT GSI override
+    /// applies to the IOAPIC and does not move the legacy PIC input.
+    pub(crate) fn require_sci_pic_masked(&self, sci_int: u32) -> Result<(), Error> {
+        self.identity.check_irq_cpu().map_err(failed)?;
+        if self.identity.in_interrupt() {
+            return Err(Error::Busy);
+        }
+        if sci_int < 16 && self.routing()?.has_legacy_pic() {
+            require_pic_masked(sci_int as u8)?;
+        }
+        Ok(())
+    }
+
+    /// Verify the IOAPIC routes and any PC/AT PIC masks for these ISA lines.
+    /// Whole IOAPIC handoff grants no PIC programming permission.
+    pub(crate) fn require_isa_masked(&self, irqs: &[u8]) -> Result<(), Error> {
+        if self.identity.in_interrupt() {
+            return Err(Error::Busy);
         }
         let routing = self.routing()?;
-        for descriptor in &routing.units {
-            // SAFETY: forwarded exclusive controller handoff.
-            let unit = unsafe { self.ioapic(*descriptor) }?;
+        let state = self.ioapics.borrow();
+        let MountedIoapics::Ready(controllers) = &*state else {
+            return Err(Error::Unavailable);
+        };
+        for &irq in irqs {
+            let line = routing.isa(irq).map_err(failed)?;
+            controllers.check_line(&routing, line).map_err(failed)?;
+        }
+        if routing.has_legacy_pic() {
             for &irq in irqs {
-                let line = routing.isa(irq).map_err(failed)?;
-                if line
-                    .gsi
-                    .checked_sub(unit.gsi_base())
-                    .is_some_and(|pin| pin < u32::from(unit.pins()))
-                {
-                    // SAFETY: caller owns these firmware lines; active claims refuse.
-                    unsafe { unit.mask_unclaimed(line.gsi) }.map_err(failed)?;
-                }
+                require_pic_masked(irq)?;
             }
         }
         Ok(())
     }
+}
+
+fn require_pic_masked(irq: u8) -> Result<(), Error> {
+    let port = if irq < 8 { 0x21 } else { 0xa1 };
+    let mask = 1 << (irq & 7);
+    if in8(port) & mask == 0 {
+        return Err(Error::Unavailable);
+    }
+    Ok(())
 }

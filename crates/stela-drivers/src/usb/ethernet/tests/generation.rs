@@ -46,7 +46,7 @@ pub(crate) fn refuse(peer: &mut UsbEthernet, target: &Shared) {
         Backend::Realtek(chip) => &mut chip.io,
         Backend::Asix(_) => unreachable!(),
     };
-    io.controller = target.clone();
+    io.source_mut().controller = target.clone();
     let before_id = peer.id;
     let before_pending = peer.pending.clone();
     let before_send = peer.send.bytes().to_vec();

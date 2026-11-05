@@ -6,6 +6,9 @@ use super::*;
 
 #[test]
 fn ax210_product_reset_uses_explicit_unmanaged_policy_and_refuses_managed_without_provider() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = ax210_bytes();
     let catalog = catalog_for(&ax210_profile(), Family::Ax210.firmware_name(), &bytes);
     let (observation, step_catalog) = step_fixture();

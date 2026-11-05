@@ -209,12 +209,12 @@ unsafe impl HostConfiguration for Config {
             h.time.0.set(h.time.now_us().wrapping_add(delta));
         }
         if h.config_fault == Some((n, false)) {
-            return Err(ConfigurationError);
+            return Err(ConfigurationError::Unavailable);
         }
         let value = h.configuration;
         h.config_log.push((false, value));
         if h.config_fault == Some((n, true)) {
-            Err(ConfigurationError)
+            Err(ConfigurationError::Unavailable)
         } else {
             Ok(value)
         }
@@ -229,7 +229,7 @@ unsafe impl HostConfiguration for Config {
             h.time.0.set(h.time.now_us().wrapping_add(delta));
         }
         if h.config_fault == Some((n, false)) {
-            return Err(ConfigurationError);
+            return Err(ConfigurationError::Unavailable);
         }
         assert!(
             !h.active,
@@ -240,7 +240,7 @@ unsafe impl HostConfiguration for Config {
             h.configuration = value;
         }
         if h.config_fault == Some((n, true)) {
-            Err(ConfigurationError)
+            Err(ConfigurationError::Unavailable)
         } else {
             Ok(())
         }
@@ -562,24 +562,40 @@ fn function_provider_uses_narrow_writes_and_keeps_its_root_guard() {
         writes: Rc<Cell<usize>>,
     }
     impl ConfigSpace for NativeSpace {
-        fn read32(&self, offset: u16) -> u32 {
-            match offset {
-                0 => self.id.get(),
-                8 => 0x0c05_0000,
-                _ => 0,
-            }
+        fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+            let value = {
+                match offset {
+                    0 => self.id.get(),
+                    8 => 0x0c05_0000,
+                    _ => 0,
+                }
+            };
+            Ok(value)
         }
-        fn write32(&mut self, _: u16, _: u32) {
+        fn write32(&mut self, _: u16, _: u32) -> Result<(), crate::bus::pci::ConfigError> {
             panic!("configuration byte requires a narrow actual store")
         }
-        fn read8(&self, offset: u16) -> u8 {
-            assert_eq!(offset, PCI_HOST_CONFIGURATION);
-            self.byte.get()
+        fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+            let value = {
+                assert_eq!(offset, PCI_HOST_CONFIGURATION);
+                self.byte.get()
+            };
+            Ok(value)
         }
-        fn write8(&mut self, offset: u16, value: u8) {
+        fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
             assert_eq!(offset, PCI_HOST_CONFIGURATION);
             self.writes.set(self.writes.get() + 1);
             self.byte.set(value);
+
+            Ok(())
+        }
+
+        fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+        }
+
+        fn write16(&mut self, _: u16, _: u16) -> Result<(), crate::bus::pci::ConfigError> {
+            panic!("unexpected narrow PCI store in controller fixture");
         }
     }
     let id = Rc::new(Cell::new(0x7e22_8086));
@@ -614,8 +630,11 @@ fn function_provider_uses_narrow_writes_and_keeps_its_root_guard() {
     assert_eq!(byte.get(), HOST_ENABLED);
     assert_eq!(drops.get(), 0);
     id.set(u32::MAX);
-    assert_eq!(cfg.read(), Err(ConfigurationError));
-    assert_eq!(cfg.write(HOST_ENABLED), Err(ConfigurationError));
+    assert_eq!(cfg.read(), Err(ConfigurationError::IdentityChanged));
+    assert_eq!(
+        cfg.write(HOST_ENABLED),
+        Err(ConfigurationError::IdentityChanged)
+    );
     assert_eq!(writes.get(), 2);
     drop(cfg);
     assert_eq!(drops.get(), 1);
@@ -848,3 +867,5 @@ fn unchanged_linux_fixed_block_wire_and_return_classes() {
     }
     assert_eq!(cases, 272);
 }
+
+mod access_failures;

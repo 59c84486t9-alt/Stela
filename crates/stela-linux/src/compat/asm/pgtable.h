@@ -1,0 +1,232 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef _ASM_STELA_PGTABLE_H
+#define _ASM_STELA_PGTABLE_H
+/* x86-64's max-five-level, runtime-folded page table format, from
+ * arch/x86/include/asm's
+ * pgtable_64_types.h and pgtable_types.h, with which Linux's MM headers
+ * describe mappings. Linux code under Stela owns no address space and edits
+ * no CPU page table: its memory owners map memory. */
+#include <linux/const.h>
+#include <asm/page.h>
+/* Original unsigned-int runtime state. The one canonical native root product
+ * publishes these before Environment/tasks/initial-mm can be initialized. No
+ * x86 CPU feature array or caller-selected LA57 capability is fabricated. */
+extern unsigned int __pgtable_l5_enabled;
+extern unsigned int pgdir_shift;
+extern unsigned int ptrs_per_p4d;
+static inline bool pgtable_l5_enabled(void)
+{
+	return __pgtable_l5_enabled;
+}
+#define PGDIR_SHIFT pgdir_shift
+#define P4D_SHIFT 39
+#define MAX_PTRS_PER_P4D 512
+#define PTRS_PER_P4D ptrs_per_p4d
+#define P4D_SIZE (_AC(1, UL) << P4D_SHIFT)
+#define P4D_MASK (~(P4D_SIZE - 1))
+/* Dynamic native root ownership is bound by the actual initial-root producer.
+ * A static swapper array would provide neither that root nor mapping authority. */
+#define INIT_MM_PGD ((pgd_t *)0)
+
+
+#define PTRS_PER_PGD	512
+#define PUD_SHIFT	30
+#define PTRS_PER_PUD	512
+#define PMD_SHIFT	21
+#define PTRS_PER_PMD	512
+#define PTRS_PER_PTE	512
+
+#define PGDIR_SIZE	(_AC(1, UL) << PGDIR_SHIFT)
+#define PGDIR_MASK	(~(PGDIR_SIZE - 1))
+#define PUD_SIZE	(_AC(1, UL) << PUD_SHIFT)
+#define PUD_MASK	(~(PUD_SIZE - 1))
+#define PMD_SIZE	(_AC(1, UL) << PMD_SHIFT)
+#define PMD_MASK	(~(PMD_SIZE - 1))
+
+#define _PAGE_PRESENT	(_AT(pteval_t, 1) << 0)
+#define _PAGE_RW	(_AT(pteval_t, 1) << 1)
+#define _PAGE_USER	(_AT(pteval_t, 1) << 2)
+#define _PAGE_PWT	(_AT(pteval_t, 1) << 3)
+#define _PAGE_PCD	(_AT(pteval_t, 1) << 4)
+#define _PAGE_ACCESSED	(_AT(pteval_t, 1) << 5)
+#define _PAGE_DIRTY	(_AT(pteval_t, 1) << 6)
+#define _PAGE_PSE	(_AT(pteval_t, 1) << 7)
+#define _PAGE_NX	(_AT(pteval_t, 1) << 63)
+
+/* Original x86-64 pure value encodings, not page-table access authority.
+ * pgtable_types.h selects this KNL mask for its 64-bit entry format. */
+#define _PAGE_BIT_GLOBAL 8
+#define _PAGE_BIT_PROTNONE _PAGE_BIT_GLOBAL
+#define _PAGE_KNL_ERRATUM_MASK (_PAGE_DIRTY | _PAGE_ACCESSED)
+#define _PAGE_SWP_EXCLUSIVE _PAGE_PWT
+
+/* Linux's default PAT programs index 1 write-combining and index 2 UC-. */
+#define pgprot_writecombine(prot) __pgprot(pgprot_val(prot) | _PAGE_PWT)
+#define pgprot_noncached(prot) __pgprot(pgprot_val(prot) | _PAGE_PCD)
+
+#define PFN_PTE_SHIFT	PAGE_SHIFT
+/* x86-64's 52 physical address bits. */
+#define PTE_PFN_MASK	(((_AT(pteval_t, 1) << 52) - 1) & PAGE_MASK)
+
+#define pte_val(x)	((x).pte)
+#define pmd_val(x)	((x).pmd)
+#define pud_val(x)	((x).pud)
+#define p4d_val(x)	((x).p4d)
+#define pgd_val(x)	((x).pgd)
+#define pgprot_val(x)	((x).pgprot)
+#define __pte(x)	((pte_t) { (x) })
+#define __pmd(x)	((pmd_t) { (x) })
+#define __pud(x)	((pud_t) { (x) })
+#define __p4d(x)	((p4d_t) { (x) })
+#define __pgd(x)	((pgd_t) { (x) })
+#define __pgprot(x)	((pgprot_t) { (x) })
+
+/* Original x86-64 software-swap representation. These macros transform
+ * values only; they provide no swap device, page, MM or TLB ownership. */
+#define SWP_TYPE_BITS 5
+#define SWP_OFFSET_FIRST_BIT (_PAGE_BIT_PROTNONE + 1)
+#define SWP_OFFSET_SHIFT (SWP_OFFSET_FIRST_BIT + SWP_TYPE_BITS)
+#define __swp_type(x) ((x).val >> (64 - SWP_TYPE_BITS))
+#define __swp_offset(x) (~(x).val << SWP_TYPE_BITS >> SWP_OFFSET_SHIFT)
+#define __swp_entry(type, offset) ((swp_entry_t) { \
+	(~(unsigned long)(offset) << SWP_OFFSET_SHIFT >> SWP_TYPE_BITS) \
+	| ((unsigned long)(type) << (64-SWP_TYPE_BITS)) })
+#define __pte_to_swp_entry(pte) ((swp_entry_t) { pte_val((pte)) })
+#define __pmd_to_swp_entry(pmd) ((swp_entry_t) { pmd_val((pmd)) })
+#define __swp_entry_to_pte(x) (__pte((x).val))
+#define __swp_entry_to_pmd(x) (__pmd((x).val))
+
+#define PTE_FLAGS_MASK (~PTE_PFN_MASK)
+static inline pteval_t native_pte_val(pte_t pte)
+{
+	return pte.pte;
+}
+static inline pteval_t pte_flags(pte_t pte)
+{
+	return native_pte_val(pte) & PTE_FLAGS_MASK;
+}
+static inline int pte_none(pte_t pte)
+{
+	return !(pte.pte & ~(_PAGE_KNL_ERRATUM_MASK));
+}
+
+static inline int pte_present(pte_t pte) { return pte_val(pte) & _PAGE_PRESENT; }
+static inline int pte_write(pte_t pte) { return !!(pte_val(pte) & _PAGE_RW); }
+static inline int pte_young(pte_t pte) { return !!(pte_val(pte) & _PAGE_ACCESSED); }
+static inline int pte_dirty(pte_t pte) { return !!(pte_val(pte) & _PAGE_DIRTY); }
+static inline pte_t pte_set_flags(pte_t pte, pteval_t set) { return __pte(pte_val(pte) | set); }
+static inline pte_t pte_clear_flags(pte_t pte, pteval_t clear)
+{
+	return __pte(pte_val(pte) & ~clear);
+}
+static inline pte_t pte_swp_mkexclusive(pte_t pte)
+{
+	return pte_set_flags(pte, _PAGE_SWP_EXCLUSIVE);
+}
+static inline bool pte_swp_exclusive(pte_t pte)
+{
+	return pte_flags(pte) & _PAGE_SWP_EXCLUSIVE;
+}
+static inline pte_t pte_swp_clear_exclusive(pte_t pte)
+{
+	return pte_clear_flags(pte, _PAGE_SWP_EXCLUSIVE);
+}
+
+static inline pte_t pte_mkyoung(pte_t pte) { return pte_set_flags(pte, _PAGE_ACCESSED); }
+static inline pte_t pte_mkold(pte_t pte) { return pte_clear_flags(pte, _PAGE_ACCESSED); }
+static inline pte_t pte_mkdirty(pte_t pte) { return pte_set_flags(pte, _PAGE_DIRTY); }
+static inline pte_t pte_mkclean(pte_t pte) { return pte_clear_flags(pte, _PAGE_DIRTY); }
+static inline pte_t pte_mkwrite_novma(pte_t pte) { return pte_set_flags(pte, _PAGE_RW); }
+static inline pte_t pte_wrprotect(pte_t pte) { return pte_clear_flags(pte, _PAGE_RW); }
+static inline unsigned long pte_pfn(pte_t pte)
+{
+	return (pte_val(pte) & PTE_PFN_MASK) >> PAGE_SHIFT;
+}
+static inline pte_t pfn_pte(unsigned long pfn, pgprot_t prot)
+{
+	return __pte(((pteval_t)pfn << PAGE_SHIFT) | pgprot_val(prot));
+}
+static inline void set_pte(pte_t *ptep, pte_t pte) { WRITE_ONCE(*ptep, pte); }
+static inline void pte_clear(struct mm_struct *mm, unsigned long addr, pte_t *ptep)
+{
+	set_pte(ptep, __pte(0));
+}
+
+static inline int pmd_none(pmd_t pmd) { return !pmd_val(pmd); }
+static inline int pmd_present(pmd_t pmd) { return pmd_val(pmd) & _PAGE_PRESENT; }
+static inline int pmd_bad(pmd_t pmd) { return !(pmd_val(pmd) & _PAGE_PRESENT); }
+static inline unsigned long pmd_page_vaddr(pmd_t pmd)
+{
+	return (unsigned long)__va(pmd_val(pmd) & PTE_PFN_MASK);
+}
+static inline int pud_none(pud_t pud) { return !pud_val(pud); }
+static inline int pud_present(pud_t pud) { return pud_val(pud) & _PAGE_PRESENT; }
+static inline int pud_bad(pud_t pud) { return !(pud_val(pud) & _PAGE_PRESENT); }
+static inline pmd_t *pud_pgtable(pud_t pud)
+{
+	return (pmd_t *)__va(pud_val(pud) & PTE_PFN_MASK);
+}
+/* Original x86 runtime folding: the PGD is the P4D on an L4 root. */
+#define p4d_index p4d_index
+static inline unsigned long p4d_index(unsigned long address)
+{
+	return (address >> P4D_SHIFT) & (PTRS_PER_P4D - 1);
+}
+static inline int pgd_present(pgd_t pgd)
+{
+	return !pgtable_l5_enabled() || (pgd_val(pgd) & _PAGE_PRESENT);
+}
+static inline int pgd_none(pgd_t pgd)
+{
+	return pgtable_l5_enabled() && !pgd_val(pgd);
+}
+static inline int pgd_bad(pgd_t pgd)
+{
+	return pgtable_l5_enabled() && !(pgd_val(pgd) & _PAGE_PRESENT);
+}
+static inline unsigned long pgd_page_vaddr(pgd_t pgd)
+{
+	return (unsigned long)__va(pgd_val(pgd) & PTE_PFN_MASK);
+}
+#define p4d_offset p4d_offset
+static inline p4d_t *p4d_offset(pgd_t *pgd, unsigned long address)
+{
+	if (!pgtable_l5_enabled())
+		return (p4d_t *)pgd;
+	return (p4d_t *)pgd_page_vaddr(*pgd) + p4d_index(address);
+}
+struct mm_struct;
+#define mm_p4d_folded mm_p4d_folded
+static inline bool mm_p4d_folded(struct mm_struct *mm)
+{
+	return !pgtable_l5_enabled();
+}
+static inline void set_pgd(pgd_t *pgdp, pgd_t pgd)
+{
+	WRITE_ONCE(*pgdp, pgd);
+}
+static inline void pgd_clear(pgd_t *pgdp)
+{
+	if (pgtable_l5_enabled())
+		set_pgd(pgdp, __pgd(0));
+}
+static inline void set_p4d(p4d_t *p4dp, p4d_t p4d)
+{
+	WRITE_ONCE(*p4dp, p4d);
+}
+static inline void p4d_clear(p4d_t *p4dp)
+{
+	set_p4d(p4dp, __p4d(0));
+}
+static inline int p4d_none(p4d_t p4d) { return !p4d_val(p4d); }
+static inline int p4d_present(p4d_t p4d) { return p4d_val(p4d) & _PAGE_PRESENT; }
+static inline int p4d_bad(p4d_t p4d) { return !(p4d_val(p4d) & _PAGE_PRESENT); }
+static inline pud_t *p4d_pgtable(p4d_t p4d)
+{
+	return (pud_t *)__va(p4d_val(p4d) & PTE_PFN_MASK);
+}
+
+#define PAGE_NONE	__pgprot(0)
+#define PAGE_KERNEL	__pgprot(_PAGE_PRESENT | _PAGE_RW | _PAGE_ACCESSED | \
+				 _PAGE_DIRTY | _PAGE_NX)
+#endif

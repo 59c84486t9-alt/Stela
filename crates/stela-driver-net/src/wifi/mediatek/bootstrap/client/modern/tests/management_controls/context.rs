@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn deferred_envelope_guard_revalidation() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     let first = received(&mut driver, &model, 9);
@@ -54,6 +57,9 @@ fn deferred_envelope_guard_revalidation() {
 
 #[test]
 fn reconnect_rejects_stale_context_and_keys() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut old_owner, old_state) = fixture();
     let old_session = attach(&mut driver, &mut old_owner);
     let old_received = received(&mut driver, &model, 9);

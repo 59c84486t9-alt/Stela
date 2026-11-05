@@ -8,21 +8,22 @@
 //! power resources, the HDMI GPU port provider, OEM amplifier/pin policy, suspend and
 //! guest audio bridging remain platform responsibilities. An ID match alone
 //! does not establish exclusive controller ownership.
-//! All DMA allocations live for the boot, even after an error or drop. Do not
-//! unmap memory or release controller ownership until shutdown succeeds (or
-//! the platform independently resets and quiesces the device).
+//! Hardware shutdown is distinct from resource retirement. The outer owner
+//! must independently retire payload/root/IRQ/work/CPU users before unmapping
+//! DMA or releasing controller resources. Error or Drop proves no completion.
+use crate::Timer;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering, fence};
 
 use super::{Error, Phase};
-use crate::bus::{
-    dma::{DmaAllocator, DmaBuffer},
-    i2c::Timer,
-};
+use crate::bus::dma::{DmaAllocator, DmaBuffer};
 
 mod cache;
+mod construction;
+pub use construction::{Construction, ConstructionFailure};
 mod cirrus;
 mod codec;
+pub mod cold;
 pub mod digital;
 pub use cirrus::{
     CirrusCoefficient, CirrusInputAmplifier, CirrusOutputAmplifier, CirrusProfile, CirrusReport,
@@ -158,13 +159,17 @@ struct ControllerToken {
 }
 
 pub struct Controller<R, T> {
-    registers: R,
-    timer: T,
+    registers: core::mem::ManuallyDrop<R>,
+    timer: core::mem::ManuallyDrop<T>,
+    minimum_error: core::cell::Cell<Option<Error>>,
+    effect_error: core::cell::Cell<Option<Error>>,
+    reset_cleanup_error: Option<Error>,
+    reset_error: Option<Error>,
     config: Config,
     capabilities: Capabilities,
     codec_mask: u16,
-    corb: DmaBuffer,
-    rirb: DmaBuffer,
+    corb: core::mem::ManuallyDrop<DmaBuffer>,
+    rirb: core::mem::ManuallyDrop<DmaBuffer>,
     corb_entries: u16,
     rirb_entries: u16,
     corb_wp: u16,
@@ -206,6 +211,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// A vendor codec profile's common precondition: `graph` belongs to this
     /// controller, no failure needs a reset and the controller is running.
     fn vendor_codec_guard(&self, graph: &CodecGraph) -> Result<(), Error> {
+        self.minimum_guard()?;
         if graph.token != self.token {
             return Err(Error::InvalidCodecGraph);
         }
@@ -224,19 +230,26 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// all of its fixed/bidirectional stream descriptors. Registers must expose
     /// at least 0x440 bytes of uncached BAR0 using native access widths; no
     /// firmware, DSP, AML, SMM or other CPU may concurrently use the hardware.
-    /// The allocator must return unique coherent identity-mapped contiguous
-    /// memory reachable by this controller (including any IOMMU). Keep all DMA
-    /// memory and MMIO alive for the boot. On constructor failure, quiesce/reset
-    /// hardware before releasing ownership: stop acknowledgement may have failed.
+    /// The allocator must return unique coherent CPU-accessible memory with
+    /// contiguous controller IOVAs through this exact requester/root. CPU VA,
+    /// PA and IOVA may differ; none may replace another. Keep all DMA
+    /// memory and MMIO alive for the boot. Constructor refusal keeps the same
+    /// register/timer and partial DMA or entire core in its owning carrier.
+    /// Drop performs no reset, unmap or release; stop acknowledgement may have
+    /// failed. Keep the independent allocator/root graph alongside that carrier.
     /// Apply platform PCI/snoop/power/clock/quirk setup before calling this.
     /// `config.dma_address_bits` must reflect the identity/platform DMA
     /// reachability ceiling; GCAP's 64-bit flag alone does not establish it.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Refusal returns the same physical owner graph without allocating on failure"
+    )]
     pub unsafe fn new(
         registers: R,
         timer: T,
         allocator: &mut dyn DmaAllocator,
         config: Config,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, ConstructionFailure<R, T>> {
         // SAFETY: forwards the complete controller/allocator ownership contract.
         unsafe {
             Self::new_with_identities(
@@ -251,111 +264,253 @@ impl<R: Registers, T: Timer> Controller<R, T> {
 
     // The production namespace is permanent. A private injectable namespace lets
     // tests prove exhaustion without resetting or consuming the global counter.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Refusal returns the same physical owner graph without allocating on failure"
+    )]
     unsafe fn new_with_identities(
         registers: R,
         timer: T,
         allocator: &mut dyn DmaAllocator,
         config: Config,
         identities: &AtomicU64,
-    ) -> Result<Self, Error> {
-        if config.transition_timeout_us == 0
-            || config.verb_timeout_us == 0
-            || !(32..=64).contains(&config.dma_address_bits)
-        {
-            return Err(Error::InvalidConfiguration);
+    ) -> Result<Self, ConstructionFailure<R, T>> {
+        // SAFETY: forwarded legacy constructor ownership prerequisites.
+        unsafe { Self::construct(registers, timer, allocator, config, identities, None) }
+    }
+
+    /// Start new rings only after inherited engines have been acknowledged
+    /// stopped and their original-root/IRQ/work owners independently retired.
+    ///
+    /// # Safety
+    /// The stopped observation belongs to these exact registers/configuration
+    /// epoch. No producer/reset/firmware user could resume after it. The
+    /// original root drained before the paired private domain and allocator
+    /// were installed. All normal new ownership/coherence prerequisites hold.
+    /// An outer owner retains the actual register/allocator graph across every
+    /// constructor error or unwind; this operation never retries failed reset.
+    #[expect(
+        clippy::result_large_err,
+        reason = "Refusal returns the same physical owner graph without allocating on failure"
+    )]
+    pub unsafe fn new_after_stop(
+        registers: R,
+        timer: T,
+        allocator: &mut dyn DmaAllocator,
+        config: Config,
+        stopped: cold::Stopped,
+    ) -> Result<Self, ConstructionFailure<R, T>> {
+        // SAFETY: forwarded same-owner stopped/root/allocator prerequisites.
+        unsafe {
+            Self::construct(
+                registers,
+                timer,
+                allocator,
+                config,
+                &NEXT_CONTROLLER_IDENTITY,
+                Some(stopped),
+            )
         }
-        config.probe_policy.budget()?;
-        // Reserve before any register-provider callback, timer or DMA effect.
-        let identity = ControllerIdentity::reserve(identities)?;
-        registers.validate_config(&config)?;
-        let mut registers = registers;
-        let (major, minor) = (registers.read8(VMAJ), registers.read8(VMIN));
-        if major != 1 || minor != 0 {
-            return Err(Error::UnsupportedVersion { major, minor });
+    }
+
+    #[expect(
+        clippy::result_large_err,
+        reason = "Refusal returns the same physical owner graph without allocating on failure"
+    )]
+    unsafe fn construct(
+        registers: R,
+        timer: T,
+        allocator: &mut dyn DmaAllocator,
+        config: Config,
+        identities: &AtomicU64,
+        stopped: Option<cold::Stopped>,
+    ) -> Result<Self, ConstructionFailure<R, T>> {
+        let mut custody = Construction::new(registers, timer);
+        let result = (|| -> Result<(), Error> {
+            if config.transition_timeout_us == 0
+                || config.verb_timeout_us == 0
+                || !(32..=64).contains(&config.dma_address_bits)
+            {
+                return Err(Error::InvalidConfiguration);
+            }
+            config.probe_policy.budget()?;
+            // Reserve before any register-provider callback, timer or DMA effect.
+            let identity = ControllerIdentity::reserve(identities)?;
+            custody
+                .timer
+                .as_ref()
+                .unwrap()
+                .check()
+                .map_err(Error::MinimumDelay)?;
+            let registers = custody.registers.as_mut().unwrap();
+            registers.validate_config(&config)?;
+            let (major, minor) = (registers.read8(VMAJ), registers.read8(VMIN));
+            if major != 1 || minor != 0 {
+                return Err(Error::UnsupportedVersion { major, minor });
+            }
+            let gcap = registers.read16(GCAP);
+            let capabilities = Capabilities {
+                input_streams: ((gcap >> 8) & 15) as u8,
+                output_streams: ((gcap >> 12) & 15) as u8,
+                bidirectional_streams: ((gcap >> 3) & 31) as u8,
+                address_64_bit: gcap & 1 != 0,
+                dma_address_bits: config
+                    .dma_address_bits
+                    .min(if gcap & 1 != 0 { 64 } else { 32 }),
+                output_payload_words: registers.read16(OUTPAY),
+                input_payload_words: registers.read16(INPAY),
+                output_stream_payload_words: registers.read16(OUTSTRMPAY),
+                input_stream_payload_words: registers.read16(INSTRMPAY),
+            };
+            let total = capabilities.input_streams
+                + capabilities.output_streams
+                + capabilities.bidirectional_streams;
+            if total == 0 || total > 30 {
+                return Err(Error::UnsupportedTopology);
+            }
+            if let Some(stopped) = &stopped
+                && stopped.streams() != total
+            {
+                return Err(Error::UnsupportedTopology);
+            }
+            let extended = if config.reset_policy == ResetPolicy::IntelClockGate {
+                Some(extended::inspect(registers, total)?)
+            } else {
+                None
+            };
+            // Allocations remain alive if hardware refuses to stop on an error.
+            custody.corb = Some(match allocator.allocate(1024, 128) {
+                Ok(buffer) => buffer,
+                Err(error) => {
+                    custody.allocation_error = Some(error);
+                    return Err(Error::NoDmaMemory);
+                }
+            });
+            custody.rirb = Some(match allocator.allocate(2048, 128) {
+                Ok(buffer) => buffer,
+                Err(error) => {
+                    custody.allocation_error = Some(error);
+                    return Err(Error::NoDmaMemory);
+                }
+            });
+            let corb = custody.corb.as_ref().unwrap();
+            let rirb = custody.rirb.as_ref().unwrap();
+            Self::check_dma(corb, 128, capabilities.dma_address_bits)?;
+            Self::check_dma(rirb, 128, capabilities.dma_address_bits)?;
+            if corb.len() < 1024 || rirb.len() < 2048 {
+                return Err(Error::InvalidBuffer);
+            }
+            let controller = Self {
+                registers: core::mem::ManuallyDrop::new(custody.registers.take().unwrap()),
+                timer: core::mem::ManuallyDrop::new(custody.timer.take().unwrap()),
+                minimum_error: core::cell::Cell::new(None),
+                effect_error: core::cell::Cell::new(None),
+                reset_cleanup_error: None,
+                reset_error: None,
+                config,
+                capabilities,
+                codec_mask: 0,
+                token: ControllerToken {
+                    owner: identity,
+                    generation: 1,
+                },
+                lifecycle_failed: false,
+                discovery_ready: false,
+                extended,
+                unsolicited: unsolicited::State::new(),
+                corb: core::mem::ManuallyDrop::new(custody.corb.take().unwrap()),
+                rirb: core::mem::ManuallyDrop::new(custody.rirb.take().unwrap()),
+                corb_entries: 0,
+                rirb_entries: 0,
+                corb_wp: 0,
+                rirb_rp: 0,
+                command_poisoned: false,
+                outstanding: [0; 15],
+                answers: [0; 15],
+                single_command: false,
+                probing: false,
+                allow_bus_reset: false,
+                response_reset: false,
+                in_reset: false,
+                writes: cache::Writes::default(),
+                stopped: false,
+                streams: (0..total).map(|_| None).collect(),
+                routes: Vec::new(),
+                codec_controls: Vec::new(),
+                converter_bindings: Vec::new(),
+                realtek_codecs: Vec::new(),
+                conexant_codecs: Vec::new(),
+                sigmatel_codecs: Vec::new(),
+                cirrus_codecs: Vec::new(),
+                hdmi_ports: Vec::new(),
+                routing_failed: false,
+            };
+            custody.controller = Some(alloc::boxed::Box::new(controller));
+            let controller = custody.controller.as_mut().unwrap();
+            let initialized = if stopped.is_some() {
+                controller.initialize_after_stop()
+            } else {
+                controller.initialize()
+            };
+            if let Err(error) = initialized {
+                // The returned primary belongs to this same retained graph even
+                // if explicit shutdown below fails or unwinds. A lost access or
+                // minimum authority never licenses another hardware effect.
+                if controller.reset_error.is_none() {
+                    controller.reset_error = Some(error);
+                }
+                controller.lifecycle_failed = true;
+                if controller.first_effect_error().is_none()
+                    && controller.reset_cleanup_error.is_none()
+                {
+                    controller.reset_cleanup_error = controller.shutdown().err();
+                }
+                return Err(error);
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => Ok(*custody.controller.take().unwrap()),
+            Err(error) => Err(crate::Refusal {
+                error,
+                owner: custody,
+            }),
         }
-        let gcap = registers.read16(GCAP);
-        let capabilities = Capabilities {
-            input_streams: ((gcap >> 8) & 15) as u8,
-            output_streams: ((gcap >> 12) & 15) as u8,
-            bidirectional_streams: ((gcap >> 3) & 31) as u8,
-            address_64_bit: gcap & 1 != 0,
-            dma_address_bits: config
-                .dma_address_bits
-                .min(if gcap & 1 != 0 { 64 } else { 32 }),
-            output_payload_words: registers.read16(OUTPAY),
-            input_payload_words: registers.read16(INPAY),
-            output_stream_payload_words: registers.read16(OUTSTRMPAY),
-            input_stream_payload_words: registers.read16(INSTRMPAY),
-        };
-        let total = capabilities.input_streams
-            + capabilities.output_streams
-            + capabilities.bidirectional_streams;
-        if total == 0 || total > 30 {
-            return Err(Error::UnsupportedTopology);
+    }
+
+    /// Consume stopped core buffers after independent platform drains, keeping
+    /// its original registers and timer available for outer resource retirement.
+    ///
+    /// # Safety
+    /// Payload writes, IRQ/service/work and all CPU buffer users are retired
+    /// through the exact current root/owner. No reset/restart can occur. The
+    /// allocator/root remain alive while this drops every core DMA reference.
+    pub unsafe fn into_shutdown_resources(mut self) -> Result<(R, T), alloc::boxed::Box<Self>> {
+        if !self.stopped || self.lifecycle_failed || self.first_effect_error().is_some() {
+            return Err(alloc::boxed::Box::new(self));
         }
-        let extended = if config.reset_policy == ResetPolicy::IntelClockGate {
-            Some(extended::inspect(&mut registers, total)?)
-        } else {
-            None
-        };
-        // Allocations remain alive if hardware refuses to stop on an error.
-        let corb = allocator
-            .allocate(1024, 128)
-            .map_err(|_| Error::NoDmaMemory)?;
-        let rirb = allocator
-            .allocate(2048, 128)
-            .map_err(|_| Error::NoDmaMemory)?;
-        Self::check_dma(&corb, 128, capabilities.dma_address_bits)?;
-        Self::check_dma(&rirb, 128, capabilities.dma_address_bits)?;
-        if corb.len() < 1024 || rirb.len() < 2048 {
-            return Err(Error::InvalidBuffer);
+        // SAFETY: the caller has completed every payload/IRQ/work/CPU user;
+        // this is the sole explicit consumption of the original core graph.
+        unsafe {
+            core::mem::ManuallyDrop::drop(&mut self.corb);
+            core::mem::ManuallyDrop::drop(&mut self.rirb);
         }
-        let mut controller = Self {
-            registers,
-            timer,
-            config,
-            capabilities,
-            codec_mask: 0,
-            token: ControllerToken {
-                owner: identity,
-                generation: 1,
-            },
-            lifecycle_failed: false,
-            discovery_ready: false,
-            extended,
-            unsolicited: unsolicited::State::new(),
-            corb,
-            rirb,
-            corb_entries: 0,
-            rirb_entries: 0,
-            corb_wp: 0,
-            rirb_rp: 0,
-            command_poisoned: false,
-            outstanding: [0; 15],
-            answers: [0; 15],
-            single_command: false,
-            probing: false,
-            allow_bus_reset: false,
-            response_reset: false,
-            in_reset: false,
-            writes: cache::Writes::default(),
-            stopped: false,
-            streams: (0..total).map(|_| None).collect(),
-            routes: Vec::new(),
-            codec_controls: Vec::new(),
-            converter_bindings: Vec::new(),
-            realtek_codecs: Vec::new(),
-            conexant_codecs: Vec::new(),
-            sigmatel_codecs: Vec::new(),
-            cirrus_codecs: Vec::new(),
-            hdmi_ports: Vec::new(),
-            routing_failed: false,
-        };
-        if let Err(error) = controller.initialize() {
-            let _ = controller.shutdown();
-            return Err(error);
-        }
-        Ok(controller)
+        drop(core::mem::take(&mut self.streams));
+        drop(core::mem::take(&mut self.routes));
+        drop(core::mem::take(&mut self.codec_controls));
+        drop(core::mem::take(&mut self.converter_bindings));
+        drop(core::mem::take(&mut self.realtek_codecs));
+        drop(core::mem::take(&mut self.conexant_codecs));
+        drop(core::mem::take(&mut self.sigmatel_codecs));
+        drop(core::mem::take(&mut self.cirrus_codecs));
+        drop(core::mem::take(&mut self.hdmi_ports));
+        // SAFETY: these original owners are moved once after independent drains.
+        Ok(unsafe {
+            (
+                core::mem::ManuallyDrop::take(&mut self.registers),
+                core::mem::ManuallyDrop::take(&mut self.timer),
+            )
+        })
     }
 
     pub fn capabilities(&self) -> Capabilities {
@@ -374,9 +529,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         phase: Phase,
         mut predicate: impl FnMut(&mut R) -> bool,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         let start = self.timer.now_us();
         loop {
-            if predicate(&mut self.registers) {
+            if predicate(&mut *self.registers) {
                 return Ok(());
             }
             if self.timer.now_us().wrapping_sub(start)
@@ -388,14 +544,110 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
     }
 
-    fn delay(&self, us: u64) {
-        let start = self.timer.now_us();
-        while self.timer.now_us().wrapping_sub(start) < us {
-            self.timer.relax();
+    /// Primary returned error of the latest reset bracket, kept before cleanup.
+    pub fn reset_error(&self) -> Option<Error> {
+        self.reset_error
+    }
+    pub fn reset_cleanup_error(&self) -> Option<Error> {
+        self.reset_cleanup_error
+    }
+    pub fn first_minimum_error(&self) -> Option<Error> {
+        self.minimum_error.get()
+    }
+    pub fn first_effect_error(&self) -> Option<Error> {
+        self.effect_error.get().or(self.minimum_error.get())
+    }
+    fn fence_effect_error(&self, error: Error) {
+        if matches!(
+            error,
+            Error::Config(_)
+                | Error::PciCapability(_)
+                | Error::MinimumDelay(_)
+                | Error::Interrupted
+        ) {
+            if self.effect_error.get().is_none() {
+                self.effect_error.set(Some(error));
+            }
+            if matches!(error, Error::MinimumDelay(_) | Error::Interrupted)
+                && self.minimum_error.get().is_none()
+            {
+                self.minimum_error.set(Some(error));
+            }
         }
+    }
+    fn reset_clock_gate_effect(&mut self, enabled: bool) -> Result<(), Error> {
+        if let Some(error) = self.first_effect_error() {
+            return Err(error);
+        }
+        // Close effect admission BEFORE the external hook. Caught unwind
+        // retains Interrupted without claiming that it was a minimum failure.
+        self.effect_error.set(Some(Error::Interrupted));
+        let result = self.registers.reset_clock_gate(enabled);
+        self.effect_error.set(None);
+        if let Err(error) = result {
+            self.fence_effect_error(error);
+        }
+        result
+    }
+    fn minimum_guard(&self) -> Result<(), Error> {
+        if let Some(error) = self.first_effect_error() {
+            return Err(error);
+        }
+        self.minimum_error.set(Some(Error::Interrupted));
+        match self.timer.check() {
+            Ok(()) => {
+                self.minimum_error.set(None);
+                Ok(())
+            }
+            Err(cause) => {
+                let error = Error::MinimumDelay(cause);
+                self.minimum_error.set(Some(error));
+                Err(error)
+            }
+        }
+    }
+    fn minimum_wait(
+        timer: &T,
+        failure: &core::cell::Cell<Option<Error>>,
+        us: u64,
+    ) -> Result<(), Error> {
+        if let Some(error) = failure.get() {
+            return Err(error);
+        }
+        failure.set(Some(Error::Interrupted));
+        match timer.check().and_then(|()| timer.wait_us(us)) {
+            Ok(()) => {
+                failure.set(None);
+                Ok(())
+            }
+            Err(cause) => {
+                let error = Error::MinimumDelay(cause);
+                failure.set(Some(error));
+                Err(error)
+            }
+        }
+    }
+    fn delay(&mut self, us: u64) -> Result<(), Error> {
+        self.minimum_guard()?;
+        let previous = (
+            self.lifecycle_failed,
+            self.command_poisoned,
+            self.routing_failed,
+        );
+        self.lifecycle_failed = true;
+        self.command_poisoned = true;
+        self.routing_failed = true;
+        Self::minimum_wait(&*self.timer, &self.minimum_error, us)?;
+        (
+            self.lifecycle_failed,
+            self.command_poisoned,
+            self.routing_failed,
+        ) = previous;
+        Ok(())
     }
 
     fn stop_commands(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.registers.write8(CORBCTL, 0);
         self.registers.write8(RIRBCTL, 0);
         self.wait(Phase::CommandStop, |r| {
@@ -404,6 +656,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     fn initialize(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.refresh_extended()?;
         self.registers.write32(INTCTL, 0);
         self.registers.write16(WAKEEN, 0);
@@ -413,24 +666,53 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.stop_commands()?;
         self.registers.write32(DPLBASE, 0);
         self.registers.write32(DPUBASE, 0);
+        self.initialize_after_stop()
+    }
+
+    fn initialize_after_stop(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
+        self.refresh_extended()?;
         if self.config.reset_policy == ResetPolicy::Generic {
             return self.initialize_link();
         }
-        // A failed disable can have partially changed PCI state; always attempt
-        // the matching enable before returning, even when reset never began.
-        if let Err(error) = self.registers.reset_clock_gate(false) {
-            let _ = self.registers.reset_clock_gate(true);
+        self.reset_cleanup_error = None;
+        self.reset_error = None;
+        if let Err(error) = self.reset_clock_gate_effect(false) {
+            self.reset_error = Some(error);
+            if self.first_effect_error().is_none() {
+                self.reset_cleanup_error = self.reset_clock_gate_effect(true).err();
+            }
             return Err(error);
         }
         let reset = self.initialize_link();
-        let cleanup = self.registers.reset_clock_gate(true);
-        cleanup?;
-        reset?;
+        if let Err(error) = reset {
+            self.reset_error = Some(error);
+            self.fence_effect_error(error);
+        }
+        if self.first_effect_error().is_some() {
+            return reset;
+        }
+        let cleanup = self.reset_clock_gate_effect(true);
+        match reset {
+            Err(error) => {
+                // Preserve the primary reset error beside any distinct hook
+                // cleanup error; a cleanup denial has already fenced IO.
+                self.reset_cleanup_error = cleanup.err();
+                return Err(error);
+            }
+            Ok(()) => {
+                if let Err(error) = cleanup {
+                    self.reset_error = Some(error);
+                    return Err(error);
+                }
+            }
+        }
         self.refresh_extended()?;
         self.configure_extended_link()
     }
 
     fn initialize_link(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         let gctl = self.registers.read32(GCTL);
         if gctl == u32::MAX {
             return Err(Error::RegisterUnavailable { offset: GCTL });
@@ -444,13 +726,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             let value = r.read32(GCTL);
             value != u32::MAX && value & GCTL_RESET == 0
         })?;
-        self.delay(500); // Linux: >=100us link/codec PLL reset assertion.
+        self.delay(500)?; // Linux: >=100us link/codec PLL reset assertion.
         self.registers.write32(GCTL, gctl | GCTL_RESET);
         self.wait(Phase::LinkResetExit, |r| {
             let value = r.read32(GCTL);
             value != u32::MAX && value & GCTL_RESET != 0
         })?;
-        self.delay(1000); // Codec initialization requires >=540us after CRST.
+        self.delay(1000)?; // Codec initialization requires >=540us after CRST.
         let state = self.registers.read16(STATESTS);
         if state == u16::MAX {
             return Err(Error::RegisterUnavailable { offset: STATESTS });
@@ -514,6 +796,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     fn command_fault(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         if self.registers.read8(CORBSTS) & CORB_MEMORY != 0 {
             return Err(Error::CorbMemory);
         }
@@ -528,6 +811,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// once, where a codec allowed that (`allow_bus_reset`), and retries, or
     /// falls back to the immediate command interface for good.
     pub fn verb(&mut self, verb: Verb) -> Result<u32, Error> {
+        self.minimum_guard()?;
         if self.lifecycle_failed {
             return Err(Error::NeedsReset);
         }
@@ -545,6 +829,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     fn exchange(&mut self, verb: Verb) -> Result<u32, Error> {
+        self.minimum_guard()?;
         loop {
             let result = if self.single_command {
                 self.single_verb(verb)
@@ -587,6 +872,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// `snd_hdac_bus_update_rirb`: unsolicited responses queue; a solicited
     /// one from a codec with nothing outstanding is spurious and dropped.
     fn update_rirb(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.command_fault()?;
         let wp = self.registers.read16(RIRBWP);
         if wp == u16::MAX {
@@ -619,6 +905,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// `snd_hdac_bus_send_cmd` then `snd_hdac_bus_get_response_rirb`. Answers
     /// already queued are consumed first, as `azx_interrupt` would have.
     fn rirb_verb(&mut self, verb: Verb) -> Result<u32, Error> {
+        self.minimum_guard()?;
         self.update_rirb()?;
         let rp = self.registers.read16(CORBRP);
         if rp >= self.corb_entries {
@@ -650,6 +937,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// `azx_single_send_cmd` and `azx_single_wait_for_response`: 50us for the
     /// interface to go idle, then 50us for the response.
     fn single_verb(&mut self, verb: Verb) -> Result<u32, Error> {
+        self.minimum_guard()?;
         let start = self.timer.now_us();
         while self.registers.read16(IRS) & IRS_BUSY != 0 {
             if self.timer.now_us().wrapping_sub(start) >= SINGLE_COMMAND_US {
@@ -679,6 +967,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// register cache. Streams lose their descriptors to the link reset and
     /// stay stopped until released.
     fn bus_reset(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         if !self.writes.complete() {
             // Writes the cache could not key cannot be restored.
             return Err(Error::Timeout(Phase::Verb));
@@ -702,6 +991,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// `azx_stop_chip` then `azx_init_chip(chip, true)`: a link and command
     /// ring reset that keeps the codec mask, unlike a new probe.
     pub(super) fn reset_chip(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         for stream in self.streams.iter_mut().flatten() {
             stream.running = false;
             stream.poisoned = true;
@@ -723,6 +1013,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Stop every stream and both command engines. Failure keeps ownership:
     /// DMA memory cannot be repurposed and the platform must reset the device.
     pub fn shutdown(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         // Only this invocation's RUN readbacks may establish quiescence.
         // A prior stopped state can survive a failed reset/restart attempt.
         self.stopped = false;
@@ -787,6 +1078,23 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(error);
         }
         Ok(())
+    }
+}
+
+impl<R, T> Drop for Controller<R, T> {
+    fn drop(&mut self) {
+        // No engine stop, unmap, reset or provider release is inferred in Drop.
+        // Registers, timing and rings are ManuallyDrop; retain every dependent
+        // codec/stream/GPU owner until the explicit drained extraction path.
+        core::mem::forget(core::mem::take(&mut self.streams));
+        core::mem::forget(core::mem::take(&mut self.routes));
+        core::mem::forget(core::mem::take(&mut self.codec_controls));
+        core::mem::forget(core::mem::take(&mut self.converter_bindings));
+        core::mem::forget(core::mem::take(&mut self.realtek_codecs));
+        core::mem::forget(core::mem::take(&mut self.conexant_codecs));
+        core::mem::forget(core::mem::take(&mut self.sigmatel_codecs));
+        core::mem::forget(core::mem::take(&mut self.cirrus_codecs));
+        core::mem::forget(core::mem::take(&mut self.hdmi_ports));
     }
 }
 

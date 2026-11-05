@@ -9,6 +9,11 @@ use core::{
 
 #[derive(Default)]
 struct State {
+    timing_failure: Option<crate::bus::pci::power::Error>,
+    fail_delay_at: Option<usize>,
+    delay_calls: usize,
+    timer_drops: Arc<AtomicUsize>,
+
     operations: Vec<[u32; 3]>,
     accesses: usize,
     fail_at: Option<usize>,
@@ -138,15 +143,47 @@ unsafe impl Registers for Io {
         Ok(())
     }
 }
-struct Timer(Rc<RefCell<State>>);
-impl Delay for Timer {
-    fn delay(&mut self, microseconds: u64) {
+struct Timer(Rc<RefCell<State>>, Arc<AtomicUsize>);
+impl Timer {
+    fn new(state: Rc<RefCell<State>>) -> Self {
+        let drops = state.borrow().timer_drops.clone();
+        Self(state, drops)
+    }
+}
+// SAFETY: isolated owned virtual-time model; this grants no native permission.
+unsafe impl Delay for Timer {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        if let Some(error) = self.0.borrow().timing_failure {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+    fn wait_us(&self, microseconds: u64) -> Result<(), crate::bus::pci::power::Error> {
+        self.check()?;
+        {
+            let mut state = self.0.borrow_mut();
+            let at = state.delay_calls;
+            state.delay_calls += 1;
+            if state.fail_delay_at == Some(at) {
+                let error = crate::bus::pci::power::Error::Clock;
+                state.timing_failure = Some(error);
+                return Err(error);
+            }
+        }
         self.0
             .borrow_mut()
             .operations
             .push([2, microseconds as u32, 0]);
+        Ok(())
     }
 }
+impl Drop for Timer {
+    fn drop(&mut self) {
+        self.1.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 type Fixture = (Phy<Io, Timer>, Rc<RefCell<State>>, Arc<AtomicUsize>);
 fn fixture(kind: Kind) -> Fixture {
     let state = Rc::new(RefCell::new(State::new()));
@@ -157,7 +194,7 @@ fn fixture(kind: Kind) -> Fixture {
     };
     // SAFETY: fixture's exact PHY kind and sole model owner are controlled.
     (
-        unsafe { Phy::new(kind, io, Timer(state.clone())) },
+        unsafe { Phy::new(kind, io, Timer::new(state.clone())) },
         state,
         released,
     )
@@ -454,4 +491,48 @@ fn unchanged_linux_pch_phy_register_effects() {
         cases += 1;
     }
     assert_eq!(cases, 264);
+}
+
+#[test]
+fn minimum_preflight_failure_has_no_register_effect_and_keeps_both_owners() {
+    let (mut phy, state, released) = fixture(Kind::I82579);
+    let cause = crate::bus::pci::power::Error::Clock;
+    state.borrow_mut().timing_failure = Some(cause);
+    let register = Register::new(0, 1).unwrap();
+    assert_eq!(phy.read(register), Err(Fault::Minimum(cause).into()));
+    assert!(phy.is_poisoned());
+    assert!(state.borrow().operations.is_empty());
+    state.borrow_mut().timing_failure = None;
+    for _ in 0..3 {
+        assert_eq!(phy.read(register), Err(Fault::Minimum(cause).into()));
+    }
+    assert!(state.borrow().operations.is_empty());
+    drop(phy);
+    assert_eq!(released.load(Ordering::SeqCst), 0);
+    assert_eq!(state.borrow().timer_drops.load(Ordering::SeqCst), 0);
+}
+#[test]
+fn minimum_wait_failure_does_not_clear_uncertain_semaphore_or_retry() {
+    let (mut phy, state, released) = fixture(Kind::I82579);
+    state.borrow_mut().fail_delay_at = Some(0);
+    let cause = crate::bus::pci::power::Error::Clock;
+    let register = Register::new(0, 1).unwrap();
+    assert_eq!(
+        phy.read(register),
+        Err(Error {
+            primary: Fault::Minimum(cause),
+            cleanup: Some(Fault::Minimum(cause))
+        })
+    );
+    assert_eq!(state.borrow().ext & SWFLAG, SWFLAG);
+    let observed = state.borrow().operations.clone();
+    state.borrow_mut().timing_failure = None;
+    for _ in 0..3 {
+        assert_eq!(phy.read(register), Err(Fault::Minimum(cause).into()));
+    }
+    assert_eq!(state.borrow().operations, observed);
+    assert_eq!(state.borrow().delay_calls, 1);
+    drop(phy);
+    assert_eq!(released.load(Ordering::SeqCst), 0);
+    assert_eq!(state.borrow().timer_drops.load(Ordering::SeqCst), 0);
 }

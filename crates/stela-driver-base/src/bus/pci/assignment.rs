@@ -53,6 +53,9 @@ pub unsafe trait PhysicalAssignment: Send + Sync + 'static {
 }
 
 trait Ancestor: Send + Sync {
+    fn check_admission(&self) -> Result<(), Error>;
+    fn check_control(&self) -> Result<(), Error>;
+    fn close_admission(&self);
     fn acquire(&self) -> Result<(), Error>;
     fn release(&self);
 }
@@ -106,6 +109,22 @@ struct Storage<P: PhysicalAssignment> {
     gate: Gate,
 }
 impl<P: PhysicalAssignment> Ancestor for Storage<P> {
+    fn check_admission(&self) -> Result<(), Error> {
+        if let Some(parent) = &self.gate.parent {
+            parent.original.check_admission()?;
+        }
+        if self.gate.state.load(Ordering::Acquire) & CLOSED != 0 {
+            return Err(Error::Closed);
+        }
+        Ok(())
+    }
+
+    fn close_admission(&self) {
+        self.gate.state.fetch_or(CLOSED, Ordering::AcqRel);
+    }
+    fn check_control(&self) -> Result<(), Error> {
+        self.original.check_control()
+    }
     fn acquire(&self) -> Result<(), Error> {
         self.gate.acquire()
     }
@@ -142,6 +161,14 @@ impl<P: PhysicalAssignment> Assignment<P> {
             _local: PhantomData,
         }
     }
+    /// Retain this same original root for metadata-only admission denial.
+    /// The projection has no native I/O, reset, reopening or physical release.
+    pub fn admission_close(&self) -> AdmissionClose {
+        AdmissionClose {
+            original: ManuallyDrop::new(Arc::clone(&self.storage) as Arc<dyn Ancestor>),
+            dismissed: false,
+        }
+    }
     pub fn retain(&self) -> Retention<P> {
         Retention {
             storage: Arc::clone(&self.storage),
@@ -165,6 +192,48 @@ impl<P: PhysicalAssignment> Assignment<P> {
             });
         }
         Ok(())
+    }
+    /// Count one bounded exclusive control access while this SAME affine owner
+    /// is closed and all prior users have ended. Parent acquisition still
+    /// atomically excludes competing ancestor mutation. This grants no actual
+    /// operation permission or hardware retirement proof by itself.
+    pub fn exclusive_control_use(&mut self) -> Result<Use<P>, Error> {
+        self.storage.original.check_control()?;
+        if let Some(parent) = &self.storage.gate.parent {
+            parent.original.acquire()?;
+        }
+        match self.storage.gate.state.compare_exchange(
+            CLOSED,
+            CLOSED + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(Use {
+                storage: ManuallyDrop::new(Arc::clone(&self.storage)),
+                kind: UseKind::Configuration,
+                released: false,
+            }),
+            Err(state) => {
+                if let Some(parent) = &self.storage.gate.parent {
+                    parent.original.release();
+                }
+                Err(if state & CLOSED == 0 {
+                    Error::Open
+                } else {
+                    Error::Busy {
+                        uses: state & COUNT,
+                        retentions: Arc::strong_count(&self.storage) - 1,
+                    }
+                })
+            }
+        }
+    }
+    /// Irreversibly deny new uses on control abandonment, from any context.
+    /// This is ONLY atomic metadata denial; it performs no owner entry, native
+    /// callback, assignment change, user join, reset, or physical release.
+    /// The caller must still keep the complete actual control/product graph.
+    pub fn abandon_admission(&mut self) {
+        self.storage.gate.state.fetch_or(CLOSED, Ordering::AcqRel);
     }
     pub fn uses(&self) -> usize {
         self.storage.gate.state.load(Ordering::Acquire) & COUNT
@@ -216,10 +285,54 @@ impl<P: PhysicalAssignment> Drop for Assignment<P> {
             // Losing the affine controller closes every surviving admission
             // atomically, even on a foreign thread. Keep all actual rights;
             // this is metadata denial, never hardware retirement or release.
-            self.storage.gate.state.fetch_or(CLOSED, Ordering::AcqRel);
+            self.abandon_admission();
             ABANDONED_CONTROLS.fetch_add(1, Ordering::Relaxed);
         }
         // ManuallyDrop keeps the ENTIRE original control/storage/ancestor graph.
+    }
+}
+/// Close-only retention of one original assignment. An outstanding source key
+/// may deny all descendant admission from any thread, but cannot perform I/O,
+/// return the physical product, reopen admission or invent user completion.
+/// Default destruction closes metadata and retains its complete original graph.
+#[must_use = "retain the original close handle until its owning source key returns"]
+pub struct AdmissionClose {
+    original: ManuallyDrop<Arc<dyn Ancestor>>,
+    dismissed: bool,
+}
+impl AdmissionClose {
+    pub(super) fn check_admission(&self) -> Result<(), Error> {
+        self.original.check_admission()
+    }
+
+    /// Infallible, nonblocking metadata denial; no context callback or hardware
+    /// effect occurs, and every accepted original user remains counted.
+    pub fn close(&self) {
+        self.original.close_admission();
+    }
+    /// Retain the same close-only projection without calling the source.
+    pub(crate) fn retain_close(&self) -> Self {
+        Self {
+            original: ManuallyDrop::new(Arc::clone(&self.original)),
+            dismissed: false,
+        }
+    }
+    /// End only this close-handle retention after its source key was returned.
+    /// This releases no counted use and acknowledges no native completion.
+    pub fn dismiss(mut self) {
+        self.dismissed = true;
+        // SAFETY: this consumed affine handle transfers its one Arc once. Its
+        // actual controller cannot return storage while this strong Arc exists;
+        // ordinary abandoned controls retain that original storage permanently.
+        drop(unsafe { ManuallyDrop::take(&mut self.original) });
+    }
+}
+impl Drop for AdmissionClose {
+    fn drop(&mut self) {
+        if !self.dismissed {
+            self.close();
+        }
+        // ManuallyDrop retains the entire actual product, never reissuing it.
     }
 }
 /// Allocation/assignment retention only, not entered/config/I/O permission.
@@ -234,6 +347,28 @@ impl<P: PhysicalAssignment> Clone for Retention<P> {
     }
 }
 impl<P: PhysicalAssignment> Retention<P> {
+    /// Observe the original assignment and every ancestor's denial state.
+    /// A successful observation does not admit an operation or grant a use.
+    pub fn check_admission(&self) -> Result<(), Error> {
+        self.storage.check_admission()
+    }
+
+    /// Read only the same original gate's live use count. This observation
+    /// grants no admission, completion, mutation or original-product return.
+    pub fn uses(&self) -> usize {
+        self.storage.gate.state.load(Ordering::Acquire) & COUNT
+    }
+    /// Observe the local gate only. This is neither ancestor admission nor
+    /// an atomic acquisition for a future operation.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn check_local_admission(&self) -> Result<(), Error> {
+        if self.storage.gate.state.load(Ordering::Acquire) & CLOSED != 0 {
+            Err(Error::Closed)
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn same_assignment(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.storage, &other.storage)
     }
@@ -255,6 +390,19 @@ pub struct Use<P: PhysicalAssignment> {
     released: bool,
 }
 impl<P: PhysicalAssignment> Use<P> {
+    /// Erase only Rust's product type, retaining the SAME actual storage/use.
+    /// No allocation, callback, new permission, weak lookup or counter change.
+    pub fn erase(mut self) -> OpaqueUse {
+        self.released = true;
+        // SAFETY: transfer this live use's one Arc exactly once; Drop must not
+        // release its count because the original use continues in OpaqueUse.
+        let original = unsafe { ManuallyDrop::take(&mut self.storage) };
+        OpaqueUse {
+            original: ManuallyDrop::new(original as Arc<dyn Ancestor>),
+            kind: self.kind,
+            released: false,
+        }
+    }
     pub fn kind(&self) -> UseKind {
         self.kind
     }
@@ -275,6 +423,59 @@ impl<P: PhysicalAssignment> Use<P> {
     }
 }
 impl<P: PhysicalAssignment> Drop for Use<P> {
+    fn drop(&mut self) {
+        if !self.released {
+            ABANDONED_USES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+/// Type-erased owned original use for bounded config/native adapter boundaries.
+/// Its fat Arc keeps actual original product/ancestors; no heap allocation is
+/// needed per access, including IRQ reads. Drop retains the real graph/count.
+#[must_use = "finish the actual operation and explicitly release its real use"]
+pub struct OpaqueUse {
+    original: ManuallyDrop<Arc<dyn Ancestor>>,
+    kind: UseKind,
+    released: bool,
+}
+impl OpaqueUse {
+    /// Actual SAME-use close-only projection. No callback, allocation, counter
+    /// change, control/writer edge or completion/release permission is added.
+    pub(crate) fn admission_close(&self) -> AdmissionClose {
+        AdmissionClose {
+            original: ManuallyDrop::new(Arc::clone(&self.original)),
+            dismissed: false,
+        }
+    }
+    pub fn kind(&self) -> UseKind {
+        self.kind
+    }
+    /// # Safety
+    /// The actual operation/user has fully ended with the same completion
+    /// obligations as Use::release. No new operation may use this token. This
+    /// releases metadata counts only, never hardware resources or reset rights.
+    pub unsafe fn release(mut self) -> Result<(), (Error, Self)> {
+        // SAFETY: caller supplies the same actual completion obligations.
+        match unsafe { self.release_in_place() } {
+            Ok(()) => Ok(()),
+            Err(error) => Err((error, self)),
+        }
+    }
+
+    /// # Safety
+    /// As for release. The operation may keep this token in place while its
+    /// original completion-context check runs. Call at most once successfully.
+    pub(crate) unsafe fn release_in_place(&mut self) -> Result<(), Error> {
+        assert!(!self.released);
+        self.original.check_control()?;
+        self.original.release();
+        self.released = true;
+        // SAFETY: one consumed original-use Arc, after exact count release.
+        drop(unsafe { ManuallyDrop::take(&mut self.original) });
+        Ok(())
+    }
+}
+impl Drop for OpaqueUse {
     fn drop(&mut self) {
         if !self.released {
             ABANDONED_USES.fetch_add(1, Ordering::Relaxed);

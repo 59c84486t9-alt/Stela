@@ -17,6 +17,7 @@ pub use lifetime::Attached;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
+    Config(crate::bus::pci::ConfigError),
     Device(super::Error),
     Preparation(preparation::Error),
     Configuration(owned::Error),
@@ -96,6 +97,10 @@ pub struct Inputs<R: RetirableRegisters, T: Timer + 'static> {
 /// timer in the same process/root context. Prior firmware, IRQ/work, bypass
 /// and competing PCI writers are excluded; inherited DMA backing stays kept.
 /// The page provider supplies stable coherent WB pages for this native domain.
+#[expect(
+    clippy::result_large_err,
+    reason = "return the original owner and precise failure without allocating during refusal or retirement"
+)]
 pub unsafe fn attach<R: RetirableRegisters, T: Timer + 'static>(
     inputs: Inputs<R, T>,
     pages: &dyn PageSource,
@@ -103,4 +108,10 @@ pub unsafe fn attach<R: RetirableRegisters, T: Timer + 'static>(
     // SAFETY: the caller supplies the original cold-owner and exclusion contract.
     let bound = unsafe { cold::prepare(inputs) }?;
     lifetime::attach(bound, pages)
+}
+
+impl From<crate::bus::pci::ConfigError> for Error {
+    fn from(e: crate::bus::pci::ConfigError) -> Self {
+        Self::Config(e)
+    }
 }

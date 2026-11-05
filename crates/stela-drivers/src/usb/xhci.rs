@@ -79,6 +79,8 @@ mod iso;
 mod lifecycle;
 mod lpm;
 mod memory;
+mod minimum;
+use minimum::Minimum;
 #[cfg(test)]
 pub(crate) mod model;
 pub mod native;
@@ -335,6 +337,10 @@ impl Registers for Bar {
 /// Enumeration reports keep the original error alongside the operation
 /// that failed. In particular, Address Device and an EP0 transfer can both
 /// report USB Transaction Error, with different recovery requirements.
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 fn during<T>(
     operation: impl Into<String>,
     result: Result<T, BlockError>,
@@ -395,9 +401,16 @@ struct Attachment {
     parent: Option<(u8, u8)>,
 }
 
+/// Kept minimum timer owners whose controller lifetime ended without an
+/// independently proven native timing/source retirement boundary.
+pub fn retained_minimum_timers() -> u64 {
+    minimum::retained()
+}
+
 pub struct Controller {
     registers: Box<dyn Registers>,
     pub(crate) clock: Clock,
+    minimum: Minimum,
     operational: usize,
     runtime: usize,
     doorbells: usize,
@@ -469,8 +482,16 @@ impl Controller {
         clock: Clock,
         dma: &mut dyn DmaAllocator,
         location: String,
+        minimum: Rc<dyn crate::bus::pci::power::Timer>,
     ) -> Result<Self, BlockError> {
-        Self::with_dma_profile(registers, clock, dma, location, dma::Profile::SPEC)
+        Self::with_dma_profile(
+            registers,
+            clock,
+            dma,
+            location,
+            dma::Profile::SPEC,
+            Minimum::retain(minimum),
+        )
     }
 
     #[cfg(test)]
@@ -480,6 +501,7 @@ impl Controller {
         dma: &mut dyn DmaAllocator,
         location: String,
         profile: dma::Profile,
+        minimum: Minimum,
     ) -> Result<Self, BlockError> {
         Self::with_hardware_profile(
             registers,
@@ -491,6 +513,7 @@ impl Controller {
                 ..Default::default()
             },
             || Ok(()),
+            minimum,
         )
     }
 
@@ -501,19 +524,39 @@ impl Controller {
         location: String,
         policy: hardware::Policy,
         after_reset: impl FnOnce() -> Result<(), BlockError>,
+        minimum: Minimum,
     ) -> Result<Self, BlockError> {
-        Self::with_memory_profile(registers, clock, dma, location, policy, after_reset, None)
+        Self::with_memory_profile(
+            registers,
+            clock,
+            dma,
+            location,
+            policy,
+            after_reset,
+            None,
+            minimum,
+        )
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the retained minimum provider and original native memory have independent lifetime contracts"
+    )]
     fn with_memory_profile(
-        mut registers: Box<dyn Registers>,
+        registers: Box<dyn Registers>,
         clock: Clock,
         dma: &mut dyn DmaAllocator,
         location: String,
         policy: hardware::Policy,
         after_reset: impl FnOnce() -> Result<(), BlockError>,
         native_memory: Option<Rc<memory::Native>>,
+        minimum: Minimum,
     ) -> Result<Self, BlockError> {
+        // Take custody before even the first fallible source check. Raw start
+        // accepts an owned backend whose Drop may unmap or release a device.
+        let mut registers: Box<dyn Registers> =
+            Box::new(minimum::Gate::retain(registers, minimum.clone()));
+        minimum.check()?;
         clock_ready(clock)?;
         let profile = policy.dma;
         let capability = registers.read32(0);
@@ -566,7 +609,12 @@ impl Controller {
                 }
                 match header & 0xff {
                     LEGACY_SUPPORT => {
-                        crate::usb::handoff::xhci_legacy(&mut *registers, at, clock);
+                        minimum.source_result(crate::usb::handoff::xhci_legacy(
+                            &mut *registers,
+                            at,
+                            clock,
+                            minimum.timer().as_ref(),
+                        ))?;
                     }
                     SUPPORTED_PROTOCOL => {
                         let ports = registers.read32(at + 8);
@@ -601,6 +649,7 @@ impl Controller {
             clock,
             operational,
             profile.reset_settle_us(),
+            &minimum,
         )?;
         after_reset()?;
         if registers.read32(operational + PAGESIZE) & 1 == 0 {
@@ -664,9 +713,11 @@ impl Controller {
         };
         let mut slots = Vec::new();
         slots.resize_with(max_slots + 1, || None);
+        minimum.check()?;
         Ok(Self {
             registers,
             clock,
+            minimum,
             operational,
             runtime,
             doorbells,
@@ -943,9 +994,32 @@ impl Controller {
         }))
     }
 
+    /// The original minimum provider's first failure; it cannot be cleared by
+    /// a later tick, timeout, reset acknowledgment or replacement device ID.
+    pub fn minimum_error(&self) -> Option<crate::bus::pci::power::Error> {
+        self.minimum.error()
+    }
+    fn minimum_status<T>(&mut self, result: Result<T, BlockError>) -> Result<T, BlockError> {
+        if let Some(error) = self.minimum.error() {
+            self.command_poisoned = true;
+            self.hardware = hardware::State::Failed;
+            return Err(BlockError::PciPower(error));
+        }
+        result
+    }
+    fn check_minimum(&mut self) -> Result<(), BlockError> {
+        let result = self.minimum.check();
+        self.minimum_status(result)
+    }
+    pub(in crate::usb) fn minimum_wait(&mut self, microseconds: u64) -> Result<(), BlockError> {
+        let result = self.minimum.wait_us(microseconds);
+        self.minimum_status(result)
+    }
+
     /// Before any new command-dependent DMA mutation or doorbell. A late
     /// completion cannot establish a new command generation or undo poison.
     fn ready(&mut self) -> Result<(), BlockError> {
+        self.check_minimum()?;
         self.hardware.ready()?;
         if let Some(memory) = &self.native_memory {
             memory.ready()?;
@@ -1004,12 +1078,13 @@ impl Controller {
     }
 }
 
-/// All fixed controller/port waits fit this interval. Caller-supplied budgets
+/// Nominal polling deadlines fit this interval. This grants no minimum wait.
+/// Caller-supplied budgets
 /// also pass fallible admission at their submission boundary.
 fn clock_ready(clock: Clock) -> Result<(), BlockError> {
     clock
         .check_duration(60_000_000)
-        .map_err(|_| BlockError::Unsupported("xHCI requires an available calibrated clock"))
+        .map_err(|_| BlockError::Unsupported("xHCI requires an available nominal polling clock"))
 }
 
 /// Polls `ready` against the registers until it holds or time runs out.
@@ -1070,9 +1145,10 @@ pub fn attach(
     function: &mut Function,
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
 ) -> Result<Found, BlockError> {
     let firmware = crate::firmware::HandoffProvider::new(handoff.firmware.as_deref());
-    attach_with_provider(function, handoff, dma, &firmware)
+    attach_with_provider(function, handoff, dma, &firmware, minimum)
 }
 
 /// Attach while preserving the caller's firmware lookup/recording boundary.
@@ -1081,8 +1157,9 @@ pub fn attach_with_provider(
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
     firmware: &dyn crate::firmware::Provider,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
 ) -> Result<Found, BlockError> {
-    attach_with_firmware_diagnostics(function, handoff, dma, firmware)
+    attach_with_firmware_diagnostics(function, handoff, dma, firmware, minimum)
         .map_err(renesas::Error::transport)
 }
 
@@ -1094,14 +1171,18 @@ pub fn attach_with_firmware_diagnostics(
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
     firmware: &dyn crate::firmware::Provider,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
 ) -> Result<Found, renesas::Error> {
+    let minimum = Minimum::retain(minimum);
+    minimum.check()?;
     clock_ready(handoff.clock)?;
     let stream_policy = streams::pci_policy(function)?;
     let dma_profile = dma::Profile::pci(function.vendor, function.device);
     let quirks = quirks::Profile::pci(function)?;
-    function.power_up(&handoff.clock)?;
-    let controller_firmware = renesas::prepare(function, handoff.clock, firmware)?;
-    let bars = function.bars();
+    function.power_up(minimum.timer())?;
+    let controller_firmware =
+        renesas::prepare_with_minimum(function, handoff.clock, firmware, &minimum)?;
+    let bars = function.bars().map_err(BlockError::Config)?;
     // The capability, operational, runtime and doorbell registers all lie
     // in BAR 0, whatever its size (5.2.1): QEMU's is 16 KiB, a PC's 64 KiB
     // or more.
@@ -1112,7 +1193,7 @@ pub fn attach_with_firmware_diagnostics(
         mmio: registers(handoff, bars[0], 0, bytes)?,
         bytes: usize::try_from(bytes).unwrap_or(usize::MAX),
     };
-    function.enable_polled();
+    function.enable_polled()?;
     // xhci_try_enable_msi: MSI-X, otherwise MSI, for interrupter 0.
     let signalled = match handoff.completion {
         Some(message) => function.enable_message(handoff, &bars, message)?,
@@ -1136,6 +1217,7 @@ pub fn attach_with_firmware_diagnostics(
         },
         signalled,
         || quirks::after_reset(function, handoff.clock),
+        minimum,
     )?;
     found.controller_firmware = controller_firmware;
     Ok(found)
@@ -1148,6 +1230,7 @@ pub fn start(
     clock: Clock,
     dma: &mut dyn DmaAllocator,
     location: String,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
 ) -> Result<Found, BlockError> {
     start_with_provider(
         registers,
@@ -1155,6 +1238,7 @@ pub fn start(
         dma,
         location,
         &crate::firmware::HandoffProvider::new(None),
+        minimum,
     )
 }
 
@@ -1166,6 +1250,7 @@ pub fn start_with_provider(
     dma: &mut dyn DmaAllocator,
     location: String,
     firmware: &dyn crate::firmware::Provider,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
 ) -> Result<Found, BlockError> {
     start_with_policies(
         registers,
@@ -1176,6 +1261,7 @@ pub fn start_with_provider(
         hardware::Policy::default(),
         false,
         || Ok(()),
+        Minimum::retain(minimum),
     )
 }
 
@@ -1192,9 +1278,17 @@ fn start_with_policies(
     policy: hardware::Policy,
     signal: bool,
     after_reset: impl FnOnce() -> Result<(), BlockError>,
+    minimum: Minimum,
 ) -> Result<Found, BlockError> {
-    let mut controller =
-        Controller::with_hardware_profile(registers, clock, dma, location, policy, after_reset)?;
+    let mut controller = Controller::with_hardware_profile(
+        registers,
+        clock,
+        dma,
+        location,
+        policy,
+        after_reset,
+        minimum,
+    )?;
     if signal {
         controller.signal();
     }
@@ -1339,11 +1433,14 @@ mod tests {
                 },
                 &mut Trap,
                 "unavailable-clock owner".into(),
+                crate::minimum_model::owned(Clock {
+                    ticks_per_microsecond: 1,
+                }),
             );
             assert!(matches!(
                 result,
                 Err(BlockError::Unsupported(
-                    "xHCI requires an available calibrated clock"
+                    "xHCI requires an available nominal polling clock"
                 ))
             ));
         }

@@ -1,0 +1,458 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 12:58:49 -0500
+Subject: [PATCH] refactor(fs): link original inode lifetime accounting
+
+---
+ fs/inode.c            | 197 ----------------------------------------
+ fs/inode_cache_init.c | 207 ++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 207 insertions(+), 197 deletions(-)
+
+diff --git a/fs/inode.c b/fs/inode.c
+index da3ef4c1a957dbce9572ac77b38678c6581681bc..41fcde17f94d4cb4ec55b843f65453fde0f7806b 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -59,41 +59,6 @@
+ 
+ static __cacheline_aligned_in_smp DEFINE_SPINLOCK(inode_hash_lock);
+ 
+-/*
+- * Empty aops. Can be used for the cases where the user does not
+- * define any of the address_space operations.
+- */
+-const struct address_space_operations empty_aops = {
+-};
+-EXPORT_SYMBOL(empty_aops);
+-
+-static DEFINE_PER_CPU(unsigned long, nr_inodes);
+-
+-static long get_nr_inodes(void)
+-{
+-	int i;
+-	long sum = 0;
+-	for_each_possible_cpu(i)
+-		sum += per_cpu(nr_inodes, i);
+-	return sum < 0 ? 0 : sum;
+-}
+-
+-static inline long get_nr_inodes_unused(void)
+-{
+-	int i;
+-	long sum = 0;
+-	for_each_possible_cpu(i)
+-		sum += per_cpu(nr_unused_inodes, i);
+-	return sum < 0 ? 0 : sum;
+-}
+-
+-long get_nr_dirty_inodes(void)
+-{
+-	/* not actually dirty inodes, but a wild approximation */
+-	long nr_dirty = get_nr_inodes() - get_nr_inodes_unused();
+-	return nr_dirty > 0 ? nr_dirty : 0;
+-}
+-
+ #ifdef CONFIG_DEBUG_FS
+ static DEFINE_PER_CPU(long, mg_ctime_updates);
+ static DEFINE_PER_CPU(long, mg_fine_stamps);
+@@ -158,147 +123,6 @@ late_initcall(mg_debugfs_init);
+ 
+ #endif /* CONFIG_DEBUG_FS */
+ 
+-/*
+- * Handle nr_inode sysctl
+- */
+-#ifdef CONFIG_SYSCTL
+-/*
+- * Statistics gathering..
+- */
+-static struct inodes_stat_t inodes_stat;
+-
+-static int proc_nr_inodes(const struct ctl_table *table, int write, void *buffer,
+-			  size_t *lenp, loff_t *ppos)
+-{
+-	inodes_stat.nr_inodes = get_nr_inodes();
+-	inodes_stat.nr_unused = get_nr_inodes_unused();
+-	return proc_doulongvec_minmax(table, write, buffer, lenp, ppos);
+-}
+-
+-static const struct ctl_table inodes_sysctls[] = {
+-	{
+-		.procname	= "inode-nr",
+-		.data		= &inodes_stat,
+-		.maxlen		= 2*sizeof(long),
+-		.mode		= 0444,
+-		.proc_handler	= proc_nr_inodes,
+-	},
+-	{
+-		.procname	= "inode-state",
+-		.data		= &inodes_stat,
+-		.maxlen		= 7*sizeof(long),
+-		.mode		= 0444,
+-		.proc_handler	= proc_nr_inodes,
+-	},
+-};
+-
+-static int __init init_fs_inode_sysctls(void)
+-{
+-	register_sysctl_init("fs", inodes_sysctls);
+-	return 0;
+-}
+-early_initcall(init_fs_inode_sysctls);
+-#endif
+-
+-static int no_open(struct inode *inode, struct file *file)
+-{
+-	return -ENXIO;
+-}
+-
+-/**
+- * inode_init_always_gfp - perform inode structure initialisation
+- * @sb: superblock inode belongs to
+- * @inode: inode to initialise
+- * @gfp: allocation flags
+- *
+- * These are initializations that need to be done on every inode
+- * allocation as the fields are not initialised by slab allocation.
+- * If there are additional allocations required @gfp is used.
+- */
+-int inode_init_always_gfp(struct super_block *sb, struct inode *inode, gfp_t gfp)
+-{
+-	static const struct inode_operations empty_iops;
+-	static const struct file_operations no_open_fops = {.open = no_open};
+-	struct address_space *const mapping = &inode->i_data;
+-
+-	inode->i_sb = sb;
+-	inode->i_blkbits = sb->s_blocksize_bits;
+-	inode->i_flags = 0;
+-	inode_state_assign_raw(inode, 0);
+-	atomic64_set(&inode->i_sequence, 0);
+-	atomic_set(&inode->i_count, 1);
+-	inode->i_op = &empty_iops;
+-	inode->i_fop = &no_open_fops;
+-	inode->i_ino = 0;
+-	inode->__i_nlink = 1;
+-	inode->i_opflags = 0;
+-	if (sb->s_xattr)
+-		inode->i_opflags |= IOP_XATTR;
+-	if (sb->s_type->fs_flags & FS_MGTIME)
+-		inode->i_opflags |= IOP_MGTIME;
+-	i_uid_write(inode, 0);
+-	i_gid_write(inode, 0);
+-	atomic_set(&inode->i_writecount, 0);
+-	inode->i_size = 0;
+-	inode->i_write_hint = WRITE_LIFE_NOT_SET;
+-	inode->i_blocks = 0;
+-	inode->i_bytes = 0;
+-	inode->i_generation = 0;
+-	inode->i_pipe = NULL;
+-	inode->i_cdev = NULL;
+-	inode->i_link = NULL;
+-	inode->i_dir_seq = 0;
+-	inode->i_rdev = 0;
+-	inode->dirtied_when = 0;
+-
+-#ifdef CONFIG_CGROUP_WRITEBACK
+-	inode->i_wb_frn_winner = 0;
+-	inode->i_wb_frn_avg_time = 0;
+-	inode->i_wb_frn_history = 0;
+-#endif
+-
+-	spin_lock_init(&inode->i_lock);
+-	lockdep_set_class(&inode->i_lock, &sb->s_type->i_lock_key);
+-
+-	init_rwsem(&inode->i_rwsem);
+-	lockdep_set_class(&inode->i_rwsem, &sb->s_type->i_mutex_key);
+-
+-	atomic_set(&inode->i_dio_count, 0);
+-
+-	mapping->a_ops = &empty_aops;
+-	mapping->host = inode;
+-	mapping->flags = 0;
+-	mapping->wb_err = 0;
+-	atomic_set(&mapping->i_mmap_writable, 0);
+-	mapping_set_gfp_mask(mapping, GFP_HIGHUSER_MOVABLE);
+-	mapping->writeback_index = 0;
+-	init_rwsem(&mapping->invalidate_lock);
+-	lockdep_set_class_and_name(&mapping->invalidate_lock,
+-				   &sb->s_type->invalidate_lock_key,
+-				   "mapping.invalidate_lock");
+-	if (sb->s_iflags & SB_I_STABLE_WRITES)
+-		mapping_set_stable_writes(mapping);
+-	inode->i_private = NULL;
+-	inode->i_mapping = mapping;
+-	INIT_HLIST_HEAD(&inode->i_dentry);	/* buggered by rcu freeing */
+-#ifdef CONFIG_FS_POSIX_ACL
+-	inode->i_acl = inode->i_default_acl = ACL_NOT_CACHED;
+-#endif
+-
+-#ifdef CONFIG_FSNOTIFY
+-	inode->i_fsnotify_mask = 0;
+-#endif
+-	inode->i_flctx = NULL;
+-
+-	if (unlikely(security_inode_alloc(inode, gfp)))
+-		return -ENOMEM;
+-
+-	this_cpu_inc(nr_inodes);
+-
+-	return 0;
+-}
+-EXPORT_SYMBOL(inode_init_always_gfp);
+-
+ void free_inode_nonrcu(struct inode *inode)
+ {
+ 	kmem_cache_free(inode_cachep, inode);
+@@ -351,27 +175,6 @@ struct inode *alloc_inode(struct super_block *sb)
+ 	return inode;
+ }
+ 
+-void __destroy_inode(struct inode *inode)
+-{
+-	inode_detach_wb(inode);
+-	security_inode_free(inode);
+-	fsnotify_inode_delete(inode);
+-	locks_free_lock_context(inode);
+-	if (!inode->i_nlink) {
+-		WARN_ON(atomic_long_read(&inode->i_sb->s_remove_count) == 0);
+-		atomic_long_dec(&inode->i_sb->s_remove_count);
+-	}
+-
+-#ifdef CONFIG_FS_POSIX_ACL
+-	if (inode->i_acl && !is_uncached_acl(inode->i_acl))
+-		posix_acl_release(inode->i_acl);
+-	if (inode->i_default_acl && !is_uncached_acl(inode->i_default_acl))
+-		posix_acl_release(inode->i_default_acl);
+-#endif
+-	this_cpu_dec(nr_inodes);
+-}
+-EXPORT_SYMBOL(__destroy_inode);
+-
+ static void destroy_inode(struct inode *inode)
+ {
+ 	const struct super_operations *ops = inode->i_sb->s_op;
+diff --git a/fs/inode_cache_init.c b/fs/inode_cache_init.c
+index 9bf183252d3b8c0222d9e4091255839ecb36bf91..e619c805a8a086ab398bb0e71452bc6d7cfadd12 100644
+--- a/fs/inode_cache_init.c
++++ b/fs/inode_cache_init.c
+@@ -4,10 +4,20 @@
+  * (C) 1997 Linus Torvalds
+  * (C) 1999 Andrea Arcangeli <andrea@suse.de> (dynamic inode allocation)
+  */
++#include <linux/backing-dev.h>
++#include <linux/export.h>
++#include <linux/filelock.h>
+ #include <linux/fs.h>
++#include <linux/fsnotify.h>
+ #include <linux/memblock.h>
++#include <linux/pagemap.h>
++#include <linux/posix_acl.h>
++#include <linux/rw_hint.h>
++#include <linux/security.h>
+ #include <linux/slab.h>
++#include <linux/sysctl.h>
+ 
++#include "inode_lru.h"
+ #include "internal.h"
+ 
+ unsigned int inode_hash_mask __ro_after_init;
+@@ -77,3 +87,200 @@ void __init inode_init(void)
+ 					0,
+ 					0);
+ }
++
++/*
++ * Empty aops. Can be used for the cases where the user does not
++ * define any of the address_space operations.
++ */
++const struct address_space_operations empty_aops = {
++};
++EXPORT_SYMBOL(empty_aops);
++
++static DEFINE_PER_CPU(unsigned long, nr_inodes);
++
++static long get_nr_inodes(void)
++{
++	int i;
++	long sum = 0;
++	for_each_possible_cpu(i)
++		sum += per_cpu(nr_inodes, i);
++	return sum < 0 ? 0 : sum;
++}
++
++static inline long get_nr_inodes_unused(void)
++{
++	int i;
++	long sum = 0;
++	for_each_possible_cpu(i)
++		sum += per_cpu(nr_unused_inodes, i);
++	return sum < 0 ? 0 : sum;
++}
++
++long get_nr_dirty_inodes(void)
++{
++	/* not actually dirty inodes, but a wild approximation */
++	long nr_dirty = get_nr_inodes() - get_nr_inodes_unused();
++	return nr_dirty > 0 ? nr_dirty : 0;
++}
++
++/*
++ * Handle nr_inode sysctl
++ */
++#ifdef CONFIG_SYSCTL
++/*
++ * Statistics gathering..
++ */
++static struct inodes_stat_t inodes_stat;
++
++static int proc_nr_inodes(const struct ctl_table *table, int write, void *buffer,
++			  size_t *lenp, loff_t *ppos)
++{
++	inodes_stat.nr_inodes = get_nr_inodes();
++	inodes_stat.nr_unused = get_nr_inodes_unused();
++	return proc_doulongvec_minmax(table, write, buffer, lenp, ppos);
++}
++
++static const struct ctl_table inodes_sysctls[] = {
++	{
++		.procname	= "inode-nr",
++		.data		= &inodes_stat,
++		.maxlen		= 2*sizeof(long),
++		.mode		= 0444,
++		.proc_handler	= proc_nr_inodes,
++	},
++	{
++		.procname	= "inode-state",
++		.data		= &inodes_stat,
++		.maxlen		= 7*sizeof(long),
++		.mode		= 0444,
++		.proc_handler	= proc_nr_inodes,
++	},
++};
++
++static int __init init_fs_inode_sysctls(void)
++{
++	register_sysctl_init("fs", inodes_sysctls);
++	return 0;
++}
++early_initcall(init_fs_inode_sysctls);
++#endif
++
++static int no_open(struct inode *inode, struct file *file)
++{
++	return -ENXIO;
++}
++
++/**
++ * inode_init_always_gfp - perform inode structure initialisation
++ * @sb: superblock inode belongs to
++ * @inode: inode to initialise
++ * @gfp: allocation flags
++ *
++ * These are initializations that need to be done on every inode
++ * allocation as the fields are not initialised by slab allocation.
++ * If there are additional allocations required @gfp is used.
++ */
++int inode_init_always_gfp(struct super_block *sb, struct inode *inode, gfp_t gfp)
++{
++	static const struct inode_operations empty_iops;
++	static const struct file_operations no_open_fops = {.open = no_open};
++	struct address_space *const mapping = &inode->i_data;
++
++	inode->i_sb = sb;
++	inode->i_blkbits = sb->s_blocksize_bits;
++	inode->i_flags = 0;
++	inode_state_assign_raw(inode, 0);
++	atomic64_set(&inode->i_sequence, 0);
++	atomic_set(&inode->i_count, 1);
++	inode->i_op = &empty_iops;
++	inode->i_fop = &no_open_fops;
++	inode->i_ino = 0;
++	inode->__i_nlink = 1;
++	inode->i_opflags = 0;
++	if (sb->s_xattr)
++		inode->i_opflags |= IOP_XATTR;
++	if (sb->s_type->fs_flags & FS_MGTIME)
++		inode->i_opflags |= IOP_MGTIME;
++	i_uid_write(inode, 0);
++	i_gid_write(inode, 0);
++	atomic_set(&inode->i_writecount, 0);
++	inode->i_size = 0;
++	inode->i_write_hint = WRITE_LIFE_NOT_SET;
++	inode->i_blocks = 0;
++	inode->i_bytes = 0;
++	inode->i_generation = 0;
++	inode->i_pipe = NULL;
++	inode->i_cdev = NULL;
++	inode->i_link = NULL;
++	inode->i_dir_seq = 0;
++	inode->i_rdev = 0;
++	inode->dirtied_when = 0;
++
++#ifdef CONFIG_CGROUP_WRITEBACK
++	inode->i_wb_frn_winner = 0;
++	inode->i_wb_frn_avg_time = 0;
++	inode->i_wb_frn_history = 0;
++#endif
++
++	spin_lock_init(&inode->i_lock);
++	lockdep_set_class(&inode->i_lock, &sb->s_type->i_lock_key);
++
++	init_rwsem(&inode->i_rwsem);
++	lockdep_set_class(&inode->i_rwsem, &sb->s_type->i_mutex_key);
++
++	atomic_set(&inode->i_dio_count, 0);
++
++	mapping->a_ops = &empty_aops;
++	mapping->host = inode;
++	mapping->flags = 0;
++	mapping->wb_err = 0;
++	atomic_set(&mapping->i_mmap_writable, 0);
++	mapping_set_gfp_mask(mapping, GFP_HIGHUSER_MOVABLE);
++	mapping->writeback_index = 0;
++	init_rwsem(&mapping->invalidate_lock);
++	lockdep_set_class_and_name(&mapping->invalidate_lock,
++				   &sb->s_type->invalidate_lock_key,
++				   "mapping.invalidate_lock");
++	if (sb->s_iflags & SB_I_STABLE_WRITES)
++		mapping_set_stable_writes(mapping);
++	inode->i_private = NULL;
++	inode->i_mapping = mapping;
++	INIT_HLIST_HEAD(&inode->i_dentry);	/* buggered by rcu freeing */
++#ifdef CONFIG_FS_POSIX_ACL
++	inode->i_acl = inode->i_default_acl = ACL_NOT_CACHED;
++#endif
++
++#ifdef CONFIG_FSNOTIFY
++	inode->i_fsnotify_mask = 0;
++#endif
++	inode->i_flctx = NULL;
++
++	if (unlikely(security_inode_alloc(inode, gfp)))
++		return -ENOMEM;
++
++	this_cpu_inc(nr_inodes);
++
++	return 0;
++}
++EXPORT_SYMBOL(inode_init_always_gfp);
++
++void __destroy_inode(struct inode *inode)
++{
++	inode_detach_wb(inode);
++	security_inode_free(inode);
++	fsnotify_inode_delete(inode);
++	locks_free_lock_context(inode);
++	if (!inode->i_nlink) {
++		WARN_ON(atomic_long_read(&inode->i_sb->s_remove_count) == 0);
++		atomic_long_dec(&inode->i_sb->s_remove_count);
++	}
++
++#ifdef CONFIG_FS_POSIX_ACL
++	if (inode->i_acl && !is_uncached_acl(inode->i_acl))
++		posix_acl_release(inode->i_acl);
++	if (inode->i_default_acl && !is_uncached_acl(inode->i_default_acl))
++		posix_acl_release(inode->i_default_acl);
++#endif
++	this_cpu_dec(nr_inodes);
++}
++EXPORT_SYMBOL(__destroy_inode);

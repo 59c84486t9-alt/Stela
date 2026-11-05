@@ -143,6 +143,9 @@ mod tests {
     use alloc::vec::Vec;
     #[test]
     fn profile_errors_latch_and_uninitialized_state_grants_no_antenna() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let mut state = Coexistence::new();
         assert_eq!(state.activity(), Err(CoexistenceError::Uninitialized));
         state.initialized();
@@ -162,6 +165,9 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_COEX_TRACE"]
     fn pinned_linux_cold_coexistence_ci_and_management_antenna() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_COEX_TRACE").unwrap()).unwrap();
         assert_eq!(

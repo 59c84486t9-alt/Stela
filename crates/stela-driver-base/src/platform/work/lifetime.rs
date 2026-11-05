@@ -34,6 +34,9 @@ impl<const N: usize> Runtime<N> {
         // register performs only immutable CPU/queue identity checks; no clock,
         // idle/event provider, C callback or inline switch is invoked here.
         domain.register(self)?;
+        self.execution
+            .set_clock(domain.scheduling_clock())
+            .unwrap_or_else(|error| self.queue.cpu.fatal(error));
         scheduling.state().scheduling.clock = Some(domain.scheduling_clock());
         scheduling.state().scheduling.enabled = true;
         drop(scheduling);
@@ -287,7 +290,11 @@ impl<const N: usize> Runtime<N> {
         if self.queue.abandoned.load(Ordering::Acquire) {
             return Err(WorkError::Closed);
         }
-        if self.pending_reservations.get() != 0 || self.owned_escrows.get() != 0 {
+        if self.pending_reservations.get() != 0
+            || self.owned_escrows.get() != 0
+            || !self.queue.stack_pins_quiet()
+            || !self.queue.execution_quiet()
+        {
             return Err(WorkError::Pending);
         }
         if self.domain().is_some_and(|domain| !domain.retired()) {
@@ -307,6 +314,7 @@ impl<const N: usize> Runtime<N> {
         self.queue.close()?;
         // SAFETY: covered by this function's own safety contract.
         unsafe { self.queue.retire()? };
+        self.execution.closed.store(true, Ordering::Release);
         self.retired.set(true);
         Ok(())
     }

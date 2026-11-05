@@ -12,12 +12,10 @@ use super::{
     ipc::{put, word},
     registers::*,
 };
+use crate::Timer;
 use crate::{
     Direction, PcmFormat,
-    bus::{
-        dma::{mapping::DmaDomain, memory::PageSource},
-        i2c::Timer,
-    },
+    bus::dma::{mapping::DmaDomain, memory::PageSource},
     firmware::Image,
 };
 use alloc::sync::Arc;
@@ -608,6 +606,7 @@ fn validate_nhlt(bytes: &[u8], format: PcmFormat) -> Result<(), Error> {
 
 impl<R: Registers, T: Timer> Controller<R, T> {
     pub fn install_dmic(&mut self, topology: DmicTopology) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.guard(&[State::Firmware])?;
         if self.graph.is_some() {
             return Err(Error::Busy);
@@ -644,6 +643,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         ring_bytes: usize,
         period_bytes: usize,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.guard(&[State::Firmware])?;
         let graph = self.graph.as_ref().ok_or(Error::State)?;
         let format = graph.format;
@@ -705,6 +705,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.finish(result)
     }
     pub fn start_capture(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.guard(&[State::Prepared, State::Stopped])?;
         let host = self.graph.as_ref().ok_or(Error::State)?.host;
         let command_id = if self.state == State::Stopped {
@@ -723,6 +724,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.finish(result)
     }
     pub fn stop_capture(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.guard(&[State::Running])?;
         let host = self.graph.as_ref().ok_or(Error::State)?.host;
         let result = (|| {
@@ -739,6 +741,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// CPU copies require DSP pause, all SD_RUN bits clear, acknowledged native
     /// BME containment and original-domain payload completion before CPU sync.
     pub fn read_capture(&mut self, offset: usize, bytes: &mut [u8]) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.guard(&[State::Stopped])?;
         self.pcm
             .as_mut()
@@ -746,6 +749,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .copy_from(offset, bytes)
     }
     pub fn capture_position(&mut self) -> Result<usize, Error> {
+        self.minimum_guard()?;
         self.guard(&[State::Running])?;
         let result = (|| {
             let stream = self.pcm.as_ref().ok_or(Error::State)?;

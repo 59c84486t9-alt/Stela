@@ -1,0 +1,775 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 22:00:11 -0500
+Subject: [PATCH] refactor(bitmap): separate original in-kernel parsers
+
+---
+ lib/Makefile        |   4 +-
+ lib/bitmap-parse.c  | 289 ++++++++++++++++++++++++++++++++++++++++++++
+ lib/bitmap-str.c    | 279 ------------------------------------------
+ lib/kstrtox-parse.c |  68 +++++++++++
+ lib/kstrtox.c       |  61 ----------
+ 5 files changed, 359 insertions(+), 342 deletions(-)
+ create mode 100644 lib/bitmap-parse.c
+ create mode 100644 lib/kstrtox-parse.c
+
+diff --git a/lib/Makefile b/lib/Makefile
+index c341b06378d320a2490d9d45dab64006319f6f2a..016d52892fa9154019cb091baafd5fb89dc0aa37 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -60,11 +60,11 @@ obj-y += bcd.o sort.o parser.o debug_locks.o random32.o \
+ 	 bsearch.o find_bit.o find_random_bit.o llist.o lwq.o \
+ 	 memweight.o kfifo.o percpu-refcount.o rhashtable.o base64.o \
+ 	 once.o refcount.o refcount_lock.o rcuref.o usercopy.o errseq.o bucket_locks.o \
+-	 generic-radix-tree.o bitmap-str.o
++	 generic-radix-tree.o bitmap-str.o bitmap-parse.o
+ obj-y += string_helpers.o
+ obj-y += hexdump.o
+ obj-$(CONFIG_TEST_HEXDUMP) += test_hexdump.o
+-obj-y += kstrtox.o
++obj-y += kstrtox.o kstrtox-parse.o
+ obj-$(CONFIG_FIND_BIT_BENCHMARK) += find_bit_benchmark.o
+ obj-$(CONFIG_FIND_BIT_BENCHMARK_RUST) += find_bit_benchmark_rust.o
+ obj-$(CONFIG_TEST_BPF) += test_bpf.o
+diff --git a/lib/bitmap-parse.c b/lib/bitmap-parse.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..5e401fd6517d3e39490ecd71ea8dab954bf766ec
+--- /dev/null
++++ b/lib/bitmap-parse.c
+@@ -0,0 +1,289 @@
++// SPDX-License-Identifier: GPL-2.0-only
++
++#include <linux/bitmap.h>
++#include <linux/ctype.h>
++#include <linux/errno.h>
++#include <linux/err.h>
++#include <linux/export.h>
++#include <linux/hex.h>
++#include <linux/kernel.h>
++#include <linux/string.h>
++
++#include "kstrtox.h"
++
++/*
++ * Region 9-38:4/10 describes the following bitmap structure:
++ * 0	   9  12    18			38	     N
++ * .........****......****......****..................
++ *	    ^  ^     ^			 ^	     ^
++ *      start  off   group_len	       end	 nbits
++ */
++struct region {
++	unsigned int start;
++	unsigned int off;
++	unsigned int group_len;
++	unsigned int end;
++	unsigned int nbits;
++};
++
++static void bitmap_set_region(const struct region *r, unsigned long *bitmap)
++{
++	unsigned int start;
++
++	for (start = r->start; start <= r->end; start += r->group_len)
++		bitmap_set(bitmap, start, min(r->end - start + 1, r->off));
++}
++
++static int bitmap_check_region(const struct region *r)
++{
++	if (r->start > r->end || r->group_len == 0 || r->off > r->group_len)
++		return -EINVAL;
++
++	if (r->end >= r->nbits)
++		return -ERANGE;
++
++	return 0;
++}
++
++static const char *bitmap_getnum(const char *str, unsigned int *num,
++				 unsigned int lastbit)
++{
++	unsigned long long n;
++	unsigned int len;
++
++	if (str[0] == 'N') {
++		*num = lastbit;
++		return str + 1;
++	}
++
++	len = _parse_integer(str, 10, &n);
++	if (!len)
++		return ERR_PTR(-EINVAL);
++	if (len & KSTRTOX_OVERFLOW || n != (unsigned int)n)
++		return ERR_PTR(-EOVERFLOW);
++
++	*num = n;
++	return str + len;
++}
++
++static inline bool end_of_str(char c)
++{
++	return c == '\0' || c == '\n';
++}
++
++static inline bool __end_of_region(char c)
++{
++	return isspace(c) || c == ',';
++}
++
++static inline bool end_of_region(char c)
++{
++	return __end_of_region(c) || end_of_str(c);
++}
++
++/*
++ * The format allows commas and whitespaces at the beginning
++ * of the region.
++ */
++static const char *bitmap_find_region(const char *str)
++{
++	while (__end_of_region(*str))
++		str++;
++
++	return end_of_str(*str) ? NULL : str;
++}
++
++static const char *bitmap_find_region_reverse(const char *start, const char *end)
++{
++	while (start <= end && __end_of_region(*end))
++		end--;
++
++	return end;
++}
++
++static const char *bitmap_parse_region(const char *str, struct region *r)
++{
++	unsigned int lastbit = r->nbits - 1;
++
++	if (!strncasecmp(str, "all", 3)) {
++		r->start = 0;
++		r->end = lastbit;
++		str += 3;
++
++		goto check_pattern;
++	}
++
++	str = bitmap_getnum(str, &r->start, lastbit);
++	if (IS_ERR(str))
++		return str;
++
++	if (end_of_region(*str))
++		goto no_end;
++
++	if (*str != '-')
++		return ERR_PTR(-EINVAL);
++
++	str = bitmap_getnum(str + 1, &r->end, lastbit);
++	if (IS_ERR(str))
++		return str;
++
++check_pattern:
++	if (end_of_region(*str))
++		goto no_pattern;
++
++	if (*str != ':')
++		return ERR_PTR(-EINVAL);
++
++	str = bitmap_getnum(str + 1, &r->off, lastbit);
++	if (IS_ERR(str))
++		return str;
++
++	if (*str != '/')
++		return ERR_PTR(-EINVAL);
++
++	return bitmap_getnum(str + 1, &r->group_len, lastbit);
++
++no_end:
++	r->end = r->start;
++no_pattern:
++	r->off = r->end + 1;
++	r->group_len = r->end + 1;
++
++	return end_of_str(*str) ? NULL : str;
++}
++
++/**
++ * bitmap_parselist - convert list format ASCII string to bitmap
++ * @buf: read user string from this buffer; must be terminated
++ *    with a \0 or \n.
++ * @maskp: write resulting mask here
++ * @nmaskbits: number of bits in mask to be written
++ *
++ * Input format is a comma-separated list of decimal numbers and
++ * ranges.  Consecutively set bits are shown as two hyphen-separated
++ * decimal numbers, the smallest and largest bit numbers set in
++ * the range.
++ * Optionally each range can be postfixed to denote that only parts of it
++ * should be set. The range will divided to groups of specific size.
++ * From each group will be used only defined amount of bits.
++ * Syntax: range:used_size/group_size
++ * Example: 0-1023:2/256 ==> 0,1,256,257,512,513,768,769
++ * The value 'N' can be used as a dynamically substituted token for the
++ * maximum allowed value; i.e (nmaskbits - 1).  Keep in mind that it is
++ * dynamic, so if system changes cause the bitmap width to change, such
++ * as more cores in a CPU list, then any ranges using N will also change.
++ *
++ * Returns: 0 on success, -errno on invalid input strings. Error values:
++ *
++ *   - ``-EINVAL``: wrong region format
++ *   - ``-EINVAL``: invalid character in string
++ *   - ``-ERANGE``: bit number specified too large for mask
++ *   - ``-EOVERFLOW``: integer overflow in the input parameters
++ */
++int bitmap_parselist(const char *buf, unsigned long *maskp, int nmaskbits)
++{
++	struct region r;
++	long ret;
++
++	r.nbits = nmaskbits;
++	bitmap_zero(maskp, r.nbits);
++
++	while (buf) {
++		buf = bitmap_find_region(buf);
++		if (buf == NULL)
++			return 0;
++
++		buf = bitmap_parse_region(buf, &r);
++		if (IS_ERR(buf))
++			return PTR_ERR(buf);
++
++		ret = bitmap_check_region(&r);
++		if (ret)
++			return ret;
++
++		bitmap_set_region(&r, maskp);
++	}
++
++	return 0;
++}
++EXPORT_SYMBOL(bitmap_parselist);
++
++
++static const char *bitmap_get_x32_reverse(const char *start,
++					const char *end, u32 *num)
++{
++	u32 ret = 0;
++	int c, i;
++
++	for (i = 0; i < 32; i += 4) {
++		c = hex_to_bin(*end--);
++		if (c < 0)
++			return ERR_PTR(-EINVAL);
++
++		ret |= c << i;
++
++		if (start > end || __end_of_region(*end))
++			goto out;
++	}
++
++	if (hex_to_bin(*end--) >= 0)
++		return ERR_PTR(-EOVERFLOW);
++out:
++	*num = ret;
++	return end;
++}
++
++/**
++ * bitmap_parse - convert an ASCII hex string into a bitmap.
++ * @start: pointer to buffer containing string.
++ * @buflen: buffer size in bytes.  If string is smaller than this
++ *    then it must be terminated with a \0 or \n. In that case,
++ *    UINT_MAX may be provided instead of string length.
++ * @maskp: pointer to bitmap array that will contain result.
++ * @nmaskbits: size of bitmap, in bits.
++ *
++ * Commas group hex digits into chunks.  Each chunk defines exactly 32
++ * bits of the resultant bitmask.  No chunk may specify a value larger
++ * than 32 bits (%-EOVERFLOW), and if a chunk specifies a smaller value
++ * then leading 0-bits are prepended.  %-EINVAL is returned for illegal
++ * characters. Grouping such as "1,,5", ",44", "," or "" is allowed.
++ * Leading, embedded and trailing whitespace accepted.
++ */
++int bitmap_parse(const char *start, unsigned int buflen,
++		unsigned long *maskp, int nmaskbits)
++{
++	const char *end = strnchrnul(start, buflen, '\n') - 1;
++	int chunks = BITS_TO_U32(nmaskbits);
++	u32 *bitmap = (u32 *)maskp;
++	int unset_bit;
++	int chunk;
++
++	for (chunk = 0; ; chunk++) {
++		end = bitmap_find_region_reverse(start, end);
++		if (start > end)
++			break;
++
++		if (!chunks--)
++			return -EOVERFLOW;
++
++#if defined(CONFIG_64BIT) && defined(__BIG_ENDIAN)
++		end = bitmap_get_x32_reverse(start, end, &bitmap[chunk ^ 1]);
++#else
++		end = bitmap_get_x32_reverse(start, end, &bitmap[chunk]);
++#endif
++		if (IS_ERR(end))
++			return PTR_ERR(end);
++	}
++
++	unset_bit = (BITS_TO_U32(nmaskbits) - chunks) * 32;
++	if (unset_bit < nmaskbits) {
++		bitmap_clear(maskp, unset_bit, nmaskbits - unset_bit);
++		return 0;
++	}
++
++	if (find_next_bit(maskp, unset_bit, nmaskbits) != unset_bit)
++		return -EOVERFLOW;
++
++	return 0;
++}
++EXPORT_SYMBOL(bitmap_parse);
+diff --git a/lib/bitmap-str.c b/lib/bitmap-str.c
+index 26d36c938c6aff7caefe4898ccb0edd60ed3803c..79a4d53814e1410afdae445403bc657420e7181d 100644
+--- a/lib/bitmap-str.c
++++ b/lib/bitmap-str.c
+@@ -10,8 +10,6 @@
+ #include <linux/mm.h>
+ #include <linux/string.h>
+ 
+-#include "kstrtox.h"
+-
+ /**
+  * bitmap_parse_user - convert an ASCII hex string in a user buffer into a bitmap
+  *
+@@ -170,204 +168,6 @@ int bitmap_print_list_to_buf(char *buf, const unsigned long *maskp,
+ }
+ EXPORT_SYMBOL(bitmap_print_list_to_buf);
+ 
+-/*
+- * Region 9-38:4/10 describes the following bitmap structure:
+- * 0	   9  12    18			38	     N
+- * .........****......****......****..................
+- *	    ^  ^     ^			 ^	     ^
+- *      start  off   group_len	       end	 nbits
+- */
+-struct region {
+-	unsigned int start;
+-	unsigned int off;
+-	unsigned int group_len;
+-	unsigned int end;
+-	unsigned int nbits;
+-};
+-
+-static void bitmap_set_region(const struct region *r, unsigned long *bitmap)
+-{
+-	unsigned int start;
+-
+-	for (start = r->start; start <= r->end; start += r->group_len)
+-		bitmap_set(bitmap, start, min(r->end - start + 1, r->off));
+-}
+-
+-static int bitmap_check_region(const struct region *r)
+-{
+-	if (r->start > r->end || r->group_len == 0 || r->off > r->group_len)
+-		return -EINVAL;
+-
+-	if (r->end >= r->nbits)
+-		return -ERANGE;
+-
+-	return 0;
+-}
+-
+-static const char *bitmap_getnum(const char *str, unsigned int *num,
+-				 unsigned int lastbit)
+-{
+-	unsigned long long n;
+-	unsigned int len;
+-
+-	if (str[0] == 'N') {
+-		*num = lastbit;
+-		return str + 1;
+-	}
+-
+-	len = _parse_integer(str, 10, &n);
+-	if (!len)
+-		return ERR_PTR(-EINVAL);
+-	if (len & KSTRTOX_OVERFLOW || n != (unsigned int)n)
+-		return ERR_PTR(-EOVERFLOW);
+-
+-	*num = n;
+-	return str + len;
+-}
+-
+-static inline bool end_of_str(char c)
+-{
+-	return c == '\0' || c == '\n';
+-}
+-
+-static inline bool __end_of_region(char c)
+-{
+-	return isspace(c) || c == ',';
+-}
+-
+-static inline bool end_of_region(char c)
+-{
+-	return __end_of_region(c) || end_of_str(c);
+-}
+-
+-/*
+- * The format allows commas and whitespaces at the beginning
+- * of the region.
+- */
+-static const char *bitmap_find_region(const char *str)
+-{
+-	while (__end_of_region(*str))
+-		str++;
+-
+-	return end_of_str(*str) ? NULL : str;
+-}
+-
+-static const char *bitmap_find_region_reverse(const char *start, const char *end)
+-{
+-	while (start <= end && __end_of_region(*end))
+-		end--;
+-
+-	return end;
+-}
+-
+-static const char *bitmap_parse_region(const char *str, struct region *r)
+-{
+-	unsigned int lastbit = r->nbits - 1;
+-
+-	if (!strncasecmp(str, "all", 3)) {
+-		r->start = 0;
+-		r->end = lastbit;
+-		str += 3;
+-
+-		goto check_pattern;
+-	}
+-
+-	str = bitmap_getnum(str, &r->start, lastbit);
+-	if (IS_ERR(str))
+-		return str;
+-
+-	if (end_of_region(*str))
+-		goto no_end;
+-
+-	if (*str != '-')
+-		return ERR_PTR(-EINVAL);
+-
+-	str = bitmap_getnum(str + 1, &r->end, lastbit);
+-	if (IS_ERR(str))
+-		return str;
+-
+-check_pattern:
+-	if (end_of_region(*str))
+-		goto no_pattern;
+-
+-	if (*str != ':')
+-		return ERR_PTR(-EINVAL);
+-
+-	str = bitmap_getnum(str + 1, &r->off, lastbit);
+-	if (IS_ERR(str))
+-		return str;
+-
+-	if (*str != '/')
+-		return ERR_PTR(-EINVAL);
+-
+-	return bitmap_getnum(str + 1, &r->group_len, lastbit);
+-
+-no_end:
+-	r->end = r->start;
+-no_pattern:
+-	r->off = r->end + 1;
+-	r->group_len = r->end + 1;
+-
+-	return end_of_str(*str) ? NULL : str;
+-}
+-
+-/**
+- * bitmap_parselist - convert list format ASCII string to bitmap
+- * @buf: read user string from this buffer; must be terminated
+- *    with a \0 or \n.
+- * @maskp: write resulting mask here
+- * @nmaskbits: number of bits in mask to be written
+- *
+- * Input format is a comma-separated list of decimal numbers and
+- * ranges.  Consecutively set bits are shown as two hyphen-separated
+- * decimal numbers, the smallest and largest bit numbers set in
+- * the range.
+- * Optionally each range can be postfixed to denote that only parts of it
+- * should be set. The range will divided to groups of specific size.
+- * From each group will be used only defined amount of bits.
+- * Syntax: range:used_size/group_size
+- * Example: 0-1023:2/256 ==> 0,1,256,257,512,513,768,769
+- * The value 'N' can be used as a dynamically substituted token for the
+- * maximum allowed value; i.e (nmaskbits - 1).  Keep in mind that it is
+- * dynamic, so if system changes cause the bitmap width to change, such
+- * as more cores in a CPU list, then any ranges using N will also change.
+- *
+- * Returns: 0 on success, -errno on invalid input strings. Error values:
+- *
+- *   - ``-EINVAL``: wrong region format
+- *   - ``-EINVAL``: invalid character in string
+- *   - ``-ERANGE``: bit number specified too large for mask
+- *   - ``-EOVERFLOW``: integer overflow in the input parameters
+- */
+-int bitmap_parselist(const char *buf, unsigned long *maskp, int nmaskbits)
+-{
+-	struct region r;
+-	long ret;
+-
+-	r.nbits = nmaskbits;
+-	bitmap_zero(maskp, r.nbits);
+-
+-	while (buf) {
+-		buf = bitmap_find_region(buf);
+-		if (buf == NULL)
+-			return 0;
+-
+-		buf = bitmap_parse_region(buf, &r);
+-		if (IS_ERR(buf))
+-			return PTR_ERR(buf);
+-
+-		ret = bitmap_check_region(&r);
+-		if (ret)
+-			return ret;
+-
+-		bitmap_set_region(&r, maskp);
+-	}
+-
+-	return 0;
+-}
+-EXPORT_SYMBOL(bitmap_parselist);
+-
+-
+ /**
+  * bitmap_parselist_user() - convert user buffer's list format ASCII
+  * string to bitmap
+@@ -397,82 +197,3 @@ int bitmap_parselist_user(const char __user *ubuf,
+ 	return ret;
+ }
+ EXPORT_SYMBOL(bitmap_parselist_user);
+-
+-static const char *bitmap_get_x32_reverse(const char *start,
+-					const char *end, u32 *num)
+-{
+-	u32 ret = 0;
+-	int c, i;
+-
+-	for (i = 0; i < 32; i += 4) {
+-		c = hex_to_bin(*end--);
+-		if (c < 0)
+-			return ERR_PTR(-EINVAL);
+-
+-		ret |= c << i;
+-
+-		if (start > end || __end_of_region(*end))
+-			goto out;
+-	}
+-
+-	if (hex_to_bin(*end--) >= 0)
+-		return ERR_PTR(-EOVERFLOW);
+-out:
+-	*num = ret;
+-	return end;
+-}
+-
+-/**
+- * bitmap_parse - convert an ASCII hex string into a bitmap.
+- * @start: pointer to buffer containing string.
+- * @buflen: buffer size in bytes.  If string is smaller than this
+- *    then it must be terminated with a \0 or \n. In that case,
+- *    UINT_MAX may be provided instead of string length.
+- * @maskp: pointer to bitmap array that will contain result.
+- * @nmaskbits: size of bitmap, in bits.
+- *
+- * Commas group hex digits into chunks.  Each chunk defines exactly 32
+- * bits of the resultant bitmask.  No chunk may specify a value larger
+- * than 32 bits (%-EOVERFLOW), and if a chunk specifies a smaller value
+- * then leading 0-bits are prepended.  %-EINVAL is returned for illegal
+- * characters. Grouping such as "1,,5", ",44", "," or "" is allowed.
+- * Leading, embedded and trailing whitespace accepted.
+- */
+-int bitmap_parse(const char *start, unsigned int buflen,
+-		unsigned long *maskp, int nmaskbits)
+-{
+-	const char *end = strnchrnul(start, buflen, '\n') - 1;
+-	int chunks = BITS_TO_U32(nmaskbits);
+-	u32 *bitmap = (u32 *)maskp;
+-	int unset_bit;
+-	int chunk;
+-
+-	for (chunk = 0; ; chunk++) {
+-		end = bitmap_find_region_reverse(start, end);
+-		if (start > end)
+-			break;
+-
+-		if (!chunks--)
+-			return -EOVERFLOW;
+-
+-#if defined(CONFIG_64BIT) && defined(__BIG_ENDIAN)
+-		end = bitmap_get_x32_reverse(start, end, &bitmap[chunk ^ 1]);
+-#else
+-		end = bitmap_get_x32_reverse(start, end, &bitmap[chunk]);
+-#endif
+-		if (IS_ERR(end))
+-			return PTR_ERR(end);
+-	}
+-
+-	unset_bit = (BITS_TO_U32(nmaskbits) - chunks) * 32;
+-	if (unset_bit < nmaskbits) {
+-		bitmap_clear(maskp, unset_bit, nmaskbits - unset_bit);
+-		return 0;
+-	}
+-
+-	if (find_next_bit(maskp, unset_bit, nmaskbits) != unset_bit)
+-		return -EOVERFLOW;
+-
+-	return 0;
+-}
+-EXPORT_SYMBOL(bitmap_parse);
+diff --git a/lib/kstrtox-parse.c b/lib/kstrtox-parse.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..63edf5be6e7ac0976dad8b04d928237dab53236f
+--- /dev/null
++++ b/lib/kstrtox-parse.c
+@@ -0,0 +1,68 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Bounded unsigned integer parsing from lib/kstrtox.c. */
++#include <linux/ctype.h>
++#include <linux/limits.h>
++#include <linux/overflow.h>
++
++#include "kstrtox.h"
++
++/**
++ * _parse_integer_limit - Convert integer string representation to an integer
++ * @s: Integer string representation
++ * @base: Radix
++ * @p: Where to store result
++ * @max_chars: Maximum amount of characters to convert
++ *
++ * Convert non-negative integer string representation in explicitly given
++ * radix to an integer. If overflow occurs, value at @p is set to ULLONG_MAX.
++ *
++ * This function is the workhorse of other string conversion functions and it
++ * is discouraged to use it explicitly. Consider kstrto*() family instead.
++ *
++ * Return: Number of characters consumed, maybe ORed with overflow bit
++ */
++noinline
++unsigned int _parse_integer_limit(const char *s, unsigned int base, unsigned long long *p,
++				  size_t max_chars)
++{
++	unsigned int rv, overflow = 0;
++	unsigned long long res;
++
++	res = 0;
++	for (rv = 0; rv < max_chars; rv++, s++) {
++		unsigned int c = *s;
++		unsigned int lc = _tolower(c);
++		unsigned int val;
++
++		if ('0' <= c && c <= '9')
++			val = c - '0';
++		else if ('a' <= lc && lc <= 'f')
++			val = lc - 'a' + 10;
++		else
++			break;
++
++		if (val >= base)
++			break;
++		/*
++		 * Check for overflow only if we are within range of
++		 * it in the max base we support (16)
++		 */
++		if (unlikely(res & (~0ull << 60))) {
++			if (check_mul_overflow(res, base, &res) ||
++			    check_add_overflow(res, val, &res)) {
++				res = ULLONG_MAX;
++				overflow = KSTRTOX_OVERFLOW;
++			}
++		} else {
++			res = res * base + val;
++		}
++	}
++	*p = res;
++	return rv | overflow;
++}
++
++noinline
++unsigned int _parse_integer(const char *s, unsigned int base, unsigned long long *p)
++{
++	return _parse_integer_limit(s, base, p, INT_MAX);
++}
+diff --git a/lib/kstrtox.c b/lib/kstrtox.c
+index edc4eb7c1bca184a28f98ecc0786584381c5c234..34fc6a60cf36083386aa83c6e106a6e2ed00c468 100644
+--- a/lib/kstrtox.c
++++ b/lib/kstrtox.c
+@@ -39,67 +39,6 @@ const char *_parse_integer_fixup_radix(const char *s, unsigned int *base)
+ 	return s;
+ }
+ 
+-/**
+- * _parse_integer_limit - Convert integer string representation to an integer
+- * @s: Integer string representation
+- * @base: Radix
+- * @p: Where to store result
+- * @max_chars: Maximum amount of characters to convert
+- *
+- * Convert non-negative integer string representation in explicitly given
+- * radix to an integer. If overflow occurs, value at @p is set to ULLONG_MAX.
+- *
+- * This function is the workhorse of other string conversion functions and it
+- * is discouraged to use it explicitly. Consider kstrto*() family instead.
+- *
+- * Return: Number of characters consumed, maybe ORed with overflow bit
+- */
+-noinline
+-unsigned int _parse_integer_limit(const char *s, unsigned int base, unsigned long long *p,
+-				  size_t max_chars)
+-{
+-	unsigned int rv, overflow = 0;
+-	unsigned long long res;
+-
+-	res = 0;
+-	for (rv = 0; rv < max_chars; rv++, s++) {
+-		unsigned int c = *s;
+-		unsigned int lc = _tolower(c);
+-		unsigned int val;
+-
+-		if ('0' <= c && c <= '9')
+-			val = c - '0';
+-		else if ('a' <= lc && lc <= 'f')
+-			val = lc - 'a' + 10;
+-		else
+-			break;
+-
+-		if (val >= base)
+-			break;
+-		/*
+-		 * Check for overflow only if we are within range of
+-		 * it in the max base we support (16)
+-		 */
+-		if (unlikely(res & (~0ull << 60))) {
+-			if (check_mul_overflow(res, base, &res) ||
+-			    check_add_overflow(res, val, &res)) {
+-				res = ULLONG_MAX;
+-				overflow = KSTRTOX_OVERFLOW;
+-			}
+-		} else {
+-			res = res * base + val;
+-		}
+-	}
+-	*p = res;
+-	return rv | overflow;
+-}
+-
+-noinline
+-unsigned int _parse_integer(const char *s, unsigned int base, unsigned long long *p)
+-{
+-	return _parse_integer_limit(s, base, p, INT_MAX);
+-}
+-
+ static int _kstrtoull(const char *s, unsigned int base, unsigned long long *res)
+ {
+ 	unsigned long long _res;

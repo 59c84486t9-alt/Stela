@@ -1,0 +1,321 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 11:36:52 -0500
+Subject: [PATCH] refactor(fs): separate mount parsing and diagnostics from
+ path lookup
+
+---
+ fs/Makefile         |  2 +-
+ fs/fs_context.c     | 60 -------------------------------------
+ fs/fs_context_log.c | 73 +++++++++++++++++++++++++++++++++++++++++++++
+ fs/fs_parser.c      | 57 -----------------------------------
+ fs/fs_parser_path.c | 68 +++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 142 insertions(+), 118 deletions(-)
+ create mode 100644 fs/fs_context_log.c
+ create mode 100644 fs/fs_parser_path.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 31873fdf02f9a2d3945cadd64456aeff7210b13a..6422da4e8d78b0f78e35adbde3f0b7117a784aab 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -14,7 +14,7 @@ obj-y :=	open.o filp_close.o read_write.o file_table.o file_table_init.o super.o
+ 		seq_file.o seq_lifetime.o seq_output.o xattr.o simple_xattr.o libfs.o pseudo_metadata.o fs-writeback.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+ 		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
+-		fs_dirent.o fs_context.o fs_parser.o fsopen.o init.o \
++		fs_dirent.o fs_context.o fs_context_log.o fs_parser.o fs_parser_path.o fsopen.o init.o \
+ 		kernel_read_file.o mnt_idmapping.o remap_range.o pidfs.o pidfs_metadata.o \
+ 		file_attr.o fserror.o nullfs.o
+ 
+diff --git a/fs/fs_context.c b/fs/fs_context.c
+index a50584df97bea7f7fdbb2ed499895d648dca1a70..f1c95b72d7ce91dedf6a4752d829fab32524fd6f 100644
+--- a/fs/fs_context.c
++++ b/fs/fs_context.c
+@@ -404,66 +404,6 @@ err_fc:
+ }
+ EXPORT_SYMBOL(vfs_dup_fs_context);
+ 
+-/**
+- * logfc - Log a message to a filesystem context
+- * @log: The filesystem context to log to, or NULL to use printk.
+- * @prefix: A string to prefix the output with, or NULL.
+- * @level: 'w' for a warning, 'e' for an error.  Anything else is a notice.
+- * @fmt: The format of the buffer.
+- */
+-void logfc(struct fc_log *log, const char *prefix, char level, const char *fmt, ...)
+-{
+-	va_list va;
+-	struct va_format vaf = {.fmt = fmt, .va = &va};
+-
+-	va_start(va, fmt);
+-	if (!log) {
+-		switch (level) {
+-		case 'w':
+-			printk(KERN_WARNING "%s%s%pV\n", prefix ? prefix : "",
+-						prefix ? ": " : "", &vaf);
+-			break;
+-		case 'e':
+-			printk(KERN_ERR "%s%s%pV\n", prefix ? prefix : "",
+-						prefix ? ": " : "", &vaf);
+-			break;
+-		case 'i':
+-			printk(KERN_INFO "%s%s%pV\n", prefix ? prefix : "",
+-						prefix ? ": " : "", &vaf);
+-			break;
+-		default:
+-			printk(KERN_NOTICE "%s%s%pV\n", prefix ? prefix : "",
+-						prefix ? ": " : "", &vaf);
+-			break;
+-		}
+-	} else {
+-		unsigned int logsize = ARRAY_SIZE(log->buffer);
+-		u8 index;
+-		char *q = kasprintf(GFP_KERNEL, "%c %s%s%pV\n", level,
+-						prefix ? prefix : "",
+-						prefix ? ": " : "", &vaf);
+-
+-		index = log->head & (logsize - 1);
+-		BUILD_BUG_ON(sizeof(log->head) != sizeof(u8) ||
+-			     sizeof(log->tail) != sizeof(u8));
+-		if ((u8)(log->head - log->tail) == logsize) {
+-			/* The buffer is full, discard the oldest message */
+-			if (log->need_free & (1 << index))
+-				kfree(log->buffer[index]);
+-			log->tail++;
+-		}
+-
+-		log->buffer[index] = q ? q : "OOM: Can't store error string";
+-		if (q)
+-			log->need_free |= 1 << index;
+-		else
+-			log->need_free &= ~(1 << index);
+-		log->head++;
+-	}
+-	va_end(va);
+-}
+-EXPORT_SYMBOL(logfc);
+-
+ /*
+  * Free a logging structure.
+  */
+diff --git a/fs/fs_context_log.c b/fs/fs_context_log.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..c5509bb17ba42e5dc1b114eb00e6144f5670c425
+--- /dev/null
++++ b/fs/fs_context_log.c
+@@ -0,0 +1,73 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/* Provide a way to create a superblock configuration context within the kernel
++ * that allows a superblock to be set up prior to mounting.
++ *
++ * Copyright (C) 2017 Red Hat, Inc. All Rights Reserved.
++ * Written by David Howells (dhowells@redhat.com)
++ */
++
++#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
++#include <linux/export.h>
++#include <linux/fs_context.h>
++#include <linux/printk.h>
++#include <linux/slab.h>
++
++/**
++ * logfc - Log a message to a filesystem context
++ * @log: The filesystem context to log to, or NULL to use printk.
++ * @prefix: A string to prefix the output with, or NULL.
++ * @level: 'w' for a warning, 'e' for an error.  Anything else is a notice.
++ * @fmt: The format of the buffer.
++ */
++void logfc(struct fc_log *log, const char *prefix, char level, const char *fmt, ...)
++{
++	va_list va;
++	struct va_format vaf = {.fmt = fmt, .va = &va};
++
++	va_start(va, fmt);
++	if (!log) {
++		switch (level) {
++		case 'w':
++			printk(KERN_WARNING "%s%s%pV\n", prefix ? prefix : "",
++						prefix ? ": " : "", &vaf);
++			break;
++		case 'e':
++			printk(KERN_ERR "%s%s%pV\n", prefix ? prefix : "",
++						prefix ? ": " : "", &vaf);
++			break;
++		case 'i':
++			printk(KERN_INFO "%s%s%pV\n", prefix ? prefix : "",
++						prefix ? ": " : "", &vaf);
++			break;
++		default:
++			printk(KERN_NOTICE "%s%s%pV\n", prefix ? prefix : "",
++						prefix ? ": " : "", &vaf);
++			break;
++		}
++	} else {
++		unsigned int logsize = ARRAY_SIZE(log->buffer);
++		u8 index;
++		char *q = kasprintf(GFP_KERNEL, "%c %s%s%pV\n", level,
++						prefix ? prefix : "",
++						prefix ? ": " : "", &vaf);
++
++		index = log->head & (logsize - 1);
++		BUILD_BUG_ON(sizeof(log->head) != sizeof(u8) ||
++			     sizeof(log->tail) != sizeof(u8));
++		if ((u8)(log->head - log->tail) == logsize) {
++			/* The buffer is full, discard the oldest message */
++			if (log->need_free & (1 << index))
++				kfree(log->buffer[index]);
++			log->tail++;
++		}
++
++		log->buffer[index] = q ? q : "OOM: Can't store error string";
++		if (q)
++			log->need_free |= 1 << index;
++		else
++			log->need_free &= ~(1 << index);
++		log->head++;
++	}
++	va_end(va);
++}
++EXPORT_SYMBOL(logfc);
+diff --git a/fs/fs_parser.c b/fs/fs_parser.c
+index b4cc4cce518a21a3bf0ed1f9752fbc11c443aa4a..6b25edac233c59b2b91e046c74c85ef712ff441b 100644
+--- a/fs/fs_parser.c
++++ b/fs/fs_parser.c
+@@ -133,63 +133,6 @@ int __fs_parse(struct p_log *log,
+ }
+ EXPORT_SYMBOL(__fs_parse);
+ 
+-/**
+- * fs_lookup_param - Look up a path referred to by a parameter
+- * @fc: The filesystem context to log errors through.
+- * @param: The parameter.
+- * @want_bdev: T if want a blockdev
+- * @flags: Pathwalk flags passed to filename_lookup()
+- * @_path: The result of the lookup
+- */
+-int fs_lookup_param(struct fs_context *fc,
+-		    struct fs_parameter *param,
+-		    bool want_bdev,
+-		    unsigned int flags,
+-		    struct path *_path)
+-{
+-	struct filename *f;
+-	bool put_f;
+-	int ret;
+-
+-	switch (param->type) {
+-	case fs_value_is_string:
+-		f = getname_kernel(param->string);
+-		if (IS_ERR(f))
+-			return PTR_ERR(f);
+-		param->dirfd = AT_FDCWD;
+-		put_f = true;
+-		break;
+-	case fs_value_is_filename:
+-		f = param->name;
+-		put_f = false;
+-		break;
+-	default:
+-		return invalf(fc, "%s: not usable as path", param->key);
+-	}
+-
+-	ret = filename_lookup(param->dirfd, f, flags, _path, NULL);
+-	if (ret < 0) {
+-		errorf(fc, "%s: Lookup failure for '%s'", param->key, f->name);
+-		goto out;
+-	}
+-
+-	if (want_bdev &&
+-	    !S_ISBLK(d_backing_inode(_path->dentry)->i_mode)) {
+-		path_put(_path);
+-		_path->dentry = NULL;
+-		_path->mnt = NULL;
+-		errorf(fc, "%s: Non-blockdev passed as '%s'",
+-		       param->key, f->name);
+-		ret = -ENOTBLK;
+-	}
+-
+-out:
+-	if (put_f)
+-		putname(f);
+-	return ret;
+-}
+-EXPORT_SYMBOL(fs_lookup_param);
+-
+ static int fs_param_bad_value(struct p_log *log, struct fs_parameter *param)
+ {
+ 	return inval_plog(log, "Bad value for '%s'", param->key);
+diff --git a/fs/fs_parser_path.c b/fs/fs_parser_path.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..ded25f5246bd07bbd912db2d453d50f5736f333f
+--- /dev/null
++++ b/fs/fs_parser_path.c
+@@ -0,0 +1,68 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/* Filesystem parameter parser.
++ *
++ * Copyright (C) 2018 Red Hat, Inc. All Rights Reserved.
++ * Written by David Howells (dhowells@redhat.com)
++ */
++#include <linux/export.h>
++#include <linux/fs_context.h>
++#include <linux/fs_parser.h>
++#include <linux/namei.h>
++#include "internal.h"
++
++/**
++ * fs_lookup_param - Look up a path referred to by a parameter
++ * @fc: The filesystem context to log errors through.
++ * @param: The parameter.
++ * @want_bdev: T if want a blockdev
++ * @flags: Pathwalk flags passed to filename_lookup()
++ * @_path: The result of the lookup
++ */
++int fs_lookup_param(struct fs_context *fc,
++		    struct fs_parameter *param,
++		    bool want_bdev,
++		    unsigned int flags,
++		    struct path *_path)
++{
++	struct filename *f;
++	bool put_f;
++	int ret;
++
++	switch (param->type) {
++	case fs_value_is_string:
++		f = getname_kernel(param->string);
++		if (IS_ERR(f))
++			return PTR_ERR(f);
++		param->dirfd = AT_FDCWD;
++		put_f = true;
++		break;
++	case fs_value_is_filename:
++		f = param->name;
++		put_f = false;
++		break;
++	default:
++		return invalf(fc, "%s: not usable as path", param->key);
++	}
++
++	ret = filename_lookup(param->dirfd, f, flags, _path, NULL);
++	if (ret < 0) {
++		errorf(fc, "%s: Lookup failure for '%s'", param->key, f->name);
++		goto out;
++	}
++
++	if (want_bdev &&
++	    !S_ISBLK(d_backing_inode(_path->dentry)->i_mode)) {
++		path_put(_path);
++		_path->dentry = NULL;
++		_path->mnt = NULL;
++		errorf(fc, "%s: Non-blockdev passed as '%s'",
++		       param->key, f->name);
++		ret = -ENOTBLK;
++	}
++
++out:
++	if (put_f)
++		putname(f);
++	return ret;
++}
++EXPORT_SYMBOL(fs_lookup_param);

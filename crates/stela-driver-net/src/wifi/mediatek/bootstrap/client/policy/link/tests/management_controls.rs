@@ -64,6 +64,9 @@ fn pending_descriptor(model: &Model) -> (u16, u16, Vec<u8>) {
 
 #[test]
 fn owning_management_notices_preserve_the_65th_ddone_and_consume_original_context() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, session, drops) = prepared();
     for pn in 1..=64 {
         incoming(&model, &response(0x40c0, &[7, 0]), Some((1, 0, pn)), false);
@@ -137,6 +140,9 @@ fn owning_management_notices_preserve_the_65th_ddone_and_consume_original_contex
 
 #[test]
 fn a_beacon_slot_time_change_keeps_the_management_session() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, session, _) = prepared();
     drop(drain_notices(&mut link));
     // As update_slot_time_modern leaves the profile after the AP's change.
@@ -152,6 +158,9 @@ fn a_beacon_slot_time_change_keeps_the_management_session() {
 
 #[test]
 fn owning_management_tx_releases_original_keys_and_rejects_deferred_envelope_after_removal() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, session, drops) = prepared();
     let receipt = link
         .transmit_management(&session, Transmit::SaQueryRequest([0xa5, 0x5a]))

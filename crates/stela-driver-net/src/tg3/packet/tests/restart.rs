@@ -22,6 +22,9 @@ fn resets(peer: &Arc<Mutex<Device>>) -> usize {
 
 #[test]
 fn restart_reuses_only_drained_rings_and_discards_old_uncompleted_frames() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for bcm5762 in [false, true] {
         let (mut packet, pages, domain, peer) = attached(bcm5762);
         let addresses = packet.memory.as_ref().unwrap().addresses().unwrap();
@@ -71,6 +74,9 @@ fn restart_reuses_only_drained_rings_and_discards_old_uncompleted_frames() {
 
 #[test]
 fn packet_completion_fault_is_cleared_only_by_successful_explicit_rebuild() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for bcm5762 in [false, true] {
         let (mut packet, _, domain, peer) = attached(bcm5762);
         let status = peer.lock().unwrap().status();
@@ -88,6 +94,9 @@ fn packet_completion_fault_is_cleared_only_by_successful_explicit_rebuild() {
 
 #[test]
 fn failed_restart_drain_never_resets_or_reuses_dma_and_can_retry_containment() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for bcm5762 in [false, true] {
         let (mut packet, pages, domain, peer) = attached(bcm5762);
         peer.lock().unwrap().hold_tx = true;
@@ -123,6 +132,9 @@ fn failed_restart_drain_never_resets_or_reuses_dma_and_can_retry_containment() {
 
 #[test]
 fn failed_restart_engine_stop_never_drains_or_resets_the_live_epoch() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for bcm5762 in [false, true] {
         let (mut packet, pages, domain, peer) = attached(bcm5762);
         let before = resets(&peer);
@@ -141,6 +153,9 @@ fn failed_restart_engine_stop_never_drains_or_resets_the_live_epoch() {
 
 #[test]
 fn uncertain_firmware_reset_cannot_be_revived_by_another_restart() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for bcm5762 in [false, true] {
         let (mut packet, pages, domain, peer) = attached(bcm5762);
         peer.lock().unwrap().reset_ack = false;
@@ -163,6 +178,9 @@ fn uncertain_firmware_reset_cannot_be_revived_by_another_restart() {
 
 #[test]
 fn incomplete_attach_allocations_cannot_enter_restart() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fail_after in [0, 3, 5] {
         let (hardware, mut pages, domain, peer) = parts();
         pages.fail_after = Some(fail_after);
@@ -185,6 +203,9 @@ fn incomplete_attach_allocations_cannot_enter_restart() {
 
 #[test]
 fn failed_mapping_retirement_permanently_refuses_packet_restart() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for bcm5762 in [false, true] {
         for fail_id in [1, 4] {
             let (packet, pages, domain, peer) = attached(bcm5762);

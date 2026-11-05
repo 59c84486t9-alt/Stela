@@ -31,28 +31,51 @@ use core::{
 };
 
 #[cfg(target_arch = "x86_64")]
+mod accounting;
+#[cfg(target_arch = "x86_64")]
 mod binding;
+#[cfg(all(target_arch = "x86_64", feature = "linux-kernel"))]
+mod inactive;
+#[cfg(target_arch = "x86_64")]
+pub use accounting::{
+    ExecutionIdentity, ExecutionPublication, ExecutionSample, ExecutionTap, InterruptedExecution,
+    StoppedPublication,
+};
+#[cfg(all(target_arch = "x86_64", feature = "linux-kernel"))]
+pub use inactive::{InactiveObservation, InactiveTarget};
 #[cfg(target_arch = "x86_64")]
 mod context;
 #[cfg(target_arch = "x86_64")]
 mod dispatch;
 #[cfg(target_arch = "x86_64")]
 mod lifetime;
+mod queue_state;
 #[cfg(target_arch = "x86_64")]
 pub mod scheduling;
 #[cfg(target_arch = "x86_64")]
 pub mod service;
+#[cfg(target_arch = "x86_64")]
+mod terminal;
+
+#[cfg(all(target_arch = "x86_64", feature = "linux-kernel"))]
+pub mod kernel_domain;
 
 #[cfg(target_arch = "x86_64")]
+mod credits;
+#[cfg(target_arch = "x86_64")]
 mod general_reservation;
+#[cfg(target_arch = "x86_64")]
+pub use credits::{GeneralRelease, ObserveFailure, ResourceObserver, ResourceRegistration};
 mod reservation;
 mod stack_requirement;
 #[cfg(target_arch = "x86_64")]
 pub use general_reservation::{
-    AssignedGeneral, ColdStackPreparation, EnteredProcess, GeneralReservation, OwnedGeneralEscrow,
-    PinnedColdStackPreparation, StackPinError,
+    AssignedGeneral, CancelledReservation, DormantGeneralStack, EnteredProcess, GeneralBlocker,
+    GeneralRefusal, GeneralReservation, GeneralStackPreparation, OwnedGeneralEscrow,
+    OwnedPinnedGeneral, OwnedTransferFailure, PinnedGeneralStackPreparation, PublishedGeneralStack,
+    StackPinError,
 };
-pub use stack_requirement::{StackProfile, StackRequirement};
+pub use stack_requirement::{ReleasedStackGeometry, StackProfile, StackRequirement};
 #[cfg(all(any(test, feature = "test-support"), unix, target_arch = "x86_64"))]
 pub mod test_support;
 use reservation::Layout;
@@ -155,19 +178,21 @@ pub unsafe trait StackBacking: Send + Sync {
     fn bounds(&self) -> Range<usize>;
     fn guard(&self) -> Range<usize>;
 
-    /// Export a real allocation/mapping pin from this backing's resource owner.
-    /// The caller independently checks exact usable coverage/cache/granules;
-    /// an incompatible view is refused, never treated as stack access.
-    /// Metadata setup is fallible and nonblocking, without queue reentry, root
-    /// changes, migration or parking. No replacement RAM or PA/VA labels may
-    /// stand in for the real allocation and mapping owner.
+    /// Export this actual zeroed native stack allocation epoch.
+    /// No raw address, epoch scalar or caller label substitutes for the real
+    /// original RAM/mapping/root/code owner. No cold compatibility fallback.
     ///
     /// # Safety
-    /// The caller exclusively owns never-entered, fully zeroed usable
-    /// backing, with no live frame/DMA/other byte user. Every successful pin
-    /// satisfies PageBacking's real ownership contract, including initial zero
-    /// and mapping retention. No C stack/address/current permission follows.
-    unsafe fn pin_cold_pages(&self) -> Result<PinnedPages, MemoryError> {
+    /// Exact native preparation excludes execution and has zeroed the whole
+    /// usable mapping after original C/task/page/alias/RCU users retired and
+    /// an architectural successor proved old native return. epoch is its
+    /// checked nonzero per-worker generation. The provider independently
+    /// refuses overlapping old epoch/views and creates fresh per-epoch backing
+    /// ownership/page records; never return a cached old pin. All metadata
+    /// operations are nonblocking with no queue reentry/root change/parking.
+    /// Keep actual RAM/guard/mappings for Runtime lifetime even when the final
+    /// epoch view drops; that drop must not invalidate its reconstructed frame.
+    unsafe fn pin_prepared_pages(&self, _epoch: u64) -> Result<PinnedPages, MemoryError> {
         Err(MemoryError::Unavailable)
     }
 }
@@ -221,6 +246,8 @@ struct Job {
     requirement: Option<StackRequirement>,
 }
 struct State<const N: usize> {
+    #[cfg(all(target_arch = "x86_64", feature = "linux-kernel"))]
+    inactive: [Option<inactive::Subscriber>; MAX_CONTINUATIONS],
     jobs: [Option<Job>; N],
     reservations: [u64; N],
     #[cfg(target_arch = "x86_64")]
@@ -233,6 +260,8 @@ struct State<const N: usize> {
     poisoned: bool,
     #[cfg(target_arch = "x86_64")]
     scheduling: scheduling::Board,
+    #[cfg(target_arch = "x86_64")]
+    resources: credits::Resources,
 }
 /// No Runtime/Task pointer crosses into this IRQ-safe read view. A single
 /// executor binds these identities to its stack ranges.
@@ -287,6 +316,14 @@ pub struct Queue<const N: usize> {
     #[cfg(target_arch = "x86_64")]
     completing: AtomicBool,
     retired: AtomicBool,
+    #[cfg(target_arch = "x86_64")]
+    published_stack_pins: AtomicUsize,
+    #[cfg(target_arch = "x86_64")]
+    execution_fence: Arc<accounting::Fence>,
+    #[cfg(target_arch = "x86_64")]
+    resource_busy: AtomicBool,
+    #[cfg(target_arch = "x86_64")]
+    resource_observed: AtomicBool,
 }
 // SAFETY: same-CPU IRQ-save exclusion protects all state; foreign CPUs fail
 // before touching it. A bounded try-lock refuses unexpected/NMI reentry. No
@@ -314,6 +351,26 @@ impl<const N: usize> Drop for Guard<'_, N> {
     }
 }
 impl<const N: usize> Queue<N> {
+    fn execution_quiet(&self) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.execution_fence.quiet()
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            true
+        }
+    }
+    fn stack_pins_quiet(&self) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.published_stack_pins.load(Ordering::Acquire) == 0
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            true
+        }
+    }
     /// # Safety
     /// `owner` is the provider/context/code/root lease for all jobs,
     /// until real producer quiescence and retirement, never a dummy.
@@ -340,25 +397,20 @@ impl<const N: usize> Queue<N> {
             active: ActiveContext::new(),
             cpu: ManuallyDrop::new(cpu),
             owner: ManuallyDrop::new(owner),
-            state: ManuallyDrop::new(UnsafeCell::new(State {
-                jobs: [None; N],
-                reservations: [0; N],
-                #[cfg(target_arch = "x86_64")]
-                next_reservation: 1,
-                layout: Layout::Ordinary,
-                stack_profile: None,
-                stack_catalog: stack_requirement::Catalog::empty(),
-                next: 1,
-                closed: false,
-                poisoned: false,
-                #[cfg(target_arch = "x86_64")]
-                scheduling: scheduling::Board::new(),
-            })),
+            state: ManuallyDrop::new(UnsafeCell::new(State::new())),
             held: AtomicBool::new(false),
             inspection: AtomicBool::new(false),
             #[cfg(target_arch = "x86_64")]
             completing: AtomicBool::new(false),
             retired: AtomicBool::new(false),
+            #[cfg(target_arch = "x86_64")]
+            published_stack_pins: AtomicUsize::new(0),
+            #[cfg(target_arch = "x86_64")]
+            execution_fence: Arc::new(accounting::Fence::new()),
+            #[cfg(target_arch = "x86_64")]
+            resource_busy: AtomicBool::new(false),
+            #[cfg(target_arch = "x86_64")]
+            resource_observed: AtomicBool::new(false),
         }))
     }
     fn lock(&self) -> Result<Guard<'_, N>, WorkError> {
@@ -421,37 +473,13 @@ impl<const N: usize> Queue<N> {
         requested: Option<StackRequirement>,
     ) -> Result<Ticket, WorkError> {
         let mut guard = self.lock()?;
-        let state = guard.state();
-        if state.closed || state.poisoned || self.abandoned.load(Ordering::Acquire) {
-            return Err(WorkError::Closed);
-        }
-        let requirement = match (state.stack_profile, requested) {
-            (None, Some(_)) => return Err(WorkError::Unavailable),
-            (None, None) => None,
-            (Some(profile), requested) => {
-                let requirement = requested.unwrap_or_else(|| profile.default_for(lane));
-                if !state.stack_catalog.supports(lane, requirement) {
-                    return Err(WorkError::Unavailable);
-                }
-                Some(requirement)
-            }
-        };
-        let ranges = state.layout.admission(lane, N)?;
-        let slot = ranges
-            .into_iter()
-            .flatten()
-            .find(|index| state.jobs[*index].is_none() && state.reservations[*index] == 0)
-            .ok_or(WorkError::Full)?;
-        let sequence = state.next;
-        state.next = sequence.checked_add(1).ok_or(WorkError::Exhausted)?;
-        state.jobs[slot] = Some(Job {
-            callback,
-            context: context as usize,
+        let sequence = guard.state().enqueue(
             lane,
-            sequence,
-            running: false,
-            requirement,
-        });
+            callback,
+            context,
+            requested,
+            self.abandoned.load(Ordering::Acquire),
+        )?;
         Ok(Ticket {
             queue: self.id,
             sequence,
@@ -528,17 +556,20 @@ impl<const N: usize> Queue<N> {
         g.state().closed = true;
         Ok(())
     }
+    /// Read-only diagnostic publication count for independent fault controls.
+    /// It creates no ticket, current identity or execution/retirement authority.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn published_jobs_for_test(&self) -> Result<usize, WorkError> {
+        let mut guard = self.lock()?;
+        Ok(guard.state().jobs.iter().flatten().count())
+    }
+
     pub fn completed(&self, ticket: Ticket) -> Result<bool, WorkError> {
-        let mut g = self.lock()?;
-        let state = g.state();
-        if ticket.queue != self.id || ticket.sequence == 0 || ticket.sequence >= state.next {
+        let mut guard = self.lock()?;
+        if ticket.queue != self.id {
             return Err(WorkError::InvalidTicket);
         }
-        Ok(!state
-            .jobs
-            .iter()
-            .flatten()
-            .any(|j| j.sequence == ticket.sequence))
+        guard.state().completed(ticket.sequence)
     }
     #[cfg(target_arch = "x86_64")]
     fn next(
@@ -546,48 +577,20 @@ impl<const N: usize> Queue<N> {
         lane: Lane,
         geometry: stack_requirement::Geometry,
     ) -> Result<Option<(usize, Job)>, WorkError> {
-        let mut g = self.lock()?;
-        let state = g.state();
-        if state.poisoned || self.abandoned.load(Ordering::Acquire) {
-            return Err(WorkError::Closed);
-        }
-        let next = state
-            .jobs
-            .iter()
-            .enumerate()
-            .filter_map(|(i, j)| {
-                j.filter(|j| {
-                    state.reservations[i] == 0
-                        && j.lane == lane
-                        && !j.running
-                        && stack_requirement::compatible(j.requirement, geometry)
-                })
-                .map(|j| (i, j))
-            })
-            .min_by_key(|(_, j)| j.sequence);
-        if let Some((i, _)) = next {
-            state.jobs[i].as_mut().expect("selected slot").running = true;
-        }
-        Ok(next)
+        self.lock()?
+            .state()
+            .select_job(lane, geometry, self.abandoned.load(Ordering::Acquire))
     }
     #[cfg(target_arch = "x86_64")]
-    fn finish(&self, slot: usize, sequence: u64) -> Result<(), WorkError> {
-        let mut g = self.lock()?;
-        let state = g.state();
-        if state.reservations.get(slot).is_none_or(|nonce| *nonce != 0) {
-            return Err(WorkError::CorruptContext);
-        }
-        if !state
-            .jobs
-            .get(slot)
-            .and_then(|j| *j)
-            .is_some_and(|j| j.sequence == sequence && j.running)
-        {
-            state.poisoned = true;
-            return Err(WorkError::CorruptContext);
-        }
-        state.jobs[slot] = None;
-        Ok(())
+    fn finish(
+        &self,
+        slot: usize,
+        sequence: u64,
+        released_stack: Option<ReleasedStackGeometry>,
+    ) -> Result<(), WorkError> {
+        self.lock()?
+            .state()
+            .finish_job(slot, sequence, released_stack)
     }
     /// # Safety
     /// External IRQ/driver/firmware/work producers have stopped and cannot
@@ -602,10 +605,19 @@ impl<const N: usize> Queue<N> {
         let mut g = self.lock()?;
         let state = g.state();
         #[cfg(target_arch = "x86_64")]
-        if !state.scheduling.quiet() {
+        if !state.scheduling.quiet()
+            || state.resources.attached()
+            || self.resource_busy.load(Ordering::Acquire)
+        {
             return Err(WorkError::Pending);
         }
-        if !state.closed
+        #[cfg(all(target_arch = "x86_64", feature = "linux-kernel"))]
+        if state.inactive.iter().any(Option::is_some) {
+            return Err(WorkError::Pending);
+        }
+        if !self.stack_pins_quiet()
+            || !self.execution_quiet()
+            || !state.closed
             || state.poisoned
             || self.abandoned.load(Ordering::Acquire)
             || state.jobs.iter().any(Option::is_some)
@@ -626,7 +638,8 @@ impl<const N: usize> Queue<N> {
 }
 impl<const N: usize> Drop for Queue<N> {
     fn drop(&mut self) {
-        if self.retired.load(Ordering::Acquire) {
+        if self.retired.load(Ordering::Acquire) && self.stack_pins_quiet() && self.execution_quiet()
+        {
             // SAFETY: retirement proved no producer or executor still uses these fields.
             unsafe {
                 ManuallyDrop::drop(&mut self.state);
@@ -710,6 +723,18 @@ pub enum ParkOutcome {
 pub unsafe trait SwitchBinding: Send + Sync {
     /// # Safety
     /// Called on the current stack at IF0 with all binding roots kept.
+    /// Preallocated noncyclic source field lease, prepared before attach. All
+    /// fallible metric checks precede foreign attach; successful attach must
+    /// claim/initialize this lease in its nofallible tail before returning Ok.
+    /// Generic contexts may return None; a full source task must require Some.
+    fn execution_publication(
+        &self,
+        _context: &TaskContext,
+    ) -> Result<Option<Arc<dyn ExecutionPublication>>, WorkError> {
+        Ok(None)
+    }
+    /// # Safety
+    /// Called on the current stack at IF0 with all binding roots kept.
     unsafe fn attach(&self, context: &TaskContext) -> Result<(), WorkError>;
     /// # Safety
     /// Called after process PREPARE on the current stack at IF0; pure check.
@@ -723,6 +748,22 @@ pub unsafe trait SwitchBinding: Send + Sync {
     /// # Safety
     /// Called on the completing stack at IF0 after foreign owner already exited.
     unsafe fn complete(&self, context: &TaskContext) -> Result<(), WorkError>;
+    /// Commit an already-prepared original terminal departure on this dying
+    /// current stack at IF0. No wait/allocator/Drop/reentry is allowed. Failure
+    /// is fatal retention, never a return through original do_task_dead.
+    /// # Safety
+    /// Exact live native current, callback-scoped view, all roots retained.
+    unsafe fn terminal_prepare(&self, _context: &TaskContext) -> Result<(), WorkError> {
+        Err(WorkError::Unavailable)
+    }
+    /// Join that exact departure on the actual off-all-worker-stacks successor
+    /// at IF0. Only bounded identity/state/notification metadata may change;
+    /// original source reaper/RCU/resource disposal stays in a real process task.
+    /// # Safety
+    /// Core proved the actual architectural successor and retained this binding.
+    unsafe fn terminal_successor(&self, _context: &TaskContext) -> Result<(), WorkError> {
+        Err(WorkError::Unavailable)
+    }
     /// # Safety
     /// Called on the idle taskless dispatcher at IF0 after foreign quiescence.
     unsafe fn detach(&self, context: &TaskContext) -> Result<(), WorkError>;
@@ -730,6 +771,8 @@ pub unsafe trait SwitchBinding: Send + Sync {
 
 #[cfg(target_arch = "x86_64")]
 struct WakeSignal {
+    #[cfg(feature = "linux-kernel")]
+    physical: inactive::PhysicalRun,
     service: bool,
     sequence: AtomicU64,
     pending: AtomicBool,
@@ -787,6 +830,8 @@ impl<const N: usize> WakeHandle<N> {
         // Real blocked->ready ordering is committed before wake publication;
         // duplicate/running wakes preserve equal-FIFO order. No C/task pointer.
         guard.state().scheduling.wake(self.id, self.sequence)?;
+        #[cfg(feature = "linux-kernel")]
+        inactive::notify(guard.state(), self.id, self.sequence)?;
         self.queue.inspection.store(true, Ordering::Release);
         self.signal.pending.store(true, Ordering::Release);
         Ok(())
@@ -831,32 +876,11 @@ impl<const N: usize> Drop for WakeHandle<N> {
     }
 }
 #[cfg(target_arch = "x86_64")]
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum TaskState {
-    Idle,
-    Reserved,
-    Escrow,
-    Preparing,
-    Ready,
-    Running,
-    Runnable,
-    Blocked,
-}
+mod continuation;
 #[cfg(target_arch = "x86_64")]
-struct Task {
-    lane: Lane,
-    stack: Stack,
-    id: ContextId,
-    frame: context::Frame,
-    state: TaskState,
-    job: Option<(usize, Job)>,
-    flags: u64,
-    draining: bool,
-    owned_escrows: usize,
-    ever_entered: bool,
-    binding: Option<Arc<dyn SwitchBinding>>,
-    signal: Arc<WakeSignal>,
-}
+use continuation::{Continuation, TaskState};
+#[cfg(target_arch = "x86_64")]
+type Task = Continuation<Stack, u64, Arc<dyn SwitchBinding>>;
 pub const MAX_CONTINUATIONS: usize = 32;
 
 /// CPU-affine pinned executor. Task zero is a real foreground continuation,
@@ -879,6 +903,7 @@ pub struct Runtime<const N: usize> {
     firmware_turn: Cell<bool>,
     firmware_cursor: Cell<usize>,
     service_domain: ManuallyDrop<UnsafeCell<Option<Arc<service::Domain<N>>>>>,
+    execution: Arc<accounting::ExecutionView>,
     _local: PhantomData<*mut ()>,
     _pinned: PhantomPinned,
 }
@@ -976,28 +1001,9 @@ impl<const N: usize> Runtime<N> {
             .try_reserve_exact(stacks.len())
             .map_err(|_| WorkError::Full)?;
         for (index, stack) in stacks.into_iter().enumerate() {
-            let id = NEXT_CONTEXT
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-                .map_err(|_| WorkError::Exhausted)?;
-            tasks.push(Task {
-                lane: layout.lane(index),
-                stack,
-                id: ContextId(id),
-                frame: context::Frame::new(controls),
-                state: TaskState::Idle,
-                job: None,
-                flags: 0,
-                draining: false,
-                owned_escrows: 0,
-                ever_entered: false,
-                binding: None,
-                signal: Arc::new(WakeSignal {
-                    service: layout.lane(index) == Lane::Service,
-                    sequence: AtomicU64::new(0),
-                    pending: AtomicBool::new(false),
-                }),
-            });
+            tasks.push(Task::new(layout.lane(index), stack, controls, 0)?);
         }
+        let execution = accounting::ExecutionView::new(&queue, &tasks)?;
         {
             let mut admission = queue.lock()?;
             let state = admission.state();
@@ -1025,6 +1031,7 @@ impl<const N: usize> Runtime<N> {
         }
         let executor = Box::pin(Self {
             queue,
+            execution,
             layout,
             tasks: ManuallyDrop::new(UnsafeCell::new(tasks)),
             dispatch: UnsafeCell::new(context::Frame::new(controls)),
@@ -1085,19 +1092,22 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
             quarantine();
             executor.queue.cpu.fatal(WorkError::Pending);
         }
-        let now = executor
-            .queue
-            .scheduling_now()
-            .unwrap_or_else(|error| executor.queue.cpu.fatal(error));
         let _flags = match executor.queue.cpu.save_disable() {
             Ok(f) => f,
             Err(e) => executor.queue.cpu.fatal(e),
         };
+        let now = executor
+            .queue
+            .scheduling_now()
+            .unwrap_or_else(|error| executor.queue.cpu.fatal(error));
         executor
             .queue
             .lock()
             .and_then(|mut guard| guard.state().scheduling.account(now))
             .unwrap_or_else(|error| executor.queue.cpu.fatal(error));
+        if let Err(error) = executor.execution_publish_at(index, now) {
+            executor.queue.cpu.fatal(error);
+        }
         executor.queue.completing.store(true, Ordering::Release);
         let view = executor.context_view(index, true);
         // SAFETY: completing task on its own stack at IF0.
@@ -1109,6 +1119,10 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
             }
         }
         executor.queue.completing.store(false, Ordering::Release);
+        if let Err(error) = executor.execution_stop_at(index, now) {
+            executor.queue.cpu.fatal(error);
+        }
+
         let removed = (|| {
             executor
                 .queue
@@ -1126,14 +1140,29 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
             let signal = unsafe { &(*executor.task(index)).signal };
             signal.sequence.store(0, Ordering::Release);
         }
-        if let Err(e) = executor.queue.finish(slot, job.sequence) {
+        // SAFETY: exact current constructor-owned Task at IF0. Only a
+        // General stack WITHOUT a published C pin becomes reusable on return;
+        // its actual architectural successor gates event delivery separately.
+        let released_stack = unsafe {
+            let task = &*executor.task(index);
+            (task.lane == Lane::General
+                && task.stack_pin_nonce == 0
+                && !executor.execution.has_target(index))
+            .then(|| ReleasedStackGeometry::of(&task.stack, !task.ever_entered))
+        };
+        if let Err(e) = executor.queue.finish(slot, job.sequence, released_stack) {
             executor.queue.cpu.fatal(e);
         }
         // SAFETY: covered by this function's own safety contract.
         unsafe {
             let t = &mut (*executor.task(index));
             t.job = None;
-            t.state = TaskState::Idle;
+            t.completed_sequence = job.sequence;
+            t.state = if t.stack_pin_nonce == 0 && !executor.execution.has_target(index) {
+                TaskState::Idle
+            } else {
+                TaskState::Retained
+            };
         }
         executor.current.set(NONE);
         executor.queue.active.clear();
@@ -1150,7 +1179,8 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
 #[cfg(target_arch = "x86_64")]
 impl<const N: usize> Drop for Runtime<N> {
     fn drop(&mut self) {
-        if self.retired.get() && self.owned_escrows.get() == 0 {
+        self.execution.closed.store(true, Ordering::Release);
+        if self.retired.get() && self.owned_escrows.get() == 0 && self.queue.stack_pins_quiet() {
             // SAFETY: retirement proved no task frame or stack is still live.
             unsafe { ManuallyDrop::drop(&mut self.tasks) };
             // SAFETY: successful retirement also required domain release.
@@ -1349,7 +1379,11 @@ impl<const N: usize> Executor<N> {
 impl<const N: usize> Drop for Executor<N> {
     fn drop(&mut self) {
         let process = self.runtime.queue.process().is_ok();
-        if process && self.runtime.retired.get() && self.runtime.owned_escrows.get() == 0 {
+        if process
+            && self.runtime.retired.get()
+            && self.runtime.owned_escrows.get() == 0
+            && self.runtime.queue.stack_pins_quiet()
+        {
             // SAFETY: the runtime retired, so no task or provider can resume it.
             unsafe {
                 ManuallyDrop::drop(&mut self.runtime);

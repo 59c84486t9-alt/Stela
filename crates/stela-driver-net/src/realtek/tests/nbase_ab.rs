@@ -237,7 +237,7 @@ fn nbase_backup_station_and_runtime_tx_lpi_failure_do_not_guess_recovery() {
         }
         let writes = model.state.borrow().writes.len();
         model.fail_mac_address = None;
-        time.delay(50_000);
+        time.delay(50_000).unwrap();
         let hw = Hardware::new(&model, &time, revision(version), 0);
         assert_eq!(link.update(&hw), Err(BlockError::Device { status: 255 }));
         assert_eq!(model.state.borrow().writes.len(), writes);

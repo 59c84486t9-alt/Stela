@@ -1,3 +1,4 @@
+extern crate std;
 use super::*;
 use crate::bus::dma::RegionAllocator;
 use alloc::{collections::BTreeMap, rc::Rc};
@@ -58,6 +59,7 @@ pub(super) struct Model {
     d0_delay: u64,
     read_error: Option<usize>,
     write_error: Option<(usize, usize)>,
+    panic_write: Option<usize>,
     byte_error: Option<usize>,
     context: u64,
     posted: BTreeMap<u16, u64>,
@@ -122,6 +124,7 @@ impl Model {
             d0_delay: 0,
             read_error: None,
             write_error: None,
+            panic_write: None,
             byte_error: None,
             context: 0,
             posted: BTreeMap::new(),
@@ -221,6 +224,7 @@ impl Model {
     }
     fn write32(&mut self, o: usize, v: u32) {
         self.writes.push((self.time.get(), o, v));
+        assert_ne!(self.panic_write, Some(o), "injected native register unwind");
         match o {
             FH_CAUSE | HW_CAUSE | AUTOMASK => {
                 let old = self.reg(o);
@@ -439,6 +443,17 @@ unsafe impl Platform for ModelPlatform {
         }
         Ok(())
     }
+    fn minimum_delay(&mut self, microseconds: u64) -> Result<()> {
+        let model = self.0.borrow();
+        model.time.set(
+            model
+                .time
+                .get()
+                .checked_add(microseconds)
+                .ok_or(Error::Mmio("modeled time overflow"))?,
+        );
+        Ok(())
+    }
     fn now_us(&self) -> u64 {
         let m = self.0.borrow();
         let t = m.time.get();
@@ -487,6 +502,9 @@ pub(super) fn transport(
 }
 #[test]
 fn every_source_id_boots_published_context_and_posts_exactly61_buffers() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     assert_eq!(
         DEVICE_IDS,
         &[0x4d76, 0xa876, 0xe376, 0xe476, 0xd346, 0x6e74]
@@ -521,6 +539,9 @@ fn every_source_id_boots_published_context_and_posts_exactly61_buffers() {
 }
 #[test]
 fn tfd_payload_and_source_next_index_completions_wrap_without_hci_fabrication() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0xa876, &mut dma);
@@ -538,6 +559,9 @@ fn tfd_payload_and_source_next_index_completions_wrap_without_hci_fabrication() 
 }
 #[test]
 fn rx_completions_drain_coalesced_frames_preserve_padding_and_rearm_only_returned_dma() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0xa876, &mut dma);
@@ -561,6 +585,9 @@ fn rx_completions_drain_coalesced_frames_preserve_padding_and_rearm_only_returne
 }
 #[test]
 fn intel_reset_requires_tx_and_gp0_then_real_boot_event_before_d0() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0x4d76, &mut dma);
@@ -589,6 +616,9 @@ fn intel_reset_requires_tx_and_gp0_then_real_boot_event_before_d0() {
 }
 #[test]
 fn iml_reset_does_not_invent_an_operational_d0_transition() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0xa876, &mut dma);
@@ -602,6 +632,9 @@ fn iml_reset_does_not_invent_an_operational_d0_transition() {
 
 #[test]
 fn d0_requires_complete_boot_notification_and_subsequent_operational_stage() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for stage in [ROM, IML, OP | D3] {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -626,6 +659,9 @@ fn d0_requires_complete_boot_notification_and_subsequent_operational_stage() {
 
 #[test]
 fn old_gp0_cannot_acknowledge_a_silent_d0_request() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for silent in [false, true] {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -649,6 +685,9 @@ fn old_gp0_cannot_acknowledge_a_silent_d0_request() {
 
 #[test]
 fn d0_preexisting_stage_change_and_late_write_acknowledgment_are_refused() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for lost_stage in [false, true] {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -673,6 +712,9 @@ fn d0_preexisting_stage_change_and_late_write_acknowledgment_are_refused() {
 
 #[test]
 fn rom_stage_without_gp0_never_starts_rx_or_claims_startup() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0xa876, &mut dma);
@@ -691,6 +733,9 @@ fn rom_stage_without_gp0_never_starts_rx_or_claims_startup() {
 }
 #[test]
 fn abort_lockdown_halt_and_mailbox_fault_observations_survive_cleanup() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for stage in [
         ROM | (1 << 10),
         ROM | (1 << 11),
@@ -716,6 +761,9 @@ fn abort_lockdown_halt_and_mailbox_fault_observations_survive_cleanup() {
 }
 #[test]
 fn silent_tx_with_failed_retirement_keeps_first_fault() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0xa876, &mut dma);
@@ -743,6 +791,9 @@ fn silent_tx_with_failed_retirement_keeps_first_fault() {
 }
 #[test]
 fn missing_bus_master_ack_or_failed_route_drain_never_release_native_ownership() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for route in [false, true] {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -786,6 +837,9 @@ fn assert_terminal(t: &mut Transport<ModelPlatform>, m: &Rc<RefCell<Model>>) {
 
 #[test]
 fn mmio_start_read_and_effect_then_write_errors_cannot_reopen_or_rewrite_dma() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for failure in 0..20 {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -826,6 +880,9 @@ fn mmio_start_read_and_effect_then_write_errors_cannot_reopen_or_rewrite_dma() {
 
 #[test]
 fn active_transfer_errors_keep_first_fault() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for operation in 0..7 {
         for cleanup_fails in [false, true] {
             let mut backing = vec![0u64; 1024 * 1024];
@@ -875,6 +932,9 @@ fn active_transfer_errors_keep_first_fault() {
 
 #[test]
 fn uncertain_mask_or_reset_cleanup_write_never_releases_platform() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for fault in [(FH_MASK, 1), (HW_MASK, 1), (FUNC, 1), (FUNC, 2)] {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -890,6 +950,9 @@ fn uncertain_mask_or_reset_cleanup_write_never_releases_platform() {
 }
 #[test]
 fn late_completion_and_expired_publication_budget_cannot_report_success() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for before_publication in [false, true] {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -913,6 +976,9 @@ fn late_completion_and_expired_publication_budget_cannot_report_success() {
 }
 #[test]
 fn stale_mismatched_queue_count_immediate_and_duplicate_tx_completions_are_terminal() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for completion in [
         0x81000000u32,
         0x81000002,
@@ -945,6 +1011,9 @@ fn stale_mismatched_queue_count_immediate_and_duplicate_tx_completions_are_termi
 }
 #[test]
 fn unsolicited_tx_completion_is_not_assigned_to_a_new_packet() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0xa876, &mut dma);
@@ -966,6 +1035,9 @@ fn unsolicited_tx_completion_is_not_assigned_to_a_new_packet() {
 }
 #[test]
 fn malformed_rfh_hci_type_payload_and_unposted_rx_tags_never_reuse_owned_storage() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for case in 0..5 {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -1017,6 +1089,9 @@ fn malformed_rfh_hci_type_payload_and_unposted_rx_tags_never_reuse_owned_storage
 }
 #[test]
 fn out_of_order_rx_cannot_overwrite_a_still_posted_buffer_during_rearm() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0xa876, &mut dma);
@@ -1040,6 +1115,9 @@ fn out_of_order_rx_cannot_overwrite_a_still_posted_buffer_during_rearm() {
 }
 #[test]
 fn reset_transmit_does_not_complete_without_matching_alive_stage() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for no_cause in [false, true] {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -1061,6 +1139,9 @@ fn reset_transmit_does_not_complete_without_matching_alive_stage() {
 }
 #[test]
 fn host_packet_validation_rejects_without_hardware_effect_and_accepts_all_real_types() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0xa876, &mut dma);
@@ -1165,6 +1246,9 @@ fn append_firmware_upload(m: &mut Model, engine: u8, image: &[u8]) {
 }
 #[test]
 fn shared_firmware_engine_uses_real_pcie_dma_for_rsa_ecdsa_iml_op_and_d0() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     use crate::{
         bluetooth::intel::{self, TransportIdentity},
         firmware::{Catalog, Provenance, Resource},
@@ -1344,6 +1428,9 @@ fn shared_firmware_engine_uses_real_pcie_dma_for_rsa_ecdsa_iml_op_and_d0() {
 
 #[test]
 fn pcie_firmware_faults_keep_native_transcript_and_uncertain_cleanup_ownership() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     use crate::{bluetooth::intel, firmware::Catalog};
     for operation in 0..3 {
         for cleanup_fails in [false, true] {
@@ -1392,6 +1479,9 @@ fn pcie_firmware_faults_keep_native_transcript_and_uncertain_cleanup_ownership()
 
 #[test]
 fn firmware_error_drains_complete_native_packets_queued_before_send_or_poll_failure() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     use crate::{
         bluetooth::intel::{self, TransportIdentity},
         firmware::{Catalog, Provenance, Resource},
@@ -1473,3 +1563,51 @@ fn firmware_error_drains_complete_native_packets_queued_before_send_or_poll_fail
 mod native_models;
 
 mod ownership;
+
+struct NeverFirmware;
+impl crate::firmware::Provider for NeverFirmware {
+    fn load(
+        &self,
+        _: crate::firmware::Requirement<'_>,
+    ) -> core::result::Result<crate::firmware::Image<'_>, crate::firmware::Error> {
+        panic!("closed transport must not request firmware")
+    }
+}
+#[test]
+fn retirement_unwind_seals_core_before_the_first_register_effect() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
+    let mut backing = vec![0u64; 1024 * 1024];
+    let mut dma = allocator(&mut backing);
+    let (mut transport, model) = transport(0x4d76, &mut dma);
+    transport.start().unwrap();
+    model.borrow_mut().panic_write = Some(FH_MASK);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| transport.close())).is_err());
+    assert_eq!(transport.state(), State::Closing);
+    model.borrow_mut().panic_write = None;
+    let writes = model.borrow().writes.clone();
+    let error = Error::Unsupported("interrupted Intel PCIe retirement");
+    assert_eq!(transport.start(), Err(error.clone()));
+    assert_eq!(transport.poll(), Err(error.clone()));
+    assert_eq!(
+        transport.send(Kind::Command, &[3, 12, 0]),
+        Err(error.clone())
+    );
+    assert_eq!(transport.enter_d0(), Err(error.clone()));
+    assert!(!transport.ready());
+    assert!(
+        firmware::initialize(
+            &mut transport,
+            &NeverFirmware,
+            crate::bluetooth::intel::PlatformInputs::default()
+        )
+        .is_err()
+    );
+    assert_eq!(transport.close(), Err(error));
+    drop(transport);
+    assert_eq!(model.borrow().writes, writes);
+    assert_eq!(model.borrow().retire_count, 0);
+}
+
+mod minimum_fence;

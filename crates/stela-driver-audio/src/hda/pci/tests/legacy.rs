@@ -195,7 +195,18 @@ fn overlapping_controls_rejected() {
         }
         assert_eq!(
             prepare_model(&mut function, &timer, bar).unwrap_err(),
-            AttachError::InvalidCapabilities
+            match variant {
+                0 => AttachError::PciCapability(crate::bus::pci::CapabilityError::Overlap {
+                    offset: 0x54
+                }),
+                2 | 3 => AttachError::PciCapability(crate::bus::pci::CapabilityError::Overlap {
+                    offset: 0x70
+                }),
+                4 => AttachError::PciCapability(crate::bus::pci::CapabilityError::Overlap {
+                    offset: 0x50
+                }),
+                _ => AttachError::InvalidCapabilities,
+            }
         );
         assert!(function.config().writes.is_empty());
     }
@@ -216,7 +227,7 @@ fn msi_layout_bounds() {
 }
 
 #[test]
-fn final_enable_failure_attempts_cleanup() {
+fn final_enable_failure_keeps_the_published_prefix_without_cleanup() {
     let (mut function, timer, bar) = fixture(0);
     function.config().fail_after_enable = true;
     assert_eq!(
@@ -235,7 +246,15 @@ fn final_enable_failure_attempts_cleanup() {
     assert_eq!((*offset, *width), (regs::COMMAND, 2));
     assert_eq!(
         *value & u32::from(regs::COMMAND_MASTER | regs::COMMAND_MEMORY),
-        0
+        u32::from(regs::COMMAND_MASTER | regs::COMMAND_MEMORY),
+    );
+    assert_eq!(
+        config
+            .writes
+            .iter()
+            .filter(|(off, _, _, _)| *off == regs::COMMAND)
+            .count(),
+        2
     );
 }
 

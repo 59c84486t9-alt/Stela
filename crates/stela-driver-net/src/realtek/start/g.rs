@@ -69,7 +69,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                 for address in (0xfc28..=0xfc36).step_by(2) {
                     self.mac_ocp_write(address, 0)?;
                 }
-                self.timer.delay(3_000);
+                self.timer.delay(3_000)?;
                 self.mac_ocp_write(0xfc26, 0)?;
                 for (n, value) in RX_FIX.iter().copied().enumerate() {
                     self.mac_ocp_write(0xf800 + 2 * n as u16, value)?;

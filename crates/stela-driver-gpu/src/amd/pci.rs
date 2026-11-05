@@ -25,6 +25,7 @@ impl Default for Policy {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
+    Config(crate::bus::pci::ConfigError),
     Absent,
     UnsupportedHeader,
     IdentityChanged,
@@ -172,15 +173,17 @@ pub unsafe fn identify<C: ConfigSpace>(
 ) -> Result<MatchedFunction<'_, C>, Error> {
     let labels = (function.vendor, function.device, function.class);
     let config = function.config();
-    let ids = config.read32(0);
+    let ids = config.read32(0).map_err(Error::Config)?;
     if ids as u16 == u16::MAX {
         return Err(Error::Absent);
     }
-    if config.read8(regs::HEADER_TYPE) & 0x7f != 0 {
+    if config.read8(regs::HEADER_TYPE).map_err(Error::Config)? & 0x7f != 0 {
         return Err(Error::UnsupportedHeader);
     }
-    let class_revision = config.read32(regs::CLASS_REVISION);
-    let subsystem = config.read32(regs::SUBSYSTEM_VENDOR_ID);
+    let class_revision = config.read32(regs::CLASS_REVISION).map_err(Error::Config)?;
+    let subsystem = config
+        .read32(regs::SUBSYSTEM_VENDOR_ID)
+        .map_err(Error::Config)?;
     let observed = ConfigIdentity {
         vendor: u32::from(ids as u16),
         device: ids >> 16,

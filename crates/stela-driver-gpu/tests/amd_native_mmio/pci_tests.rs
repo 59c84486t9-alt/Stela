@@ -11,19 +11,27 @@ struct ObservedConfig {
     reads: Cell<u64>,
 }
 impl ConfigSpace for ObservedConfig {
-    fn read32(&self, offset: u16) -> u32 {
+    fn read32(&self, offset: u16) -> Result<u32, bus::pci::ConfigError> {
         assert!(offset.is_multiple_of(4));
         self.reads.set(self.reads.get() | (1 << (offset / 4)));
-        self.words[usize::from(offset / 4)]
+        Ok(self.words[usize::from(offset / 4)])
     }
-    fn write32(&mut self, _: u16, _: u32) {
+    fn write32(&mut self, _: u16, _: u32) -> Result<(), bus::pci::ConfigError> {
         panic!("admission performs no config writes")
     }
-    fn write16(&mut self, _: u16, _: u16) {
+    fn write16(&mut self, _: u16, _: u16) -> Result<(), bus::pci::ConfigError> {
         panic!("admission performs no config writes")
     }
-    fn write8(&mut self, _: u16, _: u8) {
+    fn write8(&mut self, _: u16, _: u8) -> Result<(), bus::pci::ConfigError> {
         panic!("admission performs no config writes")
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> (8 * (offset & 3))) as u8)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> (8 * (offset & 2))) as u16)
     }
 }
 fn observed(device: u16, class: u32, revision: u8) -> Function<ObservedConfig> {
@@ -46,10 +54,10 @@ fn observed(device: u16, class: u32, revision: u8) -> Function<ObservedConfig> {
     .unwrap()
 }
 /// A 512 KiB register BAR, which holds every register discovery reads.
-fn full_registers(base: u64) -> RegisterBar {
+fn full_registers(base: u64, model: &Fixture) -> RegisterBar {
     RegisterBar {
         index: 5,
-        resource: resource(base, 512 * 1024, ResourceKind::Registers).0,
+        resource: resource(base, 512 * 1024, ResourceKind::Registers, model).0,
     }
 }
 fn catalog(name: &str, target: Target<'_>, bytes: Vec<u8>) -> Catalog {
@@ -69,7 +77,7 @@ fn catalog(name: &str, target: Target<'_>, bytes: Vec<u8>) -> Catalog {
     .unwrap()
 }
 
-pub fn original_match(authority: &Authority, model: &Arc<Model>) {
+pub fn original_match(authority: &Authority, model: &Fixture) {
     let mut function = observed(0xffff, 0x120000, 0x45);
     // SAFETY: immutable synthetic config, no physical hardware.
     let matched = unsafe { crate::pci::identify(&mut function, Policy::default()) }.unwrap();
@@ -80,9 +88,10 @@ pub fn original_match(authority: &Authority, model: &Arc<Model>) {
     assert_eq!(matched.ip_path(), IpPath::Dynamic);
     assert_eq!(matched.apu_flags(), 0);
     // SAFETY: canonical model resources belong to this immutable function.
-    let mut bars =
-        unsafe { AttachedBars::attach_matched(authority, &matched, registers(0x1100000, 5), None) }
-            .unwrap();
+    let mut bars = unsafe {
+        AttachedBars::attach_matched(authority, &matched, registers(0x1100000, 5, model), None)
+    }
+    .unwrap();
     assert_eq!(bars.identity().asic_type, matched.asic_type());
     assert_eq!(bars.identity().original_flags, matched.flags());
     assert_eq!(bars.ip_path(), Some(IpPath::Dynamic));
@@ -128,7 +137,7 @@ pub fn original_match(authority: &Authority, model: &Arc<Model>) {
     let error =
         // SAFETY: the model device, its pages and its domain belong to this test alone; no other
         // driver, worker or DMA touches them.
-        unsafe { AttachedBars::attach_matched(authority, &matched, registers(0x1200000, 2), None) }
+        unsafe { AttachedBars::attach_matched(authority, &matched, registers(0x1200000, 2, model), None) }
             .err()
             .unwrap();
     assert_eq!(error.stage, Stage::Preflight);
@@ -138,10 +147,11 @@ pub fn original_match(authority: &Authority, model: &Arc<Model>) {
         state.fail_map = state.calls + 1;
     }
     // SAFETY: explicit unchanged model map failure, no hardware resources.
-    let error =
-        unsafe { AttachedBars::attach_matched(authority, &matched, registers(0x1200000, 5), None) }
-            .err()
-            .unwrap();
+    let error = unsafe {
+        AttachedBars::attach_matched(authority, &matched, registers(0x1200000, 5, model), None)
+    }
+    .err()
+    .unwrap();
     assert_eq!(error.stage, Stage::Registers);
     assert_eq!(error.rollback, Rollback::NotAttempted);
     model.0.lock().unwrap().fail_map = 0;
@@ -160,7 +170,7 @@ pub fn original_match(authority: &Authority, model: &Arc<Model>) {
         // SAFETY: the model device, its pages and its domain belong to this test alone; no other
         // driver, worker or DMA touches them.
         let mut bars = unsafe {
-            AttachedBars::attach_matched(authority, &matched, registers(0x1300000, 5), None)
+            AttachedBars::attach_matched(authority, &matched, registers(0x1300000, 5, model), None)
         }
         .unwrap();
         // SAFETY: refused before any access.
@@ -189,7 +199,7 @@ pub fn original_match(authority: &Authority, model: &Arc<Model>) {
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
     // driver, worker or DMA touches them.
     let mut bars = unsafe {
-        AttachedBars::attach_matched(authority, &matched, full_registers(0x1400000), None)
+        AttachedBars::attach_matched(authority, &matched, full_registers(0x1400000, model), None)
     }
     .unwrap();
     {

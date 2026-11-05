@@ -1,0 +1,725 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 05:09:08 -0500
+Subject: [PATCH] refactor(sched): share original root domain operations
+
+---
+ kernel/sched/Makefile          |   4 +-
+ kernel/sched/core.c            |  31 ------
+ kernel/sched/deadline.c        |  10 --
+ kernel/sched/fork_sources.json | 124 +++++++++++++++++++++-
+ kernel/sched/rq_root.c         | 185 +++++++++++++++++++++++++++++++++
+ kernel/sched/rq_root.h         |  17 +++
+ kernel/sched/rt.c              |  11 --
+ kernel/sched/sched_ratio.c     |  24 ++++-
+ kernel/sched/topology.c        | 146 +-------------------------
+ 9 files changed, 352 insertions(+), 200 deletions(-)
+ create mode 100644 kernel/sched/rq_root.c
+ create mode 100644 kernel/sched/rq_root.h
+
+diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
+index 0c09d8e2b3dc07d63709a77c644393fbf994fbaa..9478a84899047d7c970009c0be393fb2ec645691 100644
+--- a/kernel/sched/Makefile
++++ b/kernel/sched/Makefile
+@@ -4,6 +4,7 @@ CONTEXT_ANALYSIS_core.o := y
+ CONTEXT_ANALYSIS_rq_lock.o := y
+ CONTEXT_ANALYSIS_rq_resched.o := y
+ CONTEXT_ANALYSIS_rq_tasks.o := y
++CONTEXT_ANALYSIS_rq_root.o := y
+ CONTEXT_ANALYSIS_rq_migration.o := y
+ CONTEXT_ANALYSIS_wait_support.o := y
+ CONTEXT_ANALYSIS_fair.o := y
+@@ -32,6 +33,7 @@ CFLAGS_wait_support.o := $(CFLAGS_core.o)
+ CFLAGS_rq_lock.o := $(CFLAGS_core.o)
+ CFLAGS_rq_resched.o := $(CFLAGS_core.o)
+ CFLAGS_rq_tasks.o := $(CFLAGS_core.o)
++CFLAGS_rq_root.o := $(CFLAGS_core.o)
+ CFLAGS_rq_migration.o := $(CFLAGS_core.o)
+ endif
+ 
+@@ -48,7 +50,7 @@ endif
+ # build parallelizes well and finishes roughly at once:
+ #
+ obj-y += core.o rq_lock.o rq_clock.o rq_resched.o wait_support.o user_affinity.o
+-obj-y += rq_tasks.o rq_migration.o sched_ratio.o
++obj-y += rq_tasks.o rq_migration.o rq_root.o sched_ratio.o
+ obj-y += fair.o
+ obj-y += build_policy.o cputime_group.o rt_timeslice.o
+ obj-y += build_utility.o capacity_state.o
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 07573bb7c029d192a2918ea28b058f3585f060a2..9b1b6dec99c12112906d0d4a4374fc33cbab7913 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -7904,37 +7904,6 @@ static inline void balance_hotplug_wait(void)
+ 
+ #endif /* !CONFIG_HOTPLUG_CPU */
+ 
+-void set_rq_online(struct rq *rq)
+-{
+-	if (!rq->online) {
+-		const struct sched_class *class;
+-
+-		cpumask_set_cpu(rq->cpu, rq->rd->online);
+-		rq->online = 1;
+-
+-		for_each_class(class) {
+-			if (class->rq_online)
+-				class->rq_online(rq);
+-		}
+-	}
+-}
+-
+-void set_rq_offline(struct rq *rq)
+-{
+-	if (rq->online) {
+-		const struct sched_class *class;
+-
+-		update_rq_clock(rq);
+-		for_each_class(class) {
+-			if (class->rq_offline)
+-				class->rq_offline(rq);
+-		}
+-
+-		cpumask_clear_cpu(rq->cpu, rq->rd->online);
+-		rq->online = 0;
+-	}
+-}
+-
+ static inline void sched_set_rq_online(struct rq *rq, int cpu)
+ {
+ 	struct rq_flags rf;
+diff --git a/kernel/sched/deadline.c b/kernel/sched/deadline.c
+index 0663c00c41c04213fda2ebaf16a0bdf34e0849a8..860cc7acee27b73d2add42a71c6a999a4e2063ff 100644
+--- a/kernel/sched/deadline.c
++++ b/kernel/sched/deadline.c
+@@ -506,16 +506,6 @@ static inline int is_leftmost(struct sched_dl_entity *dl_se, struct dl_rq *dl_rq
+ 
+ static void init_dl_rq_bw_ratio(struct dl_rq *dl_rq);
+ 
+-void init_dl_bw(struct dl_bw *dl_b)
+-{
+-	raw_spin_lock_init(&dl_b->lock);
+-	if (global_rt_runtime() == RUNTIME_INF)
+-		dl_b->bw = -1;
+-	else
+-		dl_b->bw = to_ratio(global_rt_period(), global_rt_runtime());
+-	dl_b->total_bw = 0;
+-}
+-
+ void init_dl_rq(struct dl_rq *dl_rq)
+ {
+ 	dl_rq->root = RB_ROOT_CACHED;
+diff --git a/kernel/sched/fork_sources.json b/kernel/sched/fork_sources.json
+index 8bfc8cf61d1f3217a08076e7a344eb723a24bc06..0d4328e51e39a52125af14c8762910466170ef1c 100644
+--- a/kernel/sched/fork_sources.json
++++ b/kernel/sched/fork_sources.json
+@@ -90,6 +90,18 @@
+           "first_line": 11149,
+           "last_line": 11149,
+           "sha256": "11638d091efdfb889f25464fe469747376d45de32e5df18437663c2af463fd9f"
++        },
++        {
++          "symbol": "set_rq_online",
++          "first_line": 8510,
++          "last_line": 8523,
++          "sha256": "fd0c68c3177063720e27eead885bb0c2a242b2af09eca3ca0c836edb92b648b6"
++        },
++        {
++          "symbol": "set_rq_offline",
++          "first_line": 8525,
++          "last_line": 8539,
++          "sha256": "0b9fb2885b69615c88b14309ce97907a4acc431eb35a49786562345aa8d2c19e"
+         }
+       ]
+     },
+@@ -128,7 +140,20 @@
+       "path": "kernel/sched/rt.c",
+       "git_blob": "85303add726df4c2da846c427aab2d627fca9589",
+       "sha256": "b36ec6b58c10d3a30ab5e7ed889a9cf708c7ecfc392e33f2b9ff4e6b2d6722bc",
+-      "functions": []
++      "functions": [
++        {
++          "symbol": "sysctl_sched_rt_period",
++          "first_line": 18,
++          "last_line": 18,
++          "sha256": "15f19f5efa6dfa7a88e40559ebe7a50fd36d56f81af98f0591ee78126cf32355"
++        },
++        {
++          "symbol": "sysctl_sched_rt_runtime",
++          "first_line": 24,
++          "last_line": 24,
++          "sha256": "0e66315f245b11d8b4fa51b43389463c05d7886a904800fa76601022803ff5e8"
++        }
++      ]
+     },
+     {
+       "path": "kernel/sched/clock.c",
+@@ -172,6 +197,92 @@
+       "git_blob": "a5bef38add431d106dc021a71ee555cf3f961388",
+       "sha256": "0a001fa3e04c463a17481e1dfdd641a956240b969516e0a5d2f4f1484f3ead41",
+       "functions": []
++    },
++    {
++      "path": "kernel/sched/topology.c",
++      "git_blob": "70b63224a230dd26c1d5744355ee558a2013dff8",
++      "sha256": "412d665e176f5fa6ff36827968fa6f9437d1b2a3a180078eb614aaadc41b1228",
++      "functions": [
++        {
++          "symbol": "free_pd",
++          "first_line": 322,
++          "last_line": 331,
++          "sha256": "81eacaed83c2df19c3cde585cd068712b8963bb6d357e5b950b3ad1b85c1ebfb"
++        },
++        {
++          "symbol": "free_rootdomain",
++          "first_line": 460,
++          "last_line": 472,
++          "sha256": "341c3d29abce1e7101da696ba78dd1a2000ef8907ce926a537eb09ebe1ea8111"
++        },
++        {
++          "symbol": "rq_attach_root",
++          "first_line": 474,
++          "last_line": 522,
++          "sha256": "1cc0715bfac979a8d9e7fec6f55fe59c10d350aa0fef69c3272853c141ff6e40"
++        },
++        {
++          "symbol": "sched_get_rd",
++          "first_line": 524,
++          "last_line": 527,
++          "sha256": "2a4188c1eca5cb25047681fb274e75b51ecda67a1f14c8625da8ec2d1c34e8b3"
++        },
++        {
++          "symbol": "sched_put_rd",
++          "first_line": 529,
++          "last_line": 535,
++          "sha256": "8aa9e3e8fa2a4eb056810b87a41c812fa8f5cf28109c98c9dc5b6faf7060572b"
++        },
++        {
++          "symbol": "init_rootdomain",
++          "first_line": 537,
++          "last_line": 575,
++          "sha256": "36e101966f85bc0194272deed104e205d6eea4eec0087e3c2f9619e937b7d5ec"
++        },
++        {
++          "symbol": "init_defrootdomain",
++          "first_line": 583,
++          "last_line": 588,
++          "sha256": "205911657b338df8cea23d96db76648d9a73e24ba4481ecced1d04eef9b2ee87"
++        },
++        {
++          "symbol": "free_pd",
++          "first_line": 457,
++          "last_line": 457,
++          "sha256": "0140baa4c38d21545bf9a1256b6caf0a20a2f79a645e63e408f099edf1967723"
++        },
++        {
++          "symbol": "def_root_domain",
++          "first_line": 581,
++          "last_line": 581,
++          "sha256": "7a7e519a915d865972b0b219fe2357d906bfc30b11b3a217b61bffcde4495937"
++        }
++      ]
++    },
++    {
++      "path": "kernel/sched/deadline.c",
++      "git_blob": "0663c00c41c04213fda2ebaf16a0bdf34e0849a8",
++      "sha256": "4b65a160f2a71c461780211e6b38c0a16b077bfe4ccc1632503ae85b193a3a47",
++      "functions": [
++        {
++          "symbol": "init_dl_bw",
++          "first_line": 509,
++          "last_line": 517,
++          "sha256": "ad86dcc7e23cc40d57da811e2ad300cf963639cf01d4da1c0b9feb4135f1cbdd"
++        }
++      ]
++    },
++    {
++      "path": "kernel/sched/cpudeadline.c",
++      "git_blob": "0a2b7e30fd10c1b99e6ac1ce9533eaeaf44404de",
++      "sha256": "8fbf25a784bd0aafc7a7f8b5ce39dbb94768ff60232b17f4eccce6961e499edf",
++      "functions": []
++    },
++    {
++      "path": "kernel/sched/cpupri.c",
++      "git_blob": "8f2237e8b484fbcbec297af8596ffc2788e1c6ef",
++      "sha256": "d6d4e35c48cb22a9605db489809b0afa9360bcbf2c3d82e39f7278215b5e8f68",
++      "functions": []
+     }
+   ],
+   "outputs": [
+@@ -233,7 +344,7 @@
+     },
+     {
+       "path": "kernel/sched/sched_ratio.c",
+-      "sha256": "b7ae4e510d479ca53b73b394ec4f2fd776523ee962632f70bdc45c0e1abb1bbb"
++      "sha256": "40aa70ef76fbfaf22f0dbb5a3101c1fa9e73687a355a10d50d5f1f426f7f8049"
+     },
+     {
+       "path": "kernel/sched/rq_debug.c",
+@@ -246,6 +357,14 @@
+     {
+       "path": "kernel/sched/debug_output.h",
+       "sha256": "a36ed1007364450e5d27269df8a206f20e26d665eabbebb6715ca3f3cb588e0f"
++    },
++    {
++      "path": "kernel/sched/rq_root.c",
++      "sha256": "9fc6b45f49386f5154c3fe0abb46f08954f139de60675f8e165be7ba7158dc54"
++    },
++    {
++      "path": "kernel/sched/rq_root.h",
++      "sha256": "c745519d0f968a7021a772997d0aefb484a0775f0f0fa1361deee586c620d44c"
+     }
+   ],
+   "adaptations": [
+@@ -261,6 +380,7 @@
+     "Original sched_fork class and placement decisions require the native admit/select/place operations declared in fork_backend.h.",
+     "Disabled SCHED_CACHE, UCLAMP_TASK and SCHED_MM_CID branches remain guarded by their original configuration conditions.",
+     "The original scheduler bandwidth scaling and RT/deadline output bodies are shared. The regular debug unit retains the original group path and time formatting helpers. The native archive also builds unmodified lib/plist.c.",
++    "Both profiles share the original root-domain lifecycle and runqueue membership operations. The native archive also builds unmodified CPU priority and deadline management. The original realtime bandwidth defaults and deadline bandwidth initialization have one owner in sched_ratio.c.",
+     "This manifest records source provenance only; it does not establish compilation, linking, execution or native admission."
+   ]
+ }
+diff --git a/kernel/sched/rq_root.c b/kernel/sched/rq_root.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..631ca93569867f481c504d2eb4fcdff9fb11a51b
+--- /dev/null
++++ b/kernel/sched/rq_root.c
+@@ -0,0 +1,185 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Root-domain lifecycle from kernel/sched/topology.c and runqueue CPU
++ * membership from kernel/sched/core.c.
++ * Copyright (C) 1991-2002 Linus Torvalds
++ * Copyright (C) 1998-2024 Ingo Molnar, Red Hat
++ */
++#include <linux/init.h>
++#include "sched.h"
++#include "rq_root.h"
++
++#if defined(CONFIG_ENERGY_MODEL) && defined(CONFIG_CPU_FREQ_GOV_SCHEDUTIL)
++void free_pd(struct perf_domain *pd)
++{
++	struct perf_domain *tmp;
++
++	while (pd) {
++		tmp = pd->next;
++		kfree(pd);
++		pd = tmp;
++	}
++}
++#else
++static void free_pd(struct perf_domain *pd) { }
++#endif
++
++void free_rootdomain(struct rcu_head *rcu)
++{
++	struct root_domain *rd = container_of(rcu, struct root_domain, rcu);
++
++	cpupri_cleanup(&rd->cpupri);
++	cpudl_cleanup(&rd->cpudl);
++	free_cpumask_var(rd->dlo_mask);
++	free_cpumask_var(rd->rto_mask);
++	free_cpumask_var(rd->online);
++	free_cpumask_var(rd->span);
++	free_pd(rd->pd);
++	kfree(rd);
++}
++
++void rq_attach_root(struct rq *rq, struct root_domain *rd)
++{
++	struct root_domain *old_rd = NULL;
++	struct rq_flags rf;
++
++	rq_lock_irqsave(rq, &rf);
++
++	if (rq->rd) {
++		old_rd = rq->rd;
++
++		if (cpumask_test_cpu(rq->cpu, old_rd->online))
++			set_rq_offline(rq);
++
++		cpumask_clear_cpu(rq->cpu, old_rd->span);
++
++		/*
++		 * If we don't want to free the old_rd yet then
++		 * set old_rd to NULL to skip the freeing later
++		 * in this function:
++		 */
++		if (!atomic_dec_and_test(&old_rd->refcount))
++			old_rd = NULL;
++	}
++
++	atomic_inc(&rd->refcount);
++	rq->rd = rd;
++
++	cpumask_set_cpu(rq->cpu, rd->span);
++	if (cpumask_test_cpu(rq->cpu, cpu_active_mask))
++		set_rq_online(rq);
++
++	/*
++	 * Because the rq is not a task, dl_add_task_root_domain() did not
++	 * move the fair server bw to the rd if it already started.
++	 * Add it now.
++	 */
++	if (rq->fair_server.dl_server)
++		__dl_server_attach_root(&rq->fair_server, rq);
++
++#ifdef CONFIG_SCHED_CLASS_EXT
++	if (rq->ext_server.dl_server)
++		__dl_server_attach_root(&rq->ext_server, rq);
++#endif
++
++	rq_unlock_irqrestore(rq, &rf);
++
++	if (old_rd)
++		call_rcu(&old_rd->rcu, free_rootdomain);
++}
++
++void sched_get_rd(struct root_domain *rd)
++{
++	atomic_inc(&rd->refcount);
++}
++
++void sched_put_rd(struct root_domain *rd)
++{
++	if (!atomic_dec_and_test(&rd->refcount))
++		return;
++
++	call_rcu(&rd->rcu, free_rootdomain);
++}
++
++int init_rootdomain(struct root_domain *rd)
++{
++	if (!zalloc_cpumask_var(&rd->span, GFP_KERNEL))
++		goto out;
++	if (!zalloc_cpumask_var(&rd->online, GFP_KERNEL))
++		goto free_span;
++	if (!zalloc_cpumask_var(&rd->dlo_mask, GFP_KERNEL))
++		goto free_online;
++	if (!zalloc_cpumask_var(&rd->rto_mask, GFP_KERNEL))
++		goto free_dlo_mask;
++
++#ifdef HAVE_RT_PUSH_IPI
++	rd->rto_cpu = -1;
++	raw_spin_lock_init(&rd->rto_lock);
++	rd->rto_push_work = IRQ_WORK_INIT_HARD(rto_push_irq_work_func);
++#endif
++
++	rd->visit_cookie = 0;
++	init_dl_bw(&rd->dl_bw);
++	if (cpudl_init(&rd->cpudl) != 0)
++		goto free_rto_mask;
++
++	if (cpupri_init(&rd->cpupri) != 0)
++		goto free_cpudl;
++	return 0;
++
++free_cpudl:
++	cpudl_cleanup(&rd->cpudl);
++free_rto_mask:
++	free_cpumask_var(rd->rto_mask);
++free_dlo_mask:
++	free_cpumask_var(rd->dlo_mask);
++free_online:
++	free_cpumask_var(rd->online);
++free_span:
++	free_cpumask_var(rd->span);
++out:
++	return -ENOMEM;
++}
++
++/*
++ * By default the system creates a single root-domain with all CPUs as
++ * members (mimicking the global state we have today).
++ */
++struct root_domain def_root_domain;
++
++void __init init_defrootdomain(void)
++{
++	init_rootdomain(&def_root_domain);
++
++	atomic_set(&def_root_domain.refcount, 1);
++}
++
++void set_rq_online(struct rq *rq)
++{
++	if (!rq->online) {
++		const struct sched_class *class;
++
++		cpumask_set_cpu(rq->cpu, rq->rd->online);
++		rq->online = 1;
++
++		for_each_class(class) {
++			if (class->rq_online)
++				class->rq_online(rq);
++		}
++	}
++}
++
++void set_rq_offline(struct rq *rq)
++{
++	if (rq->online) {
++		const struct sched_class *class;
++
++		update_rq_clock(rq);
++		for_each_class(class) {
++			if (class->rq_offline)
++				class->rq_offline(rq);
++		}
++
++		cpumask_clear_cpu(rq->cpu, rq->rd->online);
++		rq->online = 0;
++	}
++}
+diff --git a/kernel/sched/rq_root.h b/kernel/sched/rq_root.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..a79ffe7fe4122a99e5b3c96f9b5e814ce40f0778
+--- /dev/null
++++ b/kernel/sched/rq_root.h
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _KERNEL_SCHED_RQ_ROOT_H
++#define _KERNEL_SCHED_RQ_ROOT_H
++
++struct rcu_head;
++struct root_domain;
++
++int init_rootdomain(struct root_domain *rd);
++void free_rootdomain(struct rcu_head *rcu);
++
++#if defined(CONFIG_ENERGY_MODEL) && defined(CONFIG_CPU_FREQ_GOV_SCHEDUTIL)
++struct perf_domain;
++
++void free_pd(struct perf_domain *pd);
++#endif
++
++#endif
+diff --git a/kernel/sched/rt.c b/kernel/sched/rt.c
+index 9db8c4a051de65751c95291e394b96d740f1995d..2caa9f2ebcf2f1db4b5135839e3e803ab8736ecb 100644
+--- a/kernel/sched/rt.c
++++ b/kernel/sched/rt.c
+@@ -10,17 +10,6 @@
+ /* More than 4 hours if BW_SHIFT equals 20. */
+ static const u64 max_rt_runtime = MAX_BW;
+ 
+-/*
+- * period over which we measure -rt task CPU usage in us.
+- * default: 1s
+- */
+-int sysctl_sched_rt_period = 1000000;
+-
+-/*
+- * part of the period that we allow rt tasks to run in us.
+- * default: 1s
+- */
+-int sysctl_sched_rt_runtime = 1000000;
+ 
+ #ifdef CONFIG_SYSCTL
+ static int sysctl_sched_rr_timeslice = (MSEC_PER_SEC * RR_TIMESLICE) / HZ;
+diff --git a/kernel/sched/sched_ratio.c b/kernel/sched/sched_ratio.c
+index ff6c137eb4928c7e2b7e4abf8c431726acb50a26..25b92b924d6b8c41315eb9aca6ba7a8cccef6887 100644
+--- a/kernel/sched/sched_ratio.c
++++ b/kernel/sched/sched_ratio.c
+@@ -1,5 +1,5 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+-/* Bandwidth scaling from kernel/sched/core.c.
++/* Bandwidth scaling and defaults from kernel/sched/{core,rt,deadline}.c.
+  * Copyright (C) 1991-2002 Linus Torvalds
+  * Copyright (C) 1998-2024 Ingo Molnar, Red Hat
+  */
+@@ -21,3 +21,25 @@ u64 to_ratio(u64 period, u64 runtime)
+ 
+ 	return div64_u64(runtime << BW_SHIFT, period);
+ }
++
++/*
++ * period over which we measure -rt task CPU usage in us.
++ * default: 1s
++ */
++int sysctl_sched_rt_period = 1000000;
++
++/*
++ * part of the period that we allow rt tasks to run in us.
++ * default: 1s
++ */
++int sysctl_sched_rt_runtime = 1000000;
++
++void init_dl_bw(struct dl_bw *dl_b)
++{
++	raw_spin_lock_init(&dl_b->lock);
++	if (global_rt_runtime() == RUNTIME_INF)
++		dl_b->bw = -1;
++	else
++		dl_b->bw = to_ratio(global_rt_period(), global_rt_runtime());
++	dl_b->total_bw = 0;
++}
+diff --git a/kernel/sched/topology.c b/kernel/sched/topology.c
+index 7514932285a5998b42c141cf223dd5b1771f76d5..1d2e67e57e0605fe482421edbd10cf5377c2f609 100644
+--- a/kernel/sched/topology.c
++++ b/kernel/sched/topology.c
+@@ -7,6 +7,7 @@
+ #include <linux/sched/clock.h>
+ #include <linux/bsearch.h>
+ #include "sched.h"
++#include "rq_root.h"
+ 
+ DEFINE_MUTEX(sched_domains_mutex);
+ void sched_domains_mutex_lock(void)
+@@ -319,17 +320,6 @@ static int __init sched_energy_aware_sysctl_init(void)
+ late_initcall(sched_energy_aware_sysctl_init);
+ #endif /* CONFIG_PROC_SYSCTL */
+ 
+-static void free_pd(struct perf_domain *pd)
+-{
+-	struct perf_domain *tmp;
+-
+-	while (pd) {
+-		tmp = pd->next;
+-		kfree(pd);
+-		pd = tmp;
+-	}
+-}
+-
+ static struct perf_domain *find_pd(struct perf_domain *pd, int cpu)
+ {
+ 	while (pd) {
+@@ -453,139 +443,7 @@ free:
+ 
+ 	return false;
+ }
+-#else /* !(CONFIG_ENERGY_MODEL && CONFIG_CPU_FREQ_GOV_SCHEDUTIL): */
+-static void free_pd(struct perf_domain *pd) { }
+-#endif /* !(CONFIG_ENERGY_MODEL && CONFIG_CPU_FREQ_GOV_SCHEDUTIL) */
+-
+-static void free_rootdomain(struct rcu_head *rcu)
+-{
+-	struct root_domain *rd = container_of(rcu, struct root_domain, rcu);
+-
+-	cpupri_cleanup(&rd->cpupri);
+-	cpudl_cleanup(&rd->cpudl);
+-	free_cpumask_var(rd->dlo_mask);
+-	free_cpumask_var(rd->rto_mask);
+-	free_cpumask_var(rd->online);
+-	free_cpumask_var(rd->span);
+-	free_pd(rd->pd);
+-	kfree(rd);
+-}
+-
+-void rq_attach_root(struct rq *rq, struct root_domain *rd)
+-{
+-	struct root_domain *old_rd = NULL;
+-	struct rq_flags rf;
+-
+-	rq_lock_irqsave(rq, &rf);
+-
+-	if (rq->rd) {
+-		old_rd = rq->rd;
+-
+-		if (cpumask_test_cpu(rq->cpu, old_rd->online))
+-			set_rq_offline(rq);
+-
+-		cpumask_clear_cpu(rq->cpu, old_rd->span);
+-
+-		/*
+-		 * If we don't want to free the old_rd yet then
+-		 * set old_rd to NULL to skip the freeing later
+-		 * in this function:
+-		 */
+-		if (!atomic_dec_and_test(&old_rd->refcount))
+-			old_rd = NULL;
+-	}
+-
+-	atomic_inc(&rd->refcount);
+-	rq->rd = rd;
+-
+-	cpumask_set_cpu(rq->cpu, rd->span);
+-	if (cpumask_test_cpu(rq->cpu, cpu_active_mask))
+-		set_rq_online(rq);
+-
+-	/*
+-	 * Because the rq is not a task, dl_add_task_root_domain() did not
+-	 * move the fair server bw to the rd if it already started.
+-	 * Add it now.
+-	 */
+-	if (rq->fair_server.dl_server)
+-		__dl_server_attach_root(&rq->fair_server, rq);
+-
+-#ifdef CONFIG_SCHED_CLASS_EXT
+-	if (rq->ext_server.dl_server)
+-		__dl_server_attach_root(&rq->ext_server, rq);
+-#endif
+-
+-	rq_unlock_irqrestore(rq, &rf);
+-
+-	if (old_rd)
+-		call_rcu(&old_rd->rcu, free_rootdomain);
+-}
+-
+-void sched_get_rd(struct root_domain *rd)
+-{
+-	atomic_inc(&rd->refcount);
+-}
+-
+-void sched_put_rd(struct root_domain *rd)
+-{
+-	if (!atomic_dec_and_test(&rd->refcount))
+-		return;
+-
+-	call_rcu(&rd->rcu, free_rootdomain);
+-}
+-
+-static int init_rootdomain(struct root_domain *rd)
+-{
+-	if (!zalloc_cpumask_var(&rd->span, GFP_KERNEL))
+-		goto out;
+-	if (!zalloc_cpumask_var(&rd->online, GFP_KERNEL))
+-		goto free_span;
+-	if (!zalloc_cpumask_var(&rd->dlo_mask, GFP_KERNEL))
+-		goto free_online;
+-	if (!zalloc_cpumask_var(&rd->rto_mask, GFP_KERNEL))
+-		goto free_dlo_mask;
+-
+-#ifdef HAVE_RT_PUSH_IPI
+-	rd->rto_cpu = -1;
+-	raw_spin_lock_init(&rd->rto_lock);
+-	rd->rto_push_work = IRQ_WORK_INIT_HARD(rto_push_irq_work_func);
+-#endif
+-
+-	rd->visit_cookie = 0;
+-	init_dl_bw(&rd->dl_bw);
+-	if (cpudl_init(&rd->cpudl) != 0)
+-		goto free_rto_mask;
+-
+-	if (cpupri_init(&rd->cpupri) != 0)
+-		goto free_cpudl;
+-	return 0;
+-
+-free_cpudl:
+-	cpudl_cleanup(&rd->cpudl);
+-free_rto_mask:
+-	free_cpumask_var(rd->rto_mask);
+-free_dlo_mask:
+-	free_cpumask_var(rd->dlo_mask);
+-free_online:
+-	free_cpumask_var(rd->online);
+-free_span:
+-	free_cpumask_var(rd->span);
+-out:
+-	return -ENOMEM;
+-}
+-
+-/*
+- * By default the system creates a single root-domain with all CPUs as
+- * members (mimicking the global state we have today).
+- */
+-struct root_domain def_root_domain;
+-
+-void __init init_defrootdomain(void)
+-{
+-	init_rootdomain(&def_root_domain);
+-
+-	atomic_set(&def_root_domain.refcount, 1);
+-}
++#endif /* CONFIG_ENERGY_MODEL && CONFIG_CPU_FREQ_GOV_SCHEDUTIL */
+ 
+ static struct root_domain *alloc_rootdomain(void)
+ {

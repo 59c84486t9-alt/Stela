@@ -1,0 +1,403 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 23:10:47 -0500
+Subject: [PATCH] refactor(ptrace): separate access checks from tracing
+ operations
+
+---
+ kernel/Makefile             |   2 +-
+ kernel/ptrace.c             |  99 +-----------------------------
+ kernel/ptrace_access.c      | 116 ++++++++++++++++++++++++++++++++++++
+ kernel/ptrace_access.h      |  10 ++++
+ security/Makefile           |   2 +-
+ security/commoncap.c        |  39 ------------
+ security/commoncap_ptrace.c |  47 +++++++++++++++
+ 7 files changed, 177 insertions(+), 138 deletions(-)
+ create mode 100644 kernel/ptrace_access.c
+ create mode 100644 kernel/ptrace_access.h
+ create mode 100644 security/commoncap_ptrace.c
+
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 785f497e51553549c61884ae86c2388d2555621d..55e716bf7c90133a0883a2a7d713757d7a1b59af 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -5,7 +5,7 @@
+ 
+ obj-y     = fork.o fork_caches.o exec_domain.o exec_state.o panic.o \
+ 	    cpu.o cpu_topology.o exit.o task_rcu.o rcuwait_wake.o softirq.o resource.o \
+-	    sysctl.o capability.o ptrace.o user.o \
++	    sysctl.o capability.o ptrace.o ptrace_access.o user.o \
+ 	    signal.o signal_state.o restart_no_syscall.o sys.o umh.o workqueue.o pid.o task_work.o \
+ 	    extable.o params.o \
+ 	    kthread.o sys_ni.o nsproxy.o nstree.o nscommon.o \
+diff --git a/kernel/ptrace.c b/kernel/ptrace.c
+index d041645d9d17daabfb22c09998af3fb91acb4689..de1858e09275578eea0d274aae4afd41fbb0b3ec 100644
+--- a/kernel/ptrace.c
++++ b/kernel/ptrace.c
+@@ -37,6 +37,8 @@
+ 
+ #include <asm/syscall.h>	/* for syscall_get_* */
+ 
++#include "ptrace_access.h"
++
+ /**
+  * ptracer_access_allowed - may current peek/poke @tsk's address space?
+  * @tsk: tracee
+@@ -283,103 +285,6 @@ static int ptrace_check_attach(struct task_struct *child, bool ignore_state)
+ 	return ret;
+ }
+ 
+-static bool ptrace_has_cap(struct user_namespace *ns, unsigned int mode)
+-{
+-	if (mode & PTRACE_MODE_NOAUDIT)
+-		return ns_capable_noaudit(ns, CAP_SYS_PTRACE);
+-	return ns_capable(ns, CAP_SYS_PTRACE);
+-}
+-
+-static bool task_still_dumpable(struct task_struct *task, unsigned int mode)
+-{
+-	const struct task_exec_state *exec_state;
+-
+-	guard(rcu)();
+-	exec_state = task_exec_state_rcu(task);
+-	if (READ_ONCE(exec_state->dumpable) == TASK_DUMPABLE_OWNER)
+-		return true;
+-	return ptrace_has_cap(exec_state->user_ns, mode);
+-}
+-
+-/* Returns 0 on success, -errno on denial. */
+-static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
+-{
+-	const struct cred *cred = current_cred(), *tcred;
+-	kuid_t caller_uid;
+-	kgid_t caller_gid;
+-
+-	if (!(mode & PTRACE_MODE_FSCREDS) == !(mode & PTRACE_MODE_REALCREDS)) {
+-		WARN(1, "denying ptrace access check without PTRACE_MODE_*CREDS\n");
+-		return -EPERM;
+-	}
+-
+-	/* May we inspect the given task?
+-	 * This check is used both for attaching with ptrace
+-	 * and for allowing access to sensitive information in /proc.
+-	 *
+-	 * ptrace_attach denies several cases that /proc allows
+-	 * because setting up the necessary parent/child relationship
+-	 * or halting the specified task is impossible.
+-	 */
+-
+-	/* Don't let security modules deny introspection */
+-	if (same_thread_group(task, current))
+-		return 0;
+-	rcu_read_lock();
+-	if (mode & PTRACE_MODE_FSCREDS) {
+-		caller_uid = cred->fsuid;
+-		caller_gid = cred->fsgid;
+-	} else {
+-		/*
+-		 * Using the euid would make more sense here, but something
+-		 * in userland might rely on the old behavior, and this
+-		 * shouldn't be a security problem since
+-		 * PTRACE_MODE_REALCREDS implies that the caller explicitly
+-		 * used a syscall that requests access to another process
+-		 * (and not a filesystem syscall to procfs).
+-		 */
+-		caller_uid = cred->uid;
+-		caller_gid = cred->gid;
+-	}
+-	tcred = __task_cred(task);
+-	if (uid_eq(caller_uid, tcred->euid) &&
+-	    uid_eq(caller_uid, tcred->suid) &&
+-	    uid_eq(caller_uid, tcred->uid)  &&
+-	    gid_eq(caller_gid, tcred->egid) &&
+-	    gid_eq(caller_gid, tcred->sgid) &&
+-	    gid_eq(caller_gid, tcred->gid))
+-		goto ok;
+-	if (ptrace_has_cap(tcred->user_ns, mode))
+-		goto ok;
+-	rcu_read_unlock();
+-	return -EPERM;
+-ok:
+-	rcu_read_unlock();
+-	/*
+-	 * If a task drops privileges and becomes nondumpable (through a syscall
+-	 * like setresuid()) while we are trying to access it, we must ensure
+-	 * that the dumpability is read after the credentials; otherwise,
+-	 * we may be able to attach to a task that we shouldn't be able to
+-	 * attach to (as if the task had dropped privileges without becoming
+-	 * nondumpable).
+-	 * Pairs with a write barrier in commit_creds().
+-	 */
+-	smp_rmb();
+-	if (!task_still_dumpable(task, mode))
+-		return -EPERM;
+-
+-	return security_ptrace_access_check(task, mode);
+-}
+-
+-bool ptrace_may_access(struct task_struct *task, unsigned int mode)
+-{
+-	int err;
+-	task_lock(task);
+-	err = __ptrace_may_access(task, mode);
+-	task_unlock(task);
+-	return !err;
+-}
+-
+ static int check_ptrace_options(unsigned long data)
+ {
+ 	if (data & ~(unsigned long)PTRACE_O_MASK)
+diff --git a/kernel/ptrace_access.c b/kernel/ptrace_access.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..beed03764dd1118c7fbe58f608ffab7f75a0150e
+--- /dev/null
++++ b/kernel/ptrace_access.c
+@@ -0,0 +1,116 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * linux/kernel/ptrace.c
++ *
++ * (C) Copyright 1999 Linus Torvalds
++ *
++ * Common interfaces for "ptrace()" which we do not want
++ * to continually duplicate across every architecture.
++ */
++
++#include <linux/capability.h>
++#include <linux/cred.h>
++#include <linux/ptrace.h>
++#include <linux/sched/coredump.h>
++#include <linux/sched/exec_state.h>
++#include <linux/sched/task.h>
++#include <linux/security.h>
++
++#include "ptrace_access.h"
++
++static bool ptrace_has_cap(struct user_namespace *ns, unsigned int mode)
++{
++	if (mode & PTRACE_MODE_NOAUDIT)
++		return ns_capable_noaudit(ns, CAP_SYS_PTRACE);
++	return ns_capable(ns, CAP_SYS_PTRACE);
++}
++
++static bool task_still_dumpable(struct task_struct *task, unsigned int mode)
++{
++	const struct task_exec_state *exec_state;
++
++	guard(rcu)();
++	exec_state = task_exec_state_rcu(task);
++	if (READ_ONCE(exec_state->dumpable) == TASK_DUMPABLE_OWNER)
++		return true;
++	return ptrace_has_cap(exec_state->user_ns, mode);
++}
++
++/* Returns 0 on success, -errno on denial. */
++int __ptrace_may_access(struct task_struct *task, unsigned int mode)
++{
++	const struct cred *cred = current_cred(), *tcred;
++	kuid_t caller_uid;
++	kgid_t caller_gid;
++
++	if (!(mode & PTRACE_MODE_FSCREDS) == !(mode & PTRACE_MODE_REALCREDS)) {
++		WARN(1, "denying ptrace access check without PTRACE_MODE_*CREDS\n");
++		return -EPERM;
++	}
++
++	/* May we inspect the given task?
++	 * This check is used both for attaching with ptrace
++	 * and for allowing access to sensitive information in /proc.
++	 *
++	 * ptrace_attach denies several cases that /proc allows
++	 * because setting up the necessary parent/child relationship
++	 * or halting the specified task is impossible.
++	 */
++
++	/* Don't let security modules deny introspection */
++	if (same_thread_group(task, current))
++		return 0;
++	rcu_read_lock();
++	if (mode & PTRACE_MODE_FSCREDS) {
++		caller_uid = cred->fsuid;
++		caller_gid = cred->fsgid;
++	} else {
++		/*
++		 * Using the euid would make more sense here, but something
++		 * in userland might rely on the old behavior, and this
++		 * shouldn't be a security problem since
++		 * PTRACE_MODE_REALCREDS implies that the caller explicitly
++		 * used a syscall that requests access to another process
++		 * (and not a filesystem syscall to procfs).
++		 */
++		caller_uid = cred->uid;
++		caller_gid = cred->gid;
++	}
++	tcred = __task_cred(task);
++	if (uid_eq(caller_uid, tcred->euid) &&
++	    uid_eq(caller_uid, tcred->suid) &&
++	    uid_eq(caller_uid, tcred->uid)  &&
++	    gid_eq(caller_gid, tcred->egid) &&
++	    gid_eq(caller_gid, tcred->sgid) &&
++	    gid_eq(caller_gid, tcred->gid))
++		goto ok;
++	if (ptrace_has_cap(tcred->user_ns, mode))
++		goto ok;
++	rcu_read_unlock();
++	return -EPERM;
++ok:
++	rcu_read_unlock();
++	/*
++	 * If a task drops privileges and becomes nondumpable (through a syscall
++	 * like setresuid()) while we are trying to access it, we must ensure
++	 * that the dumpability is read after the credentials; otherwise,
++	 * we may be able to attach to a task that we shouldn't be able to
++	 * attach to (as if the task had dropped privileges without becoming
++	 * nondumpable).
++	 * Pairs with a write barrier in commit_creds().
++	 */
++	smp_rmb();
++	if (!task_still_dumpable(task, mode))
++		return -EPERM;
++
++	return security_ptrace_access_check(task, mode);
++}
++
++bool ptrace_may_access(struct task_struct *task, unsigned int mode)
++{
++	int err;
++	task_lock(task);
++	err = __ptrace_may_access(task, mode);
++	task_unlock(task);
++	return !err;
++}
+diff --git a/kernel/ptrace_access.h b/kernel/ptrace_access.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..37fe72539836fe372587ef0ea97895023d886f8e
+--- /dev/null
++++ b/kernel/ptrace_access.h
+@@ -0,0 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _KERNEL_PTRACE_ACCESS_H
++#define _KERNEL_PTRACE_ACCESS_H
++
++struct task_struct;
++
++/* Caller holds task_lock(task). */
++int __ptrace_may_access(struct task_struct *task, unsigned int mode);
++
++#endif
+diff --git a/security/Makefile b/security/Makefile
+index 4601230ba442a1bcedc3f999b74a7796ac72894d..a61df6c28bbec2c840a0c66c05ccb4f3a491585e 100644
+--- a/security/Makefile
++++ b/security/Makefile
+@@ -6,7 +6,7 @@
+ obj-$(CONFIG_KEYS)			+= keys/
+ 
+ # always enable default capabilities
+-obj-y					+= commoncap.o
++obj-y					+= commoncap.o commoncap_ptrace.o
+ obj-$(CONFIG_SECURITY) 			+= lsm_syscalls.o
+ obj-$(CONFIG_MMU)			+= min_addr.o
+ 
+diff --git a/security/commoncap.c b/security/commoncap.c
+index 3399535808fec77f905573a75093b901f359d1c2..596831b7aff1986b068246c65b06bdf7bc53cd60 100644
+--- a/security/commoncap.c
++++ b/security/commoncap.c
+@@ -146,45 +146,6 @@ int cap_settime(const struct timespec64 *ts, const struct timezone *tz)
+ 	return 0;
+ }
+ 
+-/**
+- * cap_ptrace_access_check - Determine whether the current process may access
+- *			   another
+- * @child: The process to be accessed
+- * @mode: The mode of attachment.
+- *
+- * If we are in the same or an ancestor user_ns and have all the target
+- * task's capabilities, then ptrace access is allowed.
+- * If we have the ptrace capability to the target user_ns, then ptrace
+- * access is allowed.
+- * Else denied.
+- *
+- * Determine whether a process may access another, returning 0 if permission
+- * granted, -ve if denied.
+- */
+-int cap_ptrace_access_check(struct task_struct *child, unsigned int mode)
+-{
+-	int ret = 0;
+-	const struct cred *cred, *child_cred;
+-	const kernel_cap_t *caller_caps;
+-
+-	rcu_read_lock();
+-	cred = current_cred();
+-	child_cred = __task_cred(child);
+-	if (mode & PTRACE_MODE_FSCREDS)
+-		caller_caps = &cred->cap_effective;
+-	else
+-		caller_caps = &cred->cap_permitted;
+-	if (cred->user_ns == child_cred->user_ns &&
+-	    cap_issubset(child_cred->cap_permitted, *caller_caps))
+-		goto out;
+-	if (ns_capable(child_cred->user_ns, CAP_SYS_PTRACE))
+-		goto out;
+-	ret = -EPERM;
+-out:
+-	rcu_read_unlock();
+-	return ret;
+-}
+-
+ /**
+  * cap_ptrace_traceme - Determine whether another process may trace the current
+  * @parent: The task proposed to be the tracer
+diff --git a/security/commoncap_ptrace.c b/security/commoncap_ptrace.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..ae6c5ec1fb381a37e5d9d65d4588f1ca8943cce0
+--- /dev/null
++++ b/security/commoncap_ptrace.c
+@@ -0,0 +1,47 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/* Common capabilities, needed by capability.o.
++ */
++
++#include <linux/capability.h>
++#include <linux/cred.h>
++#include <linux/ptrace.h>
++#include <linux/security.h>
++
++/**
++ * cap_ptrace_access_check - Determine whether the current process may access
++ *			   another
++ * @child: The process to be accessed
++ * @mode: The mode of attachment.
++ *
++ * If we are in the same or an ancestor user_ns and have all the target
++ * task's capabilities, then ptrace access is allowed.
++ * If we have the ptrace capability to the target user_ns, then ptrace
++ * access is allowed.
++ * Else denied.
++ *
++ * Determine whether a process may access another, returning 0 if permission
++ * granted, -ve if denied.
++ */
++int cap_ptrace_access_check(struct task_struct *child, unsigned int mode)
++{
++	int ret = 0;
++	const struct cred *cred, *child_cred;
++	const kernel_cap_t *caller_caps;
++
++	rcu_read_lock();
++	cred = current_cred();
++	child_cred = __task_cred(child);
++	if (mode & PTRACE_MODE_FSCREDS)
++		caller_caps = &cred->cap_effective;
++	else
++		caller_caps = &cred->cap_permitted;
++	if (cred->user_ns == child_cred->user_ns &&
++	    cap_issubset(child_cred->cap_permitted, *caller_caps))
++		goto out;
++	if (ns_capable(child_cred->user_ns, CAP_SYS_PTRACE))
++		goto out;
++	ret = -EPERM;
++out:
++	rcu_read_unlock();
++	return ret;
++}

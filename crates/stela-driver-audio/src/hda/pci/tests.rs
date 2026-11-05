@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 use super::*;
+use crate::bus::i2c::Timer as NominalTimer;
 use crate::bus::pci::Address;
 use crate::bus::pci::regs;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
 
 pub(in crate::hda) struct Clock(Rc<Cell<u64>>);
-impl Timer for Clock {
+impl crate::bus::i2c::Timer for Clock {
     fn now_us(&self) -> u64 {
         self.0.get()
     }
@@ -41,47 +42,50 @@ impl Model {
     }
 }
 impl ConfigSpace for Model {
-    fn read32(&self, offset: u16) -> u32 {
-        let value = self.words[usize::from(offset / 4)];
-        if self.failed_interrupt_read == Some(offset)
-            && self
-                .writes
-                .iter()
-                .any(|(off, _, _, _)| *off == regs::COMMAND)
-        {
-            return u32::MAX;
-        }
-        if offset == SCH_HDA_DEVC
-            && self.failed_snoop_read
-            && self
-                .writes
-                .iter()
-                .any(|(off, _, _, _)| *off == SCH_HDA_DEVC)
-        {
-            return u32::MAX;
-        }
-        if offset == regs::COMMAND
-            && self.fail_after_enable
-            && self.writes.iter().any(|(off, _, value, _)| {
-                *off == regs::COMMAND && *value & u32::from(regs::COMMAND_MASTER) != 0
-            })
-        {
-            return u32::MAX;
-        }
-        if offset == 0x54 && (self.reject_power || self.now.get() < self.ready_at) {
-            value & !3 | u32::from(self.previous_state)
-        } else {
-            value
-        }
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        let value = {
+            let value = self.words[usize::from(offset / 4)];
+            if self.failed_interrupt_read == Some(offset)
+                && self
+                    .writes
+                    .iter()
+                    .any(|(off, _, _, _)| *off == regs::COMMAND)
+            {
+                return Ok(u32::MAX);
+            }
+            if offset == SCH_HDA_DEVC
+                && self.failed_snoop_read
+                && self
+                    .writes
+                    .iter()
+                    .any(|(off, _, _, _)| *off == SCH_HDA_DEVC)
+            {
+                return Ok(u32::MAX);
+            }
+            if offset == regs::COMMAND
+                && self.fail_after_enable
+                && self.writes.iter().any(|(off, _, value, _)| {
+                    *off == regs::COMMAND && *value & u32::from(regs::COMMAND_MASTER) != 0
+                })
+            {
+                return Ok(u32::MAX);
+            }
+            if offset == 0x54 && (self.reject_power || self.now.get() < self.ready_at) {
+                value & !3 | u32::from(self.previous_state)
+            } else {
+                value
+            }
+        };
+        Ok(value)
     }
-    fn write32(&mut self, offset: u16, value: u32) {
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         if offset == CGCTL {
             if let Some(gate) = &self.reset_gate {
                 gate.set(value & CGCTL_MISCBDCGE != 0);
             }
             self.writes.push((offset, 4, value, self.now.get()));
             self.words[usize::from(offset / 4)] = value;
-            return;
+            return Ok(());
         }
         // Other dword writes attachment needs are saved BAR restores.
         assert!((regs::BASE_ADDRESS_0..regs::BASE_ADDRESS_0 + 24).contains(&offset));
@@ -92,8 +96,10 @@ impl ConfigSpace for Model {
         );
         self.writes.push((offset, 4, value, self.now.get()));
         self.words[usize::from(offset / 4)] = value;
+
+        Ok(())
     }
-    fn write8(&mut self, offset: u16, value: u8) {
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
         assert!(matches!(
             offset,
             TCSEL | ATI_SNOOP_CONTROL | NVIDIA_TRANSREG | NVIDIA_ISTRM_COH | NVIDIA_OSTRM_COH
@@ -105,13 +111,15 @@ impl ConfigSpace for Model {
         self.writes
             .push((offset, 1, u32::from(value), self.now.get()));
         if self.reject_vendor_control {
-            return;
+            return Ok(());
         }
         let shift = (offset & 3) * 8;
         let index = usize::from(offset / 4);
         self.words[index] = self.words[index] & !(0xff << shift) | u32::from(value) << shift;
+
+        Ok(())
     }
-    fn write16(&mut self, offset: u16, value: u16) {
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
         assert!(matches!(
             offset,
             regs::COMMAND | 0x54 | 0x62 | 0x72 | 0xb2 | SCH_HDA_DEVC
@@ -124,12 +132,12 @@ impl ConfigSpace for Model {
                 0
             );
             if self.reject_snoop {
-                return;
+                return Ok(());
             }
         }
         if offset == regs::COMMAND {
             if self.reject_command {
-                return;
+                return Ok(());
             }
             if value & regs::COMMAND_MASTER != 0 {
                 assert!(self.now.get() >= self.ready_at);
@@ -152,9 +160,19 @@ impl ConfigSpace for Model {
                 offset,
                 (value & !PM_PME_STATUS) | (old & !value & PM_PME_STATUS),
             );
-            return;
+            return Ok(());
         }
         self.set16(offset, value);
+
+        Ok(())
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
     }
 }
 
@@ -303,9 +321,31 @@ impl Registers for MappedModel {
 }
 
 mod legacy;
+mod minimum;
 
 mod mapped;
 
 mod pch;
 
 mod amd;
+
+mod owned_models;
+
+mod access_failures;
+
+// SAFETY: this private synchronous peripheral model measures virtual microseconds;
+// no physical timer, CPU or native hardware permission follows from it.
+unsafe impl crate::bus::pci::power::Timer for Clock {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        Ok(())
+    }
+    fn wait_us(&self, us: u64) -> Result<(), crate::bus::pci::power::Error> {
+        self.0.set(
+            self.0
+                .get()
+                .checked_add(us)
+                .expect("bounded model minimum wait"),
+        );
+        Ok(())
+    }
+}

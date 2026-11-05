@@ -87,6 +87,10 @@ pub struct Session<B: DiagnosticIo> {
     pending: Vec<Received>,
 }
 impl<B: DiagnosticIo> Session<B> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn start(mut hci: Hci<B>, dma: &mut dyn DmaAllocator) -> Result<Self, Error> {
         let pair = plan(&hci)?;
         hci.io
@@ -120,6 +124,10 @@ impl<B: DiagnosticIo> Session<B> {
     pub fn retirement(&self) -> Option<&Retirement> {
         self.hci.io.diagnostic_retirement()
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn set_enabled(&mut self, enabled: bool) -> Result<(), Error> {
         self.hci.open()?;
         self.hci
@@ -132,15 +140,27 @@ impl<B: DiagnosticIo> Session<B> {
         self.last_delivery = Some(enabled);
         Ok(())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn submit_command(&mut self, packet: &[u8]) -> Result<(), Error> {
         self.hci.submit_command(packet).map_err(Into::into)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn submit_acl(&mut self, packet: &[u8]) -> Result<(), Error> {
         self.hci.submit_acl(packet).map_err(Into::into)
     }
     /// At most one completed native diagnostic USB record, keeping its exact
     /// boundary including a zero-length completion. Ordinary HCI data
     /// observed before a later diagnostic failure remains explicitly drainable.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn poll(&mut self) -> Result<Vec<Received>, Error> {
         self.hci.open()?;
         for packet in self.hci.poll()? {
@@ -170,10 +190,18 @@ impl<B: DiagnosticIo> Session<B> {
     pub fn take_pending_observations(&mut self) -> Vec<Received> {
         core::mem::take(&mut self.pending)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn close(&mut self) -> Result<(), Error> {
         self.hci.close().map_err(Into::into)
     }
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub(in crate::usb::bluetooth) fn plan<B: Io>(hci: &Hci<B>) -> Result<Pair, Error> {
     hci.open()?;
     let Some(Ok(InitializationReport::Broadcom(report))) = hci.initialization() else {
@@ -186,6 +214,10 @@ pub(in crate::usb::bluetooth) fn plan<B: Io>(hci: &Hci<B>) -> Result<Pair, Error
     }
     plan_binding(hci.binding())
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 fn plan_binding(binding: &Binding) -> Result<Pair, Error> {
     if !super::is_candidate(binding.device()) || binding.interface() != 0 {
         return Err(Error::Unsupported("source Broadcom PatchRAM interface0"));

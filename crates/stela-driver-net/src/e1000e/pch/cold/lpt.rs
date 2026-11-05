@@ -7,11 +7,8 @@
 //! admitted by similarity of PHY IDs. Initial MAC/PHY PCIe mode is required;
 //! SMBus switching, LANPHYPC recovery and managed firmware remain separate.
 use super::{
-    Bus, Controller, Delay, Error, Fault, Identity, Kind, Phy, Profile, Register, Registers, nvm,
-    spt,
+    Controller, Delay, Error, Fault, Identity, Kind, Phy, Profile, Register, Registers, nvm, spt,
 };
-use alloc::rc::Rc;
-use core::cell::RefCell;
 
 const CTRL_EXT: u32 = 0x18;
 const FORCE_SMBUS: u32 = 1 << 11;
@@ -133,7 +130,7 @@ impl<R: LptRegisters, D: Delay + Clone> Controller<R, D> {
         if !matches!(device, 0x153a | 0x153b | 0x15a0 | 0x15a1) {
             return Err(Error::UnsupportedDevice(device));
         }
-        let bus = Bus(Rc::new(RefCell::new(io)));
+        let (bus, delay) = super::qualified_bus(io, delay)?;
         let limits = (|| {
             let snoop = bus.0.borrow_mut().read_config16(LTR_SNOOP)?;
             let nosnoop = bus.0.borrow_mut().read_config16(LTR_NOSNOOP)?;
@@ -144,7 +141,7 @@ impl<R: LptRegisters, D: Delay + Clone> Controller<R, D> {
             Err(error) => {
                 // Keep the function/config/mapping owner on observed
                 // access failure or invalid platform limits, before mutation.
-                core::mem::forget(bus);
+                core::mem::forget((bus, delay));
                 return Err(error);
             }
         };

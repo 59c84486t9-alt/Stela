@@ -227,3 +227,7 @@ fn abandoned_control_and_use_keep_entire_actual_allocation() {
     assert!(abandoned_controls() > before_controls);
     assert!(abandoned_uses() > before_uses);
 }
+
+mod operation;
+
+mod close_only;

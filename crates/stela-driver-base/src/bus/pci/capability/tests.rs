@@ -37,12 +37,35 @@ impl Space {
 }
 
 impl ConfigSpace for Space {
-    fn read32(&self, offset: u16) -> u32 {
-        let at = usize::from(offset);
-        u32::from_le_bytes(self.0[at..at + 4].try_into().unwrap())
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        Ok({
+            let at = usize::from(offset);
+            u32::from_le_bytes(self.0[at..at + 4].try_into().unwrap())
+        })
     }
-    fn write32(&mut self, offset: u16, value: u32) {
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         self.put32(offset, value);
+        Ok(())
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        let shift = (offset & 3) * 8;
+        let word = self.read32(offset & !3)? & !(0xff << shift) | u32::from(value) << shift;
+        self.write32(offset & !3, word)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+    }
+
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
+        let shift = (offset & 2) * 8;
+        let word = self.read32(offset & !3)? & !(0xffff << shift) | u32::from(value) << shift;
+        self.write32(offset & !3, word)
     }
 }
 

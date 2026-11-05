@@ -62,7 +62,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
     }
     fn dp_wait(&self, started: bool) -> Result<(), BlockError> {
         for _ in 0..10 {
-            self.timer.delay(10_000);
+            self.timer.delay(10_000)?;
             if (self.dp_ocp_read(self.dp_status_register())? & (1 << 11) != 0) == started {
                 return Ok(());
             }

@@ -116,6 +116,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// `iwl_mld_get_regdomain` and `regulatory_set_wiphy_regd`.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub(super) fn country_answered(
         &mut self,
         queue: &mut Queue<Q, B>,

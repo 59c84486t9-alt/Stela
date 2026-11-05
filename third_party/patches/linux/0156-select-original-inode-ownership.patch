@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 01:24:01 -0500
+Subject: [PATCH] refactor(vfs): select original inode ownership initialization
+
+---
+ fs/inode.c            | 35 -----------------------------------
+ fs/inode_cache_init.c | 35 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 35 insertions(+), 35 deletions(-)
+
+diff --git a/fs/inode.c b/fs/inode.c
+index 13191c30ce578f6259f8edfe5703506a82f91923..cc2c12736a78f091e182f7a75e7a1b9d6adb4893 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -1037,35 +1037,6 @@ void init_special_inode(struct inode *inode, umode_t mode, dev_t rdev)
+ }
+ EXPORT_SYMBOL(init_special_inode);
+ 
+-/**
+- * inode_init_owner - Init uid,gid,mode for new inode according to posix standards
+- * @idmap: idmap of the mount the inode was created from
+- * @inode: New inode
+- * @dir: Directory inode
+- * @mode: mode of the new inode
+- *
+- * If the inode has been created through an idmapped mount the idmap of
+- * the vfsmount must be passed through @idmap. This function will then take
+- * care to map the inode according to @idmap before checking permissions
+- * and initializing i_uid and i_gid. On non-idmapped mounts or if permission
+- * checking is to be performed on the raw inode simply pass @nop_mnt_idmap.
+- */
+-void inode_init_owner(struct mnt_idmap *idmap, struct inode *inode,
+-		      const struct inode *dir, umode_t mode)
+-{
+-	inode_fsuid_set(inode, idmap);
+-	if (dir && dir->i_mode & S_ISGID) {
+-		inode->i_gid = dir->i_gid;
+-
+-		/* Directories are special, and always inherit S_ISGID */
+-		if (S_ISDIR(mode))
+-			mode |= S_ISGID;
+-	} else
+-		inode_fsgid_set(inode, idmap);
+-	inode->i_mode = mode;
+-}
+-EXPORT_SYMBOL(inode_init_owner);
+-
+ /*
+  * Direct i/o helper functions
+  */
+@@ -1122,12 +1093,6 @@ void inode_set_flags(struct inode *inode, unsigned int flags,
+ }
+ EXPORT_SYMBOL(inode_set_flags);
+ 
+-void inode_nohighmem(struct inode *inode)
+-{
+-	mapping_set_gfp_mask(inode->i_mapping, GFP_USER);
+-}
+-EXPORT_SYMBOL(inode_nohighmem);
+-
+ #ifdef CONFIG_DEBUG_VFS
+ /**
+  * dump_inode - dump an inode.
+diff --git a/fs/inode_cache_init.c b/fs/inode_cache_init.c
+index cd9c5f39c497e8ea66f7effda2b1d362cca60b33..6d4a3d8bd347eaae56511c62c7ff82e0eb2d8139 100644
+--- a/fs/inode_cache_init.c
++++ b/fs/inode_cache_init.c
+@@ -502,3 +502,38 @@ struct inode *new_inode(struct super_block *sb)
+ 	return inode;
+ }
+ EXPORT_SYMBOL(new_inode);
++
++/**
++ * inode_init_owner - Init uid,gid,mode for new inode according to posix standards
++ * @idmap: idmap of the mount the inode was created from
++ * @inode: New inode
++ * @dir: Directory inode
++ * @mode: mode of the new inode
++ *
++ * If the inode has been created through an idmapped mount the idmap of
++ * the vfsmount must be passed through @idmap. This function will then take
++ * care to map the inode according to @idmap before checking permissions
++ * and initializing i_uid and i_gid. On non-idmapped mounts or if permission
++ * checking is to be performed on the raw inode simply pass @nop_mnt_idmap.
++ */
++void inode_init_owner(struct mnt_idmap *idmap, struct inode *inode,
++		      const struct inode *dir, umode_t mode)
++{
++	inode_fsuid_set(inode, idmap);
++	if (dir && dir->i_mode & S_ISGID) {
++		inode->i_gid = dir->i_gid;
++
++		/* Directories are special, and always inherit S_ISGID */
++		if (S_ISDIR(mode))
++			mode |= S_ISGID;
++	} else
++		inode_fsgid_set(inode, idmap);
++	inode->i_mode = mode;
++}
++EXPORT_SYMBOL(inode_init_owner);
++
++void inode_nohighmem(struct inode *inode)
++{
++	mapping_set_gfp_mask(inode->i_mapping, GFP_USER);
++}
++EXPORT_SYMBOL(inode_nohighmem);

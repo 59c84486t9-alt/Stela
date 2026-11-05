@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn peer_channel_and_receiver_preflight() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, _, _) = secure_modern();
     let before = commands(&model);
     for field in [4, 10, 16] {
@@ -53,6 +56,9 @@ fn peer_channel_and_receiver_preflight() {
 
 #[test]
 fn malformed_wmm_cancels_pending_update() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, _, _) = secure_modern();
     let before = commands(&model);
     for change in [0, 1, 3, 4, 5] {
@@ -78,6 +84,9 @@ fn malformed_wmm_cancels_pending_update() {
 
 #[test]
 fn key_installation_invalidates_observation() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, _) = awaiting();
     let (mut owner, _) = authority(&driver, &model);
     let permit = admit(&mut owner, &driver, AssociationUse::Configure);

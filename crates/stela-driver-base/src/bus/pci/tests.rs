@@ -1,9 +1,9 @@
+mod fallible;
 use super::*;
 use crate::bus::pci::regs;
 
 #[test]
 fn borrowed_owned_transport_keeps_original_mapping_and_refuses_owner_recovery() {
-    extern crate std;
     use alloc::boxed::Box;
     use core::sync::atomic::Ordering;
     let address = Address {
@@ -17,11 +17,11 @@ fn borrowed_owned_transport_keeps_original_mapping_and_refuses_owner_recovery() 
     // LegacyControllerOwner will keep its original config and BAR leases.
     let owner = Box::leak(Box::new(owner));
     let mut config = EcamConfig::from_retained(owner);
-    config.write32(0x40, 0xa5c3_5a7e);
-    config.write8(0x41, 0x12);
-    assert_eq!(config.read32(0x40), 0xa5c3_127e);
-    config.write16(0x42, 0x4b36);
-    assert_eq!(config.read16(0x42), 0x4b36);
+    config.write32(0x40, 0xa5c3_5a7e).unwrap();
+    config.write8(0x41, 0x12).unwrap();
+    assert_eq!(config.read32(0x40).unwrap(), 0xa5c3_127e);
+    config.write16(0x42, 0x4b36).unwrap();
+    assert_eq!(config.read16(0x42).unwrap(), 0x4b36);
     let config = match config.into_owned() {
         Ok(_) => panic!("borrow is not recoverable ownership"),
         Err(config) => config,
@@ -30,10 +30,19 @@ fn borrowed_owned_transport_keeps_original_mapping_and_refuses_owner_recovery() 
     counters
         .fail_context_at
         .store(before + 1, Ordering::Relaxed);
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| config.read8(0))).is_err());
+    assert_eq!(
+        config.read8(0),
+        Err(ConfigError::before_effect(ConfigFailure::Mapping(
+            crate::bus::mmio::owned::Error::Unavailable
+        ))),
+    );
     counters.fail_context_at.store(0, Ordering::Relaxed);
-    assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| config.read32(4094))).is_err()
+    assert_eq!(
+        config.read32(4094),
+        Err(ConfigError::before_effect(ConfigFailure::Access {
+            offset: 4094,
+            width: 4
+        })),
     );
     drop(config);
     assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
@@ -42,6 +51,10 @@ fn borrowed_owned_transport_keeps_original_mapping_and_refuses_owner_recovery() 
 }
 
 #[test]
+#[expect(
+    clippy::result_large_err,
+    reason = "inventory release refusal returns the same original observed function without allocating"
+)]
 fn owned_inventory_releases_every_present_config_before_returning_data() {
     use alloc::rc::Rc;
     use core::cell::Cell;
@@ -55,11 +68,31 @@ fn owned_inventory_releases_every_present_config_before_returning_data() {
         }
     }
     impl ConfigSpace for Observed {
-        fn read32(&self, offset: u16) -> u32 {
-            self.words[usize::from(offset) / 4]
+        fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+            Ok(self.words[usize::from(offset) / 4])
         }
-        fn write32(&mut self, _: u16, _: u32) {
+        fn write32(&mut self, _: u16, _: u32) -> Result<(), crate::bus::pci::ConfigError> {
             panic!("discovery must not write configuration");
+        }
+
+        fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+        }
+
+        fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+            let shift = (offset & 3) * 8;
+            let word = self.read32(offset & !3)? & !(0xff << shift) | u32::from(value) << shift;
+            self.write32(offset & !3, word)
+        }
+
+        fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+        }
+
+        fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
+            let shift = (offset & 2) * 8;
+            let word = self.read32(offset & !3)? & !(0xffff << shift) | u32::from(value) << shift;
+            self.write32(offset & !3, word)
         }
     }
     let live = Rc::new(Cell::new(0));
@@ -85,12 +118,15 @@ fn owned_inventory_releases_every_present_config_before_returning_data() {
             words[0] = 0x11e8_1234;
             words[2] = 0xff00_0000;
             live.set(live.get() + 1);
-            Ok(Function::new(
-                address,
-                Observed {
-                    words,
-                    live: live.clone(),
-                },
+            Ok(Some(
+                Function::new(
+                    address,
+                    Observed {
+                        words,
+                        live: live.clone(),
+                    },
+                )
+                .unwrap(),
             ))
         },
         |function| {
@@ -125,12 +161,12 @@ fn native_ecam_narrow_stores_preserve_adjacent_status_and_vendor_bytes() {
     let mut words = [0xa5c3_5a7eu32; 1024];
     // SAFETY: this test exclusively owns the aligned backing allocation.
     let mut config = unsafe { EcamConfig::raw(words.as_mut_ptr() as u64) };
-    config.write8(0x44, 0x78);
-    assert_eq!(config.read32(0x44), 0xa5c3_5a78);
-    config.write8(0x47, 0x12);
-    assert_eq!(config.read32(0x44), 0x12c3_5a78);
-    config.write16(regs::COMMAND, 0x0406);
-    assert_eq!(config.read32(regs::COMMAND), 0xa5c3_0406);
+    config.write8(0x44, 0x78).unwrap();
+    assert_eq!(config.read32(0x44).unwrap(), 0xa5c3_5a78);
+    config.write8(0x47, 0x12).unwrap();
+    assert_eq!(config.read32(0x44).unwrap(), 0x12c3_5a78);
+    config.write16(regs::COMMAND, 0x0406).unwrap();
+    assert_eq!(config.read32(regs::COMMAND).unwrap(), 0xa5c3_0406);
 }
 
 /// A configuration space whose BAR registers keep only their writable
@@ -138,14 +174,16 @@ fn native_ecam_narrow_stores_preserve_adjacent_status_and_vendor_bytes() {
 struct Fake {
     words: [u32; 64],
     bar_masks: [u32; 6],
+    writes: alloc::rc::Rc<core::cell::Cell<usize>>,
 }
 
 impl ConfigSpace for Fake {
-    fn read32(&self, offset: u16) -> u32 {
-        self.words[usize::from(offset / 4)]
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        Ok(self.words[usize::from(offset / 4)])
     }
 
-    fn write32(&mut self, offset: u16, value: u32) {
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
+        self.writes.set(self.writes.get() + 1);
         let index = usize::from(offset / 4);
         self.words[index] = match index.checked_sub(4) {
             Some(bar) if bar < 6 => {
@@ -154,18 +192,31 @@ impl ConfigSpace for Fake {
             }
             _ => value,
         };
+        Ok(())
     }
 
-    fn write16(&mut self, offset: u16, value: u16) {
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
+        self.writes.set(self.writes.get() + 1);
         let shift = (offset & 2) * 8;
         let word = &mut self.words[usize::from(offset / 4)];
         *word = *word & !(0xffff << shift) | u32::from(value) << shift;
+        Ok(())
     }
 
-    fn write8(&mut self, offset: u16, value: u8) {
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        self.writes.set(self.writes.get() + 1);
         let shift = (offset & 3) * 8;
         let word = &mut self.words[usize::from(offset / 4)];
         *word = *word & !(0xff << shift) | u32::from(value) << shift;
+        Ok(())
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
     }
 }
 
@@ -184,6 +235,7 @@ fn fake() -> Fake {
     Fake {
         words,
         bar_masks: [0; 6],
+        writes: alloc::rc::Rc::new(core::cell::Cell::new(0)),
     }
 }
 
@@ -203,7 +255,7 @@ fn bars_decode_and_size_every_kind() {
     config.words[9] = 0xfeb0_0000;
     config.bar_masks[5] = 0xffff_f000;
     let mut function = Function::new(Address::default_for_tests(), config).unwrap();
-    let bars = function.bars();
+    let bars = function.bars().unwrap();
     assert_eq!(
         bars[0],
         Some(Bar::Memory {
@@ -238,7 +290,7 @@ fn bars_decode_and_size_every_kind() {
     // Sizing restores every BAR and the command register.
     assert_eq!(function.config().words[4], 0xfebf_0000);
     assert_eq!(function.config().words[7], 0x80);
-    assert_eq!(function.config().read16(regs::COMMAND), 0x0007);
+    assert_eq!(function.config().read16(regs::COMMAND).unwrap(), 0x0007);
     assert_eq!(function.class, [1, 8, 2]);
 }
 
@@ -247,7 +299,7 @@ fn interrupts_are_discovered_and_left_off() {
     let mut function = Function::new(Address::default_for_tests(), fake()).unwrap();
     function.config().words[16] |= 1 << 31; // MSI-X enabled by firmware
     function.config().words[20] |= 1 << 16; // MSI enabled by firmware
-    let interrupts = function.interrupts();
+    let interrupts = function.interrupts().unwrap();
     assert_eq!(
         interrupts.msix,
         Some(MsiX {
@@ -267,27 +319,41 @@ fn interrupts_are_discovered_and_left_off() {
             wide: true
         })
     );
-    function.enable_polled();
+    function.enable_polled().unwrap();
     assert_eq!(function.config().words[16] >> 31, 0);
     assert_eq!(function.config().words[20] >> 16 & 1, 0);
-    let command = function.config().read16(regs::COMMAND);
+    let command = function.config().read16(regs::COMMAND).unwrap();
     assert_eq!(command & 0x406, 0x406);
 }
 
-/// MSI-X opens once its table is written, and a failure to write it
-/// leaves MSI-X off.
+/// MSI-X opens only once its table is written. A failed writer retains the
+/// acknowledged Function Mask and original cause without cleanup writes.
 #[test]
 fn msix_opens_only_after_its_table_is_written() {
     let mut function = Function::new(Address::default_for_tests(), fake()).unwrap();
-    let msix = function.interrupts().msix.unwrap();
-    function.enable_polled();
+    let msix = function.interrupts().unwrap().msix.unwrap();
+    function.enable_polled().unwrap();
     function.enable_msix(msix, || Ok(())).unwrap();
     assert_eq!(function.config().words[16] >> 30, 0b10, "enabled, unmasked");
+    let writes = function.config().writes.clone();
+    let failed_at = core::cell::Cell::new(0);
     assert_eq!(
-        function.enable_msix(msix, || Err::<(), _>(BlockError::Timeout)),
+        function.enable_msix(msix, || {
+            failed_at.set(writes.get());
+            Err::<(), _>(BlockError::Timeout)
+        }),
         Err(BlockError::Timeout)
     );
-    assert_eq!(function.config().words[16] >> 31, 0, "left off");
+    assert_eq!(
+        function.config().words[16] >> 30,
+        0b11,
+        "enabled under Function Mask"
+    );
+    assert_eq!(
+        writes.get(),
+        failed_at.get(),
+        "cleanup store followed failed table writer"
+    );
 }
 
 /// MSI opens with one message once its address and data are written.
@@ -296,13 +362,13 @@ fn msi_opens_one_message_after_its_address_and_data() {
     let mut config = fake();
     config.words[20] |= 0b011 << 20;
     let mut function = Function::new(Address::default_for_tests(), config).unwrap();
-    let msi = function.interrupts().msi.unwrap();
-    function.enable_polled();
+    let msi = function.interrupts().unwrap().msi.unwrap();
+    function.enable_polled().unwrap();
     let message = crate::bus::irq::MsiMessage {
         address: 0x1_fee0_0000,
         data: 0x4041,
     };
-    function.enable_msi(msi, message);
+    function.enable_msi(msi, message).unwrap();
     let words = &function.config().words;
     assert_eq!(words[21], 0xfee0_0000);
     assert_eq!(words[22], 1);
@@ -311,12 +377,11 @@ fn msi_opens_one_message_after_its_address_and_data() {
     assert_eq!(words[20] >> 20 & 0b111, 0, "one message");
 }
 
-/// A function whose MSI-X table is not mapped sends its message from
-/// MSI, MSI-X left off.
+/// Missing table resources are explicit failures, not MSI-X capability absence.
 #[test]
-fn an_unmapped_msix_table_falls_back_to_msi() {
+fn missing_msix_table_refuses_without_enabling_msi() {
     let mut function = Function::new(Address::default_for_tests(), fake()).unwrap();
-    function.enable_polled();
+    function.enable_polled().unwrap();
     let handoff = crate::Handoff {
         firmware: None,
         completion: None,
@@ -331,14 +396,21 @@ fn an_unmapped_msix_table_falls_back_to_msi() {
         address: 0xfee0_0000,
         data: 0x41,
     };
+    let before = function.config().words;
+    let writes = function.config().writes.get();
     assert_eq!(
         function.enable_message(&handoff, &[None; 6], message),
-        Ok(true)
+        Err(BlockError::Unsupported("register BAR is not memory"))
     );
     let words = &function.config().words;
     assert_eq!(words[16] >> 31, 0, "MSI-X off");
-    assert_eq!(words[20] >> 16 & 1, 1, "MSI on");
-    assert_eq!(words[21], 0xfee0_0000);
+    assert_eq!(words[20] >> 16 & 1, 0, "MSI stayed off");
+    assert_eq!(*words, before, "resource refusal changed original config");
+    assert_eq!(
+        function.config().writes.get(),
+        writes,
+        "resource refusal issued a store"
+    );
 }
 
 #[test]
@@ -349,10 +421,10 @@ fn memory_enable_does_not_choose_an_interrupt_policy() {
         config.words[16] |= 1 << 31;
         config.words[20] |= 1 << 16;
         let mut function = Function::new(Address::default_for_tests(), config).unwrap();
-        function.enable_memory_and_bus_master();
+        function.enable_memory_and_bus_master().unwrap();
         let config = function.config();
         assert_eq!(
-            config.read16(regs::COMMAND),
+            config.read16(regs::COMMAND).unwrap(),
             intx | regs::COMMAND_MEMORY | regs::COMMAND_MASTER
         );
         assert_eq!(config.words[16] >> 31, 1);
@@ -365,7 +437,10 @@ fn a_looping_capability_list_stops_at_the_loop() {
     let mut config = fake();
     config.words[20] = 0x0086_4005; // MSI points back at MSI-X
     let function = Function::new(Address::default_for_tests(), config).unwrap();
-    assert_eq!(function.capabilities(), [(0x40, 0x11), (0x50, 0x05)]);
+    assert_eq!(
+        function.capabilities(),
+        Err(CapabilityError::Cycle { offset: 0x40 })
+    );
 }
 
 #[test]
@@ -380,7 +455,7 @@ fn bar_sizes_come_from_the_lowest_writable_address_bit() {
     config.words[9] = 0xfd00_0004;
     config.bar_masks[5] = 0xffff_f000;
     let mut function = Function::new(Address::default_for_tests(), config).unwrap();
-    let bars = function.bars();
+    let bars = function.bars().unwrap();
     assert_eq!(
         bars[0],
         Some(Bar::Memory {
@@ -409,7 +484,10 @@ fn the_capability_walk_stops_at_an_all_ones_id() {
     let mut config = fake();
     config.words[16] = 0x0003_50ff; // first capability reads as all ones
     let function = Function::new(Address::default_for_tests(), config).unwrap();
-    assert!(function.capabilities().is_empty());
+    assert_eq!(
+        function.capabilities(),
+        Err(CapabilityError::Malformed { offset: 0x40 })
+    );
 }
 
 /// A function whose D3hot exit performs the internal reset that
@@ -417,20 +495,36 @@ fn the_capability_walk_stops_at_an_all_ones_id() {
 struct SoftReset(Fake);
 
 impl ConfigSpace for SoftReset {
-    fn read32(&self, offset: u16) -> u32 {
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
         self.0.read32(offset)
     }
 
-    fn write32(&mut self, offset: u16, value: u32) {
-        self.0.write32(offset, value)
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
+        self.0.write32(offset, value)?;
+        Ok(())
     }
 
-    fn write16(&mut self, offset: u16, value: u16) {
-        let before = self.0.read16(offset);
-        self.0.write16(offset, value);
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
+        let before = self.0.read16(offset)?;
+        self.0.write16(offset, value)?;
         if offset == 0x64 && before & PM_STATE == D3HOT && before & PM_NO_SOFT_RESET == 0 {
             self.0.words[4..10].fill(0);
         }
+        Ok(())
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        let shift = (offset & 3) * 8;
+        let word = self.read32(offset & !3)? & !(0xff << shift) | u32::from(value) << shift;
+        self.write32(offset & !3, word)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
     }
 }
 
@@ -454,8 +548,11 @@ fn power_up_leaves_d3hot_and_restores_soft_reset_bars() {
             })
             .unwrap();
         assert_eq!(delays, [D3HOT_DELAY_US]);
-        assert_eq!(function.config().read16(0x64), 0);
-        assert_eq!(function.config().read32(regs::BASE_ADDRESS_0), 0xfebf_0000);
+        assert_eq!(function.config().read16(0x64).unwrap(), 0);
+        assert_eq!(
+            function.config().read32(regs::BASE_ADDRESS_0).unwrap(),
+            0xfebf_0000
+        );
     }
 }
 
@@ -467,16 +564,32 @@ fn power_up_reports_a_function_that_stays_in_d3hot() {
     config.words[25] = u32::from(D3HOT);
     struct Stuck(Fake);
     impl ConfigSpace for Stuck {
-        fn read32(&self, offset: u16) -> u32 {
+        fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
             self.0.read32(offset)
         }
-        fn write32(&mut self, offset: u16, value: u32) {
-            self.0.write32(offset, value)
+        fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
+            self.0.write32(offset, value)?;
+            Ok(())
         }
-        fn write16(&mut self, offset: u16, value: u16) {
+        fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
             if offset != 0x64 {
-                self.0.write16(offset, value)
+                self.0.write16(offset, value)?
             }
+            Ok(())
+        }
+
+        fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+        }
+
+        fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+            let shift = (offset & 3) * 8;
+            let word = self.read32(offset & !3)? & !(0xff << shift) | u32::from(value) << shift;
+            self.write32(offset & !3, word)
+        }
+
+        fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
         }
     }
     let mut function = Function::new(Address::default_for_tests(), Stuck(config)).unwrap();
@@ -495,11 +608,43 @@ fn power_up_reports_a_function_that_stays_in_d3hot() {
 fn power_up_refuses_invalid_clock_before_any_configuration_access() {
     struct NoAccess;
     impl ConfigSpace for NoAccess {
-        fn read32(&self, _: u16) -> u32 {
+        fn read32(&self, _: u16) -> Result<u32, crate::bus::pci::ConfigError> {
             panic!("config access before clock admission")
         }
-        fn write32(&mut self, _: u16, _: u32) {
+        fn write32(&mut self, _: u16, _: u32) -> Result<(), crate::bus::pci::ConfigError> {
             panic!("config effect before clock admission")
+        }
+
+        fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+        }
+
+        fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+            let shift = (offset & 3) * 8;
+            let word = self.read32(offset & !3)? & !(0xff << shift) | u32::from(value) << shift;
+            self.write32(offset & !3, word)
+        }
+
+        fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+        }
+
+        fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
+            let shift = (offset & 2) * 8;
+            let word = self.read32(offset & !3)? & !(0xffff << shift) | u32::from(value) << shift;
+            self.write32(offset & !3, word)
+        }
+    }
+    struct MissingMinimum {
+        _nominal_rate: u64,
+    }
+    // SAFETY: this diagnostic provider never grants a successful minimum wait.
+    unsafe impl power::Timer for MissingMinimum {
+        fn check(&self) -> Result<(), power::Error> {
+            Err(power::Error::Clock)
+        }
+        fn wait_us(&self, _: u64) -> Result<(), power::Error> {
+            panic!("wait after missing minimum-delay refusal")
         }
     }
     for rate in [0, u64::MAX, u64::MAX / 2 / D3HOT_DELAY_US + 1] {
@@ -510,21 +655,17 @@ fn power_up_refuses_invalid_clock_before_any_configuration_access() {
             class: [1, 8, 2],
             config: NoAccess,
         };
+        // Nominal frequency data cannot supply the missing physical provider.
+        let minimum = MissingMinimum {
+            _nominal_rate: rate,
+        };
         assert_eq!(
-            function.power_up(&Clock {
-                ticks_per_microsecond: rate
-            }),
-            Err(BlockError::Unsupported(
-                "PCI power transition requires calibrated timing"
-            ))
+            function.power_up(&minimum),
+            Err(BlockError::PciPower(power::Error::Clock))
         );
         assert_eq!(
-            function.power_up_with_timer(&Clock {
-                ticks_per_microsecond: rate
-            }),
-            Err(BlockError::Unsupported(
-                "PCI power transition requires calibrated timing"
-            ))
+            function.function_level_reset(&minimum),
+            Err(BlockError::PciPower(power::Error::Clock))
         );
     }
 }
@@ -566,6 +707,7 @@ impl Ecam {
         };
         // SAFETY: this test exclusively owns the backing allocation.
         unsafe { Function::enumerate(&window) }
+            .unwrap()
             .iter()
             .map(|function| {
                 let address = function.address;
@@ -667,16 +809,42 @@ fn copied_identity_performs_no_additional_configuration_reads() {
         reads: Cell<usize>,
     }
     impl ConfigSpace for Counted {
-        fn read32(&self, offset: u16) -> u32 {
-            self.reads.set(self.reads.get() + 1);
-            match offset {
-                0 => 0x1001_1af4,
-                8 => 0x0100_0000,
-                _ => 0,
-            }
+        fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+            Ok({
+                self.reads.set(self.reads.get() + 1);
+                match offset {
+                    0 => 0x1001_1af4,
+                    8 => 0x0100_0000,
+                    _ => 0,
+                }
+            })
         }
-        fn write32(&mut self, _offset: u16, _value: u32) {
+        fn write32(
+            &mut self,
+            _offset: u16,
+            _value: u32,
+        ) -> Result<(), crate::bus::pci::ConfigError> {
             panic!("identity observation must not write configuration");
+        }
+
+        fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+        }
+
+        fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+            let shift = (offset & 3) * 8;
+            let word = self.read32(offset & !3)? & !(0xff << shift) | u32::from(value) << shift;
+            self.write32(offset & !3, word)
+        }
+
+        fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+            Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+        }
+
+        fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
+            let shift = (offset & 2) * 8;
+            let word = self.read32(offset & !3)? & !(0xffff << shift) | u32::from(value) << shift;
+            self.write32(offset & !3, word)
         }
     }
     let function = Function::new(
@@ -715,15 +883,17 @@ struct Resettable {
 }
 
 impl ConfigSpace for Resettable {
-    fn read32(&self, offset: u16) -> u32 {
-        if offset == 0 && self.busy.get() != 0 {
-            self.busy.set(self.busy.get() - 1);
-            return u32::MAX;
-        }
-        self.words[usize::from(offset / 4)]
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        Ok({
+            if offset == 0 && self.busy.get() != 0 {
+                self.busy.set(self.busy.get() - 1);
+                return Ok(u32::MAX);
+            }
+            self.words[usize::from(offset / 4)]
+        })
     }
 
-    fn write32(&mut self, offset: u16, value: u32) {
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         self.words[usize::from(offset / 4)] = value;
         if offset == 0x48 && value & 1 << 15 != 0 {
             self.words[0x48 / 4] = 0;
@@ -735,6 +905,27 @@ impl ConfigSpace for Resettable {
             self.busy.set(self.silence);
             self.resets += 1;
         }
+        Ok(())
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        let shift = (offset & 3) * 8;
+        let word = self.read32(offset & !3)? & !(0xff << shift) | u32::from(value) << shift;
+        self.write32(offset & !3, word)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+    }
+
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
+        let shift = (offset & 2) * 8;
+        let word = self.read32(offset & !3)? & !(0xffff << shift) | u32::from(value) << shift;
+        self.write32(offset & !3, word)
     }
 }
 

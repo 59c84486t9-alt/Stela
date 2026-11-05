@@ -1,0 +1,171 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 04:09:58 -0500
+Subject: [PATCH] refactor(sched): share original task affinity updates
+
+---
+ kernel/sched/affinity.h      | 26 ++++++++++++++++++++++++++
+ kernel/sched/core.c          | 27 +--------------------------
+ kernel/sched/sched.h         | 12 +-----------
+ kernel/sched/user_affinity.c | 28 ++++++++++++++++++++++++++++
+ 4 files changed, 56 insertions(+), 37 deletions(-)
+ create mode 100644 kernel/sched/affinity.h
+
+diff --git a/kernel/sched/affinity.h b/kernel/sched/affinity.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..433d15b493efdd9f24c2810791d8ba597ea724d7
+--- /dev/null
++++ b/kernel/sched/affinity.h
+@@ -0,0 +1,26 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _KERNEL_SCHED_AFFINITY_H
++#define _KERNEL_SCHED_AFFINITY_H
++
++struct cpumask;
++struct mm_struct;
++struct task_struct;
++
++struct affinity_context {
++	const struct cpumask	*new_mask;
++	struct cpumask		*user_mask;
++	unsigned int		flags;
++};
++
++#define SCA_CHECK		0x01
++#define SCA_MIGRATE_DISABLE	0x02
++#define SCA_MIGRATE_ENABLE	0x04
++#define SCA_USER		0x08
++
++void set_cpus_allowed_common(struct task_struct *p, struct affinity_context *ctx);
++
++#ifdef CONFIG_SCHED_MM_CID
++void mm_update_cpus_allowed(struct mm_struct *mm, const struct cpumask *affmask);
++#endif
++
++#endif
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 9555b9c1ff1024fc613d8a47a19ff003c98f418e..e95be0779c7c84e63f942487d1f3f0231621b521 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -2689,30 +2689,6 @@ out_unlock:
+ 	return 0;
+ }
+ 
+-static inline void mm_update_cpus_allowed(struct mm_struct *mm, const cpumask_t *affmask);
+-
+-/*
+- * sched_class::set_cpus_allowed must do the below, but is not required to
+- * actually call this function.
+- */
+-void set_cpus_allowed_common(struct task_struct *p, struct affinity_context *ctx)
+-{
+-	if (ctx->flags & (SCA_MIGRATE_ENABLE | SCA_MIGRATE_DISABLE)) {
+-		p->cpus_ptr = ctx->new_mask;
+-		return;
+-	}
+-
+-	cpumask_copy(&p->cpus_mask, ctx->new_mask);
+-	p->nr_cpus_allowed = cpumask_weight(ctx->new_mask);
+-	mm_update_cpus_allowed(p->mm, ctx->new_mask);
+-
+-	/*
+-	 * Swap in a new user_cpus_ptr if SCA_USER flag set
+-	 */
+-	if (ctx->flags & SCA_USER)
+-		swap(p->user_cpus_ptr, ctx->user_mask);
+-}
+-
+ static void
+ do_set_cpus_allowed(struct task_struct *p, struct affinity_context *ctx)
+ {
+@@ -10711,7 +10687,7 @@ static bool mm_update_max_cids(struct mm_struct *mm)
+ 	return true;
+ }
+ 
+-static inline void mm_update_cpus_allowed(struct mm_struct *mm, const struct cpumask *affmsk)
++void mm_update_cpus_allowed(struct mm_struct *mm, const struct cpumask *affmsk)
+ {
+ 	struct cpumask *mm_allowed;
+ 	struct mm_mm_cid *mc;
+@@ -11065,7 +11041,6 @@ void mm_init_cid(struct mm_struct *mm, struct task_struct *p)
+ 	bitmap_zero(mm_cidmask(mm), num_possible_cpus());
+ }
+ #else /* CONFIG_SCHED_MM_CID */
+-static inline void mm_update_cpus_allowed(struct mm_struct *mm, const struct cpumask *affmsk) { }
+ static inline void sched_mm_cid_fork(struct task_struct *t) { }
+ #endif /* !CONFIG_SCHED_MM_CID */
+ 
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index 5697923359920f34e5b7e532aae681d7cd667dcf..4531efbf866e4fab2517890fd778bfb05154fe1e 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -2557,11 +2557,7 @@ extern const u32		sched_prio_to_wmult[40];
+ 
+ #define RETRY_TASK		((void *)-1UL)
+ 
+-struct affinity_context {
+-	const struct cpumask	*new_mask;
+-	struct cpumask		*user_mask;
+-	unsigned int		flags;
+-};
++#include "affinity.h"
+ 
+ extern s64 update_curr_common(struct rq *rq);
+ 
+@@ -2842,17 +2838,11 @@ static inline bool sched_fair_runnable(struct rq *rq)
+ extern struct task_struct *pick_task_fair(struct rq *rq, struct rq_flags *rf);
+ extern struct task_struct *pick_task_idle(struct rq *rq, struct rq_flags *rf);
+ 
+-#define SCA_CHECK		0x01
+-#define SCA_MIGRATE_DISABLE	0x02
+-#define SCA_MIGRATE_ENABLE	0x04
+-#define SCA_USER		0x08
+-
+ extern void update_group_capacity(struct sched_domain *sd, int cpu);
+ 
+ extern void sched_balance_trigger(struct rq *rq);
+ 
+ extern int __set_cpus_allowed_ptr(struct task_struct *p, struct affinity_context *ctx);
+-extern void set_cpus_allowed_common(struct task_struct *p, struct affinity_context *ctx);
+ 
+ static inline bool task_allowed_on_cpu(struct task_struct *p, int cpu)
+ {
+diff --git a/kernel/sched/user_affinity.c b/kernel/sched/user_affinity.c
+index fa230b4f5fd24fc314add9b43e68dd94de83a5fe..228b2ea8d0b3e89a50553a52df4eb82af245a889 100644
+--- a/kernel/sched/user_affinity.c
++++ b/kernel/sched/user_affinity.c
+@@ -11,6 +11,34 @@
+ #include <linux/sched.h>
+ #include <linux/slab.h>
+ 
++#include "affinity.h"
++
++#ifndef CONFIG_SCHED_MM_CID
++static inline void mm_update_cpus_allowed(struct mm_struct *mm, const struct cpumask *affmsk) { }
++#endif
++
++/*
++ * sched_class::set_cpus_allowed must do the below, but is not required to
++ * actually call this function.
++ */
++void set_cpus_allowed_common(struct task_struct *p, struct affinity_context *ctx)
++{
++	if (ctx->flags & (SCA_MIGRATE_ENABLE | SCA_MIGRATE_DISABLE)) {
++		p->cpus_ptr = ctx->new_mask;
++		return;
++	}
++
++	cpumask_copy(&p->cpus_mask, ctx->new_mask);
++	p->nr_cpus_allowed = cpumask_weight(ctx->new_mask);
++	mm_update_cpus_allowed(p->mm, ctx->new_mask);
++
++	/*
++	 * Swap in a new user_cpus_ptr if SCA_USER flag set
++	 */
++	if (ctx->flags & SCA_USER)
++		swap(p->user_cpus_ptr, ctx->user_mask);
++}
++
+ static cpumask_t *alloc_user_cpus_ptr(int node)
+ {
+ 	/*

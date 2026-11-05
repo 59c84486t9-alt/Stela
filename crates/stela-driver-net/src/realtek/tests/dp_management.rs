@@ -101,7 +101,7 @@ fn dp_incomplete_notification_is_not_retried_even_if_it_later_completes() {
         assert_eq!(model.state.borrow().dp_commands, 2);
         let count = model.state.borrow().writes.len();
         model.fail_dp_at = usize::MAX;
-        time.delay(50_000);
+        time.delay(50_000).unwrap();
         model.read32(DP_OCP_ACCESS);
         assert_eq!(model.state.borrow().dp_ocp[&0x30], 1);
         assert_eq!(model.state.borrow().writes.len(), count);
@@ -251,7 +251,7 @@ fn dp_phy_failure_blocks_page_cleanup_and_further_transactions_after_late_state_
         assert_eq!(model.state.borrow().mdio_commands, 15);
         let writes = model.state.borrow().writes.len();
         // Model a late command result, including a changed current page.
-        time.delay(50_000);
+        time.delay(50_000).unwrap();
         {
             let mut s = model.state.borrow_mut();
             s.pending = None;

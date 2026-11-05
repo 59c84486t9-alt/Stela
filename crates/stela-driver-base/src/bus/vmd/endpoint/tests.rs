@@ -11,6 +11,8 @@ use crate::bus::{
     },
     mmio::owned::{
         AddressSpace, InstalledMapping, MapFailure, MapRequest, MappingPlatform, PhysicalSpan,
+        Resource, ResourceBacking, ResourceKind,
+        model::{MappingOwner, MappingRetention},
     },
     pci::regs,
     vmd::{VMCAP, VMCONFIG},
@@ -32,7 +34,7 @@ fn lifecycle(model: Model) -> (Endpoint<Model>, Arc<Domain>) {
     let state = Arc::clone(&model.state);
     let (host, bar) = fixture(model);
     let domain = Arc::new(Domain { state, epoch: 1 });
-    let (mut endpoint, _) = Endpoint::new(host, domain.clone(), model_clock());
+    let (mut endpoint, _) = Endpoint::new(host, domain.clone(), model_timer());
     endpoint.discover(&bar, NVME_CLASS).unwrap();
     (endpoint, domain)
 }
@@ -284,7 +286,7 @@ fn stopped_siblings_remain_contained_and_a_second_nvme_is_explicitly_refused() {
             assert!(matches!(result, Err(Error::UnsupportedDevice)));
         } else {
             let mut hierarchy = result.unwrap();
-            hierarchy.prepare(&mut host, model_clock()).unwrap();
+            hierarchy.prepare(&mut host, &*model_timer()).unwrap();
             hierarchy.enable(&mut host).unwrap();
             assert_eq!(state.lock().unwrap().child(extra + 4, 2) & 7, 0);
         }
@@ -348,17 +350,22 @@ fn invalid_timing_precedes_hierarchy_and_capability_config_accesses() {
         let (mut host, bar) = fixture(model);
         let mut hierarchy = Hierarchy::discover(&mut host, &bar, NVME_CLASS).unwrap();
         let before = state.lock().unwrap().events.clone();
-        let clock = Clock {
-            ticks_per_microsecond: rate,
+        let clock = ModelTimer {
+            budget: crate::Clock {
+                ticks_per_microsecond: rate,
+            },
         };
-        assert_eq!(hierarchy.prepare(&mut host, clock), Err(Error::Clock));
+        assert_eq!(
+            hierarchy.prepare(&mut host, &clock),
+            Err(Error::PciPower(crate::bus::pci::power::Error::Clock))
+        );
         assert_eq!(state.lock().unwrap().events, before);
         let mut config = host.config(2, 0, 0).unwrap();
         let capabilities = capabilities::Capabilities::inspect(&mut config, false).unwrap();
         let before = state.lock().unwrap().events.clone();
         assert_eq!(
-            capabilities.power_up_with_timer(&mut config, &clock),
-            Err(Error::Clock)
+            capabilities.power_up(&mut config, &clock),
+            Err(Error::PciPower(crate::bus::pci::power::Error::Clock))
         );
         assert_eq!(state.lock().unwrap().events, before);
     }
@@ -401,14 +408,21 @@ fn exact_pm_wait_requests_follow_word_effect_and_propagate_failure() {
             let (mut host, _) = fixture(model);
             let mut config = host.config(2, 0, 0).unwrap();
             let capabilities = capabilities::Capabilities::inspect(&mut config, false).unwrap();
-            let result = capabilities.power_up_with_timer(
+            let result = capabilities.power_up(
                 &mut config,
                 &CapturedTime {
                     state: state.clone(),
                     fail,
                 },
             );
-            assert_eq!(result, if fail { Err(Error::Clock) } else { Ok(()) });
+            assert_eq!(
+                result,
+                if fail {
+                    Err(Error::PciPower(crate::bus::pci::power::Error::Clock))
+                } else {
+                    Ok(())
+                }
+            );
             let waits: Vec<_> = state
                 .lock()
                 .unwrap()
@@ -456,7 +470,7 @@ fn reassignment_removal_and_wrong_host_epoch_never_restart_the_controller() {
                 _ => state.set_parent(0, 4, 0x28c1_8086),
             }
         }
-        assert!(hierarchy.prepare(&mut host, model_clock()).is_err());
+        assert!(hierarchy.prepare(&mut host, &*model_timer()).is_err());
         assert!(!state.lock().unwrap().any_master());
     }
 }
@@ -533,11 +547,45 @@ fn malformed_capabilities_active_translation_and_bar_profiles_are_refused() {
     }
 }
 
-#[repr(align(4096))]
-struct DeviceMemory(UnsafeCell<[u8; 16384]>);
+#[repr(C, align(4096))]
+struct DeviceMemory {
+    bytes: UnsafeCell<[u8; 16384]>,
+    thread: std::thread::ThreadId,
+}
+// SAFETY: actual isolated RAM; every accepted model access checks this original
+// creating thread before dereference. Registry views serialize its consumers.
+unsafe impl Send for DeviceMemory {}
+// SAFETY: same original single-thread RAM exclusion; no background device exists.
+unsafe impl Sync for DeviceMemory {}
+fn memory_context(memory: &Arc<DeviceMemory>) -> Result<(), crate::bus::pci::assignment::Error> {
+    if std::thread::current().id() == memory.thread {
+        Ok(())
+    } else {
+        Err(crate::bus::pci::assignment::Error::Context)
+    }
+}
+struct MappedBacking {
+    memory: Arc<DeviceMemory>,
+    retained: MappingRetention<Arc<DeviceMemory>>,
+}
+// SAFETY: this separate fixture owns ACTUAL isolated RAM and retains the same
+// counted allocation; topology-only Backing remains a denial-only model.
+unsafe impl ResourceBacking for MappedBacking {
+    fn begin_mapping(
+        &self,
+    ) -> Result<crate::bus::pci::assignment::OpaqueUse, crate::bus::mmio::owned::Error> {
+        self.retained.begin_mapping()
+    }
+    fn physical_span(&self) -> PhysicalSpan {
+        PhysicalSpan::new(NVME_BASE, 16384).unwrap()
+    }
+    fn kind(&self) -> ResourceKind {
+        ResourceKind::Registers
+    }
+}
 struct Platform {
-    memory: Box<DeviceMemory>,
-    original_owner: Arc<()>,
+    memory: Arc<DeviceMemory>,
+    retained: MappingRetention<Arc<DeviceMemory>>,
     epoch: AtomicUsize,
     fail_second_once: AtomicBool,
     unmaps: Mutex<Vec<u64>>,
@@ -551,7 +599,7 @@ unsafe impl Sync for Platform {}
 // reservation identity and current provider epoch, not just physical numbers.
 unsafe impl MappingPlatform for Platform {
     fn check_context(&self, _: AddressSpace) -> Result<(), crate::bus::mmio::owned::Error> {
-        Ok(())
+        self.retained.check_context()
     }
     unsafe fn map(
         &self,
@@ -559,10 +607,11 @@ unsafe impl MappingPlatform for Platform {
         request: MapRequest,
     ) -> Result<InstalledMapping, MapFailure> {
         use crate::bus::mmio::owned::Error as MappingError;
-        let Some(backing) = resource.backing().downcast_ref::<Backing>() else {
+        let Some(backing) = resource.backing().downcast_ref::<MappedBacking>() else {
             return Err(MapFailure::Unchanged(MappingError::Unavailable));
         };
-        if !Arc::ptr_eq(&backing.owner, &self.original_owner)
+        if !Arc::ptr_eq(&backing.memory, &self.memory)
+            || !backing.retained.same_owner(&self.retained)
             || self.epoch.load(Ordering::Relaxed) != 1
         {
             return Err(MapFailure::Unchanged(MappingError::Unavailable));
@@ -581,7 +630,7 @@ unsafe impl MappingPlatform for Platform {
         // SAFETY: provider owns this exact bounded model allocation; symbolic
         // physical pages are unrelated to its CPU address.
         let cpu_base = unsafe {
-            NonNull::new_unchecked(self.memory.0.get().cast::<u8>().add(offset as usize))
+            NonNull::new_unchecked(self.memory.bytes.get().cast::<u8>().add(offset as usize))
         };
         Ok(InstalledMapping {
             token: request.id,
@@ -607,10 +656,13 @@ unsafe impl MappingPlatform for Platform {
         Ok(())
     }
 }
-fn mapping_platform(owner: Arc<()>) -> (Authority, Arc<Platform>) {
+fn mapping_platform(
+    memory: Arc<DeviceMemory>,
+    retained: MappingRetention<Arc<DeviceMemory>>,
+) -> (Authority, Arc<Platform>) {
     let platform = Arc::new(Platform {
-        memory: Box::new(DeviceMemory(UnsafeCell::new([0; 16384]))),
-        original_owner: owner,
+        memory,
+        retained,
         epoch: AtomicUsize::new(1),
         fail_second_once: AtomicBool::new(false),
         unmaps: Mutex::new(Vec::new()),
@@ -634,19 +686,50 @@ fn mapping_platform(owner: Arc<()>) -> (Authority, Arc<Platform>) {
 
 #[test]
 fn resource_identity_and_epoch_gate_registry_maps() {
-    let (_host, bar) = fixture(Model::default());
-    let owner = bar
-        .resource
-        .backing()
-        .downcast_ref::<Backing>()
-        .unwrap()
-        .owner
-        .clone();
-    let (wrong, _) = mapping_platform(Arc::new(()));
+    let (_host, mut bar) = fixture(Model::default());
+    let memory = || {
+        Arc::new(DeviceMemory {
+            bytes: UnsafeCell::new([0; 16384]),
+            thread: std::thread::current().id(),
+        })
+    };
+    let ram = memory();
+    assert!(
+        (ram.bytes.get() as usize).is_multiple_of(4096),
+        "actual model buffer must be page-aligned"
+    );
+    // SAFETY: this owning fixture controls actual private RAM on its original
+    // thread. Neither allocation nor its clone owns a Source/Authority/view.
+    let mut owner = unsafe { MappingOwner::from_owned(ram.clone(), memory_context) };
+    // This is a separate CPU-registry exercise. The unchanged topology-only
+    // source's Arc<()> label cannot authorize any CPU mapping.
+    bar.resource = Resource::new(Box::new(MappedBacking {
+        memory: ram.clone(),
+        retained: owner.retention().unwrap(),
+    }));
+    let other_ram = memory();
+    assert!(
+        (other_ram.bytes.get() as usize).is_multiple_of(4096),
+        "actual model buffer must be page-aligned"
+    );
+    // SAFETY: distinct actual RAM with its own original pure context guard.
+    let mut other_owner = unsafe { MappingOwner::from_owned(other_ram.clone(), memory_context) };
+    let (wrong, wrong_platform) =
+        mapping_platform(other_ram.clone(), other_owner.retention().unwrap());
     assert!(bar.map(&wrong).is_err());
-    let (authority, platform) = mapping_platform(owner);
+    assert_eq!(
+        owner.uses(),
+        0,
+        "unchanged foreign-provider refusal kept a map use"
+    );
+    let (authority, platform) = mapping_platform(ram.clone(), owner.retention().unwrap());
     platform.epoch.store(2, Ordering::Relaxed);
     assert!(bar.map(&authority).is_err());
+    assert_eq!(
+        owner.uses(),
+        0,
+        "unchanged provider-profile refusal kept a map use"
+    );
     platform.epoch.store(1, Ordering::Relaxed);
     let mut first = bar.map(&authority).unwrap();
     assert_eq!(
@@ -681,4 +764,67 @@ fn resource_identity_and_epoch_gate_registry_maps() {
     assert_eq!(unmaps.len(), 3);
     assert_ne!(unmaps[0], unmaps[1]);
     assert_eq!(unmaps[1], unmaps[2]);
+    drop(unmaps);
+    assert_eq!(
+        owner.uses(),
+        0,
+        "acknowledged original unmaps did not release counted uses"
+    );
+    drop(first);
+    drop(second);
+    drop(authority);
+    drop(platform);
+    drop(wrong);
+    drop(wrong_platform);
+    drop(bar);
+    // SAFETY: exact original RAM views and both acknowledged mapping tokens
+    // ended above; no callback/raw alias/device exists or can restart.
+    let returned = unsafe { owner.retire() }.unwrap();
+    assert!(Arc::ptr_eq(&returned, &ram));
+    // SAFETY: the wrong provider never installed a map; its original retained
+    // provider views also ended above, so this returns the SAME unused pool.
+    let other_returned = unsafe { other_owner.retire() }.unwrap();
+    assert!(Arc::ptr_eq(&other_returned, &other_ram));
+}
+
+#[test]
+fn failed_power_timing_keeps_the_same_owned_minimum_provider_with_the_hierarchy() {
+    struct Unavailable {
+        _allocation: Box<[u8; 4096]>,
+        drops: Rc<core::cell::Cell<usize>>,
+    }
+    impl Drop for Unavailable {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+    // SAFETY: denial-only model; no wait or native timing grant is supplied.
+    unsafe impl crate::bus::pci::power::Timer for Unavailable {
+        fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+            Err(crate::bus::pci::power::Error::Clock)
+        }
+        fn wait_us(&self, _: u64) -> Result<(), crate::bus::pci::power::Error> {
+            panic!("unavailable model timer cannot wait");
+        }
+    }
+    let model = Model::default();
+    let drops = model.drops.clone();
+    let state = model.state.clone();
+    let (host, bar) = fixture(model);
+    let domain = Arc::new(Domain { state, epoch: 1 });
+    let timer_drops = Rc::new(core::cell::Cell::new(0));
+    let minimum: Rc<dyn crate::bus::pci::power::Timer> = Rc::new(Unavailable {
+        _allocation: Box::new([0; 4096]),
+        drops: timer_drops.clone(),
+    });
+    let (mut endpoint, _) = Endpoint::new(host, domain, minimum.clone());
+    endpoint.discover(&bar, NVME_CLASS).unwrap();
+    assert_eq!(
+        endpoint.prepare(),
+        Err(Error::PciPower(crate::bus::pci::power::Error::Clock))
+    );
+    drop(endpoint);
+    assert_eq!(Rc::strong_count(&minimum), 2);
+    assert_eq!(timer_drops.get(), 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
 }

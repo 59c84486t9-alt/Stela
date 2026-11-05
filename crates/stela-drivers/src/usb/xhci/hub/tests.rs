@@ -8,6 +8,22 @@ pub(in super::super) fn controller(
     context: usize,
     nodes: BTreeMap<u32, Node>,
 ) -> (Controller, Rc<RefCell<Hardware>>) {
+    controller_with_minimum(
+        dma,
+        context,
+        nodes,
+        Clock {
+            ticks_per_microsecond: 1,
+        },
+    )
+}
+
+fn controller_with_minimum(
+    dma: &mut dyn DmaAllocator,
+    context: usize,
+    nodes: BTreeMap<u32, Node>,
+    physical: Clock,
+) -> (Controller, Rc<RefCell<Hardware>>) {
     let model = Rc::new(RefCell::new(Hardware::new(context, nodes)));
     let controller = Controller::new(
         Box::new(RegistersModel(model.clone())),
@@ -16,6 +32,7 @@ pub(in super::super) fn controller(
         },
         dma,
         "hub model".into(),
+        crate::minimum_model::owned(physical),
     )
     .unwrap();
     (controller, model)

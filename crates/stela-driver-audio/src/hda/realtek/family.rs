@@ -4,8 +4,7 @@
 //! Linux a804c5742bff224d4cb4d25dd383554d598be32b (GPL-2.0-or-later).
 use super::CoefficientChange;
 use crate::{
-    Error,
-    bus::i2c::Timer,
+    Error, Timer,
     hda::{Controller, Registers},
 };
 
@@ -100,6 +99,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         selected: RealtekFamily,
         zero: u16,
     ) -> Result<alloc::vec::Vec<CoefficientChange>, Error> {
+        self.minimum_guard()?;
         let mut changes = alloc::vec::Vec::new();
         let eapd = match id {
             0x10ec_0662 if zero & 0xf0 == 0x30 => Some((4, 1 << 10, 0)),
@@ -152,6 +152,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         id: u32,
         zero: u16,
     ) -> Result<Option<CoefficientChange>, Error> {
+        self.minimum_guard()?;
         if matches!(id, 0x10ec_0882 | 0x10ec_0883 | 0x10ec_0885)
             || (id == 0x10ec_0888 && matches!(zero & 0xf0, 0 | 0x10))
         {

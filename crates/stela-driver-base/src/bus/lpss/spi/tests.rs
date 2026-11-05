@@ -1,5 +1,9 @@
 use core::mem::ManuallyDrop;
 type Preparation<R> = Result<ManuallyDrop<Owner<R>>, (Error, ManuallyDrop<Owner<R>>)>;
+#[expect(
+    clippy::result_large_err,
+    reason = "source oracle retains its same inline provider on preparation refusal"
+)]
 fn prepare_owner<R: Registers>(registers: R, chip_selects: u8) -> Preparation<R> {
     let mut owner = ManuallyDrop::new(Owner::new(registers));
     match owner.prepare(chip_selects) {
@@ -425,7 +429,7 @@ fn native_original_function_mapping_prepare_and_acknowledged_retirement() {
     // so no child is published here. Separate independent serial peers execute
     // the full same composed PIO engine instead of inventing RAM-side ACKs.
     let retired = finish_owner(owner).unwrap();
-    release_native(retired.into_resources(), &config_counts, &bar_counts);
+    release_native(retired.into_resources(), &config_counts, bar_counts);
 }
 
 #[test]

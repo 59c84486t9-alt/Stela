@@ -44,7 +44,7 @@ impl Engine {
             self.check_card()?;
             // CMD11's R1 has completed. The card must pull every DAT
             // line low before its clock stops; one low pin is insufficient.
-            self.clock.delay(1_000);
+            self.quiet(1_000)?;
             if self.registers.read32(PRESENT) & DATA_LINES != 0 {
                 return Err(BlockError::Unsupported("SD CMD11 did not pull DAT low"));
             }
@@ -70,11 +70,11 @@ impl Engine {
             // mmc_host_set_uhs_voltage keeps the clock gated for 10 ms,
             // keeping Linux's margin over the architectural 5-ms minimum.
             // Card VCC stays at its original 3.3/3.0-V supply.
-            self.clock.delay(match self.profile {
+            self.quiet(match self.profile {
                 Profile::Gli9750 | Profile::Gli9755 => 110_000,
                 Profile::Gli9767 => 15_000,
                 _ => 10_000,
-            });
+            })?;
             self.check_card()?;
             if self.registers.read16(HOST_CONTROL2) & SIGNAL_180 == 0 {
                 return Err(BlockError::Unsupported(
@@ -82,7 +82,7 @@ impl Engine {
                 ));
             }
             self.registers.write16(CLOCK, clock);
-            self.clock.delay(1_000);
+            self.quiet(1_000)?;
             self.check_card()?;
             if self.registers.read16(CLOCK) & (CLOCK_CARD | CLOCK_STABLE)
                 != CLOCK_CARD | CLOCK_STABLE
@@ -217,7 +217,7 @@ impl Engine {
                 // The standard Linux SD CMD19 path uses a 1-ms inter-cycle
                 // delay even though the architectural specification permits 0.
                 if self.sd_timing != Timing::MmcHs200 {
-                    self.clock.delay(1_000);
+                    self.quiet(1_000)?;
                 }
                 let control = self.registers.read16(HOST_CONTROL2);
                 if control & EXECUTE_TUNING == 0 {
@@ -273,6 +273,9 @@ impl Engine {
     }
 
     pub(super) fn uhs_failure(&mut self, primary: BlockError) -> BlockError {
+        if matches!(primary, BlockError::PciPower(_)) {
+            return self.quarantine_authority(primary);
+        }
         if self.uhs_failed {
             // A permanent electrical/permission fence already kept its
             // cleanup result. Unwinding must neither retry nor touch its BARs.
@@ -290,7 +293,7 @@ impl Engine {
             .power_off()
             .and_then(|()| {
                 if self.registers.read8(POWER) & POWER_ON == 0 {
-                    self.clock.delay(1_000);
+                    self.quiet(1_000)?;
                     Ok(())
                 } else {
                     Err(BlockError::Unsupported(
@@ -299,6 +302,16 @@ impl Engine {
                 }
             })
             .err();
+        if matches!(&restoration, Some(BlockError::PciPower(_))) {
+            self.uhs_failed = true;
+            self.last_failure = Some(Failure {
+                primary: primary.clone(),
+                restoration,
+                retirement: None,
+                quarantined: true,
+            });
+            return primary;
+        }
         self.uhs_failed = false;
         let primary = self.retire_error(primary);
         if restoration.is_some() {

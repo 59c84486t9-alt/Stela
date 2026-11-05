@@ -1,0 +1,295 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 23:42:24 -0500
+Subject: [PATCH] refactor(vfs): link original idmapped inode permission
+ helpers
+
+---
+ fs/inode.c          |  81 -----------------------------
+ fs/mnt_idmapping.c  | 123 +++++++++++++++++++++++++++++++++++++++++++-
+ kernel/capability.c |  36 -------------
+ 3 files changed, 122 insertions(+), 118 deletions(-)
+
+diff --git a/fs/inode.c b/fs/inode.c
+index 2e9fcd06f704e6b7944672906b127ea1257ca24e..49f40a735aed349a9096f88df7938e8953183609 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -1306,37 +1306,6 @@ void inode_init_owner(struct mnt_idmap *idmap, struct inode *inode,
+ }
+ EXPORT_SYMBOL(inode_init_owner);
+ 
+-/**
+- * inode_owner_or_capable - check current task permissions to inode
+- * @idmap: idmap of the mount the inode was found from
+- * @inode: inode being checked
+- *
+- * Return true if current either has CAP_FOWNER in a namespace with the
+- * inode owner uid mapped, or owns the file.
+- *
+- * If the inode has been found through an idmapped mount the idmap of
+- * the vfsmount must be passed through @idmap. This function will then take
+- * care to map the inode according to @idmap before checking permissions.
+- * On non-idmapped mounts or if permission checking is to be performed on the
+- * raw inode simply pass @nop_mnt_idmap.
+- */
+-bool inode_owner_or_capable(struct mnt_idmap *idmap,
+-			    const struct inode *inode)
+-{
+-	vfsuid_t vfsuid;
+-	struct user_namespace *ns;
+-
+-	vfsuid = i_uid_into_vfsuid(idmap, inode);
+-	if (vfsuid_eq_kuid(vfsuid, current_fsuid()))
+-		return true;
+-
+-	ns = current_user_ns();
+-	if (vfsuid_has_mapping(ns, vfsuid) && ns_capable(ns, CAP_FOWNER))
+-		return true;
+-	return false;
+-}
+-EXPORT_SYMBOL(inode_owner_or_capable);
+-
+ /*
+  * Direct i/o helper functions
+  */
+@@ -1399,56 +1368,6 @@ void inode_nohighmem(struct inode *inode)
+ }
+ EXPORT_SYMBOL(inode_nohighmem);
+ 
+-/**
+- * in_group_or_capable - check whether caller is CAP_FSETID privileged
+- * @idmap:	idmap of the mount @inode was found from
+- * @inode:	inode to check
+- * @vfsgid:	the new/current vfsgid of @inode
+- *
+- * Check whether @vfsgid is in the caller's group list or if the caller is
+- * privileged with CAP_FSETID over @inode. This can be used to determine
+- * whether the setgid bit can be kept or must be dropped.
+- *
+- * Return: true if the caller is sufficiently privileged, false if not.
+- */
+-bool in_group_or_capable(struct mnt_idmap *idmap,
+-			 const struct inode *inode, vfsgid_t vfsgid)
+-{
+-	if (vfsgid_in_group_p(vfsgid))
+-		return true;
+-	if (capable_wrt_inode_uidgid(idmap, inode, CAP_FSETID))
+-		return true;
+-	return false;
+-}
+-EXPORT_SYMBOL(in_group_or_capable);
+-
+-/**
+- * mode_strip_sgid - handle the sgid bit for non-directories
+- * @idmap: idmap of the mount the inode was created from
+- * @dir: parent directory inode
+- * @mode: mode of the file to be created in @dir
+- *
+- * If the @mode of the new file has both the S_ISGID and S_IXGRP bit
+- * raised and @dir has the S_ISGID bit raised ensure that the caller is
+- * either in the group of the parent directory or they have CAP_FSETID
+- * in their user namespace and are privileged over the parent directory.
+- * In all other cases, strip the S_ISGID bit from @mode.
+- *
+- * Return: the new mode to use for the file
+- */
+-umode_t mode_strip_sgid(struct mnt_idmap *idmap,
+-			const struct inode *dir, umode_t mode)
+-{
+-	if ((mode & (S_ISGID | S_IXGRP)) != (S_ISGID | S_IXGRP))
+-		return mode;
+-	if (S_ISDIR(mode) || !dir || !(dir->i_mode & S_ISGID))
+-		return mode;
+-	if (in_group_or_capable(idmap, dir, i_gid_into_vfsgid(idmap, dir)))
+-		return mode;
+-	return mode & ~S_ISGID;
+-}
+-EXPORT_SYMBOL(mode_strip_sgid);
+-
+ #ifdef CONFIG_DEBUG_VFS
+ /**
+  * dump_inode - dump an inode.
+diff --git a/fs/mnt_idmapping.c b/fs/mnt_idmapping.c
+index cb61fbdb52e906ed0afa22a8aa3fcffa03545f1a..a9808538f27a2c5d73587a441ee145641c84a30e 100644
+--- a/fs/mnt_idmapping.c
++++ b/fs/mnt_idmapping.c
+@@ -1,6 +1,10 @@
+ // SPDX-License-Identifier: GPL-2.0
+-/* Copyright (c) 2022 Christian Brauner <brauner@kernel.org> */
++/*
++ * Copyright (c) 2022 Christian Brauner <brauner@kernel.org>
++ * Inode ownership helpers from fs/inode.c and kernel/capability.c.
++ */
+ 
++#include <linux/capability.h>
+ #include <linux/cred.h>
+ #include <linux/fs.h>
+ #include <linux/mnt_idmapping.h>
+@@ -387,3 +391,120 @@ int statmount_mnt_idmap(struct mnt_idmap *idmap, struct seq_file *seq, bool uid_
+ 
+ 	return nr_mappings;
+ }
++
++/**
++ * privileged_wrt_inode_uidgid - Do capabilities in the namespace work over the inode?
++ * @ns: The user namespace in question
++ * @idmap: idmap of the mount @inode was found from
++ * @inode: The inode in question
++ *
++ * Return true if the inode uid and gid are within the namespace.
++ */
++bool privileged_wrt_inode_uidgid(struct user_namespace *ns,
++				 struct mnt_idmap *idmap,
++				 const struct inode *inode)
++{
++	return vfsuid_has_mapping(ns, i_uid_into_vfsuid(idmap, inode)) &&
++	       vfsgid_has_mapping(ns, i_gid_into_vfsgid(idmap, inode));
++}
++
++/**
++ * capable_wrt_inode_uidgid - Check nsown_capable and uid and gid mapped
++ * @idmap: idmap of the mount @inode was found from
++ * @inode: The inode in question
++ * @cap: The capability in question
++ *
++ * Return true if the current task has the given capability targeted at
++ * its own user namespace and that the given inode's uid and gid are
++ * mapped into the current user namespace.
++ */
++bool capable_wrt_inode_uidgid(struct mnt_idmap *idmap,
++			      const struct inode *inode, int cap)
++{
++	struct user_namespace *ns = current_user_ns();
++
++	return ns_capable(ns, cap) &&
++	       privileged_wrt_inode_uidgid(ns, idmap, inode);
++}
++EXPORT_SYMBOL(capable_wrt_inode_uidgid);
++
++/**
++ * inode_owner_or_capable - check current task permissions to inode
++ * @idmap: idmap of the mount the inode was found from
++ * @inode: inode being checked
++ *
++ * Return true if current either has CAP_FOWNER in a namespace with the
++ * inode owner uid mapped, or owns the file.
++ *
++ * If the inode has been found through an idmapped mount the idmap of
++ * the vfsmount must be passed through @idmap. This function will then take
++ * care to map the inode according to @idmap before checking permissions.
++ * On non-idmapped mounts or if permission checking is to be performed on the
++ * raw inode simply pass @nop_mnt_idmap.
++ */
++bool inode_owner_or_capable(struct mnt_idmap *idmap,
++			    const struct inode *inode)
++{
++	vfsuid_t vfsuid;
++	struct user_namespace *ns;
++
++	vfsuid = i_uid_into_vfsuid(idmap, inode);
++	if (vfsuid_eq_kuid(vfsuid, current_fsuid()))
++		return true;
++
++	ns = current_user_ns();
++	if (vfsuid_has_mapping(ns, vfsuid) && ns_capable(ns, CAP_FOWNER))
++		return true;
++	return false;
++}
++EXPORT_SYMBOL(inode_owner_or_capable);
++
++/**
++ * in_group_or_capable - check whether caller is CAP_FSETID privileged
++ * @idmap:	idmap of the mount @inode was found from
++ * @inode:	inode to check
++ * @vfsgid:	the new/current vfsgid of @inode
++ *
++ * Check whether @vfsgid is in the caller's group list or if the caller is
++ * privileged with CAP_FSETID over @inode. This can be used to determine
++ * whether the setgid bit can be kept or must be dropped.
++ *
++ * Return: true if the caller is sufficiently privileged, false if not.
++ */
++bool in_group_or_capable(struct mnt_idmap *idmap,
++			 const struct inode *inode, vfsgid_t vfsgid)
++{
++	if (vfsgid_in_group_p(vfsgid))
++		return true;
++	if (capable_wrt_inode_uidgid(idmap, inode, CAP_FSETID))
++		return true;
++	return false;
++}
++EXPORT_SYMBOL(in_group_or_capable);
++
++/**
++ * mode_strip_sgid - handle the sgid bit for non-directories
++ * @idmap: idmap of the mount the inode was created from
++ * @dir: parent directory inode
++ * @mode: mode of the file to be created in @dir
++ *
++ * If the @mode of the new file has both the S_ISGID and S_IXGRP bit
++ * raised and @dir has the S_ISGID bit raised ensure that the caller is
++ * either in the group of the parent directory or they have CAP_FSETID
++ * in their user namespace and are privileged over the parent directory.
++ * In all other cases, strip the S_ISGID bit from @mode.
++ *
++ * Return: the new mode to use for the file
++ */
++umode_t mode_strip_sgid(struct mnt_idmap *idmap,
++			const struct inode *dir, umode_t mode)
++{
++	if ((mode & (S_ISGID | S_IXGRP)) != (S_ISGID | S_IXGRP))
++		return mode;
++	if (S_ISDIR(mode) || !dir || !(dir->i_mode & S_ISGID))
++		return mode;
++	if (in_group_or_capable(idmap, dir, i_gid_into_vfsgid(idmap, dir)))
++		return mode;
++	return mode & ~S_ISGID;
++}
++EXPORT_SYMBOL(mode_strip_sgid);
+diff --git a/kernel/capability.c b/kernel/capability.c
+index 829f49ae07b965876fbab3b292e635ba5e8c484a..a1d1e9b4a08b759b90fb0580dc5504de3f7610f3 100644
+--- a/kernel/capability.c
++++ b/kernel/capability.c
+@@ -444,42 +444,6 @@ bool file_ns_capable(const struct file *file, struct user_namespace *ns,
+ }
+ EXPORT_SYMBOL(file_ns_capable);
+ 
+-/**
+- * privileged_wrt_inode_uidgid - Do capabilities in the namespace work over the inode?
+- * @ns: The user namespace in question
+- * @idmap: idmap of the mount @inode was found from
+- * @inode: The inode in question
+- *
+- * Return true if the inode uid and gid are within the namespace.
+- */
+-bool privileged_wrt_inode_uidgid(struct user_namespace *ns,
+-				 struct mnt_idmap *idmap,
+-				 const struct inode *inode)
+-{
+-	return vfsuid_has_mapping(ns, i_uid_into_vfsuid(idmap, inode)) &&
+-	       vfsgid_has_mapping(ns, i_gid_into_vfsgid(idmap, inode));
+-}
+-
+-/**
+- * capable_wrt_inode_uidgid - Check nsown_capable and uid and gid mapped
+- * @idmap: idmap of the mount @inode was found from
+- * @inode: The inode in question
+- * @cap: The capability in question
+- *
+- * Return true if the current task has the given capability targeted at
+- * its own user namespace and that the given inode's uid and gid are
+- * mapped into the current user namespace.
+- */
+-bool capable_wrt_inode_uidgid(struct mnt_idmap *idmap,
+-			      const struct inode *inode, int cap)
+-{
+-	struct user_namespace *ns = current_user_ns();
+-
+-	return ns_capable(ns, cap) &&
+-	       privileged_wrt_inode_uidgid(ns, idmap, inode);
+-}
+-EXPORT_SYMBOL(capable_wrt_inode_uidgid);
+-
+ /**
+  * ptracer_capable - Determine if the ptracer holds CAP_SYS_PTRACE in the namespace
+  * @tsk: The task that may be ptraced

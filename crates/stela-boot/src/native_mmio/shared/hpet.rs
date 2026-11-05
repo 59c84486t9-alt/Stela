@@ -4,14 +4,15 @@
 use super::*;
 use crate::{
     engine::host::RootIdentity,
-    native_clock::{HpetCounter, hpet::Descriptor},
+    native_clock::{Prepared, hpet::Descriptor},
 };
 use alloc::rc::Rc;
 use core::mem::ManuallyDrop;
+use stela_contracts::refuse;
 use stela_drivers::{
     bus::{
         mmio::owned::{Mapping, ResourceId},
-        pci::power::{self, Timer},
+        pci::power::Timer,
     },
     platform::work::WorkError,
 };
@@ -23,6 +24,7 @@ pub(crate) struct HpetMapping {
     authority: ManuallyDrop<Authority>,
     platform: ManuallyDrop<Arc<Platform>>,
     registration: Option<ResourceId>,
+    admission: Option<AdmissionClose>,
     mapping_retired: bool,
     closing: bool,
     retired: bool,
@@ -63,6 +65,7 @@ impl HpetMapping {
         if self.retired {
             return Ok(());
         }
+        self.admission.as_ref().ok_or(WorkError::Closed)?.close();
         self.closing = true;
         if !self.mapping_retired {
             if let Some(mapping) = self.mapping.as_mut() {
@@ -78,7 +81,12 @@ impl HpetMapping {
                 .map_err(unavailable)?;
             self.registration = None;
         }
+        self.admission.take().ok_or(WorkError::Closed)?.dismiss();
         self.retired = true;
+        self.platform
+            .captured
+            .hpet_unregistered
+            .store(true, Ordering::Release);
         Ok(())
     }
 }
@@ -111,74 +119,74 @@ fn unavailable<T>(_: T) -> WorkError {
     WorkError::Unavailable
 }
 
-pub(super) struct PciMinimum(HpetCounter);
-
-// SAFETY: the retained native HPET checks the original CPU, root, power
-// eligibility and live controls. The lower bound on its actual tick delta
-// supplies the minimum independently of the driver's nominal deadline clock.
-unsafe impl Timer for PciMinimum {
-    fn check(&self) -> Result<(), power::Error> {
-        self.0.check_process().map_err(|_| power::Error::Clock)?;
-        let ticks = self
-            .0
-            .ticks_for_minimum_ns(60_000_000_000)
-            .map_err(|_| power::Error::Clock)?;
-        let before = self.0.read_irq().map_err(|_| power::Error::Clock)?;
-        let after = self
-            .0
-            .progress_after(before)
-            .map_err(|_| power::Error::Clock)?;
-        if after <= before || after.checked_add(ticks).is_none() {
-            return Err(power::Error::Clock);
-        }
-        Ok(())
-    }
-
-    fn wait_us(&self, microseconds: u64) -> Result<(), power::Error> {
-        self.0.check_process().map_err(|_| power::Error::Clock)?;
-        let minimum_ns = microseconds.checked_mul(1000).ok_or(power::Error::Clock)?;
-        let ticks = self
-            .0
-            .ticks_for_minimum_ns(minimum_ns)
-            .map_err(|_| power::Error::Clock)?;
-        let start = self.0.read_irq().map_err(|_| power::Error::Clock)?;
-        let target = start.checked_add(ticks).ok_or(power::Error::Clock)?;
-        let mut now = start;
-        while now < target {
-            let next = self
-                .0
-                .progress_after(now)
-                .map_err(|_| power::Error::Interrupted)?;
-            if next <= now {
-                return Err(power::Error::Interrupted);
-            }
-            now = next;
-        }
-        Ok(())
-    }
-}
-
 impl Source {
     /// # Safety
-    /// The original BSP keeps this whole HPET block and all root/backing
-    /// owners until shutdown. No firmware, SMM or other HPET user may resume.
-    pub(crate) unsafe fn install_pci_clock(&self) -> Result<(), WorkError> {
+    /// The BSP owns the complete captured HPET block and rounded page through
+    /// shutdown. Firmware, SMM and other controller users have stopped, with
+    /// all earlier accesses drained and no future comparator, route, reset or
+    /// decode changes. The source and root outlive every retained PCI timer.
+    pub(crate) unsafe fn install_pci_clock(&self) -> crate::Result<()> {
         if self.pci_clock.get().is_some() {
-            return Err(WorkError::Busy);
+            return Err(refuse!("the native PCI clock is already retained"));
         }
-        // SAFETY: same exclusive controller and original root identity.
-        let owned = unsafe { self.take_hpet(self.identity.clone()) }.map_err(unavailable)?;
-        let counter = HpetCounter::attach_native_exclusive(owned)?;
+        // SAFETY: caller provides the whole-controller handoff and the
+        // original root identity is the same one that activated this Source.
+        let owner = unsafe { self.take_hpet(self.identity.clone()) }
+            .map_err(|error| refuse!("PCI HPET handoff: {error}", ?error))?;
+        let prepared = Prepared::exclusive_native_hpet(owner)
+            .map_err(|error| refuse!("PCI HPET counter: {error}", ?error))?;
+        // This keeps the physical owner even if a later context or power
+        // observation refuses a timer. The mount has no live device teardown.
         self.pci_clock
-            .set(Rc::new(PciMinimum(counter)))
-            .map_err(|_| WorkError::Busy)?;
-        self.pci_minimum().map(drop)
+            .set(prepared)
+            .map_err(|_| refuse!("the native PCI clock is already retained"))
+    }
+
+    /// # Safety
+    /// The BSP hands over its quiescent local timer and original IDT and
+    /// keeps the complete HPET ownership and clock root through shutdown.
+    pub(crate) unsafe fn install_service_clock(
+        &self,
+    ) -> Result<crate::native_clock::Installed, WorkError> {
+        let source = self.pci_clock.get().ok_or(WorkError::Unavailable)?;
+        // SAFETY: same kept controller/identity and caller's LAPIC handoff.
+        unsafe {
+            crate::native_clock::Installed::attach_native(self.identity.clone(), source.clone())
+        }
     }
 
     pub(crate) fn pci_minimum(&self) -> Result<Rc<dyn Timer>, WorkError> {
-        let timer = self.pci_clock.get().ok_or(WorkError::Unavailable)?;
-        timer.check().map_err(unavailable)?;
-        Ok(timer.clone())
+        self.identity.check_dispatch()?;
+        self.pci_clock
+            .get()
+            .ok_or(WorkError::Unavailable)?
+            .pci_minimum()
+    }
+
+    /// Reclaim the original controller only after native unmap and resource
+    /// withdrawal acknowledged, and all independent backing pins have joined.
+    pub(crate) fn join_hpet(&self) -> Result<(), Error> {
+        self.identity.check_dispatch().map_err(failed)?;
+        let mut slot = self
+            .hpet_assignment
+            .try_borrow_mut()
+            .map_err(|_| Error::Busy)?;
+        if slot.is_some()
+            && !self
+                .platform
+                .captured
+                .hpet_unregistered
+                .load(Ordering::Acquire)
+        {
+            return Err(Error::Busy);
+        }
+        if let Some(previous) = slot.take()
+            && let Err(refusal) = previous.into_original()
+        {
+            *slot = Some(refusal.owner);
+            return Err(Error::Assignment(refusal.error));
+        }
+        Ok(())
     }
 
     /// # Safety
@@ -216,12 +224,20 @@ impl Source {
         {
             return Err(Error::OutsideResource);
         }
-        let resource = Resource::new(Box::new(Backing {
-            owner: self.platform.captured.clone(),
-            span: page,
-            kind: ResourceKind::Registers,
-        }));
-        let registration = self.authority.register_resource(resource.clone())?;
+        self.join_hpet()?;
+        let mut slot = self
+            .hpet_assignment
+            .try_borrow_mut()
+            .map_err(|_| Error::Busy)?;
+        let (resource, registration, assignment) =
+            self.register_reservation(page, ResourceKind::Registers)?;
+        let admission = assignment.admission_close();
+        *slot = Some(assignment);
+        self.platform
+            .captured
+            .hpet_unregistered
+            .store(false, Ordering::Release);
+        drop(slot);
         // Keep every original owner BEFORE an alias/PTE effect. Constructor
         // errors can then quarantine the same real identity/resource bundle.
         let mut owned = HpetMapping {
@@ -231,6 +247,7 @@ impl Source {
             authority: ManuallyDrop::new(self.authority.clone()),
             platform: ManuallyDrop::new(self.platform.clone()),
             registration: Some(registration),
+            admission: Some(admission),
             mapping_retired: false,
             closing: false,
             retired: false,

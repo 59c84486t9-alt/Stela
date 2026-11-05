@@ -22,6 +22,7 @@ fn native_ddr52_uses_sampling_pads_power_class_and_changed_pio_or_adma_payloads(
         let mut host = Host::new(
             Box::new(owner),
             clock(),
+            crate::sdhci::model::minimum(),
             "embedded MMC DDR52".into(),
             &mut dma,
             Profile::Gli9763e,
@@ -73,6 +74,7 @@ fn native_ddr52_ignored_sampling_or_signal_change_powers_off_and_fences() {
         let mut host = Host::new(
             Box::new(owner),
             clock(),
+            crate::sdhci::model::minimum(),
             "refused DDR52".into(),
             &mut dma,
             Profile::Gli9763e,

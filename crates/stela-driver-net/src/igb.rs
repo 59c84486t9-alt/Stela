@@ -22,7 +22,7 @@ use super::{
     ring::{DESCRIPTOR, DESCRIPTORS, Ring},
 };
 use crate::{
-    Clock, Handoff,
+    Handoff,
     block::BlockError,
     bus::{
         dma::DmaAllocator,
@@ -160,15 +160,15 @@ impl RegisterIo for Mmio {
     }
 }
 pub(crate) trait Timer {
-    fn delay(&self, microseconds: u64);
+    fn delay(&self, microseconds: u64) -> Result<(), BlockError>;
     fn wait(&self, microseconds: u64, ready: impl FnMut() -> bool) -> bool;
 }
-impl Timer for Clock {
-    fn delay(&self, microseconds: u64) {
-        self.delay(microseconds);
+impl Timer for crate::timing::Timing {
+    fn delay(&self, us: u64) -> Result<(), BlockError> {
+        crate::timing::Timing::delay(self, us)
     }
-    fn wait(&self, microseconds: u64, ready: impl FnMut() -> bool) -> bool {
-        self.wait(microseconds, ready)
+    fn wait(&self, us: u64, ready: impl FnMut() -> bool) -> bool {
+        crate::timing::Timing::wait(self, us, ready)
     }
 }
 
@@ -180,7 +180,7 @@ pub struct Igb {
     /// Register reads return all ones: the function is gone.
     faulted: bool,
     mac: Mac,
-    clock: Clock,
+    clock: crate::timing::Timing,
     pub location: String,
     pub warnings: InitializationWarnings,
     /// Whether MSI-X vector 0 sends the handoff's completion signal.
@@ -196,21 +196,23 @@ impl Igb {
         function: &mut Function,
         handoff: &Handoff,
         dma: &mut dyn DmaAllocator,
+        minimum: alloc::rc::Rc<dyn crate::bus::pci::power::Timer>,
     ) -> Result<Self, BlockError> {
+        let clock = crate::timing::Timing::new(handoff.clock, minimum)?;
         if !matches(function) {
             return Err(BlockError::Unsupported("not an igb copper controller"));
         }
         let chip = Chip::device(function.device).unwrap();
         let bytes = if chip.modern() { 0x2_0000 } else { 0x1_0000 };
-        function.power_up(&handoff.clock)?;
-        let bars = function.bars();
+        function.power_up(clock.minimum())?;
+        let bars = function.bars()?;
         let device = mapped_registers(handoff, bars[0], 0, bytes)?;
-        let capabilities = PciCapabilities::read(function);
-        function.enable_polled();
+        let capabilities = PciCapabilities::read(function)?;
+        function.enable_polled()?;
         // The 82575 maps queues to vectors through MSIXBM, which this
         // driver leaves alone: it stays polled.
         let msix = function
-            .interrupts()
+            .interrupts()?
             .msix
             .filter(|_| !matches!(chip, Chip::I82575));
         let signalled = match (handoff.completion, msix) {
@@ -232,7 +234,7 @@ impl Igb {
             }
             _ => false,
         };
-        let mut hardware = Hardware::new(&device, &handoff.clock, chip);
+        let mut hardware = Hardware::new(&device, &clock, chip);
         let (mac, warnings) = hardware.initialize(function.config(), capabilities)?;
         let mut net = Self {
             device,
@@ -241,7 +243,7 @@ impl Igb {
             dropping: false,
             faulted: false,
             mac,
-            clock: handoff.clock,
+            clock,
             location: format!("{} Intel {}", function.address, chip.name()),
             warnings,
             signalled,
@@ -262,7 +264,7 @@ impl Igb {
             let device = self.device;
             self.faulted = !TRANSMIT_QUEUE.flush(
                 &mut self.transmit,
-                self.clock,
+                self.clock.nominal(),
                 |offset| device.read32(offset),
                 |offset, value| device.write32(offset, value),
             );
@@ -341,7 +343,7 @@ impl Link for Igb {
         if !self.watchdog()? {
             return Err(LinkError::NoCarrier);
         }
-        if !self.transmit.free(self.clock, transmitted) {
+        if !self.transmit.free(self.clock.nominal(), transmitted) {
             return Err(LinkError::Adapter(format!(
                 "{} transmit ring stalled",
                 self.location
@@ -416,3 +418,6 @@ impl Link for Igb {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+use crate::Clock;

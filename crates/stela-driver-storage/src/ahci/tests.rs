@@ -5,6 +5,54 @@ use alloc::boxed::Box;
 use core::cell::{Cell, RefCell};
 use identify_fixture::identify_page;
 
+/// Private device time model: successful waits advance THIS model's physical
+/// timeline. It is never a production service or a Clock-as-Timer adapter.
+#[derive(Default)]
+struct MinimumModel {
+    now: Cell<u64>,
+    waits: RefCell<Vec<u64>>,
+    checks: Cell<usize>,
+    fail_wait: Cell<Option<usize>>,
+    fail_check: Cell<Option<usize>>,
+    panic_wait: Cell<Option<usize>>,
+}
+// SAFETY: isolated synchronous AHCI model only. wait_us advances the modeled
+// physical time by the requested interval; failures grant no elapsed minimum.
+unsafe impl crate::bus::pci::power::Timer for MinimumModel {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        let next = self.checks.get() + 1;
+        self.checks.set(next);
+        if self.fail_check.get() == Some(next) {
+            Err(crate::bus::pci::power::Error::Clock)
+        } else {
+            Ok(())
+        }
+    }
+    fn wait_us(&self, us: u64) -> Result<(), crate::bus::pci::power::Error> {
+        self.waits.borrow_mut().push(us);
+        let ordinal = self.waits.borrow().len();
+        assert_ne!(
+            self.panic_wait.get(),
+            Some(ordinal),
+            "modeled timer callback unwind"
+        );
+        if self.fail_wait.get() == Some(ordinal) {
+            return Err(crate::bus::pci::power::Error::Clock);
+        }
+        self.now
+            .set(self.now.get().checked_add(us).expect("bounded model time"));
+        if crate::test_clock::read().is_some() {
+            crate::test_clock::advance(
+                Clock {
+                    ticks_per_microsecond: 1,
+                },
+                us,
+            );
+        }
+        Ok(())
+    }
+}
+
 /// How the disk answers the next issued command.
 #[derive(Clone, Copy)]
 enum Fault {
@@ -30,6 +78,7 @@ struct Link {
     present: Cell<bool>,
     /// The disk's fastest SPD.
     fastest: Cell<u32>,
+    reads: Cell<usize>,
 }
 
 const READY: u32 = 0x50;
@@ -50,6 +99,7 @@ impl Link {
             issued: Cell::new(0),
             present: Cell::new(true),
             fastest: Cell::new(2),
+            reads: Cell::new(0),
         }
     }
 
@@ -65,6 +115,7 @@ impl Link {
 
 impl CommandPort for Link {
     fn read32(&self, offset: usize) -> u32 {
+        self.reads.set(self.reads.get() + 1);
         self.registers.borrow()[offset / 4]
     }
     fn write32(&self, offset: usize, value: u32) {
@@ -182,6 +233,9 @@ impl Fixture {
 
     /// With `slots` more command slots for queued commands.
     fn with_slots(slots: usize) -> Self {
+        Self::with_control(slots, Control::model(Rc::new(MinimumModel::default())))
+    }
+    fn with_control(slots: usize, minimum: Rc<Control>) -> Self {
         let mut registers = vec![0u64; 16].into_boxed_slice();
         let mut memory = vec![0u64; 32768 * (1 + slots)];
         let start = memory.as_mut_ptr() as u64;
@@ -193,15 +247,28 @@ impl Fixture {
                 RegionAllocator::new(start..start + (memory.len() * 8) as u64),
             )
         };
+        let retain = Rc::new(Cell::new(false));
         let mut disk = AhciDisk {
             port,
-            commands: dma
-                .allocate(COMMAND_LIST_BYTES + RECEIVED_FIS_BYTES, COMMAND_LIST_BYTES)
-                .unwrap(),
-            table: dma
-                .allocate(COMMAND_TABLE_BYTES, COMMAND_TABLE_ALIGN)
-                .unwrap(),
-            bounce: dma.allocate(BOUNCE_BYTES, 4096).unwrap(),
+            commands: DmaResource::new(
+                dma.allocate(COMMAND_LIST_BYTES + RECEIVED_FIS_BYTES, COMMAND_LIST_BYTES)
+                    .unwrap(),
+                minimum.clone(),
+                retain.clone(),
+            ),
+            table: DmaResource::new(
+                dma.allocate(COMMAND_TABLE_BYTES, COMMAND_TABLE_ALIGN)
+                    .unwrap(),
+                minimum.clone(),
+                retain.clone(),
+            ),
+            bounce: DmaResource::new(
+                dma.allocate(BOUNCE_BYTES, 4096).unwrap(),
+                minimum.clone(),
+                retain.clone(),
+            ),
+            minimum: minimum.clone(),
+            retain: retain.clone(),
             identity: Identity {
                 transport: Transport::Ahci,
                 location: "fixture".into(),
@@ -236,7 +303,7 @@ impl Fixture {
             no_dma_log: false,
             quirks: 0,
             devslp: false,
-            slots: Vec::new(),
+            slots: DmaResource::new(Vec::new(), minimum.clone(), retain),
             running: Vec::new(),
             next_tag: 0,
             looks: 0,
@@ -284,6 +351,7 @@ impl CommandPort for Engines {
 
 mod identify_fixture;
 mod lifecycle;
+mod minimum_timing;
 mod modes;
 mod power;
 mod queue;

@@ -2,17 +2,20 @@
 //! finite cyclic PCM buffer, not a guest audio bridge or an OEM speaker policy.
 use crate::Result;
 use crate::output;
-use alloc::{vec, vec::Vec};
+use alloc::{rc::Rc, vec, vec::Vec};
 use stela_contracts::refuse;
 use stela_drivers::{
     Handoff,
     audio::{
-        Direction, PcmFormat,
+        Direction, PcmFormat, Timer as AudioTimer, Timing,
         hda::{
             AnalogRoute, CodecGraph, Controller, PinOptions, StreamId, Verb, Vref, WidgetKind, pci,
         },
     },
-    bus::{dma::RegionAllocator, i2c::Timer, pci::Function},
+    bus::{
+        dma::RegionAllocator,
+        pci::{Function, power},
+    },
 };
 
 mod registers;
@@ -80,7 +83,7 @@ fn route(graph: &CodecGraph, direction: Direction) -> Result<AnalogRoute> {
 /// is already enabled. It does not configure or credit function-group power.
 /// A missing mandatory D0 capability remains an explicit strict-route failure.
 /// This uses graph/readback data and never identifies an emulator.
-fn bind_transport<R: stela_drivers::audio::hda::Registers, T: Timer>(
+fn bind_transport<R: stela_drivers::audio::hda::Registers, T: AudioTimer>(
     controller: &mut Controller<R, T>,
     graph: &CodecGraph,
     route: &AnalogRoute,
@@ -156,7 +159,13 @@ fn bind_transport<R: stela_drivers::audio::hda::Registers, T: Timer>(
 /// BARs are mapped uncached at identity addresses; its final DMA_BYTES of
 /// coherent identity-mapped RAM are exclusively reserved for this check for the
 /// boot, even on failure. The loader identity root must still be active.
-pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<()> {
+pub unsafe fn run(
+    handoff: &Handoff,
+    mode: AudioCheck,
+    minimum: Rc<dyn power::Timer>,
+) -> Result<()> {
+    let timer = Timing::new(handoff.clock, minimum);
+    power::Timer::check(&timer).map_err(|error| refuse!("audio minimum clock: {error}", ?error))?;
     let dma_start = handoff
         .dma
         .end
@@ -173,7 +182,8 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<()> {
             return Err(refuse!("audio ECAM window is not mapped"));
         }
         // SAFETY: mapped and exclusively owned as required by the caller.
-        let all = unsafe { Function::enumerate(window) };
+        let all = unsafe { Function::enumerate(window) }
+            .map_err(|error| refuse!("audio PCI inventory: {error}", ?error))?;
         // A GPU's display-audio function (Linux `get_bound_vga`: function 0
         // of the same device is a display controller) has no analog route.
         let display = |function: &Function| {
@@ -202,7 +212,10 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<()> {
         ));
     }
     let mut function = functions.remove(0);
-    let bar = function.bars()[0].ok_or(refuse!("HDA has no BAR0"))?;
+    let bars = function
+        .bars()
+        .map_err(|error| refuse!("HDA BAR sizing: {error}", %error))?;
+    let bar = bars[0].ok_or(refuse!("HDA has no BAR0"))?;
     let range = bar.memory().ok_or(refuse!("HDA BAR0 is not memory"))?;
     if !handoff.is_mapped(&range) {
         return Err(refuse!("HDA BAR0 was not mapped uncached"));
@@ -212,15 +225,9 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<()> {
         function.address, function.vendor, function.device, handoff.dma.end,
     ));
     // SAFETY: explicit platform ownership, live mapped BAR and coherent DMA.
-    let prepared = unsafe {
-        pci::prepare(
-            &mut function,
-            bar,
-            &handoff.clock,
-            pci::Ownership::ExclusiveLegacy,
-        )
-    }
-    .map_err(|error| refuse!("PCI prepare: {error}", ?error))?;
+    let prepared =
+        unsafe { pci::prepare(&mut function, bar, &timer, pci::Ownership::ExclusiveLegacy) }
+            .map_err(|error| refuse!("PCI prepare: {error}", ?error))?;
     let config = prepared.config();
     // SAFETY: the prepared PCI function and mapping remain exclusively owned.
     let registers =
@@ -228,7 +235,7 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<()> {
     let registers = registers::Observed::new(registers);
     let snapshot = registers.clone();
     // SAFETY: all controller, MMIO and DMA ownership prerequisites above hold.
-    let mut controller = unsafe { Controller::new(registers, handoff.clock, &mut dma, config) }
+    let mut controller = unsafe { Controller::new(registers, timer, &mut dma, config) }
         .map_err(|error| refuse!("controller start: {error}", ?error))?;
     let result = (|| {
         output::arguments(format_args!(
@@ -420,9 +427,16 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<()> {
     let shutdown = controller
         .shutdown()
         .map_err(|error| refuse!("controller shutdown: {error}", ?error));
-    if shutdown.is_ok() {
+    let shutdown = shutdown.and_then(|()| {
+        // SAFETY: acknowledged stream and command-engine stops above; this
+        // fixture has no IRQ, worker or other CPU user. PCM operations ended
+        // synchronously, and the loader keeps its exclusive DMA tail.
+        let resources = unsafe { controller.into_shutdown_resources() }
+            .map_err(|_| refuse!("audio resource retirement refused"))?;
+        drop(resources);
         output::arguments(format_args!("AUDIO CHECK shutdown=quiesced\n"));
-    }
+        Ok(())
+    });
     match (result, shutdown) {
         (Err(error), Err(shutdown)) => {
             return Err(refuse!("{error}; also {shutdown}", %error, %shutdown));
@@ -430,6 +444,5 @@ pub unsafe fn run(handoff: &Handoff, mode: AudioCheck) -> Result<()> {
         (Err(error), _) | (_, Err(error)) => return Err(error),
         (Ok(()), Ok(())) => {}
     }
-    output::arguments(format_args!("AUDIO CHECK passed\n"));
     Ok(())
 }

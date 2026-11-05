@@ -7,6 +7,7 @@ use crate::bus::{
         pages::DmaPages,
     },
     pci::{
+        ConfigFailure,
         owned::test_support::{fixture, fixture_pointer},
         regs,
     },
@@ -15,7 +16,7 @@ use alloc::vec::Vec;
 use core::{
     ops::Range,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::sync::Mutex;
 
@@ -32,6 +33,11 @@ struct State {
     panic_drain: AtomicBool,
     detach_error: AtomicBool,
     detachments: AtomicUsize,
+    action_delivery: AtomicBool,
+    action_epoch: AtomicU64,
+    action_entries: Mutex<Vec<irq_actions::Entry>>,
+    action_records: Mutex<Vec<u8>>,
+    action_pins_released: AtomicUsize,
 }
 struct RootOwner(Arc<State>);
 impl Drop for RootOwner {
@@ -70,7 +76,10 @@ unsafe impl Root for OldRoot {
             Ok(())
         }
     }
-    unsafe fn bind(&self, binding: RequesterBinding) -> Result<Box<dyn Attachment>, DmaError> {
+    unsafe fn bind(
+        &self,
+        binding: RequesterBinding,
+    ) -> Result<Box<dyn crate::bus::pci::requester::preparation::AttachmentBackend>, DmaError> {
         assert_eq!(binding.address(), ADDRESS);
         binding.check_live().unwrap();
         self.owner
@@ -114,16 +123,34 @@ impl Drop for Control {
 // SAFETY: this synchronous fixture has no hardware or active mappings.
 // Its unique control retains the original binding on failure and makes
 // every old domain reference stale before releasing configuration pins.
-unsafe impl Attachment for Control {
+unsafe impl crate::bus::pci::requester::preparation::AttachmentBackend for Control {
     fn domain(&self) -> Arc<dyn DmaDomain> {
         self.domain.clone()
     }
-    unsafe fn detach(&mut self) -> Result<(), DmaError> {
+    fn irq_owner(
+        &mut self,
+        _requester: &crate::bus::pci::requester::RequesterId,
+        _config: Option<&crate::bus::pci::owned::ConfigRetention>,
+    ) -> Result<Option<Box<dyn crate::bus::irq::posted_msi::RouteOwner>>, DmaError> {
+        if !self.domain._owner.0.action_delivery.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        irq_actions::owner(self.domain.clone()).map(Some)
+    }
+    unsafe fn detach(
+        &mut self,
+    ) -> Result<(), crate::bus::pci::requester::preparation::DetachError> {
         if self.detached {
-            return Err(DmaError::Unmapped);
+            return Err(
+                crate::bus::pci::requester::preparation::DetachError::Uncertain(DmaError::Unmapped),
+            );
         }
         if self.domain._owner.0.detach_error.load(Ordering::Relaxed) {
-            return Err(DmaError::InvalidationFailed);
+            return Err(
+                crate::bus::pci::requester::preparation::DetachError::Uncertain(
+                    DmaError::InvalidationFailed,
+                ),
+            );
         }
         self.domain.binding.lock().unwrap().take();
         self.domain
@@ -166,11 +193,13 @@ unsafe impl DmaDomain for Domain {
 }
 fn function(address: Address) -> Function<OwnedConfig> {
     let (mut config, _) = fixture(address);
-    config.write32(0, 0x12348086);
-    config.write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE);
-    config.write32(8, 0x02800000);
-    config.write32(0x0c, 0);
-    config.write32(0x100, 0);
+    config.write32(0, 0x12348086).unwrap();
+    config
+        .write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE)
+        .unwrap();
+    config.write32(8, 0x02800000).unwrap();
+    config.write32(0x0c, 0).unwrap();
+    config.write32(0x100, 0).unwrap();
     Function::new(address, config).unwrap()
 }
 fn preparing(drain_error: bool, bind_error: bool) -> (PreparingRequester, Arc<State>) {
@@ -198,8 +227,18 @@ fn preparing_with_drift(
 }
 #[test]
 fn old_root_completion_precedes_attachment_and_owners_follow_the_bound_domain() {
-    let (prepared, state) = preparing(false, false);
+    let (mut prepared, state) = preparing(false, false);
     assert!(state.events.lock().unwrap().is_empty());
+    let enabled = regs::COMMAND_INTX_DISABLE | regs::COMMAND_MASTER;
+    assert_eq!(
+        prepared
+            .function_mut()
+            .config()
+            .write16(regs::COMMAND, enabled),
+        Err(crate::bus::pci::ConfigError::before_effect(
+            ConfigFailure::BusMasterSealed
+        ))
+    );
     // SAFETY: the synchronous fixture has no DMA engines, submissions or IRQ/work.
     let receipt = unsafe { prepared.acknowledge_quiescence() };
     assert!(state.events.lock().unwrap().is_empty());
@@ -214,13 +253,18 @@ fn old_root_completion_precedes_attachment_and_owners_follow_the_bound_domain() 
     let old_domain = bound.attachment.domain();
     let (error, requester) = bound.requester.into_dma_binding().err().unwrap();
     assert_eq!(error, ClaimError::AlreadyBound);
-    let mut mapping = requester.into_function().into_config().into_mapping();
+    let mut config = requester.into_function().into_config();
+    assert_eq!(config.read16(regs::COMMAND), Ok(regs::COMMAND_INTX_DISABLE));
+    config.write16(regs::COMMAND, enabled).unwrap();
+    config
+        .write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE)
+        .unwrap();
     // SAFETY: isolated idle fixture; the retained binding must refuse reuse.
-    assert_eq!(unsafe { mapping.retire() }, Err(MappingError::Busy));
+    assert_eq!(unsafe { config.retire() }, Err(MappingError::Busy));
     // SAFETY: no modeled DMA/IRQ/work user exists, and all original owners stay kept.
     unsafe { bound.attachment.detach() }.unwrap();
     // SAFETY: exact fixture detach acknowledged before mapping retirement.
-    unsafe { mapping.retire() }.unwrap();
+    unsafe { crate::bus::pci::owned::test_support::retire_owned(config) }.unwrap();
     assert_eq!(state.detachments.load(Ordering::Relaxed), 1);
     drop(bound.attachment);
     assert_eq!(state.drops.load(Ordering::Relaxed), 0);
@@ -281,10 +325,15 @@ fn abandoning_preparation_does_not_release_an_unstopped_owner() {
 #[test]
 fn configuration_activity_is_rechecked_after_old_root_completion() {
     let (mut prepared, state) = preparing(false, false);
-    prepared.function_mut().config().write16(
-        regs::COMMAND,
-        regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE,
-    );
+    let command = fixture_pointer(prepared.function_mut().config(), regs::COMMAND);
+    // SAFETY: this isolated model is the sole owner of the original register
+    // bytes. Model hardware drift without giving the software a writer.
+    unsafe {
+        command
+            .cast::<u16>()
+            .as_ptr()
+            .write_volatile(regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE);
+    }
     // SAFETY: no modeled engine/submission/IRQ/work exists; the deliberately
     // enabled configuration bit must independently fail stopped validation.
     let receipt = unsafe { prepared.acknowledge_quiescence() };
@@ -299,25 +348,34 @@ fn configuration_activity_is_rechecked_after_old_root_completion() {
 }
 
 #[test]
-fn hardware_drift_during_binding_retains_the_new_attachment() {
+fn new_binding_does_not_release_the_seal_after_hardware_drift() {
     let (prepared, state) = preparing_with_drift(false, false, true);
-    // SAFETY: the model has no active device or callback; the original
-    // command register changes only during the later bind operation.
+    // SAFETY: the original fixture has no active device or callback; the
+    // modeled register changes only during the later bind operation.
     let receipt = unsafe { prepared.acknowledge_quiescence() };
-    let failure = receipt.finalize().err().expect("drift refused");
+    let mut failure = receipt.finalize().err().expect("drift refused");
     assert_eq!(
         failure.error,
         Error::Claim(ClaimError::Active {
-            offset: regs::COMMAND
+            offset: regs::COMMAND,
         })
     );
     assert_eq!(
         *state.events.lock().unwrap(),
         ["old root completion", "new domain attachment"]
     );
+    let config = failure._owner.resources().function.config();
+    assert_eq!(
+        config.write16(
+            regs::COMMAND,
+            regs::COMMAND_INTX_DISABLE | regs::COMMAND_MASTER,
+        ),
+        Err(crate::bus::pci::ConfigError::before_effect(
+            ConfigFailure::BusMasterSealed,
+        ))
+    );
     drop(failure);
     assert_eq!(state.drops.load(Ordering::Relaxed), 0);
-    assert_eq!(state.detachments.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -342,13 +400,48 @@ fn failed_or_abandoned_detach_keeps_the_binding_and_original_root() {
             state.detach_error.store(true, Ordering::Relaxed);
             // SAFETY: same stopped fixture; inject failure before any binding release.
             let detached = unsafe { bound.attachment.detach() };
-            assert_eq!(detached, Err(DmaError::InvalidationFailed));
+            assert!(matches!(detached, Err(DmaError::InvalidationFailed)));
         }
-        let mut mapping = bound.requester.into_function().into_config().into_mapping();
+        let mut config = bound.requester.into_function().into_config();
         drop(bound.attachment);
         // SAFETY: synchronous idle fixture; its live binding still prohibits retirement.
-        assert_eq!(unsafe { mapping.retire() }, Err(MappingError::Busy));
+        assert_eq!(unsafe { config.retire() }, Err(MappingError::Busy));
         assert_eq!(state.drops.load(Ordering::Relaxed), 0);
         assert_eq!(state.detachments.load(Ordering::Relaxed), 0);
     }
 }
+
+#[test]
+fn issuing_an_unused_grant_can_cancel_but_abandonment_cannot_fake_no_route() {
+    for abandon in [false, true] {
+        let (prepared, state) = preparing(false, false);
+        // SAFETY: exact original synchronous idle config/root peer.
+        let mut bound = unsafe { prepared.acknowledge_quiescence() }
+            .finalize()
+            .unwrap_or_else(|e| panic!("{:?}", e.error));
+        let grant = bound.attachment.irq_route().unwrap();
+        assert!(grant.is_unavailable());
+        assert!(grant.belongs_to(bound.attachment.requester()));
+        // Merely issued ownership is not publication. Explicit checked return
+        // permits detach; abandoning the grant cannot fabricate the return.
+        if abandon {
+            drop(grant);
+        } else {
+            bound
+                .attachment
+                .cancel_unpublished_irq(grant)
+                .unwrap_or_else(|_| panic!("original unused grant"));
+        }
+        // SAFETY: exact idle fixture and no real IRQ programmer exists.
+        let result = unsafe { bound.attachment.detach() };
+        if abandon {
+            assert!(matches!(result, Err(DmaError::DrainUnavailable)));
+            assert_eq!(state.detachments.load(Ordering::Relaxed), 0);
+        } else {
+            assert!(result.is_ok());
+            assert_eq!(state.detachments.load(Ordering::Relaxed), 1);
+        }
+    }
+}
+
+mod irq_actions;

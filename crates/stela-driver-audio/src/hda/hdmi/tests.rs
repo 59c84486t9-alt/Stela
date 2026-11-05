@@ -14,7 +14,7 @@ use std::sync::{
 
 #[derive(Clone)]
 struct Clock(Arc<AtomicU64>);
-impl Timer for Clock {
+impl crate::bus::i2c::Timer for Clock {
     fn now_us(&self) -> u64 {
         self.0.load(Ordering::SeqCst)
     }
@@ -595,6 +595,7 @@ impl Fixture {
                     ..Default::default()
                 },
             )
+            .map_err(|failure| failure.error)
         }
         .unwrap()
     }
@@ -632,3 +633,14 @@ impl Fixture {
 mod transport;
 
 mod lifecycle;
+
+// SAFETY: private synchronous peripheral peer consumes model microseconds.
+unsafe impl crate::bus::pci::power::Timer for Clock {
+    fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+        Ok(())
+    }
+    fn wait_us(&self, us: u64) -> Result<(), crate::bus::pci::power::Error> {
+        self.0.fetch_add(us, Ordering::SeqCst);
+        Ok(())
+    }
+}

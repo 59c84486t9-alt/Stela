@@ -38,14 +38,19 @@ impl Controller {
         id: SlotId,
         port: u8,
     ) -> Result<Option<u8>, BlockError> {
+        self.check_minimum()?;
         self.validate_topology_id(id)?;
         self.hub_port_owned(id, port)
     }
 
     fn hub_port_owned(&mut self, id: SlotId, port: u8) -> Result<Option<u8>, BlockError> {
+        self.check_minimum()?;
         let slot = self.validate_topology_id(id)?;
         self.observe_current_ancestors(slot, true)?;
-        if !enumerate::debounce(self.clock, || self.sample_usb2_hub_port_owned(slot, port))? {
+        let minimum = self.minimum.clone();
+        let connected =
+            enumerate::debounce(minimum, || self.sample_usb2_hub_port_owned(slot, port));
+        if !self.minimum_status(connected)? {
             return Ok(None);
         }
         self.reset_debounced_usb2_hub_port(id, port)
@@ -94,6 +99,7 @@ impl Controller {
         id: SlotId,
         port: u8,
     ) -> Result<Option<u8>, BlockError> {
+        self.check_minimum()?;
         let slot = self.validate_topology_id(id)?;
         let index = u16::from(port);
         for _ in 0..RESET_ATTEMPTS {
@@ -108,7 +114,7 @@ impl Controller {
                         setup(0x23, CLEAR_FEATURE, C_PORT_RESET, index, 0),
                         &[],
                     )?;
-                    self.clock.delay(RESET_SETTLE_US);
+                    self.minimum_wait(RESET_SETTLE_US)?;
                     let (status, change) = self.hub_port_status_owned(slot, port)?;
                     powered(status, change)?;
                     self.observe_current_ancestors(slot, true)?;

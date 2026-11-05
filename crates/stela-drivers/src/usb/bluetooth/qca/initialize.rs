@@ -19,11 +19,19 @@ const BODY_BYTES: usize = 4096;
 const BODY_TIMEOUT_US: u64 = 3_000_000;
 const ATTEMPT_US: u64 = 120_000_000;
 
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub(super) fn run<B: Io>(hci: &mut Hci<B>, provider: &dyn Provider) -> Result<OwnedReport> {
     let usb = UsbIdentity::read(hci.binding.device());
     let kind = usb.kind().ok_or(Error::Unsupported("source USB ID"))?;
     run_as(hci, provider, kind, None)
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub(super) fn run_as<B: Io>(
     hci: &mut Hci<B>,
     provider: &dyn Provider,
@@ -68,6 +76,10 @@ struct Engine<'a, B: Io> {
     attempt: Attempt,
 }
 impl<B: Io> Engine<'_, B> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn bounded(&self) -> Result<()> {
         if self.hci.io.now_us().wrapping_sub(self.start) >= ATTEMPT_US {
             Err(Error::Timeout)
@@ -75,6 +87,10 @@ impl<B: Io> Engine<'_, B> {
             Ok(())
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn delay(&self, microseconds: u64) -> Result<()> {
         let start = self.hci.io.now_us();
         while self.hci.io.now_us().wrapping_sub(start) < microseconds {
@@ -84,6 +100,10 @@ impl<B: Io> Engine<'_, B> {
         }
         self.bounded()
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn read(&mut self, request: u8, bytes: u16) -> Result<alloc::vec::Vec<u8>> {
         self.bounded()?;
         let setup = crate::usb::descriptor::setup(0xc0, request, 0, 0, bytes);
@@ -94,9 +114,17 @@ impl<B: Io> Engine<'_, B> {
         self.bounded()?;
         Ok(data)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn version(&mut self) -> Result<Version> {
         Version::parse(&self.read(GET_VERSION, 20)?)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn resource<'a>(
         &self,
         provider: &'a dyn Provider,
@@ -115,6 +143,10 @@ impl<B: Io> Engine<'_, B> {
             })
             .map_err(Error::Resource)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn upload(&mut self, component: Component, bytes: &[u8], header: usize) -> Result<()> {
         if bytes.len() < header {
             return Err(Error::protocol("complete USB DFU header required", bytes));
@@ -158,6 +190,10 @@ impl<B: Io> Engine<'_, B> {
         }
         self.bounded()
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn rampatch(
         &mut self,
         provider: &dyn Provider,
@@ -178,6 +214,10 @@ impl<B: Io> Engine<'_, B> {
         self.upload(Component::Rampatch, image.bytes(), profile.rampatch_header)?;
         Ok(FirmwareEvidence::Uploaded(Box::new(image.into())))
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn nvm(
         &mut self,
         provider: &dyn Provider,
@@ -199,6 +239,10 @@ impl<B: Io> Engine<'_, B> {
         }
         Ok(FirmwareEvidence::Uploaded(Box::new(image.into())))
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn run(
         &mut self,
         provider: &dyn Provider,

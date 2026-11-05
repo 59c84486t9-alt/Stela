@@ -10,7 +10,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering},
 };
 use stela_drivers::bus::irq::{
-    FIRST_VECTOR, IrqController, IrqError, Platform, Registry, Target, VECTOR_COUNT,
+    FIRST_VECTOR, IrqController, IrqError, Platform, Registry, Target, Trigger, VECTOR_COUNT,
 };
 use stela_drivers::platform::work::Cpu;
 
@@ -165,6 +165,19 @@ fn id(apic: &Apic) -> Result<u32, IrqError> {
     Ok(if apic.is_x2apic() { raw } else { raw >> 24 })
 }
 
+fn in_service_vector(apic: &Apic) -> Result<Option<u8>, IrqError> {
+    for bank in (0..8u32).rev() {
+        let bits = apic.read(0x100 + bank * 16);
+        if bits == u32::MAX {
+            return Err(IrqError::FailedRead);
+        }
+        if bits != 0 {
+            return Ok(Some((bank * 32 + 31 - bits.leading_zeros()) as u8));
+        }
+    }
+    Ok(None)
+}
+
 fn pending_bank(apic: &Apic, bank: u32) -> Result<u32, IrqError> {
     let irr = apic.read(0x200 + bank * 16);
     let isr = apic.read(0x100 + bank * 16);
@@ -285,6 +298,21 @@ unsafe impl Platform for NativePlatform {
         }
         Ok(())
     }
+    fn check_process(&self) -> Result<(), IrqError> {
+        self.check_cpu()?;
+        if current_context()?.is_some() {
+            return Err(IrqError::WrongCpu);
+        }
+        if let Some(cpu) = root_cpu() {
+            cpu.check_cpu().map_err(|_| IrqError::WrongCpu)?;
+            if cpu.in_interrupt() {
+                return Err(IrqError::WrongCpu);
+            }
+        }
+        // Without root_adapter this is only the original explicit early boot
+        // diagnostic grant; it creates no remapper/native delivery capability.
+        Ok(())
+    }
     fn save_and_disable(&self) -> u64 {
         let saved;
         // SAFETY: native privileged CPU; memory clobber orders the critical
@@ -315,8 +343,31 @@ unsafe impl Platform for NativePlatform {
         let pending = pending_bank(&controller(), u32::from(vector / 32))?;
         Ok(pending & (1u32 << (vector % 32)) != 0)
     }
-    fn eoi(&self) {
-        controller().eoi();
+    fn eoi(&self, vector: u8) -> Result<Trigger, IrqError> {
+        self.check_cpu()?;
+        let apic = controller();
+        // EOI removes the highest-priority ISR bit, not a caller-selected
+        // vector. A process/debug dispatch or nested lower-vector call must
+        // never acknowledge somebody else's still-active interrupt.
+        if in_service_vector(&apic)? != Some(vector) {
+            return Err(IrqError::Drain);
+        }
+        let tmr = apic.read(0x180 + u32::from(vector / 32) * 16);
+        let spurious = apic.read(apic::SPURIOUS);
+        // Read TMR before local EOI. Even a changed broadcast policy cannot
+        // justify leaving this actual in-service interrupt unacknowledged.
+        apic.eoi();
+        if tmr == u32::MAX || spurious == u32::MAX {
+            return Err(IrqError::FailedRead);
+        }
+        if spurious & (1 << 12) != 0 {
+            return Err(IrqError::Unsupported);
+        }
+        Ok(if tmr & (1u32 << (vector % 32)) == 0 {
+            Trigger::Edge
+        } else {
+            Trigger::Level
+        })
     }
     fn ticks(&self) -> u64 {
         root_cpu().map_or_else(apic::rdtsc, |cpu| cpu.ticks())

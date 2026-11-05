@@ -14,14 +14,63 @@ use crate::output;
 use firmware_state::{Found, Kind, TableError, Units, Window};
 use stela_runtime::pc::acpi;
 
+/// Original table inventory, including whether discovery covered every unit.
+pub(crate) struct FirmwareUnits {
+    units: Units,
+    complete: bool,
+}
+
+/// The complete original IOMMU inventory observed inactive at firmware exit.
+pub(crate) struct InactiveFirmwareUnits(Option<Units>);
+
+impl InactiveFirmwareUnits {
+    #[cfg(feature = "diagnostics")]
+    pub(crate) fn original_units(&self) -> Option<&[firmware_state::Unit]> {
+        self.0.as_ref().map(Units::as_slice)
+    }
+
+    pub(crate) fn contains(&self, kind: Kind, segment: u16, base: u64) -> bool {
+        let original = firmware_state::Unit {
+            kind,
+            segment,
+            base,
+        };
+        self.0
+            .as_ref()
+            .is_some_and(|units| units.as_slice().contains(&original))
+    }
+
+    pub(crate) fn matches_amd(&self, ivrs: &stela_drivers::bus::dma::amd::ivrs::Ivrs<'_>) -> bool {
+        self.0.as_ref().is_some_and(|units| {
+            units.as_slice().len() == ivrs.units().count()
+                && units.as_slice().iter().all(|unit| {
+                    unit.kind == Kind::AmdVi
+                        && ivrs.units().any(|entry| {
+                            entry.id().segment == unit.segment && entry.mmio_address() == unit.base
+                        })
+                })
+        })
+    }
+
+    pub(crate) fn matches_dmar(&self, descriptors: &[dmar::Drhd]) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|units| units.matches_dmar(descriptors))
+    }
+}
+
 /// Before ExitBootServices: every remapping unit the firmware's DMAR and IVRS
 /// tables list. A table Stela cannot read is reported once and the units
 /// past the defect stay unchecked.
-pub(crate) fn firmware_units() -> Result<Units> {
+pub(crate) fn firmware_units() -> Result<FirmwareUnits> {
     let mut units = Units::default();
     let Some(rsdp) = crate::storage::rsdp() else {
-        return Ok(units);
+        return Ok(FirmwareUnits {
+            units,
+            complete: false,
+        });
     };
+    let mut complete = true;
     for signature in [b"DMAR", b"IVRS"] {
         // SAFETY: the firmware's RSDP; its tables stay mapped while boot
         // services run, and `find` checks every checksum on the way.
@@ -39,6 +88,7 @@ pub(crate) fn firmware_units() -> Result<Units> {
                 ));
             }
             Err(error) => {
+                complete = false;
                 output::arguments(format_args!(
                     "UNSUPPORTED host IOMMU table {} unreadable ({error:?}): units past the defect are not checked for firmware DMA protection\n",
                     core::str::from_utf8(signature).unwrap_or("?"),
@@ -46,16 +96,20 @@ pub(crate) fn firmware_units() -> Result<Units> {
             }
         }
     }
-    Ok(units)
+    Ok(FirmwareUnits { units, complete })
 }
 
 /// Reserve the AMD device-table pool independently of all driver DMA windows.
-pub(crate) fn reserve_amd_tables(units: &Units) -> crate::handoff::Region {
+pub(crate) fn reserve_amd_tables(units: &FirmwareUnits) -> crate::handoff::Region {
     use crate::paging::PAGE;
     use stela_drivers::bus::dma::amd::device::DEVICE_TABLE_BYTES;
     use uefi::boot::{self, AllocateType, MemoryType};
 
+    if !units.complete {
+        return crate::handoff::Region::default();
+    }
     let units = units
+        .units
         .as_slice()
         .iter()
         .filter(|unit| unit.kind == Kind::AmdVi)
@@ -176,13 +230,19 @@ unsafe impl Window for Identity {
 /// After ExitBootServices, before any Stela driver starts DMA or firmware
 /// memory is reused: turn off the translation, interrupt remapping, logs and
 /// protected memory regions the firmware left on in each unit, reporting
-/// each once; a unit that does not turn off stops the boot.
+/// each once; a unit that does not turn off stops the boot. Only complete
+/// discovery and initial inactivity of every unit qualify the returned record.
 ///
 /// # Safety
 /// CR3 is still the firmware's identity map, which reaches every unit's
 /// registers uncached; only this CPU runs Stela code and no firmware code
 /// touches the units.
-pub(crate) unsafe fn release_firmware_units(units: &Units, tsc_hz: u64) {
+pub(crate) unsafe fn release_firmware_units(
+    inventory: FirmwareUnits,
+    tsc_hz: u64,
+) -> InactiveFirmwareUnits {
+    let FirmwareUnits { units, complete } = inventory;
+    let mut initially_inactive = complete;
     let opt_in = if units.dmar_flags & 4 != 0 {
         " (DMAR asks the OS to keep DMA protection on)"
     } else {
@@ -200,6 +260,7 @@ pub(crate) unsafe fn release_firmware_units(units: &Units, tsc_hz: u64) {
         match firmware_state::inspect(unit.kind, &window) {
             Found::Inactive => continue,
             Found::Unreadable => {
+                initially_inactive = false;
                 output::arguments(format_args!(
                     "UNSUPPORTED host IOMMU {kind} unit {:#x} segment {} reads all ones: ignored\n",
                     unit.base, unit.segment,
@@ -207,6 +268,7 @@ pub(crate) unsafe fn release_firmware_units(units: &Units, tsc_hz: u64) {
                 continue;
             }
             found => {
+                initially_inactive = false;
                 output::arguments(format_args!(
                     "UNSUPPORTED host IOMMU {kind} unit {:#x} segment {} left on by the firmware {found:?}{opt_in}: Stela turns it off and host devices DMA untranslated\n",
                     unit.base, unit.segment,
@@ -227,4 +289,5 @@ pub(crate) unsafe fn release_firmware_units(units: &Units, tsc_hz: u64) {
             );
         }
     }
+    InactiveFirmwareUnits(initially_inactive.then_some(units))
 }

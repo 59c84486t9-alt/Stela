@@ -12,6 +12,8 @@ pub(crate) struct Hardware {
     pub(crate) medium: u16,
     pub(crate) trace: Vec<([u8; 8], Vec<u8>)>,
     pub(crate) delays: Vec<u64>,
+    pub(crate) minimum_failure: bool,
+    pub(crate) minimum_attempts: Vec<u64>,
     pub(crate) fail_at: Option<usize>,
     pub(crate) short_at: Option<usize>,
     pub(crate) stuck_mii: bool,
@@ -45,6 +47,8 @@ impl Hardware {
             medium: 0,
             trace: Vec::new(),
             delays: Vec::new(),
+            minimum_failure: false,
+            minimum_attempts: Vec::new(),
             fail_at: None,
             short_at: None,
             stuck_mii: false,
@@ -222,5 +226,20 @@ impl Control for Io {
     }
     fn delay_us(&mut self, us: u64) {
         self.0.borrow_mut().delay(us);
+    }
+    fn minimum_wait(&mut self, us: u64) -> Result<(), BlockError> {
+        let mut state = self.0.borrow_mut();
+        state.minimum_attempts.push(us);
+        if state.minimum_failure {
+            return Err(BlockError::PciPower(
+                crate::bus::pci::power::Error::Interrupted,
+            ));
+        }
+        state.elapsed = state
+            .elapsed
+            .checked_add(us)
+            .ok_or(BlockError::PciPower(crate::bus::pci::power::Error::Clock))?;
+        state.delays.push(us);
+        Ok(())
     }
 }

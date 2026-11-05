@@ -14,7 +14,7 @@ use crate::bus::{
         owned::test_support::{Counters, fixture},
         requester::{
             FunctionRole, RequesterBinding,
-            preparation::{self, Attachment, Root},
+            preparation::{self, Root},
         },
     },
 };

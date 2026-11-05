@@ -39,7 +39,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         r.write8(IBCR2, self.mmio8(IBCR2)? & !1);
         let mut ready = false;
         for _ in 0..2000 {
-            self.timer.delay(50_000);
+            self.timer.delay(50_000)?;
             if self.mmio8(IBISR0)? & 0x20 != 0 {
                 ready = true;
                 break;
@@ -68,7 +68,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         self.ep_write(0x30, 1, self.ep_read(0x30)? | 1)?;
         if enabled {
             for _ in 0..30 {
-                self.timer.delay(10_000);
+                self.timer.delay(10_000)?;
                 if self.ep_read(0x124)? & 1 != 0 {
                     return Ok(());
                 }

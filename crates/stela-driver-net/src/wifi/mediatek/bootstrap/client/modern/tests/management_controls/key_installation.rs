@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn initial_key_batch_and_replay_floor() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = fixture();
     let before = model.response.lock().unwrap().client_commands.len();
     let session = attach(&mut driver, &mut owner);
@@ -71,6 +74,9 @@ fn initial_key_batch_and_replay_floor() {
 
 #[test]
 fn key_retries_preserve_ipn_namespace() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     // Unchanged complete independent source CMAC vector (same original GTK,

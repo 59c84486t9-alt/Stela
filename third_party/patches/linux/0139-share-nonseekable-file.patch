@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 00:26:05 -0500
+Subject: [PATCH] refactor(vfs): share nonseekable file open operations
+
+---
+ fs/open.c      | 33 ---------------------------------
+ fs/path_open.c | 33 +++++++++++++++++++++++++++++++++
+ 2 files changed, 33 insertions(+), 33 deletions(-)
+
+diff --git a/fs/open.c b/fs/open.c
+index a7c5c30df11c3a1992295a100ea6061a5d9e1e20..2d568a6d472e614c7130eb8488aa9191bcf97d0f 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -1100,36 +1100,3 @@ int generic_file_open(struct inode * inode, struct file * filp)
+ }
+ 
+ EXPORT_SYMBOL(generic_file_open);
+-
+-/*
+- * This is used by subsystems that don't want seekable
+- * file descriptors. The function is not supposed to ever fail, the only
+- * reason it returns an 'int' and not 'void' is so that it can be plugged
+- * directly into file_operations structure.
+- */
+-int nonseekable_open(struct inode *inode, struct file *filp)
+-{
+-	filp->f_mode &= ~(FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE);
+-	return 0;
+-}
+-
+-EXPORT_SYMBOL(nonseekable_open);
+-
+-/*
+- * stream_open is used by subsystems that want stream-like file descriptors.
+- * Such file descriptors are not seekable and don't have notion of position
+- * (file.f_pos is always 0 and ppos passed to .read()/.write() is always NULL).
+- * Contrary to file descriptors of other regular files, .read() and .write()
+- * can run simultaneously.
+- *
+- * stream_open never fails and is marked to return int so that it could be
+- * directly used as file_operations.open .
+- */
+-int stream_open(struct inode *inode, struct file *filp)
+-{
+-	filp->f_mode &= ~(FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE | FMODE_ATOMIC_POS);
+-	filp->f_mode |= FMODE_STREAM;
+-	return 0;
+-}
+-
+-EXPORT_SYMBOL(stream_open);
+diff --git a/fs/path_open.c b/fs/path_open.c
+index 5a0d7663ceb2a8b1d4685d7ee1716036acc0c15e..622eccff63ef7d8697100eede5ad06ae4a3ba496 100644
+--- a/fs/path_open.c
++++ b/fs/path_open.c
+@@ -442,3 +442,36 @@ struct file *file_open_root(const struct path *root,
+ 	return do_file_open_root(root, filename, &op);
+ }
+ EXPORT_SYMBOL(file_open_root);
++
++/*
++ * This is used by subsystems that don't want seekable
++ * file descriptors. The function is not supposed to ever fail, the only
++ * reason it returns an 'int' and not 'void' is so that it can be plugged
++ * directly into file_operations structure.
++ */
++int nonseekable_open(struct inode *inode, struct file *filp)
++{
++	filp->f_mode &= ~(FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE);
++	return 0;
++}
++
++EXPORT_SYMBOL(nonseekable_open);
++
++/*
++ * stream_open is used by subsystems that want stream-like file descriptors.
++ * Such file descriptors are not seekable and don't have notion of position
++ * (file.f_pos is always 0 and ppos passed to .read()/.write() is always NULL).
++ * Contrary to file descriptors of other regular files, .read() and .write()
++ * can run simultaneously.
++ *
++ * stream_open never fails and is marked to return int so that it could be
++ * directly used as file_operations.open .
++ */
++int stream_open(struct inode *inode, struct file *filp)
++{
++	filp->f_mode &= ~(FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE | FMODE_ATOMIC_POS);
++	filp->f_mode |= FMODE_STREAM;
++	return 0;
++}
++
++EXPORT_SYMBOL(stream_open);

@@ -1,0 +1,350 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 23:44:46 -0500
+Subject: [PATCH] refactor(vfs): link original xattr capability operations
+
+---
+ fs/Makefile          |   2 +-
+ fs/internal.h        |   1 +
+ fs/xattr.c           |  79 -------------------------
+ fs/xattr_access.c    | 137 +++++++++++++++++++++++++++++++++++++++++++
+ security/commoncap.c |  46 ---------------
+ 5 files changed, 139 insertions(+), 126 deletions(-)
+ create mode 100644 fs/xattr_access.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 0c5bdce5c6836cd1546cdeeaea5119109078f599..eaeb9380e986327476ebc776434d04c6fbb741f8 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -11,7 +11,7 @@ obj-y :=	open.o path_open.o filp_close.o read_write.o file_table.o file_table_in
+ 		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o path_get.o name_hash.o filename.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o dcache_init.o dentry_ancestry.o inode.o inode_cache_init.o inode_timestamps.o inode_evict.o \
+ 		attr.o bad_inode.o bad_inode_ops.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o mount_cache.o \
+-		seq_file.o seq_lifetime.o seq_output.o seq_path.o xattr.o simple_xattr.o libfs.o pseudo_metadata.o stashed_path.o fs-writeback.o \
++		seq_file.o seq_lifetime.o seq_output.o seq_path.o xattr.o xattr_access.o simple_xattr.o libfs.o pseudo_metadata.o stashed_path.o fs-writeback.o \
+ 		pnode.o splice.o sync.o utimes.o d_path.o \
+ 		stack.o fs_struct.o statfs.o fs_pin.o nsfs.o \
+ 		fs_dirent.o fs_context.o fs_context_log.o fs_context_params.o fs_parser.o fs_parser_path.o fsopen.o init.o \
+diff --git a/fs/internal.h b/fs/internal.h
+index 674be88712505034d948433eb948cca18f44cd6c..b663fbc421427b9075a5e27e3a5f158ffb84629f 100644
+--- a/fs/internal.h
++++ b/fs/internal.h
+@@ -310,6 +310,7 @@ int filename_setxattr(int dfd, struct filename *filename,
+ int setxattr_copy(const char __user *name, struct kernel_xattr_ctx *ctx);
+ int import_xattr_name(struct xattr_name *kname, const char __user *name);
+ 
++const struct xattr_handler *xattr_resolve_name(struct inode *inode, const char **name);
+ int may_write_xattr(struct mnt_idmap *idmap, struct inode *inode);
+ 
+ #ifdef CONFIG_FS_POSIX_ACL
+diff --git a/fs/xattr.c b/fs/xattr.c
+index 2984caae01ea0e481e98a25934353d801d334654..8eb572e54a3a9359e9843745d2c9dcfeb17d65f5 100644
+--- a/fs/xattr.c
++++ b/fs/xattr.c
+@@ -28,16 +28,6 @@
+ 
+ #include "internal.h"
+ 
+-static const char *
+-strcmp_prefix(const char *a, const char *a_prefix)
+-{
+-	while (*a_prefix && *a == *a_prefix) {
+-		a++;
+-		a_prefix++;
+-	}
+-	return *a_prefix ? NULL : a;
+-}
+-
+ /*
+  * In order to implement different sets of xattr operations for each xattr
+  * prefix, a filesystem should create a null-terminated array of struct
+@@ -50,37 +40,6 @@ strcmp_prefix(const char *a, const char *a_prefix)
+ 			(handler) != NULL;			\
+ 			(handler) = *(handlers)++)
+ 
+-/*
+- * Find the xattr_handler with the matching prefix.
+- */
+-static const struct xattr_handler *
+-xattr_resolve_name(struct inode *inode, const char **name)
+-{
+-	const struct xattr_handler * const *handlers = inode->i_sb->s_xattr;
+-	const struct xattr_handler *handler;
+-
+-	if (!(inode->i_opflags & IOP_XATTR)) {
+-		if (unlikely(is_bad_inode(inode)))
+-			return ERR_PTR(-EIO);
+-		return ERR_PTR(-EOPNOTSUPP);
+-	}
+-	for_each_xattr_handler(handlers, handler) {
+-		const char *n;
+-
+-		n = strcmp_prefix(*name, xattr_prefix(handler));
+-		if (n) {
+-			if (!handler->prefix ^ !*n) {
+-				if (*n)
+-					continue;
+-				return ERR_PTR(-EINVAL);
+-			}
+-			*name = n;
+-			return handler;
+-		}
+-	}
+-	return ERR_PTR(-EOPNOTSUPP);
+-}
+-
+ /**
+  * may_write_xattr - check whether inode allows writing xattr
+  * @idmap: idmap of the mount the inode was found from
+@@ -424,24 +383,6 @@ vfs_getxattr_alloc(struct mnt_idmap *idmap, struct dentry *dentry,
+ 	return error;
+ }
+ 
+-ssize_t
+-__vfs_getxattr(struct dentry *dentry, struct inode *inode, const char *name,
+-	       void *value, size_t size)
+-{
+-	const struct xattr_handler *handler;
+-
+-	if (is_posix_acl_xattr(name))
+-		return -EOPNOTSUPP;
+-
+-	handler = xattr_resolve_name(inode, &name);
+-	if (IS_ERR(handler))
+-		return PTR_ERR(handler);
+-	if (!handler->get)
+-		return -EOPNOTSUPP;
+-	return handler->get(handler, dentry, inode, name, value, size);
+-}
+-EXPORT_SYMBOL(__vfs_getxattr);
+-
+ ssize_t
+ vfs_getxattr(struct mnt_idmap *idmap, struct dentry *dentry,
+ 	     const char *name, void *value, size_t size)
+@@ -521,26 +462,6 @@ vfs_listxattr(struct dentry *dentry, char *list, size_t size)
+ }
+ EXPORT_SYMBOL_GPL(vfs_listxattr);
+ 
+-int
+-__vfs_removexattr(struct mnt_idmap *idmap, struct dentry *dentry,
+-		  const char *name)
+-{
+-	struct inode *inode = d_inode(dentry);
+-	const struct xattr_handler *handler;
+-
+-	if (is_posix_acl_xattr(name))
+-		return -EOPNOTSUPP;
+-
+-	handler = xattr_resolve_name(inode, &name);
+-	if (IS_ERR(handler))
+-		return PTR_ERR(handler);
+-	if (!handler->set)
+-		return -EOPNOTSUPP;
+-	return handler->set(handler, idmap, dentry, inode, name, NULL, 0,
+-			    XATTR_REPLACE);
+-}
+-EXPORT_SYMBOL(__vfs_removexattr);
+-
+ /**
+  * __vfs_removexattr_locked - set an extended attribute while holding the inode
+  * lock
+diff --git a/fs/xattr_access.c b/fs/xattr_access.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..06ec368d7bd1037fedab01b47873d31d2689fdce
+--- /dev/null
++++ b/fs/xattr_access.c
+@@ -0,0 +1,137 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Extended attribute dispatch from fs/xattr.c and the file capability
++ * hooks from security/commoncap.c.
++ * Copyright (C) 2001 Andreas Gruenbacher and SGI
++ * Copyright (c) 2004 Red Hat, Inc., James Morris
++ */
++#include <linux/export.h>
++#include <linux/fs.h>
++#include <linux/posix_acl_xattr.h>
++#include <linux/security.h>
++#include <linux/xattr.h>
++
++#include "internal.h"
++
++static const char *
++strcmp_prefix(const char *a, const char *a_prefix)
++{
++	while (*a_prefix && *a == *a_prefix) {
++		a++;
++		a_prefix++;
++	}
++	return *a_prefix ? NULL : a;
++}
++
++/*
++ * Find the xattr_handler with the matching prefix.
++ */
++const struct xattr_handler *
++xattr_resolve_name(struct inode *inode, const char **name)
++{
++	const struct xattr_handler * const *handlers = inode->i_sb->s_xattr;
++
++	if (!(inode->i_opflags & IOP_XATTR)) {
++		if (unlikely(is_bad_inode(inode)))
++			return ERR_PTR(-EIO);
++		return ERR_PTR(-EOPNOTSUPP);
++	}
++	for (; handlers && *handlers; handlers++) {
++		const struct xattr_handler *handler = *handlers;
++		const char *n = strcmp_prefix(*name, xattr_prefix(handler));
++		if (n) {
++			if (!handler->prefix ^ !*n) {
++				if (*n)
++					continue;
++				return ERR_PTR(-EINVAL);
++			}
++			*name = n;
++			return handler;
++		}
++	}
++	return ERR_PTR(-EOPNOTSUPP);
++}
++
++ssize_t
++__vfs_getxattr(struct dentry *dentry, struct inode *inode, const char *name,
++	       void *value, size_t size)
++{
++	const struct xattr_handler *handler;
++
++	if (is_posix_acl_xattr(name))
++		return -EOPNOTSUPP;
++
++	handler = xattr_resolve_name(inode, &name);
++	if (IS_ERR(handler))
++		return PTR_ERR(handler);
++	if (!handler->get)
++		return -EOPNOTSUPP;
++	return handler->get(handler, dentry, inode, name, value, size);
++}
++EXPORT_SYMBOL(__vfs_getxattr);
++
++int
++__vfs_removexattr(struct mnt_idmap *idmap, struct dentry *dentry,
++		  const char *name)
++{
++	struct inode *inode = d_inode(dentry);
++	const struct xattr_handler *handler;
++
++	if (is_posix_acl_xattr(name))
++		return -EOPNOTSUPP;
++
++	handler = xattr_resolve_name(inode, &name);
++	if (IS_ERR(handler))
++		return PTR_ERR(handler);
++	if (!handler->set)
++		return -EOPNOTSUPP;
++	return handler->set(handler, idmap, dentry, inode, name, NULL, 0,
++			    XATTR_REPLACE);
++}
++EXPORT_SYMBOL(__vfs_removexattr);
++
++/**
++ * cap_inode_need_killpriv - Determine if inode change affects privileges
++ * @dentry: The inode/dentry in being changed with change marked ATTR_KILL_PRIV
++ *
++ * Determine if an inode having a change applied that's marked ATTR_KILL_PRIV
++ * affects the security markings on that inode, and if it is, should
++ * inode_killpriv() be invoked or the change rejected.
++ *
++ * Return: 1 if security.capability has a value, meaning inode_killpriv()
++ * is required, 0 otherwise, meaning inode_killpriv() is not required.
++ */
++int cap_inode_need_killpriv(struct dentry *dentry)
++{
++	struct inode *inode = d_backing_inode(dentry);
++	int error;
++
++	error = __vfs_getxattr(dentry, inode, XATTR_NAME_CAPS, NULL, 0);
++	return error > 0;
++}
++
++/**
++ * cap_inode_killpriv - Erase the security markings on an inode
++ *
++ * @idmap:	idmap of the mount the inode was found from
++ * @dentry:	The inode/dentry to alter
++ *
++ * Erase the privilege-enhancing security markings on an inode.
++ *
++ * If the inode has been found through an idmapped mount the idmap of
++ * the vfsmount must be passed through @idmap. This function will then
++ * take care to map the inode according to @idmap before checking
++ * permissions. On non-idmapped mounts or if permission checking is to be
++ * performed on the raw inode simply pass @nop_mnt_idmap.
++ *
++ * Return: 0 if successful, -ve on error.
++ */
++int cap_inode_killpriv(struct mnt_idmap *idmap, struct dentry *dentry)
++{
++	int error;
++
++	error = __vfs_removexattr(idmap, dentry, XATTR_NAME_CAPS);
++	if (error == -EOPNOTSUPP)
++		error = 0;
++	return error;
++}
+diff --git a/security/commoncap.c b/security/commoncap.c
+index 596831b7aff1986b068246c65b06bdf7bc53cd60..ca7bfa800c6d296b6fc90dd413cee413e9d25c1e 100644
+--- a/security/commoncap.c
++++ b/security/commoncap.c
+@@ -273,52 +273,6 @@ int cap_capset(struct cred *new,
+ 	return 0;
+ }
+ 
+-/**
+- * cap_inode_need_killpriv - Determine if inode change affects privileges
+- * @dentry: The inode/dentry in being changed with change marked ATTR_KILL_PRIV
+- *
+- * Determine if an inode having a change applied that's marked ATTR_KILL_PRIV
+- * affects the security markings on that inode, and if it is, should
+- * inode_killpriv() be invoked or the change rejected.
+- *
+- * Return: 1 if security.capability has a value, meaning inode_killpriv()
+- * is required, 0 otherwise, meaning inode_killpriv() is not required.
+- */
+-int cap_inode_need_killpriv(struct dentry *dentry)
+-{
+-	struct inode *inode = d_backing_inode(dentry);
+-	int error;
+-
+-	error = __vfs_getxattr(dentry, inode, XATTR_NAME_CAPS, NULL, 0);
+-	return error > 0;
+-}
+-
+-/**
+- * cap_inode_killpriv - Erase the security markings on an inode
+- *
+- * @idmap:	idmap of the mount the inode was found from
+- * @dentry:	The inode/dentry to alter
+- *
+- * Erase the privilege-enhancing security markings on an inode.
+- *
+- * If the inode has been found through an idmapped mount the idmap of
+- * the vfsmount must be passed through @idmap. This function will then
+- * take care to map the inode according to @idmap before checking
+- * permissions. On non-idmapped mounts or if permission checking is to be
+- * performed on the raw inode simply pass @nop_mnt_idmap.
+- *
+- * Return: 0 if successful, -ve on error.
+- */
+-int cap_inode_killpriv(struct mnt_idmap *idmap, struct dentry *dentry)
+-{
+-	int error;
+-
+-	error = __vfs_removexattr(idmap, dentry, XATTR_NAME_CAPS);
+-	if (error == -EOPNOTSUPP)
+-		error = 0;
+-	return error;
+-}
+-
+ /**
+  * kuid_root_in_ns - check whether the given kuid is root in the given ns
+  * @kuid: the kuid to be tested

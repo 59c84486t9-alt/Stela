@@ -750,14 +750,18 @@ mod attach {
             subsystem_vendor: 0,
             subsystem_device: 0,
         };
-        let profile = match lpss::Profile::select(identity) {
-            Ok(profile) => profile,
+        let inspected = (|| {
+            let profile = lpss::Profile::select(identity).map_err(PlatformError::Lpss)?;
+            let bars = function.bars().map_err(PlatformError::Config)?;
+            Ok((profile, bars))
+        })();
+        let (profile, bars) = match inspected {
+            Ok(observed) => observed,
             Err(error) => {
                 owners.push(Box::new(function));
-                return Err(PlatformError::Lpss(error));
+                return Err(error);
             }
         };
-        let bars = function.bars();
         // SAFETY: the mount claimed this function stopped, and sizing its BARs
         // with decode off left it so.
         let requester = match unsafe {

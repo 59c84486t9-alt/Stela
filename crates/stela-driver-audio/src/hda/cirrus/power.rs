@@ -7,7 +7,7 @@ use super::super::{
     AnalogRoute, CodecGraph, Controller, PinOptions, Registers, StreamId, Verb, WidgetKind,
 };
 use super::{CirrusProfile, GROUP, State};
-use crate::{Error, Phase, bus::i2c::Timer};
+use crate::{Error, Phase, Timer};
 use alloc::vec::Vec;
 
 const DAC: u8 = 2;
@@ -34,6 +34,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Called before the controller's SD_RUN write. A kept route
     /// never licenses DMA while its owning codec is suspended or replaying.
     pub(in crate::hda) fn require_cirrus_route_power(&self, id: StreamId) -> Result<(), Error> {
+        self.minimum_guard()?;
         for (_, route) in self.routes.iter().filter(|(stream, _)| *stream == id) {
             if self.cirrus_codecs.iter().any(|state| {
                 state.address == route.codec_address() && (!state.active || state.suspended)
@@ -64,6 +65,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     pub(in crate::hda) fn require_cirrus_converter_power(&self, address: u8) -> Result<(), Error> {
+        self.minimum_guard()?;
         if self.cirrus_codecs.iter().any(|state| {
             state.address == address && (!state.active || state.suspended) && !state.replaying
         }) {
@@ -73,6 +75,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     fn cirrus_d3_authority(&mut self, graph: &CodecGraph) -> Result<(), Error> {
+        self.minimum_guard()?;
         let group = graph
             .groups
             .iter()
@@ -100,6 +103,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     fn cirrus_power_d3(&mut self, address: u8, node: u8) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.verb(Verb::short(address, node, 0x705, D3)?)?;
         let start = self.timer.now_us();
         loop {
@@ -124,6 +128,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// before AFG D3. The command link and every DMA/route allocation stay owned.
     /// This codec boundary does not claim PCI/ACPI system suspend support.
     pub fn suspend_cirrus_cs421x(&mut self, graph: &CodecGraph) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.cirrus_guard(graph)?;
         self.require_routing_stopped()?;
         if !matches!(
@@ -227,6 +232,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     fn replay_cirrus_routes(&mut self, graph: &CodecGraph, state: &State) -> Result<(), Error> {
+        self.minimum_guard()?;
         let old_routes: Vec<_> = self
             .routes
             .iter()
@@ -276,6 +282,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// source startup, restore the speaker control and replay
     /// stopped PCM routes. Any failure keeps all owners and requires reset.
     pub fn resume_cirrus_cs421x(&mut self, graph: &CodecGraph) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.cirrus_guard(graph)?;
         self.require_routing_stopped()?;
         let index = self

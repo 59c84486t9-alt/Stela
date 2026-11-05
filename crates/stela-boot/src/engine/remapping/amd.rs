@@ -2,7 +2,7 @@
 //! own PCI function. The units are process local; the boot processor, which
 //! runs the host drivers, owns them, and their domains refuse other
 //! processors and interrupt handlers.
-use super::CLAIMED_DISPLAYS;
+use super::{CLAIMED_DISPLAYS, InactiveFirmwareUnits};
 use crate::Result;
 use crate::{native_mmio, output};
 use alloc::{boxed::Box, format, rc::Rc, sync::Arc, vec, vec::Vec};
@@ -17,7 +17,9 @@ use stela_drivers::{
                 ivrs::{Ivrs, MemoryScope},
                 memory::TableVisibility,
                 unit::{
-                    native::{ColdPlatform, Error, Limits, Mapping, Requester, Unit},
+                    native::{
+                        ColdPlatform, DirectDelivery, Error, Limits, Mapping, Requester, Unit,
+                    },
                     registers::{FunctionInspection, Inputs},
                 },
             },
@@ -28,7 +30,7 @@ use stela_drivers::{
             pages::DmaPages,
         },
         mmio::owned::{PhysicalSpan, Protection},
-        pci::{Address, Function, owned::OwnedConfig, requester::RequesterBinding},
+        pci::{Address, Function, owned::ObservedConfig, requester::RequesterBinding},
     },
 };
 
@@ -181,33 +183,43 @@ fn named(scope: MemoryScope, segment: u16, present: &[Present]) -> Vec<u16> {
 }
 
 pub(super) struct Taken {
-    unit: Rc<RefCell<Unit<Platform>>>,
+    unit: Rc<RefCell<Unit<Platform, ObservedConfig>>>,
     segment: u16,
+    own: Address,
+    claims: Option<RefCell<Vec<(u16, bool)>>>,
     requesters: RefCell<Vec<u16>>,
 }
 
-/// The function at `address`'s own configuration page.
-///
+/// Read the unit's identity and capability list from its original ECAM page.
 /// # Safety
-/// No driver owns the function.
-unsafe fn config(mmio: &native_mmio::Source, address: Address) -> Option<Function<OwnedConfig>> {
-    // SAFETY: forwarded; the bus is shared with the drivers, each owning
-    // its own function's page.
-    let (window, resource) = unsafe { mmio.claim_bus(address.segment, address.bus) }.ok()?;
-    let offset = usize::from(address.device) << 15 | usize::from(address.function) << 12;
-    let mapping = mmio
-        .authority()
-        .map(
-            resource,
-            offset,
-            PAGE as usize,
-            CacheAttribute::Uncached,
-            Protection::ReadWrite,
-        )
-        .ok()?;
-    // SAFETY: the mapping is the function's own configuration page.
-    let config = unsafe { OwnedConfig::attach(address, window, mapping) }.ok()?;
-    Function::new(address, config)
+/// This boot owns the function's bus through inspection and unit retirement.
+/// Firmware, SMM and other native writers cannot alter the function.
+unsafe fn config(mmio: &native_mmio::Source, address: Address) -> Result<Function<ObservedConfig>> {
+    // SAFETY: forwarded; this boot owns the original function for inspection.
+    let (window, mapping) = unsafe { mmio.observe_config_page(address) }
+        .map_err(|error| refuse!("IOMMU ECAM mapping: {error}", ?error))?;
+    // SAFETY: the source issued this exact original UC read-only page;
+    // the caller keeps configuration and decode stable through retirement.
+    let config = match unsafe { ObservedConfig::attach(address, window, mapping) } {
+        Ok(config) => config,
+        Err((error, mut mapping)) => {
+            // SAFETY: the rejected attachment published no view or reader.
+            unsafe { mapping.retire() }
+                .map_err(|error| refuse!("IOMMU ECAM retirement: {error}", ?error))?;
+            return Err(refuse!("IOMMU ECAM geometry: {error}", ?error));
+        }
+    };
+    match Function::new(address, config) {
+        Ok(function) => Ok(function),
+        Err(mut refusal) => {
+            refusal
+                .config
+                .retire()
+                .map_err(|error| refuse!("IOMMU ECAM retirement: {error}", ?error))?;
+            let error = refusal.reason;
+            Err(refuse!("IOMMU function observation: {error}", ?error))
+        }
+    }
 }
 
 /// Inspect the unit at `function` with its register aperture mapped.
@@ -216,10 +228,10 @@ unsafe fn config(mmio: &native_mmio::Source, address: Address) -> Option<Functio
 /// The mount owns the unit's function and registers.
 unsafe fn inspect(
     mmio: &native_mmio::Source,
-    mut function: Function<OwnedConfig>,
+    mut function: Function<ObservedConfig>,
     base: u64,
     ivrs: &Ivrs<'_>,
-) -> Result<FunctionInspection> {
+) -> Result<FunctionInspection<ObservedConfig>> {
     let mut refusals = Vec::new();
     for bytes in APERTURES {
         let span =
@@ -261,11 +273,16 @@ unsafe fn inspect(
                 let authority = mmio.authority();
                 authority
                     .register_resource(resource)
+                    .map_err(|refusal| refusal.error)
                     .and_then(|id| authority.unregister_resource(id))
                     .map_err(|error| refuse!("release {error}", ?error))?;
             }
         }
     }
+    function
+        .config()
+        .retire()
+        .map_err(|error| refuse!("IOMMU ECAM retirement: {error}", ?error))?;
     Err(refuse!(
         "its function or registers did not match the IVRS: {refusals}",
         ?refusals
@@ -281,9 +298,10 @@ pub(super) unsafe fn take(
     inventories: &[(u16, Vec<Present>)],
     drivers: &Range<u64>,
     mmio: &native_mmio::Source,
+    inactive_firmware_units: Option<&InactiveFirmwareUnits>,
     tsc_hz: u64,
     physical_bits: u8,
-) -> Vec<Taken> {
+) -> (Vec<Taken>, Option<bool>) {
     let mut taken = Vec::new();
     let ivrs = match Ivrs::parse(table, MAXIMUM_BLOCKS) {
         Ok(ivrs) => ivrs,
@@ -291,9 +309,11 @@ pub(super) unsafe fn take(
             output::arguments(format_args!(
                 "UNSUPPORTED host IVRS unreadable ({error:?}): host DMA stays untranslated\n"
             ));
-            return taken;
+            return (taken, None);
         }
     };
+    let blocked = inactive_firmware_units.is_some_and(|units| units.matches_amd(&ivrs))
+        && ivrs.memory_definitions().next().is_none();
     for description in ivrs.units() {
         let id = description.id();
         let base = description.mmio_address();
@@ -314,10 +334,17 @@ pub(super) unsafe fn take(
                 "HOST IOMMU AMD-Vi unit {base:#x} left untranslated: {why:?}\n"
             ));
         };
-        // SAFETY: forwarded; no driver claims an IOMMU function.
-        let Some(function) = (unsafe { config(mmio, address) }) else {
-            left(&"its configuration space could not be mapped");
+        if blocked && !present.iter().any(|function| function.rid == id.device_id) {
+            left(&"its function was absent from the original stopped PCI census");
             continue;
+        }
+        // SAFETY: forwarded; no driver claims an IOMMU function.
+        let function = match unsafe { config(mmio, address) } {
+            Ok(function) => function,
+            Err(error) => {
+                left(&error);
+                continue;
+            }
         };
         // SAFETY: forwarded.
         let inspection = match unsafe { inspect(mmio, function, base, &ivrs) } {
@@ -372,41 +399,102 @@ pub(super) unsafe fn take(
                 continue;
             }
         };
-        let mut window = vec![drivers.clone()];
-        window.extend(
-            reserved
+        let claims = if blocked {
+            // Publish no shared window. Retain the real complete stopped
+            // cohort and verify each original DTE before the unit-wide drain.
+            let checked = requesters
                 .iter()
-                .filter(|(rid, _)| requesters.contains(rid))
-                .map(|(_, range)| range.clone()),
-        );
-        let Some(ranges) = window
-            .iter()
-            .map(|range| borrowed(range, physical_bits))
-            .collect::<Option<Vec<_>>>()
-        else {
-            left(&"a DMA window range is empty, out of bounds or cannot be allocated");
-            continue;
+                .try_for_each(|&rid| {
+                    unit.admit_requester(rid)?;
+                    unit.check_blocked_requester(rid).map_err(Error::Dma)
+                })
+                .and_then(|()| unit.drain_posted_writes().map_err(Error::Dma));
+            if let Err(error) = checked {
+                left(&error);
+                continue;
+            }
+            output::arguments(format_args!(
+                "HOST IOMMU AMD-Vi unit {base:#x} blocked and drained {} initial requesters\n",
+                requesters.len()
+            ));
+            Some(RefCell::new(
+                requesters.iter().map(|&rid| (rid, false)).collect(),
+            ))
+        } else {
+            let mut window = vec![drivers.clone()];
+            window.extend(
+                reserved
+                    .iter()
+                    .filter(|(rid, _)| requesters.contains(rid))
+                    .map(|(_, range)| range.clone()),
+            );
+            let Some(ranges) = window
+                .iter()
+                .map(|range| borrowed(range, physical_bits))
+                .collect::<Option<Vec<_>>>()
+            else {
+                left(&"a DMA window range is empty, out of bounds or cannot be allocated");
+                continue;
+            };
+            // SAFETY: forwarded: the requesters DMA only to the drivers' region
+            // and their reserved regions until they attach.
+            if let Err(error) = unsafe { unit.window(&requesters, ranges) } {
+                left(&error);
+                continue;
+            }
+            output::arguments(format_args!(
+                "HOST IOMMU AMD-Vi unit {base:#x} translates {} requesters\n",
+                requesters.len()
+            ));
+            None
         };
-        // SAFETY: forwarded: the requesters DMA only to the drivers' region
-        // and their reserved regions until they attach.
-        if let Err(error) = unsafe { unit.window(&requesters, ranges) } {
-            left(&error);
-            continue;
-        }
-        output::arguments(format_args!(
-            "HOST IOMMU AMD-Vi unit {base:#x} translates {} requesters\n",
-            requesters.len()
-        ));
         taken.push(Taken {
             unit: Rc::new(RefCell::new(unit)),
             segment: id.segment,
+            own: address,
+            claims,
             requesters: RefCell::new(requesters),
         });
     }
-    taken
+    let complete = blocked
+        && !taken.is_empty()
+        && taken.len() == ivrs.units().count()
+        && inventories.iter().all(|(segment, functions)| {
+            functions.iter().all(|function| {
+                let address = super::address(*segment, function.rid);
+                taken.iter().any(|unit| unit.own == address)
+                    || taken
+                        .iter()
+                        .filter(|unit| unit.covers(*segment, function.rid))
+                        .count()
+                        == 1
+            })
+        });
+    (taken, blocked.then_some(complete))
 }
 
 impl Taken {
+    pub(super) fn read_original_config(
+        &self,
+        address: Address,
+        offset: u16,
+        width: u8,
+    ) -> Option<Result<u32, super::ConfigError>> {
+        (self.own == address).then(|| {
+            self.unit
+                .try_borrow()
+                .map_err(|_| super::ConfigError::before_effect(super::ConfigFailure::Busy))?
+                .read_original_config(offset, width)
+        })
+    }
+
+    pub(super) fn pin_direct_delivery(&self) -> Result<DirectDelivery, Error> {
+        self.unit
+            .try_borrow()
+            .map_err(|_| Error::Busy)?
+            .pin_direct_delivery()
+    }
+
     /// Full IVRS routing coverage, including still-blocked future arrivals.
     pub(super) fn routes(&self, segment: u16, rid: u16) -> Result<bool, Error> {
         let unit = self.unit.try_borrow().map_err(|_| Error::Busy)?;
@@ -431,19 +519,37 @@ impl Taken {
         Ok(())
     }
 
-    /// Keep the original unit/window graph through vendor cold preparation.
+    /// Claim one original blocked entry for this exact parked function.
     pub(super) fn preparation(
         &self,
         address: Address,
-    ) -> Result<Box<dyn stela_drivers::bus::pci::requester::preparation::Root>, DmaError> {
+        lines: native_mmio::InitialPciLines,
+    ) -> Result<ColdRoot, DmaError> {
         let rid = super::requester(address);
         if !on_boot_processor() || !self.covers(address.segment, rid) {
             return Err(DmaError::IommuUnavailable);
         }
-        Ok(Box::new(ColdRoot {
+        let mut claims = self
+            .claims
+            .as_ref()
+            .ok_or(DmaError::DrainUnavailable)?
+            .try_borrow_mut()
+            .map_err(|_| DmaError::IommuUnavailable)?;
+        let claimed = claims
+            .iter_mut()
+            .find(|(member, _)| *member == rid)
+            .ok_or(DmaError::IommuUnavailable)?;
+        if claimed.1 {
+            return Err(DmaError::IommuUnavailable);
+        }
+        let root = ColdRoot {
             address,
             unit: self.unit.clone(),
-        }))
+            _lines: lines,
+        };
+        root.check()?;
+        claimed.1 = true;
+        Ok(root)
     }
 
     /// A domain of its own for `binding`'s requester.
@@ -453,7 +559,7 @@ impl Taken {
 }
 
 fn attach_domain(
-    unit: &Rc<RefCell<Unit<Platform>>>,
+    unit: &Rc<RefCell<Unit<Platform, ObservedConfig>>>,
     binding: RequesterBinding,
 ) -> Result<Arc<Domain>, Error> {
     if !on_boot_processor() {
@@ -474,11 +580,20 @@ fn attach_domain(
     }))
 }
 
-struct ColdRoot {
+pub(super) struct ColdRoot {
     address: Address,
-    unit: Rc<RefCell<Unit<Platform>>>,
+    unit: Rc<RefCell<Unit<Platform, ObservedConfig>>>,
+    _lines: native_mmio::InitialPciLines,
 }
-// SAFETY: the paired original IVRS unit/window and DMA backing are retained.
+impl ColdRoot {
+    pub(super) fn check(&self) -> Result<(), DmaError> {
+        self.unit
+            .try_borrow()
+            .map_err(|_| DmaError::IommuUnavailable)?
+            .check_blocked_requester(super::requester(self.address))
+    }
+}
+// SAFETY: the paired original IVRS unit and blocked table and DMA backing are retained.
 // It is process-local and every operation checks BSP/non-IRQ execution. The
 // consuming receipt supplies independent endpoint/IRQ/work/bypass retirement;
 // failure retains hardware resources through the unit's native owners.
@@ -496,7 +611,7 @@ unsafe impl stela_drivers::bus::pci::requester::preparation::Root for ColdRoot {
     unsafe fn bind(
         &self,
         binding: RequesterBinding,
-    ) -> Result<Box<dyn stela_drivers::bus::pci::requester::preparation::Attachment>, DmaError>
+    ) -> Result<Box<dyn stela_drivers::bus::pci::requester::preparation::AttachmentBackend>, DmaError>
     {
         if !on_boot_processor() || binding.address() != self.address {
             return Err(DmaError::IommuUnavailable);
@@ -516,25 +631,44 @@ struct Attachment {
 // Backend detach blocks all aliases, completes invalidation and releases the
 // shared configuration binding only after success. Retired requesters reject
 // all later methods; failure/Drop keeps uncertain trees and their binding.
-unsafe impl stela_drivers::bus::pci::requester::preparation::Attachment for Attachment {
+unsafe impl stela_drivers::bus::pci::requester::preparation::AttachmentBackend for Attachment {
+    fn irq_owner(
+        &mut self,
+        _requester: &stela_drivers::bus::pci::requester::RequesterId,
+        _config: Option<&stela_drivers::bus::pci::owned::ConfigRetention>,
+    ) -> Result<Option<Box<dyn stela_drivers::bus::irq::posted_msi::RouteOwner>>, DmaError> {
+        // Explicit capability refusal: no original boot root/context and exact
+        // source grant have been supplied to this attached owner. A retained
+        // DMA root, SID, numeric message or fresh BDF lookup cannot mint one.
+        Ok(None)
+    }
+
     fn domain(&self) -> Arc<dyn DmaDomain> {
         self.domain.clone()
     }
-    unsafe fn detach(&mut self) -> Result<(), DmaError> {
+    unsafe fn detach(
+        &mut self,
+    ) -> Result<(), stela_drivers::bus::pci::requester::preparation::DetachError> {
         let mut inner = self.domain.inner()?;
         if !inner.mappings.is_empty() {
-            return Err(DmaError::MappingFailed);
+            return Err(
+                stela_drivers::bus::pci::requester::preparation::DetachError::Unexposed(
+                    DmaError::MappingFailed,
+                ),
+            );
         }
         // SAFETY: paired driver supplies halt and payload/IRQ/work drainage
         // under the retained root/epoch. Both mapping inventories refuse live
         // leases before DTE effects; wrapper inventory is empty above.
-        unsafe { inner.requester.detach() }.map_err(failed)
+        unsafe { inner.requester.detach() }.map_err(|error| {
+            stela_drivers::bus::pci::requester::preparation::DetachError::Uncertain(failed(error))
+        })
     }
 }
 
 struct Inner {
-    _unit: Rc<RefCell<Unit<Platform>>>,
-    requester: Requester<Platform>,
+    _unit: Rc<RefCell<Unit<Platform, ObservedConfig>>>,
+    requester: Requester<Platform, ObservedConfig>,
     mappings: Vec<(DomainMapping, Mapping)>,
     next: u64,
 }

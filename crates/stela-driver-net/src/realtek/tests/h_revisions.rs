@@ -159,7 +159,7 @@ fn h_calibration_failed_bus_read_and_runtime_tx_lpi_failure_remain_errors() {
         }
         let writes = model.state.borrow().writes.len();
         model.fail_eri_at = usize::MAX;
-        time.delay(50_000);
+        time.delay(50_000).unwrap();
         model.read32(ERI_ADDRESS);
         let hw = Hardware::new(&model, &time, revision(version), 0);
         assert_eq!(link.update(&hw), Err(BlockError::Timeout));

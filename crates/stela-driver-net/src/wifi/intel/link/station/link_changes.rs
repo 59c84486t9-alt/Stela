@@ -132,6 +132,10 @@ impl Client {
 impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// `ieee80211_ml_reconf_work` and `ieee80211_tid_to_link_map_work`, one
     /// step a round while nothing else is in firmware's hands.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub(super) fn run_link_changes(
         &mut self,
         queue: &mut Queue<Q, B>,

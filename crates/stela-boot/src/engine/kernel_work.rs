@@ -8,16 +8,17 @@ use super::{
 use crate::{
     handoff::{Handoff, Region},
     layout,
-    native_clock::ClockServices,
+    native_clock::{ClockServices, DriverExecution, Installed as InstalledClock},
     native_mmio, native_smp,
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     arch::asm,
     cell::{Cell, UnsafeCell},
-    ffi::c_void,
+    ffi::{c_uint, c_void},
     ops::Range,
     pin::Pin,
+    ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use stela_boot_core::guarded_stacks::mappings;
@@ -32,10 +33,11 @@ mod clock;
 #[cfg(feature = "diagnostics")]
 pub(crate) use clock::check_native_clock_domain;
 mod firmware;
-#[cfg(feature = "diagnostics")]
 mod pages;
+pub(super) use pages::KernelPages;
 mod pin;
 mod plan;
+mod task_data;
 pub(crate) use firmware::FirmwareContext;
 use plan::Plan;
 #[cfg(feature = "diagnostics")]
@@ -54,10 +56,9 @@ pub(crate) enum Error {
     Cache(MemoryError),
     Work(WorkError),
     Qualification,
-    #[cfg(feature = "diagnostics")]
+    Image(crate::native_image::Error),
     NoKernelStacks,
-    #[cfg(feature = "diagnostics")]
-    Pages(stela_drivers::gpu::linux::pages::Error),
+    Pages(stela_linux::pages::Error),
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -74,11 +75,10 @@ impl core::fmt::Display for Error {
             }
             Self::Work(error) => write!(f, "native continuation admission: {error:?}"),
             Self::Qualification => f.write_str("native continuation identity or stack differs"),
-            #[cfg(feature = "diagnostics")]
+            Self::Image(error) => write!(f, "kernel work executable backing: {error}"),
             Self::NoKernelStacks => {
                 f.write_str("actual work pool has no Linux-compatible stack slots")
             }
-            #[cfg(feature = "diagnostics")]
             Self::Pages(error) => write!(f, "Linux page catalog: {error:?}"),
         }
     }
@@ -87,12 +87,42 @@ struct Reservation {
     identity: Arc<RootIdentity>,
     _wire: &'static native_mmio::Wire,
     _handoff: &'static Handoff,
+    _image: crate::native_image::CodePin,
     allocation: native_smp::resources::AllocationClaim,
     released_stack_views: AtomicUsize,
+    pin_epochs: [pin::Epoch; SLOTS],
 }
-#[cfg(feature = "diagnostics")]
-impl Reservation {
-    fn initial_pgd(
+/// Immutable DATA classifier retaining this exact Queue's original image,
+/// allocation and native root/table custody. This is never executable authority.
+pub(super) struct ReadOnlyImage {
+    _reservation: Arc<Reservation>,
+    ranges: Vec<Range<usize>>,
+}
+impl ReadOnlyImage {
+    /// Authorize one complete read within a retained immutable data section.
+    pub(super) fn contains_range(&self, address: usize, bytes: usize) -> bool {
+        address.checked_add(bytes).is_some_and(|end| {
+            self.ranges
+                .iter()
+                .any(|range| range.contains(&address) && end <= range.end)
+        })
+    }
+}
+// SAFETY: only KernelWork::image constructs this value under the same actual
+// kept original root. The relocated allocation and every native mapping remain
+// owned by Reservation; readonly_ranges admits only original immutable DATA,
+// after relocation, with no later patcher, DMA/guest loan or allocator reuse.
+// contains only checks stored bounds and never dereferences a caller pointer.
+unsafe impl stela_drivers::platform::image::NativeReadOnlyImage for ReadOnlyImage {
+    fn contains(&self, address: usize) -> bool {
+        self.contains_range(address, 1)
+    }
+}
+// SAFETY: this reservation retains the same original Handoff/LoaderTables,
+// shared mapping owners and native CodePin for the kernel lifetime. Each
+// borrow validates the actual entered root and effective cache attributes.
+unsafe impl stela_linux::threads::OriginalKernelRoot for Reservation {
+    fn pgd(
         &self,
         process: &dyn work::EnteredProcess,
     ) -> Result<core::ptr::NonNull<c_void>, WorkError> {
@@ -115,11 +145,68 @@ impl Reservation {
     }
 }
 
+// SAFETY: the same retained original table graph and image owner cover the
+// entered CPU and each C entry and geometry global. Publication is synchronous
+// in the checked scope, after validating the effective mappings.
+unsafe impl stela_linux::threads::OriginalKernelGeometry for Reservation {
+    fn bind(
+        &self,
+        process: &dyn work::EnteredProcess,
+        target: stela_linux::threads::GeometryBinding<'_>,
+    ) -> Result<(), WorkError> {
+        process.check()?;
+        let owner = &self._handoff.native_loader_tables;
+        let scope = self.identity.process_root()?;
+        scope.entered_original(owner)?;
+
+        for entry in target.entries() {
+            // SAFETY: the original root and immutable image owner are held.
+            let physical = unsafe { self._image.check_callback(entry) }
+                .map_err(|_| WorkError::CorruptContext)?;
+            let page = scope
+                .observe_original(entry as u64)?
+                .ok_or(WorkError::CorruptContext)?;
+            if page.physical != physical || page.user || page.writable || page.nx {
+                return Err(WorkError::CorruptContext);
+            }
+        }
+        for address in target.storage()? {
+            if !address.is_multiple_of(core::mem::align_of::<c_uint>()) {
+                return Err(WorkError::CorruptContext);
+            }
+            let bytes = core::mem::size_of::<c_uint>();
+            // SAFETY: the original root and immutable image owner are held.
+            let physical = unsafe { self._image.writable_span(address, bytes) }
+                .map_err(|_| WorkError::CorruptContext)?;
+            let page = scope
+                .observe_original(address as u64)?
+                .ok_or(WorkError::CorruptContext)?;
+            if page.physical != physical || page.user || !page.writable || !page.nx {
+                return Err(WorkError::CorruptContext);
+            }
+            crate::native_memory::cache::verify_writeback(
+                address as u64,
+                physical,
+                bytes,
+                layout::physical(0),
+            )
+            .map_err(|_| WorkError::Unavailable)?;
+        }
+
+        process.check()?;
+        scope.entered_original(owner)?;
+        // SAFETY: the exact entered LoaderTables, its live paging mode and the
+        // original code and writable globals have all been checked.
+        unsafe { target.publish(owner.levels()) }
+    }
+}
+
 struct Backing {
     _reservation: Arc<Reservation>,
     bounds: Range<usize>,
     guard: Range<usize>,
     physical: u64,
+    slot: usize,
 }
 // SAFETY: prepare consumes one loader allocation exactly once, verifies
 // every root's exact RW/NX/supervisor/WB backing and absent guards, and verifies
@@ -134,13 +221,13 @@ unsafe impl StackBacking for Backing {
     fn guard(&self) -> Range<usize> {
         self.guard.clone()
     }
-    unsafe fn pin_cold_pages(
+    unsafe fn pin_prepared_pages(
         &self,
+        epoch: u64,
     ) -> Result<stela_drivers::bus::dma::memory::PinnedPages, MemoryError> {
-        // SAFETY: the work owner holds this never-entered slot in Preparing
-        // and has zeroed only its usable range. The allocation and checked
-        // mappings remain held by this backing throughout export.
-        unsafe { pin::export(self) }
+        // SAFETY: the native preparation owns the zeroed slot. Export
+        // independently excludes an older view and checks the real mapping.
+        unsafe { pin::export(self, epoch) }
     }
 }
 impl Drop for Backing {
@@ -207,12 +294,21 @@ pub(super) struct KernelWork {
     /// The queue and an attached service domain share this same CPU owner.
     cpu: Arc<dyn Cpu>,
     native_clock: Option<ClockServices>,
+    installed_clock: Option<&'static InstalledClock>,
+    linux_execution: Cell<Option<NonNull<DriverExecution<'static>>>>,
     foreground: Arc<firmware::Foreground>,
     root: u64,
     busy: Cell<bool>,
-    #[cfg(feature = "diagnostics")]
-    stack_pages: pages::TaskPageInventory,
+    stack_pages: Option<pages::TaskPageInventory>,
 }
+struct ClearLinuxExecution<'a>(&'a Cell<Option<NonNull<DriverExecution<'static>>>>);
+
+impl Drop for ClearLinuxExecution<'_> {
+    fn drop(&mut self) {
+        self.0.set(None);
+    }
+}
+
 /// Owned closure/result storage. It is never made Send/Sync or exposed to an
 /// AP; the real queue checks its BSP before the callback can touch these cells.
 struct OwnedCall<F, T> {
@@ -244,9 +340,17 @@ impl KernelWork {
     pub(super) unsafe fn prepare(
         handoff: &'static Handoff,
         owner: &mut HostOwner,
+        installed_clock: Option<&'static InstalledClock>,
     ) -> Result<Self, Error> {
+        let clock = installed_clock
+            .map(InstalledClock::services)
+            .transpose()
+            .map_err(Error::Work)?;
         // SAFETY: original caller's handoff/owner/stack lifetime contract.
-        unsafe { Self::prepare_plan(handoff, owner, Plan::new(handoff)?, None) }
+        let mut work =
+            unsafe { Self::prepare_plan(handoff, owner, Plan::new(handoff)?, clock.as_ref()) }?;
+        work.installed_clock = installed_clock;
+        Ok(work)
     }
     /// # Safety
     /// Same original handoff/owner contract as prepare. A Plan describes
@@ -284,6 +388,16 @@ impl KernelWork {
         }
         // SAFETY: loader root, excluding task/native entry.
         let _root = unsafe { RestoreRoot::enter(handoff.root) };
+        // SAFETY: the same validated original handoff/loader root; source
+        // allocation, guest exclusions and callback code stay pinned below.
+        let image = unsafe { handoff.native_image.pin(handoff) }.map_err(Error::Image)?;
+        let allocation = handoff.native_image.allocation_region();
+        if !wire.loader_ram(allocation.physical, allocation.bytes) {
+            return Err(Error::Image(crate::native_image::Error::NotLoaderData));
+        }
+        // SAFETY: original image/header aliases are kept and no writer runs.
+        unsafe { image.check_callback(Self::prepare_plan as *const () as usize) }
+            .map_err(Error::Image)?;
         let mut spans = Vec::new();
         spans
             .try_reserve_exact(plan.count())
@@ -363,8 +477,10 @@ impl KernelWork {
             identity,
             _wire: wire,
             _handoff: handoff,
+            _image: image,
             allocation,
             released_stack_views: AtomicUsize::new(0),
+            pin_epochs: core::array::from_fn(|_| pin::Epoch::new()),
         });
         let cpu: Arc<dyn Cpu> = match clock {
             Some(clock) => clock.cpu(),
@@ -375,8 +491,9 @@ impl KernelWork {
                 },
             }),
         };
-        #[cfg(feature = "diagnostics")]
-        let stack_pages = pages::TaskPageInventory::from_spans(reservation.clone(), &spans)?;
+        let stack_pages = (clock.is_some() || cfg!(feature = "diagnostics"))
+            .then(|| pages::TaskPageInventory::from_spans(reservation.clone(), &spans))
+            .transpose()?;
         let (foreground_slot, foreground_physical) = plan.slot(0)?;
         let foreground = Arc::new(firmware::Foreground {
             reservation: reservation.clone(),
@@ -391,13 +508,17 @@ impl KernelWork {
         stacks
             .try_reserve_exact(spans.len())
             .map_err(|_| Error::Allocation)?;
-        for (bounds, guard, physical) in spans {
+        if spans.len() > SLOTS {
+            return Err(Error::Geometry);
+        }
+        for (slot, (bounds, guard, physical)) in spans.into_iter().enumerate() {
             stacks.push(
                 Stack::new(Box::new(Backing {
                     _reservation: reservation.clone(),
                     bounds,
                     guard,
                     physical,
+                    slot,
                 }))
                 .map_err(Error::Work)?,
             );
@@ -420,10 +541,11 @@ impl KernelWork {
             reservation,
             cpu,
             native_clock: clock.cloned(),
+            installed_clock: None,
+            linux_execution: Cell::new(None),
             foreground,
             root: handoff.root,
             busy: Cell::new(false),
-            #[cfg(feature = "diagnostics")]
             stack_pages,
         };
         // Validation enters the owned-call boundary, which acquires the
@@ -495,6 +617,23 @@ impl KernelWork {
         self.busy.set(false);
         Ok(result)
     }
+    /// Immutable native DATA from the same original relocated engine allocation
+    /// and root graph retained by this Queue, never a second image producer.
+    pub(super) fn image(&self) -> Result<Arc<ReadOnlyImage>, Error> {
+        self.dispatch(|_| {
+            // SAFETY: dispatch entered the actual retained LoaderTables root
+            // on its owning BSP, excluding IRQ/native frames and table writers.
+            let ranges =
+                unsafe { self.reservation._image.readonly_ranges() }.map_err(Error::Image)?;
+            if ranges.is_empty() {
+                return Err(Error::Inventory);
+            }
+            Ok(Arc::new(ReadOnlyImage {
+                _reservation: self.reservation.clone(),
+                ranges,
+            }))
+        })?
+    }
     fn deadline_us(&self, timeout: u64) -> Result<u64, Error> {
         let scale = if self.native_clock.is_some() {
             1_000
@@ -505,9 +644,61 @@ impl KernelWork {
         self.cpu.ticks().checked_add(ticks).ok_or(Error::Clock)
     }
 
-    /// The CPU the runtime runs on.
-    pub(super) fn cpu(&self) -> Arc<dyn Cpu> {
-        self.cpu.clone()
+    pub(super) fn linux_geometry(&self) -> Arc<dyn stela_linux::threads::OriginalKernelGeometry> {
+        self.reservation.clone()
+    }
+
+    pub(super) fn linux_root(&self) -> Arc<dyn stela_linux::threads::OriginalKernelRoot> {
+        self.reservation.clone()
+    }
+
+    pub(super) fn service_clock(&self) -> Result<&ClockServices, WorkError> {
+        self.native_clock.as_ref().ok_or(WorkError::Unavailable)
+    }
+
+    /// Enter the original loader root and its installed IRQ execution
+    /// scope for a Linux dispatcher segment.
+    pub(super) fn dispatch_linux<T>(
+        &'static self,
+        body: impl FnOnce(Pin<&'static work::Runtime<SLOTS>>) -> Result<T, WorkError>,
+    ) -> Result<T, Error> {
+        let clock = self.installed_clock.ok_or(Error::Clock)?;
+        let identity = &self.reservation.identity;
+        identity.check_irq_cpu().map_err(Error::Work)?;
+        if identity.in_interrupt() {
+            return Err(Error::Work(WorkError::InterruptContext));
+        }
+        if self.linux_execution.get().is_some() {
+            return Err(Error::Work(WorkError::Busy));
+        }
+        self.dispatch(|_| {
+            // SAFETY: dispatch entered the kept loader root on the owning
+            // BSP. This scope ends after every active frame returns or parks.
+            let execution = unsafe { clock.enter_driver_execution()? };
+            self.linux_execution.set(Some(NonNull::from(&execution)));
+            let _clear = ClearLinuxExecution(&self.linux_execution);
+            body(self.executor.runtime())
+        })?
+        .map_err(Error::Work)
+    }
+
+    /// Lend the actual dispatch segment for one synchronous Linux metadata leaf.
+    /// # Safety
+    /// The callback cannot switch or retain its process loan. An interrupt or
+    /// a call outside the active dispatch segment cannot borrow the slot.
+    pub(super) unsafe fn with_linux_process<T>(
+        &self,
+        body: impl FnOnce(&dyn work::EnteredProcess) -> T,
+    ) -> Result<T, WorkError> {
+        let identity = &self.reservation.identity;
+        identity.check_irq_cpu()?;
+        if identity.in_interrupt() {
+            return Err(WorkError::InterruptContext);
+        }
+        let execution = self.linux_execution.get().ok_or(WorkError::Unavailable)?;
+        // SAFETY: same CPU outside IRQ, and dispatch_linux clears the slot
+        // before destroying the live execution. The leaf cannot suspend it.
+        unsafe { execution.as_ref().with_process(body) }
     }
 
     /// Run `body` in the dispatcher, on the loader's root under the host

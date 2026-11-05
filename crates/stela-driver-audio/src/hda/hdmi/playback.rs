@@ -88,6 +88,7 @@ impl Progress {
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
     pub(in crate::hda) fn hdmi_before_start(&mut self, id: StreamId) -> Result<(), Error> {
+        self.minimum_guard()?;
         let Some(index) = self.hdmi_stream_port(id) else {
             return Ok(());
         };
@@ -147,6 +148,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         position: u32,
         ioc: bool,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         let Some(index) = self.hdmi_stream_port(id) else {
             return Ok(());
         };
@@ -184,6 +186,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         id: StreamId,
         pcm: &[u8],
     ) -> Result<Option<RefilledPeriod>, Error> {
+        self.minimum_guard()?;
         let index = self.hdmi_stream_port(id).ok_or(Error::InvalidHdmiPort)?;
         if !self.stream(id)?.running {
             return Err(Error::StreamStopped);

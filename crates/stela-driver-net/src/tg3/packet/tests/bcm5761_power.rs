@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn actual_5761_phy_low_power_orders_clock_after_drain_and_restores_same_dma_for_traffic() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, pages, domain, peer) = bcm5761::attach_5761();
     let addresses = packet.memory.as_ref().unwrap().addresses().unwrap();
     for _ in 0..3 {
@@ -45,6 +48,9 @@ fn actual_5761_phy_low_power_orders_clock_after_drain_and_restores_same_dma_for_
 
 #[test]
 fn actual_5761_unacknowledged_low_power_effects_poison_retains_all_original_owners() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fault in 0..4 {
         let (mut packet, pages, domain, peer) = bcm5761::attach_5761();
         assert!(packet.carrier());
@@ -87,6 +93,9 @@ fn actual_5761_unacknowledged_low_power_effects_poison_retains_all_original_owne
 
 #[test]
 fn actual_5761_low_power_refuses_undrained_epoch_and_live_board_keep_link_policy() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fault in 0..2 {
         let (mut packet, _, domain, peer) = bcm5761::attach_5761();
         assert!(packet.carrier());
@@ -112,6 +121,9 @@ fn actual_5761_low_power_refuses_undrained_epoch_and_live_board_keep_link_policy
 #[test]
 #[ignore = "oracle: STELA_TG3_BCM5761_PHY_POWER_ORACLE"]
 fn unchanged_linux_5761_phy_power_writes_match_clock_and_kept_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let trace = std::fs::read_to_string(
         std::env::var("STELA_TG3_BCM5761_PHY_POWER_ORACLE")
             .expect("fresh original C trace required"),

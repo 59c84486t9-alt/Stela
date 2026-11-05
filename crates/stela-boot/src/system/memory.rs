@@ -17,6 +17,7 @@ fn allocate_large(bytes: u64) -> Result<Region> {
 pub(super) struct EngineImage {
     pub image: firmware::Image,
     pub engine: Region,
+    pub resident: crate::native_image::ResidentImage,
     pub ram: Vec<(usize, usize)>,
     pub screen: Option<Framebuffer>,
     pub apic_base: u64,
@@ -44,15 +45,6 @@ pub(super) fn prepare_image(snapshot: &Snapshot) -> Result<EngineImage> {
     if image.start != snapshot.start || image.end - image.start != snapshot.bytes {
         return Err(refuse!("image layout changed after the snapshot"));
     }
-    let engine = allocate_large(snapshot.bytes as u64)?;
-    // SAFETY: two distinct live allocations of `bytes`.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            snapshot.copy.as_ptr(),
-            engine.physical as *mut u8,
-            snapshot.bytes,
-        );
-    }
     let ram = firmware::ram()?;
     let screen = Framebuffer::for_engine()?;
     let apic_base = crate::apic::base_msr();
@@ -69,6 +61,18 @@ pub(super) fn prepare_image(snapshot: &Snapshot) -> Result<EngineImage> {
         "host physical addresses lie beyond what any placement's physmap reaches"
     ))?;
     layout::set(placement);
+    let resident = crate::native_image::ResidentImage::allocate(snapshot.bytes, layout::image())
+        .map_err(|error| refuse!("engine image allocation failed", %error))?;
+    let engine = resident.region();
+    // SAFETY: the pristine source and the newly owned, zeroed image allocation
+    // are distinct and each covers exactly snapshot.bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            snapshot.copy.as_ptr(),
+            engine.physical as *mut u8,
+            snapshot.bytes,
+        );
+    }
     relocate(
         engine.physical as usize,
         snapshot.bytes,
@@ -77,6 +81,7 @@ pub(super) fn prepare_image(snapshot: &Snapshot) -> Result<EngineImage> {
     Ok(EngineImage {
         image,
         engine,
+        resident,
         ram,
         screen,
         apic_base,

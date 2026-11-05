@@ -1,0 +1,547 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 23:39:50 -0500
+Subject: [PATCH] refactor(vfs): link original path access checks
+
+---
+ fs/exec.c             |   9 --
+ fs/inode.c            | 228 -----------------------------------------
+ fs/inode_timestamps.c | 230 ++++++++++++++++++++++++++++++++++++++++++
+ fs/path_get.c         |  12 ++-
+ 4 files changed, 241 insertions(+), 238 deletions(-)
+
+diff --git a/fs/exec.c b/fs/exec.c
+index 7ce1a59ea7b62a742be2d70fb887ad775d9faa06..e2447279c56cb16d267636b8d08febd57cf94dc7 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -112,15 +112,6 @@ static inline void put_binfmt(struct linux_binfmt * fmt)
+ 	module_put(fmt->module);
+ }
+ 
+-bool path_noexec(const struct path *path)
+-{
+-	/* If it's an anonymous inode make sure that we catch any shenanigans. */
+-	VFS_WARN_ON_ONCE(IS_ANON_FILE(d_inode(path->dentry)) &&
+-			 !(path->mnt->mnt_sb->s_iflags & SB_I_NOEXEC));
+-	return (path->mnt->mnt_flags & MNT_NOEXEC) ||
+-	       (path->mnt->mnt_sb->s_iflags & SB_I_NOEXEC);
+-}
+-
+ #ifdef CONFIG_MMU
+ /*
+  * The nascent bprm->mm is not visible until exec_mmap() but it can
+diff --git a/fs/inode.c b/fs/inode.c
+index f873c6b45797fc100ad51dea7f7e37606f2c11f8..2e9fcd06f704e6b7944672906b127ea1257ca24e 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -1000,234 +1000,6 @@ int bmap(struct inode *inode, sector_t *block)
+ EXPORT_SYMBOL(bmap);
+ #endif
+ 
+-/*
+- * With relative atime, only update atime if the previous atime is
+- * earlier than or equal to either the ctime or mtime,
+- * or if at least a day has passed since the last atime update.
+- */
+-static bool relatime_need_update(struct vfsmount *mnt, struct inode *inode,
+-			     struct timespec64 now)
+-{
+-	struct timespec64 atime, mtime, ctime;
+-
+-	if (!(mnt->mnt_flags & MNT_RELATIME))
+-		return true;
+-	/*
+-	 * Is mtime younger than or equal to atime? If yes, update atime:
+-	 */
+-	atime = inode_get_atime(inode);
+-	mtime = inode_get_mtime(inode);
+-	if (timespec64_compare(&mtime, &atime) >= 0)
+-		return true;
+-	/*
+-	 * Is ctime younger than or equal to atime? If yes, update atime:
+-	 */
+-	ctime = inode_get_ctime(inode);
+-	if (timespec64_compare(&ctime, &atime) >= 0)
+-		return true;
+-
+-	/*
+-	 * Is the previous atime value older than a day? If yes,
+-	 * update atime:
+-	 */
+-	if ((long)(now.tv_sec - atime.tv_sec) >= 24*60*60)
+-		return true;
+-	/*
+-	 * Good, we can skip the atime update:
+-	 */
+-	return false;
+-}
+-
+-static int inode_update_atime(struct inode *inode)
+-{
+-	struct timespec64 atime = inode_get_atime(inode);
+-	struct timespec64 now = current_time(inode);
+-
+-	if (timespec64_equal(&now, &atime))
+-		return 0;
+-
+-	inode_set_atime_to_ts(inode, now);
+-	return inode_time_dirty_flag(inode);
+-}
+-
+-static int inode_update_cmtime(struct inode *inode, unsigned int flags)
+-{
+-	struct timespec64 ctime = inode_get_ctime(inode);
+-	struct timespec64 mtime = inode_get_mtime(inode);
+-	struct timespec64 now = inode_set_ctime_current(inode);
+-	unsigned int dirty = 0;
+-	bool mtime_changed;
+-
+-	mtime_changed = !timespec64_equal(&now, &mtime);
+-	if (mtime_changed || !timespec64_equal(&now, &ctime))
+-		dirty = inode_time_dirty_flag(inode);
+-
+-	/*
+-	 * Pure timestamp updates can be recorded in the inode without blocking
+-	 * by not dirtying the inode.  But when the file system requires
+-	 * i_version updates, the update of i_version can still block.
+-	 * Error out if we'd actually have to update i_version or don't support
+-	 * lazytime.
+-	 */
+-	if (IS_I_VERSION(inode)) {
+-		if (flags & IOCB_NOWAIT) {
+-			if (!(inode->i_sb->s_flags & SB_LAZYTIME) ||
+-			    inode_iversion_need_inc(inode))
+-				return -EAGAIN;
+-		} else {
+-			/*
+-			 * Don't force iversion increment for pure lazytime
+-			 * updates (I_DIRTY_TIME only), let I_VERSION_QUERIED
+-			 * dictate whether the increment is needed.
+-			 */
+-			if (inode_maybe_inc_iversion(inode,
+-						     dirty != I_DIRTY_TIME))
+-				dirty |= I_DIRTY_SYNC;
+-		}
+-	}
+-
+-	if (mtime_changed)
+-		inode_set_mtime_to_ts(inode, now);
+-	return dirty;
+-}
+-
+-/**
+- * inode_update_time - update either atime or c/mtime and i_version on the inode
+- * @inode: inode to be updated
+- * @type: timestamp to be updated
+- * @flags: flags for the update
+- *
+- * Update either atime or c/mtime and version in a inode if needed for a file
+- * access or modification.  It is up to the caller to mark the inode dirty
+- * appropriately.
+- *
+- * Returns the positive I_DIRTY_* flags for __mark_inode_dirty() if the inode
+- * needs to be marked dirty, 0 if it did not, or a negative errno if an error
+- * happened.
+- */
+-int inode_update_time(struct inode *inode, enum fs_update_time type,
+-		unsigned int flags)
+-{
+-	switch (type) {
+-	case FS_UPD_ATIME:
+-		return inode_update_atime(inode);
+-	case FS_UPD_CMTIME:
+-		return inode_update_cmtime(inode, flags);
+-	default:
+-		WARN_ON_ONCE(1);
+-		return -EIO;
+-	}
+-}
+-EXPORT_SYMBOL(inode_update_time);
+-
+-/**
+- * generic_update_time - update the timestamps on the inode
+- * @inode: inode to be updated
+- * @type: timestamp to be updated
+- * @flags: flags for the update
+- *
+- * Returns a negative error value on error, else 0.
+- */
+-int generic_update_time(struct inode *inode, enum fs_update_time type,
+-		unsigned int flags)
+-{
+-	int dirty;
+-
+-	/*
+-	 * ->dirty_inode is what could make generic timestamp updates block.
+-	 * Don't support non-blocking timestamp updates here if it is set.
+-	 * File systems that implement ->dirty_inode but want to support
+-	 * non-blocking timestamp updates should call inode_update_time
+-	 * directly.
+-	 */
+-	if ((flags & IOCB_NOWAIT) && inode->i_sb->s_op->dirty_inode)
+-		return -EAGAIN;
+-
+-	dirty = inode_update_time(inode, type, flags);
+-	if (dirty <= 0)
+-		return dirty;
+-	__mark_inode_dirty(inode, dirty);
+-	return 0;
+-}
+-EXPORT_SYMBOL(generic_update_time);
+-
+-/**
+- *	atime_needs_update	-	update the access time
+- *	@path: the &struct path to update
+- *	@inode: inode to update
+- *
+- *	Update the accessed time on an inode and mark it for writeback.
+- *	This function automatically handles read only file systems and media,
+- *	as well as the "noatime" flag and inode specific "noatime" markers.
+- */
+-bool atime_needs_update(const struct path *path, struct inode *inode)
+-{
+-	struct vfsmount *mnt = path->mnt;
+-	struct timespec64 now, atime;
+-
+-	if (inode->i_flags & S_NOATIME)
+-		return false;
+-
+-	/* Atime updates will likely cause i_uid and i_gid to be written
+-	 * back improprely if their true value is unknown to the vfs.
+-	 */
+-	if (HAS_UNMAPPED_ID(mnt_idmap(mnt), inode))
+-		return false;
+-
+-	if (IS_NOATIME(inode))
+-		return false;
+-	if ((inode->i_sb->s_flags & SB_NODIRATIME) && S_ISDIR(inode->i_mode))
+-		return false;
+-
+-	if (mnt->mnt_flags & MNT_NOATIME)
+-		return false;
+-	if ((mnt->mnt_flags & MNT_NODIRATIME) && S_ISDIR(inode->i_mode))
+-		return false;
+-
+-	now = current_time(inode);
+-
+-	if (!relatime_need_update(mnt, inode, now))
+-		return false;
+-
+-	atime = inode_get_atime(inode);
+-	if (timespec64_equal(&atime, &now))
+-		return false;
+-
+-	return true;
+-}
+-
+-void touch_atime(const struct path *path)
+-{
+-	struct vfsmount *mnt = path->mnt;
+-	struct inode *inode = d_inode(path->dentry);
+-
+-	if (!atime_needs_update(path, inode))
+-		return;
+-
+-	if (!sb_start_write_trylock(inode->i_sb))
+-		return;
+-
+-	if (mnt_get_write_access(mnt) != 0)
+-		goto skip_update;
+-	/*
+-	 * File systems can error out when updating inodes if they need to
+-	 * allocate new space to modify an inode (such is the case for
+-	 * Btrfs), but since we touch atime while walking down the path we
+-	 * really don't care if we failed to update the atime of the file,
+-	 * so just ignore the return value.
+-	 * We may also fail on filesystems that have the ability to make parts
+-	 * of the fs read only, e.g. subvolumes in Btrfs.
+-	 */
+-	if (inode->i_op->update_time)
+-		inode->i_op->update_time(inode, FS_UPD_ATIME, 0);
+-	else
+-		generic_update_time(inode, FS_UPD_ATIME, 0);
+-	mnt_put_write_access(mnt);
+-skip_update:
+-	sb_end_write(inode->i_sb);
+-}
+-EXPORT_SYMBOL(touch_atime);
+-
+ /*
+  * Return mask of changes for notify_change() that need to be done as a
+  * response to write or truncate. Return 0 if nothing has to be changed.
+diff --git a/fs/inode_timestamps.c b/fs/inode_timestamps.c
+index 0b15428c9d938e928022bdabce6f55e9515ad0aa..634908e16cbf6575527921b6afd4b8bd7ce256f7 100644
+--- a/fs/inode_timestamps.c
++++ b/fs/inode_timestamps.c
+@@ -7,6 +7,8 @@
+ #include <linux/debugfs.h>
+ #include <linux/export.h>
+ #include <linux/fs.h>
++#include <linux/iversion.h>
++#include <linux/mount.h>
+ #include <linux/seq_file.h>
+ #include <linux/timekeeping.h>
+ 
+@@ -310,3 +312,231 @@ out:
+ 	return timestamp_truncate(now, inode);
+ }
+ EXPORT_SYMBOL(current_time);
++
++/*
++ * With relative atime, only update atime if the previous atime is
++ * earlier than or equal to either the ctime or mtime,
++ * or if at least a day has passed since the last atime update.
++ */
++static bool relatime_need_update(struct vfsmount *mnt, struct inode *inode,
++			     struct timespec64 now)
++{
++	struct timespec64 atime, mtime, ctime;
++
++	if (!(mnt->mnt_flags & MNT_RELATIME))
++		return true;
++	/*
++	 * Is mtime younger than or equal to atime? If yes, update atime:
++	 */
++	atime = inode_get_atime(inode);
++	mtime = inode_get_mtime(inode);
++	if (timespec64_compare(&mtime, &atime) >= 0)
++		return true;
++	/*
++	 * Is ctime younger than or equal to atime? If yes, update atime:
++	 */
++	ctime = inode_get_ctime(inode);
++	if (timespec64_compare(&ctime, &atime) >= 0)
++		return true;
++
++	/*
++	 * Is the previous atime value older than a day? If yes,
++	 * update atime:
++	 */
++	if ((long)(now.tv_sec - atime.tv_sec) >= 24*60*60)
++		return true;
++	/*
++	 * Good, we can skip the atime update:
++	 */
++	return false;
++}
++
++static int inode_update_atime(struct inode *inode)
++{
++	struct timespec64 atime = inode_get_atime(inode);
++	struct timespec64 now = current_time(inode);
++
++	if (timespec64_equal(&now, &atime))
++		return 0;
++
++	inode_set_atime_to_ts(inode, now);
++	return inode_time_dirty_flag(inode);
++}
++
++static int inode_update_cmtime(struct inode *inode, unsigned int flags)
++{
++	struct timespec64 ctime = inode_get_ctime(inode);
++	struct timespec64 mtime = inode_get_mtime(inode);
++	struct timespec64 now = inode_set_ctime_current(inode);
++	unsigned int dirty = 0;
++	bool mtime_changed;
++
++	mtime_changed = !timespec64_equal(&now, &mtime);
++	if (mtime_changed || !timespec64_equal(&now, &ctime))
++		dirty = inode_time_dirty_flag(inode);
++
++	/*
++	 * Pure timestamp updates can be recorded in the inode without blocking
++	 * by not dirtying the inode.  But when the file system requires
++	 * i_version updates, the update of i_version can still block.
++	 * Error out if we'd actually have to update i_version or don't support
++	 * lazytime.
++	 */
++	if (IS_I_VERSION(inode)) {
++		if (flags & IOCB_NOWAIT) {
++			if (!(inode->i_sb->s_flags & SB_LAZYTIME) ||
++			    inode_iversion_need_inc(inode))
++				return -EAGAIN;
++		} else {
++			/*
++			 * Don't force iversion increment for pure lazytime
++			 * updates (I_DIRTY_TIME only), let I_VERSION_QUERIED
++			 * dictate whether the increment is needed.
++			 */
++			if (inode_maybe_inc_iversion(inode,
++						     dirty != I_DIRTY_TIME))
++				dirty |= I_DIRTY_SYNC;
++		}
++	}
++
++	if (mtime_changed)
++		inode_set_mtime_to_ts(inode, now);
++	return dirty;
++}
++
++/**
++ * inode_update_time - update either atime or c/mtime and i_version on the inode
++ * @inode: inode to be updated
++ * @type: timestamp to be updated
++ * @flags: flags for the update
++ *
++ * Update either atime or c/mtime and version in a inode if needed for a file
++ * access or modification.  It is up to the caller to mark the inode dirty
++ * appropriately.
++ *
++ * Returns the positive I_DIRTY_* flags for __mark_inode_dirty() if the inode
++ * needs to be marked dirty, 0 if it did not, or a negative errno if an error
++ * happened.
++ */
++int inode_update_time(struct inode *inode, enum fs_update_time type,
++		unsigned int flags)
++{
++	switch (type) {
++	case FS_UPD_ATIME:
++		return inode_update_atime(inode);
++	case FS_UPD_CMTIME:
++		return inode_update_cmtime(inode, flags);
++	default:
++		WARN_ON_ONCE(1);
++		return -EIO;
++	}
++}
++EXPORT_SYMBOL(inode_update_time);
++
++/**
++ * generic_update_time - update the timestamps on the inode
++ * @inode: inode to be updated
++ * @type: timestamp to be updated
++ * @flags: flags for the update
++ *
++ * Returns a negative error value on error, else 0.
++ */
++int generic_update_time(struct inode *inode, enum fs_update_time type,
++		unsigned int flags)
++{
++	int dirty;
++
++	/*
++	 * ->dirty_inode is what could make generic timestamp updates block.
++	 * Don't support non-blocking timestamp updates here if it is set.
++	 * File systems that implement ->dirty_inode but want to support
++	 * non-blocking timestamp updates should call inode_update_time
++	 * directly.
++	 */
++	if ((flags & IOCB_NOWAIT) && inode->i_sb->s_op->dirty_inode)
++		return -EAGAIN;
++
++	dirty = inode_update_time(inode, type, flags);
++	if (dirty <= 0)
++		return dirty;
++	__mark_inode_dirty(inode, dirty);
++	return 0;
++}
++EXPORT_SYMBOL(generic_update_time);
++
++/**
++ *	atime_needs_update	-	update the access time
++ *	@path: the &struct path to update
++ *	@inode: inode to update
++ *
++ *	Update the accessed time on an inode and mark it for writeback.
++ *	This function automatically handles read only file systems and media,
++ *	as well as the "noatime" flag and inode specific "noatime" markers.
++ */
++bool atime_needs_update(const struct path *path, struct inode *inode)
++{
++	struct vfsmount *mnt = path->mnt;
++	struct timespec64 now, atime;
++
++	if (inode->i_flags & S_NOATIME)
++		return false;
++
++	/* Atime updates will likely cause i_uid and i_gid to be written
++	 * back improprely if their true value is unknown to the vfs.
++	 */
++	if (HAS_UNMAPPED_ID(mnt_idmap(mnt), inode))
++		return false;
++
++	if (IS_NOATIME(inode))
++		return false;
++	if ((inode->i_sb->s_flags & SB_NODIRATIME) && S_ISDIR(inode->i_mode))
++		return false;
++
++	if (mnt->mnt_flags & MNT_NOATIME)
++		return false;
++	if ((mnt->mnt_flags & MNT_NODIRATIME) && S_ISDIR(inode->i_mode))
++		return false;
++
++	now = current_time(inode);
++
++	if (!relatime_need_update(mnt, inode, now))
++		return false;
++
++	atime = inode_get_atime(inode);
++	if (timespec64_equal(&atime, &now))
++		return false;
++
++	return true;
++}
++
++void touch_atime(const struct path *path)
++{
++	struct vfsmount *mnt = path->mnt;
++	struct inode *inode = d_inode(path->dentry);
++
++	if (!atime_needs_update(path, inode))
++		return;
++
++	if (!sb_start_write_trylock(inode->i_sb))
++		return;
++
++	if (mnt_get_write_access(mnt) != 0)
++		goto skip_update;
++	/*
++	 * File systems can error out when updating inodes if they need to
++	 * allocate new space to modify an inode (such is the case for
++	 * Btrfs), but since we touch atime while walking down the path we
++	 * really don't care if we failed to update the atime of the file,
++	 * so just ignore the return value.
++	 * We may also fail on filesystems that have the ability to make parts
++	 * of the fs read only, e.g. subvolumes in Btrfs.
++	 */
++	if (inode->i_op->update_time)
++		inode->i_op->update_time(inode, FS_UPD_ATIME, 0);
++	else
++		generic_update_time(inode, FS_UPD_ATIME, 0);
++	mnt_put_write_access(mnt);
++skip_update:
++	sb_end_write(inode->i_sb);
++}
++EXPORT_SYMBOL(touch_atime);
+diff --git a/fs/path_get.c b/fs/path_get.c
+index ae9c17b7e58f1640f14b44d54aa069046653871c..86760a684df0dfead4ffe04d3beffca7d7163d2c 100644
+--- a/fs/path_get.c
++++ b/fs/path_get.c
+@@ -1,11 +1,12 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /*
+- * Path reference operations from fs/namei.c and fs/namespace.c.
++ * Path helpers from fs/exec.c, fs/namei.c and fs/namespace.c.
+  * Copyright (C) 1991, 1992 Linus Torvalds
+  * Copyright (C) 2000, 2001 Al Viro
+  */
+ #include <linux/dcache.h>
+ #include <linux/export.h>
++#include <linux/fs.h>
+ #include <linux/path.h>
+ 
+ #include "mount.h"
+@@ -43,3 +44,12 @@ void path_put(const struct path *path)
+ 	mntput(path->mnt);
+ }
+ EXPORT_SYMBOL(path_put);
++
++bool path_noexec(const struct path *path)
++{
++	/* If it's an anonymous inode make sure that we catch any shenanigans. */
++	VFS_WARN_ON_ONCE(IS_ANON_FILE(d_inode(path->dentry)) &&
++			 !(path->mnt->mnt_sb->s_iflags & SB_I_NOEXEC));
++	return (path->mnt->mnt_flags & MNT_NOEXEC) ||
++	       (path->mnt->mnt_sb->s_iflags & SB_I_NOEXEC);
++}

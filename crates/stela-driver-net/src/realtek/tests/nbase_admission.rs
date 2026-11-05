@@ -94,33 +94,33 @@ fn nbase_polled_carrier_preserves_latch_low_an_restart_and_cache_expiry() {
         assert_eq!(link.update(&hw), Ok(true)); // Down state retries its low latch sample.
         assert_eq!(model.state.borrow().phy_ocp_commands, 3);
         let writes = model.state.borrow().writes.len();
-        time.delay(NBASE_LINK_POLL_US - 1);
+        time.delay(NBASE_LINK_POLL_US - 1).unwrap();
         assert_eq!(link.update(&hw), Ok(true));
         assert_eq!(model.state.borrow().writes.len(), writes);
-        time.delay(1);
+        time.delay(1).unwrap();
         assert_eq!(link.update(&hw), Ok(true));
         assert_eq!(model.state.borrow().phy_ocp_commands, 5);
         model.state.borrow_mut().bmsr_latch_low_once = true;
-        time.delay(NBASE_LINK_POLL_US);
+        time.delay(NBASE_LINK_POLL_US).unwrap();
         assert_eq!(link.update(&hw), Ok(false)); // Up state preserves the brief latched drop.
-        time.delay(NBASE_LINK_POLL_US);
+        time.delay(NBASE_LINK_POLL_US).unwrap();
         assert_eq!(link.update(&hw), Ok(true));
         model.state.borrow_mut().phy_ocp.insert(0xa400, 0x1200);
-        time.delay(NBASE_LINK_POLL_US);
+        time.delay(NBASE_LINK_POLL_US).unwrap();
         assert_eq!(link.update(&hw), Ok(false)); // Restart overrides an old link indication.
         {
             let mut s = model.state.borrow_mut();
             s.phy_ocp.insert(0xa400, 0x1000);
             s.phy_ocp.insert(0xa402, 0x790d);
         }
-        time.delay(NBASE_LINK_POLL_US);
+        time.delay(NBASE_LINK_POLL_US).unwrap();
         assert_eq!(link.update(&hw), Ok(false)); // AN not complete.
         model.state.borrow_mut().phy_ocp.insert(0xa402, u16::MAX);
-        time.delay(NBASE_LINK_POLL_US);
+        time.delay(NBASE_LINK_POLL_US).unwrap();
         assert_eq!(link.update(&hw), Err(BlockError::Device { status: 65535 }));
         let writes = model.state.borrow().writes.len();
         model.state.borrow_mut().phy_ocp.insert(0xa402, 0x792d);
-        time.delay(NBASE_LINK_POLL_US);
+        time.delay(NBASE_LINK_POLL_US).unwrap();
         assert_eq!(link.update(&hw), Err(BlockError::Device { status: 65535 }));
         assert_eq!(model.state.borrow().writes.len(), writes);
         let mut model = Model::nbase(&time);
@@ -132,7 +132,7 @@ fn nbase_polled_carrier_preserves_latch_low_an_restart_and_cache_expiry() {
         }
         let writes = model.state.borrow().writes.len();
         model.fail_phy_ocp_at = usize::MAX;
-        time.delay(50_000);
+        time.delay(50_000).unwrap();
         model.read32(PHY_OCP);
         let hw = Hardware::new(&model, &time, revision(version), 0);
         assert_eq!(link.update(&hw), Err(BlockError::Timeout));

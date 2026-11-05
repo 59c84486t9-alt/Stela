@@ -304,17 +304,8 @@ fn open_host(
         .chain(options.nor.iter().filter(|_| !state_in_storage))
         .collect();
     #[cfg(feature = "diagnostics")]
-    if let Some(mode) = options.audio_check {
-        let audio_handoff = handoff
-            .storage
-            .handoff()
-            .unwrap_or_else(|| output::fatal("the loader found no host device handoff"));
-        // SAFETY: --audio-check explicitly grants sole conventional HDA ownership;
-        // before host::install, the identity root and DMA pages are live.
-        unsafe { crate::audio_check::run(&audio_handoff, mode) }.unwrap_or_else(|error| {
-            output::arguments(format_args!("AUDIO CHECK failed: {error}\n"));
-            output::fatal("the audio check failed")
-        });
+    if options.audio_check.is_some() && !options.audio_own_hpet {
+        output::fatal("the audio check requires an explicit --audio-own-hpet handoff");
     }
     let InstalledHost {
         owner: mut host_owner,
@@ -327,7 +318,7 @@ fn open_host(
         mmio: native_mmio,
         remappers,
         _work: kernel_work,
-    } = start_platform(handoff, &mut host_owner, options.native_pci_own_hpet);
+    } = start_platform(handoff, &mut host_owner, options);
     // The signing service is asked only during a restore, so a boot that
     // restores nothing leaves the adapter to the guest.
     let restoring = options.install.is_some() || options.restore_source.is_some();
@@ -1132,12 +1123,18 @@ fn open_gpus(
         .iter()
         .map(|region| region.physical..region.physical + region.bytes)
         .collect();
-    let tsc_hz = handoff.tsc_hz;
     let Some(window) = mmio.and_then(|mmio| mmio.window()) else {
         crate::status::warn("this PC cannot map a GPU's memory, so it is left unused");
         return false;
     };
     let Some(mmio) = mmio else { return false };
+    if let Err(error) = work.service_clock().and_then(|clock| clock.epoch()) {
+        crate::status::warn(&format!(
+            "the GPU requires an owned continuous HPET clock: {error:?}"
+        ));
+        return false;
+    }
+    let tsc_hz = handoff.tsc_hz;
     #[cfg(feature = "nvk")]
     let heap_bytes = heap.end - heap.start;
     crate::status::begin("Starting the GPU");
@@ -1148,17 +1145,16 @@ fn open_gpus(
     } else {
         Ok(None)
     };
+    let firmware = firmware.clone();
     let claimed = work.call_owned(60_000_000, move || {
         let services = services::Services::new(mmio, remappers, None, heap, tsc_hz, Vec::new())
             .with_guest_ram(guest_ram);
         let random = stela_drivers::probe::NativeServices::entropy(&services)
             .ok()
-            .and_then(|entropy| {
-                stela_drivers::gpu::linux::random::Seeded::from_entropy(&*entropy).ok()
-            });
-        let claimed = random
-            .as_ref()
-            .map_or_else(Vec::new, |_| gpu::claim_all(&services, &adapters, gop));
+            .and_then(|entropy| stela_linux::random::Seeded::from_entropy(&*entropy).ok());
+        let claimed = random.as_ref().map_or_else(Vec::new, |_| {
+            gpu::claim_all(&services, &adapters, gop, firmware.as_ref())
+        });
         (claimed, random)
     });
     let (claimed, random) = match claimed {
@@ -1175,9 +1171,9 @@ fn open_gpus(
     let machine = gpu::Machine {
         work,
         window,
-        firmware: firmware.clone(),
         random,
         tsc_hz,
+        wall: handoff.wall,
         #[cfg(feature = "nvk")]
         heap_bytes,
     };
@@ -1508,14 +1504,18 @@ fn check_processors(
         ));
         // SAFETY: the BSP still owns the diagnostic's configuration space.
         // It reads the mapped page before handing the sole lease to the AP.
-        let (mapping, identity) = unsafe { mmio.check_shootdown_mapping() }
+        let (scope, identity) = unsafe { mmio.check_shootdown_mapping() }
             .unwrap_or_else(|_| output::fatal("AP shootdown diagnostic mapping refused"));
         let bsp = host::shootdown()
             .0
             .unwrap_or_else(|| output::fatal("the BSP has no shootdown slot"));
         // SAFETY: the sole read completed on the BSP and no consumer remains.
-        unsafe { waiter.check_aperture_retire(mapping, sender, handoff.tsc_hz) }
-            .unwrap_or_else(|error| output::fatal(error));
+        unsafe {
+            scope.retire_remotely(|mapping| {
+                waiter.check_aperture_retire(mapping, sender, handoff.tsc_hz)
+            })
+        }
+        .unwrap_or_else(|error| output::fatal(error));
         let processors = &crate::native_mmio::PROCESSORS;
         let retired = processors.requested();
         if identity == u32::MAX || retired <= generation || processors.acknowledged(bsp) < retired {
@@ -1920,6 +1920,12 @@ fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) 
     }
     #[cfg(feature = "diagnostics")]
     if options.native_mmio_check {
+        if handoff.inactive_firmware_units.original_units().is_none() {
+            output::arguments(format_args!(
+                "CHECK native-mmio REFUSED stage=original-notification-owner error=Unavailable\n"
+            ));
+            output::fatal("native MMIO original notification owner unavailable");
+        }
         // SAFETY: this explicit UP entry owns the task pool for the boot it
         // stops. It retires every view before the MMIO phases and never
         // activates a second permission or publishes a service.
@@ -1958,10 +1964,73 @@ struct Platform {
     _work: Option<&'static kernel_work::KernelWork>,
 }
 
+/// # Safety
+/// The post-EBS diagnostic exclusively owns the conventional HDA controller
+/// and entire original HPET, including firmware/SMM, reset and comparator
+/// exclusion. It runs on the installed BSP before APs or other drivers start.
+#[cfg(feature = "diagnostics")]
+unsafe fn check_audio(
+    handoff: &'static Handoff,
+    owner: &mut host::HostOwner,
+    source: &crate::native_mmio::Source,
+    mode: stela_boot_core::options::AudioCheck,
+) -> Result<()> {
+    use crate::native_clock::Prepared;
+    let audio = handoff
+        .storage
+        .handoff()
+        .ok_or(refuse!("the loader found no host device handoff"))?;
+    let identity = owner
+        .root_identity()
+        .map_err(|error| refuse!("audio root identity: {error}", ?error))?;
+    // SAFETY: original loader root on the installed BSP. The audio handoff's
+    // low ECAM, BAR and DMA addresses are usable only while this guard is held.
+    let _root = unsafe { storage::RestoreRoot::enter(handoff.root) };
+    // SAFETY: same real source and CPU, with the explicit complete controller
+    // handoff. No AP, other driver or outside HPET writer can enter here.
+    let hpet = unsafe { source.take_hpet(identity) }
+        .map_err(|error| refuse!("audio HPET handoff: {error}", ?error))?;
+    let prepared = Prepared::exclusive_native_hpet(hpet)
+        .map_err(|error| refuse!("audio HPET counter: {error}", ?error))?;
+    let counter = prepared
+        .hpet_counter()
+        .ok_or(refuse!("audio HPET counter unavailable"))?
+        .clone();
+    let result = prepared
+        .pci_minimum()
+        .map_err(|error| refuse!("audio HPET minimum: {error}", ?error))
+        .and_then(|minimum| {
+            // SAFETY: the caller supplied the complete HDA handoff and the
+            // loader root still maps its exclusive ECAM/BARs and DMA tail.
+            unsafe { crate::audio_check::run(&audio, mode, minimum) }
+        });
+    drop(prepared);
+    let retired = (|| {
+        let mut counter = alloc::sync::Arc::try_unwrap(counter)
+            .map_err(|_| refuse!("audio retained an HPET timing user"))?;
+        // SAFETY: the only timer was scoped to the diagnostic, and unique
+        // counter ownership proves no retained provider/reader remains.
+        unsafe { counter.retire() }
+            .map_err(|error| refuse!("audio HPET retirement: {error}", ?error))?;
+        drop(counter);
+        source
+            .join_hpet()
+            .map_err(|error| refuse!("audio HPET join: {error}", ?error))
+    })();
+    match (result, retired) {
+        (Err(error), Err(retire)) => Err(refuse!("{error}; also {retire}", %error, %retire)),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(()), Ok(())) => {
+            output::arguments(format_args!("AUDIO CHECK passed\n"));
+            Ok(())
+        }
+    }
+}
+
 fn start_platform(
     handoff: &'static Handoff,
     host_owner: &mut host::HostOwner,
-    own_hpet: bool,
+    options: &Options,
 ) -> Platform {
     // The owned MMIO permission the host devices' services map through. A
     // host it cannot check is reported, and those services refuse.
@@ -1974,19 +2043,29 @@ fn start_platform(
         })
         .ok()
         .map(|source| &*alloc::boxed::Box::leak(alloc::boxed::Box::new(source)));
-    if own_hpet {
-        let clock = native_mmio
-            .ok_or(stela_drivers::platform::work::WorkError::Unavailable)
+    #[cfg(feature = "diagnostics")]
+    if let Some(mode) = options.audio_check {
+        let source =
+            native_mmio.unwrap_or_else(|| output::fatal("audio HPET aperture unavailable"));
+        // SAFETY: the explicit audio and whole HPET handoffs were checked at
+        // the entry. The sole BSP owns both resources before other devices.
+        unsafe { check_audio(handoff, host_owner, source, mode) }.unwrap_or_else(|error| {
+            output::arguments(format_args!("AUDIO CHECK failed: {error}\n"));
+            output::fatal("the audio check failed")
+        });
+    }
+    if options.native_pci_own_hpet {
+        let result = native_mmio
+            .ok_or(refuse!("native MMIO aperture unavailable"))
             .and_then(|source| {
-                // SAFETY: the explicit whole-controller handoff excludes all
-                // firmware/SMM and other HPET users through shutdown.
+                // SAFETY: the explicit whole-controller handoff excludes
+                // firmware/SMM and every other writer until shutdown. The
+                // installed BSP owns the source before any native driver.
                 unsafe { source.install_pci_clock() }
             });
-        match clock {
+        match result {
             Ok(()) => output::arguments(format_args!("NATIVE PCI HPET retained\n")),
-            Err(error) => {
-                output::arguments(format_args!("NATIVE PCI HPET unavailable: {error:?}\n"))
-            }
+            Err(error) => output::arguments(format_args!("NATIVE PCI HPET unavailable: {error}\n")),
         }
     }
     match host_owner
@@ -2006,12 +2085,31 @@ fn start_platform(
         Ok(()) => output::arguments(format_args!("NATIVE IRQ device vectors attached\n")),
         Err(error) => output::arguments(format_args!("NATIVE IRQ unavailable: {error:?}\n")),
     }
-    // The remapping units, taken before any host driver starts DMA.
+    // Retire the configuration census and park the contained function owners
+    // before either SCI publication or remapper takeover.
+    let contained_pci = native_mmio.and_then(|mmio| {
+        // SAFETY: firmware is stopped, APs have not started, and native
+        // probing has not published any PCI/controller owner yet.
+        match unsafe { mmio.contain_pci(handoff.tsc_hz) } {
+            Ok(contained) => {
+                output::arguments(format_args!(
+                    "HOST PCI contained: {} functions\n",
+                    contained.functions()
+                ));
+                Some(contained)
+            }
+            Err(error) => {
+                output::arguments(format_args!("HOST PCI containment unavailable: {error}\n"));
+                None
+            }
+        }
+    });
     if let Some(screen) = handoff.screen {
-        match (&native_mmio, screen.pci_source) {
-            (Some(mmio), Some(source)) => {
-                // SAFETY: firmware stopped and no native device writer has started.
-                match unsafe { mmio.check_framebuffer(source) } {
+        match (&contained_pci, screen.pci_source) {
+            (Some(pci), Some(source)) => {
+                // SAFETY: the original parked PCI fabric still excludes all
+                // competing configuration writers at this point in startup.
+                match unsafe { pci.check_framebuffer(source) } {
                     Ok(()) => output::arguments(format_args!(
                         "HOST GOP PCI source {} BAR{} observed before and after firmware exit\n",
                         source.address,
@@ -2026,24 +2124,77 @@ fn start_platform(
             _ => output::arguments(format_args!("HOST GOP PCI source unavailable\n")),
         }
     }
-    let remappers = match (&native_mmio, handoff.storage.handoff()) {
+    // The remapping units, taken before any host driver starts DMA.
+    let mut remappers = match (&contained_pci, handoff.storage.handoff()) {
         // SAFETY: no host driver has started; the loader root maps the ACPI
-        // tables and configuration space, and the firmware's translation
-        // was turned off at ExitBootServices.
-        (Some(mmio), Some(storage)) => unsafe {
+        // tables and firmware translation was turned off at ExitBootServices.
+        (Some(pci), Some(storage)) => unsafe {
             remapping::Remappers::take(
                 handoff.rsdp,
                 handoff.root,
-                &storage.ecam,
                 storage.dma.clone(),
-                mmio,
+                pci,
+                &handoff.inactive_firmware_units,
                 handoff.tsc_hz,
             )
         },
         _ => remapping::Remappers::none(),
     };
+    if options.native_pci_own_ioapic {
+        let result = contained_pci
+            .as_ref()
+            .ok_or(stela_drivers::bus::mmio::owned::Error::Unavailable)
+            .and_then(|pci| {
+                // SAFETY: the explicit whole-controller handoff excludes
+                // firmware/SMM/other route writers through shutdown. The
+                // original stopped PCI census and all-unit remapper pins
+                // remain held while the sole BSP contains the IOAPICs.
+                unsafe { remappers.install_ioapics(pci) }
+            });
+        match result {
+            Ok(units) => output::arguments(format_args!(
+                "HOST IOAPIC contained: {units} original controllers; remapper direct mode retained\n"
+            )),
+            Err(error) => output::arguments(format_args!(
+                "HOST IOAPIC containment unavailable: {error:?}\n"
+            )),
+        }
+    }
+    if let Some(pci) = &contained_pci {
+        remappers.forward_pci_bridges(pci);
+    }
+    let prepared_sci = match (&contained_pci, &handoff.power) {
+        (Some(pci), Some(power)) => {
+            match aml::sci::Prepared::capture(pci.source(), power.clone()) {
+                Ok(prepared) => Some(prepared),
+                Err(error) => {
+                    output::arguments(format_args!("HOST ACPI SCI unavailable: {error:?}\n"));
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    let clock = if options.boots_macos() && options.native_pci_own_hpet {
+        native_mmio.and_then(|source| {
+            // SAFETY: this BSP owns the existing timer/IDT and has the
+            // explicit whole HPET handoff. Attach checks quiescence and ARAT
+            // before publishing the shared timer owner.
+            match unsafe { source.install_service_clock() } {
+                Ok(clock) => Some(&*alloc::boxed::Box::leak(alloc::boxed::Box::new(clock))),
+                Err(error) => {
+                    output::arguments(format_args!(
+                        "NATIVE SERVICE CLOCK unavailable: {error:?}\n"
+                    ));
+                    None
+                }
+            }
+        })
+    } else {
+        None
+    };
     // SAFETY: validated BSP handoff, before AP/driver producers.
-    let work = match unsafe { kernel_work::KernelWork::prepare(handoff, host_owner) } {
+    let work = match unsafe { kernel_work::KernelWork::prepare(handoff, host_owner, clock) } {
         Ok(work) => {
             #[cfg(feature = "diagnostics")]
             output::arguments(format_args!(
@@ -2056,28 +2207,6 @@ fn start_platform(
             None
         }
     };
-    let prepared_sci = match (&native_mmio, &handoff.power) {
-        (Some(mmio), Some(power)) => {
-            // SAFETY: firmware is stopped, APs have not started, and native
-            // probing has not published any PCI/controller owner yet.
-            let prepared = unsafe { mmio.mask_pci_intx() }
-                .map_err(|error| refuse!("PCI INTx handoff: {error}", ?error))
-                .and_then(|()| {
-                    // SAFETY: PCI INTx contributors are disabled; the boot
-                    // owns the fixed/GPE sources and complete IOAPIC handoff.
-                    unsafe { aml::sci::Prepared::capture(mmio, power.clone()) }
-                        .map_err(|error| refuse!("SCI route: {error}", ?error))
-                });
-            match prepared {
-                Ok(prepared) => Some(prepared),
-                Err(error) => {
-                    output::arguments(format_args!("HOST ACPI SCI unavailable: {error}\n"));
-                    None
-                }
-            }
-        }
-        _ => None,
-    };
     let host_acpi = aml::HostAcpi::start(
         handoff.rsdp,
         handoff.root,
@@ -2086,6 +2215,7 @@ fn start_platform(
             .handoff()
             .map(|storage| storage.ecam)
             .unwrap_or_default(),
+        native_mmio,
         handoff.tsc_hz,
         prepared_sci,
         work,

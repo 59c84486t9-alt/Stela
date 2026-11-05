@@ -15,6 +15,9 @@ use crate::wifi::station::{
 
 #[test]
 fn a_pmf_association_opens_its_port_after_the_handshake_keys() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (client, model) = setup_modern();
     let (join, bss) = inputs(&client);
     let client = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
@@ -117,6 +120,9 @@ fn a_pmf_association_opens_its_port_after_the_handshake_keys() {
 
 #[test]
 fn an_sae_exchange_associates_like_ieee80211_mgd_assoc() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (client, model) = setup_modern();
     let (join, bss) = inputs_akm(&client, 8);
     let client = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
@@ -366,6 +372,9 @@ fn records(commands: &[Vec<u8>], command: u8, header: usize, tag: u16) -> Vec<Ve
 /// MLDs' PTK opens the port.
 #[test]
 fn an_ap_mld_association_names_both_mlds_in_its_records() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, _) = mld_association(|_, _| (Vec::new(), Vec::new()));
     let before = model.response.lock().unwrap().client_commands.len();
     link.configure().unwrap();
@@ -425,6 +434,9 @@ fn an_ap_mld_association_names_both_mlds_in_its_records() {
 /// pairs; the link's records and interface leave with the association.
 #[test]
 fn an_ap_mld_association_adds_its_other_link_on_an_interface_of_its_own() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, _) = two_link_association();
     let before = model.response.lock().unwrap().client_commands.len();
     link.configure().unwrap();
@@ -634,6 +646,9 @@ fn two_link_association_with_cipher(cipher: u8) -> (TestLink, Model, scan::resul
 
 #[test]
 fn protected_deauthentication_on_second_link_ends_association() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model) = authorized_two_link_association();
 
     let mut deauth = response(0x40c0, &[7, 0]);
@@ -715,6 +730,9 @@ fn other_link_beacon(link: &TestLink, count: u8) -> Vec<u8> {
 
 #[test]
 fn second_link_beacon_updates_only_its_edca() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model) = authorized_two_link_association();
     let setup = *link.applied_edca().unwrap();
     let epoch = link.station().association_epoch();
@@ -764,6 +782,9 @@ fn second_link_beacon_updates_only_its_edca() {
 
 #[test]
 fn second_link_edca_failure_quarantines_without_claiming_application() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model) = authorized_two_link_association();
     let applied = link.state().client.client.state().links[0].applied_edca;
     let beacon = other_link_beacon(&link, 1);
@@ -784,6 +805,9 @@ fn second_link_edca_failure_quarantines_without_claiming_application() {
 
 #[test]
 fn second_link_beacon_narrows_only_its_channel() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use crate::wifi::station::phy::Width;
     let (mut link, model) = authorized_two_link_association();
     let setup = link.state().client.client.state().channel;
@@ -826,6 +850,9 @@ fn second_link_beacon_narrows_only_its_channel() {
 
 #[test]
 fn invalid_second_link_beacon_does_not_suppress_the_valid_beacons_gap_report() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model) = authorized_two_link_association();
     let beacon = other_link_beacon(&link, 1);
     let mut wrong_peer = beacon.clone();

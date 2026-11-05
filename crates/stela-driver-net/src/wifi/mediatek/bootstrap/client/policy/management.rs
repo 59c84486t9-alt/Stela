@@ -35,10 +35,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         index: u8,
         material: &[u8],
         receive: PacketNumber,
-    ) -> Result<Arc<Session>, PolicyError>
-    where
-        C: Send + Sync,
-    {
+    ) -> Result<Arc<Session>, PolicyError> {
         let admission = self.management_admission()?;
         // SAFETY: permission/controller are the same exclusive private attachment;
         // inherited authentic input and independent old-user drain fence.
@@ -140,10 +137,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         index: u8,
         material: &[u8],
         receive: PacketNumber,
-    ) -> Result<Arc<Session>, PolicyError>
-    where
-        C: Send + Sync,
-    {
+    ) -> Result<Arc<Session>, PolicyError> {
         let admission = self.management_admission()?;
         // SAFETY: this private attachment keeps the native requester and
         // permissions; caller supplies authentic peer policy and drain.

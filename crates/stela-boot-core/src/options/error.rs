@@ -65,7 +65,9 @@ pub enum Error {
     Dns,
     DuplicateDns,
     DuplicateAudioCheck,
+    DuplicateAudioHpet,
     DuplicateNativePciHpet,
+    DuplicateNativePciIoapic,
     MissingAudioMode,
     MissingNetworkUrl,
     DuplicateNetworkCheck,
@@ -135,7 +137,9 @@ pub enum Constraint {
     ClockCoreCount,
     ClockExclusive,
     HostDiagnosticExclusive,
+    AudioHpetDependency,
     NativePciHpetExclusive,
+    NativePciIoapicExclusive,
 }
 impl Error {
     /// The established stela.cfg diagnostic at presentation-only callers.
@@ -187,7 +191,9 @@ impl Error {
             Self::Dns => "--dns needs 1 to 3 distinct server addresses separated by commas",
             Self::DuplicateDns => "duplicate --dns",
             Self::DuplicateAudioCheck => "duplicate audio check",
+            Self::DuplicateAudioHpet => "duplicate audio HPET handoff",
             Self::DuplicateNativePciHpet => "duplicate native PCI HPET handoff",
+            Self::DuplicateNativePciIoapic => "duplicate native PCI IOAPIC handoff",
             Self::MissingAudioMode => "missing audio check mode",
             Self::MissingNetworkUrl => "missing network check URL",
             Self::DuplicateNetworkCheck => "duplicate network check",
@@ -260,13 +266,17 @@ impl Constraint {
             Self::UpgradeSelection => "--upgrade is neither a safe-mode boot nor a recoveryOS",
             Self::RecoverySafeMode => "a recoveryOS boot is not a safe-mode boot",
             Self::DramAlignment => "guest DRAM base must be 2 MiB aligned",
-            Self::NativePciHpetExclusive => {
-                "--native-pci-own-hpet requires the normal system platform path"
-            }
             Self::ClockCoreCount => "native clock check requires --native-cores 1",
             Self::ClockExclusive => "native clock check requires an exclusive diagnostic mode",
             Self::HostDiagnosticExclusive => {
                 "host check: native diagnostic fixture modes are exclusive"
+            }
+            Self::AudioHpetDependency => "--audio-own-hpet requires --audio-check",
+            Self::NativePciIoapicExclusive => {
+                "--native-pci-own-ioapic requires the normal system platform path"
+            }
+            Self::NativePciHpetExclusive => {
+                "--native-pci-own-hpet requires the normal system platform path"
             }
         }
     }

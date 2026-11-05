@@ -495,17 +495,36 @@ pub(crate) struct IcmPci {
 }
 
 impl crate::bus::pci::ConfigSpace for IcmPci {
-    fn read32(&self, offset: u16) -> u32 {
-        match offset {
-            0 => (u32::from(self.device) << 16) | 0x8086,
-            4 => self.command,
-            8 => 0x0c034000,
-            0x0c => 0,
-            _ => u32::MAX,
-        }
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        let value = {
+            match offset {
+                0 => (u32::from(self.device) << 16) | 0x8086,
+                4 => self.command,
+                8 => 0x0c034000,
+                0x0c => 0,
+                _ => u32::MAX,
+            }
+        };
+        Ok(value)
     }
-    fn write32(&mut self, _: u16, _: u32) {
+    fn write32(&mut self, _: u16, _: u32) -> Result<(), crate::bus::pci::ConfigError> {
         panic!("ICM must not alter PCI admission");
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+    }
+
+    fn write8(&mut self, _: u16, _: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        panic!("unexpected narrow PCI store in controller fixture");
+    }
+
+    fn write16(&mut self, _: u16, _: u16) -> Result<(), crate::bus::pci::ConfigError> {
+        panic!("unexpected narrow PCI store in controller fixture");
     }
 }
 

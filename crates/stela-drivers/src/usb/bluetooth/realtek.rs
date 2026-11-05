@@ -155,6 +155,10 @@ pub(super) fn is_candidate(device: &crate::usb::xhci::Device) -> bool {
 /// native consumer wrapper. Any failed candidate attempt closes/quarantines its
 /// transport and preserves typed failure/partial receipts; rebind is required.
 /// Unsupported running variants are refused, never dropped or guessed ready.
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub fn initialize<B: Io>(
     hci: &mut Hci<B>,
     provider: &dyn crate::firmware::Provider,

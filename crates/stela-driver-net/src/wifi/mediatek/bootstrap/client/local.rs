@@ -362,6 +362,9 @@ mod tests {
     use super::*;
     #[test]
     fn source_local_profile_has_real_bands_mcs_ppe_width_and_mlo_observations() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         for band in [Band::Ghz2, Band::Ghz5, Band::Ghz6] {
             for nss in 1..=4 {
                 let a = make(
@@ -420,6 +423,9 @@ mod tests {
 
     #[test]
     fn outgoing_capabilities_cannot_promote_streams_phy_or_sleep_behavior() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let source = make(
             Band::Ghz5,
             3,
@@ -487,6 +493,9 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_MT7925_LOCAL_ORACLE"]
     fn unchanged_full_source_local_capabilities_match_all_band_stream_width_profiles() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         extern crate std;
         let root = std::path::PathBuf::from(std::env::var_os("STELA_MT7925_LOCAL_ORACLE").unwrap());
         let trace = std::fs::read(root.join("client.trace")).unwrap();
@@ -585,6 +594,9 @@ mod tests {
 
     #[test]
     fn be_control_bounds_preserve_exact_match_stop_and_invalid_mtcl_semantics() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         assert_eq!(be_control(None, *b"US", u32::MAX), Ok(true));
         assert_eq!(be_control(None, *b"US", 0), Ok(false));
         assert_eq!(

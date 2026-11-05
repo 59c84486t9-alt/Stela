@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 22:11:01 -0500
+Subject: [PATCH] refactor(exec): separate original task-name update
+
+---
+ fs/Makefile    |  2 +-
+ fs/exec.c      | 14 --------------
+ fs/task_comm.c | 25 +++++++++++++++++++++++++
+ 3 files changed, 26 insertions(+), 15 deletions(-)
+ create mode 100644 fs/task_comm.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index b2897388e0c312b47508b63d1c0350361e3d5f2c..416f56e7e154592c6e3eec54b17722cb799983ee 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -8,7 +8,7 @@
+ 
+ 
+ obj-y :=	open.o read_write.o file_table.o super.o \
+-		char_dev.o stat.o exec.o pipe.o namei.o fcntl.o \
++		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o inode.o \
+ 		attr.o bad_inode.o file.o init_fdtable.o filesystems.o namespace.o \
+ 		seq_file.o seq_lifetime.o seq_output.o xattr.o libfs.o fs-writeback.o \
+diff --git a/fs/exec.c b/fs/exec.c
+index a598d48b5ffccb35fcb133fe1c8ec3e7c5c64b64..fd21bea6bb8aa9890af133a207e0e9625af87e93 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1091,20 +1091,6 @@ static int unshare_sighand(struct task_struct *me)
+ 	return 0;
+ }
+ 
+-/*
+- * This is unlocked -- the string will always be NUL-terminated, but
+- * may show overlapping contents if racing concurrent reads.
+- */
+-void __set_task_comm(struct task_struct *tsk, const char *buf, bool exec)
+-{
+-	size_t len = strnlen(buf, sizeof(tsk->comm) - 1);
+-
+-	trace_task_rename(tsk, buf);
+-	memcpy(tsk->comm, buf, len);
+-	memset(&tsk->comm[len], 0, sizeof(tsk->comm) - len);
+-	perf_event_comm(tsk, exec);
+-}
+-
+ static void posixtimer_exec(struct task_struct *me)
+ {
+ #ifdef CONFIG_POSIX_TIMERS
+diff --git a/fs/task_comm.c b/fs/task_comm.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..82f79a5787383019d8cf0a8bbaf6c4006e38218f
+--- /dev/null
++++ b/fs/task_comm.c
+@@ -0,0 +1,25 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *  linux/fs/exec.c
++ *
++ *  Copyright (C) 1991, 1992  Linus Torvalds
++ */
++
++#include <linux/perf_event.h>
++#include <linux/sched.h>
++#include <linux/string.h>
++#include <trace/events/task.h>
++
++/*
++ * This is unlocked -- the string will always be NUL-terminated, but
++ * may show overlapping contents if racing concurrent reads.
++ */
++void __set_task_comm(struct task_struct *tsk, const char *buf, bool exec)
++{
++	size_t len = strnlen(buf, sizeof(tsk->comm) - 1);
++
++	trace_task_rename(tsk, buf);
++	memcpy(tsk->comm, buf, len);
++	memset(&tsk->comm[len], 0, sizeof(tsk->comm) - len);
++	perf_event_comm(tsk, exec);
++}

@@ -41,7 +41,7 @@ fn metadata_unwind_before_programming_keeps_the_original_register_owner() {
     }
 }
 
-fn prepare_child() -> (NativeRegisters, Arc<Counters>, Arc<Counters>) {
+fn prepare_child() -> (NativeRegisters, Arc<Counters>, BarFixture) {
     let (function, mapping, config, bar) = native_fixture();
     let pointer = mapping.address(0, PRIVATE).unwrap().cast::<u32>();
     // SAFETY: this original isolated fixture owns the entire live RAM aperture

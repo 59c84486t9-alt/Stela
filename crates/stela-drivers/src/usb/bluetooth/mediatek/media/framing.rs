@@ -31,6 +31,10 @@ impl Kind {
         }
     }
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub(super) fn validate(kind: Kind, packet: &[u8]) -> Result<()> {
     if packet.len() < kind.header() || packet.len() != kind.header() + kind.length(packet) {
         return Err(Error::Packet("complete media HCI length"));
@@ -40,6 +44,10 @@ pub(super) fn validate(kind: Kind, packet: &[u8]) -> Result<()> {
     }
     Ok(())
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub(super) fn iso_output(packet: &[u8]) -> Result<[u8; ISO_TRANSFER_BYTES]> {
     validate(Kind::Iso, packet)?;
     let mut bytes = [0; ISO_TRANSFER_BYTES];
@@ -73,6 +81,10 @@ impl Framer {
     pub fn partial(&self) -> bool {
         self.since.is_some()
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn feed(&mut self, mut input: &[u8], now: u64) -> Result<Vec<Vec<u8>>> {
         if self
             .since

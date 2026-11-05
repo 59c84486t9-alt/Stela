@@ -34,6 +34,8 @@ use crate::{
     Clock,
     bus::{i2c::Timer, port},
 };
+use alloc::{boxed::Box, rc::Rc};
+use core::mem::ManuallyDrop;
 
 const HOST_STATUS: u8 = 0;
 const HOST_CONTROL: u8 = 2;
@@ -247,38 +249,88 @@ impl Default for Config {
     }
 }
 
-pub struct Piix4<R = PortIo, T = Clock> {
+struct Resources<R, T> {
     registers: R,
     timer: T,
+    minimum: Rc<dyn crate::bus::pci::power::Timer>,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ownership {
+    Idle,
+    Acting,
+    Fault,
+    Released,
+}
+pub struct Piix4<R = PortIo, T = Clock> {
+    resources: ManuallyDrop<Box<Resources<R, T>>>,
     info: ControllerInfo,
     config: Config,
     ready: bool,
+    idle_observed: bool,
+    ownership: Ownership,
 }
 
 impl<R: Registers, T: Timer> Piix4<R, T> {
     /// Instantiate the register engine after platform setup/ownership. This
     /// function neither enables the host nor chooses an AMD main/auxiliary port.
+    /// `timer` supplies nominal operation budgets only. `minimum` must be the
+    /// retained actual lower-bound source; no counter rate or polling marker
+    /// substitutes for its chipset-required first-completion quiet wait.
     pub fn new(
         registers: R,
         timer: T,
         info: ControllerInfo,
         config: Config,
+        minimum: Rc<dyn crate::bus::pci::power::Timer>,
     ) -> Result<Self, Error> {
-        if config.timeout_us == 0
-            || config.timeout_us < info.first_poll_us
-            || config.poll_interval_us == 0
-            || timer.check_duration(config.timeout_us).is_err()
-        {
-            return Err(ErrorKind::InvalidConfiguration.into());
-        }
-        let mut controller = Self {
+        // Retain actual R/T/minimum before any safe timer or register callback.
+        let held = ManuallyDrop::new(Resources {
             registers,
             timer,
+            minimum,
+        });
+        let mut storage = Box::<Resources<R, T>>::new_uninit();
+        storage.write(ManuallyDrop::into_inner(held));
+        // SAFETY: exact allocation was initialized above without a callback.
+        let resources = ManuallyDrop::new(unsafe { storage.assume_init() });
+        let mut controller = Self {
+            resources,
             info,
             config,
             ready: true,
+            idle_observed: false,
+            ownership: Ownership::Acting,
         };
-        controller.prepare()?;
+        if config.timeout_us == 0
+            || config.timeout_us < info.first_poll_us
+            || config.poll_interval_us == 0
+            || controller
+                .resources
+                .timer
+                .check_duration(config.timeout_us)
+                .is_err()
+        {
+            // A normal pure admission refusal issued no device effect.
+            controller.ownership = Ownership::Released;
+            // SAFETY: initialized untouched graph, never taken or dropped;
+            // Released prevents its controller Drop from releasing it again.
+            unsafe {
+                ManuallyDrop::drop(&mut controller.resources);
+            }
+            return Err(ErrorKind::InvalidConfiguration.into());
+        }
+        if let Err(error) = controller.resources.minimum.check() {
+            return Err(controller.minimum_failure(error));
+        }
+        if let Err(error) = controller.prepare() {
+            controller.ownership = if controller.ready {
+                Ownership::Idle
+            } else {
+                Ownership::Fault
+            };
+            return Err(error);
+        }
+        controller.ownership = Ownership::Idle;
         Ok(controller)
     }
 
@@ -290,45 +342,58 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
         }
     }
 
+    fn minimum_failure(&mut self, error: crate::bus::pci::power::Error) -> Error {
+        self.ready = false;
+        self.ownership = Ownership::Fault;
+        // Status must not be sampled or cleaned up before the quiet interval.
+        Self::error(ErrorKind::Minimum(error), 0, Recovery::Failed)
+    }
     fn elapsed(&self, start: u64) -> u64 {
-        self.timer.elapsed_us(start)
+        self.resources.timer.elapsed_us(start)
     }
 
     fn prepare(&mut self) -> Result<(), Error> {
-        let status = self.registers.read8(HOST_STATUS);
+        self.idle_observed = false;
+        let status = self.resources.registers.read8(HOST_STATUS);
         if status & HOST_BUSY != 0 {
             return Err(Self::error(ErrorKind::Busy, status, Recovery::NotAttempted));
         }
         if status & STATUS_FLAGS != 0 {
-            self.registers.write8(HOST_STATUS, status & STATUS_FLAGS);
+            self.resources
+                .registers
+                .write8(HOST_STATUS, status & STATUS_FLAGS);
         }
-        let remaining = self.registers.read8(HOST_STATUS);
+        let remaining = self.resources.registers.read8(HOST_STATUS);
         if remaining & (HOST_BUSY | STATUS_FLAGS) != 0 {
+            self.ready = false;
             return Err(Self::error(
                 ErrorKind::StatusStuck,
                 remaining,
                 Recovery::NotAttempted,
             ));
         }
-        self.registers.write8(HOST_CONTROL, 0);
+        self.resources.registers.write8(HOST_CONTROL, 0);
+        self.idle_observed = true;
         Ok(())
     }
 
     fn delay(&self, transaction_start: u64, delay: u64) {
-        let start = self.timer.start();
+        let start = self.resources.timer.start();
         while self.elapsed(start) < delay
             && self.elapsed(transaction_start) < self.config.timeout_us
         {
-            self.timer.relax();
+            self.resources.timer.relax();
         }
     }
 
     fn wait(&mut self, start: u64) -> Result<(), Error> {
         // PIIX4 errata require delaying the first completion observation.
         // CSB5 needs the longer delay recorded by its exact PCI match.
-        self.delay(start, self.info.first_poll_us);
+        if let Err(error) = self.resources.minimum.wait_us(self.info.first_poll_us) {
+            return Err(self.minimum_failure(error));
+        }
         loop {
-            let status = self.registers.read8(HOST_STATUS);
+            let status = self.resources.registers.read8(HOST_STATUS);
             if let Some(kind) = Self::status_error(status) {
                 return Err(Self::error(kind, status, Recovery::NotAttempted));
             }
@@ -363,7 +428,7 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
     }
 
     fn finish_transfer(&mut self, mut error: Option<Error>, started: bool) -> Result<(), Error> {
-        let status = self.registers.read8(HOST_STATUS);
+        let status = self.resources.registers.read8(HOST_STATUS);
         if error.is_none() {
             error = Self::status_error(status)
                 .map(|kind| Self::error(kind, status, Recovery::NotAttempted));
@@ -389,10 +454,13 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
         }
         // Preserve unknown/vendor status bits. These hosts have no I801 INUSE
         // read-to-acquire behavior, and writing bit 6 is not an unlock operation.
-        self.registers.write8(HOST_STATUS, status & STATUS_FLAGS);
-        self.registers.write8(HOST_CONTROL, 0);
-        let remaining = self.registers.read8(HOST_STATUS);
-        let recovery = if remaining & (HOST_BUSY | STATUS_FLAGS) == 0 {
+        self.resources
+            .registers
+            .write8(HOST_STATUS, status & STATUS_FLAGS);
+        self.resources.registers.write8(HOST_CONTROL, 0);
+        let remaining = self.resources.registers.read8(HOST_STATUS);
+        self.idle_observed = remaining & (HOST_BUSY | STATUS_FLAGS) == 0;
+        let recovery = if self.idle_observed {
             Recovery::Cleared
         } else {
             self.ready = false;
@@ -413,22 +481,48 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
     /// failure returns the controller alongside the error, keeping ownership
     /// until platform reset before its mux/semaphore may be restored.
     pub fn shutdown(mut self) -> Result<(R, T), (Self, Error)> {
-        let result = if self.ready {
-            self.prepare()
-        } else {
-            Err(ErrorKind::NeedsReset.into())
+        if self.ownership != Ownership::Idle || !self.ready {
+            self.ready = false;
+            self.ownership = Ownership::Fault;
+            return Err((self, ErrorKind::NeedsReset.into()));
+        }
+        self.ownership = Ownership::Acting;
+        let result = match self.resources.minimum.check() {
+            Ok(()) => self.prepare(),
+            Err(error) => Err(self.minimum_failure(error)),
         };
         match result {
-            Ok(()) => Ok((self.registers, self.timer)),
-            Err(error) => Err((self, error)),
+            Ok(()) => {
+                self.ownership = Ownership::Released;
+                // SAFETY: exact idle acknowledgment ends controller users;
+                // initialized storage was never taken, and Released prevents
+                // this controller's Drop from touching the moved graph again.
+                let resources = unsafe { ManuallyDrop::take(&mut self.resources) };
+                let Resources {
+                    registers,
+                    timer,
+                    minimum,
+                } = *resources;
+                drop(minimum);
+                Ok((registers, timer))
+            }
+            Err(error) => {
+                self.ownership = if self.ready {
+                    Ownership::Idle
+                } else {
+                    Ownership::Fault
+                };
+                Err((self, error))
+            }
         }
     }
 
     fn target(&mut self, address: Address, read: bool, command: Option<u8>) {
-        self.registers
+        self.resources
+            .registers
             .write8(HOST_ADDRESS, address.get() << 1 | u8::from(read));
         if let Some(command) = command {
-            self.registers.write8(HOST_COMMAND, command);
+            self.resources.registers.write8(HOST_COMMAND, command);
         }
     }
 
@@ -449,7 +543,7 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
             }
             Transaction::WriteByte { command, data } => {
                 self.target(address, false, Some(*command));
-                self.registers.write8(HOST_DATA0, *data);
+                self.resources.registers.write8(HOST_DATA0, *data);
                 PROTOCOL_BYTE_DATA
             }
             Transaction::ReadByte { command, .. } => {
@@ -459,8 +553,8 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
             Transaction::WriteWord { command, data } => {
                 self.target(address, false, Some(*command));
                 let [low, high] = data.to_le_bytes();
-                self.registers.write8(HOST_DATA0, low);
-                self.registers.write8(HOST_DATA1, high);
+                self.resources.registers.write8(HOST_DATA0, low);
+                self.resources.registers.write8(HOST_DATA1, high);
                 PROTOCOL_WORD_DATA
             }
             Transaction::ReadWord { command, .. } => {
@@ -469,10 +563,12 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
             }
             Transaction::WriteBlock { command, data } => {
                 self.target(address, false, Some(*command));
-                self.registers.write8(HOST_DATA0, data.len() as u8);
-                self.registers.read8(HOST_CONTROL); // reset the host's array index
+                self.resources
+                    .registers
+                    .write8(HOST_DATA0, data.len() as u8);
+                self.resources.registers.read8(HOST_CONTROL); // reset the host's array index
                 for &byte in *data {
-                    self.registers.write8(BLOCK_DATA, byte);
+                    self.resources.registers.write8(BLOCK_DATA, byte);
                 }
                 PROTOCOL_BLOCK
             }
@@ -483,9 +579,9 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
             Transaction::ProcessCall { .. } => unreachable!("validated before touching the host"),
         };
         // Do not read HSTCNT here: a read resets the block-array pointer.
-        self.registers.write8(HOST_CONTROL, protocol);
+        self.resources.registers.write8(HOST_CONTROL, protocol);
         if self.elapsed(start) >= self.config.timeout_us {
-            let status = self.registers.read8(HOST_STATUS);
+            let status = self.resources.registers.read8(HOST_STATUS);
             return self.finish_transfer(
                 Some(Self::error(
                     ErrorKind::Timeout(Phase::Completion),
@@ -495,26 +591,32 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
                 false,
             );
         }
-        self.registers.write8(HOST_CONTROL, protocol | START);
+        self.idle_observed = false;
+        self.resources
+            .registers
+            .write8(HOST_CONTROL, protocol | START);
         if let Err(error) = self.wait(start) {
+            if matches!(error.kind, ErrorKind::Minimum(_)) {
+                return Err(error);
+            }
             return self.finish(Some(error));
         }
-        let low = self.registers.read8(HOST_DATA0);
-        let high = self.registers.read8(HOST_DATA1);
+        let low = self.resources.registers.read8(HOST_DATA0);
+        let high = self.resources.registers.read8(HOST_DATA1);
         let mut block = Block::default();
         if matches!(transaction, Transaction::ReadBlock { .. }) {
             let count = usize::from(low);
             if !(1..=MAX_BLOCK).contains(&count) {
-                let status = self.registers.read8(HOST_STATUS);
+                let status = self.resources.registers.read8(HOST_STATUS);
                 return self.finish(Some(Self::error(
                     ErrorKind::InvalidBlockLength(count),
                     status,
                     Recovery::NotAttempted,
                 )));
             }
-            self.registers.read8(HOST_CONTROL);
+            self.resources.registers.read8(HOST_CONTROL);
             for byte in &mut block.bytes[..count] {
-                *byte = self.registers.read8(BLOCK_DATA);
+                *byte = self.resources.registers.read8(BLOCK_DATA);
             }
             block.length = count as u8;
         }
@@ -522,7 +624,7 @@ impl<R: Registers, T: Timer> Piix4<R, T> {
         if self.elapsed(start) >= self.config.timeout_us {
             return Err(Self::error(
                 ErrorKind::Timeout(Phase::Completion),
-                self.registers.read8(HOST_STATUS),
+                self.resources.registers.read8(HOST_STATUS),
                 Recovery::Cleared,
             ));
         }
@@ -554,14 +656,39 @@ impl<R: Registers, T: Timer> Bus for Piix4<R, T> {
         {
             return Err(ErrorKind::InvalidBlockLength(data.len()).into());
         }
-        if !self.ready {
+        if !self.ready || self.ownership != Ownership::Idle {
             return Err(ErrorKind::NeedsReset.into());
         }
-        let start = self.timer.start();
-        self.prepare()?;
-        self.transfer(address, transaction, start)
+        self.ownership = Ownership::Acting;
+        if let Err(error) = self.resources.minimum.check() {
+            return Err(self.minimum_failure(error));
+        }
+        let start = self.resources.timer.start();
+        let result = match self.prepare() {
+            Ok(()) => self.transfer(address, transaction, start),
+            Err(error) => Err(error),
+        };
+        self.ownership = if self.ready {
+            Ownership::Idle
+        } else {
+            Ownership::Fault
+        };
+        result
     }
 }
 
+impl<R, T> Drop for Piix4<R, T> {
+    fn drop(&mut self) {
+        if self.ownership == Ownership::Idle && self.ready && self.idle_observed {
+            // SAFETY: acknowledged idle, no callback/effect in flight, and
+            // this initialized graph has never been taken or dropped.
+            unsafe {
+                ManuallyDrop::drop(&mut self.resources);
+            }
+        }
+        // Acting/fault holds the complete original R/T/minimum graph. Released
+        // already moved that graph after acknowledged shutdown; never double-drop.
+    }
+}
 #[cfg(test)]
 mod tests;

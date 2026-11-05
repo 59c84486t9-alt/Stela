@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 00:21:13 -0500
+Subject: [PATCH] refactor(sched): separate task work notification kick
+
+---
+ kernel/sched/core.c         | 23 -----------------------
+ kernel/sched/wait_support.c | 23 +++++++++++++++++++++++
+ 2 files changed, 23 insertions(+), 23 deletions(-)
+
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index b21869d3ceb7adb0932b795938dc551354c68eca..9555b9c1ff1024fc613d8a47a19ff003c98f418e 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -3371,29 +3371,6 @@ out:
+ }
+ #endif /* CONFIG_NUMA_BALANCING */
+ 
+-/***
+- * kick_process - kick a running thread to enter/exit the kernel
+- * @p: the to-be-kicked thread
+- *
+- * Cause a process which is running on another CPU to enter
+- * kernel-mode, without any delay. (to get signals handled.)
+- *
+- * NOTE: this function doesn't have to take the runqueue lock,
+- * because all it wants to ensure is that the remote task enters
+- * the kernel. If the IPI races and the task has been migrated
+- * to another CPU then no harm is done and the purpose has been
+- * achieved as well.
+- */
+-void kick_process(struct task_struct *p)
+-{
+-	guard(preempt)();
+-	int cpu = task_cpu(p);
+-
+-	if ((cpu != smp_processor_id()) && task_curr(p))
+-		smp_send_reschedule(cpu);
+-}
+-EXPORT_SYMBOL_GPL(kick_process);
+-
+ /*
+  * ->cpus_ptr is protected by both rq->lock and p->pi_lock
+  *
+diff --git a/kernel/sched/wait_support.c b/kernel/sched/wait_support.c
+index 2642c36a73c06b9175ed695299f5e34416473357..0f22ba134b214a416f502fac5773d4e71717287d 100644
+--- a/kernel/sched/wait_support.c
++++ b/kernel/sched/wait_support.c
+@@ -12,6 +12,7 @@
+ #include <linux/blkdev.h>
+ #include <linux/sched/task.h>
+ #include <linux/sched/wake_q.h>
++#include <linux/smp.h>
+ 
+ static bool __wake_q_add(struct wake_q_head *head, struct task_struct *task)
+ {
+@@ -114,3 +115,25 @@ void io_schedule_finish(int token)
+ 	current->in_iowait = token;
+ }
+ 
++/***
++ * kick_process - kick a running thread to enter/exit the kernel
++ * @p: the to-be-kicked thread
++ *
++ * Cause a process which is running on another CPU to enter
++ * kernel-mode, without any delay. (to get signals handled.)
++ *
++ * NOTE: this function doesn't have to take the runqueue lock,
++ * because all it wants to ensure is that the remote task enters
++ * the kernel. If the IPI races and the task has been migrated
++ * to another CPU then no harm is done and the purpose has been
++ * achieved as well.
++ */
++void kick_process(struct task_struct *p)
++{
++	guard(preempt)();
++	int cpu = task_cpu(p);
++
++	if ((cpu != smp_processor_id()) && task_curr(p))
++		smp_send_reschedule(cpu);
++}
++EXPORT_SYMBOL_GPL(kick_process);

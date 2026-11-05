@@ -129,6 +129,10 @@ impl<R: ChildAccess> Controller<R> {
     /// Counts are firmware/board-derived for this source profile's input clock,
     /// rise/fall/hold wiring and power epoch. Source clock metadata does not
     /// grant board timing. This is the sole child; no iDMA or IRQ is enabled.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the same controller and timer accompany failure without a new allocation"
+    )]
     pub unsafe fn into_i2c<T: Timer + 'static>(
         self,
         timer: T,
@@ -142,9 +146,8 @@ impl<R: ChildAccess> Controller<R> {
 }
 impl<T: Timer + 'static> I2c<NativeRegisters, T> {
     /// # Safety
-    /// All NativeRegisters mapping/stopped epoch and Controller board-timing
-    /// contracts hold for the same native Function. No generic alias or
-    /// firmware resource override is allowed, including the Surface Go quirks.
+    /// NativeRegisters' stopped function, exclusive complete UC BAR0,
+    /// power/clock/firmware epoch and this board's timing contracts all hold.
     #[expect(
         clippy::result_large_err,
         reason = "failure retains the original native graph and timer inline"
@@ -215,6 +218,10 @@ impl<R: ChildAccess, T: Timer + 'static> Bus for I2c<R, T> {
     }
 }
 impl<R: ChildAccess, T: Timer + 'static> I2c<R, T> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "failed child disable or platform reset retains both original providers inline"
+    )]
     pub fn shutdown(self) -> Result<(Retired<R>, T), I2cFailure<R, T>> {
         let (child, timer) = match self.engine.shutdown() {
             Ok(providers) => providers,

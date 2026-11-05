@@ -14,6 +14,10 @@ struct Prepared<'p> {
     inherited: Vec<InheritedField>,
 }
 impl<B: CommandIo> Engine<'_, B> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn run<'p>(&mut self, provider: &'p dyn Provider) -> Result<Report<'p>> {
         let before = self.identity(&[0xff])?;
         if before.is_operational() {
@@ -32,6 +36,10 @@ impl<B: CommandIo> Engine<'_, B> {
             Err(e) => Err(e),
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn prepare<'p>(
         &mut self,
         provider: &'p dyn Provider,
@@ -123,6 +131,10 @@ impl<B: CommandIo> Engine<'_, B> {
             inherited,
         })
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn upload(&mut self, sfi: &firmware::Sfi<'_>) -> Result<[u8; 6]> {
         // Each stage requires its own secure result and boot event.
         self.secure = false;
@@ -160,6 +172,10 @@ impl<B: CommandIo> Engine<'_, B> {
         self.allow_boot = false;
         Ok(self.boot.unwrap())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn apply_dsbr(&mut self, identity: &ControllerIdentity) -> Result<DsbrReport> {
         let mut report = DsbrReport::new(self.dsbr);
         let required = matches!(identity,ControllerIdentity::Tlv(i) if match i.hardware_variant() {
@@ -177,6 +193,10 @@ impl<B: CommandIo> Engine<'_, B> {
         }
         Ok(report)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn upload_stages<'p>(
         &mut self,
         provider: &'p dyn Provider,
@@ -293,6 +313,10 @@ impl<B: CommandIo> Engine<'_, B> {
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 fn validate_boot(
     before: &ControllerIdentity,
     after: &ControllerIdentity,

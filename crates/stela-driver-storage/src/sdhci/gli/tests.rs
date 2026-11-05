@@ -239,6 +239,7 @@ fn host(dma: &mut dyn DmaAllocator) -> (Host, Rc<RefCell<Hardware>>, Rc<RefCell<
         Clock {
             ticks_per_microsecond: CLOCK_TICKS_PER_US,
         },
+        crate::sdhci::model::minimum(),
         "GL9750 native model".into(),
         dma,
         Profile::Gli9750,
@@ -640,31 +641,37 @@ struct Configuration {
 }
 struct Config(Rc<RefCell<Configuration>>);
 impl ConfigSpace for Config {
-    fn read8(&self, at: u16) -> u8 {
-        self.0.borrow().bytes[usize::from(at)]
+    fn read8(&self, at: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok(self.0.borrow().bytes[usize::from(at)])
     }
-    fn read16(&self, at: u16) -> u16 {
-        let at = usize::from(at);
-        u16::from_le_bytes(self.0.borrow().bytes[at..at + 2].try_into().unwrap())
+    fn read16(&self, at: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        let value = {
+            let at = usize::from(at);
+            u16::from_le_bytes(self.0.borrow().bytes[at..at + 2].try_into().unwrap())
+        };
+        Ok(value)
     }
-    fn read32(&self, at: u16) -> u32 {
-        let at = usize::from(at);
-        u32::from_le_bytes(self.0.borrow().bytes[at..at + 4].try_into().unwrap())
+    fn read32(&self, at: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        let value = {
+            let at = usize::from(at);
+            u32::from_le_bytes(self.0.borrow().bytes[at..at + 4].try_into().unwrap())
+        };
+        Ok(value)
     }
-    fn write8(&mut self, _: u16, _: u8) {
+    fn write8(&mut self, _: u16, _: u8) -> Result<(), crate::bus::pci::ConfigError> {
         panic!("word/dword configuration stores required");
     }
-    fn write16(&mut self, at: u16, value: u16) {
+    fn write16(&mut self, at: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
         let mut config = self.0.borrow_mut();
         config.writes.push((at, 2, u32::from(value)));
         assert!(matches!(at, 4 | 0x54));
         if at == 4 {
             assert!(value & 4 == 0 || config.allow_dma, "transient DMA grant");
             if config.fail == Some(6) && value & 4 != 0 {
-                return;
+                return Ok(());
             }
             if config.fail == Some(5) && value & 2 == 0 {
-                return;
+                return Ok(());
             }
         }
         if at == 0x54 {
@@ -677,7 +684,7 @@ impl ConfigSpace for Config {
             }
             if config.fail == Some(1) && value & 3 == 3 || config.fail == Some(2) && value & 3 == 0
             {
-                return;
+                return Ok(());
             }
             if value & 3 == 0 && config.bytes[0x54] & 3 == 3 {
                 config.bytes[0x10..0x28].fill(0); // D3hot-to-D0 soft reset.
@@ -688,8 +695,10 @@ impl ConfigSpace for Config {
         }
         let at = usize::from(at);
         config.bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
+
+        Ok(())
     }
-    fn write32(&mut self, at: u16, value: u32) {
+    fn write32(&mut self, at: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         let mut config = self.0.borrow_mut();
         config.writes.push((at, 4, value));
         assert!(matches!(at, 0x10..=0x24 | 0x114));
@@ -701,10 +710,12 @@ impl ConfigSpace for Config {
             );
         }
         if config.fail == Some(4) && at == 0x114 {
-            return;
+            return Ok(());
         }
         let at = usize::from(at);
         config.bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+
+        Ok(())
     }
 }
 fn configuration() -> (Function<Config>, Rc<RefCell<Configuration>>) {
@@ -748,8 +759,12 @@ fn native_gl9750_pci_dma_grant_uses_acknowledged_word_stores_and_never_regrants_
     let mut enabled = false;
     pci::dma_grant(&mut function, &mut enabled).unwrap();
     assert!(enabled);
-    assert_eq!(function.config().read16(4), 0x407);
-    assert_eq!(function.config().read16(6), 0x10, "adjacent W1C PCI status");
+    assert_eq!(function.config().read16(4).unwrap(), 0x407);
+    assert_eq!(
+        function.config().read16(6).unwrap(),
+        0x10,
+        "adjacent W1C PCI status"
+    );
     let writes = state.borrow().writes.len();
     pci::dma_grant(&mut function, &mut enabled).unwrap();
     assert_eq!(state.borrow().writes.len(), writes);
@@ -766,7 +781,7 @@ fn native_gl9750_pci_dma_grant_uses_acknowledged_word_stores_and_never_regrants_
     let mut enabled = false;
     assert!(pci::dma_grant(&mut function, &mut enabled).is_err());
     assert!(!enabled);
-    assert_eq!(function.config().read16(4), 0x403);
+    assert_eq!(function.config().read16(4).unwrap(), 0x403);
     let (mut function, state) = configuration();
     state.borrow_mut().allow_dma = true;
     state.borrow_mut().bytes[0x61] = 0xa0;
@@ -796,12 +811,13 @@ fn native_gl9750_pci_power_cycle_restores_bars_and_masks_source_aer_event() {
         Clock {
             ticks_per_microsecond: CLOCK_TICKS_PER_US,
         },
+        crate::sdhci::model::minimum().as_ref(),
     )
     .unwrap();
-    assert_eq!(function.config().read32(0x10), 0x9000_0004);
-    assert_eq!(function.config().read16(4), 0x403);
-    assert_eq!(function.config().read16(0x54), 0);
-    assert_eq!(function.config().read32(0x114), 0x1004);
+    assert_eq!(function.config().read32(0x10).unwrap(), 0x9000_0004);
+    assert_eq!(function.config().read16(4).unwrap(), 0x403);
+    assert_eq!(function.config().read16(0x54).unwrap(), 0);
+    assert_eq!(function.config().read32(0x114).unwrap(), 0x1004);
     assert_eq!(bank.borrow().words[&CFG2] & (31 << 24), 31 << 24);
     assert_eq!(bank.borrow().words[&WT] & 1, 0);
     assert!(config.borrow().writes.contains(&(0x54, 2, 3)));
@@ -826,7 +842,8 @@ fn native_gl9750_pci_failed_power_identity_and_aer_ack_are_explicit() {
                 &mut registers,
                 Clock {
                     ticks_per_microsecond: CLOCK_TICKS_PER_US
-                }
+                },
+                crate::sdhci::model::minimum().as_ref()
             )
             .is_err()
         );
@@ -876,7 +893,8 @@ fn native_gl9750_embedded_aer_capability_cannot_authorize_configuration_writes()
             &mut registers,
             Clock {
                 ticks_per_microsecond: CLOCK_TICKS_PER_US
-            }
+            },
+            crate::sdhci::model::minimum().as_ref()
         )
         .is_err()
     );
@@ -969,6 +987,7 @@ fn unchanged_linux_gl9750_phy_clocks_and_two_polarity_tuning_match_native() {
                     200_000_000,
                     timing,
                     requested,
+                    crate::sdhci::model::minimum().as_ref(),
                 )
                 .unwrap();
                 assert_eq!(actual, values[4] as u32, "{line}");

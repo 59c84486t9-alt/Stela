@@ -63,6 +63,9 @@ fn assert_generic_ack(link: &TestLink, kind: crate::wifi::mediatek::mcu::init::K
 
 #[test]
 fn custom_metadata_reaches_all_three_native_band_commands_without_phy_substitution() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model) = setup(true, true, 0);
     let originals: Vec<_> = [Band::Ghz2, Band::Ghz5, Band::Ghz6]
         .into_iter()
@@ -181,6 +184,9 @@ fn custom_metadata_reaches_all_three_native_band_commands_without_phy_substituti
 
 #[test]
 fn custom_probe_refusals_precede_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model) = setup(true, true, 0);
     let before = model.response.lock().unwrap().client_commands.len();
     let heads = queue_heads(&model);
@@ -241,6 +247,9 @@ fn custom_probe_refusals_precede_publication() {
 
 #[test]
 fn custom_probe_metadata_cannot_override_programmed_no_ir_or_dfs_policy() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for flags in [2, 8] {
         let (mut link, model) = setup(true, true, flags);
         let before = model.response.lock().unwrap().client_commands.len();
@@ -278,6 +287,9 @@ fn custom_probe_metadata_cannot_override_programmed_no_ir_or_dfs_policy() {
 
 #[test]
 fn two_and_five_ghz_custom_probe_metadata_needs_no_six_ghz_capability() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model) = setup(false, false, 0);
     let request = scan::Request::new(
         vec![
@@ -327,6 +339,9 @@ fn two_and_five_ghz_custom_probe_metadata_needs_no_six_ghz_capability() {
 
 #[test]
 fn fragment_after_short_final_fragment_is_refused_before_native_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model) = setup(true, true, 0);
     let before = model.response.lock().unwrap().client_commands.len();
     let heads = queue_heads(&model);

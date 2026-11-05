@@ -1,0 +1,515 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 23:42:55 -0500
+Subject: [PATCH] refactor(fs): separate filename allocation and copying
+
+---
+ fs/Makefile   |   2 +-
+ fs/filename.c | 243 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ fs/namei.c    | 225 ----------------------------------------------
+ 3 files changed, 244 insertions(+), 226 deletions(-)
+ create mode 100644 fs/filename.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 8179dcfea1c9c9eaf8a089fbb7b698db9894dce4..0a1767c3e28fb80a2fe6550d165e74bfbc6c3bc0 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -8,7 +8,7 @@
+ 
+ 
+ obj-y :=	open.o filp_close.o read_write.o file_table.o super.o \
+-		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o name_hash.o fcntl.o \
++		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o name_hash.o filename.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o inode.o inode_evict.o \
+ 		attr.o bad_inode.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o \
+ 		seq_file.o seq_lifetime.o seq_output.o xattr.o simple_xattr.o libfs.o pseudo_metadata.o fs-writeback.o \
+diff --git a/fs/filename.c b/fs/filename.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..2eaee4c1c127a638140e2760d9a1fa95c3724e8a
+--- /dev/null
++++ b/fs/filename.c
+@@ -0,0 +1,243 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ *  linux/fs/namei.c
++ *
++ *  Copyright (C) 1991, 1992  Linus Torvalds
++ */
++
++#include <linux/audit.h>
++#include <linux/export.h>
++#include <linux/fcntl.h>
++#include <linux/fs.h>
++#include <linux/init.h>
++#include <linux/namei.h>
++#include <linux/slab.h>
++#include <linux/uaccess.h>
++#include <asm/runtime-const.h>
++
++#include "internal.h"
++
++/* SLAB cache for struct filename instances */
++static struct kmem_cache *__names_cache __ro_after_init;
++#define names_cache	runtime_const_ptr(__names_cache)
++
++void __init filename_init(void)
++{
++	__names_cache = kmem_cache_create_usercopy("names_cache", sizeof(struct filename), 0,
++			 SLAB_HWCACHE_ALIGN|SLAB_PANIC, offsetof(struct filename, iname),
++			 EMBEDDED_NAME_MAX, NULL);
++	runtime_const_init(ptr, __names_cache);
++}
++
++static inline struct filename *alloc_filename(void)
++{
++	return kmem_cache_alloc(names_cache, GFP_KERNEL);
++}
++
++static inline void free_filename(struct filename *p)
++{
++	kmem_cache_free(names_cache, p);
++}
++
++static inline void initname(struct filename *name)
++{
++	name->aname = NULL;
++	name->refcnt = 1;
++}
++
++static int getname_long(struct filename *name, const char __user *filename)
++{
++	int len;
++	char *p __free(kfree) = kmalloc(PATH_MAX, GFP_KERNEL);
++	if (unlikely(!p))
++		return -ENOMEM;
++
++	memcpy(p, &name->iname, EMBEDDED_NAME_MAX);
++	len = strncpy_from_user(p + EMBEDDED_NAME_MAX,
++				filename + EMBEDDED_NAME_MAX,
++				PATH_MAX - EMBEDDED_NAME_MAX);
++	if (unlikely(len < 0))
++		return len;
++	if (unlikely(len == PATH_MAX - EMBEDDED_NAME_MAX))
++		return -ENAMETOOLONG;
++	name->name = no_free_ptr(p);
++	return 0;
++}
++
++static struct filename *
++do_getname(const char __user *filename, int flags, bool incomplete)
++{
++	struct filename *result;
++	char *kname;
++	int len;
++
++	result = alloc_filename();
++	if (unlikely(!result))
++		return ERR_PTR(-ENOMEM);
++
++	/*
++	 * First, try to embed the struct filename inside the names_cache
++	 * allocation
++	 */
++	kname = (char *)result->iname;
++	result->name = kname;
++
++	len = strncpy_from_user(kname, filename, EMBEDDED_NAME_MAX);
++	/*
++	 * Handle both empty path and copy failure in one go.
++	 */
++	if (unlikely(len <= 0)) {
++		/* The empty path is special. */
++		if (!len && !(flags & LOOKUP_EMPTY))
++			len = -ENOENT;
++	}
++
++	/*
++	 * Uh-oh. We have a name that's approaching PATH_MAX. Allocate a
++	 * separate struct filename so we can dedicate the entire
++	 * names_cache allocation for the pathname, and re-do the copy from
++	 * userland.
++	 */
++	if (unlikely(len == EMBEDDED_NAME_MAX))
++		len = getname_long(result, filename);
++	if (unlikely(len < 0)) {
++		free_filename(result);
++		return ERR_PTR(len);
++	}
++
++	initname(result);
++	if (likely(!incomplete))
++		audit_getname(result);
++	return result;
++}
++
++struct filename *
++getname_flags(const char __user *filename, int flags)
++{
++	return do_getname(filename, flags, false);
++}
++
++struct filename *getname_uflags(const char __user *filename, int uflags)
++{
++	int flags = (uflags & AT_EMPTY_PATH) ? LOOKUP_EMPTY : 0;
++
++	return getname_flags(filename, flags);
++}
++
++struct filename *__getname_maybe_null(const char __user *pathname)
++{
++	char c;
++
++	/* try to save on allocations; loss on um, though */
++	if (get_user(c, pathname))
++		return ERR_PTR(-EFAULT);
++	if (!c)
++		return NULL;
++
++	CLASS(filename_flags, name)(pathname, LOOKUP_EMPTY);
++	/* empty pathname translates to NULL */
++	if (!IS_ERR(name) && !(name->name[0]))
++		return NULL;
++	return no_free_ptr(name);
++}
++
++static struct filename *do_getname_kernel(const char *filename, bool incomplete)
++{
++	struct filename *result;
++	int len = strlen(filename) + 1;
++	char *p;
++
++	if (unlikely(len > PATH_MAX))
++		return ERR_PTR(-ENAMETOOLONG);
++
++	result = alloc_filename();
++	if (unlikely(!result))
++		return ERR_PTR(-ENOMEM);
++
++	if (len <= EMBEDDED_NAME_MAX) {
++		p = (char *)result->iname;
++		memcpy(p, filename, len);
++	} else {
++		p = kmemdup(filename, len, GFP_KERNEL);
++		if (unlikely(!p)) {
++			free_filename(result);
++			return ERR_PTR(-ENOMEM);
++		}
++	}
++	result->name = p;
++	initname(result);
++	if (likely(!incomplete))
++		audit_getname(result);
++	return result;
++}
++
++struct filename *getname_kernel(const char *filename)
++{
++	return do_getname_kernel(filename, false);
++}
++EXPORT_SYMBOL(getname_kernel);
++
++void putname(struct filename *name)
++{
++	int refcnt;
++
++	if (IS_ERR_OR_NULL(name))
++		return;
++
++	refcnt = name->refcnt;
++	if (unlikely(refcnt != 1)) {
++		if (WARN_ON_ONCE(!refcnt))
++			return;
++
++		name->refcnt--;
++		return;
++	}
++
++	if (unlikely(name->name != name->iname))
++		kfree(name->name);
++	free_filename(name);
++}
++EXPORT_SYMBOL(putname);
++
++static inline int __delayed_getname(struct delayed_filename *v,
++			   const char __user *string, int flags)
++{
++	v->__incomplete_filename = do_getname(string, flags, true);
++	return PTR_ERR_OR_ZERO(v->__incomplete_filename);
++}
++
++int delayed_getname(struct delayed_filename *v, const char __user *string)
++{
++	return __delayed_getname(v, string, 0);
++}
++
++int delayed_getname_uflags(struct delayed_filename *v, const char __user *string,
++			 int uflags)
++{
++	int flags = (uflags & AT_EMPTY_PATH) ? LOOKUP_EMPTY : 0;
++	return __delayed_getname(v, string, flags);
++}
++
++int putname_to_delayed(struct delayed_filename *v, struct filename *name)
++{
++	if (likely(name->refcnt == 1)) {
++		v->__incomplete_filename = name;
++		return 0;
++	}
++	name->refcnt--;
++	v->__incomplete_filename = do_getname_kernel(name->name, true);
++	return PTR_ERR_OR_ZERO(v->__incomplete_filename);
++}
++
++void dismiss_delayed_filename(struct delayed_filename *v)
++{
++	putname(no_free_ptr(v->__incomplete_filename));
++}
++
++struct filename *complete_getname(struct delayed_filename *v)
++{
++	struct filename *res = no_free_ptr(v->__incomplete_filename);
++	if (!IS_ERR(res))
++		audit_getname(res);
++	return res;
++}
+diff --git a/fs/namei.c b/fs/namei.c
+index f0bb966614d4d1effb016be6101e60a67e25f7ac..211aaa831cf2725fba7d236a4263396df1b37055 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -125,236 +125,11 @@
+  * PATH_MAX includes the nul terminator --RR.
+  */
+ 
+-/* SLAB cache for struct filename instances */
+-static struct kmem_cache *__names_cache __ro_after_init;
+-#define names_cache	runtime_const_ptr(__names_cache)
+-
+ /*
+  * Type of the last component on LOOKUP_PARENT
+  */
+ enum last_type {LAST_NORM, LAST_ROOT, LAST_DOT, LAST_DOTDOT};
+ 
+-void __init filename_init(void)
+-{
+-	__names_cache = kmem_cache_create_usercopy("names_cache", sizeof(struct filename), 0,
+-			 SLAB_HWCACHE_ALIGN|SLAB_PANIC, offsetof(struct filename, iname),
+-			 EMBEDDED_NAME_MAX, NULL);
+-	runtime_const_init(ptr, __names_cache);
+-}
+-
+-static inline struct filename *alloc_filename(void)
+-{
+-	return kmem_cache_alloc(names_cache, GFP_KERNEL);
+-}
+-
+-static inline void free_filename(struct filename *p)
+-{
+-	kmem_cache_free(names_cache, p);
+-}
+-
+-static inline void initname(struct filename *name)
+-{
+-	name->aname = NULL;
+-	name->refcnt = 1;
+-}
+-
+-static int getname_long(struct filename *name, const char __user *filename)
+-{
+-	int len;
+-	char *p __free(kfree) = kmalloc(PATH_MAX, GFP_KERNEL);
+-	if (unlikely(!p))
+-		return -ENOMEM;
+-
+-	memcpy(p, &name->iname, EMBEDDED_NAME_MAX);
+-	len = strncpy_from_user(p + EMBEDDED_NAME_MAX,
+-				filename + EMBEDDED_NAME_MAX,
+-				PATH_MAX - EMBEDDED_NAME_MAX);
+-	if (unlikely(len < 0))
+-		return len;
+-	if (unlikely(len == PATH_MAX - EMBEDDED_NAME_MAX))
+-		return -ENAMETOOLONG;
+-	name->name = no_free_ptr(p);
+-	return 0;
+-}
+-
+-static struct filename *
+-do_getname(const char __user *filename, int flags, bool incomplete)
+-{
+-	struct filename *result;
+-	char *kname;
+-	int len;
+-
+-	result = alloc_filename();
+-	if (unlikely(!result))
+-		return ERR_PTR(-ENOMEM);
+-
+-	/*
+-	 * First, try to embed the struct filename inside the names_cache
+-	 * allocation
+-	 */
+-	kname = (char *)result->iname;
+-	result->name = kname;
+-
+-	len = strncpy_from_user(kname, filename, EMBEDDED_NAME_MAX);
+-	/*
+-	 * Handle both empty path and copy failure in one go.
+-	 */
+-	if (unlikely(len <= 0)) {
+-		/* The empty path is special. */
+-		if (!len && !(flags & LOOKUP_EMPTY))
+-			len = -ENOENT;
+-	}
+-
+-	/*
+-	 * Uh-oh. We have a name that's approaching PATH_MAX. Allocate a
+-	 * separate struct filename so we can dedicate the entire
+-	 * names_cache allocation for the pathname, and re-do the copy from
+-	 * userland.
+-	 */
+-	if (unlikely(len == EMBEDDED_NAME_MAX))
+-		len = getname_long(result, filename);
+-	if (unlikely(len < 0)) {
+-		free_filename(result);
+-		return ERR_PTR(len);
+-	}
+-
+-	initname(result);
+-	if (likely(!incomplete))
+-		audit_getname(result);
+-	return result;
+-}
+-
+-struct filename *
+-getname_flags(const char __user *filename, int flags)
+-{
+-	return do_getname(filename, flags, false);
+-}
+-
+-struct filename *getname_uflags(const char __user *filename, int uflags)
+-{
+-	int flags = (uflags & AT_EMPTY_PATH) ? LOOKUP_EMPTY : 0;
+-
+-	return getname_flags(filename, flags);
+-}
+-
+-struct filename *__getname_maybe_null(const char __user *pathname)
+-{
+-	char c;
+-
+-	/* try to save on allocations; loss on um, though */
+-	if (get_user(c, pathname))
+-		return ERR_PTR(-EFAULT);
+-	if (!c)
+-		return NULL;
+-
+-	CLASS(filename_flags, name)(pathname, LOOKUP_EMPTY);
+-	/* empty pathname translates to NULL */
+-	if (!IS_ERR(name) && !(name->name[0]))
+-		return NULL;
+-	return no_free_ptr(name);
+-}
+-
+-static struct filename *do_getname_kernel(const char *filename, bool incomplete)
+-{
+-	struct filename *result;
+-	int len = strlen(filename) + 1;
+-	char *p;
+-
+-	if (unlikely(len > PATH_MAX))
+-		return ERR_PTR(-ENAMETOOLONG);
+-
+-	result = alloc_filename();
+-	if (unlikely(!result))
+-		return ERR_PTR(-ENOMEM);
+-
+-	if (len <= EMBEDDED_NAME_MAX) {
+-		p = (char *)result->iname;
+-		memcpy(p, filename, len);
+-	} else {
+-		p = kmemdup(filename, len, GFP_KERNEL);
+-		if (unlikely(!p)) {
+-			free_filename(result);
+-			return ERR_PTR(-ENOMEM);
+-		}
+-	}
+-	result->name = p;
+-	initname(result);
+-	if (likely(!incomplete))
+-		audit_getname(result);
+-	return result;
+-}
+-
+-struct filename *getname_kernel(const char *filename)
+-{
+-	return do_getname_kernel(filename, false);
+-}
+-EXPORT_SYMBOL(getname_kernel);
+-
+-void putname(struct filename *name)
+-{
+-	int refcnt;
+-
+-	if (IS_ERR_OR_NULL(name))
+-		return;
+-
+-	refcnt = name->refcnt;
+-	if (unlikely(refcnt != 1)) {
+-		if (WARN_ON_ONCE(!refcnt))
+-			return;
+-
+-		name->refcnt--;
+-		return;
+-	}
+-
+-	if (unlikely(name->name != name->iname))
+-		kfree(name->name);
+-	free_filename(name);
+-}
+-EXPORT_SYMBOL(putname);
+-
+-static inline int __delayed_getname(struct delayed_filename *v,
+-			   const char __user *string, int flags)
+-{
+-	v->__incomplete_filename = do_getname(string, flags, true);
+-	return PTR_ERR_OR_ZERO(v->__incomplete_filename);
+-}
+-
+-int delayed_getname(struct delayed_filename *v, const char __user *string)
+-{
+-	return __delayed_getname(v, string, 0);
+-}
+-
+-int delayed_getname_uflags(struct delayed_filename *v, const char __user *string,
+-			 int uflags)
+-{
+-	int flags = (uflags & AT_EMPTY_PATH) ? LOOKUP_EMPTY : 0;
+-	return __delayed_getname(v, string, flags);
+-}
+-
+-int putname_to_delayed(struct delayed_filename *v, struct filename *name)
+-{
+-	if (likely(name->refcnt == 1)) {
+-		v->__incomplete_filename = name;
+-		return 0;
+-	}
+-	name->refcnt--;
+-	v->__incomplete_filename = do_getname_kernel(name->name, true);
+-	return PTR_ERR_OR_ZERO(v->__incomplete_filename);
+-}
+-
+-void dismiss_delayed_filename(struct delayed_filename *v)
+-{
+-	putname(no_free_ptr(v->__incomplete_filename));
+-}
+-
+-struct filename *complete_getname(struct delayed_filename *v)
+-{
+-	struct filename *res = no_free_ptr(v->__incomplete_filename);
+-	if (!IS_ERR(res))
+-		audit_getname(res);
+-	return res;
+-}
+-
+ /**
+  * check_acl - perform ACL permission checking
+  * @idmap:	idmap of the mount the inode was found from

@@ -1,7 +1,7 @@
 //! AMD IOMMU register access and command-queue operation.
 use super::*;
 
-impl<P: ColdPlatform> Engine<P> {
+impl<P: ColdPlatform, C: UnitConfig> Engine<P, C> {
     pub(super) fn read(&self, offset: usize) -> Result<u64, Error> {
         self.resources
             .inspection

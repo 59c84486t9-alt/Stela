@@ -39,7 +39,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
         tries: usize,
     ) -> Result<(), BlockError> {
         for _ in 0..tries {
-            self.timer.delay(delay);
+            self.timer.delay(delay)?;
             let value = self.registers.read32(reg);
             if value == u32::MAX {
                 return Err(BlockError::Device { status: value });
@@ -54,7 +54,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
         self.interrupts_off();
         self.registers.write8(COMMAND, RESET);
         for _ in 0..100 {
-            self.timer.delay(100);
+            self.timer.delay(100)?;
             let cmd = self.registers.read8(COMMAND);
             if cmd == u8::MAX {
                 return Err(BlockError::Device { status: 255 });
@@ -135,7 +135,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
             self.dp_mdio(|| {
                 self.registers.write32(PHY_ACCESS, u32::from(reg) << 16);
                 let done = self.poll32(PHY_ACCESS, ACCESS, true, 25, 20);
-                self.timer.delay(20); // Required after completion, including failure.
+                self.timer.delay(20)?; // Required after completion, including failure.
                 done?;
                 Ok(self.registers.read32(PHY_ACCESS) as u16)
             })
@@ -176,7 +176,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
                     ACCESS | (u32::from(reg) << 16) | u32::from(value),
                 );
                 let done = self.poll32(PHY_ACCESS, ACCESS, false, 25, 20);
-                self.timer.delay(20);
+                self.timer.delay(20)?;
                 done
             })
         }
@@ -213,12 +213,12 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
     pub fn phy_reset(&self) -> Result<(), BlockError> {
         self.phy_write(PHY_PAGE, 0)?;
         self.phy_modify(PHY_CONTROL, 0, PHY_RESET)?;
-        self.timer.delay(50_000);
+        self.timer.delay(50_000)?;
         for _ in 0..12 {
             if self.phy_read(PHY_CONTROL)? & PHY_RESET == 0 {
                 return Ok(());
             }
-            self.timer.delay(50_000);
+            self.timer.delay(50_000)?;
         }
         Err(BlockError::Timeout)
     }
@@ -231,13 +231,13 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
         self.registers.write32(EPHY_ACCESS, u32::from(reg) << 16);
         self.poll32(EPHY_ACCESS, ACCESS, true, 10, 100)?;
         let value = (self.registers.read32(EPHY_ACCESS) as u16 & !clear) | set;
-        self.timer.delay(10);
+        self.timer.delay(10)?;
         self.registers.write32(
             EPHY_ACCESS,
             ACCESS | (u32::from(reg) << 16) | u32::from(value),
         );
         let result = self.poll32(EPHY_ACCESS, ACCESS, false, 10, 100);
-        self.timer.delay(10);
+        self.timer.delay(10)?;
         result
     }
     pub fn eri_read(&self, reg: u16) -> Result<u32, BlockError> {

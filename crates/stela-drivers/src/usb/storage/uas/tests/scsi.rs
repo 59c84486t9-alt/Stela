@@ -7,11 +7,12 @@ impl crate::usb::storage::Scsi for ScsiModel {
     fn command(&mut self, lun: Lun, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
         execute(&mut self.engine, self.flags, lun.bytes(), cdb, data)
     }
-    fn delay(&self, micros: u64) {
+    fn delay(&mut self, micros: u64) -> Result<(), BlockError> {
         self.engine
             .io
             .clock
             .set(self.engine.io.clock.get() + micros);
+        Ok(())
     }
     fn now_us(&self) -> u64 {
         self.engine.io.clock.get()

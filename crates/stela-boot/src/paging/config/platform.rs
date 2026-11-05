@@ -104,6 +104,13 @@ impl Platform {
         }
         Ok(())
     }
+    #[cfg(feature = "diagnostics")]
+    pub(super) fn hpet(&self) -> Result<crate::native_clock::hpet::Descriptor, Error> {
+        let descriptor = self.prepared.hpet.ok_or(Error::ResourceInventory)?;
+        let start = descriptor.registers().start();
+        self.prepared.device_range(start, start + PAGE as u64)?;
+        Ok(descriptor)
+    }
     pub(super) fn check_bus(&self, address: Address) -> Result<(), Error> {
         self.check()?;
         let inventory = stela_boot_core::ecam::EcamInventory::validate(
@@ -139,6 +146,7 @@ impl Platform {
         }
         Ok(())
     }
+    #[cfg(feature = "diagnostics")]
     pub(super) fn identity_device(&self, span: PhysicalSpan) -> Result<(), Error> {
         self.check()?;
         self.prepared.device_range(span.start(), span.end())?;
@@ -321,13 +329,20 @@ unsafe impl MappingPlatform for Platform {
         let unchanged = MapFailure::Unchanged;
         self.check_context(request.address_space)
             .map_err(unchanged)?;
-        let backing = resource
+        let span = resource.physical_span();
+        let owner = resource
             .backing()
-            .downcast_ref::<Backing>()
-            .ok_or(unchanged(owned::Error::OutsideResource))?;
-        if !core::ptr::eq(self, backing.platform.as_ref())
-            || backing.span != resource.physical_span()
-        {
+            .downcast_ref::<RegisterBacking>()
+            .is_some_and(|owner| {
+                core::ptr::eq(self, owner.platform.as_ref()) && owner.span == span
+            });
+        #[cfg(feature = "diagnostics")]
+        let owner = owner
+            || resource
+                .backing()
+                .downcast_ref::<super::fixture_config::Backing>()
+                .is_some_and(|owner| owner.matches(self, span));
+        if !owner {
             return Err(unchanged(owned::Error::OutsideResource));
         }
         if request.attribute != CacheAttribute::Uncached {

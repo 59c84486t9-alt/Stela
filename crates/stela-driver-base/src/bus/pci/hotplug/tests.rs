@@ -24,23 +24,46 @@ struct Bus(Rc<RefCell<BTreeMap<Location, Registers>>>);
 struct Function(Bus, (u8, u8, u8));
 
 impl ConfigSpace for Function {
-    fn read32(&self, offset: u16) -> u32 {
-        let functions = self.0.0.borrow();
-        let Some(registers) = functions.get(&self.1) else {
-            return u32::MAX;
-        };
-        registers.words.get(&offset).copied().unwrap_or(0)
+    fn read32(&self, offset: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        Ok({
+            let functions = self.0.0.borrow();
+            let Some(registers) = functions.get(&self.1) else {
+                return Ok(u32::MAX);
+            };
+            registers.words.get(&offset).copied().unwrap_or(0)
+        })
     }
-    fn write32(&mut self, offset: u16, value: u32) {
+    fn write32(&mut self, offset: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         let mut functions = self.0.0.borrow_mut();
         let Some(registers) = functions.get_mut(&self.1) else {
-            return;
+            return Ok(());
         };
         let word = match registers.masks.get(&offset) {
             Some(mask) => value & mask | registers.words.get(&offset).copied().unwrap_or(0) & !mask,
             None => value,
         };
         registers.words.insert(offset, word);
+        Ok(())
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+
+    fn write8(&mut self, offset: u16, value: u8) -> Result<(), crate::bus::pci::ConfigError> {
+        let shift = (offset & 3) * 8;
+        let word = self.read32(offset & !3)? & !(0xff << shift) | u32::from(value) << shift;
+        self.write32(offset & !3, word)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
+    }
+
+    fn write16(&mut self, offset: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
+        let shift = (offset & 2) * 8;
+        let word = self.read32(offset & !3)? & !(0xffff << shift) | u32::from(value) << shift;
+        self.write32(offset & !3, word)
     }
 }
 
@@ -71,15 +94,19 @@ impl Bus {
             },
         );
         let mut config = self.function(location);
-        config.write32(regs::VENDOR_ID, 0x1234_8086);
-        config.write8(regs::HEADER_TYPE, header);
+        config.write32(regs::VENDOR_ID, 0x1234_8086).unwrap();
+        config.write8(regs::HEADER_TYPE, header).unwrap();
         if let Some(flags) = express_flags {
-            config.write16(regs::STATUS, regs::STATUS_CAP_LIST);
-            config.write8(regs::CAPABILITY_LIST, EXPRESS_AT as u8);
-            config.write32(
-                EXPRESS_AT,
-                u32::from(CAPABILITY_EXPRESS) | u32::from(flags) << 16,
-            );
+            config.write16(regs::STATUS, regs::STATUS_CAP_LIST).unwrap();
+            config
+                .write8(regs::CAPABILITY_LIST, EXPRESS_AT as u8)
+                .unwrap();
+            config
+                .write32(
+                    EXPRESS_AT,
+                    u32::from(CAPABILITY_EXPRESS) | u32::from(flags) << 16,
+                )
+                .unwrap();
         }
     }
 
@@ -104,17 +131,21 @@ impl Bus {
     fn root(&self) {
         self.add(ROOT, 0x81, Some(EXPRESS_ROOT_PORT << EXPRESS_TYPE_SHIFT));
         let mut config = self.function(ROOT);
-        config.write32(BUS_NUMBERS, 0x0040_1000);
-        config.write32(
-            MEMORY_WINDOW,
-            window_word(Some(&(0x9000_0000..0xa000_0000))),
-        );
-        config.write32(
-            PREFETCH_WINDOW,
-            window_word(Some(&(0x6_0000_0000..0x7_0000_0000))) | PREFETCH_64,
-        );
-        config.write32(PREFETCH_BASE_UPPER, 6);
-        config.write32(PREFETCH_LIMIT_UPPER, 6);
+        config.write32(BUS_NUMBERS, 0x0040_1000).unwrap();
+        config
+            .write32(
+                MEMORY_WINDOW,
+                window_word(Some(&(0x9000_0000..0xa000_0000))),
+            )
+            .unwrap();
+        config
+            .write32(
+                PREFETCH_WINDOW,
+                window_word(Some(&(0x6_0000_0000..0x7_0000_0000))) | PREFETCH_64,
+            )
+            .unwrap();
+        config.write32(PREFETCH_BASE_UPPER, 6).unwrap();
+        config.write32(PREFETCH_LIMIT_UPPER, 6).unwrap();
         self.window_type(ROOT);
     }
 
@@ -129,17 +160,18 @@ impl Bus {
     fn port(&self, location: (u8, u8, u8), kind: u16) {
         self.add(location, HEADER_BRIDGE, Some(kind << EXPRESS_TYPE_SHIFT));
         self.function(location)
-            .write32(PREFETCH_WINDOW, PREFETCH_64);
+            .write32(PREFETCH_WINDOW, PREFETCH_64)
+            .unwrap();
         self.window_type(location);
     }
 
     fn base(&self, location: (u8, u8, u8), index: u16) -> u64 {
         let config = self.function(location);
         let offset = regs::BASE_ADDRESS_0 + 4 * index;
-        let low = u64::from(config.read32(offset) & !0xf);
-        let wide = config.read32(offset) & BAR_MEMORY_TYPE == BAR_MEMORY_64;
+        let low = u64::from(config.read32(offset).unwrap() & !0xf);
+        let wide = config.read32(offset).unwrap() & BAR_MEMORY_TYPE == BAR_MEMORY_64;
         low | if wide {
-            u64::from(config.read32(offset + 4)) << 32
+            u64::from(config.read32(offset + 4).unwrap()) << 32
         } else {
             0
         }
@@ -165,12 +197,15 @@ fn an_endpoint_below_a_root_port_gets_its_windows_share() {
     assert_eq!(bus.base((0x10, 0, 0), 3), 0x6_0000_0000);
     let config = bus.function((0x10, 0, 0));
     assert_eq!(
-        config.read16(regs::COMMAND) & regs::COMMAND_MEMORY,
+        config.read16(regs::COMMAND).unwrap() & regs::COMMAND_MEMORY,
         0,
         "endpoints stay off until a driver claims them"
     );
     let root = bus.function(ROOT);
-    assert_ne!(root.read16(regs::COMMAND) & regs::COMMAND_MEMORY, 0);
+    assert_ne!(
+        root.read16(regs::COMMAND).unwrap() & regs::COMMAND_MEMORY,
+        0
+    );
 }
 
 #[test]
@@ -191,31 +226,40 @@ fn a_dock_switch_gets_buses_and_nested_windows() {
     assert_eq!(arrivals.functions.len(), 5);
     assert_eq!(arrivals.functions[0].bus, 0x10);
     let upstream = bus.function((0x10, 0, 0));
-    assert_eq!(upstream.read8(SECONDARY_BUS), 0x11);
-    assert_eq!(upstream.read8(SUBORDINATE_BUS), 0x13);
+    assert_eq!(upstream.read8(SECONDARY_BUS).unwrap(), 0x11);
+    assert_eq!(upstream.read8(SUBORDINATE_BUS).unwrap(), 0x13);
     let first = bus.function((0x11, 0, 0));
-    assert_eq!(first.read8(SECONDARY_BUS), 0x12);
-    assert_eq!(first.read8(SUBORDINATE_BUS), 0x12);
+    assert_eq!(first.read8(SECONDARY_BUS).unwrap(), 0x12);
+    assert_eq!(first.read8(SUBORDINATE_BUS).unwrap(), 0x12);
     let second = bus.function((0x11, 1, 0));
-    assert_eq!(second.read8(SECONDARY_BUS), 0x13);
-    assert_eq!(second.read8(SUBORDINATE_BUS), 0x13);
+    assert_eq!(second.read8(SECONDARY_BUS).unwrap(), 0x13);
+    assert_eq!(second.read8(SUBORDINATE_BUS).unwrap(), 0x13);
 
     // Largest first: the second port's 2 MiB aligns its window to 2 MiB.
     assert_eq!(
-        memory_window(&second).unwrap(),
+        memory_window(&second).unwrap().unwrap(),
         0x9000_0000..0x9020_0000,
         "a window covers its largest BAR's alignment"
     );
-    assert_eq!(memory_window(&first).unwrap(), 0x9020_0000..0x9030_0000);
-    assert_eq!(memory_window(&upstream).unwrap(), 0x9000_0000..0x9030_0000);
     assert_eq!(
-        prefetch_window(&upstream).unwrap(),
+        memory_window(&first).unwrap().unwrap(),
+        0x9020_0000..0x9030_0000
+    );
+    assert_eq!(
+        memory_window(&upstream).unwrap().unwrap(),
+        0x9000_0000..0x9030_0000
+    );
+    assert_eq!(
+        prefetch_window(&upstream).unwrap().unwrap(),
         0x6_0000_0000..0x6_0100_0000
     );
-    assert_eq!(prefetch_window(&first), None);
+    assert_eq!(prefetch_window(&first).unwrap(), None);
     assert_eq!(bus.base((0x12, 0, 0), 0), 0x9020_0000);
     assert_eq!(bus.base((0x13, 0, 0), 2), 0x6_0000_0000);
-    assert_ne!(first.read16(regs::COMMAND) & regs::COMMAND_MASTER, 0);
+    assert_ne!(
+        first.read16(regs::COMMAND).unwrap() & regs::COMMAND_MASTER,
+        0
+    );
 }
 
 #[test]
@@ -269,7 +313,9 @@ fn too_much_for_the_window_is_refused() {
 fn too_few_buses_are_refused() {
     let bus = Bus::default();
     bus.root();
-    bus.function(ROOT).write32(BUS_NUMBERS, 0x0010_1000);
+    bus.function(ROOT)
+        .write32(BUS_NUMBERS, 0x0010_1000)
+        .unwrap();
     bus.port((0x10, 0, 0), UPSTREAM);
 
     assert_eq!(adopt(0, ROOT, bus.at()), Err(Error::Buses));
@@ -279,7 +325,7 @@ fn too_few_buses_are_refused() {
 fn a_bridge_firmware_never_numbered_is_refused() {
     let bus = Bus::default();
     bus.root();
-    bus.function(ROOT).write32(BUS_NUMBERS, 0);
+    bus.function(ROOT).write32(BUS_NUMBERS, 0).unwrap();
 
     assert_eq!(adopt(0, ROOT, bus.at()), Err(Error::Buses));
 }
@@ -291,7 +337,8 @@ fn what_firmware_placed_is_left_alone() {
     bus.add((0x10, 0, 0), 0, Some(0));
     bus.bar((0x10, 0, 0), 0, 0x1000, false, false);
     bus.function((0x10, 0, 0))
-        .write32(regs::BASE_ADDRESS_0, 0x9800_0000);
+        .write32(regs::BASE_ADDRESS_0, 0x9800_0000)
+        .unwrap();
 
     assert_eq!(adopt(0, ROOT, bus.at()), Ok(Arrivals::default()));
     assert_eq!(bus.base((0x10, 0, 0), 0), 0x9800_0000);
@@ -310,16 +357,21 @@ fn a_root_port_lowers_its_payload_to_a_smaller_device() {
     let bus = Bus::default();
     bus.root();
     bus.function(ROOT)
-        .write16(EXPRESS_AT + DEVICE_CONTROL, 2 << PAYLOAD_SHIFT);
+        .write16(EXPRESS_AT + DEVICE_CONTROL, 2 << PAYLOAD_SHIFT)
+        .unwrap();
     bus.add((0x10, 0, 0), 0, Some(0));
     bus.function((0x10, 0, 0))
-        .write32(EXPRESS_AT + DEVICE_CAPABILITIES, 1);
+        .write32(EXPRESS_AT + DEVICE_CAPABILITIES, 1)
+        .unwrap();
 
     let arrivals = adopt(0, ROOT, bus.at()).unwrap();
 
     assert!(arrivals.payload_mismatches.is_empty());
     let payload = |location| {
-        let control = bus.function(location).read16(EXPRESS_AT + DEVICE_CONTROL);
+        let control = bus
+            .function(location)
+            .read16(EXPRESS_AT + DEVICE_CONTROL)
+            .unwrap();
         (control & PAYLOAD_MASK) >> PAYLOAD_SHIFT
     };
     assert_eq!(payload(ROOT), 1);
@@ -331,20 +383,24 @@ fn a_device_takes_its_ports_payload_and_a_switch_reports_what_it_cannot_lower() 
     let bus = Bus::default();
     bus.root();
     bus.function(ROOT)
-        .write16(EXPRESS_AT + DEVICE_CONTROL, 1 << PAYLOAD_SHIFT);
+        .write16(EXPRESS_AT + DEVICE_CONTROL, 1 << PAYLOAD_SHIFT)
+        .unwrap();
     bus.port((0x10, 0, 0), UPSTREAM);
     bus.function((0x10, 0, 0))
-        .write32(EXPRESS_AT + DEVICE_CAPABILITIES, 5);
+        .write32(EXPRESS_AT + DEVICE_CAPABILITIES, 5)
+        .unwrap();
     bus.port((0x11, 0, 0), EXPRESS_DOWNSTREAM);
     bus.function((0x11, 0, 0))
-        .write32(EXPRESS_AT + DEVICE_CAPABILITIES, 5);
+        .write32(EXPRESS_AT + DEVICE_CAPABILITIES, 5)
+        .unwrap();
     bus.add((0x12, 0, 0), 0, Some(0));
 
     let arrivals = adopt(0, ROOT, bus.at()).unwrap();
 
     let control = bus
         .function((0x10, 0, 0))
-        .read16(EXPRESS_AT + DEVICE_CONTROL);
+        .read16(EXPRESS_AT + DEVICE_CONTROL)
+        .unwrap();
     assert_eq!((control & PAYLOAD_MASK) >> PAYLOAD_SHIFT, 1);
     assert_eq!(arrivals.payload_mismatches.len(), 1);
     assert_eq!(arrivals.payload_mismatches[0].bus, 0x12);
@@ -355,12 +411,14 @@ fn a_hot_plug_slot_and_its_link_read_from_the_express_capability() {
     let bus = Bus::default();
     bus.root();
     let mut root = bus.function(ROOT);
-    assert!(!hot_plug_capable(&root));
-    let flags = root.read16(EXPRESS_AT + EXPRESS_FLAGS);
-    root.write16(EXPRESS_AT + EXPRESS_FLAGS, flags | EXPRESS_SLOT_IMPLEMENTED);
-    assert!(!hot_plug_capable(&root));
-    root.write32(EXPRESS_AT + SLOT_CAPABILITIES, SLOT_HOT_PLUG_CAPABLE);
-    assert!(hot_plug_capable(&root));
+    assert!(!hot_plug_capable(&root).unwrap());
+    let flags = root.read16(EXPRESS_AT + EXPRESS_FLAGS).unwrap();
+    root.write16(EXPRESS_AT + EXPRESS_FLAGS, flags | EXPRESS_SLOT_IMPLEMENTED)
+        .unwrap();
+    assert!(!hot_plug_capable(&root).unwrap());
+    root.write32(EXPRESS_AT + SLOT_CAPABILITIES, SLOT_HOT_PLUG_CAPABLE)
+        .unwrap();
+    assert!(hot_plug_capable(&root).unwrap());
 }
 
 #[test]
@@ -368,14 +426,14 @@ fn a_link_has_arrived_once_something_unplaced_answers_on_it() {
     let bus = Bus::default();
     bus.root();
     let mut root = bus.function(ROOT);
-    let arrived = |root: &Function| super::arrived(root, bus.at());
+    let arrived = |root: &Function| super::arrived(root, bus.at()).unwrap();
     bus.add((0x10, 0, 0), 0, Some(0));
     assert!(!arrived(&root), "the link is down");
-    root.write16(EXPRESS_AT + LINK_STATUS, LINK_ACTIVE);
+    root.write16(EXPRESS_AT + LINK_STATUS, LINK_ACTIVE).unwrap();
     assert!(arrived(&root));
     bus.bar((0x10, 0, 0), 0, 0x1000, false, false);
     adopt(0, ROOT, bus.at()).unwrap();
     assert!(!arrived(&root), "it has its place");
-    root.write32(BUS_NUMBERS, 0);
+    root.write32(BUS_NUMBERS, 0).unwrap();
     assert!(arrived(&root), "adopt reports the missing bus");
 }

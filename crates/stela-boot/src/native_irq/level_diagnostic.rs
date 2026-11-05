@@ -3,6 +3,7 @@
 //! pinned ACPICA (_PIC(1), PCI0._PRT and GSIG._CRS). This fixture grant never
 //! supplies a production AML/PIRQ resolver or SCI deferred-work provider.
 use super::{
+    diagnostic::read_control,
     ioapic::{self, Devices},
     madt::{self, Routing},
 };
@@ -58,6 +59,19 @@ const LINE: LineRoute = LineRoute {
     polarity: Polarity::High,
     trigger: Trigger::Level,
 };
+/// Source-bound diagnostic admission only; never a NativeServices producer.
+struct FixtureDomain;
+// SAFETY: constructed only inside the previously independently validated
+// single-BSP Q35/TCG SMM-off fixture, retaining its boot-owned root/APIC/IDT
+// and unchanging non-remapped IOAPIC interpretation for this bounded run.
+unsafe impl stela_drivers::bus::irq::posted_msi::NotificationDomain for FixtureDomain {
+    fn check(&self) -> core::result::Result<(), stela_drivers::bus::irq::posted_msi::Error> {
+        super::NativePlatform(())
+            .check_cpu()
+            .map_err(|_| stela_drivers::bus::irq::posted_msi::Error::Context)
+    }
+}
+
 const INTX_DISABLE: u16 = 1 << 10;
 type Io = ioapic::Unit<ioapic::Mmio, super::NativePlatform>;
 
@@ -162,9 +176,17 @@ impl Prepared {
             .map_err(|e| refuse!("IOAPIC mapping: {e}", ?e))?;
         // SAFETY: exact previously checked Q35 single-BSP fixture, kept
         // UC IOAPIC page, EOI broadcast on, no firmware/SMM/other owner.
-        let unit =
-            unsafe { ioapic::Unit::attach(registers, platform, self.unit.id, self.unit.gsi_base) }
-                .map_err(|e| refuse!("IOAPIC attach: {e}", ?e))?;
+        let unit = unsafe {
+            ioapic::Unit::attach(
+                registers,
+                platform,
+                Arc::new(FixtureDomain),
+                super::CONTROLLER.identity(),
+                self.unit.id,
+                self.unit.gsi_base,
+            )
+        }
+        .map_err(|e| refuse!("IOAPIC attach: {e}", ?e))?;
         self.routing
             .owner(LINE, &[(self.unit, unit.pins())])
             .map_err(|e| refuse!("live IOAPIC GSI owner: {e}", ?e))?;
@@ -176,14 +198,26 @@ impl Prepared {
         {
             return Err(refuse!("level fixture original EDU owner mismatch"));
         }
-        if function.config().read8(0x3d) != 1
-            || function.config().read16(4) & (4 | INTX_DISABLE) != INTX_DISABLE
+        let config = function.config();
+        if config
+            .read8(0x3d)
+            .map_err(|error| refuse!("EDU interrupt pin: {error}", %error))?
+            != 1
+            || read_control(config, 4).map_err(|error| refuse!("EDU command: {error}", ?error))?
+                & (4 | INTX_DISABLE)
+                != INTX_DISABLE
         {
             return Err(refuse!("EDU INTA/MSI-retired state mismatch"));
         }
-        let interrupts = function.interrupts();
+        let interrupts = function
+            .interrupts()
+            .map_err(|error| refuse!("EDU interrupt capabilities: {error}", ?error))?;
         let msi = interrupts.msi.ok_or(refuse!("EDU MSI metadata missing"))?;
-        if function.config().read16(u16::from(msi.offset) + 2) & 1 != 0 || interrupts.msix.is_some()
+        if read_control(function.config(), u16::from(msi.offset) + 2)
+            .map_err(|error| refuse!("EDU MSI control: {error}", ?error))?
+            & 1
+            != 0
+            || interrupts.msix.is_some()
         {
             return Err(refuse!("EDU MSI remains active before INTx"));
         }
@@ -226,7 +260,11 @@ impl Prepared {
         .map_err(|e| refuse!("IOAPIC line claim: {e}", ?e))?;
         let mut registration = super::service()
             .map_err(|e| refuse!("level service: {e}", ?e))?
-            .request(Box::new(pin), handlers.clone())
+            .request(stela_drivers::bus::irq::Request {
+                source: Box::new(pin),
+                handler: handlers.clone(),
+                routing: stela_drivers::bus::irq::RouteRequest::Line(LINE),
+            })
             .map_err(|e| refuse!("level request: {e}", ?e))?;
         let vector = registration.vector();
         // SAFETY: the level handler group is registered and interrupts are masked again right after
@@ -262,9 +300,17 @@ impl Prepared {
                 handled = ?registration.handled()
             ));
         }
-        registration
+        let retired = registration
             .retire()
             .map_err(|e| refuse!("level retirement: {e}", ?e))?;
+        // SAFETY: exact line retirement succeeded on its owner CPU; source precedes callback.
+        let (source, callback, route) = unsafe { retired.into_parts() }.map_err(|failure| {
+            let error = failure.error;
+            refuse!("line owner context changed: {error}", ?error)
+        })?;
+        drop(source);
+        drop(callback);
+        drop(route);
         let state = unit
             .state(LINE.gsi)
             .map_err(|e| refuse!("retired IOAPIC: {e}", ?e))?;
@@ -365,6 +411,15 @@ struct Contributors {
     function: Option<Function>,
     edu: Arc<Edu>,
 }
+impl Contributors {
+    fn config(&mut self) -> Result<&mut OwnedConfig, IrqError> {
+        Ok(self
+            .function
+            .as_mut()
+            .ok_or(IrqError::Unregistered)?
+            .config())
+    }
+}
 impl Drop for Contributors {
     fn drop(&mut self) {
         // Pin releases contributors ONLY after its registry/IOAPIC/
@@ -381,29 +436,10 @@ impl Drop for Contributors {
 // all other sharers stopped; INTx-disable readback and real EDU idle/cause ACK.
 unsafe impl Devices for Contributors {
     fn mask(&mut self) -> Result<(), IrqError> {
-        let command = self
-            .function
-            .as_mut()
-            .ok_or(IrqError::Unregistered)?
-            .config()
-            .read16(4);
-        if command == u16::MAX {
-            return Err(IrqError::FailedRead);
-        }
-        self.function
-            .as_mut()
-            .ok_or(IrqError::Unregistered)?
-            .config()
-            .write16(4, command | INTX_DISABLE);
-        let actual = self
-            .function
-            .as_mut()
-            .ok_or(IrqError::Unregistered)?
-            .config()
-            .read16(4);
-        if actual == u16::MAX {
-            return Err(IrqError::FailedRead);
-        }
+        let config = self.config()?;
+        let command = read_control(config, 4)?;
+        config.write16(4, command | INTX_DISABLE)?;
+        let actual = read_control(config, 4)?;
         if actual & INTX_DISABLE == 0 {
             return Err(IrqError::Mask);
         }
@@ -412,15 +448,7 @@ unsafe impl Devices for Contributors {
     fn quiesce(&mut self) -> Result<(), IrqError> {
         // SAFETY: `base` maps the EDU register BAR, which holds its DMA command at 0x98.
         let dma = unsafe { ((self.edu.base + 0x98) as *const u64).read_volatile() };
-        let command = self
-            .function
-            .as_mut()
-            .ok_or(IrqError::Unregistered)?
-            .config()
-            .read16(4);
-        if command == u16::MAX {
-            return Err(IrqError::FailedRead);
-        }
+        let command = read_control(self.config()?, 4)?;
         if dma & 1 != 0 || self.edu.read(0x20) & 1 != 0 || command & 4 != 0 {
             return Err(IrqError::Quiesce);
         }
@@ -431,32 +459,13 @@ unsafe impl Devices for Contributors {
         Ok(())
     }
     unsafe fn enable(&mut self) -> Result<(), IrqError> {
-        let command = self
-            .function
-            .as_mut()
-            .ok_or(IrqError::Unregistered)?
-            .config()
-            .read16(4);
-        if command == u16::MAX {
-            return Err(IrqError::FailedRead);
-        }
+        let config = self.config()?;
+        let command = read_control(config, 4)?;
         if command & 4 != 0 {
             return Err(IrqError::Quiesce);
         }
-        self.function
-            .as_mut()
-            .ok_or(IrqError::Unregistered)?
-            .config()
-            .write16(4, command & !INTX_DISABLE);
-        let actual = self
-            .function
-            .as_mut()
-            .ok_or(IrqError::Unregistered)?
-            .config()
-            .read16(4);
-        if actual == u16::MAX {
-            return Err(IrqError::FailedRead);
-        }
+        config.write16(4, command & !INTX_DISABLE)?;
+        let actual = read_control(config, 4)?;
         if actual & (4 | INTX_DISABLE) != 0 {
             return Err(IrqError::Mask);
         }

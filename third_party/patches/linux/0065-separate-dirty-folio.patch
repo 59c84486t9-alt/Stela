@@ -1,0 +1,161 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 00:55:39 -0500
+Subject: [PATCH] refactor(mm): separate dirty folio cleanup
+
+---
+ mm/Makefile          |  2 +-
+ mm/page-writeback.c  | 50 -----------------------------------
+ mm/writeback_folio.c | 62 ++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 63 insertions(+), 51 deletions(-)
+ create mode 100644 mm/writeback_folio.c
+
+diff --git a/mm/Makefile b/mm/Makefile
+index 01b0d0c36b67e1a0b12e85d30d3e6cfff3eaccfb..e37b07be86ea215357bd8aebee74648484cf621f 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -49,7 +49,7 @@ mmu-$(CONFIG_MMU)	+= mseal.o
+ endif
+ 
+ obj-y			:= filemap.o pagecache_init.o folio_wait.o mempool.o oom_kill.o oom_adj.o fadvise.o \
+-			   maccess.o page-writeback.o writeback_domain.o folio-compat.o \
++			   maccess.o page-writeback.o writeback_folio.o writeback_domain.o folio-compat.o \
+ 			   readahead.o swap.o filemap_batch.o truncate.o vmscan.o shrinker.o \
+ 			   shmem.o util.o mmzone.o lruvec.o vmstat.o vmstat_init.o backing-dev.o backing-dev-inode.o \
+ 			   mm_init.o percpu.o slab_common.o kvfree_rcu.o \
+diff --git a/mm/page-writeback.c b/mm/page-writeback.c
+index af438d12497c82e39e304d47483f71c841c8961d..80c32b7881dbe1f3691ff9246f5bd030fc7ab553 100644
+--- a/mm/page-writeback.c
++++ b/mm/page-writeback.c
+@@ -2586,22 +2586,6 @@ static void folio_account_dirtied(struct folio *folio,
+ 	}
+ }
+ 
+-/*
+- * Helper function for deaccounting dirty page without writeback.
+- *
+- */
+-void folio_account_cleaned(struct folio *folio, struct bdi_writeback *wb)
+-{
+-	long nr = folio_nr_pages(folio);
+-
+-	lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, -nr);
+-	if (folio_test_dropbehind(folio))
+-		wb_stat_mod(wb, WB_DONTCACHE_DIRTY, -nr);
+-	zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, -nr);
+-	wb_stat_mod(wb, WB_RECLAIMABLE, -nr);
+-	task_io_account_cancelled_write(nr * PAGE_SIZE);
+-}
+-
+ /*
+  * Mark the folio dirty, and set it dirty in the page cache.
+  *
+@@ -2767,40 +2751,6 @@ bool folio_mark_dirty_lock(struct folio *folio)
+ }
+ EXPORT_SYMBOL(folio_mark_dirty_lock);
+ 
+-/*
+- * This cancels just the dirty bit on the kernel page itself, it does NOT
+- * actually remove dirty bits on any mmap's that may be around. It also
+- * leaves the page tagged dirty, so any sync activity will still find it on
+- * the dirty lists, and in particular, clear_page_dirty_for_io() will still
+- * look at the dirty bits in the VM.
+- *
+- * Doing this should *normally* only ever be done when a page is truncated,
+- * and is not actually mapped anywhere at all. However, fs/buffer.c does
+- * this when it notices that somebody has cleaned out all the buffers on a
+- * page without actually doing it through the VM. Can you say "ext3 is
+- * horribly ugly"? Thought you could.
+- */
+-void __folio_cancel_dirty(struct folio *folio)
+-{
+-	struct address_space *mapping = folio_mapping(folio);
+-
+-	if (mapping_can_writeback(mapping)) {
+-		struct inode *inode = mapping->host;
+-		struct bdi_writeback *wb;
+-		struct wb_lock_cookie cookie = {};
+-
+-		wb = unlocked_inode_to_wb_begin(inode, &cookie);
+-
+-		if (folio_test_clear_dirty(folio))
+-			folio_account_cleaned(folio, wb);
+-
+-		unlocked_inode_to_wb_end(inode, &cookie);
+-	} else {
+-		folio_clear_dirty(folio);
+-	}
+-}
+-EXPORT_SYMBOL(__folio_cancel_dirty);
+-
+ /*
+  * Clear a folio's dirty flag, while caring for dirty memory accounting.
+  * Returns true if the folio was previously dirty.
+diff --git a/mm/writeback_folio.c b/mm/writeback_folio.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..efbb7bcf3a61c3f2373eb24a5af3adfc46ec2448
+--- /dev/null
++++ b/mm/writeback_folio.c
+@@ -0,0 +1,62 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Dirty folio cleanup from mm/page-writeback.c.
++ * Copyright (C) 2002, Linus Torvalds.
++ * Copyright (C) 2007 Red Hat, Inc., Peter Zijlstra
++ */
++#include <linux/backing-dev.h>
++#include <linux/export.h>
++#include <linux/pagemap.h>
++#include <linux/task_io_accounting_ops.h>
++
++#include "internal.h"
++
++/*
++ * Helper function for deaccounting dirty page without writeback.
++ *
++ */
++void folio_account_cleaned(struct folio *folio, struct bdi_writeback *wb)
++{
++	long nr = folio_nr_pages(folio);
++
++	lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, -nr);
++	if (folio_test_dropbehind(folio))
++		wb_stat_mod(wb, WB_DONTCACHE_DIRTY, -nr);
++	zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, -nr);
++	wb_stat_mod(wb, WB_RECLAIMABLE, -nr);
++	task_io_account_cancelled_write(nr * PAGE_SIZE);
++}
++
++/*
++ * This cancels just the dirty bit on the kernel page itself, it does NOT
++ * actually remove dirty bits on any mmap's that may be around. It also
++ * leaves the page tagged dirty, so any sync activity will still find it on
++ * the dirty lists, and in particular, clear_page_dirty_for_io() will still
++ * look at the dirty bits in the VM.
++ *
++ * Doing this should *normally* only ever be done when a page is truncated,
++ * and is not actually mapped anywhere at all. However, fs/buffer.c does
++ * this when it notices that somebody has cleaned out all the buffers on a
++ * page without actually doing it through the VM. Can you say "ext3 is
++ * horribly ugly"? Thought you could.
++ */
++void __folio_cancel_dirty(struct folio *folio)
++{
++	struct address_space *mapping = folio_mapping(folio);
++
++	if (mapping_can_writeback(mapping)) {
++		struct inode *inode = mapping->host;
++		struct bdi_writeback *wb;
++		struct wb_lock_cookie cookie = {};
++
++		wb = unlocked_inode_to_wb_begin(inode, &cookie);
++
++		if (folio_test_clear_dirty(folio))
++			folio_account_cleaned(folio, wb);
++
++		unlocked_inode_to_wb_end(inode, &cookie);
++	} else {
++		folio_clear_dirty(folio);
++	}
++}
++EXPORT_SYMBOL(__folio_cancel_dirty);

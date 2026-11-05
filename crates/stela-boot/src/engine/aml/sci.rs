@@ -18,19 +18,16 @@ pub(super) type Endpoint =
     ioapic::ParentMask<native_mmio::IoapicRegisters, native_irq::NativePlatform>;
 
 pub(crate) struct Prepared {
-    unit: Arc<native_mmio::IoapicUnit>,
+    mmio: &'static native_mmio::Source,
     line: LineRoute,
     power: HostPower,
     irq: u32,
-    legacy_pic: bool,
 }
 impl Prepared {
-    /// # Safety
-    /// The engine has stopped firmware IRQ ownership and owns every fixed/GPE
-    /// SCI source and the controller's selector/window. PCI INTx aliases must
-    /// be stopped before the route is admitted.
-    pub(crate) unsafe fn capture(
-        mmio: &native_mmio::Source,
+    /// Observe the masked SCI route on the original contained controller.
+    /// This prepares the route while its fixed/GPE contributors remain separate.
+    pub(crate) fn capture(
+        mmio: &'static native_mmio::Source,
         power: HostPower,
     ) -> Result<Self, IrqError> {
         if power.refused.is_some() || power.pm1[0].is_none() || power.pm1_event_bytes != 4 {
@@ -38,36 +35,18 @@ impl Prepared {
         }
         let routing = mmio.routing().map_err(|_| IrqError::Route)?;
         let line = routing.sci(mmio.fadt()).map_err(|_| IrqError::Route)?;
-        // SCI_INT is the original source number. MADT's override changes
-        // its IOAPIC GSI without changing the legacy PIC input.
+        mmio.original_line(line)?;
+        // SCI_INT is the legacy source number ACPICA passes to install_interrupt;
+        // MADT's override determines the physical GSI separately.
         let fadt = mmio.fadt();
         let irq = u32::from(u16::from_le_bytes([fadt[46], fadt[47]]));
-        let legacy_pic = routing.has_legacy_pic();
-        require_pic_masked(legacy_pic, irq)?;
-        let mut units = Vec::new();
-        for descriptor in &routing.units {
-            // SAFETY: the caller grants the complete IOAPIC handoff.
-            let unit = unsafe { mmio.ioapic(*descriptor) }.map_err(|_| IrqError::Unavailable)?;
-            units.push((*descriptor, unit));
-        }
-        let spans: Vec<_> = units
-            .iter()
-            .map(|(descriptor, unit)| (*descriptor, unit.pins()))
-            .collect();
-        let owner = routing.owner(line, &spans).map_err(|_| IrqError::Route)?;
-        let unit = units
-            .into_iter()
-            .find(|(descriptor, _)| *descriptor == owner)
-            .map(|(_, unit)| unit)
-            .ok_or(IrqError::Route)?;
-        // SAFETY: former firmware route and contributors are owned by caller.
-        unsafe { unit.mask_unclaimed(line.gsi) }?;
+        mmio.require_sci_pic_masked(irq)
+            .map_err(|_| IrqError::Mask)?;
         Ok(Self {
-            unit,
+            mmio,
             line,
             power,
             irq,
-            legacy_pic,
         })
     }
 
@@ -77,26 +56,37 @@ impl Prepared {
 
     /// # Safety
     /// Called once by this boot's ACPICA activation, with the same permanent
-    /// provider/handler argument kept until acknowledged removal.
+    /// provider/handler argument kept until acknowledged removal. The hardware
+    /// provider exclusively owns every fixed/GPE contributor and has stopped
+    /// the old SCI and PCI INTx sharers.
     pub(super) unsafe fn install(
         self,
         handler: Interrupt,
         argument: *mut c_void,
     ) -> Result<Armed, IrqError> {
-        require_pic_masked(self.legacy_pic, self.irq)?;
         let pending = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(AtomicBool::new(false));
         let devices = Sources::new(self.power);
+        let unit = self.mmio.original_line(self.line)?;
+        self.mmio
+            .require_sci_pic_masked(self.irq)
+            .map_err(|_| IrqError::Mask)?;
         // SAFETY: capture checked the owned physical route; Sources masks and
         // restores every fixed/GPE enable bit on this exclusive SCI line.
-        let pin = unsafe { self.unit.claim(self.line, Box::new(devices)) }?;
+        let pin = unsafe { unit.claim(self.line, Box::new(devices)) }?;
         let parent = Arc::new(pin.parent_mask()?);
         let callback = Arc::new(Deferred {
             parent: parent.clone(),
             pending: pending.clone(),
             failed: failed.clone(),
         });
-        let registration = native_irq::service()?.request(Box::new(pin), callback)?;
+        let registration = native_irq::service()?
+            .request(stela_drivers::bus::irq::Request {
+                source: Box::new(pin),
+                handler: callback,
+                routing: stela_drivers::bus::irq::RouteRequest::Line(self.line),
+            })
+            .map_err(|e| e.error)?;
         Ok(Armed {
             pending,
             failed,
@@ -106,23 +96,6 @@ impl Prepared {
             argument: argument as usize,
         })
     }
-}
-
-fn require_pic_masked(legacy_pic: bool, irq: u32) -> Result<(), IrqError> {
-    if legacy_pic && irq < 16 {
-        native_irq::NativePlatform::current()?;
-        if crate::engine::host::in_interrupt() {
-            return Err(IrqError::WrongCpu);
-        }
-        let port = if irq < 8 { 0x21 } else { 0xa1 };
-        // SAFETY: MADT identifies an original PC/AT PIC. Reading its mask
-        // neither programs the controller nor acknowledges an interrupt.
-        let mask = unsafe { super::in8(port) };
-        if mask & (1 << (irq & 7)) == 0 {
-            return Err(IrqError::Mask);
-        }
-    }
-    Ok(())
 }
 
 struct Enable {
@@ -271,6 +244,13 @@ impl Armed {
         unsafe { self.parent.rearm() }
     }
     pub(super) fn retire(&mut self) -> Result<(), IrqError> {
-        self.registration.retire()
+        let retired = self.registration.retire()?;
+        // SAFETY: same original SCI line owner, stopped sources and completed callback.
+        let (source, callback, route) =
+            unsafe { retired.into_parts() }.map_err(|failure| failure.error)?;
+        drop(source);
+        drop(callback);
+        drop(route);
+        Ok(())
     }
 }

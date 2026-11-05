@@ -756,7 +756,7 @@ fn absent_or_invalid_board_ownership_evidence_refuses_before_reset() {
 #[test]
 fn unavailable_native_clock_refuses_before_identification_access_and_keeps_original_owner() {
     for asic in [Asic::Bcm5761, Asic::Bcm5720, Asic::Bcm5762] {
-        for rate in [0, u64::MAX, u64::MAX / 60_000_000 + 1] {
+        for rate in [0, 3_000, u64::MAX] {
             let (mut previous, model) = model(asic, 0);
             let registers = previous.release_registers();
             // SAFETY: isolated original symbolic owner; invalid
@@ -764,12 +764,15 @@ fn unavailable_native_clock_refuses_before_identification_access_and_keeps_origi
             let mut hardware = unsafe {
                 Hardware::new(
                     registers,
-                    crate::Clock {
+                    crate::timing::refused_model(crate::Clock {
                         ticks_per_microsecond: rate,
-                    },
+                    }),
                 )
             };
-            assert_eq!(hardware.identify(), Err(Error::Clock));
+            assert_eq!(
+                hardware.identify(),
+                Err(Error::Timing(crate::bus::pci::power::Error::Clock))
+            );
             assert!(hardware.identity().is_none());
             assert!(model.borrow().trace.is_empty());
             drop(hardware);
@@ -802,7 +805,7 @@ fn every_mdio_wait_failure_restores_autopoll_releases_original_grant_and_poison_
             }
             assert_eq!(
                 hardware.read_phy(7),
-                Err(Error::Clock),
+                Err(Error::Timing(crate::bus::pci::power::Error::Clock)),
                 "{asic:?} wait {failing}"
             );
             let grant = if asic == Asic::Bcm5761 {
@@ -826,7 +829,10 @@ fn every_mdio_wait_failure_restores_autopoll_releases_original_grant_and_poison_
                     matches!(model.borrow().trace.last(), Some(Event::ApeWrite(offset, APE_DRIVER)) if *offset == at)
                 );
             }
-            assert_eq!(hardware.failure(), Some(Error::Clock));
+            assert_eq!(
+                hardware.failure(),
+                Some(Error::Timing(crate::bus::pci::power::Error::Clock))
+            );
             let effects = model.borrow().trace.len();
             assert_eq!(hardware.read_phy(7), Err(Error::Poisoned));
             assert_eq!(model.borrow().trace.len(), effects);
@@ -850,11 +856,14 @@ fn every_core_reset_wait_failure_prevents_completion_and_keeps_original_epoch() 
             model.borrow_mut().fail_delay = Some(fail_at);
             assert_eq!(
                 hardware.reset_unmanaged_core(),
-                Err(Error::Clock),
+                Err(Error::Timing(crate::bus::pci::power::Error::Clock)),
                 "{asic:?} wait {failing}"
             );
             assert!(!hardware.core_reset_completed());
-            assert_eq!(hardware.failure(), Some(Error::Clock));
+            assert_eq!(
+                hardware.failure(),
+                Some(Error::Timing(crate::bus::pci::power::Error::Clock))
+            );
             let effects = model.borrow().trace.len();
             assert_eq!(hardware.read_phy(2), Err(Error::Poisoned));
             assert_eq!(model.borrow().trace.len(), effects);

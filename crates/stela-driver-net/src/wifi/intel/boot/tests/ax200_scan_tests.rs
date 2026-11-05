@@ -40,11 +40,17 @@ pub(super) fn finish_mcc<'a>(
 }
 #[test]
 fn reduced_scan_configuration_completes_real_ack_and_keeps_board_policy_required() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise(false);
 }
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn ax200_scan_cfg5_uses_real_rx_tx_antennas_and_original_dma_epoch() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise(true);
 }
 fn exercise(actual: bool) {

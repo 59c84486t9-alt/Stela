@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 11:26:28 -0500
+Subject: [PATCH] fix(fs): handle native character device map availability
+
+---
+ fs/char_dev.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/fs/char_dev.c b/fs/char_dev.c
+index 00229e25c10f613749676cf0d384b5c318a7cf2e..76d75f2072c5d62363d4c380e573b2f5d9842742 100644
+--- a/fs/char_dev.c
++++ b/fs/char_dev.c
+@@ -24,6 +24,10 @@
+ #include <linux/backing-dev.h>
+ #include <linux/tty.h>
+ 
++#ifdef CONFIG_STELA
++#include <stela/linux.h>
++#endif
++
+ #include "internal.h"
+ 
+ static struct kobj_map *cdev_map __ro_after_init;
+@@ -374,6 +378,10 @@ static int chrdev_open(struct inode *inode, struct file *filp)
+ 	struct cdev *new = NULL;
+ 	int ret = 0;
+ 
++#ifdef CONFIG_STELA
++	if (!cdev_map)
++		return -ENXIO;
++#endif
+ 	spin_lock(&cdev_lock);
+ 	p = inode->i_cdev;
+ 	if (!p) {
+@@ -671,6 +679,10 @@ static struct kobject *base_probe(dev_t dev, int *part, void *data)
+ void __init chrdev_init(void)
+ {
+ 	cdev_map = kobj_map_init(base_probe, &chrdevs_lock);
++#ifdef CONFIG_STELA
++	if (!cdev_map)
++		stela_linux_fatal("character device map initialization failed");
++#endif
+ }
+ 
+ 

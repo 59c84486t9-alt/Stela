@@ -14,7 +14,16 @@ const PCI_HOST_CONFIGURATION: u16 = 0x40;
 const SPD_WRITE_DISABLE: u8 = 1 << 4;
 const PROTOCOL_I2C_BLOCK: u8 = 0x18;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ConfigurationError;
+pub enum ConfigurationError {
+    IdentityChanged,
+    Config(crate::bus::pci::ConfigError),
+    Unavailable,
+}
+impl From<crate::bus::pci::ConfigError> for ConfigurationError {
+    fn from(error: crate::bus::pci::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
 /// Function configuration, kept through every temporary mode change.
 /// # Safety
 /// The provider exclusively owns the same PCI function/reset epoch and
@@ -47,10 +56,10 @@ impl<C: ConfigSpace, G> OwnedConfiguration<C, G> {
     }
     fn identity(&mut self) -> Result<(), ConfigurationError> {
         let expected = u32::from(self.function.vendor) | u32::from(self.function.device) << 16;
-        if self.function.config().read32(0) == expected {
+        if self.function.config().read32(0)? == expected {
             Ok(())
         } else {
-            Err(ConfigurationError)
+            Err(ConfigurationError::IdentityChanged)
         }
     }
 }
@@ -62,12 +71,17 @@ unsafe impl<C: ConfigSpace + 'static, G: 'static> HostConfiguration for OwnedCon
     }
     fn read(&mut self) -> Result<u8, ConfigurationError> {
         self.identity()?;
-        Ok(self.function.config().read8(PCI_HOST_CONFIGURATION))
+        self.function
+            .config()
+            .read8(PCI_HOST_CONFIGURATION)
+            .map_err(ConfigurationError::from)
     }
     fn write(&mut self, value: u8) -> Result<(), ConfigurationError> {
         self.identity()?;
-        self.function.config().write8(PCI_HOST_CONFIGURATION, value);
-        Ok(())
+        self.function
+            .config()
+            .write8(PCI_HOST_CONFIGURATION, value)
+            .map_err(ConfigurationError::from)
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,7 +96,7 @@ pub struct ConfigurationFailure {
     pub phase: ConfigurationPhase,
     pub expected: u8,
     pub observed: Option<u8>,
-    pub access_failed: bool,
+    pub error: Option<ConfigurationError>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Failure {
@@ -116,8 +130,9 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
         if !host.ready || host.locked || host.info.device != configuration.device_id() {
             return Err((ErrorKind::InvalidConfiguration, (host, configuration)));
         }
-        let Ok(original) = configuration.read() else {
-            return Err((ErrorKind::InvalidConfiguration, (host, configuration)));
+        let original = match configuration.read() {
+            Ok(original) => original,
+            Err(error) => return Err((ErrorKind::Configuration(error), (host, configuration))),
         };
         let kind = if original & HOST_ENABLED == 0 {
             Some(ErrorKind::HostDisabled)
@@ -150,7 +165,12 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
             transfer,
             configuration,
         });
-        let mut error = transfer.unwrap_or_else(|| ErrorKind::InvalidConfiguration.into());
+        let mut error = transfer.unwrap_or_else(|| {
+            configuration
+                .and_then(|failure| failure.error)
+                .map_or(ErrorKind::InvalidConfiguration, ErrorKind::Configuration)
+                .into()
+        });
         error.recovery = Recovery::Failed;
         error
     }
@@ -165,13 +185,13 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
                 phase,
                 expected,
                 observed: Some(observed),
-                access_failed: false,
+                error: None,
             }),
-            Err(_) => Err(ConfigurationFailure {
+            Err(error) => Err(ConfigurationFailure {
                 phase,
                 expected,
                 observed: None,
-                access_failed: true,
+                error: Some(error),
             }),
         }
     }
@@ -180,12 +200,12 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
         expected: u8,
         phase: ConfigurationPhase,
     ) -> Result<(), ConfigurationFailure> {
-        if self.owners.as_mut().unwrap().1.write(expected).is_err() {
+        if let Err(error) = self.owners.as_mut().unwrap().1.write(expected) {
             return Err(ConfigurationFailure {
                 phase,
                 expected,
                 observed: None,
-                access_failed: true,
+                error: Some(error),
             });
         }
         self.check(expected, phase)
@@ -218,7 +238,7 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
                 phase: ConfigurationPhase::Unquiesced,
                 expected: self.original,
                 observed: None,
-                access_failed: false,
+                error: None,
             };
             return Err(self.fault(transfer.err(), Some(failure)));
         }
@@ -437,6 +457,10 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
         self.owners.as_mut().unwrap().0.take_host_notify()
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "failed release retains the original controller and client without allocating"
+    )]
     pub fn release(mut self) -> Result<(I801<R, T>, C), Self> {
         if self.active
             || self.failure.is_some()

@@ -4,7 +4,7 @@
 //! Copyright(c) 2018, 2020 Intel Corporation
 use super::{Controller, Error, FirmwareReport, Mailboxes, Phase, Registers, registers::*};
 use super::{Deadline, Field};
-use crate::bus::i2c::Timer;
+use crate::Timer;
 
 pub(super) fn word(bytes: &[u8], offset: usize) -> Result<u32, Error> {
     Ok(u32::from_le_bytes(
@@ -69,6 +69,7 @@ pub(super) fn firmware_payload(bytes: &[u8]) -> Result<&[u8], Error> {
 
 impl<R: Registers, T: Timer> Controller<R, T> {
     fn sram_read(&mut self, offset: usize, bytes: &mut [u8]) -> Result<(), Error> {
+        self.minimum_guard()?;
         if offset < 0x80000
             || offset
                 .checked_add(bytes.len())
@@ -82,6 +83,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn sram_write(&mut self, offset: usize, bytes: &[u8]) -> Result<(), Error> {
+        self.minimum_guard()?;
         if offset < 0x80000
             || offset
                 .checked_add(bytes.len())
@@ -95,6 +97,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     pub(super) fn firmware_ready(&mut self, sha256: [u8; 32]) -> Result<FirmwareReport, Error> {
+        self.minimum_guard()?;
         let start = self.timer.now_us();
         let notification = self.poll(
             Bar::Dsp,
@@ -221,6 +224,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })
     }
     pub(super) fn exchange(&mut self, message: &[u8], reply: &mut [u8]) -> Result<usize, Error> {
+        self.minimum_guard()?;
         self.authority()?;
         let boxes = self.mailboxes.ok_or(Error::State)?;
         if message.len() < 8

@@ -22,36 +22,48 @@ const TIMER_INTERRUPTS: u32 = 4 | 0x4000;
 enum Owner {
     Scoped(HpetMapping),
     Native(NativeHpetMapping),
+    #[cfg(feature = "diagnostics")]
+    Standalone(crate::paging::config::Hpet),
 }
 impl Owner {
     fn descriptor(&self) -> Descriptor {
         match self {
             Self::Scoped(owner) => owner.descriptor(),
             Self::Native(owner) => owner.descriptor(),
+            #[cfg(feature = "diagnostics")]
+            Self::Standalone(owner) => owner.descriptor(),
         }
     }
-    fn identity(&self) -> &Arc<RootIdentity> {
+    fn identity(&self) -> Option<&Arc<RootIdentity>> {
         match self {
-            Self::Scoped(owner) => owner.context().identity(),
-            Self::Native(owner) => owner.identity(),
+            Self::Scoped(owner) => Some(owner.context().identity()),
+            Self::Native(owner) => Some(owner.identity()),
+            #[cfg(feature = "diagnostics")]
+            Self::Standalone(_) => None,
         }
     }
     fn check_process(&self) -> Result<(), WorkError> {
         match self {
             Self::Scoped(owner) => owner.check_process(),
             Self::Native(owner) => owner.check_process(),
+            #[cfg(feature = "diagnostics")]
+            Self::Standalone(owner) => owner.check(),
         }
     }
     fn check_irq_cpu(&self) -> Result<(), WorkError> {
         match self {
             Self::Scoped(owner) => owner.check_irq_cpu(),
             Self::Native(owner) => owner.check_irq_cpu(),
+            #[cfg(feature = "diagnostics")]
+            Self::Standalone(owner) => owner.check(),
         }
     }
     fn mapping(&self) -> Result<&Mapping, WorkError> {
         match self {
             Self::Scoped(owner) => Ok(owner.mapping()),
             Self::Native(owner) => owner.mapping(),
+            #[cfg(feature = "diagnostics")]
+            Self::Standalone(owner) => Ok(owner.mapping()),
         }
     }
     unsafe fn retire_mapping(&mut self) -> Result<(), WorkError> {
@@ -61,6 +73,9 @@ impl Owner {
             Self::Scoped(owner) => unsafe { owner.retire_mapping() },
             // SAFETY: same drain, using the production registry's owner.
             Self::Native(owner) => unsafe { owner.retire_mapping() },
+            #[cfg(feature = "diagnostics")]
+            // SAFETY: same drain, through the standalone root and registry.
+            Self::Standalone(owner) => unsafe { owner.retire_mapping() },
         }
     }
 }
@@ -103,11 +118,18 @@ impl Counter {
     pub(crate) fn attach_native_exclusive(owned: NativeExclusiveHpet) -> Result<Self, WorkError> {
         Self::attach(Owner::Native(owned.into_mapping()), true)
     }
+    #[cfg(feature = "diagnostics")]
+    pub(super) fn attach_standalone(owned: crate::paging::config::Hpet) -> Result<Self, WorkError> {
+        Self::attach(Owner::Standalone(owned), true)
+    }
+
     fn attach(owned: Owner, may_enable: bool) -> Result<Self, WorkError> {
         owned.check_process()?;
-        let eligibility = match &owned {
-            Owner::Scoped(_) => Eligibility::Scoped,
-            Owner::Native(_) => Eligibility::Native(PowerControl::capture(owned.identity())),
+        let eligibility = if matches!(owned, Owner::Scoped(_)) {
+            Eligibility::Scoped
+        } else {
+            // SAFETY: the exact retained mapping checked its process CPU above.
+            Eligibility::Native(unsafe { PowerControl::capture() })
         };
         let descriptor = owned.descriptor();
         let mapping = owned.mapping()?;
@@ -188,6 +210,8 @@ impl Counter {
         match &self.owned {
             Owner::Scoped(owner) => Ok(owner),
             Owner::Native(_) => Err(WorkError::Unavailable),
+            #[cfg(feature = "diagnostics")]
+            Owner::Standalone(_) => Err(WorkError::Unavailable),
         }
     }
     /// Only a native resource plus eligible live platform can back
@@ -199,12 +223,20 @@ impl Counter {
         }
         match &self.eligibility {
             Eligibility::Native(Ok(control)) => {
-                control.check(self.identity())?;
+                // SAFETY: the original owner checked this CPU above.
+                unsafe { control.check() }?;
                 Ok(self.geometry.period_fs)
             }
             Eligibility::Native(Err(error)) => Err(*error),
             Eligibility::Scoped => Err(WorkError::Unavailable),
         }
+    }
+
+    pub(super) fn ticks_for_minimum_ns(&self, minimum_ns: u64) -> Result<u64, WorkError> {
+        self.continuous_period()?;
+        self.geometry
+            .ticks_for_minimum_ns(minimum_ns)
+            .map_err(|_| WorkError::Exhausted)
     }
 
     pub(crate) fn elapsed_bounds(
@@ -219,7 +251,8 @@ impl Counter {
 
     fn controls(&self) -> Result<(), WorkError> {
         if let Eligibility::Native(Ok(control)) = &self.eligibility {
-            control.check(self.identity())?;
+            // SAFETY: both callers checked this original CPU before sampling.
+            unsafe { control.check() }?;
         }
         // SAFETY: caller first validates this real owner/IRQ CPU. Geometry
         // bounds every register; MMIO is the original UC mapping.
@@ -246,20 +279,13 @@ impl Counter {
         Ok(())
     }
 
-    pub(crate) fn ticks_for_minimum_ns(&self, minimum_ns: u64) -> Result<u64, WorkError> {
-        self.continuous_period()?;
-        self.geometry
-            .ticks_for_minimum_ns(minimum_ns)
-            .map_err(|_| WorkError::Exhausted)
-    }
-
     pub(crate) fn period_fs(&self) -> u32 {
         self.geometry.period_fs
     }
     pub(crate) fn descriptor(&self) -> Descriptor {
         self.owned.descriptor()
     }
-    pub(crate) fn identity(&self) -> &Arc<RootIdentity> {
+    pub(crate) fn identity(&self) -> Option<&Arc<RootIdentity>> {
         self.owned.identity()
     }
     /// A short active-spin reference, never an HPET continuity/PC10 grant.
@@ -269,7 +295,11 @@ impl Counter {
         &self,
         identity: &Arc<RootIdentity>,
     ) -> Result<u64, WorkError> {
-        if !matches!(&self.owned, Owner::Native(_)) || !Arc::ptr_eq(self.identity(), identity) {
+        if !matches!(&self.owned, Owner::Native(_))
+            || self
+                .identity()
+                .is_none_or(|owner| !Arc::ptr_eq(owner, identity))
+        {
             return Err(WorkError::Unavailable);
         }
         self.check_process()?;

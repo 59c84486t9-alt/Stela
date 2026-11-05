@@ -116,6 +116,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn conexant_microphone_sense(&mut self, address: u8) -> Result<u32, Error> {
+        self.minimum_guard()?;
         let sense = self.verb(Verb::short(address, MIC, GET_SENSE, 0)?)?;
         if sense == u32::MAX {
             return Err(Error::RouteRejected);
@@ -123,6 +124,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(sense)
     }
     fn conexant_microphone_control(&mut self, address: u8, present: bool) -> Result<u8, Error> {
+        self.minimum_guard()?;
         let control = if present { MIC_ON } else { MIC_OFF };
         self.route_control(address, MIC, SET_PIN, GET_PIN, control)?;
         Ok(control)
@@ -134,6 +136,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<ConexantHeadsetInitialization, Error> {
+        self.minimum_guard()?;
         self.conexant_guard(graph)?;
         Self::conexant_headset_preflight(graph)?;
         let codec = self.initialize_conexant_common(graph)?;
@@ -186,6 +189,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         &mut self,
         graph: &CodecGraph,
     ) -> Result<ConexantHeadsetReport, Error> {
+        self.minimum_guard()?;
         self.conexant_guard(graph)?;
         if !is_profile(graph.vendor_id) {
             return Err(Error::UnsupportedTopology);
@@ -211,7 +215,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                         status = Some(value);
                         break;
                     }
-                    self.delay(DETECTION_INTERVAL_US);
+                    self.delay(DETECTION_INTERVAL_US)?;
                 }
                 let status = status.ok_or(Error::Timeout(Phase::CodecHeadsetDetection))?;
                 let kind = self.verb(Verb::short(graph.address, VENDOR, GET_TYPE, 0)?)?;

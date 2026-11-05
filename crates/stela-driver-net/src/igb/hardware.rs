@@ -16,16 +16,16 @@ pub(super) struct PciCapabilities {
     pub power: Option<u16>,
 }
 impl PciCapabilities {
-    pub(super) fn read<C: ConfigSpace>(function: &Function<C>) -> Self {
+    pub(super) fn read<C: ConfigSpace>(function: &Function<C>) -> Result<Self, BlockError> {
         let mut found = Self::default();
-        for (offset, id) in function.capabilities() {
+        for (offset, id) in function.capabilities()? {
             match id {
                 0x10 => found.pcie = Some(u16::from(offset)),
                 1 => found.power = Some(u16::from(offset)),
                 _ => {}
             }
         }
-        found
+        Ok(found)
     }
 }
 
@@ -73,7 +73,7 @@ impl<'a, R: RegisterIo, T: Timer> Hardware<'a, R, T> {
         }
         self.configure_phy()?;
         self.configure_mac(mac);
-        self.flush_82575_receive_fifo();
+        self.flush_82575_receive_fifo()?;
         Ok((mac, self.warnings))
     }
 
@@ -99,7 +99,7 @@ impl<'a, R: RegisterIo, T: Timer> Hardware<'a, R, T> {
             self.completion_timeout(config, capabilities)?;
         }
         self.io.read(STATUS);
-        self.clock.delay(10_000);
+        self.clock.delay(10_000)?;
         // Reset this function, not DEV_RST: other copper ports are separate
         // PCI functions and may already have their own Stela driver.
         self.io.write(CTRL, self.io.read(CTRL) | CTRL_RST);
@@ -150,13 +150,14 @@ impl<'a, R: RegisterIo, T: Timer> Hardware<'a, R, T> {
                 let capability = capabilities.pcie.ok_or(BlockError::Unsupported(
                     "igb completion timeout needs PCIe capability",
                 ))?;
-                if config.read16(capability + 2) & 0xf < 2 {
+                if config.read16(capability + 2)? & 0xf < 2 {
                     return Err(BlockError::Unsupported(
                         "igb requires PCIe Device Control 2",
                     ));
                 }
                 let offset = capability + 0x28;
-                config.write16(offset, config.read16(offset) | 5); // 16–55 ms
+                let value = config.read16(offset)?;
+                config.write16(offset, value | 5)?; // 16–55 ms
             }
         }
         self.io.write(GCR, control & !GCR_RESEND);
@@ -205,7 +206,7 @@ impl<'a, R: RegisterIo, T: Timer> Hardware<'a, R, T> {
                 };
             }
             self.put_hardware_semaphore();
-            self.clock.delay(5_000);
+            self.clock.delay(5_000)?;
         }
         Err(BlockError::Timeout)
     }
@@ -321,9 +322,9 @@ impl<'a, R: RegisterIo, T: Timer> Hardware<'a, R, T> {
         }
     }
 
-    fn flush_82575_receive_fifo(&self) {
+    fn flush_82575_receive_fifo(&self) -> Result<(), BlockError> {
         if self.chip != Chip::I82575 || self.io.read(MANC) & MANC_TCO == 0 {
-            return;
+            return Ok(());
         }
         // reset() already disabled and acknowledged every RX queue. Flush
         // the manageability FIFO with no DMA buffers exposed, rejecting all
@@ -336,9 +337,10 @@ impl<'a, R: RegisterIo, T: Timer> Hardware<'a, R, T> {
         self.io.write(RCTL, RCTL_LPE);
         self.io.write(RCTL, RCTL_LPE | RCTL_EN);
         self.io.read(STATUS);
-        self.clock.delay(2_000);
+        self.clock.delay(2_000)?;
         self.io.write(RCTL, control);
         self.io.write(RLPML, maximum);
         self.io.write(RFCTL, filter);
+        Ok(())
     }
 }

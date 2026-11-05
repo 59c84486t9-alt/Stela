@@ -14,30 +14,35 @@
 //! shootdowns and spins, the boot CPU also runs the environment, and a task
 //! thread sleeps.
 use super::{
-    BOOT_CPU, Installed, PAGE, environment_error, installed, nanoseconds,
+    BOOT_CPU, Installed, PAGE, installed,
     stack::{self, Stack},
 };
 use crate::{engine::host, output};
 use alloc::{
     alloc::{Layout, alloc, dealloc},
     boxed::Box,
+    rc::Rc,
     vec::Vec,
 };
 use core::{
     cell::Cell,
     ffi::{CStr, c_char, c_int, c_long, c_uint, c_ulong, c_void},
     hint,
+    pin::Pin,
     ptr::{self, NonNull},
     slice, str,
-    sync::atomic::{
-        AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence,
-    },
+    sync::atomic::{AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence},
 };
 use stela_boot_core::page_window::Cache;
-use stela_drivers::{
-    gpu::linux::{client, owner::Entered},
-    platform::work::{WorkError, service::Idle},
+use stela_drivers::platform::work::{WorkError, service::Idle};
+use stela_linux::{
+    client,
+    task::runtime::{ManagedJob, Outcome, Pending, SubmitError},
 };
+
+fn nanoseconds(ticks: u64, tsc_hz: u64) -> u64 {
+    (u128::from(ticks) * 1_000_000_000 / u128::from(tsc_hz)) as u64
+}
 
 const ENODEV: i64 = -19;
 const EFAULT: i64 = -14;
@@ -112,7 +117,6 @@ struct Thread {
     body: unsafe extern "C" fn(*mut c_void),
     argument: *mut c_void,
     core: c_uint,
-    stack: Option<Stack>,
 }
 
 /// A running thread of Mesa's.
@@ -133,20 +137,18 @@ const THREADS: usize = 16;
 static SLEEPING: [AtomicPtr<c_uint>; THREADS] =
     [const { AtomicPtr::new(ptr::null_mut()) }; THREADS];
 
-unsafe extern "C" fn run_thread(context: *mut c_void) {
-    // SAFETY: `perform` gave this task the box.
-    let thread = unsafe { Box::from_raw(context.cast::<Thread>()) };
-    let gpu = installed().expect("threads start in a running environment");
-    let stack = thread.stack.as_ref().expect("`perform` gave it one");
+fn run_thread(gpu: &Installed, thread: &Thread, stack: &Stack) {
     let running = Running {
         top: stack.top(),
         core: thread.core,
         task: (stack::pointer() - TASK_STACK_MARGIN) & !15,
     };
-    gpu.threads.borrow_mut().insert(stack.bottom(), running);
+    gpu.mesa_threads
+        .borrow_mut()
+        .insert(stack.bottom(), running);
     // SAFETY: the thread's own stack, and the C library's thread.
     unsafe { stack::on_stack(running.top, &mut || (thread.body)(thread.argument)) };
-    gpu.threads.borrow_mut().remove(&stack.bottom());
+    gpu.mesa_threads.borrow_mut().remove(&stack.bottom());
 }
 
 /// The Mesa thread running here, by its stack.
@@ -155,7 +157,7 @@ fn current_thread(gpu: &Installed) -> Option<Running> {
         return None;
     }
     let pointer = stack::pointer();
-    let threads = gpu.threads.borrow();
+    let threads = gpu.mesa_threads.borrow();
     let (_, thread) = threads.range(..=pointer).next_back()?;
     (pointer < thread.top).then_some(*thread)
 }
@@ -165,7 +167,8 @@ struct Request {
     operation: Operation,
     next: Cell<*const Request>,
     result: AtomicI64,
-    done: AtomicBool,
+    done: AtomicU32,
+    wake_task: bool,
 }
 
 impl Request {
@@ -174,8 +177,24 @@ impl Request {
             operation,
             next: Cell::new(ptr::null()),
             result: AtomicI64::new(0),
-            done: AtomicBool::new(false),
+            done: AtomicU32::new(0),
+            wake_task: false,
         }
+    }
+
+    fn complete(&self, result: i64) -> bool {
+        let wake_task = self.wake_task;
+        self.result.store(result, Ordering::Relaxed);
+        self.done.store(1, Ordering::Release);
+        wake_task
+    }
+
+    fn refuse(&self, result: i64) -> bool {
+        if let Operation::Thread(thread) = self.operation {
+            // SAFETY: no original child executed the request or took its box.
+            drop(unsafe { Box::from_raw(thread) });
+        }
+        self.complete(result)
     }
 }
 
@@ -221,7 +240,7 @@ fn unload(request: &Request, seconds: u64) -> bool {
     };
     let deadline = host::rdtsc().saturating_add(seconds.saturating_mul(gpu.tsc_hz));
     wait(gpu, request, deadline);
-    request.done.load(Ordering::Acquire)
+    request.done.load(Ordering::Acquire) != 0
 }
 
 /// A dma-buf of `runs` and the host's mapping of them, for the GPU's service.
@@ -290,7 +309,7 @@ unsafe fn perform(gpu: &Installed, operation: Operation) -> i64 {
     // SAFETY: the function's own contract for every arm.
     unsafe {
         match operation {
-            Operation::Open(minor) => client::open(minor).into(),
+            Operation::Open(minor) => stela_drivers::gpu::drm::open(minor).into(),
             Operation::Close(fd) => client::close(fd).into(),
             Operation::Duplicate(fd) => client::duplicate(fd).into(),
             Operation::Device(fd) => client::device(fd),
@@ -340,20 +359,7 @@ unsafe fn perform(gpu: &Installed, operation: Operation) -> i64 {
                 }
                 0
             }
-            Operation::Thread(thread) => {
-                (*thread).stack = Stack::map(gpu.window, THREAD_STACK_BYTES);
-                let spawned = match (*thread).stack {
-                    Some(_) => gpu.environment.as_ref().spawn(run_thread, thread.cast()),
-                    None => Err(WorkError::Full),
-                };
-                match spawned {
-                    Ok(_) => 0,
-                    Err(_) => {
-                        drop(Box::from_raw(thread));
-                        EAGAIN
-                    }
-                }
-            }
+            Operation::Thread(_) => unreachable!("a thread runs in its original managed child"),
             Operation::Export(runs, count) => {
                 client::export(slice::from_raw_parts(runs, count)).into()
             }
@@ -364,7 +370,7 @@ unsafe fn perform(gpu: &Installed, operation: Operation) -> i64 {
             Operation::Shutdown => {
                 let gpu = installed().expect("requests are posted to a running environment");
                 gpu.start
-                    .attached
+                    ._attached
                     .iter()
                     .for_each(|attached| attached.shutdown());
                 0
@@ -373,19 +379,102 @@ unsafe fn perform(gpu: &Installed, operation: Operation) -> i64 {
     }
 }
 
-unsafe extern "C" fn serve(context: *mut c_void) {
-    // SAFETY: the poster waits for `done`, so the request is live.
-    let request = unsafe { &*context.cast::<Request>() };
-    let gpu = installed().expect("requests are posted to a running environment");
-    // SAFETY: a task of the environment, whose owner lasts for the boot.
-    let _entered = unsafe { Entered::new(gpu.owner.raw()) };
-    let code = request_code(&request.operation);
-    let started = host::rdtsc();
-    // SAFETY: entered, on a task, and the poster keeps what the call names.
-    let result = unsafe { perform(gpu, request.operation) };
-    count(&SERVED, code, host::rdtsc().wrapping_sub(started));
-    request.result.store(result, Ordering::Relaxed);
-    request.done.store(true, Ordering::Release);
+struct RequestJob {
+    request: NonNull<Request>,
+    completed: Rc<Cell<bool>>,
+    thread: Option<(Box<Thread>, Stack)>,
+}
+
+// SAFETY: the caller retains the posted record through completion. After
+// completion neither the job nor its join dereferences the request again.
+// Thread storage remains owned by the job through native and source join.
+unsafe impl ManagedJob for RequestJob {
+    fn run(mut self: Pin<&mut Self>) {
+        let gpu = installed().expect("managed requests have a running environment");
+        // SAFETY: the request stays live through its release acknowledgement.
+        let request = unsafe { self.request.as_ref() };
+        let code = request_code(&request.operation);
+        let started = host::rdtsc();
+        let result = if let Operation::Thread(thread) = request.operation {
+            // SAFETY: this original child is the sole consumer of the box.
+            let thread = unsafe { Box::from_raw(thread) };
+            if let Some(stack) = Stack::map(gpu.window, THREAD_STACK_BYTES) {
+                self.thread = Some((thread, stack));
+                0
+            } else {
+                EAGAIN
+            }
+        } else {
+            // SAFETY: the broker entered the canonical Linux owner on this
+            // original task. The requester retains the operation's inputs.
+            unsafe { perform(gpu, request.operation) }
+        };
+        count(&SERVED, code, host::rdtsc().wrapping_sub(started));
+        self.completed.set(true);
+        if request.complete(result) {
+            // SAFETY: the same source task owns the Linux wait queue.
+            unsafe { client::wake() };
+        }
+        if let Some((thread, stack)) = &self.thread {
+            run_thread(gpu, thread, stack);
+        }
+    }
+}
+
+pub(super) struct PendingRequest {
+    job: Pending,
+    request: NonNull<Request>,
+    completed: Rc<Cell<bool>>,
+}
+
+fn join_requests(gpu: &Installed) {
+    let mut requests = gpu.requests.take();
+    let mut index = 0;
+    while index < requests.len() {
+        if !requests[index].job.status().joined {
+            index += 1;
+            continue;
+        }
+        let PendingRequest {
+            job,
+            request,
+            completed,
+        } = requests.swap_remove(index);
+        // SAFETY: same taskless dispatcher, after all active C/native frames
+        // have returned, with no source or metadata loan.
+        match unsafe { job.try_join() } {
+            Ok(joined) => {
+                if !completed.get() {
+                    if !matches!(
+                        joined.outcome(),
+                        Outcome::CreationFailed(_) | Outcome::Skipped(_)
+                    ) {
+                        output::fatal(format_args!(
+                            "Linux request ended before completion: {:?}",
+                            joined.outcome()
+                        ));
+                    }
+                    // SAFETY: the poster still waits and no callback took the box.
+                    let wake = unsafe { request.as_ref() }.refuse(ENOMEM);
+                    gpu.wake_task.set(gpu.wake_task.get() || wake);
+                }
+            }
+            Err(job) => {
+                requests.push(PendingRequest {
+                    job,
+                    request,
+                    completed,
+                });
+                break;
+            }
+        }
+    }
+    gpu.requests.replace(requests);
+}
+
+unsafe extern "C" fn wake_waiters(_: *mut c_void) {
+    // SAFETY: a reserved service leaf is already entered in the exact owner.
+    unsafe { client::wake() };
 }
 
 /// An ioctl by its request code; every other request as zero.
@@ -443,59 +532,74 @@ unsafe extern "C" fn serve_wake(context: *mut c_void) {
     // SAFETY: the service owns a real entered process continuation; waking
     // waiters is bounded and cannot sleep or enter another owner.
     unsafe { client::wake() };
-    request.result.store(0, Ordering::Relaxed);
-    request.done.store(true, Ordering::Release);
+    request.complete(0);
 }
 
 /// Admit posted operations in the dispatcher. General capacity refusal is an
 /// immediate resource failure; queued operations must not depend on a later
 /// unaccepted ioctl or thread startup. Wake leaves use the reserved service.
 pub(super) fn start(gpu: &Installed) -> Result<(), WorkError> {
+    join_requests(gpu);
     let mut request = REQUESTS
         .swap(ptr::null_mut(), Ordering::Acquire)
         .cast_const();
     let mut deferred = false;
-    // Inspect every captured request: Owner pressure must not hide a Wake
-    // farther down this list, because that wake can release the occupied tasks.
-    // SAFETY: captured posted requests stay live until the done acknowledgement.
+    // Capacity refusal must not hide a Wake behind occupied original children.
+    // SAFETY: captured requests stay live until their completion is published.
     while let Some(current) = unsafe { request.as_ref() } {
         let next = current.next.get();
-        // SAFETY: posted storage lives until done. Wake leaves run on the
-        // existing service task; all other requests retain ordinary task rules.
-        let accepted = unsafe {
-            match current.operation {
-                Operation::Wake => gpu
-                    .environment
-                    .as_ref()
-                    .defer_service(serve_wake, request.cast_mut().cast()),
-                _ => gpu
-                    .environment
-                    .as_ref()
-                    .spawn(serve, request.cast_mut().cast())
-                    .map(drop),
-            }
-        };
-        match accepted {
-            Ok(()) => {}
-            Err(WorkError::Full) if matches!(current.operation, Operation::Wake) => {
-                // Every occupied leaf slot has a raised SERVICE reason and a
-                // bounded nonblocking callback. Retry after that independent
-                // service drains; this never waits for a General/pool credit.
-                post(current);
-                deferred = true;
-            }
-            Err(WorkError::Full) => {
-                if let Operation::Thread(thread) = current.operation {
-                    // SAFETY: no serve task accepted this request, so its
-                    // transferred thread box has never run or been consumed.
-                    drop(unsafe { Box::from_raw(thread) });
+        if matches!(current.operation, Operation::Wake) {
+            // SAFETY: the poster holds the record until this reserved leaf runs.
+            match unsafe {
+                gpu.owner
+                    .environment()
+                    .defer_service(serve_wake, request.cast_mut().cast())
+            } {
+                Ok(()) => {}
+                Err(WorkError::Full) => {
+                    post(current);
+                    deferred = true;
                 }
-                current.result.store(ENOMEM, Ordering::Relaxed);
-                current.done.store(true, Ordering::Release);
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
+        } else {
+            let completed = Rc::new(Cell::new(false));
+            let request = NonNull::from(current);
+            let job = Box::pin(RequestJob {
+                request,
+                completed: completed.clone(),
+                thread: None,
+            });
+            // SAFETY: the exact dispatcher and installed owner retain the
+            // original child and the caller retains the record through completion.
+            match unsafe { gpu.threads.submit(job) } {
+                Ok(job) => gpu.requests.borrow_mut().push(PendingRequest {
+                    job,
+                    request,
+                    completed,
+                }),
+                Err(refusal) => match refusal.error {
+                    SubmitError::Capacity => {
+                        let wake = current.refuse(ENOMEM);
+                        gpu.wake_task.set(gpu.wake_task.get() || wake);
+                    }
+                    SubmitError::Context(error) => return Err(error),
+                },
+            }
         }
         request = next;
+    }
+    if gpu.wake_task.get() {
+        // SAFETY: this wake needs no caller storage and cannot sleep.
+        match unsafe {
+            gpu.owner
+                .environment()
+                .defer_service(wake_waiters, ptr::null_mut())
+        } {
+            Ok(()) => gpu.wake_task.set(false),
+            Err(WorkError::Full) => deferred = true,
+            Err(error) => return Err(error),
+        }
     }
     if deferred {
         gpu.events.notify()?;
@@ -505,16 +609,34 @@ pub(super) fn start(gpu: &Installed) -> Result<(), WorkError> {
 
 fn submit(operation: Operation) -> i64 {
     let Some(gpu) = installed() else {
-        return ENODEV;
+        return {
+            if let Operation::Thread(thread) = operation {
+                // SAFETY: the thread was never accepted.
+                drop(unsafe { Box::from_raw(thread) });
+            }
+            ENODEV
+        };
     };
     if let Some(thread) = current_thread(gpu) {
         let mut result = 0;
         let mut call = || {
-            // SAFETY: a task of the environment, as in `serve`.
-            let _entered = unsafe { Entered::new(gpu.owner.raw()) };
-            // SAFETY: entered, on a task, and the caller keeps what the call
-            // names.
-            result = unsafe { perform(gpu, operation) };
+            if matches!(operation, Operation::Thread(_)) {
+                let mut request = Request::new(operation);
+                request.wake_task = true;
+                post(&request);
+                if let Err(error) = gpu.events.notify() {
+                    output::fatal(format_args!(
+                        "the host's Linux environment failed: {error:?}"
+                    ));
+                }
+                // SAFETY: Mesa is back on its original source task stack.
+                // The completion word stays live through the Linux wait.
+                unsafe { client::wait(request.done.as_ptr(), 0, u64::MAX) };
+                result = request.result.load(Ordering::Acquire);
+            } else {
+                // SAFETY: back on the original source task's Linux stack.
+                result = unsafe { perform(gpu, operation) };
+            }
         };
         // SAFETY: the task runs nothing else below its thread's frame.
         unsafe { stack::on_stack(thread.task, &mut call) };
@@ -573,7 +695,7 @@ pub(super) fn take_served() -> Vec<(u32, u64, u64)> {
 /// Posts `request` to the service and waits for it, until the host counter
 /// reaches `deadline`.
 fn wait(gpu: &Installed, request: &Request, deadline: u64) {
-    let waiting = || !request.done.load(Ordering::Acquire) && host::rdtsc() < deadline;
+    let waiting = || request.done.load(Ordering::Acquire) == 0 && host::rdtsc() < deadline;
     post(request);
     if let Err(error) = gpu.events.notify() {
         output::fatal(format_args!(
@@ -587,14 +709,17 @@ fn wait(gpu: &Installed, request: &Request, deadline: u64) {
             hint::spin_loop();
         }
     } else {
-        let ran = gpu.work.dispatch(|runtime| {
+        let ran = gpu.work.dispatch_linux(|runtime| {
             while waiting() {
+                gpu.advance_children();
                 start(gpu)?;
-                runtime.step_or_idle()?;
+                if waiting() {
+                    runtime.step_or_idle()?;
+                }
             }
-            Ok::<_, WorkError>(())
+            Ok(())
         });
-        if let Err(error) = ran.and_then(|ran| ran.map_err(environment_error)) {
+        if let Err(error) = ran {
             output::fatal(format_args!("the host's Linux environment failed: {error}"));
         }
     }
@@ -711,7 +836,6 @@ unsafe extern "C" fn stela_libc_thread_start(
         body,
         argument,
         core,
-        stack: None,
     }));
     submit(Operation::Thread(thread)) as c_int
 }
@@ -731,8 +855,6 @@ unsafe extern "C" fn stela_libc_wait(word: *const c_uint, value: c_uint, deadlin
         _ => deadline.saturating_sub(nanoseconds(host::rdtsc(), gpu.tsc_hz)),
     };
     let mut sleep = || {
-        // SAFETY: a task of the environment, as in `serve`.
-        let _entered = unsafe { Entered::new(gpu.owner.raw()) };
         // SAFETY: entered, on a task, and the C library's word outlives its wait.
         unsafe { client::wait(word, value, left) };
     };

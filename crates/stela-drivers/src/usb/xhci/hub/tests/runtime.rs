@@ -1,5 +1,9 @@
 //! Ring/context/interrupt model coverage of runtime topology ownership.
-use super::super::{model::*, tests::controller, *};
+use super::super::{
+    model::*,
+    tests::{controller, controller_with_minimum},
+    *,
+};
 use crate::bus::dma::TestRegion;
 use alloc::collections::BTreeMap;
 
@@ -117,7 +121,10 @@ fn runtime_usb2_hub_debounce_yields_between_samples_and_restarts_on_a_bounce() {
     hub.ports.as_mut().unwrap()[0].status &= !3;
     let nodes = BTreeMap::from([(0, hub), (1, unbound_leaf(speed))]);
     let mut dma = TestRegion::new(512 * 1024 * 8);
-    let (mut c, model) = controller(&mut dma, 64, nodes);
+    let physical = Clock {
+        ticks_per_microsecond: 2,
+    };
+    let (mut c, model) = controller_with_minimum(&mut dma, 64, nodes, physical);
     let clock = c.clock;
     let mut failures = Vec::new();
     let devices = c.enumerate(&mut dma, &mut failures);
@@ -149,8 +156,16 @@ fn runtime_usb2_hub_debounce_yields_between_samples_and_restarts_on_a_bounce() {
     assert!(Clock::ticks().wrapping_sub(service_start) < DEBOUNCE_STEP_US);
     assert!(!host.attachment_due());
     assert_no_reset();
+    // The nominal clock schedules the callback halfway through the physical
+    // minimum. This callback must neither sample the port nor credit time.
+    let requests = model.borrow().requests.len();
+    crate::test_clock::advance(clock, DEBOUNCE_STEP_US);
+    assert!(host.attachment_due());
+    let early = runtime_poll(&mut host, &mut dma);
+    assert!(early.added.devices.is_empty() && early.added.failures.is_empty());
+    assert_eq!(model.borrow().requests.len(), requests);
     for _ in 0..3 {
-        crate::test_clock::advance(clock, DEBOUNCE_STEP_US);
+        crate::test_clock::advance(physical, DEBOUNCE_STEP_US);
         assert!(host.attachment_due());
         service_start = Clock::ticks();
         let changes = runtime_poll(&mut host, &mut dma);
@@ -166,11 +181,11 @@ fn runtime_usb2_hub_debounce_yields_between_samples_and_restarts_on_a_bounce() {
     let bounced_at = Clock::ticks();
     assert_no_reset();
     for _ in 0..3 {
-        crate::test_clock::advance(clock, DEBOUNCE_STEP_US);
+        crate::test_clock::advance(physical, DEBOUNCE_STEP_US);
         assert!(runtime_poll(&mut host, &mut dma).added.devices.is_empty());
         assert_no_reset();
     }
-    crate::test_clock::advance(clock, DEBOUNCE_STEP_US);
+    crate::test_clock::advance(physical, DEBOUNCE_STEP_US);
     let completed = runtime_poll(&mut host, &mut dma);
     assert!(
         completed.added.failures.is_empty(),
@@ -182,7 +197,12 @@ fn runtime_usb2_hub_debounce_yields_between_samples_and_restarts_on_a_bounce() {
     let reset_at = (start_requests..m.requests.len())
         .find(|&i| m.requests[i].2 == reset)
         .unwrap();
-    assert!(m.request_times[reset_at].wrapping_sub(bounced_at) >= DEBOUNCE_STABLE_US);
+    assert!(
+        physical
+            .elapsed_at(bounced_at, m.request_times[reset_at])
+            .unwrap()
+            >= DEBOUNCE_STABLE_US
+    );
 }
 
 #[test]

@@ -31,7 +31,7 @@ fn pci_preparation_and_duplex() {
         let mut controller =
             // SAFETY: The prepared adapter owns this model's register/reset path. fixture
             // keeps all coherent DMA backing live while the controller polls it.
-            unsafe { Controller::new(registers, timer, &mut fixture.allocator, selected) }.unwrap();
+            unsafe { Controller::new(registers, timer, &mut fixture.allocator, selected).map_err(|failure|failure.error) }.unwrap();
         assert!(gate.get()); //The model asserts every CRST write occurs with gate clear.
         assert_eq!(controller.link_clock().unwrap().unwrap().mhz, 24);
         let graph = controller.enumerate_codec(0).unwrap();

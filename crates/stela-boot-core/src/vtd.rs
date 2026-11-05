@@ -11,22 +11,27 @@
 //! This never attaches by guessing a DMAR scope or changes active firmware
 //! domains. ATS, scalable mode, RMRR preservation, peer groups and AMD-Vi need
 //! their platform owners and are not supplied by this backend.
-use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::{
     cell::UnsafeCell,
     mem::ManuallyDrop,
     ops::Range,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 use stela_drivers::bus::dma::{
     mapping::{Direction, DmaDomain, DmaError, DomainMapping},
     memory::{CacheAttribute, CpuMapping, PageSource, PinnedPages},
     pages::DmaPages,
 };
+use stela_drivers::bus::mmio::owned::{Mapping, Protection, ResourceKind};
 
 use crate::requester::RequesterClaim;
-use stela_drivers::bus::mmio::owned::{Mapping, Protection, ResourceKind};
+
+pub mod interrupt;
+mod requester;
+pub use requester::BoundRequester;
+use requester::{RequesterActor, RequesterLifetime, RequesterUnwind};
 
 const PAGE: usize = 4096;
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
@@ -83,6 +88,8 @@ pub fn quarantined_units() -> u64 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VtdError {
+    Config(stela_drivers::bus::pci::ConfigError),
+    PciCapability(stela_drivers::bus::pci::CapabilityError),
     Busy,
     Unsupported,
     RegisterRange,
@@ -90,7 +97,30 @@ pub enum VtdError {
     Memory,
     Timeout,
     Invalidation,
+    Exhausted,
     FaultOverflow,
+}
+impl From<stela_drivers::bus::pci::ConfigError> for VtdError {
+    fn from(error: stela_drivers::bus::pci::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+impl From<stela_drivers::bus::pci::CapabilityError> for VtdError {
+    fn from(error: stela_drivers::bus::pci::CapabilityError) -> Self {
+        Self::PciCapability(error)
+    }
+}
+/// Exact original requester/unit custody survives failed or unwinding attach.
+pub struct AttachRequesterFailure<R: Registers> {
+    pub error: VtdError,
+    _retained: ManuallyDrop<Box<RequesterActor<R>>>,
+}
+impl<R: Registers> core::fmt::Debug for AttachRequesterFailure<R> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("AttachRequesterFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,7 +188,8 @@ struct UcAddress(NonNull<u8>);
 // SAFETY: this is an exclusive root-stable UC register address with no CPU
 // memory references. Its original mapping is kept by the register owner.
 unsafe impl Send for UcAddress {}
-// SAFETY: Unit serializes register accesses, and the mapping remains owned.
+// SAFETY: Unit serializes writes. Its direct-delivery pin allows only
+// concurrent lock-free hardware reads of the frozen mode and root.
 unsafe impl Sync for UcAddress {}
 
 impl MmioRegisters {
@@ -326,7 +357,7 @@ struct LiveMapping {
 struct DomainState {
     did: u16,
     generation: u64,
-    claim: RequesterClaim,
+    lifetime: Arc<RequesterLifetime>,
     tables: Vec<Table>,
     table_index: BTreeMap<u64, usize>,
     mappings: BTreeMap<u64, LiveMapping>,
@@ -358,6 +389,12 @@ struct State {
 /// require process/deferred context; the lock is not a hard-IRQ service.
 pub struct Unit<R: Registers> {
     registers: ManuallyDrop<R>,
+    // Persistent GCMD controls only; one-shot SRTP/SIRTP/WBF are never saved.
+    command: AtomicU32,
+    /// Acquired under the Unit lock. Released without I/O by the exact pin.
+    direct_delivery: AtomicBool,
+    interrupts: ManuallyDrop<UnsafeCell<Option<interrupt::State>>>,
+    ecap: u64,
     source: &'static (dyn PageSource + Sync),
     held: AtomicBool,
     state: ManuallyDrop<UnsafeCell<State>>,
@@ -369,8 +406,9 @@ pub struct Unit<R: Registers> {
     table_cacheline: Option<usize>,
 }
 
-// SAFETY: all mutable state/register accesses use the acquire/release lock.
-// IRQ reentry and platform ownership changes are excluded by construction.
+// SAFETY: mutable state and register writes use the acquire/release lock.
+// The direct-delivery pin permits only IRQ-safe register observation with
+// the original root and mode frozen; platform ownership changes are excluded.
 unsafe impl<R: Registers> Sync for Unit<R> {}
 
 enum InitialState {
@@ -408,14 +446,31 @@ impl<R: Registers> InitialBlock<R> {
 }
 
 impl<R: Registers> BlockedRequester<R> {
+    pub fn requester(&self) -> u16 {
+        self.rid
+    }
+
+    /// Check this kept, one-shot owner's original blocked context without
+    /// draining it or authorizing a new domain or configuration operation.
+    pub fn check(&self) -> Result<(), DmaError> {
+        self.with_blocked(|_, _| Ok(()))
+    }
+
     pub fn drain(&self) -> Result<(), DmaError> {
+        self.with_blocked(Unit::drain_initial)
+    }
+
+    fn with_blocked(
+        &self,
+        action: impl FnOnce(&Unit<R>, &mut State) -> Result<(), DmaError>,
+    ) -> Result<(), DmaError> {
         let mut guard = self.unit.lock();
         let state = guard.state();
         self.unit.check_blocked_requester(state, self.rid)?;
         if !*state.initial_claim(self.rid)? {
             return Err(DmaError::IommuUnavailable);
         }
-        self.unit.drain_initial(state)
+        action(&self.unit, state)
     }
 }
 
@@ -598,6 +653,10 @@ impl<R: Registers> Unit<R> {
         }
         let unit = Arc::new(Self {
             registers: ManuallyDrop::new(registers),
+            command: AtomicU32::new(0),
+            direct_delivery: AtomicBool::new(false),
+            interrupts: ManuallyDrop::new(UnsafeCell::new(None)),
+            ecap,
             source,
             held: AtomicBool::new(false),
             state: ManuallyDrop::new(UnsafeCell::new(State {
@@ -626,10 +685,11 @@ impl<R: Registers> Unit<R> {
         // owner, never a firmware handler kept across ownership transfer.
         unit.registers.write32(FECTL, 1 << 31);
         unit.registers.write64(RTADDR, state.root.physical());
-        unit.registers.write32(GCMD, ROOT_POINTER);
+        unit.write_command(ROOT_POINTER)?;
         unit.wait32(GSTS, ROOT_POINTER, true)?;
-        unit.invalidate(0, true)?;
-        unit.registers.write32(GCMD, TRANSLATION);
+        unit.invalidate(true)?;
+        unit.command.store(TRANSLATION, Ordering::Relaxed);
+        unit.write_command(0)?;
         unit.wait32(GSTS, TRANSLATION, true)?;
         drop(guard);
         Ok(unit)
@@ -684,7 +744,7 @@ impl<R: Registers> Unit<R> {
         // Keep the unit closed through every hardware callback, including an
         // unwind before the acknowledgment can be issued.
         state.poisoned = true;
-        self.invalidate(TRANSLATION, true)
+        self.invalidate(true)
             .map_err(|_| DmaError::InvalidationFailed)?;
         self.check_root_registers(state)?;
         state.initial_block = InitialState::Issued(pending);
@@ -753,7 +813,7 @@ impl<R: Registers> Unit<R> {
         // VT-d 6.5.4's DW acknowledgement covers this original root's
         // translated writes; use the same checked completion as live domains.
         state.poisoned = true;
-        self.invalidate(TRANSLATION, false)
+        self.invalidate(false)
             .map_err(|_| DmaError::InvalidationFailed)?;
         state.poisoned = false;
         Ok(())
@@ -790,7 +850,7 @@ impl<R: Registers> Unit<R> {
                 state.root.flush(&*self.registers, line);
             }
             publish();
-            if let Err(error) = self.invalidate(TRANSLATION, true) {
+            if let Err(error) = self.invalidate(true) {
                 state.poisoned = true;
                 return Err(error);
             }
@@ -807,12 +867,126 @@ impl<R: Registers> Unit<R> {
     /// owner can resume it before this returned domain's mapping publication.
     pub unsafe fn attach_requester(
         self: &Arc<Self>,
-        mut claim: RequesterClaim,
-    ) -> Result<Arc<RequesterDomain<R>>, VtdError> {
-        claim.check_stopped()?;
-        let rid = claim.requester();
-        let mut guard = self.lock();
-        let state = guard.state();
+        claim: RequesterClaim,
+    ) -> Result<BoundRequester<R>, AttachRequesterFailure<R>> {
+        let mut original = RequesterActor::prepare(self.clone(), claim);
+        let mut unwind = RequesterUnwind::new(original.lifetime.clone());
+        let result = (|| -> Result<(), VtdError> {
+            let rid = {
+                let mut slot = original
+                    .claim
+                    .try_borrow_mut()
+                    .map_err(|_| VtdError::Busy)?;
+                let claim = slot.as_mut().expect("original requester claim");
+                claim.check_stopped()?;
+                claim.requester()
+            };
+            let (did, generation) = {
+                let mut guard = self.lock();
+                self.requester_slot(guard.state(), rid)?
+            };
+            // Page providers can reenter the unit. Keep the claim and root in
+            // the parked actor while preparing outside its hardware lock.
+            original.staged = ManuallyDrop::new(Some(Table::new(self.source, self.physical_bits)?));
+            let physical = original
+                .staged
+                .as_ref()
+                .expect("prepared requester root")
+                .physical();
+            original.domain = Some(Arc::new(RequesterDomain {
+                unit: ManuallyDrop::new(original.unit.take().expect("original unit")),
+                rid,
+                did,
+                generation,
+                lifetime: original.lifetime.clone(),
+            }));
+            let mut table_index = BTreeMap::new();
+            table_index.insert(physical, 0);
+            let mut tables = Vec::with_capacity(1);
+            let mut guard = self.lock();
+            let state = guard.state();
+            // A concurrent attachment or provider callback can consume a DID
+            // or change admission while the root is being prepared.
+            if self.requester_slot(state, rid)? != (did, generation) {
+                return Err(VtdError::Busy);
+            }
+            if let InitialState::Issued(claims) = &mut state.initial_block
+                && let Ok(index) = claims.binary_search_by_key(&rid, |&(rid, _)| rid)
+            {
+                claims.remove(index);
+            }
+            state.next_generation = generation + 1;
+            tables.push(original.staged.take().expect("prepared requester root"));
+            state.domains.insert(
+                rid,
+                DomainState {
+                    did,
+                    generation,
+                    lifetime: original.lifetime.clone(),
+                    tables,
+                    table_index,
+                    mappings: BTreeMap::new(),
+                    quarantined: false,
+                },
+            );
+            // Close the whole unit before the first publication callback. A
+            // caught unwind cannot resume sibling contexts after an uncertain
+            // table flush, context store, or invalidation. Only full success
+            // reopens admission under this same held unit lock.
+            state.poisoned = true;
+            // Even an unsolicited access while TE is active must never walk stale
+            // child contents. Publish this complete zero root before its context.
+            if let Some(line) = self.table_cacheline {
+                state.domains[&rid].tables[0].flush(&*self.registers, line);
+            }
+            publish();
+            let (context, index) = state.context(rid);
+            if context.read(index) & 1 != 0 {
+                // VT-d 6.5.3.3: a present context entry is cleared and its cached
+                // copies and the window's translations invalidated before it is
+                // rewritten.
+                context.write(index, 0);
+                if let Some(line) = self.table_cacheline {
+                    context.flush(&*self.registers, line);
+                }
+                publish();
+                if let Err(error) = self.invalidate(true) {
+                    state.poisoned = true;
+                    return Err(error);
+                }
+            }
+            let (context, index) = state.context(rid);
+            context.write(index + 1, u64::from(did) << 8 | u64::from(self.levels - 2));
+            if let Some(line) = self.table_cacheline {
+                context.flush(&*self.registers, line);
+            }
+            publish();
+            context.write(index, physical | 1);
+            if let Some(line) = self.table_cacheline {
+                context.flush(&*self.registers, line);
+            }
+            publish();
+            if let Err(error) = self.invalidate(true) {
+                state.poisoned = true;
+                return Err(error);
+            }
+            state.poisoned = false;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                unwind.dismiss();
+                Ok(BoundRequester::new(original))
+            }
+            Err(error) => Err(AttachRequesterFailure {
+                error,
+                _retained: original,
+            }),
+        }
+    }
+
+    /// Read-only admission preflight; no provider, allocation or register IO.
+    fn requester_slot(&self, state: &State, rid: u16) -> Result<(u16, u64), VtdError> {
         if state.shutdown
             || state.poisoned
             || !state.allowed.contains(&rid)
@@ -826,73 +1000,18 @@ impl<R: Registers> Unit<R> {
             1
         };
         let did = (first..self.max_domains)
-            .find(|did| !state.domains.values().any(|d| u32::from(d.did) == *did))
+            .find(|did| {
+                !state
+                    .domains
+                    .values()
+                    .any(|domain| u32::from(domain.did) == *did)
+            })
             .ok_or(VtdError::Busy)? as u16;
-        let generation = state.next_generation;
-        state.next_generation = generation.checked_add(1).ok_or(VtdError::Unsupported)?;
-        if let InitialState::Issued(claims) = &mut state.initial_block
-            && let Ok(index) = claims.binary_search_by_key(&rid, |&(rid, _)| rid)
-        {
-            claims.remove(index);
-        }
-        let root = Table::new(self.source, self.physical_bits)?;
-        let physical = root.physical();
-        // Even an unsolicited access while TE is active must never walk stale
-        // child contents. Publish this complete zero root before its context.
-        if let Some(line) = self.table_cacheline {
-            root.flush(&*self.registers, line);
-        }
-        publish();
-        let mut table_index = BTreeMap::new();
-        table_index.insert(physical, 0);
-        state.domains.insert(
-            rid,
-            DomainState {
-                did,
-                generation,
-                claim,
-                tables: vec![root],
-                table_index,
-                mappings: BTreeMap::new(),
-                quarantined: false,
-            },
-        );
-        let (context, index) = state.context(rid);
-        if context.read(index) & 1 != 0 {
-            // VT-d 6.5.3.3: a present context entry is cleared and its cached
-            // copies and the window's translations invalidated before it is
-            // rewritten.
-            context.write(index, 0);
-            if let Some(line) = self.table_cacheline {
-                context.flush(&*self.registers, line);
-            }
-            publish();
-            if let Err(error) = self.invalidate(TRANSLATION, true) {
-                state.poisoned = true;
-                return Err(error);
-            }
-        }
-        let (context, index) = state.context(rid);
-        context.write(index + 1, u64::from(did) << 8 | u64::from(self.levels - 2));
-        if let Some(line) = self.table_cacheline {
-            context.flush(&*self.registers, line);
-        }
-        publish();
-        context.write(index, physical | 1);
-        if let Some(line) = self.table_cacheline {
-            context.flush(&*self.registers, line);
-        }
-        publish();
-        if let Err(error) = self.invalidate(TRANSLATION, true) {
-            state.poisoned = true;
-            return Err(error);
-        }
-        Ok(Arc::new(RequesterDomain {
-            unit: ManuallyDrop::new(self.clone()),
-            rid,
-            did,
-            generation,
-        }))
+        state
+            .next_generation
+            .checked_add(1)
+            .ok_or(VtdError::Unsupported)?;
+        Ok((did, state.next_generation))
     }
 
     fn lock(&self) -> Guard<'_, R> {
@@ -944,6 +1063,9 @@ impl<R: Registers> Unit<R> {
         if self.cap & CAP_PAGE_SELECTIVE == 0 || u64::from(mask) > largest {
             return self.invalidate_domain(did);
         }
+        if self.queued_iotlb(3, did, first >> mask << mask << 12, mask as u8)? {
+            return Ok(());
+        }
         publish();
         self.flush_write_buffer()?;
         let mut request = IOTLB_INVALIDATE | IOTLB_PAGE | u64::from(did) << IOTLB_DOMAIN_SHIFT;
@@ -968,8 +1090,9 @@ impl<R: Registers> Unit<R> {
         Ok(())
     }
     fn flush_write_buffer(&self) -> Result<(), VtdError> {
+        self.check_interrupt_state()?;
         if self.cap & CAP_WRITE_BUFFER != 0 {
-            self.registers.write32(GCMD, TRANSLATION | WRITE_BUFFER);
+            self.write_command(WRITE_BUFFER)?;
             self.wait32(GSTS, WRITE_BUFFER, false)?;
         }
         Ok(())
@@ -977,6 +1100,9 @@ impl<R: Registers> Unit<R> {
     /// Invalidate one domain's IOTLB entries, draining its queued DMA: the
     /// unit may grant the global invalidation instead.
     fn invalidate_domain(&self, did: u16) -> Result<(), VtdError> {
+        if self.queued_iotlb(2, did, 0, 0)? {
+            return Ok(());
+        }
         publish();
         self.flush_write_buffer()?;
         let mut request = IOTLB_INVALIDATE | IOTLB_DOMAIN | u64::from(did) << IOTLB_DOMAIN_SHIFT;
@@ -1041,7 +1167,10 @@ impl<R: Registers> Unit<R> {
             core::hint::spin_loop();
         }
     }
-    fn invalidate(&self, command: u32, context: bool) -> Result<(), VtdError> {
+    fn invalidate(&self, context: bool) -> Result<(), VtdError> {
+        if self.queued_global(context)? {
+            return Ok(());
+        }
         publish();
         if context {
             self.wait64(CCMD, CONTEXT_INVALIDATE)?;
@@ -1066,7 +1195,7 @@ impl<R: Registers> Unit<R> {
             return Err(VtdError::Invalidation);
         }
         if self.cap & CAP_WRITE_BUFFER != 0 {
-            self.registers.write32(GCMD, command | WRITE_BUFFER);
+            self.write_command(WRITE_BUFFER)?;
             self.wait32(GSTS, WRITE_BUFFER, false)?;
         }
         Ok(())
@@ -1084,11 +1213,17 @@ impl<R: Registers> Unit<R> {
         if state.shutdown {
             return Ok(());
         }
-        if !state.domains.is_empty() {
+        if self.direct_delivery.load(Ordering::Acquire) || !state.domains.is_empty() {
             return Err(VtdError::Busy);
         }
-        self.invalidate(TRANSLATION, true)?;
-        self.registers.write32(GCMD, 0);
+        self.interrupt_shutdown_ready()?;
+        // Latch before any disable/invalidation effect, including unwind. A
+        // failed shutdown must not permit a new requester/map on that root.
+        state.poisoned = true;
+        self.stop_interrupt_remapping()?;
+        self.invalidate(true)?;
+        self.command.store(0, Ordering::Relaxed);
+        self.write_command(0)?;
         self.wait32(GSTS, TRANSLATION, false)?;
         state.shutdown = true;
         Ok(())
@@ -1104,6 +1239,7 @@ impl<R: Registers> Drop for Unit<R> {
             // acknowledgement and TE-off acknowledgement preceded shutdown.
             unsafe {
                 ManuallyDrop::drop(&mut self.state);
+                ManuallyDrop::drop(&mut self.interrupts);
                 ManuallyDrop::drop(&mut self.registers);
             }
         } else {
@@ -1282,13 +1418,15 @@ impl DomainState {
 }
 
 /// One requester context, hardware DID and non-reused software epoch.
-/// It keeps the hardware owner and consumed PCI claim through every DMA lease.
+/// It keeps physical hardware/table resources and a deny-only lifecycle; the
+/// affine configuration claim belongs only to BoundRequester.
 /// Final release is process/deferred context, never an IRQ callback.
 pub struct RequesterDomain<R: Registers> {
     unit: ManuallyDrop<Arc<Unit<R>>>,
     rid: u16,
     did: u16,
     generation: u64,
+    lifetime: Arc<RequesterLifetime>,
 }
 impl<R: Registers> RequesterDomain<R> {
     pub fn requester(&self) -> u16 {
@@ -1305,89 +1443,37 @@ impl<R: Registers> RequesterDomain<R> {
         state: &'a mut State,
         live: bool,
     ) -> Result<&'a mut DomainState, DmaError> {
+        if !self.lifetime.is_live() {
+            return Err(DmaError::Unmapped);
+        }
         if state.shutdown || (live && state.poisoned) {
             return Err(DmaError::MappingFailed);
         }
         state
             .domains
             .get_mut(&self.rid)
-            .filter(|d| d.did == self.did && d.generation == self.generation && !d.quarantined)
+            .filter(|d| {
+                d.did == self.did
+                    && d.generation == self.generation
+                    && Arc::ptr_eq(&d.lifetime, &self.lifetime)
+                    && !d.quarantined
+            })
             .ok_or(DmaError::Unmapped)
     }
-    /// # Safety
-    /// The device is stopped before disabling, or every enabled DMA
-    /// address is published under this owned domain. Device IRQ/work/reset and
-    /// configuration ownership remain excluded. This is not a stop/drain ACK.
-    /// Controlled fault probes must keep all possible target backing too.
-    pub unsafe fn set_bus_master(&self, enabled: bool) -> Result<(), VtdError> {
+    /// Observe this exact retained domain's mapping inventory without changing
+    /// a context, command queue or configuration. Callers retain their actual
+    /// original process/root context; this supplies no detach/stop receipt.
+    pub fn has_live_mappings(&self) -> Result<bool, DmaError> {
         let mut guard = self.unit.lock();
-        self.domain(guard.state(), enabled)
-            .map_err(|_| VtdError::Busy)?
-            .claim
-            .set_bus_master(enabled)
-    }
-    /// # Safety
-    /// Engines, posted requests, IRQ/work/reset and submissions from
-    /// this owned requester are stopped/drained and cannot restart. No numeric
-    /// RID or BusMaster-clear bit alone establishes this proof.
-    pub unsafe fn detach(&self) -> Result<RequesterClaim, VtdError> {
-        let mut guard = self.unit.lock();
-        let state = guard.state();
-        let domain = self.domain(state, false).map_err(|_| VtdError::Busy)?;
-        if !domain.mappings.is_empty() {
-            return Err(VtdError::Busy);
-        }
-        domain.claim.check_stopped()?;
-        let (context, index) = state.context(self.rid);
-        context.write(index, 0);
-        if let Some(line) = self.unit.table_cacheline {
-            context.flush(&*self.unit.registers, line);
-        }
-        publish();
-        if let Err(error) = self.unit.invalidate(TRANSLATION, true) {
-            state.poisoned = true;
-            return Err(error);
-        }
-        let (context, index) = state.context(self.rid);
-        context.write(index + 1, 0);
-        if let Some(line) = self.unit.table_cacheline {
-            context.flush(&*self.unit.registers, line);
-        }
-        publish();
-        let DomainState { claim, .. } = state
-            .domains
-            .remove(&self.rid)
-            .expect("retained owned context");
-        Ok(claim)
+        Ok(!self.domain(guard.state(), false)?.mappings.is_empty())
     }
 }
 impl<R: Registers> Drop for RequesterDomain<R> {
     fn drop(&mut self) {
-        let active = {
-            let mut guard = self.unit.lock();
-            let state = guard.state();
-            if let Some(domain) = state
-                .domains
-                .get_mut(&self.rid)
-                .filter(|d| d.did == self.did && d.generation == self.generation)
-            {
-                if !domain.quarantined {
-                    domain.quarantined = true;
-                    let _ =
-                        QUARANTINED_DOMAINS.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                            Some(v.saturating_add(1))
-                        });
-                }
-                true
-            } else {
-                false
-            }
-        };
-        // An unacknowledged context keeps its claim/tables/unit Arc;
-        // a later attach can neither reuse that RID nor steal its hardware DID.
-        if !active {
-            // SAFETY: the context's retirement was acknowledged, so no hardware state still needs
-            // the unit; it is dropped once.
+        self.lifetime.close();
+        if self.lifetime.is_detached() {
+            // SAFETY: removal and invalidation were acknowledged before the
+            // original local actor released its claim. No callback or I/O.
             unsafe {
                 ManuallyDrop::drop(&mut self.unit);
             }
@@ -1593,7 +1679,7 @@ unsafe impl<R: Registers + 'static> DmaDomain for RequesterDomain<R> {
         // returning. It neither establishes device stop nor drains peer DMA.
         // The existing operation verifies completion/granularity and performs
         // the real write-buffer flush where the unit requires it.
-        if self.unit.invalidate(TRANSLATION, false).is_err() {
+        if self.unit.invalidate(false).is_err() {
             state.poisoned = true;
             return Err(DmaError::InvalidationFailed);
         }

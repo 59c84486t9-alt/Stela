@@ -1,0 +1,131 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 05:19:20 -0500
+Subject: [PATCH] refactor(sched): consume native samples in fair accounting
+
+---
+ kernel/sched/fair.c            | 17 +++++++++++++++++
+ kernel/sched/fork_sources.json | 23 +++++++++++++++++++++++
+ 2 files changed, 40 insertions(+)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index b6cace1d0e3228b2c53c24b0d402ed7286609538..9808e88a377865e912ab547e2972bbc5e7189964 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -58,6 +58,10 @@
+ #include "stats.h"
+ #include "autogroup.h"
+ 
++#ifdef CONFIG_STELA
++#include <stela/linux.h>
++#endif
++
+ /*
+  * The initial- and re-scaling of tunables is configurable
+  *
+@@ -1360,6 +1364,7 @@ void post_init_entity_util_avg(struct task_struct *p)
+ 	sa->runnable_avg = sa->util_avg;
+ }
+ 
++#ifndef CONFIG_STELA
+ static inline void account_mm_sched(struct rq *rq, struct task_struct *p, s64 delta_exec);
+ 
+ static s64 update_se(struct rq *rq, struct sched_entity *se)
+@@ -1402,6 +1407,8 @@ static s64 update_se(struct rq *rq, struct sched_entity *se)
+ 	return delta_exec;
+ }
+ 
++#endif /* !CONFIG_STELA */
++
+ static void set_next_buddy(struct sched_entity *se);
+ 
+ #ifdef CONFIG_SCHED_CACHE
+@@ -2147,8 +2154,10 @@ void init_sched_mm(struct task_struct *p)
+ 
+ #else /* CONFIG_SCHED_CACHE */
+ 
++#ifndef CONFIG_STELA
+ static inline void account_mm_sched(struct rq *rq, struct task_struct *p,
+ 				    s64 delta_exec) { }
++#endif
+ 
+ void init_sched_mm(struct task_struct *p) { }
+ 
+@@ -2170,6 +2179,7 @@ static void pref_llc_running_dec(struct rq *rq, struct task_struct *p) {}
+ 
+ #endif /* CONFIG_SCHED_CACHE */
+ 
++#ifndef CONFIG_STELA
+ /*
+  * Used by other classes to account runtime.
+  */
+@@ -2177,6 +2187,7 @@ s64 update_curr_common(struct rq *rq)
+ {
+ 	return update_se(rq, &rq->donor->se);
+ }
++#endif
+ 
+ /*
+  * Update the current task's runtime statistics.
+@@ -2197,7 +2208,13 @@ static void update_curr(struct cfs_rq *cfs_rq)
+ 	if (unlikely(!curr))
+ 		return;
+ 
++#ifdef CONFIG_STELA
++	if (unlikely(task_of(curr) != rq->curr))
++		stela_linux_fatal("fair accounting without the current runqueue entity");
++	delta_exec = update_curr_common(rq);
++#else
+ 	delta_exec = update_se(rq, curr);
++#endif
+ 	if (unlikely(delta_exec <= 0))
+ 		return;
+ 
+diff --git a/kernel/sched/fork_sources.json b/kernel/sched/fork_sources.json
+index 0d4328e51e39a52125af14c8762910466170ef1c..3e4454b9f1b570889afd5cbc74f05e39d6f5f4cf 100644
+--- a/kernel/sched/fork_sources.json
++++ b/kernel/sched/fork_sources.json
+@@ -133,6 +133,24 @@
+           "first_line": 2153,
+           "last_line": 2153,
+           "sha256": "d994ff162b81709cb75b38ff5d33dc795c6584d12dee2f75b4d18ee41a9d76b5"
++        },
++        {
++          "symbol": "update_se",
++          "first_line": 1365,
++          "last_line": 1403,
++          "sha256": "b509333e2de46883ee50c14ba74746e1fa74f856ac785c353dbab381ddad945b"
++        },
++        {
++          "symbol": "update_curr_common",
++          "first_line": 2176,
++          "last_line": 2179,
++          "sha256": "e1c859ea270f3583d29bc0074a98e78ea397d80f9792f055ea58559b1b8d31fb"
++        },
++        {
++          "symbol": "update_curr",
++          "first_line": 2184,
++          "last_line": 2230,
++          "sha256": "5147a46d0d3df94765cbebaa93ed9544506aa739cb1c5df784bc230bf17a19d7"
+         }
+       ]
+     },
+@@ -365,6 +383,10 @@
+     {
+       "path": "kernel/sched/rq_root.h",
+       "sha256": "c745519d0f968a7021a772997d0aefb484a0775f0f0fa1361deee586c620d44c"
++    },
++    {
++      "path": "kernel/sched/fair.c",
++      "sha256": "f4a3eb8c35ef9a0e13ed81eb549cbce596d7f5277306642372de4381558b0a8d"
+     }
+   ],
+   "adaptations": [
+@@ -381,6 +403,7 @@
+     "Disabled SCHED_CACHE, UCLAMP_TASK and SCHED_MM_CID branches remain guarded by their original configuration conditions.",
+     "The original scheduler bandwidth scaling and RT/deadline output bodies are shared. The regular debug unit retains the original group path and time formatting helpers. The native archive also builds unmodified lib/plist.c.",
+     "Both profiles share the original root-domain lifecycle and runqueue membership operations. The native archive also builds unmodified CPU priority and deadline management. The original realtime bandwidth defaults and deadline bandwidth initialization have one owner in sched_ratio.c.",
++    "The regular scheduler keeps fair.c runtime accounting. Native class callbacks consume the increment of the retained Runtime sample. The native publication owns the execution total and system time. The Linux runqueue clock owns exec_start.",
+     "This manifest records source provenance only; it does not establish compilation, linking, execution or native admission."
+   ]
+ }

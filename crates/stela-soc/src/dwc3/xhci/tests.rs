@@ -945,6 +945,28 @@ pub(crate) mod host {
         }
     }
 
+    // SAFETY: this fixture owns the isolated controller's virtual time.
+    // Waiting advances that same model at its 24 MHz rate before servicing it.
+    unsafe impl<F: Function> stela_drivers::bus::pci::power::Timer for Shared<F> {
+        fn check(&self) -> Result<(), stela_drivers::bus::pci::power::Error> {
+            self.0
+                .try_borrow_mut()
+                .map(|_| ())
+                .map_err(|_| stela_drivers::bus::pci::power::Error::Clock)
+        }
+
+        fn wait_us(&self, microseconds: u64) -> Result<(), stela_drivers::bus::pci::power::Error> {
+            use stela_drivers::bus::pci::power::Error;
+            let mut model = self.0.try_borrow_mut().map_err(|_| Error::Clock)?;
+            let ticks = microseconds
+                .checked_mul(super::SECOND / 1_000_000)
+                .ok_or(Error::Clock)?;
+            model.now = model.now.checked_add(ticks).ok_or(Error::Clock)?;
+            model.service();
+            Ok(())
+        }
+    }
+
     pub(crate) struct Bench<F> {
         pub model: Rc<RefCell<Model<F>>>,
         dma: RegionAllocator,
@@ -985,6 +1007,7 @@ pub(crate) mod host {
             clock(),
             &mut bench.dma,
             String::from("xhci test"),
+            Rc::new(Shared(bench.model.clone())),
         )
         .unwrap()
     }

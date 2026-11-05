@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn rotation_revokes_old_namespace() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = fixture();
     let first = attach(&mut driver, &mut owner);
     let delayed = received(&mut driver, &model, 9);
@@ -108,6 +111,9 @@ fn rotation_revokes_old_namespace() {
 
 #[test]
 fn canonical_pending_block_ack_prevents_rotation() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = fixture();
     let first = attach(&mut driver, &mut owner);
     assert!(matches!(
@@ -163,6 +169,9 @@ fn canonical_pending_block_ack_prevents_rotation() {
 
 #[test]
 fn removed_context_prevents_rotation() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = fixture();
     let first = attach(&mut driver, &mut owner);
     let permit = admit(&mut owner, &driver, AssociationUse::Management);

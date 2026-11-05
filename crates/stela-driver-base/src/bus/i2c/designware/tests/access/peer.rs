@@ -42,7 +42,9 @@ impl Control {
     }
 }
 pub(super) fn cause() -> IoError {
-    IoError::Mmio(crate::bus::mmio::owned::Error::Unavailable)
+    IoError::Mmio(crate::bus::mmio::owned::Error::Assignment(
+        crate::bus::pci::assignment::Error::Context,
+    ))
 }
 pub(super) struct Gate {
     original: RegisterModel,

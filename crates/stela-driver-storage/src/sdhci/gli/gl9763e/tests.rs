@@ -17,15 +17,18 @@ struct State {
 }
 struct Config(Rc<RefCell<State>>);
 impl ConfigSpace for Config {
-    fn read32(&self, at: u16) -> u32 {
-        let at = usize::from(at);
-        u32::from_le_bytes(self.0.borrow().config[at..at + 4].try_into().unwrap())
+    fn read32(&self, at: u16) -> Result<u32, crate::bus::pci::ConfigError> {
+        let value = {
+            let at = usize::from(at);
+            u32::from_le_bytes(self.0.borrow().config[at..at + 4].try_into().unwrap())
+        };
+        Ok(value)
     }
-    fn write32(&mut self, at: u16, value: u32) {
+    fn write32(&mut self, at: u16, value: u32) -> Result<(), crate::bus::pci::ConfigError> {
         let mut s = self.0.borrow_mut();
         s.events.push((0, usize::from(at), value));
         if s.ignore_pci == Some(at) {
-            return;
+            return Ok(());
         }
         if at != VHS {
             assert_eq!(
@@ -39,19 +42,31 @@ impl ConfigSpace for Config {
         if s.lose_identity_on_pci == Some(at as u16) {
             s.config[..4].fill(0xff);
         }
+
+        Ok(())
     }
-    fn write16(&mut self, at: u16, value: u16) {
+    fn write16(&mut self, at: u16, value: u16) -> Result<(), crate::bus::pci::ConfigError> {
         assert_eq!(at, 4, "source uses word command stores only");
         let mut s = self.0.borrow_mut();
         s.events.push((0, usize::from(at), u32::from(value)));
         if s.ignore_pci == Some(at) {
-            return;
+            return Ok(());
         }
         let at = usize::from(at);
         s.config[at..at + 2].copy_from_slice(&value.to_le_bytes());
+
+        Ok(())
     }
-    fn write8(&mut self, _: u16, _: u8) {
+    fn write8(&mut self, _: u16, _: u8) -> Result<(), crate::bus::pci::ConfigError> {
         panic!("unexpected PCI byte store");
+    }
+
+    fn read8(&self, offset: u16) -> Result<u8, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 3) * 8)) as u8)
+    }
+
+    fn read16(&self, offset: u16) -> Result<u16, crate::bus::pci::ConfigError> {
+        Ok((self.read32(offset & !3)? >> ((offset & 2) * 8)) as u16)
     }
 }
 struct Mmio {
@@ -232,12 +247,12 @@ fn native_gl9763e_original_phy_idle_cqe_retirement_and_eight_pin_mmc_pio_are_rea
     card.borrow_mut().ext[202] = 0x50;
     initialize_owner(&mut owner).unwrap();
     let config = Config(state.clone());
-    assert_eq!(config.read32(0x8e0) & (1 << 9), 1 << 9);
-    assert_eq!(config.read32(0x960) & 8, 0);
-    assert_eq!((config.read32(0x8a4) >> 19) & 0x3ff, 0x54);
-    assert_eq!(config.read32(0x934) >> 28, 5);
-    assert_eq!(config.read32(CFG) & (1 << 12), 1 << 12);
-    assert_eq!(config.read32(VHS) & (15 << 16), 0);
+    assert_eq!(config.read32(0x8e0).unwrap() & (1 << 9), 1 << 9);
+    assert_eq!(config.read32(0x960).unwrap() & 8, 0);
+    assert_eq!((config.read32(0x8a4).unwrap() >> 19) & 0x3ff, 0x54);
+    assert_eq!(config.read32(0x934).unwrap() >> 28, 5);
+    assert_eq!(config.read32(CFG).unwrap() & (1 << 12), 1 << 12);
+    assert_eq!(config.read32(VHS).unwrap() & (15 << 16), 0);
     assert_eq!(*state.borrow().words.get(&CQ_CFG).unwrap() & 1, 0);
     assert_eq!(*state.borrow().words.get(&0x52c).unwrap() & (1 << 8), 0);
     {
@@ -257,6 +272,7 @@ fn native_gl9763e_original_phy_idle_cqe_retirement_and_eight_pin_mmc_pio_are_rea
     let mut host = Host::new(
         Box::new(owner),
         clock(),
+        crate::sdhci::model::minimum(),
         "GL9763E embedded MMC".into(),
         &mut dma,
         Profile::Gli9763e,
@@ -305,6 +321,7 @@ fn gl9763e_supply_and_adma_follow_card_state() {
     let mut host = Host::new(
         Box::new(owner),
         clock(),
+        crate::sdhci::model::minimum(),
         "GL9763E 1.8V MMC".into(),
         &mut dma,
         Profile::Gli9763e,
@@ -358,6 +375,7 @@ fn native_gl9763e_revoked_pci_or_reenabled_queue_fences_published_mmc_before_com
         let mut host = Host::new(
             Box::new(owner),
             clock(),
+            crate::sdhci::model::minimum(),
             "revoked GL9763E".into(),
             &mut dma,
             Profile::Gli9763e,
@@ -408,7 +426,11 @@ fn unchanged_linux_gl9763e_phy_lpn_and_mmc_hs_signaling_match_native() {
                     low_power(owner.function.config(), true).unwrap();
                 }
                 for (i, at) in addresses.into_iter().enumerate() {
-                    assert_eq!(owner.function.config().read32(at), number(3 + i), "{line}");
+                    assert_eq!(
+                        owner.function.config().read32(at).unwrap(),
+                        number(3 + i),
+                        "{line}"
+                    );
                 }
                 assert_eq!(owner.mmio.read32(0x52c), number(10), "{line}");
             }
@@ -470,7 +492,7 @@ fn native_gl9763e_invalid_clock_is_refused_before_original_pci_or_controller_eff
         assert!(state.borrow().events.is_empty());
         assert_eq!(card.borrow().reads, 0);
         assert!(card.borrow().writes.is_empty());
-        assert_eq!(owner.function.config().read32(0), ID);
+        assert_eq!(owner.function.config().read32(0).unwrap(), ID);
     }
 }
 
@@ -489,6 +511,7 @@ fn native_gl9763e_current_metadata_uses_the_vcc_supply_field() {
         let host = Host::new(
             Box::new(owner),
             clock(),
+            crate::sdhci::model::minimum(),
             "actual VCC current field".into(),
             &mut dma,
             Profile::Gli9763e,

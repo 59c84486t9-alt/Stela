@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn pmf_admission_and_legacy_denial() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, before, mut owner, state, protection) = awaiting_pmf();
     let (mut ordinary, _) = authority(&driver, &model);
     assert!(matches!(
@@ -46,6 +49,9 @@ fn pmf_admission_and_legacy_denial() {
 
 #[test]
 fn selected_rsn_and_ap_response() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (driver, _) = setup();
     for band in [Band::Ghz2, Band::Ghz5] {
         let local = driver.local_advertisement(band).unwrap();
@@ -111,6 +117,9 @@ fn selected_rsn_and_ap_response() {
 
 #[test]
 fn scan_observation_provenance() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, join, old, _, _, _) = preparing();
     let (_, other_model, _, foreign, _, _, _) = preparing();
     let (mut owner, state, _) = authority_pmf(old.clone(), &join, &model);

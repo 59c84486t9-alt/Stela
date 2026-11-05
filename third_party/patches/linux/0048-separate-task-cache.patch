@@ -1,0 +1,321 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 23:49:04 -0500
+Subject: [PATCH] refactor(fork): separate task cache and limit initialization
+
+---
+ kernel/fork.c        | 107 +-----------------------------------------
+ kernel/fork_caches.c | 109 +++++++++++++++++++++++++++++++++++++++++++
+ kernel/fork_caches.h |  18 +++++++
+ 3 files changed, 128 insertions(+), 106 deletions(-)
+
+diff --git a/kernel/fork.c b/kernel/fork.c
+index a54ac92b1da2cc434a6086e658ec95e65370692a..b23060725a96c4321ed4828028b1ef990664645e 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -128,24 +128,12 @@
+ 
+ #include <kunit/visibility.h>
+ 
+-/*
+- * Minimum number of threads to boot the kernel
+- */
+-#define MIN_THREADS 20
+-
+-/*
+- * Maximum number of threads
+- */
+-#define MAX_THREADS FUTEX_TID_MASK
+-
+ /*
+  * Protected counters by write_lock_irq(&tasklist_lock)
+  */
+ unsigned long total_forks;	/* Handle normal Linux uptimes. */
+ int nr_threads;			/* The idle threads do not count.. */
+ 
+-static int max_threads;		/* tunable limit on nr_threads */
+-
+ #define NAMED_ARRAY_INDEX(x)	[x] = __stringify(x)
+ 
+ static const char * const resident_page_types[] = {
+@@ -182,8 +170,6 @@ void __weak arch_release_task_struct(struct task_struct *tsk)
+ {
+ }
+ 
+-static struct kmem_cache *task_struct_cachep;
+-
+ static inline struct task_struct *alloc_task_struct_node(int node)
+ {
+ 	return kmem_cache_alloc_node(task_struct_cachep, GFP_KERNEL, node);
+@@ -292,7 +278,7 @@ static void thread_stack_delayed_free(struct task_struct *tsk)
+ 	call_rcu(&vm_stack->rcu, thread_stack_free_rcu);
+ }
+ 
+-static int free_vm_stack_cache(unsigned int cpu)
++int free_vm_stack_cache(unsigned int cpu)
+ {
+ 	struct vm_struct **cached_vm_stack_areas = per_cpu_ptr(cached_stacks, cpu);
+ 	int i;
+@@ -794,97 +780,6 @@ void __put_task_struct_rcu_cb(struct rcu_head *rhp)
+ }
+ EXPORT_SYMBOL_GPL(__put_task_struct_rcu_cb);
+ 
+-void __init __weak arch_task_cache_init(void) { }
+-
+-/*
+- * set_max_threads
+- */
+-static void __init set_max_threads(unsigned int max_threads_suggested)
+-{
+-	u64 threads;
+-	unsigned long nr_pages = memblock_estimated_nr_free_pages();
+-
+-	/*
+-	 * The number of threads shall be limited such that the thread
+-	 * structures may only consume a small part of the available memory.
+-	 */
+-	if (fls64(nr_pages) + fls64(PAGE_SIZE) > 64)
+-		threads = MAX_THREADS;
+-	else
+-		threads = div64_u64((u64) nr_pages * (u64) PAGE_SIZE,
+-				    (u64) THREAD_SIZE * 8UL);
+-
+-	if (threads > max_threads_suggested)
+-		threads = max_threads_suggested;
+-
+-	max_threads = clamp_t(u64, threads, MIN_THREADS, MAX_THREADS);
+-}
+-
+-#ifdef CONFIG_ARCH_WANTS_DYNAMIC_TASK_STRUCT
+-/* Initialized by the architecture: */
+-int arch_task_struct_size __read_mostly;
+-#endif
+-
+-static void __init task_struct_whitelist(unsigned long *offset, unsigned long *size)
+-{
+-	/* Fetch thread_struct whitelist for the architecture. */
+-	arch_thread_struct_whitelist(offset, size);
+-
+-	/*
+-	 * Handle zero-sized whitelist or empty thread_struct, otherwise
+-	 * adjust offset to position of thread_struct in task_struct.
+-	 */
+-	if (unlikely(*size == 0))
+-		*offset = 0;
+-	else
+-		*offset += offsetof(struct task_struct, thread);
+-}
+-
+-void __init fork_init(void)
+-{
+-	int i;
+-#ifndef ARCH_MIN_TASKALIGN
+-#define ARCH_MIN_TASKALIGN	0
+-#endif
+-	int align = max_t(int, L1_CACHE_BYTES, ARCH_MIN_TASKALIGN);
+-	unsigned long useroffset, usersize;
+-
+-	/* create a slab on which task_structs can be allocated */
+-	task_struct_whitelist(&useroffset, &usersize);
+-	task_struct_cachep = kmem_cache_create_usercopy("task_struct",
+-			arch_task_struct_size, align,
+-			SLAB_PANIC|SLAB_ACCOUNT,
+-			useroffset, usersize, NULL);
+-
+-	/* do the arch specific task caches init */
+-	arch_task_cache_init();
+-
+-	set_max_threads(MAX_THREADS);
+-
+-	init_task.signal->rlim[RLIMIT_NPROC].rlim_cur = max_threads/2;
+-	init_task.signal->rlim[RLIMIT_NPROC].rlim_max = max_threads/2;
+-	init_task.signal->rlim[RLIMIT_SIGPENDING] =
+-		init_task.signal->rlim[RLIMIT_NPROC];
+-
+-	for (i = 0; i < UCOUNT_COUNTS; i++)
+-		init_user_ns.ucount_max[i] = max_threads/2;
+-
+-	set_userns_rlimit_max(&init_user_ns, UCOUNT_RLIMIT_NPROC,      RLIM_INFINITY);
+-	set_userns_rlimit_max(&init_user_ns, UCOUNT_RLIMIT_MSGQUEUE,   RLIM_INFINITY);
+-	set_userns_rlimit_max(&init_user_ns, UCOUNT_RLIMIT_SIGPENDING, RLIM_INFINITY);
+-	set_userns_rlimit_max(&init_user_ns, UCOUNT_RLIMIT_MEMLOCK,    RLIM_INFINITY);
+-
+-#ifdef CONFIG_VMAP_STACK
+-	cpuhp_setup_state(CPUHP_BP_PREPARE_DYN, "fork:vm_stack_cache",
+-			  NULL, free_vm_stack_cache);
+-#endif
+-
+-	scs_init();
+-
+-	lockdep_init_task(&init_task);
+-	uprobes_init();
+-}
+-
+ int __weak arch_dup_task_struct(struct task_struct *dst,
+ 					       struct task_struct *src)
+ {
+diff --git a/kernel/fork_caches.c b/kernel/fork_caches.c
+index 440bf0a24e5ecfdad1628f2646b9f255ef9ceede..48946a05c5139bdacfb9b10a77da46915fcdee6a 100644
+--- a/kernel/fork_caches.c
++++ b/kernel/fork_caches.c
+@@ -12,14 +12,25 @@
+  * management can be a bitch. See 'mm/memory.c': 'copy_page_range()'
+  */
+ 
++#include <linux/cpuhotplug.h>
+ #include <linux/fdtable.h>
+ #include <linux/fs_struct.h>
+ #include <linux/init.h>
++#include <linux/memblock.h>
+ #include <linux/mm.h>
+ #include <linux/nsproxy.h>
+ #include <linux/sched/exec_state.h>
+ #include <linux/sched/signal.h>
++#include <linux/sched/task.h>
++#include <linux/sched/task_stack.h>
++#include <linux/scs.h>
+ #include <linux/slab.h>
++#include <linux/uprobes.h>
++#include <linux/user_namespace.h>
++
++#ifdef CONFIG_STELA
++#include <stela/page.h>
++#endif
+ 
+ #include "fork_caches.h"
+ 
+@@ -65,3 +76,101 @@ void __init proc_caches_init(void)
+ 	mmap_init();
+ 	nsproxy_cache_init();
+ }
++
++struct kmem_cache *task_struct_cachep;
++int max_threads;			/* tunable limit on nr_threads */
++
++void __init __weak arch_task_cache_init(void) { }
++
++/*
++ * set_max_threads
++ */
++static void __init set_max_threads(unsigned int max_threads_suggested)
++{
++	u64 threads;
++#ifdef CONFIG_STELA
++	unsigned long nr_pages = stela_linux_page_boot_capacity();
++#else
++	unsigned long nr_pages = memblock_estimated_nr_free_pages();
++#endif
++
++	/*
++	 * The number of threads shall be limited such that the thread
++	 * structures may only consume a small part of the available memory.
++	 */
++	if (fls64(nr_pages) + fls64(PAGE_SIZE) > 64)
++		threads = MAX_THREADS;
++	else
++		threads = div64_u64((u64) nr_pages * (u64) PAGE_SIZE,
++				    (u64) THREAD_SIZE * 8UL);
++
++	if (threads > max_threads_suggested)
++		threads = max_threads_suggested;
++
++	max_threads = clamp_t(u64, threads, MIN_THREADS, MAX_THREADS);
++}
++
++#ifdef CONFIG_ARCH_WANTS_DYNAMIC_TASK_STRUCT
++/* Initialized by the architecture: */
++int arch_task_struct_size __read_mostly;
++#endif
++
++static void __init task_struct_whitelist(unsigned long *offset, unsigned long *size)
++{
++	/* Fetch thread_struct whitelist for the architecture. */
++	arch_thread_struct_whitelist(offset, size);
++
++	/*
++	 * Handle zero-sized whitelist or empty thread_struct, otherwise
++	 * adjust offset to position of thread_struct in task_struct.
++	 */
++	if (unlikely(*size == 0))
++		*offset = 0;
++	else
++		*offset += offsetof(struct task_struct, thread);
++}
++
++void __init fork_init(void)
++{
++	int i;
++#ifndef ARCH_MIN_TASKALIGN
++#define ARCH_MIN_TASKALIGN	0
++#endif
++	int align = max_t(int, L1_CACHE_BYTES, ARCH_MIN_TASKALIGN);
++	unsigned long useroffset, usersize;
++
++	/* create a slab on which task_structs can be allocated */
++	task_struct_whitelist(&useroffset, &usersize);
++	task_struct_cachep = kmem_cache_create_usercopy("task_struct",
++			arch_task_struct_size, align,
++			SLAB_PANIC|SLAB_ACCOUNT,
++			useroffset, usersize, NULL);
++
++	/* do the arch specific task caches init */
++	arch_task_cache_init();
++
++	set_max_threads(MAX_THREADS);
++
++	init_task.signal->rlim[RLIMIT_NPROC].rlim_cur = max_threads/2;
++	init_task.signal->rlim[RLIMIT_NPROC].rlim_max = max_threads/2;
++	init_task.signal->rlim[RLIMIT_SIGPENDING] =
++		init_task.signal->rlim[RLIMIT_NPROC];
++
++	for (i = 0; i < UCOUNT_COUNTS; i++)
++		init_user_ns.ucount_max[i] = max_threads/2;
++
++	set_userns_rlimit_max(&init_user_ns, UCOUNT_RLIMIT_NPROC,      RLIM_INFINITY);
++	set_userns_rlimit_max(&init_user_ns, UCOUNT_RLIMIT_MSGQUEUE,   RLIM_INFINITY);
++	set_userns_rlimit_max(&init_user_ns, UCOUNT_RLIMIT_SIGPENDING, RLIM_INFINITY);
++	set_userns_rlimit_max(&init_user_ns, UCOUNT_RLIMIT_MEMLOCK,    RLIM_INFINITY);
++
++#ifdef CONFIG_VMAP_STACK
++	cpuhp_setup_state(CPUHP_BP_PREPARE_DYN, "fork:vm_stack_cache",
++			  NULL, free_vm_stack_cache);
++#endif
++
++	scs_init();
++
++	lockdep_init_task(&init_task);
++	uprobes_init();
++}
+diff --git a/kernel/fork_caches.h b/kernel/fork_caches.h
+index 83a1e583a6a26f4a3083ef869c78985c3fc01557..a7ba86f5b0da59fe9352ccc2a9ccd3de78457b5a 100644
+--- a/kernel/fork_caches.h
++++ b/kernel/fork_caches.h
+@@ -2,10 +2,28 @@
+ #ifndef _KERNEL_FORK_CACHES_H
+ #define _KERNEL_FORK_CACHES_H
+ 
++#include <linux/futex.h>
++
++/*
++ * Minimum number of threads to boot the kernel
++ */
++#define MIN_THREADS 20
++
++/*
++ * Maximum number of threads
++ */
++#define MAX_THREADS FUTEX_TID_MASK
++
+ struct kmem_cache;
++extern struct kmem_cache *task_struct_cachep;
++extern int max_threads;
+ extern struct kmem_cache *signal_cachep;
+ extern struct kmem_cache *sighand_cachep;
+ extern struct kmem_cache *files_cachep;
+ extern struct kmem_cache *fs_cachep;
+ 
++#ifdef CONFIG_VMAP_STACK
++int free_vm_stack_cache(unsigned int cpu);
++#endif
++
+ #endif

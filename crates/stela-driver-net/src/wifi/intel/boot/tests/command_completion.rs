@@ -6,6 +6,9 @@ use super::*;
 
 #[test]
 fn hcmd_real_tfd_writeback_and_rx_completion_own_payload_lifetime() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use crate::wifi::intel::command::{Command, Tfd};
     let bytes = ax210_bytes();
     let catalog = catalog_for(&ax210_profile(), Family::Ax210.firmware_name(), &bytes);
@@ -96,6 +99,9 @@ fn hcmd_real_tfd_writeback_and_rx_completion_own_payload_lifetime() {
 
 #[test]
 fn hcmd_source_no_reclaim_and_all_notifications_in_completed_rb_are_preserved() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = firmware_bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -171,6 +177,9 @@ fn hcmd_source_no_reclaim_and_all_notifications_in_completed_rb_are_preserved() 
 
 #[test]
 fn hcmd_completion_reclaim_retries_without_releasing_or_resubmitting() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for failure in 0..4 {
         let bytes = firmware_bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

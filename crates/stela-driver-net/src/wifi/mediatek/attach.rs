@@ -97,7 +97,7 @@ impl fmt::Display for AttachError {
 }
 
 /// A kept station connection and what limits it without stopping it.
-pub struct Attached<C: Send + Sync + 'static> {
+pub struct Attached<C: 'static> {
     pub station: Wifi<C>,
     /// The firmware offers its own regulatory domain
     /// (`MT7925_REGD_SUPPORTED`). The link programs and verifies
@@ -113,7 +113,7 @@ pub struct Attached<C: Send + Sync + 'static> {
 /// `base..base + bytes`, `resource` and `domain`, with `inputs.pages` as the
 /// page source: `resource` keeps the claimed function and its uncached BAR0
 /// mapping, whose interrupts are off.
-pub unsafe fn attach<C: Send + Sync + 'static>(
+pub unsafe fn attach<C: 'static>(
     pci: PciIdentity,
     base: NonNull<u8>,
     bytes: usize,

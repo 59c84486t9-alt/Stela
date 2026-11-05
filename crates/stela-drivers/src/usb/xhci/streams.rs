@@ -53,8 +53,8 @@ impl Policy {
 }
 
 pub(super) fn pci_policy<C: ConfigSpace>(function: &mut Function<C>) -> Result<Policy, BlockError> {
-    let id = function.config().read32(0);
-    let class = function.config().read32(8);
+    let id = function.config().read32(0)?;
+    let class = function.config().read32(8)?;
     let observed = [(class >> 24) as u8, (class >> 16) as u8, (class >> 8) as u8];
     if id == u32::MAX
         || id as u16 == 0

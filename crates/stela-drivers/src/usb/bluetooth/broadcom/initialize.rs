@@ -24,6 +24,10 @@ const COMMAND_US: u64 = 5_000_000;
 const ATTEMPT_US: u64 = 120_000_000;
 const MAX_ASYNC_PACKETS: usize = 64;
 
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub(super) fn run<B: Io>(
     hci: &mut Hci<B>,
     provider: &dyn Provider,
@@ -66,6 +70,10 @@ struct Engine<'a, B: Io> {
     attempt: Attempt,
 }
 impl<B: Io> Engine<'_, B> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn within_attempt(&self) -> Result<()> {
         if self.hci.io.now_us().wrapping_sub(self.start) >= ATTEMPT_US {
             Err(Error::Timeout("complete initialization attempt"))
@@ -73,6 +81,10 @@ impl<B: Io> Engine<'_, B> {
             Ok(())
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn asynchronous(&mut self, packet: Packet) -> Result<()> {
         if self.attempt.asynchronous.len() >= MAX_ASYNC_PACKETS {
             let (Packet::Event(bytes) | Packet::Acl(bytes) | Packet::Diagnostic(bytes)) = packet;
@@ -84,6 +96,10 @@ impl<B: Io> Engine<'_, B> {
         self.attempt.asynchronous.push(packet);
         Ok(())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn command(&mut self, opcode: u16, parameters: &[u8]) -> Result<Vec<u8>> {
         self.within_attempt()?;
         let packet =
@@ -153,6 +169,10 @@ impl<B: Io> Engine<'_, B> {
             core::hint::spin_loop();
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn delay(&mut self, minimum: u64) -> Result<()> {
         let start = self.hci.io.now_us();
         while self.hci.io.now_us().wrapping_sub(start) < minimum {
@@ -180,12 +200,20 @@ impl<B: Io> Engine<'_, B> {
         }
         self.within_attempt()
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn exact<const N: usize>(&mut self, opcode: u16) -> Result<[u8; N]> {
         let p = self.command(opcode, &[])?;
         p.as_slice()
             .try_into()
             .map_err(|_| Error::protocol("vendor response length", &p))
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn reset(&mut self) -> Result<()> {
         let p = self.command(RESET, &[])?;
         if p != [0] {
@@ -193,6 +221,10 @@ impl<B: Io> Engine<'_, B> {
         }
         self.delay(100_000)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn name(&mut self) -> Result<Vec<u8>> {
         let p = self.command(READ_NAME, &[])?;
         if p.len() != 249 {
@@ -200,10 +232,18 @@ impl<B: Io> Engine<'_, B> {
         }
         Ok(p)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn address(&mut self) -> Result<[u8; 6]> {
         let p = self.exact::<7>(READ_ADDRESS)?;
         Ok(p[1..].try_into().unwrap())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn run(
         &mut self,
         provider: &dyn Provider,

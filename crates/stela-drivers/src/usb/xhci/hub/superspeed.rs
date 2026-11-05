@@ -178,7 +178,7 @@ impl Controller {
             )?;
             powered_ports.push(port);
         }
-        self.clock.delay(descriptor.power_good_us);
+        self.minimum_wait(descriptor.power_good_us)?;
         self.observe_hub_power(slot, attachment)?;
         for port in powered_ports {
             let location = format!("{}.{port}", device.location);
@@ -216,6 +216,7 @@ impl Controller {
     }
 
     pub(in super::super) fn hub_ssp_for(&mut self, id: SlotId) -> Result<Option<Ssp>, BlockError> {
+        self.check_minimum()?;
         let slot = self.validate_topology_id(id)?;
         self.hub_ssp_owned(slot)
     }
@@ -270,6 +271,7 @@ impl Controller {
         port: u8,
         ssp: Option<&Ssp>,
     ) -> Result<Option<u8>, BlockError> {
+        self.check_minimum()?;
         self.validate_topology_id(id)?;
         self.superspeed_port_owned(id, port, ssp)
     }
@@ -280,19 +282,21 @@ impl Controller {
         port: u8,
         ssp: Option<&Ssp>,
     ) -> Result<Option<u8>, BlockError> {
+        self.check_minimum()?;
         let slot = self.validate_topology_id(id)?;
         // Check the same stable connection interval as USB2/root ports.
         // Clearing CSC once is not evidence that the downstream plug settled.
-        let clock = self.clock;
+        let minimum = self.minimum.clone();
         let mut stable_state = None;
-        let connected = super::super::enumerate::debounce(clock, || {
+        let connected = super::super::enumerate::debounce(minimum, || {
             let state = self.superspeed_status(slot, port, ssp.is_some())?;
             state.powered()?;
             let changed = state.change & CHANGE_CONNECTION != 0;
             self.clear_superspeed_changes(slot, port, state.change)?;
             stable_state = Some(state);
             Ok((state.status & CONNECTION != 0, changed))
-        })?;
+        });
+        let connected = self.minimum_status(connected)?;
         if !connected {
             return Ok(None);
         }
@@ -331,7 +335,7 @@ impl Controller {
                 }
                 if state.status & RESET == 0 && state.status & CONNECTION != 0 {
                     self.clear_superspeed_changes(slot, port, state.change)?;
-                    self.clock.delay(SS_RESET_RECOVERY_US);
+                    self.minimum_wait(SS_RESET_RECOVERY_US)?;
                     let mut final_state = self.superspeed_status(slot, port, ssp.is_some())?;
                     if final_state.change == 1 << 6 && final_state.status & LINK_STATE == U0 {
                         self.clear_superspeed_changes(slot, port, final_state.change)?;

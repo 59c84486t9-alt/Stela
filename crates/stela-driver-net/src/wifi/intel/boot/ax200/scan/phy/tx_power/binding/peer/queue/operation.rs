@@ -161,6 +161,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
     /// # Safety
     /// `advance`'s contract holds, and the command stays within the channel,
     /// power and legacy rates those leases check.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub unsafe fn submit(
         &mut self,
         id: Id,
@@ -179,6 +183,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         .map_err(Ax200ManagementQueueError::Binding)?
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub fn poll_submitted(
         &mut self,
         ticket: &CommandTicket,
@@ -234,6 +242,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
     ///
     /// # Safety
     /// As [`Self::submit`], and the frame goes to the peer on the channel.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub unsafe fn publish(
         &mut self,
         tid: u8,
@@ -265,6 +277,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
     }
 
     /// Reclaim what a TX response on `queue` finished, up to `next`.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub fn reclaim(&mut self, queue: u16, next: u16) -> Result<u16, Ax200ManagementQueueError> {
         let Some((_, ring)) = self
             .rings
@@ -291,6 +307,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
     ///
     /// # Safety
     /// As [`Self::submit`].
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub unsafe fn add_queue(
         &mut self,
         tid: u8,
@@ -342,6 +362,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
     }
 
     /// The scheduler answered [`Self::add_queue`]: `tid`'s frames may flow.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub fn queue_added(
         &mut self,
         tid: u8,

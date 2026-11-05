@@ -1,6 +1,17 @@
 //! Configuration access under the activated standalone table owner.
 //! The one native Permission keeps real firmware/root reservations. Captured
 //! MCFG observations alone cannot construct this Source.
+#[cfg(feature = "diagnostics")]
+mod fixture_config;
+#[cfg(feature = "diagnostics")]
+pub(crate) use fixture_config::FixtureConfig;
+#[cfg(feature = "diagnostics")]
+mod fixture_registers;
+#[cfg(feature = "diagnostics")]
+pub(crate) use fixture_registers::FixtureRegisters;
+#[cfg(feature = "diagnostics")]
+mod hpet;
+mod inventory;
 mod platform;
 mod prepare;
 use super::{ActivatedTables, PAGE, RootError};
@@ -11,13 +22,18 @@ use core::{
     marker::PhantomData,
     sync::atomic::{AtomicU32, Ordering},
 };
+#[cfg(feature = "diagnostics")]
+pub(crate) use hpet::Hpet;
 pub(crate) use prepare::Prepared;
 use stela_drivers::bus::{
     mmio::owned::{
         self, AddressSpace, Authority, CacheAttribute, PhysicalSpan, Protection, Resource,
         ResourceBacking, ResourceKind,
     },
-    pci::{Address, EcamWindow, owned::OwnedConfig},
+    pci::{
+        Address, ConfigError, EcamWindow, EnumerationError,
+        assignment::{self, Assignment, OpaqueUse, PhysicalAssignment, Retention, UseKind},
+    },
 };
 
 // A separate canonical high-half window; builder refuses any overlap.
@@ -48,7 +64,8 @@ pub(crate) enum Error {
     Mapping(owned::Error),
     Root(RootError),
     Tables(Refusal),
-    Config(stela_drivers::bus::pci::owned::ConfigError),
+    Config(ConfigError),
+    Discovery(EnumerationError),
     NotReady(Address),
 }
 impl fmt::Display for Error {
@@ -64,6 +81,7 @@ impl fmt::Display for Error {
             Self::Root(error) => write!(f, "owned PCI root: {error}"),
             Self::Tables(error) => write!(f, "{error}"),
             Self::Config(error) => write!(f, "owned PCI configuration: {error:?}"),
+            Self::Discovery(error) => write!(f, "owned PCI topology: {error:?}"),
             Self::NotReady(address) => {
                 write!(f, "PCI {address} returned CRS; no qualified retry clock")
             }
@@ -73,29 +91,77 @@ impl fmt::Display for Error {
 struct Bus {
     window: EcamWindow,
     resource: Resource,
+    _assignment: Assignment<RegisterReservation>,
 }
 pub(crate) struct Source {
     platform: Arc<platform::Platform>,
     authority: Authority,
     buses: Vec<Bus>,
+    #[cfg(feature = "diagnostics")]
+    hpet_assignment: core::cell::RefCell<Option<Assignment<RegisterReservation>>>,
+    #[cfg(feature = "diagnostics")]
+    issued_config: core::cell::RefCell<Vec<Address>>,
     _local: PhantomData<*mut ()>,
 }
-struct Backing {
+struct RegisterReservation {
+    platform: Arc<platform::Platform>,
+    _span: PhysicalSpan,
+}
+
+// SAFETY: the exclusive post-EBS source owns the validated ECAM windows,
+// separately handed off HPET page and verified diagnostic register spans. The original ActivatedTables and
+// firmware exclusions remain held without a mapping or registry backedge.
+unsafe impl PhysicalAssignment for RegisterReservation {
+    fn parent(&self) -> Option<&assignment::Parent> {
+        None
+    }
+
+    fn check_control(&self) -> Result<(), assignment::Error> {
+        self.platform
+            .check()
+            .map_err(|_| assignment::Error::Context)
+    }
+}
+
+struct RegisterBacking {
     platform: Arc<platform::Platform>,
     span: PhysicalSpan,
+    retention: Retention<RegisterReservation>,
 }
-// SAFETY: only Source's post-EBS exclusive bus handoff mints these
-// complete ECAM reservations. Original tables/resource exclusions stay pinned;
-// no other config/reset writer is published for this standalone boot path.
-unsafe impl ResourceBacking for Backing {
+
+// SAFETY: the source gives each checked span its original retained assignment
+// and keeps it across every live or quarantined mapping.
+unsafe impl ResourceBacking for RegisterBacking {
     fn physical_span(&self) -> PhysicalSpan {
         self.span
     }
+
     fn kind(&self) -> ResourceKind {
         ResourceKind::Registers
     }
+
+    fn begin_mapping(&self) -> Result<OpaqueUse, owned::Error> {
+        self.platform
+            .check()
+            .map_err(|_| owned::Error::Unavailable)?;
+        self.retention
+            .begin_use(UseKind::Mapping)
+            .map(|usage| usage.erase())
+            .map_err(owned::Error::Assignment)
+    }
 }
 impl Source {
+    #[cfg(feature = "diagnostics")]
+    fn exclude_ecam(&self, span: PhysicalSpan) -> Result<(), Error> {
+        if self.buses.iter().any(|bus| {
+            let ecam = bus.resource.physical_span();
+            ecam.start() < span.end() && span.start() < ecam.end()
+        }) {
+            return Err(Error::ResourceConflict);
+        }
+        Ok(())
+    }
+
     /// # Safety
     /// Standalone/HostCheck post-EBS BSP owns all captured PCI roots,
     /// excluding firmware/SMM configuration/reset and every competing accessor.
@@ -121,24 +187,37 @@ impl Source {
             let range = window.range();
             let span =
                 PhysicalSpan::new(range.start, range.end - range.start).map_err(Error::Mapping)?;
-            let resource = Resource::new(Box::new(Backing {
+            let assignment = Assignment::from_owned(RegisterReservation {
+                platform: platform.clone(),
+                _span: span,
+            });
+            let resource = Resource::new(Box::new(RegisterBacking {
                 platform: platform.clone(),
                 span,
+                retention: assignment.retain(),
             }));
-            authority
-                .register_resource(resource.clone())
-                .map_err(Error::Mapping)?;
-            buses.push(Bus { window, resource });
+            buses.push(Bus {
+                window,
+                resource,
+                _assignment: assignment,
+            });
         }
         Ok(Self {
             platform,
             authority,
             buses,
+            #[cfg(feature = "diagnostics")]
+            hpet_assignment: core::cell::RefCell::new(None),
+            #[cfg(feature = "diagnostics")]
+            issued_config: core::cell::RefCell::new(Vec::new()),
             _local: PhantomData,
         })
     }
-    /// Exact function access, keeping its real mapping until explicit retirement.
-    pub(crate) fn config(&self, address: Address) -> Result<OwnedConfig, Error> {
+    fn config_mapping(
+        &self,
+        address: Address,
+        protection: Protection,
+    ) -> Result<(EcamWindow, owned::Mapping), Error> {
         self.platform.check_bus(address)?;
         let bus = self
             .buses
@@ -169,58 +248,13 @@ impl Source {
                 offset,
                 PAGE,
                 CacheAttribute::Uncached,
-                Protection::ReadWrite,
+                protection,
             )
             .map_err(Error::Mapping)?;
-        // SAFETY: unique original bus reservation, current root and exact
-        // 4K lease; no raw accessor or second writer is exposed by this Source.
-        match unsafe { OwnedConfig::attach(address, bus.window, mapping) } {
-            Ok(config) => Ok(config),
-            Err((error, mut mapping)) => {
-                // No consumer/device effect occurred. Explicitly retire this
-                // rejected mapping; failure leaves its real owner quarantined.
-                // SAFETY: rejected attachment made no device access and exposed no view.
-                let _ = unsafe { mapping.retire() };
-                Err(Error::Config(error))
-            }
-        }
+        Ok((bus.window, mapping))
     }
     pub(crate) fn windows(&self) -> impl Iterator<Item = EcamWindow> + '_ {
         self.buses.iter().map(|bus| bus.window)
-    }
-    /// Read-only bridge/ARI topology through config owners. Even
-    /// absent/CRS mappings are returned to the retirement owner.
-    pub(crate) fn inventory(
-        &self,
-        window: &EcamWindow,
-    ) -> Result<Vec<stela_drivers::bus::pci::Identity>, Error> {
-        use stela_drivers::bus::pci::Function;
-        Function::inventory_with(
-            window,
-            |address| {
-                let config = self.config(address)?;
-                match Function::try_new(address, config) {
-                    Ok(function) => Ok(Some(function)),
-                    Err(config) => {
-                        let vendor = config.try_read16(0).map_err(Error::Config)?;
-                        let mut mapping = config.into_mapping();
-                        // SAFETY: read-only inventory exposed no pointer/view and
-                        // performed no device/DMA/IRQ action through this config.
-                        unsafe { mapping.retire() }.map_err(Error::Mapping)?;
-                        if vendor == 0xffff {
-                            Ok(None)
-                        } else {
-                            Err(Error::NotReady(address))
-                        }
-                    }
-                }
-            },
-            |function| {
-                let mut mapping = function.into_config().into_mapping();
-                // SAFETY: same exclusively read-only discovery scope above.
-                unsafe { mapping.retire() }.map_err(Error::Mapping)
-            },
-        )
     }
     pub(crate) fn verify_retired(&self) -> Result<(), Error> {
         self.platform.verify_empty()?;
@@ -233,32 +267,5 @@ impl Source {
             return Err(Error::Mapping(owned::Error::Busy));
         }
         Ok(())
-    }
-    /// The private permit is minted only by post-EBS fixture binding,
-    /// after its requester/controller identity and route were rechecked.
-    pub(crate) fn fixture_registers(
-        &self,
-        permit: &crate::native_dma::diagnostic::RegisterSpan<'_>,
-    ) -> Result<owned::Mapping, Error> {
-        let range = permit.for_source(self).ok_or(Error::ResourceInventory)?;
-        let span =
-            PhysicalSpan::new(range.start, range.end - range.start).map_err(Error::Mapping)?;
-        self.platform.identity_device(span)?;
-        let resource = Resource::new(Box::new(Backing {
-            platform: self.platform.clone(),
-            span,
-        }));
-        self.authority
-            .register_resource(resource.clone())
-            .map_err(Error::Mapping)?;
-        self.authority
-            .map(
-                resource,
-                0,
-                usize::try_from(span.bytes()).map_err(|_| Error::ResourceInventory)?,
-                CacheAttribute::Uncached,
-                Protection::ReadWrite,
-            )
-            .map_err(Error::Mapping)
     }
 }

@@ -55,6 +55,10 @@ pub enum TransportIdentity {
     Pcie(super::intel_pcie::Identity),
 }
 impl TransportIdentity {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn usb(self) -> Result<(u16, u16, u16)> {
         match self {
             Self::Usb(identity) => Ok(identity),
@@ -88,18 +92,42 @@ impl TransportIdentity {
 /// original complete HCI event bytes; no method may inject command completion.
 /// Bus-specific wrappers keep any DMA/RFH metadata outside this command engine.
 pub trait CommandIo {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn identity(&self) -> Result<TransportIdentity>;
     fn now_us(&self) -> u64;
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn submit_command(&mut self, bytes: &[u8]) -> Result<()>;
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn events(&mut self) -> Result<Vec<Vec<u8>>>;
     /// Correlate HCI image identity with any independent bus boot-stage evidence.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn validate_identity(&self, _identity: &ControllerIdentity) -> Result<()> {
         Ok(())
     }
     /// USB changes identified bulk framing after real endpoint cancellation;
     /// PCIe uses the same four-byte type/framing throughout the download.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn intel_mode(&mut self, bootloader: bool) -> Result<()>;
     /// PCIe verifies the post-boot D0 handshake; USB has no such MMIO.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn finish_boot(&mut self) -> Result<()>;
     /// Close or quarantine the owner and keep any cleanup failure.
     fn fail(&mut self, cause: Error) -> Error;
@@ -256,6 +284,10 @@ pub struct Report<'a> {
 pub(crate) fn is_candidate(device: &crate::usb::xhci::Device) -> bool {
     Identity::usb(device).is_ok()
 }
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub(crate) fn usb_identity(device: &crate::usb::xhci::Device) -> Result<TransportIdentity> {
     Ok(TransportIdentity::Usb(Identity::usb(device)?))
 }
@@ -263,12 +295,20 @@ pub(crate) fn usb_identity(device: &crate::usb::xhci::Device) -> Result<Transpor
 /// Initialize one exclusively owned raw controller. Any failure after physical
 /// identity selection closes/quarantines its transport. Success leaves
 /// ordinary command/event traffic open; keep this device-specific report.
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub fn initialize<'a, B: CommandIo>(hci: &mut B, provider: &'a dyn Provider) -> Result<Report<'a>> {
     initialize_with_platform(hci, provider, PlatformInputs::default())
 }
 
 /// Supply an observed pre-EBS platform capture. Default initialize explicitly
 /// records Unavailable; it never impersonates an absent/present UEFI variable.
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub fn initialize_with_platform<'a, B: CommandIo>(
     hci: &mut B,
     provider: &'a dyn Provider,
@@ -308,11 +348,19 @@ impl<'a, B: CommandIo> Engine<'a, B> {
     fn now(&self) -> u64 {
         self.hci.now_us()
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn submit(&mut self, opcode: u16, parameters: &[u8]) -> Result<()> {
         let packet = command::packet(opcode, parameters).map_err(Error::Protocol)?;
         self.hci.submit_command(&packet)?;
         Ok(())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn pump(&mut self) -> Result<()> {
         for event in self.hci.events()? {
             if event[0] != 0xff {
@@ -346,6 +394,10 @@ impl<'a, B: CommandIo> Engine<'a, B> {
         }
         Ok(())
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn command(&mut self, opcode: u16, parameters: &[u8]) -> Result<Vec<u8>> {
         if !self.events.is_empty() {
             return Err(Error::Protocol("stale command response"));
@@ -397,6 +449,10 @@ impl<'a, B: CommandIo> Engine<'a, B> {
             core::hint::spin_loop();
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn vendor(&mut self, boot: bool) -> Result<()> {
         let deadline = self.now().saturating_add(VENDOR_US);
         loop {
@@ -424,6 +480,10 @@ impl<'a, B: CommandIo> Engine<'a, B> {
             core::hint::spin_loop();
         }
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn identity(&mut self, parameters: &[u8]) -> Result<ControllerIdentity> {
         let payload = self.command(READ_VERSION, parameters)?;
         let bus = self.hci.identity()?;
@@ -443,6 +503,10 @@ impl<'a, B: CommandIo> Engine<'a, B> {
         self.hci.validate_identity(&identity)?;
         Ok(identity)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn address(&mut self) -> Result<[u8; 6]> {
         let payload = self.command(READ_BD_ADDR, &[])?;
         if payload.len() != 7 {
@@ -452,6 +516,10 @@ impl<'a, B: CommandIo> Engine<'a, B> {
         identity::valid_address(address)?;
         Ok(address)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn observe_running<'p>(&mut self, before: ControllerIdentity) -> Result<Report<'p>> {
         let address = self.address()?;
         let after = self.identity(before.parameters())?;

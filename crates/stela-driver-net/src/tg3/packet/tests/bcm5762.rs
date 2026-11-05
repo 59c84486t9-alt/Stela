@@ -77,6 +77,9 @@ pub(super) fn attach_5762() -> (Packet<Reg, Timer>, Pages, Arc<Domain>, Arc<Mute
 }
 #[test]
 fn actual_5762_alternate_registers_rings_and_retained_nonidentity_dma_transfer() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, pages, domain, peer) = attach_5762();
     assert_eq!(
         packet.hardware.identity().unwrap().asic,
@@ -105,6 +108,9 @@ fn actual_5762_alternate_registers_rings_and_retained_nonidentity_dma_transfer()
 }
 #[test]
 fn actual_5762_all_admitted_nvm_straps_require_real_magic_and_fixed_mac_offset() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for strap in [
         0x0200_0001,
         0x0200_0003,
@@ -153,6 +159,9 @@ fn actual_5762_all_admitted_nvm_straps_require_real_magic_and_fixed_mac_offset()
 }
 #[test]
 fn actual_5762_static_revision_and_dell_denials_precede_any_mmio_effect() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fault in 0..3 {
         let (hardware, pages, domain, peer) = parts_5762();
         {
@@ -190,6 +199,9 @@ fn actual_5762_static_revision_and_dell_denials_precede_any_mmio_effect() {
 }
 #[test]
 fn actual_5762_unknown_managed_lom_nvm_and_phy_never_publish_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fault in 0..12 {
         let (hardware, pages, domain, peer) = parts_5762();
         {
@@ -254,6 +266,9 @@ fn actual_5762_unknown_managed_lom_nvm_and_phy_never_publish_dma() {
 }
 #[test]
 fn actual_5762_changed_postreset_nvm_profile_is_not_reused() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (hardware, pages, domain, peer) = parts_5762();
     peer.lock().unwrap().reset_nvram = Some(0x0080_0002);
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
@@ -270,6 +285,9 @@ fn actual_5762_changed_postreset_nvm_profile_is_not_reused() {
 }
 #[test]
 fn actual_5762_ignored_required_register_writes_cannot_advertise_attachment() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for at in [0x3628, 0x6808, 0x245c, 0x4890, 0x48a0, 0x468] {
         let (hardware, pages, domain, peer) = parts_5762();
         peer.lock().unwrap().ignore_write = Some(at);
@@ -295,6 +313,9 @@ fn actual_5762_ignored_required_register_writes_cannot_advertise_attachment() {
 }
 #[test]
 fn actual_5762_each_alternate_fix_and_ring_word_is_required_for_every_dma_effect() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     // A refusal leaves no DMA effect, so one attachment serves every case
     // once each is restored.
     let (packet, _pages, domain, peer) = attach_5762();
@@ -324,6 +345,9 @@ fn actual_5762_each_alternate_fix_and_ring_word_is_required_for_every_dma_effect
 }
 #[test]
 fn actual_5762_link_loss_rebuilds_same_mappings_and_lowwater_does_not_fault_packets() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, pages, domain, peer) = attach_5762();
     assert!(packet.carrier());
     let mappings: Vec<_> = domain.maps.lock().unwrap().keys().copied().collect();
@@ -350,6 +374,9 @@ fn actual_5762_link_loss_rebuilds_same_mappings_and_lowwater_does_not_fault_pack
 }
 #[test]
 fn actual_5762_stop_drain_unmap_failure_retains_original_epoch() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, pages, domain, peer) = attach_5762();
     assert!(packet.carrier());
     domain.defer.store(true, Ordering::Relaxed);
@@ -382,6 +409,9 @@ fn actual_5762_stop_drain_unmap_failure_retains_original_epoch() {
 
 #[test]
 fn actual_5762_transfers_and_fatal_dma_attention_preserve_ownership() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, pages, domain, peer) = attach_5762();
     assert!(packet.carrier());
     // The 5762 shares the 5720's ring geometry, whose wrap
@@ -409,6 +439,9 @@ fn actual_5762_transfers_and_fatal_dma_attention_preserve_ownership() {
 #[test]
 #[ignore = "oracle: STELA_TG3_PACKET_ORACLE"]
 fn unchanged_linux_5720_5762_selected_packet_setup_matches_registers() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let path = std::env::var("STELA_TG3_PACKET_ORACLE").expect("fresh original C trace required");
     let trace = std::fs::read_to_string(path).unwrap();
     let mut lines = trace.lines();
@@ -489,6 +522,9 @@ fn unchanged_linux_5720_5762_selected_packet_setup_matches_registers() {
 
 #[test]
 fn actual_5762_register_access_removal_and_nvm_read_failures_retain_owners() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for at in [0x4890, 0x48a0, 0x3628, 0x245c, 0x468, 0x7014] {
         for fault in 0..3 {
             let (hardware, pages, domain, peer) = parts_5762();

@@ -22,7 +22,7 @@ use super::{
     ring::{DESCRIPTOR, Ring},
 };
 use crate::{
-    Clock, Handoff,
+    Handoff,
     block::BlockError,
     bus::{
         dma::DmaAllocator,
@@ -174,7 +174,8 @@ pub struct Igc {
     link: link::Supervisor,
     statistics: Statistics,
     mac: Mac,
-    clock: Clock,
+    clock: crate::timing::Timing,
+    timing_failure: Option<BlockError>,
     pub location: String,
     /// Internal PHY identifier, including its silicon revision.
     pub phy_identity: u32,
@@ -194,7 +195,9 @@ impl Igc {
         function: &mut Function,
         handoff: &Handoff,
         dma: &mut dyn DmaAllocator,
+        minimum: alloc::rc::Rc<dyn crate::bus::pci::power::Timer>,
     ) -> Result<Self, BlockError> {
+        let clock = crate::timing::Timing::new(handoff.clock, minimum)?;
         if !matches(function) {
             return Err(BlockError::Unsupported(
                 "not an Intel I225/I226 copper candidate",
@@ -205,11 +208,11 @@ impl Igc {
             // apply the erratum before BAR probing, decode or bus mastering.
             unsafe { pci::disable_aspm_l1_2_link(function, handoff) }
         })?;
-        function.power_up(&handoff.clock)?;
-        let bars = function.bars();
+        function.power_up(clock.minimum())?;
+        let bars = function.bars()?;
         let device = registers(handoff, bars[0], 0, REGISTER_BYTES)?;
-        function.enable_polled();
-        let signalled = match (handoff.completion, function.interrupts().msix) {
+        function.enable_polled()?;
+        let signalled = match (handoff.completion, function.interrupts()?.msix) {
             (Some(message), Some(msix)) => {
                 let table = registers(
                     handoff,
@@ -228,7 +231,6 @@ impl Igc {
             }
             _ => false,
         };
-        let clock = handoff.clock;
         let mut hardware = hardware::Hardware::new(&device, &clock)?;
         let phy_identity = hardware.initialize()?;
         let mac = station(device.read32(RAL), device.read32(RAH)).ok_or(
@@ -241,6 +243,7 @@ impl Igc {
             stalled: None,
             discarding: false,
             faulted: false,
+            timing_failure: None,
             link: link::Supervisor::new(),
             statistics: Statistics::default(),
             mac,
@@ -342,6 +345,9 @@ impl Igc {
     /// Linux igc_down: record the counters, then stop the controller. Errors
     /// leave its DMA state uncertain.
     fn stop(&mut self) -> Result<(), BlockError> {
+        if let Some(error) = &self.timing_failure {
+            return Err(error.clone());
+        }
         let _ = self.statistics.accumulate(&self.device);
         hardware::Hardware::new(&self.device, &self.clock)?.stop()
     }
@@ -363,6 +369,11 @@ impl Igc {
             self.start_transmit()
         })();
         self.faulted |= result.is_err();
+        if let Err(error) = &result
+            && matches!(error, BlockError::PciPower(_))
+        {
+            self.timing_failure = Some(error.clone());
+        }
         result
     }
 
@@ -388,27 +399,41 @@ impl Igc {
     /// Report a lost function, and discard the transmit work a lost link
     /// strands (Linux `igc_watchdog_task` resets for it). Returns the carrier.
     fn watchdog(&mut self) -> Result<bool, LinkError> {
+        if let Some(error) = &self.timing_failure {
+            return Err(LinkError::Pci(error.clone()));
+        }
         let change = match self.faulted {
             true => link::Change::None,
-            false => self
+            false => match self
                 .link
                 .poll(&self.device, &self.clock, self.clock.now_us())
-                .unwrap_or_else(|_| {
+            {
+                Ok(change) => change,
+                Err(error) => {
                     self.faulted = true;
+                    if matches!(error, BlockError::PciPower(_)) {
+                        self.timing_failure = Some(error.clone());
+                        return Err(LinkError::Pci(error));
+                    }
                     link::Change::None
-                }),
+                }
+            },
         };
         if change == link::Change::Down && self.transmit.pending() {
             let device = self.device;
             let flushed = TRANSMIT_QUEUE.flush(
                 &mut self.transmit,
-                self.clock,
+                self.clock.nominal(),
                 |offset| device.read32(offset),
                 |offset, value| device.write32(offset, value),
             );
             // A queue that will not stop needs the reset Linux uses here.
-            if !flushed {
-                let _ = self.reinitialize();
+            if !flushed
+                && let Err(error) = self.reinitialize()
+                && matches!(error, BlockError::PciPower(_))
+            {
+                self.timing_failure = Some(error.clone());
+                return Err(LinkError::Pci(error));
             }
         }
         match self.faulted {
@@ -438,6 +463,11 @@ impl Igc {
             self.faulted = true;
         } else if status & STATUS_TXOFF == 0 && held >= TRANSMIT_HANG_US * factor {
             let reset = self.reinitialize();
+            if let Err(error) = &reset
+                && matches!(error, BlockError::PciPower(_))
+            {
+                return LinkError::Pci(error.clone());
+            }
             return LinkError::Adapter(format!(
                 "Intel I225/I226 {} transmit hang; controller reset {}",
                 self.location,
@@ -487,7 +517,7 @@ impl Link for Igc {
         if !self.watchdog()? {
             return Err(LinkError::NoCarrier);
         }
-        if !self.transmit.free(self.clock, transmitted) {
+        if !self.transmit.free(self.clock.nominal(), transmitted) {
             return Err(self.transmit_stalled());
         }
         self.stalled = None;
@@ -544,6 +574,9 @@ impl Link for Igc {
 }
 
 #[cfg(test)]
+use crate::Clock;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -579,12 +612,13 @@ mod tests {
                 stalled: None,
                 discarding: false,
                 faulted: false,
+                timing_failure: None,
                 link: link::Supervisor::established(LINK),
                 statistics: Statistics::default(),
                 mac: Mac([2, 0, 0, 0, 0, 1]),
-                clock: Clock {
+                clock: crate::timing::model(Clock {
                     ticks_per_microsecond: 1,
-                },
+                }),
                 location: "model".into(),
                 phy_identity: 0x67c9dc01,
                 signalled: false,
@@ -843,5 +877,27 @@ mod tests {
             assert_eq!(net.transmit.buffer(tail), before);
             assert_eq!(net.transmit.descriptors.bytes(), descriptors);
         }
+    }
+
+    #[test]
+    fn minimum_failure_during_reinitialization_is_typed_and_blocks_later_device_effects() {
+        let mut fixture = Fixture::new();
+        let (timing, failed) = crate::timing::controlled_model(Clock {
+            ticks_per_microsecond: 1,
+        });
+        fixture.net.clock = timing;
+        failed.set(true);
+        let expected = BlockError::PciPower(crate::bus::pci::power::Error::Clock);
+        assert_eq!(fixture.net.reinitialize(), Err(expected.clone()));
+        let observed = fixture.registers.clone();
+        for _ in 0..3 {
+            assert!(!fixture.net.carrier());
+            assert_eq!(
+                fixture.net.transmit(&[1; 60]),
+                Err(LinkError::Pci(expected.clone()))
+            );
+            assert_eq!(fixture.net.receive(), Err(LinkError::Pci(expected.clone())));
+        }
+        assert_eq!(fixture.registers, observed);
     }
 }

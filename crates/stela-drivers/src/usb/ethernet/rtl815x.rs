@@ -120,7 +120,7 @@ pub struct Policy {
 /// Failed register accesses latch inaccessible until a new device attachment.
 /// No read/modify/write is attempted after a short read or failed control TD.
 pub struct Chip<C> {
-    pub(super) io: C,
+    pub(super) io: super::MinimumControl<C>,
     revision: Revision,
     base: Option<u32>,
     accessible: bool,
@@ -226,7 +226,7 @@ impl<C: Control> Chip<C> {
             return Err(BlockError::Unsupported("RTL815x hardware revision changed"));
         }
         Ok(Self {
-            io,
+            io: super::MinimumControl::new(io),
             revision,
             base: None,
             accessible: true,
@@ -252,6 +252,9 @@ impl<C: Control> Chip<C> {
     }
 
     fn transaction(&mut self, request: [u8; 8], data: &[u8]) -> Result<Vec<u8>, BlockError> {
+        if let Some(error) = self.io.error() {
+            return Err(error.clone());
+        }
         if !self.accessible {
             return Err(BlockError::Unsupported("RTL815x register access poisoned"));
         }
@@ -347,6 +350,14 @@ impl<C: Control> Chip<C> {
         self.modify(PLA, mapped, 2, clear, set)
     }
 
+    fn minimum_wait(&mut self, us: u64) -> Result<(), BlockError> {
+        let result = self.io.minimum_wait(us);
+        if result.is_err() {
+            self.enabled = false;
+            self.initialized = false;
+        }
+        result
+    }
     fn aldps(&mut self, enable: bool) -> Result<(), BlockError> {
         if self.revision.is_8153a()
             || self.revision.is_8153b()
@@ -360,7 +371,7 @@ impl<C: Control> Chip<C> {
             ENPDNPS | LINKENA | DIS_SDSAVE | if enable { ENPWRSAVE } else { 0 },
         )?;
         if !enable {
-            self.io.delay_us(20_000);
+            self.minimum_wait(20_000)?;
         }
         Ok(())
     }
@@ -512,6 +523,9 @@ impl<C: Control> Chip<C> {
     /// PHY carrier drives MAC enabling. A disconnected link is never
     /// assumed up because USB enumeration or initialization succeeded.
     pub fn carrier(&mut self) -> Result<bool, BlockError> {
+        if let Some(error) = self.io.error() {
+            return Err(error.clone());
+        }
         if !self.initialized {
             return Err(BlockError::Unsupported("RTL815x chip is not initialized"));
         }

@@ -5,6 +5,7 @@ use core::sync::atomic::{AtomicU8, AtomicU64};
 use stela_drivers::platform::work::{
     ContextId, LeaveReason, ParkOutcome, SwitchBinding, TaskContext, service::Domain,
 };
+use stela_linux::threads::TaskDataStorage;
 
 #[derive(Default)]
 struct OneShotBinding {
@@ -154,11 +155,32 @@ pub(crate) unsafe fn check_native_clock_domain(
     // same BSP and real installed source. It joins before clock retirement.
     let work =
         unsafe { KernelWork::prepare_plan(handoff, owner, plan, Some(clock)) }.map_err(failed)?;
+    let backing = work.task_data().map_err(failed)?;
+    static IMAGE_DATA: AtomicU64 = AtomicU64::new(0);
+    let heap_data = Box::new(0u64);
+    let bytes = core::mem::size_of::<u64>();
+    let data = (&raw const IMAGE_DATA).addr();
+    let heap = core::ptr::from_ref(heap_data.as_ref()).addr();
+    let code = check_native_clock_domain as *const () as usize;
+    if !backing.contains(TaskDataStorage::InitialImage, data..data + bytes)
+        || !backing.contains(TaskDataStorage::AllocatedTask, heap..heap + bytes)
+        || backing.contains(TaskDataStorage::InitialImage, heap..heap + bytes)
+        || backing.contains(TaskDataStorage::AllocatedTask, data..data + bytes)
+        || backing.contains(TaskDataStorage::InitialImage, code..code + bytes)
+        || backing.contains(TaskDataStorage::InitialImage, data..data)
+    {
+        return Err(WorkError::CorruptContext);
+    }
+    drop(backing);
+    crate::output::arguments(format_args!(
+        "CHECK native-task-data-backing PASS image=original-writable-data heap=registered-owner cross-kind+executable+empty=refused\n"
+    ));
     let clock = work
         .native_clock
         .as_ref()
         .ok_or(WorkError::CorruptContext)?;
     let epoch = stage("epoch", clock.epoch())?;
+    let root: Arc<dyn stela_linux::threads::OriginalKernelRoot> = work.reservation.clone();
     // The real Host-root entry must refuse to lend the loader PGD.
     {
         // SAFETY: same BSP and original HPET, before service publication.
@@ -166,8 +188,7 @@ pub(crate) unsafe fn check_native_clock_domain(
             clock.enter_dispatch(installed)
         })?;
         // SAFETY: immutable root observation only. The loan ends on return.
-        let wrong_root =
-            unsafe { host.with_process(|process| work.reservation.initial_pgd(process)) }?;
+        let wrong_root = unsafe { host.with_process(|process| root.pgd(process)) }?;
         if wrong_root != Err(WorkError::CorruptContext) {
             return Err(WorkError::CorruptContext);
         }
@@ -186,7 +207,7 @@ pub(crate) unsafe fn check_native_clock_domain(
                 if execution.with_process(|_| ()).is_ok() {
                     return Err(WorkError::CorruptContext);
                 }
-                work.reservation.initial_pgd(process)
+                root.pgd(process)
             })?
         })?;
         let expected = layout::physical(handoff.native_loader_tables.root());

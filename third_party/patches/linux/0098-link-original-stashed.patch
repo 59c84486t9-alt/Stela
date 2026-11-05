@@ -1,0 +1,210 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 13:22:46 -0500
+Subject: [PATCH] refactor(fs): link original stashed PID dentry operations
+
+---
+ fs/libfs.c           | 55 --------------------------------------------
+ fs/pidfs.c           | 14 -----------
+ fs/pidfs_metadata.c  | 15 ++++++++++++
+ fs/pseudo_metadata.c | 55 ++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 70 insertions(+), 69 deletions(-)
+
+diff --git a/fs/libfs.c b/fs/libfs.c
+index 7c76ba17da809e83ef11dea0806fd1303619c06e..284c392113905595672fa091ba5f47b0a6e31193 100644
+--- a/fs/libfs.c
++++ b/fs/libfs.c
+@@ -2017,21 +2017,6 @@ struct timespec64 simple_inode_init_ts(struct inode *inode)
+ }
+ EXPORT_SYMBOL(simple_inode_init_ts);
+ 
+-struct dentry *stashed_dentry_get(struct dentry **stashed)
+-{
+-	struct dentry *dentry;
+-
+-	guard(rcu)();
+-	dentry = rcu_dereference(*stashed);
+-	if (!dentry)
+-		return NULL;
+-	if (IS_ERR(dentry))
+-		return dentry;
+-	if (!lockref_get_not_dead(&dentry->d_lockref))
+-		return NULL;
+-	return dentry;
+-}
+-
+ static struct dentry *prepare_anon_dentry(struct dentry **stashed,
+ 					  struct super_block *sb,
+ 					  void *data)
+@@ -2074,27 +2059,6 @@ static struct dentry *prepare_anon_dentry(struct dentry **stashed,
+ 	return dentry;
+ }
+ 
+-struct dentry *stash_dentry(struct dentry **stashed, struct dentry *dentry)
+-{
+-	guard(rcu)();
+-	for (;;) {
+-		struct dentry *old;
+-
+-		/* Assume any old dentry was cleared out. */
+-		old = cmpxchg(stashed, NULL, dentry);
+-		if (likely(!old))
+-			return dentry;
+-
+-		/* Check if somebody else installed a reusable dentry. */
+-		if (lockref_get_not_dead(&old->d_lockref))
+-			return old;
+-
+-		/* There's an old dead dentry there, try to take it over. */
+-		if (likely(try_cmpxchg(stashed, &old, dentry)))
+-			return dentry;
+-	}
+-}
+-
+ /**
+  * path_from_stashed - create path from stashed or new dentry
+  * @stashed:    where to retrieve or stash dentry
+@@ -2152,25 +2116,6 @@ make_path:
+ 	return 0;
+ }
+ 
+-void stashed_dentry_prune(struct dentry *dentry)
+-{
+-	struct dentry **stashed = dentry->d_fsdata;
+-	struct inode *inode = d_inode(dentry);
+-
+-	if (WARN_ON_ONCE(!stashed))
+-		return;
+-
+-	if (!inode)
+-		return;
+-
+-	/*
+-	 * Only replace our own @dentry as someone else might've
+-	 * already cleared out @dentry and stashed their own
+-	 * dentry in there.
+-	 */
+-	cmpxchg(stashed, dentry, NULL);
+-}
+-
+ /**
+  * simple_start_creating - prepare to create a given name
+  * @parent: directory in which to prepare to create the name
+diff --git a/fs/pidfs.c b/fs/pidfs.c
+index d2ada0d99a61925496460e8e3b752994e01da77b..234a5036a84c163ed0a8f228bbc8cce6d861d5d3 100644
+--- a/fs/pidfs.c
++++ b/fs/pidfs.c
+@@ -673,20 +673,6 @@ static const struct super_operations pidfs_sops = {
+ 	.statfs		= simple_statfs,
+ };
+ 
+-/*
+- * 'lsof' has knowledge of out historical anon_inode use, and expects
+- * the pidfs dentry name to start with 'anon_inode'.
+- */
+-static char *pidfs_dname(struct dentry *dentry, char *buffer, int buflen)
+-{
+-	return dynamic_dname(buffer, buflen, "anon_inode:[pidfd]");
+-}
+-
+-const struct dentry_operations pidfs_dentry_operations = {
+-	.d_dname	= pidfs_dname,
+-	.d_prune	= stashed_dentry_prune,
+-};
+-
+ static int pidfs_encode_fh(struct inode *inode, u32 *fh, int *max_len,
+ 			   struct inode *parent)
+ {
+diff --git a/fs/pidfs_metadata.c b/fs/pidfs_metadata.c
+index 39a2c6f4b138b2330ee816a27620b029e515e915..e671c92fac35f4ebef57e5f9b977b85074fccc3c 100644
+--- a/fs/pidfs_metadata.c
++++ b/fs/pidfs_metadata.c
+@@ -9,6 +9,7 @@
+ #include <linux/workqueue.h>
+ #include <linux/xattr.h>
+ 
++#include "internal.h"
+ #include "pidfs_metadata.h"
+ 
+ struct simple_xattr_cache pidfs_xa_cache;
+@@ -129,3 +130,17 @@ void pidfs_free_pid(struct pid *pid)
+ 	else if (llist_add(&attr->pidfs_llist, &pidfs_free_list))
+ 		schedule_work(&pidfs_free_work);
+ }
++
++/*
++ * 'lsof' has knowledge of out historical anon_inode use, and expects
++ * the pidfs dentry name to start with 'anon_inode'.
++ */
++static char *pidfs_dname(struct dentry *dentry, char *buffer, int buflen)
++{
++	return dynamic_dname(buffer, buflen, "anon_inode:[pidfd]");
++}
++
++const struct dentry_operations pidfs_dentry_operations = {
++	.d_dname	= pidfs_dname,
++	.d_prune	= stashed_dentry_prune,
++};
+diff --git a/fs/pseudo_metadata.c b/fs/pseudo_metadata.c
+index d990a2a9b329c4ea562c78f19cef8889bac8a0e5..b779fd69110c8b7e3a57a88efecf19beeff93fb5 100644
+--- a/fs/pseudo_metadata.c
++++ b/fs/pseudo_metadata.c
+@@ -271,3 +271,58 @@ u64 inode_query_iversion(struct inode *inode)
+ 	return cur >> I_VERSION_QUERIED_SHIFT;
+ }
+ EXPORT_SYMBOL(inode_query_iversion);
++
++struct dentry *stashed_dentry_get(struct dentry **stashed)
++{
++	struct dentry *dentry;
++
++	guard(rcu)();
++	dentry = rcu_dereference(*stashed);
++	if (!dentry)
++		return NULL;
++	if (IS_ERR(dentry))
++		return dentry;
++	if (!lockref_get_not_dead(&dentry->d_lockref))
++		return NULL;
++	return dentry;
++}
++
++struct dentry *stash_dentry(struct dentry **stashed, struct dentry *dentry)
++{
++	guard(rcu)();
++	for (;;) {
++		struct dentry *old;
++
++		/* Assume any old dentry was cleared out. */
++		old = cmpxchg(stashed, NULL, dentry);
++		if (likely(!old))
++			return dentry;
++
++		/* Check if somebody else installed a reusable dentry. */
++		if (lockref_get_not_dead(&old->d_lockref))
++			return old;
++
++		/* There's an old dead dentry there, try to take it over. */
++		if (likely(try_cmpxchg(stashed, &old, dentry)))
++			return dentry;
++	}
++}
++
++void stashed_dentry_prune(struct dentry *dentry)
++{
++	struct dentry **stashed = dentry->d_fsdata;
++	struct inode *inode = d_inode(dentry);
++
++	if (WARN_ON_ONCE(!stashed))
++		return;
++
++	if (!inode)
++		return;
++
++	/*
++	 * Only replace our own @dentry as someone else might've
++	 * already cleared out @dentry and stashed their own
++	 * dentry in there.
++	 */
++	cmpxchg(stashed, dentry, NULL);
++}

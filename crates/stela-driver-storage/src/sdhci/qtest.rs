@@ -196,6 +196,7 @@ fn real_paused_qemu_sd_card_runs_native_initialization_pio_and_durable_io() {
         Clock {
             ticks_per_microsecond: 10_000,
         },
+        crate::sdhci::model::minimum(),
         "real paused QEMU SDHCI".into(),
         &mut dma,
         Profile::Standard,

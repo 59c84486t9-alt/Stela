@@ -375,11 +375,17 @@ mod tests {
 
     #[test]
     fn neither_uefi_table_sends_nothing() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         assert_eq!(ap_types(1, &tables(None, None)), Ok(None));
     }
 
     #[test]
     fn the_first_version_carries_one_map_and_the_second_both() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let first = ap_types(1, &tables(Some(1), Some(2))).unwrap().unwrap();
         assert_eq!(first.len(), 340);
         assert_eq!((first[337], first[338]), (1, 0));

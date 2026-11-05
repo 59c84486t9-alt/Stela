@@ -13,7 +13,7 @@ use super::{
     CodecGraph, Controller, ControllerToken, FunctionGroup, Registers, StreamId, Verb, Widget,
     WidgetKind,
 };
-use crate::bus::i2c::Timer;
+use crate::Timer;
 use alloc::vec::Vec;
 
 const GET_SELECT: u16 = 0xf01;
@@ -458,6 +458,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         get: u16,
         value: u8,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.verb(Verb::short(codec, node, set, value)?)?;
         let readback = self.verb(Verb::short(codec, node, get, 0)?)?;
         if readback != u32::from(value) {
@@ -467,6 +468,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     pub(super) fn power_d0(&mut self, codec: u8, node: u8) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.verb(Verb::short(codec, node, SET_POWER, 0)?)?;
         let start = self.timer.now_us();
         loop {
@@ -487,6 +489,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     fn route_amplifier(&mut self, codec: u8, amp: Amplifier) -> Result<(), Error> {
+        self.minimum_guard()?;
         // Fake mute is a real minimum-gain write, never an invented bit7
         // capability. Enabling restores the route's advertised 0dB value.
         let value = if amp.minimum_mute && amp.mute {
@@ -518,6 +521,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         widget: &Widget,
         muted: bool,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         let caps = widget.output_amplifier.ok_or(Error::UnsupportedTopology)?;
         let mut amp = amplifier(widget.node, true, 0, widget.channels(), caps, false)?;
         amp.minimum_mute = caps & AMP_MUTE_SUPPORTED == 0;
@@ -537,6 +541,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<Plan, Error> {
+        self.minimum_guard()?;
         self.preflight_analog_route_policy(
             graph,
             route,
@@ -555,6 +560,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         options: PinOptions,
         policy: RoutePolicy,
     ) -> Result<Plan, Error> {
+        self.minimum_guard()?;
         if graph.token != self.token || route.token != self.token {
             return Err(Error::InvalidCodecGraph);
         }
@@ -621,6 +627,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         if self.manages_realtek_codec(graph.address) {
             return self.configure_realtek_route(graph, route, id, channel, options);
         }
@@ -651,6 +658,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         options: PinOptions,
         policy: RoutePolicy,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         let plan =
             self.preflight_analog_route_policy(graph, route, id, channel, options, policy)?;
         let result = (|| {

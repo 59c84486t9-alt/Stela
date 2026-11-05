@@ -102,6 +102,9 @@ fn ci_emitted(
 }
 #[test]
 fn bt_profile_survives_diagnostics_and_ci_cache_waits_for_ack() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise(&coex_image(2));
 }
 fn exercise(bytes: &[u8]) {
@@ -217,6 +220,9 @@ fn exercise(bytes: &[u8]) {
 }
 #[test]
 fn malformed_canonical_profile_and_future_ci_schema_refuse_before_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for malformed in [false, true] {
         let bytes = coex_image(if malformed { 2 } else { 3 });
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -266,6 +272,9 @@ fn malformed_canonical_profile_and_future_ci_schema_refuse_before_publication() 
 }
 #[test]
 fn ci_publication_checks_every_original_rate_under_real_policy_before_dma_or_doorbell() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = coex_image(2);
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -308,6 +317,9 @@ fn ci_publication_checks_every_original_rate_under_real_policy_before_dma_or_doo
 }
 #[test]
 fn missing_ci_ack_does_not_apply_cache_or_release_original_queue_through_failed_stop() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = coex_image(2);
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -354,6 +366,9 @@ fn missing_ci_ack_does_not_apply_cache_or_release_original_queue_through_failed_
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn ax200_bt_config6_ci2_and_fixed_old_profile_source_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =

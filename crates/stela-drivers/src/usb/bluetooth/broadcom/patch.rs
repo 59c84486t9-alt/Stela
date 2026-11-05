@@ -13,6 +13,10 @@ pub struct Hcd<'a> {
     records: usize,
 }
 impl<'a> Hcd<'a> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub fn parse(bytes: &'a [u8]) -> Result<Self> {
         let mut offset = 0;
         let mut records = 0;

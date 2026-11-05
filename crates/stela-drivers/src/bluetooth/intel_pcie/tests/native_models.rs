@@ -1,4 +1,4 @@
-//! Native IRQ/HCI models with separate payload and posted-MSI completion.
+//! Bounded native IRQ/HCI models: action joins are separate from payload/fabric.
 extern crate std;
 use super::*;
 use crate::{
@@ -23,12 +23,13 @@ struct Hardware {
     fail_table: Option<u64>,
     payload_drains: usize,
     msi_drains: usize,
-    cpu_after_delivery: usize,
+    cpu_after_payload: usize,
     fail_payload: bool,
     fail_posted_msi: bool,
     fail_msi_bind: bool,
     msi_message: Option<irq::MsiMessage>,
     config_drops: usize,
+    forbid_config_reads: bool,
     bar_drops: usize,
     register_drops: usize,
     callback_eoi: Arc<AtomicU64>,
@@ -48,12 +49,13 @@ impl Hardware {
             fail_table: None,
             payload_drains: 0,
             msi_drains: 0,
-            cpu_after_delivery: 0,
+            cpu_after_payload: 0,
             fail_payload: false,
             fail_posted_msi: false,
             fail_msi_bind: false,
             msi_message: None,
             config_drops: 0,
+            forbid_config_reads: false,
             bar_drops: 0,
             register_drops: 0,
             callback_eoi: Arc::new(AtomicU64::new(0)),
@@ -79,6 +81,10 @@ impl Hardware {
         self.config[offset..offset + n].copy_from_slice(&value.to_le_bytes()[..n]);
     }
     fn get(&self, offset: u16, n: usize) -> u32 {
+        assert!(
+            !self.forbid_config_reads,
+            "minimum refusal reached configuration"
+        );
         let mut b = [0; 4];
         b[..n].copy_from_slice(&self.config[usize::from(offset)..usize::from(offset) + n]);
         u32::from_le_bytes(b)
@@ -89,24 +95,38 @@ impl Hardware {
 }
 struct Config(Arc<Mutex<Hardware>>);
 impl ConfigSpace for Config {
-    fn read32(&self, offset: u16) -> u32 {
-        self.0.lock().unwrap().get(offset, 4)
+    fn read32(&self, offset: u16) -> core::result::Result<u32, crate::bus::pci::ConfigError> {
+        Ok(self.0.lock().unwrap().get(offset, 4))
     }
-    fn read16(&self, offset: u16) -> u16 {
-        self.0.lock().unwrap().get(offset, 2) as u16
+    fn read16(&self, offset: u16) -> core::result::Result<u16, crate::bus::pci::ConfigError> {
+        Ok(self.0.lock().unwrap().get(offset, 2) as u16)
     }
-    fn read8(&self, offset: u16) -> u8 {
-        self.0.lock().unwrap().get(offset, 1) as u8
+    fn read8(&self, offset: u16) -> core::result::Result<u8, crate::bus::pci::ConfigError> {
+        Ok(self.0.lock().unwrap().get(offset, 1) as u8)
     }
-    fn write16(&mut self, offset: u16, value: u16) {
+    fn write16(
+        &mut self,
+        offset: u16,
+        value: u16,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
         let mut h = self.0.lock().unwrap();
         let status = h.get(6, 2);
         h.put(usize::from(offset), 2, u32::from(value));
         assert_eq!(h.get(6, 2), status, "adjacent Status W1C replayed");
         h.update_route();
+
+        Ok(())
     }
-    fn write32(&mut self, _: u16, _: u32) {
+    fn write32(
+        &mut self,
+        _: u16,
+        _: u32,
+    ) -> core::result::Result<(), crate::bus::pci::ConfigError> {
         panic!("unexpected wide config store");
+    }
+
+    fn write8(&mut self, _: u16, _: u8) -> core::result::Result<(), crate::bus::pci::ConfigError> {
+        panic!("unexpected narrow configuration write")
     }
 }
 // SAFETY: independent function model implements exact narrow config effects.
@@ -237,6 +257,9 @@ unsafe impl irq::Platform for Cpu {
     fn check_cpu(&self) -> core::result::Result<(), irq::IrqError> {
         Ok(())
     }
+    fn check_process(&self) -> core::result::Result<(), crate::bus::irq::IrqError> {
+        self.check_cpu()
+    }
     fn save_and_disable(&self) -> u64 {
         0
     }
@@ -251,8 +274,7 @@ unsafe impl irq::Platform for Cpu {
         {
             let mut h = self.hardware.lock().unwrap();
             if h.payload_drains != 0 {
-                assert!(h.msi_drains != 0);
-                h.cpu_after_delivery += 1;
+                h.cpu_after_payload += 1;
             }
         }
         if self.fail_pending.load(Ordering::Acquire) {
@@ -261,8 +283,12 @@ unsafe impl irq::Platform for Cpu {
             Ok(false)
         }
     }
-    fn eoi(&self) {
+    fn eoi(
+        &self,
+        _vector: u8,
+    ) -> core::result::Result<crate::bus::irq::Trigger, crate::bus::irq::IrqError> {
         self.eoi.fetch_add(1, Ordering::Relaxed);
+        Ok(crate::bus::irq::Trigger::Edge)
     }
     fn ticks(&self) -> u64 {
         self.ticks.fetch_add(1, Ordering::Relaxed)
@@ -303,9 +329,12 @@ fn inputs() -> Context<Inputs> {
         clock: Clock {
             ticks_per_microsecond: 1000,
         },
+        minimum: crate::minimum_model::owned(Clock {
+            ticks_per_microsecond: 1000,
+        }),
         interrupts: registry,
         domain: Arc::new(root::Payload(h.clone())),
-        msi_completion: root::completion(h.clone()),
+        msi_route: root::completion(h.clone()),
     };
     (inputs, h, registry, fail_pending)
 }
@@ -325,6 +354,9 @@ fn attach(dma: &mut RegionAllocator) -> Context<Driver> {
 }
 #[test]
 fn native_owned_function_msix_callback_and_dma_service_release_only_after_real_retirement() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, h, registry, _) = attach(&mut dma);
@@ -353,13 +385,16 @@ fn native_owned_function_msix_callback_and_dma_service_release_only_after_real_r
     t.close().unwrap();
     assert_eq!(t.state(), State::Closed);
     assert!(!h.lock().unwrap().bt.armed);
-    assert!(!registry.dispatch(irq::FIRST_VECTOR));
+    assert!(registry.dispatch(irq::FIRST_VECTOR));
     drop(t);
     let h = h.lock().unwrap();
     assert_eq!((h.config_drops, h.bar_drops, h.register_drops), (1, 1, 1));
 }
 #[test]
 fn native_missing_stop_or_cpu_drain_never_releases_owners() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for no_stop in [false, true] {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -393,6 +428,9 @@ fn native_missing_stop_or_cpu_drain_never_releases_owners() {
 }
 #[test]
 fn native_records_real_disconnect_ack_before_reset_can_clear_status() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, h, _, _) = attach(&mut dma);
@@ -406,6 +444,9 @@ fn native_records_real_disconnect_ack_before_reset_can_clear_status() {
 }
 #[test]
 fn native_late_callback_during_service_keeps_next_rx_and_work_notification() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for already_posted in [false, true] {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -433,6 +474,9 @@ fn native_late_callback_during_service_keeps_next_rx_and_work_notification() {
 }
 #[test]
 fn native_callback_between_mask_restores_cannot_reopen_pending_sources() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, h, registry, _) = attach(&mut dma);
@@ -458,6 +502,9 @@ fn native_callback_between_mask_restores_cannot_reopen_pending_sources() {
 }
 #[test]
 fn msix_failures_keep_raw_fault_and_terminal_owner() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for failed_arm in [false, true] {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -484,6 +531,9 @@ fn msix_failures_keep_raw_fault_and_terminal_owner() {
 }
 #[test]
 fn native_callback_mask_fault_during_source_restore_refuses_successful_service() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, h, registry, _) = attach(&mut dma);
@@ -508,13 +558,16 @@ fn native_callback_mask_fault_during_source_restore_refuses_successful_service()
 }
 #[test]
 fn native_constructor_refuses_unqualified_inputs_without_writes_and_returns_owners() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for failure in 0..7 {
         let (mut inputs, h, registry, _) = inputs();
         match failure {
             0 => inputs.clock.ticks_per_microsecond = 0,
             1 => inputs.function.device = 0xffff,
-            2 => inputs.function.config().write16(4, 2),
-            3 => inputs.function.config().write16(0x52, 0x8000),
+            2 => inputs.function.config().write16(4, 2).unwrap(),
+            3 => inputs.function.config().write16(0x52, 0x8000).unwrap(),
             5 => inputs.clock.ticks_per_microsecond = u64::MAX,
             6 => inputs.clock.ticks_per_microsecond = u64::MAX / 2 / 120_000_000 + 1,
             _ => {
@@ -542,11 +595,14 @@ fn native_constructor_refuses_unqualified_inputs_without_writes_and_returns_owne
         assert_eq!(h.lock().unwrap().config, before);
         assert!(h.lock().unwrap().table_writes.is_empty());
         assert!(h.lock().unwrap().bt.writes.is_empty());
-        assert!(!registry.dispatch(irq::FIRST_VECTOR));
+        assert!(registry.dispatch(irq::FIRST_VECTOR));
     }
 }
 #[test]
 fn native_msix_irq_dma_attachment_runs_shared_secure_iml_and_operational_firmware() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     use crate::{
         bluetooth::intel::{self, TransportIdentity},
         firmware::{Catalog, Provenance, Resource},
@@ -642,3 +698,28 @@ fn native_msix_irq_dma_attachment_runs_shared_secure_iml_and_operational_firmwar
 }
 
 mod root;
+
+#[test]
+fn unavailable_minimum_returns_same_inputs_before_native_configuration_access() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
+    let (mut inputs, hardware, _, _) = inputs();
+    inputs.minimum = crate::minimum_model::refusing(inputs.clock);
+    hardware.lock().unwrap().forbid_config_reads = true;
+    // SAFETY: explicit isolated fixture; denied timer must stop before effects.
+    let (error, inputs) = match unsafe { native::NativePlatform::new(inputs) } {
+        Err(refusal) => refusal,
+        Ok(_) => panic!("unavailable minimum admitted native transport"),
+    };
+    assert_eq!(
+        error,
+        native::Error::Minimum(crate::bus::pci::power::Error::Clock)
+    );
+    assert_eq!(hardware.lock().unwrap().config_drops, 0);
+    assert!(hardware.lock().unwrap().table_writes.is_empty());
+    assert_eq!(
+        inputs.function.address,
+        hardware.lock().unwrap().bt.identity.address
+    );
+}

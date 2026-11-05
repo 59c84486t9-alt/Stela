@@ -40,7 +40,10 @@ fn reset_binding_preflight() {
     assert!(matches!(
         // SAFETY: The adapter and clock use this test's synchronous register model.
         // fixture keeps unique coherent DMA storage throughout controller use.
-        unsafe { Controller::new(registers, timer, &mut fixture.allocator, config()) },
+        unsafe {
+            Controller::new(registers, timer, &mut fixture.allocator, config())
+                .map_err(|failure| failure.error)
+        },
         Err(Error::InvalidConfiguration)
     ));
     assert_eq!(state.borrow().reads, pci_reads);
@@ -71,7 +74,7 @@ fn clock_gate_brackets_each_reset() {
     let mut controller =
         // SAFETY: The adapter and clock use this test's synchronous register model.
         // fixture keeps unique coherent DMA storage throughout controller use.
-        unsafe { Controller::new(registers, timer, &mut fixture.allocator, selected) }.unwrap();
+        unsafe { Controller::new(registers, timer, &mut fixture.allocator, selected).map_err(|failure|failure.error) }.unwrap();
     controller.reinitialize().unwrap();
     model.borrow_mut().codec_ready_after_resets = 3;
     let result = controller.discover_codecs().unwrap();
@@ -120,7 +123,10 @@ fn reset_control_failure_attempts_cleanup() {
         assert!(matches!(
             // SAFETY: The adapter and clock use this test's synchronous register model.
             // fixture keeps unique coherent DMA storage throughout controller use.
-            unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()) },
+            unsafe {
+                Controller::new(registers, timer, &mut fixture.allocator, modern_config())
+                    .map_err(|failure| failure.error)
+            },
             Err(Error::PciResetControl { offset: 0x48 })
         ));
         assert!(model.borrow().commands.is_empty());
@@ -157,7 +163,7 @@ fn failed_reset_keeps_dma_until_recovery() {
         let mut controller =
             // SAFETY: The adapter and clock use this test's synchronous register model.
             // fixture keeps unique coherent DMA storage throughout controller use.
-            unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()) }
+            unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()).map_err(|failure|failure.error) }
                 .unwrap();
         let id = controller
             .allocate_stream(Direction::Playback, pcm(), 128, 2, &mut fixture.allocator)

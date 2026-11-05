@@ -283,6 +283,9 @@ mod tests {
 
     #[test]
     fn a_frame_takes_a_descriptor_its_byte_count_and_the_doorbell() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         for (family, count) in [(Family::Ax200, 25u16), (Family::Ax210, 100)] {
             let (mut ring, source, _domain, bytes) = ring(family, 16, 3);
             let fw = Firmware::parse(&bytes).unwrap();
@@ -304,6 +307,9 @@ mod tests {
 
     #[test]
     fn a_response_returns_each_finished_frame_and_refuses_what_never_left() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let (mut ring, source, _domain, bytes) = ring(Family::Ax200, 16, 254);
         let fw = Firmware::parse(&bytes).unwrap();
         for _ in 0..4 {
@@ -341,6 +347,9 @@ mod tests {
 
     #[test]
     fn a_full_queue_waits_and_a_long_frame_is_refused() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let (mut ring, source, _domain, bytes) = ring(Family::Ax210, 16, 0);
         let fw = Firmware::parse(&bytes).unwrap();
         for _ in 0..16 {
@@ -360,6 +369,9 @@ mod tests {
 
     #[test]
     fn a_data_queue_holds_the_full_pointer_range_less_one_on_ax200() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let (mut ring, source, _domain, bytes) = ring(Family::Ax200, 256, 0);
         let fw = Firmware::parse(&bytes).unwrap();
         assert_eq!(ring.space(), 255);

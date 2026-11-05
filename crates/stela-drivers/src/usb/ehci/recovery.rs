@@ -19,6 +19,9 @@ impl Controller {
     /// Privately suspended roots require their explicit resume first; this
     /// method supplies no reset-on-resume or platform power transition.
     pub fn recover(&mut self) -> Result<(), Error> {
+        if let Some(error) = self.fault {
+            return Err(error);
+        }
         if matches!(self.state, State::Retiring | State::Stopped) || self.hardware.is_none() {
             return Err(Error::Quarantined);
         }

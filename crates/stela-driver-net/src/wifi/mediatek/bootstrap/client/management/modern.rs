@@ -118,10 +118,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         index: u8,
         material: &[u8],
         receive: PacketNumber,
-    ) -> Result<Arc<Session>, Error>
-    where
-        C: Send + Sync,
-    {
+    ) -> Result<Arc<Session>, Error> {
         let s = self.state_mut();
         let (ptk, gtk) = Self::management_keys(s)?;
         if s.station.association_epoch() != Some(epoch) {

@@ -2,8 +2,8 @@ use super::*;
 mod access;
 use crate::bus::pci::regs;
 use crate::bus::pci::{
-    Address, ConfigSpace,
-    owned::test_support::{Counters, fixture},
+    Address,
+    owned::test_support::{BarFixture, Counters, bar_fixture, fixture, physical, retire_owned},
     requester::FunctionRole,
 };
 use alloc::sync::Arc;
@@ -189,7 +189,7 @@ fn model(device: u16, base: u64, caps: u32) -> ModelResources {
         drops,
     )
 }
-pub(crate) type NativeFixture = (Function<OwnedConfig>, Mapping, Arc<Counters>, Arc<Counters>);
+pub(crate) type NativeFixture = (Function<OwnedConfig>, Mapping, Arc<Counters>, BarFixture);
 fn native_fixture() -> NativeFixture {
     native_fixture_for(0x9d60)
 }
@@ -201,24 +201,32 @@ pub(crate) fn native_fixture_for(device: u16) -> NativeFixture {
         function: 0,
     };
     let (mut config, config_counts) = fixture(address);
-    let (window, bar_counts) = fixture(Address {
-        function: 1,
-        ..address
-    });
-    let mapping = window.into_mapping();
+    // Symbolic BAR geometry preserves the existing model address. The helper
+    // creates a separate actual RAM owner born Registers, never config custody.
+    let bar_span = crate::bus::mmio::owned::PhysicalSpan::new(
+        physical(Address {
+            function: 1,
+            ..address
+        }),
+        4096,
+    )
+    .unwrap();
+    let (bar_counts, mapping) = bar_fixture(bar_span, 4096);
     let physical = mapping.physical_span().unwrap().start();
     assert!(physical <= u64::from(u32::MAX));
-    config.write32(0, u32::from(device) << 16 | 0x8086);
-    config.write32(8, 0x1180_0000);
-    config.write16(
-        regs::COMMAND,
-        regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE,
-    );
+    config.write32(0, u32::from(device) << 16 | 0x8086).unwrap();
+    config.write32(8, 0x1180_0000).unwrap();
+    config
+        .write16(
+            regs::COMMAND,
+            regs::COMMAND_MEMORY | regs::COMMAND_INTX_DISABLE,
+        )
+        .unwrap();
     // A real owned RAM mapping stands in for the exclusive BAR.
     // Its CPU pointer and symbolic physical address are distinct.
-    config.write32(0x10, physical as u32 | 4);
-    config.write32(0x14, 0);
-    config.write32(0x2c, 0x1237_152d);
+    config.write32(0x10, physical as u32 | 4).unwrap();
+    config.write32(0x14, 0).unwrap();
+    config.write32(0x2c, 0x1237_152d).unwrap();
     let pointer = mapping.address(0, WINDOW_BYTES).unwrap().cast::<u32>();
     assert_ne!(pointer.as_ptr() as u64, physical);
     // SAFETY: fixture's isolated original RAM resource has no device,
@@ -242,22 +250,20 @@ pub(crate) fn stop_fixture(function: Function<OwnedConfig>) -> StoppedRequester 
 pub(super) fn release_native(
     resources: NativeResources,
     config_counts: &Counters,
-    bar_counts: &Counters,
+    bar_counts: BarFixture,
 ) {
-    let (function, mut mapping) = resources;
-    let mut config = function.into_config().into_mapping();
-    // SAFETY: the original isolated resources have no remaining register,
-    // device or worker users after the synchronous owner was consumed.
-    unsafe { mapping.retire() }.unwrap();
-    // SAFETY: the model device is stopped and drained, so nothing still uses what this
-    // releases.
-    unsafe { config.retire() }.unwrap();
-    for counts in [config_counts, bar_counts] {
-        assert_eq!(counts.unmaps.load(Ordering::Relaxed), 1);
-        assert_eq!(counts.resource_drops.load(Ordering::Relaxed), 1);
-        assert_eq!(counts.platform_drops.load(Ordering::Relaxed), 1);
-    }
+    let (function, mapping) = resources;
+    // SAFETY: the synchronous register owner was consumed after its actual
+    // stop/drain acknowledgement; no BAR views, raw tails or workers remain.
+    // The helper retains the SAME BAR fixture and mapping on any refusal.
+    unsafe { bar_counts.retire(mapping) }.unwrap();
+    // SAFETY: original stopped model config has no IRQ, binding or worker user.
+    unsafe { retire_owned(function.into_config()) }.unwrap();
+    assert_eq!(config_counts.unmaps.load(Ordering::Relaxed), 1);
+    assert_eq!(config_counts.resource_drops.load(Ordering::Relaxed), 1);
+    assert_eq!(config_counts.platform_drops.load(Ordering::Relaxed), 1);
 }
+
 #[test]
 fn native_i2c_unavailable_or_unrepresentable_clock_returns_untouched_original_resources() {
     for rate in [0, u64::MAX, u64::MAX / 2 / 100 + 1] {
@@ -325,13 +331,13 @@ fn concrete_native_registers_use_owned_mapping_and_acknowledged_reset_release() 
     assert_eq!(registers.read32(REMAP_HIGH), Ok((physical >> 32) as u32));
     assert_eq!(registers.read32(WINDOW_BYTES), Err(Error::Mapping));
     assert_eq!(registers.write32(1, 0), Err(Error::Mapping));
-    for counts in [&config_counts, &bar_counts] {
+    for counts in [config_counts.as_ref(), &*bar_counts] {
         assert_eq!(counts.unmaps.load(Ordering::Relaxed), 0);
         assert_eq!(counts.resource_drops.load(Ordering::Relaxed), 0);
     }
     // SAFETY: private core only; no child was published.
     let retired = unsafe { owner.retire() }.unwrap();
-    release_native(retired.into_resources(), &config_counts, &bar_counts);
+    release_native(retired.into_resources(), &config_counts, bar_counts);
 }
 #[test]
 fn concrete_native_live_and_uncertain_child_owners_keep_original_platform_resources() {
@@ -390,7 +396,7 @@ fn concrete_native_live_and_uncertain_child_owners_keep_original_platform_resour
                 _ => unreachable!(),
             }
         }
-        for counts in [&config_counts, &bar_counts] {
+        for counts in [config_counts.as_ref(), &*bar_counts] {
             assert_eq!(counts.unmaps.load(Ordering::Relaxed), 0);
             assert_eq!(counts.resource_drops.load(Ordering::Relaxed), 0);
             assert_eq!(counts.platform_drops.load(Ordering::Relaxed), 0);
@@ -403,12 +409,13 @@ fn concrete_native_rejections_return_exact_unmodified_mapping_and_config_owners(
     for scenario in 0..5 {
         let (mut function, mut mapping, config_counts, bar_counts) = native_fixture();
         match scenario {
-            0 => function.config().write32(0x10, 0x1234_0004),
-            1 => function.config().write32(0x10, 1),
+            0 => function.config().write32(0x10, 0x1234_0004).unwrap(),
+            1 => function.config().write32(0x10, 1).unwrap(),
             2 => function
                 .config()
-                .write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE),
-            3 => function.config().write32(0x14, u32::MAX),
+                .write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE)
+                .unwrap(),
+            3 => function.config().write32(0x14, u32::MAX).unwrap(),
             4 => {
                 // SAFETY: no register user/engine exists; the retired
                 // mapping must not be silently resurrected by the adapter.
@@ -435,16 +442,17 @@ fn concrete_native_rejections_return_exact_unmodified_mapping_and_config_owners(
         );
         assert_eq!(config_counts.unmaps.load(Ordering::Relaxed), 0);
         if scenario != 4 {
-            release_native(resources, &config_counts, &bar_counts);
+            release_native(resources, &config_counts, bar_counts);
         } else {
             let (function, mapping) = resources;
             assert!(mapping.address(0, 4).is_err());
             drop(mapping);
-            let mut mapping = function.into_config().into_mapping();
-            // SAFETY: same original no-user RAM fixture.
-            unsafe { mapping.retire() }.unwrap();
+            // SAFETY: the control explicitly unmapped the exact original BAR
+            // before the refused claim; its returned mapping has now been dropped.
+            unsafe { bar_counts.finish_unmapped() }.unwrap();
+            // SAFETY: same original no-user RAM configuration fixture.
+            unsafe { retire_owned(function.into_config()) }.unwrap();
             assert_eq!(config_counts.unmaps.load(Ordering::Relaxed), 1);
-            assert_eq!(bar_counts.unmaps.load(Ordering::Relaxed), 1);
         }
     }
 }

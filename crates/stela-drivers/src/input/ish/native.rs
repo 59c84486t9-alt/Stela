@@ -10,11 +10,9 @@ use crate::{
     Clock,
     bus::{
         dma::mapping::DmaDomain,
-        irq::{
-            self, Disposition, Handler, IrqController, IrqRegistration, Route, RouteRequest, Source,
-        },
+        irq::{self, Disposition, Handler, IrqController, IrqRegistration, Route, Source},
         pci::{
-            Address, CapabilityError, Function, Layout,
+            Address, Function, Layout,
             msi::{self, DisabledMsiConfig, MsiConfig, MsiConfigSpace, RetainedOwner},
             owned::OwnedConfig,
         },
@@ -75,6 +73,7 @@ pub struct Inputs<
     pub registers: R,
     pub domain: Arc<dyn DmaDomain>,
     pub interrupts: &'static dyn IrqController,
+    pub msi_route: irq::posted_msi::MsiRoute,
     pub clock: T,
 }
 struct Signals {
@@ -155,8 +154,9 @@ struct NativeSource<C: Configuration, R: Registers> {
     shared: Arc<Shared<R>>,
 }
 // SAFETY: fresh admission is independently stopped/drained. After any route
-// programming this source cannot claim posted-MSI completion: quiesce refuses
-// and every owner stays held. No inferred barrier grants route reuse.
+// This owner has no qualified terminal IRQ-action/pending-cause join yet;
+// quiesce refuses after publication and keeps every uncertain owner. Neither
+// payload completion nor notification-domain admission supplies that join.
 unsafe impl<C: Configuration, R: Registers> Source for NativeSource<C, R> {
     fn mask(&mut self) -> core::result::Result<(), irq::IrqError> {
         let result = (|| {
@@ -180,11 +180,17 @@ unsafe impl<C: Configuration, R: Registers> Source for NativeSource<C, R> {
             Ok(())
         }
     }
-    fn route(&self) -> RouteRequest {
-        RouteRequest::Msi
+    fn route_kind(&self) -> crate::bus::irq::RouteKind {
+        crate::bus::irq::RouteKind::Msi
     }
-    unsafe fn program(&mut self, route: Route) -> core::result::Result<(), irq::IrqError> {
-        let Route::Msi(message) = route else {
+    fn requester(&self) -> Option<&crate::bus::pci::requester::RequesterId> {
+        None
+    }
+    unsafe fn program(
+        &mut self,
+        route: &crate::bus::irq::AllocatedRoute<'_>,
+    ) -> core::result::Result<(), irq::IrqError> {
+        let Route::Msi(message) = route.programming() else {
             return Err(irq::IrqError::Route);
         };
         self.shared
@@ -262,6 +268,7 @@ pub struct Native<
     shared: Option<Arc<Shared<R>>>,
     config: Option<Rc<RefCell<ConfigState<C>>>>,
     registration: Option<Box<dyn IrqRegistration>>,
+    msi_route: Option<irq::posted_msi::MsiRoute>,
     interrupts: &'static dyn IrqController,
     clock: core::mem::ManuallyDrop<T>,
     engine: Engine,
@@ -295,6 +302,10 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
     /// service/stop; only the documented IRQ callback accesses shared registers.
     /// Clock/domain/native access contracts remain valid for every owner.
     /// Rejection returns original owners without any native write.
+    #[expect(
+        clippy::result_large_err,
+        reason = "rejection returns every affine input without allocating or releasing resources"
+    )]
     pub unsafe fn new(
         mut inputs: Inputs<C, R, T>,
     ) -> core::result::Result<Self, (Error, Inputs<C, R, T>)> {
@@ -305,13 +316,13 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
                 return Err(Error::Requirement("actual retained 8086:9d35 endpoint"));
             }
             let c = f.config();
-            let id = c.read32(0);
-            let class = c.read32(8);
-            let subsystem = c.read32(0x2c);
+            let id = c.read32(0).map_err(Error::ConfigAccess)?;
+            let class = c.read32(8).map_err(Error::ConfigAccess)?;
+            let subsystem = c.read32(0x2c).map_err(Error::ConfigAccess)?;
             if id != 0x9d35_8086
                 || class == u32::MAX
                 || subsystem == u32::MAX
-                || c.read8(0x0e) & 0x7f != 0
+                || c.read8(0x0e).map_err(Error::ConfigAccess)? & 0x7f != 0
             {
                 return Err(Error::Requirement(
                     "readable same native endpoint identity/header",
@@ -321,18 +332,18 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
                 return Err(Error::Requirement("SPT ISH signal-processing class"));
             }
             validate_capabilities(c)?;
-            let command = c.read16(4);
+            let command = c.read16(4).map_err(Error::ConfigAccess)?;
             if command == u16::MAX || command & 4 != 0 || command & 0x400 == 0 || command & 2 == 0 {
                 return Err(Error::Requirement(
                     "independently stopped BM-off MEM-enabled INTx-disabled source",
                 ));
             }
-            let low = c.read32(0x10);
+            let low = c.read32(0x10).map_err(Error::ConfigAccess)?;
             if low == u32::MAX || low & 9 != 0 || !matches!(low & 6, 0 | 4) {
                 return Err(Error::Requirement("ordinary nonprefetchable memory BAR0"));
             }
             let high = if low & 4 != 0 {
-                let h = c.read32(0x14);
+                let h = c.read32(0x14).map_err(Error::ConfigAccess)?;
                 if h == u32::MAX {
                     return Err(Error::Config(0x14));
                 }
@@ -373,6 +384,7 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
             registers,
             domain,
             interrupts,
+            msi_route,
             clock,
         } = inputs;
         Ok(Self {
@@ -392,6 +404,7 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
             })),
             config: None,
             registration: None,
+            msi_route: Some(msi_route),
             interrupts,
             clock: core::mem::ManuallyDrop::new(clock),
             engine: Engine::new(),
@@ -546,20 +559,22 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
         self.started = true;
         let f = self.function.as_mut().unwrap();
         let c = f.config();
-        if c.read32(0) != 0x9d35_8086 || c.read32(8) as u8 != self.revision {
+        if c.read32(0).map_err(Error::ConfigAccess)? != 0x9d35_8086
+            || c.read32(8).map_err(Error::ConfigAccess)? as u8 != self.revision
+        {
             return Err(Error::Requirement(
                 "unchanged actual endpoint before startup",
             ));
         }
         // Original config owner enables BME only under the already attached real
         // isolated domain. RMP2 remains0 until the route is published.
-        let observed = c.read16(4);
+        let observed = c.read16(4).map_err(Error::ConfigAccess)?;
         if observed == u16::MAX {
             return Err(Error::Config(4));
         }
         let command = observed | 0x406;
-        c.write16(4, command);
-        if c.read16(4) != command {
+        c.write16(4, command).map_err(Error::ConfigAccess)?;
+        if c.read16(4).map_err(Error::ConfigAccess)? != command {
             return Err(Error::Config(4));
         }
         let function = self.function.take().unwrap();
@@ -585,18 +600,28 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
             shared: shared.clone(),
         });
         let callback = Arc::new(Callback(shared));
-        self.registration = Some(match self.interrupts.request(source, callback) {
-            Ok(registration) => registration,
-            Err(error) => {
-                return Err(self
-                    .config
-                    .as_ref()
-                    .unwrap()
-                    .borrow()
-                    .failure
-                    .unwrap_or(Error::Irq(error)));
-            }
-        });
+        self.registration = Some(
+            match self.interrupts.request(irq::Request {
+                source,
+                handler: callback,
+                routing: irq::RouteRequest::Msi(
+                    self.msi_route
+                        .take()
+                        .ok_or(Error::Requirement("original unused IRQ route"))?,
+                ),
+            }) {
+                Ok(registration) => registration,
+                Err(error) => {
+                    return Err(self
+                        .config
+                        .as_ref()
+                        .unwrap()
+                        .borrow()
+                        .failure
+                        .unwrap_or(Error::Irq(error.error)));
+                }
+            },
+        );
         self.accept_reset = true;
         self.reset_ready = false;
         let host = read(self.regs(), HOST_COMM)?;
@@ -1059,16 +1084,16 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
             core::hint::spin_loop();
         }
         let stop_config = |c: &mut C| -> Result<()> {
-            if c.read32(0) != 0x9d35_8086 {
+            if c.read32(0).map_err(Error::ConfigAccess)? != 0x9d35_8086 {
                 return Err(Error::Config(0));
             }
-            let command = c.read16(4);
+            let command = c.read16(4).map_err(Error::ConfigAccess)?;
             if command == u16::MAX {
                 return Err(Error::Config(4));
             }
             let wanted = (command | 0x400) & !4;
-            c.write16(4, wanted);
-            if c.read16(4) != wanted {
+            c.write16(4, wanted).map_err(Error::ConfigAccess)?;
+            if c.read16(4).map_err(Error::ConfigAccess)? != wanted {
                 return Err(Error::Config(4));
             }
             Ok(())
@@ -1092,8 +1117,8 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
         // SAFETY: submissions/firmware DMA are terminal and acknowledged idle;
         // original domain/root/config/IRQ/mappings remain held.
         unsafe { self.domain.as_ref().unwrap().drain_posted_writes() }.map_err(Error::Dma)?;
-        // No registration.retire/release/unmap. Translated payload
-        // completion does not drain already posted MSI on the original route.
+        // No registration.retire/release/unmap: this adapter has no terminal
+        // old service/pending-cause action join. Payload drain cannot invent it.
         Err(Error::PostedMsiRetirementUnavailable)
     }
 }
@@ -1108,6 +1133,9 @@ impl<C: Configuration, R: Registers, T: Time> Drop for Native<C, R, T> {
         }
         // Neither Drop nor a failed stop can certify original posted-MSI/root
         // completion. Preserve every uncertain owner, even after panic.
+        if let Some(v) = self.msi_route.take() {
+            core::mem::forget(v);
+        }
         if let Some(v) = self.registration.take() {
             core::mem::forget(v);
         }
@@ -1129,19 +1157,15 @@ impl<C: Configuration, R: Registers, T: Time> Drop for Native<C, R, T> {
     }
 }
 fn validate_capabilities<C: Configuration>(c: &C) -> Result<()> {
-    if c.read16(6) == u16::MAX || c.read16(6) & 0x10 == 0 {
+    if c.read16(6).map_err(Error::ConfigAccess)? == u16::MAX
+        || c.read16(6).map_err(Error::ConfigAccess)? & 0x10 == 0
+    {
         return Err(Error::Requirement("actual native PCI capabilities"));
     }
     let mut msi = false;
     let mut pm = false;
     for entry in crate::bus::pci::capability::capabilities(c) {
-        let entry = entry.map_err(|error| match error {
-            CapabilityError::FailedRead { offset } => Error::Config(offset),
-            CapabilityError::OutOfRange { .. } | CapabilityError::Overlap { .. } => {
-                Error::Requirement("native capability extent")
-            }
-            _ => Error::Requirement("bounded nonoverlapping native capabilities"),
-        })?;
+        let entry = entry.map_err(Error::Capability)?;
         let at = entry.offset;
         match entry.id {
             5 => {
@@ -1149,7 +1173,7 @@ fn validate_capabilities<C: Configuration>(c: &C) -> Result<()> {
                     return Err(Error::Requirement("one actual MSI capability"));
                 }
                 msi = true;
-                let flags = c.read16(at + 2);
+                let flags = c.read16(at + 2).map_err(Error::ConfigAccess)?;
                 if flags & !0x1fe != 0
                     || (flags >> 1) & 7 > 5
                     || (flags >> 4) & 7 > (flags >> 1) & 7
@@ -1158,12 +1182,12 @@ fn validate_capabilities<C: Configuration>(c: &C) -> Result<()> {
                 }
             }
             1 => {
-                if pm || c.read16(at + 4) & 3 != 0 {
+                if pm || c.read16(at + 4).map_err(Error::ConfigAccess)? & 3 != 0 {
                     return Err(Error::Requirement("actual single D0 PM capability"));
                 }
                 pm = true;
             }
-            0x11 if c.read16(at + 2) & 0x8000 != 0 => {
+            0x11 if c.read16(at + 2).map_err(Error::ConfigAccess)? & 0x8000 != 0 => {
                 return Err(Error::Requirement(
                     "inactive MSI-X before native ISH admission",
                 ));

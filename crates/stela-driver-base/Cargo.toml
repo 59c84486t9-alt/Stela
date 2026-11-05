@@ -18,6 +18,8 @@ linux-kernel = []
 ram-disk = []
 # The virtual clock and models other driver crates' tests share.
 test-support = []
+# Explicit bounded boot IRQ diagnostics, never native-service delivery.
+irq-diagnostics = []
 
 [dependencies]
 stela-driver-core = { path = "../stela-driver-core" }

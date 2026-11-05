@@ -6,17 +6,26 @@ use super::*;
 
 #[test]
 fn cold_radio_real_prefix_keeps_nvm_epoch_and_command_completions() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise_cold_radio(false);
 }
 
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn cold_radio_images_run_source_prefix_with_distinct_offload_and_latencies() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise_cold_radio(true);
 }
 
 #[test]
 fn cold_radio_preflight_rfkill_wrong_response_and_uncertain_publication_fail_closed() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..5 {
         let mut bytes = radio_bytes(false);
         if case == 0 {

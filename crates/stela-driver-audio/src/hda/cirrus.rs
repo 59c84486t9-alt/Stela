@@ -8,7 +8,7 @@ use super::{
     AnalogRoute, CodecGraph, Controller, PinOptions, PinSense, Registers, StreamId, Verb,
     WidgetKind, routing::RoutePolicy,
 };
-use crate::{Error, bus::i2c::Timer};
+use crate::{Error, Timer};
 use alloc::vec::Vec;
 
 mod cs4208;
@@ -140,10 +140,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .any(|state| state.address == address)
     }
     fn cirrus_guard(&self, graph: &CodecGraph) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.vendor_codec_guard(graph)?;
         profile(graph.vendor_id).map(|_| ())
     }
     fn cirrus_authority(&mut self, graph: &CodecGraph) -> Result<Authority, Error> {
+        self.minimum_guard()?;
         let group = graph
             .groups
             .iter()
@@ -232,6 +234,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         })
     }
     fn cirrus_index(&mut self, address: u8, vendor: u8, index: u16) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.verb(Verb::long(address, vendor, 5, index)?)?;
         if self.verb(Verb::long(address, vendor, 13, 0)?)? != u32::from(index) {
             return Err(Error::CoefficientRejected {
@@ -242,6 +245,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
     fn cirrus_read(&mut self, address: u8, vendor: u8, index: u16) -> Result<u16, Error> {
+        self.minimum_guard()?;
         self.cirrus_index(address, vendor, index)?;
         u16::try_from(self.verb(Verb::long(address, vendor, 12, 0)?)?).map_err(|_| {
             Error::CoefficientRejected {
@@ -257,6 +261,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         index: u16,
         value: u16,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         if self.verb(Verb::long(address, vendor, 5, index)?)? == u32::MAX
             || self.verb(Verb::long(address, vendor, 4, value)?)? == u32::MAX
         {
@@ -274,6 +279,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         index: u16,
         value: u16,
     ) -> Result<CirrusCoefficient, Error> {
+        self.minimum_guard()?;
         self.cirrus_coefficient_ack(address, vendor, index, value)?;
         if self.cirrus_read(address, vendor, index)? != value {
             return Err(Error::CoefficientRejected {
@@ -284,9 +290,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(CirrusCoefficient { index, value })
     }
     fn cirrus_processing(&mut self, address: u8, vendor: u8, state: u8) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.route_control(address, vendor, 0x703, 0xf03, state)
     }
     fn cirrus_active(&mut self, graph: &CodecGraph) -> Result<State, Error> {
+        self.minimum_guard()?;
         self.cirrus_guard(graph)?;
         let state = self
             .cirrus_codecs
@@ -337,6 +345,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Source-checked cold startup, shared-pin mux and analog capabilities.
     /// No OEM GPIO, pin rewrite, automute or digital-stream policy is inferred.
     pub fn initialize_cirrus_codec(&mut self, graph: &CodecGraph) -> Result<CirrusReport, Error> {
+        self.minimum_guard()?;
         self.cirrus_guard(graph)?;
         self.require_routing_stopped()?;
         if self
@@ -432,6 +441,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<(), Error> {
+        self.minimum_guard()?;
         self.cirrus_guard(graph)?;
         let policy = profile(graph.vendor_id)?.route_policy();
         self.preflight_analog_route_policy(graph, route, stream, channel, options, policy)?;
@@ -455,6 +465,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         graph: &CodecGraph,
         pin: u8,
     ) -> Result<PinSense, Error> {
+        self.minimum_guard()?;
         self.cirrus_active(graph)?;
         let result = self.poll_pin_sense_policy(graph, pin, true);
         if result.as_ref().is_err_and(|error| {
@@ -465,6 +476,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         result
     }
     pub(super) fn shutdown_cirrus_codecs(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         for index in 0..self.cirrus_codecs.len() {
             let state = self.cirrus_codecs[index].clone();
             if state.quiet {

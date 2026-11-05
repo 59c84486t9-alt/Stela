@@ -80,6 +80,9 @@ fn unpublished_profile(
         _clock: crate::test_clock::virtualize(),
     }));
     let mut controller = Controller {
+        minimum: crate::usb::xhci::minimum::fixture(Clock {
+            ticks_per_microsecond: 1,
+        }),
         native_memory: None,
         registers: Box::new(Model(hardware.clone())),
         clock: Clock {

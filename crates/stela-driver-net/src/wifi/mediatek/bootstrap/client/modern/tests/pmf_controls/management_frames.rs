@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn prekey_control_port_transport() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state, protection) = configured();
     let epoch = driver.station().association_epoch().unwrap();
     let admission = permit(&mut owner, &driver, AssociationUse::Authentication);
@@ -96,6 +99,9 @@ fn prekey_control_port_transport() {
 
 #[test]
 fn protected_block_ack_receipts() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state, protection) = configured();
     protection.authenticated.set(true);
     let session = attach(&mut driver, &mut owner);

@@ -203,7 +203,7 @@ impl<R: Registers, D: Delay> Phy<R, D> {
     fn mtp_kmrn(&mut self, value: Option<u16>) -> Result<u16, Fault> {
         self.write_mac(KMRN, KMRN_K1_CONFIG | value.map_or(KMRN_READ, u32::from))?;
         self.read_mac(super::STATUS)?;
-        self.delay.delay(2);
+        self.wait_minimum(2)?;
         if value.is_none() {
             Ok(self.read_mac(KMRN)? as u16)
         } else {
@@ -216,21 +216,21 @@ impl<R: Registers, D: Delay> Phy<R, D> {
             FEXTNVM12,
             (value & !PHY_POWER_STATE_MASK) | PHY_POWER_STATE_P1,
         )?;
-        self.delay.delay(1000);
+        self.wait_minimum(1000)?;
         if disable {
             let value = self.mtp_kmrn(None)?;
             self.mtp_kmrn(Some(value & !KMRN_K1_ENABLE))?;
-            self.delay.delay(20);
+            self.wait_minimum(20)?;
             let ext = self.read_mac(CTRL_EXT)?;
             let ctrl = self.read_mac(super::CTRL)?;
             self.write_mac(super::CTRL, (ctrl & !SPEED_BITS) | FORCE_SPEED)?;
             self.write_mac(CTRL_EXT, ext | SPEED_BYPASS)?;
             self.read_mac(super::STATUS)?;
-            self.delay.delay(20);
+            self.wait_minimum(20)?;
             self.write_mac(super::CTRL, ctrl)?;
             self.write_mac(CTRL_EXT, ext)?;
             self.read_mac(super::STATUS)?;
-            self.delay.delay(20);
+            self.wait_minimum(20)?;
         } else {
             let value = self.access(PHY_TIMEOUT, None)?;
             self.access(

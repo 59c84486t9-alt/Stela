@@ -101,6 +101,13 @@ pub fn reservation_parent(resource: &MmioResource) -> Option<&MmioResource> {
 // and epoch. The broker admits only nonoverlapping subranges. This pin keeps its
 // parent and reservation live through the final clone/mapping's drop.
 unsafe impl ResourceBacking for Backing {
+    fn begin_mapping(
+        &self,
+    ) -> Result<crate::bus::pci::assignment::OpaqueUse, crate::bus::mmio::owned::Error> {
+        // Same actual parent's counted use; namespace DATA creates no gate.
+        self.0.parent.begin_mapping()
+    }
+
     fn physical_span(&self) -> PhysicalSpan {
         self.0.physical
     }
@@ -275,6 +282,15 @@ mod tests {
     // SAFETY: the authored native resource model reserves this disjoint interval
     // exclusively; each test owns the sole modeled platform and reservation.
     unsafe impl ResourceBacking for Root {
+        fn begin_mapping(
+            &self,
+        ) -> Result<crate::bus::pci::assignment::OpaqueUse, crate::bus::mmio::owned::Error>
+        {
+            // This broker-only fixture has no RAM mapper/allocation product.
+            // Its symbolic reservation cannot authorize a mapping.
+            Err(crate::bus::mmio::owned::Error::Unavailable)
+        }
+
         fn physical_span(&self) -> PhysicalSpan {
             self.physical
         }
@@ -315,6 +331,10 @@ mod tests {
             PhysicalSpan::new(0x9000, 4096).unwrap()
         );
         assert!(reservation_parent(reservation.resource()).is_some());
+        assert!(matches!(
+            reservation.resource().begin_mapping(),
+            Err(crate::bus::mmio::owned::Error::Unavailable)
+        ));
         reservation.matches(&device).unwrap();
         assert!(matches!(broker.reserve(&device, 0), Err(Error::Conflict)));
         let mapping_resource = reservation.resource().clone();

@@ -25,6 +25,7 @@ fn native_hs200_hs400_and_enhanced_strobe_change_real_mmc_payloads() {
         let mut host = Host::new(
             Box::new(owner),
             clock(),
+            crate::sdhci::model::minimum(),
             "fast embedded MMC".into(),
             &mut dma,
             Profile::Gli9763e,
@@ -100,6 +101,7 @@ fn native_hs200_response_crc_is_tolerated_only_at_the_source_switch_status() {
         let mut host = Host::new(
             Box::new(owner),
             clock(),
+            crate::sdhci::model::minimum(),
             "MMC status CRC".into(),
             &mut dma,
             Profile::Gli9763e,
@@ -157,6 +159,7 @@ fn native_fast_timing_tuning_or_strobe_refusal_fences_before_publication() {
         let mut host = Host::new(
             Box::new(owner),
             clock(),
+            crate::sdhci::model::minimum(),
             "refused fast MMC".into(),
             &mut dma,
             Profile::Gli9763e,

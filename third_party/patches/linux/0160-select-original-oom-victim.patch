@@ -1,0 +1,339 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 01:37:23 -0500
+Subject: [PATCH] refactor(oom): select original victim exit accounting
+
+---
+ mm/Makefile     |   2 +-
+ mm/oom_kill.c   | 114 +-------------------------------------
+ mm/oom_victim.c | 143 ++++++++++++++++++++++++++++++++++++++++++++++++
+ mm/oom_victim.h |  11 ++++
+ 4 files changed, 156 insertions(+), 114 deletions(-)
+ create mode 100644 mm/oom_victim.c
+ create mode 100644 mm/oom_victim.h
+
+diff --git a/mm/Makefile b/mm/Makefile
+index ca7cf0278e2c5ddfdf15a4cc78747f50dd46826d..a905f3baf89acf332f671bae0a1b23f7f2bfe1ee 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -48,7 +48,7 @@ ifdef CONFIG_64BIT
+ mmu-$(CONFIG_MMU)	+= mseal.o
+ endif
+ 
+-obj-y			:= filemap.o pagecache_init.o folio_wait.o folio_fs.o mempool.o oom_kill.o oom_adj.o fadvise.o \
++obj-y			:= filemap.o pagecache_init.o folio_wait.o folio_fs.o mempool.o oom_kill.o oom_victim.o oom_adj.o fadvise.o \
+ 			   maccess.o page-writeback.o writeback_io.o writeback_folio.o writeback_domain.o folio-compat.o \
+ 			   readahead.o swap.o filemap_batch.o truncate.o vmscan.o reclaim_throttle.o shrinker.o \
+ 			   shmem.o util.o mmzone.o lruvec.o vmstat.o vmstat_init.o backing-dev.o backing-dev-inode.o \
+diff --git a/mm/oom_kill.c b/mm/oom_kill.c
+index 1ff5ca5d3484083922b47878cb1f9bc67bf13a36..5abc85235089a959d4ccd76bd706605e3b390e9c 100644
+--- a/mm/oom_kill.c
++++ b/mm/oom_kill.c
+@@ -48,6 +48,7 @@
+ 
+ #include <asm/tlb.h>
+ #include "internal.h"
++#include "oom_victim.h"
+ #include "slab.h"
+ 
+ #define CREATE_TRACE_POINTS
+@@ -57,15 +58,6 @@ static int sysctl_panic_on_oom;
+ static int sysctl_oom_kill_allocating_task;
+ static int sysctl_oom_dump_tasks = 1;
+ 
+-/*
+- * Serializes oom killer invocations (out_of_memory()) from all contexts to
+- * prevent from over eager oom killing (e.g. when the oom killer is invoked
+- * from different domains).
+- *
+- * oom_killer_disable() relies on this lock to stabilize oom_killer_disabled
+- * and mark_oom_victim
+- */
+-DEFINE_MUTEX(oom_lock);
+ static inline bool is_memcg_oom(struct oom_control *oc)
+ {
+ 	return oc->memcg != NULL;
+@@ -471,14 +463,6 @@ static void dump_header(struct oom_control *oc)
+ 		dump_tasks(oc);
+ }
+ 
+-/*
+- * Number of OOM victims in flight
+- */
+-static atomic_t oom_victims = ATOMIC_INIT(0);
+-static DECLARE_WAIT_QUEUE_HEAD(oom_victims_wait);
+-
+-static bool oom_killer_disabled __read_mostly;
+-
+ /*
+  * task->mm can be NULL if the task is the exited group leader.  So to
+  * determine whether the task is using a particular mm, we examine all the
+@@ -735,102 +719,6 @@ static inline void queue_oom_reaper(struct task_struct *tsk)
+ }
+ #endif /* CONFIG_MMU */
+ 
+-/**
+- * mark_oom_victim - mark the given task as OOM victim
+- * @tsk: task to mark
+- *
+- * Has to be called with oom_lock held and never after
+- * oom has been disabled already.
+- *
+- * tsk->mm has to be non NULL and caller has to guarantee it is stable (either
+- * under task_lock or operate on the current).
+- */
+-static void mark_oom_victim(struct task_struct *tsk)
+-{
+-	const struct cred *cred;
+-	struct mm_struct *mm = tsk->mm;
+-
+-	WARN_ON(oom_killer_disabled);
+-	/* OOM killer might race with memcg OOM */
+-	if (test_and_set_tsk_thread_flag(tsk, TIF_MEMDIE))
+-		return;
+-
+-	/* oom_mm is bound to the signal struct life time. */
+-	if (!cmpxchg(&tsk->signal->oom_mm, NULL, mm))
+-		mmgrab(tsk->signal->oom_mm);
+-
+-	/*
+-	 * Make sure that the process is woken up from uninterruptible sleep
+-	 * if it is frozen because OOM killer wouldn't be able to free any
+-	 * memory and livelock. The freezer will thaw the tasks that are OOM
+-	 * victims regardless of the PM freezing and cgroup freezing states.
+-	 */
+-	thaw_process(tsk);
+-	atomic_inc(&oom_victims);
+-	cred = get_task_cred(tsk);
+-	trace_mark_victim(tsk, cred->uid.val);
+-	put_cred(cred);
+-}
+-
+-/**
+- * exit_oom_victim - note the exit of an OOM victim
+- */
+-void exit_oom_victim(void)
+-{
+-	clear_thread_flag(TIF_MEMDIE);
+-
+-	if (!atomic_dec_return(&oom_victims))
+-		wake_up_all(&oom_victims_wait);
+-}
+-
+-/**
+- * oom_killer_enable - enable OOM killer
+- */
+-void oom_killer_enable(void)
+-{
+-	oom_killer_disabled = false;
+-	pr_info("OOM killer enabled.\n");
+-}
+-
+-/**
+- * oom_killer_disable - disable OOM killer
+- * @timeout: maximum timeout to wait for oom victims in jiffies
+- *
+- * Forces all page allocations to fail rather than trigger OOM killer.
+- * Will block and wait until all OOM victims are killed or the given
+- * timeout expires.
+- *
+- * The function cannot be called when there are runnable user tasks because
+- * the userspace would see unexpected allocation failures as a result. Any
+- * new usage of this function should be consulted with MM people.
+- *
+- * Returns true if successful and false if the OOM killer cannot be
+- * disabled.
+- */
+-bool oom_killer_disable(signed long timeout)
+-{
+-	signed long ret;
+-
+-	/*
+-	 * Make sure to not race with an ongoing OOM killer. Check that the
+-	 * current is not killed (possibly due to sharing the victim's memory).
+-	 */
+-	if (mutex_lock_killable(&oom_lock))
+-		return false;
+-	oom_killer_disabled = true;
+-	mutex_unlock(&oom_lock);
+-
+-	ret = wait_event_interruptible_timeout(oom_victims_wait,
+-			!atomic_read(&oom_victims), timeout);
+-	if (ret <= 0) {
+-		oom_killer_enable();
+-		return false;
+-	}
+-	pr_info("OOM killer disabled.\n");
+-
+-	return true;
+-}
+-
+ static inline bool __task_will_free_mem(struct task_struct *task)
+ {
+ 	struct signal_struct *sig = task->signal;
+diff --git a/mm/oom_victim.c b/mm/oom_victim.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..5d68210cc131cf988170e6736a96c658d8ce4805
+--- /dev/null
++++ b/mm/oom_victim.c
+@@ -0,0 +1,143 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *  linux/mm/oom_kill.c
++ *
++ *  Copyright (C)  1998,2000  Rik van Riel
++ *	Thanks go out to Claus Fischer for some serious inspiration and
++ *	for goading me into coding this file...
++ *  Copyright (C)  2010  Google, Inc.
++ *	Rewritten by David Rientjes
++ *
++ *  The routines in this file are used to kill a process when
++ *  we're seriously out of memory. This gets called from __alloc_pages()
++ *  in mm/page_alloc.c when we really run out of memory.
++ *
++ *  Since we won't call these routines often (on a well-configured
++ *  machine) this file will double as a 'coding guide' and a signpost
++ *  for newbie kernel hackers. It features several pointers to major
++ *  kernel subsystems and hints as to where to find out what things do.
++ */
++
++#include <linux/cred.h>
++#include <linux/freezer.h>
++#include <linux/oom.h>
++#include <linux/sched/mm.h>
++#include <linux/sched/signal.h>
++#include <linux/wait.h>
++#include <trace/events/oom.h>
++
++#include "oom_victim.h"
++
++/*
++ * Serializes oom killer invocations (out_of_memory()) from all contexts to
++ * prevent from over eager oom killing (e.g. when the oom killer is invoked
++ * from different domains).
++ *
++ * oom_killer_disable() relies on this lock to stabilize oom_killer_disabled
++ * and mark_oom_victim
++ */
++DEFINE_MUTEX(oom_lock);
++
++/*
++ * Number of OOM victims in flight
++ */
++static atomic_t oom_victims = ATOMIC_INIT(0);
++static DECLARE_WAIT_QUEUE_HEAD(oom_victims_wait);
++
++bool oom_killer_disabled __read_mostly;
++
++/**
++ * mark_oom_victim - mark the given task as OOM victim
++ * @tsk: task to mark
++ *
++ * Has to be called with oom_lock held and never after
++ * oom has been disabled already.
++ *
++ * tsk->mm has to be non NULL and caller has to guarantee it is stable (either
++ * under task_lock or operate on the current).
++ */
++void mark_oom_victim(struct task_struct *tsk)
++{
++	const struct cred *cred;
++	struct mm_struct *mm = tsk->mm;
++
++	WARN_ON(oom_killer_disabled);
++	/* OOM killer might race with memcg OOM */
++	if (test_and_set_tsk_thread_flag(tsk, TIF_MEMDIE))
++		return;
++
++	/* oom_mm is bound to the signal struct life time. */
++	if (!cmpxchg(&tsk->signal->oom_mm, NULL, mm))
++		mmgrab(tsk->signal->oom_mm);
++
++	/*
++	 * Make sure that the process is woken up from uninterruptible sleep
++	 * if it is frozen because OOM killer wouldn't be able to free any
++	 * memory and livelock. The freezer will thaw the tasks that are OOM
++	 * victims regardless of the PM freezing and cgroup freezing states.
++	 */
++	thaw_process(tsk);
++	atomic_inc(&oom_victims);
++	cred = get_task_cred(tsk);
++	trace_mark_victim(tsk, cred->uid.val);
++	put_cred(cred);
++}
++
++/**
++ * exit_oom_victim - note the exit of an OOM victim
++ */
++void exit_oom_victim(void)
++{
++	clear_thread_flag(TIF_MEMDIE);
++
++	if (!atomic_dec_return(&oom_victims))
++		wake_up_all(&oom_victims_wait);
++}
++
++/**
++ * oom_killer_enable - enable OOM killer
++ */
++void oom_killer_enable(void)
++{
++	oom_killer_disabled = false;
++	pr_info("OOM killer enabled.\n");
++}
++
++/**
++ * oom_killer_disable - disable OOM killer
++ * @timeout: maximum timeout to wait for oom victims in jiffies
++ *
++ * Forces all page allocations to fail rather than trigger OOM killer.
++ * Will block and wait until all OOM victims are killed or the given
++ * timeout expires.
++ *
++ * The function cannot be called when there are runnable user tasks because
++ * the userspace would see unexpected allocation failures as a result. Any
++ * new usage of this function should be consulted with MM people.
++ *
++ * Returns true if successful and false if the OOM killer cannot be
++ * disabled.
++ */
++bool oom_killer_disable(signed long timeout)
++{
++	signed long ret;
++
++	/*
++	 * Make sure to not race with an ongoing OOM killer. Check that the
++	 * current is not killed (possibly due to sharing the victim's memory).
++	 */
++	if (mutex_lock_killable(&oom_lock))
++		return false;
++	oom_killer_disabled = true;
++	mutex_unlock(&oom_lock);
++
++	ret = wait_event_interruptible_timeout(oom_victims_wait,
++			!atomic_read(&oom_victims), timeout);
++	if (ret <= 0) {
++		oom_killer_enable();
++		return false;
++	}
++	pr_info("OOM killer disabled.\n");
++
++	return true;
++}
+diff --git a/mm/oom_victim.h b/mm/oom_victim.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7f85e367fea2cd4b48fa40547e45a20f1137cdf
+--- /dev/null
++++ b/mm/oom_victim.h
+@@ -0,0 +1,11 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#ifndef _MM_OOM_VICTIM_H
++#define _MM_OOM_VICTIM_H
++
++#include <linux/types.h>
++
++struct task_struct;
++extern bool oom_killer_disabled;
++void mark_oom_victim(struct task_struct *tsk);
++
++#endif

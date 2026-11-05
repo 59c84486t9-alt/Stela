@@ -1,6 +1,5 @@
-//! HD Audio controllers on their claimed function, owned BAR0 and DMA domain,
-//! started and their codecs bound as Linux's `azx_probe_continue` binds them.
-use super::{Claimed, Failure, NativeServices, ServiceError, claim, map};
+//! Conventional HDA through one original-root/config/BAR/DMA lifetime.
+use super::{Failure, NativeServices, ServiceError, map};
 use crate::{
     Clock,
     audio::{
@@ -8,154 +7,175 @@ use crate::{
         hda::{self, CodecFailure, CodecGraph, CodecSetup},
     },
     bus::{
-        dma::DomainAllocator,
         mmio::{Mmio, owned::Mapping},
-        pci::{Address, Function, owned::OwnedConfig},
+        pci::Address,
     },
     probe::Error,
 };
 use alloc::{boxed::Box, string::String, vec::Vec};
+mod lifetime;
+pub use lifetime::Error as RetirementError;
+use lifetime::{Inputs, Native};
 
-/// An HD Audio controller on its prepared function and owned BAR0.
-pub type Hda = hda::Controller<hda::pci::PciRegisters<'static, Bar0, OwnedConfig>, Clock>;
-
-/// HD Audio BAR0 through its owned uncached mapping, at native widths.
+/// HD Audio BAR0 through its actual owned uncached mapping/native widths.
 pub struct Bar0 {
     mmio: Mmio,
     bytes: usize,
-    _mapping: Mapping,
+    mapping: Mapping,
 }
-
 impl hda::Registers for Bar0 {
     fn region_bytes(&self) -> usize {
         self.bytes
     }
-    fn read8(&mut self, offset: usize) -> u8 {
-        self.mmio.read8(offset)
+    fn read8(&mut self, o: usize) -> u8 {
+        self.mmio.read8(o)
     }
-    fn read16(&mut self, offset: usize) -> u16 {
-        self.mmio.read16(offset)
+    fn read16(&mut self, o: usize) -> u16 {
+        self.mmio.read16(o)
     }
-    fn read32(&mut self, offset: usize) -> u32 {
-        self.mmio.read32(offset)
+    fn read32(&mut self, o: usize) -> u32 {
+        self.mmio.read32(o)
     }
-    fn write8(&mut self, offset: usize, value: u8) {
-        self.mmio.write8(offset, value);
+    fn write8(&mut self, o: usize, v: u8) {
+        self.mmio.write8(o, v);
     }
-    fn write16(&mut self, offset: usize, value: u16) {
-        self.mmio.write16(offset, value);
+    fn write16(&mut self, o: usize, v: u16) {
+        self.mmio.write16(o, v);
     }
-    fn write32(&mut self, offset: usize, value: u32) {
-        self.mmio.write32(offset, value);
+    fn write32(&mut self, o: usize, v: u32) {
+        self.mmio.write32(o, v);
     }
 }
-
-/// A discovered codec and the vendor setup it bound to.
 pub struct Codec {
     pub graph: CodecGraph,
     pub setup: Result<CodecSetup, audio::Error>,
 }
-
-/// An attached HD Audio controller. No guest audio device consumes it yet.
+/// The real register provider/core/DMA allocator never escape independently.
+/// Discovery is metadata; a retained success alone is not guest audio readiness.
 pub struct Host {
     pub location: String,
-    pub controller: Hda,
-    /// The controller's DMA domain allocator, which streams draw on.
-    pub dma: DomainAllocator<'static>,
+    owner: Native<Bar0, audio::Timing<Clock>>,
     pub codecs: Vec<Codec>,
-    /// Codecs that failed enumeration on some discovery attempt.
     pub codec_failures: Vec<CodecFailure>,
-    /// Why discovery found no usable codec.
     pub discovery_error: Option<audio::Error>,
 }
-
-/// Attach the HD Audio controller at `address`: prepare its function over
-/// the owned BAR0, start the controller on the function's own DMA domain,
-/// then discover its codecs and apply each one's vendor setup.
-///
+impl Host {
+    /// Explicit one-shot hardware/root/lease/Attachment/mapping retirement.
+    /// Failure and unwind keep the complete graph and permanently close entry.
+    pub fn shutdown(&mut self) -> Result<(), RetirementError> {
+        self.owner.close()
+    }
+}
+struct ColdOwner {
+    requester: Option<crate::bus::pci::requester::preparation::PreparingRequester>,
+    mapping: Option<Mapping>,
+    minimum: Option<alloc::rc::Rc<dyn crate::bus::pci::power::Timer>>,
+}
+impl Drop for ColdOwner {
+    fn drop(&mut self) {
+        core::mem::forget(self.requester.take());
+        core::mem::forget(self.mapping.take());
+        core::mem::forget(self.minimum.take());
+    }
+}
 /// # Safety
-/// [`NativeServices`]' contract holds for `services`, `clock` is the
-/// handoff's calibrated clock, and no firmware, AML or SMM agent drives the
-/// controller: the identity table admits only conventional (non-DSP)
-/// controllers.
+/// NativeServices ownership, calibrated clock and original D0/decode/power
+/// hold. Conventional identity alone cannot exclude firmware/AML/SMM/DSP users.
+/// Their original root/backing and competing-owner exclusions remain required.
+/// The separate original IRQ/work retirement producer is currently unavailable:
+/// this factory performs source containment, then retains/refuses before bind.
 #[expect(
     clippy::result_large_err,
-    reason = "a failed attach hands back the owners that must outlive the device"
+    reason = "A failed HDA attach keeps its typed cause and all original resource owners"
 )]
 pub(in crate::probe) unsafe fn attach(
     services: &dyn NativeServices,
     address: Address,
     clock: Clock,
+    minimum: alloc::rc::Rc<dyn crate::bus::pci::power::Timer>,
 ) -> Result<Host, Failure> {
-    let refused = |error: ServiceError| (Error::Native(error), None);
-    let Claimed {
-        function,
-        domain,
-        bars,
-    } = claim(services, address).map_err(refused)?;
-    let mapping = map(services, address, &bars, 0).map_err(refused)?;
+    minimum.check().map_err(|error| {
+        (
+            Error::HdaNative(RetirementError::Controller(audio::Error::MinimumDelay(
+                error,
+            ))),
+            None,
+        )
+    })?;
+    // Check the largest selected conventional-core wait before any config or
+    // vendor effect. Generic clock metadata alone does not qualify a timer.
+    clock
+        .check_duration(1_000_000)
+        .map_err(|error| (Error::HdaNative(RetirementError::Clock(error)), None))?;
+    let requester = services
+        .prepare_requester(address)
+        .map_err(|e| (Error::Native(e), None))?;
+    let mut cold = ColdOwner {
+        requester: Some(requester),
+        mapping: None,
+        minimum: Some(minimum),
+    };
+    let bars = match cold.requester.as_mut().unwrap().function_mut().bars() {
+        Ok(bars) => bars,
+        Err(error) => return Err((error.into(), Some(Box::new(cold)))),
+    };
+    let mapping = match map(services, address, &bars, 0) {
+        Ok(m) => m,
+        Err(e) => return Err((Error::Native(e), Some(Box::new(cold)))),
+    };
+    cold.mapping = Some(mapping);
     let bar = bars[0].expect("map checked BAR0");
-    let bytes = mapping
-        .bytes()
-        .map_err(|error| refused(ServiceError::Mapping(error)))?;
-    let window = mapping
-        .address(0, bytes)
-        .map_err(|error| refused(ServiceError::Mapping(error)))?;
+    let window = (|| {
+        let mapping = cold.mapping.as_ref().unwrap();
+        let bytes = mapping.bytes()?;
+        Ok((mapping.address(0, bytes)?, bytes))
+    })();
+    let (window, bytes) = match window {
+        Ok(v) => v,
+        Err(e) => {
+            return Err((
+                Error::Native(ServiceError::Mapping(e)),
+                Some(Box::new(cold)),
+            ));
+        }
+    };
     let registers = Bar0 {
-        // SAFETY: `window` is the whole owned uncached BAR0 mapping, which
-        // `_mapping` keeps; the claimed function has no other driver.
+        // SAFETY: exactly this original owned UC BAR0; Native outer owner
+        // keeps actual mapping across constructor error and callback unwind.
         mmio: unsafe { Mmio::new(window.as_ptr() as u64) },
         bytes,
-        _mapping: mapping,
+        mapping: cold.mapping.take().unwrap(),
     };
-    // The controller keeps its function for the boot; nothing detaches it.
-    let function: &'static mut Function<OwnedConfig> = Box::leak(Box::new(function));
-    let kept = |owner: Box<dyn core::any::Any>| Some(owner);
-    // SAFETY: the mount claimed the stopped function with its own domain and
-    // mapped exactly its BAR0 uncached; the caller excludes other agents.
-    let registers = unsafe {
-        hda::pci::prepare_with_registers(
-            function,
-            bar,
-            &clock,
-            hda::pci::Ownership::ExclusiveLegacy,
-            registers,
-        )
-    }
-    .map_err(|error| (Error::HdaPci(error), kept(Box::new(domain.clone()))))?;
-    let config = registers.config();
-    // SAFETY: `domain` is the claimed controller's, which `prepare` set to
-    // snoop; the limit is the identity's DMA reach.
-    let mut dma = unsafe {
-        DomainAllocator::new(
-            services.pages(),
-            domain,
-            u64::MAX >> (64 - u32::from(config.dma_address_bits)),
-        )
+    let inputs = Inputs {
+        requester: cold.requester.take().unwrap(),
+        registers,
+        clock: audio::Timing::new(clock, cold.minimum.take().unwrap()),
+        pages: services.pages(),
+        bar,
+        // No native original-owner IRQ/CPU/EOI/service/work completion producer
+        // exists. Post-EBS serialization, source masks or polled operation do
+        // not construct one; Native retains/refuses before root drain/bind.
+        original_users: None,
     };
-    // SAFETY: preparation above established the function's power, decode,
-    // snoop and identity setup over its own mapping and DMA domain.
-    let mut controller = match unsafe { Hda::new(registers, clock, &mut dma, config) } {
-        Ok(controller) => controller,
-        Err(error) => return Err((Error::Hda(error), kept(Box::new(dma)))),
+    let mut owner = match Native::new(inputs) {
+        Ok(owner) => owner,
+        Err(failure) => {
+            let error = failure
+                .construction_error()
+                .cloned()
+                .map_or(Error::HdaNative(failure.error), Error::Device);
+            return Err((error, Some(Box::new(failure))));
+        }
     };
-    let (codecs, codec_failures, discovery_error) = match controller.discover_codecs() {
-        Ok(discovery) => (discovery.codecs, discovery.failures, None),
-        Err(failure) => (Vec::new(), failure.failures, Some(failure.error)),
+    let discovery = match owner.discover_and_setup() {
+        Ok(d) => d,
+        Err(error) => return Err((Error::HdaNative(error), Some(Box::new(owner)))),
     };
-    let codecs = codecs
-        .into_iter()
-        .map(|graph| Codec {
-            setup: controller.initialize_codec(&graph),
-            graph,
-        })
-        .collect();
     Ok(Host {
         location: alloc::format!("{address}"),
-        controller,
-        dma,
-        codecs,
-        codec_failures,
-        discovery_error,
+        owner,
+        codecs: discovery.codecs,
+        codec_failures: discovery.codec_failures,
+        discovery_error: discovery.discovery_error,
     })
 }

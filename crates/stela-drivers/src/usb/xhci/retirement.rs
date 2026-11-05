@@ -55,6 +55,10 @@ impl Controller {
     /// Exclusive root-leaf reset is the only published storage return producer.
     /// Its private witness keeps the original generation/current/attachment
     /// through whole-slot retirement and postsettle physical reset.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn retire_reset_root(&mut self, id: SlotId) -> Result<Published, Failure> {
         let slot = self
             .validate_id(id)
@@ -84,12 +88,20 @@ impl Controller {
     /// permanently; only unpublished EP0-only owners enter the retry cache.
     /// The separate RetiredRoot witness additionally requires physical reset
     /// and final health before Published can return complete root-leaf storage.
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     pub(super) fn disable_slot(&mut self, slot: u8, ownership: Ownership) -> Result<(), Failure> {
         Quiesced::acquire(self, slot, ownership)?.disable()
     }
 }
 
 impl RetiredRoot {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn reset(self, controller: &mut Controller) -> Result<Published, Failure> {
         let slot = self.id.hardware_slot();
         let index = usize::from(slot);
@@ -143,6 +155,10 @@ impl RetiredRoot {
 }
 
 impl<'a> Quiesced<'a> {
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn acquire(
         controller: &'a mut Controller,
         slot: u8,
@@ -275,6 +291,10 @@ impl<'a> Quiesced<'a> {
         })
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn disable(self) -> Result<(), Failure> {
         let Self {
             controller,

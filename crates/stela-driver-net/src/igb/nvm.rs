@@ -146,7 +146,7 @@ impl<R: RegisterIo, T: Timer> Hardware<'_, R, T> {
         let pmcsr = capabilities.power.ok_or(BlockError::Unsupported(
             "flashless igb PLL recovery requires PCI power management",
         ))? + 4;
-        let power = config.read16(pmcsr) & !(3 | (1 << 15)); // do not acknowledge PME_Status (W1C)
+        let power = config.read16(pmcsr)? & !(3 | (1 << 15)); // do not acknowledge PME_Status (W1C)
         let mdio = self.io.read(MDICNFG);
         let wake = self.io.read(WUC);
         let control = self.io.read(CTRL);
@@ -164,16 +164,16 @@ impl<R: RegisterIo, T: Timer> Hardware<'_, R, T> {
                 self.io.write(WUC, 0);
                 self.io
                     .write(EEARBC, (0x0a << 4) | u32::from(autoload | 0x10) << 16);
-                config.write16(pmcsr, power | 3);
-                if config.read16(pmcsr) & 3 != 3 {
+                config.write16(pmcsr, power | 3)?;
+                if config.read16(pmcsr)? & 3 != 3 {
                     return Err(BlockError::Unsupported("igb PLL D3 transition refused"));
                 }
-                self.clock.delay(1_000);
-                config.write16(pmcsr, power);
-                if config.read16(pmcsr) & 3 != 0 {
+                self.clock.delay(1_000)?;
+                config.write16(pmcsr, power)?;
+                if config.read16(pmcsr)? & 3 != 0 {
                     return Err(BlockError::Unsupported("igb PLL D0 transition refused"));
                 }
-                self.clock.delay(1_000);
+                self.clock.delay(1_000)?;
                 self.io
                     .write(EEARBC, (0x0a << 4) | u32::from(autoload) << 16);
                 self.io.write(WUC, wake);
@@ -183,8 +183,8 @@ impl<R: RegisterIo, T: Timer> Hardware<'_, R, T> {
             ))
         })();
         // Always attempt to leave D0 before restoring MMIO/MDIO state.
-        config.write16(pmcsr, power);
-        if config.read16(pmcsr) & 3 != 0 {
+        config.write16(pmcsr, power)?;
+        if config.read16(pmcsr)? & 3 != 0 {
             return Err(BlockError::Unsupported(
                 "igb PLL recovery left controller outside D0",
             ));

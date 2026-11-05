@@ -12,7 +12,7 @@
 //! `device_rmrr_is_relaxable`). A display driver that maps those regions
 //! itself passes its function in `claimed_displays`, and the unit is taken.
 use alloc::vec::Vec;
-use core::ops::Range;
+use core::{convert::Infallible, ops::Range};
 use stela_drivers::bus::pci::EcamWindow;
 
 /// The 4 KiB page span a DMA window needs, within the host's supported
@@ -58,6 +58,16 @@ const BUSES: u16 = 0x18;
 /// read-only inventory does not authorize attaching unsupported ARI devices.
 /// `read32` reads a configuration dword, None where nothing answers.
 pub fn enumerate(roots: &[u8], mut read32: impl FnMut(u16, u16) -> Option<u32>) -> Vec<Present> {
+    try_enumerate(roots, |rid, offset| {
+        Ok::<_, Infallible>(read32(rid, offset))
+    })
+    .unwrap_or_else(|never| match never {})
+}
+
+fn try_enumerate<E>(
+    roots: &[u8],
+    mut read32: impl FnMut(u16, u16) -> Result<Option<u32>, E>,
+) -> Result<Vec<Present>, E> {
     let mut found = Vec::new();
     let mut seen = [false; 256];
     let mut pending: Vec<u8> = roots.to_vec();
@@ -68,14 +78,13 @@ pub fn enumerate(roots: &[u8], mut read32: impl FnMut(u16, u16) -> Option<u32>) 
         for device in 0..32u16 {
             for function in 0..8u16 {
                 let rid = u16::from(bus) << 8 | device << 3 | function;
-                if read32(rid, VENDOR).is_none_or(|id| id as u16 == 0xffff) {
+                if read32(rid, VENDOR)?.is_none_or(|id| id as u16 == 0xffff) {
                     continue;
                 }
-                let class = read32(rid, CLASS).unwrap_or(0);
-                let kind = read32(rid, HEADER).unwrap_or(0) >> 16 & 0x7f;
-                let bridge = (kind == 1)
-                    .then(|| read32(rid, BUSES))
-                    .flatten()
+                let class = read32(rid, CLASS)?.unwrap_or(0);
+                let kind = read32(rid, HEADER)?.unwrap_or(0) >> 16 & 0x7f;
+                let buses = if kind == 1 { read32(rid, BUSES)? } else { None };
+                let bridge = buses
                     .map(|buses| ((buses >> 8) as u8, (buses >> 16) as u8))
                     .filter(|&(secondary, subordinate)| {
                         secondary > bus && subordinate >= secondary
@@ -92,7 +101,7 @@ pub fn enumerate(roots: &[u8], mut read32: impl FnMut(u16, u16) -> Option<u32>) 
         }
     }
     found.sort_unstable_by_key(|function| function.rid);
-    found
+    Ok(found)
 }
 
 /// Inventory each PCI segment across all of its ECAM windows before choosing
@@ -103,6 +112,18 @@ pub fn enumerate_segments(
     windows: &[EcamWindow],
     mut read32: impl FnMut(&EcamWindow, u16, u16) -> Option<u32>,
 ) -> Vec<(u16, Vec<Present>)> {
+    try_enumerate_segments(windows, |window, rid, offset| {
+        Ok::<_, Infallible>(read32(window, rid, offset))
+    })
+    .unwrap_or_else(|never| match never {})
+}
+
+/// Enumerate the complete admitted windows, stopping on the original read
+/// error before returning any topology that could be mistaken for a census.
+pub fn try_enumerate_segments<E>(
+    windows: &[EcamWindow],
+    mut read32: impl FnMut(&EcamWindow, u16, u16) -> Result<Option<u32>, E>,
+) -> Result<Vec<(u16, Vec<Present>)>, E> {
     let mut segments: Vec<_> = windows.iter().map(|window| window.segment).collect();
     segments.sort_unstable();
     segments.dedup();
@@ -114,14 +135,16 @@ pub fn enumerate_segments(
                 .filter(|window| window.segment == segment)
                 .flat_map(|window| window.start_bus..=window.end_bus)
                 .collect();
-            let present = enumerate(&roots, |rid, offset| {
+            let present = try_enumerate(&roots, |rid, offset| {
                 let bus = (rid >> 8) as u8;
-                let window = windows.iter().find(|window| {
+                let Some(window) = windows.iter().find(|window| {
                     window.segment == segment && (window.start_bus..=window.end_bus).contains(&bus)
-                })?;
+                }) else {
+                    return Ok(None);
+                };
                 read32(window, rid, offset)
-            });
-            (segment, present)
+            })?;
+            Ok((segment, present))
         })
         .collect()
 }

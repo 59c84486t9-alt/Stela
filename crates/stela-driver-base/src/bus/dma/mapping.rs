@@ -45,6 +45,8 @@ pub enum Direction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DmaError {
+    Config(crate::bus::pci::ConfigError),
+    PciCapability(crate::bus::pci::CapabilityError),
     IommuUnavailable,
     InvalidRange,
     AddressLimit,
@@ -54,6 +56,16 @@ pub enum DmaError {
     CoherenceUnavailable,
     DrainUnavailable,
     Unmapped,
+}
+impl From<crate::bus::pci::ConfigError> for DmaError {
+    fn from(error: crate::bus::pci::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+impl From<crate::bus::pci::CapabilityError> for DmaError {
+    fn from(error: crate::bus::pci::CapabilityError) -> Self {
+        Self::PciCapability(error)
+    }
 }
 
 /// Whether a domain isolates its requester's DMA.

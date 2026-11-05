@@ -130,6 +130,19 @@ impl Units {
         &self.units[..self.count]
     }
 
+    /// Compare the complete early inventory with a later DMAR parse, without
+    /// treating duplicate entries or an IVRS unit as a VT-d match.
+    pub fn matches_dmar(&self, descriptors: &[crate::dmar::Drhd]) -> bool {
+        let units = self.as_slice();
+        units.len() == descriptors.len()
+            && units.iter().all(|original| {
+                original.kind == Kind::Vtd
+                    && descriptors.iter().any(|descriptor| {
+                        original.segment == descriptor.segment && original.base == descriptor.base
+                    })
+            })
+    }
+
     fn push(&mut self, unit: Unit, at: usize) -> Result<(), TableError> {
         if unit.base == 0 || !unit.base.is_multiple_of(4096) {
             return Err(TableError::Structure(at));
@@ -273,10 +286,23 @@ pub enum Failure {
 
 /// Read the unit's state without changing it.
 pub fn inspect(kind: Kind, window: &impl Window) -> Found {
+    inspect_registers(
+        kind,
+        |offset| window.read32(offset),
+        |offset| window.read64(offset),
+    )
+}
+
+/// Read the original inactive-state registers without a writable transport.
+pub fn inspect_registers(
+    kind: Kind,
+    read32: impl Fn(usize) -> u32,
+    read64: impl Fn(usize) -> u64,
+) -> Found {
     match kind {
         Kind::Vtd => {
-            let status = window.read32(GSTS);
-            let protected = window.read32(PMEN);
+            let status = read32(GSTS);
+            let protected = read32(PMEN);
             if status == u32::MAX || protected == u32::MAX {
                 Found::Unreadable
             } else if status & (TRANSLATION | QUEUED_INVALIDATION | INTERRUPT_REMAP) != 0
@@ -288,8 +314,8 @@ pub fn inspect(kind: Kind, window: &impl Window) -> Found {
             }
         }
         Kind::AmdVi => {
-            let control = window.read64(CONTROL);
-            let status = window.read64(STATUS);
+            let control = read64(CONTROL);
+            let status = read64(STATUS);
             if control == u64::MAX {
                 Found::Unreadable
             } else if control & AMD_ACTIVE != 0 || status != u64::MAX && status & AMD_RUNNING != 0 {
@@ -496,6 +522,27 @@ mod tests {
             units.add_dmar(&sealed(b"DMAR", 0, &drhd(0xfed9_0000, 1))),
             Err(TableError::Structure(TABLE_HEADER))
         );
+    }
+
+    #[test]
+    fn dmar_match_requires_each_original_unit_in_the_same_segment() {
+        let first = drhd(0xfed9_0000, 0);
+        let second = drhd(0xfed9_1000, 1);
+        let mut table = sealed(b"DMAR", 0, &[first, second].concat());
+        table[36] = 47;
+        table[9] = 0u8.wrapping_sub(table.iter().copied().fold(0, u8::wrapping_add));
+        let mut units = Units::default();
+        units.add_dmar(&table).unwrap();
+        let mut parsed = crate::dmar::parse(&table).unwrap();
+        parsed.units.reverse();
+        assert!(units.matches_dmar(&parsed.units));
+        assert!(!units.matches_dmar(&parsed.units[..1]));
+        let second = parsed.units[1].clone();
+        parsed.units[1] = parsed.units[0].clone();
+        assert!(!units.matches_dmar(&parsed.units));
+        parsed.units[1] = second;
+        parsed.units[1].segment = 1;
+        assert!(!units.matches_dmar(&parsed.units));
     }
 
     #[test]

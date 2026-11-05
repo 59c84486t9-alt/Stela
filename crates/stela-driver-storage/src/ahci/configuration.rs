@@ -12,180 +12,232 @@ impl AhciDisk {
         capabilities_2: u32,
         clock: Clock,
         dma: &mut dyn DmaAllocator,
-    ) -> Result<Option<Self>, BlockError> {
-        let lpm = Lpm::new(capabilities, capabilities_2, port.read32(PORT_COMMAND));
-        stop_port(&port, clock)?;
-        if capabilities & CAP_STAGGERED_SPIN_UP != 0 {
-            port.write32(PORT_COMMAND, port.read32(PORT_COMMAND) | COMMAND_SPIN_UP);
-        }
-        // sata_link_init_spd: the firmware's SPD caps the limit.
-        let initial = (port.read32(PORT_SATA_CONTROL) & SATA_CONTROL_SPEED) >> SPEED_SHIFT;
-        let speed_limit = match initial {
-            0 => u32::MAX,
-            speed => (1 << speed) - 1,
-        };
-        let control = port.read32(PORT_SATA_CONTROL) & !SATA_CONTROL_DETECTION;
-        port.write32(PORT_SATA_CONTROL, control | SATA_CONTROL_RESET);
-        clock.delay(COMRESET_HOLD_US);
-        port.write32(PORT_SATA_CONTROL, control);
-        if !clock.wait(RESET_TIMEOUT_US, || {
-            port.read32(PORT_SATA_STATUS) & SATA_STATUS_DETECTION == DEVICE_PRESENT
-        }) {
-            return Ok(None);
-        }
-        port.write32(PORT_SATA_ERROR, u32::MAX);
-        let commands = dma.allocate(COMMAND_LIST_BYTES + RECEIVED_FIS_BYTES, COMMAND_LIST_BYTES)?;
-        let table = dma.allocate(COMMAND_TABLE_BYTES, COMMAND_TABLE_ALIGN)?;
-        let bounce = dma.allocate(BOUNCE_BYTES, 4096)?;
-        if capabilities & CAP_64BIT == 0
-            && [&commands, &table, &bounce]
-                .iter()
-                .any(|buffer| buffer.bus_address() + buffer.len() as u64 > 1 << 32)
-        {
-            return Err(BlockError::Unsupported("32-bit AHCI with DMA above 4 GiB"));
-        }
-        port.write64(PORT_LIST, commands.bus_address());
-        port.write64(PORT_FIS, commands.bus_address() + COMMAND_LIST_BYTES as u64);
-        port.write32(
-            PORT_COMMAND,
-            port.read32(PORT_COMMAND) | COMMAND_FIS_RECEIVE,
-        );
-        if !clock.wait(SPIN_UP_TIMEOUT_US, || {
-            port.read32(PORT_TASK_FILE) & TASK_FILE_BUSY == 0
-        }) {
-            return Err(BlockError::Timeout);
-        }
-        let unsupported = match port.read32(PORT_SIGNATURE) {
-            SIGNATURE_ATA => None,
-            SIGNATURE_ATAPI => Some("ATAPI device"),
-            SIGNATURE_PORT_MULTIPLIER => Some("SATA port multiplier"),
-            SIGNATURE_ENCLOSURE => Some("SATA enclosure management bridge"),
-            _ => Some("unknown SATA device signature"),
-        };
-        if let Some(device) = unsupported {
-            stop_port(&port, clock)?;
-            return Err(BlockError::Unsupported(device));
-        }
-        port.write32(PORT_INTERRUPTS, u32::MAX);
-        port.write32(PORT_COMMAND, port.read32(PORT_COMMAND) | COMMAND_START);
-        let speed = (port.read32(PORT_SATA_STATUS) >> SPEED_SHIFT) & 0xf;
-        let mut disk = Self {
+        minimum: Rc<Control>,
+    ) -> Result<Option<Self>, PortRefusal> {
+        let mut kept = crate::Retained::new(alloc::boxed::Box::new(minimum::PortBuild {
+            owner: minimum,
             port,
-            commands,
-            table,
-            bounce,
-            identity: Identity {
-                transport: Transport::Ahci,
-                location: alloc::string::String::new(),
-                model: alloc::string::String::new(),
-                serial: alloc::string::String::new(),
-                blocks: 0,
-                block_size: ATA_SECTOR_BYTES,
-                read_only: false,
-                features: Features::default(),
-            },
-            clock,
-            command_timeout_us: COMMAND_TIMEOUT_US,
-            fault: None,
-            flush: None,
-            errors: ErrorRing::default(),
-            // ata_eh_set_mode configured the disk: the transfer is unverified.
-            dubious: true,
-            speed_limit,
-            speed,
-            sense_reporting: false,
-            transfer: Transfer::default(),
-            pio_mask: u32::MAX,
-            udma_mask: u32::MAX,
-            mode: 0,
-            step_downs: 0,
-            locked: false,
-            lpm,
-            ncq: Ncq {
-                host: capabilities & CAP_NCQ != 0,
-                host_slots: (capabilities >> CAP_SLOTS_SHIFT & CAP_SLOTS) as usize + 1,
-                ..Ncq::default()
-            },
-            log_dma: false,
-            no_dma_log: false,
-            quirks: 0,
-            devslp: false,
-            slots: Vec::new(),
-            running: Vec::new(),
-            next_tag: 0,
-            looks: 0,
-        };
-        let port = disk.port;
-        let buffer = disk.bounce.bus_address();
-        disk.internal(&port, ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, buffer)
-            .map_err(|failure| failure.error)?;
-        let found = identify(disk.bounce.bytes())?;
-        if found.quirks & quirks::DISABLE != 0 {
+            commands: None,
+            table: None,
+            bounce: None,
+            disk: None,
+        }));
+        let result = (|| {
+            let port = kept.port;
+            let minimum = kept.owner.clone();
+            minimum.check()?;
+            let lpm = Lpm::new(capabilities, capabilities_2, port.read32(PORT_COMMAND));
             stop_port(&port, clock)?;
-            return Err(BlockError::Unsupported("SATA device libata disables"));
-        }
-        disk.sense_reporting = found.sense_reporting.1;
-        disk.flush = found.flush;
-        disk.identity.serial = found.serial.clone();
-        disk.identity.model = found.model.clone();
-        disk.identity.blocks = found.blocks;
-        disk.identity.block_size = found.block_size;
-        // libata's `ata_dev_config_fua` uses FUA only with NCQ and its
-        // quirk lists; this driver leaves it off: a durable write is
-        // followed by a flush, which the write cache's state decides.
-        disk.identity.features = Features {
-            write_cache: found.flush.is_some(),
-            fua: false,
-            max_transfer: BOUNCE_BYTES,
-            discard: found
-                .trim
-                .then_some(DiscardLimits::single(TRIM_RANGES * TRIM_RANGE_SECTORS)),
-            write_zeroes: None,
-        };
-        disk.transfer = found.transfer;
-        disk.locked = found.locked;
-        (disk.lpm.hipm, disk.lpm.dipm) = (found.hipm, found.dipm);
-        // ata_dev_configure, then ATA_EHI_SETMODE and config_lpm; a failure
-        // takes EH's next try.
-        let mut configured = disk.configure(&port, &found);
-        if configured.is_ok() {
-            disk.set_mode(&port)?;
-            configured = disk.configure_lpm(&port, DEVICE_TRIES);
-        }
-        if let Err(error) = configured {
-            let tries = if error == AGAIN {
-                DEVICE_TRIES
-            } else {
-                DEVICE_TRIES - 1
-            };
-            disk.reconfigure(&port, true, false, error, tries)?;
-        }
-        // Linux `__ata_change_queue_depth`: as many queued commands as the
-        // host's slots and the disk take, here at most DEPTH. A slot the
-        // DMA pool cannot hold leaves the queue shallower.
-        if disk.ncq.device {
-            let depth = DEPTH.min(disk.ncq.host_slots).min(disk.ncq.depth);
-            for _ in 1..depth {
-                let (Ok(table), Ok(bounce)) = (
-                    dma.allocate(COMMAND_TABLE_BYTES, COMMAND_TABLE_ALIGN),
-                    dma.allocate(BOUNCE_BYTES, 4096),
-                ) else {
-                    break;
-                };
-                let slot = Slot { table, bounce };
-                if capabilities & CAP_64BIT == 0
-                    && [&slot.table, &slot.bounce]
-                        .iter()
-                        .any(|buffer| buffer.bus_address() + buffer.len() as u64 > 1 << 32)
-                {
-                    break;
-                }
-                disk.slots.push(slot);
+            if capabilities & CAP_STAGGERED_SPIN_UP != 0 {
+                port.write32(PORT_COMMAND, port.read32(PORT_COMMAND) | COMMAND_SPIN_UP);
             }
+            // sata_link_init_spd: the firmware's SPD caps the limit.
+            let initial = (port.read32(PORT_SATA_CONTROL) & SATA_CONTROL_SPEED) >> SPEED_SHIFT;
+            let speed_limit = match initial {
+                0 => u32::MAX,
+                speed => (1 << speed) - 1,
+            };
+            let control = port.read32(PORT_SATA_CONTROL) & !SATA_CONTROL_DETECTION;
+            minimum.wait_after(COMRESET_HOLD_US, || {
+                port.write32(PORT_SATA_CONTROL, control | SATA_CONTROL_RESET);
+                port.read32(PORT_SATA_CONTROL);
+            })?;
+            minimum.wait_after(RESUME_SETTLE_US, || {
+                port.write32(PORT_SATA_CONTROL, control);
+                port.read32(PORT_SATA_CONTROL);
+            })?;
+            if !clock.wait(RESET_TIMEOUT_US, || {
+                port.read32(PORT_SATA_STATUS) & SATA_STATUS_DETECTION == DEVICE_PRESENT
+            }) {
+                return Ok(false);
+            }
+            port.write32(PORT_SATA_ERROR, u32::MAX);
+            kept.get_mut().commands =
+                Some(dma.allocate(COMMAND_LIST_BYTES + RECEIVED_FIS_BYTES, COMMAND_LIST_BYTES)?);
+            kept.get_mut().table = Some(dma.allocate(COMMAND_TABLE_BYTES, COMMAND_TABLE_ALIGN)?);
+            kept.get_mut().bounce = Some(dma.allocate(BOUNCE_BYTES, 4096)?);
+            let commands = kept.commands.as_ref().expect("same command allocation");
+            let table = kept.table.as_ref().expect("same table allocation");
+            let bounce = kept.bounce.as_ref().expect("same bounce allocation");
+            if capabilities & CAP_64BIT == 0
+                && [&commands, &table, &bounce]
+                    .iter()
+                    .any(|buffer| buffer.bus_address() + buffer.len() as u64 > 1 << 32)
+            {
+                return Err(BlockError::Unsupported("32-bit AHCI with DMA above 4 GiB"));
+            }
+            port.write64(PORT_LIST, commands.bus_address());
+            port.write64(PORT_FIS, commands.bus_address() + COMMAND_LIST_BYTES as u64);
+            port.write32(
+                PORT_COMMAND,
+                port.read32(PORT_COMMAND) | COMMAND_FIS_RECEIVE,
+            );
+            if !clock.wait(SPIN_UP_TIMEOUT_US, || {
+                port.read32(PORT_TASK_FILE) & TASK_FILE_BUSY == 0
+            }) {
+                return Err(BlockError::Timeout);
+            }
+            let unsupported = match port.read32(PORT_SIGNATURE) {
+                SIGNATURE_ATA => None,
+                SIGNATURE_ATAPI => Some("ATAPI device"),
+                SIGNATURE_PORT_MULTIPLIER => Some("SATA port multiplier"),
+                SIGNATURE_ENCLOSURE => Some("SATA enclosure management bridge"),
+                _ => Some("unknown SATA device signature"),
+            };
+            if let Some(device) = unsupported {
+                stop_port(&port, clock)?;
+                return Err(BlockError::Unsupported(device));
+            }
+            port.write32(PORT_INTERRUPTS, u32::MAX);
+            port.write32(PORT_COMMAND, port.read32(PORT_COMMAND) | COMMAND_START);
+            let speed = (port.read32(PORT_SATA_STATUS) >> SPEED_SHIFT) & 0xf;
+            let retain = Rc::new(Cell::new(false));
+            kept.get_mut().disk = Some(Self {
+                port,
+                commands: DmaResource::new(
+                    kept.get_mut().commands.take().expect("same commands"),
+                    minimum.clone(),
+                    retain.clone(),
+                ),
+                table: DmaResource::new(
+                    kept.get_mut().table.take().expect("same table"),
+                    minimum.clone(),
+                    retain.clone(),
+                ),
+                bounce: DmaResource::new(
+                    kept.get_mut().bounce.take().expect("same bounce"),
+                    minimum.clone(),
+                    retain.clone(),
+                ),
+                minimum: minimum.clone(),
+                retain: retain.clone(),
+                identity: Identity {
+                    transport: Transport::Ahci,
+                    location: alloc::string::String::new(),
+                    model: alloc::string::String::new(),
+                    serial: alloc::string::String::new(),
+                    blocks: 0,
+                    block_size: ATA_SECTOR_BYTES,
+                    read_only: false,
+                    features: Features::default(),
+                },
+                clock,
+                command_timeout_us: COMMAND_TIMEOUT_US,
+                fault: None,
+                flush: None,
+                errors: ErrorRing::default(),
+                // ata_eh_set_mode configured the disk: the transfer is unverified.
+                dubious: true,
+                speed_limit,
+                speed,
+                sense_reporting: false,
+                transfer: Transfer::default(),
+                pio_mask: u32::MAX,
+                udma_mask: u32::MAX,
+                mode: 0,
+                step_downs: 0,
+                locked: false,
+                lpm,
+                ncq: Ncq {
+                    host: capabilities & CAP_NCQ != 0,
+                    host_slots: (capabilities >> CAP_SLOTS_SHIFT & CAP_SLOTS) as usize + 1,
+                    ..Ncq::default()
+                },
+                log_dma: false,
+                no_dma_log: false,
+                quirks: 0,
+                devslp: false,
+                slots: DmaResource::new(Vec::new(), minimum.clone(), retain.clone()),
+                running: Vec::new(),
+                next_tag: 0,
+                looks: 0,
+            });
+            let disk = kept.get_mut().disk.as_mut().expect("same initialized disk");
+            let port = disk.port;
+            let buffer = disk.bounce.bus_address();
+            disk.internal(&port, ATA_IDENTIFY, 0, 0, ATA_SECTOR_BYTES as usize, buffer)
+                .map_err(|failure| failure.error)?;
+            let found = identify(disk.bounce.bytes())?;
+            if found.quirks & quirks::DISABLE != 0 {
+                stop_port(&port, clock)?;
+                return Err(BlockError::Unsupported("SATA device libata disables"));
+            }
+            disk.sense_reporting = found.sense_reporting.1;
+            disk.flush = found.flush;
+            disk.identity.serial = found.serial.clone();
+            disk.identity.model = found.model.clone();
+            disk.identity.blocks = found.blocks;
+            disk.identity.block_size = found.block_size;
+            // libata's `ata_dev_config_fua` uses FUA only with NCQ and its
+            // quirk lists; this driver leaves it off: a durable write is
+            // followed by a flush, which the write cache's state decides.
+            disk.identity.features = Features {
+                write_cache: found.flush.is_some(),
+                fua: false,
+                max_transfer: BOUNCE_BYTES,
+                discard: found
+                    .trim
+                    .then_some(DiscardLimits::single(TRIM_RANGES * TRIM_RANGE_SECTORS)),
+                write_zeroes: None,
+            };
+            disk.transfer = found.transfer;
+            disk.locked = found.locked;
+            (disk.lpm.hipm, disk.lpm.dipm) = (found.hipm, found.dipm);
+            // ata_dev_configure, then ATA_EHI_SETMODE and config_lpm; a failure
+            // takes EH's next try.
+            let mut configured = disk.configure(&port, &found);
+            if configured.is_ok() {
+                disk.set_mode(&port)?;
+                configured = disk.configure_lpm(&port, DEVICE_TRIES);
+            }
+            if let Err(error) = configured {
+                let tries = if error == AGAIN {
+                    DEVICE_TRIES
+                } else {
+                    DEVICE_TRIES - 1
+                };
+                disk.minimum.ready()?;
+                disk.reconfigure(&port, true, false, error, tries)?;
+            }
+            // Linux `__ata_change_queue_depth`: as many queued commands as the
+            // host's slots and the disk take, here at most DEPTH. A slot the
+            // DMA pool cannot hold leaves the queue shallower.
+            if disk.ncq.device {
+                let depth = DEPTH.min(disk.ncq.host_slots).min(disk.ncq.depth);
+                for _ in 1..depth {
+                    let (Ok(table), Ok(bounce)) = (
+                        dma.allocate(COMMAND_TABLE_BYTES, COMMAND_TABLE_ALIGN),
+                        dma.allocate(BOUNCE_BYTES, 4096),
+                    ) else {
+                        break;
+                    };
+                    let slot = Slot { table, bounce };
+                    if capabilities & CAP_64BIT == 0
+                        && [&slot.table, &slot.bounce]
+                            .iter()
+                            .any(|buffer| buffer.bus_address() + buffer.len() as u64 > 1 << 32)
+                    {
+                        break;
+                    }
+                    disk.slots.push(slot);
+                }
+            }
+            Ok(true)
+        })();
+        match result {
+            Ok(true) => {
+                let minimum::PortBuild { disk, .. } = *kept.into_inner();
+                Ok(Some(disk.expect("same configured disk")))
+            }
+            Ok(false) => {
+                // No allocations or DMA pointer publication occurred on the
+                // absent-link branch, and the port was stopped beforehand.
+                drop(kept.into_inner());
+                Ok(None)
+            }
+            Err(error) => Err(PortRefusal::new(error, kept)),
         }
-        Ok(Some(disk))
     }
-
     /// Linux `ata_dev_revalidate`: IDENTIFY again and require the same model,
     /// serial and capacity (`ata_dev_same_device`).
     pub(super) fn revalidate(&mut self, port: &impl CommandPort) -> Result<(), BlockError> {
@@ -317,6 +369,7 @@ impl AhciDisk {
             ) else {
                 return Ok(true);
             };
+            self.minimum.ready()?;
             stop_engine(port, self.clock)?;
             start_engine(port);
             if !dma {
@@ -396,6 +449,7 @@ impl AhciDisk {
         port: &impl CommandPort,
         policy: u8,
     ) -> Result<(), BlockError> {
+        self.minimum.check()?;
         let lpm = self.lpm;
         let buffer = self.bounce.bus_address();
         let dipm = |disk: &mut Self, feature| match disk.internal(
@@ -441,9 +495,10 @@ impl AhciDisk {
             let mut command = port.read32(PORT_COMMAND);
             if policy == LPM_MAX_POWER || !lpm.hipm {
                 command &= !(COMMAND_AGGRESSIVE_SLUMBER | COMMAND_AGGRESSIVE_LPM);
-                port.write32(PORT_COMMAND, command | COMMAND_INTERFACE_ACTIVE);
-                port.read32(PORT_COMMAND);
-                self.clock.delay(LPM_WAKE_US);
+                self.minimum.wait_after(LPM_WAKE_US, || {
+                    port.write32(PORT_COMMAND, command | COMMAND_INTERFACE_ACTIVE);
+                    port.read32(PORT_COMMAND);
+                })?;
             } else {
                 port.write32(PORT_COMMAND, command | COMMAND_AGGRESSIVE_LPM);
             }

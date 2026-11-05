@@ -2123,6 +2123,7 @@ dependencies = [
  "stela-compiler",
  "stela-contracts",
  "stela-crypto",
+ "stela-driver-base",
  "stela-drivers",
  "stela-engine",
  "stela-formats",
@@ -2270,7 +2271,6 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "cc",
- "libc",
  "object",
  "sha2",
  "stela-c-build",
@@ -2278,9 +2278,8 @@ dependencies = [
  "stela-crypto",
  "stela-driver-base",
  "stela-driver-core",
- "tempfile",
+ "stela-linux",
  "triomphe",
- "zeroize",
 ]
 
 [[package]]
@@ -2319,6 +2318,7 @@ dependencies = [
  "stela-driver-gpu",
  "stela-driver-net",
  "stela-driver-storage",
+ "stela-linux",
  "zeroize",
 ]
 
@@ -2380,6 +2380,20 @@ dependencies = [
  "stela-formats",
  "stela-loader",
  "tempfile",
+]
+
+[[package]]
+name = "stela-linux"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "libc",
+ "stela-c-build",
+ "stela-crypto",
+ "stela-driver-base",
+ "stela-driver-core",
+ "tempfile",
+ "zeroize",
 ]
 
 [[package]]

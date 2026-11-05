@@ -1,13 +1,30 @@
 //! The owned-configuration model other drivers' tests attach functions to.
+mod bar;
+pub use bar::{BarFixture, BarRetireFailure, bar_fixture};
+#[cfg(test)]
+mod retirement_tests;
 extern crate std;
+use super::grant::Grant;
 use super::*;
 use crate::bus::mmio::owned::{
-    AddressSpace, Authority, InstalledMapping, MapFailure, MapRequest, MappingPlatform,
-    PhysicalSpan, Resource, ResourceBacking, ResourceKind,
+    AddressSpace, Authority, CacheAttribute, InstalledMapping, MapFailure, MapRequest,
+    MappingPlatform, PhysicalSpan, Protection, Resource, ResourceBacking, ResourceKind,
+    model::{MappingOwner, MappingRetention},
+};
+use crate::bus::pci::{
+    ConfigFailure,
+    assignment::{self, OpaqueUse, UseKind},
+    owned::grant::{
+        CompletionCheck, ConfigCustody, ConfigEpoch, ConfigOperation, DriverCustody, DriverGrant,
+        Operation,
+    },
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
+    any::Any,
     cell::UnsafeCell,
+    mem::ManuallyDrop,
+    ptr::NonNull,
     sync::atomic::{AtomicUsize, Ordering},
 };
 use std::sync::Mutex;
@@ -17,6 +34,8 @@ pub const SPACE: AddressSpace = AddressSpace {
     physical_bits: 48,
     virtual_bits: 48,
 };
+pub const FUNCTION_BYTES: usize = 4096;
+pub const BUS_SHIFT: u32 = 20;
 pub const BASE: u64 = 0x8000_0000;
 pub const ADDRESS: Address = Address {
     segment: 0x1234,
@@ -43,6 +62,7 @@ pub struct Backing {
     span: PhysicalSpan,
     kind: ResourceKind,
     counters: Arc<Counters>,
+    mapping: MappingRetention<Arc<Ram>>,
 }
 // SAFETY: isolated symbolic physical inventory, kept alongside
 // owned CPU fixture storage; no hardware or production permission is used.
@@ -53,6 +73,9 @@ unsafe impl ResourceBacking for Backing {
     fn kind(&self) -> ResourceKind {
         self.kind
     }
+    fn begin_mapping(&self) -> Result<OpaqueUse, MappingError> {
+        self.mapping.begin_mapping()
+    }
 }
 impl Drop for Backing {
     fn drop(&mut self) {
@@ -62,9 +85,33 @@ impl Drop for Backing {
 
 #[repr(align(4096))]
 pub struct Pages([u8; 8192]);
+/// Actual hosted RAM only: no Source/control/Authority/Resource backedge.
+#[repr(align(4096))]
+pub struct Ram {
+    pages: UnsafeCell<Pages>,
+}
+// SAFETY: actual isolated RAM publishes raw bounded volatile accesses only.
+unsafe impl Send for Ram {}
+// SAFETY: no safe payload references alias those raw accesses.
+unsafe impl Sync for Ram {}
+impl Ram {
+    fn pointer(&self) -> NonNull<u8> {
+        // SAFETY: stable real UnsafeCell allocation, never a PA conversion.
+        unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.pages.get()).0).cast()) }
+    }
+}
+fn ram_context(ram: &Arc<Ram>) -> Result<(), assignment::Error> {
+    let base = ram.pointer().as_ptr() as usize;
+    if base.is_multiple_of(FUNCTION_BYTES) && base.checked_add(8192).is_some() {
+        Ok(())
+    } else {
+        Err(assignment::Error::Context)
+    }
+}
 pub struct Model {
-    memory: Box<UnsafeCell<Pages>>,
+    memory: Arc<Ram>,
     installed: Mutex<Option<MapRequest>>,
+    unmap_pending: Mutex<Option<MapRequest>>,
     counters: Arc<Counters>,
 }
 // SAFETY: storage is stable and only accessed through raw volatile pointers;
@@ -75,11 +122,7 @@ unsafe impl Send for Model {}
 unsafe impl Sync for Model {}
 impl Model {
     fn pointer(&self) -> NonNull<u8> {
-        // SAFETY: UnsafeCell permits volatile mutation without shared RAM
-        // references. Box storage remains alive until acknowledged unmap.
-        unsafe {
-            NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.memory.get()).0).cast::<u8>())
-        }
+        self.memory.pointer()
     }
 }
 impl Drop for Model {
@@ -133,6 +176,9 @@ unsafe impl MappingPlatform for Model {
                 && request.physical.end() <= resource_span.end()
         );
         assert!(request.physical.bytes() <= 8192);
+        if self.unmap_pending.lock().unwrap().is_some() {
+            return Err(MapFailure::Unchanged(MappingError::Busy));
+        }
         let mut installed = self.installed.lock().unwrap();
         assert!(installed.is_none());
         *installed = Some(request);
@@ -150,16 +196,24 @@ unsafe impl MappingPlatform for Model {
         request: MapRequest,
         mapping: InstalledMapping,
     ) -> Result<(), MappingError> {
-        assert_eq!(self.installed.lock().unwrap().take(), Some(request));
+        let installed = self.installed.lock().unwrap().take();
+        let already_removed = installed.is_none();
+        let original = installed.or_else(|| self.unmap_pending.lock().unwrap().take());
+        assert_eq!(original, Some(request));
         assert_eq!(mapping.token, request.id);
         assert_eq!(mapping.cpu_base, self.pointer());
-        self.counters.unmaps.fetch_add(1, Ordering::Relaxed);
+        if !already_removed {
+            self.counters.unmaps.fetch_add(1, Ordering::Relaxed);
+        }
         if self
             .counters
             .fail_unmap_after_effect
-            .load(Ordering::Relaxed)
+            .swap(0, Ordering::Relaxed)
             != 0
         {
+            // Retain the SAME original mapper transaction after its removal
+            // prefix. A checked same-token retry can ACK without repeating it.
+            *self.unmap_pending.lock().unwrap() = original;
             return Err(MappingError::UnmapFailed);
         }
         Ok(())
@@ -179,69 +233,641 @@ pub fn physical(address: Address) -> u64 {
         + (u64::from(address.device) << 15)
         + (u64::from(address.function) << 12)
 }
+/// External fixture controller. Resource inventories contain only its actual
+/// retention projection; config and mapping use the SAME original count gate.
+pub struct FixtureCustody {
+    #[cfg(test)]
+    prepublication: bool,
+    close: Option<assignment::AdmissionClose>,
+    owner: MappingOwner<Arc<Ram>>,
+    resource: Option<Resource>,
+    retention: Option<MappingRetention<Arc<Ram>>>,
+    memory: Arc<Ram>,
+    completion: Option<Arc<FixtureCompletion>>,
+    address: Address,
+    window: EcamWindow,
+}
+// Only actual accepted RAM/context retention. No provider, Mapping/View,
+// source writer, fixture control or RootState backedge enters physical P.
+struct FixtureCompletion {
+    retention: MappingRetention<Arc<Ram>>,
+    fault: crate::sync::FirstFault<ConfigError>,
+}
+// SAFETY: validates this SAME original retained RAM context without mutable
+// entry or allocation. Failure observation reads only the original first cause.
+unsafe impl CompletionCheck for FixtureCompletion {
+    fn postvalidate(&self) -> Result<(), ConfigError> {
+        let result = self.retention.check_context().map_err(|error| {
+            ConfigError::before_effect(match error {
+                MappingError::Assignment(error) => ConfigFailure::Ownership(error),
+                error => ConfigFailure::Mapping(error),
+            })
+        });
+        if let Err(error) = result {
+            self.fault.latch(error);
+        }
+        result
+    }
+    fn failure(&self) -> crate::sync::FaultState<ConfigError> {
+        self.fault.observe()
+    }
+}
+impl Drop for FixtureCustody {
+    fn drop(&mut self) {
+        self.owner.abandon_admission();
+        // DriverGrant normally retains the whole source object. A direct
+        // mapped() custody can also be abandoned while a guard survives: keep
+        // its preowned validator so finish never runs its final destructor.
+        if let Some(completion) = self.completion.take() {
+            core::mem::forget(completion);
+        }
+    }
+}
+struct Epoch {
+    retention: MappingRetention<Arc<Ram>>,
+    memory: Arc<Ram>,
+}
+// SAFETY: same actual isolated RAM and source retention, never a controller,
+// mapping view or native physical/code/IRQ ownership assertion.
+unsafe impl ConfigEpoch for Epoch {
+    fn check(&self) -> Result<(), MappingError> {
+        self.retention.check_admission()
+    }
+    fn retain(&self) -> Result<Box<dyn ConfigEpoch>, MappingError> {
+        self.check()?;
+        Ok(Box::new(Self {
+            retention: self.retention.clone(),
+            memory: self.memory.clone(),
+        }))
+    }
+    fn same_epoch(&self, other: &dyn ConfigEpoch) -> Result<bool, MappingError> {
+        self.check()?;
+        let Some(other) = other.as_any().downcast_ref::<Self>() else {
+            return Ok(false);
+        };
+        other.check()?;
+        Ok(self.retention.same_owner(&other.retention))
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+// SAFETY: same actual hosted allocation and exclusive controller constructed
+// together below; data geometry cannot create an independent owner or gate.
+unsafe impl ConfigCustody for FixtureCustody {
+    fn address(&self) -> Address {
+        self.address
+    }
+    fn window(&self) -> EcamWindow {
+        self.window
+    }
+    fn resource(&self) -> &Resource {
+        self.resource.as_ref().expect("live fixture resource")
+    }
+    fn begin(&self, operation: Operation) -> Result<ConfigOperation, ConfigError> {
+        #[cfg(test)]
+        if self.prepublication && matches!(operation, Operation::Write { .. }) {
+            return Err(ConfigError::before_effect(
+                ConfigFailure::UnqualifiedControl,
+            ));
+        }
+        let (offset, width) = match operation {
+            Operation::Read { offset, width } | Operation::Write { offset, width, .. } => {
+                (offset, width)
+            }
+        };
+        if !matches!(width, 1 | 2 | 4)
+            || !usize::from(offset).is_multiple_of(width)
+            || usize::from(offset)
+                .checked_add(width)
+                .is_none_or(|end| end > FUNCTION_BYTES)
+        {
+            return Err(ConfigError::before_effect(ConfigFailure::Access {
+                offset,
+                width,
+            }));
+        }
+        let completion = self
+            .completion
+            .as_ref()
+            .ok_or(ConfigError::before_effect(ConfigFailure::ForeignGrant))?;
+        match completion.failure() {
+            crate::sync::FaultState::Ready(error) => return Err(error),
+            crate::sync::FaultState::Publishing => {
+                return Err(ConfigError::before_effect(ConfigFailure::FaultPublishing));
+            }
+            crate::sync::FaultState::Empty => {}
+        }
+        let count = self
+            .retention
+            .as_ref()
+            .ok_or(ConfigError::before_effect(ConfigFailure::ForeignGrant))?
+            .begin_use(UseKind::Configuration)
+            .map_err(|error| {
+                ConfigError::before_effect(match error {
+                    MappingError::Assignment(error) => ConfigFailure::Ownership(error),
+                    error => ConfigFailure::Mapping(error),
+                })
+            })?;
+        // SAFETY: this count and preowned validator retain the SAME original
+        // fixture RAM/assignment. Arc clone allocates nothing; control stays here.
+        Ok(unsafe { ConfigOperation::new(count, completion.clone()) })
+    }
+    fn retirement_context(&self) -> Result<(), MappingError> {
+        self.retention
+            .as_ref()
+            .ok_or(MappingError::Retired)?
+            .check_context()
+    }
+    fn retain_epoch(&self) -> Result<Box<dyn ConfigEpoch>, MappingError> {
+        let retention = self.retention.as_ref().ok_or(MappingError::Retired)?;
+        retention.check_admission()?;
+        Ok(Box::new(Epoch {
+            retention: retention.clone(),
+            memory: self.memory.clone(),
+        }))
+    }
+}
+// SAFETY: cfg-only actual RAM fixture owns the sole model controller. It models
+// driver policy, never native firmware/root/IRQ/DMA retirement or a PCI Source.
+unsafe impl DriverCustody for FixtureCustody {}
+// SAFETY: this isolated model has one source and forbids all prepublication
+// writes. The test joins its synchronous readers before changing policy.
+#[cfg(test)]
+unsafe impl super::grant::PrepublicationCustody for FixtureCustody {}
+impl FixtureCustody {
+    #[cfg(test)]
+    pub(super) fn fixture_base(&self) -> NonNull<u8> {
+        self.memory.pointer()
+    }
+
+    #[cfg(test)]
+    pub(super) fn into_prepublication(mut self) -> super::grant::PrepublicationGrant {
+        self.prepublication = true;
+        let mut custody = Box::new(self);
+        let close = custody.close.take().expect("preowned fixture close");
+        // SAFETY: this is the same original model owner and close.
+        unsafe { super::grant::PrepublicationGrant::from_boxed(custody, close) }
+    }
+
+    #[cfg(test)]
+    pub(super) fn finish_promotion(&mut self) -> Result<(), MappingError> {
+        if !self.prepublication || self.uses() != 1 {
+            return Err(MappingError::Busy);
+        }
+        self.prepublication = false;
+        Ok(())
+    }
+
+    pub fn into_grant(self) -> DriverGrant {
+        let mut custody = Box::new(self);
+        let close = custody.close.take().expect("preowned fixture close");
+        // SAFETY: the close was captured from this same original model owner.
+        unsafe { DriverGrant::from_boxed(custody, close) }
+    }
+    pub fn retention(&self) -> MappingRetention<Arc<Ram>> {
+        self.retention.as_ref().expect("live fixture epoch").clone()
+    }
+    pub fn close(&mut self) -> Result<(), MappingError> {
+        self.owner.close()
+    }
+    pub fn uses(&self) -> usize {
+        self.owner.uses()
+    }
+    /// # Safety
+    /// Source caller completed actual model unmap and every raw/callback user.
+    /// Failure keeps the complete SAME source actor, never recreates a grant.
+    unsafe fn finish(mut self: Box<Self>) -> Result<(), RetireFailure> {
+        // SAFETY: same actual fixture retirement described above.
+        unsafe { self.finish_in_place() }.map_err(|error| RetireFailure::source(error, self))
+    }
+
+    unsafe fn finish_in_place(&mut self) -> Result<(), MappingError> {
+        self.owner.close()?;
+        drop(self.resource.take());
+        drop(self.retention.take());
+        drop(self.completion.take());
+        if let Some(close) = self.close.take() {
+            close.dismiss();
+        }
+        // SAFETY: caller supplied exact model drain; actual original gate also
+        // checks every retained epoch and config operation has ended.
+        drop(unsafe { self.owner.retire() }?);
+        Ok(())
+    }
+}
+/// Original source plus mapping. Geometry remains model DATA and never creates
+/// a new physical source, independent gate or native ownership assertion.
 pub fn mapped(
+    address: Address,
+    window: EcamWindow,
     span: PhysicalSpan,
     offset: usize,
     bytes: usize,
     attribute: CacheAttribute,
     protection: Protection,
-) -> (Mapping, Arc<Counters>) {
+) -> (FixtureCustody, Mapping, Arc<Counters>) {
+    let (source, authority, counters) = unmapped(address, window, span, attribute);
+    let mapping = authority
+        .map(
+            source.resource().clone(),
+            offset,
+            bytes,
+            attribute,
+            protection,
+        )
+        .unwrap();
+    (source, mapping, counters)
+}
+
+pub(super) fn unmapped(
+    address: Address,
+    window: EcamWindow,
+    span: PhysicalSpan,
+    attribute: CacheAttribute,
+) -> (FixtureCustody, Authority, Arc<Counters>) {
     let counters = Arc::new(Counters::default());
+    let memory = Arc::new(Ram {
+        pages: UnsafeCell::new(Pages([0; 8192])),
+    });
+    // SAFETY: this real allocation has one isolated creator/controller; no
+    // firmware, native device, external reset, guest or backedge exists.
+    let owner = unsafe { MappingOwner::from_owned(memory.clone(), ram_context) };
+    let close = owner.admission_close().unwrap();
+    let retention = owner.retention().unwrap();
     let platform = Arc::new(Model {
-        memory: Box::new(UnsafeCell::new(Pages([0; 8192]))),
+        memory: memory.clone(),
         installed: Mutex::new(None),
+        unmap_pending: Mutex::new(None),
         counters: counters.clone(),
     });
-    // SAFETY: independent fixture storage and symbolic resources cannot
-    // overlap another model or the production activation inventory.
+    // SAFETY: actual isolated RAM and original exclusive fixture inventory.
     let authority = unsafe { Authority::isolated_model(platform, SPACE, Vec::new()) }.unwrap();
     let resource = Resource::new(Box::new(Backing {
         span,
-        // WC exists only for the unsuitable-resource case;
-        // ordinary ECAM fixtures model conservative register resources.
         kind: if attribute == CacheAttribute::WriteCombining {
             ResourceKind::PrefetchableMemory
         } else {
-            ResourceKind::Registers
+            ResourceKind::Configuration
         },
         counters: counters.clone(),
+        mapping: retention.clone(),
     }));
-    let mapping = authority
-        .map(resource, offset, bytes, attribute, protection)
-        .unwrap();
-    drop(authority);
-    (mapping, counters)
+    (
+        FixtureCustody {
+            #[cfg(test)]
+            prepublication: false,
+            close: Some(close),
+            owner,
+            resource: Some(resource),
+            completion: Some(Arc::new(FixtureCompletion {
+                retention: retention.clone(),
+                fault: crate::sync::FirstFault::new(),
+            })),
+            retention: Some(retention),
+            memory,
+            address,
+            window,
+        },
+        authority,
+        counters,
+    )
 }
-
-/// Registry-owned transport fixture for sibling requester tests.
-/// Program it through ConfigSpace and explicitly retire its returned mapping.
+/// Sibling fixture entry. The actual final grant owns its external controller.
 pub fn fixture(address: Address) -> (OwnedConfig, Arc<Counters>) {
     let span = PhysicalSpan::new(physical(address), FUNCTION_BYTES as u64).unwrap();
-    let (mapping, counters) = mapped(
-        span,
-        0,
-        FUNCTION_BYTES,
-        CacheAttribute::Uncached,
-        Protection::ReadWrite,
-    );
-    // SAFETY: this fixture owns its storage, exclusive config access
-    // and symbolic resource epoch. It grants no production device permission.
-    let config = match unsafe { OwnedConfig::attach(address, window(address), mapping) } {
+    let (source, authority, counters) =
+        unmapped(address, window(address), span, CacheAttribute::Uncached);
+    let prepared = OwnedConfig::prepare(source.into_grant());
+    let mapping = authority
+        .map(
+            prepared.configuration_resource().clone(),
+            0,
+            FUNCTION_BYTES,
+            CacheAttribute::Uncached,
+            Protection::ReadWrite,
+        )
+        .unwrap();
+    let config = match prepared.attach(mapping) {
         Ok(config) => config,
-        Err((error, _)) => panic!("valid owned fixture: {error:?}"),
+        Err((error, _parts)) => panic!("valid original owned fixture refused: {error:?}"),
     };
     (config, counters)
 }
-
+/// Hosted RAM inspection only. It never resumes terminal configuration IO or
+/// creates a writer/source from an address. Stop raw users before retirement.
 pub fn fixture_pointer(config: &OwnedConfig, offset: u16) -> NonNull<u8> {
-    config.try_register(offset).unwrap()
+    assert!(usize::from(offset) < FUNCTION_BYTES);
+    let epoch = config.retain_epoch().unwrap();
+    let original = epoch
+        .custody
+        .as_any()
+        .downcast_ref::<Epoch>()
+        .expect("actual fixture epoch");
+    // SAFETY: same real RAM is still owned by config custody. This pointer is
+    // not native MMIO or a mutable reference and grants no hardware access.
+    unsafe { NonNull::new_unchecked(original.memory.pointer().as_ptr().add(usize::from(offset))) }
+}
+/// Failure keeps exact original parts/source. Cause inspection cannot release.
+pub struct RetireFailure {
+    pub error: MappingError,
+    kept: Option<KeptFailure>,
 }
 
-pub fn retire(mut mapping: Mapping, counters: &Counters) {
-    // SAFETY: each test stopped all synchronous fixture accesses before
-    // returning the original mapping; no worker/device can access storage.
-    unsafe { mapping.retire() }.unwrap();
+enum KeptFailure {
+    Parts {
+        _grant: DriverGrant,
+        _mapping: Mapping,
+    },
+    Envelope {
+        _parts: ConfigParts<DriverGrant>,
+    },
+    Source(ManuallyDrop<Box<FixtureCustody>>),
+    Grant {
+        _grant: DriverGrant,
+    },
+}
+impl Drop for RetireFailure {
+    fn drop(&mut self) {
+        // Losing the real source controller must deny NEW admission even while
+        // its whole original object remains retained. Ordinary DriverGrant and
+        // Mapping fields below run their own close/quarantine-only Drop paths;
+        // neither acknowledges hardware or frees an unfinished graph.
+        if let Some(KeptFailure::Source(source)) = &mut self.kept {
+            source.owner.abandon_admission();
+        }
+    }
+}
+impl core::fmt::Debug for RetireFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RetireFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+impl RetireFailure {
+    fn parts(error: MappingError, grant: DriverGrant, mapping: Mapping) -> Self {
+        Self {
+            error,
+            kept: Some(KeptFailure::Parts {
+                _grant: grant,
+                _mapping: mapping,
+            }),
+        }
+    }
+    fn source(error: MappingError, source: Box<FixtureCustody>) -> Self {
+        Self {
+            error,
+            kept: Some(KeptFailure::Source(ManuallyDrop::new(source))),
+        }
+    }
+}
+/// Pure negative checks BEFORE asking the mapper to remove CPU access. The
+/// one expected count is this exact mapping's own retained use; a pending
+/// config/DMA/IRQ/other use must veto teardown of the whole original graph.
+/// Counts are not source-drain permission: callers still supply that proof,
+/// and the actual mapper/source retirement must independently acknowledge.
+fn preflight_unmap(grant: &DriverGrant, mapping: &Mapping) -> Result<(), MappingError> {
+    if grant.custody().type_id() != core::any::TypeId::of::<FixtureCustody>() {
+        return Err(MappingError::InvalidPlatformReply);
+    }
+    // SAFETY: exact concrete Any identity above; borrow of this SAME original
+    // fixture actor, not a new source/grant or numeric geometry reconstruction.
+    let fixture =
+        unsafe { &*(grant.custody() as *const dyn ConfigCustody).cast::<FixtureCustody>() };
+    if fixture.uses() != 1 {
+        return Err(MappingError::Busy);
+    }
+    fixture.retirement_context()?;
+    let resource = fixture.resource.as_ref().ok_or(MappingError::Retired)?;
+    if !mapping.retains_resource(resource)? {
+        return Err(MappingError::InvalidPlatformReply);
+    }
+    Ok(())
+}
+/// Caller already retired this actual mapping; extract only the SAME actual
+/// hosted source. A native/foreign grant is retained and explicitly refused.
+/// # Safety
+/// Actual model mapping unmap acknowledged and every raw/callback user ended.
+unsafe fn finish_original(grant: DriverGrant) -> Result<(), RetireFailure> {
+    if grant.custody().type_id() != core::any::TypeId::of::<FixtureCustody>() {
+        // Keep foreign admission/state/control entirely unchanged. Never call
+        // unsafe native extraction merely to inspect its Rust identity.
+        return Err(RetireFailure {
+            error: MappingError::InvalidPlatformReply,
+            kept: Some(KeptFailure::Grant { _grant: grant }),
+        });
+    }
+    // SAFETY: exact Any identity above makes this an immutable observation of
+    // the SAME actual fixture actor. Count is a negative veto only, not proof.
+    let fixture =
+        unsafe { &*(grant.custody() as *const dyn ConfigCustody).cast::<FixtureCustody>() };
+    if fixture.uses() != 0 {
+        return Err(RetireFailure {
+            error: MappingError::Busy,
+            kept: Some(KeptFailure::Grant { _grant: grant }),
+        });
+    }
+    // SAFETY: known actual hosted source transfers intact to its retirement
+    // owner. It will only close/retire; no seal/terminal state resumes IO.
+    let source = unsafe { grant.into_original() };
+    // SAFETY: exact original Any identity determines the SAME Box/layout;
+    // no source or control is reconstructed from descriptors or numbers.
+    let source = unsafe { Box::from_raw(Box::into_raw(source).cast::<FixtureCustody>()) };
+    // SAFETY: the exact acknowledged model drain contract above.
+    unsafe { source.finish() }
+}
+/// # Safety
+/// Same complete acknowledged source drain as finish_original; no raw user or
+/// callback may restart. Counter assertions inspect effects, never prove them.
+pub unsafe fn finish_retired(grant: DriverGrant, counters: &Counters) -> Result<(), RetireFailure> {
+    // SAFETY: caller supplies the exact original model retirement contract.
+    unsafe { finish_original(grant) }?;
     assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
     assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 1);
     assert_eq!(counters.platform_drops.load(Ordering::Relaxed), 1);
+    Ok(())
+}
+/// # Safety
+/// Every raw fixture pointer/callback/borrower stopped; no actor can restart.
+pub unsafe fn retire(
+    grant: DriverGrant,
+    mut mapping: Mapping,
+    counters: &Counters,
+) -> Result<(), RetireFailure> {
+    if let Err(error) = preflight_unmap(&grant, &mapping) {
+        return Err(RetireFailure::parts(error, grant, mapping));
+    }
+    // SAFETY: ordinary fixtures explicitly ended every synchronous raw user;
+    // original same-resource/pending-use vetoes ran before this unmap effect.
+    if let Err(error) = unsafe { mapping.retire() } {
+        return Err(RetireFailure::parts(error, grant, mapping));
+    }
+    drop(mapping);
+    // SAFETY: caller completed this exact fixture's raw/borrowed users and the
+    // actual mapping retirement above acknowledged before source extraction.
+    unsafe { finish_retired(grant, counters) }
+}
+/// # Safety
+/// Same complete synchronous model drain as retire; no raw user can restart.
+pub unsafe fn retire_config(config: OwnedConfig, counters: &Counters) -> Result<(), RetireFailure> {
+    // SAFETY: same exact original model drain supplied by this caller.
+    unsafe { retire_owned(config) }?;
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
+    assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 1);
+    assert_eq!(counters.platform_drops.load(Ordering::Relaxed), 1);
+    Ok(())
+}
+
+/// Complete one original hosted config fixture without needing its counters.
+/// Failure retains the SAME envelope. No native source is admitted.
+/// # Safety
+/// Every actual model producer, callback, raw pointer and alias has ended and
+/// cannot restart. This is the owning fixture's acknowledged retirement path.
+pub unsafe fn retire_owned(config: OwnedConfig) -> Result<(), RetireFailure> {
+    // SAFETY: exact original model drain and owning acknowledgement supplied.
+    unsafe { retire_parts(config.into_parts()) }
+}
+
+unsafe fn retire_parts(parts: ConfigParts<DriverGrant>) -> Result<(), RetireFailure> {
+    // SAFETY: actual fixture drain from the caller. The finalizer borrows the
+    // same model source in place and performs its acknowledged retirement.
+    let result = unsafe {
+        parts.finish_model(
+            |source: &FixtureCustody, mapping| {
+                if source.uses() != usize::from(mapping.is_some()) {
+                    return Err(MappingError::Busy);
+                }
+                Ok(())
+            },
+            |source| source.finish_in_place(),
+        )
+    };
+    result.map_err(|(error, parts)| RetireFailure {
+        error,
+        kept: Some(KeptFailure::Envelope { _parts: parts }),
+    })
+}
+
+#[cfg(test)]
+mod operation_controls {
+    use super::*;
+
+    fn source() -> (FixtureCustody, Mapping, Arc<Counters>) {
+        mapped(
+            ADDRESS,
+            window(ADDRESS),
+            PhysicalSpan::new(physical(ADDRESS), FUNCTION_BYTES as u64).unwrap(),
+            0,
+            FUNCTION_BYTES,
+            CacheAttribute::Uncached,
+            Protection::ReadWrite,
+        )
+    }
+
+    #[test]
+    fn accepted_configuration_finishes_after_close_without_provider_counter_entry() {
+        let (source, mut mapping, counters) = source();
+        let completion = source.completion.as_ref().unwrap().clone();
+        let calls = counters.contexts.load(Ordering::Relaxed);
+        let mut operation = source
+            .begin(Operation::Read {
+                offset: 0,
+                width: 4,
+            })
+            .unwrap();
+        assert_eq!(source.uses(), 2, "same mapping and configuration gate");
+        let close = source.owner.admission_close().unwrap();
+        close.close();
+        assert!(matches!(
+            source.begin(Operation::Read {
+                offset: 0,
+                width: 4
+            }),
+            Err(ConfigError {
+                reason: ConfigFailure::Ownership(assignment::Error::Closed),
+                ..
+            })
+        ));
+        // SAFETY: this accepted RAM-only readonly control issued no volatile
+        // access, raw pointer or callback. Its empty effect/user has ended.
+        unsafe { operation.finish() }.unwrap();
+        assert_eq!(source.uses(), 1, "original mapping remains counted");
+        assert_eq!(counters.contexts.load(Ordering::Relaxed), calls);
+        assert!(matches!(
+            completion.failure(),
+            crate::sync::FaultState::Empty
+        ));
+        close.dismiss();
+        drop(completion);
+        // SAFETY: every actual model user ended; original unmap is acknowledged.
+        unsafe { mapping.retire() }.unwrap();
+        drop(mapping);
+        // SAFETY: same original RAM owner, mapping and operation drained above.
+        unsafe { Box::new(source).finish() }.unwrap();
+        assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
+        assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(counters.platform_drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn abandoned_configuration_retains_count_and_closes_original_admission() {
+        let (source, _mapping, counters) = source();
+        let calls = counters.contexts.load(Ordering::Relaxed);
+        let operation = source
+            .begin(Operation::Read {
+                offset: 0,
+                width: 4,
+            })
+            .unwrap();
+        assert_eq!(source.uses(), 2);
+        drop(operation);
+        assert_eq!(source.uses(), 2, "abandonment is not completion");
+        assert!(matches!(
+            source.begin(Operation::Read {
+                offset: 0,
+                width: 4
+            }),
+            Err(ConfigError {
+                reason: ConfigFailure::Ownership(assignment::Error::Closed),
+                ..
+            })
+        ));
+        assert_eq!(counters.contexts.load(Ordering::Relaxed), calls);
+        assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.resource_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.platform_drops.load(Ordering::Relaxed), 0);
+        // Default source/mapping destruction keeps the unfinished original RAM
+        // graph. No native retirement or new completed cause is fabricated.
+    }
+
+    #[test]
+    fn direct_source_drop_keeps_preowned_completion_after_accepted_finish() {
+        let (source, mut mapping, counters) = source();
+        let completion = Arc::downgrade(source.completion.as_ref().unwrap());
+        let resource = source.resource.as_ref().unwrap().clone();
+        let mut operation = source
+            .begin(Operation::Read {
+                offset: 0,
+                width: 4,
+            })
+            .unwrap();
+        drop(source);
+        assert!(matches!(
+            resource.begin_mapping(),
+            Err(MappingError::Assignment(assignment::Error::Closed))
+        ));
+        // SAFETY: readonly RAM-only admission issued no volatile effect/user.
+        // Losing source control closed new admission, not this accepted finish.
+        unsafe { operation.finish() }.unwrap();
+        assert!(
+            completion.upgrade().is_some(),
+            "original validator remains preowned"
+        );
+        drop(resource);
+        // SAFETY: this exact accepted RAM mapping has no remaining users.
+        unsafe { mapping.retire() }.unwrap();
+        assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
+        // No assignment completion is claimed after direct source abandonment.
+    }
 }

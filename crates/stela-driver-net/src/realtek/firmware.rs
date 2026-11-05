@@ -125,7 +125,7 @@ impl<'a> Script<'a> {
                     if delays > MAX_DELAY_US {
                         return Err(Error::Script("firmware delay budget exceeded"));
                     }
-                    timer.delay(delay);
+                    timer.delay(delay)?;
                 }
                 _ => (), // Already exhaustively validated; conditional skip not taken.
             }
@@ -146,8 +146,9 @@ mod tests {
         fn now(&self) -> u64 {
             self.0.get()
         }
-        fn delay(&self, us: u64) {
+        fn delay(&self, us: u64) -> Result<(), BlockError> {
             self.0.set(self.0.get() + us);
+            Ok(())
         }
     }
     #[derive(Default)]

@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 13:31:11 -0500
+Subject: [PATCH] refactor(fs): link original inode number allocation
+
+---
+ fs/inode.c            | 42 ------------------------------------------
+ fs/inode_cache_init.c | 42 ++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 42 insertions(+), 42 deletions(-)
+
+diff --git a/fs/inode.c b/fs/inode.c
+index b11e1859a074e1ef751bbbe252f6347740cd870c..7ef26389701e6ee1426966e02e0117319fcf78ec 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -666,48 +666,6 @@ repeat:
+ 	return NULL;
+ }
+ 
+-/*
+- * Each cpu owns a range of LAST_INO_BATCH numbers.
+- * 'shared_last_ino' is dirtied only once out of LAST_INO_BATCH allocations,
+- * to renew the exhausted range.
+- *
+- * This does not significantly increase overflow rate because every CPU can
+- * consume at most LAST_INO_BATCH-1 unused inode numbers. So there is
+- * NR_CPUS*(LAST_INO_BATCH-1) wastage. At 4096 and 1024, this is ~0.1% of the
+- * 2^32 range, and is a worst-case. Even a 50% wastage would only increase
+- * overflow rate by 2x, which does not seem too significant.
+- *
+- * On a 32bit, non LFS stat() call, glibc will generate an EOVERFLOW
+- * error if st_ino won't fit in target struct field. Use 32bit counter
+- * here to attempt to avoid that.
+- */
+-#define LAST_INO_BATCH 1024
+-static DEFINE_PER_CPU(unsigned int, last_ino);
+-
+-unsigned int get_next_ino(void)
+-{
+-	unsigned int *p = &get_cpu_var(last_ino);
+-	unsigned int res = *p;
+-
+-#ifdef CONFIG_SMP
+-	if (unlikely((res & (LAST_INO_BATCH-1)) == 0)) {
+-		static atomic_t shared_last_ino;
+-		int next = atomic_add_return(LAST_INO_BATCH, &shared_last_ino);
+-
+-		res = next - LAST_INO_BATCH;
+-	}
+-#endif
+-
+-	res++;
+-	/* get_next_ino should not provide a 0 inode number */
+-	if (unlikely(!res))
+-		res++;
+-	*p = res;
+-	put_cpu_var(last_ino);
+-	return res;
+-}
+-EXPORT_SYMBOL(get_next_ino);
+-
+ /**
+  *	new_inode 	- obtain an inode
+  *	@sb: superblock
+diff --git a/fs/inode_cache_init.c b/fs/inode_cache_init.c
+index e62a751f507dbbc9f76db62d0a5a45f8f5006140..442074ed633a44a2f837dd5266715cb7d8604925 100644
+--- a/fs/inode_cache_init.c
++++ b/fs/inode_cache_init.c
+@@ -344,3 +344,45 @@ void unlock_new_inode(struct inode *inode)
+ 	spin_unlock(&inode->i_lock);
+ }
+ EXPORT_SYMBOL(unlock_new_inode);
++
++/*
++ * Each cpu owns a range of LAST_INO_BATCH numbers.
++ * 'shared_last_ino' is dirtied only once out of LAST_INO_BATCH allocations,
++ * to renew the exhausted range.
++ *
++ * This does not significantly increase overflow rate because every CPU can
++ * consume at most LAST_INO_BATCH-1 unused inode numbers. So there is
++ * NR_CPUS*(LAST_INO_BATCH-1) wastage. At 4096 and 1024, this is ~0.1% of the
++ * 2^32 range, and is a worst-case. Even a 50% wastage would only increase
++ * overflow rate by 2x, which does not seem too significant.
++ *
++ * On a 32bit, non LFS stat() call, glibc will generate an EOVERFLOW
++ * error if st_ino won't fit in target struct field. Use 32bit counter
++ * here to attempt to avoid that.
++ */
++#define LAST_INO_BATCH 1024
++static DEFINE_PER_CPU(unsigned int, last_ino);
++
++unsigned int get_next_ino(void)
++{
++	unsigned int *p = &get_cpu_var(last_ino);
++	unsigned int res = *p;
++
++#ifdef CONFIG_SMP
++	if (unlikely((res & (LAST_INO_BATCH-1)) == 0)) {
++		static atomic_t shared_last_ino;
++		int next = atomic_add_return(LAST_INO_BATCH, &shared_last_ino);
++
++		res = next - LAST_INO_BATCH;
++	}
++#endif
++
++	res++;
++	/* get_next_ino should not provide a 0 inode number */
++	if (unlikely(!res))
++		res++;
++	*p = res;
++	put_cpu_var(last_ino);
++	return res;
++}
++EXPORT_SYMBOL(get_next_ino);

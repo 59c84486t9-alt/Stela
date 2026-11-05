@@ -6,6 +6,9 @@ use super::*;
 
 #[test]
 fn pnvm_each_new_mapping_visibility_and_partial_stop_failure_preserves_epoch() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let mut bytes = ax210_bytes();
     bytes.extend(30u32.to_le_bytes());
     bytes.extend(8u32.to_le_bytes());
@@ -105,6 +108,9 @@ fn pnvm_each_new_mapping_visibility_and_partial_stop_failure_preserves_epoch() {
 
 #[test]
 fn pnvm_wrong_short_and_failed_doorbell_never_release_or_synthesize_status() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = ax210_bytes();
     let catalog = catalog_for(&ax210_profile(), Family::Ax210.firmware_name(), &bytes);
     let (observation, step_catalog) = step_fixture();
@@ -160,6 +166,9 @@ fn pnvm_wrong_short_and_failed_doorbell_never_release_or_synthesize_status() {
 
 #[test]
 fn ax210_fragmented_wide_invalid_and_duplicate_completions_never_release_iml() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = ax210_bytes();
     let catalog = catalog_for(&ax210_profile(), Family::Ax210.firmware_name(), &bytes);
     let (observation, step_catalog) = step_fixture();

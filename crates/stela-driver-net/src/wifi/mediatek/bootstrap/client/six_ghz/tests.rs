@@ -210,6 +210,9 @@ pub(crate) fn six_profile() -> Profile {
 
 #[test]
 fn a_wide_standard_power_ap_authenticates_on_its_primary_as_mac80211_does() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = six_setup();
     let mut elements = beacon_elements();
     // The HE operation's 6 GHz information: 80 MHz around channel 7 from a
@@ -244,6 +247,9 @@ fn a_wide_standard_power_ap_authenticates_on_its_primary_as_mac80211_does() {
 
 #[test]
 fn a_bound_six_ghz_session_is_fenced_and_removes_through_its_own_codec() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = six_setup();
     let observed = observe(&mut driver, &model);
     let permission = Rc::new(Permission::default());
@@ -400,6 +406,9 @@ fn a_bound_six_ghz_session_is_fenced_and_removes_through_its_own_codec() {
 
 #[test]
 fn a_six_ghz_sae_frame_goes_again_once_its_wait_passes() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = six_setup();
     let observed = observe(&mut driver, &model);
     let permission = Rc::new(Permission::default());
@@ -458,6 +467,9 @@ fn a_six_ghz_sae_frame_goes_again_once_its_wait_passes() {
 
 #[test]
 fn a_six_ghz_sae_exchange_associates_like_ieee80211_mgd_assoc() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = six_setup();
     let observed = observe(&mut driver, &model);
     let permission = Rc::new(Permission::default());

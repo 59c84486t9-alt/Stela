@@ -1,7 +1,9 @@
 use super::*;
+mod minimum;
 mod timer;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::{Cell, RefCell};
+use minimum::minimum;
 
 /// Vendor/reserved bits are nonzero. They are neither an I801
 /// INUSE semaphore nor BYTE_DONE; every status write is checked against W1C.
@@ -205,12 +207,13 @@ fn controller(vendor: u16, device: u16, revision: u8) -> (Controller, Rc<RefCell
     let info = ControllerInfo::from_pci_id(vendor, device, revision).unwrap();
     let controller = Piix4::new(
         RegisterModel(state.clone()),
-        ModelTimer(time),
+        ModelTimer(time.clone()),
         info,
         Config {
             timeout_us: 5000,
             poll_interval_us: 250,
         },
+        minimum(time),
     )
     .unwrap();
     (controller, state)
@@ -616,4 +619,24 @@ fn unsupported_protocols_and_invalid_write_lengths_do_not_touch_the_host() {
         );
     }
     assert_eq!(state.borrow().writes.len(), writes);
+}
+
+// Consume actual acknowledged idle, retaining the SAME genuine model source
+// when changing only this fixture's nominal timer/register surface.
+type Parts = (
+    RegisterModel,
+    ModelTimer,
+    ControllerInfo,
+    Config,
+    Rc<dyn crate::bus::pci::power::Timer>,
+);
+fn parts(old: Controller) -> Parts {
+    let info = old.info;
+    let config = old.config;
+    let minimum = old.resources.minimum.clone();
+    let (registers, timer) = match old.shutdown() {
+        Ok(parts) => parts,
+        Err(_) => panic!("fixture owner failed actual idle shutdown"),
+    };
+    (registers, timer, info, config, minimum)
 }

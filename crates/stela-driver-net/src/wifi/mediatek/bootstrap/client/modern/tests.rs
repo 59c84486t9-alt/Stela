@@ -165,6 +165,9 @@ fn awaiting_cipher(suite: u8) -> (Client<Bar, Q, NativeGuard>, Model, usize) {
 
 #[test]
 fn modern_current_context_waits_for_real_admission_without_legacy_configuration_ack() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, commands_before) = awaiting();
     assert_eq!(driver.phase(), ClientPhase::AwaitingModernAdmission);
     assert_eq!(driver.station().phase(), station::Phase::Configuring);
@@ -194,6 +197,9 @@ fn modern_current_context_waits_for_real_admission_without_legacy_configuration_
 
 #[test]
 fn modern_configuration_and_secure_qos_publication_hold_both_permissions() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use wifi::regulatory::AssociationUse;
     let (mut driver, model, before) = awaiting();
     let context = driver.modern_context().unwrap().clone();
@@ -464,6 +470,9 @@ fn modern_keys(driver: &mut Client<Bar, Q, NativeGuard>, authority: &mut Owner) 
 
 #[test]
 fn mixed_qos_and_nonqos_share_original_key_counter_zero() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, _authority, _state) = secure_modern();
     // Real native DMA key binding and complete-owned single-parent replay
     // gate, with distinct source sequence queues and one shared PN domain.
@@ -552,6 +561,9 @@ fn split_bytes(format: u8, pn: Option<u64>, source: u8) -> Vec<u8> {
 
 #[test]
 fn queue_bound_split_parent_uses_one_replay_commit_and_original_member_sources() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, _, _) = secure_modern();
     let head = split_bytes(3, Some(20), 1);
     let tail = split_bytes(1, None, 2);
@@ -634,6 +646,9 @@ fn qos_packet(sequence: u16) -> Vec<u8> {
 
 #[test]
 fn ba_enable_sequence_replays_parent_once() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use wifi::regulatory::AssociationUse;
     let (mut driver, model, mut authority, state) = secure_modern();
     let parameters: u16 = 1 | 2 | (6 << 2) | (8 << 6);
@@ -768,6 +783,9 @@ fn ba_enable_sequence_replays_parent_once() {
 
 #[test]
 fn ccmp_and_gcmp_keys_bind_receive_layouts() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use wifi::regulatory::AssociationUse;
     for (suite, firmware, length) in [(4, 4u32, 16), (10, 10, 32), (8, 11, 16), (9, 12, 32)] {
         let (mut driver, model, _) = awaiting_cipher(suite);
@@ -851,6 +869,9 @@ fn ccmp_and_gcmp_keys_bind_receive_layouts() {
 
 #[test]
 fn peer_delba_before_native_start_cannot_publish_or_resurrect_the_agreement() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, _, _) = secure_modern();
     let parameters: u16 = 2 | (6 << 2) | (8 << 6);
     let mut request = vec![3, 0, 7];
@@ -888,6 +909,9 @@ fn peer_delba_before_native_start_cannot_publish_or_resurrect_the_agreement() {
 
 #[test]
 fn modern_failed_real_configuration_keeps_current_context_and_peer() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use wifi::regulatory::AssociationUse;
     let (mut driver, model, before) = awaiting();
     let context = driver.modern_context().unwrap().clone();
@@ -924,6 +948,9 @@ fn modern_failed_real_configuration_keeps_current_context_and_peer() {
 
 #[test]
 fn late_firmware_completion_cannot_reuse_precommand_configuration_time() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use wifi::regulatory::AssociationUse;
     let (mut driver, model, _) = awaiting();
     let (mut authority, _) = authority(&driver, &model);
@@ -952,6 +979,9 @@ fn late_firmware_completion_cannot_reuse_precommand_configuration_time() {
 
 #[test]
 fn copied_modern_local_streams_refuse_before_any_peer_or_packet_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     let (mut join, beacon) = modern_inputs(&driver);
     let mut elements = join.request.elements().to_vec();

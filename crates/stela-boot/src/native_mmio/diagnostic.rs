@@ -100,7 +100,11 @@ unsafe fn check_native_hpet(
     // firmware/native comparator routes or other counter readers/writers.
     let owned = unsafe { source.take_hpet(identity.clone()) }?;
     let mut counter = crate::native_clock::HpetCounter::attach_native_exclusive(owned)?;
-    if !alloc::sync::Arc::ptr_eq(counter.identity(), &identity) || counter.owner().is_ok() {
+    if counter
+        .identity()
+        .is_none_or(|actual| !alloc::sync::Arc::ptr_eq(actual, &identity))
+        || counter.owner().is_ok()
+    {
         return Err(Error::InvalidPlatformReply.into());
     }
     let before = counter.read_irq()?;
@@ -145,6 +149,9 @@ unsafe fn check_native_hpet(
         }
     }
     let base = counter.descriptor().registers().start();
+    let retained = source
+        .authority()
+        .resolve_resource(counter.descriptor().registers())?;
     // SAFETY: this stack frame is the only counter reader, no IRQ/publication
     // exists, and every Source/RootIdentity/controller owner remains live.
     unsafe { counter.retire() }?;
@@ -160,6 +167,16 @@ unsafe fn check_native_hpet(
         return Err(Error::UnmapFailed.into());
     }
     drop(counter);
+    if !matches!(
+        source.join_hpet(),
+        Err(Error::Assignment(
+            stela_drivers::bus::pci::assignment::Error::Busy { .. }
+        ))
+    ) {
+        return Err(Error::InvalidPlatformReply.into());
+    }
+    drop(retained);
+    source.join_hpet()?;
     crate::output::arguments(format_args!(
         "CHECK native-hpet-owner PASS source=production identity=actual base={base:#x} counter=progressed retire=config-restored+UC-unmapped+resource-released; no IRQ, Runtime or RAM-adoption grant\n"
     ));
@@ -169,6 +186,19 @@ unsafe fn check_native_hpet(
     let owned = unsafe { source.take_hpet(identity.clone()) }?;
     let prepared = Prepared::exclusive_native_hpet(owned)?;
     let counter = prepared.hpet_counter().ok_or(Error::Unavailable)?.clone();
+    {
+        let minimum = prepared.pci_minimum()?;
+        let interval = minimum
+            .begin_interval(20)
+            .map_err(|_| Error::Unavailable)?
+            .ok_or(Error::Unavailable)?;
+        let start = counter.read_irq()?;
+        minimum.wait_us(20).map_err(|_| Error::Unavailable)?;
+        let elapsed = counter.elapsed_bounds(counter.read_irq()?.wrapping_sub(start))?;
+        if elapsed.lower_ns < 20_000 || !interval.elapsed().map_err(|_| Error::Unavailable)? {
+            return Err(Error::InvalidPlatformReply.into());
+        }
+    }
     // SAFETY: original Source/RootIdentity, controller, IDT and ARAT
     // delivery stay pinned. This diagnostic creates no production producer.
     unsafe { crate::native_clock::diagnostic::check_native(handoff, owner, identity, prepared) }?;
@@ -184,6 +214,8 @@ unsafe fn check_native_hpet(
     {
         return Err(Error::UnmapFailed.into());
     }
+    drop(counter);
+    source.join_hpet()?;
     crate::output::arguments(format_args!(
         "CHECK native-hpet-clock PASS source=production identity=immutable IRQ=elapsed idle=HLT guest_mux=elapsed retire=quiet+source-released; no RAM-adoption or production-service grant\n"
     ));
@@ -196,6 +228,8 @@ unsafe fn check_native_hpet(
 /// other CPU or legacy driver owns or accesses HPET control/counter/comparator/
 /// decode/route state or IOAPIC/ECAM during the kernel-image epoch. Caller stops the boot immediately afterward, preserving the
 /// permanently installed Permission/IRQ/clock's physical root owner.
+/// The same handoff excludes other writers of every captured remapper until
+/// the last controller readback and notification mapping retirement.
 pub(crate) unsafe fn check(handoff: &'static Handoff, owner: &mut HostOwner) -> Result<(), Error> {
     if handoff.native_resources.cores != 1 || handoff.storage.present {
         return Err(Error::Unavailable);
@@ -205,6 +239,12 @@ pub(crate) unsafe fn check(handoff: &'static Handoff, owner: &mut HostOwner) -> 
     let (source, session) = stage("authority-activate", unsafe {
         ScopedSource::activate(handoff, &root)
     })?;
+    let notification = stage(
+        "original-notification-owner",
+        // SAFETY: same original scope and inactive firmware inventory, with
+        // every format writer excluded for this bounded diagnostic.
+        unsafe { source.pin_inactive_notification(handoff, &session) },
+    )?;
     // SAFETY: diagnostic's complete post-EBS wholeblock handoff excludes
     // firmware/SMM/native comparator/counter/decode/route owners. Original SDT
     // and idle register values alone are not that physical ownership proof.
@@ -234,7 +274,12 @@ pub(crate) unsafe fn check(handoff: &'static Handoff, owner: &mut HostOwner) -> 
         "irq-root-attach",
         // SAFETY: the driver execution owns interrupt delivery and the claimed IOAPICs.
         unsafe {
-            crate::native_irq::root::Root::attach(&execution, source.authority(), source.madt())
+            crate::native_irq::root::Root::attach(
+                &execution,
+                source.authority(),
+                source.madt(),
+                notification.clone(),
+            )
         }
         .map_err(|error| {
             crate::output::arguments(format_args!(
@@ -302,6 +347,9 @@ pub(crate) unsafe fn check(handoff: &'static Handoff, owner: &mut HostOwner) -> 
         irq.recheck_firmware_lines().map_err(failed),
     )?;
     drop(irq);
+    // SAFETY: the diagnostic published no contributor. Dropping the only
+    // IOAPIC root ended all notification-domain users before map withdrawal.
+    stage("notification-retire", unsafe { notification.retire() })?;
     source.verify_only_hpet(counter.owner().map_err(failed)?)?;
     let mut reused = source.authority().map(
         ecam,

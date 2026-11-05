@@ -60,6 +60,7 @@ impl AhciDisk {
         failure: &mut Failure,
         io: bool,
     ) -> Result<(), BlockError> {
+        self.minimum.check()?;
         if !failure.frozen {
             stop_engine(port, self.clock)?;
             start_engine(port);
@@ -110,6 +111,7 @@ impl AhciDisk {
         mut tries: usize,
     ) -> Result<(), BlockError> {
         loop {
+            self.minimum.ready()?;
             if reset {
                 let mut online = None;
                 for timeout in RESET_TIMEOUTS_US {
@@ -118,7 +120,10 @@ impl AhciDisk {
                             online = Some(present);
                             break;
                         }
-                        Err(error) => last = error,
+                        Err(error) => {
+                            self.minimum.ready()?;
+                            last = error;
+                        }
                     }
                 }
                 match online {
@@ -142,6 +147,7 @@ impl AhciDisk {
             else {
                 return Ok(());
             };
+            self.minimum.ready()?;
             // ata_eh_handle_dev_fail: another device gets one more chance,
             // and the last chance runs slower; -EAGAIN costs no try.
             if error != AGAIN {
@@ -172,6 +178,7 @@ impl AhciDisk {
         mask: u32,
         io: bool,
     ) -> Result<bool, BlockError> {
+        self.minimum.check()?;
         let mut eflags = if io { EFLAG_IO } else { 0 };
         if self.dubious {
             eflags |= EFLAG_DUBIOUS;
@@ -289,6 +296,7 @@ impl AhciDisk {
         timeout_us: u64,
         hotplug: bool,
     ) -> Result<bool, BlockError> {
+        self.minimum.check()?;
         let clock = self.clock;
         let start = clock.try_start().map_err(|_| BlockError::Timeout)?;
         let elapsed = || clock.try_elapsed_us(start).map_err(|_| BlockError::Timeout);
@@ -311,18 +319,21 @@ impl AhciDisk {
             port.write32(PORT_SATA_CONTROL, control | target << SPEED_SHIFT);
         }
         let speed = port.read32(PORT_SATA_CONTROL) & SATA_CONTROL_SPEED;
-        port.write32(PORT_SATA_CONTROL, speed | SATA_CONTROL_COMRESET);
-        port.read32(PORT_SATA_CONTROL);
-        clock.delay(COMRESET_HOLD_US);
+        self.minimum.wait_after(COMRESET_HOLD_US, || {
+            port.write32(PORT_SATA_CONTROL, speed | SATA_CONTROL_COMRESET);
+            port.read32(PORT_SATA_CONTROL);
+        })?;
         // sata_link_resume
         let mut resumed = false;
         let mut control = port.read32(PORT_SATA_CONTROL);
         for _ in 0..RESUME_TRIES {
-            port.write32(
-                PORT_SATA_CONTROL,
-                control & SATA_CONTROL_SPEED | SATA_CONTROL_RESUMED,
-            );
-            clock.delay(RESUME_SETTLE_US);
+            self.minimum.wait_after(RESUME_SETTLE_US, || {
+                port.write32(
+                    PORT_SATA_CONTROL,
+                    control & SATA_CONTROL_SPEED | SATA_CONTROL_RESUMED,
+                );
+                port.read32(PORT_SATA_CONTROL);
+            })?;
             control = port.read32(PORT_SATA_CONTROL);
             if control & SATA_CONTROL_RESUME_MASK == SATA_CONTROL_RESUMED {
                 resumed = true;
@@ -336,7 +347,13 @@ impl AhciDisk {
                 } else {
                     DEBOUNCE_NORMAL
                 };
-                debounce(port, clock, timing, timeout_us.saturating_sub(elapsed()?))?;
+                debounce(
+                    port,
+                    clock,
+                    &self.minimum,
+                    timing,
+                    timeout_us.saturating_sub(elapsed()?),
+                )?;
                 port.write32(PORT_SATA_ERROR, port.read32(PORT_SATA_ERROR));
             }
             if port.read32(PORT_SATA_STATUS) & SATA_STATUS_DETECTION != DEVICE_PRESENT {
@@ -351,6 +368,9 @@ impl AhciDisk {
             }
             Ok(true)
         })();
+        // A timing callback may have failed during debounce. Do not execute
+        // Linux's ordinary error-path engine restart after that terminal loss.
+        self.minimum.ready()?;
         start_engine(port);
         let online = result?;
         // ata_eh_reset records the current link speed.

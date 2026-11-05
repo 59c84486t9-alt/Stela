@@ -4,9 +4,6 @@ mod amd;
 #[cfg(feature = "amd-commands")]
 #[path = "build/amd_commands.rs"]
 mod amd_commands;
-#[cfg(feature = "nouveau-port")]
-#[path = "build/initcalls.rs"]
-mod initcalls;
 #[cfg(feature = "intel-port")]
 #[path = "build/intel.rs"]
 mod intel;
@@ -34,13 +31,15 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CLIPPY_ARGS");
     #[cfg(feature = "linux-kernel")]
     if std::env::var_os("CLIPPY_ARGS").is_some() {
-        let mut tests = native::Tests::default();
-        tests.rust_children();
+        let tests = stela_c_build::linux_build::Tests::default();
         tests.write();
         return;
     }
     #[cfg(feature = "linux-kernel")]
-    let (linux, mut tests) = (native::Linux::new(), native::Tests::default());
+    let (linux, mut tests) = (
+        native::Linux::new(),
+        stela_c_build::linux_build::Tests::default(),
+    );
     #[cfg(feature = "linux-kernel")]
     linux.tests(&mut tests);
     #[cfg(feature = "amd-port")]

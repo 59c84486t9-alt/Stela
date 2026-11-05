@@ -8,6 +8,7 @@
 //! Firmware clock synchronization lacks an UTC service and is explicitly
 //! unsupported. Final armed-MSI retirement remains unsupported until the common
 //! root owner implements posted-MSI completion; all original owners are held.
+pub mod cold;
 mod descriptor;
 mod input;
 mod native;
@@ -25,6 +26,8 @@ pub use registers::{MappedRegisters, Registers};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
+    ConfigAccess(crate::bus::pci::ConfigError),
+    Capability(crate::bus::pci::CapabilityError),
     Requirement(&'static str),
     Mapping(owned::Error),
     Config(u16),

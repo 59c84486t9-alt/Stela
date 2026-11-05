@@ -8,6 +8,10 @@ pub use crate::bluetooth::intel::*;
 use super::{Hci, Io, Packet, State};
 
 /// Initialize identified Intel firmware through the real USB transport.
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub fn initialize<'a, B: Io>(
     hci: &mut Hci<B>,
     provider: &'a dyn crate::firmware::Provider,
@@ -15,6 +19,10 @@ pub fn initialize<'a, B: Io>(
     crate::bluetooth::intel::initialize(hci, provider)
 }
 /// Preserve explicit DSBR capture/default provenance for USB initialization.
+#[expect(
+    clippy::result_large_err,
+    reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+)]
 pub fn initialize_with_platform<'a, B: Io>(
     hci: &mut Hci<B>,
     provider: &'a dyn crate::firmware::Provider,
@@ -32,6 +40,10 @@ impl<B: Io> CommandIo for Hci<B> {
     fn submit_command(&mut self, bytes: &[u8]) -> Result<(), Error> {
         Hci::submit_command(self, bytes).map_err(Into::into)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "The shared error preserves exact source and cleanup causes without allocating on propagation."
+    )]
     fn events(&mut self) -> Result<alloc::vec::Vec<alloc::vec::Vec<u8>>, Error> {
         self.poll()?
             .into_iter()

@@ -175,9 +175,10 @@ pub struct Snapshot {
 /// # Safety
 /// Identity and board observations bind the same requester and
 /// reset epoch. Former firmware/driver/CPU owners are independently drained;
-/// their DMA/domain/IRQ reservations cannot alias any new allocation. `prepare`
-/// performs acknowledged coordinated FLR/isolation, waits
-/// at least the donor's 100 ms before BAR accesses, establishes PCI D0/MEM/BM,
+/// their DMA/domain/IRQ reservations cannot alias any new allocation. Before
+/// allocation, `prepare` ensures acknowledged coordinated FLR/isolation under
+/// the original root and at least the donor's 100 ms before BAR accesses, then
+/// establishes PCI D0/MEM/BM only after private binding,
 /// and disables BCM4377 ASPM including its parent-link policy.
 /// `now_us` observes the monotonic microsecond clock; delayed native
 /// effects and observations remain inside the same request deadline.
@@ -187,7 +188,9 @@ pub struct Snapshot {
 /// coherent for source shared-index polling. MSI admission installs exactly one
 /// real checked message/callback with every native owner kept; no INTx or
 /// MSI-X fallback. `retire` independently stops device DMA/posted writes,
-/// drains root/domain/CPU/IRQ/callback/deferred work and excludes future access;
+/// drains root/domain/CPU/IRQ/callback/deferred work and excludes future access.
+/// After buffer lease removal, `retire_resources` detaches the requester before
+/// retiring its configuration/BAR mappings;
 /// ring-destroy replies, SLEEP3 and masking alone are not that proof. An error
 /// keeps all uncertain native resources and forbids automatic retry/reopen.
 pub unsafe trait Platform: 'static {
@@ -214,7 +217,18 @@ pub unsafe trait Platform: 'static {
         false
     }
     fn arm_msi(&mut self) -> Result<()>;
+    /// Stop/reset and drain device, payload, posted MSI, CPU and deferred users.
+    /// DMA leases and PCI mappings remain owned until final resource retirement.
     fn retire(&mut self) -> Result<()>;
+    /// Called once after every coherent lease has been successfully unmapped.
+    /// Native implementations detach the requester before retiring PCI mappings.
+    /// A direct call while stopped coherent leases remain must refuse before
+    /// requester blocking or any PCI mapping release.
+    /// The default applies only when the provider has no separate requester or
+    /// platform mapping obligations beyond the transport's coherent buffers.
+    fn retire_resources(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub struct Transport<P: Platform> {

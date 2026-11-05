@@ -18,6 +18,7 @@ fn host(
         Clock {
             ticks_per_microsecond: CLOCK_TICKS_PER_US,
         },
+        crate::sdhci::model::minimum(),
         "SDHCI native model".into(),
         dma,
         Profile::Standard,
@@ -440,11 +441,15 @@ fn initial_card_clock_runs_before_cmd0_and_unqualified_1v8_hosts_refuse() {
             Clock {
                 ticks_per_microsecond: 0
             },
+            crate::sdhci::model::minimum(),
             "uncalibrated".into(),
             &mut dma,
             Profile::Standard,
         ),
-        Err(BlockError::Unsupported(_))
+        Err(HostFailure {
+            error: BlockError::Unsupported(_),
+            ..
+        })
     ));
     assert!(unclocked.borrow().writes.is_empty());
     assert_eq!(unclocked.borrow().reads, 0);
@@ -456,11 +461,15 @@ fn initial_card_clock_runs_before_cmd0_and_unqualified_1v8_hosts_refuse() {
             Clock {
                 ticks_per_microsecond: CLOCK_TICKS_PER_US
             },
+            crate::sdhci::model::minimum(),
             "unqualified1.8V".into(),
             &mut dma,
             Profile::Standard,
         ),
-        Err(BlockError::Unsupported(_))
+        Err(HostFailure {
+            error: BlockError::Unsupported(_),
+            ..
+        })
     ));
     assert!(model.borrow().commands.is_empty());
     assert!(
@@ -595,6 +604,7 @@ fn ene_exact_pci_profiles_apply_real_power_pio_and_ios_reset_sequences() {
                 Clock {
                     ticks_per_microsecond: CLOCK_TICKS_PER_US,
                 },
+                crate::sdhci::model::minimum(),
                 format!("ENE {device:04x}"),
                 &mut dma,
                 Profile::select(0x1524, device),
@@ -681,6 +691,7 @@ fn ene_failed_post_settings_reset_retires_old_aliases_and_pins_controller() {
         Clock {
             ticks_per_microsecond: CLOCK_TICKS_PER_US,
         },
+        crate::sdhci::model::minimum(),
         "ENE fault".into(),
         &mut dma,
         Profile::select(0x1524, 0x0750),
@@ -731,6 +742,7 @@ fn intel_exact_profiles_apply_declared_wiring_without_hispd_or_broken_adma() {
                 Clock {
                     ticks_per_microsecond: CLOCK_TICKS_PER_US,
                 },
+                crate::sdhci::model::minimum(),
                 format!("Intel {device:04x}"),
                 &mut dma,
                 profile,
@@ -804,6 +816,7 @@ fn intel_wide_bus_crc_failure_never_publishes_or_revives_legacy_alias() {
         Clock {
             ticks_per_microsecond: CLOCK_TICKS_PER_US,
         },
+        crate::sdhci::model::minimum(),
         "Intel faulty wiring".into(),
         &mut dma,
         Profile::select(0x8086, 0x0807),

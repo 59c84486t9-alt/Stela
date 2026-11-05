@@ -97,6 +97,9 @@ pub enum Phase {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
+    PciClaim(crate::bus::pci::requester::ClaimError),
+    Config(crate::bus::pci::ConfigError),
+    PciCapability(crate::bus::pci::CapabilityError),
     Ownership,
     MicrophoneAbsent,
     UnsupportedController,
@@ -1033,4 +1036,15 @@ pub(super) fn check_dma_range(
         return Err(Error::DmaAddress);
     }
     Ok(())
+}
+
+impl From<crate::bus::pci::ConfigError> for Error {
+    fn from(error: crate::bus::pci::ConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+impl From<crate::bus::pci::CapabilityError> for Error {
+    fn from(error: crate::bus::pci::CapabilityError) -> Self {
+        Self::PciCapability(error)
+    }
 }

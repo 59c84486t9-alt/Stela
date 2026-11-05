@@ -1,0 +1,465 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 23:21:21 -0500
+Subject: [PATCH] refactor(vfs): link original resolved path open
+
+---
+ fs/Makefile    |   2 +-
+ fs/open.c      | 195 -------------------------------------------
+ fs/path_open.c | 221 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 222 insertions(+), 196 deletions(-)
+ create mode 100644 fs/path_open.c
+
+diff --git a/fs/Makefile b/fs/Makefile
+index 6404e0cd26b7577e2c14b377c81d5e5f164d8f20..0c5bdce5c6836cd1546cdeeaea5119109078f599 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -7,7 +7,7 @@
+ # 
+ 
+ 
+-obj-y :=	open.o filp_close.o read_write.o file_table.o file_table_init.o super.o super_anon_dev.o super_lifetime.o \
++obj-y :=	open.o path_open.o filp_close.o read_write.o file_table.o file_table_init.o super.o super_anon_dev.o super_lifetime.o \
+ 		char_dev.o stat.o exec.o task_comm.o pipe.o namei.o path_get.o name_hash.o filename.o fcntl.o \
+ 		ioctl.o readdir.o select.o dcache.o dcache_init.o dentry_ancestry.o inode.o inode_cache_init.o inode_timestamps.o inode_evict.o \
+ 		attr.o bad_inode.o bad_inode_ops.o file.o file_ref.o init_fdtable.o filesystems.o namespace.o mount_cache.o \
+diff --git a/fs/open.c b/fs/open.c
+index ef4a63acd9c0f88a172cd2ec4664f3ec478970b8..cb744283906759c67366cb5a6329679e6f68df58 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -859,158 +859,6 @@ SYSCALL_DEFINE3(fchown, unsigned int, fd, uid_t, user, gid_t, group)
+ 	return ksys_fchown(fd, user, group);
+ }
+ 
+-static inline int file_get_write_access(struct file *f)
+-{
+-	int error;
+-
+-	error = get_write_access(f->f_inode);
+-	if (unlikely(error))
+-		return error;
+-	error = mnt_get_write_access(f->f_path.mnt);
+-	if (unlikely(error))
+-		goto cleanup_inode;
+-	if (unlikely(f->f_mode & FMODE_BACKING)) {
+-		error = mnt_get_write_access(backing_file_user_path(f)->mnt);
+-		if (unlikely(error))
+-			goto cleanup_mnt;
+-	}
+-	return 0;
+-
+-cleanup_mnt:
+-	mnt_put_write_access(f->f_path.mnt);
+-cleanup_inode:
+-	put_write_access(f->f_inode);
+-	return error;
+-}
+-
+-static int do_dentry_open(struct file *f,
+-			  int (*open)(struct inode *, struct file *))
+-{
+-	static const struct file_operations empty_fops = {};
+-	struct inode *inode = f->f_path.dentry->d_inode;
+-	int error;
+-
+-	path_get(&f->f_path);
+-	f->f_inode = inode;
+-	f->f_mapping = inode->i_mapping;
+-	f->f_wb_err = filemap_sample_wb_err(f->f_mapping);
+-	f->f_sb_err = file_sample_sb_err(f);
+-
+-	if (unlikely(f->f_flags & O_PATH)) {
+-		f->f_mode = FMODE_PATH | FMODE_OPENED;
+-		file_set_fsnotify_mode(f, FMODE_NONOTIFY);
+-		f->f_op = &empty_fops;
+-		return 0;
+-	}
+-
+-	if ((f->f_mode & (FMODE_READ | FMODE_WRITE)) == FMODE_READ) {
+-		i_readcount_inc(inode);
+-	} else if (f->f_mode & FMODE_WRITE && !special_file(inode->i_mode)) {
+-		error = file_get_write_access(f);
+-		if (unlikely(error))
+-			goto cleanup_file;
+-		f->f_mode |= FMODE_WRITER;
+-	}
+-
+-	/* POSIX.1-2008/SUSv4 Section XSI 2.9.7 */
+-	if (S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode))
+-		f->f_mode |= FMODE_ATOMIC_POS;
+-
+-	f->f_op = fops_get(inode->i_fop);
+-	if (WARN_ON(!f->f_op)) {
+-		error = -ENODEV;
+-		goto cleanup_all;
+-	}
+-
+-	error = security_file_open(f);
+-	if (unlikely(error))
+-		goto cleanup_all;
+-
+-	/*
+-	 * Call fsnotify open permission hook and set FMODE_NONOTIFY_* bits
+-	 * according to existing permission watches.
+-	 * If FMODE_NONOTIFY mode was already set for an fanotify fd or for a
+-	 * pseudo file, this call will not change the mode.
+-	 */
+-	error = fsnotify_open_perm_and_set_mode(f);
+-	if (unlikely(error))
+-		goto cleanup_all;
+-
+-	error = break_lease(file_inode(f), f->f_flags);
+-	if (unlikely(error))
+-		goto cleanup_all;
+-
+-	/* normally all 3 are set; ->open() can clear them if needed */
+-	f->f_mode |= FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE;
+-	if (!open)
+-		open = f->f_op->open;
+-	if (open) {
+-		error = open(inode, f);
+-		if (error)
+-			goto cleanup_all;
+-	}
+-	f->f_mode |= FMODE_OPENED;
+-	if ((f->f_mode & FMODE_READ) &&
+-	     likely(f->f_op->read || f->f_op->read_iter))
+-		f->f_mode |= FMODE_CAN_READ;
+-	if ((f->f_mode & FMODE_WRITE) &&
+-	     likely(f->f_op->write || f->f_op->write_iter))
+-		f->f_mode |= FMODE_CAN_WRITE;
+-	if ((f->f_mode & FMODE_LSEEK) && !f->f_op->llseek)
+-		f->f_mode &= ~FMODE_LSEEK;
+-	if (f->f_mapping->a_ops && f->f_mapping->a_ops->direct_IO)
+-		f->f_mode |= FMODE_CAN_ODIRECT;
+-
+-	f->f_flags &= ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | __O_REGULAR);
+-	f->f_iocb_flags = iocb_flags(f);
+-
+-	file_ra_state_init(&f->f_ra, f->f_mapping->host->i_mapping);
+-
+-	if ((f->f_flags & O_DIRECT) && !(f->f_mode & FMODE_CAN_ODIRECT))
+-		return -EINVAL;
+-
+-	return 0;
+-
+-cleanup_all:
+-	if (WARN_ON_ONCE(error > 0))
+-		error = -EINVAL;
+-	fops_put(f->f_op);
+-	put_file_access(f);
+-cleanup_file:
+-	path_put(&f->f_path);
+-	f->__f_path.mnt = NULL;
+-	f->__f_path.dentry = NULL;
+-	f->f_inode = NULL;
+-	return error;
+-}
+-
+-/**
+- * finish_open - finish opening a file
+- * @file: file pointer
+- * @dentry: pointer to dentry
+- * @open: open callback
+- *
+- * This can be used to finish opening a file passed to i_op->atomic_open().
+- *
+- * If the open callback is set to NULL, then the standard f_op->open()
+- * filesystem callback is substituted.
+- *
+- * NB: the dentry reference is _not_ consumed.  If, for example, the dentry is
+- * the return value of d_splice_alias(), then the caller needs to perform dput()
+- * on it after finish_open().
+- *
+- * Returns zero on success or -errno if the open failed.
+- */
+-int finish_open(struct file *file, struct dentry *dentry,
+-		int (*open)(struct inode *, struct file *))
+-{
+-	BUG_ON(file->f_mode & FMODE_OPENED); /* once it's opened, it's opened */
+-
+-	file->__f_path.dentry = dentry;
+-	return do_dentry_open(file, open);
+-}
+-EXPORT_SYMBOL(finish_open);
+-
+ /**
+  * finish_no_open - finish ->atomic_open() without opening the file
+  *
+@@ -1040,49 +888,6 @@ char *file_path(struct file *filp, char *buf, int buflen)
+ }
+ EXPORT_SYMBOL(file_path);
+ 
+-/**
+- * vfs_open - open the file at the given path
+- * @path: path to open
+- * @file: newly allocated file with f_flag initialized
+- */
+-int vfs_open(const struct path *path, struct file *file)
+-{
+-	int ret;
+-
+-	file->__f_path = *path;
+-	ret = do_dentry_open(file, NULL);
+-	if (!ret) {
+-		/*
+-		 * Once we return a file with FMODE_OPENED, __fput() will call
+-		 * fsnotify_close(), so we need fsnotify_open() here for
+-		 * symmetry.
+-		 */
+-		fsnotify_open(file);
+-	}
+-	return ret;
+-}
+-
+-struct file *dentry_open(const struct path *path, int flags,
+-			 const struct cred *cred)
+-{
+-	int error;
+-	struct file *f;
+-
+-	/* We must always pass in a valid mount pointer. */
+-	BUG_ON(!path->mnt);
+-
+-	f = alloc_empty_file(flags, cred);
+-	if (!IS_ERR(f)) {
+-		error = vfs_open(path, f);
+-		if (error) {
+-			fput(f);
+-			f = ERR_PTR(error);
+-		}
+-	}
+-	return f;
+-}
+-EXPORT_SYMBOL(dentry_open);
+-
+ struct file *dentry_open_nonotify(const struct path *path, int flags,
+ 				  const struct cred *cred)
+ {
+diff --git a/fs/path_open.c b/fs/path_open.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..fe2a506eac094b6441ccfe497d7e7cdedad99e6d
+--- /dev/null
++++ b/fs/path_open.c
+@@ -0,0 +1,221 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Open a resolved VFS path, from fs/open.c.
++ * Copyright (C) 1991, 1992 Linus Torvalds
++ */
++#include <linux/export.h>
++#include <linux/file.h>
++#include <linux/filelock.h>
++#include <linux/fs.h>
++#include <linux/fsnotify.h>
++#include <linux/module.h>
++#include <linux/mount.h>
++#include <linux/pagemap.h>
++#include <linux/security.h>
++
++#ifdef CONFIG_STELA
++#include <stela/file.h>
++#endif
++
++#include "internal.h"
++
++static inline int file_get_write_access(struct file *f)
++{
++	int error;
++
++	error = get_write_access(f->f_inode);
++	if (unlikely(error))
++		return error;
++	error = mnt_get_write_access(f->f_path.mnt);
++	if (unlikely(error))
++		goto cleanup_inode;
++	if (unlikely(f->f_mode & FMODE_BACKING)) {
++		error = mnt_get_write_access(backing_file_user_path(f)->mnt);
++		if (unlikely(error))
++			goto cleanup_mnt;
++	}
++	return 0;
++
++cleanup_mnt:
++	mnt_put_write_access(f->f_path.mnt);
++cleanup_inode:
++	put_write_access(f->f_inode);
++	return error;
++}
++
++static int do_dentry_open(struct file *f,
++			  int (*open)(struct inode *, struct file *))
++{
++	static const struct file_operations empty_fops = {};
++	struct inode *inode = f->f_path.dentry->d_inode;
++	int error;
++
++	path_get(&f->f_path);
++	f->f_inode = inode;
++	f->f_mapping = inode->i_mapping;
++	f->f_wb_err = filemap_sample_wb_err(f->f_mapping);
++	f->f_sb_err = file_sample_sb_err(f);
++
++	if (unlikely(f->f_flags & O_PATH)) {
++		f->f_mode = FMODE_PATH | FMODE_OPENED;
++		file_set_fsnotify_mode(f, FMODE_NONOTIFY);
++		f->f_op = &empty_fops;
++		return 0;
++	}
++
++	if ((f->f_mode & (FMODE_READ | FMODE_WRITE)) == FMODE_READ) {
++		i_readcount_inc(inode);
++	} else if (f->f_mode & FMODE_WRITE && !special_file(inode->i_mode)) {
++		error = file_get_write_access(f);
++		if (unlikely(error))
++			goto cleanup_file;
++		f->f_mode |= FMODE_WRITER;
++	}
++
++	/* POSIX.1-2008/SUSv4 Section XSI 2.9.7 */
++	if (S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode))
++		f->f_mode |= FMODE_ATOMIC_POS;
++
++	f->f_op = fops_get(inode->i_fop);
++	if (WARN_ON(!f->f_op)) {
++		error = -ENODEV;
++		goto cleanup_all;
++	}
++
++	error = security_file_open(f);
++	if (unlikely(error))
++		goto cleanup_all;
++
++	/*
++	 * Call fsnotify open permission hook and set FMODE_NONOTIFY_* bits
++	 * according to existing permission watches.
++	 * If FMODE_NONOTIFY mode was already set for an fanotify fd or for a
++	 * pseudo file, this call will not change the mode.
++	 */
++	error = fsnotify_open_perm_and_set_mode(f);
++	if (unlikely(error))
++		goto cleanup_all;
++
++	error = break_lease(file_inode(f), f->f_flags);
++	if (unlikely(error))
++		goto cleanup_all;
++
++	/* normally all 3 are set; ->open() can clear them if needed */
++	f->f_mode |= FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE;
++	if (!open)
++		open = f->f_op->open;
++	if (open) {
++		error = open(inode, f);
++		if (error)
++			goto cleanup_all;
++	}
++	f->f_mode |= FMODE_OPENED;
++	if ((f->f_mode & FMODE_READ) &&
++	     likely(f->f_op->read || f->f_op->read_iter))
++		f->f_mode |= FMODE_CAN_READ;
++	if ((f->f_mode & FMODE_WRITE) &&
++	     likely(f->f_op->write || f->f_op->write_iter))
++		f->f_mode |= FMODE_CAN_WRITE;
++	if ((f->f_mode & FMODE_LSEEK) && !f->f_op->llseek)
++		f->f_mode &= ~FMODE_LSEEK;
++	if (f->f_mapping->a_ops && f->f_mapping->a_ops->direct_IO)
++		f->f_mode |= FMODE_CAN_ODIRECT;
++
++	f->f_flags &= ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC | __O_REGULAR);
++	f->f_iocb_flags = iocb_flags(f);
++
++	file_ra_state_init(&f->f_ra, f->f_mapping->host->i_mapping);
++
++	if ((f->f_flags & O_DIRECT) && !(f->f_mode & FMODE_CAN_ODIRECT))
++		return -EINVAL;
++
++	return 0;
++
++cleanup_all:
++	if (WARN_ON_ONCE(error > 0))
++		error = -EINVAL;
++	fops_put(f->f_op);
++	put_file_access(f);
++cleanup_file:
++	path_put(&f->f_path);
++	f->__f_path.mnt = NULL;
++	f->__f_path.dentry = NULL;
++	f->f_inode = NULL;
++	return error;
++}
++
++/**
++ * finish_open - finish opening a file
++ * @file: file pointer
++ * @dentry: pointer to dentry
++ * @open: open callback
++ *
++ * This can be used to finish opening a file passed to i_op->atomic_open().
++ *
++ * If the open callback is set to NULL, then the standard f_op->open()
++ * filesystem callback is substituted.
++ *
++ * NB: the dentry reference is _not_ consumed.  If, for example, the dentry is
++ * the return value of d_splice_alias(), then the caller needs to perform dput()
++ * on it after finish_open().
++ *
++ * Returns zero on success or -errno if the open failed.
++ */
++int finish_open(struct file *file, struct dentry *dentry,
++		int (*open)(struct inode *, struct file *))
++{
++	BUG_ON(file->f_mode & FMODE_OPENED); /* once it's opened, it's opened */
++
++	file->__f_path.dentry = dentry;
++	return do_dentry_open(file, open);
++}
++EXPORT_SYMBOL(finish_open);
++
++/**
++ * vfs_open - open the file at the given path
++ * @path: path to open
++ * @file: newly allocated file with f_flag initialized
++ */
++int vfs_open(const struct path *path, struct file *file)
++{
++	int ret;
++
++	file->__f_path = *path;
++	ret = do_dentry_open(file, NULL);
++	if (!ret) {
++		/*
++		 * Once we return a file with FMODE_OPENED, __fput() will call
++		 * fsnotify_close(), so we need fsnotify_open() here for
++		 * symmetry.
++		 */
++		fsnotify_open(file);
++	}
++	return ret;
++}
++
++struct file *dentry_open(const struct path *path, int flags,
++			 const struct cred *cred)
++{
++	int error;
++	struct file *f;
++
++#ifdef CONFIG_STELA
++	/* Compatibility files lack a VFS mount and have no reopenable path. */
++	if (!path->mnt || !path->dentry || !d_inode(path->dentry) ||
++	    !d_inode(path->dentry)->i_sb)
++		return stela_linux_reopen_unowned_path();
++#endif
++	/* We must always pass in a valid mount pointer. */
++	BUG_ON(!path->mnt);
++
++	f = alloc_empty_file(flags, cred);
++	if (!IS_ERR(f)) {
++		error = vfs_open(path, f);
++		if (error) {
++			fput(f);
++			f = ERR_PTR(error);
++		}
++	}
++	return f;
++}
++EXPORT_SYMBOL(dentry_open);

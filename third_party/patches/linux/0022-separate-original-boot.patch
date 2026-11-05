@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 22:05:14 -0500
+Subject: [PATCH] refactor(mm): separate original boot allocation state
+
+---
+ mm/Makefile           |  2 +-
+ mm/page_alloc.c       | 19 -------------------
+ mm/page_alloc_state.c | 39 +++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 40 insertions(+), 20 deletions(-)
+ create mode 100644 mm/page_alloc_state.c
+
+diff --git a/mm/Makefile b/mm/Makefile
+index ea45571f15d1d8a0c5c3be86d9cca1fe1aa4ed2a..c357fafb7c1035b34168b700f38dd6395cce0ae4 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -58,7 +58,7 @@ obj-y			:= filemap.o mempool.o oom_kill.o fadvise.o \
+ 			   debug.o gup.o mmap_lock.o vma_init.o $(mmu-y)
+ 
+ # Give 'page_alloc' its own module-parameter namespace
+-page-alloc-y := page_alloc.o
++page-alloc-y := page_alloc.o page_alloc_state.o
+ page-alloc-$(CONFIG_SHUFFLE_PAGE_ALLOCATOR) += shuffle.o
+ 
+ # Give 'memory_hotplug' its own module-parameter namespace
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 73645d2eda6f4dc5a7502a85906ac25eff411997..c27f6cf37d3246fbe603aab2b8d16590bb036f02 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -185,25 +185,6 @@ volatile unsigned long latent_entropy __latent_entropy;
+ EXPORT_SYMBOL(latent_entropy);
+ #endif
+ 
+-/*
+- * Array of node states.
+- */
+-nodemask_t node_states[NR_NODE_STATES] __read_mostly = {
+-	[N_POSSIBLE] = NODE_MASK_ALL,
+-	[N_ONLINE] = { { [0] = 1UL } },
+-#ifndef CONFIG_NUMA
+-	[N_NORMAL_MEMORY] = { { [0] = 1UL } },
+-#ifdef CONFIG_HIGHMEM
+-	[N_HIGH_MEMORY] = { { [0] = 1UL } },
+-#endif
+-	[N_MEMORY] = { { [0] = 1UL } },
+-	[N_CPU] = { { [0] = 1UL } },
+-#endif	/* NUMA */
+-};
+-EXPORT_SYMBOL(node_states);
+-
+-gfp_t gfp_allowed_mask __read_mostly = GFP_BOOT_MASK;
+-
+ #ifdef CONFIG_HUGETLB_PAGE_SIZE_VARIABLE
+ unsigned int pageblock_order __read_mostly;
+ #endif
+diff --git a/mm/page_alloc_state.c b/mm/page_alloc_state.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8b8fff900c0bbb8ccccebb8b2ddca9967bfa6c7
+--- /dev/null
++++ b/mm/page_alloc_state.c
+@@ -0,0 +1,39 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ *
++ *  Manages the free list, the system allocates free pages here.
++ *  Note that kmalloc() lives in slab.c
++ *
++ *  Copyright (C) 1991, 1992, 1993, 1994  Linus Torvalds
++ *  Swap reorganised 29.12.95, Stephen Tweedie
++ *  Support of BIGMEM added by Gerhard Wichert, Siemens AG, July 1999
++ *  Reshaped it to be a zoned allocator, Ingo Molnar, Red Hat, 1999
++ *  Discontiguous memory support, Kanoj Sarcar, SGI, Nov 1999
++ *  Zone balancing, Kanoj Sarcar, SGI, Jan 2000
++ *  Per cpu hot/cold page lists, bulk allocation, Martin J. Bligh, Sept 2002
++ *          (lots of bits borrowed from Ingo Molnar & Andrew Morton)
++ */
++
++#include <linux/export.h>
++#include <linux/gfp.h>
++#include <linux/nodemask.h>
++
++/*
++ * Array of node states.
++ */
++nodemask_t node_states[NR_NODE_STATES] __read_mostly = {
++	[N_POSSIBLE] = NODE_MASK_ALL,
++	[N_ONLINE] = { { [0] = 1UL } },
++#ifndef CONFIG_NUMA
++	[N_NORMAL_MEMORY] = { { [0] = 1UL } },
++#ifdef CONFIG_HIGHMEM
++	[N_HIGH_MEMORY] = { { [0] = 1UL } },
++#endif
++	[N_MEMORY] = { { [0] = 1UL } },
++	[N_CPU] = { { [0] = 1UL } },
++#endif	/* NUMA */
++};
++EXPORT_SYMBOL(node_states);
++
++gfp_t gfp_allowed_mask __read_mostly =
++	__GFP_BITS_MASK & ~(__GFP_RECLAIM | __GFP_IO | __GFP_FS);

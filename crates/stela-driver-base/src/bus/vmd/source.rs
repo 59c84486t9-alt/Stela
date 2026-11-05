@@ -3,7 +3,7 @@
 //! Each child contributes its real device source and IRQ handler. No completion
 //! is inferred from a VMD mask, a BDF, or a caller-set software stopped flag.
 use super::*;
-use crate::bus::irq::{Handler, IrqError, MsiMessage, Route, RouteRequest, Source};
+use crate::bus::irq::{Handler, IrqError, MsiMessage, Route, Source};
 use crate::bus::pci::regs;
 use alloc::{boxed::Box, rc::Rc, sync::Arc};
 use core::cell::RefCell;
@@ -63,7 +63,7 @@ impl<R: Registers> ParentSource<R> {
         if children.is_empty()
             || children
                 .iter()
-                .any(|child| child.source.route() != RouteRequest::Msi)
+                .any(|child| child.source.route_kind() != crate::bus::irq::RouteKind::Msi)
         {
             return Err((Error::Address, host, children));
         }
@@ -119,11 +119,17 @@ unsafe impl<R: Registers> Source for ParentSource<R> {
         }
         Ok(())
     }
-    fn route(&self) -> RouteRequest {
-        RouteRequest::Msi
+    fn route_kind(&self) -> crate::bus::irq::RouteKind {
+        crate::bus::irq::RouteKind::Msi
     }
-    unsafe fn program(&mut self, route: Route) -> Result<(), IrqError> {
-        let Route::Msi(message) = route else {
+    fn requester(&self) -> Option<&crate::bus::pci::requester::RequesterId> {
+        None
+    }
+    unsafe fn program(
+        &mut self,
+        route: &crate::bus::irq::AllocatedRoute<'_>,
+    ) -> Result<(), IrqError> {
+        let Route::Msi(message) = route.programming() else {
             return Err(IrqError::Unsupported);
         };
         let host = self.host()?;
@@ -140,7 +146,9 @@ unsafe impl<R: Registers> Source for ParentSource<R> {
         for child in self.children.as_mut().ok_or(IrqError::Unregistered)? {
             // SAFETY: this is the owned VMD route to the same parent
             // registry/callback, not an invented APIC target for the child.
-            unsafe { child.program(Route::Msi(message)) }?;
+            let child_route = unsafe { route.vmd_child(message) };
+            // SAFETY: same exact complete child/VMD ingress owner, not a root grant.
+            unsafe { child.program(&child_route) }?;
         }
         Ok(())
     }

@@ -34,6 +34,15 @@ fn unlocked_with<T>(
     operation: impl FnOnce(&mut dyn ConfigSpace) -> Result<T, BlockError>,
 ) -> Result<T, BlockError> {
     let result = update(c, at, mask, open).and_then(|()| operation(c));
+    if matches!(
+        &result,
+        Err(BlockError::Config(_)
+            | BlockError::PciPower(_)
+            | BlockError::PciCapability(crate::bus::pci::CapabilityError::Config { .. }))
+    ) {
+        return result;
+    }
+
     let close = update(c, at, mask, 0);
     result.and_then(|value| close.map(|()| value))
 }
@@ -95,7 +104,9 @@ pub(super) fn set_clock(
     base: u32,
     timing: Timing,
     requested: u32,
+    minimum: &dyn crate::bus::pci::power::Timer,
 ) -> Result<u32, BlockError> {
+    minimum.check().map_err(BlockError::PciPower)?;
     unlocked(r, |r| update(r, PLL, DIRECT | SSC_ENABLE, 0))?;
     r.write16(CLOCK, 0);
     if r.read16(CLOCK) & CLOCK_CARD != 0 {
@@ -131,7 +142,7 @@ pub(super) fn set_clock(
         unlocked(r, |r| {
             update(r, PLL, 0x73ff | DIRECT, ldiv | pdiv << 12 | DIRECT)
         })?;
-        timer.delay(1_000);
+        minimum.wait_us(1_000).map_err(BlockError::PciPower)?;
     }
     let field = (divisor & 0xff) << 8 | (divisor & 0x300) >> 2;
     enable_clock(r, timer, version, field)?;
@@ -252,27 +263,69 @@ impl Engine {
     }
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Return the same affine device, mapping and timer graph without a fallible failure-path allocation."
+)]
 pub(super) fn attach(
-    mut function: Function,
+    mut owner: Retained<FunctionPreparation>,
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
-) -> Result<Attached, BlockError> {
-    validate_clock(handoff.clock)?;
-    let profile = Profile::select(function.vendor, function.device);
-    let mut mappings = prepare_slots(&mut function, handoff, profile)?;
-    let registers = mappings
-        .pop()
-        .ok_or(BlockError::Unsupported("GL9750 slot mapping absent"))?;
-    let location = format!("{} GL{:04x} SD slot", function.address, function.device);
-    let registers = pci::prepare(function, registers, handoff.clock)?;
-    let mut host = Host::new(Box::new(registers), handoff.clock, location, dma, profile)?;
+) -> Result<Attached, OwnedAttachFailure> {
+    let profile = Profile::select(owner.function.vendor, owner.function.device);
+    let location = format!(
+        "{} GL{:04x} SD slot",
+        owner.function.address, owner.function.device
+    );
+    if let Err(error) = prepare_slots(owner.get_mut(), handoff, profile) {
+        return Err(refused_preparation(error, owner));
+    }
+    let Some(registers) = owner.get_mut().mappings.pop() else {
+        return Err(refused_preparation(
+            BlockError::Unsupported("GL9750 slot mapping absent"),
+            owner,
+        ));
+    };
+    let FunctionPreparation {
+        function,
+        minimum,
+        mappings,
+    } = owner.into_inner();
+    drop(mappings);
+    let registers = pci::prepare(Retained::new(OwnedPreparation {
+        function,
+        registers,
+        clock: handoff.clock,
+        minimum: minimum.clone(),
+        stage: PreparationStage::Mapped,
+    }))?;
+    let mut host = Host::new(
+        Box::new(registers),
+        handoff.clock,
+        minimum.clone(),
+        location,
+        dma,
+        profile,
+    )
+    .map_err(|failure| OwnedAttachFailure {
+        error: failure.error,
+        owner: Retained::new(FailedAttachment::Host(failure.owner.into_inner())),
+    })?;
     let (cards, failures) = match host.poll() {
         Ok(Some(card)) => (alloc::vec![card], Vec::new()),
         Ok(None) => (Vec::new(), Vec::new()),
         Err(error) => (Vec::new(), alloc::vec![(0, error)]),
     };
+    let failed = host.inner.borrow().fault.is_some();
+    let (hosts, failed_hosts) = if failed {
+        (Vec::new(), alloc::vec![host])
+    } else {
+        (alloc::vec![host], Vec::new())
+    };
     Ok(Attached {
-        hosts: alloc::vec![host],
+        hosts,
+        failed_hosts,
+        failed_slots: Vec::new(),
         cards,
         failures,
     })

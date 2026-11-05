@@ -22,6 +22,9 @@ pub use stack::{
 /// Why a network operation failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NetError {
+    /// The link's exact PCI access/capability failure.
+    /// This is terminal for automatic transport retry, including uncertain writes.
+    Pci(stela_drivers::block::BlockError),
     /// The link adapter failed or refused a frame.
     Link(String),
     /// The owned transport clock refused; this stack cannot be reused.
@@ -76,6 +79,7 @@ impl NetError {
 impl fmt::Display for NetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Pci(why) => write!(f, "network PCI: {why}"),
             Self::Link(why) => write!(f, "network link: {why}"),
             Self::Clock(why) => write!(f, "network clock: {why}"),
             Self::NoCarrier => f.write_str("network link has no carrier"),
@@ -103,6 +107,7 @@ impl fmt::Display for NetError {
 impl From<LinkError> for NetError {
     fn from(error: LinkError) -> Self {
         match error {
+            LinkError::Pci(error) => Self::Pci(error),
             LinkError::Adapter(why) => Self::Link(why),
             LinkError::Invalid(why) => Self::Invalid(why),
             LinkError::NoCarrier => Self::NoCarrier,
@@ -149,5 +154,50 @@ pub trait Clock {
 impl Clock for stela_drivers::Clock {
     fn now_us(&self) -> Result<u64, ClockError> {
         self.try_now_us().map_err(ClockError::Calibration)
+    }
+}
+
+#[cfg(test)]
+mod pci_error_tests {
+    use super::*;
+    use stela_drivers::{
+        block::BlockError,
+        bus::pci::{ConfigError, ConfigFailure},
+    };
+
+    #[test]
+    fn link_pci_refusal_retains_exact_reason_and_effect_without_transport_retry() {
+        for error in [
+            ConfigError::before_effect(ConfigFailure::ForeignGrant),
+            ConfigError::write_may_have_applied(
+                4,
+                2,
+                ConfigFailure::Mapping(stela_drivers::bus::mmio::owned::Error::Unavailable),
+            ),
+        ] {
+            let cause = BlockError::Config(error);
+            let converted = NetError::from(LinkError::Pci(cause.clone()));
+            assert_eq!(converted, NetError::Pci(cause));
+            assert!(!converted.retryable());
+            let NetError::Pci(BlockError::Config(actual)) = converted else {
+                panic!("typed PCI failure lost");
+            };
+            assert_eq!(actual.reason, error.reason);
+            assert_eq!(actual.effect, error.effect);
+        }
+    }
+
+    #[test]
+    fn legacy_link_carrier_and_invalid_conversions_keep_their_retry_policy() {
+        let adapter = NetError::from(LinkError::Adapter(String::from("modeled link error")));
+        assert_eq!(adapter, NetError::Link(String::from("modeled link error")));
+        assert!(adapter.retryable());
+        assert_eq!(NetError::from(LinkError::NoCarrier), NetError::NoCarrier);
+        assert!(NetError::NoCarrier.retryable());
+        assert_eq!(
+            NetError::from(LinkError::Invalid("frame")),
+            NetError::Invalid("frame")
+        );
+        assert!(!NetError::Invalid("frame").retryable());
     }
 }

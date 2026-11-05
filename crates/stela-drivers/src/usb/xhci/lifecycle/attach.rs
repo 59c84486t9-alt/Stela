@@ -2,16 +2,23 @@
 //! USB2 downstream attachment waits across host service calls. Port reset
 //! and enumeration still require the same stable, observed connection.
 use super::*;
+use crate::bus::pci::power::{Error as ClockError, Interval};
 
 pub(super) struct Pending {
     pub(super) port: u8,
     debounce: enumerate::Debounce,
     next: Deadline,
     end: Deadline,
+    interval: Box<dyn Interval>,
 }
 
 impl Pending {
-    pub(super) fn start(c: &mut Controller, id: SlotId, port: u8) -> Result<Self, BlockError> {
+    pub(super) fn start(
+        c: &mut Controller,
+        id: SlotId,
+        port: u8,
+    ) -> Result<Option<Self>, BlockError> {
+        c.check_minimum()?;
         let end = c
             .clock
             .try_deadline(DEBOUNCE_TIMEOUT_US)
@@ -20,18 +27,40 @@ impl Pending {
         let (connected, changed) = c.sample_usb2_hub_port(id, port)?;
         let mut debounce = enumerate::Debounce::default();
         debounce.observe(connected, changed);
-        Ok(Self {
+        let interval = c.minimum.begin_interval(DEBOUNCE_STEP_US);
+        let Some(interval) = c.minimum_status(interval)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
             port,
             debounce,
             next: c.clock.deadline(DEBOUNCE_STEP_US),
             end,
-        })
+            interval,
+        }))
     }
 
-    pub(super) fn notice(&mut self, clock: Clock, connected: bool, changed: bool) {
+    fn restart_interval(&mut self, c: &mut Controller) -> Result<(), BlockError> {
+        let interval = c.minimum.begin_interval(DEBOUNCE_STEP_US);
+        let Some(interval) = c.minimum_status(interval)? else {
+            let failure = c.minimum.source_result(Err(ClockError::Clock));
+            return c.minimum_status(failure);
+        };
+        self.interval = interval;
+        self.next = c.clock.deadline(DEBOUNCE_STEP_US);
+        Ok(())
+    }
+
+    pub(super) fn notice(
+        &mut self,
+        c: &mut Controller,
+        connected: bool,
+        changed: bool,
+    ) -> Result<(), BlockError> {
         if self.debounce.restart_on_change(connected, changed) {
-            self.next = clock.deadline(DEBOUNCE_STEP_US);
+            self.restart_interval(c)?;
         }
+        Ok(())
     }
 
     fn due(&self, now: u64) -> bool {
@@ -39,16 +68,28 @@ impl Pending {
     }
 
     fn sample(&mut self, c: &mut Controller, id: SlotId) -> Result<Option<bool>, BlockError> {
-        if self.next.passed() {
-            let (connected, changed) = c.sample_usb2_hub_port(id, self.port)?;
-            if let Some(stable) = self.debounce.observe(connected, changed) {
-                return Ok(Some(stable));
+        let sampled = if self.next.passed() {
+            let elapsed = c.minimum.interval_elapsed(self.interval.as_ref());
+            if c.minimum_status(elapsed)? {
+                let (connected, changed) = c.sample_usb2_hub_port(id, self.port)?;
+                if let Some(stable) = self.debounce.observe(connected, changed) {
+                    return Ok(Some(stable));
+                }
+                true
+            } else {
+                false
             }
-        }
+        } else {
+            false
+        };
         if self.end.passed() {
             return Err(BlockError::Unsupported("USB port connection never settled"));
         }
-        self.next = c.clock.deadline(DEBOUNCE_STEP_US);
+        if sampled {
+            self.restart_interval(c)?;
+        } else {
+            self.next = c.clock.deadline(DEBOUNCE_STEP_US);
+        }
         Ok(None)
     }
 }

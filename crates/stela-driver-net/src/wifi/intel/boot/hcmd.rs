@@ -569,6 +569,9 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_HCMD_ORACLE"]
     fn unchanged_linux_sentinel_index_and_reclaim_oracle() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_HCMD_ORACLE").unwrap()).unwrap();
         assert_eq!(

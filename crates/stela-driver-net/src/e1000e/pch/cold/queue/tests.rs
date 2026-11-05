@@ -1562,3 +1562,26 @@ fn mtp_flush_success_does_not_replace_vendor_drain_and_unresolved_flush_never_re
         }
     }
 }
+
+#[test]
+fn lost_minimum_is_typed_through_link_and_cannot_resume_device_effects() {
+    let (state, released, controller) = setup();
+    let mut memory = Memory::new();
+    let mut net = open(controller, &mut memory);
+    let cause = crate::bus::pci::power::Error::Clock;
+    state.borrow_mut().timing_failure = Some(cause);
+    let observed = state.borrow().operations.clone();
+    assert!(!net.carrier());
+    let expected = LinkError::Pci(crate::block::BlockError::PciPower(cause));
+    assert_eq!(net.failure().and_then(Error::minimum_cause), Some(cause));
+    state.borrow_mut().timing_failure = None;
+    for _ in 0..3 {
+        assert_eq!(net.transmit(&[1; 60]), Err(expected.clone()));
+        assert_eq!(net.receive(), Err(expected.clone()));
+    }
+    assert_eq!(state.borrow().operations, observed);
+    drop(net);
+    assert_eq!(released.load(Ordering::SeqCst), 0);
+    // NVM's unused clone may drop; PHY keeps the actual shared provider alive.
+    assert_eq!(state.borrow().timer_drops.load(Ordering::SeqCst), 1);
+}

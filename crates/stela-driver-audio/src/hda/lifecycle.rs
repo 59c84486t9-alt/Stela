@@ -7,7 +7,7 @@
 //! Copyright (c) 2004 Takashi Iwai <tiwai@suse.de>
 //!                     PeiSen Hou <pshou@realtek.com.tw>
 use super::{Controller, Registers};
-use crate::{Error, bus::i2c::Timer};
+use crate::{Error, Timer};
 
 impl<R: Registers, T: Timer> Controller<R, T> {
     /// Stop all streams/command engines, then reset and restart command DMA.
@@ -17,6 +17,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// operations fail with NeedsReset. A later explicit attempt may recover.
     /// This does not restore PCI/ACPI power, ownership, or codec/OEM routes.
     pub fn reinitialize(&mut self) -> Result<(), Error> {
+        self.minimum_guard()?;
         let generation = self
             .token
             .generation
@@ -46,7 +47,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.writes = super::cache::Writes::default();
         self.discovery_ready = false;
         if let Err(error) = self.initialize() {
-            let _ = self.shutdown();
+            if self.first_effect_error().is_none() && self.reset_cleanup_error.is_none() {
+                // Preserve the original failure and any distinct shutdown
+                // failure in this same retained controller graph.
+                self.reset_cleanup_error = self.shutdown().err();
+            }
             return Err(error);
         }
         // CRST disabled codec unsolicited state and the controller
@@ -142,6 +147,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     pub fn discover_codecs(&mut self) -> Result<CodecDiscovery, DiscoveryFailure> {
         let mut failures = alloc::vec::Vec::new();
         let preflight = (|| {
+            self.minimum_guard()?;
             let budget = self.config.probe_policy.budget()?;
             if self.lifecycle_failed || self.command_poisoned || self.routing_failed {
                 return Err(Error::NeedsReset);
@@ -222,7 +228,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     failures,
                 });
             }
-            self.delay(u64::from(delay_us));
+            self.delay(u64::from(delay_us))
+                .map_err(|error| DiscoveryFailure {
+                    attempts: attempt,
+                    error,
+                    failures: core::mem::take(&mut failures),
+                })?;
             if let Err(error) = self.reinitialize() {
                 return Err(DiscoveryFailure {
                     attempts: attempt,

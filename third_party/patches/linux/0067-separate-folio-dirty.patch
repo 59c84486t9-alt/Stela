@@ -1,0 +1,212 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 01:00:26 -0500
+Subject: [PATCH] refactor(mm): separate folio dirty dispatch
+
+---
+ mm/folio-compat.c    | 12 -------
+ mm/page-writeback.c  | 70 -------------------------------------
+ mm/writeback_folio.c | 82 ++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 82 insertions(+), 82 deletions(-)
+
+diff --git a/mm/folio-compat.c b/mm/folio-compat.c
+index a02179a0bded3755dec98cdbb2634ae1d926cb43..349f3c5b9359bf0717b612684741db54f277f370 100644
+--- a/mm/folio-compat.c
++++ b/mm/folio-compat.c
+@@ -41,18 +41,6 @@ void set_page_writeback(struct page *page)
+ }
+ EXPORT_SYMBOL(set_page_writeback);
+ 
+-bool set_page_dirty(struct page *page)
+-{
+-	return folio_mark_dirty(page_folio(page));
+-}
+-EXPORT_SYMBOL(set_page_dirty);
+-
+-int set_page_dirty_lock(struct page *page)
+-{
+-	return folio_mark_dirty_lock(page_folio(page));
+-}
+-EXPORT_SYMBOL(set_page_dirty_lock);
+-
+ bool clear_page_dirty_for_io(struct page *page)
+ {
+ 	return folio_clear_dirty_for_io(page_folio(page));
+diff --git a/mm/page-writeback.c b/mm/page-writeback.c
+index 80c32b7881dbe1f3691ff9246f5bd030fc7ab553..51d55cde60086e294adbc315b4fc2f5726ff537b 100644
+--- a/mm/page-writeback.c
++++ b/mm/page-writeback.c
+@@ -2541,17 +2541,6 @@ int do_writepages(struct address_space *mapping, struct writeback_control *wbc)
+ 	return ret;
+ }
+ 
+-/*
+- * For address_spaces which do not use buffers nor write back.
+- */
+-bool noop_dirty_folio(struct address_space *mapping, struct folio *folio)
+-{
+-	if (!folio_test_dirty(folio))
+-		return !folio_test_set_dirty(folio);
+-	return false;
+-}
+-EXPORT_SYMBOL(noop_dirty_folio);
+-
+ /*
+  * Helper function for set_page_dirty family.
+  *
+@@ -2692,65 +2681,6 @@ bool folio_redirty_for_writepage(struct writeback_control *wbc,
+ }
+ EXPORT_SYMBOL(folio_redirty_for_writepage);
+ 
+-/**
+- * folio_mark_dirty - Mark a folio as being modified.
+- * @folio: The folio.
+- *
+- * The folio may not be truncated while this function is running.
+- * Holding the folio lock is sufficient to prevent truncation, but some
+- * callers cannot acquire a sleeping lock.  These callers instead hold
+- * the page table lock for a page table which contains at least one page
+- * in this folio.  Truncation will block on the page table lock as it
+- * unmaps pages before removing the folio from its mapping.
+- *
+- * Return: True if the folio was newly dirtied, false if it was already dirty.
+- */
+-bool folio_mark_dirty(struct folio *folio)
+-{
+-	struct address_space *mapping = folio_mapping(folio);
+-
+-	if (likely(mapping)) {
+-		/*
+-		 * readahead/folio_deactivate could remain
+-		 * PG_readahead/PG_reclaim due to race with folio_end_writeback
+-		 * About readahead, if the folio is written, the flags would be
+-		 * reset. So no problem.
+-		 * About folio_deactivate, if the folio is redirtied,
+-		 * the flag will be reset. So no problem. but if the
+-		 * folio is used by readahead it will confuse readahead
+-		 * and make it restart the size rampup process. But it's
+-		 * a trivial problem.
+-		 */
+-		if (folio_test_reclaim(folio))
+-			folio_clear_reclaim(folio);
+-		return mapping->a_ops->dirty_folio(mapping, folio);
+-	}
+-
+-	return noop_dirty_folio(mapping, folio);
+-}
+-EXPORT_SYMBOL(folio_mark_dirty);
+-
+-/*
+- * folio_mark_dirty() is racy if the caller has no reference against
+- * folio->mapping->host, and if the folio is unlocked.  This is because another
+- * CPU could truncate the folio off the mapping and then free the mapping.
+- *
+- * Usually, the folio _is_ locked, or the caller is a user-space process which
+- * holds a reference on the inode by having an open file.
+- *
+- * In other cases, the folio should be locked before running folio_mark_dirty().
+- */
+-bool folio_mark_dirty_lock(struct folio *folio)
+-{
+-	bool ret;
+-
+-	folio_lock(folio);
+-	ret = folio_mark_dirty(folio);
+-	folio_unlock(folio);
+-	return ret;
+-}
+-EXPORT_SYMBOL(folio_mark_dirty_lock);
+-
+ /*
+  * Clear a folio's dirty flag, while caring for dirty memory accounting.
+  * Returns true if the folio was previously dirty.
+diff --git a/mm/writeback_folio.c b/mm/writeback_folio.c
+index efbb7bcf3a61c3f2373eb24a5af3adfc46ec2448..a4ef8e820b65a02a051331ae1a7320f4ec79f09a 100644
+--- a/mm/writeback_folio.c
++++ b/mm/writeback_folio.c
+@@ -60,3 +60,85 @@ void __folio_cancel_dirty(struct folio *folio)
+ 	}
+ }
+ EXPORT_SYMBOL(__folio_cancel_dirty);
++
++/*
++ * For address_spaces which do not use buffers nor write back.
++ */
++bool noop_dirty_folio(struct address_space *mapping, struct folio *folio)
++{
++	if (!folio_test_dirty(folio))
++		return !folio_test_set_dirty(folio);
++	return false;
++}
++EXPORT_SYMBOL(noop_dirty_folio);
++
++/**
++ * folio_mark_dirty - Mark a folio as being modified.
++ * @folio: The folio.
++ *
++ * The folio may not be truncated while this function is running.
++ * Holding the folio lock is sufficient to prevent truncation, but some
++ * callers cannot acquire a sleeping lock.  These callers instead hold
++ * the page table lock for a page table which contains at least one page
++ * in this folio.  Truncation will block on the page table lock as it
++ * unmaps pages before removing the folio from its mapping.
++ *
++ * Return: True if the folio was newly dirtied, false if it was already dirty.
++ */
++bool folio_mark_dirty(struct folio *folio)
++{
++	struct address_space *mapping = folio_mapping(folio);
++
++	if (likely(mapping)) {
++		/*
++		 * readahead/folio_deactivate could remain
++		 * PG_readahead/PG_reclaim due to race with folio_end_writeback
++		 * About readahead, if the folio is written, the flags would be
++		 * reset. So no problem.
++		 * About folio_deactivate, if the folio is redirtied,
++		 * the flag will be reset. So no problem. but if the
++		 * folio is used by readahead it will confuse readahead
++		 * and make it restart the size rampup process. But it's
++		 * a trivial problem.
++		 */
++		if (folio_test_reclaim(folio))
++			folio_clear_reclaim(folio);
++		return mapping->a_ops->dirty_folio(mapping, folio);
++	}
++
++	return noop_dirty_folio(mapping, folio);
++}
++EXPORT_SYMBOL(folio_mark_dirty);
++
++/*
++ * folio_mark_dirty() is racy if the caller has no reference against
++ * folio->mapping->host, and if the folio is unlocked.  This is because another
++ * CPU could truncate the folio off the mapping and then free the mapping.
++ *
++ * Usually, the folio _is_ locked, or the caller is a user-space process which
++ * holds a reference on the inode by having an open file.
++ *
++ * In other cases, the folio should be locked before running folio_mark_dirty().
++ */
++bool folio_mark_dirty_lock(struct folio *folio)
++{
++	bool ret;
++
++	folio_lock(folio);
++	ret = folio_mark_dirty(folio);
++	folio_unlock(folio);
++	return ret;
++}
++EXPORT_SYMBOL(folio_mark_dirty_lock);
++
++bool set_page_dirty(struct page *page)
++{
++	return folio_mark_dirty(page_folio(page));
++}
++EXPORT_SYMBOL(set_page_dirty);
++
++int set_page_dirty_lock(struct page *page)
++{
++	return folio_mark_dirty_lock(page_folio(page));
++}
++EXPORT_SYMBOL(set_page_dirty_lock);

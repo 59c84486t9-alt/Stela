@@ -26,6 +26,9 @@ fn parts_clock(
 
 #[test]
 fn original_enabled_clkreq_uses_negotiated_speed_before_raw_tx_and_rx() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for initial in [0x0343, 0x0243] {
         let (hardware, pages, domain, peer) = parts_clock(0x0576_1000, initial);
         // SAFETY: the model device, its pages and its domain belong to this test alone; no other
@@ -58,6 +61,9 @@ fn original_enabled_clkreq_uses_negotiated_speed_before_raw_tx_and_rx() {
 
 #[test]
 fn original_clkreq_bug_survives_own_low_speed_clear_phy_suspend_and_full_rebuild() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (hardware, pages, domain, peer) = parts_clock(0x0576_1000, 0x0343);
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
     // driver, worker or DMA touches them.
@@ -95,6 +101,9 @@ fn original_clkreq_bug_survives_own_low_speed_clear_phy_suspend_and_full_rebuild
 
 #[test]
 fn uncertain_clkreq_read_store_or_acknowledgement_poison_and_keep_before_tx_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fault in 0..3 {
         let (hardware, pages, domain, peer) = parts_clock(0x0576_1000, 0x0343);
         // SAFETY: the model device, its pages and its domain belong to this test alone; no other
@@ -138,6 +147,9 @@ fn uncertain_clkreq_read_store_or_acknowledgement_poison_and_keep_before_tx_dma(
 
 #[test]
 fn independent_tx_peer_rejects_clkreq_corruption_before_descriptor_or_payload_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (hardware, pages, domain, peer) = parts_clock(0x0576_1000, 0x0343);
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
     // driver, worker or DMA touches them.
@@ -164,6 +176,9 @@ fn independent_tx_peer_rejects_clkreq_corruption_before_descriptor_or_payload_dm
 #[test]
 #[ignore = "oracle: STELA_TG3_CLKREQ_ORACLE"]
 fn unchanged_linux_clkreq_flag_and_complete_word_policy_match_packet_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let trace = std::fs::read_to_string(
         std::env::var("STELA_TG3_CLKREQ_ORACLE").expect("fresh original source trace required"),
     )

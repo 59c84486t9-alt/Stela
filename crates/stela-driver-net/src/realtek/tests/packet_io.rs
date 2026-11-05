@@ -17,9 +17,9 @@ fn modelled(registers: &mut [u32], memory: &mut [u64], signalled: bool) -> Realt
     let revision = revision::detect(0x0080_0000).unwrap();
     Realtek {
         device,
-        clock: Clock {
+        clock: crate::timing::model(Clock {
             ticks_per_microsecond: 1,
-        },
+        }),
         receive: Ring::new(&mut dma, true).unwrap(),
         transmit: Ring::new(&mut dma, true).unwrap(),
         mac: Mac([2, 0, 0, 0, 0, 1]),

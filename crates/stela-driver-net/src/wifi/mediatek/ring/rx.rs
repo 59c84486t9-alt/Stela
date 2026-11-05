@@ -335,6 +335,9 @@ pub(crate) mod tests {
     }
     #[test]
     fn receive_ddone_payload_and_gap_refill_wrap_non_power_of_two_rings() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let (mut ring, state) = setup(7);
         for i in 0..70u8 {
             assert_eq!(ring.poll().unwrap(), None);
@@ -377,6 +380,9 @@ pub(crate) mod tests {
     }
     #[test]
     fn corrupt_length_and_unimplemented_wed_format_poison_without_reuse() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         for ctrl in [
             DONE | LAST,
             DONE | LAST | (2049 << 16),
@@ -404,6 +410,9 @@ pub(crate) mod tests {
     }
     #[test]
     fn failed_rearm_keeps_queue_and_all_published_buffers_until_quiescence() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let (mut ring, state) = setup(4);
         device_receive(&state, &[0x5a; 200], true, 0);
         state.lock().unwrap().fail_publish = true;
@@ -431,6 +440,9 @@ pub(crate) mod tests {
     }
     #[test]
     fn active_drop_keeps_owned_requester_and_all_posted_receive_pins() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let (ring, state) = setup(4);
         drop(ring);
         assert_eq!(
@@ -442,6 +454,9 @@ pub(crate) mod tests {
     }
     #[test]
     fn fragment_assembly_bounds_the_whole_chain() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let fragment = |more, drop| Fragment {
             bytes: vec![0x71; 2048],
             more,
@@ -471,6 +486,9 @@ pub(crate) mod tests {
     }
     #[test]
     fn donor_1536_entry_data_queue_is_supported_without_power_of_two_assumptions() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let (mut ring, state) = setup(1536);
         assert_eq!(state.lock().unwrap().head, 1535);
         device_receive(&state, &[0x39; 2048], true, 0);
@@ -490,6 +508,9 @@ pub(crate) mod tests {
     }
     #[test]
     fn every_completed_descriptor_payload_and_rearm_visibility_failure_keeps_ownership() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         for fail_at in 8..=11 {
             let (mut ring, state) = setup(4);
             state.lock().unwrap().memory.lock().unwrap().fail_sync_at = Some(fail_at);

@@ -195,10 +195,6 @@ impl Routing {
         Ok(routing)
     }
 
-    pub fn has_legacy_pic(&self) -> bool {
-        self.legacy_pic
-    }
-
     pub fn isa(&self, irq: u8) -> Result<LineRoute, RouteError> {
         if irq >= 16 {
             return Err(RouteError::InvalidStructure);
@@ -241,6 +237,10 @@ impl Routing {
             polarity,
             trigger,
         })
+    }
+
+    pub fn has_legacy_pic(&self) -> bool {
+        self.legacy_pic
     }
 
     pub fn has_ioapic_nmis(&self) -> bool {

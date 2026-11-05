@@ -127,6 +127,9 @@ fn fixture() -> Fixture {
 
 #[test]
 fn live_igtk_independent_peer_matches_nist_and_unchanged_source_mic() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     assert_eq!(
         cmac(
             &[
@@ -149,6 +152,9 @@ fn live_igtk_independent_peer_matches_nist_and_unchanged_source_mic() {
 
 #[test]
 fn live_igtk_ack_keeps_both_index_windows_without_data_pn_reset() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut mailbox, mut key, response, wm, drops, gtk) = fixture();
     let old = key.installed_igtk().unwrap();
     key.authorize(&key_packet(gtk, 9)).unwrap();
@@ -252,6 +258,9 @@ fn live_igtk_ack_keeps_both_index_windows_without_data_pn_reset() {
 
 #[test]
 fn live_igtk_retired_material_and_invalid_requests_refuse_before_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut mailbox, mut key, _, wm, _, gtk) = fixture();
     // SAFETY: source-modeled command/key/IRQ users drained and authentic new key.
     unsafe { key.rotate_igtk(&mut mailbox, 4, &[0x66; 16], PacketNumber::new(5).unwrap()) }
@@ -334,6 +343,9 @@ fn live_igtk_retired_material_and_invalid_requests_refuse_before_publication() {
 
 #[test]
 fn live_igtk_history_exhaustion_preserves_current_and_other_receive_windows() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut mailbox, mut key, _, wm, _, _) = fixture();
     for material in 1..HISTORY_CAPACITY as u8 {
         // SAFETY: modeled old users drained; source peer retired overwritten index.
@@ -360,6 +372,9 @@ fn live_igtk_history_exhaustion_preserves_current_and_other_receive_windows() {
 
 #[test]
 fn negative_late_or_missing_live_igtk_ack_quarantines_every_key_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fault in 0..4 {
         let (mut mailbox, mut key, response, wm, drops, gtk) = fixture();
         let old = key.installed_igtk().unwrap();

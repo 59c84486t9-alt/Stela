@@ -1,0 +1,198 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 20:46:06 -0500
+Subject: [PATCH] refactor(vfs): link original referenced mount lookup
+
+---
+ fs/mount_cache.c | 77 ++++++++++++++++++++++++++++++++++++++++++++++++
+ fs/namei.c       | 16 ----------
+ fs/namespace.c   | 61 --------------------------------------
+ 3 files changed, 77 insertions(+), 77 deletions(-)
+
+diff --git a/fs/mount_cache.c b/fs/mount_cache.c
+index 2bd6fde52dd0edb90a3a8fe2283b6e67b3ba6be5..a13e527955b4f7954df9b46e4ad093f5b4847bc7 100644
+--- a/fs/mount_cache.c
++++ b/fs/mount_cache.c
+@@ -91,6 +91,83 @@ struct mount *__lookup_mnt(struct vfsmount *mnt, struct dentry *dentry)
+ 	return NULL;
+ }
+ 
++/* call under rcu_read_lock */
++int __legitimize_mnt(struct vfsmount *bastard, unsigned seq)
++{
++	struct mount *mnt;
++	if (read_seqretry(&mount_lock, seq))
++		return 1;
++	if (bastard == NULL)
++		return 0;
++	mnt = real_mount(bastard);
++	mnt_inc_count(mnt);
++	smp_mb();	/* see mntput_no_expire_slowpath() and do_umount() */
++	if (likely(!read_seqretry(&mount_lock, seq)))
++		return 0;
++	lock_mount_hash();
++	if (unlikely(bastard->mnt_flags & (MNT_SYNC_UMOUNT | MNT_DOOMED))) {
++		mnt_dec_count(mnt);
++		unlock_mount_hash();
++		return 1;
++	}
++	unlock_mount_hash();
++	/* caller will mntput() */
++	return -1;
++}
++
++/* call under rcu_read_lock */
++static bool legitimize_mnt(struct vfsmount *bastard, unsigned seq)
++{
++	int res = __legitimize_mnt(bastard, seq);
++	if (likely(!res))
++		return true;
++	if (unlikely(res < 0)) {
++		rcu_read_unlock();
++		mntput(bastard);
++		rcu_read_lock();
++	}
++	return false;
++}
++
++/**
++ * lookup_mnt - Return the child mount mounted at given location
++ * @path:	location in the namespace
++ *
++ * Acquires and returns a new reference to mount at given location
++ * or %NULL if nothing is mounted there.
++ */
++struct vfsmount *lookup_mnt(const struct path *path)
++{
++	struct mount *child_mnt;
++	struct vfsmount *m;
++	unsigned seq;
++
++	rcu_read_lock();
++	do {
++		seq = read_seqbegin(&mount_lock);
++		child_mnt = __lookup_mnt(path->mnt, path->dentry);
++		m = child_mnt ? &child_mnt->mnt : NULL;
++	} while (!legitimize_mnt(m, seq));
++	rcu_read_unlock();
++	return m;
++}
++
++int follow_down_one(struct path *path)
++{
++	struct vfsmount *mounted;
++
++	mounted = lookup_mnt(path);
++	if (mounted) {
++		dput(path->dentry);
++		mntput(path->mnt);
++		path->mnt = mounted;
++		path->dentry = dget(mounted->mnt_root);
++		return 1;
++	}
++	return 0;
++}
++EXPORT_SYMBOL(follow_down_one);
++
+ static inline struct hlist_head *mp_hash(struct dentry *dentry)
+ {
+ 	unsigned long tmp = ((unsigned long)dentry / L1_CACHE_BYTES);
+diff --git a/fs/namei.c b/fs/namei.c
+index 18e0f816b4c52bd5ef7172fce07250053db9ac98..4fa94945678e1e1f59c76c8023f3321258ef7e06 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -1396,22 +1396,6 @@ static inline int traverse_mounts(struct path *path, bool *jumped,
+ 	return __traverse_mounts(path, flags, jumped, count, lookup_flags);
+ }
+ 
+-int follow_down_one(struct path *path)
+-{
+-	struct vfsmount *mounted;
+-
+-	mounted = lookup_mnt(path);
+-	if (mounted) {
+-		dput(path->dentry);
+-		mntput(path->mnt);
+-		path->mnt = mounted;
+-		path->dentry = dget(mounted->mnt_root);
+-		return 1;
+-	}
+-	return 0;
+-}
+-EXPORT_SYMBOL(follow_down_one);
+-
+ /*
+  * Follow down to the covering mount currently visible to userspace.  At each
+  * point, the filesystem owning that dentry may be queried as to whether the
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 425fe2e818d87f95fbb4fc85a9d04e0bf0e131f1..53eaca825da814ff26cd0afaac1b3e183e54904d 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -461,67 +461,6 @@ int sb_prepare_remount_readonly(struct super_block *sb)
+ 	return err;
+ }
+ 
+-/* call under rcu_read_lock */
+-int __legitimize_mnt(struct vfsmount *bastard, unsigned seq)
+-{
+-	struct mount *mnt;
+-	if (read_seqretry(&mount_lock, seq))
+-		return 1;
+-	if (bastard == NULL)
+-		return 0;
+-	mnt = real_mount(bastard);
+-	mnt_inc_count(mnt);
+-	smp_mb();	/* see mntput_no_expire_slowpath() and do_umount() */
+-	if (likely(!read_seqretry(&mount_lock, seq)))
+-		return 0;
+-	lock_mount_hash();
+-	if (unlikely(bastard->mnt_flags & (MNT_SYNC_UMOUNT | MNT_DOOMED))) {
+-		mnt_dec_count(mnt);
+-		unlock_mount_hash();
+-		return 1;
+-	}
+-	unlock_mount_hash();
+-	/* caller will mntput() */
+-	return -1;
+-}
+-
+-/* call under rcu_read_lock */
+-static bool legitimize_mnt(struct vfsmount *bastard, unsigned seq)
+-{
+-	int res = __legitimize_mnt(bastard, seq);
+-	if (likely(!res))
+-		return true;
+-	if (unlikely(res < 0)) {
+-		rcu_read_unlock();
+-		mntput(bastard);
+-		rcu_read_lock();
+-	}
+-	return false;
+-}
+-
+-/**
+- * lookup_mnt - Return the child mount mounted at given location
+- * @path:	location in the namespace
+- *
+- * Acquires and returns a new reference to mount at given location
+- * or %NULL if nothing is mounted there.
+- */
+-struct vfsmount *lookup_mnt(const struct path *path)
+-{
+-	struct mount *child_mnt;
+-	struct vfsmount *m;
+-	unsigned seq;
+-
+-	rcu_read_lock();
+-	do {
+-		seq = read_seqbegin(&mount_lock);
+-		child_mnt = __lookup_mnt(path->mnt, path->dentry);
+-		m = child_mnt ? &child_mnt->mnt : NULL;
+-	} while (!legitimize_mnt(m, seq));
+-	rcu_read_unlock();
+-	return m;
+-}
+-
+ /*
+  * __is_local_mountpoint - Test to see if dentry is a mountpoint in the
+  *                         current mount namespace.

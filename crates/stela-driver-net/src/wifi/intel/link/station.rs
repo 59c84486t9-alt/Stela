@@ -574,6 +574,10 @@ fn management(local: Mac, ap: Mac, subtype: u16, protected: bool, body: &[u8]) -
 
 impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// Raise the chain for `bss`.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn raise(
         &mut self,
         bss: &Bss,
@@ -604,6 +608,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// One service round on the raised chain.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn operate(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
         let now = self.clock.now_us();
         if let Some(plan) = self.client.plan.take() {
@@ -746,6 +754,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// The chain is up: start what it was raised for, under session protection.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn arrive(&mut self, plan: Plan, now: u64) -> Result<(), Error> {
         let client = &mut self.client;
         if let Plan::Join { join, observed } = plan {
@@ -769,6 +781,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// `iwl_mvm_mld_mac_sta_state`'s AUTH to ASSOC, then the `vif_cfg_changed`
     /// that follows it.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn association_steps(
         &mut self,
         queue: &mut Queue<Q, B>,
@@ -839,6 +855,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// Issue the next step, or take the answer the waiting one has.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn run_steps(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
         loop {
             if let Some(waiting) = &self.client.waiting {
@@ -904,6 +924,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         }
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn finish(
         &mut self,
         queue: &mut Queue<Q, B>,
@@ -967,6 +991,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// Frames from the AP.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn take_frames(&mut self, queue: &mut Queue<Q, B>, now: u64) -> Result<(), Error> {
         loop {
             match queue.poll_receive().map_err(Error::Queue)? {
@@ -988,6 +1016,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         }
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn frame(
         &mut self,
         normalized: boot::NormalizedMpdu,
@@ -1168,6 +1200,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// numbers `ieee80211_crypto_ccmp_decrypt` keeps apart from data's: its
     /// departure ends the association, and an SA Query is answered, as
     /// `ieee80211_process_sa_query_req` does.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn protected_management(
         &mut self,
         mut frame: Mpdu,
@@ -1231,6 +1267,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// Firmware notifications beside the frames.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn take_notifications(&mut self, queue: &mut Queue<Q, B>, now: u64) -> Result<(), Error> {
         while let Some(update) = queue.take_country_update() {
             self.country_update(&update.raw);
@@ -1439,6 +1479,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// Management frames, once session protection holds the channel for them.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn send_management(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
         if self.client.outbox.is_empty()
             || (self.client.tracking.watch.silent() && !self.client.leaving)
@@ -1490,6 +1534,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// Data frames onto their TIDs' queues, each adding its queue first.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn send_data(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
         if self.client.tracking.watch.silent() {
             return Ok(());
@@ -1521,6 +1569,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// Queue `ethernet` for its TID.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn send(&mut self, ethernet: &[u8], class: TxClass) -> Result<(), Error> {
         let client = &mut self.client;
         let epoch = client
@@ -1612,6 +1664,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// `iwl_mvm_mld_set_key` for the association's data key, or a group key
     /// of the link of `ap`. A dormant link's stands installed without
     /// reaching firmware, as mac80211 holds it back until the link activates.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn install(
         &mut self,
         ap: Mac,
@@ -1700,6 +1756,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// The chain's way down, once its last commands finished.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub(super) fn leave(&mut self, queue: &mut Queue<Q, B>) -> Result<bool, Error> {
         if !self.client.leaving || !self.client.idle() || self.client.link_scanning() {
             return Ok(false);
@@ -1777,6 +1837,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// Serve the raised chain.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     pub(super) fn serve(&mut self) -> Result<(), Error> {
         let stage = core::mem::replace(&mut self.stage, Stage::Moving);
         let Stage::Ready(mut queue) = stage else {
@@ -1800,6 +1864,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         result
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn observed(&self, handle: usize) -> Result<Arc<NativeBssObservation>, Error> {
         self.client
             .observed
@@ -1810,6 +1878,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 }
 
 /// The body of the firmware's `TLC_MNG_CONFIG_CMD` version.
+#[expect(
+    clippy::result_large_err,
+    reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+)]
 fn rate_shape(
     firmware: &crate::wifi::intel::firmware::Firmware<'_>,
 ) -> Result<commands::RateShape, Error> {
@@ -2068,6 +2140,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// The probes of a scan this adapter runs now.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn probe(&self) -> Result<boot::Probe, Error> {
         let country = self
             .client
@@ -2104,7 +2180,16 @@ impl<Q: BootIo, B: BiosIo> Link for Wifi<Q, B> {
             return Err(LinkError::NoCarrier);
         }
         self.send(frame, TxClass::Data)
-            .map_err(|error| LinkError::Adapter(format!("{error}")))
+            .map_err(|error| match error {
+                Error::Pci(error) | Error::Boot(boot::Error::Pci(error)) => LinkError::Pci(error),
+                Error::Boot(boot::Error::Access(super::super::power::AccessError::Minimum(
+                    error,
+                )))
+                | Error::Boot(boot::Error::Power(super::super::power::Error::Access(
+                    super::super::power::AccessError::Minimum(error),
+                ))) => LinkError::Pci(crate::block::BlockError::PciPower(error)),
+                error => LinkError::Adapter(format!("{error}")),
+            })
     }
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
         Ok(self.client.received.pop_front())
@@ -2143,6 +2228,9 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         let Some(error) = self.error.clone() else {
             return served;
         };
+        // A terminal firmware/transport failure revokes the controlled port
+        // even when stop or reset refuses and the original owner stays held.
+        self.client.port_open = false;
         let restarted = self.restart();
         if self.reported && !restarted {
             return Ok(());
@@ -2246,6 +2334,10 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         Ok(())
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn begin_scan(&mut self, request: scan::Request, budget_us: u64) -> Result<(), Error> {
         let probe = request.active().then(|| self.probe()).transpose()?;
         let pages = self.pages;
@@ -2501,6 +2593,10 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         Ok(installed)
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn authorize_port(&mut self, epoch: u64) -> Result<(), Error> {
         let client = &mut self.client;
         if !client.keys_settled() || !client.idle() {
@@ -2597,6 +2693,10 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
 impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// `iwl_mvm_mld_mac_sta_state`'s ASSOC to AUTHORIZED: the beacon filter,
     /// the MAC's and station's authorized state, and rates at full width.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn authorized_steps(
         &mut self,
         queue: &mut Queue<Q, B>,
@@ -2657,6 +2757,10 @@ impl Client {
     }
 
     /// The AP on the MLD association's link `link_id`.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn link_ap(&self, link_id: u8) -> Result<Mac, Error> {
         self.station
             .link_contexts()
@@ -2691,6 +2795,10 @@ impl Client {
 
     /// An IGTK of the link of `ap`, which firmware takes while that link is
     /// active.
+    #[expect(
+        clippy::result_large_err,
+        reason = "preserve complete typed PCI and timing causes without allocating on recovery or refusal"
+    )]
     fn keep_management_key(
         &mut self,
         ap: Mac,

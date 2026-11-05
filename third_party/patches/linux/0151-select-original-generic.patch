@@ -1,0 +1,704 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 01:08:49 -0500
+Subject: [PATCH] refactor(mm): select original generic write and cache
+ invalidation
+
+---
+ fs/open.c          |   6 -
+ fs/path_open.c     |   6 +
+ mm/filemap.c       | 205 -----------------------------
+ mm/filemap_batch.c | 314 +++++++++++++++++++++++++++++++++++++++++++++
+ mm/truncate.c      | 103 ---------------
+ 5 files changed, 320 insertions(+), 314 deletions(-)
+
+diff --git a/fs/open.c b/fs/open.c
+index 2d568a6d472e614c7130eb8488aa9191bcf97d0f..5324fdb2941e4f2ae72ca1352b63458180c1d41a 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -848,12 +848,6 @@ int finish_no_open(struct file *file, struct dentry *dentry)
+ }
+ EXPORT_SYMBOL(finish_no_open);
+ 
+-char *file_path(struct file *filp, char *buf, int buflen)
+-{
+-	return d_path(&filp->f_path, buf, buflen);
+-}
+-EXPORT_SYMBOL(file_path);
+-
+ struct file *dentry_open_nonotify(const struct path *path, int flags,
+ 				  const struct cred *cred)
+ {
+diff --git a/fs/path_open.c b/fs/path_open.c
+index 622eccff63ef7d8697100eede5ad06ae4a3ba496..fe2bfb958fa8904e4bd62890b3e9af32bdc7e62f 100644
+--- a/fs/path_open.c
++++ b/fs/path_open.c
+@@ -475,3 +475,9 @@ int stream_open(struct inode *inode, struct file *filp)
+ }
+ 
+ EXPORT_SYMBOL(stream_open);
++
++char *file_path(struct file *filp, char *buf, int buflen)
++{
++	return d_path(&filp->f_path, buf, buflen);
++}
++EXPORT_SYMBOL(file_path);
+diff --git a/mm/filemap.c b/mm/filemap.c
+index 1517cdec708ec8f6e77f665028c96bb5872b05a0..b63ed2a8316923a5ce364ea02a75c865b3aa11b0 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -487,41 +487,6 @@ out:
+ 	return folio_batch_count(fbatch);
+ }
+ 
+-int filemap_invalidate_pages(struct address_space *mapping,
+-			     loff_t pos, loff_t end, bool nowait)
+-{
+-	int ret;
+-
+-	if (nowait) {
+-		/* we could block if there are any pages in the range */
+-		if (filemap_range_has_page(mapping, pos, end))
+-			return -EAGAIN;
+-	} else {
+-		ret = filemap_write_and_wait_range(mapping, pos, end);
+-		if (ret)
+-			return ret;
+-	}
+-
+-	/*
+-	 * After a write we want buffered reads to be sure to go to disk to get
+-	 * the new data.  We invalidate clean cached page from the region we're
+-	 * about to write.  We do this *before* the write so that we can return
+-	 * without clobbering -EIOCBQUEUED from ->direct_IO().
+-	 */
+-	return invalidate_inode_pages2_range(mapping, pos >> PAGE_SHIFT,
+-					     end >> PAGE_SHIFT);
+-}
+-
+-int kiocb_invalidate_pages(struct kiocb *iocb, size_t count)
+-{
+-	struct address_space *mapping = iocb->ki_filp->f_mapping;
+-
+-	return filemap_invalidate_pages(mapping, iocb->ki_pos,
+-					iocb->ki_pos + count - 1,
+-					iocb->ki_flags & IOCB_NOWAIT);
+-}
+-EXPORT_SYMBOL_GPL(kiocb_invalidate_pages);
+-
+ /*
+  * Splice subpages from a folio into a pipe.
+  */
+@@ -1607,176 +1572,6 @@ EXPORT_SYMBOL(generic_file_readonly_mmap_prepare);
+ /*
+  * Warn about a page cache invalidation failure during a direct I/O write.
+  */
+-static void dio_warn_stale_pagecache(struct file *filp)
+-{
+-	static DEFINE_RATELIMIT_STATE(_rs, 86400 * HZ, DEFAULT_RATELIMIT_BURST);
+-	char pathname[128];
+-	char *path;
+-
+-	errseq_set(&filp->f_mapping->wb_err, -EIO);
+-	if (__ratelimit(&_rs)) {
+-		path = file_path(filp, pathname, sizeof(pathname));
+-		if (IS_ERR(path))
+-			path = "(unknown)";
+-		pr_crit("Page cache invalidation failure on direct I/O.  Possible data corruption due to collision with buffered I/O!\n");
+-		pr_crit("File: %s PID: %d Comm: %.20s\n", path, current->pid,
+-			current->comm);
+-	}
+-}
+-
+-void kiocb_invalidate_post_direct_write(struct kiocb *iocb, size_t count)
+-{
+-	struct address_space *mapping = iocb->ki_filp->f_mapping;
+-
+-	if (mapping->nrpages &&
+-	    invalidate_inode_pages2_range(mapping,
+-			iocb->ki_pos >> PAGE_SHIFT,
+-			(iocb->ki_pos + count - 1) >> PAGE_SHIFT))
+-		dio_warn_stale_pagecache(iocb->ki_filp);
+-}
+-
+-ssize_t
+-generic_file_direct_write(struct kiocb *iocb, struct iov_iter *from)
+-{
+-	struct address_space *mapping = iocb->ki_filp->f_mapping;
+-	size_t write_len = iov_iter_count(from);
+-	ssize_t written;
+-
+-	/*
+-	 * If a page can not be invalidated, return 0 to fall back
+-	 * to buffered write.
+-	 */
+-	written = kiocb_invalidate_pages(iocb, write_len);
+-	if (written) {
+-		if (written == -EBUSY)
+-			return 0;
+-		return written;
+-	}
+-
+-	written = mapping->a_ops->direct_IO(iocb, from);
+-
+-	/*
+-	 * Finally, try again to invalidate clean pages which might have been
+-	 * cached by non-direct readahead, or faulted in by get_user_pages()
+-	 * if the source of the write was an mmap'ed region of the file
+-	 * we're writing.  Either one is a pretty crazy thing to do,
+-	 * so we don't support it 100%.  If this invalidation
+-	 * fails, tough, the write still worked...
+-	 *
+-	 * Most of the time we do not need this since dio_complete() will do
+-	 * the invalidation for us. However there are some file systems that
+-	 * do not end up with dio_complete() being called, so let's not break
+-	 * them by removing it completely.
+-	 *
+-	 * Noticeable example is a blkdev_direct_IO().
+-	 *
+-	 * Skip invalidation for async writes or if mapping has no pages.
+-	 */
+-	if (written > 0) {
+-		struct inode *inode = mapping->host;
+-		loff_t pos = iocb->ki_pos;
+-
+-		kiocb_invalidate_post_direct_write(iocb, written);
+-		pos += written;
+-		write_len -= written;
+-		if (pos > i_size_read(inode) && !S_ISBLK(inode->i_mode)) {
+-			i_size_write(inode, pos);
+-			mark_inode_dirty(inode);
+-		}
+-		iocb->ki_pos = pos;
+-	}
+-	if (written != -EIOCBQUEUED)
+-		iov_iter_revert(from, write_len - iov_iter_count(from));
+-	return written;
+-}
+-EXPORT_SYMBOL(generic_file_direct_write);
+-
+-/**
+- * __generic_file_write_iter - write data to a file
+- * @iocb:	IO state structure (file, offset, etc.)
+- * @from:	iov_iter with data to write
+- *
+- * This function does all the work needed for actually writing data to a
+- * file. It does all basic checks, removes SUID from the file, updates
+- * modification times and calls proper subroutines depending on whether we
+- * do direct IO or a standard buffered write.
+- *
+- * It expects i_rwsem to be grabbed unless we work on a block device or similar
+- * object which does not need locking at all.
+- *
+- * This function does *not* take care of syncing data in case of O_SYNC write.
+- * A caller has to handle it. This is mainly due to the fact that we want to
+- * avoid syncing under i_rwsem.
+- *
+- * Return:
+- * * number of bytes written, even for truncated writes
+- * * negative error code if no data has been written at all
+- */
+-ssize_t __generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
+-{
+-	struct file *file = iocb->ki_filp;
+-	struct address_space *mapping = file->f_mapping;
+-	struct inode *inode = mapping->host;
+-	ssize_t ret;
+-
+-	ret = file_remove_privs(file);
+-	if (ret)
+-		return ret;
+-
+-	ret = file_update_time(file);
+-	if (ret)
+-		return ret;
+-
+-	if (iocb->ki_flags & IOCB_DIRECT) {
+-		ret = generic_file_direct_write(iocb, from);
+-		/*
+-		 * If the write stopped short of completing, fall back to
+-		 * buffered writes.  Some filesystems do this for writes to
+-		 * holes, for example.  For DAX files, a buffered write will
+-		 * not succeed (even if it did, DAX does not handle dirty
+-		 * page-cache pages correctly).
+-		 */
+-		if (ret < 0 || !iov_iter_count(from) || IS_DAX(inode))
+-			return ret;
+-		return direct_write_fallback(iocb, from, ret,
+-				generic_perform_write(iocb, from));
+-	}
+-
+-	return generic_perform_write(iocb, from);
+-}
+-EXPORT_SYMBOL(__generic_file_write_iter);
+-
+-/**
+- * generic_file_write_iter - write data to a file
+- * @iocb:	IO state structure
+- * @from:	iov_iter with data to write
+- *
+- * This is a wrapper around __generic_file_write_iter() to be used by most
+- * filesystems. It takes care of syncing the file in case of O_SYNC file
+- * and acquires i_rwsem as needed.
+- * Return:
+- * * negative error code if no data has been written at all of
+- *   vfs_fsync_range() failed for a synchronous write
+- * * number of bytes written, even for truncated writes
+- */
+-ssize_t generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
+-{
+-	struct file *file = iocb->ki_filp;
+-	struct inode *inode = file->f_mapping->host;
+-	ssize_t ret;
+-
+-	inode_lock(inode);
+-	ret = generic_write_checks(iocb, from);
+-	if (ret > 0)
+-		ret = __generic_file_write_iter(iocb, from);
+-	inode_unlock(inode);
+-
+-	if (ret > 0)
+-		ret = generic_write_sync(iocb, ret);
+-	return ret;
+-}
+-EXPORT_SYMBOL(generic_file_write_iter);
+-
+ /**
+  * filemap_invalidate_inode - Invalidate/forcibly write back a range of an inode's pagecache
+  * @inode: The inode to flush
+diff --git a/mm/filemap_batch.c b/mm/filemap_batch.c
+index b3f2c85b1f0f87769eb2636f900b99e45b83df56..4a7f17c32c3cd232ee6046c3cf6582b869dc16ac 100644
+--- a/mm/filemap_batch.c
++++ b/mm/filemap_batch.c
+@@ -3077,3 +3077,317 @@ retry:
+ 	return written;
+ }
+ EXPORT_SYMBOL(generic_perform_write);
++
++/**
++ * invalidate_inode_pages2_range - remove range of pages from an address_space
++ * @mapping: the address_space
++ * @start: the page offset 'from' which to invalidate
++ * @end: the page offset 'to' which to invalidate (inclusive)
++ *
++ * Any pages which are found to be mapped into pagetables are unmapped prior to
++ * invalidation.
++ *
++ * Return: -EBUSY if any pages could not be invalidated.
++ */
++int invalidate_inode_pages2_range(struct address_space *mapping,
++				  pgoff_t start, pgoff_t end)
++{
++	pgoff_t indices[FOLIO_BATCH_SIZE];
++	struct folio_batch fbatch;
++	pgoff_t index;
++	int i;
++	int ret = 0;
++	int ret2 = 0;
++	int did_range_unmap = 0;
++
++	if (mapping_empty(mapping))
++		return 0;
++
++	folio_batch_init(&fbatch);
++	index = start;
++	while (find_get_entries(mapping, &index, end, &fbatch, indices)) {
++		bool xa_has_values = false;
++		int nr = folio_batch_count(&fbatch);
++
++		for (i = 0; i < nr; i++) {
++			struct folio *folio = fbatch.folios[i];
++
++			/* We rely upon deletion not changing folio->index */
++
++			if (xa_is_value(folio)) {
++				xa_has_values = true;
++				if (dax_mapping(mapping) &&
++				    !dax_invalidate_mapping_entry_sync(mapping, indices[i]))
++					ret = -EBUSY;
++				continue;
++			}
++
++			if (!did_range_unmap && folio_mapped(folio)) {
++				/*
++				 * If folio is mapped, before taking its lock,
++				 * zap the rest of the file in one hit.
++				 */
++				unmap_mapping_pages(mapping, indices[i],
++						(1 + end - indices[i]), false);
++				did_range_unmap = 1;
++			}
++
++			folio_lock(folio);
++			if (unlikely(folio->mapping != mapping)) {
++				folio_unlock(folio);
++				continue;
++			}
++			VM_BUG_ON_FOLIO(!folio_contains(folio, indices[i]), folio);
++			folio_wait_writeback(folio);
++#ifdef CONFIG_STELA
++			/* Owner mappings bypass the Linux rmap. Preserve any data
++			 * a writable client could have changed before removal. */
++			if (stela_linux_unmap_folio(folio))
++				folio_mark_dirty(folio);
++#endif
++			ret2 = folio_unmap_invalidate(mapping, folio, GFP_KERNEL);
++			if (ret2 < 0)
++				ret = ret2;
++			folio_unlock(folio);
++		}
++
++		if (xa_has_values)
++			clear_shadow_entries(mapping, indices[0], indices[nr-1]);
++
++		folio_batch_remove_exceptionals(&fbatch);
++		folio_batch_release(&fbatch);
++		cond_resched();
++	}
++	/*
++	 * For DAX we invalidate page tables after invalidating page cache.  We
++	 * could invalidate page tables while invalidating each entry however
++	 * that would be expensive. And doing range unmapping before doesn't
++	 * work as we have no cheap way to find whether page cache entry didn't
++	 * get remapped later.
++	 */
++	if (dax_mapping(mapping)) {
++		unmap_mapping_pages(mapping, start, end - start + 1, false);
++	}
++	return ret;
++}
++EXPORT_SYMBOL_GPL(invalidate_inode_pages2_range);
++
++/**
++ * invalidate_inode_pages2 - remove all pages from an address_space
++ * @mapping: the address_space
++ *
++ * Any pages which are found to be mapped into pagetables are unmapped prior to
++ * invalidation.
++ *
++ * Return: -EBUSY if any pages could not be invalidated.
++ */
++int invalidate_inode_pages2(struct address_space *mapping)
++{
++	return invalidate_inode_pages2_range(mapping, 0, -1);
++}
++EXPORT_SYMBOL_GPL(invalidate_inode_pages2);
++
++int filemap_invalidate_pages(struct address_space *mapping,
++			     loff_t pos, loff_t end, bool nowait)
++{
++	int ret;
++
++	if (nowait) {
++		/* we could block if there are any pages in the range */
++		if (filemap_range_has_page(mapping, pos, end))
++			return -EAGAIN;
++	} else {
++		ret = filemap_write_and_wait_range(mapping, pos, end);
++		if (ret)
++			return ret;
++	}
++
++	/*
++	 * After a write we want buffered reads to be sure to go to disk to get
++	 * the new data.  We invalidate clean cached page from the region we're
++	 * about to write.  We do this *before* the write so that we can return
++	 * without clobbering -EIOCBQUEUED from ->direct_IO().
++	 */
++	return invalidate_inode_pages2_range(mapping, pos >> PAGE_SHIFT,
++					     end >> PAGE_SHIFT);
++}
++
++int kiocb_invalidate_pages(struct kiocb *iocb, size_t count)
++{
++	struct address_space *mapping = iocb->ki_filp->f_mapping;
++
++	return filemap_invalidate_pages(mapping, iocb->ki_pos,
++					iocb->ki_pos + count - 1,
++					iocb->ki_flags & IOCB_NOWAIT);
++}
++EXPORT_SYMBOL_GPL(kiocb_invalidate_pages);
++
++static void dio_warn_stale_pagecache(struct file *filp)
++{
++	static DEFINE_RATELIMIT_STATE(_rs, 86400 * HZ, DEFAULT_RATELIMIT_BURST);
++	char pathname[128];
++	char *path;
++
++	errseq_set(&filp->f_mapping->wb_err, -EIO);
++	if (__ratelimit(&_rs)) {
++		path = file_path(filp, pathname, sizeof(pathname));
++		if (IS_ERR(path))
++			path = "(unknown)";
++		pr_crit("Page cache invalidation failure on direct I/O.  Possible data corruption due to collision with buffered I/O!\n");
++		pr_crit("File: %s PID: %d Comm: %.20s\n", path, current->pid,
++			current->comm);
++	}
++}
++
++void kiocb_invalidate_post_direct_write(struct kiocb *iocb, size_t count)
++{
++	struct address_space *mapping = iocb->ki_filp->f_mapping;
++
++	if (mapping->nrpages &&
++	    invalidate_inode_pages2_range(mapping,
++			iocb->ki_pos >> PAGE_SHIFT,
++			(iocb->ki_pos + count - 1) >> PAGE_SHIFT))
++		dio_warn_stale_pagecache(iocb->ki_filp);
++}
++
++ssize_t
++generic_file_direct_write(struct kiocb *iocb, struct iov_iter *from)
++{
++	struct address_space *mapping = iocb->ki_filp->f_mapping;
++	size_t write_len = iov_iter_count(from);
++	ssize_t written;
++
++	/*
++	 * If a page can not be invalidated, return 0 to fall back
++	 * to buffered write.
++	 */
++	written = kiocb_invalidate_pages(iocb, write_len);
++	if (written) {
++		if (written == -EBUSY)
++			return 0;
++		return written;
++	}
++
++	written = mapping->a_ops->direct_IO(iocb, from);
++
++	/*
++	 * Finally, try again to invalidate clean pages which might have been
++	 * cached by non-direct readahead, or faulted in by get_user_pages()
++	 * if the source of the write was an mmap'ed region of the file
++	 * we're writing.  Either one is a pretty crazy thing to do,
++	 * so we don't support it 100%.  If this invalidation
++	 * fails, tough, the write still worked...
++	 *
++	 * Most of the time we do not need this since dio_complete() will do
++	 * the invalidation for us. However there are some file systems that
++	 * do not end up with dio_complete() being called, so let's not break
++	 * them by removing it completely.
++	 *
++	 * Noticeable example is a blkdev_direct_IO().
++	 *
++	 * Skip invalidation for async writes or if mapping has no pages.
++	 */
++	if (written > 0) {
++		struct inode *inode = mapping->host;
++		loff_t pos = iocb->ki_pos;
++
++		kiocb_invalidate_post_direct_write(iocb, written);
++		pos += written;
++		write_len -= written;
++		if (pos > i_size_read(inode) && !S_ISBLK(inode->i_mode)) {
++			i_size_write(inode, pos);
++			mark_inode_dirty(inode);
++		}
++		iocb->ki_pos = pos;
++	}
++	if (written != -EIOCBQUEUED)
++		iov_iter_revert(from, write_len - iov_iter_count(from));
++	return written;
++}
++EXPORT_SYMBOL(generic_file_direct_write);
++
++/**
++ * __generic_file_write_iter - write data to a file
++ * @iocb:	IO state structure (file, offset, etc.)
++ * @from:	iov_iter with data to write
++ *
++ * This function does all the work needed for actually writing data to a
++ * file. It does all basic checks, removes SUID from the file, updates
++ * modification times and calls proper subroutines depending on whether we
++ * do direct IO or a standard buffered write.
++ *
++ * It expects i_rwsem to be grabbed unless we work on a block device or similar
++ * object which does not need locking at all.
++ *
++ * This function does *not* take care of syncing data in case of O_SYNC write.
++ * A caller has to handle it. This is mainly due to the fact that we want to
++ * avoid syncing under i_rwsem.
++ *
++ * Return:
++ * * number of bytes written, even for truncated writes
++ * * negative error code if no data has been written at all
++ */
++ssize_t __generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
++{
++	struct file *file = iocb->ki_filp;
++	struct address_space *mapping = file->f_mapping;
++	struct inode *inode = mapping->host;
++	ssize_t ret;
++
++	ret = file_remove_privs(file);
++	if (ret)
++		return ret;
++
++	ret = file_update_time(file);
++	if (ret)
++		return ret;
++
++	if (iocb->ki_flags & IOCB_DIRECT) {
++		ret = generic_file_direct_write(iocb, from);
++		/*
++		 * If the write stopped short of completing, fall back to
++		 * buffered writes.  Some filesystems do this for writes to
++		 * holes, for example.  For DAX files, a buffered write will
++		 * not succeed (even if it did, DAX does not handle dirty
++		 * page-cache pages correctly).
++		 */
++		if (ret < 0 || !iov_iter_count(from) || IS_DAX(inode))
++			return ret;
++		return direct_write_fallback(iocb, from, ret,
++				generic_perform_write(iocb, from));
++	}
++
++	return generic_perform_write(iocb, from);
++}
++EXPORT_SYMBOL(__generic_file_write_iter);
++
++/**
++ * generic_file_write_iter - write data to a file
++ * @iocb:	IO state structure
++ * @from:	iov_iter with data to write
++ *
++ * This is a wrapper around __generic_file_write_iter() to be used by most
++ * filesystems. It takes care of syncing the file in case of O_SYNC file
++ * and acquires i_rwsem as needed.
++ * Return:
++ * * negative error code if no data has been written at all of
++ *   vfs_fsync_range() failed for a synchronous write
++ * * number of bytes written, even for truncated writes
++ */
++ssize_t generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
++{
++	struct file *file = iocb->ki_filp;
++	struct inode *inode = file->f_mapping->host;
++	ssize_t ret;
++
++	inode_lock(inode);
++	ret = generic_write_checks(iocb, from);
++	if (ret > 0)
++		ret = __generic_file_write_iter(iocb, from);
++	inode_unlock(inode);
++
++	if (ret > 0)
++		ret = generic_write_sync(iocb, ret);
++	return ret;
++}
++EXPORT_SYMBOL(generic_file_write_iter);
+diff --git a/mm/truncate.c b/mm/truncate.c
+index 43ad298e3b5678ad4ed63c1025185aa26dd441e4..bef0c4689369ae69a83e060fea2cd922f7d06142 100644
+--- a/mm/truncate.c
++++ b/mm/truncate.c
+@@ -24,109 +24,6 @@
+ #include "internal.h"
+ #include "filemap_batch.h"
+ 
+-/**
+- * invalidate_inode_pages2_range - remove range of pages from an address_space
+- * @mapping: the address_space
+- * @start: the page offset 'from' which to invalidate
+- * @end: the page offset 'to' which to invalidate (inclusive)
+- *
+- * Any pages which are found to be mapped into pagetables are unmapped prior to
+- * invalidation.
+- *
+- * Return: -EBUSY if any pages could not be invalidated.
+- */
+-int invalidate_inode_pages2_range(struct address_space *mapping,
+-				  pgoff_t start, pgoff_t end)
+-{
+-	pgoff_t indices[FOLIO_BATCH_SIZE];
+-	struct folio_batch fbatch;
+-	pgoff_t index;
+-	int i;
+-	int ret = 0;
+-	int ret2 = 0;
+-	int did_range_unmap = 0;
+-
+-	if (mapping_empty(mapping))
+-		return 0;
+-
+-	folio_batch_init(&fbatch);
+-	index = start;
+-	while (find_get_entries(mapping, &index, end, &fbatch, indices)) {
+-		bool xa_has_values = false;
+-		int nr = folio_batch_count(&fbatch);
+-
+-		for (i = 0; i < nr; i++) {
+-			struct folio *folio = fbatch.folios[i];
+-
+-			/* We rely upon deletion not changing folio->index */
+-
+-			if (xa_is_value(folio)) {
+-				xa_has_values = true;
+-				if (dax_mapping(mapping) &&
+-				    !dax_invalidate_mapping_entry_sync(mapping, indices[i]))
+-					ret = -EBUSY;
+-				continue;
+-			}
+-
+-			if (!did_range_unmap && folio_mapped(folio)) {
+-				/*
+-				 * If folio is mapped, before taking its lock,
+-				 * zap the rest of the file in one hit.
+-				 */
+-				unmap_mapping_pages(mapping, indices[i],
+-						(1 + end - indices[i]), false);
+-				did_range_unmap = 1;
+-			}
+-
+-			folio_lock(folio);
+-			if (unlikely(folio->mapping != mapping)) {
+-				folio_unlock(folio);
+-				continue;
+-			}
+-			VM_BUG_ON_FOLIO(!folio_contains(folio, indices[i]), folio);
+-			folio_wait_writeback(folio);
+-			ret2 = folio_unmap_invalidate(mapping, folio, GFP_KERNEL);
+-			if (ret2 < 0)
+-				ret = ret2;
+-			folio_unlock(folio);
+-		}
+-
+-		if (xa_has_values)
+-			clear_shadow_entries(mapping, indices[0], indices[nr-1]);
+-
+-		folio_batch_remove_exceptionals(&fbatch);
+-		folio_batch_release(&fbatch);
+-		cond_resched();
+-	}
+-	/*
+-	 * For DAX we invalidate page tables after invalidating page cache.  We
+-	 * could invalidate page tables while invalidating each entry however
+-	 * that would be expensive. And doing range unmapping before doesn't
+-	 * work as we have no cheap way to find whether page cache entry didn't
+-	 * get remapped later.
+-	 */
+-	if (dax_mapping(mapping)) {
+-		unmap_mapping_pages(mapping, start, end - start + 1, false);
+-	}
+-	return ret;
+-}
+-EXPORT_SYMBOL_GPL(invalidate_inode_pages2_range);
+-
+-/**
+- * invalidate_inode_pages2 - remove all pages from an address_space
+- * @mapping: the address_space
+- *
+- * Any pages which are found to be mapped into pagetables are unmapped prior to
+- * invalidation.
+- *
+- * Return: -EBUSY if any pages could not be invalidated.
+- */
+-int invalidate_inode_pages2(struct address_space *mapping)
+-{
+-	return invalidate_inode_pages2_range(mapping, 0, -1);
+-}
+-EXPORT_SYMBOL_GPL(invalidate_inode_pages2);
+-
+ /**
+  * truncate_pagecache_range - unmap and remove pagecache that is hole-punched
+  * @inode: inode

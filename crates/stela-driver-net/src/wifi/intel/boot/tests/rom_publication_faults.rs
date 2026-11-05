@@ -6,6 +6,9 @@ use super::*;
 
 #[test]
 fn ax210_every_launch_csr_fault_quarantines_owner_after_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = ax210_bytes();
     let catalog = catalog_for(&ax210_profile(), Family::Ax210.firmware_name(), &bytes);
     let (observation, step_catalog) = step_fixture();
@@ -96,6 +99,9 @@ fn ax210_every_launch_csr_fault_quarantines_owner_after_publication() {
 
 #[test]
 fn every_csr_start_failure_after_first_possible_publication_quarantines_bar_and_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = firmware_bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let source = Source::default();

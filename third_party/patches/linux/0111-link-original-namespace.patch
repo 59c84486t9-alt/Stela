@@ -1,0 +1,109 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 19:50:44 -0500
+Subject: [PATCH] refactor(vfs): link original namespace dentry metadata
+
+---
+ fs/nsfs.c            | 30 ------------------------------
+ fs/pseudo_metadata.c | 34 +++++++++++++++++++++++++++++++++-
+ 2 files changed, 33 insertions(+), 31 deletions(-)
+
+diff --git a/fs/nsfs.c b/fs/nsfs.c
+index 5857084afd90f781065782713a3652ac327847e3..3843d3e4072c05a3c56b9e66e03373060ed0d25e 100644
+--- a/fs/nsfs.c
++++ b/fs/nsfs.c
+@@ -40,21 +40,6 @@ static const struct file_operations ns_file_operations = {
+ 	.compat_ioctl   = compat_ptr_ioctl,
+ };
+ 
+-static char *ns_dname(struct dentry *dentry, char *buffer, int buflen)
+-{
+-	struct inode *inode = d_inode(dentry);
+-	struct ns_common *ns = inode->i_private;
+-	const struct proc_ns_operations *ns_ops = ns->ops;
+-
+-	return dynamic_dname(buffer, buflen, "%s:[%llu]",
+-		ns_ops->name, inode->i_ino);
+-}
+-
+-const struct dentry_operations ns_dentry_operations = {
+-	.d_dname	= ns_dname,
+-	.d_prune	= stashed_dentry_prune,
+-};
+-
+ static void nsfs_evict(struct inode *inode)
+ {
+ 	struct ns_common *ns = inode->i_private;
+@@ -367,21 +352,6 @@ static long ns_ioctl(struct file *filp, unsigned int ioctl,
+ 	return ret;
+ }
+ 
+-int ns_get_name(char *buf, size_t size, struct task_struct *task,
+-			const struct proc_ns_operations *ns_ops)
+-{
+-	struct ns_common *ns;
+-	int res = -ENOENT;
+-	const char *name;
+-	ns = ns_ops->get(task);
+-	if (ns) {
+-		name = ns_ops->real_ns_name ? : ns_ops->name;
+-		res = snprintf(buf, size, "%s:[%u]", name, ns->inum);
+-		ns_ops->put(ns);
+-	}
+-	return res;
+-}
+-
+ bool proc_ns_file(const struct file *file)
+ {
+ 	return file->f_op == &ns_file_operations;
+diff --git a/fs/pseudo_metadata.c b/fs/pseudo_metadata.c
+index b779fd69110c8b7e3a57a88efecf19beeff93fb5..84f11a73d95eb03e37943289a912752a7637a663 100644
+--- a/fs/pseudo_metadata.c
++++ b/fs/pseudo_metadata.c
+@@ -1,9 +1,11 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+-/* Simple pseudo-filesystem metadata from fs/d_path.c and fs/libfs.c. */
++/* Simple pseudo-filesystem metadata from fs/d_path.c, fs/libfs.c and fs/nsfs.c. */
+ #include <linux/export.h>
+ #include <linux/fs.h>
+ #include <linux/iversion.h>
+ #include <linux/mm.h>
++#include <linux/nsfs.h>
++#include <linux/proc_ns.h>
+ #include <linux/statfs.h>
+ #include <trace/events/timestamp.h>
+ 
+@@ -326,3 +328,33 @@ void stashed_dentry_prune(struct dentry *dentry)
+ 	 */
+ 	cmpxchg(stashed, dentry, NULL);
+ }
++
++static char *ns_dname(struct dentry *dentry, char *buffer, int buflen)
++{
++	struct inode *inode = d_inode(dentry);
++	struct ns_common *ns = inode->i_private;
++	const struct proc_ns_operations *ns_ops = ns->ops;
++
++	return dynamic_dname(buffer, buflen, "%s:[%llu]",
++		ns_ops->name, inode->i_ino);
++}
++
++const struct dentry_operations ns_dentry_operations = {
++	.d_dname	= ns_dname,
++	.d_prune	= stashed_dentry_prune,
++};
++
++int ns_get_name(char *buf, size_t size, struct task_struct *task,
++			const struct proc_ns_operations *ns_ops)
++{
++	struct ns_common *ns;
++	int res = -ENOENT;
++	const char *name;
++	ns = ns_ops->get(task);
++	if (ns) {
++		name = ns_ops->real_ns_name ? : ns_ops->name;
++		res = snprintf(buf, size, "%s:[%u]", name, ns->inum);
++		ns_ops->put(ns);
++	}
++	return res;
++}

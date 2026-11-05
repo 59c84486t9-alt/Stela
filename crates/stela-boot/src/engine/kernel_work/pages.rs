@@ -2,11 +2,9 @@
 use super::*;
 use crate::native_memory::LinuxPages as HeapPages;
 use core::ptr::NonNull;
-use stela_drivers::{
-    bus::dma::memory::PinnedPages,
-    gpu::linux::pages::{
-        Catalog, Extent, PinRetirement, Provider, Request, Reservation as PageReservation,
-    },
+use stela_drivers::bus::dma::memory::PinnedPages;
+use stela_linux::pages::{
+    Catalog, Extent, PinRetirement, Provider, Request, Reservation as PageReservation,
 };
 
 #[derive(Clone, Copy)]
@@ -21,7 +19,7 @@ pub(super) struct TaskPageInventory {
     owner: Arc<Reservation>,
     rows: Vec<Coverage>,
 }
-pub(super) struct KernelPages {
+pub(in crate::engine) struct KernelPages {
     heap: HeapPages,
     stacks: TaskPageInventory,
 }
@@ -30,7 +28,7 @@ impl TaskPageInventory {
         owner: Arc<Reservation>,
         spans: &[(Range<usize>, Range<usize>, u64)],
     ) -> Result<Self, Error> {
-        let required = stela_drivers::gpu::linux::task::stack_requirement().map_err(Error::Work)?;
+        let required = stela_linux::task::stack_requirement().map_err(Error::Work)?;
         let mut rows = Vec::new();
         for (bounds, guard, physical) in spans {
             if bounds.len() != required.usable_bytes()
@@ -53,12 +51,13 @@ impl TaskPageInventory {
         Ok(Self { owner, rows })
     }
     fn check(&self) -> Result<(), WorkError> {
-        self.owner.identity.check_irq_cpu()?;
+        self.owner.identity.check_clock_root()?;
         if self.owner.identity.in_interrupt() {
             return Err(WorkError::InterruptContext);
         }
         Ok(())
     }
+    #[cfg(feature = "diagnostics")]
     pub(super) fn count(&self) -> usize {
         self.rows.len()
     }
@@ -77,11 +76,21 @@ impl TaskPageInventory {
         })
     }
     /// # Safety
+    /// Actual loader-root BSP owns these allocations through retirement.
+    #[cfg(feature = "diagnostics")]
+    pub(super) unsafe fn register(self) -> Result<Catalog<KernelPages>, Error> {
+        // SAFETY: original task and heap allocations are retained.
+        let (provider, extents) = unsafe { self.into_inventory() }?;
+        // SAFETY: diagnostic owns the taskless legacy entry for this boot.
+        unsafe { Catalog::register_annotated(provider, extents) }.map_err(Error::Pages)
+    }
+
+    /// # Safety
     /// Serialized native process/deferred context excludes C reentry, migration,
     /// root/cache mutation and source retargeting through catalog retirement.
     /// This is taskless metadata entry; a taskful C caller must use its
     /// entered-owner boundary rather than reentering this leaf constructor.
-    pub(super) unsafe fn register(self) -> Result<Catalog<KernelPages>, Error> {
+    unsafe fn into_inventory(self) -> Result<(KernelPages, Vec<Extent>), Error> {
         self.check().map_err(Error::Work)?;
         if self.rows.is_empty() {
             return Err(Error::NoKernelStacks);
@@ -105,11 +114,7 @@ impl TaskPageInventory {
                 .map_err(Error::Pages)?;
             extents.push(Extent::runtime_stack(reservation));
         }
-        let provider = KernelPages { heap, stacks: self };
-        // SAFETY: provider owns both heap-generation and task allocation/
-        // mapping lifetimes. Ordinary allocation delegates only to heap pages;
-        // RuntimeStack coverage stays reserved and supplies no payload loan.
-        unsafe { Catalog::register_annotated(provider, extents) }.map_err(Error::Pages)
+        Ok((KernelPages { heap, stacks: self }, extents))
     }
 }
 // SAFETY: NativeMemory heap pins keep its generation and WB mappings.
@@ -139,6 +144,29 @@ impl KernelWork {
     /// report NoKernelStacks. This supplies descriptors, not cold-worker access;
     /// the work owner's entered history still rejects hot-frame preparation.
     pub(super) fn task_pages(&self) -> Result<TaskPageInventory, Error> {
-        self.stack_pages.retained_copy()
+        self.stack_pages
+            .as_ref()
+            .ok_or(Error::NoKernelStacks)?
+            .retained_copy()
+    }
+
+    /// Publish the original heap and guarded runtime-stack descriptors under
+    /// the already claimed kernel before its first source task is published.
+    ///
+    /// # Safety
+    /// Inside this work owner's admitted native Linux dispatcher segment,
+    /// with this exact kernel and no active source entry or task.
+    pub(in crate::engine) unsafe fn register_linux_pages<K: stela_linux::owner::Platform>(
+        &self,
+        kernel: &stela_linux::kernel::KernelOwner<K, SLOTS>,
+    ) -> Result<&'static Catalog<KernelPages>, Error> {
+        let pages = self.task_pages()?;
+        // SAFETY: exact retained heap and slot allocations on the loader root.
+        let (provider, extents) = unsafe { pages.into_inventory() }?;
+        // SAFETY: exact claimed owner on this taskless dispatcher before
+        // Initial. Provider keeps the actual backing through publication.
+        let catalog = unsafe { Catalog::register_annotated_bootstrap(kernel, provider, extents) }
+            .map_err(Error::Pages)?;
+        Ok(&*Box::leak(Box::new(catalog)))
     }
 }

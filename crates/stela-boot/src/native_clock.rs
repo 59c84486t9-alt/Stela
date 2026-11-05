@@ -8,7 +8,7 @@ use crate::{
     apic::{self, Apic},
     engine::{host, interrupts},
 };
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 use core::{
     arch::asm,
     cell::{Cell, UnsafeCell},
@@ -262,6 +262,12 @@ impl ClockServices {
     pub(crate) fn idle(&self) -> Arc<dyn Idle> {
         self.idle.clone()
     }
+    /// Publish a software wake from the retained service. The service sends
+    /// its own doorbell after this store when another CPU may be waiting.
+    pub(crate) fn notify_dispatch(&self) {
+        self.state.pending.store(true, Ordering::Release);
+    }
+
     pub(crate) fn epoch(&self) -> Result<CounterEpoch, WorkError> {
         self.check_identity(&self.state.cpu.identity)?;
         Ok(CounterEpoch {
@@ -274,13 +280,20 @@ impl CounterEpoch {
     /// Nominal monotonic nanoseconds for transport deadlines. UTC callers use
     /// sample/elapsed_bounds, which keep the source's outward uncertainty.
     pub(crate) fn now_ns(&self) -> Result<u64, WorkError> {
-        let sample = self.sample()?;
+        let ticks = self.sample_ticks()?;
         self.cpu
             .source
-            .ns(sample.ticks)
+            .ns(ticks)
             .map_err(|error| self.cpu.health.fail(error))
     }
     pub(crate) fn sample(&self) -> Result<CounterSample, WorkError> {
+        Ok(CounterSample {
+            epoch: self.clone(),
+            ticks: self.sample_ticks()?,
+        })
+    }
+
+    fn sample_ticks(&self) -> Result<u64, WorkError> {
         self.cpu.health.check()?;
         self.cpu.check_cpu()?;
         self.cpu
@@ -298,10 +311,7 @@ impl CounterEpoch {
         let ticks = result?;
         self.cpu.check_cpu()?;
         self.cpu.health.check()?;
-        Ok(CounterSample {
-            epoch: self.clone(),
-            ticks,
-        })
+        Ok(ticks)
     }
 
     pub(crate) fn elapsed_bounds(
@@ -314,7 +324,7 @@ impl CounterEpoch {
         }
         // A kept old reading never supplies readiness after detach,
         // control/root loss or a source transition.
-        self.sample()?;
+        self.sample_ticks()?;
         let ticks = end
             .ticks
             .checked_sub(start.ticks)
@@ -323,6 +333,149 @@ impl CounterEpoch {
             .source
             .elapsed_bounds(ticks)
             .map_err(|error| self.cpu.health.fail(error))
+    }
+}
+
+/// A physical minimum on the same retained epoch as the scheduler clock.
+pub(crate) struct MinimumDeadline {
+    epoch: CounterEpoch,
+    start: u64,
+    target: u64,
+    minimum_ns: u64,
+    nominal_ns: i64,
+}
+
+impl CounterEpoch {
+    fn minimum_target(&self, start: u64, minimum_ns: u64) -> Result<u64, WorkError> {
+        let counter = self
+            .cpu
+            .source
+            .hpet_counter()
+            .ok_or(WorkError::Unavailable)?;
+        let ticks = counter.ticks_for_minimum_ns(minimum_ns)?;
+        start.checked_add(ticks).ok_or(WorkError::Exhausted)
+    }
+
+    /// Atomic physical wait on this CPU's continuously qualified HPET.
+    pub(crate) fn minimum_delay_us(&self, minimum_us: u64) -> Result<(), WorkError> {
+        let minimum_ns = minimum_us.checked_mul(1000).ok_or(WorkError::Exhausted)?;
+        let start = self.sample_ticks()?;
+        let target = self.minimum_target(start, minimum_ns)?;
+        let mut now = start;
+        while now < target {
+            core::hint::spin_loop();
+            now = self.sample_ticks()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn minimum_deadline(&self, minimum_ns: u64) -> Result<MinimumDeadline, WorkError> {
+        let start = self.sample_ticks()?;
+        let target = self.minimum_target(start, minimum_ns)?;
+        // The nominal conversion floors. A subnanosecond HPET tick can
+        // share that nanosecond with an earlier tick, so wake one ns later.
+        let nominal_ns = self.cpu.source.ns(target)?;
+        let nominal_ns = i64::try_from(nominal_ns)
+            .ok()
+            .and_then(|ns| ns.checked_add(1))
+            .filter(|ns| *ns != i64::MAX)
+            .ok_or(WorkError::Exhausted)?;
+        Ok(MinimumDeadline {
+            epoch: self.clone(),
+            start,
+            target,
+            minimum_ns,
+            nominal_ns,
+        })
+    }
+}
+
+// SAFETY: construction is private to the installed HPET epoch. Every call
+// revalidates that retained source and CPU and releases its sampling scope
+// before returning. The hint uses the nominal conversion of that same epoch.
+unsafe impl stela_linux::owner::MinimumDeadline for MinimumDeadline {
+    fn ready(&self) -> Result<bool, WorkError> {
+        Ok(self.epoch.sample_ticks()? >= self.target)
+    }
+
+    fn wake_ns(&self) -> Result<i64, WorkError> {
+        self.epoch.sample_ticks()?;
+        Ok(self.nominal_ns)
+    }
+
+    fn remaining_quanta_ceil(&self, quantum_us: u64) -> Result<u64, WorkError> {
+        let quantum_ns = quantum_us
+            .checked_mul(1000)
+            .filter(|ns| *ns != 0)
+            .ok_or(WorkError::Exhausted)?;
+        let now = self.epoch.sample_ticks()?;
+        if now >= self.target {
+            return Ok(0);
+        }
+        let elapsed = now
+            .checked_sub(self.start)
+            .ok_or(WorkError::CorruptContext)?;
+        let lower_ns = self.epoch.cpu.source.elapsed_bounds(elapsed)?.lower_ns;
+        let remaining = self
+            .minimum_ns
+            .checked_sub(lower_ns)
+            .filter(|ns| *ns != 0)
+            .ok_or(WorkError::CorruptContext)?;
+        // A fresh delay for this remainder reapplies the HPET edge bound.
+        // The elapsed lower bound never credits more ticks than actually ran.
+        Ok(remaining.div_ceil(quantum_ns))
+    }
+}
+
+impl stela_drivers::bus::pci::power::Interval for MinimumDeadline {
+    fn elapsed(&self) -> Result<bool, stela_drivers::bus::pci::power::Error> {
+        use stela_drivers::bus::pci::power::Error;
+        if self.epoch.cpu.in_interrupt() {
+            return Err(Error::Clock);
+        }
+        stela_linux::owner::MinimumDeadline::ready(self).map_err(|_| Error::Clock)
+    }
+}
+
+// SAFETY: the epoch retains and checks the actual HPET/CPU/root on every
+// sample, derives the target from the outward lower bound, and does not wait
+// in PCI interrupt context.
+unsafe impl stela_drivers::bus::pci::power::Timer for CounterEpoch {
+    fn check(&self) -> Result<(), stela_drivers::bus::pci::power::Error> {
+        use stela_drivers::bus::pci::power::Error;
+        if self.cpu.in_interrupt() {
+            return Err(Error::Clock);
+        }
+        let start = self.sample_ticks().map_err(|_| Error::Clock)?;
+        // The longest PCI power readiness interval is 60 seconds.
+        self.minimum_target(start, 60_000_000_000)
+            .map(|_| ())
+            .map_err(|_| Error::Clock)
+    }
+
+    fn wait_us(&self, microseconds: u64) -> Result<(), stela_drivers::bus::pci::power::Error> {
+        use stela_drivers::bus::pci::power::Error;
+        if self.cpu.in_interrupt() {
+            return Err(Error::Clock);
+        }
+        self.minimum_delay_us(microseconds)
+            .map_err(|_| Error::Clock)
+    }
+
+    fn begin_interval(
+        &self,
+        microseconds: u64,
+    ) -> Result<
+        Option<Box<dyn stela_drivers::bus::pci::power::Interval>>,
+        stela_drivers::bus::pci::power::Error,
+    > {
+        use stela_drivers::bus::pci::power::Error;
+        if self.cpu.in_interrupt() {
+            return Err(Error::Clock);
+        }
+        let ns = microseconds.checked_mul(1_000).ok_or(Error::Clock)?;
+        let interval = self.minimum_deadline(ns).map_err(|_| Error::Clock)?;
+        Ok(Some(Box::new(interval)))
     }
 }
 
@@ -392,6 +545,28 @@ impl State {
         }
         Ok(())
     }
+    /// Wait on the installed mux under the caller's local interrupt save.
+    /// The caller owns the explicit root/IRQ execution boundary for HLT.
+    unsafe fn wait_until(&self, deadline: Option<u64>) -> Result<(), WorkError> {
+        let now = self.cpu.sample()?;
+        if self.pending.swap(false, Ordering::AcqRel)
+            || deadline.is_some_and(|deadline| deadline <= now)
+        {
+            return Ok(());
+        }
+        self.idle.store(deadline.unwrap_or(NONE), Ordering::Relaxed);
+        self.rearm(now)?;
+        let budget = || {
+            let ticks = self.cpu.controller().read(apic::CURRENT);
+            Some(u64::from(ticks) * 1_000_000 / self.apic_hz)
+        };
+        // SAFETY: caller supplies the live IDT/LAPIC and the explicit wait scope.
+        unsafe { crate::native_idle::wait(budget) };
+        self.idle.store(NONE, Ordering::Relaxed);
+        self.pending.swap(false, Ordering::AcqRel);
+        self.rearm(self.cpu.sample()?)
+    }
+
     fn rearm(&self, now: u64) -> Result<(), WorkError> {
         self.cpu.health.check()?;
         self.cpu
@@ -450,26 +625,9 @@ unsafe impl Idle for NativeIdle {
             if flags & IF == 0 {
                 return Err(WorkError::WouldDeadlock);
             }
-            let now = self.state.cpu.sample()?;
-            if self.state.pending.swap(false, Ordering::AcqRel)
-                || deadline.is_some_and(|d| d <= now)
-            {
-                return Ok(());
-            }
-            self.state
-                .idle
-                .store(deadline.unwrap_or(NONE), Ordering::Relaxed);
-            self.state.rearm(now)?;
-            let budget = || {
-                let ticks = self.state.cpu.controller().read(apic::CURRENT);
-                Some(u64::from(ticks) * 1_000_000 / self.state.apic_hz)
-            };
-            // SAFETY: incoming IF was set, root owns IDT/LAPIC. The wait
-            // ends on any interrupt, including one published before it.
-            unsafe { crate::native_idle::wait(budget) };
-            self.state.idle.store(NONE, Ordering::Relaxed);
-            self.state.pending.swap(false, Ordering::AcqRel);
-            self.state.rearm(self.state.cpu.sample()?)
+            // SAFETY: incoming IF was set and process validation owns the
+            // exact installed dispatcher CPU and root for this wait.
+            unsafe { self.state.wait_until(deadline) }
         })();
         // SAFETY: exact flags from the same physical dispatcher entry.
         unsafe {
@@ -618,10 +776,6 @@ impl DriverExecution<'_> {
     /// # Safety
     /// The body must be bounded and synchronous. It cannot switch, park,
     /// restore interrupts, change roots or retain the borrowed permission.
-    #[cfg_attr(
-        not(feature = "diagnostics"),
-        expect(dead_code, reason = "used by the loader-root qualification")
-    )]
     pub(crate) unsafe fn with_process<R>(
         &self,
         body: impl FnOnce(&dyn EnteredProcess) -> R,
@@ -1146,6 +1300,41 @@ fn calibrate(cpu: &RootCpu) -> Result<u64, WorkError> {
         apic.write(apic::DIVIDE, saved_divide);
     }
     result
+}
+
+/// Route a host wait through the installed LAPIC owner, when present.
+pub(crate) fn host_sleep(micros: u64) -> bool {
+    let flags = flags_disable();
+    let handled = host_sleep_disabled(micros);
+    // SAFETY: restore the enclosing same-CPU save after returning from idle.
+    unsafe { restore(flags) };
+    handled
+}
+
+fn host_sleep_disabled(micros: u64) -> bool {
+    if !registration_cpu() {
+        return false;
+    }
+    let pointer = ACTIVE.load(Ordering::Acquire);
+    if pointer.is_null() {
+        return false;
+    }
+    // SAFETY: same-CPU IRQ exclusion keeps the active registration's Arc.
+    let state = unsafe { &*pointer };
+    if state.process().is_ok() {
+        let result = (|| {
+            let now = state.cpu.sample()?;
+            let delta = micros.checked_mul(1000).ok_or(WorkError::Exhausted)?;
+            let deadline = now.checked_add(delta).ok_or(WorkError::Exhausted)?;
+            // SAFETY: same installed host root/CPU and existing host wait
+            // boundary, with local IRQ exclusion already held.
+            unsafe { state.wait_until(Some(deadline)) }
+        })();
+        if let Err(error) = result {
+            state.cpu.fatal(error);
+        }
+    }
+    true
 }
 
 /// Existing host owner routes its guest timer count here when registered.
