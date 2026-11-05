@@ -7,6 +7,7 @@ use std::path::PathBuf;
 pub mod fetch;
 mod llvm;
 mod mesa;
+mod metal_suite;
 mod nvidia;
 mod nvk;
 mod support;
@@ -108,6 +109,10 @@ pub enum Command {
         #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..))]
         jobs: u16,
     },
+    /// Differential testing of the Metal stack: plan the suite's assertions,
+    /// prove them on a Mac, carry them to a guest and check its results.
+    #[command(subcommand)]
+    MetalSuite(metal_suite::Command),
     /// Compile LLVM and libc++ for `stela.efi`, which `nvk` also does.
     Llvm {
         /// Maximum parallel native compiler processes.
@@ -147,6 +152,7 @@ pub fn run(command: Command) -> Result<()> {
         Command::Nvidia { jobs, target } => nvidia::build(jobs, target),
         // `stela.efi` carries the kext it links against each boot's kernel.
         Command::Nvk { jobs } => build_nvk(jobs),
+        Command::MetalSuite(command) => metal_suite::run(command),
         Command::Llvm { jobs, test } => llvm::build(&nvidia::Toolchain::discover()?, jobs, test),
     }
 }
