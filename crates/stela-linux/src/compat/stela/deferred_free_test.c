@@ -209,6 +209,55 @@ static void cache_destruction_joins_deferred_objects(void)
 	assert(after.reclaimable == totals.reclaimable && after.unreclaimable == totals.unreclaimable);
 }
 
+static unsigned int constructors;
+
+static void initialize_cache_object(void *pointer)
+{
+	u64 *value = pointer;
+	constructors++;
+	*value = 0x123456789abcdef0ULL;
+}
+
+static void cache_shrink_preserves_late_page_reference(void)
+{
+	struct stela_linux_slab_pages before = stela_linux_slab_owned_pages();
+	unsigned long free_before, available;
+	assert(!stela_linux_available_page_frames(&free_before));
+	struct kmem_cache_args args = {.align = 128, .ctor = initialize_cache_object};
+	struct kmem_cache *cache = __kmem_cache_create_args("source-cache-late-page-ref",
+		PAGE_SIZE + 1, &args, SLAB_TYPESAFE_BY_RCU);
+	assert(cache);
+	u64 *object = kmem_cache_alloc(cache, GFP_KERNEL);
+	assert(object && *object == 0x123456789abcdef0ULL && constructors == 1);
+	struct page *head = virt_to_page(object);
+	struct page *tail = head + 1;
+	assert(PageHead(head) && PageTail(tail));
+	*object = 0xfedcba9876543210ULL;
+	kmem_cache_free(cache, object);
+	assert(!kmem_cache_shrink(cache));
+	struct stela_linux_slab_pages detached = stela_linux_slab_owned_pages();
+	assert(detached.unreclaimable == before.unreclaimable + 2);
+	rcu_read_lock();
+	get_page(tail);
+	assert(*object == 0xfedcba9876543210ULL);
+	rcu_read_unlock();
+	stela_linux_rcu_finish();
+	assert(page_ref_count(head) == 2 && kmem_cache_shrink(cache) == 1);
+	assert(!stela_linux_available_page_frames(&available) && available + 2 == free_before);
+	u64 *reused = kmem_cache_alloc(cache, GFP_NOWAIT);
+	assert(reused == object && *reused == 0xfedcba9876543210ULL && constructors == 1);
+	kmem_cache_free(cache, reused);
+	put_page(tail);
+	assert(page_ref_count(head) == 1 && !kmem_cache_shrink(cache));
+	stela_linux_rcu_finish();
+	struct stela_linux_slab_pages retired = stela_linux_slab_owned_pages();
+	assert(retired.reclaimable == before.reclaimable && retired.unreclaimable == before.unreclaimable);
+	/* The dispatcher can drain the returned frames during the RCU wait. */
+	stela_linux_pages_finish();
+	assert(!stela_linux_available_page_frames(&available) && available == free_before);
+	kmem_cache_destroy(cache);
+}
+
 void stela_linux_deferred_free_source_test(void)
 {
 	embedded(0);
@@ -217,6 +266,7 @@ void stela_linux_deferred_free_source_test(void)
 	headless();
 	page_backing_returns_after_callback();
 	cache_destruction_joins_deferred_objects();
+	cache_shrink_preserves_late_page_reference();
 }
 #else
 
