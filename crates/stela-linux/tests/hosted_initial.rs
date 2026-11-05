@@ -189,6 +189,10 @@ impl Platform for Host {
         panic!("Linux warning at {file:?}:{line} {condition:?}");
     }
     fn unsupported(&self, operation: &CStr) {
+        #[cfg(feature = "hosted-test-support")]
+        if original_fixtures::count_refusal() {
+            return;
+        }
         panic!("Linux reported {operation:?}");
     }
     fn random_bytes(&self, bytes: &mut [u8]) {
@@ -622,6 +626,9 @@ mod original_fixtures {
     static BODY_RETURNED: AtomicBool = AtomicBool::new(false);
     static SOFTWARE_PEER: AtomicBool = AtomicBool::new(false);
     static SRCU_NEGATIVE_CASE: AtomicU32 = AtomicU32::new(0);
+    /// Set only by a fixture that observes Linux's degraded refusals itself.
+    static COUNT_REFUSALS: AtomicBool = AtomicBool::new(false);
+    static REFUSALS: AtomicU32 = AtomicU32::new(0);
 
     unsafe extern "C" {
         fn stela_linux_timer_test_sleeper();
@@ -632,6 +639,7 @@ mod original_fixtures {
         fn stela_linux_exec_state_source_test();
         fn stela_linux_registry_source_test(parameter_failure: bool);
         fn stela_linux_trees_source_test();
+        fn stela_linux_cache_source_test();
         fn stela_linux_srcu_queue_before_threads();
         fn stela_linux_srcu_negative_case(which: u32, witness: unsafe extern "C" fn());
         fn stela_linux_workqueue_test_main();
@@ -647,6 +655,21 @@ mod original_fixtures {
             ...
         ) -> *mut c_void;
         fn wake_up_process(task: *mut c_void) -> i32;
+    }
+
+    /// Whether the running fixture counts refusals instead of failing on them.
+    pub(super) fn count_refusal() -> bool {
+        let counting = COUNT_REFUSALS.load(Ordering::Relaxed);
+        if counting {
+            REFUSALS.fetch_add(1, Ordering::Relaxed);
+        }
+        counting
+    }
+
+    /// The refusals counted so far, read by the cache fixture.
+    #[unsafe(no_mangle)]
+    extern "C" fn stela_test_refusals() -> u32 {
+        REFUSALS.load(Ordering::Relaxed)
     }
 
     pub(super) fn software_peer_active() -> bool {
@@ -792,6 +815,18 @@ mod original_fixtures {
         );
     }
 
+    #[test]
+    fn original_caches_keep_slab_lifetimes_and_accounts() {
+        in_fresh_process(
+            "original_fixtures::original_caches_keep_slab_lifetimes_and_accounts",
+            "original caches kept slab lifetimes and accounts",
+            16 * 1024,
+            14,
+            mount_cache,
+            drive_cache,
+        );
+    }
+
     const SRCU_WITNESS: &str = "entered original SRCU refusal case\n";
 
     #[test]
@@ -897,6 +932,13 @@ mod original_fixtures {
         0
     }
 
+    unsafe extern "C" fn cache_job(_: *mut c_void) -> i32 {
+        // SAFETY: original kthreadd bound this entered source task.
+        unsafe { stela_linux_cache_source_test() };
+        BODY_RETURNED.store(true, Ordering::Relaxed);
+        0
+    }
+
     unsafe extern "C" fn srcu_witness() {
         let bytes = SRCU_WITNESS.as_bytes();
         // SAFETY: resident bytes and the child process's captured stderr.
@@ -979,6 +1021,13 @@ mod original_fixtures {
         unsafe { mount(owner, context, trees_job, c"trees-fixture", None) }
     }
 
+    unsafe extern "C" fn mount_cache(owner: *const RawOwner, context: *mut c_void) -> ! {
+        // The fixture asserts each degraded refusal it provokes.
+        COUNT_REFUSALS.store(true, Ordering::Relaxed);
+        // SAFETY: exact retained Initial scope and live fixture callback.
+        unsafe { mount(owner, context, cache_job, c"cache-fixture", None) }
+    }
+
     unsafe extern "C" fn mount_registry<const PARAMETER_FAILURE: bool>(
         owner: *const RawOwner,
         context: *mut c_void,
@@ -1049,6 +1098,12 @@ mod original_fixtures {
     fn drive_trees(runtime: Pin<&TestRuntime>, _: &HostedClock, _: &TestQueue) {
         await_fixture(runtime);
         println!("original trees returned their nodes after grace periods");
+        process::exit(0);
+    }
+
+    fn drive_cache(runtime: Pin<&TestRuntime>, _: &HostedClock, _: &TestQueue) {
+        await_fixture(runtime);
+        println!("original caches kept slab lifetimes and accounts");
         process::exit(0);
     }
 

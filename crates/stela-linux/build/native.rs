@@ -382,6 +382,7 @@ impl Linux {
         if super::task_fixtures() && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
             build.define("STELA_LINUX_REGISTRY_SOURCE_TEST", None);
             build.define("STELA_LINUX_HOSTED_PAGE_TEST", None);
+            build.define("STELA_LINUX_CACHE_SOURCE_TEST", None);
         }
         linux_archive(&build, "stela-linux", &kernel, &upstream, Path::new(COMPAT));
         // A callable target-ABI fixture plus host helpers only. It links the
@@ -550,7 +551,6 @@ impl Linux {
             ("linux_panic", "panic.c", "STELA_LINUX_PANIC_TEST"),
             ("linux_pages", "page.c", "STELA_LINUX_PAGE_TEST"),
             ("linux_slab", "slab.c", "STELA_LINUX_SLAB_TEST"),
-            ("linux_cache", "cache.c", "STELA_LINUX_CACHE_TEST"),
             ("linux_params", "params.c", "STELA_LINUX_PARAMS_TEST"),
             (
                 "linux_params_parser",

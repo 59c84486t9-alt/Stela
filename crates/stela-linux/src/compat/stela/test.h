@@ -27,6 +27,9 @@ void stela_test_allocations_begin(bool refuse);
 struct stela_test_allocations stela_test_allocations_snapshot(void);
 struct stela_test_allocations stela_test_allocations_end(void);
 bool stela_test_allocation_attempt(unsigned int route);
+/* Refuse only this thread's page attempts, independent of any window, while
+ * heap routes keep serving the metadata a refused grow still needs. */
+void stela_test_pages_refuse(bool refuse);
 
 /* The host's monotonic clock, and a sleep of at least usecs on it. */
 s64 stela_test_now_ns(void);

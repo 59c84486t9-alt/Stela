@@ -34,11 +34,13 @@ void stela_test_allocations_begin(bool refuse);
 struct stela_test_allocations stela_test_allocations_snapshot(void);
 struct stela_test_allocations stela_test_allocations_end(void);
 bool stela_test_allocation_attempt(unsigned int route);
+void stela_test_pages_refuse(bool refuse);
 /* Per thread: a fixture counts and refuses only its own thread's attempts.
  * Other threads of the test process, such as the harness thread that spawned
  * the fixture's, keep allocating while a window is armed. */
 static _Thread_local uint64_t allocation_attempts[3];
 static _Thread_local bool refuse_allocations;
+static _Thread_local bool refuse_pages;
 
 void stela_test_allocations_begin(bool refuse)
 {
@@ -62,11 +64,16 @@ struct stela_test_allocations stela_test_allocations_end(void)
  return stela_test_allocations_snapshot();
 }
 
+void stela_test_pages_refuse(bool refuse)
+{
+ refuse_pages = refuse;
+}
+
 bool stela_test_allocation_attempt(unsigned int route)
 {
  if (route >= 3 || allocation_attempts[route]++ == UINT64_MAX)
   abort();
- return !refuse_allocations;
+ return !refuse_allocations && !(route == 2 && refuse_pages);
 }
 
 #ifndef STELA_TEST_CANONICAL_RUST_HEAP
