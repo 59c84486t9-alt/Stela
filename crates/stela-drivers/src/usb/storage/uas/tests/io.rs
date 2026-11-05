@@ -14,20 +14,6 @@ impl Io for Model {
     fn streams(&self) -> Option<u16> {
         self.state.borrow().streams
     }
-    fn read_command_ceiling(&self) -> Result<usize, BlockError> {
-        Ok(self.state.borrow().read_ceiling)
-    }
-    fn submit_chained_read(
-        &mut self,
-        tag: u16,
-        buffer: &DmaBuffer,
-        length: usize,
-    ) -> Result<Ticket, BlockError> {
-        assert!((MAX_TD + 1..=buffer.len()).contains(&length));
-        assert!(buffer.bus_address().is_multiple_of(MAX_TD as u64));
-        self.state.borrow_mut().chained_reads.push(length);
-        self.submit(Pipe::Input, tag, buffer.bus_address(), length)
-    }
     fn now(&self) -> u64 {
         self.clock.get()
     }
