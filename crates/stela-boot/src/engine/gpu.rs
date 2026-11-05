@@ -1662,9 +1662,7 @@ pub(super) fn pump() {
             if !runtime.step()? {
                 break;
             }
-            if super::service::shutdown_pending()
-                || host::rdtsc().wrapping_sub(started) >= budget
-            {
+            if super::service::shutdown_pending() || host::rdtsc().wrapping_sub(started) >= budget {
                 gpu.events.pending.store(true, Ordering::Release);
                 break;
             }
@@ -1740,7 +1738,10 @@ pub(super) fn slice(ticks: u64) -> u64 {
     let Some(gpu) = installed() else {
         return ticks;
     };
-    let left = gpu.next.load(Ordering::Relaxed).saturating_sub(host::rdtsc());
+    let left = gpu
+        .next
+        .load(Ordering::Relaxed)
+        .saturating_sub(host::rdtsc());
     let left = u128::from(left) * u128::from(host::COUNTER_HZ) / u128::from(gpu.tsc_hz.max(1));
     ticks.min(left.min(u128::from(u64::MAX)) as u64).max(1)
 }
