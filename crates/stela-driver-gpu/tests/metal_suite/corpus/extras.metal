@@ -69,6 +69,16 @@ kernel void pack_formats(device const float4 *in [[buffer(0)]], device uint4 *pa
     unpacked[i * 3 + 2] = unpack_snorm10a2_to_float(ps);
 }
 
+// Every sample of each slice of a multisampled depth array.
+kernel void read_ms_depth_array(depth2d_ms_array<float> depth [[texture(0)]], device float *depths [[buffer(0)]],
+                                uint2 p [[thread_position_in_grid]])
+{
+    uint w = depth.get_width(), h = depth.get_height(), n = depth.get_num_samples();
+    for (uint l = 0; l < depth.get_array_size(); l++)
+        for (uint s = 0; s < n; s++)
+            depths[((l * h + p.y) * w + p.x) * n + s] = depth.read(p, l, s);
+}
+
 // Every sample of a multisampled depth texture and of each slice of a
 // multisampled colour array.
 kernel void read_ms(depth2d_ms<float> depth [[texture(0)]], texture2d_ms_array<float> layers [[texture(1)]],
@@ -106,6 +116,11 @@ struct Fetched {
 kernel void stage_in_compute(Fetched in [[stage_in]], device float4 *out [[buffer(2)]],
                              uint i [[thread_position_in_grid]])
 { out[i] = float4(in.a, float(in.b.x) + float(in.b.y) * 256.0f, float(in.b.z) - float(in.b.w)); }
+
+// The same over a grid one thread wide, a row per element.
+kernel void stage_in_rows(Fetched in [[stage_in]], device float4 *out [[buffer(2)]],
+                          uint2 p [[thread_position_in_grid]])
+{ out[p.y] = float4(in.a, float(in.b.x) + float(in.b.y) * 256.0f, float(in.b.z) - float(in.b.w)); }
 
 struct Pixel {
     float4 position [[position]];
@@ -153,3 +168,76 @@ kernel void bfloat_scalar(device const float *in [[buffer(0)]], device ushort *n
 kernel void limited(device uint *out [[buffer(0)]], uint i [[thread_position_in_grid]],
                     uint t [[threads_per_threadgroup]])
 { out[i] = i * 3u + t; }
+
+// The stage-in fetch as a command a kernel encodes: its buffers, the
+// float2s at the stride the command gives, and its region.
+struct StageInCommands {
+    command_buffer commands [[id(0)]];
+};
+
+kernel void encode_stage_in(device StageInCommands &c [[buffer(0)]], device const float2 *a [[buffer(1)]],
+                            device const uchar4 *b [[buffer(2)]], device float4 *out [[buffer(3)]],
+                            constant uint &n [[buffer(4)]])
+{
+    compute_command command(c.commands, 0);
+    command.set_kernel_buffer(a, 16, 0);
+    command.set_kernel_buffer(b, 1);
+    command.set_kernel_buffer(out, 2);
+    command.set_stage_in_region(uint3(0), uint3(n, 1, 1));
+    command.concurrent_dispatch_threadgroups(uint3(n / 64, 1, 1), uint3(64, 1, 1));
+}
+
+// (quadgroup index, quadgroups, dispatched quadgroups, lane) of each
+// thread, for simd_ids's grid.
+kernel void quad_ids(device uint4 *out [[buffer(0)]], uint3 grid [[thread_position_in_grid]],
+                     uint group [[quadgroup_index_in_threadgroup]],
+                     uint groups [[quadgroups_per_threadgroup]],
+                     uint dispatched [[dispatch_quadgroups_per_threadgroup]],
+                     uint lane [[thread_index_in_quadgroup]])
+{
+    out[grid.x] = uint4(group, groups, dispatched, lane);
+}
+
+// A stage-in region's origin and size, with the attribute each thread of
+// the region fetches.
+struct Indexed {
+    uint v [[attribute(0)]];
+};
+
+kernel void stage_in_origin(Indexed in [[stage_in]], device uint4 *out [[buffer(1)]], uint3 origin [[grid_origin]],
+                            uint3 size [[grid_size]], uint3 p [[thread_position_in_grid]])
+{
+    if (p.x < size.x)
+        out[p.x] = uint4(in.v, origin.x, size.x, p.x);
+}
+
+// Atomic booleans: each thread swaps its own flags, so every result is
+// fixed: the first flag exchanged for true, the second set if it was
+// false (retrying the weak exchange's spurious failures), the first
+// stored inverted, then the second read back.
+kernel void atomic_flags(device atomic_bool *first [[buffer(0)]], device atomic_bool *second [[buffer(1)]],
+                         device uint *out [[buffer(2)]], uint i [[thread_position_in_grid]])
+{
+    bool was = atomic_exchange_explicit(&first[i], true, memory_order_relaxed);
+    bool expected, swapped;
+    do {
+        expected = false;
+        swapped = atomic_compare_exchange_weak_explicit(&second[i], &expected, true, memory_order_relaxed,
+                                                        memory_order_relaxed);
+    } while (!swapped && !expected);
+    atomic_store_explicit(&first[i], !atomic_load_explicit(&first[i], memory_order_relaxed), memory_order_relaxed);
+    out[i] = uint(was) | uint(swapped) << 1 | uint(expected) << 2 | uint(atomic_load_explicit(&second[i], memory_order_relaxed)) << 3;
+}
+
+// Two attributes fetched through the stage input's index buffer: the
+// first by the thread's x position, the second by its y.
+struct IndexedPair {
+    uint a [[attribute(0)]];
+    uint b [[attribute(1)]];
+};
+
+kernel void stage_in_indexed(IndexedPair in [[stage_in]], device uint2 *out [[buffer(2)]],
+                             uint2 p [[thread_position_in_grid]], uint2 n [[threads_per_grid]])
+{
+    out[p.y * n.x + p.x] = uint2(in.a, in.b);
+}

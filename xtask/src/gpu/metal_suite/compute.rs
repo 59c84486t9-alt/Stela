@@ -6,7 +6,7 @@
 //! width. The order in which atomics return their values is the device's
 //! choice, so those outputs are compared sorted.
 use super::plan::{Buffer, Case, Output, Plan, Tolerance};
-use super::values::{Dtype, Random, bits32, f16r, f32r, floats, ints, sum, u32s};
+use super::values::{Dtype, Random, bits32, f16r, f32r, f32s, floats, ints, sum, u32s};
 use serde_json::json;
 
 const SIMD: usize = 32;
@@ -19,10 +19,6 @@ fn values(seed: u64, count: usize, limit: u64) -> Vec<u64> {
 
 fn u32w(v: i128) -> u32 {
     v as u32
-}
-
-fn exact(name: &str, dtype: Dtype, data: Vec<u8>) -> Output {
-    Output::new(name, dtype, Tolerance::default()).expect_same(data)
 }
 
 fn words(v: &[u64]) -> Vec<u8> {
@@ -71,7 +67,7 @@ fn builtins(plan: &mut Plan, library: &str) {
         )
         .dispatch_threads()
         .buffer(Buffer::zeroed("out", 0, total * 64))
-        .output(exact("out", Dtype::U32, u32s(&expected)))
+        .output(Output::exact("out", Dtype::U32, u32s(&expected)))
         .note("non-uniform threadgroups at the grid edges"),
     );
 }
@@ -104,8 +100,8 @@ fn reduction(plan: &mut Plan, library: &str) {
         .buffer(Buffer::data("in", 0, words(&data)))
         .buffer(Buffer::zeroed("sums", 1, groups * 4))
         .buffer(Buffer::zeroed("partials", 2, data.len() * 4))
-        .output(exact("sums", Dtype::U32, words(&sums)))
-        .output(exact("partials", Dtype::U32, words(&partials)))
+        .output(Output::exact("sums", Dtype::U32, words(&sums)))
+        .output(Output::exact("partials", Dtype::U32, words(&partials)))
         .set(
             "threadgroup_memory",
             json!([{"index": 0, "length": size * 4}]),
@@ -134,7 +130,7 @@ fn reduction(plan: &mut Plan, library: &str) {
         )
         .buffer(Buffer::data("in", 0, floats(Dtype::F32, &image)))
         .buffer(Buffer::zeroed("out", 1, image.len() * 4))
-        .output(exact("out", Dtype::F32, floats(Dtype::F32, &out))),
+        .output(Output::exact("out", Dtype::F32, floats(Dtype::F32, &out))),
     );
 }
 
@@ -173,8 +169,8 @@ fn atomics(plan: &mut Plan, library: &str) {
         .buffer(Buffer::data("in", 0, words(&data)))
         .buffer(Buffer::data("u", 1, words(&initial_u)))
         .buffer(Buffer::data("s", 2, ints(Dtype::I32, &initial_s)))
-        .output(exact("u", Dtype::U32, words(&u)))
-        .output(exact("s", Dtype::I32, ints(Dtype::I32, &s))),
+        .output(Output::exact("u", Dtype::U32, words(&u)))
+        .output(Output::exact("s", Dtype::I32, ints(Dtype::I32, &s))),
     );
     let total: u32 = (0..n).map(|i| (i % 5) as u32 + 1).sum();
     plan.add(
@@ -186,7 +182,7 @@ fn atomics(plan: &mut Plan, library: &str) {
         )
         .buffer(Buffer::data("counter", 0, u32s(&[0])))
         .buffer(Buffer::zeroed("seen", 1, n * 4))
-        .output(exact("counter", Dtype::U32, u32s(&[total])).set("length", 4))
+        .output(Output::exact("counter", Dtype::U32, u32s(&[total])).set("length", 4))
         .output(Output::new("seen", Dtype::U32, Tolerance::default()).set("sorted_compare", true))
         .note("seen holds each fetch-add return; the compare sorts them"),
     );
@@ -201,7 +197,7 @@ fn atomics(plan: &mut Plan, library: &str) {
         .buffer(Buffer::data("cell", 0, u32s(&[0])))
         .buffer(Buffer::zeroed("seen", 1, n * 4))
         .output(
-            exact("seen", Dtype::U32, u32s(&all))
+            Output::exact("seen", Dtype::U32, u32s(&all))
                 .set("sorted_compare", true)
                 .set("append", "cell"),
         )
@@ -235,7 +231,7 @@ fn atomics(plan: &mut Plan, library: &str) {
         )
         .buffer(Buffer::data("in", 0, words(&data)))
         .buffer(Buffer::zeroed("out", 1, groups * 18 * 4))
-        .output(exact("out", Dtype::U32, words(&hist))),
+        .output(Output::exact("out", Dtype::U32, words(&hist))),
     );
     let fl: Vec<f64> = values(23, n, 1 << 20)
         .iter()
@@ -249,7 +245,7 @@ fn atomics(plan: &mut Plan, library: &str) {
             Case::compute1("compute.atomics.float", library, "atomics_float", n as u32)
                 .buffer(Buffer::data("in", 0, floats(Dtype::F32, &fl)))
                 .buffer(Buffer::data("sums", 1, floats(Dtype::F32, &[0.0; 4])))
-                .output(exact("sums", Dtype::F32, floats(Dtype::F32, &sums))),
+                .output(Output::exact("sums", Dtype::F32, floats(Dtype::F32, &sums))),
         );
     }
 }
@@ -334,7 +330,7 @@ fn simd(plan: &mut Plan, library: &str) {
         )
         .buffer(Buffer::data("in", 0, words(&data)))
         .buffer(Buffer::zeroed("out", 1, n * 96))
-        .output(exact("out", Dtype::U32, u32s(&out))),
+        .output(Output::exact("out", Dtype::U32, u32s(&out))),
     );
     let mut rot = vec![];
     for (i, _) in data.iter().enumerate() {
@@ -358,7 +354,7 @@ fn simd(plan: &mut Plan, library: &str) {
             Case::compute1("compute.simd.rotate", library, "simd_rotate", n as u32)
                 .buffer(Buffer::data("in", 0, words(&data)))
                 .buffer(Buffer::zeroed("out", 1, n * 16))
-                .output(exact("out", Dtype::U32, words(&rot))),
+                .output(Output::exact("out", Dtype::U32, words(&rot))),
         );
     }
     let mut div = vec![];
@@ -391,7 +387,7 @@ fn simd(plan: &mut Plan, library: &str) {
         )
         .buffer(Buffer::data("in", 0, words(&data)))
         .buffer(Buffer::zeroed("out", 1, n * 24))
-        .output(exact("out", Dtype::U32, words(&div))),
+        .output(Output::exact("out", Dtype::U32, words(&div))),
     );
     let mut quad = vec![];
     for i in 0..n {
@@ -424,8 +420,70 @@ fn simd(plan: &mut Plan, library: &str) {
         )
         .buffer(Buffer::data("in", 0, words(&data)))
         .buffer(Buffer::zeroed("out", 1, n * 32))
-        .output(exact("out", Dtype::U32, words(&quad))),
+        .output(Output::exact("out", Dtype::U32, words(&quad))),
     );
+    if plan.has(SOURCE, "matrix_filled") {
+        plan.add(
+            Case::compute(
+                "compute.matrix.filled",
+                library,
+                "matrix_filled",
+                [6, 1, 1],
+                [6, 1, 1],
+            )
+            .buffer(Buffer::zeroed("out", 0, 24))
+            .output(Output::exact("out", Dtype::F32, f32s(&[2.5; 6]))),
+        );
+    }
+    if plan.has(SOURCE, "address_spaces") {
+        plan.add(
+            Case::compute(
+                "compute.address_spaces",
+                library,
+                "address_spaces",
+                [1, 1, 1],
+                [1, 1, 1],
+            )
+            .buffer(Buffer::zeroed("out", 0, 16))
+            .set("threadgroup_memory", json!([{"index": 0, "length": 16}]))
+            .output(Output::exact("out", Dtype::U32, u32s(&[1, 2, 4, 0]))),
+        );
+    }
+    plan.add(
+        Case::compute(
+            "compute.array_ref",
+            library,
+            "array_refs",
+            [1, 1, 1],
+            [1, 1, 1],
+        )
+        .buffer(Buffer::data("in", 0, u32s(&[4, 5, 6, 7])))
+        .buffer(Buffer::zeroed("out", 1, 32))
+        .output(Output::exact(
+            "out",
+            Dtype::U32,
+            u32s(&[3, 6, 15, 26, 11, 0, 0, 0]),
+        )),
+    );
+    if plan.has(SOURCE, "simdgroup_elements") {
+        // Small integers, so the sum is exact in any order.
+        let m: Vec<f64> = (0..64).map(|k| f64::from(k % 13) - 6.0).collect();
+        let mut expected: Vec<f64> = m.iter().map(|v| v * 2.0).collect();
+        expected.push(m.iter().sum());
+        plan.add(
+            Case::compute(
+                "compute.simdgroup_matrix.thread_elements",
+                library,
+                "simdgroup_elements",
+                [32, 1, 1],
+                [32, 1, 1],
+            )
+            .buffer(Buffer::data("in", 0, f32s(&m)))
+            .buffer(Buffer::zeroed("out", 1, 65 * 4))
+            .output(Output::exact("out", Dtype::F32, f32s(&expected)))
+            .requires(&[], &["simd_reduction"]),
+        );
+    }
     if plan.has(SOURCE, "simdgroup_matrix_bfloat") {
         simdgroup_matrix_bfloat(plan, library);
     }
@@ -456,8 +514,8 @@ fn simd(plan: &mut Plan, library: &str) {
             .buffer(Buffer::zeroed("out_half", 3, 128))
             .buffer(Buffer::data("ah", 4, floats(Dtype::F16, &a)))
             .buffer(Buffer::data("bh", 5, floats(Dtype::F16, &b)))
-            .output(exact("out", Dtype::F32, floats(Dtype::F32, &prod)))
-            .output(exact(
+            .output(Output::exact("out", Dtype::F32, floats(Dtype::F32, &prod)))
+            .output(Output::exact(
                 "out_half",
                 Dtype::F16,
                 floats(Dtype::F16, &half_prod),
@@ -495,7 +553,7 @@ fn simdgroup_matrix_bfloat(plan: &mut Plan, library: &str) {
         .buffer(Buffer::data("a", 0, bf(&a)))
         .buffer(Buffer::data("b", 1, bf(&b)))
         .buffer(Buffer::zeroed("out", 2, 128))
-        .output(exact("out", Dtype::U16, bf(&prod)))
+        .output(Output::exact("out", Dtype::U16, bf(&prod)))
         .requires(&[], &["simd_reduction"]),
     );
 }
@@ -596,8 +654,12 @@ fn memory(plan: &mut Plan, library: &str) {
             floats(Dtype::F32, &[1.5, 0.25, 0.0, 0.0]),
         ))
         .buffer(Buffer::zeroed("scalars", 5, n * 4))
-        .output(exact("out", Dtype::U8, expected).mask(mixed_defined()))
-        .output(exact("shorts", Dtype::U16, ints(Dtype::U16, &shorts)))
+        .output(Output::exact("out", Dtype::U8, expected).mask(mixed_defined()))
+        .output(Output::exact(
+            "shorts",
+            Dtype::U16,
+            ints(Dtype::U16, &shorts),
+        ))
         .output(
             Output::new("scalars", Dtype::F32, one.clone())
                 .expect(floats(Dtype::F32, &scalars), one),
@@ -653,7 +715,7 @@ fn control(plan: &mut Plan, library: &str) {
         Case::compute1("compute.control_flow", library, "control_flow", n as u32)
             .buffer(Buffer::data("in", 0, words(&data)))
             .buffer(Buffer::zeroed("out", 1, n * 16))
-            .output(exact("out", Dtype::U32, words(&out))),
+            .output(Output::exact("out", Dtype::U32, words(&out))),
     );
 }
 

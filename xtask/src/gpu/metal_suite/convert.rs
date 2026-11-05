@@ -58,95 +58,71 @@ fn srgb_decode(c: f64) -> f64 {
     }
 }
 
-type Encode = Option<fn(f64) -> f64>;
+/// How a packed lane encodes and decodes.
+#[derive(Clone, Copy, PartialEq)]
+enum Lane {
+    Unorm,
+    Snorm,
+    /// sRGB colour lanes, a linear alpha.
+    Srgb,
+}
 
-/// name, MSL, lanes, bits per lane, lane encoding (sRGB when None).
-const PACKERS: [(&str, &str, usize, u32, Encode); 5] = [
-    (
-        "unorm4x8",
-        "pack_float_to_unorm4x8",
-        4,
-        8,
-        Some(|v| (v.clamp(0.0, 1.0) * 255.0).round_ties_even()),
-    ),
-    (
-        "snorm4x8",
-        "pack_float_to_snorm4x8",
-        4,
-        8,
-        Some(|v| (v.clamp(-1.0, 1.0) * 127.0).round_ties_even()),
-    ),
-    (
-        "unorm2x16",
-        "pack_float_to_unorm2x16",
-        2,
-        16,
-        Some(|v| (v.clamp(0.0, 1.0) * 65535.0).round_ties_even()),
-    ),
-    (
-        "snorm2x16",
-        "pack_float_to_snorm2x16",
-        2,
-        16,
-        Some(|v| (v.clamp(-1.0, 1.0) * 32767.0).round_ties_even()),
-    ),
-    ("srgb_unorm4x8", "pack_float_to_srgb_unorm4x8", 4, 8, None),
+/// The packed formats with their lane widths: each packs from and
+/// unpacks to float (`pack_float_to_*`, `unpack_*_to_float`) and half.
+const PACKED: [(&str, &[u32], Lane); 8] = [
+    ("unorm4x8", &[8, 8, 8, 8], Lane::Unorm),
+    ("snorm4x8", &[8, 8, 8, 8], Lane::Snorm),
+    ("unorm2x16", &[16, 16], Lane::Unorm),
+    ("snorm2x16", &[16, 16], Lane::Snorm),
+    ("srgb_unorm4x8", &[8, 8, 8, 8], Lane::Srgb),
+    ("unorm10a2", &[10, 10, 10, 2], Lane::Unorm),
+    ("snorm10a2", &[10, 10, 10, 2], Lane::Snorm),
+    ("unorm565", &[5, 6, 5], Lane::Unorm),
 ];
 
-type Decode = Option<fn(f64, u32) -> f64>;
+/// The scalar types packing reads and unpacking writes.
+const PACKED_TYPES: [(&str, Dtype); 2] = [("float", Dtype::F32), ("half", Dtype::F16)];
 
-/// name, MSL, lane widths, lane decoding (sRGB when None), signed lanes.
-const UNPACKERS: [(&str, &str, &[u32], Decode, bool); 7] = [
-    (
-        "unorm4x8",
-        "unpack_unorm4x8_to_float",
-        &[8, 8, 8, 8],
-        Some(|q, _| q / 255.0),
-        false,
-    ),
-    (
-        "snorm4x8",
-        "unpack_snorm4x8_to_float",
-        &[8, 8, 8, 8],
-        Some(|q, _| (q / 127.0).max(-1.0)),
-        true,
-    ),
-    (
-        "unorm2x16",
-        "unpack_unorm2x16_to_float",
-        &[16, 16],
-        Some(|q, _| q / 65535.0),
-        false,
-    ),
-    (
-        "snorm2x16",
-        "unpack_snorm2x16_to_float",
-        &[16, 16],
-        Some(|q, _| (q / 32767.0).max(-1.0)),
-        true,
-    ),
-    (
-        "srgb_unorm4x8",
-        "unpack_unorm4x8_srgb_to_float",
-        &[8, 8, 8, 8],
-        None,
-        false,
-    ),
-    (
-        "unorm10a2",
-        "unpack_unorm10a2_to_float",
-        &[10, 10, 10, 2],
-        Some(|q, b| q / f64::from((1u32 << b) - 1)),
-        false,
-    ),
-    (
-        "unorm565",
-        "unpack_unorm565_to_float",
-        &[5, 6, 5],
-        Some(|q, b| q / f64::from((1u32 << b) - 1)),
-        false,
-    ),
-];
+fn unpack_function(name: &str, t: &str) -> String {
+    match name {
+        "srgb_unorm4x8" => format!("unpack_unorm4x8_srgb_to_{t}"),
+        _ => format!("unpack_{name}_to_{t}"),
+    }
+}
+
+/// A lane's largest code: all ones unsigned, the sign bit's neighbour
+/// signed.
+fn lane_max(lane: Lane, bits: u32) -> f64 {
+    f64::from(if lane == Lane::Snorm {
+        (1u32 << (bits - 1)) - 1
+    } else {
+        (1u32 << bits) - 1
+    })
+}
+
+fn encode_lane(lane: Lane, k: usize, bits: u32, v: f64) -> i64 {
+    let max = lane_max(lane, bits);
+    (match lane {
+        Lane::Snorm => v.clamp(-1.0, 1.0) * max,
+        Lane::Srgb if k < 3 => srgb_encode(v) * max,
+        _ => v.clamp(0.0, 1.0) * max,
+    })
+    .round_ties_even() as i64
+}
+
+fn decode_lane(lane: Lane, k: usize, bits: u32, q: f64) -> f64 {
+    let max = lane_max(lane, bits);
+    match lane {
+        Lane::Snorm => (q / max).max(-1.0),
+        Lane::Srgb if k < 3 => srgb_decode(q / max),
+        _ => q / max,
+    }
+}
+
+/// The vector type a packing reads: four lanes, or two.
+fn packed_vector(t: &str, widths: &[u32]) -> String {
+    format!("{t}{}", if widths.len() == 2 { 2 } else { 4 })
+}
 
 fn msl() -> String {
     let mut lines = vec![
@@ -203,23 +179,38 @@ fn msl() -> String {
     ] {
         lines.push(kernel(name, src, dst, expr));
     }
-    for (name, function, lanes, ..) in PACKERS {
-        let t = if lanes == 4 { "float4" } else { "float2" };
-        lines.push(kernel(
-            &format!("pack_{name}"),
-            t,
-            "uint",
-            &format!("{function}({t}(x))"),
-        ));
-    }
-    for (name, function, widths, ..) in UNPACKERS {
-        let src = if widths.iter().sum::<u32>() == 16 {
+    for (name, widths, _) in PACKED {
+        let packed = if widths.iter().sum::<u32>() == 16 {
             "ushort"
         } else {
             "uint"
         };
-        let expr = format!("float4({function}(x){})", ", 0.0f".repeat(4 - widths.len()));
-        lines.push(kernel(&format!("unpack_{name}"), src, "float4", &expr));
+        for (t, _) in PACKED_TYPES {
+            let v = packed_vector(t, widths);
+            let arg = if widths.len() == 3 { "x.xyz" } else { "x" };
+            let infix = if t == "float" {
+                String::new()
+            } else {
+                format!("{t}_")
+            };
+            lines.push(kernel(
+                &format!("pack_{infix}{name}"),
+                &v,
+                packed,
+                &format!("pack_{t}_to_{name}({arg})"),
+            ));
+            let expr = format!(
+                "{t}4({}(x){})",
+                unpack_function(name, t),
+                format!(", 0.0{}", if t == "half" { "h" } else { "f" }).repeat(4 - widths.len())
+            );
+            lines.push(kernel(
+                &format!("unpack_{infix}{name}"),
+                packed,
+                &format!("{t}4"),
+                &expr,
+            ));
+        }
     }
     lines.join("\n") + "\n"
 }
@@ -545,105 +536,121 @@ pub fn build(plan: &mut Plan) {
             exact(),
             1,
         ));
-        for (name, _, lanes, width, encode) in PACKERS {
-            let mut values: Vec<f64> = vec![
-                0.0,
-                1.0,
-                -1.0,
-                0.5,
-                2.0,
-                -2.0,
-                1.0 / 255.0,
-                0.5 / 255.0,
-                1.5 / 255.0,
-                2.5 / 255.0,
-            ];
-            values.extend((0..COUNT - 10).map(|_| rng.uniform(-1.2, 1.2)));
-            let values: Vec<f64> = values.into_iter().map(f32r).collect();
-            let expected: Vec<u32> = values
-                .chunks(lanes)
-                .map(|lane_values| {
-                    let mut word = 0u32;
-                    for (lane, &v) in lane_values.iter().enumerate() {
-                        let q = match encode {
-                            Some(f) => f(v),
-                            None if lane < 3 => (srgb_encode(v) * 255.0).round_ties_even(),
-                            None => (v.clamp(0.0, 1.0) * 255.0).round_ties_even(),
-                        } as i64;
-                        word |= ((q & ((1 << width) - 1)) as u32) << (lane as u32 * width);
-                    }
-                    word
-                })
-                .collect();
-            if skipped.contains(&format!("pack_{name}")) {
-                continue;
-            }
-            // Each lane compares within one step of its quantization.
-            let lane_type = if width == 8 { Dtype::U8 } else { Dtype::U16 };
-            let t = Tolerance::units(1.0);
-            cases.push(Some(
-                Case::compute1(
-                    &format!("convert.pack.{name}{}", suffix(version)),
-                    &library,
-                    &format!("pack_{name}"),
-                    (values.len() / lanes) as u32,
-                )
-                .buffer(Buffer::data("in0", 0, floats(Dtype::F32, &values)))
-                .buffer(Buffer::zeroed(
-                    "result",
-                    3,
-                    values.len() * width as usize / 8,
-                ))
-                .output(Output::new("result", lane_type, t.clone()).expect(u32s(&expected), t)),
-            ));
-        }
-        for (name, _, widths, decode, signed) in UNPACKERS {
+        for (name, widths, lane) in PACKED {
             let total: u32 = widths.iter().sum();
-            let mut words: Vec<u32> = vec![0, ((1u64 << total) - 1) as u32];
-            words.extend((0..COUNT - 2).map(|_| rng.u32() & ((1u64 << total) - 1) as u32));
-            let mut expected = vec![];
-            for &w in &words {
-                let mut at = 0;
-                for (lane, &b) in widths.iter().enumerate() {
-                    let mut q = i64::from((w >> at) & ((1u32 << b) - 1));
-                    at += b;
-                    if signed && q >> (b - 1) != 0 {
-                        q -= 1 << b;
-                    }
-                    let q = q as f64;
-                    expected.push(f32r(match decode {
-                        Some(f) => f(q, b),
-                        None if lane < 3 => srgb_decode(q / 255.0),
-                        None => q / 255.0,
-                    }));
+            let packed = if total == 16 { Dtype::U16 } else { Dtype::U32 };
+            for (t, dtype) in PACKED_TYPES {
+                let infix = if t == "float" {
+                    String::new()
+                } else {
+                    format!("{t}_")
+                };
+                // Packing: edges, then values a little past each lane's range.
+                let width = if widths.len() == 2 { 2 } else { 4 };
+                let mut values: Vec<f64> = vec![
+                    0.0,
+                    1.0,
+                    -1.0,
+                    0.5,
+                    2.0,
+                    -2.0,
+                    1.0 / 255.0,
+                    0.5 / 255.0,
+                    1.5 / 255.0,
+                    2.5 / 255.0,
+                ];
+                values.extend((0..COUNT * width - 10).map(|_| rng.uniform(-1.2, 1.2)));
+                let values: Vec<f64> = values.into_iter().map(|v| dtype.round(v)).collect();
+                let expected: Vec<u32> = values
+                    .chunks(width)
+                    .map(|v| {
+                        let mut word = 0u32;
+                        let mut at = 0;
+                        for (k, &bits) in widths.iter().enumerate() {
+                            let q = encode_lane(lane, k, bits, v[k]);
+                            word |= ((q & ((1 << bits) - 1)) as u32) << at;
+                            at += bits;
+                        }
+                        word
+                    })
+                    .collect();
+                let function = format!("pack_{infix}{name}");
+                if !skipped.contains(&function) {
+                    // Within one step of each lane's quantization: lanes
+                    // are compared as whole words only when they are bytes
+                    // or halves, so other layouts are exact.
+                    let t = if widths.iter().all(|&b| b == 8 || b == 16) {
+                        Tolerance::units(1.0)
+                    } else {
+                        Tolerance::exact()
+                    };
+                    let lane_type = match widths[0] {
+                        8 => Dtype::U8,
+                        16 => Dtype::U16,
+                        _ => packed,
+                    };
+                    let words = ints(
+                        packed,
+                        &expected.iter().map(|&w| i128::from(w)).collect::<Vec<_>>(),
+                    );
+                    let lane_data = if lane_type == packed {
+                        words
+                    } else {
+                        u32s(&expected)
+                    };
+                    cases.push(Some(
+                        Case::compute1(
+                            &format!("convert.pack.{infix}{name}{}", suffix(version)),
+                            &library,
+                            &function,
+                            COUNT as u32,
+                        )
+                        .buffer(Buffer::data("in0", 0, floats(dtype, &values)))
+                        .buffer(Buffer::zeroed("result", 3, COUNT * packed.size()))
+                        .output(Output::new("result", lane_type, t.clone()).expect(lane_data, t)),
+                    ));
                 }
-                expected.extend(std::iter::repeat_n(0.0, 4 - widths.len()));
+                // Unpacking: zero, all ones, then random codes.
+                let mut words: Vec<u32> = vec![0, ((1u64 << total) - 1) as u32];
+                words.extend((0..COUNT - 2).map(|_| rng.u32() & ((1u64 << total) - 1) as u32));
+                let mut decoded = vec![];
+                for &w in &words {
+                    let mut at = 0;
+                    for (k, &bits) in widths.iter().enumerate() {
+                        let mut q = i64::from((w >> at) & ((1u32 << bits) - 1));
+                        at += bits;
+                        if lane == Lane::Snorm && q >> (bits - 1) != 0 {
+                            q -= 1 << bits;
+                        }
+                        decoded.push(dtype.round(decode_lane(lane, k, bits, q as f64)));
+                    }
+                    decoded.extend(std::iter::repeat_n(0.0, 4 - widths.len()));
+                }
+                let function = format!("unpack_{infix}{name}");
+                if !skipped.contains(&function) {
+                    // Apple's sRGB decode is within 1.2e-4 of the exact curve.
+                    let t = match (lane, dtype) {
+                        (Lane::Srgb, Dtype::F32) => Tolerance::ulp(8.0).with_abs(2.5e-4),
+                        (Lane::Srgb, _) => Tolerance::ulp(2.0).with_abs(2.5e-4),
+                        _ => Tolerance::ulp(2.0),
+                    };
+                    let input: Vec<i128> = words.iter().map(|&w| i128::from(w)).collect();
+                    cases.push(Some(
+                        Case::compute1(
+                            &format!("convert.unpack.{infix}{name}{}", suffix(version)),
+                            &library,
+                            &function,
+                            COUNT as u32,
+                        )
+                        .buffer(Buffer::data("in0", 0, ints(packed, &input)))
+                        .buffer(Buffer::zeroed("result", 3, COUNT * 4 * dtype.size()))
+                        .output(
+                            Output::new("result", dtype, t.clone())
+                                .expect(floats(dtype, &decoded), t),
+                        ),
+                    ));
+                }
             }
-            if skipped.contains(&format!("unpack_{name}")) {
-                continue;
-            }
-            let src = if total == 16 { Dtype::U16 } else { Dtype::U32 };
-            let input: Vec<i128> = words.iter().map(|&w| i128::from(w)).collect();
-            // Apple's sRGB decode is within 1.2e-4 of the exact curve.
-            let t = if decode.is_some() {
-                Tolerance::ulp(2.0)
-            } else {
-                Tolerance::ulp(8.0).with_abs(2.5e-4)
-            };
-            cases.push(Some(
-                Case::compute1(
-                    &format!("convert.unpack.{name}{}", suffix(version)),
-                    &library,
-                    &format!("unpack_{name}"),
-                    COUNT as u32,
-                )
-                .buffer(Buffer::data("in0", 0, ints(src, &input)))
-                .buffer(Buffer::zeroed("result", 3, COUNT * 16))
-                .output(
-                    Output::new("result", Dtype::F32, t.clone())
-                        .expect(floats(Dtype::F32, &expected), t),
-                ),
-            ));
         }
         for case in cases.into_iter().flatten() {
             plan.add(case);

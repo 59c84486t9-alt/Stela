@@ -80,6 +80,36 @@ kernel void reflected(device Item *items [[buffer(0)]], constant float4 *weights
     dst.write(uint4(items[i].id), uint2(i, 0), 0);
 }
 
+// Nested types reflection describes in full: a struct holding an array
+// of structs, an argument buffer of textures, a sampler, a pointer and
+// an array of textures, and an atomic counter.
+struct Inner {
+    float2 uv;
+    uint ids[3];
+};
+
+struct Outer {
+    float4 color;
+    Inner inner[2];
+    packed_float3 p;
+};
+
+struct Resources {
+    texture2d<float> image [[id(0)]];
+    depth2d<float> shadow [[id(1)]];
+    sampler s [[id(2)]];
+    device float *data [[id(3)]];
+    array<texture2d<float>, 2> layers [[id(4)]];
+};
+
+kernel void reflected_types(device Outer *outer [[buffer(0)]], constant Resources &res [[buffer(1)]],
+                            device atomic_uint *count [[buffer(2)]], uint i [[thread_position_in_grid]])
+{
+    float4 v = res.image.sample(res.s, outer[i].inner[0].uv) + res.layers[1].read(uint2(0));
+    outer[i].color = v + float4(res.shadow.read(uint2(0)), res.data[i], float(outer[i].inner[1].ids[2]), outer[i].p.x);
+    atomic_fetch_add_explicit(count, 1u, memory_order_relaxed);
+}
+
 // Rectangles at a depth, four vertices each: x0, y0, x1, y1 and z.
 struct DepthRect {
     float4 rect;

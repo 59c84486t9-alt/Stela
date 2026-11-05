@@ -76,6 +76,46 @@ static void emit_rect(RectMesh m, float4 r, float4 color, uint t)
                          uint g [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]])
 { emit_rect(m, rects[g], colors[g], t); }
 
+// The same rectangles, their six indices set four and then two at a time.
+[[mesh]] void mesh_rects_packed(RectMesh m, constant float4 *rects [[buffer(0)]], constant float4 *colors [[buffer(1)]],
+                                uint g [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]])
+{
+    float4 r = rects[g];
+    if (t < 4)
+        m.set_vertex(t, {float4(t & 1 ? r.z : r.x, t & 2 ? r.w : r.y, 0.0f, 1.0f)});
+    if (t < 2)
+        m.set_primitive(t, {colors[g]});
+    if (t == 0) {
+        m.set_indices(0, uchar4(0, 1, 2, 2));
+        m.set_indices(4, uchar2(1, 3));
+        m.set_primitive_count(2);
+    }
+}
+
+// The rectangles again, every primitive of the second marked culled.
+struct CulledPrimitive {
+    float4 color [[flat]];
+    bool culled [[primitive_culled]];
+};
+
+using CulledMesh = metal::mesh<MeshVertex, CulledPrimitive, 4, 2, topology::triangle>;
+
+[[mesh]] void mesh_rects_culled(CulledMesh m, constant float4 *rects [[buffer(0)]], constant float4 *colors [[buffer(1)]],
+                                uint g [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]])
+{
+    float4 r = rects[g];
+    if (t < 4)
+        m.set_vertex(t, {float4(t & 1 ? r.z : r.x, t & 2 ? r.w : r.y, 0.0f, 1.0f)});
+    if (t < 2)
+        m.set_primitive(t, {colors[g], g == 1});
+    if (t < 6) {
+        const uint indices[6] = {0, 1, 2, 2, 1, 3};
+        m.set_index(t, indices[t]);
+    }
+    if (t == 0)
+        m.set_primitive_count(2);
+}
+
 // An object threadgroup chooses how many mesh threadgroups run, and hands
 // each its rectangle through the payload.
 struct RectPayload {
@@ -93,6 +133,27 @@ struct RectPayload {
     }
     if (t == 0)
         grid.set_threadgroups_per_grid(uint3(count, 1, 1));
+}
+
+// The same payload, the live count summed from each object thread's vote
+// in threadgroup memory.
+[[object]] void object_shared(object_data RectPayload &payload [[payload]], mesh_grid_properties grid,
+                              constant float4 *rects [[buffer(0)]], constant float4 *colors [[buffer(1)]],
+                              constant uint &count [[buffer(2)]], threadgroup uint *votes [[threadgroup(0)]],
+                              uint t [[thread_index_in_threadgroup]], uint n [[threads_per_threadgroup]])
+{
+    votes[t] = t < count ? 1u : 0u;
+    if (t < count) {
+        payload.rects[t] = rects[t];
+        payload.colors[t] = colors[t];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (t == 0) {
+        uint live = 0;
+        for (uint k = 0; k < n; k++)
+            live += votes[k];
+        grid.set_threadgroups_per_grid(uint3(live, 1, 1));
+    }
 }
 
 [[mesh]] void mesh_payload(RectMesh m, const object_data RectPayload &payload [[payload]],
@@ -201,3 +262,43 @@ struct RoutedFragment {
 
 fragment float4 frag_routed(RoutedFragment in [[stage_in]])
 { return in.color; }
+
+// Indirect commands a kernel encodes, for an executing encoder whose
+// pipeline they inherit.
+struct StageCommands {
+    command_buffer commands [[id(0)]];
+};
+
+// Both patches from their control points, by the factors given; then the
+// same patches with the control points fetched through an index buffer.
+kernel void encode_patches(device StageCommands &c [[buffer(0)]], device const float *controls [[buffer(1)]],
+                           const device MTLQuadTessellationFactorsHalf *factors [[buffer(2)]],
+                           device const uint *point_index [[buffer(3)]], constant uint &indexed [[buffer(4)]])
+{
+    render_command command(c.commands, 0);
+    command.set_vertex_buffer(controls, 0);
+    if (indexed)
+        command.draw_indexed_patches(4, 0, 2, (const device uint *)nullptr, point_index, 1, 0, factors);
+    else
+        command.draw_patches(4, 0, 2, (const device uint *)nullptr, 1, 0, factors);
+}
+
+// Rectangles drawn by object threadgroups sharing threadgroup memory, or
+// by a grid of mesh threads reading the rectangles themselves.
+kernel void encode_mesh_draws(device StageCommands &c [[buffer(0)]], device const float4 *rects [[buffer(1)]],
+                              device const float4 *colors [[buffer(2)]], device const uint *count [[buffer(3)]],
+                              constant uint &threads [[buffer(4)]])
+{
+    render_command command(c.commands, 0);
+    if (threads) {
+        command.set_mesh_buffer(rects, 0);
+        command.set_mesh_buffer(colors, 1);
+        command.draw_mesh_threads(uint3(12, 1, 1), uint3(1, 1, 1), uint3(6, 1, 1));
+    } else {
+        command.set_object_buffer(rects, 0);
+        command.set_object_buffer(colors, 1);
+        command.set_object_buffer(count, 2);
+        command.set_object_threadgroup_memory_length(32, 0);
+        command.draw_mesh_threadgroups(uint3(1, 1, 1), uint3(8, 1, 1), uint3(6, 1, 1));
+    }
+}

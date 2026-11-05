@@ -1055,7 +1055,7 @@ fn forms(plan: &mut Plan, library: &str, rng: &mut Random) {
                 coords.extend([p[0], p[1], dx, dx]);
                 expected.extend(sample(&levels, &sampler, [p[0], p[1], 0.0], lod, 2).map(f32r));
             }
-            let mut case = Case::compute1(
+            let case = Case::compute1(
                 &format!("texture.sample.gradient.{label}"),
                 library,
                 "sample2d_grad",
@@ -1067,18 +1067,10 @@ fn forms(plan: &mut Plan, library: &str, rng: &mut Random) {
                 Output::new("out", Dtype::F32, mip.clone()).expect(f32s(&expected), mip.clone()),
             )
             .texture(tex())
-            .sampler(sampler.json());
-            // Both are macOS 26 sampler properties the M1 Pro ignores: it
-            // filters by weighted average at the unbiased level.
-            let ignored = if label == "lod_bias" {
-                "lodBias"
-            } else {
-                "reductionMode"
-            };
-            case = case.set(
-                "reference_divergence",
-                format!("the M1 Pro ignores {ignored}"),
-            );
+            .sampler(sampler.json())
+            // The feature set tables give LOD bias and min-max reduction
+            // to Apple10.
+            .requires(&["apple10"], &[]);
             plan.add(case);
         }
     }
@@ -1876,6 +1868,21 @@ fn texture_atomic_ops(plan: &mut Plan, library: &str, rng: &mut Random) {
                 ),
         );
     }
+    if plan.has(SOURCE, "texture_atomic_load_store") {
+        let stored: Vec<u32> = (0..16).map(|i| i * 7 + 1).collect();
+        plan.add(
+            Case::compute1(
+                "texture.atomics.load_store",
+                library,
+                "texture_atomic_load_store",
+                16,
+            )
+            .buffer(Buffer::zeroed("out", 0, 64))
+            .output(Output::new("out", Dtype::U32, Tolerance::default()).expect_same(u32s(&stored)))
+            .output(Output::new("t", Dtype::U32, Tolerance::default()).expect_same(u32s(&stored)))
+            .texture(t2d("t", "r32uint", 16, 1).usage(&["read", "write", "atomic"])),
+        );
+    }
     // 64 threads, each adding to texel i % 4 of each texture type.
     let adds = |k: u32| u32s(&[16 * k; 4]);
     let zeros = |texels: usize| vec![0u8; texels * 4];
@@ -1956,6 +1963,63 @@ fn queries(plan: &mut Plan, library: &str) {
                     .index(3)
                     .mipmaps(5),
             ),
+    );
+}
+
+/// Block reads of two texels across and down, from a coordinate, with an
+/// offset and at level 1, where texel (x, y) of level l holds
+/// 100l + 10y + x; and a constexpr sampler clamping the level of detail
+/// to [1, 2] over levels holding 1, 2 and 3.
+fn blocks(plan: &mut Plan, library: &str) {
+    let texel = |l: u32, x: u32, y: u32| {
+        let v = f64::from(100 * l + 10 * y + x);
+        [v, v + 0.5, 0.0, 1.0]
+    };
+    let data: Vec<f64> = [(0, 4), (1, 2)]
+        .iter()
+        .flat_map(|&(l, n)| (0..n * n).flat_map(move |i| texel(l, i % n, i / n)))
+        .collect();
+    let read: Vec<f64> = [
+        (0, 1, 2),
+        (0, 2, 2),
+        (0, 3, 1),
+        (0, 3, 2),
+        (1, 0, 1),
+        (1, 1, 1),
+    ]
+    .iter()
+    .flat_map(|&(l, x, y)| texel(l, x, y))
+    .collect();
+    plan.add(
+        Case::compute(
+            "texture.block_read",
+            library,
+            "block_reads",
+            [1, 1, 1],
+            [1, 1, 1],
+        )
+        .texture(t2d("t", "rgba32float", 4, 4).mipmaps(2).data(f32s(&data)))
+        .sampler(
+            json!({"name": "s", "index": 0, "min": "nearest", "mag": "nearest", "mip": "nearest"}),
+        )
+        .buffer(Buffer::zeroed("out", 0, 6 * 16))
+        .output(Output::new("out", Dtype::F32, Tolerance::exact()).expect_same(f32s(&read))),
+    );
+    let levels: Vec<f64> = [(16, 1.0), (4, 2.0), (1, 3.0)]
+        .iter()
+        .flat_map(|&(n, v)| std::iter::repeat_n([v, 0.0, 0.0, 1.0], n).flatten())
+        .collect();
+    plan.add(
+        Case::compute(
+            "texture.sample.lod_clamp",
+            library,
+            "sample_lod_clamp",
+            [1, 1, 1],
+            [1, 1, 1],
+        )
+        .texture(t2d("t", "rgba32float", 4, 4).mipmaps(3).data(f32s(&levels)))
+        .buffer(Buffer::zeroed("out", 0, 8))
+        .output(Output::new("out", Dtype::F32, Tolerance::exact()).expect_same(f32s(&[2.0, 3.0]))),
     );
 }
 
@@ -2194,6 +2258,34 @@ fn variants(plan: &mut Plan, library: &str, rng: &mut Random) {
         )
         .sampler(nearest.clone()),
     );
+    // Two depth cubes, each texel sampled through its cube's index.
+    let array_depths: Vec<f64> = (0..per_face * 12)
+        .map(|_| f32r(rng.uniform(0.0, 1.0)))
+        .collect();
+    let expected: Vec<f64> = cube_points
+        .iter()
+        .map(|&(cube, face, i, j, _)| {
+            array_depths[(cube * 6 + face) * per_face + (j * n + i) as usize]
+        })
+        .collect();
+    plan.add(
+        Case::compute1(
+            "texture.sample.depth_cube_array",
+            library,
+            "sample_depth_cube_array",
+            256,
+        )
+        .buffer(Buffer::data("coords", 0, f32s(&coords)))
+        .buffer(Buffer::zeroed("out", 1, 256 * 4))
+        .output(Output::new("out", Dtype::F32, Tolerance::exact()).expect_same(f32s(&expected)))
+        .texture(
+            Texture::new("t", "depth32float", "cube_array", [n as u32, n as u32, 1])
+                .index(0)
+                .array(2)
+                .data(f32s(&array_depths)),
+        )
+        .sampler(nearest.clone()),
+    );
     let cube_texels = make_texels(&f, per_face * 12, rng);
     let expected: Vec<f64> = cube_points
         .iter()
@@ -2375,6 +2467,7 @@ pub fn build(plan: &mut Plan) {
     sampling(plan, &library);
     writes(plan, &library);
     queries(plan, &library);
+    blocks(plan, &library);
     variants(plan, &library, &mut Random::new(907));
     super::compressed::build(plan, &library);
 }

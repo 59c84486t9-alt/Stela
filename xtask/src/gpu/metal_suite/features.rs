@@ -10,10 +10,6 @@ use super::values::{Dtype, Random, bits32, f16r, f32r, f32s, floats, ints, u32s}
 const SOURCE: &str = "features.metal";
 const SIMD: usize = 32;
 
-fn exact(name: &str, dtype: Dtype, data: Vec<u8>) -> Output {
-    Output::new(name, dtype, Tolerance::exact()).expect_same(data)
-}
-
 fn relational(plan: &mut Plan, library: &str, rng: &mut Random) {
     let n = 256;
     let v: Vec<[i64; 4]> = (0..n)
@@ -38,7 +34,7 @@ fn relational(plan: &mut Plan, library: &str, rng: &mut Random) {
         Case::compute1("features.relational", library, "relational", n as u32)
             .buffer(Buffer::data("in", 0, ints(Dtype::I32, &input)))
             .buffer(Buffer::zeroed("out", 1, n * 32))
-            .output(exact("out", Dtype::U32, u32s(&out))),
+            .output(Output::exact("out", Dtype::U32, u32s(&out))),
     );
 }
 
@@ -66,10 +62,10 @@ fn atomics(plan: &mut Plan, library: &str, rng: &mut Random) {
         .buffer(Buffer::zeroed("flags", 2, n * 4))
         .buffer(Buffer::zeroed("signed_flags", 3, n * 4))
         .buffer(Buffer::zeroed("out", 4, n * 8))
-        .output(exact("data", Dtype::U32, u32s(&data)))
-        .output(exact("flags", Dtype::U32, u32s(&flags)))
-        .output(exact("signed_flags", Dtype::U32, u32s(&signed)))
-        .output(exact("out", Dtype::U32, u32s(&out))),
+        .output(Output::exact("data", Dtype::U32, u32s(&data)))
+        .output(Output::exact("flags", Dtype::U32, u32s(&flags)))
+        .output(Output::exact("signed_flags", Dtype::U32, u32s(&signed)))
+        .output(Output::exact("out", Dtype::U32, u32s(&out))),
     );
     let (n, group) = (1024, 64);
     let v: Vec<u32> = (0..n).map(|_| rng.u32()).collect();
@@ -92,7 +88,7 @@ fn atomics(plan: &mut Plan, library: &str, rng: &mut Random) {
         )
         .buffer(Buffer::data("in", 0, u32s(&v)))
         .buffer(Buffer::zeroed("out", 1, n / group * 12))
-        .output(exact("out", Dtype::U32, u32s(&out))),
+        .output(Output::exact("out", Dtype::U32, u32s(&out))),
     );
 }
 
@@ -116,7 +112,7 @@ fn simd(plan: &mut Plan, library: &str, rng: &mut Random) {
         )
         .buffer(Buffer::data("in", 0, u32s(&v)))
         .buffer(Buffer::zeroed("out", 1, n * 4))
-        .output(exact("out", Dtype::U32, u32s(&out))),
+        .output(Output::exact("out", Dtype::U32, u32s(&out))),
     );
     if plan.has(SOURCE, "quad_more") {
         let v: Vec<u32> = (0..n).map(|_| rng.u32() % 600).collect();
@@ -169,7 +165,7 @@ fn simd(plan: &mut Plan, library: &str, rng: &mut Random) {
             Case::compute1("features.quad.more", library, "quad_more", n as u32)
                 .buffer(Buffer::data("in", 0, u32s(&v)))
                 .buffer(Buffer::zeroed("out", 1, n * 80))
-                .output(exact("out", Dtype::U32, u32s(&out))),
+                .output(Output::exact("out", Dtype::U32, u32s(&out))),
         );
     }
     if plan.has(SOURCE, "simdgroup_diagonal") {
@@ -186,7 +182,7 @@ fn simd(plan: &mut Plan, library: &str, rng: &mut Random) {
             )
             .buffer(Buffer::data("b", 0, f32s(&b)))
             .buffer(Buffer::zeroed("out", 1, 512))
-            .output(exact("out", Dtype::F32, f32s(&expected)))
+            .output(Output::exact("out", Dtype::F32, f32s(&expected)))
             .requires(&[], &["simd_reduction"]),
         );
     }
@@ -201,7 +197,7 @@ fn quadgroups(plan: &mut Plan, library: &str) {
     plan.add(
         Case::compute1("features.quadgroup_ids", library, "quadgroup_ids", 256)
             .buffer(Buffer::zeroed("out", 0, 1024))
-            .output(exact("out", Dtype::U32, u32s(&out))),
+            .output(Output::exact("out", Dtype::U32, u32s(&out))),
     );
 }
 
@@ -238,7 +234,7 @@ fn textures(plan: &mut Plan, library: &str, rng: &mut Random) {
             .texture(Texture::new("volume", "rgba8unorm", "3d", [1, 1, 1]).index(3))
             .buffer(Buffer::data("pick", 0, u32s(&pick)))
             .buffer(Buffer::zeroed("out", 1, 64))
-            .output(exact("out", Dtype::U32, u32s(&out))),
+            .output(Output::exact("out", Dtype::U32, u32s(&out))),
     );
 }
 
@@ -363,12 +359,12 @@ fn pixels(plan: &mut Plan, library: &str, rng: &mut Random) {
                 .buffer(Buffer::zeroed("d", 4, n * 4))
                 .buffer(Buffer::zeroed("e", 5, n * 4))
                 .buffer(Buffer::zeroed("f", 6, n * 4))
-                .output(exact("a", Dtype::U8, a))
+                .output(Output::exact("a", Dtype::U8, a))
                 .output(Output::new("b", Dtype::U8, Tolerance::units(1.0)).expect_same(b))
-                .output(exact("c", Dtype::U32, u32s(&c)))
-                .output(exact("d", Dtype::U8, d))
-                .output(exact("e", Dtype::U32, u32s(&e)))
-                .output(exact("f", Dtype::U8, f)),
+                .output(Output::exact("c", Dtype::U32, u32s(&c)))
+                .output(Output::exact("d", Dtype::U8, d))
+                .output(Output::exact("e", Dtype::U32, u32s(&e)))
+                .output(Output::exact("f", Dtype::U8, f)),
         );
     }
 }
@@ -384,7 +380,7 @@ fn values(plan: &mut Plan, library: &str, rng: &mut Random) {
                 .buffer(Buffer::data("in", 0, u32s(&v)))
                 .buffer(Buffer::data("k", 1, u32s(&[5])))
                 .buffer(Buffer::zeroed("out", 2, 256))
-                .output(exact("out", Dtype::U32, u32s(&out))),
+                .output(Output::exact("out", Dtype::U32, u32s(&out))),
         );
     }
     if plan.has(SOURCE, "bfloat_vectors") {
@@ -416,9 +412,9 @@ fn values(plan: &mut Plan, library: &str, rng: &mut Random) {
             .buffer(Buffer::zeroed("wide", 2, n * 16))
             .buffer(Buffer::zeroed("halves", 3, n * 8))
             .buffer(Buffer::zeroed("pairs", 4, n * 4))
-            .output(exact("narrow", Dtype::U16, ints(Dtype::U16, &bits)))
-            .output(exact("wide", Dtype::F32, f32s(&narrowed)))
-            .output(exact(
+            .output(Output::exact("narrow", Dtype::U16, ints(Dtype::U16, &bits)))
+            .output(Output::exact("wide", Dtype::F32, f32s(&narrowed)))
+            .output(Output::exact(
                 "halves",
                 Dtype::F16,
                 floats(
@@ -426,7 +422,7 @@ fn values(plan: &mut Plan, library: &str, rng: &mut Random) {
                     &narrowed.iter().map(|&v| f16r(v)).collect::<Vec<_>>(),
                 ),
             ))
-            .output(exact("pairs", Dtype::U16, ints(Dtype::U16, &pairs))),
+            .output(Output::exact("pairs", Dtype::U16, ints(Dtype::U16, &pairs))),
         );
     }
 }

@@ -73,14 +73,14 @@ fn mac_script(plan: &Value) -> String {
             .filter_map(Value::as_str)
             .map(|l| format!(" lib/{l}.metallib"))
             .collect();
+        // Linked by the `metal` driver, which keeps the functions'
+        // reflection that `metallib` alone drops.
         lines.push(if build["dynamic"].as_bool() == Some(true) {
             format!(
                 "xcrun -sdk macosx metal -dynamiclib -install_name @loader_path/{name}.metallib lib/{name}.air -o lib/{name}.metallib"
             )
-        } else if !links.is_empty() {
-            format!("xcrun -sdk macosx metal lib/{name}.air{links} -o lib/{name}.metallib")
         } else {
-            format!("xcrun -sdk macosx metallib lib/{name}.air -o lib/{name}.metallib")
+            format!("xcrun -sdk macosx metal lib/{name}.air{links} -o lib/{name}.metallib")
         });
     }
     lines.push(
@@ -89,15 +89,23 @@ fn mac_script(plan: &Value) -> String {
          -framework CoreGraphics -framework QuartzCore -framework IOSurface runner.m -o runner.bin"
             .into(),
     );
-    lines.extend(bundle_script());
+    let default = plan["builds"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .find(|(_, b)| b["default"].as_bool() == Some(true))
+        .map(|(name, _)| name.as_str());
+    lines.extend(bundle_script(default));
     lines.join("\n") + "\n"
 }
 
 /// Puts the runner in `Runner.app`, with the same binary as its embedded
 /// `Share.xpc` service, signs both and leaves `runner` as a script that
 /// starts the bundled binary. `host` cases sharing a texture and an event
-/// across processes reach the service by its bundle identifier.
-fn bundle_script() -> Vec<String> {
+/// across processes reach the service by its bundle identifier. The
+/// bundle's resources hold the plan's default library, if it has one, as
+/// an application ships `default.metallib`.
+fn bundle_script(default: Option<&str>) -> Vec<String> {
     let plist = |id: &str, executable: &str, package: &str, extra: &str| {
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
@@ -111,9 +119,9 @@ fn bundle_script() -> Vec<String> {
     };
     let app = "Runner.app/Contents";
     let service = format!("{app}/XPCServices/Share.xpc/Contents");
-    vec![
+    let mut lines: Vec<String> = vec![
         "rm -rf Runner.app runner".into(),
-        format!("mkdir -p {app}/MacOS {service}/MacOS"),
+        format!("mkdir -p {app}/MacOS {app}/Resources {service}/MacOS"),
         format!("cp runner.bin {app}/MacOS/runner"),
         format!("mv runner.bin {service}/MacOS/share"),
         format!(
@@ -129,10 +137,18 @@ fn bundle_script() -> Vec<String> {
                 "<key>XPCService</key><dict><key>ServiceType</key><string>Application</string></dict>"
             )
         ),
+    ];
+    if let Some(name) = default {
+        lines.push(format!(
+            "cp lib/{name}.metallib {app}/Resources/default.metallib"
+        ));
+    }
+    lines.extend([
         "codesign -s - -f Runner.app/Contents/XPCServices/Share.xpc && codesign -s - -f Runner.app".into(),
         "printf '#!/bin/sh\\nexec \"$(dirname \"$0\")/Runner.app/Contents/MacOS/runner\" \"$@\"\\n' > runner".into(),
         "chmod +x runner".into(),
-    ]
+    ]);
+    lines
 }
 
 /// Copies DIR/plan to the Mac, builds it there, runs every case and brings
@@ -193,8 +209,9 @@ fn kernel_lines(text: &str) -> Vec<Option<String>> {
 }
 
 /// Finds, for every guarded corpus source and MSL version, the functions
-/// Apple's compiler refuses, and records them in availability.json.
-pub fn probe(_out: &Path, host: &str) -> Result<()> {
+/// Apple's compiler refuses, and records them in availability.json with
+/// the functions the toolchain's headers declare.
+pub fn probe(out: &Path, host: &str) -> Result<()> {
     let mut full = plan::Plan::new(Default::default());
     super::build(&mut full);
     let corpus = super::assets().join("corpus");
@@ -282,10 +299,70 @@ pub fn probe(_out: &Path, host: &str) -> Result<()> {
         .next()
         .unwrap_or_default()
         .to_string();
+    // The toolchain's own headers, from beside its compiler.
+    let headers = out.join("headers");
+    if headers.exists() {
+        fs::remove_dir_all(&headers)?;
+    }
+    fs::create_dir_all(&headers)?;
+    let mut extract = Command::new("tar");
+    // macOS tar records file flags GNU tar does not know.
+    extract
+        .arg("-C")
+        .arg(&headers)
+        .args(["--warning=no-unknown-keyword", "-xf", "-"]);
+    pipe(
+        ssh(
+            host,
+            &format!(
+                "export DEVELOPER_DIR={DEVELOPER_DIR}; root=$(dirname \"$(dirname \"$(xcrun -sdk macosx -f metal)\")\")/metal; \
+                 tar -C \"$(find \"$root\" -type d -path '*/include/metal' | head -1)\" -cf - ."
+            ),
+        ),
+        extract,
+    )?;
+    let functions = super::inventory::inventory(&headers)?;
+    println!(
+        "{} functions in {} headers",
+        functions.values().map(BTreeSet::len).sum::<usize>(),
+        functions.len()
+    );
+    // The SDK's Metal.framework headers.
+    let framework = out.join("framework");
+    if framework.exists() {
+        fs::remove_dir_all(&framework)?;
+    }
+    fs::create_dir_all(&framework)?;
+    let mut extract = Command::new("tar");
+    extract
+        .arg("-C")
+        .arg(&framework)
+        .args(["--warning=no-unknown-keyword", "-xf", "-"]);
+    pipe(
+        ssh(
+            host,
+            &format!(
+                "export DEVELOPER_DIR={DEVELOPER_DIR}; \
+                 tar -C \"$(xcrun -sdk macosx --show-sdk-path)/System/Library/Frameworks/Metal.framework/Headers\" -cf - ."
+            ),
+        ),
+        extract,
+    )?;
+    let api = super::inventory::framework(&framework)?;
+    println!(
+        "{} framework entries in {} headers",
+        api.values()
+            .flat_map(|classes| classes.values())
+            .map(BTreeSet::len)
+            .sum::<usize>(),
+        api.len()
+    );
     let path = super::assets().join("availability.json");
     fs::write(
         &path,
-        serde_json::to_string_pretty(&json!({"toolchain": toolchain, "sources": result}))? + "\n",
+        serde_json::to_string_pretty(
+            &json!({"toolchain": toolchain, "sources": result, "functions": functions, "api": api}),
+        )? + "\n",
     )?;
     println!("{}", path.display());
     Ok(())

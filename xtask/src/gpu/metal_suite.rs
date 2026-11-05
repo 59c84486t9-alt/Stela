@@ -16,7 +16,7 @@
 //!     cargo xtask gpu metal-suite serve           run it in a Stela guest
 //!     cargo xtask gpu metal-suite compare REF RUN compare two runs
 //!     cargo xtask gpu metal-suite offline         compile the AIR with Stela's compiler
-//!     cargo xtask gpu metal-suite probe           which functions each MSL version compiles
+//!     cargo xtask gpu metal-suite probe           which functions each MSL version compiles, and the headers' inventory
 //!     cargo xtask gpu metal-suite coverage        what macOS's shaders use that no case does
 use crate::tools;
 use anyhow::{Context, Result, bail};
@@ -25,6 +25,7 @@ use std::{fs, path::PathBuf};
 
 mod api;
 mod arguments;
+mod bindings;
 mod blits;
 mod check;
 mod compressed;
@@ -36,7 +37,9 @@ mod features;
 mod guest;
 mod host;
 mod integer;
+mod inventory;
 mod math;
+mod pipelines;
 mod plan;
 mod reference;
 mod remote;
@@ -46,6 +49,8 @@ mod sequences;
 mod stages;
 mod textures;
 mod values;
+#[cfg(test)]
+mod wire;
 
 /// The runner, the MSL corpus and the probe's availability record.
 fn assets() -> PathBuf {
@@ -80,7 +85,8 @@ pub enum Command {
         selection: Selection,
     },
     /// Find which functions of each guarded corpus source Apple's compiler
-    /// refuses at each MSL version, into availability.json.
+    /// refuses at each MSL version, and the functions the toolchain's
+    /// headers declare, into availability.json.
     Probe {
         #[command(flatten)]
         selection: Selection,
@@ -205,6 +211,8 @@ fn build(plan: &mut plan::Plan) {
     extras::build(plan);
     api::build(plan);
     host::build(plan);
+    bindings::build(plan);
+    pipelines::build(plan);
 }
 
 fn availability() -> Result<plan::Availability> {

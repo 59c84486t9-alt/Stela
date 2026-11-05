@@ -243,6 +243,60 @@ kernel void simdgroup_matrix(device const float *a [[buffer(0)]], device const f
 }
 #endif
 
+#ifndef SKIP_matrix_filled
+// A matrix with every element one value.
+kernel void matrix_filled(device float *out [[buffer(0)]], uint i [[thread_position_in_grid]])
+{
+    float3x2 m = make_filled_matrix<float, 3, 2>(2.5f);
+    out[i] = m[i / 2][i % 2];
+}
+#endif
+
+#ifndef SKIP_simdgroup_elements
+// The elements each thread of a SIMD-group matrix holds: together every
+// element once, and doubled in place the whole matrix doubles.
+kernel void simdgroup_elements(device const float *in [[buffer(0)]], device float *out [[buffer(1)]],
+                               uint l [[thread_index_in_simdgroup]])
+{
+    simdgroup_float8x8 m;
+    simdgroup_load(m, in, 8);
+    auto held = m.thread_elements();
+    float sum = simd_sum(held[0] + held[1]);
+    m.thread_elements() *= 2.0f;
+    simdgroup_store(m, out, 8);
+    if (l == 0)
+        out[64] = sum;
+}
+#endif
+
+#ifndef SKIP_address_spaces
+// The address space of a pointer into each: 1 device, 2 threadgroup,
+// 4 thread.
+kernel void address_spaces(device uint *out [[buffer(0)]], threadgroup uint *shared [[threadgroup(0)]])
+{
+    uint local = 0;
+    out[0] = is_device_addrspace(out) | is_threadgroup_addrspace(out) << 1 | is_thread_addrspace(out) << 2;
+    out[1] = is_device_addrspace(shared) | is_threadgroup_addrspace(shared) << 1 | is_thread_addrspace(shared) << 2;
+    out[2] = is_device_addrspace(&local) | is_threadgroup_addrspace(&local) << 1 | is_thread_addrspace(&local) << 2;
+}
+#endif
+
+// Views of an array, one element and a slice, with their sizes; and the
+// size an array type holds.
+kernel void array_refs(device const uint *in [[buffer(0)]], device uint *out [[buffer(1)]])
+{
+    uint a[3] = {in[0], in[1], in[2]};
+    array_ref<thread uint> whole = make_array_ref(a);
+    array_ref<thread uint> one = make_array_ref(a[1]);
+    array_ref<thread uint> tail = make_array_ref(a + 1, 2);
+    array<uint, 4> b = {in[0], in[1], in[2], in[3]};
+    out[0] = whole.size();
+    out[1] = whole[2];
+    out[2] = one.size() * 10 + one[0];
+    out[3] = tail.size() * 10 + tail[1];
+    out[4] = b.max_size() + b[3];
+}
+
 #ifndef SKIP_simdgroup_matrix_bfloat
 // An 8x8 bfloat SIMD-group matrix product, A * B + A.
 kernel void simdgroup_matrix_bfloat(device const bfloat *a [[buffer(0)]], device const bfloat *b [[buffer(1)]],

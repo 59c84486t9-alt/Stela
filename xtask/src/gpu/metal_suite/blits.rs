@@ -5,7 +5,7 @@
 //! generation for 2D, array, cube and 3D textures, and access hints that
 //! leave contents as they were.
 use super::plan::{Buffer, Case, Output, Plan, Texture, Tolerance};
-use super::values::{Dtype, Random};
+use super::values::{Dtype, Random, u32s};
 use serde_json::json;
 
 fn bytes(rng: &mut Random, n: usize) -> Vec<u8> {
@@ -294,7 +294,34 @@ fn more(plan: &mut Plan, rng: &mut Random) {
             json!([{"op": "optimize_gpu_access", "texture": "t"}, {"op": "optimize_cpu_access", "texture": "t"}]),
         )
         .texture(Texture::d2("t", "rgba8unorm", 16, 16).data(data.clone()))
-        .output(exact("t", data)),
+        .output(exact("t", data.clone())),
+    );
+    // The same hints for one level of one slice, in a pass that samples
+    // timestamps at its start and end. Hints may do no work, so the pass
+    // also fills a buffer, which gives the samples something to bound.
+    plan.add(
+        Case::blit(
+            "blit.optimize_access.slice_level",
+            json!([{"op": "optimize_gpu_access", "texture": "t", "slice": 1, "level": 0},
+                   {"op": "optimize_cpu_access", "texture": "t", "slice": 1, "level": 0},
+                   {"op": "fill_buffer", "dst": "filled", "offset": 0, "size": 256, "value": 0x3C}]),
+        )
+        .buffer(Buffer::zeroed("filled", 0, 256).unbound())
+        .output(exact("filled", vec![0x3C; 256]))
+        .requires(&[], &["counters_stage_boundary", "counter_set_timestamp"])
+        .set("timestamps", json!({"buffer": "stamps"}))
+        .buffer(Buffer::zeroed("stamps", 0, 16).unbound())
+        .texture(
+            Texture::new("t", "rgba8unorm", "2d_array", [16, 16, 1])
+                .array(2)
+                .data([data.clone(), data.clone()].concat()),
+        )
+        .output(exact("t", [data.clone(), data].concat()))
+        .output(
+            Output::new("stamps", Dtype::U64, Tolerance::exact())
+                .expect_same(u32s(&[1, 1]))
+                .set("derive", "ordered"),
+        ),
     );
 }
 

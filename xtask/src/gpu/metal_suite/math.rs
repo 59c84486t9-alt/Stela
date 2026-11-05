@@ -10,6 +10,7 @@ use super::values::{
     Dtype, F16_MIN, F32_MIN, Random, domain_values, f16_bits, f16_from_bits, f32r, floats, ints,
     libm, sum, u32s,
 };
+use serde_json::json;
 
 const COUNT: usize = 512;
 
@@ -495,6 +496,9 @@ kernel void NAME##_predicates(device const T *a [[buffer(0)]], device uint *r [[
                               uint i [[thread_position_in_grid]]) \
 { T x = a[i]; r[i] = uint(isnan(x)) | uint(isinf(x)) << 1 | uint(isfinite(x)) << 2 | \
                      uint(isnormal(x)) << 3 | uint(signbit(x)) << 4; } \
+kernel void NAME##_ordering(device const T *a [[buffer(0)]], device const T *b [[buffer(1)]], \
+                            device uint *r [[buffer(3)]], uint i [[thread_position_in_grid]]) \
+{ r[i] = uint(isordered(a[i], b[i])) | uint(isunordered(a[i], b[i])) << 1; } \
 kernel void NAME##_ilogb(device const T *a [[buffer(0)]], device int *r [[buffer(3)]], \
                          uint i [[thread_position_in_grid]]) \
 { r[i] = ilogb(a[i]); } \
@@ -554,6 +558,21 @@ kernel void f16_geometric(device const half4 *a [[buffer(0)]], device const half
     r[i * 4 + 3] = half4(cross(x.xyz, y.xyz), length_squared(x));
 }
 
+// Reflection, refraction, facing and squared distance, from unit
+// directions where the definitions take them.
+#define REFLECTIONS(NAME, T, T4) \
+kernel void NAME##_reflections(device const T4 *a [[buffer(0)]], device const T4 *b [[buffer(1)]], \
+                               device T4 *r [[buffer(3)]], uint i [[thread_position_in_grid]]) \
+{ \
+    T4 x = a[i], y = b[i], u = normalize(x), n = normalize(y); \
+    r[i * 4 + 0] = reflect(x, n); \
+    r[i * 4 + 1] = refract(u, n, T(0.66)); \
+    r[i * 4 + 2] = faceforward(x, y, y.wzyx); \
+    r[i * 4 + 3] = T4(distance_squared(x, y), distance_squared(x.xy, y.xy), distance_squared(x.xyz, y.xyz), T(0)); \
+}
+REFLECTIONS(f32, float, float4)
+REFLECTIONS(f16, half, half4)
+
 // Matrix arithmetic: products, transpose and determinant.
 kernel void f32_matrix(device const float4x4 *a [[buffer(0)]], device const float4x4 *b [[buffer(1)]],
                        device float4x4 *r [[buffer(3)]], uint i [[thread_position_in_grid]])
@@ -609,8 +628,7 @@ fn size(dtype: Dtype) -> usize {
     dtype.size()
 }
 
-fn add_table(plan: &mut Plan, library: &str, mode: &str, version: &str) {
-    let precise = mode == "precise";
+fn add_table(plan: &mut Plan, library: &str, mode: &str, precise: bool, version: &str) {
     for (index, r) in table().into_iter().enumerate() {
         if !available(r.name, version) {
             continue;
@@ -755,8 +773,7 @@ fn step(x: f64, y: f64, dtype: Dtype) -> f64 {
     }
 }
 
-fn add_pairs(plan: &mut Plan, library: &str, mode: &str, version: &str) {
-    let precise = mode == "precise";
+fn add_pairs(plan: &mut Plan, library: &str, mode: &str, precise: bool, version: &str) {
     for dtype in [Dtype::F32, Dtype::F16] {
         let size = size(dtype);
         let name = dtype.name();
@@ -889,6 +906,32 @@ fn add_pairs(plan: &mut Plan, library: &str, mode: &str, version: &str) {
             predicates = predicates.informational();
         }
         plan.add(predicates);
+        // Ordered when neither operand is NaN, against the values reversed.
+        let others: Vec<f64> = values.iter().rev().copied().collect();
+        let ordering: Vec<u32> = values
+            .iter()
+            .zip(&others)
+            .map(|(a, b)| {
+                let unordered = a.is_nan() || b.is_nan();
+                u32::from(!unordered) | u32::from(unordered) << 1
+            })
+            .collect();
+        let mut ordered = Case::compute1(
+            &case_name(mode, name, "ordering", version),
+            library,
+            &format!("{name}_ordering"),
+            COUNT as u32,
+        )
+        .buffer(Buffer::data("in0", 0, floats(dtype, &values)))
+        .buffer(Buffer::data("in1", 1, floats(dtype, &others)))
+        .buffer(Buffer::zeroed("result", 3, COUNT * 4))
+        .output(
+            Output::new("result", Dtype::U32, Tolerance::default()).expect_same(u32s(&ordering)),
+        );
+        if !precise {
+            ordered = ordered.informational();
+        }
+        plan.add(ordered);
         let logb: Vec<i128> = inputs
             .iter()
             .map(|&v| {
@@ -993,8 +1036,8 @@ fn det(a: &[Vec<f64>]) -> f64 {
     total
 }
 
-fn add_vectors(plan: &mut Plan, library: &str, mode: &str, version: &str) {
-    let mut rng = Random::new(if mode == "fast" { 77 } else { 78 });
+fn add_vectors(plan: &mut Plan, library: &str, mode: &str, precise: bool, version: &str) {
+    let mut rng = Random::new(if precise { 78 } else { 77 });
     let n = 128;
     let a: Vec<f64> = (0..n * 4).map(|_| rng.uniform(-4.0, 4.0)).collect();
     let b: Vec<f64> = (0..n * 4).map(|_| rng.uniform(-4.0, 4.0)).collect();
@@ -1045,6 +1088,64 @@ fn add_vectors(plan: &mut Plan, library: &str, mode: &str, version: &str) {
             .buffer(Buffer::zeroed("result", 3, n * 16 * size(dtype)))
             .output(
                 Output::new("result", dtype, tol.doubled()).expect(floats(dtype, &expected), tol),
+            ),
+        );
+    }
+    for (dtype, tol) in [
+        (Dtype::F32, Tolerance::ulp(16.0).with_abs(1e-5)),
+        (Dtype::F16, Tolerance::ulp(8.0).with_abs(2f64.powi(-6))),
+    ] {
+        let x: Vec<f64> = a.iter().map(|&v| dtype.round(v)).collect();
+        let y: Vec<f64> = b.iter().map(|&v| dtype.round(v)).collect();
+        let mut expected = vec![];
+        let mut mask = vec![];
+        for i in 0..n {
+            let (p, q) = (&x[i * 4..i * 4 + 4], &y[i * 4..i * 4 + 4]);
+            let unit = |v: &[f64]| v.iter().map(|s| s / length(v)).collect::<Vec<_>>();
+            let (u, m) = (unit(p), unit(q));
+            let d = dot(&m, p);
+            expected.extend(p.iter().zip(&m).map(|(s, t)| s - 2.0 * d * t));
+            let (eta, c) = (dtype.round(0.66), dot(&m, &u));
+            let k = 1.0 - eta * eta * (1.0 - c * c);
+            if k < 0.0 {
+                expected.extend([0.0; 4]);
+            } else {
+                expected.extend(
+                    u.iter()
+                        .zip(&m)
+                        .map(|(s, t)| eta * s - (eta * c + libm::sqrt(k)) * t),
+                );
+            }
+            let reference = [q[3], q[2], q[1], q[0]];
+            let facing = dot(&reference, q);
+            expected.extend(p.iter().map(|s| if facing < 0.0 { *s } else { -s }));
+            let squared = |len: usize| (0..len).map(|j| (p[j] - q[j]) * (p[j] - q[j])).sum::<f64>();
+            expected.extend([squared(4), squared(2), squared(3), 0.0]);
+            // Refraction near total internal reflection, and a facing
+            // test near zero, may round either way.
+            let edge = k.abs() < 1e-2;
+            let tie = facing.abs() < 1e-2 * length(&reference) * length(q);
+            for uncertain in [false, edge, tie, false] {
+                mask.extend([u8::from(!uncertain); 4]);
+            }
+        }
+        let expected: Vec<f64> = expected.into_iter().map(|e| dtype.round(e)).collect();
+        let name = dtype.name();
+        plan.add(
+            Case::compute(
+                &case_name(mode, name, "reflections", version),
+                library,
+                &format!("{name}_reflections"),
+                [n as u32, 1, 1],
+                [32, 1, 1],
+            )
+            .buffer(Buffer::data("in0", 0, floats(dtype, &x)))
+            .buffer(Buffer::data("in1", 1, floats(dtype, &y)))
+            .buffer(Buffer::zeroed("result", 3, n * 16 * size(dtype)))
+            .output(
+                Output::new("result", dtype, tol.doubled())
+                    .expect(floats(dtype, &expected), tol)
+                    .mask(mask),
             ),
         );
     }
@@ -1149,15 +1250,55 @@ fn add_vectors(plan: &mut Plan, library: &str, mode: &str, version: &str) {
     }
 }
 
-/// Every case at every MSL version, each from its own library.
+fn add_all(plan: &mut Plan, library: &str, mode: &str, precise: bool, version: &str) {
+    add_table(plan, library, mode, precise, version);
+    add_pairs(plan, library, mode, precise, version);
+    add_vectors(plan, library, mode, precise, version);
+}
+
+/// Every case at every MSL version, fast and precise, each from its own
+/// library. A mode is held to the specification's precise bounds only when
+/// both its arithmetic and its functions are precise; any other is held to
+/// the fast bounds, which precise results also meet.
 pub fn build(plan: &mut Plan) {
     let source = plan.generated("math.metal", msl());
     for (version, ..) in VERSIONS {
-        for (mode, flags) in [("fast", &[][..]), ("precise", &["-fno-fast-math"][..])] {
+        for (mode, precise, flags) in [
+            ("fast", false, &[][..]),
+            ("precise", true, &["-fno-fast-math"][..]),
+        ] {
             let library = plan.library(&format!("math_{mode}_{version}"), &source, flags, version);
-            add_table(plan, &library, mode, version);
-            add_pairs(plan, &library, mode, version);
-            add_vectors(plan, &library, mode, version);
+            add_all(plan, &library, mode, precise, version);
         }
+    }
+    // MSL 3.2's finer modes, at the latest version: relaxed arithmetic,
+    // which keeps infinities and NaNs; safe arithmetic with the default
+    // fast functions; fast arithmetic with precise functions.
+    for (mode, flag) in [
+        ("relaxed", "-fmetal-math-mode=relaxed"),
+        ("safe", "-fmetal-math-mode=safe"),
+        ("precise_functions", "-fmetal-math-fp32-functions=precise"),
+    ] {
+        let library = plan.library(&format!("math_{mode}"), &source, &[flag], LATEST);
+        add_all(plan, &library, mode, false, LATEST);
+    }
+    // The modes an application asks for at run time, through
+    // MTLCompileOptions' math mode and floating-point functions.
+    for (mode, precise, options) in [
+        (
+            "runtime_safe",
+            true,
+            json!({"math_mode": "safe", "math_functions": "precise"}),
+        ),
+        ("runtime_relaxed", false, json!({"math_mode": "relaxed"})),
+        ("runtime_fast", false, json!({"math_mode": "fast"})),
+        (
+            "runtime_precise_functions",
+            false,
+            json!({"math_mode": "fast", "math_functions": "precise"}),
+        ),
+    ] {
+        let library = plan.runtime_library(&format!("math_{mode}"), &source, options);
+        add_all(plan, &library, mode, precise, LATEST);
     }
 }

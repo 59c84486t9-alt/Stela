@@ -426,6 +426,11 @@ impl Output {
         self
     }
 
+    /// An output expected bit for bit.
+    pub fn exact(name: &str, dtype: Dtype, data: Vec<u8>) -> Self {
+        Self::new(name, dtype, Tolerance::exact()).expect_same(data)
+    }
+
     /// The expected bytes within the comparison's tolerance.
     pub fn expect_same(self, data: Vec<u8>) -> Self {
         let tolerance = Tolerance::from_json(self.json.get("tolerance"));
@@ -618,6 +623,36 @@ impl Case {
         self
     }
 
+    pub fn get(&self, key: &str) -> &Value {
+        self.json.get(key).unwrap_or(&Value::Null)
+    }
+
+    /// Sets a key of a nested object, such as `["render", "mesh", "x"]`.
+    pub fn set_at(mut self, path: &[&str], value: impl Into<Value>) -> Self {
+        let (last, parents) = path.split_last().expect("a path");
+        let mut at = &mut self.json;
+        for key in parents {
+            at = at
+                .entry(key.to_string())
+                .or_insert_with(|| Value::Object(Map::new()))
+                .as_object_mut()
+                .expect("an object on the path");
+        }
+        at.insert(last.to_string(), value.into());
+        self
+    }
+
+    /// Sets a key of the named entry of a list the case already holds
+    /// (`buffers`, `textures` or `samplers`), as when varying a case.
+    pub fn edit(mut self, list: &str, name: &str, key: &str, value: impl Into<Value>) -> Self {
+        let entry = self.json[list]
+            .as_array_mut()
+            .and_then(|l| l.iter_mut().find(|e| e["name"] == name))
+            .unwrap_or_else(|| panic!("no {list} entry {name}"));
+        entry[key] = value.into();
+        self
+    }
+
     pub fn name(&self) -> &str {
         self.json["name"].as_str().unwrap()
     }
@@ -633,6 +668,8 @@ pub struct Library {
     pub dynamic: bool,
     /// The dynamic libraries it links against.
     pub links: Vec<String>,
+    /// The runner's bundle ships it as its default library.
+    pub default: bool,
     /// Compiled by the device at run time from source, with these
     /// `MTLCompileOptions`, in place of a metallib the Mac builds.
     pub runtime: Option<Value>,
@@ -684,11 +721,18 @@ impl Plan {
                     flags: all,
                     dynamic: false,
                     links: vec![],
+                    default: false,
                     runtime: None,
                 },
             );
         }
         name.into()
+    }
+
+    /// Marks `name` as the library the runner's bundle ships as
+    /// `default.metallib`, which `newDefaultLibrary` loads.
+    pub fn default_library(&mut self, name: &str) {
+        self.libraries.get_mut(name).unwrap().default = true;
     }
 
     /// A dynamic library of a corpus source, which other libraries link
@@ -700,11 +744,38 @@ impl Plan {
     }
 
     /// A library the device compiles from a corpus source at run time with
-    /// `options`: `language`, `fast_math`, `macros`, `preserve_invariance`
-    /// and `optimization`, as `MTLCompileOptions` takes them.
-    pub fn runtime_library(&mut self, name: &str, source: &str, options: Value) -> String {
-        let name = self.library(name, source, &[], LATEST);
-        self.libraries.get_mut(&name).unwrap().runtime = Some(options);
+    /// `options` as `MTLCompileOptions` takes them: `language` (any MSL
+    /// version, the latest by default), `math_mode` (safe, relaxed, fast),
+    /// `math_functions` (precise, fast), the older `fast_math`, `macros`,
+    /// `preserve_invariance`, `optimization` (size), `libraries` (dynamic
+    /// libraries to link), `allow_undefined`, `symbol_visibility`
+    /// (default, hidden), `logging`, `required_threads`,
+    /// `conversion_rounding` (nearest_even, toward_zero) and
+    /// `install_name`, which makes it a dynamic library installed there.
+    pub fn runtime_library(&mut self, name: &str, source: &str, mut options: Value) -> String {
+        let version = options["language"].as_str().unwrap_or(LATEST).to_string();
+        let name = self.library(name, source, &[], &version);
+        // The functions the toolchain refuses at that version, left out
+        // by the same macros an offline build defines.
+        let skipped = self.unavailable(source, &version);
+        if !skipped.is_empty() {
+            let mut macros = options["macros"].as_object().cloned().unwrap_or_default();
+            for k in skipped {
+                macros.insert(format!("SKIP_{k}"), "1".into());
+            }
+            options["macros"] = macros.into();
+        }
+        let library = self.libraries.get_mut(&name).unwrap();
+        library.dynamic = options["install_name"].is_string();
+        // The dynamic libraries it links as it compiles go with it.
+        library.links = options["libraries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        library.runtime = Some(options);
         name
     }
 
@@ -761,7 +832,82 @@ impl Plan {
     pub fn add(&mut self, case: Case) {
         let name = case.name().to_string();
         assert!(self.names.insert(name.clone()), "duplicate case {name}");
+        let json = self.materialize(case);
+        self.cases.push(Value::Object(json));
+    }
+
+    /// A copy of the case `name` as `name.suffix`, changed by `change`:
+    /// the same inputs and expectations through another path of the API,
+    /// with any buffers, textures, samplers and outputs `change` adds.
+    pub fn vary(&mut self, name: &str, suffix: &str, change: impl FnOnce(Case) -> Case) {
+        let json = self
+            .cases
+            .iter()
+            .find(|c| name_of(c) == name)
+            .unwrap_or_else(|| panic!("no case {name} to vary"))
+            .as_object()
+            .unwrap()
+            .clone();
+        let case = Case {
+            json,
+            buffers: vec![],
+            textures: vec![],
+            samplers: vec![],
+            outputs: vec![],
+            render: false,
+        };
+        self.add(change(case.set("name", format!("{name}.{suffix}"))));
+    }
+
+    /// A case's JSON with its buffers', textures' and outputs' bytes
+    /// stored as inputs, appended to the lists it already holds.
+    fn materialize(&mut self, case: Case) -> Map<String, Value> {
         let mut json = case.json;
+        let name = json
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let lengths: BTreeMap<String, usize> = case
+            .buffers
+            .iter()
+            .map(|b| {
+                let declared = b.json.get("length").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let length = declared.max(b.data.as_ref().map_or(0, Vec::len));
+                let name = b.json.get("name").and_then(Value::as_str);
+                (name.unwrap_or_default().to_string(), length)
+            })
+            .collect();
+        // A derived output's expectation holds one u32 property per
+        // element the output reads back.
+        for o in &case.outputs {
+            let (Some(_), Some(expect)) = (o.json.get("derive"), &o.expect) else {
+                continue;
+            };
+            let output = o
+                .json
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let dtype = o
+                .json
+                .get("dtype")
+                .and_then(Value::as_str)
+                .and_then(Dtype::parse);
+            let bytes = o
+                .json
+                .get("length")
+                .and_then(Value::as_u64)
+                .map(|l| l as usize)
+                .or_else(|| lengths.get(output).copied());
+            if let (Some(dtype), Some(bytes)) = (dtype, bytes) {
+                assert_eq!(
+                    expect.len() / 4,
+                    bytes / dtype.size(),
+                    "{name}: derived output {output} expects one u32 per element"
+                );
+            }
+        }
         let mut buffers = vec![];
         for b in case.buffers {
             let mut m = b.json;
@@ -785,6 +931,15 @@ impl Plan {
         let mut outputs = vec![];
         for o in case.outputs {
             let mut m = o.json;
+            // A buffer output is read back at the length the case gives
+            // it, not at the larger size the runner may allocate.
+            if let Some(&length) = m
+                .get("name")
+                .and_then(Value::as_str)
+                .and_then(|n| lengths.get(n))
+            {
+                m.entry("length").or_insert(length.into());
+            }
             if let Some(data) = o.expect {
                 m.insert("expect".into(), self.input(data).into());
             }
@@ -798,15 +953,19 @@ impl Plan {
             }
             outputs.push(Value::Object(m));
         }
-        json.insert("buffers".into(), buffers.into());
-        json.insert("outputs".into(), outputs.into());
-        if case.render || !textures.is_empty() {
-            json.insert("textures".into(), textures.into());
-        }
-        if case.render || !case.samplers.is_empty() {
-            json.insert("samplers".into(), case.samplers.into());
-        }
-        self.cases.push(Value::Object(json));
+        let mut extend = |key: &str, items: Vec<Value>, always: bool| {
+            if items.is_empty() && !always && !json.contains_key(key) {
+                return;
+            }
+            if let Value::Array(list) = json.entry(key).or_insert_with(|| Value::Array(vec![])) {
+                list.extend(items);
+            }
+        };
+        extend("buffers", buffers, true);
+        extend("outputs", outputs, true);
+        extend("textures", textures, case.render);
+        extend("samplers", case.samplers, case.render);
+        json
     }
 
     #[cfg(test)]
@@ -833,9 +992,12 @@ impl Plan {
             .flat_map(|c| {
                 let steps = c["steps"].as_array().into_iter().flatten();
                 let preloads = c["preload"].as_array().into_iter().flatten();
+                // Libraries a case's pipelines link functions from.
+                let uses = c["uses"].as_array().into_iter().flatten();
                 std::iter::once(&c["library"])
                     .chain(steps.map(|s| &s["library"]))
                     .chain(preloads)
+                    .chain(uses)
             })
             .filter_map(Value::as_str)
             .collect();
@@ -859,6 +1021,7 @@ impl Plan {
                 flags,
                 dynamic,
                 links,
+                default,
                 runtime,
             } = library;
             let base = Path::new(source).file_name().unwrap().to_string_lossy();
@@ -872,7 +1035,8 @@ impl Plan {
             libraries.insert(name.clone(), format!("lib/{name}.metallib").into());
             builds.insert(
                 name.clone(),
-                json!({"source": source, "version": version, "flags": flags, "dynamic": dynamic, "links": links}),
+                json!({"source": source, "version": version, "flags": flags, "dynamic": dynamic, "links": links,
+                       "default": default}),
             );
         }
         let body = serde_json::to_string(&json!({"libraries": libraries, "cases": selected}))?;

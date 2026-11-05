@@ -259,6 +259,12 @@ fragment float4 frag_sample_id(Full in [[stage_in]], uint sample [[sample_id]])
     return float4(float(sample + 1) * 0.25f, float(sample) * 0.125f, 0.0f, 1.0f);
 }
 
+// Each sample's position within the pixel, which the resolve averages.
+fragment float4 frag_sample_position(Full in [[stage_in]], uint sample [[sample_id]])
+{
+    return float4(get_sample_position(sample), 0.0f, 1.0f);
+}
+
 fragment float4 frag_mask_in(Plain in [[stage_in]], uint mask [[sample_mask]])
 {
     return float4(float(popcount(mask)) * 0.25f, 0.0f, 0.0f, 1.0f);
@@ -321,6 +327,27 @@ struct HalfAttr {
 vertex void vert_fetch_half(HalfAttr in [[stage_in]], uint v [[vertex_id]], device float4 *out [[buffer(2)]])
 {
     out[v] = float4(in.a);
+}
+
+// The same fetches by a kernel, through its stage input descriptor.
+kernel void stage_fetch_float(FloatAttr in [[stage_in]], uint i [[thread_position_in_grid]], device float4 *out [[buffer(2)]])
+{
+    out[i] = in.a;
+}
+
+kernel void stage_fetch_uint(UintAttr in [[stage_in]], uint i [[thread_position_in_grid]], device uint4 *out [[buffer(2)]])
+{
+    out[i] = in.a;
+}
+
+kernel void stage_fetch_int(IntAttr in [[stage_in]], uint i [[thread_position_in_grid]], device int4 *out [[buffer(2)]])
+{
+    out[i] = in.a;
+}
+
+kernel void stage_fetch_half(HalfAttr in [[stage_in]], uint i [[thread_position_in_grid]], device float4 *out [[buffer(2)]])
+{
+    out[i] = float4(in.a);
 }
 
 struct Instanced {
@@ -401,7 +428,9 @@ fragment float4 frag_interpolant(PullIn in [[stage_in]], constant float2 &offset
     float2 center = in.uv.interpolate_at_center();
     float2 at = in.uv.interpolate_at_offset(offset);
     float2 sample = in.uv.interpolate_at_sample(0);
-    return float4(center.x - sample.x + center.y - sample.y, center.y, at.x, at.y);
+    float2 centroid = in.uv.interpolate_at_centroid();
+    return float4(center.x - sample.x + center.y - sample.y + centroid.x - center.x + centroid.y - center.y, center.y, at.x,
+                  at.y);
 }
 #endif
 
@@ -444,3 +473,39 @@ fragment float4 frag_white(Full in [[stage_in]])
 fragment float4 frag_fetch(Full in [[stage_in]], float4 target [[color(0)]], device const float4 *c [[buffer(0)]],
                            constant uint &width [[buffer(1)]])
 { return target * 0.5f + c[pixel(in.position, width)]; }
+
+// Two instances in order: an occluder over the left half at depth 0.25,
+// then the whole target at 0.75. With early fragment tests the hidden
+// fragments of the second never run, so each instance counts exactly the
+// fragments it shows.
+struct Occluded {
+    float4 position [[position]];
+    uint instance [[flat]];
+};
+
+vertex Occluded vert_occluder(uint v [[vertex_id]], uint i [[instance_id]])
+{
+    float x1 = i == 0 ? 0.0f : 1.0f;
+    return {float4(v & 1 ? x1 : -1.0f, v & 2 ? 1.0f : -1.0f, i == 0 ? 0.25f : 0.75f, 1.0f), i};
+}
+
+[[early_fragment_tests]]
+fragment float4 frag_early(Occluded in [[stage_in]], device atomic_uint *runs [[buffer(0)]],
+                           constant float4 *colors [[buffer(1)]])
+{
+    atomic_fetch_add_explicit(&runs[in.instance], 1u, memory_order_relaxed);
+    return colors[in.instance];
+}
+
+// Each vertex's value of the triangle, uninterpolated, in the order the
+// triangle's vertices were drawn.
+struct PerVertex {
+    float4 position [[position]];
+    vertex_value<float> single;
+};
+
+fragment float4 frag_vertex_values(PerVertex in [[stage_in]])
+{
+    return float4(in.single.get(vertex_index::first), in.single.get(vertex_index::second),
+                  in.single.get(vertex_index::third), 1.0f);
+}

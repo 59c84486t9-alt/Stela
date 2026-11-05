@@ -8,16 +8,12 @@
 //! wireframe fill; and two and eight samples. Every result is one the
 //! specification fixes, or a relation it fixes where a value is the
 //! device's (timestamps, which samples a line lights).
-use super::plan::{Buffer, Case, Output, Plan, Step, Texture, Tolerance};
+use super::plan::{Buffer, Case, Output, Plan, Step, Texture, Tolerance, VERSIONS};
 use super::textures::{decode, format_named, texel_bytes};
-use super::values::{Dtype, Random, f32s, ints, u32s};
+use super::values::{Dtype, Random, f16_bits, f32s, ints, u32s};
 use serde_json::{Value, json};
 
 const SOURCE: &str = "api.metal";
-
-fn exact(name: &str, dtype: Dtype, data: Vec<u8>) -> Output {
-    Output::new(name, dtype, Tolerance::exact()).expect_same(data)
-}
 
 fn u64s(values: &[u64]) -> Vec<u8> {
     ints(
@@ -64,21 +60,28 @@ fn image(w: u32, h: u32, color: [f64; 4], inside: impl Fn(u32, u32) -> bool) -> 
 fn storage(plan: &mut Plan, library: &str, rng: &mut Random) {
     let n = 256u32;
     let v: Vec<u32> = (0..n).map(|_| rng.u32()).collect();
-    for (name, mode, no_copy) in [
-        ("shared", "shared", false),
-        ("managed", "managed", false),
-        ("private", "private", false),
-        ("no_copy", "shared", true),
-        ("managed_no_copy", "managed", true),
+    // Write-combined memory the CPU writes but does not read back fast;
+    // the results arrive through a copy as for private storage.
+    for (name, mode, no_copy, write_combined) in [
+        ("shared", "shared", false, false),
+        ("managed", "managed", false, false),
+        ("private", "private", false, false),
+        ("no_copy", "shared", true, false),
+        ("managed_no_copy", "managed", true, false),
+        ("shared.write_combined", "shared", false, true),
+        ("managed.write_combined", "managed", false, true),
     ] {
         let mut data = Buffer::data("data", 0, u32s(&v)).set("storage", mode);
         if no_copy {
             data = data.set("no_copy", true);
         }
+        if write_combined {
+            data = data.set("write_combined", true);
+        }
         plan.add(
             Case::compute1(&format!("api.storage.buffer.{name}"), library, "touch", n)
                 .buffer(data)
-                .output(exact("data", Dtype::U32, u32s(&touched(&v))).set("length", n * 4)),
+                .output(Output::exact("data", Dtype::U32, u32s(&touched(&v))).set("length", n * 4)),
         );
     }
     // A texture written by a kernel from another, each in a storage mode:
@@ -93,6 +96,7 @@ fn storage(plan: &mut Plan, library: &str, rng: &mut Random) {
         ("managed", "managed", 0),
         ("managed.padded", "managed", 4),
         ("private", "private", 0),
+        ("shared.write_combined", "shared", 0),
     ] {
         plan.add(
             Case::compute(
@@ -107,6 +111,7 @@ fn storage(plan: &mut Plan, library: &str, rng: &mut Random) {
                     .index(0)
                     .set("storage", mode)
                     .set("row_padding", pad)
+                    .set("write_combined", name.ends_with("write_combined"))
                     .data(texels.clone()),
             )
             .texture(
@@ -115,7 +120,7 @@ fn storage(plan: &mut Plan, library: &str, rng: &mut Random) {
                     .usage(&["write"])
                     .set("storage", mode),
             )
-            .output(exact("out", Dtype::U8, inverted.clone())),
+            .output(Output::exact("out", Dtype::U8, inverted.clone())),
         );
     }
     // Every slice and level of an array and of a 3D texture, through the
@@ -148,7 +153,7 @@ fn storage(plan: &mut Plan, library: &str, rng: &mut Random) {
                     .set("row_padding", pad)
                     .data(array.clone()),
             )
-            .output(exact("t", Dtype::U16, array.clone())),
+            .output(Output::exact("t", Dtype::U16, array.clone())),
         );
         plan.add(
             Case::compute1(
@@ -163,7 +168,7 @@ fn storage(plan: &mut Plan, library: &str, rng: &mut Random) {
                     .set("row_padding", pad)
                     .data(volume.clone()),
             )
-            .output(exact("t", Dtype::U8, volume.clone())),
+            .output(Output::exact("t", Dtype::U8, volume.clone())),
         );
     }
     // A linear texture over a buffer's rows, 256 bytes apart.
@@ -212,7 +217,7 @@ fn inline_constants(plan: &mut Plan, library: &str, rng: &mut Random) {
         Case::compute1("api.inline.compute", library, "params", n)
             .buffer(Buffer::data("data", 0, u32s(&v)))
             .buffer(Buffer::data("params", 1, params).set("inline", true))
-            .output(exact("data", Dtype::U32, u32s(&expect))),
+            .output(Output::exact("data", Dtype::U32, u32s(&expect))),
     );
     let color = [0.25, 0.5, 0.75, 1.0];
     plan.add(
@@ -225,7 +230,11 @@ fn inline_constants(plan: &mut Plan, library: &str, rng: &mut Random) {
         )
         .buffers(inline_rect([-1.0, -1.0, 0.0, 1.0], color))
         .texture(Texture::d2("a", "rgba32float", 8, 8).usage(&["render"]))
-        .output(exact("a", Dtype::F32, image(8, 8, color, |x, _| x < 4))),
+        .output(Output::exact(
+            "a",
+            Dtype::F32,
+            image(8, 8, color, |x, _| x < 4),
+        )),
     );
 }
 
@@ -240,6 +249,48 @@ fn visibility(plan: &mut Plan, library: &str) {
     let draws: Vec<Value> = (0..3)
         .map(|k| json!({"vertex_start": 4 * k, "vertex_count": 4, "visibility_offset": 8 * k}))
         .collect();
+    // Results reset when the pass begins, or added to what the buffer
+    // already holds.
+    for (kind, expect) in [("reset", [64u64, 0, 16]), ("accumulate", [69, 5, 21])] {
+        plan.add(
+            Case::render(
+                &format!("api.visibility.counting.{kind}"),
+                library,
+                "vert_depth_rect",
+                Some("frag_flat"),
+                strip(json!({"colors": [{"texture": "a", "clear": [0, 0, 0, 0]}],
+                             "depth": {"texture": "depth", "clear": 1.0, "compare": "less"},
+                             "visibility": {"buffer": "visibility", "mode": "counting", "type": kind},
+                             "draws": draws})),
+            )
+            .buffer(Buffer::data("rects", 0, rects.clone()).stage("vertex"))
+            .buffer(Buffer::data("color", 0, f32s(&[1.0; 4])).stage("fragment"))
+            .buffer(Buffer::data("visibility", 0, u64s(&[5; 3])).unbound())
+            .texture(Texture::d2("a", "rgba8unorm", 8, 8).usage(&["render"]))
+            .texture(Texture::d2("depth", "depth32float", 8, 8).usage(&["render"]))
+            .output(Output::exact("visibility", Dtype::U64, u64s(&expect))),
+        );
+    }
+    // Counting turned off for the third draw, whose result stays zero.
+    let mut disabled = draws.clone();
+    disabled[2]["visibility_mode"] = "disabled".into();
+    plan.add(
+        Case::render(
+            "api.visibility.counting.disabled_draw",
+            library,
+            "vert_depth_rect",
+            Some("frag_flat"),
+            strip(json!({"colors": [{"texture": "a", "clear": [0, 0, 0, 0]}],
+                         "depth": {"texture": "depth", "clear": 1.0, "compare": "less"},
+                         "visibility": {"buffer": "visibility", "mode": "counting"}, "draws": disabled})),
+        )
+        .buffer(Buffer::data("rects", 0, rects.clone()).stage("vertex"))
+        .buffer(Buffer::data("color", 0, f32s(&[1.0; 4])).stage("fragment"))
+        .buffer(Buffer::zeroed("visibility", 0, 24).unbound())
+        .texture(Texture::d2("a", "rgba8unorm", 8, 8).usage(&["render"]))
+        .texture(Texture::d2("depth", "depth32float", 8, 8).usage(&["render"]))
+        .output(Output::exact("visibility", Dtype::U64, u64s(&[64, 0, 0]))),
+    );
     for (mode, expect) in [("counting", vec![64u64, 0, 16]), ("boolean", vec![1, 0, 1])] {
         let mut out = Output::new("visibility", Dtype::U64, Tolerance::exact());
         out = if mode == "boolean" {
@@ -279,8 +330,8 @@ fn counters(plan: &mut Plan, library: &str, rng: &mut Random) {
             .set("timestamps", json!({"buffer": "stamps"}))
             .buffer(Buffer::data("data", 0, u32s(&v)))
             .buffer(Buffer::zeroed("stamps", 0, 16).unbound())
-            .output(exact("data", Dtype::U32, u32s(&touched(&v))))
-            .output(exact("stamps", Dtype::U64, u32s(&[1, 1])).set("derive", "ordered")),
+            .output(Output::exact("data", Dtype::U32, u32s(&touched(&v))))
+            .output(Output::exact("stamps", Dtype::U64, u32s(&[1, 1])).set("derive", "ordered")),
     );
     plan.add(
         Case::render(
@@ -295,7 +346,7 @@ fn counters(plan: &mut Plan, library: &str, rng: &mut Random) {
         .buffers(inline_rect([-1.0, -1.0, 1.0, 1.0], [1.0; 4]))
         .buffer(Buffer::zeroed("stamps", 0, 32).unbound())
         .texture(Texture::d2("a", "rgba8unorm", 8, 8).usage(&["render"]))
-        .output(exact("stamps", Dtype::U64, u32s(&[1, 1, 1, 1])).set("derive", "nonzero")),
+        .output(Output::exact("stamps", Dtype::U64, u32s(&[1, 1, 1, 1])).set("derive", "nonzero")),
     );
     // Statistics between the encoder's start and end: one kernel
     // invocation per thread and no other stage's work.
@@ -310,7 +361,7 @@ fn counters(plan: &mut Plan, library: &str, rng: &mut Random) {
             )
             .buffer(Buffer::data("data", 0, u32s(&v)))
             .buffer(Buffer::zeroed("stats", 0, 64).unbound())
-            .output(exact("stats", Dtype::U64, u64s(&stats))),
+            .output(Output::exact("stats", Dtype::U64, u64s(&stats))),
     );
 }
 
@@ -329,14 +380,23 @@ fn logging(plan: &mut Plan, rng: &mut Random) {
     );
     let mut expect = text.into_bytes();
     expect.resize(1024, 0);
-    plan.add(
-        Case::compute1("api.log", &library, "log_values", 64)
-            .requires(&[], &["logging"])
-            .set("log", json!({"buffer": "log", "lines": 5}))
-            .buffer(Buffer::data("data", 0, u32s(&data)))
-            .buffer(Buffer::zeroed("log", 0, 1024).unbound())
-            .output(exact("log", Dtype::U8, expect)),
+    // The same messages from the library the device compiles with
+    // logging enabled by its compile options.
+    let runtime = plan.runtime_library(
+        "api_logging_runtime",
+        SOURCE,
+        json!({"language": "3.2", "logging": true}),
     );
+    for (name, library) in [("api.log", &library), ("api.log.runtime", &runtime)] {
+        plan.add(
+            Case::compute1(name, library, "log_values", 64)
+                .requires(&[], &["logging"])
+                .set("log", json!({"buffer": "log", "lines": 5}))
+                .buffer(Buffer::data("data", 0, u32s(&data)))
+                .buffer(Buffer::zeroed("log", 0, 1024).unbound())
+                .output(Output::exact("log", Dtype::U8, expect.clone())),
+        );
+    }
 }
 
 fn reflection(plan: &mut Plan, library: &str) {
@@ -349,7 +409,11 @@ fn reflection(plan: &mut Plan, library: &str) {
         Case::compute1("api.reflection.compute", library, "reflected", 64)
             .set("reflection", "reflection")
             .buffer(Buffer::zeroed("reflection", 0, 2048).unbound())
-            .output(exact("reflection", Dtype::U8, text(&COMPUTE_REFLECTION))),
+            .output(Output::exact(
+                "reflection",
+                Dtype::U8,
+                text(&COMPUTE_REFLECTION),
+            )),
     );
     plan.add(
         Case::render(
@@ -371,9 +435,145 @@ fn reflection(plan: &mut Plan, library: &str) {
         .buffer(Buffer::data("color", 0, f32s(&[1.0; 4])).stage("fragment"))
         .buffer(Buffer::zeroed("reflection", 0, 2048).unbound())
         .texture(Texture::d2("a", "rgba8unorm", 4, 4).usage(&["render"]))
-        .output(exact("reflection", Dtype::U8, text(&RENDER_REFLECTION))),
+        .output(Output::exact(
+            "reflection",
+            Dtype::U8,
+            text(&RENDER_REFLECTION),
+        )),
     );
 }
+
+/// Reflection in full and through the older arguments: `reflected`'s
+/// bindings as `MTLArgument`s, a vertex and fragment pipeline's, and
+/// `reflected_types`, whose nested structs, arrays, pointers, argument
+/// buffer of textures and sampler, and atomic reflection describes
+/// member by member (name@offset#argument index:data type=type).
+fn reflection_types(plan: &mut Plan, library: &str) {
+    let text = |lines: &[&str]| {
+        let mut t = lines.join("\n").into_bytes();
+        t.resize(4096, 0);
+        t
+    };
+    plan.add(
+        Case::compute1("api.reflection.compute.arguments", library, "reflected", 64)
+            .set("reflection", "reflection")
+            .set("reflection_arguments", true)
+            .buffer(Buffer::zeroed("reflection", 0, 4096).unbound())
+            .output(Output::exact(
+                "reflection",
+                Dtype::U8,
+                text(&COMPUTE_ARGUMENTS),
+            )),
+    );
+    plan.add(
+        Case::render(
+            "api.reflection.render.arguments",
+            library,
+            "vert_depth_rect",
+            Some("frag_flat"),
+            strip(json!({"colors": [{"texture": "a", "clear": [0, 0, 0, 0]}]})),
+        )
+        .set("reflection", "reflection")
+        .set("reflection_arguments", true)
+        .buffer(
+            Buffer::data(
+                "rects",
+                0,
+                f32s(&[-1.0, -1.0, 1.0, 1.0, 0.5, 0.0, 0.0, 0.0]),
+            )
+            .stage("vertex"),
+        )
+        .buffer(Buffer::data("color", 0, f32s(&[1.0; 4])).stage("fragment"))
+        .buffer(Buffer::zeroed("reflection", 0, 4096).unbound())
+        .texture(Texture::d2("a", "rgba8unorm", 4, 4).usage(&["render"]))
+        .output(Output::exact(
+            "reflection",
+            Dtype::U8,
+            text(&RENDER_ARGUMENTS),
+        )),
+    );
+    let n = 4u32;
+    for (suffix, legacy, expect) in [
+        ("", false, &TYPES_REFLECTION[..]),
+        (".arguments", true, &TYPES_ARGUMENTS[..]),
+    ] {
+        plan.add(
+            Case::compute1(
+                &format!("api.reflection.types{suffix}"),
+                library,
+                "reflected_types",
+                n,
+            )
+            .set("dispatch", "threads")
+            .set("reflection", "reflection")
+            .set("reflection_types", !legacy)
+            .set("reflection_arguments", legacy)
+            .buffer(Buffer::zeroed("outer", 0, 80 * n as usize))
+            .buffer(Buffer::zeroed("res", 1, 48))
+            .buffer(Buffer::zeroed("count", 2, 16))
+            .buffer(Buffer::data("data", 0, f32s(&[1.0; 4])).unbound())
+            .buffer(Buffer::zeroed("reflection", 0, 4096).unbound())
+            .texture(Texture::d2("image", "rgba8unorm", 2, 2))
+            .texture(Texture::d2("shadow", "depth32float", 2, 2))
+            .texture(Texture::d2("layer0", "rgba8unorm", 2, 2))
+            .texture(Texture::d2("layer1", "rgba8unorm", 2, 2))
+            .sampler(json!({"name": "s", "argument_buffers": true}))
+            .set(
+                "arguments",
+                json!([{"buffer": "res", "entries": [
+                    {"kind": "texture", "offset": 0, "resource": "image"},
+                    {"kind": "texture", "offset": 8, "resource": "shadow"},
+                    {"kind": "sampler", "offset": 16, "resource": "s"},
+                    {"kind": "buffer", "offset": 24, "resource": "data"},
+                    {"kind": "texture", "offset": 32, "resource": "layer0"},
+                    {"kind": "texture", "offset": 40, "resource": "layer1"}]}]),
+            )
+            .output(Output::exact("count", Dtype::U32, u32s(&[n, 0, 0, 0])))
+            .output(Output::exact("reflection", Dtype::U8, text(expect))),
+        );
+    }
+}
+
+/// `reflected`'s bindings as the older `MTLArgument`s list them: each
+/// active, with its pointee in full.
+const COMPUTE_ARGUMENTS: [&str; 9] = [
+    "items type=0 index=0 access=1 active=1 size=80 align=16 data=1 pointer=*(1 access=1 align=16 size=80 argument_buffer=0 {position@0#0:6 id@16#0:33 uv@20#0:17 basis@32#0:11})",
+    "weights type=0 index=2 access=0 active=1 size=16 align=16 data=6 pointer=*(6 access=0 align=16 size=16 argument_buffer=0)",
+    "ids type=0 index=5 access=0 active=1 size=4 align=4 data=33 pointer=*(33 access=0 align=4 size=4 argument_buffer=0)",
+    "scratch type=1 index=0 access=1 active=1 size=4 align=4",
+    "src type=2 index=0 access=0 active=1 texture=2 data=16 depth=0 array=1",
+    "dst type=2 index=3 access=2 active=1 texture=3 data=33 depth=0 array=1",
+    "shadow type=2 index=4 access=0 active=1 texture=2 data=3 depth=1 array=1",
+    "s type=3 index=1 access=0 active=1",
+    "static_threadgroup_memory=256\n",
+];
+
+const RENDER_ARGUMENTS: [&str; 5] = [
+    "vertex",
+    "rects type=0 index=0 access=0 active=1 size=32 align=16 data=1 pointer=*(1 access=0 align=16 size=32 argument_buffer=0 {rect@0#0:6 depth@16#0:6})",
+    "fragment",
+    "color type=0 index=0 access=0 active=1 size=16 align=16 data=6 pointer=*(6 access=0 align=16 size=16 argument_buffer=0)",
+    "",
+];
+
+/// `Outer` is 80 bytes: its color, two 24-byte `Inner`s (a float2 and
+/// three uints, aligned to 8) from 16, and a packed float3 at 64. The
+/// argument buffer holds 8-byte texture, sampler and pointer entries,
+/// each at its own argument index, the texture array's two from 4.
+const TYPES_REFLECTION: [&str; 5] = [
+    "outer type=0 index=0 access=1 used=1 argument=1 size=80 align=16 data=1 color@0:6 inner@16:2 p@64:5 pointer=*(1 access=1 align=16 size=80 argument_buffer=0 {color@0#0:6 inner@16#0:2=[2 stride=24 ids=0 1 {uv@0#0:4 ids@8#0:2=[3 stride=4 ids=0 33]}] p@64#0:5})",
+    "res type=0 index=1 access=0 used=1 argument=1 size=48 align=8 data=1 image@0:58 shadow@8:58 s@16:59 data@24:60 layers@32:2 pointer=*(1 access=0 align=8 size=48 argument_buffer=1 {image@0#0:58=texture(2 data=3 access=0 depth=0) shadow@8#1:58=texture(2 data=3 access=0 depth=1) s@16#2:59 data@24#3:60=*(3 access=1 align=4 size=4 argument_buffer=0) layers@32#4:2=[2 stride=0 ids=1 58 texture(2 data=3 access=0 depth=0)]})",
+    "count type=0 index=2 access=1 used=1 argument=1 size=4 align=4 data=1 __s@0:33 pointer=*(1 access=1 align=4 size=4 argument_buffer=0 {__s@0#0:33})",
+    "static_threadgroup_memory=0",
+    "state=none\n",
+];
+
+const TYPES_ARGUMENTS: [&str; 4] = [
+    "outer type=0 index=0 access=1 active=1 size=80 align=16 data=1 pointer=*(1 access=1 align=16 size=80 argument_buffer=0 {color@0#0:6 inner@16#0:2=[2 stride=24 ids=0 1 {uv@0#0:4 ids@8#0:2=[3 stride=4 ids=0 33]}] p@64#0:5})",
+    "res type=0 index=1 access=0 active=1 size=48 align=8 data=1 pointer=*(1 access=0 align=8 size=48 argument_buffer=1 {image@0#0:58=texture(2 data=3 access=0 depth=0) shadow@8#1:58=texture(2 data=3 access=0 depth=1) s@16#2:59 data@24#3:60=*(3 access=1 align=4 size=4 argument_buffer=0) layers@32#4:2=[2 stride=0 ids=1 58 texture(2 data=3 access=0 depth=0)]})",
+    "count type=0 index=2 access=1 active=1 size=4 align=4 data=1 pointer=*(1 access=1 align=4 size=4 argument_buffer=0 {__s@0#0:33})",
+    "static_threadgroup_memory=0\n",
+];
 
 /// Each binding of `reflected` as `MTLComputePipelineReflection` lists
 /// it: `MTLBindingType`, index, `MTLBindingAccess`, whether used and an
@@ -431,9 +631,111 @@ fn runtime(plan: &mut Plan, rng: &mut Random) {
                 n,
             )
             .buffer(Buffer::data("data", 0, u32s(&v)))
-            .output(exact("data", Dtype::U32, u32s(&expect))),
+            .output(Output::exact("data", Dtype::U32, u32s(&expect))),
         );
     }
+    // Every language version an application may ask for, each seen by
+    // the source as its __METAL_VERSION__.
+    for (language, .., number) in VERSIONS {
+        let label = language.replace('.', "_");
+        let library = plan.runtime_library(
+            &format!("api_runtime_language_{label}"),
+            "api_runtime.metal",
+            json!({"language": language, "macros": {"SCALE": "2u"}}),
+        );
+        let expect: Vec<u32> = v.iter().map(|&x| x * 2 + 7 + number).collect();
+        plan.add(
+            Case::compute1(
+                &format!("api.runtime_library.language_{label}"),
+                &library,
+                "runtime_scale",
+                n,
+            )
+            .buffer(Buffer::data("data", 0, u32s(&v)))
+            .output(Output::exact("data", Dtype::U32, u32s(&expect))),
+        );
+    }
+}
+
+/// A float's nearest half toward zero: the bits round down in magnitude,
+/// and a magnitude past the largest half saturates to it.
+fn f16_toward_zero(x: f64) -> u16 {
+    let sign = if x.is_sign_negative() { 0x8000 } else { 0 };
+    let a = x.abs();
+    if a.is_nan() {
+        return sign | 0x7E00;
+    }
+    if a.is_infinite() {
+        return sign | 0x7C00;
+    }
+    if a < 2f64.powi(-14) {
+        return sign | (a * 2f64.powi(24)).trunc() as u16;
+    }
+    let exponent = ((a.to_bits() >> 52) & 0x7FF) as i32 - 1023;
+    if exponent > 15 {
+        return sign | 0x7BFF;
+    }
+    let mantissa = ((a / 2f64.powi(exponent) - 1.0) * 1024.0).trunc() as u16;
+    sign | ((exponent + 15) as u16) << 10 | mantissa
+}
+
+/// Compile options that change what a kernel computes or how it runs:
+/// the rounding of float-to-half conversions, a required threadgroup
+/// size, and logging enabled at run time rather than by a build flag.
+fn runtime_options(plan: &mut Plan, rng: &mut Random) {
+    let mut input: Vec<f64> = vec![
+        1.0 + 2f64.powi(-11) + 2f64.powi(-20),
+        -(1.0 + 2f64.powi(-11) + 2f64.powi(-20)),
+        1.0 + 3.0 * 2f64.powi(-11),
+        70000.0,
+        -70000.0,
+        3.0 * 2f64.powi(-25),
+        65519.0,
+        0.1,
+    ];
+    input.extend((0..56).map(|_| f64::from(rng.uniform(-300.0, 300.0) as f32)));
+    let input: Vec<f64> = input.iter().map(|&x| f64::from(x as f32)).collect();
+    for (mode, narrow) in [
+        ("nearest_even", f16_bits as fn(f64) -> u16),
+        ("toward_zero", f16_toward_zero),
+    ] {
+        let library = plan.runtime_library(
+            &format!("api_runtime_rounding_{mode}"),
+            "api_runtime.metal",
+            json!({"conversion_rounding": mode, "macros": {"SCALE": "1u"}}),
+        );
+        let expect: Vec<u8> = input
+            .iter()
+            .flat_map(|&x| narrow(x).to_le_bytes())
+            .collect();
+        plan.add(
+            Case::compute1(
+                &format!("api.runtime_library.conversion_rounding.{mode}"),
+                &library,
+                "runtime_narrow",
+                input.len() as u32,
+            )
+            .buffer(Buffer::data("in", 0, f32s(&input)))
+            .buffer(Buffer::zeroed("out", 1, input.len() * 2))
+            .output(Output::exact("out", Dtype::U16, expect)),
+        );
+    }
+    let library = plan.runtime_library(
+        "api_runtime_required_threads",
+        "api_runtime.metal",
+        json!({"required_threads": [64, 1, 1], "macros": {"SCALE": "1u"}}),
+    );
+    let words: Vec<u32> = (0..128u32).flat_map(|i| [64, 1, 1, i % 64]).collect();
+    plan.add(
+        Case::compute1(
+            "api.runtime_library.required_threads",
+            &library,
+            "runtime_group",
+            128,
+        )
+        .buffer(Buffer::zeroed("out", 0, 128 * 16))
+        .output(Output::exact("out", Dtype::U32, u32s(&words))),
+    );
 }
 
 fn targets(plan: &mut Plan, library: &str) {
@@ -505,7 +807,7 @@ fn targets(plan: &mut Plan, library: &str) {
             )
             .buffers(inline_rect([-1.0, -1.0, 1.0, 1.0], color))
             .texture(texture.usage(&["render"]).data(initial))
-            .output(exact("a", Dtype::F32, expect)),
+            .output(Output::exact("a", Dtype::F32, expect)),
         );
     }
     // A multisampled pass resolved into one slice of an array.
@@ -532,7 +834,7 @@ fn targets(plan: &mut Plan, library: &str) {
                 .usage(&["render"])
                 .data(zeros(3 * face)),
         )
-        .output(exact("a", Dtype::F32, [empty(32), lit].concat())),
+        .output(Output::exact("a", Dtype::F32, [empty(32), lit].concat())),
     );
 }
 
@@ -554,6 +856,29 @@ fn resolves(plan: &mut Plan, library: &str) {
                 .usage(&["render"]),
         )
     };
+    // Samples resolved into the second plane of a 3D texture; the first
+    // keeps what it held.
+    let pixels = (size * size) as usize;
+    let mut planes = vec![0u8; pixels * 4];
+    planes.extend([0u8, 255, 51, 255].repeat(pixels));
+    plan.add(
+        Case::render(
+            "api.resolve.depth_plane",
+            library,
+            "vert_inline_rect",
+            Some("frag_flat"),
+            strip(json!({"samples": 4, "colors": [{"texture": "c", "clear": [0, 0, 0, 0], "resolve": "volume",
+                                                   "resolve_depth_plane": 1}]})),
+        )
+        .buffers(inline_rect([-1.0, -1.0, 1.0, 1.0], [0.0, 1.0, 0.2, 1.0]))
+        .texture(Texture::new("c", "rgba8unorm", "2d_ms", [size, size, 1]).samples(4).usage(&["render"]))
+        .texture(
+            Texture::new("volume", "rgba8unorm", "3d", [size, size, 2])
+                .usage(&["render"])
+                .data(vec![0; pixels * 8]),
+        )
+        .output(Output::exact("volume", Dtype::U8, planes)),
+    );
     for (filter, depth) in [("sample0", 0.1f64), ("min", 0.1), ("max", 0.4)] {
         plan.add(
             base(
@@ -620,7 +945,7 @@ fn draws(plan: &mut Plan, library: &str) {
         .buffer(Buffer::data("indices", 0, ints(Dtype::U16, &[0, 1, 2, 3])).unbound())
         .buffer(Buffer::data("arguments", 0, u32s(&[4, 1, 0, 0, 0])).unbound())
         .texture(Texture::d2("a", "rgba32float", w, h).usage(&["render"]))
-        .output(exact("a", Dtype::F32, image(w, h, color, |x, _| x >= 4))),
+        .output(Output::exact("a", Dtype::F32, image(w, h, color, |x, _| x >= 4))),
     );
     // Two strips in one draw, split by the restart index.
     let corners = [quad(-1.0, -0.5), quad(0.5, 1.0)].concat();
@@ -644,7 +969,7 @@ fn draws(plan: &mut Plan, library: &str) {
             .buffer(Buffer::data("color", 0, f32s(&color)).stage("fragment"))
             .buffer(Buffer::data("indices", 0, indices).unbound())
             .texture(Texture::d2("a", "rgba32float", w, h).usage(&["render"]))
-            .output(exact(
+            .output(Output::exact(
                 "a",
                 Dtype::F32,
                 image(w, h, color, |x, _| !(2..6).contains(&x)),
@@ -703,8 +1028,11 @@ fn wireframe(plan: &mut Plan, library: &str) {
         .buffer(Buffer::data("edges", 0, f32s(&edges)).unbound())
         .buffer(Buffer::zeroed("hits", 0, 12).unbound())
         .texture(Texture::d2("a", "r32float", size, size).usage(&["render", "read"]))
-        .output(exact("hits", Dtype::U32, u32s(&[1, 1, 1])).set("length", 12))
-        .output(exact("a", Dtype::F32, f32s(&vec![0.0; (size * size) as usize])).expect_mask(mask)),
+        .output(Output::exact("hits", Dtype::U32, u32s(&[1, 1, 1])).set("length", 12))
+        .output(
+            Output::exact("a", Dtype::F32, f32s(&vec![0.0; (size * size) as usize]))
+                .expect_mask(mask),
+        ),
     );
 }
 
@@ -791,7 +1119,7 @@ fn depth_stencil_formats(plan: &mut Plan, library: &str) {
         .buffer(Buffer::data("rects", 0, rects.clone()).stage("vertex"))
         .texture(Texture::d2("c", "rgba32float", size, size).usage(&["render"]))
         .texture(Texture::d2("ds", format, size, size).usage(&["render"]))
-        .output(exact("c", Dtype::F32, colors));
+        .output(Output::exact("c", Dtype::F32, colors));
         if let Some(feature) = requires {
             case = case.requires(&[], &[feature]);
         }
@@ -844,7 +1172,7 @@ fn depth_stencil_formats(plan: &mut Plan, library: &str) {
         .texture(Texture::d2("c", "rgba8unorm", size, size).usage(&["render"]))
         .texture(Texture::d2("ds", format, size, size).usage(&["render", "read", "view"]))
         .texture(Texture::d2("stencil", view, size, size).set("view_of", "ds"))
-        .output(exact(
+        .output(Output::exact(
             "out",
             Dtype::U32,
             u32s(&(0..size).flat_map(|y| (0..size).map(move |x| if quarter(x, y) { 9 } else { 2 })).collect::<Vec<_>>()),
@@ -874,7 +1202,7 @@ fn limits(plan: &mut Plan, library: &str) {
         )
         .set("threadgroup_memory", json!([{"index": 0, "length": 32768}]))
         .buffer(Buffer::zeroed("out", 0, 4096))
-        .output(exact("out", Dtype::U32, u32s(&sums))),
+        .output(Output::exact("out", Dtype::U32, u32s(&sums))),
     );
     plan.add(
         Case::compute(
@@ -892,7 +1220,7 @@ fn limits(plan: &mut Plan, library: &str) {
                 .data(vec![51, 0, 0, 255]),
         )
         .sampler(json!({"name": "s", "index": 15}))
-        .output(exact("out", Dtype::U32, u32s(&[1051, 0, 0, 0]))),
+        .output(Output::exact("out", Dtype::U32, u32s(&[1051, 0, 0, 0]))),
     );
     let size = 4u32;
     let mut case = Case::render(
@@ -906,7 +1234,7 @@ fn limits(plan: &mut Plan, library: &str) {
     for k in 0..8 {
         case = case
             .texture(Texture::d2(&format!("c{k}"), "r32float", size, size).usage(&["render"]))
-            .output(exact(
+            .output(Output::exact(
                 &format!("c{k}"),
                 Dtype::F32,
                 f32s(&vec![f64::from(k + 1); (size * size) as usize]),
@@ -926,7 +1254,7 @@ fn limits(plan: &mut Plan, library: &str) {
         .buffer(Buffer::data("corners", 30, f32s(&[-1.0, -1.0, 0.0, -1.0, -1.0, 1.0, 0.0, 1.0])).stage("vertex"))
         .buffer(Buffer::data("color", 0, f32s(&[1.0; 4])).stage("fragment"))
         .texture(Texture::d2("a", "rgba32float", 8, 8).usage(&["render"]))
-        .output(exact("a", Dtype::F32, image(8, 8, [1.0; 4], |x, _| x < 4))),
+        .output(Output::exact("a", Dtype::F32, image(8, 8, [1.0; 4], |x, _| x < 4))),
     );
 }
 
@@ -947,7 +1275,7 @@ fn frameworks(plan: &mut Plan, rng: &mut Random) {
         .buffer(Buffer::data("a", 0, f32s(&a)).unbound())
         .buffer(Buffer::data("b", 0, f32s(&b)).unbound())
         .buffer(Buffer::zeroed("c", 0, n * n * 4).unbound())
-        .output(exact("c", Dtype::F32, f32s(&c))),
+        .output(Output::exact("c", Dtype::F32, f32s(&c))),
     );
     let (w, h) = (16usize, 8usize);
     let texels: Vec<u8> = (0..w * h * 4)
@@ -1015,7 +1343,9 @@ pub fn build(plan: &mut Plan) {
     counters(plan, &library, &mut rng);
     logging(plan, &mut rng);
     reflection(plan, &library);
+    reflection_types(plan, &library);
     runtime(plan, &mut rng);
+    runtime_options(plan, &mut rng);
     targets(plan, &library);
     resolves(plan, &library);
     draws(plan, &library);

@@ -19,10 +19,6 @@ use serde_json::json;
 const SOURCE: &str = "resources.metal";
 const N: u32 = 256;
 
-fn exact(name: &str, dtype: Dtype, data: Vec<u8>) -> Output {
-    Output::new(name, dtype, Tolerance::exact()).expect_same(data)
-}
-
 fn scaled(v: &[u32]) -> Vec<u32> {
     v.iter()
         .map(|x| x.wrapping_mul(3).wrapping_add(1))
@@ -39,7 +35,7 @@ fn heaps(plan: &mut Plan, library: &str, rng: &mut Random) {
             .buffer(Buffer::data("in", 0, u32s(&v)).set("heap", "h"))
             .buffer(Buffer::zeroed("out", 1, bytes).set("heap", "h"))
             .set("heaps", json!([shared("h", "automatic")]))
-            .output(exact("out", Dtype::U32, u32s(&scaled(&v)))),
+            .output(Output::exact("out", Dtype::U32, u32s(&scaled(&v)))),
     );
     // "a" and "b" share their first bytes; "c" lies past both. The kernel
     // reads "a"'s contents through "b".
@@ -67,7 +63,7 @@ fn heaps(plan: &mut Plan, library: &str, rng: &mut Random) {
                 "heaps",
                 json!([{"name": "p", "type": "placement", "size": 1 << 20, "untracked": true}]),
             )
-            .output(exact("c", Dtype::U32, u32s(&v))),
+            .output(Output::exact("c", Dtype::U32, u32s(&v))),
     );
     // An argument buffer of a heap buffer and a heap texture, which no
     // encoder binds or names by useResource.
@@ -120,7 +116,7 @@ fn heaps(plan: &mut Plan, library: &str, rng: &mut Random) {
         .buffer(Buffer::zeroed("mid", 0, bytes).unbound().set("heap", "h"))
         .buffer(Buffer::zeroed("out", 0, bytes).unbound().set("heap", "h"))
         .set("heaps", json!([shared("h", "automatic")]))
-        .output(exact("out", Dtype::U32, u32s(&scaled(&scaled(&v))))),
+        .output(Output::exact("out", Dtype::U32, u32s(&scaled(&scaled(&v))))),
     );
 }
 
@@ -143,7 +139,11 @@ fn read_view(
         .texture(view.index(0))
         .buffer(Buffer::zeroed("out", 0, (w * h * d * 16) as usize))
         .buffer(Buffer::zeroed("size", 1, 16))
-        .output(exact("size", Dtype::U32, u32s(&[w, h, levels, slices])))
+        .output(Output::exact(
+            "size",
+            Dtype::U32,
+            u32s(&[w, h, levels, slices]),
+        ))
 }
 
 fn views(plan: &mut Plan, library: &str, rng: &mut Random) {
@@ -170,7 +170,7 @@ fn views(plan: &mut Plan, library: &str, rng: &mut Random) {
         .texture(source())
         .texture(view("rgba8uint").index(0))
         .buffer(Buffer::zeroed("out", 0, texels * 16))
-        .output(exact(
+        .output(Output::exact(
             "out",
             Dtype::U32,
             u32s(&bytes.iter().map(|&b| u32::from(b)).collect::<Vec<_>>()),
@@ -221,7 +221,7 @@ fn views(plan: &mut Plan, library: &str, rng: &mut Random) {
         )
         .texture(view("rg32uint").index(0))
         .buffer(Buffer::zeroed("out", 0, texels * 16))
-        .output(exact("out", Dtype::U32, u32s(&expected))),
+        .output(Output::exact("out", Dtype::U32, u32s(&expected))),
     );
     // Mipmap and slice ranges of rgba32float textures whose every texel
     // names its slice, level and position.
@@ -268,7 +268,7 @@ fn views(plan: &mut Plan, library: &str, rng: &mut Random) {
             2,
             1,
         )
-        .output(exact("out", Dtype::F32, f32s(&level(0, 1)))),
+        .output(Output::exact("out", Dtype::F32, f32s(&level(0, 1)))),
     );
     let layered = |slices: u32| {
         Texture::new("source", "rgba32float", "2d_array", [w, h, 1])
@@ -290,7 +290,7 @@ fn views(plan: &mut Plan, library: &str, rng: &mut Random) {
             1,
             1,
         )
-        .output(exact("out", Dtype::F32, f32s(&level(2, 0)))),
+        .output(Output::exact("out", Dtype::F32, f32s(&level(2, 0)))),
     );
     plan.add(
         read_view(
@@ -306,7 +306,7 @@ fn views(plan: &mut Plan, library: &str, rng: &mut Random) {
             1,
             2,
         )
-        .output(exact(
+        .output(Output::exact(
             "out",
             Dtype::F32,
             f32s(&[level(1, 0), level(2, 0)].concat()),
@@ -328,7 +328,7 @@ fn views(plan: &mut Plan, library: &str, rng: &mut Random) {
                 .index(0),
         )
         .buffer(Buffer::zeroed("out", 0, (w * h * 6 * 16) as usize))
-        .output(exact(
+        .output(Output::exact(
             "out",
             Dtype::F32,
             f32s(&(0..6).flat_map(|s| level(s, 0)).collect::<Vec<_>>()),
@@ -371,7 +371,7 @@ fn views(plan: &mut Plan, library: &str, rng: &mut Random) {
             .texture(swizzled_view())
             .buffer(Buffer::zeroed("out", 0, texels * 16))
             .buffer(Buffer::zeroed("size", 1, 16))
-            .output(exact("out", Dtype::F32, f32s(&swizzled))),
+            .output(Output::exact("out", Dtype::F32, f32s(&swizzled))),
         );
         plan.add(
             Case::compute(
@@ -386,7 +386,7 @@ fn views(plan: &mut Plan, library: &str, rng: &mut Random) {
             .texture(swizzled_view())
             .sampler(json!({"name": "s", "index": 0}))
             .buffer(Buffer::zeroed("out", 0, texels * 16))
-            .output(exact("out", Dtype::F32, f32s(&swizzled))),
+            .output(Output::exact("out", Dtype::F32, f32s(&swizzled))),
         );
     }
 }
@@ -453,7 +453,40 @@ fn sample_positions(plan: &mut Plan, library: &str) {
                     .samples(4)
                     .usage(&["render", "read"]),
             )
-            .output(exact("out", Dtype::F32, f32s(&expected))),
+            .output(Output::exact("out", Dtype::F32, f32s(&expected))),
+        );
+        // The rectangle's depth over a cleared multisampled depth target,
+        // stored with the custom positions that decide which samples it
+        // covers.
+        let depths: Vec<f64> = expected
+            .chunks(4)
+            .map(|s| if s[0] == 1.0 { 0.0 } else { 0.75 })
+            .collect();
+        plan.add(
+            Case::sequence(
+                &format!("render.sample_positions.{name}.depth"),
+                library,
+                vec![
+                    Step::render(
+                        "vert_rect",
+                        "frag_one",
+                        json!({"colors": [{"texture": "ms", "clear": [0, 0, 0, 0]}], "samples": 4,
+                               "depth": {"texture": "d", "clear": 0.75, "compare": "always",
+                                         "custom_sample_positions": true},
+                               "primitive": "triangle_strip", "vertex_count": 4, "sample_positions": positions}),
+                    )
+                    .bind_stage("vertex", &[("rect", 0)]),
+                    Step::compute("read_depth_samples4", [w, h, 1], [4, 4, 1])
+                        .bind_textures(&[("d", 0)])
+                        .bind(&[("out", 0)]),
+                ],
+            )
+            .requires(&[], &["programmable_sample_positions"])
+            .buffer(Buffer::data("rect", 0, f32s(&rect)).unbound())
+            .buffer(Buffer::zeroed("out", 0, (w * h * 16) as usize).unbound())
+            .texture(Texture::new("ms", "rgba16float", "2d_ms", [w, h, 1]).samples(4).usage(&["render"]))
+            .texture(Texture::new("d", "depth32float", "2d_ms", [w, h, 1]).samples(4).usage(&["render", "read"]))
+            .output(Output::exact("out", Dtype::F32, f32s(&depths))),
         );
     }
 }
@@ -487,7 +520,7 @@ fn heaps_more(plan: &mut Plan, library: &str, rng: &mut Random) {
             )
             .set("use_heaps", json!(["p"]))
             .buffer(Buffer::zeroed("out", 0, (w * h * 32) as usize))
-            .output(exact("out", Dtype::F32, f32s(&both))),
+            .output(Output::exact("out", Dtype::F32, f32s(&both))),
     );
     let v: Vec<u32> = (0..N).map(|_| rng.u32()).collect();
     let bytes = N as usize * 4;
@@ -511,7 +544,7 @@ fn heaps_more(plan: &mut Plan, library: &str, rng: &mut Random) {
         .buffer(Buffer::data("in", 0, u32s(&v)).unbound().set("heap", "u"))
         .buffer(Buffer::zeroed("mid", 0, bytes).unbound().set("heap", "u"))
         .buffer(Buffer::zeroed("out", 0, bytes).unbound().set("heap", "u"))
-        .output(exact("out", Dtype::U32, u32s(&scaled(&scaled(&v))))),
+        .output(Output::exact("out", Dtype::U32, u32s(&scaled(&scaled(&v))))),
     );
 }
 

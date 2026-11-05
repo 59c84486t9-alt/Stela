@@ -9,10 +9,6 @@ use serde_json::json;
 
 const SOURCE: &str = "extras.metal";
 
-fn exact(name: &str, dtype: Dtype, data: Vec<u8>) -> Output {
-    Output::new(name, dtype, Tolerance::exact()).expect_same(data)
-}
-
 /// SIMD-group indices and counts of a 160-thread grid in threadgroups of
 /// 128, whose second threadgroup has 32 threads, for each SIMD width. The
 /// plain counts describe the threadgroup as it runs and the `dispatch_` ones
@@ -30,8 +26,8 @@ fn simd_ids(plan: &mut Plan, library: &str) {
         out
     };
     let width = |w: u32, partial: u32| vec![w, group, partial, group];
-    let mut ids_out = exact("out", Dtype::U32, u32s(&ids(32)));
-    let mut width_out = exact("width", Dtype::U32, u32s(&width(32, grid - group)));
+    let mut ids_out = Output::exact("out", Dtype::U32, u32s(&ids(32)));
+    let mut width_out = Output::exact("width", Dtype::U32, u32s(&width(32, grid - group)));
     for w in [4, 8, 16, 32, 64] {
         if w != 32 {
             ids_out = ids_out.expect_alternative(u32s(&ids(w)));
@@ -53,6 +49,72 @@ fn simd_ids(plan: &mut Plan, library: &str) {
         .output(ids_out)
         .output(width_out),
     );
+    // Quadgroups are four threads at any SIMD width; the partial
+    // threadgroup may count its quadgroups as run or as dispatched.
+    let quads = |dispatched_partial: bool| -> Vec<u32> {
+        (0..grid)
+            .flat_map(|i| {
+                let local = i % group;
+                let actual = if i < group || dispatched_partial {
+                    group
+                } else {
+                    grid - group
+                };
+                [local / 4, actual.div_ceil(4), group / 4, local % 4]
+            })
+            .collect()
+    };
+    plan.add(
+        Case::compute(
+            "extras.quad_ids",
+            library,
+            "quad_ids",
+            [grid, 1, 1],
+            [group, 1, 1],
+        )
+        .dispatch_threads()
+        .buffer(Buffer::zeroed("out", 0, grid as usize * 16))
+        .output(
+            Output::exact("out", Dtype::U32, u32s(&quads(false)))
+                .expect_alternative(u32s(&quads(true))),
+        ),
+    );
+}
+
+/// Atomic booleans, four bytes each, every thread on its own flags.
+fn atomic_flags(plan: &mut Plan, library: &str) {
+    let n = 8u32;
+    let first: Vec<u32> = (0..n).map(|i| i & 1).collect();
+    let second: Vec<u32> = (0..n).map(|i| (i >> 1) & 1).collect();
+    let out: Vec<u32> = (0..n)
+        .map(|i| {
+            (i & 1) | (u32::from(second[i as usize] == 0) << 1) | (second[i as usize] << 2) | 8
+        })
+        .collect();
+    plan.add(
+        Case::compute(
+            "extras.atomic_bool",
+            library,
+            "atomic_flags",
+            [n, 1, 1],
+            [n, 1, 1],
+        )
+        .dispatch_threads()
+        .buffer(Buffer::data("first", 0, u32s(&first)))
+        .buffer(Buffer::data("second", 1, u32s(&second)))
+        .buffer(Buffer::zeroed("out", 2, n as usize * 4))
+        .output(Output::exact(
+            "first",
+            Dtype::U32,
+            u32s(&vec![0; n as usize]),
+        ))
+        .output(Output::exact(
+            "second",
+            Dtype::U32,
+            u32s(&vec![1; n as usize]),
+        ))
+        .output(Output::exact("out", Dtype::U32, u32s(&out))),
+    );
 }
 
 fn handles(plan: &mut Plan, library: &str) {
@@ -71,7 +133,7 @@ fn handles(plan: &mut Plan, library: &str) {
                 .index(2),
         )
         .buffer(Buffer::zeroed("out", 0, 32))
-        .output(exact("out", Dtype::U32, u32s(&[0, 1, 0, 1, 1])).set("length", 20)),
+        .output(Output::exact("out", Dtype::U32, u32s(&[0, 1, 0, 1, 1])).set("length", 20)),
     );
     let n = 256u32;
     let expected: Vec<u32> = (0..n).map(|i| (i ^ 1) * 7 + 3).collect();
@@ -79,7 +141,7 @@ fn handles(plan: &mut Plan, library: &str) {
         Case::compute1("extras.coherent_exchange", library, "coherent_exchange", n)
             .buffer(Buffer::zeroed("data", 0, n as usize * 4))
             .buffer(Buffer::zeroed("out", 1, n as usize * 4))
-            .output(exact("out", Dtype::U32, u32s(&expected))),
+            .output(Output::exact("out", Dtype::U32, u32s(&expected))),
     );
     let expected: Vec<u32> = (0..n).map(|i| i * 3 + 64).collect();
     plan.add(
@@ -91,7 +153,7 @@ fn handles(plan: &mut Plan, library: &str) {
             [64, 1, 1],
         )
         .buffer(Buffer::zeroed("out", 0, n as usize * 4))
-        .output(exact("out", Dtype::U32, u32s(&expected))),
+        .output(Output::exact("out", Dtype::U32, u32s(&expected))),
     );
 }
 
@@ -141,7 +203,7 @@ fn packing(plan: &mut Plan, library: &str, rng: &mut Random) {
             .buffer(Buffer::data("in", 0, f32s(&input)))
             .buffer(Buffer::zeroed("packed", 1, n * 16))
             .buffer(Buffer::zeroed("unpacked", 2, n * 48))
-            .output(exact("packed", Dtype::U32, u32s(&packed)))
+            .output(Output::exact("packed", Dtype::U32, u32s(&packed)))
             .output(
                 Output::new("unpacked", Dtype::F32, Tolerance::ulp(1.0))
                     .expect_same(f32s(&unpacked.into_iter().map(f32r).collect::<Vec<_>>())),
@@ -190,8 +252,48 @@ fn multisampled(plan: &mut Plan, library: &str) {
         )
         .buffer(Buffer::zeroed("depths", 0, texels * 4).unbound())
         .buffer(Buffer::zeroed("colors", 0, texels * 2 * 16).unbound())
-        .output(exact("depths", Dtype::F32, f32s(&vec![0.5; texels])))
-        .output(exact("colors", Dtype::F32, f32s(&colors))),
+        .output(Output::exact(
+            "depths",
+            Dtype::F32,
+            f32s(&vec![0.5; texels]),
+        ))
+        .output(Output::exact("colors", Dtype::F32, f32s(&colors))),
+    );
+    // The same pass over a two-slice depth array: the draw reaches slice
+    // 0 at depth 0.5, and slice 1 keeps its clear.
+    let mut depths = vec![0.5; texels];
+    depths.extend(vec![0.75; texels]);
+    plan.add(
+        Case::sequence(
+            "extras.multisampled_reads.depth_array",
+            library,
+            vec![
+                Step::render(
+                    "vert_full",
+                    "frag_first",
+                    json!({"colors": [{"texture": "layers", "clear": clear}], "samples": samples,
+                           "depth": {"texture": "depth", "clear": 0.75, "compare": "always"},
+                           "primitive": "triangle_strip", "vertex_count": 4}),
+                ),
+                Step::compute("read_ms_depth_array", [w, h, 1], [w, h, 1])
+                    .bind_textures(&[("depth", 0)])
+                    .bind(&[("depths", 0)]),
+            ],
+        )
+        .texture(
+            Texture::new("depth", "depth32float", "2d_ms_array", [w, h, 1])
+                .array(2)
+                .samples(samples)
+                .usage(&["render", "read"]),
+        )
+        .texture(
+            Texture::new("layers", "rgba16float", "2d_ms_array", [w, h, 1])
+                .array(2)
+                .samples(samples)
+                .usage(&["render", "read"]),
+        )
+        .buffer(Buffer::zeroed("depths", 0, texels * 2 * 4).unbound())
+        .output(Output::exact("depths", Dtype::F32, f32s(&depths))),
     );
 }
 
@@ -259,7 +361,7 @@ fn gradients(plan: &mut Plan, library: &str) {
         )
         .buffer(Buffer::data("grads", 0, f32s(&grads)))
         .buffer(Buffer::zeroed("out", 1, lods.len() * 48))
-        .output(exact("out", Dtype::F32, f32s(&expected))),
+        .output(Output::exact("out", Dtype::F32, f32s(&expected))),
     );
 }
 
@@ -275,26 +377,215 @@ fn stage_in(plan: &mut Plan, library: &str, rng: &mut Random) {
             [a[2 * i], a[2 * i + 1], c(0) + c(1) * 256.0, c(2) - c(3)]
         })
         .collect();
-    plan.add(
+    let stage_input = json!({"attributes": [{"index": 0, "format": "float2", "offset": 0, "buffer": 0},
+                                            {"index": 1, "format": "uchar4", "offset": 0, "buffer": 1}],
+                             "layouts": [{"buffer": 0, "stride": 8, "step": "grid_x"},
+                                         {"buffer": 1, "stride": 4, "step": "grid_x"}]});
+    // The float2s padded to 16 bytes, read at the stride each binding gives.
+    let padded: Vec<f64> = a.chunks(2).flat_map(|p| [p[0], p[1], 0.0, 0.0]).collect();
+    let mut dynamic = stage_input.clone();
+    dynamic["layouts"][0]["stride"] = "dynamic".into();
+    let base = |name: &str, input: &serde_json::Value, first: Buffer| {
         Case::compute(
-            "extras.stage_in",
+            name,
             library,
             "stage_in_compute",
             [n as u32, 1, 1],
             [64, 1, 1],
         )
         .dispatch_threads()
-        .set(
-            "stage_input",
-            json!({"attributes": [{"index": 0, "format": "float2", "offset": 0, "buffer": 0},
-                                      {"index": 1, "format": "uchar4", "offset": 0, "buffer": 1}],
-                       "layouts": [{"buffer": 0, "stride": 8, "step": "grid_x"},
-                                   {"buffer": 1, "stride": 4, "step": "grid_x"}]}),
-        )
-        .buffer(Buffer::data("a", 0, f32s(&a)))
-        .buffer(Buffer::data("b", 1, b))
+        .set("stage_input", input.clone())
+        .buffer(first)
+        .buffer(Buffer::data("b", 1, b.clone()))
         .buffer(Buffer::zeroed("out", 2, n * 16))
-        .output(exact("out", Dtype::F32, f32s(&expected))),
+        .output(Output::exact("out", Dtype::F32, f32s(&expected)))
+    };
+    let case = |name: &str| base(name, &stage_input, Buffer::data("a", 0, f32s(&a)));
+    let strided = |name: &str| {
+        base(
+            name,
+            &dynamic,
+            Buffer::data("a", 0, f32s(&padded)).set("attribute_stride", 16),
+        )
+    };
+    plan.add(case("extras.stage_in"));
+    plan.add(strided("extras.stage_in.dynamic_stride"));
+    // The bytes fetched once for every thread, the first element's.
+    let mut constant = stage_input.clone();
+    constant["layouts"][1]["step"] = "constant".into();
+    let once: Vec<f64> = (0..n)
+        .flat_map(|i| {
+            let c = |k: usize| f64::from(b[k]);
+            [a[2 * i], a[2 * i + 1], c(0) + c(1) * 256.0, c(2) - c(3)]
+        })
+        .collect();
+    plan.add(
+        Case::compute(
+            "extras.stage_in.step.constant",
+            library,
+            "stage_in_compute",
+            [n as u32, 1, 1],
+            [64, 1, 1],
+        )
+        .dispatch_threads()
+        .set("stage_input", constant)
+        .buffer(Buffer::data("a", 0, f32s(&a)))
+        .buffer(Buffer::data("b", 1, b.clone()))
+        .buffer(Buffer::zeroed("out", 2, n * 16))
+        .output(Output::exact("out", Dtype::F32, f32s(&once))),
+    );
+    // Elements stepped by the grid's y, over a grid one thread wide.
+    let mut rows = stage_input.clone();
+    for layout in rows["layouts"].as_array_mut().unwrap() {
+        layout["step"] = "grid_y".into();
+    }
+    plan.add(
+        Case::compute(
+            "extras.stage_in.step.grid_y",
+            library,
+            "stage_in_rows",
+            [1, n as u32, 1],
+            [1, 64, 1],
+        )
+        .dispatch_threads()
+        .set("stage_input", rows)
+        .buffer(Buffer::data("a", 0, f32s(&a)))
+        .buffer(Buffer::data("b", 1, b.clone()))
+        .buffer(Buffer::zeroed("out", 2, n * 16))
+        .output(Output::exact("out", Dtype::F32, f32s(&expected))),
+    );
+    // A region that starts past the first attributes: each thread fetches
+    // the one at the origin plus its position, and reads the region back.
+    let (origin, size) = (5u32, 16u32);
+    let words: Vec<u32> = (0..32).map(|k| 1000 + k * 7).collect();
+    let fetched: Vec<u32> = (0..size)
+        .flat_map(|p| [words[(origin + p) as usize], origin, size, p])
+        .collect();
+    let index_input = json!({"attributes": [{"index": 0, "format": "uint", "offset": 0, "buffer": 0}],
+                             "layouts": [{"buffer": 0, "stride": 4, "step": "grid_x"}]});
+    plan.add(
+        Case::compute(
+            "extras.stage_in.origin",
+            library,
+            "stage_in_origin",
+            [size, 1, 1],
+            [size, 1, 1],
+        )
+        .dispatch_threads()
+        .set("stage_input", index_input)
+        .set("stage_in_region_buffer", "region")
+        .buffer(Buffer::data("region", 0, u32s(&[origin, 0, 0, size, 1, 1])).unbound())
+        .buffer(Buffer::data("words", 0, u32s(&words)))
+        .buffer(Buffer::zeroed("out", 1, size as usize * 16))
+        .output(Output::exact("out", Dtype::U32, u32s(&fetched))),
+    );
+    // Attributes fetched through an index buffer of each width: the first
+    // by each thread's x position, the second by its y.
+    let (w, h) = (4u32, 3u32);
+    let indices = [7u32, 3, 0, 5, 1, 1, 6, 2];
+    let a_words: Vec<u32> = (0..16).map(|k| 100 + k).collect();
+    let b_words: Vec<u32> = (0..16).map(|k| 200 + k).collect();
+    let pairs: Vec<u32> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            [
+                a_words[indices[x as usize] as usize],
+                b_words[indices[y as usize] as usize],
+            ]
+        })
+        .collect();
+    for index_type in ["uint16", "uint32"] {
+        let index_bytes: Vec<u8> = if index_type == "uint16" {
+            indices
+                .iter()
+                .flat_map(|&i| (i as u16).to_le_bytes())
+                .collect()
+        } else {
+            u32s(&indices)
+        };
+        plan.add(
+            Case::compute(
+                &format!("extras.stage_in.indexed.{index_type}"),
+                library,
+                "stage_in_indexed",
+                [w, h, 1],
+                [w, h, 1],
+            )
+            .dispatch_threads()
+            .set(
+                "stage_input",
+                json!({
+                "attributes": [{"index": 0, "format": "uint", "offset": 0, "buffer": 0},
+                               {"index": 1, "format": "uint", "offset": 0, "buffer": 1}],
+                "layouts": [{"buffer": 0, "stride": 4, "step": "grid_x_indexed"},
+                            {"buffer": 1, "stride": 4, "step": "grid_y_indexed"}],
+                "index_buffer": 3, "index_type": index_type}),
+            )
+            .buffer(Buffer::data("a", 0, u32s(&a_words)))
+            .buffer(Buffer::data("b", 1, u32s(&b_words)))
+            .buffer(Buffer::zeroed("out", 2, (w * h * 8) as usize))
+            .buffer(Buffer::data("indices", 3, index_bytes))
+            .output(Output::exact("out", Dtype::U32, u32s(&pairs))),
+        );
+    }
+    // The region read from a buffer: origin 0, size n by 1 by 1.
+    plan.add(
+        case("extras.stage_in.indirect_region")
+            .set("stage_in_region_buffer", "region")
+            .buffer(Buffer::data("region", 0, u32s(&[0, 0, 0, n as u32, 1, 1])).unbound()),
+    );
+    // The same fetch as the one command of an indirect command buffer,
+    // whose range a buffer holds; then with the float2s at a stride the
+    // command gives.
+    let uses = |name: &str, index: u32| json!({"name": name, "index": index, "offset": 0});
+    let command = |input: &serde_json::Value, a: serde_json::Value, dynamic_stride: bool| {
+        json!([{"name": "icb", "type": "dispatch", "count": 1, "max_buffers": 3, "dynamic_stride": dynamic_stride,
+                "commands": [{"function": "stage_in_compute", "stage_input": input, "stage_in_region": [n],
+                              "buffers": [a, uses("b", 1), uses("out", 2)],
+                              "threadgroups": [n / 64], "threadgroup": [64]}]}])
+    };
+    plan.add(
+        case("extras.stage_in.indirect_command")
+            .set("supports_icb", true)
+            .set(
+                "execute_icb",
+                json!({"icb": "icb", "range_buffer": "range"}),
+            )
+            .set("icbs", command(&stage_input, uses("a", 0), false))
+            .buffer(Buffer::data("range", 0, u32s(&[0, 1])).unbound()),
+    );
+    let mut a_strided = uses("a", 0);
+    a_strided["attribute_stride"] = 16.into();
+    plan.add(
+        strided("extras.stage_in.indirect_command.dynamic_stride")
+            .set("supports_icb", true)
+            .set("execute_icb", json!({"icb": "icb", "count": 1}))
+            .set("icbs", command(&dynamic, a_strided, true)),
+    );
+    // A kernel encodes that command: its buffers, the stride and the region.
+    plan.add(
+        Case::sequence(
+            "extras.stage_in.gpu_command",
+            library,
+            vec![
+                Step::compute("encode_stage_in", [1, 1, 1], [1, 1, 1])
+                    .bind(&[("commands", 0), ("a", 1), ("b", 2), ("out", 3), ("n", 4)]),
+                Step::compute("stage_in_compute", [n as u32, 1, 1], [64, 1, 1])
+                    .set("stage_input", dynamic.clone())
+                    .set("supports_icb", true)
+                    .set("use", json!(["a", "b", "out"]))
+                    .set("execute_icb", json!({"icb": "icb", "count": 1})),
+            ],
+        )
+        .buffer(Buffer::data("a", 0, f32s(&padded)).unbound())
+        .buffer(Buffer::data("b", 0, b.clone()).unbound())
+        .buffer(Buffer::zeroed("out", 0, n * 16).unbound())
+        .buffer(Buffer::data("n", 0, u32s(&[n as u32])).unbound())
+        .buffer(Buffer::zeroed("commands", 0, 16).unbound())
+        .set("icbs", json!([{"name": "icb", "type": "dispatch", "count": 1, "max_buffers": 3,
+                              "inherit_pipeline": true, "dynamic_stride": true}]))
+        .set("arguments", json!([{"buffer": "commands", "entries": [{"kind": "icb", "offset": 0, "resource": "icb"}]}]))
+        .output(Output::exact("out", Dtype::F32, f32s(&expected))),
     );
 }
 
@@ -361,7 +652,7 @@ fn invariance(plan: &mut Plan, library: &str) {
         .buffer(Buffer::data("scale", 0, f32s(&[1.0])).unbound())
         .texture(Texture::d2("c", "rgba32float", size, size).usage(&["render"]))
         .texture(Texture::d2("d", "depth32float", size, size).usage(&["render"]))
-        .output(exact(
+        .output(Output::exact(
             "c",
             Dtype::F32,
             f32s(&second.repeat((size * size) as usize)),
@@ -394,8 +685,8 @@ fn bfloat_scalar(plan: &mut Plan, library: &str, rng: &mut Random) {
             .buffer(Buffer::data("in", 0, f32s(&input)))
             .buffer(Buffer::zeroed("narrow", 1, n * 2))
             .buffer(Buffer::zeroed("wide", 2, n * 4))
-            .output(exact("narrow", Dtype::U16, narrow))
-            .output(exact("wide", Dtype::F32, f32s(&wide))),
+            .output(Output::exact("narrow", Dtype::U16, narrow))
+            .output(Output::exact("wide", Dtype::F32, f32s(&wide))),
     );
 }
 
@@ -409,6 +700,7 @@ pub fn build(plan: &mut Plan) {
     let mut rng = Random::new(2718);
     simd_ids(plan, &library);
     handles(plan, &library);
+    atomic_flags(plan, &library);
     packing(plan, &library, &mut rng);
     multisampled(plan, &library);
     gradients(plan, &library);

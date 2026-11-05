@@ -103,3 +103,168 @@ kernel void grid_hash(device atomic_uint *sums [[buffer(0)]], threadgroup atomic
     if (l == 3)
         atomic_fetch_max_explicit(&sums[3], atomic_load_explicit(&local[3], memory_order_relaxed), memory_order_relaxed);
 }
+
+// A strip over a rectangle at a depth: x0, y0, x1, y1, z.
+vertex Position vert_offset_rect(constant float *rect [[buffer(0)]], uint v [[vertex_id]])
+{
+    return {float4(v & 1 ? rect[2] : rect[0], v & 2 ? rect[3] : rect[1], rect[4], 1.0f)};
+}
+
+// The colour's RGB with, as alpha, a sample at level 0 that the bound
+// sampler's clamps move to another level.
+fragment float4 frag_rebind(constant float4 &color [[buffer(0)]], texture2d<float> t [[texture(1)]],
+                            sampler s [[sampler(0)]])
+{
+    return float4(color.rgb, t.sample(s, float2(0.5f), level(0)).r);
+}
+
+fragment float4 frag_rebind_color(constant float4 &color [[buffer(0)]])
+{
+    return color;
+}
+
+kernel void copy_word(device uint *dst [[buffer(0)]], device const uint *src [[buffer(1)]], constant uint &k [[buffer(2)]])
+{
+    dst[k] = src[0];
+}
+
+kernel void sample_levels(texture2d<float> a [[texture(0)]], texture2d<float> b [[texture(1)]], sampler s [[sampler(0)]],
+                          device float *out [[buffer(0)]])
+{
+    out[0] = a.sample(s, float2(0.5f), level(0)).r;
+    out[1] = b.sample(s, float2(0.5f), level(3)).r;
+}
+
+struct Corner {
+    float2 position [[attribute(0)]];
+};
+
+vertex Position vert_attribute(Corner in [[stage_in]])
+{
+    return {float4(in.position, 0.0f, 1.0f)};
+}
+
+kernel void write_values(device uint *x [[buffer(0)]], constant uint &k [[buffer(1)]], uint i [[thread_position_in_grid]])
+{
+    x[i] = i * k + 1u;
+}
+
+kernel void double_values(device const uint *x [[buffer(0)]], device uint *y [[buffer(1)]], uint i [[thread_position_in_grid]])
+{
+    y[i] = x[i] * 2u;
+}
+
+struct Link {
+    float4 position [[position]];
+    float size [[point_size]];
+    uint value [[flat]];
+};
+
+// One point over the single pixel, carrying the chain's word `from`.
+vertex Link vert_chain(device const uint *chain [[buffer(0)]], constant uint &from [[buffer(1)]])
+{
+    return {float4(0.0f, 0.0f, 0.0f, 1.0f), 1.0f, chain[from]};
+}
+
+fragment void frag_chain(Link in [[stage_in]], device uint *chain [[buffer(0)]], constant uint &to [[buffer(1)]])
+{
+    chain[to] = in.value + 1u;
+}
+
+struct Viewported {
+    float4 position [[position]];
+    uint viewport [[viewport_array_index]];
+    uint instance [[flat]];
+};
+
+vertex Viewported vert_viewport(uint v [[vertex_id]], uint i [[instance_id]])
+{
+    return {float4(v & 1 ? 1.0f : -1.0f, v & 2 ? 1.0f : -1.0f, 0.0f, 1.0f), i, i};
+}
+
+fragment float4 frag_instance(Viewported in [[stage_in]], constant float4 *colors [[buffer(0)]])
+{
+    return colors[in.instance];
+}
+
+kernel void fill_linear(texture2d<float, access::write> t [[texture(0)]],
+                        texture_buffer<float, access::write> texels [[texture(1)]],
+                        uint2 p [[thread_position_in_grid]])
+{
+    float4 v = float4(float(p.x) / 255.0f, float(p.y) / 255.0f, 1.0f, 1.0f);
+    t.write(v, p);
+    if (p.y == 0)
+        texels.write(v.yxzw, p.x);
+}
+
+[[max_total_threads_per_threadgroup(128)]]
+kernel void limited(device uint *data [[buffer(0)]], uint i [[thread_position_in_grid]])
+{
+    data[i] = i;
+}
+
+// A threadgroup sum, run as a command of an indirect command buffer.
+kernel void group_sum(device const uint *src [[buffer(0)]], device uint *out [[buffer(1)]],
+                      threadgroup uint *partial [[threadgroup(0)]], uint l [[thread_index_in_threadgroup]],
+                      uint n [[threads_per_threadgroup]])
+{
+    partial[l] = src[l];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (l == 0) {
+        uint sum = 0;
+        for (uint k = 0; k < n; k++)
+            sum += partial[k];
+        out[0] = sum;
+    }
+}
+
+// Two pointers an argument buffer laid out from descriptors holds.
+struct Pointers {
+    device uint *data [[id(0)]];
+    constant uint *k [[id(1)]];
+};
+
+kernel void through_arguments(device Pointers &p [[buffer(0)]], uint i [[thread_position_in_grid]])
+{
+    p.data[i] = p.data[i] * 2u + p.k[0];
+}
+
+// One minus what the target holds at this pixel, read from the target
+// itself after a render-target barrier.
+fragment float4 frag_feedback(Position in [[stage_in]], texture2d<float> earlier [[texture(0)]])
+{
+    float4 v = earlier.read(uint2(in.position.xy));
+    return float4(1.0f - v.rgb, v.a);
+}
+
+// A view whose minimum LOD is 1: a sample at level 0 reaches level 1,
+// and reads of levels 1 and 2 are within it.
+kernel void sample_min_lod(texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], device float *out [[buffer(0)]])
+{
+    out[0] = t.sample(s, float2(0.5f), level(0)).r;
+    out[1] = t.read(uint2(0), 1).r;
+    out[2] = t.read(uint2(0), 2).r;
+}
+
+// Functions an archive holds beyond pipelines: a visible function, a
+// stitchable one for a stitched library, and a mesh pipeline's mesh.
+[[visible]] uint archived_visible(uint x)
+{
+    return x * 5u;
+}
+
+[[stitchable]] uint archived_stitch(uint x)
+{
+    return x + 3u;
+}
+
+[[mesh]] void archived_mesh(mesh<Position, void, 3, 1, topology::triangle> m, uint l [[thread_index_in_threadgroup]])
+{
+    if (l == 0) {
+        m.set_primitive_count(1);
+        for (uint v = 0; v < 3; v++) {
+            m.set_vertex(v, {float4(v == 1 ? 1.0f : -1.0f, v == 2 ? 1.0f : -1.0f, 0.0f, 1.0f)});
+            m.set_index(v, v);
+        }
+    }
+}

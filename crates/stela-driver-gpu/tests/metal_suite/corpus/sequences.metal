@@ -70,6 +70,17 @@ vertex Rect vert_rect(constant float4 &r [[buffer(0)]], uint v [[vertex_id]])
 fragment float4 frag_constant(constant float4 &color [[buffer(0)]])
 { return color; }
 
+struct Corner {
+    float2 position [[attribute(0)]];
+};
+
+vertex Rect vert_corner_attribute(Corner in [[stage_in]])
+{ return {float4(in.position, 0.0f, 1.0f)}; }
+
+// A rectangle at a depth the command sets.
+vertex Rect vert_rect_z(constant float4 &r [[buffer(0)]], constant float &z [[buffer(1)]], uint v [[vertex_id]])
+{ return {float4(v & 1 ? r.z : r.x, v & 2 ? r.w : r.y, z, 1.0f)}; }
+
 fragment float4 frag_coordinates(Rect in [[stage_in]])
 { return float4(in.position.x / 16.0f, in.position.y / 16.0f, 0.25f, 1.0f); }
 
@@ -93,6 +104,21 @@ kernel void icb_step(device uint *data [[buffer(0)]], constant uint &k [[buffer(
 
 kernel void icb_scale(device uint *data [[buffer(0)]], uint i [[thread_position_in_grid]])
 { data[i] = data[i] * 3u + 1u; }
+
+// A slice's sum through threadgroup memory the command sizes.
+kernel void icb_group_sum(device const uint *data [[buffer(0)]], device uint *sum [[buffer(1)]],
+                          threadgroup uint *partial [[threadgroup(0)]], uint l [[thread_index_in_threadgroup]],
+                          uint n [[threads_per_threadgroup]])
+{
+    partial[l] = data[l];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (l == 0) {
+        uint total = 0;
+        for (uint k = 0; k < n; k++)
+            total += partial[k];
+        sum[0] = total;
+    }
+}
 
 struct Commands {
     command_buffer commands [[id(0)]];
@@ -175,4 +201,84 @@ kernel void encode_indexed_draws(device IndexedCommands &c [[buffer(0)]], consta
     command.set_vertex_buffer(rects + i, 0);
     command.set_fragment_buffer(colors + i, 0);
     command.draw_indexed_primitives(primitive_type::triangle, 6, indices, 1, 0, 0);
+}
+
+// Commands a kernel encodes and then edits: the first over slice 0; the
+// second a copy of it moved to slice 1, its barrier set and cleared; the
+// third over slice 2, reset to nothing; the fourth a copy of the first
+// ordered after the rest by its barrier.
+kernel void encode_dispatch_edits(device Commands &c [[buffer(0)]], device uint *data [[buffer(1)]])
+{
+    compute_command first(c.commands, 0);
+    first.set_kernel_buffer(data, 0);
+    first.concurrent_dispatch_threadgroups(uint3(1, 1, 1), uint3(64, 1, 1));
+    compute_command copied(c.commands, 1);
+    copied.copy_command(first);
+    copied.set_kernel_buffer(data + 64, 0);
+    copied.set_barrier();
+    copied.clear_barrier();
+    compute_command reset(c.commands, 2);
+    reset.set_kernel_buffer(data + 128, 0);
+    reset.concurrent_dispatch_threadgroups(uint3(1, 1, 1), uint3(64, 1, 1));
+    reset.reset();
+    compute_command again(c.commands, 3);
+    again.copy_command(first);
+    again.set_barrier();
+}
+
+// sequence.icb.cpu_draw_state's commands, encoded by a kernel: each sets
+// every piece of fixed-function state itself, the depth-stencil states
+// from the argument buffer.
+struct StateCommands {
+    command_buffer commands [[id(0)]];
+    depth_stencil_state always [[id(1)]];
+    depth_stencil_state always_write [[id(2)]];
+    depth_stencil_state less_equal_write [[id(3)]];
+    depth_stencil_state less [[id(4)]];
+};
+
+kernel void encode_draw_state(device StateCommands &c [[buffer(0)]], constant float4 *rects [[buffer(1)]],
+                              constant float *depths [[buffer(2)]], constant float4 *colors [[buffer(3)]],
+                              uint i [[thread_position_in_grid]])
+{
+    render_command command(c.commands, i);
+    command.set_vertex_buffer(rects + i, 0);
+    command.set_vertex_buffer(depths + i, 1);
+    command.set_fragment_buffer(colors + i, 0);
+    command.set_cull_mode(i < 2 ? cull_mode::back : cull_mode::none);
+    command.set_front_facing_winding(i == 1 ? winding::counterclockwise : winding::clockwise);
+    command.set_triangle_fill_mode(triangle_fill_mode::fill);
+    command.set_depth_clip_mode(i == 2 ? depth_clip_mode::clamp : depth_clip_mode::clip);
+    command.set_depth_bias(i == 4 ? -1000.0f : 0.0f, 0.0f, 0.0f);
+    if (i == 2)
+        command.set_depth_stencil_state(c.always_write);
+    else if (i == 3)
+        command.set_depth_stencil_state(c.less_equal_write);
+    else if (i == 4)
+        command.set_depth_stencil_state(c.less);
+    else
+        command.set_depth_stencil_state(c.always);
+    command.draw_primitives(primitive_type::triangle_strip, 0, 4, 1, 0);
+    if (i == 2) {
+        command.set_barrier();
+        command.clear_barrier();
+    }
+    if (i == 4)
+        command.set_barrier();
+    if (i == 5)
+        command.reset();
+}
+
+// Draws fetching corners at the stride each command gives: 8 bytes for
+// the left half, 16 for the right.
+kernel void encode_strided_draws(device Commands &c [[buffer(0)]], constant float2 *corners [[buffer(1)]],
+                                 constant float4 *colors [[buffer(2)]], uint i [[thread_position_in_grid]])
+{
+    render_command command(c.commands, i);
+    if (i == 0)
+        command.set_vertex_buffer(corners, 8, 1);
+    else
+        command.set_vertex_buffer(corners + 4, 16, 1);
+    command.set_fragment_buffer(colors + i, 0);
+    command.draw_primitives(primitive_type::triangle_strip, 0, 4, 1, 0);
 }

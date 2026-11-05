@@ -13,7 +13,7 @@
 //! sizes the mesh grid and fills its payload) and vertex amplification
 //! (views mapped to target layers and to viewports) draw rectangles whose
 //! images are exact.
-use super::plan::{Buffer, Case, Output, Plan, Texture, Tolerance};
+use super::plan::{Buffer, Case, Output, Plan, Step, Texture, Tolerance};
 use super::values::{Dtype, f16_bits, f32s, u32s};
 use serde_json::json;
 
@@ -66,8 +66,10 @@ type Tessellation = (&'static str, &'static str, u32, [[f64; 6]; 2], u32);
 fn tessellation(plan: &mut Plan, library: &str) {
     let uniform = |f: f64| [f; 6];
     // (name, partition, maximum, factors per patch, segments per side)
-    let cases: [Tessellation; 5] = [
+    // "scaled" halves its factors and has the encoder double them.
+    let cases: [Tessellation; 6] = [
         ("integer", "integer", 16, [uniform(4.0); 2], 4),
+        ("scaled", "integer", 16, [uniform(2.0); 2], 4),
         ("integer_odd", "integer", 16, [uniform(3.0); 2], 3),
         ("integer_rounded", "integer", 16, [uniform(2.25); 2], 3),
         ("pow2", "pow2", 16, [uniform(3.0); 2], 4),
@@ -116,6 +118,9 @@ fn tessellation(plan: &mut Plan, library: &str) {
                     "attributes": [{"index": 0, "format": "float2", "offset": 0, "buffer": 0},
                                    {"index": 1, "format": "float", "offset": 8, "buffer": 0}],
                     "layouts": [{"buffer": 0, "stride": 12, "step": "patch_control_point"}]}});
+            if name == "scaled" {
+                state["tessellation"]["factor_scale"] = 2.0.into();
+            }
             state
                 .as_object_mut()
                 .unwrap()
@@ -140,6 +145,28 @@ fn tessellation(plan: &mut Plan, library: &str) {
                 Output::new("points", Dtype::F32, Tolerance::abs(1e-5)).expect_same(f32s(&points)),
             ),
         );
+        // The integer image again from a command of an indirect command
+        // buffer, which names the factor buffer itself.
+        if name == "integer" {
+            plan.add(
+                inputs(Case::render(
+                    "stages.tessellation.integer.indirect_command",
+                    library,
+                    "tess_quad",
+                    Some("frag_tessellated"),
+                    state(json!({"colors": [{"texture": "target", "clear": [0, 0, 0, 0]}], "supports_icb": true,
+                                 "execute_icb": {"icb": "icb", "count": 1}})),
+                ))
+                .set("icbs", json!([{"name": "icb", "type": "patches", "count": 1, "max_buffers": 1, "commands": [
+                    {"buffers": [{"name": "controls", "stage": "vertex", "index": 0, "offset": 0}],
+                     "patches": {"factors": "factors", "control_points": 4, "patch_count": 2}}]}]))
+                .texture(Texture::d2("target", "rgba32float", SIZE, SIZE).usage(&["render"]))
+                .output(
+                    Output::new("target", Dtype::F32, Tolerance::abs(IMAGE)).expect_same(f32s(&image)),
+                ),
+            );
+            indexed_control_points(plan, library, &state, &image);
+        }
         plan.add(
             inputs(Case::render(
                 &format!("stages.tessellation.{name}.image"),
@@ -152,6 +179,119 @@ fn tessellation(plan: &mut Plan, library: &str) {
             .output(
                 Output::new("target", Dtype::F32, Tolerance::abs(IMAGE)).expect_same(f32s(&image)),
             ),
+        );
+    }
+}
+
+/// The integer image with the control points stored in reverse and
+/// fetched in order through a control-point index buffer: drawn by the
+/// encoder with indices of each type, and by an indirect command the CPU
+/// encodes; then the patches drawn by a command a kernel encodes, as
+/// they are and through the index buffer.
+fn indexed_control_points(
+    plan: &mut Plan,
+    library: &str,
+    state: &dyn Fn(serde_json::Value) -> serde_json::Value,
+    image: &[f64],
+) {
+    let reversed: Vec<f64> = control_points()
+        .chunks(3)
+        .rev()
+        .flatten()
+        .copied()
+        .collect();
+    let point_index = |index_type: &str| -> Vec<u8> {
+        if index_type == "uint16" {
+            (0..8u16).rev().flat_map(u16::to_le_bytes).collect()
+        } else {
+            u32s(&(0..8u32).rev().collect::<Vec<_>>())
+        }
+    };
+    let indexed = |index_type: &str, extra: serde_json::Value| {
+        let mut state = state(extra);
+        state["tessellation"]["control_point_index"] = "points".into();
+        state["tessellation"]["control_point_index_type"] = index_type.into();
+        state
+    };
+    let target = json!({"colors": [{"texture": "target", "clear": [0, 0, 0, 0]}]});
+    // The control points bound by the encoder, or unbound for a command
+    // to bind.
+    let finish = |case: Case, index_type: &str, controls: Buffer| {
+        case.buffer(controls)
+            .buffer(Buffer::data("factors", 0, factors(&[[4.0; 6]; 2])).unbound())
+            .buffer(Buffer::data("points", 0, point_index(index_type)).unbound())
+            .texture(Texture::d2("target", "rgba32float", SIZE, SIZE).usage(&["render"]))
+            .output(
+                Output::new("target", Dtype::F32, Tolerance::abs(IMAGE)).expect_same(f32s(image)),
+            )
+    };
+    for index_type in ["uint16", "uint32"] {
+        plan.add(finish(
+            Case::render(
+                &format!("stages.tessellation.integer.indexed_control_points.{index_type}"),
+                library,
+                "tess_quad",
+                Some("frag_tessellated"),
+                indexed(index_type, target.clone()),
+            ),
+            index_type,
+            Buffer::data("controls", 0, f32s(&reversed)).stage("vertex"),
+        ));
+    }
+    let mut cpu = target.clone();
+    cpu["supports_icb"] = true.into();
+    cpu["execute_icb"] = json!({"icb": "icb", "count": 1});
+    plan.add(
+        finish(
+            Case::render(
+                "stages.tessellation.integer.indirect_command.indexed",
+                library,
+                "tess_quad",
+                Some("frag_tessellated"),
+                indexed("uint32", cpu.clone()),
+            ),
+            "uint32",
+            Buffer::data("controls", 0, f32s(&reversed)).unbound(),
+        )
+        .set("icbs", json!([{"name": "icb", "type": "patches", "count": 1, "max_buffers": 1, "commands": [
+            {"buffers": [{"name": "controls", "stage": "vertex", "index": 0, "offset": 0}],
+             "patches": {"factors": "factors", "control_points": 4, "patch_count": 2, "control_point_index": "points"}}]}])),
+    );
+    for (label, flag) in [("gpu_command", 0u32), ("gpu_command.indexed", 1)] {
+        let pass = if flag == 1 {
+            indexed("uint32", cpu.clone())
+        } else {
+            state(cpu.clone())
+        };
+        let controls = if flag == 1 {
+            reversed.clone()
+        } else {
+            control_points()
+        };
+        plan.add(
+            finish(
+                Case::sequence(
+                    &format!("stages.tessellation.integer.{label}"),
+                    library,
+                    vec![
+                        Step::compute("encode_patches", [1, 1, 1], [1, 1, 1]).bind(&[
+                            ("commands", 0),
+                            ("controls", 1),
+                            ("factors", 2),
+                            ("points", 3),
+                            ("indexed", 4),
+                        ]),
+                        Step::render("tess_quad", "frag_tessellated", pass)
+                            .set("use", json!(["controls", "factors", "points"])),
+                    ],
+                ),
+                "uint32",
+                Buffer::data("controls", 0, f32s(&controls)).unbound(),
+            )
+            .buffer(Buffer::data("indexed", 0, u32s(&[flag])).unbound())
+            .buffer(Buffer::zeroed("commands", 0, 8).unbound())
+            .set("icbs", json!([{"name": "icb", "type": "patches", "count": 1, "max_buffers": 1}]))
+            .set("arguments", json!([{"buffer": "commands", "entries": [{"kind": "icb", "offset": 0, "resource": "icb"}]}])),
         );
     }
 }
@@ -358,6 +498,23 @@ fn tessellation_images(plan: &mut Plan, library: &str) {
             .buffer(Buffer::data("factors", 0, half_factors(&[first, second].concat())).unbound()),
         );
     }
+    // The factor step functions: a constant step gives every patch the
+    // first patch's factors, so the second, whose own are cut, lives; a
+    // per-instance step gives the second instance its cut factors.
+    plan.add(
+        case("quad.factors_constant", "tess_quad",
+             json!({"partition": "integer", "max_factor": 16, "factors": "factors", "control_points": 4,
+                    "patch_count": 2, "factor_step": "constant"}),
+             Some(halves()), full.clone())
+        .buffer(Buffer::data("factors", 0, half_factors(&[[4.0; 6], cut].concat())).unbound()),
+    );
+    plan.add(
+        case("quad.factors_per_instance", "tess_quad_instanced",
+             json!({"partition": "integer", "max_factor": 16, "factors": "factors", "control_points": 4,
+                    "patch_count": 1, "instance_count": 2, "instance_stride": 12, "factor_step": "per_instance"}),
+             Some(halves()[..12].to_vec()), left.clone())
+        .buffer(Buffer::data("factors", 0, half_factors(&[[2.0; 6], cut].concat())).unbound()),
+    );
     // No control points: each patch reads its rectangle by patch id.
     plan.add(
         case("quad.no_control_points", "tess_quad_free",
@@ -430,6 +587,156 @@ fn mesh(plan: &mut Plan, library: &str) {
                 .expect_same(f32s(&rects_image(2))),
         ),
     );
+    // The same two groups from an indirect buffer, as a grid of mesh
+    // threads, and with indices set four and two at a time.
+    for (label, draw) in [
+        (
+            "packed_indices",
+            json!({"mesh": "mesh_rects_packed", "threadgroups": [2], "mesh_threads": [6]}),
+        ),
+        (
+            "indirect",
+            json!({"mesh": "mesh_rects", "indirect": "groups", "mesh_threads": [6]}),
+        ),
+        (
+            "threads",
+            json!({"mesh": "mesh_rects", "threads": [12], "mesh_threads": [6]}),
+        ),
+    ] {
+        plan.add(
+            inputs(
+                Case::render(
+                    &format!("stages.mesh.rects.{label}"),
+                    library,
+                    "mesh_rects",
+                    Some("frag_mesh"),
+                    target(draw),
+                ),
+                "mesh",
+            )
+            .buffer(Buffer::data("groups", 0, u32s(&[2, 1, 1])).unbound())
+            .output(
+                Output::new("target", Dtype::F32, Tolerance::exact())
+                    .expect_same(f32s(&rects_image(2))),
+            ),
+        );
+    }
+    // The second rectangle's primitives culled by the mesh function.
+    plan.add(
+        inputs(
+            Case::render(
+                "stages.mesh.primitive_culled",
+                library,
+                "mesh_rects_culled",
+                Some("frag_mesh"),
+                target(
+                    json!({"mesh": "mesh_rects_culled", "threadgroups": [2], "mesh_threads": [6]}),
+                ),
+            ),
+            "mesh",
+        )
+        .output(
+            Output::new("target", Dtype::F32, Tolerance::exact())
+                .expect_same(f32s(&rects_image(1))),
+        ),
+    );
+    // Object threads counting live rectangles in object threadgroup memory.
+    plan.add(
+        inputs(
+            Case::render(
+                "stages.mesh.object_threadgroup_memory",
+                library,
+                "mesh_payload",
+                Some("frag_mesh"),
+                target(json!({"object": "object_shared", "mesh": "mesh_payload", "threadgroups": [1],
+                              "object_threads": [8], "mesh_threads": [6], "object_threadgroup_memory": 32})),
+            ),
+            "object",
+        )
+        .buffer(Buffer::data("count", 2, u32s(&[2])).stage("object"))
+        .output(Output::new("target", Dtype::F32, Tolerance::exact()).expect_same(f32s(&rects_image(2)))),
+    );
+    // Mesh draws as commands of an indirect command buffer: object and
+    // mesh buffers and object threadgroup memory set per command. The
+    // feature set tables give these commands to Apple9.
+    let uses = |name: &str, stage: &str, index: u32| json!({"name": name, "stage": stage, "index": index, "offset": 0});
+    for (label, draw) in [
+        (
+            "indirect_command",
+            json!({"threadgroups": [1], "object_threads": [8], "mesh_threads": [6], "object_threadgroup_memory": 32}),
+        ),
+        (
+            "indirect_command.threads",
+            json!({"threads": [8], "object_threads": [8], "mesh_threads": [6], "object_threadgroup_memory": 32}),
+        ),
+    ] {
+        plan.add(
+        inputs(
+            Case::render(
+                &format!("stages.mesh.{label}"),
+                library,
+                "mesh_payload",
+                Some("frag_mesh"),
+                json!({"colors": [{"texture": "target", "clear": [0, 0, 0, 0]}], "supports_icb": true,
+                       "mesh": {"object": "object_shared", "mesh": "mesh_payload"},
+                       "execute_icb": {"icb": "icb", "count": 1}}),
+            ),
+            "object",
+        )
+        .requires(&["apple9"], &[])
+        .buffer(Buffer::data("count", 2, u32s(&[3])).stage("object"))
+        .set("icbs", json!([{"name": "icb", "type": "mesh", "count": 1, "max_buffers": 3, "commands": [
+            {"buffers": [uses("rects", "object", 0), uses("colors", "object", 1), uses("count", "object", 2)],
+             "mesh": draw}]}]))
+        .output(Output::new("target", Dtype::F32, Tolerance::exact()).expect_same(f32s(&rects_image(3)))),
+    );
+    }
+    // The same draws as commands a kernel encodes: object threadgroups
+    // with their buffers and threadgroup memory, and a grid of mesh
+    // threads reading the rectangles through mesh buffers.
+    for (label, threads, stages, count) in [
+        (
+            "gpu_command",
+            0u32,
+            json!({"object": "object_shared", "mesh": "mesh_payload"}),
+            3usize,
+        ),
+        ("gpu_command.threads", 1, json!({"mesh": "mesh_rects"}), 2),
+    ] {
+        let mesh_function = stages["mesh"].as_str().unwrap().to_string();
+        plan.add(
+            Case::sequence(
+                &format!("stages.mesh.{label}"),
+                library,
+                vec![
+                    Step::compute("encode_mesh_draws", [1, 1, 1], [1, 1, 1]).bind(&[
+                        ("commands", 0),
+                        ("rects", 1),
+                        ("colors", 2),
+                        ("count", 3),
+                        ("threads", 4),
+                    ]),
+                    Step::render(
+                        &mesh_function,
+                        "frag_mesh",
+                        json!({"colors": [{"texture": "target", "clear": [0, 0, 0, 0]}], "supports_icb": true,
+                               "mesh": stages, "execute_icb": {"icb": "icb", "count": 1}}),
+                    )
+                    .set("use", json!(["rects", "colors", "count"])),
+                ],
+            )
+            .buffer(Buffer::data("rects", 0, f32s(&RECTS.concat())).unbound())
+            .buffer(Buffer::data("colors", 0, f32s(&COLORS.concat())).unbound())
+            .buffer(Buffer::data("count", 0, u32s(&[count as u32])).unbound())
+            .requires(&["apple9"], &[])
+            .buffer(Buffer::data("threads", 0, u32s(&[threads])).unbound())
+            .buffer(Buffer::zeroed("commands", 0, 8).unbound())
+            .texture(Texture::d2("target", "rgba32float", SIZE, SIZE).usage(&["render"]))
+            .set("icbs", json!([{"name": "icb", "type": "mesh", "count": 1, "max_buffers": 3}]))
+            .set("arguments", json!([{"buffer": "commands", "entries": [{"kind": "icb", "offset": 0, "resource": "icb"}]}]))
+            .output(Output::new("target", Dtype::F32, Tolerance::exact()).expect_same(f32s(&rects_image(count)))),
+        );
+    }
     for count in [3u32, 1, 0] {
         plan.add(
             inputs(

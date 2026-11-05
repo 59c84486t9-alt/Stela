@@ -256,6 +256,30 @@ fn interpolation(plan: &mut Plan, library: &str) {
             .output(image.output("c", tol)),
         );
     }
+    // Each vertex's value, uninterpolated, in drawing order: vertex 5's
+    // first. The feature set tables give these values to Apple10.
+    let mut image = Image::new();
+    for (x, y) in pixels() {
+        image.push(match locate(&t, x as f64 + 0.5, y as f64 + 0.5) {
+            Px::Edge => None,
+            Px::Out => Some(CLEAR),
+            Px::In(_) => Some([attrs[0][3], attrs[1][3], attrs[2][3], 1.0]),
+        });
+    }
+    plan.add(
+        draw(
+            "render.interpolate.vertex_values",
+            library,
+            "vert_interp",
+            "frag_vertex_values",
+            &pos,
+            &att,
+            "rgba32float",
+            start.clone(),
+        )
+        .requires(&["apple10"], &[])
+        .output(image.output("c", Tolerance::exact())),
+    );
     // Flat unsigned integers, bit for bit.
     let mut expected = vec![];
     let mut defined = vec![];
@@ -1989,6 +2013,22 @@ fn multisampling(plan: &mut Plan, library: &str) {
         .texture(target("c", "rgba8unorm"))
         .output(Output::new("c", Dtype::U8, units.clone()).expect(expected, units.clone())),
     );
+    // The four standard sample positions average to the pixel's centre.
+    plan.add(
+        full(
+            "render.msaa4.sample_position",
+            library,
+            "frag_sample_position",
+            &[0.0; 4],
+            state.clone(),
+        )
+        .texture(ms())
+        .texture(target("c", "rgba8unorm"))
+        .output(
+            Output::new("c", Dtype::U8, units.clone())
+                .expect([128, 128, 0, 255].repeat((W * H) as usize), units.clone()),
+        ),
+    );
     // Per-sample shading: the resolve averages each sample's value.
     let r = ((0.25 + 0.5 + 0.75 + 1.0) / 4.0 * 255.0f64).round() as u8;
     let g = ((0.0 + 0.125 + 0.25 + 0.375) / 4.0 * 255.0f64).round() as u8;
@@ -2356,11 +2396,11 @@ fn fetch(plan: &mut Plan, library: &str) {
                 data[v * stride + offset..v * stride + offset + f.size].copy_from_slice(&bytes);
                 expected.extend((f.decode)(&bytes));
             }
-            let (function, dtype) = match f.shader {
-                "uint" => ("vert_fetch_uint", Dtype::U32),
-                "int" => ("vert_fetch_int", Dtype::I32),
-                "half" => ("vert_fetch_half", Dtype::F32),
-                _ => ("vert_fetch_float", Dtype::F32),
+            let (shader, dtype) = match f.shader {
+                "uint" => ("uint", Dtype::U32),
+                "int" => ("int", Dtype::I32),
+                "half" => ("half", Dtype::F32),
+                _ => ("float", Dtype::F32),
             };
             let tol = if f.name.contains("normalized") {
                 Tolerance::ulp(1.0)
@@ -2374,18 +2414,39 @@ fn fetch(plan: &mut Plan, library: &str) {
                     &expected.iter().map(|&v| v as i128).collect::<Vec<_>>(),
                 ),
             };
+            let name = format!(
+                "render.fetch.{}{}",
+                f.name,
+                if offset > 0 { ".offset" } else { "" }
+            );
+            let attributes = json!({"attributes": [{"index": 0, "format": f.name, "offset": offset, "buffer": 0}],
+                                    "layouts": [{"buffer": 0, "stride": stride}]});
             plan.add(
                 Case::render(
-                    &format!("render.fetch.{}{}", f.name, if offset > 0 { ".offset" } else { "" }),
+                    &name,
                     library,
-                    function,
+                    &format!("vert_fetch_{shader}"),
                     None,
                     json!({"rasterize": false, "primitive": "point", "vertex_count": count, "target_size": [1, 1],
-                           "vertex_descriptor": {"attributes": [{"index": 0, "format": f.name, "offset": offset, "buffer": 0}],
-                                                 "layouts": [{"buffer": 0, "stride": stride}]}}),
+                           "vertex_descriptor": attributes}),
                 )
-                .buffer(Buffer::data("vertices", 0, data).stage("vertex"))
+                .buffer(Buffer::data("vertices", 0, data.clone()).stage("vertex"))
                 .buffer(Buffer::zeroed("out", 2, count * 16).stage("vertex"))
+                .output(Output::new("out", dtype, tol.clone()).expect(out.clone(), tol.clone())),
+            );
+            // The same attribute fetched by a kernel's stage input.
+            plan.add(
+                Case::compute(
+                    &format!("{name}.stage_in"),
+                    library,
+                    &format!("stage_fetch_{shader}"),
+                    [count as u32, 1, 1],
+                    [64, 1, 1],
+                )
+                .dispatch_threads()
+                .set("stage_input", attributes)
+                .buffer(Buffer::data("vertices", 0, data))
+                .buffer(Buffer::zeroed("out", 2, count * 16))
                 .output(Output::new("out", dtype, tol.clone()).expect(out, tol)),
             );
         }
@@ -2537,6 +2598,30 @@ fn fetch(plan: &mut Plan, library: &str) {
             .buffer(Buffer::data("count", 3, u32s(&[count])).stage("vertex"))
             .output(Output::new("out", Dtype::U32, Tolerance::exact()).expect_same(u32s(&expected))),
         );
+        // The same draw from a pipeline that names its primitives' class.
+        let class = primitive.trim_end_matches("_strip");
+        plan.vary(
+            &format!("render.vertex_ids.{primitive}"),
+            "topology",
+            |case| case.set_at(&["render", "input_primitive"], class),
+        );
+        // The same draw as a command of an indirect command buffer, using
+        // the encoder's buffers.
+        plan.add(
+            Case::render(
+                &format!("render.vertex_ids.indirect_command.{primitive}"),
+                library,
+                "vert_ids",
+                None,
+                json!({"rasterize": false, "target_size": [1, 1], "supports_icb": true,
+                       "execute_icb": {"icb": "icb", "count": 1}}),
+            )
+            .set("icbs", json!([{"name": "icb", "type": "draw", "count": 1, "max_buffers": 4, "inherit_buffers": true,
+                                  "commands": [{"primitive": primitive, "vertex_count": count, "instance_count": instances}]}]))
+            .buffer(Buffer::zeroed("out", 2, expected.len() * 4).stage("vertex"))
+            .buffer(Buffer::data("count", 3, u32s(&[count])).stage("vertex"))
+            .output(Output::new("out", Dtype::U32, Tolerance::exact()).expect_same(u32s(&expected))),
+        );
     }
 }
 
@@ -2553,7 +2638,8 @@ fn fragment_queries(plan: &mut Plan, library: &str) {
     };
     // uv advances `scale` per pixel on both axes over a 64x64 texture, so the
     // level is log2(64 scale), within a 32nd as the device computes it; the
-    // sampler clamps it to [0, 2].
+    // sampler clamps it to [0, 2]. Querying the level needs a device that
+    // reports it (all of Apple8, some of Apple7).
     for texels_per_pixel in [0.5, 2.0, 4.0, 8.0] {
         let lod: f64 = libm::log2(texels_per_pixel);
         let expected: Vec<f64> = pixels()
@@ -2567,6 +2653,7 @@ fn fragment_queries(plan: &mut Plan, library: &str) {
                 Some("frag_lod"),
                 fill(true),
             )
+            .requires(&[], &["query_texture_lod"])
             .buffer(Buffer::data("depth", 2, f32s(&[0.0])).stage("vertex"))
             .buffer(Buffer::data("scale", 3, f32s(&[texels_per_pixel / 64.0])).stage("fragment"))
             .texture(Texture::d2("t", "rgba8unorm", 64, 64).index(0).mipmaps(7))
@@ -2620,7 +2707,8 @@ fn fragment_queries(plan: &mut Plan, library: &str) {
         );
     }
     if plan.has(SOURCE, "frag_interpolant") {
-        // Offsets are from the pixel's upper-left corner.
+        // Offsets are from the pixel's upper-left corner; a covered
+        // pixel's centroid is its centre.
         let offset = [0.25, 0.75];
         let expected: Vec<f64> = pixels()
             .flat_map(|(x, y)| {
@@ -2699,6 +2787,11 @@ fn layers_and_clipping(plan: &mut Plan, library: &str) {
         .texture(target("c", "rgba32float"))
         .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&expected))),
     );
+    // The planes bound to both stages at once; the fragment function
+    // binds no buffers.
+    plan.vary("render.clip_distance", "both_stages", |case| {
+        case.edit("buffers", "planes", "stage", "both")
+    });
     let mut rng = Random::new(6061);
     let n = (W * H * 4) as usize;
     let initial: Vec<f64> = (0..n).map(|_| f32r(rng.uniform(-2.0, 2.0))).collect();
@@ -2722,8 +2815,40 @@ fn layers_and_clipping(plan: &mut Plan, library: &str) {
     );
 }
 
+/// Early fragment tests: an occluding instance, then one over the whole
+/// target behind it, whose fragment function counts its runs. The hidden
+/// fragments are rejected before they run, so the counts are exact.
+fn early_fragment_tests(plan: &mut Plan, library: &str) {
+    let colors = [[0.25, 0.5, 0.75, 1.0], [1.0, 0.0, 0.5, 0.25]];
+    let image: Vec<f64> = pixels()
+        .flat_map(|(x, _)| colors[usize::from(x >= W / 2)])
+        .collect();
+    let half = W / 2 * H;
+    plan.add(
+        Case::render(
+            "render.depth.early_fragment_tests",
+            library,
+            "vert_occluder",
+            Some("frag_early"),
+            json!({"colors": [{"texture": "c", "clear": [0, 0, 0, 0]}],
+                   "depth": {"texture": "d", "clear": 1.0, "compare": "less"},
+                   "primitive": "triangle_strip", "vertex_count": 4, "instance_count": 2}),
+        )
+        .texture(target("c", "rgba32float"))
+        .texture(target("d", "depth32float"))
+        .buffer(Buffer::zeroed("runs", 0, 16).stage("fragment"))
+        .buffer(Buffer::data("colors", 1, f32s(&colors.concat())).stage("fragment"))
+        .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&image)))
+        .output(
+            Output::new("runs", Dtype::U32, Tolerance::exact())
+                .expect_same(u32s(&[half, half, 0, 0])),
+        ),
+    );
+}
+
 pub fn build(plan: &mut Plan) {
     let library = plan.library("render", SOURCE, &[], LATEST);
+    early_fragment_tests(plan, &library);
     interpolation(plan, &library);
     derivatives(plan, &library);
     builtins(plan, &library);
@@ -2749,7 +2874,7 @@ pub fn build(plan: &mut Plan) {
             "families.apple1": false, "families.apple2": false, "families.apple4": false,
             "families.apple5": false, "families.apple6": false, "families.apple7": false,
             "families.apple8": false, "families.apple9": false, "families.apple10": false,
-            "families.metal3": false, "families.metal4": false,
+            "families.apple11": false, "families.metal3": false, "families.metal4": false,
             "features.raytracing": false, "features.raster_order_groups": false,
             "features.primitive_motion_blur": false,
         }),

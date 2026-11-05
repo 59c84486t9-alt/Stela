@@ -91,11 +91,12 @@ kernel void sample1d(texture1d<float> t [[texture(0)]], sampler s [[sampler(0)]]
 { out[i] = t.sample(s, c[i].x); }
 
 // Sampler states declared in the shader, which AIR carries as constants.
+// An explicit level leaves the anisotropic one's anisotropy nothing to do.
 kernel void sample_constexpr(texture2d<float> t [[texture(0)]], device const float4 *c [[buffer(0)]],
                              device float4 *out [[buffer(1)]], uint i [[thread_position_in_grid]])
 {
     constexpr sampler nearest_repeat(filter::nearest, address::repeat);
-    constexpr sampler linear_mirror(filter::linear, address::mirrored_repeat);
+    constexpr sampler linear_mirror(filter::linear, address::mirrored_repeat, max_anisotropy(8));
     constexpr sampler pixel_clamp(coord::pixel, filter::linear, address::clamp_to_edge);
     constexpr sampler border(filter::nearest, address::clamp_to_border, border_color::opaque_white);
     out[i * 4 + 0] = t.sample(nearest_repeat, c[i].xy, level(0));
@@ -223,6 +224,16 @@ kernel void texture_atomics_int(texture2d<int, access::read_write> t [[texture(0
     atomic_ops(t, wins, v[i], i);
 }
 
+#ifndef SKIP_texture_atomic_load_store
+// An atomic store and load of each thread's own texel.
+kernel void texture_atomic_load_store(texture2d<uint, access::read_write> t [[texture(0)]], device uint *out [[buffer(0)]],
+                                      uint i [[thread_position_in_grid]])
+{
+    t.atomic_store(uint4(i * 7u + 1u), uint2(i, 0));
+    out[i] = t.atomic_load(uint2(i, 0)).x;
+}
+#endif
+
 // An atomic add on each texture type that has atomics, at texel i % 4.
 kernel void texture_atomics_types(texture1d<uint, access::read_write> t1 [[texture(0)]],
                                   texture1d_array<uint, access::read_write> t1a [[texture(1)]],
@@ -298,6 +309,11 @@ kernel void sample_depth_cube(depthcube<float> t [[texture(0)]], sampler s [[sam
                               uint i [[thread_position_in_grid]])
 { out[i] = t.sample(s, c[i].xyz, level(0)); }
 
+kernel void sample_depth_cube_array(depthcube_array<float> t [[texture(0)]], sampler s [[sampler(0)]],
+                                    device const float4 *c [[buffer(0)]], device float *out [[buffer(1)]],
+                                    uint i [[thread_position_in_grid]])
+{ out[i] = t.sample(s, c[i].xyz, uint(c[i].w), level(0)); }
+
 kernel void samplecube_array(texturecube_array<float> t [[texture(0)]], sampler s [[sampler(0)]],
                              device const float4 *c [[buffer(0)]], device float4 *out [[buffer(1)]],
                              uint i [[thread_position_in_grid]])
@@ -333,4 +349,29 @@ kernel void queries_types(depth2d<float> d [[texture(0)]], texturecube_array<flo
     out[13] = t1.get_width(); out[14] = t3.get_num_mip_levels(); out[15] = da.get_width();
     out[16] = da.get_height(); out[17] = da.get_array_size(); out[18] = tc.get_height();
     out[19] = da.get_num_mip_levels();
+}
+
+// Blocks of two texels, side by side and one above the other: from a
+// coordinate, from a coordinate and an offset, and at level 1.
+kernel void block_reads(texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], device float4 *out [[buffer(0)]])
+{
+    auto across = t.block_read<2, 1>(s, int2(1, 2));
+    auto down = t.block_read<1, 2>(s, int2(0, 0), int2(3, 1));
+    auto lower = t.block_read<2, 1>(s, int2(0, 1), int2(0), 1);
+    out[0] = get<0>(across);
+    out[1] = get<1>(across);
+    out[2] = get<0>(down);
+    out[3] = get<1>(down);
+    out[4] = get<0>(lower);
+    out[5] = get<1>(lower);
+}
+
+// A sampler whose level of detail is clamped to [1, 2], asked for levels
+// 0 and 3.
+constexpr sampler clamped_lod(filter::nearest, mip_filter::nearest, lod_clamp(1.0f, 2.0f));
+
+kernel void sample_lod_clamp(texture2d<float> t [[texture(0)]], device float *out [[buffer(0)]])
+{
+    out[0] = t.sample(clamped_lod, float2(0.5f), level(0)).r;
+    out[1] = t.sample(clamped_lod, float2(0.5f), level(3)).r;
 }

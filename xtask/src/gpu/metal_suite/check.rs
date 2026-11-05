@@ -11,7 +11,12 @@ use super::plan::{self, Tolerance};
 use super::values::{Dtype, elements, f16_bits, int_elements};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
-use std::{collections::BTreeMap, fmt::Write, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write,
+    fs,
+    path::Path,
+};
 
 /// An output's elements: floats with their width, or integers.
 #[derive(Clone, Debug, PartialEq)]
@@ -199,6 +204,140 @@ fn compare(
         out.max_ulps = Some(worst);
     }
     out
+}
+
+/// Values of the runner's lookup tables, or whole tables (`*`), that no
+/// case can use on the reference device, with the reason.
+const LOOKUPS_LEFT_OUT: [(&str, &str, &str); 8] = [
+    (
+        "cull mode",
+        "*",
+        "indirect command buffer draw state needs Apple10",
+    ),
+    (
+        "depth clip mode",
+        "*",
+        "indirect command buffer draw state needs Apple10",
+    ),
+    (
+        "fill mode",
+        "*",
+        "indirect command buffer draw state needs Apple10",
+    ),
+    (
+        "winding",
+        "*",
+        "indirect command buffer draw state needs Apple10",
+    ),
+    (
+        "reduction mode",
+        "*",
+        "sampler min-max reduction needs Apple10",
+    ),
+    (
+        "forward progress",
+        "simdgroup_parallel",
+        "forward progress guarantees need Apple11",
+    ),
+    (
+        "pixel format",
+        "depth24unorm_stencil8",
+        "the M1 Pro has no depth24Unorm_stencil8",
+    ),
+    (
+        "pixel format",
+        "x24_stencil8",
+        "the M1 Pro has no depth24Unorm_stencil8",
+    ),
+];
+
+/// The table labels the runner's `lookup` calls name: each call's second
+/// argument, after a first that may be a dictionary literal.
+fn lookup_labels(runner: &str) -> BTreeSet<String> {
+    runner
+        .match_indices("lookup(")
+        .filter(|(at, _)| !runner[..*at].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
+        .filter_map(|(at, call)| {
+            let mut depth = 0usize;
+            let mut quoted = false;
+            let rest = &runner[at + call.len()..];
+            let comma = rest.char_indices().find_map(|(i, c)| {
+                match c {
+                    '"' => quoted = !quoted,
+                    _ if quoted => {}
+                    '(' | '[' | '{' => depth += 1,
+                    ')' | ']' | '}' if depth == 0 => return Some(None),
+                    ')' | ']' | '}' => depth -= 1,
+                    ',' if depth == 0 => return Some(Some(i)),
+                    _ => {}
+                }
+                None
+            })??;
+            let label = rest[comma + 1..].trim_start().strip_prefix("@\"")?;
+            Some(label[..label.find('"')?].to_string())
+        })
+        .collect()
+}
+
+/// The named values of the runner's tables that no case of a complete
+/// reference run looked up, and the tables no case reached; None when the
+/// run is not complete.
+fn unused_lookups(plan: &Value, test: &Path) -> Result<Option<Vec<String>>> {
+    let mut used: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for case in plan["cases"].as_array().unwrap() {
+        let s = status(&test.join(plan::name_of(case)));
+        if status_name(&s) == "not run" || status_name(&s) == "running" {
+            return Ok(None);
+        }
+        for (label, values) in s["lookups"].as_object().into_iter().flatten() {
+            let values = values
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str);
+            used.entry(label.clone())
+                .or_default()
+                .extend(values.map(str::to_string));
+        }
+    }
+    let path = test.join("lookups.json");
+    let tables: BTreeMap<String, BTreeSet<String>> = serde_json::from_str(
+        &fs::read_to_string(&path).with_context(|| path.display().to_string())?,
+    )?;
+    let runner = fs::read_to_string(super::assets().join("runner.m"))?;
+    let left_out: BTreeSet<(&str, &str)> =
+        LOOKUPS_LEFT_OUT.iter().map(|(t, v, _)| (*t, *v)).collect();
+    let mut lines: Vec<String> = lookup_labels(&runner)
+        .into_iter()
+        .filter(|label| !tables.contains_key(label) && !left_out.contains(&(label.as_str(), "*")))
+        .map(|label| format!("UNUSED    {label}: no case looks up this table"))
+        .collect();
+    // An entry left out that a case now reaches is stale.
+    for (table, value) in &left_out {
+        let reached = if *value == "*" {
+            tables.contains_key(*table)
+        } else {
+            used.get(*table).is_some_and(|seen| seen.contains(*value))
+        };
+        if reached {
+            lines.push(format!(
+                "STALE     {table}: {value} is left out but a case reaches it"
+            ));
+        }
+    }
+    for (label, values) in &tables {
+        let none = BTreeSet::new();
+        let seen = used.get(label).unwrap_or(&none);
+        let unused: Vec<&str> = values
+            .iter()
+            .filter(|v| !seen.contains(*v) && !left_out.contains(&(label.as_str(), v.as_str())))
+            .map(String::as_str)
+            .collect();
+        if !unused.is_empty() {
+            lines.push(format!("UNUSED    {label}: {}", unused.join(", ")));
+        }
+    }
+    Ok(Some(lines))
 }
 
 /// Whether a results directory holds the reference device's results.
@@ -613,6 +752,17 @@ pub fn run(
         }
     }
     lines.extend(slow(&timings));
+    // A complete reference run must use every value the runner can name.
+    let mut unused = 0;
+    if only.is_empty() && is_reference(test) {
+        match unused_lookups(&plan, test)? {
+            Some(found) => {
+                unused = found.len();
+                lines.extend(found);
+            }
+            None => lines.push("lookup coverage needs a complete run".into()),
+        }
+    }
     lines.extend(summary.brief());
     lines.push(
         KEYS.iter()
@@ -628,9 +778,9 @@ pub fn run(
     if let Some(path) = report {
         fs::write(path, &text)?;
     }
-    if summary.get("mismatch") > 0 || summary.get("test failed") > 0 {
+    if summary.get("mismatch") > 0 || summary.get("test failed") > 0 || unused > 0 {
         bail!(
-            "{} mismatched, {} failed",
+            "{} mismatched, {} failed, {unused} lookup table problems",
             summary.get("mismatch"),
             summary.get("test failed")
         );
@@ -672,6 +822,37 @@ fn slow(timings: &[(f64, f64, String)]) -> Vec<String> {
         ));
     }
     lines
+}
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::*;
+
+    #[test]
+    fn lookup_labels_reads_each_call() {
+        let runner = "static NSUInteger lookup(NSDictionary *table, NSString *kind, id name)\n\
+                      x = lookup(modes, @\"math mode\", w[@\"m\"]);\n\
+                      y = lookup(compare_functions(), @\"compare function\", a);\n";
+        let labels: Vec<String> = lookup_labels(runner).into_iter().collect();
+        assert_eq!(labels, ["compare function", "math mode"]);
+    }
+
+    /// Labels are how a run's record names its tables, so each must name
+    /// one table.
+    #[test]
+    fn runner_labels_are_distinct_tables() {
+        let runner = fs::read_to_string(super::super::assets().join("runner.m")).unwrap();
+        let labels = lookup_labels(&runner);
+        assert!(labels.len() > 25, "{labels:?}");
+        let inline = lookup_labels(
+            "lookup(@{@\"reset\" : @(0), @\"add\" : @(f(1, 2))}, @\"visibility type\", x); my_lookup(t, @\"no\", y);",
+        );
+        assert_eq!(inline, BTreeSet::from(["visibility type".to_string()]));
+        assert!(
+            labels.iter().all(|l| !l.is_empty() && !l.contains('%')),
+            "{labels:?}"
+        );
+    }
 }
 
 #[cfg(test)]

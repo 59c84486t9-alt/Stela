@@ -16,7 +16,8 @@
 //!   compile options.
 //!
 //! What the suite lacks of each is ranked by how many system libraries use
-//! it.
+//! it; within the families the suite reaches, so are the typed overloads
+//! (vector widths, element types, address spaces) it never calls.
 use anyhow::{Context, Result, bail};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -221,11 +222,25 @@ pub fn run(out: &Path, host: &str, refresh: bool, report: Option<&Path>) -> Resu
             .extend(users.iter().cloned());
     }
     let covered: BTreeSet<String> = suite_calls.keys().map(|n| family(n)).collect();
+    // Within the families the suite reaches, the typed overloads it does
+    // not: a vector width, element type or address space no case calls.
+    let overloads: Uses = system_calls
+        .iter()
+        .filter(|(name, _)| covered.contains(&family(name)))
+        .map(|(name, users)| (name.clone(), users.clone()))
+        .collect();
+    let exact: BTreeSet<String> = suite_calls.into_keys().collect();
     let keys: BTreeSet<String> = suite_keys.into_keys().collect();
     let text = format!(
-        "{} system libraries\n{}\n{}",
+        "{} system libraries\n{}\n{}\n{}",
         libraries.len(),
         section("intrinsic families", &families, &covered, &system),
+        section(
+            "intrinsic overloads of the families reached",
+            &overloads,
+            &exact,
+            &system
+        ),
         section("metadata keys", &system_keys, &keys, &system)
     );
     print!("{text}");

@@ -82,6 +82,26 @@ fn constants(plan: &mut Plan, library: &str) {
         }
         plan.add(case);
     }
+    // Consecutive constants of one type set by one call over their range.
+    let words = [0x0102_0304u32, 0xFFFF_FFFF, 7];
+    plan.add(
+        Case::compute(
+            "arguments.constants.range",
+            library,
+            "constant_range",
+            [1, 1, 1],
+            [1, 1, 1],
+        )
+        .set(
+            "constants",
+            json!([{"type": "uint", "range": [40, 3], "bytes": base64(&u32s(&words))}]),
+        )
+        .buffer(Buffer::zeroed("out", 0, 16))
+        .output(
+            Output::new("out", Dtype::U32, Tolerance::exact())
+                .expect_same(u32s(&[words[0], words[1], words[2], 0])),
+        ),
+    );
     let mut rng = Random::new(1001);
     let input: Vec<f64> = (0..256).map(|_| f32r(rng.uniform(-10.0, 10.0))).collect();
     for (count, negate) in [(0, false), (3, true), (17, false)] {
@@ -239,6 +259,149 @@ fn argument_buffers(plan: &mut Plan, library: &str) {
     }
 }
 
+/// Two visible function tables at consecutive indices, from a kernel, a
+/// vertex function and a fragment function, each bound one table at a
+/// time and as a range, with the tables filled entry by entry or at once.
+fn visible_pairs(plan: &mut Plan, library: &str, rng: &mut Random) {
+    let n = 64usize;
+    let input: Vec<f64> = (0..n).map(|_| f32r(rng.uniform(-4.0, 4.0))).collect();
+    let which: Vec<u32> = (0..n).map(|_| rng.u32() % 9).collect();
+    let apply = |k: u32, x: f64| {
+        f32r(match k {
+            0 => x * 2.0,
+            1 => x * x,
+            _ => 1.0 - x,
+        })
+    };
+    let values: Vec<f64> = input
+        .iter()
+        .zip(&which)
+        .map(|(&x, &w)| apply(w / 3, apply(w % 3, x)))
+        .collect();
+    let pixels: Vec<f64> = values.iter().flat_map(|&v| [v, 0.0, 0.0, 1.0]).collect();
+    let functions = json!(["twice", "square", "negate_plus"]);
+    let tables =
+        json!([{"index": 1, "functions": functions}, {"index": 2, "functions": functions}]);
+    let inputs = |case: Case, stage: &str| {
+        case.buffer(Buffer::data("in", 0, f32s(&input)).stage(stage))
+            .buffer(Buffer::data("which", 4, u32s(&which)).stage(stage))
+    };
+    let image = || Output::new("target", Dtype::F32, Tolerance::exact()).expect_same(f32s(&pixels));
+    // The tables at [[id]]s of an argument buffer: set by its encoder
+    // singly or over a range, or written as resource IDs.
+    let encoded = json!([{"id": 0, "functions": functions}, {"id": 1, "functions": functions}]);
+    for (mode, bind, encoder) in [
+        ("encoder", "single", true),
+        ("encoder_ranges", "ranges", true),
+        ("resource_ids", "single", false),
+    ] {
+        let features: &[&str] = if encoder {
+            &["function_pointers"]
+        } else {
+            &["function_pointers", "argument_buffers_tier2"]
+        };
+        plan.add(
+            inputs(
+                Case::compute1(
+                    &format!("arguments.visible_function_tables.argument.{mode}"),
+                    library,
+                    "tabled_pair",
+                    n as u32,
+                ),
+                "compute",
+            )
+            .requires(&[], features)
+            .set("bind", bind)
+            .set("visible_functions", functions.clone())
+            .set("function_tables", encoded.clone())
+            .set(
+                "table_arguments",
+                json!({"buffer": "tables", "index": 1, "encoder": encoder}),
+            )
+            .buffer(Buffer::zeroed("tables", 1, 16))
+            .buffer(Buffer::zeroed("out", 3, n * 4))
+            .output(Output::new("out", Dtype::F32, Tolerance::exact()).expect_same(f32s(&values))),
+        );
+    }
+    // A bound table of three, a null table, and arrays of none and two:
+    // sizes and emptiness.
+    plan.add(
+        Case::compute(
+            "arguments.visible_function_tables.extents",
+            library,
+            "table_extents",
+            [1, 1, 1],
+            [1, 1, 1],
+        )
+        .requires(&[], &["function_pointers"])
+        .set("visible_functions", functions.clone())
+        .set(
+            "function_tables",
+            json!([{"index": 1, "functions": functions}]),
+        )
+        .buffer(Buffer::zeroed("out", 3, 24))
+        .output(
+            Output::new("out", Dtype::U32, Tolerance::exact())
+                .expect_same(u32s(&[3, 0, 0, 1, 1, 0])),
+        ),
+    );
+    for mode in ["single", "ranges"] {
+        plan.add(
+            inputs(
+                Case::compute1(
+                    &format!("arguments.visible_function_tables.compute.{mode}"),
+                    library,
+                    "visible_pair",
+                    n as u32,
+                ),
+                "compute",
+            )
+            .requires(&[], &["function_pointers"])
+            .set("bind", mode)
+            .set("visible_functions", functions.clone())
+            .set("function_tables", tables.clone())
+            .buffer(Buffer::zeroed("out", 3, n * 4))
+            .output(Output::new("out", Dtype::F32, Tolerance::exact()).expect_same(f32s(&values))),
+        );
+        plan.add(
+            inputs(
+                Case::render(
+                    &format!("arguments.visible_function_tables.vertex.{mode}"),
+                    library,
+                    "vert_visible_pair",
+                    Some("frag_visible_value"),
+                    json!({"colors": [{"texture": "target", "clear": [0, 0, 0, 0]}],
+                           "primitive": "point", "vertex_count": n,
+                           "vertex_visible_functions": functions, "vertex_tables": tables}),
+                ),
+                "vertex",
+            )
+            .requires(&[], &["function_pointers_render"])
+            .set("bind", mode)
+            .texture(Texture::d2("target", "rgba32float", 8, 8).usage(&["render"]))
+            .output(image()),
+        );
+        plan.add(
+            inputs(
+                Case::render(
+                    &format!("arguments.visible_function_tables.fragment.{mode}"),
+                    library,
+                    "vert_pair_quad",
+                    Some("frag_visible_pair"),
+                    json!({"colors": [{"texture": "target", "clear": [0, 0, 0, 0]}],
+                           "primitive": "triangle_strip", "vertex_count": 4,
+                           "fragment_visible_functions": functions, "fragment_tables": tables}),
+                ),
+                "fragment",
+            )
+            .requires(&[], &["function_pointers_render"])
+            .set("bind", mode)
+            .texture(Texture::d2("target", "rgba32float", 8, 8).usage(&["render"]))
+            .output(image()),
+        );
+    }
+}
+
 fn function_pointers(plan: &mut Plan, library: &str) {
     let mut rng = Random::new(1003);
     let n = 256usize;
@@ -342,6 +505,9 @@ fn function_pointers(plan: &mut Plan, library: &str) {
             ),
         );
     }
+    if plan.has(SOURCE, "visible_pair") {
+        visible_pairs(plan, library, &mut rng);
+    }
     if plan.has(SOURCE, "stitched_call") {
         let input: Vec<f64> = (0..2 * n).map(|_| f32r(rng.uniform(-4.0, 4.0))).collect();
         // stitched(a, b) = stitch_add(stitch_mul(a, b), a), which may be
@@ -412,6 +578,56 @@ fn dynamic_libraries(plan: &mut Plan, rng: &mut Random) {
             ),
         );
     }
+    // The same kernel compiled by the device: linked against a dynamic
+    // library the device compiles, installed beside the executable, as
+    // it compiles (its exports hidden or not), which the pipeline loads
+    // by that install name; or its calls left undefined for the
+    // pipeline's preloaded library to resolve.
+    let installed = plan.runtime_library(
+        "dynamic_runtime",
+        "dynamic.metal",
+        json!({"install_name": "@executable_path/stela_suite_dynamic_runtime.metallib"}),
+    );
+    for (name, options, preload) in [
+        (
+            "runtime_linked",
+            json!({"libraries": [installed]}),
+            json!([]),
+        ),
+        (
+            "runtime_hidden",
+            json!({"libraries": [installed], "symbol_visibility": "hidden"}),
+            json!([]),
+        ),
+        (
+            "runtime_undefined",
+            json!({"allow_undefined": true}),
+            json!([dynamic]),
+        ),
+    ] {
+        let runtime = plan.runtime_library(
+            &format!("dynamic_user_{name}"),
+            "dynamic_user.metal",
+            options,
+        );
+        plan.add(
+            Case::compute1(
+                &format!("arguments.dynamic_library.{name}"),
+                &runtime,
+                "use_dynamic",
+                n as u32,
+            )
+            .requires(&[], &["dynamic_libraries"])
+            .set("preload", preload)
+            .buffer(Buffer::data("in", 0, f32s(&input)))
+            .buffer(Buffer::zeroed("out", 1, n * 4))
+            .output(
+                Output::new("out", Dtype::F32, Tolerance::exact())
+                    .expect_same(f32s(&expected))
+                    .expect_alternative(f32s(&fused)),
+            ),
+        );
+    }
     let color = [0.25, 0.5, 0.75, 0.125];
     let tinted = [color[2], color[1], color[0], 1.0 - color[3]];
     plan.add(
@@ -440,6 +656,8 @@ fn more_constants(plan: &mut Plan, library: &str) {
     let words = [0xDEAD_BEEFu32, 1, 0x8000_0000, 42];
     let halves = [0.5f64, -1.0, 65504.0, -0.0];
     let floats2 = [3.25f32, -7.5];
+    let (long, ulong) = (-0x1_2345_6789i64, 0xFEDC_BA98_7654_3210u64);
+    let int4 = [-1i32, 2, i32::MIN, i32::MAX];
     let list = json!([
         constant("char", 20, -5),
         constant("uchar", 21, 250),
@@ -448,11 +666,18 @@ fn more_constants(plan: &mut Plan, library: &str) {
         {"type": "uint4", "index": 24, "bytes": base64(&u32s(&words))},
         {"type": "half4", "index": 25, "bytes": base64(&halves.iter().flat_map(|&h| f16_bits(h).to_le_bytes()).collect::<Vec<_>>())},
         {"type": "float2", "index": 26, "bytes": base64(&floats2.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<_>>())},
+        {"type": "long", "index": 27, "bytes": base64(&long.to_le_bytes())},
+        {"type": "ulong", "index": 28, "bytes": base64(&ulong.to_le_bytes())},
+        {"type": "int4", "index": 29, "bytes": base64(&ints(&int4))},
     ]);
     let mut expected = vec![(-5i32) as u32, 250, 65000, (-9i32) as u32, 123_456];
     expected.extend(words);
     expected.extend(halves.map(|h| u32::from(f16_bits(h))));
     expected.extend(floats2.map(f32::to_bits));
+    for v in [long as u64, ulong] {
+        expected.extend([v as u32, (v >> 32) as u32]);
+    }
+    expected.extend(int4.map(|v| v as u32));
     plan.add(
         Case::compute(
             "arguments.constants.more_types",
@@ -462,12 +687,8 @@ fn more_constants(plan: &mut Plan, library: &str) {
             [1, 1, 1],
         )
         .set("constants", list)
-        .buffer(Buffer::zeroed("out", 0, 64))
-        .output(
-            Output::new("out", Dtype::U32, Tolerance::exact())
-                .expect_same(u32s(&expected))
-                .set("length", 60),
-        ),
+        .buffer(Buffer::zeroed("out", 0, 92))
+        .output(Output::exact("out", Dtype::U32, u32s(&expected))),
     );
 }
 
