@@ -7,7 +7,7 @@
 //! Each service runs on a stack of its own, deep enough for a compile. Its
 //! lock means one is enough; opening comes before any caller.
 use super::{
-    BOOT_CPU, Bound, Installed, PAGE, client, installed, pump,
+    BOOT_CPU, Bound, Installed, PAGE, client, installed, look_again, pump,
     stack::{self, Stack},
 };
 use crate::{engine::host, output};
@@ -326,6 +326,7 @@ fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
             note,
             ticks: host::rdtsc,
             served,
+            wake: look_again,
         },
     )))
 }

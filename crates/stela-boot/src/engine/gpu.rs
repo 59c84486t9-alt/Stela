@@ -1147,7 +1147,53 @@ pub(super) fn pump() {
         output::fatal(format_args!("the host's Linux environment failed: {error}"));
     }
     #[cfg(feature = "nvk")]
-    gate::interrupted();
+    if look_due(gpu) {
+        gate::interrupted();
+    }
+}
+
+#[cfg(feature = "nvk")]
+/// The GPU interrupts taken when the Metal services last looked for
+/// completed work.
+static LOOKED: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "nvk")]
+/// A service a call held asked to look again.
+static LOOK: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "nvk")]
+/// When a pump next looks though nothing asked, in host nanoseconds.
+static NEXT_LOOK: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "nvk")]
+/// How long a pump goes without looking when the GPU has not interrupted: a
+/// fence Linux signals outside its interrupt, as a submission or a job's
+/// timeout may, is seen within this.
+const LOOK_FALLBACK_NS: u64 = 10_000_000;
+
+#[cfg(feature = "nvk")]
+/// Whether this pump looks for completed work: each look asks the driver for
+/// each GPU's completion, which only an interrupt makes likely to have moved.
+/// Most pumps run for a call a PE posted or a Linux timer.
+fn look_due(gpu: &Installed) -> bool {
+    let fired = FIRED.load(Ordering::Acquire);
+    let interrupted = LOOKED.swap(fired, Ordering::Relaxed) != fired;
+    let asked = LOOK.swap(false, Ordering::AcqRel);
+    let now = gpu.time.now_ns().unwrap_or(u64::MAX);
+    if interrupted || asked || now >= NEXT_LOOK.load(Ordering::Relaxed) {
+        NEXT_LOOK.store(now.saturating_add(LOOK_FALLBACK_NS), Ordering::Relaxed);
+        return true;
+    }
+    false
+}
+
+#[cfg(feature = "nvk")]
+/// Pumps the service again soon, from any processor, and has that pump look
+/// for completed work.
+fn look_again() {
+    LOOK.store(true, Ordering::Release);
+    if let Some(gpu) = installed() {
+        // This raises a flag and calls the boot PE, so it cannot fail.
+        let _ = gpu.events.notify();
+    }
 }
 
 /// `ticks` of the host counter, cut short to end at Linux's next deadline.

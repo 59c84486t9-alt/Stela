@@ -71,6 +71,9 @@ pub struct ServiceHost {
     pub ticks: fn() -> u64,
     /// Told of each guest call the gate served.
     pub served: fn(Served),
+    /// Asks the platform to call [`SharedService::interrupted`] again soon,
+    /// outside this turn: a turn held the service when the GPU interrupted.
+    pub wake: fn(),
 }
 
 /// A guest call the gate served, in the platform's ticks: the PE that rang
@@ -93,7 +96,8 @@ unsafe impl<B: Backend + Send, C: Compiler + Send> Sync for SharedService<B, C> 
 unsafe impl<B: Backend + Send, C: Compiler + Send> Send for SharedService<B, C> {}
 
 /// A turn at the service.
-pub(super) struct Turn<'a, B: Backend, C: Compiler>(&'a SharedService<B, C>);
+/// The service held, and whether a look in this turn found work completed.
+pub(super) struct Turn<'a, B: Backend, C: Compiler>(&'a SharedService<B, C>, bool);
 
 impl<B: Backend, C: Compiler> Deref for Turn<'_, B, C> {
     type Target = Service<B, C>;
@@ -111,15 +115,25 @@ impl<B: Backend, C: Compiler> DerefMut for Turn<'_, B, C> {
     }
 }
 
+impl<B: Backend, C: Compiler> Turn<'_, B, C> {
+    /// Asks the device what completed for the interrupt that raised `stale`.
+    /// The turn's drop publishes what it found.
+    fn look(&mut self) {
+        self.0.stale.store(false, Ordering::SeqCst);
+        let mut completed = false;
+        // Polling enters Vulkan too. An interrupt can take this path without
+        // a guest call's stack switch around it.
+        (self.0.host.run)(self.0.host.stack, &mut || completed = (**self).signaled());
+        self.1 |= completed;
+    }
+}
+
 impl<B: Backend, C: Compiler> Drop for Turn<'_, B, C> {
     fn drop(&mut self) {
-        // A failed `try_turn` left the look to this holder, which it sees
-        // once `stale` has been raised.
-        let mut completed = false;
-        if self.0.stale.swap(false, Ordering::SeqCst) || self.device().is_lost() {
-            // Polling enters Vulkan too. An interrupt can take this path
-            // without a guest call's stack switch around it.
-            (self.0.host.run)(self.0.host.stack, &mut || completed = (**self).signaled());
+        // A lost device answers without entering the driver.
+        let mut completed = self.1;
+        if self.device().is_lost() {
+            (self.0.host.run)(self.0.host.stack, &mut || completed |= (**self).signaled());
         }
         let device = self.device();
         let reached = if device.is_lost() {
@@ -133,8 +147,11 @@ impl<B: Backend, C: Compiler> Drop for Turn<'_, B, C> {
             self.0.completed.store(true, Ordering::Release);
         }
         self.0.locked.store(false, Ordering::SeqCst);
+        // An interrupt this turn kept from looking is the platform's to look
+        // at again: a guest call's processor would wait for the boot
+        // processor to answer the query on its behalf.
         if self.0.stale.load(Ordering::SeqCst) {
-            self.0.interrupted();
+            (self.0.host.wake)();
         }
     }
 }
@@ -199,7 +216,7 @@ impl<B: Backend, C: Compiler> SharedService<B, C> {
     }
 
     pub(super) fn try_turn(&self) -> Option<Turn<'_, B, C>> {
-        (!self.locked.swap(true, Ordering::SeqCst)).then(|| Turn(self))
+        (!self.locked.swap(true, Ordering::SeqCst)).then(|| Turn(self, false))
     }
 
     fn turn(&self) -> Turn<'_, B, C> {
@@ -223,11 +240,13 @@ impl<B: Backend, C: Compiler> SharedService<B, C> {
         result.expect("the platform runs what it is given")
     }
 
-    /// The GPU interrupted: look for what completed now, or leave that to the
-    /// call under way.
+    /// The GPU interrupted: look for what completed now or, while a call
+    /// holds the service, once it leaves.
     pub fn interrupted(&self) {
         self.stale.store(true, Ordering::SeqCst);
-        drop(self.try_turn());
+        if let Some(mut turn) = self.try_turn() {
+            turn.look();
+        }
     }
 
     /// Closes admission while holding the same turn as guest calls, so a

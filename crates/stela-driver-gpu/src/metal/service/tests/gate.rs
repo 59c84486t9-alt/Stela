@@ -191,6 +191,7 @@ const HOST: ServiceHost = ServiceHost {
     note: |_| {},
     ticks: || 0,
     served: |_| {},
+    wake: || panic!("no turn kept an interrupt from looking"),
 };
 
 /// The GPU finishes what was committed.
@@ -370,18 +371,29 @@ fn every_call_runs_where_the_platform_says() {
 }
 
 #[test]
-fn an_interrupt_during_a_call_is_left_to_that_call() {
-    let shared = SharedService::new(service(), HOST);
+fn an_interrupt_during_a_call_wakes_the_platform_to_look_once_it_leaves() {
+    static WAKES: AtomicUsize = AtomicUsize::new(0);
+    let host = ServiceHost {
+        wake: || {
+            WAKES.fetch_add(1, Ordering::Relaxed);
+        },
+        ..HOST
+    };
+    let shared = SharedService::new(service(), host);
     let connection = connect(&mut shared.try_turn().unwrap());
     commit_shared(&shared, connection);
     complete(&shared);
-    {
-        let turn = shared.try_turn().unwrap();
-        shared.interrupted();
-        assert!(!shared.signaled());
-        drop(turn);
-    }
+    let turn = shared.try_turn().unwrap();
+    shared.interrupted();
+    assert_eq!(WAKES.load(Ordering::Relaxed), 0, "the call still holds it");
+    drop(turn);
+    // The holder does not ask the device itself: that query would run on
+    // the guest call's processor.
+    assert_eq!(WAKES.load(Ordering::Relaxed), 1);
+    assert!(!shared.signaled());
+    shared.interrupted();
     assert!(shared.signaled());
+    assert_eq!(WAKES.load(Ordering::Relaxed), 1, "the look cleared it");
 }
 
 #[test]
