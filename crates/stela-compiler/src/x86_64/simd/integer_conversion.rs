@@ -277,12 +277,71 @@ fn finish_float(code: &mut Code, operand: &IntegerConversion) {
     commit(code, operand.float, RESULT_VECTOR);
 }
 
+fn word_to_double(
+    code: &mut Code,
+    operand: &IntegerConversion,
+    register: Register,
+    signed: bool,
+    pc: GuestAddress,
+) {
+    // The shared FP completion refuses enabled exception traps. Keep that
+    // boundary even though every W input converts exactly to binary64.
+    test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
+    let enabled = branch(code, Condition::NotZero);
+
+    // Exact integer conversion changes neither MXCSR nor FPSR. Start with
+    // a zero upper lane and read the old upper lane only for NEP merging.
+    packed(code, Host::Xor, RESULT_VECTOR, RESULT_VECTOR);
+    let mut asm = code.asm();
+    match (signed, asm.guest(register)) {
+        (true, Some(source)) => {
+            asm.cvtsi2float(FloatLanes::ScalarDouble, Size::Dword, RESULT_VECTOR, source);
+        }
+        (_, source) => {
+            if let Some(source) = source {
+                asm.mov_load(Size::Dword, Rax, source);
+            } else {
+                asm.alu(Alu::Xor, Size::Dword, Rax, Rax);
+            }
+            asm.cvtsi2float(FloatLanes::ScalarDouble, Size::Qword, RESULT_VECTOR, Rax);
+        }
+    }
+    test_control(code, FPCR_NEP);
+    let no_merge = branch(code, Condition::Zero);
+    code.asm()
+        .movhps(RESULT_VECTOR, guest(vector_offset(operand.float) + 8));
+    let commit_start = code.len();
+    resolve(code, no_merge, commit_start);
+    commit(code, operand.float, RESULT_VECTOR);
+    let done = jump(code);
+    let helper_start = code.len();
+    resolve(code, enabled, helper_start);
+    helper(code, pc);
+    let end = code.len();
+    resolve(code, done, end);
+}
+
 pub(in crate::x86_64) fn from_integer(
     code: &mut Code,
     operand: &IntegerConversion,
     pc: GuestAddress,
     target: TargetCpu,
 ) {
+    if let IntegerOperand::General {
+        register,
+        format:
+            IntegerFormat {
+                width: IntegerWidth::Bits32,
+                signed,
+            },
+    } = operand.integer
+        && operand.format == Format::Double
+        && operand.frac_bits == 0
+        && !target.data_independent_timing()
+    {
+        word_to_double(code, operand, register, signed, pc);
+        return;
+    }
     if operand.format == Format::Half && !half_supported(operand, target) {
         // S->H after integer->S can double round; there is no baseline H CVT.
         helper(code, pc);
@@ -671,4 +730,88 @@ pub(in crate::x86_64) fn javascript(
     asm.alu_imm8(Alu::Xor, Size::Dword, Rcx, INEXACT as i8);
     asm.shift_imm(ShiftOp::Shl, Size::Dword, Rcx, shift);
     flag_word::store(&mut asm, Rcx);
+}
+
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+#[test]
+fn exact_word_to_double_keeps_source_rows_status_and_nep() {
+    use crate::{
+        GuestState, Options,
+        aarch64::floating::{FPCR_AH, FPCR_ROUNDING_SHIFT},
+        block::{BlockProfile, CompilationPlan},
+        x86_64::native::run,
+    };
+
+    let pc = GuestAddress(0x1000120c0);
+    let target = TargetCpu::Baseline;
+    let compile = |word: u32, target| {
+        let source = [word, 0xd65f_03c0].map(u32::to_le_bytes).concat();
+        CompilationPlan::new(&source, pc, &Options::new(BlockProfile::ORDINARY, target))
+            .unwrap()
+            .compile()
+            .unwrap()
+            .native
+    };
+    let uses_environment = |code: &[u8]| code.windows(2).any(|word| word == [0x0f, 0xae]);
+    for (word, source, destination, signed) in [
+        (0x1e62_0262, 19, 2, true), // SCVTF D2,W19 from Geekbench.
+        (0x1e63_0120, 9, 0, false), // UCVTF D0,W9 from Geekbench.
+        (0x1e62_03e2, 31, 2, true),
+        (0x1e63_03e0, 31, 0, false),
+    ] {
+        let native = compile(word, target);
+        assert_eq!(native.source_map.len(), 2);
+        assert_eq!(native.source_map[0], (pc, 0));
+        assert_eq!(native.source_map[1].0, GuestAddress(pc.0 + 4));
+        assert!(!uses_environment(&native.x86_64_code));
+        let dit = compile(word, target.with_data_independent_timing());
+        assert!(uses_environment(&dit.x86_64_code));
+        for bits in [0, 1, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff] {
+            for nep in [0, FPCR_NEP] {
+                for rounding in 0..4 {
+                    let mut initial = GuestState {
+                        fpcr: nep
+                            | FPCR_FIZ
+                            | FPCR_FZ
+                            | FPCR_AH
+                            | (rounding << FPCR_ROUNDING_SHIFT),
+                        fpsr: 0x0800_009f,
+                        nzcv: 0xb000_0000,
+                        ..GuestState::default()
+                    };
+                    initial.x[30] = 0x4000;
+                    if source != 31 {
+                        initial.x[source] = 0xdead_beef_0000_0000 | u64::from(bits);
+                    }
+                    initial.v[destination] = [u64::MAX, 0x1234_5678_9abc_def0];
+                    let mut expected = initial.clone();
+                    let value = if source == 31 { 0 } else { bits };
+                    let result = if signed {
+                        f64::from(value as i32)
+                    } else {
+                        f64::from(value)
+                    };
+                    expected.v[destination][0] = result.to_bits();
+                    if nep == 0 {
+                        expected.v[destination][1] = 0;
+                    }
+                    let mut actual = initial.clone();
+                    assert_eq!(run(&native.x86_64_code, &mut actual), 0x4000);
+                    assert_eq!(actual, expected);
+
+                    initial.fpcr |= FPCR_EXCEPTION_ENABLE_MASK;
+                    let mut actual = initial.clone();
+                    assert_eq!(run(&native.x86_64_code, &mut actual), pc.0);
+                    assert_eq!(actual, initial);
+                }
+            }
+        }
+    }
+    for word in [0x1e22_0262, 0x9e62_0262, 0x1e42_c120] {
+        assert!(uses_environment(&compile(word, target).x86_64_code));
+    }
 }
