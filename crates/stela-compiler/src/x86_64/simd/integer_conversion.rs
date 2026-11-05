@@ -770,7 +770,7 @@ fn exact_word_to_double_keeps_source_rows_status_and_nep() {
         assert!(!uses_environment(&native.x86_64_code));
         let dit = compile(word, target.with_data_independent_timing());
         assert!(uses_environment(&dit.x86_64_code));
-        for bits in [0, 1, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff] {
+        for bits in [0u32, 1, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff] {
             for nep in [0, FPCR_NEP] {
                 for rounding in 0..4 {
                     let mut initial = GuestState {
