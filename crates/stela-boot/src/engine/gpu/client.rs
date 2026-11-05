@@ -889,11 +889,14 @@ pub(super) fn pool_report(tsc_hz: u64) -> Option<alloc::string::String> {
     let mut line = alloc::string::String::new();
     let _ = write!(
         line,
-        "GPU WORKERS workers={} idle={} starting={} queued={} oldest_ms={oldest} serving:{serving}",
+        "GPU WORKERS workers={} idle={} starting={} queued={} oldest_ms={oldest} pending={} \
+         timer_failure={:?} serving:{serving}",
         service.workers.get(),
         service.idle.get(),
         service.starting.get(),
         queue.len(),
+        gpu.events.pending.load(Ordering::Relaxed),
+        stela_linux::service::timer_delivery_failure(),
     );
     Some(line)
 }
