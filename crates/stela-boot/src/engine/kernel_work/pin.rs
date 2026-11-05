@@ -77,10 +77,12 @@ fn boxed(view: View) -> Result<Box<View>, MemoryError> {
 /// Preparing and zeros its entire usable range. No callback, byte user,
 /// DMA producer, root/cache mutation or stack loan overlaps the export.
 pub(super) unsafe fn export(backing: &Backing, epoch: u64) -> Result<PinnedPages, MemoryError> {
+    // Linux prepares children on the entered original loader root. The
+    // same pinned stack mapping is shared with Host and verified at mount.
     backing
         ._reservation
         .identity
-        .check_current()
+        .check_clock_root()
         .map_err(|_| MemoryError::Unavailable)?;
     if backing._reservation.identity.in_interrupt() {
         return Err(MemoryError::Unavailable);
