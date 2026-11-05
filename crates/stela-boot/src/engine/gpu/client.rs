@@ -3,9 +3,9 @@
 //!
 //! Linux's files belong to the environment on the boot CPU, so a PE posts its
 //! call, ends the boot PE's slice and spins: an ioctl costs the caller a
-//! round trip, not a core. Each call runs as a Linux task, since an ioctl may
-//! sleep on the GPU. On the boot CPU itself there is no one to wait for, so the
-//! caller runs the environment until its call is done.
+//! round trip, not a core. Each call runs on one of a few standing Linux
+//! tasks, since an ioctl may sleep on the GPU. On the boot CPU itself there is
+//! no one to wait for, so the caller runs the environment until its call is done.
 //!
 //! A thread Mesa starts is a Linux task too, as Linux's own kthreads are, so it
 //! makes its calls in place and sleeps in Linux. It runs Mesa on a stack of its
@@ -21,11 +21,12 @@ use crate::{engine::host, output};
 use alloc::{
     alloc::{Layout, alloc, dealloc},
     boxed::Box,
+    collections::VecDeque,
     rc::Rc,
     vec::Vec,
 };
 use core::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     ffi::{CStr, c_char, c_int, c_long, c_uint, c_ulong, c_void},
     hint,
     pin::Pin,
@@ -379,38 +380,134 @@ unsafe fn perform(gpu: &Installed, operation: Operation) -> i64 {
     }
 }
 
-struct RequestJob {
+/// How long a worker waits for a call before it leaves, while another stays.
+const IDLE_SECONDS: u64 = 10;
+
+/// The word idle workers sleep on, bumped as calls are queued.
+static ARRIVALS: AtomicU32 = AtomicU32::new(0);
+
+/// The Linux tasks that serve posted calls, and Mesa's threads. On the boot CPU.
+///
+/// A task costs Linux's kthreadd round trip and one of its few stacks, so
+/// workers stay and take calls from one queue: a call waits for a worker
+/// instead of failing for one. The pool grows while each worker is busy, as
+/// one may sleep on the GPU, and shrinks back to one worker when idle.
+#[derive(Default)]
+pub(super) struct Service {
+    children: RefCell<Vec<Child>>,
+    /// Calls no worker has taken yet, oldest first.
+    queue: RefCell<VecDeque<NonNull<Request>>>,
+    /// Workers accepted and not yet left.
+    workers: Cell<usize>,
+    /// Workers accepted and not yet running.
+    starting: Cell<usize>,
+    /// Workers waiting for a call.
+    idle: Cell<usize>,
+    /// Whether a task waiting in Linux must look at its word again.
+    wake_task: Cell<bool>,
+}
+
+impl Service {
+    fn wake(&self, wake: bool) {
+        self.wake_task.set(self.wake_task.get() || wake);
+    }
+
+    /// Answers every queued call with `result`, as no worker is left to.
+    fn refuse_queued(&self, result: i64) {
+        let queued = core::mem::take(&mut *self.queue.borrow_mut());
+        for request in queued {
+            // SAFETY: a queued call's poster keeps it until it is done.
+            self.wake(unsafe { request.as_ref() }.refuse(result));
+        }
+    }
+}
+
+/// An accepted original child: a worker, or a Mesa thread whose request waits
+/// for it to start.
+struct Child {
+    job: Pending,
+    ran: Rc<Cell<bool>>,
+    thread: Option<NonNull<Request>>,
+}
+
+struct Worker {
+    ran: Rc<Cell<bool>>,
+}
+
+// SAFETY: a worker takes each call off the queue before performing it, and
+// the call's poster keeps it until done. The job holds nothing else.
+unsafe impl ManagedJob for Worker {
+    fn run(self: Pin<&mut Self>) {
+        self.ran.set(true);
+        let gpu = installed().expect("workers have a running environment");
+        let service = &gpu.service;
+        service.starting.set(service.starting.get() - 1);
+        let idle_ticks = IDLE_SECONDS.saturating_mul(gpu.tsc_hz);
+        let mut idle_since = None;
+        loop {
+            // Read before the queue, so a call queued after it ends the wait.
+            let seen = ARRIVALS.load(Ordering::Acquire);
+            let next = service.queue.borrow_mut().pop_front();
+            if let Some(request) = next {
+                idle_since = None;
+                // SAFETY: a queued call's poster keeps it until it is done.
+                serve(gpu, unsafe { request.as_ref() });
+                continue;
+            }
+            let now = host::rdtsc();
+            let since = *idle_since.get_or_insert(now);
+            if now.wrapping_sub(since) >= idle_ticks && service.workers.get() > 1 {
+                service.workers.set(service.workers.get() - 1);
+                return;
+            }
+            service.idle.set(service.idle.get() + 1);
+            // SAFETY: an original task, sleeping on a static word.
+            unsafe { client::wait(ARRIVALS.as_ptr(), seen, IDLE_SECONDS * 1_000_000_000) };
+            service.idle.set(service.idle.get() - 1);
+        }
+    }
+}
+
+/// Performs `request` on this task and answers its poster.
+fn serve(gpu: &Installed, request: &Request) {
+    let code = request_code(&request.operation);
+    let started = host::rdtsc();
+    // SAFETY: an original task entered in the canonical Linux owner. The
+    // poster keeps the operation's inputs until it is done.
+    let result = unsafe { perform(gpu, request.operation) };
+    count(&SERVED, code, host::rdtsc().wrapping_sub(started));
+    if request.complete(result) {
+        // SAFETY: the same source task owns the Linux wait queue.
+        unsafe { client::wake() };
+    }
+}
+
+struct ThreadJob {
     request: NonNull<Request>,
-    completed: Rc<Cell<bool>>,
+    ran: Rc<Cell<bool>>,
     thread: Option<(Box<Thread>, Stack)>,
 }
 
-// SAFETY: the caller retains the posted record through completion. After
-// completion neither the job nor its join dereferences the request again.
-// Thread storage remains owned by the job through native and source join.
-unsafe impl ManagedJob for RequestJob {
+// SAFETY: the poster keeps the request until its completion, after which
+// the job does not touch it. The thread's storage stays with the job.
+unsafe impl ManagedJob for ThreadJob {
     fn run(mut self: Pin<&mut Self>) {
-        let gpu = installed().expect("managed requests have a running environment");
-        // SAFETY: the request stays live through its release acknowledgement.
+        self.ran.set(true);
+        let gpu = installed().expect("threads have a running environment");
+        // SAFETY: the request stays live until it is completed below.
         let request = unsafe { self.request.as_ref() };
-        let code = request_code(&request.operation);
-        let started = host::rdtsc();
-        let result = if let Operation::Thread(thread) = request.operation {
-            // SAFETY: this original child is the sole consumer of the box.
-            let thread = unsafe { Box::from_raw(thread) };
-            if let Some(stack) = Stack::map(gpu.window, THREAD_STACK_BYTES) {
+        let Operation::Thread(thread) = request.operation else {
+            unreachable!("a thread job carries a thread request")
+        };
+        // SAFETY: this original child is the sole consumer of the box.
+        let thread = unsafe { Box::from_raw(thread) };
+        let result = match Stack::map(gpu.window, THREAD_STACK_BYTES) {
+            Some(stack) => {
                 self.thread = Some((thread, stack));
                 0
-            } else {
-                EAGAIN
             }
-        } else {
-            // SAFETY: the broker entered the canonical Linux owner on this
-            // original task. The requester retains the operation's inputs.
-            unsafe { perform(gpu, request.operation) }
+            None => EAGAIN,
         };
-        count(&SERVED, code, host::rdtsc().wrapping_sub(started));
-        self.completed.set(true);
         if request.complete(result) {
             // SAFETY: the same source task owns the Linux wait queue.
             unsafe { client::wake() };
@@ -421,55 +518,110 @@ unsafe impl ManagedJob for RequestJob {
     }
 }
 
-pub(super) struct PendingRequest {
-    job: Pending,
-    request: NonNull<Request>,
-    completed: Rc<Cell<bool>>,
-}
-
-fn join_requests(gpu: &Installed) {
-    let mut requests = gpu.requests.take();
+fn join_children(gpu: &Installed) {
+    let service = &gpu.service;
+    let mut children = service.children.take();
     let mut index = 0;
-    while index < requests.len() {
-        if !requests[index].job.status().joined {
+    while index < children.len() {
+        if !children[index].job.status().joined {
             index += 1;
             continue;
         }
-        let PendingRequest {
-            job,
-            request,
-            completed,
-        } = requests.swap_remove(index);
+        let Child { job, ran, thread } = children.swap_remove(index);
         // SAFETY: same taskless dispatcher, after all active C/native frames
         // have returned, with no source or metadata loan.
         match unsafe { job.try_join() } {
             Ok(joined) => {
-                if !completed.get() {
-                    if !matches!(
-                        joined.outcome(),
-                        Outcome::CreationFailed(_) | Outcome::Skipped(_)
-                    ) {
-                        output::fatal(format_args!(
-                            "Linux request ended before completion: {:?}",
-                            joined.outcome()
-                        ));
-                    }
+                let outcome = joined.outcome();
+                // A task that ran returns; one that did not was never created.
+                let expected = if ran.get() {
+                    outcome == Outcome::CallbackReturned
+                } else {
+                    matches!(outcome, Outcome::CreationFailed(_) | Outcome::Skipped(_))
+                };
+                if !expected {
+                    output::fatal(format_args!("a Linux GPU task ended early: {outcome:?}"));
+                }
+                if ran.get() {
+                    continue;
+                }
+                match thread {
                     // SAFETY: the poster still waits and no callback took the box.
-                    let wake = unsafe { request.as_ref() }.refuse(ENOMEM);
-                    gpu.wake_task.set(gpu.wake_task.get() || wake);
+                    Some(request) => service.wake(unsafe { request.as_ref() }.refuse(EAGAIN)),
+                    None => {
+                        service.starting.set(service.starting.get() - 1);
+                        service.workers.set(service.workers.get() - 1);
+                        if service.workers.get() == 0 {
+                            service.refuse_queued(ENOMEM);
+                        }
+                    }
                 }
             }
             Err(job) => {
-                requests.push(PendingRequest {
-                    job,
-                    request,
-                    completed,
-                });
+                children.push(Child { job, ran, thread });
                 break;
             }
         }
     }
-    gpu.requests.replace(requests);
+    service.children.replace(children);
+}
+
+/// Starts a worker for each queued call beyond those idle or starting. With
+/// none to be had, the calls wait for a busy worker, or with no worker at all
+/// fail as out of memory.
+fn grow(gpu: &Installed) -> Result<(), WorkError> {
+    let service = &gpu.service;
+    while service.queue.borrow().len() > service.idle.get() + service.starting.get() {
+        let ran = Rc::new(Cell::new(false));
+        let worker = Box::pin(Worker { ran: ran.clone() });
+        // SAFETY: the exact dispatcher and installed owner retain the
+        // original child, which takes only queued calls their posters keep.
+        match unsafe { gpu.threads.submit(worker) } {
+            Ok(job) => {
+                service.workers.set(service.workers.get() + 1);
+                service.starting.set(service.starting.get() + 1);
+                service.children.borrow_mut().push(Child {
+                    job,
+                    ran,
+                    thread: None,
+                });
+            }
+            Err(refusal) => match refusal.error {
+                SubmitError::Capacity => {
+                    if service.workers.get() == 0 {
+                        service.refuse_queued(ENOMEM);
+                    }
+                    break;
+                }
+                SubmitError::Context(error) => return Err(error),
+            },
+        }
+    }
+    Ok(())
+}
+
+/// Starts Mesa's thread on a task of its own, or refuses it for want of one.
+fn start_thread(gpu: &Installed, request: &Request) -> Result<(), WorkError> {
+    let ran = Rc::new(Cell::new(false));
+    let job = Box::pin(ThreadJob {
+        request: NonNull::from(request),
+        ran: ran.clone(),
+        thread: None,
+    });
+    // SAFETY: the exact dispatcher and installed owner retain the original
+    // child, and the poster keeps the request until it is completed.
+    match unsafe { gpu.threads.submit(job) } {
+        Ok(job) => gpu.service.children.borrow_mut().push(Child {
+            job,
+            ran,
+            thread: Some(NonNull::from(request)),
+        }),
+        Err(refusal) => match refusal.error {
+            SubmitError::Capacity => gpu.service.wake(request.refuse(EAGAIN)),
+            SubmitError::Context(error) => return Err(error),
+        },
+    }
+    Ok(())
 }
 
 unsafe extern "C" fn wake_waiters(_: *mut c_void) {
@@ -535,68 +687,61 @@ unsafe extern "C" fn serve_wake(context: *mut c_void) {
     request.complete(0);
 }
 
-/// Admit posted operations in the dispatcher. General capacity refusal is an
-/// immediate resource failure; queued operations must not depend on a later
-/// unaccepted ioctl or thread startup. Wake leaves use the reserved service.
+/// Queues posted calls for the workers, oldest first, and starts Mesa's
+/// threads. Wake leaves use the reserved service.
 pub(super) fn start(gpu: &Installed) -> Result<(), WorkError> {
-    join_requests(gpu);
+    join_children(gpu);
+    let service = &gpu.service;
     let mut request = REQUESTS
         .swap(ptr::null_mut(), Ordering::Acquire)
         .cast_const();
     let mut deferred = false;
-    // Capacity refusal must not hide a Wake behind occupied original children.
+    let mut queued = false;
+    // The posted list is newest first, so each goes ahead of the one before.
+    let oldest = service.queue.borrow().len();
     // SAFETY: captured requests stay live until their completion is published.
     while let Some(current) = unsafe { request.as_ref() } {
         let next = current.next.get();
-        if matches!(current.operation, Operation::Wake) {
-            // SAFETY: the poster holds the record until this reserved leaf runs.
-            match unsafe {
-                gpu.owner
-                    .environment()
-                    .defer_service(serve_wake, request.cast_mut().cast())
-            } {
-                Ok(()) => {}
-                Err(WorkError::Full) => {
-                    post(current);
-                    deferred = true;
-                }
-                Err(error) => return Err(error),
-            }
-        } else {
-            let completed = Rc::new(Cell::new(false));
-            let request = NonNull::from(current);
-            let job = Box::pin(RequestJob {
-                request,
-                completed: completed.clone(),
-                thread: None,
-            });
-            // SAFETY: the exact dispatcher and installed owner retain the
-            // original child and the caller retains the record through completion.
-            match unsafe { gpu.threads.submit(job) } {
-                Ok(job) => gpu.requests.borrow_mut().push(PendingRequest {
-                    job,
-                    request,
-                    completed,
-                }),
-                Err(refusal) => match refusal.error {
-                    SubmitError::Capacity => {
-                        let wake = current.refuse(ENOMEM);
-                        gpu.wake_task.set(gpu.wake_task.get() || wake);
+        match current.operation {
+            Operation::Wake => {
+                // SAFETY: the poster holds the record until this reserved leaf runs.
+                match unsafe {
+                    gpu.owner
+                        .environment()
+                        .defer_service(serve_wake, request.cast_mut().cast())
+                } {
+                    Ok(()) => {}
+                    Err(WorkError::Full) => {
+                        post(current);
+                        deferred = true;
                     }
-                    SubmitError::Context(error) => return Err(error),
-                },
+                    Err(error) => return Err(error),
+                }
+            }
+            Operation::Thread(_) => start_thread(gpu, current)?,
+            _ => {
+                service
+                    .queue
+                    .borrow_mut()
+                    .insert(oldest, NonNull::from(current));
+                queued = true;
             }
         }
         request = next;
     }
-    if gpu.wake_task.get() {
+    if queued {
+        ARRIVALS.fetch_add(1, Ordering::Release);
+        service.wake(service.idle.get() != 0);
+    }
+    grow(gpu)?;
+    if service.wake_task.get() {
         // SAFETY: this wake needs no caller storage and cannot sleep.
         match unsafe {
             gpu.owner
                 .environment()
                 .defer_service(wake_waiters, ptr::null_mut())
         } {
-            Ok(()) => gpu.wake_task.set(false),
+            Ok(()) => service.wake_task.set(false),
             Err(WorkError::Full) => deferred = true,
             Err(error) => return Err(error),
         }

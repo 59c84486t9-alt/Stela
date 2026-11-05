@@ -1264,9 +1264,7 @@ struct Installed {
     #[cfg(feature = "nvk")]
     mesa_threads: RefCell<BTreeMap<u64, client::Running>>,
     #[cfg(feature = "nvk")]
-    requests: RefCell<Vec<client::PendingRequest>>,
-    #[cfg(feature = "nvk")]
-    wake_task: Cell<bool>,
+    service: client::Service,
     owner: &'static Arc<LinuxKernel>,
     threads: &'static LinuxThreads,
     start: ManuallyDrop<Started>,
@@ -1468,9 +1466,7 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         #[cfg(feature = "nvk")]
         mesa_threads: RefCell::new(BTreeMap::new()),
         #[cfg(feature = "nvk")]
-        requests: RefCell::new(Vec::new()),
-        #[cfg(feature = "nvk")]
-        wake_task: Cell::new(false),
+        service: client::Service::default(),
         owner,
         threads,
         start: job,
