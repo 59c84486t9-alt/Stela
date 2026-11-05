@@ -3,6 +3,7 @@
 #include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
+#include <linux/irq_work.h>
 #include <linux/limits.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -142,7 +143,7 @@ static void refused_worker_keeps_callback_until_explicit_recovery(const struct s
 	/* This is an explicit model resource-availability event. The service's
 	 * native Runtime event subscription remains an integration prerequisite. */
 	control->workers(control->context, false);
-	stela_linux_srcu_retry();
+	irq_work_run();
 	wait_for_completion(&item.done);
 	srcu_barrier(&domain);
 	assert(item.calls == 1);

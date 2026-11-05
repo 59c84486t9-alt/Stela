@@ -2410,14 +2410,16 @@ static int wake_state(struct task_struct *linux_task, unsigned int state)
 	struct stela_linux_task *task = allocated_task(linux_task);
 	if (!task || !refcount_read(&task->linux_task->usage))
 		__builtin_trap();
-	if (!task->attached || !task->context.sequence || !task->ops)
-		__builtin_trap();
 	guard(raw_spinlock_irqsave)(&linux_task->pi_lock);
 	/* Full wake barrier pairs with original set_current_state before the
 	 * genuine predicate/park. No preemptive Linux ISR can enter this port. */
 	smp_mb();
 	if (!(READ_ONCE(linux_task->__state) & state))
 		return 0;
+	/* A newly published runnable child can be woken before its first
+	 * dispatch. Only a matching sleep state needs an attached wake target. */
+	if (!task->attached || !task->context.sequence || !task->ops)
+		__builtin_trap();
 	/* Publish the generation-safe signal before changing C state. Failure
 	 * under a held live ref is corruption and must not lose a wake. */
 	if (task->ops->wake_target(task->binding, task->context.sequence))

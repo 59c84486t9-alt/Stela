@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
-/* Linux's workqueues on the existing fixture's real Runtime tasks: the owner
- * starts each requested worker as a General job. */
+/* Linux's workqueues on the original worker tasks. */
 #include <linux/interrupt.h>
 #include <linux/errno.h>
 #include <linux/err.h>
@@ -13,8 +12,6 @@
 #include <stela/test.h>
 #include <stela/workqueue.h>
 
-void stela_linux_workqueue_test_bind(void *context, int (*start_worker)(void *context, unsigned int kind));
-void stela_linux_workqueue_test_worker(void *context, unsigned int kind);
 void stela_linux_workqueue_test_main(void *context);
 void stela_linux_i2c_test(void);
 void stela_linux_sync_test(void);
@@ -28,13 +25,6 @@ static s64 now_ns(void *context)
 	return stela_linux_test_now;
 }
 
-struct start {
-	void *context;
-	int (*start_worker)(void *context, unsigned int kind);
-};
-
-static struct start start;
-static unsigned int started;
 static struct kthread_worker *dedicated;
 static struct kthread_work dedicated_work, dedicated_cancelled;
 static unsigned int dedicated_runs;
@@ -70,13 +60,6 @@ static void dedicated_identity_and_join(void)
 }
 
 static void dedicated_exhaustion_preserves_both_workqueue_pools(void);
-static int start_worker(void *context, unsigned int kind)
-{
-	(void)context;
-	started++;
-	return start.start_worker(start.context, kind);
-}
-
 static bool forced;
 
 static void shutdown(void *context, bool force)
@@ -128,7 +111,6 @@ static int irq_retire(void *context, unsigned int irq)
 
 static const struct stela_linux_services services = {
 	.now_ns = now_ns,
-	.start_worker = start_worker,
 	.shutdown = shutdown,
 	.irq_enable = irq_enable,
 	.irq_disable = irq_disable,
@@ -138,29 +120,17 @@ static const struct stela_linux_owner owner = {.services = &services};
 
 const struct stela_linux_owner *stela_linux_workqueue_test_owner(void) { return &owner; }
 
-void stela_linux_workqueue_test_bind(void *context, int (*start_worker_fn)(void *context, unsigned int kind))
-{
-	start = (struct start){.context = context, .start_worker = start_worker_fn};
-}
-
-void stela_linux_workqueue_test_worker(void *context, unsigned int kind)
-{
-	(void)context;
-	stela_linux_enter(&owner);
-	stela_linux_workers_run(kind);
-	stela_linux_exit();
-}
-
 static struct workqueue_struct *wq, *ordered;
 static struct work_struct outer, inner, steps[3], cancelled, shared;
 static struct delayed_work later;
+static struct task_struct *outer_task;
 static bool outer_done, inner_done, shared_done, later_done, cancelled_ran;
 static char order[4];
 static unsigned int order_length;
 
 static void run_inner(struct work_struct *work)
 {
-	assert(work == &inner && current_work() == &inner);
+	assert(work == &inner && current_work() == &inner && current != outer_task);
 	inner_done = true;
 }
 
@@ -168,6 +138,7 @@ static void run_inner(struct work_struct *work)
 static void run_outer(struct work_struct *work)
 {
 	assert(work == &outer && !work_pending(work));
+	outer_task = current;
 	assert(queue_work(wq, &inner) && !queue_work(wq, &inner));
 	assert(flush_work(&inner) && inner_done);
 	outer_done = true;
@@ -294,7 +265,6 @@ void stela_linux_workqueue_test_main(void *context)
 	INIT_WORK(&inner, run_inner);
 	assert(queue_work(wq, &outer));
 	assert(flush_work(&outer) && outer_done && inner_done && !flush_work(&outer));
-	assert(started >= 2);
 	for (int i = 0; i < 3; i++) {
 		INIT_WORK(&steps[i], run_step);
 		assert(queue_work(ordered, &steps[i]));

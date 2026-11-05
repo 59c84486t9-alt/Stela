@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
-/* Linux's timers, timed sleeps, wait queues, completions and bit waits on
- * the existing fixture's real Runtime tasks. A service task delivers expired
- * timers as the owner's service does; the fixture publishes jiffies from its
- * clock as the platform's tick does. */
+/* Original timer and wait APIs on a source child, with delivery owned by
+ * the mounted Initial's regular service loop. */
 #include <linux/completion.h>
+#include <linux/hrtimer.h>
 #include <linux/jiffies.h>
 #include <linux/sched.h>
+#include <linux/timekeeping.h>
 #include <linux/timer.h>
 #include <linux/wait.h>
 #include <linux/wait_bit.h>
@@ -13,35 +13,7 @@
 #include <stela/test.h>
 #include <stela/timer.h>
 
-void stela_linux_timer_test_service(void *context);
-void stela_linux_timer_test_sleeper(void *context);
-
-struct timer_service_call {
-	void *context;
-	/* Begin the service's next due batch; false when none is due. */
-	bool (*begin)(void *context);
-	/* Finish it with the earliest pending expiry, when one is armed. */
-	void (*finish)(void *context, bool armed, unsigned long expires);
-	bool (*done)(void *context);
-};
-
-void stela_linux_timer_test_service(void *context)
-{
-	const struct timer_service_call *call = context;
-	stela_linux_enter(&stela_linux_bare);
-	while (!call->done(call->context)) {
-		if (!call->begin(call->context)) {
-			set_current_state(TASK_UNINTERRUPTIBLE);
-			schedule();
-			continue;
-		}
-		stela_linux_timers_run();
-		unsigned long expires;
-		bool armed = stela_linux_timers_next(&expires);
-		call->finish(call->context, armed, expires);
-	}
-	stela_linux_exit();
-}
+void stela_linux_timer_test_sleeper(void);
 
 static unsigned int counted;
 static struct timer_list first, second, waker, completer, clearer;
@@ -75,10 +47,8 @@ static void clear_bit_zero(struct timer_list *timer)
 	clear_and_wake_up_bit(0, &word);
 }
 
-void stela_linux_timer_test_sleeper(void *context)
+static void timer_list_waits(void)
 {
-	(void)context;
-	stela_linux_enter(&stela_linux_bare);
 	unsigned long expires;
 	assert(!stela_linux_timers_next(&expires));
 	timer_setup(&first, count, 0);
@@ -114,5 +84,70 @@ void stela_linux_timer_test_sleeper(void *context)
 	timer_setup(&clearer, clear_bit_zero, 0);
 	mod_timer(&clearer, jiffies + 2);
 	assert(!wait_on_bit(&word, 0, TASK_UNINTERRUPTIBLE) && !test_bit(0, &word));
-	stela_linux_exit();
+}
+
+static DECLARE_COMPLETION(high_fired);
+static unsigned int fires;
+
+static enum hrtimer_restart once(struct hrtimer *timer)
+{
+	assert(ktime_get() >= hrtimer_get_softexpires(timer));
+	fires++;
+	complete(&high_fired);
+	return HRTIMER_NORESTART;
+}
+
+static enum hrtimer_restart periodic(struct hrtimer *timer)
+{
+	fires++;
+	assert(hrtimer_active(timer) && hrtimer_try_to_cancel(timer) == -1);
+	const ktime_t period = ms_to_ktime(100);
+	ktime_t expiry = hrtimer_get_expires(timer);
+	/* Observe at least two missed periods and leave room for the waiting
+	 * task to cancel the restart after the real dispatcher resumes it. */
+	ktime_t sample = max(ktime_get(), expiry + ms_to_ktime(250));
+	u64 periods = (u64)((sample - expiry) / period) + 1;
+	assert(hrtimer_forward(timer, sample, period) == periods);
+	assert(hrtimer_get_expires(timer) > sample);
+	complete(&high_fired);
+	return HRTIMER_RESTART;
+}
+
+static void hrtimer_waits(void)
+{
+	struct hrtimer timer, earlier;
+
+	hrtimer_setup(&timer, once, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	assert(!hrtimer_active(&timer));
+	hrtimer_start(&timer, ms_to_ktime(5), HRTIMER_MODE_REL);
+	assert(hrtimer_active(&timer) && !fires);
+	wait_for_completion(&high_fired);
+	assert(fires == 1 && !hrtimer_active(&timer));
+	assert(!hrtimer_cancel(&timer));
+
+	/* An already-expired timer runs, and cancelling a different timer
+	 * leaves that expiry intact. */
+	hrtimer_setup(&earlier, once, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
+	hrtimer_start(&earlier, ktime_get() - 1, HRTIMER_MODE_ABS);
+	hrtimer_start(&timer, ms_to_ktime(50), HRTIMER_MODE_REL);
+	assert(hrtimer_cancel(&timer) && hrtimer_active(&earlier));
+	wait_for_completion(&high_fired);
+	assert(fires == 2 && !hrtimer_active(&earlier));
+
+	fires = 0;
+	hrtimer_setup(&timer, periodic, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	hrtimer_start(&timer, ms_to_ktime(10), HRTIMER_MODE_REL);
+	wait_for_completion(&high_fired);
+	assert(fires == 1 && hrtimer_active(&timer));
+	assert(hrtimer_cancel(&timer) && !hrtimer_active(&timer));
+
+	ktime_t timeout = ms_to_ktime(2);
+	set_current_state(TASK_UNINTERRUPTIBLE);
+	assert(!schedule_hrtimeout(&timeout, HRTIMER_MODE_REL));
+}
+
+void stela_linux_timer_test_sleeper(void)
+{
+	timer_list_waits();
+	hrtimer_waits();
 }

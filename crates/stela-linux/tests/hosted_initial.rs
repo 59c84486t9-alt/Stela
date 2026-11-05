@@ -53,6 +53,33 @@ struct Host {
     random: RefCell<stela_linux::random::Seeded>,
 }
 
+struct HostDeadline {
+    clock: Arc<HostedClock>,
+    target_ns: u64,
+}
+
+// SAFETY: the deadline retains the same checked host clock as the runtime.
+// Its target comes from that clock and supplies no native timing authority.
+unsafe impl MinimumDeadline for HostDeadline {
+    fn ready(&self) -> Result<bool, WorkError> {
+        Ok(self.clock.now_ns()? >= self.target_ns)
+    }
+
+    fn wake_ns(&self) -> Result<i64, WorkError> {
+        self.clock.now_ns()?;
+        self.target_ns.try_into().map_err(|_| WorkError::Exhausted)
+    }
+
+    fn remaining_quanta_ceil(&self, quantum_us: u64) -> Result<u64, WorkError> {
+        let quantum_ns = quantum_us.checked_mul(1_000).ok_or(WorkError::Exhausted)?;
+        if quantum_ns == 0 {
+            return Err(WorkError::InvalidTicket);
+        }
+        let remaining = self.target_ns.saturating_sub(self.clock.now_ns()?);
+        Ok(remaining.div_ceil(quantum_ns))
+    }
+}
+
 struct HostEntropy;
 
 impl Entropy for HostEntropy {
@@ -135,8 +162,17 @@ impl Platform for Host {
     fn minimum_delay_us(&self, _: u64) -> Result<(), WorkError> {
         Err(WorkError::Unavailable)
     }
-    fn minimum_deadline_us(&self, _: u64) -> Result<Box<dyn MinimumDeadline>, WorkError> {
-        Err(WorkError::Unavailable)
+    fn minimum_deadline_us(&self, minimum: u64) -> Result<Box<dyn MinimumDeadline>, WorkError> {
+        let minimum_ns = minimum.checked_mul(1_000).ok_or(WorkError::Exhausted)?;
+        let target_ns = self
+            .clock
+            .now_ns()?
+            .checked_add(minimum_ns)
+            .ok_or(WorkError::Exhausted)?;
+        Ok(Box::new(HostDeadline {
+            clock: self.clock.clone(),
+            target_ns,
+        }))
     }
     fn timer_changed(&self) -> Result<(), WorkError> {
         self.timer.raise()
@@ -554,6 +590,78 @@ fn drive_reap_service(runtime: Pin<&TestRuntime>, _: &HostedClock, queue: &TestQ
     panic!("original source did not release the child's exact stack");
 }
 
+#[cfg(feature = "hosted-test-support")]
+mod original_timers {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    static TIMER_BODY_RETURNED: AtomicBool = AtomicBool::new(false);
+
+    unsafe extern "C" {
+        fn stela_linux_timer_test_sleeper();
+        fn kthread_create_on_node(
+            entry: unsafe extern "C" fn(*mut c_void) -> i32,
+            arg: *mut c_void,
+            node: i32,
+            name: *const std::ffi::c_char,
+            ...
+        ) -> *mut c_void;
+        fn wake_up_process(task: *mut c_void) -> i32;
+    }
+
+    #[test]
+    fn original_timer_callbacks_resume_a_real_source_child() {
+        in_fresh_process(
+            "original_timers::original_timer_callbacks_resume_a_real_source_child",
+            "original timer and hrtimer waits completed",
+            16 * 1024,
+            14,
+            mount,
+            drive,
+        );
+    }
+
+    unsafe extern "C" fn timer_job(_: *mut c_void) -> i32 {
+        // SAFETY: the original kthread enters this exact owner before the body.
+        unsafe { stela_linux_timer_test_sleeper() };
+        TIMER_BODY_RETURNED.store(true, Ordering::Relaxed);
+        0
+    }
+
+    unsafe extern "C" fn mount(owner: *const RawOwner, context: *mut c_void) -> ! {
+        // SAFETY: same original owner and the kept dispatcher runtime handle.
+        let (owner, runtime) = unsafe { (&*owner, *context.cast::<Pin<&TestRuntime>>()) };
+        {
+            // SAFETY: the mounted Initial is the entered original creator.
+            let _entered = unsafe { Entered::new(owner) };
+            // SAFETY: actual Initial with retained original model resources.
+            unsafe { initialize_hosted_resources(owner) }.unwrap();
+            // SAFETY: actual entered Initial with original resources.
+            unsafe { start_hosted_threads(owner, runtime) }.unwrap();
+            // SAFETY: resident callback and name supplied to original kthreadd.
+            let task = unsafe {
+                kthread_create_on_node(timer_job, ptr::null_mut(), -1, c"timer-fixture".as_ptr())
+            };
+            assert!(!task.is_null() && task.addr() < usize::MAX - 4095);
+            // SAFETY: the genuine returned child has been kept by original source.
+            assert_eq!(unsafe { wake_up_process(task) }, 1);
+        }
+        // SAFETY: original Initial scope with no entered owner guard.
+        unsafe { stela_linux::service::run_hosted_service(owner, runtime) }
+    }
+
+    fn drive(runtime: Pin<&TestRuntime>, _: &HostedClock, _: &TestQueue) {
+        let mut steps = 0;
+        while !TIMER_BODY_RETURNED.load(Ordering::Relaxed) {
+            step_hosted(runtime, true).unwrap();
+            steps += 1;
+            assert!(steps < 512, "the original timer child did not complete");
+        }
+        println!("original timer and hrtimer waits completed");
+        process::exit(0);
+    }
+}
+
 unsafe extern "C" fn start_timer_service(owner: *const RawOwner, context: *mut c_void) -> ! {
     // SAFETY: exact retained original owner/current and dispatcher runtime handle.
     let (owner, runtime) = unsafe { (&*owner, *context.cast::<Pin<&TestRuntime>>()) };
@@ -613,7 +721,11 @@ fn in_fresh_process(
             .unwrap();
         let stdout = String::from_utf8_lossy(&result.stdout);
         let stderr = String::from_utf8_lossy(&result.stderr);
-        assert!(result.status.success(), "{stdout}\n{stderr}");
+        assert!(
+            result.status.success(),
+            "{test} exited with {}\n{stdout}\n{stderr}",
+            result.status
+        );
         assert!(stdout.contains(witness), "{stdout}");
         return;
     }

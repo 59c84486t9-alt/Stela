@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
-/* Linux's sleeping locks, SRCU, kthread workers and high-resolution timers on
- * the fixture's real Runtime tasks, which their waits need, and irq_work on
- * its worker. */
+/* Linux sleeping locks, kthread workers, and irq_work on original tasks. */
 #include <linux/completion.h>
-#include <linux/hrtimer.h>
 #include <linux/irq_work.h>
 #include <linux/kthread.h>
 #include <linux/rwsem.h>
@@ -13,10 +10,8 @@
 #include <stela/atomic_callback.h>
 #include <stela/linux.h>
 #include <stela/test.h>
-#include <stela/timer.h>
 
 void stela_linux_sync_test(void);
-extern s64 stela_linux_test_now;
 
 static DECLARE_RWSEM(lock);
 static struct work_struct writer_work;
@@ -96,81 +91,6 @@ static void workers(void)
 	kthread_destroy_worker(worker);
 }
 
-static unsigned int fires;
-
-static enum hrtimer_restart once(struct hrtimer *timer)
-{
-	(void)timer;
-	fires++;
-	return HRTIMER_NORESTART;
-}
-
-static enum hrtimer_restart periodic(struct hrtimer *timer)
-{
-	fires++;
-	assert(hrtimer_active(timer) && hrtimer_try_to_cancel(timer) == -1);
-	hrtimer_forward(timer, hrtimer_cb_get_time(timer), ms_to_ktime(10));
-	return HRTIMER_RESTART;
-}
-
-static struct work_struct expire_work;
-
-static void expire(struct work_struct *work)
-{
-	(void)work;
-	stela_linux_test_now += 3 * NSEC_PER_MSEC;
-	stela_linux_timers_run();
-}
-
-static void hrtimers(void)
-{
-	struct hrtimer timer;
-	unsigned long next;
-
-	assert(!stela_linux_hrtimers_next(&next));
-	hrtimer_setup(&timer, once, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	assert(!hrtimer_active(&timer));
-	hrtimer_start(&timer, ms_to_ktime(5), HRTIMER_MODE_REL);
-	assert(hrtimer_active(&timer));
-	assert(stela_linux_timers_next(&next) && time_after(next, jiffies));
-	stela_linux_test_now += 4 * NSEC_PER_MSEC;
-	stela_linux_timers_run();
-	assert(!fires);
-	stela_linux_test_now += NSEC_PER_MSEC;
-	stela_linux_timers_run();
-	assert(fires == 1 && !hrtimer_active(&timer));
-	assert(!hrtimer_cancel(&timer));
-
-	/* An earlier timer runs first, and cancelling leaves the other alone. */
-	struct hrtimer late;
-
-	hrtimer_setup(&late, once, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
-	hrtimer_start(&late, ms_to_ktime(1), HRTIMER_MODE_ABS);
-	hrtimer_start(&timer, ms_to_ktime(50), HRTIMER_MODE_REL);
-	assert(hrtimer_cancel(&timer) && hrtimer_active(&late));
-	stela_linux_timers_run();
-	assert(fires == 2 && !hrtimer_active(&late));
-
-	/* A periodic timer, 25 ms late: forward skips the missed periods. */
-	fires = 0;
-	hrtimer_setup(&timer, periodic, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	hrtimer_start(&timer, ms_to_ktime(10), HRTIMER_MODE_REL);
-	stela_linux_test_now += 25 * NSEC_PER_MSEC;
-	stela_linux_timers_run();
-	assert(fires == 1 && hrtimer_active(&timer));
-	assert(hrtimer_get_expires(&timer) > ktime_get());
-	assert(hrtimer_cancel(&timer) && !stela_linux_hrtimers_next(&next));
-
-	/* A sleeper, woken by the timer service on another task. */
-	ktime_t timeout = ms_to_ktime(2);
-
-	INIT_WORK(&expire_work, expire);
-	assert(schedule_work(&expire_work));
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	assert(!schedule_hrtimeout(&timeout, HRTIMER_MODE_REL));
-	flush_work(&expire_work);
-}
-
 static DECLARE_COMPLETION(deferred_ran);
 static unsigned int deferred_calls;
 static bool deferred_requeue;
@@ -225,6 +145,5 @@ void stela_linux_sync_test(void)
 {
 	rwsem();
 	workers();
-	hrtimers();
 	irq_works();
 }
