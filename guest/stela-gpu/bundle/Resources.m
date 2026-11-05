@@ -480,15 +480,26 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 				   level:(NSUInteger)level
 				   slice:(NSUInteger)slice
 {
+	if (!_block.block_width) {
+		_block = [_device alignmentsOfFormat:_pixelFormat];
+	}
+	/* Metal reaches the last row's texels, not its stride: a caller may end
+	 * its memory there, and the span is what the frontend touches when the
+	 * service finds a page unmapped. */
 	NSUInteger images = region.size.depth ? region.size.depth : 1;
-	NSUInteger image = bytesPerImage ? bytesPerImage : bytesPerRow * region.size.height;
+	NSUInteger rows = _block.block_height ? (region.size.height + _block.block_height - 1) / _block.block_height : 0;
+	NSUInteger rowBytes = _block.block_width
+		? (region.size.width + _block.block_width - 1) / _block.block_width * _block.block_bytes
+		: 0;
+	NSUInteger image = bytesPerImage ? bytesPerImage : bytesPerRow * rows;
+	NSUInteger length = rows && rowBytes ? (images - 1) * image + (rows - 1) * bytesPerRow + rowBytes : 0;
 	return (StelaTextureBytesRequest){
 		.texture = _handle,
 		.region = {.slice = slice,
 			   .level = level,
 			   .origin = {region.origin.x, region.origin.y, region.origin.z},
 			   .size = {region.size.width, region.size.height, region.size.depth}},
-		.bytes = stela_span(bytes, image * images),
+		.bytes = stela_span(bytes, length),
 		.bytes_per_row = bytesPerRow,
 		.bytes_per_image = bytesPerImage,
 	};

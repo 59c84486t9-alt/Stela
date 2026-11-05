@@ -192,6 +192,9 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 	IOSurfaceRef _surface;
 	NSUInteger _surfacePlane;
 	StelaTextureDescriptorRecord _record;
+	/* The pixel format's block, asked for at the first CPU transfer: a zero
+	 * width until then. */
+	StelaFormatAlignmentsResponse _block;
 }
 - (instancetype)initWithDevice:(StelaGPUDevice *)device
 		      response:(const StelaTextureResponse *)response
