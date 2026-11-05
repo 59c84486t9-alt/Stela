@@ -411,19 +411,19 @@ const INPUT_IDLE_MICROS: u64 = 1000;
 #[derive(Default)]
 struct GuestConsole {
     lines: console_lines::Lines,
-    /// The TSC before which the host's port is not looked at again.
+    /// The host counter before which the host's port is not looked at again.
     next_input: u64,
 }
 
 impl ConsoleSink for GuestConsole {
     fn poll(&mut self) -> Option<u8> {
-        let now = host::rdtsc();
+        let now = host::fresh_counter();
         if now < self.next_input {
             return None;
         }
         let byte = crate::serial::read();
         if byte.is_none() {
-            self.next_input = now + crate::firmware::tsc_hz() / 1_000_000 * INPUT_IDLE_MICROS;
+            self.next_input = now + host::COUNTER_HZ / 1_000_000 * INPUT_IDLE_MICROS;
         }
         byte
     }
