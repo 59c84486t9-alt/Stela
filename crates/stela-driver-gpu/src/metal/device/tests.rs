@@ -310,6 +310,34 @@ fn texture_buffers_and_linear_textures_alias_their_buffer() {
 }
 
 #[test]
+fn heap_buffers_start_where_a_linear_texture_over_them_binds() {
+    let mut device = device();
+    let shared = options(StorageMode::Shared);
+    let heap = device
+        .new_heap(&HeapDescriptor {
+            size: 1 << 20,
+            options: shared,
+            heap_type: HeapType::Automatic,
+            sparse_page_size: SparsePageSize::Size64,
+        })
+        .unwrap();
+    let (_, linear) = device.capabilities.linear_texture_alignments();
+    let first = device.new_heap_buffer(heap, 100, shared, None).unwrap();
+    let second = device.new_heap_buffer(heap, 1 << 14, shared, None).unwrap();
+    for buffer in [first, second] {
+        let offset = device.buffer_placement(buffer).unwrap().heap_offset;
+        assert!(offset.is_multiple_of(linear), "{offset:#x}");
+    }
+    let mut descriptor = texture(PixelFormat::R32Float, TextureUsage::SHADER_READ);
+    descriptor.width = 16;
+    descriptor.height = 16;
+    descriptor.options = shared;
+    device
+        .new_texture_from_buffer(second, &descriptor, 0, 256)
+        .unwrap();
+}
+
+#[test]
 fn samplers_are_shared_and_clamped_variants_cached() {
     let mut device = device();
     let descriptor = SamplerDescriptor::default();
@@ -406,7 +434,8 @@ fn automatic_heaps_place_and_alias_resources() {
     let b = device
         .new_heap_buffer(heap, 1000, options(StorageMode::Private), None)
         .unwrap();
-    assert_eq!(device.heap_usage(heap, 1).unwrap().0, 2048);
+    // Each starts where a linear texture over it can bind.
+    assert_eq!(device.heap_usage(heap, 1).unwrap().0, 8192);
     assert!(
         device
             .new_heap_buffer(heap, 64, options(StorageMode::Shared), None)
@@ -420,7 +449,7 @@ fn automatic_heaps_place_and_alias_resources() {
         "automatic heaps place"
     );
     device.make_buffer_aliasable(a).unwrap();
-    assert_eq!(device.heap_usage(heap, 1).unwrap().0, 1024);
+    assert_eq!(device.heap_usage(heap, 1).unwrap().0, 4096);
     assert!(device.make_buffer_aliasable(a).is_err());
     let c = device
         .new_heap_buffer(heap, 1000, options(StorageMode::Private), None)

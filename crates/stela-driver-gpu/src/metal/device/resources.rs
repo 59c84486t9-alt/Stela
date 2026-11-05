@@ -630,9 +630,16 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 offset,
                 bytes_per_row,
             )?;
-            let image =
-                self.backend
-                    .create_placed_image(&plan.image, memory, memory_offset + offset)?;
+            let (_, linear) = self.capabilities.linear_texture_alignments();
+            let place = memory_offset
+                .checked_add(offset)
+                .filter(|place| place.is_multiple_of(linear))
+                .ok_or(Error::Invalid(
+                    "the buffer's memory is not aligned for a texture",
+                ))?;
+            let image = self
+                .backend
+                .create_placed_image(&plan.image, memory, place)?;
             let (id, views) = match self.shader_views(image, &plan.views) {
                 Ok(created) => created,
                 Err(error) => {
@@ -1212,7 +1219,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     ) -> Result<SizeAndAlign> {
         let plan = resource::buffer(&self.capabilities, length, options)?;
         let requirements = self.backend.buffer_requirements(&plan.info)?;
-        SizeAndAlign::from_requirements(requirements.size, requirements.alignment)
+        // A linear texture may later be made over any buffer, at an offset
+        // Metal aligns only within the buffer; the image binds at the buffer's
+        // place plus that offset, so the buffer starts where an image can.
+        let (_, linear) = self.capabilities.linear_texture_alignments();
+        SizeAndAlign::from_requirements(requirements.size, requirements.alignment.max(linear))
             .ok_or(Error::Invalid("requirements"))
     }
 
