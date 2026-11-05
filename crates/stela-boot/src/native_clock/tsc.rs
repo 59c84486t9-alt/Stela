@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Native HPET power validation and private CPU TSC calibration.
-//! TSC remains a candidate: no Cpu/Clock/Idle implementation,
-//! Prepared variant or service grant can be constructed from this observation.
+//! Native HPET power validation, private CPU TSC calibration and device
+//! minimum delays. The calibration remains a candidate: no Cpu/Clock/Idle
+//! implementation, Prepared variant or service grant is built from it.
 //! Absent ADJUST remains an explicit owned-watchdog requirement; a temporary
 //! HPET active-spin reference is not that persistent watchdog or PC10 proof.
 mod deadline;
 pub(super) use deadline::Control as DeadlineControl;
 mod hpet_power;
+mod minimum;
 use super::{HpetCounter, WorkError};
 use crate::{engine::host::RootIdentity, handoff::Handoff, native_smp::firmware};
 use alloc::sync::Arc;
@@ -15,6 +16,7 @@ use core::{
     marker::PhantomData,
 };
 pub(super) use hpet_power::PowerControl;
+pub(crate) use minimum::Minimum;
 use stela_boot_core::{
     topology::Snapshot,
     tsc::{self, Calibration, CounterPolicy, RateRequirement, Sample},

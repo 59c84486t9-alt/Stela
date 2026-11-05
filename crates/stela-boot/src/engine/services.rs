@@ -140,8 +140,13 @@ unsafe impl NativeServices for Services<'_> {
     {
         self.acpi.map_or(Ok(None), HostAcpi::embedded_controller)
     }
+    /// The invariant TSC, which every supported host has and reads fastest,
+    /// else the HPET when this boot retained the whole controller.
     fn minimum_delay(&self) -> Result<Rc<dyn Timer>, ServiceError> {
-        self.mmio.pci_minimum().map_err(ServiceError::MinimumDelay)
+        let invariant = crate::cpu::INVARIANT_TSC.present();
+        crate::native_clock::tsc::Minimum::timer(self.tsc_hz, invariant)
+            .map_or_else(|| self.mmio.pci_minimum(), Ok)
+            .map_err(ServiceError::MinimumDelay)
     }
 
     fn entropy(&self) -> Result<Arc<dyn stela_drivers::entropy::Entropy>, ServiceError> {
