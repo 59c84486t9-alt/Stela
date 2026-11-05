@@ -6,12 +6,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Run host-side work on the devices, such as an external peer's
     /// computation, between steps: the host time it takes is not guest
     /// time, so the system counter does not advance across it. A parallel
-    /// PE stopped at EL0 holds no lock the kernel times, so the other PEs'
-    /// count goes on meanwhile, as across its own gate calls.
+    /// PE holds the count at what its work earned meanwhile; stopped at EL0
+    /// it holds no lock the kernel times, so the other PEs' count goes on,
+    /// as across its own gate calls.
     pub fn exclude_host_time<T>(&mut self, work: impl FnOnce(&mut D) -> T) -> T {
         let progress = self.work();
-        let released =
-            self.cpu.pstate.el == 0 && self.clock.release(|| self.host.counter(), progress);
+        let at_el0 = self.cpu.pstate.el == 0;
+        let released = self.clock.leave(|| self.host.counter(), progress, at_el0);
         let before = self.host.counter();
         let result = work(&mut self.devices);
         let after = self.host.counter();

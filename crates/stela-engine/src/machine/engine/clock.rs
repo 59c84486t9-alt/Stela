@@ -28,25 +28,30 @@
 //! **Parallel PEs** each run on a host core of their own and read one
 //! [`SharedClock`], as the cores of a Mac read one system counter (Linux
 //! KVM likewise keeps one counter offset for a whole arm64 VM, so its
-//! vCPUs agree). Each running PE publishes a horizon at its slice
-//! boundaries: the count it has earned at its [`Pace`], never more than the
-//! lookahead past the present. The count stops at the lowest horizon of the
-//! PEs that run. A PE the host stopped (compiling, serving the host,
-//! waiting on a broadcast, or descheduled) runs no blocks and publishes
-//! nothing, so the count stops within the lookahead of its last boundary,
-//! whatever stopped it, and resumes from there, the time held becoming lag.
-//! A PE that runs keeps the count at the host's pace unless it runs slower
-//! than [`PACE_INSTRUCTIONS_PER_SECOND`]; then the count slows with it, so a guest
-//! second always holds that much work per running PE, on any host. A PE
+//! vCPUs agree). Each PE keeps the count its work has earned at its
+//! [`Pace`]: from the present when it starts after a wait, plus what each
+//! slice ran, never more than the lookahead past the present. Running guest
+//! code, its horizon is that earned count plus the lookahead, so the count
+//! need not wait for its next boundary; whenever it leaves guest code (a
+//! slice ends, the host serves its devices or GPU, or a call runs on the
+//! host) its horizon falls back to the earned count, so host work, however
+//! long, never shows as guest time it did not run. The count stops at the
+//! lowest horizon, the time held becoming lag. A PE that runs keeps the
+//! count at the host's pace unless it runs slower than
+//! [`PACE_INSTRUCTIONS_PER_SECOND`]; then the count slows with it, so a guest
+//! interval always holds that much work per running PE, on any host. A PE
 //! waiting in WFI or WFE, held in reset or powered down holds nothing, so an
 //! idle guest's time follows the host's. A PE polling a monitor in WFE is
 //! the exception: it spins on a lock, which FIFO ticket locks hand to it, so
 //! it holds the count while it polls, and a host that stops it stops the
-//! count. So does a PE an interrupt line changed for, until it has looked:
-//! whoever sent the interrupt may time the answer. This is conservative synchronization
-//! with bounded lookahead, as parallel full-system simulators keep their
-//! cores' time, and QEMU's `-icount shift=auto` keeps a guest's. Only the
-//! count waits: a PE that is ahead keeps running.
+//! count. An interrupt line that changes for a PE cancels whatever its
+//! work earned past the present and holds a waiting PE there until it
+//! looks: whoever sent the interrupt may time the answer, which must take
+//! the PE as much work as the wait shows time, less one lookahead. This is
+//! conservative synchronization with bounded lookahead, as parallel
+//! full-system simulators keep their cores' time, and QEMU's
+//! `-icount shift=auto` keeps a guest's. Only the count waits: a PE that is
+//! ahead keeps running.
 //!
 //! The architecture requires a constant counter frequency, not a match
 //! with wall time; time of day drifts behind by the accumulated lag, as on
@@ -79,10 +84,12 @@ pub(super) const PACE_INSTRUCTIONS_PER_SECOND: u64 = 250_000_000;
 /// The retired instructions of one unit of a parallel PE's progress.
 pub(super) const PACE_UNIT_SHIFT: u32 = 10;
 
-/// Slice periods ([`QUANTUM_HZ`]) a running PE's horizon may lie past the
-/// present: several, so that only a PE stopped for longer than a few slices
-/// holds the count, never one merely between two boundaries.
-const LOOKAHEAD_SLICES: u64 = 4;
+/// Slice periods ([`QUANTUM_HZ`]) a PE in guest code may hold the count past
+/// what its work earned, and its work may earn past the present: enough
+/// that a PE at the pace never holds the count between two boundaries, and
+/// little against the shortest timeouts XNU sets another PE (10 ms for a
+/// debugger cross-call's acknowledgement, `model_dep.c`).
+const LOOKAHEAD_SLICES: u64 = 2;
 
 /// How a [`SharedClock`]'s horizons advance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +125,10 @@ pub struct SharedClock {
     /// Each PE's horizon, [`UNBOUNDED`] while it holds nothing. Changed only
     /// with `state.sequence` odd.
     horizons: Box<[AtomicU64]>,
+    /// The count each PE's work has earned since it last started after a
+    /// wait: its horizon without the lookahead of a PE in guest code.
+    /// Changed only with `state.sequence` odd.
+    earned: Box<[AtomicU64]>,
     /// [`Pace::per_block`] and [`Pace::lookahead`].
     per_block: AtomicU64,
     lookahead: AtomicU64,
@@ -126,11 +137,17 @@ pub struct SharedClock {
 /// What a PE did since its last publication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Progress {
-    /// Ran this many blocks, or starts running after a wait.
+    /// Starts running guest code after a wait, from the count an interrupt
+    /// held it at, or else the present.
+    Resumes,
+    /// Runs guest code again after host work, from the count it earned.
+    Runs,
+    /// Left guest code after running this many blocks.
     Ran(u64),
     /// Polled a monitor: it could run at once, so it keeps a whole lookahead.
     Polls,
-    /// Waits, or stopped running guest code.
+    /// Waits, or stopped running guest code for host work on behalf of its
+    /// EL0 thread.
     Waits,
 }
 
@@ -150,6 +167,7 @@ impl SharedClock {
         Self {
             state,
             horizons: (0..pes).map(|_| AtomicU64::new(UNBOUNDED)).collect(),
+            earned: (0..pes).map(|_| AtomicU64::new(0)).collect(),
             per_block: AtomicU64::new(1),
             lookahead: AtomicU64::new(0),
         }
@@ -201,19 +219,25 @@ impl SharedClock {
         self.host_deadline(count)
     }
 
-    /// PE `pe` may have a reason to wake as of `count`: a waiting PE holds
-    /// the count as a running one does until it next looks. The count's
-    /// ceiling follows at the next publication, whose running PE this leaves
-    /// behind the lookahead at most.
+    /// PE `pe` may have a reason to wake as of `count`: what its work earned
+    /// past `count` no longer counts, and a waiting PE holds the count there
+    /// until it next looks. The count's ceiling follows at the next
+    /// publication, at most a slice later while another PE runs.
     pub(super) fn hold_woken(&self, pe: usize, count: u64) {
-        if self.horizons[pe].load(Ordering::Relaxed) != UNBOUNDED {
-            return;
-        }
         let sequence = self.lock();
-        if self.horizons[pe].load(Ordering::Relaxed) == UNBOUNDED {
-            let lookahead = self.lookahead.load(Ordering::Relaxed);
-            self.horizons[pe].store(count.saturating_add(lookahead), Ordering::Relaxed);
-        }
+        let horizon = self.horizons[pe].load(Ordering::Relaxed);
+        let earned = self.earned[pe].load(Ordering::Relaxed);
+        let (earned, horizon) = if horizon == UNBOUNDED {
+            (count, count)
+        } else {
+            let earned_now = earned.min(count);
+            (
+                earned_now,
+                earned_now.saturating_add(horizon.saturating_sub(earned)),
+            )
+        };
+        self.earned[pe].store(earned, Ordering::Relaxed);
+        self.horizons[pe].store(horizon, Ordering::Relaxed);
         self.unlock(sequence);
     }
 
@@ -225,16 +249,27 @@ impl SharedClock {
         let offset = self.state.offset.load(Ordering::Relaxed);
         let ceiling = self.state.ceiling.load(Ordering::Relaxed);
         let count = host.wrapping_add(offset).min(ceiling);
-        let lookahead = count.saturating_add(self.lookahead.load(Ordering::Relaxed));
+        let lookahead = self.lookahead.load(Ordering::Relaxed);
+        let limit = count.saturating_add(lookahead);
         let previous = self.horizons[pe].load(Ordering::Relaxed);
-        let horizon = match progress {
-            Progress::Waits => UNBOUNDED,
-            Progress::Polls => lookahead,
-            Progress::Ran(_) if previous == UNBOUNDED => lookahead,
-            Progress::Ran(blocks) => previous
-                .saturating_add(blocks.saturating_mul(self.per_block.load(Ordering::Relaxed)))
-                .min(lookahead),
+        let earned = self.earned[pe].load(Ordering::Relaxed);
+        let (earned, horizon) = match progress {
+            Progress::Waits => (earned, UNBOUNDED),
+            Progress::Polls => (count, limit),
+            Progress::Resumes => {
+                let from = if previous == UNBOUNDED { count } else { earned };
+                (from, from.saturating_add(lookahead))
+            }
+            Progress::Runs => (earned, earned.saturating_add(lookahead)),
+            Progress::Ran(blocks) => {
+                let per_block = self.per_block.load(Ordering::Relaxed);
+                let earned = earned
+                    .saturating_add(blocks.saturating_mul(per_block))
+                    .min(limit);
+                (earned, earned)
+            }
         };
+        self.earned[pe].store(earned, Ordering::Relaxed);
         self.horizons[pe].store(horizon, Ordering::Relaxed);
         let lowest = self
             .horizons
@@ -479,17 +514,21 @@ impl Clock {
     }
 
     /// A slice starts at block count `blocks`, with `share` PEs (at least
-    /// one) able to run in the round. Attached, a PE that waited holds the
-    /// count again from here.
+    /// one) able to run in the round. Attached, the PE holds the count again:
+    /// from the present after a wait, else from what its work earned, with
+    /// a lookahead while it runs guest code.
     pub(super) fn start_slice(&mut self, mut counter: impl Counter, blocks: u64, share: u64) {
         if let Some(attachment) = &mut self.shared {
-            if attachment.waiting {
-                attachment.waiting = false;
-                attachment.blocks = blocks;
-                attachment
-                    .clock
-                    .publish(attachment.pe, Progress::Ran(0), &mut counter);
-            }
+            let progress = if attachment.waiting {
+                Progress::Resumes
+            } else {
+                Progress::Runs
+            };
+            attachment.waiting = false;
+            attachment.blocks = blocks;
+            attachment
+                .clock
+                .publish(attachment.pe, progress, &mut counter);
             return;
         }
         let host = counter();
@@ -549,13 +588,13 @@ impl Clock {
         }
     }
 
-    /// The running PE, at `work`, leaves guest code for host work on behalf
-    /// of its EL0 thread, which holds no lock the kernel times: attached, it
-    /// holds the count no further than the work it did. Whether it released
-    /// the count, for [`Self::resume`] once the host's work returns. That
-    /// work takes the time it takes, as a device's does, while the other
-    /// PEs' time goes on.
-    pub(super) fn release(&mut self, mut counter: impl Counter, work: u64) -> bool {
+    /// The running PE, at `work`, leaves guest code for host work: attached,
+    /// it holds the count no further than the work it did. On behalf of its
+    /// EL0 thread, which holds no lock the kernel times, it releases the
+    /// count: that work takes the time it takes, as a device's does, while
+    /// the other PEs' time goes on. Whether it left, for [`Self::resume`]
+    /// once the host's work returns.
+    pub(super) fn leave(&mut self, mut counter: impl Counter, work: u64, at_el0: bool) -> bool {
         if self
             .shared
             .as_ref()
@@ -564,12 +603,15 @@ impl Clock {
             return false;
         }
         self.end_slice(&mut counter, work);
-        self.wait(&mut counter);
+        if at_el0 {
+            self.wait(&mut counter);
+        }
         true
     }
 
-    /// The PE [`Self::release`]d the count returns to guest code at `work`,
-    /// holding the count again from the present.
+    /// The PE that [`Self::leave`]s returns to guest code at `work`, holding
+    /// the count again: from the present after a release, else from what
+    /// its work earned.
     pub(super) fn resume(&mut self, counter: impl Counter, work: u64) {
         self.start_slice(counter, work, 1);
     }
@@ -744,12 +786,12 @@ mod tests {
     }
 
     #[test]
-    fn a_24_mhz_pace_earns_98_counts_a_unit_and_looks_ahead_four_slices() {
+    fn a_24_mhz_pace_earns_98_counts_a_unit_and_looks_ahead_two_slices() {
         assert_eq!(
             Pace::new(24_000_000),
             Pace {
                 per_block: 98,
-                lookahead: 192_000
+                lookahead: 96_000
             }
         );
     }
@@ -797,8 +839,8 @@ mod tests {
         // The first PE leaves guest code for a long host call. Holding the
         // count, it would keep it at its horizon, 1100: the second runs on,
         // and the count follows the second instead.
-        assert!(first.release(|| 1010, 10));
-        assert!(!first.release(|| 1010, 10), "released once");
+        assert!(first.leave(|| 1010, 10, true));
+        assert!(!first.leave(|| 1010, 10, true), "released once");
         for (host, blocks) in [(2000, 1000), (3000, 2000), (4000, 3000)] {
             second.end_slice(|| host, blocks);
         }
@@ -813,7 +855,7 @@ mod tests {
         assert_eq!(shared.status(|| 9000).holder.map(|(pe, _)| pe), Some(0));
         // A waiting PE has nothing to release.
         second.wait(|| 9000);
-        assert!(!second.release(|| 9000, 100_000));
+        assert!(!second.leave(|| 9000, 100_000, true));
     }
 
     #[test]
@@ -828,6 +870,7 @@ mod tests {
         assert!(!first.below(4000, || 4000));
         // The lag makes that bound loose until the next read tightens it.
         first.end_slice(|| 5000, 100);
+        first.start_slice(|| 5000, 100, 1);
         assert_eq!(first.read(|| 5040), 1140);
         assert!(first.below(1141, || 5040));
         assert!(!first.below(1140, || 5040));
@@ -874,10 +917,13 @@ mod tests {
                 holder: Some((0, 1100))
             }
         );
-        // The first PE ran 100 blocks: its horizon rises to 1200, while the
-        // second PE's last one, 1150, now holds. The 3900 host counts held
-        // became lag, so the count continues from 1100.
+        // The first PE ran 100 blocks, earning 1100: between slices that
+        // holds the count. Running again, its horizon rises to 1200, while
+        // the second PE's last one, 1150, now holds. The 3900 host counts
+        // held became lag, so the count continues from 1100.
         first.end_slice(|| 5000, 100);
+        assert_eq!(shared.status(|| 5000).holder, Some((0, 1100)));
+        first.start_slice(|| 5000, 100, 1);
         assert_eq!(second.read(|| 5000), 1100);
         assert_eq!(second.read(|| 5040), 1140);
         assert_eq!(first.read(|| 5060), 1150);
@@ -901,15 +947,20 @@ mod tests {
         second.start_slice(|| 1000, 0, 1);
         second.wait(|| 1000);
         first.end_slice(|| 1050, 10_000);
-        // An interrupt for the waiter: the host stops it before it looks.
+        // An interrupt for the waiter at 1050: the host stops it before it
+        // looks, and the next publication holds the count there, or where
+        // it already was.
         shared.hold_woken(1, 1050);
+        first.start_slice(|| 1060, 10_000, 1);
         first.end_slice(|| 1060, 20_000);
-        assert_eq!(first.read(|| 4000), 1150);
-        // It looks and finds nothing to do: the count catches up to the host
-        // from where it was held.
+        assert_eq!(first.read(|| 4000), 1060);
+        assert_eq!(shared.status(|| 4000).holder, Some((1, 1050)));
+        // It looks and finds nothing to do: the count goes on from where it
+        // was held.
         second.wait(|| 4000);
+        first.start_slice(|| 4000, 20_000, 1);
         first.end_slice(|| 4000, 30_000);
-        assert_eq!(first.read(|| 4010), 1160);
+        assert_eq!(first.read(|| 4010), 1070);
     }
 
     #[test]
@@ -943,12 +994,65 @@ mod tests {
         let mut previous = 0;
         for slice in 1..=5 {
             let host = 1000 + slice * 1000;
+            if slice > 1 {
+                first.start_slice(|| host - 1000, (slice - 1) * 10, 1);
+            }
             first.end_slice(|| host, slice * 10);
             let count = second.read(|| host);
             assert!(count >= previous);
             assert_eq!(count, 1100 + (slice - 1) * 10);
             previous = count;
         }
+    }
+
+    #[test]
+    fn host_work_holds_the_count_at_what_the_pe_s_work_earned() {
+        let (shared, mut first, mut second) = pair();
+        first.start_slice(|| 1000, 0, 1);
+        second.start_slice(|| 1000, 0, 1);
+        second.wait(|| 1000);
+        // Running guest code, the first PE's horizon is its lookahead: 1100.
+        // It ran 20 blocks, then the host serves its devices at EL1 for
+        // 30,000 counts: the count stops at what it earned, not at 1100.
+        assert!(first.leave(|| 1020, 20, false));
+        assert_eq!(first.read(|| 31_020), 1020);
+        assert_eq!(shared.status(|| 31_020).holder, Some((0, 1020)));
+        // Back in guest code, it holds the lookahead past its work again.
+        first.resume(|| 31_020, 20);
+        assert_eq!(first.read(|| 31_200), 1120);
+        // Over many such services the count gains only what it runs: five
+        // blocks a round, to its work's 1070 and the lookahead.
+        for round in 1..=10u64 {
+            let host = 31_200 + round * 10_000;
+            assert!(first.leave(|| host, 20 + round * 5, false));
+            first.resume(|| host + 9_000, 20 + round * 5);
+        }
+        assert_eq!(first.read(|| 200_000), 1070 + 100);
+    }
+
+    #[test]
+    fn an_interrupt_cancels_work_earned_past_the_present() {
+        let (shared, mut first, mut second) = pair();
+        first.start_slice(|| 1000, 0, 1);
+        second.start_slice(|| 1000, 0, 1);
+        second.wait(|| 1000);
+        // A fast slice earns the first PE up to the lookahead past the
+        // present: 1100 at host 1000.
+        first.end_slice(|| 1000, 10_000);
+        first.start_slice(|| 1000, 10_000, 1);
+        assert_eq!(shared.status(|| 1000).holder, None);
+        // An interrupt for it at 1000: it must earn the time its answer
+        // takes from there. Stopped by the host, without the interrupt it
+        // would let the count reach 1100; with it, only the present, 1010.
+        shared.hold_woken(0, 1000);
+        first.leave(|| 1010, 10_000, false);
+        assert_eq!(first.read(|| 5000), 1010);
+        // Five blocks later the count shows what they earned, and the ten
+        // counts it ran with its lookahead.
+        first.resume(|| 5000, 10_000);
+        first.end_slice(|| 5010, 10_005);
+        assert_eq!(first.read(|| 9000), 1020);
+        assert_eq!(shared.status(|| 9000).holder, Some((0, 1005)));
     }
 
     #[test]

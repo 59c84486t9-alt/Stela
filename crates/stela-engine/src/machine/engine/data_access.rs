@@ -89,9 +89,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         {
             // A call from EL0 holds no lock the kernel times, so the count
             // need not wait for it: a compile or a GPU wait can take
-            // milliseconds.
-            let released =
-                self.cpu.pstate.el == 0 && self.clock.release(|| memory.host.counter(), work);
+            // milliseconds. Any other holds it at what its work earned.
+            let at_el0 = self.cpu.pstate.el == 0;
+            let released = self.clock.leave(|| memory.host.counter(), work, at_el0);
             let mut caller = caller::CallerSpace {
                 controls: self.cpu.controls(self.cpu.regime()),
                 requester: mmu::Requester {
