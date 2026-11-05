@@ -1024,12 +1024,23 @@ fn indexed_load_store_pair_shares_checked_address_with_distinct_fault_rows() {
         }
     }
 
-    // Replacing the index with the load result invalidates the pair.
+    // Replacing the index with the load result invalidates the shared
+    // address. The separate store can use the newly committed index.
     let alias = [words[0] & !31 | 23, words[1]];
     let grouped = compile(&alias, pc, ordinary, target, direct);
     let fallback = compile(&alias, pc, ordinary, dit, direct);
+    let (store_pc, start) = grouped.native.source_map[1];
+    let separate = compile(&alias[1..], store_pc, ordinary, target, direct);
+    let add_base = [0x48, 0x03, 0x87, 0x40, 0, 0, 0];
+    let load_base = [0x48, 0x8b, 0x87, 0x40, 0, 0, 0];
+    let commit_index = [0x48, 0x89, 0x87, 0xb8, 0, 0, 0];
+    assert_eq!(store_pc, GuestAddress(pc.0 + 4));
+    assert!(grouped.native.x86_64_code[..start].ends_with(&commit_index));
+    assert!(grouped.native.x86_64_code[start..].starts_with(&add_base));
+    assert!(fallback.native.x86_64_code[fallback.native.source_map[1].1..].starts_with(&load_base));
+    assert!(separate.native.x86_64_code.starts_with(&load_base));
     assert_eq!(
-        grouped.native.x86_64_code.len(),
+        grouped.native.x86_64_code.len() + load_base.len(),
         fallback.native.x86_64_code.len()
     );
     for checks in [
