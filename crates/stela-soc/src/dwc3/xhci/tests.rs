@@ -209,6 +209,26 @@ fn a_running_controller_posts_port_changes_and_mfindex_wraps() {
 }
 
 #[test]
+fn a_split_erstba_write_loads_the_segment_table_with_its_high_dword() {
+    // RAM sits above 4 GiB, so the low dword alone names no segment table.
+    let mut ram = Ram::new(RAM, 0x4000);
+    let mut x = Xhci::new();
+    ram.put_u64(ERST, EVENTS);
+    ram.put_u64(ERST + 8, 16);
+    let i0 = INTERRUPTER_BASE;
+    wr(&mut x, i0 + 8, 1);
+    x.write(i0 + 0x18, 8, EVENTS, 0).unwrap();
+    wr(&mut x, i0 + 0x10, ERST as u32);
+    service(&mut x, &mut ram);
+    wr(&mut x, i0 + 0x14, (ERST >> 32) as u32);
+    service(&mut x, &mut ram);
+    assert_eq!(
+        u64::from(rd(&mut x, i0 + 0x10)) | u64::from(rd(&mut x, i0 + 0x14)) << 32,
+        ERST
+    );
+}
+
+#[test]
 fn commands_complete_through_the_event_ring_and_raise_the_interrupter() {
     let mut ram = Ram::new(RAM, 0x4000);
     let mut x = Xhci::new();

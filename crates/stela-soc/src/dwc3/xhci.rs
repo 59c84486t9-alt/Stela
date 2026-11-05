@@ -782,10 +782,9 @@ impl Xhci {
                         i.erstsz = value;
                     }
                     0x0c => return Err(refuse!("reserved xHCI interrupter register")),
-                    0x10 => {
-                        i.erstba = i.erstba & !0xffff_ffff | u64::from(value & !0x3f);
-                        i.reload = true;
-                    }
+                    // A split 64-bit write takes effect with its high
+                    // dword, which software writes last (xHCI 5.1).
+                    0x10 => i.erstba = i.erstba & !0xffff_ffff | u64::from(value & !0x3f),
                     0x14 => {
                         i.erstba = i.erstba & 0xffff_ffff | u64::from(value) << 32;
                         i.reload = true;
