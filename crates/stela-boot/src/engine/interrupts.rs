@@ -560,6 +560,14 @@ pub(crate) unsafe fn observe() -> Observation {
 /// Report an x86 exception that is a Stela failure, never a guest event.
 pub fn fatal(frame: &Frame) -> ! {
     report(frame);
+    // Linux's minimum-deadline callbacks stop on `ud2` after recording why.
+    if let Some(error) = stela_linux::owner::minimum_failure() {
+        use core::fmt::Write;
+        let _ = writeln!(
+            crate::serial::Serial,
+            "linux minimum deadline failed: {error:?}"
+        );
+    }
     // SAFETY: the interrupted stack, which a fault that left it unreadable
     // would have stopped on as a double fault before printing this.
     unsafe { output::print_stack_at(frame.rsp as *const u64) };
