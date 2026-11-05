@@ -622,6 +622,8 @@ mod original_fixtures {
     unsafe extern "C" {
         fn stela_linux_timer_test_sleeper();
         fn stela_linux_srcu_source_cases();
+        fn stela_linux_srcu_worker_pressure_test();
+        fn stela_linux_srcu_bootstrap_pressure_test();
         fn stela_linux_deferred_free_source_test();
         fn stela_linux_exec_state_source_test();
         fn stela_linux_srcu_queue_before_threads();
@@ -713,6 +715,30 @@ mod original_fixtures {
     }
 
     #[test]
+    fn original_srcu_keeps_callbacks_through_worker_exhaustion() {
+        in_fresh_process(
+            "original_fixtures::original_srcu_keeps_callbacks_through_worker_exhaustion",
+            "original SRCU grace periods and cleanup completed",
+            16 * 1024,
+            14,
+            mount_srcu_pressure,
+            drive_srcu,
+        );
+    }
+
+    #[test]
+    fn original_srcu_bootstrap_retries_after_worker_exhaustion() {
+        in_fresh_process(
+            "original_fixtures::original_srcu_bootstrap_retries_after_worker_exhaustion",
+            "original SRCU grace periods and cleanup completed",
+            16 * 1024,
+            14,
+            mount_srcu_bootstrap_pressure,
+            drive_srcu,
+        );
+    }
+
+    #[test]
     fn original_rcu_reclaims_allocations_after_the_observed_grace_period() {
         in_fresh_process(
             "original_fixtures::original_rcu_reclaims_allocations_after_the_observed_grace_period",
@@ -791,6 +817,20 @@ mod original_fixtures {
         0
     }
 
+    unsafe extern "C" fn srcu_pressure_job(_: *mut c_void) -> i32 {
+        // SAFETY: this original kthread controls and joins the pressure workers.
+        unsafe { stela_linux_srcu_worker_pressure_test() };
+        BODY_RETURNED.store(true, Ordering::Relaxed);
+        0
+    }
+
+    unsafe extern "C" fn srcu_bootstrap_pressure_job(_: *mut c_void) -> i32 {
+        // SAFETY: this original kthread controls and joins the pressure workers.
+        unsafe { stela_linux_srcu_bootstrap_pressure_test() };
+        BODY_RETURNED.store(true, Ordering::Relaxed);
+        0
+    }
+
     unsafe extern "C" fn deferred_free_job(_: *mut c_void) -> i32 {
         // SAFETY: the original task owns its C allocation and RCU joins.
         unsafe {
@@ -848,6 +888,27 @@ mod original_fixtures {
     unsafe extern "C" fn mount_srcu_negative(owner: *const RawOwner, context: *mut c_void) -> ! {
         // SAFETY: exact retained Initial scope and live fixture callback.
         unsafe { mount(owner, context, srcu_negative_job, c"srcu-refusal", None) }
+    }
+
+    unsafe extern "C" fn mount_srcu_pressure(owner: *const RawOwner, context: *mut c_void) -> ! {
+        // SAFETY: exact retained Initial scope and live fixture callback.
+        unsafe { mount(owner, context, srcu_pressure_job, c"srcu-pressure", None) }
+    }
+
+    unsafe extern "C" fn mount_srcu_bootstrap_pressure(
+        owner: *const RawOwner,
+        context: *mut c_void,
+    ) -> ! {
+        // SAFETY: exact retained Initial scope and live fixture callback.
+        unsafe {
+            mount(
+                owner,
+                context,
+                srcu_bootstrap_pressure_job,
+                c"srcu-bootstrap",
+                None,
+            )
+        }
     }
 
     unsafe extern "C" fn mount_deferred_free(owner: *const RawOwner, context: *mut c_void) -> ! {

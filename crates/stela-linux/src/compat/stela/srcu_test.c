@@ -4,7 +4,9 @@
 #include <linux/backing-dev.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
+#include <linux/err.h>
 #include <linux/irq_work.h>
+#include <linux/kthread.h>
 #include <linux/limits.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -25,6 +27,8 @@ void stela_linux_srcu_early_test(void);
 void stela_linux_srcu_queue_before_threads(void);
 void stela_linux_srcu_source_cases(void);
 void stela_linux_srcu_negative_case(unsigned int which, void (*witness)(void));
+void stela_linux_srcu_worker_pressure_test(void);
+void stela_linux_srcu_bootstrap_pressure_test(void);
 int stela_linux_srcu_bootstrap_joined(const struct stela_linux_owner *owner);
 DEFINE_STATIC_SRCU(readers);
 static struct work_struct grace_work;
@@ -415,6 +419,116 @@ static void wait_for_workqueues(void)
 	for (unsigned int tick = 0; tick < HZ && !READ_ONCE(bdi_wq); tick++)
 		schedule_timeout_uninterruptible(1);
 	assert(READ_ONCE(bdi_wq));
+}
+
+struct worker_pressure {
+	struct kthread_worker *held[16];
+	unsigned int count;
+};
+
+static void fill_worker_stacks(struct worker_pressure *pressure)
+{
+	for (;;) {
+		struct kthread_worker *worker = kthread_create_worker(0, "srcu-pressure");
+		if (IS_ERR(worker)) {
+			assert(PTR_ERR(worker) == -ENOMEM || PTR_ERR(worker) == -ENOSPC);
+			break;
+		}
+		assert(pressure->count < ARRAY_SIZE(pressure->held));
+		pressure->held[pressure->count++] = worker;
+	}
+	assert(pressure->count >= 2);
+}
+
+static void release_worker_stacks(struct worker_pressure *pressure)
+{
+	while (pressure->count)
+		kthread_destroy_worker(pressure->held[--pressure->count]);
+	rcu_barrier();
+}
+
+static DECLARE_COMPLETION(normal_running);
+static DECLARE_COMPLETION(release_normal);
+
+static void occupy_normal_worker(struct work_struct *work)
+{
+	assert(current_work() == work);
+	complete(&normal_running);
+	wait_for_completion(&release_normal);
+}
+
+static void callback_waits_for_worker_capacity(struct worker_pressure *pressure)
+{
+	struct srcu_struct domain;
+	struct observed item = {};
+	struct work_struct occupied;
+	assert(!init_srcu_struct(&domain));
+	init_completion(&item.done);
+	INIT_WORK(&occupied, occupy_normal_worker);
+	assert(schedule_work(&occupied));
+	assert(wait_for_completion_timeout(&normal_running, HZ));
+	/* Let the original pool establish its spare before exhausting stacks. */
+	fill_worker_stacks(pressure);
+	call_srcu(&domain, &item.head, observed_callback);
+	assert(irq_work_is_pending(&domain.srcu_irq_work) && !item.calls);
+	msleep(30);
+	assert(!item.calls && !READ_ONCE(domain.srcu_gp_running));
+	/* Recover through the original worker manager's retry, with the first
+	 * worker still occupied. The queued SRCU request must survive that wait. */
+	release_worker_stacks(pressure);
+	assert(wait_for_completion_timeout(&item.done, 3 * HZ));
+	complete(&release_normal);
+	flush_work(&occupied);
+	srcu_barrier(&domain);
+	assert(item.calls == 1);
+	cleanup_srcu_struct(&domain);
+}
+
+void stela_linux_srcu_worker_pressure_test(void)
+{
+	wait_for_workqueues();
+	struct worker_pressure pressure = {};
+	callback_waits_for_worker_capacity(&pressure);
+}
+
+static DECLARE_COMPLETION(pool_warmed);
+
+static void warm_pool_worker(struct work_struct *work)
+{
+	assert(current_work() == work);
+	complete(&pool_warmed);
+}
+
+static void warm_pool(struct workqueue_struct *queue)
+{
+	struct work_struct work;
+	INIT_WORK(&work, warm_pool_worker);
+	reinit_completion(&pool_warmed);
+	assert(queue_work(queue, &work));
+	assert(wait_for_completion_timeout(&pool_warmed, 3 * HZ));
+	flush_work(&work);
+}
+
+void stela_linux_srcu_bootstrap_pressure_test(void)
+{
+	wait_for_workqueues();
+	const struct stela_linux_owner *owner = stela_linux_owner();
+	struct worker_pressure pressure = {};
+	warm_pool(system_percpu_wq);
+	warm_pool(system_highpri_wq);
+	fill_worker_stacks(&pressure);
+	/* Original probes need a second worker while each first worker waits.
+	 * Under exhaustion that dependency times out or is eventually handled
+	 * by the same worker, neither of which is a successful replacement. */
+	int status = stela_linux_srcu_bootstrap(owner);
+	assert(status == -EAGAIN || status == -ETIMEDOUT);
+	assert(!stela_linux_srcu_bootstrapping(owner));
+	release_worker_stacks(&pressure);
+	warm_pool(system_percpu_wq);
+	warm_pool(system_highpri_wq);
+	assert(!stela_linux_srcu_bootstrap(owner));
+	assert(stela_linux_srcu_bootstrap(owner) == -EALREADY);
+	assert(stela_linux_srcu_bootstrap_joined(owner) == -EPERM);
 }
 
 void stela_linux_srcu_source_cases(void)

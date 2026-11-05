@@ -189,9 +189,9 @@ int stela_linux_srcu_bootstrap(const struct stela_linux_owner *owner)
 		return -EAGAIN;
 	if (!stela_linux_quiescent())
 		return -EBUSY;
-	/* Pointer presence is only a cold-init refusal gate. Actual worker and
-	 * clock probes below remain the functional readiness evidence. */
-	if (!system_wq || !system_highpri_wq)
+	/* Probe the same per-CPU queue used by original SRCU's schedule_work(),
+	 * with independent high-priority work and actual timer delivery. */
+	if (!system_percpu_wq || !system_highpri_wq)
 		return -EAGAIN;
 	if (__atomic_load_n(&phase, __ATOMIC_ACQUIRE) == ACTIVE)
 		return -EALREADY;
@@ -199,7 +199,7 @@ int stela_linux_srcu_bootstrap(const struct stela_linux_owner *owner)
 		return -EBUSY;
 	__atomic_store_n(&phase, PROBING, __ATOMIC_RELEASE);
 	struct pool_probe normal, high;
-	pool_init(&normal, owner, system_wq);
+	pool_init(&normal, owner, system_percpu_wq);
 	pool_init(&high, owner, system_highpri_wq);
 	struct clock_probe clock;
 	init_completion(&clock.delivered);
