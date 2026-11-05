@@ -423,8 +423,10 @@ impl ResolveArguments {
     pub const FLAGS_OFFSET: u32 = 60;
     pub const CLASS_COUNT_OFFSET: u32 = 64;
     pub const PUSH_OFFSET: u32 = 72;
-    pub const VERTEX_BUFFERS_OFFSET: u32 = 136;
-    pub const SLOTS_OFFSET: u32 = 632;
+    /// The kernel loads each 16-byte vertex buffer and slot as one vector,
+    /// so both arrays start on 16-byte boundaries.
+    pub const VERTEX_BUFFERS_OFFSET: u32 = 144;
+    pub const SLOTS_OFFSET: u32 = 640;
     pub const SLOT_BYTES: u32 = 16;
     pub const INHERIT_PIPELINE: u32 = 1;
     pub const INHERIT_BUFFERS: u32 = 2;
@@ -485,6 +487,11 @@ const _: () = assert!(
         && ResolveArguments::VERTEX_BUFFERS_OFFSET
             + GeneratedSequence::VERTEX_BUFFER_BYTES * MAX_BUFFER_BINDINGS
             == ResolveArguments::SLOTS_OFFSET
+        && (ResolveArguments::VERTEX_BUFFERS_OFFSET as u64)
+            .is_multiple_of(ResolveArguments::ALIGNMENT)
+        && (ResolveArguments::SLOTS_OFFSET as u64).is_multiple_of(ResolveArguments::ALIGNMENT)
+        && GeneratedSequence::VERTEX_BUFFER_BYTES as u64 == ResolveArguments::ALIGNMENT
+        && ResolveArguments::SLOT_BYTES as u64 == ResolveArguments::ALIGNMENT
 );
 
 /// The offsets of what a dynamic kernel's dispatch reads at the push
@@ -1304,7 +1311,7 @@ mod tests {
             |offset: u32| u32::from_le_bytes(bytes[offset as usize..][..4].try_into().unwrap());
         let u64_at =
             |offset: u32| u64::from_le_bytes(bytes[offset as usize..][..8].try_into().unwrap());
-        assert_eq!(bytes.len(), 648);
+        assert_eq!(bytes.len(), 656);
         assert_eq!(u64_at(ResolveArguments::HEADER_OFFSET), 0x1000);
         assert_eq!(u64_at(ResolveArguments::STRIDES_OFFSET), 0x4000);
         assert_eq!(u32_at(ResolveArguments::COUNT_OFFSET), 9);
