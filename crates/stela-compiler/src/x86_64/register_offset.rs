@@ -14,12 +14,26 @@ use crate::{
 use alloc::vec::Vec;
 
 pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChecks) {
-    address(
+    emit_after(code, operand, checks, super::Rax::Unknown);
+}
+
+pub(super) fn emit_after(
+    code: &mut Code,
+    operand: &Operand,
+    checks: super::MemoryChecks,
+    held: super::Rax,
+) {
+    emit_address(
         code,
         checks,
         IndexedAddress::of(operand),
         operand.bytes,
-        operand.transfer == MemoryTransfer::Store,
+        Access::of(
+            operand.transfer == MemoryTransfer::Store,
+            operand.bytes.into(),
+        ),
+        false,
+        held,
     );
     let scratch = if code.is_pinned() || !code.constant_time() {
         Gpr::Rax
@@ -36,6 +50,7 @@ pub(super) fn emit_load_store(
     source_map: &mut Vec<(GuestAddress, usize)>,
     instructions: &[Instruction],
     checks: super::MemoryChecks,
+    held: super::Rax,
 ) -> bool {
     debug_assert!(!checks.checks_every_access() && !code.constant_time());
     let Some([load, store]) = instructions.first_chunk() else {
@@ -69,6 +84,7 @@ pub(super) fn emit_load_store(
         first.bytes,
         Access::of(false, first.bytes.into()),
         true,
+        held,
     );
     transfer(code, first, Gpr::Rcx);
     source_map.push((store.pc, code.len()));
@@ -123,6 +139,7 @@ pub(super) fn address(
         bytes,
         Access::of(write, bytes.into()),
         false,
+        super::Rax::Unknown,
     );
 }
 
@@ -133,6 +150,7 @@ fn emit_address(
     bytes: u8,
     access: Access,
     shared: bool,
+    held: super::Rax,
 ) {
     let IndexedAddress {
         base,
@@ -140,22 +158,54 @@ fn emit_address(
         extend,
         shift,
     } = address;
+    let direct_base = code
+        .host(base)
+        .filter(|_| !checks.alignment && !checks.checks_every_access());
     // Validate incoming SP before offset addition, even if the effective
     // address would be aligned. No guest register is committed before access.
-    // Only the final address is checked against the guest's ranges.
-    let base_checks = super::MemoryChecks {
-        guest_range: false,
-        ..checks
-    };
-    if let (Some(host), false) = (
-        code.host(base),
-        checks.alignment || checks.checks_every_access(),
-    ) {
-        if base == Register::Sp && checks.stack_alignment && !checks.stack_checked {
-            code.asm().test_imm(Size::Byte, host, 15);
-            code.check_failure(crate::x86_64::asm::Cond::Ne);
-        }
+    if let Some(host) = direct_base
+        && base == Register::Sp
+        && checks.stack_alignment
+        && !checks.stack_checked
+    {
+        code.asm().test_imm(Size::Byte, host, 15);
+        code.check_failure(crate::x86_64::asm::Cond::Ne);
+    }
+    if held == super::Rax::Guest(index)
+        && matches!(base, Register::X(_))
+        && base != index
+        && code.host(index).is_none()
+        && matches!(extend, IndexExtend::Lsl | IndexExtend::Sxtx)
+        && shift == 0
+        && !code.constant_time()
+        && !checks.alignment
+        && !checks.checks_every_access()
+    {
+        // The predecessor settled the index before either memory access.
+        // Base + index is commutative modulo 2^64.
+        let mut asm = code.asm();
+        let base = asm.guest(base).expect("X base register");
+        asm.alu_load(Alu::Add, Size::Qword, Gpr::Rax, base);
+    } else if let Some(host) = direct_base {
         index_from_base(code, host, index, extend, shift);
+    } else {
+        memory_address(
+            code,
+            super::MemoryChecks {
+                guest_range: false,
+                ..checks
+            },
+            crate::x86_64::ImmediateAddress {
+                base,
+                displacement: 0,
+                mode: AddressMode::Offset,
+            },
+            1,
+            access,
+        );
+        index_add(code, index, extend, shift);
+    }
+    if direct_base.is_some() {
         if checks.guest_range {
             checks.range.emit_base(code, Gpr::Rax);
             if shared {
@@ -164,21 +214,9 @@ fn emit_address(
                 super::unreachable_if(&mut code.asm(), super::asm::Cond::A);
             }
         }
-        return;
+    } else {
+        super::address_checks(code, checks, bytes, access);
     }
-    memory_address(
-        code,
-        base_checks,
-        crate::x86_64::ImmediateAddress {
-            base,
-            displacement: 0,
-            mode: AddressMode::Offset,
-        },
-        1,
-        access,
-    );
-    index_add(code, index, extend, shift);
-    super::address_checks(code, checks, bytes, access);
 }
 
 /// The largest shift a SIB scale applies (times eight).

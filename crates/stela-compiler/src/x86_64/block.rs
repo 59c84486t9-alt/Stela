@@ -523,6 +523,7 @@ fn emit_selected(
                 &mut block.source_map,
                 &instructions[cursor..],
                 checks_at(cursor),
+                held.rax,
             )
         {
             cursor += 2;
@@ -1082,6 +1083,8 @@ fn emit_single(
             .expect("decoded Q pair displacement and ADD immediate fit i32");
         super::address_add(code, adjustment, super::AddressMode::Offset);
         super::store(code, destination);
+    } else if let Operation::MemoryRegisterOffset(operand) = &instruction.operation {
+        super::register_offset::emit_after(code, operand, checks, held.rax);
     } else if live_nzcv {
         assert!(
             super::pinned::emit_direct_with_add_sub_capture(

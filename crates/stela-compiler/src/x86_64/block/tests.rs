@@ -860,6 +860,111 @@ fn inplace_aes_round_pair_keeps_source_rows_and_cpu_fallbacks() {
 }
 
 #[test]
+fn settled_x_index_is_reused_by_single_and_shared_accesses() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features, RecoverySiteKind},
+        x86_64::MemoryChecks,
+    };
+
+    // LZ4 AND X23,X7,#0x3ffc; LDR W7,[X8,X23]; STR W17,[X8,X23].
+    let words = [0x927e_2cf7u32, 0xb877_6907, 0xb837_6911];
+    let pc = GuestAddress(0x100008010);
+    let target = TargetCpu::Baseline;
+    let direct = MemoryChecks::DEFAULT;
+    let system = BlockProfile::new(Features::SYSTEM_MODE);
+    let compile = |words: &[u32], pc, profile, target, checks| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        CompilationPlan::new(
+            &source,
+            pc,
+            &Options::new(profile, target).with_memory_checks(checks),
+        )
+        .unwrap()
+        .compile()
+        .unwrap()
+    };
+    let frame_add = [0x48, 0x03, 0x87, 0x40, 0, 0, 0];
+    let pinned_add = [0x48, 0x03, 0xc6];
+    let committed = [0x48, 0x89, 0x87, 0xb8, 0, 0, 0];
+    for profile in [BlockProfile::ORDINARY, system] {
+        let add = if profile == system {
+            &pinned_add[..]
+        } else {
+            &frame_add[..]
+        };
+        for source in [&words[..2], &words[..]] {
+            let block = compile(source, pc, profile, target, direct);
+            let (load_pc, start) = block.native.source_map[1];
+            assert_eq!(load_pc, GuestAddress(pc.0 + 4));
+            assert_eq!(block.native.source_map.len(), source.len());
+            assert!(block.native.x86_64_code[..start].ends_with(&committed));
+            assert!(block.native.x86_64_code[start..].starts_with(add));
+            let separate = compile(&source[1..], load_pc, profile, target, direct);
+            assert!(!separate.native.x86_64_code.starts_with(add));
+            if profile != system {
+                continue;
+            }
+            let accesses: Vec<_> = block
+                .fault_recovery
+                .iter()
+                .filter(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+                .collect();
+            assert_eq!(accesses.len(), source.len() - 1);
+            for (index, site) in accesses.into_iter().enumerate() {
+                assert_eq!(
+                    site.retirement.instruction_pc(),
+                    GuestAddress(pc.0 + 4 * (index as u64 + 1))
+                );
+                assert_eq!(site.retirement.retired_before(), index as u16 + 1);
+                assert!(site.start >= block.native.source_map[index + 1].1);
+            }
+        }
+    }
+
+    // An independent store can use the same fact, and an SXTX index at
+    // scale one is the same full-width addition as LSL #0.
+    let only_store = [words[0], words[2] | (1 << 15)];
+    let store = compile(&only_store, pc, system, target, direct);
+    assert!(store.native.x86_64_code[store.native.source_map[1].1..].starts_with(&pinned_add));
+
+    for (words, target, checks) in [
+        ([words[0], words[1] | (1 << 12)], target, direct), // Scaled index.
+        (
+            [words[0], (words[1] & !(31 << 5)) | (23 << 5)],
+            target,
+            direct,
+        ), // Base aliases index.
+        (
+            [words[0], words[1]],
+            target.with_data_independent_timing(),
+            direct,
+        ),
+        (
+            [words[0], words[1]],
+            target,
+            direct.with_translation(0x1000),
+        ),
+        (
+            [words[0], words[1]],
+            target,
+            MemoryChecks::system(true, true, true, false),
+        ),
+    ] {
+        let block = compile(&words, pc, system, target, checks);
+        assert!(!block.native.x86_64_code[block.native.source_map[1].1..].starts_with(&pinned_add));
+    }
+
+    // Desktop UBFIZ X9,X10,#3,#1; LDR X9,[X12,X9] uses two frame
+    // operands. The first row must settle X9 even though the load writes it.
+    let desktop = [0xd37d_0149, 0xf869_6989];
+    let block = compile(&desktop, GuestAddress(0x18f5_a17ec), system, target, direct);
+    let row = block.native.source_map[1].1;
+    assert!(block.native.x86_64_code[..row].ends_with(&[0x48, 0x89, 0x47, 0x48]));
+    assert!(block.native.x86_64_code[row..].starts_with(&[0x48, 0x03, 0x47, 0x60]));
+}
+
+#[test]
 fn indexed_load_store_pair_shares_checked_address_with_distinct_fault_rows() {
     use crate::{
         Options, TargetCpu,
