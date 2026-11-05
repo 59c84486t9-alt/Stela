@@ -529,27 +529,36 @@ fn emit_selected(
             cursor += 2;
             continue;
         }
-        if fuse_pairs
-            && matches!(
-                instructions[cursor].operation,
+        if fuse_pairs {
+            let group = match instructions[cursor].operation {
                 Operation::Memory {
                     transfer: super::MemoryTransfer::Load { .. },
                     mode: super::AddressMode::Offset | super::AddressMode::PostIndex,
                     ..
-                }
-            )
-            && let Some(group) =
-                super::memory_recipe::CompareLoads::new(&instructions[cursor..], held.rax, checks)
-        {
-            after.rax = group.emit(
-                code,
-                &mut block.source_map,
-                &instructions[cursor..],
-                checks,
-                native_branch_after(cursor + 2),
-            );
-            cursor += 3;
-            continue;
+                } => super::memory_recipe::CompareLoads::new(
+                    &instructions[cursor..],
+                    held.rax,
+                    checks,
+                ),
+                Operation::MemoryPair {
+                    transfer: super::MemoryTransfer::Load { .. },
+                    mode: super::AddressMode::Offset,
+                    ..
+                } => super::memory_recipe::CompareLoads::from_pair(&instructions[cursor..], checks),
+                _ => None,
+            };
+            if let Some(group) = group {
+                let compare = cursor + group.compare_index();
+                after.rax = group.emit(
+                    code,
+                    &mut block.source_map,
+                    &instructions[cursor..],
+                    checks,
+                    native_branch_after(compare),
+                );
+                cursor = compare + 1;
+                continue;
+            }
         }
         if (pinned || fuse_pairs)
             && !code.constant_time()

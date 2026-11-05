@@ -598,6 +598,92 @@ fn ordinary_compare_reads_both_settled_load_results() {
 }
 
 #[test]
+fn ordinary_pair_compare_reuses_both_committed_load_results() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features, RecoverySiteKind},
+    };
+
+    // LDP X8,X10,[X1,#8]; CMP X10,X8; B.EQ from yyjson.
+    let words = [0xa940_a828, 0xeb08_015f, 0x5400_1b60];
+    let pc = GuestAddress(0x1000001ec);
+    let ordinary = BlockProfile::ORDINARY;
+    let baseline = TargetCpu::Baseline;
+    let fast = TargetCpu::X86_64_V2.with_bmi2().with_fast_pdep();
+    let compile = |words: &[u32], pc, profile, target| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        CompilationPlan::new(&source, pc, &Options::new(profile, target))
+            .unwrap()
+            .compile()
+            .unwrap()
+    };
+    let staged = [0x49, 0x39, 0xc8]; // CMP R8,RCX.
+    for target in [baseline, fast] {
+        let grouped = compile(&words, pc, ordinary, target).native;
+        let map = &grouped.source_map;
+        assert_eq!(
+            map.iter().map(|row| row.0).collect::<Vec<_>>(),
+            [pc, GuestAddress(pc.0 + 4), GuestAddress(pc.0 + 8)]
+        );
+        let (compare, branch) = (map[1].1, map[2].1);
+        let code = &grouped.x86_64_code;
+        let pair = compile(&words[..1], pc, ordinary, target).native;
+        assert_eq!(&code[..compare], &pair.x86_64_code[..compare]);
+        assert!(code[..compare].ends_with(&[0x4c, 0x89, 0x87, 0x50, 0, 0, 0])); // Commit X10.
+        assert!(code[compare..branch].starts_with(&staged));
+        if target == fast {
+            assert!(code[branch..].starts_with(&[0x0f, 0x84])); // JE.
+        }
+        let independent = compile(&words[1..], map[1].0, ordinary, target).native;
+        assert_eq!(independent.source_map[0], (map[1].0, 0));
+        assert!(independent.x86_64_code.starts_with(&[
+            0x48, 0x8b, 0x87, 0x50, 0, 0, 0, // MOV RAX,[frame+X10].
+            0x48, 0x3b, 0x87, 0x40, 0, 0, 0, // CMP RAX,[frame+X8].
+        ]));
+        assert_eq!(independent.source_map[1].1, branch - compare + 11);
+        let branch_entry = compile(&words[2..], map[2].0, ordinary, target).native;
+        assert_eq!(branch_entry.source_map[0], (map[2].0, 0));
+        assert_eq!(branch_entry.x86_64_code[0], 0xf6); // Frame NZCV.
+    }
+
+    // W8,W10 and reversed operand order each use the appropriate CMP.
+    for (pair, compare, expected) in [
+        (0x2940_a828, 0x6b08_015f, [0x41, 0x39, 0xc8]),
+        (words[0], 0xeb0a_011f, [0x4c, 0x39, 0xc1]),
+        ((words[0] & !(31 << 5)) | (10 << 5), words[1], staged), // Base aliases X10.
+    ] {
+        let block = compile(&[pair, compare, words[2]], pc, ordinary, baseline).native;
+        assert!(block.x86_64_code[block.source_map[1].1..].starts_with(&expected));
+    }
+
+    for (pair, compare, target) in [
+        (words[0], words[1], fast.with_data_independent_timing()),
+        (words[0], words[1] | (1 << 10), baseline), // CMP X10,X8,LSL #1.
+        (words[0], words[1] & !(1 << 31), baseline), // CMP W10,W8.
+        (words[0] ^ (3 << 23), words[1], baseline), // Post-index LDP.
+    ] {
+        let fallback = compile(&[pair, compare, words[2]], pc, ordinary, target).native;
+        assert!(!fallback.x86_64_code[fallback.source_map[1].1..].starts_with(&staged));
+    }
+
+    let system = BlockProfile::new(Features::SYSTEM_MODE);
+    let checked = compile(&words, pc, system, fast);
+    let compare = checked.native.source_map[1].1;
+    assert!(!checked.native.x86_64_code[compare..].starts_with(&staged));
+    let accesses: Vec<_> = checked
+        .fault_recovery
+        .iter()
+        .filter(|site| site.site.kind() == RecoverySiteKind::GuestAccess)
+        .collect();
+    assert_eq!(accesses.len(), 2);
+    for access in accesses {
+        assert_eq!(access.retirement.instruction_pc(), pc);
+        assert_eq!(access.retirement.retired_before(), 0);
+        assert!(access.start < access.end && access.end <= compare);
+    }
+}
+
+#[test]
 fn extended_compare_reads_its_left_operand_in_place() {
     use crate::{
         Options, TargetCpu,

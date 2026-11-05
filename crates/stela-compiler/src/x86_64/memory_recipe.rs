@@ -232,10 +232,19 @@ pub(super) fn address(
         mask(Gpr::Rax) | mask(Gpr::Rcx),
     );
 }
+const FRAME_PAIR_RESULTS: [Gpr; 2] = [Gpr::Rcx, Gpr::R8];
+
+enum CompareInput {
+    Scalars {
+        first: Scalar,
+        second: Scalar,
+        second_host: Gpr,
+    },
+    Pair(Pair),
+}
+
 pub(super) struct CompareLoads {
-    first: Scalar,
-    second: Scalar,
-    second_host: Gpr,
+    input: CompareInput,
     width: Width,
     left: Gpr,
     right: Gpr,
@@ -311,9 +320,11 @@ impl CompareLoads {
             return None;
         };
         Some(Self {
-            first: first_load,
-            second: second_load,
-            second_host,
+            input: CompareInput::Scalars {
+                first: first_load,
+                second: second_load,
+                second_host,
+            },
             width,
             left,
             right,
@@ -321,9 +332,80 @@ impl CompareLoads {
         })
     }
 
-    /// Commit each load and its writeback before the next guest access. An
-    /// offset load can reuse RAX for its result. A post-index load keeps
-    /// both address temporaries and stages its result separately.
+    pub(super) fn from_pair(instructions: &[Instruction], checks: MemoryChecks) -> Option<Self> {
+        let [load, compare, ..] = instructions else {
+            return None;
+        };
+        let Operation::MemoryPair {
+            transfer:
+                transfer @ MemoryTransfer::Load {
+                    signed: false,
+                    width,
+                },
+            bytes,
+            data: data @ [Register::X(_), Register::X(_)],
+            base: base @ Register::X(_),
+            displacement,
+            mode: AddressMode::Offset,
+        } = load.operation
+        else {
+            return None;
+        };
+        if checks != MemoryChecks::DEFAULT
+            || load.pc.0.checked_add(4) != Some(compare.pc.0)
+            || data[0] == data[1]
+            || !matches!((width, bytes), (Width::W32, 4) | (Width::X64, 8))
+        {
+            return None;
+        }
+        let Operation::AddSubRegister {
+            width: compare_width,
+            subtract: true,
+            flags: true,
+            destination: Register::Zero,
+            left,
+            right,
+            amount: 0,
+            ..
+        } = compare.operation
+        else {
+            return None;
+        };
+        if width != compare_width {
+            return None;
+        }
+        let [left, right] = if [left, right] == data {
+            FRAME_PAIR_RESULTS
+        } else if [right, left] == data {
+            [FRAME_PAIR_RESULTS[1], FRAME_PAIR_RESULTS[0]]
+        } else {
+            return None;
+        };
+        Some(Self {
+            input: CompareInput::Pair(Pair {
+                transfer,
+                bytes,
+                data,
+                address: ImmediateAddress {
+                    base,
+                    displacement,
+                    mode: AddressMode::Offset,
+                },
+            }),
+            width,
+            left,
+            right,
+            destination: Register::Zero,
+        })
+    }
+
+    pub(super) fn compare_index(&self) -> usize {
+        match self.input {
+            CompareInput::Scalars { .. } => 2,
+            CompareInput::Pair(_) => 1,
+        }
+    }
+
     pub(super) fn emit(
         self,
         code: &mut Code,
@@ -333,15 +415,32 @@ impl CompareLoads {
         live_nzcv: bool,
     ) -> super::Rax {
         debug_assert!(!code.is_pinned() && !code.constant_time());
-        for (instruction, operand, result) in [
-            (&instructions[0], self.first, Gpr::Rcx),
-            (&instructions[1], self.second, self.second_host),
-        ] {
-            source_map.push((instruction.pc, code.len()));
-            code.set_instruction(source_map.len() - 1);
-            scalar(code, checks, operand, None, Some(result));
+        let compare = self.compare_index();
+        match self.input {
+            CompareInput::Scalars {
+                first,
+                second,
+                second_host,
+            } => {
+                // Settle each scalar access before the next one.
+                for (instruction, operand, result) in [
+                    (&instructions[0], first, Gpr::Rcx),
+                    (&instructions[1], second, second_host),
+                ] {
+                    source_map.push((instruction.pc, code.len()));
+                    code.set_instruction(source_map.len() - 1);
+                    scalar(code, checks, operand, None, Some(result));
+                }
+            }
+            CompareInput::Pair(operand) => {
+                source_map.push((instructions[0].pc, code.len()));
+                code.set_instruction(source_map.len() - 1);
+                // Keep the original pair's two accesses and delayed frame
+                // commit. Its staged results still hold both CMP operands.
+                pair(code, checks, operand, None);
+            }
         }
-        source_map.push((instructions[2].pc, code.len()));
+        source_map.push((instructions[compare].pc, code.len()));
         code.set_instruction(source_map.len() - 1);
         let mut asm = code.asm();
         let destination = asm.guest(self.destination);
@@ -584,9 +683,11 @@ pub(super) fn pair(
                     .and_then(|(at, _)| code.host(register).filter(|host| *host != at))
                     .unwrap_or(staged)
             };
-            let hosts = [host(code, data[0], Gpr::Rcx), {
+            let hosts = [host(code, data[0], FRAME_PAIR_RESULTS[0]), {
                 // The second element's own load is the last to need the base.
-                place.and_then(|_| code.host(data[1])).unwrap_or(Gpr::R8)
+                place
+                    .and_then(|_| code.host(data[1]))
+                    .unwrap_or(FRAME_PAIR_RESULTS[1])
             }];
             for (element, host, source) in [
                 (0, hosts[0], Mem::base(at, displacement)),
