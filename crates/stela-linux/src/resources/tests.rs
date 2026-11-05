@@ -161,7 +161,6 @@ unsafe impl EnteredProcess for EnteredModel {
 struct Control {
     context: *mut c_void,
     exhaust: unsafe extern "C" fn(*mut c_void, bool),
-    heap_bytes: usize,
 }
 unsafe extern "C" {
     fn stela_linux_resource_fixture(context: *mut c_void);
@@ -193,7 +192,6 @@ unsafe extern "C" fn body(context: *mut c_void) {
     let control = Control {
         context: Arc::as_ptr(&f.memory).cast_mut().cast(),
         exhaust,
-        heap_bytes: PAGE * PAGES,
     };
     // SAFETY: attached task/stack and scoped Control/Memory stay held
     // until the finite original-C fixture returns with no owner or refs escaped.

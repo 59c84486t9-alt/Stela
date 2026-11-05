@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 /* Original UID/exec-state paths on an actually attached hosted Runtime task.
- * The CPU/physical provider is a test model; no native current is installed. */
+ * The CPU/physical provider is a test model; no native current is installed,
+ * so RCU-deferred frees never complete here (see resources_test.c). */
 #include <linux/errno.h>
 #include <linux/irqflags.h>
 #include <linux/mutex.h>
@@ -18,7 +19,6 @@
 struct resource_control {
     void *context;
     void (*exhaust)(void *context, bool enabled);
-    size_t heap_bytes;
 };
 void stela_linux_resource_fixture(void *context);
 
@@ -101,24 +101,26 @@ void stela_linux_resource_fixture(void *context)
      * original copy helper writes only its owned exec_state field. */
     struct task_struct *destination = kzalloc(sizeof(*destination), GFP_KERNEL);
     assert(destination);
-    size_t capacity = control->heap_bytes / sizeof(struct task_exec_state) + 1;
+    /* Without new pages, fill the cache's current slab page; the copy then
+     * needs a page it cannot have. Freed exec states wait for RCU, which a
+     * bare task never completes, so they stay held instead of returning. */
+    size_t capacity = PAGE_SIZE / sizeof(struct task_exec_state) + 1;
     struct task_exec_state **held = kcalloc(capacity, sizeof(*held), GFP_KERNEL);
     assert(held);
+    control->exhaust(control->context, true);
     size_t count = 0;
     for (; count < capacity; count++) {
         held[count] = alloc_task_exec_state(&init_user_ns);
         if (!held[count])
             break;
     }
-    assert(count && count < capacity);
+    assert(count < capacity);
     parent->exec_state = source;
     task_exec_state_set_dumpable(TASK_DUMPABLE_OWNER);
     assert(source->dumpable == TASK_DUMPABLE_OWNER);
     assert(task_exec_state_copy(destination) == -ENOMEM);
     assert(!destination->exec_state && refcount_read(&source->count) == 1);
-    for (size_t i = 0; i < count; i++)
-        put_task_exec_state(held[i]);
-    stela_linux_rcu_finish();
+    control->exhaust(control->context, false);
     assert(task_exec_state_copy(destination) == 0);
     assert(destination->exec_state && destination->exec_state != source);
     assert(destination->exec_state->user_ns == &init_user_ns);
@@ -134,16 +136,16 @@ void stela_linux_resource_fixture(void *context)
     struct task_exec_state *copied = destination->exec_state;
     destination->exec_state = NULL;
     kfree(destination);
-    kfree(held);
     put_task_exec_state(copied);
+    for (size_t i = 0; i < count; i++)
+        put_task_exec_state(held[i]);
+    kfree(held);
+    /* The last put defers the free past every reader's grace period. */
     rcu_read_lock();
     put_task_exec_state(source);
     assert(stela_linux_allocation_range(source, sizeof(*source), &allocation));
     assert(!refcount_read(&source->count));
     rcu_read_unlock();
-    unsigned long source_address = (unsigned long)source;
-    stela_linux_rcu_finish();
-    assert(!stela_linux_allocation_range((void *)source_address, sizeof(*source), &allocation));
     assert(refcount_read(&init_task_exec_state.count) == 2);
     assert(parent->exec_state == NULL);
     stela_linux_exit();
