@@ -19,4 +19,6 @@ struct stela_linux_slab_pages stela_linux_slab_owned_pages(void);
 /* Ensure ordinary backing has an unused slot, growing only while quiescent. */
 struct kmem_cache;
 bool stela_linux_cache_prime(struct kmem_cache *cache);
+/* Objects of the cache allocated and not yet freed. Observation only. */
+size_t stela_linux_cache_live_objects(struct kmem_cache *cache);
 #endif

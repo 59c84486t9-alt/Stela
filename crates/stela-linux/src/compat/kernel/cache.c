@@ -301,6 +301,11 @@ static struct cache_slab *grow_cache(struct kmem_cache *cache, gfp_t flags)
 	return slab;
 }
 
+size_t stela_linux_cache_live_objects(struct kmem_cache *cache)
+{
+	return require_cache(cache)->live;
+}
+
 bool stela_linux_cache_prime(struct kmem_cache *cache)
 {
 	if (!stela_linux_quiescent())

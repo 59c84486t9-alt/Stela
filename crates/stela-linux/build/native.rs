@@ -409,7 +409,6 @@ impl Linux {
             }
             fixture
                 .define("STELA_LINUX_TREES_TEST", None)
-                .define("STELA_LINUX_TREES_CALLABLE", None)
                 .files([
                     format!("{COMPAT}/kernel/trees.c"),
                     format!("{COMPAT}/stela/percpu_test.c"),

@@ -41,6 +41,10 @@ use stela_linux::{
     },
 };
 
+#[cfg(feature = "hosted-test-support")]
+#[global_allocator]
+static HEAP: stela_linux::test_heap::TestHeap = stela_linux::test_heap::TestHeap;
+
 type TestRuntime = HostedRuntime<16>;
 type TestQueue = HostedQueue<16>;
 const HOSTED_CHILD: &str = "STELA_HOSTED_INITIAL_CHILD";
@@ -627,6 +631,7 @@ mod original_fixtures {
         fn stela_linux_deferred_free_source_test();
         fn stela_linux_exec_state_source_test();
         fn stela_linux_registry_source_test(parameter_failure: bool);
+        fn stela_linux_trees_source_test();
         fn stela_linux_srcu_queue_before_threads();
         fn stela_linux_srcu_negative_case(which: u32, witness: unsafe extern "C" fn());
         fn stela_linux_workqueue_test_main();
@@ -775,6 +780,18 @@ mod original_fixtures {
         );
     }
 
+    #[test]
+    fn original_trees_return_their_nodes_after_grace_periods() {
+        in_fresh_process(
+            "original_fixtures::original_trees_return_their_nodes_after_grace_periods",
+            "original trees returned their nodes after grace periods",
+            16 * 1024,
+            14,
+            mount_trees,
+            drive_trees,
+        );
+    }
+
     const SRCU_WITNESS: &str = "entered original SRCU refusal case\n";
 
     #[test]
@@ -873,6 +890,13 @@ mod original_fixtures {
         0
     }
 
+    unsafe extern "C" fn trees_job(_: *mut c_void) -> i32 {
+        // SAFETY: original kthreadd bound this entered source task.
+        unsafe { stela_linux_trees_source_test() };
+        BODY_RETURNED.store(true, Ordering::Relaxed);
+        0
+    }
+
     unsafe extern "C" fn srcu_witness() {
         let bytes = SRCU_WITNESS.as_bytes();
         // SAFETY: resident bytes and the child process's captured stderr.
@@ -948,6 +972,13 @@ mod original_fixtures {
         unsafe { mount(owner, context, deferred_free_job, c"deferred-free", None) }
     }
 
+    unsafe extern "C" fn mount_trees(owner: *const RawOwner, context: *mut c_void) -> ! {
+        // The IDA cases observe original nonblocking allocations in the span.
+        assert!(stela_linux::test_heap::register());
+        // SAFETY: exact retained Initial scope and live fixture callback.
+        unsafe { mount(owner, context, trees_job, c"trees-fixture", None) }
+    }
+
     unsafe extern "C" fn mount_registry<const PARAMETER_FAILURE: bool>(
         owner: *const RawOwner,
         context: *mut c_void,
@@ -1012,6 +1043,12 @@ mod original_fixtures {
     fn drive_deferred_free(runtime: Pin<&TestRuntime>, _: &HostedClock, _: &TestQueue) {
         await_fixture(runtime);
         println!("original deferred-free callbacks reclaimed their allocations");
+        process::exit(0);
+    }
+
+    fn drive_trees(runtime: Pin<&TestRuntime>, _: &HostedClock, _: &TestQueue) {
+        await_fixture(runtime);
+        println!("original trees returned their nodes after grace periods");
         process::exit(0);
     }
 

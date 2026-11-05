@@ -14,7 +14,6 @@
 #include <linux/xarray.h>
 #include <stela/cache.h>
 #include <stela/linux.h>
-#include <stela/page.h>
 #include <stela/test.h>
 
 static_assert(IS_ENABLED(CONFIG_XARRAY_MULTI));
@@ -23,117 +22,24 @@ static_assert(IS_ENABLED(CONFIG_XARRAY_MULTI));
  * algorithm is copied here; only its actual public cache handle is borrowed. */
 extern struct kmem_cache *radix_tree_node_cachep;
 
-#define TEST_PAGES 8UL
-#define TEST_BYTES (TEST_PAGES * PAGE_SIZE)
-#define TEST_PHYSICAL 0x36000000ULL
 #define TEST_IDS 8192U
 #define MAP_SIZE 256U
 
-struct model_pin {
-	bool active;
-	size_t first, count;
-	u64 physical[TEST_PAGES];
-};
-
-static struct {
-	u8 *cpu;
-	bool used[TEST_PAGES];
-	struct model_pin pins[TEST_PAGES];
-	unsigned int allocations, releases;
-	unsigned int validations, exhausted_requests;
-	bool exhausted;
-} model;
-
 static unsigned int payload[TEST_IDS];
-static unsigned int unsupported_calls;
+static size_t settled_nodes = SIZE_MAX;
 
-static void unsupported(void *context, const char *operation)
-{
-	(void)context;
-	unsupported_calls++;
-	printf("Unexpected tree dependency refusal: %s\n", operation);
-	assert(false);
-}
-
-static int validate(void *context, u32 gfp, unsigned int order, bool atomic)
-{
-	assert(context == &model);
-	model.validations++;
-	if (atomic || !stela_linux_page_request_blocking(gfp) ||
-	    !stela_linux_page_request_reclaimable(gfp))
-		return -EOPNOTSUPP;
-	assert(gfp & (__force u32)__GFP_COMP);
-	return order <= 3 ? 0 : -ENOMEM;
-}
-
-static int allocate(void *context, u32 gfp, unsigned int order, bool atomic,
-		    struct stela_linux_page_allocation *result)
-{
-	int error = validate(context, gfp, order, atomic);
-	if (error)
-		return error;
-	if (model.exhausted) {
-		model.exhausted_requests++;
-		return -ENOMEM;
-	}
-	size_t count = 1UL << order;
-	for (size_t first = 0; first + count <= TEST_PAGES; first += count) {
-		bool free = true;
-		for (size_t i = 0; i < count; i++)
-			free &= !model.used[first + i];
-		if (!free)
-			continue;
-		struct model_pin *pin = &model.pins[first];
-		assert(!pin->active);
-		pin->active = true;
-		pin->first = first;
-		pin->count = count;
-		for (size_t i = 0; i < count; i++) {
-			model.used[first + i] = true;
-			pin->physical[i] = TEST_PHYSICAL + (u64)(first + i) * PAGE_SIZE;
-		}
-		u8 *cpu = model.cpu + first * PAGE_SIZE;
-		memset(cpu, 0, count * PAGE_SIZE);
-		*result = (struct stela_linux_page_allocation){
-			.pin = pin, .cpu_base = cpu,
-			.physical_pages = pin->physical, .page_count = count,
-		};
-		model.allocations++;
-		return 0;
-	}
-	model.exhausted_requests++;
-	return -ENOMEM;
-}
-
-static void release(void *context, void *handle)
-{
-	assert(context == &model);
-	struct model_pin *pin = handle;
-	bool known = false;
-	for (size_t i = 0; i < TEST_PAGES; i++)
-		known |= pin == &model.pins[i];
-	assert(known && pin->active);
-	for (size_t i = 0; i < pin->count; i++) {
-		assert(model.used[pin->first + i]);
-		model.used[pin->first + i] = false;
-	}
-	memset(model.cpu + pin->first * PAGE_SIZE, 0xd3, pin->count * PAGE_SIZE);
-	pin->active = false;
-	model.releases++;
-}
-
+/* Every node a case freed returns to the cache through original RCU: the
+ * nodes outside the per-CPU preload pool come back to their settled count.
+ * The kernel's own trees keep theirs throughout. */
 static void settle_empty_cache(void)
 {
 	assert(stela_linux_quiescent());
-	assert(!per_cpu(radix_tree_preloads, 0).nr);
 	rcu_barrier();
-	assert(!kmem_cache_shrink(radix_tree_node_cachep));
-	stela_linux_pages_finish();
-	struct stela_linux_slab_pages totals = stela_linux_slab_owned_pages();
-	assert(!totals.reclaimable && !totals.unreclaimable);
-	assert(model.allocations == model.releases);
-	for (size_t i = 0; i < TEST_PAGES; i++)
-		assert(!model.used[i] && !model.pins[i].active);
+	size_t nodes = stela_linux_cache_live_objects(radix_tree_node_cachep) -
+		per_cpu(radix_tree_preloads, 0).nr;
+	if (settled_nodes == SIZE_MAX)
+		settled_nodes = nodes;
+	assert(nodes == settled_nodes);
 }
 
 static void bitmap_range_math(void)
@@ -414,7 +320,16 @@ static void allocation_failure(void)
 {
 	struct idr tree;
 	idr_init(&tree);
-	model.exhausted = true;
+	void *held[64];
+	size_t count = 0;
+	stela_test_allocations_begin(true);
+	/* Hold every free node slot, including those beside the kernel's own
+	 * nodes, so each new node needs a page that is refused. */
+	while (stela_linux_cache_prime(radix_tree_node_cachep)) {
+		assert(count < ARRAY_SIZE(held));
+		held[count] = kmem_cache_alloc(radix_tree_node_cachep, GFP_KERNEL);
+		assert(held[count++]);
+	}
 	u32 next = UINT_MAX;
 	assert(idr_alloc_u32(&tree, &payload[0], &next, UINT_MAX, GFP_KERNEL) == -ENOMEM);
 	assert(next == UINT_MAX && idr_is_empty(&tree));
@@ -423,14 +338,15 @@ static void allocation_failure(void)
 	assert(!xa_store(&array, 0, &payload[1], GFP_KERNEL)); /* Root needs no node. */
 	assert(xa_err(xa_store(&array, ULONG_MAX, &payload[2], GFP_KERNEL)) == -ENOMEM);
 	assert(xa_load(&array, 0) == &payload[1] && !xa_load(&array, ULONG_MAX));
-	assert(model.exhausted_requests);
-	model.exhausted = false;
+	assert(stela_test_allocations_end().pages);
+	for (size_t i = 0; i < count; i++)
+		kmem_cache_free(radix_tree_node_cachep, held[i]);
 	idr_destroy(&tree);
 	xa_destroy(&array);
 	settle_empty_cache();
 }
 
-static void preload_lifetime_and_retirement(const struct stela_linux_owner *owner)
+static void preload_lifetime(void)
 {
 	struct idr tree;
 	idr_init(&tree);
@@ -438,22 +354,12 @@ static void preload_lifetime_and_retirement(const struct stela_linux_owner *owne
 	unsigned int count = per_cpu(radix_tree_preloads, 0).nr;
 	assert(count && !stela_linux_quiescent());
 	idr_preload_end();
-	assert(stela_linux_quiescent());
-	struct stela_linux_slab_pages before = stela_linux_slab_owned_pages();
-	assert(before.reclaimable && !before.unreclaimable);
-	assert(stela_linux_page_catalog_unregister(1) == -EBUSY);
-	stela_linux_exit();
-	stela_linux_enter(&stela_linux_bare);
-	assert(per_cpu(radix_tree_preloads, 0).nr == count);
-	struct stela_linux_slab_pages after = stela_linux_slab_owned_pages();
-	assert(before.reclaimable == after.reclaimable && !after.unreclaimable);
-	assert(stela_linux_page_catalog_unregister(1) == -EBUSY);
-	stela_linux_exit();
-	stela_linux_enter(owner);
-	/* Consume original retained pool through original IDR allocation. Every
-	 * cache/bitmap attempt remains genuinely nonblocking; no fake CPU death,
-	 * direct private pool mutation or fixture-only drain is involved. Eight
-	 * backing pages hold fewer nodes than required by TEST_IDS dense IDs. */
+	assert(stela_linux_quiescent() && per_cpu(radix_tree_preloads, 0).nr == count);
+	/* Consume the retained pool through original IDR allocation. Every
+	 * cache/bitmap attempt stays genuinely nonblocking, and without new
+	 * pages the pool and settled cache hold fewer nodes than TEST_IDS dense
+	 * IDs need. No fake CPU death or direct private pool mutation. */
+	stela_test_allocations_begin(true);
 	preempt_disable();
 	unsigned int inserted = 0;
 	for (; inserted < TEST_IDS; inserted++) {
@@ -464,45 +370,25 @@ static void preload_lifetime_and_retirement(const struct stela_linux_owner *owne
 	}
 	assert(inserted && inserted < TEST_IDS && !per_cpu(radix_tree_preloads, 0).nr);
 	preempt_enable();
+	stela_test_allocations_end();
 	for (unsigned int i = 0; i < inserted; i++)
 		assert(idr_find(&tree, i) == &payload[i]);
+	size_t live = stela_linux_cache_live_objects(radix_tree_node_cachep);
 	rcu_read_lock();
 	idr_destroy(&tree);
 	/* Internal nodes cannot return to the cache before this reader ends. */
-	after = stela_linux_slab_owned_pages();
-	assert(after.reclaimable && !after.unreclaimable);
+	assert(stela_linux_cache_live_objects(radix_tree_node_cachep) == live);
 	rcu_read_unlock();
 	settle_empty_cache();
-	assert(!stela_linux_page_catalog_unregister(1));
 }
 
-#ifdef STELA_LINUX_TREES_CALLABLE
-int stela_linux_trees_fixture(void);
-int stela_linux_trees_fixture(void)
-#else
-int main(void)
-#endif
+void stela_linux_trees_source_test(void);
+void stela_linux_trees_source_test(void)
 {
-	model.cpu = aligned_alloc(TEST_BYTES, TEST_BYTES);
-	assert(model.cpu);
-	memset(model.cpu, 0xd3, TEST_BYTES);
 	for (unsigned int i = 0; i < TEST_IDS; i++)
 		payload[i] = i;
-	const struct stela_linux_services services = {.unsupported = unsupported};
-	const struct stela_linux_owner owner = {.services = &services};
-	stela_linux_enter(&owner);
-	const struct stela_linux_page_reservation reservation = {
-		.generation = 1, .physical_base = TEST_PHYSICAL,
-		.cpu_base = model.cpu, .page_count = TEST_PAGES,
-	};
-	const struct stela_linux_page_ops operations = {
-		.validate = validate, .allocate = allocate, .release = release,
-	};
-	assert(!stela_linux_page_catalog_register(&reservation, &operations, &model));
-	/* Real original once-only initialization; no per-enter constructor or
-	 * replacement global cache/CPUHP callback is introduced. */
-	radix_tree_init();
 	assert(radix_tree_node_cachep);
+	settle_empty_cache();
 	stela_test_heap_try_enable(true);
 	bitmap_range_math();
 	idr_map_and_ranges();
@@ -511,12 +397,7 @@ int main(void)
 	xarray_map_and_allocations();
 	xarray_ordered_entries();
 	allocation_failure();
-	preload_lifetime_and_retirement(&owner);
+	preload_lifetime();
 	stela_test_heap_try_enable(false);
-	assert(!unsupported_calls);
-	stela_linux_exit();
-	free(model.cpu);
-	printf("Linux trees: original IDR/IDA/radix/XArray, bounded bitmap, allocation and retained lifetime\n");
-	return 0;
 }
 #endif

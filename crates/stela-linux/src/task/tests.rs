@@ -14,7 +14,6 @@ use stela_driver_base::platform::work::{Cpu, Executor, Kind, Queue, Stack, Stack
 #[global_allocator]
 static HEAP: crate::test_heap::TestHeap = crate::test_heap::TestHeap;
 unsafe extern "C" {
-    fn stela_linux_trees_fixture() -> i32;
     fn stela_linux_task_test_taskless();
     fn stela_linux_percpu_fixture(context: *mut c_void);
     fn stela_linux_percpu_taskless_fixture();
@@ -285,8 +284,6 @@ unsafe extern "C" fn trees_body(_: *mut c_void) {
     // SAFETY: same real attached task and RunScoped body; this callable
     // fixture enters/exits its own owner and keeps no callback/context.
     unsafe { stela_linux_percpu_fixture(ptr::null_mut()) };
-    // SAFETY: C task, entered by the unchanged fixture body.
-    assert_eq!(unsafe { stela_linux_trees_fixture() }, 0);
 }
 unsafe extern "C" fn trees(context: *mut c_void) {
     // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
