@@ -43,6 +43,7 @@ use stela_linux::{
 
 type TestRuntime = HostedRuntime<16>;
 type TestQueue = HostedQueue<16>;
+const HOSTED_CHILD: &str = "STELA_HOSTED_INITIAL_CHILD";
 
 struct Host {
     clock: Arc<HostedClock>,
@@ -609,13 +610,19 @@ fn drive_reap_service(runtime: Pin<&TestRuntime>, _: &HostedClock, queue: &TestQ
 #[cfg(feature = "hosted-test-support")]
 mod original_fixtures {
     use super::*;
-    use std::sync::atomic::AtomicBool;
+    use std::{
+        os::unix::process::ExitStatusExt,
+        sync::atomic::{AtomicBool, AtomicU32},
+    };
 
     static BODY_RETURNED: AtomicBool = AtomicBool::new(false);
     static SOFTWARE_PEER: AtomicBool = AtomicBool::new(false);
+    static SRCU_NEGATIVE_CASE: AtomicU32 = AtomicU32::new(0);
 
     unsafe extern "C" {
         fn stela_linux_timer_test_sleeper();
+        fn stela_linux_srcu_source_cases();
+        fn stela_linux_srcu_negative_case(which: u32, witness: unsafe extern "C" fn());
         fn stela_linux_workqueue_test_main();
         fn stela_linux_workqueue_test_shutdown(force: bool);
         fn stela_linux_workqueue_test_irq_enable(irq: u32, unexposed: *mut bool) -> Errno;
@@ -690,6 +697,63 @@ mod original_fixtures {
         );
     }
 
+    #[test]
+    fn original_srcu_joins_grace_periods_on_bound_workers() {
+        in_fresh_process(
+            "original_fixtures::original_srcu_joins_grace_periods_on_bound_workers",
+            "original SRCU grace periods and cleanup completed",
+            16 * 1024,
+            14,
+            mount_srcu,
+            drive_srcu,
+        );
+    }
+
+    const SRCU_WITNESS: &str = "entered original SRCU refusal case\n";
+
+    #[test]
+    fn original_srcu_refuses_invalid_source_contexts() {
+        const TEST: &str = "original_fixtures::original_srcu_refuses_invalid_source_contexts";
+        const CASE: &str = "STELA_HOSTED_SRCU_NEGATIVE_CASE";
+        if std::env::var_os(HOSTED_CHILD).is_none() {
+            let cases = [
+                "callback sleep",
+                "owner exit",
+                "rebalanced sleep",
+                "unbalanced return",
+                "cleanup with live reader",
+            ];
+            for (which, description) in cases.into_iter().enumerate() {
+                let result = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", TEST, "--nocapture"])
+                    .env(HOSTED_CHILD, "1")
+                    .env(CASE, which.to_string())
+                    .output()
+                    .unwrap();
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                assert!(stderr.contains(SRCU_WITNESS), "{description}\n{stderr}");
+                assert_eq!(
+                    result.status.signal(),
+                    Some(libc::SIGILL),
+                    "{description}\n{stderr}"
+                );
+            }
+            return;
+        }
+        SRCU_NEGATIVE_CASE.store(
+            std::env::var(CASE).unwrap().parse().unwrap(),
+            Ordering::Relaxed,
+        );
+        in_fresh_process(
+            TEST,
+            SRCU_WITNESS,
+            16 * 1024,
+            14,
+            mount_srcu_negative,
+            drive_srcu,
+        );
+    }
+
     unsafe extern "C" fn timer_job(_: *mut c_void) -> i32 {
         // SAFETY: the original kthread enters this exact owner before the body.
         unsafe { stela_linux_timer_test_sleeper() };
@@ -704,6 +768,33 @@ mod original_fixtures {
         0
     }
 
+    unsafe extern "C" fn srcu_job(_: *mut c_void) -> i32 {
+        // SAFETY: original kthreadd bound this continuation before entry.
+        unsafe { stela_linux_srcu_source_cases() };
+        BODY_RETURNED.store(true, Ordering::Relaxed);
+        0
+    }
+
+    unsafe extern "C" fn srcu_witness() {
+        let bytes = SRCU_WITNESS.as_bytes();
+        // SAFETY: resident bytes and the child process's captured stderr.
+        // No host allocator or stdio lock can run in the original callback.
+        let written =
+            unsafe { libc::write(libc::STDERR_FILENO, bytes.as_ptr().cast(), bytes.len()) };
+        if usize::try_from(written) != Ok(bytes.len()) {
+            process::abort();
+        }
+    }
+
+    unsafe extern "C" fn srcu_negative_job(_: *mut c_void) -> i32 {
+        // SAFETY: original kthreadd bound this continuation before entry.
+        unsafe {
+            stela_linux_srcu_negative_case(SRCU_NEGATIVE_CASE.load(Ordering::Relaxed), srcu_witness)
+        };
+        BODY_RETURNED.store(true, Ordering::Relaxed);
+        0
+    }
+
     unsafe extern "C" fn mount_timers(owner: *const RawOwner, context: *mut c_void) -> ! {
         // SAFETY: exact retained Initial scope and live fixture callback.
         unsafe { mount(owner, context, timer_job, c"timer-fixture") }
@@ -713,6 +804,16 @@ mod original_fixtures {
         SOFTWARE_PEER.store(true, Ordering::Relaxed);
         // SAFETY: exact retained Initial scope and live fixture callback.
         unsafe { mount(owner, context, workqueue_job, c"workqueue-fixture") }
+    }
+
+    unsafe extern "C" fn mount_srcu(owner: *const RawOwner, context: *mut c_void) -> ! {
+        // SAFETY: exact retained Initial scope and live fixture callback.
+        unsafe { mount(owner, context, srcu_job, c"srcu-fixture") }
+    }
+
+    unsafe extern "C" fn mount_srcu_negative(owner: *const RawOwner, context: *mut c_void) -> ! {
+        // SAFETY: exact retained Initial scope and live fixture callback.
+        unsafe { mount(owner, context, srcu_negative_job, c"srcu-refusal") }
     }
 
     unsafe fn mount(
@@ -740,13 +841,23 @@ mod original_fixtures {
         unsafe { stela_linux::service::run_hosted_service(owner, runtime) }
     }
 
-    fn drive(runtime: Pin<&TestRuntime>, _: &HostedClock, _: &TestQueue) {
+    fn await_fixture(runtime: Pin<&TestRuntime>) {
         let mut steps = 0;
         while !BODY_RETURNED.load(Ordering::Relaxed) {
             step_hosted(runtime, true).unwrap();
             steps += 1;
             assert!(steps < 2048, "the original fixture child did not complete");
         }
+    }
+
+    fn drive_srcu(runtime: Pin<&TestRuntime>, _: &HostedClock, _: &TestQueue) {
+        await_fixture(runtime);
+        println!("original SRCU grace periods and cleanup completed");
+        process::exit(0);
+    }
+
+    fn drive(runtime: Pin<&TestRuntime>, _: &HostedClock, _: &TestQueue) {
+        await_fixture(runtime);
         if software_peer_active() {
             println!("original workqueue, IRQ and synchronization fixtures completed");
         } else {
@@ -806,11 +917,10 @@ fn in_fresh_process(
     body: unsafe extern "C" fn(*const RawOwner, *mut c_void) -> !,
     drive: fn(Pin<&TestRuntime>, &HostedClock, &TestQueue),
 ) {
-    const CHILD: &str = "STELA_HOSTED_INITIAL_CHILD";
-    if std::env::var_os(CHILD).is_none() {
+    if std::env::var_os(HOSTED_CHILD).is_none() {
         let result = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", test, "--nocapture"])
-            .env(CHILD, "1")
+            .env(HOSTED_CHILD, "1")
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&result.stdout);

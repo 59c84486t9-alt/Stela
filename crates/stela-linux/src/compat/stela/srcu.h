@@ -13,7 +13,7 @@ struct srcu_struct;
 int stela_linux_srcu_bind_initial(const struct stela_linux_owner *owner);
 
 /* Probe already-initialized original SRCU/workqueues/clock on an actual owned
- * canonical task. This never calls rcu_init/srcu_init/scheduler-start itself.
+ * source task. This never calls rcu_init/srcu_init/scheduler-start itself.
  * Failure retains source ownership and original pending work. Public admission
  * still needs the separate exact Rust Bootstrap original managed-request join. */
 int stela_linux_srcu_bootstrap(const struct stela_linux_owner *owner);

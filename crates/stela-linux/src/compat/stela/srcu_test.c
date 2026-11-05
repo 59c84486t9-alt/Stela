@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 /* Original Tiny SRCU on real retained Runtime/service/workqueue tasks. */
 #include <linux/completion.h>
+#include <linux/backing-dev.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/irq_work.h>
@@ -21,6 +22,9 @@ struct srcu_test_control {
 static_assert(sizeof(struct srcu_test_control) == 16);
 void stela_linux_srcu_test(const struct srcu_test_control *control);
 void stela_linux_srcu_early_test(void);
+void stela_linux_srcu_source_cases(void);
+void stela_linux_srcu_negative_case(unsigned int which, void (*witness)(void));
+int stela_linux_srcu_bootstrap_joined(const struct stela_linux_owner *owner);
 DEFINE_STATIC_SRCU(readers);
 static struct work_struct grace_work;
 static DECLARE_COMPLETION(grace_started);
@@ -212,7 +216,7 @@ static void invalid_cleanup(void)
 {
 	cleanup_srcu_struct(invalid_cleanup_domain);
 }
-static void polling_wrap_and_dynamic_cleanup(void)
+static void polling_wrap_and_dynamic_cleanup(bool check_cleanup_refusal)
 {
 	struct srcu_struct *domain = kzalloc(sizeof(*domain), GFP_KERNEL);
 	assert(domain && !init_srcu_struct(domain));
@@ -227,8 +231,10 @@ static void polling_wrap_and_dynamic_cleanup(void)
 		cookie = start_poll_synchronize_srcu(domain);
 		wait_for_gp(domain);
 		assert(!poll_state_synchronize_srcu(domain, cookie));
-		invalid_cleanup_domain = domain;
-		assert(stela_test_traps(invalid_cleanup));
+		if (check_cleanup_refusal) {
+			invalid_cleanup_domain = domain;
+			assert(stela_test_traps(invalid_cleanup));
+		}
 		srcu_read_unlock(domain, reader);
 		srcu_barrier(domain);
 		assert(poll_state_synchronize_srcu(domain, cookie));
@@ -336,20 +342,24 @@ static void callback_unbalanced_return(struct rcu_head *head)
 	local_irq_disable();
 }
 static rcu_callback_t invalid_callback;
-static void run_invalid_callback(void)
+static void queue_invalid_callback(rcu_callback_t callback)
 {
 	struct srcu_struct domain;
 	struct rcu_head head;
 	assert(!init_srcu_struct(&domain));
-	call_srcu(&domain, &head, invalid_callback);
+	call_srcu(&domain, &head, callback);
 	srcu_barrier(&domain);
 }
+static void run_invalid_callback(void)
+{
+	queue_invalid_callback(invalid_callback);
+}
+static rcu_callback_t const invalid_callbacks[] = {callback_sleep, callback_exit,
+	callback_rebalanced_sleep, callback_unbalanced_return};
 static void callback_guards(void)
 {
-	rcu_callback_t callbacks[] = {callback_sleep, callback_exit,
-		callback_rebalanced_sleep, callback_unbalanced_return};
-	for (unsigned int n = 0; n != ARRAY_SIZE(callbacks); n++) {
-		invalid_callback = callbacks[n];
+	for (unsigned int n = 0; n != ARRAY_SIZE(invalid_callbacks); n++) {
+		invalid_callback = invalid_callbacks[n];
 		assert(stela_test_traps(run_invalid_callback));
 	}
 }
@@ -370,17 +380,68 @@ void stela_linux_srcu_early_test(void)
 	srcu_barrier(&early_domain);
 	assert(early.calls == 1);
 }
-void stela_linux_srcu_test(const struct srcu_test_control *control)
+static void source_cases(bool check_cleanup_refusal)
 {
-	assert(stela_linux_srcu_bootstrap(stela_linux_owner()) == -EALREADY);
-	/* Existing sync_test.c case moved intact into the canonical child. */
-	refused_worker_keeps_callback_until_explicit_recovery(control);
 	srcu();
 	sleeping_and_independent_domains();
 	disabled_unlock_requires_counter_recheck();
 	fifo_and_requeue_need_distinct_generations();
-	polling_wrap_and_dynamic_cleanup();
+	polling_wrap_and_dynamic_cleanup(check_cleanup_refusal);
 	pending_kick_cleanup_joins_before_free();
+}
+
+static void wait_for_workqueues(void)
+{
+	/* PID1 publishes this after original workqueue startup and topology. */
+	for (unsigned int tick = 0; tick < HZ && !READ_ONCE(bdi_wq); tick++)
+		schedule_timeout_uninterruptible(1);
+	assert(READ_ONCE(bdi_wq));
+}
+
+void stela_linux_srcu_source_cases(void)
+{
+	wait_for_workqueues();
+	const struct stela_linux_owner *owner = stela_linux_owner();
+	assert(!stela_linux_srcu_bootstrap(owner));
+	assert(stela_linux_srcu_bootstrap(owner) == -EALREADY);
+	assert(stela_linux_srcu_bootstrap_joined(owner) == -EPERM);
+	assert(stela_linux_srcu_current_active(owner) == -EPERM);
+	source_cases(false);
+}
+
+static void (*negative_witness)(void);
+
+static void witnessed_invalid_callback(struct rcu_head *head)
+{
+	assert(stela_linux_atomic_callback_active() && in_task() &&
+	       preempt_count() == SOFTIRQ_DISABLE_OFFSET && !irqs_disabled());
+	negative_witness();
+	invalid_callback(head);
+}
+
+void stela_linux_srcu_negative_case(unsigned int which, void (*witness)(void))
+{
+	wait_for_workqueues();
+	if (which < ARRAY_SIZE(invalid_callbacks)) {
+		negative_witness = witness;
+		invalid_callback = invalid_callbacks[which];
+		queue_invalid_callback(witnessed_invalid_callback);
+	} else {
+		assert(which == ARRAY_SIZE(invalid_callbacks));
+		struct srcu_struct domain;
+		assert(!init_srcu_struct(&domain));
+		int reader = srcu_read_lock(&domain);
+		assert(domain.srcu_lock_nesting[reader] == 1 && stela_linux_quiescent());
+		witness();
+		cleanup_srcu_struct(&domain);
+	}
+}
+
+void stela_linux_srcu_test(const struct srcu_test_control *control)
+{
+	assert(stela_linux_srcu_bootstrap(stela_linux_owner()) == -EALREADY);
+	refused_worker_keeps_callback_until_explicit_recovery(control);
+	source_cases(true);
 	assert(stela_test_traps(cleanup_with_reader_arriving_during_join));
 	callback_guards();
 }

@@ -178,7 +178,7 @@ int stela_linux_srcu_bootstrap(const struct stela_linux_owner *owner)
 {
 	(void)stela_linux_current();
 	if (!owner || stela_linux_owner() != owner ||
-	    !stela_linux_kernel_catalogue_active() ||
+	    !stela_linux_kernel_source_active() ||
 	    !stela_linux_kernel_owner_allowed(owner))
 		return -EPERM;
 	int current_error = stela_linux_require_current(owner);
