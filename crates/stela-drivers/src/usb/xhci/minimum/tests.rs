@@ -160,6 +160,27 @@ fn a_latched_minimum_blocks_later_register_effects_and_controller_commands() {
 }
 
 #[test]
+fn the_gate_keeps_a_backend_s_single_64_bit_write() {
+    struct Qword(Rc<RefCell<Vec<(usize, u64)>>>);
+    impl Registers for Qword {
+        fn read32(&mut self, _: usize) -> u32 {
+            0
+        }
+        fn write32(&mut self, at: usize, value: u32) {
+            self.0.borrow_mut().push((at, u64::from(value)));
+        }
+        fn write64(&mut self, at: usize, value: u64) {
+            self.0.borrow_mut().push((at, value));
+        }
+    }
+    let (timer, _) = fault_timer();
+    let writes = Rc::new(RefCell::new(Vec::new()));
+    let mut gate = Gate::retain(Box::new(Qword(writes.clone())), Minimum::retain(timer));
+    gate.write64(DCBAAP, 0x1_2345_6780);
+    assert_eq!(*writes.borrow(), [(DCBAAP, 0x1_2345_6780)]);
+}
+
+#[test]
 fn unavailable_minimum_refuses_before_registers_or_dma_even_with_valid_nominal_clock() {
     struct Trap;
     impl Registers for Trap {

@@ -103,6 +103,12 @@ impl Registers for Gate {
             self.registers.write32(at, value);
         }
     }
+    /// The backend's own 64-bit write, which may be a single access.
+    fn write64(&mut self, at: usize, value: u64) {
+        if self.minimum.error().is_none() {
+            self.registers.write64(at, value);
+        }
+    }
     fn size(&self) -> Option<usize> {
         self.registers.size()
     }
